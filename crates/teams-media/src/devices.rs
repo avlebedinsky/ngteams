@@ -6,9 +6,11 @@
 //!
 //! - [`file`]: no audio server at all. A tone or a WAV file in, a WAV recording out, a generated test pattern as the
 //!   camera ([`pattern`]), received frames counted. `teams-headless` and the tests use it.
-//! - [`pipewire`]: one PipeWire server for audio and the camera (the camera portal hands over a PipeWire node too).
-//!   Which server a build may open is fixed when it is built ([`pipewire::THIS_BUILD`]): the UI sandbox's private one
-//!   for the lab and every `test-support` build, the desktop's for the personal build only.
+//! - [`pipewire`]: one PipeWire server for audio and the camera. Which server a build may open is fixed when it is
+//!   built ([`pipewire::THIS_BUILD`]): the UI sandbox's private one for the lab and every `test-support` build, the
+//!   desktop's for the personal build only, whose camera comes through the desktop's camera portal ([`portal`]: a
+//!   PipeWire remote showing only the cameras). It lists the devices there are and follows the user's choice of each
+//!   kind ([`catalog`]).
 //!
 //! Every device hands frames over on threads of its own: a source is read with a timeout and a sink takes a frame and
 //! returns at once, so the caller's thread never waits on an audio server.
@@ -16,9 +18,11 @@
 use std::io;
 use std::time::Duration;
 
+pub mod catalog;
 pub mod file;
 pub mod pattern;
 pub mod pipewire;
+pub mod portal;
 pub mod wav;
 
 /// The sample rate of every audio frame, in Hz.
@@ -119,6 +123,9 @@ pub enum DeviceError {
     Wav(String),
     #[error("PipeWire: {0}")]
     PipeWire(String),
+    /// The desktop's camera portal (or the bus it is on) failed or didn't answer.
+    #[error("the camera portal: {0}")]
+    Portal(String),
     /// The device or its server went away.
     #[error("the device was closed")]
     Closed,

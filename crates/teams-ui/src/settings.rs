@@ -4,8 +4,13 @@
 //! - **What**: the chat shown last ([`Settings::selected_chat`]), whether typing, read receipts and the account's own
 //!   availability are sent, which messages notify ([`Notifications`]), the idle time after which the account's
 //!   availability stops being reported, the account's manual status ([`ManualStatus`]), whether calls use Cisco's
-//!   OpenH264 for video ([`Settings::video_calls`], its switch shown only where the build has the codec), and whether
-//!   the first run's screen of the writes that happen on their own was confirmed. Tasks 13, 14 and 20 act on the ones Task 8 only kept.
+//!   OpenH264 for video ([`Settings::video_calls`], its switch shown only where the build has the codec), the calls'
+//!   microphone, speaker and camera ([`Settings::microphone`] and the others: a device's name, or the system's default
+//!   when none is named), and whether the first run's screen of the writes that happen on their own was confirmed.
+//!   Tasks 13, 14 and 20 act on the ones Task 8 only kept.
+//! - **The devices** (M3 Task 20, [`attach_devices`]): with the calls' devices attached, the model keeps the list of
+//!   devices there are (each change of it shown as it comes), hands the device directory the choice of each kind at
+//!   once and on every change, so a call that runs moves to the device chosen; the settings view lists them.
 //! - **The first run** (the personal build, M2 Task 27, [`SettingsModel::requiring_first_run`]): typing, read receipts
 //!   and the account's availability are the writes that happen without a per-item action; until the user confirms the
 //!   first-run screen ([`Settings::first_run`]) none of them is sent, whatever its switch says
@@ -28,11 +33,13 @@ use std::io::{self, Read as _, Write as _};
 use std::ops::RangeInclusive;
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
-use gpui::{AppContext as _, AsyncApp, ClipboardItem, Context, Task, WeakEntity};
+use gpui::{App, AppContext as _, AsyncApp, ClipboardItem, Context, Entity, Task, WeakEntity};
 use teams_core::Choice;
 pub use teams_log::Level as LogLevel;
 use teams_log::diagnostics::{Report, Source as DiagnosticsSource};
+use teams_media::devices::catalog::{DeviceDirectory, DeviceKind, DeviceList};
 use teams_proto::ManualAvailability;
 use toml::{Table, Value};
 
@@ -48,6 +55,8 @@ pub const DEFAULT_IDLE_MINUTES: u32 = 5;
 pub const MAX_CHAT_ID: usize = 512;
 /// The largest settings file read; a larger one is unreadable.
 pub const MAX_FILE: u64 = 64 * 1024;
+/// The longest device name kept as a choice.
+pub const MAX_DEVICE_NAME: usize = 256;
 
 /// Which messages notify.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -207,6 +216,34 @@ pub struct Settings {
     /// Calls use Cisco's OpenH264 for video: the user's control over the codec Cisco's binary licence asks for (to
     /// enable it, disable it, and enable it again); off, a call's media starts no video and the codec isn't used.
     pub video_calls: bool,
+    /// The calls' microphone by its device name; `None` follows the system's default.
+    pub microphone: Option<String>,
+    /// The calls' speaker (and the ringtone's); `None` follows the system's default.
+    pub speaker: Option<String>,
+    /// The calls' camera; `None` follows the system's default.
+    pub camera: Option<String>,
+}
+
+impl Settings {
+    /// The device chosen for `kind`; `None` follows the system.
+    #[must_use]
+    pub fn device(&self, kind: DeviceKind) -> Option<&str> {
+        match kind {
+            DeviceKind::Microphone => self.microphone.as_deref(),
+            DeviceKind::Speaker => self.speaker.as_deref(),
+            DeviceKind::Camera => self.camera.as_deref(),
+        }
+    }
+
+    /// Chooses `name` for `kind`; `None` follows the system.
+    pub fn set_device(&mut self, kind: DeviceKind, name: Option<String>) {
+        let slot = match kind {
+            DeviceKind::Microphone => &mut self.microphone,
+            DeviceKind::Speaker => &mut self.speaker,
+            DeviceKind::Camera => &mut self.camera,
+        };
+        *slot = name;
+    }
 }
 
 impl Default for Settings {
@@ -222,6 +259,9 @@ impl Default for Settings {
             manual_status: ManualStatus::default(),
             log_level: LogLevel::default(),
             video_calls: true,
+            microphone: None,
+            speaker: None,
+            camera: None,
         }
     }
 }
@@ -238,6 +278,9 @@ pub mod keys {
     pub const MANUAL_STATUS: &str = "manual_status";
     pub const LOG_LEVEL: &str = "log_level";
     pub const VIDEO_CALLS: &str = "video_calls";
+    pub const MICROPHONE: &str = "microphone";
+    pub const SPEAKER: &str = "speaker";
+    pub const CAMERA: &str = "camera";
 }
 
 /// What went wrong with the settings file: the defaults are used, or the one setting's default.
@@ -324,11 +367,35 @@ fn take(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem
         keys::VIDEO_CALLS => {
             settings.video_calls = value.as_bool().ok_or(bad(keys::VIDEO_CALLS, "not true or false"))?;
         }
+        keys::MICROPHONE | keys::SPEAKER | keys::CAMERA => take_device(settings, key, value)?,
         other => {
             return Err(Problem::UnknownKey { key: other.to_owned() });
         }
     }
     Ok(())
+}
+
+/// Takes a device's choice: a device name, as the settings keep one.
+fn take_device(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem> {
+    let (kind, key) = match key {
+        keys::MICROPHONE => (DeviceKind::Microphone, keys::MICROPHONE),
+        keys::SPEAKER => (DeviceKind::Speaker, keys::SPEAKER),
+        _ => (DeviceKind::Camera, keys::CAMERA),
+    };
+    let name = device_name(value).ok_or(Problem::BadValue {
+        key,
+        why: "not a device's name",
+    })?;
+    settings.set_device(kind, Some(name));
+    Ok(())
+}
+
+/// A device name as the settings keep one: a non-empty string without control characters, at most
+/// [`MAX_DEVICE_NAME`] bytes.
+fn device_name(value: &Value) -> Option<String> {
+    let name = value.as_str()?;
+    let shaped = !name.is_empty() && name.len() <= MAX_DEVICE_NAME && !name.chars().any(char::is_control);
+    shaped.then(|| name.to_owned())
 }
 
 /// A chat id as the settings keep one: a string of visible ASCII, at most [`MAX_CHAT_ID`] bytes.
@@ -372,6 +439,15 @@ pub fn render(settings: &Settings) -> String {
         keys::LOG_LEVEL.to_owned(),
         Value::String(settings.log_level.key().to_owned()),
     );
+    for (key, kind) in [
+        (keys::MICROPHONE, DeviceKind::Microphone),
+        (keys::SPEAKER, DeviceKind::Speaker),
+        (keys::CAMERA, DeviceKind::Camera),
+    ] {
+        if let Some(name) = settings.device(kind) {
+            table.insert(key.to_owned(), Value::String(name.to_owned()));
+        }
+    }
     table.to_string()
 }
 
@@ -522,6 +598,22 @@ pub struct SettingsModel {
     first_run: bool,
     /// The build has the video codec: the view shows its switch ([`SettingsModel::with_video_switch`]).
     video_switch: bool,
+    /// The calls' devices, once attached ([`attach_devices`]): where each choice goes, and the devices there are.
+    devices: Option<Devices>,
+}
+
+/// The calls' devices as the settings know them.
+struct Devices {
+    directory: Arc<dyn DeviceDirectory>,
+    list: DeviceList,
+}
+
+impl std::fmt::Debug for Devices {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Devices")
+            .field("list", &self.list)
+            .finish_non_exhaustive()
+    }
 }
 
 impl SettingsModel {
@@ -542,6 +634,7 @@ impl SettingsModel {
             copying: None,
             first_run: false,
             video_switch: false,
+            devices: None,
         }
     }
 
@@ -558,6 +651,7 @@ impl SettingsModel {
             copying: None,
             first_run: false,
             video_switch: false,
+            devices: None,
         }
     }
 
@@ -573,6 +667,21 @@ impl SettingsModel {
     #[must_use]
     pub fn shows_video_switch(&self) -> bool {
         self.video_switch
+    }
+
+    /// The devices there are, once the calls' devices are attached ([`attach_devices`]); `None` without (no calls).
+    #[must_use]
+    pub fn devices(&self) -> Option<&DeviceList> {
+        self.devices.as_ref().map(|devices| &devices.list)
+    }
+
+    /// Hands the device directory the choice of each kind the settings hold.
+    fn apply_devices(&self) {
+        if let Some(devices) = &self.devices {
+            for kind in DeviceKind::ALL {
+                devices.directory.choose(kind, self.settings.device(kind));
+            }
+        }
     }
 
     /// The settings with the first run's screen asked for (the personal build): until [`Settings::first_run`] is confirmed,
@@ -699,6 +808,12 @@ impl SettingsModel {
             // no log installed (a view test): nothing to tell
             let _ = teams_log::apply_setting(self.settings.log_level);
         }
+        if DeviceKind::ALL
+            .iter()
+            .any(|kind| self.settings.device(*kind) != before.device(*kind))
+        {
+            self.apply_devices();
+        }
         self.problems
             .retain(|problem| !matches!(problem, Problem::Unsaved { .. }));
         if let Some(file) = &self.file {
@@ -716,4 +831,35 @@ impl SettingsModel {
         }
         cx.notify();
     }
+}
+
+/// Attaches the calls' devices to the settings (see the module docs): the list there is now, each change of it as it
+/// comes, and each kind's choice handed to `directory` now and on every change.
+pub fn attach_devices(model: &Entity<SettingsModel>, directory: Arc<dyn DeviceDirectory>, cx: &mut App) {
+    let (told, lists) = async_channel::unbounded::<DeviceList>();
+    directory.watch(Box::new(move |list: &DeviceList| {
+        // the settings gone: nobody to tell
+        let _ = told.try_send(list.clone());
+    }));
+    let list = directory.devices();
+    model.update(cx, |model, cx| {
+        model.devices = Some(Devices { directory, list });
+        model.apply_devices();
+        cx.notify();
+    });
+    let weak = model.downgrade();
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        while let Ok(list) = lists.recv().await {
+            let kept = weak.update(cx, |model, cx| {
+                if let Some(devices) = &mut model.devices {
+                    devices.list = list;
+                    cx.notify();
+                }
+            });
+            if kept.is_err() {
+                break;
+            }
+        }
+    })
+    .detach();
 }

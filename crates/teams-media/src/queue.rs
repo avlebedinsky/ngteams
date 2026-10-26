@@ -2,9 +2,9 @@
 //! between a media session's capture thread and its network thread.
 //!
 //! A full queue drops its oldest entries, so whoever reads always gets the newest media: a reader that falls behind
-//! (or starts late) loses the backlog, not the present. The writing side may hold its end as [`Closing`], which
-//! closes the queue when dropped (the PipeWire loop thread's end, when its stream errs, is unlinked, is closed, or the
-//! loop stops with the server's fatal error); the reading side then hears [`DeviceError::Closed`].
+//! (or starts late) loses the backlog, not the present. The writing side closes it when it ends (the PipeWire loop
+//! thread's stream, when it errs, is unlinked, is closed, or the loop stops with the server's fatal error); the
+//! reading side then hears [`DeviceError::Closed`] once it has drained it.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
@@ -107,25 +107,6 @@ impl<T> Queue<T> {
     }
 }
 
-/// The loop thread's end of a queue: closes it when dropped (its stream gone).
-pub(crate) struct Closing<T>(Queue<T>);
-
-impl<T> Closing<T> {
-    pub(crate) fn new(queue: Queue<T>) -> Self {
-        Self(queue)
-    }
-
-    pub(crate) fn queue(&self) -> &Queue<T> {
-        &self.0
-    }
-}
-
-impl<T> Drop for Closing<T> {
-    fn drop(&mut self) {
-        self.0.close();
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::thread;
@@ -162,7 +143,7 @@ mod tests {
     fn a_closed_queue_is_drained_then_reports_closed_and_refuses_more() {
         let queue = Queue::new(3);
         queue.push(1);
-        drop(Closing::new(queue.clone()));
+        queue.close();
         assert!(matches!(queue.extend([2]), Err(DeviceError::Closed)));
         assert_eq!(queue.recv(NOW).unwrap(), Some(1));
         assert!(matches!(queue.recv(NOW), Err(DeviceError::Closed)));

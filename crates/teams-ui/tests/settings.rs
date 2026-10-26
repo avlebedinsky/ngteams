@@ -10,9 +10,10 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 
 use gpui::{AppContext as _, TestAppContext};
+use teams_media::devices::catalog::{DeviceDirectory as _, DeviceInfo, DeviceKind, DeviceList, FixedDirectory};
 use teams_ui::settings::{
     DEFAULT_IDLE_MINUTES, DIR_MODE, FILE_MODE, FirstRunState, LogLevel, ManualStatus, Notifications, Problem, Settings,
-    SettingsFile, SettingsModel, parse, render,
+    SettingsFile, SettingsModel, attach_devices, parse, render,
 };
 
 const CHAT: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces";
@@ -39,6 +40,9 @@ fn changed() -> Settings {
         manual_status: ManualStatus::DoNotDisturb,
         log_level: LogLevel::Debug,
         video_calls: false,
+        microphone: Some("alsa_input.usb-headset".to_owned()),
+        speaker: None,
+        camera: Some("v4l2_camera".to_owned()),
     }
 }
 
@@ -389,4 +393,111 @@ fn nothing_writes_on_its_own_until_the_first_run_is_confirmed(cx: &mut TestAppCo
     let saved = cx.new(|_| SettingsModel::load(file.clone()).requiring_first_run());
     saved.update(cx, SettingsModel::confirm_first_run);
     assert!(!SettingsModel::load(file).requiring_first_run().awaiting_first_run());
+}
+
+#[test]
+fn the_calls_devices_follow_the_system_by_default_and_a_chosen_one_is_kept_by_name() {
+    let defaults = Settings::default();
+    for kind in DeviceKind::ALL {
+        assert_eq!(defaults.device(kind), None, "{kind:?} follows the system");
+    }
+    let text = render(&defaults);
+    for key in ["microphone", "speaker", "camera"] {
+        assert!(!text.contains(key), "nothing written for the system's: {text}");
+    }
+    let (read, problems) =
+        parse("microphone = \"alsa_input.usb-Headset-00.mono-fallback\"\ncamera = \"v4l2 cam\"").expect("TOML");
+    assert!(problems.is_empty(), "{problems:?}");
+    assert_eq!(
+        read.device(DeviceKind::Microphone),
+        Some("alsa_input.usb-Headset-00.mono-fallback")
+    );
+    assert_eq!(read.device(DeviceKind::Speaker), None);
+    assert_eq!(read.device(DeviceKind::Camera), Some("v4l2 cam"));
+    assert_eq!(parse(&render(&read)).expect("TOML").0, read, "read back as written");
+
+    for bad in ["speaker = 3", "speaker = \"\"", "speaker = \"a\\nb\""] {
+        let (read, problems) = parse(bad).expect("TOML");
+        assert_eq!(read.speaker, None, "{bad}: the system's kept");
+        assert_eq!(
+            problems,
+            [Problem::BadValue {
+                key: "speaker",
+                why: "not a device's name"
+            }],
+            "{bad}"
+        );
+    }
+}
+
+fn device(kind: DeviceKind, name: &str, description: &str) -> DeviceInfo {
+    DeviceInfo {
+        kind,
+        name: name.to_owned(),
+        description: description.to_owned(),
+    }
+}
+
+#[gpui::test]
+fn attached_devices_take_each_choice_at_once_and_on_every_change_and_their_list_follows(cx: &mut TestAppContext) {
+    let directory = FixedDirectory::new(DeviceList::new(vec![device(
+        DeviceKind::Microphone,
+        "mic",
+        "Microphone",
+    )]));
+    let settings = Settings {
+        camera: Some("cam".to_owned()),
+        ..Settings::default()
+    };
+    let model = cx.new(|_| SettingsModel::in_memory(settings));
+    assert!(
+        model.read_with(cx, |model, _| model.devices().is_none()),
+        "no devices before they are attached"
+    );
+    cx.update(|cx| attach_devices(&model, std::sync::Arc::new(directory.clone()), cx));
+    assert_eq!(
+        directory.choices_made(),
+        [
+            (DeviceKind::Microphone, None),
+            (DeviceKind::Speaker, None),
+            (DeviceKind::Camera, Some("cam".to_owned()))
+        ],
+        "every kind's choice handed over at once"
+    );
+    assert_eq!(
+        model.read_with(cx, |model, _| model.devices().map(|list| list.all().len())),
+        Some(1)
+    );
+
+    cx.update(|cx| {
+        model.update(cx, |model, cx| {
+            model.change(
+                |settings| settings.set_device(DeviceKind::Microphone, Some("mic".to_owned())),
+                cx,
+            );
+        });
+    });
+    assert_eq!(directory.chosen(DeviceKind::Microphone).as_deref(), Some("mic"));
+    let made = directory.choices_made().len();
+    cx.update(|cx| {
+        model.update(cx, |model, cx| {
+            model.change(|settings| settings.send_typing = false, cx);
+        });
+    });
+    assert_eq!(
+        directory.choices_made().len(),
+        made,
+        "a change of another setting moves no device"
+    );
+
+    // a device plugged in: the list the settings show follows
+    directory.set_devices(DeviceList::new(vec![
+        device(DeviceKind::Microphone, "mic", "Microphone"),
+        device(DeviceKind::Speaker, "usb", "USB headset"),
+    ]));
+    cx.run_until_parked();
+    assert_eq!(
+        model.read_with(cx, |model, _| model.devices().map(|list| list.all().len())),
+        Some(2)
+    );
 }

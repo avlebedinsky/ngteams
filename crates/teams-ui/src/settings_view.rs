@@ -1,8 +1,11 @@
 //! The settings view, in the conversation pane: switches for sending typing, read receipts and the account's
 //! availability, the calls' video (in a build that has the codec: "OpenH264 Video Codec provided by Cisco Systems,
 //! Inc.", as Cisco's binary licence asks beside its control), which messages notify,
-//! the idle time, the account's manual status, the diagnostic log's level and "Copy diagnostics", and what was wrong
-//! with the settings file (or the log). Each change goes to the [`SettingsModel`] (and so to the file) at once.
+//! the idle time, the account's manual status, the calls' microphone, speaker and camera (where the app has calls:
+//! "Follow the system", naming the system's default, then every device there is, a device chosen that isn't there
+//! shown as not connected), the diagnostic log's level and "Copy diagnostics", and what was wrong with the settings
+//! file (or the log). Each change goes to the [`SettingsModel`] (and so to the file, and a device's to the calls) at
+//! once.
 
 use gpui::{
     AnyElement, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
@@ -12,12 +15,26 @@ use gpui_component::button::Button;
 use gpui_component::radio::Radio;
 use gpui_component::switch::Switch;
 use teams_log::diagnostics::WARNING;
+use teams_media::devices::catalog::{DeviceKind, DeviceList};
 
 use crate::settings::{LogLevel, ManualStatus, Notifications, Settings, SettingsModel};
 use crate::theme::{self, Palette};
 
 /// The idle times offered, in minutes (the one set is offered too, if it isn't one of these).
 pub const IDLE_CHOICES: [u32; 6] = [1, 5, 10, 15, 30, 60];
+
+/// What the settings call each kind of device.
+#[must_use]
+pub fn device_label(kind: DeviceKind) -> &'static str {
+    match kind {
+        DeviceKind::Microphone => "Microphone",
+        DeviceKind::Speaker => "Speaker",
+        DeviceKind::Camera => "Camera",
+    }
+}
+
+/// The key of the radio that follows the system (its test selector `<kind>-system`).
+pub const FOLLOW_SYSTEM: &str = "system";
 
 /// The label of the calls' video switch: the codec named as Cisco's binary licence asks.
 pub const VIDEO_SWITCH: &str = "Video in calls: OpenH264 Video Codec provided by Cisco Systems, Inc.";
@@ -161,6 +178,49 @@ impl SettingsView {
         section("Status").child(div().flex().flex_col().gap_1().children(radios))
     }
 
+    /// The calls' devices: for each kind, "Follow the system" (naming the system's default), then every device there
+    /// is, and a device chosen that isn't there, as not connected. Each radio's test selector is `<kind>-<key>`: the
+    /// device's name, or [`FOLLOW_SYSTEM`].
+    fn devices(&self, settings: &Settings, list: &DeviceList) -> impl IntoElement {
+        let kinds = DeviceKind::ALL.map(|kind| {
+            let chosen = settings.device(kind).map(str::to_owned);
+            let system = match list.default_of(kind) {
+                Some(device) => format!("Follow the system ({})", device.description),
+                None => "Follow the system".to_owned(),
+            };
+            let mut radios = vec![self.radio(
+                kind.key(),
+                FOLLOW_SYSTEM,
+                system.into(),
+                chosen.is_none(),
+                move |settings| {
+                    settings.set_device(kind, None);
+                },
+            )];
+            let mut names: Vec<(String, String)> = list
+                .of(kind)
+                .map(|device| (device.name.clone(), device.description.clone()))
+                .collect();
+            if let Some(missing) = chosen.as_ref().filter(|name| list.find(kind, name).is_none()) {
+                names.push((missing.clone(), format!("{missing} (not connected)")));
+            }
+            radios.extend(names.into_iter().map(|(name, label)| {
+                let checked = chosen.as_deref() == Some(name.as_str());
+                let key = name.clone();
+                self.radio(kind.key(), &key, label.into(), checked, move |settings| {
+                    settings.set_device(kind, Some(name.clone()));
+                })
+            }));
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(div().child(device_label(kind)))
+                .children(radios)
+        });
+        section("Devices").child(div().flex().flex_col().gap_3().children(kinds))
+    }
+
     /// The diagnostic log: its level (changed live; `TEAMS_APP_LOG` overrides it, said here), "Copy diagnostics", and
     /// what the last copy held: said plainly when it has full requests and responses.
     fn log(&self, settings: &Settings, model: &SettingsModel, palette: Palette) -> impl IntoElement {
@@ -246,6 +306,7 @@ impl Render for SettingsView {
         let settings = model.settings().clone();
         let problems = problems(model, palette);
         let log = self.log(&settings, model, palette);
+        let devices = model.devices().map(|list| self.devices(&settings, list));
         div()
             .debug_selector(|| "settings".to_owned())
             .size_full()
@@ -260,6 +321,7 @@ impl Render for SettingsView {
             .child(self.notifications(&settings))
             .child(self.idle(&settings))
             .child(self.status(&settings))
+            .children(devices)
             .child(log)
     }
 }

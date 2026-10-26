@@ -18,11 +18,12 @@ use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext
 use teams_core::sync::CatchUpReport;
 use teams_core::{Cause, Event, MessageChange, Source};
 use teams_log::diagnostics::{Source as DiagnosticsSource, WARNING};
+use teams_media::devices::catalog::{DeviceDirectory as _, DeviceInfo, DeviceKind, DeviceList, FixedDirectory};
 use teams_store::{Applied, Conversation, ConversationKind, Member, Message};
 use teams_trouter::{Down, Stop};
 use teams_ui::chat_list::{ChatList, DELETED, RowKind, format_time, listed, one_to_one_partner, preview};
 use teams_ui::settings::{
-    Copied, FirstRunState, LogLevel, ManualStatus, Notifications, Problem, Settings, SettingsModel,
+    Copied, FirstRunState, LogLevel, ManualStatus, Notifications, Problem, Settings, SettingsModel, attach_devices,
 };
 use teams_ui::shell::{LIST_MAX, LIST_MIN, LIST_WIDTH, Main, RailItem, Shell, ShellParts};
 use teams_ui::switcher::{fuzzy_score, matches};
@@ -666,6 +667,75 @@ fn the_settings_view_changes_the_settings() {
             log_level: LogLevel::Debug,
             ..Settings::default()
         }
+    );
+}
+
+fn device_info(kind: DeviceKind, name: &str, description: &str) -> DeviceInfo {
+    DeviceInfo {
+        kind,
+        name: name.to_owned(),
+        description: description.to_owned(),
+    }
+}
+
+#[test]
+fn the_settings_view_lists_the_devices_and_moves_the_calls_to_the_one_chosen() {
+    let rig = seeded();
+    let directory = FixedDirectory::new(
+        DeviceList::new(vec![
+            device_info(DeviceKind::Microphone, "built-in-mic", "Built-in microphone"),
+            device_info(DeviceKind::Microphone, "usb-mic", "USB headset"),
+            device_info(DeviceKind::Speaker, "built-in-speaker", "Speakers"),
+        ])
+        .with_default(DeviceKind::Microphone, Some("built-in-mic")),
+    );
+    let settings = Settings {
+        camera: Some("unplugged-cam".to_owned()),
+        ..Settings::default()
+    };
+    let (shell, cx) = shell_window(&rig, settings, Arc::new(ViewTrace::off()));
+    // without the calls' devices the view lists none
+    cx.update(|_, cx| shell.update(cx, Shell::show_settings));
+    assert!(bounds(cx, "microphone-system").is_none(), "no devices without calls");
+    let model = cx.update(|_, cx| shell.read(cx).settings().clone());
+    cx.update(|_, cx| attach_devices(&model, Arc::new(directory.clone()), cx));
+    for drawn in [
+        "microphone-system",
+        "microphone-built-in-mic",
+        "microphone-usb-mic",
+        "speaker-system",
+        "speaker-built-in-speaker",
+        "camera-system",
+        // chosen and not plugged in: still shown, as not connected
+        "camera-unplugged-cam",
+    ] {
+        assert!(bounds(cx, drawn).is_some(), "{drawn} is drawn");
+    }
+
+    click(cx, "microphone-usb-mic");
+    assert_eq!(settings_of(&shell, cx).microphone.as_deref(), Some("usb-mic"));
+    assert_eq!(
+        directory.chosen(DeviceKind::Microphone).as_deref(),
+        Some("usb-mic"),
+        "the calls move to it"
+    );
+    click(cx, "camera-system");
+    assert_eq!(settings_of(&shell, cx).camera, None);
+    assert_eq!(
+        directory.chosen(DeviceKind::Camera),
+        None,
+        "the camera follows the system again"
+    );
+
+    // a device plugged in while the settings are shown appears in them
+    directory.set_devices(DeviceList::new(vec![
+        device_info(DeviceKind::Microphone, "usb-mic", "USB headset"),
+        device_info(DeviceKind::Camera, "webcam", "Webcam"),
+    ]));
+    assert!(bounds(cx, "camera-webcam").is_some(), "the camera plugged in is listed");
+    assert!(
+        bounds(cx, "microphone-built-in-mic").is_none(),
+        "the one unplugged is gone"
     );
 }
 

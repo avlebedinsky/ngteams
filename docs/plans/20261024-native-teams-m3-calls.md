@@ -1150,12 +1150,33 @@ are captured denied first, mapped, and only then can a rerun reach the invitatio
 **Files:**
 - Modify: `crates/teams-media/src/*`, `crates/teams-ui/src/*`, `crates/ui-sandbox/src/*`
 
-- [ ] tests first: the settings list microphones, speakers and cameras from PipeWire, "follow the system" by default;
+- [x] tests first: the settings list microphones, speakers and cameras from PipeWire, "follow the system" by default;
       a device switched mid-call without dropping the call (the tone continues in the recording); a device added or
       removed while a call runs (the sandbox adds and removes a node), the call moving when following the system
-- [ ] the camera through the desktop portal behind a seam (the sandbox's fake camera in lab runs; the portal's node in
+      → done: `teams-media`'s `DeviceDirectory` (`devices/catalog.rs`, the registry and the session manager's defaults
+      in `pipewire/listing.rs`), a choice moving every open stream of its kind make-before-break (`pipewire/serve.rs`),
+      no `target.object` when following the system; the settings keep `microphone`/`speaker`/`camera` by node name
+      (`teams-ui/src/settings.rs`, `attach_devices`), the view lists each kind with "Follow the system (<default>)" and
+      a chosen device that is gone as not connected (`settings_view.rs`; `teams-ui/tests/{settings,shell}.rs`); the
+      sandbox adds and removes nodes (`ui-sandbox/src/pipewire/nodes.rs`); `ui-sandbox/tests/device_choice.rs`: the
+      list and defaults, a node coming, becoming the default and going, a running microphone and speaker moved to
+      the chosen device and back (longest gap between microphone frames under 300 ms, the tone in the right
+      recording), both following a node plugged in above the system's and back; `teams-app/tests/call_window.rs`:
+      during the sandboxed a–b call a's microphone goes to a USB microphone a's settings choose, back, to a headset
+      plugged in above the system's and back, b hearing each tone alone (0.9–1.4 s per move), the call never ending.
+      The sandbox's recorder sets `node.dont-reconnect` (WirePlumber moves a stream that named the default to every
+      later default).
+- [x] the camera through the desktop portal behind a seam (the sandbox's fake camera in lab runs; the portal's node in
       the personal build), tested on a fake portal on the sandbox's bus
-- [ ] the gate passes
+      → done: `teams-media`'s `CameraRoute`, fixed by the build's reach: a sandbox build's camera is the sandbox
+      server's node, the personal build's comes through the camera portal (`devices/portal.rs`: `AccessCamera`, its
+      `Response`, then `OpenPipeWireRemote`, one remote per camera opened, a camera choice moving those streams too);
+      a sandbox build asks only a portal bus inside the sandbox dir (`portal_bus`). The sandbox's fake portal
+      (`ui-sandbox/src/bus.rs`, `set_camera_allowed`, `portal_calls`) answers on the sandbox's bus;
+      `device_choice.rs` drives `PipeWireDevices::camera` through it: granted gives frames, denied gives no remote, a
+      bus outside the sandbox is refused before it is reached. The personal build's calls (its camera included) stay
+      off until Task 22 wires them.
+- [x] the gate passes
 
 ### Task 21: Verify the lab acceptance
 **Files:**

@@ -39,6 +39,9 @@ serde_json.workspace = true
 # the SDP the call's peer speaks: offers and answers taken from and handed to it
 str0m.workspace = true
 thiserror.workspace = true
+# the personal build's camera: the desktop's camera portal, asked on the bus the backend is given (blocking calls, on
+# the blocking pool a device opens on; the async-io flavour the app's notifications use, so one zbus in the tree)
+zbus.workspace = true
 # the microphone's echo cancellation (AEC3), noise suppression and gain control: WebRTC's audio processing module,
 # built from the source the binding bundles (BSD-3-Clause; it logs nothing)
 webrtc-audio-processing.workspace = true

@@ -9,13 +9,18 @@
 //! On it, from this process (each over a connection to this bus's address, never one taken from the environment):
 //! a fake notification server (`org.freedesktop.Notifications`) and a fake `StatusNotifierItem` watcher
 //! (`org.kde.StatusNotifierWatcher`), each recording every call with its sender. The watcher can be stopped and
-//! started again ([`PrivateBus::stop_watcher`], [`PrivateBus::start_watcher`]), as a panel that restarts.
+//! started again ([`PrivateBus::stop_watcher`], [`PrivateBus::start_watcher`]), as a panel that restarts. With the
+//! sandbox's PipeWire, a fake camera portal too (`org.freedesktop.portal.Desktop`'s `org.freedesktop.portal.Camera`,
+//! [`PrivateBus::start_camera_portal`]): it answers `AccessCamera` with the user's answer the test sets
+//! ([`PrivateBus::set_camera_allowed`]), and `OpenPipeWireRemote`, once access was granted to that caller, with a
+//! connection to the sandbox's PipeWire (the whole server, where the real portal's remote shows only the cameras).
 
 use std::{
     collections::HashMap,
     fmt::Write as _,
     fs,
-    path::Path,
+    os::unix::net::UnixStream,
+    path::{Path, PathBuf},
     process::{Child, Stdio},
     sync::{Arc, Mutex, PoisonError},
 };
@@ -25,7 +30,7 @@ use zbus::{
     interface,
     message::Header,
     names::BusName,
-    zvariant::Value,
+    zvariant::{OwnedFd, OwnedObjectPath, Value},
 };
 
 use crate::{SOCKET_WAIT, SandboxResult, clean_command, spawn, wait_until};
@@ -39,6 +44,21 @@ pub const NOTIFICATIONS_PATH: &str = "/org/freedesktop/Notifications";
 /// The `StatusNotifierItem` watcher's bus name and object path.
 pub const WATCHER_NAME: &str = "org.kde.StatusNotifierWatcher";
 pub const WATCHER_PATH: &str = "/StatusNotifierWatcher";
+/// The desktop portal's bus name and object path, and the request objects' interface.
+pub const PORTAL_NAME: &str = "org.freedesktop.portal.Desktop";
+pub const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
+const REQUEST_INTERFACE: &str = "org.freedesktop.portal.Request";
+
+/// One call the fake camera portal got.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PortalCall {
+    /// The caller's unique bus name.
+    pub sender: String,
+    /// `AccessCamera` or `OpenPipeWireRemote`.
+    pub method: &'static str,
+    /// What the portal answered: `granted`, `denied`, `remote` or `refused`.
+    pub answer: &'static str,
+}
 
 /// One `Notify` call the fake server got.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -74,6 +94,11 @@ struct Records {
     closed: Vec<u32>,
     tray_items: Vec<TrayItem>,
     tray_hosts: Vec<String>,
+    portal_calls: Vec<PortalCall>,
+    /// The user's answer to `AccessCamera`.
+    camera_denied: bool,
+    /// The callers granted the camera.
+    camera_granted: Vec<String>,
 }
 
 type Shared = Arc<Mutex<Records>>;
@@ -224,6 +249,104 @@ impl Watcher {
     }
 }
 
+/// The fake `org.freedesktop.portal.Camera` (see the module docs).
+struct CameraPortal {
+    records: Shared,
+    /// The sandbox's PipeWire socket, which `OpenPipeWireRemote` connects to.
+    pipewire: PathBuf,
+}
+
+impl CameraPortal {
+    fn record(&self, sender: String, method: &'static str, answer: &'static str) {
+        records(&self.records)
+            .portal_calls
+            .push(PortalCall { sender, method, answer });
+    }
+}
+
+/// The request object's path for `sender` and its `token`: the portal's own rule.
+fn request_path(sender: &str, token: &str) -> String {
+    format!(
+        "{PORTAL_PATH}/request/{}/{token}",
+        sender.trim_start_matches(':').replace('.', "_")
+    )
+}
+
+fn failed(error: impl std::fmt::Display) -> zbus::fdo::Error {
+    zbus::fdo::Error::Failed(error.to_string())
+}
+
+#[interface(name = "org.freedesktop.portal.Camera")]
+impl CameraPortal {
+    /// Answers at once, with the answer set ([`PrivateBus::set_camera_allowed`]), as the `Response` of the request
+    /// object the caller's token names.
+    async fn access_camera(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        #[zbus(connection)] connection: &zbus::Connection,
+        options: HashMap<&str, Value<'_>>,
+    ) -> zbus::fdo::Result<OwnedObjectPath> {
+        let sender = sender(&header);
+        let token = match options.get("handle_token") {
+            Some(Value::Str(token)) => token.as_str().to_owned(),
+            _ => "t".to_owned(),
+        };
+        let path = request_path(&sender, &token);
+        let denied = records(&self.records).camera_denied;
+        let (code, answer) = if denied { (1_u32, "denied") } else { (0, "granted") };
+        if !denied {
+            records(&self.records).camera_granted.push(sender.clone());
+        }
+        self.record(sender.clone(), "AccessCamera", answer);
+        let results: HashMap<&str, Value<'_>> = HashMap::new();
+        connection
+            .emit_signal(
+                Some(sender.as_str()),
+                path.as_str(),
+                REQUEST_INTERFACE,
+                "Response",
+                &(code, results),
+            )
+            .await?;
+        OwnedObjectPath::try_from(path).map_err(failed)
+    }
+
+    /// A connection to the sandbox's PipeWire, for a caller granted the camera.
+    #[zbus(name = "OpenPipeWireRemote")]
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "zbus hands a method its message header by value"
+    )]
+    fn open_pipewire_remote(
+        &self,
+        #[zbus(header)] header: Header<'_>,
+        options: HashMap<&str, Value<'_>>,
+    ) -> zbus::fdo::Result<OwnedFd> {
+        // the portal's version 1 names no option
+        drop(options);
+        let sender = sender(&header);
+        if !records(&self.records).camera_granted.contains(&sender) {
+            self.record(sender, "OpenPipeWireRemote", "refused");
+            return Err(zbus::fdo::Error::AccessDenied("the camera wasn't granted".to_owned()));
+        }
+        let remote = UnixStream::connect(&self.pipewire).map_err(failed)?;
+        self.record(sender, "OpenPipeWireRemote", "remote");
+        Ok(OwnedFd::from(std::os::fd::OwnedFd::from(remote)))
+    }
+
+    #[zbus(property)]
+    #[expect(clippy::unused_self, reason = "a D-Bus property zbus reads on the object")]
+    fn is_camera_present(&self) -> bool {
+        true
+    }
+
+    #[zbus(property, name = "version")]
+    #[expect(clippy::unused_self, reason = "a D-Bus property zbus reads on the object")]
+    fn version(&self) -> u32 {
+        1
+    }
+}
+
 /// `text` as a D-Bus address value: bytes outside `[-0-9A-Za-z_/.\*]` percent-escaped.
 #[must_use]
 pub fn escape_address_value(text: &str) -> String {
@@ -266,6 +389,8 @@ pub struct PrivateBus {
     connections: Vec<Connection>,
     /// The watcher's connection, while it runs.
     watcher: Mutex<Option<Connection>>,
+    /// The camera portal's connection, once it runs.
+    portal: Mutex<Option<Connection>>,
 }
 
 impl Drop for PrivateBus {
@@ -299,6 +424,7 @@ impl PrivateBus {
             records: Shared::default(),
             connections: Vec::new(),
             watcher: Mutex::new(None),
+            portal: Mutex::new(None),
         };
         if wait_until(SOCKET_WAIT, || socket.exists().then_some(())).is_none() {
             let log = fs::read_to_string(dir.join(LOG)).unwrap_or_default();
@@ -354,6 +480,37 @@ impl PrivateBus {
             connection.close()?;
         }
         Ok(())
+    }
+
+    /// Starts the fake camera portal, its remotes on the PipeWire at `pipewire` (the sandbox's socket), unless it runs.
+    ///
+    /// # Errors
+    /// The connection or the name can't be had.
+    pub fn start_camera_portal(&self, pipewire: &Path) -> SandboxResult {
+        let mut running = self.portal.lock().unwrap_or_else(PoisonError::into_inner);
+        if running.is_none() {
+            let portal = CameraPortal {
+                records: Arc::clone(&self.records),
+                pipewire: pipewire.to_owned(),
+            };
+            let connection = Builder::address(self.address.as_str())?
+                .name(PORTAL_NAME)?
+                .serve_at(PORTAL_PATH, portal)?
+                .build()?;
+            *running = Some(connection);
+        }
+        Ok(())
+    }
+
+    /// The user's answer the fake camera portal gives from now on (allowed until said otherwise).
+    pub fn set_camera_allowed(&self, allowed: bool) {
+        records(&self.records).camera_denied = !allowed;
+    }
+
+    /// The calls the fake camera portal got, in order.
+    #[must_use]
+    pub fn portal_calls(&self) -> Vec<PortalCall> {
+        records(&self.records).portal_calls.clone()
     }
 
     /// The bus's address, for `DBUS_SESSION_BUS_ADDRESS`.
@@ -461,6 +618,14 @@ mod tests {
         );
         let denied = zbus::fdo::Error::AccessDenied("no".into());
         assert_eq!(unless_gone::<u32>(Err(denied.clone())), Err(denied));
+    }
+
+    #[test]
+    fn a_request_path_is_the_portal_s_own() {
+        assert_eq!(
+            request_path(":1.42", "teams_camera_1"),
+            "/org/freedesktop/portal/desktop/request/1_42/teams_camera_1"
+        );
     }
 
     #[test]

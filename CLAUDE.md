@@ -439,6 +439,15 @@ What the code does and why. A change that undoes one of these needs a new reason
   Available while the window was used within the idle time or a manual status is chosen, refreshed on a timer; nothing
   once idle and nothing on quit (no captured request reports Away or Offline for one endpoint); a manual status when
   chosen and its reset when Automatic is chosen again. A failed report is shown and never sent again on its own.
+- **The calls' devices** (`teams-media/src/devices/pipewire*`, `devices/catalog.rs`, `devices/portal.rs`): the
+  settings list PipeWire's microphones, speakers and cameras and keep a choice by node name, "follow the system" (no
+  `target.object`) by default; a choice moves every open stream of its kind by making its replacement and swapping it
+  in once linked (make before break), so a call's device never says it closed. The personal build's camera comes
+  through the desktop's camera portal; a sandbox build asks only a portal on a bus inside the sandbox dir, where the
+  sandbox's fake answers. WirePlumber moves a stream whose `target.object` names the current default to every later
+  default (PulseAudio's rule), so a chosen device's stream sets `node.dont-move` (it stays on its node and falls back to
+  the default when the node goes; `node.dont-reconnect` would destroy it with its node), and the
+  sandbox's recorder sets `node.dont-reconnect`.
 - **The UI kit** is `gpui-component` (Apache-2.0), held to its audit by `crates/teams-ui/tests/reach.rs`: its host tree
   has no HTTP or WebSocket client and only licences an Apache-2.0/MIT project can take, its default GPUI features give
   Linux no X11 backend, the only logger is `teams-log` (installed by the app), and its theme watcher

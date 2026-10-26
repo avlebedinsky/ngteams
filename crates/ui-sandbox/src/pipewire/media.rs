@@ -5,6 +5,8 @@
 //!   carrying its index.
 //! - **The recording**: a capture of the speaker's monitor, written to a WAV file whose header is brought up to date
 //!   every second.
+//! - **Devices added and removed while it runs** ([`super::nodes`]): another microphone playing a tone of its own, or
+//!   another speaker recorded to a file of its own, as a device plugged in and out.
 //!
 //! The thread connects to the server's socket itself and hands libpipewire the descriptor, with the sandbox's own
 //! client config named outright, so nothing of this process's session (its runtime dir, its config dirs) is read.
@@ -12,7 +14,9 @@
 //! `PIPEWIRE_CONFIG_PREFIX` ahead of the config a context names, so a process that sets either is refused
 //! ([`check_environment`]) before anything starts.
 
-use std::cell::Cell;
+use std::any::Any;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io::Cursor;
 use std::os::unix::net::UnixStream;
@@ -47,14 +51,23 @@ use crate::{SOCKET_WAIT, SandboxResult};
 
 /// The camera and the recording, stopped (and the recording's header brought up to date) on drop.
 pub struct MediaHelper {
-    quit: pipewire::channel::Sender<()>,
+    commands: pipewire::channel::Sender<Command>,
     thread: Option<JoinHandle<()>>,
     frames: Arc<AtomicU64>,
 }
 
+/// What the helper's thread is asked.
+pub(super) enum Command {
+    /// Adds a node (`super::nodes`); answers once the node is there.
+    Add(super::nodes::Added, mpsc::Sender<Result<(), String>>),
+    /// Removes the node of this name; answers once it is gone.
+    Remove(String, mpsc::Sender<()>),
+    Quit,
+}
+
 impl Drop for MediaHelper {
     fn drop(&mut self) {
-        let _ = self.quit.send(());
+        let _ = self.commands.send(Command::Quit);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -71,7 +84,7 @@ impl MediaHelper {
     pub fn start(socket: &Path, client_conf: &Path, recording: &Path, camera: PatternCamera) -> SandboxResult<Self> {
         check_environment()?;
         let stream = UnixStream::connect(socket)?;
-        let (quit, quit_rx) = pipewire::channel::channel();
+        let (commands, commands_rx) = pipewire::channel::channel();
         let (ready_tx, ready_rx) = mpsc::channel();
         let frames = Arc::new(AtomicU64::new(0));
         let setup = Setup {
@@ -84,12 +97,12 @@ impl MediaHelper {
         let thread = thread::Builder::new()
             .name("ui-sandbox-media".to_owned())
             .spawn(move || {
-                if let Err(error) = setup.run(quit_rx, &ready_tx) {
+                if let Err(error) = setup.run(commands_rx, &ready_tx) {
                     let _ = ready_tx.send(Err(error));
                 }
             })?;
         let helper = Self {
-            quit,
+            commands,
             thread: Some(thread),
             frames,
         };
@@ -104,6 +117,11 @@ impl MediaHelper {
     #[must_use]
     pub fn frames_shown(&self) -> u64 {
         self.frames.load(Ordering::Relaxed)
+    }
+
+    /// The way to the helper's thread, for the nodes it adds.
+    pub(super) fn commands(&self) -> pipewire::channel::Sender<Command> {
+        self.commands.clone()
     }
 }
 
@@ -135,14 +153,14 @@ struct Setup {
     frames: Arc<AtomicU64>,
 }
 
-fn text(error: impl std::fmt::Display) -> String {
+pub(super) fn text(error: impl std::fmt::Display) -> String {
     error.to_string()
 }
 
 impl Setup {
     fn run(
         self,
-        quit: pipewire::channel::Receiver<()>,
+        commands: pipewire::channel::Receiver<Command>,
         ready: &mpsc::Sender<Result<(), String>>,
     ) -> Result<(), String> {
         pipewire::init();
@@ -166,30 +184,62 @@ impl Setup {
             .into_sync_result()
             .map_err(text)?;
         let stop = main_loop.downgrade();
-        let _quit = quit.attach(main_loop.loop_(), move |()| {
-            if let Some(main_loop) = stop.upgrade() {
-                main_loop.quit();
+        let added: Rc<RefCell<HashMap<String, Box<dyn Any>>>> = Rc::default();
+        let adding = Rc::clone(&added);
+        let _commands = commands.attach(main_loop.loop_(), move |command| match command {
+            Command::Add(node, done) => {
+                let name = node.name().to_owned();
+                let _ = done.send(super::nodes::add(&core, node).map(|open| {
+                    adding.borrow_mut().insert(name, open);
+                }));
+            }
+            Command::Remove(name, done) => {
+                let removed = adding.borrow_mut().remove(&name);
+                drop(removed);
+                let _ = done.send(());
+            }
+            Command::Quit => {
+                if let Some(main_loop) = stop.upgrade() {
+                    main_loop.quit();
+                }
             }
         });
         main_loop.run();
+        added.borrow_mut().clear();
         Ok(())
     }
 }
 
-fn serialize(object: pod::Object) -> Result<Vec<u8>, String> {
+pub(super) fn serialize(object: pod::Object) -> Result<Vec<u8>, String> {
     PodSerializer::serialize(Cursor::new(Vec::new()), &Value::Object(object))
         .map(|(cursor, _)| cursor.into_inner())
         .map_err(|error| format!("{error:?}"))
 }
 
-fn as_pod(bytes: &[u8]) -> Result<&Pod, String> {
+pub(super) fn as_pod(bytes: &[u8]) -> Result<&Pod, String> {
     Pod::from_bytes(bytes).ok_or_else(|| "a parameter PipeWire can't read".to_owned())
 }
 
 /// A stream and its listener; the listener goes first (it unhooks itself from the stream).
-struct Open<D: 'static> {
-    _listener: StreamListener<D>,
-    _stream: StreamRc,
+pub(super) struct Open<D: 'static> {
+    pub(super) _listener: StreamListener<D>,
+    pub(super) _stream: StreamRc,
+}
+
+/// F32 mono at 48 kHz: what the recording and the nodes added take and give.
+pub(super) fn audio_format() -> Result<Vec<u8>, String> {
+    let mut info = AudioInfoRaw::new();
+    info.set_format(AudioFormat::F32LE);
+    info.set_rate(teams_media::devices::SAMPLE_RATE);
+    info.set_channels(1);
+    let mut position = [0; spa::param::audio::MAX_CHANNELS];
+    position[0] = spa::sys::SPA_AUDIO_CHANNEL_MONO;
+    info.set_position(position);
+    serialize(pod::Object {
+        type_: SpaTypes::ObjectParamFormat.as_raw(),
+        id: ParamType::EnumFormat.as_raw(),
+        properties: info.into(),
+    })
 }
 
 struct Recording {
@@ -205,6 +255,9 @@ fn recorder(core: &CoreRc, path: &Path, ready: mpsc::Sender<Result<(), String>>)
         *pipewire::keys::NODE_NAME => "sandbox-recorder",
         *pipewire::keys::TARGET_OBJECT => SPEAKER_NODE,
         *pipewire::keys::STREAM_CAPTURE_SINK => "true",
+        // the session manager moves a stream linked to the default it named to every new default (PulseAudio's
+        // rule): the recording stays on the sandbox's speaker when a speaker is plugged in above it
+        *pipewire::keys::NODE_DONT_RECONNECT => "true",
     };
     let stream = StreamRc::new(core.clone(), "sandbox-recorder", props).map_err(text)?;
     let state = Recording {
@@ -240,18 +293,7 @@ fn recorder(core: &CoreRc, path: &Path, ready: mpsc::Sender<Result<(), String>>)
         })
         .register()
         .map_err(text)?;
-    let mut info = AudioInfoRaw::new();
-    info.set_format(AudioFormat::F32LE);
-    info.set_rate(teams_media::devices::SAMPLE_RATE);
-    info.set_channels(1);
-    let mut position = [0; spa::param::audio::MAX_CHANNELS];
-    position[0] = spa::sys::SPA_AUDIO_CHANNEL_MONO;
-    info.set_position(position);
-    let format = serialize(pod::Object {
-        type_: SpaTypes::ObjectParamFormat.as_raw(),
-        id: ParamType::EnumFormat.as_raw(),
-        properties: info.into(),
-    })?;
+    let format = audio_format()?;
     stream
         .connect(
             Direction::Input,
@@ -287,7 +329,7 @@ impl Camera {
             *pipewire::keys::MEDIA_CLASS => "Video/Source",
             *pipewire::keys::NODE_NAME => CAMERA_NODE,
             *pipewire::keys::NODE_DESCRIPTION => "Sandbox camera",
-            *pipewire::keys::PRIORITY_SESSION => "2000",
+            *pipewire::keys::PRIORITY_SESSION => super::DEVICE_PRIORITY.to_string().as_str(),
         };
         let stream = StreamRc::new(core.clone(), CAMERA_NODE, props).map_err(text)?;
         let showing = Showing {
@@ -390,7 +432,7 @@ fn buffers(pattern: TestPattern) -> Result<Vec<u8>, String> {
     })
 }
 
-fn to_usize(value: u32) -> usize {
+pub(super) fn to_usize(value: u32) -> usize {
     usize::try_from(value).unwrap_or(usize::MAX)
 }
 

@@ -14,6 +14,17 @@
 //! The socket is connected here and handed to libpipewire as a descriptor (`pw_context_connect_fd`), so libpipewire
 //! never looks for a server by itself (it would fall back from one runtime dir to another, and to `/run/pipewire`).
 //!
+//! **The camera** ([`CameraRoute`], fixed by the reach too): a sandbox build's is a node of the sandbox's server, like
+//! its microphone and speaker; the personal build's comes through the desktop's camera portal ([`super::portal`]),
+//! which asks the user and hands over a PipeWire remote showing only the cameras, one remote for each camera opened.
+//! [`PipeWireDevices::connect_with_camera_portal`] names a portal's bus outright; a sandbox build takes only one inside
+//! the UI sandbox's dir (the sandbox's own bus, where its fake portal answers), never the desktop's.
+//!
+//! **The devices there are and the user's choice** ([`DeviceDirectory`]): the loop thread watches the server's
+//! registry and the session manager's defaults ([`listing`]); a choice moves the open streams of its kind to the
+//! device chosen, or back to the system's default, without the devices noticing (`serve`). With no device chosen, a
+//! stream follows the system's default as the session manager moves it (a device plugged in or out).
+//!
 //! **Threads**: libpipewire's objects live on one thread of this backend's own, running PipeWire's main loop
 //! ([`PipeWireDevices`] starts it and stops it when the last device and handle are gone); libpipewire adds its own
 //! data thread. Frames cross to and from the caller over bounded queues that drop their oldest entries when full: the
@@ -31,15 +42,20 @@ use std::os::unix::net::UnixStream;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use super::{AudioFrame, AudioSink, AudioSource, DeviceError, Devices, VideoFrame, VideoSource};
+use super::catalog::{Choices, DeviceDirectory, DeviceKind, DeviceList, DeviceWatcher};
+use super::{AudioFrame, AudioSink, AudioSource, DeviceError, Devices, VideoFrame, VideoSource, portal};
 
+mod listing;
+mod serve;
 mod streams;
 
 use crate::queue::Queue;
+use listing::Listing;
+use serve::Command;
 
 /// Which PipeWire server a build may open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -95,11 +111,15 @@ pub struct SessionEnv {
 /// they load another config in its place.
 pub const CONFIG_OVERRIDES: [&str; 2] = ["PIPEWIRE_CONFIG_NAME", "PIPEWIRE_CONFIG_PREFIX"];
 
+/// The session bus's address, where the desktop's camera portal answers.
+const SESSION_BUS_ENV: &str = "DBUS_SESSION_BUS_ADDRESS";
+
 /// The variables [`SessionEnv::current`] takes from the process.
-const READ_VARS: [&str; 5] = [
+const READ_VARS: [&str; 6] = [
     SANDBOX_ENV,
     "PIPEWIRE_RUNTIME_DIR",
     "XDG_RUNTIME_DIR",
+    SESSION_BUS_ENV,
     CONFIG_OVERRIDES[0],
     CONFIG_OVERRIDES[1],
 ];
@@ -269,48 +289,184 @@ fn desktop_endpoint(env: &SessionEnv) -> Result<Endpoint, DeviceError> {
     })
 }
 
-/// The PipeWire backend's devices: one connection, on a thread of its own, to the server this build allows.
+/// Where a build's camera comes from (see the module docs).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CameraRoute {
+    /// A node of the same server as the microphone and the speaker: the UI sandbox's.
+    Server,
+    /// The camera portal on the bus at this address.
+    Portal(String),
+    /// No way to a camera: why.
+    Unavailable(String),
+}
+
+/// The camera route `reach` takes in the session `env` describes: the sandbox's server, or the desktop's camera portal
+/// on the session bus.
+#[must_use]
+pub fn camera_route(reach: Reach, env: &SessionEnv) -> CameraRoute {
+    match reach {
+        Reach::Sandbox => CameraRoute::Server,
+        Reach::Desktop => match session_bus(env) {
+            Some(address) => CameraRoute::Portal(address),
+            None => CameraRoute::Unavailable(format!(
+                "no session bus for the camera portal: neither {SESSION_BUS_ENV} nor XDG_RUNTIME_DIR is set"
+            )),
+        },
+    }
+}
+
+/// The session bus's address: `DBUS_SESSION_BUS_ADDRESS`, else the bus in the runtime dir.
+fn session_bus(env: &SessionEnv) -> Option<String> {
+    if let Some(address) = env.vars.get(SESSION_BUS_ENV).filter(|value| !value.is_empty()) {
+        return Some(address.to_string_lossy().into_owned());
+    }
+    let dir = env.var("XDG_RUNTIME_DIR")?;
+    Some(format!("unix:path={}", dir.join("bus").display()))
+}
+
+/// Whether `reach` may ask the camera portal on the bus at `address`: a sandbox build only on a bus whose socket lies
+/// in the UI sandbox's dir (`unix:path=<a path in it>`, nothing else), so no lab or test process ever asks the
+/// desktop's portal; the personal build on any.
+///
+/// # Errors
+/// [`DeviceError::Refused`], with the reason.
+pub fn portal_bus(reach: Reach, env: &SessionEnv, address: &str) -> Result<(), DeviceError> {
+    if reach == Reach::Desktop {
+        return Ok(());
+    }
+    let dir = env
+        .var(SANDBOX_ENV)
+        .ok_or_else(|| {
+            refused(format!(
+                "this build asks only the UI sandbox's camera portal, and {SANDBOX_ENV} is unset"
+            ))
+        })?
+        .canonicalize()?;
+    let path = address
+        .strip_prefix("unix:path=")
+        .filter(|rest| !rest.contains([',', ';']))
+        .and_then(unescape_address)
+        .ok_or_else(|| {
+            refused(format!(
+                "the camera portal's bus must be a `unix:path=` socket, not {address}"
+            ))
+        })?;
+    let path = Path::new(&path);
+    if !path.is_absolute() || path.components().any(|part| part == Component::ParentDir) {
+        return Err(refused("the camera portal's bus must be an absolute path without `..`"));
+    }
+    let socket = path.canonicalize()?;
+    if !socket.starts_with(&dir) {
+        return Err(refused(format!(
+            "the camera portal's bus {} isn't the UI sandbox's (in {})",
+            socket.display(),
+            dir.display()
+        )));
+    }
+    check_socket(&socket)
+}
+
+/// A D-Bus address value with its `%xx` escapes undone; `None` for a broken escape or bytes that aren't UTF-8.
+fn unescape_address(value: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(value.len());
+    let mut rest = value.as_bytes();
+    while let Some((&byte, after)) = rest.split_first() {
+        if byte == b'%' {
+            let hex = std::str::from_utf8(after.get(..2)?).ok()?;
+            bytes.push(u8::from_str_radix(hex, 16).ok()?);
+            rest = &after[2..];
+        } else {
+            bytes.push(byte);
+            rest = after;
+        }
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// The PipeWire backend's devices: one connection, on a thread of its own, to the server this build allows; the
+/// camera on it or through the camera portal ([`CameraRoute`]); the devices there are and the user's choice of each
+/// kind ([`DeviceDirectory`]).
 #[derive(Clone)]
 pub struct PipeWireDevices {
     connection: Arc<Connection>,
+    camera: CameraRoute,
+    /// The client config a connection takes (the sandbox's), for the portal's remotes too.
+    client_conf: Option<PathBuf>,
+    choices: Arc<Mutex<Choices>>,
+    /// The portal's remotes, one per camera open now: a camera choice moves their streams too.
+    remotes: Arc<Mutex<Vec<Weak<Connection>>>>,
 }
 
 impl std::fmt::Debug for PipeWireDevices {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PipeWireDevices").finish_non_exhaustive()
+        f.debug_struct("PipeWireDevices")
+            .field("camera", &self.camera)
+            .finish_non_exhaustive()
     }
 }
 
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
 impl PipeWireDevices {
-    /// Connects to the server this build allows ([`THIS_BUILD`]) in this process's session.
+    /// Connects to the server this build allows ([`THIS_BUILD`]) in this process's session, its camera on the route
+    /// the build takes ([`camera_route`]), and returns once the devices there are listed.
     ///
     /// # Errors
     /// The server is refused ([`DeviceError::Refused`]), can't be reached, or doesn't answer in time.
     pub fn connect() -> Result<Self, DeviceError> {
-        let endpoint = endpoint(THIS_BUILD, &SessionEnv::current())?;
+        let env = SessionEnv::current();
+        Self::connect_routed(&env, camera_route(THIS_BUILD, &env))
+    }
+
+    /// [`PipeWireDevices::connect`], the camera through the camera portal on the bus at `bus` (in a sandbox build,
+    /// only the UI sandbox's: [`portal_bus`]).
+    ///
+    /// # Errors
+    /// As [`PipeWireDevices::connect`]'s, and [`DeviceError::Refused`] for a bus this build may not ask.
+    pub fn connect_with_camera_portal(bus: &str) -> Result<Self, DeviceError> {
+        let env = SessionEnv::current();
+        portal_bus(THIS_BUILD, &env, bus)?;
+        Self::connect_routed(&env, CameraRoute::Portal(bus.to_owned()))
+    }
+
+    fn connect_routed(env: &SessionEnv, camera: CameraRoute) -> Result<Self, DeviceError> {
+        let endpoint = endpoint(THIS_BUILD, env)?;
         let stream = UnixStream::connect(&endpoint.socket)?;
-        Connection::start(stream.into(), endpoint.client_conf).map(|connection| Self {
+        let connection = Connection::start(stream.into(), endpoint.client_conf.clone(), Choices::default())?;
+        Ok(Self {
             connection: Arc::new(connection),
+            camera,
+            client_conf: endpoint.client_conf,
+            choices: Arc::default(),
+            remotes: Arc::default(),
         })
     }
 
-    /// Asks the loop thread for a stream and waits for it. The guard exists from the moment the command is sent, so
-    /// a stream the loop makes after this gave up (a timeout) is closed again right after. A loop thread that has
-    /// ended (the server went away), or ends while this waits, makes it [`DeviceError::Closed`]: nobody would ever
-    /// take the command.
+    /// The camera's route.
+    #[must_use]
+    pub fn camera_route(&self) -> &CameraRoute {
+        &self.camera
+    }
+
+    /// Asks the loop thread of `connection` for a stream and waits for it. The guard exists from the moment the
+    /// command is sent, so a stream the loop makes after this gave up (a timeout) is closed again right after. A loop
+    /// thread that has ended (the server went away), or ends while this waits, makes it [`DeviceError::Closed`]:
+    /// nobody would ever take the command.
     fn open(
-        &self,
-        make: impl FnOnce(u64, mpsc::Sender<Result<(), String>>) -> streams::Command,
+        connection: &Arc<Connection>,
+        make: impl FnOnce(u64, mpsc::Sender<Result<(), String>>) -> Command,
     ) -> Result<StreamGuard, DeviceError> {
-        let id = self.connection.next_id.fetch_add(1, Ordering::Relaxed);
+        let id = connection.next_id.fetch_add(1, Ordering::Relaxed);
         let (ready_tx, ready_rx) = mpsc::channel();
-        self.connection.send(make(id, ready_tx))?;
-        let guard = StreamGuard::new(id, &self.connection);
+        connection.send(make(id, ready_tx))?;
+        let guard = StreamGuard::new(id, connection);
         let deadline = Instant::now() + OPEN_TIMEOUT;
         loop {
             // read before the wait: the loop thread answers before it ends, so once it has ended its answer, if any,
             // is already in the channel
-            let ended = self.connection.ended();
+            let ended = connection.ended();
             let slice = OPEN_CHECK.min(deadline.saturating_duration_since(Instant::now()));
             match ready_rx.recv_timeout(slice) {
                 Ok(Ok(())) => return Ok(guard),
@@ -326,13 +482,41 @@ impl PipeWireDevices {
             }
         }
     }
+
+    /// The connection a camera opens on: this one, or a new remote from the camera portal.
+    fn camera_connection(&self) -> Result<Arc<Connection>, DeviceError> {
+        match &self.camera {
+            CameraRoute::Server => Ok(Arc::clone(&self.connection)),
+            CameraRoute::Portal(bus) => {
+                let remote = portal::open_camera_remote(bus)?;
+                let choices = lock(&self.choices).clone();
+                let started_with = choices.get(DeviceKind::Camera).map(str::to_owned);
+                let connection = Arc::new(Connection::start(remote, self.client_conf.clone(), choices)?);
+                let mut remotes = lock(&self.remotes);
+                remotes.retain(|remote| remote.strong_count() > 0);
+                remotes.push(Arc::downgrade(&connection));
+                // a choice made while the remote started: `choose` set it before walking `remotes`, which held no
+                // remote yet; one made from here on reaches it through `choose` (sent twice, the loop takes it once)
+                let now = lock(&self.choices).get(DeviceKind::Camera).map(str::to_owned);
+                if now != started_with {
+                    // a remote whose loop has ended has no stream to move
+                    let _ = connection.send(Command::Choose {
+                        kind: DeviceKind::Camera,
+                        name: now,
+                    });
+                }
+                Ok(connection)
+            }
+            CameraRoute::Unavailable(why) => Err(refused(why.clone())),
+        }
+    }
 }
 
 impl Devices for PipeWireDevices {
     fn microphone(&self) -> Result<Box<dyn AudioSource>, DeviceError> {
         let frames = Queue::new(QUEUED_FRAMES);
         let shared = frames.clone();
-        let stream = self.open(|id, ready| streams::Command::Microphone {
+        let stream = Self::open(&self.connection, |id, ready| Command::Microphone {
             id,
             frames: shared,
             ready,
@@ -346,7 +530,7 @@ impl Devices for PipeWireDevices {
     fn speaker(&self) -> Result<Box<dyn AudioSink>, DeviceError> {
         let queue = Queue::new(SPEAKER_QUEUE);
         let shared = queue.clone();
-        let stream = self.open(|id, ready| streams::Command::Speaker {
+        let stream = Self::open(&self.connection, |id, ready| Command::Speaker {
             id,
             queue: shared,
             ready,
@@ -355,9 +539,10 @@ impl Devices for PipeWireDevices {
     }
 
     fn camera(&self) -> Result<Box<dyn VideoSource>, DeviceError> {
+        let connection = self.camera_connection()?;
         let frames = Queue::new(QUEUED_VIDEO);
         let shared = frames.clone();
-        let stream = self.open(|id, ready| streams::Command::Camera {
+        let stream = Self::open(&connection, |id, ready| Command::Camera {
             id,
             frames: shared,
             ready,
@@ -369,14 +554,47 @@ impl Devices for PipeWireDevices {
     }
 }
 
+impl DeviceDirectory for PipeWireDevices {
+    fn devices(&self) -> DeviceList {
+        self.connection.listing.list()
+    }
+
+    fn watch(&self, watcher: DeviceWatcher) {
+        self.connection.listing.watch(watcher);
+    }
+
+    fn choose(&self, kind: DeviceKind, name: Option<&str>) {
+        if !lock(&self.choices).set(kind, name) {
+            return;
+        }
+        let choose = || Command::Choose {
+            kind,
+            name: name.map(str::to_owned),
+        };
+        // a connection whose loop has ended has no stream left to move
+        let _ = self.connection.send(choose());
+        if kind == DeviceKind::Camera {
+            for remote in lock(&self.remotes).iter().filter_map(Weak::upgrade) {
+                let _ = remote.send(choose());
+            }
+        }
+    }
+
+    fn chosen(&self, kind: DeviceKind) -> Option<String> {
+        lock(&self.choices).get(kind).map(str::to_owned)
+    }
+}
+
 /// The loop thread and the way to it.
 struct Connection {
-    commands: Mutex<pipewire::channel::Sender<streams::Command>>,
+    commands: Mutex<pipewire::channel::Sender<Command>>,
     thread: Mutex<Option<JoinHandle<()>>>,
     next_id: AtomicU64,
     /// Set once the loop thread has stopped taking commands (it quit, or the server went away): PipeWire's channel
     /// keeps taking them, so a send can't tell by itself.
     ended: Arc<AtomicBool>,
+    /// The devices the server holds, as the loop thread last listed them.
+    listing: Arc<Listing>,
 }
 
 /// Marks the loop thread's end when dropped, on its way out (a panic too).
@@ -389,22 +607,33 @@ impl Drop for EndMark {
 }
 
 impl Connection {
-    fn start(fd: OwnedFd, client_conf: Option<PathBuf>) -> Result<Self, DeviceError> {
+    /// Starts the loop thread on `fd` with the user's `choices`, and waits until the devices are listed.
+    fn start(fd: OwnedFd, client_conf: Option<PathBuf>, choices: Choices) -> Result<Self, DeviceError> {
         let (commands, receiver) = pipewire::channel::channel();
         let (started_tx, started_rx) = mpsc::channel();
         let ended = Arc::new(AtomicBool::new(false));
         let mark = EndMark(Arc::clone(&ended));
+        let listing = Arc::new(Listing::default());
+        let start_listing = Arc::clone(&listing);
         let thread = thread::Builder::new()
             .name("teams-media-pipewire".to_owned())
             .spawn(move || {
                 let _mark = mark;
-                streams::run(fd, client_conf.as_deref(), receiver, &started_tx);
+                let start = serve::Start {
+                    fd,
+                    client_conf: client_conf.as_deref(),
+                    commands: receiver,
+                    listing: start_listing,
+                    choices,
+                };
+                serve::run(start, &started_tx);
             })?;
         let connection = Self {
             commands: Mutex::new(commands),
             thread: Mutex::new(Some(thread)),
             next_id: AtomicU64::new(1),
             ended,
+            listing,
         };
         match started_rx.recv_timeout(CONNECT_TIMEOUT) {
             Ok(Ok(())) => Ok(connection),
@@ -423,19 +652,19 @@ impl Connection {
 
     /// Hands `command` to the loop thread; [`DeviceError::Closed`] once it has ended (the command would stay queued
     /// with nobody to take it).
-    fn send(&self, command: streams::Command) -> Result<(), DeviceError> {
+    fn send(&self, command: Command) -> Result<(), DeviceError> {
         if self.ended() {
             return Err(DeviceError::Closed);
         }
-        let sender = self.commands.lock().unwrap_or_else(PoisonError::into_inner);
+        let sender = lock(&self.commands);
         sender.send(command).map_err(|_| DeviceError::Closed)
     }
 }
 
 impl Drop for Connection {
     fn drop(&mut self) {
-        let _ = self.send(streams::Command::Quit);
-        let thread = self.thread.lock().unwrap_or_else(PoisonError::into_inner).take();
+        let _ = self.send(Command::Quit);
+        let thread = lock(&self.thread).take();
         if let Some(thread) = thread {
             let _ = thread.join();
         }
@@ -459,7 +688,7 @@ impl StreamGuard {
 
 impl Drop for StreamGuard {
     fn drop(&mut self) {
-        let _ = self.connection.send(streams::Command::Close(self.id));
+        let _ = self.connection.send(Command::Close(self.id));
     }
 }
 
@@ -495,5 +724,71 @@ impl AudioSink for Speaker {
     /// playback stream ended or the server went away.
     fn play(&mut self, frame: &AudioFrame) -> Result<(), DeviceError> {
         self.queue.extend(frame.samples().iter().copied()).map(drop)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_sandbox_build_s_camera_is_the_sandbox_s_and_the_personal_build_s_comes_through_the_portal() {
+        let env = SessionEnv::from_vars([(SESSION_BUS_ENV, "unix:path=/run/user/1000/bus")], 1000);
+        assert_eq!(camera_route(Reach::Sandbox, &env), CameraRoute::Server);
+        assert_eq!(
+            camera_route(Reach::Desktop, &env),
+            CameraRoute::Portal("unix:path=/run/user/1000/bus".to_owned())
+        );
+        let env = SessionEnv::from_vars([("XDG_RUNTIME_DIR", "/run/user/1000")], 1000);
+        assert_eq!(
+            camera_route(Reach::Desktop, &env),
+            CameraRoute::Portal("unix:path=/run/user/1000/bus".to_owned()),
+            "the bus in the runtime dir"
+        );
+        let none = SessionEnv::from_vars(Vec::<(&str, &str)>::new(), 1000);
+        assert!(matches!(
+            camera_route(Reach::Desktop, &none),
+            CameraRoute::Unavailable(_)
+        ));
+    }
+
+    #[test]
+    fn an_address_value_s_escapes_are_undone() {
+        assert_eq!(unescape_address("/tmp/a%20b%2cc").as_deref(), Some("/tmp/a b,c"));
+        assert_eq!(unescape_address("/tmp/%2").as_deref(), None);
+        assert_eq!(unescape_address("/tmp/%zz").as_deref(), None);
+    }
+
+    #[test]
+    fn a_sandbox_build_asks_only_a_portal_on_a_bus_in_the_sandbox() {
+        let sandbox = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        let bus = sandbox.path().join("bus");
+        let elsewhere = outside.path().join("bus");
+        let _listening = [&bus, &elsewhere].map(|path| std::os::unix::net::UnixListener::bind(path).unwrap());
+        let env = SessionEnv::from_vars([(SANDBOX_ENV, sandbox.path())], own_uid());
+        let address = |path: &Path| format!("unix:path={}", path.display());
+        assert!(portal_bus(Reach::Sandbox, &env, &address(&bus)).is_ok());
+        for refused_address in [
+            address(&elsewhere),
+            format!("{},guid=00", address(&bus)),
+            format!("unix:abstract={}", bus.display()),
+            "unix:path=relative/bus".to_owned(),
+            format!("unix:path={}/..{}", sandbox.path().display(), elsewhere.display()),
+        ] {
+            assert!(
+                matches!(
+                    portal_bus(Reach::Sandbox, &env, &refused_address),
+                    Err(DeviceError::Refused(_))
+                ),
+                "{refused_address}"
+            );
+        }
+        let no_sandbox = SessionEnv::from_vars(Vec::<(&str, &str)>::new(), own_uid());
+        assert!(matches!(
+            portal_bus(Reach::Sandbox, &no_sandbox, &address(&bus)),
+            Err(DeviceError::Refused(_))
+        ));
+        assert!(portal_bus(Reach::Desktop, &no_sandbox, &address(&elsewhere)).is_ok());
     }
 }

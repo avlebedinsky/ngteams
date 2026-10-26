@@ -12,7 +12,11 @@
 //!
 //! - a calls b (Ctrl+Shift+C in the a–b chat a's settings open); b's banner, ringtone and notification come, and
 //!   the ringtone is in b's recording; b answers from the notification's Answer; both connect, and each one's tone is
-//!   in the other's recording; a turns its camera on (Ctrl+Shift+O: the sandbox's fake camera, H.264 the bundled
+//!   in the other's recording; while the call runs, a's microphone moves (M3 Task 20): to a USB microphone a's
+//!   settings choose (the sandbox adds the node; the choice goes through the settings model, as the settings view
+//!   makes it), back to the system's when the settings follow it again, to a headset plugged in above the system's
+//!   (following the system), and back once the headset is unplugged, b hearing each one's tone alone in turn and the
+//!   call never ending; a turns its camera on (Ctrl+Shift+O: the sandbox's fake camera, H.264 the bundled
 //!   source's), and b's window presents a's picture through GPUI's external surface and a's its self view (each
 //!   counted by the trace's `video-tile presented`); a hangs up (Ctrl+Shift+H) and b's call ends with it;
 //! - a calls b again; b declines from the notification's Decline; a's call is taken by b's voicemail (as captured) and
@@ -54,12 +58,14 @@ use teams_mock::{AB_CHAT, CHAT_BASE, ChatServiceMock, ECHO, LAB_A, LAB_B, LAB_C,
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::Store;
 use teams_trouter::{CallStack, Options, Trouter, TrouterCredentials};
+use teams_ui::Desktop;
 use teams_ui::ringtone::{DeviceRinger, RINGTONE};
 use teams_ui::settings::Settings;
 use teams_ui::{Bridge, Ringer, SettingsFile, VideoFeed};
 use tokio::sync::broadcast;
 use ui_sandbox::input::{Modifier, VirtualInput};
-use ui_sandbox::pipewire::PipeWireOptions;
+use ui_sandbox::pipewire::nodes::NodeSpec;
+use ui_sandbox::pipewire::{DEVICE_PRIORITY, PipeWireOptions};
 use ui_sandbox::{NIRI_FULL_WINDOW, Running, Sandbox, SandboxOptions, SandboxResult, sandbox_or_skip, wait_until};
 
 /// Which account the child is (`a` or `b`); unset in the parent.
@@ -76,6 +82,9 @@ const SKYPE_ENV: &str = "TEAMS_APP_CALL_SKYPE";
 const DIR_ENV: &str = "TEAMS_APP_CALL_DIR";
 /// The file in the sandbox dir the parent writes to have the child quit.
 const QUIT_TRIGGER: &str = "quit";
+/// The file in the sandbox dir the parent writes to have the child's settings choose a microphone: the device's
+/// name, or nothing to follow the system.
+const MICROPHONE_TRIGGER: &str = "microphone";
 /// From the child's start to its `ready`.
 const STARTUP: Duration = Duration::from_secs(120);
 /// Anything else the parent waits for.
@@ -97,6 +106,18 @@ const B_TONE: Tone = Tone {
 const HEARD: f32 = 0.1;
 /// The frames a tile must have presented (traced at the first and every 30th).
 const PRESENTED: u64 = 30;
+/// The tones of the microphones plugged into a's sandbox while the call runs: one the settings choose, one plugged in
+/// above the system's.
+const USB_TONE: Tone = Tone {
+    hz: 550.0,
+    amplitude: 0.5,
+};
+const HEADSET_TONE: Tone = Tone {
+    hz: 990.0,
+    amplitude: 0.5,
+};
+/// A tone quieter than this in a recording isn't there.
+const QUIET: f32 = 0.03;
 
 fn main() -> ExitCode {
     let outcome = match std::env::var(CHILD_ENV).as_deref() {
@@ -309,6 +330,14 @@ impl TraceReader {
         }
     }
 
+    /// Takes every line that has come so far into `seen`.
+    fn catch_up(&mut self) -> &[serde_json::Value] {
+        while let Ok(line) = self.lines.try_recv() {
+            self.seen.push(line);
+        }
+        &self.seen
+    }
+
     fn wait_for(&mut self, view: &str, change: &str) -> SandboxResult<serde_json::Value> {
         let what = format!("{view} {change}");
         if let Some(line) = self
@@ -445,6 +474,8 @@ fn calls(a: &mut AppUnderTest, b: &mut AppUnderTest, a_box: &Sandbox, b_box: &Sa
         return Err(format!("the tones didn't cross: a heard b at {a_heard:.3}, b heard a at {b_heard:.3}").into());
     }
 
+    microphones_mid_call(a, a_box, b_box)?;
+
     // a turns its camera on (off when the call started): b's window presents a's picture, a's its self view
     ctrl_shift(&mut a_keys, 'o')?;
     a.in_call(&["connected", "camera-on"])?;
@@ -492,6 +523,95 @@ fn calls(a: &mut AppUnderTest, b: &mut AppUnderTest, a_box: &Sandbox, b_box: &Sa
     ctrl_shift(&mut a_keys, 'h')?;
     a.in_call(&["ended", "hung-up"])?;
     Ok(())
+}
+
+/// Moves a's microphone while the call runs: to a USB microphone a's settings choose, back to the system's, to a
+/// headset plugged in above the system's (following the system), and back once it is unplugged; b hears each tone
+/// alone in turn, and a's call never ends.
+fn microphones_mid_call(a: &mut AppUnderTest, a_box: &Sandbox, b_box: &Sandbox) -> SandboxResult {
+    let pipewire = a_box.pipewire().ok_or("no PipeWire")?;
+    let heard_by_b = recording(b_box)?;
+    let usb = pipewire.add_microphone(
+        NodeSpec {
+            name: "sandbox-usb-mic".to_owned(),
+            description: "USB microphone".to_owned(),
+            priority: DEVICE_PRIORITY - 1_000,
+        },
+        USB_TONE,
+    )?;
+    choose_microphone(a_box, Some(usb.name()))?;
+    hears_alone(
+        &heard_by_b,
+        USB_TONE.hz,
+        A_TONE.hz,
+        "the USB microphone a's settings chose",
+    )?;
+    choose_microphone(a_box, None)?;
+    hears_alone(
+        &heard_by_b,
+        A_TONE.hz,
+        USB_TONE.hz,
+        "a's settings following the system again",
+    )?;
+    let headset = pipewire.add_microphone(
+        NodeSpec {
+            name: "sandbox-headset-mic".to_owned(),
+            description: "Headset".to_owned(),
+            priority: DEVICE_PRIORITY + 1_000,
+        },
+        HEADSET_TONE,
+    )?;
+    hears_alone(
+        &heard_by_b,
+        HEADSET_TONE.hz,
+        A_TONE.hz,
+        "a headset plugged into a's sandbox",
+    )?;
+    headset.remove()?;
+    hears_alone(&heard_by_b, A_TONE.hz, HEADSET_TONE.hz, "the headset unplugged")?;
+    drop(usb);
+    if let Some(ended) = a
+        .trace
+        .catch_up()
+        .iter()
+        .find(|line| line["view"] == "in-call" && strings(line, "kinds").iter().any(|kind| kind == "ended"))
+    {
+        return Err(format!("a's call ended while its microphone moved: {ended}").into());
+    }
+    Ok(())
+}
+
+/// Has a's settings choose the microphone `name` (`None`: the system's), as the settings view does.
+fn choose_microphone(a_box: &Sandbox, name: Option<&str>) -> SandboxResult {
+    let staged = a_box.path("microphone.staged");
+    fs::write(&staged, name.unwrap_or_default())?;
+    fs::rename(&staged, a_box.path(MICROPHONE_TRIGGER))?;
+    Ok(())
+}
+
+/// Waits until the recording at `path` holds `wanted` and not `other` at its end: what `moved` moved b's ear to.
+fn hears_alone(path: &Path, wanted: f32, other: f32, moved: &str) -> SandboxResult {
+    let started = Instant::now();
+    let alone = wait_until(WAIT, || {
+        let heard = loudest(path, wanted, Duration::from_secs(1)).ok()?;
+        let left = loudest(path, other, Duration::from_millis(600)).ok()?;
+        (heard >= HEARD && left < QUIET).then_some((heard, left))
+    });
+    match alone {
+        Some((heard, left)) => {
+            say(&format!(
+                "{moved}: b heard {wanted} Hz at {heard:.3} ({other} Hz at {left:.3}) after {} ms",
+                started.elapsed().as_millis()
+            ));
+            Ok(())
+        }
+        None => Err(format!(
+            "{moved}: b didn't hear {wanted} Hz alone (at {:?}, {other} Hz at {:?})",
+            loudest(path, wanted, Duration::from_secs(1)).ok(),
+            loudest(path, other, Duration::from_millis(600)).ok()
+        )
+        .into()),
+    }
 }
 
 // --- the children ---
@@ -622,7 +742,8 @@ fn child(alias: Alias) -> SandboxResult {
     teams_app::guard::window_allowed_here()?;
     let trace = teams_ui::ViewTrace::new(adopt_trace(env(TRACE_FD_ENV)?.parse()?)?);
     let dir = PathBuf::from(env(DIR_ENV)?);
-    let devices: Arc<dyn Devices + Send + Sync> = Arc::new(PipeWireDevices::connect()?);
+    let pipewire = Arc::new(PipeWireDevices::connect()?);
+    let devices: Arc<dyn Devices + Send + Sync> = pipewire.clone();
     let feed = VideoFeed::new();
     let engine = engine(alias, Arc::clone(&devices), feed.clone(), &dir)?;
     let settings = SettingsFile::new(dir.join("settings.toml"));
@@ -652,11 +773,13 @@ fn child(alias: Alias) -> SandboxResult {
                     ringer: Some(ringer),
                     echo: Some(Mri::new(ECHO)),
                     video: Some(feed),
+                    devices: Some(pipewire),
                 }),
             },
         );
         match launched {
             Ok(launched) => {
+                choose_when_asked(launched.desktop, cx);
                 quit_when_asked(launched.bridge, cx);
                 say("ready");
             }
@@ -671,6 +794,31 @@ fn child(alias: Alias) -> SandboxResult {
     }
     say("quit");
     Ok(())
+}
+
+/// Each time the parent writes [`MICROPHONE_TRIGGER`] in the sandbox dir: the settings choose the microphone it names
+/// (none: the system's), through the settings model as the settings view does.
+fn choose_when_asked(desktop: gpui::Entity<Desktop>, cx: &mut App) {
+    let Some(dir) = std::env::var_os(ui_sandbox::SANDBOX_ENV) else {
+        say("no sandbox dir");
+        return;
+    };
+    let trigger = PathBuf::from(dir).join(MICROPHONE_TRIGGER);
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        loop {
+            cx.background_executor().timer(Duration::from_millis(100)).await;
+            let Ok(name) = fs::read_to_string(&trigger) else {
+                continue;
+            };
+            let _ = fs::remove_file(&trigger);
+            let name = (!name.is_empty()).then_some(name);
+            cx.update(|cx| {
+                let settings = desktop.read(cx).settings().clone();
+                settings.update(cx, |model, cx| model.change(|settings| settings.microphone = name, cx));
+            });
+        }
+    })
+    .detach();
 }
 
 /// Once the parent writes [`QUIT_TRIGGER`] in the sandbox dir: the engine shut down, then the app quits.

@@ -1,17 +1,27 @@
-//! The loop thread: PipeWire's main loop over the one connection, and the streams the devices asked for.
+//! The device streams the loop thread makes: the microphone, the speaker and the camera, each linked by the session
+//! manager to the device chosen for it ([`Target`]: `target.object`) or, with none chosen, to the system's default,
+//! which it then follows.
+//!
+//! A chosen device is pinned with `node.dont-move`: WirePlumber takes a stream whose `target.object` names the
+//! current default for one following the default (the rule `PulseAudio` has: it writes `target.node = -1` into the
+//! `default` metadata for it), so a device chosen while it is the default would be left for every later default.
+//! With `node.dont-move` WirePlumber reads the stream's target only from its own properties, never from that
+//! metadata, and still falls back to the default when the chosen node goes, so the call is never left without a
+//! device. `node.dont-reconnect` would pin it too, but a stream with it is destroyed when its node goes.
+//!
+//! A stream hands its media to its device through a [`Feed`], gated by its [`Gate`]: a **live** stream feeds the
+//! device and closes its queue when it ends; a stream made to replace it (the device was moved to another node) is
+//! **pending** until the session manager has linked it, and feeds nothing (a pending speaker plays silence) while the
+//! live one still carries the media; once the loop swaps them, the old one is **retired**: it feeds nothing and
+//! closes nothing on its way out. So a device moved to another node never says it closed, and the media doesn't stop
+//! while the new link is made.
 
 use std::any::Any;
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::cell::Cell;
 use std::io::Cursor;
-use std::os::fd::OwnedFd;
-use std::path::Path;
 use std::rc::Rc;
-use std::sync::mpsc;
 
-use pipewire::context::ContextRc;
-use pipewire::core::{CoreRc, PW_ID_CORE};
-use pipewire::main_loop::MainLoopRc;
+use pipewire::core::CoreRc;
 use pipewire::properties::{PropertiesBox, properties};
 use pipewire::spa;
 use pipewire::spa::param::ParamType;
@@ -25,28 +35,10 @@ use pipewire::spa::utils::{Direction, Fraction, Rectangle, SpaTypes};
 use pipewire::stream::{StreamFlags, StreamListener, StreamRc, StreamState};
 
 use crate::devices::{AudioFrame, FRAME_SAMPLES, PixelFormat, SAMPLE_RATE, VideoFrame};
-use crate::queue::{Closing, Queue};
+use crate::queue::Queue;
 
-/// The device side's way into the loop thread.
-pub(super) enum Command {
-    Microphone {
-        id: u64,
-        frames: Queue<AudioFrame>,
-        ready: mpsc::Sender<Result<(), String>>,
-    },
-    Speaker {
-        id: u64,
-        queue: Queue<f32>,
-        ready: mpsc::Sender<Result<(), String>>,
-    },
-    Camera {
-        id: u64,
-        frames: Queue<VideoFrame>,
-        ready: mpsc::Sender<Result<(), String>>,
-    },
-    Close(u64),
-    Quit,
-}
+/// The node a stream asks to be linked to; `None` follows the system's default.
+pub(super) type Target<'a> = Option<&'a str>;
 
 /// The raw formats a camera may hand over, the first preferred.
 const CAMERA_FORMATS: [(VideoFormat, PixelFormat); 9] = [
@@ -61,97 +53,112 @@ const CAMERA_FORMATS: [(VideoFormat, PixelFormat); 9] = [
     (VideoFormat::BGR, PixelFormat::Bgr),
 ];
 
+/// A stream's part in its device (see the module docs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Role {
+    Pending,
+    Live,
+    Retired,
+}
+
+/// A stream's role, and what its state has been, shared by the loop and the stream's callbacks.
+#[derive(Debug)]
+pub(super) struct Gate {
+    role: Cell<Role>,
+    streaming: Cell<bool>,
+    ended: Cell<bool>,
+}
+
+impl Gate {
+    fn new(role: Role) -> Rc<Self> {
+        Rc::new(Self {
+            role: Cell::new(role),
+            streaming: Cell::new(false),
+            ended: Cell::new(false),
+        })
+    }
+
+    /// A stream that feeds its device from the start (a device opened).
+    pub(super) fn live() -> Rc<Self> {
+        Self::new(Role::Live)
+    }
+
+    /// A stream made to replace a live one, feeding nothing until [`Gate::go_live`].
+    pub(super) fn pending() -> Rc<Self> {
+        Self::new(Role::Pending)
+    }
+
+    pub(super) fn go_live(&self) {
+        self.role.set(Role::Live);
+    }
+
+    /// The stream is being replaced: it feeds and closes nothing from now on.
+    pub(super) fn retire(&self) {
+        self.role.set(Role::Retired);
+    }
+
+    fn is_live(&self) -> bool {
+        self.role.get() == Role::Live
+    }
+
+    /// The session manager linked the stream and media flows (it may have stopped since).
+    pub(super) fn has_streamed(&self) -> bool {
+        self.streaming.get()
+    }
+
+    /// The stream erred, or was unlinked or disconnected for good.
+    pub(super) fn has_ended(&self) -> bool {
+        self.ended.get()
+    }
+}
+
+/// A stream's end of its device's queue: fed only while the stream is live, closed when a live stream ends or goes.
+pub(super) struct Feed<T> {
+    queue: Queue<T>,
+    gate: Rc<Gate>,
+}
+
+impl<T> Feed<T> {
+    pub(super) fn new(queue: Queue<T>, gate: Rc<Gate>) -> Self {
+        Self { queue, gate }
+    }
+
+    /// The queue, while the stream is live.
+    fn live(&self) -> Option<&Queue<T>> {
+        self.gate.is_live().then_some(&self.queue)
+    }
+
+    /// Takes the stream's new state: it streamed, or it ended (closing a live stream's queue).
+    fn state(&self, new: &StreamState) {
+        match new {
+            StreamState::Streaming => self.gate.streaming.set(true),
+            StreamState::Error(_) | StreamState::Unconnected => {
+                self.gate.ended.set(true);
+                if self.gate.is_live() {
+                    self.queue.close();
+                }
+            }
+            StreamState::Connecting | StreamState::Paused => {}
+        }
+    }
+}
+
+impl<T> Drop for Feed<T> {
+    fn drop(&mut self) {
+        if self.gate.is_live() {
+            self.queue.close();
+        }
+    }
+}
+
 /// A stream and its listener; the listener goes first (it unhooks itself from the stream).
 struct Open<D: 'static> {
     _listener: StreamListener<D>,
     _stream: StreamRc,
 }
 
-type Streams = Rc<RefCell<HashMap<u64, Box<dyn Any>>>>;
-
-/// Runs the loop until [`Command::Quit`] or the server's fatal error; reports the first round trip (or why there was
-/// none) on `started`.
-pub(super) fn run(
-    fd: OwnedFd,
-    client_conf: Option<&Path>,
-    commands: pipewire::channel::Receiver<Command>,
-    started: &mpsc::Sender<Result<(), String>>,
-) {
-    if let Err(error) = serve(fd, client_conf, commands, started) {
-        let _ = started.send(Err(error));
-    }
-}
-
 fn text(error: impl std::fmt::Display) -> String {
     error.to_string()
-}
-
-fn serve(
-    fd: OwnedFd,
-    client_conf: Option<&Path>,
-    commands: pipewire::channel::Receiver<Command>,
-    started: &mpsc::Sender<Result<(), String>>,
-) -> Result<(), String> {
-    pipewire::init();
-    let main_loop = MainLoopRc::new(None).map_err(text)?;
-    let mut context_props = PropertiesBox::new();
-    if let Some(conf) = client_conf {
-        let conf = conf.to_str().ok_or("the client config's path isn't UTF-8")?;
-        context_props.insert(*pipewire::keys::CONFIG_NAME, conf);
-    }
-    let context = ContextRc::new(&main_loop, Some(context_props)).map_err(text)?;
-    let core = context.connect_fd_rc(fd, None).map_err(text)?;
-    let pending = core.sync(0).map_err(text)?;
-    let started = started.clone();
-    let quit_loop = main_loop.downgrade();
-    let _core_listener = core
-        .add_listener_local()
-        .done(move |id, seq| {
-            if id == PW_ID_CORE && seq == pending {
-                let _ = started.send(Ok(()));
-            }
-        })
-        .error(move |id, _seq, _res, _message| {
-            if id == PW_ID_CORE
-                && let Some(main_loop) = quit_loop.upgrade()
-            {
-                main_loop.quit();
-            }
-        })
-        .register();
-    let streams: Streams = Rc::default();
-    let handler = {
-        let core = core.clone();
-        let streams = Rc::clone(&streams);
-        let main_loop = main_loop.downgrade();
-        move |command| handle(command, &core, &streams, &main_loop)
-    };
-    let _receiver = commands.attach(main_loop.loop_(), handler);
-    main_loop.run();
-    streams.borrow_mut().clear();
-    Ok(())
-}
-
-fn handle(command: Command, core: &CoreRc, streams: &Streams, main_loop: &pipewire::main_loop::MainLoopWeak) {
-    let (id, opened, ready) = match command {
-        Command::Microphone { id, frames, ready } => (id, microphone(core, frames), ready),
-        Command::Speaker { id, queue, ready } => (id, speaker(core, queue), ready),
-        Command::Camera { id, frames, ready } => (id, camera(core, frames), ready),
-        Command::Close(id) => {
-            streams.borrow_mut().remove(&id);
-            return;
-        }
-        Command::Quit => {
-            if let Some(main_loop) = main_loop.upgrade() {
-                main_loop.quit();
-            }
-            return;
-        }
-    };
-    let reply = opened.map(|open| {
-        streams.borrow_mut().insert(id, open);
-    });
-    let _ = ready.send(reply);
 }
 
 fn serialize(object: pod::Object) -> Result<Vec<u8>, String> {
@@ -188,22 +195,30 @@ fn connect(stream: &StreamRc, direction: Direction, format: &[u8]) -> Result<(),
         .map_err(text)
 }
 
-fn new_stream(core: &CoreRc, name: &str, props: PropertiesBox) -> Result<StreamRc, String> {
-    StreamRc::new(core.clone(), name, props).map_err(text)
-}
+/// Keeps a stream on the target its own properties name (see the module docs); the `pipewire` crate has no constant
+/// for it.
+const NODE_DONT_MOVE: &str = "node.dont-move";
 
-/// Whether a stream in state `new` is gone for good (it erred, or was unlinked or disconnected): its device's queue
-/// is closed then.
-fn ended(new: &StreamState) -> bool {
-    matches!(new, StreamState::Error(_) | StreamState::Unconnected)
+/// A stream named `name` with `props`, asking for `target` when one is chosen, and pinned to it.
+fn new_stream(core: &CoreRc, name: &str, mut props: PropertiesBox, target: Target<'_>) -> Result<StreamRc, String> {
+    if let Some(target) = target {
+        props.insert(*pipewire::keys::TARGET_OBJECT, target);
+        props.insert(NODE_DONT_MOVE, "true");
+    }
+    StreamRc::new(core.clone(), name, props).map_err(text)
 }
 
 struct MicrophoneState {
     pending: Vec<f32>,
-    frames: Closing<AudioFrame>,
+    frames: Feed<AudioFrame>,
 }
 
-fn microphone(core: &CoreRc, frames: Queue<AudioFrame>) -> Result<Box<dyn Any>, String> {
+pub(super) fn microphone(
+    core: &CoreRc,
+    frames: Queue<AudioFrame>,
+    target: Target<'_>,
+    gate: Rc<Gate>,
+) -> Result<Box<dyn Any>, String> {
     let stream = new_stream(
         core,
         "teams-microphone",
@@ -212,15 +227,19 @@ fn microphone(core: &CoreRc, frames: Queue<AudioFrame>) -> Result<Box<dyn Any>, 
             *pipewire::keys::MEDIA_CATEGORY => "Capture",
             *pipewire::keys::MEDIA_ROLE => "Communication",
         },
+        target,
     )?;
     let state = MicrophoneState {
         pending: Vec::with_capacity(4 * FRAME_SAMPLES),
-        frames: Closing::new(frames),
+        frames: Feed::new(frames, gate),
     };
     let listener = stream
         .add_local_listener_with_user_data(state)
         .process(|stream, state| {
             let Some(mut buffer) = stream.dequeue_buffer() else {
+                return;
+            };
+            let Some(queue) = state.frames.live() else {
                 return;
             };
             if let Some(data) = buffer.datas_mut().first_mut() {
@@ -234,16 +253,12 @@ fn microphone(core: &CoreRc, frames: Queue<AudioFrame>) -> Result<Box<dyn Any>, 
             }
             while state.pending.len() >= FRAME_SAMPLES {
                 if let Some(frame) = AudioFrame::from_samples(&state.pending[..FRAME_SAMPLES]) {
-                    state.frames.queue().push(frame);
+                    queue.push(frame);
                 }
                 state.pending.drain(..FRAME_SAMPLES);
             }
         })
-        .state_changed(|_, state, _, new| {
-            if ended(&new) {
-                state.frames.queue().close();
-            }
-        })
+        .state_changed(|_, state, _, new| state.frames.state(&new))
         .register()
         .map_err(text)?;
     connect(&stream, Direction::Input, &audio_format()?)?;
@@ -253,7 +268,12 @@ fn microphone(core: &CoreRc, frames: Queue<AudioFrame>) -> Result<Box<dyn Any>, 
     }))
 }
 
-fn speaker(core: &CoreRc, queue: Queue<f32>) -> Result<Box<dyn Any>, String> {
+pub(super) fn speaker(
+    core: &CoreRc,
+    queue: Queue<f32>,
+    target: Target<'_>,
+    gate: Rc<Gate>,
+) -> Result<Box<dyn Any>, String> {
     let stream = new_stream(
         core,
         "teams-speaker",
@@ -262,10 +282,11 @@ fn speaker(core: &CoreRc, queue: Queue<f32>) -> Result<Box<dyn Any>, String> {
             *pipewire::keys::MEDIA_CATEGORY => "Playback",
             *pipewire::keys::MEDIA_ROLE => "Communication",
         },
+        target,
     )?;
     let listener = stream
-        .add_local_listener_with_user_data(Closing::new(queue))
-        .process(|stream, queue| {
+        .add_local_listener_with_user_data(Feed::new(queue, gate))
+        .process(|stream, feed| {
             let Some(mut buffer) = stream.dequeue_buffer() else {
                 return;
             };
@@ -273,17 +294,13 @@ fn speaker(core: &CoreRc, queue: Queue<f32>) -> Result<Box<dyn Any>, String> {
             let Some(data) = buffer.datas_mut().first_mut() else {
                 return;
             };
-            let written = data.data().map_or(0, |bytes| fill(bytes, requested, queue.queue()));
+            let written = data.data().map_or(0, |bytes| fill(bytes, requested, feed.live()));
             let chunk = data.chunk_mut();
             *chunk.offset_mut() = 0;
             *chunk.stride_mut() = 4;
             *chunk.size_mut() = u32::try_from(written * 4).unwrap_or(0);
         })
-        .state_changed(|_, queue, _, new| {
-            if ended(&new) {
-                queue.queue().close();
-            }
-        })
+        .state_changed(|_, feed, _, new| feed.state(&new))
         .register()
         .map_err(text)?;
     connect(&stream, Direction::Output, &audio_format()?)?;
@@ -294,28 +311,41 @@ fn speaker(core: &CoreRc, queue: Queue<f32>) -> Result<Box<dyn Any>, String> {
 }
 
 /// Fills a playback buffer with up to `requested` queued samples (all it holds when `requested` is 0), silence
-/// where the queue runs out; returns how many samples it wrote.
-fn fill(bytes: &mut [u8], requested: usize, queue: &Queue<f32>) -> usize {
+/// where the queue runs out or when there is none to play from (a stream not live); returns how many samples it wrote.
+fn fill(bytes: &mut [u8], requested: usize, queue: Option<&Queue<f32>>) -> usize {
     let capacity = bytes.len() / 4;
     let count = if requested == 0 {
         capacity
     } else {
         requested.min(capacity)
     };
-    queue.with_items(|queue| {
-        for slot in bytes.as_chunks_mut::<4>().0.iter_mut().take(count) {
-            slot.copy_from_slice(&queue.pop_front().unwrap_or(0.0).to_le_bytes());
+    let slots = bytes.as_chunks_mut::<4>().0.iter_mut().take(count);
+    match queue {
+        Some(queue) => queue.with_items(|queue| {
+            for slot in slots {
+                slot.copy_from_slice(&queue.pop_front().unwrap_or(0.0).to_le_bytes());
+            }
+        }),
+        None => {
+            for slot in slots {
+                slot.copy_from_slice(&0.0_f32.to_le_bytes());
+            }
         }
-    });
+    }
     count
 }
 
 struct CameraState {
     format: Option<(PixelFormat, u32, u32)>,
-    frames: Closing<VideoFrame>,
+    frames: Feed<VideoFrame>,
 }
 
-fn camera(core: &CoreRc, frames: Queue<VideoFrame>) -> Result<Box<dyn Any>, String> {
+pub(super) fn camera(
+    core: &CoreRc,
+    frames: Queue<VideoFrame>,
+    target: Target<'_>,
+    gate: Rc<Gate>,
+) -> Result<Box<dyn Any>, String> {
     let stream = new_stream(
         core,
         "teams-camera",
@@ -324,10 +354,11 @@ fn camera(core: &CoreRc, frames: Queue<VideoFrame>) -> Result<Box<dyn Any>, Stri
             *pipewire::keys::MEDIA_CATEGORY => "Capture",
             *pipewire::keys::MEDIA_ROLE => "Camera",
         },
+        target,
     )?;
     let state = CameraState {
         format: None,
-        frames: Closing::new(frames),
+        frames: Feed::new(frames, gate),
     };
     let listener = stream
         .add_local_listener_with_user_data(state)
@@ -340,36 +371,13 @@ fn camera(core: &CoreRc, frames: Queue<VideoFrame>) -> Result<Box<dyn Any>, Stri
             let Some(mut buffer) = stream.dequeue_buffer() else {
                 return;
             };
-            let Some((format, width, height)) = state.format else {
-                return;
-            };
-            let Some(data) = buffer.datas_mut().first_mut() else {
-                return;
-            };
-            let chunk = data.chunk();
-            let (offset, size) = (to_usize(chunk.offset()), to_usize(chunk.size()));
-            let stride = u32::try_from(chunk.stride()).unwrap_or(0);
-            let Some(bytes) = data.data() else {
-                return;
-            };
-            let end = offset.saturating_add(size).min(bytes.len());
-            let Some(bytes) = bytes.get(offset..end).filter(|bytes| !bytes.is_empty()) else {
-                return;
-            };
-            let frame = VideoFrame {
-                width,
-                height,
-                format,
-                stride: if stride == 0 { width } else { stride },
-                data: bytes.to_vec(),
-            };
-            state.frames.queue().push(frame);
-        })
-        .state_changed(|_, state, _, new| {
-            if ended(&new) {
-                state.frames.queue().close();
+            if let (Some(queue), Some(format)) = (state.frames.live(), state.format)
+                && let Some(frame) = buffer.datas_mut().first_mut().and_then(|data| frame_of(data, format))
+            {
+                queue.push(frame);
             }
         })
+        .state_changed(|_, state, _, new| state.frames.state(&new))
         .register()
         .map_err(text)?;
     connect(&stream, Direction::Input, &camera_formats()?)?;
@@ -377,6 +385,23 @@ fn camera(core: &CoreRc, frames: Queue<VideoFrame>) -> Result<Box<dyn Any>, Stri
         _listener: listener,
         _stream: stream,
     }))
+}
+
+/// The frame one camera buffer's data holds, in the negotiated `format`; `None` for an empty one.
+fn frame_of(data: &mut spa::buffer::Data, (format, width, height): (PixelFormat, u32, u32)) -> Option<VideoFrame> {
+    let chunk = data.chunk();
+    let (offset, size) = (to_usize(chunk.offset()), to_usize(chunk.size()));
+    let stride = u32::try_from(chunk.stride()).unwrap_or(0);
+    let bytes = data.data()?;
+    let end = offset.saturating_add(size).min(bytes.len());
+    let bytes = bytes.get(offset..end).filter(|bytes| !bytes.is_empty())?;
+    Some(VideoFrame {
+        width,
+        height,
+        format,
+        stride: if stride == 0 { width } else { stride },
+        data: bytes.to_vec(),
+    })
 }
 
 /// A negotiated video format we take, as its pixel format and size.
@@ -451,4 +476,63 @@ fn to_usize(value: u32) -> usize {
 
 fn to_usize_u64(value: u64) -> usize {
     usize::try_from(value).unwrap_or(usize::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::*;
+    use crate::devices::DeviceError;
+
+    #[test]
+    fn a_live_feed_closes_its_queue_when_its_stream_ends_or_goes_and_a_retired_one_never_does() {
+        let queue: Queue<u8> = Queue::new(4);
+        let gate = Gate::live();
+        let feed = Feed::new(queue.clone(), Rc::clone(&gate));
+        assert!(feed.live().is_some());
+        feed.state(&StreamState::Streaming);
+        assert!(gate.has_streamed() && !gate.has_ended());
+        drop(feed);
+        assert!(matches!(queue.recv(Duration::ZERO), Err(DeviceError::Closed)));
+
+        let queue: Queue<u8> = Queue::new(4);
+        let gate = Gate::live();
+        let feed = Feed::new(queue.clone(), Rc::clone(&gate));
+        gate.retire();
+        assert!(feed.live().is_none(), "a retired stream feeds nothing");
+        feed.state(&StreamState::Unconnected);
+        drop(feed);
+        assert!(gate.has_ended());
+        assert_eq!(queue.recv(Duration::ZERO).unwrap(), None, "still open");
+    }
+
+    #[test]
+    fn a_pending_feed_feeds_nothing_until_it_goes_live() {
+        let queue: Queue<u8> = Queue::new(4);
+        let gate = Gate::pending();
+        let feed = Feed::new(queue.clone(), Rc::clone(&gate));
+        assert!(feed.live().is_none());
+        feed.state(&StreamState::Error("gone".into()));
+        assert_eq!(
+            queue.recv(Duration::ZERO).unwrap(),
+            None,
+            "a pending stream closes nothing"
+        );
+        gate.go_live();
+        assert!(feed.live().is_some());
+    }
+
+    #[test]
+    fn a_speaker_that_isn_t_live_plays_silence_and_leaves_the_queue() {
+        let queue = Queue::new(8);
+        queue.extend([0.5_f32; 4]).unwrap();
+        let mut bytes = [0xff_u8; 16];
+        assert_eq!(fill(&mut bytes, 4, None), 4);
+        assert!(bytes.iter().all(|byte| *byte == 0));
+        assert_eq!(queue.with_items(|items| items.len()), 4);
+        assert_eq!(fill(&mut bytes, 0, Some(&queue)), 4);
+        assert_eq!(queue.with_items(|items| items.len()), 0);
+        assert!((f32::from_le_bytes(bytes[..4].try_into().unwrap()) - 0.5).abs() < f32::EPSILON);
+    }
 }

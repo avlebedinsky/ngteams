@@ -205,15 +205,15 @@ pub fn launch(cx: &mut App, launch: Launch) -> Result<Launched, LaunchFailed> {
     // down, and closing the window keeps the app in the tray: the app quits itself when the desktop asks
     // (`quit_when_asked`), once the engine is shut down
     cx.set_quit_mode(QuitMode::Explicit);
-    let (models, ringer, video) = match calls {
+    let (models, ringer, video, devices) = match calls {
         Some(calls) => {
             let models = match calls.video.clone() {
                 Some(feed) => Models::with_video_calls(calls.echo, feed, cx),
                 None => Models::with_calls(calls.echo, cx),
             };
-            (models, calls.ringer, calls.video)
+            (models, calls.ringer, calls.video, calls.devices)
         }
-        None => (Models::new(cx), None, None),
+        None => (Models::new(cx), None, None, None),
     };
     let core: Arc<dyn Core> = Arc::new(engine.requests());
     let drained = models.clone();
@@ -223,6 +223,10 @@ pub fn launch(cx: &mut App, launch: Launch) -> Result<Launched, LaunchFailed> {
         watch_sign_out(signed_out, bridge.downgrade(), sign_in_hint(alias), cx);
     }
     let settings = settings_model(settings, diagnostics, video, cx);
+    if let Some(devices) = devices {
+        // the calls' devices as the settings choose them, from the start
+        teams_ui::settings::attach_devices(&settings, devices, cx);
+    }
     let parts = ShellParts {
         core: bridge.read(cx).core(),
         models,

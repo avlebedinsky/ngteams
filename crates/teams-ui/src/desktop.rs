@@ -195,6 +195,12 @@ impl Desktop {
         &self.own_presence
     }
 
+    /// The settings every window of the app shows.
+    #[must_use]
+    pub fn settings(&self) -> &Entity<crate::SettingsModel> {
+        &self.parts.shell.settings
+    }
+
     /// The window, while it is open.
     #[must_use]
     pub fn window(&self) -> Option<WindowHandle<KitRoot>> {

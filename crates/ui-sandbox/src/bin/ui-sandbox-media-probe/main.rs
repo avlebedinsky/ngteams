@@ -10,6 +10,19 @@
 //! - `ended <seconds>`: opens the microphone, the speaker and the camera, prints `opened=1`, then keeps using them
 //!   and reports, for each, whether it said `closed` within that time (the test stops the server meanwhile); then
 //!   opens each again and reports how that open failed and how long it took (`reopened_<device>`, `reopen_ms_<device>`).
+//!
+//! The devices there are and the user's choice ([`choice`]):
+//!
+//! - `devices`: the devices and each kind's default.
+//! - `watch-node <name> <seconds>`: says when the node comes, becomes its kind's default, and goes.
+//! - `follow-mic <system hz> <added hz> <seconds>`: the microphone following the system's default as the test adds
+//!   and removes a node above the system's.
+//! - `switch-mic <name> <system hz> <chosen hz>`: the microphone moved to `name` and back while it runs.
+//! - `pinned-mic <chosen> <chosen hz> <added> <added hz> <seconds>`: the microphone on `chosen` (the system's
+//!   default) by choice, kept there when the test plugs in `added` above it; then on `added` by choice, falling back
+//!   to the system's when the test unplugs it.
+//! - `switch-speaker <name> <hz> <amplitude> <seconds each>`: the speaker moved to `name` and back while it plays.
+//! - `portal-camera <frames> <seconds>`: the camera through the camera portal on the sandbox's bus.
 
 use std::process::ExitCode;
 use std::thread;
@@ -22,6 +35,8 @@ use teams_media::devices::{
     AudioFrame, AudioSink, AudioSource, DeviceError, Devices, FRAME_DURATION, VideoFrame, VideoSink,
 };
 use teams_media::tone::{Tone, ToneGenerator, amplitude_at};
+
+mod choice;
 
 type ProbeResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -47,6 +62,9 @@ fn number<T: std::str::FromStr>(args: &[String], at: usize, what: &str) -> Probe
 }
 
 fn run(args: &[String]) -> ProbeResult {
+    if args.first().map(String::as_str) == Some("portal-camera") {
+        return choice::portal_camera(number(args, 1, "frames")?, number(args, 2, "seconds")?);
+    }
     let devices = PipeWireDevices::connect()?;
     match args.first().map(String::as_str) {
         Some("mic") => mic(&devices, number(args, 1, "seconds")?, &args[2..]),
@@ -68,7 +86,59 @@ fn run(args: &[String]) -> ProbeResult {
         ),
         Some("camera-late") => camera_late(&devices, Duration::from_millis(number(args, 1, "milliseconds")?)),
         Some("ended") => ended(&devices, Duration::from_secs(number(args, 1, "seconds")?)),
-        _ => Err("usage: mic <seconds> <hz>... | speaker <seconds> <hz> <amplitude> | camera <frames> <seconds> | echo <hz> <amplitude> | camera-late <milliseconds> | ended <seconds>".into()),
+        Some(_) => choose(&devices, args),
+        None => Err(USAGE.into()),
+    }
+}
+
+const USAGE: &str = "usage: mic <seconds> <hz>... | speaker <seconds> <hz> <amplitude> | camera <frames> <seconds> | echo <hz> <amplitude> | camera-late <milliseconds> | ended <seconds> | devices | watch-node <name> <seconds> | follow-mic <system hz> <added hz> <seconds> | switch-mic <name> <system hz> <chosen hz> | pinned-mic <chosen> <chosen hz> <added> <added hz> <seconds> | switch-speaker <name> <hz> <amplitude> <seconds each> | portal-camera <frames> <seconds>";
+
+/// The commands about the devices there are and the user's choice.
+fn choose(devices: &PipeWireDevices, args: &[String]) -> ProbeResult {
+    let name = || {
+        args.get(1)
+            .map(String::as_str)
+            .ok_or("expected a node's name at argument 1")
+    };
+    match args.first().map(String::as_str) {
+        Some("devices") => {
+            choice::devices(devices);
+            Ok(())
+        }
+        Some("watch-node") => choice::watch_node(devices, name()?, number(args, 2, "seconds")?),
+        Some("follow-mic") => choice::follow_mic(
+            devices,
+            number(args, 1, "a frequency")?,
+            number(args, 2, "a frequency")?,
+            number(args, 3, "seconds")?,
+        ),
+        Some("switch-mic") => choice::switch_mic(
+            devices,
+            name()?,
+            number(args, 2, "a frequency")?,
+            number(args, 3, "a frequency")?,
+        ),
+        Some("pinned-mic") => choice::pinned_mic(
+            devices,
+            (name()?, number(args, 2, "a frequency")?),
+            (
+                args.get(3)
+                    .map(String::as_str)
+                    .ok_or("expected a node's name at argument 3")?,
+                number(args, 4, "a frequency")?,
+            ),
+            number(args, 5, "seconds")?,
+        ),
+        Some("switch-speaker") => choice::switch_speaker(
+            devices,
+            name()?,
+            Tone {
+                hz: number(args, 2, "a frequency")?,
+                amplitude: number(args, 3, "an amplitude")?,
+            },
+            Duration::from_secs_f32(number(args, 4, "seconds")?),
+        ),
+        _ => Err(USAGE.into()),
     }
 }
 

@@ -8382,6 +8382,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "webrtc-audio-processing",
+ "zbus",
 ]
 
 [[package]]

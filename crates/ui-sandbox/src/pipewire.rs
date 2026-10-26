@@ -11,6 +11,8 @@
 //! - **The camera and the recording** ([`media`]): a thread of the process that owns the sandbox shows the test
 //!   pattern as a video source (`sandbox-camera`, the default camera) and records the speaker to
 //!   [`PrivatePipeWire::recording`].
+//! - **Devices plugged in and out** ([`nodes`]): the same thread adds another microphone or speaker while the sandbox
+//!   runs ([`PrivatePipeWire::add_microphone`], [`PrivatePipeWire::add_speaker`]) and removes it again.
 //!
 //! Both processes get an environment built from scratch: a home, config dirs and a runtime dir of the sandbox's, no
 //! session bus, and the plugin and module dirs cut down to links to the few the sandbox needs (no ALSA, Bluetooth,
@@ -20,6 +22,7 @@
 //! server, at its fixed place inside [`SANDBOX_ENV`](crate::SANDBOX_ENV)'s dir.
 
 pub mod media;
+pub mod nodes;
 
 use std::ffi::OsString;
 use std::fmt::Write as _;
@@ -34,6 +37,7 @@ use teams_media::devices::pipewire::{SANDBOX_CLIENT_CONF, SANDBOX_SOCKET};
 use teams_media::tone::Tone;
 
 use crate::{SANDBOX_ENV, SOCKET_WAIT, SandboxResult, private_dir, spawn, wait_until};
+use nodes::{Added, AddedNode, NodeSpec};
 
 /// The speaker's node (the default output).
 pub const SPEAKER_NODE: &str = "sandbox-speaker";
@@ -43,6 +47,9 @@ pub const MICROPHONE_NODE: &str = "sandbox-microphone";
 pub const CAMERA_NODE: &str = "sandbox-camera";
 /// The speaker's recording, relative to the sandbox dir.
 pub const SPEAKER_RECORDING: &str = "recordings/speaker.wav";
+/// The `priority.session` of the sandbox's own speaker, microphone and camera: a device added above it becomes the
+/// system's default as it comes.
+pub const DEVICE_PRIORITY: u32 = 2000;
 /// WirePlumber's profile, defined by the sandbox's drop-in.
 const PROFILE: &str = "ms-teams-sandbox";
 /// How long the server and the session manager get to stop on `SIGTERM` before they are killed.
@@ -357,6 +364,29 @@ impl PrivatePipeWire {
         self.layout.root.join(SPEAKER_RECORDING)
     }
 
+    /// Adds a microphone playing `tone` (see [`nodes`]), as a device plugged in; it goes when the node is dropped.
+    ///
+    /// # Errors
+    /// The helper's thread has stopped, or the node isn't there in time.
+    pub fn add_microphone(&self, spec: NodeSpec, tone: Tone) -> SandboxResult<AddedNode> {
+        AddedNode::add(nodes::commands_of(self.media.as_ref())?, Added::Microphone(spec, tone))
+    }
+
+    /// Adds a speaker recorded to `recordings/<its name>.wav` in the sandbox dir (see [`nodes`]); it goes when the
+    /// node is dropped.
+    ///
+    /// # Errors
+    /// The helper's thread has stopped, or the node isn't there in time.
+    pub fn add_speaker(&self, spec: NodeSpec) -> SandboxResult<AddedNode> {
+        let recording = self
+            .recording()
+            .with_file_name(format!("{}.wav", spec.name.replace('/', "_")));
+        AddedNode::add(
+            nodes::commands_of(self.media.as_ref())?,
+            Added::Speaker(spec, recording),
+        )
+    }
+
     /// Frames the camera has shown so far.
     #[must_use]
     pub fn camera_frames(&self) -> u64 {
@@ -594,7 +624,7 @@ fn microphone_module(options: &PipeWireOptions) -> String {
           node.name = {MICROPHONE_NODE}
           node.description = \"Sandbox microphone\"
           media.class = Audio/Source
-          priority.session = 2000
+          priority.session = {DEVICE_PRIORITY}
         }}
       }}
     }}
@@ -624,7 +654,7 @@ context.objects = [
         media.class = Audio/Sink
         audio.position = [ MONO ]
         audio.rate = 48000
-        priority.session = 2000
+        priority.session = {DEVICE_PRIORITY}
       }}
     }}
 ]

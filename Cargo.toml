@@ -198,8 +198,8 @@ webrtc-audio-processing = { version = "2.1.0", features = ["bundled"] }
 wiremock = "0.6.5"
 # the virtual keyboard's keymap and its text-to-key table: the version GPUI already links, without its features
 xkbcommon = { version = "0.8.0", default-features = false }
-# D-Bus for the app's notifications and tray item (M2 Task 14) and the UI sandbox's fake notification server and tray
-# watcher: the version and the async-io flavour GPUI's ashpd already takes (a `tokio` flavour breaks every workspace
+# D-Bus for the app's notifications and tray item (M2 Task 14), the personal build's camera portal (M3 Task 20) and the
+# UI sandbox's fake notification server, tray watcher and camera portal: the version and the async-io flavour GPUI's ashpd already takes (a `tokio` flavour breaks every workspace
 # build with GPUI in it, as for oo7). 5.19.0 is what GPUI links; crates.io's newest was 6.0.0 on 2026-10-22, which
 # would put a second zbus in the tree.
 zbus = { version = "5.19.0", default-features = false, features = ["async-io", "blocking-api"] }

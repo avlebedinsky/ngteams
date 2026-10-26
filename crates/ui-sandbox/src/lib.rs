@@ -6,7 +6,8 @@
 //!   `NIRI_SOCKET`.
 //! - **A private D-Bus session bus** ([`bus`]): a `dbus-daemon` on a socket in the client's runtime dir, with a
 //!   config of our own (no service activation, so nothing of the desktop is started on it), holding a fake
-//!   notification server and a fake `StatusNotifierItem` watcher that record what they get.
+//!   notification server and a fake `StatusNotifierItem` watcher that record what they get, and with the private
+//!   PipeWire a fake camera portal handing out remotes on it.
 //! - **Virtual input** ([`input`]): a keyboard and a pointer in the nested niri, through its
 //!   `zwp_virtual_keyboard_manager_v1` and `zwlr_virtual_pointer_manager_v1`.
 //! - **A no-op URI opener** ([`opener`]): `xdg-open` (and the other launchers GPUI tries) first on the client's
@@ -348,7 +349,9 @@ impl Sandbox {
         sandbox.start_niri(&tools.niri, &parent)?;
         if let Some(pipewire) = &options.pipewire {
             let tools = PipeWireTools::find()?;
-            sandbox.pipewire = Some(PrivatePipeWire::start(&tools, sandbox.dir.path(), pipewire)?);
+            let started = PrivatePipeWire::start(&tools, sandbox.dir.path(), pipewire)?;
+            sandbox.bus.start_camera_portal(&started.socket())?;
+            sandbox.pipewire = Some(started);
         }
         Ok(sandbox)
     }

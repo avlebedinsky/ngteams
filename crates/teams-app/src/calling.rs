@@ -5,7 +5,9 @@
 //!
 //! The devices are the PipeWire the build allows ([`PipeWireDevices`]): a lab or test build's is the UI sandbox's
 //! private one only, so a lab app's microphone, speaker, camera and ringtone never reach the desktop's. Without it (no
-//! sandbox PipeWire) the app runs without calls: no call is shown, and the engine has no calling socket.
+//! sandbox PipeWire) the app runs without calls: no call is shown, and the engine has no calling socket. The settings
+//! list its devices and choose among them ([`AppCalls::devices`], M3 Task 20): a choice moves the calls' devices at
+//! once, a running call's included.
 //!
 //! **Video** (M3 Task 18): a 1:1 call takes video when the lab's copy of Cisco's OpenH264 is there and is Cisco's
 //! ([`teams_core::lab::openh264`], fetched by `scripts/fetch-openh264.sh`); its frames are shown on the window's
@@ -19,6 +21,7 @@ use teams_core::lab::{LAB_LANGUAGE, web_client_info};
 use teams_core::{CallMedia, CallVideo, Relay};
 use teams_fence::Mri;
 use teams_fence::lab::LabConfig;
+use teams_media::devices::catalog::DeviceDirectory;
 use teams_media::devices::pipewire::PipeWireDevices;
 use teams_media::devices::{DeviceError, Devices};
 use teams_media::relay::RelayOptions;
@@ -35,6 +38,8 @@ pub struct AppCalls {
     pub echo: Option<Mri>,
     /// Where a 1:1 call's video is shown; `None`: the calls carry no video (no codec).
     pub video: Option<VideoFeed>,
+    /// The devices the settings list and choose among; `None` lists none (devices that can't be chosen).
+    pub devices: Option<Arc<dyn DeviceDirectory>>,
 }
 
 impl std::fmt::Debug for AppCalls {
@@ -43,6 +48,7 @@ impl std::fmt::Debug for AppCalls {
             .field("ringer", &self.ringer.is_some())
             .field("echo", &self.echo)
             .field("video", &self.video.is_some())
+            .field("devices", &self.devices.is_some())
             .finish()
     }
 }
@@ -92,6 +98,7 @@ pub fn on_devices(
             ringer: Some(ringer),
             echo,
             video: feed,
+            devices: None,
         },
     )
 }
@@ -101,7 +108,7 @@ pub fn on_devices(
 /// # Errors
 /// The PipeWire is refused or can't be reached ([`PipeWireDevices::connect`]).
 pub fn open(config: &LabConfig) -> Result<(AccountCalls, AppCalls), DeviceError> {
-    let devices = PipeWireDevices::connect()?;
+    let devices = Arc::new(PipeWireDevices::connect()?);
     let library = teams_core::lab::openh264(config.paths());
     let video = match library.check() {
         Ok(()) => Some(library),
@@ -110,5 +117,7 @@ pub fn open(config: &LabConfig) -> Result<(AccountCalls, AppCalls), DeviceError>
             None
         }
     };
-    Ok(on_devices(Arc::new(devices), echo_of(config), video))
+    let (engine, mut window) = on_devices(devices.clone(), echo_of(config), video);
+    window.devices = Some(devices);
+    Ok((engine, window))
 }
