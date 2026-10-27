@@ -32,6 +32,7 @@
 //! strictly JSON) is ignored like one it doesn't offer: no consumer is handed an invitation the fence can't judge.
 
 use std::collections::BTreeSet;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use serde_json::Value;
@@ -97,7 +98,13 @@ pub(crate) struct Offer {
     /// The callbacks the call's end comes back to, from the permitted attach.
     ends: Vec<Callback>,
     receipts: Vec<Receipt>,
+    /// When it was offered: an offer never attached holds the call floor only for [`UNATTACHED_RING`].
+    offered: Instant,
 }
+
+/// How long an offered invitation no attach bound (so its ring's end is never seen) holds the call floor: longer
+/// than an invitation rings before the service gives up on it.
+pub(crate) const UNATTACHED_RING: Duration = Duration::from_secs(90);
 
 impl Offer {
     pub(crate) fn new(invitation: Invitation) -> Self {
@@ -109,6 +116,17 @@ impl Offer {
             agent: None,
             ends: Vec::new(),
             receipts: Vec::new(),
+            offered: Instant::now(),
+        }
+    }
+
+    /// Whether it holds the call floor ([`crate::CallFloor`]): answered and not left, or ringing (attached, until its
+    /// ring ends; never attached, for [`UNATTACHED_RING`] at most).
+    pub(crate) fn holds_floor(&self) -> bool {
+        match self.state {
+            OfferState::Answered => true,
+            OfferState::Ringing => self.ring_end_known() || self.offered.elapsed() < UNATTACHED_RING,
+            _ => false,
         }
     }
 

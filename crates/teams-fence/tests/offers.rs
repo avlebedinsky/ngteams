@@ -11,9 +11,9 @@ use std::path::PathBuf;
 use base64::Engine as _;
 use serde_json::{Value, json};
 use teams_fence::{
-    CallOperation, Contact, Delivery, DeliveryDecision, DeliveryDenyReason, DenyReason, FailClosed, Fence, FenceLog,
-    Membership, MembershipFuture, MembershipSource, Mri, Observed, PartialReason, Policy, Request, Roster, Scope,
-    Target, WriteKind, contacting,
+    CALL_START_URL, CallFloor, CallOperation, Contact, Delivery, DeliveryDecision, DeliveryDenyReason, DenyReason,
+    FailClosed, Fence, FenceLog, Membership, MembershipFuture, MembershipSource, Mri, Observed, PartialReason, Policy,
+    Request, Roster, Scope, TEST_CALL_SCENARIO, Target, WriteKind, contacting,
 };
 
 const GUID_A: &str = "00000000-0000-4000-8000-00000000000a";
@@ -1761,4 +1761,256 @@ async fn reason_with(lab: &Lab, target: Target, members: &Members) -> Option<Den
         .await
         .err()
         .map(|denied| *denied.reason())
+}
+
+// --- the call floor: the accounts of one app, one call at a time ---
+
+/// `lab`'s fence sharing `floor` with the other accounts of its app.
+fn on_floor(lab: Lab, floor: &CallFloor) -> Lab {
+    Lab {
+        fence: lab.fence.sharing_calls(floor),
+        ..lab
+    }
+}
+
+/// Where a's test call's callbacks go: its endpoint's call agent.
+const A_CALLBACKS: &str =
+    "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/callAgent/agent-a";
+const A_CONVERSATION_END: &str =
+    "/v4/f/SyntheticEndpoint00000/callAgent/agent-a/05050505/conversation/conversationEnd/";
+
+/// a's test call start, shaped like `tests/calls.rs`'s (the echo call's capture).
+fn a_start_body() -> Vec<u8> {
+    json!({
+        "conversationRequest": {
+            "conversationType": null,
+            "suppressDialout": true,
+            "links": {
+                "conversationEnd": format!("{A_CALLBACKS}/05050505/conversation/conversationEnd/"),
+                "conversationUpdate": format!("{A_CALLBACKS}/06060606/conversation/conversationUpdate/"),
+            },
+            "scenario": TEST_CALL_SCENARIO,
+        },
+        "participants": {"from": {"id": LAB_A, "displayName": "Lab A"}, "to": []},
+        "groupChat": null,
+        "callInvitation": {
+            "callModalities": ["Audio"],
+            "links": {
+                "acceptance": format!("{A_CALLBACKS}/03030303/call/acceptance/"),
+                "end": format!("{A_CALLBACKS}/04040404/call/end/"),
+            },
+            "mediaContent": {"blob": "v=0\r\n", "contentType": "application/sdp-ngc-1.0"},
+        },
+    })
+    .to_string()
+    .into_bytes()
+}
+
+/// a's fence on `floor`, its test call started and registered: a is in a call.
+async fn a_in_a_call(floor: &CallFloor) -> TestResult<Lab> {
+    let lab = on_floor(lab_of(Some(LAB_A))?, floor);
+    let body = a_start_body();
+    let start = match contacting(
+        &Request::new("POST", CALL_START_URL).with_body(Some(&body)),
+        &Policy::new().with_echo_callee(Mri::new(ECHO)),
+    ) {
+        Contact::Write(target) => target,
+        other => return Err(format!("a's start is {other:?}").into()),
+    };
+    let permit = lab.fence.check(start, &FailClosed).await?;
+    let pending = lab.fence.pend_start(&permit, &body).ok_or("a's start pends")?;
+    let conversation = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticConversation9";
+    let answer = json!({
+        "conversationController": format!("{conversation}?i=10-0-0-2&e=1"),
+        "links": {"leave": format!("{conversation}/leave?i=10-0-0-2&e=1")},
+    });
+    lab.fence.register_start(pending, answer.to_string().as_bytes())?;
+    Ok(lab)
+}
+
+/// a's call ends: the conversation's end delivered at its start's callback.
+fn a_s_call_ends(lab: &Lab) {
+    let ended = Delivery {
+        connection: "session-a/socket-1".to_owned(),
+        id: 1,
+        path: A_CONVERSATION_END.to_owned(),
+        trouter_request: Some(TROUTER_REQUEST.to_owned()),
+        chain_id: None,
+        message_id: None,
+        body: Vec::new(),
+    };
+    assert_eq!(lab.fence.observe_delivery(&ended), Observed::Ended);
+}
+
+/// The 1:1 invitation to a from c, with this delivery id.
+fn invitation_to_a(id: i64) -> TestResult<Delivery> {
+    let (delivery, mut gp) = invitation(0, id)?;
+    *gp.pointer_mut("/callNotification/to/id").ok_or("to")? = Value::from(LAB_A);
+    *gp.pointer_mut("/callNotification/from/id").ok_or("from")? = Value::from(LAB_C);
+    Ok(invitation_delivery(&delivery.path, id, &gp))
+}
+
+/// The test call start of `caller` (a new call of `caller` and the echo service).
+fn test_call(caller: &str) -> Target {
+    Target::new(WriteKind::Call, Scope::New).with_added([Mri::new(caller), Mri::new(ECHO)])
+}
+
+#[tokio::test]
+async fn on_a_shared_floor_an_invitation_isn_t_offered_while_another_account_is_in_a_call() -> TestResult {
+    let floor = CallFloor::new();
+    let a = a_in_a_call(&floor).await?;
+    let b = on_floor(lab_b()?, &floor);
+    let (delivery, gp) = invitation(0, 120)?;
+    assert_eq!(b.fence.observe_delivery(&delivery), Observed::Ignored);
+    assert!(matches!(
+        respond(&b, &receipt(120), &FailClosed).await,
+        DeliveryDecision::NotPending
+    ));
+    // a fence of its own (no floor) isn't held by a's call
+    assert_eq!(lab_b()?.fence.observe_delivery(&delivery), Observed::Offered);
+    // once a's call ended, the invitation delivered again is offered
+    a_s_call_ends(&a);
+    let again = invitation_delivery(&delivery.path, 121, &gp);
+    assert_eq!(b.fence.observe_delivery(&again), Observed::Offered);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_invitation_ringing_or_answered_holds_the_floor_until_it_ends() -> TestResult {
+    let (url, body) = attach_case()?;
+    // b's invitation only offered (not attached yet) holds it: two accounts never ring at once, and a starts nothing
+    let floor = CallFloor::new();
+    let b = on_floor(lab_b()?, &floor);
+    let a = on_floor(lab_of(Some(LAB_A))?, &floor);
+    let (delivery, _) = invitation(0, 130)?;
+    assert_eq!(b.fence.observe_delivery(&delivery), Observed::Offered);
+    assert_eq!(a.fence.observe_delivery(&invitation_to_a(131)?), Observed::Ignored);
+    assert_eq!(
+        reason(&a, test_call(LAB_A)).await,
+        Some(DenyReason::AnotherAccountInCall)
+    );
+    // let go before it rang (the call machine dropped it): a's next one is offered
+    b.fence.let_go(&url);
+    assert_eq!(a.fence.observe_delivery(&invitation_to_a(137)?), Observed::Offered);
+    // b's invitation attached (its ring's end known): until its ring ends
+    let floor = CallFloor::new();
+    let b = on_floor(bound().await?, &floor);
+    let a = on_floor(lab_of(Some(LAB_A))?, &floor);
+    assert_eq!(a.fence.observe_delivery(&invitation_to_a(132)?), Observed::Ignored);
+    let end = body["attach"]["links"]["end"].as_str().ok_or("end")?;
+    let ended = Delivery {
+        path: url::Url::parse(end)?.path().to_owned(),
+        id: 133,
+        body: b"{}".to_vec(),
+        ..delivery.clone()
+    };
+    assert_eq!(b.fence.observe_delivery(&ended), Observed::RingEnded);
+    assert_eq!(a.fence.observe_delivery(&invitation_to_a(134)?), Observed::Offered);
+    // b's invitation answered: until b left its call
+    let floor = CallFloor::new();
+    let b = on_floor(answered().await?, &floor);
+    let a = on_floor(lab_of(Some(LAB_A))?, &floor);
+    assert_eq!(a.fence.observe_delivery(&invitation_to_a(135)?), Observed::Ignored);
+    b.fence.check(case_write(LEAVE, |_| ())?, &FailClosed).await?;
+    assert_eq!(a.fence.observe_delivery(&invitation_to_a(136)?), Observed::Offered);
+    Ok(())
+}
+
+#[tokio::test]
+async fn an_invitation_offered_is_still_taken_when_delivered_again() -> TestResult {
+    let floor = CallFloor::new();
+    let b = on_floor(lab_b()?, &floor);
+    let (delivery, gp) = invitation(0, 140)?;
+    assert_eq!(b.fence.observe_delivery(&delivery), Observed::Offered);
+    // b's invitation rings: a starts no call meanwhile
+    let a = on_floor(lab_of(Some(LAB_A))?, &floor);
+    assert_eq!(
+        reason(&a, test_call(LAB_A)).await,
+        Some(DenyReason::AnotherAccountInCall)
+    );
+    // and b's invitation delivered again is taken, its receipt with it
+    let again = invitation_delivery(&delivery.path, 141, &gp);
+    assert_eq!(b.fence.observe_delivery(&again), Observed::Offered);
+    assert!(matches!(
+        respond(&b, &receipt(141), &FailClosed).await,
+        DeliveryDecision::Permitted(_)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_start_a_join_or_an_answer_is_denied_while_another_account_on_the_floor_is_busy() -> TestResult {
+    // a in a call, and b's invitation offered before b joined the floor (as an account added while it rang)
+    let floor = CallFloor::new();
+    let a = a_in_a_call(&floor).await?;
+    let b = lab_b()?;
+    let (delivery, _) = invitation(0, 150)?;
+    assert_eq!(b.fence.observe_delivery(&delivery), Observed::Offered);
+    let b = on_floor(b, &floor);
+    // b's ring-time sends go on: its attach, its answer bound, its endpoint state
+    let (url, body) = attach_case()?;
+    let permit = b.fence.check(attach_target(&url, &body)?, &FailClosed).await?;
+    let pending = b.fence.pend_answer(&permit).ok_or("the attach pends")?;
+    let (_, _, answer) = progress_case()?;
+    b.fence.bind_answer(pending, answer.to_string().as_bytes())?;
+    b.fence.check(case_write(STATE, |_| ())?, &FailClosed).await?;
+    // what enters a call doesn't: its answer, a start, a join
+    let another = Some(DenyReason::AnotherAccountInCall);
+    assert_eq!(reason(&b, case_write(ACCEPT, |_| ())?).await, another);
+    assert_eq!(reason(&b, test_call(LAB_B)).await, another);
+    assert_eq!(reason(&b, case_write(MEDIA_JOIN, |_| ())?).await, another);
+    // and while b's invitation rings, a doesn't start another call either
+    assert_eq!(reason(&a, test_call(LAB_A)).await, another);
+    // each deny logged, by its reason
+    let log = std::fs::read_to_string(&b.log)?;
+    let denies: Vec<Value> = log
+        .lines()
+        .map(serde_json::from_str)
+        .collect::<Result<Vec<Value>, _>>()?
+        .into_iter()
+        .filter(|entry| entry["reason"] == "another_account_in_call")
+        .collect();
+    assert_eq!(denies.len(), 3, "{log}");
+    assert!(denies.iter().all(|entry| entry["verdict"] == "deny"));
+    // a's call ended: b answers
+    a_s_call_ends(&a);
+    let permit = b.fence.check(case_write(ACCEPT, |_| ())?, &FailClosed).await?;
+    assert_eq!(permit.target().kind(), WriteKind::CallAnswer);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_fence_dropped_leaves_the_floor() -> TestResult {
+    let floor = CallFloor::new();
+    let a = a_in_a_call(&floor).await?;
+    let b = on_floor(lab_b()?, &floor);
+    let (delivery, gp) = invitation(0, 160)?;
+    assert_eq!(b.fence.observe_delivery(&delivery), Observed::Ignored);
+    assert_eq!(
+        reason(&b, test_call(LAB_B)).await,
+        Some(DenyReason::AnotherAccountInCall)
+    );
+    // a's account removed (its fence dropped) with its call still live: it no longer holds the floor
+    drop(a);
+    let again = invitation_delivery(&delivery.path, 161, &gp);
+    assert_eq!(b.fence.observe_delivery(&again), Observed::Offered);
+    assert_eq!(reason(&b, test_call(LAB_B)).await, None);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_lab_fence_on_a_floor_judges_its_own_account_s_invitations_as_without_one() -> TestResult {
+    // b's invitation attached (its ring's end known): a lab fence offers b the group call's too, on a floor or not
+    // (the floor keeps apart the accounts, not one account's own invitations)
+    for floored in [false, true] {
+        let b = bound().await?;
+        let b = if floored { on_floor(b, &CallFloor::new()) } else { b };
+        let (group, _) = invitation(1, 170)?;
+        assert_eq!(
+            b.fence.observe_delivery(&group),
+            Observed::Offered,
+            "floored: {floored}"
+        );
+    }
+    Ok(())
 }

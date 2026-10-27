@@ -251,8 +251,9 @@ impl Calls {
     }
 
     /// Whether a call is up, rings, or a start or join was asked for and its call not yet told (its media being set
-    /// up): another start waits for it to settle.
-    fn busy(&self) -> bool {
+    /// up): another start waits for it to settle, and so do the other accounts' ([`crate::accounts`]).
+    #[must_use]
+    pub fn busy(&self) -> bool {
         self.call.is_some() || self.ringing.is_some() || self.asked.is_some()
     }
 
@@ -527,6 +528,7 @@ fn local_refusal_text(why: &str) -> String {
         "not-ringing" => "no call rings".to_owned(),
         "no-call" => "no call is up".to_owned(),
         "no-chat" => "no chat is open".to_owned(),
+        "another-account" => "another account is in a call".to_owned(),
         "no-video" => "this build has no video codec".to_owned(),
         _ => "calls aren't available".to_owned(),
     }

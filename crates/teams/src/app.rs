@@ -1,16 +1,23 @@
-//! The personal app on GPUI: the bridge over the account's engine, the main window (`teams-ui`'s shell, with the first
-//! run's screen of the writes that happen on their own, [`settings`]), the notifications and the tray on the desktop's
-//! session bus, the calls when the engine has its calling ([`PersonalCalls`]: a call button and "Test call", an
+//! The personal app on GPUI: every account the user added, all running at once in one window
+//! (`docs/personal-build.md`, "Several accounts"): a bridge per account over its engine, the main window
+//! (`teams-ui`'s desktop with a shell per account, the rail's avatars switching between them, and the first run's
+//! screen of the writes that happen on their own, [`settings`]), the notifications and the tray on the desktop's
+//! session bus, the calls when the engines have their calling ([`PersonalCalls`]: a call button and "Test call", an
 //! incoming call's ringtone, notification and banner, the in-call view, the video switch and the devices in the
-//! settings), the sign-out and the quit.
+//! settings; one call at a time across the accounts), the sign-out and the quit.
 //!
-//! **Signed out** ([`watch_sign_out`]): once the session can't renew its tokens (`invalid_grant`: a sign-in frequency
-//! policy, a password change, a revoked session; or no refresh token stored), the window shows [`SIGNED_OUT_HINT`], the
-//! engine is shut down (nothing more is sent: every request answers that it stopped), and the sign-in window opens
-//! again ([`SignInAgain`]). A sign-in that goes through starts the app afresh (`main`: the process runs itself again),
-//! so a new engine starts only once it is signed in again.
+//! **Adding an account** (the rail's "+"): the window asking for the account opens (the first sign-in's), the account
+//! is signed in through the sign-in window off GPUI's foreground ([`crate::accounts::add`]), and once that goes through
+//! its engine starts ([`Runner::start`]) and the window shows it; nothing else restarts. **Removing one** ("Sign out
+//! and remove" in its account menu): its engine is shut down, then it is forgotten as `teams --forget` forgets it, then
+//! it leaves the window; the last one removed quits the app.
+//!
+//! **Signed out** ([`watch_sign_out`]): once an account's session can't renew its tokens (`invalid_grant`: a sign-in
+//! frequency policy, a password change, a revoked session; or no refresh token stored), its shell shows
+//! [`SIGNED_OUT_HINT`], its engine is shut down (nothing more is sent for it: every request answers that it stopped),
+//! and the sign-in window opens again for it ([`SignInAgain`]). A sign-in that goes through starts the app afresh
+//! (`main`: the process runs itself again), so a new engine starts only once it is signed in again.
 
-use std::cell::Cell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -18,16 +25,20 @@ use std::sync::Arc;
 use gpui::{App, AppContext as _, AsyncApp, Entity, Global, QuitMode, SharedString, Task, WeakEntity, WindowHandle};
 use teams_auth::session::SignedOut;
 use teams_core::EngineHandle;
+use teams_fence::personal::PersonalAccount;
 use teams_log::diagnostics::Source as DiagnosticsSource;
+use teams_ui::account_prompt::{self, AccountPrompt, AccountPromptEvent};
 use teams_ui::bus::BusError;
 use teams_ui::window::{KitRoot, PERSONAL_APP_ID};
 use teams_ui::{
-    Bridge, Core, Desktop, DesktopEvent, DesktopParts, LogLevel, Models, SettingsFile, SettingsModel, ShellParts,
-    VideoFeed, ViewTrace,
+    AccountParts, Bridge, Core, Desktop, DesktopEvent, DesktopParts, LogLevel, Models, SettingsFile, SettingsModel,
+    ShellParts, VideoFeed, ViewTrace,
 };
 use tokio::sync::watch;
 
+use crate::accounts::{self, Runner, Started};
 use crate::calling::PersonalCalls;
+use crate::engine::display_name;
 
 /// The window's title and the app's name on its notifications and tray item.
 pub const TITLE: &str = "Teams";
@@ -40,16 +51,17 @@ pub type SignInAgain = Rc<dyn Fn(&mut App)>;
 
 /// What the app starts with.
 pub struct Launch {
-    pub engine: EngineHandle,
-    /// The session's signed-out state (`Session::watch_signed_out`).
-    pub signed_out: watch::Receiver<Option<SignedOut>>,
+    /// The first account's engine, started; the others follow it in [`Launch::others`].
+    pub first: Started,
+    pub others: Vec<Started>,
     /// The settings, the first run's screen asked for ([`settings`]).
     pub settings: SettingsModel,
     /// The desktop's session bus, for the notifications and the tray item.
     pub bus: Result<String, BusError>,
-    pub sign_in_again: SignInAgain,
-    /// The window's calls, when the engine has its calling (`crate::calling::open`); `None` shows no call.
-    pub calls: Option<PersonalCalls>,
+    /// The sign-in window again for an account signed out ([`SignInAgain`]).
+    pub sign_in_again: Rc<dyn Fn(&PersonalAccount) -> SignInAgain>,
+    /// What starts more accounts (the rail's "+") and forgets one ("Sign out and remove").
+    pub runner: Runner,
 }
 
 /// The settings in `file` (`~/.local/share/teams/settings.toml`) with the first run's screen asked for: none of
@@ -86,58 +98,68 @@ pub fn install_log(dir: PathBuf, setting: LogLevel, fence_log: PathBuf) -> Diagn
     }
 }
 
-/// The desktop and the bridge, held for the app's life.
+/// The app's accounts as it runs them, held for its life: the desktop, and each account's bridge holding its engine.
 struct Held {
-    _desktop: Entity<Desktop>,
-    _bridge: Entity<Bridge>,
+    running: Entity<Running>,
 }
 
 impl Global for Held {}
 
+/// The accounts the app runs: each one's bridge (its MRI, its UPN), what starts more and forgets one, the settings
+/// every account shares and the prompt that adds one while it is open.
+pub struct Running {
+    desktop: Entity<Desktop>,
+    bridges: Vec<(String, String, Entity<Bridge>)>,
+    runner: Runner,
+    settings: Entity<SettingsModel>,
+    sign_in_again: Rc<dyn Fn(&PersonalAccount) -> SignInAgain>,
+    adding: Option<WindowHandle<KitRoot>>,
+    quitting: bool,
+}
+
 /// What [`launch`] started.
 pub struct Launched {
     pub window: WindowHandle<KitRoot>,
-    pub bridge: Entity<Bridge>,
     pub desktop: Entity<Desktop>,
 }
 
-/// The window couldn't be opened: why, and the engine's shutdown (the caller quits after it).
+/// The window couldn't be opened: why, and the engines' shutdown (the caller quits after it).
 pub struct LaunchFailed {
     pub error: String,
     pub stopped: Task<()>,
 }
 
-/// Starts the app inside GPUI's `run`: the bridge holding the engine, the window, the sign-out watch, the bus.
+/// Starts the app inside GPUI's `run`: a bridge per account holding its engine, the window with every account in it,
+/// the sign-out watches, the bus, and what the rail asks (an account added or removed) and the quit.
 ///
 /// # Errors
-/// The window can't be opened: the bridge is shut down then.
+/// The window can't be opened: every bridge is shut down then.
 pub fn launch(cx: &mut App, launch: Launch) -> Result<Launched, LaunchFailed> {
     let Launch {
-        engine,
-        signed_out,
+        first,
+        others,
         settings,
         bus,
         sign_in_again,
-        calls,
+        runner,
     } = launch;
-    // closing the window keeps the app in the tray: it quits itself once the engine is shut down
+    // closing the window keeps the app in the tray: it quits itself once the engines are shut down
     cx.set_quit_mode(QuitMode::Explicit);
-    let (models, bridge) = bridge(engine, calls.as_ref(), cx);
-    watch_sign_out(signed_out, bridge.downgrade(), sign_in_again, cx);
-    for problem in settings.problems() {
-        eprintln!("teams: {problem}");
-        log::warn!("{problem}");
-    }
-    let video = calls.as_ref().and_then(|calls| calls.video.clone());
-    let settings = settings_entity(settings, video, cx);
-    if let Some(devices) = calls.as_ref().and_then(|calls| calls.devices.clone()) {
-        // the calls' devices as the settings choose them, from the start
-        teams_ui::settings::attach_devices(&settings, devices, cx);
-    }
+    let settings = shared_settings(settings, first.calls.as_ref(), cx);
+    let (models, bridge) = bridge(first.engine.handle, first.calls.as_ref(), cx);
+    watch_sign_out(
+        first.engine.session.watch_signed_out(),
+        bridge.downgrade(),
+        sign_in_again(&first.account),
+        cx,
+    );
+    let core = bridge.read(cx).core();
+    let key = core.me().to_owned();
+    settings.update(cx, |settings, cx| settings.set_first_account(&key, cx));
     let parts = ShellParts {
-        core: bridge.read(cx).core(),
+        core,
         models,
-        settings,
+        settings: settings.clone(),
         trace: Arc::new(ViewTrace::off()),
     };
     let desktop = cx.new(|cx| {
@@ -147,10 +169,27 @@ pub fn launch(cx: &mut App, launch: Launch) -> Result<Launched, LaunchFailed> {
                 app_name: TITLE.into(),
                 title: TITLE.into(),
                 shell: parts,
-                ringer: calls.and_then(|calls| calls.ringer),
+                account_name: display_name(&first.account).to_owned().into(),
+                account_detail: first.account.upn.clone().into(),
+                can_add: true,
+                ringer: first.calls.and_then(|calls| calls.ringer),
             },
             cx,
         )
+    });
+    let running = cx.new(|_| Running {
+        desktop: desktop.clone(),
+        bridges: vec![(key, first.account.upn.clone(), bridge)],
+        runner,
+        settings,
+        sign_in_again,
+        adding: None,
+        quitting: false,
+    });
+    running.update(cx, |running, cx| {
+        for started in others {
+            running.add_started(started, cx);
+        }
     });
     let window = match desktop.update(cx, Desktop::open_window) {
         Ok(window) => window,
@@ -158,15 +197,14 @@ pub fn launch(cx: &mut App, launch: Launch) -> Result<Launched, LaunchFailed> {
             log::error!("the window can't be opened: {error:#}");
             return Err(LaunchFailed {
                 error: format!("{error:#}"),
-                stopped: bridge.update(cx, Bridge::shutdown),
+                stopped: running.update(cx, Running::shutdown),
             });
         }
     };
     cx.set_global(Held {
-        _desktop: desktop.clone(),
-        _bridge: bridge.clone(),
+        running: running.clone(),
     });
-    quit_when_asked(&desktop, bridge.clone(), cx);
+    follow_desktop(&desktop, running, cx);
     let connecting = desktop.update(cx, |desktop, cx| desktop.connect(bus, cx));
     cx.spawn(async move |_: &mut AsyncApp| {
         for problem in connecting.await {
@@ -175,11 +213,186 @@ pub fn launch(cx: &mut App, launch: Launch) -> Result<Launched, LaunchFailed> {
         }
     })
     .detach();
-    Ok(Launched {
-        window,
-        bridge,
-        desktop,
+    Ok(Launched { window, desktop })
+}
+
+/// The settings every account shares, their problems said; the first account's calls' video following them and the
+/// calls' devices attached, from the start.
+fn shared_settings(settings: SettingsModel, calls: Option<&PersonalCalls>, cx: &mut App) -> Entity<SettingsModel> {
+    for problem in settings.problems() {
+        eprintln!("teams: {problem}");
+        log::warn!("{problem}");
+    }
+    let video = calls.and_then(|calls| calls.video.clone());
+    let settings = settings_entity(settings, video, cx);
+    if let Some(devices) = calls.and_then(|calls| calls.devices.clone()) {
+        teams_ui::settings::attach_devices(&settings, devices, cx);
+    }
+    settings
+}
+
+/// What the desktop asks, done: an account added, one removed, the quit.
+fn follow_desktop(desktop: &Entity<Desktop>, running: Entity<Running>, cx: &mut App) {
+    cx.subscribe(desktop, move |_, event, cx| {
+        running.update(cx, |running, cx| match event {
+            DesktopEvent::Quit => running.quit(cx),
+            DesktopEvent::AddAccount => running.ask_account(cx),
+            DesktopEvent::RemoveAccount(key) => running.remove(key, cx),
+        });
     })
+    .detach();
+}
+
+impl Running {
+    /// An account started: its bridge, its sign-out watch, its calls' video following the settings, and its place in
+    /// the window.
+    fn add_started(&mut self, started: Started, cx: &mut gpui::Context<Self>) {
+        let Started { account, engine, calls } = started;
+        if let Some(feed) = calls.as_ref().and_then(|calls| calls.video.clone()) {
+            feed.set_enabled(self.settings.read(cx).settings().video_calls);
+            cx.observe(&self.settings, move |_, model, cx| {
+                feed.set_enabled(model.read(cx).settings().video_calls);
+            })
+            .detach();
+        }
+        let (models, bridge) = bridge(engine.handle, calls.as_ref(), cx);
+        watch_sign_out(
+            engine.session.watch_signed_out(),
+            bridge.downgrade(),
+            (self.sign_in_again)(&account),
+            cx,
+        );
+        let core = bridge.read(cx).core();
+        let key = core.me().to_owned();
+        let parts = AccountParts {
+            core,
+            models,
+            name: display_name(&account).to_owned().into(),
+            detail: account.upn.clone().into(),
+        };
+        self.desktop.update(cx, |desktop, cx| desktop.add_account(parts, cx));
+        self.bridges.push((key, account.upn, bridge));
+    }
+
+    /// The rail's "+": the window asking for the account (the first sign-in's), brought forward if it is open. The
+    /// account it names is signed in through the sign-in window off GPUI's foreground; once that goes through its
+    /// engine starts and the window shows it, and the prompt closes; one that doesn't is said on the prompt.
+    fn ask_account(&mut self, cx: &mut gpui::Context<Self>) {
+        if let Some(window) = self.adding
+            && window.update(cx, |_, window, _| window.activate_window()).is_ok()
+        {
+            return;
+        }
+        let (window, prompt) = match account_prompt::open(cx, PERSONAL_APP_ID, "Add an account".into(), None) {
+            Ok(opened) => opened,
+            Err(error) => {
+                log::warn!("the window asking for an account can't be opened: {error:#}");
+                return;
+            }
+        };
+        self.adding = Some(window);
+        let running = cx.entity().downgrade();
+        cx.subscribe(&prompt, move |_, prompt, event, cx| {
+            let AccountPromptEvent::SignIn(upn) = event;
+            let _ = running.update(cx, |running, cx| running.sign_in_added(upn.clone(), prompt, cx));
+        })
+        .detach();
+    }
+
+    /// Signs the account `upn` the prompt named in, then starts it (see [`Running::ask_account`]).
+    fn sign_in_added(&mut self, upn: String, prompt: Entity<AccountPrompt>, cx: &mut gpui::Context<Self>) {
+        if self.bridges.iter().any(|(_, held, _)| held.eq_ignore_ascii_case(&upn)) {
+            prompt.update(cx, |prompt, cx| prompt.failed(format!("{upn} is added already"), cx));
+            return;
+        }
+        let setup = self.runner.setup.clone();
+        let signing = cx.background_spawn(async move { accounts::add(&setup, &upn) });
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let signed = signing.await;
+            let _ = this.update(cx, |running, cx| {
+                match signed.and_then(|account| running.runner.start(&account)) {
+                    Ok(started) => running.added(started, cx),
+                    Err(error) => {
+                        log::warn!("an account wasn't added");
+                        prompt.update(cx, |prompt, cx| prompt.failed(error, cx));
+                    }
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// An account added: started, shown, and the prompt that asked for it closed.
+    fn added(&mut self, started: Started, cx: &mut gpui::Context<Self>) {
+        self.add_started(started, cx);
+        if let Some(key) = self.bridges.last().map(|(key, _, _)| key.clone()) {
+            self.desktop.update(cx, |desktop, cx| {
+                desktop.switch(&key, cx);
+                desktop.show(cx);
+            });
+        }
+        if let Some(window) = self.adding.take() {
+            let _ = window.update(cx, |_, window, _| window.remove_window());
+        }
+    }
+
+    /// "Sign out and remove" of the account `key`: its engine shut down, then the account forgotten as
+    /// `teams --forget` forgets it (its store stays), then it leaves the window. The last account removed quits the
+    /// app (the next start asks for an account).
+    fn remove(&mut self, key: &str, cx: &mut gpui::Context<Self>) {
+        let Some(index) = self.bridges.iter().position(|(held, _, _)| held == key) else {
+            return;
+        };
+        let (key, upn, bridge) = self.bridges.remove(index);
+        let last = self.bridges.is_empty();
+        // its own settings go with it; the next account, when it was the first, takes the first's place
+        let next = self.bridges.first().map(|(next, _, _)| next.clone());
+        self.settings
+            .update(cx, |settings, cx| settings.forget_account(&key, next.as_deref(), cx));
+        let stopped = bridge.update(cx, Bridge::shutdown);
+        let setup = self.runner.setup.clone();
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            stopped.await;
+            let forgot = cx.background_spawn(async move { accounts::forget(&setup, &upn) }).await;
+            if let Err(error) = forgot {
+                eprintln!("teams: the account wasn't forgotten: {error}");
+                log::warn!("an account removed wasn't forgotten");
+            }
+            let _ = this.update(cx, |running, cx| {
+                if last {
+                    running.quit(cx);
+                } else {
+                    running
+                        .desktop
+                        .update(cx, |desktop, cx| desktop.remove_account(&key, cx));
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Every engine shut down, joined.
+    fn shutdown(&mut self, cx: &mut gpui::Context<Self>) -> Task<()> {
+        let stopping: Vec<Task<()>> = self
+            .bridges
+            .iter()
+            .map(|(_, _, bridge)| bridge.update(cx, Bridge::shutdown))
+            .collect();
+        cx.background_spawn(async move {
+            for stopped in stopping {
+                stopped.await;
+            }
+        })
+    }
+
+    /// The quit: every engine shut down, then the app quits; the first ask does it.
+    fn quit(&mut self, cx: &mut gpui::Context<Self>) {
+        if std::mem::replace(&mut self.quitting, true) {
+            return;
+        }
+        let stopped = self.shutdown(cx);
+        quit_after(stopped, cx);
+    }
 }
 
 /// The models and the bridge holding `engine`. The models show calls when the window has them (`calls`: its test call
@@ -243,18 +456,13 @@ pub fn watch_sign_out(
     .detach();
 }
 
-/// Once the desktop asks to quit: the engine shut down, then the app quits; the first ask does it.
-fn quit_when_asked(desktop: &Entity<Desktop>, bridge: Entity<Bridge>, cx: &mut App) {
-    let quitting = Rc::new(Cell::new(false));
-    cx.subscribe(desktop, move |_, event, cx| match event {
-        DesktopEvent::Quit => {
-            if !quitting.replace(true) {
-                let stopped = bridge.update(cx, Bridge::shutdown);
-                quit_after(stopped, cx);
-            }
-        }
-    })
-    .detach();
+/// Quits the app: every account's engine shut down first ([`Running`]'s quit), then the app; before the app was
+/// launched (the first sign-in screen), at once.
+pub fn quit(cx: &mut App) {
+    match cx.try_global::<Held>().map(|held| held.running.clone()) {
+        Some(running) => running.update(cx, Running::quit),
+        None => cx.quit(),
+    }
 }
 
 /// Quits the app once `stopped` (the engine's shutdown) has ended.

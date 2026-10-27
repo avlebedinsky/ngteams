@@ -10,6 +10,7 @@ use std::future::Future;
 use std::io;
 use std::path::PathBuf;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::Serialize;
@@ -20,6 +21,7 @@ use crate::calls::{
 };
 use crate::contacting::call::{start_evidence, start_target};
 use crate::contacting::json::strict_json;
+use crate::floor::CallFloor;
 use crate::lab::{Alias, ConfigError, LabConfig, LabLocations};
 use crate::log::{FenceLog, Verdict};
 use crate::membership::is_chat_id;
@@ -257,6 +259,9 @@ pub enum DenyReason {
     /// The personal fence: a call start on no chat, or an `add`, that isn't the test call's: the account and the echo
     /// service (`TEAMS_ECHO_BOT_MRI`) alone, the `add` of exactly that bot to the test call.
     NotTheTestCall,
+    /// A start, a join or an answer while another account of the app is in a call or one rings for it: one call at a
+    /// time across the accounts sharing a call floor ([`crate::CallFloor`]).
+    AnotherAccountInCall,
 }
 
 impl fmt::Display for DenyReason {
@@ -277,6 +282,7 @@ impl fmt::Display for DenyReason {
             Self::CallMismatch => f.write_str("the write doesn't fit the registered call"),
             Self::CalleesNotInChat => f.write_str("the chat's fresh read doesn't list every callee"),
             Self::NotTheTestCall => f.write_str("not the test call of the account and the echo service"),
+            Self::AnotherAccountInCall => f.write_str("another account of the app is in a call"),
         }
     }
 }
@@ -336,7 +342,10 @@ pub struct Fence {
     /// The serial of the next permit.
     serial: AtomicU64,
     /// The calls this fence permitted, and the links their services handed out ([`crate::calls`]).
-    calls: CallRegistry,
+    calls: Arc<CallRegistry>,
+    /// The call floor this fence shares with the other accounts of its app ([`Fence::sharing_calls`]); `None` for a
+    /// fence of its own.
+    floor: Option<CallFloor>,
     /// How it decides an operation on a call and a call delivery response.
     call_rule: CallRule,
 }
@@ -429,7 +438,8 @@ impl Fence {
             own,
             id: NEXT_FENCE.fetch_add(1, Ordering::Relaxed),
             serial: AtomicU64::new(0),
-            calls: CallRegistry::default(),
+            calls: Arc::new(CallRegistry::default()),
+            floor: None,
             call_rule,
         }
     }
@@ -438,6 +448,15 @@ impl Fence {
         let mut fence = Self::from_config(config)?;
         fence.own = config.account(alias).mri.as_deref().map(Mri::new);
         Ok(fence)
+    }
+
+    /// This fence sharing `floor` with the other accounts of its app: one call or ringing invitation at a time across
+    /// them all ([`crate::floor`]). A fence shares one floor at most; a second call replaces the first.
+    #[must_use]
+    pub fn sharing_calls(mut self, floor: &CallFloor) -> Self {
+        floor.join(self.id, &self.calls);
+        self.floor = Some(floor.clone());
+        self
     }
 
     /// A fence over any roster and any log. Tests only (`test-support`).
@@ -497,7 +516,7 @@ impl Fence {
 
     /// The account whose own availability this fence permits: the account a [`Fence::open_lab_account`] was opened
     /// for, when `lab.toml` knows its MRI, or the signed-in account of a personal fence (`Fence::open_personal`, which
-    /// opens only once `account.toml` holds its object id); `None` otherwise.
+    /// opens only once its `accounts.toml` entry holds its object id); `None` otherwise.
     #[must_use]
     pub fn own_account(&self) -> Option<&Mri> {
         self.own.as_ref()
@@ -558,8 +577,13 @@ impl Fence {
     /// [`DenyReason::CallMismatch`] when it isn't its operation's kind, from the call's caller, adding exactly its
     /// invitees and handing out only the call's own callbacks. A personal fence denies
     /// with its own reasons too: [`DenyReason::NotPersonalKind`], [`DenyReason::NotPersonalScope`],
-    /// [`DenyReason::AddsParticipants`] and [`DenyReason::NotAMember`].
+    /// [`DenyReason::AddsParticipants`] and [`DenyReason::NotAMember`]. A fence sharing a call floor
+    /// ([`Fence::sharing_calls`]) denies a start, a join or an answer while another account on it is busy with a call
+    /// as [`DenyReason::AnotherAccountInCall`], before anything else is read.
     pub async fn check(&self, target: Target, source: &dyn MembershipSource) -> Result<WritePermit, Denied> {
+        if self.another_account_in_call(&target) {
+            return self.decided(target, Verdict::Deny(DenyReason::AnotherAccountInCall));
+        }
         #[cfg(feature = "personal")]
         if self.rules == Rules::Personal {
             if matches!(target.scope(), Scope::CallOperation { .. }) {
@@ -585,6 +609,13 @@ impl Fence {
         };
         let verdict = self.judge(&target, membership);
         self.decided(target, verdict)
+    }
+
+    /// Whether `target` enters a call (a start, a join, an answer) while another account on this fence's call floor is
+    /// busy with one ([`crate::floor`]).
+    fn another_account_in_call(&self, target: &Target) -> bool {
+        matches!(target.kind(), WriteKind::Call | WriteKind::CallAnswer)
+            && self.floor.as_ref().is_some_and(|floor| floor.others_busy(self.id))
     }
 
     /// Logs `verdict` on `target` and gives the permit when it allows and was logged.
@@ -824,11 +855,19 @@ impl Fence {
             || (self.roster.is_lab_account(&invitation.callee) && self.roster.admits(&invitation.caller));
         let offered =
             self.own.as_ref() == Some(&invitation.callee) && admitted && invitation.caller != invitation.callee;
-        if offered {
-            self.calls.offer(invitation, delivery, self.is_personal())
-        } else {
-            Observed::Ignored
+        if !offered {
+            return Observed::Ignored;
         }
+        let Some(floor) = &self.floor else {
+            return self.calls.offer(invitation, delivery, self.is_personal());
+        };
+        // one at a time across the accounts on the floor: held, so two accounts can't both be offered one at once; its
+        // own account's invitations by its own rule
+        let _held = floor.hold();
+        if floor.others_busy(self.id) && !self.calls.offers(&invitation) {
+            return Observed::Ignored;
+        }
+        self.calls.offer(invitation, delivery, self.is_personal())
     }
 
     /// Forgets the pending deliveries of a connection that closed.

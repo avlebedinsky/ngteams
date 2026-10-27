@@ -22,7 +22,7 @@ use std::time::Duration;
 use futures_util::StreamExt as _;
 use futures_util::future::BoxFuture;
 use futures_util::stream::BoxStream;
-use gpui::{AppContext as _, AsyncApp, Context, WeakEntity};
+use gpui::{App, AppContext as _, AsyncApp, Context, Entity, Subscription, WeakEntity};
 use tokio::sync::mpsc::UnboundedSender;
 use zbus::Connection;
 use zbus::interface;
@@ -105,10 +105,14 @@ pub struct Tray {
     icon: Option<Arc<dyn TrayIcon>>,
     counted: HashMap<String, Counted>,
     total: Option<u64>,
+    /// The other accounts' counts, whose totals the item shows summed with this one's ([`Tray::add_account`]).
+    others: Vec<(Entity<Tray>, Subscription)>,
+    /// The total the item was last shown (this account's and the others').
+    shown: Option<u64>,
     /// A count is under way, and whether the models changed since it began.
     counting: bool,
     again: bool,
-    _observing: gpui::Subscription,
+    _observing: Subscription,
 }
 
 impl Tray {
@@ -123,6 +127,8 @@ impl Tray {
             icon: None,
             counted: HashMap::new(),
             total: None,
+            others: Vec::new(),
+            shown: None,
             counting: false,
             again: false,
             _observing: observing,
@@ -133,10 +139,52 @@ impl Tray {
 
     /// The item from now on; it is shown the total at once.
     pub fn set_icon(&mut self, icon: Arc<dyn TrayIcon>, cx: &mut Context<Self>) {
-        if let Some(total) = self.total {
+        if let Some(total) = self.combined(cx) {
             cx.background_spawn(icon.set_unread(total)).detach();
         }
         self.icon = Some(icon);
+    }
+
+    /// Another account's count (an app of several accounts): the item shows the totals summed, counted again whenever
+    /// that one's changes.
+    pub fn add_account(&mut self, other: Entity<Tray>, cx: &mut Context<Self>) {
+        let observing = cx.observe(&other, |this: &mut Self, _, cx| this.show(cx));
+        self.others.push((other, observing));
+        self.show(cx);
+    }
+
+    /// Takes another account's count out of the sum.
+    pub fn remove_account(&mut self, other: &Entity<Tray>, cx: &mut Context<Self>) {
+        self.others.retain(|(tray, _)| tray != other);
+        self.show(cx);
+    }
+
+    /// The total the item shows: this account's and the others', once this one was counted.
+    #[must_use]
+    pub fn combined(&self, cx: &App) -> Option<u64> {
+        let others: u64 = self.others.iter().filter_map(|(other, _)| other.read(cx).total()).sum();
+        self.total.map(|total| total + others)
+    }
+
+    /// Shows the item the combined total when it changed.
+    fn show(&mut self, cx: &mut Context<Self>) {
+        let combined = self.combined(cx);
+        if combined == self.shown {
+            return;
+        }
+        self.shown = combined;
+        if let Some(total) = combined {
+            self.trace.record(&TraceLine::new("tray", "unread").unread([total]));
+            if let Some(icon) = &self.icon {
+                cx.background_spawn(icon.set_unread(total)).detach();
+            }
+        }
+    }
+
+    /// Takes the item away (another account's count shows it from now on).
+    pub fn take_icon(&mut self) -> Option<Arc<dyn TrayIcon>> {
+        self.shown = None;
+        self.icon.take()
     }
 
     /// Whether an item was given.
@@ -167,10 +215,7 @@ impl Tray {
         let total = self.counted.values().map(|counted| counted.unread).sum();
         if self.total != Some(total) {
             self.total = Some(total);
-            self.trace.record(&TraceLine::new("tray", "unread").unread([total]));
-            if let Some(icon) = &self.icon {
-                cx.background_spawn(icon.set_unread(total)).detach();
-            }
+            self.show(cx);
             cx.notify();
         }
         if std::mem::take(&mut self.again) {

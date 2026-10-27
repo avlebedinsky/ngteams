@@ -44,6 +44,9 @@ pub struct SettingsView {
     model: Entity<SettingsModel>,
     /// The build has the video codec: its switch is shown.
     video_switch: bool,
+    /// The account whose own settings (its manual status) the view shows ([`SettingsView::for_account`]); `None`: the
+    /// first account's.
+    account: Option<String>,
     _observing: Subscription,
 }
 
@@ -54,8 +57,16 @@ impl SettingsView {
         Self {
             model,
             video_switch,
+            account: None,
             _observing: observing,
         }
+    }
+
+    /// The view showing `account`'s own settings (its MRI): an app of several accounts has a view per account.
+    #[must_use]
+    pub fn for_account(mut self, account: String) -> Self {
+        self.account = Some(account);
+        self
     }
 
     /// A change of the settings, as a control's handler makes it.
@@ -166,13 +177,19 @@ impl SettingsView {
     }
 
     fn status(&self, settings: &Settings) -> impl IntoElement {
+        let account = self
+            .account
+            .clone()
+            .or_else(|| settings.first_account.clone())
+            .unwrap_or_default();
         let radios = ManualStatus::ALL.map(|status| {
+            let chosen = account.clone();
             self.radio(
                 "status",
                 status.key(),
                 status.label().into(),
-                settings.manual_status == status,
-                move |settings| settings.manual_status = status,
+                settings.manual_status_of(&account) == status,
+                move |settings| settings.set_manual_status(&chosen, status),
             )
         });
         section("Status").child(div().flex().flex_col().gap_1().children(radios))

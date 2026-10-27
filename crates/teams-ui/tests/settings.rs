@@ -12,8 +12,8 @@ use std::path::{Path, PathBuf};
 use gpui::{AppContext as _, TestAppContext};
 use teams_media::devices::catalog::{DeviceDirectory as _, DeviceInfo, DeviceKind, DeviceList, FixedDirectory};
 use teams_ui::settings::{
-    DEFAULT_IDLE_MINUTES, DIR_MODE, FILE_MODE, FirstRunState, LogLevel, ManualStatus, Notifications, Problem, Settings,
-    SettingsFile, SettingsModel, attach_devices, parse, render,
+    AccountSettings, DEFAULT_IDLE_MINUTES, DIR_MODE, FILE_MODE, FirstRunState, LogLevel, ManualStatus, Notifications,
+    Problem, Settings, SettingsFile, SettingsModel, attach_devices, parse, render,
 };
 
 const CHAT: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces";
@@ -43,6 +43,15 @@ fn changed() -> Settings {
         microphone: Some("alsa_input.usb-headset".to_owned()),
         speaker: None,
         camera: Some("v4l2_camera".to_owned()),
+        accounts: [(
+            "8:orgid:00000000-0000-4000-8000-00000000000b".to_owned(),
+            AccountSettings {
+                selected_chat: Some(CHAT.to_owned()),
+                manual_status: ManualStatus::Busy,
+            },
+        )]
+        .into(),
+        first_account: None,
     }
 }
 
@@ -500,4 +509,84 @@ fn attached_devices_take_each_choice_at_once_and_on_every_change_and_their_list_
         model.read_with(cx, |model, _| model.devices().map(|list| list.all().len())),
         Some(2)
     );
+}
+
+#[test]
+fn each_account_keeps_its_own_chat_and_status_and_the_first_one_the_top_level_ones() {
+    const FIRST: &str = "8:orgid:00000000-0000-4000-8000-00000000000a";
+    const OTHER: &str = "8:orgid:00000000-0000-4000-8000-00000000000b";
+    // a file of one account: its values are the first account's
+    let (mut settings, problems) = parse("selected_chat = \"19:first@thread.v2\"\nmanual_status = \"busy\"\n").unwrap();
+    assert_eq!(problems, []);
+    settings.make_first(FIRST);
+    assert_eq!(settings.selected_chat_of(FIRST), Some("19:first@thread.v2"));
+    assert_eq!(settings.manual_status_of(FIRST), ManualStatus::Busy);
+    assert_eq!(settings.selected_chat_of(OTHER), None);
+    assert_eq!(settings.manual_status_of(OTHER), ManualStatus::default());
+    settings.set_selected_chat(OTHER, Some("19:other@thread.v2".to_owned()));
+    settings.set_manual_status(OTHER, ManualStatus::DoNotDisturb);
+    assert_eq!(settings.selected_chat, Some("19:first@thread.v2".to_owned()));
+
+    // written and read back: the other account's under its MRI
+    let text = render(&settings);
+    let (mut read, problems) = parse(&text).unwrap();
+    assert_eq!(problems, []);
+    assert_eq!(read, settings);
+    read.make_first(FIRST);
+    assert_eq!(read, settings);
+    assert_eq!(read.selected_chat_of(OTHER), Some("19:other@thread.v2"));
+    assert_eq!(read.manual_status_of(OTHER), ManualStatus::DoNotDisturb);
+}
+
+#[test]
+fn another_account_made_first_trades_places_with_the_first() {
+    const FIRST: &str = "8:orgid:00000000-0000-4000-8000-00000000000a";
+    const OTHER: &str = "8:orgid:00000000-0000-4000-8000-00000000000b";
+    let (mut read, problems) = parse(
+        "selected_chat = \"19:first@thread.v2\"\nmanual_status = \"busy\"\n\
+         first_account = \"8:orgid:00000000-0000-4000-8000-00000000000a\"\n\
+         [accounts.\"8:orgid:00000000-0000-4000-8000-00000000000b\"]\nselected_chat = \"19:other@thread.v2\"\n",
+    )
+    .unwrap();
+    assert_eq!(problems, []);
+    assert_eq!(read.first_account.as_deref(), Some(FIRST));
+    read.make_first(OTHER);
+    assert_eq!(read.first_account.as_deref(), Some(OTHER));
+    assert_eq!(read.selected_chat, Some("19:other@thread.v2".to_owned()));
+    assert_eq!(read.selected_chat_of(FIRST), Some("19:first@thread.v2"));
+    assert_eq!(read.manual_status_of(FIRST), ManualStatus::Busy);
+}
+
+#[test]
+fn an_account_s_table_that_is_bad_is_reported_and_left_out() {
+    let (bad, problems) = parse("[accounts.\"8:orgid:x\"]\nmanual_status = \"sleeping\"\n").unwrap();
+    assert!(bad.accounts.is_empty());
+    assert_eq!(problems.len(), 1);
+}
+
+#[test]
+fn an_account_removed_leaves_nothing_of_its_own_and_the_next_takes_the_first_s_place() {
+    const FIRST: &str = "8:orgid:00000000-0000-4000-8000-00000000000a";
+    const OTHER: &str = "8:orgid:00000000-0000-4000-8000-00000000000b";
+    let mut settings = Settings::default();
+    settings.make_first(FIRST);
+    settings.set_selected_chat(FIRST, Some("19:first@thread.v2".to_owned()));
+    settings.set_manual_status(FIRST, ManualStatus::Busy);
+    settings.set_selected_chat(OTHER, Some("19:other@thread.v2".to_owned()));
+    settings.set_manual_status(OTHER, ManualStatus::DoNotDisturb);
+    // the other one removed: its table goes
+    let mut removed = settings.clone();
+    removed.forget_account(OTHER, None);
+    assert!(removed.accounts.is_empty());
+    assert_eq!(removed.selected_chat_of(FIRST), Some("19:first@thread.v2"));
+    // the first one removed: the other takes the top level, and nothing of the first stays
+    settings.forget_account(FIRST, Some(OTHER));
+    assert_eq!(settings.first_account.as_deref(), Some(OTHER));
+    assert_eq!(settings.selected_chat.as_deref(), Some("19:other@thread.v2"));
+    assert_eq!(settings.manual_status, ManualStatus::DoNotDisturb);
+    assert!(settings.accounts.is_empty());
+    // the last one removed: the top level back to its defaults
+    settings.forget_account(OTHER, None);
+    assert_eq!((settings.selected_chat, settings.first_account), (None, None));
+    assert_eq!(settings.manual_status, ManualStatus::default());
 }

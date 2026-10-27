@@ -55,6 +55,7 @@
 //! M2 Tasks 6–17 and 20 (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
 
 pub mod account_prompt;
+pub mod accounts;
 pub mod bridge;
 pub mod bus;
 pub mod call_alert;
@@ -91,6 +92,7 @@ pub mod view;
 pub mod window;
 
 pub use account_prompt::{AccountPrompt, AccountPromptEvent};
+pub use accounts::{AccountParts, AccountTile, Accounts, AccountsEvent};
 pub use bridge::{Bridge, Core, EventSource, StoppedCore};
 pub use call_alert::{CallAlert, CallAlertEvent};
 pub use call_view::CallBar;

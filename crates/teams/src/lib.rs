@@ -1,28 +1,35 @@
-//! `teams`: the personal build, the user's own Teams account on the user's desktop (`docs/personal-build.md`, approved
+//! `teams`: the personal build, the user's own Teams accounts (one or several, all running at once) on the user's desktop (`docs/personal-build.md`, approved
 //! by the user on 2026-10-23; M2 Task 27 of `docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
 //!
 //! - [`refusal`]: what both binaries refuse before anything else, the window included: a build with `test-support`
 //!   (any `cargo test`, `--all-targets` or `--all-features` build), and a build `scripts/install-personal.sh` didn't
 //!   make (its install marker, read at compile time). Agents never produce a runnable personal binary.
-//! - [`setup`]: its files (`~/.config/teams/account.toml`, `~/.local/share/teams/`), kept apart from the lab's: a data
-//!   dir overlapping the lab's and an account `lab.toml` names are refused.
-//! - [`signin`]: the sign-in through `teams-signin-personal` (the window bound to Entra's and the identity provider's
-//!   hosts), the code redeemed only for the account `account.toml` names (its object id and tenant once known), the
-//!   refresh token stored under [`KEYRING_APPLICATION`] on the desktop's Secret Service, the region from authz.
-//! - [`engine`]: the account's engine (`teams_core::account`) under the personal fence (`Fence::open_personal`) and its
-//!   own membership source, the account's own store at `~/.local/share/teams/store/<oid>.sqlite`.
+//! - [`setup`]: its files (`~/.config/teams/accounts.toml`, the user's accounts in the order added;
+//!   `~/.local/share/teams/`), kept apart from the lab's: a data dir overlapping the lab's and an account `lab.toml`
+//!   names are refused. A single account's `account.toml` of an earlier build is moved into them.
+//! - [`signin`]: one account's sign-in through `teams-signin-personal --account <UPN>` (the window bound to Entra's
+//!   hosts and that account's identity provider hosts), the code redeemed only for that account (its object id and
+//!   tenant once known), the refresh token stored under its UPN and [`KEYRING_APPLICATION`] on the desktop's Secret
+//!   Service, its region from authz (`regions/<oid>.json`).
+//! - [`engine`]: an account's engine (`teams_core::account`) under its personal fence (`Fence::open_personal`) and its
+//!   own membership source, the account's own store at `~/.local/share/teams/store/<oid>.sqlite`; one per account.
 //! - [`calling`]: the calls (`docs/personal-build.md`, "Calls"; M3 Task 22): the engine's calling on the desktop's
 //!   PipeWire and camera portal, the window's ringtone, test call, video and devices, under the personal fence's call
 //!   rule.
-//! - [`app`]: the window (`teams-ui`'s shell with the first run's screen of the writes that happen on their own, and
-//!   the calls), the tray, and the sign-out: a session that can't renew its tokens shows "signed out", stops the
+//! - [`accounts`]: the accounts the app runs at once ([`accounts::Runner`]: each one's engine over its own fence on the
+//!   app's call floor, its calls on the app's one set of devices), and the sign-in and forget the window runs to add
+//!   and remove one.
+//! - [`app`]: the window (`teams-ui`'s desktop with a shell per account, switched from the rail's avatars, the first
+//!   run's screen of the writes that happen on their own, and the calls), the tray, adding and removing an account,
+//!   and the sign-out: a session that can't renew its tokens shows "signed out", stops the
 //!   engine (nothing more is sent) and opens the sign-in window again; a sign-in that goes through starts the app
 //!   afresh.
 //! - [`cli`]: `teams [--account <UPN>]` (without it, a window asks for the account before the first sign-in),
-//!   `teams --forget` ([`forget`]: refused while the account's engine runs).
+//!   `teams --forget <UPN>` ([`forget`]: one account, refused while its engine runs).
 //!
 //! No broker and no sandbox: it is the user's own app. It never opens the lab's fence, data dir or keyring items.
 
+pub mod accounts;
 pub mod app;
 pub mod calling;
 pub mod cli;

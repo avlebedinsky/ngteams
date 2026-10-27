@@ -1,22 +1,27 @@
-//! The personal build's sign-in (`docs/personal-build.md`, "Its sign-in" and "The binary and its data"):
+//! The personal build's sign-in of one of its accounts (`docs/personal-build.md`, "Its sign-in" and "The binary and its
+//! data"):
 //!
-//! 1. the authorize request for the account `account.toml` names (its UPN as `login_hint`; once known, its object id
+//! 1. the authorize request for the account `accounts.toml` holds (its UPN as `login_hint`; once known, its object id
 //!    and tenant required of the ID token), the native client `1fec8e78-…` with the `nativeclient` redirect, never
 //!    another client id or a borrowed device claim;
-//! 2. the sign-in window, `teams-signin-personal` beside this binary ([`window_command`]), which answers the redirect
+//! 2. the sign-in window, `teams-signin-personal --account <UPN>` beside this binary ([`window_command`]; its arguments
+//!    read by [`window_account`]), bound to that account's identity provider hosts, which answers the redirect
 //!    (`teams_auth::signin`);
 //! 3. the code redeemed only for that account: the refresh token stored under the account's UPN in the store handed in
 //!    (the desktop's Secret Service under [`crate::KEYRING_APPLICATION`]); a sign-in that lands in another account or
-//!    tenant stores nothing; a lab account (by its MRI, now known) has its token deleted again and is refused;
-//! 4. `account.toml` given the object id, tenant and display name the ID token named, and the region from authz saved
-//!    (`region.json`, `0600`, never a token).
+//!    tenant stores nothing; a lab account (by its MRI, now known), or an account another entry of `accounts.toml`
+//!    already is (by its object id), has its token deleted again and is refused;
+//! 4. the account's entry in `accounts.toml` given the object id, tenant and display name the ID token named (the other
+//!    accounts kept as they are), and the region from authz saved (`regions/<oid>.json`, `0600` in a `0700`
+//!    directory, never a token).
 //!
 //! An `AADSTS` refusal (Conditional Access, a device requirement, a multi-factor registration) comes back as the
 //! window's or Entra's error and stores nothing.
 
-use std::fs;
+use std::ffi::OsString;
+use std::fs::{self, DirBuilder};
 use std::io::{self, Write as _};
-use std::os::unix::fs::OpenOptionsExt as _;
+use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -77,13 +82,26 @@ impl SignInClients {
     }
 }
 
-/// The sign-in window's command: [`WINDOW_BINARY`] beside the running executable.
+/// The sign-in window's command for `account`: [`WINDOW_BINARY`] beside the running executable, `--account <UPN>`.
 ///
 /// # Errors
 /// [`SignInError::NoWindow`] when the running executable can't be found.
-pub fn window_command() -> Result<Command, SignInError> {
+pub fn window_command(account: &PersonalAccount) -> Result<Command, SignInError> {
     let exe = std::env::current_exe().map_err(SignInError::NoWindow)?;
-    Ok(Command::new(exe.with_file_name(WINDOW_BINARY)))
+    let mut command = Command::new(exe.with_file_name(WINDOW_BINARY));
+    command.arg("--account").arg(&account.upn);
+    Ok(command)
+}
+
+/// The UPN the sign-in window's arguments (`args`, its own name left out) give: exactly `--account <UPN>`, as
+/// [`window_command`] passes it; `None` for anything else (the window's usage error).
+#[must_use]
+pub fn window_account(args: impl IntoIterator<Item = OsString>) -> Option<String> {
+    let mut args = args.into_iter();
+    let (Some(flag), Some(upn), None) = (args.next(), args.next(), args.next()) else {
+        return None;
+    };
+    (flag == "--account").then(|| upn.into_string().ok()).flatten()
 }
 
 /// Whether `account` can start without a sign-in: a sign-in named its object id, its region is saved, and a refresh
@@ -92,7 +110,7 @@ pub fn window_command() -> Result<Command, SignInError> {
 /// # Errors
 /// When the store can't be read.
 pub async fn ready<S: SecretStore>(setup: &Setup, account: &PersonalAccount, store: &S) -> Result<bool, SignInError> {
-    if !account.is_signed_in() || !setup.paths.region_file().is_file() {
+    if !account.is_signed_in() || !setup.paths.region_file(account).is_some_and(|region| region.is_file()) {
         return Ok(false);
     }
     Ok(store.get(&refresh_token_key(&account.upn)).await?.is_some())
@@ -103,7 +121,8 @@ pub async fn ready<S: SecretStore>(setup: &Setup, account: &PersonalAccount, sto
 ///
 /// # Errors
 /// [`SignInError`]: the window gave no code for this request, Entra refused or the ID token named another account or
-/// tenant (nothing stored then), a lab account (its token deleted again), authz refused, or a file couldn't be written.
+/// tenant (nothing stored then), a lab account or one another entry already is (its token deleted again), authz refused,
+/// or a file couldn't be written.
 pub async fn sign_in<S: SecretStore>(
     setup: &Setup,
     account: &PersonalAccount,
@@ -122,16 +141,19 @@ pub async fn sign_in<S: SecretStore>(
         &signed.account.tenant,
         signed.account.display_name.as_deref(),
     )?;
-    if let Err(error) = named.check_not_lab(&setup.lab) {
-        // a lab account is never driven by the personal fence: what was just stored goes again
+    // a lab account is never driven by the personal fence, and an account another entry already is (by its object id)
+    // isn't added twice: what was just stored goes again
+    let saved = named.check_not_lab(&setup.lab).and_then(|()| {
+        setup.paths.make_dirs().map_err(|source| PersonalError::Write {
+            path: setup.paths.data_dir().to_path_buf(),
+            source,
+        })?;
+        named.save(&setup.paths)
+    });
+    if let Err(error) = saved {
         store.delete(&refresh_token_key(&account.upn)).await?;
         return Err(error.into());
     }
-    setup.paths.make_dirs().map_err(|source| PersonalError::Write {
-        path: setup.paths.data_dir().to_path_buf(),
-        source,
-    })?;
-    named.save(&setup.paths)?;
     let spaces = clients.token.refresh(store, &account.upn, &Scope::spaces()).await?;
     let skypetoken = clients
         .authz
@@ -143,11 +165,12 @@ pub async fn sign_in<S: SecretStore>(
             AuthzKind::ExplicitLogin,
         )
         .await?;
-    save_region(&setup.paths.region_file(), &skypetoken.region)?;
+    let region = setup.paths.region_file(&named).ok_or(PersonalError::NoAccount)?;
+    save_region(&region, &skypetoken.region)?;
     Ok(named)
 }
 
-/// Writes `region` (its GTMs, never a token) to `path`, `0600`, through a new file renamed over it.
+/// Writes `region` (its GTMs, never a token) to `path`, `0600` in a `0700` directory, through a new file renamed over it.
 fn save_region(path: &Path, region: &Region) -> Result<(), SignInError> {
     let failed = |source| SignInError::Region {
         path: path.to_path_buf(),
@@ -158,6 +181,9 @@ fn save_region(path: &Path, region: &Region) -> Result<(), SignInError> {
     staging.push(format!(".{}.new", std::process::id()));
     let staging = PathBuf::from(staging);
     let written = (|| {
+        if let Some(dir) = path.parent() {
+            DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
+        }
         let mut file = fs::OpenOptions::new()
             .write(true)
             .create(true)

@@ -5,6 +5,8 @@ use gpui::{
     size,
 };
 
+use crate::accounts::Accounts;
+use crate::own_presence::OwnPresence;
 use crate::shell::{Shell, ShellParts};
 use crate::view::Root;
 use crate::{shell, theme};
@@ -55,6 +57,60 @@ pub fn open(cx: &mut App, app_id: &str, title: SharedString, parts: ShellParts) 
         let trace = std::sync::Arc::clone(&parts.trace);
         let shell = cx.new(|cx| Shell::new(parts, window, cx));
         let view = cx.new(|cx| Root::new(models, trace, cx).with_shell(shell).following(following));
+        cx.new(|cx| KitRoot::new(view, window, cx))
+    })
+}
+
+/// Opens the main window of an app of several accounts: [`open`]'s, with a shell for the first account (`first`) and
+/// for each of the others (`rest`), each with its own presence, the one `accounts` shows in front, every shell's rail
+/// showing the accounts.
+///
+/// # Errors
+/// The platform can't open a window.
+pub fn open_accounts(
+    cx: &mut App,
+    app_id: &str,
+    title: SharedString,
+    first: (ShellParts, Entity<OwnPresence>),
+    rest: Vec<(ShellParts, Entity<OwnPresence>)>,
+    accounts: &Entity<Accounts>,
+) -> gpui::Result<WindowHandle<KitRoot>> {
+    let bounds = Bounds::centered(None, size(px(DEFAULT_SIZE.0), px(DEFAULT_SIZE.1)), cx);
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        titlebar: Some(TitlebarOptions {
+            title: Some(title),
+            ..TitlebarOptions::default()
+        }),
+        app_id: Some(app_id.to_owned()),
+        ..WindowOptions::default()
+    };
+    init(cx);
+    cx.open_window(options, |window, cx| {
+        let following = theme::follow(window, cx);
+        let mut shell_of = |(parts, own): (ShellParts, Entity<OwnPresence>), cx: &mut App| {
+            let shell = cx.new(|cx| Shell::new(parts, window, cx));
+            shell.update(cx, |shell, cx| {
+                shell.set_own_presence(own, cx);
+                shell.set_accounts(accounts.clone(), cx);
+            });
+            shell
+        };
+        let (models, trace) = (first.0.models.clone(), std::sync::Arc::clone(&first.0.trace));
+        let first = shell_of(first, cx);
+        let rest: Vec<Entity<Shell>> = rest.into_iter().map(|parts| shell_of(parts, cx)).collect();
+        // each shell took the keyboard as it was made: the one shown takes it back
+        first.update(cx, |shell, cx| shell.take_focus(window, cx));
+        let view = cx.new(|cx| {
+            let mut root = Root::new(models, trace, cx)
+                .with_shell(first)
+                .following(following)
+                .with_accounts(accounts.clone(), window, cx);
+            for shell in rest {
+                root.add_shell(shell, cx);
+            }
+            root
+        });
         cx.new(|cx| KitRoot::new(view, window, cx))
     })
 }

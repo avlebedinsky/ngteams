@@ -47,8 +47,10 @@ fn signed_in_setup(dir: &tempfile::TempDir) -> (Setup, PersonalAccount) {
     .unwrap();
     account.save(&setup.paths).unwrap();
     setup.paths.make_dirs().unwrap();
+    let region = setup.paths.region_file(&account).unwrap();
+    fs::create_dir_all(region.parent().unwrap()).unwrap();
     fs::write(
-        setup.paths.region_file(),
+        region,
         format!(r#"{{"region": "amer", "partition": null, "regionGtms": {{"chatServiceAfd": "{CHAT_BASE}"}}}}"#),
     )
     .unwrap();
@@ -72,7 +74,7 @@ fn settle(cx: &TestAppContext, mut done: impl FnMut(&TestAppContext) -> bool) {
 fn signed_out_shows_it_stops_the_engine_and_opens_the_sign_in_window_again() {
     let dir = tempfile::tempdir().unwrap();
     let (setup, account) = signed_in_setup(&dir);
-    let fence = Arc::new(Fence::open_personal_with(&setup.paths, &setup.lab).unwrap());
+    let fence = Arc::new(Fence::open_personal_with(&setup.paths, &account.upn, &setup.lab).unwrap());
     let engine = teams::engine::start(&setup.paths, &account, fence, MemorySecretStore::new(), false, None).unwrap();
     let core = engine.handle.requests();
     let cx = TestAppContext::single();
@@ -110,7 +112,7 @@ fn signed_out_shows_it_stops_the_engine_and_opens_the_sign_in_window_again() {
 fn shown_after_a_ring(calls: Option<&PersonalCalls>) -> (bool, bool, bool, bool, bool) {
     let dir = tempfile::tempdir().unwrap();
     let (setup, account) = signed_in_setup(&dir);
-    let fence = Arc::new(Fence::open_personal_with(&setup.paths, &setup.lab).unwrap());
+    let fence = Arc::new(Fence::open_personal_with(&setup.paths, &account.upn, &setup.lab).unwrap());
     // the engine without calling: the models' side alone is under test here (tests/calls.rs runs the calls)
     let engine = teams::engine::start(&setup.paths, &account, fence, MemorySecretStore::new(), false, None).unwrap();
     let cx = TestAppContext::single();
@@ -178,7 +180,7 @@ fn a_test_build_s_devices_are_the_sandbox_s_and_its_engine_without_them_places_n
     let dir = tempfile::tempdir().unwrap();
     let (setup, account) = signed_in_setup(&dir);
     assert!(teams::calling::open(&setup.paths).is_err() || std::env::var_os("UI_SANDBOX_DIR").is_some());
-    let fence = Arc::new(Fence::open_personal_with(&setup.paths, &setup.lab).unwrap());
+    let fence = Arc::new(Fence::open_personal_with(&setup.paths, &account.upn, &setup.lab).unwrap());
     let engine = teams::engine::start(&setup.paths, &account, fence, MemorySecretStore::new(), false, None).unwrap();
     let refused = engine
         .handle

@@ -469,6 +469,15 @@ impl CallRegistry {
         self.inner.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// Whether the account holds the call floor ([`crate::CallFloor`]): a registered call that is live, or an
+    /// invitation it offered answered and not left or still ringing (`offer::Offer::holds_floor`: one never attached
+    /// for a ring's length at most; one the call machine lets go is retired by [`CallRegistry::let_go`]). So two
+    /// accounts never ring at once: the second invitation isn't offered while the first rings.
+    pub(crate) fn holds_floor(&self) -> bool {
+        let inner = self.lock();
+        inner.calls.iter().any(|call| call.state == State::Live) || inner.offers.iter().any(offer::Offer::holds_floor)
+    }
+
     /// A pending call from a call start permit (its `serial`, never taken before) and the start's evidence; `None`
     /// when the permit was taken already.
     pub(crate) fn pend(&self, fence: u64, serial: u64, target: &Target, start: &StartEvidence) -> Option<PendingStart> {
@@ -610,6 +619,14 @@ impl CallRegistry {
         offer.expect_receipt(delivery);
         inner.offers.push(offer);
         Observed::Offered
+    }
+
+    /// Whether `invitation` was offered already and its ring hasn't ended: another delivery of it is still taken.
+    pub(crate) fn offers(&self, invitation: &Invitation) -> bool {
+        self.lock()
+            .offers
+            .iter()
+            .any(|offer| offer.is_redelivery(invitation) && offer.state != offer::OfferState::Ended)
     }
 
     /// What `delivery` does (see the module docs).

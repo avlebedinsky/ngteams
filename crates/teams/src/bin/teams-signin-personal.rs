@@ -1,7 +1,8 @@
 //! `teams-signin-personal`: the personal build's sign-in window (`docs/personal-build.md`, Choice C), `teams-signin`'s
-//! window bound to Entra's sign-in hosts and the identity provider's hosts `account.toml` names, through its host gate.
-//! `teams` starts it from beside itself with the request as one line on stdin; the answer goes as one line on stdout,
-//! nothing else there. Its refusals come first (after stdout is taken for the answer), before the request is read and
+//! window bound to Entra's sign-in hosts and the identity provider's hosts `accounts.toml` names for the account it signs
+//! in, through its host gate. `teams` starts it from beside itself as `teams-signin-personal --account <UPN>` (an
+//! account `accounts.toml` holds; any other arguments, or an account it doesn't hold, are refused) with the request as
+//! one line on stdin; the answer goes as one line on stdout, nothing else there. Its refusals come first (after stdout is taken for the answer), before the request is read and
 //! before any window: a `test-support` build and one `scripts/install-personal.sh` didn't make. Its decisions go to the
 //! personal `fence.log`.
 
@@ -10,6 +11,7 @@ use std::process::ExitCode;
 use std::sync::Arc;
 
 use teams::setup::Setup;
+use teams::signin;
 use teams_auth::signin::{WindowAnswer, WindowRequest, read_line};
 use teams_fence::FenceLog;
 use teams_fence::personal::PersonalAccount;
@@ -49,15 +51,14 @@ fn prepare() -> Result<WindowConfig, String> {
     if let Some(refusal) = teams::refusal() {
         return Err(refusal.into());
     }
-    if std::env::args_os().len() > 1 {
-        return Err("usage: teams-signin-personal (the request on stdin, the answer on stdout)".into());
-    }
+    let upn = signin::window_account(std::env::args_os().skip(1))
+        .ok_or("usage: teams-signin-personal --account <UPN> (the request on stdin, the answer on stdout)")?;
     let setup = Setup::from_env().map_err(|error| error.to_string())?;
-    let idp_hosts = PersonalAccount::load(&setup.paths)
+    let account = PersonalAccount::find(&setup.paths, &upn)
         .map_err(|error| error.to_string())?
-        .map(|account| account.idp_hosts)
-        .unwrap_or_default();
-    let hosts = SignInHosts::entra_with(&idp_hosts).map_err(|error| error.to_string())?;
+        .ok_or_else(|| format!("{upn} isn't one of the accounts (accounts.toml): add it in Teams first"))?;
+    account.check_not_lab(&setup.lab).map_err(|error| error.to_string())?;
+    let hosts = SignInHosts::entra_with(&account.idp_hosts).map_err(|error| error.to_string())?;
     let line = read_line(io::stdin().lock())
         .map_err(|error| format!("the request can't be read: {error}"))?
         .ok_or("no request on stdin")?;

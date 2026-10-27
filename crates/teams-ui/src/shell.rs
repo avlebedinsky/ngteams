@@ -12,7 +12,8 @@
 //! input and every keystroke in its window (the ones a key binding takes included) tell the own presence the window is
 //! used.
 //!
-//! The keyboard: Ctrl+K opens the [`Switcher`] over the panes (and closes it again); a chat chosen there or clicked in
+//! The keyboard: Ctrl+Alt+Down and Ctrl+Alt+Up show the app's next and previous account ([`crate::accounts`]); Ctrl+K
+//! opens the [`Switcher`] over the panes (and closes it again); a chat chosen there or clicked in
 //! the list opens in the conversation pane and is kept as the selected chat in the settings, so the app opens it again
 //! at its next start; a channel chosen there opens read-only, and a "Set status: …" command chosen there sets the
 //! account's status as the account menu does. Ctrl+Shift+F opens the [`Search`] of the stored messages the same way (one of the two at a
@@ -39,10 +40,12 @@ use gpui::{
     prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::{Icon, ResizableState, h_resizable, resizable_panel};
+use gpui_component::tooltip::Tooltip;
+use gpui_component::{Icon, ResizableState, Size, h_resizable, resizable_panel};
 use teams_core::{Availability, Reporting};
 use teams_proto::ManualAvailability;
 
+use crate::accounts::{AccountTile, Accounts};
 use crate::bridge::Core;
 use crate::call_view::CallBar;
 use crate::calls::{self, Ask};
@@ -50,8 +53,9 @@ use crate::channel_view::ChannelView;
 use crate::chat_list::{ChatList, ChatListEvent};
 use crate::chat_view::{self, ChatView};
 use crate::first_run::FirstRun;
-use crate::models::Models;
+use crate::models::{Account, Models};
 use crate::own_presence::{self, OwnPresence};
+use crate::people;
 use crate::presence;
 use crate::search::{HitTarget, Search, SearchEvent};
 use crate::settings::{ManualStatus, SettingsModel};
@@ -61,8 +65,9 @@ use crate::switcher::{CallCommand, Switcher, SwitcherEvent};
 use crate::teams_list::{ChannelChosen, TeamsList, TeamsListEvent};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
+use crate::view::status_text;
 
-actions!(teams_ui, [ToggleSwitcher, ToggleSearch]);
+actions!(teams_ui, [ToggleSwitcher, ToggleSearch, NextAccount, PreviousAccount]);
 actions!(
     teams_ui,
     [
@@ -84,6 +89,10 @@ pub const LIST_WIDTH: f32 = 320.0;
 pub const LIST_MIN: f32 = 220.0;
 /// The widest the list pane gets, px.
 pub const LIST_MAX: f32 = 560.0;
+/// An account's avatar on the rail, px.
+const ACCOUNT_AVATAR: f32 = 36.0;
+/// An account's unread badge's colour, 0xRRGGBB (Teams' red).
+const UNREAD_BADGE: u32 = 0x00c4_314b;
 /// The rail's width, px.
 pub const RAIL_WIDTH: f32 = 76.0;
 /// A rail item's height, px.
@@ -124,6 +133,8 @@ pub fn init(cx: &mut App) {
     cx.bind_keys([
         KeyBinding::new("ctrl-k", ToggleSwitcher, None),
         KeyBinding::new("ctrl-shift-f", ToggleSearch, None),
+        KeyBinding::new("ctrl-alt-down", NextAccount, None),
+        KeyBinding::new("ctrl-alt-up", PreviousAccount, None),
         KeyBinding::new("ctrl-shift-c", CallChat, None),
         KeyBinding::new("ctrl-shift-j", JoinCall, None),
         KeyBinding::new("ctrl-shift-s", AnswerCall, None),
@@ -191,6 +202,8 @@ pub struct Shell {
     call_bar: Entity<CallBar>,
     /// The chat whose call button was last traced, and which it showed.
     call_button_traced: Option<(String, &'static str)>,
+    /// The app's accounts, once the desktop handed them in ([`Shell::set_accounts`]): the rail shows their avatars.
+    accounts: Option<(Entity<Accounts>, Subscription)>,
     _subscriptions: [Subscription; 8],
 }
 
@@ -213,7 +226,11 @@ impl Shell {
             settings,
             trace,
         } = parts;
-        let selected = settings.read(cx).settings().selected_chat.clone();
+        let selected = settings
+            .read(cx)
+            .settings()
+            .selected_chat_of(core.me())
+            .map(str::to_owned);
         let list_trace = Arc::clone(&trace);
         let (list_core, list_models) = (Arc::clone(&core), models.clone());
         let list = cx.new(|cx| ChatList::new(list_core, list_models, list_trace, selected.clone(), cx));
@@ -226,7 +243,8 @@ impl Shell {
             let (list, teams, models, trace) = sidebar_parts;
             Sidebar::new(list, teams, models, trace, cx)
         });
-        let settings_view = cx.new(|cx| SettingsView::new(settings.clone(), cx));
+        let account = core.me().to_owned();
+        let settings_view = cx.new(|cx| SettingsView::new(settings.clone(), cx).for_account(account));
         let first_run = cx.new(|cx| FirstRun::new(settings.clone(), cx));
         // the first run's screen comes and goes with the settings
         let settled = cx.observe(&settings, |_: &mut Self, _, cx| cx.notify());
@@ -271,6 +289,7 @@ impl Shell {
             header_traced: None,
             call_bar,
             call_button_traced: None,
+            accounts: None,
             _subscriptions: [
                 opened,
                 channel_opened,
@@ -355,7 +374,7 @@ impl Shell {
             return "none";
         };
         let calls = self.models.calls.read(cx);
-        if !calls.idle() || !calls.registered() {
+        if !calls.idle() || !calls.registered() || self.busy_elsewhere(cx) {
             "none"
         } else if calls.joinable(id) {
             "join"
@@ -386,7 +405,60 @@ impl Shell {
 
     /// The user asks `ask` of the calls (a key, a button, a command).
     pub fn ask_call(&mut self, ask: Ask, cx: &mut Context<Self>) {
+        let enters = matches!(ask, Ask::Call { .. } | Ask::Join { .. } | Ask::TestCall | Ask::Answer);
+        if enters && self.busy_elsewhere(cx) {
+            calls::refuse_here(&self.models.calls, &self.trace, &ask, "another-account", cx);
+            return;
+        }
         calls::ask(&self.models.calls, &self.core, &self.trace, ask, cx);
+    }
+
+    /// The account's models the shell shows.
+    #[must_use]
+    pub fn models(&self) -> &Models {
+        &self.models
+    }
+
+    /// The account the shell is: its MRI.
+    #[must_use]
+    pub fn account(&self) -> &str {
+        self.core.me()
+    }
+
+    /// Hands in the app's accounts: the rail shows their avatars in place of the status button, and no call is offered
+    /// while another account has one ([`Accounts::busy_elsewhere`]).
+    pub fn set_accounts(&mut self, accounts: Entity<Accounts>, cx: &mut Context<Self>) {
+        let observing = cx.observe(&accounts, |this: &mut Self, _, cx| {
+            this.trace_call_button(cx);
+            cx.notify();
+        });
+        self.accounts = Some((accounts, observing));
+        cx.notify();
+    }
+
+    /// Takes the window's keyboard: the chat's compose box when a chat is shown, else the shell (an account switched to).
+    pub fn take_focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        match (&self.main, &self.chat) {
+            (Main::Chat(_), Some(chat)) => {
+                let compose = chat.read(cx).compose().clone();
+                compose.update(cx, |compose, cx| compose.focus(window, cx));
+            }
+            _ => self.focus.focus(window, cx),
+        }
+    }
+
+    /// Shows the next account of the app (`forward`) or the one before, round: Ctrl+Alt+Down and Ctrl+Alt+Up.
+    pub fn cycle_account(&mut self, forward: bool, cx: &mut Context<Self>) {
+        if let Some((accounts, _)) = &self.accounts {
+            accounts.update(cx, |accounts, cx| accounts.cycle(forward, cx));
+        }
+    }
+
+    /// Whether another account of the app has a call up, ringing or being set up.
+    fn busy_elsewhere(&self, cx: &App) -> bool {
+        self.accounts
+            .as_ref()
+            .is_some_and(|(accounts, _)| accounts.read(cx).busy_elsewhere(self.core.me(), cx))
     }
 
     /// Calls the chat shown (a 1:1 chat's other member, a group chat's members).
@@ -513,10 +585,21 @@ impl Shell {
             own.update(cx, |own, cx| own.choose(status.choice(), cx));
         }
         // unchanged (the same status chosen again), the settings tell nobody: the own presence was told above
+        let account = self.core.me().to_owned();
         self.settings.update(cx, |settings, cx| {
-            settings.change(|settings| settings.manual_status = status, cx);
+            settings.change(|settings| settings.set_manual_status(&account, status), cx);
         });
         self.status_menu = false;
+        cx.notify();
+    }
+
+    /// The account menu's "Sign out and remove": asked of the app (the menu closed).
+    fn ask_remove_account(&mut self, cx: &mut Context<Self>) {
+        self.status_menu = false;
+        if let Some((accounts, _)) = &self.accounts {
+            let key = self.core.me().to_owned();
+            accounts.update(cx, |accounts, cx| accounts.ask_remove(&key, cx));
+        }
         cx.notify();
     }
 
@@ -605,9 +688,10 @@ impl Shell {
         {
             self.chat = None;
         }
-        if self.settings.read(cx).settings().selected_chat.as_deref() == Some(chosen.id.as_str()) {
+        let account = self.core.me().to_owned();
+        if self.settings.read(cx).settings().selected_chat_of(&account) == Some(chosen.id.as_str()) {
             self.settings.update(cx, |settings, cx| {
-                settings.change(|settings| settings.selected_chat = None, cx);
+                settings.change(|settings| settings.set_selected_chat(&account, None), cx);
             });
         }
         if let Some(chat) = &self.chat {
@@ -676,9 +760,9 @@ impl Shell {
         }
         self.list.update(cx, |list, cx| list.select(Some(id.clone()), cx));
         self.teams.update(cx, |teams, cx| teams.select(None, cx));
-        let kept = id.clone();
+        let (account, kept) = (self.core.me().to_owned(), id.clone());
         self.settings.update(cx, |settings, cx| {
-            settings.change(|settings| settings.selected_chat = Some(kept), cx);
+            settings.change(|settings| settings.set_selected_chat(&account, Some(kept)), cx);
         });
         self.main = Main::Chat(id);
         self.trace_header(cx);
@@ -906,7 +990,8 @@ impl Shell {
                 Self::show_chats,
             ))
             .child(div().flex_1())
-            .child(self.status_button(palette, cx))
+            .children(self.account_rail(palette, cx))
+            .children(self.accounts.is_none().then(|| self.status_button(palette, cx)))
             .child(Self::rail_button(
                 "rail-settings",
                 RailItem::SETTINGS,
@@ -922,6 +1007,146 @@ impl Shell {
     #[must_use]
     pub fn own_reporting(&self, cx: &App) -> Option<Reporting> {
         self.own_presence().map(|own| own.read(cx).reporting(cx))
+    }
+
+    /// The rail's account avatars (see [`crate::accounts`]) and its "+", once the accounts were handed in; nothing
+    /// before.
+    fn account_rail(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let (accounts, _) = self.accounts.as_ref()?;
+        let accounts = accounts.read(cx);
+        let me = self.core.me();
+        let faces: Vec<AccountFace> = accounts
+            .tiles()
+            .iter()
+            .enumerate()
+            .map(|(index, tile)| AccountFace::of(index, tile, tile.key == me, cx))
+            .collect();
+        let can_add = accounts.can_add();
+        let avatars: Vec<AnyElement> = faces
+            .into_iter()
+            .map(|face| self.account_avatar(face, palette, cx))
+            .collect();
+        let add = can_add.then(|| {
+            let accounts = self.accounts.as_ref().map(|(accounts, _)| accounts.clone());
+            div()
+                .debug_selector(|| "rail-add-account".to_owned())
+                .id("rail-add-account")
+                .size(px(ACCOUNT_AVATAR))
+                .flex_none()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .border_1()
+                .border_color(rgb(palette.border))
+                .text_color(rgb(palette.muted_foreground))
+                .cursor_pointer()
+                .hover(move |style| style.bg(rgb(palette.hover)).text_color(rgb(palette.brand)))
+                .tooltip(|window, cx| Tooltip::new("Add an account").build(window, cx))
+                .on_click(move |_, _, cx| {
+                    if let Some(accounts) = &accounts {
+                        accounts.update(cx, Accounts::ask_add);
+                    }
+                })
+                .child("+")
+        });
+        Some(
+            div()
+                .debug_selector(|| "rail-accounts".to_owned())
+                .w_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap_2()
+                .pb_2()
+                .children(avatars)
+                .children(add)
+                .into_any_element(),
+        )
+    }
+
+    /// One account's avatar on the rail: its picture or initials, its own presence's dot, the account shown marked
+    /// (a click opens its account menu: selector `rail-status`), another with its unread total (a click shows it:
+    /// selector `rail-account-<n>`), a signed-out one faded.
+    fn account_avatar(&self, account: AccountFace, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let AccountFace {
+            index,
+            key,
+            name,
+            detail,
+            picture,
+            reporting,
+            unread,
+            signed_out,
+            shown,
+        } = account;
+        let selector: SharedString = if shown {
+            "rail-status".into()
+        } else {
+            format!("rail-account-{index}").into()
+        };
+        let face = people::avatar(Some(&name), picture.as_ref(), Size::Medium);
+        let dot = reporting.map(|reporting| {
+            let dot = presence::dot(&shown_as(reporting), palette)
+                .absolute()
+                .right(px(-2.0))
+                .bottom(px(-2.0));
+            if shown {
+                dot.debug_selector(|| "rail-status-dot".to_owned())
+            } else {
+                dot
+            }
+        });
+        let badge = (!shown && unread > 0).then(|| {
+            div()
+                .debug_selector(move || format!("rail-account-{index}-unread"))
+                .absolute()
+                .top(px(-4.0))
+                .right(px(-6.0))
+                .min_w(px(16.0))
+                .h(px(16.0))
+                .px_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(rgb(UNREAD_BADGE))
+                .text_color(rgb(0x00ff_ffff))
+                .text_size(px(10.0))
+                .child(SharedString::from(if unread > 99 {
+                    "99+".to_owned()
+                } else {
+                    unread.to_string()
+                }))
+        });
+        let tip: SharedString = format!("{name}\n{detail}").into();
+        div()
+            .debug_selector({
+                let selector = selector.clone();
+                move || selector.to_string()
+            })
+            .id(selector)
+            .relative()
+            .flex_none()
+            .p(px(2.0))
+            .rounded_full()
+            .border_2()
+            .border_color(rgb(if shown { palette.brand } else { palette.rail }))
+            .cursor_pointer()
+            .when(signed_out, |avatar| avatar.opacity(0.45))
+            .when(shown && self.status_menu, |avatar| avatar.bg(rgb(palette.border)))
+            .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                if this.core.me() == key {
+                    this.toggle_status_menu(cx);
+                } else if let Some((accounts, _)) = &this.accounts {
+                    accounts.update(cx, |accounts, cx| accounts.switch(&key, cx));
+                }
+            }))
+            .child(face)
+            .children(dot)
+            .children(badge)
+            .into_any_element()
     }
 
     /// The rail's status button: a dot for what the own presence reports, opening the account menu.
@@ -964,10 +1189,53 @@ impl Shell {
             .on_click(cx.listener(|this, _, _, cx| this.toggle_status_menu(cx)))
     }
 
+    /// The account menu's account: its name and what tells it apart above the statuses, and its "Sign out and remove"
+    /// below them in an app that adds and removes accounts; neither before the accounts were handed in.
+    fn account_menu_parts(&self, palette: Palette, cx: &mut Context<Self>) -> (Option<gpui::Div>, Option<gpui::Div>) {
+        let account = self.accounts.as_ref().and_then(|(accounts, _)| {
+            let accounts = accounts.read(cx);
+            let tile = accounts.tile(self.core.me())?;
+            Some((tile.name.clone(), tile.detail.clone(), accounts.can_add()))
+        });
+        let header = account.as_ref().map(|(name, detail, _)| {
+            div()
+                .debug_selector(|| "status-menu-account".to_owned())
+                .pb_1()
+                .mb_1()
+                .border_b_1()
+                .border_color(rgb(palette.border))
+                .child(div().font_weight(gpui::FontWeight::BOLD).child(name.clone()))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(rgb(palette.muted_foreground))
+                        .child(detail.clone()),
+                )
+        });
+        let remove = account.filter(|(_, _, can_add)| *can_add).map(|_| {
+            div()
+                .debug_selector(|| "status-menu-remove-account".to_owned())
+                .w_full()
+                .mt_1()
+                .pt_1()
+                .border_t_1()
+                .border_color(rgb(palette.border))
+                .child(
+                    Button::new("status-menu-remove-account")
+                        .label("Sign out and remove")
+                        .compact()
+                        .ghost()
+                        .w_full()
+                        .on_click(cx.listener(|this, _, _, cx| this.ask_remove_account(cx))),
+                )
+        });
+        (header, remove)
+    }
+
     /// The account menu: the statuses the user may set (the one set marked), what is reported, and the last failed
     /// report.
     fn status_menu_view(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let chosen = self.settings.read(cx).settings().manual_status;
+        let chosen = self.settings.read(cx).settings().manual_status_of(self.core.me());
         let entries = ManualStatus::ALL.map(|status| {
             let id: SharedString = format!("status-menu-{}", status.key()).into();
             let selector = id.to_string();
@@ -1009,6 +1277,7 @@ impl Shell {
                         failure.why
                     )))
             });
+        let (header, remove) = self.account_menu_parts(palette, cx);
         div()
             .debug_selector(|| "status-menu".to_owned())
             .absolute()
@@ -1024,9 +1293,11 @@ impl Shell {
             .border_color(rgb(palette.border))
             .rounded_md()
             .shadow_md()
+            .children(header)
             .children(entries)
             .children(reported)
             .children(failure)
+            .children(remove)
             .into_any_element()
     }
 
@@ -1160,6 +1431,8 @@ impl Render for Shell {
             .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, _, cx| this.used(cx)))
             .on_action(cx.listener(|this, _: &ToggleSwitcher, window, cx| this.toggle_switcher(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleSearch, window, cx| this.toggle_search(window, cx)))
+            .on_action(cx.listener(|this, _: &NextAccount, _, cx| this.cycle_account(true, cx)))
+            .on_action(cx.listener(|this, _: &PreviousAccount, _, cx| this.cycle_account(false, cx)))
             // the call keys only in a build that shows calls: elsewhere they reach whatever else takes them
             .when(self.models.calls.read(cx).shows(), |shell| {
                 shell
@@ -1185,12 +1458,67 @@ impl Render for Shell {
                     .flex()
                     .flex_col()
                     .child(self.call_bar.clone())
-                    .child(div().flex_1().min_h_0().child(panes)),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h_0()
+                            .child(self.panes_or_signed_out(panes, palette, cx)),
+                    ),
             )
             .children(switcher)
             .children(search)
             .children(status_menu)
             .children(first_run)
+    }
+}
+
+/// What the rail shows of one account, read before it is drawn.
+struct AccountFace {
+    index: usize,
+    key: String,
+    name: SharedString,
+    detail: SharedString,
+    picture: Option<people::Picture>,
+    reporting: Option<Reporting>,
+    unread: u64,
+    signed_out: bool,
+    /// It is the account this shell is.
+    shown: bool,
+}
+
+impl AccountFace {
+    fn of(index: usize, tile: &AccountTile, shown: bool, cx: &App) -> Self {
+        Self {
+            index,
+            key: tile.key.clone(),
+            name: tile.name.clone(),
+            detail: tile.detail.clone(),
+            picture: tile.picture.clone(),
+            reporting: tile.own_presence.as_ref().map(|own| own.read(cx).reporting(cx)),
+            unread: tile.unread(cx),
+            signed_out: tile.signed_out(cx),
+            shown,
+        }
+    }
+}
+
+impl Shell {
+    /// The panes; in place of them, once the account is signed out in an app of accounts, what to do (the rail stays,
+    /// to switch to another account or remove this one).
+    fn panes_or_signed_out(&self, panes: impl IntoElement, palette: Palette, cx: &App) -> AnyElement {
+        let status = self.models.status.read(cx);
+        if self.accounts.is_none() || !matches!(status.account, Account::SignedOut { .. }) {
+            return div().size_full().child(panes).into_any_element();
+        }
+        div()
+            .debug_selector(|| "account-signed-out".to_owned())
+            .size_full()
+            .flex()
+            .items_center()
+            .justify_center()
+            .text_color(rgb(palette.muted_foreground))
+            .child(status_text(status))
+            .into_any_element()
     }
 }
 

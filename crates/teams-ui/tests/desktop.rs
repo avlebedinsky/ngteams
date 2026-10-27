@@ -174,6 +174,9 @@ impl OnDesktop {
                         app_name: "Teams (test)".into(),
                         title: "Teams (test)".into(),
                         shell,
+                        account_name: "Lab A".into(),
+                        account_detail: "lab a".into(),
+                        can_add: false,
                         ringer: None,
                     },
                     cx,
@@ -182,8 +185,10 @@ impl OnDesktop {
             desktop.update(cx, |desktop, cx| {
                 desktop.notifier().update(cx, |notifier, _| notifier.set_server(given));
             });
-            cx.subscribe(&desktop, move |_, event, _| recorded.lock().unwrap().push(*event))
-                .detach();
+            cx.subscribe(&desktop, move |_, event, _| {
+                recorded.lock().unwrap().push(event.clone());
+            })
+            .detach();
             desktop
         });
         Self {

@@ -116,6 +116,55 @@ pub trait NotificationServer: Send + Sync + 'static {
     fn close(&self, id: u32) -> BoxFuture<'static, ()>;
 }
 
+/// A notification server that names the account a notification is for (an app of several accounts): its summary
+/// followed by the account's name while a label is set ([`AccountLabel::set`]), the notice as it is otherwise.
+pub struct LabelledServer {
+    inner: Arc<dyn NotificationServer>,
+    label: AccountLabel,
+}
+
+impl LabelledServer {
+    #[must_use]
+    pub fn new(inner: Arc<dyn NotificationServer>, label: AccountLabel) -> Self {
+        Self { inner, label }
+    }
+}
+
+impl NotificationServer for LabelledServer {
+    fn show(&self, notice: &Notice, replaces: u32) -> BoxFuture<'static, Result<u32, String>> {
+        match self.label.get() {
+            Some(label) => {
+                let notice = Notice {
+                    summary: format!("{} · {label}", notice.summary),
+                    ..notice.clone()
+                };
+                self.inner.show(&notice, replaces)
+            }
+            None => self.inner.show(notice, replaces),
+        }
+    }
+
+    fn close(&self, id: u32) -> BoxFuture<'static, ()> {
+        self.inner.close(id)
+    }
+}
+
+/// The account's name a [`LabelledServer`] adds to its notifications; none while the app runs one account.
+#[derive(Clone, Debug, Default)]
+pub struct AccountLabel(Arc<std::sync::Mutex<Option<String>>>);
+
+impl AccountLabel {
+    /// From now on the notifications name `label`; `None` names none.
+    pub fn set(&self, label: Option<String>) {
+        *self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = label;
+    }
+
+    #[must_use]
+    pub fn get(&self) -> Option<String> {
+        self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+}
+
 /// What the notifier tells.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NotifierEvent {

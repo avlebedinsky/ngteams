@@ -86,22 +86,55 @@ pub fn on_devices(
     )
 }
 
+/// The calls' devices of the app, opened once and shared by every account (`docs/personal-build.md`, "Several
+/// accounts"): the PipeWire this build allows, and the video codec when it is there.
+#[derive(Clone)]
+pub struct CallDevices {
+    devices: Arc<PipeWireDevices>,
+    video: Option<H264Library>,
+}
+
+impl std::fmt::Debug for CallDevices {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CallDevices")
+            .field("video", &self.video.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+impl CallDevices {
+    /// The PipeWire this build allows (see the module docs), the video codec from `paths`' data dir when it is there.
+    ///
+    /// # Errors
+    /// The PipeWire is refused or can't be reached ([`PipeWireDevices::connect`]).
+    pub fn open(paths: &PersonalPaths) -> Result<Self, DeviceError> {
+        let devices = Arc::new(PipeWireDevices::connect()?);
+        let library = openh264(paths);
+        let video = match library.check() {
+            Ok(()) => Some(library),
+            Err(error) => {
+                log::info!("the calls carry no video: {error}");
+                None
+            }
+        };
+        Ok(Self { devices, video })
+    }
+
+    /// One account's engine calling and window calls on these devices (its own video feed).
+    #[must_use]
+    pub fn for_account(&self) -> (AccountCalls, PersonalCalls) {
+        let devices: Arc<dyn Devices + Send + Sync> = self.devices.clone();
+        let (engine, mut window) = on_devices(devices, self.video.clone());
+        window.devices = Some(self.devices.clone());
+        (engine, window)
+    }
+}
+
 /// The engine's calling and the window's calls on the PipeWire this build allows (see the module docs), the video
 /// codec from `paths`' data dir when it is there.
 ///
 /// # Errors
 /// The PipeWire is refused or can't be reached ([`PipeWireDevices::connect`]).
 pub fn open(paths: &PersonalPaths) -> Result<(AccountCalls, PersonalCalls), DeviceError> {
-    let devices = Arc::new(PipeWireDevices::connect()?);
-    let library = openh264(paths);
-    let video = match library.check() {
-        Ok(()) => Some(library),
-        Err(error) => {
-            log::info!("the calls carry no video: {error}");
-            None
-        }
-    };
-    let (engine, mut window) = on_devices(devices.clone(), video);
-    window.devices = Some(devices);
-    Ok((engine, window))
+    CallDevices::open(paths).map(|devices| devices.for_account())
 }

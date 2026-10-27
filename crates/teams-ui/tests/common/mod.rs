@@ -24,8 +24,8 @@ pub const LAB_B: &str = "8:orgid:00000000-0000-4000-8000-00000000000b";
 
 /// The engine's owning side, fed by the test; counts its shutdowns.
 pub struct FakeEvents {
-    events: mpsc::UnboundedReceiver<Event>,
-    shutdowns: Arc<AtomicUsize>,
+    pub events: mpsc::UnboundedReceiver<Event>,
+    pub shutdowns: Arc<AtomicUsize>,
 }
 
 impl EventSource for FakeEvents {

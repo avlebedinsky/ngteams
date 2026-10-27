@@ -1,11 +1,12 @@
-//! What the live acceptance runs (`ui_live`, `call_live`) share: a UI sandbox per lab account with the normally built
-//! app in it, its credential broker outside, its view trace on a pipe; the run's dirs, its numbers and the check that
+//! What the live acceptance runs (`ui_live`, `call_live`) share: a UI sandbox per app with the normally built app in it
+//! (one lab account's, [`App::new`], or several accounts' in one window, [`App::with_accounts`]), each account's
+//! credential broker outside, the view trace on a pipe; the run's dirs, its numbers and the check that
 //! nothing it kept holds a token. Each test loads this module and leaves out what it doesn't use.
 
 use std::collections::BTreeMap;
 use std::fs::{self, DirBuilder};
 use std::io::{self, BufRead as _, BufReader, Write as _};
-use std::os::fd::{AsFd as _, AsRawFd as _};
+use std::os::fd::{AsFd, AsRawFd as _};
 use std::os::unix::fs::{DirBuilderExt as _, PermissionsExt as _};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -255,17 +256,20 @@ pub struct Launch {
     pub ready: Vec<(&'static str, &'static str)>,
 }
 
-/// One run of an app: the app in its sandbox, its broker outside, its trace.
+/// One run of an app: the app in its sandbox, each account's broker outside, its trace.
 struct Run {
     app: Option<Running>,
-    broker: Reaped,
+    brokers: Vec<Reaped>,
     trace: Trace,
     pid: u32,
 }
 
-/// A lab account's app: its sandbox (kept across a restart), its keyboard, its current run.
+/// An app of one or more lab accounts: its sandbox (kept across a restart), its keyboard, its current run.
 pub struct App {
+    /// The first account's alias.
     pub alias: &'static str,
+    /// Every account's alias, the first one first.
+    pub aliases: Vec<&'static str>,
     launch: Launch,
     pub sandbox: Sandbox,
     pub input: VirtualInput,
@@ -287,12 +291,21 @@ const BROKER_ENV: [&str; 7] = [
 ];
 
 impl App {
-    /// The sandbox of `alias` (`options`), then the app started in it ([`Self::start`]).
+    /// The sandbox of `alias` (`options`), then its app started in it ([`Self::start`]).
     pub fn new(tools: &Tools, alias: &'static str, options: &SandboxOptions, launch: Launch) -> Self {
-        let sandbox = Sandbox::start(tools, options).unwrap_or_else(|error| panic!("{alias}'s sandbox: {error}"));
+        Self::with_accounts(tools, &[alias], options, launch)
+    }
+
+    /// The sandbox (`options`), then one app of every account of `aliases` started in it (the first one first), each
+    /// with its own broker ([`Self::start`]).
+    pub fn with_accounts(tools: &Tools, aliases: &[&'static str], options: &SandboxOptions, launch: Launch) -> Self {
+        let alias = *aliases.first().expect("an account");
+        let label = aliases.concat();
+        let sandbox = Sandbox::start(tools, options).unwrap_or_else(|error| panic!("{label}'s sandbox: {error}"));
         let input = sandbox.input().unwrap();
         let mut app = Self {
             alias,
+            aliases: aliases.to_vec(),
             launch,
             sandbox,
             input,
@@ -304,10 +317,16 @@ impl App {
         app
     }
 
+    /// What names the app in the run's files and messages: its aliases together (`a`, `ab`).
+    pub fn label(&self) -> String {
+        self.aliases.concat()
+    }
+
     fn run(&mut self) -> &mut Run {
+        let label = self.label();
         self.run
             .as_mut()
-            .unwrap_or_else(|| panic!("{}'s app isn't running", self.alias))
+            .unwrap_or_else(|| panic!("{label}'s app isn't running"))
     }
 
     pub fn trace(&mut self) -> &mut Trace {
@@ -319,15 +338,11 @@ impl App {
         self.run().pid
     }
 
-    /// Starts the broker outside the sandbox and the app inside it, the socket pair between them, the trace on a pipe;
-    /// then waits for the window and the launch's ready lines (the push channel, the first catch-up, so what the app
-    /// missed while it wasn't running is in its store before a chat is opened and can't land in the middle of a step).
-    pub fn start(&mut self) {
-        self.starts += 1;
-        let name = format!("{}-{}", self.alias, self.starts);
-        let out = self.launch.out.clone();
+    /// `alias`'s broker started outside the sandbox (`name` names its output in the run's dir), and the app's end of
+    /// the socket pair between them.
+    fn start_broker(&self, alias: &str, name: &str) -> (Reaped, UnixStream) {
         let (broker_end, app_end) = UnixStream::pair().unwrap();
-        let file = |suffix: &str| fs::File::create(out.join(format!("{name}-{suffix}"))).unwrap();
+        let file = |suffix: &str| fs::File::create(self.launch.out.join(format!("{name}-{suffix}"))).unwrap();
         let mut command = Command::new(&self.launch.binary);
         command.env_clear();
         for variable in BROKER_ENV {
@@ -336,50 +351,65 @@ impl App {
             }
         }
         command
-            .args([
-                "secrets",
-                "--lab",
-                self.alias,
-                "--fd",
-                &broker_end.as_raw_fd().to_string(),
-            ])
+            .args(["secrets", "--lab", alias, "--fd", &broker_end.as_raw_fd().to_string()])
             .stdin(Stdio::null())
             .stdout(file("broker.out"))
             .stderr(file("broker.err"));
         ui_sandbox::spawn::pass_only(&mut command, &[broker_end.as_fd()]);
         let broker = Reaped(Some(command.spawn().unwrap()));
+        // the broker holds its end from here: this process keeps none
+        drop(broker_end);
+        (broker, app_end)
+    }
+
+    /// Starts each account's broker outside the sandbox and the app inside it, a socket pair between the app and each
+    /// broker (the `--lab`/`--secrets-fd` pairs in the accounts' order), the trace on a pipe; then waits for the window
+    /// and the launch's ready lines (the push channel, the first catch-up, so what the app missed while it wasn't
+    /// running is in its store before a chat is opened and can't land in the middle of a step).
+    pub fn start(&mut self) {
+        self.starts += 1;
+        let name = format!("{}-{}", self.label(), self.starts);
+        let out = self.launch.out.clone();
+        let (brokers, app_ends): (Vec<Reaped>, Vec<UnixStream>) = self
+            .aliases
+            .iter()
+            .map(|alias| {
+                let broker_name = if self.aliases.len() == 1 {
+                    name.clone()
+                } else {
+                    format!("{name}-{alias}")
+                };
+                self.start_broker(alias, &broker_name)
+            })
+            .unzip();
         let (reader, writer) = io::pipe().unwrap();
-        let (secrets_fd, trace_fd) = (app_end.as_raw_fd().to_string(), writer.as_raw_fd().to_string());
+        let secrets_fds: Vec<String> = app_ends.iter().map(|end| end.as_raw_fd().to_string()).collect();
+        let trace_fd = writer.as_raw_fd().to_string();
+        let mut args: Vec<&str> = Vec::new();
+        for (alias, fd) in self.aliases.iter().zip(&secrets_fds) {
+            args.extend(["--lab", alias, "--secrets-fd", fd.as_str()]);
+        }
+        args.extend(["--trace-fd", trace_fd.as_str()]);
         let env: Vec<(&str, &str)> = self
             .launch
             .env
             .iter()
             .map(|(name, value)| (*name, value.as_str()))
             .collect();
+        let mut fds: Vec<_> = app_ends.iter().map(AsFd::as_fd).collect();
+        fds.push(writer.as_fd());
         let child = self
             .sandbox
-            .spawn_with_fds(
-                &self.launch.binary,
-                &[
-                    "--lab",
-                    self.alias,
-                    "--secrets-fd",
-                    &secrets_fd,
-                    "--trace-fd",
-                    &trace_fd,
-                ],
-                &env,
-                &[app_end.as_fd(), writer.as_fd()],
-            )
+            .spawn_with_fds(&self.launch.binary, &args, &env, &fds)
             .unwrap();
-        // the two processes hold the socket's ends and the trace's writer from here: this process keeps none
-        drop((broker_end, app_end, writer));
+        // the app holds the sockets' ends and the trace's writer from here: this process keeps none
+        drop((app_ends, writer));
         let pid = child.id();
         let app = Running::new(child).unwrap();
         let trace = Trace::start(reader, out.join(format!("{name}-trace.jsonl")), name);
         self.run = Some(Run {
             app: Some(app),
-            broker,
+            brokers,
             trace,
             pid,
         });
@@ -406,7 +436,7 @@ impl App {
                     .map(|(key, value)| (key.to_owned(), value.to_owned()))
             })
             .collect();
-        let alias = self.alias;
+        let alias = self.label();
         assert_eq!(
             variables.get("DBUS_SESSION_BUS_ADDRESS").map(String::as_str),
             Some(self.sandbox.bus().address()),
@@ -434,9 +464,9 @@ impl App {
         self.shots += 1;
         // the frames after the trace's line
         thread::sleep(Duration::from_millis(500));
-        let name = format!("{}-{what}.png", self.alias);
+        let name = format!("{}-{what}.png", self.label());
         let Ok(png) = self.sandbox.screenshot(&name, true) else {
-            eprintln!("{}: no screenshot of {what}", self.alias);
+            eprintln!("{}: no screenshot of {what}", self.label());
             return;
         };
         let kept = self.launch.shots.join(format!("{:02}-{name}", self.shots));
@@ -508,7 +538,7 @@ impl App {
     /// Keeps the current run's stdout and stderr in the run's dir (`<alias>-<n>-app.out`, `.err`), which the token
     /// check reads.
     fn keep_output(&self, stdout: &str, stderr: &str) {
-        let name = format!("{}-{}-app", self.alias, self.starts);
+        let name = format!("{}-{}-app", self.label(), self.starts);
         fs::write(self.launch.out.join(format!("{name}.out")), stdout).unwrap();
         fs::write(self.launch.out.join(format!("{name}.err")), stderr).unwrap();
     }
@@ -519,7 +549,7 @@ impl App {
         let Some(pipewire) = self.sandbox.pipewire() else {
             return;
         };
-        let kept = self.launch.out.join(format!("{}-speaker.wav", self.alias));
+        let kept = self.launch.out.join(format!("{}-speaker.wav", self.label()));
         if fs::copy(pipewire.recording(), &kept).is_ok() {
             let _ = fs::set_permissions(&kept, fs::Permissions::from_mode(0o600));
         }
@@ -555,22 +585,24 @@ impl App {
         .is_ok()
     }
 
-    /// The tray menu's "Quit": the app quits and its broker exits once the socket closes. Both exit cleanly; the
-    /// app's stdout and stderr are kept in the run's dir.
+    /// The tray menu's "Quit": the app quits and each account's broker exits once its socket closes. All exit cleanly;
+    /// the app's stdout and stderr are kept in the run's dir.
     pub fn quit(&mut self) {
-        assert!(self.ask_to_quit(), "{}'s tray menu didn't take Quit", self.alias);
-        let alias = self.alias;
+        let label = self.label();
+        assert!(self.ask_to_quit(), "{label}'s tray menu didn't take Quit");
         let mut run = self.run.take().unwrap();
         let app = run.app.take().unwrap();
         let stdout = stdout_until_closed(&app, EXIT);
         let (status, stderr) = app.finish(EXIT).unwrap();
         self.keep_output(&stdout, &stderr);
-        assert!(status.success(), "{alias}'s app exited {status}");
-        let broker = run.broker.exit_within(EXIT);
-        assert!(
-            broker.is_some_and(|status| status.success()),
-            "{alias}'s broker didn't exit cleanly once its app quit: {broker:?}"
-        );
+        assert!(status.success(), "{label}'s app exited {status}");
+        for (alias, broker) in self.aliases.iter().zip(&mut run.brokers) {
+            let exited = broker.exit_within(EXIT);
+            assert!(
+                exited.is_some_and(|status| status.success()),
+                "{alias}'s broker didn't exit cleanly once {label}'s app quit: {exited:?}"
+            );
+        }
     }
 }
 
@@ -606,7 +638,7 @@ impl Drop for App {
             self.keep_recording();
             eprintln!(
                 "{}: the app was killed; its output is kept in the run's dir",
-                self.alias
+                self.label()
             );
         }
     }

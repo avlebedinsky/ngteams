@@ -1,10 +1,12 @@
-//! `teams --forget`: signs out and forgets the account `account.toml` holds — its `teams-personal` items (the refresh
-//! token and the skypetoken), `account.toml` and the saved region. Its store stays (`store/<oid>.sqlite`, never another
-//! account's), to delete by hand.
+//! `teams --forget <UPN>`: signs out and forgets one account — its `teams-personal` items (the refresh token, the
+//! skypetoken and its expiry, each under its UPN), its region (`regions/<oid>.json`) and its entry in `accounts.toml`,
+//! the other accounts kept as they are. Its store stays (`store/<oid>.sqlite`, never another account's), to delete by
+//! hand.
 //!
 //! Refused while the account's engine runs (a `teams` open, in the tray too): that engine's session keeps the tokens it
 //! holds and a renewal of its would store them again, so the account's engine lock (`teams_store::EngineLock`) is taken
-//! first, without waiting, and held until everything is deleted, so no engine starts on the account meanwhile.
+//! first, without waiting, and held until everything is deleted, so no engine starts on the account meanwhile. Its
+//! entry goes last, so a forget that fails part way can be run again.
 
 use std::path::PathBuf;
 
@@ -16,10 +18,10 @@ use teams_store::{EngineLock, StoreError};
 
 use crate::setup::Setup;
 
-/// What `teams --forget` did.
+/// What `teams --forget <UPN>` did.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Forgot {
-    /// There was no account to forget.
+    /// No account of that UPN.
     Nothing,
     /// The account `upn` is forgotten; its store, if a sign-in ever named its object id, stays at `store`.
     Account { upn: String, store: Option<PathBuf> },
@@ -41,13 +43,14 @@ pub enum ForgetError {
     Remove { path: PathBuf, source: std::io::Error },
 }
 
-/// Forgets the account `setup`'s `account.toml` holds, its items deleted from `secrets` (see the module docs).
+/// Forgets the account `upn` (case aside) of `setup`'s `accounts.toml`, its items deleted from `secrets` (see the
+/// module docs).
 ///
 /// # Errors
-/// [`ForgetError::Running`] while the account's engine runs (nothing deleted); otherwise when `account.toml` can't be
-/// read, or an item or a file can't be deleted.
-pub async fn forget<S: SecretStore>(setup: &Setup, secrets: &S) -> Result<Forgot, ForgetError> {
-    let Some(account) = PersonalAccount::load(&setup.paths)? else {
+/// [`ForgetError::Running`] while the account's engine runs (nothing deleted); otherwise when `accounts.toml` can't be
+/// read or written, or an item or a file can't be deleted.
+pub async fn forget<S: SecretStore>(setup: &Setup, upn: &str, secrets: &S) -> Result<Forgot, ForgetError> {
+    let Some(account) = PersonalAccount::find(&setup.paths, upn)? else {
         return Ok(Forgot::Nothing);
     };
     let store = setup.paths.store_file(&account);
@@ -69,13 +72,14 @@ pub async fn forget<S: SecretStore>(setup: &Setup, secrets: &S) -> Result<Forgot
     ] {
         secrets.delete(&key).await?;
     }
-    for path in [setup.paths.account_file(), setup.paths.region_file()] {
+    if let Some(path) = setup.paths.region_file(&account) {
         match std::fs::remove_file(&path) {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(source) => return Err(ForgetError::Remove { path, source }),
         }
     }
+    PersonalAccount::remove(&setup.paths, &account.upn)?;
     Ok(Forgot::Account {
         upn: account.upn,
         store,

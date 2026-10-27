@@ -1,10 +1,12 @@
-//! The app (`teams-app --lab <alias> --secrets-fd <n>`) up to its window: its command line, what it refuses before it
+//! The app (`teams-app --lab <alias> --secrets-fd <n> ...`) up to its window: its command line (one account, or
+//! several paired with their brokers' sockets in order), what it refuses before it
 //! touches the lab (a `test-support` build, a window outside the UI sandbox or with `DISPLAY` set, a trace
 //! descriptor it can't write), its engine built as `teams-headless` builds one (`teams_core::lab::start`) with its
 //! tokens only through the broker's socket, another engine on the account reported, and the signed-out state: a
 //! session that can't renew its tokens shows the account signed out and stops the engine, so nothing more is sent; its
 //! calls (M3 Task 17) relayed through Teams' relay and processed as a call's, on the UI sandbox's PipeWire only, the
-//! test call's echo lab.toml's.
+//! test call's echo lab.toml's; several accounts launched in one window on GPUI's test context, each on the rail,
+//! the quit shutting every engine down.
 //!
 //! The lab here is a made-up one in a temp dir (the mock's `lab.toml`, a region record with the mock's chat base), and
 //! the broker serves a `MemorySecretStore` holding no refresh token: every token request ends at the session, which
@@ -21,7 +23,7 @@ use std::time::{Duration, Instant};
 
 use clap::Parser as _;
 use gpui::{AppContext as _, TestAppContext};
-use teams_app::app::{AppEngine, sign_in_hint, start_failure, watch_sign_out};
+use teams_app::app::{self, AppEngine, Launch, LaunchAccount, sign_in_hint, start_failure, watch_sign_out};
 use teams_app::calling;
 use teams_app::cli::{Cli, Mode, ModeError};
 use teams_app::guard::window_allowed;
@@ -32,10 +34,12 @@ use teams_auth::session::SignedOut;
 use teams_core::account::AccountError;
 use teams_core::lab::{self, LabEngine, LabError};
 use teams_core::{EngineError, Reply};
-use teams_fence::Fence;
 use teams_fence::lab::{Alias, LabConfig, LabPaths};
+use teams_fence::{CallFloor, Fence};
 use teams_mock::{CHAT_BASE, lab_toml};
-use teams_ui::{Account, Bridge, Core, Engine, Models};
+use teams_ui::bus::BusError;
+use teams_ui::tray::TrayEvent;
+use teams_ui::{Account, Bridge, Core, Engine, Models, SettingsFile, ViewTrace};
 
 const BINARY: &str = env!("CARGO_BIN_EXE_teams-app");
 const UPN_A: &str = "bot-a@lab.example.test";
@@ -51,8 +55,7 @@ fn the_command_line_takes_the_app_or_the_broker() -> TestResult {
     assert_eq!(
         app.mode(),
         Ok(Mode::App {
-            alias: Alias::B,
-            secrets_fd: 5,
+            accounts: vec![(Alias::B, 5)],
             trace_fd: Some(6)
         })
     );
@@ -60,8 +63,7 @@ fn the_command_line_takes_the_app_or_the_broker() -> TestResult {
     assert_eq!(
         untraced.mode(),
         Ok(Mode::App {
-            alias: Alias::A,
-            secrets_fd: 3,
+            accounts: vec![(Alias::A, 3)],
             trace_fd: None
         })
     );
@@ -94,6 +96,72 @@ fn the_command_line_takes_the_app_or_the_broker() -> TestResult {
     Ok(())
 }
 
+/// The command line `line`, split at its spaces.
+fn parsed(line: &str) -> Result<Cli, clap::Error> {
+    Cli::try_parse_from(line.split_whitespace())
+}
+
+#[test]
+fn several_accounts_pair_each_lab_with_its_broker_s_socket_in_order() -> TestResult {
+    let app = parsed("teams-app --lab a --secrets-fd 3 --lab c --secrets-fd 5 --lab b --secrets-fd 4 --trace-fd 6")?;
+    assert_eq!(
+        app.mode(),
+        Ok(Mode::App {
+            accounts: vec![(Alias::A, 3), (Alias::C, 5), (Alias::B, 4)],
+            trace_fd: Some(6)
+        })
+    );
+    // the flags' order between the pairs doesn't matter: the n-th --secrets-fd is the n-th --lab's
+    let grouped = parsed("teams-app --lab b --lab a --secrets-fd 7 --secrets-fd 8")?;
+    assert_eq!(
+        grouped.mode(),
+        Ok(Mode::App {
+            accounts: vec![(Alias::B, 7), (Alias::A, 8)],
+            trace_fd: None
+        })
+    );
+
+    let refusals = [
+        (
+            "teams-app --lab a --lab b --secrets-fd 3",
+            ModeError::Unpaired { labs: 2, sockets: 1 },
+        ),
+        (
+            "teams-app --lab a --secrets-fd 3 --secrets-fd 4",
+            ModeError::Unpaired { labs: 1, sockets: 2 },
+        ),
+        (
+            "teams-app --lab a --secrets-fd 3 --lab a --secrets-fd 4",
+            ModeError::RepeatedAccount(Alias::A),
+        ),
+        (
+            "teams-app --lab a --secrets-fd 3 --lab b --secrets-fd 3",
+            ModeError::SharedDescriptor(3),
+        ),
+        (
+            "teams-app --lab a --secrets-fd 3 --lab b --secrets-fd 4 --trace-fd 4",
+            ModeError::SharedDescriptor(4),
+        ),
+    ];
+    for (refused, error) in refusals {
+        assert_eq!(parsed(refused)?.mode(), Err(error), "{refused}");
+    }
+    Ok(())
+}
+
+#[test]
+fn several_accounts_are_titled_and_named_by_their_aliases() {
+    assert_eq!(app::title(Alias::A).as_ref(), "Teams (lab a)");
+    assert_eq!(app::titled(&[Alias::A]).as_ref(), "Teams (lab a)");
+    assert_eq!(app::titled(&[Alias::A, Alias::B]).as_ref(), "Teams (lab a, b)");
+    assert_eq!(
+        app::titled(&[Alias::C, Alias::A, Alias::B]).as_ref(),
+        "Teams (lab c, a, b)"
+    );
+    assert_eq!(app::account_name(Alias::B).as_ref(), "Lab B");
+    assert_eq!(app::account_detail(Alias::B).as_ref(), "lab b");
+}
+
 #[test]
 fn without_the_broker_s_socket_the_app_does_not_start() -> TestResult {
     let output = Command::new(BINARY).args(["--lab", "a"]).output()?;
@@ -113,7 +181,23 @@ fn one_descriptor_named_for_both_the_broker_and_the_trace_is_refused_before_eith
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert!(output.stdout.is_empty(), "{output:?}");
     let stderr = String::from_utf8(output.stderr)?;
-    assert!(stderr.contains("both name descriptor 3"), "{stderr}");
+    assert!(stderr.contains("descriptor 3 is named twice"), "{stderr}");
+    assert!(!stderr.contains("test-support"), "refused first: {stderr}");
+    assert_eq!(std::fs::read_dir(home.path())?.count(), 0, "nothing was created");
+    Ok(())
+}
+
+#[test]
+fn an_account_given_twice_is_refused_before_any_descriptor_is_taken() -> TestResult {
+    let home = tempfile::tempdir()?;
+    let output = Command::new(BINARY)
+        .args(["--lab", "a", "--secrets-fd", "3", "--lab", "a", "--secrets-fd", "4"])
+        .env_clear()
+        .env("HOME", home.path())
+        .output()?;
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    let stderr = String::from_utf8(output.stderr)?;
+    assert!(stderr.contains("--lab a is given twice"), "{stderr}");
     assert!(!stderr.contains("test-support"), "refused first: {stderr}");
     assert_eq!(std::fs::read_dir(home.path())?.count(), 0, "nothing was created");
     Ok(())
@@ -161,7 +245,7 @@ fn a_build_with_the_personal_fence_refuses_to_run() {
         main.find("guard::test_support_refusal()").unwrap(),
         main.find("guard::personal_refusal()").unwrap(),
     );
-    let prepared = main.find("prepare(alias").unwrap();
+    let prepared = main.find("prepare(accounts").unwrap();
     assert!(
         test_support < personal && personal < prepared,
         "both refusals before the app touches anything"
@@ -317,9 +401,9 @@ fn outside_the_sandbox_s_pipewire_the_app_has_no_calls() -> TestResult {
 
 // --- the engine, as the app builds it ---
 
-/// A made-up lab in a temp dir: the mock's `lab.toml`, a's region record with the mock's chat base.
+/// A made-up lab in a temp dir: the mock's `lab.toml`, every account's region record with the mock's chat base.
 struct TempLab {
-    _dir: tempfile::TempDir,
+    dir: tempfile::TempDir,
     config: LabConfig,
 }
 
@@ -332,10 +416,13 @@ impl TempLab {
             "partition": "amer03",
             "regionGtms": {"chatServiceAfd": CHAT_BASE},
         });
-        let file = config.paths().region_file(Alias::A);
-        std::fs::create_dir_all(file.parent().ok_or("a parent dir")?)?;
-        std::fs::write(&file, region.to_string())?;
-        Ok(Self { _dir: dir, config })
+        // every account's: the launch of several starts more than a's engine
+        for alias in Alias::ALL {
+            let file = config.paths().region_file(alias);
+            std::fs::create_dir_all(file.parent().ok_or("a parent dir")?)?;
+            std::fs::write(&file, region.to_string())?;
+        }
+        Ok(Self { dir, config })
     }
 
     fn paths(&self) -> &LabPaths {
@@ -519,5 +606,100 @@ fn a_session_that_cannot_renew_shows_signed_out_and_stops_the_engine() -> TestRe
     // the engine's thread was joined: its lock is free for the next one
     let (again, _) = broker(&runtime)?;
     start(&lab, again)?.handle.shutdown();
+    Ok(())
+}
+
+// --- several accounts in one window ---
+
+/// `alias`'s engine on the made-up lab, its fence on `floor`, its tokens from an empty store: nothing leaves the
+/// process.
+fn engine_on(lab: &TempLab, alias: Alias, floor: &CallFloor) -> TestResult<teams_core::EngineHandle> {
+    let fence = Fence::open(&lab.config)?.sharing_calls(floor);
+    let started = lab::start(
+        &lab.config,
+        alias,
+        Arc::new(fence),
+        MemorySecretStore::new(),
+        false,
+        None,
+    )?;
+    Ok(started.handle)
+}
+
+/// The MRI lab.toml gives `alias`.
+fn mri_of(lab: &TempLab, alias: Alias) -> TestResult<String> {
+    Ok(lab.config.account(alias).mri.clone().ok_or("an MRI in lab.toml")?)
+}
+
+#[test]
+fn several_accounts_run_in_one_window_and_the_quit_shuts_every_engine_down() -> TestResult {
+    let lab = TempLab::new()?;
+    let floor = CallFloor::new();
+    let (a, b) = (engine_on(&lab, Alias::A, &floor)?, engine_on(&lab, Alias::B, &floor)?);
+    let cx = TestAppContext::single();
+    let settings = SettingsFile::new(lab.dir.path().join("ui").join("a.toml"));
+    let launched = cx.update(|cx| {
+        app::launch(
+            cx,
+            Launch {
+                first: LaunchAccount::bare(Alias::A, a),
+                others: vec![LaunchAccount::bare(Alias::B, b)],
+                trace: ViewTrace::off(),
+                settings,
+                // no bus: nothing is put on the desktop's
+                bus: Err(BusError::NotGiven),
+                diagnostics: None,
+            },
+        )
+    });
+    let launched = launched.map_err(|failed| failed.error)?;
+    cx.run_until_parked();
+
+    let (mri_a, mri_b) = (mri_of(&lab, Alias::A)?, mri_of(&lab, Alias::B)?);
+    let tiles = cx.read(|cx| {
+        let accounts = launched.desktop.read(cx).accounts().read(cx);
+        let tiles: Vec<(String, String, String)> = accounts
+            .tiles()
+            .iter()
+            .map(|tile| (tile.key.clone(), tile.name.to_string(), tile.detail.to_string()))
+            .collect();
+        (tiles, accounts.active_key().map(str::to_owned), accounts.can_add())
+    });
+    assert_eq!(
+        tiles.0,
+        [
+            (mri_a.clone(), "Lab A".to_owned(), "lab a".to_owned()),
+            (mri_b, "Lab B".to_owned(), "lab b".to_owned()),
+        ],
+        "each account on the rail, the first one first"
+    );
+    assert_eq!(tiles.1.as_deref(), Some(mri_a.as_str()), "the first account shown");
+    assert!(!tiles.2, "lab accounts are added only through `proto-lab auth`");
+    let first = cx.read(|cx| {
+        launched
+            .desktop
+            .read(cx)
+            .settings()
+            .read(cx)
+            .settings()
+            .first_account
+            .clone()
+    });
+    assert_eq!(first.as_deref(), Some(mri_a.as_str()), "the settings' top level is a's");
+    assert_eq!(launched.bridges.len(), 2);
+    assert!(cx.read(|cx| launched.bridges.iter().all(|bridge| bridge.read(cx).running())));
+
+    cx.update(|cx| {
+        launched
+            .desktop
+            .update(cx, |desktop, cx| desktop.tray_asked(TrayEvent::Quit, cx));
+    });
+    settle(&cx, |cx| {
+        cx.read(|cx| launched.bridges.iter().all(|bridge| !bridge.read(cx).running()))
+    });
+    // every engine's thread was joined: their locks are free for the next ones
+    let (again_a, again_b) = (engine_on(&lab, Alias::A, &floor)?, engine_on(&lab, Alias::B, &floor)?);
+    again_a.shutdown();
+    again_b.shutdown();
     Ok(())
 }

@@ -35,7 +35,7 @@ use std::time::{Duration, Instant, SystemTime};
 use std::{fs, future, io, thread};
 
 use gpui::{App, AsyncApp, WindowingModes};
-use teams_app::app::{self, Launch};
+use teams_app::app::{self, Launch, LaunchAccount};
 use teams_app::calling::AppCalls;
 use teams_app::trace::adopt_trace;
 use teams_auth::secrets::Secret;
@@ -761,20 +761,20 @@ fn child(alias: Alias) -> SandboxResult {
         let launched = app::launch(
             cx,
             Launch {
-                alias,
-                engine,
-                broker: None,
-                signed_out: None,
+                first: LaunchAccount {
+                    calls: Some(AppCalls {
+                        ringer: Some(ringer),
+                        echo: Some(Mri::new(ECHO)),
+                        video: Some(feed),
+                        devices: Some(pipewire),
+                    }),
+                    ..LaunchAccount::bare(alias, engine)
+                },
+                others: Vec::new(),
                 trace,
                 settings,
                 bus: teams_ui::bus::address_from_env(),
                 diagnostics: None,
-                calls: Some(AppCalls {
-                    ringer: Some(ringer),
-                    echo: Some(Mri::new(ECHO)),
-                    video: Some(feed),
-                    devices: Some(pipewire),
-                }),
             },
         );
         match launched {

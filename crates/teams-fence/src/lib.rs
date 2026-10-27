@@ -41,6 +41,7 @@ pub mod apart;
 mod calls;
 mod contacting;
 mod decision;
+mod floor;
 pub mod lab;
 mod log;
 mod membership;
@@ -61,6 +62,7 @@ pub use decision::{
     Denied, DenyReason, FailClosed, Fence, FetchFailure, Membership, MembershipFuture, MembershipSource, OpenError,
     PartialReason, Roster, WritePermit,
 };
+pub use floor::CallFloor;
 pub use log::{
     AllowedRecord, ArmingCause, ArmingRecord, Channel, CloseOutcome, Containment, FenceLog, FrameRecord,
     RequestOutcome, RequestRecord, path_shape,

@@ -101,7 +101,8 @@ impl OwnPresence {
         let now = cx.background_executor().now();
         let saved = settings.read(cx).settings().clone();
         let allowed = settings.read(cx).sends_presence();
-        let policy = OwnPresencePolicy::new(saved.manual_status.choice(), idle(saved.idle_minutes), now);
+        let account = core.me().to_owned();
+        let policy = OwnPresencePolicy::new(saved.manual_status_of(&account).choice(), idle(saved.idle_minutes), now);
         let feeding = cx.subscribe(&models.feed, |this: &mut Self, _, event, cx| this.fed(event, cx));
         let settled = cx.observe(settings, |this: &mut Self, settings, cx| {
             let allowed = settings.read(cx).sends_presence();
@@ -233,7 +234,7 @@ impl OwnPresence {
     /// change of another setting never sends a failed one again), and the idle time taken.
     fn settings_changed(&mut self, settings: &Settings, cx: &mut Context<Self>) {
         let now = cx.background_executor().now();
-        let choice = settings.manual_status.choice();
+        let choice = settings.manual_status_of(self.core.me()).choice();
         let mut send = if choice == self.policy.choice() {
             Vec::new()
         } else {

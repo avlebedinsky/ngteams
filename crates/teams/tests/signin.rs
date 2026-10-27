@@ -1,13 +1,16 @@
 //! The personal build's sign-in and start: `teams` signs in through its sign-in window (`sh` standing in for
 //! `teams-signin-personal`, answering the redirect), the code redeemed at a local token endpoint and the skypetoken at a
 //! local authz (wiremock), the refresh token stored under the account's UPN in the store handed in (the app hands in the
-//! desktop's Secret Service under `teams-personal`; here a `MemorySecretStore`), `account.toml` given the object id and
-//! tenant, the region saved; a later sign-in landing in another account stores nothing; a lab account is refused; the
-//! engine opens its store under the personal data dir. Every directory is a test's own; every value is made up.
+//! desktop's Secret Service under `teams-personal`; here a `MemorySecretStore`), the account's `accounts.toml` entry given
+//! the object id and tenant, its region saved under `regions/`; a later sign-in landing in another account stores
+//! nothing; a lab account is refused; several accounts side by side (added, abandoned, signed in, forgotten one at a
+//! time), a single account's files of an earlier build moved into theirs; the engine opens each account's store under
+//! the personal data dir. Every directory is a test's own; every value is made up.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
 
+use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::process::Command;
@@ -20,7 +23,7 @@ use teams::KEYRING_APPLICATION;
 use teams::forget::{self, ForgetError, Forgot};
 use teams::setup::{Setup, SetupError};
 use teams::signin::{self, SignInClients, SignInError};
-use teams_auth::authz::AuthzClient;
+use teams_auth::authz::{AuthzClient, skypetoken_expiry_key, skypetoken_key};
 use teams_auth::refresh::refresh_token_key;
 use teams_auth::secrets::{MemorySecretStore, Secret, SecretStore};
 use teams_auth::signin::{WindowAnswer, WindowSignInError};
@@ -37,6 +40,7 @@ const OID: &str = "00000000-0000-4000-8000-0000000000ff";
 const TENANT: &str = "00000000-0000-4000-8000-000000000001";
 const DISPLAY_NAME: &str = "Made-Up Person";
 const OTHER_OID: &str = "00000000-0000-4000-8000-0000000000ee";
+const SECOND_UPN: &str = "someone-else@example.test";
 const LAB_A_OID: &str = "00000000-0000-4000-8000-00000000000a";
 const AUTHZ_FIXTURE: &str = include_str!("../../../tests/fixtures/auth/authz-ok.json");
 
@@ -58,8 +62,8 @@ fn lab_toml() -> String {
     text
 }
 
-/// The personal build's files and a lab beside them, all under `dir`.
-fn setup_in(dir: &tempfile::TempDir) -> Setup {
+/// The personal build's paths and a lab beside them (its `lab.toml` written), all under `dir`.
+fn paths_in(dir: &tempfile::TempDir) -> (PersonalPaths, LabLocations) {
     let config_file = dir.path().join("config/teams-lab/lab.toml");
     fs::create_dir_all(config_file.parent().unwrap()).unwrap();
     fs::write(&config_file, lab_toml()).unwrap();
@@ -69,7 +73,29 @@ fn setup_in(dir: &tempfile::TempDir) -> Setup {
         personal_data_dir: dir.path().join("share/teams"),
     };
     let paths = PersonalPaths::new(dir.path().join("config/teams"), dir.path().join("share/teams"));
+    (paths, lab)
+}
+
+/// The personal build's files and a lab beside them, all under `dir`.
+fn setup_in(dir: &tempfile::TempDir) -> Setup {
+    let (paths, lab) = paths_in(dir);
     Setup::new(paths, lab).unwrap()
+}
+
+/// `upn` signed in as `oid` through a token endpoint and authz of its own.
+async fn signed_in(setup: &Setup, upn: &str, oid: &str, store: &MemorySecretStore) -> PersonalAccount {
+    let server = MockServer::start().await;
+    let clients = clients(&server, upn, oid).await;
+    let account = setup.ask_for(upn).unwrap();
+    signin::sign_in(setup, &account, &clients, store, window())
+        .await
+        .unwrap()
+}
+
+/// `account`'s engine under its own personal fence, its secrets a store of its own (nothing is sent).
+fn start_engine(setup: &Setup, account: &PersonalAccount) -> teams::engine::PersonalEngine<MemorySecretStore> {
+    let fence = Arc::new(Fence::open_personal_with(&setup.paths, &account.upn, &setup.lab).unwrap());
+    teams::engine::start(&setup.paths, account, fence, MemorySecretStore::new(), false, None).unwrap()
 }
 
 /// An unsigned ID token naming `upn`, `oid`, the tenant, for the native client.
@@ -138,8 +164,9 @@ async fn the_first_sign_in_stores_the_token_the_account_and_the_region_and_the_e
     let server = MockServer::start().await;
     let clients = clients(&server, UPN, OID).await;
     let store = MemorySecretStore::new();
-    let account = setup.account(Some(UPN)).unwrap();
+    let account = setup.ask_for(UPN).unwrap();
     assert!(!account.is_signed_in());
+    assert_eq!(setup.paths.region_file(&account), None);
     assert!(!signin::ready(&setup, &account, &store).await.unwrap());
 
     let signed = signin::sign_in(&setup, &account, &clients, &store, window())
@@ -151,21 +178,30 @@ async fn the_first_sign_in_stores_the_token_the_account_and_the_region_and_the_e
     assert_eq!(teams::engine::display_name(&signed), DISPLAY_NAME);
     let stored = store.get(&refresh_token_key(UPN)).await.unwrap();
     assert_eq!(stored.as_ref().map(Secret::expose), Some("made-up-refresh-token"));
-    assert_eq!(PersonalAccount::load(&setup.paths).unwrap(), Some(signed.clone()));
-    let region = fs::read_to_string(setup.paths.region_file()).unwrap();
+    assert_eq!(PersonalAccount::load_all(&setup.paths).unwrap(), vec![signed.clone()]);
+    let region_file = setup.paths.region_file(&signed).unwrap();
+    assert_eq!(
+        region_file,
+        setup.paths.data_dir().join("regions").join(format!("{OID}.json"))
+    );
+    let region = fs::read_to_string(&region_file).unwrap();
     assert!(
         region.contains(CHAT_BASE) && !region.contains("made-up-skypetoken"),
         "{region}"
     );
+    assert_eq!(fs::metadata(&region_file).unwrap().permissions().mode() & 0o777, 0o600);
     assert_eq!(
-        fs::metadata(setup.paths.region_file()).unwrap().permissions().mode() & 0o777,
-        0o600
+        fs::metadata(region_file.parent().unwrap())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
     );
     assert!(signin::ready(&setup, &signed, &store).await.unwrap());
 
-    // the engine: the personal fence from account.toml, the store under the personal data dir; nothing is sent
-    let fence = Arc::new(Fence::open_personal_with(&setup.paths, &setup.lab).unwrap());
-    let engine = teams::engine::start(&setup.paths, &signed, fence, MemorySecretStore::new(), false, None).unwrap();
+    // the engine: the personal fence of the account, the store under the personal data dir; nothing is sent
+    let engine = start_engine(&setup, &signed);
     let store_file = setup.paths.store_file(&signed).unwrap();
     assert!(store_file.is_file());
     assert_eq!(
@@ -184,7 +220,8 @@ async fn a_later_sign_in_that_lands_in_another_account_stores_nothing() {
         .unwrap()
         .save(&setup.paths)
         .unwrap();
-    let account = setup.account(None).unwrap();
+    let account = setup.ask_for(UPN).unwrap();
+    assert!(account.is_signed_in());
     let server = MockServer::start().await;
     let clients = clients(&server, UPN, OTHER_OID).await;
     let store = MemorySecretStore::new();
@@ -199,7 +236,8 @@ async fn a_later_sign_in_that_lands_in_another_account_stores_nothing() {
         "{refused:?}"
     );
     assert!(store.get(&refresh_token_key(UPN)).await.unwrap().is_none());
-    assert_eq!(PersonalAccount::load(&setup.paths).unwrap(), Some(account));
+    assert_eq!(PersonalAccount::load_all(&setup.paths).unwrap(), vec![account.clone()]);
+    assert!(!setup.paths.data_dir().join("regions").exists());
     // a window closed before the redirect stores nothing either
     let mut closed = Command::new("sh");
     closed.arg("-c").arg(format!(
@@ -207,7 +245,7 @@ async fn a_later_sign_in_that_lands_in_another_account_stores_nothing() {
         WindowAnswer::Closed.to_line().expose()
     ));
     assert!(
-        signin::sign_in(&setup, &setup.account(None).unwrap(), &clients, &store, closed)
+        signin::sign_in(&setup, &account, &clients, &store, closed)
             .await
             .is_err()
     );
@@ -219,137 +257,286 @@ async fn a_lab_account_is_refused_before_the_window_and_after_it() {
     let setup = setup_in(&dir);
     // by its UPN, before anything is asked
     assert!(matches!(
-        setup.account(Some("bot-b@lab.example.test")),
+        setup.ask_for("bot-b@lab.example.test"),
         Err(SetupError::Personal(PersonalError::LabAccount))
     ));
-    assert!(!setup.paths.account_file().exists());
+    assert!(!setup.paths.accounts_file().exists());
     // by its MRI, once the ID token names it: what was stored goes again
     let server = MockServer::start().await;
     let clients = clients(&server, UPN, LAB_A_OID).await;
     let store = MemorySecretStore::new();
-    let account = setup.account(Some(UPN)).unwrap();
+    let account = setup.ask_for(UPN).unwrap();
     let refused = signin::sign_in(&setup, &account, &clients, &store, window()).await;
     assert!(
         matches!(refused, Err(SignInError::Personal(PersonalError::LabAccount))),
         "{refused:?}"
     );
     assert!(store.get(&refresh_token_key(UPN)).await.unwrap().is_none());
-    assert!(!PersonalAccount::load(&setup.paths).unwrap().unwrap().is_signed_in());
+    assert!(
+        !PersonalAccount::find(&setup.paths, UPN)
+            .unwrap()
+            .unwrap()
+            .is_signed_in()
+    );
 }
 
 #[test]
-fn the_account_given_stays_until_another_is_given_before_a_sign_in() {
+fn an_account_given_is_the_one_held_and_another_is_added_after_it() {
     let dir = tempfile::tempdir().unwrap();
     let setup = setup_in(&dir);
-    assert!(matches!(setup.account(None), Err(SetupError::NoAccount)));
-    let pending = setup.account(Some(UPN)).unwrap();
+    assert!(setup.accounts().unwrap().is_empty());
+    let pending = setup.ask_for(UPN).unwrap();
     assert_eq!(pending.upn, UPN);
+    assert!(!pending.is_signed_in());
     assert_eq!(
-        fs::metadata(setup.paths.account_file()).unwrap().permissions().mode() & 0o777,
+        fs::metadata(setup.paths.accounts_file()).unwrap().permissions().mode() & 0o777,
         0o600
     );
-    assert_eq!(setup.account(None).unwrap(), pending);
-    assert_eq!(setup.account(Some("SOMEONE@example.test")).unwrap(), pending);
-    // no sign-in named it yet: another account given takes its place, as on the first sign-in screen
-    let other = setup.account(Some("other@example.test")).unwrap();
-    assert_eq!(other.upn, "other@example.test");
-    assert_eq!(setup.account(None).unwrap(), other);
+    // the same account again, case aside: the one held, not a second
+    assert_eq!(setup.ask_for("SOMEONE@example.test").unwrap(), pending);
+    assert_eq!(setup.accounts().unwrap(), vec![pending.clone()]);
+    // another one is added after it, the first kept
+    let other = setup.ask_for(SECOND_UPN).unwrap();
+    assert_eq!(other.upn, SECOND_UPN);
+    assert_eq!(setup.accounts().unwrap(), vec![pending.clone(), other.clone()]);
+    assert_eq!(
+        setup.pending_upns().unwrap(),
+        vec![UPN.to_owned(), SECOND_UPN.to_owned()]
+    );
+    assert!(
+        setup.signed_in_accounts().unwrap().is_empty(),
+        "no sign-in named either"
+    );
+    assert_eq!(setup.ask_for(SECOND_UPN).unwrap(), other);
+    // a bad UPN is refused, nothing written
+    assert!(matches!(
+        setup.ask_for("not a upn"),
+        Err(SetupError::Personal(PersonalError::Account(_)))
+    ));
+    assert_eq!(setup.accounts().unwrap().len(), 2);
 }
 
 #[tokio::test]
-async fn the_first_sign_in_screen_asks_until_a_sign_in_names_the_account() {
+async fn an_abandoned_account_goes_only_while_no_sign_in_named_it() {
     let dir = tempfile::tempdir().unwrap();
     let setup = setup_in(&dir);
-    // nothing held: the screen asks, with an empty field
-    assert!(setup.signed_in_account().unwrap().is_none());
-    assert_eq!(setup.held_upn().unwrap(), None);
+    // nothing held: the first run's screen asks, with an empty field
+    assert!(setup.signed_in_accounts().unwrap().is_empty());
+    assert!(setup.pending_upns().unwrap().is_empty());
     // a lab account is refused before anything is written
     assert!(matches!(
         setup.ask_for("bot-b@lab.example.test"),
         Err(SetupError::Personal(PersonalError::LabAccount))
     ));
-    assert!(!setup.paths.account_file().exists());
-    // an account no sign-in named yet gives way to the next one asked, keeping its identity provider's hosts
+    assert!(!setup.paths.accounts_file().exists());
+    // an account given whose sign-in stored nothing leaves nothing behind
     let typo = setup.ask_for("someone@example.tset").unwrap();
     assert!(!typo.is_signed_in());
-    let mut with_idp = PersonalAccount::load(&setup.paths).unwrap().unwrap();
+    assert_eq!(setup.pending_upns().unwrap(), vec!["someone@example.tset".to_owned()]);
+    assert!(setup.abandon("SOMEONE@example.tset").unwrap());
+    assert!(setup.accounts().unwrap().is_empty());
+    assert!(!setup.abandon("someone@example.tset").unwrap(), "none left to take out");
+    // the identity provider's hosts given to a pending account are kept by its sign-in
+    let pending = setup.ask_for(UPN).unwrap();
+    let mut with_idp = pending.clone();
     with_idp.idp_hosts = vec!["sso.example.test".to_owned()];
     with_idp.save(&setup.paths).unwrap();
-    assert!(setup.signed_in_account().unwrap().is_none(), "no sign-in named it yet");
-    assert_eq!(setup.held_upn().unwrap().as_deref(), Some("someone@example.tset"));
-    let pending = setup.ask_for(UPN).unwrap();
-    assert_eq!(pending.upn, UPN);
-    assert_eq!(pending.idp_hosts, vec!["sso.example.test".to_owned()]);
-    assert_eq!(PersonalAccount::load(&setup.paths).unwrap().unwrap(), pending);
-    // once a sign-in named it, it is the account to start with, and the screen may only repeat it
-    let server = MockServer::start().await;
-    let clients = clients(&server, UPN, OID).await;
     let store = MemorySecretStore::new();
-    let signed = signin::sign_in(&setup, &pending, &clients, &store, window())
-        .await
-        .unwrap();
-    assert_eq!(setup.signed_in_account().unwrap(), Some(signed.clone()));
+    let signed = signed_in(&setup, UPN, OID, &store).await;
+    assert_eq!(signed.idp_hosts, vec!["sso.example.test".to_owned()]);
+    assert_eq!(setup.signed_in_accounts().unwrap(), vec![signed.clone()]);
+    assert!(setup.pending_upns().unwrap().is_empty());
+    // once a sign-in named it, it stays: abandon takes out only a pending one
+    assert!(!setup.abandon(UPN).unwrap());
     assert_eq!(setup.ask_for("SOMEONE@example.test").unwrap(), signed);
-    assert!(matches!(
-        setup.ask_for("other@example.test"),
-        Err(SetupError::OtherAccount { .. })
-    ));
-    assert_eq!(PersonalAccount::load(&setup.paths).unwrap().unwrap(), signed);
+    let added = setup.ask_for(SECOND_UPN).unwrap();
+    assert!(setup.abandon(SECOND_UPN).unwrap());
+    assert_eq!(setup.accounts().unwrap(), vec![signed]);
+    assert!(!added.is_signed_in());
 }
 
 #[tokio::test]
-async fn forget_is_refused_while_the_engine_runs_and_the_next_account_never_opens_the_kept_store() {
+async fn a_second_account_s_sign_in_keeps_the_first_and_each_has_its_region_and_store() {
     let dir = tempfile::tempdir().unwrap();
     let setup = setup_in(&dir);
+    let store = MemorySecretStore::new();
+    let first = signed_in(&setup, UPN, OID, &store).await;
+    let second = signed_in(&setup, SECOND_UPN, OTHER_OID, &store).await;
+    assert_eq!(second.oid.as_deref(), Some(OTHER_OID));
+    assert_eq!(setup.signed_in_accounts().unwrap(), vec![first.clone(), second.clone()]);
+    let regions: Vec<_> = [&first, &second]
+        .iter()
+        .map(|account| setup.paths.region_file(account).unwrap())
+        .collect();
+    assert_ne!(regions[0], regions[1]);
+    let mut held: Vec<OsString> = fs::read_dir(setup.paths.data_dir().join("regions"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    held.sort();
+    assert_eq!(
+        held,
+        [format!("{OTHER_OID}.json"), format!("{OID}.json")].map(OsString::from)
+    );
+    for account in [&first, &second] {
+        assert!(store.get(&refresh_token_key(&account.upn)).await.unwrap().is_some());
+        assert!(signin::ready(&setup, account, &store).await.unwrap());
+    }
+    // each account its engine, under its own fence, on its own store, side by side
+    let engines = [start_engine(&setup, &first), start_engine(&setup, &second)];
+    let stores = [&first, &second].map(|account| setup.paths.store_file(account).unwrap());
+    assert_ne!(stores[0], stores[1]);
+    assert!(stores.iter().all(|store| store.is_file()));
+    for engine in engines {
+        engine.handle.shutdown();
+    }
+}
+
+#[tokio::test]
+async fn a_sign_in_landing_in_an_account_already_held_under_another_upn_stores_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let setup = setup_in(&dir);
+    let store = MemorySecretStore::new();
+    let first = signed_in(&setup, UPN, OID, &store).await;
     let server = MockServer::start().await;
-    let first_clients = clients(&server, UPN, OID).await;
+    let clients = clients(&server, SECOND_UPN, OID).await;
+    let alias = setup.ask_for(SECOND_UPN).unwrap();
+    let refused = signin::sign_in(&setup, &alias, &clients, &store, window()).await;
+    assert!(
+        matches!(refused, Err(SignInError::Personal(PersonalError::Account(_)))),
+        "{refused:?}"
+    );
+    assert!(store.get(&refresh_token_key(SECOND_UPN)).await.unwrap().is_none());
+    assert!(store.get(&refresh_token_key(UPN)).await.unwrap().is_some());
+    assert_eq!(setup.accounts().unwrap(), vec![first, alias]);
+}
+
+#[tokio::test]
+async fn forget_is_refused_while_the_engine_runs_and_forgets_one_account_leaving_the_other() {
+    let dir = tempfile::tempdir().unwrap();
+    let setup = setup_in(&dir);
     let secrets = MemorySecretStore::new();
-    let account = setup.account(Some(UPN)).unwrap();
-    let signed = signin::sign_in(&setup, &account, &first_clients, &secrets, window())
-        .await
-        .unwrap();
-    let fence = Arc::new(Fence::open_personal_with(&setup.paths, &setup.lab).unwrap());
-    let engine = teams::engine::start(&setup.paths, &signed, fence, MemorySecretStore::new(), false, None).unwrap();
+    let signed = signed_in(&setup, UPN, OID, &secrets).await;
+    let second = signed_in(&setup, SECOND_UPN, OTHER_OID, &secrets).await;
+    let engine = start_engine(&setup, &signed);
+    let first_region = setup.paths.region_file(&signed).unwrap();
+    let second_region = setup.paths.region_file(&second).unwrap();
 
     // the engine runs: nothing is deleted
-    let error = forget::forget(&setup, &secrets).await.unwrap_err();
+    let error = forget::forget(&setup, UPN, &secrets).await.unwrap_err();
     assert!(
         matches!(&error, ForgetError::Running { upn, .. } if upn == UPN),
         "{error}"
     );
     assert!(error.to_string().contains("quit it"), "{error}");
     assert!(secrets.get(&refresh_token_key(UPN)).await.unwrap().is_some());
-    assert_eq!(PersonalAccount::load(&setup.paths).unwrap(), Some(signed.clone()));
-    assert!(setup.paths.region_file().is_file());
+    assert_eq!(setup.accounts().unwrap(), vec![signed.clone(), second.clone()]);
+    assert!(first_region.is_file());
 
-    // once it has stopped, the account goes and its store stays
+    // once it has stopped, the account goes (case aside) and its store stays; the other account is untouched
     engine.handle.shutdown();
     let kept = setup.paths.store_file(&signed).unwrap();
     assert_eq!(
-        forget::forget(&setup, &secrets).await.unwrap(),
+        forget::forget(&setup, "SOMEONE@example.test", &secrets).await.unwrap(),
         Forgot::Account {
             upn: UPN.to_owned(),
             store: Some(kept.clone()),
         }
     );
-    assert!(secrets.get(&refresh_token_key(UPN)).await.unwrap().is_none());
-    assert_eq!(PersonalAccount::load(&setup.paths).unwrap(), None);
-    assert!(!setup.paths.region_file().exists());
+    for key in [refresh_token_key(UPN), skypetoken_key(UPN), skypetoken_expiry_key(UPN)] {
+        assert!(secrets.get(&key).await.unwrap().is_none(), "{key:?}");
+    }
+    for key in [
+        refresh_token_key(SECOND_UPN),
+        skypetoken_key(SECOND_UPN),
+        skypetoken_expiry_key(SECOND_UPN),
+    ] {
+        assert!(secrets.get(&key).await.unwrap().is_some(), "{key:?}");
+    }
+    assert_eq!(setup.accounts().unwrap(), vec![second.clone()]);
+    assert!(!first_region.exists());
+    assert!(second_region.is_file());
     assert!(kept.is_file());
-    assert_eq!(forget::forget(&setup, &secrets).await.unwrap(), Forgot::Nothing);
+    assert!(signin::ready(&setup, &second, &secrets).await.unwrap());
+    assert_eq!(forget::forget(&setup, UPN, &secrets).await.unwrap(), Forgot::Nothing);
 
-    // another account signed in next has a store of its own
-    let other_upn = "someone-else@example.test";
-    let server = MockServer::start().await;
-    let other_clients = clients(&server, other_upn, OTHER_OID).await;
-    let account = setup.account(Some(other_upn)).unwrap();
-    let other = signin::sign_in(&setup, &account, &other_clients, &secrets, window())
-        .await
-        .unwrap();
-    let fence = Arc::new(Fence::open_personal_with(&setup.paths, &setup.lab).unwrap());
-    let engine = teams::engine::start(&setup.paths, &other, fence, MemorySecretStore::new(), false, None).unwrap();
+    // a pending account is forgotten with no store and no lock to take
+    setup.ask_for("pending@example.test").unwrap();
+    assert_eq!(
+        forget::forget(&setup, "pending@example.test", &secrets).await.unwrap(),
+        Forgot::Account {
+            upn: "pending@example.test".to_owned(),
+            store: None,
+        }
+    );
+
+    // another account signed in next has a store of its own, never the kept one
+    let other = signed_in(
+        &setup,
+        "third@example.test",
+        "00000000-0000-4000-8000-0000000000dd",
+        &secrets,
+    )
+    .await;
+    let engine = start_engine(&setup, &other);
     let own = setup.paths.store_file(&other).unwrap();
     assert_ne!(own, kept);
     assert!(own.is_file());
     engine.handle.shutdown();
+}
+
+#[tokio::test]
+async fn a_single_account_of_an_earlier_build_is_moved_into_the_files_of_several() {
+    let dir = tempfile::tempdir().unwrap();
+    let (paths, lab) = paths_in(&dir);
+    fs::create_dir_all(paths.config_dir()).unwrap();
+    fs::write(
+        paths.legacy_account_file(),
+        format!("upn = \"{UPN}\"\noid = \"{OID}\"\ntid = \"{TENANT}\"\nidp_hosts = [\"sso.example.test\"]\n"),
+    )
+    .unwrap();
+    paths.make_dirs().unwrap();
+    let region =
+        format!(r#"{{"region": "amer", "partition": null, "regionGtms": {{"chatServiceAfd": "{CHAT_BASE}"}}}}"#);
+    fs::write(paths.legacy_region_file(), &region).unwrap();
+
+    let setup = Setup::new(paths, lab).unwrap();
+    assert!(!setup.paths.legacy_account_file().exists());
+    assert!(!setup.paths.legacy_region_file().exists());
+    assert!(setup.paths.accounts_file().is_file());
+    let mut held = PersonalAccount::new(UPN, OID, TENANT).unwrap();
+    held.idp_hosts = vec!["sso.example.test".to_owned()];
+    assert_eq!(setup.signed_in_accounts().unwrap(), vec![held.clone()]);
+    let moved = setup.paths.region_file(&held).unwrap();
+    assert_eq!(fs::read_to_string(moved).unwrap(), region);
+    let store = MemorySecretStore::new();
+    store
+        .put(&refresh_token_key(UPN), &Secret::new("made-up-refresh-token"))
+        .await
+        .unwrap();
+    assert!(signin::ready(&setup, &held, &store).await.unwrap());
+    // a second setup over the moved files changes nothing
+    let again = Setup::new(setup.paths.clone(), setup.lab.clone()).unwrap();
+    assert_eq!(again.accounts().unwrap(), vec![held]);
+}
+
+#[test]
+fn the_sign_in_window_is_given_exactly_the_account_it_signs_in() {
+    let account = PersonalAccount::pending(UPN).unwrap();
+    let command = signin::window_command(&account).unwrap();
+    assert!(command.get_program().to_string_lossy().ends_with(signin::WINDOW_BINARY));
+    let args: Vec<OsString> = command.get_args().map(ToOwned::to_owned).collect();
+    assert_eq!(signin::window_account(args), Some(UPN.to_owned()));
+    let parse = |args: &[&str]| signin::window_account(args.iter().map(OsString::from));
+    assert_eq!(parse(&["--account", UPN]), Some(UPN.to_owned()));
+    for refused in [
+        &[][..],
+        &["--account"][..],
+        &[UPN][..],
+        &["--account", UPN, "--account", UPN][..],
+        &["--upn", UPN][..],
+        &["--account=someone@example.test"][..],
+    ] {
+        assert_eq!(parse(refused), None, "{refused:?}");
+    }
 }

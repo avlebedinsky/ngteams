@@ -39,7 +39,7 @@ use gpui::{
     App, AppContext as _, AsyncApp, Bounds, Context, IntoElement, ParentElement as _, Render, Styled as _, Window,
     WindowBounds, WindowOptions, WindowingModes, div, img, px, rgb, size,
 };
-use teams_app::app::{self, Launch};
+use teams_app::app::{self, Launch, LaunchAccount};
 use teams_app::trace::adopt_trace;
 use teams_auth::secrets::Secret;
 use teams_auth::session::{AccessToken, Renewal};
@@ -697,16 +697,13 @@ fn child_window() -> SandboxResult {
         let launched = app::launch(
             cx,
             Launch {
-                alias: Alias::A,
-                engine,
-                broker: None,
-                signed_out: None,
+                first: LaunchAccount::bare(Alias::A, engine),
+                others: Vec::new(),
                 trace,
                 settings,
                 // the sandbox's private bus, with its fake notification server and tray watcher
                 bus: teams_ui::bus::address_from_env(),
                 diagnostics: None,
-                calls: None,
             },
         );
         match launched {

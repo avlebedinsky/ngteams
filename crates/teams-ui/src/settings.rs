@@ -28,6 +28,7 @@
 //! [`SettingsModel`] is the GPUI entity the views share: a change goes to the file at once (unless it couldn't be
 //! read).
 
+use std::collections::BTreeMap;
 use std::fs::{self, DirBuilder, File, OpenOptions, Permissions};
 use std::io::{self, Read as _, Write as _};
 use std::ops::RangeInclusive;
@@ -222,9 +223,110 @@ pub struct Settings {
     pub speaker: Option<String>,
     /// The calls' camera; `None` follows the system's default.
     pub camera: Option<String>,
+    /// The other accounts' own settings, by the account's MRI: the first account's are [`Settings::selected_chat`]
+    /// and [`Settings::manual_status`] themselves (see [`Settings::first_account`]).
+    pub accounts: BTreeMap<String, AccountSettings>,
+    /// The app's first account, whose own settings are the top-level ones (an app of one account: its only one), as
+    /// the app last set it ([`SettingsModel::set_first_account`]) and the file keeps it. `None` (a file of a build of
+    /// one account): every account is taken for the first, and the first one the app sets takes the top-level ones.
+    pub first_account: Option<String>,
+}
+
+/// What each account of an app of several keeps of its own: the chat shown last and its manual status.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AccountSettings {
+    pub selected_chat: Option<String>,
+    pub manual_status: ManualStatus,
 }
 
 impl Settings {
+    /// Whether `account` is the first account, whose own settings are the top-level ones.
+    fn is_first(&self, account: &str) -> bool {
+        self.first_account.as_deref().is_none_or(|first| first == account)
+    }
+
+    /// The chat `account` showed last.
+    #[must_use]
+    pub fn selected_chat_of(&self, account: &str) -> Option<&str> {
+        if self.is_first(account) {
+            self.selected_chat.as_deref()
+        } else {
+            self.accounts.get(account)?.selected_chat.as_deref()
+        }
+    }
+
+    /// Keeps `chat` as the chat `account` showed last; `None` keeps none.
+    pub fn set_selected_chat(&mut self, account: &str, chat: Option<String>) {
+        if self.is_first(account) {
+            self.selected_chat = chat;
+        } else {
+            self.accounts.entry(account.to_owned()).or_default().selected_chat = chat;
+            self.accounts.retain(|_, kept| *kept != AccountSettings::default());
+        }
+    }
+
+    /// `account`'s manual status.
+    #[must_use]
+    pub fn manual_status_of(&self, account: &str) -> ManualStatus {
+        if self.is_first(account) {
+            self.manual_status
+        } else {
+            self.accounts
+                .get(account)
+                .map_or_else(ManualStatus::default, |kept| kept.manual_status)
+        }
+    }
+
+    /// Sets `account`'s manual status.
+    pub fn set_manual_status(&mut self, account: &str, status: ManualStatus) {
+        if self.is_first(account) {
+            self.manual_status = status;
+        } else {
+            self.accounts.entry(account.to_owned()).or_default().manual_status = status;
+            self.accounts.retain(|_, kept| *kept != AccountSettings::default());
+        }
+    }
+
+    /// Makes `account` the first account: its own settings become the top-level ones, and the first account's before
+    /// it are kept under its MRI. With no first account yet (a file of one account), the top-level ones are taken for
+    /// `account`'s.
+    pub fn make_first(&mut self, account: &str) {
+        if self.first_account.as_deref() == Some(account) {
+            return;
+        }
+        // a file of one account: its top-level ones are this account's
+        if self.first_account.is_none() {
+            self.accounts.remove(account);
+            self.first_account = Some(account.to_owned());
+            return;
+        }
+        let own = self.accounts.remove(account).unwrap_or_default();
+        let before = AccountSettings {
+            selected_chat: std::mem::replace(&mut self.selected_chat, own.selected_chat),
+            manual_status: std::mem::replace(&mut self.manual_status, own.manual_status),
+        };
+        if let Some(first) = self.first_account.replace(account.to_owned())
+            && before != AccountSettings::default()
+        {
+            self.accounts.insert(first, before);
+        }
+    }
+
+    /// Forgets `account`'s own settings (an account removed): when it was the first, `next` (the app's next account)
+    /// takes the first's place first, so nothing of it stays at the top level.
+    pub fn forget_account(&mut self, account: &str, next: Option<&str>) {
+        if self.first_account.as_deref() == Some(account) {
+            if let Some(next) = next {
+                self.make_first(next);
+            } else {
+                self.selected_chat = None;
+                self.manual_status = ManualStatus::default();
+                self.first_account = None;
+            }
+        }
+        self.accounts.remove(account);
+    }
+
     /// The device chosen for `kind`; `None` follows the system.
     #[must_use]
     pub fn device(&self, kind: DeviceKind) -> Option<&str> {
@@ -262,6 +364,8 @@ impl Default for Settings {
             microphone: None,
             speaker: None,
             camera: None,
+            accounts: BTreeMap::new(),
+            first_account: None,
         }
     }
 }
@@ -281,6 +385,10 @@ pub mod keys {
     pub const MICROPHONE: &str = "microphone";
     pub const SPEAKER: &str = "speaker";
     pub const CAMERA: &str = "camera";
+    /// The other accounts' own settings: a table of tables, by the account's MRI.
+    pub const ACCOUNTS: &str = "accounts";
+    /// The account whose own settings are the top-level ones, by its MRI.
+    pub const FIRST_ACCOUNT: &str = "first_account";
 }
 
 /// What went wrong with the settings file: the defaults are used, or the one setting's default.
@@ -368,11 +476,48 @@ fn take(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem
             settings.video_calls = value.as_bool().ok_or(bad(keys::VIDEO_CALLS, "not true or false"))?;
         }
         keys::MICROPHONE | keys::SPEAKER | keys::CAMERA => take_device(settings, key, value)?,
+        keys::ACCOUNTS => take_accounts(settings, value)?,
+        keys::FIRST_ACCOUNT => {
+            settings.first_account = Some(chat_id(value).ok_or(bad(keys::FIRST_ACCOUNT, "not an account's MRI"))?);
+        }
         other => {
             return Err(Problem::UnknownKey { key: other.to_owned() });
         }
     }
     Ok(())
+}
+
+/// Takes the other accounts' own settings: each a table under the account's MRI (an id as a chat id is kept) holding
+/// `selected_chat` and `manual_status`. One that is bad leaves out that account's, the others are taken.
+fn take_accounts(settings: &mut Settings, value: &Value) -> Result<(), Problem> {
+    let bad = Problem::BadValue {
+        key: keys::ACCOUNTS,
+        why: "not a table of accounts, each with a chat id and a status this app knows",
+    };
+    let table = value.as_table().ok_or(bad.clone())?;
+    let mut failed = false;
+    for (account, kept) in table {
+        let taken = chat_id(&Value::String(account.clone()))
+            .zip(kept.as_table())
+            .and_then(|(account, kept)| {
+                let mut own = AccountSettings::default();
+                for (key, value) in kept {
+                    match key.as_str() {
+                        keys::SELECTED_CHAT => own.selected_chat = Some(chat_id(value)?),
+                        keys::MANUAL_STATUS => own.manual_status = value.as_str().and_then(ManualStatus::from_key)?,
+                        _ => return None,
+                    }
+                }
+                Some((account, own))
+            });
+        match taken {
+            Some((account, own)) => {
+                settings.accounts.insert(account, own);
+            }
+            None => failed = true,
+        }
+    }
+    if failed { Err(bad) } else { Ok(()) }
 }
 
 /// Takes a device's choice: a device name, as the settings keep one.
@@ -447,6 +592,27 @@ pub fn render(settings: &Settings) -> String {
         if let Some(name) = settings.device(kind) {
             table.insert(key.to_owned(), Value::String(name.to_owned()));
         }
+    }
+    let accounts: Table = settings
+        .accounts
+        .iter()
+        .map(|(account, own)| {
+            let mut kept = Table::new();
+            if let Some(chat) = &own.selected_chat {
+                kept.insert(keys::SELECTED_CHAT.to_owned(), Value::String(chat.clone()));
+            }
+            kept.insert(
+                keys::MANUAL_STATUS.to_owned(),
+                Value::String(own.manual_status.key().to_owned()),
+            );
+            (account.clone(), Value::Table(kept))
+        })
+        .collect();
+    if !accounts.is_empty() {
+        table.insert(keys::ACCOUNTS.to_owned(), Value::Table(accounts));
+    }
+    if let Some(first) = &settings.first_account {
+        table.insert(keys::FIRST_ACCOUNT.to_owned(), Value::String(first.clone()));
     }
     table.to_string()
 }
@@ -682,6 +848,19 @@ impl SettingsModel {
                 devices.directory.choose(kind, self.settings.device(kind));
             }
         }
+    }
+
+    /// Makes `account` the app's first account, whose own settings are the top-level ones ([`Settings::make_first`]);
+    /// an app of several accounts sets it before its views read an account's settings.
+    pub fn set_first_account(&mut self, account: &str, cx: &mut Context<Self>) {
+        let account = account.to_owned();
+        self.change(move |settings| settings.make_first(&account), cx);
+    }
+
+    /// Forgets `account`'s own settings, `next` the first account when it was ([`Settings::forget_account`]).
+    pub fn forget_account(&mut self, account: &str, next: Option<&str>, cx: &mut Context<Self>) {
+        let (account, next) = (account.to_owned(), next.map(str::to_owned));
+        self.change(move |settings| settings.forget_account(&account, next.as_deref()), cx);
     }
 
     /// The settings with the first run's screen asked for (the personal build): until [`Settings::first_run`] is confirmed,

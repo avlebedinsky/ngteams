@@ -40,12 +40,12 @@ personal build widens what a lab account may do.
 |---|---|---|
 | crate | `crates/teams-app` | `crates/teams` (a lib beside `main.rs`, as `teams-headless` and `teams-app` have) |
 | UI | `teams-ui` | the same `teams-ui` |
-| account | one lab alias per process, from `lab.toml` | the user's own work account, the one the sign-in window signs in |
-| config | `~/.config/teams-lab/lab.toml` | `~/.config/teams/account.toml` (written by the first sign-in, below) |
+| account | one or more lab aliases per process (`--lab`), from `lab.toml` | the user's own work accounts, each one the sign-in window signs in ([Several accounts](#several-accounts)) |
+| config | `~/.config/teams-lab/lab.toml` | `~/.config/teams/accounts.toml` (written by each first sign-in, below) |
 | data dir | `$XDG_DATA_HOME/teams-lab/` (or `lab.toml`'s `data_dir`) | `$XDG_DATA_HOME/teams/` (`~/.local/share/teams/`), `0700` |
 | store | `<lab data>/store/<alias>.sqlite` | `~/.local/share/teams/store/<oid>.sqlite` (`0600`, as `teams-store` makes it) |
 | fence log | `<lab data>/fence.log` | `~/.local/share/teams/fence.log` (`0600`) |
-| region (no token) | `<lab data>/auth/<alias>.json` | `~/.local/share/teams/region.json` |
+| region (no token) | `<lab data>/auth/<alias>.json` | `~/.local/share/teams/regions/<oid>.json` |
 | UI settings | `<lab data>/ui/<alias>.toml` | `~/.local/share/teams/settings.toml` |
 | diagnostic log | under the lab's data dir | under `~/.local/share/teams/` (`0600`, rotated; below) |
 | Secret Service application | `teams-lab` (`LabPaths::KEYRING_APPLICATION`) | `teams-personal` |
@@ -56,15 +56,15 @@ personal build widens what a lab account may do.
 | live lock | `~/.local/share/teams-lab/live.lock` around every live command | none: it is the user's own app |
 | calls | the UI sandbox's private PipeWire and fake camera portal; the lab's call rule (a call judged by its entry); the echo service from `lab.toml`; OpenH264 in `<lab data>/openh264/` | the desktop's PipeWire and camera portal (fixed when built); the personal call rule ([Calls](#calls)) on the call registry; the echo service from the web bundle (`teams_proto::TEAMS_ECHO_BOT_MRI`); OpenH264 in `~/.local/share/teams/openh264/` (`scripts/fetch-openh264.sh ~/.local/share/teams`, once; without it the calls carry audio only) |
 
-`account.toml` holds what the first sign-in learned, never a token: the UPN the user typed, and the ID token's `oid`
-and `tid`. Every later sign-in must give the same `oid` and `tid` (the ID token's `preferred_username` checked as
+`accounts.toml` holds, for each account, what its first sign-in learned, never a token: the UPN the user typed, and
+the ID token's `oid` and `tid`. Every later sign-in must give the same `oid` and `tid` (the ID token's `preferred_username` checked as
 `teams_auth::token::TokenClient::exchange_code` checks it today, then the pair compared), so a sign-in that lands in
-another account or another tenant stores nothing and says so. Changing account is an explicit "sign out and forget
-this account" in the app, which deletes the `teams-personal` items, `account.toml` and, after a confirmation, the
-store.
+another account or another tenant stores nothing and says so. Removing an account is an explicit "Sign out and
+remove" in the app (or `teams --forget <UPN>`), which deletes its `teams-personal` items, its `accounts.toml` entry and
+its region; its store stays, to delete by hand.
 
 The engine is built as `teams_core::lab::start` builds it (the `Session`, the transport, the push channel, the
-outbox), from `account.toml` and the region the authz exchange gives instead of `lab.toml`; Task 27 factors the
+outbox), from the account's `accounts.toml` entry and the region the authz exchange gives instead of `lab.toml`; Task 27 factors the
 shared part out of `lab.rs` rather than copying it. The engine lock (`Store::engine_lock`) keeps one `teams` per
 account, as it keeps one lab engine per alias.
 
@@ -75,6 +75,33 @@ CLAUDE.md's token rule is unchanged (no token, cookie or code reaches any log or
 that log holds the user's colleagues' messages: it is the user's data, like the store and `fence.log`, and never goes
 into the repo, not even sanitized.
 
+## Several accounts
+
+The user may add several of their own work accounts (the user's decision of 2026-10-27), all of them running at once
+in one window: the rail shows each account's avatar above Settings, a click switches to it at once, the "+" under the
+avatars adds one, and an account's menu has "Sign out and remove". Every account notifies and rings whichever one the
+window shows, its notifications naming it.
+
+- **Each account is the user's own and stands alone.** It is in `accounts.toml` (`[[account]]` tables, in the order
+  added; a single account's `account.toml` and `region.json` from before are moved there, and to
+  `regions/<oid>.json`, at the next start), it has its own store (`store/<oid>.sqlite`), region, refresh token and
+  skypetoken (`teams-personal` items keyed by its UPN), its own engine (its own engine lock) and its own personal
+  fence, `Fence::open_personal(paths, upn)`, which permits only that account's writes, to conversations its own fresh
+  read lists it in. Nothing of one account is used for another. A lab account is refused as before, by UPN or MRI.
+- **Adding one** goes through the same window as the first sign-in (the account asked for, then Microsoft's sign-in
+  window bound to that account's identity provider hosts); a sign-in that stores nothing leaves no account behind.
+  Once it goes through, the account's engine starts and its avatar shows; nothing else restarts.
+- **Removing one** stops its engine first, then forgets it as `teams --forget <UPN>` does: its `teams-personal` items,
+  its `accounts.toml` entry and its region; its store stays, to delete by hand.
+- **Calls, one at a time across the accounts.** The accounts' fences share one call floor (`teams_fence::CallFloor`):
+  while any account has a call up or ringing, an invitation to another account isn't offered (it rings on the user's
+  other clients) and no other account starts, joins or answers a call. The calls' devices are the one PipeWire the
+  build opens, shared.
+- **The settings** are one file for the app (`settings.toml`): the first account's last chat and manual status are
+  its top-level keys as before, the other accounts' under `[accounts."<mri>"]`. Typing, read receipts, presence and
+  the first run's confirmation hold for every account.
+- **`fence.log`** is one file for every account; each decision names its target, which names the account's own chats.
+
 ## The personal fence
 
 ### Where it lives
@@ -82,8 +109,8 @@ into the repo, not even sanitized.
 In `teams-fence`, behind a cargo feature `personal` that only `crates/teams/Cargo.toml` enables. `Fence` keeps its
 one type (the transport, the outbox and the push channel all take an `Arc<Fence>` today) and gains a policy inside
 it: the lab's roster and group chat as now, or, only with `personal`, the personal account. The only way to a
-personal policy is `Fence::open_personal(paths)`, which exists only with the feature, reads `account.toml` from the
-personal paths and opens the personal `fence.log`. Permits, `Authorized<_>`, `PostReadPermit` and the sealed
+personal policy is `Fence::open_personal(paths, upn)`, which exists only with the feature, reads that account from
+the personal paths' `accounts.toml` and opens the personal `fence.log`; one per account. Permits, `Authorized<_>`, `PostReadPermit` and the sealed
 `MembershipSource` stay where they are: nothing outside `teams-fence` mints one, in either build.
 
 ### What it permits
@@ -126,7 +153,7 @@ A write is permitted only when all of these hold, each checked when the fence de
 one and the call writes [Calls](#calls) gives targets of their own (an invitation addressed to the account, a
 registered call, the test call); a call's start and join are held to them, as that section says. Task 19 gives the
 availability a scope of its own, "the account itself", which `Fence::judge` permits without a member read only for
-the fence's own account; in the personal build it is permitted only for the account `account.toml` names, only on
+the fence's own account; in the personal build it is permitted only for the fence's own account (its `accounts.toml` entry), only on
 its own Trouter endpoint (the one the push channel registered this run, any other id `Unknown`), only with the
 availability values a capture showed, and only while the presence setting is on (rule 5). Rules 1, 2, 5 and 6 hold
 for it as for every write. A status note, out-of-office or a profile field is not part of it: those stay
@@ -330,7 +357,7 @@ sign-in:
   the web process extension module beside them.
 - **A bounded set of hosts**: Entra's sign-in host (`login.microsoftonline.com`), its static content hosts (the
   `aadcdn`/`logincdn` hosts the sign-in page loads from), and the federated identity provider's hosts the user
-  names in `account.toml` (`idp_hosts`, empty by default), `https` only. The network session's egress proxy (today
+  names in the account's `accounts.toml` entry (`idp_hosts`, empty by default), `https` only. The network session's egress proxy (today
   `teams_signin::egress`'s black hole) becomes a host gate: it opens a `CONNECT` tunnel only to those hosts on 443,
   refuses and logs every other connection, and is the soup session's only way out, so the requests the guard can't
   see (the redirects and an unarmed web process's) reach no other host either. No Teams, Office or Graph host is on
@@ -368,7 +395,7 @@ anything it sends. An allowlist of the identity hosts rules that out by construc
 The options:
 
 - **The host-bounded window above** (the proposal): Entra's sign-in hosts, their static content hosts and the
-  identity provider's hosts named in `account.toml`, nothing else. Its three gaps (two redirects, an unarmed web
+  identity provider's hosts named in the account's `accounts.toml` entry, nothing else. Its three gaps (two redirects, an unarmed web
   process) are accepted knowingly for the user's own sign-in, because they can reach no Teams host. Its cost: a
   sign-in page that loads from a host not on the list (an identity provider's CDN, a captcha) fails until the user
   adds that host.
@@ -575,19 +602,22 @@ Written after the approval and the lab fence's rewrite, by Task 27:
 - **Membership.** The personal source's answer is `Membership::Listed` (one unpaged thread read in a captured shape,
   every member `8:orgid:<guid>` or `28:<guid>`, a group chat's `threadType` `chat`, a 1:1 chat's members exactly the
   two its id names); the lab fence denies a listing, and the personal fence denies anything but one.
-- **`account.toml`.** Before the first sign-in, `teams` opens a window of its own asking for the work account
-  (`teams_ui::account_prompt`); "Sign in" writes the UPN there (the user may add `idp_hosts`) and opens the sign-in
-  window, which adds the object id and tenant; the personal fence opens only once both are there, and a sign-in that
-  goes through starts the app afresh. Until a sign-in named one, another UPN typed replaces it (keeping `idp_hosts`);
-  afterwards the window may only repeat it. It opens again whenever the account must sign in before the app starts.
-  `teams --account <UPN>` skips it and goes to the sign-in window at once, under the same rule.
-- **Changing account** is `teams --forget` (the `teams-personal` items, `account.toml`, the region; the store stays, to
-  delete by hand), a command line flag rather than an item in the app. It is refused while the account's engine runs
+- **`accounts.toml`.** Before the first sign-in, `teams` opens a window of its own asking for the work account
+  (`teams_ui::account_prompt`); "Sign in" adds the UPN there (the user may add `idp_hosts`) and opens the sign-in
+  window (`teams-signin-personal --account <UPN>`), which adds the object id and tenant; that account's fence opens
+  only once both are there, and a sign-in that goes through starts the app afresh. A UPN typed that is one already is
+  that account; another is a new account, taken out again when its sign-in stores nothing. The rail's "+" opens the
+  same window to add an account while the app runs. An account a sign-in named that can't start without one signs in
+  again once the others run (or on that window, with none running). `teams --account <UPN>` skips the window and goes
+  to the sign-in window at once, under the same rule.
+- **Removing an account** is "Sign out and remove" in its account menu, or `teams --forget <UPN>` (its
+  `teams-personal` items, its `accounts.toml` entry, its region; the store stays, to delete by hand). The flag is
+  refused while the account's engine runs
   (it takes the account's engine lock first and holds it until everything is deleted), so a running app's session
   can't keep sending or store a renewed token again. Each account has a store of its own (`store/<oid>.sqlite`), so a
   store kept after a forget is never opened for another account.
-- **The display name** a post carries (`imdisplayname`) is the ID token's `name`, kept in `account.toml` by every
-  sign-in that gives one; an `account.toml` without one falls back to the UPN's local part.
+- **The display name** a post carries (`imdisplayname`) is the ID token's `name`, kept in the account's
+  `accounts.toml` entry by every sign-in that gives one; an entry without one falls back to the UPN's local part.
 - **The lab's credential broker** (`teams-app secrets`) builds no fence and refuses neither `test-support` nor
   `personal`, as before; the app itself refuses both.
 - **CLAUDE.md** carries the approved text without its date (CLAUDE.md holds current rules only), its references to

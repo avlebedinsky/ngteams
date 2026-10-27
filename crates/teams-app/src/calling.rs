@@ -9,6 +9,10 @@
 //! list its devices and choose among them ([`AppCalls::devices`], M3 Task 20): a choice moves the calls' devices at
 //! once, a running call's included.
 //!
+//! An app of several accounts opens the devices once ([`CallDevices::connect`]) and makes each account's calls on them
+//! ([`CallDevices::account`]): each its own engine calling and its own video feed, one ringtone and one device choice
+//! for the app.
+//!
 //! **Video** (M3 Task 18): a 1:1 call takes video when the lab's copy of Cisco's OpenH264 is there and is Cisco's
 //! ([`teams_core::lab::openh264`], fetched by `scripts/fetch-openh264.sh`); its frames are shown on the window's
 //! [`VideoFeed`], and the settings' switch ("OpenH264 Video Codec provided by Cisco Systems, Inc.") turns the codec off
@@ -83,21 +87,61 @@ pub fn on_devices(
     )
 }
 
-/// The engine's calling and the window's calls on the PipeWire this build allows (see the module docs).
+/// The calls' devices of the whole app, opened once: the PipeWire this build allows, the codec when it is there, the
+/// test call's echo. Every account's calls are made on them ([`CallDevices::account`]): one microphone, speaker and
+/// camera for the app, however many accounts it runs (one call at a time across them: `teams_fence::CallFloor`).
+#[derive(Clone)]
+pub struct CallDevices {
+    devices: Arc<PipeWireDevices>,
+    video: Option<H264Library>,
+    echo: Option<Mri>,
+}
+
+impl std::fmt::Debug for CallDevices {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CallDevices")
+            .field("video", &self.video.is_some())
+            .field("echo", &self.echo)
+            .finish_non_exhaustive()
+    }
+}
+
+impl CallDevices {
+    /// The PipeWire this build allows (see the module docs), the lab's codec when it is Cisco's, lab.toml's echo.
+    ///
+    /// # Errors
+    /// The PipeWire is refused or can't be reached ([`PipeWireDevices::connect`]).
+    pub fn connect(config: &LabConfig) -> Result<Self, DeviceError> {
+        let devices = Arc::new(PipeWireDevices::connect()?);
+        let library = teams_core::lab::openh264(config.paths());
+        let video = match library.check() {
+            Ok(()) => Some(library),
+            Err(error) => {
+                log::info!("the calls carry no video: {error}");
+                None
+            }
+        };
+        Ok(Self {
+            devices,
+            video,
+            echo: echo_of(config),
+        })
+    }
+
+    /// One account's engine calling and window calls on these devices ([`on_devices`]), its video on a feed of its
+    /// own; the settings list these devices.
+    #[must_use]
+    pub fn account(&self) -> (AccountCalls, AppCalls) {
+        let (engine, mut window) = on_devices(self.devices.clone(), self.echo.clone(), self.video.clone());
+        window.devices = Some(self.devices.clone());
+        (engine, window)
+    }
+}
+
+/// The engine's calling and the window's calls of one account on the PipeWire this build allows (see the module docs).
 ///
 /// # Errors
 /// The PipeWire is refused or can't be reached ([`PipeWireDevices::connect`]).
 pub fn open(config: &LabConfig) -> Result<(AccountCalls, AppCalls), DeviceError> {
-    let devices = Arc::new(PipeWireDevices::connect()?);
-    let library = teams_core::lab::openh264(config.paths());
-    let video = match library.check() {
-        Ok(()) => Some(library),
-        Err(error) => {
-            log::info!("the calls carry no video: {error}");
-            None
-        }
-    };
-    let (engine, mut window) = on_devices(devices.clone(), echo_of(config), video);
-    window.devices = Some(devices);
-    Ok((engine, window))
+    CallDevices::connect(config).map(|devices| devices.account())
 }

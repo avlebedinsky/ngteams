@@ -1,6 +1,6 @@
 [package]
 name = "teams-app"
-description = "The lab's GPUI app for one lab account, and its credential broker (`teams-app secrets`), which serves the account's own Secret Service items to the sandboxed app on a socket pair"
+description = "The lab's GPUI app for one or more lab accounts in one window, and its credential broker (`teams-app secrets`), which serves one account's own Secret Service items to the sandboxed app on a socket pair"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -62,6 +62,12 @@ zbus.workspace = true
 # the app's window in the UI sandbox, on the mock: its own `main` (GPUI runs on the main thread), which runs itself
 # again inside the sandbox
 name = "window"
+harness = false
+
+[[test]]
+# several accounts in the app's one window, on the mock in the UI sandbox: its own `main` (GPUI runs on the main
+# thread), which runs itself again inside the sandbox as the app of a and b
+name = "accounts_window"
 harness = false
 
 [[test]]

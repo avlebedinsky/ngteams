@@ -5,5 +5,5 @@ use teams_fence::personal::PersonalPaths;
 
 fn main() {
     let paths = PersonalPaths::from_env().unwrap();
-    let _ = Fence::open_personal(&paths);
+    let _ = Fence::open_personal(&paths, "someone@example.com");
 }

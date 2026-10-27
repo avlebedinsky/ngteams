@@ -1,10 +1,10 @@
-//! The personal account's engine, assembled as every binary builds one (`teams_core::account::start`) from the personal
-//! build's parts: the fence the binary opened (`Fence::open_personal`, its account from `account.toml`), its own
+//! One personal account's engine, assembled as every binary builds one (`teams_core::account::start`) from the personal
+//! build's parts: the fence the binary opened for it (`Fence::open_personal`, the account from `accounts.toml`), its own
 //! membership source (`PersonalMembershipSource`: a chat's thread read fresh at every decision, its credential the chat
 //! transport's), the account's own store at `~/.local/share/teams/store/<oid>.sqlite` (never another account's: a store
-//! kept after `teams --forget` stays its account's), the region the sign-in saved, the push channel, and the calling
-//! (`crate::calling`: the calling stack's socket under the same fence, the calls' media on the desktop's devices) when
-//! the devices could be opened.
+//! kept after `teams --forget` stays its account's), the region its sign-in saved (`regions/<oid>.json`), the push
+//! channel, and the calling (`crate::calling`: the calling stack's socket under the same fence, the calls' media on the
+//! desktop's devices) when the devices could be opened. An app of several accounts starts one per account.
 //! Nothing is sent while it is built: the session asks its store for a token only when a request needs one.
 
 use std::sync::Arc;
@@ -18,7 +18,7 @@ use teams_fence::personal::{PersonalAccount, PersonalMembershipSource, PersonalP
 /// Why the engine couldn't be built or started.
 #[derive(Debug, thiserror::Error)]
 pub enum StartError {
-    #[error("no account signed in yet: sign in first")]
+    #[error("the account isn't signed in yet: sign it in first")]
     NotSignedIn,
     #[error("the region the sign-in saved can't be read ({0}): sign in again")]
     Region(#[from] RegionFileError),
@@ -33,7 +33,7 @@ pub type PersonalEngine<S> = AccountEngine<S>;
 /// push channel when `push` and its calling when `calls` is given (`crate::calling`; see the module docs).
 ///
 /// # Errors
-/// [`StartError`]; [`AccountError::Engine`] with `EngineError::AlreadyRunning` when another `teams` runs.
+/// [`StartError`]; [`AccountError::Engine`] with `EngineError::AlreadyRunning` when another engine runs for the account.
 pub fn start<S: SecretStore + 'static>(
     paths: &PersonalPaths,
     account: &PersonalAccount,
@@ -44,7 +44,7 @@ pub fn start<S: SecretStore + 'static>(
 ) -> Result<PersonalEngine<S>, StartError> {
     let mri = account.mri().ok_or(StartError::NotSignedIn)?;
     let store_file = paths.store_file(account).ok_or(StartError::NotSignedIn)?;
-    let region = Region::load(&paths.region_file())?;
+    let region = Region::load(&paths.region_file(account).ok_or(StartError::NotSignedIn)?)?;
     let parts = Account {
         upn: account.upn.clone(),
         mri: mri.as_str().to_owned(),
@@ -64,8 +64,8 @@ pub fn start<S: SecretStore + 'static>(
     Ok(account::start(parts, fence, membership)?)
 }
 
-/// The name the account's posts carry (`imdisplayname`): the display name the sign-in's ID token gave (`account.toml`'s
-/// `name`), else, from an `account.toml` without one, the UPN's local part.
+/// The name the account's posts carry (`imdisplayname`): the display name the sign-in's ID token gave (its
+/// `accounts.toml` entry's `name`), else, from an entry without one, the UPN's local part.
 #[must_use]
 pub fn display_name(account: &PersonalAccount) -> &str {
     account.name.as_deref().unwrap_or_else(|| {

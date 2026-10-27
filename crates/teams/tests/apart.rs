@@ -18,7 +18,7 @@ use teams::setup::Setup;
 use teams_auth::signin::{WindowAnswer, WindowRequest};
 use teams_auth::token::NATIVE_CLIENT_REDIRECT;
 use teams_fence::lab::{ConfigError, LabLocations, LabPaths};
-use teams_fence::personal::{PersonalError, PersonalPaths};
+use teams_fence::personal::{PersonalAccount, PersonalError, PersonalPaths};
 use toml::Value;
 
 fn root() -> PathBuf {
@@ -225,7 +225,8 @@ fn both_binaries_refuse_first() {
     let text = fs::read_to_string(root().join("crates/teams/src/main.rs")).unwrap();
     let main = &text[text.find("fn main()").unwrap()..];
     let refused = main.find("teams::refusal()").unwrap();
-    for later in ["Cli::parse", "Setup::from_env", "gpui_platform", "LazyKeyring::new"] {
+    // the keyring is opened only through `teams::accounts`, which `main` reaches after the refusal
+    for later in ["Cli::parse", "Setup::from_env", "gpui_platform", "accounts::"] {
         assert!(
             main.find(later).is_some_and(|at| at > refused),
             "{later} before the refusal"
@@ -234,7 +235,14 @@ fn both_binaries_refuse_first() {
     let text = fs::read_to_string(root().join("crates/teams/src/bin/teams-signin-personal.rs")).unwrap();
     let window = &text[text.find("fn prepare()").unwrap()..];
     let refused = window.find("teams::refusal()").unwrap();
-    for later in ["Setup::from_env", "read_line", "FenceLog::open", "WindowConfig {"] {
+    for later in [
+        "window_account",
+        "Setup::from_env",
+        "PersonalAccount::find",
+        "read_line",
+        "FenceLog::open",
+        "WindowConfig {",
+    ] {
         assert!(
             window.find(later).is_some_and(|at| at > refused),
             "{later} before the refusal"
@@ -260,8 +268,8 @@ fn only_this_crate_names_the_personal_keyring_and_opens_the_personal_fence_and_n
     }
     assert_eq!(teams::KEYRING_APPLICATION, "teams-personal");
     assert_ne!(teams::KEYRING_APPLICATION, LabPaths::KEYRING_APPLICATION);
-    let main = fs::read_to_string(root().join("crates/teams/src/main.rs")).unwrap();
-    assert!(main.contains("LazyKeyring::new(KEYRING_APPLICATION)"));
+    let accounts = fs::read_to_string(root().join("crates/teams/src/accounts.rs")).unwrap();
+    assert!(accounts.contains("LazyKeyring::new(KEYRING_APPLICATION)"));
     let opener = ["open", "_personal("].concat();
     for file in holding(&["crates"], &opener) {
         let allowed = file.starts_with("crates/teams/")
@@ -334,6 +342,7 @@ fn both_binaries_built_with_test_support_refuse_and_touch_nothing() {
     assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0, "nothing was created");
 
     let mut child = Command::new(env!("CARGO_BIN_EXE_teams-signin-personal"))
+        .args(["--account", "someone@example.test"])
         .env_clear()
         .env("HOME", home.path())
         .stdin(Stdio::piped())
@@ -388,5 +397,46 @@ fn each_side_refuses_the_other_s_data_dir() {
     assert!(matches!(
         overlapping.lab_paths(),
         Err(ConfigError::PersonalDataDir { .. })
+    ));
+}
+
+#[test]
+fn a_lab_account_among_the_personal_accounts_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_file = dir.path().join("config/teams-lab/lab.toml");
+    fs::create_dir_all(config_file.parent().unwrap()).unwrap();
+    let lab_toml = ["a", "b", "c"].map(|alias| {
+        let end = alias.repeat(2);
+        format!(
+            "[[accounts]]\nalias = \"{alias}\"\nupn = \"bot-{alias}@lab.example.test\"\n\
+             mri = \"8:orgid:00000000-0000-4000-8000-0000000000{end}\"\n"
+        )
+    });
+    fs::write(&config_file, lab_toml.concat()).unwrap();
+    let lab = LabLocations {
+        config_file,
+        data_dir: dir.path().join("share/teams-lab"),
+        personal_data_dir: dir.path().join("share/teams"),
+    };
+    let paths = PersonalPaths::new(dir.path().join("config/teams"), dir.path().join("share/teams"));
+    let setup = Setup::new(paths, lab).unwrap();
+    setup.ask_for("someone@example.test").unwrap();
+    // written beside it by hand: every listing of the accounts refuses it, and asking for it does too
+    PersonalAccount::pending("BOT-A@lab.example.test")
+        .unwrap()
+        .save(&setup.paths)
+        .unwrap();
+    for refused in [setup.accounts(), setup.signed_in_accounts()] {
+        assert!(
+            matches!(
+                refused,
+                Err(teams::setup::SetupError::Personal(PersonalError::LabAccount))
+            ),
+            "{refused:?}"
+        );
+    }
+    assert!(matches!(
+        setup.ask_for("bot-a@lab.example.test"),
+        Err(teams::setup::SetupError::Personal(PersonalError::LabAccount))
     ));
 }

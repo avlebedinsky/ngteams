@@ -1,0 +1,141 @@
+//! The accounts the app runs at once (`docs/personal-build.md`, "Several accounts"): each signed-in account's engine,
+//! started over a personal fence of its own that shares the app's call floor (`teams_fence::CallFloor`: one call or
+//! ringing invitation at a time across the accounts), its calls on the app's one set of devices ([`CallDevices`]); and
+//! the blocking sign-in and forget the window's "+" and "Sign out and remove" run off GPUI's foreground.
+//!
+//! Nothing is sent here: each engine's writes go through its own outbox under its own fence.
+
+use std::sync::Arc;
+
+use teams_auth::secrets::LazyKeyring;
+use teams_fence::personal::PersonalAccount;
+use teams_fence::{CallFloor, Fence};
+
+use crate::KEYRING_APPLICATION;
+use crate::calling::{CallDevices, PersonalCalls};
+use crate::engine::{self, PersonalEngine};
+use crate::forget::{self, Forgot};
+use crate::setup::Setup;
+use crate::signin::{self, SignInClients};
+
+/// An account's engine, started.
+pub struct Started {
+    pub account: PersonalAccount,
+    pub engine: PersonalEngine<LazyKeyring>,
+    /// The window's calls of the account, when the app's devices could be opened.
+    pub calls: Option<PersonalCalls>,
+}
+
+impl std::fmt::Debug for Started {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Started")
+            .field("account", &self.account)
+            .field("calls", &self.calls.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+/// What every account the app runs shares: the setup, the call floor, the calls' devices.
+#[derive(Clone, Debug)]
+pub struct Runner {
+    pub setup: Setup,
+    pub floor: CallFloor,
+    /// The calls' devices; `None`: the app runs without calls.
+    pub devices: Option<CallDevices>,
+}
+
+impl Runner {
+    /// Starts `account`'s engine: its fence on the floor, its calling on the devices, its push channel.
+    ///
+    /// # Errors
+    /// Why it couldn't start, said for the user (another `teams` runs on the account, its region can't be read).
+    pub fn start(&self, account: &PersonalAccount) -> Result<Started, String> {
+        let fence = Fence::open_personal(&self.setup.paths, &account.upn)
+            .map_err(|error| format!("{}: {error}", account.upn))?
+            .sharing_calls(&self.floor);
+        let (engine_calls, calls) = self
+            .devices
+            .as_ref()
+            .map(CallDevices::for_account)
+            .map_or((None, None), |(engine, window)| (Some(engine), Some(window)));
+        let engine = engine::start(
+            &self.setup.paths,
+            account,
+            Arc::new(fence),
+            LazyKeyring::new(KEYRING_APPLICATION),
+            true,
+            engine_calls,
+        )
+        .map_err(|error| format!("{}: {error}", account.upn))?;
+        Ok(Started {
+            account: account.clone(),
+            engine,
+            calls,
+        })
+    }
+}
+
+/// A runtime of its own for a blocking sign-in or forget.
+///
+/// # Errors
+/// When it can't be built.
+pub fn runtime() -> Result<tokio::runtime::Runtime, String> {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("can't start the async runtime: {error}"))
+}
+
+/// Whether `account` can start without a sign-in ([`signin::ready`]).
+///
+/// # Errors
+/// When the Secret Service can't be read.
+pub fn ready(setup: &Setup, account: &PersonalAccount) -> Result<bool, String> {
+    let store = LazyKeyring::new(KEYRING_APPLICATION);
+    runtime()?
+        .block_on(signin::ready(setup, account, &store))
+        .map_err(|error| error.to_string())
+}
+
+/// Signs `account` in through the sign-in window (blocking: run it off GPUI's foreground), as [`signin::sign_in`].
+///
+/// # Errors
+/// Why the sign-in stored nothing.
+pub fn sign_in(setup: &Setup, account: &PersonalAccount) -> Result<PersonalAccount, String> {
+    let store = LazyKeyring::new(KEYRING_APPLICATION);
+    runtime()?.block_on(async {
+        let clients = SignInClients::live().map_err(|error| error.to_string())?;
+        let window = signin::window_command(account).map_err(|error| error.to_string())?;
+        let signed = signin::sign_in(setup, account, &clients, &store, window)
+            .await
+            .map_err(|error| format!("the sign-in stored nothing: {error}"))?;
+        log::info!("an account was signed in (its tenant matched)");
+        Ok(signed)
+    })
+}
+
+/// Adds the account `upn` (or takes the one held) and signs it in (blocking: run it off GPUI's foreground). One that
+/// doesn't go through leaves nothing behind: an account no sign-in named is taken out again ([`Setup::abandon`]).
+///
+/// # Errors
+/// Why it wasn't added.
+pub fn add(setup: &Setup, upn: &str) -> Result<PersonalAccount, String> {
+    let account = setup.ask_for(upn).map_err(|error| error.to_string())?;
+    let signed = sign_in(setup, &account);
+    if signed.is_err() {
+        // a pending account only: one a sign-in named earlier stays
+        let _ = setup.abandon(upn);
+    }
+    signed
+}
+
+/// Forgets the account `upn` (blocking), as `teams --forget` does: refused while its engine runs.
+///
+/// # Errors
+/// Why it wasn't forgotten.
+pub fn forget(setup: &Setup, upn: &str) -> Result<Forgot, String> {
+    let store = LazyKeyring::new(KEYRING_APPLICATION);
+    runtime()?
+        .block_on(forget::forget(setup, upn, &store))
+        .map_err(|error| error.to_string())
+}

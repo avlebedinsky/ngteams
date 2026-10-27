@@ -1,9 +1,11 @@
 //! The personal build's fence (`docs/personal-build.md`, approved by the user on 2026-10-23), only with the `personal`
 //! feature, which only `crates/teams` enables.
 //!
-//! - **Its files** ([`PersonalPaths`]): `account.toml` in `~/.config/teams/` (the account the first sign-in signed in:
-//!   its UPN, object id and tenant, and the identity provider hosts the user names; never a token), and under
-//!   `~/.local/share/teams/` its `fence.log`, store, region, settings and diagnostic log. The data dir is refused when
+//! - **Its files** ([`PersonalPaths`]): `accounts.toml` in `~/.config/teams/` (the user's accounts in the order added,
+//!   each as its first sign-in signed it in: its UPN, object id and tenant, and the identity provider hosts the user
+//!   names; never a token; a single account's `account.toml` of an earlier build is moved there), and under
+//!   `~/.local/share/teams/` its `fence.log` (one for every account), each account's store and region, the settings and
+//!   the diagnostic log. The data dir is refused when
 //!   it is, contains or lies inside the lab's ([`PersonalPaths::check_apart`]), and an account `lab.toml` names is
 //!   refused ([`PersonalAccount::check_not_lab`]).
 //! - **Its decision** ([`Fence::open_personal`], the only way to it outside tests): a write is permitted only when it
@@ -78,9 +80,16 @@ impl PersonalPaths {
         &self.data_dir
     }
 
-    /// `account.toml`: the account the first sign-in signed in ([`PersonalAccount`]).
+    /// `accounts.toml`: the accounts the user added, in the order they were added ([`PersonalAccount`]).
     #[must_use]
-    pub fn account_file(&self) -> PathBuf {
+    pub fn accounts_file(&self) -> PathBuf {
+        self.config_dir.join("accounts.toml")
+    }
+
+    /// `account.toml`: the one account a build before several accounts kept ([`PersonalPaths::migrate_single_account`]
+    /// moves it into `accounts.toml`).
+    #[must_use]
+    pub fn legacy_account_file(&self) -> PathBuf {
         self.config_dir.join("account.toml")
     }
 
@@ -99,10 +108,49 @@ impl PersonalPaths {
         Some(self.data_dir.join("store").join(format!("{oid}.sqlite")))
     }
 
-    /// The account's region as authz gave it (never a token).
+    /// `account`'s region as authz gave it (never a token): `regions/<oid>.json`; `None` before a sign-in named its
+    /// object id.
     #[must_use]
-    pub fn region_file(&self) -> PathBuf {
+    pub fn region_file(&self, account: &PersonalAccount) -> Option<PathBuf> {
+        let oid = account.oid.as_deref().filter(|oid| is_guid(oid))?;
+        Some(self.data_dir.join("regions").join(format!("{oid}.json")))
+    }
+
+    /// `region.json`: the one account's region a build before several accounts kept.
+    #[must_use]
+    pub fn legacy_region_file(&self) -> PathBuf {
         self.data_dir.join("region.json")
+    }
+
+    /// Moves a build's single account into the files of several: its `region.json` to `regions/<oid>.json`, then
+    /// `account.toml` into `accounts.toml` (as its one account), which marks the move done. Nothing when `accounts.toml` exists already or there is
+    /// no `account.toml`; a region of an account no sign-in named is left where it is (the next sign-in writes one).
+    ///
+    /// # Errors
+    /// When a file can't be read, parsed or moved; whatever moved before stays moved, and the next start goes on.
+    pub fn migrate_single_account(&self) -> Result<(), PersonalError> {
+        let legacy = self.legacy_account_file();
+        if self.accounts_file().exists() || !legacy.exists() {
+            return Ok(());
+        }
+        let text = fs::read_to_string(&legacy).map_err(|source| PersonalError::Read {
+            path: legacy.clone(),
+            source,
+        })?;
+        let account = PersonalAccount::parse(&text)?;
+        // the region first: `accounts.toml` written is what says the move is done
+        if let Some(region) = self.region_file(&account) {
+            let old = self.legacy_region_file();
+            if old.is_file() {
+                let moved = region
+                    .parent()
+                    .map_or(Ok(()), |dir| DirBuilder::new().recursive(true).mode(0o700).create(dir))
+                    .and_then(|()| fs::rename(&old, &region));
+                moved.map_err(|source| PersonalError::Write { path: region, source })?;
+            }
+        }
+        write_accounts(self, std::slice::from_ref(&account))?;
+        fs::remove_file(&legacy).map_err(|source| PersonalError::Write { path: legacy, source })
     }
 
     /// The app's settings (`teams-ui`).
@@ -162,7 +210,8 @@ fn lab_config(lab: &LabLocations) -> Result<Option<LabConfig>, PersonalError> {
     }
 }
 
-/// The account the personal build signs in (`account.toml`): the UPN the user gave (`teams --account`), and once the
+/// One account the personal build signs in (an `[[account]]` of `accounts.toml`): the UPN the user gave (the first
+/// sign-in screen, the rail's "+" or `teams --account`), and once the
 /// first sign-in went through, the object id and tenant its ID token named, which every later sign-in must match, and
 /// the display name it gave (`name`, refreshed by every sign-in; what the account's posts carry as their sender's
 /// name). Never a token.
@@ -198,20 +247,57 @@ impl fmt::Debug for PersonalAccount {
 }
 
 impl PersonalAccount {
-    /// Reads `paths`' `account.toml`; `None` when there is none yet (before the first sign-in).
+    /// The accounts `paths`' `accounts.toml` holds, in the order they were added; none before the first one was given.
+    /// Without `accounts.toml`, a single account's `account.toml` (not migrated yet) is read as the one account.
     ///
     /// # Errors
-    /// When it can't be read or isn't valid ([`PersonalAccount::parse`]).
-    pub fn load(paths: &PersonalPaths) -> Result<Option<Self>, PersonalError> {
-        let path = paths.account_file();
+    /// When it can't be read or isn't valid ([`PersonalAccount::parse`]; an account given twice, by UPN or object id).
+    pub fn load_all(paths: &PersonalPaths) -> Result<Vec<Self>, PersonalError> {
+        let path = paths.accounts_file();
         match fs::read_to_string(&path) {
-            Ok(text) => Self::parse(&text).map(Some),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Ok(text) => parse_accounts(&text),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let legacy = paths.legacy_account_file();
+                match fs::read_to_string(&legacy) {
+                    Ok(text) => Ok(vec![Self::parse(&text)?]),
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(Vec::new()),
+                    Err(source) => Err(PersonalError::Read { path: legacy, source }),
+                }
+            }
             Err(error) => Err(PersonalError::Read { path, source: error }),
         }
     }
 
-    /// Parses `account.toml`: a UPN (`user@domain`), the object id and tenant id as GUIDs (stored lowercase), both or
+    /// The account `upn` (case aside) of `paths`' accounts ([`PersonalAccount::load_all`]); `None` when it isn't one.
+    ///
+    /// # Errors
+    /// As [`PersonalAccount::load_all`].
+    pub fn find(paths: &PersonalPaths, upn: &str) -> Result<Option<Self>, PersonalError> {
+        Ok(Self::load_all(paths)?
+            .into_iter()
+            .find(|account| account.upn.eq_ignore_ascii_case(upn)))
+    }
+
+    /// Takes the account `upn` (case aside) out of `paths`' `accounts.toml`, the others kept in their order; the account
+    /// taken, or `None` when it wasn't one.
+    ///
+    /// # Errors
+    /// When the accounts can't be read or written.
+    pub fn remove(paths: &PersonalPaths, upn: &str) -> Result<Option<Self>, PersonalError> {
+        let _changing = changing();
+        let mut accounts = Self::load_all(paths)?;
+        let Some(index) = accounts
+            .iter()
+            .position(|account| account.upn.eq_ignore_ascii_case(upn))
+        else {
+            return Ok(None);
+        };
+        let removed = accounts.remove(index);
+        write_accounts(paths, &accounts)?;
+        Ok(Some(removed))
+    }
+
+    /// Parses one account (a single account's `account.toml`, or one `[[account]]` table of `accounts.toml`): a UPN (`user@domain`), the object id and tenant id as GUIDs (stored lowercase), both or
     /// neither, and the identity provider hosts, each a lowercase DNS name.
     ///
     /// # Errors
@@ -333,59 +419,136 @@ impl PersonalAccount {
         Ok(())
     }
 
-    /// Writes the account to `paths`' `account.toml` (`0600`, its directory `0700`), whole, through a new file renamed
-    /// over it.
+    /// Writes the account into `paths`' `accounts.toml` (`0600`, its directory `0700`): in the place of the account of
+    /// the same UPN (case aside), else after the others; the file whole, through a new file renamed over it.
+    /// A single account's files not moved yet ([`PersonalPaths::migrate_single_account`]) are moved first.
     ///
     /// # Errors
-    /// When it can't be written.
+    /// When the accounts can't be read or written, or another account has the same object id.
     pub fn save(&self, paths: &PersonalPaths) -> Result<(), PersonalError> {
-        let path = paths.account_file();
-        let write = || -> io::Result<()> {
-            let dir = paths.config_dir();
-            DirBuilder::new().recursive(true).mode(0o700).create(dir)?;
-            let hosts: Vec<toml::Value> = self.idp_hosts.iter().cloned().map(toml::Value::String).collect();
-            let ids = match (&self.oid, &self.tid) {
-                (Some(oid), Some(tid)) => format!(
-                    "oid = {}\ntid = {}\n",
-                    toml::Value::String(oid.clone()),
-                    toml::Value::String(tid.clone())
-                ),
-                _ => String::new(),
-            };
-            let name = self
-                .name
-                .as_ref()
-                .map(|name| format!("name = {}\n", toml::Value::String(name.clone())))
-                .unwrap_or_default();
-            let text = format!(
-                "# The account the personal build signs in (its first sign-in adds oid and tid). Never a token.\n\
-                 upn = {}\n{ids}{name}idp_hosts = {}\n",
-                toml::Value::String(self.upn.clone()),
-                toml::Value::Array(hosts),
-            );
-            let mut staging = path.as_os_str().to_owned();
-            staging.push(format!(".{}.new", std::process::id()));
-            let staging = PathBuf::from(staging);
-            let written = (|| {
-                let mut file = fs::OpenOptions::new()
-                    .write(true)
-                    .create_new(true)
-                    .mode(0o600)
-                    .open(&staging)?;
-                io::Write::write_all(&mut file, text.as_bytes())?;
-                file.sync_all()?;
-                fs::rename(&staging, &path)
-            })();
-            if written.is_err() {
-                let _ = fs::remove_file(&staging);
-            }
-            written
-        };
-        write().map_err(|source| PersonalError::Write {
-            path: path.clone(),
-            source,
-        })
+        let _changing = changing();
+        // a single account's files not moved yet go first, so they are never left behind `accounts.toml`
+        paths.migrate_single_account()?;
+        let mut accounts = Self::load_all(paths)?;
+        match accounts
+            .iter_mut()
+            .find(|account| account.upn.eq_ignore_ascii_case(&self.upn))
+        {
+            Some(held) => *held = self.clone(),
+            None => accounts.push(self.clone()),
+        }
+        check_distinct(&accounts)?;
+        write_accounts(paths, &accounts)
     }
+
+    /// The account as one `[[account]]` table of `accounts.toml`.
+    fn to_toml(&self) -> String {
+        let hosts: Vec<toml::Value> = self.idp_hosts.iter().cloned().map(toml::Value::String).collect();
+        let ids = match (&self.oid, &self.tid) {
+            (Some(oid), Some(tid)) => format!(
+                "oid = {}\ntid = {}\n",
+                toml::Value::String(oid.clone()),
+                toml::Value::String(tid.clone())
+            ),
+            _ => String::new(),
+        };
+        let name = self
+            .name
+            .as_ref()
+            .map(|name| format!("name = {}\n", toml::Value::String(name.clone())))
+            .unwrap_or_default();
+        format!(
+            "[[account]]\nupn = {}\n{ids}{name}idp_hosts = {}\n",
+            toml::Value::String(self.upn.clone()),
+            toml::Value::Array(hosts),
+        )
+    }
+}
+
+/// Held while `accounts.toml` is read, changed and written again: an account saved by a sign-in and one removed at the
+/// same moment (each on a task of its own) never write over each other's change.
+static CHANGING: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The next staging file's number: two writes in one process never share a staging file.
+static STAGING: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn changing() -> std::sync::MutexGuard<'static, ()> {
+    CHANGING.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// `accounts.toml` as written: its `[[account]]` tables.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AccountsFile {
+    #[serde(default)]
+    account: Vec<toml::Table>,
+}
+
+/// Parses `accounts.toml`: each `[[account]]` as [`PersonalAccount::parse`] takes `account.toml`, no account twice.
+fn parse_accounts(text: &str) -> Result<Vec<PersonalAccount>, PersonalError> {
+    let file: AccountsFile = toml::from_str(text).map_err(|error| PersonalError::Account(error.message().into()))?;
+    let accounts = file
+        .account
+        .into_iter()
+        .map(|table| PersonalAccount::parse(&table.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    check_distinct(&accounts)?;
+    Ok(accounts)
+}
+
+/// Refuses an account given twice, by UPN (case aside) or object id.
+fn check_distinct(accounts: &[PersonalAccount]) -> Result<(), PersonalError> {
+    for (index, account) in accounts.iter().enumerate() {
+        let twice = accounts[..index].iter().any(|earlier| {
+            earlier.upn.eq_ignore_ascii_case(&account.upn) || (earlier.oid.is_some() && earlier.oid == account.oid)
+        });
+        if twice {
+            return Err(PersonalError::Account(format!("{} is given twice", account.upn)));
+        }
+    }
+    Ok(())
+}
+
+/// Writes `accounts` to `paths`' `accounts.toml` (`0600`, its directory `0700`), whole, through a new file renamed over
+/// it.
+fn write_accounts(paths: &PersonalPaths, accounts: &[PersonalAccount]) -> Result<(), PersonalError> {
+    let path = paths.accounts_file();
+    let write = || -> io::Result<()> {
+        DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(paths.config_dir())?;
+        let mut text = String::from(
+            "# The accounts the personal build signs in, in the order they were added (a first sign-in adds oid and\n\
+             # tid). Never a token.\n",
+        );
+        for account in accounts {
+            text.push('\n');
+            text.push_str(&account.to_toml());
+        }
+        let mut staging = path.as_os_str().to_owned();
+        let serial = STAGING.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        staging.push(format!(".{}.{serial}.new", std::process::id()));
+        let staging = PathBuf::from(staging);
+        let written = (|| {
+            let mut file = fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&staging)?;
+            io::Write::write_all(&mut file, text.as_bytes())?;
+            file.sync_all()?;
+            fs::rename(&staging, &path)
+        })();
+        if written.is_err() {
+            let _ = fs::remove_file(&staging);
+        }
+        written
+    };
+    write().map_err(|source| PersonalError::Write {
+        path: path.clone(),
+        source,
+    })
 }
 
 /// Why the personal build's files or fence couldn't be used.
@@ -397,9 +560,9 @@ pub enum PersonalError {
     Read { path: PathBuf, source: io::Error },
     #[error("can't write {}: {source}", path.display())]
     Write { path: PathBuf, source: io::Error },
-    #[error("account.toml: {0}")]
+    #[error("accounts.toml: {0}")]
     Account(String),
-    #[error("no account signed in yet (account.toml has no object id): sign in first")]
+    #[error("the account isn't one signed in yet (accounts.toml names no object id for it): sign in first")]
     NoAccount,
     #[error("the account is one of the lab's (lab.toml names it): the personal build never signs in a lab account")]
     LabAccount,
@@ -416,21 +579,23 @@ pub enum PersonalError {
 }
 
 impl Fence {
-    /// The personal build's fence (see the module docs): its account from `paths`' `account.toml`, its decisions to
-    /// `paths`' `fence.log`. Refused for a data dir that overlaps the lab's or an account `lab.toml` names.
+    /// The personal build's fence of the account `upn` (see the module docs): the account from `paths`'
+    /// `accounts.toml`, its decisions to `paths`' `fence.log` (one log for every account of the app). Refused for a data
+    /// dir that overlaps the lab's or an account `lab.toml` names. An app of several accounts opens one per account and
+    /// lets them share a call floor ([`Fence::sharing_calls`]).
     ///
     /// # Errors
-    /// [`PersonalError::NoAccount`] before the first sign-in; otherwise when the account, the lab's files or the log
-    /// can't be read, or a keep-apart check refuses.
-    pub fn open_personal(paths: &PersonalPaths) -> Result<Self, PersonalError> {
+    /// [`PersonalError::NoAccount`] when `upn` isn't one of the accounts or no sign-in named it yet; otherwise when the
+    /// accounts, the lab's files or the log can't be read, or a keep-apart check refuses.
+    pub fn open_personal(paths: &PersonalPaths, upn: &str) -> Result<Self, PersonalError> {
         let lab = LabLocations::from_env().map_err(|_| PersonalError::NoHome)?;
-        Self::open_personal_apart(paths, &lab)
+        Self::open_personal_apart(paths, upn, &lab)
     }
 
     /// [`Fence::open_personal`] against the lab's locations `lab`.
-    fn open_personal_apart(paths: &PersonalPaths, lab: &LabLocations) -> Result<Self, PersonalError> {
+    fn open_personal_apart(paths: &PersonalPaths, upn: &str, lab: &LabLocations) -> Result<Self, PersonalError> {
         paths.check_apart(lab)?;
-        let account = PersonalAccount::load(paths)?.ok_or(PersonalError::NoAccount)?;
+        let account = PersonalAccount::find(paths, upn)?.ok_or(PersonalError::NoAccount)?;
         account.check_not_lab(lab)?;
         let own = account.mri().ok_or(PersonalError::NoAccount)?;
         paths.make_dirs().map_err(|source| PersonalError::Write {
@@ -447,8 +612,8 @@ impl Fence {
     /// # Errors
     /// As [`Fence::open_personal`].
     #[cfg(feature = "test-support")]
-    pub fn open_personal_with(paths: &PersonalPaths, lab: &LabLocations) -> Result<Self, PersonalError> {
-        Self::open_personal_apart(paths, lab)
+    pub fn open_personal_with(paths: &PersonalPaths, upn: &str, lab: &LabLocations) -> Result<Self, PersonalError> {
+        Self::open_personal_apart(paths, upn, lab)
     }
 
     /// The personal fence's verdict on `target` (see the module docs).
