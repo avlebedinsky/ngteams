@@ -603,12 +603,12 @@ fn the_switcher_offers_the_call_commands_that_fit_the_moment() {
     assert_eq!(actions(&rig), [CallAction::TestCall { echo: Mri::new(ECHO) }]);
     assert!(cx.update(|_, cx| shell.read(cx).switcher().is_none()), "closed");
 
-    // while it is up: Hang up and Mute
+    // while it is up: Leave call and Mute
     status(&rig, 1, CallStatus::Connected);
     cx.simulate_keystrokes("ctrl-k");
-    cx.simulate_input("hang");
+    cx.simulate_input("leave");
     cx.run_until_parked();
-    assert_eq!(commands(cx), ["Hang up"]);
+    assert_eq!(commands(cx), ["Leave call"]);
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     assert_eq!(actions(&rig)[1], CallAction::HangUp { call: call(1) });

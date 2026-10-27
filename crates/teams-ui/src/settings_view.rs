@@ -1,32 +1,160 @@
-//! The settings view, in the conversation pane: how the app looks (the theme, following the system's light or dark
-//! mode with a theme for each or one theme whatever the system says, the font size with its steps and the font
-//! family, searchable among the system's), switches for sending typing, read receipts and the account's
-//! availability, the calls' video (in a build that has the codec: "OpenH264 Video Codec provided by Cisco Systems,
-//! Inc.", as Cisco's binary licence asks beside its control), which messages notify,
-//! the idle time, the account's manual status, the calls' microphone, speaker and camera (where the app has calls:
-//! "Follow the system", naming the system's default, then every device there is, a device chosen that isn't there
-//! shown as not connected), the diagnostic log's level and "Copy diagnostics", and what was wrong with the settings
-//! file (or the log). Each change goes to the [`SettingsModel`] (and so to the file, and a device's to the calls) at
-//! once.
+//! The settings view, in place of the list and the conversation while Settings is chosen, laid out as Teams lays out
+//! its own: a column of pages on the left (General, Appearance, Notifications, Privacy, Calls where the app has calls,
+//! Diagnostics), the chosen page on the right, each a title over boxes of rows, a row's name and what it does leading
+//! and its control trailing.
+//!
+//! - **General**: the account's manual status, whether its availability is reported, and the idle time after which
+//!   it no longer is.
+//! - **Appearance**: the theme (following the system's light or dark mode with a theme for each, or one theme
+//!   whatever the system says), each a tile drawn in its own colours; the font size with its steps; the font family,
+//!   searchable among the system's.
+//! - **Notifications**: which messages notify.
+//! - **Privacy**: sending typing and read receipts.
+//! - **Calls** (where the app has calls, or the build has the video codec): the calls' microphone, speaker and camera
+//!   ("Follow the system", naming the system's default, then every device there is, a device chosen that isn't there
+//!   shown as not connected), and the calls' video ("OpenH264 Video Codec provided by Cisco Systems, Inc.", as
+//!   Cisco's binary licence asks beside its control).
+//! - **Diagnostics**: the diagnostic log's level and "Copy diagnostics".
+//!
+//! What was wrong with the settings file (or the log) is shown above every page. Each change goes to the
+//! [`SettingsModel`] (and so to the file, and a device's to the calls) at once.
+
+use std::rc::Rc;
 
 use gpui::{
-    AnyElement, AppContext as _, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, px, rgb,
+    Anchor, AnyElement, App, AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
+    KeyDownEvent, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
+    Window, div, prelude::FluentBuilder as _, px, rgb,
 };
-use gpui_component::Disableable as _;
 use gpui_component::IndexPath;
 use gpui_component::button::Button;
-use gpui_component::radio::Radio;
+use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::select::{SearchableVec, Select, SelectEvent, SelectState};
 use gpui_component::switch::Switch;
+use gpui_component::{Disableable as _, Sizable as _};
+use teams_core::{Choice, Reporting};
 use teams_log::diagnostics::WARNING;
 use teams_media::devices::catalog::{DeviceKind, DeviceList};
 
+use crate::icons::{Glyph, icon_button, selected_by};
+use crate::presence;
 use crate::settings::{LogLevel, ManualStatus, Notifications, Settings, SettingsModel};
-use crate::theme::{self, Appearance, FONT_SIZE, FONT_SIZES, Palette, THEMES};
+use crate::shell::shown_as;
+use crate::theme::{self, Appearance, FONT_SIZE, FONT_SIZES, Palette, THEMES, ThemeSpec};
 
 /// The font picker's first row: the system's UI font (no family named).
 pub const SYSTEM_FONT_LABEL: &str = "System font";
+
+/// The idle times offered, in minutes (the one set is offered too, if it isn't one of these).
+pub const IDLE_CHOICES: [u32; 6] = [1, 5, 10, 15, 30, 60];
+
+/// The key of the device row that follows the system (its test selector `<kind>-system`).
+pub const FOLLOW_SYSTEM: &str = "system";
+
+/// The calls' video switch's credit: the codec named as Cisco's binary licence asks, beside the switch.
+pub const VIDEO_SWITCH: &str = "OpenH264 Video Codec provided by Cisco Systems, Inc.";
+
+/// The page column's width, px.
+const NAV_WIDTH: f32 = 240.0;
+/// The widest a page's content gets, px.
+const PAGE_WIDTH: f32 = 880.0;
+/// A theme tile's width, px.
+const TILE_WIDTH: f32 = 96.0;
+/// A theme tile's preview height, px.
+const TILE_HEIGHT: f32 = 60.0;
+/// The tallest a picker's menu gets before it scrolls, px: a long device list or a short window still reaches every
+/// row.
+const MENU_HEIGHT: f32 = 320.0;
+
+/// What a choice's control does when it is chosen.
+type Apply = Rc<dyn Fn(&mut App)>;
+
+/// What the settings call each kind of device.
+#[must_use]
+pub fn device_label(kind: DeviceKind) -> &'static str {
+    match kind {
+        DeviceKind::Microphone => "Microphone",
+        DeviceKind::Speaker => "Speaker",
+        DeviceKind::Camera => "Camera",
+    }
+}
+
+/// A status's mark, as the account menu and the settings show it: its presence's dot, or for Automatic the
+/// "follows the window's use" arrows.
+#[must_use]
+pub fn status_mark(status: ManualStatus, palette: Palette) -> AnyElement {
+    match status.choice() {
+        Choice::Manual(manual) => div()
+            .w(px(16.0))
+            .flex()
+            .justify_center()
+            .child(presence::dot(&shown_as(Reporting::Manual(manual)), palette))
+            .into_any_element(),
+        Choice::Automatic => Glyph::REFRESH
+            .icon()
+            .size(px(14.0))
+            .text_color(rgb(palette.muted_foreground))
+            .into_any_element(),
+    }
+}
+
+/// A page of the settings.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Page {
+    General,
+    Appearance,
+    Notifications,
+    Privacy,
+    Calls,
+    Diagnostics,
+}
+
+impl Page {
+    pub const ALL: [Self; 6] = [
+        Self::General,
+        Self::Appearance,
+        Self::Notifications,
+        Self::Privacy,
+        Self::Calls,
+        Self::Diagnostics,
+    ];
+
+    /// Its name in its nav row's test selector, `settings-page-<key>`.
+    #[must_use]
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::General => "general",
+            Self::Appearance => "appearance",
+            Self::Notifications => "notifications",
+            Self::Privacy => "privacy",
+            Self::Calls => "calls",
+            Self::Diagnostics => "diagnostics",
+        }
+    }
+
+    #[must_use]
+    pub fn title(self) -> &'static str {
+        match self {
+            Self::General => "General",
+            Self::Appearance => "Appearance",
+            Self::Notifications => "Notifications",
+            Self::Privacy => "Privacy",
+            Self::Calls => "Calls and devices",
+            Self::Diagnostics => "Diagnostics",
+        }
+    }
+
+    fn glyph(self) -> Glyph {
+        match self {
+            Self::General => Glyph::USER,
+            Self::Appearance => Glyph::PALETTE,
+            Self::Notifications => Glyph::BELL,
+            Self::Privacy => Glyph::SHIELD,
+            Self::Calls => Glyph::HEADPHONES,
+            Self::Diagnostics => Glyph::BUG,
+        }
+    }
+}
 
 /// The font picker's state.
 type FontSelect = SelectState<SearchableVec<SharedString>>;
@@ -41,7 +169,7 @@ struct Fonts {
 impl Fonts {
     /// Shows the family `appearance` holds when the picker shows another (another account's view, or the file,
     /// changed it); a family the system doesn't have is offered too, as at the start.
-    fn show(&mut self, appearance: &Appearance, window: &mut Window, cx: &mut gpui::App) {
+    fn show(&mut self, appearance: &Appearance, window: &mut Window, cx: &mut App) {
         let shown: SharedString = appearance
             .font_family
             .clone()
@@ -62,24 +190,15 @@ impl Fonts {
     }
 }
 
-/// The idle times offered, in minutes (the one set is offered too, if it isn't one of these).
-pub const IDLE_CHOICES: [u32; 6] = [1, 5, 10, 15, 30, 60];
-
-/// What the settings call each kind of device.
-#[must_use]
-pub fn device_label(kind: DeviceKind) -> &'static str {
-    match kind {
-        DeviceKind::Microphone => "Microphone",
-        DeviceKind::Speaker => "Speaker",
-        DeviceKind::Camera => "Camera",
-    }
+/// One choice of a picker or a segmented control: its key (its test selector is `<group>-<key>`), its words, a
+/// status's mark, whether it is the one set, and what choosing it changes.
+struct Pick {
+    key: String,
+    label: SharedString,
+    status: Option<ManualStatus>,
+    chosen: bool,
+    apply: Apply,
 }
-
-/// The key of the radio that follows the system (its test selector `<kind>-system`).
-pub const FOLLOW_SYSTEM: &str = "system";
-
-/// The label of the calls' video switch: the codec named as Cisco's binary licence asks.
-pub const VIDEO_SWITCH: &str = "Video in calls: OpenH264 Video Codec provided by Cisco Systems, Inc.";
 
 /// The settings view (see the module docs).
 pub struct SettingsView {
@@ -89,7 +208,11 @@ pub struct SettingsView {
     /// The account whose own settings (its manual status) the view shows ([`SettingsView::for_account`]); `None`: the
     /// first account's.
     account: Option<String>,
-    /// The font picker, made the first time the view draws (it needs the window).
+    /// The page shown.
+    page: Page,
+    /// The page column's focus: Up, Down, Home and End move between the pages while it has it.
+    focus: FocusHandle,
+    /// The font picker, made the first time the view draws it (it needs the window).
     fonts: Option<Fonts>,
     _observing: Subscription,
 }
@@ -102,6 +225,8 @@ impl SettingsView {
             model,
             video_switch,
             account: None,
+            page: Page::General,
+            focus: cx.focus_handle(),
             fonts: None,
             _observing: observing,
         }
@@ -116,181 +241,307 @@ impl SettingsView {
 
     /// The family the font picker shows, once the view has drawn it.
     #[must_use]
-    pub fn shown_font(&self, cx: &gpui::App) -> Option<SharedString> {
+    pub fn shown_font(&self, cx: &App) -> Option<SharedString> {
         self.fonts.as_ref()?.select.read(cx).selected_value().cloned()
     }
 
+    /// The page shown.
+    #[must_use]
+    pub fn page(&self) -> Page {
+        self.page
+    }
+
+    /// Shows `page`.
+    pub fn show_page(&mut self, page: Page, cx: &mut Context<Self>) {
+        if self.page != page {
+            self.page = page;
+            cx.notify();
+        }
+    }
+
+    /// Gives the page column the keyboard, as Settings opens.
+    pub fn focus_pages(&self, window: &mut Window, cx: &mut App) {
+        self.focus.focus(window, cx);
+    }
+
+    /// The pages the column lists: Calls only where it has something.
+    fn pages(&self, cx: &App) -> Vec<Page> {
+        let calls = self.has_calls(cx);
+        Page::ALL
+            .into_iter()
+            .filter(|page| *page != Page::Calls || calls)
+            .collect()
+    }
+
+    /// Up, Down, Home and End on the page column: the page before, after, first or last.
+    fn page_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        let keystroke = &event.keystroke;
+        if keystroke.modifiers.modified() {
+            return;
+        }
+        let pages = self.pages(cx);
+        let at = pages.iter().position(|page| *page == self.page).unwrap_or(0);
+        let to = match keystroke.key.as_str() {
+            "up" => at.saturating_sub(1),
+            "down" => (at + 1).min(pages.len() - 1),
+            "home" => 0,
+            "end" => pages.len() - 1,
+            _ => return,
+        };
+        cx.stop_propagation();
+        self.show_page(pages[to], cx);
+    }
+
+    /// Whether the Calls page has anything to show: the calls' devices, or the video switch.
+    fn has_calls(&self, cx: &App) -> bool {
+        self.video_switch || self.model.read(cx).devices().is_some()
+    }
+
     /// A change of the settings, as a control's handler makes it.
-    fn changer(&self, change: impl Fn(&mut Settings) + 'static) -> impl Fn(&mut gpui::App) + 'static {
+    fn changer(&self, change: impl Fn(&mut Settings) + 'static) -> Apply {
         let model = self.model.clone();
-        move |cx| model.update(cx, |model, cx| model.change(&change, cx))
+        Rc::new(move |cx| model.update(cx, |model, cx| model.change(&change, cx)))
     }
 
     /// A switch, its test selector its id; `set` writes the value asked for.
-    fn switch(&self, id: &'static str, label: &'static str, checked: bool, set: fn(&mut Settings, bool)) -> AnyElement {
+    fn switch(&self, id: &'static str, checked: bool, set: fn(&mut Settings, bool)) -> AnyElement {
         let model = self.model.clone();
-        div()
-            .debug_selector(move || id.to_owned())
-            .child(
-                Switch::new(id)
-                    .checked(checked)
-                    .label(label)
-                    .on_click(move |checked: &bool, _, cx| {
-                        let checked = *checked;
-                        model.update(cx, |model, cx| model.change(|settings| set(settings, checked), cx));
-                    }),
-            )
-            .into_any_element()
+        selected_by(
+            id,
+            Switch::new(id).checked(checked).on_click(move |checked: &bool, _, cx| {
+                let checked = *checked;
+                model.update(cx, |model, cx| model.change(|settings| set(settings, checked), cx));
+            }),
+        )
+        .into_any_element()
     }
 
-    fn switches(&self, settings: &Settings) -> impl IntoElement {
+    // --- the pages ---
+
+    fn general(&self, settings: &Settings, palette: Palette) -> Vec<AnyElement> {
+        let account = self
+            .account
+            .clone()
+            .or_else(|| settings.first_account.clone())
+            .unwrap_or_default();
+        let set = settings.manual_status_of(&account);
+        let statuses = ManualStatus::ALL
+            .into_iter()
+            .map(|status| {
+                let chosen = account.clone();
+                Pick {
+                    key: status.key().to_owned(),
+                    label: status.label().into(),
+                    status: Some(status),
+                    chosen: set == status,
+                    apply: self.changer(move |settings| settings.set_manual_status(&chosen, status)),
+                }
+            })
+            .collect();
+        vec![
+            group(
+                Some("Status"),
+                vec![row(
+                    "Your status",
+                    Some("What others see. Automatic shows you available while you use the app."),
+                    picker("status", statuses, palette),
+                    palette,
+                )],
+                palette,
+            ),
+            group(
+                Some("Availability"),
+                vec![
+                    row(
+                        "Report my availability",
+                        Some("Off: this app never tells Teams you are available."),
+                        self.switch("send-presence", settings.send_presence, |settings, on| {
+                            settings.send_presence = on;
+                        }),
+                        palette,
+                    ),
+                    row(
+                        "Stop reporting me available after",
+                        Some("How long the app may go unused before you no longer show as available."),
+                        picker("idle", self.idle_picks(settings), palette),
+                        palette,
+                    ),
+                ],
+                palette,
+            ),
+        ]
+    }
+
+    /// The idle times, and the one set if it isn't one of them.
+    fn idle_picks(&self, settings: &Settings) -> Vec<Pick> {
+        let mut idle = IDLE_CHOICES.to_vec();
+        if !idle.contains(&settings.idle_minutes) {
+            idle.push(settings.idle_minutes);
+            idle.sort_unstable();
+        }
+        idle.into_iter()
+            .map(|minutes| Pick {
+                key: minutes.to_string(),
+                label: minutes_label(minutes).into(),
+                status: None,
+                chosen: settings.idle_minutes == minutes,
+                apply: self.changer(move |settings| settings.idle_minutes = minutes),
+            })
+            .collect()
+    }
+
+    fn appearance(
+        &mut self,
+        appearance: &Appearance,
+        palette: Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        let select = self.font_select(appearance, window, cx);
+        let font = selected_by(
+            "font-family",
+            div()
+                .w(px(240.0))
+                .child(Select::new(&select).search_placeholder("Search fonts")),
+        );
+        vec![
+            group(Some("Theme"), self.themes(appearance, palette), palette),
+            group(
+                Some("Text"),
+                vec![
+                    row(
+                        "Font size",
+                        Some("Ctrl+= and Ctrl+- change it anywhere in the app, Ctrl+0 resets it."),
+                        self.font_size(appearance, palette),
+                        palette,
+                    ),
+                    row("Font", None, font, palette),
+                ],
+                palette,
+            ),
+        ]
+    }
+
+    /// The theme's rows: following the system, then the tiles of each of its modes, or of the one theme. Each tile's
+    /// test selector is `<side>-<key>`: `light-theme`, `dark-theme` or `theme`, and the theme's key.
+    fn themes(&self, appearance: &Appearance, palette: Palette) -> Vec<AnyElement> {
+        let follow = row(
+            "Match the system",
+            Some("Use one theme while the system is light and another while it is dark."),
+            self.switch("follow-system-theme", appearance.follow_system, |settings, on| {
+                settings.appearance.follow_system = on;
+            }),
+            palette,
+        );
+        let mut rows = vec![follow];
+        if appearance.follow_system {
+            rows.push(self.theme_side(
+                "light-theme",
+                Some("When the system is light"),
+                appearance.light_theme,
+                |appearance, key| appearance.light_theme = key,
+                palette,
+            ));
+            rows.push(self.theme_side(
+                "dark-theme",
+                Some("When the system is dark"),
+                appearance.dark_theme,
+                |appearance, key| appearance.dark_theme = key,
+                palette,
+            ));
+        } else {
+            rows.push(self.theme_side(
+                "theme",
+                None,
+                appearance.theme,
+                |appearance, key| appearance.theme = key,
+                palette,
+            ));
+        }
+        rows
+    }
+
+    /// A row of every theme's tile, `chosen` marked; picking one `set`s it.
+    fn theme_side(
+        &self,
+        group: &'static str,
+        title: Option<&'static str>,
+        chosen: &'static str,
+        set: fn(&mut Appearance, &'static str),
+        palette: Palette,
+    ) -> AnyElement {
+        let tiles = THEMES.iter().map(|spec| {
+            let key = spec.key;
+            let apply = self.changer(move |settings| set(&mut settings.appearance, key));
+            theme_tile(group, spec, chosen == key, palette, apply)
+        });
         div()
+            .px_4()
+            .py_3()
             .flex()
             .flex_col()
             .gap_2()
-            .child(self.switch(
-                "send-typing",
-                "Send typing indicators",
-                settings.send_typing,
-                |settings, on| settings.send_typing = on,
-            ))
-            .child(self.switch(
-                "send-read-receipts",
-                "Send read receipts",
-                settings.send_read_receipts,
-                |settings, on| settings.send_read_receipts = on,
-            ))
-            .child(self.switch(
-                "send-presence",
-                "Report my availability",
-                settings.send_presence,
-                |settings, on| settings.send_presence = on,
-            ))
-            .children(self.video_switch.then(|| {
-                self.switch("video-calls", VIDEO_SWITCH, settings.video_calls, |settings, on| {
-                    settings.video_calls = on;
-                })
-            }))
-    }
-
-    /// One radio of a choice, its test selector `<group>-<key>`.
-    fn radio(
-        &self,
-        group: &'static str,
-        key: &str,
-        label: SharedString,
-        checked: bool,
-        change: impl Fn(&mut Settings) + 'static,
-    ) -> AnyElement {
-        let apply = self.changer(change);
-        let id: SharedString = format!("{group}-{key}").into();
-        let selector = id.to_string();
-        div()
-            .debug_selector(move || selector)
-            .child(
-                Radio::new(id)
-                    .label(label)
-                    .checked(checked)
-                    .on_click(move |_, _, cx| apply(cx)),
-            )
+            .children(title.map(|title| div().text_sm().text_color(rgb(palette.muted_foreground)).child(title)))
+            .child(div().flex().flex_wrap().gap_3().children(tiles))
             .into_any_element()
-    }
-
-    /// The theme: following the system with a theme for each of its modes, or one theme. Each radio's test selector is
-    /// `<side>-<key>`: `light-theme`, `dark-theme` or `theme`, and the theme's key.
-    fn themes(&self, appearance: &Appearance) -> impl IntoElement {
-        let follow = self.switch(
-            "follow-system-theme",
-            "Follow the system's light or dark mode",
-            appearance.follow_system,
-            |settings, on| settings.appearance.follow_system = on,
-        );
-        let side =
-            |group: &'static str, title: &'static str, chosen: &'static str, set: fn(&mut Appearance, &'static str)| {
-                let radios = THEMES.iter().map(|spec| {
-                    let key = spec.key;
-                    self.radio(group, key, spec.name.into(), chosen == key, move |settings| {
-                        set(&mut settings.appearance, key);
-                    })
-                });
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(div().child(title))
-                    .child(div().flex().flex_wrap().gap_3().children(radios))
-            };
-        let sides = if appearance.follow_system {
-            vec![
-                side(
-                    "light-theme",
-                    "When the system is light",
-                    appearance.light_theme,
-                    |appearance, key| {
-                        appearance.light_theme = key;
-                    },
-                ),
-                side(
-                    "dark-theme",
-                    "When the system is dark",
-                    appearance.dark_theme,
-                    |appearance, key| {
-                        appearance.dark_theme = key;
-                    },
-                ),
-            ]
-        } else {
-            vec![side("theme", "Theme", appearance.theme, |appearance, key| {
-                appearance.theme = key;
-            })]
-        };
-        div().flex().flex_col().gap_3().child(follow).children(sides)
     }
 
     /// The font size: a step smaller, the size, a step larger and back to the default (Ctrl+-, Ctrl+= and Ctrl+0 do
     /// the same anywhere in the window).
-    fn font_size(&self, appearance: &Appearance, palette: Palette) -> impl IntoElement {
+    fn font_size(&self, appearance: &Appearance, palette: Palette) -> AnyElement {
         let size = appearance.font_size;
-        let step = |id: &'static str, label: &'static str, to: u16, disabled: bool| {
+        let step = |id: &'static str, glyph: Glyph, tip: String, to: u16, disabled: bool| {
             let apply = self.changer(move |settings| settings.appearance.font_size = to);
-            div().debug_selector(move || id.to_owned()).child(
-                Button::new(id)
-                    .label(label)
-                    .outline()
+            selected_by(
+                id,
+                icon_button(id, glyph, tip)
+                    .small()
                     .disabled(disabled)
                     .on_click(move |_, _, cx| apply(cx)),
             )
         };
-        div()
+        let stepper = div()
             .flex()
             .items_center()
-            .gap_2()
-            .child(div().child("Font size"))
+            .p_0p5()
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(palette.border))
             .child(step(
                 "font-smaller",
-                "A−",
+                Glyph::MINUS,
+                "Smaller (Ctrl+-)".to_owned(),
                 appearance.stepped_font_size(-1),
                 size <= *FONT_SIZES.start(),
             ))
             .child(
                 div()
                     .debug_selector(|| "font-size".to_owned())
-                    .min_w(px(48.0))
+                    .min_w(px(52.0))
+                    .flex()
+                    .justify_center()
                     .child(SharedString::from(format!("{size} px"))),
             )
             .child(step(
                 "font-larger",
-                "A+",
+                Glyph::PLUS,
+                "Larger (Ctrl+=)".to_owned(),
                 appearance.stepped_font_size(1),
                 size >= *FONT_SIZES.end(),
+            ));
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(stepper)
+            .child(step(
+                "font-reset",
+                Glyph::RESET,
+                format!("Reset to {FONT_SIZE} px (Ctrl+0)"),
+                FONT_SIZE,
+                size == FONT_SIZE,
             ))
-            .child(step("font-reset", "Reset", FONT_SIZE, size == FONT_SIZE))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(palette.muted_foreground))
-                    .child("Ctrl+=, Ctrl+- and Ctrl+0"),
-            )
+            .into_any_element()
     }
 
     /// The font picker, made over the system's font families (and a family chosen that isn't there) the first time,
@@ -344,230 +595,644 @@ impl SettingsView {
         select
     }
 
-    /// How the app looks: the theme, the font size and the font.
-    fn appearance(
-        &mut self,
-        appearance: &Appearance,
-        palette: Palette,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let select = self.font_select(appearance, window, cx);
-        let font = div().flex().items_center().gap_2().child(div().child("Font")).child(
-            div()
-                .debug_selector(|| "font-family".to_owned())
-                .w(px(280.0))
-                .child(Select::new(&select).search_placeholder("Search fonts")),
-        );
-        section("Appearance")
-            .child(self.themes(appearance))
-            .child(self.font_size(appearance, palette))
-            .child(font)
-            .into_any_element()
+    fn notifications(&self, settings: &Settings, palette: Palette) -> Vec<AnyElement> {
+        let choices = Notifications::ALL
+            .into_iter()
+            .map(|level| Pick {
+                key: level.key().to_owned(),
+                label: level.label().into(),
+                status: None,
+                chosen: settings.notifications == level,
+                apply: self.changer(move |settings| settings.notifications = level),
+            })
+            .collect();
+        vec![group(
+            None,
+            vec![row(
+                "Notify me about",
+                Some("A desktop notification for every new message, only for those that mention you, or none."),
+                segmented("notifications", choices, palette),
+                palette,
+            )],
+            palette,
+        )]
     }
 
-    fn notifications(&self, settings: &Settings) -> impl IntoElement {
-        let radios = Notifications::ALL.map(|level| {
-            self.radio(
-                "notifications",
-                level.key(),
-                level.label().into(),
-                settings.notifications == level,
-                move |settings| settings.notifications = level,
-            )
-        });
-        section("Notifications").child(div().flex().gap_3().children(radios))
+    fn privacy(&self, settings: &Settings, palette: Palette) -> Vec<AnyElement> {
+        vec![group(
+            None,
+            vec![
+                row(
+                    "Send typing indicators",
+                    Some("Others in a chat see when you are typing."),
+                    self.switch("send-typing", settings.send_typing, |settings, on| {
+                        settings.send_typing = on;
+                    }),
+                    palette,
+                ),
+                row(
+                    "Send read receipts",
+                    Some("Others in a chat see when you have read their messages."),
+                    self.switch("send-read-receipts", settings.send_read_receipts, |settings, on| {
+                        settings.send_read_receipts = on;
+                    }),
+                    palette,
+                ),
+            ],
+            palette,
+        )]
     }
 
-    fn idle(&self, settings: &Settings) -> impl IntoElement {
-        let mut choices = IDLE_CHOICES.to_vec();
-        if !choices.contains(&settings.idle_minutes) {
-            choices.push(settings.idle_minutes);
-            choices.sort_unstable();
+    fn calls(&self, settings: &Settings, palette: Palette, cx: &App) -> Vec<AnyElement> {
+        let mut groups = Vec::new();
+        if let Some(list) = self.model.read(cx).devices() {
+            groups.push(self.devices(settings, list, palette));
         }
-        let radios = choices.into_iter().map(|minutes| {
-            self.radio(
-                "idle",
-                &minutes.to_string(),
-                format!("{minutes} min").into(),
-                settings.idle_minutes == minutes,
-                move |settings| settings.idle_minutes = minutes,
-            )
-        });
-        section("Stop reporting me available after").child(div().flex().flex_wrap().gap_3().children(radios))
+        if self.video_switch {
+            groups.push(group(
+                Some("Video"),
+                vec![row(
+                    "Video in calls",
+                    Some(VIDEO_SWITCH),
+                    self.switch("video-calls", settings.video_calls, |settings, on| {
+                        settings.video_calls = on;
+                    }),
+                    palette,
+                )],
+                palette,
+            ));
+        }
+        groups
     }
 
-    fn status(&self, settings: &Settings) -> impl IntoElement {
-        let account = self
-            .account
-            .clone()
-            .or_else(|| settings.first_account.clone())
-            .unwrap_or_default();
-        let radios = ManualStatus::ALL.map(|status| {
-            let chosen = account.clone();
-            self.radio(
-                "status",
-                status.key(),
-                status.label().into(),
-                settings.manual_status_of(&account) == status,
-                move |settings| settings.set_manual_status(&chosen, status),
-            )
-        });
-        section("Status").child(div().flex().flex_col().gap_1().children(radios))
+    /// The calls' devices: for each kind, a picker of "Follow the system" (naming the system's default), then every
+    /// device there is, and a device chosen that isn't there, as not connected. Each picker's test selector is its
+    /// kind's key, each of its rows' `<kind>-<key>`: the device's name, or [`FOLLOW_SYSTEM`].
+    fn devices(&self, settings: &Settings, list: &DeviceList, palette: Palette) -> AnyElement {
+        let rows = DeviceKind::ALL
+            .map(|kind| {
+                let picks = self.device_picks(kind, settings, list);
+                row(device_label(kind), None, picker(kind.key(), picks, palette), palette)
+            })
+            .into_iter()
+            .collect();
+        group(Some("Devices"), rows, palette)
     }
 
-    /// The calls' devices: for each kind, "Follow the system" (naming the system's default), then every device there
-    /// is, and a device chosen that isn't there, as not connected. Each radio's test selector is `<kind>-<key>`: the
-    /// device's name, or [`FOLLOW_SYSTEM`].
-    fn devices(&self, settings: &Settings, list: &DeviceList) -> impl IntoElement {
-        let kinds = DeviceKind::ALL.map(|kind| {
-            let chosen = settings.device(kind).map(str::to_owned);
-            let system = match list.default_of(kind) {
-                Some(device) => format!("Follow the system ({})", device.description),
-                None => "Follow the system".to_owned(),
-            };
-            let mut radios = vec![self.radio(
-                kind.key(),
-                FOLLOW_SYSTEM,
-                system.into(),
-                chosen.is_none(),
-                move |settings| {
-                    settings.set_device(kind, None);
-                },
-            )];
-            let mut names: Vec<(String, String)> = list
-                .of(kind)
-                .map(|device| (device.name.clone(), device.description.clone()))
-                .collect();
-            if let Some(missing) = chosen.as_ref().filter(|name| list.find(kind, name).is_none()) {
-                names.push((missing.clone(), format!("{missing} (not connected)")));
-            }
-            radios.extend(names.into_iter().map(|(name, label)| {
-                let checked = chosen.as_deref() == Some(name.as_str());
-                let key = name.clone();
-                self.radio(kind.key(), &key, label.into(), checked, move |settings| {
-                    settings.set_device(kind, Some(name.clone()));
-                })
-            }));
-            div()
-                .flex()
-                .flex_col()
-                .gap_1()
-                .child(div().child(device_label(kind)))
-                .children(radios)
-        });
-        section("Devices").child(div().flex().flex_col().gap_3().children(kinds))
+    fn device_picks(&self, kind: DeviceKind, settings: &Settings, list: &DeviceList) -> Vec<Pick> {
+        let chosen = settings.device(kind).map(str::to_owned);
+        let system = match list.default_of(kind) {
+            Some(device) => format!("Follow the system ({})", device.description),
+            None => "Follow the system".to_owned(),
+        };
+        let mut picks = vec![Pick {
+            key: FOLLOW_SYSTEM.to_owned(),
+            label: system.into(),
+            status: None,
+            chosen: chosen.is_none(),
+            apply: self.changer(move |settings| settings.set_device(kind, None)),
+        }];
+        let mut names: Vec<(String, String)> = list
+            .of(kind)
+            .map(|device| (device.name.clone(), device.description.clone()))
+            .collect();
+        if let Some(missing) = chosen.as_ref().filter(|name| list.find(kind, name).is_none()) {
+            names.push((missing.clone(), format!("{missing} (not connected)")));
+        }
+        picks.extend(names.into_iter().map(|(name, label)| Pick {
+            key: name.clone(),
+            label: label.into(),
+            status: None,
+            chosen: chosen.as_deref() == Some(name.as_str()),
+            apply: self.changer(move |settings| settings.set_device(kind, Some(name.clone()))),
+        }));
+        picks
     }
 
     /// The diagnostic log: its level (changed live; `TEAMS_APP_LOG` overrides it, said here), "Copy diagnostics", and
     /// what the last copy held: said plainly when it has full requests and responses.
-    fn log(&self, settings: &Settings, model: &SettingsModel, palette: Palette) -> impl IntoElement {
-        let radios = LogLevel::ALL.map(|level| {
-            self.radio(
-                "log-level",
-                level.key(),
-                level.label().into(),
-                settings.log_level == level,
-                move |settings| settings.log_level = level,
-            )
-        });
+    fn diagnostics(&self, settings: &Settings, model: &SettingsModel, palette: Palette) -> Vec<AnyElement> {
+        let levels = LogLevel::ALL
+            .into_iter()
+            .map(|level| Pick {
+                key: level.key().to_owned(),
+                label: level_label(level).into(),
+                status: None,
+                chosen: settings.log_level == level,
+                apply: self.changer(move |settings| settings.log_level = level),
+            })
+            .collect();
         let overridden = teams_log::installed()
             .and_then(teams_log::FileLog::overridden)
             .map(|level| {
-                div()
-                    .debug_selector(|| "log-level-overridden".to_owned())
-                    .text_sm()
-                    .text_color(rgb(palette.muted_foreground))
+                caption("log-level-overridden", palette.muted_foreground)
                     .child(SharedString::from(format!(
-                        "TEAMS_APP_LOG sets the level to {} for this run",
+                        "TEAMS_APP_LOG sets the level to {} for this run.",
                         level.key()
                     )))
+                    .into_any_element()
             });
-        let copy_model = self.model.clone();
-        let copy = div().debug_selector(|| "copy-diagnostics".to_owned()).child(
+        let mut log = vec![row(
+            "Log level",
+            Some("Debug writes full requests and responses to the log; credentials are always left out."),
+            segmented("log-level", levels, palette),
+            palette,
+        )];
+        log.extend(overridden);
+        let mut report = vec![row(
+            "Copy diagnostics",
+            Some("The app's log and its fence log, to paste into a bug report."),
+            self.copy_button(),
+            palette,
+        )];
+        report.extend(copied_note(model, palette));
+        vec![
+            group(Some("Log"), log, palette),
+            group(Some("Report a problem"), report, palette),
+        ]
+    }
+
+    fn copy_button(&self) -> AnyElement {
+        let model = self.model.clone();
+        selected_by(
+            "copy-diagnostics",
             Button::new("copy-diagnostics")
                 .label("Copy diagnostics")
-                .on_click(move |_, _, cx| {
-                    copy_model.update(cx, |model, cx| {
-                        model.copy_diagnostics(cx);
-                    });
-                }),
-        );
-        let copied = model.copied().map(|copied| {
-            let text = if copied.has_debug {
-                format!("Copied. It {WARNING}.")
-            } else {
-                "Copied.".to_owned()
-            };
+                .outline()
+                .small()
+                .on_click(move |_, _, cx| model.update(cx, SettingsModel::copy_diagnostics)),
+        )
+        .into_any_element()
+    }
+
+    // --- the frame ---
+
+    /// The page column: its title, then a row per page (Calls only where it has something), the shown one marked.
+    fn nav(&self, palette: Palette, window: &Window, cx: &mut Context<Self>) -> AnyElement {
+        let focused = self.focus.is_focused(window);
+        let rows = self.pages(cx).into_iter().map(|page| {
+            let shown = page == self.page;
+            let id: SharedString = format!("settings-page-{}", page.key()).into();
+            let selector = id.to_string();
             div()
-                .debug_selector(|| "diagnostics-copied".to_owned())
-                .text_sm()
-                .child(SharedString::from(text))
+                .debug_selector(move || selector.clone())
+                .id(id)
+                .h(px(36.0))
+                .px_3()
+                .flex()
+                .items_center()
+                .gap_3()
+                .rounded_md()
+                .cursor_pointer()
+                .text_color(rgb(if shown { palette.brand } else { palette.foreground }))
+                .when(shown, |row| {
+                    row.bg(rgb(palette.selected)).font_weight(gpui::FontWeight::SEMIBOLD)
+                })
+                // where the keyboard is: the page shown, ringed while the column has the focus
+                .border_1()
+                .border_color(rgb(if shown && focused {
+                    palette.brand
+                } else {
+                    palette.surface
+                }))
+                .when(!shown, |row| row.hover(move |row| row.bg(rgb(palette.hover))))
+                .child(page.glyph().icon().size(px(18.0)))
+                .child(page.title())
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.focus.focus(window, cx);
+                    this.show_page(page, cx);
+                }))
         });
-        section("Diagnostic log")
-            .child(div().flex().flex_wrap().gap_3().children(radios))
-            .children(overridden)
-            .child(copy)
-            .children(copied)
+        div()
+            .debug_selector(|| "settings-nav".to_owned())
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(Self::page_key))
+            .w(px(NAV_WIDTH))
+            .h_full()
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .px_2()
+            .bg(rgb(palette.surface))
+            .border_r_1()
+            .border_color(rgb(palette.border))
+            .child(
+                div()
+                    .h(px(48.0))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .text_lg()
+                    .font_weight(gpui::FontWeight::BOLD)
+                    .child("Settings"),
+            )
+            .children(rows)
+            .into_any_element()
+    }
+
+    /// The shown page's boxes.
+    fn page_content(
+        &mut self,
+        settings: &Settings,
+        palette: Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        match self.page {
+            Page::General => self.general(settings, palette),
+            Page::Appearance => self.appearance(&settings.appearance, palette, window, cx),
+            Page::Notifications => self.notifications(settings, palette),
+            Page::Privacy => self.privacy(settings, palette),
+            Page::Calls => self.calls(settings, palette, cx),
+            Page::Diagnostics => {
+                let model = self.model.clone();
+                self.diagnostics(settings, model.read(cx), palette)
+            }
+        }
     }
 }
 
-/// A titled part of the view.
-fn section(title: &'static str) -> gpui::Div {
+/// `minutes` in words.
+fn minutes_label(minutes: u32) -> String {
+    match minutes {
+        1 => "1 minute".to_owned(),
+        60 => "1 hour".to_owned(),
+        _ => format!("{minutes} minutes"),
+    }
+}
+
+/// A log level's short name, for its segment.
+fn level_label(level: LogLevel) -> &'static str {
+    match level {
+        LogLevel::Error => "Errors",
+        LogLevel::Warn => "Warnings",
+        LogLevel::Info => "Info",
+        LogLevel::Debug => "Debug",
+    }
+}
+
+/// A line under a row, in `color`, its test selector `selector`.
+fn caption(selector: &'static str, color: u32) -> gpui::Div {
+    div()
+        .debug_selector(move || selector.to_owned())
+        .px_4()
+        .pb_3()
+        .flex()
+        .items_center()
+        .gap_2()
+        .text_sm()
+        .text_color(rgb(color))
+}
+
+/// What the last "copy diagnostics" held, under its row: said plainly when it has full requests and responses.
+fn copied_note(model: &SettingsModel, palette: Palette) -> Option<AnyElement> {
+    let copied = model.copied()?;
+    let (text, color) = if copied.has_debug {
+        (format!("Copied. It {WARNING}."), theme::DANGER)
+    } else {
+        ("Copied to the clipboard.".to_owned(), palette.muted_foreground)
+    };
+    Some(
+        caption("diagnostics-copied", color)
+            .child(Glyph::CHECK.icon().size(px(14.0)))
+            .child(SharedString::from(text))
+            .into_any_element(),
+    )
+}
+
+/// A titled box of rows, a hairline between each.
+fn group(title: Option<&'static str>, rows: Vec<AnyElement>, palette: Palette) -> AnyElement {
+    let rows = rows.into_iter().enumerate().map(|(index, row)| {
+        div()
+            .when(index > 0, |row| row.border_t_1().border_color(rgb(palette.border)))
+            .child(row)
+    });
     div()
         .flex()
         .flex_col()
         .gap_2()
-        .child(div().font_weight(gpui::FontWeight::BOLD).child(title))
+        .children(title.map(|title| div().font_weight(gpui::FontWeight::SEMIBOLD).child(title)))
+        .child(
+            div()
+                .flex()
+                .flex_col()
+                .rounded_lg()
+                .border_1()
+                .border_color(rgb(palette.border))
+                .bg(rgb(palette.surface))
+                .children(rows),
+        )
+        .into_any_element()
 }
 
-/// What was wrong with the settings file, one line each.
-fn problems(model: &SettingsModel, palette: Palette) -> impl IntoElement {
-    let lines = model
-        .problems()
-        .iter()
-        .map(|problem| div().child(SharedString::from(problem.to_string())));
+/// One row: its name and what it does leading, its control trailing.
+fn row(
+    title: &'static str,
+    description: Option<&'static str>,
+    control: impl IntoElement,
+    palette: Palette,
+) -> AnyElement {
     div()
-        .debug_selector(|| "settings-problems".to_owned())
+        .min_h(px(56.0))
+        .px_4()
+        .py_2p5()
+        .flex()
+        .items_center()
+        .gap_4()
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .child(title)
+                .children(description.map(|description| {
+                    div()
+                        .text_sm()
+                        .text_color(rgb(palette.muted_foreground))
+                        .child(description)
+                })),
+        )
+        .child(div().flex_none().child(control))
+        .into_any_element()
+}
+
+/// A few choices side by side, the one set filled; each segment's test selector is `<group>-<key>`.
+fn segmented(group: &'static str, choices: Vec<Pick>, palette: Palette) -> AnyElement {
+    let segments = choices.into_iter().map(|pick| {
+        let id: SharedString = format!("{group}-{}", pick.key).into();
+        let selector = id.to_string();
+        let apply = pick.apply;
+        div()
+            .debug_selector(move || selector.clone())
+            .id(id)
+            .h(px(28.0))
+            .px_3()
+            .flex()
+            .items_center()
+            .rounded_md()
+            .text_sm()
+            .cursor_pointer()
+            .when(pick.chosen, |segment| {
+                segment
+                    .bg(rgb(palette.brand))
+                    .text_color(rgb(palette.on_brand))
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+            })
+            .when(!pick.chosen, |segment| {
+                segment.hover(move |segment| segment.bg(rgb(palette.hover)))
+            })
+            .child(pick.label)
+            .on_click(move |_, _, cx| apply(cx))
+    });
+    div()
+        .flex()
+        .items_center()
+        .gap_0p5()
+        .p_0p5()
+        .rounded_lg()
+        .border_1()
+        .border_color(rgb(palette.border))
+        .bg(rgb(palette.background))
+        .children(segments)
+        .into_any_element()
+}
+
+/// A dropdown of `picks`, showing the one set; its test selector is `group`, each of its menu's rows'
+/// `<group>-<key>`.
+fn picker(group: &'static str, picks: Vec<Pick>, palette: Palette) -> AnyElement {
+    let shown = picks.iter().find(|pick| pick.chosen);
+    let face = div()
+        .w_full()
+        .flex()
+        .items_center()
+        .gap_2()
+        .min_w_0()
+        .children(
+            shown
+                .and_then(|pick| pick.status)
+                .map(|status| status_mark(status, palette)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .child(shown.map_or_else(|| SharedString::from("Choose…"), |pick| pick.label.clone())),
+        )
+        .child(
+            Glyph::CHEVRON_DOWN
+                .icon()
+                .size(px(14.0))
+                .text_color(rgb(palette.muted_foreground)),
+        );
+    let picks = Rc::new(picks);
+    selected_by(
+        group,
+        Button::new(group)
+            .outline()
+            .min_w(px(220.0))
+            .max_w(px(320.0))
+            .child(face)
+            .dropdown_menu_with_anchor(Anchor::TopRight, move |menu, _, _| {
+                let menu = menu.min_w(px(220.0)).scrollable(true).max_h(px(MENU_HEIGHT));
+                picks
+                    .iter()
+                    .fold(menu, |menu, pick| menu.item(pick_item(group, pick, palette)))
+            }),
+    )
+    .into_any_element()
+}
+
+/// A picker's menu row.
+fn pick_item(group: &'static str, pick: &Pick, palette: Palette) -> PopupMenuItem {
+    let selector = format!("{group}-{}", pick.key);
+    let (label, status, apply) = (pick.label.clone(), pick.status, Rc::clone(&pick.apply));
+    PopupMenuItem::element(move |_, _| {
+        let selector = selector.clone();
+        div()
+            .debug_selector(move || selector.clone())
+            .flex()
+            .items_center()
+            .gap_2()
+            .children(status.map(|status| status_mark(status, palette)))
+            .child(label.clone())
+    })
+    .checked(pick.chosen)
+    .on_click(move |_, _, cx| apply(cx))
+}
+
+/// A theme's preview: a small window in its own colours (the rail, the list with its chosen row, two messages).
+fn theme_preview(spec: &ThemeSpec) -> gpui::Div {
+    let colors = spec.palette;
+    let bar = |width: f32| {
+        div()
+            .h(px(4.0))
+            .w(px(width))
+            .rounded_full()
+            .bg(rgb(colors.muted_foreground))
+    };
+    div()
+        .h(px(TILE_HEIGHT))
+        .w_full()
+        .flex()
+        .overflow_hidden()
+        .rounded_md()
+        .bg(rgb(colors.background))
+        .child(
+            div()
+                .w(px(12.0))
+                .h_full()
+                .flex()
+                .flex_col()
+                .items_center()
+                .pt_2()
+                .bg(rgb(colors.rail))
+                .child(div().size(px(5.0)).rounded_full().bg(rgb(colors.brand))),
+        )
+        .child(
+            div()
+                .w(px(38.0))
+                .h_full()
+                .flex()
+                .flex_col()
+                .gap_1p5()
+                .p_1p5()
+                .bg(rgb(colors.surface))
+                .child(div().h(px(6.0)).rounded_sm().bg(rgb(colors.selected)))
+                .child(bar(24.0))
+                .child(bar(18.0)),
+        )
+        .child(
+            div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .justify_end()
+                .gap_1()
+                .p_1p5()
+                .child(div().h(px(8.0)).w(px(36.0)).rounded_sm().bg(rgb(colors.surface)))
+                .child(
+                    div()
+                        .flex()
+                        .justify_end()
+                        .child(div().h(px(8.0)).w(px(30.0)).rounded_sm().bg(rgb(colors.brand))),
+                ),
+        )
+}
+
+/// A theme's tile: its preview, its name under it, the one set ringed in the brand colour. Its test selector is
+/// `<group>-<key>`.
+fn theme_tile(group: &'static str, spec: &ThemeSpec, chosen: bool, palette: Palette, apply: Apply) -> AnyElement {
+    let id: SharedString = format!("{group}-{}", spec.key).into();
+    let selector = id.to_string();
+    let check = chosen.then(|| Glyph::CHECK.icon().size(px(14.0)).text_color(rgb(palette.brand)));
+    div()
+        .debug_selector(move || selector.clone())
+        .id(id)
+        .w(px(TILE_WIDTH))
         .flex()
         .flex_col()
-        .gap_1()
-        .text_sm()
-        .text_color(rgb(palette.muted_foreground))
-        .children(lines)
+        .gap_1p5()
+        .cursor_pointer()
+        .child(
+            div()
+                .p_0p5()
+                .rounded_lg()
+                .border_2()
+                .border_color(rgb(if chosen { palette.brand } else { palette.border }))
+                .when(!chosen, |frame| {
+                    frame.hover(move |frame| frame.border_color(rgb(palette.muted_foreground)))
+                })
+                .child(theme_preview(spec)),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .text_sm()
+                .when(chosen, |name| name.font_weight(gpui::FontWeight::SEMIBOLD))
+                .child(spec.name)
+                .children(check),
+        )
+        .on_click(move |_, _, cx| apply(cx))
+        .into_any_element()
+}
+
+/// What was wrong with the settings file, one line each, in a warning box; nothing when all was well.
+fn problems(model: &SettingsModel) -> Option<AnyElement> {
+    let problems = model.problems();
+    if problems.is_empty() {
+        return None;
+    }
+    let lines = problems
+        .iter()
+        .map(|problem| div().child(SharedString::from(problem.to_string())));
+    Some(
+        div()
+            .debug_selector(|| "settings-problems".to_owned())
+            .flex()
+            .gap_3()
+            .p_3()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(theme::DANGER))
+            .text_sm()
+            .child(Glyph::INFO.icon().size(px(16.0)).text_color(rgb(theme::DANGER)))
+            .child(div().flex_1().flex().flex_col().gap_1().children(lines))
+            .into_any_element(),
+    )
 }
 
 impl Render for SettingsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = theme::current(cx);
+        if self.page == Page::Calls && !self.has_calls(cx) {
+            self.page = Page::General;
+        }
         let settings = self.model.read(cx).settings().clone();
-        let appearance = self.appearance(&settings.appearance, palette, window, cx);
-        let model = self.model.read(cx);
-        let problems = problems(model, palette);
-        let log = self.log(&settings, model, palette);
-        let devices = model.devices().map(|list| self.devices(&settings, list));
-        // scrolled: the settings outgrow the pane at a large font size or in a small window
+        let content = self.page_content(&settings, palette, window, cx);
+        let problems = problems(self.model.read(cx));
+        let nav = self.nav(palette, window, cx);
         div()
-            .id("settings")
-            .debug_selector(|| "settings".to_owned())
+            .debug_selector(|| "settings-view".to_owned())
             .size_full()
-            .overflow_y_scroll()
+            .flex()
+            .bg(rgb(palette.background))
+            .child(nav)
             .child(
+                // scrolled: a page outgrows the pane at a large font size or in a small window
                 div()
-                    .p_4()
-                    .flex()
-                    .flex_col()
-                    .gap_4()
-                    .max_w(px(640.0))
-                    .child(div().text_lg().font_weight(gpui::FontWeight::BOLD).child("Settings"))
-                    .child(problems)
-                    .child(appearance)
-                    .child(self.switches(&settings))
-                    .child(self.notifications(&settings))
-                    .child(self.idle(&settings))
-                    .child(self.status(&settings))
-                    .children(devices)
-                    .child(log),
+                    .id("settings")
+                    .debug_selector(|| "settings".to_owned())
+                    .flex_1()
+                    .h_full()
+                    .min_w_0()
+                    .overflow_y_scroll()
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(PAGE_WIDTH))
+                            .px_8()
+                            .pt_6()
+                            .pb_8()
+                            .flex()
+                            .flex_col()
+                            .gap_6()
+                            .child(
+                                div()
+                                    .text_size(px(22.0))
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child(self.page.title()),
+                            )
+                            .children(problems)
+                            .children(content),
+                    ),
             )
     }
 }

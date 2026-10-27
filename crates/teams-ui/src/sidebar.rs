@@ -1,8 +1,9 @@
-//! The sidebar: the list pane as Teams shows it, one list under the "Chat" header (with the connection state) holding
-//! two sections, "Chats" (the [`ChatList`]'s rows) and "Teams and channels" (the [`TeamsList`]'s teams, each with its
-//! channels). A section's header folds and unfolds it, and a team's line its channels; unfolding the teams asks for
-//! them again ([`TeamsList::reload`]: the engine reads them when they are old). The rows themselves are the lists':
-//! a chat clicked is the [`ChatList`]'s to tell, a channel the [`TeamsList`]'s.
+//! The sidebar: the list pane as Teams shows it, one list under the "Chat" header (with the connection state while it
+//! isn't up: connecting, reconnecting, offline or signed out; nothing once connected) holding two sections, "Chats"
+//! (the [`ChatList`]'s rows) and "Teams and channels" (the [`TeamsList`]'s teams, each with its channels). A section's
+//! header folds and unfolds it, and a team's line its channels; unfolding the teams asks for them again
+//! ([`TeamsList::reload`]: the engine reads them when they are old). The rows themselves are the lists': a chat clicked
+//! is the [`ChatList`]'s to tell, a channel the [`TeamsList`]'s.
 //!
 //! Traced: `sidebar folded`/`unfolded` with the section (`chats` or `teams`), `team folded`/`unfolded` with the team.
 
@@ -20,7 +21,10 @@ use crate::models::Models;
 use crate::teams_list::{LOADING, NO_TEAMS, TeamsList, UNREADABLE};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
-use crate::view::status_text;
+use crate::view::{Shown, status_text};
+
+/// The connection's dot while it comes up (Teams' amber).
+const CONNECTING: u32 = 0x00c1_9c00;
 
 /// A section header's height, px.
 pub const SECTION_HEIGHT: f32 = 32.0;
@@ -356,7 +360,28 @@ fn splice(state: &ListState, old: &[Entry], new: &[Entry]) {
 impl Render for Sidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = theme::current(cx);
-        let status = status_text(self.models.status.read(cx));
+        let status = self.models.status.read(cx);
+        // the connection only when it isn't up: a healthy one says nothing, as in Teams
+        let connection = match Shown::of(status) {
+            Shown::Connected => None,
+            Shown::Connecting | Shown::Reconnecting => Some(CONNECTING),
+            Shown::Offline | Shown::SignedOut => Some(theme::DANGER),
+        }
+        .map(|dot| {
+            div()
+                .debug_selector(|| "connection".to_owned())
+                .flex()
+                .items_center()
+                .gap_1p5()
+                .px_2()
+                .py_0p5()
+                .rounded_full()
+                .bg(rgb(palette.hover))
+                .text_xs()
+                .text_color(rgb(palette.muted_foreground))
+                .child(div().size(px(6.0)).rounded_full().bg(rgb(dot)))
+                .child(status_text(status))
+        });
         let header = div()
             .h(px(48.0))
             .flex_none()
@@ -366,14 +391,8 @@ impl Render for Sidebar {
             .justify_between()
             .border_b_1()
             .border_color(rgb(palette.border))
-            .child(div().font_weight(gpui::FontWeight::BOLD).child("Chat"))
-            .child(
-                div()
-                    .debug_selector(|| "connection".to_owned())
-                    .text_xs()
-                    .text_color(rgb(palette.muted_foreground))
-                    .child(status),
-            );
+            .child(div().text_lg().font_weight(gpui::FontWeight::BOLD).child("Chat"))
+            .children(connection);
         let rows = list(
             self.state.clone(),
             cx.processor(move |this: &mut Self, at: usize, _window, cx| this.render_entry(at, palette, cx)),

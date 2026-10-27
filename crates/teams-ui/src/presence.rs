@@ -26,8 +26,8 @@ pub const DOT: f32 = 10.0;
 
 /// Available's green.
 const GREEN: u32 = 0x006b_b700;
-/// Busy's and Do not disturb's red.
-const RED: u32 = 0x00c4_314b;
+/// Busy's and Do not disturb's red: Teams' one red.
+const RED: u32 = crate::theme::DANGER;
 /// Away's and Be right back's amber.
 const AMBER: u32 = 0x00ff_aa44;
 /// Offline's grey.

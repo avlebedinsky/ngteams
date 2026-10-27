@@ -37,9 +37,10 @@ use std::time::{Duration, Instant};
 use gpui::{
     AnyElement, App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Focusable as _, Global,
     InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Task, Window, div, px, rgb,
+    Styled as _, Subscription, Task, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
-use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::Disableable as _;
+use gpui_component::button::ButtonVariants;
 use gpui_component::input::{
     Enter, Escape, IndentInline, InlineToken, InlineTokenSpan, InputContent, InputEvent, MoveDown, MoveUp, Textarea,
     TextareaState,
@@ -51,6 +52,7 @@ use teams_proto::chat::{ComposeError, Marks, MessageText, MessageType, Node, Quo
 use teams_store::Message;
 
 use crate::bridge::Core;
+use crate::icons::{Glyph, icon_button, selected_by};
 use crate::presence::{self, Presences};
 use crate::settings::SettingsModel;
 use crate::theme::{self, Palette};
@@ -531,6 +533,8 @@ impl Compose {
                     .record(&TraceLine::new("compose", "changed").conversation(&this.conversation));
                 this.refresh_picker(cx);
                 this.typed(window, cx);
+                // the send button follows whether there is anything to send
+                cx.notify();
             }
         });
         // a presence the engine told: an open picker draws its dots again
@@ -996,9 +1000,12 @@ impl Compose {
             Mode::Reply(quoted) => (format!("Replying to {}", quoted.sender_name), quoted.preview.clone()),
             Mode::Edit { .. } => ("Editing your message".to_owned(), String::new()),
         };
-        let cancel = Button::new("compose-cancel")
-            .label("Cancel")
-            .ghost()
+        let tip = if matches!(self.mode, Mode::Edit { .. }) {
+            "Cancel editing"
+        } else {
+            "Cancel reply"
+        };
+        let cancel = icon_button("compose-cancel", Glyph::X, tip)
             .with_size(Size::XSmall)
             .on_click(cx.listener(|this, _, window, cx| this.cancel(window, cx)));
         Some(
@@ -1023,6 +1030,25 @@ impl Compose {
                 .child(div().debug_selector(|| "compose-cancel".to_owned()).child(cancel))
                 .into_any_element(),
         )
+    }
+
+    /// Send (Enter does the same), greyed while the box holds nothing to send.
+    fn send_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let empty = self.input.read(cx).value().trim().is_empty();
+        let tip = if matches!(self.mode, Mode::Edit { .. }) {
+            "Save (Enter)"
+        } else {
+            "Send (Enter)"
+        };
+        selected_by(
+            "compose-send",
+            icon_button("compose-send", Glyph::SEND, tip)
+                .disabled(empty)
+                .when(!empty, ButtonVariants::primary)
+                .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
+        )
+        .mb(px(2.0))
+        .into_any_element()
     }
 
     fn picker_view(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1111,6 +1137,19 @@ impl Render for Compose {
             .children(self.picker_view(palette, cx))
             .children(self.mode_bar(palette, cx))
             .children(self.problem_view(palette))
-            .child(div().min_h(px(36.0)).child(Textarea::new(&self.input)))
+            .child(
+                div()
+                    .flex()
+                    .items_end()
+                    .gap_1()
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .min_h(px(36.0))
+                            .child(Textarea::new(&self.input)),
+                    )
+                    .child(self.send_button(cx)),
+            )
     }
 }

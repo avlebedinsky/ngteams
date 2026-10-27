@@ -1081,6 +1081,49 @@ fn typing_shows_who_is_typing_and_clears_by_its_end_a_timeout_or_their_message()
 }
 
 #[test]
+fn the_hover_bar_lies_inside_its_row_so_its_top_edge_keeps_it_and_takes_the_click() {
+    let rig = rig_with(vec![
+        message("1", LAB_B, "<p>theirs</p>", NOON),
+        message("2", LAB_A, "<p>mine</p>", NOON + MINUTE),
+    ]);
+    let (view, cx) = chat_window(&rig, Arc::new(ViewTrace::off()));
+    let events: Rc<RefCell<Vec<ChatViewEvent>>> = Rc::default();
+    let seen = Rc::clone(&events);
+    cx.update(|_, cx| {
+        cx.subscribe(&view, move |_, event: &ChatViewEvent, _| {
+            seen.borrow_mut().push(event.clone());
+        })
+        .detach();
+    });
+    let mine = cx.debug_bounds("message-2").unwrap();
+    cx.simulate_mouse_move(mine.center(), None, Modifiers::none());
+    draw(cx);
+    let bar = cx.debug_bounds("message-actions").unwrap();
+    assert!(
+        bar.origin.y >= mine.origin.y,
+        "the bar reaches above its row: {bar:?} over {mine:?}"
+    );
+    // GPUI's hover is the row's own hitbox: a part of the bar outside it would drop the hover and the click
+    let edit = cx.debug_bounds("action-edit").unwrap();
+    let top_edge = point(edit.center().x, edit.origin.y + px(1.0));
+    cx.simulate_mouse_move(top_edge, None, Modifiers::none());
+    draw(cx);
+    assert_eq!(
+        cx.update(|_, cx| view.read(cx).hovered().map(str::to_owned)).as_deref(),
+        Some("2")
+    );
+    cx.simulate_click(top_edge, Modifiers::none());
+    draw(cx);
+    assert_eq!(
+        std::mem::take(&mut *events.borrow_mut()),
+        [ChatViewEvent::Action {
+            action: MessageAction::Edit,
+            message: "2".to_owned(),
+        }]
+    );
+}
+
+#[test]
 fn hover_and_keyboard_actions_offer_edit_and_delete_on_the_account_s_own_only() {
     let mut gone = message("3", LAB_A, "", NOON + 2 * MINUTE);
     gone.delete_time = Some(NOON + 3 * MINUTE);

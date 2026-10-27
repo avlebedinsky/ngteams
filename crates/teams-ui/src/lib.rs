@@ -67,6 +67,7 @@ pub mod chat_view;
 pub mod compose;
 pub mod desktop;
 pub mod first_run;
+pub mod icons;
 pub mod models;
 pub mod notify;
 pub mod own_presence;

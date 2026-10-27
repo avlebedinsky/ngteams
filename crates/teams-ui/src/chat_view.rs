@@ -69,10 +69,10 @@ use gpui::{
     ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
     WeakEntity, Window, actions, anchored, canvas, deferred, div, list, px, relative, rgb,
 };
-use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::button::{Button, ButtonCustomVariant, ButtonRounded, ButtonVariants as _};
 use gpui_component::input::Escape as ComposeEscape;
 use gpui_component::tooltip::Tooltip;
-use gpui_component::{Icon, Sizable as _, Size};
+use gpui_component::{Sizable as _, Size};
 use teams_core::{Action, Command, EngineError};
 use teams_proto::chat::{
     MessageType, RichText, ThreadActivity, Unshown, parse_html, thread_activity, unshown_parts, web_chat_link,
@@ -81,6 +81,7 @@ use teams_store::{Message, OutboxEntry, OutboxKind, OutboxState, PageCursor, Rea
 
 use crate::bridge::Core;
 use crate::compose::{self, Compose, ComposeEvent, ComposeParts, Quoted};
+use crate::icons::{Glyph, icon_button_with_key, selected_by};
 use crate::models::Models;
 use crate::people::{Face, Shown};
 use crate::reaction_picker::{ReactionPicker, ReactionPickerEvent};
@@ -200,6 +201,27 @@ impl MessageAction {
             Self::React => "React",
             Self::Edit => "Edit",
             Self::Delete => "Delete",
+        }
+    }
+
+    /// Its button's icon.
+    #[must_use]
+    pub fn glyph(self) -> Glyph {
+        match self {
+            Self::Reply => Glyph::REPLY,
+            Self::React => Glyph::REACT,
+            Self::Edit => Glyph::PENCIL,
+            Self::Delete => Glyph::TRASH,
+        }
+    }
+
+    /// The action its key asks for on the selected message, for its button's tooltip.
+    fn key_action(self) -> &'static dyn gpui::Action {
+        match self {
+            Self::Reply => &ReplyToSelected,
+            Self::React => &ReactToSelected,
+            Self::Edit => &EditSelected,
+            Self::Delete => &DeleteSelected,
         }
     }
 
@@ -2152,8 +2174,8 @@ fn quick_reactions(
         .tooltip(|window, cx| Tooltip::new("More reactions").build(window, cx))
         .on_click(cx.listener(|this, _, window, cx| this.open_more(window, cx)))
         .child(
-            Icon::default()
-                .data(include_bytes!("../assets/icons/smile-plus.svg"))
+            Glyph::REACT
+                .icon()
                 .size(px(QUICK_EMOJI - 4.0))
                 .text_color(rgb(palette.muted_foreground)),
         );
@@ -2216,6 +2238,7 @@ fn note_line(note: &Note, palette: Palette, cx: &mut Context<ChatView>) -> AnyEl
     let again = (note.again != Again::No).then(|| {
         div().debug_selector(move || format!("send-again-{row}")).child(
             Button::new(ElementId::Name(format!("send-again-{row}").into()))
+                .icon(Glyph::REFRESH.icon())
                 .label("Send again")
                 .ghost()
                 .with_size(Size::XSmall)
@@ -2273,26 +2296,38 @@ fn actions_bar(item: &MessageItem, palette: Palette, cx: &mut Context<ChatView>)
     let buttons = item.actions().into_iter().map(|action| {
         let message = item.id.clone();
         let name = action.name();
-        div().debug_selector(move || format!("action-{name}")).child(
-            Button::new(ElementId::Name(format!("action-{name}-{message}").into()))
-                .label(action.label())
-                .ghost()
-                .with_size(Size::XSmall)
-                .on_click(cx.listener(move |this, _, window, cx| this.act(action, &message, window, cx))),
+        let id = ElementId::Name(format!("action-{name}-{message}").into());
+        let button = icon_button_with_key(id, action.glyph(), action.label(), action.key_action()).small();
+        let button = if action == MessageAction::Delete {
+            button.custom(
+                ButtonCustomVariant::new(cx)
+                    .foreground(rgb(theme::DANGER).into())
+                    .hover(rgb(palette.hover).into())
+                    .active(rgb(palette.selected).into()),
+            )
+        } else {
+            button
+        };
+        selected_by(
+            format!("action-{name}"),
+            button.on_click(cx.listener(move |this, _, window, cx| this.act(action, &message, window, cx))),
         )
     });
     div()
         .debug_selector(|| "message-actions".to_owned())
         .absolute()
+        // inside the row: the row's own hover keeps the bar, so a part of it over the message above would vanish
+        // under the pointer and pass its click to that message
         .top_0()
-        .right(px(16.0))
+        .right(px(20.0))
         .flex()
-        .gap_1()
-        .px_1()
-        .rounded_md()
+        .gap_0p5()
+        .p_0p5()
+        .rounded_lg()
         .border_1()
         .border_color(rgb(palette.border))
         .bg(rgb(palette.surface))
+        .shadow_md()
         .children(buttons)
         .into_any_element()
 }
@@ -2855,8 +2890,10 @@ impl Render for ChatView {
                 .justify_center()
                 .child(
                     Button::new("jump-to-newest")
+                        .icon(Glyph::ARROW_DOWN.icon())
                         .label("Jump to newest")
                         .primary()
+                        .rounded(ButtonRounded::Large)
                         .small()
                         .on_click(cx.listener(|this, _, _, cx| this.jump_to_newest(cx))),
                 )

@@ -8,7 +8,7 @@
 //! chosen opens its chat at the message. Last come the app's commands the query matches ([`COMMANDS`]: "Copy
 //! diagnostics", and "Set status: …" for each status the account menu offers, so the account's status is set from the
 //! keyboard too), and in a build that shows calls the call commands that fit the moment ([`CallCommand`]: "Call" the
-//! chat shown, "Test call", "Join call", "Answer call", "Decline call", "Hang up", "Mute or unmute", M3 Task 17;
+//! chat shown, "Test call", "Join call", "Answer call", "Decline call", "Leave call", "Mute or unmute", M3 Task 17;
 //! "Camera on or off", Task 18).
 
 use std::sync::Arc;
@@ -142,9 +142,9 @@ impl CallCommand {
             Self::Join => "Join call",
             Self::Answer => "Answer call",
             Self::Decline => "Decline call",
-            Self::HangUp => "Hang up",
+            Self::HangUp => "Leave call",
             Self::ToggleMute => "Mute or unmute",
-            Self::ToggleCamera => "Camera on or off",
+            Self::ToggleCamera => "Turn camera on or off",
         }
     }
 

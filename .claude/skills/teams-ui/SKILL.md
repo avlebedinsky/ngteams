@@ -1,0 +1,130 @@
+---
+name: teams-ui
+description: How to build and change the native Teams client's UI (crates/teams-ui, the GPUI + gpui-component views) so it looks and behaves like real Microsoft Teams and stays clean — icon buttons with tooltips instead of text buttons, structured settings pages, the app's palette and Teams' red/green, the kit's pitfalls, keeping test selectors, and checking the result in the UI sandbox screenshots before handing it over. Use it for ANY task that touches what the app shows or how it is used: a new view, button, menu, dialog, settings option, empty or error state, call control, theme or layout tweak, "make it look like Teams", "this looks raw/ugly", a UI bug in the personal build — even when the request only names a feature ("add pinned chats", "show who reacted") and the UI part is implied.
+---
+
+# Teams UI
+
+The app is meant to replace Microsoft Teams for daily use, so a view is done when it looks and behaves like the real
+client, not when it merely works. The user checks the personal build by hand: every visible slip costs them a rebuild
+and a restart. This skill is the UI side of the project's rules; CLAUDE.md's hard rules (no view builds a request, every
+call action is the user's, the view trace never carries text) still hold for every change.
+
+## Before you build
+
+- **Find the Teams reference.** When the user shows a screenshot or says "like Teams", list every behavior it shows
+  (layout, sections, scrolling, hover, empty and fallback states) and build all of it, or say up front what you leave
+  out. Where unclear, look at the web client. A feature real Teams has and the app lacks is a gap to fix, never
+  "by design".
+- **Look at the current state first**: run the UI tour (below) and read the shots of the surfaces you will touch.
+- **Reuse what exists** before writing new widgets: `crates/teams-ui/src/icons.rs` (icons, icon buttons),
+  `settings_view.rs` (`group`, `row`, `segmented`, `picker`, `theme_tile`, `caption`), `shell.rs` (`menu_row`,
+  `pane_header`, `no_chat`), `call_view.rs` (`control`: solid red/green call buttons). `../ngterm/crates/ngterm-gpui/src`
+  (the user's GPUI terminal) is a reference for clean GPUI patterns, e.g. `settings/draw.rs`.
+
+## Guidelines
+
+### Controls
+
+- **An action in a toolbar, header, bar or hover strip is an icon button with a tooltip**, not a text button:
+  `icon_button(id, Glyph::X, "Tip")`, or `icon_button_with_key(id, glyph, "Tip", &Action)` when a key is bound, so
+  the tooltip shows the key. The tooltip names the action in plain words ("Turn camera off", "Cancel reply"); it is
+  also the button's accessible name.
+- **A word stays** where the word is the point: a dialog's confirm/cancel, the one primary action of a place (Teams'
+  "Join", "Leave", "Answer", "Decline" carry an icon *and* a word), "Send again", "Copy diagnostics".
+- **A toggle shows its state**: swap the glyph (mic/mic-off) and mark it `.selected(true)` while it is in the "off"
+  state Teams highlights (muted, camera off).
+- **Destructive and call actions use Teams' colours**: `theme::DANGER` (leave, decline, delete, unread badge),
+  `theme::SUCCESS` (answer). The kit's `.danger()`, `.success()` and `.custom(..)` button variants are drawn only
+  tinted (a custom colour is mixed 80% toward transparent), so a solid red/green button is our own `div` — see
+  `call_view.rs`'s `control`. A quiet destructive icon (delete in a hover bar) is a ghost button with a red foreground.
+- **Icons are Lucide SVGs** (ISC, `crates/teams-ui/assets/icons/LICENSE-LUCIDE`). A new one is copied from
+  `~/.cargo/registry/src/*/gpui-kit-assets-*/assets/icons/<name>.svg` into `crates/teams-ui/assets/icons/` and added
+  as a `Glyph` constant; never draw one ad hoc. Sizes: 14 px in menus and small buttons, 16–18 px in toolbars and nav,
+  22 px on the rail.
+
+### Structure
+
+- **Settings-like content is pages of titled boxes of rows**: a box (`group`) is a rounded, bordered surface with a
+  hairline between rows; a row (`row`) has its name and a one-line description of what it does on the left and the
+  control on the right. Group related options; a page per area, listed in the settings' own nav (the settings take the
+  list pane's place, as in Teams).
+- **Pick the control by the choice**: a switch for on/off; a segmented control (`segmented`) for 2–4 short options; a
+  dropdown (`picker`) for longer lists or long labels (statuses, durations, devices); preview tiles for visual choices
+  (themes); a stepper with −/+/reset icons for a number. Never a wall of radio buttons.
+- **Menus** (account menu, pickers) are rows of icon/mark + label + a check on the chosen one, on a raised surface with
+  a shadow — `menu_row` in `shell.rs`.
+- **Headers line up**: the list header and the conversation header are both 48 px with a bottom border; a chat header
+  shows the chat's avatar, its name (semibold, ellipsized), presence, then actions on the right.
+- **Empty and error states give direction**: an empty pane shows an icon in a tinted circle, a short title and what to
+  do (with the key as a `Kbd`). A status that is fine says nothing (the connection appears only when it isn't up);
+  a problem says what is wrong and how to fix it, in a warning box (`problems` in `settings_view.rs`).
+
+### Reach
+
+- **Everything the pointer reaches, the keyboard reaches.** A new list of pages, tabs or rows gets a focus handle and
+  Up/Down/Home/End (the settings' page column: `SettingsView::page_key`), focused when it opens; a new action gets a
+  key or a Ctrl+K command where it fits.
+- **An element shown only while its row is hovered stays inside that row.** GPUI's hover is the row's own hitbox: a
+  hover bar nudged above its row (a negative `top`) vanishes as the pointer reaches its upper part, and the click falls
+  through to the row underneath. `chat_view.rs`'s `actions_bar` sits at `top_0` for this reason; a test moves the
+  pointer to the bar's top edge and clicks there.
+- **A dropdown or popup scrolls** (`menu.scrollable(true).max_h(..)`): a long device list or a short window must still
+  reach every row.
+
+### Look
+
+- **Colours come from the palette** (`theme::current(cx)`: `foreground`, `muted_foreground`, `surface`, `background`,
+  `border`, `brand`, `hover`, `selected`, `on_brand`, `rail`) so every theme (Teams Light/Dark, High Contrast,
+  Solarized, Nord, Dracula) works; the only fixed colours are `theme::DANGER*`/`SUCCESS*`. Check a change in a dark
+  theme as well as Teams Light.
+- **Type**: titles semibold (page title ~22 px, pane titles `text_lg`), body default, descriptions and captions
+  `text_sm`/`text_xs` in `muted_foreground`. Sentence case everywhere.
+- **Spacing and shape**: GPUI's scale (`gap_2/3`, `px_3/4`, `py_2p5`); boxes and menus `rounded_lg`, controls
+  `rounded_md`, avatars and dots `rounded_full`. One border colour (`palette.border`).
+
+### Words
+
+Write from the user's side, plainly: "Report my availability", "Stop reporting me available after", "Turn camera on" —
+not the internal names (fence, outbox, endpoint, trace). Active verbs, and one name for an action everywhere it is
+offered: the call bar's Leave (tooltip "Leave call"), the Ctrl+K command "Leave call" and the README all say leave, never
+"hang up" in one place and "leave" in another. When you rename an action, grep the switcher (`switcher.rs`), the
+notifications, the README and the tests for the old name. Errors say what happened and what to do, without apologising.
+
+## Kit pitfalls (gpui-component 0.8)
+
+- `Button` takes no `debug_selector`: wrap it with `selected_by(id, button)` so tests can still find it.
+- `.dropdown_caret(true)` doesn't show when the button's content is a custom child: add a `Glyph::CHEVRON_DOWN` to the
+  face yourself (see `picker`).
+- A dropdown's rows are `PopupMenuItem::element(..)` whose element carries the row's `debug_selector`, so a test can
+  click the picker, then the row.
+- `Tooltip::new(text).action(&action, None)` shows a key on a plain `div`'s `.tooltip(..)` (needs
+  `StatefulInteractiveElement`, so the div needs an `.id`).
+- Never use the kit's Markdown/HTML views for message text (CLAUDE.md, "The UI kit"); never call
+  `ThemeRegistry::watch_dir`.
+
+## Keep tests and the trace working
+
+- **Keep every existing `debug_selector`** (tests click and measure by them: `call-mute`, `status-menu-busy`,
+  `idle-15`, `microphone-usb-mic`, …). When a control moves into a page or a dropdown, update the test to navigate
+  there first (`settings-page-<key>`, then the picker's selector, then the row's) rather than renaming the selector.
+- Give every new control a stable selector of the same shape (`<group>-<key>`).
+- The view trace records view and change names and service ids only, never displayed text.
+
+## Check it rendered — before you say it's done
+
+1. `GPUI_SMOKE_REQUIRE=1 cargo test -p teams-app --test ui_tour` (run in the background; it builds and drives the app
+   on the mock in the UI sandbox) writes `target/ui-shots/tour-*.png`: no chat, a chat with a message's actions (shown
+   by selecting it, so hover itself isn't checked: that is the view tests' job), a reply, the account menu, every
+   settings page (Calls with made-up devices), appearance and chat in Teams Dark. A new surface gets a step in
+   `STEPS` in `crates/teams-app/tests/ui_tour.rs`.
+2. Calls: `cargo test -p teams-app --test call_window` writes `teams-app-call-*.png` (incoming, connected, video).
+3. **Read the screenshots** (the Read tool shows images) and fix what looks off — alignment, clipped text, a control
+   that looks disabled, a colour that vanished in dark mode. Say plainly what a still shot can't show (hover, open
+   menus, animation) and that you haven't seen it.
+4. The gate (CLAUDE.md): `cargo fmt --all --check`, `cargo clippy -p teams-ui -p teams-app --all-targets
+   --all-features -- -D warnings`, `scripts/lint-report.sh`, `cargo test -p teams-ui -p teams-app`. Render functions
+   grow fast: split one over clippy's line limit into helpers (a `controls`, a `no_chat`), never `#[expect]` it.
+
+When reporting, list the surfaces changed and which shots you looked at; offer the personal-build install only when the
+user asks for it (CLAUDE.md: agents install and start it only on request).

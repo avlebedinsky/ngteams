@@ -65,6 +65,12 @@ name = "window"
 harness = false
 
 [[test]]
+# a look at the app's views on the mock in the UI sandbox, each screenshotted under `target/ui-shots/tour-*.png`: its
+# own `main` (GPUI runs on the main thread), which runs itself again inside the sandbox
+name = "ui_tour"
+harness = false
+
+[[test]]
 # several accounts in the app's one window, on the mock in the UI sandbox: its own `main` (GPUI runs on the main
 # thread), which runs itself again inside the sandbox as the app of a and b
 name = "accounts_window"

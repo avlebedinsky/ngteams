@@ -1,16 +1,17 @@
 //! The calls in the window (M3 Task 17), at the top of the shell's right side ([`CallBar`]):
 //!
 //! - **The incoming call's banner** while an invitation the engine offered rings: who calls (the caller's name as the
-//!   invitation gives it, "Someone" without one; a group call's chat by its row's name), Answer and Decline. The
-//!   ringtone and the notification are the desktop's ([`crate::call_alert`]).
+//!   invitation gives it, "Someone" without one; a group call's chat by its row's name), Answer in Teams' green and
+//!   Decline in its red. The ringtone and the notification are the desktop's ([`crate::call_alert`]).
 //! - **The in-call bar** while a call is up or being set up: who it is with (a chat's members other than the account,
-//!   by their names; an invitation's caller; the test call's echo), its state (calling, ringing, connecting,
-//!   connected with its duration, reconnecting, taken by voicemail), Mute or Unmute, Camera on or off (a build that
-//!   shows video), Hang up, and why an ask went nowhere while it is up; under it, once the call's roster told who is in
-//!   it, **the participant grid**: a cell per participant (its name as the roster gives it, its video when a line shows
-//!   it, a mark while it speaks) and the account's own (its self view, a mark while it speaks); before that, the video
-//!   tiles, the far end's picture and the self view ([`crate::video::Tiles`]). Once it ended, how (or why a later ask
-//!   went nowhere) until the next call or Dismiss.
+//!   by their names; an invitation's caller; the test call's echo), its state (calling, ringing, connecting, connected
+//!   with its duration, reconnecting, taken by voicemail), the microphone and the camera (a build that shows video) as
+//!   icons whose tooltips say Mute or Unmute and Turn camera on or off, Leave in Teams' red, and why an ask went
+//!   nowhere while it is up; under it, once the call's roster told who is in it, **the participant grid**: a cell per
+//!   participant (its name as the roster gives it, its video when a line shows it, a mark while it speaks) and the
+//!   account's own (its self view, a mark while it speaks); before that, the video tiles, the far end's picture and the
+//!   self view ([`crate::video::Tiles`]). Once it ended, how (or why a later ask went nowhere) until the next call or
+//!   Dismiss (an ✕).
 //!
 //! A build that shows no calls draws none of it.
 //!
@@ -26,16 +27,20 @@ use std::time::Duration;
 
 use gpui::{
     AnyElement, AsyncApp, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    SharedString, Styled as _, Subscription, Task, Window, div, px, rgb,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div, px, rgb,
 };
-use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::Selectable as _;
+use gpui_component::Sizable as _;
+use gpui_component::tooltip::Tooltip;
 use teams_core::{CallId, CallStatus, CallView, IncomingCall};
 
 use crate::bridge::Core;
 use crate::calls::{self, ActiveCall, Ask, CallKind, Calls, Refused};
 use crate::chat_list::{self, ChatList};
+use crate::icons::{Glyph, icon_button, icon_button_with_key, selected_by};
 use crate::notify::SOMEONE;
 use crate::people::Shown;
+use crate::shell::{AnswerCall, DeclineCall, HangUpCall, ToggleCameraCall, ToggleMuteCall};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 use crate::video::{Tile, Tiles, VideoFeed};
@@ -387,13 +392,35 @@ impl CallBar {
         };
         strip(palette)
             .debug_selector(|| "call-banner".to_owned())
-            .child(div().flex_1().font_weight(gpui::FontWeight::BOLD).child(text))
-            .child(button("call-answer", "Answer", true, cx, |this, cx| {
-                this.ask(Ask::Answer, cx);
-            }))
-            .child(button("call-decline", "Decline", false, cx, |this, cx| {
-                this.ask(Ask::Decline, cx);
-            }))
+            .child(
+                div()
+                    .size(px(32.0))
+                    .flex_none()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .rounded_full()
+                    .bg(rgb(palette.selected))
+                    .text_color(rgb(palette.brand))
+                    .child(Glyph::PHONE.icon().size(px(16.0))),
+            )
+            .child(div().flex_1().font_weight(gpui::FontWeight::SEMIBOLD).child(text))
+            .child(control(
+                "call-answer",
+                Control::Labelled(Glyph::PHONE, "Answer"),
+                ("Answer", &AnswerCall),
+                Look::Success,
+                cx,
+                |this, cx| this.ask(Ask::Answer, cx),
+            ))
+            .child(control(
+                "call-decline",
+                Control::Labelled(Glyph::PHONE_OFF, "Decline"),
+                ("Decline", &DeclineCall),
+                Look::Danger,
+                cx,
+                |this, cx| this.ask(Ask::Decline, cx),
+            ))
             .into_any_element()
     }
 
@@ -422,13 +449,6 @@ impl CallBar {
                 .text_color(rgb(palette.muted_foreground))
                 .child(SharedString::from(refusal_text(refused)))
         });
-        let mute = if active.muted { "Unmute" } else { "Mute" };
-        let camera = self.tiles.is_some().then(|| {
-            let label = if active.camera { "Camera off" } else { "Camera on" };
-            button("call-camera", label, false, cx, |this, cx| {
-                this.ask(Ask::ToggleCamera, cx);
-            })
-        });
         let grid = self.grid(active, palette);
         let tiles = if grid.is_none() {
             self.video_tiles(active, palette)
@@ -442,7 +462,11 @@ impl CallBar {
                     .flex_1()
                     .flex()
                     .flex_col()
-                    .child(div().font_weight(gpui::FontWeight::BOLD).child(self.title(active, cx)))
+                    .child(
+                        div()
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .child(self.title(active, cx)),
+                    )
                     .children(with)
                     .child(
                         div()
@@ -452,13 +476,7 @@ impl CallBar {
                     )
                     .children(refused),
             )
-            .child(button("call-mute", mute, false, cx, |this, cx| {
-                this.ask(Ask::ToggleMute, cx);
-            }))
-            .children(camera)
-            .child(button("call-hang-up", "Hang up", true, cx, |this, cx| {
-                this.ask(Ask::HangUp, cx);
-            }));
+            .child(self.controls(active, palette, cx));
         div()
             .w_full()
             .flex()
@@ -467,6 +485,52 @@ impl CallBar {
             .children(grid)
             .children(tiles)
             .into_any_element()
+    }
+
+    /// The call's controls: the microphone, the camera (a build that shows video) and Leave, in Teams' red.
+    fn controls(&self, active: &ActiveCall, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
+        let (mic, mute) = if active.muted {
+            (Glyph::MIC_OFF, "Unmute")
+        } else {
+            (Glyph::MIC, "Mute")
+        };
+        let camera = self.tiles.is_some().then(|| {
+            let (glyph, tip) = if active.camera {
+                (Glyph::VIDEO, "Turn camera off")
+            } else {
+                (Glyph::VIDEO_OFF, "Turn camera on")
+            };
+            control(
+                "call-camera",
+                Control::Icon(glyph),
+                (tip, &ToggleCameraCall),
+                Look::Toggle(!active.camera),
+                cx,
+                |this, cx| this.ask(Ask::ToggleCamera, cx),
+            )
+        });
+        div()
+            .flex()
+            .items_center()
+            .gap_1()
+            .child(control(
+                "call-mute",
+                Control::Icon(mic),
+                (mute, &ToggleMuteCall),
+                Look::Toggle(active.muted),
+                cx,
+                |this, cx| this.ask(Ask::ToggleMute, cx),
+            ))
+            .children(camera)
+            .child(div().w(px(1.0)).h(px(24.0)).mx_1().bg(rgb(palette.border)))
+            .child(control(
+                "call-hang-up",
+                Control::Labelled(Glyph::PHONE_OFF, "Leave"),
+                ("Leave call", &HangUpCall),
+                Look::Danger,
+                cx,
+                |this, cx| this.ask(Ask::HangUp, cx),
+            ))
     }
 
     /// A 1:1 call's video tiles (the far end's and the account's own), when there are any.
@@ -591,9 +655,12 @@ impl CallBar {
             strip(palette)
                 .debug_selector(|| "call-after".to_owned())
                 .child(div().flex_1().child(SharedString::from(text)))
-                .child(button("call-dismiss", "Dismiss", false, cx, |this, cx| {
-                    this.calls.update(cx, Calls::dismiss);
-                }))
+                .child(selected_by(
+                    "call-dismiss",
+                    icon_button("call-dismiss", Glyph::X, "Dismiss")
+                        .small()
+                        .on_click(cx.listener(|this, _, _, cx| this.calls.update(cx, Calls::dismiss))),
+                ))
                 .into_any_element(),
         )
     }
@@ -612,7 +679,7 @@ fn ask_label(ask: &str) -> &'static str {
         "join" => "join",
         "answer" => "answer",
         "decline" => "decline",
-        "hang-up" => "hang up",
+        "hang-up" => "leave the call",
         "camera" => "turn the camera on or off",
         _ => "do that",
     }
@@ -662,22 +729,71 @@ fn strip(palette: Palette) -> gpui::Div {
         .border_color(rgb(palette.border))
 }
 
-/// A button whose debug selector is its id.
-fn button(
+/// What a call control shows: an icon alone (named by its tooltip), or an icon and a word.
+#[derive(Clone, Copy)]
+enum Control {
+    Icon(Glyph),
+    Labelled(Glyph, &'static str),
+}
+
+/// How a call control looks: quiet, marked while its state is on (muted, camera off), or Teams' red or green.
+#[derive(Clone, Copy)]
+enum Look {
+    Toggle(bool),
+    Danger,
+    Success,
+}
+
+/// A call control whose debug selector is its id, its tooltip naming it and the key bound to `action`.
+fn control(
     id: &'static str,
-    label: &'static str,
-    primary: bool,
+    shows: Control,
+    (tip, action): (&'static str, &dyn gpui::Action),
+    look: Look,
     cx: &mut Context<CallBar>,
     on: fn(&mut CallBar, &mut Context<CallBar>),
 ) -> AnyElement {
-    let button = Button::new(id)
-        .label(label)
-        .compact()
-        .on_click(cx.listener(move |this, _, _, cx| on(this, cx)));
-    let button = if primary { button.primary() } else { button.ghost() };
+    let (fill, hover) = match look {
+        Look::Toggle(toggled) => {
+            let glyph = match shows {
+                Control::Icon(glyph) | Control::Labelled(glyph, _) => glyph,
+            };
+            return selected_by(
+                id,
+                icon_button_with_key(id, glyph, tip, action)
+                    .selected(toggled)
+                    .on_click(cx.listener(move |this, _, _, cx| on(this, cx))),
+            )
+            .into_any_element();
+        }
+        Look::Danger => (theme::DANGER, theme::DANGER_HOVER),
+        Look::Success => (theme::SUCCESS, theme::SUCCESS_HOVER),
+    };
+    // Teams' red and green are solid: the kit's own coloured buttons are only tinted
+    let (glyph, label) = match shows {
+        Control::Icon(glyph) => (glyph, None),
+        Control::Labelled(glyph, label) => (glyph, Some(label)),
+    };
+    let action = action.boxed_clone();
     div()
         .debug_selector(move || id.to_owned())
-        .child(button)
+        .id(id)
+        .h(px(32.0))
+        .px_3()
+        .flex()
+        .items_center()
+        .gap_1p5()
+        .rounded_md()
+        .cursor_pointer()
+        .bg(rgb(fill))
+        .text_color(rgb(0x00ff_ffff))
+        .text_sm()
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .hover(move |button| button.bg(rgb(hover)))
+        .tooltip(move |window, cx| Tooltip::new(tip).action(action.as_ref(), None).build(window, cx))
+        .on_click(cx.listener(move |this, _, _, cx| on(this, cx)))
+        .child(glyph.icon().size(px(16.0)))
+        .children(label)
         .into_any_element()
 }
 

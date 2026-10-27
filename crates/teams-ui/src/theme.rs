@@ -330,6 +330,15 @@ fn is_dark(appearance: WindowAppearance) -> bool {
     matches!(appearance, WindowAppearance::Dark | WindowAppearance::VibrantDark)
 }
 
+/// Teams' red: leaving a call, declining one, an unread count, deleting, and Busy's presence dot.
+pub const DANGER: u32 = 0x00c4_314b;
+pub const DANGER_HOVER: u32 = 0x00a7_2037;
+const DANGER_ACTIVE: u32 = 0x008e_192e;
+/// Teams' green: answering a call.
+pub const SUCCESS: u32 = 0x0023_7b4b;
+pub const SUCCESS_HOVER: u32 = 0x001e_6b41;
+const SUCCESS_ACTIVE: u32 = 0x0019_5a37;
+
 /// `0xRRGGBB` as the kit's `#rrggbb`.
 fn hex(color: u32) -> gpui::SharedString {
     format!("#{color:06x}").into()
@@ -369,6 +378,15 @@ fn colors(palette: Palette) -> ThemeConfigColors {
     colors.sidebar_border = Some(hex(palette.border));
     colors.title_bar = Some(hex(palette.rail));
     colors.title_bar_border = Some(hex(palette.border));
+    // Teams' own red and green whatever the theme: leaving or declining a call, answering one
+    colors.danger = Some(hex(DANGER));
+    colors.danger_hover = Some(hex(DANGER_HOVER));
+    colors.danger_active = Some(hex(DANGER_ACTIVE));
+    colors.danger_foreground = Some(hex(0x00ff_ffff));
+    colors.success = Some(hex(SUCCESS));
+    colors.success_hover = Some(hex(SUCCESS_HOVER));
+    colors.success_active = Some(hex(SUCCESS_ACTIVE));
+    colors.success_foreground = Some(hex(0x00ff_ffff));
     colors
 }
 

@@ -1,9 +1,10 @@
 //! The shell: the window's three panes, Teams-like and compact. On the left the rail (Chat, and Settings at its foot),
 //! then the list pane (the [`Sidebar`]: the [`ChatList`]'s chats and the [`TeamsList`]'s teams with their channels,
 //! M2 Task 16, in sections of one list), resizable by the handle on its right edge, then the conversation pane (the
-//! chat opened in a [`ChatView`] under its name, and a 1:1 chat's other member's presence, M2 Task 17; a channel
-//! opened in a [`ChannelView`] under its team's and its own name, read-only; or the settings, which the rail's Chat
-//! leaves for what they hid).
+//! chat opened in a [`ChatView`] under its avatar and name, and a 1:1 chat's other member's presence, M2 Task 17; a
+//! channel opened in a [`ChannelView`] under its team's and its own name, read-only; with nothing open, what to do).
+//! Settings take the place of both the list and the conversation pane, as in Teams (their pages are their own list);
+//! the rail's Chat leaves them for what they hid.
 //!
 //! The account menu (M2 Task 20): the rail's status button, above Settings, shows what the account's own presence
 //! reports ([`OwnPresence`], handed in by the desktop) and opens a menu of the statuses the user may set (Automatic and
@@ -25,10 +26,10 @@
 //! Calls (M3 Task 17), in a build that shows them (in one that doesn't, the call keys do nothing here): the chat's
 //! header has Call (or Join, when an invitation named a running call in that group chat) while the calling endpoint is
 //! registered and no call is up, ringing or being set up; the [`CallBar`] above the panes shows the incoming call's
-//! banner (Answer, Decline) and the in-call bar (Mute, Hang up). The keys: Ctrl+Shift+C calls the chat shown,
+//! banner (Answer, Decline) and the in-call bar (Mute, the camera, Leave). The keys: Ctrl+Shift+C calls the chat shown,
 //! Ctrl+Shift+J joins its running call, Ctrl+Shift+S answers and Ctrl+Shift+D declines the call that rings,
 //! Ctrl+Shift+M mutes or unmutes, Ctrl+Shift+O turns the camera on or off (a build that shows video) and Ctrl+Shift+H
-//! hangs up; the switcher offers the same as commands, with "Test call".
+//! leaves the call; the switcher offers the same as commands, with "Test call".
 //! Traced: `call-button shown` (the chat, and `call`, `join` or `none`).
 
 use std::sync::Arc;
@@ -39,7 +40,9 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, actions, div,
     prelude::FluentBuilder as _, px, rgb,
 };
+use gpui_component::avatar::Avatar;
 use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::kbd::Kbd;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, ResizableState, Size, h_resizable, resizable_panel};
 use teams_core::{Availability, Reporting};
@@ -53,13 +56,14 @@ use crate::channel_view::ChannelView;
 use crate::chat_list::{ChatList, ChatListEvent};
 use crate::chat_view::{self, ChatView};
 use crate::first_run::FirstRun;
+use crate::icons::{Glyph, icon_button_with_key, selected_by};
 use crate::models::{Account, Models};
 use crate::own_presence::{self, OwnPresence};
 use crate::people;
 use crate::presence;
 use crate::search::{HitTarget, Search, SearchEvent};
 use crate::settings::{ManualStatus, SettingsModel};
-use crate::settings_view::SettingsView;
+use crate::settings_view::{self, Page, SettingsView};
 use crate::sidebar::Sidebar;
 use crate::switcher::{CallCommand, Switcher, SwitcherEvent};
 use crate::teams_list::{ChannelChosen, TeamsList, TeamsListEvent};
@@ -92,8 +96,6 @@ pub const LIST_MIN: f32 = 220.0;
 pub const LIST_MAX: f32 = 560.0;
 /// An account's avatar on the rail, px.
 const ACCOUNT_AVATAR: f32 = 36.0;
-/// An account's unread badge's colour, 0xRRGGBB (Teams' red).
-const UNREAD_BADGE: u32 = 0x00c4_314b;
 /// The rail's width, px.
 pub const RAIL_WIDTH: f32 = 76.0;
 /// A rail item's height, px.
@@ -155,7 +157,8 @@ pub fn init(cx: &mut App) {
 /// What a button of the shell does.
 type ShellAction = fn(&mut Shell, &mut Context<Shell>);
 
-/// What the conversation pane shows.
+/// What the shell shows right of the list: a chat, a channel or nothing in the conversation pane, or the settings
+/// across both panes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Main {
     Nothing,
@@ -505,22 +508,24 @@ impl Shell {
 
     /// The chat header's call button (Call, or Join), when it has one.
     fn call_header_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let (id, label, on): (&'static str, &'static str, ShellAction) = match self.call_button(cx) {
-            "call" => ("chat-call", "Call", Self::call_chat),
-            "join" => ("chat-join", "Join", Self::join_call),
+        // Teams' header: an audio call is an icon; a running call's Join is the one filled button
+        let (id, button, on): (&'static str, Button, ShellAction) = match self.call_button(cx) {
+            "call" => (
+                "chat-call",
+                icon_button_with_key("chat-call", Glyph::PHONE, "Audio call", &CallChat),
+                Self::call_chat,
+            ),
+            "join" => (
+                "chat-join",
+                icon_button_with_key("chat-join", Glyph::PHONE, "Join the call", &JoinCall)
+                    .label("Join")
+                    .primary(),
+                Self::join_call,
+            ),
             _ => return None,
         };
-        let button = Button::new(id)
-            .label(label)
-            .compact()
-            .primary()
-            .on_click(cx.listener(move |this, _, _, cx| on(this, cx)));
-        Some(
-            div()
-                .debug_selector(move || id.to_owned())
-                .child(button)
-                .into_any_element(),
-        )
+        let button = button.on_click(cx.listener(move |this, _, _, cx| on(this, cx)));
+        Some(selected_by(id, button).into_any_element())
     }
 
     /// Traces what the chat's header shows (`header shown`: the chat; its other member's presence, `none` for a chat
@@ -715,7 +720,7 @@ impl Shell {
         &self.list
     }
 
-    /// The settings view the conversation pane shows when Settings is chosen.
+    /// The settings view the shell shows across both panes when Settings is chosen.
     #[must_use]
     pub fn settings_view(&self) -> &Entity<SettingsView> {
         &self.settings_view
@@ -824,8 +829,8 @@ impl Shell {
         }
     }
 
-    /// Shows the settings in the conversation pane; the chat they hide is kept (its draft stays), but isn't shown, so
-    /// no read receipt goes for it.
+    /// Shows the settings in place of the list and the conversation pane; the chat they hide is kept (its draft
+    /// stays), but isn't shown, so no read receipt goes for it.
     pub fn show_settings(&mut self, cx: &mut Context<Self>) {
         if self.main != Main::Settings {
             self.trace.record(&TraceLine::new("settings", "opened"));
@@ -914,15 +919,18 @@ impl Shell {
         cx.notify();
     }
 
-    /// The palette's "Copy diagnostics": the text on the clipboard, the switcher closed, and the settings shown, where
-    /// what was copied is told (said plainly when it holds full requests and responses).
+    /// The palette's "Copy diagnostics": the text on the clipboard, the switcher closed, and the settings' Diagnostics
+    /// shown, where what was copied is told (said plainly when it holds full requests and responses).
     fn copy_diagnostics(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.settings.update(cx, |settings, cx| {
             settings.copy_diagnostics(cx);
         });
         self.trace.record(&TraceLine::new("diagnostics", "copied"));
         self.close_switcher(window, cx);
+        self.settings_view
+            .update(cx, |view, cx| view.show_page(Page::Diagnostics, cx));
         self.show_settings(cx);
+        self.settings_view.update(cx, |view, cx| view.focus_pages(window, cx));
     }
 
     fn close_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1035,7 +1043,10 @@ impl Shell {
                 self.main == Main::Settings,
                 palette,
                 cx,
-                |this, _, cx| this.show_settings(cx),
+                |this, window, cx| {
+                    this.show_settings(cx);
+                    this.settings_view.update(cx, |view, cx| view.focus_pages(window, cx));
+                },
             ))
     }
 
@@ -1085,7 +1096,7 @@ impl Shell {
                         accounts.update(cx, Accounts::ask_add);
                     }
                 })
-                .child("+")
+                .child(Glyph::PLUS.icon().size(px(18.0)))
         });
         Some(
             div()
@@ -1147,7 +1158,7 @@ impl Shell {
                 .items_center()
                 .justify_center()
                 .rounded_full()
-                .bg(rgb(UNREAD_BADGE))
+                .bg(rgb(theme::DANGER))
                 .text_color(rgb(0x00ff_ffff))
                 .text_size(px(10.0))
                 .child(SharedString::from(if unread > 99 {
@@ -1210,19 +1221,33 @@ impl Shell {
         div()
             .debug_selector(|| "rail-status".to_owned())
             .id("rail-status")
-            .mx_1()
-            .px_1()
-            .py_1()
+            .mx_auto()
+            .mb_1()
             .flex()
             .items_center()
             .justify_center()
-            .gap_1()
-            .rounded_md()
             .cursor_pointer()
-            .text_xs()
+            .relative()
+            .size(px(ACCOUNT_AVATAR))
+            .flex_none()
+            .rounded_full()
+            .text_color(rgb(if failed {
+                theme::DANGER
+            } else {
+                palette.muted_foreground
+            }))
+            .hover(move |button| button.bg(rgb(palette.hover)))
             .when(self.status_menu, |button| button.bg(rgb(palette.border)))
-            .children(dot)
-            .child(if failed { "Status !" } else { "Status" })
+            .tooltip(move |window, cx| {
+                Tooltip::new(if failed {
+                    "Your status (the last report failed)"
+                } else {
+                    "Your status"
+                })
+                .build(window, cx)
+            })
+            .child(Glyph::USER.icon().size(px(RAIL_ICON)))
+            .children(dot.map(|dot| dot.absolute().right(px(2.0)).bottom(px(2.0))))
             .on_click(cx.listener(|this, _, _, cx| this.toggle_status_menu(cx)))
     }
 
@@ -1237,7 +1262,9 @@ impl Shell {
         let header = account.as_ref().map(|(name, detail, _)| {
             div()
                 .debug_selector(|| "status-menu-account".to_owned())
-                .pb_1()
+                .px_2()
+                .pt_1()
+                .pb_2()
                 .mb_1()
                 .border_b_1()
                 .border_color(rgb(palette.border))
@@ -1251,18 +1278,16 @@ impl Shell {
         });
         let remove = account.filter(|(_, _, can_add)| *can_add).map(|_| {
             div()
-                .debug_selector(|| "status-menu-remove-account".to_owned())
                 .w_full()
                 .mt_1()
                 .pt_1()
                 .border_t_1()
                 .border_color(rgb(palette.border))
                 .child(
-                    Button::new("status-menu-remove-account")
-                        .label("Sign out and remove")
-                        .compact()
-                        .ghost()
-                        .w_full()
+                    menu_row("status-menu-remove-account", palette)
+                        .text_color(rgb(theme::DANGER))
+                        .child(Glyph::LOG_OUT.icon().size(px(16.0)))
+                        .child("Sign out and remove")
                         .on_click(cx.listener(|this, _, _, cx| this.ask_remove_account(cx))),
                 )
         });
@@ -1274,25 +1299,19 @@ impl Shell {
     fn status_menu_view(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let chosen = self.settings.read(cx).settings().manual_status_of(self.core.me());
         let entries = ManualStatus::ALL.map(|status| {
-            let id: SharedString = format!("status-menu-{}", status.key()).into();
-            let selector = id.to_string();
-            let button = Button::new(id)
-                .label(status.label())
-                .compact()
-                .on_click(cx.listener(move |this, _, _, cx| this.choose_status(status, cx)));
-            let button = if status == chosen {
-                button.primary()
-            } else {
-                button.ghost()
-            };
-            div()
-                .debug_selector(move || selector.clone())
-                .w_full()
-                .child(button.w_full())
+            let check = (status == chosen).then(|| Glyph::CHECK.icon().size(px(14.0)).text_color(rgb(palette.brand)));
+            menu_row(format!("status-menu-{}", status.key()), palette)
+                .when(status == chosen, |row| row.font_weight(gpui::FontWeight::SEMIBOLD))
+                .child(settings_view::status_mark(status, palette))
+                .child(div().flex_1().child(status.label()))
+                .children(check)
+                .on_click(cx.listener(move |this, _, _, cx| this.choose_status(status, cx)))
         });
         let reported = self.own_reporting(cx).map(|reporting| {
             div()
                 .debug_selector(|| "status-menu-reported".to_owned())
+                .px_2()
+                .pt_1()
                 .text_xs()
                 .text_color(rgb(palette.muted_foreground))
                 .child(SharedString::from(format!(
@@ -1306,6 +1325,8 @@ impl Shell {
             .map(|failure| {
                 div()
                     .debug_selector(|| "status-menu-failure".to_owned())
+                    .px_2()
+                    .pt_1()
                     .text_xs()
                     .text_color(rgb(palette.muted_foreground))
                     .child(SharedString::from(format!(
@@ -1320,16 +1341,16 @@ impl Shell {
             .absolute()
             .left(px(RAIL_WIDTH + 4.0))
             .bottom(px(48.0))
-            .w(px(220.0))
-            .p_2()
+            .w(px(260.0))
+            .p_1()
             .flex()
             .flex_col()
-            .gap_1()
+            .gap_0p5()
             .bg(rgb(palette.surface))
             .border_1()
             .border_color(rgb(palette.border))
-            .rounded_md()
-            .shadow_md()
+            .rounded_lg()
+            .shadow_lg()
             .children(header)
             .children(entries)
             .children(reported)
@@ -1354,13 +1375,11 @@ impl Shell {
             .flex_col()
             .bg(rgb(palette.background));
         match &self.main {
-            Main::Settings => pane.child(self.settings_view.clone()).into_any_element(),
             Main::Chat(id) => {
-                let name = self
-                    .list
-                    .read(cx)
-                    .row(id)
-                    .map_or_else(|| SharedString::from("Chat"), |row| row.name.clone());
+                let row = self.list.read(cx).row(id);
+                let name = row.map_or_else(|| SharedString::from("Chat"), |row| row.name.clone());
+                let face =
+                    row.map(|row| people::avatar(row.named.then_some(&row.name), row.picture.as_ref(), Size::Small));
                 let chat = self
                     .chat
                     .clone()
@@ -1369,8 +1388,8 @@ impl Shell {
                     presence::labelled(&availability, palette).debug_selector(|| "chat-header-presence".to_owned())
                 });
                 let call = self.call_header_button(cx);
-                let header = pane_header(name, palette)
-                    .gap_2()
+                // Teams' chat header: the chat's picture and name, the other member's presence, the call on the right
+                let header = pane_header(face, name, palette)
                     .children(presence)
                     .child(div().flex_1())
                     .children(call)
@@ -1394,46 +1413,100 @@ impl Shell {
                         }
                     },
                 );
-                pane.child(pane_header(title, palette).debug_selector(|| "channel-header".to_owned()))
+                pane.child(pane_header(None, title, palette).debug_selector(|| "channel-header".to_owned()))
                     .child(div().flex_1().min_h_0().children(shown.map(|(view, _)| view.clone())))
                     .into_any_element()
             }
-            Main::Nothing => pane
-                .items_center()
-                .justify_center()
-                .text_color(rgb(palette.muted_foreground))
-                .child("Choose a chat, or press Ctrl+K")
-                .into_any_element(),
+            // the settings are drawn across both panes (`body`), never here
+            Main::Nothing | Main::Settings => pane.child(no_chat(palette)).into_any_element(),
         }
     }
 }
 
+/// A row of a popup menu, its test selector `id`: an icon or mark, its words, maybe a check.
+fn menu_row(id: impl Into<SharedString>, palette: Palette) -> gpui::Stateful<gpui::Div> {
+    let id = id.into();
+    let selector = id.to_string();
+    div()
+        .debug_selector(move || selector.clone())
+        .id(id)
+        .w_full()
+        .h(px(32.0))
+        .px_2()
+        .flex()
+        .items_center()
+        .gap_2()
+        .rounded_md()
+        .cursor_pointer()
+        .hover(move |row| row.bg(rgb(palette.hover)))
+}
+
+/// The conversation pane while no chat is open: what to do, and the key that finds a chat.
+fn no_chat(palette: Palette) -> gpui::Div {
+    div()
+        .size_full()
+        .flex()
+        .flex_col()
+        .items_center()
+        .justify_center()
+        .gap_3()
+        .text_color(rgb(palette.muted_foreground))
+        .child(
+            div()
+                .size(px(72.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .bg(rgb(palette.selected))
+                .text_color(rgb(palette.brand))
+                .child(Glyph::MESSAGE.icon().size(px(32.0))),
+        )
+        .child(
+            div()
+                .text_lg()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(rgb(palette.foreground))
+                .child("No chat open"),
+        )
+        .child(
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child("Choose one from the list, or press")
+                .child(Kbd::new(gpui::Keystroke::parse("ctrl-k").unwrap_or_default()).outline())
+                .child("to find one"),
+        )
+}
+
 /// A pane's header line.
-fn pane_header(title: impl Into<SharedString>, palette: Palette) -> gpui::Div {
+fn pane_header(face: Option<Avatar>, title: impl Into<SharedString>, palette: Palette) -> gpui::Div {
     div()
         .h(px(48.0))
         .flex_none()
-        .px_3()
+        .px_4()
         .flex()
         .items_center()
+        .gap_3()
+        .bg(rgb(palette.surface))
         .border_b_1()
         .border_color(rgb(palette.border))
-        .font_weight(gpui::FontWeight::BOLD)
-        .child(title.into())
+        .children(face)
+        .child(
+            div()
+                .text_lg()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .child(title.into()),
+        )
 }
 
 impl Render for Shell {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = theme::current(cx);
-        let panes = h_resizable("panes")
-            .with_state(&self.panes)
-            .child(
-                resizable_panel()
-                    .size(px(LIST_WIDTH))
-                    .size_range(px(LIST_MIN)..px(LIST_MAX))
-                    .child(self.list_pane()),
-            )
-            .child(resizable_panel().child(self.main_pane(palette, cx)));
         let overlay = |view: AnyView| {
             div()
                 .absolute()
@@ -1492,12 +1565,7 @@ impl Render for Shell {
                     .flex()
                     .flex_col()
                     .child(self.call_bar.clone())
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_h_0()
-                            .child(self.panes_or_signed_out(panes, palette, cx)),
-                    ),
+                    .child(div().flex_1().min_h_0().child(self.body(palette, cx))),
             )
             .children(switcher)
             .children(search)
@@ -1539,6 +1607,24 @@ impl AccountFace {
 impl Shell {
     /// The panes; in place of them, once the account is signed out in an app of accounts, what to do (the rail stays,
     /// to switch to another account or remove this one).
+    /// Under the call bar: the settings across both panes while Settings is chosen (as in Teams, their pages are
+    /// their own list), else the list and the conversation panes (or the signed-out notice).
+    fn body(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        if self.main == Main::Settings {
+            return self.settings_view.clone().into_any_element();
+        }
+        let panes = h_resizable("panes")
+            .with_state(&self.panes)
+            .child(
+                resizable_panel()
+                    .size(px(LIST_WIDTH))
+                    .size_range(px(LIST_MIN)..px(LIST_MAX))
+                    .child(self.list_pane()),
+            )
+            .child(resizable_panel().child(self.main_pane(palette, cx)));
+        self.panes_or_signed_out(panes, palette, cx)
+    }
+
     fn panes_or_signed_out(&self, panes: impl IntoElement, palette: Palette, cx: &App) -> AnyElement {
         let status = self.models.status.read(cx);
         if self.accounts.is_none() || !matches!(status.account, Account::SignedOut { .. }) {

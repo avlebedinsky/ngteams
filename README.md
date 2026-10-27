@@ -434,18 +434,21 @@ refresh token is refused, the window shows the account signed out (run `proto-la
 Closing the window shuts the engine down, then quits; an engine still waiting on the broker after 5 s (an unlock prompt
 nobody answers) has the broker's socket shut down under it.
 
-The window is three panes: the rail (Chat, Settings), the sidebar (resizable, under the connection state: "Chats", the
-store's chats by last activity with names, previews, times and unread counts, then "Teams and channels", each team with
-its channels; a section's header or a team's line folds it) and the conversation pane, which shows
-the chat opened in the chat view: its messages from the store, the newest at the bottom (older pages load as the top
+The window is three panes: the rail (Chat, Settings), the sidebar (resizable, under "Chat" and the connection state
+while it isn't up: "Chats", the store's chats by last activity with names, previews, times and unread counts, then
+"Teams and channels", each team with its channels; a section's header or a team's line folds it) and the conversation
+pane, which shows the chat opened in the chat view under its avatar and name: its messages from the store, the newest at the bottom (older pages load as the top
 comes near), grouped by sender within 5 minutes, with day separators, a "New messages" divider at the read horizon as
 the chat opened, edited and deleted markers, reactions, thread events, a "Jump to newest" pill once scrolled up, and
 who is typing. With the message list focused (a click on a message), Up and Down select a message, and `r` (reply),
 `a` (react), `e` (edit, the account's own), Delete (the account's own) and Escape (clear the selection) act on it; the
-same actions show over a message under the pointer. Ctrl+K opens the chat switcher (fuzzy over the chats' names;
-Enter opens, Escape closes). The settings (the selected chat,
-typing, read receipts, notifications, the idle time, the manual status, the log's level) live in `<data_dir>/ui/<alias>.toml` (`0600`,
-its directory `0700`); a file that can't be read gives the defaults, a bad value keeps its default, and either is
+same actions show as icon buttons over a message under the pointer, each named by its tooltip with its key, and the
+compose box has a Send button beside Enter. Ctrl+K opens the chat switcher (fuzzy over the chats' names; Enter opens,
+Escape closes). Settings take the place of the sidebar and the conversation pane, as in Teams: a column of pages
+(General, Appearance, Notifications, Privacy, Calls and devices where the app has calls, Diagnostics; Up and Down move
+between them) beside the page shown, each a set of titled boxes of rows. The settings (the selected chat, typing, read
+receipts, notifications, the idle time, the manual status, the log's level, the theme and the font) live in
+`<data_dir>/ui/<alias>.toml` (`0600`, its directory `0700`); a file that can't be read gives the defaults, a bad value keeps its default, and either is
 printed and shown in the settings view.
 
 The diagnostic log (`teams-log`) is installed before the engine starts, at
@@ -484,21 +487,24 @@ messages from the store; a message of c's notifying on the sandbox's fake server
 the tray item keeping the app when the window closes, the window back when the watcher leaves and the item
 registered again with a new one, opening it again and quitting it) and keeps its two screenshots
 under `target/ui-shots/`: `teams-app-window.png` (the window as the catch-up filled it) and `teams-app-chat.png` (the
-chat opened).
+chat opened). `crates/teams-app/tests/ui_tour.rs` walks the app on `teams-mock` through its views and screenshots each
+as `target/ui-shots/tour-<step>.png` (no chat open, a chat with a message's actions, a reply begun, the account menu,
+every settings page with Calls on made-up devices, the appearance and the chat in Teams Dark): the shots a change of
+the UI is looked at by.
 
 Calls (M3): the app's engine gets its calling on the UI sandbox's PipeWire (the only one a lab build may open; without
 it the app runs without calls). A chat's header has Call once the calling endpoint is registered (Join
 where an invitation named a running call in that group chat); an invitation the engine offered rings with a ringtone on
 the default output, a banner (Answer, Decline) and a notification with Answer and Decline on the bus the app is given,
 the caller named as the invitation names them, all gone once its ring ends; the in-call bar above the panes shows who
-the call is with, its state and duration, Mute and Hang up, and how it ended (a 1:1 call the callee declined is taken by
+the call is with, its state and duration, the microphone and camera toggles and Leave, and how it ended (a 1:1 call the callee declined is taken by
 their voicemail, as captured, and says so). Once the call is up the window shows the far end's video and the self
 view, or in a group call the participant grid (a cell per participant as the roster names them, its video when a
 line shows it, a mark while it speaks). The camera is off at every start, join and answer; only the user turns it on.
 Keys: Ctrl+Shift+C calls the chat shown, Ctrl+Shift+J joins its running call, Ctrl+Shift+S answers, Ctrl+Shift+D
-declines, Ctrl+Shift+M mutes or unmutes, Ctrl+Shift+O turns the camera on or off, Ctrl+Shift+H hangs up; the switcher
-(Ctrl+K) offers the commands that fit the moment ("Call", "Test call", "Join call", "Answer call", "Decline call",
-"Hang up", "Mute or unmute", "Camera on or off"). Nothing answers or declines a call but the user. The settings list
+declines, Ctrl+Shift+M mutes or unmutes, Ctrl+Shift+O turns the camera on or off, Ctrl+Shift+H leaves the call; the
+switcher (Ctrl+K) offers the commands that fit the moment ("Call", "Test call", "Join call", "Answer call", "Decline
+call", "Leave call", "Mute or unmute", "Turn camera on or off"). Nothing answers or declines a call but the user. The settings list
 the sandbox's microphones, speakers and cameras ("Follow the system" by default; a choice moves a running call's
 device without dropping it) and the video switch, on only with Cisco's OpenH264 in the lab's `openh264/`.
 `crates/teams-app/tests/call_window.rs` runs a's and b's apps in two sandboxes, each with its private PipeWire's tone,

@@ -25,6 +25,7 @@ use teams_ui::chat_list::{ChatList, DELETED, RowKind, format_time, listed, one_t
 use teams_ui::settings::{
     Copied, FirstRunState, LogLevel, ManualStatus, Notifications, Problem, Settings, SettingsModel, attach_devices,
 };
+use teams_ui::settings_view::Page;
 use teams_ui::shell::{LIST_MAX, LIST_MIN, LIST_WIDTH, Main, Shell, ShellParts};
 use teams_ui::switcher::{fuzzy_score, matches};
 use teams_ui::view::{Shown, status_text};
@@ -653,13 +654,20 @@ fn the_settings_view_changes_the_settings() {
     let rig = seeded();
     let (shell, cx) = shell_window(&rig, Settings::default(), Arc::new(ViewTrace::off()));
     cx.update(|_, cx| shell.update(cx, Shell::show_settings));
+    // each page from the settings' own column; a picker's row once its menu is open
     for selector in [
+        "settings-page-privacy",
         "send-typing",
         "send-read-receipts",
+        "settings-page-general",
         "send-presence",
-        "notifications-mentions",
+        "idle",
         "idle-15",
+        "status",
         "status-do-not-disturb",
+        "settings-page-notifications",
+        "notifications-mentions",
+        "settings-page-diagnostics",
         "log-level-debug",
     ] {
         click(cx, selector);
@@ -685,6 +693,7 @@ fn the_settings_view_chooses_the_theme_and_the_font_size_and_the_zoom_keys_step_
     let rig = seeded();
     let (shell, cx) = shell_window(&rig, Settings::default(), Arc::new(ViewTrace::off()));
     cx.update(|_, cx| shell.update(cx, Shell::show_settings));
+    click(cx, "settings-page-appearance");
     // following the system: a theme for each of its modes
     click(cx, "dark-theme-nord");
     assert_eq!(settings_of(&shell, cx).appearance.dark_theme, "nord");
@@ -720,6 +729,30 @@ fn the_settings_view_chooses_the_theme_and_the_font_size_and_the_zoom_keys_step_
 }
 
 #[test]
+fn the_settings_pages_are_reached_by_the_keyboard() {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig, Settings::default(), Arc::new(ViewTrace::off()));
+    cx.update(|_, cx| shell.update(cx, Shell::show_settings));
+    let view = cx.update(|_, cx| shell.read(cx).settings_view().clone());
+    cx.update(|window, cx| view.update(cx, |view, cx| view.focus_pages(window, cx)));
+    let page = |cx: &mut VisualTestContext| cx.update(|_, cx| view.read(cx).page());
+    assert_eq!(page(cx), Page::General);
+    cx.simulate_keystrokes("down");
+    assert_eq!(page(cx), Page::Appearance);
+    // without calls the last page is Diagnostics: Calls isn't listed, so it isn't reached
+    cx.simulate_keystrokes("end");
+    assert_eq!(page(cx), Page::Diagnostics);
+    cx.simulate_keystrokes("up");
+    assert_eq!(page(cx), Page::Privacy);
+    cx.simulate_keystrokes("home up");
+    assert_eq!(page(cx), Page::General, "Up at the first page stays there");
+    // a page clicked takes the keyboard too
+    click(cx, "settings-page-notifications");
+    cx.simulate_keystrokes("down");
+    assert_eq!(page(cx), Page::Privacy);
+}
+
+#[test]
 fn the_font_picker_shows_a_family_chosen_elsewhere_and_the_settings_scroll() {
     let rig = seeded();
     let settings = Settings {
@@ -731,6 +764,7 @@ fn the_font_picker_shows_a_family_chosen_elsewhere_and_the_settings_scroll() {
     };
     let (shell, cx) = shell_window(&rig, settings, Arc::new(ViewTrace::off()));
     cx.update(|_, cx| shell.update(cx, Shell::show_settings));
+    click(cx, "settings-page-appearance");
     let shown = |cx: &mut VisualTestContext| {
         let _ = bounds(cx, "settings");
         cx.update(|_, cx| shell.read(cx).settings_view().read(cx).shown_font(cx))
@@ -748,9 +782,9 @@ fn the_font_picker_shows_a_family_chosen_elsewhere_and_the_settings_scroll() {
     });
     assert_eq!(shown(cx).as_deref(), Some("Noto Sans"));
 
-    // in a small window the log's controls are below the pane: a scroll brings them up
+    // in a small window the font's row is below the pane: a scroll brings it up
     cx.simulate_resize(gpui::size(px(800.0), px(400.0)));
-    let before = bounds(cx, "log-level-debug").expect("drawn").origin.y;
+    let before = bounds(cx, "font-family").expect("drawn").origin.y;
     let pane = bounds(cx, "settings").expect("drawn");
     cx.simulate_event(gpui::ScrollWheelEvent {
         position: pane.center(),
@@ -758,7 +792,7 @@ fn the_font_picker_shows_a_family_chosen_elsewhere_and_the_settings_scroll() {
         modifiers: Modifiers::none(),
         touch_phase: gpui::TouchPhase::Moved,
     });
-    let after = bounds(cx, "log-level-debug").expect("drawn").origin.y;
+    let after = bounds(cx, "font-family").expect("drawn").origin.y;
     assert!(after < before, "the settings scrolled: {before:?} to {after:?}");
 }
 
@@ -786,24 +820,29 @@ fn the_settings_view_lists_the_devices_and_moves_the_calls_to_the_one_chosen() {
         ..Settings::default()
     };
     let (shell, cx) = shell_window(&rig, settings, Arc::new(ViewTrace::off()));
-    // without the calls' devices the view lists none
+    // without the calls' devices the view has no page for them
     cx.update(|_, cx| shell.update(cx, Shell::show_settings));
-    assert!(bounds(cx, "microphone-system").is_none(), "no devices without calls");
+    assert!(bounds(cx, "settings-page-calls").is_none(), "no devices without calls");
     let model = cx.update(|_, cx| shell.read(cx).settings().clone());
     cx.update(|_, cx| attach_devices(&model, Arc::new(directory.clone()), cx));
-    for drawn in [
-        "microphone-system",
-        "microphone-built-in-mic",
-        "microphone-usb-mic",
-        "speaker-system",
-        "speaker-built-in-speaker",
-        "camera-system",
+    click(cx, "settings-page-calls");
+    for (picker, rows) in [
+        (
+            "microphone",
+            &["microphone-system", "microphone-built-in-mic", "microphone-usb-mic"][..],
+        ),
+        ("speaker", &["speaker-system", "speaker-built-in-speaker"][..]),
         // chosen and not plugged in: still shown, as not connected
-        "camera-unplugged-cam",
+        ("camera", &["camera-system", "camera-unplugged-cam"][..]),
     ] {
-        assert!(bounds(cx, drawn).is_some(), "{drawn} is drawn");
+        click(cx, picker);
+        for drawn in rows {
+            assert!(bounds(cx, drawn).is_some(), "{drawn} is drawn");
+        }
+        cx.simulate_keystrokes("escape");
     }
 
+    click(cx, "microphone");
     click(cx, "microphone-usb-mic");
     assert_eq!(settings_of(&shell, cx).microphone.as_deref(), Some("usb-mic"));
     assert_eq!(
@@ -811,6 +850,7 @@ fn the_settings_view_lists_the_devices_and_moves_the_calls_to_the_one_chosen() {
         Some("usb-mic"),
         "the calls move to it"
     );
+    click(cx, "camera");
     click(cx, "camera-system");
     assert_eq!(settings_of(&shell, cx).camera, None);
     assert_eq!(
@@ -824,7 +864,10 @@ fn the_settings_view_lists_the_devices_and_moves_the_calls_to_the_one_chosen() {
         device_info(DeviceKind::Microphone, "usb-mic", "USB headset"),
         device_info(DeviceKind::Camera, "webcam", "Webcam"),
     ]));
+    click(cx, "camera");
     assert!(bounds(cx, "camera-webcam").is_some(), "the camera plugged in is listed");
+    cx.simulate_keystrokes("escape");
+    click(cx, "microphone");
     assert!(
         bounds(cx, "microphone-built-in-mic").is_none(),
         "the one unplugged is gone"
@@ -862,6 +905,7 @@ fn the_settings_view_copies_the_diagnostics_and_says_when_they_aren_t_safe_to_pa
     let model = SettingsModel::in_memory(Settings::default()).with_diagnostics(diagnostics_in(&dir, INFO_LINE));
     let (shell, cx) = shell_window_with(&rig, model, Arc::new(ViewTrace::off()));
     cx.update(|_, cx| shell.update(cx, Shell::show_settings));
+    click(cx, "settings-page-diagnostics");
     assert!(bounds(cx, "diagnostics-copied").is_none(), "nothing copied yet");
     click(cx, "copy-diagnostics");
     let copied = clipboard(cx);
