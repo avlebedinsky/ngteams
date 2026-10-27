@@ -152,8 +152,8 @@ pub struct Conversation {
     /// `addedBy`, `consumptionhorizon`, `isemptyconversation`, … as they came (booleans mostly as strings).
     #[serde(default)]
     pub properties: Map<String, Value>,
-    /// `threadType`, `productThreadType`, `rosterVersion`, `topics`, … as they came. A chat's topic wasn't seen in any
-    /// capture, so no field names it: a team's name is `spaceThreadTopic`.
+    /// `threadType`, `productThreadType`, `rosterVersion`, `topic`, `topics`, … as they came. A group or meeting chat's
+    /// name is `topic` (the web client titles a chat by it); a team's name is `spaceThreadTopic`.
     #[serde(rename = "threadProperties", default)]
     pub thread_properties: Map<String, Value>,
     #[serde(flatten)]
@@ -177,6 +177,12 @@ impl Conversation {
     #[must_use]
     pub fn thread_property(&self, name: &str) -> Option<&str> {
         self.thread_properties.get(name).and_then(Value::as_str)
+    }
+
+    /// The chat's name (`threadProperties.topic`), when it has one: a named group chat's or a meeting's title.
+    #[must_use]
+    pub fn topic(&self) -> Option<&str> {
+        named(self.thread_property("topic"))
     }
 
     /// The roster's version (`threadProperties.rosterVersion`): a number or a string of digits is known, anything else
@@ -741,6 +747,17 @@ impl Thread {
     pub fn kind(&self) -> ConversationKind {
         ConversationKind::of(&self.id, self.properties.get("threadType").and_then(Value::as_str))
     }
+
+    /// The chat's name (`properties.topic`), when it has one.
+    #[must_use]
+    pub fn topic(&self) -> Option<&str> {
+        named(self.properties.get("topic").and_then(Value::as_str))
+    }
+}
+
+/// A topic that names something: not empty, nor only whitespace.
+fn named(topic: Option<&str>) -> Option<&str> {
+    topic.filter(|topic| !topic.trim().is_empty())
 }
 
 /// A member of a thread, as the thread read and the member list give it.

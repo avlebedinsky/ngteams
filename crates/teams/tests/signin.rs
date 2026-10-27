@@ -238,7 +238,7 @@ async fn a_lab_account_is_refused_before_the_window_and_after_it() {
 }
 
 #[test]
-fn the_account_is_given_once_and_only_repeated_afterwards() {
+fn the_account_given_stays_until_another_is_given_before_a_sign_in() {
     let dir = tempfile::tempdir().unwrap();
     let setup = setup_in(&dir);
     assert!(matches!(setup.account(None), Err(SetupError::NoAccount)));
@@ -250,10 +250,51 @@ fn the_account_is_given_once_and_only_repeated_afterwards() {
     );
     assert_eq!(setup.account(None).unwrap(), pending);
     assert_eq!(setup.account(Some("SOMEONE@example.test")).unwrap(), pending);
+    // no sign-in named it yet: another account given takes its place, as on the first sign-in screen
+    let other = setup.account(Some("other@example.test")).unwrap();
+    assert_eq!(other.upn, "other@example.test");
+    assert_eq!(setup.account(None).unwrap(), other);
+}
+
+#[tokio::test]
+async fn the_first_sign_in_screen_asks_until_a_sign_in_names_the_account() {
+    let dir = tempfile::tempdir().unwrap();
+    let setup = setup_in(&dir);
+    // nothing held: the screen asks, with an empty field
+    assert!(setup.signed_in_account().unwrap().is_none());
+    assert_eq!(setup.held_upn().unwrap(), None);
+    // a lab account is refused before anything is written
     assert!(matches!(
-        setup.account(Some("other@example.test")),
+        setup.ask_for("bot-b@lab.example.test"),
+        Err(SetupError::Personal(PersonalError::LabAccount))
+    ));
+    assert!(!setup.paths.account_file().exists());
+    // an account no sign-in named yet gives way to the next one asked, keeping its identity provider's hosts
+    let typo = setup.ask_for("someone@example.tset").unwrap();
+    assert!(!typo.is_signed_in());
+    let mut with_idp = PersonalAccount::load(&setup.paths).unwrap().unwrap();
+    with_idp.idp_hosts = vec!["sso.example.test".to_owned()];
+    with_idp.save(&setup.paths).unwrap();
+    assert!(setup.signed_in_account().unwrap().is_none(), "no sign-in named it yet");
+    assert_eq!(setup.held_upn().unwrap().as_deref(), Some("someone@example.tset"));
+    let pending = setup.ask_for(UPN).unwrap();
+    assert_eq!(pending.upn, UPN);
+    assert_eq!(pending.idp_hosts, vec!["sso.example.test".to_owned()]);
+    assert_eq!(PersonalAccount::load(&setup.paths).unwrap().unwrap(), pending);
+    // once a sign-in named it, it is the account to start with, and the screen may only repeat it
+    let server = MockServer::start().await;
+    let clients = clients(&server, UPN, OID).await;
+    let store = MemorySecretStore::new();
+    let signed = signin::sign_in(&setup, &pending, &clients, &store, window())
+        .await
+        .unwrap();
+    assert_eq!(setup.signed_in_account().unwrap(), Some(signed.clone()));
+    assert_eq!(setup.ask_for("SOMEONE@example.test").unwrap(), signed);
+    assert!(matches!(
+        setup.ask_for("other@example.test"),
         Err(SetupError::OtherAccount { .. })
     ));
+    assert_eq!(PersonalAccount::load(&setup.paths).unwrap().unwrap(), signed);
 }
 
 #[tokio::test]

@@ -1,5 +1,5 @@
 //! The chat list: the account's chats by last activity, each row with its avatar, name, last message's first line,
-//! time and unread count; the connection state above it.
+//! time and unread count, in the [`crate::sidebar`]'s "Chats" section, which draws its rows.
 //!
 //! - **From the store only.** The list asks the engine's store ([`Core::conversations`], then per chat its members,
 //!   newest messages, unread count and people's names) when it opens and again each time the models say a chat
@@ -7,7 +7,7 @@
 //!   only when its chat changed since it was built, or when a message that carried a name came, in any chat, from
 //!   someone the row is named by, or their profile changed ([`crate::Chats::named_at`]); every row again after a
 //!   catch-up.
-//! - **Which chats**: 1:1, group and meeting chats. A team's channels belong to the Teams rail (Task 16) and the
+//! - **Which chats**: 1:1, group and meeting chats. A team's channels belong to the Teams list (Task 16) and the
 //!   account's own streams (`48:notes`, `48:notifications`, …) aren't chats: neither is listed.
 //! - **Names** (M2 Task 12): a 1:1 chat by the other member's name as the engine has it ([`Core::person`]: their
 //!   profile's, else their newest message's, else one the binary knew), else their MRI; a group or meeting chat by its
@@ -31,8 +31,8 @@ use std::sync::Arc;
 use chrono::{DateTime, Datelike as _, Local, TimeZone};
 use gpui::{
     AnyElement, App, AsyncApp, Context, ElementId, EventEmitter, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
-    WeakEntity, Window, div, px, rgb, uniform_list,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity,
+    div, px, rgb,
 };
 use gpui_component::Size;
 use gpui_component::avatar::Avatar;
@@ -45,9 +45,8 @@ use crate::compose::PICKER_MAX;
 use crate::models::Models;
 use crate::people::{self, Picture, Shown};
 use crate::presence;
-use crate::theme::{self, Palette};
+use crate::theme::Palette;
 use crate::trace::{TraceLine, ViewTrace};
-use crate::view::status_text;
 
 /// The most chats the list shows.
 pub const LIST_LIMIT: usize = 500;
@@ -99,7 +98,7 @@ impl RowKind {
     }
 }
 
-/// Whether the chat list shows a conversation: not a channel (the Teams rail's), not one of the account's own
+/// Whether the chat list shows a conversation: not a channel (the Teams list's), not one of the account's own
 /// streams.
 #[must_use]
 pub fn listed(conversation: &Conversation) -> bool {
@@ -581,7 +580,7 @@ impl ChatList {
     }
 
     /// The row at `index` of the list; its test selector `chat-row-<index>`.
-    fn render_row(&self, index: usize, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_row(&self, index: usize, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let Some(row) = self.rows.get(index) else {
             return div().into_any_element();
         };
@@ -711,46 +710,4 @@ async fn build_rows(core: &dyn Core, planned: Vec<Planned>) -> (Vec<ChatRow>, Ve
         }
     }
     (rows, built)
-}
-
-impl Render for ChatList {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let palette = theme::current(cx);
-        let status = status_text(self.models.status.read(cx));
-        let header = div()
-            .h(px(48.0))
-            .px_3()
-            .flex()
-            .items_center()
-            .justify_between()
-            .border_b_1()
-            .border_color(rgb(palette.border))
-            .child(div().font_weight(gpui::FontWeight::BOLD).child("Chat"))
-            .child(
-                div()
-                    .debug_selector(|| "connection".to_owned())
-                    .text_xs()
-                    .text_color(rgb(palette.muted_foreground))
-                    .child(status),
-            );
-        let rows = uniform_list(
-            "chat-rows",
-            self.rows.len(),
-            cx.processor(move |list: &mut Self, range: std::ops::Range<usize>, _window, cx| {
-                range
-                    .map(|index| list.render_row(index, palette, cx))
-                    .collect::<Vec<AnyElement>>()
-            }),
-        )
-        .flex_1()
-        .w_full();
-        div()
-            .size_full()
-            .overflow_hidden()
-            .flex()
-            .flex_col()
-            .bg(rgb(palette.surface))
-            .child(header)
-            .child(rows)
-    }
 }

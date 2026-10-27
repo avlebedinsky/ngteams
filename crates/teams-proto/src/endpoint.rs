@@ -49,6 +49,10 @@ pub enum Service {
     /// `x-ms-migration: True` and `api-version: 2`, as the web client's Entra form of the read
     /// (`docs/protocol/auth.md`): [`crate::RelayTokens`].
     Relay,
+    /// Teams' reaction pictures on its public CDN,
+    /// `https://statics.teams.cdn.office.net/evergreen-assets/personal-expressions/v2/assets/emoticons/`, with no token
+    /// (static files any browser reads): a reaction's animation ([`crate::ReactionAnimation`]).
+    Emoticons,
 }
 
 /// A request's path under its service's base, as path segments (each sent as one encoded segment, so a `/` inside one

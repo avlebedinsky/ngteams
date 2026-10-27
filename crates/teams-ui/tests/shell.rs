@@ -25,7 +25,7 @@ use teams_ui::chat_list::{ChatList, DELETED, RowKind, format_time, listed, one_t
 use teams_ui::settings::{
     Copied, FirstRunState, LogLevel, ManualStatus, Notifications, Problem, Settings, SettingsModel, attach_devices,
 };
-use teams_ui::shell::{LIST_MAX, LIST_MIN, LIST_WIDTH, Main, RailItem, Shell, ShellParts};
+use teams_ui::shell::{LIST_MAX, LIST_MIN, LIST_WIDTH, Main, Shell, ShellParts};
 use teams_ui::switcher::{fuzzy_score, matches};
 use teams_ui::view::{Shown, status_text};
 use teams_ui::{Root, ViewTrace};
@@ -479,20 +479,30 @@ fn the_shell_has_three_panes_and_the_list_pane_resizes_within_its_range() {
 }
 
 #[test]
-fn the_rail_switches_the_list_pane_and_opens_the_settings() {
+fn the_sidebar_shows_the_chats_and_the_teams_and_the_rail_s_chat_leaves_the_settings() {
     let rig = seeded();
     let (shell, cx) = shell_window(&rig, Settings::default(), Arc::new(ViewTrace::off()));
-    assert!(bounds(cx, "chat-row-0").is_some());
-    click(cx, "rail-teams");
-    assert_eq!(cx.update(|_, cx| shell.read(cx).rail()), RailItem::Teams);
-    assert!(bounds(cx, "teams-list").is_some());
+    for selector in ["section-chats", "chat-row-0", "section-teams", "teams-note"] {
+        assert!(bounds(cx, selector).is_some(), "{selector} is drawn");
+    }
+    assert!(bounds(cx, "rail-teams").is_none(), "no rail of the teams' own");
+    // the chats folded: the teams stay
+    click(cx, "section-chats");
     assert!(bounds(cx, "chat-row-0").is_none());
+    assert!(bounds(cx, "section-teams").is_some());
+    click(cx, "section-chats");
+    assert!(bounds(cx, "chat-row-0").is_some());
+
+    // the settings hide the chat; the rail's Chat shows it again
+    click(cx, "chat-row-1");
     click(cx, "rail-settings");
     assert_eq!(cx.update(|_, cx| shell.read(cx).main().clone()), Main::Settings);
     assert!(bounds(cx, "settings").is_some());
     click(cx, "rail-chats");
-    assert_eq!(cx.update(|_, cx| shell.read(cx).rail()), RailItem::Chats);
-    assert!(bounds(cx, "chat-row-0").is_some());
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).main().clone()),
+        Main::Chat(AB.to_owned())
+    );
 }
 
 #[test]

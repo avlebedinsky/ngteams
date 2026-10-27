@@ -72,9 +72,8 @@ The app has a diagnostic log (the user's decision of 2026-10-22), in both builds
 and rotated. At `info` it carries no payload, as every log line does today. At `debug` it carries full HTTP requests
 and responses and Trouter frames (bodies, headers, message text), with credentials redacted by the logger itself:
 CLAUDE.md's token rule is unchanged (no token, cookie or code reaches any log or stdout). For the personal build
-that log holds the user's colleagues' messages: it is the user's data, like the store and `fence.log`, and agents
-never read it, as they never read anything else under `~/.local/share/teams/`. A problem it shows is reported by its
-reason, never by an excerpt.
+that log holds the user's colleagues' messages: it is the user's data, like the store and `fence.log`, and never goes
+into the repo, not even sanitized.
 
 ## The personal fence
 
@@ -157,7 +156,8 @@ and Adaptive Card actions stay unmapped and denied (`docs/backlog/bot-invokes-an
 ### Its reads
 
 - **`GET`s** on the transport's host allowlist, as the lab sends them (the chat service, Graph's two probed shapes,
-  CSA's team reads); a new host or shape is added under the same review rule as in the lab.
+  CSA's team reads, and with no token a reaction's animation on Teams' CDN, `Service::Emoticons`); a new host or shape
+  is added under the same review rule as in the lab.
 - **Own-state and frames**: the same sealed `OwnState` and `OwnFrame` lists, in their captured shapes; each logged to
   the personal `fence.log` before it goes. No entry is added for the personal build alone.
 - **`PostRead`**, the profile lookups and `getpresence`, in their captured shapes, for **anyone in the account's
@@ -411,8 +411,8 @@ The first run, for the user (agents never do any of it):
 
 ## What "agents never build a personal build" means once the code exists
 
-- **Allowed**: the gate compiles the `teams` crate (`cargo clippy --workspace --all-targets --all-features`,
-  `cargo test --workspace`) and runs its tests on `teams-mock` (`cargo test -p teams`). `crates/teams` dev-depends
+- **Allowed**: the gate compiles the `teams` crate (`cargo clippy -p teams --all-targets --all-features`,
+  `cargo clippy --workspace --all-targets --all-features`, `cargo test --workspace`) and runs its tests on `teams-mock` (`cargo test -p teams`). `crates/teams` dev-depends
   on `teams-fence` with `test-support`, as `teams-app` and `teams-headless` do, so every build that compiles its
   tests builds its two binaries with `test-support`, and they refuse to run; a manifest test checks that
   dev-dependency.
@@ -575,8 +575,12 @@ Written after the approval and the lab fence's rewrite, by Task 27:
 - **Membership.** The personal source's answer is `Membership::Listed` (one unpaged thread read in a captured shape,
   every member `8:orgid:<guid>` or `28:<guid>`, a group chat's `threadType` `chat`, a 1:1 chat's members exactly the
   two its id names); the lab fence denies a listing, and the personal fence denies anything but one.
-- **`account.toml`.** `teams --account <UPN>` writes the UPN (and the user may add `idp_hosts`) before the first
-  sign-in, which adds the object id and tenant; the personal fence opens only once both are there.
+- **`account.toml`.** Before the first sign-in, `teams` opens a window of its own asking for the work account
+  (`teams_ui::account_prompt`); "Sign in" writes the UPN there (the user may add `idp_hosts`) and opens the sign-in
+  window, which adds the object id and tenant; the personal fence opens only once both are there, and a sign-in that
+  goes through starts the app afresh. Until a sign-in named one, another UPN typed replaces it (keeping `idp_hosts`);
+  afterwards the window may only repeat it. It opens again whenever the account must sign in before the app starts.
+  `teams --account <UPN>` skips it and goes to the sign-in window at once, under the same rule.
 - **Changing account** is `teams --forget` (the `teams-personal` items, `account.toml`, the region; the store stays, to
   delete by hand), a command line flag rather than an item in the app. It is refused while the account's engine runs
   (it takes the account's engine lock first and holds it until everything is deleted), so a running app's session

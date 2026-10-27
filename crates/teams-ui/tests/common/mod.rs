@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use gpui::{AppContext as _, Entity, TestAppContext};
 use teams_core::sync::{CatchUpReport, Synced};
 use teams_core::{
-    Action, Answer, Availability, CallAction, CallId, EngineError, Event, NameFrom, OwnStatus, Person, Reply,
+    Action, Answer, Availability, CallAction, CallId, EngineError, Event, NameFrom, OwnStatus, Person, Reply, Strip,
     Transient, TransientSent,
 };
 use teams_store::{
@@ -59,6 +59,12 @@ pub struct FakeCore {
     pub held: Mutex<Vec<(Answer<Person>, Person)>>,
     /// Reactions by message id.
     pub reactions: Mutex<HashMap<String, Vec<Reaction>>>,
+    /// The account's recent reaction keys, the newest first.
+    pub recent: Mutex<Vec<String>>,
+    /// Reactions' animation strips by id; any other is answered `None`.
+    pub animations: Mutex<HashMap<String, Strip>>,
+    /// Reactions whose animation's read fails on the way (answered [`EngineError::AnimationUnread`]).
+    pub unread_animations: Mutex<HashSet<String>>,
     /// The account's read horizons by conversation.
     pub horizons: Mutex<HashMap<String, ReadHorizon>>,
     /// Per conversation, the service's older pages `load_older` brings into `messages`, the next one first (each the
@@ -130,6 +136,9 @@ impl Default for FakeCore {
             hold_people: Mutex::default(),
             held: Mutex::default(),
             reactions: Mutex::default(),
+            animations: Mutex::default(),
+            unread_animations: Mutex::default(),
+            recent: Mutex::default(),
             horizons: Mutex::default(),
             older: Mutex::default(),
             unsynced: Mutex::default(),
@@ -368,6 +377,20 @@ impl Core for FakeCore {
             return reply;
         }
         self.answer("person", || self.person_now(mri))
+    }
+
+    fn recent_reactions(&self, limit: usize) -> Reply<Vec<String>> {
+        self.answer("recent_reactions", || {
+            locked(&self.recent).iter().take(limit).cloned().collect()
+        })
+    }
+
+    fn reaction_animation(&self, id: String) -> Reply<Option<Strip>> {
+        if locked(&self.unread_animations).contains(&id) {
+            locked(&self.asked).push("reaction_animation");
+            return Reply::ready(Err(EngineError::AnimationUnread));
+        }
+        self.answer("reaction_animation", || locked(&self.animations).get(&id).cloned())
     }
 
     fn presence(&self, mri: String) -> Reply<Availability> {

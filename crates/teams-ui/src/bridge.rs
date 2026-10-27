@@ -24,8 +24,8 @@ use futures_util::future::{Either, Shared, select};
 use gpui::{AppContext as _, AsyncApp, Context, SharedString, Task};
 use teams_core::sync::{CatchUpReport, Synced};
 use teams_core::{
-    Action, Availability, CallAction, CallId, EngineHandle, EngineRequests, Event, OwnStatus, Person, Reply, Transient,
-    TransientSent,
+    Action, Availability, CallAction, CallId, EngineHandle, EngineRequests, Event, OwnStatus, Person, Reply, Strip,
+    Transient, TransientSent,
 };
 use teams_store::{
     Conversation, Member, Message, MessagePage, OutboxEntry, PageCursor, Reaction, ReadHorizon, SearchHit, Team,
@@ -63,6 +63,8 @@ pub trait Core: Send + Sync + 'static {
     fn reactions(&self, conversation: String, id: String) -> Reply<Vec<Reaction>>;
     /// A chat's stored members.
     fn members(&self, conversation: String) -> Reply<Vec<Member>>;
+    /// The reaction keys the account set most recently, the newest first; at most `limit`.
+    fn recent_reactions(&self, limit: usize) -> Reply<Vec<String>>;
     /// How many stored messages of a conversation the account hasn't read.
     fn unread_count(&self, conversation: String) -> Reply<u64>;
     /// Someone's name and picture as the engine has them; a lookup starts in the background when its stored ones
@@ -72,6 +74,8 @@ pub trait Core: Send + Sync + 'static {
     /// change comes as `Event::Presence`. The engine watches at most `teams_core::MAX_WATCHED` people: past it the one
     /// asked about longest ago is dropped and told unknown, so a view asks again whenever it shows its people anew.
     fn presence(&self, mri: String) -> Reply<Availability>;
+    /// A reaction's animation as Teams' CDN has it (its strip of frames), read once a run; `None` when there is none.
+    fn reaction_animation(&self, id: String) -> Reply<Option<Strip>>;
     /// The account's own read horizon in a conversation.
     fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>>;
     /// Whether the store holds a conversation's whole history; `None` when it was never synced.
@@ -158,6 +162,14 @@ impl Core for EngineRequests {
 
     fn presence(&self, mri: String) -> Reply<Availability> {
         EngineRequests::presence(self, mri)
+    }
+
+    fn reaction_animation(&self, id: String) -> Reply<Option<Strip>> {
+        EngineRequests::reaction_animation(self, id)
+    }
+
+    fn recent_reactions(&self, limit: usize) -> Reply<Vec<String>> {
+        EngineRequests::recent_reactions(self, limit)
     }
 
     fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>> {
@@ -278,6 +290,14 @@ impl Core for StoppedCore {
     }
 
     fn presence(&self, _: String) -> Reply<Availability> {
+        stopped()
+    }
+
+    fn reaction_animation(&self, _: String) -> Reply<Option<Strip>> {
+        stopped()
+    }
+
+    fn recent_reactions(&self, _: usize) -> Reply<Vec<String>> {
         stopped()
     }
 

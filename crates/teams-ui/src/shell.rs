@@ -1,8 +1,9 @@
-//! The shell: the window's three panes, Teams-like and compact. On the left the rail (Chat, Teams, and Settings at
-//! its foot), then the list pane (the [`ChatList`] for Chat; the [`TeamsList`] of teams and their channels for Teams,
-//! M2 Task 16), resizable by the handle on its right edge, then the conversation pane (the chat opened in a
-//! [`ChatView`] under its name, and a 1:1 chat's other member's presence, M2 Task 17; a channel opened in a
-//! [`ChannelView`] under its team's and its own name, read-only; or the settings).
+//! The shell: the window's three panes, Teams-like and compact. On the left the rail (Chat, and Settings at its foot),
+//! then the list pane (the [`Sidebar`]: the [`ChatList`]'s chats and the [`TeamsList`]'s teams with their channels,
+//! M2 Task 16, in sections of one list), resizable by the handle on its right edge, then the conversation pane (the
+//! chat opened in a [`ChatView`] under its name, and a 1:1 chat's other member's presence, M2 Task 17; a channel
+//! opened in a [`ChannelView`] under its team's and its own name, read-only; or the settings, which the rail's Chat
+//! leaves for what they hid).
 //!
 //! The account menu (M2 Task 20): the rail's status button, above Settings, shows what the account's own presence
 //! reports ([`OwnPresence`], handed in by the desktop) and opens a menu of the statuses the user may set (Automatic and
@@ -38,7 +39,7 @@ use gpui::{
     prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::{ResizableState, h_resizable, resizable_panel};
+use gpui_component::{Icon, ResizableState, h_resizable, resizable_panel};
 use teams_core::{Availability, Reporting};
 use teams_proto::ManualAvailability;
 
@@ -55,6 +56,7 @@ use crate::presence;
 use crate::search::{HitTarget, Search, SearchEvent};
 use crate::settings::{ManualStatus, SettingsModel};
 use crate::settings_view::SettingsView;
+use crate::sidebar::Sidebar;
 use crate::switcher::{CallCommand, Switcher, SwitcherEvent};
 use crate::teams_list::{ChannelChosen, TeamsList, TeamsListEvent};
 use crate::theme::{self, Palette};
@@ -84,6 +86,28 @@ pub const LIST_MIN: f32 = 220.0;
 pub const LIST_MAX: f32 = 560.0;
 /// The rail's width, px.
 pub const RAIL_WIDTH: f32 = 76.0;
+/// A rail item's height, px.
+const RAIL_ITEM_HEIGHT: f32 = 52.0;
+/// A rail item's icon's size, px.
+const RAIL_ICON: f32 = 22.0;
+
+/// A rail item: its icon (Lucide's, ISC: `assets/icons/LICENSE-LUCIDE`) and its caption.
+#[derive(Clone, Copy)]
+struct RailItem {
+    icon: &'static [u8],
+    label: &'static str,
+}
+
+impl RailItem {
+    const CHAT: Self = Self {
+        icon: include_bytes!("../assets/icons/chat.svg"),
+        label: "Chat",
+    };
+    const SETTINGS: Self = Self {
+        icon: include_bytes!("../assets/icons/settings.svg"),
+        label: "Settings",
+    };
+}
 
 /// Marks the shell's key bindings as installed.
 struct Bound;
@@ -114,13 +138,6 @@ pub fn init(cx: &mut App) {
 /// What a button of the shell does.
 type ShellAction = fn(&mut Shell, &mut Context<Shell>);
 
-/// What the rail has chosen for the list pane.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RailItem {
-    Chats,
-    Teams,
-}
-
 /// What the conversation pane shows.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Main {
@@ -148,6 +165,8 @@ pub struct Shell {
     trace: Arc<ViewTrace>,
     list: Entity<ChatList>,
     teams: Entity<TeamsList>,
+    /// The list pane: the chats and the teams.
+    sidebar: Entity<Sidebar>,
     /// The chat opened in the conversation pane.
     chat: Option<Entity<ChatView>>,
     /// The channel opened in the conversation pane, with the names its header shows.
@@ -157,8 +176,9 @@ pub struct Shell {
     first_run: Entity<FirstRun>,
     switcher: Option<(Entity<Switcher>, Subscription)>,
     search: Option<(Entity<Search>, Subscription)>,
-    rail: RailItem,
     main: Main,
+    /// What the settings hid, shown again when the rail's Chat leaves them.
+    before_settings: Main,
     panes: Entity<ResizableState>,
     focus: FocusHandle,
     /// The account's own presence, once the desktop handed it in, with the shell's observation of it.
@@ -200,18 +220,11 @@ impl Shell {
         let opened = cx.subscribe_in(&list, window, |this: &mut Self, _, event, window, cx| match event {
             ChatListEvent::Opened(id) => this.open_chat(id.clone(), window, cx),
         });
-        let (teams_core, teams_models, teams_trace) = (Arc::clone(&core), models.clone(), Arc::clone(&trace));
-        let teams = cx.new(|cx| TeamsList::new(teams_core, teams_models, teams_trace, cx));
-        let channel_opened = cx.subscribe_in(&teams, window, |this: &mut Self, _, event, window, cx| match event {
-            TeamsListEvent::Opened(chosen) => this.open_channel(chosen.clone(), window, cx),
-        });
-        // a channel kept as the selected chat (by a build that opened one in a chat view) opens as a channel once the
-        // list knows it
-        let kept_channel = cx.observe_in(&teams, window, |this: &mut Self, teams, window, cx| {
-            let Main::Chat(id) = &this.main else { return };
-            if let Some(chosen) = teams.read(cx).chosen(id) {
-                this.open_channel(chosen, window, cx);
-            }
+        let (teams, [channel_opened, kept_channel]) = Self::teams_list(&core, &models, &trace, window, cx);
+        let sidebar_parts = (list.clone(), teams.clone(), models.clone(), Arc::clone(&trace));
+        let sidebar = cx.new(|cx| {
+            let (list, teams, models, trace) = sidebar_parts;
+            Sidebar::new(list, teams, models, trace, cx)
         });
         let settings_view = cx.new(|cx| SettingsView::new(settings.clone(), cx));
         let first_run = cx.new(|cx| FirstRun::new(settings.clone(), cx));
@@ -242,14 +255,15 @@ impl Shell {
             trace,
             list,
             teams,
+            sidebar,
             chat,
             channel: None,
             settings_view,
             first_run,
             switcher: None,
             search: None,
-            rail: RailItem::Chats,
             main: selected.map_or(Main::Nothing, Main::Chat),
+            before_settings: Main::Nothing,
             panes: cx.new(|_| ResizableState::default()),
             focus,
             own_presence: None,
@@ -268,6 +282,30 @@ impl Shell {
                 calling,
             ],
         }
+    }
+
+    /// The Teams list, with the subscriptions that open a channel it chose, and a channel kept as the selected chat.
+    fn teams_list(
+        core: &Arc<dyn Core>,
+        models: &Models,
+        trace: &Arc<ViewTrace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (Entity<TeamsList>, [Subscription; 2]) {
+        let (core, models, trace) = (Arc::clone(core), models.clone(), Arc::clone(trace));
+        let teams = cx.new(|cx| TeamsList::new(core, models, trace, cx));
+        let channel_opened = cx.subscribe_in(&teams, window, |this: &mut Self, _, event, window, cx| match event {
+            TeamsListEvent::Opened(chosen) => this.open_channel(chosen.clone(), window, cx),
+        });
+        // a channel kept as the selected chat (by a build that opened one in a chat view) opens as a channel once the
+        // list knows it
+        let kept_channel = cx.observe_in(&teams, window, |this: &mut Self, teams, window, cx| {
+            let Main::Chat(id) = &this.main else { return };
+            if let Some(chosen) = teams.read(cx).chosen(id) {
+                this.open_channel(chosen, window, cx);
+            }
+        });
+        (teams, [channel_opened, kept_channel])
     }
 
     /// The chat view of `selected`, the chat the settings kept, opened again and taking what is typed.
@@ -508,6 +546,12 @@ impl Shell {
         &self.teams
     }
 
+    /// The list pane: the chats and the teams.
+    #[must_use]
+    pub fn sidebar(&self) -> &Entity<Sidebar> {
+        &self.sidebar
+    }
+
     /// The channel view of the channel opened, if one is.
     #[must_use]
     pub fn channel(&self) -> Option<&Entity<ChannelView>> {
@@ -551,6 +595,7 @@ impl Shell {
         }
         self.teams
             .update(cx, |teams, cx| teams.select(Some(chosen.id.clone()), cx));
+        self.list.update(cx, |list, cx| list.select(None, cx));
         // a chat view of the channel itself (kept as the selected chat by an earlier build) is dropped, and the channel
         // isn't the selected chat any more
         if self
@@ -568,7 +613,6 @@ impl Shell {
         if let Some(chat) = &self.chat {
             chat.update(cx, |chat, cx| chat.set_shown(false, cx));
         }
-        self.rail = RailItem::Teams;
         self.main = Main::Channel(chosen.id);
         self.close_switcher(window, cx);
         self.close_search(window, cx);
@@ -590,11 +634,6 @@ impl Shell {
     #[must_use]
     pub fn main(&self) -> &Main {
         &self.main
-    }
-
-    #[must_use]
-    pub fn rail(&self) -> RailItem {
-        self.rail
     }
 
     /// The panes' sizes (the list pane's first).
@@ -636,11 +675,11 @@ impl Shell {
             self.chat = Some(cx.new(|cx| ChatView::new(parts, conversation, window, cx)));
         }
         self.list.update(cx, |list, cx| list.select(Some(id.clone()), cx));
+        self.teams.update(cx, |teams, cx| teams.select(None, cx));
         let kept = id.clone();
         self.settings.update(cx, |settings, cx| {
             settings.change(|settings| settings.selected_chat = Some(kept), cx);
         });
-        self.rail = RailItem::Chats;
         self.main = Main::Chat(id);
         self.trace_header(cx);
         self.trace_call_button(cx);
@@ -694,7 +733,7 @@ impl Shell {
     pub fn show_settings(&mut self, cx: &mut Context<Self>) {
         if self.main != Main::Settings {
             self.trace.record(&TraceLine::new("settings", "opened"));
-            self.main = Main::Settings;
+            self.before_settings = std::mem::replace(&mut self.main, Main::Settings);
             if let Some(chat) = &self.chat {
                 chat.update(cx, |chat, cx| chat.set_shown(false, cx));
             }
@@ -702,22 +741,19 @@ impl Shell {
         }
     }
 
-    /// Shows what the rail's `item` lists in the list pane; the Teams list asks for the teams again (the engine reads
-    /// them when they are old).
-    pub fn show_rail(&mut self, item: RailItem, cx: &mut Context<Self>) {
-        if self.rail != item {
-            self.rail = item;
-            if item == RailItem::Teams {
-                self.teams.update(cx, TeamsList::reload);
+    /// The rail's Chat: leaves the settings for what they hid (the chat or the channel shown before them, opened
+    /// again), or nothing; elsewhere it does nothing.
+    pub fn show_chats(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.main != Main::Settings {
+            return;
+        }
+        match std::mem::replace(&mut self.before_settings, Main::Nothing) {
+            Main::Chat(id) => self.open_chat(id, window, cx),
+            Main::Channel(id) => self.open_channel_id(id, window, cx),
+            Main::Nothing | Main::Settings => {
+                self.main = Main::Nothing;
+                cx.notify();
             }
-            self.trace.record(&TraceLine::new(
-                "rail",
-                match item {
-                    RailItem::Chats => "chats",
-                    RailItem::Teams => "teams",
-                },
-            ));
-            cx.notify();
         }
     }
 
@@ -803,29 +839,52 @@ impl Shell {
         }
     }
 
+    /// A rail item as Teams draws it: its icon over a small caption, the chosen one in the brand colour with a mark on
+    /// its left edge.
     fn rail_button(
         id: &'static str,
-        label: &'static str,
+        item: RailItem,
         chosen: bool,
+        palette: Palette,
         cx: &mut Context<Self>,
-        on: fn(&mut Self, &mut Context<Self>),
+        on: fn(&mut Self, &mut Window, &mut Context<Self>),
     ) -> AnyElement {
-        let button = Button::new(id)
-            .label(label)
-            .compact()
-            .on_click(cx.listener(move |this, _, _, cx| on(this, cx)));
-        let button = if chosen { button.primary() } else { button.ghost() };
+        let color = if chosen {
+            palette.brand
+        } else {
+            palette.muted_foreground
+        };
+        let mark = div()
+            .absolute()
+            .left_0()
+            .top(px(RAIL_ITEM_HEIGHT / 4.0))
+            .w(px(3.0))
+            .h(px(RAIL_ITEM_HEIGHT / 2.0))
+            .rounded_r_sm()
+            .when(chosen, |mark| mark.bg(rgb(palette.brand)));
         div()
             .debug_selector(move || id.to_owned())
+            .id(id)
+            .relative()
             .w_full()
-            .px_1()
-            .child(button.w_full())
+            .h(px(RAIL_ITEM_HEIGHT))
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_0p5()
+            .cursor_pointer()
+            .text_color(rgb(color))
+            .hover(move |style| style.bg(rgb(palette.hover)).text_color(rgb(palette.brand)))
+            .on_click(cx.listener(move |this, _, window, cx| on(this, window, cx)))
+            .child(mark)
+            .child(Icon::default().data(item.icon).size(px(RAIL_ICON)))
+            .child(div().text_size(px(10.0)).child(item.label))
             .into_any_element()
     }
 
     fn rail_view(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        let chats = self.rail == RailItem::Chats && self.main != Main::Settings;
-        let teams = self.rail == RailItem::Teams && self.main != Main::Settings;
+        let chats = self.main != Main::Settings;
         div()
             .debug_selector(|| "rail".to_owned())
             .w(px(RAIL_WIDTH))
@@ -838,20 +897,23 @@ impl Shell {
             .bg(rgb(palette.rail))
             .border_r_1()
             .border_color(rgb(palette.border))
-            .child(Self::rail_button("rail-chats", "Chat", chats, cx, |this, cx| {
-                this.show_rail(RailItem::Chats, cx);
-            }))
-            .child(Self::rail_button("rail-teams", "Teams", teams, cx, |this, cx| {
-                this.show_rail(RailItem::Teams, cx);
-            }))
+            .child(Self::rail_button(
+                "rail-chats",
+                RailItem::CHAT,
+                chats,
+                palette,
+                cx,
+                Self::show_chats,
+            ))
             .child(div().flex_1())
             .child(self.status_button(palette, cx))
             .child(Self::rail_button(
                 "rail-settings",
-                "Settings",
+                RailItem::SETTINGS,
                 self.main == Main::Settings,
+                palette,
                 cx,
-                Self::show_settings,
+                |this, _, cx| this.show_settings(cx),
             ))
     }
 
@@ -968,18 +1030,12 @@ impl Shell {
             .into_any_element()
     }
 
-    fn list_pane(&self, palette: Palette) -> AnyElement {
-        let pane = div().debug_selector(|| "list-pane".to_owned()).size_full();
-        match self.rail {
-            RailItem::Chats => pane.child(self.list.clone()).into_any_element(),
-            RailItem::Teams => pane
-                .flex()
-                .flex_col()
-                .bg(rgb(palette.surface))
-                .child(pane_header("Teams", palette))
-                .child(div().flex_1().min_h_0().child(self.teams.clone()))
-                .into_any_element(),
-        }
+    fn list_pane(&self) -> AnyElement {
+        div()
+            .debug_selector(|| "list-pane".to_owned())
+            .size_full()
+            .child(self.sidebar.clone())
+            .into_any_element()
     }
 
     fn main_pane(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
@@ -1067,7 +1123,7 @@ impl Render for Shell {
                 resizable_panel()
                     .size(px(LIST_WIDTH))
                     .size_range(px(LIST_MIN)..px(LIST_MAX))
-                    .child(self.list_pane(palette)),
+                    .child(self.list_pane()),
             )
             .child(resizable_panel().child(self.main_pane(palette, cx)));
         let overlay = |view: AnyView| {

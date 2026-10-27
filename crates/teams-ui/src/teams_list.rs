@@ -1,12 +1,12 @@
-//! The Teams list (M2 Task 16): the account's teams, each with its channels (its general one first), in the list pane
-//! when the rail chooses Teams.
+//! The Teams list (M2 Task 16): the account's teams, each with its channels (its general one first), in the
+//! [`crate::sidebar`]'s "Teams and channels" section, which draws it.
 //!
 //! - **From the store only.** The list asks the engine for the stored teams ([`Core::teams`]) when it opens and again
 //!   each time the models say they changed ([`crate::Chats::teams_at`]: `Event::Teams`); the engine reads them from
 //!   CSA in the background when they are missing or old. Before a read settled them it says so ("Loading teams…"),
 //!   or, when the last read told failed ([`crate::Chats::teams_failed_at`]: `Event::Failed` during
 //!   [`teams_core::READING_TEAMS`]), that the teams can't be read; the engine tries again when the list asks after
-//!   its retry wait (the rail chosen again).
+//!   its retry wait (after a catch-up, or the section unfolded again).
 //! - **Read-only.** A channel clicked is told as [`TeamsListEvent::Opened`]; the shell shows its posts in a
 //!   [`crate::ChannelView`], which offers no composer.
 //!
@@ -17,19 +17,21 @@ use std::sync::Arc;
 
 use gpui::{
     AnyElement, App, AsyncApp, Context, ElementId, EventEmitter, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
-    WeakEntity, Window, div, px, rgb,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity,
+    div, px, rgb,
 };
 use teams_core::EngineError;
 use teams_store::Team;
 
 use crate::bridge::Core;
 use crate::models::Models;
-use crate::theme::{self, Palette};
+use crate::theme::Palette;
 use crate::trace::{TraceLine, ViewTrace};
 
 /// A channel row's height, px.
 pub const CHANNEL_HEIGHT: f32 = 32.0;
+/// How far a channel's name is set in, px: under its team's name (past the team's fold mark and initial).
+pub const CHANNEL_INDENT: f32 = 56.0;
 /// What the list says before the teams were read.
 pub const LOADING: &str = "Loading teams…";
 /// What the list says when the account is in no team.
@@ -69,7 +71,9 @@ pub struct TeamsList {
     dirty: bool,
     loads: u64,
     traced: Option<Vec<(String, bool)>>,
-    _observing: Subscription,
+    /// The models' catch-ups the list has asked again after.
+    catch_ups: u64,
+    _observing: [Subscription; 2],
 }
 
 impl EventEmitter<TeamsListEvent> for TeamsList {}
@@ -89,6 +93,15 @@ impl TeamsList {
                 cx.notify();
             }
         });
+        // a catch-up (the push channel back): the teams asked for again, read again when old
+        let caught_up = cx.observe(&models.status, |this: &mut Self, status, cx| {
+            let catch_ups = status.read(cx).catch_ups;
+            if catch_ups != this.catch_ups {
+                this.catch_ups = catch_ups;
+                this.reload(cx);
+            }
+        });
+        let catch_ups = models.status.read(cx).catch_ups;
         let mut list = Self {
             core,
             trace,
@@ -101,7 +114,8 @@ impl TeamsList {
             dirty: false,
             loads: 0,
             traced: None,
-            _observing: observing,
+            catch_ups,
+            _observing: [observing, caught_up],
         };
         list.reload(cx);
         list
@@ -216,36 +230,33 @@ impl TeamsList {
         self.traced = Some(shown);
     }
 
-    /// A team's name line, its test selector `team-<index>`.
-    fn team_header(index: usize, team: &Team, palette: Palette) -> AnyElement {
-        let name = if team.archived {
-            format!("{} (archived)", team.name)
-        } else {
-            team.name.clone()
+    /// The channel at `channel` of the team at `team`, as the sidebar shows it: its row, its test selector
+    /// `channel-row-<index>` (`index` counts the channels across the teams).
+    pub(crate) fn channel_row(
+        &self,
+        index: usize,
+        team: usize,
+        channel: usize,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(shown) = self
+            .teams
+            .as_deref()
+            .and_then(|teams| teams.get(team))
+            .and_then(|team| team.channels.get(channel))
+        else {
+            return div().into_any_element();
         };
-        div()
-            .debug_selector(move || format!("team-{index}"))
-            .px_3()
-            .pt_2()
-            .pb_1()
-            .truncate()
-            .font_weight(gpui::FontWeight::BOLD)
-            .text_color(rgb(palette.foreground))
-            .child(name)
-            .into_any_element()
-    }
-
-    /// A channel's row, its test selector `channel-row-<index>` (counted across the teams).
-    fn channel_row(&self, index: usize, id: &str, name: &str, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let selected = self.selected.as_deref() == Some(id);
+        let selected = self.selected.as_deref() == Some(shown.id.as_str());
         let background = if selected { palette.selected } else { palette.surface };
-        let opened = id.to_owned();
+        let opened = shown.id.clone();
         div()
-            .id(ElementId::Name(format!("channel-{id}").into()))
+            .id(ElementId::Name(format!("channel-{}", shown.id).into()))
             .debug_selector(move || format!("channel-row-{index}"))
             .w_full()
             .h(px(CHANNEL_HEIGHT))
-            .pl_6()
+            .pl(px(CHANNEL_INDENT))
             .pr_3()
             .flex()
             .items_center()
@@ -254,56 +265,7 @@ impl TeamsList {
             .bg(rgb(background))
             .hover(move |style| style.bg(rgb(if selected { palette.selected } else { palette.hover })))
             .on_click(cx.listener(move |this, _, _, cx| this.open(&opened, cx)))
-            .child(name.to_owned())
+            .child(shown.name.clone())
             .into_any_element()
-    }
-
-    fn rows(&self, palette: Palette, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let mut rows = Vec::new();
-        let mut index = 0;
-        for (team_index, team) in self.teams.iter().flatten().enumerate() {
-            rows.push(Self::team_header(team_index, team, palette));
-            for channel in &team.channels {
-                rows.push(self.channel_row(index, &channel.id, &channel.name, palette, cx));
-                index += 1;
-            }
-        }
-        rows
-    }
-}
-
-impl Render for TeamsList {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let palette = theme::current(cx);
-        let note = |text: &'static str| {
-            div()
-                .debug_selector(|| "teams-note".to_owned())
-                .p_3()
-                .text_sm()
-                .text_color(rgb(palette.muted_foreground))
-                .child(text)
-        };
-        let unreadable = self.unreadable(cx);
-        let body = match &self.teams {
-            None if unreadable => note(UNREADABLE).into_any_element(),
-            None => note(LOADING).into_any_element(),
-            Some(teams) if teams.is_empty() => note(NO_TEAMS).into_any_element(),
-            Some(_) => div()
-                .id("teams-rows")
-                .flex_1()
-                .min_h_0()
-                .overflow_y_scroll()
-                .flex()
-                .flex_col()
-                .children(self.rows(palette, cx))
-                .into_any_element(),
-        };
-        div()
-            .debug_selector(|| "teams-list".to_owned())
-            .size_full()
-            .flex()
-            .flex_col()
-            .bg(rgb(palette.surface))
-            .child(body)
     }
 }

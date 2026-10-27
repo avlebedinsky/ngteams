@@ -1,0 +1,1664 @@
+# The reactions Teams offers, by its picker's categories, in its order (scripts/reaction-pack.py).
+# Catalog: Teams' emoticon metadata 0f52465a47bf42f299c74a639443f33e. Pictures: Fluent Emoji 3D (MIT), 1ffb34c752ecf5d402f04cfb4b392c77f57c54bc, 64 px WebP.
+# `@<category>`, then per reaction: id, code points, `d` when it takes a skin tone, offset and length of its
+# picture in emoji.bin (empty: none), description.
+@Smileys
+1f603_grinningfacewithbigeyes	1f603		0	2364	Grinning face with big eyes
+happyface	1f603		0	2364	Happy face
+grinningfacewithsmilingeyes	1f604		2364	2138	Grinning face with smiling eyes
+1f601_beamingfacewithsmilingeyes	1f601		4502	2152	Beaming face with smiling eyes
+laugh	1f606		6654	2178	Laugh
+sweatgrinning	1f605		8832	2402	Sweat grinning
+rofl	1f923		11234	2486	Rolling on the floor laughing
+cwl	1f602		13720	2354	Crying with laughter
+smile	1f642		16074	2282	Smile
+upsidedownface	1f643		18356	2320	Upside down face
+meltingface	1fae0		20676	2590	Melting face
+wink	1f609		23266	2378	Wink
+smileeyes	1f60a		25644	2170	Smile eyes
+angel	1f607		27814	2650	Angel
+inlove	1f970		30464	2710	In love
+hearteyes	1f60d		33174	2270	Heart eyes
+stareyes	1f929		35444	2590	Star eyes
+1f618_facethrowingakiss	1f618		38034	2504	Face blowing a kiss
+kiss	1f617		40538	2244	Kiss
+mmm	263a fe0f		42782	2306	Mmmmm…
+1f61a_kissingfacewithclosedeyes	1f61a		45088	2230	Kissing face with closed eyes
+1f619_kissingfacewithsmilingeyes	1f619		47318	2078	Kissing face with smiling eyes
+smilingfacewithtear	1f972		49396	2442	Smiling face with tear
+tongueout	1f60b		51838	2190	Cheeky
+1f61b_facewithtongue	1f61b		54028	2296	Face with tongue
+winktongueout	1f61c		56324	2380	Winking tongue out
+1f92a_zanyface	1f92a		58704	2732	Zany face
+squintingfacewithtongue	1f61d		61436	2170	Squinting face with tongue
+1f911_moneymouthface	1f911		63606	2492	Money mouth face
+1f917_huggingface	1f917		66098	2632	Hugging face
+giggle	1f92d		68730	2206	Giggle
+handovermouth	1fae2		70936	2452	Hand over mouth
+peekingeye	1fae3		73388	2474	Peeking eye
+lipssealed	1f92b		75862	2298	My lips are sealed
+think	1f914		78160	2622	Thinking
+salute	1fae1		80782	2486	Saluting face
+1f910_zippermouthface	1f910		83268	2478	Zipper mouth face
+wonder	1f928		85746	2300	Wondering
+speechless	1f610		88046	2224	Speechless
+expressionless	1f611		90270	1906	Expressionless
+blankface	1f636		92176	2112	Face without mouth
+dottedlineface	1fae5		94288	2710	Dotted line face
+faceinclouds	1f636 200d 1f32b fe0f		96998	1468	Face in clouds
+smirk	1f60f		98466	2272	Smirking
+unamused	1f612		100738	2338	Unamused
+dull	1f644		103076	2164	Dull
+1f62c_grimacingface	1f62c		105240	2600	Grimacing face
+faceexhaling	1f62e 200d 1f4a8		107840	2336	Face exhaling
+1f925_lyingface	1f925		110176	2298	Lying face
+shaking	1fae8		112474	3120	Shaking Head
+headshakingvertically2	1f642 200d 2195 fe0f		115594	2770	Head shaking vertically
+headshakinghorizontally2	1f642 200d 2194 fe0f		118364	2656	Head shaking horizontally
+relieved	1f60c		121020	2236	Relieved
+pensive	1f614		123256	2124	Pensive
+sleepy	1f62a		125380	2334	Sleepy
+1f924_droolingface	1f924		127714	2524	Drooling face
+sleepingface	1f634		130238	2464	Sleeping face
+1f637_facewithmedicalmask	1f637		132702	2284	Face with medical mask
+ill	1f912		134986	2612	Ill
+1f915_facewithheadbandage	1f915		137598	2288	Face with head bandage
+1f922_nauseatedface	1f922		139886	2418	Nauseated face
+puke	1f92e		142304	2398	Vomiting
+1f927_sneezingface	1f927		144702	2342	Sneezing face
+1f975_hotface	1f975		147044	2632	Hotface
+shivering	1f976		149676	2506	Cold shivering
+hungover	1f971		152182	2412	Morning after party
+1f635_dizzyface	1f635		154594	2244	Dizzy face
+facewithspiraleyes	1f635 200d 1f4ab		156838	2494	Face with spiral eyes
+1f92f_explodinghead	1f92f		159332	2922	Exploding head
+1f920_facewithcowboyhat	1f920		162254	2770	Face with cowboy hat
+party	1f973		165024	2674	Party
+disguisedface	1f978		167698	2860	Disguised face
+cool	1f60e		170558	2532	Cool
+nerdy	1f913		173090	2554	Nerdy
+1f9d0_facewithmonocle	1f9d0		175644	2558	Face with monocle
+confused	1f615		178202	2282	Confused
+diagonalmouth	1fae4		180484	2286	Face with diagonal mouth
+worry	1f627		182770	2446	Worried
+sad	1f641		185216	2554	Sad
+2639_frowningface	2639 fe0f		187770	2288	Frowning face
+surprised	1f62e		190058	2242	Surprised
+1f62f_hushedface	1f62f		192300	2394	Hushed face
+1f632_astonishedface	1f632		194694	2436	Astonished face
+blush	1f60a		25644	2170	Blush
+1f97a_pleadingface	1f97a		197130	2406	Pleading face
+faceholdingbacktears	1f979		199536	2482	Face holding back tears
+1f626_frowningfacewithopenmouth	1f626		202018	2248	Frowning face with open mouth
+1f627_anguishedface	1f627		182770	2446	Anguished face
+fearful	1f628		204266	2398	Fearful
+1f630_anxiousfacewithsweat	1f630		206664	2560	Anxious face with sweat
+1f625_sadbutrelievedface	1f625		209224	2554	Sad but relieved face
+cry	1f622		211778	2498	Crying
+loudlycrying	1f62d		214276	2432	Loudly crying
+screamingfear	1f631		216708	2496	Screaming with fear
+veryconfused	1f616		219204	2232	Very confused
+doh	1f62b		221436	2300	Doh!
+disappointed	1f61e		223736	2082	Disappointed
+sweat	1f613		225818	2234	Sweating
+weary	1f629		228052	2280	Weary
+1f62b_tiredface	1f62b		221436	2300	Tired face
+1f971_yawningface	1f971		152182	2412	Yawning face
+1f624_facewithlookoftriumph	1f624		230332	2634	Face with steam from nose
+angryface	1f621		232966	2478	Angry face
+angry	1f620		235444	2380	Angry
+swear	1f92c		237824	2710	Swearing
+devil	1f608		240534	2558	Devil
+1f47f_angryfacewithhorns	1f47f		243092	2574	Angry face with horns
+skull	1f480		245666	2090	Skull
+2620_skullandcrossbones	2620 fe0f		247756	2876	Skull and crossbones
+poop	1f4a9		250632	2150	Pile of poo
+1f921_clownface	1f921		252782	2954	Clown face
+1f479_japaneseogre	1f479		255736	2576	Ogre
+1f47a_japanesegoblin	1f47a		258312	2420	Goblin
+ghost	1f47b		260732	2124	Ghost
+1f47d_extraterrestrialalien	1f47d		262856	2302	Alien
+1f47e_alienmonster	1f47e		265158	2590	Alien monster
+smilerobot	1f916		267748	2514	Smile robot
+smilecat	1f63a		270262	2432	Smile cat
+laughcat	1f63a		270262	2432	Laugh cat
+1f639_catwithtearsofjoy	1f639		272694	2548	Cat with tears of joy
+hearteyescat	1f63b		275242	2560	Heart eyes cat
+1f63c_catwithwrysmile	1f63c		277802	2472	Cat with wry smile
+1f63d_kissingcat	1f63d		280274	2468	Kissing cat
+1f640_wearycat	1f640		282742	2434	Weary cat
+sadcat	1f63f		285176	2490	Sad cat
+1f63e_poutingcat	1f63e		287666	2456	Pouting cat
+hearnoevil	1f649		290122	2188	Monkey hear no evil
+seenoevil	1f648		292310	2324	Monkey see no evil
+speaknoevil	1f64a		294634	2340	Monkey speak no evil
+lips	1f48b		296974	2664	Kissing lips
+loveletter	1f48c		299638	1294	Love letter
+1f498_heartwitharrow	1f498		300932	2360	Heart with arrow
+1f49d_heartwithribbon	1f49d		303292	2240	Heart with ribbon
+sparklingheart	1f496		305532	2204	Sparkling heart
+growingheart	1f497		307736	2030	Growing heart
+1f493_beatingheart	1f493		309766	2358	Beating heart
+1f49e_revolvinghearts	1f49e		312124	2746	Revolving hearts
+twohearts	1f495		314870	2044	Two hearts
+1f49f_heartdecoration	1f49f		316914	1256	Heart button
+2763_heartexclamation	2763 fe0f		318170	1898	Heart exclamation
+brokenheart	1f494		320068	2402	Broken heart
+heartonfire	2764 fe0f 200d 1f525		322470	2292	Heart on fire
+mendingheart	2764 fe0f 200d 1fa79		324762	1946	Mending heart
+heart	2764 fe0f		326708	1922	Heart
+heartpink	1fa77		328630	1824	Pink heart
+heartorange	1f9e1		330454	1882	Orange heart
+heartyellow	1f49b		332336	1896	Yellow heart
+heartgreen	1f49a		334232	1826	Green heart
+heartblue	1f499		336058	1968	Blue heart
+heartlightblue	1fa75		338026	1854	Light blue heart
+heartpurple	1f49c		339880	1934	Purple heart
+heartbrown	1f90e		341814	1872	Brown heart
+heartblack	1f5a4		343686	1786	Black heart
+heartgrey	1fa76		345472	1682	Grey heart
+heartwhite	1f90d		347154	1658	White heart
+rainbowheart2	2764 fe0f		326708	1922	Rainbow heart
+1f4af_hundredpointssymbol	1f4af		348812	3284	Hundred points
+1f4a2_angersymbol	1f4a2		352096	3414	Anger symbol
+1f4a5_collisionsymbol	1f4a5		355510	2476	Explosion
+1f4ab_dizzysymbol	1f4ab		357986	2788	Dizzy symbol
+1f4a6_splashingsweatsymbol	1f4a6		360774	2672	Droplets
+1f4a8_dashsymbol	1f4a8		363446	2070	Dashing away
+1f573_hole	1f573 fe0f		365516	1436	Hole
+bomb	1f4a3		366952	1990	Bomb
+speechbubble	1f4ac		368942	1498	Speech bubble
+eyeinspeechbubble	1f441 fe0f 200d 1f5e8 fe0f		370440	1806	Eye speech bubble
+1f5e8_leftspeechbubble	1f5e8 fe0f		372246	1468	Left speech bubble
+1f5ef_rightangerbubble	1f5ef fe0f		373714	1590	Angry speech bubble
+1f4ad_thoughtballoon	1f4ad		375304	1816	Thought bubble
+1f4a4_zzz	1f4a4		377120	2406	Zzz
+coolcat	1f60e		170558	2532	Cool cat
+cooldog	1f436		379526	2210	Cool dog
+coolmonkey	1f60e		170558	2532	Cool monkey
+coolrobot	1f916		267748	2514	Cool robot
+coolkoala	1f428		381736	1972	Cool koala
+hearteyesdog	1f60d		33174	2270	Heart eyes dog
+hearteyesmonkey	1f60d		33174	2270	Heart eyes monkey
+hearteyesrobot	1f60d		33174	2270	Heart eyes robot
+hearteyeskoala	1f60d		33174	2270	Heart eyes koala
+laughdog	1f604		2364	2138	Laugh dog
+laughmonkey	1f604		2364	2138	Laugh monkey
+laughrobot	1f604		2364	2138	Laugh robot
+laughkoala	1f604		2364	2138	Laugh koala
+saddog	1f641		185216	2554	Sad dog
+sadmonkey	1f641		185216	2554	Sad monkey
+sadrobot	1f916		267748	2514	Sad robot
+sadkoala	1f641		185216	2554	Sad koala
+dream	1f60c		121020	2236	Dreaming
+headbang	1f624		230332	2634	Banging head on wall
+headphones	1f3a7		383708	2762	Listening to headphones
+holidayspirit	1f973		165024	2674	Holiday spirit
+idea	1f4a1		386470	1806	Idea
+movember	1f9d0		175644	2558	Movember
+punch	1f94a		388276	1468	Punch
+rainbowsmile	1f642		16074	2282	Rainbow smile
+wasntme	1f644		103076	2164	It wasn't me!
+call	1f919		389744	2000	Call
+highfive	270b		391744	1924	High five
+hi	1f44b		393668	2656	Hi
+like	1f44d		396324	1820	Like
+rock	1f918		398144	1718	Rock
+sarcastic	1f44f		399862	2328	Sarcastic
+selfie	1f933		402190	1756	Selfie
+tmi	1f92b		75862	2298	Too much information
+emo	1f611		90270	1906	Emo
+nod	1f642		16074	2282	Nodding
+shake	1f641		185216	2554	Shake
+ttm	1f612		100738	2338	Talking too much
+wait	270b		391744	1924	Wait
+whew	1f605		8832	2402	Relieved
+facepalm	1f926		403946	1976	Facepalm
+fingerscrossed	1f91e		405922	1978	Fingers crossed
+clap	1f44f		399862	2328	Clapping
+thewave1	1f64c		407900	2682	The Wave 1
+thewave2	1f64c		407900	2682	The Wave 2
+thewave3	1f64c		407900	2682	The Wave 3
+thewave4	1f64c		407900	2682	The Wave 4
+thewave5	1f64c		407900	2682	The Wave 5
+oreoyum	28 6f 72 65 6f 79 75 6d 29				OREO Yum
+@Hand gestures
+1f44b_wavinghand	1f44b	d	393668	2656	Waving hand
+1f91a_raisedbackofhand	1f91a	d	410582	1870	Raised back of hand
+1f590_handwithfingerssplayed	1f590 fe0f	d	412452	2374	Hand with fingers splayed
+270b_raisedhand	270b	d	391744	1924	Raised hand
+vulcansalute	1f596	d	414826	2314	Vulcan salute
+rightwardshand	1faf1	d	417140	2000	Rightwards hand
+leftwardshand	1faf2	d	419140	1984	Leftwards hand
+palmdownhand	1faf3	d	421124	1912	Palm down hand
+palmuphand	1faf4	d	423036	1936	Palm up hand
+pushright	1faf8	d	424972	1928	Push right
+pushleft	1faf7	d	426900	1938	Push left
+ok	1f44c	d	428838	2234	OK
+pinchedfingers	1f90c	d	431072	2140	Pinched fingers
+1f90f_pinchinghand	1f90f	d	433212	2208	Pinching hand
+victory	270c fe0f	d	435420	2020	Victory sign
+crossedfingers	1f91e	d	405922	1978	Crossed fingers
+fingerheart	1faf0	d	437440	1936	Finger heart
+1f91f_loveyougesture	1f91f	d	439376	2050	Love you gesture
+1f918_signofthehorns	1f918	d	398144	1718	Sign of the horns
+1f919_callmehand	1f919	d	389744	2000	Call me hand
+pointleftindex	1f448	d	441426	1876	Backhand Index Pointing Left
+pointrightindex	1f449	d	443302	1974	Backhand index pointing right
+1f446_backhandindexpointingup	1f446	d	445276	1834	Backhand index pointing up
+pointdownindex	1f447	d	447110	1816	Backhand index pointing down
+pointupindex	261d fe0f	d	448926	1684	Index pointing up
+poke	1faf5	d	450610	1858	Poke
+yes	1f44d	d	396324	1820	Yes
+no	1f44e	d	452468	1908	No
+raisedfist	270a	d	454376	1956	Raised fist
+1f44a_oncomingfist	1f44a	d	456332	1696	Oncoming fist
+1f91b_leftfacingfist	1f91b	d	458028	1696	Left facing fist
+1f91c_rightfacingfist	1f91c	d	459724	1682	Right facing fist
+clappinghands	1f44f	d	399862	2328	Clapping hands
+handsinair	1f64c	d	407900	2682	Hands celebrating
+hearthands	1faf6	d	461406	2228	Heart hands
+1f450_openhands	1f450	d	463634	1976	Open hands
+1f932_palmsuptogether	1f932	d	465610	2158	Palms up together
+handshake	1f91d	d	467768	2070	Handshake
+praying	1f64f	d	469838	1598	Folded hands
+270d_writinghand	270d fe0f	d	471436	2254	Writing hand
+1f485_nailpolish	1f485	d	473690	2180	Nail polish
+selfiehand	1f933	d	402190	1756	Selfie
+muscle	1f4aa	d	475870	2000	Muscle
+1f9be_mechanicalarm	1f9be		477870	1874	Mechanical arm
+1f9bf_mechanicalleg	1f9bf		479744	1696	Mechanical leg
+1f9b5_leg	1f9b5	d	481440	1748	Leg
+1f9b6_foot	1f9b6	d	483188	1596	Foot
+1f442_ear	1f442	d	484784	1678	Ear
+1f9bb_earwithhearingaid	1f9bb	d	486462	1972	Ear with hearing aid
+1f443_nose	1f443	d	488434	1624	Nose
+1f9e0_brain	1f9e0		490058	1906	Brain
+anatomicalheart	1fac0		491964	2274	Anatomical heart
+lungs	1fac1		494238	2338	Lungs
+1f9b7_tooth	1f9b7		496576	2026	Tooth
+1f9b4_bone	1f9b4		498602	1664	Bone
+1f440_eyes	1f440		500266	1978	Eyes
+1f441_eye	1f441 fe0f		502244	1822	Eye
+1f445_tongue	1f445		504066	1486	Tongue
+1f444_mouth	1f444		505552	1924	Mouth
+bitinglip	1fae6		507476	1690	Biting lip
+dropthemic	1f3a4	d	509166	1704	Drop the mic
+fistbump	1f91c 1f91b	d	510870	1454	Fist bump
+support	28 73 75 70 70 6f 72 74 29	d			Support
+@People
+smilebaby	1f476	d	512324	2208	Smile baby
+1f9d2_child	1f9d2	d	514532	2506	Child
+smileboy	1f466	d	517038	2386	Smile boy
+smilegirl	1f467	d	519424	2636	Smile girl
+person	1f9d1	d	522060	2352	Smile person
+1f471_blondehairedperson	1f471	d	524412	2292	Person blond hair
+smileman	1f468	d	526704	2418	Smile man
+1f9d4_beardedperson	1f9d4	d	529122	2436	Bearded person
+manbeard	1f9d4 200d 2642 fe0f	d	531558	2410	Bearded man
+womanbeard	1f9d4 200d 2640 fe0f	d	533968	2572	Bearded woman
+1f468_200d_1f9b0_maleredhaired	1f468 200d 1f9b0	d	536540	2494	Man red hair
+1f468_200d_1f9b1_mancurlyhaired	1f468 200d 1f9b1	d	539034	2660	Man curly hair
+1f468_200d_1f9b3_malewhitehaired	1f468 200d 1f9b3	d	541694	2306	Man white hair
+1f468_200d_1f9b2_manbald	1f468 200d 1f9b2	d	544000	2184	Man bald
+smilewoman	1f469	d	546184	2504	Smile woman
+1f469_200d_1f9b0_femaleredhaired	1f469 200d 1f9b0	d	548688	2522	Woman red hair
+1f9b0_redhaired	1f9d1 200d 1f9b0	d	551210	2412	Red haired
+womancurlyhair	1f469 200d 1f9b1	d	553622	3204	Woman curly hair
+1f9b1_curlyhaired	1f9d1 200d 1f9b1	d	556826	2906	Curly haired
+womanwhitehair	1f469 200d 1f9b3	d	559732	2362	Woman white hair
+personwhitehair	1f9d1 200d 1f9b3	d	562094	2256	Person white hair
+1f9b2_bald	1f9d1 200d 1f9b2	d	564350	2102	Bald
+1f469_200d_1f9b2_femalebald	1f469 200d 1f9b2	d	566452	2102	Woman bald
+womanblondhair	1f471 200d 2640 fe0f	d	568554	2412	Woman blond hair
+manblondhair	1f471 200d 2642 fe0f	d	570966	2292	Man blond hair
+1f9d3_olderadult	1f9d3	d	573258	2300	Older adult
+1f474_olderman	1f474	d	575558	2336	Old man
+oldwoman	1f475	d	577894	2254	Old woman
+frowning	1f64d	d	580148	2084	Person frowning
+man_frowning	1f64d 200d 2642 fe0f	d	582232	2090	Man frowning
+womanfrowning	1f64d 200d 2640 fe0f	d	584322	2172	Woman frowning
+pouting_face	1f64e	d	586494	2058	Pouting face
+man_pouting	1f64e 200d 2642 fe0f	d	588552	2102	Man pouting
+womanpouting	1f64e 200d 2640 fe0f	d	590654	2212	Woman pouting
+1f645_facewithnogoodgesture	1f645	d	592866	2616	Face with no good gesture
+man_gesturing_not_ok	1f645 200d 2642 fe0f	d	595482	2828	Man gesturing no
+womangesturingno	1f645 200d 2640 fe0f	d	598310	2600	Woman gesturing no
+1f646_persongesturingok	1f646	d	600910	2902	Person gesturing ok
+man_gesturing_ok	1f646 200d 2642 fe0f	d	603812	3024	Man gesturing OK
+womangesturingok	1f646 200d 2640 fe0f	d	606836	2658	Woman gesturing OK
+person_tipping_hand	1f481	d	609494	2408	Person tipping hand
+man_tipping_hand	1f481 200d 2642 fe0f	d	611902	2484	Man tipping hand
+womantippinghand	1f481 200d 2640 fe0f	d	614386	2236	Woman tipping hand
+happy_person_raising_one_hand	1f64b	d	616622	2596	Person raising hand
+man_raising_hand	1f64b 200d 2642 fe0f	d	619218	2680	Man raising hand
+womanraisinghand	1f64b 200d 2640 fe0f	d	621898	2556	Woman raising hand
+person_deaf	1f9cf	d	624454	2126	Deaf person
+man_deaf	1f9cf 200d 2642 fe0f	d	626580	2242	Deaf Man
+woman_deaf	1f9cf 200d 2640 fe0f	d	628822	2074	Woman deaf
+bowing	1f647	d	630896	2686	Person bowing
+bow	1f647 200d 2642 fe0f	d	633582	2820	Man bowing
+thanks	1f647 200d 2640 fe0f	d	636402	2852	Woman bowing
+1f926_personfacepalming	1f926	d	403946	1976	Person facepalming
+manfacepalming	1f926 200d 2642 fe0f	d	639254	2112	Man facepalming
+womanfacepalming	1f926 200d 2640 fe0f	d	641366	2114	Woman facepalming
+shrug	1f937	d	643480	2568	Person shrugging
+manshrug	1f937 200d 2642 fe0f	d	646048	2668	Man shrug
+womanshrug	1f937 200d 2640 fe0f	d	648716	2430	Woman shrug
+personhealthworker	1f9d1 200d 2695 fe0f	d	651146	1950	Person health worker
+manhealthworker	1f468 200d 2695 fe0f	d	653096	1980	Man health worker
+womanhealthworker	1f469 200d 2695 fe0f	d	655076	2130	Woman health worker
+student	1f9d1 200d 1f393	d	657206	2182	Student
+manstudent	1f468 200d 1f393	d	659388	2146	Man student
+womanstudent	1f469 200d 1f393	d	661534	2104	Woman student
+personteacher	1f9d1 200d 1f3eb	d	663638	2206	Person teacher
+manteacher	1f468 200d 1f3eb	d	665844	2168	Man teacher
+womanteacher	1f469 200d 1f3eb	d	668012	2196	Woman teacher
+personjudge	1f9d1 200d 2696 fe0f	d	670208	2116	Person judge
+manjudge	1f468 200d 2696 fe0f	d	672324	2152	Man judge
+womanjudge	1f469 200d 2696 fe0f	d	674476	2338	Woman judge
+personfarmer	1f9d1 200d 1f33e	d	676814	2562	Person farmer
+manfarmer	1f468 200d 1f33e	d	679376	2558	Man farmer
+womanfarmer	1f469 200d 1f33e	d	681934	2524	Woman farmer
+personchef	1f9d1 200d 1f373	d	684458	2340	Person chef
+manchef	1f468 200d 1f373	d	686798	2342	Man chef
+womanchef	1f469 200d 1f373	d	689140	2368	Woman chef
+personmechanic	1f9d1 200d 1f527	d	691508	2224	Person mechanic
+manmechanic	1f468 200d 1f527	d	693732	2228	Man mechanic
+womanmechanic	1f469 200d 1f527	d	695960	2334	Woman mechanic
+personwelder	1f9d1 200d 1f3ed	d	698294	2550	Person welder
+manwelder	1f468 200d 1f3ed	d	700844	2540	Man welder
+womanwelder	1f469 200d 1f3ed	d	703384	2534	Woman welder
+personofficeworker	1f9d1 200d 1f4bc	d	705918	1922	Person office worker
+officeworkermale	1f468 200d 1f4bc	d	707840	1970	Office worker male
+officeworkerfemale	1f469 200d 1f4bc	d	709810	2030	Office worker female
+personscientist	1f9d1 200d 1f52c	d	711840	2062	Person scientist
+manscientist	1f468 200d 1f52c	d	713902	2086	Man scientist
+womanscientist	1f469 200d 1f52c	d	715988	2196	Woman scientist
+persondeveloper	1f9d1 200d 1f4bb	d	718184	1900	Person writing code
+mantechie	1f468 200d 1f4bb	d	720084	1802	Man writing code
+womandeveloper	1f469 200d 1f4bb	d	721886	1862	Woman writing code
+personsinger	1f9d1 200d 1f3a4	d	723748	2436	Person singer
+man_singer	1f468 200d 1f3a4	d	726184	2402	Man singer
+woman_singer	1f469 200d 1f3a4	d	728586	2312	Woman singer
+personartist	1f9d1 200d 1f3a8	d	730898	2504	Person artist
+manartist	1f468 200d 1f3a8	d	733402	2508	Man artist
+womanartist	1f469 200d 1f3a8	d	735910	2584	Woman artist
+personpilot	1f9d1 200d 2708 fe0f	d	738494	2016	Person pilot
+manpilot	1f468 200d 2708 fe0f	d	740510	2058	Man pilot
+womanpilot	1f469 200d 2708 fe0f	d	742568	2188	Woman pilot
+personastronaut	1f9d1 200d 1f680	d	744756	2112	Person astronaut
+manastronaut	1f468 200d 1f680	d	746868	2120	Man astronaut
+womanastronaut	1f469 200d 1f680	d	748988	2140	Woman astronaut
+personfirefighter	1f9d1 200d 1f692	d	751128	2334	Person firefighter
+manfirefighter	1f468 200d 1f692	d	753462	2338	Man firefighter
+womanfirefighter	1f469 200d 1f692	d	755800	2356	Woman firefighter
+police_officer	1f46e	d	758156	2368	Police officer
+manpoliceofficer	1f46e 200d 2642 fe0f	d	760524	2406	Man police officer
+womanpoliceofficer	1f46e 200d 2640 fe0f	d	762930	2480	Woman police officer
+detective	1f575 fe0f	d	765410	2692	Detective
+man_detective	1f575 fe0f 200d 2642 fe0f	d	768102	2686	Man detective
+woman_detective	1f575 fe0f 200d 2640 fe0f	d	770788	2632	Woman detective
+guard	1f482	d	773420	1924	Guard
+man_guard	1f482 200d 2642 fe0f	d	775344	1920	Man guard
+woman_guard	1f482 200d 2640 fe0f	d	777264	2064	Woman guard
+ninja	1f977	d	779328	2134	Ninja
+construction_worker	1f477	d	781462	2082	Construction worker
+man_construction_worker	1f477 200d 2642 fe0f	d	783544	2078	Man construction worker
+woman_construction_worker	1f477 200d 2640 fe0f	d	785622	2106	Woman construction worker
+personcrown	1fac5	d	787728	2434	Person with crown
+prince	1f934	d	790162	2494	Prince
+princess	1f478	d	792656	2442	Princess
+1f473_personwearingturban	1f473	d	795098	2352	Person wearing turban
+man_wearing_turban	1f473 200d 2642 fe0f	d	797450	2356	Man wearing turban
+womanwearingturban	1f473 200d 2640 fe0f	d	799806	2322	Woman wearing turban
+man_with_chinese_cap	1f472	d	802128	2278	Man with chinese cap
+woman_with_head_scarf	1f9d5	d	804406	1888	Woman with head scarf
+personintuxedo	1f935	d	806294	2106	Person in tuxedo
+manintuxedo	1f935 200d 2642 fe0f	d	808400	1992	Man in tuxedo
+womanintuxedo	1f935 200d 2640 fe0f	d	810392	2152	Woman in tuxedo
+personwithveil	1f470	d	812544	1968	Person with veil
+manwithveil	1f470 200d 2642 fe0f	d	814512	1990	Man with veil
+womanwithveil	1f470 200d 2640 fe0f	d	816502	2020	Woman with veil
+womanpregnant	1f930	d	818522	2022	Woman pregnant
+pregnantman	1fac3	d	820544	2036	Pregnant man
+pregnant	1fac4	d	822580	1996	Pregnant
+breastfeeding	1f931	d	824576	2356	Breastfeeding
+manbottlefeeding	1f468 200d 1f37c	d	826932	2342	Man bottle feeding
+bottlefeeding	1f9d1 200d 1f37c	d	829274	2348	Bottle feeding
+1f47c_babyangel	1f47c	d	831622	2850	Baby angel
+santa	1f385	d	834472	2716	Santa
+mother_christmas	1f936	d	837188	2484	Mrs claus
+mxclaus	1f9d1 200d 1f384	d	839672	2782	Mx Claus
+personsuperhero	1f9b8	d	842454	2174	Person superhero
+mansuperhero	1f9b8 200d 2642 fe0f	d	844628	2168	Man superhero
+hero	1f9b8 200d 2640 fe0f	d	846796	2290	Woman superhero
+1f9b9_supervillain	1f9b9	d	849086	2390	Supervillain
+man_super_villain	1f9b9 200d 2642 fe0f	d	851476	2396	Man supervillain
+woman_super_villain	1f9b9 200d 2640 fe0f	d	853872	2352	Woman supervillain
+wizard	1f9d9 200d 2642 fe0f	d	856224	2778	Mage
+womanmage	1f9d9 200d 2640 fe0f	d	859002	2768	Woman mage
+fairy	1f9da	d	861770	2278	Fairy
+man_fairy	1f9da 200d 2642 fe0f	d	864048	2274	Man fairy
+woman_fairy	1f9da 200d 2640 fe0f	d	866322	2266	Woman fairy
+vampire	1f9db	d	868588	2220	Man vampire
+dracula	1f9db 200d 2642 fe0f	d	870808	2226	Vampire
+ladyvampire	1f9db 200d 2640 fe0f	d	873034	2204	Woman vampire
+merperson	1f9dc	d	875238	2512	Merperson
+merman	1f9dc 200d 2642 fe0f	d	877750	3154	Merman
+mermaid	1f9dc 200d 2640 fe0f	d	880904	2470	Mermaid
+elf	1f9dd	d	883374	2214	Elf
+manelf	1f9dd 200d 2642 fe0f	d	885588	2386	Man elf
+woman_elf	1f9dd 200d 2640 fe0f	d	887974	2218	Woman elf
+1f9de_genie	1f9de		890192	2110	Genie
+mangenie	1f9de 200d 2642 fe0f		892302	2152	Man genie
+womangenie	1f9de 200d 2640 fe0f		894454	2212	Woman genie
+personzombie	1f9df		896666	2608	Person zombie
+manzombie	1f9df 200d 2642 fe0f		899274	2520	Man zombie
+zombie	1f9df 200d 2640 fe0f		901794	2486	Zombie
+troll	1f9cc		904280	2702	Troll
+1f486_facemassage	1f486	d	906982	2108	Person getting massage
+man_getting_face_massage	1f486 200d 2642 fe0f	d	909090	2110	Man getting massage
+face_massage	1f486 200d 2640 fe0f	d	911200	2238	Woman getting massage
+person_getting_haircut	1f487	d	913438	2224	Getting haircut
+man_getting_haircut	1f487 200d 2642 fe0f	d	915662	2274	Man getting haircut
+woman_getting_haircut	1f487 200d 2640 fe0f	d	917936	2240	Woman getting haircut
+personwalkingfacingright2	1f6b6 200d 27a1 fe0f	d	920176	2210	Person walking facing right
+manwalking	1f6b6 200d 2642 fe0f	d	922386	2218	Man walking
+woman_walking	1f6b6 200d 2640 fe0f	d	924604	2216	Woman walking
+personkneelingfacingright2	1f9ce 200d 27a1 fe0f	d	926820	1842	Person kneeling facing right
+man_kneeling	1f9ce 200d 2642 fe0f	d	928662	1882	Man kneeling
+woman_kneeling	1f9ce 200d 2640 fe0f	d	930544	1862	Woman kneeling
+nonbinarystanding	1f9cd	d	932406	1614	Standing
+manstanding	1f9cd 200d 2642 fe0f	d	934020	1608	Man standing
+womanstanding	1f9cd 200d 2640 fe0f	d	935628	1624	Woman standing
+personwithprobingcane	1f9d1 200d 1f9af	d	937252	2652	Person with probing cane
+man_probing_cane	1f468 200d 1f9af	d	939904	2684	Man probing cane
+woman_probing_cane	1f469 200d 1f9af	d	942588	2668	Woman probing cane
+personmotorwheelchairright2	1f9d1 200d 1f9bc 200d 27a1 fe0f	d	945256	2440	Person in motorized wheelchair facing right
+man_in_motorized_wheelchair	1f468 200d 1f9bc	d	947696	2460	Man in motorized wheelchair
+woman_in_motorized_wheelchair	1f469 200d 1f9bc	d	950156	2402	Woman in motorized wheelchair
+personmanualwheelchairright2	1f9d1 200d 1f9bd 200d 27a1 fe0f	d	952558	2444	Person in manual wheelchair facing right
+man_in_manual_wheelchair	1f468 200d 1f9bd	d	955002	2434	Man in manual wheelchair
+woman_in_manual_wheelchair	1f469 200d 1f9bd	d	957436	2428	Woman in manual wheelchair
+runner	1f3c3	d	959864	2570	Runner
+gottarun	1f3c3 200d 2642 fe0f	d	962434	2690	Got to run
+personrunningfacingright2	1f3c3 200d 27a1 fe0f	d	965124	2582	Person running facing right
+running	1f3c3 200d 2640 fe0f	d	967706	2678	Running
+1f483_womandancing	1f483	d	970384	2732	Woman dancing
+dance	1f57a	d	973116	2434	Dancing
+gran	1f475	d	577894	2254	Dancing gran
+man_in_suit_levitating	1f574 fe0f	d	975550	1334	Man in suit levitating
+steam_room	1f9d6	d	976884	2238	Person steam room
+man_steam_room	1f9d6 200d 2642 fe0f	d	979122	2314	Man in steamy room
+woman_steam_room	1f9d6 200d 2640 fe0f	d	981436	2392	Woman steam room
+climber	1f9d7	d	983828	2968	Person climbing
+man_climbing	1f9d7 200d 2642 fe0f	d	986796	2936	Man climbing
+woman_climbing	1f9d7 200d 2640 fe0f	d	989732	2944	Woman climbing
+womanfencer	1f93a		992676	2552	Fencer
+horse_racing	1f3c7	d	995228	2980	Horse racing
+skier	26f7 fe0f	d	998208	2608	Skier
+snowboarder	1f3c2	d	1000816	2384	Snowboarder
+golfer	1f3cc fe0f	d	1003200	2266	Person golfing
+mangolfing	1f3cc fe0f 200d 2642 fe0f	d	1005466	2302	Man golfing
+woman_golfer	1f3cc fe0f 200d 2640 fe0f	d	1007768	2266	Woman golfer
+1f3c4_personsurfing	1f3c4	d	1010034	3184	Person surfing
+mansurfer	1f3c4 200d 2642 fe0f	d	1013218	3188	Man surfer
+womansurfer	1f3c4 200d 2640 fe0f	d	1016406	3190	Woman surfer
+personrowingboat	1f6a3	d	1019596	2034	Person rowing boat
+manrowingboat	1f6a3 200d 2642 fe0f	d	1021630	2124	Man rowing boat
+woman_rowing_boat	1f6a3 200d 2640 fe0f	d	1023754	2102	Woman rowing boat
+personswimming	1f3ca	d	1025856	2156	Person swimming
+manswimming	1f3ca 200d 2642 fe0f	d	1028012	2240	Man swimming
+woman_swimmer	1f3ca 200d 2640 fe0f	d	1030252	2098	Woman swimmer
+bouncing_ball	26f9 fe0f	d	1032350	2828	Person bouncing ball
+man_bouncing_ball	26f9 fe0f 200d 2642 fe0f	d	1035178	2888	Man bouncing ball
+woman_bouncing_ball	26f9 fe0f 200d 2640 fe0f	d	1038066	2844	Woman bouncing ball
+bartlett	26bd	d	1040910	2384	Man playing football
+womanfootball	26bd	d	1040910	2384	Woman playing football
+weight_lifter	1f3cb fe0f	d	1043294	2926	Person lifting weights
+manliftingweights	1f3cb fe0f 200d 2642 fe0f	d	1046220	2992	Man lifting weights
+woman_weight_lifter	1f3cb fe0f 200d 2640 fe0f	d	1049212	2954	Woman weight lifter
+1f6b4_personbiking	1f6b4	d	1052166	3270	Person biking
+bike	1f6b4 200d 2642 fe0f	d	1055436	3272	Bicycle
+womanridingbike	1f6b4 200d 2640 fe0f	d	1058708	3264	Woman riding bike
+manmountainbiking	1f6b5 200d 2642 fe0f	d	1061972	2752	Man mountain biking
+woman_mountain_biking	1f6b5 200d 2640 fe0f	d	1064724	2738	Woman mountain biking
+1f938_personcartwheeling	1f938	d	1067462	2212	Person cartwheeling
+man_cartwheeling	1f938 200d 2642 fe0f	d	1069674	2228	Man cartwheeling
+woman_cartwheeling	1f938 200d 2640 fe0f	d	1071902	2198	Woman cartwheeling
+manplayingwaterpolo	1f93d 200d 2642 fe0f	d	1074100	2584	Man playing water polo
+woman_playing_water_polo	1f93d 200d 2640 fe0f	d	1076684	2586	Woman playing water polo
+manplayinghandball	1f93e 200d 2642 fe0f	d	1079270	2806	Man playing handball
+woman_playing_handball	1f93e 200d 2640 fe0f	d	1082076	2756	Woman playing handball
+personjuggling	1f939	d	1084832	3052	Person juggling
+manjuggling	1f939 200d 2642 fe0f	d	1087884	3046	Man juggling
+woman_juggling	1f939 200d 2640 fe0f	d	1090930	2854	Woman juggling
+lotus_position	1f9d8	d	1093784	2278	Person in lotus position
+maninlotusposition	1f9d8 200d 2642 fe0f	d	1096062	2336	Man in lotus position
+yoga	1f9d8 200d 2640 fe0f	d	1098398	2274	Yoga
+womanbath	1f6c0	d	1100672	2358	Woman taking a bath
+person_in_bed	1f6cc	d	1103030	1550	Person in bed
+1f5e3_speakingheadinsilhouette	1f5e3 fe0f		1104580	1882	Speaking head
+1f464_bustinsilhouette	1f464		1106462	1568	Bust in silhouette
+1f465_bustsinsilhouette	1f465		1108030	2036	Busts in silhouette
+peoplehugging	1fac2		1110066	1918	People hugging
+1f463_footprints	1f463		1111984	2456	Footprints
+@Animals and nature
+smilemonkey	1f435		1114440	2132	Smile monkey
+monkey	1f412		1116572	2924	Monkey
+1f98d_gorilla	1f98d		1119496	1956	Gorilla
+orangutanscratching	1f9a7		1121452	2520	Orangutan
+smiledog	1f436		379526	2210	Smile dog
+dog	1f415		1123972	2962	Dog
+1f9ae_guidedog	1f9ae		1126934	2976	Guidedog
+1f415_200d_1f9ba_servicedog	1f415 200d 1f9ba		1129910	2900	Service dog
+1f429_poodle	1f429		1132810	2628	Poodle
+1f43a_wolfface	1f43a		1135438	2156	Wolf face
+foxhug	1f98a		1137594	2292	Fox
+racoon	1f99d		1139886	2188	Raccoon
+cat	1f408		1142074	2852	Cat
+blackcat	1f408 200d 2b1b		1144926	2580	Black cat
+lion	1f981		1147506	2580	Lion
+1f42f_tigerface	1f42f		1150086	2824	Tiger face
+1f405_tiger	1f405		1152910	2474	Tiger
+1f406_leopard	1f406		1155384	2340	Leopard
+1f434_horseface	1f434		1157724	2088	Horse face
+moose	1face		1159812	2930	Moose
+donkey	1facf		1162742	2266	Donkey
+1f40e_horse	1f40e		1165008	2738	Horse
+unicornhead	1f984		1167746	2288	Unicorn head
+1f993_zebraface	1f993		1170034	2828	Zebra
+reindeer	1f98c		1172862	2756	Reindeer
+bison	1f9ac		1175618	2360	Bison
+1f42e_cowface	1f42e		1177978	2240	Cow face
+1f402_ox	1f402		1180218	2314	Ox
+1f403_waterbuffalo	1f403		1182532	2294	Water buffalo
+1f404_cow	1f404		1184826	2650	Cow
+1f437_pigface	1f437		1187476	2174	Pig face
+pig	1f416		1189650	1892	Pig
+1f417_boar	1f417		1191542	1982	Boar
+1f43d_pignose	1f43d		1193524	1734	Pig nose
+1f40f_ram	1f40f		1195258	2460	Ram
+lamb	1f411		1197718	2268	Spring lamb
+1f410_goat	1f410		1199986	2376	Goat
+1f42a_dromedarycamel	1f42a		1202362	2510	Camel
+1f42b_bactriancamel	1f42b		1204872	2578	Two humped Camel
+1f999_llama	1f999		1207450	2288	Llama
+1f992_giraffeface	1f992		1209738	2632	Giraffe
+elephant	1f418		1212370	2054	Elephant
+mammoth	1f9a3		1214424	2292	Mammoth
+1f98f_rhinoceros	1f98f		1216716	1790	Rhinoceros
+1f99b_hippopotamus	1f99b		1218506	1756	Hippopotamus
+1f42d_mouseface	1f42d		1220262	2362	Mouse face
+1f401_mouse	1f401		1222624	2362	Mouse
+1f400_rat	1f400		1224986	2328	Rat
+1f439_hamsterface	1f439		1227314	2496	Hamster Face
+bunnyhug	1f430		1229810	2270	Rabbit
+bunny	1f407		1232080	2178	Bunny
+1f43f_chipmunk	1f43f fe0f		1234258	2708	Chipmunk
+beaver	1f9ab		1236966	2146	Beaver
+hedgehoghug	1f994		1239112	2096	Hedgehog
+batsmile	1f987		1241208	2132	Bat smile
+1f43b_bearface	1f43b		1243340	2316	Bear face
+polarbear	1f43b 200d 2744 fe0f		1245656	2010	Polar bear
+koala	1f428		381736	1972	Koala
+panda	1f43c		1247666	2308	Panda
+sloth	1f9a5		1249974	2732	Sloth
+1f9a6_otter	1f9a6		1252706	2212	Otter
+1f9a8_skunk	1f9a8		1254918	2474	Skunk
+1f998_kangaroo	1f998		1257392	2608	Kangaroo
+1f9a1_badger	1f9a1		1260000	1798	Badger
+1f43e_pawprints	1f43e		1261798	2310	Paw prints
+1f983_turkey	1f983		1264108	2514	Turkey
+1f414_chicken	1f414		1266622	2146	Chicken
+1f413_rooster	1f413		1268768	2548	Rooster
+1f423_hatchingchick	1f423		1271316	2182	Hatching chick
+1f424_babychick	1f424		1273498	2056	Baby chick
+1f425_frontfacingbabychick	1f425		1275554	1936	Front facing baby chick
+1f426_bird	1f426		1277490	2364	Bird
+penguin	1f427		1279854	2034	Dancing penguin
+1f54a_doveofpeace	1f54a fe0f		1281888	2240	Dove
+1f985_eagle	1f985		1284128	1994	Eagle
+phoenix3	1f426 200d 1f525		1286122	3304	Phoenix
+1f986_duck	1f986		1289426	2146	Duck
+1f9a2_swan	1f9a2		1291572	2076	Swan
+1f989_owl	1f989		1293648	2356	Owl
+dodo	1f9a4		1296004	2280	Dodo
+feather	1fab6		1298284	1904	Feather
+1f9a9_flamingo	1f9a9		1300188	2276	Flamingo
+1f99a_peacock	1f99a		1302464	2924	Peacock
+1f99c_parrot	1f99c		1305388	2334	Parrot
+wingleft	1fabd		1307722	1914	Left wing
+wing	1fabd		1307722	1914	Wing
+birdblack	1f426 200d 2b1b		1309636	2062	Black bird
+goose	1fabf		1311698	2068	Goose
+1f438_frogface	1f438		1313766	2528	Frog face
+1f40a_crocodile	1f40a		1316294	2684	Crocodile
+tortoise	1f422		1318978	1772	Tortoise
+lizard	1f98e		1320750	2500	Lizard
+snake	1f40d		1323250	3066	Snake
+1f432_dragonface	1f432		1326316	2984	Dragon face
+1f409_dragon	1f409		1329300	3146	Dragon
+1f995_sauropod	1f995		1332446	2324	Dinosaur
+trex	1f996		1334770	2386	Trex
+spoutingwhale	1f433		1337156	3224	Spouting Whale
+whale	1f40b		1340380	2468	Whale
+dolphin	1f42c		1342848	2436	Dolphin
+seal	1f9ad		1345284	1884	Seal
+fish	1f41f		1347168	2272	Fish
+tropicalfish	1f420		1349440	2006	Tropical fish
+1f421_blowfish	1f421		1351446	2220	Blowfish
+1f988_shark	1f988		1353666	2264	Shark
+octopus	1f419		1355930	2236	Octopus
+1f41a_spiralshell	1f41a		1358166	1996	Spiralshell
+coral	1fab8		1360162	3494	Coral
+jellyfish	1fabc		1363656	3032	Jellyfish
+snail	1f40c		1366688	2064	Snail
+butterfly	1f98b		1368752	3278	Butterfly
+bug	1f41b		1372030	2252	Bug
+1f41c_ant	1f41c		1374282	2532	Ant
+bee	1f41d		1376814	2348	Bee
+beetle	1fab2		1379162	2958	Beetle
+1f41e_ladybeetle	1f41e		1382120	2804	Ladybug
+cricket	1f997		1384924	2098	Cricket
+cockroach	1fab3		1387022	3310	Cockroach
+spider	1f577 fe0f		1390332	3328	Spider
+1f578_spiderweb	1f578 fe0f		1393660	3354	Web
+1f982_scorpion	1f982		1397014	2902	Scorpion
+1f99f_mosquito	1f99f		1399916	2980	Mosquito
+fly	1fab0		1402896	2934	Fly
+worm	1fab1		1405830	2344	Worm
+1f9a0_microbe	1f9a0		1408174	2490	Microbe
+hendance	1f414		1266622	2146	Dancing hen
+penguinkiss	1f427		1279854	2034	Penguin kiss
+stingray	1f642		16074	2282	Stingray
+werewolfhowl	1f43a		1135438	2156	Werewolf howl
+snowangel	1f435		1114440	2132	Snow angel
+1f490_bouquet	1f490		1410664	2488	Bouquet
+cherryblossom	1f338		1413152	2334	Cherry blossom
+1f4ae_whiteflower	1f4ae		1415486	2488	White flower
+lotus	1fab7		1417974	2496	Lotus
+1f3f5_rosette	1f3f5 fe0f		1420470	2620	Rosette
+rose	1f339		1423090	1882	Rose
+wiltedflower	1f940		1424972	2834	Wilted flower
+1f33a_hibiscus	1f33a		1427806	2354	Hibiscus
+sunflower	1f33b		1430160	2480	Sunflower
+flower	1f33c		1432640	2160	Flower
+tulip	1f337		1434800	2216	Tulip
+hyacinth	1fabb		1437016	2830	Hyacinth
+seedling	1f331		1439846	2110	Seedling
+pottedplant	1fab4		1441956	2484	Potted Plant
+evergreentree	1f332		1444440	1592	Evergreen tree
+deciduoustree	1f333		1446032	1778	Deciduous tree
+palmtree	1f334		1447810	1968	Palm tree
+cactus	1f335		1449778	2598	Cactus
+1f33e_earofrice	1f33e		1452376	2392	Sheaf of rice
+1f33f_herb	1f33f		1454768	2842	Herb
+2618_shamrock	2618 fe0f		1457610	2658	Shamrock
+goodluck	1f340		1460268	2222	Good luck
+1f341_mapleleaf	1f341		1462490	2294	Maple leaf
+1f342_fallenleaf	1f342		1464784	2676	Fallen leaf
+fallingleaf	1f343		1467460	2882	Falling leaf
+nest	1fab9		1470342	2282	Empty nest
+nestwitheggs	1faba		1472624	2462	Nest with eggs
+1f344_mushroom	1f344		1475086	1872	Mushroom
+@Food
+grapes	1f347		1476958	2228	Grapes
+1f348_melon	1f348		1479186	2034	Melon
+watermelon	1f349		1481220	1956	Watermelon
+orange	1f34a		1483176	1972	Orange
+lemon	1f34b		1485148	2032	Lemon
+lime4	1f34b 200d 1f7e9		1487180	2048	Lime
+banana	1f34c		1489228	2062	Banana
+pineapple	1f34d		1491290	2030	Pineapple
+1f96d_mango	1f96d		1493320	1986	Mango
+apple	1f34e		1495306	1986	Apple
+1f34f_greenapple	1f34f		1497292	1970	Green apple
+1f350_pear	1f350		1499262	1924	Pear
+peach	1f351		1501186	2108	Peach
+cherries	1f352		1503294	2920	Cherries
+strawberry	1f353		1506214	1980	Strawberry
+blueberries	1fad0		1508194	2248	Blueberries
+1f95d_kiwifruit	1f95d		1510442	2496	Kiwi fruit
+1f345_tomato	1f345		1512938	2230	Tomato
+olive	1fad2		1515168	1968	Olive
+1f965_coconut	1f965		1517136	2006	Coconut
+aubergine	1f346		1519142	1964	Eggplant
+1f954_potato	1f954		1521106	1820	Potato
+brownmushroom4	1f344 200d 1f7eb		1522926	1640	Brown mushroom
+1f955_carrot	1f955		1524566	2242	Carrot
+1f33d_earofmaize	1f33d		1526808	2392	Corn
+1f336_hotpepper	1f336 fe0f		1529200	1806	Chili pepper
+bellpepper	1fad1		1531006	2136	Bell Pepper
+1f952_cucumber	1f952		1533142	1836	Cucumber
+1f96c_leafygreen	1f96c		1534978	2306	Lettuce
+1f966_broccoli	1f966		1537284	2272	Broccoli
+1f9c4_garlic	1f9c4		1539556	1706	Garlic
+1f9c5_onion	1f9c5		1541262	1660	Onion
+1f95c_peanuts	1f95c		1542922	1932	Peanuts
+beans	1fad8		1544854	2496	Beans
+1f330_chestnut	1f330		1547350	1506	Chestnut
+ginger	1fada		1548856	2532	ginger
+peapod	1fadb		1551388	2206	Pea pod
+1f35e_bread	1f35e		1553594	1922	Bread
+croissant	1f950		1555516	2096	Croissant
+1f956_baguettebread	1f956		1557612	1526	Baguette
+flatbread	1fad3		1559138	1792	Flat Bread
+1f968_pretzel	1f968		1560930	2842	Pretzel
+1f96f_bagel	1f96f		1563772	2520	Bagel
+1f95e_pancake	1f95e		1566292	2294	Pancake
+1f9c7_waffle	1f9c7		1568586	1794	Waffle
+cheese	1f9c0		1570380	1876	Cheese
+1f356_meatonbone	1f356		1572256	1842	Meat on bone
+chickenleg	1f357		1574098	1742	Chicken leg
+1f969_cutofmeat	1f969		1575840	2024	Steak
+1f953_bacon	1f953		1577864	2280	Bacon
+burger	1f354		1580144	2004	Burger
+fries	1f35f		1582148	2262	Fries
+pizzaslice	1f355		1584410	2006	Pizza slice
+1f32d_hotdog	1f32d		1586416	2198	Hot dog
+1f96a_sandwich	1f96a		1588614	2124	Sandwich
+1f32e_taco	1f32e		1590738	1790	Taco
+1f32f_burrito	1f32f		1592528	1950	Burrito
+tamale	1fad4		1594478	1924	Tamale
+1f959_stuffedflatbread	1f959		1596402	2358	Stuffed flatbread
+1f9c6_falafel	1f9c6		1598760	2032	Falafel
+1f95a_egg	1f95a		1600792	1412	Egg
+1f373_cooking	1f373		1602204	1948	Cooking
+1f958_shallowpanoffood	1f958		1604152	2342	Paella
+1f372_potoffood	1f372		1606494	2342	Stew
+fondue	1fad5		1608836	2242	Fondue
+1f963_bowlwithspoon	1f963		1611078	2174	Bowl with spoon
+1f957_greensalad	1f957		1613252	2056	Salad
+1f37f_popcorn	1f37f		1615308	2012	Popcorn
+1f9c8_butter	1f9c8		1617320	1616	Butter
+1f9c2_salt	1f9c2		1618936	1550	Salt
+1f96b_cannedfood	1f96b		1620486	1516	Tin can
+1f371_bentobox	1f371		1622002	1878	Bento box
+1f358_ricecracker	1f358		1623880	2074	Rice cracker
+1f359_riceball	1f359		1625954	1770	Rice ball
+1f35a_cookedrice	1f35a		1627724	2134	Rice
+1f35b_curryandrice	1f35b		1629858	1940	Curry
+noodles	1f35c		1631798	2410	Noodles
+1f35d_spaghetti	1f35d		1634208	2552	Spaghetti
+1f360_roastedsweetpotato	1f360		1636760	1808	Sweet potato
+1f362_oden	1f362		1638568	2122	Oden
+1f363_sushi	1f363		1640690	1886	Sushi
+1f364_friedshrimp	1f364		1642576	2378	Fried shrimp
+1f365_fishcakewithswirldesign	1f365		1644954	2054	Fishcake
+1f96e_mooncake	1f96e		1647008	2400	Moon cake
+1f361_dango	1f361		1649408	2004	Dango
+1f95f_dumpling	1f95f		1651412	1994	Dumpling
+1f960_fortunecookie	1f960		1653406	2090	Fortune cookie
+1f961_takeoutbox	1f961		1655496	1750	Takeout box
+1f980_crab	1f980		1657246	3060	Crab
+1f99e_lobster	1f99e		1660306	3360	Lobster
+1f990_shrimp	1f990		1663666	2892	Shrimp
+1f991_squid	1f991		1666558	3296	Squid
+1f9aa_oyster	1f9aa		1669854	2302	Oyster
+1f366_softicecream	1f366		1672156	1688	Soft ice cream
+1f367_shavedice	1f367		1673844	1892	Shaved ice
+1f368_icecream	1f368		1675736	2346	Ice cream
+1f369_doughnut	1f369		1678082	2444	Doughnut
+cookies	1f36a		1680526	2028	Cookies
+cake	1f382		1682554	2548	Cake
+cakeslice	1f370		1685102	2064	Cake slice
+cupcake	1f9c1		1687166	2190	Cupcake
+pie	1f967		1689356	2122	Pie
+1f36b_chocolatebar	1f36b		1691478	1614	Chocolate
+1f36c_candy	1f36c		1693092	2426	Candy
+1f36d_lollipop	1f36d		1695518	2138	Lollipop
+1f36e_custard	1f36e		1697656	1224	Custard
+1f36f_honeypot	1f36f		1698880	1826	Honey
+1f37c_babybottle	1f37c		1700706	1900	Baby bottle
+1f95b_milkglass	1f95b		1702606	1440	Milk
+coffee	2615		1704046	2190	Coffee
+teapot	1fad6		1706236	2060	Teapot
+chai	1f375		1708296	2020	Tea
+1f376_sakebottleandcup	1f376		1710316	1514	Sake
+champagne	1f37e		1711830	1890	Champagne
+redwine	1f377		1713720	1682	Red wine
+drink	1f378		1715402	1710	Drink
+1f379_tropicaldrink	1f379		1717112	2124	Tropical drink
+beer	1f37a		1719236	1756	Beer
+1f37b_clinkingbeermugs	1f37b		1720992	2512	Beer mugs
+cheers	1f942		1723504	2294	Cheers!
+1f943_tumblerglass	1f943		1725798	978	Tumbler glass
+pour	1fad7		1726776	2144	Pouring liquid
+1f964_cupwithstraw	1f964		1728920	1730	Cup with straw
+bubbletea	1f9cb		1730650	1866	Bubble Tea
+1f9c3_beveragebox	1f9c3		1732516	1596	Juice box
+1f9c9_mate	1f9c9		1734112	1802	Yerba mate
+1f9ca_icecube	1f9ca		1735914	1748	Ice cube
+1f962_chopsticks	1f962		1737662	2044	Chopsticks
+1f37d_forkandknifewithplate	1f37d fe0f		1739706	1992	Dinner
+1f374_forkandknife	1f374		1741698	1548	Cutlery
+1f944_spoon	1f944		1743246	1420	Spoon
+1f52a_hocho	1f52a		1744666	1660	Kitchen knife
+1f3fa_amphora	1f3fa		1746326	2094	Amphora
+jar	1fad9		1748420	1224	Jar
+avocadolove	1f951		1749644	2198	Avocado love
+turkey	1f983		1264108	2514	Headless turkey
+oreo	28 6f 72 65 6f 29				OREO
+@Travel and places
+1f30d_earthglobeeuropeafrica	1f30d		1751842	2206	Earth globe Europe Africa
+1f30e_earthglobeamericas	1f30e		1754048	2156	Earth globe americas
+1f30f_earthglobeasiaaustralia	1f30f		1756204	2184	Earth globe Asia Australia
+1f310_globewithmeridians	1f310		1758388	3832	Globe with meridians
+1f5fa_worldmap	1f5fa fe0f		1762220	2010	World map
+1f5fe_silhouetteofjapan	1f5fe		1764230	2162	Silhouette of Japan
+1f9ed_compass	1f9ed		1766392	2566	Compass
+1f3d4_snowcappedmountain	1f3d4 fe0f		1768958	1336	Snow capped mountain
+26f0_mountain	26f0 fe0f		1770294	1360	Mountain
+1f30b_volcano	1f30b		1771654	1914	Volcano
+1f5fb_mountfuji	1f5fb		1773568	1130	Mount Fuji
+1f3d5_camping	1f3d5 fe0f		1774698	2500	Camping
+1f3d6_beachwithumbrella	1f3d6 fe0f		1777198	2412	Beach with umbrella
+desert	1f3dc fe0f		1779610	1690	Desert
+island	1f3dd fe0f		1781300	2358	Island
+1f3de_nationalpark	1f3de fe0f		1783658	1718	National park
+1f3df_stadium	1f3df fe0f		1785376	2768	Stadium
+1f3db_classicalbuilding	1f3db fe0f		1788144	1614	Classical building
+1f3d7_buildingconstruction	1f3d7 fe0f		1789758	3108	Building construction
+1f9f1_bricks	1f9f1		1792866	1774	Bricks
+stone	1faa8		1794640	1786	Stone
+wood	1fab5		1796426	1610	Wood
+hut	1f6d6		1798036	1508	Hut
+1f3d8_housebuildings	1f3d8 fe0f		1799544	2094	House building
+1f3da_derelicthouse	1f3da fe0f		1801638	2050	Derelict house
+house	1f3e0		1803688	1858	House
+1f3e1_housewithgarden	1f3e1		1805546	2166	House with garden
+1f3e2_officebuilding	1f3e2		1807712	1660	Office building
+1f3e3_japanesepostoffice	1f3e3		1809372	1802	Post office
+1f3e4_europeanpostoffice	1f3e4		1811174	1858	European post office
+1f3e5_hospital	1f3e5		1813032	1536	Hospital
+1f3e6_bank	1f3e6		1814568	1832	Bank
+1f3e8_hotel	1f3e8		1816400	2218	Hotel
+1f3ea_conveniencestore	1f3ea		1818618	1920	Convenience store
+1f3eb_school	1f3eb		1820538	2064	School
+1f3ec_departmentstore	1f3ec		1822602	2124	Department store
+1f3ed_factory	1f3ed		1824726	2102	Factory
+1f3ef_japanesecastle	1f3ef		1826828	2518	Castle
+1f3f0_europeancastle	1f3f0		1829346	2266	European castle
+1f492_wedding	1f492		1831612	2168	Wedding
+1f5fc_tokyotower	1f5fc		1833780	2068	Tokyo tower
+statueofliberty	1f5fd		1835848	2442	Statue of Liberty
+26ea_church	26ea		1838290	2002	Church
+1f54c_mosque	1f54c		1840292	2458	Mosque
+1f6d5_hindutemple	1f6d5		1842750	2356	Hindu temple
+1f54d_synagogue	1f54d		1845106	2234	Synagogue
+26e9_shintoshrine	26e9 fe0f		1847340	2426	Shinto shrine
+1f54b_kaaba	1f54b		1849766	1972	Kaaba
+26f2_fountain	26f2		1851738	2278	Fountain
+26fa_tent	26fa		1854016	1856	Tent
+1f301_foggy	1f301		1855872	1728	Foggy
+1f303_nightwithstars	1f303		1857600	1952	Night with stars
+1f3d9_cityscape	1f3d9 fe0f		1859552	2070	Cityscape
+1f304_sunriseovermountains	1f304		1861622	1484	Sunrise over mountains
+1f305_sunrise	1f305		1863106	1568	Sunrise
+1f306_cityscapeatdusk	1f306		1864674	1708	City scape at dusk
+1f307_sunsetoverbuildings	1f307		1866382	2012	Sunset over buildings
+1f309_bridgeatnight	1f309		1868394	2188	Bridge at night
+2668_hotsprings	2668 fe0f		1870582	3336	Hot springs
+1f3a0_carouselhorse	1f3a0		1873918	3014	Carousel horse
+slide	1f6dd		1876932	2502	Slide
+1f3a1_ferriswheel	1f3a1		1879434	3740	Ferris wheel
+1f3a2_rollercoaster	1f3a2		1883174	2576	Rollercoaster
+1f488_barberpole	1f488		1885750	1622	Barber pole
+1f3aa_circustent	1f3aa		1887372	2150	Circus tent
+steamtrain	1f682		1889522	2336	Steam train
+1f683_railwaycar	1f683		1891858	2078	Railway car
+1f684_highspeedtrain	1f684		1893936	1866	High speed train
+1f685_bullettrain	1f685		1895802	1476	Bullet train
+1f686_train	1f686		1897278	2084	Train
+1f687_metro	1f687		1899362	1754	Metro
+1f688_lightrail	1f688		1901116	1518	Light rail
+1f689_station	1f689		1902634	2262	Station
+1f68a_tram	1f68a		1904896	1724	Tram
+1f69d_monorail	1f69d		1906620	1452	Monorail
+1f69e_mountainrailway	1f69e		1908072	1934	Mountain railway
+1f68b_tramcar	1f68b		1910006	2190	Tram car
+1f68c_bus	1f68c		1912196	1992	Bus
+1f68d_oncomingbus	1f68d		1914188	1984	Oncoming bus
+1f68e_trolleybus	1f68e		1916172	2100	Trolley bus
+1f690_minibus	1f690		1918272	1726	Minibus
+ambulance	1f691		1919998	2054	Ambulance
+1f692_fireengine	1f692		1922052	2586	Fire engine
+policecar	1f693		1924638	2042	Police car
+1f694_oncomingpolicecar	1f694		1926680	1878	Oncoming police car
+taxi	1f695		1928558	2174	Taxi
+1f696_oncomingtaxi	1f696		1930732	1870	Oncoming taxi
+car	1f697		1932602	1930	Car
+1f698_oncomingautomobile	1f698		1934532	1820	Oncoming automobile
+1f699_recreationalvehicle	1f699		1936352	2500	Sports utility vehicle
+pickuptruck	1f6fb		1938852	1782	Pickup truck
+truck	1f69a		1940634	2060	Truck
+1f69b_articulatedlorry	1f69b		1942694	2236	Articulated lorry
+1f69c_tractor	1f69c		1944930	2256	Tractor
+1f3ce_racingcar	1f3ce fe0f		1947186	1582	Racing car
+motorbike	1f3cd fe0f		1948768	2264	Motorbike
+scooter	1f6f5		1951032	1982	Scooter
+1f9bd_manualwheelchair	1f9bd		1953014	2682	Manual wheelchair
+1f9bc_motorizedwheelchair	1f9bc		1955696	2202	Motorized wheelchair
+rickshaw	1f6fa		1957898	2482	Auto Rickshaw
+bicycle	1f6b2		1960380	2674	Bicycle
+kickscooter	1f6f4		1963054	2284	Kick scooter
+skate	1f6f9		1965338	1844	Skate
+rollerskate	1f6fc		1967182	2096	Roller skate
+1f68f_busstop	1f68f		1969278	1728	Bus stop
+1f6e3_motorway	1f6e3 fe0f		1971006	1930	Motorway
+1f6e4_railwaytrack	1f6e4 fe0f		1972936	1568	Railway track
+1f6e2_oildrum	1f6e2 fe0f		1974504	1556	Oil drum
+26fd_fuelpump	26fd		1976060	1508	Fuel pump
+wheel	1f6de		1977568	3262	Wheel
+1f6a8_policecarsrevolvinglight	1f6a8		1980830	2098	Police car light
+1f6a5_horizontaltrafficlight	1f6a5		1982928	1242	Horizontal traffic light
+1f6a6_verticaltrafficlight	1f6a6		1984170	1188	Vertical traffic light
+stopsign	1f6d1		1985358	1370	Stop sign
+1f6a7_constructionsign	1f6a7		1986728	1998	Construction sign
+2693_anchor	2693		1988726	2528	Anchor
+buoy	1f6df		1991254	2516	Ring buoy
+26f5_sailboat	26f5		1993770	1826	Sailboat
+1f6f6_canoe	1f6f6		1995596	1768	Canoe
+1f6a4_speedboat	1f6a4		1997364	1776	Speedboat
+1f6f3_passengership	1f6f3 fe0f		1999140	1838	Passenger ship
+26f4_ferry	26f4 fe0f		2000978	1994	Ferry
+1f6e5_motorboat	1f6e5 fe0f		2002972	1698	Motor boat
+1f6a2_ship	1f6a2		2004670	1722	Ship
+plane	2708 fe0f		2006392	2710	Plane
+1f6e9_smallairplane	1f6e9 fe0f		2009102	2664	Small airplane
+1f6eb_airplanedeparture	1f6eb		2011766	2266	Airplane departure
+1f6ec_airplanearriving	1f6ec		2014032	2360	Airplane arriving
+1fa82_parachute	1fa82		2016392	2742	Parachute
+1f4ba_seat	1f4ba		2019134	1792	Seat
+1f681_helicopter	1f681		2020926	2594	Helicopter
+1f69f_suspensionrailway	1f69f		2023520	2014	Suspension railway
+1f6a0_mountaincableway	1f6a0		2025534	2236	Mountain cableway
+1f6a1_aerialtramway	1f6a1		2027770	2066	Aerial tramway
+1f6f0_satellite	1f6f0 fe0f		2029836	2726	Satellite
+launch	1f680		2032562	2304	Rocket launch
+1f6f8_flyingsaucer	1f6f8		2034866	1986	Flying saucer
+1f6ce_bellhopbell	1f6ce fe0f		2036852	1926	Bellhop bell
+1f9f3_luggage	1f9f3		2038778	1498	Luggage
+holdon	231b		2040276	1846	Hold on
+231b_hourglassdone	231b		2040276	1846	Hour glass done
+231a_watch	231a		2042122	2206	Watch
+23f0_alarmclock	23f0		2044328	2672	Alarm clock
+23f1_stopwatch	23f1 fe0f		2047000	2394	Stop watch
+23f2_timerclock	23f2 fe0f		2049394	2210	Timer clock
+1f570_mantelpiececlock	1f570 fe0f		2051604	1964	Mantel piece clock
+1f55b_twelveoclock	1f55b		2053568	1834	Twelve o'clock
+1f567_twelvethirty	1f567		2055402	1848	Twelve-thirty
+1f550_oneoclock	1f550		2057250	1876	One o'clock
+1f55c_onethirty	1f55c		2059126	2054	One-thirty
+1f551_twooclock	1f551		2061180	2034	Two o'clock
+1f55d_twothirty	1f55d		2063214	2070	Two-thirty
+1f552_threeoclock	1f552		2065284	2024	Three o'clock
+1f55e_threethirty	1f55e		2067308	2044	Three-thirty
+1f553_fouroclock	1f553		2069352	1904	Four o'clock
+1f55f_fourthirty	1f55f		2071256	2042	Four thirty
+1f554_fiveoclock	1f554		2073298	1888	Five o'clock
+1f560_fivethirty	1f560		2075186	2024	Five-thirty
+1f555_sixoclock	1f555		2077210	1860	Six o'clock
+1f561_sixthirty	1f561		2079070	1790	Six-thirty
+1f556_sevenoclock	1f556		2080860	1882	Seven o'clock
+1f562_seventhirty	1f562		2082742	1836	Seven-thirty
+1f557_eightoclock	1f557		2084578	1892	Eight o'clock
+1f563_eightthirty	1f563		2086470	1842	Eight-thirty
+1f558_nineoclock	1f558		2088312	1868	Nine o'clock
+1f564_ninethirty	1f564		2090180	1838	Nine-thirty
+1f559_tenoclock	1f559		2092018	2030	Ten o'clock
+1f565_tenthirty	1f565		2094048	1844	Ten-thirty
+1f55a_elevenoclock	1f55a		2095892	1868	Eleven o'clock
+1f566_eleventhirty	1f566		2097760	1854	Eleven-thirty
+1f311_newmoonsymbol	1f311		2099614	1874	New moon symbol
+1f312_waxingcrescentmoonsymbol	1f312		2101488	1980	Waxing crescent moon symbol
+1f313_firstquartermoonsymbol	1f313		2103468	1854	First quarter moon symbol
+1f314_waxinggibbousmoonsymbol	1f314		2105322	2012	Waxing gibbous moon system
+1f315_fullmoonsymbol	1f315		2107334	1976	Full moon symbol
+1f316_waninggibbousmoonsymbol	1f316		2109310	2140	Waning gibbous moon symbol
+1f317_lastquartermoonsymbol	1f317		2111450	1962	Last quarter moon symbol
+1f318_waningcrescentmoonsymbol	1f318		2113412	2078	Waning crescent moon symbol
+1f319_crescentmoon	1f319		2115490	1784	Crescent moon
+1f31a_newmoonwithface	1f31a		2117274	2084	New moon with face
+1f31b_firstquartermoonwithface	1f31b		2119358	2078	First quarter moon with face
+1f31c_lastquartermoonwithface	1f31c		2121436	2048	Last quarter moon with face
+1f321_thermometer	1f321 fe0f		2123484	1998	Thermometer
+2600_sunwithrays	2600 fe0f		2125482	1956	Sun with rays
+1f31d_fullmoonwithface	1f31d		2127438	2414	Full moon face
+sun	1f31e		2129852	2700	Sun
+1fa90_ringedplanet	1fa90		2132552	1972	Ringed planet
+star	2b50		2134524	1942	Star
+1f31f_glowingstar	1f31f		2136466	2672	Glowing star
+1f320_shootingstar	1f320		2139138	1422	Shooting star
+1f30c_milkyway	1f30c		2140560	1594	Milky way
+2601_cloud	2601 fe0f		2142154	1336	Cloud
+1f325_sunbehindlargecloud	1f325 fe0f		2143490	1832	Sun behind large cloud
+26c8_cloudwithlightningandrain	26c8 fe0f		2145322	2856	Cloud with lightning and rain
+1f324_sunbehindsmallcloud	1f324 fe0f		2148178	1986	Sun behind small cloud
+26c5_sunbehindcloud	26c5		2150164	2054	Sun behind cloud
+1f326_sunbehindraincloud	1f326 fe0f		2152218	2462	Sun behind rain cloud
+rain	1f327 fe0f		2154680	2356	Raining
+1f328_cloudwithsnow	1f328 fe0f		2157036	2114	Cloud with snow
+1f329_cloudwithlightning	1f329 fe0f		2159150	1920	Cloud with lightning
+1f32a_cloudwithtornado	1f32a fe0f		2161070	1910	Tornado
+1f32b_fog	1f32b fe0f		2162980	870	Fog
+1f32c_windblowingface	1f32c fe0f		2163850	2052	Wind face
+1f300_cyclone	1f300		2165902	3204	Cyclone
+rainbow	1f308		2169106	2170	Rainbow
+1f302_closedumbrella	1f302		2171276	1958	Closed umbrella
+2602_umbrella	2602 fe0f		2173234	2036	Umbrella
+umbrella	2614		2175270	2322	Umbrella
+26f1_umbrellaonground	26f1 fe0f		2177592	2384	Beach umbrella
+26a1_highvoltagesign	26a1		2179976	1340	High voltage
+snowflake	2744 fe0f		2181316	3182	Snowflake
+snowmanwithoutsnow	26c4		2184498	2232	Snowman without snow
+snegovik	2603 fe0f		2186730	2920	Snow buddie
+2604_comet	2604 fe0f		2189650	1706	Comet
+fire	1f525		2191356	1876	Fire
+1f4a7_droplet	1f4a7		2193232	1618	Droplet
+1f30a_waterwave	1f30a		2194850	2312	Water wave
+sandcastle	1f3d6 fe0f		1777198	2412	Sandcastle
+cactuslove	2764		326708	1922	Cactus love
+wfh	1f3e0		1803688	1858	Working from home
+windturbine	267b		2197162	2816	Wind turbine
+vegetablegarden	267b		2197162	2816	Vegetable garden
+electriccar	267b		2197162	2816	Electric car
+europeafricainhand	267b	d	2197162	2816	Earth in hand, Europe and Africa
+americainhand	267b	d	2197162	2816	Earth in hand, Americas
+asiaaustraliainhand	267b	d	2197162	2816	Earth in hand, Asia and Australia
+@Objects
+1f453_glasses	1f453		2199978	1530	Glasses
+1f576_sunglasses	1f576 fe0f		2201508	1526	Sunglasses
+1f97d_goggles	1f97d		2203034	2798	Goggles
+1f97c_labcoat	1f97c		2205832	1786	Lab coat
+1f9ba_safetyvest	1f9ba		2207618	2146	Safety vest
+1f454_necktie	1f454		2209764	1542	Necktie
+1f455_tshirt	1f455		2211306	1730	T-shirt
+1f456_jeans	1f456		2213036	2364	Jeans
+1f9e3_scarf	1f9e3		2215400	2302	Scarf
+1f9e4_gloves	1f9e4		2217702	2196	Gloves
+1f9e5_coat	1f9e5		2219898	1982	Coat
+1f9e6_socks	1f9e6		2221880	1834	Socks
+1f457_dress	1f457		2223714	2032	Dress
+1f458_kimono	1f458		2225746	2040	Kimono
+1f97b_sari	1f97b		2227786	1930	Sari
+1fa71_onepiece	1fa71		2229716	1718	Swimming suit
+1fa72_briefs	1fa72		2231434	1562	Briefs
+1fa73_shorts	1fa73		2232996	2292	Shorts
+1f459_bikini	1f459		2235288	2886	Bikini
+1f45a_womansclothes	1f45a		2238174	1668	Blouse
+fan	1faad		2239842	2240	Fan
+1f45b_purse	1f45b		2242082	1890	Purse
+1f45c_handbag	1f45c		2243972	2050	Handbag
+1f45d_pouch	1f45d		2246022	1462	Pouch
+shopping	1f6cd fe0f		2247484	1702	Shopping bags
+1f392_schoolsatchel	1f392		2249186	1998	Backpack
+thongsandal	1fa74		2251184	1954	Thong Sandal
+1f45e_mansshoe	1f45e		2253138	1196	Man's shoe
+1f45f_athleticshoe	1f45f		2254334	1818	Sneaker
+1f97e_hikingboot	1f97e		2256152	1706	Hiking boot
+1f97f_womansflatshoe	1f97f		2257858	1328	Womans flat shoe
+1f460_highheeledshoe	1f460		2259186	1720	High heels
+1f461_womanssandal	1f461		2260906	1524	Womans sandal
+1fa70_balletshoes	1fa70		2262430	2790	Ballet shoes
+1f462_womansboots	1f462		2265220	1848	Womans boot
+hairpick	1faae		2267068	2514	Hair pick
+1f451_crown	1f451		2269582	2376	Crown
+1f452_womanshat	1f452		2271958	1766	Womans hat
+1f3a9_tophat	1f3a9		2273724	1526	Top hat
+1f393_graduationcap	1f393		2275250	1820	Graduate
+1f9e2_billedcap	1f9e2		2277070	1728	Baseball cap
+militaryhelmet	1fa96		2278798	2170	Military helmet
+26d1_helmetwithwhitecross	26d1 fe0f		2280968	2476	Rescue helmet
+1f4ff_prayerbeads	1f4ff		2283444	2568	Prayer beads
+lipstick	1f484		2286012	1368	Lipstick
+ring	1f48d		2287380	2322	Engagement ring
+diamond	1f48e		2289702	1554	Diamond
+1f507_mutedspeaker	1f507		2291256	1670	Mute
+1f508_speaker	1f508		2292926	1096	Speaker
+1f509_speakerwithonesoundwave	1f509		2294022	1578	Medium volume
+1f50a_speakerwiththreesoundwaves	1f50a		2295600	2234	High volume
+1f4e2_publicaddressloudspeaker	1f4e2		2297834	1770	PA loudspeaker
+1f4e3_cheeringmegaphone	1f4e3		2299604	2048	Megaphone
+1f4ef_postalhorn	1f4ef		2301652	2446	Postal horn
+bell	1f514		2304098	1718	Bell
+1f515_bellwithslash	1f515		2305816	2318	Muted bell
+1f3bc_musicalscore	1f3bc		2308134	1840	Musical score
+music	1f3b5		2309974	2070	Music
+1f3b6_multiplemusicalnotes	1f3b6		2312044	2622	Multiple musical notes
+1f399_studiomicrophone	1f399 fe0f		2314666	2026	Studio microphone
+1f39a_levelslider	1f39a fe0f		2316692	1264	Level slider
+1f39b_controlknobs	1f39b fe0f		2317956	1532	Control knobs
+1f3a4_microphone	1f3a4		509166	1704	Microphone
+headphone	1f3a7		383708	2762	Headphone
+1f4fb_radio	1f4fb		2319488	1916	Radio
+1f3b7_saxophone	1f3b7		2321404	1964	Saxophone
+accordion	1fa97		2323368	2770	Accordion
+guitar	1f3b8		2326138	2174	Guitar
+1f3b9_musicalkeyboard	1f3b9		2328312	766	Musical keyboard
+1f3ba_trumpet	1f3ba		2329078	2644	Trumpet
+1f3bb_violin	1f3bb		2331722	2626	Violin
+1fa95_banjo	1fa95		2334348	2182	Banjo
+1f941_drumwithdrumsticks	1f941		2336530	2358	Drum
+longdrum	1fa98		2338888	1722	Long Drum
+maracas	1fa87		2340610	2800	Maracas
+flute	1fa88		2343410	1690	Flute
+phone	1f4f1		2345100	1412	Phone
+1f4f2_mobilephonewitharrow	1f4f2		2346512	2182	Mobile phone with arrow
+260e_blacktelephone	260e fe0f		2348694	1938	Telephone
+telephonereceiver	1f4de		2350632	1956	Telephone receiver
+1f4df_pager	1f4df		2352588	1490	Pager
+1f4e0_faxmachine	1f4e0		2354078	1708	Fax machine
+1f50b_battery	1f50b		2355786	990	Battery
+lowbattery	1faab		2356776	1044	Low battery
+1f50c_electricplug	1f50c		2357820	1370	Electric plug
+computer	1f4bb		2359190	1330	Computer
+1f5a5_desktopcomputer	1f5a5 fe0f		2360520	1458	Computer
+1f5a8_printer	1f5a8 fe0f		2361978	1760	Printer
+2328_keyboard	2328 fe0f		2363738	1044	Keyboard
+1f5b1_threebuttonmouse	1f5b1 fe0f		2364782	1344	Mouse
+1f5b2_trackball	1f5b2 fe0f		2366126	1512	Trackball
+1f4bd_minidisc	1f4bd		2367638	1476	Minidisc
+1f4be_floppydisk	1f4be		2369114	1288	Floppy disk
+1f4bf_opticaldisc	1f4bf		2370402	1968	Optical disk
+1f4c0_dvd	1f4c0		2372370	2064	DVD
+1f9ee_abacus	1f9ee		2374434	3692	Abacus
+1f3a5_moviecamera	1f3a5		2378126	2080	Movie camera
+1f39e_filmframes	1f39e fe0f		2380206	1668	Film frames
+1f4fd_filmprojector	1f4fd fe0f		2381874	2624	Film projector
+movie	1f3ac		2384498	1850	Movie
+1f4fa_television	1f4fa		2386348	1830	Television
+1f4f7_camera	1f4f7		2388178	1240	Camera
+camera	1f4f8		2389418	1544	Camera
+1f4f9_videocamera	1f4f9		2390962	1448	Video camera
+1f4fc_videocassette	1f4fc		2392410	1234	Video cassette
+1f50d_magnifiertiltedleft	1f50d		2393644	1888	Magnifying glass left
+1f50e_magnifiertiltedright	1f50e		2395532	1986	Magnifying glass right
+1f56f_candle	1f56f fe0f		2397518	1302	Candle
+1f4a1_electriclightbulb	1f4a1		386470	1806	Electric light bulb
+1f526_electrictorch	1f526		2398820	1806	Torch
+1f3ee_izakayalantern	1f3ee		2400626	1614	Izakaya lantern
+1fa94_diyalamp	1fa94		2402240	2342	Diya lamp
+1f4d4_decorativenotebook	1f4d4		2404582	1634	Decorative notebook
+1f4d5_closedbook	1f4d5		2406216	758	Red book
+1f4d6_openbook	1f4d6		2406974	1140	Open book
+1f4d7_greenbook	1f4d7		2408114	1034	Green book
+1f4d8_bluebook	1f4d8		2409148	1152	Blue book
+1f4d9_orangebook	1f4d9		2410300	1062	Orange book
+1f4da_books	1f4da		2411362	1424	Books
+1f4d3_notebook	1f4d3		2412786	1104	Notebook
+1f4d2_ledger	1f4d2		2413890	1464	Binder
+1f4c3_pagewithcurl	1f4c3		2415354	950	Curled page
+1f4dc_scroll	1f4dc		2416304	1372	Scroll
+1f4c4_pagefacingup	1f4c4		2417676	982	Page
+1f4f0_newspaper	1f4f0		2418658	848	Newspaper
+1f5de_rolledupnewspaper	1f5de fe0f		2419506	1682	Rolled up newspaper
+1f4d1_bookmarktabs	1f4d1		2421188	1088	Bookmark tabs
+1f516_bookmark	1f516		2422276	1620	Bookmark
+1f3f7_label	1f3f7 fe0f		2423896	1750	Label tag
+1f4b0_moneybag	1f4b0		2425646	2200	Money bag
+coin	1fa99		2427846	2162	Coin
+1f4b4_banknotewithyensign	1f4b4		2430008	1386	Yen
+1f4b5_banknotewithdollarsign	1f4b5		2431394	1442	Dollar
+1f4b6_banknotewitheurosign	1f4b6		2432836	1596	Euro
+1f4b7_banknotewithpoundsign	1f4b7		2434432	1434	Pound
+1f4b8_moneywithwings	1f4b8		2435866	1918	Flying money
+1f4b3_creditcard	1f4b3		2437784	1066	Credit card
+1f9fe_receipt	1f9fe		2438850	1480	Receipt
+1f4b9_yengraph	1f4b9		2440330	1656	Chart increasing with yen
+1f9e7_redenvelope	1f9e7		2441986	1332	Red envelope
+1f4e7_email	1f4e7		2443318	1492	Email
+1f4e8_incomingenvelope	1f4e8		2444810	1416	Income envelope
+1f4e9_envelopewitharrow	1f4e9		2446226	1420	Envelope with arrow
+1f4e4_outboxtray	1f4e4		2447646	1494	Outbox
+1f4e5_inboxtray	1f4e5		2449140	1394	Inbox
+1f4e6_package	1f4e6		2450534	1844	Package
+1f4eb_mailboxclosedflagup	1f4eb		2452378	1640	Closed mailbox with flag
+1f4ea_mailboxclosedflagdown	1f4ea		2454018	1574	Closed mailbox
+1f4ec_openmailboxwithraisedflag	1f4ec		2455592	1764	Open mailbox with flag
+1f4ed_openmailboxwithloweredflag	1f4ed		2457356	1602	Open mailbox
+1f4ee_postbox	1f4ee		2458958	1514	Post box
+1f5f3_ballotboxwithballot	1f5f3 fe0f		2460472	1338	Ballot box
+270f_pencil	270f fe0f		2461810	1428	Pencil
+2712_blacknib	2712 fe0f		2463238	1852	Black nib
+1f58b_lowerleftfountainpen	1f58b fe0f		2465090	1544	Fountain pen
+1f58a_lowerleftballpointpen	1f58a fe0f		2466634	2032	Ball point pen
+1f58c_lowerleftpaintbrush	1f58c fe0f		2468666	1630	Paint brush
+1f58d_lowerleftcrayon	1f58d fe0f		2470296	1602	Crayon
+1f4dd_memo	1f4dd		2471898	1442	Memo
+1f4bc_briefcase	1f4bc		2473340	1220	Briefcase
+1f4c1_filefolder	1f4c1		2474560	1144	Folder
+1f4c2_openfilefolder	1f4c2		2475704	1382	Open folder
+1f5c2_cardindexdividers	1f5c2 fe0f		2477086	1428	Folder dividers
+1f4c5_calendar	1f4c5		2478514	1514	Calendar
+spiralcalendar	1f4c6		2480028	1804	Spiral calendar
+1f4c6_tearoffcalendar	1f5d3 fe0f		2481832	2088	Tear off calendar
+1f5d2_spiralnotepad	1f5d2 fe0f		2483920	1332	Spiral notepad
+1f4c7_cardindex	1f4c7		2485252	1696	Rolodex
+1f4c8_chartwithupwardstrend	1f4c8		2486948	1580	Positive graph
+1f4c9_chartwithdownwardstrend	1f4c9		2488528	1468	Negative graph
+1f4ca_barchart	1f4ca		2489996	1330	Bar chart
+1f4cb_clipboard	1f4cb		2491326	1170	Clipboard
+1f4cc_pushpin	1f4cc		2492496	1800	Pin
+1f4cd_roundpushpin	1f4cd		2494296	1440	Pin
+1f4ce_paperclip	1f4ce		2495736	2872	Paperclip
+1f587_linkedpaperclips	1f587 fe0f		2498608	2262	Paper clips
+1f4cf_straightruler	1f4cf		2500870	1284	Ruler
+1f4d0_triangularruler	1f4d0		2502154	1380	Triangular ruler
+2702_blackscissors	2702 fe0f		2503534	3066	Scissors
+1f5c3_cardfilebox	1f5c3 fe0f		2506600	1628	File box
+1f5c4_filecabinet	1f5c4 fe0f		2508228	1034	Filing cabinet
+1f5d1_wastebasket	1f5d1 fe0f		2509262	3070	Trash bin
+1f512_locked	1f512		2512332	1770	Locked
+1f513_unlocked	1f513		2514102	1808	Unlocked
+1f50f_lockedwithpen	1f50f		2515910	2160	Locked with pen
+1f510_lockedwithkey	1f510		2518070	2092	Lock and key
+1f511_key	1f511		2520162	1772	Key
+oldkey	1f5dd fe0f		2521934	2182	Old key
+1f528_hammer	1f528		2524116	1436	Hammer
+1fa93_axe	1fa93		2525552	1766	Axe
+26cf_pick	26cf fe0f		2527318	1544	Pick
+2692_hammerandpick	2692 fe0f		2528862	2356	Hammer and pick
+1f6e0_hammerandwrench	1f6e0 fe0f		2531218	2510	Hammer and wrench
+1f5e1_daggerknife	1f5e1 fe0f		2533728	2138	Dagger
+boomerang	1fa83		2535866	1992	Boomerang
+2694_crossedswords	2694 fe0f		2537858	2492	Swords
+1f52b_pistol	1f52b		2540350	1716	Water pistol
+1f3f9_bowandarrow	1f3f9		2542066	3380	Bow and arrow
+1f6e1_shield	1f6e1 fe0f		2545446	1774	Shield
+carpentrysaw	1fa9a		2547220	1602	Carpentry saw
+1f527_wrench	1f527		2548822	1672	Wrench
+screwdriver	1fa9b		2550494	1554	Screwdriver
+1f529_nutandbolt	1f529		2552048	1716	Bolt
+2699_gear	2699 fe0f		2553764	2224	Cog
+1f5dc_compression	1f5dc fe0f		2555988	2078	Clamp
+2696_scales	2696 fe0f		2558066	3172	Scales
+1f9af_probingcane	1f9af		2561238	1124	Probing cane
+1f517_linksymbol	1f517		2562362	2572	Link
+brokenchain8	26d3 fe0f 200d 1f4a5		2564934	3722	Broken chain
+26d3_chains	26d3 fe0f		2568656	3322	Chains
+hook	1fa9d		2571978	1854	Hook
+1f9f0_toolbox	1f9f0		2573832	1856	Toolbox
+1f9f2_magnet	1f9f2		2575688	1936	Magnet
+ladder	1fa9c		2577624	2514	Ladder
+2697_alembic	2697 fe0f		2580138	2500	Alembic
+1f9ea_testtube	1f9ea		2582638	1560	Test tube
+1f9eb_petridish	1f9eb		2584198	2202	Petri dish
+1f9ec_dna	1f9ec		2586400	2554	DNA
+1f52c_microscope	1f52c		2588954	2432	Microscope
+1f52d_telescope	1f52d		2591386	2632	Telescope
+1f4e1_satelliteantenna	1f4e1		2594018	2302	Satellite antenna
+1f489_syringe	1f489		2596320	1600	Syringe
+1fa78_blooddrop	1fa78		2597920	1646	Blood drop
+1f48a_pill	1f48a		2599566	1546	Pill
+1fa79_adhesivebandage	1fa79		2601112	1722	Plaster
+crutch	1fa7c		2602834	1774	Crutch
+1fa7a_stethoscope	1fa7a		2604608	2828	Stethoscope
+xray	1fa7b		2607436	1800	X-ray
+1f6aa_door	1f6aa		2609236	1010	Door
+elevator	1f6d7		2610246	1738	Elevator
+mirror	1fa9e		2611984	1986	Mirror
+window	1fa9f		2613970	1346	Window
+1f6cf_bed	1f6cf fe0f		2615316	1382	Bed
+1f6cb_couchandlamp	1f6cb fe0f		2616698	2120	Couch and lamp
+1fa91_chair	1fa91		2618818	2128	Chair
+toilet	1f6bd		2620946	1276	Toilet
+plunger	1faa0		2622222	1496	Plunger
+1f6bf_shower	1f6bf		2623718	2126	Shower
+1f6c1_bathtub	1f6c1		2625844	2114	Bath tub
+mousetrap	1faa4		2627958	1880	Mouse trap
+1fa92_razor	1fa92		2629838	1528	Razor
+1f9f4_lotionbottle	1f9f4		2631366	1370	Lotion
+1f9f9_broom	1f9f9		2632736	1578	Broom
+1f9fa_basket	1f9fa		2634314	2372	Laundry basket
+1f9fb_toiletpaper	1f9fb		2636686	1426	Roll of paper
+bucket	1faa3		2638112	1888	Bucket
+1f9fc_soap	1f9fc		2640000	2056	Soap
+bubbles	1fae7		2642056	2352	Bubbles
+toothbrush	1faa5		2644408	1446	Toothbrush
+1f9fd_sponge	1f9fd		2645854	1870	Sponge
+1f9ef_fireextinguisher	1f9ef		2647724	1978	Fire extinguisher
+1f6d2_shoppingtrolley	1f6d2		2649702	3146	Shopping trolley
+cigarette	1f6ac		2652848	1532	Cigarette
+26b0_coffin	26b0 fe0f		2654380	1794	Coffin
+headstone	1faa6		2656174	1372	Headstone
+26b1_funeralurn	26b1 fe0f		2657546	1690	Funeral urn
+hamsa	1faac		2659236	2126	Hamsa
+1f5ff_moyai	1f5ff		2661362	1700	Moyai
+placard	1faa7		2663062	1404	Placard
+idcard	1faaa		2664466	1184	ID card
+@Activities
+pumpkin	1f383		2665650	2260	Pumpkin
+xmastree	1f384		2667910	1936	Xmas tree
+fireworks	1f386		2669846	1830	Fireworks
+sparkler	1f387		2671676	1920	Sparkler
+1f9e8_firecracker	1f9e8		2673596	1528	Dynamite
+2728_sparkles	2728		2675124	2498	Sparkles
+1f388_balloon	1f388		2677622	1856	Balloon
+1f389_partypopper	1f389		2679478	3418	Party popper
+1f38a_confettiball	1f38a		2682896	3074	Confetti ball
+1f38b_tanabatatree	1f38b		2685970	3044	Tanabata tree
+1f38d_pinedecoration	1f38d		2689014	2270	Pine decoration
+1f38e_japanesedolls	1f38e		2691284	2414	Japanese dolls
+1f38f_carpstreamer	1f38f		2693698	3240	Carp streamer
+1f390_windchime	1f390		2696938	1888	Wind chime
+1f391_moonviewingceremony	1f391		2698826	1906	Harvest moon
+1f380_ribbon	1f380		2700732	2174	Ribbon
+gift	1f381		2702906	1790	Gift
+reminderribbon	1f397 fe0f		2704696	2354	Reminder ribbon
+1f39f_admissiontickets	1f39f fe0f		2707050	1522	Admission tickets
+1f3ab_ticket	1f3ab		2708572	1520	Ticket
+1f396_militarymedal	1f396 fe0f		2710092	2166	Military medal
+trophy	1f3c6		2712258	2294	Trophy
+1f3c5_sportsmedal	1f3c5		2714552	2620	Sports medal
+goldmedal	1f947		2717172	2290	Gold medal
+silvermedal	1f948		2719462	2230	Silver medal
+bronzemedal	1f949		2721692	2262	Bronze medal
+soccerball	26bd		1040910	2384	Soccer ball
+baseball	26be		2723954	2228	Baseball
+1f94e_softball	1f94e		2726182	2290	Softball
+basketball	1f3c0		2728472	2634	Basketball
+1f3d0_volleyball	1f3d0		2731106	2014	Volley ball
+americanfootball	1f3c8		2733120	2240	American football
+rugbyball	1f3c9		2735360	2262	Rugby football
+tennisball	1f3be		2737622	2758	Tennis ball
+1f94f_flyingdisc	1f94f		2740380	1962	Frisbee
+bowlingball	1f3b3		2742342	2398	Bowling ball
+cricketbatandball	1f3cf		2744740	1786	Cricket bat and ball
+1f3d1_fieldhockeystickandball	1f3d1		2746526	2190	Field hockey
+1f3d2_icehockeystickandpuck	1f3d2		2748716	1918	Ice hockey
+lacrosse	1f94d		2750634	2432	Lacrosse
+1f3d3_tabletennispaddleandball	1f3d3		2753066	1952	Table tennis
+1f3f8_badminton	1f3f8		2755018	2854	Badminton
+boxingglove	1f94a		388276	1468	Boxing glove
+1f94b_martialartsuniform	1f94b		2757872	1656	Martial arts uniform
+1f945_goalnet	1f945		2759528	2610	Goal
+flaginhole	26f3		2762138	1956	Flag in hole
+26f8_iceskate	26f8 fe0f		2764094	1814	Ice skate
+1f3a3_fishingpoleandfish	1f3a3		2765908	2524	Fishing pole
+1f93f_divingmask	1f93f		2768432	2518	Diving mask
+1f3bd_runningshirtwithsash	1f3bd		2770950	1762	Running shirt
+1f3bf_skiandskiboot	1f3bf		2772712	2230	Ski and skiboot
+1f6f7_sled	1f6f7		2774942	1724	Sled
+1f94c_curlingstone	1f94c		2776666	1728	Curling stone
+target	1f3af		2778394	2528	Archery
+1fa80_yoyo	1fa80		2780922	2360	Yo-yo
+1fa81_kite	1fa81		2783282	2682	Kite
+eightball	1f3b1		2785964	1836	Pool eight ball
+1f52e_crystalball	1f52e		2787800	1942	Crystal ball
+magicwand	1fa84		2789742	2406	Magic Wand
+1f9ff_nazaramulet	1f9ff		2792148	2188	Nazar amulet
+games	1f3ae		2794336	2024	Games
+1f579_joystick	1f579 fe0f		2796360	1976	Joystick
+1f3b0_slotmachine	1f3b0		2798336	1890	Slot machine
+1f3b2_gamedie	1f3b2		2800226	1868	Dice
+1f9e9_jigsaw	1f9e9		2802094	2314	Puzzle piece
+hug	1f9f8		2804408	2520	Teddy bear
+pinata	1fa85		2806928	2368	Piñata
+glitterball	1faa9		2809296	1760	Glitter ball
+matreshka	1fa86		2811056	2102	Matreshka
+2660_blackspadesuit	2660 fe0f		2813158	1932	Spades
+2665_blackheartsuit	2665 fe0f		2815090	1678	Hearts
+2666_blackdiamondsuit	2666 fe0f		2816768	1374	Diamonds
+2663_blackclubsuit	2663 fe0f		2818142	1984	Clubs
+265f_chesspawn	265f fe0f		2820126	1418	Chess pawn
+1f0cf_playingcardblackjoker	1f0cf		2821544	1148	Joker
+1f004_mahjong	1f004		2822692	1200	Mahjong
+1f3b4_flowerplayingcards	1f3b4		2823892	1110	Flower playing cards
+1f3ad_performingarts	1f3ad		2825002	2954	Performing arts
+1f5bc_framewithpicture	1f5bc fe0f		2827956	1308	Painting
+1f3a8_artistpalette	1f3a8		2829264	2440	Artist palette
+1f9f5_thread	1f9f5		2831704	2258	Thread
+sewingneedle	1faa1		2833962	2440	Sewing needle
+1f9f6_yarn	1f9f6		2836402	2384	Ball of yarn
+knot	1faa2		2838786	3026	Knot
+ribbonred	1f397 fe0f		2704696	2354	Red ribbon
+@Symbols
+1f3e7_automatedtellermachine	1f3e7		2841812	1352	ATM
+1f6ae_putlitterinitsplacesymbol	1f6ae		2843164	1678	Litter in bin
+1f6b0_potablewatersymbol	1f6b0		2844842	1462	Water tap
+267f_wheelchairsymbol	267f		2846304	1550	Wheelchair symbol
+1f6b9_menssymbol	1f6b9		2847854	1452	Mens symbol
+1f6ba_womenssymbol	1f6ba		2849306	1460	Womans symbol
+1f6bb_restroom	1f6bb		2850766	1850	Restroom
+1f6bc_babysymbol	1f6bc		2852616	1640	Baby symbol
+1f6be_watercloset	1f6be		2854256	1600	Water closet
+1f6c2_passportcontrol	1f6c2		2855856	1700	Passport control
+1f6c3_customs	1f6c3		2857556	1698	Customs
+1f6c4_baggageclaim	1f6c4		2859254	1600	Baggage claim
+1f6c5_leftluggage	1f6c5		2860854	1704	Left luggage
+26a0_warningsign	26a0 fe0f		2862558	1600	Warning
+1f6b8_childrencrossing	1f6b8		2864158	1742	Children crossing
+26d4_noentry	26d4		2865900	1750	No entry
+1f6ab_noentrysign	1f6ab		2867650	2148	Banned
+1f6b3_nobicycles	1f6b3		2869798	2552	No bicycles
+1f6ad_nosmokingsymbol	1f6ad		2872350	2296	No smoking
+1f6af_donotlittersymbol	1f6af		2874646	2448	No littering
+1f6b1_nonpotablewatersymbol	1f6b1		2877094	2444	Non-potable water
+1f6b7_nopedestrians	1f6b7		2879538	2404	No pedestrians
+1f4f5_nomobilephones	1f4f5		2881942	2288	No mobile phones
+1f51e_nooneundereighteensymbol	1f51e		2884230	2478	No one under eighteen
+2622_radioactivesign	2622 fe0f		2886708	2320	Radioactive
+2623_biohazardsign	2623 fe0f		2889028	2588	Biohazard
+2b06_upwardsblackarrow	2b06 fe0f		2891616	1254	Up arrow
+2197_northeastarrow	2197 fe0f		2892870	1332	Up right arrow
+27a1_blackrightwardsarrow	27a1 fe0f		2894202	1196	Right arrow
+2198_southeastarrow	2198 fe0f		2895398	1302	Down right arrow
+2b07_downwardsblackarrow	2b07 fe0f		2896700	1242	Down arrow
+2199_southwestarrow	2199 fe0f		2897942	1310	Down left arrow
+2b05_leftwardsblackarrow	2b05 fe0f		2899252	1226	Left arrow
+2196_northwestarrow	2196 fe0f		2900478	1340	Up left arrow
+2195_updownarrow	2195 fe0f		2901818	1436	Up down arrow
+2194_leftrightarrow	2194 fe0f		2903254	1462	Left right arrow
+21a9_leftwardsarrowwithhook	21a9 fe0f		2904716	1422	Curving left arrow
+21aa_rightwardsarrowwithhook	21aa fe0f		2906138	1416	Curving right arrow
+2934_arrowcurvedupright	2934 fe0f		2907554	1222	Arrow curving up
+2935_arrowcurveddownright	2935 fe0f		2908776	1242	Arrow curving down
+1f503_arrowsclockwise	1f503		2910018	1432	Clockwise vertical arrows
+1f504_refresh	1f504		2911450	1432	Counterclockwise arrows button
+1f519_backarrow	1f519		2912882	3058	Back arrow
+1f51a_endwithleftwardsarrowabove	1f51a		2915940	2408	End arrow
+1f51b_on	1f51b		2918348	2638	On! arrow
+1f51c_soon	1f51c		2920986	2972	Soon arrow
+1f51d_topwithupwardsarrowabove	1f51d		2923958	2314	Top arrow
+1f6d0_placeofworship	1f6d0		2926272	1520	Place of worship
+269b_atomsymbol	269b fe0f		2927792	1928	Atom
+1f549_omsymbol	1f549 fe0f		2929720	1772	Om
+2721_starofdavid	2721 fe0f		2931492	1532	Star of David
+2638_wheelofdharma	2638 fe0f		2933024	1864	Wheel of dharma
+262f_yinyang	262f fe0f		2934888	1628	Yin yang
+271d_latincross	271d fe0f		2936516	1144	Latin cross
+2626_orthodoxcross	2626 fe0f		2937660	1306	Orthodox cross
+262a_starandcrescent	262a fe0f		2938966	1470	Star and crescent
+262e_peacesymbol	262e fe0f		2940436	1602	Peace
+1f54e_menorahwithninebranches	1f54e		2942038	1996	Menorah
+1f52f_starwithdot	1f52f		2944034	1644	Star with dot
+khanda	1faaf		2945678	1806	Khanda
+2648_aries	2648		2947484	1440	Aries
+2649_taurus	2649		2948924	1442	Taurus
+264a_gemini	264a		2950366	1350	Gemini
+264b_cancer	264b		2951716	1712	Cancer
+264c_leo	264c		2953428	1558	Leo
+264d_virgo	264d		2954986	1522	Virgo
+264e_libra	264e		2956508	1408	Libra
+264f_scorpius	264f		2957916	1396	Scorpio
+2650_sagittarius	2650		2959312	1336	Sagittarius
+2651_capricorn	2651		2960648	1474	Capricorn
+2652_aquarius	2652		2962122	1568	Aquarius
+2653_pisces	2653		2963690	1496	Pisces
+26ce_ophiuchus	26ce		2965186	1528	Ophiuchus
+1f500_twistedrightwardsarrows	1f500		2966714	1456	Shuffle button
+1f501_repeat	1f501		2968170	1552	Repeat button
+1f502_repeatsingle	1f502		2969722	1512	Repeat single button
+25b6_blackrightpointingtriangle	25b6 fe0f		2971234	1276	Play button
+23e9_fastforwardbutton	23e9		2972510	1406	Fast-forward button
+23ed_nexttrack	23ed fe0f		2973916	1488	Next track button
+23ef_playpause	23ef fe0f		2975404	1306	Play or pause button
+25c0_blackleftpointingtriangle	25c0 fe0f		2976710	1188	Reverse button
+23ea_fastreversebutton	23ea		2977898	1442	Rewind button
+23ee_lasttrack	23ee fe0f		2979340	1492	Last track button
+1f53c_uppointingsmallredtriangle	1f53c		2980832	1248	Up button
+23eb_fastupbutton	23eb		2982080	1372	Fast up button
+1f53d_buttondownsmall	1f53d		2983452	1284	Button down small
+23ec_fastdownbutton	23ec		2984736	1296	Fast down button
+23f8_doubleverticalbar	23f8 fe0f		2986032	1260	Pause button
+23f9_blacksquareforstop	23f9 fe0f		2987292	1114	Stop button
+23fa_blackcircleforrecord	23fa fe0f		2988406	1284	Record button
+23cf_ejectsymbol	23cf fe0f		2989690	1300	Eject button
+1f3a6_cinema	1f3a6		2990990	1346	Cinema
+1f505_lowbrightnesssymbol	1f505		2992336	3030	Low brightness
+1f506_highbrightnesssymbol	1f506		2995366	2876	High brightness
+1f4f6_antennawithbars	1f4f6		2998242	1432	Signal strength
+wifi	1f6dc		2999674	1768	Wifi
+1f4f3_vibrationmode	1f4f3		3001442	1582	Vibration mode
+1f4f4_mobilephoneoff	1f4f4		3003024	1554	Mobile phone off
+2640_woman	2640 fe0f		3004578	1478	Female sign
+2642_man	2642 fe0f		3006056	1620	Male sign
+transgendersymbol	26a7 fe0f		3007676	1764	Transgender symbol
+2716_heavymultiplicationx	2716 fe0f		3009440	1970	Multiplication sign
+2795_heavyplussign	2795		3011410	1490	Plus sign
+2796_heavyminussign	2796		3012900	724	Minus sign
+2797_heavydivisionsign	2797		3013624	1566	Division sign
+equals	1f7f0		3015190	1156	Equals sign
+267e_infinity	267e fe0f		3016346	2320	Infinity
+203c_doubleexclamationmark	203c fe0f		3018666	1560	Double exclamation
+exclamationquestionmark	2049 fe0f		3020226	2652	Exclamation question mark
+2753_blackquestionmarkornament	2753		3022878	1842	Question mark
+2754_whitequestionmarkornament	2754		3024720	1640	White question mark
+2755_whiteexclamationmark	2755		3026360	822	White exclamation mark
+2757_heavyexclamationmarksymbol	2757		3027182	934	Exclamation mark
+3030_wavydash	3030 fe0f		3028116	1390	Wavy dash
+1f4b1_currencyexchange	1f4b1		3029506	3190	Currency exchange
+cash	1f4b2		3032696	1920	Dollar
+2695_staffofaesculapius	2695 fe0f		3034616	1984	Medical symbol
+recycle	267b fe0f		2197162	2816	Recycle
+269c_fleurdelis	269c fe0f		3036600	2376	Fleur de lis
+1f531_tridentemblem	1f531		3038976	3370	Trident
+1f4db_namebadge	1f4db		3042346	1982	Name badge
+1f530_japanesesymbolforbeginner	1f530		3044328	1392	Beginner
+2b55_heavylargecircle	2b55		3045720	2610	Red ring
+2705_whiteheavycheckmark	2705		3048330	1280	Checkmark button
+2611_ballotboxwithcheck	2611 fe0f		3049610	1154	Checkbox
+2714_heavycheckmark	2714 fe0f		3050764	1400	Checkmark
+274c_crossmark	274c		3052164	1564	Crossmark
+274e_negativesquaredcrossmark	274e		3053728	1304	Cross mark button
+27b0_curlyloop	27b0		3055032	2558	Curly loop
+27bf_doublecurlyloop	27bf		3057590	2470	Double curly loop
+303d_partalternationmark	303d fe0f		3060060	2238	Part alternation mark
+2733_eightspokedasterisk	2733 fe0f		3062298	1616	Asterisk
+2734_eightpointedblackstar	2734 fe0f		3063914	1510	Star button
+2747_sparkle	2747 fe0f		3065424	1408	Sparkle
+00a9_copyrightsign	a9 fe0f		3066832	3152	Copyright
+00ae_registeredsign	ae fe0f		3069984	3598	Registered
+2122_trademarksign	2122 fe0f		3073582	1298	Trademark
+keycapnumbersign	23 fe0f 20e3		3074880	1342	Keycap number
+keycapnumberasterisk	2a fe0f 20e3		3076222	1360	Keycap asterisk
+keycapdigitzero	30 fe0f 20e3		3077582	1354	Keycap zero
+keycapdigitone	31 fe0f 20e3		3078936	1214	Keycap one
+keycapdigittwo	32 fe0f 20e3		3080150	1320	Keycap two
+keycapdigitthree	33 fe0f 20e3		3081470	1338	Keycap three
+keycapdigitfour	34 fe0f 20e3		3082808	1302	Keycap four
+keycapdigitfive	35 fe0f 20e3		3084110	1302	Keycap five
+keycapdigitsix	36 fe0f 20e3		3085412	1322	Keycap six
+keycapdigitseven	37 fe0f 20e3		3086734	1280	Keycap seven
+keycapdigiteight	38 fe0f 20e3		3088014	1356	Keycap eight
+keycapdigitnine	39 fe0f 20e3		3089370	1308	Keycap nine
+1f51f_keycapten	1f51f		3090678	1400	Keycap ten
+1f520_uppercaseabcd	1f520		3092078	1742	Uppercase
+1f521_lowercaseabcd	1f521		3093820	1668	Lowercase
+1f522_inputsymbolfornumbers	1f522		3095488	1632	Numbers
+1f523_inputsymbolforsymbols	1f523		3097120	1850	Symbols
+1f524_inputsymbolforlatinletters	1f524		3098970	1644	Letters
+1f170_bloodtypea	1f170 fe0f		3100614	1274	Blood type A
+1f18e_negativesquaredab	1f18e		3101888	1492	Blood type AB
+1f171_bloodtypeb	1f171 fe0f		3103380	1220	Blood type B
+1f191_squaredcl	1f191		3104600	1302	Clear
+1f192_squaredcool	1f192		3105902	1474	Cool
+1f193_squaredfree	1f193		3107376	1452	Free
+2139_informationsource	2139 fe0f		3108828	1250	Information
+1f194_squaredid	1f194		3110078	1388	ID
+24c2_circledlatincapitalletterm	24c2 fe0f		3111466	2144	Circled M
+1f195_squarednew	1f195		3113610	1432	New
+1f196_squaredng	1f196		3115042	1526	NG
+1f17e_bloodtype0	1f17e fe0f		3116568	1412	Blood type O
+1f197_squaredok	1f197		3117980	1530	OK button
+1f17f_parking	1f17f fe0f		3119510	1324	Parking
+1f198_squaredsos	1f198		3120834	1702	SOS
+1f199_buttonup	1f199		3122536	1496	UP! button
+1f19a_squaredvs	1f19a		3124032	1504	VS
+1f201_squaredkatakanakoko	1f201		3125536	1376	Here
+1f202_squaredkatakanasa	1f202 fe0f		3126912	1464	Service Charge
+1f237_monthlyamount	1f237 fe0f		3128376	1396	Monthly amount
+1f236_notfreeofcharge	1f236		3129772	1500	Not free of charge
+1f22f_reserved	1f22f		3131272	1700	Reserved
+1f250_circledideographadvantage	1f250		3132972	2612	Bargain
+1f239_discount	1f239		3135584	1756	Discount
+1f21a_freeofcharge	1f21a		3137340	1868	Free of charge
+1f232_prohibited	1f232		3139208	1982	Prohibited
+1f251_circledideographaccept	1f251		3141190	2242	Accept
+1f238_application	1f238		3143432	1552	Application
+1f234_agreement	1f234		3144984	1580	Agreement
+1f233_vacancy	1f233		3146564	1658	Vacancy
+3297_congratulations	3297 fe0f		3148222	2420	Congratulations
+3299_circledideographsecret	3299 fe0f		3150642	2652	Secret
+1f23a_open	1f23a		3153294	1628	Open for business
+1f235_novacancy	1f235		3154922	1906	No vacancy
+1f534_largeredcircle	1f534		3156828	1622	Red circle
+1f7e0_orangecircle	1f7e0		3158450	1640	Orange circle
+1f7e1_yellowcircle	1f7e1		3160090	1626	Yellow circle
+1f7e2_greencircle	1f7e2		3161716	1588	Green circle
+1f535_largebluecircle	1f535		3163304	1676	Blue circle
+1f7e3_purplecircle	1f7e3		3164980	1610	Purple circle
+1f7e4_browncircle	1f7e4		3166590	1570	Brown circle
+26ab_mediumblackcircle	26ab		3168160	1540	Black circle
+26aa_mediumwhitecircle	26aa		3169700	1450	White circle
+1f7e5_redsquare	1f7e5		3171150	808	Red square
+1f7e7_orangesquare	1f7e7		3171958	914	Orange square
+1f7e8_yellowsquare	1f7e8		3172872	862	Yellow square
+1f7e9_greensquare	1f7e9		3173734	774	Green square
+1f7e6_bluesquare	1f7e6		3174508	834	Blue square
+1f7ea_purplesquare	1f7ea		3175342	696	Purple square
+1f7eb_brownsquare	1f7eb		3176038	770	Brown square
+2b1b_blacklargesquare	2b1b		3176808	584	Large black square
+2b1c_whitelargesquare	2b1c		3177392	632	Large white square
+25fc_blackmediumsquare	25fc fe0f		3178024	476	Medium black square
+25fb_whitemediumsquare	25fb fe0f		3178500	580	Medium white square
+25fe_blackmediumsmallsquare	25fe		3179080	564	Medium small black square
+25fd_whitemediumsmallsquare	25fd		3179644	662	Medium small white square
+25aa_blacksmallsquare	25aa fe0f		3180306	476	Small black square
+25ab_whitesmallsquare	25ab fe0f		3180782	460	Small white square
+1f536_largeorangediamond	1f536		3181242	1052	Large orange diamond
+1f537_largebluediamond	1f537		3182294	1012	Large blue diamond
+1f538_smallorangediamond	1f538		3183306	550	Small orange diamond
+1f539_smallbluediamond	1f539		3183856	548	Small blue diamond
+1f53a_uppointingredtriangle	1f53a		3184404	818	Red triangle up
+1f53b_downpointingredtriangle	1f53b		3185222	808	Red triangle down
+1f4a0_diamondshapewithadotinside	1f4a0		3186030	1268	Diamond flower
+1f518_radiobutton	1f518		3187298	1744	Radio button
+1f533_whitesquarebutton	1f533		3189042	722	White square button
+1f532_blacksquarebutton	1f532		3189764	682	Black square button
+50th_50	35 fe0f 20e3 30 fe0f 20e3		3190446	1294	50th 50
+50th_butterfly	1f98b		1368752	3278	50th Butterfly
+50th_card	35 fe0f 20e3 30 fe0f 20e3 2665 fe0f		3191740	1438	50th Card
+50th_chess	265f fe0f		2820126	1418	50th Chess
+50th_cloud	2601 fe0f		2142154	1336	50th Cloud
+50th_cursor	1f5b1 fe0f		2364782	1344	50th Cursor
+50th_floppy	1f4be		2369114	1288	50th Floppy
+50th_mail	2709 fe0f		3193178	1050	50th Mail
+50th_paint	1f3a8		2829264	2440	50th Paint
+50th_rainbow	1f308		2169106	2170	50th Rainbow
+50th_slate	1f3ac		2384498	1850	50th Slate
+50th_win98	1f4bd		2367638	1476	50th Win98
+50th_tree	1f333		1446032	1778	50th Tree
+50th_sun	2600 fe0f		2125482	1956	50th Sun
+50th_smile	1f642		16074	2282	50th Smile
+50th_search	1f50d		2393644	1888	50th Search
+50th_paintbucket	1f3a8		2829264	2440	50th PaintBucket
+50th_msnbutterfly	1f98b		1368752	3278	50th MSN butterfly
+50th_folder	1f4c1		2474560	1144	50th Folder
+50th_explorer	1f310		1758388	3832	50th Explorer
+50th_clippy	1f4ce		2495736	2872	50th Clippy
+50th_cd	1f4bf		2370402	1968	50th CD
+50th_camera	1f4f7		2388178	1240	50th Camera

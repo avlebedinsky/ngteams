@@ -3,7 +3,8 @@
 //! as text, as the capture's link inserted with its text; mentions by MRI only), Enter and Shift-Enter, a refused
 //! send's draft given back, the mention picker over the chat's members (closed once the cursor leaves its `@`), a
 //! reply with its quote, an edit (Up in an empty box edits the last), a delete confirmed first (on the message
-//! selected), the quick reactions (a chip of any other key only shows), typing (its throttle, kept across a chat view
+//! selected), the quick reactions and "more reactions" (a chip
+//! of a key Teams doesn't offer only shows), typing (its throttle, kept across a chat view
 //! built again, the focus, the setting, never while editing), read receipts (the chat shown, the window active, the
 //! list at the newest, the setting, one per burst), and the outbox rows shown with their states and "send again" (a
 //! queued post at once, a sent one until its message is held or stored, a write a newer one made out of date never).
@@ -23,17 +24,21 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use common::{LAB_A, LAB_B, Rig, Written, outbox_row};
-use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, px, size};
+use gpui::{
+    Entity, Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext, point, px, size,
+};
 use teams_core::{Action, Command, Event, MessageChange, Source, Transient};
 use teams_fence::Mri;
 use teams_proto::chat::{ComposeError, MessageText, Node, RichText};
 use teams_store::{Applied, Member, Message, OutboxEntry, OutboxState, Reaction, ReadHorizon};
 use teams_ui::ViewTrace;
+use teams_ui::bridge::Core;
 use teams_ui::chat_view::{ChatView, MessageAction, PAGE, QUICK_REACTIONS, READ_DEBOUNCE};
 use teams_ui::compose::{
     Candidate, CantEdit, Compose, DraftMention, Mode, PREVIEW_MAX, Quoted, TYPING_EVERY, TypingThrottle, load,
     matching, mention_query, message_text,
 };
+use teams_ui::reaction_picker::{RECENT, Section};
 use teams_ui::sending::{Again, RowState};
 use teams_ui::settings::{Settings, SettingsModel};
 use teams_ui::shell::Shell;
@@ -1169,14 +1174,14 @@ fn a_send_the_engine_refuses_gives_the_box_its_draft_back() {
 }
 
 #[test]
-fn a_chip_of_a_key_the_capture_never_showed_sent_only_shows() {
+fn a_chip_of_any_reaction_teams_offers_sets_or_takes_back_and_one_of_another_key_only_shows() {
     let theirs = message(NOON, LAB_B, "<p>nice</p>");
     let rig = rig_with(vec![theirs.clone()]);
     rig.core.reactions.lock().unwrap().insert(
         theirs.id.clone(),
         vec![
             Reaction {
-                key: "sad".to_owned(),
+                key: "1f440_eyes".to_owned(),
                 user: LAB_B.to_owned(),
                 time: NOON,
             },
@@ -1185,13 +1190,226 @@ fn a_chip_of_a_key_the_capture_never_showed_sent_only_shows() {
                 user: LAB_A.to_owned(),
                 time: NOON + 1,
             },
+            Reaction {
+                key: "custom-key".to_owned(),
+                user: LAB_B.to_owned(),
+                time: NOON + 2,
+            },
         ],
     );
     let (view, cx, _) = chat_window(&rig, no_receipts());
-    click(cx, "reaction-sad");
+    click(cx, "reaction-1f440_eyes");
     click(cx, "reaction-yes-tone2");
-    cx.update(|_, cx| view.update(cx, |view, cx| view.toggle_reaction(&theirs.id, "yes-tone2", cx)));
-    assert!(actions(&rig).is_empty(), "neither set nor taken back");
+    click(cx, "reaction-custom-key");
+    cx.update(|_, cx| view.update(cx, |view, cx| view.toggle_reaction(&theirs.id, "custom-key", cx)));
+    let (conversation, message_id) = (AB.to_owned(), theirs.id.clone());
+    assert_eq!(
+        actions(&rig),
+        [
+            Action::React {
+                conversation: conversation.clone(),
+                message_id: message_id.clone(),
+                key: "1f440_eyes".to_owned(),
+            },
+            Action::Unreact {
+                conversation,
+                message_id,
+                key: "yes-tone2".to_owned(),
+            },
+        ],
+        "a key Teams doesn't offer is neither set nor taken back"
+    );
+}
+
+#[test]
+fn a_click_into_the_compose_box_closes_more_reactions_and_keeps_the_focus_there() {
+    let theirs = message(NOON, LAB_B, "<p>nice</p>");
+    let rig = rig_with(vec![theirs.clone()]);
+    let (view, cx, _) = chat_window(&rig, no_receipts());
+    act(&view, cx, MessageAction::React, &theirs.id);
+    keys(cx, "5");
+    let picker = cx.debug_bounds("reaction-picker-more").expect("more reactions open");
+    let compose_box = cx.debug_bounds("compose").unwrap();
+    let inside = [
+        compose_box.center(),
+        point(compose_box.left() + px(4.0), compose_box.center().y),
+        point(compose_box.right() - px(4.0), compose_box.center().y),
+    ]
+    .into_iter()
+    .find(|spot| !picker.contains(spot))
+    .expect("a spot of the compose box outside the picker");
+
+    cx.simulate_click(inside, Modifiers::none());
+    assert!(cx.update(|_, cx| view.read(cx).more_reactions().is_none()), "closed");
+    assert_eq!(focused(&view, cx), (false, true), "the compose box keeps the focus");
+    assert_eq!(
+        cx.update(|_, cx| view.read(cx).reacting().map(str::to_owned)),
+        None,
+        "the quick reactions closed with it"
+    );
+    type_text(cx, "1");
+    assert!(actions(&rig).is_empty(), "1 typed in the compose box reacts to nothing");
+}
+
+#[test]
+fn more_reactions_finds_and_picks_any_reaction_teams_offers() {
+    let theirs = message(NOON, LAB_B, "<p>nice</p>");
+    let rig = rig_with(vec![theirs.clone()]);
+    let (view, cx, _) = chat_window(&rig, no_receipts());
+    let more = |cx: &mut VisualTestContext| cx.update(|_, cx| view.read(cx).more_reactions().cloned());
+
+    // key 5 opens it, its search field focused: what is typed there is a search, never the list's keys
+    act(&view, cx, MessageAction::React, &theirs.id);
+    assert!(cx.debug_bounds("pick-more").is_some());
+    keys(cx, "5");
+    assert!(cx.debug_bounds("reaction-picker-more").is_some());
+    type_text(cx, "1");
+    assert!(actions(&rig).is_empty(), "1 typed in the search picks nothing");
+    let picker = more(cx).expect("more reactions open");
+    let shown = cx.update(|_, cx| picker.read(cx).shown());
+    assert!(shown.iter().all(|id| id.contains('1')), "1 is searched for");
+    keys(cx, "backspace");
+    type_text(cx, "eyes");
+    let shown = cx.update(|_, cx| picker.read(cx).shown());
+    assert_eq!(shown.first(), Some(&"1f440_eyes"), "the reaction named so first");
+    assert!(shown.contains(&"hearteyes"));
+    keys(cx, "enter");
+    assert_eq!(
+        actions(&rig),
+        [Action::React {
+            conversation: AB.to_owned(),
+            message_id: theirs.id.clone(),
+            key: "1f440_eyes".to_owned(),
+        }]
+    );
+    assert!(more(cx).is_none(), "a pick closes it");
+    assert_eq!(cx.update(|_, cx| view.read(cx).reacting().map(str::to_owned)), None);
+
+    act(&view, cx, MessageAction::React, &theirs.id);
+    keys(cx, "5");
+    keys(cx, "escape");
+    assert!(more(cx).is_none());
+    assert!(actions(&rig).is_empty());
+}
+
+#[test]
+fn more_reactions_scrolls_through_recent_and_every_category_its_tabs_following() {
+    let theirs = message(NOON, LAB_B, "<p>nice</p>");
+    let rig = rig_with(vec![theirs.clone()]);
+    let (view, cx, _) = chat_window(&rig, no_receipts());
+    let more = |cx: &mut VisualTestContext| cx.update(|_, cx| view.read(cx).more_reactions().cloned());
+
+    // Recent first: the account's own recent reactions (one with a skin tone as its reaction), then Teams' defaults
+    *rig.core.recent.lock().unwrap() = vec!["1f44b_wavinghand".to_owned(), "yes-tone2".to_owned()];
+    act(&view, cx, MessageAction::React, &theirs.id);
+    click(cx, "pick-more");
+    let picker = more(cx).expect("more reactions open");
+    let recent = cx.update(|_, cx| picker.read(cx).section(Section::Recent));
+    assert_eq!(recent[..3], ["1f44b_wavinghand", "yes", "surprised"]);
+    assert_eq!(recent.len(), RECENT);
+    assert_eq!(cx.update(|_, cx| picker.read(cx).active()), Some(Section::Recent));
+    // the whole catalog in one list: scrolled down, the tab follows; a tab clicked scrolls to its section
+    let list = cx.debug_bounds("emoji-1f44b_wavinghand").unwrap();
+    cx.simulate_mouse_move(list.center(), None, Modifiers::none());
+    cx.simulate_event(ScrollWheelEvent {
+        position: list.center(),
+        delta: ScrollDelta::Pixels(point(px(0.0), px(-1_500.0))),
+        modifiers: Modifiers::none(),
+        touch_phase: TouchPhase::Moved,
+    });
+    draw(cx);
+    assert!(matches!(
+        cx.update(|_, cx| picker.read(cx).active()),
+        Some(Section::Category(_))
+    ));
+    click(cx, "reaction-category-1");
+    assert_eq!(cx.update(|_, cx| picker.read(cx).active()), Some(Section::Category(1)));
+    let first = cx.update(|_, cx| picker.read(cx).section(Section::Category(1))[0]);
+    let selector: &'static str = format!("emoji-{first}").leak();
+    click(cx, selector);
+    assert_eq!(
+        actions(&rig),
+        [Action::React {
+            conversation: AB.to_owned(),
+            message_id: theirs.id.clone(),
+            key: first.to_owned(),
+        }]
+    );
+}
+
+#[test]
+fn the_reaction_under_the_pointer_plays_its_animation_once_read() {
+    let theirs = message(NOON, LAB_B, "<p>nice</p>");
+    let rig = rig_with(vec![theirs.clone()]);
+    let mut strip = image::RgbaImage::new(2, 6);
+    strip.put_pixel(0, 0, image::Rgba([1, 2, 3, 255]));
+    let mut png = Vec::new();
+    strip
+        .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+        .unwrap();
+    rig.core
+        .animations
+        .lock()
+        .unwrap()
+        .insert("1f440_eyes".to_owned(), png.into());
+    let (view, cx, _) = chat_window(&rig, no_receipts());
+    act(&view, cx, MessageAction::React, &theirs.id);
+    keys(cx, "5");
+    type_text(cx, "eyes");
+    let picker = cx.update(|_, cx| view.read(cx).more_reactions().cloned()).unwrap();
+    assert!(
+        !rig.core.asked().contains(&"reaction_animation"),
+        "nothing read before a hover"
+    );
+
+    let cell = cx.debug_bounds("emoji-1f440_eyes").unwrap();
+    cx.simulate_mouse_move(cell.center(), None, Modifiers::none());
+    draw(cx);
+    assert_eq!(cx.update(|_, cx| picker.read(cx).hovered()), Some("1f440_eyes"));
+    assert!(rig.core.asked().contains(&"reaction_animation"));
+    let core: Arc<dyn Core> = rig.core.clone();
+    let played = cx.update(|_, cx| teams_ui::reactions::animation("1f440_eyes", &core, cx));
+    assert_eq!(played.map(|frames| frames.frame_count()), Some(3), "its three frames");
+    let asked = rig
+        .core
+        .asked()
+        .iter()
+        .filter(|name| **name == "reaction_animation")
+        .count();
+    assert_eq!(asked, 1, "read once");
+}
+
+#[test]
+fn an_animation_whose_read_failed_on_the_way_is_asked_again() {
+    let rig = rig_with(vec![]);
+    rig.core
+        .unread_animations
+        .lock()
+        .unwrap()
+        .insert("1f440_eyes".to_owned());
+    let (_view, cx, _) = chat_window(&rig, no_receipts());
+    let core: Arc<dyn Core> = rig.core.clone();
+    let asked = || {
+        rig.core
+            .asked()
+            .iter()
+            .filter(|name| **name == "reaction_animation")
+            .count()
+    };
+    assert!(
+        cx.update(|_, cx| teams_ui::reactions::animation("1f440_eyes", &core, cx))
+            .is_none()
+    );
+    cx.run_until_parked();
+    assert_eq!(asked(), 1);
+
+    // the read fails again: asked again, not kept as none
+    assert!(
+        cx.update(|_, cx| teams_ui::reactions::animation("1f440_eyes", &core, cx))
+            .is_none()
+    );
+    cx.run_until_parked();
+    assert_eq!(asked(), 2, "a failed read isn't kept as none");
 }
 
 #[test]

@@ -386,6 +386,22 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
+    /// The reaction keys `user` has set and not taken back, on any stored message, the one set most recently first; at
+    /// most `limit`.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] when the read fails.
+    pub fn recent_reactions(&self, user: &str, limit: usize) -> Result<Vec<String>, StoreError> {
+        let mut statement = self.conn.prepare_cached(
+            "SELECT reaction FROM reactions WHERE user_mri = ?1 AND present = 1
+             GROUP BY reaction ORDER BY MAX(time) DESC, reaction LIMIT ?2",
+        )?;
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let rows = statement.query_map(params![user, limit], |row| row.get(0))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// One message.
     ///
     /// # Errors

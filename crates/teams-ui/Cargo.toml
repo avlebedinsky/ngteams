@@ -21,6 +21,8 @@ log = { workspace = true, features = ["max_level_debug", "release_max_level_debu
 gpui-component.workspace = true
 # the view trace: one JSON object per line
 serde_json.workspace = true
+# a reaction's animation strip (a PNG) cut into the frames GPUI plays: the version and decoder GPUI already links
+image = { workspace = true, features = ["png"] }
 # the engine: its request side (behind `Core`), its events and its shutdown
 teams-core.workspace = true
 # a mention's MRI, as compose hands it to `teams-proto`'s message text

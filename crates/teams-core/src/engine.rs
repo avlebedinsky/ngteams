@@ -118,6 +118,7 @@ use tokio::time::{Instant, MissedTickBehavior};
 use crate::calling::{
     Act, CallAction, CallActionError, CallParts, CallStatus, CallView, Calling, CallingTask, IncomingCall,
 };
+use crate::emoticons::{Animations, Strip};
 use crate::outbox::{Command, Outbox, OutboxError, Sent, Transient, TransientSent, create_chat, enqueue};
 use crate::presence::{Availability, PRESENCE_POLL, Polled, Presences};
 use crate::profiles::{PROFILE_RETRY, Person, Profiles};
@@ -407,6 +408,10 @@ pub enum EngineError {
     AlreadyRunning { lock: PathBuf },
     #[error("the engine has stopped")]
     Stopped,
+    /// A reaction's animation failed to be read on the way (not an answer that there is none): the next ask reads it
+    /// again.
+    #[error("the reaction's animation couldn't be read")]
+    AnimationUnread,
     /// A call action was refused: nothing was sent.
     #[error(transparent)]
     Call(CallActionError),
@@ -431,6 +436,7 @@ impl EngineError {
             Self::Thread(_) => "thread",
             Self::AlreadyRunning { .. } => "already running",
             Self::Stopped => "stopped",
+            Self::AnimationUnread => "animation unread",
             Self::Call(_) => "call",
         }
     }
@@ -512,6 +518,7 @@ enum Request {
     SyncConversation(String, Responder<Synced>),
     Person(String, Responder<Person>),
     Presence(String, Responder<Availability>),
+    ReactionAnimation(String, Responder<Option<Strip>>),
     Teams(Responder<Option<Vec<Team>>>),
     Query(Query),
     Shutdown,
@@ -537,6 +544,7 @@ enum Query {
         reply: Responder<Vec<Reaction>>,
     },
     Members(String, Responder<Vec<Member>>),
+    RecentReactions(usize, Responder<Vec<String>>),
     UnreadCount(String, Responder<u64>),
     DisplayName(String, Responder<Option<String>>),
     ReadHorizon(String, Responder<Option<ReadHorizon>>),
@@ -698,6 +706,12 @@ impl EngineRequests {
         })
     }
 
+    /// The reaction keys the account set most recently on stored messages (and hasn't taken back), the newest first;
+    /// at most `limit`.
+    pub fn recent_reactions(&self, limit: usize) -> Reply<Vec<String>> {
+        self.query(|reply| Query::RecentReactions(limit, reply))
+    }
+
     /// A chat's stored members.
     pub fn members(&self, conversation: impl Into<String>) -> Reply<Vec<Member>> {
         let conversation = conversation.into();
@@ -732,6 +746,13 @@ impl EngineRequests {
     pub fn presence(&self, mri: impl Into<String>) -> Reply<Availability> {
         let mri = mri.into();
         self.ask(|reply| Request::Presence(mri, reply))
+    }
+
+    /// The animation of the reaction `id` (its key without a skin tone), as Teams' CDN has it ([`crate::emoticons`]):
+    /// its strip of frames, or `None` when there is none.
+    pub fn reaction_animation(&self, id: impl Into<String>) -> Reply<Option<Strip>> {
+        let id = id.into();
+        self.ask(|reply| Request::ReactionAnimation(id, reply))
     }
 
     /// The account's own stored read horizon in a conversation.
@@ -927,6 +948,7 @@ struct Core<C, T> {
     profiles: Profiles<C>,
     teams: Teams<C>,
     presences: Presences<C>,
+    animations: Animations<C>,
     events: mpsc::UnboundedSender<Event>,
     options: EngineOptions,
     push: Option<Push>,
@@ -966,6 +988,7 @@ where
         );
         let teams = Teams::new(Arc::clone(&parts.client), parts.options.teams_retry);
         let presences = Presences::new(Arc::clone(&parts.client), parts.options.presence_poll);
+        let animations = Animations::new(Arc::clone(&parts.client));
         let people = parts
             .client
             .transport()
@@ -982,6 +1005,7 @@ where
             profiles,
             teams,
             presences,
+            animations,
             events,
             options: parts.options,
             push: parts.push,
@@ -1184,6 +1208,7 @@ where
                 let synced = synced.map_err(EngineError::from);
                 let _ = reply.send(logged(synced, || format!("sync of {conversation}")));
             }
+            Request::ReactionAnimation(id, reply) => self.animations.animation(id, reply),
             Request::Person(mri, reply) => {
                 self.refresh_people();
                 let person = self.profiles.person(&self.store, &mri);
@@ -1272,6 +1297,7 @@ where
                 reply,
             } => give(reply, store.reactions(&conversation, &id)),
             Query::Members(conversation, reply) => give(reply, store.members(&conversation)),
+            Query::RecentReactions(limit, reply) => give(reply, store.recent_reactions(self.me(), limit)),
             Query::UnreadCount(conversation, reply) => give(reply, store.unread_count(&conversation, self.me())),
             Query::DisplayName(mri, reply) => give(reply, store.display_name(&mri)),
             Query::ReadHorizon(conversation, reply) => give(reply, store.read_horizon(&conversation, self.me())),

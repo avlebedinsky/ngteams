@@ -46,6 +46,7 @@
 
 pub mod chat;
 mod client;
+mod emoticon;
 mod endpoint;
 mod frame;
 mod http;
@@ -57,6 +58,7 @@ mod request;
 mod write;
 
 pub use client::{Client, PostReadError, Response, Transport, WriteError};
+pub use emoticon::{MAX_ANIMATION, ReactionAnimation};
 pub use endpoint::{Endpoint, Method, Service};
 pub use frame::{
     AcceptanceAcknowledgement, Authenticate, ConnectParams, DeliveryResponse, Disconnect, DroppedIndicator, FrameError,
@@ -64,9 +66,9 @@ pub use frame::{
     RespondError, ResponseDecider, ResponseRefused, Sent,
 };
 pub use http::{
-    BuildError, CONNECT_TIMEOUT, CSA_AUDIENCE, Credentials, DEFAULT_RETRY_WAIT, Failure, GRAPH_AUDIENCE, GRAPH_HOST,
-    HttpError, HttpTransport, IC3_AUDIENCE, MAX_BODY, MAX_RETRY_WAIT, MIDDLE_TIER_AUDIENCE, PRESENCE_AUDIENCE,
-    RELAY_HOST, REQUEST_TIMEOUT, Refusal, TROUTER_HOST,
+    BuildError, CONNECT_TIMEOUT, CSA_AUDIENCE, Credentials, DEFAULT_RETRY_WAIT, EMOTICONS_HOST, Failure,
+    GRAPH_AUDIENCE, GRAPH_HOST, HttpError, HttpTransport, IC3_AUDIENCE, MAX_BODY, MAX_RETRY_WAIT, MIDDLE_TIER_AUDIENCE,
+    PRESENCE_AUDIENCE, RELAY_HOST, REQUEST_TIMEOUT, Refusal, TROUTER_HOST,
 };
 #[cfg(feature = "test-support")]
 pub use own::ProbeOwnState;

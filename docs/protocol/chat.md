@@ -64,7 +64,10 @@ percent-encoded as one segment.
   channels in `topics`, a JSON string), `streamofnotifications` (`48:notifications`). The rest: `createdat`,
   `isCreator`, `lastjoinat`, `lastSequenceId`, `rosterVersion` (a number), `version` (a string),
   `originalThreadId`, `gapDetectionEnabled`. Booleans in `properties` and `threadProperties` are mostly strings.
-  A group chat in the list wasn't seen (the lab had none when the probe ran).
+  A group chat in the list wasn't seen (the lab had none when the probe ran). A named group chat's or a meeting
+  chat's name is `threadProperties.topic` (a meeting's chat has `threadType` `meeting` and is titled by the meeting);
+  the web bundle titles a chat by it, and the thread read carries it as `properties.topic`. Read from the web bundle
+  (the `meeting` thread type from the personal build's store), not from a lab capture.
 
 ## Message pages (ab-chat-full, b)
 
@@ -321,6 +324,23 @@ Fixture: `tests/fixtures/chatsvc/reactions.json`.
   the order they were first set, each with its users; a key taken back stays with `users: []`, and
   `annotationsSummary.emotions` counts only the keys that still have a user (`{}` once none has). Each change raised the
   message's `version`.
+
+### Reaction pictures
+
+Not a capture: the web bundle's config and Teams' public CDN, read with no token.
+
+- **The keys.** Besides the four quick ones, every reaction Teams offers is a key of its emoticon catalog
+  (`…/personal-expressions/v1/metadata/<emoticonAssetVersion>/default.json` on `statics.teams.cdn.office.net`, the
+  version the bundle's config names): nine categories, about 1 650 ids, each with its code points, whether it takes a
+  skin tone (`diverse`), a description and its animation's frame rate (24 fps). An id is either an older name (`like`,
+  `cool`, `hearteyes`, `fistbump`) or the code point and a name (`1f440_eyes`, the form the user's own chats showed
+  stored). A reaction that takes a tone is sent with the tone appended, `-tone1` to `-tone5` (the bundle builds
+  `<id>-tone<n>`; `like` becomes `yes-tone<n>`). The key goes in the same body as the quick ones'; the native client
+  sends any key of the catalog in that form, and shows any other key it receives without sending it.
+- **The pictures.** Each id's still picture and animation are on the CDN under
+  `…/personal-expressions/v2/assets/emoticons/<id>/default/`: `50_f.png` (50×50) and `<size>_anim_f.png` (30, 50 or
+  100 px frames stacked top to bottom, one strip per animation). The app draws its still pictures from Fluent Emoji
+  3D (Microsoft's, MIT), packed into the app, and reads only the 50 px strip of the reaction under the pointer.
 
 ### Typing (chat-shapes)
 

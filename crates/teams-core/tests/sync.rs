@@ -1001,6 +1001,51 @@ async fn a_later_last_activity_under_an_unreadable_version_is_told_as_a_change()
     assert!(a.catch_up.take_changes().is_empty());
 }
 
+#[tokio::test]
+async fn a_listed_chats_topic_is_stored_as_its_name() {
+    const MEETING: &str = "19:meeting_synthetic@thread.v2";
+    const BLANK: &str = "19:synthetic-blank@thread.v2";
+    let server = scripted(vec![
+        ("", page(Vec::new(), Some("s1"), None)),
+        ("s1", page(Vec::new(), Some("s1"), None)),
+    ])
+    .await;
+    let listed = json!({"conversations": [
+        {"id": CHAT, "version": 2, "threadProperties": {"threadType": "chat", "topic": "Synthetic group"}},
+        {"id": MEETING, "version": 3, "threadProperties": {"threadType": "meeting", "topic": "Synthetic sync"}},
+        {"id": BLANK, "version": 4, "threadProperties": {"threadType": "chat", "topic": "  "}},
+    ]});
+    Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/api/chatsvc/amer/v1/users/ME/conversations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(listed))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path(format!(
+            "/api/chatsvc/amer/v1/threads/{BLANK}"
+        )))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": BLANK, "members": []})))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let mut a = plain_account(&server);
+    a.store
+        .replace_members(CHAT, 1, &[Member::new(LAB_A, None), Member::new(LAB_B, None)])
+        .unwrap();
+
+    let report = a.catch_up.catch_up(&mut a.store).await.unwrap();
+    assert!(report.failed.is_empty(), "{report:?}");
+    let topic = |id: &str| a.store.conversation(id).unwrap().unwrap().topic;
+    assert_eq!(topic(CHAT).as_deref(), Some("Synthetic group"));
+    assert_eq!(
+        topic(MEETING).as_deref(),
+        Some("Synthetic sync"),
+        "a meeting's chat by its title"
+    );
+    assert_eq!(topic(BLANK), None, "a blank topic names nothing");
+}
+
 /// `entry` as a control message of `messagetype` (typing and its end come with no content).
 fn control(mut entry: Value, messagetype: &str) -> Value {
     entry["messagetype"] = json!(messagetype);

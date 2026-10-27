@@ -8509,6 +8509,7 @@ dependencies = [
  "gpui-component",
  "gpui-pre",
  "gpui-pre-platform",
+ "image",
  "log",
  "serde_json",
  "teams-auth",

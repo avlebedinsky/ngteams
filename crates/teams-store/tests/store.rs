@@ -219,6 +219,43 @@ fn reopening_keeps_the_data_and_runs_no_migration_twice() {
 }
 
 #[test]
+fn the_topics_migration_takes_the_chats_without_a_topic_again() -> Result<(), StoreError> {
+    const MEETING: &str = "19:meeting_synthetic@thread.v2";
+    const NAMED: &str = "19:synthetic-named@thread.v2";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = with_chat(&dir)?;
+    store.upsert_conversation(&conversation(GROUP, ConversationKind::Group, 5))?;
+    store.upsert_conversation(&conversation(
+        MEETING,
+        ConversationKind::Other("thread_type:meeting".to_owned()),
+        6,
+    ))?;
+    let mut named = conversation(NAMED, ConversationKind::Group, 7);
+    named.topic = Some("Synthetic".to_owned());
+    store.upsert_conversation(&named)?;
+    store.set_conversation_list_sync_link(Some("https://chat.example.invalid/v1/list?syncState=x"), 1)?;
+    drop(store);
+    // the store as schema 9 left it
+    let raw = rusqlite::Connection::open(store_path(&dir)).expect("open directly");
+    raw.pragma_update(None, "user_version", 9).expect("back to schema 9");
+    drop(raw);
+
+    let store = open(&dir)?;
+    assert_eq!(store.schema_version()?, SCHEMA_VERSION);
+    assert_eq!(
+        store.conversation_list_sync_link()?,
+        None,
+        "the list is read whole again"
+    );
+    let version = |id: &str| store.conversation(id).map(|stored| stored.map(|stored| stored.version));
+    assert_eq!(version(GROUP)?, Some(0), "a group chat without a topic is taken again");
+    assert_eq!(version(MEETING)?, Some(0), "so is a meeting's chat");
+    assert_eq!(version(NAMED)?, Some(7), "a chat with a topic keeps its version");
+    assert_eq!(version(CHAT)?, Some(1), "a 1:1 chat has no topic to take");
+    Ok(())
+}
+
+#[test]
 fn a_store_from_a_newer_build_is_refused() {
     let dir = tempfile::tempdir().expect("tempdir");
     drop(open(&dir).expect("open the store"));
@@ -545,6 +582,33 @@ fn our_own_message_is_found_by_its_client_message_id() {
 }
 
 // --- reactions ---
+
+#[test]
+fn the_account_s_recent_reactions_are_its_own_set_ones_the_newest_first() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = with_chat(&dir).expect("a store with the chat");
+    for (id, at) in [("1000", 1000), ("1001", 1001)] {
+        store
+            .upsert_message(&message(id, at, "hi", at, PEER), None)
+            .expect("message");
+    }
+    for change in [
+        ReactionChange::add(CHAT, "1000", "like", ME, 2000),
+        ReactionChange::add(CHAT, "1000", "heart", ME, 2100),
+        ReactionChange::add(CHAT, "1001", "like", ME, 2200),
+        ReactionChange::add(CHAT, "1001", "1f440_eyes", ME, 2300),
+        ReactionChange::remove(CHAT, "1001", "1f440_eyes", ME, 2400),
+        ReactionChange::add(CHAT, "1000", "laugh", PEER, 2500),
+    ] {
+        store.apply_reaction(&change).expect("reaction");
+    }
+    assert_eq!(
+        store.recent_reactions(ME, 10).expect("read"),
+        ["like", "heart"],
+        "each key once, by its newest use; taken back and others' left out"
+    );
+    assert_eq!(store.recent_reactions(ME, 1).expect("read"), ["like"]);
+}
 
 #[test]
 fn reactions_are_kept_per_user_and_the_newest_change_wins() {

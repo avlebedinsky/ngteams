@@ -8,7 +8,7 @@
 # - Installs both binaries and the sign-in window's web process extension into ~/.local/lib/teams/ (the window finds
 #   the extension beside itself, `teams` finds the window beside itself), `teams` linked from ~/.local/bin/, and
 #   `packaging/teams.desktop` into ~/.local/share/applications/ with its `Exec` pointing at the installed binary.
-# - Starts nothing. The first run is the user's: `teams --account <your UPN>` (docs/personal-build.md, "The first run").
+# - Starts nothing. The first run is the user's: `teams`, which asks for the account (docs/personal-build.md, "The first run").
 #
 # Usage: scripts/install-personal.sh   (PREFIX overrides ~/.local)
 set -euo pipefail
@@ -34,4 +34,4 @@ sed "s|^Exec=teams$|Exec=$lib/teams|" "$root/packaging/teams.desktop" > "$apps/t
 chmod 0644 "$apps/teams.desktop"
 
 echo "installed: $lib/teams (linked from $bin/teams) and $apps/teams.desktop"
-echo "first run: teams --account <your UPN>   (then review the first-run screen before anything is sent on its own)"
+echo "first run: start Teams and enter your work account   (then review the first-run screen before anything is sent on its own)"

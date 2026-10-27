@@ -14,10 +14,10 @@ pub enum SetupError {
     #[error("HOME is unset or relative, so the lab's directories can't be found to keep apart from")]
     NoHome,
     /// No account yet, and none given.
-    #[error("no account yet: run `teams --account <your UPN>` once to sign in")]
+    #[error("no account yet: start `teams` and enter it in its window to sign in")]
     NoAccount,
     /// Another account than the one `account.toml` holds.
-    #[error("account.toml holds another account ({held}): run `teams --forget` first to change accounts")]
+    #[error("Teams is set up for {held}: run `teams --forget` first to change accounts")]
     OtherAccount { held: String },
 }
 
@@ -48,28 +48,68 @@ impl Setup {
         Ok(Self { paths, lab })
     }
 
-    /// The account to run for: `account.toml`'s, which `asked` (a `--account` UPN) may only repeat, or, before the first
-    /// sign-in, the one `asked` names, written to `account.toml` (`0600`) without an object id yet. A lab account is
-    /// refused either way.
+    /// The account to run for: with `asked` (a `--account` UPN), what [`Self::ask_for`] makes of it, as the first
+    /// sign-in screen would; without, `account.toml`'s. A lab account is refused either way.
     ///
     /// # Errors
-    /// [`SetupError::NoAccount`] with neither; [`SetupError::OtherAccount`] when `asked` differs from the account held;
-    /// [`SetupError::Personal`] for a lab account, a bad UPN or a file that can't be read or written.
+    /// [`SetupError::NoAccount`] with neither; as [`Self::ask_for`] with `asked`; [`SetupError::Personal`] for a lab
+    /// account or a file that can't be read.
     pub fn account(&self, asked: Option<&str>) -> Result<PersonalAccount, SetupError> {
-        let account = match (PersonalAccount::load(&self.paths)?, asked) {
-            (Some(held), Some(asked)) if !held.upn.eq_ignore_ascii_case(asked) => {
-                return Err(SetupError::OtherAccount { held: held.upn });
+        if let Some(asked) = asked {
+            return self.ask_for(asked);
+        }
+        let held = PersonalAccount::load(&self.paths)?.ok_or(SetupError::NoAccount)?;
+        held.check_not_lab(&self.lab)?;
+        Ok(held)
+    }
+
+    /// The account `account.toml` holds once a sign-in named it (its object id known), else `None`: the first sign-in
+    /// screen asks for it then ([`Self::ask_for`]). A lab account is refused.
+    ///
+    /// # Errors
+    /// [`SetupError::Personal`] for a lab account or a file that can't be read.
+    pub fn signed_in_account(&self) -> Result<Option<PersonalAccount>, SetupError> {
+        match PersonalAccount::load(&self.paths)? {
+            Some(held) if held.is_signed_in() => {
+                held.check_not_lab(&self.lab)?;
+                Ok(Some(held))
             }
-            (Some(held), _) => held,
-            (None, Some(asked)) => {
-                let pending = PersonalAccount::pending(asked)?;
-                pending.check_not_lab(&self.lab)?;
-                pending.save(&self.paths)?;
-                pending
+            _ => Ok(None),
+        }
+    }
+
+    /// The account an earlier attempt named, for the first sign-in screen to show again: `account.toml`'s UPN.
+    ///
+    /// # Errors
+    /// [`SetupError::Personal`] when `account.toml` can't be read.
+    pub fn held_upn(&self) -> Result<Option<String>, SetupError> {
+        Ok(PersonalAccount::load(&self.paths)?.map(|held| held.upn))
+    }
+
+    /// The account the first sign-in screen (or `--account`) was given (`upn`), to sign in: `account.toml`'s when a
+    /// sign-in named it (`upn` may only repeat it) or `upn` repeats it, else `upn` written to `account.toml` (`0600`)
+    /// without an object id, in place of an account no sign-in named yet (whose `idp_hosts` it keeps). A lab account is
+    /// refused.
+    ///
+    /// # Errors
+    /// [`SetupError::OtherAccount`] when a signed-in account is held and `upn` differs; [`SetupError::Personal`] for a
+    /// lab account, a bad UPN or a file that can't be read or written.
+    pub fn ask_for(&self, upn: &str) -> Result<PersonalAccount, SetupError> {
+        let held = PersonalAccount::load(&self.paths)?;
+        if let Some(held) = held
+            .as_ref()
+            .filter(|held| held.is_signed_in() || held.upn.eq_ignore_ascii_case(upn))
+        {
+            if !held.upn.eq_ignore_ascii_case(upn) {
+                return Err(SetupError::OtherAccount { held: held.upn.clone() });
             }
-            (None, None) => return Err(SetupError::NoAccount),
-        };
-        account.check_not_lab(&self.lab)?;
-        Ok(account)
+            held.check_not_lab(&self.lab)?;
+            return Ok(held.clone());
+        }
+        let mut pending = PersonalAccount::pending(upn)?;
+        pending.idp_hosts = held.map(|held| held.idp_hosts).unwrap_or_default();
+        pending.check_not_lab(&self.lab)?;
+        pending.save(&self.paths)?;
+        Ok(pending)
     }
 }

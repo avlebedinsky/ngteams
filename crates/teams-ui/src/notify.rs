@@ -12,7 +12,7 @@
 //!   app's start until the push channel first goes down, then the moment it was last known to deliver before it last
 //!   went down (when its socket last heard from the service, as the engine tells it: a socket gone silent in a suspend
 //!   is noticed only later), less [`CLOCK_SKEW_MS`], since the service's times are compared with this machine's;
-//! - in a team's channel only a mention of the account notifies (channels are the Teams rail's, read-only in M2).
+//! - in a team's channel only a mention of the account notifies (channels are the sidebar's teams section's, read-only in M2).
 //!
 //! A mention of the account is marked as such ("… mentioned you"). Messages are gathered for [`GATHER`] before they
 //! are shown, so a catch-up's are seen together: up to [`SINGLES`] of one chat are shown one by one; more than that

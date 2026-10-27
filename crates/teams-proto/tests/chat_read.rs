@@ -708,6 +708,21 @@ fn reaction_users_and_quotes_keep_a_time_or_value_of_another_form() -> TestResul
 }
 
 #[test]
+fn a_chats_topic_is_its_name_and_a_blank_one_none() -> TestResult {
+    let listed = |topic: Value| -> serde_json::Result<Conversation> {
+        serde_json::from_value(json!({"id": ABC_CHAT, "threadProperties": {"threadType": "chat", "topic": topic}}))
+    };
+    assert_eq!(listed(json!("Synthetic group"))?.topic(), Some("Synthetic group"));
+    assert_eq!(listed(json!(" "))?.topic(), None);
+    assert_eq!(listed(json!(7))?.topic(), None, "a topic that isn't text names nothing");
+    let thread: Thread = serde_json::from_value(json!({"id": ABC_CHAT, "properties": {"topic": "Synthetic group"}}))?;
+    assert_eq!(thread.topic(), Some("Synthetic group"));
+    let bare: Thread = serde_json::from_value(json!({"id": ABC_CHAT}))?;
+    assert_eq!(bare.topic(), None);
+    Ok(())
+}
+
+#[test]
 fn a_threads_and_member_lists_named_numbers_are_absent_known_or_kept_as_they_came() -> TestResult {
     let absent: Thread = serde_json::from_value(json!({"id": ABC_CHAT}))?;
     assert_eq!(

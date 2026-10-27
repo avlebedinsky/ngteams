@@ -27,7 +27,9 @@
 //!   trailing slash every captured one had); the calling service ([`Service::Calling`], the flight proxy:
 //!   `https://api.flightproxy.teams.microsoft.com/api/v2/`, authorized call writes only, a read or a plain request on
 //!   it refused); and the TURN relay's credentials ([`Service::Relay`]: `https://teams.microsoft.com/trap`, the
-//!   relay read). An endpoint with an empty, `.` or `..` segment is refused. Entra and authz aren't a service here
+//!   relay read); and Teams' reaction pictures on its CDN ([`Service::Emoticons`]:
+//!   `https://statics.teams.cdn.office.net/evergreen-assets/personal-expressions/v2/assets/emoticons`, no token). An
+//!   endpoint with an empty, `.` or `..` segment is refused. Entra and authz aren't a service here
 //!   (they stay in `teams-auth`'s own clients), and neither is AMS. A new service is a code change: a variant, its base
 //!   and its token's audience.
 //! - **The client**: `https` only, no proxy (an environment's `HTTPS_PROXY` could point anywhere), no redirects (a 3xx
@@ -594,6 +596,7 @@ impl<C: Credentials> HttpTransport<C> {
             Service::Presence => self.presence.clone().ok_or(refused(Refusal::NoPresence)),
             Service::Calling => Err(refused(Refusal::Calling)),
             Service::Relay => fixed(format!("https://{RELAY_HOST}/{RELAY_PATH}")),
+            Service::Emoticons => fixed(format!("https://{EMOTICONS_HOST}/{EMOTICONS_PATH}")),
         }
     }
 
@@ -1132,6 +1135,10 @@ const SKYPETOKEN_HEADER: &str = "x-skypetoken";
 pub const RELAY_HOST: &str = "teams.microsoft.com";
 const RELAY_PATH: &str = "trap";
 
+/// Teams' reaction pictures' host and path ([`Service::Emoticons`]).
+pub const EMOTICONS_HOST: &str = "statics.teams.cdn.office.net";
+const EMOTICONS_PATH: &str = "evergreen-assets/personal-expressions/v2/assets/emoticons";
+
 /// The Entra audience of the bearer token `service` takes, if it takes one.
 fn audience(service: Service) -> Option<&'static str> {
     match service {
@@ -1140,7 +1147,7 @@ fn audience(service: Service) -> Option<&'static str> {
         Service::Graph => Some(GRAPH_AUDIENCE),
         Service::Csa => Some(CSA_AUDIENCE),
         Service::Presence => Some(PRESENCE_AUDIENCE),
-        Service::Trouter | Service::Calling => None,
+        Service::Trouter | Service::Calling | Service::Emoticons => None,
     }
 }
 
@@ -1156,7 +1163,8 @@ fn plain_headers(service: Service, body: bool) -> Vec<(String, String)> {
         | Service::Csa
         | Service::Presence
         | Service::Calling
-        | Service::Relay => "application/json",
+        | Service::Relay
+        | Service::Emoticons => "application/json",
     };
     let mut headers = vec![(ACCEPT.as_str().to_owned(), "application/json".to_owned())];
     if body {
@@ -1191,7 +1199,7 @@ fn service_headers(service: Service) -> &'static [(&'static str, &'static str)] 
         ],
         // the Entra form of the web client's read (`docs/protocol/auth.md`)
         Service::Relay => &[("api-version", "2"), ("x-ms-migration", "True")],
-        Service::Trouter | Service::Graph | Service::Csa | Service::Calling => &[],
+        Service::Trouter | Service::Graph | Service::Csa | Service::Calling | Service::Emoticons => &[],
     }
 }
 
@@ -1220,7 +1228,8 @@ fn on_base(service: Service, base: &Url, url: &Url, endpoint: &Endpoint) -> bool
         | Service::Csa
         | Service::Presence
         | Service::Relay
-        | Service::Calling => true,
+        | Service::Calling
+        | Service::Emoticons => true,
     };
     plain
         && url.host_str() == base.host_str()

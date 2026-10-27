@@ -1,4 +1,4 @@
-//! Teams and channels (M2 Task 16) on GPUI's test context, over the fake engine (`common`): the Teams rail lists the
+//! Teams and channels (M2 Task 16) on GPUI's test context, over the fake engine (`common`): the sidebar lists the
 //! teams with their channels from the store, "Loading teams…" before a read settled them, again when the engine tells
 //! the teams changed; a channel clicked opens read-only, synced first, its posts each with its replies under it,
 //! replies to a post the store doesn't hold under "Replies to an earlier post", no composer and no write asked; the
@@ -18,7 +18,8 @@ use teams_core::{EngineError, Event, NameFrom, Person, READING_TEAMS};
 use teams_store::{Message, Team, TeamChannel};
 use teams_ui::channel_view::{EARLIER_POST, READ_ONLY, arrange_threads};
 use teams_ui::settings::{Settings, SettingsModel};
-use teams_ui::shell::{Main, RailItem, Shell, ShellParts};
+use teams_ui::shell::{Main, Shell, ShellParts};
+use teams_ui::sidebar::Section;
 use teams_ui::teams_list::{LOADING, UNREADABLE};
 use teams_ui::{ChannelView, TeamsList, ViewTrace};
 
@@ -27,6 +28,7 @@ const CHANNEL: &str = "19:channel0002@thread.tacv2";
 const ARCHIVED: &str = "19:channel0004@thread.tacv2";
 const POST: &str = "1760000300000";
 const LAB_C: &str = "8:orgid:00000000-0000-4000-8000-00000000000c";
+const LAB_CHAT: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000c@unq.gbl.spaces";
 
 fn teams() -> Vec<Team> {
     let channel = |id: &str, name: &str, general: bool| TeamChannel {
@@ -134,12 +136,11 @@ fn teams_of(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<TeamsLi
 }
 
 #[test]
-fn the_teams_rail_lists_the_teams_with_their_channels_from_the_store() {
+fn the_sidebar_lists_the_teams_with_their_channels_from_the_store() {
     let rig = rig();
     let written = Written::default();
     let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::new(written.clone())));
-    click(cx, "rail-teams");
-    assert_eq!(cx.update(|_, cx| shell.read(cx).rail()), RailItem::Teams);
+    assert!(bounds(cx, "section-teams").is_some());
     let list = teams_of(&shell, cx);
     assert_eq!(cx.update(|_, cx| list.read(cx).teams().map(<[Team]>::len)), None);
     assert!(bounds(cx, "teams-note").is_some(), "{LOADING}");
@@ -170,11 +171,87 @@ fn the_teams_rail_lists_the_teams_with_their_channels_from_the_store() {
 }
 
 #[test]
+fn a_section_or_a_team_folds_and_unfolds_by_its_header() {
+    let rig = rig();
+    *rig.core.teams.lock().unwrap() = Some(teams());
+    let written = Written::default();
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::new(written.clone())));
+    let sidebar = cx.update(|_, cx| shell.read(cx).sidebar().clone());
+    assert!(bounds(cx, "channel-row-2").is_some());
+
+    // the first team folded: its channels go, the next team's keep their numbers
+    click(cx, "team-0");
+    assert!(!cx.update(|_, cx| sidebar.read(cx).team_open(TEAM)));
+    for selector in ["channel-row-0", "channel-row-1"] {
+        assert!(bounds(cx, selector).is_none(), "{selector} is folded");
+    }
+    assert!(bounds(cx, "channel-row-2").is_some());
+    click(cx, "team-0");
+    assert!(bounds(cx, "channel-row-1").is_some());
+
+    // the section folded: no team shows; unfolded, the teams are asked for again
+    let asked = rig.core.asked().iter().filter(|asked| **asked == "teams").count();
+    click(cx, "section-teams");
+    assert!(!cx.update(|_, cx| sidebar.read(cx).is_open(Section::Teams)));
+    for selector in ["team-0", "channel-row-0", "teams-note"] {
+        assert!(bounds(cx, selector).is_none(), "{selector} is folded");
+    }
+    click(cx, "section-teams");
+    assert!(bounds(cx, "team-0").is_some());
+    assert_eq!(
+        rig.core.asked().iter().filter(|asked| **asked == "teams").count(),
+        asked + 1
+    );
+    let folds: Vec<(String, String)> = written
+        .lines()
+        .into_iter()
+        .filter(|line| line["view"] == "sidebar" || line["view"] == "team")
+        .map(|line| {
+            (
+                line["view"].as_str().unwrap().to_owned(),
+                line["change"].as_str().unwrap().to_owned(),
+            )
+        })
+        .collect();
+    let expected = [
+        ("team", "folded"),
+        ("team", "unfolded"),
+        ("sidebar", "folded"),
+        ("sidebar", "unfolded"),
+    ]
+    .map(|(view, change)| (view.to_owned(), change.to_owned()));
+    assert_eq!(folds, expected);
+}
+
+#[test]
+fn a_channel_opened_takes_the_highlight_from_the_chat_and_back() {
+    let rig = rig();
+    *rig.core.teams.lock().unwrap() = Some(teams());
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    let teams = teams_of(&shell, cx);
+    let list = cx.update(|_, cx| shell.read(cx).list().clone());
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(LAB_CHAT.to_owned(), window, cx)));
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|_, cx| list.read(cx).selected().map(str::to_owned)),
+        Some(LAB_CHAT.to_owned())
+    );
+    click(cx, "channel-row-1");
+    assert_eq!(cx.update(|_, cx| list.read(cx).selected().map(str::to_owned)), None);
+    assert_eq!(
+        cx.update(|_, cx| teams.read(cx).selected().map(str::to_owned)),
+        Some(CHANNEL.to_owned())
+    );
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(LAB_CHAT.to_owned(), window, cx)));
+    cx.run_until_parked();
+    assert_eq!(cx.update(|_, cx| teams.read(cx).selected().map(str::to_owned)), None);
+}
+
+#[test]
 fn a_team_list_with_none_says_so() {
     let rig = rig();
     *rig.core.teams.lock().unwrap() = Some(Vec::new());
     let (_, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
-    click(cx, "rail-teams");
     assert!(bounds(cx, "teams-note").is_some());
     assert!(bounds(cx, "channel-row-0").is_none());
 }
@@ -188,7 +265,6 @@ fn a_channel_clicked_opens_read_only_with_its_posts_and_their_replies() {
     rig.core.roots.lock().unwrap().insert(CHANNEL.to_owned(), roots);
     let written = Written::default();
     let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::new(written.clone())));
-    click(cx, "rail-teams");
     click(cx, "channel-row-1");
     assert_eq!(
         cx.update(|_, cx| shell.read(cx).main().clone()),
@@ -309,7 +385,6 @@ fn a_post_or_reply_with_a_file_or_card_no_capture_showed_says_so_never_guessed()
     rig.core.roots.lock().unwrap().insert(CHANNEL.to_owned(), roots);
     let written = Written::default();
     let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::new(written.clone())));
-    click(cx, "rail-teams");
     click(cx, "channel-row-1");
     let view: Entity<ChannelView> = cx.update(|_, cx| shell.read(cx).channel().cloned().expect("a channel view"));
     let unshown: Vec<bool> = cx.update(|_, cx| {
@@ -359,7 +434,6 @@ fn a_channel_shown_reads_again_when_it_changes() {
     let rig = rig();
     *rig.core.teams.lock().unwrap() = Some(teams());
     let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
-    click(cx, "rail-teams");
     click(cx, "channel-row-1");
     let view: Entity<ChannelView> = cx.update(|_, cx| shell.read(cx).channel().cloned().expect("a channel view"));
     assert!(cx.update(|_, cx| view.read(cx).threads().is_empty()));
@@ -371,9 +445,6 @@ fn a_channel_shown_reads_again_when_it_changes() {
     });
     cx.run_until_parked();
     assert_eq!(cx.update(|_, cx| view.read(cx).threads().len()), 3);
-
-    click(cx, "rail-chats");
-    assert_eq!(cx.update(|_, cx| shell.read(cx).rail()), RailItem::Chats);
 }
 
 #[test]
@@ -381,7 +452,6 @@ fn a_channel_opened_again_is_synced_again() {
     let rig = rig();
     *rig.core.teams.lock().unwrap() = Some(teams());
     let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
-    click(cx, "rail-teams");
     click(cx, "channel-row-1");
     let view: Entity<ChannelView> = cx.update(|_, cx| shell.read(cx).channel().cloned().expect("a channel view"));
     // its first sync is over (and found nothing): opened again, the same view asks again
@@ -399,7 +469,6 @@ fn a_channel_shows_a_profile_read_after_it_was_shown() {
     rig.core.messages.lock().unwrap().insert(CHANNEL.to_owned(), messages);
     rig.core.roots.lock().unwrap().insert(CHANNEL.to_owned(), roots);
     let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
-    click(cx, "rail-teams");
     click(cx, "channel-row-1");
     let view: Entity<ChannelView> = cx.update(|_, cx| shell.read(cx).channel().cloned().expect("a channel view"));
     let post_sender = |cx: &mut VisualTestContext| -> String {
@@ -429,7 +498,6 @@ fn a_channel_shows_a_profile_read_after_it_was_shown() {
 fn a_failed_teams_read_says_the_teams_can_t_be_read_until_one_is_read() {
     let rig = rig();
     let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
-    click(cx, "rail-teams");
     let list = teams_of(&shell, cx);
     assert!(!cx.update(|_, cx| list.read(cx).unreadable(cx)), "{LOADING}");
     // a read of another kind failing says nothing of the teams
@@ -524,14 +592,14 @@ fn once_the_engine_stopped_the_teams_shown_stay() {
     let rig = rig();
     *rig.core.teams.lock().unwrap() = Some(teams());
     let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
-    click(cx, "rail-teams");
     let shutdown = cx.update(|_, cx| rig.bridge.update(cx, teams_ui::Bridge::shutdown));
     shutdown.detach();
     cx.run_until_parked();
     assert_eq!(rig.shutdowns(), 1);
     *rig.core.stopped.lock().unwrap() = true;
-    click(cx, "rail-chats");
-    click(cx, "rail-teams");
+    // folded and unfolded: asked for again
+    click(cx, "section-teams");
+    click(cx, "section-teams");
     let list = teams_of(&shell, cx);
     assert_eq!(
         cx.update(|_, cx| list.read(cx).teams().map(<[Team]>::len)),

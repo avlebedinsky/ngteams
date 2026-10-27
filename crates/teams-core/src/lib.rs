@@ -19,6 +19,7 @@
 //! - [`presence`]: others' presence, read from UPS by polling for the people the views asked about; never stored.
 //! - [`search`]: local search: each message's plain text handed to the store's index as it is stored, and the
 //!   messages stored before indexed by a backfill in batches.
+//! - [`emoticons`]: reactions' animations, read from Teams' CDN when a view asks for one and kept for the run.
 //! - [`teams`]: the account's teams and their channels, read from CSA in the background and kept in the store;
 //!   read-only, as a channel's posts are.
 //! - [`calling`]: the account's calls (M3 Task 14): the call session joining the signaling machine (`teams-call`), the
@@ -32,6 +33,7 @@
 
 pub mod account;
 pub mod calling;
+pub mod emoticons;
 pub mod engine;
 pub mod lab;
 pub mod outbox;
@@ -46,6 +48,7 @@ pub use calling::{
     CallAction, CallActionError, CallMedia, CallParticipant, CallParts, CallStatus, CallVideo, CallView, GROUP_SLOTS,
     IncomingCall, Relay, VideoOutput,
 };
+pub use emoticons::Strip;
 pub use engine::{
     Action, Answer, Cause, EngineError, EngineHandle, EngineOptions, EngineRequests, Event, MessageChange, OwnStatus,
     Parts, Push, Reply, Source,

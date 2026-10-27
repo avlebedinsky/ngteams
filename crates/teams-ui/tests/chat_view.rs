@@ -581,6 +581,19 @@ fn scrolled_up_the_pill_shows_and_takes_the_list_back_to_the_newest() {
 }
 
 #[test]
+fn the_wheel_scrolls_an_active_chat_that_sends_read_receipts() {
+    // the list's scroll handler runs while the list holds its own state: a receipt's check of the list waits for it
+    let rig = rig_with(many(100));
+    let (view, cx) = chat_window(&rig, Arc::new(ViewTrace::off()));
+    cx.update(|window, _| window.activate_window());
+    draw(cx);
+    scroll_up(cx, 1_000.0);
+    assert!(cx.update(|_, cx| view.read(cx).scrolled_up()));
+    scroll_up(cx, -100_000.0);
+    assert!(!cx.update(|_, cx| view.read(cx).scrolled_up()), "back at the newest");
+}
+
+#[test]
 fn older_pages_come_from_the_store_then_the_service_until_the_beginning() {
     // 30 stored, 40 more at the service in two pages
     let all = many(70);

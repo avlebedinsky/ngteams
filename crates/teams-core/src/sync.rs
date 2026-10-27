@@ -757,7 +757,7 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         let row = Conversation {
             id: id.to_owned(),
             kind: store_kind(&thread.kind()),
-            topic: None,
+            topic: thread.topic().map(str::to_owned),
             version: 0,
             last_activity: None,
         };
@@ -867,8 +867,7 @@ fn conversation_row(listed: &chat::Conversation, version: i64) -> Conversation {
     Conversation {
         id: listed.id.clone(),
         kind: store_kind(&listed.kind()),
-        // a chat's topic was never captured
-        topic: None,
+        topic: listed.topic().map(str::to_owned),
         version,
         last_activity: listed.last_message().and_then(|message| message.arrival_time_ms()),
     }

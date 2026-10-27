@@ -121,15 +121,14 @@ captures and tokens, agents and protocol notes hold for both builds.
   PipeWire is the desktop's, fixed when it is built. The microphone opens only after the user's start, join or answer
   passed the fence; the camera is off at every start, join and answer, and only the user turns it on, through the
   desktop portal.
-- **Agents install and start the personal build only when the user asks, and never touch its data.** Agents may
+- **Agents install and start the personal build only when the user asks.** Agents may
   compile the `teams` crate in the gate and test it on `teams-mock`; any other `teams` or `teams-signin-personal`
   binary they leave is a `test-support` one, which refuses to run. Only on the user's explicit request in the
   conversation, each time, an agent runs `scripts/install-personal.sh` (the only way an agent builds a runnable
   personal binary or sets the install marker; never a plain `cargo build -p teams`, which the root's `default-members`
   leave out) and starts the installed `teams` detached on the user's desktop, its output discarded, then leaves it
-  alone: it never drives its window, signs it in, or tests or captures with it. Agents never read or write
-  `~/.local/share/teams/` (its diagnostic log included), `~/.config/teams/` or the `teams-personal` items. They never
-  receive the user's tokens, chat ids or logs; the user reports a problem by its reason.
+  alone: it never drives its window, signs it in, or tests or captures with it. Agents never read or write the
+  `teams-personal` items and never receive the user's tokens.
 - **Protocol notes are written in our own words** in `docs/protocol/`. Microsoft JS is never copied into the repo.
 
 ## Patterns
@@ -436,7 +435,7 @@ What the code does and why. A change that undoes one of these needs a new reason
   written, Trouter's `user.authenticate` and the `connectparams` signature (`sig`) of `trouter.connected`, a
   credential's `name=` value anywhere on a line in any escaped form: a SAS link's `sig` in a message's HTML as
   `&amp;sig=`, `%26sig%3D`, `\u0026sig=`), never left to call sites. A lab run's debug log is lab data like a capture
-  (never in the repo, never sanitized into it); the personal build's is the user's data, which agents never read.
+  (never in the repo, never sanitized into it); the personal build's is the user's data, never in the repo either.
 - **The store** (`teams-store`): one SQLite file per account (`0600`, its dir `0700`), WAL, migrations by
   `user_version`, each in an `IMMEDIATE` transaction; a released migration is never edited, a new one is added. A new
   file is made and switched to WAL under `<store>-runs/open.lock`: SQLite answers two connections switching at once
@@ -640,7 +639,11 @@ Every change passes all four:
 
 ```sh
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo clippy -p <crate> [-p <crate> ...] --all-targets --all-features -- -D warnings   # only the crates the change touched
 scripts/lint-report.sh
-cargo test --workspace
+cargo test -p <crate> [-p <crate> ...]   # only the crates the change touched
 ```
+
+Clippy and the tests run only for the crates the change touched (a crate is touched when a file under its directory
+changed), not the whole workspace. A change to any `tests/fixtures/` or `docs/` also runs `cargo test -p
+fixture-guard`. `cargo clippy --workspace` and `cargo test --workspace` run only when asked.

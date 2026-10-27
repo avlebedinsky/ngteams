@@ -8,20 +8,23 @@
 //! - [`models`]: GPUI entities the views observe: the account's [`Status`](models::Status) (the push channel, the
 //!   engine, signed in or out) and what changed in the [`Chats`](models::Chats). Everything shown comes from the store,
 //!   through a query; the models say when to ask again.
-//! - [`shell`]: the window's three panes: the rail (Chat, Teams, Settings), the list pane, resizable, and the
-//!   conversation pane; Ctrl+K opens the [`switcher`] (the chat switcher, fuzzy over the chats' names).
+//! - [`shell`]: the window's three panes: the rail (Chat, Settings), the list pane, resizable, and the conversation
+//!   pane; Ctrl+K opens the [`switcher`] (the chat switcher, fuzzy over the chats' names). The list pane is the
+//!   [`sidebar`]: the chats and the teams with their channels, in sections of one list, each folded by its header.
 //! - [`chat_list`]: the chats by last activity, from the store, kept up to date by the models' changes.
 //! - [`people`]: people as the views show them, a name and a picture from the engine (M2 Task 12); [`presence`] their
 //!   presence, a dot in the chat list, the chat's header and the mention picker (M2 Task 17).
 //! - [`chat_view`]: a chat's messages, the newest at the bottom, paged from the store (and the service's older
 //!   history), grouped by sender, with day separators, the "New messages" divider, typing and the messages' actions;
 //!   [`rich_text`] is our own renderer of a message's sanitized rich text (never an HTML or markdown view); the
-//!   account's writes show there as they go out ([`sending`]: each outbox row's state, "send again").
+//!   account's writes show there as they go out ([`sending`]: each outbox row's state, "send again"); reactions are
+//!   drawn from [`reactions`] (every reaction Teams offers, in Fluent Emoji's pictures) and picked in
+//!   [`reaction_picker`].
 //! - [`compose`]: the compose box under a chat's messages: text with line breaks, links and mentions (by MRI, from the
 //!   chat's members) into a message, Enter sends, replies and edits, typing; every write through the engine.
 //! - [`search`]: local search (Ctrl+Shift+F, and the switcher's messages) over the messages the store holds, never the
 //!   service's search; a hit opens its chat at the message.
-//! - [`teams_list`]: the Teams rail's list, the account's teams and their channels (M2 Task 16); [`channel_view`] a
+//! - [`teams_list`]: the sidebar's teams section, the account's teams and their channels (M2 Task 16); [`channel_view`] a
 //!   channel's posts with their reply chains, read-only: no composer, and no write a channel could take.
 //! - [`own_presence`]: the account's own presence as the app reports it (M2 Task 20): `teams-core`'s policy driven by
 //!   the window's use, the push channel's registration, the settings' manual status (the shell's account menu) and idle
@@ -38,6 +41,8 @@
 //!   personal build), and the user's asks; [`call_view`] the incoming call's banner and the in-call bar,
 //!   [`call_alert`] the incoming call's ringtone ([`ringtone`], on the default output) and its notification with
 //!   Answer and Decline.
+//! - [`account_prompt`]: the personal build's first sign-in screen, a window of its own asking for the work account
+//!   before anything is signed in.
 //! - [`view`]: the window's root view; [`window`] opens it inside the kit's root, which applies the theme to the
 //!   window (its font size as the rem size, its font family and colours) and hosts the kit's dialogs and tooltips.
 //! - [`theme`]: the UI kit's (`gpui-component`) theme in Teams-like colours and compact sizes, light and dark
@@ -49,6 +54,7 @@
 //!
 //! M2 Tasks 6–17 and 20 (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
 
+pub mod account_prompt;
 pub mod bridge;
 pub mod bus;
 pub mod call_alert;
@@ -65,6 +71,8 @@ pub mod notify;
 pub mod own_presence;
 pub mod people;
 pub mod presence;
+pub mod reaction_picker;
+pub mod reactions;
 pub mod rich_text;
 pub mod ringtone;
 pub mod search;
@@ -72,6 +80,7 @@ pub mod sending;
 pub mod settings;
 pub mod settings_view;
 pub mod shell;
+pub mod sidebar;
 pub mod switcher;
 pub mod teams_list;
 pub mod theme;
@@ -81,6 +90,7 @@ pub mod video;
 pub mod view;
 pub mod window;
 
+pub use account_prompt::{AccountPrompt, AccountPromptEvent};
 pub use bridge::{Bridge, Core, EventSource, StoppedCore};
 pub use call_alert::{CallAlert, CallAlertEvent};
 pub use call_view::CallBar;

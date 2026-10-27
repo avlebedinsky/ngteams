@@ -1,4 +1,4 @@
-//! The window's root view: the [`Shell`] (the rail, the chat list, the conversation) once it is given one, the
+//! The window's root view: the [`Shell`] (the rail, the sidebar, the conversation) once it is given one, the
 //! account's status alone before that; signed out, only that and what to do. It traces the window's opening, each
 //! status it shows (connecting, connected, reconnecting, offline, signed out) and each catch-up that ended
 //! (`status caught-up`: a live test waits for the first one before it reads what a chat shows).

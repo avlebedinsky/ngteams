@@ -18,7 +18,8 @@
 //!   the calls), the tray, and the sign-out: a session that can't renew its tokens shows "signed out", stops the
 //!   engine (nothing more is sent) and opens the sign-in window again; a sign-in that goes through starts the app
 //!   afresh.
-//! - [`cli`]: `teams [--account <UPN>]`, `teams --forget` ([`forget`]: refused while the account's engine runs).
+//! - [`cli`]: `teams [--account <UPN>]` (without it, a window asks for the account before the first sign-in),
+//!   `teams --forget` ([`forget`]: refused while the account's engine runs).
 //!
 //! No broker and no sandbox: it is the user's own app. It never opens the lab's fence, data dir or keyring items.
 
