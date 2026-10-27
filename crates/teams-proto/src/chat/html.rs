@@ -191,6 +191,9 @@ pub struct ThreadActivity {
     pub roster_version: Field<u64>,
     /// `eventtime` (ms): as `roster_version`.
     pub event_time: Field<u64>,
+    /// `sharehistorytime` (ms; `0` for all of it): how far back the chat's history was shared with those added; as
+    /// `roster_version`, [`Field::Absent`] when the event names none.
+    pub share_history_time: Field<u64>,
 }
 
 /// Parses a message's HTML content (see the module docs).
@@ -228,7 +231,7 @@ fn drop_block_gaps(nodes: &mut Vec<Node>) {
 }
 
 /// `content` up to [`MAX_CONTENT`] bytes (cut on a character boundary), and whether it was cut.
-fn bounded(content: &str) -> (&str, bool) {
+pub(crate) fn bounded(content: &str) -> (&str, bool) {
     if content.len() <= MAX_CONTENT {
         return (content, false);
     }
@@ -269,6 +272,7 @@ pub fn thread_activity(content: &str) -> Option<ThreadActivity> {
             "target" => activity.targets.push(text()),
             "rosterversion" => activity.roster_version = digits(text()),
             "eventtime" => activity.event_time = digits(text()),
+            "sharehistorytime" => activity.share_history_time = digits(text()),
             _ => {}
         }
     }

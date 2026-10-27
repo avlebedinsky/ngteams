@@ -228,6 +228,113 @@ fn the_account_s_own_a_replay_from_before_the_start_one_already_stored_history_a
     assert!(may_notify(LAB_A, AB, &message(AB, "1", LAB_B, "x", 1), Source::CatchUp));
 }
 
+/// A meeting's chat, for the system messages Teams never notifies for.
+const MEETING: &str = "19:meeting_bWFkZS11cA@thread.v2";
+
+/// `kind` with `content` from `sender` in the meeting's chat.
+fn system(id: &str, sender: &str, kind: &str, content: &str, at: i64) -> Message {
+    let mut event = message(MEETING, id, sender, content, at);
+    event.message_type = kind.to_owned();
+    event
+}
+
+/// A call's start and end, a recording started and ready, a transcript, the thread's events (one of a kind no capture
+/// showed) and a text the thread itself sent, in the meeting's chat.
+fn system_arrivals() -> Vec<Message> {
+    let recording = |status: &str, code: &str| {
+        format!(
+            "<URIObject type=\"Video.2/CallRecording.1\"><RecordingStatus status=\"{status}\" code=\"{code}\" />\
+             <Title>Weekly sync</Title><a href=\"https://example.test/play\">Play</a>\
+             <RecordingContent contentTypes=\"Recording+Transcript\" duration=\"0:16:50\"></RecordingContent></URIObject>"
+        )
+    };
+    let ended = format!(
+        "<ended/><partlist alt=\"\" count=\"1\"><part identity=\"{LAB_B}\"><name>{LAB_B}</name>\
+         <duration>1930</duration></part></partlist>"
+    );
+    let joined = format!(r#"{{"eventtime":1,"initiator":"{LAB_B}","members":[{{"id":"{LAB_C}","friendlyname":""}}]}}"#);
+    vec![
+        system("1", LAB_B, "Event/Call", "<partlist alt =\"\"></partlist>", 7_000),
+        system(
+            "2",
+            LAB_B,
+            "RichText/Media_CallRecording",
+            &recording("Initial", "0"),
+            7_001,
+        ),
+        system("3", LAB_B, "Event/Call", &ended, 7_002),
+        system(
+            "4",
+            LAB_B,
+            "RichText/Media_CallRecording",
+            &recording("Success", "200"),
+            7_003,
+        ),
+        system(
+            "5",
+            LAB_B,
+            "RichText/Media_CallTranscript",
+            r#"{"callId":"c","isDeleted":false}"#,
+            7_004,
+        ),
+        system("6", MEETING, "ThreadActivity/MemberJoined", &joined, 7_005),
+        system(
+            "7",
+            MEETING,
+            "ThreadActivity/TopicUpdate",
+            "<topicupdate><value>x</value></topicupdate>",
+            7_006,
+        ),
+        system("8", MEETING, "ThreadActivity/SomethingNew", "<somethingnew/>", 7_007),
+        // a message of a type Teams notifies, sent by the thread itself: never named by its id
+        system("9", MEETING, "RichText/Html", "<p>from the thread</p>", 7_008),
+    ]
+}
+
+#[test]
+fn a_call_a_recording_a_transcript_and_a_thread_s_event_never_notify_as_in_teams() {
+    let n = Notifying::start(Settings::default());
+    let arrivals = system_arrivals();
+    for event in &arrivals {
+        assert!(
+            !may_notify(LAB_A, MEETING, event, Source::Delivery),
+            "{} notifies",
+            event.message_type
+        );
+    }
+    for event in arrivals {
+        n.arrive(event, Source::Delivery);
+    }
+    n.settle();
+    assert_eq!(n.server.asked(), []);
+    // what Teams notifies for: text and a card, from a person
+    for kind in ["Text", "RichText/Html", "RichText/Media_Card"] {
+        assert!(
+            may_notify(
+                LAB_A,
+                MEETING,
+                &system("10", LAB_B, kind, "<p>hi</p>", 7_009),
+                Source::Delivery
+            ),
+            "{kind} doesn't notify"
+        );
+    }
+    n.arrive(
+        system("11", LAB_B, "RichText/Html", "<p>notes after the call</p>", 7_010),
+        Source::Delivery,
+    );
+    n.settle();
+    let shown = n.server.shown();
+    assert_eq!(shown.len(), 1, "{shown:?}");
+    assert_eq!(shown[0].body, "notes after the call");
+    assert!(
+        shown
+            .iter()
+            .all(|notice| !notice.body.contains("Play") && !notice.summary.contains("19:")),
+        "{shown:?}"
+    );
+}
+
 #[test]
 fn a_mention_is_marked_and_mentions_only_shows_only_mentions() {
     let n = Notifying::start(Settings {

@@ -180,6 +180,77 @@ every profile lookup; the account's display name since the lookups of lab accoun
   of a type the chat view doesn't show gets the same button under its placeholder. The read-only channel view shows
   the line without the button: no channel deep link has been captured.
 
+## System messages
+
+Seen in the lab's call runs (`ab-call`, `abc-call`: `Event/Call`) and in the personal build's stores, read locally
+(the rest); no value from either is copied here. Which words the web client draws for each was read from its bundle
+(its message renderer and its chat list's preview), and the native client follows it (`teams_proto::chat::chat_event`
+reads them, `teams_ui::system_message` words them). A kind or a shape not listed here keeps the placeholder.
+
+- **Who sends them.** A thread's own events (`ThreadActivity/…`) come `from` the thread's contact URL, so the sender
+  read from `from` is the thread's id (`19:…@thread.v2`, a meeting chat's `19:meeting_…@thread.v2`). That is no
+  person: the chat view draws them centred with no author row, and never names the thread as a sender. A call's events
+  and a recording's come from a person (the call's caller, the meeting's organizer), and are drawn the same way.
+- **A meeting chat** is told by its id, as the web client tells it: the id contains `meeting_`.
+- **`Event/Call`**: XML. A start is a `<partlist alt ="">` (empty) followed, in later shapes, by `<meetingDetails>`
+  (organizer, meeting type, scheduled times), `<callEventType>callStarted</callEventType>`, the conversation's start
+  time and URL and the call id; the oldest shape is the part list alone. An end begins `<ended/>`, then
+  `<partlist alt="" count="n">` with a `<part identity>` per participant (`<name>` the MRI, `<displayName>`,
+  `<duration>` in whole seconds), then the same details with `callEnded`. A group chat's meeting (its "huddle")
+  carries `<conversationType>"huddleGroupCall"</conversationType>`, and its start names the starter in a
+  `<partlist type="started">`. The web client takes the length from the last participant's `<duration>` and draws
+  nothing for an end without one (an end with `count="0"` was seen). In a meeting chat it shows "Meeting started" and
+  "Meeting ended: <length>" (the native client: as a card titled by the chat's name, with the time); in a 1:1 or
+  group chat "Call started", "Call ended <length>", or "Call missed" for someone else's call with fewer than two
+  participants; a huddle "<name> started a meeting." and "Meeting ended <length>". A length reads `1h 2m 3s`, its
+  zero parts left out.
+- **`RichText/Media_CallRecording`**: a `<URIObject type="Video.2/CallRecording.1">` with
+  `<RecordingStatus status code>`, `<Title>` (the meeting's), `<a href>` (the player's link, empty until ready),
+  `<OriginalName v>` (the file's name), `<RecordingInitiatorId value isAutoRecording>`, and
+  `<RecordingContent contentTypes duration>` (`Recording`, `Transcript` or `Recording+Transcript`; none in a
+  channel's; the length a .NET time span, `h:mm:ss.fffffff`). Three states were seen, each a message of its own:
+  `Initial`/`0` (started: "<name> started recording." or "… started recording and transcription"),
+  `ChunkFinished`/`202` (stopped: "Recording stopped. Saving recording…", "Recording and transcription stopped") and
+  `Success`/`200` (ready: the recording's card, its name and length, played in Teams on the web). The `Transcript`
+  half of a recording is drawn as nothing, as the web client does. Another state or contents is no event.
+- **`RichText/Media_CallTranscript`**: JSON with every quote escaped (`{\"callId\":…}`): `callId`, `scopeId`,
+  `iCalUid`, `meetingOrganizerId`, `isDeleted` (always `false` here), `isExportedToOdsp`. Drawn as the transcript's
+  card ("Transcript is available"), read in Teams on the web.
+- **`ThreadActivity/MemberJoined` and `MemberLeft`**: JSON `{eventtime, initiator, members: [{id, friendlyname,
+  meetingMemberType?}]}`; `meetingMemberType` was only ever `temp` (joined for the meeting). A meeting chat: "<names>
+  was/were invited to the meeting.", "<names> left the chat."; a temporary member "has temporarily joined the chat.",
+  "no longer has access to the chat."; another chat "joined the conversation.". Names: one, "A and B", "A and n
+  others"; a member's `friendlyname` names them when no profile does (a visitor's).
+- **`ThreadActivity/TopicUpdate`** (`<topicupdate>` with `initiator` and `value`): "<name> named the meeting <value>."
+  in a meeting chat, "<name> changed the group name to <value>." elsewhere, "… removed the group name …" without one.
+- **`ThreadActivity/DeleteMember`** (`<deletemember>` with `initiator` and `target`s): the initiator alone "left the
+  chat.", else "<name> removed <names> from the chat.", or "<names> was/were removed from the chat." when the thread
+  removed them.
+- **`ThreadActivity/AddMember`** ([above](#a-message-as-read)), also with `<sharehistorytime>` per target (`0`: all of
+  it): "<name> added <names> to the chat" and "… and shared all chat history." for `0` (or "from the past n days"
+  for a share time at least a day before a known event time; no clause when the event doesn't say it plainly); an
+  initiator adding only themself "joined the conversation."; a lone bot added, nothing; one naming no initiator keeps
+  the placeholder.
+- **`ThreadActivity/MeetingPolicyUpdated`** (`value` `ChatEnabled` seen): "Chat has been turned on for this meeting."
+  and the web client's other values' lines.
+- **Seen, not drawn**: `ThreadActivity/RoleUpdate`, `PinnedItemsUpdate`, `FileAdd`, `ModalityUpdate`, the app and
+  channel events of a team (`AddCustomApp`, `SpaceThreadChannelAdded`, `TopicTopicUpdated`, …), `RichText/Media_Card`
+  (an adaptive card), `RichText/Media_CallLogRecording` and `Media_CallLogTranscript` (the account's call log stream).
+  They keep the placeholder (a thread's centred, without an author).
+- **Notifications**: the web client's chat notifications take only some types (its toast filter, read from the
+  bundle): `Text`, `RichText/Html`, `RichText/Media_Card`, `RichText/Media_CallRecording` and
+  `ThreadActivity/AddMember` (plus the Skype interop types). A recording is notified only when its upload failed (a
+  state with a code other than `0` or `202` that isn't a successful export; none was seen), and an `AddMember` only
+  for a pending chat request from outside the organization (otherwise its sender, the thread, has no profile and it is
+  dropped). A call's start or end, a transcript and every other thread event are never notified. The native client
+  notifies a text message and a card only, and never one the thread itself sent.
+- **The chat list's preview** of a meeting chat says what the web client's list says: "Meeting started", "Meeting
+  ended: <length>", "Recording has started", "Recording has stopped", "Recording is ready", "Transcript is
+  available"; the transcript's half of a recording, a 1:1 or group call and a thread's events leave the line to the
+  message before them, and so does a call's media message (`RichText/Media_Call…`) the native client doesn't read (a
+  deleted transcript, a recording in another state, the call log's): its content is a record with ids in it, never
+  shown as text, and never indexed for search or found by it.
+
 ## A message as sent (ab-chat-full, a)
 
 `POST v1/users/ME/conversations/<chat>/messages` as in fence-targets.md: the message's fields with `id` `-1`,

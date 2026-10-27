@@ -33,6 +33,7 @@ impl Glyph {
     pub const PENCIL: Self = Self(include_bytes!("../assets/icons/pencil.svg"));
     pub const PHONE: Self = Self(include_bytes!("../assets/icons/phone.svg"));
     pub const PHONE_OFF: Self = Self(include_bytes!("../assets/icons/phone-off.svg"));
+    pub const PLAY: Self = Self(include_bytes!("../assets/icons/circle-play.svg"));
     pub const PLUS: Self = Self(include_bytes!("../assets/icons/plus.svg"));
     pub const QUOTE: Self = Self(include_bytes!("../assets/icons/quote.svg"));
     pub const REACT: Self = Self(include_bytes!("../assets/icons/smile-plus.svg"));
@@ -41,6 +42,7 @@ impl Glyph {
     pub const RESET: Self = Self(include_bytes!("../assets/icons/rotate-ccw.svg"));
     pub const SEND: Self = Self(include_bytes!("../assets/icons/send-horizontal.svg"));
     pub const SHIELD: Self = Self(include_bytes!("../assets/icons/shield.svg"));
+    pub const TRANSCRIPT: Self = Self(include_bytes!("../assets/icons/file-text.svg"));
     pub const TRASH: Self = Self(include_bytes!("../assets/icons/trash.svg"));
     pub const USER: Self = Self(include_bytes!("../assets/icons/user-round.svg"));
     pub const VIDEO: Self = Self(include_bytes!("../assets/icons/video.svg"));

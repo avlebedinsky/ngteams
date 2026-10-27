@@ -102,5 +102,12 @@ harness = false
 name = "notes_window"
 harness = false
 
+[[test]]
+# a meeting's chat with every kind of system message Teams shows in one, drawn in the UI sandbox over the fake engine,
+# screenshotted in each theme under `target/ui-shots/meeting-*.png`: its own `main` (GPUI runs on the main thread),
+# which runs itself again inside the sandbox
+name = "meeting_window"
+harness = false
+
 [lints]
 workspace = true

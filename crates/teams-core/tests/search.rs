@@ -62,6 +62,20 @@ fn a_message_is_found_by_the_text_its_reader_sees() {
     );
     assert_eq!(search_text(&event), "");
     assert_eq!(search_text(&message(CHAT, "5", "Control/Typing", "")), "");
+    // a call's media message is a record, ids in it: never indexed as text
+    for kind in [
+        "RichText/Media_CallRecording",
+        "RichText/Media_CallTranscript",
+        "RichText/Media_CallLogRecording",
+    ] {
+        let record = message(
+            CHAT,
+            "6",
+            kind,
+            r#"<URIObject><Title>Weekly</Title><a href="">Play</a></URIObject>"#,
+        );
+        assert_eq!(search_text(&record), "", "{kind}");
+    }
 }
 
 fn store_path(dir: &tempfile::TempDir) -> PathBuf {

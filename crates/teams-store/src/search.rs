@@ -264,6 +264,8 @@ impl Store {
         } else {
             ""
         };
+        // a call's media message (`RichText/Media_Call…`: a recording's or a transcript's record, ids in it) is never a
+        // hit, even one an earlier build indexed: its content isn't text (`teams_proto::chat::is_call_media`)
         let sql = format!(
             "SELECT entry.conversation_id, entry.message_id, message.arrival_time, message.sender,
                     message.sender_name,
@@ -273,6 +275,7 @@ impl Store {
              JOIN messages AS message
                ON message.conversation_id = entry.conversation_id AND message.id = entry.message_id
              WHERE message_search MATCH ?1 {only}
+               AND substr(message.message_type, 1, 19) <> 'RichText/Media_Call'
              ORDER BY message.arrival_time DESC, message.id DESC LIMIT ?2"
         );
         let hit = |row: &rusqlite::Row<'_>| {

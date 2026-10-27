@@ -56,6 +56,7 @@ use crate::models::{FeedEvent, Models};
 use crate::people::Shown;
 use crate::rich_text::Mentions;
 use crate::settings::{Notifications, SettingsModel};
+use crate::system_message;
 use crate::trace::{TraceLine, ViewTrace};
 
 /// How long messages are gathered before they are shown.
@@ -249,13 +250,18 @@ fn millis(time: SystemTime) -> i64 {
         .map_or(0, |since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX))
 }
 
-/// Whether `message` (newly stored in `conversation`, brought by `source`) may notify `me` at all: the rest is
-/// decided when it is processed.
+/// Whether `message` (newly stored in `conversation`, brought by `source`) may notify `me` at all: someone else's
+/// message of a type Teams notifies for ([`system_message::notifies`]: a text message or a card, never a call's, a
+/// recording's, a transcript's or a thread's event), never one the thread itself sent. The rest is decided when it is
+/// processed.
 #[must_use]
 pub fn may_notify(me: &str, conversation: &str, message: &Message, source: Source) -> bool {
     matches!(source, Source::Delivery | Source::Replay | Source::CatchUp)
-        && message.sender.as_deref().is_some_and(|sender| sender != me)
-        && chat_list::is_text(message)
+        && message
+            .sender
+            .as_deref()
+            .is_some_and(|sender| sender != me && !system_message::is_thread(sender))
+        && system_message::notifies(&message.message_type)
         && message.delete_time.is_none()
         && !conversation.starts_with("48:")
 }

@@ -15,6 +15,8 @@ mod common;
 #[path = "common/parts.rs"]
 mod parts;
 // names and pictures in the chat list and the chat view (M2 Task 12)
+#[path = "chat_view/meeting.rs"]
+mod meeting;
 #[path = "chat_view/people.rs"]
 mod people;
 
@@ -294,7 +296,7 @@ fn the_messages_show_oldest_first_with_their_markers_reactions_and_events() {
         ],
         "the control message is never shown"
     );
-    assert_eq!(shown[0].body, Body::Event("You added Lab Bee".into()));
+    assert_eq!(shown[0].body, Body::Event("You added Lab Bee to the chat.".into()));
     assert_eq!(shown[4].body, Body::Unsupported("RichText/Media_Card".to_owned()));
     assert_eq!(
         shown[1].reactions,

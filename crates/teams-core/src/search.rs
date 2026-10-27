@@ -5,13 +5,13 @@
 //! - **The text** ([`search_text`]): a rich-text message's sanitized [`RichText`](teams_proto::chat::RichText) read
 //!   as the reader sees it (its runs, mentions' names, links' text, images' `alt`, a quote's text), a `Text`
 //!   message's content as it came; none for a deleted message or one that isn't text (a thread event, a call's
-//!   record). Every message the core stores goes through [`crate::Outbox::receive`], which indexes it in the same
+//!   record, a call's media message: a recording's or a transcript's record, whose ids aren't text). Every message the core stores goes through [`crate::Outbox::receive`], which indexes it in the same
 //!   write ([`Store::upsert_message_indexed`]): an edit replaces its text, a delete removes it.
 //! - **The backfill** ([`Backfill`]): the stored messages the index doesn't hold at their version, a bounded batch at
 //!   a time ([`INDEX_BATCH`]), in the store's fixed order, from the engine's loop between its other work. The store
 //!   keeps what is indexed, so a backfill that stopped goes on at the next start where it was.
 
-use teams_proto::chat::parse_html;
+use teams_proto::chat::{is_call_media, parse_html};
 use teams_store::{IndexCursor, IndexText, Message, Store, StoreError};
 
 /// How many messages one step of the backfill indexes at most.
@@ -20,7 +20,7 @@ pub const INDEX_BATCH: usize = 200;
 /// The text of `message` the search finds it by (see the module docs); empty when it has none.
 #[must_use]
 pub fn search_text(message: &Message) -> String {
-    if message.delete_time.is_some() {
+    if message.delete_time.is_some() || is_call_media(&message.message_type) {
         String::new()
     } else if message.message_type == "Text" {
         // plain text: its `<` and `&` are the text's own

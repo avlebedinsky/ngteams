@@ -89,6 +89,7 @@ pub mod settings_view;
 pub mod shell;
 pub mod sidebar;
 pub mod switcher;
+pub mod system_message;
 pub mod teams_list;
 pub mod theme;
 pub mod trace;

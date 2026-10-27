@@ -12,9 +12,12 @@
 //! - **Threads** ([`arrange_threads`]): each post with its replies under it, the oldest post first; a message whose
 //!   post isn't recorded (read before posts were kept) is a post of its own; replies whose post the view doesn't hold
 //!   show under "Replies to an earlier post". Each message shows its sender's name ([`Core::person`]: their profile's,
-//!   else the name the message carried, else their MRI), its time, its rich text through our own renderer
-//!   ([`crate::rich_text`]), "Edited", or "This message was deleted"; a member's addition is a line naming who added
-//!   whom; any other event or type a placeholder that names no content.
+//!   else the name the message carried, else their MRI; none for the thread's own message, never its id), its time,
+//!   its rich text through our own renderer ([`crate::rich_text`]), "Edited", or "This message was deleted"; a system
+//!   message ([`crate::system_message`]: a call's start or end, a recording, a transcript, members added, joined, left
+//!   or removed, the name) is a line in Teams' words, a card's title and detail on one line; one Teams draws nothing
+//!   for isn't shown, nor its thread when nothing under it is (with replies, a placeholder stands for it); any other
+//!   type or shape a placeholder that names no content.
 //!
 //! What the view shows is traced (`channel-view shown`: the channel, its messages' ids in the order shown, each `post`
 //! or `reply`), never text or a name.
@@ -29,7 +32,7 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, div, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
-use teams_proto::chat::{MessageType, RichText, parse_html, thread_activity};
+use teams_proto::chat::{MessageType, RichText, parse_html};
 use teams_store::Message;
 
 use crate::bridge::Core;
@@ -38,6 +41,7 @@ use crate::clock::{self, HourCycle};
 use crate::models::Models;
 use crate::people::Shown;
 use crate::rich_text::{self, Mentions, Rendered};
+use crate::system_message::{self, Naming, Shown as SystemShown};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 
@@ -103,7 +107,8 @@ pub fn arrange_threads<S: BuildHasher>(
 pub enum Body {
     Text(Arc<Rendered>),
     Deleted,
-    /// A thread event's line.
+    /// A system message's line, in Teams' words ([`crate::system_message`]): a thread's event, a call's or a
+    /// recording's state, or a card's title and detail.
     Event(SharedString),
     Unsupported,
 }
@@ -302,15 +307,7 @@ impl ChannelView {
             let threads = arrange_threads(read.messages, &read.roots);
             self.threads = threads
                 .into_iter()
-                .map(|thread| Thread {
-                    root: thread.root,
-                    post: thread.post.map(|post| self.item(&post, &read.people)),
-                    replies: thread
-                        .replies
-                        .iter()
-                        .map(|reply| self.item(reply, &read.people))
-                        .collect(),
-                })
+                .filter_map(|thread| self.thread(thread, &read.people))
                 .collect();
             self.trace_threads();
             if !self.placed && !self.threads.is_empty() {
@@ -324,13 +321,50 @@ impl ChannelView {
         }
     }
 
+    /// A thread as shown; `None` when nothing of it is. A post Teams draws nothing for (a lone bot added, a call's end
+    /// with no length) takes its thread with it; with replies shown under it, its placeholder stands in its place, never
+    /// "Replies to an earlier post" (that is for a post the view doesn't hold).
+    fn thread(&mut self, thread: Thread<Message>, people: &HashMap<String, Shown>) -> Option<Thread<Item>> {
+        let replies: Vec<Item> = thread
+            .replies
+            .iter()
+            .filter_map(|reply| self.item(reply, people))
+            .collect();
+        let post = match thread.post {
+            None if replies.is_empty() => return None,
+            None => None,
+            Some(post) => match self.item(&post, people) {
+                Some(item) => Some(item),
+                None if replies.is_empty() => return None,
+                None => Some(Self::item_with(&post, Body::Unsupported, people, self.core.me())),
+            },
+        };
+        Some(Thread {
+            root: thread.root,
+            post,
+            replies,
+        })
+    }
+
     /// A message as shown.
-    fn item(&mut self, message: &Message, people: &HashMap<String, Shown>) -> Item {
-        let body = self.body(message, people);
+    /// `None` for a system message Teams draws nothing for.
+    fn item(&mut self, message: &Message, people: &HashMap<String, Shown>) -> Option<Item> {
+        let body = self.body(message, people)?;
+        Some(Self::item_with(message, body, people, self.core.me()))
+    }
+
+    /// `message` showing `body`.
+    fn item_with(message: &Message, body: Body, people: &HashMap<String, Shown>, me: &str) -> Item {
         let unshown = matches!(body, Body::Text(_)) && unshown_of(message).any();
+        // a thread's own message has no sender to name: never the thread's id
+        let from_thread = message.sender.as_deref().is_some_and(system_message::is_thread);
         Item {
             id: message.id.clone(),
-            sender_name: sender_name(message, people, self.core.me()),
+            sender_name: if from_thread {
+                SharedString::default()
+            } else {
+                sender_name(message, people, me)
+            },
             arrival_time: message.arrival_time,
             edited: message.edit_time.is_some() && message.delete_time.is_none(),
             body,
@@ -338,15 +372,37 @@ impl ChannelView {
         }
     }
 
-    fn body(&mut self, message: &Message, people: &HashMap<String, Shown>) -> Body {
+    /// What a message shows: a system message as its line (a card's title and detail on one); `None` for one Teams
+    /// draws nothing for.
+    fn body(&mut self, message: &Message, people: &HashMap<String, Shown>) -> Option<Body> {
         if message.delete_time.is_some() {
-            return Body::Deleted;
+            return Some(Body::Deleted);
         }
         match MessageType::from(message.message_type.clone()) {
-            MessageType::RichTextHtml | MessageType::Text => Body::Text(self.rendered(message)),
-            MessageType::AddMember => Body::Event(added(message, people, self.core.me()).into()),
-            _ => Body::Unsupported,
+            MessageType::RichTextHtml | MessageType::Text => return Some(Body::Text(self.rendered(message))),
+            _ => {}
         }
+        let names = ChannelNames {
+            people,
+            me: self.core.me(),
+        };
+        let shown = system_message::shown(
+            &message.message_type,
+            &message.content,
+            &self.channel,
+            message.sender.as_deref(),
+            &names,
+        );
+        Some(match shown {
+            Some(SystemShown::Line(text) | SystemShown::TimedLine(text)) => Body::Event(text.into()),
+            Some(SystemShown::Card { title, detail, .. }) => Body::Event(
+                title
+                    .map_or_else(|| detail.clone(), |title| format!("{title}: {detail}"))
+                    .into(),
+            ),
+            Some(SystemShown::Nothing) => return None,
+            None => Body::Unsupported,
+        })
     }
 
     /// A text message's rich text, laid out once per id and version.
@@ -462,24 +518,25 @@ fn sender_name(message: &Message, people: &HashMap<String, Shown>, me: &str) -> 
         .unwrap_or_else(|| sender.to_owned().into())
 }
 
-/// A member's addition: who added whom.
-fn added(message: &Message, people: &HashMap<String, Shown>, me: &str) -> String {
-    let Some(activity) = thread_activity(&message.content) else {
-        return "Members changed".to_owned();
-    };
-    let name = |mri: &str| -> String {
-        if mri == me {
-            return "You".to_owned();
-        }
-        people
+/// How a system message names people in a channel: their name as the engine has it, else the one the event gives,
+/// else a placeholder; never an MRI.
+struct ChannelNames<'p> {
+    people: &'p HashMap<String, Shown>,
+    me: &'p str,
+}
+
+impl Naming for ChannelNames<'_> {
+    fn is_me(&self, mri: &str) -> bool {
+        mri == self.me
+    }
+
+    fn name(&self, mri: &str, carried: Option<&str>) -> String {
+        self.people
             .get(mri)
             .and_then(|shown| shown.name.as_ref())
-            .map_or_else(|| mri.to_owned(), ToString::to_string)
-    };
-    let targets: Vec<String> = activity.targets.iter().map(|mri| name(mri)).collect();
-    match &activity.initiator {
-        Some(initiator) => format!("{} added {}", name(initiator), targets.join(", ")),
-        None => format!("Added {}", targets.join(", ")),
+            .map(ToString::to_string)
+            .or_else(|| carried.map(str::to_owned))
+            .unwrap_or_else(|| crate::chat_list::unnamed(mri).to_owned())
     }
 }
 
@@ -491,11 +548,10 @@ async fn read(core: &dyn Core, channel: &str, limit: usize) -> Option<Read> {
     let mut wanted: HashSet<String> = HashSet::new();
     for message in &page.messages {
         wanted.extend(message.sender.iter().cloned());
-        if message.message_type == MessageType::AddMember.as_str()
-            && let Some(activity) = thread_activity(&message.content)
-        {
-            wanted.extend(activity.initiator);
-            wanted.extend(activity.targets);
+        let text = message.message_type == MessageType::RichTextHtml.as_str()
+            || message.message_type == MessageType::Text.as_str();
+        if !text && message.delete_time.is_none() {
+            wanted.extend(system_message::people(&message.message_type, &message.content));
         }
     }
     wanted.remove(core.me());
@@ -522,11 +578,12 @@ fn message_view(item: &Item, palette: Palette, cycle: HourCycle) -> AnyElement {
         .gap_2()
         .items_center()
         .text_sm()
-        .child(
+        // a thread's own message names no sender
+        .children((!item.sender_name.is_empty()).then(|| {
             div()
                 .font_weight(gpui::FontWeight::BOLD)
-                .child(item.sender_name.clone()),
-        )
+                .child(item.sender_name.clone())
+        }))
         .child(div().text_xs().text_color(rgb(palette.muted_foreground)).child(time))
         .children(item.edited.then(|| {
             div()

@@ -26,8 +26,13 @@
 //!   time ([`clock::message_time`]) muted over the bubble; an "@" beside a bubble that mentions the account. A message shows its rich text through our own renderer ([`crate::rich_text`],
 //!   parsed and laid out once per message id and version), "Edited" once edited, "This message was deleted" once
 //!   deleted, its reactions as pills over the bubble's bottom edge with their counts (the account's own ringed) and
-//!   "Add reaction", and a thread's event as a line of its own. A message type this build doesn't show is a placeholder
-//!   that names no content; `Control/…` messages (typing) are signals, never shown.
+//!   "Add reaction". A system message ([`crate::system_message`]) is drawn centred with no author row, in Teams' words:
+//!   a line (members added, joined, left or removed, the chat's name, a meeting chat's policy), a line after its time
+//!   (a call's start or end, a recording's state), or a card (a meeting's start and end titled by the chat's name, a
+//!   recording and a transcript with the link to Teams on the web); one Teams draws nothing for (a call's end with no
+//!   length, the transcript's half of a recording, a lone bot added) isn't shown. A message type or shape this build
+//!   doesn't show is a placeholder that names no content (the thread's own centred, never named by its id);
+//!   `Control/…` messages (typing) are signals, never shown.
 //! - **Typing**: who is typing now ([`crate::Chats::typing`]), under the messages; it goes off with their end of
 //!   typing, their message, or [`crate::models::TYPING_TIMEOUT`] after their last signal.
 //! - **Actions** on a message, under the pointer or selected with the keyboard (Up and Down, once the list has the
@@ -87,9 +92,7 @@ use gpui_component::kbd::Kbd;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Sizable as _, Size};
 use teams_core::{Action, Command, EngineError, NOTES};
-use teams_proto::chat::{
-    MessageType, RichText, ThreadActivity, Unshown, parse_html, thread_activity, unshown_parts, web_chat_link,
-};
+use teams_proto::chat::{MessageType, RichText, Unshown, parse_html, unshown_parts, web_chat_link};
 use teams_store::{Message, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction};
 
 use crate::bridge::Core;
@@ -104,6 +107,7 @@ use crate::rich_text::{self, Mentions, Rendered};
 use crate::sending::{self, Again, Note, RowState};
 use crate::settings::SettingsModel;
 use crate::shell::ShellParts;
+use crate::system_message::{self, CardKind, Naming, Shown as SystemShown};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 use crate::{presence, presence_badge};
@@ -153,6 +157,8 @@ const AVATAR_GAP: f32 = 12.0;
 const BUBBLE_INSET: f32 = 16.0;
 /// The column right of someone else's bubble that holds the "mentions you" mark, px.
 const MARK_COLUMN: f32 = 28.0;
+/// A system message's card's width, px (narrower when the pane is).
+const CARD_WIDTH: f32 = 480.0;
 /// A message's header's height, rem: the avatar beside it starts below it, level with the bubble.
 const HEADER_REMS: f32 = 1.5;
 /// Messages read from the store at a time; older ones load when fewer rows than this are above the view.
@@ -350,10 +356,17 @@ impl PartialEq for RenderedText {
 pub enum Body {
     Text(RenderedText),
     Deleted,
-    /// A thread's event (members added), as a line of its own.
+    /// A system message as a centred line of its own, with no author (members added, joined or left, the chat's name).
     Event(SharedString),
+    /// A system message as a centred line after its time (a call's start or end, a recording's state).
+    TimedEvent(SharedString),
+    /// A system message as a centred card (a meeting's start or end, a recording, a transcript).
+    Card(Box<EventCard>),
     /// A type this build doesn't show, by its name.
     Unsupported(String),
+    /// A type this build doesn't show that the thread itself sent: its placeholder as a centred line, with no author
+    /// (a thread is never shown as a sender).
+    UnsupportedEvent(String),
 }
 
 impl Body {
@@ -364,9 +377,29 @@ impl Body {
             Self::Text(_) => "text",
             Self::Deleted => "deleted",
             Self::Event(_) => "event",
+            Self::TimedEvent(_) => "timed-event",
+            Self::Card(card) => card.kind.name(),
             Self::Unsupported(_) => "unsupported",
+            Self::UnsupportedEvent(_) => "unsupported-event",
         }
     }
+
+    /// A system message: drawn centred, with no author row, never grouped with a message beside it.
+    #[must_use]
+    pub const fn is_system(&self) -> bool {
+        matches!(
+            self,
+            Self::Event(_) | Self::TimedEvent(_) | Self::Card(_) | Self::UnsupportedEvent(_)
+        )
+    }
+}
+
+/// A system message's card: what it is, its title and the line under it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EventCard {
+    pub kind: CardKind,
+    pub title: SharedString,
+    pub detail: SharedString,
 }
 
 /// A reaction key on a message: how many reacted with it, and whether the account did.
@@ -468,6 +501,42 @@ pub struct PendingItem {
     pub body: Option<RenderedText>,
 }
 
+/// Whether a message of `message_type` is a text message the view lays out: `Text` or `RichText/Html`.
+fn is_text_type(message_type: &str) -> bool {
+    message_type == MessageType::RichTextHtml.as_str() || message_type == MessageType::Text.as_str()
+}
+
+/// The chat view's system messages: each as shown, per message id, with the version and the names' revision it was
+/// worked out at (`None`: a type or shape this build doesn't show), and what they are worked out from beside the
+/// message.
+#[derive(Default)]
+struct Systems {
+    shown: HashMap<String, (i64, u64, Option<SystemShown>)>,
+    /// Raised whenever a name the view knows changes: system messages name people.
+    names_revision: u64,
+    /// The chat's name, as the chat list has it: a meeting's card is titled by it.
+    title: Option<SharedString>,
+}
+
+/// How a system message names people in this view: their name as the engine has it, else the one the event gives,
+/// else a placeholder; never an MRI.
+struct ViewNames<'v>(&'v ChatView);
+
+impl Naming for ViewNames<'_> {
+    fn is_me(&self, mri: &str) -> bool {
+        mri == self.0.core.me()
+    }
+
+    fn name(&self, mri: &str, carried: Option<&str>) -> String {
+        self.0
+            .shown(mri)
+            .and_then(|shown| shown.name.as_ref())
+            .map(ToString::to_string)
+            .or_else(|| carried.map(str::to_owned))
+            .unwrap_or_else(|| crate::chat_list::unnamed(mri).to_owned())
+    }
+}
+
 /// Whether a message of `message_type` counts unread, as [`teams_store::Store::unread_count`] counts it: `Text` and
 /// every `RichText…` type (a card too).
 #[must_use]
@@ -525,7 +594,7 @@ pub fn day_of<Tz: TimeZone>(ms: i64, tz: &Tz) -> Option<NaiveDate> {
 
 /// Whether `item` continues the group of `before`: the same sender, within [`GROUP_MS`], neither an event.
 fn continues(before: &MessageItem, item: &MessageItem) -> bool {
-    let events = matches!(before.body, Body::Event(_)) || matches!(item.body, Body::Event(_));
+    let events = before.body.is_system() || item.body.is_system();
     !events
         && before.sender.is_some()
         && before.sender == item.sender
@@ -687,11 +756,12 @@ pub struct ChatView {
     people_seen: u64,
     /// Rendered rich text per message id, with the version it was rendered from.
     rendered: HashMap<String, (i64, Arc<Rendered>)>,
-    /// A thread event's parsed content per message id, with the version it was parsed from.
-    activities: HashMap<String, (i64, Option<Arc<ThreadActivity>>)>,
+    /// The system messages as shown, and what they are worked out from.
+    systems: Systems,
     /// How many times rich text was laid out.
     layouts: u64,
-    /// How many times a message's content was parsed (its HTML, or a thread event's XML).
+    /// How many times a message's content was parsed: a text message's HTML, or a system message's record (worked out
+    /// again whenever a name the view knows changes).
     parses: u64,
     items: Vec<Item>,
     list: ListState,
@@ -799,7 +869,7 @@ impl ChatView {
             asks: 0,
             people_seen,
             rendered: HashMap::new(),
-            activities: HashMap::new(),
+            systems: Systems::default(),
             layouts: 0,
             parses: 0,
             items: Vec::new(),
@@ -1022,7 +1092,8 @@ impl ChatView {
         self.layouts
     }
 
-    /// How many times a message's content was parsed (once per message id and version).
+    /// How many times a message's content was parsed: a text message once per id and version, a system message once
+    /// per id, version and names' revision (every change of a name it may show works it out again).
     #[must_use]
     pub fn parses(&self) -> u64 {
         self.parses
@@ -1582,7 +1653,7 @@ impl ChatView {
         let held: HashSet<&str> = self.messages.iter().map(|message| message.id.as_str()).collect();
         self.reactions.retain(|id, _| held.contains(id.as_str()));
         self.rendered.retain(|id, _| held.contains(id.as_str()));
-        self.activities.retain(|id, _| held.contains(id.as_str()));
+        self.systems.shown.retain(|id, _| held.contains(id.as_str()));
     }
 
     /// Asks the engine for the people the rows name: the senders (their profile's name and their picture), events'
@@ -1594,11 +1665,8 @@ impl ChatView {
             if let Some(sender) = &message.sender {
                 wanted.push(sender.clone());
             }
-            if message.message_type == MessageType::AddMember.as_str()
-                && let Some(activity) = self.activity(message)
-            {
-                wanted.extend(activity.initiator.iter().cloned());
-                wanted.extend(activity.targets.iter().cloned());
+            if !is_text_type(&message.message_type) && message.delete_time.is_none() {
+                wanted.extend(system_message::people(&message.message_type, &message.content));
             }
         }
         self.messages = messages;
@@ -1620,7 +1688,7 @@ impl ChatView {
     fn watch_senders(&self) {
         let mut senders: Vec<&String> = Vec::new();
         let shown = self.items.iter().rev().filter_map(|item| match item {
-            Item::Message(item) if !item.own && !matches!(item.body, Body::Event(_)) => item.sender.as_ref(),
+            Item::Message(item) if !item.own && !item.body.is_system() => item.sender.as_ref(),
             _ => None,
         });
         for sender in shown {
@@ -1679,6 +1747,7 @@ impl ChatView {
             }
         }
         if changed {
+            self.systems.names_revision += 1;
             self.rebuild(cx);
         }
     }
@@ -1694,6 +1763,9 @@ impl ChatView {
             .cloned()
             .collect();
         self.people_seen = chats.revision();
+        if !renamed.is_empty() {
+            self.systems.names_revision += 1;
+        }
         for mri in &renamed {
             self.people.remove(mri);
         }
@@ -1795,55 +1867,82 @@ impl ChatView {
         }
     }
 
-    /// A thread event's content, parsed once per id and version (counted in [`Self::parses`]).
-    fn activity(&mut self, message: &Message) -> Option<Arc<ThreadActivity>> {
-        if let Some((version, activity)) = self.activities.get(&message.id)
+    /// A system message as shown, worked out once per id, version and names' revision (counted in
+    /// [`Self::parses`]).
+    fn system(&mut self, message: &Message) -> Option<SystemShown> {
+        if let Some((version, revision, shown)) = self.systems.shown.get(&message.id)
             && *version == message.version
+            && *revision == self.systems.names_revision
         {
-            return activity.clone();
+            return shown.clone();
         }
         self.parses += 1;
-        let activity = thread_activity(&message.content).map(Arc::new);
-        self.activities
-            .insert(message.id.clone(), (message.version, activity.clone()));
-        activity
+        let shown = system_message::shown(
+            &message.message_type,
+            &message.content,
+            &self.conversation,
+            message.sender.as_deref(),
+            &ViewNames(self),
+        );
+        let revision = self.systems.names_revision;
+        self.systems
+            .shown
+            .insert(message.id.clone(), (message.version, revision, shown.clone()));
+        shown
     }
 
-    /// What a message shows.
-    fn body(&mut self, message: &Message) -> Body {
+    /// What a message shows; `None` for a system message Teams draws nothing for.
+    fn body(&mut self, message: &Message) -> Option<Body> {
         if message.delete_time.is_some() {
-            return Body::Deleted;
+            return Some(Body::Deleted);
         }
-        match MessageType::from(message.message_type.clone()) {
-            MessageType::RichTextHtml | MessageType::Text => Body::Text(RenderedText(self.rendered(message))),
-            MessageType::AddMember => {
-                let activity = self.activity(message);
-                Body::Event(self.event_text(activity.as_deref()).into())
+        if is_text_type(&message.message_type) {
+            return Some(Body::Text(RenderedText(self.rendered(message))));
+        }
+        let kind = message.message_type.clone();
+        Some(match self.system(message) {
+            Some(SystemShown::Line(text)) => Body::Event(text.into()),
+            Some(SystemShown::TimedLine(text)) => Body::TimedEvent(text.into()),
+            Some(SystemShown::Card { kind, title, detail }) => Body::Card(Box::new(EventCard {
+                kind,
+                title: title.map_or_else(
+                    || {
+                        self.systems
+                            .title
+                            .clone()
+                            .unwrap_or_else(|| system_message::MEETING.into())
+                    },
+                    SharedString::from,
+                ),
+                detail: detail.into(),
+            })),
+            Some(SystemShown::Nothing) => return None,
+            // the thread's own: never shown as from a sender
+            None if kind.starts_with("ThreadActivity/")
+                || message.sender.as_deref().is_some_and(system_message::is_thread) =>
+            {
+                Body::UnsupportedEvent(kind)
             }
-            other => Body::Unsupported(other.as_str().to_owned()),
-        }
+            None => Body::Unsupported(kind),
+        })
     }
 
-    /// A thread event's line: who added whom.
-    fn event_text(&self, activity: Option<&ThreadActivity>) -> String {
-        let Some(activity) = activity else {
-            return "Members changed".to_owned();
-        };
-        let targets: Vec<String> = activity.targets.iter().map(|mri| self.name_of(mri)).collect();
-        match &activity.initiator {
-            Some(initiator) => format!("{} added {}", self.name_of(initiator), targets.join(", ")),
-            None => format!("Added {}", targets.join(", ")),
+    /// The chat's name, as the chat list has it: a meeting's card is titled by it.
+    pub fn set_title(&mut self, title: Option<SharedString>, cx: &mut Context<Self>) {
+        if self.systems.title != title {
+            self.systems.title = title;
+            self.rebuild(cx);
         }
     }
 
     /// A message's row, before it is arranged, with the note `notes` has for it; `None` for a control message (a
-    /// signal, never shown).
+    /// signal, never shown) and a system message Teams draws nothing for.
     fn item(&mut self, message: &Message, notes: &HashMap<String, Vec<Note>>) -> Option<MessageItem> {
         if MessageType::from(message.message_type.clone()).is_control() {
             return None;
         }
         let me = self.core.me().to_owned();
-        let body = self.body(message);
+        let body = self.body(message)?;
         let unshown = if matches!(body, Body::Text(_)) {
             unshown_of(message)
         } else {
@@ -2249,8 +2348,9 @@ impl ChatView {
                 this.focus.focus(window, cx);
                 this.select(Some(clicked_id.clone()), cx);
             }));
-        let row = if matches!(item.body, Body::Event(_)) {
-            row.flex_col().child(event_line(item, palette))
+        let row = if item.body.is_system() {
+            row.flex_col()
+                .child(system_row(item, &self.conversation, palette, clock::cycle(cx)))
         } else {
             // someone else's message beside their avatar's column, Teams' way; the account's own to the right
             let avatar = (!item.own).then(|| self.avatar_column(item, palette, cx));
@@ -3119,12 +3219,124 @@ fn new_messages_row(palette: Palette) -> AnyElement {
         .into_any_element()
 }
 
-fn event_line(item: &MessageItem, palette: Palette) -> AnyElement {
-    let text = match &item.body {
-        Body::Event(text) => text.clone(),
-        _ => SharedString::default(),
+/// A system message's row, centred and with no author, as Teams draws it: a line (after its time, for a call's or a
+/// recording's), a card, or the placeholder of a kind this build doesn't show with the link to Teams on the web.
+fn system_row(item: &MessageItem, conversation: &str, palette: Palette, cycle: HourCycle) -> AnyElement {
+    let id = item.id.clone();
+    let selector = move || format!("event-{id}");
+    match &item.body {
+        Body::Event(text) => centered_line(text.clone(), palette)
+            .debug_selector(selector)
+            .into_any_element(),
+        Body::TimedEvent(text) => centered_line(
+            format!("{}\u{2003}{text}", time_of_day(item.arrival_time, cycle)),
+            palette,
+        )
+        .debug_selector(selector)
+        .into_any_element(),
+        Body::Card(card) => event_card(item, card, conversation, palette, cycle),
+        Body::UnsupportedEvent(_) => centered_line(SharedString::default(), palette)
+            .debug_selector(selector)
+            .child(web_line(
+                &format!("unsupported-{}", item.id),
+                UNSUPPORTED,
+                &item.id,
+                conversation,
+                palette,
+            ))
+            .into_any_element(),
+        Body::Text(_) | Body::Deleted | Body::Unsupported(_) => div().into_any_element(),
+    }
+}
+
+/// The time of day of `ms` on `cycle`'s clock: a system message's day is its separator's.
+fn time_of_day(ms: i64, cycle: HourCycle) -> String {
+    DateTime::from_timestamp_millis(ms).map_or_else(String::new, |at| {
+        at.with_timezone(&Local).format(cycle.time_of_day()).to_string()
+    })
+}
+
+/// A system message's card, centred: its icon in a tinted circle, its title over its detail and time, and for a
+/// recording or a transcript the link that opens it in Teams on the web (this build plays and shows neither).
+fn event_card(
+    item: &MessageItem,
+    card: &EventCard,
+    conversation: &str,
+    palette: Palette,
+    cycle: HourCycle,
+) -> AnyElement {
+    let glyph = match card.kind {
+        CardKind::MeetingStarted | CardKind::MeetingEnded => Glyph::VIDEO,
+        CardKind::Recording => Glyph::PLAY,
+        CardKind::Transcript => Glyph::TRANSCRIPT,
     };
-    centered_line(text, palette).into_any_element()
+    let icon = div()
+        .size(px(36.0))
+        .flex_none()
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(rgb(palette.selected))
+        .text_color(rgb(palette.brand))
+        .child(glyph.icon());
+    let detail = format!("{}\u{2003}{}", card.detail, time_of_day(item.arrival_time, cycle));
+    let text = div()
+        .flex_1()
+        .min_w_0()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .text_sm()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(rgb(palette.foreground))
+                .truncate()
+                .child(card.title.clone()),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(rgb(palette.muted_foreground))
+                .truncate()
+                .child(detail),
+        );
+    let link = card.kind.opens_on_the_web().then(|| {
+        let link = web_chat_link(conversation);
+        let open = format!("open-on-the-web-{}", item.id);
+        div().debug_selector(move || open.clone()).flex_none().child(
+            Button::new(SharedString::from(format!("open-on-the-web-{}", item.id)))
+                .label(OPEN_ON_THE_WEB)
+                .ghost()
+                .with_size(Size::XSmall)
+                .on_click(move |_, _, cx| cx.open_url(&link)),
+        )
+    });
+    let selector = format!("event-card-{} {}", item.id, card.kind.name());
+    div()
+        .w_full()
+        .py_2()
+        .flex()
+        .justify_center()
+        .child(
+            div()
+                .debug_selector(move || selector)
+                .w(px(CARD_WIDTH))
+                .max_w_full()
+                .px_4()
+                .py_3()
+                .flex()
+                .items_center()
+                .gap_3()
+                .rounded_lg()
+                .border_1()
+                .border_color(rgb(palette.border))
+                .bg(rgb(palette.surface))
+                .child(icon)
+                .child(text)
+                .children(link),
+        )
+        .into_any_element()
 }
 
 /// A message's header, Teams' way: the sender's name (none on the account's own) and its time (on `cycle`'s clock),
@@ -3242,7 +3454,7 @@ fn bubble(
             conversation,
             palette,
         ),
-        Body::Event(_) => div().into_any_element(),
+        Body::Event(_) | Body::TimedEvent(_) | Body::Card(_) | Body::UnsupportedEvent(_) => div().into_any_element(),
     };
     let selector = format!("bubble-{}", item.id);
     let bubble = div()

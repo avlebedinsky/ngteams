@@ -58,6 +58,7 @@ use crate::models::Models;
 use crate::people::{self, Picture, Shown};
 use crate::presence;
 use crate::presence_badge;
+use crate::system_message::{self, Preview};
 use crate::theme::Palette;
 use crate::trace::{TraceLine, ViewTrace};
 
@@ -229,20 +230,33 @@ pub async fn chat_name(core: &dyn Core, conversation: &Conversation) -> SharedSt
     name_of(core, conversation, &members).await.name
 }
 
-/// The preview line of a chat from its newest messages (newest first): the newest text message's first line, read
-/// from its sanitized rich text, or as it came for a `Text` message ("You: " before the account's own); empty when
-/// there is none.
+/// The preview line of a chat from its newest messages (newest first), as Teams' list words it: the newest text
+/// message's first line, read from its sanitized rich text, or as it came for a `Text` message ("You: " before the
+/// account's own); a meeting's start or end, a recording's state or a transcript in Teams' words
+/// ([`system_message::preview`]); empty when there is none.
 #[must_use]
 pub fn preview(page: &[Message], me: &str) -> SharedString {
-    let Some(message) = page.iter().find(|message| is_text(message)) else {
-        return SharedString::default();
-    };
-    let text = message_line(message);
-    if message.sender.as_deref() == Some(me) {
-        format!("You: {text}").into()
-    } else {
-        text.into()
+    for message in page {
+        let said = if message.delete_time.is_some() {
+            Preview::Text
+        } else {
+            system_message::preview(&message.message_type, &message.content, &message.conversation_id)
+        };
+        match said {
+            Preview::Skipped => {}
+            Preview::Said(said) => return said.into(),
+            Preview::Text if !is_text(message) => {}
+            Preview::Text => {
+                let text = message_line(message);
+                return if message.sender.as_deref() == Some(me) {
+                    format!("You: {text}").into()
+                } else {
+                    text.into()
+                };
+            }
+        }
     }
+    SharedString::default()
 }
 
 /// What a chat is called, whether that is a name, and its picture.

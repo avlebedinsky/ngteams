@@ -29,7 +29,8 @@ pub enum HourCycle {
 
 impl HourCycle {
     /// The time of day's `chrono` format.
-    fn time_of_day(self) -> &'static str {
+    #[must_use]
+    pub fn time_of_day(self) -> &'static str {
         match self {
             Self::Twelve => "%-I:%M %p",
             Self::TwentyFour => "%H:%M",

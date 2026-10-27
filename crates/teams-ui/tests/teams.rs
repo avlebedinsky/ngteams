@@ -368,6 +368,60 @@ fn assert_channel_traced(written: &Written) {
     }
 }
 
+/// A thread event from the channel itself: `ThreadActivity/AddMember` adding a lone bot, which Teams draws nothing for.
+fn bot_added(id: &str) -> Message {
+    let mut event = message(
+        id,
+        CHANNEL,
+        "<addmember><initiator>8:orgid:00000000-0000-4000-8000-00000000000a</initiator>\
+        <target>28:00000000-0000-4000-8000-0000000000bb</target></addmember>",
+    );
+    event.message_type = "ThreadActivity/AddMember".to_owned();
+    event.sender_name = None;
+    event
+}
+
+#[test]
+fn a_post_teams_draws_nothing_for_takes_its_thread_with_it_or_stands_as_a_placeholder_over_its_replies() {
+    let rig = rig();
+    *rig.core.teams.lock().unwrap() = Some(teams());
+    let (mut messages, mut roots) = channel_store();
+    // a lone bot added with nothing under it, and another with a reply under it
+    messages.insert(0, message("1760000500100", LAB_B, "<p>welcome, bot</p>"));
+    messages.insert(1, bot_added("1760000500000"));
+    messages.insert(2, bot_added("1760000450000"));
+    for (id, root) in [
+        ("1760000500100", "1760000500000"),
+        ("1760000500000", "1760000500000"),
+        ("1760000450000", "1760000450000"),
+    ] {
+        roots.push((id.to_owned(), root.to_owned()));
+    }
+    rig.core.messages.lock().unwrap().insert(CHANNEL.to_owned(), messages);
+    rig.core.roots.lock().unwrap().insert(CHANNEL.to_owned(), roots);
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    click(cx, "channel-row-1");
+    let view: Entity<ChannelView> = cx.update(|_, cx| shell.read(cx).channel().cloned().expect("a channel view"));
+    let shapes = thread_shapes(&view, cx);
+    assert!(
+        !shapes.iter().any(|thread| thread.0 == "1760000450000"),
+        "the hidden post alone is no thread: {shapes:?}"
+    );
+    let held = shape("1760000500000", Some("1760000500000"), &["1760000500100"]);
+    assert!(shapes.contains(&held), "{shapes:?}");
+    let post = cx.update(|_, cx| {
+        view.read(cx)
+            .threads()
+            .iter()
+            .find(|thread| thread.root == "1760000500000")
+            .and_then(|thread| thread.post.clone())
+            .expect("its post")
+    });
+    // its placeholder, with no sender named: never the thread's id, never "an earlier post"
+    assert_eq!(post.body, teams_ui::channel_view::Body::Unsupported);
+    assert!(post.sender_name.is_empty());
+}
+
 #[test]
 fn a_post_or_reply_with_a_file_or_card_no_capture_showed_says_so_never_guessed() {
     let rig = rig();

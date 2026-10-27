@@ -263,7 +263,7 @@ impl Shell {
             cx.notify();
         });
         // the list's rows built again (a name or a picture read): the header shows what its row shows
-        let renamed = cx.observe(&list, |this: &mut Self, _, cx| this.trace_header(cx));
+        let renamed = cx.observe(&list, |this: &mut Self, _, cx| this.list_changed(cx));
         let typed = Self::keystrokes_are_use(window, cx);
         let (call_bar, calling) = Self::calls(&core, &models, &list, &trace, cx);
         let focus = cx.focus_handle();
@@ -528,6 +528,26 @@ impl Shell {
         Some(selected_by(id, button).into_any_element())
     }
 
+    /// The chat list changed: the header and the chat view's title follow it.
+    fn list_changed(&mut self, cx: &mut Context<Self>) {
+        self.trace_header(cx);
+        self.give_title(cx);
+    }
+
+    /// Gives the chat view its chat's name as the list has it, when it is a name: a meeting's card is titled by it.
+    fn give_title(&mut self, cx: &mut Context<Self>) {
+        let (Some(chat), Main::Chat(id)) = (&self.chat, &self.main) else {
+            return;
+        };
+        let title = self
+            .list
+            .read(cx)
+            .row(id)
+            .filter(|row| row.named)
+            .map(|row| row.name.clone());
+        chat.update(cx, |chat, cx| chat.set_title(title, cx));
+    }
+
     /// Traces what the chat's header shows (`header shown`: the chat; its other member's presence, `none` for a chat
     /// that isn't 1:1, then `named` or `unnamed`, then `picture` or `no-picture`), when it changed. Nothing while no
     /// chat is shown, or before the list has its row.
@@ -783,6 +803,7 @@ impl Shell {
         });
         self.main = Main::Chat(id);
         self.trace_header(cx);
+        self.give_title(cx);
         self.trace_call_button(cx);
         self.close_switcher(window, cx);
         self.close_search(window, cx);

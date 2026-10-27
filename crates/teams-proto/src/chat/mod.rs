@@ -16,11 +16,16 @@
 //! engine for a pasted picture's bytes or an emoticon's, never this crate).
 
 mod compose;
+mod event;
 mod html;
 mod model;
 mod read;
 
 pub use compose::{ComposeError, MessageText};
+pub use event::{
+    CALL_MEDIA_PREFIX, CallEnd, CallStart, ChatEvent, ChatPolicy, Member, Members, Recording, RecordingContents,
+    RecordingStatus, Removed, TopicUpdate, Transcript, chat_event, is_call_media,
+};
 pub use html::{
     AMS_IMAGE_ITEMTYPE, EMOJI_ITEMTYPE, Image, MAX_CONTENT, MAX_DEPTH, MENTION_ITEMTYPE, Marks, Node, Quote,
     REPLY_ITEMTYPE, RichText, ThreadActivity, parse as parse_html, thread_activity,

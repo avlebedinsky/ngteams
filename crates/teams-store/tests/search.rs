@@ -129,6 +129,20 @@ fn the_migration_creates_the_index_and_fills_nothing() -> Result<(), StoreError>
 }
 
 #[test]
+fn a_call_s_media_message_an_earlier_build_indexed_is_never_a_hit() -> Result<(), StoreError> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = with_chats(&dir)?;
+    // indexed with its text, as a build before this rule did
+    let mut record = message(CHAT, "1001", 1, "Weekly sync Play transcriptid", 1_000);
+    record.message_type = "RichText/Media_CallRecording".to_owned();
+    store_indexed(&mut store, &record)?;
+    store_indexed(&mut store, &message(CHAT, "1002", 1, "Weekly sync notes", 2_000))?;
+    assert_eq!(found(&store, "weekly"), ["1002"]);
+    assert!(found(&store, "transcriptid").is_empty());
+    Ok(())
+}
+
+#[test]
 fn a_message_stored_with_its_text_is_found_an_edit_replaces_it_and_a_delete_removes_it() -> Result<(), StoreError> {
     let dir = tempfile::tempdir().expect("tempdir");
     let mut store = with_chats(&dir)?;
