@@ -172,7 +172,8 @@ impl Root {
         cx.notify();
     }
 
-    /// Keeps `appearance` (the theme following the window, [`theme::follow`]) for as long as the view lives.
+    /// Keeps `appearance` (the theme following the window and the settings' choice: [`theme::follow`] joined with
+    /// [`theme::follow_settings`]) for as long as the view lives.
     #[must_use]
     pub fn following(mut self, appearance: Subscription) -> Self {
         self.appearance = Some(appearance);

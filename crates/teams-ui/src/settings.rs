@@ -6,7 +6,9 @@
 //!   availability stops being reported, the account's manual status ([`ManualStatus`]), whether calls use Cisco's
 //!   OpenH264 for video ([`Settings::video_calls`], its switch shown only where the build has the codec), the calls'
 //!   microphone, speaker and camera ([`Settings::microphone`] and the others: a device's name, or the system's default
-//!   when none is named), and whether the first run's screen of the writes that happen on their own was confirmed.
+//!   when none is named), how the app looks ([`Settings::appearance`]: the theme, following the system's light or dark
+//!   mode or not, the font size and family), and whether the first run's screen of the writes that happen on their
+//!   own was confirmed.
 //!   Tasks 13, 14 and 20 act on the ones Task 8 only kept.
 //! - **The devices** (M3 Task 20, [`attach_devices`]): with the calls' devices attached, the model keeps the list of
 //!   devices there are (each change of it shown as it comes), hands the device directory the choice of each kind at
@@ -43,6 +45,8 @@ use teams_log::diagnostics::{Report, Source as DiagnosticsSource};
 use teams_media::devices::catalog::{DeviceDirectory, DeviceKind, DeviceList};
 use teams_proto::ManualAvailability;
 use toml::{Table, Value};
+
+use crate::theme::{self, Appearance};
 
 /// The settings file's mode.
 pub const FILE_MODE: u32 = 0o600;
@@ -223,6 +227,8 @@ pub struct Settings {
     pub speaker: Option<String>,
     /// The calls' camera; `None` follows the system's default.
     pub camera: Option<String>,
+    /// How the app looks: its theme, font size and font family, the app's for every account.
+    pub appearance: Appearance,
     /// The other accounts' own settings, by the account's MRI: the first account's are [`Settings::selected_chat`]
     /// and [`Settings::manual_status`] themselves (see [`Settings::first_account`]).
     pub accounts: BTreeMap<String, AccountSettings>,
@@ -364,6 +370,7 @@ impl Default for Settings {
             microphone: None,
             speaker: None,
             camera: None,
+            appearance: Appearance::default(),
             accounts: BTreeMap::new(),
             first_account: None,
         }
@@ -385,6 +392,12 @@ pub mod keys {
     pub const MICROPHONE: &str = "microphone";
     pub const SPEAKER: &str = "speaker";
     pub const CAMERA: &str = "camera";
+    pub const FOLLOW_SYSTEM_THEME: &str = "follow_system_theme";
+    pub const THEME: &str = "theme";
+    pub const LIGHT_THEME: &str = "light_theme";
+    pub const DARK_THEME: &str = "dark_theme";
+    pub const FONT_SIZE: &str = "font_size";
+    pub const FONT_FAMILY: &str = "font_family";
     /// The other accounts' own settings: a table of tables, by the account's MRI.
     pub const ACCOUNTS: &str = "accounts";
     /// The account whose own settings are the top-level ones, by its MRI.
@@ -476,6 +489,12 @@ fn take(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem
             settings.video_calls = value.as_bool().ok_or(bad(keys::VIDEO_CALLS, "not true or false"))?;
         }
         keys::MICROPHONE | keys::SPEAKER | keys::CAMERA => take_device(settings, key, value)?,
+        keys::FOLLOW_SYSTEM_THEME
+        | keys::THEME
+        | keys::LIGHT_THEME
+        | keys::DARK_THEME
+        | keys::FONT_SIZE
+        | keys::FONT_FAMILY => take_appearance(&mut settings.appearance, key, value)?,
         keys::ACCOUNTS => take_accounts(settings, value)?,
         keys::FIRST_ACCOUNT => {
             settings.first_account = Some(chat_id(value).ok_or(bad(keys::FIRST_ACCOUNT, "not an account's MRI"))?);
@@ -520,6 +539,49 @@ fn take_accounts(settings: &mut Settings, value: &Value) -> Result<(), Problem> 
     if failed { Err(bad) } else { Ok(()) }
 }
 
+/// Takes one of how the app looks: whether the theme follows the system, a theme's key of the catalog, the font size
+/// within [`theme::FONT_SIZES`] or the font family's name.
+fn take_appearance(appearance: &mut Appearance, key: &str, value: &Value) -> Result<(), Problem> {
+    let theme_key = |key: &'static str| {
+        value
+            .as_str()
+            .and_then(theme::find)
+            .map(|spec| spec.key)
+            .ok_or(Problem::BadValue {
+                key,
+                why: "not a theme this app knows",
+            })
+    };
+    match key {
+        keys::FOLLOW_SYSTEM_THEME => {
+            appearance.follow_system = value.as_bool().ok_or(Problem::BadValue {
+                key: keys::FOLLOW_SYSTEM_THEME,
+                why: "not true or false",
+            })?;
+        }
+        keys::THEME => appearance.theme = theme_key(keys::THEME)?,
+        keys::LIGHT_THEME => appearance.light_theme = theme_key(keys::LIGHT_THEME)?,
+        keys::DARK_THEME => appearance.dark_theme = theme_key(keys::DARK_THEME)?,
+        keys::FONT_SIZE => {
+            appearance.font_size = value
+                .as_integer()
+                .and_then(|size| u16::try_from(size).ok())
+                .filter(|size| theme::FONT_SIZES.contains(size))
+                .ok_or(Problem::BadValue {
+                    key: keys::FONT_SIZE,
+                    why: "not a whole number of pixels from 10 to 24",
+                })?;
+        }
+        _ => {
+            appearance.font_family = Some(device_name(value).ok_or(Problem::BadValue {
+                key: keys::FONT_FAMILY,
+                why: "not a font's name",
+            })?);
+        }
+    }
+    Ok(())
+}
+
 /// Takes a device's choice: a device name, as the settings keep one.
 fn take_device(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem> {
     let (kind, key) = match key {
@@ -535,8 +597,8 @@ fn take_device(settings: &mut Settings, key: &str, value: &Value) -> Result<(), 
     Ok(())
 }
 
-/// A device name as the settings keep one: a non-empty string without control characters, at most
-/// [`MAX_DEVICE_NAME`] bytes.
+/// A device name (or a font family's) as the settings keep one: a non-empty string without control characters, at
+/// most [`MAX_DEVICE_NAME`] bytes.
 fn device_name(value: &Value) -> Option<String> {
     let name = value.as_str()?;
     let shaped = !name.is_empty() && name.len() <= MAX_DEVICE_NAME && !name.chars().any(char::is_control);
@@ -593,6 +655,7 @@ pub fn render(settings: &Settings) -> String {
             table.insert(key.to_owned(), Value::String(name.to_owned()));
         }
     }
+    render_appearance(&settings.appearance, &mut table);
     let accounts: Table = settings
         .accounts
         .iter()
@@ -615,6 +678,28 @@ pub fn render(settings: &Settings) -> String {
         table.insert(keys::FIRST_ACCOUNT.to_owned(), Value::String(first.clone()));
     }
     table.to_string()
+}
+
+/// How the app looks, into the file's table (the font family only when one is named).
+fn render_appearance(appearance: &Appearance, table: &mut Table) {
+    table.insert(
+        keys::FOLLOW_SYSTEM_THEME.to_owned(),
+        Value::Boolean(appearance.follow_system),
+    );
+    for (key, theme) in [
+        (keys::THEME, appearance.theme),
+        (keys::LIGHT_THEME, appearance.light_theme),
+        (keys::DARK_THEME, appearance.dark_theme),
+    ] {
+        table.insert(key.to_owned(), Value::String(theme.to_owned()));
+    }
+    table.insert(
+        keys::FONT_SIZE.to_owned(),
+        Value::Integer(i64::from(appearance.font_size)),
+    );
+    if let Some(family) = &appearance.font_family {
+        table.insert(keys::FONT_FAMILY.to_owned(), Value::String(family.clone()));
+    }
 }
 
 /// The settings as read from their file, and what was wrong with it.

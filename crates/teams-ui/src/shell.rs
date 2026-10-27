@@ -68,6 +68,7 @@ use crate::trace::{TraceLine, ViewTrace};
 use crate::view::status_text;
 
 actions!(teams_ui, [ToggleSwitcher, ToggleSearch, NextAccount, PreviousAccount]);
+actions!(teams_ui, [FontLarger, FontSmaller, FontReset]);
 actions!(
     teams_ui,
     [
@@ -135,6 +136,11 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-shift-f", ToggleSearch, None),
         KeyBinding::new("ctrl-alt-down", NextAccount, None),
         KeyBinding::new("ctrl-alt-up", PreviousAccount, None),
+        // Teams' zoom keys, on the base font size
+        KeyBinding::new("ctrl-=", FontLarger, None),
+        KeyBinding::new("ctrl-+", FontLarger, None),
+        KeyBinding::new("ctrl--", FontSmaller, None),
+        KeyBinding::new("ctrl-0", FontReset, None),
         KeyBinding::new("ctrl-shift-c", CallChat, None),
         KeyBinding::new("ctrl-shift-j", JoinCall, None),
         KeyBinding::new("ctrl-shift-s", AnswerCall, None),
@@ -709,6 +715,12 @@ impl Shell {
         &self.list
     }
 
+    /// The settings view the conversation pane shows when Settings is chosen.
+    #[must_use]
+    pub fn settings_view(&self) -> &Entity<SettingsView> {
+        &self.settings_view
+    }
+
     /// The settings the shell keeps the selected chat in.
     #[must_use]
     pub fn settings(&self) -> &Entity<SettingsModel> {
@@ -839,6 +851,31 @@ impl Shell {
                 cx.notify();
             }
         }
+    }
+
+    /// The base font size a step larger (`step` 1), smaller (-1) or back to the default (`None`), kept in the settings.
+    pub fn step_font(&mut self, step: Option<i32>, cx: &mut Context<Self>) {
+        self.settings.update(cx, |settings, cx| {
+            settings.change(
+                |settings| {
+                    let appearance = &mut settings.appearance;
+                    appearance.font_size = step.map_or(theme::FONT_SIZE, |step| appearance.stepped_font_size(step));
+                },
+                cx,
+            );
+        });
+    }
+
+    /// The handlers of the shell's own keys (the switcher, the search, the accounts, the zoom) on its root.
+    fn shell_keys(shell: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
+        shell
+            .on_action(cx.listener(|this, _: &ToggleSwitcher, window, cx| this.toggle_switcher(window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleSearch, window, cx| this.toggle_search(window, cx)))
+            .on_action(cx.listener(|this, _: &NextAccount, _, cx| this.cycle_account(true, cx)))
+            .on_action(cx.listener(|this, _: &PreviousAccount, _, cx| this.cycle_account(false, cx)))
+            .on_action(cx.listener(|this, _: &FontLarger, _, cx| this.step_font(Some(1), cx)))
+            .on_action(cx.listener(|this, _: &FontSmaller, _, cx| this.step_font(Some(-1), cx)))
+            .on_action(cx.listener(|this, _: &FontReset, _, cx| this.step_font(None, cx)))
     }
 
     /// Opens the switcher, or closes it when it is open.
@@ -1429,10 +1466,7 @@ impl Render for Shell {
             .on_mouse_move(cx.listener(|this, _: &MouseMoveEvent, _, cx| this.used(cx)))
             .capture_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, _, cx| this.used(cx)))
             .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, _, cx| this.used(cx)))
-            .on_action(cx.listener(|this, _: &ToggleSwitcher, window, cx| this.toggle_switcher(window, cx)))
-            .on_action(cx.listener(|this, _: &ToggleSearch, window, cx| this.toggle_search(window, cx)))
-            .on_action(cx.listener(|this, _: &NextAccount, _, cx| this.cycle_account(true, cx)))
-            .on_action(cx.listener(|this, _: &PreviousAccount, _, cx| this.cycle_account(false, cx)))
+            .map(|shell| Self::shell_keys(shell, cx))
             // the call keys only in a build that shows calls: elsewhere they reach whatever else takes them
             .when(self.models.calls.read(cx).shows(), |shell| {
                 shell

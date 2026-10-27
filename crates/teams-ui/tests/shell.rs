@@ -680,6 +680,88 @@ fn the_settings_view_changes_the_settings() {
     );
 }
 
+#[test]
+fn the_settings_view_chooses_the_theme_and_the_font_size_and_the_zoom_keys_step_it() {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig, Settings::default(), Arc::new(ViewTrace::off()));
+    cx.update(|_, cx| shell.update(cx, Shell::show_settings));
+    // following the system: a theme for each of its modes
+    click(cx, "dark-theme-nord");
+    assert_eq!(settings_of(&shell, cx).appearance.dark_theme, "nord");
+    assert!(bounds(cx, "theme-dracula").is_none(), "no single theme while following");
+    click(cx, "follow-system-theme");
+    click(cx, "theme-dracula");
+    click(cx, "font-larger");
+    click(cx, "font-larger");
+    click(cx, "font-smaller");
+    let appearance = settings_of(&shell, cx).appearance;
+    assert!(!appearance.follow_system);
+    assert_eq!(appearance.theme, "dracula");
+    assert_eq!(appearance.font_size, teams_ui::theme::FONT_SIZE + 1);
+    assert!(
+        bounds(cx, "light-theme-nord").is_none(),
+        "no sides while one theme is chosen"
+    );
+    assert!(bounds(cx, "font-family").is_some(), "the font picker is drawn");
+
+    cx.simulate_keystrokes("ctrl-=");
+    cx.simulate_keystrokes("ctrl-=");
+    assert_eq!(
+        settings_of(&shell, cx).appearance.font_size,
+        teams_ui::theme::FONT_SIZE + 3
+    );
+    cx.simulate_keystrokes("ctrl--");
+    assert_eq!(
+        settings_of(&shell, cx).appearance.font_size,
+        teams_ui::theme::FONT_SIZE + 2
+    );
+    cx.simulate_keystrokes("ctrl-0");
+    assert_eq!(settings_of(&shell, cx).appearance.font_size, teams_ui::theme::FONT_SIZE);
+}
+
+#[test]
+fn the_font_picker_shows_a_family_chosen_elsewhere_and_the_settings_scroll() {
+    let rig = seeded();
+    let settings = Settings {
+        appearance: teams_ui::theme::Appearance {
+            font_size: *teams_ui::theme::FONT_SIZES.end(),
+            ..teams_ui::theme::Appearance::default()
+        },
+        ..Settings::default()
+    };
+    let (shell, cx) = shell_window(&rig, settings, Arc::new(ViewTrace::off()));
+    cx.update(|_, cx| shell.update(cx, Shell::show_settings));
+    let shown = |cx: &mut VisualTestContext| {
+        let _ = bounds(cx, "settings");
+        cx.update(|_, cx| shell.read(cx).settings_view().read(cx).shown_font(cx))
+    };
+    assert_eq!(shown(cx).as_deref(), Some(teams_ui::settings_view::SYSTEM_FONT_LABEL));
+    // another account's view (they share the one settings model) chooses a family
+    let model = cx.update(|_, cx| shell.read(cx).settings().clone());
+    cx.update(|_, cx| {
+        model.update(cx, |model, cx| {
+            model.change(
+                |settings| settings.appearance.font_family = Some("Noto Sans".to_owned()),
+                cx,
+            );
+        });
+    });
+    assert_eq!(shown(cx).as_deref(), Some("Noto Sans"));
+
+    // in a small window the log's controls are below the pane: a scroll brings them up
+    cx.simulate_resize(gpui::size(px(800.0), px(400.0)));
+    let before = bounds(cx, "log-level-debug").expect("drawn").origin.y;
+    let pane = bounds(cx, "settings").expect("drawn");
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position: pane.center(),
+        delta: gpui::ScrollDelta::Pixels(gpui::point(px(0.0), px(-400.0))),
+        modifiers: Modifiers::none(),
+        touch_phase: gpui::TouchPhase::Moved,
+    });
+    let after = bounds(cx, "log-level-debug").expect("drawn").origin.y;
+    assert!(after < before, "the settings scrolled: {before:?} to {after:?}");
+}
+
 fn device_info(kind: DeviceKind, name: &str, description: &str) -> DeviceInfo {
     DeviceInfo {
         kind,

@@ -236,7 +236,7 @@ fn the_theme_is_ours_compact_and_light_at_first(cx: &mut TestAppContext) {
         assert_eq!(kit.mode, ThemeMode::Light);
         assert_eq!(kit.light_theme.name.as_ref(), LIGHT);
         assert_eq!(kit.dark_theme.name.as_ref(), DARK);
-        assert_eq!(kit.font_size, px(FONT_SIZE));
+        assert_eq!(kit.font_size, px(f32::from(FONT_SIZE)));
         assert_eq!(kit.radius, px(4.0));
         assert!(!kit.shadow);
         assert_eq!(kit.background, rgb(LIGHT_PALETTE.background).into());
@@ -264,7 +264,7 @@ fn the_theme_switches_live_and_every_window_redraws(cx: &mut TestAppContext) {
         assert_eq!(kit.mode, ThemeMode::Dark);
         assert_eq!(kit.background, rgb(DARK_PALETTE.background).into());
         assert_eq!(kit.foreground, rgb(DARK_PALETTE.foreground).into());
-        assert_eq!(kit.font_size, px(FONT_SIZE), "compact in either mode");
+        assert_eq!(kit.font_size, px(f32::from(FONT_SIZE)), "compact in either mode");
     });
     let dark = renders(&view, &mut cx);
     assert!(dark > before, "the window redrew in the dark theme without being asked");
@@ -284,6 +284,66 @@ fn a_followed_window_sets_the_mode_from_its_appearance(cx: &mut TestAppContext) 
     // the test platform's windows are light: following one switches back at once
     let following = cx.update(theme::follow);
     assert_eq!(cx.read(theme::mode), ThemeMode::Light);
+    drop(following);
+}
+
+#[gpui::test]
+fn a_theme_chosen_whatever_the_system_says_holds_and_the_font_reaches_the_kit(cx: &mut TestAppContext) {
+    let (view, mut cx) = compose(cx);
+    let chosen = theme::Appearance {
+        follow_system: false,
+        theme: "solarized-dark",
+        font_size: 18,
+        font_family: Some("DejaVu Sans".to_owned()),
+        ..theme::Appearance::default()
+    };
+    cx.update(|_, cx| theme::set_appearance(&chosen, cx));
+    cx.run_until_parked();
+    cx.read(|cx| {
+        let kit = Theme::global(cx);
+        assert_eq!(kit.mode, ThemeMode::Dark);
+        assert_eq!(kit.background, rgb(theme::SOLARIZED_DARK_PALETTE.background).into());
+        assert_eq!(kit.font_size, px(18.0));
+        assert_eq!(kit.font_family.as_ref(), "DejaVu Sans");
+        assert_eq!(theme::active(cx).key, "solarized-dark");
+    });
+    // the system turning light doesn't move it
+    cx.update(|_, cx| theme::apply(WindowAppearance::Light, cx));
+    assert_eq!(cx.read(theme::current), theme::SOLARIZED_DARK_PALETTE);
+
+    // following again: the system's mode picks the side's theme, the font back to the system's
+    let following = theme::Appearance {
+        dark_theme: "high-contrast",
+        ..theme::Appearance::default()
+    };
+    cx.update(|_, cx| theme::set_appearance(&following, cx));
+    assert_eq!(cx.read(theme::current), LIGHT_PALETTE);
+    cx.read(|cx| assert_eq!(Theme::global(cx).font_family.as_ref(), theme::SYSTEM_FONT));
+    cx.update(|_, cx| theme::apply(WindowAppearance::Dark, cx));
+    assert_eq!(cx.read(theme::current), theme::HIGH_CONTRAST_PALETTE);
+    cx.read(|cx| assert_eq!(Theme::global(cx).mode, ThemeMode::Dark));
+    assert_eq!(value(&view, &mut cx), "", "switching keeps the window's state");
+}
+
+#[gpui::test]
+fn the_settings_choice_is_followed_live(cx: &mut TestAppContext) {
+    cx.update(theme::init);
+    let settings = cx.new(|_| teams_ui::SettingsModel::in_memory(teams_ui::Settings::default()));
+    let following = cx.update(|cx| theme::follow_settings(&settings, cx));
+    assert_eq!(cx.read(theme::current), LIGHT_PALETTE);
+    settings.update(cx, |model, cx| {
+        model.change(
+            |settings| {
+                settings.appearance.follow_system = false;
+                settings.appearance.theme = "dracula";
+                settings.appearance.font_size = 12;
+            },
+            cx,
+        );
+    });
+    cx.run_until_parked();
+    assert_eq!(cx.read(theme::current), theme::DRACULA_PALETTE);
+    cx.read(|cx| assert_eq!(Theme::global(cx).font_size, px(12.0)));
     drop(following);
 }
 
@@ -346,12 +406,16 @@ fn the_app_s_window_draws_at_the_theme_s_font_size(cx: &mut TestAppContext) {
             teams_ui::window::open(cx, teams_ui::window::LAB_APP_ID, "lab a".into(), parts)
         })
         .expect("the window opens");
-    assert_eq!(rem_size(window, cx), px(FONT_SIZE));
+    assert_eq!(rem_size(window, cx), px(f32::from(FONT_SIZE)));
 
     cx.update(|cx| theme::apply(WindowAppearance::Dark, cx));
-    assert_eq!(rem_size(window, cx), px(FONT_SIZE), "compact in the dark theme too");
+    assert_eq!(
+        rem_size(window, cx),
+        px(f32::from(FONT_SIZE)),
+        "compact in the dark theme too"
+    );
 
     // a font size changed in the theme reaches the drawn window, not only the kit's global
-    cx.update(|cx| Theme::global_mut(cx).font_size = px(FONT_SIZE + 2.0));
-    assert_eq!(rem_size(window, cx), px(FONT_SIZE + 2.0));
+    cx.update(|cx| Theme::global_mut(cx).font_size = px(f32::from(FONT_SIZE) + 2.0));
+    assert_eq!(rem_size(window, cx), px(f32::from(FONT_SIZE) + 2.0));
 }

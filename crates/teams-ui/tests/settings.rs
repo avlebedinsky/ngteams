@@ -15,6 +15,7 @@ use teams_ui::settings::{
     AccountSettings, DEFAULT_IDLE_MINUTES, DIR_MODE, FILE_MODE, FirstRunState, LogLevel, ManualStatus, Notifications,
     Problem, Settings, SettingsFile, SettingsModel, attach_devices, parse, render,
 };
+use teams_ui::theme::{self, Appearance, THEMES};
 
 const CHAT: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces";
 
@@ -43,6 +44,14 @@ fn changed() -> Settings {
         microphone: Some("alsa_input.usb-headset".to_owned()),
         speaker: None,
         camera: Some("v4l2_camera".to_owned()),
+        appearance: Appearance {
+            follow_system: false,
+            theme: "nord",
+            light_theme: "solarized-light",
+            dark_theme: "high-contrast",
+            font_size: 17,
+            font_family: Some("Noto Sans".to_owned()),
+        },
         accounts: [(
             "8:orgid:00000000-0000-4000-8000-00000000000b".to_owned(),
             AccountSettings {
@@ -589,4 +598,71 @@ fn an_account_removed_leaves_nothing_of_its_own_and_the_next_takes_the_first_s_p
     settings.forget_account(OTHER, None);
     assert_eq!((settings.selected_chat, settings.first_account), (None, None));
     assert_eq!(settings.manual_status, ManualStatus::default());
+}
+
+#[test]
+fn the_theme_follows_the_system_by_default_and_every_choice_of_how_the_app_looks_goes_through_the_file() {
+    let defaults = Settings::default().appearance;
+    assert!(defaults.follow_system);
+    assert_eq!(
+        (defaults.light_theme, defaults.dark_theme),
+        (theme::LIGHT_KEY, theme::DARK_KEY)
+    );
+    assert_eq!(defaults.font_size, theme::FONT_SIZE);
+    assert_eq!(defaults.font_family, None, "the system's UI font");
+    assert!(
+        !render(&Settings::default()).contains("font_family"),
+        "nothing written for the system's"
+    );
+
+    for spec in &THEMES {
+        for follow_system in [false, true] {
+            let settings = Settings {
+                appearance: Appearance {
+                    follow_system,
+                    theme: spec.key,
+                    light_theme: spec.key,
+                    dark_theme: spec.key,
+                    font_size: *theme::FONT_SIZES.end(),
+                    font_family: Some("DejaVu Sans".to_owned()),
+                },
+                ..Settings::default()
+            };
+            let (read, problems) = parse(&render(&settings)).expect("TOML");
+            assert_eq!(read, settings);
+            assert!(problems.is_empty(), "{problems:?}");
+        }
+    }
+}
+
+#[test]
+fn a_theme_this_app_doesn_t_know_or_a_font_size_out_of_range_keeps_its_default() {
+    for (bad, key) in [
+        ("theme = \"purple\"", "theme"),
+        ("light_theme = \"Teams Light\"", "light_theme"),
+        ("dark_theme = 3", "dark_theme"),
+        ("follow_system_theme = \"yes\"", "follow_system_theme"),
+        ("font_size = 9", "font_size"),
+        ("font_size = 25", "font_size"),
+        ("font_size = 14.5", "font_size"),
+        ("font_family = \"\"", "font_family"),
+        ("font_family = \"a\\nb\"", "font_family"),
+    ] {
+        let (read, problems) = parse(bad).expect("TOML");
+        assert_eq!(read, Settings::default(), "{bad}");
+        assert!(
+            matches!(&problems[..], [Problem::BadValue { key: found, .. }] if *found == key),
+            "{bad}: {problems:?}"
+        );
+    }
+}
+
+#[test]
+fn the_font_size_steps_within_its_range() {
+    let mut appearance = Appearance::default();
+    assert_eq!(appearance.stepped_font_size(1), theme::FONT_SIZE + 1);
+    appearance.font_size = *theme::FONT_SIZES.end();
+    assert_eq!(appearance.stepped_font_size(1), *theme::FONT_SIZES.end());
+    appearance.font_size = *theme::FONT_SIZES.start();
+    assert_eq!(appearance.stepped_font_size(-1), *theme::FONT_SIZES.start());
 }
