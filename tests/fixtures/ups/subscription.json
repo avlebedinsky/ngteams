@@ -1,0 +1,88 @@
+{
+  "_synthetic": "Made up, in the shape of the web client's presence subscriptions and UPS's answers in the lab captures of 2026-10-20 to 2026-10-26 (755 subscriptions, ab-trouter, ab-chat, ab-call, abc-call and others; read locally): POST <presence base>/v1/pubsub/subscriptions/<the endpoint's epid> with no trailing slash and no query, a JSON object of exactly trouterUri (the socket's push URL, its surl, then unifiedPresenceService), shouldPurgePreviousSubscriptions, subscriptionsToAdd and subscriptionsToRemove (each a list of {mri, source: ups}); answered 200 as application/json with addStatuses and removeStatuses, one item per MRI asked (mri, source, status 20200). The web client also sent x-ms-endpoint-id (the path's epid again), its caller, session and correlation ids and a cookie, which the native client leaves out. <guid:a>, <guid:b>, <guid:c> are lab accounts' object ids, <endpoint> the made-up epid; tests fill them in.",
+  "content_type": "application/json",
+  "path": "/ups/noam/v1/pubsub/subscriptions/<endpoint>",
+  "cases": [
+    {
+      "name": "the first subscription of a connection: the endpoint's earlier ones purged, the people watched added",
+      "request": {
+        "trouterUri": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000A/unifiedPresenceService",
+        "shouldPurgePreviousSubscriptions": true,
+        "subscriptionsToAdd": [
+          {
+            "mri": "8:orgid:<guid:a>",
+            "source": "ups"
+          },
+          {
+            "mri": "8:orgid:<guid:b>",
+            "source": "ups"
+          }
+        ],
+        "subscriptionsToRemove": []
+      },
+      "answer": {
+        "addStatuses": [
+          {
+            "mri": "8:orgid:<guid:a>",
+            "source": "ups",
+            "status": 20200
+          },
+          {
+            "mri": "8:orgid:<guid:b>",
+            "source": "ups",
+            "status": 20200
+          }
+        ],
+        "removeStatuses": []
+      }
+    },
+    {
+      "name": "someone newly watched added beside the earlier ones",
+      "request": {
+        "trouterUri": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000A/unifiedPresenceService",
+        "shouldPurgePreviousSubscriptions": false,
+        "subscriptionsToAdd": [
+          {
+            "mri": "8:orgid:<guid:c>",
+            "source": "ups"
+          }
+        ],
+        "subscriptionsToRemove": []
+      },
+      "answer": {
+        "addStatuses": [
+          {
+            "mri": "8:orgid:<guid:c>",
+            "source": "ups",
+            "status": 20200
+          }
+        ],
+        "removeStatuses": []
+      }
+    },
+    {
+      "name": "someone no longer watched removed",
+      "request": {
+        "trouterUri": "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000A/unifiedPresenceService",
+        "shouldPurgePreviousSubscriptions": false,
+        "subscriptionsToAdd": [],
+        "subscriptionsToRemove": [
+          {
+            "mri": "8:orgid:<guid:b>",
+            "source": "ups"
+          }
+        ]
+      },
+      "answer": {
+        "addStatuses": [],
+        "removeStatuses": [
+          {
+            "mri": "8:orgid:<guid:b>",
+            "source": "ups",
+            "status": 20200
+          }
+        ]
+      }
+    }
+  ]
+}

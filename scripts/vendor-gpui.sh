@@ -5,7 +5,8 @@
 #   gpui-pre       `ExternalSurface` (a dmabuf or CPU pixels) as the Linux payload of `PaintSurface`, and
 #                  `Window::paint_external_surface` (0001)
 #   gpui-pre-wgpu  the renderer's side: dmabufs imported through wgpu-hal Vulkan and copied on the GPU, CPU pixels
-#                  uploaded into a texture kept per surface, by damaged rectangle (0001)
+#                  uploaded into a texture kept per surface, by damaged rectangle (0001); and, our own, a weight or
+#                  style the family has no face of drawn anyway: a variable face at that weight, else synthesized (0002)
 #
 # Each source is the crates.io archive of GPUI_VERSION, verified against SHA256 below (the release's crates.io
 # checksum: the `cksum` of its line in https://index.crates.io/gp/ui/<crate>, also what Cargo.lock recorded for the
@@ -36,7 +37,7 @@ mode=vendor
 case "${1:-}" in
   "") ;;
   --check) mode=check ;;
-  -h | --help) sed -n '2,17s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"; exit 0 ;;
+  -h | --help) sed -n '2,19s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"; exit 0 ;;
   *) die "unknown argument: $1 (see --help)" ;;
 esac
 

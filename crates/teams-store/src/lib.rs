@@ -28,6 +28,7 @@ pub mod profiles;
 mod runs;
 pub mod schema;
 pub mod search;
+pub mod snapshot;
 pub mod state;
 pub mod teams;
 
@@ -77,6 +78,9 @@ pub enum StoreError {
     /// Another engine runs on this account (in this process or another): its lock is held.
     #[error("another engine runs on this account: its lock {} is held", path.display())]
     EngineRunning { path: PathBuf },
+    /// A store's copy ([`snapshot::snapshot`]) failed SQLite's check.
+    #[error("the store's copy at {} failed SQLite's check", path.display())]
+    Snapshot { path: PathBuf },
 }
 
 /// The account's engine lock, held until it is dropped ([`Store::engine_lock`]): one engine per account, so two never

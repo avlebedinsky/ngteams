@@ -28,7 +28,8 @@ use gpui_component::command::{Command, CommandItem, CommandState};
 use teams_store::search::{MATCH_END, MATCH_START};
 
 use crate::bridge::Core;
-use crate::chat_list::{ChatList, format_time};
+use crate::chat_list::ChatList;
+use crate::clock::{self, HourCycle};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 
@@ -151,8 +152,7 @@ pub async fn find(core: &dyn Core, query: String, chats: Vec<(String, SharedStri
 #[must_use]
 pub fn listed_chats(list: &Entity<ChatList>, cx: &App) -> Vec<(String, SharedString)> {
     list.read(cx)
-        .rows()
-        .iter()
+        .all_rows()
         .map(|row| (row.id.clone(), row.name.clone()))
         .collect()
 }
@@ -173,10 +173,11 @@ pub fn trace_hits(trace: &ViewTrace, view: &'static str, hits: &[Hit]) {
     );
 }
 
-/// A hit's row: the chat, the sender and the time over the text around the match, the matched terms marked.
+/// A hit's row: the chat, the sender and the time (on `cycle`'s clock) over the text around the match, the matched
+/// terms marked.
 #[must_use]
-pub fn hit_row(hit: &Hit, palette: Palette) -> gpui::Div {
-    let when = format_time(hit.target.arrival_time, &Local::now());
+pub fn hit_row(hit: &Hit, palette: Palette, cycle: HourCycle) -> gpui::Div {
+    let when = clock::list_time(hit.target.arrival_time, &Local::now(), cycle);
     let marked = HighlightStyle {
         font_weight: Some(FontWeight::BOLD),
         color: Some(rgb(palette.brand).into()),
@@ -209,7 +210,7 @@ pub fn hit_item(hit: &Hit) -> CommandItem {
     let shown = hit.clone();
     CommandItem::new()
         .label(hit.snippet.clone())
-        .child(move |_, cx| hit_row(&shown, theme::current(cx)))
+        .child(move |_, cx| hit_row(&shown, theme::current(cx), clock::cycle(cx)))
 }
 
 /// What the search tells the shell.

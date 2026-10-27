@@ -421,6 +421,7 @@ fn what_isnt_a_messages_text_is_refused() {
         src: "https://example.com/image.png".to_owned(),
         alt: None,
         item_type: None,
+        ..Image::default()
     });
     assert_eq!(MessageText::new(rich(vec![image]), []), Err(ComposeError::Image));
     for href in ["javascript:alert(1)", "data:text/html,hi", "not a url"] {

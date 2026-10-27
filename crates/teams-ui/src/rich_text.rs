@@ -5,15 +5,21 @@
 //!
 //! - [`layout`] turns the model into [`Rendered`]: [`Block::Text`] (a paragraph's text with its styled pieces and its
 //!   links) and [`Block::Quote`] (a reply's or a plain quote, with what it quotes in blocks of its own). A line break
-//!   is a `\n` in the text; marks (bold, italic, underline, strike, code) style their pieces; a mention is highlighted,
-//!   the account's own more strongly (a mention's `itemid` names its entry in `properties.mentions`, whose MRI says
-//!   whom it names; an entry this build can't read names nobody); a link is a clickable range; an image is a
-//!   placeholder (`Image`, with its `alt`), never fetched, followed in a chat's message by a link that opens the
-//!   message in Teams on the web ([`layout_with_web_link`], [`message_web_link`]): sending and showing images stay
-//!   deferred (M2 Task 21, `docs/backlog/ams-image-sending.md`).
-//! - [`render`] draws it: a link opens through GPUI's `open_url` (the portal or `xdg-open`; in tests the test
-//!   platform's record or the UI sandbox's no-op opener), and only an `http`, `https` or `mailto` one (the model
-//!   keeps no other, and the renderer checks again).
+//!   is a `\n` in the text; marks (bold, italic, underline, strike, code) style their pieces; a mention is drawn in
+//!   the brand colour, the account's own bold in the mention colour, neither on a box (a mention's `itemid` names its
+//!   entry in `properties.mentions`, whose MRI says whom it names; an entry this build can't read names nobody); a
+//!   link is a clickable range; an emoticon (`<img itemtype="http://schema.skype.com/Emoji" itemid="<id>">`) keeps
+//!   the place of a few spaces in its paragraph's text ([`InlineEmoticon`]); a picture pasted into the message (an
+//!   `<img>` naming a view of an AMS object, not inside a link or a quote) is a block of its own ([`Block::Picture`]);
+//!   any other image is a placeholder (`Image`, with its `alt`), followed in a chat's message by a link that opens the
+//!   message in Teams on the web ([`layout_with_web_link`], [`message_web_link`]), as is a picture that can't be
+//!   shown. A message of emoticons alone ([`Rendered::emoticons_only`]) is drawn as Teams draws one: large, playing,
+//!   without its bubble.
+//! - [`render`] draws it: paragraphs line under line with no gap between them, as Teams sets them; pictures and
+//!   emoticons through `crate::inline`, their bytes asked of the engine of the [`PictureSource`] the view gave
+//!   ([`Rendered::with_source`]); a link opens through GPUI's `open_url` (the portal or `xdg-open`; in tests the test
+//!   platform's record or the UI sandbox's no-op opener), and only an `http`, `https` or `mailto` one (the model keeps
+//!   no other, and the renderer checks again).
 
 use std::collections::HashSet;
 use std::ops::Range;
@@ -25,12 +31,22 @@ use gpui::{
     rgb,
 };
 use serde_json::{Value, json};
-use teams_proto::chat::{Field, Marks, Mention, Node, Quote, RichText, WEB_CLIENT};
+use teams_proto::MessagePicture;
+use teams_proto::chat::{Field, Image, Marks, Mention, Node, Quote, RichText, WEB_CLIENT};
 
+use crate::inline::{Emoticon, InlineText, LARGE_EMOTICON, Picture};
+pub use crate::inline::{PictureEngine, PictureSource};
 use crate::theme::Palette;
 
-/// What an image shows: images are never fetched (M2 Task 21 left them deferred).
+/// What an image that isn't shown says.
 pub const IMAGE_PLACEHOLDER: &str = "Image";
+
+/// The place an emoticon keeps in its paragraph's text: an em and an en space, about as wide as the emoticon drawn
+/// over it at the text's height.
+pub const EMOTICON_PLACE: &str = "\u{2003}\u{2002}";
+
+/// The most emoticons a message of emoticons alone is drawn large with.
+pub const MOST_LARGE_EMOTICONS: usize = 10;
 
 /// The text of the link after an image's placeholder ([`layout_with_web_link`]).
 pub const IMAGE_WEB_LINK: &str = "open in Teams on the web";
@@ -79,12 +95,22 @@ pub struct LinkRange {
     pub href: String,
 }
 
-/// A paragraph's text, its styled pieces (in order, not overlapping, covering the text) and its links.
+/// An emoticon in a paragraph: the place it keeps in the text ([`EMOTICON_PLACE`]), its id in Teams' catalog and its
+/// emoji.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InlineEmoticon {
+    pub range: Range<usize>,
+    pub id: String,
+    pub alt: Option<String>,
+}
+
+/// A paragraph's text, its styled pieces (in order, not overlapping, covering the text), its links and its emoticons.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TextBlock {
     pub text: String,
     pub pieces: Vec<(Range<usize>, Style)>,
     pub links: Vec<LinkRange>,
+    pub emoticons: Vec<InlineEmoticon>,
 }
 
 impl TextBlock {
@@ -111,7 +137,33 @@ impl TextBlock {
 
     /// Nothing a reader would see.
     fn is_blank(&self) -> bool {
-        self.text.trim().is_empty() && !self.pieces.iter().any(|(_, style)| style.image)
+        self.text.trim().is_empty() && !self.pieces.iter().any(|(_, style)| style.image) && self.emoticons.is_empty()
+    }
+
+    /// The text as a reader would copy it: each emoticon's place given its emoji.
+    #[must_use]
+    pub fn plain(&self) -> String {
+        let mut plain = String::with_capacity(self.text.len());
+        let mut at = 0;
+        for emoticon in &self.emoticons {
+            plain.push_str(&self.text[at..emoticon.range.start]);
+            plain.push_str(emoticon.alt.as_deref().unwrap_or_default());
+            at = emoticon.range.end;
+        }
+        plain.push_str(&self.text[at..]);
+        plain
+    }
+
+    /// Whether it shows nothing but emoticons (and space).
+    fn only_emoticons(&self) -> bool {
+        let mut at = 0;
+        for emoticon in &self.emoticons {
+            if !self.text[at..emoticon.range.start].trim().is_empty() {
+                return false;
+            }
+            at = emoticon.range.end;
+        }
+        self.text[at..].trim().is_empty() && self.links.is_empty()
     }
 
     /// The pieces with any style but the plain one.
@@ -135,11 +187,22 @@ pub struct QuoteBlock {
     pub blocks: Vec<Block>,
 }
 
+/// A picture pasted into a message: the view its `src` names, its `alt`, the size the message gives it, and what is
+/// drawn when it can't be shown (its placeholder, with the link to the message in Teams on the web).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PictureBlock {
+    pub src: String,
+    pub alt: Option<String>,
+    pub size: Option<(u32, u32)>,
+    pub fallback: TextBlock,
+}
+
 /// One block of a message's text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Block {
     Text(TextBlock),
     Quote(QuoteBlock),
+    Picture(PictureBlock),
 }
 
 /// A message's rich text laid out to draw.
@@ -148,6 +211,51 @@ pub struct Rendered {
     pub blocks: Vec<Block>,
     /// The content was longer than `teams-proto` reads: only its first part is shown.
     pub truncated: bool,
+    /// Drawn bare, with no bubble behind it: Teams draws a message that is only an emoticon or a sticker large and on
+    /// the background (the header and the avatar stay). The chat view reads it for each message's bubble; what counts
+    /// as emoji-only is the emoji renderer's to decide, when it lays the message out (none is yet).
+    pub bare: bool,
+    /// Where its pictures and emoticons are asked for; without one a picture is its placeholder and an emoticon the
+    /// reaction pack's picture.
+    pub source: Option<PictureSource>,
+}
+
+impl Rendered {
+    /// It, its pictures and emoticons asked of `source`'s engine.
+    #[must_use]
+    pub fn with_source(mut self, source: PictureSource) -> Self {
+        self.source = Some(source);
+        self
+    }
+
+    /// Its emoticons, when it shows nothing else and has 1 to [`MOST_LARGE_EMOTICONS`] of them: a message Teams draws
+    /// large, playing, without its bubble ([`Self::bare`]).
+    #[must_use]
+    pub fn emoticons_only(&self) -> Option<Vec<&InlineEmoticon>> {
+        let mut emoticons = Vec::new();
+        for block in &self.blocks {
+            let Block::Text(text) = block else { return None };
+            if !text.only_emoticons() {
+                return None;
+            }
+            emoticons.extend(&text.emoticons);
+        }
+        (1..=MOST_LARGE_EMOTICONS)
+            .contains(&emoticons.len())
+            .then_some(emoticons)
+    }
+
+    /// Whether its own text (not a quote of another message) mentions the account.
+    #[must_use]
+    pub fn mentions_me(&self) -> bool {
+        self.blocks.iter().any(|block| match block {
+            Block::Text(text) => text
+                .pieces
+                .iter()
+                .any(|(_, style)| style.mention == Some(Mentioned::Me)),
+            Block::Quote(_) | Block::Picture(_) => false,
+        })
+    }
 }
 
 /// The mentions of a message: which `itemid`s name the account.
@@ -220,10 +328,14 @@ pub fn layout_with_web_link(text: &RichText, mentions: &Mentions, web_link: Opti
     let mut builder = Builder::new(mentions);
     builder.web_link = web_link.filter(|link| opens(link)).map(str::to_owned);
     builder.walk(&text.nodes);
-    Rendered {
+    let mut rendered = Rendered {
         blocks: builder.finish(),
         truncated: text.truncated,
-    }
+        bare: false,
+        source: None,
+    };
+    rendered.bare = rendered.emoticons_only().is_some();
+    rendered
 }
 
 /// Builds the blocks of one level (the message's, or a quote's).
@@ -235,6 +347,8 @@ struct Builder<'a> {
     link: Option<String>,
     /// Where an image's placeholder links to ([`layout_with_web_link`]).
     web_link: Option<String>,
+    /// A quote's: its pictures stay placeholders, as another message's.
+    quoted: bool,
 }
 
 impl<'a> Builder<'a> {
@@ -245,6 +359,7 @@ impl<'a> Builder<'a> {
             current: TextBlock::default(),
             link: None,
             web_link: None,
+            quoted: false,
         }
     }
 
@@ -293,13 +408,44 @@ impl<'a> Builder<'a> {
                     self.walk(children);
                     self.link = outer;
                 }
-                Node::Image(image) => self.image(image.alt.as_deref()),
+                Node::Image(image) => self.image(image),
                 Node::Quote(quote) => self.quote(quote),
             }
         }
     }
 
-    fn image(&mut self, alt: Option<&str>) {
+    /// An emoticon keeps its place in the text; a picture of the message's own (not a quote's, nor inside a link) is a
+    /// block; any other image is its placeholder.
+    fn image(&mut self, image: &Image) {
+        let id = image.item_id.as_deref().filter(|id| !id.trim().is_empty());
+        if let (true, Some(id)) = (image.is_emoji(), id) {
+            let start = self.current.text.len();
+            self.push(EMOTICON_PLACE, Style::default());
+            self.current.emoticons.push(InlineEmoticon {
+                range: start..self.current.text.len(),
+                id: id.to_owned(),
+                alt: image.alt.clone(),
+            });
+            return;
+        }
+        if !self.quoted && self.link.is_none() && MessagePicture::of(&image.src).is_some() {
+            self.end_block();
+            let mut fallback = Builder::new(self.mentions);
+            fallback.web_link.clone_from(&self.web_link);
+            fallback.placeholder(image.alt.as_deref());
+            self.blocks.push(Block::Picture(PictureBlock {
+                src: image.src.clone(),
+                alt: image.alt.clone(),
+                size: image.size,
+                fallback: fallback.current,
+            }));
+            return;
+        }
+        self.placeholder(image.alt.as_deref());
+    }
+
+    /// An image's placeholder, with the link to the message after it ([`layout_with_web_link`]).
+    fn placeholder(&mut self, alt: Option<&str>) {
         let text = match alt.map(str::trim).filter(|alt| !alt.is_empty()) {
             Some(alt) => format!("[{IMAGE_PLACEHOLDER}: {alt}]"),
             None => format!("[{IMAGE_PLACEHOLDER}]"),
@@ -325,6 +471,7 @@ impl<'a> Builder<'a> {
     fn quote(&mut self, quote: &Quote) {
         self.end_block();
         let mut inner = Builder::new(self.mentions);
+        inner.quoted = true;
         inner.walk(&quote.body);
         self.blocks.push(Block::Quote(QuoteBlock {
             sender_name: quote.sender_name.clone().filter(|name| !name.trim().is_empty()),
@@ -356,7 +503,7 @@ fn tint(color: u32, alpha: f32) -> gpui::Hsla {
 }
 
 /// GPUI's highlight for a piece's style: bold, italic, underline (a link's too), strikethrough, the code background,
-/// the brand colour for a link or a mention, and for the account's own mention bold on a brand tint.
+/// the brand colour for a link or someone else's mention, and the account's own mention bold in the mention colour.
 #[must_use]
 pub fn highlight(style: Style, palette: Palette) -> HighlightStyle {
     let mut highlight = HighlightStyle::default();
@@ -384,9 +531,10 @@ pub fn highlight(style: Style, palette: Palette) -> HighlightStyle {
     if style.link || style.mention.is_some() {
         highlight.color = Some(rgb(palette.brand).into());
     }
+    // as Teams draws them: no box behind a mention, the account's own bold in the mention colour
     if style.mention == Some(Mentioned::Me) {
         highlight.font_weight = Some(FontWeight::BOLD);
-        highlight.background_color = Some(tint(palette.brand, 0.18));
+        highlight.color = Some(rgb(palette.mention).into());
     }
     if style.image {
         highlight.color = Some(rgb(palette.muted_foreground).into());
@@ -395,29 +543,59 @@ pub fn highlight(style: Style, palette: Palette) -> HighlightStyle {
     highlight
 }
 
-/// Draws `rendered`; `id` keeps its links' elements apart from another message's.
+/// Draws `rendered`; `id` keeps its links' and pictures' elements apart from another message's. A message of emoticons
+/// alone is drawn large and playing ([`Rendered::emoticons_only`]).
 #[must_use]
 pub fn render(id: &SharedString, rendered: &Arc<Rendered>, palette: Palette) -> AnyElement {
+    let draw = Draw {
+        id,
+        palette,
+        source: rendered.source.as_ref(),
+    };
+    if let Some(emoticons) = rendered.emoticons_only() {
+        return div()
+            .debug_selector(|| "rich-emoticons".to_owned())
+            .flex()
+            .flex_wrap()
+            .gap_1()
+            .children(emoticons.into_iter().map(|emoticon| {
+                Emoticon::new(
+                    &emoticon.id,
+                    emoticon.alt.as_deref(),
+                    LARGE_EMOTICON,
+                    true,
+                    draw.source.cloned(),
+                )
+            }))
+            .into_any_element();
+    }
     let mut path = Vec::new();
     div()
         .flex()
         .flex_col()
-        .gap_1()
-        .children(blocks(id, &mut path, &rendered.blocks, palette))
+        .children(blocks(&draw, &mut path, &rendered.blocks))
         .into_any_element()
+}
+
+/// What every block of one message is drawn with.
+struct Draw<'a> {
+    id: &'a SharedString,
+    palette: Palette,
+    source: Option<&'a PictureSource>,
 }
 
 /// The elements of `blocks`; `path` names the block's place, for its element id. Recursive over quotes, as deep as
 /// the model.
-fn blocks(id: &SharedString, path: &mut Vec<usize>, blocks: &[Block], palette: Palette) -> Vec<AnyElement> {
+fn blocks(draw: &Draw<'_>, path: &mut Vec<usize>, blocks: &[Block]) -> Vec<AnyElement> {
     blocks
         .iter()
         .enumerate()
         .map(|(at, block)| {
             path.push(at);
             let element = match block {
-                Block::Text(text) => text_block(id, path, text, palette),
-                Block::Quote(quote) => quote_block(id, path, quote, palette),
+                Block::Text(text) => text_block(draw, path, text),
+                Block::Quote(quote) => quote_block(draw, path, quote),
+                Block::Picture(picture) => picture_block(draw, path, picture),
             };
             path.pop();
             element
@@ -425,7 +603,27 @@ fn blocks(id: &SharedString, path: &mut Vec<usize>, blocks: &[Block], palette: P
         .collect()
 }
 
-fn quote_block(id: &SharedString, path: &mut Vec<usize>, quote: &QuoteBlock, palette: Palette) -> AnyElement {
+/// A picture of the message's own, as Teams draws one: at its size, scaled down to the bubble's width, its aspect
+/// ratio kept; its placeholder when it can't be shown.
+fn picture_block(draw: &Draw<'_>, path: &[usize], picture: &PictureBlock) -> AnyElement {
+    let fallback = text_block(draw, path, &picture.fallback);
+    let reading = tint(draw.palette.border, 0.6);
+    div()
+        .debug_selector(|| "rich-picture".to_owned())
+        .py_1()
+        .child(Picture::new(
+            SharedString::from(format!("{}-picture-{path:?}", draw.id)),
+            &picture.src,
+            picture.size,
+            draw.source.cloned(),
+            reading,
+            fallback,
+        ))
+        .into_any_element()
+}
+
+fn quote_block(draw: &Draw<'_>, path: &mut Vec<usize>, quote: &QuoteBlock) -> AnyElement {
+    let palette = draw.palette;
     let header = quote.sender_name.clone().map(|name| {
         div()
             .text_xs()
@@ -435,6 +633,7 @@ fn quote_block(id: &SharedString, path: &mut Vec<usize>, quote: &QuoteBlock, pal
     });
     div()
         .debug_selector(|| "rich-quote".to_owned())
+        .my_1()
         .pl_2()
         .py_1()
         .border_l_2()
@@ -443,7 +642,7 @@ fn quote_block(id: &SharedString, path: &mut Vec<usize>, quote: &QuoteBlock, pal
         .flex()
         .flex_col()
         .children(header)
-        .children(blocks(id, path, &quote.blocks, palette))
+        .children(blocks(draw, path, &quote.blocks))
         .into_any_element()
 }
 
@@ -458,27 +657,46 @@ pub fn highlights(block: &TextBlock, palette: Palette) -> Vec<(Range<usize>, Hig
         .collect()
 }
 
-fn text_block(id: &SharedString, path: &[usize], block: &TextBlock, palette: Palette) -> AnyElement {
-    let highlights = highlights(block, palette);
+fn text_block(draw: &Draw<'_>, path: &[usize], block: &TextBlock) -> AnyElement {
+    let highlights = highlights(block, draw.palette);
     let styled = StyledText::new(block.text.clone()).with_highlights(highlights);
-    if block.links.is_empty() {
-        return div()
-            .w_full()
-            .debug_selector(|| "rich-text".to_owned())
-            .child(styled)
-            .into_any_element();
-    }
-    let element_id = SharedString::from(format!("{id}-{path:?}"));
-    let hrefs: Vec<String> = block.links.iter().map(|link| link.href.clone()).collect();
-    let ranges = block.links.iter().map(|link| link.range.clone()).collect();
-    let text = InteractiveText::new(element_id, styled).on_click(ranges, move |at, _: &mut Window, cx: &mut App| {
-        if let Some(href) = hrefs.get(at).filter(|href| opens(href)) {
-            cx.open_url(href);
-        }
-    });
+    let layout = styled.layout().clone();
+    let (selector, text) = if block.links.is_empty() {
+        ("rich-text", styled.into_any_element())
+    } else {
+        let element_id = SharedString::from(format!("{}-{path:?}", draw.id));
+        let hrefs: Vec<String> = block.links.iter().map(|link| link.href.clone()).collect();
+        let ranges = block.links.iter().map(|link| link.range.clone()).collect();
+        let text =
+            InteractiveText::new(element_id, styled).on_click(ranges, move |at, _: &mut Window, cx: &mut App| {
+                if let Some(href) = hrefs.get(at).filter(|href| opens(href)) {
+                    cx.open_url(href);
+                }
+            });
+        ("rich-link", text.into_any_element())
+    };
+    let text = if block.emoticons.is_empty() {
+        text
+    } else {
+        let emoticons = block
+            .emoticons
+            .iter()
+            .map(|emoticon| {
+                let drawn = Emoticon::new(
+                    &emoticon.id,
+                    emoticon.alt.as_deref(),
+                    px(20.0),
+                    false,
+                    draw.source.cloned(),
+                );
+                (emoticon.range.clone(), drawn.into_any_element())
+            })
+            .collect();
+        InlineText::new(text, layout, emoticons).into_any_element()
+    };
     div()
         .w_full()
-        .debug_selector(|| "rich-link".to_owned())
+        .debug_selector(move || selector.to_owned())
         .child(text)
         .into_any_element()
 }

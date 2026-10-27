@@ -17,7 +17,7 @@ use std::time::Duration;
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_core::engine::{self, Action, EngineHandle, EngineOptions, Event, Parts};
-use teams_core::{Outbox, Source};
+use teams_core::{NOTES, Outbox, Source};
 use teams_fence::{Fence, FenceLog, LiveMembershipSource, Mri, Roster};
 use teams_mock::{CHANNEL, CHAT_BASE, CSA_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, TEAM_CHANNEL};
 use teams_proto::chat::MessageText;
@@ -77,6 +77,12 @@ struct Rig {
 
 /// Lab account a's engine on the mock, without a push channel; its reads given CSA's base when `csa`.
 async fn rig(csa: bool, teams_retry: Duration) -> Rig {
+    rig_polling(csa, teams_retry, None).await
+}
+
+/// [`rig`], catching up at the start and then every `poll` when it is given (the read-only mode's
+/// [`EngineOptions::poll`]).
+async fn rig_polling(csa: bool, teams_retry: Duration, poll: Option<Duration>) -> Rig {
     let mock = ChatServiceMock::start().await.unwrap();
     let dir = tempfile::tempdir().unwrap();
     let log = SharedLog::default();
@@ -111,6 +117,7 @@ async fn rig(csa: bool, teams_retry: Duration) -> Rig {
             tick: Duration::from_millis(50),
             catch_up_retry: Duration::from_millis(500),
             teams_retry,
+            poll,
             ..EngineOptions::default()
         },
         known_names: Vec::new(),
@@ -291,4 +298,72 @@ async fn nothing_is_written_to_a_channel() {
         .count();
     assert_eq!(written, 0, "nothing but reads reached the service");
     assert!(rig.log.text().contains("\"verdict\":\"deny\""), "{}", rig.log.text());
+}
+
+/// CSA's answer with no teams and the account's own notes as its one favourite, in the captured shape
+/// (`tests/fixtures/csa/folders.json`).
+fn notes_favourite() -> serde_json::Value {
+    serde_json::json!({
+        "teams": [],
+        "metadata": {"isPartialData": false},
+        "conversationFolders": {
+            "isPartialResponse": false,
+            "conversationFolders": [{
+                "id": "made-up~Favorites",
+                "sortType": "UserDefinedCustomOrder",
+                "name": "Favorites",
+                "folderType": "Favorites",
+                "conversationFolderItems": [
+                    {"conversationId": NOTES, "createdTime": 1_760_000_000_100_u64, "threadType": "streamofnotes"}
+                ],
+                "isDeleted": false
+            }]
+        }
+    })
+}
+
+#[tokio::test]
+async fn notes_that_become_a_favourite_after_the_catch_up_are_synced_at_once() {
+    // the first run (and the first after the store kept favourites): the catch-up runs before the teams' read, so it
+    // can't know the notes are a favourite; no other catch-up comes within the test (the next poll is an hour away)
+    let mut rig = rig_polling(true, Duration::from_mins(5), Some(Duration::from_hours(1))).await;
+    rig.until(|event| match event {
+        Event::CaughtUp { .. } => Some(()),
+        Event::CatchUpFailed { error, .. } => panic!("catch-up failed: {error}"),
+        _ => None,
+    })
+    .await;
+    let notes_path = "/api/chatsvc/amer/v1/users/ME/conversations/48:notes/messages";
+    assert_eq!(rig.requests_to(notes_path).await, 0, "not a favourite yet");
+    rig.mock
+        .answer_next("GET", "/teams/users/me", 200, &notes_favourite())
+        .await;
+    let requests = rig.handle.requests();
+    assert_eq!(
+        requests.chat_listing().await.unwrap().favorites,
+        None,
+        "nothing read yet"
+    );
+    rig.until(|event| match event {
+        Event::Teams => Some(()),
+        Event::Failed { during, error } => panic!("failed {during}: {error}"),
+        _ => None,
+    })
+    .await;
+    // the notes synced right after the read stored them as a favourite: their row kept (the mock has none of them:
+    // never written, which is none yet), and the list told
+    rig.until(|event| match event {
+        Event::ConversationChanged { conversation } if conversation == NOTES => Some(()),
+        Event::Failed { during, error } => panic!("failed {during}: {error}"),
+        _ => None,
+    })
+    .await;
+    assert_eq!(
+        requests.chat_listing().await.unwrap().favorites,
+        Some(vec![NOTES.to_owned()])
+    );
+    let stored = requests.conversations(10).await.unwrap();
+    assert!(stored.iter().any(|conversation| conversation.id == NOTES), "{stored:?}");
+    assert_eq!(rig.requests_to(notes_path).await, 1);
+    assert_eq!(rig.requests_to(CSA_PATH).await, 1);
 }

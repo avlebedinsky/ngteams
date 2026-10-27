@@ -33,10 +33,12 @@ use teams_proto::chat::{ComposeError, MessageText, Node, RichText};
 use teams_store::{Applied, Member, Message, OutboxEntry, OutboxState, Reaction, ReadHorizon};
 use teams_ui::ViewTrace;
 use teams_ui::bridge::Core;
-use teams_ui::chat_view::{ChatView, MessageAction, PAGE, QUICK_REACTIONS, READ_DEBOUNCE};
+use teams_ui::chat_view::{
+    ChatView, DEFAULT_QUICK_REACTIONS, MessageAction, PAGE, QUICK_COUNT, READ_DEBOUNCE, quick_reactions,
+};
 use teams_ui::compose::{
-    Candidate, CantEdit, Compose, DraftMention, Mode, PREVIEW_MAX, Quoted, TYPING_EVERY, TypingThrottle, load,
-    matching, mention_query, message_text,
+    Candidate, CantEdit, Compose, DraftMention, Mode, PREVIEW_MAX, Quoted, READ_ONLY_APP, READ_ONLY_NOTES,
+    TYPING_EVERY, TypingThrottle, load, matching, mention_query, message_text,
 };
 use teams_ui::reaction_picker::{RECENT, Section};
 use teams_ui::sending::{Again, RowState};
@@ -246,6 +248,7 @@ fn an_edit_loads_the_text_back_its_mentions_by_mri_and_keeps_its_quote() {
             src: "https://example.test/i.png".to_owned(),
             alt: None,
             item_type: None,
+            ..teams_proto::chat::Image::default()
         })],
         truncated: false,
     };
@@ -694,6 +697,43 @@ fn a_delete_asks_first_and_escape_keeps_the_message() {
 }
 
 #[test]
+fn the_quick_reactions_are_the_account_s_most_used_then_teams_own() {
+    let frequent = |keys: &[&str]| keys.iter().map(|key| (*key).to_owned()).collect::<Vec<_>>();
+    assert_eq!(quick_reactions(&[]), ["like", "heart", "laugh", "surprised"]);
+    assert_eq!(
+        quick_reactions(&frequent(&["1f440_eyes", "heart"])),
+        ["1f440_eyes", "heart", "like", "laugh"],
+        "the most used first, Teams' own after them, none twice"
+    );
+    assert_eq!(
+        quick_reactions(&frequent(&["custom-key", "yes-tone2", "fire", "cool", "angry", "sad"])),
+        ["yes-tone2", "fire", "cool", "angry"],
+        "a key Teams doesn't offer left out, a skin tone kept, four at most"
+    );
+
+    // the view asks the engine, and its keys pick them in that order
+    let theirs = message(NOON, LAB_B, "<p>nice</p>");
+    let rig = rig_with(vec![theirs.clone()]);
+    *rig.core.frequent.lock().unwrap() = frequent(&["1f440_eyes"]);
+    let (view, cx, _) = chat_window(&rig, Settings::default());
+    assert_eq!(
+        cx.update(|_, cx| view.read(cx).quick().to_vec()),
+        ["1f440_eyes", "like", "heart", "laugh"]
+    );
+    act(&view, cx, MessageAction::React, &theirs.id);
+    assert!(cx.debug_bounds("pick-1f440_eyes").is_some());
+    keys(cx, "1");
+    assert_eq!(
+        actions(&rig),
+        [Action::React {
+            conversation: AB.to_owned(),
+            message_id: theirs.id.clone(),
+            key: "1f440_eyes".to_owned(),
+        }]
+    );
+}
+
+#[test]
 fn the_quick_reactions_set_the_account_s_own_and_a_chip_takes_it_back() {
     let theirs = message(NOON, LAB_B, "<p>nice</p>");
     let rig = rig_with(vec![theirs.clone()]);
@@ -709,7 +749,7 @@ fn the_quick_reactions_set_the_account_s_own_and_a_chip_takes_it_back() {
 
     act(&view, cx, MessageAction::React, &theirs.id);
     assert_eq!(
-        QUICK_REACTIONS,
+        DEFAULT_QUICK_REACTIONS[..QUICK_COUNT],
         ["like", "heart", "laugh", "surprised"],
         "M2 Task 10's capture"
     );
@@ -1232,6 +1272,8 @@ fn a_click_into_the_compose_box_closes_more_reactions_and_keeps_the_focus_there(
     let compose_box = cx.debug_bounds("compose").unwrap();
     let inside = [
         compose_box.center(),
+        // right of the picker, in the text area
+        point(picker.right() + px(24.0), compose_box.center().y),
         point(compose_box.left() + px(4.0), compose_box.center().y),
         point(compose_box.right() - px(4.0), compose_box.center().y),
     ]
@@ -1636,4 +1678,96 @@ fn moving_the_selection_closes_the_delete_s_confirmation_and_the_quick_reactions
             message_id: older.id.clone(),
         }]
     );
+}
+
+// --- the account's own notes: read-only ---
+
+const NOTES: &str = "48:notes";
+
+#[test]
+fn the_notes_show_their_messages_synced_on_opening_and_take_no_write() {
+    let rig = rig_with(Vec::new());
+    let mut note = message(NOON, LAB_A, "<p>buy milk</p>");
+    note.conversation_id = NOTES.to_owned();
+    rig.core
+        .messages
+        .lock()
+        .unwrap()
+        .insert(NOTES.to_owned(), vec![note.clone()]);
+    let parts = parts::parts(&rig, Settings::default(), Arc::new(ViewTrace::off()));
+    let app: &'static mut TestAppContext = Box::leak(Box::new(rig.cx.clone()));
+    let (view, cx) = app.add_window_view(|window, cx| ChatView::new(parts, NOTES.to_owned(), window, cx));
+    cx.simulate_resize(size(px(800.0), px(600.0)));
+    cx.update(|window, _| window.activate_window());
+    draw(cx);
+
+    // read from the service as it opens, as no conversation list brings them
+    assert_eq!(*rig.core.synced.lock().unwrap(), [NOTES]);
+    let shown: Vec<String> = cx.update(|_, cx| view.read(cx).message_items().map(|item| item.id.clone()).collect());
+    assert_eq!(shown, [note.id.clone()]);
+    let offered = cx.update(|_, cx| {
+        view.read(cx)
+            .message_items()
+            .map(teams_ui::chat_view::MessageItem::actions)
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(offered, [Vec::<MessageAction>::new()], "a note offers no action");
+
+    // the box takes no text and sends nothing: no reply, no edit, no reaction, no typing
+    let compose = compose(&view, cx);
+    assert!(cx.update(|_, cx| compose.read(cx).is_read_only()));
+    assert!(cx.debug_bounds("compose-read-only").is_some(), "{READ_ONLY_NOTES}");
+    focus_compose(&view, cx);
+    type_text(cx, "x");
+    keys(cx, "enter");
+    act(&view, cx, MessageAction::Reply, &note.id);
+    act(&view, cx, MessageAction::Edit, &note.id);
+    cx.update(|_, cx| view.update(cx, |view, cx| view.toggle_reaction(&note.id, "like", cx)));
+    draw(cx);
+    assert!(actions(&rig).is_empty());
+    assert_eq!(mode(&view, cx), Mode::New);
+    assert!(rig.core.transients.lock().unwrap().is_empty());
+}
+
+// --- the app's read-only mode ---
+
+#[test]
+fn in_the_read_only_mode_a_chat_offers_only_copying_and_sends_nothing() {
+    let theirs = message(NOON, LAB_B, "<p>hello</p>");
+    let mine = message(NOON + MINUTE, LAB_A, "<p>mine</p>");
+    let rig = rig_with(vec![mine.clone(), theirs.clone()]);
+    *rig.core.read_only.lock().unwrap() = true;
+    let settings = Settings {
+        send_typing: true,
+        send_read_receipts: true,
+        ..Settings::default()
+    };
+    let (view, cx, _) = chat_window(&rig, settings);
+
+    let offered = cx.update(|_, cx| {
+        view.read(cx)
+            .message_items()
+            .map(teams_ui::chat_view::MessageItem::actions)
+            .collect::<Vec<_>>()
+    });
+    assert!(
+        offered.iter().all(|actions| actions == &[MessageAction::Copy]),
+        "copying only: {offered:?}"
+    );
+    // the box says so, takes no text and sends nothing: no post, reply, edit, reaction, typing or read receipt
+    let compose = compose(&view, cx);
+    assert!(cx.update(|_, cx| compose.read(cx).is_read_only()));
+    assert!(cx.debug_bounds("compose-read-only").is_some(), "{READ_ONLY_APP}");
+    focus_compose(&view, cx);
+    type_text(cx, "x");
+    keys(cx, "enter");
+    act(&view, cx, MessageAction::Reply, &theirs.id);
+    act(&view, cx, MessageAction::Edit, &mine.id);
+    act(&view, cx, MessageAction::Delete, &mine.id);
+    cx.update(|_, cx| view.update(cx, |view, cx| view.toggle_reaction(&theirs.id, "like", cx)));
+    cx.executor().advance_clock(READ_DEBOUNCE * 2);
+    draw(cx);
+    assert!(actions(&rig).is_empty(), "no write, no read receipt");
+    assert_eq!(mode(&view, cx), Mode::New);
+    assert!(rig.core.transients.lock().unwrap().is_empty(), "no typing");
 }

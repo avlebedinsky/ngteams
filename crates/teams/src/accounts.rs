@@ -18,15 +18,16 @@ use crate::forget::{self, Forgot};
 use crate::setup::Setup;
 use crate::signin::{self, SignInClients};
 
-/// An account's engine, started.
-pub struct Started {
+/// An account's engine, started: over the desktop's Secret Service ([`LazyKeyring`]) in the app, over a test's store
+/// in its tests.
+pub struct Started<S = LazyKeyring> {
     pub account: PersonalAccount,
-    pub engine: PersonalEngine<LazyKeyring>,
+    pub engine: PersonalEngine<S>,
     /// The window's calls of the account, when the app's devices could be opened.
     pub calls: Option<PersonalCalls>,
 }
 
-impl std::fmt::Debug for Started {
+impl<S> std::fmt::Debug for Started<S> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Started")
             .field("account", &self.account)
@@ -100,33 +101,35 @@ pub fn ready(setup: &Setup, account: &PersonalAccount) -> Result<bool, String> {
 /// Signs `account` in through the sign-in window (blocking: run it off GPUI's foreground), as [`signin::sign_in`].
 ///
 /// # Errors
-/// Why the sign-in stored nothing.
+/// Why the sign-in stored nothing, as the user is told it ([`signin::failure`]).
 pub fn sign_in(setup: &Setup, account: &PersonalAccount) -> Result<PersonalAccount, String> {
     let store = LazyKeyring::new(KEYRING_APPLICATION);
     runtime()?.block_on(async {
         let clients = SignInClients::live().map_err(|error| error.to_string())?;
-        let window = signin::window_command(account).map_err(|error| error.to_string())?;
-        let signed = signin::sign_in(setup, account, &clients, &store, window)
-            .await
-            .map_err(|error| format!("the sign-in stored nothing: {error}"))?;
+        let signed = match signin::window_command(account) {
+            Ok(window) => signin::sign_in(setup, account, &clients, &store, window).await,
+            Err(error) => Err(error),
+        }
+        .map_err(|error| signin::failure(setup, account, &error))?;
         log::info!("an account was signed in (its tenant matched)");
         Ok(signed)
     })
 }
 
-/// Adds the account `upn` (or takes the one held) and signs it in (blocking: run it off GPUI's foreground). One that
-/// doesn't go through leaves nothing behind: an account no sign-in named is taken out again ([`Setup::abandon`]).
+/// Adds the account `upn` (or takes up the entry held of it) and signs it in (blocking: run it off GPUI's foreground),
+/// as [`signin::add`]: one that doesn't go through is taken out again only while its entry holds nothing but its UPN,
+/// and kept when the window refused an identity provider's host, for the user to add to its `idp_hosts`.
 ///
 /// # Errors
-/// Why it wasn't added.
+/// Why it wasn't added, as the user is told it ([`signin::failure`]).
 pub fn add(setup: &Setup, upn: &str) -> Result<PersonalAccount, String> {
-    let account = setup.ask_for(upn).map_err(|error| error.to_string())?;
-    let signed = sign_in(setup, &account);
-    if signed.is_err() {
-        // a pending account only: one a sign-in named earlier stays
-        let _ = setup.abandon(upn);
-    }
-    signed
+    let store = LazyKeyring::new(KEYRING_APPLICATION);
+    runtime()?.block_on(async {
+        let clients = SignInClients::live().map_err(|error| error.to_string())?;
+        let signed = signin::add(setup, upn, &clients, &store, signin::window_command).await?;
+        log::info!("an account was added (its tenant matched)");
+        Ok(signed)
+    })
 }
 
 /// Forgets the account `upn` (blocking), as `teams --forget` does: refused while its engine runs.

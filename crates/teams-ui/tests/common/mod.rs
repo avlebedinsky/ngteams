@@ -9,8 +9,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use gpui::{AppContext as _, Entity, TestAppContext};
 use teams_core::sync::{CatchUpReport, Synced};
 use teams_core::{
-    Action, Answer, Availability, CallAction, CallId, EngineError, Event, NameFrom, OwnStatus, Person, Reply, Strip,
-    Transient, TransientSent,
+    Action, Answer, Availability, CallAction, CallId, ChatListing, EngineError, Event, NameFrom, OwnStatus, Person,
+    PictureBytes, Reply, Strip, Transient, TransientSent,
 };
 use teams_store::{
     Conversation, Member, Message, MessagePage, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction,
@@ -61,10 +61,14 @@ pub struct FakeCore {
     pub reactions: Mutex<HashMap<String, Vec<Reaction>>>,
     /// The account's recent reaction keys, the newest first.
     pub recent: Mutex<Vec<String>>,
+    /// The account's most used reaction keys, the most used first.
+    pub frequent: Mutex<Vec<String>>,
     /// Reactions' animation strips by id; any other is answered `None`.
     pub animations: Mutex<HashMap<String, Strip>>,
     /// Reactions whose animation's read fails on the way (answered [`EngineError::AnimationUnread`]).
     pub unread_animations: Mutex<HashSet<String>>,
+    /// Messages' pictures by their `src`; any other is answered `None`.
+    pub pictures: Mutex<HashMap<String, PictureBytes>>,
     /// The account's read horizons by conversation.
     pub horizons: Mutex<HashMap<String, ReadHorizon>>,
     /// Per conversation, the service's older pages `load_older` brings into `messages`, the next one first (each the
@@ -102,6 +106,8 @@ pub struct FakeCore {
     pub searches: Mutex<Vec<String>>,
     /// The account's teams as the store has them; `None` before a read settled them.
     pub teams: Mutex<Option<Vec<Team>>>,
+    /// The favourite chats and the conversations the service calls empty, as `chat_listing` answers them.
+    pub listing: Mutex<ChatListing>,
     /// Per channel, the post each stored message belongs to.
     pub roots: Mutex<HashMap<String, Vec<(String, String)>>>,
     /// Every conversation a sync was asked for, in order.
@@ -119,6 +125,8 @@ pub struct FakeCore {
     /// kept in `held_calls` for the test to send.
     pub hold_calls: Mutex<bool>,
     pub held_calls: Mutex<Vec<Answer<CallId>>>,
+    /// The app's read-only mode, as `Core::read_only` answers it.
+    pub read_only: Mutex<bool>,
 }
 
 impl Default for FakeCore {
@@ -138,7 +146,9 @@ impl Default for FakeCore {
             reactions: Mutex::default(),
             animations: Mutex::default(),
             unread_animations: Mutex::default(),
+            pictures: Mutex::default(),
             recent: Mutex::default(),
+            frequent: Mutex::default(),
             horizons: Mutex::default(),
             older: Mutex::default(),
             unsynced: Mutex::default(),
@@ -156,6 +166,7 @@ impl Default for FakeCore {
             earlier: Mutex::default(),
             searches: Mutex::default(),
             teams: Mutex::default(),
+            listing: Mutex::default(),
             roots: Mutex::default(),
             synced: Mutex::default(),
             presence_asked: Mutex::default(),
@@ -164,6 +175,7 @@ impl Default for FakeCore {
             call_answers: Mutex::default(),
             hold_calls: Mutex::new(false),
             held_calls: Mutex::default(),
+            read_only: Mutex::new(false),
         }
     }
 }
@@ -266,6 +278,10 @@ impl FakeCore {
 impl Core for FakeCore {
     fn me(&self) -> &str {
         &self.me
+    }
+
+    fn read_only(&self) -> bool {
+        *locked(&self.read_only)
     }
 
     fn write(&self, action: Action) -> Reply<OutboxEntry> {
@@ -385,12 +401,22 @@ impl Core for FakeCore {
         })
     }
 
+    fn frequent_reactions(&self, limit: usize) -> Reply<Vec<String>> {
+        self.answer("frequent_reactions", || {
+            locked(&self.frequent).iter().take(limit).cloned().collect()
+        })
+    }
+
     fn reaction_animation(&self, id: String) -> Reply<Option<Strip>> {
         if locked(&self.unread_animations).contains(&id) {
             locked(&self.asked).push("reaction_animation");
             return Reply::ready(Err(EngineError::AnimationUnread));
         }
         self.answer("reaction_animation", || locked(&self.animations).get(&id).cloned())
+    }
+
+    fn message_picture(&self, src: String) -> Reply<Option<PictureBytes>> {
+        self.answer("message_picture", || locked(&self.pictures).get(&src).cloned())
     }
 
     fn presence(&self, mri: String) -> Reply<Availability> {
@@ -482,6 +508,10 @@ impl Core for FakeCore {
 
     fn teams(&self) -> Reply<Option<Vec<Team>>> {
         self.answer("teams", || locked(&self.teams).clone())
+    }
+
+    fn chat_listing(&self) -> Reply<ChatListing> {
+        self.answer("chat_listing", || locked(&self.listing).clone())
     }
 
     fn sync_conversation(&self, conversation: String) -> Reply<Synced> {

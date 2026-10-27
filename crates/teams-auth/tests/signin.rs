@@ -120,6 +120,12 @@ fn answer_lines_round_trip_and_hide_the_redirect() -> TestResult {
         WindowAnswer::parse(WindowAnswer::Closed.to_line().expose())?,
         WindowAnswer::Closed
     ));
+    let WindowAnswer::Refused(host) =
+        WindowAnswer::parse(WindowAnswer::Refused("sso.example.test".into()).to_line().expose())?
+    else {
+        panic!("a refused host");
+    };
+    assert_eq!(host, "sso.example.test");
     let long = "é".repeat(REASON_LIMIT);
     let WindowAnswer::Failed(reason) = WindowAnswer::parse(WindowAnswer::Failed(long).to_line().expose())? else {
         panic!("a failure");
@@ -129,6 +135,13 @@ fn answer_lines_round_trip_and_hide_the_redirect() -> TestResult {
         json!({"closed": false}).to_string(),
         json!({"redirect": url, "closed": true}).to_string(),
         json!({"failed": "x".repeat(REASON_LIMIT + 1)}).to_string(),
+        // a refused answer gives a host alone: never a URL, a path, a query or an upper-case name
+        json!({"refused": "https://sso.example.test/adfs/ls/?SAMLRequest=x"}).to_string(),
+        json!({"refused": "sso.example.test/adfs"}).to_string(),
+        json!({"refused": "SSO.example.test"}).to_string(),
+        json!({"refused": "sso..example.test"}).to_string(),
+        json!({"refused": ""}).to_string(),
+        json!({"refused": true}).to_string(),
         json!({"other": "x"}).to_string(),
         json!({}).to_string(),
     ] {
@@ -208,6 +221,17 @@ fn a_window_closed_failed_or_gone_gives_no_code() -> TestResult {
     let authorization = authorization()?;
     let closed = ask(&authorization, format!("{}\n", WindowAnswer::Closed.to_line().expose()))?;
     assert!(matches!(closed, Err(WindowError::Closed)));
+    let refused = ask(
+        &authorization,
+        format!(
+            "{}\n",
+            WindowAnswer::Refused("sso.example.test".into()).to_line().expose()
+        ),
+    )?;
+    let Err(WindowError::Refused(host)) = refused else {
+        panic!("refused: {refused:?}");
+    };
+    assert_eq!(host, "sso.example.test");
     let failed = ask(
         &authorization,
         format!(

@@ -25,22 +25,12 @@ help: the trait `teams_proto::Request` is not implemented for `RawPost`
    |
  6 | struct RawPost;
    | ^^^^^^^^^^^^^^
-help: the following other types implement trait `teams_proto::Request`
-  --> $WORKSPACE/crates/teams-proto/src/own.rs
-   |
-   | impl Request for EndpointRegistration {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `EndpointRegistration`
-...
-   | impl Request for CallingRegistration {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `CallingRegistration`
-   |
-  ::: $WORKSPACE/crates/teams-proto/src/post_read.rs
-   |
-   | impl Request for ShortProfileLookup {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `ShortProfileLookup`
-...
-   | impl Request for PresenceRead {
-   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `PresenceRead`
+   = help: the following other types implement trait `teams_proto::Request`:
+             CallingRegistration
+             EndpointRegistration
+             PresenceRead
+             PresenceSubscription
+             ShortProfileLookup
 note: required by a bound in `send`
   --> $WORKSPACE/crates/teams-proto/src/client.rs
    |

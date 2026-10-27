@@ -549,6 +549,8 @@ impl Desktop {
     pub fn connect(&mut self, address: Result<String, BusError>, cx: &mut Context<Self>) -> Task<Vec<String>> {
         let app_id = self.parts.app_id;
         let app_name = self.parts.app_name.to_string();
+        // the read-only mode shows no tray item: closing its window quits it
+        let with_tray = !self.parts.shell.core.read_only();
         cx.spawn(async move |this, cx: &mut AsyncApp| {
             let connection = match bus::connect_given(address).await {
                 Ok(connection) => connection,
@@ -558,7 +560,7 @@ impl Desktop {
             if let Err(error) = notifications(&this, &connection, &app_name, cx).await {
                 problems.push(format!("no notifications: {error}"));
             }
-            if let Err(error) = tray(&this, &connection, app_id, &app_name, cx).await {
+            if with_tray && let Err(error) = tray(&this, &connection, app_id, &app_name, cx).await {
                 problems.push(format!("no tray item: {error}"));
             }
             let _ = this.update(cx, |this, _| this.bus = Some(connection));

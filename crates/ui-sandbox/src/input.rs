@@ -46,6 +46,13 @@ pub mod keys {
     pub const LEFT: u32 = 105;
     pub const RIGHT: u32 = 106;
     pub const DOWN: u32 = 108;
+    pub const SPACE: u32 = 57;
+    pub const HOME: u32 = 102;
+    pub const PAGE_UP: u32 = 104;
+    pub const END: u32 = 107;
+    pub const PAGE_DOWN: u32 = 109;
+    pub const DELETE: u32 = 111;
+    pub const F1: u32 = 59;
     /// The left mouse button.
     pub const BTN_LEFT: u32 = 0x110;
     pub const BTN_RIGHT: u32 = 0x111;
@@ -75,6 +82,61 @@ impl Modifier {
             Self::Alt => xkb::MOD_NAME_ALT,
         }
     }
+}
+
+/// A key press as a name gives it (`ctrl+k`, `shift+Tab`, `Down`, `Enter`, `a`, `F6`): its modifiers (`ctrl`, `shift`,
+/// `alt`, joined by `+`, case aside) and its key, a named one (`Esc`/`Escape`, `Tab`, `Enter`/`Return`, `Backspace`,
+/// `Space`, `Up`, `Down`, `Left`, `Right`, `Home`, `End`, `PageUp`, `PageDown`, `Delete`, `F1`–`F10`) or one character
+/// on `keymap` (Shift added where it needs it). `None` for anything else.
+#[must_use]
+pub fn parse_key(spec: &str, keymap: &Keymap) -> Option<(Vec<Modifier>, u32)> {
+    let mut parts: Vec<&str> = spec.split('+').collect();
+    let key = parts.pop().filter(|key| !key.is_empty())?;
+    let mut modifiers = Vec::new();
+    for part in parts {
+        let modifier = match part.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => Modifier::Ctrl,
+            "shift" => Modifier::Shift,
+            "alt" => Modifier::Alt,
+            _ => return None,
+        };
+        if !modifiers.contains(&modifier) {
+            modifiers.push(modifier);
+        }
+    }
+    let named = match key.to_ascii_lowercase().as_str() {
+        "esc" | "escape" => Some(keys::ESC),
+        "tab" => Some(keys::TAB),
+        "enter" | "return" => Some(keys::ENTER),
+        "backspace" => Some(keys::BACKSPACE),
+        "space" => Some(keys::SPACE),
+        "up" => Some(keys::UP),
+        "down" => Some(keys::DOWN),
+        "left" => Some(keys::LEFT),
+        "right" => Some(keys::RIGHT),
+        "home" => Some(keys::HOME),
+        "end" => Some(keys::END),
+        "pageup" => Some(keys::PAGE_UP),
+        "pagedown" => Some(keys::PAGE_DOWN),
+        "delete" | "del" => Some(keys::DELETE),
+        name => name
+            .strip_prefix('f')
+            .and_then(|number| number.parse::<u32>().ok())
+            .filter(|number| (1..=10).contains(number))
+            .map(|number| keys::F1 + number - 1),
+    };
+    if let Some(code) = named {
+        return Some((modifiers, code));
+    }
+    let mut chars = key.chars();
+    let (Some(typed), None) = (chars.next(), chars.next()) else {
+        return None;
+    };
+    let (code, shift) = keymap.key_for(typed)?;
+    if shift && !modifiers.contains(&Modifier::Shift) {
+        modifiers.push(Modifier::Shift);
+    }
+    Some((modifiers, code))
 }
 
 /// `wl_keyboard`'s key states.
@@ -313,5 +375,36 @@ impl Drop for VirtualInput {
         self.keyboard.destroy();
         self.pointer.destroy();
         let _ = self.connection.flush();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_key_is_read_from_its_name_with_its_modifiers() {
+        let Ok(keymap) = Keymap::us() else {
+            eprintln!("skipping: no XKB data");
+            return;
+        };
+        assert_eq!(parse_key("Down", &keymap), Some((Vec::new(), keys::DOWN)));
+        assert_eq!(parse_key("enter", &keymap), Some((Vec::new(), keys::ENTER)));
+        assert_eq!(
+            parse_key("ctrl+shift+Tab", &keymap),
+            Some((vec![Modifier::Ctrl, Modifier::Shift], keys::TAB))
+        );
+        assert_eq!(parse_key("F6", &keymap), Some((Vec::new(), keys::F1 + 5)));
+        let (modifiers, k) = parse_key("ctrl+k", &keymap).unwrap();
+        assert_eq!(
+            (modifiers, Some(k)),
+            (vec![Modifier::Ctrl], keymap.key_for('k').map(|(key, _)| key))
+        );
+        // a character that needs Shift gets it
+        let (modifiers, _) = parse_key("A", &keymap).unwrap();
+        assert_eq!(modifiers, [Modifier::Shift]);
+        for bad in ["", "ctrl+", "hyper+a", "F11", "ab", "ctrl+nothing"] {
+            assert_eq!(parse_key(bad, &keymap), None, "{bad}");
+        }
     }
 }

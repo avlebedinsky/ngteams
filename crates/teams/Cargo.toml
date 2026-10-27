@@ -25,6 +25,10 @@ gpui-pre-platform.workspace = true
 log = { workspace = true, features = ["max_level_debug", "release_max_level_debug"] }
 # the sign-in (the window's protocol, the code exchange, authz and the region), the session, the Secret Service
 teams-auth.workspace = true
+# the read-only mode's descriptors (the broker's socket, the view trace): whether one handed in is open
+libc.workspace = true
+# ... a Unix stream socket, or open for writing; both made close-on-exec
+rustix = { workspace = true, features = ["fs", "net"] }
 # the account's engine, assembled as every binary builds one (`teams_core::account`)
 teams-core.workspace = true
 # the personal fence: only this crate enables `personal` (docs/personal-build.md; tests/apart.rs checks every manifest)
@@ -43,8 +47,10 @@ teams-store.workspace = true
 # the views and the bridge over the engine
 teams-ui.workspace = true
 thiserror.workspace = true
-# the sign-in's and the engine's runtimes; the session's sign-out watch
-tokio = { workspace = true, features = ["rt", "sync"] }
+# the sign-in's and the engine's runtimes; the session's sign-out watch; the read-only mode's broker socket (`net`)
+tokio = { workspace = true, features = ["net", "rt", "sync"] }
+# the read-only mode opens its window only on the UI sandbox's compositor (`ui_sandbox::in_sandbox`)
+ui-sandbox.workspace = true
 
 [dev-dependencies]
 # a call's id for the call events the personal app's models are shown (`CallId::for_tests`)

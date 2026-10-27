@@ -1,5 +1,5 @@
-//! The call registry (`teams_fence`'s `calls` module, `docs/protocol/fence-targets.md`), under the registry's rule (the
-//! personal build's, `Fence::tracking_calls` here): a call this run's fence permitted is registered once its start's
+//! The call registry (`teams_fence`'s `calls` module, `docs/protocol/fence-targets.md`), under the registry's rule (no
+//! build's fence's: `Fence::tracking_calls` here, the registry's resolution as verdicts): a call this run's fence permitted is registered once its start's
 //! answer is read, its call controller links are bound only by the acceptance delivered at the start's own acceptance
 //! callback, and a follow-up passes only as a captured operation to exactly a link of a live registered call. The lab's
 //! rule, which judges only a call's entry, is at the end ("the lab's call rule"). Shaped like the echo-call capture's

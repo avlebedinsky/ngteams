@@ -283,8 +283,8 @@ recorded, from going into the microphone to coming out of the speaker, on one cl
 
 1. **Fencing a call's follow-ups.** Settled by judging a call's entry, not by a membership read
    ([fence-targets.md](fence-targets.md#the-labs-call-rule)): a follow-up passes once its call's start, join or answer
-   was let in (the call registry of M3 Task 3, which bound each to a link the call's services handed out, is the
-   personal build's rule now). The `add` posts to the answer's
+   was let in (the call registry of M3 Task 3, which bound each to a link the call's services handed out, is kept as
+   every fence's bookkeeping; its own rule decides no build's calls). The `add` posts to the answer's
    `addParticipantAndModality` link (`…/add`), not `addParticipant`. What follows is the M0 state.
    `updateEndpointMetadata`, `applyChannelParameters`, `acknowledge`, `add` and `leave` land on a call that exists. The fence requires its members read fresh and complete; neither the chat
    service read nor anything else gives that for a call yet. Candidates: the conversation's `getAllParticipants` link

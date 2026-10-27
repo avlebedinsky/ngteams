@@ -232,16 +232,29 @@ impl Store {
         Ok(rows.collect::<Result<_, _>>()?)
     }
 
-    /// Everyone the stored member lists hold, across every conversation, by MRI, each once: the people of the account's
-    /// chats (the personal build's reads by `POST` may name them, `teams_fence::ChatPeople`).
+    /// Keeps whether the chat service calls `conversation` empty (`None`: it said nothing readable); whether that
+    /// changed. Nothing for a conversation the store doesn't hold.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] when the write fails.
+    pub fn set_conversation_empty(&mut self, conversation: &str, empty: Option<bool>) -> Result<bool, StoreError> {
+        let changed = self
+            .conn
+            .prepare_cached("UPDATE conversations SET empty = ?2 WHERE id = ?1 AND empty IS NOT ?2")?
+            .execute(params![conversation, empty])?;
+        Ok(changed > 0)
+    }
+
+    /// The conversations the chat service last called empty, by id, in no set order.
     ///
     /// # Errors
     ///
     /// [`StoreError::Sqlite`] when the read fails.
-    pub fn all_members(&self) -> Result<Vec<String>, StoreError> {
+    pub fn empty_conversations(&self) -> Result<Vec<String>, StoreError> {
         let mut statement = self
             .conn
-            .prepare_cached("SELECT DISTINCT mri FROM members ORDER BY mri")?;
+            .prepare_cached("SELECT id FROM conversations WHERE empty = 1")?;
         let rows = statement.query_map([], |row| row.get(0))?;
         Ok(rows.collect::<Result<_, _>>()?)
     }

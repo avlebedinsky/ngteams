@@ -380,8 +380,7 @@ impl Switcher {
         let rows: Vec<(String, SharedString)> = self
             .list
             .read(cx)
-            .rows()
-            .iter()
+            .all_rows()
             .map(|row| (row.id.clone(), row.name.clone()))
             .collect();
         self.matches = matches(&self.query, &rows);

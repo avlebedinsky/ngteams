@@ -1,27 +1,39 @@
 //! The sidebar: the list pane as Teams shows it, one list under the "Chat" header (with the connection state while it
-//! isn't up: connecting, reconnecting, offline or signed out; nothing once connected) holding two sections, "Chats"
-//! (the [`ChatList`]'s rows) and "Teams and channels" (the [`TeamsList`]'s teams, each with its channels). A section's
+//! isn't up: connecting, reconnecting, offline or signed out; nothing once connected; in the read-only mode, which
+//! opens no push channel and reads by polling, a quiet "Read-only" instead of a connection that never comes up, unless
+//! the engine stopped or the account is signed out) holding its sections:
+//! "Favorites" (the [`ChatList`]'s favourite chats, only while it has any), "Chats" (its other rows) and "Teams and
+//! channels" (the [`TeamsList`]'s teams, each with its channels). A section's
 //! header folds and unfolds it, and a team's line its channels; unfolding the teams asks for them again
 //! ([`TeamsList::reload`]: the engine reads them when they are old). The rows themselves are the lists': a chat clicked
 //! is the [`ChatList`]'s to tell, a channel the [`TeamsList`]'s.
 //!
-//! Traced: `sidebar folded`/`unfolded` with the section (`chats` or `teams`), `team folded`/`unfolded` with the team.
+//! Traced: `sidebar folded`/`unfolded` with the section (`favorites`, `chats` or `teams`), `team folded`/`unfolded` with the team.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, Context, ElementId, Entity, InteractiveElement as _, IntoElement, ListAlignment, ListState,
-    ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, list, px, rgb,
+    AnyElement, App, Context, ElementId, Entity, InteractiveElement as _, IntoElement, ListAlignment, ListOffset,
+    ListState, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
+    list, px, rgb,
 };
+use gpui_component::tooltip::Tooltip;
 use teams_store::Team;
 
 use crate::chat_list::ChatList;
+use crate::icons::Glyph;
 use crate::models::Models;
 use crate::teams_list::{LOADING, NO_TEAMS, TeamsList, UNREADABLE};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 use crate::view::{Shown, status_text};
+
+/// The header's state in the read-only mode, in place of a connection.
+pub const READ_ONLY: &str = "Read-only";
+
+/// Its tooltip.
+const READ_ONLY_TIP: &str = "This window only reads your chats: it sends nothing";
 
 /// The connection's dot while it comes up (Teams' amber).
 const CONNECTING: u32 = 0x00c1_9c00;
@@ -36,6 +48,7 @@ const OVERDRAW: f32 = 400.0;
 /// A section of the sidebar.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Section {
+    Favorites,
     Chats,
     Teams,
 }
@@ -45,6 +58,7 @@ impl Section {
     #[must_use]
     pub fn key(self) -> &'static str {
         match self {
+            Self::Favorites => "favorites",
             Self::Chats => "chats",
             Self::Teams => "teams",
         }
@@ -52,6 +66,7 @@ impl Section {
 
     fn title(self) -> &'static str {
         match self {
+            Self::Favorites => "Favorites",
             Self::Chats => "Chats",
             Self::Teams => "Teams and channels",
         }
@@ -62,6 +77,11 @@ impl Section {
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Entry {
     Section(Section),
+    /// The chat list's favourite at `index`.
+    Favorite {
+        index: usize,
+        id: String,
+    },
     /// The chat list's row at `index`.
     Chat {
         index: usize,
@@ -92,6 +112,7 @@ impl Entry {
             Self::Note(text) => (2, text),
             Self::Team { id, .. } => (3, id),
             Self::Channel { id, .. } => (4, id),
+            Self::Favorite { id, .. } => (5, id),
         }
     }
 }
@@ -104,6 +125,7 @@ pub struct Sidebar {
     trace: Arc<ViewTrace>,
     state: ListState,
     entries: Vec<Entry>,
+    favorites_open: bool,
     chats_open: bool,
     teams_open: bool,
     /// The teams whose channels are folded, by id.
@@ -130,6 +152,7 @@ impl Sidebar {
             trace,
             state: ListState::new(0, ListAlignment::Top, px(OVERDRAW)),
             entries: Vec::new(),
+            favorites_open: true,
             chats_open: true,
             teams_open: true,
             folded: HashSet::new(),
@@ -143,6 +166,7 @@ impl Sidebar {
     #[must_use]
     pub fn is_open(&self, section: Section) -> bool {
         match section {
+            Section::Favorites => self.favorites_open,
             Section::Chats => self.chats_open,
             Section::Teams => self.teams_open,
         }
@@ -157,6 +181,7 @@ impl Sidebar {
     /// Folds `section`, or unfolds it when it is folded; the teams unfolded are asked for again.
     pub fn toggle(&mut self, section: Section, cx: &mut Context<Self>) {
         let open = match section {
+            Section::Favorites => &mut self.favorites_open,
             Section::Chats => &mut self.chats_open,
             Section::Teams => &mut self.teams_open,
         };
@@ -190,7 +215,18 @@ impl Sidebar {
     }
 
     fn entries(&self, cx: &App) -> Vec<Entry> {
-        let mut entries = vec![Entry::Section(Section::Chats)];
+        let mut entries = Vec::new();
+        let favorites = self.list.read(cx).favorites();
+        if !favorites.is_empty() {
+            entries.push(Entry::Section(Section::Favorites));
+            if self.favorites_open {
+                entries.extend(favorites.iter().enumerate().map(|(index, row)| Entry::Favorite {
+                    index,
+                    id: row.id.clone(),
+                }));
+            }
+        }
+        entries.push(Entry::Section(Section::Chats));
         if self.chats_open {
             let rows = self.list.read(cx).rows().iter().enumerate();
             entries.extend(rows.map(|(index, row)| Entry::Chat {
@@ -240,6 +276,9 @@ impl Sidebar {
         };
         match entry {
             Entry::Section(section) => self.section_header(section, palette, cx),
+            Entry::Favorite { index, .. } => self
+                .list
+                .update(cx, |list, cx| list.render_favorite(index, palette, cx)),
             Entry::Chat { index, .. } => self.list.update(cx, |list, cx| list.render_row(index, palette, cx)),
             Entry::Note(text) => div()
                 .debug_selector(|| "teams-note".to_owned())
@@ -338,7 +377,11 @@ fn chevron(open: bool) -> impl IntoElement {
 }
 
 /// Tells `state` how `old` became `new`: the rows they start and end with (by what they are) keep their place and
-/// their measured height, the ones between are replaced.
+/// their measured height, the ones between are replaced. A list scrolled to its very top stays there: rows that come
+/// in above its first one (the "Favorites" section arriving after the first load, once the teams' read gave the
+/// favourites) are shown, not scrolled past. GPUI's list anchors its scroll position on the item it shows first, and
+/// sets that anchor after any layout whose rows didn't fill the pane, so without this the list would keep "Chats" at
+/// its top and the favourites out of sight above it.
 fn splice(state: &ListState, old: &[Entry], new: &[Entry]) {
     let head = old
         .iter()
@@ -354,34 +397,62 @@ fn splice(state: &ListState, old: &[Entry], new: &[Entry]) {
     if head + tail == old.len() && old.len() == new.len() {
         return;
     }
+    let top = state.logical_scroll_top();
+    let at_top = top.item_ix == 0 && top.offset_in_item <= px(0.0);
     state.splice(head..old.len() - tail, new.len() - head - tail);
+    if at_top {
+        state.scroll_to(ListOffset::default());
+    }
+}
+
+impl Sidebar {
+    /// The header's connection state (see the module docs): `None` while it is up, as in Teams.
+    fn connection(&self, palette: Palette, cx: &App) -> Option<AnyElement> {
+        let status = self.models.status.read(cx);
+        let dot = match Shown::of(status) {
+            Shown::Offline | Shown::SignedOut => theme::DANGER,
+            // no push channel ever comes up: the list is read by polling, which is nothing to wait for
+            _ if self.list.read(cx).read_only() => return Some(read_only_state(palette)),
+            Shown::Connected => return None,
+            Shown::Connecting | Shown::Reconnecting => CONNECTING,
+        };
+        let pill = div()
+            .debug_selector(|| "connection".to_owned())
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .px_2()
+            .py_0p5()
+            .rounded_full()
+            .bg(rgb(palette.hover))
+            .text_xs()
+            .text_color(rgb(palette.muted_foreground))
+            .child(div().size(px(6.0)).rounded_full().bg(rgb(dot)))
+            .child(status_text(status));
+        Some(pill.into_any_element())
+    }
+}
+
+/// The header's state in the read-only mode: a quiet "Read-only", its tooltip saying what that means.
+fn read_only_state(palette: Palette) -> AnyElement {
+    div()
+        .id("read-only")
+        .debug_selector(|| "read-only".to_owned())
+        .flex()
+        .items_center()
+        .gap_1()
+        .text_xs()
+        .text_color(rgb(palette.muted_foreground))
+        .child(Glyph::INFO.icon().size(px(12.0)))
+        .child(READ_ONLY)
+        .tooltip(|window, cx| Tooltip::new(READ_ONLY_TIP).build(window, cx))
+        .into_any_element()
 }
 
 impl Render for Sidebar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = theme::current(cx);
-        let status = self.models.status.read(cx);
-        // the connection only when it isn't up: a healthy one says nothing, as in Teams
-        let connection = match Shown::of(status) {
-            Shown::Connected => None,
-            Shown::Connecting | Shown::Reconnecting => Some(CONNECTING),
-            Shown::Offline | Shown::SignedOut => Some(theme::DANGER),
-        }
-        .map(|dot| {
-            div()
-                .debug_selector(|| "connection".to_owned())
-                .flex()
-                .items_center()
-                .gap_1p5()
-                .px_2()
-                .py_0p5()
-                .rounded_full()
-                .bg(rgb(palette.hover))
-                .text_xs()
-                .text_color(rgb(palette.muted_foreground))
-                .child(div().size(px(6.0)).rounded_full().bg(rgb(dot)))
-                .child(status_text(status))
-        });
+        let connection = self.connection(palette, cx);
         let header = div()
             .h(px(48.0))
             .flex_none()

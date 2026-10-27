@@ -159,19 +159,21 @@ fn the_chat_list_names_people_by_their_profiles_and_shows_a_1_to_1_partner_s_pic
     let shown = ab.picture.expect("b's picture");
     assert_eq!((shown.format, shown.bytes.as_slice()), (ImageFormat::Png, &PICTURE[..]));
     let group = row(cx, GROUP);
-    assert_eq!((group.name.as_ref(), group.named), ("Graph Bee, lab-c", true));
+    // a group without a topic by its members' first names, as Teams joins them
+    assert_eq!((group.name.as_ref(), group.named), ("Graph and lab-c", true));
     assert_eq!(group.picture, None, "a group shows no member's picture");
 
     // b's profile changes in the background: every row named by b is built again
-    rig.core.people.lock().unwrap().insert(
-        LAB_B.to_owned(),
-        person(LAB_B, "Graph Bee Renamed", NameFrom::Graph, None),
-    );
+    rig.core
+        .people
+        .lock()
+        .unwrap()
+        .insert(LAB_B.to_owned(), person(LAB_B, "Renamed Bee", NameFrom::Graph, None));
     rig.send(Event::Profile { mri: LAB_B.to_owned() });
     draw(cx);
     let ab = row(cx, AB);
-    assert_eq!((ab.name.as_ref(), ab.picture), ("Graph Bee Renamed", None));
-    assert_eq!(row(cx, GROUP).name.as_ref(), "Graph Bee Renamed, lab-c");
+    assert_eq!((ab.name.as_ref(), ab.picture), ("Renamed Bee", None));
+    assert_eq!(row(cx, GROUP).name.as_ref(), "lab-c and Renamed");
 }
 
 #[test]

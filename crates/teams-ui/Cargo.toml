@@ -21,8 +21,9 @@ log = { workspace = true, features = ["max_level_debug", "release_max_level_debu
 gpui-component.workspace = true
 # the view trace: one JSON object per line
 serde_json.workspace = true
-# a reaction's animation strip (a PNG) cut into the frames GPUI plays: the version and decoder GPUI already links
-image = { workspace = true, features = ["png"] }
+# a reaction's animation strip (a PNG) cut into the frames GPUI plays, and a message's pictures (PNG, JPEG, GIF,
+# WebP) decoded: the version and decoders GPUI already links
+image = { workspace = true, features = ["png", "jpeg", "gif", "webp"] }
 # the engine: its request side (behind `Core`), its events and its shutdown
 teams-core.workspace = true
 # a mention's MRI, as compose hands it to `teams-proto`'s message text
@@ -75,9 +76,30 @@ name = "kit_window"
 harness = false
 
 [[test]]
+# the chat list drawn on the real platform in the UI sandbox over the fake engine, screenshotted in each theme under
+# `target/ui-shots/chat-list-*.png`: its own `main` (GPUI runs on the main thread), which runs itself again inside the
+# sandbox
+name = "chat_list_window"
+harness = false
+
+[[test]]
 # what GPUI's own system notifications do on the sandbox's bus: its own `main`, which runs itself again inside the
 # sandbox
 name = "gpui_notification"
+harness = false
+
+[[test]]
+# bold, semibold and italic text drawn in the UI sandbox and measured from its screenshot, kept as
+# `target/ui-shots/font-styles.png`: its own `main` (GPUI runs on the main thread), which runs itself again inside the
+# sandbox
+name = "font_styles"
+harness = false
+
+[[test]]
+# the account's own notes opened from "Favorites", drawn in the UI sandbox over the fake engine, screenshotted in each
+# theme under `target/ui-shots/notes-*.png`: its own `main` (GPUI runs on the main thread), which runs itself again
+# inside the sandbox
+name = "notes_window"
 harness = false
 
 [lints]

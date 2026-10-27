@@ -2,9 +2,11 @@
 //!
 //! Every fence keeps one. Under the lab's call rule (`crate::Fence::check`, `CallRule::Entry`) it decides nothing but
 //! which invitations are offered and which offered invitation an answer or a decline acts on
-//! ([`CallRegistry::resolve_answer`]); what it binds otherwise is bookkeeping, which the native client's call machine
-//! reads its deliveries by ([`Observed`]). Under the call registry's own rule (the personal build's, `CallRule::Registry`)
-//! it decides every operation on a call, as follows.
+//! ([`CallRegistry::resolve_answer`]); a personal fence decides nothing by it (`decision/audit.rs`) but which
+//! invitations are offered. What it binds otherwise is every fence's bookkeeping, which the native client's call
+//! machine reads its deliveries by ([`Observed`]). Under the call registry's own rule (`CallRule::Registry`, which no
+//! build's fence decides by: tests turn it on with `Fence::tracking_calls`) it decides every operation on a call, as
+//! follows.
 //!
 //! A follow-up on a call (`docs/protocol/calling-echo.md`: the endpoint's metadata, an `add`, the `leave`, the
 //! acceptance's acknowledgement, a media line's channel parameters) reaches the call's participants, and no source reads

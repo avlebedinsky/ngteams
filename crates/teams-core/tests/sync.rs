@@ -21,8 +21,8 @@ use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_core::{
-    CLOCK_SKEW_MS, CatchUp, CatchUpError, Clock, Command, Gaps, MAX_FAILED_CHECKS, MAX_PAGES, Outbox, OutboxError,
-    StoredMessage, UnreadableSeen, enqueue, outbox::ConversationSync,
+    CLOCK_SKEW_MS, CatchUp, CatchUpError, Clock, Command, Gaps, MAX_FAILED_CHECKS, MAX_PAGES, NOTES, Outbox,
+    OutboxError, StoredMessage, UnreadableSeen, enqueue, outbox::ConversationSync,
 };
 use teams_fence::{Fence, FenceLog, Membership, MembershipFuture, MembershipSource, Mri, Roster, Scope};
 use teams_mock::{
@@ -368,6 +368,11 @@ async fn the_first_catch_up_fills_the_store() {
         assert!(state.sync_link.is_some() && state.history_complete, "{id}: {state:?}");
     }
     assert!(a.store.conversation_list_sync_link().unwrap().is_some());
+    // empty as the list says (the mock calls a conversation empty while it holds no message)
+    let empty = a.store.empty_conversations().unwrap();
+    for id in [AB_CHAT, AC_CHAT, AX_CHAT, ABC_CHAT, CHANNEL, NOTIFICATIONS] {
+        assert_eq!(empty.iter().any(|e| e == id), a.messages(id).is_empty(), "{id}");
+    }
 
     // nothing changed: the next catch-up reads the list's sync link and nothing else
     let before = mock.received_requests().await.len();
@@ -1826,4 +1831,136 @@ async fn post_count(server: &MockServer) -> usize {
         .iter()
         .filter(|request| request.method.as_str() == "POST")
         .count()
+}
+
+// --- the account's own notes ---
+
+/// A plain service whose conversation list is empty and whose notes hold one note of the account's own, synced on.
+async fn notes_service() -> MockServer {
+    let server = MockServer::start().await;
+    Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/api/chatsvc/amer/v1/users/ME/conversations"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"conversations": []})))
+        .mount(&server)
+        .await;
+    let mut note = entry(1_760_000_001_000, json!(1_760_000_001_000_u64));
+    note["conversationid"] = json!(NOTES);
+    note["from"] = json!(format!("{CHAT_BASE}/v1/users/ME/contacts/{LAB_A}"));
+    let sync = format!("{CHAT_BASE}/v1/users/ME/conversations/48%3Anotes/messages?syncState=n1&view=msnp24Equivalent");
+    let page = json!({"messages": [note], "_metadata": {"syncState": sync}});
+    Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path_regex(
+            "/conversations/48(:|%3A)notes/messages$",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(page))
+        .mount(&server)
+        .await;
+    server
+}
+
+/// The paths (after the chat base's `v1`) the plain service was asked for.
+async fn paths_read(server: &MockServer) -> Vec<String> {
+    server
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .map(|request| {
+            let path = request.url.path().trim_start_matches("/api/chatsvc/amer/v1/");
+            format!("{} {}", request.method, path.replace("%3A", ":"))
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn a_catch_up_syncs_the_favourite_notes_the_list_never_brings() {
+    let server = notes_service().await;
+    let mut a = Account::on(&server.uri(), LAB_A, "placeholder-token");
+    a.store.replace_favorites(&[NOTES.to_owned()], START).unwrap();
+
+    let report = a.catch_up.catch_up(&mut a.store).await.unwrap();
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert_eq!(report.messages.inserted, 1);
+    let stored = a.store.conversation(NOTES).unwrap().unwrap();
+    assert_eq!(
+        stored.kind,
+        ConversationKind::Other("thread_type:streamofnotes".to_owned())
+    );
+    let notes = a.messages(NOTES);
+    assert_eq!(notes.len(), 1);
+    assert_eq!(notes[0].sender.as_deref(), Some(LAB_A), "a note is the account's own");
+    assert_eq!(
+        paths_read(&server).await,
+        [
+            "GET users/ME/conversations",
+            "GET users/ME/conversations/48:notes/messages"
+        ],
+        "only GETs, and the notes are never read as a thread"
+    );
+
+    // the next catch-up follows the notes' own sync link
+    a.catch_up.catch_up(&mut a.store).await.unwrap();
+    assert_eq!(tokens_read(&server).await, ["n1"]);
+}
+
+#[tokio::test]
+async fn notes_neither_favourite_nor_stored_are_not_read() {
+    let server = notes_service().await;
+    let mut a = Account::on(&server.uri(), LAB_A, "placeholder-token");
+    a.store.replace_favorites(&[], START).unwrap();
+
+    let report = a.catch_up.catch_up(&mut a.store).await.unwrap();
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert!(a.store.conversation(NOTES).unwrap().is_none());
+    assert_eq!(paths_read(&server).await, ["GET users/ME/conversations"]);
+}
+
+/// A plain service whose conversation list is empty, with a sync link, and whose notes answer `status`.
+async fn notes_answering(status: u16) -> MockServer {
+    let server = MockServer::start().await;
+    let sync = format!("{CHAT_BASE}/v1/users/ME/conversations?syncState=l1&view=msnp24Equivalent");
+    Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/api/chatsvc/amer/v1/users/ME/conversations"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(json!({"conversations": [], "_metadata": {"syncState": sync}})),
+        )
+        .mount(&server)
+        .await;
+    // the chat service's answer for notes never written (a 404's shape, its text made up)
+    let missing = json!({"errorCode": status, "message": "synthetic: not found"});
+    Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path_regex(
+            "/conversations/48(:|%3A)notes/messages$",
+        ))
+        .respond_with(ResponseTemplate::new(status).set_body_json(missing))
+        .mount(&server)
+        .await;
+    server
+}
+
+#[tokio::test]
+async fn notes_that_fail_to_sync_never_hold_the_lists_sync_link_back() {
+    let server = notes_answering(500).await;
+    let mut a = Account::on(&server.uri(), LAB_A, "placeholder-token");
+    a.store.replace_favorites(&[NOTES.to_owned()], START).unwrap();
+
+    let report = a.catch_up.catch_up(&mut a.store).await.unwrap();
+    assert_eq!(report.failed.len(), 1, "{report:?}");
+    assert_eq!(report.failed[0].conversation, NOTES);
+    assert!(a.store.conversation_list_sync_link().unwrap().is_some());
+}
+
+#[tokio::test]
+async fn notes_never_written_are_none_not_a_failure() {
+    let server = notes_answering(404).await;
+    let mut a = Account::on(&server.uri(), LAB_A, "placeholder-token");
+    a.store.replace_favorites(&[NOTES.to_owned()], START).unwrap();
+
+    let report = a.catch_up.catch_up(&mut a.store).await.unwrap();
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert!(a.messages(NOTES).is_empty());
+    assert!(
+        a.store.sync_state(NOTES).unwrap().is_none(),
+        "read again from the newest page next time"
+    );
 }

@@ -245,6 +245,28 @@ async fn a_persons_presence_is_read_at_once_and_told_logged_as_allowed() {
 }
 
 #[tokio::test]
+async fn a_bot_is_never_watched_nor_named_by_a_read() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path(GET_PRESENCE))
+        .respond_with(|request: &Request| answer_all(request, "Available"))
+        .mount(&server)
+        .await;
+    let mut rig = rig(server, Duration::from_hours(1), true);
+    // the echo service of the test call: a `28:` id, which has no presence and is never read
+    let bot = "28:00000000-0000-4000-8000-0000000000ec".to_owned();
+
+    assert_eq!(rig.handle.presence(bot.clone()).await.unwrap(), Availability::Unknown);
+    assert_eq!(rig.handle.presence(mri(GUID_B)).await.unwrap(), Availability::Unknown);
+    assert_eq!(rig.next_presence().await, (mri(GUID_B), Availability::Available));
+    let reads = rig.reads().await;
+    assert_eq!(reads.len(), 1);
+    assert_eq!(asked(&reads[0]), [mri(GUID_B)], "the bot left out");
+    assert_eq!(rig.handle.presence(bot).await.unwrap(), Availability::Unknown);
+    rig.handle.shutdown();
+}
+
+#[tokio::test]
 async fn everyone_watched_is_read_in_one_read_each_poll_and_only_a_change_is_told() {
     let server = MockServer::start().await;
     let answered = Arc::new(AtomicUsize::new(0));

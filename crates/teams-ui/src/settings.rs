@@ -7,7 +7,8 @@
 //!   OpenH264 for video ([`Settings::video_calls`], its switch shown only where the build has the codec), the calls'
 //!   microphone, speaker and camera ([`Settings::microphone`] and the others: a device's name, or the system's default
 //!   when none is named), how the app looks ([`Settings::appearance`]: the theme, following the system's light or dark
-//!   mode or not, the font size and family), and whether the first run's screen of the writes that happen on their
+//!   mode or not, the font size and family), the clock times are shown on ([`Settings::time_format`]: the system's,
+//!   12-hour or 24-hour), and whether the first run's screen of the writes that happen on their
 //!   own was confirmed.
 //!   Tasks 13, 14 and 20 act on the ones Task 8 only kept.
 //! - **The devices** (M3 Task 20, [`attach_devices`]): with the calls' devices attached, the model keeps the list of
@@ -99,6 +100,46 @@ impl Notifications {
 
     fn from_key(key: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|level| level.key() == key)
+    }
+}
+
+/// How a time of day is shown ([`crate::clock`]): on the clock the system's locale uses, or on one the user picks.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TimeFormat {
+    /// The system's locale decides ([`crate::clock::system_cycle`]).
+    #[default]
+    System,
+    /// "3:30 PM".
+    Twelve,
+    /// "15:30".
+    TwentyFour,
+}
+
+impl TimeFormat {
+    pub const ALL: [Self; 3] = [Self::System, Self::Twelve, Self::TwentyFour];
+
+    /// Its name in the file.
+    #[must_use]
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::System => "system",
+            Self::Twelve => "12-hour",
+            Self::TwentyFour => "24-hour",
+        }
+    }
+
+    /// What the settings view calls it.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::System => "Follow the system",
+            Self::Twelve => "12-hour",
+            Self::TwentyFour => "24-hour",
+        }
+    }
+
+    fn from_key(key: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|format| format.key() == key)
     }
 }
 
@@ -229,6 +270,8 @@ pub struct Settings {
     pub camera: Option<String>,
     /// How the app looks: its theme, font size and font family, the app's for every account.
     pub appearance: Appearance,
+    /// The clock times are shown on, the app's for every account.
+    pub time_format: TimeFormat,
     /// The other accounts' own settings, by the account's MRI: the first account's are [`Settings::selected_chat`]
     /// and [`Settings::manual_status`] themselves (see [`Settings::first_account`]).
     pub accounts: BTreeMap<String, AccountSettings>,
@@ -371,6 +414,7 @@ impl Default for Settings {
             speaker: None,
             camera: None,
             appearance: Appearance::default(),
+            time_format: TimeFormat::default(),
             accounts: BTreeMap::new(),
             first_account: None,
         }
@@ -398,6 +442,7 @@ pub mod keys {
     pub const DARK_THEME: &str = "dark_theme";
     pub const FONT_SIZE: &str = "font_size";
     pub const FONT_FAMILY: &str = "font_family";
+    pub const TIME_FORMAT: &str = "time_format";
     /// The other accounts' own settings: a table of tables, by the account's MRI.
     pub const ACCOUNTS: &str = "accounts";
     /// The account whose own settings are the top-level ones, by its MRI.
@@ -495,6 +540,12 @@ fn take(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem
         | keys::DARK_THEME
         | keys::FONT_SIZE
         | keys::FONT_FAMILY => take_appearance(&mut settings.appearance, key, value)?,
+        keys::TIME_FORMAT => {
+            settings.time_format = value
+                .as_str()
+                .and_then(TimeFormat::from_key)
+                .ok_or(bad(keys::TIME_FORMAT, "not one of system, 12-hour, 24-hour"))?;
+        }
         keys::ACCOUNTS => take_accounts(settings, value)?,
         keys::FIRST_ACCOUNT => {
             settings.first_account = Some(chat_id(value).ok_or(bad(keys::FIRST_ACCOUNT, "not an account's MRI"))?);
@@ -656,6 +707,10 @@ pub fn render(settings: &Settings) -> String {
         }
     }
     render_appearance(&settings.appearance, &mut table);
+    table.insert(
+        keys::TIME_FORMAT.to_owned(),
+        Value::String(settings.time_format.key().to_owned()),
+    );
     let accounts: Table = settings
         .accounts
         .iter()
@@ -845,12 +900,24 @@ pub struct SettingsModel {
     copied: Option<Copied>,
     /// The "copy diagnostics" being collected.
     copying: Option<Task<()>>,
-    /// Typing, read receipts and presence wait for the first run's screen ([`SettingsModel::requiring_first_run`]).
-    first_run: bool,
+    /// When typing, read receipts and presence may go: as their switches say, after the first run's screen
+    /// ([`SettingsModel::requiring_first_run`]), or never ([`SettingsModel::read_only`]).
+    signals: Signals,
     /// The build has the video codec: the view shows its switch ([`SettingsModel::with_video_switch`]).
     video_switch: bool,
     /// The calls' devices, once attached ([`attach_devices`]): where each choice goes, and the devices there are.
     devices: Option<Devices>,
+}
+
+/// When the settings let typing, read receipts and presence go ([`SettingsModel::sends_typing`] and the others).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Signals {
+    /// As their switches say.
+    AsSwitched,
+    /// As their switches say, once the first run's screen was confirmed (the personal build).
+    AfterFirstRun,
+    /// Never: the app's read-only mode.
+    Never,
 }
 
 /// The calls' devices as the settings know them.
@@ -883,7 +950,7 @@ impl SettingsModel {
             diagnostics: None,
             copied: None,
             copying: None,
-            first_run: false,
+            signals: Signals::AsSwitched,
             video_switch: false,
             devices: None,
         }
@@ -900,7 +967,7 @@ impl SettingsModel {
             diagnostics: None,
             copied: None,
             copying: None,
-            first_run: false,
+            signals: Signals::AsSwitched,
             video_switch: false,
             devices: None,
         }
@@ -952,32 +1019,51 @@ impl SettingsModel {
     /// none of typing, read receipts and presence is sent.
     #[must_use]
     pub fn requiring_first_run(mut self) -> Self {
-        self.first_run = true;
+        if self.signals == Signals::AsSwitched {
+            self.signals = Signals::AfterFirstRun;
+        }
         self
     }
 
-    /// Whether the first run's screen is waiting for the user: asked for, and not confirmed yet.
+    /// The settings of the app's read-only mode (the personal build's `teams --read-only`): typing, read receipts
+    /// and presence are never sent whatever their switches say, and no first run's screen is shown (it asks only about
+    /// those).
+    #[must_use]
+    pub fn read_only(mut self) -> Self {
+        self.signals = Signals::Never;
+        self
+    }
+
+    /// Whether these are the read-only mode's settings ([`SettingsModel::read_only`]).
+    #[must_use]
+    pub fn is_read_only(&self) -> bool {
+        self.signals == Signals::Never
+    }
+
+    /// Whether the first run's screen is waiting for the user: asked for, and not confirmed yet (never in the read-only
+    /// mode).
     #[must_use]
     pub fn awaiting_first_run(&self) -> bool {
-        self.first_run && self.settings.first_run == FirstRunState::Waiting
+        self.signals == Signals::AfterFirstRun && self.settings.first_run == FirstRunState::Waiting
     }
 
-    /// Whether typing is sent now: its switch is on and no first run waits.
+    /// Whether typing is sent now: its switch is on, no first run waits, and the app isn't read-only.
     #[must_use]
     pub fn sends_typing(&self) -> bool {
-        !self.awaiting_first_run() && self.settings.send_typing
+        !self.is_read_only() && !self.awaiting_first_run() && self.settings.send_typing
     }
 
-    /// Whether read receipts are sent now: their switch is on and no first run waits.
+    /// Whether read receipts are sent now: their switch is on, no first run waits, and the app isn't read-only.
     #[must_use]
     pub fn sends_read_receipts(&self) -> bool {
-        !self.awaiting_first_run() && self.settings.send_read_receipts
+        !self.is_read_only() && !self.awaiting_first_run() && self.settings.send_read_receipts
     }
 
-    /// Whether the account's own availability is reported now: its switch is on and no first run waits.
+    /// Whether the account's own availability is reported now: its switch is on, no first run waits, and the app isn't
+    /// read-only.
     #[must_use]
     pub fn sends_presence(&self) -> bool {
-        !self.awaiting_first_run() && self.settings.send_presence
+        !self.is_read_only() && !self.awaiting_first_run() && self.settings.send_presence
     }
 
     /// The first run's screen confirmed with the switches as they stand: from now on each is sent as its switch says.

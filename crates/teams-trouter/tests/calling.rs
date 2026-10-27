@@ -169,7 +169,8 @@ struct Lab {
 
 impl Lab {
     /// b's lab: b's fence (b its own account, a and b lab accounts, the echo service approved) logging to the lab's log,
-    /// deciding calls by the call registry (the personal build's rule, which these tests hold the socket's responses to).
+    /// deciding calls by the call registry (its own rule, which no build's fence decides by: the strictest these tests
+    /// hold the socket's responses to).
     async fn start() -> Self {
         Self::start_with(true).await
     }
@@ -820,7 +821,8 @@ impl Transport for PersonalShaped {
     }
 
     fn send<R: PlainRequest>(&self, _request: &R) -> impl Future<Output = Result<Response, Self::Error>> + Send {
-        future::ready(Err(teams_proto::HttpError::Refused(teams_proto::Refusal::Personal)))
+        // never reached: the registration goes through `send_own`, which the test counts
+        future::ready(Err(teams_proto::HttpError::Refused(teams_proto::Refusal::NotAllowed)))
     }
 
     fn send_own<R: OwnState + PlainRequest + Sync>(

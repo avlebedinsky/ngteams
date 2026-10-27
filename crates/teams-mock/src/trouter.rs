@@ -35,7 +35,8 @@
 //!
 //! Test hooks: every socket's record ([`TrouterMock::sockets`]: the account, the endpoint, the query, the stack, every
 //! frame the client sent), dropping an account's sockets, a service disconnect with a reason, an incoming call's
-//! delivery, sockets closed before their `trouter.connected`, a late `1::`.
+//! delivery, others' presence as UPS delivers it ([`TrouterMock::deliver_presence`]), sockets closed before their
+//! `trouter.connected`, a late `1::`.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -113,6 +114,9 @@ enum Command {
     /// A call delivery to a calling stack's socket whose endpoint the calling stack registered: its id, its path under
     /// the push URL, its body.
     DeliverCall { id: i64, path: String, body: String },
+    /// A presence delivery from UPS to a socket that doesn't take calls: its id, its body, whether it is a stored
+    /// replay.
+    DeliverPresence { id: i64, body: String, stored: bool },
 }
 
 /// One delivery the account's endpoints get again on every connect.
@@ -363,6 +367,26 @@ impl TrouterMock {
             },
         );
         id
+    }
+
+    /// Delivers `body` to `account`'s open messaging sockets as UPS delivers others' presence once the endpoint
+    /// subscribed to it (`tests/fixtures/trouter/presence-deliveries.json`'s shape, at the endpoint's
+    /// `unifiedPresenceService` path), a stored replay (`"mstore":true`) when `stored`. The mock's UPS sends none by
+    /// itself: a test delivers what the subscription would bring.
+    pub fn deliver_presence(&self, account: &str, body: &Value, stored: bool) {
+        let id = {
+            let mut sockets = self.shared.sockets();
+            sockets.next_delivery += 1;
+            i64::try_from(3_000_000 + sockets.next_delivery).unwrap_or(i64::MAX)
+        };
+        self.command(
+            account,
+            &Command::DeliverPresence {
+                id,
+                body: body.to_string(),
+                stored,
+            },
+        );
     }
 
     fn command(&self, account: &str, command: &Command) {
@@ -655,6 +679,29 @@ async fn carry_out(socket: &mut Socket, endpoint: &str, to_calls: bool, command:
                 "method": "POST",
                 "url": format!("/v4/f/{endpoint}/{path}"),
                 "headers": {"Content-Type": "application/json"},
+                "body": body,
+            });
+            socket.send(Message::text(format!("3:::{delivery}"))).await.ok()
+        }
+        Command::DeliverPresence { .. } if to_calls => Some(()),
+        Command::DeliverPresence { id, body, stored } => {
+            let mut request = json!({"id": format!("00000000-0000-4000-8003-{:012x}", id.unsigned_abs()), "src": "192.0.2.1", "port": 3443});
+            if stored {
+                request["mstore"] = json!(true);
+            }
+            let delivery = json!({
+                "id": id,
+                "method": "POST",
+                "url": format!("/v4/f/{endpoint}/unifiedPresenceService"),
+                "headers": {
+                    "Host": format!("{REGIONAL_NAME}-t.trouter.teams.microsoft.com"),
+                    "User-Agent": "Microsoft.Skype.Presence.App/1.0",
+                    "Content-Type": "application/json; charset=utf-8",
+                    "X-Microsoft-Skype-Message-ID": "0",
+                    "X-Trouter-Delivery-Control": "async; ttl=600",
+                    "trouter-request": request.to_string(),
+                    "Content-Length": body.len().to_string(),
+                },
                 "body": body,
             });
             socket.send(Message::text(format!("3:::{delivery}"))).await.ok()

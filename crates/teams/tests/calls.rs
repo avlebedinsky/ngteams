@@ -1,20 +1,19 @@
 //! The personal build's calls on the mock (`teams-mock`'s calling service, its Trouter and its media: a loopback TURN
 //! server and a loopback peer behind each party it plays), under the personal fence (`docs/personal-build.md`,
-//! "Calls"): each account an engine of its own, as `crates/teams` assembles one, with the personal fence of its account,
-//! its own `fence.log`, the personal membership source reading the mock's threads, its messaging socket and its calling
-//! socket, its calls' media on the file backend (a tone in, a recording out, each opening of the microphone and the
+//! "Calls"): each account an engine of its own, as `crates/teams` assembles one, with the personal fence of its account
+//! (which logs every send and denies none, so it reads no members), its own `fence.log`, its messaging socket and its
+//! calling socket, its calls' media on the file backend (a tone in, a recording out, each opening of the microphone and the
 //! camera counted). No PipeWire and no portal is opened (`test-support` wins over `personal`).
 //!
 //! - the test call to the web bundle's echo service: every write permitted and logged, its registration an own-state
 //!   entry, its frames logged, no plain request, the microphone opened only once the start passed, the camera never;
-//!   one to another echo is denied at its start;
-//! - a call in a 1:1 chat whose fresh read lists the account: the callee's engine answers only by its action;
-//! - a start naming someone the chat's read doesn't list, or in a chat whose read doesn't list the account: denied;
+//! - a call in a 1:1 chat: the callee's engine answers only by its action;
+//! - any start, whoever it names and in whatever chat, passes the fence unread and logged;
 //! - an outsider's invitation: offered, rung, answered or declined only by the action;
 //! - an invitation during a call: not offered, nothing sent for it;
 //! - an `attach` refused with a 401 goes again and its invitation is answered; one that failed for good (a refusal, a
 //!   skypetoken that couldn't be had) is let go, and the next invitation rings;
-//! - a running group call joined in a chat whose read lists the account;
+//! - a running group call joined;
 //! - the plain requests a lab call sends, each with its personal route.
 //!
 //! Every id, token and MRI here is the mocks' made-up one.
@@ -35,8 +34,7 @@ use teams_auth::session::{AccessToken, Renewal};
 use teams_auth::token::TokenError;
 use teams_core::engine::{self, EngineError, EngineHandle, EngineOptions, Event, Parts, Push};
 use teams_core::{CallAction, CallId, CallMedia, CallParts, CallStatus, End, Identity, IncomingCall, Outbox, Relay};
-use teams_fence::personal::PersonalMembershipSource;
-use teams_fence::{DenyReason, Fence, FenceLog, MembershipSource, Mri, Scope, Target, WriteKind};
+use teams_fence::{FailClosed, Fence, FenceLog, MembershipSource, Mri, Scope, Target, WriteKind};
 use teams_media::devices::file::{AudioInput, FileDevices, Pacing, PatternCamera};
 use teams_media::devices::{AudioSink, AudioSource, DeviceError, Devices, VideoSource, wav};
 use teams_media::processing::ProcessingConfig;
@@ -302,9 +300,8 @@ impl Account {
         let http =
             || HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &origin).unwrap();
         let transport = Arc::new(http());
-        let source = PersonalMembershipSource::with_mock_origin(&origin).unwrap();
-        source.set_credential_source(transport.clone());
-        let members: Arc<dyn MembershipSource + Send> = Arc::new(source);
+        // the personal fence reads no members
+        let members: Arc<dyn MembershipSource + Send> = Arc::new(FailClosed);
         let trouter = || {
             Trouter::with_mock_origin(Arc::clone(&transport), Arc::clone(&tokens), lab.trouter.origin())
                 .unwrap()
@@ -555,28 +552,6 @@ async fn the_test_call_goes_to_the_echo_service_every_write_logged_and_no_plain_
 }
 
 #[tokio::test]
-async fn a_test_call_to_anyone_but_the_echo_service_is_denied_at_its_start_and_nothing_goes() {
-    let lab = Lab::start().await;
-    let mut a = lab.account(LAB_A, A_TONE).await;
-    let other = Mri::new(teams_mock::ECHO);
-    assert_ne!(other, echo());
-    match a.act(CallAction::TestCall { echo: other }).await {
-        Ok(call) => assert!(matches!(a.ended(call).await, End::Failed(_))),
-        Err(error) => panic!("refused before the fence: {error:?}"),
-    }
-    let denials = a.log.denials();
-    assert!(
-        denials
-            .iter()
-            .any(|line| line["kind"] == "call" && line["reason"] == "not_the_test_call"),
-        "{denials:#?}"
-    );
-    assert!(lab.mock.calls().is_empty(), "no call reached the service");
-    assert_eq!(a.opened.microphones(), 0, "no microphone for a call the fence stopped");
-    a.shut_down().await;
-}
-
-#[tokio::test]
 async fn a_call_in_a_chat_listing_the_account_rings_and_the_callee_answers_only_by_its_action() {
     let lab = Lab::start().await;
     let mut a = lab.account(LAB_A, A_TONE).await;
@@ -623,43 +598,31 @@ fn call_start(id: &str, caller: &str, callees: &[&str]) -> Target {
 }
 
 #[tokio::test]
-async fn a_start_naming_someone_the_chat_doesn_t_list_or_in_a_chat_not_listing_the_account_is_denied() {
+async fn every_start_passes_the_personal_fence_unread_and_logged() {
     let mock = ChatServiceMock::start().await.unwrap();
-    let decide = |own: &'static str, target: Target| {
-        let mock = &mock;
-        async move {
-            let fence = Arc::new(Fence::personal(Mri::new(own), FenceLog::from_writer(io::sink())));
-            let tokens = Arc::new(Tokens {
-                ic3: mock.token(LAB_A).unwrap(),
-                skypetoken: String::new(),
-                renewals: broadcast::channel(4).0,
-                failing: Arc::default(),
-            });
-            let transport = Arc::new(
-                HttpTransport::with_mock_origin(tokens, Arc::clone(&fence), CHAT_BASE, &mock.origin()).unwrap(),
-            );
-            let source = PersonalMembershipSource::with_mock_origin(&mock.origin()).unwrap();
-            source.set_credential_source(transport);
-            fence.check(target, &source).await
-        }
+    let decide = |own: &'static str, target: Target| async move {
+        let log = SharedLog::default();
+        let fence = Fence::personal(Mri::new(own), FenceLog::from_writer(log.clone()));
+        let decided = fence.check(target, &FailClosed).await;
+        (decided, log)
     };
-    // the a–b–c chat's fresh read lists a, b and c: a may call b and c there, not the outsider
-    assert!(
-        decide(LAB_A, call_start(ABC_CHAT, LAB_A, &[LAB_B, teams_mock::LAB_C]))
-            .await
-            .is_ok()
-    );
-    let denied = decide(LAB_A, call_start(ABC_CHAT, LAB_A, &[LAB_B, OUTSIDER]))
-        .await
-        .unwrap_err();
-    assert_eq!(denied.reason(), &DenyReason::CalleesNotInChat);
-    // the outsider's fence: the a–b–c chat's read doesn't list it
-    let denied = decide(OUTSIDER, call_start(ABC_CHAT, OUTSIDER, &[LAB_B]))
-        .await
-        .unwrap_err();
-    assert_eq!(denied.reason(), &DenyReason::NotAMember);
-    // a 1:1 chat with the outsider that lists the account: callable, as it is writable
-    assert!(decide(LAB_A, call_start(AX_CHAT, LAB_A, &[OUTSIDER])).await.is_ok());
+    let another_echo = Target::new(WriteKind::Call, Scope::New).with_added([
+        Mri::new(LAB_A),
+        Mri::new(teams_mock::ECHO),
+        Mri::new(OUTSIDER),
+    ]);
+    for (own, target) in [
+        // a callee the chat doesn't list, a chat that doesn't list the account, a test call with another bot and more
+        (LAB_A, call_start(ABC_CHAT, LAB_A, &[LAB_B, OUTSIDER])),
+        (OUTSIDER, call_start(ABC_CHAT, OUTSIDER, &[LAB_B])),
+        (LAB_A, call_start(AX_CHAT, LAB_A, &[OUTSIDER])),
+        (LAB_A, another_echo),
+    ] {
+        let (decided, log) = decide(own, target.clone()).await;
+        assert!(decided.is_ok(), "{target}");
+        assert!(log.denials().is_empty() && log.permitted_any("\"call\""), "{target}");
+    }
+    assert!(mock.received_requests().await.is_empty(), "no chat read");
 }
 
 #[tokio::test]

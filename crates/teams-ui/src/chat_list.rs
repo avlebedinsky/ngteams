@@ -1,5 +1,6 @@
 //! The chat list: the account's chats by last activity, each row with its avatar, name, last message's first line,
-//! time and unread count, in the [`crate::sidebar`]'s "Chats" section, which draws its rows.
+//! time and unread count, in the [`crate::sidebar`]'s "Chats" section, which draws its rows; the account's favourite
+//! chats above them, in the "Favorites" section, in the order Teams keeps them, and not again under "Chats".
 //!
 //! - **From the store only.** The list asks the engine's store ([`Core::conversations`], then per chat its members,
 //!   newest messages, unread count and people's names) when it opens and again each time the models say a chat
@@ -7,13 +8,22 @@
 //!   only when its chat changed since it was built, or when a message that carried a name came, in any chat, from
 //!   someone the row is named by, or their profile changed ([`crate::Chats::named_at`]); every row again after a
 //!   catch-up.
-//! - **Which chats**: 1:1, group and meeting chats. A team's channels belong to the Teams list (Task 16) and the
-//!   account's own streams (`48:notes`, `48:notifications`, …) aren't chats: neither is listed.
+//! - **Which chats**: 1:1, group and meeting chats, but not one the chat service calls empty while the store holds no
+//!   text of it and none unread (`isemptyconversation`: a chat nobody wrote in yet, as a test call's chat with the
+//!   echo service or a meeting nobody wrote in; Teams lists none of them). A team's channels belong to the Teams list
+//!   (Task 16) and the account's own streams (`48:notifications`, …) aren't chats: neither is listed.
+//! - **Favorites** ([`Core::chat_listing`]: the `Favorites` folder of CSA's teams read, in its order): each one the
+//!   list has a row for moves from "Chats" to "Favorites"; the account's own notes (`48:notes`, its chat with itself)
+//!   is a row of its own there, [`NOTES`], named as Teams names it, "<name> (You)", with the account's own picture and
+//!   presence. A favourite the store doesn't hold is left out.
 //! - **Names** (M2 Task 12): a 1:1 chat by the other member's name as the engine has it ([`Core::person`]: their
-//!   profile's, else their newest message's, else one the binary knew), else their MRI; a group or meeting chat by its
-//!   topic, else its other members' names (or MRIs). The avatar shows a 1:1 chat's other member's picture, else the
-//!   initials of a name, else nothing.
-//! - **Presence** (M2 Task 17): a 1:1 chat's avatar carries its other member's presence dot ([`crate::presence`]).
+//!   profile's, else their newest message's, else one the binary knew); a group or meeting chat by its topic, else its
+//!   other members' first names as Teams joins them ("Evgenia and Sean"). Someone without a name is never shown by
+//!   MRI: "Unknown user", a bot "Bot" (the test call's echo service "Test call").
+//! - **Avatars** ([`AVATAR`] across): a 1:1 chat's other member's picture, else the initials of a name, else nothing;
+//!   a group chat's two of its other members, half each, as Teams splits it; a meeting chat Teams' calendar.
+//! - **Presence** (M2 Task 17): a 1:1 chat's avatar carries its other member's presence badge
+//!   ([`crate::presence_badge`], nothing while it isn't known), never a bot's (it has none to read).
 //!   After each load the engine is asked about the other members of the top [`LIST_WATCHED`] 1:1 chats, the lowest
 //!   first so the top ones are the latest asked, then the selected chat's (its header's), again when the selection
 //!   changes; the list draws what the presence model holds, again on each change of it. A row below them shows
@@ -25,26 +35,29 @@
 //! the list shows is traced (`chat-list shown`: the chats' ids in order, their kinds and unread counts, never a name
 //! or text).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use chrono::{DateTime, Datelike as _, Local, TimeZone};
+use chrono::Local;
 use gpui::{
-    AnyElement, App, AsyncApp, Context, ElementId, EventEmitter, InteractiveElement as _, IntoElement,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity,
-    div, px, rgb,
+    AnyElement, App, AsyncApp, Context, Div, ElementId, EventEmitter, InteractiveElement as _, IntoElement, ObjectFit,
+    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription,
+    Task, WeakEntity, div, img, px, rgb,
 };
 use gpui_component::Size;
-use gpui_component::avatar::Avatar;
-use teams_core::{Availability, MAX_WATCHED};
+use teams_core::{Availability, ChatListing, MAX_WATCHED, has_presence};
+use teams_proto::TEAMS_ECHO_BOT_MRI;
 use teams_proto::chat::parse_html;
 use teams_store::{Conversation, ConversationKind, Member, Message};
 
 use crate::bridge::Core;
+use crate::clock::{self, HourCycle};
 use crate::compose::PICKER_MAX;
+use crate::icons::Glyph;
 use crate::models::Models;
 use crate::people::{self, Picture, Shown};
 use crate::presence;
+use crate::presence_badge;
 use crate::theme::Palette;
 use crate::trace::{TraceLine, ViewTrace};
 
@@ -56,12 +69,24 @@ pub const PREVIEW_PAGE: usize = 20;
 pub const PREVIEW_CHARS: usize = 120;
 /// The most members a group chat without a topic is named by.
 pub const NAMED_MEMBERS: usize = 4;
-/// A row's height, px.
-pub const ROW_HEIGHT: f32 = 56.0;
+/// A row's avatar's diameter, px: twice the kit's small avatar (as the user asked), its initials and marks with it.
+pub const AVATAR: f32 = 48.0;
+/// The presence badge on a row's avatar, px across, its ring included: scaled with [`AVATAR`].
+pub const AVATAR_BADGE: f32 = 20.0;
+/// A row's height, px: the avatar and room around it.
+pub const ROW_HEIGHT: f32 = AVATAR + 16.0;
+/// The account's own notes: its chat with itself, which Teams lists under "Favorites" as "<name> (You)".
+pub const NOTES: &str = "48:notes";
+/// What a member without a name is called.
+pub const UNKNOWN_USER: &str = "Unknown user";
+/// What a bot or a service (a `28:` id) without a name is called.
+pub const BOT: &str = "Bot";
+/// What the test call's echo service is called (the name the app's own "Test call" gives it).
+pub const ECHO: &str = "Test call";
 /// What a deleted message's preview says.
 pub const DELETED: &str = "This message was deleted";
 /// How many of the top 1:1 chats' other members the list asks the engine about: with the open chat's (the header's)
-/// and the mention picker's [`PICKER_MAX`], never more than the engine watches ([`MAX_WATCHED`]), so the list's own
+/// and the mention picker's or the chat view's senders' [`PICKER_MAX`], never more than the engine watches ([`MAX_WATCHED`]), so the list's own
 /// asks never drop the people it shows from the watch.
 pub const LIST_WATCHED: usize = MAX_WATCHED - PICKER_MAX - 1;
 
@@ -71,6 +96,8 @@ pub enum RowKind {
     OneToOne,
     Group,
     Meeting,
+    /// The account's own notes ([`NOTES`]).
+    Notes,
     /// A kind this build doesn't name.
     Other,
 }
@@ -82,6 +109,8 @@ impl RowKind {
             ConversationKind::OneToOne => Self::OneToOne,
             ConversationKind::Group => Self::Group,
             ConversationKind::Meeting => Self::Meeting,
+            // the store keeps a meeting's chat by the thread type the list gave it
+            ConversationKind::Other(kind) if kind == "thread_type:meeting" => Self::Meeting,
             ConversationKind::Channel | ConversationKind::Other(_) => Self::Other,
         }
     }
@@ -93,6 +122,7 @@ impl RowKind {
             Self::OneToOne => "one-to-one",
             Self::Group => "group",
             Self::Meeting => "meeting",
+            Self::Notes => "notes",
             Self::Other => "other",
         }
     }
@@ -116,13 +146,22 @@ pub struct ChatRow {
     pub named: bool,
     /// A 1:1 chat's other member's picture, from the engine.
     pub picture: Option<Picture>,
-    /// A 1:1 chat's other member, whose presence the row shows.
+    /// A 1:1 chat's other member (the account itself for its notes), whose presence the row shows; never a bot.
     pub partner: Option<String>,
+    /// A group chat's two members its avatar shows, half each (none for any other chat, or a group of one other).
+    pub faces: Vec<HalfFace>,
     /// The last message's first line.
     pub preview: SharedString,
     /// Milliseconds.
     pub last_activity: Option<i64>,
     pub unread: u64,
+}
+
+/// A member a group chat's avatar shows half of: the initial of their name, or their picture.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HalfFace {
+    pub name: Option<SharedString>,
+    pub picture: Option<Picture>,
 }
 
 /// The other member of a 1:1 chat its id names (`19:<oid>_<oid>@unq.gbl.spaces`), when one of the two is `me`.
@@ -206,39 +245,48 @@ pub fn preview(page: &[Message], me: &str) -> SharedString {
     }
 }
 
-/// A row's time: the time of day today, the weekday within the week, else the day (and the year, if not this one).
-#[must_use]
-pub fn format_time<Tz: TimeZone>(ms: i64, now: &DateTime<Tz>) -> String
-where
-    Tz::Offset: std::fmt::Display,
-{
-    let Some(at) = DateTime::from_timestamp_millis(ms) else {
-        return String::new();
-    };
-    let at = at.with_timezone(&now.timezone());
-    let (day, today) = (at.date_naive(), now.date_naive());
-    let days = (today - day).num_days();
-    let format = if days == 0 {
-        "%H:%M"
-    } else if (1..7).contains(&days) {
-        "%a"
-    } else if at.year() == now.year() {
-        "%-d %b"
-    } else {
-        "%-d %b %Y"
-    };
-    at.format(format).to_string()
-}
-
 /// What a chat is called, whether that is a name, and its picture.
 struct Naming {
     name: SharedString,
     named: bool,
     picture: Option<Picture>,
-    /// A 1:1 chat's other member.
+    /// A 1:1 chat's other member, when they have a presence.
     partner: Option<String>,
-    /// The members whose names the name read (none for a topic).
+    faces: Vec<HalfFace>,
+    /// The members whose names the name or the avatar read.
     people: Vec<String>,
+}
+
+/// What someone without a name is called: never their MRI.
+#[must_use]
+pub fn unnamed(mri: &str) -> &'static str {
+    if mri == TEAMS_ECHO_BOT_MRI {
+        ECHO
+    } else if mri.starts_with("28:") {
+        BOT
+    } else {
+        UNKNOWN_USER
+    }
+}
+
+/// The first word of a name, as Teams names a group chat's members.
+fn first_name(name: &str) -> &str {
+    name.split_whitespace().next().unwrap_or(name)
+}
+
+/// Names joined as Teams joins them (English list form): "A", "A and B", "A, B, and C"; past [`NAMED_MEMBERS`]
+/// `more` others counted, "A, B, C, D, +2".
+#[must_use]
+pub fn joined(names: &[String], more: usize) -> String {
+    if more > 0 {
+        return format!("{}, +{more}", names.join(", "));
+    }
+    match names {
+        [] => String::new(),
+        [one] => one.clone(),
+        [one, two] => format!("{one} and {two}"),
+        [rest @ .., last] => format!("{}, and {last}", rest.join(", ")),
+    }
 }
 
 /// What a chat is called (see the module docs).
@@ -247,56 +295,140 @@ async fn name_of(core: &dyn Core, conversation: &Conversation, members: &[Member
         .topic
         .as_deref()
         .map(str::trim)
-        .filter(|topic| !topic.is_empty());
+        .filter(|topic| !topic.is_empty())
+        .filter(|_| conversation.kind != ConversationKind::OneToOne);
+    let others = others(conversation, members, core.me());
+    let kind = RowKind::of(&conversation.kind);
+    // a meeting's chat shows its calendar, never its people: only its topic is read
     if let Some(topic) = topic
-        && conversation.kind != ConversationKind::OneToOne
+        && kind == RowKind::Meeting
     {
         return Naming {
             name: topic.to_owned().into(),
             named: true,
             picture: None,
             partner: None,
+            faces: Vec::new(),
             people: Vec::new(),
         };
     }
-    let others = others(conversation, members, core.me());
     if others.is_empty() {
         return Naming {
-            name: "Chat".into(),
-            named: false,
+            name: topic.unwrap_or("Chat").to_owned().into(),
+            named: topic.is_some(),
             picture: None,
             partner: None,
+            faces: Vec::new(),
             people: Vec::new(),
         };
     }
-    let mut shown = Vec::new();
-    let mut all_named = true;
-    let mut pictures = Vec::new();
+    let mut shown: Vec<(String, Option<Shown>)> = Vec::new();
     for mri in others.iter().take(NAMED_MEMBERS) {
-        let person = core.person(mri.clone()).await.ok().map(Shown::of);
-        pictures.push(person.as_ref().and_then(|person| person.picture.clone()));
-        if let Some(name) = person.and_then(|person| person.name) {
-            shown.push(name.to_string());
-        } else {
-            shown.push(mri.clone());
-            all_named = false;
-        }
+        shown.push((mri.clone(), core.person(mri.clone()).await.ok().map(Shown::of)));
     }
-    // a 1:1 chat shows the other member's picture and presence; a group neither of its own
-    let one_to_one = conversation.kind == ConversationKind::OneToOne && others.len() == 1;
-    let picture = if one_to_one { pictures.pop().flatten() } else { None };
-    let partner = one_to_one.then(|| others[0].clone());
-    let mut name = shown.join(", ");
-    if others.len() > NAMED_MEMBERS {
-        name = format!("{name} +{}", others.len() - NAMED_MEMBERS);
+    let people: Vec<String> = shown.iter().map(|(mri, _)| mri.clone()).collect();
+    // a 1:1 chat shows the other member's picture and presence (a bot has none to read)
+    if conversation.kind == ConversationKind::OneToOne && others.len() == 1 {
+        let (mri, person) = shown.swap_remove(0);
+        let name = person.as_ref().and_then(|person| person.name.clone());
+        return Naming {
+            named: name.is_some(),
+            name: name.unwrap_or_else(|| unnamed(&mri).into()),
+            picture: person.and_then(|person| person.picture),
+            partner: has_presence(&mri).then_some(mri),
+            faces: Vec::new(),
+            people,
+        };
     }
+    let faces = if kind == RowKind::Group && others.len() > 1 {
+        shown
+            .iter()
+            .take(2)
+            .map(|(_, person)| HalfFace {
+                name: person.as_ref().and_then(|person| person.name.clone()),
+                picture: person.as_ref().and_then(|person| person.picture.clone()),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let (name, named) = match topic {
+        Some(topic) => (topic.to_owned(), true),
+        None => members_named(&shown, others.len().saturating_sub(NAMED_MEMBERS)),
+    };
     Naming {
         name: name.into(),
-        named: all_named,
-        picture,
-        partner,
-        people: others.into_iter().take(NAMED_MEMBERS).collect(),
+        named,
+        picture: None,
+        partner: None,
+        faces,
+        people,
     }
+}
+
+/// A group chat without a topic by the first names of the members `shown` (alphabetically, `more` others counted),
+/// and whether every one of them had a name.
+fn members_named(shown: &[(String, Option<Shown>)], more: usize) -> (String, bool) {
+    let all_named = shown
+        .iter()
+        .all(|(_, person)| person.as_ref().is_some_and(|p| p.name.is_some()));
+    let mut names: Vec<String> = shown
+        .iter()
+        .map(
+            |(mri, person)| match person.as_ref().and_then(|person| person.name.as_ref()) {
+                Some(name) => first_name(name).to_owned(),
+                None => unnamed(mri).to_owned(),
+            },
+        )
+        .collect();
+    names.sort_by_key(|name| name.to_lowercase());
+    (joined(&names, more), all_named)
+}
+
+/// The account's own notes' row ([`NOTES`]): "<name> (You)" with its own picture and presence, its preview from the
+/// stored notes (if any).
+pub async fn notes_row(core: &dyn Core) -> ChatRow {
+    let me = core.me().to_owned();
+    let person = core.person(me.clone()).await.ok().map(Shown::of);
+    let name = person.as_ref().and_then(|person| person.name.clone());
+    let page = core
+        .messages(NOTES.to_owned(), None, PREVIEW_PAGE)
+        .await
+        .map(|page| page.messages)
+        .unwrap_or_default();
+    ChatRow {
+        id: NOTES.to_owned(),
+        kind: RowKind::Notes,
+        named: name.is_some(),
+        name: name.map_or_else(|| "You".into(), |name| format!("{name} (You)").into()),
+        picture: person.and_then(|person| person.picture),
+        partner: Some(me.clone()),
+        faces: Vec::new(),
+        preview: preview(&page, &me),
+        last_activity: None,
+        unread: 0,
+    }
+}
+
+/// The list's two sections from the rows of the stored conversations, the latest activity first (see the module
+/// docs): the favourites in their order (`notes` the account's own notes' row, when it is one of them), and the other
+/// chats, without the ones the service calls empty that have no text and nothing unread.
+#[must_use]
+pub fn arrange(rows: Vec<ChatRow>, listing: &ChatListing, mut notes: Option<ChatRow>) -> (Vec<ChatRow>, Vec<ChatRow>) {
+    let empty: HashSet<&str> = listing.empty.iter().map(String::as_str).collect();
+    let mut rows: Vec<ChatRow> = rows
+        .into_iter()
+        .filter(|row| !(empty.contains(row.id.as_str()) && row.preview.is_empty() && row.unread == 0))
+        .collect();
+    let mut favorites = Vec::new();
+    for id in listing.favorites.iter().flatten() {
+        if id == NOTES {
+            favorites.extend(notes.take());
+        } else if let Some(at) = rows.iter().position(|row| &row.id == id) {
+            favorites.push(rows.remove(at));
+        }
+    }
+    (favorites, rows)
 }
 
 /// A chat's row, from the store. A query that fails leaves its part empty: the row is still shown.
@@ -319,6 +451,7 @@ async fn build(core: &dyn Core, conversation: &Conversation) -> (ChatRow, Vec<St
         named,
         picture,
         partner,
+        faces,
         people,
     } = name_of(core, conversation, &members).await;
     let row = ChatRow {
@@ -327,6 +460,7 @@ async fn build(core: &dyn Core, conversation: &Conversation) -> (ChatRow, Vec<St
         named,
         picture,
         partner,
+        faces,
         preview: preview(&page, core.me()),
         last_activity: conversation.last_activity,
         unread,
@@ -367,6 +501,9 @@ pub struct ChatList {
     core: Arc<dyn Core>,
     models: Models,
     trace: Arc<ViewTrace>,
+    /// The "Favorites" section's rows, in Teams' order.
+    favorites: Vec<ChatRow>,
+    /// The "Chats" section's rows.
     rows: Vec<ChatRow>,
     cache: HashMap<String, Cached>,
     /// Moves when the cache is dropped: a load that started before keeps none of its rows.
@@ -412,6 +549,7 @@ impl ChatList {
             core,
             models,
             trace,
+            favorites: Vec::new(),
             rows: Vec::new(),
             cache: HashMap::new(),
             generation: 0,
@@ -427,16 +565,33 @@ impl ChatList {
         list
     }
 
-    /// The rows shown, the latest activity first.
+    /// The "Chats" section's rows, the latest activity first.
     #[must_use]
     pub fn rows(&self) -> &[ChatRow] {
         &self.rows
     }
 
+    /// Whether the engine sends nothing ([`Core::read_only`]): the app's read-only mode, which opens no push channel.
+    #[must_use]
+    pub fn read_only(&self) -> bool {
+        self.core.read_only()
+    }
+
+    /// The "Favorites" section's rows, in Teams' order.
+    #[must_use]
+    pub fn favorites(&self) -> &[ChatRow] {
+        &self.favorites
+    }
+
+    /// Every row shown: the favourites, then the other chats.
+    pub fn all_rows(&self) -> impl Iterator<Item = &ChatRow> {
+        self.favorites.iter().chain(&self.rows)
+    }
+
     /// A shown row, by its chat's id.
     #[must_use]
     pub fn row(&self, id: &str) -> Option<&ChatRow> {
-        self.rows.iter().find(|row| row.id == id)
+        self.all_rows().find(|row| row.id == id)
     }
 
     #[must_use]
@@ -470,7 +625,7 @@ impl ChatList {
     /// the header's longest.
     fn watch_shown(&self) {
         let mut partners: Vec<&String> = Vec::new();
-        for partner in self.rows.iter().filter_map(|row| row.partner.as_ref()) {
+        for partner in self.all_rows().filter_map(|row| row.partner.as_ref()) {
             if partners.len() == LIST_WATCHED {
                 break;
             }
@@ -542,14 +697,22 @@ impl ChatList {
     }
 
     /// A load ended: its rows shown, the ones it built kept (unless the cache was dropped since it started).
-    fn loaded(&mut self, generation: u64, at: u64, rows: Option<(Vec<ChatRow>, Vec<Built>)>, cx: &mut Context<Self>) {
+    fn loaded(&mut self, generation: u64, at: u64, rows: Option<Loaded>, cx: &mut Context<Self>) {
         self.loading = None;
         self.loads += 1;
-        if let Some((rows, built)) = rows {
+        if let Some(Loaded {
+            rows,
+            built,
+            listing,
+            notes,
+        }) = rows
+        {
             if generation == self.generation {
                 self.keep_built(&rows, built, at);
             }
             self.cache.retain(|id, _| rows.iter().any(|row| &row.id == id));
+            let (favorites, rows) = arrange(rows, &listing, notes);
+            self.favorites = favorites;
             self.rows = rows;
             self.trace_rows();
             self.watch_shown();
@@ -563,8 +726,7 @@ impl ChatList {
     /// Traces what the list shows, when it changed.
     fn trace_rows(&mut self) {
         let shown: Vec<(String, RowKind, u64)> = self
-            .rows
-            .iter()
+            .all_rows()
             .map(|row| (row.id.clone(), row.kind, row.unread))
             .collect();
         if self.traced.as_ref() == Some(&shown) {
@@ -579,52 +741,69 @@ impl ChatList {
         self.traced = Some(shown);
     }
 
-    /// The row at `index` of the list; its test selector `chat-row-<index>`.
+    /// The "Chats" row at `index`; its test selector `chat-row-<index>`.
     pub(crate) fn render_row(&self, index: usize, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let Some(row) = self.rows.get(index) else {
-            return div().into_any_element();
-        };
+        match self.rows.get(index) {
+            Some(row) => self.render(row, format!("chat-row-{index}"), palette, cx),
+            None => div().into_any_element(),
+        }
+    }
+
+    /// The "Favorites" row at `index`; its test selector `favorite-row-<index>`.
+    pub(crate) fn render_favorite(&self, index: usize, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        match self.favorites.get(index) {
+            Some(row) => self.render(row, format!("favorite-row-{index}"), palette, cx),
+            None => div().into_any_element(),
+        }
+    }
+
+    fn render(&self, row: &ChatRow, selector: String, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let selected = self.selected.as_deref() == Some(row.id.as_str());
         let id = row.id.clone();
         let background = if selected { palette.selected } else { palette.surface };
         div()
-            .id(ElementId::Name(row.id.clone().into()))
-            .debug_selector(move || format!("chat-row-{index}"))
+            .id(ElementId::Name(format!("{selector}-{}", row.id).into()))
+            .debug_selector(move || selector.clone())
             .w_full()
             .h(px(ROW_HEIGHT))
             .overflow_hidden()
             .px_3()
             .flex()
             .items_center()
-            .gap_2()
+            .gap_3()
             .bg(rgb(background))
             .hover(move |style| style.bg(rgb(if selected { palette.selected } else { palette.hover })))
             .on_click(cx.listener(move |this, _, _, cx| this.open(id.clone(), cx)))
-            .child(self.avatar(row, palette, cx))
-            .child(row_text(row, palette))
+            .child(self.avatar(row, background, palette, cx))
+            .child(row_text(row, palette, clock::cycle(cx)))
             .into_any_element()
     }
 
-    /// The row's avatar ([`avatar`]), a 1:1 chat's with its other member's presence dot at its corner.
-    fn avatar(&self, row: &ChatRow, palette: Palette, cx: &App) -> AnyElement {
-        let Some(availability) = self.presence_of(row, cx) else {
-            return avatar(row).into_any_element();
+    /// The row's avatar ([`avatar`]), with its person's presence badge at its corner (a 1:1 chat's other member, the
+    /// account's own on its notes) when it is known, ringed in the row's `background`.
+    fn avatar(&self, row: &ChatRow, background: u32, palette: Palette, cx: &App) -> AnyElement {
+        let badge = self
+            .presence_of(row, cx)
+            .and_then(|availability| presence_badge::badge(&availability, AVATAR_BADGE, palette));
+        let Some(badge) = badge else {
+            return avatar(row, palette);
         };
         div()
             .relative()
             .flex_none()
-            .child(avatar(row))
+            .child(avatar(row, palette))
             .child(
-                presence::dot(&availability, palette)
+                badge
+                    .border_color(rgb(background))
                     .absolute()
-                    .right(px(-1.0))
-                    .bottom(px(-1.0)),
+                    .right(px(-2.0))
+                    .bottom(px(-2.0)),
             )
             .into_any_element()
     }
 
-    /// The presence a row shows: its 1:1 chat's other member's, as the presence model holds it; `None` for a row
-    /// that shows none (a group or meeting chat).
+    /// The presence a row shows: its 1:1 chat's other member's (the account's own on its notes), as the presence
+    /// model holds it; `None` for a row that shows none (a group or meeting chat, a bot).
     #[must_use]
     pub fn presence_of(&self, row: &ChatRow, cx: &App) -> Option<Availability> {
         let partner = row.partner.as_deref()?;
@@ -632,16 +811,128 @@ impl ChatList {
     }
 }
 
-/// The row's avatar: its picture, else the initials of its name (not of an MRI), else none.
-fn avatar(row: &ChatRow) -> Avatar {
-    people::avatar(row.named.then_some(&row.name), row.picture.as_ref(), Size::Small)
+/// A row's avatar, [`AVATAR`] across: a meeting's calendar, a group's two members split, else the picture, else the
+/// initials of its name (not of an MRI), else a blank one.
+fn avatar(row: &ChatRow, palette: Palette) -> AnyElement {
+    match (row.kind, row.faces.as_slice()) {
+        (RowKind::Meeting, _) => mark_avatar(Glyph::CALENDAR, palette.brand, palette.on_brand, "avatar-meeting"),
+        // a 1:1 chat whose other member has no presence: a bot or a service
+        (RowKind::OneToOne, _) if row.partner.is_none() && row.picture.is_none() => {
+            mark_avatar(Glyph::BOT, palette.hover, palette.muted_foreground, "avatar-bot")
+        }
+        (RowKind::Group, [left, right, ..]) => split_avatar(left, right).into_any_element(),
+        _ => {
+            let name = row.named.then(|| match row.kind {
+                // the initials of the account's own name, not of "(You)"
+                RowKind::Notes => SharedString::from(row.name.trim_end_matches(" (You)").to_owned()),
+                _ => row.name.clone(),
+            });
+            div()
+                .flex_none()
+                .child(people::avatar(
+                    name.as_ref(),
+                    row.picture.as_ref(),
+                    Size::Size(px(AVATAR)),
+                ))
+                .into_any_element()
+        }
+    }
 }
 
-/// The row's name and time over its preview and unread count.
-fn row_text(row: &ChatRow, palette: Palette) -> impl IntoElement {
+/// An avatar of one mark on a colour, its test selector `selector`: Teams' calendar on the brand colour for a
+/// meeting's chat, a bot's head on a quiet one for a bot.
+fn mark_avatar(mark: Glyph, background: u32, foreground: u32, selector: &'static str) -> AnyElement {
+    div()
+        .debug_selector(move || selector.to_owned())
+        .size(px(AVATAR))
+        .flex_none()
+        .rounded_full()
+        .bg(rgb(background))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(mark.icon().size(px(AVATAR * 0.5)).text_color(rgb(foreground)))
+        .into_any_element()
+}
+
+/// The gap between a split avatar's halves, px.
+const SPLIT_GAP: f32 = 1.0;
+
+/// A group chat's avatar as Teams splits it: two members, half each.
+fn split_avatar(left: &HalfFace, right: &HalfFace) -> Div {
+    div()
+        .debug_selector(|| "avatar-split".to_owned())
+        .size(px(AVATAR))
+        .flex_none()
+        .flex()
+        .gap(px(SPLIT_GAP))
+        .child(half(left, true))
+        .child(half(right, false))
+}
+
+/// One half of a split avatar: the member's picture, else the initial of their name on a colour of its own.
+fn half(face: &HalfFace, left: bool) -> AnyElement {
+    let width = px((AVATAR - SPLIT_GAP) / 2.0);
+    let radius = px(AVATAR / 2.0);
+    if let Some(picture) = &face.picture {
+        let image = img(Arc::clone(picture.image()))
+            .w(width)
+            .h(px(AVATAR))
+            .object_fit(ObjectFit::Cover);
+        let image = if left {
+            image.rounded_tl(radius).rounded_bl(radius)
+        } else {
+            image.rounded_tr(radius).rounded_br(radius)
+        };
+        return image.into_any_element();
+    }
+    let initial: String = face
+        .name
+        .as_deref()
+        .and_then(|name| name.chars().find(|c| c.is_alphanumeric()))
+        .map(|c| c.to_uppercase().collect())
+        .unwrap_or_default();
+    let (background, foreground) = initials_colour(face.name.as_deref().unwrap_or(""));
+    let half = div()
+        .w(width)
+        .h(px(AVATAR))
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(rgb(background))
+        .text_color(rgb(foreground))
+        .text_size(px(AVATAR * 0.4))
+        .child(initial);
+    if left {
+        half.rounded_tl(radius).rounded_bl(radius).into_any_element()
+    } else {
+        half.rounded_tr(radius).rounded_br(radius).into_any_element()
+    }
+}
+
+/// Teams' soft avatar colours (background, initials), one picked by the name.
+const INITIALS_COLOURS: [(u32, u32); 6] = [
+    (0x00f6_d1d5, 0x00a4_262c),
+    (0x00fd_e7d3, 0x008e_562e),
+    (0x00d6_e5f6, 0x0000_4e8c),
+    (0x00d9_ecd4, 0x0028_6e2c),
+    (0x00e4_dcf2, 0x005c_2e91),
+    (0x00f7_e5c2, 0x0080_5c00),
+];
+
+/// The colours of `name`'s initials, the same for the same name.
+fn initials_colour(name: &str) -> (u32, u32) {
+    let sum = name
+        .bytes()
+        .fold(0_usize, |sum, byte| sum.wrapping_add(usize::from(byte)));
+    INITIALS_COLOURS[sum % INITIALS_COLOURS.len()]
+}
+
+/// The row's name and time (on `cycle`'s clock) over its preview and unread count (when it has either).
+fn row_text(row: &ChatRow, palette: Palette, cycle: HourCycle) -> impl IntoElement {
     let time = row
         .last_activity
-        .map(|ms| format_time(ms, &Local::now()))
+        .map(|ms| clock::list_time(ms, &Local::now(), cycle))
         .unwrap_or_default();
     let name = div().flex_1().min_w_0().truncate().child(row.name.clone());
     let name = if row.unread > 0 {
@@ -673,12 +964,29 @@ fn row_text(row: &ChatRow, palette: Palette) -> impl IntoElement {
                 .child(row.unread.to_string()),
         );
     }
-    div().flex_1().min_w_0().flex().flex_col().child(top).child(bottom)
+    let text = div().flex_1().min_w_0().flex().flex_col().child(top);
+    // a row with nothing under its name (the account's own notes before anything was written) is one line, centred
+    if row.preview.is_empty() && row.unread == 0 {
+        text
+    } else {
+        text.child(bottom)
+    }
+}
+
+/// What a load read: the rows it kept or built, the ones it built, the favourites and the empty chats, and the
+/// account's own notes' row when they are one of the favourites.
+struct Loaded {
+    rows: Vec<ChatRow>,
+    built: Vec<Built>,
+    listing: ChatListing,
+    notes: Option<ChatRow>,
 }
 
 /// One load: the conversation list, then each row kept or built, then shown.
 async fn load(core: Arc<dyn Core>, generation: u64, this: WeakEntity<ChatList>, cx: &mut AsyncApp) {
     let listed = core.conversations(LIST_LIMIT).await;
+    // without it (an engine that stopped, a store that failed) every chat is listed under "Chats"
+    let listing = core.chat_listing().await.unwrap_or_default();
     let Ok(planned) = this.update(cx, |list, cx| {
         let at = list.models.chats.read(cx).revision();
         (listed.map(|listed| list.plan(listed, cx)), at)
@@ -688,7 +996,17 @@ async fn load(core: Arc<dyn Core>, generation: u64, this: WeakEntity<ChatList>, 
     };
     let (planned, at) = planned;
     let rows = match planned {
-        Ok(planned) => Some(build_rows(&*core, planned).await),
+        Ok(planned) => {
+            let (rows, built) = build_rows(&*core, planned).await;
+            let favored = listing.favorites.iter().flatten().any(|id| id == NOTES);
+            let notes = if favored { Some(notes_row(&*core).await) } else { None };
+            Some(Loaded {
+                rows,
+                built,
+                listing,
+                notes,
+            })
+        }
         // the engine stopped: the rows shown stay
         Err(_) => None,
     };

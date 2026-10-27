@@ -41,8 +41,9 @@
 //!   read in the background when the store's are missing or old ([`crate::profiles`]: Graph, else the middle tier's
 //!   profile lookup, a read sent as a `POST`); each change stored is told as [`Event::Profile`].
 //! - **Others' presence** (M2 Task 17, [`EngineRequests::presence`]): the availability of the people the views asked
-//!   about, read from UPS by polling ([`crate::presence`]: [`EngineOptions::presence_poll`], never stored); each change
-//!   told as [`Event::Presence`].
+//!   about, pushed by UPS once the push channel's endpoint subscribed to it and read from UPS by polling besides
+//!   ([`crate::presence`]: [`EngineOptions::presence_poll`], [`EngineOptions::presence_poll_subscribed`], never
+//!   stored); each change told as [`Event::Presence`].
 //! - **Search** ([`EngineRequests::search`]): the store's own index of the messages' plain text ([`crate::search`]),
 //!   never the service's search. Each message is indexed as it is stored; the messages stored before are indexed by a
 //!   backfill that runs from the engine's start, a batch at a time ([`EngineOptions::index_batch`]) between the
@@ -53,7 +54,10 @@
 //!   old ([`crate::teams`]), each change of the list told as [`Event::Teams`]; a channel's posts and replies synced
 //!   on demand like any conversation's ([`EngineRequests::sync_conversation`]: a channel other than a team's general
 //!   one is in no conversation list, so no catch-up reaches it), and the post each stored channel message belongs to
-//!   ([`EngineRequests::reply_roots`]). Nothing is written there: a channel has no write type.
+//!   ([`EngineRequests::reply_roots`]). Nothing is written there: a channel has no write type. A read whose
+//!   favourites name the account's own notes ([`NOTES`]) while the store has none syncs them on the next tick: the
+//!   catch-up that runs before the first read of the teams (the first run, the first after the store kept favourites)
+//!   can't know them yet, and without a push channel's drop no other catch-up may come for a long time.
 //! - **Transient writes** ([`EngineRequests::transient`]: typing) go out through the outbox too, but as no row
 //!   ([`Transient`]); a throttled one goes out from the tick unless a newer one of the same took its place, it waits
 //!   once and briefly ([`crate::MAX_TRANSIENT_WAIT`]), and a message post to its conversation drops it (told as
@@ -99,7 +103,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 
 use teams_call::{CallId, Placement, RemoteEnd};
-use teams_fence::{ChatPeople, Mri};
+use teams_fence::Mri;
 use teams_proto::chat::{self, MessageText};
 use teams_proto::{
     Client, Credentials, EndpointRegistrar, HttpError, HttpTransport, ManualAvailability, RegisteredEndpoint, Transport,
@@ -120,11 +124,12 @@ use crate::calling::{
 };
 use crate::emoticons::{Animations, Strip};
 use crate::outbox::{Command, Outbox, OutboxError, Sent, Transient, TransientSent, create_chat, enqueue};
-use crate::presence::{Availability, PRESENCE_POLL, Polled, Presences};
+use crate::pictures::{PictureBytes, Pictures};
+use crate::presence::{Availability, PRESENCE_POLL, PRESENCE_POLL_SUBSCRIBED, PresenceDone, Presences};
 use crate::profiles::{PROFILE_RETRY, Person, Profiles};
 use crate::search::{Backfill, INDEX_BATCH, Step};
-use crate::sync::{CatchUp, CatchUpError, CatchUpReport, Gaps, Synced};
-use crate::teams::{READING_TEAMS, TEAMS_RETRY, Teams, TeamsReadError};
+use crate::sync::{CatchUp, CatchUpError, CatchUpReport, Gaps, NOTES, Synced};
+use crate::teams::{ChatListing, READING_TEAMS, TEAMS_RETRY, Teams, TeamsRead, TeamsReadError};
 
 mod described;
 
@@ -144,8 +149,15 @@ pub struct EngineOptions {
     /// How long after a read of the teams that failed a view's asking reads them again, at the soonest
     /// ([`crate::teams`]): [`TEAMS_RETRY`].
     pub teams_retry: Duration,
-    /// How often the watched people's presence is read ([`crate::presence`]): [`PRESENCE_POLL`].
+    /// How often the watched people's presence is read while the subscription doesn't cover them all
+    /// ([`crate::presence`]): [`PRESENCE_POLL`].
     pub presence_poll: Duration,
+    /// How often it is read while the subscription covers everyone it may name: [`PRESENCE_POLL_SUBSCRIBED`].
+    pub presence_poll_subscribed: Duration,
+    /// Without a push channel, a catch-up at the start and then this often ([`Cause::Poll`]): the personal build's
+    /// read-only mode, which opens no push channel, reads what is new so. `None` (the default): without a push channel
+    /// nothing is caught up but on [`EngineRequests::sync`].
+    pub poll: Option<Duration>,
 }
 
 impl Default for EngineOptions {
@@ -157,6 +169,8 @@ impl Default for EngineOptions {
             index_batch: INDEX_BATCH,
             teams_retry: TEAMS_RETRY,
             presence_poll: PRESENCE_POLL,
+            presence_poll_subscribed: PRESENCE_POLL_SUBSCRIBED,
+            poll: None,
         }
     }
 }
@@ -278,6 +292,8 @@ pub enum Cause {
     /// The last one failed (or left a conversation unsynced), or a delivery didn't reach the store, and its wait is
     /// over.
     Retry,
+    /// There is no push channel, and the poll's time came ([`EngineOptions::poll`]).
+    Poll,
 }
 
 /// What the engine tells its owner.
@@ -412,6 +428,10 @@ pub enum EngineError {
     /// again.
     #[error("the reaction's animation couldn't be read")]
     AnimationUnread,
+    /// A message's picture failed to be read on the way (not an answer that there is none): the next ask reads it
+    /// again.
+    #[error("the message's picture couldn't be read")]
+    PictureUnread,
     /// A call action was refused: nothing was sent.
     #[error(transparent)]
     Call(CallActionError),
@@ -437,6 +457,7 @@ impl EngineError {
             Self::AlreadyRunning { .. } => "already running",
             Self::Stopped => "stopped",
             Self::AnimationUnread => "animation unread",
+            Self::PictureUnread => "picture unread",
             Self::Call(_) => "call",
         }
     }
@@ -519,7 +540,9 @@ enum Request {
     Person(String, Responder<Person>),
     Presence(String, Responder<Availability>),
     ReactionAnimation(String, Responder<Option<Strip>>),
+    MessagePicture(String, Responder<Option<PictureBytes>>),
     Teams(Responder<Option<Vec<Team>>>),
+    ChatListing(Responder<ChatListing>),
     Query(Query),
     Shutdown,
 }
@@ -545,6 +568,7 @@ enum Query {
     },
     Members(String, Responder<Vec<Member>>),
     RecentReactions(usize, Responder<Vec<String>>),
+    FrequentReactions(usize, Responder<Vec<String>>),
     UnreadCount(String, Responder<u64>),
     DisplayName(String, Responder<Option<String>>),
     ReadHorizon(String, Responder<Option<ReadHorizon>>),
@@ -582,6 +606,8 @@ pub struct EngineRequests {
     requests: mpsc::UnboundedSender<Request>,
     /// The account's MRI: who the engine writes as.
     me: Arc<str>,
+    /// The engine sends nothing ([`EngineRequests::read_only`]).
+    read_only: bool,
 }
 
 impl EngineRequests {
@@ -589,6 +615,14 @@ impl EngineRequests {
     #[must_use]
     pub fn me(&self) -> &str {
         &self.me
+    }
+
+    /// Whether the engine sends nothing (its outbox is read-only: the personal build's `teams --read-only`): every write
+    /// it is asked for is refused below the views, before the fence is asked, and logged to `fence.log` as
+    /// `refused_read_only` ([`Outbox::is_read_only`]). Fixed when the engine starts.
+    #[must_use]
+    pub fn read_only(&self) -> bool {
+        self.read_only
     }
 
     /// A call action ([`crate::calling`]); the reply is the call it acted on, once the action went (a start, a join or an
@@ -656,6 +690,13 @@ impl EngineRequests {
         self.ask(Request::Teams)
     }
 
+    /// What the chat list shows besides the stored conversations ([`ChatListing`]): the favourite chats as CSA's teams
+    /// read last listed them, and the conversations the chat service calls empty. A read of the teams starts as
+    /// [`Self::teams`] starts it, and a change of the favourites comes as [`Event::Teams`].
+    pub fn chat_listing(&self) -> Reply<ChatListing> {
+        self.ask(Request::ChatListing)
+    }
+
     /// The post each stored message of a channel belongs to, as (message id, post id) in no set order: a post's is
     /// its own id; a message stored without one recorded (a chat's, or a channel's read before posts were kept) has
     /// none.
@@ -712,6 +753,12 @@ impl EngineRequests {
         self.query(|reply| Query::RecentReactions(limit, reply))
     }
 
+    /// The reaction keys the account uses most on stored messages (set and not taken back), the most used first; at
+    /// most `limit`.
+    pub fn frequent_reactions(&self, limit: usize) -> Reply<Vec<String>> {
+        self.query(|reply| Query::FrequentReactions(limit, reply))
+    }
+
     /// A chat's stored members.
     pub fn members(&self, conversation: impl Into<String>) -> Reply<Vec<Member>> {
         let conversation = conversation.into();
@@ -739,8 +786,9 @@ impl EngineRequests {
     }
 
     /// Someone's presence as last read ([`Availability::Unknown`] before the first read); from now on they are watched,
-    /// and each change of their presence comes as [`Event::Presence`] ([`crate::presence`]: read from UPS every
-    /// [`EngineOptions::presence_poll`]). At most
+    /// and each change of their presence comes as [`Event::Presence`] ([`crate::presence`]: pushed by UPS once
+    /// subscribed, and read every [`EngineOptions::presence_poll`] or [`EngineOptions::presence_poll_subscribed`]). At
+    /// most
     /// [`MAX_WATCHED`](crate::MAX_WATCHED) people are watched: past it the one asked about longest ago is dropped and
     /// told as [`Availability::Unknown`], so a view asks again about the people it shows whenever it shows them anew.
     pub fn presence(&self, mri: impl Into<String>) -> Reply<Availability> {
@@ -753,6 +801,13 @@ impl EngineRequests {
     pub fn reaction_animation(&self, id: impl Into<String>) -> Reply<Option<Strip>> {
         let id = id.into();
         self.ask(|reply| Request::ReactionAnimation(id, reply))
+    }
+
+    /// The picture a message's `<img>` names by its `src` (a view of an AMS object), as the account's AMS base has it
+    /// ([`crate::pictures`]): its bytes and format, or `None` when there is none or `src` names no AMS view.
+    pub fn message_picture(&self, src: impl Into<String>) -> Reply<Option<PictureBytes>> {
+        let src = src.into();
+        self.ask(|reply| Request::MessagePicture(src, reply))
     }
 
     /// The account's own stored read horizon in a conversation.
@@ -916,6 +971,7 @@ where
         .build()
         .map_err(EngineError::Runtime)?;
     let me: Arc<str> = parts.outbox.me().mri().as_str().into();
+    let read_only = parts.outbox.is_read_only();
     let (requests, received) = mpsc::unbounded_channel();
     let (events, taken) = mpsc::unbounded_channel();
     let (ending, ended) = std::sync::mpsc::channel();
@@ -933,7 +989,11 @@ where
         })
         .map_err(EngineError::Thread)?;
     Ok(EngineHandle {
-        requests: EngineRequests { requests, me },
+        requests: EngineRequests {
+            requests,
+            me,
+            read_only,
+        },
         events: taken,
         thread: Some(thread),
         ended,
@@ -949,6 +1009,7 @@ struct Core<C, T> {
     teams: Teams<C>,
     presences: Presences<C>,
     animations: Animations<C>,
+    pictures: Pictures<C>,
     events: mpsc::UnboundedSender<Event>,
     options: EngineOptions,
     push: Option<Push>,
@@ -960,13 +1021,16 @@ struct Core<C, T> {
     endpoint: Option<RegisteredEndpoint>,
     /// When a catch-up is tried again after one that failed, or after something a delivery brought was missed.
     retry_at: Option<Instant>,
+    /// A read of the teams changed the favourites: the account's own notes may be due a sync
+    /// ([`Core::sync_favourite_notes`]).
+    notes_due: bool,
+    /// When the next poll's catch-up is due, while there is no push channel and the engine polls
+    /// ([`EngineOptions::poll`]).
+    poll_at: Option<Instant>,
     /// Message-loss reports waiting for a catch-up that runs clean.
     losses: Vec<MessageLoss>,
     /// The search backfill of the messages stored before ([`crate::search`]), until it is over or failed.
     backfill: Option<Backfill>,
-    /// The people of the account's chats the reads' transport may name in a read by `POST` through the personal
-    /// build's fence; `None` through a lab fence, which never reads it.
-    people: Option<Arc<ChatPeople>>,
     /// The account's calling, when the engine makes calls, until the engine runs it as a task of its own.
     calling: Option<Calling<C, T>>,
     /// The account's calling, running.
@@ -987,13 +1051,10 @@ where
             parts.options.profile_retry,
         );
         let teams = Teams::new(Arc::clone(&parts.client), parts.options.teams_retry);
-        let presences = Presences::new(Arc::clone(&parts.client), parts.options.presence_poll);
+        let polls = (parts.options.presence_poll, parts.options.presence_poll_subscribed);
+        let presences = Presences::new(Arc::clone(&parts.client), polls);
         let animations = Animations::new(Arc::clone(&parts.client));
-        let people = parts
-            .client
-            .transport()
-            .is_personal()
-            .then(|| Arc::clone(parts.client.transport().chat_people()));
+        let pictures = Pictures::new(Arc::clone(&parts.client));
         let calling = parts
             .calls
             .map(|calls| Calling::new(calls, Arc::clone(&outbox), Arc::clone(&parts.client), events.clone()));
@@ -1006,6 +1067,7 @@ where
             teams,
             presences,
             animations,
+            pictures,
             events,
             options: parts.options,
             push: parts.push,
@@ -1013,29 +1075,20 @@ where
             up: false,
             endpoint: None,
             retry_at: None,
+            poll_at: None,
+            notes_due: false,
             losses: Vec::new(),
             backfill: Some(Backfill::new(parts.options.index_batch)),
-            people,
             calling,
             calls: None,
         }
     }
 
-    /// Before a read by `POST` may start (a profile lookup, a presence read): through the personal build's fence, the
-    /// people it may name are made those of the account's chats as the store holds them now (`teams_fence::ChatPeople`).
-    /// A store that can't be read leaves the last ones.
-    fn refresh_people(&self) {
-        let Some(people) = &self.people else {
-            return;
-        };
-        match self.store.all_members() {
-            Ok(members) => people.replace(members.into_iter().map(Mri::new)),
-            Err(error) => log::warn!("the people of the account's chats can't be read: {error}"),
-        }
-    }
-
     async fn run(mut self, mut requests: mpsc::UnboundedReceiver<Request>) {
         let mut push = self.push.take().map(Push::spawn);
+        if push.is_none() && self.options.poll.is_some() {
+            self.poll_at = Some(Instant::now());
+        }
         self.calls = self.calling.take().map(Calling::spawn);
         let mut tick = tokio::time::interval(self.options.tick);
         tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
@@ -1209,8 +1262,8 @@ where
                 let _ = reply.send(logged(synced, || format!("sync of {conversation}")));
             }
             Request::ReactionAnimation(id, reply) => self.animations.animation(id, reply),
+            Request::MessagePicture(src, reply) => self.pictures.picture(&src, reply),
             Request::Person(mri, reply) => {
-                self.refresh_people();
                 let person = self.profiles.person(&self.store, &mri);
                 let _ = reply.send(person.map_err(EngineError::from));
             }
@@ -1228,6 +1281,10 @@ where
             Request::Teams(reply) => {
                 let teams = self.teams.teams(&self.store);
                 let _ = reply.send(teams.map_err(EngineError::from));
+            }
+            Request::ChatListing(reply) => {
+                let listing = self.teams.chat_listing(&self.store);
+                let _ = reply.send(listing.map_err(EngineError::from));
             }
             Request::Query(query) => self.answer(query),
             Request::Shutdown => {}
@@ -1253,22 +1310,49 @@ where
         }
     }
 
-    /// A presence read is over (`None`: none ran): each change it brought told.
-    fn on_presence(&mut self, polled: Option<Polled>) {
-        let Some(polled) = polled else { return };
-        for (mri, availability) in self.presences.settle(polled) {
+    /// A presence read or subscription is over (`None`: none ran): each change it brought told.
+    fn on_presence(&mut self, done: Option<PresenceDone>) {
+        let Some(done) = done else { return };
+        for (mri, availability) in self.presences.settle(done) {
             self.emit(Event::Presence { mri, availability });
         }
     }
 
     /// A read of the teams is over (`None`: none ran): stored, and told when the list changed; a failure is told.
-    fn on_teams(&mut self, read: Option<Result<Vec<Team>, TeamsReadError>>) {
+    /// The account's own notes, once a favourite and not stored yet, are synced from the next tick (see the module
+    /// docs).
+    fn on_teams(&mut self, read: Option<Result<TeamsRead, TeamsReadError>>) {
         let Some(read) = read else { return };
         match self.teams.store(&mut self.store, read) {
-            Ok(Ok(true)) => self.emit(Event::Teams),
+            Ok(Ok(true)) => {
+                self.emit(Event::Teams);
+                self.notes_due = true;
+            }
             Ok(Ok(false)) => {}
             Ok(Err(error)) => self.failed(READING_TEAMS, error),
             Err(error) => self.failed("storing the teams", error),
+        }
+    }
+
+    /// Syncs the account's own notes ([`NOTES`]) when the stored favourites name them and the store has none yet
+    /// (the catch-up's own pass over them, [`CatchUp::catch_up`], ran before it knew they were a favourite).
+    async fn sync_favourite_notes(&mut self) {
+        if !std::mem::take(&mut self.notes_due) {
+            return;
+        }
+        let due = self
+            .store
+            .favorites()
+            .map(|favorites| favorites.is_some_and(|favorites| favorites.iter().any(|id| id == NOTES)))
+            .and_then(|favourite| Ok(favourite && self.store.conversation(NOTES)?.is_none()));
+        match due {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(error) => return self.failed("reading the favourites", error),
+        }
+        log::info!("the account's notes became a favourite: synced");
+        if let Err(error) = self.catch_up.sync_messages(&mut self.store, NOTES).await {
+            self.missed("syncing the account's notes", error);
         }
     }
 
@@ -1298,6 +1382,7 @@ where
             } => give(reply, store.reactions(&conversation, &id)),
             Query::Members(conversation, reply) => give(reply, store.members(&conversation)),
             Query::RecentReactions(limit, reply) => give(reply, store.recent_reactions(self.me(), limit)),
+            Query::FrequentReactions(limit, reply) => give(reply, store.frequent_reactions(self.me(), limit)),
             Query::UnreadCount(conversation, reply) => give(reply, store.unread_count(&conversation, self.me())),
             Query::DisplayName(mri, reply) => give(reply, store.display_name(&mri)),
             Query::ReadHorizon(conversation, reply) => give(reply, store.read_horizon(&conversation, self.me())),
@@ -1626,7 +1711,9 @@ where
         if self.up && self.retry_at.is_some_and(|at| Instant::now() >= at) {
             self.auto_catch_up(Cause::Retry).await;
         }
-        self.refresh_people();
+        self.poll_due().await;
+        // the account's own notes, when a read of the teams just made them a favourite
+        self.sync_favourite_notes().await;
         // profile lookups that failed on the way, their wait over
         self.profiles.retry_due();
         // the watched people's presence, when a read is due
@@ -1634,6 +1721,19 @@ where
     }
 
     // --- catch-up ---
+
+    /// Without a push channel, the poll's catch-up when it is due ([`EngineOptions::poll`]), the next one set.
+    async fn poll_due(&mut self) {
+        let (Some(at), Some(every)) = (self.poll_at, self.options.poll) else {
+            return;
+        };
+        if Instant::now() < at {
+            return;
+        }
+        self.poll_at = Some(Instant::now() + every);
+        self.gaps.missed();
+        self.auto_catch_up(Cause::Poll).await;
+    }
 
     /// A catch-up if one is due; `None` when none is.
     async fn catch_up_due(&mut self) -> Option<Result<CatchUpReport, CatchUpError>> {
@@ -1669,15 +1769,21 @@ where
 
     async fn on_push(&mut self, event: PushEvent) {
         match event {
-            PushEvent::Connected { endpoint, .. } => {
+            PushEvent::Connected { endpoint, push_url, .. } => {
+                self.presences.connected(push_url);
                 self.up = true;
                 self.gaps.connected();
                 self.emit(Event::Connected { endpoint });
                 self.auto_catch_up(Cause::Connected).await;
             }
-            PushEvent::Registered(endpoint) => self.endpoint = Some(endpoint),
+            PushEvent::Registered(endpoint) => {
+                self.presences.registered(endpoint.clone());
+                self.endpoint = Some(endpoint);
+            }
             PushEvent::Registration(report) => self.emit(Event::Registration(report)),
             PushEvent::MessageLoss(loss) => {
+                // a presence change may be among what was missed
+                self.presences.missed();
                 if loss.messaging() {
                     self.losses.push(loss);
                     self.gaps.missed();
@@ -1688,15 +1794,22 @@ where
                 }
             }
             PushEvent::Delivery(delivery) => self.on_delivery(delivery).await,
+            PushEvent::Presence(delivery) => {
+                for (mri, availability) in self.presences.delivered(&delivery) {
+                    self.emit(Event::Presence { mri, availability });
+                }
+            }
             // an incoming call, or another endpoint's push: never acted on, never answered; a call delivery comes only on
             // the calling stack's socket, which `crate::calling` runs when the engine has `Parts::calls`
             PushEvent::Ignored(_) | PushEvent::Call(_) => {}
             PushEvent::Disconnected { down, heard } => {
+                self.presences.down();
                 self.up = false;
                 self.gaps.disconnected();
                 self.emit(Event::Disconnected { down, heard });
             }
             PushEvent::Stopped(stop) => {
+                self.presences.down();
                 self.up = false;
                 // no registration is renewed any more: the endpoint it kept is no longer the account's live one, and
                 // an availability waiting out a `Retry-After` doesn't go out from the tick after it
@@ -1876,8 +1989,8 @@ fn one_to_one_other(chat: &str, me: &str) -> Option<String> {
 /// A read in the background that is over.
 enum Background {
     Looked(Option<crate::profiles::Looked>),
-    Teams(Option<Result<Vec<Team>, TeamsReadError>>),
-    Presence(Option<Polled>),
+    Teams(Option<Result<TeamsRead, TeamsReadError>>),
+    Presence(Option<PresenceDone>),
 }
 
 /// The next read in the background to be over, a person's lookup, the teams' or the presence read; never while none

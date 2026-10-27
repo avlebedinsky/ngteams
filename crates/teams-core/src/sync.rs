@@ -16,6 +16,12 @@
 //!   sync reads on from a kept gap first, and so does [`CatchUp::load_older`] before older history; a sync answer cut
 //!   again while a gap is still unread leaves the sync link where it was ([`CatchUpError::GapPending`]). A
 //!   conversation the store doesn't know yet is first read as a thread.
+//! - **The account's own notes** ([`NOTES`], `48:notes`, its chat with itself, which Teams lists under "Favorites"):
+//!   the conversation list never brings it, so a catch-up syncs it after the list when it is one of the favourites CSA
+//!   listed or the store already has it (a failure there doesn't hold the list's sync link back). Its messages are
+//!   read as any conversation's (`GET …/conversations/48:notes/messages`); it is no thread, so it is never read as one:
+//!   the store keeps it as `thread_type:streamofnotes`, with no members, and a delivery naming it adds it so too. An
+//!   account that never wrote a note has none: the service answers 404, which is no notes, not a failure.
 //! - **One path for what comes in** ([`CatchUp::receive_message`]): a message as read (a sync page, or the resource of
 //!   a Trouter delivery) becomes a store row and goes through [`Outbox::receive`], which stores it by its id and
 //!   version and matches our own to its outbox row by `clientmessageid`. So a delivery and a sync that bring the same
@@ -72,6 +78,13 @@ pub const MAX_PAGES: usize = 50;
 /// How far the service's clock (a message's arrival time) may be behind ours (an outbox row's `created_at`): the
 /// outbox's check reads back to a message older than its row by this much. Five minutes, Kerberos's default tolerance.
 pub const CLOCK_SKEW_MS: i64 = 5 * 60 * 1000;
+
+/// The account's own notes: its chat with itself, a `48:` stream (`threadType` `streamofnotes`) that Teams lists under
+/// "Favorites" as "<name> (You)". Read like any conversation's messages; nothing is written there.
+pub const NOTES: &str = "48:notes";
+
+/// The store's kind for [`NOTES`]: what the conversation list's own kind for it would be ([`store_kind`]).
+const NOTES_KIND: &str = "thread_type:streamofnotes";
 
 /// What a catch-up can fail with.
 #[derive(Debug, thiserror::Error)]
@@ -180,7 +193,8 @@ pub struct CatchUpReport {
     /// What the conversations' message syncs did, together.
     pub messages: Synced,
     /// Conversations that couldn't be synced. The list's sync link stayed where it was, so the next catch-up lists
-    /// them again.
+    /// them again; the account's own notes ([`NOTES`]), which the list never brings, are synced again by it all the
+    /// same.
     pub failed: Vec<ConversationFailed>,
 }
 
@@ -411,6 +425,7 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         if report.failed.is_empty() {
             store.set_conversation_list_sync_link(sync_link.as_deref(), (self.clock)())?;
         }
+        self.catch_up_notes(store, &conversations, &mut report).await?;
         log::info!(
             "catch-up: {} conversation(s) listed ({} skipped), {} message(s) new, {} newer, {} failed{}",
             report.conversations,
@@ -437,8 +452,21 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
     ///
     /// [`CatchUpError::Read`] when a read fails, [`CatchUpError::Store`] or [`CatchUpError::Outbox`] when the store
     /// does; the sync state then stays as it was (a kept gap may have been read on). [`CatchUpError::GapPending`]
-    /// when the answer is cut at [`MAX_PAGES`] while an earlier gap is still unread: the sync link stays.
+    /// when the answer is cut at [`MAX_PAGES`] while an earlier gap is still unread: the sync link stays. The account's
+    /// own notes ([`NOTES`]) answered 404 ("Conversation was not found": nothing was ever written there) are none yet,
+    /// not an error.
     pub async fn sync_messages(&self, store: &mut Store, conversation: &str) -> Result<Synced, CatchUpError> {
+        match self.sync_stored(store, conversation).await {
+            Err(error) if conversation == NOTES && not_found(&error) => {
+                log::debug!("sync: the account's notes aren't there yet (404)");
+                Ok(Synced::default())
+            }
+            synced => synced,
+        }
+    }
+
+    /// [`CatchUp::sync_messages`], whatever the service answers.
+    async fn sync_stored(&self, store: &mut Store, conversation: &str) -> Result<Synced, CatchUpError> {
         if store.conversation(conversation)?.is_none() {
             self.add_conversation(store, conversation).await?;
         }
@@ -745,14 +773,59 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         {
             self.changed(|changes| changes.conversation(&listed.id));
         }
+        // whether the service calls it empty (the chat list leaves such a chat out), as the list says it now
+        if store.set_conversation_empty(&listed.id, listed.is_empty_conversation())? {
+            self.changed(|changes| changes.conversation(&listed.id));
+        }
         self.store_horizon(store, listed)?;
         self.refresh_members(store, listed).await?;
         Ok(synced)
     }
 
+    /// The account's own notes ([`NOTES`]), which no conversation list brings (when `listed` does, they were synced
+    /// with it): synced when CSA listed them among the favourites or the store has them already. Once the list's sync link is kept, so a failure here (in
+    /// [`CatchUpReport::failed`], and the catch-up is tried again) never holds the list back.
+    async fn catch_up_notes(
+        &self,
+        store: &mut Store,
+        listed: &[chat::Conversation],
+        report: &mut CatchUpReport,
+    ) -> Result<(), CatchUpError> {
+        if listed.iter().any(|conversation| conversation.id == NOTES) {
+            return Ok(());
+        }
+        let favourite = store
+            .favorites()?
+            .is_some_and(|favorites| favorites.iter().any(|id| id == NOTES));
+        if !favourite && store.conversation(NOTES)?.is_none() {
+            return Ok(());
+        }
+        match self.sync_messages(store, NOTES).await {
+            Ok(synced) => report.messages.add(synced),
+            Err(error) => report.failed.push(ConversationFailed {
+                conversation: NOTES.to_owned(),
+                error,
+            }),
+        }
+        Ok(())
+    }
+
     /// A conversation the store doesn't know, read as a thread: kept at version 0 (the list's version replaces it),
-    /// with its members. The engine adds one this way when a delivery names it, before it stores the delivery.
+    /// with its members. The engine adds one this way when a delivery names it, before it stores the delivery. The
+    /// account's own notes ([`NOTES`]) are no thread: kept as they are, with nothing read.
     pub(crate) async fn add_conversation(&self, store: &mut Store, id: &str) -> Result<(), CatchUpError> {
+        if id == NOTES {
+            let row = Conversation {
+                id: NOTES.to_owned(),
+                kind: ConversationKind::Other(NOTES_KIND.to_owned()),
+                topic: None,
+                version: 0,
+                last_activity: None,
+            };
+            let added = store.upsert_conversation(&row)?;
+            self.conversation_changed(id, added);
+            return Ok(());
+        }
         let thread = ChatReads::new(&self.client).thread(id).await?;
         let row = Conversation {
             id: id.to_owned(),
@@ -860,6 +933,11 @@ impl<C: Credentials, T: Transport<Error = HttpError> + Send> ConversationSync fo
             .await
             .map_err(SyncError::from)
     }
+}
+
+/// Whether a read was answered 404 without a `Location` (with one it is a region hop, [`ChatReadError::RegionMoved`]).
+fn not_found(error: &CatchUpError) -> bool {
+    matches!(error, CatchUpError::Read(ChatReadError::Http(HttpError::Status(answer))) if answer.status() == 404)
 }
 
 /// A conversation of the list as the store keeps it, at `version`.

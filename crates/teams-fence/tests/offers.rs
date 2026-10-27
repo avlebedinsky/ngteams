@@ -1,6 +1,7 @@
 //! Offered invitations (`teams_fence`'s `calls::offer`, `docs/protocol/fence-targets.md`, "Offered invitations"): an
 //! incoming call is offered only when it is readable, addressed to the fence's own account and called by a lab account.
-//! Under the registry's rule (the personal build's, `Fence::tracking_calls` here) only its ring-time sends pass on it
+//! Under the registry's rule (no build's fence's: `Fence::tracking_calls` here, the registry's resolution as verdicts)
+//! only its ring-time sends pass on it
 //! (its delivery response, the callee's `attach`), each bound to it, a group call's only while its group chat reads
 //! lab-only, and nothing passes once its ring ended. Under the lab's rule (at the end) only its answer and its decline
 //! are judged, and a join by the chat it names. Shaped like the `ab-call` and
@@ -1474,7 +1475,7 @@ async fn under_the_lab_rule_a_join_is_judged_by_the_chat_it_names() -> TestResul
 
 // --- the personal build's rule ---
 
-/// b's personal fence (its own account b): the call registry's rule, no roster.
+/// b's personal fence (its own account b): it offers any invitation to b, one at a time, and denies nothing.
 fn personal_b() -> TestResult<Lab> {
     let dir = tempfile::tempdir()?;
     let log = dir.path().join("fence.log");
@@ -1521,13 +1522,10 @@ async fn the_personal_fence_offers_one_ringing_invitation_at_a_time() -> TestRes
     assert_eq!(lab.fence.observe_delivery(&first), Observed::Offered);
     let (url, body) = attach_case()?;
     lab.fence.check(attach_target(&url, &body)?, &FailClosed).await?;
-    // while it rings, another invitation (the group call's) isn't offered, and nothing passes for it
+    // while it rings, another invitation (the group call's) isn't offered (the personal fence would let a response go,
+    // but the call machine is never handed an invitation not offered)
     let (second, _) = invitation(1, 93)?;
     assert_eq!(lab.fence.observe_delivery(&second), Observed::Ignored);
-    assert!(matches!(
-        respond(&lab, &receipt(93), &FailClosed).await,
-        DeliveryDecision::NotPending
-    ));
     // the ringing one's own redelivery still is
     let again = invitation_delivery(&first.path, 94, &gp);
     assert_eq!(lab.fence.observe_delivery(&again), Observed::Offered);
@@ -1579,11 +1577,8 @@ async fn an_invitation_the_call_machine_let_go_is_retired_and_the_next_one_is_of
     // the attach failed for good (not sent for a credential failure, no answer, a refusal no attempt follows): the
     // call machine lets the invitation go, and the service may never have taken the callbacks its ring would end at
     lab.fence.let_go(&url);
-    // nothing more passes on it, and it isn't offered again
-    assert_eq!(
-        reason(&lab, attach_target(&url, &body)?).await,
-        Some(DenyReason::Partial(PartialReason::CallEnded))
-    );
+    // it isn't offered again (the personal fence denies nothing: an attach on it would pass, and changes nothing)
+    assert_eq!(reason(&lab, attach_target(&url, &body)?).await, None);
     let again = invitation_delivery(&first.path, 99, &gp);
     assert_eq!(lab.fence.observe_delivery(&again), Observed::Ignored);
     // and it holds no call open: the next invitation is offered
@@ -1641,18 +1636,17 @@ fn case_on_leg(index: usize, leg: u8) -> TestResult<Target> {
 #[tokio::test]
 async fn after_a_decline_a_re_invitation_to_the_same_conversation_is_answered() -> TestResult {
     let lab = personal_b()?;
-    let ended = Some(DenyReason::Partial(PartialReason::CallEnded));
     bound_on_leg(&lab, 1, 100).await?;
     lab.fence.check(case_on_leg(REJECT, 1)?, &FailClosed).await?;
-    // the declined invitation keeps the conversation's links only as a tombstone
-    assert_eq!(reason(&lab, case_on_leg(STATE, 1)?).await, ended);
+    // the declined invitation keeps the conversation's links only as a tombstone (the personal fence denies nothing)
+    assert_eq!(reason(&lab, case_on_leg(STATE, 1)?).await, None);
     // a re-invitation to the same conversation on a new leg: its attach's answer binds the same conversation links
     bound_on_leg(&lab, 2, 101).await?;
     lab.fence.check(case_on_leg(STATE, 2)?, &FailClosed).await?;
     let permit = lab.fence.check(case_on_leg(ACCEPT, 2)?, &FailClosed).await?;
     assert_eq!(permit.target().kind(), WriteKind::CallAnswer);
-    // the declined leg stays declined: no answer goes on it, its own decline still does
-    assert_eq!(reason(&lab, case_on_leg(ACCEPT, 1)?).await, ended);
+    // the declined leg stays declined; an answer or a decline on it is logged and passes, moving nothing
+    assert_eq!(reason(&lab, case_on_leg(ACCEPT, 1)?).await, None);
     lab.fence.check(case_on_leg(REJECT, 1)?, &FailClosed).await?;
     // and the answered call's own operations go on the conversation's links
     lab.fence.check(case_on_leg(STATE, 2)?, &FailClosed).await?;
@@ -1709,12 +1703,8 @@ async fn group_call_answered(lab: &Lab, members: &Members, leg: u8, id: i64) -> 
 #[tokio::test]
 async fn after_leaving_a_group_call_a_re_invitation_to_it_is_answered_and_its_call_goes_on() -> TestResult {
     let lab = personal_b()?;
-    let members = Members::new(Membership::Listed(vec![
-        Mri::new(LAB_A),
-        Mri::new(LAB_B),
-        Mri::new(LAB_C),
-    ]));
-    let ended = Some(DenyReason::Partial(PartialReason::CallEnded));
+    // never read: the personal fence reads no members
+    let members = Members::new(Membership::Partial(PartialReason::NoSource));
     // b joins the running group call once its ring ended: its join registers the call on the conversation's links
     let (delivery, gp) = invitation(1, 110)?;
     assert_eq!(lab.fence.observe_delivery(&delivery), Observed::Offered);
@@ -1740,18 +1730,17 @@ async fn after_leaving_a_group_call_a_re_invitation_to_it_is_answered_and_its_ca
     lab.fence.check(group_case(METADATA, 2)?, &members).await?;
     // b leaves while the others stay: the call it left keeps the conversation's links as a tombstone
     lab.fence.check(group_case(LEAVE, 2)?, &members).await?;
-    assert_eq!(reason_with(&lab, group_case(METADATA, 2)?, &members).await, ended);
+    assert_eq!(reason_with(&lab, group_case(METADATA, 2)?, &members).await, None);
     // re-invited to the same conversation on a new leg, b answers: the conversation's links act on the answered call
     group_call_answered(&lab, &members, 3, 112).await?;
     for index in [METADATA, PROPERTIES, MEDIA_LINES, RENEGOTIATE] {
         lab.fence.check(group_case(index, 3)?, &members).await?;
     }
-    // b leaves it too: then only its leave again, and the conversation's other links are tombstones once more
+    // b leaves it too, and leaves again; whatever follows is logged and passes
     lab.fence.check(group_case(LEAVE, 3)?, &members).await?;
     lab.fence.check(group_case(LEAVE, 3)?, &members).await?;
-    assert_eq!(reason_with(&lab, group_case(METADATA, 3)?, &members).await, ended);
-    // and no answer goes on the left leg
-    assert_eq!(reason_with(&lab, group_case(ACCEPT, 3)?, &members).await, ended);
+    assert_eq!(reason_with(&lab, group_case(METADATA, 3)?, &members).await, None);
+    assert_eq!(members.reads(), 0);
     Ok(())
 }
 

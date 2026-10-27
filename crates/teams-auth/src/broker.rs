@@ -48,12 +48,13 @@ const ANSWER_MISSING: u8 = 2;
 const ANSWER_REFUSED: u8 = 3;
 const ANSWER_FAILED: u8 = 4;
 
-/// What a broker serves: one application namespace (the lab's `teams-lab`) and one account (its UPN), every audience
-/// under it.
+/// What a broker serves: one application namespace (the lab's `teams-lab`, the personal build's `teams-personal`) and
+/// one account (its UPN), every audience under it; `get`, `put` and `delete`, or `get` alone ([`BrokerScope::get_only`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BrokerScope {
     application: String,
     account: String,
+    get_only: bool,
 }
 
 impl BrokerScope {
@@ -62,7 +63,22 @@ impl BrokerScope {
         Self {
             application: application.into(),
             account: account.into(),
+            get_only: false,
         }
+    }
+
+    /// The same scope served read-only (the personal build's read-only mode, `teams secrets`): a `put` and a `delete`
+    /// are answered "refused" and reach no store, so the stored items are never rotated, overwritten or removed.
+    #[must_use]
+    pub fn get_only(mut self) -> Self {
+        self.get_only = true;
+        self
+    }
+
+    /// Whether only `get` is served ([`Self::get_only`]).
+    #[must_use]
+    pub fn is_get_only(&self) -> bool {
+        self.get_only
     }
 
     #[must_use]
@@ -122,7 +138,9 @@ impl fmt::Display for Op {
 /// Why the broker didn't do what was asked, as the client sees it. Never carries a secret value.
 #[derive(Debug, thiserror::Error)]
 pub enum BrokerError {
-    #[error("the credential broker refused the request: not its account or application")]
+    #[error(
+        "the credential broker refused the request: not its account or application, or a write to a get-only broker"
+    )]
     Refused,
     #[error("the credential broker's store failed: {0}")]
     Store(String),
@@ -165,6 +183,8 @@ pub enum Outcome {
     Missing,
     Done,
     Refused,
+    /// A `put` or a `delete` a get-only broker refused ([`BrokerScope::get_only`]); "refused" on the wire.
+    RefusedGetOnly,
     Failed,
 }
 
@@ -175,6 +195,7 @@ impl fmt::Display for Note<'_> {
             Outcome::Missing => "missing",
             Outcome::Done => "done",
             Outcome::Refused => "refused (not this broker's account or application)",
+            Outcome::RefusedGetOnly => "refused (this broker serves get only)",
             Outcome::Failed => "the store failed",
         };
         write!(
@@ -203,6 +224,8 @@ enum Answer {
     Found(Secret),
     Missing,
     Refused,
+    /// "Refused" on the wire, noted as [`Outcome::RefusedGetOnly`]; never decoded.
+    RefusedGetOnly,
     Failed(String),
 }
 
@@ -299,7 +322,7 @@ impl Answer {
             Self::Done => frame(ANSWER_DONE, &[]),
             Self::Found(secret) => frame(ANSWER_FOUND, &[secret.expose()]),
             Self::Missing => frame(ANSWER_MISSING, &[]),
-            Self::Refused => frame(ANSWER_REFUSED, &[]),
+            Self::Refused | Self::RefusedGetOnly => frame(ANSWER_REFUSED, &[]),
             Self::Failed(text) => frame(ANSWER_FAILED, &[truncated(text, MAX_FAILURE_TEXT)]),
         };
         match encoded {
@@ -327,7 +350,7 @@ impl Answer {
     /// Whether this is an answer `op` can get.
     fn fits(&self, op: Op) -> bool {
         match self {
-            Self::Refused | Self::Failed(_) => true,
+            Self::Refused | Self::RefusedGetOnly | Self::Failed(_) => true,
             Self::Found(_) | Self::Missing => op == Op::Get,
             Self::Done => op != Op::Get,
         }
@@ -339,6 +362,7 @@ impl Answer {
             Self::Found(_) => Outcome::Found,
             Self::Missing => Outcome::Missing,
             Self::Refused => Outcome::Refused,
+            Self::RefusedGetOnly => Outcome::RefusedGetOnly,
             Self::Failed(_) => Outcome::Failed,
         }
     }
@@ -441,6 +465,9 @@ async fn answer<S: SecretStore>(store: &S, scope: &BrokerScope, request: &Reques
     if !scope.admits(&request.application, &request.key) {
         return Answer::Refused;
     }
+    if scope.get_only && request.op != Op::Get {
+        return Answer::RefusedGetOnly;
+    }
     let result = match (request.op, &request.secret) {
         (Op::Get, _) => store
             .get(&request.key)
@@ -508,7 +535,7 @@ impl BrokerSecretStore {
             .await
             .map_err(|_| BrokerError::Closed)??;
         match answer {
-            Answer::Refused => Err(BrokerError::Refused),
+            Answer::Refused | Answer::RefusedGetOnly => Err(BrokerError::Refused),
             Answer::Failed(text) => Err(BrokerError::Store(text)),
             answer => Ok(answer),
         }

@@ -24,8 +24,8 @@ use futures_util::future::{Either, Shared, select};
 use gpui::{AppContext as _, AsyncApp, Context, SharedString, Task};
 use teams_core::sync::{CatchUpReport, Synced};
 use teams_core::{
-    Action, Availability, CallAction, CallId, EngineHandle, EngineRequests, Event, OwnStatus, Person, Reply, Strip,
-    Transient, TransientSent,
+    Action, Availability, CallAction, CallId, ChatListing, EngineHandle, EngineRequests, Event, OwnStatus, Person,
+    PictureBytes, Reply, Strip, Transient, TransientSent,
 };
 use teams_store::{
     Conversation, Member, Message, MessagePage, OutboxEntry, PageCursor, Reaction, ReadHorizon, SearchHit, Team,
@@ -65,6 +65,8 @@ pub trait Core: Send + Sync + 'static {
     fn members(&self, conversation: String) -> Reply<Vec<Member>>;
     /// The reaction keys the account set most recently, the newest first; at most `limit`.
     fn recent_reactions(&self, limit: usize) -> Reply<Vec<String>>;
+    /// The reaction keys the account uses most, the most used first; at most `limit`.
+    fn frequent_reactions(&self, limit: usize) -> Reply<Vec<String>>;
     /// How many stored messages of a conversation the account hasn't read.
     fn unread_count(&self, conversation: String) -> Reply<u64>;
     /// Someone's name and picture as the engine has them; a lookup starts in the background when its stored ones
@@ -76,6 +78,9 @@ pub trait Core: Send + Sync + 'static {
     fn presence(&self, mri: String) -> Reply<Availability>;
     /// A reaction's animation as Teams' CDN has it (its strip of frames), read once a run; `None` when there is none.
     fn reaction_animation(&self, id: String) -> Reply<Option<Strip>>;
+    /// The picture a message's `<img>` names by its `src` (a view of an AMS object), read by the engine once a run;
+    /// `None` when there is none, or `src` names no AMS view.
+    fn message_picture(&self, src: String) -> Reply<Option<PictureBytes>>;
     /// The account's own read horizon in a conversation.
     fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>>;
     /// Whether the store holds a conversation's whole history; `None` when it was never synced.
@@ -93,6 +98,10 @@ pub trait Core: Send + Sync + 'static {
     /// The account's teams with their channels, from the store (`None` before a read settled them); a read starts in
     /// the background when they are missing or old, and a change comes as `Event::Teams` (M2 Task 16).
     fn teams(&self) -> Reply<Option<Vec<Team>>>;
+    /// What the chat list shows besides the stored conversations: the favourite chats in Teams' order (`None` before a
+    /// read gave them) and the conversations the chat service calls empty; a read of the teams starts in the
+    /// background when they are old, and a change of the favourites comes as `Event::Teams`.
+    fn chat_listing(&self) -> Reply<ChatListing>;
     /// Syncs one conversation's messages from the service now: how a channel's posts are read.
     fn sync_conversation(&self, conversation: String) -> Reply<Synced>;
     /// The post each stored message of a channel belongs to, as (message id, post id).
@@ -101,11 +110,21 @@ pub trait Core: Send + Sync + 'static {
     /// invitation the engine offered, a hang-up, muting; answered with the call it acted on, or why it was refused
     /// (nothing sent). Only the user's action asks for one ([`crate::calls`]).
     fn call(&self, action: CallAction) -> Reply<CallId>;
+    /// Whether the engine sends nothing (the personal build's read-only mode, `teams --read-only`): the views offer no
+    /// write (the boxes, a message's actions, the calls, the status say "Read-only"), and one asked anyway is refused
+    /// below them, logged to `fence.log`. `false` by default.
+    fn read_only(&self) -> bool {
+        false
+    }
 }
 
 impl Core for EngineRequests {
     fn me(&self) -> &str {
         EngineRequests::me(self)
+    }
+
+    fn read_only(&self) -> bool {
+        EngineRequests::read_only(self)
     }
 
     fn write(&self, action: Action) -> Reply<OutboxEntry> {
@@ -168,8 +187,16 @@ impl Core for EngineRequests {
         EngineRequests::reaction_animation(self, id)
     }
 
+    fn message_picture(&self, src: String) -> Reply<Option<PictureBytes>> {
+        EngineRequests::message_picture(self, src)
+    }
+
     fn recent_reactions(&self, limit: usize) -> Reply<Vec<String>> {
         EngineRequests::recent_reactions(self, limit)
+    }
+
+    fn frequent_reactions(&self, limit: usize) -> Reply<Vec<String>> {
+        EngineRequests::frequent_reactions(self, limit)
     }
 
     fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>> {
@@ -198,6 +225,10 @@ impl Core for EngineRequests {
 
     fn teams(&self) -> Reply<Option<Vec<Team>>> {
         EngineRequests::teams(self)
+    }
+
+    fn chat_listing(&self) -> Reply<ChatListing> {
+        EngineRequests::chat_listing(self)
     }
 
     fn sync_conversation(&self, conversation: String) -> Reply<Synced> {
@@ -297,7 +328,15 @@ impl Core for StoppedCore {
         stopped()
     }
 
+    fn message_picture(&self, _: String) -> Reply<Option<PictureBytes>> {
+        stopped()
+    }
+
     fn recent_reactions(&self, _: usize) -> Reply<Vec<String>> {
+        stopped()
+    }
+
+    fn frequent_reactions(&self, _: usize) -> Reply<Vec<String>> {
         stopped()
     }
 
@@ -326,6 +365,10 @@ impl Core for StoppedCore {
     }
 
     fn teams(&self) -> Reply<Option<Vec<Team>>> {
+        stopped()
+    }
+
+    fn chat_listing(&self) -> Reply<ChatListing> {
         stopped()
     }
 

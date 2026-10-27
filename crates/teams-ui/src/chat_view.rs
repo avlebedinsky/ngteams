@@ -20,23 +20,29 @@
 //!   their avatar (M2 Task 12: their picture from the engine, else their initials). The name is their profile's
 //!   ([`Core::person`]: Graph's, else the middle tier's profile lookup's), else the one their message carried, else
 //!   their newest message's or one the binary knew, else their MRI; a name or a picture read later shows once the
-//!   engine tells it (`Event::Profile`). A message shows its
-//!   rich text through our own renderer ([`crate::rich_text`], parsed and laid out once per message id and version),
-//!   "Edited" once edited, "This message was deleted" once deleted, its reactions with their counts (the account's own
-//!   marked), and a thread's event as a line of its own. A message type this build doesn't show is a placeholder
+//!   engine tells it (`Event::Profile`). Laid out as Teams does: someone else's avatar in a column of its own, level
+//!   with the bubble's top, with their presence's badge when the presence model knows it (after every load the view
+//!   asks the engine about the newest [`SENDERS_WATCHED`] senders it shows: [`crate::presence`]); the name and the
+//!   time ([`clock::message_time`]) muted over the bubble; an "@" beside a bubble that mentions the account. A message shows its rich text through our own renderer ([`crate::rich_text`],
+//!   parsed and laid out once per message id and version), "Edited" once edited, "This message was deleted" once
+//!   deleted, its reactions as pills over the bubble's bottom edge with their counts (the account's own ringed) and
+//!   "Add reaction", and a thread's event as a line of its own. A message type this build doesn't show is a placeholder
 //!   that names no content; `Control/…` messages (typing) are signals, never shown.
 //! - **Typing**: who is typing now ([`crate::Chats::typing`]), under the messages; it goes off with their end of
 //!   typing, their message, or [`crate::models::TYPING_TIMEOUT`] after their last signal.
 //! - **Actions** on a message, under the pointer or selected with the keyboard (Up and Down, once the list has the
 //!   focus: Escape in the compose box with nothing to cancel there (no reply, edit or open picker) moves it there,
-//!   whatever the box holds, and Escape in the list with nothing open or selected moves it back): reply and react, and
-//!   for the account's own message edit and delete. Each is told as [`ChatViewEvent::Action`] and carried out (M2 Task
-//!   13): a reply and an edit go to the [`Compose`] box under the messages; react opens the quick reactions M2 Task 10
-//!   captured ([`QUICK_REACTIONS`], keys 1–4) and "more reactions" (key 5: [`ReactionPicker`], every reaction Teams
-//!   offers, over the view), and a reaction chip clicked sets or takes back the account's own (a chip of a key Teams
-//!   doesn't offer only shows: [`reactions::Catalog::offers`]); react and delete select the message they act on, and moving
-//!   the selection closes them; delete asks first (Enter or the button confirms, Escape cancels). Every write goes out
-//!   through the engine ([`Core::write`]), never from the view.
+//!   whatever the box holds, and Escape in the list with nothing open or selected moves it back): reply, react and
+//!   copy text, and for the account's own message edit and delete. They are on Teams' hover bar over the bubble's top
+//!   right ([`ChatView::hover_bar`]): the quick reactions (the account's most used, [`Core::frequent_reactions`], then
+//!   Teams' own: [`quick_reactions`]), react, edit, reply, and "More options" (copy text, delete). Each is told as
+//!   [`ChatViewEvent::Action`] and carried out (M2 Task 13): a reply and an edit go to the [`Compose`] box under the
+//!   messages; react's key numbers the bar's quick reactions (keys 1–4) and "more reactions" (key 5, or react's
+//!   button: [`ReactionPicker`], every reaction Teams offers, over the view), and a quick reaction or a reaction chip
+//!   clicked sets or takes back the account's own (a chip of a key Teams doesn't offer only shows:
+//!   [`reactions::Catalog::offers`]); react and delete select the message they act on, and moving the selection
+//!   closes them; delete asks first (Enter or the button confirms, Escape cancels). Every write goes out through the
+//!   engine ([`Core::write`]), never from the view.
 //! - **The account's writes as they go out** ([`crate::sending`]): a message post shows at once as a pending message of
 //!   its own (the engine tells its row as it is made, and the rows are built again then, before any store read),
 //!   with its state, until its message is held or found in the store ([`Core::message`], by the id the row was sent
@@ -48,6 +54,10 @@
 //!   the shell hides it behind the settings), the window is active and the list is at the newest message, the
 //!   account's read horizon moves to the newest message from someone else that is after it, [`READ_DEBOUNCE`] after
 //!   the view settles, one at a time.
+//! - **The account's own notes** ([`NOTES`], "<name> (You)" under "Favorites"): read-only here. No conversation
+//!   list brings them, so the view asks the engine to sync them from the service each time it opens
+//!   ([`Core::sync_conversation`]); their messages offer no action and send no read receipt, and the compose box says
+//!   they can't be written ([`compose::READ_ONLY_NOTES`]).
 //! - **Opened at a message** ([`ChatView::reveal`], a search's hit, M2 Task 15): the view reads the store back to the
 //!   message, scrolls to it and selects it; the list stops following the newest. Until the message is shown no read
 //!   receipt goes, and one already waiting is dropped.
@@ -63,25 +73,29 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Datelike as _, Local, NaiveDate, TimeZone, Utc};
+use gpui::ClipboardItem;
 use gpui::{
     AnyElement, App, AppContext as _, AsyncApp, Bounds, Context, ElementId, Entity, EventEmitter, FocusHandle,
     FollowMode, Global, InteractiveElement as _, IntoElement, KeyBinding, ListAlignment, ListOffset, ListState,
     ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
-    WeakEntity, Window, actions, anchored, canvas, deferred, div, list, px, relative, rgb,
+    WeakEntity, Window, actions, anchored, canvas, deferred, div, list, px, relative, rems, rgb,
 };
-use gpui_component::button::{Button, ButtonCustomVariant, ButtonRounded, ButtonVariants as _};
+use gpui_component::Selectable as _;
+use gpui_component::button::{Button, ButtonRounded, ButtonVariants as _};
 use gpui_component::input::Escape as ComposeEscape;
+use gpui_component::kbd::Kbd;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Sizable as _, Size};
-use teams_core::{Action, Command, EngineError};
+use teams_core::{Action, Command, EngineError, NOTES};
 use teams_proto::chat::{
     MessageType, RichText, ThreadActivity, Unshown, parse_html, thread_activity, unshown_parts, web_chat_link,
 };
 use teams_store::{Message, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction};
 
 use crate::bridge::Core;
+use crate::clock::{self, HourCycle};
 use crate::compose::{self, Compose, ComposeEvent, ComposeParts, Quoted};
-use crate::icons::{Glyph, icon_button_with_key, selected_by};
+use crate::icons::{Glyph, icon_button, icon_button_with_key, selected_by};
 use crate::models::Models;
 use crate::people::{Face, Shown};
 use crate::reaction_picker::{ReactionPicker, ReactionPickerEvent};
@@ -92,6 +106,7 @@ use crate::settings::SettingsModel;
 use crate::shell::ShellParts;
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
+use crate::{presence, presence_badge};
 
 actions!(
     teams_ui,
@@ -104,21 +119,42 @@ actions!(
         DeleteSelected,
         ClearSelection,
         ConfirmDelete,
-        PickLike,
-        PickHeart,
-        PickLaugh,
-        PickSurprised,
-        PickMore
+        PickFirst,
+        PickSecond,
+        PickThird,
+        PickFourth,
+        PickMore,
+        CopySelected
     ]
 );
 
 /// The message list's key context: its keys apply only while the list itself has the focus (never while compose's
 /// text area has it).
 pub const CONTEXT: &str = "ChatMessages";
-/// A reaction drawn in the quick reactions, px.
-const QUICK_EMOJI: f32 = 24.0;
-/// A reaction drawn in its chip under a message, px.
-const CHIP_EMOJI: f32 = 16.0;
+/// A reaction drawn in the hover bar's quick reactions, px.
+const QUICK_EMOJI: f32 = 20.0;
+/// A button of the hover bar, px: a quick reaction's or an action's square.
+const BAR_BUTTON: f32 = 28.0;
+/// The hover bar's padding and the gap between its buttons, px.
+const BAR_GAP: f32 = 2.0;
+/// The hover bar's more-options menu's width, px.
+const MENU_WIDTH: f32 = 200.0;
+/// A reaction drawn in its pill under a message, px.
+const CHIP_EMOJI: f32 = 18.0;
+/// A reaction's pill's height, px.
+const PILL: f32 = 28.0;
+/// How far the reactions reach up over their bubble's bottom edge, px.
+const REACTIONS_OVERLAP: f32 = 6.0;
+/// The avatar beside someone else's messages, px: Teams' 32.
+const AVATAR: f32 = 32.0;
+/// Between the avatar's column and the bubble, px.
+const AVATAR_GAP: f32 = 12.0;
+/// A bubble's text inset, px: the reactions start there too.
+const BUBBLE_INSET: f32 = 16.0;
+/// The column right of someone else's bubble that holds the "mentions you" mark, px.
+const MARK_COLUMN: f32 = 28.0;
+/// A message's header's height, rem: the avatar beside it starts below it, level with the bubble.
+const HEADER_REMS: f32 = 1.5;
 /// Messages read from the store at a time; older ones load when fewer rows than this are above the view.
 pub const PAGE: usize = 50;
 /// A sender's messages within this long of the one before are grouped under one name and time, ms.
@@ -127,6 +163,10 @@ pub const GROUP_MS: i64 = 5 * 60 * 1_000;
 pub const OVERDRAW: f32 = 400.0;
 /// The most message ids a trace line names (the newest).
 pub const TRACED: usize = 50;
+/// The most senders whose presence the view asks the engine about ([`ChatView::watch_senders`]): the mention picker's
+/// [`PICKER_MAX`](compose::PICKER_MAX), whose share of the engine's watch it takes (both show the open chat's people),
+/// so the chat list's own asks ([`LIST_WATCHED`](crate::chat_list::LIST_WATCHED)) still fit beside them.
+pub const SENDERS_WATCHED: usize = compose::PICKER_MAX;
 /// What a deleted message shows.
 pub const DELETED: &str = "This message was deleted";
 /// What a message of a type this build doesn't show shows.
@@ -140,9 +180,13 @@ pub const OPEN_ON_THE_WEB: &str = "Open in Teams on the web";
 pub const NEW_MESSAGES: &str = "New messages";
 /// Older loads in a row that may bring nothing before rows near the top stop asking for more by themselves.
 pub const MAX_FRUITLESS: u32 = 3;
-/// The quick reactions, in the order the web client's hover bar offered them (M2 Task 10, `docs/protocol/chat.md`,
-/// "Reactions (chat-shapes)"); keys 1–4 pick them once react is chosen, and key 5 opens every other.
-pub const QUICK_REACTIONS: [&str; 4] = ["like", "heart", "laugh", "surprised"];
+/// How many quick reactions the hover bar shows, as Teams' does; keys 1–4 pick them once react is chosen, and key 5
+/// opens every other.
+pub const QUICK_COUNT: usize = 4;
+/// Teams' own quick reactions, in its order (the web client's hover bar offered the first four to an account that
+/// had set none: M2 Task 10, `docs/protocol/chat.md`, "Reactions (chat-shapes)"): they fill the hover bar after the
+/// account's most used ([`quick_reactions`]).
+pub const DEFAULT_QUICK_REACTIONS: [&str; 6] = ["like", "heart", "laugh", "surprised", "sad", "angry"];
 /// How long the view waits, once a read receipt is due, before it sends it (and looks again whether it still is).
 pub const READ_DEBOUNCE: Duration = Duration::from_millis(800);
 /// What the delete's confirmation asks.
@@ -174,11 +218,12 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("delete", DeleteSelected, context),
         KeyBinding::new("escape", ClearSelection, context),
         KeyBinding::new("enter", ConfirmDelete, context),
-        KeyBinding::new("1", PickLike, context),
-        KeyBinding::new("2", PickHeart, context),
-        KeyBinding::new("3", PickLaugh, context),
-        KeyBinding::new("4", PickSurprised, context),
+        KeyBinding::new("1", PickFirst, context),
+        KeyBinding::new("2", PickSecond, context),
+        KeyBinding::new("3", PickThird, context),
+        KeyBinding::new("4", PickFourth, context),
         KeyBinding::new("5", PickMore, context),
+        KeyBinding::new("ctrl-c", CopySelected, context),
     ]);
 }
 
@@ -191,6 +236,8 @@ pub enum MessageAction {
     Edit,
     /// The account's own message only.
     Delete,
+    /// Its text to the clipboard.
+    Copy,
 }
 
 impl MessageAction {
@@ -201,6 +248,7 @@ impl MessageAction {
             Self::React => "React",
             Self::Edit => "Edit",
             Self::Delete => "Delete",
+            Self::Copy => "Copy text",
         }
     }
 
@@ -208,10 +256,12 @@ impl MessageAction {
     #[must_use]
     pub fn glyph(self) -> Glyph {
         match self {
-            Self::Reply => Glyph::REPLY,
+            // Teams' quote mark: a reply quotes the message
+            Self::Reply => Glyph::QUOTE,
             Self::React => Glyph::REACT,
             Self::Edit => Glyph::PENCIL,
             Self::Delete => Glyph::TRASH,
+            Self::Copy => Glyph::COPY,
         }
     }
 
@@ -222,6 +272,7 @@ impl MessageAction {
             Self::React => &ReactToSelected,
             Self::Edit => &EditSelected,
             Self::Delete => &DeleteSelected,
+            Self::Copy => &CopySelected,
         }
     }
 
@@ -233,6 +284,7 @@ impl MessageAction {
             Self::React => "react",
             Self::Edit => "edit",
             Self::Delete => "delete",
+            Self::Copy => "copy",
         }
     }
 }
@@ -349,6 +401,19 @@ pub struct MessageItem {
     /// What it carries beside its text that no capture showed ([`unshown_of`]): a received file, a card. With any, it
     /// shows [`UNSHOWN_CONTENT`] and a way to open the chat in Teams on the web, never a guess at the part.
     pub unshown: UnshownParts,
+    /// Whether its chat takes writes: not the account's own notes ([`NOTES`]), where it offers no action.
+    pub writes: ChatWrites,
+}
+
+/// Whether a chat takes the account's writes from this app.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatWrites {
+    Taken,
+    /// The account's own notes ([`NOTES`]): read-only here.
+    ReadOnly,
+    /// The app's read-only mode ([`crate::Core::read_only`]): no chat takes a write; a message's text can still be
+    /// copied.
+    AppReadOnly,
 }
 
 /// The parts of a stored message no capture showed, by kind ([`unshown_of`]).
@@ -411,14 +476,17 @@ pub fn counts_unread(message_type: &str) -> bool {
 }
 
 impl MessageItem {
-    /// The actions it offers: none on an event, a deleted message or one this build doesn't show; edit and delete
-    /// only on the account's own.
+    /// The actions it offers: none on an event, a deleted message, one this build doesn't show or one in a chat that
+    /// takes no write; edit and delete only on the account's own.
     #[must_use]
     pub fn actions(&self) -> Vec<MessageAction> {
-        if !matches!(self.body, Body::Text(_)) {
+        if self.writes == ChatWrites::ReadOnly || !matches!(self.body, Body::Text(_)) {
             return Vec::new();
         }
-        let mut actions = vec![MessageAction::Reply, MessageAction::React];
+        if self.writes == ChatWrites::AppReadOnly {
+            return vec![MessageAction::Copy];
+        }
+        let mut actions = vec![MessageAction::Reply, MessageAction::React, MessageAction::Copy];
         if self.own {
             actions.extend([MessageAction::Edit, MessageAction::Delete]);
         }
@@ -640,6 +708,9 @@ pub struct ChatView {
     /// The rows laid out in the last frame.
     drawn: Vec<usize>,
     hovered: Option<String>,
+    /// The message whose hover bar is under the pointer: the bar floats over the message above its own, outside its
+    /// row, so it keeps itself shown.
+    bar_hovered: Option<String>,
     selected: Option<String>,
     focus: FocusHandle,
     traced: Option<Vec<Traced>>,
@@ -652,6 +723,14 @@ pub struct ChatView {
     more: Option<(Entity<ReactionPicker>, Subscription)>,
     /// Where the open quick reactions were last drawn, in the window: "more reactions" opens under them.
     quick_bar: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// The hover bar's quick reactions: the account's most used, then Teams' own ([`quick_reactions`]).
+    quick: Vec<String>,
+    /// How many reactions of the account's the rows held when its most used were last asked for.
+    own_reactions: Option<usize>,
+    /// The message whose more-options menu is open.
+    options: Option<String>,
+    /// Where the open more-options menu's button was last drawn, in the window: the menu opens under it.
+    options_at: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// The message whose delete waits for its confirmation.
     deleting: Option<String>,
     /// The row whose "send again" waits for its confirmation (its message may have arrived).
@@ -679,8 +758,8 @@ pub struct ChatView {
     reveal: Option<(i64, String)>,
     /// The message the running window load reads back to, shown once it ends.
     revealing: Option<(i64, String)>,
-    /// The models' changes, the compose box's events and the window's activation.
-    _subscriptions: [Subscription; 3],
+    /// The models' changes, the compose box's events, the window's activation and the presence model's changes.
+    _subscriptions: [Subscription; 4],
 }
 
 impl EventEmitter<ChatViewEvent> for ChatView {}
@@ -734,6 +813,7 @@ impl ChatView {
             seen,
             drawn: Vec::new(),
             hovered: None,
+            bar_hovered: None,
             selected: None,
             focus: cx.focus_handle(),
             traced: None,
@@ -743,6 +823,10 @@ impl ChatView {
             reacting: None,
             more: None,
             quick_bar: Rc::default(),
+            quick: quick_reactions(&[]),
+            own_reactions: None,
+            options: None,
+            options_at: Rc::default(),
             deleting: None,
             resending: None,
             unsettled: Vec::new(),
@@ -761,7 +845,21 @@ impl ChatView {
         };
         view.kick(cx);
         view.typing_changed(cx);
+        view.sync_notes(cx);
         view
+    }
+
+    /// The account's own notes ([`NOTES`]), which no conversation list brings, synced from the service as the view
+    /// opens: what it stores comes as the models' change, and a failed sync leaves what the store holds shown.
+    fn sync_notes(&self, cx: &mut Context<Self>) {
+        if self.conversation != NOTES {
+            return;
+        }
+        let core = Arc::clone(&self.core);
+        cx.spawn(async move |_: WeakEntity<Self>, _: &mut AsyncApp| {
+            let _ = core.sync_conversation(NOTES.to_owned()).await;
+        })
+        .detach();
     }
 
     /// The message list: bottom-aligned, following the newest; its scroll moves the pill, and back at the newest a
@@ -783,14 +881,14 @@ impl ChatView {
         list
     }
 
-    /// What the view follows: the models (its chat's changes, typing, names), its compose box's events and the
-    /// window's activation.
+    /// What the view follows: the models (its chat's changes, typing, names, presence), its compose box's events and
+    /// the window's activation.
     fn subscriptions(
         models: &Models,
         compose: &Entity<Compose>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> [Subscription; 3] {
+    ) -> [Subscription; 4] {
         let observing = cx.observe(&models.chats, |this: &mut Self, chats, cx| {
             let at = chats.read(cx).changed_at(&this.conversation);
             if at > this.seen {
@@ -812,7 +910,9 @@ impl ChatView {
             this.active = Activation::of(window);
             this.want_receipt(cx);
         });
-        [observing, compose_events, activation]
+        // a presence the engine told: the senders' badges are drawn again from the model
+        let presence = cx.observe(&models.presence, |_: &mut Self, _, cx| cx.notify());
+        [observing, compose_events, activation, presence]
     }
 
     /// The compose box under the messages.
@@ -952,7 +1052,26 @@ impl ChatView {
 
     #[must_use]
     pub fn hovered(&self) -> Option<&str> {
-        self.hovered.as_deref()
+        self.bar_hovered.as_deref().or(self.hovered.as_deref())
+    }
+
+    /// The hover bar's quick reactions, in order.
+    #[must_use]
+    pub fn quick(&self) -> &[String] {
+        &self.quick
+    }
+
+    /// The message whose more-options menu is open.
+    #[must_use]
+    pub fn options(&self) -> Option<&str> {
+        self.options.as_deref()
+    }
+
+    /// Takes `message` as the one under the pointer, as its row's hover does (the UI tour's screenshots show a hover
+    /// without moving the pointer).
+    pub fn hover(&mut self, message: Option<String>, cx: &mut Context<Self>) {
+        self.hovered = message;
+        cx.notify();
     }
 
     /// The message list's focus.
@@ -1034,6 +1153,9 @@ impl ChatView {
             if self.deleting.is_some() && self.deleting != message {
                 self.deleting = None;
             }
+            if self.options.is_some() && self.options != message {
+                self.options = None;
+            }
             self.selected = message;
             cx.notify();
         }
@@ -1056,6 +1178,7 @@ impl ChatView {
         // another action closes what waited for an answer
         self.reacting = None;
         self.deleting = None;
+        self.options = None;
         match action {
             MessageAction::Reply => self.reply_to(message, window, cx),
             MessageAction::Edit => self.edit(message, window, cx),
@@ -1071,6 +1194,7 @@ impl ChatView {
                 self.deleting = Some(message.to_owned());
                 self.focus.focus(window, cx);
             }
+            MessageAction::Copy => self.copy_text(message, cx),
         }
         cx.notify();
     }
@@ -1124,7 +1248,7 @@ impl ChatView {
         let Some(item) = self.message_items().find(|item| item.id == message) else {
             return;
         };
-        if !matches!(item.body, Body::Text(_)) {
+        if !item.actions().contains(&MessageAction::React) {
             return;
         }
         let mine = item
@@ -1152,9 +1276,49 @@ impl ChatView {
 
     /// Picks the `index`th quick reaction on the message they are open on.
     fn pick(&mut self, index: usize, cx: &mut Context<Self>) {
-        if let (Some(message), Some(key)) = (self.reacting.clone(), QUICK_REACTIONS.get(index)) {
-            self.toggle_reaction(&message, key, cx);
+        if let (Some(message), Some(key)) = (self.reacting.clone(), self.quick.get(index).cloned()) {
+            self.toggle_reaction(&message, &key, cx);
         }
+    }
+
+    /// Puts `message`'s text on the clipboard, as the reader sees it (a quote it carries left out).
+    fn copy_text(&self, message: &str, cx: &mut Context<Self>) {
+        let text = self
+            .message_items()
+            .find(|item| item.id == message)
+            .and_then(|item| match &item.body {
+                Body::Text(text) => Some(plain_text(&text.0)),
+                _ => None,
+            });
+        if let Some(text) = text {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
+    }
+
+    /// Opens the more-options menu on `message`, or closes it when it is open there.
+    pub fn toggle_options(&mut self, message: &str, cx: &mut Context<Self>) {
+        self.options = if self.options.as_deref() == Some(message) {
+            None
+        } else {
+            Some(message.to_owned())
+        };
+        cx.notify();
+    }
+
+    /// Asks the engine for the account's most used reactions, for the hover bar's quick reactions.
+    fn ask_frequent(&mut self, cx: &mut Context<Self>) {
+        let reply = self.core.frequent_reactions(2 * QUICK_COUNT);
+        cx.spawn(async move |this, cx| {
+            let Ok(keys) = reply.await else { return };
+            let _ = this.update(cx, |this, cx| {
+                let quick = quick_reactions(&keys);
+                if this.quick != quick {
+                    this.quick = quick;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
 
     /// Opens "more reactions" on the message the quick reactions are open on, its search field focused; a pick sets
@@ -1215,6 +1379,9 @@ impl ChatView {
 
     /// "Send again" on row `row`: the engine's explicit resend, after a warning when its message may have arrived.
     pub fn send_again(&mut self, row: i64, cx: &mut Context<Self>) {
+        if self.core.read_only() {
+            return;
+        }
         let again = self.note_of_row(row).map(|note| note.again);
         match again {
             Some(Again::AfterWarning) if self.resending != Some(row) => self.resending = Some(row),
@@ -1240,7 +1407,10 @@ impl ChatView {
     /// the focus goes back to the compose box.
     fn escape(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.more = None;
-        let open = self.reacting.take().is_some() | self.deleting.take().is_some() | self.resending.take().is_some();
+        let open = self.reacting.take().is_some()
+            | self.deleting.take().is_some()
+            | self.resending.take().is_some()
+            | self.options.take().is_some();
         if open {
             cx.notify();
         } else if self.selected.is_some() {
@@ -1344,6 +1514,7 @@ impl ChatView {
         }
         self.want_names(cx);
         self.rebuild(cx);
+        self.watch_senders();
         if load == Load::Window
             && let Some(target) = self.revealing.take()
         {
@@ -1440,6 +1611,27 @@ impl ChatView {
             .collect();
         wanted.extend(typing);
         self.ask_names(wanted, cx);
+    }
+
+    /// Asks the engine about the people whose avatars the rows show (see the module docs): the senders of someone
+    /// else's messages, the newest [`SENDERS_WATCHED`] of them, the newest asked last so the engine's watch keeps them
+    /// longest; never a bot or a service, which has no presence ([`teams_core::has_presence`]). Asked after every
+    /// load, as the chat list asks after each of its own.
+    fn watch_senders(&self) {
+        let mut senders: Vec<&String> = Vec::new();
+        let shown = self.items.iter().rev().filter_map(|item| match item {
+            Item::Message(item) if !item.own && !matches!(item.body, Body::Event(_)) => item.sender.as_ref(),
+            _ => None,
+        });
+        for sender in shown {
+            if senders.len() == SENDERS_WATCHED {
+                break;
+            }
+            if teams_core::has_presence(sender) && !senders.contains(&sender) {
+                senders.push(sender);
+            }
+        }
+        presence::watch(self.core.as_ref(), senders.into_iter().rev());
     }
 
     fn ask_names(&mut self, wanted: Vec<String>, cx: &mut Context<Self>) {
@@ -1583,7 +1775,11 @@ impl ChatView {
         self.layouts += 1;
         let mentions = Mentions::of(message.properties.as_deref(), self.core.me());
         let web_link = rich_text::message_web_link(&message.conversation_id, &message.id);
-        let rendered = Arc::new(rich_text::layout_with_web_link(&text, &mentions, web_link.as_deref()));
+        // its pictures and emoticons asked of this account's engine
+        let rendered = Arc::new(
+            rich_text::layout_with_web_link(&text, &mentions, web_link.as_deref())
+                .with_source(rich_text::PictureSource::new(Arc::clone(&self.core))),
+        );
         self.rendered
             .insert(message.id.clone(), (message.version, Arc::clone(&rendered)));
         rendered
@@ -1680,6 +1876,13 @@ impl ChatView {
             reactions,
             outbox: notes.get(&message.id).cloned().unwrap_or_default(),
             unshown,
+            writes: if self.core.read_only() {
+                ChatWrites::AppReadOnly
+            } else if self.conversation == NOTES {
+                ChatWrites::ReadOnly
+            } else {
+                ChatWrites::Taken
+            },
         })
     }
 
@@ -1810,6 +2013,15 @@ impl ChatView {
             self.selected = None;
         }
         self.close_gone();
+        // the account's reactions changed: its most used may have too
+        let own = self
+            .message_items()
+            .map(|item| item.reactions.iter().filter(|reaction| reaction.mine).count())
+            .sum();
+        if self.own_reactions != Some(own) {
+            self.own_reactions = Some(own);
+            self.ask_frequent(cx);
+        }
         self.trace_items();
         self.trace_outbox();
         cx.notify();
@@ -1831,6 +2043,11 @@ impl ChatView {
             && !offers(self, &id, MessageAction::Delete)
         {
             self.deleting = None;
+        }
+        if let Some(id) = self.options.clone()
+            && !offers(self, &id, MessageAction::Copy)
+        {
+            self.options = None;
         }
     }
 
@@ -1873,6 +2090,8 @@ impl ChatView {
             && self.reveal.is_none()
             && self.revealing.is_none()
             && self.list.is_following_tail()
+            && self.conversation != NOTES
+            && !self.core.read_only()
             && self.settings.read(cx).sends_read_receipts();
         if !wanted {
             return None;
@@ -2010,19 +2229,14 @@ impl ChatView {
         let hovered_id = id.clone();
         let clicked_id = id.clone();
         let highlighted = self.selected.as_deref() == Some(id.as_str());
-        let actions =
-            (highlighted || self.hovered.as_deref() == Some(id.as_str())).then(|| actions_bar(item, palette, cx));
         let row = div()
             .id(ElementId::Name(format!("message-{id}").into()))
             .debug_selector(move || format!("message-{id}"))
             .relative()
             .w_full()
             .px_4()
-            .pt(px(if item.header { 8.0 } else { 2.0 }))
-            .flex()
-            .flex_col();
-        // the account's own messages to the right
-        let row = if item.own { row.items_end() } else { row.items_start() };
+            .pt(px(if item.header { 12.0 } else { 2.0 }))
+            .flex();
         let row = row
             .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
                 let now = hovered.then(|| hovered_id.clone());
@@ -2036,22 +2250,74 @@ impl ChatView {
                 this.select(Some(clicked_id.clone()), cx);
             }));
         let row = if matches!(item.body, Body::Event(_)) {
-            row.child(event_line(item, palette))
+            row.flex_col().child(event_line(item, palette))
         } else {
-            let picker = (self.reacting.as_deref() == Some(item.id.as_str()))
-                .then(|| quick_reactions(item, &self.quick_bar, palette, cx));
-            row.children(item.header.then(|| header_line(item, palette)))
-                .child(bubble(item, &self.conversation, highlighted, palette))
-                .children(footer_line(item, palette, cx))
-                .children(
-                    item.outbox
-                        .iter()
-                        .map(|note| note_line(note, palette, cx))
-                        .collect::<Vec<_>>(),
-                )
-                .children(picker)
+            // someone else's message beside their avatar's column, Teams' way; the account's own to the right
+            let avatar = (!item.own).then(|| self.avatar_column(item, palette, cx));
+            row.children(avatar)
+                .child(self.message_column(item, highlighted, palette, cx))
         };
-        row.children(actions).into_any_element()
+        row.into_any_element()
+    }
+
+    /// The column left of someone else's messages: their avatar beside the first of a group, level with its bubble's
+    /// top, with their presence's badge when the models know it (the view asks the engine about its senders after
+    /// each load, [`Self::watch_senders`], and draws what the model holds).
+    fn avatar_column(&self, item: &MessageItem, palette: Palette, cx: &App) -> gpui::Div {
+        let column = div().w(px(AVATAR)).flex_none().mr(px(AVATAR_GAP));
+        if !item.header {
+            return column;
+        }
+        let badge = item
+            .sender
+            .as_deref()
+            .and_then(|sender| {
+                presence_badge::badge(
+                    &self.models.presence.read(cx).of(sender),
+                    presence_badge::MESSAGE,
+                    palette,
+                )
+            })
+            .map(|badge| badge.absolute().right(px(-2.0)).bottom(px(-2.0)));
+        let id = item.id.clone();
+        column.pt(rems(HEADER_REMS)).child(
+            div()
+                .debug_selector(move || format!("avatar-{id}"))
+                .relative()
+                .size(px(AVATAR))
+                // the kit's own sizes: 48 px with small initials, drawn at Teams' 32 (an exact `Size::Size` gives
+                // the initials half its width, too narrow for two)
+                .child(item.face.avatar(&item.sender_name, Size::Medium).size(px(AVATAR)))
+                .children(badge),
+        )
+    }
+
+    /// A message's column: its header, its bubble (with the "mentions you" mark beside it and its hover bar over its
+    /// top while it is shown), its reactions over the bubble's bottom edge and its outbox notes.
+    fn message_column(
+        &self,
+        item: &MessageItem,
+        highlighted: bool,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        let bar = self.hover_bar(item, highlighted, palette, cx);
+        let column = div().flex_1().min_w_0().flex().flex_col();
+        let column = if item.own {
+            column.items_end()
+        } else {
+            column.items_start()
+        };
+        column
+            .children(item.header.then(|| header_line(item, palette, clock::cycle(cx))))
+            .child(bubble_line(item, &self.conversation, highlighted, palette, bar))
+            .children(footer_line(item, palette, cx))
+            .children(
+                item.outbox
+                    .iter()
+                    .map(|note| note_line(note, palette, cx))
+                    .collect::<Vec<_>>(),
+            )
     }
 
     /// What waits for the user's answer under the messages: the delete's confirmation, or the warning before "send
@@ -2144,92 +2410,334 @@ impl Activation {
     }
 }
 
-/// The quick reactions over a message, each with its key: each sets the account's own, or takes it back when it is
-/// set; "more reactions" after them. Where the bar is drawn is kept in `drawn_at`, for "more reactions" to open under.
-fn quick_reactions(
-    item: &MessageItem,
-    drawn_at: &Rc<Cell<Option<Bounds<Pixels>>>>,
-    palette: Palette,
-    cx: &mut Context<ChatView>,
-) -> AnyElement {
-    let buttons = QUICK_REACTIONS.iter().enumerate().map(|(index, key)| {
-        let message = item.id.clone();
-        let mine = item
-            .reactions
+/// The hover bar's quick reactions: the account's most used (`frequent`, the most used first; a key Teams doesn't
+/// offer left out), then Teams' own ([`DEFAULT_QUICK_REACTIONS`]) to fill the row, [`QUICK_COUNT`] in all, none twice.
+#[must_use]
+pub fn quick_reactions(frequent: &[String]) -> Vec<String> {
+    let mut quick: Vec<String> = Vec::with_capacity(QUICK_COUNT);
+    let offered = frequent
+        .iter()
+        .map(String::as_str)
+        .filter(|key| reactions::catalog().offers(key));
+    for key in offered.chain(DEFAULT_QUICK_REACTIONS) {
+        if quick.len() == QUICK_COUNT {
+            break;
+        }
+        if !quick.iter().any(|known| known == key) {
+            quick.push(key.to_owned());
+        }
+    }
+    quick
+}
+
+/// A message's text as the reader sees it, its paragraphs a line each (an emoticon as its emoji); a quote it carries
+/// (a reply's) and its pictures left out.
+fn plain_text(rendered: &Rendered) -> String {
+    rendered
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            rich_text::Block::Text(text) => Some(text.plain()),
+            rich_text::Block::Quote(_) | rich_text::Block::Picture(_) => None,
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+impl ChatView {
+    /// A message's hover bar, as Teams draws it, while the message is under the pointer or selected (or its bar, its
+    /// reactions or its more-options menu is): over its bubble's top, flush with the bubble's right edge and never past
+    /// its left, floating over the header line or the message above. In it, Teams' order: the quick reactions (the
+    /// account's most used first, each setting or taking back the account's own), "React" (every reaction), then
+    /// edit on the account's own, reply (Teams' quote), and "More options" holding the rest. None on a message
+    /// that offers no action.
+    fn hover_bar(
+        &self,
+        item: &MessageItem,
+        highlighted: bool,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let id = item.id.as_str();
+        let reacting = self.reacting.as_deref() == Some(id);
+        let shown = highlighted
+            || reacting
+            || self.hovered.as_deref() == Some(id)
+            || self.bar_hovered.as_deref() == Some(id)
+            || self.options.as_deref() == Some(id);
+        let actions = item.actions();
+        if !shown || actions.is_empty() {
+            return None;
+        }
+        let quick = self
+            .quick
             .iter()
-            .any(|reaction| reaction.key == *key && reaction.mine);
-        let button = quick_button(
-            ElementId::Name(format!("pick-{key}-{message}").into()),
-            index + 1,
-            palette,
+            .enumerate()
+            .map(|(index, key)| quick_button(item, key, reacting.then_some(index + 1), palette, cx))
+            .collect::<Vec<_>>();
+        let quick = div()
+            .debug_selector(|| "reaction-picker".to_owned())
+            .flex()
+            .items_center()
+            .gap(px(BAR_GAP))
+            .children(quick);
+        let edit = actions
+            .contains(&MessageAction::Edit)
+            .then(|| bar_button(item, MessageAction::Edit, cx));
+        let measure = reacting.then(|| measured(&self.quick_bar));
+        let hovered_id = item.id.clone();
+        let bar = div()
+            .id(ElementId::Name(format!("message-actions-{id}").into()))
+            .debug_selector(|| "message-actions".to_owned())
+            .relative()
+            .flex()
+            .items_center()
+            .gap(px(BAR_GAP))
+            .p(px(BAR_GAP))
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(palette.border))
+            .bg(rgb(palette.surface))
+            .shadow_md()
+            // the message under it (the one above this one) is neither hovered nor clicked through the bar
+            .block_mouse_except_scroll()
+            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                if *hovered {
+                    this.bar_hovered = Some(hovered_id.clone());
+                    cx.notify();
+                } else if this.bar_hovered.as_deref() == Some(hovered_id.as_str()) {
+                    this.bar_hovered = None;
+                    cx.notify();
+                }
+            }))
+            .children(measure)
+            .child(quick)
+            .child(react_button(item, reacting, palette, cx))
+            .children(edit)
+            .child(bar_button(item, MessageAction::Reply, cx))
+            .child(self.options_button(item, cx));
+        // over the bubble: its right edge the bubble's, its left never left of the bubble's
+        let place = div()
+            .absolute()
+            .bottom(relative(1.0))
+            .min_w(relative(1.0))
+            .flex()
+            .justify_end();
+        let place = if item.own { place.right_0() } else { place.left_0() };
+        Some(place.child(bar).into_any_element())
+    }
+
+    /// "More options" on the hover bar: opens or closes the menu of the message's other actions, under it.
+    fn options_button(&self, item: &MessageItem, cx: &mut Context<Self>) -> gpui::Div {
+        let message = item.id.clone();
+        let open = self.options.as_deref() == Some(item.id.as_str());
+        let button = icon_button(
+            ElementId::Name(format!("message-more-{message}").into()),
+            Glyph::MORE,
+            "More options",
         )
-        .debug_selector(move || format!("pick-{key}"))
-        .tooltip(move |window, cx| Tooltip::new(reactions::description(key).to_owned()).build(window, cx))
-        .on_click(cx.listener(move |this, _, _, cx| this.toggle_reaction(&message, key, cx)))
-        .child(reactions::emoji(key, px(QUICK_EMOJI)));
-        if mine { button.bg(rgb(palette.selected)) } else { button }
-    });
-    let more = quick_button(ElementId::Name(format!("pick-more-{}", item.id).into()), 5, palette)
-        .debug_selector(|| "pick-more".to_owned())
-        .tooltip(|window, cx| Tooltip::new("More reactions").build(window, cx))
-        .on_click(cx.listener(|this, _, window, cx| this.open_more(window, cx)))
-        .child(
-            Glyph::REACT
-                .icon()
-                .size(px(QUICK_EMOJI - 4.0))
-                .text_color(rgb(palette.muted_foreground)),
-        );
+        .with_size(Size::Size(px(BAR_BUTTON)))
+        .selected(open)
+        .on_click(cx.listener(move |this, _, _, cx| {
+            cx.stop_propagation();
+            this.toggle_options(&message, cx);
+        }));
+        selected_by("message-more", button)
+            .relative()
+            .children(open.then(|| measured(&self.options_at)))
+    }
+
+    /// The more-options menu, over the view under its button as it was last drawn: the message's actions the hover
+    /// bar doesn't show, each with its key; a click outside closes it.
+    fn options_overlay(&mut self, palette: Palette, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let Some(message) = self.options.clone() else {
+            self.options_at.set(None);
+            return None;
+        };
+        let at = self.options_at.get()?;
+        let actions = self.message_items().find(|item| item.id == message)?.actions();
+        let entries = [MessageAction::Copy, MessageAction::Delete]
+            .into_iter()
+            .filter(|action| actions.contains(action))
+            .map(|action| menu_entry(&message, action, palette, window, cx))
+            .collect::<Vec<_>>();
+        let menu = div()
+            .id("message-menu")
+            .debug_selector(|| "message-menu".to_owned())
+            .w(px(MENU_WIDTH))
+            .p_1()
+            .flex()
+            .flex_col()
+            .gap_0p5()
+            .bg(rgb(palette.surface))
+            .border_1()
+            .border_color(rgb(palette.border))
+            .rounded_lg()
+            .shadow_lg()
+            .occlude()
+            .on_mouse_down_out(cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                // a click on its own button toggles it there
+                if !at.contains(&event.position) {
+                    this.options = None;
+                    cx.notify();
+                }
+            }))
+            .children(entries);
+        Some(
+            deferred(
+                anchored()
+                    .anchor(gpui::Anchor::TopRight)
+                    .position(at.bottom_right())
+                    .snap_to_window_with_margin(px(8.0))
+                    .child(div().pt_1().child(menu)),
+            )
+            .with_priority(1)
+            .into_any_element(),
+        )
+    }
+}
+
+/// An empty element over its parent that keeps where the parent was last drawn in `drawn_at`, for a popup to open by.
+fn measured(drawn_at: &Rc<Cell<Option<Bounds<Pixels>>>>) -> AnyElement {
     let drawn_at = Rc::clone(drawn_at);
-    let measure = canvas(
+    canvas(
         move |bounds, window, _| {
             if drawn_at.replace(Some(bounds)) != Some(bounds) {
-                // "more reactions" is drawn before the list's rows: it moves with the bar on the next frame
+                // the popup is drawn before the list's rows: it moves with its anchor on the next frame
                 window.on_next_frame(|window, _| window.refresh());
             }
         },
         |_, (), _, _| {},
     )
     .absolute()
-    .size_full();
-    div()
-        .debug_selector(|| "reaction-picker".to_owned())
-        .relative()
-        .flex()
-        .items_center()
-        .gap_0p5()
-        .mt_1()
-        .p_0p5()
-        .rounded_lg()
-        .border_1()
-        .border_color(rgb(palette.border))
-        .bg(rgb(palette.surface))
-        .child(measure)
-        .children(buttons)
-        .child(more)
-        .into_any_element()
+    .top_0()
+    .left_0()
+    .size_full()
+    .into_any_element()
 }
 
-/// A reaction's place in the quick reactions, its key number in the corner.
-fn quick_button(id: ElementId, number: usize, palette: Palette) -> gpui::Stateful<gpui::Div> {
+/// An action's icon button on the hover bar, its tooltip naming it and its key.
+fn bar_button(item: &MessageItem, action: MessageAction, cx: &mut Context<ChatView>) -> gpui::Div {
+    let message = item.id.clone();
+    let name = action.name();
+    let id = ElementId::Name(format!("action-{name}-{message}").into());
+    let button = icon_button_with_key(id, action.glyph(), action.label(), action.key_action())
+        .with_size(Size::Size(px(BAR_BUTTON)))
+        .on_click(cx.listener(move |this, _, window, cx| {
+            cx.stop_propagation();
+            this.act(action, &message, window, cx);
+        }));
+    selected_by(format!("action-{name}"), button)
+}
+
+/// "React" on the hover bar (Teams' smiley with a plus): every reaction Teams offers, over the view. While the quick
+/// reactions are open on the message (react's key), it is the 5th, its number in the corner.
+fn react_button(item: &MessageItem, reacting: bool, palette: Palette, cx: &mut Context<ChatView>) -> gpui::Div {
+    let message = item.id.clone();
+    let action = MessageAction::React;
+    let id = ElementId::Name(format!("action-react-{message}").into());
+    let button = icon_button_with_key(id, action.glyph(), action.label(), action.key_action())
+        .with_size(Size::Size(px(BAR_BUTTON)))
+        .on_click(cx.listener(move |this, _, window, cx| {
+            cx.stop_propagation();
+            this.act(action, &message, window, cx);
+            this.open_more(window, cx);
+        }));
     div()
-        .id(id)
+        .debug_selector(|| "pick-more".to_owned())
         .relative()
-        .size(px(QUICK_EMOJI + 8.0))
+        .child(selected_by("action-react", button))
+        .children(reacting.then(|| key_number(5, palette)))
+}
+
+/// A quick reaction on the hover bar: sets the account's own, or takes it back when it is set (then marked). While the
+/// quick reactions are open on the message, its key's `number` is in its corner.
+fn quick_button(
+    item: &MessageItem,
+    key: &str,
+    number: Option<usize>,
+    palette: Palette,
+    cx: &mut Context<ChatView>,
+) -> AnyElement {
+    let mine = item
+        .reactions
+        .iter()
+        .any(|reaction| reaction.key == key && reaction.mine);
+    let (message, toggled) = (item.id.clone(), key.to_owned());
+    let selector = format!("pick-{key}");
+    let described = SharedString::from(reactions::description(key).to_owned());
+    let button = div()
+        .id(ElementId::Name(format!("pick-{key}-{message}").into()))
+        .debug_selector(move || selector.clone())
+        .relative()
+        .size(px(BAR_BUTTON))
         .flex()
+        .flex_none()
         .items_center()
         .justify_center()
         .rounded_md()
         .cursor_pointer()
         .hover(move |style| style.bg(rgb(palette.hover)))
-        .child(
-            div()
-                .absolute()
-                .top_0()
-                .left(px(2.0))
-                .text_size(px(9.0))
-                .text_color(rgb(palette.muted_foreground))
-                .child(number.to_string()),
-        )
+        .tooltip(move |window, cx| Tooltip::new(described.clone()).build(window, cx))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            cx.stop_propagation();
+            this.toggle_reaction(&message, &toggled, cx);
+        }))
+        .child(reactions::emoji(key, px(QUICK_EMOJI)))
+        .children(number.map(|number| key_number(number, palette)));
+    let button = if mine { button.bg(rgb(palette.selected)) } else { button };
+    button.into_any_element()
+}
+
+/// A key's number in the corner of a hover bar button, while the quick reactions are open.
+fn key_number(number: usize, palette: Palette) -> gpui::Div {
+    div()
+        .absolute()
+        .top_0()
+        .left(px(2.0))
+        .text_size(px(9.0))
+        .text_color(rgb(palette.muted_foreground))
+        .child(number.to_string())
+}
+
+/// An entry of the more-options menu: the action's icon, its name and its key; delete in Teams' red.
+fn menu_entry(
+    message: &str,
+    action: MessageAction,
+    palette: Palette,
+    window: &Window,
+    cx: &mut Context<ChatView>,
+) -> AnyElement {
+    let message = message.to_owned();
+    let key = Kbd::binding_for_action(action.key_action(), Some(CONTEXT), window).map(Kbd::outline);
+    let colour = if action == MessageAction::Delete {
+        theme::DANGER
+    } else {
+        palette.foreground
+    };
+    let selector = format!("action-{}", action.name());
+    div()
+        .id(ElementId::Name(selector.clone().into()))
+        .debug_selector(move || selector.clone())
+        .w_full()
+        .h(px(32.0))
+        .px_2()
+        .flex()
+        .items_center()
+        .gap_2()
+        .rounded_md()
+        .cursor_pointer()
+        .text_sm()
+        .text_color(rgb(colour))
+        .hover(move |row| row.bg(rgb(palette.hover)))
+        .on_click(cx.listener(move |this, _, window, cx| {
+            this.options = None;
+            this.act(action, &message, window, cx);
+        }))
+        .child(action.glyph().icon().size(px(14.0)))
+        .child(div().flex_1().child(action.label()))
+        .children(key)
+        .into_any_element()
 }
 
 /// An outbox row's state under the message it concerns, with "send again" when it is offered.
@@ -2288,47 +2796,6 @@ fn pending_row(pending: &PendingItem, palette: Palette, cx: &mut Context<ChatVie
                 .child(content),
         )
         .child(note_line(&pending.note, palette, cx))
-        .into_any_element()
-}
-
-/// The actions a message offers, as buttons over its row's top right corner.
-fn actions_bar(item: &MessageItem, palette: Palette, cx: &mut Context<ChatView>) -> AnyElement {
-    let buttons = item.actions().into_iter().map(|action| {
-        let message = item.id.clone();
-        let name = action.name();
-        let id = ElementId::Name(format!("action-{name}-{message}").into());
-        let button = icon_button_with_key(id, action.glyph(), action.label(), action.key_action()).small();
-        let button = if action == MessageAction::Delete {
-            button.custom(
-                ButtonCustomVariant::new(cx)
-                    .foreground(rgb(theme::DANGER).into())
-                    .hover(rgb(palette.hover).into())
-                    .active(rgb(palette.selected).into()),
-            )
-        } else {
-            button
-        };
-        selected_by(
-            format!("action-{name}"),
-            button.on_click(cx.listener(move |this, _, window, cx| this.act(action, &message, window, cx))),
-        )
-    });
-    div()
-        .debug_selector(|| "message-actions".to_owned())
-        .absolute()
-        // inside the row: the row's own hover keeps the bar, so a part of it over the message above would vanish
-        // under the pointer and pass its click to that message
-        .top_0()
-        .right(px(20.0))
-        .flex()
-        .gap_0p5()
-        .p_0p5()
-        .rounded_lg()
-        .border_1()
-        .border_color(rgb(palette.border))
-        .bg(rgb(palette.surface))
-        .shadow_md()
-        .children(buttons)
         .into_any_element()
 }
 
@@ -2660,32 +3127,30 @@ fn event_line(item: &MessageItem, palette: Palette) -> AnyElement {
     centered_line(text, palette).into_any_element()
 }
 
-fn header_line(item: &MessageItem, palette: Palette) -> AnyElement {
-    let time = DateTime::from_timestamp_millis(item.arrival_time)
-        .map(|at| at.with_timezone(&Local).format("%H:%M").to_string())
-        .unwrap_or_default();
-    let name = (!item.own).then(|| {
-        div()
-            .font_weight(gpui::FontWeight::BOLD)
-            .child(item.sender_name.clone())
-    });
-    let avatar = (!item.own).then(|| {
-        div()
-            .debug_selector({
-                let id = item.id.clone();
-                move || format!("avatar-{id}")
-            })
-            .child(item.face.avatar(&item.sender_name, Size::XSmall))
-    });
+/// A message's header, Teams' way: the sender's name (none on the account's own) and its time (on `cycle`'s clock),
+/// both muted, over the bubble's left edge, then "Edited" once edited. The time's test selector is
+/// `message-time-<id> <time>`.
+fn header_line(item: &MessageItem, palette: Palette, cycle: HourCycle) -> AnyElement {
+    let time = clock::message_time(item.arrival_time, &Local::now(), cycle);
+    let id = &item.id;
+    let time = div().debug_selector(|| format!("message-time-{id} {time}")).child(time);
+    let name = (!item.own).then(|| div().child(item.sender_name.clone()));
     div()
+        .h(rems(HEADER_REMS))
         .flex()
-        .gap_2()
+        .gap_3()
         .items_center()
         .text_sm()
-        .children(avatar)
+        .text_color(rgb(palette.muted_foreground))
         .children(name)
-        .child(div().text_xs().text_color(rgb(palette.muted_foreground)).child(time))
+        .child(time)
+        .children(item.edited.then(edited_mark))
         .into_any_element()
+}
+
+/// "Edited", beside a message's time.
+fn edited_mark() -> gpui::Div {
+    div().debug_selector(|| "edited".to_owned()).child("Edited")
 }
 
 /// A message as the trace last told it.
@@ -2721,7 +3186,46 @@ fn trace_kind(item: &MessageItem) -> &'static str {
     }
 }
 
-fn bubble(item: &MessageItem, conversation: &str, highlighted: bool, palette: Palette) -> AnyElement {
+/// Whether someone else's message mentions the account in its own text: Teams marks it beside its bubble.
+fn mentions_me(item: &MessageItem) -> bool {
+    !item.own && matches!(&item.body, Body::Text(text) if text.0.mentions_me())
+}
+
+/// A message's bubble (with its hover bar `bar` over its top, while shown) and, for someone else's, the column right
+/// of it that holds Teams' "@" when it mentions the account.
+fn bubble_line(
+    item: &MessageItem,
+    conversation: &str,
+    highlighted: bool,
+    palette: Palette,
+    bar: Option<AnyElement>,
+) -> gpui::Div {
+    let line = div().w_full().flex().items_start();
+    if item.own {
+        return line
+            .justify_end()
+            .child(bubble(item, conversation, highlighted, palette, bar));
+    }
+    let id = item.id.clone();
+    let mark = mentions_me(item).then(|| {
+        div()
+            .debug_selector(move || format!("mentions-me-{id}"))
+            .text_lg()
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(rgb(palette.mention))
+            .child("@")
+    });
+    line.child(bubble(item, conversation, highlighted, palette, bar))
+        .child(div().w(px(MARK_COLUMN)).flex_none().pt_1().pl_2().children(mark))
+}
+
+fn bubble(
+    item: &MessageItem,
+    conversation: &str,
+    highlighted: bool,
+    palette: Palette,
+    bar: Option<AnyElement>,
+) -> AnyElement {
     let background = match (highlighted, item.own) {
         (true, _) => palette.selection,
         (false, true) => palette.selected,
@@ -2740,12 +3244,22 @@ fn bubble(item: &MessageItem, conversation: &str, highlighted: bool, palette: Pa
         ),
         Body::Event(_) => div().into_any_element(),
     };
-    div()
-        .max_w(relative(0.8))
-        .px_3()
-        .py_1()
-        .rounded_md()
-        .bg(rgb(background))
+    let selector = format!("bubble-{}", item.id);
+    let bubble = div()
+        .debug_selector(move || selector)
+        // the hover bar's anchor
+        .relative()
+        .min_w_0();
+    // a message drawn bare (only an emoticon or a sticker, `Rendered::bare`) has no bubble behind it, as in Teams
+    let bare = matches!(&item.body, Body::Text(text) if text.0.bare);
+    let bubble = if bare {
+        bubble
+    } else {
+        bubble.px(px(BUBBLE_INSET)).py_2().rounded_lg().bg(rgb(background))
+    };
+    // the account's own keep Teams' margin on their left; someone else's reach the mark's column
+    let bubble = if item.own { bubble.max_w(relative(0.8)) } else { bubble };
+    bubble
         .child(content)
         .children(item.unshown.any().then(|| {
             div()
@@ -2759,6 +3273,8 @@ fn bubble(item: &MessageItem, conversation: &str, highlighted: bool, palette: Pa
                 ))
                 .into_any_element()
         }))
+        // last, so it is drawn over the bubble
+        .children(bar)
         .into_any_element()
 }
 
@@ -2793,58 +3309,94 @@ fn muted(text: &'static str, palette: Palette) -> AnyElement {
         .into_any_element()
 }
 
-/// "Edited" and the reactions, if any; a reaction clicked sets the account's own, or takes it back.
+/// The reactions as Teams draws them, over the bubble's bottom edge from its text's inset: a pill per key (its count
+/// once more than one reacted, the account's own ringed in the brand colour; a click sets or takes back the account's
+/// own), then "Add reaction", which opens the reactions on the message. "Edited" stands here when there is no header
+/// to hold it.
 fn footer_line(item: &MessageItem, palette: Palette, cx: &mut Context<ChatView>) -> Option<AnyElement> {
-    if !item.edited && item.reactions.is_empty() {
+    let edited =
+        (item.edited && !item.header).then(|| edited_mark().text_xs().text_color(rgb(palette.muted_foreground)));
+    if edited.is_none() && item.reactions.is_empty() {
         return None;
     }
-    let edited = item.edited.then(|| {
-        div()
-            .debug_selector(|| "edited".to_owned())
-            .text_xs()
-            .text_color(rgb(palette.muted_foreground))
-            .child("Edited")
+    let reactions = item
+        .reactions
+        .iter()
+        .map(|reaction| reaction_pill(item, reaction, palette, cx))
+        .collect::<Vec<_>>();
+    let add = (!item.reactions.is_empty() && item.actions().contains(&MessageAction::React)).then(|| {
+        let message = item.id.clone();
+        pill(ElementId::Name(format!("reactions-add-{}", item.id).into()), palette)
+            .debug_selector(|| "reactions-add".to_owned())
+            .border_color(rgb(palette.border))
+            .tooltip(|window, cx| Tooltip::new("Add reaction").build(window, cx))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.act(MessageAction::React, &message, window, cx);
+                this.open_more(window, cx);
+            }))
+            .child(
+                Glyph::REACT
+                    .icon()
+                    .size(px(CHIP_EMOJI - 2.0))
+                    .text_color(rgb(palette.muted_foreground)),
+            )
     });
-    let reactions = item.reactions.iter().map(|reaction| {
-        let key = reaction.key.clone();
-        let (message, toggled) = (item.id.clone(), reaction.key.clone());
-        let described = SharedString::from(reactions::description(&key).to_owned());
-        let chip = div()
-            .id(ElementId::Name(format!("reaction-{}-{key}", item.id).into()))
-            .debug_selector(move || format!("reaction-{key}"))
-            .flex()
-            .items_center()
-            .gap_1()
-            .h(px(CHIP_EMOJI + 6.0))
-            .px_1p5()
-            .rounded_full()
-            .border_1()
-            .text_xs()
-            .tooltip(move |window, cx| Tooltip::new(described.clone()).build(window, cx))
-            .child(reactions::emoji(&reaction.key, px(CHIP_EMOJI)))
-            .child(reaction.count.to_string());
-        // a chip of a reaction Teams offers sets or takes back the account's own; any other key only shows
-        let chip = if reactions::catalog().offers(&reaction.key) {
-            chip.on_click(cx.listener(move |this, _, _, cx| this.toggle_reaction(&message, &toggled, cx)))
-        } else {
-            chip
-        };
-        if reaction.mine {
-            chip.border_color(rgb(palette.brand)).bg(rgb(palette.selected))
-        } else {
-            chip.border_color(rgb(palette.border))
-        }
-    });
+    let line = div().flex().gap_1().items_center().px(px(BUBBLE_INSET));
+    // over the bubble's bottom edge, drawn after it
+    let line = if item.reactions.is_empty() {
+        line.pt_1()
+    } else {
+        line.mt(px(-REACTIONS_OVERLAP))
+    };
     Some(
-        div()
-            .flex()
-            .gap_1()
-            .items_center()
-            .pt_1()
-            .children(edited)
+        line.children(edited)
             .children(reactions)
+            .children(add)
             .into_any_element(),
     )
+}
+
+/// A reaction's pill.
+fn reaction_pill(
+    item: &MessageItem,
+    reaction: &ReactionCount,
+    palette: Palette,
+    cx: &mut Context<ChatView>,
+) -> gpui::Stateful<gpui::Div> {
+    let key = reaction.key.clone();
+    let (message, toggled) = (item.id.clone(), reaction.key.clone());
+    let described = SharedString::from(reactions::description(&key).to_owned());
+    let chip = pill(ElementId::Name(format!("reaction-{}-{key}", item.id).into()), palette)
+        .debug_selector(move || format!("reaction-{key}"))
+        .tooltip(move |window, cx| Tooltip::new(described.clone()).build(window, cx))
+        .child(reactions::emoji(&reaction.key, px(CHIP_EMOJI)))
+        .children((reaction.count > 1).then(|| reaction.count.to_string()));
+    // a chip of a reaction Teams offers sets or takes back the account's own; any other key only shows
+    let chip = if reactions::catalog().offers(&reaction.key) {
+        chip.on_click(cx.listener(move |this, _, _, cx| this.toggle_reaction(&message, &toggled, cx)))
+    } else {
+        chip
+    };
+    chip.border_color(rgb(if reaction.mine { palette.brand } else { palette.border }))
+}
+
+/// A pill under a message: a reaction's, or "Add reaction".
+fn pill(id: ElementId, palette: Palette) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap_1()
+        .h(px(PILL))
+        .min_w(px(PILL + 8.0))
+        .px_2()
+        .rounded_full()
+        .border_1()
+        .bg(rgb(palette.surface))
+        .text_sm()
+        .cursor_pointer()
+        .hover(move |style| style.bg(rgb(palette.hover)))
 }
 
 impl ChatView {
@@ -2868,18 +3420,23 @@ impl ChatView {
     }
 }
 
-impl Render for ChatView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let palette = theme::current(cx);
-        self.drawn.clear();
-        let more = self.more_overlay();
-        let rows = list(
-            self.list.clone(),
-            cx.processor(|this: &mut Self, index: usize, _window, cx| this.render_item(index, cx)),
-        )
-        .size_full()
-        .pb_3();
-        let pill = (self.scrolled_up() && !self.items.is_empty()).then(|| {
+/// The hover bar's keys on the message list: the quick reactions (1–4) and every reaction (5) once react opened
+/// them, and copy text on the selected message.
+fn hover_bar_keys(list: gpui::Div, cx: &mut Context<ChatView>) -> gpui::Div {
+    list.on_action(cx.listener(|this, _: &PickFirst, _, cx| this.pick(0, cx)))
+        .on_action(cx.listener(|this, _: &PickSecond, _, cx| this.pick(1, cx)))
+        .on_action(cx.listener(|this, _: &PickThird, _, cx| this.pick(2, cx)))
+        .on_action(cx.listener(|this, _: &PickFourth, _, cx| this.pick(3, cx)))
+        .on_action(cx.listener(|this, _: &PickMore, window, cx| this.open_more(window, cx)))
+        .on_action(cx.listener(|this, _: &CopySelected, window, cx| {
+            this.act_on_selected(MessageAction::Copy, window, cx);
+        }))
+}
+
+impl ChatView {
+    /// "Jump to newest" over the list's foot, while it is scrolled up.
+    fn jump_pill(&self, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        (self.scrolled_up() && !self.items.is_empty()).then(|| {
             div()
                 .debug_selector(|| "jump-to-newest".to_owned())
                 .absolute()
@@ -2897,8 +3454,12 @@ impl Render for ChatView {
                         .small()
                         .on_click(cx.listener(|this, _, _, cx| this.jump_to_newest(cx))),
                 )
-        });
-        let typing = self.typing_text(cx).map(|text| {
+        })
+    }
+
+    /// Who is typing, under the messages, while anyone is.
+    fn typing_line(&self, palette: Palette, cx: &App) -> Option<gpui::Div> {
+        self.typing_text(cx).map(|text| {
             div()
                 .debug_selector(|| "typing".to_owned())
                 .px_4()
@@ -2907,8 +3468,25 @@ impl Render for ChatView {
                 .italic()
                 .text_color(rgb(palette.muted_foreground))
                 .child(text)
-        });
-        let messages = div()
+        })
+    }
+}
+
+impl Render for ChatView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = theme::current(cx);
+        self.drawn.clear();
+        let more = self.more_overlay();
+        let options = self.options_overlay(palette, window, cx);
+        let rows = list(
+            self.list.clone(),
+            cx.processor(|this: &mut Self, index: usize, _window, cx| this.render_item(index, cx)),
+        )
+        .size_full()
+        .pb_3();
+        let pill = self.jump_pill(cx);
+        let typing = self.typing_line(palette, cx);
+        let messages = hover_bar_keys(div(), cx)
             .key_context(CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &SelectPrevious, _, cx| this.step_selection(-1, cx)))
@@ -2927,11 +3505,6 @@ impl Render for ChatView {
             }))
             .on_action(cx.listener(|this, _: &ClearSelection, window, cx| this.escape(window, cx)))
             .on_action(cx.listener(|this, _: &ConfirmDelete, _, cx| this.confirm_delete(cx)))
-            .on_action(cx.listener(|this, _: &PickLike, _, cx| this.pick(0, cx)))
-            .on_action(cx.listener(|this, _: &PickHeart, _, cx| this.pick(1, cx)))
-            .on_action(cx.listener(|this, _: &PickLaugh, _, cx| this.pick(2, cx)))
-            .on_action(cx.listener(|this, _: &PickSurprised, _, cx| this.pick(3, cx)))
-            .on_action(cx.listener(|this, _: &PickMore, window, cx| this.open_more(window, cx)))
             .debug_selector(|| "chat-messages".to_owned())
             .relative()
             .flex_1()
@@ -2951,5 +3524,6 @@ impl Render for ChatView {
             .children(self.confirmation(palette, cx))
             .child(self.compose.clone())
             .children(more)
+            .children(options)
     }
 }

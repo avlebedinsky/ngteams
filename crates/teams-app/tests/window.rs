@@ -7,8 +7,8 @@
 //!   `test-support` mock origins, a test roster and log), handed to the app as `teams-app` hands its own
 //!   ([`teams_app::app::launch`]), its settings in the test's own directory. The parent waits for the window, checks
 //!   its rem size is the theme's font size, reads the view trace (the window opened, the push channel connected, the
-//!   chat list filled from the store once the catch-up brought a's chats: the chats, not the channel or the
-//!   notifications stream), screenshots the window (the rail, the list and the conversation pane drawn; the shot is
+//!   chat list filled from the store once the catch-up brought a's chats: the a–b chat, not the channel or the
+//!   notifications stream, nor the chats the mock calls empty, as Teams leaves them out), screenshots the window (the rail, the list and the conversation pane drawn; the shot is
 //!   kept under `target/ui-shots/`), drives the chat switcher with the sandbox's virtual keyboard (Ctrl+K opens it,
 //!   Escape closes it, Ctrl+K and Enter open the chat at its top), checks the chat view shows that chat's messages
 //!   from the store (the a–b chat's with their kinds: its event, a deleted and an edited message), and screenshots it
@@ -299,26 +299,27 @@ fn strings(line: &serde_json::Value, key: &str) -> Vec<String> {
 }
 
 /// The chat list, once the catch-up filled it from the mock: a's chats with their kinds, never the team's channel or
-/// a's notifications stream. Its chats in order.
+/// a's notifications stream, nor the a–c chat and the group chat, which nobody wrote in yet: the mock calls them empty
+/// (`isemptyconversation` `True`, as the service does), and Teams lists no such chat. Its chats in order.
 fn the_chat_list_shows_a_s_chats(trace: &mut TraceReader) -> SandboxResult<Vec<String>> {
     let line = trace.wait_where("chat-list shown with a's chats", |line| {
         let ids = strings(line, "conversations");
-        line["view"] == "chat-list"
-            && [AB_CHAT, AC_CHAT, ABC_CHAT]
-                .iter()
-                .all(|chat| ids.iter().any(|id| id == chat))
+        line["view"] == "chat-list" && ids.iter().any(|id| id == AB_CHAT)
     })?;
     let ids = strings(&line, "conversations");
     let kinds = strings(&line, "kinds");
     if ids.iter().any(|id| id == CHANNEL || id == NOTIFICATIONS) {
         return Err(format!("the list shows a channel or an own stream: {ids:?}").into());
     }
+    if ids.iter().any(|id| id == AC_CHAT || id == ABC_CHAT) {
+        return Err(format!("the list shows a chat the service calls empty: {ids:?}").into());
+    }
     let kind_of = |chat: &str| {
         ids.iter()
             .position(|id| id == chat)
             .and_then(|at| kinds.get(at).cloned())
     };
-    if kind_of(AB_CHAT).as_deref() != Some("one-to-one") || kind_of(ABC_CHAT).as_deref() != Some("group") {
+    if kind_of(AB_CHAT).as_deref() != Some("one-to-one") {
         return Err(format!("the chats' kinds: {ids:?} {kinds:?}").into());
     }
     Ok(ids)

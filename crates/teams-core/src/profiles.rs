@@ -3,8 +3,8 @@
 //!
 //! - **Where a name comes from**, first that gives one: Microsoft Graph's user record (`users/<object id>`, a read,
 //!   [`GraphUser`]); the middle tier's profile lookup (`users/fetchShortProfile`, a read sent as a `POST`,
-//!   [`ShortProfileLookup`], sent by [`Client::lookup`]: whoever it names through a lab fence, through the personal
-//!   build's only someone of the account's chats), for a name Graph doesn't give; the name the person's newest stored message carried (`imdisplayname`);
+//!   [`ShortProfileLookup`], sent by [`Client::lookup`], whoever it names), for a name Graph doesn't give; the name
+//!   the person's newest stored message carried (`imdisplayname`);
 //!   a name the binary knows already ([`Parts::known_names`](crate::Parts::known_names): a lab binary's lab accounts,
 //!   from `lab.toml`). Else none, and a view shows the MRI. A **picture** is Graph's 96×96 one ([`GraphPicture`]);
 //!   without one a view draws initials.

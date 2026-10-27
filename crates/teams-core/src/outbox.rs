@@ -454,6 +454,14 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         &self.me
     }
 
+    /// Whether the outbox sends nothing (its transport is read-only: the personal build's `teams --read-only`): every
+    /// write it is asked for, a row's, a transient's or a call's, is refused before the fence is asked and logged to
+    /// `fence.log` as `refused_read_only`; a row is failed, a transient dropped, a call write not sent.
+    #[must_use]
+    pub fn is_read_only(&self) -> bool {
+        self.transport.is_read_only()
+    }
+
     /// The fence every attempt asks.
     #[must_use]
     pub fn fence(&self) -> &Arc<Fence> {
@@ -819,6 +827,12 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
     }
 
     async fn deliver<R: Mutating + Send>(&self, request: R) -> Tried {
+        // read-only (the personal build's `teams --read-only`): refused before the fence is asked, logged by the
+        // transport as `refused_read_only`; nothing is sent, and nothing tries it again
+        if let Some(refused) = self.transport.read_only_refusal(&request) {
+            log::info!("read-only: {} refused", request.target().kind());
+            return Tried::NotSent(refused.to_string());
+        }
         let permit = match self.fence.check(request.target(), &*self.membership).await {
             Ok(permit) => {
                 log::info!("fence allowed {}", request.target());

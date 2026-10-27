@@ -7,7 +7,8 @@
 //! method (`POST`), the path, every query parameter and its value, the headers that change what it does, and the
 //! body schema (a non-empty JSON list naming MRIs). It names the MRIs it asks about ([`PostRead::names`]), and it goes
 //! out only inside an [`AuthorizedPostRead`], next to the [`PostReadPermit`] `Fence::check_post_read` gave for exactly
-//! that entry and that ordered list (in a lab build: every one a lab account, none twice).
+//! that entry and that ordered list (through a lab fence: every one a lab account, none twice; through the personal
+//! build's, whoever it names).
 //!
 //! The transport then reads the request it is about to send back against the entry's captured shape (the URL's
 //! path and query, every header but the token, the body as bytes) and sends nothing that differs in any way, nor one
@@ -23,6 +24,9 @@
 //!   sent (`isMailAddress=false&…`).
 //! - [`PresenceRead`]: UPS's `v1/presence/getpresence/` by MRI: its answers in the first run that let it through each
 //!   named only the accounts asked for.
+//! - [`PresenceSubscription`]: UPS's `v1/pubsub/subscriptions/<endpoint>`, the account's own Trouter endpoint
+//!   subscribed to the presence of the MRIs it names (or no longer): it reaches nobody, its answer names only the MRIs
+//!   asked for, and the changes then come to the account's own socket.
 
 use std::fmt;
 
@@ -31,6 +35,7 @@ use serde_json::Value;
 use teams_fence::{Mri, PostReadPermit};
 
 use crate::endpoint::{Endpoint, Method, Service};
+use crate::own::{RegisteredEndpoint, is_guid, is_push_url};
 use crate::request::Request;
 
 /// A reviewed read by `POST` (see the module docs). Sealed: no other crate can implement it.
@@ -75,6 +80,20 @@ mod sealed {
         }
     }
 
+    impl Sealed for super::PresenceSubscription {
+        fn shape(&self) -> &'static Shape {
+            &super::PRESENCE_SUBSCRIPTION
+        }
+
+        fn wire(&self) -> PostReadWire {
+            PostReadWire {
+                endpoint: self.wire_endpoint(),
+                headers: Vec::new(),
+                body: self.wire_body(),
+            }
+        }
+    }
+
     #[cfg(feature = "test-support")]
     impl Sealed for super::ProbePostRead {
         fn shape(&self) -> &'static Shape {
@@ -95,13 +114,15 @@ mod sealed {
     }
 }
 
-/// An entry's shape as the capture showed it: the service, the path under its base, the query (each pair once,
-/// nothing else, in any order), the headers it is sent with besides the token (each once, exactly these values, all
-/// of them) and its body's schema. Only this crate makes or reads one.
+/// An entry's shape as the capture showed it: the service, the path under its base (and whether the account's own
+/// endpoint ends it), the query (each pair once, nothing else, in any order), the headers it is sent with besides the
+/// token (each once, exactly these values, all of them) and its body's schema. Only this crate makes or reads one.
 #[derive(Debug)]
 pub struct Shape {
     service: Service,
     path: &'static [&'static str],
+    /// The path ends with one more segment, the account's Trouter endpoint (its `epid`, a lowercase GUID).
+    endpoint: bool,
     query: &'static [(&'static str, &'static str)],
     headers: &'static [(&'static str, &'static str)],
     body: Body,
@@ -115,14 +136,20 @@ enum Body {
     /// A non-empty JSON list of `{"mri": "8:orgid:…"}` objects, the key exactly so and nothing else beside it (the
     /// presence read; the web client's own `"source": "ups"` beside the account's own MRI isn't sent).
     MriObjects,
+    /// A presence subscription: exactly `{"trouterUri", "shouldPurgePreviousSubscriptions", "subscriptionsToAdd",
+    /// "subscriptionsToRemove"}`, the URI the account's own Trouter endpoint's presence path (a push URL as the
+    /// registration takes one, then `unifiedPresenceService`), the flag a boolean, each list of `{"mri": …, "source":
+    /// "ups"}` objects, both keys exactly so; the names it gives are the additions, then the removals.
+    Subscription,
 }
 
 impl Body {
-    /// The body naming `names`, in that order.
+    /// The list naming `names`, in that order, in the schema's form of an item (a subscription's: one list of it).
     fn of(self, names: &[Mri]) -> Value {
         let item = |mri: &Mri| match self {
             Self::Mris => Value::from(mri.as_str()),
             Self::MriObjects => serde_json::json!({ "mri": mri.as_str() }),
+            Self::Subscription => serde_json::json!({ "mri": mri.as_str(), "source": UPS_SOURCE }),
         };
         Value::Array(names.iter().map(item).collect())
     }
@@ -137,9 +164,46 @@ impl Body {
                 .into_iter()
                 .map(|object| object.mri)
                 .collect(),
+            Self::Subscription => serde_json::from_slice::<SubscriptionBody>(body).ok()?.names()?,
         };
         (!names.is_empty()).then(|| names.into_iter().map(Mri::new).collect())
     }
+}
+
+/// A [`Body::Subscription`], read strictly: these four keys and no other.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct SubscriptionBody {
+    trouter_uri: String,
+    /// Read for its type only: either value is the captured shape.
+    #[serde(rename = "shouldPurgePreviousSubscriptions")]
+    _purge: bool,
+    subscriptions_to_add: Vec<SourcedMri>,
+    subscriptions_to_remove: Vec<SourcedMri>,
+}
+
+impl SubscriptionBody {
+    /// The MRIs it names, the additions first, when its URI is the account's Trouter endpoint's presence path and
+    /// every item's `source` UPS's.
+    fn names(self) -> Option<Vec<String>> {
+        let push_url = self.trouter_uri.strip_suffix(PRESENCE_PUSH_PATH)?;
+        let items = self
+            .subscriptions_to_add
+            .into_iter()
+            .chain(self.subscriptions_to_remove);
+        let names: Option<Vec<String>> = items
+            .map(|item| (item.source == UPS_SOURCE).then_some(item.mri))
+            .collect();
+        is_push_url(push_url).then_some(names).flatten()
+    }
+}
+
+/// One item of a subscription's lists, read strictly: `mri` and `source`, nothing else.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SourcedMri {
+    mri: String,
+    source: String,
 }
 
 /// One item of a [`Body::MriObjects`] list, read strictly: `mri` and no other key.
@@ -192,10 +256,11 @@ impl Shape {
         self.service
     }
 
-    /// The MRIs a request names, when the request is exactly this shape: `path` is the shape's, `query` its pairs
-    /// (each once, nothing else, in any order), `headers` (by lower-cased name, the token left out) its headers (each
-    /// once, exactly their values, all of them), and `body` of the shape's schema, naming someone, and nothing else.
-    /// `None` for anything else: the request is unknown.
+    /// The MRIs a request names, when the request is exactly this shape: `path` is the shape's (then, when the shape
+    /// says so, one lowercase GUID, the account's endpoint), `query` its pairs (each once, nothing else, in any order),
+    /// `headers` (by lower-cased name, the token left out) its headers (each once, exactly their values, all of them),
+    /// and `body` of the shape's schema, naming someone, and nothing else. `None` for anything else: the request is
+    /// unknown.
     pub(crate) fn read_back(
         &self,
         path: &[String],
@@ -203,6 +268,15 @@ impl Shape {
         headers: &[(String, String)],
         body: &[u8],
     ) -> Option<Vec<Mri>> {
+        let path = if self.endpoint {
+            let (endpoint, rest) = path.split_last()?;
+            if !is_guid(endpoint) {
+                return None;
+            }
+            rest
+        } else {
+            path
+        };
         let same_path = path.iter().map(String::as_str).eq(self.path.iter().copied());
         (same_path && same_pairs(query, self.query) && same_pairs(headers, self.headers))
             .then(|| self.body.read(body))
@@ -310,6 +384,7 @@ const LOOKUP_HEADERS: &[(&str, &str)] = &[
 static SHORT_PROFILE: Shape = Shape {
     service: Service::MiddleTier,
     path: &["beta", "users", "fetchShortProfile"],
+    endpoint: false,
     query: LOOKUP_QUERY,
     headers: LOOKUP_HEADERS,
     body: Body::Mris,
@@ -336,6 +411,7 @@ const PRESENCE_HEADERS: &[(&str, &str)] = &[
 static PRESENCE: Shape = Shape {
     service: Service::Presence,
     path: PRESENCE_PATH,
+    endpoint: false,
     query: &[],
     headers: PRESENCE_HEADERS,
     body: Body::MriObjects,
@@ -595,6 +671,204 @@ impl From<RawUserPresence> for UserPresence {
             activity,
         }
     }
+}
+
+/// The path under an endpoint's push URL that UPS delivers presence changes at: the subscription's `trouterUri` is the
+/// push URL with it.
+pub const PRESENCE_PUSH_PATH: &str = "unifiedPresenceService";
+
+/// The `source` every captured subscription item named.
+const UPS_SOURCE: &str = "ups";
+
+/// The status UPS gave every subscription it took in the captures (its web client's "success").
+const SUBSCRIBED: i64 = 20_200;
+
+/// `v1/pubsub/subscriptions/<endpoint>` (see [`PresenceSubscription`]): the presence read's headers, as the presence
+/// read sends them (no `x-ms-endpoint-id`, which every captured subscription carried with the path's endpoint again,
+/// no caller, session or correlation ids, no cookie), and no trailing slash, as no captured one had.
+static PRESENCE_SUBSCRIPTION: Shape = Shape {
+    service: Service::Presence,
+    path: &["v1", "pubsub", "subscriptions"],
+    endpoint: true,
+    query: &[],
+    headers: PRESENCE_HEADERS,
+    body: Body::Subscription,
+};
+
+/// `POST <presence base>/v1/pubsub/subscriptions/<endpoint>` with `{"trouterUri": "<push URL>unifiedPresenceService",
+/// "shouldPurgePreviousSubscriptions": …, "subscriptionsToAdd": [{"mri": …, "source": "ups"}, …],
+/// "subscriptionsToRemove": […]}`: the account's own Trouter endpoint (the registration's `epid`) subscribed to the
+/// presence of the MRIs it adds, and no longer to those it removes; with the purge, its earlier subscriptions dropped
+/// first. UPS then delivers each change of theirs (a snapshot first) to the socket at that push URL. Reviewed from the
+/// web client's 755 subscriptions in the captures of 2026-10-20 to 2026-10-26 (each answered with a status per MRI
+/// asked and no other). It names the MRIs it adds or removes ([`PostRead::names`]: the additions, then the removals),
+/// never a bot's or a service's `28:` id nor a `48:` stream's. Its answer is read with
+/// [`PresenceSubscription::read_answer`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PresenceSubscription {
+    endpoint: String,
+    push_url: String,
+    purge: bool,
+    /// The additions, then the removals.
+    names: Vec<Mri>,
+    added: usize,
+}
+
+impl PresenceSubscription {
+    /// The subscription of `endpoint` (a registration of this run) at `push_url` (its socket's push URL, as the
+    /// registration takes one: `https://<name>.trouter.teams.microsoft.com[:port]/v4/f/<id>/`), adding `add` and
+    /// removing `remove`, its earlier subscriptions dropped first when `purge`. `None` when the push URL isn't one, when
+    /// it names nobody or someone twice, or names a `28:` or `48:` id (no presence to subscribe to). Whether it may go
+    /// out is the fence's decision, as for every entry.
+    #[must_use]
+    pub fn new(
+        endpoint: &RegisteredEndpoint,
+        push_url: &str,
+        purge: bool,
+        add: impl IntoIterator<Item = Mri>,
+        remove: impl IntoIterator<Item = Mri>,
+    ) -> Option<Self> {
+        let mut names: Vec<Mri> = add.into_iter().collect();
+        let added = names.len();
+        names.extend(remove);
+        let unique = names.iter().collect::<std::collections::BTreeSet<_>>().len() == names.len();
+        let has_presence = names
+            .iter()
+            .all(|mri| !mri.as_str().starts_with("28:") && !mri.as_str().starts_with("48:"));
+        let shaped = is_guid(endpoint.id()) && is_push_url(push_url);
+        (!names.is_empty() && unique && has_presence && shaped).then(|| Self {
+            endpoint: endpoint.id().to_owned(),
+            push_url: push_url.to_owned(),
+            purge,
+            names,
+            added,
+        })
+    }
+
+    /// The MRIs it subscribes to.
+    #[must_use]
+    pub fn added(&self) -> &[Mri] {
+        &self.names[..self.added]
+    }
+
+    /// The MRIs it no longer subscribes to.
+    #[must_use]
+    pub fn removed(&self) -> &[Mri] {
+        &self.names[self.added..]
+    }
+
+    /// What UPS made of each MRI asked, from the answer `body`: one [`SubscriptionStatus`] per item, `taken` only for
+    /// the captured success (`20200`); any other status (the web client's polling only, too many subscribers or
+    /// subscriptions, a failed snapshot, an error, a status of a form no capture showed) is not taken, and someone
+    /// asked about whom the answer says nothing isn't either.
+    ///
+    /// # Errors
+    /// [`AnswerError::Malformed`] unless the body is `{"addStatuses": [...], "removeStatuses": [...]}` (both keys, as
+    /// every captured answer has them) with an `mri` in each item; [`AnswerError::Unasked`] when an item is of an MRI
+    /// the subscription didn't add (or, among the removals, remove).
+    pub fn read_answer(&self, body: &[u8]) -> Result<Vec<SubscriptionStatus>, AnswerError> {
+        let answer: RawSubscriptionAnswer = serde_json::from_slice(body).map_err(|_| AnswerError::Malformed)?;
+        let unasked = answer
+            .add_statuses
+            .iter()
+            .filter(|item| !self.added().contains(&item.mri))
+            .chain(
+                answer
+                    .remove_statuses
+                    .iter()
+                    .filter(|item| !self.removed().contains(&item.mri)),
+            )
+            .count();
+        if unasked > 0 {
+            return Err(AnswerError::Unasked { count: unasked });
+        }
+        let status = |removed: bool| {
+            move |item: RawSubscriptionStatus| SubscriptionStatus {
+                taken: item.status.as_ref().and_then(Value::as_i64) == Some(SUBSCRIBED),
+                mri: item.mri,
+                removed,
+            }
+        };
+        Ok(answer
+            .add_statuses
+            .into_iter()
+            .map(status(false))
+            .chain(answer.remove_statuses.into_iter().map(status(true)))
+            .collect())
+    }
+
+    fn wire_endpoint(&self) -> Endpoint {
+        Endpoint::new(
+            PRESENCE_SUBSCRIPTION
+                .path
+                .iter()
+                .copied()
+                .chain([self.endpoint.as_str()]),
+        )
+    }
+
+    fn wire_body(&self) -> Value {
+        serde_json::json!({
+            "trouterUri": format!("{}{PRESENCE_PUSH_PATH}", self.push_url),
+            "shouldPurgePreviousSubscriptions": self.purge,
+            "subscriptionsToAdd": Body::Subscription.of(self.added()),
+            "subscriptionsToRemove": Body::Subscription.of(self.removed()),
+        })
+    }
+}
+
+impl Request for PresenceSubscription {
+    fn service(&self) -> Service {
+        PRESENCE_SUBSCRIPTION.service
+    }
+
+    fn method(&self) -> Method {
+        Method::Post
+    }
+
+    fn endpoint(&self) -> Endpoint {
+        self.wire_endpoint()
+    }
+
+    fn body(&self) -> Option<Value> {
+        Some(self.wire_body())
+    }
+}
+
+impl PostRead for PresenceSubscription {
+    const KIND: &'static str = "presence_subscription";
+
+    fn names(&self) -> &[Mri] {
+        &self.names
+    }
+}
+
+/// UPS's answer to a subscription, as captured: `{"addStatuses": [{"mri", "source", "status"}, …],
+/// "removeStatuses": […]}`.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawSubscriptionAnswer {
+    add_statuses: Vec<RawSubscriptionStatus>,
+    remove_statuses: Vec<RawSubscriptionStatus>,
+}
+
+#[derive(Deserialize)]
+struct RawSubscriptionStatus {
+    #[serde(deserialize_with = "mri")]
+    mri: Mri,
+    /// A number in every captured answer; another form is no success.
+    #[serde(default)]
+    status: Option<Value>,
+}
+
+/// What UPS made of one MRI a subscription named.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubscriptionStatus {
+    pub mri: Mri,
+    /// Named among the removals.
+    pub removed: bool,
+    /// UPS took it: its changes now come to the endpoint (an addition), or no longer (a removal).
+    pub taken: bool,
 }
 
 /// A profile lookup or a presence read with something added that its entry doesn't name (a query pair, a header,

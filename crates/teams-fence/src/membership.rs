@@ -465,22 +465,6 @@ impl LiveMembershipSource {
             .unwrap_or(Membership::Partial(PartialReason::FetchFailed(FetchFailure::Timeout)))
     }
 
-    /// The personal fence's read of the chat `id` (`personal::PersonalMembershipSource`): its thread, read once within
-    /// this source's deadline (the credential, a renewal, the read and its body), judged by [`parse_listing`].
-    #[cfg(feature = "personal")]
-    pub(crate) async fn listing(&self, id: &str) -> Membership {
-        let read = async {
-            match self.read_renewing(id, ThreadRead::Thread).await {
-                Ok(body) => serde_json::from_slice::<Value>(&body)
-                    .map_or(Membership::Partial(MALFORMED), |thread| parse_listing(id, &thread)),
-                Err(reason) => Membership::Partial(reason),
-            }
-        };
-        tokio::time::timeout(self.deadline, read)
-            .await
-            .unwrap_or(Membership::Partial(PartialReason::FetchFailed(FetchFailure::Timeout)))
-    }
-
     /// The thread `id`'s `read` with the credential this source has now; when the service refuses it, once more with
     /// the renewed credential its source gives, if any. No credential is [`PartialReason::NoCredential`], nothing sent.
     async fn read_renewing(&self, id: &str, read: ThreadRead) -> Result<Vec<u8>, PartialReason> {
@@ -817,79 +801,6 @@ fn member(entry: &Value) -> Option<Mri> {
         .or_else(|| id.strip_prefix("28:"))
         .is_some_and(is_guid);
     (shown && known).then(|| Mri::new(id))
-}
-
-/// Reads a chat's thread (`GET v1/threads/<id>?view=msnp24Equivalent`) as the personal fence's listing of its members
-/// (`docs/personal-build.md`, Choices A and B): [`Membership::Listed`] with the listed members only when all of this
-/// holds, in the shape the reads showed (`tests/fixtures/chatsvc/thread-group.json`):
-/// - no pagination key (as [`parse_thread`] reads one) at any depth → else [`PartialReason::Paginated`];
-/// - an object whose `id` is `id` and which has a `members` array → else malformed;
-/// - any member count (as [`parse_thread`] reads one) equal to the members listed → else [`PartialReason::Truncated`];
-/// - every member an object with a string `id` that is an MRI in a form the reads showed (`8:orgid:<guid>` or
-///   `28:<guid>`) → else [`PartialReason::UnknownForm`]; none of them `hidden` (`false` or absent) and nobody listed
-///   twice, case folded → else malformed;
-/// - a group chat's (`19:…@thread.v2`) `properties.threadType` is `chat` → else [`PartialReason::UnknownForm`] (a
-///   meeting's, a channel's or none); a 1:1 chat's, when it has one, too, and its members are exactly the two its id
-///   names ([`one_to_one_pair`]) → else malformed.
-///
-/// Whether the account is among them is the fence's to judge.
-#[must_use]
-pub fn parse_listing(id: &str, thread: &Value) -> Membership {
-    match judge_listing(id, thread) {
-        Ok(members) => Membership::Listed(members),
-        Err(reason) => Membership::Partial(reason),
-    }
-}
-
-fn judge_listing(id: &str, thread: &Value) -> Result<Vec<Mri>, PartialReason> {
-    if has_page_marker(thread) {
-        return Err(PartialReason::Paginated);
-    }
-    let object = thread.as_object().ok_or(MALFORMED)?;
-    if object.get("id").and_then(Value::as_str) != Some(id) {
-        return Err(MALFORMED);
-    }
-    let listed = object.get("members").and_then(Value::as_array).ok_or(MALFORMED)?;
-    if !counts_match(object, listed.len()) {
-        return Err(PartialReason::Truncated);
-    }
-    let thread_type = object
-        .get("properties")
-        .and_then(Value::as_object)
-        .and_then(|properties| properties.get("threadType"));
-    let pair = one_to_one_pair(id);
-    match (thread_type, &pair) {
-        (Some(Value::String(kind)), _) if kind == "chat" => {}
-        (None, Some(_)) => {}
-        _ => return Err(PartialReason::UnknownForm),
-    }
-    let mut members = Vec::with_capacity(listed.len());
-    for entry in listed {
-        let id = entry.get("id").and_then(Value::as_str).ok_or(MALFORMED)?;
-        let known = id
-            .strip_prefix("8:orgid:")
-            .or_else(|| id.strip_prefix("28:"))
-            .is_some_and(is_guid);
-        if !known {
-            return Err(PartialReason::UnknownForm);
-        }
-        if entry.get("hidden").is_some_and(|hidden| *hidden != Value::Bool(false)) {
-            return Err(MALFORMED);
-        }
-        members.push(Mri::new(id));
-    }
-    let mut folded: Vec<String> = members.iter().map(|mri| mri.as_str().to_ascii_lowercase()).collect();
-    folded.sort_unstable();
-    folded.dedup();
-    if folded.len() != members.len() {
-        return Err(MALFORMED);
-    }
-    if let Some(pair) = pair
-        && !same_members(&members, &pair)
-    {
-        return Err(MALFORMED);
-    }
-    Ok(members)
 }
 
 /// Whether any object key at any depth of `value` looks like pagination ([`is_page_marker`]).

@@ -2,23 +2,30 @@
 //! or opened, the window included.
 
 use std::cell::Cell;
+use std::os::fd::RawFd;
 use std::os::unix::process::CommandExt as _;
+use std::path::Path;
 use std::process::{Command, ExitCode};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use clap::Parser as _;
 use gpui::{App, AppContext as _, AsyncApp, Entity, WindowingModes};
 use teams::accounts::{self, Runner, Started};
 use teams::app::{self, Launch, SignInAgain};
 use teams::calling::CallDevices;
-use teams::cli::Cli;
+use teams::cli::{Cli, Command as Subcommand, ReadOnlyMode};
+use teams::descriptors::{adopt_socket, adopt_trace};
 use teams::forget::Forgot;
 use teams::setup::Setup;
-use teams_fence::CallFloor;
-use teams_fence::personal::PersonalAccount;
-use teams_ui::SettingsFile;
+use teams::{KEYRING_APPLICATION, read_only, snapshot};
+use teams_auth::secrets::LazyKeyring;
+use teams_fence::lab::LabLocations;
+use teams_fence::personal::{PersonalAccount, PersonalPaths};
+use teams_fence::{CallFloor, Fence};
 use teams_ui::account_prompt::{self, AccountPrompt, AccountPromptEvent};
 use teams_ui::window::PERSONAL_APP_ID;
+use teams_ui::{SettingsFile, ViewTrace};
 
 /// How the app ended.
 enum Outcome {
@@ -33,7 +40,17 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     let cli = Cli::parse();
-    match run(&cli) {
+    match &cli.command {
+        Some(Subcommand::Secrets { account, fd }) => return broker(account, *fd),
+        Some(Subcommand::Snapshot { to }) => return take_snapshot(to),
+        None => {}
+    }
+    let outcome = match cli.read_only_mode(std::env::var_os(read_only::ENV).as_deref()) {
+        Ok(Some(mode)) => run_read_only(&mode),
+        Ok(None) => run(&cli),
+        Err(error) => Err(error),
+    };
+    match outcome {
         Ok(Outcome::Quit) => ExitCode::SUCCESS,
         Ok(Outcome::Restart) => {
             let error = Command::new(std::env::current_exe().unwrap_or_else(|_| "teams".into()))
@@ -99,6 +116,8 @@ fn run(cli: &Cli) -> Result<Outcome, String> {
                 sign_in_again(again_setup.clone(), account.clone(), Rc::clone(&again_restart))
             }),
             runner,
+            read_only: false,
+            trace: Arc::new(ViewTrace::off()),
         };
         if let Err(failure) = app::launch(cx, launch) {
             eprintln!("teams: the window can't be opened: {}", failure.error);
@@ -115,6 +134,126 @@ fn run(cli: &Cli) -> Result<Outcome, String> {
         return Err("the window couldn't be opened".to_owned());
     }
     Ok(if restart.get() { Outcome::Restart } else { Outcome::Quit })
+}
+
+/// `teams secrets --account <UPN> --fd <n>`: the read-only mode's credential broker (`teams::read_only`), its socket
+/// taken over first, before anything opens a descriptor of its own; `get` only, of an account `accounts.toml` holds.
+fn broker(upn: &str, fd: RawFd) -> ExitCode {
+    let socket = match adopt_socket(fd) {
+        Ok(socket) => socket,
+        Err(error) => return failed("secrets", &error),
+    };
+    let account = PersonalPaths::from_env()
+        .map_err(|error| error.to_string())
+        .and_then(|paths| PersonalAccount::find(&paths, upn).map_err(|error| error.to_string()));
+    let lab = LabLocations::from_env().map_err(|error| error.to_string());
+    let account = match (account, lab) {
+        (Ok(Some(account)), Ok(lab)) if account.is_signed_in() => match account.check_not_lab(&lab) {
+            Ok(()) => account,
+            Err(error) => return failed("secrets", &error),
+        },
+        (Ok(_), Ok(_)) => return failed("secrets", &format!("{upn} isn't one of your signed-in accounts")),
+        (Err(error), _) | (_, Err(error)) => return failed("secrets", &error),
+    };
+    let scope = read_only::broker_scope(&account.upn);
+    let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+        Ok(runtime) => runtime,
+        Err(error) => return failed("secrets", &format!("can't start the async runtime: {error}")),
+    };
+    let store = LazyKeyring::new(KEYRING_APPLICATION);
+    match runtime.block_on(read_only::serve_broker(socket, &scope, &store, &mut std::io::stderr())) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => failed("secrets", &format!("{error}; the socket is closed")),
+    }
+}
+
+/// `teams snapshot --to <dir>`: the snapshot of the user's files the read-only mode runs on (`teams::snapshot`).
+fn take_snapshot(to: &Path) -> ExitCode {
+    let made = PersonalPaths::from_env()
+        .map_err(|error| error.to_string())
+        .and_then(|mine| snapshot::snapshot(&mine, to).map_err(|error| error.to_string()));
+    match made {
+        Ok(paths) => {
+            println!("snapshot: {}", to.display());
+            println!("config: {}", paths.config_dir().display());
+            println!("data: {}", paths.data_dir().display());
+            ExitCode::SUCCESS
+        }
+        Err(error) => failed("snapshot", &error),
+    }
+}
+
+fn failed(what: &str, error: &dyn std::fmt::Display) -> ExitCode {
+    eprintln!("teams {what}: {error}");
+    ExitCode::FAILURE
+}
+
+/// The read-only mode (`teams::read_only`): its descriptors taken over first, then the sandbox check, the snapshot
+/// (apart from the user's own files), the account, its engine (read-only, no push channel, no calls) over the broker's
+/// store, and the window; nothing adds, removes or signs in an account.
+fn run_read_only(mode: &ReadOnlyMode) -> Result<Outcome, String> {
+    let socket = adopt_socket(mode.secrets_fd).map_err(|error| error.to_string())?;
+    let trace = match mode.trace_fd {
+        Some(fd) => ViewTrace::new(adopt_trace(fd).map_err(|error| error.to_string())?),
+        None => ViewTrace::off(),
+    };
+    read_only::window_allowed_here()?;
+    let mine = PersonalPaths::from_env().map_err(|error| error.to_string())?;
+    let paths = read_only::snapshot_paths(&mode.data, &mine)?;
+    let lab = LabLocations::from_env().map_err(|error| error.to_string())?;
+    let setup = Setup::new(paths, lab).map_err(|error| error.to_string())?;
+    let account = setup
+        .signed_in_accounts()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .find(|account| account.upn.eq_ignore_ascii_case(&mode.account))
+        .ok_or_else(|| format!("read-only: {} isn't a signed-in account of the snapshot", mode.account))?;
+    let secrets = read_only::secrets(socket).map_err(|error| format!("the broker's socket: {error}"))?;
+    let file = SettingsFile::new(setup.paths.settings_file());
+    let diagnostics = app::install_log(
+        setup.paths.log_dir(),
+        file.load().settings.log_level,
+        setup.paths.fence_log(),
+    );
+    log::info!("read-only mode: nothing that writes is sent");
+    let fence = Fence::open_personal(&setup.paths, &account.upn).map_err(|error| error.to_string())?;
+    let engine = teams::engine::start_read_only(&setup.paths, &account, Arc::new(fence), secrets)
+        .map_err(|error| format!("{}: {error}", account.upn))?;
+    let first = Started {
+        account,
+        engine,
+        calls: None,
+    };
+    let runner = Runner {
+        setup,
+        floor: CallFloor::new(),
+        devices: None,
+    };
+    let failed = Rc::new(Cell::new(false));
+    let failed_in_app = Rc::clone(&failed);
+    gpui_platform::linux(WindowingModes::WAYLAND).run(move |cx: &mut App| {
+        let launch = Launch {
+            first,
+            others: Vec::new(),
+            settings: app::settings(file, Some(diagnostics)).read_only(),
+            // the bus it is given (the sandbox's): the notifications, and no tray item
+            bus: teams_ui::bus::address_from_env(),
+            // it never signs in: a sign-out only says so
+            sign_in_again: Rc::new(|_| Rc::new(|_| {})),
+            runner,
+            read_only: true,
+            trace: Arc::new(trace),
+        };
+        if let Err(failure) = app::launch(cx, launch) {
+            eprintln!("teams: the window can't be opened: {}", failure.error);
+            failed_in_app.set(true);
+            app::quit_after(failure.stopped, cx);
+        }
+    });
+    if failed.get() {
+        return Err("the window couldn't be opened".to_owned());
+    }
+    Ok(Outcome::Quit)
 }
 
 /// Every account's engine: the first one's must start (another `teams` running on it, say, ends the app); a later
@@ -154,7 +293,8 @@ fn ready_accounts(setup: &Setup) -> Result<(Vec<PersonalAccount>, Vec<PersonalAc
 /// The first sign-in screen (`teams_ui::account_prompt`): asks for the work account (`held`, or the last one typed
 /// before, filled in), signs it in through the sign-in window, and once that goes through the app starts afresh
 /// (`main`: the process runs itself again) with the account signed in. A sign-in that stores nothing is said on the
-/// screen, which asks again, and leaves no account behind; closing it quits.
+/// screen, which asks again; its entry goes as the rail's "+" leaves one ([`accounts::add`]: kept when the user wrote
+/// its `idp_hosts` or the window refused an identity provider's host); closing it quits.
 fn ask_account(setup: Setup, held: Option<String>) -> Result<Outcome, String> {
     let held = match held {
         Some(held) => Some(held),
@@ -208,18 +348,14 @@ fn sign_in_from_prompt(
 }
 
 /// The account `upn` (`--account`), signed in: added when it is new, then through the sign-in window first when it
-/// isn't signed in yet (no object id, region or refresh token); one that doesn't go through leaves no account behind.
+/// isn't signed in yet (no object id, region or refresh token); one that doesn't go through leaves its entry as the
+/// rail's "+" does ([`accounts::add`]).
 fn signed_in(setup: &Setup, upn: &str) -> Result<PersonalAccount, String> {
     let account = setup.ask_for(upn).map_err(|error| error.to_string())?;
     if account.is_signed_in() && accounts::ready(setup, &account)? {
         return Ok(account);
     }
-    let signed = accounts::sign_in(setup, &account);
-    if signed.is_err() {
-        // a pending account only: one a sign-in named earlier stays
-        let _ = setup.abandon(upn);
-    }
-    let signed = signed?;
+    let signed = accounts::add(setup, upn)?;
     eprintln!("teams: signed in as {} (its tenant matched)", signed.upn);
     Ok(signed)
 }

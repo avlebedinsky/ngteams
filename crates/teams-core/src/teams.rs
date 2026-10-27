@@ -8,6 +8,11 @@
 //!   than [`TEAMS_MAX_AGE`], unless one is under way or one failed less than the engine's
 //!   [`EngineOptions::teams_retry`](crate::EngineOptions::teams_retry) ago. Its result is stored whole; a list that
 //!   changed is told as [`Event::Teams`](crate::Event::Teams).
+//! - **And the favourite chats**: the same answer's `Favorites` folder (the chats Teams lists under "Favorites" above
+//!   its chats, in the user's order), stored with the teams when it could be read ([`TeamsRead::favorites`]; a read
+//!   that couldn't keeps the stored ones), a change told as [`Event::Teams`](crate::Event::Teams) too. The chat list
+//!   asks for them ([`EngineRequests::chat_listing`](crate::EngineRequests::chat_listing)), which starts a read as
+//!   asking for the teams does.
 //! - **No write**: nothing here writes, and a chat write the engine takes for a channel's id (a post, a read receipt:
 //!   sealed chat writes aimed at the channel) is denied by the fence, which never reads a channel's members complete.
 //!   No write is mapped to `WriteKind::ChannelPost`. The fence, not a missing write type, keeps channels unwritten.
@@ -42,10 +47,27 @@ pub enum TeamsReadError {
     Lost,
 }
 
+/// What the chat list shows besides the stored conversations ([`EngineRequests::chat_listing`](crate::EngineRequests::chat_listing)).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ChatListing {
+    /// The favourite chats' ids, in the order Teams lists them under "Favorites" (`48:notes` is the account's own
+    /// notes, its chat with itself); `None` before a read could read them.
+    pub favorites: Option<Vec<String>>,
+    /// The conversations the chat service last called empty (`isemptyconversation`): Teams lists none of them.
+    pub empty: Vec<String>,
+}
+
+/// What one read of the teams gave: the teams, and the favourite chats when the answer's folders could be read.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TeamsRead {
+    pub(crate) teams: Vec<Team>,
+    pub(crate) favorites: Option<Vec<String>>,
+}
+
 /// The background read of the teams.
 pub(crate) struct Teams<C> {
     client: Arc<Client<HttpTransport<C>>>,
-    running: JoinSet<Result<Vec<Team>, TeamsReadError>>,
+    running: JoinSet<Result<TeamsRead, TeamsReadError>>,
     /// After a failed read: not before then.
     retry_at: Option<Instant>,
     retry: Duration,
@@ -59,6 +81,17 @@ impl<C: Credentials + 'static> Teams<C> {
             retry_at: None,
             retry,
         }
+    }
+
+    /// What the chat list needs besides the conversations: the stored favourite chats (`None` before a read could
+    /// read them) and the conversations the chat service calls empty; a read starts when the teams are due one, as
+    /// [`Self::teams`] starts it.
+    pub(crate) fn chat_listing(&mut self, store: &Store) -> Result<ChatListing, StoreError> {
+        self.teams(store)?;
+        Ok(ChatListing {
+            favorites: store.favorites()?,
+            empty: store.empty_conversations()?,
+        })
     }
 
     /// The stored teams (`None` before the first read settled them); a read starts when they are due one (see the
@@ -85,22 +118,28 @@ impl<C: Credentials + 'static> Teams<C> {
     }
 
     /// The read's result once it is over; never while none runs ([`Self::busy`]).
-    pub(crate) async fn next(&mut self) -> Option<Result<Vec<Team>, TeamsReadError>> {
+    pub(crate) async fn next(&mut self) -> Option<Result<TeamsRead, TeamsReadError>> {
         let joined = self.running.join_next().await?;
         Some(joined.unwrap_or(Err(TeamsReadError::Lost)))
     }
 
-    /// Stores a read's teams; whether the list changed. A failed read waits [`Self::retry`] before the next.
+    /// Stores a read's teams and favourite chats (these only when it could read them); whether either changed. A
+    /// failed read waits [`Self::retry`] before the next.
     pub(crate) fn store(
         &mut self,
         store: &mut Store,
-        read: Result<Vec<Team>, TeamsReadError>,
+        read: Result<TeamsRead, TeamsReadError>,
     ) -> Result<Result<bool, TeamsReadError>, StoreError> {
         match read {
-            Ok(teams) => {
+            Ok(read) => {
                 self.retry_at = None;
-                let applied = store.replace_teams(&teams, now_ms())?;
-                Ok(Ok(applied != Applied::Ignored))
+                let now = now_ms();
+                let teams = store.replace_teams(&read.teams, now)?;
+                let favorites = match &read.favorites {
+                    Some(favorites) => store.replace_favorites(favorites, now)?,
+                    None => Applied::Ignored,
+                };
+                Ok(Ok(teams != Applied::Ignored || favorites != Applied::Ignored))
             }
             Err(error) => {
                 self.retry_at = Some(Instant::now() + self.retry);
@@ -110,11 +149,11 @@ impl<C: Credentials + 'static> Teams<C> {
     }
 }
 
-/// CSA's teams read, as the store keeps its teams.
-async fn read<C: Credentials>(client: &Client<HttpTransport<C>>) -> Result<Vec<Team>, TeamsReadError> {
+/// CSA's teams read, as the store keeps its teams and favourite chats.
+async fn read<C: Credentials>(client: &Client<HttpTransport<C>>) -> Result<TeamsRead, TeamsReadError> {
     let answer = client.read(&CsaTeams).await?;
     let read = CsaTeams::read_answer(answer.body())?;
-    Ok(read
+    let teams = read
         .teams
         .into_iter()
         .map(|team| Team {
@@ -131,7 +170,11 @@ async fn read<C: Credentials>(client: &Client<HttpTransport<C>>) -> Result<Vec<T
                 })
                 .collect(),
         })
-        .collect())
+        .collect();
+    Ok(TeamsRead {
+        teams,
+        favorites: read.favorites,
+    })
 }
 
 fn now_ms() -> i64 {

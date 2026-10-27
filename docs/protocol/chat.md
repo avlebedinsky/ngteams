@@ -69,6 +69,54 @@ percent-encoded as one segment.
   the web bundle titles a chat by it, and the thread read carries it as `properties.topic`. Read from the web bundle
   (the `meeting` thread type from the personal build's store), not from a lab capture.
 
+## Favorites, empty chats and the chat list
+
+What Teams v2's list shows above and in its "Chats" section, as the native client reads it (the lab's captures of
+2026-10-24 and a personal build's debug log and store of 2026-10-26/27):
+
+- **Favorites** live in CSA's teams read (`GET <CSA base>/api/v3/teams/users/me`, the read the Teams list already
+  makes; [channels.md](channels.md#csas-teams-read)), in its top-level `conversationFolders`: `isPartialResponse`
+  (`false` in every answer), `folderHierarchyVersion`, `conversationFolderOrder` (the folders' ids) and
+  `conversationFolders`, seven folders whose `folderType` is `Favorites`, `RecentChats`, `TeamsAndChannels`,
+  `QuickViews`, `MutedChats`, `MeetingChats` or `EngageCommunities`, each with `id` (`<tenant>~<oid>~<type>`),
+  `sortType` (`UserDefinedCustomOrder` for Favorites and QuickViews, `MostRecent`, `NameAlphabetical`), `name`,
+  `isExpanded`, `isDeleted`, `version`, `createdTime` and `conversationFolderItems`. A conversation item is
+  `conversationId`, `createdTime`, `lastUpdatedTime` and `threadType`; QuickViews' items are slices
+  (`slice-saved`, …, `itemType` `Slice`). The Favorites folder lists the chats in the user's order; its first item
+  was `48:notes` (`threadType` `streamofnotes`) in every account: the account's own notes, its chat with itself, which
+  Teams titles "<name> (You)" (the web bundle's `chat_title_self_chat_name`, `{{name}} (You)`) with the account's
+  own picture and presence. `MutedChats` and `MeetingChats` were empty in every answer: the folders don't say which
+  chats are muted. The middle tier's user properties (`favorites`, `{"48:notes":1}`, and `selfChatSettings`) carry an
+  older form of the same; the native client reads only the folder. Pinning, unpinning and reordering are CSA writes
+  no capture shows; the native client sends none. Fixture: `tests/fixtures/csa/folders.json`.
+- **Muted chats**: CSA's `chats` (the same answer) carry `isMuted` and `alerts` only on some meeting chats
+  (`false`/`true`); a chat Teams draws muted had neither, and neither had any chat that isn't a meeting's. No
+  readable field says a chat is muted, so the native client shows none as muted.
+- **Empty chats**: the conversation list's `properties.isemptyconversation` (`"True"`/`"False"`) is `True` for a chat
+  nobody wrote in: the 1:1 chat a test call creates with the echo service (its call events don't count), and a
+  meeting's chat nobody wrote in. Teams lists neither; CSA's `chats[].isEmptyConversation` agrees. Its `hidden` is no
+  guide: it was `true` on 1:1 chats Teams lists.
+- **Meeting chats** (`threadType` `meeting`, ids `19:meeting_<base64>@thread.v2`) each belong to one meeting: two
+  with the same topic are two meetings (a recurring series' occurrences, or two meetings named alike), and Teams lists
+  each with its calendar avatar.
+
+## The account's own notes
+
+`48:notes` (`threadType` `streamofnotes`), the account's chat with itself, which Teams lists first under Favorites
+(above), is in no conversation list: neither the lab's captures nor a personal build's store of 2026-10-27 held it
+there, while the other `48:` streams (`48:notifications`, `48:mentions`, `48:calllogs`) were listed and synced. The web
+bundle builds every conversation's messages path the same way (`v1/users/ME/conversations/<id>/messages`) and names
+the notes by their fixed id and thread type, so the native client reads them as any chat's messages, by `GET`
+(newest page, then its sync link), from the catch-up when the notes are a favourite or already stored, and when the
+chat view opens them. Not captured: no lab account and no personal run opened its notes, so the messages read on
+`48:notes` is unverified live. What was captured: the conversation's properties read (`GET
+v1/users/ME/conversations/48:notes?view=msnp24Equivalent`, made by the web client on load) answered 404 with
+`errorCode` 404, "Conversation was not found" (`RequestHandlerException`) for lab accounts that never wrote a note, so
+an account's notes exist only once something was written there; the native client takes a 404 on them as no notes.
+Notes aren't a thread: no thread or member read is made for them. Each note's sender is the account itself. Whether
+Trouter delivers a note written on another device wasn't seen; a delivery naming `48:notes` would be stored like any
+chat's. Writing is off: no write type is mapped to a `48:` stream, and the chat view shows the notes read-only.
+
 ## Message pages (ab-chat-full, b)
 
 Opening the chat, b's client made two reads. Fixture: `tests/fixtures/chatsvc/messages.json`.
@@ -203,14 +251,47 @@ tree has none of it.
 run): it names no reader at all, no conversation, MRI or permission, so it can't say who may read the object now. The
 200s and the 403 show that the service checks readers, and only for the accounts the lab holds; they can never show
 that nobody else can read it. Even with a complete reader list the race between that read and the upload (a `forward`
-from any client) would need evidence of its own. So images stay deferred: the upload stays unmapped, AMS is no
-service of the native transport, there is no `SendImage`, and the app shows an image as a placeholder followed by a link to
-its message in Teams on the web. What would reopen it is in `docs/backlog/ams-image-sending.md`.
+from any client) would need evidence of its own. So sending images stays deferred: the upload stays unmapped and there
+is no `SendImage`. What would reopen it is in `docs/backlog/ams-image-sending.md`. Showing a received picture is a read
+of its own ([Pictures in messages](#pictures-in-messages)).
 
 The first run was **breached**: 15 s after the creation the laptop's lid closed and the machine suspended for eight
 minutes; on resume the fence found its connection to both browsers gone and killed them. `fence.log` has nothing of
 that run after 01:46:05Z and its captures end there too, so nothing shows what, if anything, the browsers sent between
 the resume and the kill. The second run (`…/20261022T020426Z`) came out clean (`ab-image-object: ok`).
+
+## Pictures in messages
+
+How a received message carries a pasted picture and an emoticon, from the lab's captures (channel posts in `ab-chat`,
+`abc-chat` and `load`) and the user's own chats as the personal build stored them, read for their shape only; and
+how the web client draws them, from its bundle.
+
+- **A pasted picture** is an `<img>` with `itemtype="http://schema.skype.com/AMSImage"`, its `src` a view of an AMS
+  object: `https://us-api.asm.skype.com/v1/objects/<id>/views/imgo` in most, `…/views/imgpsh_fullsize_anim` for an
+  animated one, and (in a signature pasted from mail) `https://us-prod.asyncgw.teams.microsoft.com/v1/objects/<id>/views/
+  imgpsh_fullsize` without the `itemtype`. The object id is like `0-eus-d9-<32 hex>`. The size it is shown at comes as
+  `width` and `height` attributes (a fraction too: `130.64889918887602`) or as `style="width:<n>px; height:<n>px"`
+  (photos at their full size, `2082px` by `2776px`); `itemid` repeats the object id, `id` is `x_<object id>`, `alt` is
+  usually `image`. Each sits in a paragraph of its own (`<p>`, or `<div>` joined by `<br>`).
+- **Where the web client reads it**: whatever host the message names, it reads the same path from its own AMS base,
+  the region's GTM `amsV2` (the async gateway, `https://us-prod.asyncgw.teams.microsoft.com` for the lab and the user),
+  and draws it in an `<img>` authorized by an image cookie the page gets beforehand. The bundle's own requests to AMS
+  carry `Authorization: skype_token <skypetoken>`. The native client reads the view with the `ic3` bearer token and
+  `x-ms-migration: True` instead, the form the async gateway answered the object read in (`proto-lab probe object`);
+  that form's answer to a view read hasn't been seen live.
+- **How Teams draws it**: at the size the message gives it, scaled down to the bubble's width with its aspect ratio
+  kept; no link next to it.
+- **An emoticon** is an `<img>` with `itemtype="http://schema.skype.com/Emoji"`, `itemid` its id in Teams' emoticon
+  catalog (`speechless`, `smile`, `1f44b_wavinghand`), `alt` its emoji and a `src` on the CDN
+  (`…/emoticons/<id>/default/20_f.png`, sometimes `100_f.png?v=<n>`), wrapped in a `<span>` whose `class` is
+  `animated-emoticon-<size>-<id>` with `title` and `type` naming it. One inside text is styled `20px` square; one sent
+  alone in a message `58px` (`animated-emoticon-58-…`). Teams draws one inside text at the text's height and a message
+  of emoticons alone large, animated and without a bubble. The native client draws both from the emoticon's animation
+  strip on the CDN ([Reaction pictures](#reaction-pictures)): the first frame inline, the whole animation large.
+- **Stickers and GIFs**: the bundle knows a sticker `itemtype` (`http://schema.skype.com/Sticker`, its pictures on
+  `static.asm.skype.com`) and a Giphy one, but neither appears in any capture or in the user's chats. The GIFs the
+  captures hold are plain `<img>`s on `media*.giphy.com` with no `itemtype`, which the native client leaves as
+  placeholders (a third party's host, not a Teams service).
 
 ## Files: sending, denied (ab-file)
 

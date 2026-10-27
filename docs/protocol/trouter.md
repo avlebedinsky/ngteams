@@ -331,7 +331,8 @@ newly found offline messages are notified is M2's.
   "Available","activityReporting":"Transport","deviceType":"Web"}`, and subscribes to others' presence
   (`POST …/ups/<geo>/v1/pubsub/subscriptions/<epid>`). The fence of the time denied both in every run (they were on the
   run's expected list), and other people's presence reads were denied too, so what makes an account show online (the PUT,
-  the activity, or both) was not tested. Others' presence is read since M2 Task 17 ([below](#others-presence)); the
+  the activity, or both) was not tested. Others' presence is read since M2 Task 17 and subscribed to since 2026-10-27
+  ([below](#others-presence)); the
   account's own was measured in M2 Task 18 ([Own presence](#own-presence-m2-task-18)): the endpoint `PUT` is what
   makes it show online, `user.activity` alone does nothing others see.
 
@@ -359,14 +360,70 @@ v1/presence/getpresence/`, a read the web client sends as a `POST`.
   MRI alone (`[{"mri": …}]`, never `source`), with the captured header values and its own non-CAE presence token,
   which UPS took (`teams-headless a presence`, 2026-10-23: two reads, `Offline` for b and c;
   [auth.md](auth.md#open-questions) question 4). The engine polls it every minute for the people the views asked
-  about, a colleague outside the lab included, in one read (`teams-core` `presence.rs`): at most 20 watched, the one asked about longest ago dropped (and told
-  unknown); someone newly asked about brings the read forward, never within 10 s of the last; a 429 or 503 holds every
+  about, a colleague outside the lab included (`teams-core` `presence.rs`): at most 20 watched, the one asked about longest ago dropped (and told
+  unknown), at most 8 named per read (the most any of the web client's captured reads named; more watched are read 8
+  at a time); someone newly asked about brings the read forward, never within 10 s of the last; a 429 or 503 holds every
   read until its `Retry-After`, counted from the answer, is over. The views show a dot, "unknown" before the first read,
   after a failed one and for someone no longer watched.
-- **No subscription**: the web client also subscribes its endpoint to others' presence (`POST
-  v1/pubsub/subscriptions/<epid>`), which the lab browser lets through (it reaches nobody); the native client doesn't
-  send one, so its presence is only as fresh as its last poll. If a minute proves too stale, a subscription is an
-  ordinary request to add.
+
+### The subscription and its deliveries
+
+Read from the lab's captures of 2026-10-20 to 2026-10-26 (755 subscriptions, allowed since 2026-10-23, and 2971
+presence deliveries) and the web bundle `26260.1717.5229.7049` (read locally; notes in our own words).
+
+- **The request**: `POST <presence base>/v1/pubsub/subscriptions/<epid>`, the path ending in the endpoint's `epid`
+  (the registration's GUID, the one the endpoint `PUT` names) with **no** trailing slash and no query, the presence
+  read's headers plus `x-ms-endpoint-id` (the same `epid`) and the client's caller, session and correlation ids. Its
+  body: exactly `trouterUri` (the messaging socket's `surl` from `trouter.connected`, the `-f` host on port 3443, then
+  `unifiedPresenceService`), `shouldPurgePreviousSubscriptions` (a boolean), `subscriptionsToAdd` and
+  `subscriptionsToRemove` (each a list of `{"mri": …, "source": "ups"}`; the web client adds its own MRI too). The
+  answer, `200`: `{"addStatuses": [{"mri", "source", "status"}], "removeStatuses": […]}`, one item per MRI asked and
+  no other, `status` `20200` in every captured one. The bundle names the others: `30010` polling only, `40010` invalid
+  source, `40020` MRI not found, `40030` too many subscribers, `40040` too many subscriptions, `50000` error, `50001`
+  snapshot failed, `50002` not supported; the web client polls whom UPS didn't take.
+- **The lifecycle**: the web client subscribes when its push channel's state changes (connected), the first request
+  purging, then more people as it tracks them (`shouldPurgePreviousSubscriptions: false`, only the new ones); it
+  removes whom it no longer tracks on a six-minute timer (`subscriptionsToAdd: []`), refreshes the whole subscription
+  every 55 minutes, and subscribes again with the purge when its Trouter URL changes. It tracks up to 650 people; the
+  lab's captures name 3 at most per subscription (every lab account), so no request size beyond that was seen.
+- **The deliveries**: on the messaging socket, `POST /v4/f/<endpoint>/unifiedPresenceService` from
+  `Microsoft.Skype.Presence.App/1.0`, `X-Trouter-Delivery-Control: async; ttl=600`, `X-Microsoft-Skype-Message-ID`
+  `0`; the body a JSON string of `{"presence": [{"mri", "etag", "source"?, "presence": {"sourceNetwork",
+  "calendarData", "capabilities", "availability", "activity", "lastActiveTime"?, "deviceType"?}}]}`, with
+  `"isSnapshot": true` on the snapshot UPS sends right after a subscription (everyone it named, as they are), and
+  without it on each change (`Available`, `Busy`/`InACall` during a call, `Offline`). The same change often came
+  several times over within a run. The `etag` grows with time.
+- **No answer needed**: the web client answers every delivery (`3:::{"id",…,"status":200}`), but in the runs of
+  2026-10-23 to 2026-10-26 the fence held back most of those answers (2764 of the 2971 deliveries went unanswered),
+  and UPS kept delivering: changes came live for the whole of a 49-minute `ab-call` run whose every presence delivery
+  went unanswered. The unanswered ones were stored and replayed on later connects (`"mstore":true`, `"flow":""`,
+  `Trouter-Timeout: 7500`), as chat deliveries are ([Answering deliveries](#answering-deliveries)). So the native
+  client answers none, as it answers no delivery but a call's.
+- **Polling beside it**: the bundle's sync reads every four minutes only whom the subscription doesn't cover (and,
+  after a message-loss report, everyone); in the captures, once subscriptions went through, the interval reads
+  stopped (none in 49 minutes of `ab-call`), while in the runs that denied the subscriptions they came every four
+  minutes.
+
+The native client (`teams-core` `presence/subscription.rs`, `teams_proto::PresenceSubscription`,
+`teams_trouter::PresenceDelivery`):
+
+- It subscribes the people it watches (those a read may name: never a `28:` or `48:` id, which have no presence)
+  once the messaging socket is connected and a registration of
+  that connection went through, **in full** (the first request purging, 8 MRIs per request) after every registration
+  (a connect's, a reconnect's with its new `surl`, the hourly renewal's), every 55 minutes, and once someone no longer
+  watched has stayed subscribed for 6 minutes (left out rather than named in a removal: it sends no removal); anyone
+  newly watched is added at once. One subscription at a time, at least 10 s apart; one that failed is tried again
+  after a minute (or its `Retry-After`). It goes as the presence read does: a plain request logged `allowed` in the
+  lab, the sealed `PostRead` entry `presence_subscription` through the personal fence, with the presence read's header
+  values only (no `x-ms-endpoint-id`, caller, session ids or cookie: whether UPS takes it without `x-ms-endpoint-id`
+  is for a lab live run to show).
+- A delivery at the endpoint's `unifiedPresenceService` path becomes `PushEvent::Presence`, never answered; the engine
+  applies each watched person's availability as a read's would be applied, telling each change once
+  (`Event::Presence`). A stored replay is left alone: it is up to ten minutes old, and the connect's subscription
+  (whose snapshot follows) and read give the current state.
+- The reads go on every minute while the subscription doesn't cover everyone it may name (the socket down, someone
+  UPS didn't take, a subscription that failed or not yet answered), and every four minutes while it does; a
+  message-loss report brings the next read forward.
 
 ## Own presence (M2 Task 18)
 

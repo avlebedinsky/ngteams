@@ -343,7 +343,7 @@ pub async fn register<T: EndpointRegistrar>(
 }
 
 /// A GUID as `8-4-4-4-12` lowercase hex digits.
-fn is_guid(text: &str) -> bool {
+pub(crate) fn is_guid(text: &str) -> bool {
     let groups: Vec<&str> = text.split('-').collect();
     groups.iter().map(|group| group.len()).eq([8, 4, 4, 4, 12])
         && groups.iter().all(|group| {
@@ -354,7 +354,7 @@ fn is_guid(text: &str) -> bool {
 }
 
 /// A Trouter push URL (see [`EndpointRegistration::messaging`]).
-fn is_push_url(text: &str) -> bool {
+pub(crate) fn is_push_url(text: &str) -> bool {
     let Ok(url) = Url::parse(text) else {
         return false;
     };

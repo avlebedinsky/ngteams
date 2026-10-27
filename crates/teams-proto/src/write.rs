@@ -141,6 +141,15 @@ impl<R: Mutating> Authorized<R> {
     }
 }
 
+/// The method and the endpoint or URL a mutating request would go to, for the transport's read-only refusal
+/// (`HttpTransport::read_only`): a call write's exact URL, else its wire form; `None` for neither.
+pub(crate) fn wire_or_call<R: Mutating>(request: &R) -> Option<Result<Wire, (Method, url::Url)>> {
+    if let Some(call) = sealed::Sealed::call(request) {
+        return Some(Err((call.method(), call.url().clone())));
+    }
+    sealed::Sealed::wire(request).map(Ok)
+}
+
 /// A permit used for a request it wasn't issued for. Its `Display` and `Debug` show both targets the way [`Target`]
 /// does: scope ids as they are, added participants as a count. Both targets are boxed to keep the error small.
 #[derive(Debug, thiserror::Error)]

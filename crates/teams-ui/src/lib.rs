@@ -31,6 +31,8 @@
 //!   time, held by the desktop for the app's life.
 //! - [`settings`]: the settings and their file (`0600` in a `0700` directory; defaults for what can't be read);
 //!   [`settings_view`] changes them.
+//! - [`clock`]: every time a view shows, in Teams' words, on the 12-hour or 24-hour clock the settings' "Time format"
+//!   gives (the system's locale by default), changed live.
 //! - [`trace`]: the view trace, one JSON line per view change (ids, kinds and times, never text) on a descriptor the
 //!   caller hands in, read by the live test.
 //! - [`desktop`]: the app on the desktop: the main window (opened again from the tray or a notification), the
@@ -64,15 +66,18 @@ pub mod calls;
 pub mod channel_view;
 pub mod chat_list;
 pub mod chat_view;
+pub mod clock;
 pub mod compose;
 pub mod desktop;
 pub mod first_run;
 pub mod icons;
+pub mod inline;
 pub mod models;
 pub mod notify;
 pub mod own_presence;
 pub mod people;
 pub mod presence;
+pub mod presence_badge;
 pub mod reaction_picker;
 pub mod reactions;
 pub mod rich_text;

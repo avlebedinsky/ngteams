@@ -254,7 +254,7 @@ impl CsaTeams {
     /// The teams the answer `body` gives, each with its channels: a team or a channel marked deleted is left out, and
     /// so is one without a string `id` and `displayName` (counted in [`TeamsAnswer::skipped`]). A team's general
     /// channel (`isGeneral` `true`, or the channel whose id is the team's) comes first, the others in the answer's
-    /// order.
+    /// order. The account's favourite chats come with them ([`TeamsAnswer::favorites`]).
     ///
     /// The answer must say it is whole: `metadata.isPartialData` exactly `false`, as every captured answer had it. A
     /// partial answer leaves teams out, and the store replaces its list with what a read gives, so one that says it is
@@ -278,7 +278,10 @@ impl CsaTeams {
             .get("teams")
             .and_then(Value::as_array)
             .ok_or(CsaAnswerError::Malformed)?;
-        let mut read = TeamsAnswer::default();
+        let mut read = TeamsAnswer {
+            favorites: favorites(&answer),
+            ..TeamsAnswer::default()
+        };
         for entry in entries {
             match named(entry) {
                 Named::Deleted => {}
@@ -313,6 +316,60 @@ pub struct TeamsAnswer {
     pub teams: Vec<Team>,
     /// Teams and channels left out because they had no string `id` or `displayName`.
     pub skipped: usize,
+    /// The account's favourite chats, the ones Teams lists under "Favorites" above its chats, in the folder's order:
+    /// the conversation ids of the `Favorites` folder of `conversationFolders` (see [`favorites`]). `None` when the
+    /// answer's folders aren't in the captured shape: not known, never read as none.
+    pub favorites: Option<Vec<String>>,
+}
+
+/// The `Favorites` folder's conversations of a CSA answer, in the folder's order (its `sortType` was
+/// `UserDefinedCustomOrder` in every capture: the user's own order, as listed).
+///
+/// Read only in the captured shape: `conversationFolders` an object that says it is whole (`isPartialResponse`
+/// exactly `false`) with a `conversationFolders` array. Without a folder whose `folderType` is `Favorites` (or with
+/// it marked deleted) there are none. An item is a conversation id (`conversationId`, a string) unless it is another
+/// kind of item (`itemType` present: the quick views' slices); a conversation listed twice keeps its first place.
+/// Anything else (no folders, a partial or unsaid answer, a folder or an item of another shape) is `None`.
+fn favorites(answer: &Value) -> Option<Vec<String>> {
+    let folders = answer.get("conversationFolders")?;
+    if folders.get("isPartialResponse").and_then(Value::as_bool) != Some(false) {
+        return None;
+    }
+    let listed = folders.get("conversationFolders")?.as_array()?;
+    let mut found = None;
+    for folder in listed {
+        let folder = folder.as_object()?;
+        if folder.get("folderType").and_then(Value::as_str) == Some("Favorites") && !flag_of(folder, "isDeleted") {
+            if found.is_some() {
+                // two favourites folders: no capture showed which one Teams shows
+                return None;
+            }
+            found = Some(folder);
+        }
+    }
+    let Some(folder) = found else {
+        return Some(Vec::new());
+    };
+    let mut ids: Vec<String> = Vec::new();
+    for item in folder.get("conversationFolderItems")?.as_array()? {
+        let item = item.as_object()?;
+        if item.contains_key("itemType") {
+            continue;
+        }
+        let id = item.get("conversationId")?.as_str()?;
+        if id.is_empty() {
+            return None;
+        }
+        if !ids.iter().any(|kept| kept == id) {
+            ids.push(id.to_owned());
+        }
+    }
+    Some(ids)
+}
+
+/// Whether an object's boolean `key` is `true`.
+fn flag_of(object: &serde_json::Map<String, Value>, key: &str) -> bool {
+    object.get(key).and_then(Value::as_bool) == Some(true)
 }
 
 /// A team the account is a member of. `Debug` leaves the names out.

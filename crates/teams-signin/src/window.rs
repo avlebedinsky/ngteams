@@ -21,7 +21,9 @@
 //!
 //! Then it loads `about:blank`, which makes `WebKit` create the page, and opens the authorize URL only once that page
 //! has told the guard it is armed. The redirect, from `decide-policy` or from the guard, whichever comes first, ends the
-//! run with [`WindowAnswer::Redirect`]; closing the window with [`WindowAnswer::Closed`]; the page's web process
+//! run with [`WindowAnswer::Redirect`]; closing the window with [`WindowAnswer::Closed`], or with
+//! [`WindowAnswer::Refused`] naming the last host a refused navigation went to that the user could add to the
+//! account's `idp_hosts` (the personal window: `SignInHosts::idp_candidate`, the host alone); the page's web process
 //! ending (a crash: a process `WebKit` started again might not be armed) with [`WEB_PROCESS_ENDED`]. However the run
 //! ends, the view's web process is then terminated and the window destroyed (the black hole, or the host gate, keeps
 //! deciding whatever a kept-alive load still sends from the network process).
@@ -107,6 +109,20 @@ impl Bound {
             Self::Loopback => is_local_page(uri),
             #[cfg(feature = "personal")]
             Self::Hosts(hosts) => hosts.admits_url(uri),
+        }
+    }
+
+    /// The host of a refused navigation to `uri` the user could add to the account's `idp_hosts`: only the personal
+    /// window's bound names one (`SignInHosts::idp_candidate`).
+    fn idp_candidate(&self, uri: &str) -> Option<String> {
+        match self {
+            Self::Loopback => {
+                // the loopback window has no identity provider: a page off loopback is never one to name
+                let _ = uri;
+                None
+            }
+            #[cfg(feature = "personal")]
+            Self::Hosts(hosts) => hosts.idp_candidate(uri),
         }
     }
 }
@@ -210,10 +226,11 @@ impl Window {
         let answer = Rc::new(RefCell::new(None));
         let finish = finisher(&main, &answer);
         let stage = Rc::new(Cell::new(Stage::Arming));
+        let refused = Rc::new(RefCell::new(None));
         connect_policy(
             &view,
             (redirect, guard, config.bound),
-            Rc::clone(&stage),
+            (Rc::clone(&stage), Rc::clone(&refused)),
             finish.clone(),
         );
         let window = gtk4::Window::builder()
@@ -224,7 +241,10 @@ impl Window {
             .build();
         let closed = finish.clone();
         window.connect_close_request(move |_| {
-            closed(WindowAnswer::Closed);
+            closed(match refused.borrow_mut().take() {
+                Some(host) => WindowAnswer::Refused(host),
+                None => WindowAnswer::Closed,
+            });
             glib::Propagation::Proceed
         });
         let ended = finish.clone();
@@ -331,11 +351,12 @@ fn settings() -> Result<Settings, String> {
     Ok(settings)
 }
 
-/// `decide-policy` and `create`: see the module docs.
+/// `decide-policy` and `create`: see the module docs. A refused navigation's host the user could add to `idp_hosts`
+/// is kept in `refused` (the last one), for the answer when the window is closed.
 fn connect_policy(
     view: &WebView,
     (redirect, guard, bound): (RedirectUri, Arc<Guard>, Bound),
-    stage: Rc<Cell<Stage>>,
+    (stage, refused): (Rc<Cell<Stage>>, Rc<RefCell<Option<String>>>),
     finish: Finish,
 ) {
     view.connect_create(|_, _| None);
@@ -361,6 +382,9 @@ fn connect_policy(
                     decision.ignore();
                     let method = request.as_ref().and_then(webkit6::URIRequest::http_method);
                     guard.refuse(method.as_deref().unwrap_or("GET"), &uri);
+                    if let Some(host) = bound.idp_candidate(&uri) {
+                        *refused.borrow_mut() = Some(host);
+                    }
                 }
                 Navigation::Hold => decision.ignore(),
             }

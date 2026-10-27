@@ -86,6 +86,44 @@ fn the_bound_is_entra_and_the_identity_provider_s_hosts_never_a_microsoft_servic
 }
 
 #[test]
+fn a_refused_navigation_names_only_a_host_the_user_could_add_to_idp_hosts() -> TestResult {
+    // the account names no identity provider yet: its organization's sign-in page is refused, and its host (alone,
+    // never the path or the query) is the one the window's answer names
+    let hosts = SignInHosts::entra_with(&[])?;
+    assert_eq!(
+        hosts
+            .idp_candidate("https://sso.example.test/adfs/ls/?SAMLRequest=made-up&RelayState=made-up")
+            .as_deref(),
+        Some("sso.example.test")
+    );
+    assert_eq!(
+        hosts.idp_candidate("https://SSO.Example.test/").as_deref(),
+        Some("sso.example.test"),
+        "a URL's host is lowercase"
+    );
+    // nothing to add: a Microsoft service, a host on the bound, an address, a page that isn't https
+    for url in [
+        "https://go.microsoft.com/fwlink/?LinkId=made-up",
+        "https://www.office.com/",
+        "https://login.microsoftonline.com:8443/x",
+        "https://192.0.2.1/x",
+        "http://sso.example.test/adfs/ls/",
+        "https://localhost/x",
+        "about:blank",
+        "not a url",
+    ] {
+        assert_eq!(hosts.idp_candidate(url), None, "{url}");
+    }
+    let named = SignInHosts::entra_with(&["sso.example.test".to_owned()])?;
+    assert_eq!(
+        named.idp_candidate("https://sso.example.test:8443/adfs/ls/"),
+        None,
+        "on the bound already"
+    );
+    Ok(())
+}
+
+#[test]
 fn the_guard_denies_every_request_off_the_bound_and_takes_the_personal_rules() -> TestResult {
     let (guard, lines) = guard(SignInHosts::entra_with(&["sso.example.test".to_owned()])?)?;
     for (method, url, decision) in [

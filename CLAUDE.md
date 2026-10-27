@@ -9,9 +9,13 @@ finished plans are in `docs/plans/completed/`. Commands and layout are in [READM
 These hold for every agent and every change, with no exceptions. **Lab accounts contact only each other; everything
 else is allowed.** The lab browser's fence and the native client (its HTTP transport and its Trouter frames) follow
 this rule. The rules about writes, calls and the browser fence govern the lab and every lab binary; the personal build
-(`teams`) has a fence of its own and the three rules about it below. The rules on the native client's sealed types,
+(`teams`) is the user's Teams, under the two rules about it below. The rules on the native client's sealed types,
 captures and tokens, agents and protocol notes hold for both builds.
 
+- **A change that fits a rule's test is an ordinary change and goes ahead**, with no stop to ask the user: a new read,
+  own-state request or frame that passes its rule's test, say; the examples a rule names are today's, not a closed
+  list. Only a change to a test itself, or in the lab a new contacting write kind or widening whom a request may name
+  or reach, needs the user's sign-off; the personal build has no such limit.
 - **A contacting write goes only to the lab.** A contacting write is one that reaches other people: a message (a
   post, reply, edit, delete, forward, channel post, a scheduled or drafted send), a reaction, a call (starting,
   joining or answering one), a chat created, a member added or removed, an invite, a meeting, a mail, a share. It is
@@ -52,7 +56,8 @@ captures and tokens, agents and protocol notes hold for both builds.
   target, the WebSocket guard, the service worker neutralized.
 - **The native client sends a contacting write only as `Authorized<_>`** with a `WritePermit` from `Fence::check`
   for its exact target, logged to `fence.log` by `Fence::check`; a sealed `Mutating` type in `teams-proto` is the
-  only way to build one, and the transport refuses any other request `teams_fence::contacting` doesn't call `None`.
+  only way to build one, and a lab binary's transport refuses any other request `teams_fence::contacting` doesn't
+  call `None` (the personal build's sends it, logged).
   The transport is `https` only, with no proxy and no redirects, to its services' bases, and hands each token only to
   its own service's host.
   A write is never resent by the transport (the HTTP client's own retries stay off: an HTTP/2 retry could post
@@ -74,64 +79,35 @@ captures and tokens, agents and protocol notes hold for both builds.
   or `Fence::open_lab_account` (roster from `lab.toml`, the lab's `fence.log`), and `teams-fence`'s `test-support`
   feature (any roster, any log, fake membership sources) is enabled only under `[dev-dependencies]`, never as a
   normal dependency.
-- **The personal build (`teams`) has a fence of its own, and only it.** It is the user's own accounts on the user's
-  desktop (one or several, each one the user added and signed in; all of them run at once, each with its own engine
-  and its own fence for that account alone): the `teams` and `teams-signin-personal` binaries, its data under `~/.local/share/teams/` and
-  `~/.config/teams/`, its Secret Service items under `teams-personal`, no broker, no sandbox. Its fence is
-  `teams-fence`'s personal policy, behind the `personal` feature only `crates/teams` enables, opened only by
-  `Fence::open_personal`, one per account, for that account (a write of one account never goes through another's
-  fence). A write goes out only as a sealed `Mutating` type sent as `Authorized<_>` through the outbox,
-  with a `WritePermit` from `Fence::check` for its exact target; only the kinds `docs/personal-build.md` lists
-  (messages, edits, deletes, reactions, typing, read receipts, and the calls of the next rule); only to a 1:1 or group
-  chat whose thread, read fresh when the fence decides, unpaged and in a shape a capture showed (every member in a
-  captured MRI form), lists the account as a member (never a channel, a meeting chat, a `48:` stream, a new chat, a
-  paged answer or an unknown shape), or the account's own availability on its own registered endpoint in a captured
-  value, or a call write as the next rule allows; only from an explicit action in the UI or a setting the user turned on
-  (typing, read receipts and presence only after the first run's screen is confirmed), save the call's own sends the
-  next rule names; logged to its `fence.log` before it goes. Its reads are `GET`s and the sealed lists: `OwnState`, and
-  `PostRead` naming only the account or people the account's stored chats list, never a search or a suggestion list; it
-  sends no plain request, and logs its Trouter frames. Its sign-in window reaches only Entra's sign-in hosts and the
-  identity provider's hosts `accounts.toml` names for the account signing in, through its egress gate. The rules that hold for both builds hold for
-  it; nothing in it changes a lab rule: every lab binary keeps the lab fence, refuses the personal data dir, keyring
-  items and accounts, and refuses to run with `personal` or `test-support` built in; `teams` refuses the lab's.
-- **The personal build's calls are the user's, in the account's own chats.** Only 1:1 and group-chat calls (no meetings,
-  screen or content sharing, transfer, forwarding, replacement, call park or PSTN), every call write a sealed type in a
-  captured shape sent as `Authorized<_>` through the outbox, a fresh `Fence::check` logged to its `fence.log` before it
-  goes, never resent after an unknown outcome or by a later run. A start or a join goes out only on the user's action in
-  that chat: an existing 1:1 or group chat whose one fresh, unpaged thread read in a captured shape lists the account
-  and every callee the start names; the chat is the one the write carries, as the lab's rule ties it, never the client's
-  context, and a join also needs a captured answer or delivery binding the running call to that chat. Any readable
-  invitation addressed to the account may be offered, whoever it is from; it is answered or declined only on the user's
-  explicit action on that still-offered invitation (its banner or notification), never by a delivery, a timer, a setting
-  or a reconnect, and a decline is the captured rejection, not a dismissed banner. An invitation stops being offered
-  when its ring ends (answered, declined, cancelled, answered elsewhere, timed out). One call or ringing invitation at a
-  time across all the app's accounts (their fences share one `CallFloor`): another invitation isn't offered and nothing
-  is sent for it, and no other account starts, joins or answers a call meanwhile. Every follow-up on an entered call, whether
-  requested by the user (mute, camera, hang up) or generated by the call's machinery, needs this run's registration of a
-  call the user started, joined or answered, bound to its conversation, call and service as the captures bind them
-  (never by a bare id), and only a captured operation, until the call ends (its captured end exchange included); a
-  reconnect keeps a live call's registration and never restores an ended call or invitation. Without a further user
-  action only these go: that call's captured setup, keep-alive and end writes (acknowledgements, channel parameters,
-  renegotiation, `leave` on a failure), and the captured sends the client makes by itself while an offered invitation
-  rings, bound to it, never one that answers, declines, joins or adds. No `add` and no new chat but the test call's, a
-  named exception for the echo service alone, each from the user's "Test call": the 1:1 chat of exactly the account and
-  the bot created in its captured shape, the start in the test call's captured shape, and the `add` of exactly that bot
-  to that call (its MRI a constant in `teams-proto` from the web bundle's `teamsEchoBotMri`, never taken from the
-  network or the UI). The calling registration is an `OwnState` entry and the calling socket's frames are logged; a call
-  delivery response goes only as a captured, typed `OwnFrame` bound to the delivery it answers, under the same rules as
-  the write it stands for. The call roster isn't read or watched. Media isn't classified: it carries only a call the
-  signaling fence permitted, through relayed candidates only, with no local address in an offer. The personal build's
-  PipeWire is the desktop's, fixed when it is built. The microphone opens only after the user's start, join or answer
-  passed the fence; the camera is off at every start, join and answer, and only the user turns it on, through the
-  desktop portal.
-- **Agents install and start the personal build only when the user asks.** Agents may
-  compile the `teams` crate in the gate and test it on `teams-mock`; any other `teams` or `teams-signin-personal`
-  binary they leave is a `test-support` one, which refuses to run. Only on the user's explicit request in the
-  conversation, each time, an agent runs `scripts/install-personal.sh` (the only way an agent builds a runnable
-  personal binary or sets the install marker; never a plain `cargo build -p teams`, which the root's `default-members`
-  leave out) and starts the installed `teams` detached on the user's desktop, its output discarded, then leaves it
-  alone: it never drives its window, signs it in, or tests or captures with it. Agents never read or write the
-  `teams-personal` items and never receive the user's tokens.
+- **The personal build (`teams`) is the user's Teams.** It is the user's own work accounts on the user's desktop (each
+  one the user added and signed in, all running at once, each with its own engine and fence): the `teams` and
+  `teams-signin-personal` binaries, its data under `~/.local/share/teams/` and `~/.config/teams/`, its Secret Service
+  items under `teams-personal`, no broker, no sandbox. Whatever the Teams client lets its user do, it may do: writes of
+  every kind to any target, reads of every kind, calls of every kind. **Its fence logs every send and denies none**
+  (`teams-fence`'s personal policy, behind the `personal` feature only `crates/teams` enables, opened only by
+  `Fence::open_personal`, one per account): a write goes through the outbox as a sealed `Mutating` type sent as
+  `Authorized<_>` under the permit `Fence::check` gives it, and every write, plain request, read by `POST` and frame is
+  logged to its `fence.log` before it goes (one that can't be logged isn't sent). It sends what the user did in the UI
+  or a setting the user turned on, and the follow-ups that action needs, as Teams does; one call at a time across its
+  accounts, as a Teams client holds one. Sign-in and token renewal stay in `teams-auth`'s clients, its sign-in window
+  reaching only Entra's sign-in hosts and the identity provider's hosts `accounts.toml` names, so the account's
+  credentials go only to Microsoft's sign-in. Nothing in it changes a lab rule: every lab binary keeps the lab fence,
+  refuses the personal data dir, keyring items and accounts, and refuses to run with `personal` or `test-support`
+  built in; `teams` refuses the lab's.
+- **Agents run the personal build only read-only, and install it only when the user asks.** Agents may compile the
+  `teams` crate in the gate and test it on `teams-mock`; any other `teams` or `teams-signin-personal` binary they leave
+  is a `test-support` one, which refuses to run. Only on the user's explicit request in the conversation, each time,
+  an agent runs `scripts/install-personal.sh` (the only way an agent builds a runnable personal binary or sets the
+  install marker; never a plain `cargo build -p teams`, which the root's `default-members` leave out), and may start
+  the installed `teams` detached for the user, its output discarded, then leave it alone. On their own initiative
+  agents may start it only in its read-only mode, look at and screenshot its window, drive its UI to navigate, and
+  read its logs and store while it runs; they may read `~/.local/share/teams/` and `~/.config/teams/` at any time.
+  Read-only mode sends nothing anyone else sees or that changes the account (no message, edit, delete, reaction, call
+  start, join, answer or decline, chat created, typing, read receipt, availability or status write, nor a delivery
+  response that answers a call); reads, the app's own token renewal and the push socket's own session frames go. The
+  app enforces it, not the agent's care: a send attempted in read-only mode is refused and logged. Agents start it
+  only through `scripts/run-personal-read-only.sh`, which refuses an installed binary without that mode. Agents never sign it in, never drive, test or capture with it in
+  its sending mode, never read or write the `teams-personal` items and never receive the user's tokens.
 - **Protocol notes are written in our own words** in `docs/protocol/`. Microsoft JS is never copied into the repo.
 
 ## Patterns
@@ -212,12 +188,13 @@ What the code does and why. A change that undoes one of these needs a new reason
 - `Fence::check` reads the target's members for every write except a new target (`Scope::New`, a chat or call
   created, judged by its added participants alone), an operation on a call (`Scope::CallOperation`, decided by the
   fence's call rule, below), typing and read receipts on a chat, and the account's own availability (which keeps
-  its own-account check). Typing and read receipts reach nobody: on a chat
-  id `is_chat_id` takes (1:1, group or meeting, the rule `contacting` carves them out by) they are permitted without a
-  member read, judged only by the participants they name, and logged like every decision; anywhere else (a channel, a
-  chat id in another form) they are judged like any write. So a caller hands it a `Typing` or `ReadReceipt` target
-  only for the content-free signal: `contacting` carves typing out only in its captured body (`content` empty or
-  absent, no key but `content`, `contenttype`, `messagetype`) and a read receipt only with `name` its one query key.
+  its own-account check). Typing and read receipts reach nobody: on a chat id `is_chat_id` takes (1:1, group or
+  meeting, the rule `contacting` carves them out by) a lab fence permits them without a member read, judged only by
+  the participants they name, and logged like every decision; anywhere else (a channel, a chat id in another form)
+  they are judged like any write. A personal fence reads no members for any write. So a caller hands it
+  a `Typing` or `ReadReceipt` target only for the content-free signal: `contacting` carves typing out only in its
+  captured body (`content` empty or absent, no key but `content`, `contenttype`, `messagetype`) and a read receipt
+  only with `name` its one query key.
 - **A call start** maps in two captured shapes (`contacting/call.rs`): the echo test call's (`WriteKind::Call` on
   `Scope::New`, the caller and the echo service added), and a chat header's call (`chat_call_start`): `WriteKind::Call`
   on the `Scope::Conversation` it is tied to by what it carries (`groupChat.threadId`, a group chat's id, or for a
@@ -240,9 +217,10 @@ What the code does and why. A change that undoes one of these needs a new reason
   delivery response that names a delivery id, logged. The registry still reads the deliveries and what passes (an
   acceptance, a call's end, an `attach`'s ring-end callbacks), so the native client's call machine sees the same
   deliveries, but it decides nothing for a lab fence.
-- **The call registry** (`crates/teams-fence/src/calls.rs`, one per fence) is the personal build's call rule
-  (`CallRule::Registry`, `Fence::tracks_calls`; tested on a lab roster through `Fence::tracking_calls`, `test-support`
-  only). Under it no source reads a call's members, so a
+- **The call registry** (`crates/teams-fence/src/calls.rs`, one per fence) keeps every fence's call bookkeeping. Its
+  own rule (`CallRule::Registry`, `Fence::tracks_calls`) is no build's fence's: tests turn it on over a lab roster
+  (`Fence::tracking_calls`, `test-support` only) to check the registry's resolution as verdicts, the resolution the
+  lab's and the personal fence's bookkeeping binds a call's operations by. Under it no source reads a call's members, so a
   follow-up passes only on a call this fence permitted, to exactly a link the call's own services handed out. A call
   start's permit (this fence's, taken once: `WritePermit` carries the fence's run-unique id and a serial) and the
   start's body make a pending call (`Fence::pend_start`); a readable answer registers it (`Fence::register_start`:
@@ -262,15 +240,15 @@ What the code does and why. A change that undoes one of these needs a new reason
   calls hold resolves to neither. An invitation the call machine dropped before it rang is retired for good
   (`Fence::let_go`). The native transport feeds the registry around a call write's send (below, "The call writes").
   A `conversationUpdate` binds nothing.
-- **The personal fence's calls** (`crates/teams-fence/src/decision/personal_calls.rs`, `docs/personal-build.md`,
-  "Calls"): no roster. A start is judged by its chat's one fresh thread read (`Listed`) listing the account and every
-  participant it names, the account among them (`CalleesNotInChat`, `NotAMember`); the test call's start and its
-  `add` only with exactly the account and `TEAMS_ECHO_BOT_MRI` (the web bundle's, a constant in `teams-fence`
-  re-exported by `teams-proto`; `NotTheTestCall`); a join by the registry's binding and its chat's read listing the
-  account; everything else as the registry resolves it, with no read. `observe_delivery` offers any readable
-  invitation addressed to the account whose caller isn't the account, one at a time (none while a registered call is
-  live, an offered one answered, or one rings with its end bound); an offered invitation's receipt reads no chat;
-  `pend_start` takes only the account's own start or join. The personal build creates no chat for the test call.
+- **The personal fence** (`crates/teams-fence/src/decision/audit.rs`, `docs/personal-build.md`): audit only, no
+  roster and no member read. `Fence::check` logs every write and permits it, whatever its kind and target (a channel,
+  a meeting chat, a `48:` stream, a new chat, any call start, join, `add` or follow-up, another account's
+  availability); an operation on a call moves the call registry as the lab's call rule moves it (what `resolve`, or
+  for an answer or a decline `resolve_answer`, ties it to), and `Fence::check_delivery_response` permits every
+  delivery response as the lab's does. The one thing it holds back is the call floor's (below); an allow it can't log
+  is `LogUnavailable`. `Fence::check_post_read` permits a read by `POST` naming anyone. `observe_delivery` offers any
+  readable invitation addressed to the account whose caller isn't the account, one at a time (none while a registered
+  call is live, an offered one answered, or one rings with its end bound), as a Teams client rings for one call.
 - **The call floor** (`crates/teams-fence/src/floor.rs`): an app of several accounts (the personal build, the lab app
   with several `--lab`) opens one fence per account and shares one `CallFloor` among them (`Fence::sharing_calls`).
   While another account on it holds the floor (a live call, an answered offer not left, an offer still ringing,
@@ -347,18 +325,19 @@ What the code does and why. A change that undoes one of these needs a new reason
   the engine stopping hangs the call up and lets an invitation that rings go unanswered.
 - **What the native client sends** (`teams-proto`): a read (`Read`: `GET`, no body), a plain request (`Request`, an
   open trait: any method and body, sent by `Transport::send` only when `teams_fence::contacting` calls it `None`,
-  logged `allowed` before it goes: the registration, profile lookups and presence reads whoever they name, the
-  account's own settings), or a sealed `Mutating` write as `Authorized<_>`; a Trouter frame only as a typed
-  `OwnFrame`, through `FrameSink`, which writes nothing to `fence.log` (a frame isn't a contacting write). `OwnFrame`
-  is sealed only to keep raw text out: no other crate makes frame text, and a new frame type in `teams-proto` (say
-  `user.activity`) is an ordinary change. A request that can't be logged isn't sent. Each service has one base
-  (`Service`; a new one is a code change: its base and its token's audience), and every URL is built on it and
-  checked against it. The personal build's sealed `OwnState` and `PostRead` lists stay beside them: through a
-  personal fence (`Fence::is_personal`) the transport refuses every plain request (`Refusal::Personal`), the
-  registration goes as its own-state entry (`Transport::send_own`), a read by `POST` only through `Client::lookup`
-  under a `Fence::check_post_read_among` permit against the people of the account's chats (`ChatPeople`, which the
-  engine refreshes from its store), and its sink logs each frame (`FrameSink::logging`, `teams_fence::FrameRecord`);
-  a lab binary sends their entries as plain requests and its sink logs no frame. There is no raw
+  logged `allowed` before it goes: the registrations, profile lookups, presence reads and the presence subscription
+  whoever they name, the account's own settings), or a sealed `Mutating` write as `Authorized<_>`; a Trouter frame
+  only as a typed `OwnFrame`, through `FrameSink`, which writes nothing to `fence.log` (a frame isn't a contacting
+  write). `OwnFrame` is sealed only to keep raw text out: no other crate makes frame text, and a new frame type in
+  `teams-proto` (say `user.activity`) is an ordinary change. A request that can't be logged isn't sent. Each service
+  has one base (`Service`; a new one is a code change: its base and its token's audience), and every URL is built on
+  it and checked against it. The sealed `OwnState` and `PostRead` types stay beside them: through a personal fence
+  (`Fence::is_personal`) the transport sends every plain request, one `contacting` calls `None` logged `allowed`,
+  one it calls a write or can't read logged `sent_unjudged` with that classification (`FenceLog::record_unjudged`:
+  method, host, path shape, never a body, query or header); the registrations go as their own-state entries
+  (`Transport::send_own`), a read by `POST` through `Client::lookup` under a `Fence::check_post_read` permit (any
+  names), and its sink logs each frame (`FrameSink::logging`, `teams_fence::FrameRecord`); a lab binary sends their
+  entries as plain requests and its sink logs no frame. There is no raw
   frame, no answer to a delivery but a typed call delivery response (`AcceptanceAcknowledgement`,
   `InvitationReceipt`, `DeliveryResponse`, sealed and no `OwnFrame` itself) sent only by `FrameSink::respond`, which
   makes its JSON once, has `Fence::check_delivery_response` decide exactly that JSON for the connection the sink was
@@ -473,7 +452,16 @@ What the code does and why. A change that undoes one of these needs a new reason
   absolute socket inside the dir `UI_SANDBOX_DIR` names (`ui_sandbox::in_sandbox`), and `teams-app` refuses a set
   `DISPLAY` too (the UI kit's GPUI features would let it fall back to X11). Notifications and the tray go over `zbus`
   only to the session bus the app is given (`DBUS_SESSION_BUS_ADDRESS`), never `$XDG_RUNTIME_DIR/bus`; links open only
-  through GPUI's `open_url`. The personal build runs on the user's desktop, and agents never run it.
+  through GPUI's `open_url`. The personal build runs on the user's desktop; agents run it only in its read-only mode.
+- **The personal build's read-only mode** (`crates/teams/src/read_only.rs`, `scripts/run-personal-read-only.sh`):
+  decided at start (`--read-only` or `TEAMS_READ_ONLY=1`), never turned off. Its engine's transports are read-only
+  (`HttpTransport::read_only`): every write, call write, own-state request and mutating plain request is refused before
+  the fence is asked (`Transport::read_only_refusal`, the outbox's first step) and logged as `refused_read_only`; the
+  engine gets no push channel and no calling whatever was asked (`teams_core::account::listening`) and polls by reads
+  (`EngineOptions::poll`). It runs only on a snapshot (`teams snapshot`, stores copied with `VACUUM INTO` from a
+  read-only connection) apart from the user's files, only in the UI sandbox, with no tray and no PipeWire; its tokens
+  come from `teams secrets` (a `get`-only broker) through an `OverlaySecretStore`, so a renewal stays in memory, and it
+  never signs in. The views ask `Core::read_only` and the settings `SettingsModel::read_only` to offer no write.
 - **Several accounts in one window** (`teams-ui/src/accounts.rs`, `desktop.rs`): every account runs at once, each its
   own engine, bridge, models, notifier, call alert, own presence and tray count; the window holds a shell per account
   and shows the one `Accounts` shows (the rail's avatars above Settings switch at once, a shell kept as it was left).
@@ -604,7 +592,7 @@ What the code does and why. A change that undoes one of these needs a new reason
   `--disable-audio-output`, `browser::BASE_ARGS`), which opens no audio device or server of the desktop; a call
   scenario reads the audio it receives in the page (the WebRTC hooks' audio tap: WebAudio and a muted element of its
   own, a Goertzel check at the tone), never from a speaker.
-- The personal build is never a live run of an agent's; the live lock is the lab's.
+- An agent's run of the personal build is only its read-only mode, never a lab live run; the live lock is the lab's.
 - Every live command, a lab browser's or a native client's, holds the live lock (`flock
   ~/.local/share/teams-lab/live.lock`) and runs under an outer `timeout --signal=INT`. Every page call and navigation
   is bounded (a `beforeunload` dialog holding a navigation is accepted after 5 s), and SIGINT or SIGTERM kills the

@@ -67,6 +67,8 @@ pub struct Palette {
     pub selection: u32,
     /// The left rail.
     pub rail: u32,
+    /// A mention of the account itself, and the mark beside a message that has one: Teams' orange.
+    pub mention: u32,
 }
 
 /// The light palette.
@@ -84,6 +86,7 @@ pub const LIGHT_PALETTE: Palette = Palette {
     selected: 0x00e8_ebfa,
     selection: 0x00c5_cbfa,
     rail: 0x00eb_ebeb,
+    mention: 0x00c4_3501,
 };
 
 /// The dark palette.
@@ -101,6 +104,7 @@ pub const DARK_PALETTE: Palette = Palette {
     selected: 0x002f_2f4a,
     selection: 0x0044_4791,
     rail: 0x0014_1414,
+    mention: 0x00e9_835e,
 };
 
 /// The high contrast palette (Teams' own: white on black, cyan and yellow marks).
@@ -118,6 +122,7 @@ pub const HIGH_CONTRAST_PALETTE: Palette = Palette {
     selected: 0x0000_3a40,
     selection: 0x0047_4700,
     rail: 0x0000_0000,
+    mention: 0x00ff_ff00,
 };
 
 /// Solarized's light palette.
@@ -135,6 +140,7 @@ pub const SOLARIZED_LIGHT_PALETTE: Palette = Palette {
     selected: 0x00de_e6dc,
     selection: 0x00c9_dbe6,
     rail: 0x00e4_dcc5,
+    mention: 0x00cb_4b16,
 };
 
 /// Solarized's dark palette.
@@ -152,6 +158,7 @@ pub const SOLARIZED_DARK_PALETTE: Palette = Palette {
     selected: 0x000c_4a5c,
     selection: 0x001b_5a6e,
     rail: 0x0000_212b,
+    mention: 0x00cb_4b16,
 };
 
 /// Nord's palette.
@@ -169,6 +176,7 @@ pub const NORD_PALETTE: Palette = Palette {
     selected: 0x004c_566a,
     selection: 0x005e_81ac,
     rail: 0x0027_2c36,
+    mention: 0x00d0_8770,
 };
 
 /// Dracula's palette.
@@ -186,6 +194,7 @@ pub const DRACULA_PALETTE: Palette = Palette {
     selected: 0x0044_475a,
     selection: 0x005a_5e7a,
     rail: 0x0021_222c,
+    mention: 0x00ff_b86c,
 };
 
 /// A theme of the catalog.
@@ -456,8 +465,9 @@ pub fn set_appearance(appearance: &Appearance, cx: &mut App) {
 /// the choice's for that side), switches the kit to that mode and redraws every window.
 fn refresh(cx: &mut App) {
     let current = cx.global::<Current>();
-    let appearance = current.appearance.clone();
+    let mut appearance = current.appearance.clone();
     let active = appearance.active(current.system);
+    appearance.font_family = installed_family(appearance.font_family, cx);
     let light = if active.dark {
         spec_or(appearance.light_theme, false)
     } else {
@@ -472,6 +482,16 @@ fn refresh(cx: &mut App) {
     Theme::global_mut(cx).light_theme = Rc::new(config(light, &appearance));
     Theme::global_mut(cx).dark_theme = Rc::new(config(dark, &appearance));
     Theme::change(active.mode(), None, cx);
+}
+
+/// `family` when the system has it, else `None` (the system's UI font). GPUI resolves a family it can't find through
+/// its own fallback list at the regular weight and upright, which would draw every bold and italic text regular; the
+/// kit names the family the system's UI font lands on, which keeps both. A text system that lists no family at all
+/// (the test platform's) takes the name as it is.
+fn installed_family(family: Option<String>, cx: &App) -> Option<String> {
+    let name = family?;
+    let installed = cx.text_system().all_font_names();
+    (installed.is_empty() || installed.contains(&name)).then_some(name)
 }
 
 /// Applies `window`'s appearance now and again each time the platform says it changed, for as long as the returned

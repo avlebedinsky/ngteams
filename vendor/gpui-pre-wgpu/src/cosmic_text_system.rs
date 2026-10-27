@@ -17,7 +17,7 @@ use smallvec::SmallVec;
 use std::{borrow::Cow, ops::Range, sync::Arc};
 use swash::{
     scale::{Render, ScaleContext, Source, StrikeWith},
-    zeno::{Format, Vector},
+    zeno::{Angle, Format, Transform, Vector},
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -57,6 +57,9 @@ struct CosmicTextSystemState {
     /// Caches the `FontId`s associated with a specific family to avoid iterating the font database
     /// for every font face in a family.
     font_ids_by_family_cache: HashMap<FontKey, SmallVec<[FontId; 4]>>,
+    /// The faces drawn other than as they are: a variable face at a requested weight, or a face
+    /// emboldened or slanted because its family has no face of the requested weight or style.
+    styled_font_ids: HashMap<(FontId, Synthesis), FontId>,
     system_font_fallback: String,
     missing_glyph_sink: Option<Arc<dyn MissingGlyphSink>>,
 }
@@ -68,6 +71,32 @@ struct LoadedFont {
     /// resolved at load time so `layout_line` shares one chain across faces.
     /// `Arc` keeps clone cheap on the per-run hot path.
     user_fallback_chain: Arc<[(FontId, SharedString)]>,
+    /// How the face is drawn other than as it is.
+    synthesis: Synthesis,
+}
+
+/// How a face is drawn to come close to the weight and style asked for when its family has no
+/// face of them: a variable face at the weight on its `wght` axis (shaped and rasterized there),
+/// else a face too light for a bold request emboldened, and an upright face slanted for an italic
+/// one, as a browser synthesizes them.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+struct Synthesis {
+    /// The value set on the face's `wght` axis.
+    weight: Option<u16>,
+    embolden: bool,
+    oblique: bool,
+}
+
+impl Synthesis {
+    /// The weight from which a face lighter than [`Self::LIGHTEST_UNSYNTHESIZED`] is emboldened.
+    const BOLD: f32 = 600.0;
+    const LIGHTEST_UNSYNTHESIZED: u16 = 600;
+    /// The slant of a synthesized oblique.
+    const OBLIQUE_DEGREES: f32 = 14.0;
+
+    fn is_none(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 struct FontMatchProperties {
@@ -139,6 +168,7 @@ impl CosmicTextSystem {
             loaded_fonts: Vec::new(),
             loaded_font_ids_by_key: HashMap::default(),
             font_ids_by_family_cache: HashMap::default(),
+            styled_font_ids: HashMap::default(),
             system_font_fallback: system_font_fallback.to_string(),
             missing_glyph_sink: None,
         }))
@@ -158,6 +188,7 @@ impl CosmicTextSystem {
             loaded_fonts: Vec::new(),
             loaded_font_ids_by_key: HashMap::default(),
             font_ids_by_family_cache: HashMap::default(),
+            styled_font_ids: HashMap::default(),
             system_font_fallback: system_font_fallback.to_string(),
             missing_glyph_sink: None,
         }))
@@ -204,8 +235,9 @@ impl PlatformTextSystem for CosmicTextSystem {
         };
 
         let ix = find_best_match(font, candidates, &state)?;
+        let font_id = candidates[ix];
 
-        Ok(candidates[ix])
+        Ok(state.styled_font_id(font_id, font))
     }
 
     fn prewarm_fonts(&self, font_ids: &[FontId]) {
@@ -303,10 +335,81 @@ impl CosmicTextSystemState {
             primary_family_name: first_family.0.clone().into(),
             stretch: face.stretch,
             style: face.style,
-            weight: face.weight,
+            weight: loaded_font
+                .synthesis
+                .weight
+                .map_or(face.weight, cosmic_text::Weight),
             features: loaded_font.features.clone(),
             fallback_chain: Arc::clone(&loaded_font.user_fallback_chain),
         })
+    }
+
+    /// The font that draws `font_id`'s face as close to `font`'s weight and style as it can be
+    /// drawn: the face itself when it has them.
+    fn styled_font_id(&mut self, font_id: FontId, font: &Font) -> FontId {
+        let synthesis = self.synthesis(font_id, font);
+        if synthesis.is_none() {
+            return font_id;
+        }
+        if let Some(&styled) = self.styled_font_ids.get(&(font_id, synthesis)) {
+            return styled;
+        }
+        let loaded = self.loaded_font(font_id);
+        let face_font = match synthesis.weight {
+            Some(weight) => self
+                .font_system
+                .get_font(loaded.font.id(), cosmic_text::Weight(weight)),
+            None => Some(Arc::clone(&loaded.font)),
+        };
+        let Some(face_font) = face_font else {
+            return font_id;
+        };
+        let loaded = self.loaded_font(font_id);
+        let styled = LoadedFont {
+            font: face_font,
+            features: loaded.features.clone(),
+            is_known_emoji_font: loaded.is_known_emoji_font,
+            user_fallback_chain: Arc::clone(&loaded.user_fallback_chain),
+            synthesis,
+        };
+        let styled_id = FontId(self.loaded_fonts.len());
+        self.loaded_fonts.push(styled);
+        self.styled_font_ids.insert((font_id, synthesis), styled_id);
+        styled_id
+    }
+
+    /// What drawing `font_id`'s face at `font`'s weight and style takes.
+    fn synthesis(&self, font_id: FontId, font: &Font) -> Synthesis {
+        let loaded = self.loaded_font(font_id);
+        let Some(face) = self.font_system.db().face(loaded.font.id()) else {
+            return Synthesis::default();
+        };
+        if loaded.is_known_emoji_font {
+            return Synthesis::default();
+        }
+        let requested = font.weight.0.round().clamp(1.0, 1000.0) as u16;
+        let weight_axis = loaded
+            .font
+            .as_swash()
+            .variations()
+            .find_by_tag(swash::tag_from_bytes(b"wght"))
+            .map(|axis| (axis.min_value(), axis.max_value()));
+        let weight = weight_axis
+            .filter(|(min, max)| (*min..=*max).contains(&f32::from(requested)))
+            .filter(|_| requested != face.weight.0)
+            .map(|_| requested);
+        let embolden = weight.is_none()
+            && font.weight.0 >= Synthesis::BOLD
+            && face.weight.0 < Synthesis::LIGHTEST_UNSYNTHESIZED;
+        let oblique = matches!(
+            font.style,
+            gpui::FontStyle::Italic | gpui::FontStyle::Oblique
+        ) && face.style == cosmic_text::Style::Normal;
+        Synthesis {
+            weight,
+            embolden,
+            oblique,
+        }
     }
 
     fn prewarm_fonts(&mut self, font_ids: &[FontId]) {
@@ -439,6 +542,7 @@ impl CosmicTextSystemState {
                 features: cosmic_features.clone(),
                 is_known_emoji_font: check_is_known_emoji_font(&postscript_name),
                 user_fallback_chain: Arc::clone(&user_fallback_chain),
+                synthesis: Synthesis::default(),
             });
             self.loaded_font_ids_by_key.insert(key, font_id);
         }
@@ -517,6 +621,7 @@ impl CosmicTextSystemState {
         let loaded_font = &self.loaded_fonts[params.font_id.0];
         let font_ref = loaded_font.font.as_swash();
         let pixel_size = f32::from(params.font_size);
+        let synthesis = loaded_font.synthesis;
 
         let subpixel_offset = Vector::new(
             params.subpixel_variant.x as f32 / SUBPIXEL_VARIANTS_X as f32 / params.scale_factor,
@@ -528,6 +633,13 @@ impl CosmicTextSystemState {
             .builder(font_ref)
             .size(pixel_size * params.scale_factor)
             .hint(true)
+            // The context keeps the last scaler's coordinates: start from the default instance.
+            .normalized_coords(std::iter::empty::<swash::NormalizedCoord>())
+            .variations(
+                synthesis
+                    .weight
+                    .map(|weight| (swash::tag_from_bytes(b"wght"), f32::from(weight))),
+            )
             .build();
 
         let sources: &[Source] = if params.is_emoji {
@@ -541,6 +653,16 @@ impl CosmicTextSystemState {
         };
 
         let mut renderer = Render::new(sources);
+        if synthesis.embolden {
+            // As FreeType's `FT_GlyphSlot_Embolden`: a 24th of the em.
+            renderer.embolden(pixel_size * params.scale_factor / 24.0);
+        }
+        if synthesis.oblique {
+            renderer.transform(Some(Transform::skew(
+                Angle::from_degrees(Synthesis::OBLIQUE_DEGREES),
+                Angle::from_degrees(0.0),
+            )));
+        }
         if params.subpixel_rendering {
             // There seems to be a bug in Swash where the B and R values are swapped.
             renderer
@@ -588,6 +710,7 @@ impl CosmicTextSystemState {
                 features: CosmicFontFeatures::new(),
                 is_known_emoji_font: check_is_known_emoji_font(&face.post_script_name),
                 user_fallback_chain: Arc::from(Vec::new()),
+                synthesis: Synthesis::default(),
             });
 
             Ok(font_id)

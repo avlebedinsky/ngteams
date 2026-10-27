@@ -3,7 +3,8 @@
 //! mention picker), and each `Event::Presence` the bridge applies is drawn as a dot on the chat list's avatar, in the
 //! chat's header and beside each person the picker offers; "unknown" (a hollow ring) before the first and after a
 //! failed read; a group chat's row shows none; the list asking about its top chats' people only, within the engine's
-//! watch. Every id and name is made up.
+//! watch; the chat view asking about the newest senders it shows (never the account or a bot) and badging each.
+//! Every id and name is made up.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
@@ -19,7 +20,7 @@ use gpui::{Entity, TestAppContext, VisualTestContext, px, size};
 use teams_core::{Availability, Event};
 use teams_store::{Conversation, ConversationKind, Member, Message};
 use teams_ui::chat_list::LIST_WATCHED;
-use teams_ui::chat_view::ChatView;
+use teams_ui::chat_view::{ChatView, SENDERS_WATCHED};
 use teams_ui::presence::{fill, label};
 use teams_ui::settings::Settings;
 use teams_ui::shell::Shell;
@@ -375,4 +376,49 @@ fn every_availability_has_a_label_and_only_named_ones_a_fill() {
     assert_ne!(fill(&Availability::Available), fill(&Availability::Busy));
     assert_ne!(fill(&Availability::Busy), fill(&Availability::Away));
     assert_ne!(fill(&Availability::Away), fill(&Availability::Offline));
+}
+
+#[test]
+fn the_chat_view_asks_about_the_senders_it_shows_and_badges_each_never_the_account_or_a_bot() {
+    let rig = Rig::start();
+    rig.cx.update(teams_ui::window::init);
+    // a group chat's senders: more people than the view's share of the watch, then a bot, then the account itself
+    let bot = "28:00000000-0000-4000-8000-0000000000b0";
+    let count = SENDERS_WATCHED + 2;
+    let people: Vec<String> = (0..count).map(partner).collect();
+    let mut messages: Vec<Message> = (0..count)
+        .map(|n| message(TRIO, &people[n], 1_000 + 1_000 * i64::try_from(n).unwrap()))
+        .collect();
+    messages.push(message(TRIO, bot, 90_000));
+    messages.push(message(TRIO, LAB_A, 91_000));
+    rig.core
+        .conversations
+        .lock()
+        .unwrap()
+        .push(chat(TRIO, ConversationKind::Group, Some("Lab trio"), 91_000));
+    rig.core.messages.lock().unwrap().insert(TRIO.to_owned(), messages);
+    let parts = parts::parts(&rig, Settings::default(), Arc::new(ViewTrace::off()));
+    let app: &'static mut TestAppContext = Box::leak(Box::new(rig.cx.clone()));
+    let (_view, cx) = app.add_window_view(|window, cx| ChatView::new(parts, TRIO.to_owned(), window, cx));
+    cx.simulate_resize(size(px(800.0), px(900.0)));
+    draw(cx);
+
+    // the newest senders within the share, the newest asked last; never the account, the bot or the older ones
+    let asked = rig.core.presence_asked.lock().unwrap().clone();
+    let newest: Vec<String> = people[count - SENDERS_WATCHED..].to_vec();
+    assert!(asked.len() >= SENDERS_WATCHED, "{asked:?}");
+    assert_eq!(asked[asked.len() - SENDERS_WATCHED..], newest);
+    for never in [LAB_A, bot, people[0].as_str(), people[1].as_str()] {
+        assert!(!asked.iter().any(|mri| mri == never), "{never} asked: {asked:?}");
+    }
+
+    // nothing drawn while unknown; each sender's badge once the engine tells it
+    assert!(cx.debug_bounds("presence-unknown").is_none());
+    told(&rig, &people[count - 1], Availability::Available);
+    told(&rig, &people[count - 2], Availability::Busy);
+    told(&rig, &people[count - 3], Availability::Away);
+    draw(cx);
+    for state in ["presence-available", "presence-busy", "presence-away"] {
+        assert!(cx.debug_bounds(state).is_some(), "{state} on its sender's avatar");
+    }
 }

@@ -174,6 +174,7 @@ fn the_migration_starts_the_channels_syncs_again_and_keeps_the_chats() -> Result
     let raw = rusqlite::Connection::open(store_path(&dir)).expect("open directly");
     raw.execute_batch(
         "DROP TABLE reply_roots; DROP TABLE team_channels; DROP TABLE teams; DROP TABLE teams_read;
+         DROP TABLE favorites; DROP TABLE favorites_read; ALTER TABLE conversations DROP COLUMN empty;
          PRAGMA user_version = 8;",
     )
     .expect("back to schema 8");
@@ -188,5 +189,72 @@ fn the_migration_starts_the_channels_syncs_again_and_keeps_the_chats() -> Result
         "a channel's sync starts again from the newest page"
     );
     assert_eq!(store.teams()?, []);
+    assert_eq!(store.favorites()?, None);
+    assert_eq!(store.empty_conversations()?, Vec::<String>::new());
+    Ok(())
+}
+
+#[test]
+fn the_favourites_are_replaced_whole_in_their_order_and_kept_across_a_reopen() -> Result<(), StoreError> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(&store_path(&dir))?;
+    assert_eq!(store.favorites()?, None, "none before a read");
+    let listed = ["48:notes".to_owned(), CHAT.to_owned(), "48:notes".to_owned()];
+    assert_eq!(store.replace_favorites(&listed, 1_000)?, Applied::Inserted);
+    assert_eq!(store.replace_favorites(&listed[..2], 2_000)?, Applied::Ignored);
+    drop(store);
+    let mut store = Store::open(&store_path(&dir))?;
+    assert_eq!(store.favorites()?, Some(vec!["48:notes".to_owned(), CHAT.to_owned()]));
+    let reordered = [CHAT.to_owned(), "48:notes".to_owned()];
+    assert_eq!(store.replace_favorites(&reordered, 3_000)?, Applied::Updated);
+    assert_eq!(store.favorites()?, Some(reordered.to_vec()));
+    assert_eq!(store.replace_favorites(&[], 4_000)?, Applied::Updated);
+    assert_eq!(store.favorites()?, Some(Vec::new()), "none, known");
+    Ok(())
+}
+
+#[test]
+fn a_conversation_is_empty_only_as_the_service_last_said() -> Result<(), StoreError> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(&store_path(&dir))?;
+    store.upsert_conversation(&conversation(CHAT, ConversationKind::OneToOne))?;
+    assert_eq!(store.empty_conversations()?, Vec::<String>::new());
+    assert!(store.set_conversation_empty(CHAT, Some(true))?);
+    assert!(!store.set_conversation_empty(CHAT, Some(true))?, "no change");
+    assert!(!store.set_conversation_empty("19:unknown@thread.v2", Some(true))?);
+    assert_eq!(store.empty_conversations()?, [CHAT]);
+    assert!(store.set_conversation_empty(CHAT, None)?);
+    assert_eq!(
+        store.empty_conversations()?,
+        Vec::<String>::new(),
+        "not known is not empty"
+    );
+    assert!(store.set_conversation_empty(CHAT, Some(false))?);
+    assert_eq!(store.empty_conversations()?, Vec::<String>::new());
+    Ok(())
+}
+
+#[test]
+fn the_favourites_migration_keeps_the_teams_but_has_them_read_again() -> Result<(), StoreError> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(&store_path(&dir))?;
+    store.replace_teams(&teams(), 5_000)?;
+    store.upsert_conversation(&conversation(CHAT, ConversationKind::OneToOne))?;
+    drop(store);
+    // the store as schema 10 left it
+    let raw = rusqlite::Connection::open(store_path(&dir)).expect("open directly");
+    raw.execute_batch(
+        "DROP TABLE favorites; DROP TABLE favorites_read; ALTER TABLE conversations DROP COLUMN empty;
+         PRAGMA user_version = 10;",
+    )
+    .expect("back to schema 10");
+    drop(raw);
+
+    let store = Store::open(&store_path(&dir))?;
+    assert_eq!(store.schema_version()?, SCHEMA_VERSION);
+    assert_eq!(store.teams()?, teams());
+    assert_eq!(store.teams_read_at()?, Some(0), "old: read again at the next ask");
+    assert_eq!(store.favorites()?, None);
+    assert_eq!(store.empty_conversations()?, Vec::<String>::new());
     Ok(())
 }

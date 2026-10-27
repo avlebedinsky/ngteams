@@ -6,7 +6,7 @@
 //! the `test-support` mock origins, a test roster and log). Once the window is drawn and the chats are listed, the
 //! child walks the views one step at a time (no chat open; the a–b chat with a message selected and its actions
 //! shown; a reply begun; the account menu; every page of the settings, Calls with made-up devices; the appearance
-//! and the chat again in Teams Dark) and says `shot <name>` after each; the parent screenshots the window and lets it
+//! and the chat again in Teams Dark; the 12-hour time format and a chat's times on it) and says `shot <name>` after each; the parent screenshots the window and lets it
 //! go on. The views are driven from inside the app, never by screen coordinates.
 //!
 //! Without weston 15, niri or `dbus-daemon` it says so and passes, unless `GPUI_SMOKE_REQUIRE=1`.
@@ -31,7 +31,9 @@ use teams_core::lab::display_name;
 use teams_fence::lab::{Alias, LabConfig, record_abc_chat};
 use teams_fence::{Fence, FenceLog, LiveMembershipSource, Mri, Roster};
 use teams_media::devices::catalog::{DeviceInfo, DeviceKind, DeviceList, FixedDirectory};
-use teams_mock::{AB_CHAT, ABC_CHAT, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, TrouterMock, lab_toml};
+use teams_mock::{
+    AB_CHAT, ABC_CHAT, AMS_BASE, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, PRESENCE_BASE, TrouterMock, lab_toml,
+};
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::Store;
 use teams_trouter::{Options, Trouter, TrouterCredentials};
@@ -62,12 +64,26 @@ const SETTLE: Duration = Duration::from_millis(1500);
 type Step = (&'static str, fn(&Entity<Shell>, &mut Window, &mut App));
 
 /// The tour.
-const STEPS: [Step; 13] = [
+const STEPS: [Step; 19] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
+        // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
+        let models = shell.read(cx).models().clone();
+        models.apply(
+            teams_core::Event::Presence {
+                mri: LAB_B.to_owned(),
+                availability: teams_core::Availability::Away,
+            },
+            cx,
+        );
         shell.update(cx, |shell, cx| shell.open_chat(AB_CHAT.to_owned(), window, cx));
     }),
-    ("chat-actions", select_last_message),
+    ("chat-hover-theirs", |shell, _, cx| hover_last(shell, false, cx)),
+    ("chat-hover-mine", |shell, _, cx| hover_last(shell, true, cx)),
+    ("chat-actions", |shell, window, cx| {
+        hover_none(shell, cx);
+        select_last_message(shell, window, cx);
+    }),
     ("chat-reply", |shell, window, cx| {
         if let Some((chat, message)) = last_message(shell, cx) {
             chat.update(cx, |chat, cx| chat.act(MessageAction::Reply, &message, window, cx));
@@ -112,6 +128,35 @@ const STEPS: [Step; 13] = [
     ("chat-dark", |shell, window, cx| {
         shell.update(cx, |shell, cx| shell.show_chats(window, cx));
         select_last_message(shell, window, cx);
+    }),
+    // b's pasted picture with an emoticon in its text, and b's wave alone (`seed_pictures`), in Teams Dark
+    ("chat-pictures", |shell, window, cx| {
+        shell.update(cx, |shell, cx| shell.open_chat(ABC_CHAT.to_owned(), window, cx));
+    }),
+    // the 12-hour clock chosen, back in Teams Light: the setting, then the a–b chat's times
+    ("settings-time-12-hour", |shell, _, cx| {
+        let model = shell.read(cx).settings().clone();
+        model.update(cx, |model, cx| {
+            model.change(
+                |settings| {
+                    settings.appearance.theme = teams_ui::theme::LIGHT_KEY;
+                    settings.time_format = teams_ui::settings::TimeFormat::Twelve;
+                },
+                cx,
+            );
+        });
+        show_page(shell, Page::General, cx);
+    }),
+    ("chat-12-hour", |shell, window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.show_chats(window, cx);
+            shell.open_chat(AB_CHAT.to_owned(), window, cx);
+        });
+    }),
+    // the a–b–c chat: its senders' presence as the view asked the engine and the mock's UPS answered (`seed_group`),
+    // b's and c's badges on their avatars
+    ("chat-group-presence", |shell, window, cx| {
+        shell.update(cx, |shell, cx| shell.open_chat(ABC_CHAT.to_owned(), window, cx));
     }),
 ];
 
@@ -216,6 +261,28 @@ fn last_message(shell: &Entity<Shell>, cx: &App) -> Option<(Entity<teams_ui::cha
         _ => None,
     })?;
     Some((chat, message))
+}
+
+/// Shows the hover bar of the last message of b's (`own` false) or a's that offers actions, as the pointer over it
+/// would, nothing selected.
+fn hover_last(shell: &Entity<Shell>, own: bool, cx: &mut App) {
+    let Some(chat) = shell.read(cx).chat().cloned() else {
+        return;
+    };
+    let message = chat.read(cx).items().iter().rev().find_map(|item| match item {
+        Item::Message(message) if message.own == own && !message.actions().is_empty() => Some(message.id.clone()),
+        _ => None,
+    });
+    chat.update(cx, |chat, cx| {
+        chat.select(None, cx);
+        chat.hover(message, cx);
+    });
+}
+
+fn hover_none(shell: &Entity<Shell>, cx: &mut App) {
+    if let Some(chat) = shell.read(cx).chat().cloned() {
+        chat.update(cx, |chat, cx| chat.hover(None, cx));
+    }
 }
 
 fn select_last_message(shell: &Entity<Shell>, _: &mut Window, cx: &mut App) {
@@ -343,6 +410,10 @@ impl MockLab {
             .build()?;
         let mock = runtime.block_on(ChatServiceMock::start())?;
         let trouter = mock.start_trouter()?;
+        seed_group(&mock, &runtime)?;
+        seed_pictures(&mock, &runtime)?;
+        seed_own(&mock)?;
+        seed_mentions(&mock)?;
         let dir = tempfile::tempdir()?;
         let config = LabConfig::parse(&lab_toml(dir.path()), dir.path())?;
         record_abc_chat(config.paths(), ABC_CHAT)?;
@@ -370,7 +441,7 @@ impl MockLab {
         let engine = engine::start(Parts {
             calls: None,
             store: Store::open(&config.paths().store_file(Alias::A))?,
-            client: Arc::new(Client::new(http()?)),
+            client: Arc::new(Client::new(http()?.with_ams(AMS_BASE)?.with_presence(PRESENCE_BASE)?)),
             outbox: Outbox::new(transport, fence, Arc::new(membership), author),
             push: Some(Push::new(trouter_client)),
             options: EngineOptions::default(),
@@ -384,6 +455,133 @@ impl MockLab {
         };
         Ok((lab, engine))
     }
+}
+
+/// c's message in the a–b–c chat, before b's; the mock's UPS answering b as away (as the "chat" step tells it) and c
+/// as busy, so the chat's senders show two badges once the view asked about them.
+fn seed_group(mock: &ChatServiceMock, runtime: &tokio::runtime::Runtime) -> SandboxResult {
+    runtime.block_on(mock.serve_presence(&[(LAB_B, "Away"), (LAB_C, "Busy")]));
+    mock.post_as(
+        LAB_C,
+        ABC_CHAT,
+        "<p>Morning all, the release notes are ready for a look</p>",
+    )
+    .ok_or("c's post refused")?;
+    Ok(())
+}
+
+/// A pasted picture's made-up object, and the view of it b's message names (on the media service's host, read from
+/// the account's AMS base).
+const PICTURE_OBJECT: &str = "0-eus-d9-00000000000000000000000000000abc";
+
+/// An emoticon's `<img>` as Teams sends it, in its span (`docs/protocol/chat.md`, "Pictures in messages").
+fn emoticon(id: &str, alt: &str, side: u32) -> String {
+    format!(
+        "<span title=\"{id}\" type=\"({id})\" class=\"animated-emoticon-{side}-{id}\" itemscope=\"\"><img itemscope=\"\" \
+         itemtype=\"http://schema.skype.com/Emoji\" itemid=\"{id}\" \
+         src=\"https://statics.teams.cdn.office.net/evergreen-assets/personal-expressions/v2/assets/emoticons/{id}/default/\
+         20_f.png\" alt=\"{alt}\" style=\"width:{side}px; height:{side}px\"></span>"
+    )
+}
+
+/// b's two messages in the a–b–c chat as the ones Teams shows: a status line, a pasted picture of a dashboard (made up,
+/// served by the mock as AMS would) and two lines, the last ending in an emoticon; then a wave alone.
+fn seed_pictures(mock: &ChatServiceMock, runtime: &tokio::runtime::Runtime) -> SandboxResult {
+    let mut png = Vec::new();
+    made_up_dashboard().write_to(&mut io::Cursor::new(&mut png), image::ImageFormat::Png)?;
+    runtime.block_on(mock.serve_bytes(&format!("/v1/objects/{PICTURE_OBJECT}/views/imgo"), "image/png", png));
+    let html = format!(
+        "<p>Made-up board summary for the lab week:</p>\r\n\
+         <p><img src=\"https://us-api.asm.skype.com/v1/objects/{PICTURE_OBJECT}/views/imgo\" \
+         itemtype=\"http://schema.skype.com/AMSImage\" itemscope=\"png\" width=\"884\" height=\"228\" alt=\"image\" \
+         id=\"x_{PICTURE_OBJECT}\" itemid=\"{PICTURE_OBJECT}\"></p>\r\n\
+         <p>12 made-up cards moved</p>\r\n<p>7 made-up cards added{}</p>",
+        emoticon("speechless", "\u{1f610}", 20)
+    );
+    mock.post_as(LAB_B, ABC_CHAT, &html).ok_or("b's picture refused")?;
+    let wave = format!("<div>{}</div>", emoticon("1f44b_wavinghand", "\u{1f44b}", 58));
+    mock.post_as(LAB_B, ABC_CHAT, &wave).ok_or("b's wave refused")?;
+    Ok(())
+}
+
+/// A made-up dashboard, 884 by 228: four cards on black, each with a coloured figure.
+fn made_up_dashboard() -> image::RgbaImage {
+    let mut picture = image::RgbaImage::from_pixel(884, 228, image::Rgba([12, 12, 12, 255]));
+    let mut fill = |x0: u32, y0: u32, width: u32, height: u32, colour: [u8; 3]| {
+        for y in y0..(y0 + height).min(228) {
+            for x in x0..(x0 + width).min(884) {
+                picture.put_pixel(x, y, image::Rgba([colour[0], colour[1], colour[2], 255]));
+            }
+        }
+    };
+    // the title and the subtitle
+    fill(16, 14, 250, 16, [235, 235, 235]);
+    fill(16, 40, 520, 8, [120, 120, 120]);
+    let figures = [[74, 222, 128], [59, 130, 246], [245, 245, 245], [245, 245, 245]];
+    for (at, figure) in (0u32..).zip(figures) {
+        let x = 16 + at * 214;
+        fill(x, 72, 200, 140, [44, 44, 44]);
+        fill(x + 2, 74, 196, 136, [22, 22, 22]);
+        fill(x + 16, 92, 80, 6, [150, 150, 150]);
+        fill(x + 16, 112, 60, 28, figure);
+        fill(x + 16, 156, 150, 6, [110, 110, 110]);
+        fill(x + 16, 170, 110, 6, [110, 110, 110]);
+    }
+    picture
+}
+
+/// a's own message in the a–b chat, before b's, with a's heart on it: a's hover bar, and a's most used reactions
+/// (the heart, and the eyes on b's) first in every hover bar.
+fn seed_own(mock: &ChatServiceMock) -> SandboxResult {
+    let id = mock
+        .post_as(LAB_A, AB_CHAT, "<p>Sure, I can look at it this afternoon</p>")
+        .ok_or("a's post refused")?;
+    let client_message_id = (9_000_000_000_000_000_000_u64 + id.parse::<u64>()?).to_string();
+    let changed = mock.change_message(AB_CHAT, &client_message_id, |message| {
+        message["properties"]["emotions"] = serde_json::json!([{
+            "key": "heart",
+            "users": [{"mri": LAB_A, "time": 1_767_268_860_000_i64, "value": "1767268860000"}],
+        }]);
+    });
+    if !changed {
+        return Err("a's post isn't in the mock".into());
+    }
+    Ok(())
+}
+
+/// b's message to a in the a–b chat as the one Teams shows: a mention of a and one of c in its text, and a's own
+/// reaction on it.
+fn seed_mentions(mock: &ChatServiceMock) -> SandboxResult {
+    let mention = |id: u32, name: &str| {
+        format!("<span itemscope=\"\" itemtype=\"http://schema.skype.com/Mention\" itemid=\"{id}\">{name}</span>")
+    };
+    let html = format!(
+        "<p>{} can you check the made-up report with {}? It is a long message written only for this tour, so that it \
+         wraps onto a second line and a third. Nothing in it is about anyone, it just fills the bubble with enough \
+         words to show how a long message reads with two mentions at the start of it, ending right about here</p>",
+        mention(0, "Lab A"),
+        mention(1, "Lab C")
+    );
+    let id = mock.post_as(LAB_B, AB_CHAT, &html).ok_or("b's post refused")?;
+    let entry = |id: u32, mri: &str, name: &str| {
+        serde_json::json!({
+            "@type": "http://schema.skype.com/Mention", "itemid": id, "mri": mri, "mentionType": "person",
+            "displayName": name,
+        })
+    };
+    let mentions = serde_json::json!([entry(0, LAB_A, "Lab A"), entry(1, LAB_C, "Lab C")]).to_string();
+    let client_message_id = (9_000_000_000_000_000_000_u64 + id.parse::<u64>()?).to_string();
+    let changed = mock.change_message(AB_CHAT, &client_message_id, |message| {
+        message["properties"]["mentions"] = serde_json::json!(mentions);
+        message["properties"]["emotions"] = serde_json::json!([{
+            "key": "1f440_eyes",
+            "users": [{"mri": LAB_A, "time": 1_767_268_800_000_i64, "value": "1767268800000"}],
+        }]);
+    });
+    if !changed {
+        return Err("b's post isn't in the mock".into());
+    }
+    Ok(())
 }
 
 fn child_window() -> SandboxResult {

@@ -13,7 +13,7 @@ use gpui::{AppContext as _, TestAppContext};
 use teams_media::devices::catalog::{DeviceDirectory as _, DeviceInfo, DeviceKind, DeviceList, FixedDirectory};
 use teams_ui::settings::{
     AccountSettings, DEFAULT_IDLE_MINUTES, DIR_MODE, FILE_MODE, FirstRunState, LogLevel, ManualStatus, Notifications,
-    Problem, Settings, SettingsFile, SettingsModel, attach_devices, parse, render,
+    Problem, Settings, SettingsFile, SettingsModel, TimeFormat, attach_devices, parse, render,
 };
 use teams_ui::theme::{self, Appearance, THEMES};
 
@@ -52,6 +52,7 @@ fn changed() -> Settings {
             font_size: 17,
             font_family: Some("Noto Sans".to_owned()),
         },
+        time_format: TimeFormat::Twelve,
         accounts: [(
             "8:orgid:00000000-0000-4000-8000-00000000000b".to_owned(),
             AccountSettings {
@@ -632,6 +633,30 @@ fn the_theme_follows_the_system_by_default_and_every_choice_of_how_the_app_looks
             assert_eq!(read, settings);
             assert!(problems.is_empty(), "{problems:?}");
         }
+    }
+}
+
+#[test]
+fn the_time_format_follows_the_system_by_default_and_each_choice_goes_through_the_file() {
+    assert_eq!(Settings::default().time_format, TimeFormat::System);
+    for format in TimeFormat::ALL {
+        let settings = Settings {
+            time_format: format,
+            ..Settings::default()
+        };
+        let text = render(&settings);
+        assert!(text.contains(&format!("time_format = \"{}\"", format.key())), "{text}");
+        let (read, problems) = parse(&text).expect("TOML");
+        assert_eq!(read, settings);
+        assert!(problems.is_empty(), "{problems:?}");
+    }
+    for bad in ["time_format = \"am-pm\"", "time_format = 12", "time_format = \"12h\""] {
+        let (read, problems) = parse(bad).expect("TOML");
+        assert_eq!(read, Settings::default(), "{bad}");
+        assert!(
+            matches!(&problems[..], [Problem::BadValue { key: "time_format", .. }]),
+            "{bad}: {problems:?}"
+        );
     }
 }
 

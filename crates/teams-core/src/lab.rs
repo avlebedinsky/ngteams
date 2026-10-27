@@ -6,7 +6,8 @@
 //! ([`LabPaths::region_file`], read by [`Region::load`]), 1:1, group and meeting chats' members read live
 //! ([`LiveMembershipSource::for_fence`], its credential the chat transport's), the store at [`LabPaths::store_file`],
 //! the reads' transport with the middle tier's base from the GTM `middleTier` (the profile lookup's), CSA's from the
-//! GTM `chatSvcAggAfd` (the teams read's) and UPS's from the GTM `presenceUPS` (the presence read's; the writes'
+//! GTM `chatSvcAggAfd` (the teams read's), AMS's from the GTM `amsV2` (a message's pictures') and UPS's from the GTM
+//! `presenceUPS` (the presence read's; the writes'
 //! transport gets UPS's base too, for the account's own availability, M2 Task 19), the lab
 //! accounts' names as lab.toml has them ([`known_names`]), the push channel when asked for, and the calling when the
 //! binary gives its media ([`AccountCalls`]; the account describes its client in its calls as the web client does,
@@ -29,7 +30,7 @@ use teams_fence::lab::LabPaths;
 use teams_media::video::codec::H264Library;
 
 use crate::account::{self, Account, AccountCalls, AccountEngine, AccountError, Membership};
-pub use crate::account::{CSA_GTM, MIDDLE_TIER_GTM, PRESENCE_GTM};
+pub use crate::account::{AMS_GTM, CSA_GTM, MIDDLE_TIER_GTM, PRESENCE_GTM};
 
 /// Why a lab account's engine couldn't be built or started.
 #[derive(Debug, thiserror::Error)]
@@ -76,6 +77,8 @@ pub fn start<S: SecretStore + 'static>(
         push,
         known_names: known_names(config),
         calls,
+        // the lab's engines write (to the lab accounts, under the lab fence)
+        read_only: false,
     };
     let membership: Membership<'_> = Box::new(|fence, credential| {
         let membership = LiveMembershipSource::for_fence(fence)?;

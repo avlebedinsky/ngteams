@@ -1,7 +1,7 @@
 //! One personal account's engine, assembled as every binary builds one (`teams_core::account::start`) from the personal
-//! build's parts: the fence the binary opened for it (`Fence::open_personal`, the account from `accounts.toml`), its own
-//! membership source (`PersonalMembershipSource`: a chat's thread read fresh at every decision, its credential the chat
-//! transport's), the account's own store at `~/.local/share/teams/store/<oid>.sqlite` (never another account's: a store
+//! build's parts: the fence the binary opened for it (`Fence::open_personal`, the account from `accounts.toml`, which
+//! logs every send and denies none, so it reads no members: its membership source is `FailClosed`, never asked), the
+//! account's own store at `~/.local/share/teams/store/<oid>.sqlite` (never another account's: a store
 //! kept after `teams --forget` stays its account's), the region its sign-in saved (`regions/<oid>.json`), the push
 //! channel, and the calling (`crate::calling`: the calling stack's socket under the same fence, the calls' media on the
 //! desktop's devices) when the devices could be opened. An app of several accounts starts one per account.
@@ -12,8 +12,8 @@ use std::sync::Arc;
 use teams_auth::authz::{Region, RegionFileError};
 use teams_auth::secrets::SecretStore;
 use teams_core::account::{self, Account, AccountCalls, AccountEngine, AccountError, Membership};
-use teams_fence::Fence;
-use teams_fence::personal::{PersonalAccount, PersonalMembershipSource, PersonalPaths};
+use teams_fence::personal::{PersonalAccount, PersonalPaths};
+use teams_fence::{FailClosed, Fence};
 
 /// Why the engine couldn't be built or started.
 #[derive(Debug, thiserror::Error)]
@@ -42,6 +42,33 @@ pub fn start<S: SecretStore + 'static>(
     push: bool,
     calls: Option<AccountCalls>,
 ) -> Result<PersonalEngine<S>, StartError> {
+    start_with(paths, account, fence, secrets, (push, calls), false)
+}
+
+/// `account`'s engine in the read-only mode (`teams --read-only`, `crate::read_only`): its transports send reads only
+/// (every write refused below the views, logged to `fence.log` as `refused_read_only`), no push channel and no calling
+/// (no endpoint registered, no second Trouter connection on the account), a catch-up by reads every
+/// `teams_core::account::READ_ONLY_POLL`. `paths` are the snapshot's, never the user's own.
+///
+/// # Errors
+/// As [`start`].
+pub fn start_read_only<S: SecretStore + 'static>(
+    paths: &PersonalPaths,
+    account: &PersonalAccount,
+    fence: Arc<Fence>,
+    secrets: S,
+) -> Result<PersonalEngine<S>, StartError> {
+    start_with(paths, account, fence, secrets, (false, None), true)
+}
+
+fn start_with<S: SecretStore + 'static>(
+    paths: &PersonalPaths,
+    account: &PersonalAccount,
+    fence: Arc<Fence>,
+    secrets: S,
+    (push, calls): (bool, Option<AccountCalls>),
+    read_only: bool,
+) -> Result<PersonalEngine<S>, StartError> {
     let mri = account.mri().ok_or(StartError::NotSignedIn)?;
     let store_file = paths.store_file(account).ok_or(StartError::NotSignedIn)?;
     let region = Region::load(&paths.region_file(account).ok_or(StartError::NotSignedIn)?)?;
@@ -55,12 +82,10 @@ pub fn start<S: SecretStore + 'static>(
         push,
         known_names: Vec::new(),
         calls,
+        read_only,
     };
-    let membership: Membership<'_> = Box::new(|fence, credential| {
-        let membership = PersonalMembershipSource::for_fence(fence)?;
-        membership.set_credential_source(credential);
-        Ok(Arc::new(membership))
-    });
+    // the personal fence decides nothing, so it reads no members
+    let membership: Membership<'_> = Box::new(|_fence, _credential| Ok(Arc::new(FailClosed)));
     Ok(account::start(parts, fence, membership)?)
 }
 

@@ -119,6 +119,21 @@ impl SignInHosts {
     pub fn idp_hosts(&self) -> &[String] {
         &self.idp
     }
+
+    /// The host of `url`, a navigation the window refused, when the user could name it in the account's `idp_hosts`:
+    /// an `https` page whose host is a DNS name off the bound that [`SignInHosts::entra_with`] takes (so never one of
+    /// Microsoft's service domains, an address or a host on the bound already); `None` otherwise. The host alone: never
+    /// the URL's path or query.
+    #[must_use]
+    pub fn idp_candidate(&self, url: &str) -> Option<String> {
+        let url = Url::parse(url).ok()?;
+        let Some(url::Host::Domain(host)) = url.host() else {
+            return None;
+        };
+        let host = host.to_owned();
+        let off_bound = url.scheme() == "https" && !self.hosts.contains(&host);
+        (off_bound && Self::entra_with(std::slice::from_ref(&host)).is_ok()).then_some(host)
+    }
 }
 
 /// A lowercase DNS name of at least two labels.

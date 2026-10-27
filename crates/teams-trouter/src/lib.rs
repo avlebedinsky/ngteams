@@ -43,8 +43,8 @@
 //! that went through registered, `teams_proto::RegisteredEndpoint`: the one id the account's own availability may
 //! name, M2 Task 19), message-loss reports,
 //! deliveries as typed chat events ([`events`]: new messages, typing, edits, deletes, reactions, the read horizon,
-//! the chat's updates; anything else `Unknown`, logged by its kind only), ignored deliveries, disconnects and the
-//! stop. Nothing here logs a token: tokens are [`teams_auth::secrets::Secret`]s, and errors carry no token, frame or
+//! the chat's updates; anything else `Unknown`, logged by its kind only), others' presence once the endpoint subscribed
+//! to it ([`presence`], never answered either), ignored deliveries, disconnects and the stop. Nothing here logs a token: tokens are [`teams_auth::secrets::Secret`]s, and errors carry no token, frame or
 //! body. A frame's text reaches a log only at `debug`, every frame both ways, as a `teams_log::wire::Frame` record
 //! (under `teams_log::wire::FRAME_TARGET`), whose formatting redacts `user.authenticate`'s arguments and every
 //! credential field (the `connectparams` signature of `trouter.connected` among them); no other log line carries a
@@ -54,6 +54,7 @@ pub mod calls;
 pub mod credentials;
 pub mod events;
 pub mod frames;
+pub mod presence;
 pub mod registration;
 mod session;
 pub mod socket;
@@ -61,5 +62,6 @@ pub mod socket;
 pub use calls::{CallDelivery, CallResponder, CallResponse, CallStack, RespondFailure};
 pub use credentials::TrouterCredentials;
 pub use events::{Change, ChatEvent, Delivery};
+pub use presence::PresenceDelivery;
 pub use registration::{RegistrationReport, RegistrationTimes};
 pub use session::{BuildError, Down, Ignored, MessageLoss, Options, PushEvent, Stop, Trouter, TrouterHandle};

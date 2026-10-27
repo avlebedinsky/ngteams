@@ -179,6 +179,7 @@ fn cause(cause: Cause) -> &'static str {
         Cause::Connected => "connected",
         Cause::MessageLoss => "message_loss",
         Cause::Retry => "retry",
+        Cause::Poll => "poll",
     }
 }
 

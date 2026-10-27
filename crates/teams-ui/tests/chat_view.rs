@@ -22,7 +22,7 @@ use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use chrono::{FixedOffset, NaiveDate};
+use chrono::{FixedOffset, NaiveDate, TimeZone as _};
 use common::{LAB_A, LAB_B, Rig, Written};
 use gpui::{
     AppContext as _, Entity, ListOffset, Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase,
@@ -33,12 +33,13 @@ use teams_proto::chat::web_chat_link;
 use teams_store::{Applied, Message, Reaction, ReadHorizon};
 use teams_ui::ViewTrace;
 use teams_ui::chat_view::{
-    Body, ChatView, ChatViewEvent, GROUP_MS, History, Item, MAX_FRUITLESS, MessageAction, MessageItem, PAGE,
-    ReactionCount, RenderedText, UnshownParts, arrange, count_reactions, day_label, reaction_label,
+    Body, ChatView, ChatViewEvent, ChatWrites, GROUP_MS, History, Item, MAX_FRUITLESS, MessageAction, MessageItem,
+    PAGE, ReactionCount, RenderedText, UnshownParts, arrange, count_reactions, day_label, reaction_label,
 };
+use teams_ui::clock::{self, HourCycle};
 use teams_ui::models::TYPING_TIMEOUT;
 use teams_ui::rich_text::Rendered;
-use teams_ui::settings::{Settings, SettingsModel};
+use teams_ui::settings::{Settings, SettingsModel, TimeFormat};
 use teams_ui::shell::{Shell, ShellParts};
 
 const AB: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces";
@@ -340,6 +341,7 @@ fn row(id: &str, sender: &str, at: i64) -> MessageItem {
         reactions: Vec::new(),
         outbox: Vec::new(),
         unshown: UnshownParts::default(),
+        writes: ChatWrites::Taken,
     }
 }
 
@@ -408,6 +410,80 @@ fn a_sender_s_messages_group_within_five_minutes_and_days_are_separated() {
         day_label(NaiveDate::from_ymd_opt(2025, 12, 31).unwrap(), today),
         "Wednesday, 31 December 2025"
     );
+}
+
+#[test]
+fn a_message_s_time_says_the_day_as_teams_does() {
+    let utc = FixedOffset::east_opt(0).unwrap();
+    // 2026-01-01 (a Thursday) at noon
+    let now = utc.timestamp_millis_opt(NOON).unwrap();
+    let day = 24 * 60 * MINUTE;
+    let message_time =
+        |ms: i64, now: &chrono::DateTime<FixedOffset>| clock::message_time(ms, now, HourCycle::TwentyFour);
+    let at = |back: i64| message_time(NOON - back, &now);
+    assert_eq!(at(150 * MINUTE), "09:30", "today: the time alone");
+    assert_eq!(at(day - 3 * 60 * MINUTE), "Yesterday 15:00");
+    assert_eq!(at(3 * day), "Monday 12:00", "within the week: the weekday");
+    assert_eq!(
+        at(7 * day),
+        "25 December 2025 12:00",
+        "older: the day, the year when not this one"
+    );
+    let june = utc.with_ymd_and_hms(2026, 6, 30, 8, 0, 0).unwrap();
+    assert_eq!(message_time(NOON, &june), "1 January 12:00");
+}
+
+#[test]
+fn a_change_of_the_time_format_shows_at_once() {
+    let rig = rig_with(vec![message("301", LAB_B, "<p>when?</p>", NOON - 150 * MINUTE)]);
+    let settings = Settings {
+        time_format: TimeFormat::TwentyFour,
+        ..Settings::default()
+    };
+    let parts = parts::parts(&rig, settings, Arc::new(ViewTrace::off()));
+    let model = parts.settings.clone();
+    let _following = rig.cx.update(|cx| clock::follow_settings(&model, cx));
+    let app: &'static mut TestAppContext = Box::leak(Box::new(rig.cx.clone()));
+    let (_view, window) = app.add_window_view(|window, cx| ChatView::new(parts, AB.to_owned(), window, cx));
+    window.simulate_resize(size(px(800.0), px(600.0)));
+    draw(window);
+    // a test selector is `'static`
+    let shown = |cycle| -> &'static str {
+        let time = clock::message_time(NOON - 150 * MINUTE, &chrono::Local::now(), cycle);
+        format!("message-time-301 {time}").leak()
+    };
+    let (twelve, twenty_four) = (shown(HourCycle::Twelve), shown(HourCycle::TwentyFour));
+    assert!(twelve.ends_with('M'), "{twelve}: AM or PM");
+    assert!(window.debug_bounds(twenty_four).is_some(), "{twenty_four} is shown");
+
+    window.update(|_, cx| model.update(cx, |model, cx| model.change(|s| s.time_format = TimeFormat::Twelve, cx)));
+    draw(window);
+    assert!(window.debug_bounds(twelve).is_some(), "{twelve} is shown at once");
+    assert!(window.debug_bounds(twenty_four).is_none());
+}
+
+#[test]
+fn a_mention_of_the_account_is_marked_and_a_known_sender_s_presence_badged() {
+    let mention = "<p><span itemscope itemtype=\"http://schema.skype.com/Mention\" itemid=\"0\">Lab A</span> look</p>";
+    let mut mentioning = message("201", LAB_B, mention, NOON);
+    mentioning.properties = Some(format!(
+        "{{\"mentions\":[{{\"itemid\":\"0\",\"mri\":\"{LAB_A}\",\"mentionType\":\"person\"}}]}}"
+    ));
+    let plain = message("202", LAB_B, "<p>plain</p>", NOON + 2 * GROUP_MS);
+    let rig = rig_with(vec![mentioning, plain]);
+    let (trace, _) = trace();
+    let (_view, cx) = chat_window(&rig, trace);
+    assert!(cx.debug_bounds("mentions-me-201").is_some(), "Teams' \"@\" beside it");
+    assert!(cx.debug_bounds("mentions-me-202").is_none());
+
+    // a presence the model doesn't know yet shows no badge
+    assert!(cx.debug_bounds("presence-away").is_none());
+    rig.send(Event::Presence {
+        mri: LAB_B.to_owned(),
+        availability: teams_core::Availability::Away,
+    });
+    draw(cx);
+    assert!(cx.debug_bounds("presence-away").is_some(), "on b's avatar");
 }
 
 #[test]
@@ -1081,10 +1157,16 @@ fn typing_shows_who_is_typing_and_clears_by_its_end_a_timeout_or_their_message()
 }
 
 #[test]
-fn the_hover_bar_lies_inside_its_row_so_its_top_edge_keeps_it_and_takes_the_click() {
+fn the_hover_bar_floats_over_its_bubble_s_top_right_and_keeps_itself_over_the_message_above() {
     let rig = rig_with(vec![
         message("1", LAB_B, "<p>theirs</p>", NOON),
         message("2", LAB_A, "<p>mine</p>", NOON + MINUTE),
+        message(
+            "3",
+            LAB_A,
+            "<p>mine again, a line long enough to reach past the bar</p>",
+            NOON + MINUTE + 1,
+        ),
     ]);
     let (view, cx) = chat_window(&rig, Arc::new(ViewTrace::off()));
     let events: Rc<RefCell<Vec<ChatViewEvent>>> = Rc::default();
@@ -1095,32 +1177,136 @@ fn the_hover_bar_lies_inside_its_row_so_its_top_edge_keeps_it_and_takes_the_clic
         })
         .detach();
     });
+    // the first of a group: the bar over the header line, inside its row, flush with the bubble's right edge
     let mine = cx.debug_bounds("message-2").unwrap();
     cx.simulate_mouse_move(mine.center(), None, Modifiers::none());
     draw(cx);
     let bar = cx.debug_bounds("message-actions").unwrap();
+    let text = cx.debug_bounds("bubble-2").unwrap();
     assert!(
-        bar.origin.y >= mine.origin.y,
-        "the bar reaches above its row: {bar:?} over {mine:?}"
+        bar.origin.y >= mine.origin.y && bar.bottom() <= text.origin.y,
+        "the bar over the header line: {bar:?} in {mine:?}, over {text:?}"
     );
-    // GPUI's hover is the row's own hitbox: a part of the bar outside it would drop the hover and the click
+    assert!(
+        (mine.right() - bar.right()).abs() <= px(17.0),
+        "the account's own bubble's right edge: {bar:?} in {mine:?}"
+    );
+    // the next of the group has no header: its bar floats over the message above, and keeps itself there
+    let next = cx.debug_bounds("message-3").unwrap();
+    cx.simulate_mouse_move(next.center(), None, Modifiers::none());
+    draw(cx);
+    let bar = cx.debug_bounds("message-actions").unwrap();
+    assert!(
+        bar.origin.y < next.origin.y,
+        "over the message above: {bar:?} over {next:?}"
+    );
     let edit = cx.debug_bounds("action-edit").unwrap();
     let top_edge = point(edit.center().x, edit.origin.y + px(1.0));
+    assert!(mine.contains(&top_edge), "the point is over message 2");
     cx.simulate_mouse_move(top_edge, None, Modifiers::none());
     draw(cx);
     assert_eq!(
         cx.update(|_, cx| view.read(cx).hovered().map(str::to_owned)).as_deref(),
-        Some("2")
+        Some("3")
     );
+    // the click goes to the bar, never to the message under it
     cx.simulate_click(top_edge, Modifiers::none());
     draw(cx);
     assert_eq!(
         std::mem::take(&mut *events.borrow_mut()),
         [ChatViewEvent::Action {
             action: MessageAction::Edit,
-            message: "2".to_owned(),
+            message: "3".to_owned(),
         }]
     );
+    assert_ne!(
+        cx.update(|_, cx| view.read(cx).selected().map(str::to_owned))
+            .as_deref(),
+        Some("2")
+    );
+    // away from both, it goes
+    cx.simulate_mouse_move(point(px(1.0), px(1.0)), None, Modifiers::none());
+    draw(cx);
+    assert_eq!(cx.update(|_, cx| view.read(cx).hovered().map(str::to_owned)), None);
+}
+
+/// Points at the message `row`, opens its more-options menu and clicks `entry` in it.
+fn from_menu(cx: &mut VisualTestContext, row: &'static str, entry: &'static str) {
+    let row = cx.debug_bounds(row).unwrap();
+    cx.simulate_mouse_move(row.center(), None, Modifiers::none());
+    draw(cx);
+    let more = cx.debug_bounds("message-more").unwrap();
+    cx.simulate_click(more.center(), Modifiers::none());
+    draw(cx);
+    let entry = cx.debug_bounds(entry).unwrap();
+    cx.simulate_click(entry.center(), Modifiers::none());
+    draw(cx);
+}
+
+#[test]
+fn the_hover_bar_holds_the_quick_reactions_react_reply_and_more_options_in_teams_order() {
+    let rig = rig_with(vec![
+        message("1", LAB_B, "<p>theirs</p>", NOON),
+        message("2", LAB_A, "<p>mine</p>", NOON + MINUTE),
+    ]);
+    let (view, cx) = chat_window(&rig, Arc::new(ViewTrace::off()));
+    let x = |cx: &mut VisualTestContext, selector: &'static str| cx.debug_bounds(selector).unwrap().center().x;
+    let theirs = cx.debug_bounds("message-1").unwrap();
+    cx.simulate_mouse_move(theirs.center(), None, Modifiers::none());
+    draw(cx);
+    let order = [
+        "pick-like",
+        "pick-heart",
+        "pick-laugh",
+        "pick-surprised",
+        "action-react",
+        "action-reply",
+        "message-more",
+    ];
+    let xs: Vec<_> = order.iter().map(|selector| x(cx, selector)).collect();
+    assert!(xs.is_sorted(), "{order:?} left to right: {xs:?}");
+    assert!(cx.debug_bounds("action-edit").is_none());
+    // someone else's menu: copy text, no delete; copy puts the text on the clipboard
+    let more = cx.debug_bounds("message-more").unwrap();
+    cx.simulate_click(more.center(), Modifiers::none());
+    draw(cx);
+    assert!(cx.debug_bounds("action-copy").is_some() && cx.debug_bounds("action-delete").is_none());
+    let copy = cx.debug_bounds("action-copy").unwrap();
+    cx.simulate_click(copy.center(), Modifiers::none());
+    draw(cx);
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|item| item.text()).as_deref(),
+        Some("theirs")
+    );
+    assert_eq!(cx.update(|_, cx| view.read(cx).options().map(str::to_owned)), None);
+    // the account's own: edit before reply; delete and copy in the menu
+    let mine = cx.debug_bounds("message-2").unwrap();
+    cx.simulate_mouse_move(mine.center(), None, Modifiers::none());
+    draw(cx);
+    assert!(x(cx, "action-react") < x(cx, "action-edit") && x(cx, "action-edit") < x(cx, "action-reply"));
+    assert!(cx.debug_bounds("message-menu").is_none());
+    let more = cx.debug_bounds("message-more").unwrap();
+    cx.simulate_click(more.center(), Modifiers::none());
+    draw(cx);
+    assert_eq!(
+        cx.update(|_, cx| view.read(cx).options().map(str::to_owned)).as_deref(),
+        Some("2")
+    );
+    let menu = cx.debug_bounds("message-menu").unwrap();
+    assert!(
+        menu.origin.y >= more.bottom(),
+        "the menu under its button: {menu:?} under {more:?}"
+    );
+    assert!(x(cx, "action-copy") > px(0.0) && cx.debug_bounds("action-delete").is_some());
+    // the button again closes it; Escape too
+    cx.simulate_click(more.center(), Modifiers::none());
+    draw(cx);
+    assert_eq!(cx.update(|_, cx| view.read(cx).options().map(str::to_owned)), None);
+    cx.simulate_click(more.center(), Modifiers::none());
+    draw(cx);
+    cx.update(|window, cx| view.read(cx).focus_handle().clone().focus(window, cx));
+    cx.simulate_keystrokes("escape");
+    assert_eq!(cx.update(|_, cx| view.read(cx).options().map(str::to_owned)), None);
 }
 
 #[test]
@@ -1156,16 +1342,16 @@ fn hover_and_keyboard_actions_offer_edit_and_delete_on_the_account_s_own_only() 
         Some("1")
     );
     assert!(cx.debug_bounds("action-reply").is_some() && cx.debug_bounds("action-react").is_some());
-    assert!(cx.debug_bounds("action-edit").is_none() && cx.debug_bounds("action-delete").is_none());
-    // the account's own: edit and delete too, and a click tells it
+    // the account's own: edit on the bar and delete in its menu too, and a click tells it
     let mine = cx.debug_bounds("message-2").unwrap();
     cx.simulate_mouse_move(mine.center(), None, Modifiers::none());
     draw(cx);
-    assert!(cx.debug_bounds("action-edit").is_some() && cx.debug_bounds("action-delete").is_some());
     let edit = cx.debug_bounds("action-edit").unwrap();
     cx.simulate_click(edit.center(), Modifiers::none());
     draw(cx);
     assert_eq!(took(&events), [action(MessageAction::Edit, "2")]);
+    from_menu(cx, "message-2", "action-delete");
+    assert_eq!(took(&events), [action(MessageAction::Delete, "2")]);
 
     // the keyboard, once the list has the focus: Up from the newest (a deleted one offers nothing)
     cx.update(|window, cx| {

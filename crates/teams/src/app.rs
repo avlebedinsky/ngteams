@@ -23,6 +23,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{App, AppContext as _, AsyncApp, Entity, Global, QuitMode, SharedString, Task, WeakEntity, WindowHandle};
+use teams_auth::secrets::{LazyKeyring, SecretStore};
 use teams_auth::session::SignedOut;
 use teams_core::EngineHandle;
 use teams_fence::personal::PersonalAccount;
@@ -46,14 +47,22 @@ pub const TITLE: &str = "Teams";
 /// What the window says once the account is signed out.
 pub const SIGNED_OUT_HINT: &str = "Signed out: sign in again in the window that opened";
 
+/// What the read-only mode's window says once the account is signed out: it never signs in itself.
+pub const READ_ONLY_SIGNED_OUT_HINT: &str =
+    "Signed out: sign in again in your own Teams (this read-only window never signs in)";
+
 /// Opens the sign-in window again once the account is signed out (see the module docs).
 pub type SignInAgain = Rc<dyn Fn(&mut App)>;
 
-/// What the app starts with.
-pub struct Launch {
+/// What makes an account's [`SignInAgain`] ([`Launch::sign_in_again`]).
+pub type SignInAgainFor = Rc<dyn Fn(&PersonalAccount) -> SignInAgain>;
+
+/// What the app starts with: its engines over the desktop's Secret Service ([`LazyKeyring`]), a test's over its own
+/// store.
+pub struct Launch<S = LazyKeyring> {
     /// The first account's engine, started; the others follow it in [`Launch::others`].
-    pub first: Started,
-    pub others: Vec<Started>,
+    pub first: Started<S>,
+    pub others: Vec<Started<S>>,
     /// The settings, the first run's screen asked for ([`settings`]).
     pub settings: SettingsModel,
     /// The desktop's session bus, for the notifications and the tray item.
@@ -62,6 +71,11 @@ pub struct Launch {
     pub sign_in_again: Rc<dyn Fn(&PersonalAccount) -> SignInAgain>,
     /// What starts more accounts (the rail's "+") and forgets one ("Sign out and remove").
     pub runner: Runner,
+    /// The read-only mode (`teams --read-only`, [`crate::read_only`]): no account is added, removed or signed in, the
+    /// rail offers neither, and a sign-out only says so ([`READ_ONLY_SIGNED_OUT_HINT`]).
+    pub read_only: bool,
+    /// Where the view trace goes (`--trace-fd`, the read-only mode's runner reads it); off otherwise.
+    pub trace: Arc<ViewTrace>,
 }
 
 /// The settings in `file` (`~/.local/share/teams/settings.toml`) with the first run's screen asked for: none of
@@ -115,6 +129,8 @@ pub struct Running {
     sign_in_again: Rc<dyn Fn(&PersonalAccount) -> SignInAgain>,
     adding: Option<WindowHandle<KitRoot>>,
     quitting: bool,
+    /// The read-only mode: nothing is added, removed or signed in ([`Launch::read_only`]).
+    read_only: bool,
 }
 
 /// What [`launch`] started.
@@ -134,7 +150,7 @@ pub struct LaunchFailed {
 ///
 /// # Errors
 /// The window can't be opened: every bridge is shut down then.
-pub fn launch(cx: &mut App, launch: Launch) -> Result<Launched, LaunchFailed> {
+pub fn launch<S: SecretStore + 'static>(cx: &mut App, launch: Launch<S>) -> Result<Launched, LaunchFailed> {
     let Launch {
         first,
         others,
@@ -142,12 +158,16 @@ pub fn launch(cx: &mut App, launch: Launch) -> Result<Launched, LaunchFailed> {
         bus,
         sign_in_again,
         runner,
+        read_only,
+        trace,
     } = launch;
+    let (hint, sign_in_again) = signing_out(read_only, sign_in_again);
     // closing the window keeps the app in the tray: it quits itself once the engines are shut down
     cx.set_quit_mode(QuitMode::Explicit);
     let settings = shared_settings(settings, first.calls.as_ref(), cx);
     let (models, bridge) = bridge(first.engine.handle, first.calls.as_ref(), cx);
-    watch_sign_out(
+    watch_sign_out_saying(
+        hint,
         first.engine.session.watch_signed_out(),
         bridge.downgrade(),
         sign_in_again(&first.account),
@@ -160,7 +180,7 @@ pub fn launch(cx: &mut App, launch: Launch) -> Result<Launched, LaunchFailed> {
         core,
         models,
         settings: settings.clone(),
-        trace: Arc::new(ViewTrace::off()),
+        trace,
     };
     let desktop = cx.new(|cx| {
         Desktop::new(
@@ -171,7 +191,7 @@ pub fn launch(cx: &mut App, launch: Launch) -> Result<Launched, LaunchFailed> {
                 shell: parts,
                 account_name: display_name(&first.account).to_owned().into(),
                 account_detail: first.account.upn.clone().into(),
-                can_add: true,
+                can_add: !read_only,
                 ringer: first.calls.and_then(|calls| calls.ringer),
             },
             cx,
@@ -185,6 +205,7 @@ pub fn launch(cx: &mut App, launch: Launch) -> Result<Launched, LaunchFailed> {
         sign_in_again,
         adding: None,
         quitting: false,
+        read_only,
     });
     running.update(cx, |running, cx| {
         for started in others {
@@ -205,6 +226,22 @@ pub fn launch(cx: &mut App, launch: Launch) -> Result<Launched, LaunchFailed> {
         running: running.clone(),
     });
     follow_desktop(&desktop, running, cx);
+    connect(&desktop, bus, cx);
+    Ok(Launched { window, desktop })
+}
+
+/// What a sign-out shows and opens: the sign-in window again with [`SIGNED_OUT_HINT`], or in the read-only mode
+/// nothing but [`READ_ONLY_SIGNED_OUT_HINT`] (it never signs in, whatever was handed in).
+fn signing_out(read_only: bool, sign_in_again: SignInAgainFor) -> (&'static str, SignInAgainFor) {
+    if read_only {
+        (READ_ONLY_SIGNED_OUT_HINT, Rc::new(|_| Rc::new(|_| {})))
+    } else {
+        (SIGNED_OUT_HINT, sign_in_again)
+    }
+}
+
+/// The desktop's notifications and tray on `bus`, what failed said.
+fn connect(desktop: &Entity<Desktop>, bus: Result<String, BusError>, cx: &mut App) {
     let connecting = desktop.update(cx, |desktop, cx| desktop.connect(bus, cx));
     cx.spawn(async move |_: &mut AsyncApp| {
         for problem in connecting.await {
@@ -213,7 +250,6 @@ pub fn launch(cx: &mut App, launch: Launch) -> Result<Launched, LaunchFailed> {
         }
     })
     .detach();
-    Ok(Launched { window, desktop })
 }
 
 /// The settings every account shares, their problems said; the first account's calls' video following them and the
@@ -246,7 +282,7 @@ fn follow_desktop(desktop: &Entity<Desktop>, running: Entity<Running>, cx: &mut 
 impl Running {
     /// An account started: its bridge, its sign-out watch, its calls' video following the settings, and its place in
     /// the window.
-    fn add_started(&mut self, started: Started, cx: &mut gpui::Context<Self>) {
+    fn add_started<S: SecretStore + 'static>(&mut self, started: Started<S>, cx: &mut gpui::Context<Self>) {
         let Started { account, engine, calls } = started;
         if let Some(feed) = calls.as_ref().and_then(|calls| calls.video.clone()) {
             feed.set_enabled(self.settings.read(cx).settings().video_calls);
@@ -256,7 +292,13 @@ impl Running {
             .detach();
         }
         let (models, bridge) = bridge(engine.handle, calls.as_ref(), cx);
-        watch_sign_out(
+        let hint = if self.read_only {
+            READ_ONLY_SIGNED_OUT_HINT
+        } else {
+            SIGNED_OUT_HINT
+        };
+        watch_sign_out_saying(
+            hint,
             engine.session.watch_signed_out(),
             bridge.downgrade(),
             (self.sign_in_again)(&account),
@@ -276,8 +318,14 @@ impl Running {
 
     /// The rail's "+": the window asking for the account (the first sign-in's), brought forward if it is open. The
     /// account it names is signed in through the sign-in window off GPUI's foreground; once that goes through its
-    /// engine starts and the window shows it, and the prompt closes; one that doesn't is said on the prompt.
+    /// engine starts and the window shows it, and the prompt closes; one that doesn't is said on the prompt. The
+    /// prompt's events come to `Running` as it is being updated already (GPUI's subscriber is leased to its callback),
+    /// so they are handled on the `running` handed in, never by updating `Running` again.
     fn ask_account(&mut self, cx: &mut gpui::Context<Self>) {
+        if self.read_only {
+            log::info!("read-only: no account is added");
+            return;
+        }
         if let Some(window) = self.adding
             && window.update(cx, |_, window, _| window.activate_window()).is_ok()
         {
@@ -291,16 +339,18 @@ impl Running {
             }
         };
         self.adding = Some(window);
-        let running = cx.entity().downgrade();
-        cx.subscribe(&prompt, move |_, prompt, event, cx| {
+        cx.subscribe(&prompt, |running, prompt, event, cx| {
             let AccountPromptEvent::SignIn(upn) = event;
-            let _ = running.update(cx, |running, cx| running.sign_in_added(upn.clone(), prompt, cx));
+            running.sign_in_added(upn.clone(), prompt, cx);
         })
         .detach();
     }
 
     /// Signs the account `upn` the prompt named in, then starts it (see [`Running::ask_account`]).
     fn sign_in_added(&mut self, upn: String, prompt: Entity<AccountPrompt>, cx: &mut gpui::Context<Self>) {
+        if self.read_only {
+            return;
+        }
         if self.bridges.iter().any(|(_, held, _)| held.eq_ignore_ascii_case(&upn)) {
             prompt.update(cx, |prompt, cx| prompt.failed(format!("{upn} is added already"), cx));
             return;
@@ -340,6 +390,11 @@ impl Running {
     /// `teams --forget` forgets it (its store stays), then it leaves the window. The last account removed quits the
     /// app (the next start asks for an account).
     fn remove(&mut self, key: &str, cx: &mut gpui::Context<Self>) {
+        if self.read_only {
+            // its Secret Service items, its entry and its region stay as the user's own Teams keeps them
+            log::info!("read-only: no account is removed");
+            return;
+        }
         let Some(index) = self.bridges.iter().position(|(held, _, _)| held == key) else {
             return;
         };
@@ -435,6 +490,18 @@ fn settings_entity(settings: SettingsModel, video: Option<VideoFeed>, cx: &mut A
 /// Once `signed_out` says the session is signed out: shows [`SIGNED_OUT_HINT`], shuts the engine down (nothing more is
 /// sent) and, once it is down, opens the sign-in window again (`again`), once.
 pub fn watch_sign_out(
+    signed_out: watch::Receiver<Option<SignedOut>>,
+    bridge: WeakEntity<Bridge>,
+    again: SignInAgain,
+    cx: &mut App,
+) {
+    watch_sign_out_saying(SIGNED_OUT_HINT, signed_out, bridge, again, cx);
+}
+
+/// [`watch_sign_out`], the window saying `hint` (the read-only mode's [`READ_ONLY_SIGNED_OUT_HINT`], whose `again`
+/// does nothing).
+pub fn watch_sign_out_saying(
+    hint: &'static str,
     mut signed_out: watch::Receiver<Option<SignedOut>>,
     bridge: WeakEntity<Bridge>,
     again: SignInAgain,
@@ -445,9 +512,7 @@ pub fn watch_sign_out(
         if signed_out.wait_for(Option::is_some).await.is_err() {
             return;
         }
-        let Ok(stopped) = bridge.update(cx, |bridge, cx| {
-            bridge.sign_out(SharedString::from(SIGNED_OUT_HINT), cx)
-        }) else {
+        let Ok(stopped) = bridge.update(cx, |bridge, cx| bridge.sign_out(SharedString::from(hint), cx)) else {
             return;
         };
         stopped.await;

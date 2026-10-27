@@ -38,6 +38,9 @@ call action is the user's, the view trace never carries text) still hold for eve
   `theme::SUCCESS` (answer). The kit's `.danger()`, `.success()` and `.custom(..)` button variants are drawn only
   tinted (a custom colour is mixed 80% toward transparent), so a solid red/green button is our own `div` — see
   `call_view.rs`'s `control`. A quiet destructive icon (delete in a hover bar) is a ghost button with a red foreground.
+- **The read-only mode** (`Core::read_only`): a new control that writes (sends, reacts, calls, sets a status, adds or
+  removes an account) offers nothing there, the way the compose box shows `READ_ONLY_APP` and a message offers only
+  Copy (`ChatWrites::AppReadOnly`); the engine refuses it anyway, but the view shouldn't offer it.
 - **Icons are Lucide SVGs** (ISC, `crates/teams-ui/assets/icons/LICENSE-LUCIDE`). A new one is copied from
   `~/.cargo/registry/src/*/gpui-kit-assets-*/assets/icons/<name>.svg` into `crates/teams-ui/assets/icons/` and added
   as a `Glyph` constant; never draw one ad hoc. Sizes: 14 px in menus and small buttons, 16–18 px in toolbars and nav,
@@ -65,10 +68,11 @@ call action is the user's, the view trace never carries text) still hold for eve
 - **Everything the pointer reaches, the keyboard reaches.** A new list of pages, tabs or rows gets a focus handle and
   Up/Down/Home/End (the settings' page column: `SettingsView::page_key`), focused when it opens; a new action gets a
   key or a Ctrl+K command where it fits.
-- **An element shown only while its row is hovered stays inside that row.** GPUI's hover is the row's own hitbox: a
-  hover bar nudged above its row (a negative `top`) vanishes as the pointer reaches its upper part, and the click falls
-  through to the row underneath. `chat_view.rs`'s `actions_bar` sits at `top_0` for this reason; a test moves the
-  pointer to the bar's top edge and clicks there.
+- **An element shown only while its row is hovered keeps itself shown and takes its own clicks.** GPUI's hover is the
+  row's own hitbox: a hover bar that reaches past its row (Teams' message bar floats over the header or the message
+  above) vanishes as the pointer leaves the row unless the bar keeps the hover itself, and a click on it falls through
+  to the row underneath unless it blocks the mouse. `chat_view.rs`'s hover bar does both; a test moves the pointer to
+  the bar's top edge, over the message above, and clicks there.
 - **A dropdown or popup scrolls** (`menu.scrollable(true).max_h(..)`): a long device list or a short window must still
   reach every row.
 
@@ -126,5 +130,12 @@ notifications, the README and the tests for the old name. Errors say what happen
    --all-features -- -D warnings`, `scripts/lint-report.sh`, `cargo test -p teams-ui -p teams-app`. Render functions
    grow fast: split one over clippy's line limit into helpers (a `controls`, a `no_chat`), never `#[expect]` it.
 
+5. **The user's real chats** (a bug only real data shows, a layout with real names and long chats): run the installed
+   personal build read-only, on its own initiative, with `scripts/run-personal-read-only.sh <upn>` (a snapshot of the
+   user's files, a sandbox of its own, nothing sent; `--shot <name>`, `--key <spec>`, `--type <text>`,
+   `--click <x> <y>` drive it, `--stop` ends it and deletes the snapshot). It shows what the *installed* build does,
+   not your change, and the user's chats are private: describe what you saw, never paste names or message text. The
+   script refuses a binary without the read-only mode; never start `teams` any other way.
+
 When reporting, list the surfaces changed and which shots you looked at; offer the personal-build install only when the
-user asks for it (CLAUDE.md: agents install and start it only on request).
+user asks for it (CLAUDE.md: agents install it only on request, and start it on their own only read-only).

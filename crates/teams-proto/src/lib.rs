@@ -3,7 +3,8 @@
 //!
 //! A request comes in one of three classes, and a [`Transport`] takes nothing else:
 //! - a [`Read`]: always sent as a `GET`, with no body (the chat service's, Microsoft Graph's reads of a person's name
-//!   and picture, [`GraphUser`] and [`GraphPicture`], and CSA's read of the account's teams, [`CsaTeams`]);
+//!   and picture, [`GraphUser`] and [`GraphPicture`], CSA's read of the account's teams, [`CsaTeams`], and a picture
+//!   pasted into a message, [`MessagePicture`], from AMS);
 //! - a plain [`Request`]: any method and body, the trait open to any crate. The transport builds its URL from its
 //!   [`Service`]'s base and asks [`teams_fence::contacting`], the lab rule's one classifier: sent when it reaches nobody
 //!   (the messaging stack's [`EndpointRegistration`], the middle tier's profile lookup [`ShortProfileLookup`], UPS's
@@ -44,6 +45,7 @@
 //! fence's live membership read takes the native client's own credential from ([`teams_fence::CredentialSource`]):
 //! the account's `ic3` token and the transport's chat base.
 
+mod ams;
 pub mod chat;
 mod client;
 mod emoticon;
@@ -57,6 +59,7 @@ mod relay;
 mod request;
 mod write;
 
+pub use ams::{MessagePicture, PastedFormat, PastedPicture};
 pub use client::{Client, PostReadError, Response, Transport, WriteError};
 pub use emoticon::{MAX_ANIMATION, ReactionAnimation};
 pub use endpoint::{Endpoint, Method, Service};
@@ -66,9 +69,9 @@ pub use frame::{
     RespondError, ResponseDecider, ResponseRefused, Sent,
 };
 pub use http::{
-    BuildError, CONNECT_TIMEOUT, CSA_AUDIENCE, Credentials, DEFAULT_RETRY_WAIT, EMOTICONS_HOST, Failure,
-    GRAPH_AUDIENCE, GRAPH_HOST, HttpError, HttpTransport, IC3_AUDIENCE, MAX_BODY, MAX_RETRY_WAIT, MIDDLE_TIER_AUDIENCE,
-    PRESENCE_AUDIENCE, RELAY_HOST, REQUEST_TIMEOUT, Refusal, TROUTER_HOST,
+    AMS_HOST_SUFFIX, BuildError, CONNECT_TIMEOUT, CSA_AUDIENCE, Credentials, DEFAULT_RETRY_WAIT, EMOTICONS_HOST,
+    Failure, GRAPH_AUDIENCE, GRAPH_HOST, HttpError, HttpTransport, IC3_AUDIENCE, MAX_BODY, MAX_PICTURE_BODY,
+    MAX_RETRY_WAIT, MIDDLE_TIER_AUDIENCE, PRESENCE_AUDIENCE, RELAY_HOST, REQUEST_TIMEOUT, Refusal, TROUTER_HOST,
 };
 #[cfg(feature = "test-support")]
 pub use own::ProbeOwnState;
@@ -80,8 +83,8 @@ pub use own::{
 #[cfg(feature = "test-support")]
 pub use post_read::ProbePostRead;
 pub use post_read::{
-    AnswerError, AuthorizedPostRead, PostRead, PostReadMismatch, PresenceRead, ShortProfile, ShortProfileLookup,
-    UserPresence,
+    AnswerError, AuthorizedPostRead, PRESENCE_PUSH_PATH, PostRead, PostReadMismatch, PresenceRead,
+    PresenceSubscription, ShortProfile, ShortProfileLookup, SubscriptionStatus, UserPresence,
 };
 pub use read::{
     CSA_TEAMS_PATH, CSA_TEAMS_QUERY, Channel, CsaAnswerError, CsaTeams, GRAPH_PICTURE_SIZE, GRAPH_USER_SELECT,

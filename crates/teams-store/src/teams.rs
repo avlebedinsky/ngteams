@@ -1,5 +1,5 @@
-//! The account's teams and their channels as CSA last listed them (M2 Task 16), replaced whole by each read, and the
-//! reply chain each stored channel message belongs to (its post, as the message's `conversationLink` named it). A
+//! The account's teams and their channels as CSA last listed them (M2 Task 16), replaced whole by each read, its
+//! favourite chats as the same read listed them (schema 11), and the reply chain each stored channel message belongs to (its post, as the message's `conversationLink` named it). A
 //! channel's messages are kept like a chat's ([`crate::messages`]); its conversation row is the chat service's.
 
 use std::fmt;
@@ -133,6 +133,65 @@ impl Store {
             .prepare_cached("SELECT read_at FROM teams_read WHERE id = 1")?
             .query_row([], |row| row.get(0))
             .optional()?)
+    }
+
+    /// Replaces the stored favourite chats with `favorites` (conversation ids, in the order Teams lists them; one
+    /// listed twice keeps its first place), read at `read_at` (ms): [`Applied::Inserted`] for the first list,
+    /// [`Applied::Updated`] when it differs from the stored one, [`Applied::Ignored`] when it doesn't (only the read time
+    /// moves).
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] when the write fails.
+    pub fn replace_favorites(&mut self, favorites: &[String], read_at: i64) -> Result<Applied, StoreError> {
+        let mut listed: Vec<String> = Vec::with_capacity(favorites.len());
+        for id in favorites {
+            if !listed.contains(id) {
+                listed.push(id.clone());
+            }
+        }
+        let applied = match self.favorites()? {
+            None => Applied::Inserted,
+            Some(stored) if stored != listed => Applied::Updated,
+            Some(_) => Applied::Ignored,
+        };
+        let tx = self.conn.transaction()?;
+        if applied != Applied::Ignored {
+            tx.execute("DELETE FROM favorites", [])?;
+            let mut row = tx.prepare_cached("INSERT INTO favorites (position, conversation_id) VALUES (?1, ?2)")?;
+            for (position, id) in (0_i64..).zip(&listed) {
+                row.execute(params![position, id])?;
+            }
+        }
+        tx.execute(
+            "INSERT INTO favorites_read (id, read_at) VALUES (1, ?1)
+             ON CONFLICT (id) DO UPDATE SET read_at = excluded.read_at",
+            [read_at],
+        )?;
+        tx.commit()?;
+        Ok(applied)
+    }
+
+    /// The stored favourite chats' ids in their order; `None` before a read could read them.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] when the read fails.
+    pub fn favorites(&self) -> Result<Option<Vec<String>>, StoreError> {
+        let read = self
+            .conn
+            .prepare_cached("SELECT read_at FROM favorites_read WHERE id = 1")?
+            .query_row([], |row| row.get::<_, i64>(0))
+            .optional()?;
+        if read.is_none() {
+            return Ok(None);
+        }
+        let ids = self
+            .conn
+            .prepare_cached("SELECT conversation_id FROM favorites ORDER BY position")?
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<_, _>>()?;
+        Ok(Some(ids))
     }
 
     /// Records the post `root` that the stored channel message `message` of `conversation` belongs to (its own id for a

@@ -4,7 +4,8 @@
 //! when its devices opened (its test call to the web bundle's echo service, an invitation ringing by the name it
 //! gives), and none without them; a test build opens no PipeWire outside the UI sandbox. The engine is the personal
 //! build's own (`teams::engine::start`) over a `MemorySecretStore` holding no refresh token, so no request leaves the
-//! process; the calls themselves run in `tests/calls.rs`.
+//! process; the calls themselves run in `tests/calls.rs`. The rail's "+" opens the window asking for the account, and
+//! the account it names reaches the app as it runs (an account it runs already said on that window).
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
@@ -15,18 +16,21 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui::TestAppContext;
-use teams::app::{self, SIGNED_OUT_HINT, SignInAgain};
+use gpui::{TestAppContext, WindowHandle};
+use teams::accounts::{Runner, Started};
+use teams::app::{self, Launch, SIGNED_OUT_HINT, SignInAgain};
 use teams::calling::PersonalCalls;
 use teams::setup::Setup;
 use teams_auth::secrets::MemorySecretStore;
 use teams_core::{CallAction, CallActionError, CallId, EngineError, Event, IncomingCall, RegistrationReport};
-use teams_fence::Fence;
 use teams_fence::lab::LabLocations;
 use teams_fence::personal::{PersonalAccount, PersonalPaths};
+use teams_fence::{CallFloor, Fence};
 use teams_media::devices::file::{AudioInput, FileDevices, Pacing, PatternCamera};
 use teams_mock::CHAT_BASE;
-use teams_ui::{Account, Engine, SettingsFile};
+use teams_ui::bus::BusError;
+use teams_ui::window::KitRoot;
+use teams_ui::{Account, AccountPrompt, AccountPromptEvent, DesktopEvent, Engine, SettingsFile, ViewTrace};
 
 const WAIT: Duration = Duration::from_secs(30);
 
@@ -203,4 +207,151 @@ fn the_settings_ask_for_the_first_run_s_screen() {
     let settings = app::settings(file, None);
     assert!(settings.awaiting_first_run());
     assert!(!settings.sends_typing() && !settings.sends_read_receipts() && !settings.sends_presence());
+}
+
+/// The window asking for an account the rail's "+" opened: the app's window other than `main`.
+fn the_prompt(cx: &TestAppContext, main: WindowHandle<KitRoot>) -> gpui::Entity<AccountPrompt> {
+    cx.update(|cx| {
+        let prompts: Vec<gpui::Entity<AccountPrompt>> = cx
+            .windows()
+            .into_iter()
+            .filter(|window| window.window_id() != main.window_id())
+            .filter_map(|window| window.downcast::<KitRoot>())
+            .filter_map(|window| window.read(cx).ok()?.view().clone().downcast::<AccountPrompt>().ok())
+            .collect();
+        assert_eq!(prompts.len(), 1, "one window asks for the account");
+        prompts.into_iter().next().unwrap()
+    })
+}
+
+#[test]
+fn the_rail_s_plus_asks_for_an_account_and_says_one_the_app_runs_already() {
+    let dir = tempfile::tempdir().unwrap();
+    let (setup, account) = signed_in_setup(&dir);
+    let fence = Arc::new(Fence::open_personal_with(&setup.paths, &account.upn, &setup.lab).unwrap());
+    let engine = teams::engine::start(&setup.paths, &account, fence, MemorySecretStore::new(), false, None).unwrap();
+    let cx = TestAppContext::single();
+    let launch = Launch {
+        first: Started {
+            account: account.clone(),
+            engine,
+            calls: None,
+        },
+        others: Vec::new(),
+        settings: app::settings(SettingsFile::new(dir.path().join("settings.toml")), None),
+        bus: Err(BusError::NotGiven),
+        sign_in_again: Rc::new(|_| Rc::new(|_| {})),
+        runner: Runner {
+            setup: setup.clone(),
+            floor: CallFloor::new(),
+            devices: None,
+        },
+        read_only: false,
+        trace: Arc::new(ViewTrace::off()),
+    };
+    let Ok(launched) = cx.update(|cx| app::launch(cx, launch)) else {
+        panic!("the window opens");
+    };
+    cx.run_until_parked();
+
+    // the rail's "+"
+    cx.update(|cx| launched.desktop.update(cx, |_, cx| cx.emit(DesktopEvent::AddAccount)));
+    cx.run_until_parked();
+    let prompt = the_prompt(&cx, launched.window);
+
+    // the account named there reaches the app as it runs (it used to update the app inside its own update: a panic
+    // that quit it): one it runs already, case aside, is said under the field, and no sign-in window opens for it
+    let named = account.upn.to_uppercase();
+    cx.update(|cx| prompt.update(cx, |_, cx| cx.emit(AccountPromptEvent::SignIn(named.clone()))));
+    cx.run_until_parked();
+    let problem = cx.read(|cx| prompt.read(cx).problem().map(ToString::to_string));
+    assert_eq!(problem, Some(format!("{named} is added already")));
+    assert!(
+        !cx.read(|cx| prompt.read(cx).is_signing_in()),
+        "the field is open again"
+    );
+
+    // a second "+" brings the same window forward, not another one
+    cx.update(|cx| launched.desktop.update(cx, |_, cx| cx.emit(DesktopEvent::AddAccount)));
+    cx.run_until_parked();
+    assert_eq!(the_prompt(&cx, launched.window), prompt);
+
+    cx.update(app::quit);
+    cx.run_until_parked();
+}
+
+#[test]
+fn the_read_only_mode_adds_removes_and_signs_in_no_account_and_says_signed_out_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let (setup, account) = signed_in_setup(&dir);
+    let fence = Arc::new(Fence::open_personal_with(&setup.paths, &account.upn, &setup.lab).unwrap());
+    let engine = teams::engine::start_read_only(&setup.paths, &account, fence, MemorySecretStore::new()).unwrap();
+    let core = engine.handle.requests();
+    assert!(core.read_only(), "the views see the read-only mode");
+    let signed_out = engine.session.watch_signed_out();
+    let cx = TestAppContext::single();
+    let asked = Rc::new(Cell::new(0));
+    let counted = Rc::clone(&asked);
+    let launch = Launch {
+        first: Started {
+            account: account.clone(),
+            engine,
+            calls: None,
+        },
+        others: Vec::new(),
+        settings: app::settings(SettingsFile::new(dir.path().join("settings.toml")), None).read_only(),
+        bus: Err(BusError::NotGiven),
+        sign_in_again: Rc::new(move |_| {
+            let counted = Rc::clone(&counted);
+            Rc::new(move |_| counted.set(counted.get() + 1))
+        }),
+        runner: Runner {
+            setup: setup.clone(),
+            floor: CallFloor::new(),
+            devices: None,
+        },
+        read_only: true,
+        trace: Arc::new(ViewTrace::off()),
+    };
+    let Ok(launched) = cx.update(|cx| app::launch(cx, launch)) else {
+        panic!("the window opens");
+    };
+    cx.run_until_parked();
+    let windows = || cx.update(|cx| cx.windows().len());
+    assert_eq!(windows(), 1);
+
+    // no "+": asked anyway, no window asks for an account
+    cx.update(|cx| launched.desktop.update(cx, |_, cx| cx.emit(DesktopEvent::AddAccount)));
+    cx.run_until_parked();
+    assert_eq!(windows(), 1, "no window asks for an account");
+    // nor "Sign out and remove": asked anyway, the account and its files stay
+    cx.update(|cx| {
+        launched
+            .desktop
+            .update(cx, |_, cx| cx.emit(DesktopEvent::RemoveAccount(core.me().to_owned())));
+    });
+    cx.run_until_parked();
+    assert!(PersonalAccount::find(&setup.paths, &account.upn).unwrap().is_some());
+    assert!(setup.paths.region_file(&account).unwrap().is_file());
+
+    // signed out (no refresh token in the store): the engine stops, and no sign-in window opens
+    assert!(core.sync().blocking_wait().is_err());
+    let mut watching = signed_out;
+    settle(&cx, |_| watching.borrow_and_update().is_some());
+    settle(&cx, |_| {
+        matches!(core.sync().blocking_wait(), Err(EngineError::Stopped))
+    });
+    cx.run_until_parked();
+    let (can_add, read_only) = cx.read(|cx| {
+        let desktop = launched.desktop.read(cx);
+        (
+            desktop.accounts().read(cx).can_add(),
+            desktop.settings().read(cx).is_read_only(),
+        )
+    });
+    assert!(!can_add, "the rail offers no \"+\" and no \"Sign out and remove\"");
+    assert!(read_only, "no typing, read receipt or presence");
+    assert_eq!(asked.get(), 0, "no sign-in window");
+    cx.update(app::quit);
+    cx.run_until_parked();
 }

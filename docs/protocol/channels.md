@@ -118,4 +118,5 @@ complete, and its thread read listed one member); `teams-core`'s `nothing_is_wri
 is mapped to `WriteKind::ChannelPost`, and the views offer no composer or message action in a channel. The web
 client's channel writes stay unmapped and denied in the browser fence ([endpoints.md](endpoints.md#writes)). They need
 a team of the lab accounts only before they can be mapped and tested
-(`docs/backlog/channel-writes-need-a-lab-only-team.md`); the personal build stays read-only until then.
+(`docs/backlog/channel-writes-need-a-lab-only-team.md`). The personal build's fence allows them (it denies nothing),
+but the app has no channel composer yet.

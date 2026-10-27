@@ -111,6 +111,7 @@ fn child(scenario: &str) -> SandboxResult {
     match answer {
         WindowAnswer::Redirect(url) => say(&format!("answer redirect {}", url.expose())),
         WindowAnswer::Closed => say("answer closed"),
+        WindowAnswer::Refused(host) => say(&format!("answer refused {host}")),
         WindowAnswer::Failed(reason) => say(&format!("answer failed {reason}")),
     }
     Ok(())

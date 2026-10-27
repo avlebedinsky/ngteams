@@ -114,6 +114,10 @@ pub const CHAT_BASE: &str = "https://teams.microsoft.com/api/chatsvc/amer";
 /// [`ChatServiceMock::origin`] with this base's path.
 pub const CSA_BASE: &str = "https://teams.microsoft.com/api/csa/amer";
 
+/// The AMS base a client is given (`amsV2` as the region's GTMs give it: the async gateway); its requests go to
+/// [`ChatServiceMock::origin`] with this base's path, where [`ChatServiceMock::serve_bytes`] answers them.
+pub const AMS_BASE: &str = "https://us-prod.asyncgw.teams.microsoft.com";
+
 /// The presence base a client is given (`presenceUPS` as the region's GTMs give it); its requests go to
 /// [`ChatServiceMock::origin`] with this base's path.
 pub const PRESENCE_BASE: &str = "https://teams.microsoft.com/ups/noam";
@@ -351,6 +355,86 @@ impl ChatServiceMock {
             .await;
     }
 
+    /// Answers every `GET` of exactly `path` with `body` as `content_type`, before the world sees it: a test's stand-in
+    /// for a static file (a message's picture on AMS, an emoticon's animation on Teams' CDN), which the world has none
+    /// of.
+    pub async fn serve_bytes(&self, path: &str, content_type: &str, body: Vec<u8>) {
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path(path))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(body, content_type))
+            .with_priority(1)
+            .mount(&self.server)
+            .await;
+    }
+
+    /// Answers every presence read (`POST` of UPS's `v1/presence/getpresence/` under [`PRESENCE_BASE`]) before the
+    /// world sees it, in the shape of `tests/fixtures/ups/getpresence-answer.json`: one item per MRI asked, with the
+    /// availability `presences` gives it, `Offline` for anyone else. A test's stand-in: the world keeps no one's
+    /// presence.
+    pub async fn serve_presence(&self, presences: &[(&str, &str)]) {
+        let presences: Vec<(String, String)> = presences
+            .iter()
+            .map(|(mri, availability)| ((*mri).to_owned(), (*availability).to_owned()))
+            .collect();
+        let path = format!(
+            "{}/v1/presence/getpresence/",
+            PRESENCE_BASE.trim_start_matches("https://teams.microsoft.com")
+        );
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path(path))
+            .respond_with(move |request: &Request| {
+                let asked: Vec<Value> = serde_json::from_slice(&request.body).unwrap_or_default();
+                let items: Vec<Value> = asked
+                    .iter()
+                    .filter_map(|ask| ask["mri"].as_str())
+                    .map(|mri| {
+                        let availability = presences
+                            .iter()
+                            .find(|(known, _)| known == mri)
+                            .map_or("Offline", |(_, availability)| availability.as_str());
+                        serde_json::json!({
+                            "mri": mri,
+                            "presence": {
+                                "sourceNetwork": "SameEnterprise",
+                                "calendarData": {"isOutOfOffice": false},
+                                "capabilities": [],
+                                "availability": availability,
+                                "activity": availability,
+                                "lastActiveTime": "0001-01-01T00:00:00Z",
+                            },
+                            "etagMatch": false,
+                            "etag": "made-up-tag",
+                            "status": 20000,
+                        })
+                    })
+                    .collect();
+                ResponseTemplate::new(200).set_body_raw(Value::Array(items).to_string(), "application/json")
+            })
+            .with_priority(1)
+            .mount(&self.server)
+            .await;
+    }
+
+    /// Answers every presence subscription (`POST` of UPS's `v1/pubsub/subscriptions/<endpoint>` under
+    /// [`PRESENCE_BASE`]) before the world sees it, in the shape of `tests/fixtures/ups/subscription.json`: a body of
+    /// exactly its four keys is answered with one status per MRI it adds or removes, `20200` (taken) but for those in
+    /// `polling_only` (`30010`, which the web client polls instead); any other body is a `400`. The mock delivers
+    /// nothing for it ([`TrouterMock::deliver_presence`] does). A test reads what was asked from
+    /// [`ChatServiceMock::received_requests`].
+    pub async fn serve_presence_subscriptions(&self, polling_only: &[&str]) {
+        let polling_only: Vec<String> = polling_only.iter().map(|mri| (*mri).to_owned()).collect();
+        let prefix = format!(
+            "{}/v1/pubsub/subscriptions/",
+            PRESENCE_BASE.trim_start_matches("https://teams.microsoft.com")
+        );
+        Mock::given(method("POST"))
+            .and(wiremock::matchers::path_regex(format!("^{prefix}[0-9a-f-]+$")))
+            .respond_with(move |request: &Request| subscription_answer(&request.body, &polling_only))
+            .with_priority(1)
+            .mount(&self.server)
+            .await;
+    }
+
     /// The skypetoken the mock's calling service takes as `mri`'s (`X-Skypetoken`), if `mri` is one of its accounts.
     #[must_use]
     pub fn skypetoken(&self, mri: &str) -> Option<String> {
@@ -521,4 +605,41 @@ impl ChatServiceMock {
     fn lock(&self) -> std::sync::MutexGuard<'_, world::State> {
         self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+/// UPS's answer to a presence subscription's `body` (see [`ChatServiceMock::serve_presence_subscriptions`]).
+fn subscription_answer(body: &[u8], polling_only: &[String]) -> ResponseTemplate {
+    const KEYS: [&str; 4] = [
+        "trouterUri",
+        "shouldPurgePreviousSubscriptions",
+        "subscriptionsToAdd",
+        "subscriptionsToRemove",
+    ];
+    let Ok(Value::Object(body)) = serde_json::from_slice::<Value>(body) else {
+        return ResponseTemplate::new(400);
+    };
+    if body.len() != KEYS.len() || KEYS.iter().any(|key| !body.contains_key(*key)) {
+        return ResponseTemplate::new(400);
+    }
+    let status = |mri: &str| {
+        if polling_only.iter().any(|polled| polled == mri) {
+            30_010
+        } else {
+            20_200
+        }
+    };
+    let statuses = |key: &str| -> Vec<Value> {
+        body[key]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|item| item["mri"].as_str())
+            .map(|mri| serde_json::json!({"mri": mri, "source": "ups", "status": status(mri)}))
+            .collect()
+    };
+    let answer = serde_json::json!({
+        "addStatuses": statuses("subscriptionsToAdd"),
+        "removeStatuses": statuses("subscriptionsToRemove"),
+    });
+    ResponseTemplate::new(200).set_body_raw(answer.to_string(), "application/json")
 }

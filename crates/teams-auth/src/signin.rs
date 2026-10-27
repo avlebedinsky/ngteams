@@ -5,7 +5,9 @@
 //! - on the window's stdin, the request: `{"authorize": <the authorize URL>, "redirect_uri": <the registered redirect
 //!   URI>}` ([`WindowRequest`]);
 //! - on its stdout, the answer ([`WindowAnswer`]): `{"redirect": <the URL Entra redirected to>}`, `{"closed": true}`
-//!   when the window was closed before a redirect, or `{"failed": <a short reason>}`.
+//!   when the window was closed before a redirect, `{"refused": <a host>}` when it was closed after it refused to go to
+//!   that host (off its bound: a federated identity provider's sign-in page the account's entry doesn't name; the host
+//!   alone, never a URL), or `{"failed": <a short reason>}`.
 //!
 //! The window never redeems anything and never logs the redirect: the code goes only into the answer. Here the answer
 //! is tied to the request ([`Authorization::code_from_redirect`]: the registered redirect URI, the request's `state`
@@ -54,6 +56,9 @@ pub enum WindowError {
     /// The window was closed before Entra redirected.
     #[error("the sign-in window was closed before the sign-in finished")]
     Closed,
+    /// The window was closed before Entra redirected, after it refused to go to this host (off its bound).
+    #[error("the sign-in window was closed after it refused to go to {0}")]
+    Refused(String),
     /// The window gave up, for this reason.
     #[error("the sign-in window failed: {0}")]
     Failed(String),
@@ -131,6 +136,8 @@ pub enum WindowAnswer {
     Redirect(Secret),
     /// The window was closed before a redirect.
     Closed,
+    /// The window was closed before a redirect, after it refused to go to this host (off its bound; [`is_host`]).
+    Refused(String),
     /// The window gave up: a short reason that never holds the redirect.
     Failed(String),
 }
@@ -140,6 +147,7 @@ impl fmt::Debug for WindowAnswer {
         match self {
             Self::Redirect(_) => f.write_str("Redirect(<redacted>)"),
             Self::Closed => f.write_str("Closed"),
+            Self::Refused(host) => f.debug_tuple("Refused").field(host).finish(),
             Self::Failed(reason) => f.debug_tuple("Failed").field(reason).finish(),
         }
     }
@@ -152,12 +160,13 @@ impl WindowAnswer {
         let value = match self {
             Self::Redirect(url) => json!({"redirect": url.expose()}),
             Self::Closed => json!({"closed": true}),
+            Self::Refused(host) => json!({"refused": host}),
             Self::Failed(reason) => json!({"failed": short_reason(reason)}),
         };
         Secret::new(value.to_string())
     }
 
-    /// Reads an answer line: exactly one of its three forms.
+    /// Reads an answer line: exactly one of its four forms, a refused host a host name ([`is_host`]).
     ///
     /// # Errors
     /// [`WindowError::TooLong`] or [`WindowError::Malformed`].
@@ -170,10 +179,23 @@ impl WindowAnswer {
         match (key.as_str(), value) {
             ("redirect", Value::String(url)) => Ok(Self::Redirect(Secret::new(url))),
             ("closed", Value::Bool(true)) => Ok(Self::Closed),
+            ("refused", Value::String(host)) if is_host(&host) => Ok(Self::Refused(host)),
             ("failed", Value::String(reason)) if reason.len() <= REASON_LIMIT => Ok(Self::Failed(reason)),
             _ => Err(WindowError::Malformed),
         }
     }
+}
+
+/// Whether `text` is a host name as a refused answer gives it: lowercase letters, digits, `-` and `.`, at most 253
+/// bytes, no empty label: never a URL, a path or a query.
+#[must_use]
+pub fn is_host(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() <= 253
+        && text.split('.').all(|label| !label.is_empty())
+        && text
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-' || byte == b'.')
 }
 
 /// `reason` cut to [`REASON_LIMIT`] bytes at a character boundary.
@@ -222,7 +244,8 @@ pub fn read_line(reader: impl Read) -> Result<Option<Zeroizing<String>>, WindowE
 /// redirect is shown to answer this request ([`Authorization::code_from_redirect`]).
 ///
 /// # Errors
-/// [`WindowError::Closed`], [`WindowError::Failed`] or [`WindowError::NoAnswer`] when the window gave no redirect;
+/// [`WindowError::Closed`], [`WindowError::Refused`], [`WindowError::Failed`] or [`WindowError::NoAnswer`] when the
+/// window gave no redirect;
 /// [`WindowError::Redirect`] when the redirect isn't this request's or carries Entra's refusal; [`WindowError::Io`],
 /// [`WindowError::Malformed`] or [`WindowError::TooLong`] on the wire.
 pub fn code_from_window(
@@ -240,6 +263,7 @@ pub fn code_from_window(
     match WindowAnswer::parse(&answer)? {
         WindowAnswer::Redirect(url) => Ok(authorization.code_from_redirect(url.expose())?),
         WindowAnswer::Closed => Err(WindowError::Closed),
+        WindowAnswer::Refused(host) => Err(WindowError::Refused(host)),
         WindowAnswer::Failed(reason) => Err(WindowError::Failed(reason)),
     }
 }

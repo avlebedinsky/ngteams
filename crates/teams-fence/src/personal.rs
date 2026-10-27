@@ -8,44 +8,26 @@
 //!   the diagnostic log. The data dir is refused when
 //!   it is, contains or lies inside the lab's ([`PersonalPaths::check_apart`]), and an account `lab.toml` names is
 //!   refused ([`PersonalAccount::check_not_lab`]).
-//! - **Its decision** ([`Fence::open_personal`], the only way to it outside tests): a write is permitted only when it
-//!   is a message, an edit, a delete, a reaction, typing or a read receipt on a 1:1 chat whose id names the account or
-//!   on a group chat (never a channel, a meeting chat, a stream, a new chat, a call), adding nobody, and the chat's
-//!   thread, read fresh when the fence decides by [`PersonalMembershipSource`] (one unpaged read in a shape a capture
-//!   showed, every member in a captured MRI form: [`crate::parse_listing`]), lists the account. The one write without
-//!   a conversation is the account's own availability, on the account itself. The calls go by the personal call
-//!   rule (`crate::decision`'s `personal_calls`: a start in such a chat whose read lists every callee too, the test
-//!   call with the echo service alone, every operation on a call by the call registry). Every decision goes to the
-//!   personal `fence.log` first; an allow that can't be logged is denied.
-//! - **Its reads by `POST`**: [`Fence::check_post_read_among`] with the people of the account's chats.
+//! - **Its decision** ([`Fence::open_personal`], the only way to it outside tests): none. It is the user's own account
+//!   in the user's own window, so it logs every write and permits it, whatever its kind and target, with no member
+//!   read (`crate::decision`'s `audit`); an operation on a call moves the call registry as the lab's call rule does,
+//!   and the call floor keeps one call at a time across the app's accounts. Every decision goes to the personal
+//!   `fence.log` first; an allow that can't be logged is denied.
+//! - **Its reads by `POST`**: [`Fence::check_post_read`] permits every one, logged.
 
 use std::fmt;
 use std::fs::{self, DirBuilder};
 use std::io;
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 use serde::Deserialize;
 
-use crate::DenyReason;
 use crate::apart::{PersonalLocations, overlapping};
-use crate::decision::{Fence, Membership, MembershipFuture, MembershipSource, PartialReason};
+use crate::decision::Fence;
 use crate::lab::{LabConfig, LabLocations};
-use crate::log::{FenceLog, Verdict};
-use crate::membership::{CredentialSource, LiveMembershipSource, LiveSourceError, is_group_chat_id, one_to_one_pair};
-use crate::target::{Mri, Scope, Target, WriteKind};
-
-/// The kinds of chat write the personal build sends (besides the account's own availability and the calls, which its
-/// call rule judges).
-pub const PERSONAL_KINDS: [WriteKind; 6] = [
-    WriteKind::Message,
-    WriteKind::Edit,
-    WriteKind::Delete,
-    WriteKind::Reaction,
-    WriteKind::Typing,
-    WriteKind::ReadReceipt,
-];
+use crate::log::FenceLog;
+use crate::target::Mri;
 
 /// The personal build's files.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -614,121 +596,6 @@ impl Fence {
     #[cfg(feature = "test-support")]
     pub fn open_personal_with(paths: &PersonalPaths, upn: &str, lab: &LabLocations) -> Result<Self, PersonalError> {
         Self::open_personal_apart(paths, upn, lab)
-    }
-
-    /// The personal fence's verdict on `target` (see the module docs).
-    pub(crate) async fn judge_personal(&self, target: &Target, source: &dyn MembershipSource) -> Verdict {
-        if target.kind() == WriteKind::OwnAvailability || matches!(target.scope(), Scope::Account { .. }) {
-            return self.judge_own_personal(target);
-        }
-        if !PERSONAL_KINDS.contains(&target.kind()) {
-            return Verdict::Deny(DenyReason::NotPersonalKind);
-        }
-        if !target.added().is_empty() {
-            return Verdict::Deny(DenyReason::AddsParticipants);
-        }
-        let Some(own) = self.own_account() else {
-            return Verdict::Deny(DenyReason::NotOwnAccount);
-        };
-        let id = match target.scope() {
-            Scope::New => return Verdict::Deny(DenyReason::NotCreatable),
-            Scope::Conversation { id } => id,
-            _ => return Verdict::Deny(DenyReason::NotPersonalScope),
-        };
-        match one_to_one_pair(id) {
-            Some(pair) if !pair.iter().any(|member| same(member, own)) => {
-                return Verdict::Deny(DenyReason::NotAMember);
-            }
-            Some(_) => {}
-            None if is_group_chat_id(id) => {}
-            None => return Verdict::Deny(DenyReason::NotPersonalScope),
-        }
-        match source.members(target.scope()).await {
-            Membership::Listed(members) if members.iter().any(|member| same(member, own)) => Verdict::Allow,
-            Membership::Listed(_) => Verdict::Deny(DenyReason::NotAMember),
-            Membership::Partial(reason) => Verdict::Deny(DenyReason::Partial(reason)),
-            // only the personal source's listing answers the personal fence's question
-            Membership::Complete(_) | Membership::OrgWide => {
-                Verdict::Deny(DenyReason::Partial(PartialReason::Unsupported))
-            }
-        }
-    }
-
-    /// The account's own availability: only on the account itself, the fence's own, adding nobody.
-    fn judge_own_personal(&self, target: &Target) -> Verdict {
-        if target.kind() != WriteKind::OwnAvailability {
-            return Verdict::Deny(DenyReason::AccountScope);
-        }
-        let own = match target.scope() {
-            Scope::Account { mri } => self.own_account().is_some_and(|own| own.as_str() == mri),
-            _ => false,
-        };
-        if own && target.added().is_empty() {
-            Verdict::Allow
-        } else {
-            Verdict::Deny(DenyReason::NotOwnAccount)
-        }
-    }
-}
-
-/// The same MRI, case aside (an object id is a GUID).
-pub(crate) fn same(one: &Mri, other: &Mri) -> bool {
-    one.as_str().eq_ignore_ascii_case(other.as_str())
-}
-
-/// The personal fence's membership source: a 1:1 or group chat's thread, read fresh from the chat service on every
-/// check ([`LiveMembershipSource`]'s client, credential and bounds), judged by [`crate::parse_listing`]. Every other
-/// scope is [`PartialReason::Unsupported`], answered without a read.
-#[derive(Debug)]
-pub struct PersonalMembershipSource {
-    live: LiveMembershipSource,
-}
-
-impl PersonalMembershipSource {
-    /// The source of the personal fence `fence`, with no credential yet.
-    ///
-    /// # Errors
-    /// When the HTTPS client can't be built.
-    pub fn for_fence(_fence: &Fence) -> Result<Self, LiveSourceError> {
-        Ok(Self {
-            live: LiveMembershipSource::new()?,
-        })
-    }
-
-    /// A source whose reads go to `origin` (a local mock). Tests only (`test-support`).
-    ///
-    /// # Errors
-    /// When the client can't be built.
-    #[cfg(feature = "test-support")]
-    pub fn with_mock_origin(origin: &str) -> Result<Self, LiveSourceError> {
-        Ok(Self {
-            live: LiveMembershipSource::with_mock_origin(origin)?,
-        })
-    }
-
-    /// Asks `source` for the credential on every read (the native transport, over the account's session).
-    pub fn set_credential_source(&self, source: Arc<dyn CredentialSource>) {
-        self.live.set_credential_source(source);
-    }
-
-    /// Reads with `credential` from now on. Tests only (`test-support`): the personal build reads with its session's
-    /// token ([`Self::set_credential_source`]).
-    #[cfg(feature = "test-support")]
-    pub fn set_credential(&self, credential: crate::ChatCredential) {
-        self.live.set_credential(credential);
-    }
-}
-
-impl MembershipSource for PersonalMembershipSource {
-    fn members<'a>(&'a self, scope: &'a Scope) -> MembershipFuture<'a> {
-        Box::pin(async move {
-            match scope {
-                Scope::Conversation { id } if one_to_one_pair(id).is_some() || is_group_chat_id(id) => {
-                    self.live.listing(id).await
-                }
-                _ => Membership::Partial(PartialReason::Unsupported),
-            }
-        })
     }
 }
 

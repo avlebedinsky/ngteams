@@ -5,8 +5,7 @@
 //! source); [`start`] builds the account's [`Session`], the writes' transport (the chat base from the region's GTMs,
 //! UPS's base for the account's own availability), the member read with that transport's credential, the reads'
 //! transport (the middle tier's base from the GTM `middleTier`, the profile lookup's; CSA's from `chatSvcAggAfd`, the
-//! teams read's; UPS's from `presenceUPS`, the presence read's), sharing the people of the account's chats the engine
-//! keeps from its store (`teams_fence::ChatPeople`, read only through a personal fence), the push channel
+//! teams read's; UPS's from `presenceUPS`, the presence read's; AMS's from `amsV2`, the messages' pictures'), the push channel
 //! ([`Trouter`]) when asked for, the calling ([`AccountCalls`]: the calling stack's socket over the writes' transport, the
 //! account in its calls, their media) when asked for, and starts the engine.
 //!
@@ -21,7 +20,7 @@ use teams_auth::secrets::SecretStore;
 use teams_auth::session::Session;
 use teams_auth::token::{EntraConfig, TokenClient, TokenError};
 use teams_call::Identity;
-use teams_fence::{ChatPeople, CredentialSource, Fence, LiveSourceError, MembershipSource, Mri};
+use teams_fence::{CredentialSource, Fence, LiveSourceError, MembershipSource, Mri};
 use teams_media::video::codec::{EncoderSettings, H264Library};
 use teams_media::video::convert::MaxSize;
 use teams_proto::{Author, BuildError, Client, ClientInfo, Credentials, HttpTransport};
@@ -133,6 +132,18 @@ pub struct Account<S> {
     pub known_names: Vec<(String, String)>,
     /// Whether, and how, the account calls; `None` runs the engine without calling.
     pub calls: Option<AccountCalls>,
+    /// Read-only (the personal build's `teams --read-only`, [`READ_ONLY_POLL`]): see [`start`].
+    pub read_only: bool,
+}
+
+/// How often a read-only engine catches up by reads, having no push channel ([`EngineOptions::poll`]).
+pub const READ_ONLY_POLL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// What an engine opens of what the binary asked for: its push channel and its calling, neither of them when it is
+/// read-only (no second Trouter connection on the account, no endpoint registered, no calling socket).
+#[must_use]
+pub fn listening(read_only: bool, push: bool, calls: Option<AccountCalls>) -> (bool, Option<AccountCalls>) {
+    if read_only { (false, None) } else { (push, calls) }
 }
 
 /// An account's calling as the binary gives it: what its calls' media is made of, and how the account describes its
@@ -163,6 +174,11 @@ pub struct AccountEngine<S> {
 /// Builds `account`'s engine as the module docs say, over `fence`, with the member read `membership` makes, and starts
 /// it ([`engine::start`]: refused while another engine runs on the account).
 ///
+/// A read-only account ([`Account::read_only`]) gets transports that send reads only
+/// (`teams_proto::HttpTransport::read_only`: every write refused below the views and logged as `refused_read_only`),
+/// no push channel and no calling whatever was asked ([`listening`]), and catches up by reads every
+/// [`READ_ONLY_POLL`] instead.
+///
 /// # Errors
 /// See [`AccountError`]; [`AccountError::Engine`] with [`EngineError::AlreadyRunning`] when another engine holds the
 /// account.
@@ -181,7 +197,12 @@ pub fn start<S: SecretStore + 'static>(
         push,
         known_names,
         calls,
+        read_only,
     } = account;
+    let (push, calls) = listening(read_only, push, calls);
+    let writable = |transport: HttpTransport<Session<S>>| {
+        if read_only { transport.read_only() } else { transport }
+    };
     let store = Store::open(&store_file)?;
     let session = Arc::new(Session::new(
         upn,
@@ -195,20 +216,17 @@ pub fn start<S: SecretStore + 'static>(
     // the writes' transport (the outbox's, the push channel's registration): UPS's base too, for the account's own
     // availability (M2 Task 19), which goes out only as an authorized write under the fence's permit
     let transport = Arc::new(with_presence(
-        HttpTransport::new(Arc::clone(&session), Arc::clone(&fence), &base)?,
+        writable(HttpTransport::new(Arc::clone(&session), Arc::clone(&fence), &base)?),
         presence.as_deref(),
     )?);
     let members = membership(&fence, transport.clone())?;
-    let people = Arc::new(ChatPeople::new());
     let reads = with_middle_tier(
-        || {
-            HttpTransport::new(Arc::clone(&session), Arc::clone(&fence), &base)
-                .map(|reads| reads.with_chat_people(Arc::clone(&people)))
-        },
+        || HttpTransport::new(Arc::clone(&session), Arc::clone(&fence), &base).map(writable),
         session.service_base(MIDDLE_TIER_GTM).as_deref(),
     )?;
     let reads = with_csa(reads, session.service_base(CSA_GTM).as_deref())?;
     let reads = with_presence(reads, presence.as_deref())?;
+    let reads = with_ams(reads, session.service_base(AMS_GTM).as_deref())?;
     let client = Arc::new(Client::new(reads));
     let push = if push {
         Some(Push::new(Trouter::new(Arc::clone(&transport), Arc::clone(&session))?))
@@ -241,7 +259,10 @@ pub fn start<S: SecretStore + 'static>(
         client,
         outbox,
         push,
-        options: EngineOptions::default(),
+        options: EngineOptions {
+            poll: read_only.then_some(READ_ONLY_POLL),
+            ..EngineOptions::default()
+        },
         known_names,
     })?;
     Ok(AccountEngine { handle, session })
@@ -281,6 +302,23 @@ fn with_csa<C: Credentials>(reads: HttpTransport<C>, csa: Option<&str>) -> Resul
         Some(base) if HttpTransport::<C>::accepts_csa_base(base) => reads.with_csa(base),
         Some(_) => {
             log::warn!("the region's chatSvcAggAfd base isn't of the form the transport accepts: no teams read");
+            Ok(reads)
+        }
+        None => Ok(reads),
+    }
+}
+
+/// The GTM AMS's base comes from (the async gateway: a message's pictures' reads).
+pub const AMS_GTM: &str = "amsV2";
+
+/// The reads' transport with AMS's base (a message's pictures' reads) when the region has one the transport accepts.
+/// Without one, or with one of another form (logged, without its value), every picture read is refused and a message
+/// shows its pictures as placeholders: an optional read never stops the engine.
+fn with_ams<C: Credentials>(reads: HttpTransport<C>, ams: Option<&str>) -> Result<HttpTransport<C>, BuildError> {
+    match ams {
+        Some(base) if HttpTransport::<C>::accepts_ams_base(base) => reads.with_ams(base),
+        Some(_) => {
+            log::warn!("the region's amsV2 base isn't of the form the transport accepts: no message pictures");
             Ok(reads)
         }
         None => Ok(reads),

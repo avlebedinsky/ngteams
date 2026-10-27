@@ -3,7 +3,7 @@
 //! target what the browser fence's classifier makes of the same bytes, sent only as `Authorized<_>` to the calling
 //! service (the flight proxy, the account's skypetoken, the call's headers, the link exactly as handed out), and the
 //! fence's call registry fed by the transport: a start and a join with media registered from their answers, an
-//! `attach` and an `accept` binding theirs, so under the registry's rule (the personal build's, `Fence::tracking_calls`
+//! `attach` and an `accept` binding theirs, so under the registry's rule (no build's fence's, `Fence::tracking_calls`
 //! here) every later write of the call passes `Fence::check` only on the links the call's services handed out. Under
 //! the lab's own rule (at the end) only a call's entry is judged, and the rest goes under its permit, logged.
 //!
@@ -250,7 +250,7 @@ struct Lab {
     transport: HttpTransport<Tokens>,
 }
 
-/// `own`'s lab whose fence decides calls by the call registry (the personal build's rule): the transport's registry
+/// `own`'s lab whose fence decides calls by the call registry's own rule: the transport's registry
 /// feeding is tested on it.
 async fn lab(own: &str) -> Lab {
     lab_with(own, true).await

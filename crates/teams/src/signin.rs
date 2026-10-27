@@ -17,6 +17,13 @@
 //!
 //! An `AADSTS` refusal (Conditional Access, a device requirement, a multi-factor registration) comes back as the
 //! window's or Entra's error and stores nothing.
+//!
+//! **Adding an account** ([`add`], the first run's screen and the rail's "+" alike): its entry is written first
+//! ([`Setup::ask_for`]: the one held of that UPN, with whatever the user wrote into it), then it signs in. One whose
+//! sign-in stores nothing is taken out again only while it holds nothing but its UPN ([`Setup::abandon`]), and is kept
+//! when the window refused an identity provider's host ([`refused_host`]): what the user says ([`failure`]) is to add
+//! that host to the entry's `idp_hosts` by hand and sign in again, which takes the entry up. Nothing adds a host by
+//! itself, and an entry no sign-in named never starts an engine.
 
 use std::ffi::OsString;
 use std::fs::{self, DirBuilder};
@@ -29,7 +36,7 @@ use teams_auth::authz::{AuthzClient, AuthzError, AuthzKind, Region};
 use teams_auth::pkce::PkceError;
 use teams_auth::refresh::refresh_token_key;
 use teams_auth::secrets::{SecretError, SecretStore};
-use teams_auth::signin::{WindowSignInError, sign_in_with_window};
+use teams_auth::signin::{WindowError, WindowSignInError, sign_in_with_window};
 use teams_auth::token::{Authorization, EntraConfig, Scope, TokenClient, TokenError};
 use teams_fence::personal::{PersonalAccount, PersonalError};
 
@@ -168,6 +175,58 @@ pub async fn sign_in<S: SecretStore>(
     let region = setup.paths.region_file(&named).ok_or(PersonalError::NoAccount)?;
     save_region(&region, &skypetoken.region)?;
     Ok(named)
+}
+
+/// Adds the account `upn` (or takes up the entry held of it, as the user left it: [`Setup::ask_for`]) and signs it in
+/// through the window `window` makes for it ([`sign_in`]); see the module docs for what a sign-in that stores nothing
+/// leaves behind.
+///
+/// # Errors
+/// What the user is told ([`failure`]) when the account can't be added or its sign-in stored nothing.
+pub async fn add<S: SecretStore>(
+    setup: &Setup,
+    upn: &str,
+    clients: &SignInClients,
+    store: &S,
+    window: impl FnOnce(&PersonalAccount) -> Result<Command, SignInError>,
+) -> Result<PersonalAccount, String> {
+    let account = setup.ask_for(upn).map_err(|error| error.to_string())?;
+    let signed = match window(&account) {
+        Ok(window) => sign_in(setup, &account, clients, store, window).await,
+        Err(error) => Err(error),
+    };
+    signed.map_err(|error| {
+        // kept when the window refused a host: the user adds it to this entry's `idp_hosts`
+        if refused_host(&error).is_none() {
+            let _ = setup.abandon(upn);
+        }
+        failure(setup, &account, &error)
+    })
+}
+
+/// The host the sign-in window refused to go to, when that is why it stored nothing: a federated identity provider's
+/// page the account's `idp_hosts` doesn't name (`teams_signin::hosts::SignInHosts::idp_candidate`; the host alone).
+#[must_use]
+pub fn refused_host(error: &SignInError) -> Option<&str> {
+    match error {
+        SignInError::Window(WindowSignInError::Window(WindowError::Refused(host))) => Some(host),
+        _ => None,
+    }
+}
+
+/// What the user is told when `account`'s sign-in stored nothing for `error`: for a host the window refused, that host
+/// and where to add it (`idp_hosts` in the account's entry of `accounts.toml`), never a URL; else the error.
+#[must_use]
+pub fn failure(setup: &Setup, account: &PersonalAccount, error: &SignInError) -> String {
+    match refused_host(error) {
+        Some(host) => format!(
+            "the sign-in window refused {host}, your organization's sign-in page: add it to idp_hosts in the \
+             [[account]] entry of {} in {} (idp_hosts = [\"{host}\"]), then sign in again",
+            account.upn,
+            setup.paths.accounts_file().display(),
+        ),
+        None => format!("the sign-in stored nothing: {error}"),
+    }
 }
 
 /// Writes `region` (its GTMs, never a token) to `path`, `0600` in a `0700` directory, through a new file renamed over it.

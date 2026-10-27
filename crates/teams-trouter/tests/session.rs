@@ -1,6 +1,6 @@
 //! The push channel against `teams-mock`'s Trouter and chat service, reached through the `test-support` mock origins:
 //! connect, authenticate as the first frame, register the messaging endpoint, keep-alives, deliveries that are never
-//! answered (an incoming call's included), a dropped socket and the regional reconnect with its replay, when a socket
+//! answered (an incoming call's and others' presence included), a dropped socket and the regional reconnect with its replay, when a socket
 //! that went down was last heard (not when a missing pong was noticed), the service's
 //! disconnects, a regional host given up, token renewal (a fake clock, the real session over a mock Entra, before the
 //! service's `1::`), a session signed out before the service's `1::`, a throttled token service, the stop (also while
@@ -748,6 +748,70 @@ async fn an_incoming_call_is_ignored_and_never_answered() {
     // a ping afterwards shows the socket read on, and nothing answered the call
     let before = lab.trouter.sockets()[0].frames.len();
     sockets_until(&lab.trouter, |sockets| sockets[0].frames.len() > before).await;
+    push.stop().await;
+    sent_only_own_frames(&lab).await;
+}
+
+#[tokio::test]
+async fn others_presence_is_handed_on_as_delivered_and_never_answered() {
+    let lab = Lab::start().await;
+    let mut push = lab.client().spawn();
+    connected(&mut push).await;
+    registered(&mut push).await;
+    let presence = |availability: &str| {
+        json!({"presence": [{
+            "mri": LAB_A,
+            "etag": "A0000000110",
+            "presence": {
+                "sourceNetwork": "SameEnterprise",
+                "calendarData": {"isOutOfOffice": false},
+                "capabilities": [],
+                "availability": availability,
+                "activity": availability,
+                "deviceType": "Web",
+            },
+        }]})
+    };
+    let mut snapshot = presence("Offline");
+    snapshot["isSnapshot"] = json!(true);
+    lab.trouter.deliver_presence(LAB_B, &snapshot, false);
+    let delivered = next(&mut push, |event| match event {
+        PushEvent::Presence(delivery) => Some(delivery),
+        _ => None,
+    })
+    .await;
+    assert!(delivered.snapshot && !delivered.stored);
+    assert_eq!(delivered.presences.len(), 1);
+    assert_eq!(delivered.presences[0].mri, Mri::new(LAB_A));
+    assert_eq!(delivered.presences[0].availability.as_deref(), Some("Offline"));
+
+    // a change, then a replay of an older one (stored): both handed on, told apart
+    lab.trouter.deliver_presence(LAB_B, &presence("Busy"), false);
+    lab.trouter.deliver_presence(LAB_B, &presence("Away"), true);
+    let mut seen = Vec::new();
+    while seen.len() < 2 {
+        seen.push(
+            next(&mut push, |event| match event {
+                PushEvent::Presence(delivery) => Some(delivery),
+                _ => None,
+            })
+            .await,
+        );
+    }
+    assert_eq!(seen[0].presences[0].availability.as_deref(), Some("Busy"));
+    assert!(!seen[0].stored && !seen[0].snapshot);
+    assert_eq!(seen[1].presences[0].availability.as_deref(), Some("Away"));
+    assert!(seen[1].stored);
+
+    // a body that isn't a presence list isn't read, and isn't answered either
+    lab.trouter
+        .deliver_presence(LAB_B, &json!({"presence": [{"etag": "no mri"}]}), false);
+    let ignored = next(&mut push, |event| match event {
+        PushEvent::Ignored(ignored) => Some(ignored),
+        _ => None,
+    })
+    .await;
+    assert!(matches!(ignored, Ignored::Undecodable { ref path } if path.ends_with("/unifiedPresenceService")));
     push.stop().await;
     sent_only_own_frames(&lab).await;
 }

@@ -12,7 +12,8 @@
 //!
 //! Received attachments are parsed, never fetched: `amsreferences`, `properties.files` and `properties.cards` with an
 //! entry are kept as they came ([`Unshown`]: no capture showed one, so a view says the message has content it can't
-//! show and never guesses at it), and an image's `src` is kept on [`Image`].
+//! show and never guesses at it), and an image's `src`, `itemtype`, `itemid` and size are kept on [`Image`] (a view asks the
+//! engine for a pasted picture's bytes or an emoticon's, never this crate).
 
 mod compose;
 mod html;
@@ -21,8 +22,8 @@ mod read;
 
 pub use compose::{ComposeError, MessageText};
 pub use html::{
-    Image, MAX_CONTENT, MAX_DEPTH, MENTION_ITEMTYPE, Marks, Node, Quote, REPLY_ITEMTYPE, RichText, ThreadActivity,
-    parse as parse_html, thread_activity,
+    AMS_IMAGE_ITEMTYPE, EMOJI_ITEMTYPE, Image, MAX_CONTENT, MAX_DEPTH, MENTION_ITEMTYPE, Marks, Node, Quote,
+    REPLY_ITEMTYPE, RichText, ThreadActivity, parse as parse_html, thread_activity,
 };
 pub use model::{
     ConsumptionHorizon, Conversation, ConversationKind, ConversationList, Field, Malformed, MemberList, Mention,

@@ -29,7 +29,8 @@ pub trait Transport: Sync {
 
     /// Sends a plain request when it reaches nobody ([`teams_fence::contacting`] calls it
     /// [`teams_fence::Contact::None`]), logged to `fence.log` as `allowed` before it goes when it is mutating; refuses
-    /// a write or a request the classifier can't read, before anything is sent.
+    /// a write or a request the classifier can't read, before anything is sent, but through the personal build's fence,
+    /// which denies nothing (the native transport then sends it too, logged with the classification).
     fn send<R: Request>(&self, request: &R) -> impl Future<Output = Result<Response, Self::Error>> + Send;
 
     /// Sends an entry of the sealed own-state list that is also a plain request (the registration): as a plain request
@@ -48,6 +49,20 @@ pub trait Transport: Sync {
         &self,
         write: Authorized<R>,
     ) -> impl Future<Output = Result<Response, Self::Error>> + Send;
+
+    /// Whether this transport sends only reads (the personal build's read-only mode, [`HttpTransport::read_only`]):
+    /// `false` (the default) for one that may write.
+    fn is_read_only(&self) -> bool {
+        false
+    }
+
+    /// Why `write` is refused before the fence is even asked: on a read-only transport (the personal build's read-only
+    /// mode, [`HttpTransport::read_only`]) its refusal, logged to `fence.log` as `refused_read_only`; `None` (the
+    /// default, and every transport that may write) when it may go on to the fence.
+    fn read_only_refusal<R: Mutating>(&self, write: &R) -> Option<Self::Error> {
+        let _ = write;
+        None
+    }
 
     /// The account this transport sends for, as its fence owns it ([`teams_fence::Fence::own_account`]): the account an
     /// endpoint registered through it is recorded for ([`crate::register`], [`crate::RegisteredEndpoint::account`]).
@@ -226,13 +241,12 @@ impl<C: Credentials> Client<HttpTransport<C>> {
     }
 
     /// Sends a read by `POST` of the sealed list: through a lab fence as a plain request ([`Transport::send`], whoever it
-    /// names); through the personal build's fence only under the permit [`teams_fence::Fence::check_post_read_among`]
-    /// gives for its exact MRIs against the people of the account's chats ([`HttpTransport::chat_people`]), once, in its
-    /// entry's captured shape ([`HttpTransport::post_read`]).
+    /// names); through the personal build's fence under the permit [`teams_fence::Fence::check_post_read`] gives for its
+    /// exact MRIs (any, logged by its entry's kind), once, in its entry's captured shape ([`HttpTransport::post_read`]).
     ///
     /// # Errors
-    /// The transport's; [`HttpError::Refused`] with [`Refusal::PostReadDenied`] when the personal fence denied it
-    /// (nothing sent), [`HttpError::Unknown`] when the permit doesn't match it.
+    /// The transport's; [`HttpError::Refused`] with [`Refusal::PostReadDenied`] when the fence couldn't log it (nothing
+    /// sent), [`HttpError::Unknown`] when the permit doesn't match it.
     pub async fn lookup<R: PostRead + Request + Send + Sync>(&self, request: R) -> Result<Response, HttpError> {
         if !self.transport.is_personal() {
             return self.transport.send(&request).await;
@@ -240,7 +254,7 @@ impl<C: Credentials> Client<HttpTransport<C>> {
         let permit = self
             .transport
             .fence()
-            .check_post_read_among(R::KIND, request.names(), self.transport.chat_people())
+            .check_post_read(R::KIND, request.names())
             .map_err(|_| HttpError::Refused(Refusal::PostReadDenied))?;
         self.post_read(request, permit).await.map_err(|error| match error {
             PostReadError::Mismatch(_) => HttpError::Unknown,

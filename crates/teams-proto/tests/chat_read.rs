@@ -145,6 +145,25 @@ fn a_conversations_roster_version_is_absent_known_or_kept_as_it_came() -> TestRe
 }
 
 #[test]
+fn a_conversation_is_empty_only_as_the_service_says_it_in_its_captured_form() -> TestResult {
+    let empty = |properties: Value| -> TestResult<Option<bool>> {
+        let listed: Conversation = serde_json::from_value(json!({"id": AB_CHAT, "properties": properties}))?;
+        Ok(listed.is_empty_conversation())
+    };
+    assert_eq!(empty(json!({"isemptyconversation": "True"}))?, Some(true));
+    assert_eq!(empty(json!({"isemptyconversation": "False"}))?, Some(false));
+    // absent, or a form no capture showed: not known
+    for other in [
+        json!({}),
+        json!({"isemptyconversation": true}),
+        json!({"isemptyconversation": "true"}),
+    ] {
+        assert_eq!(empty(other.clone())?, None, "{other}");
+    }
+    Ok(())
+}
+
+#[test]
 fn a_conversation_kind_this_build_does_not_name_is_kept_and_read_only() {
     let kind = ConversationKind::of("19:meeting_abc@thread.v2", Some("chat"));
     assert_eq!(kind, ConversationKind::Unknown("chat".to_owned()));
@@ -858,6 +877,8 @@ fn unknown_markup_is_kept_as_text_and_known_markup_typed() {
                 src: "https://example.test/i.png".to_owned(),
                 alt: Some("pic".to_owned()),
                 item_type: Some("http://schema.skype.com/AMSImage".to_owned()),
+                item_id: None,
+                size: None,
             }),
             Node::Quote(Quote {
                 body: vec![Node::Paragraph(vec![text("plain quote")])],
@@ -866,6 +887,66 @@ fn unknown_markup_is_kept_as_text_and_known_markup_typed() {
         ]
     );
     assert_eq!(rich.plain_text(), "moving bold both\nx\nlinkpic\nplain quote\n");
+}
+
+/// A pasted picture and an emoticon in the shapes the captures and the user's chats showed (made-up ids): the picture
+/// with its `itemid` and its size from its attributes (a fraction rounded) or its `style`, the emoticon with its id.
+#[test]
+fn a_pasted_picture_and_an_emoticon_keep_their_ids_and_size() {
+    let object = "0-eus-d9-00000000000000000000000000000abc";
+    let rich = parse_html(&format!(
+        "<p><img src=\"https://us-api.asm.skype.com/v1/objects/{object}/views/imgo\" \
+         itemtype=\"http://schema.skype.com/AMSImage\" itemscope=\"png\" width=\"884\" height=\"130.64889918887602\" \
+         alt=\"image\" id=\"x_{object}\" itemid=\"{object}\"></p>\
+         <p><img src=\"https://us-api.asm.skype.com/v1/objects/{object}/views/imgo\" itemscope=\"\" \
+         itemtype=\"http://schema.skype.com/AMSImage\" style=\"width:2082px; height:2776px\"></p>\
+         <p>done<span title=\"Speechless\" type=\"(speechless)\" class=\"animated-emoticon-20-speechless\" \
+         itemscope=\"\"><img itemscope=\"\" itemtype=\"http://schema.skype.com/Emoji\" itemid=\"speechless\" \
+         src=\"https://statics.teams.cdn.office.net/evergreen-assets/personal-expressions/v2/assets/emoticons/\
+         speechless/default/20_f.png\" title=\"Speechless\" alt=\"\u{1f610}\" style=\"width:20px; height:20px\">\
+         </span></p>"
+    ));
+    let images: Vec<&teams_proto::chat::Image> = rich
+        .nodes
+        .iter()
+        .flat_map(|node| match node {
+            Node::Paragraph(children) => children.iter().collect(),
+            other => vec![other],
+        })
+        .filter_map(|node| match node {
+            Node::Image(image) => Some(image),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(images.len(), 3, "{rich:?}");
+    assert_eq!(images[0].item_id.as_deref(), Some(object));
+    assert_eq!(images[0].size, Some((884, 131)));
+    assert!(!images[0].is_emoji());
+    assert_eq!(
+        (images[1].item_id.as_deref(), images[1].size),
+        (None, Some((2082, 2776)))
+    );
+    assert!(images[2].is_emoji());
+    assert_eq!(images[2].item_id.as_deref(), Some("speechless"));
+    assert_eq!(images[2].alt.as_deref(), Some("\u{1f610}"));
+    assert_eq!(images[2].size, Some((20, 20)));
+    assert_eq!(rich.plain_text(), "image\n\ndone\u{1f610}\n");
+
+    // a size that isn't plain pixels, or only half of one, is none
+    for img in [
+        "<img src=\"https://example.test/i.png\" width=\"50%\" height=\"10\">",
+        "<img src=\"https://example.test/i.png\" width=\"10\">",
+        "<img src=\"https://example.test/i.png\" width=\"0\" height=\"10\">",
+        "<img src=\"https://example.test/i.png\" style=\"width:10em; height:10px\">",
+        "<img src=\"https://example.test/i.png\" width=\"-4\" height=\"10\">",
+        "<img src=\"https://example.test/i.png\" width=\"9999999\" height=\"10\">",
+    ] {
+        let nodes = parse_html(img).nodes;
+        assert!(
+            matches!(&nodes[..], [Node::Image(image)] if image.size.is_none()),
+            "{img}: {nodes:?}"
+        );
+    }
 }
 
 #[test]

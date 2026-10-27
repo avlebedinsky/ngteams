@@ -3,21 +3,121 @@
 //! sign in, added when it is a new one, through the sign-in window at once), `teams --forget <UPN>` (signs out and
 //! forgets that account: its `teams-personal` items, its `accounts.toml` entry and its saved region, refused while
 //! Teams runs for it; its store stays, to delete by hand).
+//!
+//! The read-only mode (`crate::read_only`, run by `scripts/run-personal-read-only.sh`):
+//! `teams --read-only --account <UPN> --data <snapshot> --secrets-fd <n> [--trace-fd <n>]` (or `TEAMS_READ_ONLY=1`
+//! in place of `--read-only`), the window over a snapshot in the UI sandbox only; `teams snapshot --to <dir>` (the
+//! snapshot of the user's files it runs on) and `teams secrets --account <UPN> --fd <n>` (its credential broker, `get`
+//! only, run outside the sandbox).
 
-use clap::Parser;
+use std::os::fd::RawFd;
+use std::path::PathBuf;
+
+use clap::{Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(
     name = "teams",
-    about = "Microsoft Teams for your own accounts, under the personal build's fence. Prints no token."
+    about = "Microsoft Teams for your own accounts, under the personal build's fence. Prints no token.",
+    args_conflicts_with_subcommands = true
 )]
 pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<Command>,
     /// A work account to sign in (its UPN) before the app starts, skipping the window that asks for it: one of the
-    /// accounts already given, or a new one added after them.
+    /// accounts already given, or a new one added after them. In the read-only mode: the account to show.
     #[arg(long, value_name = "UPN")]
     pub account: Option<String>,
     /// Sign out and forget the account of this UPN: its Secret Service items, its entry in `accounts.toml` and its saved
     /// region; the other accounts stay. Refused while Teams runs for it (quit it first). Its store stays.
-    #[arg(long, value_name = "UPN", conflicts_with = "account")]
+    #[arg(long, value_name = "UPN", conflicts_with_all = ["account", "read_only"])]
     pub forget: Option<String>,
+    #[command(flatten)]
+    pub read_only: ReadOnlyArgs,
+}
+
+/// The read-only mode's arguments.
+#[derive(Debug, Args)]
+pub struct ReadOnlyArgs {
+    /// The read-only mode: sends nothing anyone sees or that changes the account, opens no push channel and no calls,
+    /// runs on a snapshot (`--data`) and only in the UI sandbox. `TEAMS_READ_ONLY=1` asks for it too.
+    #[arg(long = "read-only")]
+    pub read_only: bool,
+    /// The snapshot the read-only mode runs on (`teams snapshot --to <dir>`).
+    #[arg(long, value_name = "DIR")]
+    pub data: Option<PathBuf>,
+    /// The credential broker's socket (`teams secrets`, the other end of a socket pair), handed to this process at its
+    /// start (3 or above): the read-only mode's only way to the account's tokens.
+    #[arg(long, value_name = "N")]
+    pub secrets_fd: Option<RawFd>,
+    /// Where the view trace goes in the read-only mode: a descriptor open for writing, handed to this process at its
+    /// start (3 or above).
+    #[arg(long, value_name = "N")]
+    pub trace_fd: Option<RawFd>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Copies your Teams files (the accounts, the settings, each account's region and a consistent copy of its store,
+    /// read without writing it) into a new directory, for the read-only mode to run on. Writes nothing of yours.
+    Snapshot {
+        /// The new (or empty) directory, apart from your own Teams files.
+        #[arg(long, value_name = "DIR")]
+        to: PathBuf,
+    },
+    /// The read-only mode's credential broker: serves `get` of the account's own `teams-personal` Secret Service items
+    /// on descriptor `--fd` (one end of a socket pair), refuses `put`, `delete` and any other account or application;
+    /// exits when the socket closes. Run outside the UI sandbox; opens no window.
+    Secrets {
+        /// The account (its UPN).
+        #[arg(long, value_name = "UPN")]
+        account: String,
+        /// The socket's descriptor, handed to this process at its start (3 or above).
+        #[arg(long, value_name = "N")]
+        fd: RawFd,
+    },
+}
+
+/// The read-only mode, as the command line gives it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReadOnlyMode {
+    pub account: String,
+    pub data: PathBuf,
+    pub secrets_fd: RawFd,
+    pub trace_fd: Option<RawFd>,
+}
+
+impl Cli {
+    /// The read-only mode when `--read-only` or `env` ([`crate::read_only::ENV`]'s value) asks for it, with what it
+    /// needs; `Ok(None)` when it isn't asked for (and none of its arguments is given).
+    ///
+    /// # Errors
+    /// What is missing or given twice, as the message to print.
+    pub fn read_only_mode(&self, env: Option<&std::ffi::OsStr>) -> Result<Option<ReadOnlyMode>, String> {
+        let args = &self.read_only;
+        if !crate::read_only::asked(args.read_only, env) {
+            if args.data.is_some() || args.secrets_fd.is_some() || args.trace_fd.is_some() {
+                return Err("--data, --secrets-fd and --trace-fd are the read-only mode's: give --read-only".into());
+            }
+            return Ok(None);
+        }
+        if self.forget.is_some() {
+            return Err("the read-only mode forgets no account".into());
+        }
+        let missing = |what: &str| format!("the read-only mode needs {what}");
+        let account = self.account.clone().ok_or_else(|| missing("--account <UPN>"))?;
+        let data = args.data.clone().ok_or_else(|| missing("--data <snapshot>"))?;
+        let secrets_fd = args.secrets_fd.ok_or_else(|| missing("--secrets-fd <n>"))?;
+        if args.trace_fd == Some(secrets_fd) {
+            return Err(format!(
+                "descriptor {secrets_fd} is named for both --secrets-fd and --trace-fd"
+            ));
+        }
+        Ok(Some(ReadOnlyMode {
+            account,
+            data,
+            secrets_fd,
+            trace_fd: args.trace_fd,
+        }))
+    }
 }

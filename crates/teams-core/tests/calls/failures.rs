@@ -26,8 +26,9 @@ fn test_call() -> CallAction {
     CallAction::TestCall { echo: Mri::new(ECHO) }
 }
 
-/// A's outbox on the mock, its fence logging to `log`: deciding calls by the call registry when `tracking` (the
-/// personal build's rule), by the lab's own rule otherwise.
+/// A's outbox on the mock, its fence logging to `log`: deciding calls by the call registry when `tracking` (its
+/// own rule, which no build's fence decides by: the strictest a call's writes are held to), by the lab's own rule
+/// otherwise.
 fn outbox_of(lab: &Lab, log: &SharedLog, tracking: bool) -> Outbox<HttpTransport<crate::support::Tokens>> {
     let fence = Fence::new(
         Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), [Mri::new(ECHO)]),

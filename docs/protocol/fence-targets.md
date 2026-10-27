@@ -280,12 +280,12 @@ that tracks calls (`Fence::tracks_calls`): a lab fence's `attach` or `accept` go
 
 ## The call registry
 
-The personal build's call rule (`CallRule::Registry`, `Fence::tracks_calls`; its tests run it on a lab roster through
-`Fence::tracking_calls`, `test-support` only). Through the personal fence itself (M3 Task 22,
-`docs/personal-build.md`, "How the implementation reads it") the roster plays no part: the starts below are judged by
-the chat's fresh thread read listing the account and every callee, the test call by the echo service's MRI from the
-web bundle, any invitation addressed to the account is offered (one at a time), and what the registry resolves passes
-with no further read but a join's chat. A call's follow-ups reach its participants, and no source reads a call's members (the conversation's
+The registry's own rule (`CallRule::Registry`, `Fence::tracks_calls`) is no build's fence's: its tests run it on a lab
+roster through `Fence::tracking_calls` (`test-support` only) to check the registry's resolution as verdicts, the
+resolution the lab's call rule and the personal fence bind a call's operations by when they move the registry. The
+personal fence (`crates/teams-fence/src/decision/audit.rs`, `docs/personal-build.md`) denies no call write: it offers
+any invitation addressed to the account (one at a time) and keeps the registry's bookkeeping, and the call floor
+keeps one call at a time across the app's accounts. What follows is the registry's rule as it was designed: a call's follow-ups reach its participants, and no source reads a call's members (the conversation's
 `getAllParticipants` answered an empty list for a call that had its caller in it:
 [calling-echo.md](calling-echo.md#open)).
 So the fence trusts only the calls it permitted itself (CLAUDE.md, "Calls go only to the lab, both ways"): each fence
@@ -511,13 +511,15 @@ name: the middle tier's profile lookups are on none of its people paths, UPS's p
 service, and CSA's `chatsAndChannelsByIds` and Substrate's search are carve-outs, so the lab browser and the native
 client let them through ([the contacting services](#the-contacting-services)). Until 2026-10-23 the browser fence let
 the first three through only in their captured shape and only when every MRI they named was a lab account; the
-personal build's sealed `PostRead` list keeps those shapes ([below](#the-native-clients-reads-by-post)).
+personal build sends those it has an entry for in those shapes, as sealed `PostRead` entries, whoever they name
+([below](#the-native-clients-reads-by-post)).
 
 | Request | Body |
 |---|---|
 | `POST https://<teams origin>/api/mt/part/<partition>/beta/users/fetchShortProfile?<the lookup query>` | a non-empty JSON list of MRIs |
 | `POST https://<teams origin>/api/mt/part/<partition>/beta/users/fetch?<the lookup query>` | a non-empty JSON list of MRIs |
 | `POST https://<teams origin>/ups/<geo>/v1/presence/getpresence/` (M2 Task 17) | a non-empty JSON list of `{"mri": …}`, each with at most `"source": "ups"` beside it, no MRI twice |
+| `POST https://<teams origin>/ups/<geo>/v1/pubsub/subscriptions/<epid>` (2026-10-27) | exactly `trouterUri`, `shouldPurgePreviousSubscriptions`, `subscriptionsToAdd` and `subscriptionsToRemove`, each list of `{"mri": …, "source": "ups"}`: the account's own endpoint subscribed to others' presence ([trouter.md](trouter.md#the-subscription-and-its-deliveries)) |
 
 The profile lookups, as 5869 captured ones sent them:
 
@@ -562,7 +564,7 @@ was 200 and named only the accounts asked for: a list of one item per MRI (`mri`
 
 ### The native client's reads by POST
 
-A lab binary sends two of them, each a plain `Request` through `Transport::send` (judged by `contacting`, `None`, and
+A lab binary sends three of them, each a plain `Request` through `Transport::send` (judged by `contacting`, `None`, and
 logged `allowed` before it goes), whoever it names:
 
 - `ShortProfileLookup` to the middle tier (the account's middle-tier base from the GTM `middleTier`), in the captured
@@ -579,6 +581,11 @@ logged `allowed` before it goes), whoever it names:
   `https://presence.teams.microsoft.com/` token. `PresenceRead::read_answer` drops the answer whole if any item is of
   an MRI not asked for, and reads an item's `availability` and `activity` only when its `status` is the captured
   `20000`.
+- `PresenceSubscription` to UPS at `v1/pubsub/subscriptions/<epid>` with no trailing slash and no query (the `epid` a
+  `RegisteredEndpoint`, a registration of this run), the presence read's headers (not the web client's
+  `x-ms-endpoint-id`), the body above with the connection's push URL and `"source": "ups"` beside each MRI, never a
+  `28:` or `48:` id, at most 8 added per request by the engine. `PresenceSubscription::read_answer` drops the answer
+  whole if any status is of an MRI not asked for, and counts an MRI subscribed only for the captured `20200`.
 
 Not sent: `users/fetch` (names come from Graph and `short_profile`).
 
@@ -586,13 +593,14 @@ Both went out naming an account outside the lab for the first time on 2026-10-23
 `teams-headless a profile`, which name anyone by MRI): each was logged `allowed` and answered 200 (the lookup for an
 account Graph answered 404 for, with no name for it).
 
-The personal build keeps both as entries of `teams-proto`'s sealed `PostRead` list (`short_profile`, `presence`),
-sent by `HttpTransport::post_read` only as an `AuthorizedPostRead`: `Fence::check_post_read(kind, names)` decides on
-the entry's kind and its exact, ordered MRIs (logged as `post_read_decision`, never with the MRIs) and makes a
-`PostReadPermit`, which `AuthorizedPostRead::new` pairs with the request only for that entry and exactly those MRIs;
-the transport reads the request back against the entry's captured shape (the path, every query pair once, every
-header but the token once with its pinned value, the body naming exactly the permit's MRIs), logs it by its kind and
-sends it once. A lab binary doesn't use that path.
+The personal build sends the three as entries of `teams-proto`'s sealed `PostRead` trait (`short_profile`, `presence`,
+`presence_subscription`, the last one's path ending in the endpoint's `epid`, a lowercase GUID), today's examples, not a
+closed list ([personal-build.md](../personal-build.md#its-reads)), sent by `HttpTransport::post_read` only as an
+`AuthorizedPostRead`: `Fence::check_post_read(kind, names)` logs the entry's kind and how many MRIs it names (as
+`post_read_decision`, never with the MRIs) and, through a personal fence, permits any names with a `PostReadPermit`, which `AuthorizedPostRead::new` pairs with
+the request only for that entry and exactly those MRIs; the transport reads the request back against the entry's
+captured shape (the path, every query pair once, every header but the token once with its pinned value, the body
+naming exactly the permit's MRIs), logs it by its kind and sends it once. A lab binary doesn't use that path.
 
 ## How a run uses it
 

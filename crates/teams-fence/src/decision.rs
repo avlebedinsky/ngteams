@@ -3,6 +3,9 @@
 //! false) is judged without a member read: typing and read receipts on a chat (1:1, group or meeting), and the
 //! account's own availability ([`WriteKind::OwnAvailability`] on [`Scope::Account`]), which the fence permits only
 //! for its own account ([`Fence::own_account`]), so that a lab account never sets another's presence.
+//!
+//! A personal fence (`Fence::open_personal`, only with the `personal` feature) decides nothing: it logs every write and
+//! permits it (`decision/audit.rs`), keeping only the call floor's one call at a time across the app's accounts.
 
 use std::collections::BTreeSet;
 use std::fmt;
@@ -28,7 +31,7 @@ use crate::membership::is_chat_id;
 use crate::target::{CallOperation, Mri, Scope, Target, WriteKind};
 
 #[cfg(feature = "personal")]
-mod personal_calls;
+mod audit;
 
 /// Who may take part in a write: the lab accounts and the approved service participants, by exact MRI. A lab account
 /// or service whose MRI isn't known yet is simply left out, so it matches nobody.
@@ -111,10 +114,6 @@ pub enum PartialReason {
     NoCredential,
     /// The source can't read this kind of scope in full (yet).
     Unsupported,
-    /// The answer holds something in a form no capture showed: a member's MRI of another kind (a guest, another
-    /// tenant's user, a consumer account), or a thread of another type. Never guessed: the write is denied
-    /// (`docs/personal-build.md`, Choice B).
-    UnknownForm,
     /// A call operation whose link no call or offered invitation of this run's fence holds: a call this fence didn't
     /// permit, whose answer or acceptance wasn't read, or of another run; or, under the lab's call rule, an answer or a
     /// decline of a call leg no offered invitation names.
@@ -133,7 +132,6 @@ impl fmt::Display for PartialReason {
             Self::NoSource => f.write_str("no membership source (the fence runs fail-closed)"),
             Self::NoCredential => f.write_str("the membership source has no credential yet"),
             Self::Unsupported => f.write_str("the membership source can't read this scope in full"),
-            Self::UnknownForm => f.write_str("the answer holds a member or a thread in a form no capture showed"),
             Self::UnregisteredCall => f.write_str("no call or offered invitation of this run's fence holds this link"),
             Self::CallEnded => f.write_str("the call ended"),
         }
@@ -149,11 +147,6 @@ pub enum Membership {
     Partial(PartialReason),
     /// An org-wide team or one of its channels: everyone in the tenant takes part.
     OrgWide,
-    /// The members one fresh, unpaged read of a thread lists, in a shape a capture showed, without proof that nobody
-    /// is left out: the personal fence's answer to "is the account a member?" (`docs/personal-build.md`, Choice A),
-    /// given only by its own source (`personal::PersonalMembershipSource`). The lab fence, which needs the whole
-    /// membership, denies it as [`PartialReason::Unsupported`].
-    Listed(Vec<Mri>),
 }
 
 /// The future a [`MembershipSource`] returns.
@@ -192,8 +185,6 @@ mod sealed {
     impl Sealed for super::FailClosed {}
     #[cfg(not(feature = "test-support"))]
     impl Sealed for crate::membership::LiveMembershipSource {}
-    #[cfg(all(feature = "personal", not(feature = "test-support")))]
-    impl Sealed for crate::personal::PersonalMembershipSource {}
 
     /// Tests only: any type may be a membership source.
     #[cfg(feature = "test-support")]
@@ -241,24 +232,9 @@ pub enum DenyReason {
     AccountScope,
     /// The write would be allowed, but its decision couldn't be written to `fence.log`.
     LogUnavailable,
-    /// The personal fence: a kind of write the personal build doesn't send (only messages, edits, deletes,
-    /// reactions, typing, read receipts and the account's own availability).
-    NotPersonalKind,
-    /// The personal fence: a target that isn't a 1:1 chat naming the account or a group chat (a channel, a team, a
-    /// call, a meeting chat, a stream, anything else).
-    NotPersonalScope,
-    /// The personal fence: a write that adds participants (none of the kinds it sends does).
-    AddsParticipants,
-    /// The personal fence: the conversation's fresh read doesn't list the account as a member.
-    NotAMember,
     /// A call operation that doesn't fit the registered call holding its link: another kind of write, a sender other
     /// than the call's caller, or participants added by anything but an `add`.
     CallMismatch,
-    /// The personal fence: a call start naming a callee the chat's fresh read doesn't list.
-    CalleesNotInChat,
-    /// The personal fence: a call start on no chat, or an `add`, that isn't the test call's: the account and the echo
-    /// service (`TEAMS_ECHO_BOT_MRI`) alone, the `add` of exactly that bot to the test call.
-    NotTheTestCall,
     /// A start, a join or an answer while another account of the app is in a call or one rings for it: one call at a
     /// time across the accounts sharing a call floor ([`crate::CallFloor`]).
     AnotherAccountInCall,
@@ -275,13 +251,7 @@ impl fmt::Display for DenyReason {
             Self::NotOwnAccount => f.write_str("not the fence's own account's availability"),
             Self::AccountScope => f.write_str("only the account's own availability lands on the account itself"),
             Self::LogUnavailable => f.write_str("fence.log can't be written"),
-            Self::NotPersonalKind => f.write_str("a kind of write the personal build doesn't send"),
-            Self::NotPersonalScope => f.write_str("not a 1:1 chat of the account's or a group chat"),
-            Self::AddsParticipants => f.write_str("the write adds participants"),
-            Self::NotAMember => f.write_str("the conversation's fresh read doesn't list the account"),
             Self::CallMismatch => f.write_str("the write doesn't fit the registered call"),
-            Self::CalleesNotInChat => f.write_str("the chat's fresh read doesn't list every callee"),
-            Self::NotTheTestCall => f.write_str("not the test call of the account and the echo service"),
             Self::AnotherAccountInCall => f.write_str("another account of the app is in a call"),
         }
     }
@@ -333,9 +303,9 @@ pub struct Fence {
     roster: Roster,
     log: FenceLog,
     /// The account this fence is a client's of ([`Fence::open_lab_account`], or the personal build's signed-in account
-    /// through `Fence::open_personal`): the one account whose own availability it permits, and for a personal fence
-    /// the account every conversation it writes to must list. `None` for a fence of no account ([`Fence::open_lab`],
-    /// the browser fence's) or of an account whose MRI `lab.toml` doesn't know yet: it permits no own availability.
+    /// through `Fence::open_personal`): the one account whose own availability a lab fence permits, and whose incoming
+    /// calls it offers. `None` for a fence of no account ([`Fence::open_lab`], the browser fence's) or of an account
+    /// whose MRI `lab.toml` doesn't know yet: it permits no own availability.
     own: Option<Mri>,
     /// This fence's run-unique id, which its permits carry.
     id: u64,
@@ -351,7 +321,8 @@ pub struct Fence {
 }
 
 /// How a fence decides an operation on a call ([`Scope::CallOperation`]) and a call delivery response
-/// ([`Fence::check_delivery_response`]).
+/// ([`Fence::check_delivery_response`]). A personal fence keeps [`CallRule::Entry`]'s bookkeeping and judges nothing
+/// (`decision/audit.rs`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CallRule {
     /// The lab's: only a call's entry is judged. A join by the chat it joins (read fresh, complete, lab-only), an
@@ -362,7 +333,10 @@ enum CallRule {
     /// same deliveries.
     Entry,
     /// The call registry's ([`crate::calls`]): a follow-up only to a link a call or an offered invitation this fence
-    /// registered handed out, a delivery response only to a delivery it waits for: the personal build's.
+    /// registered handed out, a delivery response only to a delivery it waits for. No build's fence decides by it: tests
+    /// turn it on ([`Fence::tracking_calls`]) to check the registry's resolution, which [`CallRule::Entry`]'s
+    /// bookkeeping binds by, as verdicts.
+    #[cfg(feature = "test-support")]
     Registry,
 }
 
@@ -423,14 +397,10 @@ impl Fence {
         Ok(Self::of(Rules::Lab, Roster::from_lab(config), log, None))
     }
 
-    /// A fence of `rules`, with its own id, no permit issued yet and no call registered. A lab fence decides calls by
-    /// their entry ([`CallRule::Entry`]), a personal one by the call registry ([`CallRule::Registry`]).
+    /// A fence of `rules`, with its own id, no permit issued yet and no call registered. Its call registry keeps the
+    /// bookkeeping of the lab's call rule ([`CallRule::Entry`]); a personal fence judges no call by it.
     fn of(rules: Rules, roster: Roster, log: FenceLog, own: Option<Mri>) -> Self {
-        let call_rule = match rules {
-            Rules::Lab => CallRule::Entry,
-            #[cfg(feature = "personal")]
-            Rules::Personal => CallRule::Registry,
-        };
+        let call_rule = CallRule::Entry;
         Self {
             rules,
             roster,
@@ -480,15 +450,15 @@ impl Fence {
     }
 
     /// Whether this is the personal build's fence (`Fence::open_personal`, only with the `personal` feature); `false`
-    /// for every lab fence. The native transport sends no plain request through a personal fence, and its reads by
-    /// `POST` go under its permits ([`Fence::check_post_read_among`]).
+    /// for every lab fence. A personal fence denies nothing and logs every send: the native transport sends every plain
+    /// request through it, logged, and its reads by `POST` go under its permits ([`Fence::check_post_read`]).
     #[must_use]
     pub fn is_personal(&self) -> bool {
         self.rules != Rules::Lab
     }
 
-    /// The fence deciding calls by the call registry, as a personal fence does (see [`Fence::tracks_calls`]), over its
-    /// lab roster. Tests only (`test-support`): the registry's rule is tested on a lab roster.
+    /// The fence deciding calls by the call registry's own rule (see [`Fence::tracks_calls`]), over its lab roster.
+    /// Tests only (`test-support`): no build's fence decides by it; it shows the registry's resolution as verdicts.
     #[cfg(feature = "test-support")]
     #[must_use]
     pub fn tracking_calls(mut self) -> Self {
@@ -496,14 +466,15 @@ impl Fence {
         self
     }
 
-    /// Whether this fence decides an operation on a call and a call delivery response by its call registry (a personal
-    /// fence): only to a link a call or an offered invitation it registered handed out, a response only to a delivery
-    /// it waits for. A lab fence doesn't (`false`): it judges a call's entry (its start, a join, an answer or a decline,
-    /// an `add`) and permits what the call sends once it was let in; its registry only keeps what it reads. The native
-    /// transport refuses a call write the registry won't pend only on a fence that tracks calls.
+    /// Whether this fence decides an operation on a call and a call delivery response by its call registry's own rule
+    /// ([`Fence::tracking_calls`], tests only): only to a link a call or an offered invitation it registered handed
+    /// out, a response only to a delivery it waits for. No build's fence does (`false`): a lab fence judges a call's
+    /// entry (its start, a join, an answer or a decline, an `add`) and permits what the call sends once it was let in,
+    /// a personal fence judges nothing; either registry only keeps what it reads. The native transport refuses a call
+    /// write the registry won't pend only on a fence that tracks calls.
     #[must_use]
     pub fn tracks_calls(&self) -> bool {
-        self.call_rule == CallRule::Registry
+        self.call_rule != CallRule::Entry
     }
 
     /// The fence with `mri` as its own account (see [`Fence::own_account`]). Tests only (`test-support`).
@@ -558,12 +529,10 @@ impl Fence {
     /// Nothing else lands on [`Scope::Account`]. Every decision is appended to `fence.log`; an allow that can't be
     /// logged is denied.
     ///
-    /// A personal fence (`Fence::open_personal`, only with the `personal` feature) decides by the personal build's
-    /// rules instead (`docs/personal-build.md`): the roster plays no part; only the kinds the personal build sends, on
-    /// a 1:1 chat of the account's or a group chat, adding nobody, each one (typing and read receipts included) after
-    /// one fresh read of the conversation that lists the account; the account's own availability as above; and the
-    /// calls by its call rule (`decision/personal_calls.rs`: a start by its chat's fresh read listing the account and
-    /// every callee, the test call with the echo service alone, every operation on a call by the call registry).
+    /// A personal fence (`Fence::open_personal`, only with the `personal` feature) decides nothing
+    /// (`docs/personal-build.md`, `decision/audit.rs`): it reads no members and permits every write, logged, an
+    /// operation on a call moving the call registry as the lab's call rule moves it. The one thing it holds back is the
+    /// call floor's: a start, a join or an answer while another account of the app is in a call.
     ///
     /// # Errors
     /// [`Denied`] when the membership is partial, empty or org-wide, when any participant is outside the roster, when
@@ -575,9 +544,8 @@ impl Fence {
     /// [`PartialReason::UnregisteredCall`] when no registered call holds its link,
     /// [`PartialReason::CallEnded`] when its call is ending (other than its `leave`) or ended, and
     /// [`DenyReason::CallMismatch`] when it isn't its operation's kind, from the call's caller, adding exactly its
-    /// invitees and handing out only the call's own callbacks. A personal fence denies
-    /// with its own reasons too: [`DenyReason::NotPersonalKind`], [`DenyReason::NotPersonalScope`],
-    /// [`DenyReason::AddsParticipants`] and [`DenyReason::NotAMember`]. A fence sharing a call floor
+    /// invitees and handing out only the call's own callbacks. A personal fence denies only an allow it can't log. A
+    /// fence sharing a call floor
     /// ([`Fence::sharing_calls`]) denies a start, a join or an answer while another account on it is busy with a call
     /// as [`DenyReason::AnotherAccountInCall`], before anything else is read.
     pub async fn check(&self, target: Target, source: &dyn MembershipSource) -> Result<WritePermit, Denied> {
@@ -586,15 +554,7 @@ impl Fence {
         }
         #[cfg(feature = "personal")]
         if self.rules == Rules::Personal {
-            if matches!(target.scope(), Scope::CallOperation { .. }) {
-                return self.check_personal_call_operation(target, source).await;
-            }
-            let verdict = if target.kind() == WriteKind::Call {
-                self.judge_personal_call_start(&target, source).await
-            } else {
-                self.judge_personal(&target, source).await
-            };
-            return self.decided(target, verdict);
+            return self.audit(target);
         }
         let membership = match target.scope() {
             Scope::CallOperation { .. } if self.call_rule == CallRule::Entry => {
@@ -748,7 +708,6 @@ impl Fence {
             Membership::Complete(_) => Err(DenyReason::CallMismatch),
             Membership::Partial(reason) => Err(DenyReason::Partial(reason)),
             Membership::OrgWide => Err(DenyReason::OrgWide),
-            Membership::Listed(_) => Err(DenyReason::Partial(PartialReason::Unsupported)),
         }
     }
 
@@ -766,10 +725,6 @@ impl Fence {
         }
         let evidence = start_evidence(start_body)?;
         if start_target(target, start_body, &evidence.caller).as_ref() != Some(target) {
-            return None;
-        }
-        // the personal build places and joins calls only as its own account
-        if self.is_personal() && self.own.as_ref() != Some(&evidence.caller) {
             return None;
         }
         self.calls.pend(self.id, permit.serial, target, &evidence)
@@ -840,7 +795,8 @@ impl Fence {
     /// acceptance binds its call controller's links, and the end of a call ends it; an incoming call's invitation is
     /// offered when it is addressed to this fence's [own account](Fence::own_account), a lab account, and its caller
     /// is a lab account or an approved service (a fence of no account offers none; a personal fence offers any one
-    /// addressed to its account whose caller isn't the account, one at a time), and a delivery at an offered
+    /// addressed to its account whose caller isn't the account, one at a time, as a Teams client rings for one call at
+    /// a time), and a delivery at an offered
     /// invitation's end callback ends its ring. A delivery at an endpoint's root that may be an invitation but doesn't
     /// read is [`Observed::Ignored`] too. It sends nothing and permits nothing by itself.
     pub fn observe_delivery(&self, delivery: &Delivery) -> Observed {
@@ -876,7 +832,7 @@ impl Fence {
     }
 
     /// Decides a Trouter delivery response sent on `connection` (`response`: the socket.io message's JSON, after
-    /// `3:::`). A lab fence permits every one that names a delivery (a numeric `id`), logged
+    /// `3:::`). A lab or personal fence permits every one that names a delivery (a numeric `id`), logged
     /// ([`Self::permit_delivery_response`]). Under the registry's rule ([`Fence::tracks_calls`]) it is decided once per
     /// delivery ([`crate::calls`]): permitted only as the captured acknowledgement of a pending
     /// acceptance delivery of a live call on that connection, as the captured receipt (an empty body) of a renegotiation
@@ -898,15 +854,6 @@ impl Fence {
             Some(Response::Acknowledgement(decided)) => (ACKNOWLEDGEMENT, decided),
             Some(Response::NegotiationReceipt(decided)) => (NEGOTIATION_RECEIPT, decided),
             Some(Response::ReceiptDenied(reason)) => (RECEIPT, Err(reason)),
-            Some(Response::Receipt { delivery, offer, .. }) if self.is_personal() => {
-                // the personal build's: an offered invitation is any addressed to the account, its parties unjudged
-                let judged = if self.calls.still_ringing(offer) {
-                    Ok(delivery)
-                } else {
-                    Err(crate::calls::DeliveryDenyReason::NotLive)
-                };
-                (RECEIPT, judged)
-            }
             Some(Response::Receipt {
                 delivery,
                 offer,
@@ -939,7 +886,7 @@ impl Fence {
         }
     }
 
-    /// The lab's decision on a call delivery response ([`CallRule::Entry`]): a response to a delivery the account's
+    /// The lab's and the personal fence's decision on a call delivery response ([`CallRule::Entry`]): a response to a delivery the account's
     /// calling socket received goes back to that call's services, so it is permitted and logged, whatever it answers;
     /// the registry still takes the delivery it answers, if one waits, which names its kind in the log. A response
     /// without a numeric `id` answers no delivery: [`DeliveryDecision::NotPending`].
@@ -974,8 +921,6 @@ impl Fence {
             Membership::Complete(members) => members,
             Membership::Partial(reason) => return Verdict::Deny(DenyReason::Partial(reason)),
             Membership::OrgWide => return Verdict::Deny(DenyReason::OrgWide),
-            // a listing doesn't prove nobody is left out, which the lab's rule needs
-            Membership::Listed(_) => return Verdict::Deny(DenyReason::Partial(PartialReason::Unsupported)),
         };
         if fetched && current.is_empty() {
             return Verdict::Deny(DenyReason::NoMembers);

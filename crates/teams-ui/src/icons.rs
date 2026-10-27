@@ -14,9 +14,13 @@ pub struct Glyph(&'static [u8]);
 impl Glyph {
     pub const ARROW_DOWN: Self = Self(include_bytes!("../assets/icons/arrow-down.svg"));
     pub const BELL: Self = Self(include_bytes!("../assets/icons/bell.svg"));
+    pub const BOT: Self = Self(include_bytes!("../assets/icons/bot.svg"));
     pub const BUG: Self = Self(include_bytes!("../assets/icons/bug.svg"));
+    pub const CALENDAR: Self = Self(include_bytes!("../assets/icons/calendar.svg"));
     pub const CHECK: Self = Self(include_bytes!("../assets/icons/check.svg"));
     pub const CHEVRON_DOWN: Self = Self(include_bytes!("../assets/icons/chevron-down.svg"));
+    pub const CLOCK: Self = Self(include_bytes!("../assets/icons/clock.svg"));
+    pub const COPY: Self = Self(include_bytes!("../assets/icons/copy.svg"));
     pub const HEADPHONES: Self = Self(include_bytes!("../assets/icons/headphones.svg"));
     pub const INFO: Self = Self(include_bytes!("../assets/icons/info.svg"));
     pub const LOG_OUT: Self = Self(include_bytes!("../assets/icons/log-out.svg"));
@@ -24,11 +28,13 @@ impl Glyph {
     pub const MIC: Self = Self(include_bytes!("../assets/icons/mic.svg"));
     pub const MIC_OFF: Self = Self(include_bytes!("../assets/icons/mic-off.svg"));
     pub const MINUS: Self = Self(include_bytes!("../assets/icons/minus.svg"));
+    pub const MORE: Self = Self(include_bytes!("../assets/icons/ellipsis.svg"));
     pub const PALETTE: Self = Self(include_bytes!("../assets/icons/palette.svg"));
     pub const PENCIL: Self = Self(include_bytes!("../assets/icons/pencil.svg"));
     pub const PHONE: Self = Self(include_bytes!("../assets/icons/phone.svg"));
     pub const PHONE_OFF: Self = Self(include_bytes!("../assets/icons/phone-off.svg"));
     pub const PLUS: Self = Self(include_bytes!("../assets/icons/plus.svg"));
+    pub const QUOTE: Self = Self(include_bytes!("../assets/icons/quote.svg"));
     pub const REACT: Self = Self(include_bytes!("../assets/icons/smile-plus.svg"));
     pub const REFRESH: Self = Self(include_bytes!("../assets/icons/refresh-cw.svg"));
     pub const REPLY: Self = Self(include_bytes!("../assets/icons/reply.svg"));

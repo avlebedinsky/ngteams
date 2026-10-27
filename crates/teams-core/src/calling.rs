@@ -498,7 +498,7 @@ where
             PushEvent::Disconnected { down, .. } => log::info!("calling socket down: {down:?}"),
             PushEvent::Stopped(stop) => log::warn!("calling socket stopped: {stop:?}"),
             PushEvent::Registration(report) => self.emit(Event::CallingRegistration(report)),
-            PushEvent::Registered(_) | PushEvent::Delivery(_) | PushEvent::Ignored(_) => {}
+            PushEvent::Registered(_) | PushEvent::Delivery(_) | PushEvent::Presence(_) | PushEvent::Ignored(_) => {}
         }
     }
 

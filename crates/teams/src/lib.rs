@@ -11,11 +11,12 @@
 //!   hosts and that account's identity provider hosts), the code redeemed only for that account (its object id and
 //!   tenant once known), the refresh token stored under its UPN and [`KEYRING_APPLICATION`] on the desktop's Secret
 //!   Service, its region from authz (`regions/<oid>.json`).
-//! - [`engine`]: an account's engine (`teams_core::account`) under its personal fence (`Fence::open_personal`) and its
-//!   own membership source, the account's own store at `~/.local/share/teams/store/<oid>.sqlite`; one per account.
+//! - [`engine`]: an account's engine (`teams_core::account`) under its personal fence (`Fence::open_personal`, which
+//!   logs every send and denies none, so it reads no members), the account's own store at
+//!   `~/.local/share/teams/store/<oid>.sqlite`; one per account.
 //! - [`calling`]: the calls (`docs/personal-build.md`, "Calls"; M3 Task 22): the engine's calling on the desktop's
-//!   PipeWire and camera portal, the window's ringtone, test call, video and devices, under the personal fence's call
-//!   rule.
+//!   PipeWire and camera portal, the window's ringtone, test call, video and devices, every call send logged by the
+//!   personal fence, one call at a time across the accounts (the call floor).
 //! - [`accounts`]: the accounts the app runs at once ([`accounts::Runner`]: each one's engine over its own fence on the
 //!   app's call floor, its calls on the app's one set of devices), and the sign-in and forget the window runs to add
 //!   and remove one.
@@ -27,17 +28,26 @@
 //! - [`cli`]: `teams [--account <UPN>]` (without it, a window asks for the account before the first sign-in),
 //!   `teams --forget <UPN>` ([`forget`]: one account, refused while its engine runs).
 //!
-//! No broker and no sandbox: it is the user's own app. It never opens the lab's fence, data dir or keyring items.
+//! - [`read_only`]: the read-only mode (`teams --read-only`), the only way agents run it on their own: on a snapshot
+//!   ([`snapshot`], `teams snapshot --to <dir>`) in the UI sandbox only, its tokens through a `get`-only broker
+//!   (`teams secrets`, its descriptors taken over by [`descriptors`]), sending nothing that writes, with no push
+//!   channel and no calls (`scripts/run-personal-read-only.sh`).
+//!
+//! No broker and no sandbox but in the read-only mode: it is the user's own app. It never opens the lab's fence, data
+//! dir or keyring items.
 
 pub mod accounts;
 pub mod app;
 pub mod calling;
 pub mod cli;
+pub mod descriptors;
 pub mod engine;
 pub mod forget;
+pub mod read_only;
 pub mod refusal;
 pub mod setup;
 pub mod signin;
+pub mod snapshot;
 
 pub use refusal::refusal;
 

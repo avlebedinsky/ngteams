@@ -7,7 +7,8 @@
 //!   as captured: inside a `readonly` element as sent, which is unknown markup and so gives its text, bare as read
 //!   back); a quote (`<blockquote>`; a reply's, `itemtype="http://schema.skype.com/Reply"`,
 //!   with the quoted message's id, its sender's MRI and name and its time, as `docs/protocol/chat.md` shows it); a link
-//!   with an `http`, `https` or `mailto` `href`; an image with an `https` `src`.
+//!   with an `http`, `https` or `mailto` `href`; an image with an `https` `src`, its `alt`, `itemtype` and `itemid`
+//!   (an emoticon's id, an AMS picture's object) and the size it is shown at (`width`/`height`, else its `style`'s).
 //! - **Unknown markup is kept as text**: an element this model doesn't name, a link of another scheme or an image of
 //!   another source gives its text (an image its `alt`), never its tag or attributes.
 //! - **Nothing active survives**: `script`, `style`, `template`, frames, `object`/`embed` and the document's head are
@@ -37,6 +38,15 @@ pub const MENTION_ITEMTYPE: &str = "http://schema.skype.com/Mention";
 
 /// The `itemtype` of a reply's quote.
 pub const REPLY_ITEMTYPE: &str = "http://schema.skype.com/Reply";
+
+/// The `itemtype` of an emoticon's `<img>` (its `itemid` the emoticon's id, its `alt` the emoji).
+pub const EMOJI_ITEMTYPE: &str = "http://schema.skype.com/Emoji";
+
+/// The `itemtype` of a picture pasted into a message (an `<img>` whose `src` is a view of an AMS object).
+pub const AMS_IMAGE_ITEMTYPE: &str = "http://schema.skype.com/AMSImage";
+
+/// The largest side an image's given size may have, in CSS pixels; a larger one is no size.
+const MAX_GIVEN_SIDE: u32 = 100_000;
 
 /// Elements dropped with everything in them.
 const DROPPED: &[&str] = &[
@@ -106,12 +116,29 @@ pub enum Node {
 }
 
 /// An image the content shows. Its source is kept, never fetched here.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Image {
     pub src: String,
     pub alt: Option<String>,
-    /// Its `itemtype`, if it has one (an AMS image's; none was ever captured).
+    /// Its `itemtype`, if it has one: [`AMS_IMAGE_ITEMTYPE`] for a picture pasted into a message, [`EMOJI_ITEMTYPE`]
+    /// for an emoticon.
     pub item_type: Option<String>,
+    /// Its `itemid`, if it has one: an emoticon's id in Teams' catalog (`speechless`, `1f440_eyes`), an AMS image's
+    /// object id.
+    #[serde(default)]
+    pub item_id: Option<String>,
+    /// The size it is shown at, in CSS pixels rounded, as its `width` and `height` attributes give it (`884`, or
+    /// `130.64889918887602` read as `131`), else its `style`'s `width:<n>px; height:<n>px`; `None` without both.
+    #[serde(default)]
+    pub size: Option<(u32, u32)>,
+}
+
+impl Image {
+    /// Whether it is an emoticon (`itemtype` [`EMOJI_ITEMTYPE`]).
+    #[must_use]
+    pub fn is_emoji(&self) -> bool {
+        self.item_type.as_deref() == Some(EMOJI_ITEMTYPE)
+    }
 }
 
 /// A quote. A reply's names the message it quotes; a plain `blockquote`'s fields are all `None`.
@@ -477,7 +504,43 @@ fn image(element: &Element) -> Option<Image> {
         src: src.to_owned(),
         alt: attr(element, "alt"),
         item_type: attr(element, "itemtype"),
+        item_id: attr(element, "itemid"),
+        size: given_size(element),
     })
+}
+
+/// The size an image is shown at: its `width` and `height` attributes (CSS pixels, a fraction rounded), else its
+/// `style`'s `width:<n>px` and `height:<n>px`; `None` unless both are there, positive and at most
+/// [`MAX_GIVEN_SIDE`].
+fn given_size(element: &Element) -> Option<(u32, u32)> {
+    let attributes = element
+        .attr("width")
+        .and_then(css_pixels)
+        .zip(element.attr("height").and_then(css_pixels));
+    attributes.or_else(|| {
+        let style = element.attr("style")?;
+        let property = |name: &str| {
+            style.split(';').find_map(|declaration| {
+                let (key, value) = declaration.split_once(':')?;
+                (key.trim().eq_ignore_ascii_case(name)).then(|| css_pixels(value.trim().strip_suffix("px")?))?
+            })
+        };
+        property("width").zip(property("height"))
+    })
+}
+
+/// A length in CSS pixels (`884`, `130.64889918887602`), rounded half up; `None` for anything else, `0` or over
+/// [`MAX_GIVEN_SIDE`].
+fn css_pixels(text: &str) -> Option<u32> {
+    let text = text.trim();
+    let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
+    let digits = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
+    if whole.is_empty() || whole.len() > 6 || !digits(whole) || !digits(fraction) {
+        return None;
+    }
+    let up = fraction.bytes().next().is_some_and(|digit| digit >= b'5');
+    let value = whole.parse::<u32>().ok()?.checked_add(u32::from(up))?;
+    (1..=MAX_GIVEN_SIDE).contains(&value).then_some(value)
 }
 
 /// The scheme of an absolute URL.

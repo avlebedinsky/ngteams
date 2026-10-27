@@ -4,7 +4,9 @@
 //! desktop's Secret Service under `teams-personal`; here a `MemorySecretStore`), the account's `accounts.toml` entry given
 //! the object id and tenant, its region saved under `regions/`; a later sign-in landing in another account stores
 //! nothing; a lab account is refused; several accounts side by side (added, abandoned, signed in, forgotten one at a
-//! time), a single account's files of an earlier build moved into theirs; the engine opens each account's store under
+//! time), an added account whose sign-in stored nothing keeping what the user wrote into its entry (its `idp_hosts`)
+//! for the next try, and a host the window refused named with where to add it; a single account's files of an earlier
+//! build moved into theirs; the engine opens each account's store under
 //! the personal data dir. Every directory is a test's own; every value is made up.
 
 // test code throughout (its helpers unwrap like the tests do)
@@ -353,6 +355,113 @@ async fn an_abandoned_account_goes_only_while_no_sign_in_named_it() {
     assert!(setup.abandon(SECOND_UPN).unwrap());
     assert_eq!(setup.accounts().unwrap(), vec![signed]);
     assert!(!added.is_signed_in());
+}
+
+/// `sh` standing in for the sign-in window, answering `answer` to the request.
+fn answering(answer: &WindowAnswer) -> Command {
+    let mut command = Command::new("sh");
+    command
+        .arg("-c")
+        .arg(format!("read -r line; printf '%s\\n' '{}'", answer.to_line().expose()));
+    command
+}
+
+/// `UPN`'s entry as the user writes it by hand into `accounts.toml`: its identity provider's host.
+fn hand_written_idp_hosts(setup: &Setup) {
+    let text = format!("[[account]]\nupn = \"{UPN}\"\nidp_hosts = [\"sso.example.test\"]\n");
+    fs::create_dir_all(setup.paths.config_dir()).unwrap();
+    fs::write(setup.paths.accounts_file(), text).unwrap();
+}
+
+#[tokio::test]
+async fn a_failed_sign_in_keeps_a_hand_written_idp_hosts_and_the_retry_takes_it_up() {
+    let dir = tempfile::tempdir().unwrap();
+    let setup = setup_in(&dir);
+    let server = MockServer::start().await;
+    let clients = clients(&server, UPN, OID).await;
+    let store = MemorySecretStore::new();
+    // an entry the sign-in wrote and nothing more goes when the window is closed (a typo leaves nothing behind)
+    let closed = signin::add(&setup, UPN, &clients, &store, |_| Ok(answering(&WindowAnswer::Closed))).await;
+    assert!(closed.unwrap_err().starts_with("the sign-in stored nothing: "));
+    assert!(setup.accounts().unwrap().is_empty());
+
+    // one the user wrote its identity provider's host into stays, closed or failed, pending: no account starts
+    hand_written_idp_hosts(&setup);
+    for answer in [
+        WindowAnswer::Closed,
+        WindowAnswer::Failed("the page wasn't armed in time".into()),
+    ] {
+        assert!(
+            signin::add(&setup, UPN, &clients, &store, |_| Ok(answering(&answer)))
+                .await
+                .is_err()
+        );
+        let kept = PersonalAccount::find(&setup.paths, UPN).unwrap().unwrap();
+        assert_eq!(kept.idp_hosts, vec!["sso.example.test".to_owned()], "{answer:?}");
+        assert!(!kept.is_signed_in());
+        assert!(
+            setup.signed_in_accounts().unwrap().is_empty(),
+            "never an account to start"
+        );
+        assert_eq!(
+            setup.pending_upns().unwrap(),
+            vec![UPN.to_owned()],
+            "the first run's screen fills it in"
+        );
+    }
+    assert!(store.get(&refresh_token_key(UPN)).await.unwrap().is_none());
+
+    // the retry, the same UPN case aside, takes the entry up: its window is made for the account with the host, and
+    // the sign-in keeps it
+    let mut windowed = None;
+    let signed = signin::add(&setup, "SOMEONE@example.test", &clients, &store, |account| {
+        windowed = Some(account.idp_hosts.clone());
+        Ok(window())
+    })
+    .await
+    .unwrap();
+    assert_eq!(windowed, Some(vec!["sso.example.test".to_owned()]));
+    assert_eq!(signed.upn, UPN);
+    assert_eq!(signed.idp_hosts, vec!["sso.example.test".to_owned()]);
+    assert_eq!(setup.signed_in_accounts().unwrap(), vec![signed]);
+}
+
+#[tokio::test]
+async fn a_host_the_window_refused_is_named_with_where_to_add_it_and_the_entry_stays_for_it() {
+    let dir = tempfile::tempdir().unwrap();
+    let setup = setup_in(&dir);
+    let server = MockServer::start().await;
+    let clients = clients(&server, UPN, OID).await;
+    let store = MemorySecretStore::new();
+    // the window closed after it refused the organization's sign-in page: the host alone comes back
+    let refused = WindowAnswer::Refused("sso.example.test".into());
+    let error = signin::add(&setup, UPN, &clients, &store, |_| Ok(answering(&refused)))
+        .await
+        .unwrap_err();
+    let file = setup.paths.accounts_file();
+    assert_eq!(
+        error,
+        format!(
+            "the sign-in window refused sso.example.test, your organization's sign-in page: add it to idp_hosts in the \
+             [[account]] entry of {UPN} in {} (idp_hosts = [\"sso.example.test\"]), then sign in again",
+            file.display()
+        )
+    );
+    assert!(
+        !error.contains("https://") && !error.contains('?'),
+        "a host, never a URL: {error}"
+    );
+    // the entry stays for the user to add the host to, and nothing adds it by itself
+    let kept = PersonalAccount::find(&setup.paths, UPN).unwrap().unwrap();
+    assert!(kept.idp_hosts.is_empty() && !kept.is_signed_in());
+    assert!(store.get(&refresh_token_key(UPN)).await.unwrap().is_none());
+    // the same error through a sign-in of an account held: the same words
+    let held = signin::sign_in(&setup, &kept, &clients, &store, answering(&refused)).await;
+    let Err(held) = held else {
+        panic!("the window refused a host");
+    };
+    assert_eq!(signin::refused_host(&held), Some("sso.example.test"));
+    assert_eq!(signin::failure(&setup, &kept, &held), error);
 }
 
 #[tokio::test]

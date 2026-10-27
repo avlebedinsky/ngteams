@@ -130,6 +130,74 @@ impl SecretStore for MemorySecretStore {
     }
 }
 
+/// A store that reads through to `inner` and keeps every change in memory: a `put` and a `delete` never reach `inner`
+/// (the personal build's read-only mode: a token renewed while it runs, a rotated refresh token included, lives in
+/// this process only, and the user's stored items stay as they were). A key put or deleted here is answered from
+/// memory from then on; any other is read from `inner`.
+#[derive(Debug)]
+pub struct OverlaySecretStore<S> {
+    inner: S,
+    changed: Mutex<BTreeMap<SecretKey, Change>>,
+}
+
+/// What became of a key in an [`OverlaySecretStore`].
+#[derive(Clone, Debug)]
+enum Change {
+    Put(Secret),
+    Deleted,
+}
+
+impl<S> OverlaySecretStore<S> {
+    #[must_use]
+    pub fn new(inner: S) -> Self {
+        Self {
+            inner,
+            changed: Mutex::new(BTreeMap::new()),
+        }
+    }
+
+    /// The store underneath, which this one never writes.
+    #[must_use]
+    pub fn inner(&self) -> &S {
+        &self.inner
+    }
+
+    fn change(&self, key: &SecretKey, change: Change) {
+        self.changed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(key.clone(), change);
+    }
+
+    fn changed(&self, key: &SecretKey) -> Option<Change> {
+        self.changed
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(key)
+            .cloned()
+    }
+}
+
+impl<S: SecretStore> SecretStore for OverlaySecretStore<S> {
+    fn put(&self, key: &SecretKey, secret: &Secret) -> impl Future<Output = Result<(), SecretError>> + Send {
+        self.change(key, Change::Put(secret.clone()));
+        std::future::ready(Ok(()))
+    }
+
+    async fn get(&self, key: &SecretKey) -> Result<Option<Secret>, SecretError> {
+        match self.changed(key) {
+            Some(Change::Put(secret)) => Ok(Some(secret)),
+            Some(Change::Deleted) => Ok(None),
+            None => self.inner.get(key).await,
+        }
+    }
+
+    fn delete(&self, key: &SecretKey) -> impl Future<Output = Result<(), SecretError>> + Send {
+        self.change(key, Change::Deleted);
+        std::future::ready(Ok(()))
+    }
+}
+
 /// A store in the Secret Service's default collection (gnome-keyring), through `oo7`.
 ///
 /// Every item carries the attributes `application`, `account` and `audience`; `application` namespaces the store, so

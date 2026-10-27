@@ -3,8 +3,8 @@
 //! Diagnostics), the chosen page on the right, each a title over boxes of rows, a row's name and what it does leading
 //! and its control trailing.
 //!
-//! - **General**: the account's manual status, whether its availability is reported, and the idle time after which
-//!   it no longer is.
+//! - **General**: the account's manual status, whether its availability is reported, the idle time after which
+//!   it no longer is, and the time format (following the system's locale, 12-hour or 24-hour).
 //! - **Appearance**: the theme (following the system's light or dark mode with a theme for each, or one theme
 //!   whatever the system says), each a tile drawn in its own colours; the font size with its steps; the font family,
 //!   searchable among the system's.
@@ -36,9 +36,10 @@ use teams_core::{Choice, Reporting};
 use teams_log::diagnostics::WARNING;
 use teams_media::devices::catalog::{DeviceKind, DeviceList};
 
+use crate::clock::{self, HourCycle};
 use crate::icons::{Glyph, icon_button, selected_by};
 use crate::presence;
-use crate::settings::{LogLevel, ManualStatus, Notifications, Settings, SettingsModel};
+use crate::settings::{LogLevel, ManualStatus, Notifications, Settings, SettingsModel, TimeFormat};
 use crate::shell::shown_as;
 use crate::theme::{self, Appearance, FONT_SIZE, FONT_SIZES, Palette, THEMES, ThemeSpec};
 
@@ -369,7 +370,37 @@ impl SettingsView {
                 ],
                 palette,
             ),
+            self.date_and_time(settings, palette),
         ]
+    }
+
+    /// The time format: following the system's locale (the description says which clock that is), 12-hour or 24-hour;
+    /// each segment's test selector is `time-format-<key>`.
+    fn date_and_time(&self, settings: &Settings, palette: Palette) -> AnyElement {
+        let choices = TimeFormat::ALL
+            .into_iter()
+            .map(|format| Pick {
+                key: format.key().to_owned(),
+                label: format.label().into(),
+                status: None,
+                chosen: settings.time_format == format,
+                apply: self.changer(move |settings| settings.time_format = format),
+            })
+            .collect();
+        let description = match clock::system_cycle() {
+            HourCycle::Twelve => "Times like 3:30 PM or 15:30. Your system's region uses 12-hour.",
+            HourCycle::TwentyFour => "Times like 3:30 PM or 15:30. Your system's region uses 24-hour.",
+        };
+        group(
+            Some("Date and time"),
+            vec![row(
+                "Time format",
+                Some(description),
+                segmented("time-format", choices, palette),
+                palette,
+            )],
+            palette,
+        )
     }
 
     /// The idle times, and the one set if it isn't one of them.

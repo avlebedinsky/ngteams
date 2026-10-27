@@ -9,7 +9,8 @@ Status: since 2026-10-26 (the user's decision) the lab judges a call by its entr
 answer or a decline of the account's own offered invitation, an `add` by its invitees; every mapped follow-up, the
 callee's ring-time sends and the call's delivery responses pass once the call was let in, with no registry lookup
 (CLAUDE.md, "Calls go only to the lab, both ways"; `docs/protocol/fence-targets.md`, "The lab's call rule"). The call
-registry below is the personal build's call rule now (M3 Task 22 turns it on). What is left: the follow-ups no page
+registry below is kept as every fence's bookkeeping (the call machine reads its deliveries by it); its own rule is
+no build's fence's, only the tests'. What is left: the follow-ups no page
 has sent yet (hold, `updateCallState`, `controlVideoStreaming`, screen sharing, the conversation's `notificationLinks`
 keep-alive), each still unreadable until a capture maps it.
 

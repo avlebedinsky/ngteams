@@ -10,7 +10,7 @@
 //! ([`Fence::open_lab_account`], [`Fence::own_account`]). An operation on a call ([`Scope::CallOperation`]) goes by the
 //! fence's call rule: a lab fence judges a call's entry (a join by the chat it names, an answer or a decline of the
 //! account's own offered invitation, an `add` by its invitees) and permits what the call sends once it was let in; the
-//! call registry's rule ([`Fence::tracks_calls`], the personal build's) resolves every one to a call it registered.
+//! call registry's own rule ([`Fence::tracks_calls`], tests only) resolves every one to a call it registered.
 //! Every decision goes to `fence.log` ([`FenceLog`]), and so do
 //! the mutating requests let through because they reach nobody ([`AllowedRecord`]), the browser requests the browser
 //! fence decides without a membership check ([`RequestRecord`]), the targets it couldn't arm ([`ArmingRecord`]) and the
@@ -20,12 +20,12 @@
 //! fence and the native transport alike, telling a request that reaches nobody ([`Contact::None`]) from a mapped write
 //! ([`Contact::Write`]) and from a mutating request on a contacting service that no row reads ([`Contact::Unreadable`]).
 //!
-//! A native read by `POST` of the personal build's sealed list (`teams-proto`'s `PostRead`) is decided by
-//! [`Fence::check_post_read`]: a [`PostReadPermit`] for its exact list of MRIs when every one is a lab account, none
-//! twice, the decision logged. The lab's native client sends its reads by `POST` as plain requests instead.
+//! A native read by `POST` of the sealed list (`teams-proto`'s `PostRead`) is decided by [`Fence::check_post_read`]: a
+//! [`PostReadPermit`] for its exact list of MRIs when every one is a lab account, none twice (through a personal fence,
+//! any), the decision logged. The lab's native client sends its reads by `POST` as plain requests instead.
 //!
-//! The personal build's fence (`docs/personal-build.md`) is the `personal` module, behind the `personal` feature only
-//! `crates/teams` enables: [`Fence::open_personal`] is its only constructor outside tests, and every lab binary refuses
+//! The personal build's fence (`docs/personal-build.md`), which logs every send and denies none, is the `personal`
+//! module and `decision/audit.rs`, behind the `personal` feature only `crates/teams` enables: [`Fence::open_personal`] is its only constructor outside tests, and every lab binary refuses
 //! to run in a build that has it ([`personal_enabled`]). The keep-apart paths both builds check are [`apart`].
 //!
 //! Nothing outside this crate can bend a decision: a lab binary builds its fence only with [`Fence::open_lab`] (the
@@ -70,9 +70,9 @@ pub use log::{
 pub use membership::{
     AFD_HOSTS, ChatCredential, CredentialFuture, CredentialSource, FETCH_TIMEOUT, LiveMembershipSource,
     LiveSourceError, MAX_BODY, REGIONAL_SUFFIX, chat_service_path, is_chat_id, is_group_chat_id, is_meeting_chat_id,
-    one_to_one_id, one_to_one_pair, parse_listing, parse_members, parse_thread,
+    one_to_one_id, one_to_one_pair, parse_members, parse_thread,
 };
-pub use post_read::{ChatPeople, PostReadDenied, PostReadDenyReason, PostReadPermit};
+pub use post_read::{PostReadDenied, PostReadDenyReason, PostReadPermit};
 pub use target::{CallOperation, Mri, Scope, Target, WriteKind};
 
 /// Whether this build has the `test-support` feature, which lets any code build a fence over any roster and log and

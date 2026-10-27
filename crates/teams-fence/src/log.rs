@@ -251,6 +251,32 @@ struct AllowedEntry<'a> {
     path: String,
 }
 
+/// A plain request the personal build sent although [`crate::contacting`] calls it a write or can't read it: the
+/// personal fence denies none, so its line says what the classifier made of it (`write` or `unreadable`) beside what
+/// [`AllowedRecord`] logs.
+#[derive(Serialize)]
+struct UnjudgedEntry<'a> {
+    ts_ms: u64,
+    verdict: &'static str,
+    event: &'static str,
+    contact: &'static str,
+    method: &'a str,
+    host: String,
+    path: String,
+}
+
+/// A URL's lowercase host (no port) and its path's shape ([`path_shape`]); an empty host and `<unparsable>` for a URL
+/// that doesn't parse.
+fn host_and_shape(url: &str) -> (String, String) {
+    Url::parse(url).map_or_else(
+        |_| (String::new(), "<unparsable>".to_owned()),
+        |url| {
+            let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
+            (host, path_shape(url.path()))
+        },
+    )
+}
+
 /// How an arming step failed.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -552,17 +578,50 @@ impl FenceLog {
     /// # Errors
     /// When the entry can't be written, or an earlier append failed.
     pub fn record_allowed(&self, request: &AllowedRecord<'_>) -> io::Result<()> {
-        let (host, path) = Url::parse(request.url).map_or_else(
-            |_| (String::new(), "<unparsable>".to_owned()),
-            |url| {
-                let host = url.host_str().unwrap_or_default().to_ascii_lowercase();
-                (host, path_shape(url.path()))
-            },
-        );
+        let (host, path) = host_and_shape(request.url);
         self.append(&AllowedEntry {
             ts_ms: now_ms(),
             verdict: "allow",
             event: "allowed",
+            method: request.method,
+            host,
+            path,
+        })
+    }
+
+    /// Appends one plain request the personal build sends although [`crate::contacting`] calls it a write
+    /// (`contact`: `write`) or can't read it (`unreadable`), as a single line, and flushes it: what
+    /// [`Self::record_allowed`] logs, the classification beside it (event `sent_unjudged`). Once an append has failed,
+    /// every later one fails too.
+    ///
+    /// # Errors
+    /// When the entry can't be written, or an earlier append failed.
+    pub fn record_unjudged(&self, request: &AllowedRecord<'_>, contact: &'static str) -> io::Result<()> {
+        let (host, path) = host_and_shape(request.url);
+        self.append(&UnjudgedEntry {
+            ts_ms: now_ms(),
+            verdict: "allow",
+            event: "sent_unjudged",
+            contact,
+            method: request.method,
+            host,
+            path,
+        })
+    }
+
+    /// Appends one request the personal build's read-only mode refused before anything was sent (`teams --read-only`:
+    /// a write, an own-state request or a mutating plain request), as a single line, and flushes it: its method, host
+    /// and path shape (every id replaced by its kind), never a query, header or body (verdict `deny`, event
+    /// `refused_read_only`). Once an append has failed, every later one fails too.
+    ///
+    /// # Errors
+    /// When the entry can't be written, or an earlier append failed.
+    pub fn record_refused_read_only(&self, request: &AllowedRecord<'_>) -> io::Result<()> {
+        let (host, path) = host_and_shape(request.url);
+        self.append(&AllowedEntry {
+            ts_ms: now_ms(),
+            verdict: "deny",
+            event: "refused_read_only",
             method: request.method,
             host,
             path,

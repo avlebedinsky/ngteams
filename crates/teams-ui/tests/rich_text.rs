@@ -1,12 +1,14 @@
 //! Our own renderer of a message's rich text, node by node: marks, line breaks, paragraphs, mentions (the account's
-//! own more strongly), links (opened through GPUI's `open_url`, here the test platform's record), quotes and images
-//! (a placeholder, never fetched); laid out from `teams-proto`'s sanitized model and drawn on GPUI's test context.
+//! own more strongly), links (opened through GPUI's `open_url`, here the test platform's record), quotes, images (a
+//! placeholder), a pasted picture (a block of its own, its bytes asked of the engine) and emoticons (inline at the
+//! text's height, or large and without a bubble in a message of emoticons alone); laid out from `teams-proto`'s
+//! sanitized model and drawn on GPUI's test context.
 //! Every id, name and link is made up.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use gpui::{
     Context, FontStyle, FontWeight, HighlightStyle, IntoElement, Modifiers, ParentElement as _, Render, SharedString,
@@ -30,7 +32,7 @@ fn laid_out(content: &str) -> Rendered {
 fn text_block(rendered: &Rendered, at: usize) -> &TextBlock {
     match &rendered.blocks[at] {
         Block::Text(text) => text,
-        Block::Quote(quote) => panic!("a quote, not text: {quote:?}"),
+        other => panic!("not text: {other:?}"),
     }
 }
 
@@ -98,6 +100,7 @@ fn a_mention_is_highlighted_and_the_account_s_own_more_strongly() {
         mentioned,
         [("Lab A", Some(Mentioned::Me)), ("Lab Bee", Some(Mentioned::Other))]
     );
+    assert!(rendered.mentions_me(), "the account's own mention marks the message");
 
     // mentions in a form no capture showed name nobody: still highlighted, never as the account's own
     let unreadable = format!("{{\"mentions\":{{\"0\":\"{ME}\"}}}}");
@@ -108,6 +111,7 @@ fn a_mention_is_highlighted_and_the_account_s_own_more_strongly() {
         .map(|(_, style)| style.mention)
         .collect();
     assert_eq!(kinds, [Some(Mentioned::Other), Some(Mentioned::Other)]);
+    assert!(!rendered.mentions_me());
     assert_eq!(Mentions::of(None, ME), Mentions::default());
     assert_eq!(Mentions::of(Some("not json"), ME), Mentions::default());
 }
@@ -174,6 +178,7 @@ fn a_reply_s_quote_names_its_sender_and_a_plain_quote_none() {
             text: "the original".to_owned(),
             pieces: vec![(0..12, Style::default())],
             links: Vec::new(),
+            emoticons: Vec::new(),
         })]
     );
     assert_eq!(text_block(&rendered, 1).text, "my answer");
@@ -267,7 +272,7 @@ fn an_image_of_a_chat_message_is_followed_by_its_link_to_the_web() {
         .iter()
         .find_map(|block| match block {
             Block::Quote(quote) => Some(quote),
-            Block::Text(_) => None,
+            Block::Text(_) | Block::Picture(_) => None,
         })
         .unwrap();
     let Block::Text(inner) = &quoted.blocks[0] else {
@@ -396,13 +401,21 @@ fn each_mark_a_link_and_an_image_are_drawn_with_a_highlight_of_their_own() {
 }
 
 #[test]
-fn a_mention_is_drawn_in_the_brand_colour_the_account_s_own_bold_on_a_tint() {
+fn a_mention_is_drawn_in_the_brand_colour_the_account_s_own_bold_in_the_mention_colour() {
     let (me, other) = (mentioned(Mentioned::Me), mentioned(Mentioned::Other));
-    assert!(other.color.is_some());
-    assert_eq!(me.color, other.color, "both in the brand colour");
+    assert_eq!(
+        other.color,
+        Some(gpui::rgb(LIGHT_PALETTE.brand).into()),
+        "someone else's in the brand colour"
+    );
     assert_eq!((other.font_weight, other.background_color), (None, None));
+    assert_eq!(
+        me.color,
+        Some(gpui::rgb(LIGHT_PALETTE.mention).into()),
+        "the account's own in Teams' orange"
+    );
     assert_eq!(me.font_weight, Some(FontWeight::BOLD), "the account's own is bold");
-    assert!(me.background_color.is_some(), "on a tint of its own");
+    assert_eq!(me.background_color, None, "no box behind a mention, as in Teams");
 
     // a block is drawn with its pieces' highlights
     let content =
@@ -420,4 +433,219 @@ fn a_mention_is_drawn_in_the_brand_colour_the_account_s_own_bold_on_a_tint() {
     assert_eq!(of("bold"), Some(marked(Marks::BOLD)));
     assert_eq!(of("Lab A"), Some(me));
     assert_eq!(drawn.len(), 2, "unstyled text has no highlight: {drawn:?}");
+}
+
+/// A pasted picture's `src`, its view on the media service's host (a made-up object).
+const PICTURE: &str = "https://us-api.asm.skype.com/v1/objects/0-eus-d9-00000000000000000000000000000abc/views/imgo";
+
+/// An emoticon's `<img>` as Teams sends it, wrapped in its span (`docs/protocol/chat.md`).
+fn emoticon(id: &str, alt: &str, side: u32) -> String {
+    format!(
+        "<span title=\"{id}\" type=\"({id})\" class=\"animated-emoticon-{side}-{id}\" itemscope=\"\"><img itemscope=\"\" \
+         itemtype=\"http://schema.skype.com/Emoji\" itemid=\"{id}\" \
+         src=\"https://statics.teams.cdn.office.net/evergreen-assets/personal-expressions/v2/assets/emoticons/{id}/default/\
+         20_f.png\" alt=\"{alt}\" style=\"width:{side}px; height:{side}px\"></span>"
+    )
+}
+
+#[test]
+fn an_emoticon_keeps_its_place_in_the_text_and_a_pasted_picture_is_a_block() {
+    let content = format!(
+        "<p>made-up board summary:</p>\
+         <p><img src=\"{PICTURE}\" itemtype=\"http://schema.skype.com/AMSImage\" width=\"884\" height=\"228\" \
+         alt=\"image\"></p>\
+         <p>12 made-up cards moved</p><p>7 made-up cards added{}</p>",
+        emoticon("speechless", "\u{1f610}", 20)
+    );
+    let link = "https://teams.microsoft.com/l/message/19:x@thread.v2/1";
+    let rendered = rich_text::layout_with_web_link(&parse_html(&content), &Mentions::default(), Some(link));
+    assert_eq!(rendered.blocks.len(), 4, "{rendered:#?}");
+    let Block::Picture(picture) = &rendered.blocks[1] else {
+        panic!("a picture block: {rendered:#?}");
+    };
+    assert_eq!((picture.src.as_str(), picture.size), (PICTURE, Some((884, 228))));
+    // drawn when it can't be shown: its placeholder and the link to the message
+    assert_eq!(
+        picture.fallback.text,
+        format!("[{IMAGE_PLACEHOLDER}: image] {}", rich_text::IMAGE_WEB_LINK)
+    );
+    assert_eq!(picture.fallback.links[0].href, link);
+
+    let last = text_block(&rendered, 3);
+    assert_eq!(
+        last.text,
+        format!("7 made-up cards added{}", rich_text::EMOTICON_PLACE)
+    );
+    assert_eq!(last.emoticons.len(), 1);
+    assert_eq!(last.emoticons[0].id, "speechless");
+    assert_eq!(&last.text[last.emoticons[0].range.clone()], rich_text::EMOTICON_PLACE);
+    assert_eq!(last.plain(), "7 made-up cards added\u{1f610}");
+    assert!(!last.text.contains(IMAGE_PLACEHOLDER), "no placeholder for an emoticon");
+    assert!(
+        rendered.emoticons_only().is_none() && !rendered.bare,
+        "text with it: drawn in its bubble"
+    );
+
+    // a picture a quote shows, or one inside a link, stays a placeholder; so does an emoticon without its id
+    let quoted = format!(
+        "<blockquote><p><img src=\"{PICTURE}\" alt=\"q\"></p></blockquote>\
+         <p><a href=\"https://example.test/page\"><img src=\"{PICTURE}\" alt=\"l\"></a> \
+         <img itemtype=\"http://schema.skype.com/Emoji\" src=\"https://images.example.test/e.png\" alt=\"e\"></p>"
+    );
+    let rendered = rich_text::layout(&parse_html(&quoted), &Mentions::default());
+    assert!(
+        !rendered.blocks.iter().any(|block| matches!(block, Block::Picture(_))),
+        "{rendered:#?}"
+    );
+    assert!(
+        text_block(&rendered, 1)
+            .text
+            .contains(&format!("[{IMAGE_PLACEHOLDER}: e]"))
+    );
+}
+
+#[test]
+fn a_message_of_emoticons_alone_is_drawn_bare() {
+    let one = format!("<div>{}</div>", emoticon("1f44b_wavinghand", "\u{1f44b}", 58));
+    let rendered = rich_text::layout(&parse_html(&one), &Mentions::default());
+    let emoticons = rendered.emoticons_only().unwrap();
+    assert_eq!(emoticons.len(), 1);
+    assert_eq!(emoticons[0].id, "1f44b_wavinghand");
+    assert!(rendered.bare, "no bubble behind it");
+
+    let three = format!(
+        "<p>{} &nbsp;{}</p><p>{}</p>",
+        emoticon("smile", "\u{1f642}", 20),
+        emoticon("hi", "\u{1f44b}", 20),
+        emoticon("yes", "\u{1f44d}", 20)
+    );
+    let rendered = rich_text::layout(&parse_html(&three), &Mentions::default());
+    assert_eq!(rendered.emoticons_only().map(|all| all.len()), Some(3));
+    assert!(rendered.bare);
+
+    for not_alone in [
+        format!("<p>hi {}</p>", emoticon("smile", "\u{1f642}", 20)),
+        format!(
+            "<p>{}</p><p><img src=\"{PICTURE}\"></p>",
+            emoticon("smile", "\u{1f642}", 20)
+        ),
+        format!(
+            "<p><a href=\"https://example.test/\">{}</a></p>",
+            emoticon("smile", "\u{1f642}", 20)
+        ),
+        format!(
+            "<p>{}</p>",
+            emoticon("smile", "\u{1f642}", 20).repeat(rich_text::MOST_LARGE_EMOTICONS + 1)
+        ),
+        "<p>just text</p>".to_owned(),
+    ] {
+        let rendered = rich_text::layout(&parse_html(&not_alone), &Mentions::default());
+        assert!(rendered.emoticons_only().is_none() && !rendered.bare, "{not_alone}");
+    }
+}
+
+/// The engine's side a message's pictures and emoticons are asked of: answers from its own pictures, no animation,
+/// and records what it was asked.
+#[derive(Default)]
+struct FakePictures {
+    pictures: Mutex<std::collections::HashMap<String, teams_core::PictureBytes>>,
+    asked: Mutex<Vec<&'static str>>,
+}
+
+impl rich_text::PictureEngine for FakePictures {
+    fn me(&self) -> &str {
+        ME
+    }
+
+    fn message_picture(&self, src: String) -> teams_core::Reply<Option<teams_core::PictureBytes>> {
+        self.asked.lock().unwrap().push("message_picture");
+        teams_core::Reply::ready(Ok(self.pictures.lock().unwrap().get(&src).cloned()))
+    }
+
+    fn reaction_animation(&self, _: String) -> teams_core::Reply<Option<teams_core::Strip>> {
+        self.asked.lock().unwrap().push("reaction_animation");
+        teams_core::Reply::ready(Ok(None))
+    }
+
+    fn engine(&self) -> *const () {
+        std::ptr::from_ref(self).cast()
+    }
+}
+
+impl FakePictures {
+    fn asked(&self) -> Vec<&'static str> {
+        self.asked.lock().unwrap().clone()
+    }
+}
+
+/// A made-up picture's PNG, `width` by `height`.
+fn png(width: u32, height: u32) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    image::RgbaImage::from_pixel(width, height, image::Rgba([40, 120, 200, 255]))
+        .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+        .unwrap();
+    bytes
+}
+
+#[test]
+fn a_pasted_picture_is_asked_of_the_engine_and_drawn_within_the_width_there_is() {
+    let core = Arc::new(FakePictures::default());
+    core.pictures.lock().unwrap().insert(
+        PICTURE.to_owned(),
+        Arc::new(teams_proto::PastedPicture {
+            format: teams_proto::PastedFormat::Png,
+            bytes: png(40, 10),
+        }),
+    );
+    // the message gives it a size wider than any window: drawn at the width there is, a quarter as high
+    let content = format!("<p>look</p><p><img src=\"{PICTURE}\" width=\"40000\" height=\"10000\"></p>");
+    let source = rich_text::PictureSource::of(core.clone());
+    let rendered = Arc::new(rich_text::layout(&parse_html(&content), &Mentions::default()).with_source(source));
+    let app: &'static mut TestAppContext = Box::leak(Box::new(TestAppContext::single()));
+    let (_, cx) = app.add_window_view(|_, _| Holder { rendered });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.run_until_parked();
+    assert!(core.asked().contains(&"message_picture"));
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let drawn = cx.debug_bounds("rich-picture").expect("the picture is drawn");
+    let window = cx.update(|window, _| window.viewport_size());
+    assert!(drawn.size.width <= window.width, "{drawn:?} in {window:?}");
+    // its block's padding aside, a quarter as high as wide
+    let picture_height = drawn.size.height - px(8.0);
+    assert!(
+        (f32::from(picture_height) - f32::from(drawn.size.width) / 4.0).abs() < 2.0,
+        "{drawn:?}"
+    );
+}
+
+#[test]
+fn an_emoticon_alone_is_drawn_large_and_one_in_text_at_the_text_s_height() {
+    let core = Arc::new(FakePictures::default());
+    let alone = format!("<div>{}</div>", emoticon("1f44b_wavinghand", "\u{1f44b}", 58));
+    let rendered = Arc::new(
+        rich_text::layout(&parse_html(&alone), &Mentions::default())
+            .with_source(rich_text::PictureSource::of(core.clone())),
+    );
+    let app: &'static mut TestAppContext = Box::leak(Box::new(TestAppContext::single()));
+    let (_, cx) = app.add_window_view(|_, _| Holder { rendered });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let large = cx.debug_bounds("rich-emoticons").expect("drawn large");
+    assert!(large.size.height >= px(58.0), "{large:?}");
+    assert!(core.asked().contains(&"reaction_animation"), "its animation asked for");
+
+    let inline = format!("<p>hi there{}</p>", emoticon("smile", "\u{1f642}", 20));
+    let rendered = Arc::new(laid_out(&inline));
+    let app: &'static mut TestAppContext = Box::leak(Box::new(TestAppContext::single()));
+    let (_, cx) = app.add_window_view(|_, _| Holder { rendered });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let line = cx.debug_bounds("rich-text").expect("the line is drawn");
+    assert!(line.size.height < px(40.0), "one line of text: {line:?}");
 }

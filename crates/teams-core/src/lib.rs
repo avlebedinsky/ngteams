@@ -19,7 +19,10 @@
 //! - [`presence`]: others' presence, read from UPS by polling for the people the views asked about; never stored.
 //! - [`search`]: local search: each message's plain text handed to the store's index as it is stored, and the
 //!   messages stored before indexed by a backfill in batches.
-//! - [`emoticons`]: reactions' animations, read from Teams' CDN when a view asks for one and kept for the run.
+//! - [`emoticons`]: reactions' and messages' emoticons' animations, read from Teams' CDN when a view asks for one and
+//!   kept for the run.
+//! - [`pictures`]: pictures pasted into messages, read from the account's AMS base when a view shows one and kept for
+//!   the run.
 //! - [`teams`]: the account's teams and their channels, read from CSA in the background and kept in the store;
 //!   read-only, as a channel's posts are.
 //! - [`calling`]: the account's calls (M3 Task 14): the call session joining the signaling machine (`teams-call`), the
@@ -38,6 +41,7 @@ pub mod engine;
 pub mod lab;
 pub mod outbox;
 pub mod own_presence;
+pub mod pictures;
 pub mod presence;
 pub mod profiles;
 pub mod search;
@@ -59,14 +63,18 @@ pub use outbox::{
     TransientSent, UnreadableSeen, Unsynced, create_chat, enqueue, new_client_message_id,
 };
 pub use own_presence::{AVAILABLE_REFRESH, Choice, OwnPresencePolicy, Reporting};
-pub use presence::{Availability, MAX_WATCHED, PRESENCE_MIN_GAP, PRESENCE_POLL};
+pub use pictures::PictureBytes;
+pub use presence::subscription::{SUBSCRIPTION_PRUNE, SUBSCRIPTION_RENEWAL, SUBSCRIPTION_RETRY};
+pub use presence::{
+    Availability, MAX_NAMED, MAX_WATCHED, PRESENCE_MIN_GAP, PRESENCE_POLL, PRESENCE_POLL_SUBSCRIBED, has_presence,
+};
 pub use profiles::{MAX_LOOKUPS, NameFrom, PROFILE_MAX_AGE, PROFILE_RETRY, Person};
 pub use search::{Backfill, INDEX_BATCH, search_text};
 pub use sync::{
-    CLOCK_SKEW_MS, CatchUp, CatchUpError, CatchUpReport, Changes, ConversationFailed, Gaps, MAX_PAGES, StoredMessage,
-    Synced,
+    CLOCK_SKEW_MS, CatchUp, CatchUpError, CatchUpReport, Changes, ConversationFailed, Gaps, MAX_PAGES, NOTES,
+    StoredMessage, Synced,
 };
-pub use teams::{READING_TEAMS, TEAMS_MAX_AGE, TEAMS_RETRY, TeamsReadError};
+pub use teams::{ChatListing, READING_TEAMS, TEAMS_MAX_AGE, TEAMS_RETRY, TeamsReadError};
 /// A call, how it ended and how its services ended it, as [`Event::Call`] and [`Event::RingEnded`] tell them.
 pub use teams_call::{CallError, CallId, End, Identity, RemoteEnd};
 /// How a registration of the push channel's endpoint went, as [`Event::Registration`] tells it.

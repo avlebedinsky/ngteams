@@ -1,0 +1,80 @@
+{
+  "_synthetic": "Made up, in the shape of the conversationFolders object of CSA's answer to GET <chatSvcAggAfd>/api/v3/teams/users/me with the web client's query (the lab's captures of 2026-10-24 and a personal build's debug log of 2026-10-26: seven folders, Favorites, RecentChats, TeamsAndChannels, QuickViews, MutedChats, MeetingChats and EngageCommunities, in conversationFolderOrder; the Favorites folder's sortType UserDefinedCustomOrder; QuickViews' items slices with an itemType, the other folders' items conversations with a threadType). Here a Favorites folder holding the account's own notes stream and a made-up group chat, the system folders empty, the quick views with one slice; ids under the account are <guid:tenant>~<guid:a>~<folder>, times made up. See docs/protocol/chat.md, \"Favorites\".",
+  "conversationFolders": {
+    "folderHierarchyVersion": 1760000000300,
+    "conversationFolders": [
+      {
+        "id": "<guid:tenant>~<guid:a>~Favorites",
+        "sortType": "UserDefinedCustomOrder",
+        "name": "Favorites",
+        "folderType": "Favorites",
+        "conversationFolderItems": [
+          {
+            "conversationId": "48:notes",
+            "createdTime": 1760000000100,
+            "lastUpdatedTime": 1760000000100,
+            "threadType": "streamofnotes"
+          },
+          {
+            "conversationId": "19:favorite0001@thread.v2",
+            "createdTime": 1760000000200,
+            "lastUpdatedTime": 1760000000200,
+            "threadType": "chat"
+          }
+        ],
+        "version": 1760000000300,
+        "createdTime": 1760000000000,
+        "isExpanded": true,
+        "isDeleted": false
+      },
+      {
+        "id": "<guid:tenant>~<guid:a>~RecentChats",
+        "sortType": "MostRecent",
+        "name": "RecentChats",
+        "folderType": "RecentChats",
+        "conversationFolderItems": [],
+        "version": 1760000000000,
+        "createdTime": 1760000000000,
+        "isExpanded": true,
+        "isDeleted": false
+      },
+      {
+        "id": "<guid:tenant>~<guid:a>~QuickViews",
+        "sortType": "UserDefinedCustomOrder",
+        "name": "QuickViews",
+        "folderType": "QuickViews",
+        "conversationFolderItems": [
+          {
+            "conversationId": "slice-saved",
+            "createdTime": 1760000000000,
+            "lastUpdatedTime": 1760000000000,
+            "itemType": "Slice"
+          }
+        ],
+        "version": 1760000000000,
+        "createdTime": 1760000000000,
+        "isExpanded": true,
+        "isDeleted": false
+      },
+      {
+        "id": "<guid:tenant>~<guid:a>~MutedChats",
+        "sortType": "MostRecent",
+        "name": "MutedChats",
+        "folderType": "MutedChats",
+        "conversationFolderItems": [],
+        "version": 1760000000000,
+        "createdTime": 1760000000000,
+        "isExpanded": true,
+        "isDeleted": false
+      }
+    ],
+    "conversationFolderOrder": [
+      "<guid:tenant>~<guid:a>~QuickViews",
+      "<guid:tenant>~<guid:a>~Favorites",
+      "<guid:tenant>~<guid:a>~RecentChats",
+      "<guid:tenant>~<guid:a>~MutedChats"
+    ],
+    "migratedPinnedToFavorites": true,
+    "isPartialResponse": false
+  }
+}

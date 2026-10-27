@@ -23,8 +23,9 @@
 //! - **Registration**: on every `trouter.connected`, the stack's registration of the endpoint's push URL
 //!   ([`crate::registration`]).
 //! - **Deliveries** on the messaging stack's socket become [`PushEvent::Delivery`] ([`crate::events`]) and are **never
-//!   answered**; an incoming call's (a `callNotification`, whatever its path) and one at a path not the endpoint's
-//!   messaging one are [`PushEvent::Ignored`] and never answered either. A message-loss report becomes
+//!   answered**; others' presence at the endpoint's `unifiedPresenceService` path becomes [`PushEvent::Presence`]
+//!   ([`crate::presence`]), never answered either; an incoming call's (a `callNotification`, whatever its path) and one
+//!   at a path not the endpoint's messaging or presence one are [`PushEvent::Ignored`] and never answered either. A message-loss report becomes
 //!   [`PushEvent::MessageLoss`]: catch up, then [`MessageLoss::caught_up`] acknowledges it.
 //! - **The calling stack's socket** ([`Trouter::for_calls`]): its own connect (`tc` naming `SkypeSpaces`, `dom`), its
 //!   own authentication's headers, the `SkypeSpacesWeb` registration; every delivery at its endpoint read by the fence
@@ -53,7 +54,7 @@ use teams_fence::Observed;
 use teams_proto::{
     AcceptanceAcknowledgement, Authenticate, CallingRegistration, ConnectParams, Disconnect, DroppedIndicator,
     EndpointRegistrar, EndpointRegistration, FrameError, FrameSink, IC3_AUDIENCE, InvitationReceipt, MessageLossAck,
-    OwnFrame, PermittedResponse, Ping, RegisteredEndpoint, RespondError, ResponseRefused, Sent,
+    OwnFrame, PRESENCE_PUSH_PATH, PermittedResponse, Ping, RegisteredEndpoint, RespondError, ResponseRefused, Sent,
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -64,6 +65,7 @@ use crate::calls::{CallDelivery, CallResponder, CallResponse, CallStack, Respond
 use crate::credentials::TrouterCredentials;
 use crate::events::Delivery;
 use crate::frames::{self, Connected, Event, Incoming, RawDelivery};
+use crate::presence::PresenceDelivery;
 use crate::registration::{Outcome, Registrar, Registration, RegistrationReport, RegistrationTimes};
 use crate::socket::{self, ConnectBase, ConnectError, Opener, SocketWriter, Stack, Stream, WriteFailed};
 
@@ -136,6 +138,9 @@ pub enum PushEvent {
     MessageLoss(MessageLoss),
     /// A chat delivery. It is never answered.
     Delivery(Delivery),
+    /// Others' presence, delivered at the endpoint's `unifiedPresenceService` path once it subscribed to it
+    /// (`teams_proto::PresenceSubscription`, [`crate::presence`]). It is never answered.
+    Presence(PresenceDelivery),
     /// A delivery at the calling stack's endpoint, read by the fence first ([`crate::calls`]): answered only through
     /// its responder, by a typed response the fence permits.
     Call(CallDelivery),
@@ -184,7 +189,8 @@ pub enum Ignored {
     /// agent).
     NotOurs { path: String },
     /// On the calling stack's socket, a delivery whose body doesn't decode (its gzip within
-    /// [`crate::calls::MAX_DELIVERY`]): the fence can't read it, so nothing is handed on or sent for it.
+    /// [`crate::calls::MAX_DELIVERY`]): the fence can't read it, so nothing is handed on or sent for it. On the
+    /// messaging stack's, a presence delivery that doesn't read ([`PresenceDelivery::from_raw`]).
     Undecodable { path: String },
 }
 
@@ -1071,10 +1077,12 @@ impl Link {
         if incoming_call {
             return PushEvent::Ignored(Ignored::IncomingCall);
         }
-        let ours = self
-            .endpoint
-            .as_ref()
-            .is_some_and(|endpoint| raw.url == format!("/v4/f/{endpoint}/messaging"));
+        let at = |path: &str| {
+            self.endpoint
+                .as_ref()
+                .is_some_and(|endpoint| raw.url == format!("/v4/f/{endpoint}/{path}"))
+        };
+        let ours = at("messaging");
         // the delivery's number and kind of path only, never its body or headers
         log::debug!(
             "trouter: delivery {} stored={} ours={ours} body_bytes={}",
@@ -1084,6 +1092,11 @@ impl Link {
         );
         if ours {
             PushEvent::Delivery(Delivery::from_raw(raw))
+        } else if at(PRESENCE_PUSH_PATH) {
+            PresenceDelivery::from_raw(raw).map_or_else(
+                || PushEvent::Ignored(Ignored::Undecodable { path: raw.url.clone() }),
+                PushEvent::Presence,
+            )
         } else {
             PushEvent::Ignored(Ignored::NotOurs { path: raw.url.clone() })
         }

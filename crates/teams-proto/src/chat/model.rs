@@ -202,6 +202,18 @@ impl Conversation {
         serde_json::from_value(raw.clone()).ok()
     }
 
+    /// Whether the chat service calls the conversation empty (`properties.isemptyconversation`, `"True"` or `"False"` in
+    /// every capture): a chat nobody wrote in yet, which Teams leaves out of its chat list. `None` when it is absent or
+    /// in another form: not known, never read as either.
+    #[must_use]
+    pub fn is_empty_conversation(&self) -> Option<bool> {
+        match self.properties.get("isemptyconversation").and_then(Value::as_str) {
+            Some("True") => Some(true),
+            Some("False") => Some(false),
+            _ => None,
+        }
+    }
+
     /// The account's own read horizon (`properties.consumptionhorizon`), when it has read anything.
     #[must_use]
     pub fn consumption_horizon(&self) -> Option<ConsumptionHorizon> {

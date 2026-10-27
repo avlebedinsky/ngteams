@@ -9,7 +9,7 @@ use crate::accounts::Accounts;
 use crate::own_presence::OwnPresence;
 use crate::shell::{Shell, ShellParts};
 use crate::view::Root;
-use crate::{shell, theme};
+use crate::{clock, shell, theme};
 
 /// The lab app's Wayland app id.
 pub const LAB_APP_ID: &str = "ms-teams-lab";
@@ -35,7 +35,8 @@ pub fn init(cx: &mut App) {
 
 /// Opens the main window, titled `title`, with app id `app_id`: the kit's root ([`KitRoot`]) holding our root view,
 /// which shows the [`Shell`] over `parts`; sets the app up first ([`init`]) and keeps the theme following the
-/// window's appearance and the settings' choice of how the app looks ([`theme::follow_settings`]).
+/// window's appearance and the settings' choice of how the app looks ([`theme::follow_settings`]) and of the clock times
+/// are shown on ([`clock::follow_settings`]).
 ///
 /// # Errors
 /// The platform can't open a window.
@@ -52,7 +53,10 @@ pub fn open(cx: &mut App, app_id: &str, title: SharedString, parts: ShellParts) 
     };
     init(cx);
     cx.open_window(options, |window, cx| {
-        let following = Subscription::join(theme::follow_settings(&parts.settings, cx), theme::follow(window, cx));
+        let following = Subscription::join(
+            Subscription::join(theme::follow_settings(&parts.settings, cx), theme::follow(window, cx)),
+            clock::follow_settings(&parts.settings, cx),
+        );
         let models = parts.models.clone();
         let trace = std::sync::Arc::clone(&parts.trace);
         let shell = cx.new(|cx| Shell::new(parts, window, cx));
@@ -88,7 +92,10 @@ pub fn open_accounts(
     init(cx);
     cx.open_window(options, |window, cx| {
         // one settings model for the app: the first account's parts hold it
-        let following = Subscription::join(theme::follow_settings(&first.0.settings, cx), theme::follow(window, cx));
+        let following = Subscription::join(
+            Subscription::join(theme::follow_settings(&first.0.settings, cx), theme::follow(window, cx)),
+            clock::follow_settings(&first.0.settings, cx),
+        );
         let mut shell_of = |(parts, own): (ShellParts, Entity<OwnPresence>), cx: &mut App| {
             let shell = cx.new(|cx| Shell::new(parts, window, cx));
             shell.update(cx, |shell, cx| {

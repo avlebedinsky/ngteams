@@ -1,10 +1,10 @@
 //! The shell, the chat list, the chat switcher and the settings view on GPUI's test context, over the fake engine
 //! (`common`): the three panes and the list pane's resizing; the chats by last activity with their names, previews,
 //! times and unread counts from the store, channels and own streams left out, kept up to date by the engine's events
-//! (a catch-up's too); the connection state; Ctrl+K's switcher, fuzzy, Enter opening, Escape closing; the selected chat
-//! kept in the settings and opened again; the settings view changing the settings (the log's level among them);
-//! "Copy diagnostics" from the settings view and from the palette, said to be unsafe to paste when it holds a `debug`
-//! line. Every id and name is made up.
+//! (a catch-up's too); the connection state, and the list header's ("Read-only" in the read-only mode); Ctrl+K's
+//! switcher, fuzzy, Enter opening, Escape closing; the selected chat kept in the settings and opened again; the
+//! settings view changing the settings (the log's level among them); "Copy diagnostics" from the settings view and
+//! from the palette, said to be unsafe to paste when it holds a `debug` line. Every id and name is made up.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
@@ -21,9 +21,11 @@ use teams_log::diagnostics::{Source as DiagnosticsSource, WARNING};
 use teams_media::devices::catalog::{DeviceDirectory as _, DeviceInfo, DeviceKind, DeviceList, FixedDirectory};
 use teams_store::{Applied, Conversation, ConversationKind, Member, Message};
 use teams_trouter::{Down, Stop};
-use teams_ui::chat_list::{ChatList, DELETED, RowKind, format_time, listed, one_to_one_partner, preview};
+use teams_ui::chat_list::{ChatList, DELETED, RowKind, UNKNOWN_USER, listed, one_to_one_partner, preview};
+use teams_ui::clock::{self, HourCycle};
 use teams_ui::settings::{
-    Copied, FirstRunState, LogLevel, ManualStatus, Notifications, Problem, Settings, SettingsModel, attach_devices,
+    Copied, FirstRunState, LogLevel, ManualStatus, Notifications, Problem, Settings, SettingsModel, TimeFormat,
+    attach_devices,
 };
 use teams_ui::settings_view::Page;
 use teams_ui::shell::{LIST_MAX, LIST_MIN, LIST_WIDTH, Main, Shell, ShellParts};
@@ -212,13 +214,14 @@ fn the_list_shows_the_chats_by_last_activity_with_names_previews_and_unread_coun
             )
         })
         .collect();
-    let unnamed = format!("Lab Bee, {LAB_C}");
+    // a group without a topic by its members' first names (c, unnamed, as "Unknown user", never by MRI)
+    let unnamed = format!("Lab and {UNKNOWN_USER}");
     assert_eq!(
         shown,
         [
             (TRIO, RowKind::Group, "Lab trio", true, "", 0),
             (AB, RowKind::OneToOne, "Lab Bee", true, "hello there", 2),
-            (AC, RowKind::OneToOne, LAB_C, false, "You: mine", 0),
+            (AC, RowKind::OneToOne, UNKNOWN_USER, false, "You: mine", 0),
             (UNNAMED, RowKind::Group, unnamed.as_str(), false, DELETED, 0),
         ]
     );
@@ -272,6 +275,8 @@ fn a_row_s_time_is_the_time_of_day_today_then_the_weekday_then_the_day() {
             .expect("time")
             .timestamp_millis()
     };
+    let format_time =
+        |ms, now: &chrono::DateTime<chrono::FixedOffset>| clock::list_time(ms, now, HourCycle::TwentyFour);
     assert_eq!(format_time(at(2026, 10, 21, 9, 5), &now), "09:05");
     assert_eq!(format_time(at(2026, 10, 19, 9, 5), &now), "Mon");
     assert_eq!(format_time(at(2026, 10, 1, 9, 5), &now), "1 Oct");
@@ -338,7 +343,7 @@ fn a_name_delivered_in_one_chat_renames_every_row_named_by_that_person() {
     let members_asked = |rig: &Rig| rig.core.asked().iter().filter(|name| **name == "members").count();
     let before = members_asked(&rig);
     let ac = cx.update(|_, cx| list.read(cx).row(AC).cloned()).expect("row");
-    assert_eq!((ac.name.as_ref(), ac.named), (LAB_C, false));
+    assert_eq!((ac.name.as_ref(), ac.named), (UNKNOWN_USER, false));
 
     // c's first named message comes live in the trio: the store now names c
     rig.core
@@ -363,7 +368,7 @@ fn a_name_delivered_in_one_chat_renames_every_row_named_by_that_person() {
     let ac = cx.update(|_, cx| list.read(cx).row(AC).cloned()).expect("row");
     assert_eq!((ac.name.as_ref(), ac.named), ("Lab Sea", true));
     let unnamed = cx.update(|_, cx| list.read(cx).row(UNNAMED).cloned()).expect("row");
-    assert_eq!((unnamed.name.as_ref(), unnamed.named), ("Lab Bee, Lab Sea", true));
+    assert_eq!((unnamed.name.as_ref(), unnamed.named), ("Lab and Lab", true));
 }
 
 #[test]
@@ -453,6 +458,46 @@ fn the_connection_state_follows_the_push_channel() {
     rig.send(Event::PushStopped(Stop::Requested));
     assert_eq!(text(&rig), "Offline");
     assert_eq!(rig.cx.read(|cx| Shown::of(rig.models.status.read(cx))), Shown::Offline);
+}
+
+#[test]
+fn the_list_header_shows_the_connection_only_while_it_is_not_up() {
+    let rig = seeded();
+    let (_, cx) = shell_window(&rig, Settings::default(), Arc::new(ViewTrace::off()));
+    assert!(bounds(cx, "connection").is_some(), "connecting");
+    assert!(bounds(cx, "read-only").is_none());
+    rig.send(Event::Connected {
+        endpoint: "00000000-0000-4000-8000-0000000000e1".to_owned(),
+    });
+    assert!(bounds(cx, "connection").is_none(), "a healthy connection says nothing");
+    rig.send(Event::Disconnected {
+        down: Down::Closed,
+        heard: None,
+    });
+    assert!(bounds(cx, "connection").is_some(), "reconnecting");
+    rig.send(Event::PushStopped(Stop::Requested));
+    assert!(bounds(cx, "connection").is_some(), "offline");
+    assert!(bounds(cx, "read-only").is_none());
+}
+
+#[test]
+fn in_the_read_only_mode_the_list_header_says_read_only_never_connecting() {
+    let rig = seeded();
+    *rig.core.read_only.lock().unwrap() = true;
+    let (_, cx) = shell_window(&rig, Settings::default(), Arc::new(ViewTrace::off()));
+    // no push channel ever comes up: the status stays "starting", which isn't shown as a connection on its way
+    assert_eq!(
+        rig.cx.read(|cx| Shown::of(rig.models.status.read(cx))),
+        Shown::Connecting
+    );
+    assert!(bounds(cx, "read-only").is_some(), "the quiet read-only state");
+    assert!(bounds(cx, "connection").is_none(), "no connecting pill");
+    // the engine stopped: that is still told
+    rig.cx
+        .update(|cx| rig.bridge.update(cx, teams_ui::Bridge::shutdown).detach());
+    rig.cx.run_until_parked();
+    assert!(bounds(cx, "connection").is_some(), "offline");
+    assert!(bounds(cx, "read-only").is_none());
 }
 
 #[test]
@@ -665,6 +710,7 @@ fn the_settings_view_changes_the_settings() {
         "idle-15",
         "status",
         "status-do-not-disturb",
+        "time-format-12-hour",
         "settings-page-notifications",
         "notifications-mentions",
         "settings-page-diagnostics",
@@ -683,6 +729,7 @@ fn the_settings_view_changes_the_settings() {
             idle_minutes: 15,
             manual_status: ManualStatus::DoNotDisturb,
             log_level: LogLevel::Debug,
+            time_format: TimeFormat::Twelve,
             ..Settings::default()
         }
     );

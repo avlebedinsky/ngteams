@@ -30,6 +30,7 @@ const CHAT_BASE: &str = "https://teams.microsoft.com/api/chatsvc/amer";
 const CSA_BASE: &str = "https://teams.microsoft.com/api/csa/amer";
 const TEAMS_PATH: &str = "/api/csa/amer/api/v3/teams/users/me";
 const FIXTURE: &str = include_str!("../../../tests/fixtures/csa/teams.json");
+const FOLDERS: &str = include_str!("../../../tests/fixtures/csa/folders.json");
 const TEAM: &str = "19:channel0001@thread.tacv2";
 const CHANNEL: &str = "19:channel0002@thread.tacv2";
 
@@ -157,6 +158,8 @@ async fn the_teams_read_is_a_get_of_its_probed_shape_with_the_csa_token_and_its_
     );
     assert_eq!(read.teams[1].channels.len(), 1);
     assert!(read.teams[1].channels[0].general);
+    // the fixture's folders hold no favourites folder: none, known
+    assert_eq!(read.favorites, Some(Vec::new()));
     let shown = format!("{read:?}");
     assert!(!shown.contains("made-up team") && !shown.contains("General"), "{shown}");
 }
@@ -397,4 +400,85 @@ fn a_channel_message_names_its_post_and_a_channel_thread_is_a_channel() {
     assert_eq!(ConversationKind::of(CHANNEL, Some("topic")), ConversationKind::Channel);
     assert_eq!(ConversationKind::of(TEAM, Some("space")), ConversationKind::Channel);
     assert!(ConversationKind::of(CHANNEL, Some("topic")).is_read_only());
+}
+
+/// A whole teams answer around `folders` (the `conversationFolders` object).
+fn with_folders(folders: &Value) -> Vec<u8> {
+    json!({"metadata": {"isPartialData": false}, "teams": [], "conversationFolders": folders})
+        .to_string()
+        .into_bytes()
+}
+
+/// The folders fixture's `conversationFolders`, its placeholders filled in.
+fn folders() -> Value {
+    let text = FOLDERS
+        .replace("<guid:a>", "0000000a-0000-4000-8000-00000000000a")
+        .replace("<guid:tenant>", "00000000-0000-4000-8000-0000000000ff");
+    serde_json::from_str::<Value>(&text).unwrap()["conversationFolders"].clone()
+}
+
+#[test]
+fn the_favourites_are_the_favorites_folder_s_conversations_in_its_order() {
+    let read = CsaTeams::read_answer(&with_folders(&folders())).unwrap();
+    // the quick views' slice and the other folders left out
+    assert_eq!(
+        read.favorites,
+        Some(vec!["48:notes".to_owned(), "19:favorite0001@thread.v2".to_owned()])
+    );
+}
+
+#[test]
+fn favourites_are_read_only_in_their_captured_shape() {
+    let whole = folders();
+    let changed = |change: &dyn Fn(&mut Value)| {
+        let mut folders = whole.clone();
+        change(&mut folders);
+        CsaTeams::read_answer(&with_folders(&folders)).unwrap().favorites
+    };
+    // partial, unsaid or not a list: not known
+    assert_eq!(changed(&|f| f["isPartialResponse"] = json!(true)), None);
+    assert_eq!(changed(&|f| f["isPartialResponse"] = json!("false")), None);
+    assert_eq!(
+        changed(&|f| f.as_object_mut().unwrap().retain(|k, _| k != "isPartialResponse")),
+        None
+    );
+    assert_eq!(changed(&|f| f["conversationFolders"] = json!({})), None);
+    // an item without a string id
+    assert_eq!(
+        changed(&|f| f["conversationFolders"][0]["conversationFolderItems"][1]["conversationId"] = json!(7)),
+        None
+    );
+    // two favourites folders: which one is Teams' isn't known
+    assert_eq!(
+        changed(&|f| {
+            let favourites = f["conversationFolders"][0].clone();
+            f["conversationFolders"].as_array_mut().unwrap().push(favourites);
+        }),
+        None
+    );
+    // a deleted favourites folder, or none: none, known
+    assert_eq!(
+        changed(&|f| f["conversationFolders"][0]["isDeleted"] = json!(true)),
+        Some(Vec::new())
+    );
+    assert_eq!(
+        changed(&|f| {
+            f["conversationFolders"].as_array_mut().unwrap().remove(0);
+        }),
+        Some(Vec::new())
+    );
+    // a conversation listed twice keeps its first place
+    assert_eq!(
+        changed(&|f| {
+            let first = f["conversationFolders"][0]["conversationFolderItems"][0].clone();
+            f["conversationFolders"][0]["conversationFolderItems"]
+                .as_array_mut()
+                .unwrap()
+                .push(first);
+        }),
+        Some(vec!["48:notes".to_owned(), "19:favorite0001@thread.v2".to_owned()])
+    );
+    // no folders at all: not known
+    let bare = json!({"metadata": {"isPartialData": false}, "teams": []}).to_string();
+    assert_eq!(CsaTeams::read_answer(bare.as_bytes()).unwrap().favorites, None);
 }

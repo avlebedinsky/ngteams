@@ -23,7 +23,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::hash::BuildHasher;
 use std::sync::Arc;
 
-use chrono::{DateTime, Local};
+use chrono::Local;
 use gpui::{
     AnyElement, AsyncApp, Context, InteractiveElement as _, IntoElement, ParentElement as _, Render, ScrollHandle,
     SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, div, rgb,
@@ -34,6 +34,7 @@ use teams_store::Message;
 
 use crate::bridge::Core;
 use crate::chat_view::{DELETED, UNSHOWN_CONTENT, UNSUPPORTED, unshown_of};
+use crate::clock::{self, HourCycle};
 use crate::models::Models;
 use crate::people::Shown;
 use crate::rich_text::{self, Mentions, Rendered};
@@ -361,7 +362,9 @@ impl ChannelView {
             RichText::plain(&message.content)
         };
         let mentions = Mentions::of(message.properties.as_deref(), self.core.me());
-        let rendered = Arc::new(rich_text::layout(&text, &mentions));
+        let rendered = Arc::new(
+            rich_text::layout(&text, &mentions).with_source(rich_text::PictureSource::new(Arc::clone(&self.core))),
+        );
         self.rendered
             .insert(message.id.clone(), (message.version, Arc::clone(&rendered)));
         rendered
@@ -397,9 +400,9 @@ impl ChannelView {
         self.traced = Some(shown);
     }
 
-    fn thread_view(index: usize, thread: &Thread<Item>, palette: Palette) -> AnyElement {
+    fn thread_view(index: usize, thread: &Thread<Item>, palette: Palette, cycle: HourCycle) -> AnyElement {
         let post = match &thread.post {
-            Some(post) => message_view(post, palette),
+            Some(post) => message_view(post, palette, cycle),
             None => div()
                 .debug_selector(move || format!("earlier-post-{index}"))
                 .italic()
@@ -414,7 +417,7 @@ impl ChannelView {
                 .pt_1()
                 .border_t_1()
                 .border_color(rgb(palette.border))
-                .child(message_view(reply, palette))
+                .child(message_view(reply, palette, cycle))
                 .into_any_element()
         });
         div()
@@ -511,11 +514,9 @@ async fn read(core: &dyn Core, channel: &str, limit: usize) -> Option<Read> {
     })
 }
 
-/// A message: its sender's name and time over its body.
-fn message_view(item: &Item, palette: Palette) -> AnyElement {
-    let time = DateTime::from_timestamp_millis(item.arrival_time)
-        .map(|at| at.with_timezone(&Local).format("%d %b %H:%M").to_string())
-        .unwrap_or_default();
+/// A message: its sender's name and time (in Teams' words, on `cycle`'s clock) over its body.
+fn message_view(item: &Item, palette: Palette, cycle: HourCycle) -> AnyElement {
+    let time = clock::message_time(item.arrival_time, &Local::now(), cycle);
     let header = div()
         .flex()
         .gap_2()
@@ -584,11 +585,12 @@ impl Render for ChannelView {
                 .text_color(rgb(palette.muted_foreground))
                 .child("No posts to show")
         });
+        let cycle = clock::cycle(cx);
         let threads: Vec<AnyElement> = self
             .threads
             .iter()
             .enumerate()
-            .map(|(index, thread)| Self::thread_view(index, thread, palette))
+            .map(|(index, thread)| Self::thread_view(index, thread, palette, cycle))
             .collect();
         let posts = div()
             .id("channel-posts")

@@ -34,10 +34,12 @@ pub enum Service {
     /// UPS, the presence service, at the account's presence base, the region's GTM `presenceUPS`
     /// (`https://<AFD host>/ups/<geo>`, the geo lowercase letters: `noam`), which a transport reaches only once it was
     /// given one (`HttpTransport::with_presence`), with the account's token for
-    /// `https://presence.teams.microsoft.com/`: the presence read (`v1/presence/getpresence/`, [`crate::PresenceRead`])
-    /// and the account's own availability, as an authorized write (`v1/me/endpoints/`,
-    /// [`crate::SetEndpointAvailability`]; `v1/me/forceavailability/`, [`crate::ForceAvailability`]), every path sent
-    /// with the trailing slash every captured UPS path had.
+    /// `https://presence.teams.microsoft.com/`: the presence read (`v1/presence/getpresence/`, [`crate::PresenceRead`]),
+    /// the subscription of the account's endpoint to others' presence (`v1/pubsub/subscriptions/<endpoint>`,
+    /// [`crate::PresenceSubscription`]) and the account's own availability, as an authorized write
+    /// (`v1/me/endpoints/`, [`crate::SetEndpointAvailability`]; `v1/me/forceavailability/`,
+    /// [`crate::ForceAvailability`]), every path sent with the trailing slash every captured UPS path had but the
+    /// subscription's, which never had one.
     Presence,
     /// The calling service: the flight proxy, `https://api.flightproxy.teams.microsoft.com/api/v2/`, with the account's
     /// skypetoken (`X-Skypetoken`, not a bearer token). The call writes go here (`crate::StartCall` and the others):
@@ -51,8 +53,14 @@ pub enum Service {
     Relay,
     /// Teams' reaction pictures on its public CDN,
     /// `https://statics.teams.cdn.office.net/evergreen-assets/personal-expressions/v2/assets/emoticons/`, with no token
-    /// (static files any browser reads): a reaction's animation ([`crate::ReactionAnimation`]).
+    /// (static files any browser reads): a reaction's or a message's emoticon's animation ([`crate::ReactionAnimation`]).
     Emoticons,
+    /// The media service (AMS) through the async gateway at the account's AMS base, the region's GTM `amsV2`
+    /// (`https://<name>.asyncgw.teams.microsoft.com`), which a transport reaches only once it was given one
+    /// (`HttpTransport::with_ams`), with the account's `ic3` token and `x-ms-migration: True` (the object read's form,
+    /// `docs/protocol/chat.md`): a picture pasted into a message, read by its view (`v1/objects/<id>/views/<view>`,
+    /// [`crate::MessagePicture`]). Reads only: AMS is a contacting service, and the transport sends it nothing else.
+    Ams,
 }
 
 /// A request's path under its service's base, as path segments (each sent as one encoded segment, so a `/` inside one

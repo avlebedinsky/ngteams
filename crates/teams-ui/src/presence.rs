@@ -1,5 +1,6 @@
 //! Others' presence as the views show it (M2 Task 17): a dot beside a person in the chat list (a 1:1 chat's other
-//! member, on the avatar), the chat's header (its other member) and the mention picker (each member offered).
+//! member, on the avatar), the chat's header (its other member) and the mention picker (each member offered); a
+//! message's sender's badge on their avatar ([`crate::presence_badge`]).
 //!
 //! - **From the engine only.** A view asks the engine about everyone it shows ([`watch`]: `Core::presence`, which makes
 //!   the engine read them from then on), and draws what the [`Presences`] model holds: the engine's
@@ -8,7 +9,12 @@
 //! - **Within the engine's watch** ([`teams_core::MAX_WATCHED`] people, the one asked about longest ago dropped and
 //!   told unknown): a view asks again each time it shows its people anew, and the views together ask about no more
 //!   than it holds: the chat list its top [`LIST_WATCHED`](crate::chat_list::LIST_WATCHED) 1:1 chats' other members,
-//!   the header its chat's, the mention picker the [`PICKER_MAX`](crate::compose::PICKER_MAX) people it offers.
+//!   the header its chat's, the chat view the newest [`SENDERS_WATCHED`](crate::chat_view::SENDERS_WATCHED) senders
+//!   it shows after each load, the mention picker the [`PICKER_MAX`](crate::compose::PICKER_MAX) people it offers.
+//!   The chat view and the picker show the open chat's people and share one share of the watch: while the picker
+//!   offers people the view doesn't show, the ones asked about longest ago may drop until their views ask again (the
+//!   next load of the chat or the list). A chat left isn't unwatched: its senders give way to whoever is asked about
+//!   next, as anyone does.
 //! - **Unknown** is drawn as a hollow ring: before the first read, for someone this build can't read (in the lab,
 //!   anyone but the lab accounts), when a read failed, and for someone no longer watched. A word UPS gave that this build doesn't name is drawn the
 //!   same way, its word as the dot's label.

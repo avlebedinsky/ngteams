@@ -25,6 +25,11 @@
 //!   doesn't start it over), never while editing, and only with the "send typing" setting on. Nothing is sent when
 //!   typing stops: the web client never sent `Control/ClearTyping`.
 //!
+//! - **Read-only** ([`Compose::is_read_only`]): in the app's read-only mode every box ([`READ_ONLY_APP`]), else the
+//!   account's own notes ([`teams_core::NOTES`]), which take no write from
+//!   this app (no write type is mapped to a `48:` stream), so their box shows [`READ_ONLY_NOTES`] in place of the text
+//!   area and its send: nothing can be typed, sent, replied to or edited there, and no typing goes out.
+//!
 //! What the box does is traced (`compose opened` when the box is made, `sent`, `replying`, `editing`, `cancelled`, and
 //! `changed` each time what it holds changes), never its text.
 
@@ -46,7 +51,7 @@ use gpui_component::input::{
     TextareaState,
 };
 use gpui_component::{Sizable as _, Size};
-use teams_core::{Action, Availability, Transient};
+use teams_core::{Action, Availability, NOTES, Transient};
 use teams_fence::Mri;
 use teams_proto::chat::{ComposeError, Marks, MessageText, MessageType, Node, Quote, RichText, parse_html};
 use teams_store::Message;
@@ -444,6 +449,12 @@ pub struct Picker {
     pub loading: bool,
 }
 
+/// What a read-only box says in place of its text area: the account's own notes take no write from this app.
+pub const READ_ONLY_NOTES: &str = "Notes can't be written from this app yet";
+
+/// What every box says in the app's read-only mode ([`crate::Core::read_only`]): nothing is sent from it.
+pub const READ_ONLY_APP: &str = "Read-only: this window sends nothing";
+
 /// What the box tells its chat view.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ComposeEvent {
@@ -482,6 +493,9 @@ pub struct Compose {
     reading: Option<Task<()>>,
     /// What the last send couldn't do, shown over the box.
     problem: Option<SharedString>,
+    /// The account's own notes: nothing is written there ([`READ_ONLY_NOTES`]).
+    /// What a read-only box says in place of its text area; `None` for a box that writes.
+    read_only: Option<&'static str>,
     _input_events: Subscription,
     _presence: Subscription,
 }
@@ -543,11 +557,17 @@ impl Compose {
                 cx.notify();
             }
         });
+        let note = if parts.core.read_only() {
+            Some(READ_ONLY_APP)
+        } else {
+            (conversation == NOTES).then_some(READ_ONLY_NOTES)
+        };
         Self {
             core: parts.core,
             settings: parts.settings,
             trace: parts.trace,
             presence: parts.presence,
+            read_only: note,
             conversation,
             input,
             mode: Mode::New,
@@ -600,8 +620,17 @@ impl Compose {
         self.input.read(cx).value()
     }
 
-    /// Gives the box the focus.
+    /// Whether the box takes no text: the account's own notes ([`READ_ONLY_NOTES`]).
+    #[must_use]
+    pub fn is_read_only(&self) -> bool {
+        self.read_only.is_some()
+    }
+
+    /// Gives the box the focus; a read-only one has nothing to take it.
     pub fn focus(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only.is_some() {
+            return;
+        }
         self.input.update(cx, |input, cx| input.focus(window, cx));
     }
 
@@ -619,6 +648,9 @@ impl Compose {
 
     /// Starts a reply quoting `quoted`; the text typed stays.
     pub fn reply_to(&mut self, quoted: Quoted, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only.is_some() {
+            return;
+        }
         self.trace.record(
             &TraceLine::new("compose", "replying")
                 .conversation(&self.conversation)
@@ -632,6 +664,9 @@ impl Compose {
 
     /// Starts editing the account's message `message_id`: its text loaded into the box.
     pub fn edit(&mut self, message_id: String, loaded: Loaded, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only.is_some() {
+            return;
+        }
         self.trace.record(
             &TraceLine::new("compose", "editing")
                 .conversation(&self.conversation)
@@ -725,6 +760,9 @@ impl Compose {
     /// draft back (its text, its mentions, the reply or the edit) when the engine refuses it before it makes a row,
     /// unless something was typed in it since.
     pub fn send(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only.is_some() {
+            return;
+        }
         let (text, mentions) = self.draft(cx);
         let quotes = match &self.mode {
             Mode::New => Vec::new(),
@@ -1115,9 +1153,41 @@ impl Chosen for gpui::Stateful<gpui::Div> {
     }
 }
 
+/// A read-only box: `note` ([`READ_ONLY_NOTES`], [`READ_ONLY_APP`]) where the text area would be, greyed, with nothing
+/// to type in or send.
+fn read_only_view(palette: Palette, note: &'static str) -> AnyElement {
+    div()
+        .debug_selector(|| "compose".to_owned())
+        .flex_none()
+        .px_4()
+        .pt_1()
+        .pb_3()
+        .child(
+            div()
+                .debug_selector(|| "compose-read-only".to_owned())
+                .flex()
+                .items_center()
+                .gap_2()
+                .min_h(px(36.0))
+                .px_3()
+                .rounded_md()
+                .border_1()
+                .border_color(rgb(palette.border))
+                .bg(rgb(palette.surface))
+                .text_sm()
+                .text_color(rgb(palette.muted_foreground))
+                .child(Glyph::INFO.icon().size(px(14.0)))
+                .child(note),
+        )
+        .into_any_element()
+}
+
 impl Render for Compose {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = theme::current(cx);
+        if let Some(note) = self.read_only {
+            return read_only_view(palette, note);
+        }
         div()
             .key_context(CONTEXT)
             .debug_selector(|| "compose".to_owned())
@@ -1151,5 +1221,6 @@ impl Render for Compose {
                     )
                     .child(self.send_button(cx)),
             )
+            .into_any_element()
     }
 }
