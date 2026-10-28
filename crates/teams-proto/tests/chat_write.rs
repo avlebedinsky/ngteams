@@ -25,7 +25,8 @@ use teams_mock::{
     AB_CHAT, ABC_CHAT, AC_CHAT, AX_CHAT, CHAT_BASE, ChatServiceMock, EventKind, LAB_A, LAB_B, LAB_C, OUTSIDER,
 };
 use teams_proto::chat::{
-    ComposeError, Image, List, MAX_CONTENT, MAX_DEPTH, Marks, MessageText, Node, Quote, RichText, parse_html,
+    Code, CodeRun, ComposeError, Image, List, MAX_CONTENT, MAX_DEPTH, Marks, MessageText, Node, Quote, RichText,
+    parse_html,
 };
 use teams_proto::{
     Author, Authorized, CreateChat, Credentials, DeleteMessage, EditMessage, HttpTransport, Mutating, Original,
@@ -381,6 +382,35 @@ fn a_list_is_written_as_html_and_reads_back_the_same() {
         "<ol start=\"3\"><li>three</li><li>four<ul><li>inner</li></ul></li></ol>"
     );
     assert_eq!(parse_html(text.html()).nodes, [list]);
+}
+
+#[test]
+fn a_code_block_is_written_as_the_editor_writes_one_and_reads_back_the_same() {
+    let code = |language: Option<&str>, text: &str| {
+        Node::Code(Code {
+            language: language.map(str::to_owned),
+            runs: vec![CodeRun {
+                text: text.to_owned(),
+                token: teams_proto::chat::Token::Plain,
+            }],
+        })
+    };
+    let written = "fn x() {\n    <y> & \"z\"\n}";
+    let text = MessageText::new(rich(vec![code(Some("rust"), written)]), []).unwrap();
+    assert_eq!(
+        text.html(),
+        "<pre class=\"language-rust\"><code>fn&nbsp;x()&nbsp;{<br>&nbsp;&nbsp;&nbsp;&nbsp;&lt;y&gt;&nbsp;&amp;&nbsp;\
+         &quot;z&quot;<br>}</code></pre>"
+    );
+    assert_eq!(parse_html(text.html()).nodes, [code(Some("rust"), written)]);
+    // a code ending in a blank line, or two, reads back with them
+    for ending in ["a\n", "a\n\n", "\n"] {
+        let text = MessageText::new(rich(vec![code(None, ending)]), []).unwrap();
+        assert_eq!(parse_html(text.html()).nodes, [code(None, ending)], "{ending:?}");
+    }
+    // a language id of another shape is left out
+    let odd = MessageText::new(rich(vec![code(Some("\"><b>"), "x")]), []).unwrap();
+    assert_eq!(odd.html(), "<pre><code>x</code></pre>");
 }
 
 #[test]

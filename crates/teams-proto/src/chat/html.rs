@@ -2,8 +2,10 @@
 //! paragraphs, mentions, quotes, links and images. Parsed by html5ever (through `scraper`), as a browser would, and
 //! then walked without recursion.
 //!
-//! - **Kept**: text, `br`; `p`, `div`, `li`, `h1`–`h6` and `pre` as paragraphs; `ol` and `ul` as lists, each `li` (any
-//!   paragraph) directly in one an item, numbered from `ol`'s `start`; `b`/`strong`, `i`/`em`, `u`/`ins`,
+//! - **Kept**: text, `br`; `p`, `div`, `li` and `h1`–`h6` as paragraphs; `ol` and `ul` as lists, each `li` (any
+//!   paragraph) directly in one an item, numbered from `ol`'s `start`; `pre` as a block of code ([`Code`]: its text,
+//!   its language's id and its tokens' kinds, every other element in it giving its text, a `br` a line feed), the code
+//!   block editor's own paragraph before it dropped; `b`/`strong`, `i`/`em`, `u`/`ins`,
 //!   `s`/`strike`/`del`, `code` as marks; a mention (`<span itemtype="http://schema.skype.com/Mention" itemid="<n>">`,
 //!   as captured: inside a `readonly` element as sent, which is unknown markup and so gives its text, bare as read
 //!   back); a quote (`<blockquote>`; a reply's, `itemtype="http://schema.skype.com/Reply"`,
@@ -15,7 +17,7 @@
 //! - **Whitespace as a browser sets it**: outside a `pre`, a run of spaces, tabs and line feeds in the markup is one
 //!   space, and a space at the start or end of a line (beside a `br` or a paragraph's edge) is none. A line break is a
 //!   `br` or a paragraph, never a line feed in the markup: the web client sends `<br>` followed by a line feed, and a
-//!   paragraph's text with line feeds in it reads as one line. A `pre` keeps its text as it came.
+//!   paragraph's text with line feeds in it reads as one line. A `pre` (a block of code) keeps its text as it came.
 //! - **Unknown markup is kept as text**: an element this model doesn't name, a link of another scheme or an image of
 //!   another source gives its text (an image its `alt`), never its tag or attributes.
 //! - **Nothing active survives**: `script`, `style`, `template`, frames, `object`/`embed` and the document's head are
@@ -31,6 +33,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use url::Url;
 
+use crate::chat::code::{CODE_BLOCK_ITEMTYPE, Code, Token, language_of};
 use crate::chat::model::Field;
 
 /// The deepest the model nests containers (paragraphs, links, quotes, mentions).
@@ -68,7 +71,7 @@ const DROPPED: &[&str] = &[
 ];
 
 /// Elements read as a paragraph.
-const PARAGRAPHS: &[&str] = &["p", "div", "li", "h1", "h2", "h3", "h4", "h5", "h6", "pre"];
+const PARAGRAPHS: &[&str] = &["p", "div", "li", "h1", "h2", "h3", "h4", "h5", "h6"];
 
 /// A message's content as rich text. It is also what a message is written from
 /// ([`MessageText`](crate::chat::MessageText)), and serializes for the outbox's stored commands.
@@ -127,6 +130,7 @@ pub enum Node {
     Image(Image),
     Quote(Quote),
     List(List),
+    Code(Code),
 }
 
 /// A list (`ol` or `ul`): its items, each what one `li` holds.
@@ -249,7 +253,12 @@ pub fn parse(content: &str) -> RichText {
 /// `chat-shapes` captures of 2026-10-21, `docs/protocol/chat.md`), which would otherwise read as blank lines. A
 /// no-break space is text, and whitespace between inline nodes stays.
 fn drop_block_gaps(nodes: &mut Vec<Node>) {
-    let is_block = |node: Option<&Node>| matches!(node, Some(Node::Paragraph(_) | Node::Quote(_) | Node::List(_)));
+    let is_block = |node: Option<&Node>| {
+        matches!(
+            node,
+            Some(Node::Paragraph(_) | Node::Quote(_) | Node::List(_) | Node::Code(_))
+        )
+    };
     let is_gap = |node: &Node| matches!(node, Node::Text { text, .. } if text.chars().all(|c| c.is_ascii_whitespace()));
     let keep: Vec<bool> = (0..nodes.len())
         .map(|index| {
@@ -268,7 +277,7 @@ fn trim_line_edges(nodes: &mut Vec<Node>) {
     let edge = |node: Option<&Node>| {
         matches!(
             node,
-            None | Some(Node::Break | Node::Paragraph(_) | Node::Quote(_) | Node::List(_))
+            None | Some(Node::Break | Node::Paragraph(_) | Node::Quote(_) | Node::List(_) | Node::Code(_))
         )
     };
     for index in 0..nodes.len() {
@@ -365,12 +374,14 @@ fn digits(text: String) -> Field<u64> {
 
 /// What an open element became.
 enum Frame {
-    /// A container: its content is collected on the builder's container stack and made a node when it closes. `pre`:
-    /// it is a `pre`, whose text keeps its whitespace.
-    Container { pre: bool },
+    /// A container: its content is collected on the builder's container stack and made a node when it closes.
+    Container,
     /// An element whose content goes to the container above (unknown markup, a mark, a leaf, a container too deep);
     /// the marks it found are restored when it closes.
     Pass { restore: Marks },
+    /// An element inside a block of code: its text goes to the code, as `token` while it is open (a `span` of a
+    /// highlight class), the token before it restored when it closes.
+    InCode { restore: Token },
 }
 
 enum Container {
@@ -386,12 +397,17 @@ enum Container {
         ordered: bool,
         start: u32,
     },
+    /// A block of code (`pre`): its text is collected in it, not as children.
+    Code(Code),
 }
 
 impl Container {
     /// Whether it is a block: a line starts at its edges.
     const fn is_block(&self) -> bool {
-        matches!(self, Self::Paragraph | Self::Quote(..) | Self::List { .. })
+        matches!(
+            self,
+            Self::Paragraph | Self::Quote(..) | Self::List { .. } | Self::Code(_)
+        )
     }
 }
 
@@ -407,11 +423,11 @@ struct Builder {
     marks: Marks,
     /// While above 0, the edges are inside a dropped element (the count is how deep).
     skip: usize,
-    /// While above 0, the edges are inside a `pre` (the count is how deep): its text keeps its whitespace.
-    pre: usize,
     /// The text set so far ends in a space, or a line starts here (a `br`, a block's edge): a whitespace run next is
     /// none, across any element's edge (a link, a mention, a mark), as a browser sets it.
     after_space: bool,
+    /// The kind of token the text inside a block of code is.
+    token: Token,
 }
 
 impl Builder {
@@ -422,8 +438,8 @@ impl Builder {
             containers: Vec::new(),
             marks: Marks::NONE,
             skip: 0,
-            pre: 0,
             after_space: true,
+            token: Token::Plain,
         }
     }
 
@@ -432,14 +448,15 @@ impl Builder {
             HtmlNode::Element(_) if self.skip > 0 => self.skip += 1,
             HtmlNode::Element(element) => self.open_element(element),
             HtmlNode::Text(text) if self.skip == 0 => {
+                let token = self.token;
+                if let Some(code) = self.code() {
+                    code.push(text, token);
+                    return;
+                }
                 let marks = self.marks;
-                let text = if self.pre > 0 {
-                    text.to_string()
-                } else {
-                    collapse_whitespace(text, self.after_space)
-                };
+                let text = collapse_whitespace(text, self.after_space);
                 if !text.is_empty() {
-                    self.after_space = self.pre == 0 && text.ends_with(' ');
+                    self.after_space = text.ends_with(' ');
                 }
                 push_text(self.children(), &text, marks);
             }
@@ -457,12 +474,10 @@ impl Builder {
         }
         match self.frames.pop() {
             Some(Frame::Pass { restore }) => self.marks = restore,
-            Some(Frame::Container { pre }) => {
-                if pre {
-                    self.pre -= 1;
-                }
+            Some(Frame::InCode { restore }) => self.token = restore,
+            Some(Frame::Container) => {
                 if let Some((kind, children)) = self.containers.pop() {
-                    self.close_container(kind, children, pre);
+                    self.close_container(kind, children);
                 }
             }
             None => {}
@@ -471,13 +486,16 @@ impl Builder {
 
     fn open_element(&mut self, element: &Element) {
         let name = element.name();
-        if DROPPED.contains(&name) {
+        if DROPPED.contains(&name) || element.attr("itemtype") == Some(CODE_BLOCK_ITEMTYPE) {
             self.skip = 1;
             return;
         }
+        if self.code().is_some() {
+            return self.open_in_code(element);
+        }
         if self.reply_quote().is_some() {
             match element.attr("itemprop") {
-                Some("mri") => return self.open_container(Container::Sender(attr(element, "itemid")), false),
+                Some("mri") => return self.open_container(Container::Sender(attr(element, "itemid"))),
                 Some("time") => {
                     if let Some(quote) = self.reply_quote() {
                         quote.time = attr(element, "itemid");
@@ -495,24 +513,54 @@ impl Builder {
             return;
         }
         match container(element) {
-            Some(kind) => self.open_container(kind, name == "pre"),
+            Some(kind) => self.open_container(kind),
             None => self.open_leaf(element),
         }
     }
 
-    fn open_container(&mut self, kind: Container, pre: bool) {
+    fn open_container(&mut self, kind: Container) {
         if self.containers.len() >= MAX_DEPTH {
             self.frames.push(Frame::Pass { restore: self.marks });
             return;
-        }
-        if pre {
-            self.pre += 1;
         }
         if kind.is_block() {
             self.after_space = true;
         }
         self.containers.push((kind, Vec::new()));
-        self.frames.push(Frame::Container { pre });
+        self.frames.push(Frame::Container);
+    }
+
+    /// An element inside a block of code: a `br` is a line feed, an image its `alt`, a `span` of a highlight class
+    /// the kind of the text in it; any other gives its text.
+    fn open_in_code(&mut self, element: &Element) {
+        let restore = self.token;
+        match element.name() {
+            "br" => {
+                if let Some(code) = self.code() {
+                    code.push("\n", restore);
+                }
+            }
+            "img" => {
+                if let (Some(alt), Some(code)) = (element.attr("alt"), self.code()) {
+                    code.push(alt, restore);
+                }
+            }
+            "span" => {
+                if let Some(token) = element.attr("class").and_then(Token::of_class) {
+                    self.token = token;
+                }
+            }
+            _ => {}
+        }
+        self.frames.push(Frame::InCode { restore });
+    }
+
+    /// The block of code the walk is in: the innermost container, as no container opens inside one.
+    fn code(&mut self) -> Option<&mut Code> {
+        match self.containers.last_mut() {
+            Some((Container::Code(code), _)) => Some(code),
+            _ => None,
+        }
     }
 
     /// An element that is no container: a line break, an image, or unknown markup, whose text stays.
@@ -539,14 +587,12 @@ impl Builder {
         self.frames.push(Frame::Pass { restore: marks });
     }
 
-    fn close_container(&mut self, kind: Container, mut children: Vec<Node>, pre: bool) {
+    fn close_container(&mut self, kind: Container, mut children: Vec<Node>) {
         drop_block_gaps(&mut children);
         if kind.is_block() {
             // the next text starts a line
             self.after_space = true;
-            if !pre {
-                trim_line_edges(&mut children);
-            }
+            trim_line_edges(&mut children);
         }
         let node = match kind {
             Container::Paragraph => Node::Paragraph(children),
@@ -565,6 +611,10 @@ impl Builder {
                 start,
                 items: list_items(children),
             }),
+            Container::Code(mut code) => {
+                code.finish();
+                Node::Code(code)
+            }
             Container::Sender(mri) => {
                 let mut name = String::new();
                 plain_text(&children, &mut name);
@@ -613,6 +663,10 @@ fn container(element: &Element) -> Option<Container> {
         return Some(Container::Paragraph);
     }
     match name {
+        "pre" => Some(Container::Code(Code {
+            language: element.attr("class").and_then(language_of),
+            runs: Vec::new(),
+        })),
         "a" => element
             .attr("href")
             .filter(|href| scheme(href).is_some_and(|scheme| matches!(scheme.as_str(), "http" | "https" | "mailto")))
@@ -757,6 +811,13 @@ fn plain_text(nodes: &[Node], out: &mut String) {
             Node::Link { children, .. } => plain_text(children, out),
             Node::Image(image) => out.push_str(image.alt.as_deref().unwrap_or_default()),
             Node::Quote(quote) => plain_text(&quote.body, out),
+            Node::Code(code) => {
+                if !out.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+                out.push_str(&code.text());
+                out.push('\n');
+            }
             Node::List(list) => {
                 for item in &list.items {
                     item_text(item, out);

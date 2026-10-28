@@ -17,10 +17,10 @@ use teams_auth::token::TokenError;
 use teams_fence::{Fence, FenceLog, Mri, Roster};
 use teams_mock::{AB_CHAT, ABC_CHAT, CHANNEL, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, NOTIFICATIONS, TENANT};
 use teams_proto::chat::{
-    ChatReadError, ChatReads, Conversation, ConversationKind, ConversationList, Field, FileKind, FilePreview, List,
-    MAX_CONTENT, MAX_DEPTH, Marks, MemberList, MentionKind, Message, MessagePage, MessageType, Node, Quote, RichText,
-    SharedFile, SharedFiles, Thread, Unshown, WEB_CLIENT, forwarded, link_endpoint, parse_html, shared_files,
-    unshown_parts, web_chat_link,
+    ChatReadError, ChatReads, Code, CodeRun, Conversation, ConversationKind, ConversationList, Field, FileKind,
+    FilePreview, List, MAX_CONTENT, MAX_DEPTH, Marks, MemberList, MentionKind, Message, MessagePage, MessageType, Node,
+    Quote, RichText, SharedFile, SharedFiles, Thread, Token, Unshown, WEB_CLIENT, forwarded, link_endpoint, parse_html,
+    shared_files, unshown_parts, web_chat_link,
 };
 use teams_proto::{Client, Credentials, HttpError, HttpTransport};
 use wiremock::matchers::method;
@@ -1520,6 +1520,78 @@ fn an_ordered_and_a_bulleted_list_are_read_as_lists_of_items() {
         parse_html("<li>alone</li>").nodes,
         [Node::Paragraph(vec![text_node("alone")])]
     );
+}
+
+/// A block of code as Teams' code block editor sends one (the shape of a received message, every value made up): the
+/// editor's own paragraph, then `pre` with its language's class, its lines split by `<br>`, its spaces `&nbsp;`, its
+/// tokens in highlight.js spans.
+const CODE_BLOCK: &str = "<p>it shows as this object:</p>\n<p></p>\n\
+    <p itemtype=\"http://schema.skype.com/CodeBlockEditor\" id=\"x_codeBlockEditor-made-up\">\n&nbsp;</p>\n\
+    <pre class=\"language-json language-was-manually-selected\" itemid=\"codeBlockEditor-made-up\"><code>{<br> \
+    &nbsp;&nbsp; <span class=\"hljs-function\">&quot;kind&quot;</span>:&nbsp;<span class=\"hljs-string\">\
+    &quot;made&nbsp;up&quot;</span>,<br> &nbsp;&nbsp; <span class=\"hljs-function\">&quot;next&quot;</span>:&nbsp;\
+    <span class=\"hljs-keyword\">null</span><br>}</code></pre>\n<p></p>\n<p>and nothing else</p>";
+
+#[test]
+fn a_code_block_is_read_with_its_language_lines_and_tokens() {
+    let read = parse_html(CODE_BLOCK);
+    let run = |text: &str, token| CodeRun {
+        text: text.to_owned(),
+        token,
+    };
+    assert_eq!(
+        read.nodes,
+        [
+            Node::Paragraph(vec![text_node("it shows as this object:")]),
+            Node::Paragraph(vec![]),
+            Node::Code(Code {
+                language: Some("json".to_owned()),
+                runs: vec![
+                    run("{\n    ", Token::Plain),
+                    run("\"kind\"", Token::Function),
+                    run(": ", Token::Plain),
+                    run("\"made up\"", Token::String),
+                    run(",\n    ", Token::Plain),
+                    run("\"next\"", Token::Function),
+                    run(": ", Token::Plain),
+                    run("null", Token::Keyword),
+                    run("\n}", Token::Plain),
+                ],
+            }),
+            Node::Paragraph(vec![]),
+            Node::Paragraph(vec![text_node("and nothing else")]),
+        ]
+    );
+    assert_eq!(
+        read.plain_text(),
+        "it shows as this object:\n\n{\n    \"kind\": \"made up\",\n    \"next\": null\n}\n\nand nothing else\n"
+    );
+}
+
+#[test]
+fn a_bare_pre_is_a_code_block_and_nothing_in_one_but_its_text_is_kept() {
+    // no language, its line feeds kept, a final one dropped; a link, a mark or a mention in it gives its text, a script
+    // nothing
+    let read =
+        parse_html("<pre>  keep\n<b>this</b> <a href=\"https://example.test\">link</a><script>x()</script>\n</pre>");
+    assert_eq!(
+        read.nodes,
+        [Node::Code(Code {
+            language: None,
+            runs: vec![CodeRun {
+                text: "  keep\nthis link".to_owned(),
+                token: Token::Plain,
+            }],
+        })]
+    );
+    // a language id of another shape is none; an unknown highlight class is plain text
+    let language = |class: &str| teams_proto::chat::language_of(class);
+    assert_eq!(language("language-C# other"), Some("c#".to_owned()));
+    assert_eq!(language("language-\"><x"), None);
+    assert_eq!(language("plain"), None);
+    assert_eq!(Token::of_class("hljs-made-up"), Some(Token::Plain));
+    assert_eq!(Token::of_class("other hljs-number"), Some(Token::Number));
+    assert_eq!(Token::of_class("other"), None);
 }
 
 #[test]

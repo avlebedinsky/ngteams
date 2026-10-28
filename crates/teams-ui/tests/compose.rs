@@ -272,6 +272,11 @@ fn an_edit_loads_the_text_back_its_mentions_by_mri_and_keeps_its_quote() {
         truncated: true,
     };
     assert_eq!(load(&partial, &mentioned), Err(CantEdit::Truncated));
+    // a block of code, which the box would send back as plain lines without its card or its indentation
+    let code = teams_proto::chat::parse_html(
+        "<p>see</p><pre class=\"language-json\"><code>{<br>&nbsp; \"a\": 1<br>}</code></pre>",
+    );
+    assert_eq!(load(&code, &mentioned), Err(CantEdit::Code));
 }
 
 #[test]

@@ -19,7 +19,8 @@
 //!   alone ([`Rendered::emoticons_only`]) is drawn as Teams draws one: large, playing, without its bubble. A list is
 //!   [`Block::List`]: each item's blocks beside its marker (its number, or a bullet by how deep the list is nested:
 //!   disc, circle, square), indented as a browser indents one. A paragraph of no-break spaces alone (the web client's
-//!   `<p>&nbsp;</p>`, its blank line) is drawn as a blank line; one of ASCII whitespace alone, none.
+//!   `<p>&nbsp;</p>`, its blank line) is drawn as a blank line; one of ASCII whitespace alone, none. A block of code
+//!   is [`Block::Code`]: Teams' code card ([`crate::code`]), its lines numbered and its tokens coloured by their kind.
 //! - [`render`] draws it: paragraphs line under line with no gap between them, as Teams sets them; a forward as
 //!   Teams' card, a bordered box with its header (the arrow, the original's sender and time, the view's to make:
 //!   [`render_with_header`]) above the content; pictures and emoticons through `crate::inline`, their bytes asked of
@@ -39,8 +40,9 @@ use gpui::{
 };
 use serde_json::{Value, json};
 use teams_proto::InlinePicture;
-use teams_proto::chat::{Field, Image, List, Marks, Mention, Node, Quote, RichText, WEB_CLIENT};
+use teams_proto::chat::{Code, Field, Image, List, Marks, Mention, Node, Quote, RichText, WEB_CLIENT};
 
+pub use crate::code::CodeBlock;
 use crate::inline::{Emoticon, InlineText, LARGE_EMOTICON, Picture};
 pub use crate::inline::{PictureEngine, PictureSource};
 use crate::theme::Palette;
@@ -258,6 +260,7 @@ pub enum Block {
     Picture(PictureBlock),
     List(ListBlock),
     Forward(ForwardBlock),
+    Code(CodeBlock),
 }
 
 impl Block {
@@ -270,12 +273,12 @@ impl Block {
                 .any(|(_, style)| style.mention == Some(Mentioned::Me)),
             Self::List(list) => list.items.iter().flatten().any(Self::mentions_me),
             // a forward's mentions are the original's, of its own chat
-            Self::Quote(_) | Self::Picture(_) | Self::Forward(_) => false,
+            Self::Quote(_) | Self::Picture(_) | Self::Forward(_) | Self::Code(_) => false,
         }
     }
 
     /// Its lines as a reader copies them: a paragraph's text (an emoticon as its emoji), a list's items each after its
-    /// marker, a forward's content's; a quote and a picture none.
+    /// marker, a forward's content's, a block of code's lines; a quote and a picture none.
     #[must_use]
     pub fn plain_lines(&self) -> Vec<String> {
         match self {
@@ -287,6 +290,7 @@ impl Block {
                 .flat_map(|(index, item)| list.item_lines(index, item))
                 .collect(),
             Self::Forward(forward) => forward.blocks.iter().flat_map(Self::plain_lines).collect(),
+            Self::Code(code) => code.lines.iter().map(|line| line.text.clone()).collect(),
             Self::Quote(_) | Self::Picture(_) => Vec::new(),
         }
     }
@@ -495,8 +499,15 @@ impl<'a> Builder<'a> {
                 Node::Image(image) => self.image(image),
                 Node::Quote(quote) => self.quote(quote),
                 Node::List(list) => self.list(list),
+                Node::Code(code) => self.code(code),
             }
         }
+    }
+
+    /// A block of code: a block of its own, cutting the paragraph it is in.
+    fn code(&mut self, code: &Code) {
+        self.end_block();
+        self.blocks.push(Block::Code(CodeBlock::of(code)));
     }
 
     /// A list: each item's blocks laid out as this level's are, one list deeper.
@@ -739,6 +750,11 @@ fn blocks(draw: &Draw<'_>, path: &mut Vec<usize>, blocks: &[Block]) -> Vec<AnyEl
                 Block::Picture(picture) => picture_block(draw, path, picture),
                 Block::List(list) => list_block(draw, path, list),
                 Block::Forward(forward) => forward_block(draw, path, forward),
+                Block::Code(code) => crate::code::card(
+                    SharedString::from(format!("{}-code-{path:?}", draw.id)),
+                    code,
+                    draw.palette,
+                ),
             };
             path.pop();
             element

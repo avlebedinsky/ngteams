@@ -16,7 +16,9 @@ use gpui::{
     Context, FontStyle, FontWeight, HighlightStyle, IntoElement, Modifiers, ParentElement as _, Render, SharedString,
     Styled as _, TestAppContext, Window, div, point, px,
 };
+use teams_proto::chat::Token;
 use teams_proto::chat::{Marks, parse_html};
+use teams_ui::code::token_style;
 use teams_ui::rich_text::{
     self, Block, IMAGE_PLACEHOLDER, LinkRange, ListBlock, Mentioned, Mentions, QuoteBlock, Rendered, Style, TextBlock,
     highlight, opens,
@@ -274,7 +276,7 @@ fn an_image_of_a_chat_message_is_followed_by_its_link_to_the_web() {
         .iter()
         .find_map(|block| match block {
             Block::Quote(quote) => Some(quote),
-            Block::Text(_) | Block::Picture(_) | Block::List(_) | Block::Forward(_) => None,
+            Block::Text(_) | Block::Picture(_) | Block::List(_) | Block::Forward(_) | Block::Code(_) => None,
         })
         .unwrap();
     let Block::Text(inner) = &quoted.blocks[0] else {
@@ -568,7 +570,7 @@ fn a_gif_from_the_gif_picker_is_a_picture_block_at_its_size() {
         .iter()
         .filter_map(|block| match block {
             Block::Picture(picture) => Some(picture),
-            Block::Text(_) | Block::Quote(_) | Block::List(_) | Block::Forward(_) => None,
+            Block::Text(_) | Block::Quote(_) | Block::List(_) | Block::Forward(_) | Block::Code(_) => None,
         })
         .collect();
     assert_eq!(pictures.len(), 1, "{rendered:#?}");
@@ -576,7 +578,7 @@ fn a_gif_from_the_gif_picker_is_a_picture_block_at_its_size() {
     assert!(
         rendered.blocks.iter().all(|block| match block {
             Block::Text(text) => !text.text.contains(IMAGE_PLACEHOLDER),
-            Block::Picture(_) | Block::Quote(_) | Block::List(_) | Block::Forward(_) => true,
+            Block::Picture(_) | Block::Quote(_) | Block::List(_) | Block::Forward(_) | Block::Code(_) => true,
         }),
         "no placeholder beside it: {rendered:#?}"
     );
@@ -855,4 +857,169 @@ fn an_emoticon_alone_is_drawn_large_and_one_in_text_at_the_text_s_height() {
     });
     let line = cx.debug_bounds("rich-text").expect("the line is drawn");
     assert!(line.size.height < px(40.0), "one line of text: {line:?}");
+}
+
+/// A line, a pasted picture given `width` by `height` (its bytes twice as dense, as one pasted from a dense screen),
+/// and a line, as Teams sends them; the picture's bytes put on `core`.
+fn picture_between_lines(core: &FakePictures, width: u32, height: u32) -> String {
+    core.pictures.lock().unwrap().insert(
+        PICTURE.to_owned(),
+        Arc::new(teams_proto::PastedPicture {
+            format: teams_proto::PastedFormat::Png,
+            bytes: png(width * 2, height * 2),
+        }),
+    );
+    format!(
+        "<p>before</p>\n<p><img src=\"{PICTURE}\" itemtype=\"http://schema.skype.com/AMSImage\" width=\"{width}\" \
+         height=\"{height}\" alt=\"image\"></p>\n<p>after</p>"
+    )
+}
+
+/// `content` drawn in a window of its own, the kit's theme set up, its pictures asked of `core` and read.
+fn drawn_with(core: &Arc<FakePictures>, content: &str) -> &'static mut gpui::VisualTestContext {
+    let source = rich_text::PictureSource::of(core.clone());
+    let rendered = Arc::new(rich_text::layout(&parse_html(content), &Mentions::default()).with_source(source));
+    let app: &'static mut TestAppContext = Box::leak(Box::new(TestAppContext::single()));
+    app.update(teams_ui::theme::init);
+    let (_, cx) = app.add_window_view(|_, _| Holder { rendered });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx
+}
+
+#[test]
+fn a_small_picture_is_drawn_at_its_own_size_inside_its_block() {
+    let core = Arc::new(FakePictures::default());
+    let content = picture_between_lines(&core, 198, 53);
+    let cx = drawn_with(&core, &content);
+    let window = cx.update(|window, _| window.viewport_size());
+    assert!(window.width > px(400.0), "{window:?}");
+    // its block spans the width there is, the picture in it only its own size at the start of its line, never
+    // stretched to the block's width nor drawn past its bottom (over the line after it)
+    let block = cx.debug_bounds("rich-picture").expect("its block");
+    let drawn = cx.debug_bounds("rich-picture-drawn").expect("the picture is drawn");
+    assert_eq!(
+        (drawn.size.width, drawn.size.height),
+        (px(198.0), px(53.0)),
+        "{drawn:?}"
+    );
+    assert_eq!(drawn.origin.x, block.origin.x, "{drawn:?} in {block:?}");
+    assert!(
+        drawn.top() >= block.top() && drawn.bottom() <= block.bottom(),
+        "{drawn:?} in {block:?}"
+    );
+}
+
+#[test]
+fn a_picture_wider_than_the_bubble_is_scaled_down_to_it_inside_its_block() {
+    let core = Arc::new(FakePictures::default());
+    let content = picture_between_lines(&core, 4000, 1000);
+    let cx = drawn_with(&core, &content);
+    let block = cx.debug_bounds("rich-picture").expect("its block");
+    let drawn = cx.debug_bounds("rich-picture-drawn").expect("the picture is drawn");
+    assert_eq!(drawn.size.width, block.size.width, "{drawn:?} in {block:?}");
+    assert!(
+        (f32::from(drawn.size.height) - f32::from(drawn.size.width) / 4.0).abs() < 1.0,
+        "its aspect ratio kept: {drawn:?}"
+    );
+    assert!(drawn.bottom() <= block.bottom(), "{drawn:?} in {block:?}");
+}
+
+/// A block of code as Teams' code block editor sends one, every value made up.
+const CODE_BLOCK: &str = "<p>as this object:</p>\n<p></p>\n\
+    <p itemtype=\"http://schema.skype.com/CodeBlockEditor\" id=\"x_codeBlockEditor-made-up\">\n&nbsp;</p>\n\
+    <pre class=\"language-json language-was-manually-selected\" itemid=\"codeBlockEditor-made-up\"><code>{<br> \
+    &nbsp;&nbsp; <span class=\"hljs-function\">&quot;kind&quot;</span>:&nbsp;<span class=\"hljs-string\">\
+    &quot;made&nbsp;up&quot;</span>,<br> &nbsp;&nbsp; <span class=\"hljs-function\">&quot;next&quot;</span>:&nbsp;\
+    <span class=\"hljs-keyword\">null</span><br>}</code></pre>\n<p></p>\n<p>and nothing else</p>";
+
+#[test]
+fn a_code_block_is_laid_out_as_numbered_lines_of_tokens_under_its_language() {
+    let rendered = laid_out(CODE_BLOCK);
+    // the editor's own paragraph and the empty ones are no blocks
+    assert_eq!(rendered.blocks.len(), 3, "{rendered:#?}");
+    let Block::Code(code) = &rendered.blocks[1] else {
+        panic!("a code block: {rendered:#?}");
+    };
+    assert_eq!(code.label(), "JSON");
+    let lines: Vec<&str> = code.lines.iter().map(|line| line.text.as_str()).collect();
+    assert_eq!(lines, ["{", "    \"kind\": \"made up\",", "    \"next\": null", "}"]);
+    let second = &code.lines[1];
+    let tokens: Vec<(&str, Token)> = second
+        .tokens
+        .iter()
+        .map(|(range, token)| (&second.text[range.clone()], *token))
+        .collect();
+    assert_eq!(tokens, [("\"kind\"", Token::Function), ("\"made up\"", Token::String)]);
+    assert_eq!(code.text(), "{\n    \"kind\": \"made up\",\n    \"next\": null\n}");
+    assert_eq!(rendered.blocks[1].plain_lines(), lines);
+}
+
+#[test]
+fn a_code_block_s_tokens_are_coloured_its_tabs_kept_and_its_language_named() {
+    // the kinds drawn in colours of their own, a comment muted and italic, plain text as the text around it
+    for kind in [Token::Function, Token::String, Token::Keyword] {
+        assert!(token_style(kind, LIGHT_PALETTE).color.is_some(), "{kind:?}");
+    }
+    assert_ne!(
+        token_style(Token::Function, LIGHT_PALETTE).color,
+        token_style(Token::String, LIGHT_PALETTE).color
+    );
+    assert_eq!(
+        token_style(Token::Comment, LIGHT_PALETTE).font_style,
+        Some(FontStyle::Italic)
+    );
+    assert_eq!(token_style(Token::Plain, LIGHT_PALETTE), HighlightStyle::default());
+    // a tab is drawn as four spaces, its tokens moved with it, and copied as the tab it is
+    let Some(Block::Code(tabbed)) = laid_out("<pre>all:\n\t<span class=\"hljs-keyword\">cc</span> x.c</pre>")
+        .blocks
+        .first()
+        .cloned()
+    else {
+        panic!("a code block");
+    };
+    assert_eq!(tabbed.text(), "all:\n\tcc x.c");
+    assert_eq!(
+        rich_text::Block::Code(tabbed.clone()).plain_lines(),
+        ["all:", "\tcc x.c"]
+    );
+    let (shown, tokens) = tabbed.lines[1].shown();
+    assert_eq!(shown, "    cc x.c");
+    assert_eq!(tokens, [(4..6, Token::Keyword)]);
+    // a block of code without a language is plain text; one of a language Teams doesn't name keeps its id
+    for (html, label) in [
+        ("<pre>x</pre>", "Plain text"),
+        ("<pre class=\"language-plaintext\">x</pre>", "Plain text"),
+        ("<pre class=\"language-madeup\">x</pre>", "madeup"),
+        ("<pre class=\"language-csharp\">x</pre>", "C#"),
+    ] {
+        let Some(Block::Code(code)) = laid_out(html).blocks.first().cloned() else {
+            panic!("{html}");
+        };
+        assert_eq!(code.label(), label, "{html}");
+    }
+}
+
+#[test]
+fn a_code_block_is_drawn_as_teams_card_and_its_button_copies_the_code() {
+    let core = Arc::new(FakePictures::default());
+    let cx = drawn_with(&core, CODE_BLOCK);
+    let card = cx.debug_bounds("rich-code").expect("the card is drawn");
+    let lines = cx.debug_bounds("rich-code-lines").expect("its lines are drawn");
+    let language = cx.debug_bounds("rich-code-language").expect("its language is drawn");
+    assert!(language.bottom() <= lines.top(), "the header over the lines");
+    assert!(lines.bottom() <= card.bottom() && lines.top() >= card.top());
+    let copy = cx.debug_bounds("rich-code-copy").expect("its copy button is drawn");
+    assert!(copy.left() > language.left(), "the copy button on the header's right");
+    cx.simulate_click(copy.center(), Modifiers::none());
+    let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
+    assert_eq!(
+        copied.as_deref(),
+        Some("{\n    \"kind\": \"made up\",\n    \"next\": null\n}")
+    );
 }

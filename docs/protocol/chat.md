@@ -392,7 +392,8 @@ how the web client draws them, from its bundle.
   `x-ms-migration: True` instead, the form the async gateway answered the object read in (`proto-lab probe object`);
   that form's answer to a view read hasn't been seen live.
 - **How Teams draws it**: at the size the message gives it, scaled down to the bubble's width with its aspect ratio
-  kept; no link next to it.
+  kept, at the start of its line and in the flow of the text (a small one in a wide bubble stays small); no link next
+  to it. A picture pasted from a dense screen gives half its pixels' size (`width="198" height="53"` for 396 by 106).
 - **An emoticon** is an `<img>` with `itemtype="http://schema.skype.com/Emoji"`, `itemid` its id in Teams' emoticon
   catalog (`speechless`, `smile`, `1f44b_wavinghand`), `alt` its emoji and a `src` on the CDN
   (`…/emoticons/<id>/default/20_f.png`, sometimes `100_f.png?v=<n>`), wrapped in a `<span>` whose `class` is
@@ -432,6 +433,34 @@ Trouter delivery's copy of the same messages, read for their shape only; fixture
   original message; the content as a message's own, its pictures drawn. The native client draws it so
   (`teams_ui::forwarded`); the link opens the original in the app when the account has its chat and the store holds the
   message, else in the web client (`l/message/<chat>/<id>`).
+
+## Code blocks
+
+How a received message carries a block of code, from the user's own chats as the personal build stored them, read
+for their shape only, and how Teams draws one, from its window.
+
+- **Teams' code block editor** sends a paragraph of its own, then the code:
+  `<p itemtype="http://schema.skype.com/CodeBlockEditor" id="x_codeBlockEditor-<guid>">` with a line feed and `&nbsp;`
+  in it, then `<pre class="language-<id>[ language-was-manually-selected | language-was-auto-selected]"
+  itemid="codeBlockEditor-<guid>"><code>…</code></pre>`, often between two empty `<p></p>`. In the `code` the lines are
+  split by `<br>` (a raw space after each), the spaces are `&nbsp;`, and the tokens the editor highlighted are
+  `<span class="hljs-<kind>">`: `string`, `function` (a JSON key, a shell command's word), `keyword` (`null`, `set`),
+  `comment` and `default` seen. The language ids seen: `plaintext` (most), `bash`, `json`, `shell`, `csharp`, `css`,
+  `html`, `javascript`, `markdown`, `vhdl`.
+- **Others**: an older or pasted block is `<pre class="language-plaintext"><code>…</code></pre>` with no `itemid` and
+  no editor paragraph, or a bare `<pre>` (with a `style`, or inside pasted markup with spans of no class); their lines
+  `<br>` or line feeds.
+- **How Teams draws it**: a card with a border and rounded corners, in the flow between the lines around it; its header
+  a code icon, the language's name (`JSON`) and a copy button on the right, over a hairline; then the
+  lines, numbered in a muted column, in a monospace font, the tokens coloured (in the dark theme a key red, a string
+  green, `null` in the brand colour). The editor's paragraph shows nothing.
+- **The native client** reads every `pre` as a block of code (`teams_proto::chat::Code`): the language's id, the text
+  (a `br` a line feed, a no-break space a space, any element in it giving its text) and each run's token kind from its
+  `hljs-` class, nothing else of the markup; the editor's paragraph is dropped. It draws Teams' card
+  (`teams-ui/src/code.rs`), the language named as Teams names it, else its id, `Plain text` without one; the copy
+  button copies the code's lines as they came (a tab drawn as four spaces, copied as a tab). The compose box writes
+  no block of code, so editing a message with one says it can't be edited there ("it shows a block of code");
+  `teams-proto` can write one (as the editor does, without the token spans), but nothing in the app sends one yet.
 
 ## Files: sending, denied (ab-file)
 

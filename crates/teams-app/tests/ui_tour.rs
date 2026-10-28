@@ -6,10 +6,11 @@
 //! the `test-support` mock origins, a test roster and log). Once the window is drawn and the chats are listed, the
 //! child walks the views one step at a time (no chat open; the a–b chat with a message selected and its actions
 //! shown; a reply begun; the account menu; every page of the settings, Calls with made-up devices; the appearance
-//! and the chat again in Teams Dark; a message with files, its cards and their thumbnails, in Teams Dark and Light;
-//! the 12-hour time format and a chat's times on it; a group chat's presence; a favourite channel opened from
-//! "Favorites") and says `shot <name>` after each; the parent screenshots the window and lets it
-//! go on. The views are driven from inside the app, never by screen coordinates.
+//! and the chat again in Teams Dark; a message with files, its cards and their thumbnails, in Teams Dark and Light; a
+//! message of lines, small pictures and a block of code, in Teams Dark and Light; the 12-hour time format and a chat's
+//! times on it; a group chat's presence; a favourite channel opened from "Favorites"; forwarded messages) and says
+//! `shot <name>` after each; the parent screenshots the window and lets it go on. The views are driven from inside
+//! the app, never by screen coordinates.
 //!
 //! Without weston 15, niri or `dbus-daemon` it says so and passes, unless `GPUI_SMOKE_REQUIRE=1`.
 
@@ -21,7 +22,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use std::{fs, future, io, thread};
 
-use gpui::{App, AsyncApp, Context, Entity, Window, WindowHandle, WindowingModes};
+use gpui::{App, AsyncApp, Context, Entity, ListOffset, Window, WindowHandle, WindowingModes, px};
 use teams_app::app::{self, Launch, LaunchAccount};
 use teams_app::trace::adopt_trace;
 use teams_auth::secrets::Secret;
@@ -68,7 +69,7 @@ const SETTLE: Duration = Duration::from_millis(1500);
 type Step = (&'static str, fn(&Entity<Shell>, &mut Window, &mut App));
 
 /// The tour.
-const STEPS: [Step; 29] = [
+const STEPS: [Step; 32] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -162,6 +163,13 @@ const STEPS: [Step; 29] = [
     ("chat-files-dark", |shell, window, cx| {
         shell.update(cx, |shell, cx| shell.open_chat(AC_CHAT.to_owned(), window, cx));
     }),
+    // x's message of text, two small pictures and a block of code (`seed_mixed`), in Teams Dark: the a–x chat opened
+    // (at its newest, the forwards), then scrolled to its first message, each picture at its own size in the flow and
+    // the code in Teams' code card
+    ("chat-mixed-dark", |shell, window, cx| {
+        shell.update(cx, |shell, cx| shell.open_chat(AX_CHAT.to_owned(), window, cx));
+    }),
+    ("chat-mixed-dark-read", |shell, _, cx| show_first_message(shell, cx)),
     // the 12-hour clock chosen, back in Teams Light: the setting, then the a–b chat's times
     ("settings-time-12-hour", |shell, _, cx| {
         let model = shell.read(cx).settings().clone();
@@ -207,6 +215,14 @@ const STEPS: [Step; 29] = [
         model.update(cx, |model, cx| {
             model.change(|settings| settings.appearance.theme = teams_ui::theme::DARK_KEY, cx);
         });
+    }),
+    // x's message of text, pictures and code again, in Teams Light, above the forwards in the same chat
+    ("chat-mixed", |shell, _, cx| {
+        let model = shell.read(cx).settings().clone();
+        model.update(cx, |model, cx| {
+            model.change(|settings| settings.appearance.theme = teams_ui::theme::LIGHT_KEY, cx);
+        });
+        show_first_message(shell, cx);
     }),
 ];
 
@@ -327,6 +343,17 @@ fn hover_last(shell: &Entity<Shell>, own: bool, cx: &mut App) {
         chat.select(None, cx);
         chat.hover(message, cx);
     });
+}
+
+/// Scrolls the chat shown to its top: its first message (the a–x chat's mixed one, above the forwards).
+fn show_first_message(shell: &Entity<Shell>, cx: &mut App) {
+    if let Some(chat) = shell.read(cx).chat().cloned() {
+        chat.read(cx).list_state().scroll_to(ListOffset {
+            item_ix: 0,
+            offset_in_item: px(0.0),
+        });
+        cx.refresh_windows();
+    }
 }
 
 fn hover_none(shell: &Entity<Shell>, cx: &mut App) {
@@ -486,6 +513,7 @@ impl MockLab {
         seed_group(&mock, &runtime)?;
         seed_pictures(&mock, &runtime)?;
         seed_files(&mock, &runtime)?;
+        seed_mixed(&mock, &runtime)?;
         seed_own(&mock)?;
         seed_mentions(&mock)?;
         seed_forwards(&mock, &runtime)?;
@@ -592,6 +620,65 @@ fn seed_pictures(mock: &ChatServiceMock, runtime: &tokio::runtime::Runtime) -> S
     );
     mock.post_as(LAB_C, ABC_CHAT, &picked).ok_or("c's GIF refused")?;
     Ok(())
+}
+
+/// The made-up pictures x's mixed message shows: their objects, and the sizes the message gives them (half their
+/// pixels', as a picture pasted from a screen of twice the density is given).
+const MIXED_PICTURES: [(&str, (u32, u32)); 2] = [
+    ("0-eus-d9-00000000000000000000000000000ab1", (198, 53)),
+    ("0-eus-d9-00000000000000000000000000000ab2", (535, 83)),
+];
+
+/// x's message in the a–x chat in the shape of one Teams shows (made up): a line, a small picture, a line, a wider
+/// picture, a line, a block of code as Teams' code block editor sends one (its own paragraph, `pre` with its language,
+/// lines split by `<br>`, highlight.js spans), a last line.
+fn seed_mixed(mock: &ChatServiceMock, runtime: &tokio::runtime::Runtime) -> SandboxResult {
+    let mut pictures = Vec::new();
+    for (object, (width, height)) in MIXED_PICTURES {
+        let mut png = Vec::new();
+        made_up_panel(width * 2, height * 2).write_to(&mut io::Cursor::new(&mut png), image::ImageFormat::Png)?;
+        runtime.block_on(mock.serve_bytes(&format!("/v1/objects/{object}/views/imgo"), "image/png", png));
+        pictures.push(format!(
+            "<p><img src=\"https://us-api.asm.skype.com/v1/objects/{object}/views/imgo\" \
+             itemtype=\"http://schema.skype.com/AMSImage\" itemscope=\"png\" width=\"{width}\" height=\"{height}\" \
+             alt=\"image\" id=\"x_{object}\" itemid=\"{object}\"></p>"
+        ));
+    }
+    let key = |name: &str| format!("<span class=\"hljs-function\">&quot;{name}&quot;</span>");
+    let html = format!(
+        "<p>The service never sends a proper error, it comes over the socket like this</p>\n{}\n\
+         <p>Which is odd already. The socket's tab shows it like this</p>\n{}\n\
+         <p>and through the client library it arrives as this object:</p>\n<p></p>\n\
+         <p itemtype=\"http://schema.skype.com/CodeBlockEditor\" id=\"x_codeBlockEditor-made-up\">\n&nbsp;</p>\n\
+         <pre class=\"language-json language-was-manually-selected\" itemid=\"codeBlockEditor-made-up\"><code>{{<br> \
+         &nbsp;&nbsp; {}:&nbsp;<span class=\"hljs-string\">&quot;error&quot;</span>,<br> &nbsp;&nbsp; {}:&nbsp;\
+         <span class=\"hljs-keyword\">null</span>,<br> &nbsp;&nbsp; {}:&nbsp;<span class=\"hljs-string\">\
+         &quot;Made&nbsp;up&nbsp;limit&nbsp;reached.&quot;</span><br>}}</code></pre>\n<p></p>\n\
+         <p>without any request id at all</p>\n<p>&nbsp;</p>",
+        pictures[0],
+        pictures[1],
+        key("type"),
+        key("detail"),
+        key("error"),
+    );
+    mock.post_as(OUTSIDER, AX_CHAT, &html).ok_or("x's message refused")?;
+    Ok(())
+}
+
+/// A made-up panel, `width` by `height`: a dark strip over a blue band with a light bar in it.
+fn made_up_panel(width: u32, height: u32) -> image::RgbaImage {
+    let mut picture = image::RgbaImage::from_pixel(width, height, image::Rgba([30, 30, 30, 255]));
+    for y in height / 3..height {
+        for x in 0..width {
+            let colour = if y < height * 2 / 3 && x > width / 10 && x < width / 2 {
+                [235, 235, 235, 255]
+            } else {
+                [20, 80, 160, 255]
+            };
+            picture.put_pixel(x, y, image::Rgba(colour));
+        }
+    }
+    picture
 }
 
 /// The made-up GIF c's message names on Giphy (served by the mock as Giphy's media host would).

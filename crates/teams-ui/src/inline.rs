@@ -8,7 +8,9 @@
 //!   [`MAX_DECODED_SIDE`] on its longer side; a GIF with its frames up to the first that doesn't decode, at most
 //!   [`MAX_GIF_FRAMES`] and [`MAX_GIF_BYTES`] of them, its canvas at most [`MAX_GIF_SIDE`]) and kept for the run. It is
 //!   drawn at the size the message gives it (else its own), scaled down to the width there is and keeping its aspect
-//!   ratio, as Teams draws a picture in its bubble; a box of that size stands in while it is read. One the engine has
+//!   ratio, at the start of its line, as Teams draws a picture in its bubble (never stretched to the bubble's width:
+//!   its block may be wider than the picture, which is drawn at exactly its own size inside it); a box of that size
+//!   stands in while it is read. One the engine has
 //!   none of, or none can be asked of (no engine), is drawn as the message's fallback (its placeholder text).
 //! - **An emoticon** ([`emoticon`]) is drawn from Teams' own animation of it (its CDN's strip of frames, read by the
 //!   engine as a reaction's is, [`reactions::animation`]): playing when `animated` (an emoticon-only message's, drawn
@@ -342,8 +344,8 @@ impl Picture {
 pub enum Laid {
     /// As its fallback, laid out as a child.
     Fallback,
-    /// Measured: its frames, or `None` while it is read.
-    Measured(Option<Arc<RenderImage>>),
+    /// Measured: its frames (`None` while it is read) and the size it is drawn at, before it is fitted to its block.
+    Measured(Option<Arc<RenderImage>>, (u32, u32)),
 }
 
 impl IntoElement for Picture {
@@ -390,7 +392,7 @@ impl Element for Picture {
         let layout = window.request_measured_layout(Style::default(), move |known, available, _, _| {
             fitted(natural, known, available)
         });
-        (layout, Laid::Measured(image))
+        (layout, Laid::Measured(image, natural))
     }
 
     fn prepaint(
@@ -408,21 +410,49 @@ impl Element for Picture {
                     child.prepaint(window, cx);
                 }
             }
-            Laid::Measured(image) => {
-                let shown = match image {
-                    // an id of its own: GPUI keeps a GIF's frame in the element's state
+            Laid::Measured(image, natural) => {
+                // its own size within its block, which a block or flex parent stretches to the width there is: the
+                // picture is never drawn wider (nor, its aspect ratio kept, taller) than that
+                let room = Size {
+                    width: Some(bounds.size.width),
+                    height: None,
+                };
+                let shown = fitted(*natural, room, bounds.size.map(AvailableSpace::Definite));
+                // nor taller than its block, should its block be lower than its fitted height
+                let scale = if shown.height > bounds.size.height && shown.height > px(0.0) {
+                    bounds.size.height / shown.height
+                } else {
+                    1.0
+                };
+                let (width, height) = (shown.width * scale, shown.height * scale);
+                let drawn = match image {
+                    // an id of its own: GPUI keeps a GIF's frame in the element's state; its size given outright, so
+                    // the image's own aspect ratio sets nothing
                     Some(image) => InteractiveElement::id(img(Arc::clone(image)), self.id.clone())
-                        .size_full()
+                        .w(width)
+                        .h(height)
                         .rounded(px(4.0))
                         .into_any_element(),
-                    None => div().size_full().rounded(px(4.0)).bg(self.reading).into_any_element(),
+                    None => div()
+                        .w(width)
+                        .h(height)
+                        .rounded(px(4.0))
+                        .bg(self.reading)
+                        .into_any_element(),
                 };
                 let mut sized = div()
-                    .w(bounds.size.width)
-                    .h(bounds.size.height)
-                    .child(shown)
+                    .debug_selector(|| "rich-picture-drawn".to_owned())
+                    .w(width)
+                    .h(height)
+                    .overflow_hidden()
+                    .child(drawn)
                     .into_any_element();
-                sized.prepaint_as_root(bounds.origin, bounds.size.map(AvailableSpace::Definite), window, cx);
+                sized.prepaint_as_root(
+                    bounds.origin,
+                    size(width, height).map(AvailableSpace::Definite),
+                    window,
+                    cx,
+                );
                 self.child = Some(sized);
             }
         }

@@ -5,8 +5,8 @@
 //!   the native transport;
 //! - the model ([`Conversation`], [`Message`], [`Thread`], …): unknown fields kept, unknown kinds kept as their text,
 //!   never a parse failure for what this build doesn't know;
-//! - [`RichText`]: a message's HTML as a small typed model (text runs, mentions, quotes, links, images), with unknown
-//!   markup kept as text and nothing active surviving;
+//! - [`RichText`]: a message's HTML as a small typed model (text runs, mentions, quotes, links, images, lists, code
+//!   blocks), with unknown markup kept as text and nothing active surviving;
 //! - [`MessageText`]: what a message is written from (M1 Task 12), a [`RichText`] and the MRI each of its mentions
 //!   names, from which a post's or an edit's `content`, `properties.mentions` and target are all built.
 //!
@@ -16,6 +16,7 @@
 //! says the message has content it can't show and never guesses at it), and an image's `src`, `itemtype`, `itemid` and size are kept on [`Image`] (a view asks the
 //! engine for a pasted picture's bytes or an emoticon's, never this crate).
 
+mod code;
 mod compose;
 mod event;
 mod files;
@@ -23,6 +24,7 @@ mod html;
 mod model;
 mod read;
 
+pub use code::{CODE_BLOCK_ITEMTYPE, Code, CodeRun, Token, language_of};
 pub use compose::{ComposeError, MessageText};
 pub use event::{
     CALL_MEDIA_PREFIX, CallEnd, CallStart, ChatEvent, ChatPolicy, Member, Members, Recording, RecordingContents,

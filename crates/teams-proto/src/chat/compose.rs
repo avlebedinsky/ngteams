@@ -27,6 +27,7 @@ use serde_json::{Value, json};
 use teams_fence::Mri;
 use url::Url;
 
+use crate::chat::code::{Code, language_of};
 use crate::chat::html::{List, MAX_CONTENT, MAX_DEPTH, MENTION_ITEMTYPE, Marks, Node, Quote, REPLY_ITEMTYPE, RichText};
 
 /// Why a [`MessageText`] can't be built.
@@ -305,8 +306,36 @@ impl<'a> Render<'a> {
             Node::Image(_) => return Err(ComposeError::Image),
             Node::Quote(quote) => self.quote(quote, depth)?,
             Node::List(list) => self.list(list, depth)?,
+            Node::Code(code) => self.code(code),
         }
         Ok(())
+    }
+
+    /// A block of code as Teams' code block editor writes one: `pre` with its language's class, `code`, a `br` per line
+    /// feed and every space a no-break one (the token kinds are the editor's to mark again).
+    fn code(&mut self, code: &Code) {
+        self.html.push_str("<pre");
+        if let Some(language) = code
+            .language
+            .as_deref()
+            .and_then(|id| language_of(&format!("language-{id}")))
+        {
+            self.push(&[" class=\"language-", &escape(&language), "\""]);
+        }
+        self.html.push_str("><code>");
+        let text = code.text().replace(' ', "\u{a0}");
+        for (at, line) in text.split('\n').enumerate() {
+            if at > 0 {
+                self.html.push_str("<br>");
+            }
+            self.html.push_str(&escape(line));
+        }
+        // the reader drops the one line feed a block ends in, as a browser draws no line after it: a code ending in a
+        // blank line gives one `br` more, so it reads back the same
+        if text.ends_with('\n') {
+            self.html.push_str("<br>");
+        }
+        self.html.push_str("</code></pre>");
     }
 
     fn text(&mut self, text: &str, marks: Marks) {
@@ -410,7 +439,7 @@ fn within_depth(nodes: &[Node], depth: usize) -> Result<(), ComposeError> {
                     within_depth(item, depth + 2)?;
                 }
             }
-            Node::Text { .. } | Node::Break | Node::Mention { .. } | Node::Image(_) => {}
+            Node::Text { .. } | Node::Break | Node::Mention { .. } | Node::Image(_) | Node::Code(_) => {}
         }
     }
     Ok(())

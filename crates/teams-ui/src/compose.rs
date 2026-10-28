@@ -342,6 +342,9 @@ pub struct Loaded {
 pub enum CantEdit {
     #[error("it shows an image")]
     Image,
+    /// A block of code: the box writes none, and its lines as text would lose their card and their indentation.
+    #[error("it shows a block of code")]
+    Code,
     #[error("it was read only in part")]
     Truncated,
 }
@@ -396,6 +399,7 @@ impl Loaded {
                     }
                 }
             }
+            Node::Code(_) => return Err(CantEdit::Code),
             Node::Image(_) => return Err(CantEdit::Image),
         }
         Ok(())
@@ -419,7 +423,7 @@ impl Loaded {
 /// `itemid`) as tokens again, a link as its text, its top-level quotes kept aside.
 ///
 /// # Errors
-/// [`CantEdit`]: the text shows an image (the box can't send one), or was read only in part.
+/// [`CantEdit`]: the text shows an image or a block of code (the box can send neither), or was read only in part.
 pub fn load<S: BuildHasher>(text: &RichText, mentioned: &HashMap<String, String, S>) -> Result<Loaded, CantEdit> {
     if text.truncated {
         return Err(CantEdit::Truncated);

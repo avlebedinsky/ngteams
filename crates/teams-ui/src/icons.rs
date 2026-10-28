@@ -20,6 +20,7 @@ impl Glyph {
     pub const CHECK: Self = Self(include_bytes!("../assets/icons/check.svg"));
     pub const CHEVRON_DOWN: Self = Self(include_bytes!("../assets/icons/chevron-down.svg"));
     pub const CLOCK: Self = Self(include_bytes!("../assets/icons/clock.svg"));
+    pub const CODE: Self = Self(include_bytes!("../assets/icons/square-code.svg"));
     pub const COPY: Self = Self(include_bytes!("../assets/icons/copy.svg"));
     pub const DOWNLOAD: Self = Self(include_bytes!("../assets/icons/download.svg"));
     pub const EMOJI: Self = Self(include_bytes!("../assets/icons/face-slightly-smiling.svg"));

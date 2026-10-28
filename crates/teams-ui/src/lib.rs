@@ -16,7 +16,8 @@
 //!   presence, a dot in the chat list, the chat's header and the mention picker (M2 Task 17).
 //! - [`chat_view`]: a chat's messages, the newest at the bottom, paged from the store (and the service's older
 //!   history), grouped by sender, with day separators, the "New messages" divider, typing and the messages' actions;
-//!   [`rich_text`] is our own renderer of a message's sanitized rich text (never an HTML or markdown view); the
+//!   [`rich_text`] is our own renderer of a message's sanitized rich text (never an HTML or markdown view), its blocks
+//!   of code drawn as Teams' code card by [`code`]; the
 //!   account's writes show there as they go out ([`sending`]: each outbox row's state, "send again"); reactions are
 //!   drawn from [`reactions`] (every reaction Teams offers, in Fluent Emoji's pictures) and picked in
 //!   [`reaction_picker`]; a forwarded message is drawn as Teams draws one, its content in a card under where it came
@@ -68,6 +69,7 @@ pub mod channel_view;
 pub mod chat_list;
 pub mod chat_view;
 pub mod clock;
+pub mod code;
 pub mod compose;
 pub mod desktop;
 pub mod files;
