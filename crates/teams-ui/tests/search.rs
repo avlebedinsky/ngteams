@@ -2,7 +2,8 @@
 //! it holds): Ctrl+Shift+F's search lists the messages of the chats the list shows (a channel's left out), the newest
 //! first, with the chat, the sender ("You" for the account) and the matched text; a query too short asks nothing; a hit
 //! chosen opens its chat at the message, read back from beyond the newest page, selected and scrolled to; the switcher
-//! lists the same hits under its chats; Escape closes, and the switcher and the search take turns. The store's own
+//! lists the same hits under its chats; Escape closes, and the switcher and the search take turns; an Escape while the
+//! focus is out of the switcher or the search goes where the focus is (the compose box's reply or edit). The store's own
 //! quoting of FTS syntax is `teams-store`'s test. Every id, name and text is made up.
 
 // test code throughout (its helpers unwrap like the tests do)
@@ -16,11 +17,12 @@ mod parts;
 use std::sync::Arc;
 
 use common::{LAB_A, LAB_B, Rig, Written};
-use gpui::{Entity, TestAppContext, VisualTestContext, px, size};
+use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, point, px, size};
 use teams_core::{Action, Event};
 use teams_store::search::{MATCH_END, MATCH_START};
 use teams_store::{Conversation, ConversationKind, Member, Message};
-use teams_ui::chat_view::{ChatView, PAGE, READ_DEBOUNCE};
+use teams_ui::chat_view::{ChatView, MessageAction, PAGE, READ_DEBOUNCE};
+use teams_ui::compose::Mode;
 use teams_ui::search::{MAX_HITS, MIN_QUERY, YOU, searchable, split_snippet};
 use teams_ui::settings::Settings;
 use teams_ui::shell::{Main, Shell};
@@ -520,6 +522,191 @@ fn escape_closes_the_search_and_the_switcher_and_the_search_take_turns() {
             "search opened",
         ]
     );
+}
+
+/// The dialog Ctrl+K (the switcher) or Ctrl+Shift+F (the search) opens.
+#[derive(Clone, Copy, Debug)]
+enum Dialog {
+    Switcher,
+    Search,
+}
+
+impl Dialog {
+    fn key(self) -> &'static str {
+        match self {
+            Self::Switcher => "ctrl-k",
+            Self::Search => "ctrl-shift-f",
+        }
+    }
+
+    fn selector(self) -> &'static str {
+        match self {
+            Self::Switcher => "switcher",
+            Self::Search => "search",
+        }
+    }
+
+    fn is_open(self, shell: &Entity<Shell>, cx: &mut VisualTestContext) -> bool {
+        cx.update(|_, cx| match self {
+            Self::Switcher => shell.read(cx).switcher().is_some(),
+            Self::Search => shell.read(cx).search().is_some(),
+        })
+    }
+
+    fn query(self, shell: &Entity<Shell>, cx: &mut VisualTestContext) -> String {
+        cx.update(|_, cx| match self {
+            Self::Switcher => shell.read(cx).switcher().unwrap().read(cx).query().to_owned(),
+            Self::Search => shell.read(cx).search().unwrap().read(cx).query().to_owned(),
+        })
+    }
+
+    /// Whether the focus is in the dialog.
+    fn holds_focus(self, shell: &Entity<Shell>, cx: &mut VisualTestContext) -> bool {
+        cx.update(|window, cx| match self {
+            Self::Switcher => shell.read(cx).switcher().unwrap().read(cx).holds_focus(window, cx),
+            Self::Search => shell.read(cx).search().unwrap().read(cx).holds_focus(window, cx),
+        })
+    }
+
+    /// Moves the focus back to the dialog's query field.
+    fn focus(self, shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+        cx.update(|window, cx| match self {
+            Self::Switcher => {
+                let switcher = shell.read(cx).switcher().cloned().unwrap();
+                switcher.update(cx, |switcher, cx| switcher.focus(window, cx));
+            }
+            Self::Search => {
+                let search = shell.read(cx).search().cloned().unwrap();
+                search.update(cx, |search, cx| search.focus(window, cx));
+            }
+        });
+        draw(cx);
+    }
+}
+
+fn mode(view: &Entity<ChatView>, cx: &mut VisualTestContext) -> Mode {
+    cx.update(|_, cx| view.read(cx).compose().read(cx).mode().clone())
+}
+
+fn act(view: &Entity<ChatView>, cx: &mut VisualTestContext, action: MessageAction, message: &str) {
+    cx.update(|window, cx| view.update(cx, |view, cx| view.act(action, message, window, cx)));
+    draw(cx);
+}
+
+fn escape(cx: &mut VisualTestContext) {
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+}
+
+#[test]
+fn an_escape_meant_for_the_compose_box_is_never_the_switcher_s() {
+    an_escape_meant_for_the_compose_box_is_never(Dialog::Switcher);
+}
+
+#[test]
+fn an_escape_meant_for_the_compose_box_is_never_the_search_s() {
+    an_escape_meant_for_the_compose_box_is_never(Dialog::Search);
+}
+
+/// With `dialog` open and the focus moved out of it, into the compose box, an Escape is the box's; with the focus back
+/// in the dialog's field it is the dialog's, and the dialog's key closes it wherever the focus is.
+fn an_escape_meant_for_the_compose_box_is_never(dialog: Dialog) {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(AB.to_owned(), window, cx)));
+    draw(cx);
+    let view = chat_view(&shell, cx);
+    cx.simulate_keystrokes(dialog.key());
+    draw(cx);
+    assert!(dialog.is_open(&shell, cx), "{dialog:?} opens");
+    assert!(dialog.holds_focus(&shell, cx), "{dialog:?} takes the focus");
+
+    the_box_s_escapes_pass(dialog, &shell, &view, cx);
+
+    // the focus back in its field: Escape is the dialog's again
+    dialog.focus(&shell, cx);
+    escape(cx);
+    assert!(!dialog.is_open(&shell, cx), "{dialog:?}: Escape in its field closes it");
+
+    // and its key closes it wherever the focus is
+    cx.simulate_keystrokes(dialog.key());
+    draw(cx);
+    act(&view, cx, MessageAction::Reply, "9001");
+    cx.simulate_keystrokes(dialog.key());
+    draw(cx);
+    assert!(
+        !dialog.is_open(&shell, cx),
+        "{dialog:?}: its key closes it from the box"
+    );
+    assert!(matches!(mode(&view, cx), Mode::Reply(_)), "{dialog:?}: the reply kept");
+    let compose = cx.update(|_, cx| view.read(cx).compose().clone());
+    assert!(
+        cx.update(|window, cx| compose.read(cx).focused(window, cx)),
+        "{dialog:?}: the box keeps the focus"
+    );
+}
+
+/// With `dialog` open, the focus moved out of it into the compose box: the box's Escape cancels its reply, then its
+/// edit, and the dialog stays open.
+fn the_box_s_escapes_pass(dialog: Dialog, shell: &Entity<Shell>, view: &Entity<ChatView>, cx: &mut VisualTestContext) {
+    act(view, cx, MessageAction::Reply, "9001");
+    assert!(matches!(mode(view, cx), Mode::Reply(_)), "{dialog:?}: replying");
+    assert!(!dialog.holds_focus(shell, cx), "{dialog:?}: the box has the focus");
+    escape(cx);
+    assert_eq!(
+        mode(view, cx),
+        Mode::New,
+        "{dialog:?}: the box's Escape cancels the reply"
+    );
+    assert!(dialog.is_open(shell, cx), "{dialog:?} doesn't take the box's Escape");
+    act(view, cx, MessageAction::Edit, "9001");
+    assert!(matches!(mode(view, cx), Mode::Edit { .. }), "{dialog:?}: editing");
+    escape(cx);
+    assert_eq!(
+        mode(view, cx),
+        Mode::New,
+        "{dialog:?}: the box's Escape cancels the edit"
+    );
+    assert!(dialog.is_open(shell, cx), "{dialog:?} doesn't take the box's Escape");
+}
+
+#[test]
+fn escape_closes_the_switcher_once_its_list_was_clicked() {
+    escape_closes_once_its_list_was_clicked(Dialog::Switcher);
+}
+
+#[test]
+fn escape_closes_the_search_once_its_list_was_clicked() {
+    escape_closes_once_its_list_was_clicked(Dialog::Search);
+}
+
+/// A click in `dialog`'s list moves the focus off its query field but keeps it in the dialog: Escape still closes it.
+fn escape_closes_once_its_list_was_clicked(dialog: Dialog) {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    cx.simulate_keystrokes(dialog.key());
+    // a query nothing matches: the list holds only its empty text, which no click chooses
+    cx.simulate_input("qqqqqq");
+    draw(cx);
+    let drawn = cx
+        .debug_bounds(dialog.selector())
+        .unwrap_or_else(|| panic!("{dialog:?} is drawn"));
+    // below the query field, in the list
+    let at = point(drawn.center().x, drawn.bottom() - px(8.0));
+    cx.simulate_click(at, Modifiers::none());
+    draw(cx);
+    assert!(dialog.is_open(&shell, cx), "{dialog:?}: a click in it keeps it open");
+    assert!(dialog.holds_focus(&shell, cx), "{dialog:?}: the focus is in it");
+    // but no longer in its field: what is typed now isn't a query
+    cx.simulate_input("x");
+    draw(cx);
+    assert_eq!(
+        dialog.query(&shell, cx),
+        "qqqqqq",
+        "{dialog:?}: the focus left its field"
+    );
+    escape(cx);
+    assert!(!dialog.is_open(&shell, cx), "{dialog:?}: Escape closes it");
 }
 
 #[test]

@@ -954,10 +954,14 @@ impl Shell {
         self.settings_view.update(cx, |view, cx| view.focus_pages(window, cx));
     }
 
+    /// Closes the switcher; the shell takes the focus back only when the switcher had it (one moved elsewhere, into
+    /// the compose box say, stays there).
     fn close_switcher(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.switcher.take().is_some() {
+        if let Some((switcher, _)) = self.switcher.take() {
             self.trace.record(&TraceLine::new("switcher", "closed"));
-            self.focus.focus(window, cx);
+            if switcher.read(cx).holds_focus(window, cx) {
+                self.focus.focus(window, cx);
+            }
             cx.notify();
         }
     }
@@ -981,10 +985,13 @@ impl Shell {
         cx.notify();
     }
 
+    /// Closes the search; the shell takes the focus back only when the search had it (as [`Self::close_switcher`]).
     fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.search.take().is_some() {
+        if let Some((search, _)) = self.search.take() {
             self.trace.record(&TraceLine::new("search", "closed"));
-            self.focus.focus(window, cx);
+            if search.read(cx).holds_focus(window, cx) {
+                self.focus.focus(window, cx);
+            }
             cx.notify();
         }
     }

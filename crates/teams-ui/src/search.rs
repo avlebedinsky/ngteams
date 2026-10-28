@@ -10,6 +10,8 @@
 //! - **The hits** are those of the chats the chat list shows (a channel's or the account's own streams' are left
 //!   out), at most [`MAX_HITS`]: the chat's name as the list has it, the sender (their name as the engine has it,
 //!   "You" for the account), the time, and the text around the match with the matched terms marked.
+//! - **It closes** on Escape while the focus is in it (an Escape elsewhere goes where the focus is), on Ctrl+Shift+F
+//!   again, and once a hit is chosen.
 //! - What it shows is traced (`search opened`/`closed`, `search shown` with the hits' conversation and message ids),
 //!   never a query or a text.
 
@@ -19,9 +21,9 @@ use std::sync::Arc;
 
 use chrono::Local;
 use gpui::{
-    App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, FontWeight, HighlightStyle, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, Styled as _, StyledText, Subscription, Task, Window, div,
-    px, rgb,
+    App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, FocusHandle, FontWeight, HighlightStyle,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _, StyledText,
+    Subscription, Task, Window, div, px, rgb,
 };
 use gpui_component::IndexPath;
 use gpui_component::command::{Command, CommandItem, CommandState};
@@ -234,6 +236,8 @@ pub struct Search {
     found_for: Option<String>,
     /// The search running, for the latest query: a later query drops it.
     searching: Option<Task<()>>,
+    /// Tracked on the dialog's root: the focus is in it while its query field or the palette's list has it.
+    focus: FocusHandle,
     /// Escape, before the palette's own binding (which first clears the query).
     _escape: Subscription,
 }
@@ -250,13 +254,23 @@ impl Search {
     ) -> Self {
         let state = cx.new(|cx| CommandState::new(window, cx));
         let this = cx.weak_entity();
-        let escape = cx.intercept_keystrokes(move |event, _window, cx| {
+        // the interceptor sees every keystroke of the app: an Escape is the search's only while the focus is in it (a
+        // search left open in a shell not shown, another account's, or with the focus moved out of it, never takes
+        // the Escape meant for where the focus is)
+        let escape = cx.intercept_keystrokes(move |event, window, cx| {
             let keystroke = &event.keystroke;
-            if keystroke.key == "escape" && keystroke.modifiers.number_of_modifiers() == 0 {
-                let dismissed = this.update(cx, |_, cx| cx.emit(SearchEvent::Dismissed));
-                if dismissed.is_ok() {
-                    cx.stop_propagation();
+            if keystroke.key != "escape" || keystroke.modifiers.number_of_modifiers() != 0 {
+                return;
+            }
+            let dismissed = this.update(cx, |this, cx| {
+                let held = this.holds_focus(window, cx);
+                if held {
+                    cx.emit(SearchEvent::Dismissed);
                 }
+                held
+            });
+            if matches!(dismissed, Ok(true)) {
+                cx.stop_propagation();
             }
         });
         Self {
@@ -268,6 +282,7 @@ impl Search {
             hits: Vec::new(),
             found_for: None,
             searching: None,
+            focus: cx.focus_handle(),
             _escape: escape,
         }
     }
@@ -275,6 +290,14 @@ impl Search {
     /// Moves the keyboard focus to the query field.
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
         self.state.update(cx, |state, cx| state.focus(window, cx));
+    }
+
+    /// Whether the focus is in the search (its query field, or its list once clicked): the focus may have moved
+    /// elsewhere since it opened. Read from the last frame, which GPUI draws before it dispatches a key; one not drawn
+    /// (in a shell not shown) never holds it.
+    #[must_use]
+    pub fn holds_focus(&self, window: &Window, cx: &App) -> bool {
+        self.focus.contains_focused(window, cx)
     }
 
     #[must_use]
@@ -362,6 +385,7 @@ impl Render for Search {
             .empty(move |_, _, _| div().p_2().child(empty.clone()));
         div()
             .debug_selector(|| "search".to_owned())
+            .track_focus(&self.focus)
             .w(px(WIDTH))
             .rounded_md()
             .border_1()

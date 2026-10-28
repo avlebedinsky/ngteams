@@ -1,5 +1,6 @@
 //! The chat switcher (Ctrl+K): the UI kit's command palette over the chat list's rows, matched fuzzily on their names
-//! as the user types ([`fuzzy_score`]): Enter opens the chat highlighted, Escape closes the switcher whatever was typed.
+//! as the user types ([`fuzzy_score`]): Enter opens the chat highlighted, Escape closes the switcher whatever was typed
+//! (while the focus is in it: an Escape elsewhere goes where the focus is), and so does Ctrl+K again.
 //! It is the live test's way into a chat: the keyboard, no screen coordinates.
 //!
 //! It reads the chat list's rows (one model for both), so a chat that changes while it is open shows changed. Under
@@ -14,7 +15,7 @@
 use std::sync::Arc;
 
 use gpui::{
-    App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
+    App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window, div, px, rgb,
 };
 use gpui_component::IndexPath;
@@ -244,6 +245,8 @@ pub struct Switcher {
     /// The call commands that fit the moment, first of the commands.
     call_commands: Vec<CallCommand>,
     _observing: [Subscription; 3],
+    /// Tracked on the dialog's root: the focus is in it while its query field or the palette's list has it.
+    focus: FocusHandle,
     /// Escape, before the palette's own binding (which first clears the query).
     _escape: Subscription,
 }
@@ -273,13 +276,23 @@ impl Switcher {
             }),
         ];
         let this = cx.weak_entity();
-        let escape = cx.intercept_keystrokes(move |event, _window, cx| {
+        // the interceptor sees every keystroke of the app: an Escape is the switcher's only while the focus is in it (a
+        // switcher left open in a shell not shown, another account's, or with the focus moved out of it, never takes
+        // the Escape meant for where the focus is)
+        let escape = cx.intercept_keystrokes(move |event, window, cx| {
             let keystroke = &event.keystroke;
-            if keystroke.key == "escape" && keystroke.modifiers.number_of_modifiers() == 0 {
-                let dismissed = this.update(cx, |_, cx| cx.emit(SwitcherEvent::Dismissed));
-                if dismissed.is_ok() {
-                    cx.stop_propagation();
+            if keystroke.key != "escape" || keystroke.modifiers.number_of_modifiers() != 0 {
+                return;
+            }
+            let dismissed = this.update(cx, |this, cx| {
+                let held = this.holds_focus(window, cx);
+                if held {
+                    cx.emit(SwitcherEvent::Dismissed);
                 }
+                held
+            });
+            if matches!(dismissed, Ok(true)) {
+                cx.stop_propagation();
             }
         });
         let mut switcher = Self {
@@ -294,6 +307,7 @@ impl Switcher {
             searching: None,
             call_commands,
             _observing: observing,
+            focus: cx.focus_handle(),
             _escape: escape,
         };
         switcher.refilter(cx);
@@ -303,6 +317,14 @@ impl Switcher {
     /// Moves the keyboard focus to the query field.
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
         self.state.update(cx, |state, cx| state.focus(window, cx));
+    }
+
+    /// Whether the focus is in the switcher (its query field, or its list once clicked): the focus may have moved
+    /// elsewhere since it opened. Read from the last frame, which GPUI draws before it dispatches a key; one not drawn
+    /// (in a shell not shown) never holds it.
+    #[must_use]
+    pub fn holds_focus(&self, window: &Window, cx: &App) -> bool {
+        self.focus.contains_focused(window, cx)
     }
 
     /// The chats listed now, the best match first: `(id, name)`.
@@ -464,6 +486,7 @@ impl Render for Switcher {
             .empty(|_, _, _| div().p_2().child("No chat, channel, message or command matches"));
         div()
             .debug_selector(|| "switcher".to_owned())
+            .track_focus(&self.focus)
             .w(px(WIDTH))
             .rounded_md()
             .border_1()
