@@ -2,7 +2,8 @@
 //! paragraphs, mentions, quotes, links and images. Parsed by html5ever (through `scraper`), as a browser would, and
 //! then walked without recursion.
 //!
-//! - **Kept**: text, `br`; `p`, `div`, `li`, `h1`–`h6` and `pre` as paragraphs; `b`/`strong`, `i`/`em`, `u`/`ins`,
+//! - **Kept**: text, `br`; `p`, `div`, `li`, `h1`–`h6` and `pre` as paragraphs; `ol` and `ul` as lists, each `li` (any
+//!   paragraph) directly in one an item, numbered from `ol`'s `start`; `b`/`strong`, `i`/`em`, `u`/`ins`,
 //!   `s`/`strike`/`del`, `code` as marks; a mention (`<span itemtype="http://schema.skype.com/Mention" itemid="<n>">`,
 //!   as captured: inside a `readonly` element as sent, which is unknown markup and so gives its text, bare as read
 //!   back); a quote (`<blockquote>`; a reply's, `itemtype="http://schema.skype.com/Reply"`,
@@ -48,6 +49,9 @@ pub const EMOJI_ITEMTYPE: &str = "http://schema.skype.com/Emoji";
 
 /// The `itemtype` of a picture pasted into a message (an `<img>` whose `src` is a view of an AMS object).
 pub const AMS_IMAGE_ITEMTYPE: &str = "http://schema.skype.com/AMSImage";
+
+/// The largest number a list's `start` may give; a larger one, or one that isn't digits, is 1.
+pub const MAX_LIST_START: u32 = 1_000_000;
 
 /// The largest side an image's given size may have, in CSS pixels; a larger one is no size.
 const MAX_GIVEN_SIDE: u32 = 100_000;
@@ -117,6 +121,17 @@ pub enum Node {
     },
     Image(Image),
     Quote(Quote),
+    List(List),
+}
+
+/// A list (`ol` or `ul`): its items, each what one `li` holds.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct List {
+    /// An `ol`: its items are numbered, from [`Self::start`]; else bulleted.
+    pub ordered: bool,
+    /// The first item's number: an `ol`'s `start` (digits, at most [`MAX_LIST_START`]), else 1.
+    pub start: u32,
+    pub items: Vec<Vec<Node>>,
 }
 
 /// An image the content shows. Its source is kept, never fetched here.
@@ -218,12 +233,12 @@ pub fn parse(content: &str) -> RichText {
     RichText { nodes, truncated }
 }
 
-/// Drops the markup whitespace beside a block (a paragraph or a quote): text of ASCII whitespace only, right before
+/// Drops the markup whitespace beside a block (a paragraph, a quote or a list): text of ASCII whitespace only, right before
 /// or after one, which HTML doesn't render. The service joins a read-back message's paragraphs with CRLF (the
 /// `chat-shapes` captures of 2026-10-21, `docs/protocol/chat.md`), which would otherwise read as blank lines. A
 /// no-break space is text, and whitespace between inline nodes stays.
 fn drop_block_gaps(nodes: &mut Vec<Node>) {
-    let is_block = |node: Option<&Node>| matches!(node, Some(Node::Paragraph(_) | Node::Quote(_)));
+    let is_block = |node: Option<&Node>| matches!(node, Some(Node::Paragraph(_) | Node::Quote(_) | Node::List(_)));
     let is_gap = |node: &Node| matches!(node, Node::Text { text, .. } if text.chars().all(|c| c.is_ascii_whitespace()));
     let keep: Vec<bool> = (0..nodes.len())
         .map(|index| {
@@ -239,7 +254,12 @@ fn drop_block_gaps(nodes: &mut Vec<Node>) {
 /// paragraph, a quote): a text run's leading spaces at the start of the container, after a `br` or a block, its
 /// trailing ones at the end, before a `br` or a block. A browser draws none of them. Runs left empty go.
 fn trim_line_edges(nodes: &mut Vec<Node>) {
-    let edge = |node: Option<&Node>| matches!(node, None | Some(Node::Break | Node::Paragraph(_) | Node::Quote(_)));
+    let edge = |node: Option<&Node>| {
+        matches!(
+            node,
+            None | Some(Node::Break | Node::Paragraph(_) | Node::Quote(_) | Node::List(_))
+        )
+    };
     for index in 0..nodes.len() {
         let starts = edge(index.checked_sub(1).and_then(|before| nodes.get(before)));
         let ends = edge(nodes.get(index + 1));
@@ -350,6 +370,18 @@ enum Container {
     Quote(Quote, bool),
     /// A reply quote's sender, with the MRI its `itemid` names.
     Sender(Option<String>),
+    /// A list, its kind and first number: its content is made its items when it closes ([`list_items`]).
+    List {
+        ordered: bool,
+        start: u32,
+    },
+}
+
+impl Container {
+    /// Whether it is a block: a line starts at its edges.
+    const fn is_block(&self) -> bool {
+        matches!(self, Self::Paragraph | Self::Quote(..) | Self::List { .. })
+    }
 }
 
 /// Builds the model from the parse's open and close edges. No step looks further than the open containers (at most
@@ -465,7 +497,7 @@ impl Builder {
         if pre {
             self.pre += 1;
         }
-        if matches!(kind, Container::Paragraph | Container::Quote(..)) {
+        if kind.is_block() {
             self.after_space = true;
         }
         self.containers.push((kind, Vec::new()));
@@ -498,7 +530,7 @@ impl Builder {
 
     fn close_container(&mut self, kind: Container, mut children: Vec<Node>, pre: bool) {
         drop_block_gaps(&mut children);
-        if matches!(kind, Container::Paragraph | Container::Quote(..)) {
+        if kind.is_block() {
             // the next text starts a line
             self.after_space = true;
             if !pre {
@@ -517,6 +549,11 @@ impl Builder {
                 quote.body = children;
                 Node::Quote(quote)
             }
+            Container::List { ordered, start } => Node::List(List {
+                ordered,
+                start,
+                items: list_items(children),
+            }),
             Container::Sender(mri) => {
                 let mut name = String::new();
                 plain_text(&children, &mut name);
@@ -572,6 +609,14 @@ fn container(element: &Element) -> Option<Container> {
         "span" if element.attr("itemtype") == Some(MENTION_ITEMTYPE) => {
             Some(Container::Mention(attr(element, "itemid").unwrap_or_default()))
         }
+        "ol" | "ul" => Some(Container::List {
+            ordered: name == "ol",
+            start: element
+                .attr("start")
+                .filter(|_| name == "ol")
+                .and_then(list_start)
+                .unwrap_or(1),
+        }),
         "blockquote" => {
             let reply = element.attr("itemtype") == Some(REPLY_ITEMTYPE);
             let quote = Quote {
@@ -582,6 +627,37 @@ fn container(element: &Element) -> Option<Container> {
         }
         _ => None,
     }
+}
+
+/// An `ol`'s `start`: digits only, 0 to [`MAX_LIST_START`].
+fn list_start(text: &str) -> Option<u32> {
+    let text = text.trim();
+    if text.is_empty() || text.len() > 7 || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    text.parse().ok().filter(|start| *start <= MAX_LIST_START)
+}
+
+/// A list's content as its items: each paragraph in it (an `li`) one, and any other content between them (a browser
+/// draws it without a marker) an item of its own, in order.
+fn list_items(children: Vec<Node>) -> Vec<Vec<Node>> {
+    let mut items = Vec::new();
+    let mut stray = Vec::new();
+    for child in children {
+        match child {
+            Node::Paragraph(item) => {
+                if !stray.is_empty() {
+                    items.push(std::mem::take(&mut stray));
+                }
+                items.push(item);
+            }
+            other => stray.push(other),
+        }
+    }
+    if !stray.is_empty() {
+        items.push(stray);
+    }
+    items
 }
 
 /// An image with an `https` source.
@@ -665,16 +741,35 @@ fn plain_text(nodes: &[Node], out: &mut String) {
         match node {
             Node::Text { text, .. } | Node::Mention { text, .. } => out.push_str(text),
             Node::Break => out.push('\n'),
-            Node::Paragraph(children) => {
-                if !out.is_empty() && !out.ends_with('\n') {
-                    out.push('\n');
-                }
-                plain_text(children, out);
-                out.push('\n');
-            }
+            Node::Paragraph(children) => paragraph_text(children, out),
             Node::Link { children, .. } => plain_text(children, out),
             Node::Image(image) => out.push_str(image.alt.as_deref().unwrap_or_default()),
             Node::Quote(quote) => plain_text(&quote.body, out),
+            Node::List(list) => {
+                for item in &list.items {
+                    item_text(item, out);
+                }
+            }
         }
+    }
+}
+
+/// The text of a paragraph with its `children`: on a line of its own.
+fn paragraph_text(children: &[Node], out: &mut String) {
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    plain_text(children, out);
+    out.push('\n');
+}
+
+/// The text of a list's item: on a line of its own, with no blank line after a list nested at its end.
+fn item_text(children: &[Node], out: &mut String) {
+    if !out.is_empty() && !out.ends_with('\n') {
+        out.push('\n');
+    }
+    plain_text(children, out);
+    if !out.ends_with('\n') {
+        out.push('\n');
     }
 }

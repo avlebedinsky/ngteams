@@ -2,7 +2,8 @@
 //! engine: a card per file under the text, side by side and wrapping when the window is narrow; a video's thumbnail
 //! asked of the engine by its sharing link and drawn on its card, a placeholder without one, a document's card its
 //! header alone; a click on the name opens the sharing link, "More options" downloads it or copies the link; nothing
-//! about the files is said to be unshown. The message is the synthetic fixture `tests/fixtures/chatsvc/files.json`:
+//! about the files is said to be unshown; an image with a preview is drawn as the picture alone, its card when the
+//! preview can't be had. The message is the synthetic fixture `tests/fixtures/chatsvc/files.json`:
 //! every name, link and id is made up.
 
 use std::sync::Arc;
@@ -180,4 +181,65 @@ fn more_options_download_the_file_and_copy_its_link() {
     click(cx, &format!("file-menu-copy-{ID}-0"));
     let copied = cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()));
     assert_eq!(copied.as_deref(), Some(shares[0].as_str()));
+}
+
+/// A made-up image file's preview on AMS, as an entry's `filePreview` names it.
+const PREVIEW_SRC: &str = "https://us-api.asm.skype.com/v1/objects/0-made-up-photo-0001/views/imgo";
+
+/// A message of one image file and no text, from b: the fixture's first entry made a JPEG with a preview on AMS,
+/// 501 by 500.
+fn image_message() -> Message {
+    let fixture: Value = serde_json::from_str(FIXTURE).unwrap();
+    let mut properties = fixture["read_back"]["properties"].clone();
+    let entries: Value = serde_json::from_str(properties["files"].as_str().unwrap()).unwrap();
+    let mut entry = entries[0].clone();
+    for (key, value) in [("fileName", "made-up-photo.jpg"), ("title", "made-up-photo.jpg")] {
+        entry[key] = Value::from(value);
+    }
+    entry["fileType"] = Value::from("jpg");
+    entry["type"] = Value::from("jpg");
+    entry["filePreview"] = serde_json::json!({"previewUrl": PREVIEW_SRC, "previewWidth": 501, "previewHeight": 500});
+    properties["files"] = Value::from(Value::Array(vec![entry]).to_string());
+    let mut stored = message(ID, LAB_B, "", NOON);
+    stored.properties = Some(properties.to_string());
+    stored
+}
+
+#[test]
+fn an_images_preview_is_drawn_in_place_of_its_card_at_teams_size() {
+    let rig = rig_with(vec![image_message()]);
+    rig.core
+        .pictures
+        .lock()
+        .unwrap()
+        .insert(PREVIEW_SRC.to_owned(), thumbnail());
+    let shares = share_urls();
+    let (written_trace, _) = trace();
+    let (_view, cx) = chat_window(&rig, written_trace);
+    draw(cx);
+    let preview = bounds(cx, &format!("file-preview-{ID}-0")).expect("the preview is drawn");
+    // the entry's 501 by 500, scaled down into Teams' box, its aspect ratio kept
+    assert_eq!(teams_ui::files::preview_size((501, 500)), (253.0, 252.0));
+    assert!((f32::from(preview.size.width) - 253.0).abs() < 1.0, "{preview:?}");
+    assert!((f32::from(preview.size.height) - 252.0).abs() < 1.0, "{preview:?}");
+    // the picture alone: no card, no header with the name, no thumbnail asked of Graph
+    assert!(bounds(cx, &format!("file-card-{ID}-0")).is_none());
+    assert!(bounds(cx, &format!("file-name-{ID}-0")).is_none());
+    assert!(!rig.core.asked().contains(&"file_thumbnail"));
+    // a click opens the file at its sharing link; "More options" is still there
+    click(cx, &format!("file-preview-{ID}-0"));
+    assert_eq!(cx.opened_url().as_deref(), Some(shares[0].as_str()));
+    assert!(bounds(cx, &format!("file-more-{ID}-0")).is_some());
+}
+
+#[test]
+fn an_image_whose_preview_cant_be_had_is_drawn_as_its_card() {
+    let rig = rig_with(vec![image_message()]);
+    let (written_trace, _) = trace();
+    let (_view, cx) = chat_window(&rig, written_trace);
+    draw(cx);
+    assert!(rig.core.asked().contains(&"message_picture"));
+    assert!(bounds(cx, &format!("file-preview-{ID}-0")).is_none());
+    assert!(bounds(cx, &format!("file-card-{ID}-0")).is_some(), "its card instead");
+    assert!(bounds(cx, &format!("file-name-{ID}-0")).is_some());
 }

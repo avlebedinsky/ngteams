@@ -2548,16 +2548,13 @@ pub fn quick_reactions(frequent: &[String]) -> Vec<String> {
     quick
 }
 
-/// A message's text as the reader sees it, its paragraphs a line each (an emoticon as its emoji); a quote it carries
-/// (a reply's) and its pictures left out.
+/// A message's text as the reader sees it, its paragraphs a line each (an emoticon as its emoji), a list's items each
+/// after its marker; a quote it carries (a reply's) and its pictures left out.
 fn plain_text(rendered: &Rendered) -> String {
     rendered
         .blocks
         .iter()
-        .filter_map(|block| match block {
-            rich_text::Block::Text(text) => Some(text.plain()),
-            rich_text::Block::Quote(_) | rich_text::Block::Picture(_) => None,
-        })
+        .flat_map(rich_text::Block::plain_lines)
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -3484,8 +3481,9 @@ fn bubble(
         // the hover bar's anchor
         .relative()
         .min_w_0();
-    // a message drawn bare (only an emoticon or a sticker, `Rendered::bare`) has no bubble behind it, as in Teams
-    let bare = matches!(&item.body, Body::Text(text) if text.0.bare);
+    // a message drawn bare (only an emoticon or a sticker, `Rendered::bare`) or of files alone has no bubble behind
+    // it, as in Teams
+    let bare = matches!(&item.body, Body::Text(text) if text.0.bare || (text.0.blocks.is_empty() && files.is_some()));
     let bubble = if bare {
         bubble
     } else {

@@ -27,7 +27,7 @@ use serde_json::{Value, json};
 use teams_fence::Mri;
 use url::Url;
 
-use crate::chat::html::{MAX_CONTENT, MAX_DEPTH, MENTION_ITEMTYPE, Marks, Node, Quote, REPLY_ITEMTYPE, RichText};
+use crate::chat::html::{List, MAX_CONTENT, MAX_DEPTH, MENTION_ITEMTYPE, Marks, Node, Quote, REPLY_ITEMTYPE, RichText};
 
 /// Why a [`MessageText`] can't be built.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -304,6 +304,7 @@ impl<'a> Render<'a> {
             }
             Node::Image(_) => return Err(ComposeError::Image),
             Node::Quote(quote) => self.quote(quote, depth)?,
+            Node::List(list) => self.list(list, depth)?,
         }
         Ok(())
     }
@@ -334,6 +335,23 @@ impl<'a> Render<'a> {
         self.html.push_str(&mention_span(index, name));
         self.mentions.push(mention_entry(index, mri, name));
         self.participants.insert(mri.clone());
+        Ok(())
+    }
+
+    /// A list: `ol` (with its `start` when it isn't 1) or `ul`, an `li` per item.
+    fn list(&mut self, list: &List, depth: usize) -> Result<(), ComposeError> {
+        let tag = if list.ordered { "ol" } else { "ul" };
+        self.push(&["<", tag]);
+        if list.ordered && list.start != 1 {
+            self.push(&[" start=\"", &list.start.to_string(), "\""]);
+        }
+        self.html.push('>');
+        for item in &list.items {
+            self.html.push_str("<li>");
+            self.nodes(item, depth + 2)?;
+            self.html.push_str("</li>");
+        }
+        self.push(&["</", tag, ">"]);
         Ok(())
     }
 
@@ -387,6 +405,11 @@ fn within_depth(nodes: &[Node], depth: usize) -> Result<(), ComposeError> {
         match node {
             Node::Paragraph(children) | Node::Link { children, .. } => within_depth(children, depth + 1)?,
             Node::Quote(quote) => within_depth(&quote.body, depth + 1)?,
+            Node::List(list) => {
+                for item in &list.items {
+                    within_depth(item, depth + 2)?;
+                }
+            }
             Node::Text { .. } | Node::Break | Node::Mention { .. } | Node::Image(_) => {}
         }
     }

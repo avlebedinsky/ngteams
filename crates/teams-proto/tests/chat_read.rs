@@ -17,9 +17,10 @@ use teams_auth::token::TokenError;
 use teams_fence::{Fence, FenceLog, Mri, Roster};
 use teams_mock::{AB_CHAT, ABC_CHAT, CHANNEL, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, NOTIFICATIONS, TENANT};
 use teams_proto::chat::{
-    ChatReadError, ChatReads, Conversation, ConversationKind, ConversationList, Field, FileKind, MAX_CONTENT,
-    MAX_DEPTH, Marks, MemberList, MentionKind, Message, MessagePage, MessageType, Node, Quote, RichText, SharedFile,
-    SharedFiles, Thread, Unshown, WEB_CLIENT, link_endpoint, parse_html, shared_files, unshown_parts, web_chat_link,
+    ChatReadError, ChatReads, Conversation, ConversationKind, ConversationList, Field, FileKind, FilePreview, List,
+    MAX_CONTENT, MAX_DEPTH, Marks, MemberList, MentionKind, Message, MessagePage, MessageType, Node, Quote, RichText,
+    SharedFile, SharedFiles, Thread, Unshown, WEB_CLIENT, link_endpoint, parse_html, shared_files, unshown_parts,
+    web_chat_link,
 };
 use teams_proto::{Client, Credentials, HttpError, HttpTransport};
 use wiremock::matchers::method;
@@ -1342,6 +1343,7 @@ fn a_received_messages_files_are_read_by_name_type_and_links() -> TestResult {
                 object_url: Some(format!(
                     "{personal}/Documents/Microsoft Teams Chat Files/02-made-up-rehearsal-cut-v3.mp4"
                 )),
+                preview: None,
             },
             SharedFile {
                 name: "01-made-up-stage-plan.pdf".to_owned(),
@@ -1353,6 +1355,7 @@ fn a_received_messages_files_are_read_by_name_type_and_links() -> TestResult {
                 object_url: Some(format!(
                     "{personal}/Documents/Microsoft Teams Chat Files/01-made-up-stage-plan.pdf"
                 )),
+                preview: None,
             },
         ]
     );
@@ -1369,6 +1372,90 @@ fn a_received_messages_files_are_read_by_name_type_and_links() -> TestResult {
             shared.replace("{kind}", "v")
         ))
     );
+    Ok(())
+}
+
+#[test]
+fn an_ordered_and_a_bulleted_list_are_read_as_lists_of_items() {
+    // as the web client sends one: a line feed after `<ol>`, the items' `li`s back to back, a nested list in an item
+    let read = parse_html(
+        "<p>Pick one:</p>\n<ol>\n<li>External API</li><li><b>Internal</b> API\n<ul>\n<li>inner</li></ul>\n</li></ol>\n<p>&nbsp;</p>",
+    );
+    let inner = Node::List(List {
+        ordered: false,
+        start: 1,
+        items: vec![vec![text_node("inner")]],
+    });
+    assert_eq!(
+        read.nodes,
+        [
+            Node::Paragraph(vec![text_node("Pick one:")]),
+            Node::List(List {
+                ordered: true,
+                start: 1,
+                items: vec![
+                    vec![text_node("External API")],
+                    vec![
+                        Node::Text {
+                            text: "Internal".to_owned(),
+                            marks: Marks::BOLD,
+                        },
+                        text_node(" API"),
+                        inner,
+                    ],
+                ],
+            }),
+            Node::Paragraph(vec![text_node("\u{a0}")]),
+        ]
+    );
+    assert_eq!(read.plain_text(), "Pick one:\nExternal API\nInternal API\ninner\n\u{a0}\n");
+    // an `ol`'s `start` numbers its first item; one that isn't digits, or a `ul`'s, is 1; an `li` in no list is a
+    // paragraph
+    let start = |html: &str| match &parse_html(html).nodes[..] {
+        [Node::List(list)] => Some(list.start),
+        _ => None,
+    };
+    assert_eq!(start("<ol start=\"4\"><li>d</li></ol>"), Some(4));
+    assert_eq!(start("<ol start=\"-2\"><li>x</li></ol>"), Some(1));
+    assert_eq!(start("<ol start=\"99999999\"><li>x</li></ol>"), Some(1));
+    assert_eq!(start("<ul start=\"4\"><li>x</li></ul>"), Some(1));
+    assert_eq!(
+        parse_html("<li>alone</li>").nodes,
+        [Node::Paragraph(vec![text_node("alone")])]
+    );
+}
+
+#[test]
+fn an_images_preview_on_ams_is_read_with_its_size() -> TestResult {
+    let read = files_message()?;
+    let entries: Value = serde_json::from_str(read.properties["files"].as_str().ok_or("files")?)?;
+    let src = "https://us-api.asm.skype.com/v1/objects/0-made-up-photo-0001/views/imgo";
+    let with_preview = |preview: Value| {
+        let mut entry = entries[0].clone();
+        entry["fileName"] = json!("made-up-photo.jpg");
+        entry["fileType"] = json!("jpg");
+        entry["filePreview"] = preview;
+        shared_files(Some(&json!([entry]))).files.remove(0)
+    };
+    let file = with_preview(json!({"previewUrl": src, "previewWidth": 501, "previewHeight": 500}));
+    assert_eq!(file.kind(), FileKind::Image);
+    assert_eq!(
+        file.preview,
+        Some(FilePreview {
+            src: src.to_owned(),
+            size: Some((501, 500)),
+        })
+    );
+    // a size off its range is none; a link that isn't a view of an AMS object is no preview
+    let sizeless = with_preview(json!({"previewUrl": src, "previewWidth": 0, "previewHeight": 500}));
+    assert_eq!(sizeless.preview.map(|preview| preview.size), Some(None));
+    for link in [
+        "",
+        "https://example.com/v1/objects/0-made-up-photo-0001/views/imgo",
+        "https://us-api.asm.skype.com/v1/objects/0-made-up-photo-0001/views/imgo?x=1",
+    ] {
+        assert_eq!(with_preview(json!({"previewUrl": link})).preview, None, "{link}");
+    }
     Ok(())
 }
 

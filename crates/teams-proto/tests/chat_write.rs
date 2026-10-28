@@ -25,7 +25,7 @@ use teams_mock::{
     AB_CHAT, ABC_CHAT, AC_CHAT, AX_CHAT, CHAT_BASE, ChatServiceMock, EventKind, LAB_A, LAB_B, LAB_C, OUTSIDER,
 };
 use teams_proto::chat::{
-    ComposeError, Image, MAX_CONTENT, MAX_DEPTH, Marks, MessageText, Node, Quote, RichText, parse_html,
+    ComposeError, Image, List, MAX_CONTENT, MAX_DEPTH, Marks, MessageText, Node, Quote, RichText, parse_html,
 };
 use teams_proto::{
     Author, Authorized, CreateChat, Credentials, DeleteMessage, EditMessage, HttpTransport, Mutating, Original,
@@ -355,6 +355,31 @@ fn a_mention_is_in_the_content_and_the_target_from_one_value() {
     );
     assert_eq!(text.participants(), &BTreeSet::from([mri(LAB_B)]));
     assert_eq!(text.mentioned().get("m"), Some(&mri(LAB_B)));
+}
+
+#[test]
+fn a_list_is_written_as_html_and_reads_back_the_same() {
+    let list = Node::List(List {
+        ordered: true,
+        start: 3,
+        items: vec![
+            vec![run("three")],
+            vec![
+                run("four"),
+                Node::List(List {
+                    ordered: false,
+                    start: 1,
+                    items: vec![vec![run("inner")]],
+                }),
+            ],
+        ],
+    });
+    let text = MessageText::new(rich(vec![list.clone()]), []).unwrap();
+    assert_eq!(
+        text.html(),
+        "<ol start=\"3\"><li>three</li><li>four<ul><li>inner</li></ul></li></ol>"
+    );
+    assert_eq!(parse_html(text.html()).nodes, [list]);
 }
 
 #[test]

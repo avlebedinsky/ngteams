@@ -6,6 +6,11 @@
 //!   file filling the card: its thumbnail, asked of the engine by the file's sharing link (`crate::inline::thumbnail`,
 //!   never a request of the view's own), a tinted box while it is read, and a placeholder with the type's icon when
 //!   there is none. Another kind of file is its header alone.
+//! - **An image with a preview** (its entry's `filePreview`, a picture of it on AMS) is drawn as Teams draws it: the
+//!   picture alone, no header, at the preview's size scaled down into [`PREVIEW_MAX`] (its aspect ratio kept), with
+//!   rounded corners; "More options" over its corner while the pointer is on it. The picture is asked of the engine as
+//!   a message's picture is (`crate::inline::picture`); a tinted box of its size stands in while it is read, and the
+//!   card is drawn when there is none.
 //! - **A click** on the name or the picture opens the file the way the web client does, at its sharing link in the
 //!   browser (GPUI's `open_url`); "More options" offers "Open in browser", "Download" (the sharing link with
 //!   `download=1`: the browser downloads it) and "Copy link". Nothing here reaches anyone: Teams' "Share" is left out
@@ -22,7 +27,7 @@ use gpui_component::tooltip::Tooltip;
 use teams_proto::chat::{FileKind, SharedFile};
 
 use crate::icons::{Glyph, icon_button, selected_by};
-use crate::inline::{PictureSource, PictureState, thumbnail};
+use crate::inline::{PictureSource, PictureState, picture, thumbnail};
 use crate::rich_text::tint;
 use crate::theme::Palette;
 
@@ -31,6 +36,12 @@ pub const CARD_WIDTH: f32 = 316.0;
 
 /// The height of a card's picture: a 16:9 frame of the card's width.
 pub const PICTURE_HEIGHT: f32 = 178.0;
+
+/// The box an image's preview is scaled down into (width, height), as Teams draws one in a message.
+pub const PREVIEW_MAX: (f32, f32) = (360.0, 252.0);
+
+/// The size a preview is held at while it is read, when its entry gives none.
+const PREVIEW_UNKNOWN: (u32, u32) = (252, 252);
 
 /// What "More options" offers, in Teams' words.
 pub const OPEN_IN_BROWSER: &str = "Open in browser";
@@ -113,6 +124,9 @@ pub struct FileCard {
 impl RenderOnce for FileCard {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let kind = self.file.kind();
+        if let Some(preview) = self.preview(kind, cx) {
+            return preview;
+        }
         let picture = kind.has_thumbnail().then(|| self.picture(kind, cx));
         let id = self.id.clone();
         div()
@@ -130,10 +144,82 @@ impl RenderOnce for FileCard {
             .bg(tint(self.palette.foreground, 0.04))
             .child(self.header(kind))
             .children(picture)
+            .into_any_element()
     }
 }
 
+/// The size `natural` is drawn at inside [`PREVIEW_MAX`]: scaled down to fit, its aspect ratio kept, never up.
+#[must_use]
+pub fn preview_size(natural: (u32, u32)) -> (f32, f32) {
+    #[expect(clippy::cast_precision_loss, reason = "a preview's side is at most 100 000")]
+    let (width, height) = (natural.0.max(1) as f32, natural.1.max(1) as f32);
+    let scale = (PREVIEW_MAX.0 / width).min(PREVIEW_MAX.1 / height).min(1.0);
+    ((width * scale).round(), (height * scale).round())
+}
+
 impl FileCard {
+    /// An image drawn as its preview (see the module docs); `None` when it is drawn as its card: another kind of file,
+    /// no preview, no engine to ask, or none to have.
+    fn preview(&self, kind: FileKind, cx: &mut App) -> Option<AnyElement> {
+        let preview = self.file.preview.as_ref().filter(|_| kind == FileKind::Image)?;
+        let state = picture(&preview.src, self.source.as_ref()?, cx);
+        let given = preview.size;
+        let id = self.id.clone();
+        let (selector, size, shown) = match state {
+            PictureState::Missing => return None,
+            PictureState::Reading => (
+                "file-preview-reading",
+                preview_size(given.unwrap_or(PREVIEW_UNKNOWN)),
+                div()
+                    .size_full()
+                    .bg(tint(self.palette.foreground, 0.06))
+                    .into_any_element(),
+            ),
+            PictureState::Shown(image, natural) => (
+                "file-preview",
+                preview_size(given.unwrap_or(natural)),
+                img(image).size_full().object_fit(ObjectFit::Cover).into_any_element(),
+            ),
+        };
+        let group = SharedString::from(format!("file-preview-{id}"));
+        let more = self.more().map(|more| {
+            div()
+                .absolute()
+                .top_1()
+                .right_1()
+                .rounded_md()
+                .bg(rgb(self.palette.surface))
+                .opacity(0.0)
+                .group_hover(group.clone(), |style| style.opacity(1.0))
+                .child(more)
+        });
+        let picture = open_on_click(
+            div()
+                .id(SharedString::from(format!("file-picture-{id}")))
+                .size_full()
+                .child(shown),
+            &self.file,
+        );
+        Some(
+            div()
+                .id(SharedString::from(format!("file-preview-box-{id}")))
+                .debug_selector(move || format!("{selector}-{id}"))
+                .group(group)
+                .relative()
+                .w(px(size.0))
+                .h(px(size.1))
+                .max_w_full()
+                .flex_none()
+                .rounded_lg()
+                .overflow_hidden()
+                .border_1()
+                .border_color(rgb(self.palette.border))
+                .child(picture)
+                .children(more)
+                .into_any_element(),
+        )
+    }
+
     /// The icon, the name and "More options".
     fn header(&self, kind: FileKind) -> AnyElement {
         let name = SharedString::from(self.file.name.clone());

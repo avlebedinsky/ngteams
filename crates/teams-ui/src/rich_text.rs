@@ -14,7 +14,10 @@
 //!   any other image is a placeholder (`Image`, with its `alt`), followed in a chat's message by a link that opens the
 //!   message in Teams on the web ([`layout_with_web_link`], [`message_web_link`]), as is a picture that can't be
 //!   shown. A message of emoticons alone ([`Rendered::emoticons_only`]) is drawn as Teams draws one: large, playing,
-//!   without its bubble.
+//!   without its bubble. A list is [`Block::List`]: each item's blocks beside its marker (its number, or a bullet by
+//!   how deep the list is nested: disc, circle, square), indented as a browser indents one. A paragraph of no-break
+//!   spaces alone (the web client's `<p>&nbsp;</p>`, its blank line) is drawn as a blank line; one of ASCII whitespace
+//!   alone, none.
 //! - [`render`] draws it: paragraphs line under line with no gap between them, as Teams sets them; pictures and
 //!   emoticons through `crate::inline`, their bytes asked of the engine of the [`PictureSource`] the view gave
 //!   ([`Rendered::with_source`]); a link opens through GPUI's `open_url` (the portal or `xdg-open`; in tests the test
@@ -32,7 +35,7 @@ use gpui::{
 };
 use serde_json::{Value, json};
 use teams_proto::MessagePicture;
-use teams_proto::chat::{Field, Image, Marks, Mention, Node, Quote, RichText, WEB_CLIENT};
+use teams_proto::chat::{Field, Image, List, Marks, Mention, Node, Quote, RichText, WEB_CLIENT};
 
 use crate::inline::{Emoticon, InlineText, LARGE_EMOTICON, Picture};
 pub use crate::inline::{PictureEngine, PictureSource};
@@ -135,9 +138,11 @@ impl TextBlock {
         }
     }
 
-    /// Nothing a reader would see.
+    /// Nothing a reader would see: markup whitespace alone (a no-break space is a blank line's, kept).
     fn is_blank(&self) -> bool {
-        self.text.trim().is_empty() && !self.pieces.iter().any(|(_, style)| style.image) && self.emoticons.is_empty()
+        self.text.trim_matches(|c: char| c.is_ascii_whitespace()).is_empty()
+            && !self.pieces.iter().any(|(_, style)| style.image)
+            && self.emoticons.is_empty()
     }
 
     /// The text as a reader would copy it: each emoticon's place given its emoji.
@@ -197,12 +202,81 @@ pub struct PictureBlock {
     pub fallback: TextBlock,
 }
 
+/// A list: numbered from `start` when `ordered`, else bulleted; `level` how many lists it is in (its bullet's shape);
+/// each item's blocks.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ListBlock {
+    pub ordered: bool,
+    pub start: u32,
+    pub level: usize,
+    pub items: Vec<Vec<Block>>,
+}
+
+impl ListBlock {
+    /// The marker of its item at `index`, as a browser draws it: `3.`, or a disc, circle or square bullet by its level.
+    #[must_use]
+    pub fn marker(&self, index: usize) -> String {
+        if self.ordered {
+            let number = u64::from(self.start) + u64::try_from(index).unwrap_or(u64::MAX);
+            return format!("{number}.");
+        }
+        match self.level {
+            0 => "\u{2022}",
+            1 => "\u{25e6}",
+            _ => "\u{25aa}",
+        }
+        .to_owned()
+    }
+
+    /// The lines of its item at `index`: the first after the item's marker, indented by the list's level.
+    fn item_lines(&self, index: usize, item: &[Block]) -> Vec<String> {
+        let head = format!("{}{}", "    ".repeat(self.level), self.marker(index));
+        let mut lines: Vec<String> = item.iter().flat_map(Block::plain_lines).collect();
+        match lines.first_mut() {
+            Some(first) => *first = format!("{head} {first}"),
+            None => lines.push(head),
+        }
+        lines
+    }
+}
+
 /// One block of a message's text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Block {
     Text(TextBlock),
     Quote(QuoteBlock),
     Picture(PictureBlock),
+    List(ListBlock),
+}
+
+impl Block {
+    /// Whether its own text (not a quote's) mentions the account.
+    fn mentions_me(&self) -> bool {
+        match self {
+            Self::Text(text) => text
+                .pieces
+                .iter()
+                .any(|(_, style)| style.mention == Some(Mentioned::Me)),
+            Self::List(list) => list.items.iter().flatten().any(Self::mentions_me),
+            Self::Quote(_) | Self::Picture(_) => false,
+        }
+    }
+
+    /// Its lines as a reader copies them: a paragraph's text (an emoticon as its emoji), a list's items each after its
+    /// marker; a quote and a picture none.
+    #[must_use]
+    pub fn plain_lines(&self) -> Vec<String> {
+        match self {
+            Self::Text(text) => vec![text.plain()],
+            Self::List(list) => list
+                .items
+                .iter()
+                .enumerate()
+                .flat_map(|(index, item)| list.item_lines(index, item))
+                .collect(),
+            Self::Quote(_) | Self::Picture(_) => Vec::new(),
+        }
+    }
 }
 
 /// A message's rich text laid out to draw.
@@ -248,13 +322,7 @@ impl Rendered {
     /// Whether its own text (not a quote of another message) mentions the account.
     #[must_use]
     pub fn mentions_me(&self) -> bool {
-        self.blocks.iter().any(|block| match block {
-            Block::Text(text) => text
-                .pieces
-                .iter()
-                .any(|(_, style)| style.mention == Some(Mentioned::Me)),
-            Block::Quote(_) | Block::Picture(_) => false,
-        })
+        self.blocks.iter().any(Block::mentions_me)
     }
 }
 
@@ -349,6 +417,8 @@ struct Builder<'a> {
     web_link: Option<String>,
     /// A quote's: its pictures stay placeholders, as another message's.
     quoted: bool,
+    /// How many lists the walk is in.
+    level: usize,
 }
 
 impl<'a> Builder<'a> {
@@ -360,6 +430,7 @@ impl<'a> Builder<'a> {
             link: None,
             web_link: None,
             quoted: false,
+            level: 0,
         }
     }
 
@@ -410,8 +481,33 @@ impl<'a> Builder<'a> {
                 }
                 Node::Image(image) => self.image(image),
                 Node::Quote(quote) => self.quote(quote),
+                Node::List(list) => self.list(list),
             }
         }
+    }
+
+    /// A list: each item's blocks laid out as this level's are, one list deeper.
+    fn list(&mut self, list: &List) {
+        self.end_block();
+        let items = list
+            .items
+            .iter()
+            .map(|item| {
+                let mut inner = Builder::new(self.mentions);
+                inner.web_link.clone_from(&self.web_link);
+                inner.link.clone_from(&self.link);
+                inner.quoted = self.quoted;
+                inner.level = self.level + 1;
+                inner.walk(item);
+                inner.finish()
+            })
+            .collect();
+        self.blocks.push(Block::List(ListBlock {
+            ordered: list.ordered,
+            start: list.start,
+            level: self.level,
+            items,
+        }));
     }
 
     /// An emoticon keeps its place in the text; a picture of the message's own (not a quote's, nor inside a link) is a
@@ -596,6 +692,7 @@ fn blocks(draw: &Draw<'_>, path: &mut Vec<usize>, blocks: &[Block]) -> Vec<AnyEl
                 Block::Text(text) => text_block(draw, path, text),
                 Block::Quote(quote) => quote_block(draw, path, quote),
                 Block::Picture(picture) => picture_block(draw, path, picture),
+                Block::List(list) => list_block(draw, path, list),
             };
             path.pop();
             element
@@ -619,6 +716,44 @@ fn picture_block(draw: &Draw<'_>, path: &[usize], picture: &PictureBlock) -> Any
             reading,
             fallback,
         ))
+        .into_any_element()
+}
+
+/// The width of a list item's marker column, as a browser indents a list (its marker right-aligned before the item).
+const LIST_INDENT: f32 = 40.0;
+
+/// A list, as a browser draws one: each item a row of its marker, right-aligned in the list's indent, and its blocks.
+fn list_block(draw: &Draw<'_>, path: &mut Vec<usize>, list: &ListBlock) -> AnyElement {
+    let rows: Vec<AnyElement> = list
+        .items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            path.push(index);
+            let content = blocks(draw, path, item);
+            path.pop();
+            div()
+                .flex()
+                .items_start()
+                .child(
+                    div()
+                        .w(px(LIST_INDENT))
+                        .flex_none()
+                        .flex()
+                        .justify_end()
+                        .pr(px(6.0))
+                        .whitespace_nowrap()
+                        .child(list.marker(index)),
+                )
+                .child(div().flex_1().min_w_0().flex().flex_col().children(content))
+                .into_any_element()
+        })
+        .collect();
+    div()
+        .debug_selector(|| "rich-list".to_owned())
+        .flex()
+        .flex_col()
+        .children(rows)
         .into_any_element()
 }
 

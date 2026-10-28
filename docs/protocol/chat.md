@@ -465,6 +465,14 @@ its shape (two files, made-up names and links). No lab capture holds a received 
   links, opens the sharing link in the browser on a click, offers "Open in browser", "Download" (the sharing link with
   `download=1`) and "Copy link", and reads a video's or an image's picture from Graph by the sharing link
   ([graph.md](graph.md#a-shared-files-thumbnail)). It shares nothing: Share is a contacting write.
+- **An image file** (seen in a received message, an image shared alone with no caption: the message's content empty)
+  carries the same entry with `fileType` `jpg` and a `filePreview` naming a picture of it on AMS: `previewUrl`
+  `https://<region>-api.asm.skype.com/v1/objects/<id>/views/imgo`, `previewWidth` and `previewHeight` (501 by 500
+  there). The web client draws it as that picture alone, with no card or header, about half the preview's size (253
+  by 252 there), its corners rounded, and the message with no bubble. The native client reads the preview only when
+  its link is a view of an AMS object as a pasted picture's is (`teams_proto::chat::FilePreview`, through
+  `MessagePicture::of`), reads it as it reads a pasted picture (the account's AMS, its skypetoken), draws it scaled
+  down into 360 by 252, and draws the card (with Graph's thumbnail) when the preview can't be had.
 
 ## Mentions (mention)
 

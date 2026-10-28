@@ -7,7 +7,10 @@
 //!   is a JSON string of a list; an entry's `@type` is `http://schema.skype.com/File`, its `fileName` (and `title`)
 //!   the file's name, `fileType` (and `type`) its extension, `fileInfo.shareUrl` the sharing link the web client opens
 //!   it by (`https://<tenant>-my.sharepoint.com/:v:/g/personal/<user>/<id>`), `objectUrl` (and `fileInfo.fileUrl`) the
-//!   file's own address in its library, `state` `active`, `filePreview.previewUrl` empty for a video.
+//!   file's own address in its library, `state` `active`, `filePreview.previewUrl` empty for a video; for an image,
+//!   the view of a picture of it on AMS (`https://<region>-api.asm.skype.com/v1/objects/<id>/views/imgo`) with its
+//!   `previewWidth` and `previewHeight`, which Teams draws in the message in place of the file's card
+//!   ([`SharedFile::preview`]).
 //! - **Read strictly**: an entry is read only when its `@type` is the file's, it has a name, its `state` (when there is
 //!   one) is `active`, and at least one of its links is an `https` URL on a SharePoint host ([`is_file_link`]). Any
 //!   other entry, and a `files` that isn't a list, is kept as it came ([`SharedFiles::unread`]): a view says the
@@ -21,6 +24,9 @@ pub const FILE_TYPE: &str = "http://schema.skype.com/File";
 
 /// The longest file name kept, in characters; a longer one is cut there.
 const MAX_NAME: usize = 400;
+
+/// The largest side a preview's given size may have, in pixels; a larger one is no size.
+const MAX_PREVIEW_SIDE: u64 = 100_000;
 
 /// The longest link kept, in bytes; an entry with only longer ones isn't read.
 const MAX_LINK: usize = 4096;
@@ -78,6 +84,18 @@ pub struct SharedFile {
     /// The file's own address in its library (`objectUrl`, else `fileInfo.fileUrl`), when it is a SharePoint `https`
     /// link.
     pub object_url: Option<String>,
+    /// A picture of it on AMS (`filePreview`), when its link is a view of an AMS object a message's picture is read
+    /// from ([`crate::MessagePicture::of`]).
+    pub preview: Option<FilePreview>,
+}
+
+/// A picture of a file (an image's), as its entry's `filePreview` names it.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FilePreview {
+    /// The view of the AMS object (`previewUrl`), read as a message's picture is.
+    pub src: String,
+    /// Its size (`previewWidth`, `previewHeight`), when both are whole numbers from 1 to 100 000.
+    pub size: Option<(u32, u32)>,
 }
 
 impl SharedFile {
@@ -194,6 +212,27 @@ fn read_entry(entry: &Map<String, Value>) -> Option<SharedFile> {
         extension,
         share_url,
         object_url,
+        preview: entry
+            .get("filePreview")
+            .and_then(Value::as_object)
+            .and_then(read_preview),
+    })
+}
+
+/// An entry's `filePreview`, when its `previewUrl` is a view of an AMS object.
+fn read_preview(preview: &Map<String, Value>) -> Option<FilePreview> {
+    let src = preview.get("previewUrl")?.as_str()?.trim();
+    crate::MessagePicture::of(src)?;
+    let side = |key: &str| {
+        preview
+            .get(key)
+            .and_then(Value::as_u64)
+            .filter(|side| (1..=MAX_PREVIEW_SIDE).contains(side))
+            .and_then(|side| u32::try_from(side).ok())
+    };
+    Some(FilePreview {
+        src: src.to_owned(),
+        size: side("previewWidth").zip(side("previewHeight")),
     })
 }
 

@@ -1,5 +1,6 @@
 //! Our own renderer of a message's rich text, node by node: marks, line breaks, paragraphs, mentions (the account's
-//! own more strongly), links (opened through GPUI's `open_url`, here the test platform's record), quotes, images (a
+//! own more strongly), links (opened through GPUI's `open_url`, here the test platform's record), quotes, lists (each
+//! item beside its number or bullet, indented), images (a
 //! placeholder), a pasted picture (a block of its own, its bytes asked of the engine) and emoticons (inline at the
 //! text's height, or large and without a bubble in a message of emoticons alone); laid out from `teams-proto`'s
 //! sanitized model and drawn on GPUI's test context.
@@ -16,8 +17,8 @@ use gpui::{
 };
 use teams_proto::chat::{Marks, parse_html};
 use teams_ui::rich_text::{
-    self, Block, IMAGE_PLACEHOLDER, LinkRange, Mentioned, Mentions, QuoteBlock, Rendered, Style, TextBlock, highlight,
-    opens,
+    self, Block, IMAGE_PLACEHOLDER, LinkRange, ListBlock, Mentioned, Mentions, QuoteBlock, Rendered, Style, TextBlock,
+    highlight, opens,
 };
 use teams_ui::theme::LIGHT_PALETTE;
 
@@ -272,7 +273,7 @@ fn an_image_of_a_chat_message_is_followed_by_its_link_to_the_web() {
         .iter()
         .find_map(|block| match block {
             Block::Quote(quote) => Some(quote),
-            Block::Text(_) | Block::Picture(_) => None,
+            Block::Text(_) | Block::Picture(_) | Block::List(_) => None,
         })
         .unwrap();
     let Block::Text(inner) = &quoted.blocks[0] else {
@@ -319,10 +320,55 @@ impl Render for Holder {
 }
 
 #[test]
+fn a_list_s_items_are_numbered_or_bulleted_and_a_no_break_space_is_a_blank_line() {
+    let rendered = laid_out(
+        "<p>Pick one:</p><p>&nbsp;</p><ol start=\"2\"><li>External API</li><li>Internal API<ul><li>inner<ul><li>deep</li>\
+         </ul></li></ul></li></ol>",
+    );
+    assert_eq!(text_block(&rendered, 0).text, "Pick one:");
+    assert_eq!(
+        text_block(&rendered, 1).text,
+        "\u{a0}",
+        "the web client's blank line stays"
+    );
+    let Block::List(list) = &rendered.blocks[2] else {
+        panic!("a list: {:?}", rendered.blocks[2]);
+    };
+    assert!(list.ordered && list.level == 0);
+    assert_eq!((list.marker(0), list.marker(1)), ("2.".to_owned(), "3.".to_owned()));
+    let Block::List(inner) = &list.items[1][1] else {
+        panic!("the nested list: {:?}", list.items[1]);
+    };
+    assert_eq!(
+        (inner.ordered, inner.level, inner.marker(0)),
+        (false, 1, "\u{25e6}".to_owned())
+    );
+    let bullet = |level| {
+        ListBlock {
+            level,
+            ..ListBlock::default()
+        }
+        .marker(0)
+    };
+    assert_eq!((bullet(0), bullet(2)), ("\u{2022}".to_owned(), "\u{25aa}".to_owned()));
+    // copied as a reader sees it: each item after its marker
+    assert_eq!(
+        rendered.blocks[2].plain_lines(),
+        [
+            "2. External API",
+            "3. Internal API",
+            "    \u{25e6} inner",
+            "        \u{25aa} deep"
+        ]
+    );
+}
+
+#[test]
 fn every_node_draws_and_a_link_opens_through_open_url() {
     let content = "<p><a href=\"https://example.test/opened\">example</a></p><p>a <b>bold</b> <code>c</code> \
                    <span itemscope itemtype=\"http://schema.skype.com/Mention\" itemid=\"0\">Lab A</span><br>\
-                   <img src=\"https://images.example.test/x.png\" alt=\"x\"></p><blockquote><p>quoted</p></blockquote>";
+                   <img src=\"https://images.example.test/x.png\" alt=\"x\"></p><blockquote><p>quoted</p></blockquote>\
+                   <ol><li>listed</li></ol>";
     let properties = format!("{{\"mentions\":[{{\"itemid\":\"0\",\"mri\":\"{ME}\",\"mentionType\":\"person\"}}]}}");
     let rendered = Arc::new(rich_text::layout(
         &parse_html(content),
@@ -335,7 +381,7 @@ fn every_node_draws_and_a_link_opens_through_open_url() {
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    for selector in ["rich-link", "rich-text", "rich-quote"] {
+    for selector in ["rich-link", "rich-text", "rich-quote", "rich-list"] {
         assert!(cx.debug_bounds(selector).is_some(), "{selector} is drawn");
     }
     let link = cx.debug_bounds("rich-link").expect("the link is drawn");

@@ -373,6 +373,27 @@ impl Loaded {
                 self.inline(children, mentioned)?;
             }
             Node::Quote(quote) => self.inline(&quote.body, mentioned)?,
+            Node::List(list) => {
+                // each item a line after its marker as text: the box writes no list
+                for (index, item) in list.items.iter().enumerate() {
+                    self.new_line();
+                    let marker = if list.ordered {
+                        let number = u64::from(list.start) + u64::try_from(index).unwrap_or(u64::MAX);
+                        format!("{number}. ")
+                    } else {
+                        "\u{2022} ".to_owned()
+                    };
+                    self.text.push_str(&marker);
+                    // an item's first paragraph (`<li><p>…</p></li>`) is on its marker's line
+                    match item.split_first() {
+                        Some((Node::Paragraph(first), rest)) => {
+                            self.inline(first, mentioned)?;
+                            self.inline(rest, mentioned)?;
+                        }
+                        _ => self.inline(item, mentioned)?,
+                    }
+                }
+            }
             Node::Image(_) => return Err(CantEdit::Image),
         }
         Ok(())

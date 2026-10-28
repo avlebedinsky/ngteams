@@ -28,10 +28,12 @@ pub use event::{
     CALL_MEDIA_PREFIX, CallEnd, CallStart, ChatEvent, ChatPolicy, Member, Members, Recording, RecordingContents,
     RecordingStatus, Removed, TopicUpdate, Transcript, chat_event, is_call_media,
 };
-pub use files::{FILE_TYPE, FileKind, SharedFile, SharedFiles, is_file_link, is_sharepoint_host, shared_files};
+pub use files::{
+    FILE_TYPE, FileKind, FilePreview, SharedFile, SharedFiles, is_file_link, is_sharepoint_host, shared_files,
+};
 pub use html::{
-    AMS_IMAGE_ITEMTYPE, EMOJI_ITEMTYPE, Image, MAX_CONTENT, MAX_DEPTH, MENTION_ITEMTYPE, Marks, Node, Quote,
-    REPLY_ITEMTYPE, RichText, ThreadActivity, parse as parse_html, thread_activity,
+    AMS_IMAGE_ITEMTYPE, EMOJI_ITEMTYPE, Image, List, MAX_CONTENT, MAX_DEPTH, MAX_LIST_START, MENTION_ITEMTYPE, Marks,
+    Node, Quote, REPLY_ITEMTYPE, RichText, ThreadActivity, parse as parse_html, thread_activity,
 };
 pub use model::{
     ConsumptionHorizon, Conversation, ConversationKind, ConversationList, Field, Malformed, MemberList, Mention,
