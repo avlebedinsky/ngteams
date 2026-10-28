@@ -386,6 +386,16 @@ build's (agents never do). No client, build or test sends either; `teams-media` 
 | `GET` | `https://ciscobinary.openh264.org/libopenh264-2.6.0-linux64.8.so.bz2` | Cisco's prebuilt OpenH264 2.6.0 for Linux x86-64, the library the lab binaries' and the personal build's calls load for H.264 (its decompressed SHA-256 checked) | no | no service: the script's `curl`, HTTPS only | [calling.md](calling.md#the-h264-codec) · M3 T18, T22 | used (the script) |
 | `GET` | `https://www.openh264.org/BINARY_LICENSE.txt` | Cisco's licence for that binary, saved beside it | no | no service: the script's `curl` | [calling.md](calling.md#the-h264-codec) · M3 T18 | used (the script) |
 
+## Giphy (`media.giphy.com`, `media<n>.giphy.com`)
+
+Giphy's public media CDN, where the GIFs picked from Teams' GIF picker live. Not a Teams service and not a contacting
+one: the web client's `<img>` loads a GIF as a browser loads any picture, with no credential. The native transport
+reaches it as `Service::Giphy` (`https://media.giphy.com/`, no token) and sends it only the read below.
+
+| Method | Path | What it does | Contacting? | Native | Notes · task | Evidence |
+|---|---|---|---|---|---|---|
+| `GET` | `/media/<id>/<file>.gif` (a message names it as `https://media<n>.giphy.com/media/v1.<token>/<id>/giphy.gif`, sometimes with a query) | a GIF a message shows, picked from Teams' GIF picker: its bytes | no (a read) | `Read` (`GiphyPicture` on `Service::Giphy`: `media.giphy.com` whatever shard the message names, the GIF's id and file name alone, Giphy's `v1.` token and any query left out; no token, `Accept: image/gif`; its answer kept only when its bytes are a GIF, up to 24 MB); the engine reads it when a view shows the GIF, once a run per GIF (`teams_core::pictures`), the chat and channel views playing it in the message | [chat.md](chat.md#pictures-in-messages) | the user's chats (the `<img>`, read for its shape); the read without the token and on `media.giphy.com` checked by hand (the same bytes); native on the mock only |
+
 ## The Teams page itself (`https://<teams origin>/`)
 
 | Method | Path | What it does | Contacting? | Native | Notes · task | Evidence |

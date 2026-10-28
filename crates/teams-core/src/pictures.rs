@@ -1,12 +1,14 @@
-//! Pictures pasted into messages, read when a view shows one ([`MessagePicture`]: a `GET` of the picture's view from
-//! the account's AMS base, the way the web client reads it), as [`crate::emoticons`] reads reactions' animations.
+//! Pictures messages show, read when a view shows one ([`InlinePicture`]): a picture pasted into a message
+//! ([`teams_proto::MessagePicture`]: a `GET` of the picture's view from the account's AMS base, the way the web client
+//! reads it), or a GIF picked from Teams' GIF picker ([`teams_proto::GiphyPicture`]: a `GET` of the GIF from Giphy's
+//! media host, no token), as [`crate::emoticons`] reads reactions' animations.
 //!
 //! - **Kept for the run**, in memory, up to [`KEPT_BYTES`] of them (the oldest read let go first: a view keeps what it
 //!   decoded, so a picture let go is read again only when a view asks for it anew); a view the service has none of (an
 //!   answer that isn't a success, or isn't a picture) is kept as missing. A read that failed on the way isn't kept and
 //!   is answered [`EngineError::PictureUnread`], so the next ask reads again.
 //! - **One read per picture at a time**: asks while its read runs wait for that read.
-//! - A `src` that isn't a view of an AMS object ([`MessagePicture::of`]) is answered `None` with nothing read.
+//! - A `src` that names neither ([`InlinePicture::of`]) is answered `None` with nothing read.
 //! - Nothing is stored and nothing is written.
 
 use std::cell::RefCell;
@@ -15,7 +17,7 @@ use std::hash::Hash;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use teams_proto::{Client, Credentials, HttpError, HttpTransport, MessagePicture, PastedPicture};
+use teams_proto::{Client, Credentials, HttpError, HttpTransport, InlinePicture, PastedPicture};
 
 use crate::engine::{EngineError, Responder};
 
@@ -33,7 +35,7 @@ pub(crate) enum Known {
     Reading(Vec<Responder<Option<PictureBytes>>>),
 }
 
-/// The pictures kept, by what names each (a message's AMS view; a shared file, [`crate::thumbnails`]).
+/// The pictures kept, by what names each (a message's AMS view or GIF; a shared file, [`crate::thumbnails`]).
 pub(crate) struct Kept<K> {
     pub(crate) known: HashMap<K, Known>,
     /// The pictures read, oldest first, and their bytes in all.
@@ -73,7 +75,7 @@ impl<K: Clone + Eq + Hash> Kept<K> {
 
 pub(crate) struct Pictures<C> {
     client: Arc<Client<HttpTransport<C>>>,
-    kept: Rc<RefCell<Kept<MessagePicture>>>,
+    kept: Rc<RefCell<Kept<InlinePicture>>>,
 }
 
 impl<C: Credentials + 'static> Pictures<C> {
@@ -87,7 +89,7 @@ impl<C: Credentials + 'static> Pictures<C> {
     /// Answers `reply` with the picture `src` names: at once when it is known, else once its read is over (the read
     /// started now unless one runs). A `src` no read can name is answered `None`.
     pub(crate) fn picture(&self, src: &str, reply: Responder<Option<PictureBytes>>) {
-        let Some(picture) = MessagePicture::of(src) else {
+        let Some(picture) = InlinePicture::of(src) else {
             let _ = reply.send(Ok(None));
             return;
         };
@@ -110,8 +112,8 @@ impl<C: Credentials + 'static> Pictures<C> {
 /// the way ([`EngineError::PictureUnread`]).
 async fn read_picture<C: Credentials + 'static>(
     client: Arc<Client<HttpTransport<C>>>,
-    picture: MessagePicture,
-    kept: Rc<RefCell<Kept<MessagePicture>>>,
+    picture: InlinePicture,
+    kept: Rc<RefCell<Kept<InlinePicture>>>,
 ) {
     let answer = match client.read(&picture).await {
         Ok(answer) => Some(picture.read_answer(&answer).map(Arc::new)),
@@ -137,8 +139,8 @@ mod tests {
 
     use super::*;
 
-    fn view(n: usize) -> MessagePicture {
-        MessagePicture::of(&format!(
+    fn view(n: usize) -> InlinePicture {
+        InlinePicture::of(&format!(
             "https://us-api.asm.skype.com/v1/objects/0-eus-d9-{n:032x}/views/imgo"
         ))
         .unwrap()

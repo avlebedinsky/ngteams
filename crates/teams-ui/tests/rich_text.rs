@@ -1,7 +1,8 @@
 //! Our own renderer of a message's rich text, node by node: marks, line breaks, paragraphs, mentions (the account's
 //! own more strongly), links (opened through GPUI's `open_url`, here the test platform's record), quotes, lists (each
 //! item beside its number or bullet, indented), images (a
-//! placeholder), a pasted picture (a block of its own, its bytes asked of the engine) and emoticons (inline at the
+//! placeholder), a pasted picture and a GIF from Teams' GIF picker (a block of its own, its bytes asked of the engine,
+//! a GIF's every frame kept to play) and emoticons (inline at the
 //! text's height, or large and without a bubble in a message of emoticons alone); laid out from `teams-proto`'s
 //! sanitized model and drawn on GPUI's test context.
 //! Every id, name and link is made up.
@@ -550,6 +551,63 @@ fn an_emoticon_keeps_its_place_in_the_text_and_a_pasted_picture_is_a_block() {
     );
 }
 
+/// A GIF from Teams' GIF picker, on Giphy's media host as a message names it (the id and Giphy's token made up).
+const GIF: &str = "https://media2.giphy.com/media/v1.Y2lkPW1hZGUtdXA/MadeUpGif000/giphy.gif";
+
+#[test]
+fn a_gif_from_the_gif_picker_is_a_picture_block_at_its_size() {
+    // as the web client sends one: between two blank paragraphs, its size as attributes
+    let content = format!(
+        "<p>&nbsp;</p>\n<img src=\"{GIF}\" width=\"250\" height=\"200\" alt=\"Made Up GIF (GIF Image)\" \
+         style=\"height:auto; margin-top:4px; max-width:100%\">\n<p>&nbsp;</p>"
+    );
+    let link = "https://teams.microsoft.com/l/message/19:x@thread.v2/1";
+    let rendered = rich_text::layout_with_web_link(&parse_html(&content), &Mentions::default(), Some(link));
+    let pictures: Vec<_> = rendered
+        .blocks
+        .iter()
+        .filter_map(|block| match block {
+            Block::Picture(picture) => Some(picture),
+            Block::Text(_) | Block::Quote(_) | Block::List(_) => None,
+        })
+        .collect();
+    assert_eq!(pictures.len(), 1, "{rendered:#?}");
+    assert_eq!((pictures[0].src.as_str(), pictures[0].size), (GIF, Some((250, 200))));
+    assert!(
+        rendered.blocks.iter().all(|block| match block {
+            Block::Text(text) => !text.text.contains(IMAGE_PLACEHOLDER),
+            Block::Picture(_) | Block::Quote(_) | Block::List(_) => true,
+        }),
+        "no placeholder beside it: {rendered:#?}"
+    );
+    // drawn when it can't be read: its placeholder and the link to the message
+    assert_eq!(
+        pictures[0].fallback.text,
+        format!(
+            "[{IMAGE_PLACEHOLDER}: Made Up GIF (GIF Image)] {}",
+            rich_text::IMAGE_WEB_LINK
+        )
+    );
+
+    // the Giphy `itemtype`'s form, its size in its style
+    let typed = format!(
+        "<div>Confirmed. <br><img src=\"{GIF}\" alt=\"made up GIF\" itemscope=\"\" \
+         itemtype=\"http://schema.skype.com/Giphy\" style=\"width:400px; height:300px\"></div>"
+    );
+    let rendered = laid_out(&typed);
+    let Some(Block::Picture(picture)) = rendered.blocks.last() else {
+        panic!("a picture block: {rendered:#?}");
+    };
+    assert_eq!((picture.src.as_str(), picture.size), (GIF, Some((400, 300))));
+
+    // another host's GIF stays a placeholder
+    let elsewhere = laid_out("<p><img src=\"https://images.example.test/made-up.gif\" alt=\"g\"></p>");
+    assert!(
+        !elsewhere.blocks.iter().any(|block| matches!(block, Block::Picture(_))),
+        "{elsewhere:#?}"
+    );
+}
+
 #[test]
 fn a_message_of_emoticons_alone_is_drawn_bare() {
     let one = format!("<div>{}</div>", emoticon("1f44b_wavinghand", "\u{1f44b}", 58));
@@ -666,6 +724,66 @@ fn a_pasted_picture_is_asked_of_the_engine_and_drawn_within_the_width_there_is()
         (f32::from(picture_height) - f32::from(drawn.size.width) / 4.0).abs() < 2.0,
         "{drawn:?}"
     );
+}
+
+/// A made-up animated GIF, `width` by `height`, of `frames` frames in turn red and blue.
+fn gif(width: u16, height: u16, frames: usize) -> Vec<u8> {
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = image::codecs::gif::GifEncoder::new(&mut bytes);
+        encoder.set_repeat(image::codecs::gif::Repeat::Infinite).unwrap();
+        for at in 0..frames {
+            let colour = if at % 2 == 0 {
+                [200, 40, 40, 255]
+            } else {
+                [40, 40, 200, 255]
+            };
+            let frame = image::RgbaImage::from_pixel(u32::from(width), u32::from(height), image::Rgba(colour));
+            encoder
+                .encode_frame(image::Frame::from_parts(
+                    frame,
+                    0,
+                    0,
+                    image::Delay::from_numer_denom_ms(100, 1),
+                ))
+                .unwrap();
+        }
+    }
+    bytes
+}
+
+#[test]
+fn a_gif_is_asked_of_the_engine_and_drawn_with_every_frame_at_its_size() {
+    let picture = Arc::new(teams_proto::PastedPicture {
+        format: teams_proto::PastedFormat::Gif,
+        bytes: gif(50, 40, 3),
+    });
+    let (image, natural) = teams_ui::inline::decode(&picture).expect("the GIF decodes");
+    assert_eq!(
+        (image.frame_count(), natural),
+        (3, (50, 40)),
+        "every frame kept to play"
+    );
+
+    let core = Arc::new(FakePictures::default());
+    core.pictures.lock().unwrap().insert(GIF.to_owned(), picture);
+    let content = format!("<p><img src=\"{GIF}\" width=\"250\" height=\"200\" alt=\"made up GIF\"></p>");
+    let source = rich_text::PictureSource::of(core.clone());
+    let rendered = Arc::new(rich_text::layout(&parse_html(&content), &Mentions::default()).with_source(source));
+    let app: &'static mut TestAppContext = Box::leak(Box::new(TestAppContext::single()));
+    let (_, cx) = app.add_window_view(|_, _| Holder { rendered });
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    cx.run_until_parked();
+    assert!(core.asked().contains(&"message_picture"));
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    let drawn = cx.debug_bounds("rich-picture").expect("the GIF is drawn");
+    // its block the width there is; the GIF as high as the message gives it (so as wide: it isn't scaled down), its
+    // block's padding aside
+    assert_eq!(drawn.size.height - px(8.0), px(200.0), "{drawn:?}");
 }
 
 #[test]

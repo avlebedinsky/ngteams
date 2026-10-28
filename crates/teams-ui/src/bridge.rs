@@ -78,8 +78,8 @@ pub trait Core: Send + Sync + 'static {
     fn presence(&self, mri: String) -> Reply<Availability>;
     /// A reaction's animation as Teams' CDN has it (its strip of frames), read once a run; `None` when there is none.
     fn reaction_animation(&self, id: String) -> Reply<Option<Strip>>;
-    /// The picture a message's `<img>` names by its `src` (a view of an AMS object), read by the engine once a run;
-    /// `None` when there is none, or `src` names no AMS view.
+    /// The picture a message's `<img>` names by its `src` (a view of an AMS object, or a GIF on Giphy's media host),
+    /// read by the engine once a run; `None` when there is none, or `src` names neither.
     fn message_picture(&self, src: String) -> Reply<Option<PictureBytes>>;
     /// The thumbnail of a file a message carries, by its sharing link (`teams_proto::chat::SharedFile::share_url`),
     /// read by the engine once a run; `None` when there is none.

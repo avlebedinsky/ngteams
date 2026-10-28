@@ -40,8 +40,8 @@ teams-media.workspace = true
 [dev-dependencies]
 # the sign-out on GPUI's test context
 gpui-pre = { workspace = true, features = ["test-support"] }
-# the window test's screenshot, read back
-image = { workspace = true, features = ["png"] }
+# the window test's screenshot, read back; the tour's made-up GIF
+image = { workspace = true, features = ["png", "gif"] }
 serde_json.workspace = true
 tempfile.workspace = true
 # the window test's engine reaches the mock chat service and its Trouter through the test-support mock origins; the

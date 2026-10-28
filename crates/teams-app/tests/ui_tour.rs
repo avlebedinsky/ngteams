@@ -67,7 +67,7 @@ const SETTLE: Duration = Duration::from_millis(1500);
 type Step = (&'static str, fn(&Entity<Shell>, &mut Window, &mut App));
 
 /// The tour.
-const STEPS: [Step; 25] = [
+const STEPS: [Step; 26] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -149,10 +149,13 @@ const STEPS: [Step; 25] = [
     ("chat-dark-emoji", |shell, window, cx| {
         with_compose(shell, cx, |compose, cx| compose.toggle_emoji(window, cx));
     }),
-    // b's pasted picture with an emoticon in its text, and b's wave alone (`seed_pictures`), in Teams Dark
+    // b's pasted picture with an emoticon in its text, b's wave alone and c's GIF from the GIF picker
+    // (`seed_pictures`), in Teams Dark
     ("chat-pictures", |shell, window, cx| {
         shell.update(cx, |shell, cx| shell.open_chat(ABC_CHAT.to_owned(), window, cx));
     }),
+    // the same once its pictures were read and decoded: the pasted picture, and c's GIF on one of its frames
+    ("chat-pictures-read", |_, _, _| {}),
     // c's message with two videos and a document (`seed_files`): its lines, then the files' cards, the videos' with
     // their thumbnails as Graph and the media host (the mock) gave them, in Teams Dark
     ("chat-files-dark", |shell, window, cx| {
@@ -554,6 +557,41 @@ fn seed_pictures(mock: &ChatServiceMock, runtime: &tokio::runtime::Runtime) -> S
     mock.post_as(LAB_B, ABC_CHAT, &html).ok_or("b's picture refused")?;
     let wave = format!("<div>{}</div>", emoticon("1f44b_wavinghand", "\u{1f44b}", 58));
     mock.post_as(LAB_B, ABC_CHAT, &wave).ok_or("b's wave refused")?;
+    let mut gif = Vec::new();
+    write_made_up_gif(&mut gif)?;
+    runtime.block_on(mock.serve_bytes(&format!("/media/{GIF_ID}/giphy.gif"), "image/gif", gif));
+    // as the web client sends one picked from its GIF picker: between two blank paragraphs, on a shard of Giphy's host
+    let picked = format!(
+        "<p>&nbsp;</p>\n<img src=\"https://media2.giphy.com/media/v1.Y2lkPW1hZGUtdXA/{GIF_ID}/giphy.gif\" width=\"250\" \
+         height=\"200\" alt=\"Made Up News GIF (GIF Image)\" style=\"height:auto; margin-top:4px; max-width:100%\">\n\
+         <p>&nbsp;</p>"
+    );
+    mock.post_as(LAB_C, ABC_CHAT, &picked).ok_or("c's GIF refused")?;
+    Ok(())
+}
+
+/// The made-up GIF c's message names on Giphy (served by the mock as Giphy's media host would).
+const GIF_ID: &str = "MadeUpGif000";
+
+/// A made-up animated GIF, 250 by 200: a red banner on dark blue, a light bar sweeping across it in six frames.
+fn write_made_up_gif(out: &mut Vec<u8>) -> SandboxResult {
+    let mut encoder = image::codecs::gif::GifEncoder::new(out);
+    encoder.set_repeat(image::codecs::gif::Repeat::Infinite)?;
+    for at in 0u32..6 {
+        let mut frame = image::RgbaImage::from_pixel(250, 200, image::Rgba([20, 30, 70, 255]));
+        for y in 120..170 {
+            for x in 0..250 {
+                frame.put_pixel(x, y, image::Rgba([200, 30, 40, 255]));
+            }
+        }
+        for y in 135..155 {
+            for x in (at * 40)..(at * 40 + 60).min(250) {
+                frame.put_pixel(x, y, image::Rgba([245, 245, 245, 255]));
+            }
+        }
+        let delay = image::Delay::from_numer_denom_ms(150, 1);
+        encoder.encode_frame(image::Frame::from_parts(frame, 0, 0, delay))?;
+    }
     Ok(())
 }
 

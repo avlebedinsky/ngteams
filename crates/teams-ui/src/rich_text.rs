@@ -10,7 +10,8 @@
 //!   entry in `properties.mentions`, whose MRI says whom it names; an entry this build can't read names nobody); a
 //!   link is a clickable range; an emoticon (`<img itemtype="http://schema.skype.com/Emoji" itemid="<id>">`) keeps
 //!   the place of a few spaces in its paragraph's text ([`InlineEmoticon`]); a picture pasted into the message (an
-//!   `<img>` naming a view of an AMS object, not inside a link or a quote) is a block of its own ([`Block::Picture`]);
+//!   `<img>` naming a view of an AMS object) or a GIF picked from Teams' GIF picker (one on Giphy's media host), not
+//!   inside a link or a quote, is a block of its own ([`Block::Picture`], a GIF playing);
 //!   any other image is a placeholder (`Image`, with its `alt`), followed in a chat's message by a link that opens the
 //!   message in Teams on the web ([`layout_with_web_link`], [`message_web_link`]), as is a picture that can't be
 //!   shown. A message of emoticons alone ([`Rendered::emoticons_only`]) is drawn as Teams draws one: large, playing,
@@ -34,7 +35,7 @@ use gpui::{
     rgb,
 };
 use serde_json::{Value, json};
-use teams_proto::MessagePicture;
+use teams_proto::InlinePicture;
 use teams_proto::chat::{Field, Image, List, Marks, Mention, Node, Quote, RichText, WEB_CLIENT};
 
 use crate::inline::{Emoticon, InlineText, LARGE_EMOTICON, Picture};
@@ -192,8 +193,8 @@ pub struct QuoteBlock {
     pub blocks: Vec<Block>,
 }
 
-/// A picture pasted into a message: the view its `src` names, its `alt`, the size the message gives it, and what is
-/// drawn when it can't be shown (its placeholder, with the link to the message in Teams on the web).
+/// A picture pasted into a message, or a GIF it shows: the view or GIF its `src` names, its `alt`, the size the message
+/// gives it, and what is drawn when it can't be shown (its placeholder, with the link to the message in Teams on the web).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PictureBlock {
     pub src: String,
@@ -524,7 +525,7 @@ impl<'a> Builder<'a> {
             });
             return;
         }
-        if !self.quoted && self.link.is_none() && MessagePicture::of(&image.src).is_some() {
+        if !self.quoted && self.link.is_none() && InlinePicture::of(&image.src).is_some() {
             self.end_block();
             let mut fallback = Builder::new(self.mentions);
             fallback.web_link.clone_from(&self.web_link);

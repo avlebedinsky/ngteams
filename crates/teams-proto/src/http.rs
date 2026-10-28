@@ -33,15 +33,16 @@
 //!   once the transport was given its base, AMS's async gateway ([`HttpTransport::with_ams`], the GTM `amsV2`:
 //!   `https://<name>.asyncgw.teams.microsoft.com`, reads of a pasted picture's view only); and a file thumbnail's
 //!   picture ([`Service::FileThumbnail`], no base of its own: only [`HttpTransport::file_thumbnail`] reads there, a
-//!   link Graph handed out on SharePoint's media host or a SharePoint host, checked again, with no token). An
-//!   endpoint with an empty,
+//!   link Graph handed out on SharePoint's media host or a SharePoint host, checked again, with no token); and Giphy's
+//!   media CDN ([`Service::Giphy`]: `https://media.giphy.com/`, a GIF a message shows, no token). An endpoint with an
+//!   empty,
 //!   `.` or `..` segment is refused. Entra and authz aren't a service here (they stay in `teams-auth`'s own clients). A
 //!   new service is a code change: a variant, its base and its token's audience.
 //! - **The client**: `https` only, no proxy (an environment's `HTTPS_PROXY` could point anywhere), no redirects (a 3xx
 //!   is an answer, never followed: a region hop is the caller's to report), no retries of its own (reqwest's default
 //!   replays a request after an HTTP/2 GOAWAY or `REFUSED_STREAM`, which would send a write again and a plain request
 //!   unlogged), [`CONNECT_TIMEOUT`] and [`REQUEST_TIMEOUT`], bodies read up to [`MAX_BODY`] (a
-//!   picture's from AMS up to [`MAX_PICTURE_BODY`]).
+//!   picture's from AMS or a GIF from Giphy up to [`MAX_PICTURE_BODY`]).
 //! - **Credentials** come from the account's [`Session`] ([`Credentials`]), per service, each token only to its own
 //!   service's host: the chat service takes `Authorization: Bearer <ic3>` with `X-MS-Migration: True` and
 //!   `BehaviorOverride: redirectAs404` (the web client's set, which the service took with our own non-CAE token); the
@@ -134,8 +135,8 @@ pub const TROUTER_HOST: &str = "go.trouter.teams.microsoft.com";
 /// The largest body read, in bytes; a longer one is [`HttpError::BodyTooLarge`].
 pub const MAX_BODY: usize = 4 * 1024 * 1024;
 
-/// The largest body read from AMS ([`Service::Ams`]), in bytes: a picture pasted into a message, a photo's original
-/// included; a longer one is [`HttpError::BodyTooLarge`].
+/// The largest body read from AMS ([`Service::Ams`]) or Giphy ([`Service::Giphy`]), in bytes: a picture pasted into a
+/// message, a photo's original included, or a GIF at its full size; a longer one is [`HttpError::BodyTooLarge`].
 pub const MAX_PICTURE_BODY: usize = 24 * 1024 * 1024;
 
 /// How long connecting may take.
@@ -674,6 +675,7 @@ impl<C: Credentials> HttpTransport<C> {
             Service::FileThumbnail => Err(refused(Refusal::FileThumbnail)),
             Service::Relay => fixed(format!("https://{RELAY_HOST}/{RELAY_PATH}")),
             Service::Emoticons => fixed(format!("https://{EMOTICONS_HOST}/{EMOTICONS_PATH}")),
+            Service::Giphy => fixed(format!("https://{GIPHY_HOST}/")),
             Service::Ams => self.ams.clone().ok_or(refused(Refusal::NoAms)),
         }
     }
@@ -1266,6 +1268,13 @@ const PICTURE_ACCEPT: &str = "image/avif,image/webp,image/apng,image/*,*/*;q=0.8
 pub const EMOTICONS_HOST: &str = "statics.teams.cdn.office.net";
 const EMOTICONS_PATH: &str = "evergreen-assets/personal-expressions/v2/assets/emoticons";
 
+/// Giphy's media host ([`Service::Giphy`]).
+pub const GIPHY_HOST: &str = "media.giphy.com";
+
+/// The `Accept` a GIF is read with: a GIF, whose frames the views play (a browser's `Accept` would take a WebP, of
+/// which only the first frame is drawn).
+const GIF_ACCEPT: &str = "image/gif";
+
 /// The Entra audience of the bearer token `service` takes, if it takes one.
 fn audience(service: Service) -> Option<&'static str> {
     match service {
@@ -1274,7 +1283,7 @@ fn audience(service: Service) -> Option<&'static str> {
         Service::Graph => Some(GRAPH_AUDIENCE),
         Service::Csa => Some(CSA_AUDIENCE),
         Service::Presence => Some(PRESENCE_AUDIENCE),
-        Service::Trouter | Service::Calling | Service::Emoticons | Service::FileThumbnail => None,
+        Service::Trouter | Service::Calling | Service::Emoticons | Service::FileThumbnail | Service::Giphy => None,
     }
 }
 
@@ -1293,13 +1302,23 @@ fn plain_headers(service: Service, body: bool) -> Vec<(String, String)> {
         | Service::Relay
         | Service::Emoticons
         | Service::Ams
-        | Service::FileThumbnail => "application/json",
+        | Service::FileThumbnail
+        | Service::Giphy => "application/json",
     };
     // a picture's view and a thumbnail answer an image, as a browser's `<img>` asks for one
-    let accept = if matches!(service, Service::Ams | Service::FileThumbnail) {
-        PICTURE_ACCEPT
-    } else {
-        "application/json"
+    let accept = match service {
+        Service::Ams | Service::FileThumbnail => PICTURE_ACCEPT,
+        Service::Giphy => GIF_ACCEPT,
+        Service::ChatService
+        | Service::Registrar
+        | Service::Trouter
+        | Service::MiddleTier
+        | Service::Graph
+        | Service::Csa
+        | Service::Presence
+        | Service::Calling
+        | Service::Relay
+        | Service::Emoticons => "application/json",
     };
     let mut headers = vec![(ACCEPT.as_str().to_owned(), accept.to_owned())];
     if body {
@@ -1341,7 +1360,8 @@ fn service_headers(service: Service) -> &'static [(&'static str, &'static str)] 
         | Service::Csa
         | Service::Calling
         | Service::Emoticons
-        | Service::FileThumbnail => &[],
+        | Service::FileThumbnail
+        | Service::Giphy => &[],
     }
 }
 
@@ -1373,7 +1393,8 @@ fn on_base(service: Service, base: &Url, url: &Url, endpoint: &Endpoint) -> bool
         | Service::Calling
         | Service::Emoticons
         | Service::Ams
-        | Service::FileThumbnail => true,
+        | Service::FileThumbnail
+        | Service::Giphy => true,
     };
     plain
         && url.host_str() == base.host_str()
@@ -1531,10 +1552,13 @@ fn parse_mock_origin(origin: &str) -> Option<Url> {
     (url.scheme() == "http" && loopback && url.port().is_some() && bare && url.password().is_none()).then_some(url)
 }
 
-/// The largest body read for a request to `url`: [`MAX_PICTURE_BODY`] from AMS's async gateway, [`MAX_BODY`] from
-/// anywhere else.
+/// The largest body read for a request to `url`: [`MAX_PICTURE_BODY`] from AMS's async gateway and Giphy's media host,
+/// [`MAX_BODY`] from anywhere else.
 fn max_body(url: &Url) -> usize {
-    if url.host_str().is_some_and(|host| host.ends_with(AMS_HOST_SUFFIX)) {
+    if url
+        .host_str()
+        .is_some_and(|host| host.ends_with(AMS_HOST_SUFFIX) || host == GIPHY_HOST)
+    {
         MAX_PICTURE_BODY
     } else {
         MAX_BODY

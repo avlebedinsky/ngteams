@@ -813,8 +813,9 @@ impl EngineRequests {
         self.ask(|reply| Request::ReactionAnimation(id, reply))
     }
 
-    /// The picture a message's `<img>` names by its `src` (a view of an AMS object), as the account's AMS base has it
-    /// ([`crate::pictures`]): its bytes and format, or `None` when there is none or `src` names no AMS view.
+    /// The picture a message's `<img>` names by its `src` (a view of an AMS object, as the account's AMS base has it, or
+    /// a GIF on Giphy's media host; [`crate::pictures`]): its bytes and format, or `None` when there is none or `src`
+    /// names neither.
     pub fn message_picture(&self, src: impl Into<String>) -> Reply<Option<PictureBytes>> {
         let src = src.into();
         self.ask(|reply| Request::MessagePicture(src, reply))

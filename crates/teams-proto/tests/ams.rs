@@ -16,8 +16,8 @@ use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_fence::{Fence, FenceLog, Mri, Roster};
 use teams_proto::{
-    Client, Credentials, HttpError, HttpTransport, IC3_AUDIENCE, MessagePicture, PastedFormat, Read as _, Refusal,
-    Service,
+    Client, Credentials, HttpError, HttpTransport, IC3_AUDIENCE, MAX_BODY, MessagePicture, PastedFormat, Read as _,
+    Refusal, Service,
 };
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -194,4 +194,25 @@ async fn without_an_ams_base_the_read_is_refused_and_only_an_asyncgw_base_is_tak
     ] {
         assert!(!HttpTransport::<FakeTokens>::accepts_ams_base(base), "{base}");
     }
+}
+
+#[tokio::test]
+async fn a_picture_larger_than_a_plain_body_is_read_from_ams() {
+    let server = MockServer::start().await;
+    let tokens = Arc::new(FakeTokens::default());
+    let client = Client::new(transport(&server, &tokens).with_ams(AMS_BASE).unwrap());
+    let mut large = b"\x89PNG\r\n\x1a\n".to_vec();
+    large.resize(MAX_BODY + 1, 0);
+    Mock::given(method("GET"))
+        .and(path(format!("/v1/objects/{OBJECT}/views/imgo")))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(large.clone(), "image/png"))
+        .mount(&server)
+        .await;
+    let read = MessagePicture::of(&src("us-api.asm.skype.com", "imgo")).unwrap();
+    let picture = read.read_answer(&client.read(&read).await.unwrap()).unwrap();
+    assert_eq!(
+        picture.bytes.len(),
+        large.len(),
+        "a photo's original past the 4 MB a plain body may take"
+    );
 }

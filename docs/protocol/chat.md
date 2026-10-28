@@ -396,10 +396,17 @@ how the web client draws them, from its bundle.
   alone in a message `58px` (`animated-emoticon-58-…`). Teams draws one inside text at the text's height and a message
   of emoticons alone large, animated and without a bubble. The native client draws both from the emoticon's animation
   strip on the CDN ([Reaction pictures](#reaction-pictures)): the first frame inline, the whole animation large.
-- **Stickers and GIFs**: the bundle knows a sticker `itemtype` (`http://schema.skype.com/Sticker`, its pictures on
-  `static.asm.skype.com`) and a Giphy one, but neither appears in any capture or in the user's chats. The GIFs the
-  captures hold are plain `<img>`s on `media*.giphy.com` with no `itemtype`, which the native client leaves as
-  placeholders (a third party's host, not a Teams service).
+- **Stickers**: the bundle knows a sticker `itemtype` (`http://schema.skype.com/Sticker`, its pictures on
+  `static.asm.skype.com`), but none appears in any capture or in the user's chats.
+- **GIFs** picked from Teams' GIF picker are `<img>`s on Giphy's media CDN:
+  `https://media<n>.giphy.com/media/v1.<token>/<id>/giphy.gif` (the shard `media0` to `media4`, the token Giphy's
+  base64url note of where it was picked). The common form has no `itemtype`, its size as `width` and `height`
+  attributes, `alt` `"<title> (GIF Image)"` and `style="height:auto; margin-top:4px; max-width:100%"`, alone between
+  two `<p>&nbsp;</p>`; an older one has `itemtype="http://schema.skype.com/Giphy"`, its size in its `style`
+  (`width:400px; height:300px`) and sits in a `<div>` after text and a `<br>`. Teams draws it as a picture: at its
+  size, scaled down to the bubble's width, playing. The native client reads it from `https://media.giphy.com/media/<id>/
+  <file>` with no token, leaving Giphy's token, the shard and any query out (Giphy serves the same bytes without them;
+  [endpoints.md](endpoints.md#giphy-mediagiphycom-mediangiphycom)), and plays it as a pasted GIF is played.
 
 ## Files: sending, denied (ab-file)
 

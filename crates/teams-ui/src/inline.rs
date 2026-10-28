@@ -2,8 +2,9 @@
 //! (`rich_text` lays them out, this module draws them). Their bytes come only from the engine ([`Core`]), never from a
 //! request of a view's own.
 //!
-//! - **A picture** ([`picture`]) is the view of an AMS object the message names: asked of the engine once a run per
-//!   account and `src` ([`Core::message_picture`]), decoded here off the foreground (every frame scaled down to at most
+//! - **A picture** ([`picture`]) is the view of an AMS object the message names, or a GIF on Giphy's media host (one
+//!   picked from Teams' GIF picker, playing as Teams plays it): asked of the engine once a run per account and `src`
+//!   ([`Core::message_picture`]), decoded here off the foreground (every frame scaled down to at most
 //!   [`MAX_DECODED_SIDE`] on its longer side; a GIF with its frames up to the first that doesn't decode, at most
 //!   [`MAX_GIF_FRAMES`] and [`MAX_GIF_BYTES`] of them, its canvas at most [`MAX_GIF_SIDE`]) and kept for the run. It is
 //!   drawn at the size the message gives it (else its own), scaled down to the width there is and keeping its aspect

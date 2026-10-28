@@ -4,8 +4,9 @@
 //! A request comes in one of three classes, and a [`Transport`] takes nothing else:
 //! - a [`Read`]: always sent as a `GET`, with no body (the chat service's, Microsoft Graph's reads of a person's name
 //!   and picture, [`GraphUser`] and [`GraphPicture`], and a shared file's thumbnails, [`FileThumbnails`], CSA's read
-//!   of the account's teams, [`CsaTeams`], and a picture pasted into a message, [`MessagePicture`], from AMS; beside
-//!   them a file thumbnail's picture at the link Graph handed out, [`HttpTransport::file_thumbnail`], with no token);
+//!   of the account's teams, [`CsaTeams`], and a picture pasted into a message, [`MessagePicture`], from AMS, and a GIF
+//!   a message shows, [`GiphyPicture`], from Giphy's media host with no token; beside them a file thumbnail's picture
+//!   at the link Graph handed out, [`HttpTransport::file_thumbnail`], with no token);
 //! - a plain [`Request`]: any method and body, the trait open to any crate. The transport builds its URL from its
 //!   [`Service`]'s base and asks [`teams_fence::contacting`], the lab rule's one classifier: sent when it reaches nobody
 //!   (the messaging stack's [`EndpointRegistration`], the middle tier's profile lookup [`ShortProfileLookup`], UPS's
@@ -52,6 +53,7 @@ mod client;
 mod emoticon;
 mod endpoint;
 mod frame;
+mod giphy;
 mod http;
 mod own;
 mod post_read;
@@ -70,10 +72,12 @@ pub use frame::{
     FrameSink, FrameText, FrameWriter, InvitationReceipt, MessageLossAck, OwnFrame, PermittedResponse, Ping,
     RespondError, ResponseDecider, ResponseRefused, Sent,
 };
+pub use giphy::{GiphyPicture, InlinePicture};
 pub use http::{
     AMS_HOST_SUFFIX, BuildError, CONNECT_TIMEOUT, CSA_AUDIENCE, Credentials, DEFAULT_RETRY_WAIT, EMOTICONS_HOST,
-    Failure, GRAPH_AUDIENCE, GRAPH_HOST, HttpError, HttpTransport, IC3_AUDIENCE, MAX_BODY, MAX_PICTURE_BODY,
-    MAX_RETRY_WAIT, MIDDLE_TIER_AUDIENCE, PRESENCE_AUDIENCE, RELAY_HOST, REQUEST_TIMEOUT, Refusal, TROUTER_HOST,
+    Failure, GIPHY_HOST, GRAPH_AUDIENCE, GRAPH_HOST, HttpError, HttpTransport, IC3_AUDIENCE, MAX_BODY,
+    MAX_PICTURE_BODY, MAX_RETRY_WAIT, MIDDLE_TIER_AUDIENCE, PRESENCE_AUDIENCE, RELAY_HOST, REQUEST_TIMEOUT, Refusal,
+    TROUTER_HOST,
 };
 #[cfg(feature = "test-support")]
 pub use own::ProbeOwnState;
