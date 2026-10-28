@@ -700,9 +700,9 @@ impl EngineRequests {
         self.ask(Request::Teams)
     }
 
-    /// What the chat list shows besides the stored conversations ([`ChatListing`]): the favourite chats as CSA's teams
-    /// read last listed them, and the conversations the chat service calls empty. A read of the teams starts as
-    /// [`Self::teams`] starts it, and a change of the favourites comes as [`Event::Teams`].
+    /// What the chat list shows besides the stored conversations ([`ChatListing`]): the favourites (chats and channels)
+    /// as CSA's teams read last listed them, and the conversations the chat service calls empty. A read of the teams
+    /// starts as [`Self::teams`] starts it, and a change of the favourites comes as [`Event::Teams`].
     pub fn chat_listing(&self) -> Reply<ChatListing> {
         self.ask(Request::ChatListing)
     }

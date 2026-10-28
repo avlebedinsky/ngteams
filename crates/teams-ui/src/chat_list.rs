@@ -11,11 +11,16 @@
 //! - **Which chats**: 1:1, group and meeting chats, but not one the chat service calls empty while the store holds no
 //!   text of it and none unread (`isemptyconversation`: a chat nobody wrote in yet, as a test call's chat with the
 //!   echo service or a meeting nobody wrote in; Teams lists none of them). A team's channels belong to the Teams list
-//!   (Task 16) and the account's own streams (`48:notifications`, …) aren't chats: neither is listed.
+//!   (Task 16), but for the favourite ones (below), and the account's own streams (`48:notifications`, …) aren't
+//!   chats: neither is listed under "Chats".
 //! - **Favorites** ([`Core::chat_listing`]: the `Favorites` folder of CSA's teams read, in its order): each one the
 //!   list has a row for moves from "Chats" to "Favorites"; the account's own notes (`48:notes`, its chat with itself)
 //!   is a row of its own there, [`NOTES`], named as Teams names it, "<name> (You)", with the account's own picture and
-//!   presence. A favourite the store doesn't hold is left out.
+//!   presence. A team's channel is a favourite too, as Teams lists one ([`RowKind::Channel`]): named by the channel's
+//!   name, its team's initial on a rounded square for its avatar (as the Teams list marks the team), its newest post
+//!   for its preview, bold while it has unread posts (no count: Teams counts a channel's mentions, which the store
+//!   doesn't tell apart), and opened read-only as a channel. A favourite that is neither a stored chat nor a channel of
+//!   the stored teams is left out.
 //! - **Names** (M2 Task 12): a 1:1 chat by the other member's name as the engine has it ([`Core::person`]: their
 //!   profile's, else their newest message's, else one the binary knew); a group or meeting chat by its topic, else its
 //!   other members' first names as Teams joins them ("Evgenia and Sean"). Someone without a name is never shown by
@@ -48,7 +53,7 @@ use gpui_component::Size;
 use teams_core::{Availability, ChatListing, MAX_WATCHED, has_presence};
 use teams_proto::TEAMS_ECHO_BOT_MRI;
 use teams_proto::chat::parse_html;
-use teams_store::{Conversation, ConversationKind, Member, Message};
+use teams_store::{Conversation, ConversationKind, Member, Message, Team, TeamChannel};
 
 use crate::bridge::Core;
 use crate::clock::{self, HourCycle};
@@ -99,6 +104,8 @@ pub enum RowKind {
     Meeting,
     /// The account's own notes ([`NOTES`]).
     Notes,
+    /// A team's channel among the favourites.
+    Channel,
     /// A kind this build doesn't name.
     Other,
 }
@@ -112,7 +119,8 @@ impl RowKind {
             ConversationKind::Meeting => Self::Meeting,
             // the store keeps a meeting's chat by the thread type the list gave it
             ConversationKind::Other(kind) if kind == "thread_type:meeting" => Self::Meeting,
-            ConversationKind::Channel | ConversationKind::Other(_) => Self::Other,
+            ConversationKind::Channel => Self::Channel,
+            ConversationKind::Other(_) => Self::Other,
         }
     }
 
@@ -124,6 +132,7 @@ impl RowKind {
             Self::Group => "group",
             Self::Meeting => "meeting",
             Self::Notes => "notes",
+            Self::Channel => "channel",
             Self::Other => "other",
         }
     }
@@ -151,6 +160,8 @@ pub struct ChatRow {
     pub partner: Option<String>,
     /// A group chat's two members its avatar shows, half each (none for any other chat, or a group of one other).
     pub faces: Vec<HalfFace>,
+    /// A channel's team's name, whose initial its avatar shows (none for a chat).
+    pub team: Option<SharedString>,
     /// The last message's first line.
     pub preview: SharedString,
     /// Milliseconds.
@@ -418,10 +429,70 @@ pub async fn notes_row(core: &dyn Core) -> ChatRow {
         picture: person.and_then(|person| person.picture),
         partner: Some(me.clone()),
         faces: Vec::new(),
+        team: None,
         preview: preview(&page, &me),
         last_activity: None,
         unread: 0,
     }
+}
+
+/// A favourite channel's row: the channel's name, its team's initial for its avatar, its newest post for its preview,
+/// and `last_activity` (the stored conversation's, else its newest stored message's arrival).
+pub async fn channel_row(core: &dyn Core, team: &Team, channel: &TeamChannel, last_activity: Option<i64>) -> ChatRow {
+    let id = channel.id.clone();
+    let page = core
+        .messages(id.clone(), None, PREVIEW_PAGE)
+        .await
+        .map(|page| page.messages)
+        .unwrap_or_default();
+    let unread = core.unread_count(id.clone()).await.unwrap_or(0);
+    ChatRow {
+        kind: RowKind::Channel,
+        name: channel.name.clone().into(),
+        named: true,
+        picture: None,
+        partner: None,
+        faces: Vec::new(),
+        team: Some(team.name.clone().into()),
+        preview: preview(&page, core.me()),
+        last_activity: last_activity.or_else(|| page.iter().map(|message| message.arrival_time).max()),
+        unread,
+        id,
+    }
+}
+
+/// The rows of the favourites that are channels of the stored teams (see the module docs), each with its stored
+/// conversation's activity from `activity`; the teams are asked for only when a favourite isn't among the chat `rows`.
+async fn channel_rows(
+    core: &dyn Core,
+    listing: &ChatListing,
+    rows: &[ChatRow],
+    activity: &HashMap<String, Option<i64>>,
+) -> Vec<ChatRow> {
+    let wanted: Vec<&String> = listing
+        .favorites
+        .iter()
+        .flatten()
+        .filter(|id| id.as_str() != NOTES && !rows.iter().any(|row| &row.id == *id))
+        .collect();
+    if wanted.is_empty() {
+        return Vec::new();
+    }
+    let teams = core.teams().await.ok().flatten().unwrap_or_default();
+    let mut channels = Vec::new();
+    for id in wanted {
+        let found = teams.iter().find_map(|team| {
+            team.channels
+                .iter()
+                .find(|channel| &channel.id == id)
+                .map(|channel| (team, channel))
+        });
+        if let Some((team, channel)) = found {
+            let last = activity.get(id).copied().flatten();
+            channels.push(channel_row(core, team, channel, last).await);
+        }
+    }
+    channels
 }
 
 /// The list's two sections from the rows of the stored conversations, the latest activity first (see the module
@@ -475,6 +546,7 @@ async fn build(core: &dyn Core, conversation: &Conversation) -> (ChatRow, Vec<St
         picture,
         partner,
         faces,
+        team: None,
         preview: preview(&page, core.me()),
         last_activity: conversation.last_activity,
         unread,
@@ -830,6 +902,7 @@ impl ChatList {
 fn avatar(row: &ChatRow, palette: Palette) -> AnyElement {
     match (row.kind, row.faces.as_slice()) {
         (RowKind::Meeting, _) => mark_avatar(Glyph::CALENDAR, palette.brand, palette.on_brand, "avatar-meeting"),
+        (RowKind::Channel, _) => team_avatar(row.team.as_deref().unwrap_or_default(), palette),
         // a 1:1 chat whose other member has no presence: a bot or a service
         (RowKind::OneToOne, _) if row.partner.is_none() && row.picture.is_none() => {
             mark_avatar(Glyph::BOT, palette.hover, palette.muted_foreground, "avatar-bot")
@@ -866,6 +939,29 @@ fn mark_avatar(mark: Glyph, background: u32, foreground: u32, selector: &'static
         .items_center()
         .justify_center()
         .child(mark.icon().size(px(AVATAR * 0.5)).text_color(rgb(foreground)))
+        .into_any_element()
+}
+
+/// A channel's avatar: its team's initial on the brand colour, on a rounded square as Teams draws a team (and as the
+/// Teams list marks one).
+fn team_avatar(team: &str, palette: Palette) -> AnyElement {
+    let initial: String = team
+        .chars()
+        .find(|c| c.is_alphanumeric())
+        .map(|c| c.to_uppercase().collect())
+        .unwrap_or_default();
+    div()
+        .debug_selector(|| "avatar-team".to_owned())
+        .size(px(AVATAR))
+        .flex_none()
+        .rounded_lg()
+        .bg(rgb(palette.brand))
+        .text_color(rgb(palette.on_brand))
+        .text_size(px(AVATAR * 0.4))
+        .flex()
+        .items_center()
+        .justify_center()
+        .child(initial)
         .into_any_element()
 }
 
@@ -967,7 +1063,8 @@ fn row_text(row: &ChatRow, palette: Palette, cycle: HourCycle) -> impl IntoEleme
         .text_color(rgb(palette.muted_foreground))
         .child(row.preview.clone());
     let mut bottom = div().flex().gap_2().items_center().child(preview);
-    if row.unread > 0 {
+    // a channel's unread posts make it bold, uncounted (see the module docs)
+    if row.unread > 0 && row.kind != RowKind::Channel {
         bottom = bottom.child(
             div()
                 .px_1()
@@ -1001,6 +1098,13 @@ async fn load(core: Arc<dyn Core>, generation: u64, this: WeakEntity<ChatList>, 
     let listed = core.conversations(LIST_LIMIT).await;
     // without it (an engine that stopped, a store that failed) every chat is listed under "Chats"
     let listing = core.chat_listing().await.unwrap_or_default();
+    // the stored channels' activity, for the favourite ones' rows
+    let activity: HashMap<String, Option<i64>> = listed
+        .iter()
+        .flatten()
+        .filter(|conversation| conversation.kind == ConversationKind::Channel)
+        .map(|conversation| (conversation.id.clone(), conversation.last_activity))
+        .collect();
     let Ok(planned) = this.update(cx, |list, cx| {
         let at = list.models.chats.read(cx).revision();
         (listed.map(|listed| list.plan(listed, cx)), at)
@@ -1011,7 +1115,10 @@ async fn load(core: Arc<dyn Core>, generation: u64, this: WeakEntity<ChatList>, 
     let (planned, at) = planned;
     let rows = match planned {
         Ok(planned) => {
-            let (rows, built) = build_rows(&*core, planned).await;
+            let (mut rows, built) = build_rows(&*core, planned).await;
+            let channels = channel_rows(&*core, &listing, &rows, &activity).await;
+            // each one a favourite: moved to "Favorites" in its place
+            rows.extend(channels);
             let favored = listing.favorites.iter().flatten().any(|id| id == NOTES);
             let notes = if favored { Some(notes_row(&*core).await) } else { None };
             Some(Loaded {

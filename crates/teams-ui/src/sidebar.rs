@@ -2,11 +2,11 @@
 //! isn't up: connecting, reconnecting, offline or signed out; nothing once connected; in the read-only mode, which
 //! opens no push channel and reads by polling, a quiet "Read-only" instead of a connection that never comes up, unless
 //! the engine stopped or the account is signed out) holding its sections:
-//! "Favorites" (the [`ChatList`]'s favourite chats, only while it has any), "Chats" (its other rows) and "Teams and
-//! channels" (the [`TeamsList`]'s teams, each with its channels). A section's
-//! header folds and unfolds it, and a team's line its channels; unfolding the teams asks for them again
-//! ([`TeamsList::reload`]: the engine reads them when they are old). The rows themselves are the lists': a chat clicked
-//! is the [`ChatList`]'s to tell, a channel the [`TeamsList`]'s.
+//! "Favorites" (the [`ChatList`]'s favourites (chats and channels), only while it has any), "Chats" (its other rows)
+//! and "Teams and channels" (the [`TeamsList`]'s teams, each with its channels). A section's header folds and unfolds
+//! it, and a team's line its channels; unfolding the teams asks for them again ([`TeamsList::reload`]: the engine reads
+//! them when they are old). The rows themselves are the lists': a chat clicked is the [`ChatList`]'s to tell, a channel
+//! the [`TeamsList`]'s.
 //!
 //! Traced: `sidebar folded`/`unfolded` with the section (`favorites`, `chats` or `teams`), `team folded`/`unfolded` with the team.
 

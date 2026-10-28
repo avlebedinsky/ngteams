@@ -83,9 +83,13 @@ What Teams v2's list shows above and in its "Chats" section, as the native clien
   `isExpanded`, `isDeleted`, `version`, `createdTime` and `conversationFolderItems`. A conversation item is
   `conversationId`, `createdTime`, `lastUpdatedTime` and `threadType`; QuickViews' items are slices
   (`slice-saved`, …, `itemType` `Slice`). The Favorites folder lists the chats in the user's order; its first item
-  was `48:notes` (`threadType` `streamofnotes`) in every account: the account's own notes, its chat with itself, which
-  Teams titles "<name> (You)" (the web bundle's `chat_title_self_chat_name`, `{{name}} (You)`) with the account's
-  own picture and presence. `MutedChats` and `MeetingChats` were empty in every answer: the folders don't say which
+  was `48:notes` (`threadType` `streamofnotes`) in the lab's accounts and one personal account: the account's own
+  notes, its chat with itself, which Teams titles "<name> (You)" (the web bundle's `chat_title_self_chat_name`,
+  `{{name}} (You)`) with the account's own picture and presence. Another personal account's folder held two team
+  channels and no notes (items with `threadType` `topic`, ids `19:…@thread.tacv2`, channels of the answer's `teams`
+  and in none of its `chats`): Teams lists a favourite channel there by its name, with its team's picture. The native
+  client shows one by the channel's name with its team's initial (no team picture is read), opened read-only as the
+  Teams list opens it; a favourite neither stored as a chat nor a channel of the stored teams is left out. `MutedChats` and `MeetingChats` were empty in every answer: the folders don't say which
   chats are muted. The middle tier's user properties (`favorites`, `{"48:notes":1}`, and `selfChatSettings`) carry an
   older form of the same; the native client reads only the folder. Pinning, unpinning and reordering are CSA writes
   no capture shows; the native client sends none. Fixture: `tests/fixtures/csa/folders.json`.

@@ -237,7 +237,11 @@ fn a_channel_opened_takes_the_highlight_from_the_chat_and_back() {
         Some(LAB_CHAT.to_owned())
     );
     click(cx, "channel-row-1");
-    assert_eq!(cx.update(|_, cx| list.read(cx).selected().map(str::to_owned)), None);
+    // the channel is the list's selection: no chat row is highlighted (a favourite channel's row would be)
+    assert_eq!(
+        cx.update(|_, cx| list.read(cx).selected().map(str::to_owned)),
+        Some(CHANNEL.to_owned())
+    );
     assert_eq!(
         cx.update(|_, cx| teams.read(cx).selected().map(str::to_owned)),
         Some(CHANNEL.to_owned())

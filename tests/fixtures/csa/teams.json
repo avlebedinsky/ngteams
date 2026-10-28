@@ -1,5 +1,5 @@
 {
-  "_synthetic": "Made up, in the shape of CSA's answer to `proto-lab probe teams a` (M2 Task 16, 2026-10-22: GET <chatSvcAggAfd>/api/v3/teams/users/me with the web client's query and the account's own chatsvcagg token, Accept: application/json and nothing else; it answered 200, application/json, about 32 KB). The probe printed statuses, header names, sizes, key paths with their JSON types and counts, never a value, and kept nothing: two teams of ten channels, each team's general channel the one whose id is the team's (isGeneral true), one archived team and channel, no deleted one. Its top level also had chats, users, privateFeeds, engageCommunities, conversationFolders and metadata, which the native client doesn't read and this fixture trims to empty or a few keys; a team's and a channel's many settings objects (teamSettings, teamGuestSettings, memberSettings, guestSettings, defaultFileSettings, extensionDefinition) are trimmed too. Here: a team with its general channel, a standard channel listed before it and a deleted one; an archived team with its general channel; a deleted team. Ids, names and times are made up; <guid:tenant> is the tenant, tests fill it in. See docs/protocol/channels.md.",
+  "_synthetic": "Made up, in the shape of CSA's answer to `proto-lab probe teams a` (M2 Task 16, 2026-10-22: GET <chatSvcAggAfd>/api/v3/teams/users/me with the web client's query and the account's own chatsvcagg token, Accept: application/json and nothing else; it answered 200, application/json, about 32 KB). The probe printed statuses, header names, sizes, key paths with their JSON types and counts, never a value, and kept nothing: two teams of ten channels, each team's general channel the one whose id is the team's (isGeneral true), one archived team and channel, no deleted one. Its top level also had chats, users, privateFeeds, engageCommunities, conversationFolders and metadata, which the native client doesn't read and this fixture trims to empty or a few keys; a team's and a channel's many settings objects (teamSettings, teamGuestSettings, memberSettings, guestSettings, defaultFileSettings, extensionDefinition) are trimmed too. Here: a team with its general channel, a standard channel listed before it and a deleted one; an archived team with its general channel; a deleted team; and a Favorites folder holding the standard channel (conversationFolders as docs/protocol/chat.md, \"Favorites\", describes it). Ids, names and times are made up; <guid:tenant> is the tenant, tests fill it in. See docs/protocol/channels.md.",
   "request": {
     "method": "GET",
     "path": "/api/csa/<region>/api/v3/teams/users/me",
@@ -11,8 +11,27 @@
     "body": {
       "conversationFolders": {
         "folderHierarchyVersion": 1760000000000,
-        "conversationFolders": [],
-        "conversationFolderOrder": [],
+        "conversationFolders": [
+          {
+            "id": "made-up~Favorites",
+            "sortType": "UserDefinedCustomOrder",
+            "name": "Favorites",
+            "folderType": "Favorites",
+            "conversationFolderItems": [
+              {
+                "conversationId": "19:channel0002@thread.tacv2",
+                "createdTime": 1760000000100,
+                "lastUpdatedTime": 1760000000100,
+                "threadType": "topic"
+              }
+            ],
+            "version": 1760000000100,
+            "createdTime": 1760000000000,
+            "isExpanded": true,
+            "isDeleted": false
+          }
+        ],
+        "conversationFolderOrder": ["made-up~Favorites"],
         "migratedPinnedToFavorites": true,
         "isPartialResponse": false
       },

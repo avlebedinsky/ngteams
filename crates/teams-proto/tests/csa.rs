@@ -158,8 +158,8 @@ async fn the_teams_read_is_a_get_of_its_probed_shape_with_the_csa_token_and_its_
     );
     assert_eq!(read.teams[1].channels.len(), 1);
     assert!(read.teams[1].channels[0].general);
-    // the fixture's folders hold no favourites folder: none, known
-    assert_eq!(read.favorites, Some(Vec::new()));
+    // the fixture's favourites folder holds the team's standard channel
+    assert_eq!(read.favorites, Some(vec![CHANNEL.to_owned()]));
     let shown = format!("{read:?}");
     assert!(!shown.contains("made-up team") && !shown.contains("General"), "{shown}");
 }
@@ -195,10 +195,22 @@ fn a_teams_answer_that_doesn_t_say_it_is_whole_is_refused() {
         CsaTeams::read_answer(whole.to_string().as_bytes()).unwrap().teams.len(),
         1
     );
-    // partial (as a cold boot might answer) or not saying: never taken for the whole list the store replaces its own
+    // partial only in its chats (an account with many: its newest chats, the rest the chat service's): its teams whole
+    let more_chats = json!({"teams": teams, "metadata": {"isPartialData": true, "hasMoreChats": true}});
+    assert_eq!(
+        CsaTeams::read_answer(more_chats.to_string().as_bytes())
+            .unwrap()
+            .teams
+            .len(),
+        1
+    );
+    // partial without more chats to say why, or not saying: never taken for the whole list the store replaces its own
     // with
     for metadata in [
         json!({"isPartialData": true}),
+        json!({"isPartialData": true, "hasMoreChats": false}),
+        json!({"isPartialData": true, "hasMoreChats": "true"}),
+        json!({"isPartialData": "true", "hasMoreChats": true}),
         json!({"isPartialData": "false"}),
         json!({"isPartialData": 0}),
         json!({"isPartialData": null}),
@@ -417,14 +429,22 @@ fn folders() -> Value {
     serde_json::from_str::<Value>(&text).unwrap()["conversationFolders"].clone()
 }
 
+/// The folders fixture's favourites, in its order: the account's notes, a group chat and a team's channel.
+fn favourites() -> Vec<String> {
+    [
+        "48:notes",
+        "19:favorite0001@thread.v2",
+        "19:favoritechannel0001@thread.tacv2",
+    ]
+    .map(str::to_owned)
+    .to_vec()
+}
+
 #[test]
 fn the_favourites_are_the_favorites_folder_s_conversations_in_its_order() {
     let read = CsaTeams::read_answer(&with_folders(&folders())).unwrap();
-    // the quick views' slice and the other folders left out
-    assert_eq!(
-        read.favorites,
-        Some(vec!["48:notes".to_owned(), "19:favorite0001@thread.v2".to_owned()])
-    );
+    // a channel as a chat, the quick views' slice and the other folders left out
+    assert_eq!(read.favorites, Some(favourites()));
 }
 
 #[test]
@@ -476,7 +496,7 @@ fn favourites_are_read_only_in_their_captured_shape() {
                 .unwrap()
                 .push(first);
         }),
-        Some(vec!["48:notes".to_owned(), "19:favorite0001@thread.v2".to_owned()])
+        Some(favourites())
     );
     // no folders at all: not known
     let bare = json!({"metadata": {"isPartialData": false}, "teams": []}).to_string();

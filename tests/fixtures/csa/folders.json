@@ -1,5 +1,5 @@
 {
-  "_synthetic": "Made up, in the shape of the conversationFolders object of CSA's answer to GET <chatSvcAggAfd>/api/v3/teams/users/me with the web client's query (the lab's captures of 2026-10-24 and a personal build's debug log of 2026-10-26: seven folders, Favorites, RecentChats, TeamsAndChannels, QuickViews, MutedChats, MeetingChats and EngageCommunities, in conversationFolderOrder; the Favorites folder's sortType UserDefinedCustomOrder; QuickViews' items slices with an itemType, the other folders' items conversations with a threadType). Here a Favorites folder holding the account's own notes stream and a made-up group chat, the system folders empty, the quick views with one slice; ids under the account are <guid:tenant>~<guid:a>~<folder>, times made up. See docs/protocol/chat.md, \"Favorites\".",
+  "_synthetic": "Made up, in the shape of the conversationFolders object of CSA's answer to GET <chatSvcAggAfd>/api/v3/teams/users/me with the web client's query (the lab's captures of 2026-10-24 and a personal build's debug log of 2026-10-26: seven folders, Favorites, RecentChats, TeamsAndChannels, QuickViews, MutedChats, MeetingChats and EngageCommunities, in conversationFolderOrder; the Favorites folder's sortType UserDefinedCustomOrder; QuickViews' items slices with an itemType, the other folders' items conversations with a threadType). Here a Favorites folder holding the account's own notes stream, a made-up group chat and a made-up team channel (its threadType topic, its id a channel's: a personal build's debug log of 2026-10-28 held a Favorites folder of two channels), the system folders empty, the quick views with one slice; ids under the account are <guid:tenant>~<guid:a>~<folder>, times made up. See docs/protocol/chat.md, \"Favorites\".",
   "conversationFolders": {
     "folderHierarchyVersion": 1760000000300,
     "conversationFolders": [
@@ -20,6 +20,12 @@
             "createdTime": 1760000000200,
             "lastUpdatedTime": 1760000000200,
             "threadType": "chat"
+          },
+          {
+            "conversationId": "19:favoritechannel0001@thread.tacv2",
+            "createdTime": 1760000000250,
+            "lastUpdatedTime": 1760000000250,
+            "threadType": "topic"
           }
         ],
         "version": 1760000000300,

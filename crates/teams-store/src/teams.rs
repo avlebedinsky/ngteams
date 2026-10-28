@@ -1,5 +1,5 @@
 //! The account's teams and their channels as CSA last listed them (M2 Task 16), replaced whole by each read, its
-//! favourite chats as the same read listed them (schema 11), and the reply chain each stored channel message belongs to (its post, as the message's `conversationLink` named it). A
+//! favourites (chats and channels) as the same read listed them (schema 11), and the reply chain each stored channel message belongs to (its post, as the message's `conversationLink` named it). A
 //! channel's messages are kept like a chat's ([`crate::messages`]); its conversation row is the chat service's.
 
 use std::fmt;
@@ -135,10 +135,10 @@ impl Store {
             .optional()?)
     }
 
-    /// Replaces the stored favourite chats with `favorites` (conversation ids, in the order Teams lists them; one
-    /// listed twice keeps its first place), read at `read_at` (ms): [`Applied::Inserted`] for the first list,
-    /// [`Applied::Updated`] when it differs from the stored one, [`Applied::Ignored`] when it doesn't (only the read time
-    /// moves).
+    /// Replaces the stored favourites (chats and channels) with `favorites` (conversation ids, in the order Teams lists
+    /// them; one listed twice keeps its first place), read at `read_at` (ms): [`Applied::Inserted`] for the first list,
+    /// [`Applied::Updated`] when it differs from the stored one, [`Applied::Ignored`] when it doesn't (only the read
+    /// time moves).
     ///
     /// # Errors
     ///
@@ -172,7 +172,7 @@ impl Store {
         Ok(applied)
     }
 
-    /// The stored favourite chats' ids in their order; `None` before a read could read them.
+    /// The stored favourites' ids (chats and channels) in their order; `None` before a read could read them.
     ///
     /// # Errors
     ///

@@ -254,24 +254,22 @@ impl CsaTeams {
     /// The teams the answer `body` gives, each with its channels: a team or a channel marked deleted is left out, and
     /// so is one without a string `id` and `displayName` (counted in [`TeamsAnswer::skipped`]). A team's general
     /// channel (`isGeneral` `true`, or the channel whose id is the team's) comes first, the others in the answer's
-    /// order. The account's favourite chats come with them ([`TeamsAnswer::favorites`]).
+    /// order. The account's favourites (chats and channels) come with them ([`TeamsAnswer::favorites`]).
     ///
-    /// The answer must say it is whole: `metadata.isPartialData` exactly `false`, as every captured answer had it. A
-    /// partial answer leaves teams out, and the store replaces its list with what a read gives, so one that says it is
-    /// partial, or doesn't say (no `metadata`, no flag, a flag that isn't a boolean), is refused rather than taken for
-    /// complete.
+    /// The answer must say its teams are whole, since the store replaces its list with what a read gives:
+    /// `metadata.isPartialData` exactly `false`, or exactly `true` with `metadata.hasMoreChats` exactly `true`. An
+    /// account with many chats is answered the second way (a personal build's log): the answer holds only its newest
+    /// chats, and the web client reads the rest from the chat service when it is told the answer is partial (the
+    /// bundle's `shouldSkipGroupChatSyncBasedOnIsPartialData`, `partialDataStartupChatsLimit`), its teams and folders
+    /// taken as they come. An answer that says it is partial without more chats, or doesn't say (no `metadata`, no
+    /// flag, a flag that isn't a boolean), is refused rather than taken for complete.
     ///
     /// # Errors
-    /// [`CsaAnswerError::Malformed`] unless the body is a JSON object with a `teams` array and `metadata.isPartialData`
-    /// `false`.
+    /// [`CsaAnswerError::Malformed`] unless the body is a JSON object with a `teams` array and a `metadata` that says
+    /// its teams are whole (above).
     pub fn read_answer(body: &[u8]) -> Result<TeamsAnswer, CsaAnswerError> {
         let answer: Value = serde_json::from_slice(body).map_err(|_| CsaAnswerError::Malformed)?;
-        let whole = answer
-            .get("metadata")
-            .and_then(|metadata| metadata.get("isPartialData"))
-            .and_then(Value::as_bool)
-            == Some(false);
-        if !whole {
+        if !teams_whole(answer.get("metadata")) {
             return Err(CsaAnswerError::Malformed);
         }
         let entries = answer
@@ -310,15 +308,26 @@ impl Read for CsaTeams {
     }
 }
 
+/// Whether a CSA answer's `metadata` says its teams are whole (see [`CsaTeams::read_answer`]): `isPartialData`
+/// `false`, or `true` only for the chats it leaves out (`hasMoreChats` `true`).
+fn teams_whole(metadata: Option<&Value>) -> bool {
+    let flag = |key| metadata.and_then(|metadata| metadata.get(key)).and_then(Value::as_bool);
+    match flag("isPartialData") {
+        Some(false) => true,
+        Some(true) => flag("hasMoreChats") == Some(true),
+        None => false,
+    }
+}
+
 /// What CSA's teams read gave.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TeamsAnswer {
     pub teams: Vec<Team>,
     /// Teams and channels left out because they had no string `id` or `displayName`.
     pub skipped: usize,
-    /// The account's favourite chats, the ones Teams lists under "Favorites" above its chats, in the folder's order:
-    /// the conversation ids of the `Favorites` folder of `conversationFolders` (see [`favorites`]). `None` when the
-    /// answer's folders aren't in the captured shape: not known, never read as none.
+    /// The account's favourites (chats and channels), the ones Teams lists under "Favorites" above its chats, in the
+    /// folder's order: the conversation ids of the `Favorites` folder of `conversationFolders` (see [`favorites`]).
+    /// `None` when the answer's folders aren't in the captured shape: not known, never read as none.
     pub favorites: Option<Vec<String>>,
 }
 
@@ -415,7 +424,7 @@ impl fmt::Debug for Channel {
 /// Why a CSA answer wasn't read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum CsaAnswerError {
-    /// Not the probed answer's shape, or an answer that doesn't say it is whole (`metadata.isPartialData` `false`).
+    /// Not the probed answer's shape, or an answer that doesn't say its teams are whole ([`CsaTeams::read_answer`]).
     #[error("not a whole CSA teams answer of the probed shape")]
     Malformed,
 }

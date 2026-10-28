@@ -91,12 +91,16 @@ A channel is a conversation of the chat service, read with the same reads as a c
   refuses any other CSA endpoint or query (the update read, the posts read, discover, pins, …) and anything but a
   `GET` before it asks for a token. Of the answer it reads only the teams: a team's and a channel's `id`,
   `displayName`, `isDeleted` (left out), `isArchived` (a team's) and `isGeneral` (or the channel whose id is the
-  team's); an entry without a string id and name is left out; the general channel first. The answer is taken only
-  when `metadata.isPartialData` is `false`, as in every captured answer: one that says it is partial, or doesn't say
-  (no `metadata`, no flag, a flag that isn't a boolean), is refused as malformed, since the store replaces its list
-  with what a read gives; the stored list and its read time stay, and the read is tried again after the engine's
-  retry wait. `chats`, `users`, `conversationFolders` and the rest aren't read: the chat list stays the chat
-  service's.
+  team's); an entry without a string id and name is left out; the general channel first. The answer is taken when
+  `metadata.isPartialData` is `false`, as in every lab capture, or when it is `true` with `metadata.hasMoreChats`
+  `true`: a personal build's account with a few hundred chats was answered so every time (12 teams, its `chats`
+  264 of them, `conversationFolders` with `isPartialResponse` `false`), and the web bundle ties the flag to the chats
+  alone (`partialDataStartupChatsLimit`, and `shouldSkipGroupChatSyncBasedOnIsPartialData`: the group chats are read
+  from the chat service after a partial answer), so its teams and folders are whole. One that says it is partial
+  otherwise, or doesn't say (no `metadata`, no flag, a flag that isn't a boolean), is refused as malformed, since the
+  store replaces its list with what a read gives; the stored list and its read time stay, and the read is tried again
+  after the engine's retry wait. `chats`, `users` and the rest aren't read: the chat list stays the chat service's;
+  of `conversationFolders` only the favourites are ([chat.md](chat.md#favorites-empty-chats-and-the-chat-list)).
   `teams-core` reads it in the background when a view asks and the stored list is missing or older than an hour
   (`TEAMS_MAX_AGE`), keeps it in the store whole and tells a change as `Event::Teams`.
 - **A channel's posts**: the chat service's message reads, as a chat's (`ChatReads::messages` and its links), on demand

@@ -23,7 +23,7 @@ use gpui_component::command::{Command, CommandGroup, CommandItem, CommandState};
 
 use crate::bridge::Core;
 use crate::calls::Calls;
-use crate::chat_list::ChatList;
+use crate::chat_list::{ChatList, RowKind};
 use crate::search::{self, Hit, HitTarget};
 use crate::settings::ManualStatus;
 use crate::teams_list::TeamsList;
@@ -403,6 +403,8 @@ impl Switcher {
             .list
             .read(cx)
             .all_rows()
+            // a favourite channel is offered with the other channels, below
+            .filter(|row| row.kind != RowKind::Channel)
             .map(|row| (row.id.clone(), row.name.clone()))
             .collect();
         self.matches = matches(&self.query, &rows);

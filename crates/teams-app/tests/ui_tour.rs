@@ -7,7 +7,8 @@
 //! child walks the views one step at a time (no chat open; the a–b chat with a message selected and its actions
 //! shown; a reply begun; the account menu; every page of the settings, Calls with made-up devices; the appearance
 //! and the chat again in Teams Dark; a message with files, its cards and their thumbnails, in Teams Dark and Light;
-//! the 12-hour time format and a chat's times on it) and says `shot <name>` after each; the parent screenshots the window and lets it
+//! the 12-hour time format and a chat's times on it; a group chat's presence; a favourite channel opened from
+//! "Favorites") and says `shot <name>` after each; the parent screenshots the window and lets it
 //! go on. The views are driven from inside the app, never by screen coordinates.
 //!
 //! Without weston 15, niri or `dbus-daemon` it says so and passes, unless `GPUI_SMOKE_REQUIRE=1`.
@@ -33,8 +34,8 @@ use teams_fence::lab::{Alias, LabConfig, record_abc_chat};
 use teams_fence::{Fence, FenceLog, LiveMembershipSource, Mri, Roster};
 use teams_media::devices::catalog::{DeviceInfo, DeviceKind, DeviceList, FixedDirectory};
 use teams_mock::{
-    AB_CHAT, ABC_CHAT, AC_CHAT, AMS_BASE, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, PRESENCE_BASE, TrouterMock,
-    lab_toml,
+    AB_CHAT, ABC_CHAT, AC_CHAT, AMS_BASE, CHAT_BASE, CSA_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, PRESENCE_BASE,
+    TEAM_CHANNEL, TrouterMock, lab_toml,
 };
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::Store;
@@ -67,7 +68,7 @@ const SETTLE: Duration = Duration::from_millis(1500);
 type Step = (&'static str, fn(&Entity<Shell>, &mut Window, &mut App));
 
 /// The tour.
-const STEPS: [Step; 26] = [
+const STEPS: [Step; 27] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -189,6 +190,12 @@ const STEPS: [Step; 26] = [
     // b's and c's badges on their avatars
     ("chat-group-presence", |shell, window, cx| {
         shell.update(cx, |shell, cx| shell.open_chat(ABC_CHAT.to_owned(), window, cx));
+    }),
+    // the team's channel the mock's CSA lists as a's favourite, under "Favorites" with its team's mark, clicked there:
+    // opened read-only as a channel, its row highlighted
+    ("favorite-channel", |shell, _, cx| {
+        let list = shell.read(cx).list().clone();
+        list.update(cx, |list, cx| list.open(TEAM_CHANNEL.to_owned(), cx));
     }),
 ];
 
@@ -497,7 +504,12 @@ impl MockLab {
         let engine = engine::start(Parts {
             calls: None,
             store: Store::open(&config.paths().store_file(Alias::A))?,
-            client: Arc::new(Client::new(http()?.with_ams(AMS_BASE)?.with_presence(PRESENCE_BASE)?)),
+            client: Arc::new(Client::new(
+                http()?
+                    .with_ams(AMS_BASE)?
+                    .with_presence(PRESENCE_BASE)?
+                    .with_csa(CSA_BASE)?,
+            )),
             outbox: Outbox::new(transport, fence, Arc::new(membership), author),
             push: Some(Push::new(trouter_client)),
             options: EngineOptions::default(),

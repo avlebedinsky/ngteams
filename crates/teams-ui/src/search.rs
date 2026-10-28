@@ -30,7 +30,7 @@ use gpui_component::command::{Command, CommandItem, CommandState};
 use teams_store::search::{MATCH_END, MATCH_START};
 
 use crate::bridge::Core;
-use crate::chat_list::ChatList;
+use crate::chat_list::{ChatList, RowKind};
 use crate::clock::{self, HourCycle};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
@@ -150,11 +150,12 @@ pub async fn find(core: &dyn Core, query: String, chats: Vec<(String, SharedStri
     hits
 }
 
-/// The chats the list shows, `(id, name)`: what hits may open.
+/// The chats the list shows, `(id, name)`: what hits may open (a favourite channel isn't a chat).
 #[must_use]
 pub fn listed_chats(list: &Entity<ChatList>, cx: &App) -> Vec<(String, SharedString)> {
     list.read(cx)
         .all_rows()
+        .filter(|row| row.kind != RowKind::Channel)
         .map(|row| (row.id.clone(), row.name.clone()))
         .collect()
 }

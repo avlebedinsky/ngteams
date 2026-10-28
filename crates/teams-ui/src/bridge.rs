@@ -101,9 +101,9 @@ pub trait Core: Send + Sync + 'static {
     /// The account's teams with their channels, from the store (`None` before a read settled them); a read starts in
     /// the background when they are missing or old, and a change comes as `Event::Teams` (M2 Task 16).
     fn teams(&self) -> Reply<Option<Vec<Team>>>;
-    /// What the chat list shows besides the stored conversations: the favourite chats in Teams' order (`None` before a
-    /// read gave them) and the conversations the chat service calls empty; a read of the teams starts in the
-    /// background when they are old, and a change of the favourites comes as `Event::Teams`.
+    /// What the chat list shows besides the stored conversations: the favourites (chats and channels) in Teams' order
+    /// (`None` before a read gave them) and the conversations the chat service calls empty; a read of the teams starts
+    /// in the background when they are old, and a change of the favourites comes as `Event::Teams`.
     fn chat_listing(&self) -> Reply<ChatListing>;
     /// Syncs one conversation's messages from the service now: how a channel's posts are read.
     fn sync_conversation(&self, conversation: String) -> Reply<Synced>;

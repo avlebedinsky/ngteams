@@ -8,11 +8,12 @@
 //!   than [`TEAMS_MAX_AGE`], unless one is under way or one failed less than the engine's
 //!   [`EngineOptions::teams_retry`](crate::EngineOptions::teams_retry) ago. Its result is stored whole; a list that
 //!   changed is told as [`Event::Teams`](crate::Event::Teams).
-//! - **And the favourite chats**: the same answer's `Favorites` folder (the chats Teams lists under "Favorites" above
-//!   its chats, in the user's order), stored with the teams when it could be read ([`TeamsRead::favorites`]; a read
-//!   that couldn't keeps the stored ones), a change told as [`Event::Teams`](crate::Event::Teams) too. The chat list
-//!   asks for them ([`EngineRequests::chat_listing`](crate::EngineRequests::chat_listing)), which starts a read as
-//!   asking for the teams does.
+//! - **And the favourites (chats and channels)**: the same answer's `Favorites` folder (the chats and channels Teams
+//!   lists under "Favorites" above its chats, in the user's order), stored with the teams when it could be read
+//!   ([`TeamsRead::favorites`]; a read that couldn't keeps the stored ones), a change told as
+//!   [`Event::Teams`](crate::Event::Teams) too. The chat list asks for them
+//!   ([`EngineRequests::chat_listing`](crate::EngineRequests::chat_listing)), which starts a read as asking for the
+//!   teams does.
 //! - **No write**: nothing here writes, and a chat write the engine takes for a channel's id (a post, a read receipt:
 //!   sealed chat writes aimed at the channel) is denied by the fence, which never reads a channel's members complete.
 //!   No write is mapped to `WriteKind::ChannelPost`. The fence, not a missing write type, keeps channels unwritten.
@@ -50,14 +51,15 @@ pub enum TeamsReadError {
 /// What the chat list shows besides the stored conversations ([`EngineRequests::chat_listing`](crate::EngineRequests::chat_listing)).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ChatListing {
-    /// The favourite chats' ids, in the order Teams lists them under "Favorites" (`48:notes` is the account's own
-    /// notes, its chat with itself); `None` before a read could read them.
+    /// The favourites' ids (chats and channels), in the order Teams lists them under "Favorites" (`48:notes` is the
+    /// account's own notes, its chat with itself); `None` before a read could read them.
     pub favorites: Option<Vec<String>>,
     /// The conversations the chat service last called empty (`isemptyconversation`): Teams lists none of them.
     pub empty: Vec<String>,
 }
 
-/// What one read of the teams gave: the teams, and the favourite chats when the answer's folders could be read.
+/// What one read of the teams gave: the teams, and the favourites (chats and channels) when the answer's folders could
+/// be read.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TeamsRead {
     pub(crate) teams: Vec<Team>,
@@ -83,9 +85,9 @@ impl<C: Credentials + 'static> Teams<C> {
         }
     }
 
-    /// What the chat list needs besides the conversations: the stored favourite chats (`None` before a read could
-    /// read them) and the conversations the chat service calls empty; a read starts when the teams are due one, as
-    /// [`Self::teams`] starts it.
+    /// What the chat list needs besides the conversations: the stored favourite chats and channels (`None` before a
+    /// read could read them) and the conversations the chat service calls empty; a read starts when the teams are due
+    /// one, as [`Self::teams`] starts it.
     pub(crate) fn chat_listing(&mut self, store: &Store) -> Result<ChatListing, StoreError> {
         self.read_if_due(store)?;
         stored_listing(store)
@@ -122,8 +124,8 @@ impl<C: Credentials + 'static> Teams<C> {
         Some(joined.unwrap_or(Err(TeamsReadError::Lost)))
     }
 
-    /// Stores a read's teams and favourite chats (these only when it could read them); whether either changed. A
-    /// failed read waits [`Self::retry`] before the next.
+    /// Stores a read's teams and favourite chats and channels (these only when it could read them); whether either
+    /// changed. A failed read waits [`Self::retry`] before the next.
     pub(crate) fn store(
         &mut self,
         store: &mut Store,
@@ -164,7 +166,7 @@ pub(crate) fn stored_listing(store: &Store) -> Result<ChatListing, StoreError> {
     })
 }
 
-/// CSA's teams read, as the store keeps its teams and favourite chats.
+/// CSA's teams read, as the store keeps its teams and favourites (chats and channels).
 async fn read<C: Credentials>(client: &Client<HttpTransport<C>>) -> Result<TeamsRead, TeamsReadError> {
     let answer = client.read(&CsaTeams).await?;
     let read = CsaTeams::read_answer(answer.body())?;

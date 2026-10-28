@@ -15,11 +15,11 @@ use std::sync::Arc;
 use common::{FakeCore, LAB_A, LAB_B, Rig, Written};
 use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext};
 use teams_core::{Availability, ChatListing, Event};
-use teams_store::{Conversation, ConversationKind, Member, Message};
+use teams_store::{Conversation, ConversationKind, Member, Message, Team, TeamChannel};
 use teams_ui::ViewTrace;
 use teams_ui::chat_list::{BOT, ChatList, ChatRow, ECHO, NOTES, RowKind, UNKNOWN_USER, arrange, joined, unnamed};
 use teams_ui::settings::{Settings, SettingsModel};
-use teams_ui::shell::{Shell, ShellParts};
+use teams_ui::shell::{Main, Shell, ShellParts};
 use teams_ui::sidebar::Section;
 
 const LAB_C: &str = "8:orgid:00000000-0000-4000-8000-00000000000c";
@@ -31,6 +31,8 @@ const A_BOT: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-
 const GROUP: &str = "19:00000000000000000000000000000group@thread.v2";
 const MEETING: &str = "19:meeting_00000000000000000000000000000000@thread.v2";
 const QUIET: &str = "19:meeting_0000000000000000000000000000quiet@thread.v2";
+const TEAM: &str = "19:00000000000000000000000000000team@thread.tacv2";
+const CHANNEL: &str = "19:000000000000000000000000000alerts@thread.tacv2";
 
 fn chat(id: &str, kind: ConversationKind, topic: Option<&str>, last: i64) -> Conversation {
     Conversation {
@@ -230,6 +232,91 @@ fn the_favourites_come_first_in_their_order_and_not_again_under_chats() {
 }
 
 #[test]
+fn a_favourite_channel_is_listed_by_its_name_and_team_and_opens_as_a_channel() {
+    let rig = seeded();
+    *rig.core.teams.lock().unwrap() = Some(vec![Team {
+        id: TEAM.to_owned(),
+        name: "ops crew".to_owned(),
+        archived: false,
+        channels: vec![
+            TeamChannel {
+                id: TEAM.to_owned(),
+                name: "General".to_owned(),
+                general: true,
+            },
+            TeamChannel {
+                id: CHANNEL.to_owned(),
+                name: "Prod alerts".to_owned(),
+                general: false,
+            },
+        ],
+    }]);
+    // the favourites as an account with channels among them has them: a channel between the notes and a chat, and one
+    // of no stored team left out
+    rig.core.listing.lock().unwrap().favorites = Some(vec![
+        NOTES.to_owned(),
+        CHANNEL.to_owned(),
+        AC.to_owned(),
+        "19:not-a-team-s@thread.tacv2".to_owned(),
+    ]);
+    rig.core.messages.lock().unwrap().insert(
+        CHANNEL.to_owned(),
+        vec![message(CHANNEL, "7000", LAB_B, "<p>disk full</p>", 7_000)],
+    );
+    rig.core.unread.lock().unwrap().insert(CHANNEL.to_owned(), 3);
+    let written = Written::default();
+    let (shell, cx) = shell_window_traced(&rig, Arc::new(ViewTrace::new(written.clone())));
+    let list = list_of(&shell, cx);
+    let (favorites, rows) = cx.update(|_, cx| (list.read(cx).favorites().to_vec(), list.read(cx).rows().to_vec()));
+    assert_eq!(
+        shown(&favorites),
+        [
+            (NOTES, RowKind::Notes, "Ann Able (You)", true),
+            (CHANNEL, RowKind::Channel, "Prod alerts", true),
+            (AC, RowKind::OneToOne, "Cleo Sea", true),
+        ]
+    );
+    let channel = &favorites[1];
+    assert_eq!(channel.team.as_deref(), Some("ops crew"));
+    assert_eq!(
+        (channel.preview.as_ref(), channel.last_activity, channel.unread),
+        ("disk full", Some(7_000), 3)
+    );
+    assert!(channel.partner.is_none(), "a channel shows no presence");
+    assert!(!rows.iter().any(|row| row.id == CHANNEL));
+    assert!(drawn(cx, "avatar-team"), "its team's mark for its avatar");
+    let lines = written.lines();
+    let line = lines
+        .iter()
+        .rev()
+        .find(|line| line["view"] == "chat-list")
+        .expect("traced");
+    assert_eq!(line["kinds"][1], "channel");
+    assert!(!written.text().contains("Prod alerts") && !written.text().contains("ops crew"));
+
+    // clicked: opened read-only as a channel, its row still highlighted
+    let found = cx.debug_bounds("favorite-row-1").unwrap();
+    cx.simulate_click(found.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).main().clone()),
+        Main::Channel(CHANNEL.to_owned())
+    );
+    assert_eq!(
+        cx.update(|_, cx| list.read(cx).selected().map(str::to_owned)),
+        Some(CHANNEL.to_owned())
+    );
+    // a chat opened after it takes the highlight
+    let found = cx.debug_bounds("favorite-row-2").unwrap();
+    cx.simulate_click(found.center(), Modifiers::none());
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|_, cx| list.read(cx).selected().map(str::to_owned)),
+        Some(AC.to_owned())
+    );
+}
+
+#[test]
 fn the_favorites_section_folds_like_chats_and_is_shown_only_with_favourites() {
     let rig = seeded();
     let (shell, cx) = shell_window(&rig);
@@ -348,6 +435,7 @@ fn arranging_keeps_a_chat_called_empty_once_it_has_text_or_unread() {
         picture: None,
         partner: None,
         faces: Vec::new(),
+        team: None,
         preview: preview.to_owned().into(),
         last_activity: None,
         unread,

@@ -709,7 +709,10 @@ impl Shell {
         }
         self.teams
             .update(cx, |teams, cx| teams.select(Some(chosen.id.clone()), cx));
-        self.list.update(cx, |list, cx| list.select(None, cx));
+        // the channel is the list's selection: no chat row is highlighted, and the channel's own row under "Favorites"
+        // is, as Teams highlights it, whether it is listed yet or comes with a later load
+        self.list
+            .update(cx, |list, cx| list.select(Some(chosen.id.clone()), cx));
         // a chat view of the channel itself (kept as the selected chat by an earlier build) is dropped, and the channel
         // isn't the selected chat any more
         if self

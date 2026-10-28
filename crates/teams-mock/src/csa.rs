@@ -1,6 +1,6 @@
 //! CSA's teams read (M2 Task 16): `GET /api/csa/<region>/api/v3/teams/users/me` with the web client's query exactly,
 //! answered with `csa/teams.json`'s body (the same teams for every account: the mock's one team, [`crate::CHANNEL`],
-//! with its other channel, [`crate::TEAM_CHANNEL`]). It takes the account's token alone, as the probe sent it; a
+//! with its other channel, [`crate::TEAM_CHANNEL`], that channel every account's one favourite). It takes the account's token alone, as the probe sent it; a
 //! request without a token the mock handed out is a 401, the read with any other query a 404 (the service's answers
 //! to those weren't captured).
 
