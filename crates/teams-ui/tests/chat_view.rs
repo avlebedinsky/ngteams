@@ -924,6 +924,10 @@ fn older_loads_that_bring_nothing_stall_until_asked_again() {
         u64::from(MAX_FRUITLESS),
         "nothing asks again by itself"
     );
+    // scrolled to the top (the ten messages may fill the list), still nothing asks again by itself
+    scroll_up(cx, 100_000.0);
+    draw(cx);
+    assert_eq!(older_loads(cx), u64::from(MAX_FRUITLESS), "scrolling up asks nothing");
     // the top's button asks again: the two pages left bring nothing, then the service has none
     let again = cx.debug_bounds("load-older").expect("the top offers to load again");
     cx.simulate_click(again.center(), Modifiers::none());

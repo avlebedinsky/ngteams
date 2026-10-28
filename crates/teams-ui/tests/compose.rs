@@ -1770,4 +1770,122 @@ fn in_the_read_only_mode_a_chat_offers_only_copying_and_sends_nothing() {
     assert!(actions(&rig).is_empty(), "no write, no read receipt");
     assert_eq!(mode(&view, cx), Mode::New);
     assert!(rig.core.transients.lock().unwrap().is_empty(), "no typing");
+    assert!(cx.debug_bounds("compose-emoji").is_none(), "no emoji to put anywhere");
+}
+
+fn emoji_open(view: &Entity<ChatView>, cx: &mut VisualTestContext) -> bool {
+    let compose = compose(view, cx);
+    cx.update(|_, cx| compose.read(cx).emoji_picker().is_some())
+}
+
+#[test]
+fn the_emoji_button_puts_the_emoji_picked_at_the_cursor_and_sends_nothing_by_itself() {
+    let rig = rig_with(vec![message(NOON, LAB_B, "<p>hi a</p>")]);
+    let (view, cx, written) = chat_window(&rig, no_receipts());
+    type_text(cx, "see you");
+    keys(cx, "left left left");
+
+    click(cx, "compose-emoji");
+    assert!(emoji_open(&view, cx), "the button opens the picker");
+    let picker = cx.debug_bounds("compose-emoji-picker").expect("the picker is drawn");
+    let button = cx.debug_bounds("compose-emoji").unwrap();
+    assert!(picker.bottom() <= button.top(), "it opens upwards, over the box");
+    // its search field has the focus: what is typed there is a search, never the box's text
+    type_text(cx, "eyes");
+    assert_eq!(typed(&view, cx), "see you");
+    keys(cx, "enter");
+    assert!(!emoji_open(&view, cx), "a pick closes it");
+    assert_eq!(typed(&view, cx), "see \u{1f440}you", "the emoji at the cursor");
+    assert_eq!(focused(&view, cx), (false, true), "the box has the focus back");
+    assert!(actions(&rig).is_empty(), "picking an emoji writes nothing");
+    assert!(!written.text().contains('\u{1f440}'), "no text reaches the trace");
+
+    keys(cx, "enter");
+    let sent = actions(&rig);
+    assert_eq!(sent.len(), 1, "{sent:?}");
+    assert_eq!(text_of(&sent[0]).html(), "<p>see \u{1f440}you</p>");
+}
+
+#[test]
+fn the_emoji_picker_opens_from_the_keyboard_and_its_key_or_escape_closes_it() {
+    // the account's own message, which Up in an empty box would edit
+    let rig = rig_with(vec![message(NOON, LAB_A, "<p>mine</p>")]);
+    let (view, cx, _) = chat_window(&rig, no_receipts());
+
+    keys(cx, "ctrl-.");
+    assert!(emoji_open(&view, cx), "Ctrl+. opens it");
+    // Up in its search field, the box empty, edits nothing
+    keys(cx, "up");
+    assert_eq!(mode(&view, cx), Mode::New, "Up in the search edits no message");
+    keys(cx, "ctrl-.");
+    assert!(!emoji_open(&view, cx), "Ctrl+. closes it again");
+    assert_eq!(focused(&view, cx), (false, true), "the box has the focus back");
+
+    // Enter in its search field, the box holding text, sends nothing
+    type_text(cx, "hi");
+    keys(cx, "ctrl-;");
+    assert!(emoji_open(&view, cx), "Ctrl+; opens it too");
+    keys(cx, "enter");
+    keys(cx, "escape");
+    assert!(!emoji_open(&view, cx), "Escape closes it");
+    assert_eq!(focused(&view, cx), (false, true), "the box has the focus back");
+    assert_eq!(mode(&view, cx), Mode::New);
+    assert_eq!(typed(&view, cx), "hi");
+    assert!(actions(&rig).is_empty(), "nothing sent");
+}
+
+#[test]
+fn the_emoji_button_closes_its_picker_and_an_escape_meant_for_the_box_isn_t_the_picker_s() {
+    let rig = rig_with(vec![message(NOON, LAB_A, "<p>mine</p>")]);
+    let (view, cx, _) = chat_window(&rig, no_receipts());
+
+    click(cx, "compose-emoji");
+    assert!(emoji_open(&view, cx));
+    click(cx, "compose-emoji");
+    assert!(!emoji_open(&view, cx), "its button closes it again");
+    assert_eq!(focused(&view, cx), (false, true));
+    assert!(actions(&rig).is_empty());
+
+    // an Escape while the focus is elsewhere is not the picker's: it goes where the focus is
+    click(cx, "compose-emoji");
+    assert!(emoji_open(&view, cx));
+    let mine = rig_message_id(&view, cx);
+    act(&view, cx, MessageAction::Reply, &mine);
+    assert!(matches!(mode(&view, cx), Mode::Reply(_)), "replying, the box focused");
+    keys(cx, "escape");
+    assert_eq!(mode(&view, cx), Mode::New, "the box's Escape cancels the reply");
+}
+
+/// The id of the chat's last message.
+fn rig_message_id(view: &Entity<ChatView>, cx: &mut VisualTestContext) -> String {
+    cx.update(|_, cx| view.read(cx).message_items().last().map(|item| item.id.clone()))
+        .expect("a message")
+}
+
+#[test]
+fn send_and_emoji_sit_inside_the_box_and_its_accent_line_follows_the_focus() {
+    let rig = rig_with(vec![message(NOON, LAB_B, "<p>hi a</p>")]);
+    let (view, cx, _) = chat_window(&rig, no_receipts());
+    let inside = |outer: gpui::Bounds<gpui::Pixels>, inner: gpui::Bounds<gpui::Pixels>| {
+        outer.left() <= inner.left()
+            && inner.right() <= outer.right()
+            && outer.top() <= inner.top()
+            && inner.bottom() <= outer.bottom()
+    };
+    let the_box = cx.debug_bounds("compose-box").expect("the box is drawn");
+    assert!(the_box.size.height >= px(teams_ui::compose::BOX_HEIGHT), "{the_box:?}");
+    for selector in ["compose-emoji", "compose-send"] {
+        let button = cx.debug_bounds(selector).unwrap();
+        assert!(inside(the_box, button), "{selector} {button:?} in {the_box:?}");
+    }
+    let emoji = cx.debug_bounds("compose-emoji").unwrap();
+    let send = cx.debug_bounds("compose-send").unwrap();
+    assert!(emoji.right() < send.left(), "send last, on the right");
+
+    assert!(
+        cx.debug_bounds("compose-accent").is_some(),
+        "the accent line while the box has the focus"
+    );
+    focus_list(&view, cx);
+    assert!(cx.debug_bounds("compose-accent").is_none(), "none without it");
 }

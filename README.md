@@ -445,7 +445,9 @@ who is typing. With the message list focused (a click on a message), Up and Down
 its text), Delete (the account's own) and Escape (clear the selection) act on it. A message under the pointer shows
 Teams' hover bar over its bubble's top right: the quick reactions (the account's most used on its stored messages
 first, then Teams' 👍 ❤️ 😆 😮 😢 😡), React, Edit on the account's own, Reply and "More options" (Copy text, Delete),
-each named by its tooltip with its key. The compose box has a Send button beside Enter. Ctrl+K opens the chat switcher (fuzzy over the chats' names; Enter opens,
+each named by its tooltip with its key. The compose box is drawn as Teams' (a rounded box with its accent line along
+the foot while it has the focus) with Emoji and, behind a divider, Send inside it on the right: Emoji (also Ctrl+. or
+Ctrl+;) opens every emoji Teams offers, searchable, and puts the one picked at the cursor; Send does what Enter does. Ctrl+K opens the chat switcher (fuzzy over the chats' names; Enter opens,
 Escape closes). Settings take the place of the sidebar and the conversation pane, as in Teams: a column of pages
 (General, Appearance, Notifications, Privacy, Calls and devices where the app has calls, Diagnostics; Up and Down move
 between them) beside the page shown, each a set of titled boxes of rows. The settings (the selected chat, typing, read

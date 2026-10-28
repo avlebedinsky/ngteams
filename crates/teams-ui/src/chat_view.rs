@@ -210,6 +210,7 @@ impl Global for Bound {}
 
 /// Binds the message list's keys, once per app.
 pub fn init(cx: &mut App) {
+    compose::init(cx);
     if cx.has_global::<Bound>() {
         return;
     }
@@ -2698,7 +2699,7 @@ impl ChatView {
 }
 
 /// An empty element over its parent that keeps where the parent was last drawn in `drawn_at`, for a popup to open by.
-fn measured(drawn_at: &Rc<Cell<Option<Bounds<Pixels>>>>) -> AnyElement {
+pub(crate) fn measured(drawn_at: &Rc<Cell<Option<Bounds<Pixels>>>>) -> AnyElement {
     let drawn_at = Rc::clone(drawn_at);
     canvas(
         move |bounds, window, _| {

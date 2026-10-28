@@ -25,6 +25,13 @@
 //!   doesn't start it over), never while editing, and only with the "send typing" setting on. Nothing is sent when
 //!   typing stops: the web client never sent `Control/ClearTyping`.
 //!
+//! - **The box** is drawn as Teams' compose box: the text area on a raised, rounded surface with a hairline border
+//!   ([`BOX_HEIGHT`] at least), Teams' accent line in the brand colour along its foot while it has the focus, and its
+//!   toolbar inside it on the right: Emoji, a thin divider, then Send.
+//! - **Emoji** ([`Compose::toggle_emoji`], the button or Ctrl+.): every emoji Teams offers ([`ReactionPicker::for_emoji`],
+//!   searchable) over the box; the one picked goes in at the cursor, in place of the text selected, as if typed. It
+//!   is only text in the box: nothing is sent until the message is.
+//!
 //! - **Read-only** ([`Compose::is_read_only`]): in the app's read-only mode every box ([`READ_ONLY_APP`]), else the
 //!   account's own notes ([`teams_core::NOTES`]), which take no write from
 //!   this app (no write type is mapped to a `48:` stream), so their box shows [`READ_ONLY_NOTES`] in place of the text
@@ -33,38 +40,82 @@
 //! What the box does is traced (`compose opened` when the box is made, `sent`, `replying`, `editing`, `cancelled`, and
 //! `changed` each time what it holds changes), never its text.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 use std::ops::Range;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, Focusable as _, Global,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Task, Window, div, prelude::FluentBuilder as _, px, rgb,
+    AnyElement, App, AppContext as _, AsyncApp, Bounds, Context, Entity, EventEmitter, Focusable as _, Global,
+    InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Pixels, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, actions, anchored, deferred, div,
+    prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::Disableable as _;
-use gpui_component::button::ButtonVariants;
 use gpui_component::input::{
     Enter, Escape, IndentInline, InlineToken, InlineTokenSpan, InputContent, InputEvent, MoveDown, MoveUp, Textarea,
     TextareaState,
 };
-use gpui_component::{Sizable as _, Size};
+use gpui_component::{Selectable as _, Sizable as _, Size};
 use teams_core::{Action, Availability, NOTES, Transient};
 use teams_fence::Mri;
 use teams_proto::chat::{ComposeError, Marks, MessageText, MessageType, Node, Quote, RichText, parse_html};
 use teams_store::Message;
 
 use crate::bridge::Core;
-use crate::icons::{Glyph, icon_button, selected_by};
+use crate::chat_view::measured;
+use crate::icons::{Glyph, icon_button, icon_button_with_key, selected_by};
 use crate::presence::{self, Presences};
+use crate::reaction_picker::{ReactionPicker, ReactionPickerEvent};
+use crate::reactions;
 use crate::settings::SettingsModel;
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 
 /// The compose box's key context.
 pub const CONTEXT: &str = "Compose";
+/// The box's least height, px: Teams' compose box, one line of text with its toolbar beside it.
+pub const BOX_HEIGHT: f32 = 56.0;
+/// The box's padding above and below its text area and toolbar, px.
+const BOX_PADDING: f32 = 6.0;
+/// A toolbar button in the box, px (its icon three quarters of it).
+const TOOL: f32 = 28.0;
+
+actions!(
+    compose,
+    [
+        /// Opens or closes the emoji picker.
+        ToggleEmoji
+    ]
+);
+
+/// Marks the box's key bindings as installed.
+struct Bound;
+
+impl Global for Bound {}
+
+/// The emoji picker's key context, over the box: its key closes it from inside it.
+const EMOJI_CONTEXT: &str = "ComposeEmoji";
+
+/// Binds the box's own keys, once per app: Ctrl+. (and Ctrl+;, as GTK's text fields) opens the emoji picker from the
+/// box and closes it from the picker.
+pub fn init(cx: &mut App) {
+    if cx.has_global::<Bound>() {
+        return;
+    }
+    cx.set_global(Bound);
+    // the last bound is the one a tooltip names
+    cx.bind_keys([CONTEXT, EMOJI_CONTEXT].into_iter().flat_map(|context| {
+        [
+            KeyBinding::new("ctrl-;", ToggleEmoji, Some(context)),
+            KeyBinding::new("ctrl-.", ToggleEmoji, Some(context)),
+        ]
+    }));
+}
+
 /// The shortest gap between two typing signals: the web client's throttle (`typingIndicator.notificationFrequency`,
 /// 6 000 ms; M2 Task 10, `docs/protocol/chat.md`, "Typing").
 pub const TYPING_EVERY: Duration = Duration::from_secs(6);
@@ -496,6 +547,12 @@ pub struct Compose {
     /// The account's own notes: nothing is written there ([`READ_ONLY_NOTES`]).
     /// What a read-only box says in place of its text area; `None` for a box that writes.
     read_only: Option<&'static str>,
+    /// The emoji picker, while it is open.
+    emoji: Option<(Entity<ReactionPicker>, Subscription)>,
+    /// Where the emoji button was last drawn, for the picker to open by.
+    emoji_at: Rc<Cell<Option<Bounds<Pixels>>>>,
+    /// Whether the picker was open as the emoji button was pressed: its click then closes it.
+    emoji_on_press: bool,
     _input_events: Subscription,
     _presence: Subscription,
 }
@@ -540,6 +597,10 @@ impl Compose {
                 .placeholder("Type a message")
         });
         let input_events = cx.subscribe_in(&input, window, |this: &mut Self, _, event, window, cx| {
+            if matches!(event, InputEvent::Focus | InputEvent::Blur) {
+                // the box's accent line follows the focus
+                cx.notify();
+            }
             if matches!(event, InputEvent::Change) {
                 // what the box holds changed: traced without the text, so a test driving the keyboard can tell
                 // when the app has taken in what it typed
@@ -575,6 +636,9 @@ impl Compose {
             candidates: None,
             reading: None,
             problem: None,
+            emoji: None,
+            emoji_at: Rc::default(),
+            emoji_on_press: false,
             _input_events: input_events,
             _presence: presence,
         }
@@ -975,6 +1039,64 @@ impl Compose {
         self.choose(selected, window, cx);
     }
 
+    // --- the emoji picker ---
+
+    /// The emoji picker, while it is open.
+    #[must_use]
+    pub fn emoji_picker(&self) -> Option<&Entity<ReactionPicker>> {
+        self.emoji.as_ref().map(|(picker, _)| picker)
+    }
+
+    /// Opens the emoji picker over the box, its search field focused, or closes it when it is open; a read-only box
+    /// has none.
+    pub fn toggle_emoji(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only.is_some() {
+            return;
+        }
+        if self.emoji.take().is_some() {
+            self.focus(window, cx);
+            cx.notify();
+            return;
+        }
+        self.picker = None;
+        let picker = cx.new(|cx| ReactionPicker::for_emoji(Arc::clone(&self.core), window, cx));
+        let events = cx.subscribe_in(&picker, window, |this, picker, event, window, cx| match event {
+            ReactionPickerEvent::Picked(key) => this.put_emoji(key, window, cx),
+            ReactionPickerEvent::Dismissed => {
+                // Escape gives the box its focus back; a click elsewhere keeps the focus where it went
+                let held = picker.read(cx).holds_focus(window, cx);
+                this.emoji = None;
+                if held {
+                    this.focus(window, cx);
+                }
+                cx.notify();
+            }
+        });
+        self.emoji = Some((picker, events));
+        cx.notify();
+    }
+
+    /// The emoji button clicked: the picker opens, or closes when it was open as the button was pressed (the press,
+    /// outside the picker, has dismissed it by then).
+    fn click_emoji(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if std::mem::take(&mut self.emoji_on_press) {
+            self.emoji = None;
+            self.focus(window, cx);
+            cx.notify();
+        } else {
+            self.toggle_emoji(window, cx);
+        }
+    }
+
+    /// Puts the emoji of `key` at the cursor, in place of the text selected, as if typed, and closes the picker.
+    fn put_emoji(&mut self, key: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.emoji = None;
+        self.focus(window, cx);
+        let emoji = reactions::glyph(key);
+        self.input.update(cx, |input, cx| input.replace(emoji, window, cx));
+        cx.notify();
+    }
+
     // --- keys ---
 
     fn capture_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
@@ -1070,23 +1192,122 @@ impl Compose {
         )
     }
 
-    /// Send (Enter does the same), greyed while the box holds nothing to send.
-    fn send_button(&self, cx: &mut Context<Self>) -> AnyElement {
+    /// Send (Enter does the same), as Teams draws it: a quiet icon, in the brand colour once the box holds something
+    /// to send and greyed while it holds nothing.
+    fn send_button(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let empty = self.input.read(cx).value().trim().is_empty();
         let tip = if matches!(self.mode, Mode::Edit { .. }) {
             "Save (Enter)"
         } else {
             "Send (Enter)"
         };
+        let glyph = Glyph::SEND
+            .icon()
+            .when(!empty, |icon| icon.text_color(rgb(palette.brand)));
         selected_by(
             "compose-send",
             icon_button("compose-send", Glyph::SEND, tip)
+                .icon(glyph)
+                .with_size(Size::Size(px(TOOL)))
                 .disabled(empty)
-                .when(!empty, ButtonVariants::primary)
                 .on_click(cx.listener(|this, _, window, cx| this.send(window, cx))),
         )
-        .mb(px(2.0))
         .into_any_element()
+    }
+
+    /// The emoji button, its tooltip naming its key; the picker opens over the box by it.
+    fn emoji_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let button = icon_button_with_key("compose-emoji", Glyph::EMOJI, "Emoji", &ToggleEmoji)
+            .with_size(Size::Size(px(TOOL)))
+            .selected(self.emoji.is_some())
+            .on_click(cx.listener(|this, _, window, cx| this.click_emoji(window, cx)));
+        selected_by("compose-emoji", button)
+            .relative()
+            .capture_any_mouse_down(cx.listener(|this, _, _, _| this.emoji_on_press = this.emoji.is_some()))
+            .child(measured(&self.emoji_at))
+            .into_any_element()
+    }
+
+    /// The box's toolbar, inside it on the right as Teams has it: emoji, a thin divider, then send.
+    fn toolbar(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .debug_selector(|| "compose-toolbar".to_owned())
+            .flex_none()
+            .flex()
+            .items_center()
+            .gap_1()
+            // the box's inside, its padding and border taken off: centred on one line, at the foot of more
+            .h(px(BOX_HEIGHT - 2.0 * BOX_PADDING - 2.0))
+            .child(self.emoji_button(cx))
+            .child(div().w(px(1.0)).h(px(20.0)).mx_1().bg(rgb(palette.border)))
+            .child(self.send_button(palette, cx))
+            .into_any_element()
+    }
+
+    /// The emoji picker over the box, by the emoji button as it was last drawn, opening upwards: out of the box's key
+    /// context, whose keys (Enter sends, Up edits) would act on what its search field is given.
+    /// Its own key context takes the picker's key back from inside it, so the key closes what it opened.
+    fn emoji_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let ((picker, _), at) = self.emoji.as_ref().zip(self.emoji_at.get())?;
+        Some(
+            deferred(
+                anchored()
+                    .anchor(gpui::Anchor::BottomRight)
+                    .position(at.top_right())
+                    .snap_to_window_with_margin(px(8.0))
+                    .child(
+                        div()
+                            .key_context(EMOJI_CONTEXT)
+                            .on_action(cx.listener(|this, _: &ToggleEmoji, window, cx| this.toggle_emoji(window, cx)))
+                            .pb_1()
+                            .child(picker.clone()),
+                    ),
+            )
+            .with_priority(1)
+            .into_any_element(),
+        )
+    }
+
+    /// The box itself: the text area and its toolbar on a raised, rounded surface with a hairline border, and Teams'
+    /// accent line along its foot while it has the focus.
+    fn input_box(&self, palette: Palette, focused: bool, cx: &mut Context<Self>) -> AnyElement {
+        let accent = focused.then(|| {
+            div()
+                .debug_selector(|| "compose-accent".to_owned())
+                .absolute()
+                .left_0()
+                .right_0()
+                .bottom_0()
+                .h(px(2.0))
+                .rounded_b_md()
+                .bg(rgb(palette.brand))
+        });
+        div()
+            .debug_selector(|| "compose-box".to_owned())
+            .relative()
+            .flex()
+            .items_end()
+            .gap_1()
+            .min_h(px(BOX_HEIGHT))
+            .pl_1()
+            .pr_2()
+            .py(px(BOX_PADDING))
+            .rounded_md()
+            .border_1()
+            .border_color(rgb(palette.border))
+            .bg(rgb(palette.surface))
+            .overflow_hidden()
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    // one line sits in the middle of the box; more lines grow it, the toolbar staying at its foot
+                    .self_center()
+                    .child(Textarea::new(&self.input).appearance(false).with_size(Size::Large)),
+            )
+            .child(self.toolbar(palette, cx))
+            .children(accent)
+            .into_any_element()
     }
 
     fn picker_view(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1161,14 +1382,14 @@ fn read_only_view(palette: Palette, note: &'static str) -> AnyElement {
         .flex_none()
         .px_4()
         .pt_1()
-        .pb_3()
+        .pb_4()
         .child(
             div()
                 .debug_selector(|| "compose-read-only".to_owned())
                 .flex()
                 .items_center()
                 .gap_2()
-                .min_h(px(36.0))
+                .min_h(px(BOX_HEIGHT))
                 .px_3()
                 .rounded_md()
                 .border_1()
@@ -1183,44 +1404,36 @@ fn read_only_view(palette: Palette, note: &'static str) -> AnyElement {
 }
 
 impl Render for Compose {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = theme::current(cx);
         if let Some(note) = self.read_only {
             return read_only_view(palette, note);
         }
-        div()
+        let focused = self.focused(window, cx);
+        let keyed = div()
             .key_context(CONTEXT)
-            .debug_selector(|| "compose".to_owned())
             .capture_action(cx.listener(Self::capture_up))
             .capture_action(cx.listener(Self::capture_down))
             .capture_action(cx.listener(Self::capture_enter))
             .capture_action(cx.listener(Self::capture_tab))
             .on_action(cx.listener(Self::on_enter))
             .on_action(cx.listener(Self::on_escape))
-            .flex_none()
+            .on_action(cx.listener(|this, _: &ToggleEmoji, window, cx| this.toggle_emoji(window, cx)))
             .flex()
             .flex_col()
             .gap_1()
-            .px_4()
-            .pt_1()
-            .pb_3()
             .children(self.picker_view(palette, cx))
             .children(self.mode_bar(palette, cx))
             .children(self.problem_view(palette))
-            .child(
-                div()
-                    .flex()
-                    .items_end()
-                    .gap_1()
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .min_h(px(36.0))
-                            .child(Textarea::new(&self.input)),
-                    )
-                    .child(self.send_button(cx)),
-            )
+            .child(self.input_box(palette, focused, cx));
+        div()
+            .debug_selector(|| "compose".to_owned())
+            .flex_none()
+            .px_4()
+            .pt_1()
+            .pb_4()
+            .child(keyed)
+            .children(self.emoji_overlay(cx))
             .into_any_element()
     }
 }

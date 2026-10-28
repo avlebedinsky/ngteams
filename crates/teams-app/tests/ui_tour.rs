@@ -19,7 +19,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use std::{fs, future, io, thread};
 
-use gpui::{App, AsyncApp, Entity, Window, WindowHandle, WindowingModes};
+use gpui::{App, AsyncApp, Context, Entity, Window, WindowHandle, WindowingModes};
 use teams_app::app::{self, Launch, LaunchAccount};
 use teams_app::trace::adopt_trace;
 use teams_auth::secrets::Secret;
@@ -38,6 +38,7 @@ use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::Store;
 use teams_trouter::{Options, Trouter, TrouterCredentials};
 use teams_ui::chat_view::{Item, MessageAction};
+use teams_ui::compose::Compose;
 use teams_ui::settings_view::Page;
 use teams_ui::shell::Shell;
 use teams_ui::view::Root;
@@ -64,7 +65,7 @@ const SETTLE: Duration = Duration::from_millis(1500);
 type Step = (&'static str, fn(&Entity<Shell>, &mut Window, &mut App));
 
 /// The tour.
-const STEPS: [Step; 19] = [
+const STEPS: [Step; 23] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -88,6 +89,17 @@ const STEPS: [Step; 19] = [
         if let Some((chat, message)) = last_message(shell, cx) {
             chat.update(cx, |chat, cx| chat.act(MessageAction::Reply, &message, window, cx));
         }
+    }),
+    // the compose box's emoji picker, opened from its button over the box
+    ("chat-emoji", |shell, window, cx| {
+        with_compose(shell, cx, |compose, cx| {
+            compose.cancel(window, cx);
+            compose.toggle_emoji(window, cx);
+        });
+    }),
+    // the box with the focus and text in it: its accent line, Send in the brand colour
+    ("chat-compose", |shell, window, cx| {
+        type_in_compose(shell, "Lunch at noon?", window, cx);
     }),
     ("account-menu", |shell, _, cx| {
         shell.update(cx, Shell::toggle_status_menu);
@@ -128,6 +140,12 @@ const STEPS: [Step; 19] = [
     ("chat-dark", |shell, window, cx| {
         shell.update(cx, |shell, cx| shell.show_chats(window, cx));
         select_last_message(shell, window, cx);
+    }),
+    ("chat-dark-compose", |shell, window, cx| {
+        type_in_compose(shell, "Lunch at noon?\nThe usual place, or the new one?", window, cx);
+    }),
+    ("chat-dark-emoji", |shell, window, cx| {
+        with_compose(shell, cx, |compose, cx| compose.toggle_emoji(window, cx));
     }),
     // b's pasted picture with an emoticon in its text, and b's wave alone (`seed_pictures`), in Teams Dark
     ("chat-pictures", |shell, window, cx| {
@@ -283,6 +301,29 @@ fn hover_none(shell: &Entity<Shell>, cx: &mut App) {
     if let Some(chat) = shell.read(cx).chat().cloned() {
         chat.update(cx, |chat, cx| chat.hover(None, cx));
     }
+}
+
+/// Runs `change` on the compose box of the chat shown.
+fn with_compose(shell: &Entity<Shell>, cx: &mut App, change: impl FnOnce(&mut Compose, &mut Context<Compose>)) {
+    if let Some(chat) = shell.read(cx).chat().cloned() {
+        let compose = chat.read(cx).compose().clone();
+        compose.update(cx, change);
+    }
+}
+
+/// Closes the emoji picker if it is open, gives the compose box the focus and types `text` into it, in place of what
+/// an earlier step left there.
+fn type_in_compose(shell: &Entity<Shell>, text: &str, window: &mut Window, cx: &mut App) {
+    with_compose(shell, cx, |compose, cx| {
+        if compose.emoji_picker().is_some() {
+            compose.toggle_emoji(window, cx);
+        }
+        compose.focus(window, cx);
+        compose.input().update(cx, |input, cx| {
+            input.set_value("", window, cx);
+            input.insert(text.to_owned(), window, cx);
+        });
+    });
 }
 
 fn select_last_message(shell: &Entity<Shell>, _: &mut Window, cx: &mut App) {

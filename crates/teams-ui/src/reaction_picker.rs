@@ -9,7 +9,9 @@
 //! (the list then holds what was found); Enter picks the first reaction found; Escape, or a click outside, dismisses
 //! it. A reaction the account already set on the message is marked, and picking it takes it back. The reaction under
 //! the pointer plays its animation, as Teams' picker does ([`reactions::animation`]). The list is laid out only as it
-//! comes into view. The picker only tells what was picked ([`ReactionPickerEvent`]); the chat view writes it.
+//! comes into view. The picker only tells what was picked ([`ReactionPickerEvent`]); the chat view writes it. The
+//! compose box's emoji picker is the same picker ([`ReactionPicker::for_emoji`]), nothing marked: Teams offers the same
+//! emoji in both, and the box puts the one picked into its text.
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -140,6 +142,8 @@ pub struct ReactionPicker {
     hovered: Option<&'static str>,
     /// Where Recent and the animations are read from.
     core: Arc<dyn Core>,
+    /// What the picker is for: "more reactions" on a message, or the compose box's emoji.
+    flavour: Flavour,
     _search_events: Subscription,
     /// Escape, before the field's own binding.
     _escape: Subscription,
@@ -147,10 +151,49 @@ pub struct ReactionPicker {
 
 impl EventEmitter<ReactionPickerEvent> for ReactionPicker {}
 
+/// What a picker is for, in its words and its test selector.
+#[derive(Clone, Copy)]
+struct Flavour {
+    selector: &'static str,
+    placeholder: &'static str,
+    /// What a search that finds nothing says.
+    nothing_found: &'static str,
+}
+
+/// "More reactions" on a message.
+const REACTIONS: Flavour = Flavour {
+    selector: "reaction-picker-more",
+    placeholder: "Find a reaction",
+    nothing_found: "No reaction matches",
+};
+
+/// The compose box's emoji.
+const COMPOSE_EMOJI: Flavour = Flavour {
+    selector: "compose-emoji-picker",
+    placeholder: "Search emoji",
+    nothing_found: "No emoji matches",
+};
+
 impl ReactionPicker {
     /// A picker for a message the account set `mine` on, its search field focused, its list at the top.
     pub fn new(mine: HashSet<String>, core: Arc<dyn Core>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let search = cx.new(|cx| InputState::new(window, cx).placeholder("Find a reaction"));
+        Self::make(mine, core, REACTIONS, window, cx)
+    }
+
+    /// The compose box's emoji picker: the emoji Teams offers, none of them marked, its search field focused.
+    pub fn for_emoji(core: Arc<dyn Core>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        Self::make(HashSet::new(), core, COMPOSE_EMOJI, window, cx)
+    }
+
+    /// A picker of `flavour` with `mine` marked.
+    fn make(
+        mine: HashSet<String>,
+        core: Arc<dyn Core>,
+        flavour: Flavour,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let search = cx.new(|cx| InputState::new(window, cx).placeholder(flavour.placeholder));
         let search_events = cx.subscribe_in(
             &search,
             window,
@@ -161,13 +204,23 @@ impl ReactionPicker {
             },
         );
         let this = cx.weak_entity();
-        let escape = cx.intercept_keystrokes(move |event, _window, cx| {
+        // the interceptor sees every keystroke of the app: an Escape is the picker's only while its search field has
+        // the focus (a picker left open in a shell not shown, another account's, never takes the Escape meant for
+        // what is shown)
+        let escape = cx.intercept_keystrokes(move |event, window, cx| {
             let keystroke = &event.keystroke;
-            if keystroke.key == "escape" && keystroke.modifiers.number_of_modifiers() == 0 {
-                let dismissed = this.update(cx, |_, cx| cx.emit(ReactionPickerEvent::Dismissed));
-                if dismissed.is_ok() {
-                    cx.stop_propagation();
+            if keystroke.key != "escape" || keystroke.modifiers.number_of_modifiers() != 0 {
+                return;
+            }
+            let dismissed = this.update(cx, |this, cx| {
+                let held = this.holds_focus(window, cx);
+                if held {
+                    cx.emit(ReactionPickerEvent::Dismissed);
                 }
+                held
+            });
+            if matches!(dismissed, Ok(true)) {
+                cx.stop_propagation();
             }
         });
         search.update(cx, |search, cx| search.focus(window, cx));
@@ -195,6 +248,7 @@ impl ReactionPicker {
             mine,
             hovered: None,
             core,
+            flavour,
             _search_events: search_events,
             _escape: escape,
         };
@@ -368,7 +422,7 @@ impl ReactionPicker {
                 .get(index)
                 .map_or("", |category| category.title)
                 .into(),
-            Section::Found if self.found.as_ref().is_none_or(Vec::is_empty) => "No reaction matches".into(),
+            Section::Found if self.found.as_ref().is_none_or(Vec::is_empty) => self.flavour.nothing_found.into(),
             Section::Found => "Found".into(),
         }
     }
@@ -467,8 +521,9 @@ impl Render for ReactionPicker {
         )
         .w_full()
         .h(px(LIST_HEIGHT));
+        let selector = self.flavour.selector;
         div()
-            .debug_selector(|| "reaction-picker-more".to_owned())
+            .debug_selector(move || selector.to_owned())
             .occlude()
             .w(px(WIDTH))
             .p_2()

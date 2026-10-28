@@ -21,6 +21,7 @@ impl Glyph {
     pub const CHEVRON_DOWN: Self = Self(include_bytes!("../assets/icons/chevron-down.svg"));
     pub const CLOCK: Self = Self(include_bytes!("../assets/icons/clock.svg"));
     pub const COPY: Self = Self(include_bytes!("../assets/icons/copy.svg"));
+    pub const EMOJI: Self = Self(include_bytes!("../assets/icons/face-slightly-smiling.svg"));
     pub const HEADPHONES: Self = Self(include_bytes!("../assets/icons/headphones.svg"));
     pub const INFO: Self = Self(include_bytes!("../assets/icons/info.svg"));
     pub const LOG_OUT: Self = Self(include_bytes!("../assets/icons/log-out.svg"));
