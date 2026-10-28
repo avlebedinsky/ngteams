@@ -19,7 +19,8 @@
 //!   [`rich_text`] is our own renderer of a message's sanitized rich text (never an HTML or markdown view); the
 //!   account's writes show there as they go out ([`sending`]: each outbox row's state, "send again"); reactions are
 //!   drawn from [`reactions`] (every reaction Teams offers, in Fluent Emoji's pictures) and picked in
-//!   [`reaction_picker`].
+//!   [`reaction_picker`]; a forwarded message is drawn as Teams draws one, its content in a card under where it came
+//!   from ([`forwarded`]).
 //! - [`compose`]: the compose box under a chat's messages: text with line breaks, links and mentions (by MRI, from the
 //!   chat's members) into a message, Enter sends, replies and edits, typing; every write through the engine.
 //! - [`search`]: local search (Ctrl+Shift+F, and the switcher's messages) over the messages the store holds, never the
@@ -71,6 +72,7 @@ pub mod compose;
 pub mod desktop;
 pub mod files;
 pub mod first_run;
+pub mod forwarded;
 pub mod icons;
 pub mod inline;
 pub mod models;
@@ -105,7 +107,7 @@ pub use bridge::{Bridge, Core, EventSource, StoppedCore};
 pub use call_alert::{CallAlert, CallAlertEvent};
 pub use call_view::CallBar;
 pub use calls::{ActiveCall, Ask, CallKind, Calls};
-pub use channel_view::ChannelView;
+pub use channel_view::{ChannelView, ChannelViewEvent};
 pub use chat_list::{ChatList, ChatListEvent, ChatRow};
 pub use chat_view::{ChatView, ChatViewEvent, MessageAction};
 pub use compose::{Compose, ComposeEvent, ComposeParts};

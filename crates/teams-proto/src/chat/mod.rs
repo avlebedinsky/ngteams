@@ -32,12 +32,13 @@ pub use files::{
     FILE_TYPE, FileKind, FilePreview, SharedFile, SharedFiles, is_file_link, is_sharepoint_host, shared_files,
 };
 pub use html::{
-    AMS_IMAGE_ITEMTYPE, EMOJI_ITEMTYPE, Image, List, MAX_CONTENT, MAX_DEPTH, MAX_LIST_START, MENTION_ITEMTYPE, Marks,
-    Node, Quote, REPLY_ITEMTYPE, RichText, ThreadActivity, parse as parse_html, thread_activity,
+    AMS_IMAGE_ITEMTYPE, EMOJI_ITEMTYPE, FORWARD_ITEMTYPE, Image, List, MAX_CONTENT, MAX_DEPTH, MAX_LIST_START,
+    MENTION_ITEMTYPE, Marks, Node, Quote, REPLY_ITEMTYPE, RichText, ThreadActivity, parse as parse_html,
+    thread_activity,
 };
 pub use model::{
-    ConsumptionHorizon, Conversation, ConversationKind, ConversationList, Field, Malformed, MemberList, Mention,
-    MentionKind, Message, MessagePage, MessageType, QuotedMessage, Reaction, ReactionUser, Thread, ThreadMember,
-    Unshown, WEB_CLIENT, unshown_parts, web_chat_link,
+    ConsumptionHorizon, Conversation, ConversationKind, ConversationList, Field, Forwarded, Malformed, MemberList,
+    Mention, MentionKind, Message, MessagePage, MessageType, QuotedMessage, Reaction, ReactionUser, Thread,
+    ThreadMember, Unshown, WEB_CLIENT, forwarded, unshown_parts, web_chat_link,
 };
 pub use read::{ChatReadError, ChatReads, MAX_PAGE_SIZE, link_endpoint};

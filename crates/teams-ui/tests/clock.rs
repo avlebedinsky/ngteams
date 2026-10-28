@@ -89,6 +89,30 @@ fn a_list_row_shows_the_time_only_today() {
 fn a_time_that_can_t_be_read_shows_nothing() {
     assert_eq!(message_time(i64::MAX, &now(), HourCycle::Twelve), "");
     assert_eq!(list_time(i64::MAX, &now(), HourCycle::TwentyFour), "");
+    assert_eq!(clock::full_time(i64::MAX, &zone(), HourCycle::Twelve), "");
+}
+
+#[test]
+fn a_forwarded_message_s_original_time_is_shown_in_full_as_teams_does() {
+    let morning = at(2026, 10, 28, 2, 49);
+    assert_eq!(
+        clock::full_time(morning, &zone(), HourCycle::Twelve),
+        "10/28/2026 2:49 AM"
+    );
+    assert_eq!(
+        clock::full_time(morning, &zone(), HourCycle::TwentyFour),
+        "10/28/2026 02:49"
+    );
+    // in the viewer's own zone, whatever day it is now
+    let utc = FixedOffset::east_opt(0).unwrap();
+    assert_eq!(
+        clock::full_time(morning, &utc, HourCycle::Twelve),
+        "10/27/2026 11:49 PM"
+    );
+    assert_eq!(
+        clock::full_time(at(2025, 1, 5, 17, 36), &zone(), HourCycle::Twelve),
+        "1/5/2025 5:36 PM"
+    );
 }
 
 #[test]

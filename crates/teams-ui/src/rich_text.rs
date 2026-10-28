@@ -4,27 +4,30 @@
 //! only that model is drawn.
 //!
 //! - [`layout`] turns the model into [`Rendered`]: [`Block::Text`] (a paragraph's text with its styled pieces and its
-//!   links) and [`Block::Quote`] (a reply's or a plain quote, with what it quotes in blocks of its own). A line break
-//!   is a `\n` in the text; marks (bold, italic, underline, strike, code) style their pieces; a mention is drawn in
-//!   the brand colour, the account's own bold in the mention colour, neither on a box (a mention's `itemid` names its
-//!   entry in `properties.mentions`, whose MRI says whom it names; an entry this build can't read names nobody); a
-//!   link is a clickable range; an emoticon (`<img itemtype="http://schema.skype.com/Emoji" itemid="<id>">`) keeps
-//!   the place of a few spaces in its paragraph's text ([`InlineEmoticon`]); a picture pasted into the message (an
-//!   `<img>` naming a view of an AMS object) or a GIF picked from Teams' GIF picker (one on Giphy's media host), not
-//!   inside a link or a quote, is a block of its own ([`Block::Picture`], a GIF playing);
-//!   any other image is a placeholder (`Image`, with its `alt`), followed in a chat's message by a link that opens the
-//!   message in Teams on the web ([`layout_with_web_link`], [`message_web_link`]), as is a picture that can't be
-//!   shown. A message of emoticons alone ([`Rendered::emoticons_only`]) is drawn as Teams draws one: large, playing,
-//!   without its bubble. A list is [`Block::List`]: each item's blocks beside its marker (its number, or a bullet by
-//!   how deep the list is nested: disc, circle, square), indented as a browser indents one. A paragraph of no-break
-//!   spaces alone (the web client's `<p>&nbsp;</p>`, its blank line) is drawn as a blank line; one of ASCII whitespace
-//!   alone, none.
-//! - [`render`] draws it: paragraphs line under line with no gap between them, as Teams sets them; pictures and
-//!   emoticons through `crate::inline`, their bytes asked of the engine of the [`PictureSource`] the view gave
-//!   ([`Rendered::with_source`]); a link opens through GPUI's `open_url` (the portal or `xdg-open`; in tests the test
-//!   platform's record or the UI sandbox's no-op opener), and only an `http`, `https` or `mailto` one (the model keeps
-//!   no other, and the renderer checks again).
+//!   links), [`Block::Quote`] (a reply's or a plain quote, with what it quotes in blocks of its own) and
+//!   [`Block::Forward`] (a forwarded message's content, laid out as the message's own: its pictures drawn, each image
+//!   placeholder's link to the message on the web). A line break is a `\n` in the text; marks (bold, italic,
+//!   underline, strike, code) style their pieces; a mention is drawn in the brand colour, the account's own bold in
+//!   the mention colour, neither on a box (a mention's `itemid` names its entry in `properties.mentions`, whose MRI
+//!   says whom it names; an entry this build can't read names nobody); a link is a clickable range; an emoticon
+//!   (`<img itemtype="http://schema.skype.com/Emoji" itemid="<id>">`) keeps the place of a few spaces in its
+//!   paragraph's text ([`InlineEmoticon`]); a picture pasted into the message (an `<img>` naming a view of an AMS
+//!   object) or a GIF picked from Teams' GIF picker (one on Giphy's media host), not inside a link or a quote other
+//!   than a forward, is a block of its own ([`Block::Picture`], a GIF playing); any other image is a placeholder
+//!   (`Image`, with its `alt`), followed in a chat's message by a link that opens the message in Teams on the web
+//!   ([`layout_with_web_link`], [`message_web_link`]), as is a picture that can't be shown. A message of emoticons
+//!   alone ([`Rendered::emoticons_only`]) is drawn as Teams draws one: large, playing, without its bubble. A list is
+//!   [`Block::List`]: each item's blocks beside its marker (its number, or a bullet by how deep the list is nested:
+//!   disc, circle, square), indented as a browser indents one. A paragraph of no-break spaces alone (the web client's
+//!   `<p>&nbsp;</p>`, its blank line) is drawn as a blank line; one of ASCII whitespace alone, none.
+//! - [`render`] draws it: paragraphs line under line with no gap between them, as Teams sets them; a forward as
+//!   Teams' card, a bordered box with its header (the arrow, the original's sender and time, the view's to make:
+//!   [`render_with_header`]) above the content; pictures and emoticons through `crate::inline`, their bytes asked of
+//!   the engine of the [`PictureSource`] the view gave ([`Rendered::with_source`]); a link opens through GPUI's
+//!   `open_url` (the portal or `xdg-open`; in tests the test platform's record or the UI sandbox's no-op opener), and
+//!   only an `http`, `https` or `mailto` one (the model keeps no other, and the renderer checks again).
 
+use std::cell::Cell;
 use std::collections::HashSet;
 use std::ops::Range;
 use std::sync::Arc;
@@ -241,6 +244,12 @@ impl ListBlock {
     }
 }
 
+/// A forwarded message's content (`teams_proto::chat::Quote::forward`), laid out as the message's own.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ForwardBlock {
+    pub blocks: Vec<Block>,
+}
+
 /// One block of a message's text.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Block {
@@ -248,6 +257,7 @@ pub enum Block {
     Quote(QuoteBlock),
     Picture(PictureBlock),
     List(ListBlock),
+    Forward(ForwardBlock),
 }
 
 impl Block {
@@ -259,12 +269,13 @@ impl Block {
                 .iter()
                 .any(|(_, style)| style.mention == Some(Mentioned::Me)),
             Self::List(list) => list.items.iter().flatten().any(Self::mentions_me),
-            Self::Quote(_) | Self::Picture(_) => false,
+            // a forward's mentions are the original's, of its own chat
+            Self::Quote(_) | Self::Picture(_) | Self::Forward(_) => false,
         }
     }
 
     /// Its lines as a reader copies them: a paragraph's text (an emoticon as its emoji), a list's items each after its
-    /// marker; a quote and a picture none.
+    /// marker, a forward's content's; a quote and a picture none.
     #[must_use]
     pub fn plain_lines(&self) -> Vec<String> {
         match self {
@@ -275,6 +286,7 @@ impl Block {
                 .enumerate()
                 .flat_map(|(index, item)| list.item_lines(index, item))
                 .collect(),
+            Self::Forward(forward) => forward.blocks.iter().flat_map(Self::plain_lines).collect(),
             Self::Quote(_) | Self::Picture(_) => Vec::new(),
         }
     }
@@ -416,7 +428,7 @@ struct Builder<'a> {
     link: Option<String>,
     /// Where an image's placeholder links to ([`layout_with_web_link`]).
     web_link: Option<String>,
-    /// A quote's: its pictures stay placeholders, as another message's.
+    /// A quote's (not a forward's): its pictures stay placeholders, as another message's.
     quoted: bool,
     /// How many lists the walk is in.
     level: usize,
@@ -567,6 +579,10 @@ impl<'a> Builder<'a> {
 
     fn quote(&mut self, quote: &Quote) {
         self.end_block();
+        if quote.forward {
+            self.forward(&quote.body);
+            return;
+        }
         let mut inner = Builder::new(self.mentions);
         inner.quoted = true;
         inner.walk(&quote.body);
@@ -575,6 +591,18 @@ impl<'a> Builder<'a> {
             message_id: quote.message_id.clone(),
             blocks: inner.finish(),
         }));
+    }
+
+    /// A forwarded message's content: laid out as this level's own (its pictures drawn as the message's, its images'
+    /// placeholders linked to the message on the web), in a block of its own.
+    fn forward(&mut self, body: &[Node]) {
+        let mut inner = Builder::new(self.mentions);
+        inner.web_link.clone_from(&self.web_link);
+        inner.quoted = self.quoted;
+        inner.level = self.level;
+        inner.walk(body);
+        self.blocks
+            .push(Block::Forward(ForwardBlock { blocks: inner.finish() }));
     }
 
     fn finish(mut self) -> Vec<Block> {
@@ -641,13 +669,27 @@ pub fn highlight(style: Style, palette: Palette) -> HighlightStyle {
 }
 
 /// Draws `rendered`; `id` keeps its links' and pictures' elements apart from another message's. A message of emoticons
-/// alone is drawn large and playing ([`Rendered::emoticons_only`]).
+/// alone is drawn large and playing ([`Rendered::emoticons_only`]). A forward's card has no header: see
+/// [`render_with_header`].
 #[must_use]
 pub fn render(id: &SharedString, rendered: &Arc<Rendered>, palette: Palette) -> AnyElement {
+    render_with_header(id, rendered, palette, None)
+}
+
+/// Draws `rendered` as [`render`] does, with `header` (a forward's: the arrow, the original's sender and time) at the
+/// top of its first forward's card.
+#[must_use]
+pub fn render_with_header(
+    id: &SharedString,
+    rendered: &Arc<Rendered>,
+    palette: Palette,
+    header: Option<AnyElement>,
+) -> AnyElement {
     let draw = Draw {
         id,
         palette,
         source: rendered.source.as_ref(),
+        header: Cell::new(header),
     };
     if let Some(emoticons) = rendered.emoticons_only() {
         return div()
@@ -679,6 +721,8 @@ struct Draw<'a> {
     id: &'a SharedString,
     palette: Palette,
     source: Option<&'a PictureSource>,
+    /// The header of the first forward's card, until it is drawn.
+    header: Cell<Option<AnyElement>>,
 }
 
 /// The elements of `blocks`; `path` names the block's place, for its element id. Recursive over quotes, as deep as
@@ -694,6 +738,7 @@ fn blocks(draw: &Draw<'_>, path: &mut Vec<usize>, blocks: &[Block]) -> Vec<AnyEl
                 Block::Quote(quote) => quote_block(draw, path, quote),
                 Block::Picture(picture) => picture_block(draw, path, picture),
                 Block::List(list) => list_block(draw, path, list),
+                Block::Forward(forward) => forward_block(draw, path, forward),
             };
             path.pop();
             element
@@ -779,6 +824,30 @@ fn quote_block(draw: &Draw<'_>, path: &mut Vec<usize>, quote: &QuoteBlock) -> An
         .flex_col()
         .children(header)
         .children(blocks(draw, path, &quote.blocks))
+        .into_any_element()
+}
+
+/// The width of a forward card's left edge, thicker than its other sides, as Teams draws it.
+const FORWARD_EDGE: f32 = 4.0;
+
+/// A forwarded message's content as Teams draws it: a card with a hairline border and a thicker left edge, its header
+/// (the view's: [`render_with_header`]) over the content, which is drawn as the message's own.
+fn forward_block(draw: &Draw<'_>, path: &mut Vec<usize>, forward: &ForwardBlock) -> AnyElement {
+    let palette = draw.palette;
+    let header = draw.header.take().map(|header| div().pb_2().child(header));
+    div()
+        .debug_selector(|| "rich-forward".to_owned())
+        .my_1()
+        .px_4()
+        .py_3()
+        .rounded_md()
+        .border_1()
+        .border_l(px(FORWARD_EDGE))
+        .border_color(rgb(palette.border))
+        .flex()
+        .flex_col()
+        .children(header)
+        .children(blocks(draw, path, &forward.blocks))
         .into_any_element()
 }
 

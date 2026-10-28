@@ -17,7 +17,8 @@
 //!   message ([`crate::system_message`]: a call's start or end, a recording, a transcript, members added, joined, left
 //!   or removed, the name) is a line in Teams' words, a card's title and detail on one line; one Teams draws nothing
 //!   for isn't shown, nor its thread when nothing under it is (with replies, a placeholder stands for it); any other
-//!   type or shape a placeholder that names no content.
+//!   type or shape a placeholder that names no content. A forwarded message is drawn as in a chat
+//!   ([`crate::forwarded`]), its original's time a link to it, told as [`ChannelViewEvent::OpenOriginal`].
 //!
 //! What the view shows is traced (`channel-view shown`: the channel, its messages' ids in the order shown, each `post`
 //! or `reply`), never text or a name.
@@ -39,6 +40,7 @@ use crate::bridge::Core;
 use crate::chat_view::{DELETED, UNSHOWN_CONTENT, UNSUPPORTED, files_of, unshown_of};
 use crate::clock::{self, HourCycle};
 use crate::files;
+use crate::forwarded::{self, ForwardOrigin, Original};
 use crate::models::Models;
 use crate::people::Shown;
 use crate::rich_text::{self, Mentions, Rendered};
@@ -114,6 +116,14 @@ pub enum Body {
     Unsupported,
 }
 
+/// What the channel view tells its owner.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChannelViewEvent {
+    /// A forwarded message's original time was clicked: the original is opened in the app when the account has its
+    /// chat, else in Teams on the web (the shell's to decide, as for a chat's forward).
+    OpenOriginal(Original),
+}
+
 /// A message as the view shows it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Item {
@@ -128,6 +138,9 @@ pub struct Item {
     /// showed, a card): shown with
     /// [`UNSHOWN_CONTENT`] under it, never a guess at the part. No web button: no channel deep link was captured.
     pub unshown: bool,
+    /// Where a forwarded message came from ([`crate::forwarded`]): its forward card's header, the original's time a
+    /// link to it ([`ChannelViewEvent::OpenOriginal`]).
+    pub forwarded: Option<ForwardOrigin>,
 }
 
 /// What one load read from the store.
@@ -362,6 +375,10 @@ impl ChannelView {
         let text = matches!(body, Body::Text(_));
         let unshown = text && unshown_of(message).any();
         let files = if text { files_of(message) } else { Vec::new() };
+        let forwarded = text
+            .then(|| forwarded::forwarded_from(message.properties.as_deref()))
+            .flatten()
+            .map(|from| ForwardOrigin::of(&from, from.sender.as_deref().and_then(|sender| people.get(sender))));
         // a thread's own message has no sender to name: never the thread's id
         let from_thread = message.sender.as_deref().is_some_and(system_message::is_thread);
         Item {
@@ -376,6 +393,7 @@ impl ChannelView {
             body,
             files,
             unshown,
+            forwarded,
         }
     }
 
@@ -463,9 +481,15 @@ impl ChannelView {
         self.traced = Some(shown);
     }
 
-    fn thread_view(index: usize, thread: &Thread<Item>, palette: Palette, cycle: HourCycle) -> AnyElement {
+    fn thread_view(
+        index: usize,
+        thread: &Thread<Item>,
+        palette: Palette,
+        cycle: HourCycle,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let post = match &thread.post {
-            Some(post) => message_view(post, palette, cycle),
+            Some(post) => message_view(post, palette, cycle, cx),
             None => div()
                 .debug_selector(move || format!("earlier-post-{index}"))
                 .italic()
@@ -474,15 +498,19 @@ impl ChannelView {
                 .child(EARLIER_POST)
                 .into_any_element(),
         };
-        let replies = thread.replies.iter().map(|reply| {
-            div()
-                .pl_6()
-                .pt_1()
-                .border_t_1()
-                .border_color(rgb(palette.border))
-                .child(message_view(reply, palette, cycle))
-                .into_any_element()
-        });
+        let replies: Vec<AnyElement> = thread
+            .replies
+            .iter()
+            .map(|reply| {
+                div()
+                    .pl_6()
+                    .pt_1()
+                    .border_t_1()
+                    .border_color(rgb(palette.border))
+                    .child(message_view(reply, palette, cycle, cx))
+                    .into_any_element()
+            })
+            .collect();
         div()
             .debug_selector(move || format!("thread-{index}"))
             .mx_3()
@@ -562,6 +590,12 @@ async fn read(core: &dyn Core, channel: &str, limit: usize) -> Option<Read> {
         }
     }
     wanted.remove(core.me());
+    // a forward's original sender, the account too: a forward names it by its name
+    wanted.extend(
+        page.messages
+            .iter()
+            .filter_map(|message| forwarded::forwarded_from(message.properties.as_deref())?.sender),
+    );
     let mut people = HashMap::new();
     for mri in wanted {
         if let Ok(person) = core.person(mri.clone()).await {
@@ -578,7 +612,7 @@ async fn read(core: &dyn Core, channel: &str, limit: usize) -> Option<Read> {
 }
 
 /// A message: its sender's name and time (in Teams' words, on `cycle`'s clock) over its body.
-fn message_view(item: &Item, palette: Palette, cycle: HourCycle) -> AnyElement {
+fn message_view(item: &Item, palette: Palette, cycle: HourCycle, cx: &mut Context<ChannelView>) -> AnyElement {
     let time = clock::message_time(item.arrival_time, &Local::now(), cycle);
     let header = div()
         .flex()
@@ -605,8 +639,19 @@ fn message_view(item: &Item, palette: Palette, cycle: HourCycle) -> AnyElement {
             .child(text)
             .into_any_element()
     };
+    let forward = item.forwarded.as_ref().map(|origin| {
+        let open = origin.original.clone().map(|original| {
+            Box::new(cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
+                cx.stop_propagation();
+                cx.emit(ChannelViewEvent::OpenOriginal(original.clone()));
+            })) as forwarded::OnOpen
+        });
+        forwarded::header(&item.id, origin, palette, cycle, open)
+    });
     let body = match &item.body {
-        Body::Text(rendered) => rich_text::render(&format!("channel-text-{}", item.id).into(), rendered, palette),
+        Body::Text(rendered) => {
+            rich_text::render_with_header(&format!("channel-text-{}", item.id).into(), rendered, palette, forward)
+        }
         Body::Deleted => muted(DELETED.into()),
         Body::Event(text) => muted(text.clone()),
         Body::Unsupported => muted(UNSUPPORTED.into()),
@@ -635,6 +680,8 @@ fn message_view(item: &Item, palette: Palette, cycle: HourCycle) -> AnyElement {
         .into_any_element()
 }
 
+impl gpui::EventEmitter<ChannelViewEvent> for ChannelView {}
+
 impl Render for ChannelView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = theme::current(cx);
@@ -659,7 +706,7 @@ impl Render for ChannelView {
             .threads
             .iter()
             .enumerate()
-            .map(|(index, thread)| Self::thread_view(index, thread, palette, cycle))
+            .map(|(index, thread)| Self::thread_view(index, thread, palette, cycle, cx))
             .collect();
         let posts = div()
             .id("channel-posts")

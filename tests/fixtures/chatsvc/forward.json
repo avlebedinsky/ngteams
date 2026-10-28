@@ -1,0 +1,71 @@
+{
+  "_synthetic": "Written synthetic-from-capture, made-up values: two forwarded messages as a sync read gives them back, of the shape the personal build's debug log showed on 2026-10-28 (a sync page and a Trouter delivery of the same message, read locally; the delivery's message object is the same). A forwarded message's content is a blockquote of itemtype Forward holding the original's content (paragraphs, a link, a pasted picture); properties.forwardTemplateId names the template and properties.originalMessageContext (an object, not a JSON string) names the original's sender, its sent time (three fraction digits), its id (a number) and the conversation it was sent in. Here b forwards to a, in the a-b chat, two messages c sent in the a-b-c group chat. <guid:a>, <guid:b>, <guid:c> are lab accounts' object ids, <group> the group chat's; tests fill them in. See docs/protocol/chat.md, \"Forwarded messages\".",
+  "read_back": [
+    {
+      "sequenceId": 7,
+      "conversationid": "19:<guid:a>_<guid:b>@unq.gbl.spaces",
+      "conversationLink": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/conversations/19:<guid:a>_<guid:b>@unq.gbl.spaces",
+      "contenttype": "Text",
+      "type": "Message",
+      "amsreferences": [],
+      "fromDisplayNameInToken": "Lab B",
+      "id": "1760000070000",
+      "clientmessageid": "7777777777777777777",
+      "version": "1760000070000",
+      "messagetype": "RichText/Html",
+      "content": "<blockquote itemtype=\"http://schema.skype.com/Forward\">\r\n<p>A made-up note about the new assets, see the folder below</p>\r\n<p><a href=\"https://example.com/made-up-folder\" rel=\"noreferrer noopener\" target=\"_blank\" title=\"https://example.com/made-up-folder\">https://example.com/made-up-folder</a></p>\r\n</blockquote>",
+      "from": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/contacts/8:orgid:<guid:b>",
+      "imdisplayname": "Lab B",
+      "composetime": "2026-01-01T00:01:10.0000000Z",
+      "originalarrivaltime": "2026-01-01T00:01:10.0000000Z",
+      "properties": {
+        "mentions": "[]",
+        "cards": "[]",
+        "files": "[]",
+        "forwardTemplateId": "basic_forward_message_template",
+        "originalMessageContext": {
+          "originalSender": "8:orgid:<guid:c>",
+          "originalSentTime": "2026-01-01T00:00:40.123Z",
+          "messageId": 1760000040123,
+          "originalThreadId": "19:<group>@thread.v2",
+          "threadType": "chat",
+          "messageType": "RichText/Html"
+        },
+        "languageStamp": "languages=en:100;length:80;&detector=Bling"
+      }
+    },
+    {
+      "sequenceId": 8,
+      "conversationid": "19:<guid:a>_<guid:b>@unq.gbl.spaces",
+      "conversationLink": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/conversations/19:<guid:a>_<guid:b>@unq.gbl.spaces",
+      "contenttype": "Text",
+      "type": "Message",
+      "amsreferences": [],
+      "fromDisplayNameInToken": "Lab B",
+      "id": "1760000080000",
+      "clientmessageid": "8888888888888888888",
+      "version": "1760000080000",
+      "messagetype": "RichText/Html",
+      "content": "<blockquote itemtype=\"http://schema.skype.com/Forward\">\r\n<p><img src=\"https://us-api.asm.skype.com/v1/objects/0-eus-d9-0000000000000000000000000000f0d0/views/imgo\" itemtype=\"http://schema.skype.com/AMSImage\" itemscope=\"png\" width=\"127.40112994350282\" height=\"250\" alt=\"image\" id=\"x_x_0-eus-d9-0000000000000000000000000000f0d0\" itemid=\"0-eus-d9-0000000000000000000000000000f0d0\"></p>\r\n\r\n\r\n<p>A made-up remark on the picture above</p>\r\n</blockquote>",
+      "from": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/contacts/8:orgid:<guid:b>",
+      "imdisplayname": "Lab B",
+      "composetime": "2026-01-01T00:01:20.0000000Z",
+      "originalarrivaltime": "2026-01-01T00:01:20.0000000Z",
+      "properties": {
+        "mentions": "[]",
+        "cards": "[]",
+        "files": "[]",
+        "forwardTemplateId": "basic_forward_message_template",
+        "originalMessageContext": {
+          "originalSender": "8:orgid:<guid:c>",
+          "originalSentTime": "2026-01-01T00:00:50.456Z",
+          "messageId": 1760000050456,
+          "originalThreadId": "19:<group>@thread.v2",
+          "threadType": "chat",
+          "messageType": "RichText/Html"
+        },
+        "languageStamp": "languages=en:100;length:40;&detector=Bling"
+      }
+    }
+  ]
+}

@@ -19,8 +19,8 @@ use teams_mock::{AB_CHAT, ABC_CHAT, CHANNEL, CHAT_BASE, ChatServiceMock, LAB_A, 
 use teams_proto::chat::{
     ChatReadError, ChatReads, Conversation, ConversationKind, ConversationList, Field, FileKind, FilePreview, List,
     MAX_CONTENT, MAX_DEPTH, Marks, MemberList, MentionKind, Message, MessagePage, MessageType, Node, Quote, RichText,
-    SharedFile, SharedFiles, Thread, Unshown, WEB_CLIENT, link_endpoint, parse_html, shared_files, unshown_parts,
-    web_chat_link,
+    SharedFile, SharedFiles, Thread, Unshown, WEB_CLIENT, forwarded, link_endpoint, parse_html, shared_files,
+    unshown_parts, web_chat_link,
 };
 use teams_proto::{Client, Credentials, HttpError, HttpTransport};
 use wiremock::matchers::method;
@@ -224,6 +224,7 @@ fn a_quoted_reply_reads_its_quote_from_content_and_properties() -> TestResult {
         sender_name: Some("Lab A".to_owned()),
         time: Some("1760000010000".to_owned()),
         body: vec![Node::Paragraph(vec![text("a made-up message, edited")])],
+        forward: false,
     };
     // the line break between the quote and the reply is markup, not text (`chat-shapes`, 2026-10-21)
     assert_eq!(
@@ -233,6 +234,102 @@ fn a_quoted_reply_reads_its_quote_from_content_and_properties() -> TestResult {
     assert_eq!(reply.mentions(), Field::Known(Vec::new()));
     assert_eq!(reply.files(), SharedFiles::default());
     assert_eq!(reply.ams_references, Some(Vec::new()));
+    Ok(())
+}
+
+#[test]
+fn a_forwarded_message_reads_its_content_as_a_forward_and_where_it_came_from() -> TestResult {
+    let fixture = fixture("forward.json")?;
+    let note = message(&fixture["read_back"][0])?;
+    let rich = note.rich_text().ok_or("no rich text")?;
+    let link = "https://example.com/made-up-folder";
+    let forward = Quote {
+        body: vec![
+            Node::Paragraph(vec![text("A made-up note about the new assets, see the folder below")]),
+            Node::Paragraph(vec![Node::Link {
+                href: link.to_owned(),
+                children: vec![text(link)],
+            }]),
+        ],
+        forward: true,
+        ..Quote::default()
+    };
+    assert_eq!(rich.nodes, [Node::Quote(forward)], "the markup's CRLFs are no text");
+    let from = note.forwarded().known().ok_or("originalMessageContext")?;
+    assert_eq!(from.sender.as_deref(), Some(LAB_C));
+    assert_eq!(
+        from.message_id.as_deref(),
+        Some("1760000040123"),
+        "a number, read as its digits"
+    );
+    assert_eq!(from.thread_id.as_deref(), Some(ABC_CHAT));
+    assert_eq!(from.sent_time_ms(), Some(1_767_225_640_123));
+    assert_eq!(from.extra["threadType"], "chat");
+    assert_eq!(note.unshown(), Vec::new(), "nothing of a forward goes unshown");
+
+    // a plain quote and a reply's are no forward; a message never forwarded names no origin
+    let plain = parse_html("<blockquote><p>q</p></blockquote>");
+    assert!(matches!(&plain.nodes[..], [Node::Quote(quote)] if !quote.forward));
+    let reply = &sync_page()?.messages[1];
+    let replied = reply.rich_text().ok_or("no rich text")?;
+    assert!(matches!(&replied.nodes[0], Node::Quote(quote) if !quote.forward));
+    assert_eq!(reply.forwarded(), Field::Absent);
+    Ok(())
+}
+
+#[test]
+fn a_forwarded_picture_is_the_forwards_own_with_its_object_and_size() -> TestResult {
+    let fixture = fixture("forward.json")?;
+    let picture = message(&fixture["read_back"][1])?;
+    let rich = picture.rich_text().ok_or("no rich text")?;
+    let [Node::Quote(quote)] = &rich.nodes[..] else {
+        return Err(format!("{rich:?}").into());
+    };
+    assert!(quote.forward && quote.message_id.is_none() && quote.sender.is_none());
+    let [Node::Paragraph(first), Node::Paragraph(second)] = &quote.body[..] else {
+        return Err(format!("{quote:?}").into());
+    };
+    let [Node::Image(image)] = &first[..] else {
+        return Err(format!("{first:?}").into());
+    };
+    assert_eq!(
+        image.item_id.as_deref(),
+        Some("0-eus-d9-0000000000000000000000000000f0d0")
+    );
+    assert_eq!(image.size, Some((127, 250)));
+    assert_eq!(second, &[text("A made-up remark on the picture above")]);
+    Ok(())
+}
+
+#[test]
+fn an_origin_in_a_form_no_capture_showed_is_kept_as_it_came() -> TestResult {
+    let fixture = fixture("forward.json")?;
+    let mut properties = fixture["read_back"][0]["properties"]
+        .as_object()
+        .ok_or("properties")?
+        .clone();
+    let as_text = Value::String(properties["originalMessageContext"].to_string());
+    properties.insert("originalMessageContext".to_owned(), as_text.clone());
+    assert_eq!(
+        forwarded(&properties),
+        Field::Unknown(as_text),
+        "a JSON string: not seen"
+    );
+    for unread in [
+        json!({"originalSender": 7, "messageId": 1}),
+        json!({"originalSender": LAB_C, "messageId": null}),
+        json!({"originalSender": LAB_C, "messageId": [1]}),
+        json!({"originalSender": null, "messageId": 1}),
+        json!({"originalSender": LAB_C, "originalSentTime": null}),
+        json!({"originalSender": LAB_C, "originalThreadId": null}),
+        json!({"originalSender": LAB_C, "originalThreadId": 19}),
+    ] {
+        properties.insert("originalMessageContext".to_owned(), unread.clone());
+        assert_eq!(forwarded(&properties), Field::Unknown(unread));
+    }
+    properties.insert("originalMessageContext".to_owned(), json!({}));
+    let read = forwarded(&properties).known().ok_or("an empty object is read")?;
+    assert_eq!((read.sent_time_ms(), read.sender, read.message_id), (None, None, None));
     Ok(())
 }
 

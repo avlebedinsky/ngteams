@@ -274,7 +274,7 @@ fn an_image_of_a_chat_message_is_followed_by_its_link_to_the_web() {
         .iter()
         .find_map(|block| match block {
             Block::Quote(quote) => Some(quote),
-            Block::Text(_) | Block::Picture(_) | Block::List(_) => None,
+            Block::Text(_) | Block::Picture(_) | Block::List(_) | Block::Forward(_) => None,
         })
         .unwrap();
     let Block::Text(inner) = &quoted.blocks[0] else {
@@ -568,7 +568,7 @@ fn a_gif_from_the_gif_picker_is_a_picture_block_at_its_size() {
         .iter()
         .filter_map(|block| match block {
             Block::Picture(picture) => Some(picture),
-            Block::Text(_) | Block::Quote(_) | Block::List(_) => None,
+            Block::Text(_) | Block::Quote(_) | Block::List(_) | Block::Forward(_) => None,
         })
         .collect();
     assert_eq!(pictures.len(), 1, "{rendered:#?}");
@@ -576,7 +576,7 @@ fn a_gif_from_the_gif_picker_is_a_picture_block_at_its_size() {
     assert!(
         rendered.blocks.iter().all(|block| match block {
             Block::Text(text) => !text.text.contains(IMAGE_PLACEHOLDER),
-            Block::Picture(_) | Block::Quote(_) | Block::List(_) => true,
+            Block::Picture(_) | Block::Quote(_) | Block::List(_) | Block::Forward(_) => true,
         }),
         "no placeholder beside it: {rendered:#?}"
     );
@@ -606,6 +606,49 @@ fn a_gif_from_the_gif_picker_is_a_picture_block_at_its_size() {
         !elsewhere.blocks.iter().any(|block| matches!(block, Block::Picture(_))),
         "{elsewhere:#?}"
     );
+}
+
+#[test]
+fn a_forwarded_messages_content_is_laid_out_as_the_messages_own_in_a_block_of_its_own() {
+    // as the service gives one back: a blockquote of itemtype Forward, a picture and a line in it
+    let content = format!(
+        "<blockquote itemtype=\"http://schema.skype.com/Forward\">\r\n<p><img src=\"{PICTURE}\" \
+         itemtype=\"http://schema.skype.com/AMSImage\" itemscope=\"png\" width=\"127.40112994350282\" height=\"250\" \
+         alt=\"image\"></p>\r\n\r\n\r\n<p>A made-up remark <a href=\"https://example.test/page\">here</a></p>\r\n\
+         </blockquote>"
+    );
+    let web_link = "https://teams.microsoft.com/l/message/19:x@thread.v2/1";
+    let rendered = rich_text::layout_with_web_link(&parse_html(&content), &Mentions::default(), Some(web_link));
+    let [Block::Forward(forward)] = &rendered.blocks[..] else {
+        panic!("one forward: {rendered:#?}");
+    };
+    let [Block::Picture(picture), Block::Text(line)] = &forward.blocks[..] else {
+        panic!("its picture drawn and its line: {forward:#?}");
+    };
+    assert_eq!((picture.src.as_str(), picture.size), (PICTURE, Some((127, 250))));
+    assert_eq!(
+        picture.fallback.links[0].href, web_link,
+        "the placeholder's link, as a message's own"
+    );
+    assert_eq!(line.text, "A made-up remark here");
+    assert_eq!(line.links[0].href, "https://example.test/page");
+    assert!(!rendered.bare && rendered.emoticons_only().is_none());
+    // copied as its content
+    assert_eq!(rendered.blocks[0].plain_lines(), ["A made-up remark here"]);
+
+    // a mention in it is the original's, never the account's
+    let mentioned = "<blockquote itemtype=\"http://schema.skype.com/Forward\"><p><span itemtype=\
+                     \"http://schema.skype.com/Mention\" itemid=\"0\">Lab A</span></p></blockquote>";
+    let properties = format!("{{\"mentions\":[{{\"itemid\":\"0\",\"mri\":\"{ME}\",\"mentionType\":\"person\"}}]}}");
+    let mentions = Mentions::of(Some(&properties), ME);
+    assert!(mentions.names_me());
+    let rendered = rich_text::layout(&parse_html(mentioned), &mentions);
+    assert!(!rendered.mentions_me());
+
+    // a plain quote around a picture keeps it a placeholder, as before
+    let quoted = format!("<blockquote><p><img src=\"{PICTURE}\" alt=\"q\"></p></blockquote>");
+    let rendered = rich_text::layout(&parse_html(&quoted), &Mentions::default());
+    assert!(matches!(&rendered.blocks[..], [Block::Quote(_)]), "{rendered:#?}");
 }
 
 #[test]

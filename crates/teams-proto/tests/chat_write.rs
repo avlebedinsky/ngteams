@@ -130,6 +130,7 @@ fn reply() -> MessageText {
         sender_name: Some("Lab A".to_owned()),
         time: Some("1760000010000".to_owned()),
         body: vec![Node::Paragraph(vec![run("a made-up message, edited")])],
+        forward: false,
     };
     MessageText::new(
         rich(vec![Node::Quote(quote), Node::Paragraph(vec![run("a made-up reply")])]),
@@ -493,6 +494,7 @@ fn reply_previewing(levels: usize) -> Result<MessageText, ComposeError> {
         sender_name: Some("Lab A".to_owned()),
         time: Some("1760000010000".to_owned()),
         body: vec![preview],
+        forward: false,
     };
     MessageText::new(rich(vec![Node::Quote(quote)]), [])
 }

@@ -34,8 +34,8 @@ use teams_fence::lab::{Alias, LabConfig, record_abc_chat};
 use teams_fence::{Fence, FenceLog, LiveMembershipSource, Mri, Roster};
 use teams_media::devices::catalog::{DeviceInfo, DeviceKind, DeviceList, FixedDirectory};
 use teams_mock::{
-    AB_CHAT, ABC_CHAT, AC_CHAT, AMS_BASE, CHAT_BASE, CSA_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, PRESENCE_BASE,
-    TEAM_CHANNEL, TrouterMock, lab_toml,
+    AB_CHAT, ABC_CHAT, AC_CHAT, AMS_BASE, AX_CHAT, CHAT_BASE, CSA_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, OUTSIDER,
+    PRESENCE_BASE, TEAM_CHANNEL, TrouterMock, lab_toml,
 };
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::Store;
@@ -68,7 +68,7 @@ const SETTLE: Duration = Duration::from_millis(1500);
 type Step = (&'static str, fn(&Entity<Shell>, &mut Window, &mut App));
 
 /// The tour.
-const STEPS: [Step; 27] = [
+const STEPS: [Step; 29] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -196,6 +196,17 @@ const STEPS: [Step; 27] = [
     ("favorite-channel", |shell, _, cx| {
         let list = shell.read(cx).list().clone();
         list.update(cx, |list, cx| list.open(TEAM_CHANNEL.to_owned(), cx));
+    }),
+    // two messages b sent in the a–b–c chat, forwarded to a by the outsider (`seed_forwards`): each in Teams' card
+    // under the arrow, b's avatar and name and the original's time, the second's picture drawn in it
+    ("chat-forward", |shell, window, cx| {
+        shell.update(cx, |shell, cx| shell.open_chat(AX_CHAT.to_owned(), window, cx));
+    }),
+    ("chat-forward-dark", |shell, _, cx| {
+        let model = shell.read(cx).settings().clone();
+        model.update(cx, |model, cx| {
+            model.change(|settings| settings.appearance.theme = teams_ui::theme::DARK_KEY, cx);
+        });
     }),
 ];
 
@@ -477,6 +488,7 @@ impl MockLab {
         seed_files(&mock, &runtime)?;
         seed_own(&mock)?;
         seed_mentions(&mock)?;
+        seed_forwards(&mock, &runtime)?;
         let dir = tempfile::tempdir()?;
         let config = LabConfig::parse(&lab_toml(dir.path()), dir.path())?;
         record_abc_chat(config.paths(), ABC_CHAT)?;
@@ -765,6 +777,76 @@ fn made_up_frame(dark: [u8; 3], light: [u8; 3]) -> image::RgbaImage {
             ])
         }
     })
+}
+
+/// The made-up picture b sent and the outsider forwarded, its object on AMS.
+const FORWARDED_OBJECT: &str = "0-eus-d9-0000000000000000000000000000f0d0";
+
+/// Two of b's messages in the a–b–c chat, forwarded to a by the outsider in their 1:1 chat as Teams forwards them
+/// (`docs/protocol/chat.md`, "Forwarded messages"): a note with a link, and a picture (a made-up phone screenshot,
+/// served by the mock as AMS would) over a line.
+fn seed_forwards(mock: &ChatServiceMock, runtime: &tokio::runtime::Runtime) -> SandboxResult {
+    let mut png = Vec::new();
+    made_up_phone().write_to(&mut io::Cursor::new(&mut png), image::ImageFormat::Png)?;
+    runtime.block_on(mock.serve_bytes(&format!("/v1/objects/{FORWARDED_OBJECT}/views/imgo"), "image/png", png));
+    let link = "https://example.com/made-up-assets";
+    let note = format!(
+        "<blockquote itemtype=\"http://schema.skype.com/Forward\">\r\n<p>Hey, here is the made-up link. It was mentioned \
+         in the made-up review, as a stand-in for a forwarded note that runs over a line</p>\r\n<p><a href=\
+         \"{link}\" title=\"{link}\">{link}</a></p>\r\n</blockquote>"
+    );
+    let picture = format!(
+        "<blockquote itemtype=\"http://schema.skype.com/Forward\">\r\n<p><img src=\"https://us-api.asm.skype.com/v1/\
+         objects/{FORWARDED_OBJECT}/views/imgo\" itemtype=\"http://schema.skype.com/AMSImage\" itemscope=\"png\" \
+         width=\"127.40112994350282\" height=\"250\" alt=\"image\" id=\"x_x_{FORWARDED_OBJECT}\" \
+         itemid=\"{FORWARDED_OBJECT}\"></p>\r\n\r\n\r\n<p>The made-up picture is here, forwarded with a note that runs a \
+         little long too</p>\r\n</blockquote>"
+    );
+    for (html, sent, original) in [
+        (note, "2026-01-01T02:49:12.345Z", 1_767_235_752_345_u64),
+        (picture, "2026-01-01T17:36:47.526Z", 1_767_289_007_526),
+    ] {
+        let id = mock
+            .post_as(OUTSIDER, AX_CHAT, &html)
+            .ok_or("the outsider's forward refused")?;
+        let client_message_id = (9_000_000_000_000_000_000_u64 + id.parse::<u64>()?).to_string();
+        let changed = mock.change_message(AX_CHAT, &client_message_id, |message| {
+            message["properties"]["forwardTemplateId"] = serde_json::json!("basic_forward_message_template");
+            message["properties"]["originalMessageContext"] = serde_json::json!({
+                "originalSender": LAB_B, "originalSentTime": sent, "messageId": original,
+                "originalThreadId": ABC_CHAT, "threadType": "chat", "messageType": "RichText/Html",
+            });
+        });
+        if !changed {
+            return Err("the outsider's forward isn't in the mock".into());
+        }
+    }
+    Ok(())
+}
+
+/// A made-up phone screenshot, 254 by 500: a dark frame round a white screen with a title bar, two round badges and a
+/// band of sea at the bottom.
+fn made_up_phone() -> image::RgbaImage {
+    let mut picture = image::RgbaImage::from_pixel(254, 500, image::Rgba([250, 250, 250, 255]));
+    let mut fill = |x0: u32, y0: u32, width: u32, height: u32, colour: [u8; 3]| {
+        for y in y0..(y0 + height).min(500) {
+            for x in x0..(x0 + width).min(254) {
+                picture.put_pixel(x, y, image::Rgba([colour[0], colour[1], colour[2], 255]));
+            }
+        }
+    };
+    let frame = [24, 24, 28];
+    fill(0, 0, 254, 14, frame);
+    fill(0, 486, 254, 14, frame);
+    fill(0, 0, 14, 500, frame);
+    fill(240, 0, 14, 500, frame);
+    fill(40, 70, 174, 26, [30, 30, 30]);
+    fill(118, 64, 18, 38, [240, 140, 30]);
+    fill(44, 170, 70, 70, [230, 120, 150]);
+    fill(140, 170, 70, 70, [120, 160, 230]);
+    fill(94, 300, 66, 80, [200, 200, 210]);
+    fill(14, 400, 226, 50, [90, 200, 210]);
+    picture
 }
 
 /// a's own message in the a–b chat, before b's, with a's heart on it: a's hover bar, and a's most used reactions

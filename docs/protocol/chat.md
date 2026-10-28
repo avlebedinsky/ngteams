@@ -412,6 +412,27 @@ how the web client draws them, from its bundle.
   <file>` with no token, leaving Giphy's token, the shard and any query out (Giphy serves the same bytes without them;
   [endpoints.md](endpoints.md#giphy-mediagiphycom-mediangiphycom)), and plays it as a pasted GIF is played.
 
+## Forwarded messages
+
+How a received forwarded message reads, from the personal build's debug log of 2026-10-28 (a sync page's and a
+Trouter delivery's copy of the same messages, read for their shape only; fixture `forward.json` is written from it).
+
+- **Content**: one `<blockquote itemtype="http://schema.skype.com/Forward">` (no `itemscope`, no `itemid`) holding the
+  original's content as it was: paragraphs, links, a pasted picture (its `<img>` as in a message of its own,
+  [Pictures in messages](#pictures-in-messages), the same AMS object), a code block. The paragraphs are joined by CRLFs,
+  as a read-back message's are. Nothing names the original in the markup.
+- **`properties`**: `forwardTemplateId` `basic_forward_message_template`, and `originalMessageContext`, an object (not a
+  JSON string, unlike `mentions`), as read back and as delivered: `originalSender` (the original's sender's MRI),
+  `originalSentTime` (an ISO time, three fraction digits), `messageId` (the original's id, a number), `originalThreadId`
+  (the conversation it was sent in: a 1:1 chat or a group chat), `threadType` (`chat`) and `messageType`
+  (`RichText/Html`). `amsreferences` stays `[]` with a picture in the content; `mentions`, `cards` and `files` are the
+  forward's own (`"[]"` in every one seen).
+- **How Teams draws it**: the content in a bordered card (a thicker left edge) under a header of the forward arrow,
+  the original sender's avatar and name, and the original's time in full ("10/28/2026 2:49 AM") as a link to the
+  original message; the content as a message's own, its pictures drawn. The native client draws it so
+  (`teams_ui::forwarded`); the link opens the original in the app when the account has its chat and the store holds the
+  message, else in the web client (`l/message/<chat>/<id>`).
+
 ## Files: sending, denied (ab-file)
 
 What the web client does to send a file, with every write of it force-denied by the scenario (M2 Task 23): writes to

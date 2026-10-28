@@ -26,7 +26,10 @@
 //!   time ([`clock::message_time`]) muted over the bubble; an "@" beside a bubble that mentions the account. A message shows its rich text through our own renderer ([`crate::rich_text`],
 //!   parsed and laid out once per message id and version), "Edited" once edited, "This message was deleted" once
 //!   deleted, its reactions as pills over the bubble's bottom edge with their counts (the account's own ringed) and
-//!   "Add reaction". A system message ([`crate::system_message`]) is drawn centred with no author row, in Teams' words:
+//!   "Add reaction". A forwarded message shows its content in Teams' forward card under the arrow, the original's
+//!   sender (asked of the engine as any sender) and the original's time, a link to the original ([`crate::forwarded`]:
+//!   in the app when the shell has its chat, told as [`ChatViewEvent::OpenOriginal`]). A system message
+//!   ([`crate::system_message`]) is drawn centred with no author row, in Teams' words:
 //!   a line (members added, joined, left or removed, the chat's name, a meeting chat's policy), a line after its time
 //!   (a call's start or end, a recording's state), or a card (a meeting's start and end titled by the chat's name, a
 //!   recording and a transcript with the link to Teams on the web); one Teams draws nothing for (a call's end with no
@@ -38,9 +41,10 @@
 //! - **Actions** on a message, under the pointer or selected with the keyboard (Up and Down, once the list has the
 //!   focus: Escape in the compose box with nothing to cancel there (no reply, edit or open picker) moves it there,
 //!   whatever the box holds, and Escape in the list with nothing open or selected moves it back): reply, react and
-//!   copy text, and for the account's own message edit and delete. They are on Teams' hover bar over the bubble's top
-//!   right ([`ChatView::hover_bar`]): the quick reactions (the account's most used, [`Core::frequent_reactions`], then
-//!   Teams' own: [`quick_reactions`]), react, edit, reply, and "More options" (copy text, delete). Each is told as
+//!   copy text, and for the account's own message edit (not a forward's) and delete. They are on Teams' hover bar over
+//!   the bubble's top right ([`ChatView::hover_bar`]): the quick reactions (the account's most used,
+//!   [`Core::frequent_reactions`], then Teams' own: [`quick_reactions`]), react, edit, reply, and "More options" (copy
+//!   text, delete). Each is told as
 //!   [`ChatViewEvent::Action`] and carried out (M2 Task 13): a reply and an edit go to the [`Compose`] box under the
 //!   messages; react's key numbers the bar's quick reactions (keys 1–4) and "more reactions" (key 5, or react's
 //!   button: [`ReactionPicker`], every reaction Teams offers, over the view), and a quick reaction or a reaction chip
@@ -101,6 +105,7 @@ use crate::bridge::Core;
 use crate::clock::{self, HourCycle};
 use crate::compose::{self, Compose, ComposeEvent, ComposeParts, Quoted};
 use crate::files;
+use crate::forwarded::{self, ForwardOrigin, Original};
 use crate::icons::{Glyph, icon_button, icon_button_with_key, selected_by};
 use crate::models::Models;
 use crate::people::{Face, Shown};
@@ -305,6 +310,9 @@ impl MessageAction {
 pub enum ChatViewEvent {
     /// An action was chosen on a message (M2 Task 13 carries it out).
     Action { action: MessageAction, message: String },
+    /// A forwarded message's original time was clicked: the original is opened in the app when the account has its
+    /// chat, else in Teams on the web.
+    OpenOriginal(Original),
 }
 
 /// How far the conversation's older history is loaded.
@@ -445,6 +453,8 @@ pub struct MessageItem {
     pub unshown: UnshownParts,
     /// Whether its chat takes writes: not the account's own notes ([`NOTES`]), where it offers no action.
     pub writes: ChatWrites,
+    /// Where it was forwarded from, when it is a forwarded message ([`crate::forwarded`]): its forward card's header.
+    pub forwarded: Option<Box<ForwardOrigin>>,
 }
 
 /// Whether a chat takes the account's writes from this app.
@@ -578,9 +588,20 @@ impl MessageItem {
         }
         let mut actions = vec![MessageAction::Reply, MessageAction::React, MessageAction::Copy];
         if self.own {
-            actions.extend([MessageAction::Edit, MessageAction::Delete]);
+            // a forward is the original's content: Teams offers no edit of it, and a write of one was never captured
+            if !self.is_forward() {
+                actions.push(MessageAction::Edit);
+            }
+            actions.push(MessageAction::Delete);
         }
         actions
+    }
+
+    /// Whether its text holds a forwarded message's content (`rich_text::Block::Forward`).
+    #[must_use]
+    pub fn is_forward(&self) -> bool {
+        matches!(&self.body, Body::Text(text)
+            if text.0.blocks.iter().any(|block| matches!(block, rich_text::Block::Forward(_))))
     }
 }
 
@@ -1678,9 +1699,11 @@ impl ChatView {
     }
 
     /// Asks the engine for the people the rows name: the senders (their profile's name and their picture), events'
-    /// members and who is typing.
+    /// members, forwarded messages' original senders (the account too: a forward names it, never "You") and who is
+    /// typing.
     fn want_names(&mut self, cx: &mut Context<Self>) {
         let mut wanted: Vec<String> = Vec::new();
+        let mut originals: Vec<String> = Vec::new();
         let messages = std::mem::take(&mut self.messages);
         for message in &messages {
             if let Some(sender) = &message.sender {
@@ -1689,8 +1712,15 @@ impl ChatView {
             if !is_text_type(&message.message_type) && message.delete_time.is_none() {
                 wanted.extend(system_message::people(&message.message_type, &message.content));
             }
+            if is_text_type(&message.message_type)
+                && let Some(sender) =
+                    forwarded::forwarded_from(message.properties.as_deref()).and_then(|from| from.sender)
+            {
+                originals.push(sender);
+            }
         }
         self.messages = messages;
+        self.ask_people(originals, true, cx);
         let typing: Vec<String> = self
             .models
             .chats
@@ -1723,12 +1753,19 @@ impl ChatView {
         presence::watch(self.core.as_ref(), senders.into_iter().rev());
     }
 
+    /// Asks the engine about `wanted`, the account itself left out.
     fn ask_names(&mut self, wanted: Vec<String>, cx: &mut Context<Self>) {
+        self.ask_people(wanted, false, cx);
+    }
+
+    /// Asks the engine about those of `wanted` the view hasn't asked about; the account itself only with `me_too` (a
+    /// forward names the account by its name).
+    fn ask_people(&mut self, wanted: Vec<String>, me_too: bool, cx: &mut Context<Self>) {
         let me = self.core.me().to_owned();
         let ask = self.asks + 1;
         let mut asked = Vec::new();
         for mri in wanted {
-            if mri != me && !self.people.contains_key(&mri) {
+            if (me_too || mri != me) && !self.people.contains_key(&mri) {
                 self.people.insert(mri.clone(), (ask, None));
                 asked.push(mri);
             }
@@ -1790,7 +1827,8 @@ impl ChatView {
         for mri in &renamed {
             self.people.remove(mri);
         }
-        self.ask_names(renamed, cx);
+        // only those asked about before: the account itself too when a forward named it
+        self.ask_people(renamed, true, cx);
     }
 
     /// Someone started or stopped typing.
@@ -1981,6 +2019,10 @@ impl ChatView {
             .filter(|_| body != Body::Deleted)
             .map(|(_, reactions)| count_reactions(reactions, &me))
             .unwrap_or_default();
+        let forwarded = matches!(body, Body::Text(_))
+            .then(|| forwarded::forwarded_from(message.properties.as_deref()))
+            .flatten()
+            .map(|from| Box::new(self.forward_origin(&from)));
         Some(MessageItem {
             id: message.id.clone(),
             version: message.version,
@@ -2004,7 +2046,13 @@ impl ChatView {
             } else {
                 ChatWrites::Taken
             },
+            forwarded,
         })
+    }
+
+    /// Where a forwarded message came from, as its card's header shows it ([`ForwardOrigin::of`]).
+    fn forward_origin(&self, from: &teams_proto::chat::Forwarded) -> ForwardOrigin {
+        ForwardOrigin::of(from, from.sender.as_deref().and_then(|sender| self.shown(sender)))
     }
 
     /// The conversation's outbox rows the view knows, by id: this session's as last told and the store's that aren't
@@ -2420,6 +2468,7 @@ impl ChatView {
         cx: &mut Context<Self>,
     ) -> gpui::Div {
         let bar = self.hover_bar(item, highlighted, palette, cx);
+        let forward = forward_header(item, palette, cx);
         let column = div().flex_1().min_w_0().flex().flex_col();
         let column = if item.own {
             column.items_end()
@@ -2428,7 +2477,14 @@ impl ChatView {
         };
         column
             .children(item.header.then(|| header_line(item, palette, clock::cycle(cx))))
-            .child(bubble_line(item, &self.conversation, highlighted, palette, bar))
+            .child(bubble_line(
+                item,
+                &self.conversation,
+                highlighted,
+                palette,
+                bar,
+                forward,
+            ))
             .children(footer_line(item, palette, cx))
             .children(
                 item.outbox
@@ -3375,6 +3431,19 @@ fn header_line(item: &MessageItem, palette: Palette, cycle: HourCycle) -> AnyEle
         .into_any_element()
 }
 
+/// The header of a forwarded message's card ([`forwarded::header`]); a click on the original's time tells
+/// [`ChatViewEvent::OpenOriginal`].
+fn forward_header(item: &MessageItem, palette: Palette, cx: &mut Context<ChatView>) -> Option<AnyElement> {
+    let origin = item.forwarded.as_ref()?;
+    let open = origin.original.clone().map(|original| {
+        Box::new(cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
+            cx.stop_propagation();
+            cx.emit(ChatViewEvent::OpenOriginal(original.clone()));
+        })) as forwarded::OnOpen
+    });
+    Some(forwarded::header(&item.id, origin, palette, clock::cycle(cx), open))
+}
+
 /// "Edited", beside a message's time.
 fn edited_mark() -> gpui::Div {
     div().debug_selector(|| "edited".to_owned()).child("Edited")
@@ -3418,20 +3487,21 @@ fn mentions_me(item: &MessageItem) -> bool {
     !item.own && matches!(&item.body, Body::Text(text) if text.0.mentions_me())
 }
 
-/// A message's bubble (with its hover bar `bar` over its top, while shown) and, for someone else's, the column right
-/// of it that holds Teams' "@" when it mentions the account.
+/// A message's bubble (with its hover bar `bar` over its top, while shown, and `forward`, a forwarded message's card's
+/// header) and, for someone else's, the column right of it that holds Teams' "@" when it mentions the account.
 fn bubble_line(
     item: &MessageItem,
     conversation: &str,
     highlighted: bool,
     palette: Palette,
     bar: Option<AnyElement>,
+    forward: Option<AnyElement>,
 ) -> gpui::Div {
     let line = div().w_full().flex().items_start();
     if item.own {
         return line
             .justify_end()
-            .child(bubble(item, conversation, highlighted, palette, bar));
+            .child(bubble(item, conversation, highlighted, palette, bar, forward));
     }
     let id = item.id.clone();
     let mark = mentions_me(item).then(|| {
@@ -3442,7 +3512,7 @@ fn bubble_line(
             .text_color(rgb(palette.mention))
             .child("@")
     });
-    line.child(bubble(item, conversation, highlighted, palette, bar))
+    line.child(bubble(item, conversation, highlighted, palette, bar, forward))
         .child(div().w(px(MARK_COLUMN)).flex_none().pt_1().pl_2().children(mark))
 }
 
@@ -3452,6 +3522,7 @@ fn bubble(
     highlighted: bool,
     palette: Palette,
     bar: Option<AnyElement>,
+    forward: Option<AnyElement>,
 ) -> AnyElement {
     let background = match (highlighted, item.own) {
         (true, _) => palette.selection,
@@ -3464,7 +3535,7 @@ fn bubble(
         _ => None,
     };
     let content = match &item.body {
-        Body::Text(text) => rich_text::render(&id, &text.0, palette),
+        Body::Text(text) => rich_text::render_with_header(&id, &text.0, palette, forward),
         Body::Deleted => muted(DELETED, palette),
         Body::Unsupported(_) => web_line(
             &format!("unsupported-{}", item.id),

@@ -17,6 +17,9 @@ mod parts;
 // the files a message carries, as cards
 #[path = "chat_view/files.rs"]
 mod files;
+// forwarded messages, in their card
+#[path = "chat_view/forward.rs"]
+mod forward;
 #[path = "chat_view/meeting.rs"]
 mod meeting;
 // names and pictures in the chat list and the chat view (M2 Task 12)
@@ -348,6 +351,7 @@ fn row(id: &str, sender: &str, at: i64) -> MessageItem {
         files: Arc::default(),
         unshown: UnshownParts::default(),
         writes: ChatWrites::Taken,
+        forwarded: None,
     }
 }
 

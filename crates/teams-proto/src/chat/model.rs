@@ -500,6 +500,12 @@ impl Message {
         json_list(self.properties.get("qtdMsgs"))
     }
 
+    /// `properties.originalMessageContext`: where a forwarded message came from ([`forwarded`]).
+    #[must_use]
+    pub fn forwarded(&self) -> Field<Forwarded> {
+        forwarded(&self.properties)
+    }
+
     /// `properties.files`, a JSON string of a list: received files ([`shared_files`]), each entry read only in the
     /// shape `docs/protocol/chat.md` records ("Files: received"); any other is kept as it came, never guessed at (and
     /// nothing is fetched here).
@@ -728,6 +734,50 @@ pub struct QuotedMessage {
     /// `message`, `sharedRefId`, `replyChainId`, and anything else.
     #[serde(flatten)]
     pub extra: Map<String, Value>,
+}
+
+/// Where a forwarded message came from: its `properties.originalMessageContext`, an object as read back and as
+/// delivered (`docs/protocol/chat.md`, "Forwarded messages"). Its content is a quote of itemtype Forward holding the
+/// original message's content ([`crate::chat::Quote::forward`]).
+#[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
+pub struct Forwarded {
+    /// `originalSender`: the original message's sender's MRI.
+    #[serde(rename = "originalSender", default, deserialize_with = "present_string")]
+    pub sender: Option<String>,
+    /// `originalSentTime`: when the original was sent, an ISO time (three fraction digits as captured).
+    #[serde(rename = "originalSentTime", default, deserialize_with = "present_string")]
+    pub sent_time: Option<String>,
+    /// `messageId`: the original message's id, a number as captured (read as its digits).
+    #[serde(rename = "messageId", default, deserialize_with = "optional_string_or_number")]
+    pub message_id: Option<String>,
+    /// `originalThreadId`: the conversation the original was sent in.
+    #[serde(rename = "originalThreadId", default, deserialize_with = "present_string")]
+    pub thread_id: Option<String>,
+    /// `threadType` (`chat` as captured), `messageType`, and anything else.
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
+}
+
+impl Forwarded {
+    /// `originalSentTime` in ms since the epoch.
+    #[must_use]
+    pub fn sent_time_ms(&self) -> Option<i64> {
+        self.sent_time.as_deref().and_then(iso_millis)
+    }
+}
+
+/// Where the message whose `properties` these are was forwarded from (`originalMessageContext`): an object of the
+/// captured shape is [`Field::Known`]; any other form (a JSON string, a field of another JSON type, `null` included)
+/// is kept as it came, never guessed at. [`Field::Absent`] for a message that wasn't forwarded.
+#[must_use]
+pub fn forwarded(properties: &Map<String, Value>) -> Field<Forwarded> {
+    match properties.get("originalMessageContext") {
+        None => Field::Absent,
+        Some(context @ Value::Object(_)) => {
+            serde_json::from_value(context.clone()).map_or_else(|_| Field::Unknown(context.clone()), Field::Known)
+        }
+        Some(other) => Field::Unknown(other.clone()),
+    }
 }
 
 /// A thread read (`GET v1/threads/<id>`).
@@ -1008,6 +1058,17 @@ fn string_or_number<'de, D: Deserializer<'de>>(deserializer: D) -> Result<String
         Value::Number(number) => Ok(number.to_string()),
         _ => Err(serde::de::Error::custom("not a string or a number")),
     }
+}
+
+/// A string, for a field that may be missing (`serde(default)`); anything else, `null` too, is an error (the entry
+/// isn't the model's shape).
+fn present_string<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    String::deserialize(deserializer).map(Some)
+}
+
+/// As [`string_or_number`], for a field that may be missing (`serde(default)`); `null` is an error too.
+fn optional_string_or_number<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<String>, D::Error> {
+    string_or_number(deserializer).map(Some)
 }
 
 /// A string; `null` is an empty one. Anything else is an error.

@@ -195,6 +195,20 @@ fn a_reply_quotes_the_message_its_sender_its_time_and_a_one_line_preview() {
     let mut nobody = message(NOON, LAB_B, "<p>x</p>");
     nobody.sender = None;
     assert!(Quoted::of(&nobody, "x").is_none());
+    // a reply's quote is left out; a forward's content is the message's own, quoted
+    let replied = message(
+        NOON,
+        LAB_B,
+        "<blockquote itemtype=\"http://schema.skype.com/Reply\" itemid=\"1\"><p itemprop=\"preview\">old</p>\
+         </blockquote><p>new</p>",
+    );
+    assert_eq!(Quoted::of(&replied, "Lab Bee").unwrap().preview, "new");
+    let forwarded = message(
+        NOON,
+        LAB_B,
+        "<blockquote itemtype=\"http://schema.skype.com/Forward\">\r\n<p>forwarded line</p>\r\n</blockquote>",
+    );
+    assert_eq!(Quoted::of(&forwarded, "Lab Bee").unwrap().preview, "forwarded line");
 }
 
 #[test]

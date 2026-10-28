@@ -52,10 +52,11 @@ use crate::accounts::{AccountTile, Accounts};
 use crate::bridge::Core;
 use crate::call_view::CallBar;
 use crate::calls::{self, Ask};
-use crate::channel_view::ChannelView;
+use crate::channel_view::{ChannelView, ChannelViewEvent};
 use crate::chat_list::{ChatList, ChatListEvent};
-use crate::chat_view::{self, ChatView};
+use crate::chat_view::{self, ChatView, ChatViewEvent};
 use crate::first_run::FirstRun;
+use crate::forwarded::Original;
 use crate::icons::{Glyph, icon_button_with_key, selected_by};
 use crate::models::{Account, Models};
 use crate::own_presence::{self, OwnPresence};
@@ -213,6 +214,10 @@ pub struct Shell {
     call_button_traced: Option<(String, &'static str)>,
     /// The app's accounts, once the desktop handed them in ([`Shell::set_accounts`]): the rail shows their avatars.
     accounts: Option<(Entity<Accounts>, Subscription)>,
+    /// What the chat view shown tells ([`Shell::follow_chat`]), while there is one.
+    chat_events: Option<Subscription>,
+    /// What the channel view tells ([`Shell::follow_channel`]), once there is one.
+    channel_events: Option<Subscription>,
     _subscriptions: [Subscription; 8],
 }
 
@@ -274,7 +279,7 @@ impl Shell {
             settings: settings.clone(),
             trace: Arc::clone(&trace),
         };
-        let chat = Self::kept_chat(chat_parts, selected.clone(), window, cx);
+        let (chat, chat_events) = Self::kept_chat(chat_parts, selected.clone(), window, cx).unzip();
         Self {
             core,
             models,
@@ -299,6 +304,8 @@ impl Shell {
             call_bar,
             call_button_traced: None,
             accounts: None,
+            chat_events,
+            channel_events: None,
             _subscriptions: [
                 opened,
                 channel_opened,
@@ -336,19 +343,21 @@ impl Shell {
         (teams, [channel_opened, kept_channel])
     }
 
-    /// The chat view of `selected`, the chat the settings kept, opened again and taking what is typed.
+    /// The chat view of `selected`, the chat the settings kept, opened again and taking what is typed, and what it tells
+    /// followed ([`Shell::follow_chat`]).
     fn kept_chat(
         parts: ShellParts,
         selected: Option<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> Option<Entity<ChatView>> {
+    ) -> Option<(Entity<ChatView>, Subscription)> {
         let id = selected?;
         parts.trace.record(&TraceLine::new("chat", "opened").conversation(&id));
         let chat = cx.new(|cx| ChatView::new(parts, id, window, cx));
         let compose = chat.read(cx).compose().clone();
         compose.update(cx, |compose, cx| compose.focus(window, cx));
-        Some(chat)
+        let events = Self::follow_chat(&chat, window, cx);
+        Some((chat, events))
     }
 
     /// The call bar over `models`' calls, and the observation that keeps the header's call button up to date.
@@ -705,6 +714,7 @@ impl Shell {
             let (core, models, trace) = (Arc::clone(&self.core), self.models.clone(), Arc::clone(&self.trace));
             let id = chosen.id.clone();
             let view = cx.new(|cx| ChannelView::new(core, models, trace, id, cx));
+            self.channel_events = Some(Self::follow_channel(&view, window, cx));
             self.channel = Some((view, chosen.clone()));
         }
         self.teams
@@ -721,6 +731,7 @@ impl Shell {
             .is_some_and(|chat| chat.read(cx).conversation() == chosen.id)
         {
             self.chat = None;
+            self.chat_events = None;
         }
         let account = self.core.me().to_owned();
         if self.settings.read(cx).settings().selected_chat_of(&account) == Some(chosen.id.as_str()) {
@@ -796,7 +807,9 @@ impl Shell {
         if shown != Some(true) {
             let parts = self.parts();
             let conversation = id.clone();
-            self.chat = Some(cx.new(|cx| ChatView::new(parts, conversation, window, cx)));
+            let chat = cx.new(|cx| ChatView::new(parts, conversation, window, cx));
+            self.chat_events = Some(Self::follow_chat(&chat, window, cx));
+            self.chat = Some(chat);
         }
         self.list.update(cx, |list, cx| list.select(Some(id.clone()), cx));
         self.teams.update(cx, |teams, cx| teams.select(None, cx));
@@ -829,6 +842,44 @@ impl Shell {
         if let Some(chat) = &self.chat {
             chat.update(cx, |chat, cx| chat.reveal(target.arrival_time, target.message, cx));
         }
+    }
+
+    /// Follows what `chat` tells: a forwarded message's original asked for ([`Shell::open_original`]).
+    fn follow_chat(chat: &Entity<ChatView>, window: &mut Window, cx: &mut Context<Self>) -> Subscription {
+        cx.subscribe_in(chat, window, |this: &mut Self, _, event, window, cx| match event {
+            ChatViewEvent::OpenOriginal(original) => this.open_original(original.clone(), window, cx),
+            ChatViewEvent::Action { .. } => {}
+        })
+    }
+
+    /// Follows what `channel` tells: a forwarded post's original asked for ([`Shell::open_original`]).
+    fn follow_channel(channel: &Entity<ChannelView>, window: &mut Window, cx: &mut Context<Self>) -> Subscription {
+        cx.subscribe_in(channel, window, |this: &mut Self, _, event, window, cx| match event {
+            ChannelViewEvent::OpenOriginal(original) => this.open_original(original.clone(), window, cx),
+        })
+    }
+
+    /// Opens a forwarded message's original: in the app at the message ([`Shell::open_message`]) when the chat list
+    /// has its chat and the store holds the message (the chat view reads back only as far as the store goes), else in
+    /// Teams on the web through GPUI's `open_url` when there is a link to it; without one, its chat in the app when
+    /// the list has it.
+    pub fn open_original(&mut self, original: Original, window: &mut Window, cx: &mut Context<Self>) {
+        let Original { target, web_link } = original;
+        if self.list.read(cx).row(&target.conversation).is_none() {
+            if let Some(link) = web_link {
+                cx.open_url(&link);
+            }
+            return;
+        }
+        let stored = self.core.message(target.conversation.clone(), target.message.clone());
+        cx.spawn_in(window, async move |this, cx| {
+            let stored = matches!(stored.await, Ok(Some(_)));
+            let _ = this.update_in(cx, |shell, window, cx| match web_link {
+                Some(link) if !stored => cx.open_url(&link),
+                _ => shell.open_message(target, window, cx),
+            });
+        })
+        .detach();
     }
 
     /// The presence the chat's header shows: the chat opened's other member's, when it is a 1:1 chat (the list's row

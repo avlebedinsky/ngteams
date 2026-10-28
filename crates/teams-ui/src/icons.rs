@@ -31,6 +31,7 @@ impl Glyph {
     pub const FILE_IMAGE: Self = Self(include_bytes!("../assets/icons/file-image.svg"));
     pub const FILE_SPREADSHEET: Self = Self(include_bytes!("../assets/icons/file-spreadsheet.svg"));
     pub const FILE_VIDEO: Self = Self(include_bytes!("../assets/icons/file-play.svg"));
+    pub const FORWARD: Self = Self(include_bytes!("../assets/icons/forward.svg"));
     pub const HEADPHONES: Self = Self(include_bytes!("../assets/icons/headphones.svg"));
     pub const INFO: Self = Self(include_bytes!("../assets/icons/info.svg"));
     pub const LINK: Self = Self(include_bytes!("../assets/icons/link.svg"));

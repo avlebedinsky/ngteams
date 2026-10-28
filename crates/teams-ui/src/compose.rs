@@ -283,6 +283,7 @@ impl Quoted {
             sender_name: Some(self.sender_name.clone()),
             time: Some(self.time.clone()),
             body: vec![text_node(&self.preview)],
+            forward: false,
         })
     }
 }
@@ -297,12 +298,13 @@ pub fn rich_text_of(message: &Message) -> RichText {
     }
 }
 
-/// A message's text on one line (what it quotes left out), at most [`PREVIEW_MAX`] characters.
+/// A message's text on one line (what it quotes left out; a forward's content is the message's own, kept), at most
+/// [`PREVIEW_MAX`] characters.
 fn preview(message: &Message) -> String {
     let nodes = rich_text_of(message)
         .nodes
         .into_iter()
-        .filter(|node| !matches!(node, Node::Quote(_)))
+        .filter(|node| !matches!(node, Node::Quote(quote) if !quote.forward))
         .collect();
     let plain = RichText {
         nodes,

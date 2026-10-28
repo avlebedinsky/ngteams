@@ -7,7 +7,9 @@
 //!   `s`/`strike`/`del`, `code` as marks; a mention (`<span itemtype="http://schema.skype.com/Mention" itemid="<n>">`,
 //!   as captured: inside a `readonly` element as sent, which is unknown markup and so gives its text, bare as read
 //!   back); a quote (`<blockquote>`; a reply's, `itemtype="http://schema.skype.com/Reply"`,
-//!   with the quoted message's id, its sender's MRI and name and its time, as `docs/protocol/chat.md` shows it); a link
+//!   with the quoted message's id, its sender's MRI and name and its time, as `docs/protocol/chat.md` shows it; a
+//!   forwarded message's, `itemtype="http://schema.skype.com/Forward"`, marked as one, its content the forwarded
+//!   message's own: where it came from is in `properties.originalMessageContext`); a link
 //!   with an `http`, `https` or `mailto` `href`; an image with an `https` `src`, its `alt`, `itemtype` and `itemid`
 //!   (an emoticon's id, an AMS picture's object) and the size it is shown at (`width`/`height`, else its `style`'s).
 //! - **Whitespace as a browser sets it**: outside a `pre`, a run of spaces, tabs and line feeds in the markup is one
@@ -43,6 +45,9 @@ pub const MENTION_ITEMTYPE: &str = "http://schema.skype.com/Mention";
 
 /// The `itemtype` of a reply's quote.
 pub const REPLY_ITEMTYPE: &str = "http://schema.skype.com/Reply";
+
+/// The `itemtype` of a forwarded message's quote: what it holds is the forwarded message's content.
+pub const FORWARD_ITEMTYPE: &str = "http://schema.skype.com/Forward";
 
 /// The `itemtype` of an emoticon's `<img>` (its `itemid` the emoticon's id, its `alt` the emoji).
 pub const EMOJI_ITEMTYPE: &str = "http://schema.skype.com/Emoji";
@@ -160,7 +165,8 @@ impl Image {
     }
 }
 
-/// A quote. A reply's names the message it quotes; a plain `blockquote`'s fields are all `None`.
+/// A quote. A reply's names the message it quotes; a forwarded message's ([`Self::forward`]) and a plain
+/// `blockquote`'s name nothing.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Quote {
     /// The quoted message's id (the quote's `itemid`).
@@ -171,8 +177,13 @@ pub struct Quote {
     pub sender_name: Option<String>,
     /// The quoted message's time (`itemprop="time"`'s `itemid`).
     pub time: Option<String>,
-    /// What the quote shows: the reply's `itemprop="preview"` paragraph, or a plain quote's content.
+    /// What the quote shows: the reply's `itemprop="preview"` paragraph, a forwarded message's content, or a plain
+    /// quote's content.
     pub body: Vec<Node>,
+    /// A forwarded message's (`itemtype` [`FORWARD_ITEMTYPE`]): its body is the forwarded message's own content, and
+    /// where it came from is the message's `properties.originalMessageContext` ([`crate::chat::forwarded`]).
+    #[serde(default)]
+    pub forward: bool,
 }
 
 /// The marks on a text run.
@@ -621,6 +632,7 @@ fn container(element: &Element) -> Option<Container> {
             let reply = element.attr("itemtype") == Some(REPLY_ITEMTYPE);
             let quote = Quote {
                 message_id: if reply { attr(element, "itemid") } else { None },
+                forward: element.attr("itemtype") == Some(FORWARD_ITEMTYPE),
                 ..Quote::default()
             };
             Some(Container::Quote(quote, reply))

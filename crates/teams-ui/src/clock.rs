@@ -9,7 +9,8 @@
 //!   database, no dependency.
 //! - **The wording** is Teams', the same on either clock: the time alone today, "Yesterday" and the weekday within the
 //!   week, else the day (and the year, if not this one) before it ([`message_time`]); a list row shows the time only
-//!   today, else the short weekday or day ([`list_time`]).
+//!   today, else the short weekday or day ([`list_time`]); a forwarded message's original time is shown in full, day
+//!   and time ([`full_time`]).
 //! - **Live**: [`follow_settings`] keeps the clock the settings give as a GPUI global and redraws every window when it
 //!   changes; a view reads it with [`cycle`] as it draws.
 
@@ -131,6 +132,21 @@ where
         _ => "%-d %b %Y",
     };
     at.format(format).to_string()
+}
+
+/// A time in full, day and time of day, as Teams shows a forwarded message's original time: "10/28/2026 2:49 AM" (the
+/// month first, as Teams' English does), the time of day on `cycle`.
+#[must_use]
+pub fn full_time<Tz: TimeZone>(ms: i64, zone: &Tz, cycle: HourCycle) -> String
+where
+    Tz::Offset: std::fmt::Display,
+{
+    let Some(at) = DateTime::from_timestamp_millis(ms) else {
+        return String::new();
+    };
+    at.with_timezone(zone)
+        .format(&format!("%-m/%-d/%Y {}", cycle.time_of_day()))
+        .to_string()
 }
 
 /// The clock windows show times on now.
