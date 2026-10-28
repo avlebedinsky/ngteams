@@ -658,7 +658,7 @@ fn the_search_is_the_store_s_and_never_the_service_s() {
     assert!(read >= 40, "the client crates' sources were read ({read} files)");
     let search = fs::read_to_string(workspace_root().join("crates/teams-ui/src/search.rs")).expect("UTF-8");
     assert!(search.contains("core.search(query, within, MAX_HITS)"));
-    let engine = fs::read_to_string(workspace_root().join("crates/teams-core/src/engine.rs")).expect("UTF-8");
+    let engine = fs::read_to_string(workspace_root().join("crates/teams-core/src/engine/inbox.rs")).expect("UTF-8");
     assert!(engine.contains("Some(within) => store.search_in(&query, &within, limit),"));
     assert!(engine.contains("None => store.search(&query, limit),"));
     let services = fs::read_to_string(workspace_root().join("crates/teams-proto/src/endpoint.rs")).expect("UTF-8");
