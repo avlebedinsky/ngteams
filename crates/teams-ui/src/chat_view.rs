@@ -82,8 +82,8 @@ use gpui::ClipboardItem;
 use gpui::{
     AnyElement, App, AppContext as _, AsyncApp, Bounds, Context, ElementId, Entity, EventEmitter, FocusHandle,
     FollowMode, Global, InteractiveElement as _, IntoElement, KeyBinding, ListAlignment, ListOffset, ListState,
-    ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
-    WeakEntity, Window, actions, anchored, canvas, deferred, div, list, px, relative, rems, rgb,
+    MouseButton, ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Task, WeakEntity, Window, actions, anchored, canvas, deferred, div, list, px, relative, rems, rgb,
 };
 use gpui_component::Selectable as _;
 use gpui_component::button::{Button, ButtonRounded, ButtonVariants as _};
@@ -2348,7 +2348,6 @@ impl ChatView {
     fn message_row(&self, item: &MessageItem, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let id = item.id.clone();
         let hovered_id = id.clone();
-        let clicked_id = id.clone();
         let highlighted = self.selected.as_deref() == Some(id.as_str());
         let row = div()
             .id(ElementId::Name(format!("message-{id}").into()))
@@ -2358,18 +2357,15 @@ impl ChatView {
             .px_4()
             .pt(px(if item.header { 12.0 } else { 2.0 }))
             .flex();
-        let row = row
-            .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
-                let now = hovered.then(|| hovered_id.clone());
-                if *hovered || this.hovered.as_deref() == Some(hovered_id.as_str()) {
-                    this.hovered = now;
-                    cx.notify();
-                }
-            }))
-            .on_click(cx.listener(move |this, _, window, cx| {
-                this.focus.focus(window, cx);
-                this.select(Some(clicked_id.clone()), cx);
-            }));
+        // a click on a message selects nothing, as in Teams: its actions show under the pointer, and the keyboard
+        // selects (nor does it move the focus: the list's own mouse down keeps it where it was)
+        let row = row.on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+            let now = hovered.then(|| hovered_id.clone());
+            if *hovered || this.hovered.as_deref() == Some(hovered_id.as_str()) {
+                this.hovered = now;
+                cx.notify();
+            }
+        }));
         let row = if item.body.is_system() {
             row.flex_col()
                 .child(system_row(item, &self.conversation, palette, clock::cycle(cx)))
@@ -3728,6 +3724,9 @@ impl Render for ChatView {
         let messages = hover_bar_keys(div(), cx)
             .key_context(CONTEXT)
             .track_focus(&self.focus)
+            // a click in the messages leaves the focus where it is (the compose box, as in Teams): the list takes it
+            // only from the keyboard (Escape in the box) and from the actions that need its keys
+            .on_mouse_down(MouseButton::Left, |_, window, _| window.prevent_default())
             .on_action(cx.listener(|this, _: &SelectPrevious, _, cx| this.step_selection(-1, cx)))
             .on_action(cx.listener(|this, _: &SelectNext, _, cx| this.step_selection(1, cx)))
             .on_action(cx.listener(|this, _: &ReplyToSelected, window, cx| {

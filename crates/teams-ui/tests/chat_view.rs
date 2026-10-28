@@ -1240,6 +1240,26 @@ fn the_hover_bar_floats_over_its_bubble_s_top_right_and_keeps_itself_over_the_me
     assert_eq!(cx.update(|_, cx| view.read(cx).hovered().map(str::to_owned)), None);
 }
 
+#[test]
+fn a_click_on_a_message_selects_nothing() {
+    let rig = rig_with(vec![
+        message("1", LAB_B, "<p>theirs</p>", NOON),
+        message("2", LAB_A, "<p>mine</p>", NOON + MINUTE),
+    ]);
+    let (view, cx) = chat_window(&rig, Arc::new(ViewTrace::off()));
+    for bubble in ["bubble-1", "bubble-2"] {
+        let bubble = cx.debug_bounds(bubble).unwrap();
+        cx.simulate_click(bubble.center(), Modifiers::none());
+        draw(cx);
+        assert_eq!(cx.update(|_, cx| view.read(cx).selected().map(str::to_owned)), None);
+    }
+    // its actions are still there under the pointer, and gone once it leaves
+    assert!(cx.debug_bounds("message-actions").is_some());
+    cx.simulate_mouse_move(point(px(1.0), px(1.0)), None, Modifiers::none());
+    draw(cx);
+    assert!(cx.debug_bounds("message-actions").is_none());
+}
+
 /// Points at the message `row`, opens its more-options menu and clicks `entry` in it.
 fn from_menu(cx: &mut VisualTestContext, row: &'static str, entry: &'static str) {
     let row = cx.debug_bounds(row).unwrap();

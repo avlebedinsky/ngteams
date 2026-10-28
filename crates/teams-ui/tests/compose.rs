@@ -583,6 +583,21 @@ fn escape_moves_the_focus_from_an_empty_box_to_the_list_and_back_so_r_replies_to
 }
 
 #[test]
+fn a_click_on_a_message_leaves_the_focus_in_the_box() {
+    let theirs = message(NOON, LAB_B, "<p>question?</p>");
+    let rig = rig_with(vec![theirs.clone()]);
+    let (view, cx, _) = chat_window(&rig, Settings::default());
+    assert_eq!(focused(&view, cx), (false, true));
+    let selector = format!("bubble-{}", theirs.id);
+    let bubble = cx.debug_bounds(Box::leak(selector.into_boxed_str())).unwrap();
+    cx.simulate_click(bubble.center(), Modifiers::none());
+    assert_eq!(focused(&view, cx), (false, true), "the box keeps the focus");
+    assert_eq!(selected(&view, cx), None);
+    type_text(cx, "typed");
+    assert_eq!(typed(&view, cx), "typed");
+}
+
+#[test]
 fn the_keyboard_alone_reacts_and_escape_goes_back_to_the_box_keeping_its_draft() {
     let theirs = message(NOON, LAB_B, "<p>question?</p>");
     let rig = rig_with(vec![theirs.clone()]);
