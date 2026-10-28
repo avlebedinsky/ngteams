@@ -134,39 +134,10 @@ impl<C: Credentials + 'static> Profiles<C> {
     /// `mri` as the views show them now (see the module docs), from the store and what the binary knows; a lookup is
     /// started (or queued) when their stored profile is missing or old.
     pub(crate) fn person(&mut self, store: &Store, mri: &str) -> Result<Person, StoreError> {
-        let stored = store.profile(mri)?;
-        if due(stored.as_ref()) {
+        if due(store.profile(mri)?.as_ref()) {
             self.queue(mri);
         }
-        let mut person = Person {
-            mri: mri.to_owned(),
-            name: None,
-            from: None,
-            picture: None,
-            looking: self.under_way.contains(mri),
-        };
-        if let Some(profile) = stored {
-            if let PictureState::Some(picture) = profile.picture {
-                person.picture = Some(picture);
-            }
-            person.from = profile.name_source.map(|source| match source {
-                NameSource::Graph => NameFrom::Graph,
-                NameSource::ShortProfile => NameFrom::ShortProfile,
-            });
-            person.name = profile.name.filter(|_| person.from.is_some());
-        }
-        if person.name.is_none() {
-            let (name, from) = match store.display_name(mri)? {
-                Some(name) => (Some(name), Some(NameFrom::Message)),
-                None => match self.known.get(mri) {
-                    Some(name) => (Some(name.clone()), Some(NameFrom::Known)),
-                    None => (None, None),
-                },
-            };
-            person.name = name;
-            person.from = from;
-        }
-        Ok(person)
+        stored_person(store, mri, &self.known, self.under_way.contains(mri))
     }
 
     /// Whether a lookup runs or waits to.
@@ -252,8 +223,48 @@ impl<C: Credentials + 'static> Profiles<C> {
     }
 }
 
+/// `mri` as the views show them, from the store and the names the binary knows (`known`), `looking` told as given;
+/// nothing is looked up.
+pub(crate) fn stored_person(
+    store: &Store,
+    mri: &str,
+    known: &HashMap<String, String>,
+    looking: bool,
+) -> Result<Person, StoreError> {
+    let stored = store.profile(mri)?;
+    let mut person = Person {
+        mri: mri.to_owned(),
+        name: None,
+        from: None,
+        picture: None,
+        looking,
+    };
+    if let Some(profile) = stored {
+        if let PictureState::Some(picture) = profile.picture {
+            person.picture = Some(picture);
+        }
+        person.from = profile.name_source.map(|source| match source {
+            NameSource::Graph => NameFrom::Graph,
+            NameSource::ShortProfile => NameFrom::ShortProfile,
+        });
+        person.name = profile.name.filter(|_| person.from.is_some());
+    }
+    if person.name.is_none() {
+        let (name, from) = match store.display_name(mri)? {
+            Some(name) => (Some(name), Some(NameFrom::Message)),
+            None => match known.get(mri) {
+                Some(name) => (Some(name.clone()), Some(NameFrom::Known)),
+                None => (None, None),
+            },
+        };
+        person.name = name;
+        person.from = from;
+    }
+    Ok(person)
+}
+
 /// Whether `stored` is due a read: none, never settled, or older than [`PROFILE_MAX_AGE`].
-fn due(stored: Option<&Profile>) -> bool {
+pub(crate) fn due(stored: Option<&Profile>) -> bool {
     let Some(profile) = stored else {
         return true;
     };

@@ -53,12 +53,19 @@
 //!   conversation a read added or changed (its version, its read horizon, its roster, its messages), is kept until
 //!   the engine takes it after its read and tells its owner; a message the store had as new or newer is not, so a
 //!   delivery the catch-up meets again changes nothing and is told once.
+//! - **Meanwhile** ([`Meanwhile`]): while a read waits on the service, the store is handed to its owner's
+//!   [`Meanwhile::serve`] (the engine answers its queries from it), and taken back the moment the read is over. A
+//!   catch-up of an account with hundreds of conversations and channels whose sync pages back through their whole
+//!   history runs for minutes, and a view's read of the store mustn't wait for it. The store is handed over only
+//!   between the catch-up's own uses of it, never while it is half way through storing a page.
 //!
 //! Every read is a `GET` through the native transport (`teams_proto::chat::ChatReads`), and every link is the
 //! service's own, followed only on the same chat base. Nothing here writes to the service.
 //!
 //! M1 Task 17 (`docs/plans/20261020-native-teams-m1-headless-chat-core.md`).
 
+use std::future::Future;
+use std::pin::{Pin, pin};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use serde_json::Value;
@@ -292,6 +299,13 @@ impl Gaps {
     }
 }
 
+/// What the owner of a catch-up does with its store while a read waits on the service (see the module docs).
+pub trait Meanwhile: Send + Sync {
+    /// Uses `store` until the read is over, when the future is dropped wherever it waits: only at an `.await` that
+    /// loses nothing when dropped there. A future that ends gives the store back early; the read is waited for then.
+    fn serve<'a>(&'a self, store: &'a mut Store) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>>;
+}
+
 /// The catch-up sync of one account (see the module docs): reads through `client`, stores what comes in through
 /// `outbox`'s [`Outbox::receive`].
 pub struct CatchUp<C, T> {
@@ -303,6 +317,8 @@ pub struct CatchUp<C, T> {
     clock: Clock,
     /// What the reads changed, until taken ([`CatchUp::take_changes`]).
     changes: Mutex<Changes>,
+    /// What the store is used for while a read waits ([`CatchUp::with_meanwhile`]).
+    meanwhile: Option<Arc<dyn Meanwhile>>,
 }
 
 impl<C, T> std::fmt::Debug for CatchUp<C, T> {
@@ -325,7 +341,28 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
             page_size: MAX_PAGE_SIZE,
             clock: Arc::new(now_ms),
             changes: Mutex::new(Changes::default()),
+            meanwhile: None,
         }
+    }
+
+    /// Hands the store to `meanwhile` while each read waits on the service (see the module docs).
+    #[must_use]
+    pub fn with_meanwhile(mut self, meanwhile: Arc<dyn Meanwhile>) -> Self {
+        self.meanwhile = Some(meanwhile);
+        self
+    }
+
+    /// Waits for `read` of the service, the store meanwhile handed to [`Meanwhile::serve`] (see the module docs).
+    async fn waiting<F: Future>(&self, store: &mut Store, read: F) -> F::Output {
+        let mut read = pin!(read);
+        if let Some(meanwhile) = &self.meanwhile {
+            tokio::select! {
+                biased;
+                output = &mut read => return output,
+                () = meanwhile.serve(store) => {}
+            }
+        }
+        read.await
     }
 
     /// What the reads changed in the store since the last call ([`Changes`]): the engine takes it after every read it
@@ -393,8 +430,8 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         let kept = store.conversation_list_sync_link()?;
         let first = kept.is_none();
         let mut list = match kept.as_deref() {
-            Some(link) => reads.conversations_from(link).await?,
-            None => reads.conversations().await?,
+            Some(link) => self.waiting(store, reads.conversations_from(link)).await?,
+            None => self.waiting(store, reads.conversations()).await?,
         };
         let sync_link = list.sync_state().map(str::to_owned).or(kept);
         let mut conversations = std::mem::take(&mut list.conversations);
@@ -407,7 +444,7 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
             if pages == MAX_PAGES {
                 return Err(CatchUpError::TooManyPages);
             }
-            list = reads.conversations_from(&next).await?;
+            list = self.waiting(store, reads.conversations_from(&next)).await?;
             pages += 1;
             conversations.append(&mut list.conversations);
             report.skipped += list.unreadable.len();
@@ -477,7 +514,7 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         };
         let mut synced = Synced::default();
         let kept = self.read_gap(store, kept, &mut synced).await?;
-        let page = reads.messages_from(conversation, &link).await?;
+        let page = self.waiting(store, reads.messages_from(conversation, &link)).await?;
         synced.add(self.apply_page(store, conversation, &page)?);
         let (left, walked) = self
             .follow_back(store, conversation, page.backward_link(), MAX_PAGES - 1)
@@ -555,7 +592,8 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
             return Ok(None);
         };
         let conversation = kept.conversation_id.as_str();
-        let page = ChatReads::new(&self.client).messages_from(conversation, link).await?;
+        let reads = ChatReads::new(&self.client);
+        let page = self.waiting(store, reads.messages_from(conversation, link)).await?;
         let synced = self.apply_page(store, conversation, &page)?;
         let older = page.backward_link().map(str::to_owned);
         let state = match chain {
@@ -642,7 +680,9 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         conversation: &str,
     ) -> Result<Synced, CatchUpError> {
         let kept_gap = store.sync_state(conversation)?.and_then(|state| state.gap_link);
-        let page = reads.messages(conversation, self.page_size).await?;
+        let page = self
+            .waiting(store, reads.messages(conversation, self.page_size))
+            .await?;
         let synced = self.apply_page(store, conversation, &page)?;
         let backward_link = page.backward_link().map(str::to_owned);
         let state = SyncState {
@@ -676,7 +716,7 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
             if read == budget {
                 return Ok((Some(next), synced));
             }
-            let page = reads.messages_from(conversation, &next).await?;
+            let page = self.waiting(store, reads.messages_from(conversation, &next)).await?;
             synced.add(self.apply_page(store, conversation, &page)?);
             read += 1;
             link = page.backward_link().map(str::to_owned);
@@ -826,7 +866,8 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
             self.conversation_changed(id, added);
             return Ok(());
         }
-        let thread = ChatReads::new(&self.client).thread(id).await?;
+        let reads = ChatReads::new(&self.client);
+        let thread = self.waiting(store, reads.thread(id)).await?;
         let row = Conversation {
             id: id.to_owned(),
             kind: store_kind(&thread.kind()),
@@ -908,7 +949,8 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
             (Some(stored), listed) => known_i64(&listed).is_none_or(|listed| listed > stored),
         };
         if newer {
-            let thread = ChatReads::new(&self.client).thread(&listed.id).await?;
+            let reads = ChatReads::new(&self.client);
+            let thread = self.waiting(store, reads.thread(&listed.id)).await?;
             self.store_members(store, &thread)?;
         }
         Ok(())

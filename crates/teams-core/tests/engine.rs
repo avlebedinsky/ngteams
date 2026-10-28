@@ -45,7 +45,7 @@ use teams_store::{
     StoreError,
 };
 use teams_trouter::{Options, RegistrationReport, Trouter, TrouterCredentials};
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 
 /// How long a test waits for an event before it fails.
 const WAIT: Duration = Duration::from_secs(30);
@@ -109,10 +109,12 @@ impl TrouterCredentials for Tokens {
 }
 
 /// The reads' token, which fails while `failing` is set: every read of the engine's client (the catch-up's, the
-/// outbox's check, a thread read) fails before it goes out, as an unreachable service would fail it.
+/// outbox's check, a thread read) fails before it goes out, as an unreachable service would fail it. While `held` is
+/// set, every such read waits before it goes out, as a slow service would hold it.
 struct Reads {
     tokens: Arc<Tokens>,
     failing: Arc<AtomicBool>,
+    held: Arc<watch::Sender<bool>>,
 }
 
 impl Reads {
@@ -124,9 +126,21 @@ impl Reads {
     }
 }
 
+impl Reads {
+    /// The token once the reads aren't held.
+    fn released(&self) -> impl Future<Output = Result<Secret, TokenError>> + Send + use<> {
+        let mut held = self.held.subscribe();
+        let token = self.token();
+        async move {
+            let _ = held.wait_for(|held| !held).await;
+            token
+        }
+    }
+}
+
 impl Credentials for Reads {
     fn bearer(&self, _audience: &str) -> impl Future<Output = Result<Secret, TokenError>> + Send {
-        future::ready(self.token())
+        self.released()
     }
 
     fn bearer_rejected(
@@ -134,7 +148,7 @@ impl Credentials for Reads {
         _audience: &str,
         _rejected: &Secret,
     ) -> impl Future<Output = Result<Secret, TokenError>> + Send {
-        future::ready(self.token())
+        self.released()
     }
 }
 
@@ -288,6 +302,8 @@ struct Native {
     seen: String,
     /// The engine's reads fail while it is set ([`Reads`]).
     reads_fail: Arc<AtomicBool>,
+    /// The engine's reads wait while it is set ([`Reads`]).
+    reads_held: Arc<watch::Sender<bool>>,
     /// The status the next write is answered with before it reaches the service ([`Interposed`]).
     next_write: Arc<AtomicU16>,
     /// The next write reaches the service and its answer is lost ([`Interposed`]).
@@ -347,9 +363,11 @@ fn try_native_in(lab: &Lab, me: &'static str, how: How, dir: Arc<tempfile::TempD
     let membership: Arc<dyn MembershipSource + Send> = Arc::new(live);
     let author = Author::new(Mri::new(me), "Lab account");
     let reads_fail = Arc::new(AtomicBool::new(false));
+    let reads_held = Arc::new(watch::Sender::new(false));
     let reads = Arc::new(Reads {
         tokens: Arc::clone(&tokens),
         failing: Arc::clone(&reads_fail),
+        held: Arc::clone(&reads_held),
     });
     let client = Arc::new(Client::new(
         HttpTransport::with_mock_origin(reads, Arc::clone(&fence), CHAT_BASE, &origin).unwrap(),
@@ -385,6 +403,7 @@ fn try_native_in(lab: &Lab, me: &'static str, how: How, dir: Arc<tempfile::TempD
         me,
         seen: String::new(),
         reads_fail,
+        reads_held,
         next_write,
         lose_answer,
         ahead,
@@ -1090,6 +1109,50 @@ async fn whether_the_whole_history_is_stored_tells_a_chat_never_synced_from_its_
         assert!(pages < 20, "older pages never ran out");
     }
     assert_eq!(b.handle.history_complete(AB_CHAT).await.unwrap(), Some(true));
+    b.shutdown();
+}
+
+#[tokio::test]
+async fn the_store_is_read_while_a_catch_up_waits_on_the_service_and_other_requests_wait_for_it() {
+    let lab = Lab::start().await;
+    let b = native(&lab, LAB_B, QUIET);
+    b.handle.sync().await.unwrap();
+    let stored = b.handle.messages(AB_CHAT, None, 100).await.unwrap().messages;
+    assert!(!stored.is_empty());
+
+    // the service holds the catch-up's first read, as a long catch-up holds the engine
+    b.reads_held.send_replace(true);
+    let sync = b.handle.sync();
+    let older = b.handle.load_older(AB_CHAT);
+    // a view opening a chat meanwhile: its reads of the store are answered while the catch-up waits
+    let read = tokio::time::timeout(Duration::from_secs(5), b.handle.messages(AB_CHAT, None, 100)).await;
+    let read = read.expect("the store wasn't read while the catch-up waited").unwrap();
+    assert_eq!(read.messages, stored);
+    assert!(b.handle.message(AB_CHAT, A_EDITED).await.unwrap().is_some());
+    // and so are the store reads that start a read of their own: a sender's name, the chat list's extras, the teams
+    let person = tokio::time::timeout(Duration::from_secs(5), b.handle.person(LAB_A)).await;
+    let person = person
+        .expect("a person wasn't answered while the catch-up waited")
+        .unwrap();
+    assert_eq!(person.mri, LAB_A);
+    assert!(person.name.is_some(), "{person:?}");
+    let listing = tokio::time::timeout(Duration::from_secs(5), b.handle.chat_listing()).await;
+    listing
+        .expect("the chat listing wasn't answered while the catch-up waited")
+        .unwrap();
+    let teams = tokio::time::timeout(Duration::from_secs(5), b.handle.teams()).await;
+    teams
+        .expect("the teams weren't answered while the catch-up waited")
+        .unwrap();
+    // a request that isn't a query waits for the catch-up, and goes after it in the order it was made
+    let older = tokio::spawn(older);
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!older.is_finished(), "older history was read while the catch-up waited");
+
+    b.reads_held.send_replace(false);
+    let report = sync.await.unwrap();
+    assert!(report.failed.is_empty(), "{report:?}");
+    older.await.unwrap().unwrap();
     b.shutdown();
 }
 

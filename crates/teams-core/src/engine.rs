@@ -36,7 +36,11 @@
 //!   members, the unread count and the account's read horizon of a conversation, whether its whole history is stored,
 //!   an outbox row, a conversation's rows that aren't sent and the rows earlier runs left, all read from the store on
 //!   the engine's thread, which owns it; older history from the service ([`EngineRequests::load_older`]). A row of an earlier run (or a failed or
-//!   denied one) goes out again only by the explicit [`EngineRequests::resend`].
+//!   denied one) goes out again only by the explicit [`EngineRequests::resend`]. The requests are taken in the order
+//!   they were made, but a query (and a person, the teams and the chat listing, from the store alone, their own
+//!   background read started afterwards) is answered also while a read of the catch-up waits on the service, from the
+//!   store as it stands (`inbox`): a catch-up that runs for minutes (hundreds of conversations, channels whose sync
+//!   pages back through their whole history) doesn't hold up a view's reads, while every other request waits for it.
 //! - **People** ([`EngineRequests::person`]): someone's name and picture as the views show them, from the store, and
 //!   read in the background when the store's are missing or old ([`crate::profiles`]: Graph, else the middle tier's
 //!   profile lookup, a read sent as a `POST`); each change stored is told as [`Event::Profile`].
@@ -132,6 +136,9 @@ use crate::sync::{CatchUp, CatchUpError, CatchUpReport, Gaps, NOTES, Synced};
 use crate::teams::{ChatListing, READING_TEAMS, TEAMS_RETRY, Teams, TeamsRead, TeamsReadError};
 
 mod described;
+mod inbox;
+
+use inbox::Inbox;
 
 /// How the engine paces itself.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -980,7 +987,7 @@ where
         .spawn(move || {
             // a `LocalSet`, so the calling runs as a task of its own on this thread (`crate::calling`)
             let local = tokio::task::LocalSet::new();
-            local.block_on(&runtime, Core::new(parts, events).run(received));
+            local.block_on(&runtime, Core::new(parts, events, received).run());
             // its tasks (the push channel's) and the store are gone before another engine may start
             drop(local);
             drop(runtime);
@@ -1003,6 +1010,8 @@ where
 /// The engine's state on its thread.
 struct Core<C, T> {
     store: Store,
+    /// The requests, which the catch-up's reads answer the queries of while they wait ([`Inbox`]).
+    inbox: Arc<Inbox>,
     outbox: Arc<Outbox<T>>,
     catch_up: CatchUp<C, T>,
     profiles: Profiles<C>,
@@ -1042,9 +1051,14 @@ where
     C: Credentials + 'static,
     T: Transport<Error = HttpError> + Send + 'static,
 {
-    fn new(parts: Parts<C, T>, events: mpsc::UnboundedSender<Event>) -> Self {
+    fn new(
+        parts: Parts<C, T>,
+        events: mpsc::UnboundedSender<Event>,
+        requests: mpsc::UnboundedReceiver<Request>,
+    ) -> Self {
         let outbox = Arc::new(parts.outbox);
         let me = outbox.me().mri().clone();
+        let known = parts.known_names.iter().cloned().collect();
         let profiles = Profiles::new(
             Arc::clone(&parts.client),
             parts.known_names,
@@ -1058,9 +1072,11 @@ where
         let calling = parts
             .calls
             .map(|calls| Calling::new(calls, Arc::clone(&outbox), Arc::clone(&parts.client), events.clone()));
-        let catch_up = CatchUp::new(parts.client, Arc::clone(&outbox), me);
+        let inbox = Arc::new(Inbox::new(me.as_str().to_owned(), known, requests));
+        let catch_up = CatchUp::new(parts.client, Arc::clone(&outbox), me).with_meanwhile(inbox.clone());
         Self {
             store: parts.store,
+            inbox,
             outbox,
             catch_up,
             profiles,
@@ -1084,7 +1100,7 @@ where
         }
     }
 
-    async fn run(mut self, mut requests: mpsc::UnboundedReceiver<Request>) {
+    async fn run(mut self) {
         let mut push = self.push.take().map(Push::spawn);
         if push.is_none() && self.options.poll.is_some() {
             self.poll_at = Some(Instant::now());
@@ -1094,7 +1110,7 @@ where
         tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
             tokio::select! {
-                request = requests.recv() => match request {
+                request = self.inbox.next() => match request {
                     Some(Request::Shutdown) | None => break,
                     Some(request) => self.on_request(request).await,
                 },
@@ -1358,57 +1374,7 @@ where
 
     /// Answers a query from the store.
     fn answer(&self, query: Query) {
-        fn give<T>(reply: Responder<T>, answer: Result<T, StoreError>) {
-            let _ = reply.send(answer.map_err(EngineError::from));
-        }
-        let store = &self.store;
-        match query {
-            Query::Conversations(limit, reply) => give(reply, store.conversations_by_activity(limit)),
-            Query::Messages {
-                conversation,
-                before,
-                limit,
-                reply,
-            } => give(reply, store.messages_before(&conversation, before.as_ref(), limit)),
-            Query::Message {
-                conversation,
-                id,
-                reply,
-            } => give(reply, store.message(&conversation, &id)),
-            Query::Reactions {
-                conversation,
-                id,
-                reply,
-            } => give(reply, store.reactions(&conversation, &id)),
-            Query::Members(conversation, reply) => give(reply, store.members(&conversation)),
-            Query::RecentReactions(limit, reply) => give(reply, store.recent_reactions(self.me(), limit)),
-            Query::FrequentReactions(limit, reply) => give(reply, store.frequent_reactions(self.me(), limit)),
-            Query::UnreadCount(conversation, reply) => give(reply, store.unread_count(&conversation, self.me())),
-            Query::DisplayName(mri, reply) => give(reply, store.display_name(&mri)),
-            Query::ReadHorizon(conversation, reply) => give(reply, store.read_horizon(&conversation, self.me())),
-            Query::HistoryComplete(conversation, reply) => give(
-                reply,
-                store
-                    .sync_state(&conversation)
-                    .map(|state| state.map(|state| state.history_complete)),
-            ),
-            Query::OutboxEntry(id, reply) => give(reply, store.outbox_entry(id)),
-            Query::OutboxUnsettled(conversation, reply) => give(reply, store.outbox_unsettled(&conversation)),
-            Query::LeftByEarlierRuns(reply) => give(reply, store.outbox_left_by_earlier_runs()),
-            Query::ReplyRoots(conversation, reply) => give(reply, store.reply_roots(&conversation)),
-            Query::Search {
-                query,
-                within,
-                limit,
-                reply,
-            } => give(
-                reply,
-                match within {
-                    Some(within) => store.search_in(&query, &within, limit),
-                    None => store.search(&query, limit),
-                },
-            ),
-        }
+        self.inbox.answer(&self.store, query);
     }
 
     /// The account's MRI.

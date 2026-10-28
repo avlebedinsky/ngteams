@@ -87,18 +87,20 @@ impl<C: Credentials + 'static> Teams<C> {
     /// read them) and the conversations the chat service calls empty; a read starts when the teams are due one, as
     /// [`Self::teams`] starts it.
     pub(crate) fn chat_listing(&mut self, store: &Store) -> Result<ChatListing, StoreError> {
-        self.teams(store)?;
-        Ok(ChatListing {
-            favorites: store.favorites()?,
-            empty: store.empty_conversations()?,
-        })
+        self.read_if_due(store)?;
+        stored_listing(store)
     }
 
     /// The stored teams (`None` before the first read settled them); a read starts when they are due one (see the
     /// module docs).
     pub(crate) fn teams(&mut self, store: &Store) -> Result<Option<Vec<Team>>, StoreError> {
-        let read_at = store.teams_read_at()?;
-        let old = read_at.is_none_or(|read_at| {
+        self.read_if_due(store)?;
+        stored_teams(store)
+    }
+
+    /// Starts a read when the stored teams are missing or old, unless one runs or a failed one's wait does.
+    fn read_if_due(&mut self, store: &Store) -> Result<(), StoreError> {
+        let old = store.teams_read_at()?.is_none_or(|read_at| {
             Duration::from_millis(u64::try_from(now_ms().saturating_sub(read_at)).unwrap_or(0)) > TEAMS_MAX_AGE
         });
         let waiting = self.retry_at.is_some_and(|at| Instant::now() < at);
@@ -106,10 +108,7 @@ impl<C: Credentials + 'static> Teams<C> {
             let client = Arc::clone(&self.client);
             self.running.spawn(async move { read(&client).await });
         }
-        match read_at {
-            Some(_) => store.teams().map(Some),
-            None => Ok(None),
-        }
+        Ok(())
     }
 
     /// Whether a read runs.
@@ -147,6 +146,22 @@ impl<C: Credentials + 'static> Teams<C> {
             }
         }
     }
+}
+
+/// The stored teams (`None` before the first read settled them); nothing is read.
+pub(crate) fn stored_teams(store: &Store) -> Result<Option<Vec<Team>>, StoreError> {
+    match store.teams_read_at()? {
+        Some(_) => store.teams().map(Some),
+        None => Ok(None),
+    }
+}
+
+/// What the chat list needs besides the conversations, as stored ([`ChatListing`]); nothing is read.
+pub(crate) fn stored_listing(store: &Store) -> Result<ChatListing, StoreError> {
+    Ok(ChatListing {
+        favorites: store.favorites()?,
+        empty: store.empty_conversations()?,
+    })
 }
 
 /// CSA's teams read, as the store keeps its teams and favourite chats.
