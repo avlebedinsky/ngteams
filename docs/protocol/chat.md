@@ -131,7 +131,43 @@ Opening the chat, b's client made two reads. Fixture: `tests/fixtures/chatsvc/me
    every message of the (small) chat, newest first, `_metadata` with both segment times 0 and no link.
 
 Further pages: the bundle pages a message list through `_metadata.backwardLink` (older) and `forwardLink` (newer), full
-URLs. Neither was seen: the lab chat fits in one page. A first read without a kept sync state wasn't seen either.
+URLs. A `backwardLink` was seen since on sync answers longer than a page ([below](#sync-answers)); a `forwardLink` on a
+message page never was. A first read without a kept sync state wasn't seen either.
+
+## Sync answers
+
+Read from the lab's web client captures (`ab-chat`, 2026-10-21: a sync answer longer than a page in the lab chat) and
+from a personal build's store and debug log (2026-10-28: an account with about 250 conversations, a busy team channel
+and a busy meeting chat), locally; no value from either is copied here.
+
+- **What a sync read answers.** `GET …/messages?…&syncState=<opaque>` brings what changed since the end of the segment
+  the sync state was handed out with: every message whose `version` is newer than it, newest first by id. A message
+  that arrived earlier and was edited, deleted or reacted to since is in it too, at its own id's place (so at the end
+  of the answer). Nothing changed: no messages, the same end.
+- **The segment times**, on every page: `lastCompleteSegmentEndTime` is the newest version the conversation is
+  complete to (the newest version on the answer, or the old end when nothing changed); `lastCompleteSegmentStartTime`
+  is how far back the complete segment reaches: the old start when the answer fits in a page, the oldest message's id
+  on the page while a longer answer isn't read through. The opaque `syncState` (and a `backwardLink`'s) moves with
+  them; the native client never reads into it.
+- **An answer longer than a page** has a `backwardLink` on its first page. In the lab chat, whose segment started at
+  the beginning (its whole history was read), following it brought the rest of what changed, down to the old end, and
+  that last page reported the merged segment (the old start, the new end) and no `backwardLink`: the service closed
+  the gap itself.
+- **A segment that doesn't start at the beginning** (a first read of a busy conversation: one page, more history
+  behind it) is answered otherwise. A cut answer's `backwardLink` doesn't stop at the old end: each page's
+  `lastCompleteSegmentStartTime` is its own oldest message's id, the end stays, and the link pages back through the
+  conversation's whole history. For the busy channel and meeting chat it reached two and a half years back; a
+  channel's page of 200 posts was about 0.8 MB and took 2 to 25 s, and one over 30 s timed out.
+- **So the gap is bounded by the old end.** Every message that arrived after the end of the segment the sync state came
+  with has a later id, and a page holds its messages newest first by id: once a page's `lastCompleteSegmentStartTime`
+  (or its oldest message's id) is at or before the old end, every message that arrived since is on it or on a page
+  before it, and what its `backwardLink` leads to is history the client had, or older. The native client keeps each
+  sync state's `lastCompleteSegmentEndTime` beside it and stops a sync answer's walk at that page; older history is
+  read only from the first read's own `backwardLink`, as the user scrolls. An edit or reaction of a message older than
+  the old end, on a page past that one, isn't read by the sync (a Trouter delivery brings it while the socket is up).
+- **The account's drafts** (`48:drafts`) are in the conversation list, but `GET …/conversations/48:drafts/messages`
+  answers 400 with `errorCode` 201, "Invalid threadId, cannot be 48:drafts". The native client keeps the list's entry
+  and never reads its messages.
 
 ## A message as read
 

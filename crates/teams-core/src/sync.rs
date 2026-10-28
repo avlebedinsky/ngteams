@@ -4,18 +4,30 @@
 //! - **The conversation list** ([`CatchUp::catch_up`]): the first catch-up reads the whole list, every later one
 //!   follows the list's own sync link (`syncState`), which brings only the conversations that changed since. Each
 //!   conversation is upserted by its `version`, its read horizon and (for a chat) its members are kept, and the
-//!   messages of every one that is new or changed are synced. The list's sync link moves on only once every
-//!   conversation it brought was synced: a conversation that failed is listed again by the next catch-up.
+//!   messages of every one that is new or changed are synced. What the list says of a conversation is stored whether
+//!   or not its messages synced. The list's sync link moves on once every conversation it brought was synced or kept
+//!   to be synced again ([`Store::set_unsynced`]): every later catch-up syncs a kept one (its messages, and a chat's
+//!   members) whether or not the list brings it, until it syncs, so no conversation holds the list back. A conversation the
+//!   service refuses ([`ConversationFailed::is_refused`]) keeps no catch-up due ([`CatchUpReport::caught_up`]); the
+//!   account's drafts ([`DRAFTS`]), whose messages the service won't give, are never read.
 //! - **A conversation's messages** ([`CatchUp::sync_messages`]): the first read is the newest page, whose
 //!   `backwardLink` is kept for older history ([`CatchUp::load_older`]); every later one follows the conversation's
-//!   sync link, which brings what changed since. A sync answer that has a `backwardLink` of its own (never captured) is
-//!   followed to its end, so a gap longer than a page is read through whatever its pages hold: a page that changes
-//!   nothing (its messages came as deliveries, or by an earlier attempt that failed further back) doesn't stop it.
-//!   Past [`MAX_PAGES`] the link left is kept as the conversation's gap ([`SyncState::gap_link`]), apart from its
-//!   older history's `backwardLink`, so the sync link moves on only past what is stored or kept to be read. The next
-//!   sync reads on from a kept gap first, and so does [`CatchUp::load_older`] before older history; a sync answer cut
-//!   again while a gap is still unread leaves the sync link where it was ([`CatchUpError::GapPending`]). A
-//!   conversation the store doesn't know yet is first read as a thread.
+//!   sync link, which brings what changed since (`docs/protocol/chat.md`, "Sync answers"). A gap is bounded by the
+//!   end of the segment the kept sync link came with ([`SyncState::sync_until`], the answer's
+//!   `lastCompleteSegmentEndTime`): every message that arrived since is newer than it. A sync answer's
+//!   `backwardLink` is followed until a page reaches back to that time (its `lastCompleteSegmentStartTime`, else its
+//!   oldest message), or the service ends it: what is behind is history the sync before had, or older, left to
+//!   [`CatchUp::load_older`] when the user scrolls. On the way, a page that changes nothing (its messages came as
+//!   deliveries, or by an earlier attempt that failed further back) doesn't stop it. Past [`MAX_PAGES`] the link
+//!   left is kept as the conversation's gap ([`SyncState::gap_link`]) with the same bound
+//!   ([`SyncState::gap_until`]), apart from its older history's `backwardLink`, so the sync link moves on only past
+//!   what is stored or kept to be read. The next sync reads on from a kept gap first, and so does
+//!   [`CatchUp::load_older`] before older history; a sync answer cut again while a gap is still unread leaves the sync
+//!   link where it was ([`CatchUpError::GapPending`]). A sync state written before the bound was kept is bounded by
+//!   when it was written, less [`CLOCK_SKEW_MS`] (kept as its bound by the next write), and a gap kept then ends at a
+//!   page whose messages the store all had: the messages the sync before it stored. An edit or reaction of a message older than the bound is read only when
+//!   the answer's pages up to it carry it (a delivery brings it while the push channel is up). A conversation the
+//!   store doesn't know yet is first read as a thread, then gets only its newest page.
 //! - **The account's own notes** ([`NOTES`], `48:notes`, its chat with itself, which Teams lists under "Favorites"):
 //!   the conversation list never brings it, so a catch-up syncs it after the list when it is one of the favourites CSA
 //!   listed or the store already has it (a failure there doesn't hold the list's sync link back). Its messages are
@@ -55,8 +67,8 @@
 //!   delivery the catch-up meets again changes nothing and is told once.
 //! - **Meanwhile** ([`Meanwhile`]): while a read waits on the service, the store is handed to its owner's
 //!   [`Meanwhile::serve`] (the engine answers its queries from it), and taken back the moment the read is over. A
-//!   catch-up of an account with hundreds of conversations and channels whose sync pages back through their whole
-//!   history runs for minutes, and a view's read of the store mustn't wait for it. The store is handed over only
+//!   catch-up of an account with hundreds of conversations and busy channels (a page of 200 channel posts takes
+//!   seconds) runs for a while, and a view's read of the store mustn't wait for it. The store is handed over only
 //!   between the catch-up's own uses of it, never while it is half way through storing a page.
 //!
 //! Every read is a `GET` through the native transport (`teams_proto::chat::ChatReads`), and every link is the
@@ -89,6 +101,10 @@ pub const CLOCK_SKEW_MS: i64 = 5 * 60 * 1000;
 /// The account's own notes: its chat with itself, a `48:` stream (`threadType` `streamofnotes`) that Teams lists under
 /// "Favorites" as "<name> (You)". Read like any conversation's messages; nothing is written there.
 pub const NOTES: &str = "48:notes";
+
+/// The account's drafts: a `48:` stream the conversation list brings, whose messages the chat service won't give
+/// (`GET …/conversations/48:drafts/messages` answers 400, "Invalid threadId"). Kept as the list gives it, never read.
+pub const DRAFTS: &str = "48:drafts";
 
 /// The store's kind for [`NOTES`]: what the conversation list's own kind for it would be ([`store_kind`]).
 const NOTES_KIND: &str = "thread_type:streamofnotes";
@@ -199,10 +215,20 @@ pub struct CatchUpReport {
     pub skipped: usize,
     /// What the conversations' message syncs did, together.
     pub messages: Synced,
-    /// Conversations that couldn't be synced. The list's sync link stayed where it was, so the next catch-up lists
-    /// them again; the account's own notes ([`NOTES`]), which the list never brings, are synced again by it all the
-    /// same.
+    /// Conversations that couldn't be synced. Each is kept in the store to be synced again by every later catch-up
+    /// ([`Store::unsynced_conversations`]), so the list's sync link moves on past it; the account's own notes
+    /// ([`NOTES`]), which the list never brings, are synced again by it all the same.
     pub failed: Vec<ConversationFailed>,
+}
+
+impl CatchUpReport {
+    /// Whether nothing failed that trying again soon may change: every conversation was synced, or refused by the
+    /// service ([`ConversationFailed::is_refused`]). A refused one is still synced again by every later catch-up, but
+    /// keeps none due.
+    #[must_use]
+    pub fn caught_up(&self) -> bool {
+        self.failed.iter().all(ConversationFailed::is_refused)
+    }
 }
 
 /// A conversation a catch-up couldn't sync.
@@ -210,6 +236,20 @@ pub struct CatchUpReport {
 pub struct ConversationFailed {
     pub conversation: String,
     pub error: CatchUpError,
+}
+
+impl ConversationFailed {
+    /// Whether the service refused the conversation's read in a way the same read soon after won't change: 400, 403,
+    /// 404 (without a `Location`) or 410. A timeout, a 401, a throttle, a 5xx, a sync answer left for later
+    /// ([`CatchUpError::GapPending`]) or a store's failure is not.
+    #[must_use]
+    pub fn is_refused(&self) -> bool {
+        matches!(
+            &self.error,
+            CatchUpError::Read(ChatReadError::Http(HttpError::Status(answer)))
+                if matches!(answer.status(), 400 | 403 | 404 | 410)
+        )
+    }
 }
 
 /// What the reads of the service changed in the store since the last [`CatchUp::take_changes`]: every read alike (a
@@ -397,7 +437,7 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
     }
 
     /// Catches up if one is due ([`Gaps`]); `None` when none is. A catch-up that fails, or leaves a conversation
-    /// unsynced, keeps one due.
+    /// unsynced for a reason other than the service's refusal ([`CatchUpReport::caught_up`]), keeps one due.
     ///
     /// # Errors
     ///
@@ -411,7 +451,7 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
             return Ok(None);
         }
         let report = self.catch_up(store).await?;
-        if report.failed.is_empty() {
+        if report.caught_up() {
             gaps.caught_up();
         }
         Ok(Some(report))
@@ -426,9 +466,26 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
     /// [`CatchUpError::Store`] when the store fails to keep its sync link. A conversation that can't be synced is in
     /// [`CatchUpReport::failed`] instead.
     pub async fn catch_up(&self, store: &mut Store) -> Result<CatchUpReport, CatchUpError> {
-        let reads = ChatReads::new(&self.client);
         let kept = store.conversation_list_sync_link()?;
         let first = kept.is_none();
+        let (sync_link, conversations, mut report) = self.read_list(store, kept).await?;
+        // past every conversation it brought: each one is synced, or kept to be synced again
+        if self.sync_listed(store, &conversations, &mut report).await? {
+            store.set_conversation_list_sync_link(sync_link.as_deref(), (self.clock)())?;
+        }
+        self.catch_up_notes(store, &conversations, &mut report).await?;
+        log_report(&report, first);
+        Ok(report)
+    }
+
+    /// The conversation list from `kept`, its sync link (the whole list without one), every page of it: the list's
+    /// next sync link, the conversations, and a report counting them.
+    async fn read_list(
+        &self,
+        store: &mut Store,
+        kept: Option<String>,
+    ) -> Result<(Option<String>, Vec<chat::Conversation>, CatchUpReport), CatchUpError> {
+        let reads = ChatReads::new(&self.client);
         let mut list = match kept.as_deref() {
             Some(link) => self.waiting(store, reads.conversations_from(link)).await?,
             None => self.waiting(store, reads.conversations()).await?,
@@ -450,36 +507,48 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
             report.skipped += list.unreadable.len();
         }
         report.conversations = conversations.len();
-        for conversation in &conversations {
-            match self.catch_up_conversation(store, conversation).await {
-                Ok(synced) => report.messages.add(synced),
-                Err(error) => report.failed.push(ConversationFailed {
-                    conversation: conversation.id.clone(),
-                    error,
-                }),
+        Ok((sync_link, conversations, report))
+    }
+
+    /// Syncs every conversation the list brought, then every one an earlier catch-up kept to be synced again that it
+    /// didn't bring ([`CatchUp::resync`]); whether the store kept what became of each (when it didn't, the list's sync
+    /// link stays).
+    async fn sync_listed(
+        &self,
+        store: &mut Store,
+        conversations: &[chat::Conversation],
+        report: &mut CatchUpReport,
+    ) -> Result<bool, CatchUpError> {
+        // the conversations an earlier catch-up couldn't sync, taken before this one keeps any
+        let unsynced = store.unsynced_conversations()?;
+        let mut kept = true;
+        for conversation in conversations {
+            let result = self.catch_up_conversation(store, conversation).await;
+            kept &= settle(store, &conversation.id, result, report);
+        }
+        for id in unsynced {
+            if conversations.iter().any(|listed| listed.id == id) {
+                continue;
             }
+            let result = self.resync(store, &id).await;
+            kept &= settle(store, &id, result, report);
         }
-        if report.failed.is_empty() {
-            store.set_conversation_list_sync_link(sync_link.as_deref(), (self.clock)())?;
+        Ok(kept)
+    }
+
+    /// A conversation kept to be synced again that the list didn't bring: its messages, and a chat's members read
+    /// again as a thread. What the list said of it was stored when it brought it ([`CatchUp::catch_up_conversation`]).
+    async fn resync(&self, store: &mut Store, id: &str) -> Result<Synced, CatchUpError> {
+        let synced = self.sync_messages(store, id).await?;
+        let chat = store
+            .conversation(id)?
+            .is_some_and(|stored| matches!(stored.kind, ConversationKind::OneToOne | ConversationKind::Group));
+        if chat {
+            let reads = ChatReads::new(&self.client);
+            let thread = self.waiting(store, reads.thread(id)).await?;
+            self.store_members(store, &thread)?;
         }
-        self.catch_up_notes(store, &conversations, &mut report).await?;
-        log::info!(
-            "catch-up: {} conversation(s) listed ({} skipped), {} message(s) new, {} newer, {} failed{}",
-            report.conversations,
-            report.skipped,
-            report.messages.inserted,
-            report.messages.updated,
-            report.failed.len(),
-            if first { " (the first)" } else { "" }
-        );
-        for failed in &report.failed {
-            log::warn!(
-                "catch-up: conversation {} not synced: {}",
-                failed.conversation,
-                failed.error
-            );
-        }
-        Ok(report)
+        Ok(synced)
     }
 
     /// Syncs one conversation's messages from the service (see the module docs): the newest page the first time, what
@@ -493,6 +562,9 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
     /// own notes ([`NOTES`]) answered 404 ("Conversation was not found": nothing was ever written there) are none yet,
     /// not an error.
     pub async fn sync_messages(&self, store: &mut Store, conversation: &str) -> Result<Synced, CatchUpError> {
+        if conversation == DRAFTS {
+            return Ok(Synced::default());
+        }
         match self.sync_stored(store, conversation).await {
             Err(error) if conversation == NOTES && not_found(&error) => {
                 log::debug!("sync: the account's notes aren't there yet (404)");
@@ -512,23 +584,31 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         let Some((kept, link)) = kept.and_then(|state| state.sync_link.clone().map(|link| (state, link))) else {
             return self.first_read(store, &reads, conversation).await;
         };
+        // how far back this answer is read: to the end of the segment the kept sync link came with
+        let until = sync_bound(&kept);
         let mut synced = Synced::default();
         let kept = self.read_gap(store, kept, &mut synced).await?;
         let page = self.waiting(store, reads.messages_from(conversation, &link)).await?;
         synced.add(self.apply_page(store, conversation, &page)?);
+        let rest = page.backward_link().filter(|_| !reached(&page, until));
         let (left, walked) = self
-            .follow_back(store, conversation, page.backward_link(), MAX_PAGES - 1)
+            .follow_back(store, conversation, rest, MAX_PAGES - 1, Bound::Until(until))
             .await?;
         synced.add(walked);
         if left.is_some() && kept.gap_link.is_some() {
             // one gap link at a time: the earlier one's progress is kept, this answer is read again next time
             return Err(CatchUpError::GapPending);
         }
-        let gap_link = left.or_else(|| kept.gap_link.clone());
+        let (gap_link, gap_until) = match left {
+            Some(left) => (Some(left), Some(until)),
+            None => (kept.gap_link.clone(), kept.gap_until),
+        };
         let state = SyncState {
             sync_link: page.sync_state().map(str::to_owned).or(Some(link)),
+            sync_until: segment_end(&page).or(Some(until)),
             history_complete: kept.backward_link.is_none() && gap_link.is_none(),
             gap_link,
+            gap_until,
             updated: (self.clock)(),
             ..kept
         };
@@ -548,12 +628,15 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
             return Ok(kept);
         }
         let conversation = kept.conversation_id.clone();
+        let bound = gap_bound(&kept);
         let (gap_link, walked) = self
-            .follow_back(store, &conversation, kept.gap_link.as_deref(), MAX_PAGES)
+            .follow_back(store, &conversation, kept.gap_link.as_deref(), MAX_PAGES, bound)
             .await?;
         synced.add(walked);
         let state = SyncState {
             history_complete: kept.backward_link.is_none() && gap_link.is_none(),
+            sync_until: Some(sync_bound(&kept)),
+            gap_until: gap_link.as_ref().and(bound.until()),
             gap_link,
             updated: (self.clock)(),
             ..kept
@@ -596,18 +679,28 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         let page = self.waiting(store, reads.messages_from(conversation, link)).await?;
         let synced = self.apply_page(store, conversation, &page)?;
         let older = page.backward_link().map(str::to_owned);
+        // a state of an older schema keeps the bound its next sync answer falls back on, not the time of this write
+        let sync_until = Some(sync_bound(&kept));
         let state = match chain {
-            Chain::Gap => SyncState {
-                history_complete: kept.backward_link.is_none() && older.is_none(),
-                gap_link: older,
-                updated: (self.clock)(),
-                ..kept
-            },
+            Chain::Gap => {
+                // the gap ends where its page reached what the sync before it had
+                let bound = gap_bound(&kept);
+                let older = older.filter(|_| !bound.ends(&page, &synced));
+                SyncState {
+                    history_complete: kept.backward_link.is_none() && older.is_none(),
+                    sync_until,
+                    gap_until: older.as_ref().and(bound.until()),
+                    gap_link: older,
+                    updated: (self.clock)(),
+                    ..kept
+                }
+            }
             Chain::History => SyncState {
                 history_complete: kept.gap_link.is_none() && older.is_none(),
                 // a page without a time it can read is older than the one before it all the same
                 backward_oldest: oldest_arrival(&page).or(kept.backward_oldest),
                 backward_link: older,
+                sync_until,
                 updated: (self.clock)(),
                 ..kept
             },
@@ -679,7 +772,9 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         reads: &ChatReads<'_, C>,
         conversation: &str,
     ) -> Result<Synced, CatchUpError> {
-        let kept_gap = store.sync_state(conversation)?.and_then(|state| state.gap_link);
+        let (kept_gap, kept_gap_until) = store
+            .sync_state(conversation)?
+            .map_or((None, None), |state| (state.gap_link, state.gap_until));
         let page = self
             .waiting(store, reads.messages(conversation, self.page_size))
             .await?;
@@ -691,22 +786,28 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
             history_complete: backward_link.is_none() && kept_gap.is_none(),
             backward_link,
             backward_oldest: oldest_arrival(&page),
+            // a page without a time it can read bounds nothing: the next sync answer is read to its end
+            sync_until: Some(segment_end(&page).unwrap_or(0)),
             gap_link: kept_gap,
+            gap_until: kept_gap_until,
             updated: (self.clock)(),
         };
         store.set_sync_state(&state)?;
         Ok(synced)
     }
 
-    /// Follows a chain of `backwardLink`s from `from` to its end, for up to `budget` pages, whatever each page brings
-    /// (a page that changes nothing may still have older messages behind it the store never had); returns the link
-    /// left unfollowed, if any, and what the pages read did.
+    /// Follows a chain of `backwardLink`s from `from`, for up to `budget` pages, until a page ends it by `bound`
+    /// ([`Bound::ends`]: what is behind it is history the sync before had, or older) or the chain ends; under a time
+    /// bound whatever each page brings on the way (a page that changes nothing, its messages delivered already, may
+    /// still have messages the store never had behind it). Returns the link left unfollowed, if any, and what the
+    /// pages read did.
     async fn follow_back(
         &self,
         store: &mut Store,
         conversation: &str,
         from: Option<&str>,
         budget: usize,
+        bound: Bound,
     ) -> Result<(Option<String>, Synced), CatchUpError> {
         let reads = ChatReads::new(&self.client);
         let mut synced = Synced::default();
@@ -717,9 +818,13 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
                 return Ok((Some(next), synced));
             }
             let page = self.waiting(store, reads.messages_from(conversation, &next)).await?;
-            synced.add(self.apply_page(store, conversation, &page)?);
+            let applied = self.apply_page(store, conversation, &page)?;
+            synced.add(applied);
             read += 1;
-            link = page.backward_link().map(str::to_owned);
+            link = page
+                .backward_link()
+                .filter(|_| !bound.ends(&page, &applied))
+                .map(str::to_owned);
         }
         Ok((None, synced))
     }
@@ -780,8 +885,10 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         Ok(())
     }
 
-    /// One conversation of the list: kept, its messages synced when it is new or changed (before its new version is
-    /// stored, so a sync that fails is tried again), then its read horizon and members.
+    /// One conversation of the list: kept, its messages synced when it is new or changed, then what the list says of
+    /// it (its row, whether it is empty, its read horizon, its members) whether or not they synced. Messages that
+    /// failed keep the conversation to be synced again before its new version is stored, so neither a later catch-up
+    /// nor a later listing of it skips them.
     async fn catch_up_conversation(
         &self,
         store: &mut Store,
@@ -797,18 +904,37 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
             (Some(stored), Some(version)) => version > stored.version,
             _ => true,
         };
-        let synced = if changed || store.sync_state(&listed.id)?.is_none() {
-            self.sync_messages(store, &listed.id).await?
+        let messages = if changed || store.sync_state(&listed.id)?.is_none() {
+            self.sync_messages(store, &listed.id).await
         } else {
-            Synced::default()
+            Ok(Synced::default())
         };
+        if messages.is_err() {
+            store.set_unsynced(&listed.id)?;
+        }
+        self.store_listing(store, listed, stored.as_ref(), version)?;
+        let members = self.refresh_members(store, listed).await;
+        let synced = messages?;
+        members?;
+        Ok(synced)
+    }
+
+    /// What the list says of a conversation it brought: its row at the listed version, whether it is empty, the
+    /// account's read horizon.
+    fn store_listing(
+        &self,
+        store: &mut Store,
+        listed: &chat::Conversation,
+        stored: Option<&Conversation>,
+        version: Option<i64>,
+    ) -> Result<(), CatchUpError> {
         // an unreadable version keeps the stored row: as new as itself, only a later last activity is taken
-        let kept = stored.as_ref().map_or(0, |stored| stored.version);
+        let kept = stored.map_or(0, |stored| stored.version);
         let row = conversation_row(listed, version.unwrap_or(kept));
         let applied = store.upsert_conversation(&row)?;
         self.conversation_changed(&listed.id, applied);
         // the store takes a later last activity whatever the version (`Ignored` then), and that is a change too
-        if let Some(stored) = &stored
+        if let Some(stored) = stored
             && advances(row.last_activity, stored.last_activity)
         {
             self.changed(|changes| changes.conversation(&listed.id));
@@ -817,9 +943,7 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         if store.set_conversation_empty(&listed.id, listed.is_empty_conversation())? {
             self.changed(|changes| changes.conversation(&listed.id));
         }
-        self.store_horizon(store, listed)?;
-        self.refresh_members(store, listed).await?;
-        Ok(synced)
+        self.store_horizon(store, listed)
     }
 
     /// The account's own notes ([`NOTES`]), which no conversation list brings (when `listed` does, they were synced
@@ -977,6 +1101,57 @@ impl<C: Credentials, T: Transport<Error = HttpError> + Send> ConversationSync fo
     }
 }
 
+/// Logs what a catch-up did.
+fn log_report(report: &CatchUpReport, first: bool) {
+    log::info!(
+        "catch-up: {} conversation(s) listed ({} skipped), {} message(s) new, {} newer, {} failed{}",
+        report.conversations,
+        report.skipped,
+        report.messages.inserted,
+        report.messages.updated,
+        report.failed.len(),
+        if first { " (the first)" } else { "" }
+    );
+    for failed in &report.failed {
+        log::warn!(
+            "catch-up: conversation {} not synced: {}",
+            failed.conversation,
+            failed.error
+        );
+    }
+}
+
+/// Keeps what became of one conversation's sync in a catch-up: in `report`, and in the store as synced or to be synced
+/// again by every later catch-up. Whether the store kept it: when it couldn't, the list's sync link stays.
+fn settle(
+    store: &mut Store,
+    conversation: &str,
+    result: Result<Synced, CatchUpError>,
+    report: &mut CatchUpReport,
+) -> bool {
+    match result {
+        Ok(synced) => {
+            report.messages.add(synced);
+            // one that stays kept is only synced once more
+            if let Err(error) = store.set_synced(conversation) {
+                log::warn!("catch-up: conversation {conversation} synced, but still kept to be synced: {error}");
+            }
+            true
+        }
+        Err(error) => {
+            let kept = store.set_unsynced(conversation);
+            if let Err(kept) = &kept {
+                log::warn!("catch-up: conversation {conversation} can't be kept to be synced again: {kept}");
+            }
+            report.failed.push(ConversationFailed {
+                conversation: conversation.to_owned(),
+                error,
+            });
+            kept.is_ok()
+        }
+    }
+}
+
 /// Whether a read was answered 404 without a `Location` (with one it is a region hop, [`ChatReadError::RegionMoved`]).
 fn not_found(error: &CatchUpError) -> bool {
     matches!(error, CatchUpError::Read(ChatReadError::Http(HttpError::Status(answer))) if answer.status() == 404)
@@ -1082,6 +1257,75 @@ fn arrival_time(message: &chat::Message) -> Option<i64> {
 /// The oldest arrival time among a page's messages.
 fn oldest_arrival(page: &MessagePage) -> Option<i64> {
     page.messages.iter().filter_map(arrival_time).min()
+}
+
+/// How far back a page of a sync answer reaches (ms): the start of the complete segment the service reports with it
+/// (`lastCompleteSegmentStartTime`: the oldest message's id on the page, or the start of the segment it merged into),
+/// else the oldest arrival time on the page.
+fn reach(page: &MessagePage) -> Option<i64> {
+    known_i64(&page.last_complete_segment_start()).or_else(|| oldest_arrival(page))
+}
+
+/// Whether a page of a sync answer reached back to `until`, the end of the segment the sync before it was complete to:
+/// a page holds its messages newest first by arrival, so every message that arrived since is on it or on a page read
+/// before it, and what its `backwardLink` leads to is history the sync before had, or older.
+fn reached(page: &MessagePage, until: i64) -> bool {
+    reach(page).is_some_and(|start| start <= until)
+}
+
+/// The time a sync answer's page says the conversation is complete to (ms): its `lastCompleteSegmentEndTime`, else the
+/// newest version on the page; none for an empty page without the time.
+fn segment_end(page: &MessagePage) -> Option<i64> {
+    known_i64(&page.last_complete_segment_end()).or_else(|| {
+        page.messages
+            .iter()
+            .filter_map(|message| known_i64(&message.version))
+            .max()
+    })
+}
+
+/// How far back a sync answer of `state`'s sync link is read: its kept `sync_until`, or for a state written before it
+/// was kept, when the state was written (less [`CLOCK_SKEW_MS`]), which its sync answer was read before.
+fn sync_bound(state: &SyncState) -> i64 {
+    state.sync_until.unwrap_or_else(|| written_bound(state))
+}
+
+/// Where `state`'s gap ends: at its kept `gap_until`; a gap kept before that was, at a page whose messages were all
+/// stored already ([`Bound::Stored`]).
+fn gap_bound(state: &SyncState) -> Bound {
+    state.gap_until.map_or(Bound::Stored, Bound::Until)
+}
+
+/// Where a chain of a sync answer's pages ends (see the module docs).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Bound {
+    /// At a page that reached back to this time ([`reached`]).
+    Until(i64),
+    /// A gap kept before its bound was: at a page whose messages the store all had, as the messages the sync before
+    /// it stored are. Where the gap was cut its pages are messages missed, newer than those.
+    Stored,
+}
+
+impl Bound {
+    /// Whether `page`, stored as `applied` tells, ends the chain: what its `backwardLink` leads to isn't read.
+    fn ends(self, page: &MessagePage, applied: &Synced) -> bool {
+        match self {
+            Self::Until(until) => reached(page, until),
+            Self::Stored => !page.messages.is_empty() && applied.changed() == 0 && applied.unchanged > 0,
+        }
+    }
+
+    /// The time, when it is one.
+    fn until(self) -> Option<i64> {
+        match self {
+            Self::Until(until) => Some(until),
+            Self::Stored => None,
+        }
+    }
+}
+
+fn written_bound(state: &SyncState) -> i64 {
+    state.updated.saturating_sub(CLOCK_SKEW_MS)
 }
 
 fn known_i64(field: &Field<u64>) -> Option<i64> {

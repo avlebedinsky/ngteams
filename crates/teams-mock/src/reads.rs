@@ -52,9 +52,9 @@ pub(crate) fn conversations(state: &State, call: &Call<'_>, owner: &str) -> Resp
 
 /// `GET …/conversations/<chat>/messages`: newest first, a page of `pageSize`; with the mock's `syncState` the messages
 /// changed since it was handed out (all of them), or the page before a backward link's message. Every answer carries
-/// a sync link, and a `backwardLink` (the bundle's name; never captured) while older messages remain. A backward
-/// page's sync link is the one its first page handed out (the backward token carries its time), so a client keeping
-/// the latest sync link it got while paging back still gets what changed after the first page.
+/// a sync link, and a `backwardLink` while older messages remain. A backward page's sync link is the one its first
+/// page handed out (the backward token carries its time), so a client keeping the latest sync link it got while paging
+/// back still gets what changed after the first page.
 pub(crate) fn messages(state: &State, call: &Call<'_>, chat: &str) -> ResponseTemplate {
     let conversation = match member_of(state, chat, &call.caller) {
         Ok(conversation) => conversation,

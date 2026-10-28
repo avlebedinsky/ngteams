@@ -32,9 +32,16 @@ pub struct SyncState {
     /// The oldest arrival time (milliseconds) on the page `backward_link` came with: every message newer than that is
     /// stored, apart from a gap's. None when no time on those pages could be read.
     pub backward_oldest: Option<i64>,
+    /// How far back the next sync answer is read (ms): the `lastCompleteSegmentEndTime` the kept `sync_link` came
+    /// with. Every message that arrived up to then is stored, or kept in the gap. None when unknown (a state of an
+    /// older schema, or an answer without the time).
+    pub sync_until: Option<i64>,
     /// The rest of a sync answer that was cut short (its own `backwardLink`): what changed since the sync before it,
     /// not yet stored. Read before older history, and never in its place.
     pub gap_link: Option<String>,
+    /// How far back the gap is read (ms): the `sync_until` of the sync before the answer it is the rest of. None when
+    /// there is no gap, or it is unknown.
+    pub gap_until: Option<i64>,
     /// The whole history is stored: there is no older page and no gap.
     pub history_complete: bool,
     /// When this state was written, in milliseconds.
@@ -115,18 +122,21 @@ impl Store {
         let tx = self.conn.transaction()?;
         Self::require_conversation(&tx, &state.conversation_id)?;
         tx.execute(
-            "INSERT INTO conversation_sync (conversation_id, sync_link, backward_link, backward_oldest, gap_link,
-                 history_complete, updated)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+            "INSERT INTO conversation_sync (conversation_id, sync_link, backward_link, backward_oldest, sync_until,
+                 gap_link, gap_until, history_complete, updated)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT DO UPDATE SET sync_link = excluded.sync_link, backward_link = excluded.backward_link,
-                 backward_oldest = excluded.backward_oldest, gap_link = excluded.gap_link,
+                 backward_oldest = excluded.backward_oldest, sync_until = excluded.sync_until,
+                 gap_link = excluded.gap_link, gap_until = excluded.gap_until,
                  history_complete = excluded.history_complete, updated = excluded.updated",
             params![
                 state.conversation_id,
                 state.sync_link,
                 state.backward_link,
                 state.backward_oldest,
+                state.sync_until,
                 state.gap_link,
+                state.gap_until,
                 state.history_complete,
                 state.updated
             ],
@@ -144,7 +154,8 @@ impl Store {
         Ok(self
             .conn
             .query_row(
-                "SELECT sync_link, backward_link, backward_oldest, gap_link, history_complete, updated
+                "SELECT sync_link, backward_link, backward_oldest, sync_until, gap_link, gap_until, history_complete,
+                     updated
                  FROM conversation_sync WHERE conversation_id = ?1",
                 [conversation_id],
                 |row| {
@@ -153,9 +164,11 @@ impl Store {
                         sync_link: row.get(0)?,
                         backward_link: row.get(1)?,
                         backward_oldest: row.get(2)?,
-                        gap_link: row.get(3)?,
-                        history_complete: row.get(4)?,
-                        updated: row.get(5)?,
+                        sync_until: row.get(3)?,
+                        gap_link: row.get(4)?,
+                        gap_until: row.get(5)?,
+                        history_complete: row.get(6)?,
+                        updated: row.get(7)?,
                     })
                 },
             )
@@ -189,5 +202,50 @@ impl Store {
             })
             .optional()?;
         Ok(link.flatten())
+    }
+
+    /// Keeps `conversation_id` to be synced again by every later catch-up, until [`Store::set_synced`].
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::UnknownConversation`] when the conversation isn't stored, [`StoreError::Sqlite`] when the
+    /// write fails.
+    pub fn set_unsynced(&mut self, conversation_id: &str) -> Result<(), StoreError> {
+        let tx = self.conn.transaction()?;
+        Self::require_conversation(&tx, conversation_id)?;
+        tx.execute(
+            "INSERT INTO unsynced_conversations (conversation_id) VALUES (?1) ON CONFLICT DO NOTHING",
+            [conversation_id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// `conversation_id` was synced: no later catch-up has to sync it again. Whether it had been kept to be.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] when the write fails.
+    pub fn set_synced(&mut self, conversation_id: &str) -> Result<bool, StoreError> {
+        let removed = self.conn.execute(
+            "DELETE FROM unsynced_conversations WHERE conversation_id = ?1",
+            [conversation_id],
+        )?;
+        Ok(removed > 0)
+    }
+
+    /// The conversations kept to be synced again ([`Store::set_unsynced`]), by id.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] when the read fails.
+    pub fn unsynced_conversations(&self) -> Result<Vec<String>, StoreError> {
+        let mut statement = self
+            .conn
+            .prepare("SELECT conversation_id FROM unsynced_conversations ORDER BY conversation_id")?;
+        let ids = statement
+            .query_map([], |row| row.get(0))?
+            .collect::<Result<Vec<String>, _>>()?;
+        Ok(ids)
     }
 }

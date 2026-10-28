@@ -238,7 +238,9 @@ fn the_topics_migration_takes_the_chats_without_a_topic_again() -> Result<(), St
     // the store as schema 9 left it
     let raw = rusqlite::Connection::open(store_path(&dir)).expect("open directly");
     raw.execute_batch(
-        "DROP TABLE favorites; DROP TABLE favorites_read; ALTER TABLE conversations DROP COLUMN empty;
+        "DROP TABLE unsynced_conversations; ALTER TABLE conversation_sync DROP COLUMN sync_until;
+         ALTER TABLE conversation_sync DROP COLUMN gap_until;
+         DROP TABLE favorites; DROP TABLE favorites_read; ALTER TABLE conversations DROP COLUMN empty;
          PRAGMA user_version = 9;",
     )
     .expect("back to schema 9");
@@ -971,7 +973,9 @@ fn sync_state_is_kept_per_conversation() {
         sync_link: Some("https://chat.example.invalid/v1/sync?syncState=one".to_owned()),
         backward_link: Some("https://chat.example.invalid/v1/back?page=2".to_owned()),
         backward_oldest: Some(1_760_000_000_000),
+        sync_until: Some(1_760_000_500_000),
         gap_link: Some("https://chat.example.invalid/v1/back?page=gap".to_owned()),
+        gap_until: Some(1_760_000_100_000),
         history_complete: false,
         updated: 100,
     };
@@ -980,7 +984,9 @@ fn sync_state_is_kept_per_conversation() {
     let done = SyncState {
         backward_link: None,
         backward_oldest: None,
+        sync_until: None,
         gap_link: None,
+        gap_until: None,
         history_complete: true,
         updated: 200,
         ..state.clone()
@@ -994,6 +1000,27 @@ fn sync_state_is_kept_per_conversation() {
             ..state
         })
         .expect_err("unknown");
+    assert!(matches!(error, StoreError::UnknownConversation(_)));
+}
+
+#[test]
+fn conversations_kept_to_be_synced_again_stay_until_synced() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = with_chat(&dir).expect("a store with the chat");
+    store
+        .upsert_conversation(&conversation(GROUP, ConversationKind::Group, 1))
+        .expect("group");
+    assert!(store.unsynced_conversations().expect("none yet").is_empty());
+    store.set_unsynced(GROUP).expect("group");
+    store.set_unsynced(CHAT).expect("chat");
+    store.set_unsynced(CHAT).expect("chat again");
+    let mut expected = vec![CHAT.to_owned(), GROUP.to_owned()];
+    expected.sort();
+    assert_eq!(store.unsynced_conversations().expect("read"), expected);
+    assert!(store.set_synced(CHAT).expect("synced"));
+    assert!(!store.set_synced(CHAT).expect("synced again"));
+    assert_eq!(store.unsynced_conversations().expect("read"), [GROUP]);
+    let error = store.set_unsynced("19:unknown@thread.v2").expect_err("unknown");
     assert!(matches!(error, StoreError::UnknownConversation(_)));
 }
 
@@ -1528,6 +1555,8 @@ fn a_sync_state_of_the_second_schema_is_migrated_without_a_gap_or_a_reach() {
     assert_eq!(state.backward_link.as_deref(), Some("https://chat.example.invalid/b"));
     // how far its history read reached isn't known: a check reads on from the link
     assert_eq!((state.backward_oldest, state.gap_link), (None, None));
+    // nor how far back its next sync answer is read: the sync falls back on when the state was written
+    assert_eq!((state.sync_until, state.gap_until), (None, None));
 }
 
 #[test]

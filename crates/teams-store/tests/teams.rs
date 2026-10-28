@@ -81,7 +81,9 @@ fn sync_state(conversation: &str) -> SyncState {
         sync_link: Some("https://example.test/sync".to_owned()),
         backward_link: None,
         backward_oldest: None,
+        sync_until: None,
         gap_link: None,
+        gap_until: None,
         history_complete: true,
         updated: 1,
     }
@@ -173,7 +175,9 @@ fn the_migration_starts_the_channels_syncs_again_and_keeps_the_chats() -> Result
     // the store as schema 8 left it
     let raw = rusqlite::Connection::open(store_path(&dir)).expect("open directly");
     raw.execute_batch(
-        "DROP TABLE reply_roots; DROP TABLE team_channels; DROP TABLE teams; DROP TABLE teams_read;
+        "DROP TABLE unsynced_conversations; ALTER TABLE conversation_sync DROP COLUMN sync_until;
+         ALTER TABLE conversation_sync DROP COLUMN gap_until;
+         DROP TABLE reply_roots; DROP TABLE team_channels; DROP TABLE teams; DROP TABLE teams_read;
          DROP TABLE favorites; DROP TABLE favorites_read; ALTER TABLE conversations DROP COLUMN empty;
          PRAGMA user_version = 8;",
     )
@@ -244,7 +248,9 @@ fn the_favourites_migration_keeps_the_teams_but_has_them_read_again() -> Result<
     // the store as schema 10 left it
     let raw = rusqlite::Connection::open(store_path(&dir)).expect("open directly");
     raw.execute_batch(
-        "DROP TABLE favorites; DROP TABLE favorites_read; ALTER TABLE conversations DROP COLUMN empty;
+        "DROP TABLE unsynced_conversations; ALTER TABLE conversation_sync DROP COLUMN sync_until;
+         ALTER TABLE conversation_sync DROP COLUMN gap_until;
+         DROP TABLE favorites; DROP TABLE favorites_read; ALTER TABLE conversations DROP COLUMN empty;
          PRAGMA user_version = 10;",
     )
     .expect("back to schema 10");

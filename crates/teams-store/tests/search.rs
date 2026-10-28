@@ -91,7 +91,9 @@ fn the_migration_creates_the_index_and_fills_nothing() -> Result<(), StoreError>
     // the store as schema 7 left it: no index, the message there
     let raw = rusqlite::Connection::open(store_path(&dir)).expect("open directly");
     raw.execute_batch(
-        "DROP TABLE message_search; DROP TABLE search_entries; DROP TABLE reply_roots; DROP TABLE team_channels;
+        "DROP TABLE unsynced_conversations; ALTER TABLE conversation_sync DROP COLUMN sync_until;
+         ALTER TABLE conversation_sync DROP COLUMN gap_until;
+         DROP TABLE message_search; DROP TABLE search_entries; DROP TABLE reply_roots; DROP TABLE team_channels;
          DROP TABLE teams; DROP TABLE teams_read; DROP TABLE favorites; DROP TABLE favorites_read;
          ALTER TABLE conversations DROP COLUMN empty; PRAGMA user_version = 7;",
     )
@@ -100,7 +102,7 @@ fn the_migration_creates_the_index_and_fills_nothing() -> Result<(), StoreError>
 
     let store = Store::open(&store_path(&dir))?;
     assert_eq!(store.schema_version()?, SCHEMA_VERSION);
-    assert_eq!(SCHEMA_VERSION, 11);
+    assert_eq!(SCHEMA_VERSION, 12);
     let raw = rusqlite::Connection::open(store_path(&dir)).expect("open directly");
     let tables: Vec<String> = raw
         .prepare("SELECT name FROM sqlite_master WHERE name IN ('message_search', 'search_entries') ORDER BY name")

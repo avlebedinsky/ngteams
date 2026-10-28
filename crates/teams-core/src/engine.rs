@@ -22,7 +22,8 @@
 //!   conversation the store doesn't know adds it first (a thread read), and the conversation is synced after. Typing
 //!   is only an event, never stored; a delivery is never answered (the push channel can't).
 //! - **Catch-up** ([`Gaps`]): after every connect of the push channel when one is due (on start, and after every
-//!   disconnect), after a message-loss report about the chats (acknowledged once a catch-up ran with nothing failed),
+//!   disconnect), after a message-loss report about the chats (acknowledged once a catch-up ran with nothing failed
+//!   but what the service refused, [`CatchUpReport::caught_up`]),
 //!   and on [`EngineRequests::sync`]. One that failed is tried again from the tick, [`EngineOptions::catch_up_retry`]
 //!   later, while the channel is up; so is a delivery that didn't reach the store (its conversation couldn't be
 //!   added or synced, the store failed), and a sync after a write that failed: what they would have stored is missed
@@ -39,8 +40,8 @@
 //!   denied one) goes out again only by the explicit [`EngineRequests::resend`]. The requests are taken in the order
 //!   they were made, but a query (and a person, the teams and the chat listing, from the store alone, their own
 //!   background read started afterwards) is answered also while a read of the catch-up waits on the service, from the
-//!   store as it stands (`inbox`): a catch-up that runs for minutes (hundreds of conversations, channels whose sync
-//!   pages back through their whole history) doesn't hold up a view's reads, while every other request waits for it.
+//!   store as it stands (`inbox`): a catch-up that runs for minutes (hundreds of conversations, a page of 200 channel
+//!   posts taking seconds) doesn't hold up a view's reads, while every other request waits for it.
 //! - **People** ([`EngineRequests::person`]): someone's name and picture as the views show them, from the store, and
 //!   read in the background when the store's are missing or old ([`crate::profiles`]: Graph, else the middle tier's
 //!   profile lookup, a read sent as a `POST`); each change stored is told as [`Event::Profile`].
@@ -1712,7 +1713,7 @@ where
         self.arrived(&[]);
         let result = result?;
         match &result {
-            Ok(report) if report.failed.is_empty() => {
+            Ok(report) if report.caught_up() => {
                 self.retry_at = None;
                 for loss in self.losses.drain(..) {
                     loss.caught_up();

@@ -71,7 +71,7 @@ pub use presence::{
 pub use profiles::{MAX_LOOKUPS, NameFrom, PROFILE_MAX_AGE, PROFILE_RETRY, Person};
 pub use search::{Backfill, INDEX_BATCH, search_text};
 pub use sync::{
-    CLOCK_SKEW_MS, CatchUp, CatchUpError, CatchUpReport, Changes, ConversationFailed, Gaps, MAX_PAGES, NOTES,
+    CLOCK_SKEW_MS, CatchUp, CatchUpError, CatchUpReport, Changes, ConversationFailed, DRAFTS, Gaps, MAX_PAGES, NOTES,
     StoredMessage, Synced,
 };
 pub use teams::{ChatListing, READING_TEAMS, TEAMS_MAX_AGE, TEAMS_RETRY, TeamsReadError};

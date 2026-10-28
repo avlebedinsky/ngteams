@@ -328,7 +328,8 @@ impl MessagePage {
         link(&self.metadata, "syncState")
     }
 
-    /// `_metadata.backwardLink`: the older messages (the bundle's name; never captured).
+    /// `_metadata.backwardLink`: the next older page (seen on a newest page with more behind it, and on a sync answer
+    /// longer than a page: `docs/protocol/chat.md`, "Sync answers").
     #[must_use]
     pub fn backward_link(&self) -> Option<&str> {
         link(&self.metadata, "backwardLink")
@@ -340,13 +341,14 @@ impl MessagePage {
         link(&self.metadata, "forwardLink")
     }
 
-    /// `_metadata.lastCompleteSegmentStartTime` (ms; 0 seen on the read around a time).
+    /// `_metadata.lastCompleteSegmentStartTime` (ms): how far back the complete segment reaches, on a page of a sync
+    /// answer its oldest message's id, or the start of the segment it merged into (0 seen on the read around a time).
     #[must_use]
     pub fn last_complete_segment_start(&self) -> Field<u64> {
         number_field(self.metadata.get("lastCompleteSegmentStartTime"))
     }
 
-    /// `_metadata.lastCompleteSegmentEndTime` (ms).
+    /// `_metadata.lastCompleteSegmentEndTime` (ms): the newest version the segment is complete to.
     #[must_use]
     pub fn last_complete_segment_end(&self) -> Field<u64> {
         number_field(self.metadata.get("lastCompleteSegmentEndTime"))
