@@ -29,6 +29,7 @@ use teams_fence::Mri;
 use teams_media::devices::pattern::TestPattern;
 use teams_store::{Applied, ConversationKind, Member};
 use teams_ui::call_alert::{CallAlert, notice_of};
+use teams_ui::call_view;
 use teams_ui::calls::CallKind;
 use teams_ui::notify::NoticeKind;
 use teams_ui::ringtone::{Ringer, Ringtone};
@@ -924,6 +925,73 @@ fn the_camera_is_off_when_a_call_starts_and_goes_on_and_off_by_its_key_its_butto
         kinds(lines(&written, "call", "refused").last().unwrap()),
         ["camera", "no-video"]
     );
+    no_name_in(&written);
+}
+
+#[test]
+fn the_test_call_shows_as_a_call_with_echo_its_camera_and_its_self_view() {
+    let feed = VideoFeed::new();
+    let rig = video_calling(&feed);
+    let (trace, written) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), trace);
+    registered(&rig);
+    cx.simulate_keystrokes("ctrl-k");
+    cx.simulate_input("test call");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(actions(&rig), [CallAction::TestCall { echo: Mri::new(ECHO) }]);
+    status(&rig, 1, CallStatus::Placing);
+    status(&rig, 1, CallStatus::Connected);
+
+    // Echo is the other participant, as a 1:1 call's other member is
+    let bar = cx.update(|_, cx| shell.read(cx).call_bar().clone());
+    let participants = cx.update(|_, cx| bar.read(cx).participants().to_vec());
+    assert_eq!(participants, [(ECHO.to_owned(), call_view::ECHO_IN_CALL.into())]);
+    let up = lines(&written, "in-call", "shown").last().cloned().unwrap();
+    assert_eq!(kinds(&up), ["test-call", "connected", "unmuted", "camera-off"]);
+    assert_eq!(up["people"], serde_json::json!([ECHO]));
+    for control in ["call-mute", "call-camera", "call-hang-up", "in-call-participants"] {
+        assert!(drawn(cx, control), "{control}");
+    }
+
+    // the roster names the echo without a name: a cell of its own; the camera turns on and the self view shows
+    rig.send(Event::CallParticipants {
+        call: call(1),
+        view: CallView {
+            participants: vec![CallParticipant {
+                mri: ECHO.to_owned(),
+                name: None,
+                video_on: false,
+                line: None,
+                speaking: true,
+            }],
+            speaking: false,
+            hearing: false,
+        },
+    });
+    click(cx, "call-camera");
+    assert_eq!(
+        actions(&rig)[1],
+        CallAction::Camera {
+            call: call(1),
+            on: true
+        }
+    );
+    let pattern = TestPattern::new(320, 180);
+    let output: &dyn VideoOutput = &feed;
+    output.preview().unwrap().show(&pattern.frame(1)).unwrap();
+    cx.run_until_parked();
+    for shown in [
+        "call-grid",
+        "call-participant-0",
+        "call-participant-self",
+        "video-tile-self",
+    ] {
+        assert!(drawn(cx, shown), "{shown}");
+    }
+    let cells = lines(&written, "call-participant", "shown");
+    assert_eq!(cells.last().unwrap()["people"], serde_json::json!([ECHO]));
     no_name_in(&written);
 }
 

@@ -209,7 +209,7 @@ pub enum CallActionError {
     /// No media runs for that call.
     #[error("no media runs for that call")]
     NoMedia,
-    /// That call's media carries no video (the test call's, or one whose codec didn't load).
+    /// That call's media carries no video (one whose codec didn't load).
     #[error("that call carries no video")]
     NoVideo,
     /// The call's media couldn't be set up, or its SDP made.
@@ -1124,8 +1124,10 @@ where
     /// Sets up the media of a start, a join or an answer; the action goes once it is.
     fn set_up(&mut self, act: Act, reply: Waiting) {
         let busy = self.preparing.is_some() || self.live.is_some();
-        // a 1:1 call takes its main video line; a group call's (placed, joined, answered) its main line and receiving
-        // lines; the test call's media takes none
+        // a 1:1 call takes its main video line, and so does the test call (its camera turned by a renegotiation, at
+        // the link its acceptance hands out, as a 1:1 call's; it hands out no `updateMediaDescriptions` link, so its
+        // lines couldn't be described as a group call's are); a group call's (placed, joined, answered) its main line
+        // and receiving lines
         let (answering, offer, video) = match &act {
             Act::Answer(call) => {
                 let ringing = self.calls.current() == Some((*call, Some(CallState::Offered)));
@@ -1139,9 +1141,12 @@ where
             }
             _ if busy || self.calls.current().is_some() => return refuse(reply, CallActionError::Busy),
             Act::Join(chat) if !self.calls.joinable(chat) => return refuse(reply, CallError::NotJoinable.into()),
-            Act::Place(Placement::Chat { group_chat: None, .. }) => (None, None, VideoKind::OneToOne),
+            Act::Place(Placement::Chat { group_chat: None, .. } | Placement::TestCall { .. }) => {
+                (None, None, VideoKind::OneToOne)
+            }
             Act::Place(Placement::Chat { .. }) | Act::Join(_) => (None, None, VideoKind::Group),
-            _ => (None, None, VideoKind::None),
+            // only a start, a join or an answer sets its media up
+            _ => return refuse(reply, CallError::NotNow.into()),
         };
         if answering.is_some() && offer.is_none() {
             return refuse(

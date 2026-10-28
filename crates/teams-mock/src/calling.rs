@@ -14,9 +14,9 @@
 //!   callee's answer, and every other endpoint of the callee that attached gets the call's end: answered elsewhere),
 //!   `reject` (in a 1:1 call the caller is forwarded to the callee's voicemail, which accepts, as captured; with the
 //!   media on, the voicemail's peer answers the caller's offer).
-//! - **The call**: the acceptance's acknowledgement, the endpoint metadata, `add` (the echo's success delivered), and
-//!   `leave` (while it rings, a cancel: every attached callee endpoint gets the call's end with the leave's code; once
-//!   up, the call's end to everyone in it). A join (`POST conv/<id>`) with media enters a running call and is accepted
+//! - **The call**: the acceptance's acknowledgement, the endpoint metadata, `add` (the echo's success and its roster
+//!   entry delivered), and `leave` (while it rings, a cancel: every attached callee endpoint gets the call's end with
+//!   the leave's code; once up, the call's end to everyone in it). A join (`POST conv/<id>`) with media enters a running call and is accepted
 //!   by its mixer; without media it subscribes only.
 //! - **A group call's roster** ([`crate::roster`]): delivered to everyone in the call as parties come, leave, and turn
 //!   their cameras on (`updateMediaDescriptions`); in a group call a `leave` takes only its party out, and the call
@@ -563,7 +563,10 @@ fn conversation_op(
                 .pointer("/links/addParticipantSuccess")
                 .and_then(Value::as_str)
                 .map(str::to_owned);
+            let echo = echo.to_owned();
             state.call_back(link.as_deref(), success);
+            // the echo is in the call: its roster says so (as captured)
+            roster::enter(state, index, &echo, None);
         }
         "updateEndpointMetadata" | "updateEndpointState" | "updateParticipantProperties" => {}
         _ => return None,

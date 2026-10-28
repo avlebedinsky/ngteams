@@ -269,6 +269,13 @@ pseudo-random pattern, the speaker is recorded, and the recording is searched fo
   ends before the echo plays anything back.
 - **The end.** In one run the call controller delivered `call/end` (`CallEndReasonLocalUserInitiated`) for our `leave`
   before the `leave`'s own `204`; the native client ends a call it is leaving as hung up whichever comes first.
+- **Its camera, as a 1:1 call's** (one live run of 2026-10-28: `teams-headless a call echo --video --camera-after 3
+  --seconds 45`, the lab build, account a). The start offers a 1:1 call's main video line, receiving; the acceptance
+  hands out `mediaRenegotiation` but no `updateMediaDescriptions`, so the camera goes on as in a 1:1 call: a
+  `renegotiate` with the line `sendrecv`, which the media controller answered at the renegotiation's `mediaAnswer`
+  callback, then the answer's receipt and `acknowledge`. The camera's frames went out (628 sent), the echo sent no
+  video, and it still played the tone back (round trip p50 16.7 s). Its roster entry (`active`, an endpoint in the
+  call, no display name) came once the `add` went. Nothing was denied.
 
 The three runs that heard the tone back (load average 2–4), each onset of the keyed tone in the stretch the echo
 recorded, from going into the microphone to coming out of the speaker, on one clock:

@@ -1,13 +1,14 @@
 //! A 1:1 call's video (M3 Task 18), on the mock and its loopback peer (H.264 the bundled source's): the camera off
 //! when the call starts and turned on only by the account's action, as a renegotiation of the call's media the peer
-//! answers; the peer's video shown once its renegotiation offers it; the camera turned off stops what is sent. A group
-//! call's video is `group`'s.
+//! answers; the peer's video shown once its renegotiation offers it; the camera turned off stops what is sent; the test
+//! call's camera as a 1:1 call's, the media controller's peer answering. A group call's video is `group`'s.
 
 use std::time::Duration;
 
 use crate::support::{A_TONE, B_TONE, Lab, wait_until};
 use teams_core::{CallAction, CallStatus, End};
-use teams_mock::{AB_CHAT, LAB_A, LAB_B, LAB_C};
+use teams_fence::Mri;
+use teams_mock::{AB_CHAT, ECHO, LAB_A, LAB_B, LAB_C};
 
 /// Frames a side must have decoded of the other's test pattern.
 const FRAMES: u64 = 20;
@@ -62,6 +63,49 @@ async fn the_camera_goes_on_by_the_account_s_action_and_both_ways_carry_video() 
         "on, then off: {sent:?}"
     );
     assert!(b.log.denials().is_empty(), "{:#?}", b.log.denials());
+}
+
+#[tokio::test]
+async fn the_test_call_s_camera_goes_on_as_a_one_to_one_call_s_and_shows_the_self_view() {
+    let lab = Lab::start().await;
+    let mut a = lab.account(LAB_A, A_TONE).await;
+    let requests = a.handle.requests();
+    let call = requests
+        .call(CallAction::TestCall { echo: Mri::new(ECHO) })
+        .await
+        .unwrap();
+    a.status(call, &CallStatus::Connected).await;
+    let id = lab.last_call();
+    assert_eq!(
+        a.video.preview.counts().frames,
+        0,
+        "the camera is off when the test call starts"
+    );
+
+    // a turns its camera on: a renegotiation the media controller's peer answers, a's frames reach it
+    assert_eq!(
+        requests.call(CallAction::Camera { call, on: true }).await.unwrap(),
+        call
+    );
+    wait_until(|| lab.mock.peer_stats(&id, LAB_A).unwrap().video.shown >= FRAMES).await;
+    assert!(a.video.preview.counts().frames >= FRAMES, "a's self view");
+
+    requests.call(CallAction::HangUp { call }).await.unwrap();
+    assert_eq!(a.ended(call).await, End::HungUp);
+    let sent = lab.sent_by(LAB_A);
+    assert_eq!(
+        sent,
+        [
+            "start",
+            "updateEndpointMetadata",
+            "add",
+            "renegotiate",
+            "acknowledge",
+            "leave"
+        ],
+        "the test call's writes, its camera's renegotiation among them"
+    );
+    assert!(a.log.denials().is_empty(), "{:#?}", a.log.denials());
 }
 
 #[tokio::test]

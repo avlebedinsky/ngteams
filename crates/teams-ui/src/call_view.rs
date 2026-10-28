@@ -4,7 +4,7 @@
 //!   invitation gives it, "Someone" without one; a group call's chat by its row's name), Answer in Teams' green and
 //!   Decline in its red. The ringtone and the notification are the desktop's ([`crate::call_alert`]).
 //! - **The in-call bar** while a call is up or being set up: who it is with (a chat's members other than the account,
-//!   by their names; an invitation's caller; the test call's echo), its state (calling, ringing, connecting, connected
+//!   by their names; an invitation's caller; the test call's echo, "Echo", as a 1:1 call's other member), its state (calling, ringing, connecting, connected
 //!   with its duration, reconnecting, taken by voicemail), the microphone and the camera (a build that shows video) as
 //!   icons whose tooltips say Mute or Unmute and Turn camera on or off, Leave in Teams' red, and why an ask went
 //!   nowhere while it is up; under it, once the call's roster told who is in it, **the participant grid**: a cell per
@@ -44,6 +44,10 @@ use crate::shell::{AnswerCall, DeclineCall, HangUpCall, ToggleCameraCall, Toggle
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 use crate::video::{Tile, Tiles, VideoFeed};
+
+/// What the test call's echo service is called in a call, as Teams' call window names it (its roster gives it no
+/// name). Its chat's row takes the app's own "Test call" instead ([`chat_list::ECHO`]).
+pub const ECHO_IN_CALL: &str = "Echo";
 
 /// How often the duration of a connected call is drawn again.
 const TICK: Duration = Duration::from_secs(1);
@@ -178,10 +182,15 @@ impl CallBar {
     }
 
     /// Reads who `active` is with: an invitation's caller as it named itself; a chat's members other than the
-    /// account, by the names the engine has (or their MRIs); nobody for the test call.
+    /// account, by the names the engine has (or their MRIs); the echo service for the test call, as Teams names it.
     fn read_participants(&mut self, active: &ActiveCall, cx: &mut Context<Self>) {
         let call = active.id;
         self.participants = Some((call, Vec::new()));
+        if active.kind == CallKind::TestCall {
+            let echo = self.calls.read(cx).echo().map(|echo| echo.as_str().to_owned());
+            self.participants = Some((call, echo.map(|echo| (echo, ECHO_IN_CALL.into())).into_iter().collect()));
+            return;
+        }
         if let Some(caller) = &active.caller {
             let name = active.caller_name.clone().unwrap_or_else(|| SOMEONE.to_owned());
             self.participants = Some((call, vec![(caller.as_str().to_owned(), name.into())]));
@@ -369,7 +378,7 @@ impl CallBar {
     /// Who the call is with, as its title.
     fn title(&self, active: &ActiveCall, cx: &Context<Self>) -> SharedString {
         match active.kind {
-            CallKind::TestCall => "Test call".into(),
+            CallKind::TestCall => ECHO_IN_CALL.into(),
             CallKind::Incoming => {
                 let caller = active.caller_name.clone().unwrap_or_else(|| SOMEONE.to_owned());
                 match &active.chat {

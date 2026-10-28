@@ -4,9 +4,9 @@
 //! main video]}}}}}, "type": "Delta", "sequenceNumber"}`. A delivery lists only the party that changed, as the
 //! service's do, so a client knows the others only from what it was told before.
 //!
-//! A 1:1 call's roster (the test call has none here) lists its endpoints' `call` with no media streams, as captured,
-//! and tells nobody anything before the callee answered; then both parties and every watcher are told both, and only
-//! the changes after.
+//! A 1:1 call's roster lists its endpoints' `call` with no media streams, as captured, and tells nobody anything before
+//! the callee answered; then both parties and every watcher are told both, and only the changes after. The test call's
+//! tells each change at once, as captured: its caller from its start, the echo once its `add` went (no display name).
 //!
 //! - **Parties**: the caller from its start, a callee once it answered, a joiner once it joined with media; each with
 //!   the callback its start, `attach` or join handed out.
@@ -48,15 +48,12 @@ pub(crate) fn link_of(body: &Value) -> Option<String> {
     }
 }
 
-/// `mri` is in call `index` (again), told at `link`: in a group call everyone is told the change; in a 1:1 call
-/// (never the test call's) nobody is told before the callee answered, then everyone everything.
+/// `mri` is in call `index` (again), told at `link`: in a group call and the test call everyone is told the change; in
+/// a 1:1 call nobody is told before the callee answered, then everyone everything.
 pub(crate) fn enter(state: &mut State, index: usize, mri: &str, link: Option<String>) {
     let Some(call) = state.calling.calls.get_mut(index) else {
         return;
     };
-    if call.test_call {
-        return;
-    }
     call.roster.retain(|party| party.mri != mri);
     call.roster.push(Party {
         mri: mri.to_owned(),
@@ -64,7 +61,7 @@ pub(crate) fn enter(state: &mut State, index: usize, mri: &str, link: Option<Str
         active: true,
         video_on: false,
     });
-    if call.group_chat.is_some() {
+    if call.group_chat.is_some() || call.test_call {
         send(state, index, Some(mri));
     } else if call.phase == CallPhase::Connected {
         send(state, index, None);

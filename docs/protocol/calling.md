@@ -234,7 +234,8 @@ A 1:1 call's video in the native client (M3 Task 18), as the web client's camera
   first video line that isn't the sharing line, then that line for the call's life) and answers it `recvonly` while
   the camera is off, `sendrecv` while it is on; the sharing line and every other video line are answered rejected
   (`m=video 0 RTP/SAVP 34`). A group call's video lines (a start's in a group chat, a join's, a group call
-  answered) follow "Group video" below; the test call's media takes no video line.
+  answered) follow "Group video" below; the test call's media takes a 1:1 call's main video line, its camera turned
+  on by a renegotiation the media controller answers ([calling-echo.md](calling-echo.md#the-native-echo-call)).
 - **H.264** is offered as constrained baseline (`profile-level-id=42e01f`, `packetization-mode=1`) on the payload
   type a group call's mixer gives it, `107`, with its retransmissions on `99` (the web client offers `108` and `109`;
   the mixer answers any offer with its own numbers and takes only those, "Group video" below); an offer we answer

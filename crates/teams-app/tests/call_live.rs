@@ -13,9 +13,11 @@
 //! **The cases** (`CALL_LIVE_PHASES`, comma-separated, picks some; all by default, in this order; `web` is
 //! `web-answer` and `web-place`; `CALL_LIVE_APP_LOG` sets the apps' diagnostic log level, `TEAMS_APP_LOG`):
 //! - `test-call`: a headset plugged into a's sandbox plays a keyed tone (990 Hz on and off in 200 ms slots of a shift
-//!   register's pattern); a's test call ("Test call" in the switcher) is held until the echo service played back what
-//!   it recorded, and the tone must come back in a's recording: each 2 s of it lined up with what the headset played,
-//!   on the one clock, gives a delay, and the one at least three blocks agree on is the echo's round trip.
+//!   register's pattern); a's test call ("Test call" in the switcher) shows the echo's cell, its camera goes on
+//!   (Ctrl+Shift+O) and the self view is presented, as in a chat's call; the call is held until the echo service
+//!   played back what it recorded, and the tone must come back in a's recording: each 2 s of it lined up with what
+//!   the headset played, on the one clock, gives a delay, and the one at least three blocks agree on is the echo's
+//!   round trip.
 //! - `web`: b's web client and a's app call each other, both ways, with audio and video: a calls (Ctrl+Shift+C) and
 //!   b's page answers (`--call answer`); then b's page calls (`--call place`) and a answers (Ctrl+Shift+S). Each time
 //!   a turns its camera on (Ctrl+Shift+O), a's window presents b's video, and b's page says it heard and saw a; a
@@ -438,6 +440,17 @@ fn test_call(a: &mut App, found: &mut Found) {
     });
     let connected = a.in_call(from, CONNECT, &["test-call", "connected"]);
     let setup = found.setup("test call: asked → connected", at_ms(&asked), &connected);
+    // as a chat's call: the echo's cell (its roster's entry), the camera turned on and the self view presented
+    camera_on(a);
+    a.trace()
+        .wait_from(from, VIDEO_WAIT, "the test call's self view presented", |line| {
+            is(line, "video-tile", "presented")
+                && strings(line, "kinds") == ["self"]
+                && line["frames"].as_u64().is_some_and(|frames| frames >= PRESENTED)
+        });
+    a.trace().wait_from(from, apps::STEP, "the echo's cell", |line| {
+        is(line, "call-participant", "shown") && strings(line, "people").iter().any(|mri| mri.starts_with("28:"))
+    });
     a.shot("test-call");
     thread::sleep(ECHO_HOLD);
     let held_until = now_us();

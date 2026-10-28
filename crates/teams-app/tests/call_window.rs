@@ -21,6 +21,8 @@
 //!   counted by the trace's `video-tile presented`); a hangs up (Ctrl+Shift+H) and b's call ends with it;
 //! - a calls b again; b declines from the notification's Decline; a's call is taken by b's voicemail (as captured) and
 //!   a's in-call bar says so; a hangs up;
+//! - a places the test call from the switcher: the same call view, the echo's cell (its roster's entry), its camera
+//!   turned on and the self view presented; a hangs up;
 //! - both quit; every write in either `fence.log` was permitted.
 //!
 //! Without weston 15, niri, `dbus-daemon`, PipeWire or WirePlumber it says so and passes, unless `GPUI_SMOKE_REQUIRE=1`.
@@ -522,6 +524,38 @@ fn calls(a: &mut AppUnderTest, b: &mut AppUnderTest, a_box: &Sandbox, b_box: &Sa
     shot(a_box, "teams-app-call-declined.png")?;
     ctrl_shift(&mut a_keys, 'h')?;
     a.in_call(&["ended", "hung-up"])?;
+    test_call(a, &mut a_keys, a_box)
+}
+
+/// a's test call, from the switcher: the call view a chat's call has, Echo its other participant (by its roster's
+/// entry), its camera turned on and its self view presented.
+fn test_call(a: &mut AppUnderTest, keys: &mut VirtualInput, a_box: &Sandbox) -> SandboxResult {
+    let (k, _) = keys.keymap().key_for('k').ok_or("not on the US keymap")?;
+    keys.key_with(&[Modifier::Ctrl], k)?;
+    a.trace.next_where("a: switcher opened", |line| {
+        line["view"] == "switcher" && line["change"] == "opened"
+    })?;
+    keys.type_text("test call")?;
+    thread::sleep(Duration::from_millis(500));
+    keys.key(ui_sandbox::input::keys::ENTER)?;
+    a.in_call(&["test-call", "connected"])?;
+    ctrl_shift(keys, 'o')?;
+    a.in_call(&["test-call", "camera-on"])?;
+    a.trace.next_where("a: the test call's self view presented", |line| {
+        line["view"] == "video-tile"
+            && line["change"] == "presented"
+            && strings(line, "kinds") == ["self"]
+            && line["frames"].as_u64().is_some_and(|frames| frames >= PRESENTED)
+    })?;
+    let echo = |line: &serde_json::Value| {
+        line["view"] == "call-participant" && line["change"] == "shown" && line["people"] == serde_json::json!([ECHO])
+    };
+    if !a.trace.catch_up().iter().any(echo) {
+        a.trace.next_where("a: Echo's cell", echo)?;
+    }
+    shot(a_box, "teams-app-call-test-call.png")?;
+    ctrl_shift(keys, 'h')?;
+    a.in_call(&["test-call", "ended", "hung-up"])?;
     Ok(())
 }
 

@@ -14,10 +14,10 @@
 //! is the web client's group offer's kind (audio, the main line, the receiving lines, the sharing line, the data
 //! channel), its start, join or answer describes those lines (`mediaDescriptions`), and its control plane (the data
 //! channel's) is started once the far end's SDP was applied (`teams_media::mcp`). The camera is off when a call starts;
-//! only the account's action turns it on. The test call's media carries no video (every video line offered read
-//! rejected), and neither does a call whose codec doesn't load (Cisco's library missing). Every step that blocks (the
-//! allocation, opening a device, an SDP command, the session's close) runs on tokio's blocking pool, never on the
-//! engine's thread; the session's own threads carry the media.
+//! only the account's action turns it on. The test call's media is a 1:1 call's (the media controller answers it, its
+//! camera turned by a renegotiation); a call whose codec doesn't load (Cisco's library missing) carries no video.
+//! Every step that blocks (the allocation, opening a device, an SDP command, the session's close) runs on tokio's
+//! blocking pool, never on the engine's thread; the session's own threads carry the media.
 
 use std::net::{IpAddr, ToSocketAddrs};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -156,8 +156,6 @@ pub(crate) struct Prepared {
 /// Which video a call's media takes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum VideoKind {
-    /// None (the test call's).
-    None,
     /// A 1:1 call's: the main video line.
     OneToOne,
     /// A group call's: the main video line and the receiving lines, with the control plane.
@@ -247,7 +245,7 @@ fn set_up(
     // no device opens before the call's start, join or answer passed the fence (`open_devices`)
     let session = MediaSession::start_without_devices(peer, media.session).map_err(|error| text(&error))?;
     let mut dialect = NgcSession::new();
-    let video = kind != VideoKind::None && start_video(&session, media.video.as_ref(), kind);
+    let video = start_video(&session, media.video.as_ref(), kind);
     let group = video && kind == VideoKind::Group;
     if group {
         // the main line, and the receiving lines each a participant's video

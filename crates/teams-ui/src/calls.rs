@@ -244,6 +244,12 @@ impl Calls {
         self.echo.is_some()
     }
 
+    /// The echo service the test call goes to, when known: the test call's other participant.
+    #[must_use]
+    pub fn echo(&self) -> Option<&Mri> {
+        self.echo.as_ref()
+    }
+
     /// Whether a call can start now: calls shown, none up, none ringing, no start or join asked for and not yet told.
     #[must_use]
     pub fn idle(&self) -> bool {

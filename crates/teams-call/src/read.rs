@@ -263,9 +263,11 @@ fn roster_entry(mri: &str, entry: &Value) -> Option<RosterEntry> {
         mri: Mri::new(mri),
         version,
         active: entry.get("state").and_then(Value::as_str) == Some("active") && in_call,
+        // the echo service's entry names nobody: an empty name is none
         name: entry
             .pointer("/details/displayName")
             .and_then(Value::as_str)
+            .filter(|name| !name.is_empty())
             .map(str::to_owned),
         audio_source: stream("main-audio").and_then(|audio| audio.get("sourceId")?.as_i64()),
         video_source: video.and_then(|video| video.get("sourceId")?.as_i64()),
