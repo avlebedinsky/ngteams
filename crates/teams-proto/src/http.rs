@@ -31,7 +31,10 @@
 //!   relay read); and Teams' reaction pictures on its CDN ([`Service::Emoticons`]:
 //!   `https://statics.teams.cdn.office.net/evergreen-assets/personal-expressions/v2/assets/emoticons`, no token); and,
 //!   once the transport was given its base, AMS's async gateway ([`HttpTransport::with_ams`], the GTM `amsV2`:
-//!   `https://<name>.asyncgw.teams.microsoft.com`, reads of a pasted picture's view only). An endpoint with an empty,
+//!   `https://<name>.asyncgw.teams.microsoft.com`, reads of a pasted picture's view only); and a file thumbnail's
+//!   picture ([`Service::FileThumbnail`], no base of its own: only [`HttpTransport::file_thumbnail`] reads there, a
+//!   link Graph handed out on SharePoint's media host or a SharePoint host, checked again, with no token). An
+//!   endpoint with an empty,
 //!   `.` or `..` segment is refused. Entra and authz aren't a service here (they stay in `teams-auth`'s own clients). A
 //!   new service is a code change: a variant, its base and its token's audience.
 //! - **The client**: `https` only, no proxy (an environment's `HTTPS_PROXY` could point anywhere), no redirects (a 3xx
@@ -103,6 +106,7 @@ use crate::own::OwnState;
 use crate::post_read::{AuthorizedPostRead, PostRead};
 use crate::read::Read;
 use crate::request::Request;
+use crate::thumbnail::{ThumbnailLink, is_thumbnail_link};
 use crate::write::{Authorized, CallWire, Mutating, Registry, on_calling_base};
 
 /// The Entra audience of the token the chat service and the registrar take.
@@ -269,6 +273,10 @@ pub enum Refusal {
     /// A read or a plain request to the calling service: only authorized call writes go there.
     #[error("only authorized call writes go to the calling service")]
     Calling,
+    /// A read or a plain request to a file thumbnail's host: only a link Graph handed out is read there
+    /// ([`HttpTransport::file_thumbnail`]).
+    #[error("only a thumbnail link Graph handed out is read from a thumbnail's host")]
+    FileThumbnail,
     /// A call write while the credentials give no skypetoken.
     #[error("no skypetoken for the calling service")]
     NoSkypetoken,
@@ -663,6 +671,7 @@ impl<C: Credentials> HttpTransport<C> {
             Service::Csa => self.csa.clone().ok_or(refused(Refusal::NoCsa)),
             Service::Presence => self.presence.clone().ok_or(refused(Refusal::NoPresence)),
             Service::Calling => Err(refused(Refusal::Calling)),
+            Service::FileThumbnail => Err(refused(Refusal::FileThumbnail)),
             Service::Relay => fixed(format!("https://{RELAY_HOST}/{RELAY_PATH}")),
             Service::Emoticons => fixed(format!("https://{EMOTICONS_HOST}/{EMOTICONS_PATH}")),
             Service::Ams => self.ams.clone().ok_or(refused(Refusal::NoAms)),
@@ -1087,6 +1096,28 @@ impl<C: Credentials> HttpTransport<C> {
     pub async fn post_read<R: PostRead + Send>(&self, read: AuthorizedPostRead<R>) -> Result<Response, HttpError> {
         self.send_post_read(read).await
     }
+
+    /// Reads the picture of a file's thumbnail at `link`, the link Graph handed out for it
+    /// ([`crate::FileThumbnails::read_answer`]): a `GET` on [`Service::FileThumbnail`] with no token of the account's
+    /// (the link carries its own credential), the link checked again before it goes ([`is_thumbnail_link`]), with the
+    /// one retry a 429 or 503 allows, as any read.
+    ///
+    /// # Errors
+    /// As a read's: [`Refusal::NotAllowed`] for a link off the thumbnail hosts, [`HttpError::Status`] for an answer that
+    /// isn't a success.
+    pub async fn file_thumbnail(&self, link: &ThumbnailLink) -> Result<Response, HttpError> {
+        let url = link.url();
+        if !is_thumbnail_link(url) {
+            return Err(HttpError::Refused(Refusal::NotAllowed));
+        }
+        let outgoing = Outgoing {
+            method: reqwest::Method::GET,
+            url,
+            service: Service::FileThumbnail,
+            body: None,
+        };
+        self.exchange(outgoing, Record::Nothing).await
+    }
 }
 
 impl<C: Credentials> Transport for HttpTransport<C> {
@@ -1243,7 +1274,7 @@ fn audience(service: Service) -> Option<&'static str> {
         Service::Graph => Some(GRAPH_AUDIENCE),
         Service::Csa => Some(CSA_AUDIENCE),
         Service::Presence => Some(PRESENCE_AUDIENCE),
-        Service::Trouter | Service::Calling | Service::Emoticons => None,
+        Service::Trouter | Service::Calling | Service::Emoticons | Service::FileThumbnail => None,
     }
 }
 
@@ -1261,10 +1292,11 @@ fn plain_headers(service: Service, body: bool) -> Vec<(String, String)> {
         | Service::Calling
         | Service::Relay
         | Service::Emoticons
-        | Service::Ams => "application/json",
+        | Service::Ams
+        | Service::FileThumbnail => "application/json",
     };
-    // a picture's view answers an image, as a browser's `<img>` asks for one
-    let accept = if service == Service::Ams {
+    // a picture's view and a thumbnail answer an image, as a browser's `<img>` asks for one
+    let accept = if matches!(service, Service::Ams | Service::FileThumbnail) {
         PICTURE_ACCEPT
     } else {
         "application/json"
@@ -1304,7 +1336,12 @@ fn service_headers(service: Service) -> &'static [(&'static str, &'static str)] 
         Service::Relay => &[("api-version", "2"), ("x-ms-migration", "True")],
         // the object read's form (`proto-lab probe object`), as the web client's object creation sent it
         Service::Ams => &[("x-ms-migration", "True")],
-        Service::Trouter | Service::Graph | Service::Csa | Service::Calling | Service::Emoticons => &[],
+        Service::Trouter
+        | Service::Graph
+        | Service::Csa
+        | Service::Calling
+        | Service::Emoticons
+        | Service::FileThumbnail => &[],
     }
 }
 
@@ -1335,7 +1372,8 @@ fn on_base(service: Service, base: &Url, url: &Url, endpoint: &Endpoint) -> bool
         | Service::Relay
         | Service::Calling
         | Service::Emoticons
-        | Service::Ams => true,
+        | Service::Ams
+        | Service::FileThumbnail => true,
     };
     plain
         && url.host_str() == base.host_str()

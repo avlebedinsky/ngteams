@@ -209,6 +209,29 @@ fn a_signed_link_s_sig_is_redacted_in_a_query_a_header_and_json() {
 }
 
 #[test]
+fn a_file_thumbnail_s_pre_authenticated_link_keeps_no_credential() {
+    // SharePoint's own pre-authenticated form: a short `tempauth` only its name catches
+    let tempauth = format!("v1.{}", signature("t"));
+    let sharepoint = format!(
+        "https://contoso-my.sharepoint.com/_api/v2.0/drives/x/items/y/thumbnails/0/large/content?tempauth={tempauth}"
+    );
+    let shown = redact::url(&sharepoint);
+    assert!(shown.ends_with(&format!("?tempauth={REDACTED}")), "{shown}");
+    // the media host's: the credential inside a link nested, percent-encoded, in its `docid`
+    let token = jwt("m");
+    let media = format!(
+        "https://westus1-mediap.svc.ms/transform/thumbnail?provider=spo&docid=https%3A%2F%2Fcontoso-my.sharepoint.com\
+         %2F_api%2Fv2.0%2Fdrives%2Fx%3Faccess_token%3D{token}&width=800"
+    );
+    let shown = redact::url(&media);
+    assert!(!shown.contains(&token), "{shown}");
+    assert!(
+        shown.starts_with("https://westus1-mediap.svc.ms/transform/thumbnail?provider=spo"),
+        "{shown}"
+    );
+}
+
+#[test]
 fn sign_in_s_names_and_redirect_are_redacted_in_json() {
     let (code, verifier) = (authorization_code("j"), code_verifier("k"));
     let secret = signature("c");

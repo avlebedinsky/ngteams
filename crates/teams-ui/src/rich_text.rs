@@ -496,7 +496,7 @@ pub fn opens(href: &str) -> bool {
 }
 
 /// A tint of `color` (0xRRGGBB) at `alpha`.
-fn tint(color: u32, alpha: f32) -> gpui::Hsla {
+pub(crate) fn tint(color: u32, alpha: f32) -> gpui::Hsla {
     let mut tinted: gpui::Hsla = rgb(color).into();
     tinted.a = alpha;
     tinted

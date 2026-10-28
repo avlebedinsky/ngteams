@@ -81,6 +81,9 @@ pub trait Core: Send + Sync + 'static {
     /// The picture a message's `<img>` names by its `src` (a view of an AMS object), read by the engine once a run;
     /// `None` when there is none, or `src` names no AMS view.
     fn message_picture(&self, src: String) -> Reply<Option<PictureBytes>>;
+    /// The thumbnail of a file a message carries, by its sharing link (`teams_proto::chat::SharedFile::share_url`),
+    /// read by the engine once a run; `None` when there is none.
+    fn file_thumbnail(&self, share_url: String) -> Reply<Option<PictureBytes>>;
     /// The account's own read horizon in a conversation.
     fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>>;
     /// Whether the store holds a conversation's whole history; `None` when it was never synced.
@@ -189,6 +192,10 @@ impl Core for EngineRequests {
 
     fn message_picture(&self, src: String) -> Reply<Option<PictureBytes>> {
         EngineRequests::message_picture(self, src)
+    }
+
+    fn file_thumbnail(&self, share_url: String) -> Reply<Option<PictureBytes>> {
+        EngineRequests::file_thumbnail(self, share_url)
     }
 
     fn recent_reactions(&self, limit: usize) -> Reply<Vec<String>> {
@@ -329,6 +336,10 @@ impl Core for StoppedCore {
     }
 
     fn message_picture(&self, _: String) -> Reply<Option<PictureBytes>> {
+        stopped()
+    }
+
+    fn file_thumbnail(&self, _: String) -> Reply<Option<PictureBytes>> {
         stopped()
     }
 

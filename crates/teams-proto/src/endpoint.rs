@@ -61,6 +61,11 @@ pub enum Service {
     /// `docs/protocol/chat.md`): a picture pasted into a message, read by its view (`v1/objects/<id>/views/<view>`,
     /// [`crate::MessagePicture`]). Reads only: AMS is a contacting service, and the transport sends it nothing else.
     Ams,
+    /// A file thumbnail's picture, at the pre-authenticated link Graph handed out for it ([`crate::ThumbnailLink`]:
+    /// SharePoint's media host `https://<name>.svc.ms`, or a SharePoint host), with no token of the account's (the link
+    /// carries its own credential). No base of its own: only [`crate::HttpTransport::file_thumbnail`] reads here, and a
+    /// read or a plain request naming this service is refused.
+    FileThumbnail,
 }
 
 /// A request's path under its service's base, as path segments (each sent as one encoded segment, so a `/` inside one

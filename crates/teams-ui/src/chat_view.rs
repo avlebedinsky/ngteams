@@ -92,12 +92,15 @@ use gpui_component::kbd::Kbd;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Sizable as _, Size};
 use teams_core::{Action, Command, EngineError, NOTES};
-use teams_proto::chat::{MessageType, RichText, Unshown, parse_html, unshown_parts, web_chat_link};
+use teams_proto::chat::{
+    MessageType, RichText, SharedFile, Unshown, parse_html, shared_files, unshown_parts, web_chat_link,
+};
 use teams_store::{Message, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction};
 
 use crate::bridge::Core;
 use crate::clock::{self, HourCycle};
 use crate::compose::{self, Compose, ComposeEvent, ComposeParts, Quoted};
+use crate::files;
 use crate::icons::{Glyph, icon_button, icon_button_with_key, selected_by};
 use crate::models::Models;
 use crate::people::{Face, Shown};
@@ -177,7 +180,8 @@ pub const SENDERS_WATCHED: usize = compose::PICKER_MAX;
 pub const DELETED: &str = "This message was deleted";
 /// What a message of a type this build doesn't show shows.
 pub const UNSUPPORTED: &str = "This message can't be shown here";
-/// What a message shows under its text when it carries a part no capture showed (a received file, a card).
+/// What a message shows under its text when it carries a part this build can't show (a file entry it can't read, a
+/// card).
 pub const UNSHOWN_CONTENT: &str = "This message has content that can't be shown here";
 /// The button beside [`UNSHOWN_CONTENT`] and [`UNSUPPORTED`] in a chat: it opens the chat in the web client
 /// (`teams_proto::chat::web_chat_link`). The channel view shows neither with it: no channel deep link was captured.
@@ -432,8 +436,12 @@ pub struct MessageItem {
     /// The account's writes on it that aren't sent (an edit, a delete, a reaction) and that no newer write on the same
     /// thing made out of date, as they stand, the oldest first.
     pub outbox: Vec<Note>,
-    /// What it carries beside its text that no capture showed ([`unshown_of`]): a received file, a card. With any, it
-    /// shows [`UNSHOWN_CONTENT`] and a way to open the chat in Teams on the web, never a guess at the part.
+    /// The files it carries ([`files_of`]), each drawn as its card under its text (`crate::files`). Behind one
+    /// pointer: a row stays small whether or not it has any.
+    pub files: Arc<Vec<SharedFile>>,
+    /// What it carries beside its text that this build can't show ([`unshown_of`]): a file entry of a shape no message
+    /// showed, a card. With any, it shows [`UNSHOWN_CONTENT`] and a way to open the chat in Teams on the web, never a
+    /// guess at the part.
     pub unshown: UnshownParts,
     /// Whether its chat takes writes: not the account's own notes ([`NOTES`]), where it offers no action.
     pub writes: ChatWrites,
@@ -450,10 +458,10 @@ pub enum ChatWrites {
     AppReadOnly,
 }
 
-/// The parts of a stored message no capture showed, by kind ([`unshown_of`]).
+/// The parts of a stored message this build can't show, by kind ([`unshown_of`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct UnshownParts {
-    /// `properties.files` other than an empty list: a received file.
+    /// `properties.files` entries this build can't read as a file (`teams_proto::chat::SharedFiles::unread`).
     pub files: bool,
     /// `properties.cards` other than an empty list.
     pub cards: bool,
@@ -469,9 +477,9 @@ impl UnshownParts {
     }
 }
 
-/// The parts of a stored message that no capture showed (`teams_proto::chat::unshown_parts`: `properties.files` or
-/// `properties.cards` other than an empty list); `properties` that aren't a JSON object are one too, never read as
-/// nothing. None for a message without `properties`. (The store keeps no `amsreferences`: an image shows from the
+/// The parts of a stored message this build can't show (`teams_proto::chat::unshown_parts`: `properties.files`
+/// entries it can't read as a file, `properties.cards` other than an empty list); `properties` that aren't a JSON
+/// object are one too, never read as nothing. None for a message without `properties`. (The store keeps no `amsreferences`: an image shows from the
 /// content's markup, as a placeholder.)
 #[must_use]
 pub fn unshown_of(message: &Message) -> UnshownParts {
@@ -491,6 +499,18 @@ pub fn unshown_of(message: &Message) -> UnshownParts {
             Unshown::Cards(_) => UnshownParts { cards: true, ..parts },
             Unshown::AmsReferences(_) => parts,
         })
+}
+
+/// The files a stored message carries (`teams_proto::chat::shared_files`, its `properties.files` entries read as
+/// files), in their order; none for a message without `properties` or with `properties` that aren't a JSON object.
+#[must_use]
+pub fn files_of(message: &Message) -> Vec<SharedFile> {
+    message
+        .properties
+        .as_deref()
+        .and_then(|text| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(text).ok())
+        .map(|properties| shared_files(properties.get("files")).files)
+        .unwrap_or_default()
 }
 
 /// A message post of the account's whose message isn't in the store yet: its row as it stands, and its text.
@@ -1944,10 +1964,10 @@ impl ChatView {
         }
         let me = self.core.me().to_owned();
         let body = self.body(message)?;
-        let unshown = if matches!(body, Body::Text(_)) {
-            unshown_of(message)
+        let (files, unshown) = if matches!(body, Body::Text(_)) {
+            (Arc::new(files_of(message)), unshown_of(message))
         } else {
-            UnshownParts::default()
+            (Arc::default(), UnshownParts::default())
         };
         let (sender_name, named) = self.sender_of(message);
         let picture = message
@@ -1975,6 +1995,7 @@ impl ChatView {
             body,
             reactions,
             outbox: notes.get(&message.id).cloned().unwrap_or_default(),
+            files,
             unshown,
             writes: if self.core.read_only() {
                 ChatWrites::AppReadOnly
@@ -3445,6 +3466,10 @@ fn bubble(
         (false, false) => palette.surface,
     };
     let id: SharedString = format!("message-text-{}", item.id).into();
+    let files = match &item.body {
+        Body::Text(text) => files::file_cards(&item.id, &item.files, text.0.source.as_ref(), palette),
+        _ => None,
+    };
     let content = match &item.body {
         Body::Text(text) => rich_text::render(&id, &text.0, palette),
         Body::Deleted => muted(DELETED, palette),
@@ -3474,6 +3499,7 @@ fn bubble(
     let bubble = if item.own { bubble.max_w(relative(0.8)) } else { bubble };
     bubble
         .child(content)
+        .children(files)
         .children(item.unshown.any().then(|| {
             div()
                 .text_xs()

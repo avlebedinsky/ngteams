@@ -6,7 +6,8 @@
 //! the `test-support` mock origins, a test roster and log). Once the window is drawn and the chats are listed, the
 //! child walks the views one step at a time (no chat open; the a–b chat with a message selected and its actions
 //! shown; a reply begun; the account menu; every page of the settings, Calls with made-up devices; the appearance
-//! and the chat again in Teams Dark; the 12-hour time format and a chat's times on it) and says `shot <name>` after each; the parent screenshots the window and lets it
+//! and the chat again in Teams Dark; a message with files, its cards and their thumbnails, in Teams Dark and Light;
+//! the 12-hour time format and a chat's times on it) and says `shot <name>` after each; the parent screenshots the window and lets it
 //! go on. The views are driven from inside the app, never by screen coordinates.
 //!
 //! Without weston 15, niri or `dbus-daemon` it says so and passes, unless `GPUI_SMOKE_REQUIRE=1`.
@@ -32,7 +33,8 @@ use teams_fence::lab::{Alias, LabConfig, record_abc_chat};
 use teams_fence::{Fence, FenceLog, LiveMembershipSource, Mri, Roster};
 use teams_media::devices::catalog::{DeviceInfo, DeviceKind, DeviceList, FixedDirectory};
 use teams_mock::{
-    AB_CHAT, ABC_CHAT, AMS_BASE, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, PRESENCE_BASE, TrouterMock, lab_toml,
+    AB_CHAT, ABC_CHAT, AC_CHAT, AMS_BASE, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, PRESENCE_BASE, TrouterMock,
+    lab_toml,
 };
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::Store;
@@ -65,7 +67,7 @@ const SETTLE: Duration = Duration::from_millis(1500);
 type Step = (&'static str, fn(&Entity<Shell>, &mut Window, &mut App));
 
 /// The tour.
-const STEPS: [Step; 23] = [
+const STEPS: [Step; 25] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -151,6 +153,11 @@ const STEPS: [Step; 23] = [
     ("chat-pictures", |shell, window, cx| {
         shell.update(cx, |shell, cx| shell.open_chat(ABC_CHAT.to_owned(), window, cx));
     }),
+    // c's message with two videos and a document (`seed_files`): its lines, then the files' cards, the videos' with
+    // their thumbnails as Graph and the media host (the mock) gave them, in Teams Dark
+    ("chat-files-dark", |shell, window, cx| {
+        shell.update(cx, |shell, cx| shell.open_chat(AC_CHAT.to_owned(), window, cx));
+    }),
     // the 12-hour clock chosen, back in Teams Light: the setting, then the a–b chat's times
     ("settings-time-12-hour", |shell, _, cx| {
         let model = shell.read(cx).settings().clone();
@@ -170,6 +177,10 @@ const STEPS: [Step; 23] = [
             shell.show_chats(window, cx);
             shell.open_chat(AB_CHAT.to_owned(), window, cx);
         });
+    }),
+    // the files' cards again, in Teams Light
+    ("chat-files", |shell, window, cx| {
+        shell.update(cx, |shell, cx| shell.open_chat(AC_CHAT.to_owned(), window, cx));
     }),
     // the a–b–c chat: its senders' presence as the view asked the engine and the mock's UPS answered (`seed_group`),
     // b's and c's badges on their avatars
@@ -453,6 +464,7 @@ impl MockLab {
         let trouter = mock.start_trouter()?;
         seed_group(&mock, &runtime)?;
         seed_pictures(&mock, &runtime)?;
+        seed_files(&mock, &runtime)?;
         seed_own(&mock)?;
         seed_mentions(&mock)?;
         let dir = tempfile::tempdir()?;
@@ -569,6 +581,140 @@ fn made_up_dashboard() -> image::RgbaImage {
         fill(x + 16, 170, 110, 6, [110, 110, 110]);
     }
     picture
+}
+
+/// A made-up file c shares in the a–c chat: its name, its extension, its sharing link's kind (`v` a video, `b` a
+/// document) and id, and for a video the colours its made-up thumbnail is drawn in.
+struct MadeUpFile {
+    name: &'static str,
+    extension: &'static str,
+    kind: char,
+    share: &'static str,
+    frame: Option<([u8; 3], [u8; 3])>,
+}
+
+const MADE_UP_FILES: [MadeUpFile; 3] = [
+    MadeUpFile {
+        name: "06-made-up-rehearsal-multicam-edit-v2.mp4",
+        extension: "mp4",
+        kind: 'v',
+        share: "MadeUpShareLinkMulticam0001",
+        frame: Some(([24, 120, 40], [170, 230, 120])),
+    },
+    MadeUpFile {
+        name: "04-made-up-rehearsal-three-cameras.mp4",
+        extension: "mp4",
+        kind: 'v',
+        share: "MadeUpShareLinkCameras0002",
+        frame: Some(([14, 18, 32], [60, 90, 200])),
+    },
+    MadeUpFile {
+        name: "made-up-stage-plan.pdf",
+        extension: "pdf",
+        kind: 'b',
+        share: "MadeUpShareLinkStagePlan0003",
+        frame: None,
+    },
+];
+
+/// A file's entry in `properties.files`, in the shape `tests/fixtures/chatsvc/files.json` has (made up).
+fn file_entry(file: &MadeUpFile, at: usize) -> serde_json::Value {
+    let site = "https://contoso-my.sharepoint.com/personal/made_up_user_contoso_test/";
+    let object = format!("{site}Documents/Microsoft Teams Chat Files/{}", file.name);
+    serde_json::json!({
+        "itemid": format!("made-up-item-{at}"),
+        "fileName": file.name,
+        "fileType": file.extension,
+        "fileInfo": {
+            "fileUrl": object,
+            "siteUrl": site,
+            "shareUrl": share_url(file),
+        },
+        "@type": "http://schema.skype.com/File",
+        "version": 2,
+        "objectUrl": object,
+        "type": file.extension,
+        "title": file.name,
+        "state": "active",
+        "filePreview": {"previewUrl": "", "previewHeight": 0, "previewWidth": 0},
+    })
+}
+
+fn share_url(file: &MadeUpFile) -> String {
+    format!(
+        "https://contoso-my.sharepoint.com/:{}:/g/personal/made_up_user_contoso_test/{}",
+        file.kind, file.share
+    )
+}
+
+/// c's message in the a–c chat as the one Teams shows with two videos: lines broken by `<br>` and a line feed each,
+/// then two videos and a document. Graph's thumbnail list and each video's made-up picture are served by the mock (the
+/// picture's link on the media host, as Graph hands one out).
+fn seed_files(mock: &ChatServiceMock, runtime: &tokio::runtime::Runtime) -> SandboxResult {
+    let html = "<p>Made-up lab note: a first line long enough to wrap across the chat view a couple of times over, \
+                (with a made-up aside)<br>\n<br>\nThe list below:<br>\n1. The first made-up item, which runs on a \
+                little.<br>\n2. The second made-up item.<br>\n3. The third made-up item.\
+                <br>\n<br>\nThe stage plan is attached too</p>";
+    let id = mock.post_as(LAB_C, AC_CHAT, html).ok_or("c's post refused")?;
+    let entries: Vec<serde_json::Value> = (0..)
+        .zip(&MADE_UP_FILES)
+        .map(|(at, file)| file_entry(file, at))
+        .collect();
+    let files = serde_json::Value::Array(entries).to_string();
+    let client_message_id = (9_000_000_000_000_000_000_u64 + id.parse::<u64>()?).to_string();
+    let changed = mock.change_message(AC_CHAT, &client_message_id, |message| {
+        message["properties"]["files"] = serde_json::json!(files);
+    });
+    if !changed {
+        return Err("c's post isn't in the mock".into());
+    }
+    for (at, file) in MADE_UP_FILES.iter().enumerate() {
+        let Some((dark, light)) = file.frame else { continue };
+        let read = teams_proto::FileThumbnails::of(&share_url(file)).ok_or("a made-up link no read names")?;
+        let token = read.share();
+        let picture = format!("/transform/thumbnail/made-up-{at}");
+        let list = serde_json::json!({"value": [{"id": "0", "large": {
+            "height": 450, "width": 800,
+            "url": format!("https://westus1-mediap.svc.ms{picture}?provider=spo&docid=made-up"),
+        }}]});
+        runtime.block_on(mock.serve_bytes(
+            &format!("/v1.0/shares/{token}/driveItem/thumbnails"),
+            "application/json",
+            list.to_string().into_bytes(),
+        ));
+        let mut png = Vec::new();
+        made_up_frame(dark, light).write_to(&mut io::Cursor::new(&mut png), image::ImageFormat::Png)?;
+        runtime.block_on(mock.serve_bytes(&picture, "image/png", png));
+    }
+    Ok(())
+}
+
+/// A made-up video frame, 800 by 450: a gradient from `dark` to `light` with a few bars, a figure and a caption strip.
+fn made_up_frame(dark: [u8; 3], light: [u8; 3]) -> image::RgbaImage {
+    let (width, height) = (800_u32, 450_u32);
+    image::RgbaImage::from_fn(width, height, |x, y| {
+        let mix = |from: u8, to: u8| {
+            let t = (x + y) * 255 / (width + height);
+            u8::try_from((u32::from(from) * (255 - t) + u32::from(to) * t) / 255).unwrap_or(to)
+        };
+        let figure = (300..380).contains(&x) && y > 120 && y < 420;
+        let caption = y > 410 && x < 260;
+        let bars = y > 330 && x % 90 < 30;
+        if caption {
+            image::Rgba([20, 20, 20, 255])
+        } else if figure {
+            image::Rgba([10, 10, 10, 255])
+        } else if bars {
+            image::Rgba([mix(dark[0], 40), mix(dark[1], 40), mix(dark[2], 40), 255])
+        } else {
+            image::Rgba([
+                mix(dark[0], light[0]),
+                mix(dark[1], light[1]),
+                mix(dark[2], light[2]),
+                255,
+            ])
+        }
+    })
 }
 
 /// a's own message in the a–b chat, before b's, with a's heart on it: a's hover bar, and a's most used reactions

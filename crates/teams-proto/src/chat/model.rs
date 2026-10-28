@@ -17,6 +17,7 @@ use teams_fence::{is_group_chat_id, one_to_one_pair};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+use crate::chat::files::{SharedFiles, shared_files};
 use crate::chat::html::{self, RichText, ThreadActivity};
 
 /// A value that may be missing, in a form a capture showed ([`Field::Known`]), or in another one, kept as it came
@@ -499,17 +500,17 @@ impl Message {
         json_list(self.properties.get("qtdMsgs"))
     }
 
-    /// `properties.files`, a JSON string of a list: received files. Only an empty list was ever captured (M2 Task 23's
-    /// `ab-file` sent no file: `docs/protocol/chat.md`), so only an empty list is known; a list with an entry is kept
-    /// as it came ([`Field::Unknown`]), never read as a file (and never fetched).
+    /// `properties.files`, a JSON string of a list: received files ([`shared_files`]), each entry read only in the
+    /// shape `docs/protocol/chat.md` records ("Files: received"); any other is kept as it came, never guessed at (and
+    /// nothing is fetched here).
     #[must_use]
-    pub fn files(&self) -> Field<Vec<Value>> {
-        empty_list(self.properties.get("files"))
+    pub fn files(&self) -> SharedFiles {
+        shared_files(self.properties.get("files"))
     }
 
-    /// What the message carries beside its text that no capture showed ([`unshown_parts`]): received files, cards and
-    /// AMS objects (`amsreferences` with an entry), each kept as it came. Empty for a message every captured message
-    /// was like.
+    /// What the message carries beside its text that this build can't show ([`unshown_parts`]): file entries it can't
+    /// read as a file, cards and AMS objects (`amsreferences` with an entry), each kept as it came. Empty for a message
+    /// every captured message was like, and for one whose files are all read ([`Message::files`]).
     #[must_use]
     pub fn unshown(&self) -> Vec<Unshown> {
         let mut parts = unshown_parts(&self.properties);
@@ -882,8 +883,8 @@ fn number(value: &Value) -> Option<u64> {
 /// view shows that the message has content it can't show, never a guess at it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Unshown {
-    /// `properties.files` with an entry, or in a form that isn't a list (only `"[]"` was captured: a sent file's
-    /// message never went out in M2 Task 23's `ab-file`, every write of the file denied).
+    /// `properties.files` entries this build can't read ([`SharedFiles::unread`]: not a file's in the shape
+    /// `docs/protocol/chat.md` records), or a `files` that isn't a list.
     Files(Value),
     /// `properties.cards` with an entry, or in a form that isn't a list (only `"[]"` was captured; a card comes from a
     /// bot or a connector, none in the lab).
@@ -905,9 +906,9 @@ impl Unshown {
     }
 }
 
-/// What a message's `properties` (`properties`, as the message carried them or the store keeps them) hold that no
-/// capture showed: `files` or `cards` other than an empty list (a JSON string of one, as captured, or a list), each
-/// kept as it came. A missing one is nothing to show.
+/// What a message's `properties` (`properties`, as the message carried them or the store keeps them) hold that this
+/// build can't show: `files` entries it can't read ([`SharedFiles::unread`]), and `cards` other than an empty list (a
+/// JSON string of one, as captured, or a list), each kept as it came. A missing one is nothing to show.
 #[must_use]
 pub fn unshown_parts(properties: &Map<String, Value>) -> Vec<Unshown> {
     let unknown = |key: &str| match empty_list(properties.get(key)) {
@@ -915,7 +916,7 @@ pub fn unshown_parts(properties: &Map<String, Value>) -> Vec<Unshown> {
         Field::Absent | Field::Known(_) => None,
     };
     let mut parts = Vec::new();
-    if let Some(raw) = unknown("files") {
+    if let Some(raw) = shared_files(properties.get("files")).unread {
         parts.push(Unshown::Files(raw));
     }
     if let Some(raw) = unknown("cards") {

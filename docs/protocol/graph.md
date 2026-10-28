@@ -48,9 +48,32 @@ reads), `etag` (a picture), `request-id`, `strict-transport-security`, `transfer
 - **A picture**: `GET https://graph.microsoft.com/v1.0/users/<oid>/photos/96x96/$value`, the size an avatar needs
   (the probe's 96×96 picture was a thirtieth of the largest). Kept only as `image/jpeg` (what the probe saw) or
   `image/png`, up to 256 KB; a 404 is no picture, and the view draws initials.
-- **Only these two**, only for an MRI `8:orgid:<GUID>`. The transport refuses any other Graph endpoint (the whole
-  record, another `$select`, another size, `me`, a search, a collection) before it asks for a token, and any request
-  to Graph that isn't a read.
+- **Only for an MRI `8:orgid:<GUID>`**, and with a shared file's thumbnails (below) the only Graph reads the native
+  client builds; the transport refuses any request to Graph that isn't a read.
+
+## A shared file's thumbnail
+
+A file a message carries (`properties.files`, [chat.md](chat.md#files-received)) is drawn as a card, a video's or an
+image's with a picture of it. The web client draws that picture from SharePoint's own API with a SharePoint token;
+the native client asks for no SharePoint token and reads it through Graph instead, by the file's sharing link, in
+the form Microsoft documents. Like the person reads above, no capture or probe shows it: it is our own reach, two
+reads, and a file the account can't read is just a card without its picture.
+
+- **The list**: `GET https://graph.microsoft.com/v1.0/shares/u!<sharing link>/driveItem/thumbnails` with the
+  account's Graph token, `<sharing link>` the message's `fileInfo.shareUrl` in base64url without padding (Graph's
+  sharing token), only for an `https` link on a SharePoint host. The answer is documented as `value`, a list of
+  thumbnail sets, each with an `id` and a `small`, `medium` and `large` thumbnail (`width`, `height`, `url`); an empty
+  list for a file without one. The fixture `tests/fixtures/graph/thumbnails.json` is written from that documentation.
+- **The picture**: the first set's `large` thumbnail (up to 800 pixels on its longer side; else its `medium` one),
+  read at its `url` as Graph handed it out (`teams_proto::ThumbnailLink`): a pre-authenticated link that carries its
+  own credential in its query, on SharePoint's media host (`https://<name>.svc.ms/transform/thumbnail?…`) or a
+  SharePoint host, and nothing else. It goes with no token of the account's (`Service::FileThumbnail`); the log
+  writes it at `info` by host and path alone, and at `debug` with its query's credentials redacted (a `tempauth`, an
+  `access_token` in a link nested in `docid`, any JWT-shaped value: `teams-log`'s redactor); and it is kept only when
+  its bytes are a PNG, JPEG, GIF or WebP picture.
+- **Kept for the run** in the engine's memory (`teams-core`'s `thumbnails.rs`), once per file: an answer that isn't a
+  success (403, 404), an empty list or bytes that aren't a picture are no picture, and the card shows its placeholder;
+  a read that failed on the way is asked again later. The bytes reach the card only from the engine.
 
 ## Where a name comes from
 

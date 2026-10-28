@@ -69,6 +69,8 @@ pub struct FakeCore {
     pub unread_animations: Mutex<HashSet<String>>,
     /// Messages' pictures by their `src`; any other is answered `None`.
     pub pictures: Mutex<HashMap<String, PictureBytes>>,
+    /// The thumbnails `file_thumbnail` answers, by the file's sharing link.
+    pub thumbnails: Mutex<HashMap<String, PictureBytes>>,
     /// The account's read horizons by conversation.
     pub horizons: Mutex<HashMap<String, ReadHorizon>>,
     /// Per conversation, the service's older pages `load_older` brings into `messages`, the next one first (each the
@@ -147,6 +149,7 @@ impl Default for FakeCore {
             animations: Mutex::default(),
             unread_animations: Mutex::default(),
             pictures: Mutex::default(),
+            thumbnails: Mutex::default(),
             recent: Mutex::default(),
             frequent: Mutex::default(),
             horizons: Mutex::default(),
@@ -417,6 +420,10 @@ impl Core for FakeCore {
 
     fn message_picture(&self, src: String) -> Reply<Option<PictureBytes>> {
         self.answer("message_picture", || locked(&self.pictures).get(&src).cloned())
+    }
+
+    fn file_thumbnail(&self, share_url: String) -> Reply<Option<PictureBytes>> {
+        self.answer("file_thumbnail", || locked(&self.thumbnails).get(&share_url).cloned())
     }
 
     fn presence(&self, mri: String) -> Reply<Availability> {

@@ -11,6 +11,7 @@
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
+use std::hash::Hash;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -25,24 +26,34 @@ pub type PictureBytes = Arc<PastedPicture>;
 pub const KEPT_BYTES: usize = 64 * 1024 * 1024;
 
 /// What is known of one picture.
-enum Known {
+pub(crate) enum Known {
     /// Read: its bytes, or `None` when the service has none.
     Read(Option<PictureBytes>),
     /// Its read runs; these wait for it.
     Reading(Vec<Responder<Option<PictureBytes>>>),
 }
 
-#[derive(Default)]
-struct Kept {
-    known: HashMap<MessagePicture, Known>,
+/// The pictures kept, by what names each (a message's AMS view; a shared file, [`crate::thumbnails`]).
+pub(crate) struct Kept<K> {
+    pub(crate) known: HashMap<K, Known>,
     /// The pictures read, oldest first, and their bytes in all.
-    order: VecDeque<MessagePicture>,
+    order: VecDeque<K>,
     bytes: usize,
 }
 
-impl Kept {
+impl<K> Default for Kept<K> {
+    fn default() -> Self {
+        Self {
+            known: HashMap::new(),
+            order: VecDeque::new(),
+            bytes: 0,
+        }
+    }
+}
+
+impl<K: Clone + Eq + Hash> Kept<K> {
     /// Keeps `picture`'s answer, letting the oldest go while more than [`KEPT_BYTES`] are kept; the asks it had waiting.
-    fn keep(&mut self, picture: MessagePicture, answer: Option<PictureBytes>) -> Option<Known> {
+    pub(crate) fn keep(&mut self, picture: K, answer: Option<PictureBytes>) -> Option<Known> {
         self.bytes += answer.as_ref().map_or(0, |bytes| bytes.bytes.len());
         self.order.push_back(picture.clone());
         let waiting = self.known.insert(picture, Known::Read(answer));
@@ -62,7 +73,7 @@ impl Kept {
 
 pub(crate) struct Pictures<C> {
     client: Arc<Client<HttpTransport<C>>>,
-    kept: Rc<RefCell<Kept>>,
+    kept: Rc<RefCell<Kept<MessagePicture>>>,
 }
 
 impl<C: Credentials + 'static> Pictures<C> {
@@ -100,7 +111,7 @@ impl<C: Credentials + 'static> Pictures<C> {
 async fn read_picture<C: Credentials + 'static>(
     client: Arc<Client<HttpTransport<C>>>,
     picture: MessagePicture,
-    kept: Rc<RefCell<Kept>>,
+    kept: Rc<RefCell<Kept<MessagePicture>>>,
 ) {
     let answer = match client.read(&picture).await {
         Ok(answer) => Some(picture.read_answer(&answer).map(Arc::new)),

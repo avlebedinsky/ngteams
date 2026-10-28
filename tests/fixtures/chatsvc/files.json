@@ -1,0 +1,30 @@
+{
+  "_synthetic": "Written synthetic-from-a-received-message, made-up values: a message with two files, read from the user's own store locally (never copied: every name, link, id and line here is made up), in the shape it had. Its text is one paragraph whose lines are broken by <br> each followed by a line feed, a blank line being two of them; properties.files is a JSON string of a list, one entry per file: @type http://schema.skype.com/File, fileName and title, fileType and type, fileInfo with fileUrl, siteUrl and shareUrl (the :v: sharing link the web client opens a video by), objectUrl, state active, permissionScope, an empty filePreview for a video, sharepointIds. The real message also carried properties.atp (a list of protected links with their own data), stood for by a placeholder here. <guid:a>, <guid:b> are lab accounts' object ids; tests fill them in. See docs/protocol/chat.md, Files: received.",
+  "read_back": {
+    "sequenceId": 7,
+    "conversationid": "19:<guid:a>_<guid:b>@unq.gbl.spaces",
+    "conversationLink": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/conversations/19:<guid:a>_<guid:b>@unq.gbl.spaces",
+    "contenttype": "Text",
+    "type": "Message",
+    "amsreferences": [],
+    "fromDisplayNameInToken": "Lab B",
+    "id": "1760000070000",
+    "clientmessageid": "7777777777777777777",
+    "version": "1760000070000",
+    "messagetype": "RichText/Html",
+    "content": "<p>A made-up test: three cameras on one rehearsal, each from its own spot<br>\n<br>\nThe cut shows:<br>\n1. Where each camera stood.<br>\n2. The made-up timeline.<br>\n3. The final edit.<br>\n<br>\nThe stage plan is attached too</p>",
+    "from": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/contacts/8:orgid:<guid:b>",
+    "imdisplayname": "Lab B",
+    "composetime": "2026-01-01T00:01:10.0000000Z",
+    "originalarrivaltime": "2026-01-01T00:01:10.0000000Z",
+    "properties": {
+      "mentions": "[]",
+      "cards": "[]",
+      "links": "[]",
+      "files": "[{\"itemid\":\"<guid:file-1>\",\"fileName\":\"02-made-up-rehearsal-cut-v3.mp4\",\"fileType\":\"mp4\",\"fileInfo\":{\"itemId\":null,\"fileUrl\":\"https://contoso-my.sharepoint.com/personal/made_up_user_contoso_test/Documents/Microsoft Teams Chat Files/02-made-up-rehearsal-cut-v3.mp4\",\"siteUrl\":\"https://contoso-my.sharepoint.com/personal/made_up_user_contoso_test/\",\"serverRelativeUrl\":\"\",\"shareUrl\":\"https://contoso-my.sharepoint.com/:v:/g/personal/made_up_user_contoso_test/MadeUpShareLinkForTheRehearsalCut0001\",\"shareId\":\"<guid:share-1>\"},\"fileChicletState\":{\"serviceName\":\"p2p\",\"state\":\"active\"},\"@type\":\"http://schema.skype.com/File\",\"version\":2,\"id\":\"<guid:file-1>\",\"baseUrl\":\"https://contoso-my.sharepoint.com/personal/made_up_user_contoso_test/\",\"objectUrl\":\"https://contoso-my.sharepoint.com/personal/made_up_user_contoso_test/Documents/Microsoft Teams Chat Files/02-made-up-rehearsal-cut-v3.mp4\",\"openUrl\":null,\"type\":\"mp4\",\"title\":\"02-made-up-rehearsal-cut-v3.mp4\",\"state\":\"active\",\"chicletBreadcrumbs\":null,\"providerData\":\"\",\"botFileProperties\":{},\"isUploadError\":null,\"progressComplete\":null,\"permissionScope\":\"Anyone\",\"filePreview\":{\"previewUrl\":\"\",\"previewHeight\":0,\"previewWidth\":0},\"sharepointIds\":{\"driveId\":null,\"listId\":\"<guid:list>\",\"listItemUniqueId\":\"<guid:file-1>\",\"siteId\":\"<guid:site>\",\"siteUrl\":\"https://contoso-my.sharepoint.com/personal/made_up_user_contoso_test\",\"webId\":\"<guid:web>\"},\"publication\":{\"level\":\"published\",\"versionId\":\"1.0\"},\"site\":{\"dataLocationCode\":\"NAM\",\"template\":{\"id\":\"21\"}}},{\"itemid\":\"<guid:file-2>\",\"fileName\":\"01-made-up-stage-plan.pdf\",\"fileType\":\"pdf\",\"fileInfo\":{\"itemId\":null,\"fileUrl\":\"https://contoso-my.sharepoint.com/personal/made_up_user_contoso_test/Documents/Microsoft Teams Chat Files/01-made-up-stage-plan.pdf\",\"siteUrl\":\"https://contoso-my.sharepoint.com/personal/made_up_user_contoso_test/\",\"serverRelativeUrl\":\"\",\"shareUrl\":\"https://contoso-my.sharepoint.com/:b:/g/personal/made_up_user_contoso_test/MadeUpShareLinkForTheStagePlan0002\",\"shareId\":\"<guid:share-2>\"},\"fileChicletState\":{\"serviceName\":\"p2p\",\"state\":\"active\"},\"@type\":\"http://schema.skype.com/File\",\"version\":2,\"id\":\"<guid:file-2>\",\"baseUrl\":\"https://contoso-my.sharepoint.com/personal/made_up_user_contoso_test/\",\"objectUrl\":\"https://contoso-my.sharepoint.com/personal/made_up_user_contoso_test/Documents/Microsoft Teams Chat Files/01-made-up-stage-plan.pdf\",\"openUrl\":null,\"type\":\"pdf\",\"title\":\"01-made-up-stage-plan.pdf\",\"state\":\"active\",\"chicletBreadcrumbs\":null,\"providerData\":\"\",\"botFileProperties\":{},\"isUploadError\":null,\"progressComplete\":null,\"permissionScope\":\"Anyone\",\"filePreview\":{\"previewUrl\":\"\",\"previewHeight\":0,\"previewWidth\":0},\"sharepointIds\":{\"driveId\":null,\"listId\":\"<guid:list>\",\"listItemUniqueId\":\"<guid:file-2>\",\"siteId\":\"<guid:site>\",\"siteUrl\":\"https://contoso-my.sharepoint.com/personal/made_up_user_contoso_test\",\"webId\":\"<guid:web>\"},\"publication\":{\"level\":\"published\",\"versionId\":\"1.0\"},\"site\":{\"dataLocationCode\":\"NAM\",\"template\":{\"id\":\"21\"}}}]",
+      "formatVariant": "TEAMS",
+      "languageStamp": "languages=en:100;length:300;&detector=Bling",
+      "atp": "<made-up atp entries>"
+    }
+  }
+}

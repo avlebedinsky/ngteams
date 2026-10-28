@@ -14,9 +14,12 @@ mod common;
 // the shell's and a chat view's parts over the rig
 #[path = "common/parts.rs"]
 mod parts;
-// names and pictures in the chat list and the chat view (M2 Task 12)
+// the files a message carries, as cards
+#[path = "chat_view/files.rs"]
+mod files;
 #[path = "chat_view/meeting.rs"]
 mod meeting;
+// names and pictures in the chat list and the chat view (M2 Task 12)
 #[path = "chat_view/people.rs"]
 mod people;
 
@@ -342,6 +345,7 @@ fn row(id: &str, sender: &str, at: i64) -> MessageItem {
         edited: false,
         reactions: Vec::new(),
         outbox: Vec::new(),
+        files: Arc::default(),
         unshown: UnshownParts::default(),
         writes: ChatWrites::Taken,
     }

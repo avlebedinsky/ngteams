@@ -47,6 +47,7 @@ pub mod profiles;
 pub mod search;
 pub mod sync;
 pub mod teams;
+pub mod thumbnails;
 
 pub use calling::{
     CallAction, CallActionError, CallMedia, CallParticipant, CallParts, CallStatus, CallVideo, CallView, GROUP_SLOTS,

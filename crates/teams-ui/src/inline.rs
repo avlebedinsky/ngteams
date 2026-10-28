@@ -13,6 +13,8 @@
 //!   engine as a reaction's is, [`reactions::animation`]): playing when `animated` (an emoticon-only message's, drawn
 //!   large), else standing on its first frame (one inside text, at the text's height, as Teams draws it until hovered).
 //!   Until it arrives, or when there is none, the reaction pack's picture of it stands in, else its emoji as text.
+//! - **A file's thumbnail** ([`thumbnail`]) is asked of the engine by the file's sharing link
+//!   ([`Core::file_thumbnail`]) and decoded and kept as a picture is; `crate::files` draws it on the file's card.
 //! - **Inline** ([`InlineText`]): an emoticon inside a paragraph keeps the place of a few spaces in the text, and is
 //!   drawn over them where the text's layout put them, so it flows and wraps with the text.
 
@@ -69,6 +71,11 @@ pub trait PictureEngine: Send + Sync {
     fn me(&self) -> &str;
     /// As [`Core::message_picture`].
     fn message_picture(&self, src: String) -> Reply<Option<PictureBytes>>;
+    /// As [`Core::file_thumbnail`]; `None` (there is none) unless the engine reads thumbnails.
+    fn file_thumbnail(&self, share_url: String) -> Reply<Option<PictureBytes>> {
+        let _ = share_url;
+        Reply::ready(Ok(None))
+    }
     /// As [`Core::reaction_animation`].
     fn reaction_animation(&self, id: String) -> Reply<Option<Strip>>;
     /// Which engine it is, for telling two sources apart.
@@ -85,6 +92,10 @@ impl PictureEngine for CoreEngine {
 
     fn message_picture(&self, src: String) -> Reply<Option<PictureBytes>> {
         self.0.message_picture(src)
+    }
+
+    fn file_thumbnail(&self, share_url: String) -> Reply<Option<PictureBytes>> {
+        self.0.file_thumbnail(share_url)
     }
 
     fn reaction_animation(&self, id: String) -> Reply<Option<Strip>> {
@@ -147,10 +158,18 @@ enum Known {
     Failed(Instant),
 }
 
-/// The messages' pictures this run, by the account they are shown to and their `src`.
+/// What names a picture asked of the engine: a message's `<img>` by its `src`, or a file's thumbnail by its sharing
+/// link.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum Named {
+    Src(String),
+    Thumbnail(String),
+}
+
+/// The messages' pictures and files' thumbnails this run, by the account they are shown to and what names them.
 #[derive(Default)]
 struct Pictures {
-    known: HashMap<(String, String), Known>,
+    known: HashMap<(String, Named), Known>,
 }
 
 impl gpui::Global for Pictures {}
@@ -169,7 +188,19 @@ pub enum PictureState {
 /// The picture `src` names as `source`'s engine has it; asks for it once when it wasn't (the windows drawn again once it
 /// is decoded).
 pub fn picture(src: &str, source: &PictureSource, cx: &mut App) -> PictureState {
-    let key = (source.engine().me().to_owned(), src.to_owned());
+    asked(Named::Src(src.to_owned()), source, cx)
+}
+
+/// The thumbnail of the file `share_url` is the sharing link of, as `source`'s engine has it; asked for once, as a
+/// picture is ([`picture`]).
+pub fn thumbnail(share_url: &str, source: &PictureSource, cx: &mut App) -> PictureState {
+    asked(Named::Thumbnail(share_url.to_owned()), source, cx)
+}
+
+/// The picture `named` names as `source`'s engine has it; asks for it once when it wasn't (the windows drawn again
+/// once it is decoded).
+fn asked(named: Named, source: &PictureSource, cx: &mut App) -> PictureState {
+    let key = (source.engine().me().to_owned(), named);
     let pictures = cx.default_global::<Pictures>();
     match pictures.known.get(&key) {
         Some(Known::Asked) => return PictureState::Reading,
@@ -179,7 +210,10 @@ pub fn picture(src: &str, source: &PictureSource, cx: &mut App) -> PictureState 
         Some(Known::Failed(_)) | None => {}
     }
     pictures.known.insert(key.clone(), Known::Asked);
-    let reply = source.engine().message_picture(src.to_owned());
+    let reply = match &key.1 {
+        Named::Src(src) => source.engine().message_picture(src.clone()),
+        Named::Thumbnail(share_url) => source.engine().file_thumbnail(share_url.clone()),
+    };
     cx.spawn(async move |cx| {
         let known = match reply.await {
             Ok(Some(bytes)) => cx

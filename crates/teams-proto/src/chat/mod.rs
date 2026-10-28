@@ -10,13 +10,15 @@
 //! - [`MessageText`]: what a message is written from (M1 Task 12), a [`RichText`] and the MRI each of its mentions
 //!   names, from which a post's or an edit's `content`, `properties.mentions` and target are all built.
 //!
-//! Received attachments are parsed, never fetched: `amsreferences`, `properties.files` and `properties.cards` with an
-//! entry are kept as they came ([`Unshown`]: no capture showed one, so a view says the message has content it can't
-//! show and never guesses at it), and an image's `src`, `itemtype`, `itemid` and size are kept on [`Image`] (a view asks the
+//! Received attachments are parsed, never fetched: a file `properties.files` names in the shape a received message
+//! showed is read as a [`SharedFile`] (its name, type and links: [`shared_files`]); `amsreferences`, `properties.cards` with
+//! an entry and a file entry of another shape are kept as they came ([`Unshown`]: no capture showed one, so a view
+//! says the message has content it can't show and never guesses at it), and an image's `src`, `itemtype`, `itemid` and size are kept on [`Image`] (a view asks the
 //! engine for a pasted picture's bytes or an emoticon's, never this crate).
 
 mod compose;
 mod event;
+mod files;
 mod html;
 mod model;
 mod read;
@@ -26,6 +28,7 @@ pub use event::{
     CALL_MEDIA_PREFIX, CallEnd, CallStart, ChatEvent, ChatPolicy, Member, Members, Recording, RecordingContents,
     RecordingStatus, Removed, TopicUpdate, Transcript, chat_event, is_call_media,
 };
+pub use files::{FILE_TYPE, FileKind, SharedFile, SharedFiles, is_file_link, is_sharepoint_host, shared_files};
 pub use html::{
     AMS_IMAGE_ITEMTYPE, EMOJI_ITEMTYPE, Image, MAX_CONTENT, MAX_DEPTH, MENTION_ITEMTYPE, Marks, Node, Quote,
     REPLY_ITEMTYPE, RichText, ThreadActivity, parse as parse_html, thread_activity,

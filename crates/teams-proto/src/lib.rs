@@ -3,8 +3,9 @@
 //!
 //! A request comes in one of three classes, and a [`Transport`] takes nothing else:
 //! - a [`Read`]: always sent as a `GET`, with no body (the chat service's, Microsoft Graph's reads of a person's name
-//!   and picture, [`GraphUser`] and [`GraphPicture`], CSA's read of the account's teams, [`CsaTeams`], and a picture
-//!   pasted into a message, [`MessagePicture`], from AMS);
+//!   and picture, [`GraphUser`] and [`GraphPicture`], and a shared file's thumbnails, [`FileThumbnails`], CSA's read
+//!   of the account's teams, [`CsaTeams`], and a picture pasted into a message, [`MessagePicture`], from AMS; beside
+//!   them a file thumbnail's picture at the link Graph handed out, [`HttpTransport::file_thumbnail`], with no token);
 //! - a plain [`Request`]: any method and body, the trait open to any crate. The transport builds its URL from its
 //!   [`Service`]'s base and asks [`teams_fence::contacting`], the lab rule's one classifier: sent when it reaches nobody
 //!   (the messaging stack's [`EndpointRegistration`], the middle tier's profile lookup [`ShortProfileLookup`], UPS's
@@ -57,6 +58,7 @@ mod post_read;
 mod read;
 mod relay;
 mod request;
+mod thumbnail;
 mod write;
 
 pub use ams::{MessagePicture, PastedFormat, PastedPicture};
@@ -92,6 +94,7 @@ pub use read::{
 };
 pub use relay::{RelayAnswer, RelayAnswerError, RelayCredential, RelayTokens};
 pub use request::Request;
+pub use thumbnail::{FileThumbnails, THUMBNAIL_HOST_SUFFIX, ThumbnailLink, is_thumbnail_link};
 pub use write::{
     AcceptCall, AcceptParts, AcknowledgeAcceptance, AcknowledgeMediaAnswer, AddParts, AddToCall, AnswerMedia,
     AnswerMediaParts, ApplyChannelParameters, AttachCall, AttachParts, Author, Authorized, CALL_START_URL,

@@ -9,6 +9,10 @@
 //!   with the quoted message's id, its sender's MRI and name and its time, as `docs/protocol/chat.md` shows it); a link
 //!   with an `http`, `https` or `mailto` `href`; an image with an `https` `src`, its `alt`, `itemtype` and `itemid`
 //!   (an emoticon's id, an AMS picture's object) and the size it is shown at (`width`/`height`, else its `style`'s).
+//! - **Whitespace as a browser sets it**: outside a `pre`, a run of spaces, tabs and line feeds in the markup is one
+//!   space, and a space at the start or end of a line (beside a `br` or a paragraph's edge) is none. A line break is a
+//!   `br` or a paragraph, never a line feed in the markup: the web client sends `<br>` followed by a line feed, and a
+//!   paragraph's text with line feeds in it reads as one line. A `pre` keeps its text as it came.
 //! - **Unknown markup is kept as text**: an element this model doesn't name, a link of another scheme or an image of
 //!   another source gives its text (an image its `alt`), never its tag or attributes.
 //! - **Nothing active survives**: `script`, `style`, `template`, frames, `object`/`embed` and the document's head are
@@ -210,6 +214,7 @@ pub fn parse(content: &str) -> RichText {
     }
     let mut nodes = builder.root;
     drop_block_gaps(&mut nodes);
+    trim_line_edges(&mut nodes);
     RichText { nodes, truncated }
 }
 
@@ -228,6 +233,46 @@ fn drop_block_gaps(nodes: &mut Vec<Node>) {
         .collect();
     let mut keep = keep.into_iter();
     nodes.retain(|_| keep.next().unwrap_or(true));
+}
+
+/// Drops the spaces at the start and end of each line of `nodes` (a container whose lines they are: the root, a
+/// paragraph, a quote): a text run's leading spaces at the start of the container, after a `br` or a block, its
+/// trailing ones at the end, before a `br` or a block. A browser draws none of them. Runs left empty go.
+fn trim_line_edges(nodes: &mut Vec<Node>) {
+    let edge = |node: Option<&Node>| matches!(node, None | Some(Node::Break | Node::Paragraph(_) | Node::Quote(_)));
+    for index in 0..nodes.len() {
+        let starts = edge(index.checked_sub(1).and_then(|before| nodes.get(before)));
+        let ends = edge(nodes.get(index + 1));
+        if let Some(Node::Text { text, .. }) = nodes.get_mut(index) {
+            if starts {
+                let kept = text.trim_start_matches(' ').len();
+                text.drain(..text.len() - kept);
+            }
+            if ends {
+                text.truncate(text.trim_end_matches(' ').len());
+            }
+        }
+    }
+    nodes.retain(|node| !matches!(node, Node::Text { text, .. } if text.is_empty()));
+}
+
+/// `text` with every run of HTML whitespace (space, tab, line feed, form feed, carriage return) made one space, as a
+/// browser sets text outside a `pre`; `after_space`: the text before it ends in a space, so a leading one goes too.
+fn collapse_whitespace(text: &str, after_space: bool) -> String {
+    let mut collapsed = String::with_capacity(text.len());
+    let mut space = after_space;
+    for character in text.chars() {
+        if matches!(character, ' ' | '\t' | '\n' | '\x0c' | '\r') {
+            if !space {
+                collapsed.push(' ');
+            }
+            space = true;
+        } else {
+            collapsed.push(character);
+            space = false;
+        }
+    }
+    collapsed
 }
 
 /// `content` up to [`MAX_CONTENT`] bytes (cut on a character boundary), and whether it was cut.
@@ -289,8 +334,9 @@ fn digits(text: String) -> Field<u64> {
 
 /// What an open element became.
 enum Frame {
-    /// A container: its content is collected on the builder's container stack and made a node when it closes.
-    Container,
+    /// A container: its content is collected on the builder's container stack and made a node when it closes. `pre`:
+    /// it is a `pre`, whose text keeps its whitespace.
+    Container { pre: bool },
     /// An element whose content goes to the container above (unknown markup, a mark, a leaf, a container too deep);
     /// the marks it found are restored when it closes.
     Pass { restore: Marks },
@@ -318,6 +364,11 @@ struct Builder {
     marks: Marks,
     /// While above 0, the edges are inside a dropped element (the count is how deep).
     skip: usize,
+    /// While above 0, the edges are inside a `pre` (the count is how deep): its text keeps its whitespace.
+    pre: usize,
+    /// The text set so far ends in a space, or a line starts here (a `br`, a block's edge): a whitespace run next is
+    /// none, across any element's edge (a link, a mention, a mark), as a browser sets it.
+    after_space: bool,
 }
 
 impl Builder {
@@ -328,6 +379,8 @@ impl Builder {
             containers: Vec::new(),
             marks: Marks::NONE,
             skip: 0,
+            pre: 0,
+            after_space: true,
         }
     }
 
@@ -337,7 +390,15 @@ impl Builder {
             HtmlNode::Element(element) => self.open_element(element),
             HtmlNode::Text(text) if self.skip == 0 => {
                 let marks = self.marks;
-                push_text(self.children(), text, marks);
+                let text = if self.pre > 0 {
+                    text.to_string()
+                } else {
+                    collapse_whitespace(text, self.after_space)
+                };
+                if !text.is_empty() {
+                    self.after_space = self.pre == 0 && text.ends_with(' ');
+                }
+                push_text(self.children(), &text, marks);
             }
             _ => {}
         }
@@ -353,9 +414,12 @@ impl Builder {
         }
         match self.frames.pop() {
             Some(Frame::Pass { restore }) => self.marks = restore,
-            Some(Frame::Container) => {
+            Some(Frame::Container { pre }) => {
+                if pre {
+                    self.pre -= 1;
+                }
                 if let Some((kind, children)) = self.containers.pop() {
-                    self.close_container(kind, children);
+                    self.close_container(kind, children, pre);
                 }
             }
             None => {}
@@ -370,7 +434,7 @@ impl Builder {
         }
         if self.reply_quote().is_some() {
             match element.attr("itemprop") {
-                Some("mri") => return self.open_container(Container::Sender(attr(element, "itemid"))),
+                Some("mri") => return self.open_container(Container::Sender(attr(element, "itemid")), false),
                 Some("time") => {
                     if let Some(quote) = self.reply_quote() {
                         quote.time = attr(element, "itemid");
@@ -388,40 +452,59 @@ impl Builder {
             return;
         }
         match container(element) {
-            Some(kind) => self.open_container(kind),
+            Some(kind) => self.open_container(kind, name == "pre"),
             None => self.open_leaf(element),
         }
     }
 
-    fn open_container(&mut self, kind: Container) {
+    fn open_container(&mut self, kind: Container, pre: bool) {
         if self.containers.len() >= MAX_DEPTH {
             self.frames.push(Frame::Pass { restore: self.marks });
             return;
         }
+        if pre {
+            self.pre += 1;
+        }
+        if matches!(kind, Container::Paragraph | Container::Quote(..)) {
+            self.after_space = true;
+        }
         self.containers.push((kind, Vec::new()));
-        self.frames.push(Frame::Container);
+        self.frames.push(Frame::Container { pre });
     }
 
     /// An element that is no container: a line break, an image, or unknown markup, whose text stays.
     fn open_leaf(&mut self, element: &Element) {
         let marks = self.marks;
         match element.name() {
-            "br" => self.children().push(Node::Break),
-            "img" => match image(element) {
-                Some(image) => self.children().push(Node::Image(image)),
-                None => {
-                    if let Some(alt) = element.attr("alt") {
-                        push_text(self.children(), alt, marks);
+            "br" => {
+                self.after_space = true;
+                self.children().push(Node::Break);
+            }
+            "img" => {
+                self.after_space = false;
+                match image(element) {
+                    Some(image) => self.children().push(Node::Image(image)),
+                    None => {
+                        if let Some(alt) = element.attr("alt") {
+                            push_text(self.children(), alt, marks);
+                        }
                     }
                 }
-            },
+            }
             _ => {}
         }
         self.frames.push(Frame::Pass { restore: marks });
     }
 
-    fn close_container(&mut self, kind: Container, mut children: Vec<Node>) {
+    fn close_container(&mut self, kind: Container, mut children: Vec<Node>, pre: bool) {
         drop_block_gaps(&mut children);
+        if matches!(kind, Container::Paragraph | Container::Quote(..)) {
+            // the next text starts a line
+            self.after_space = true;
+            if !pre {
+                trim_line_edges(&mut children);
+            }
+        }
         let node = match kind {
             Container::Paragraph => Node::Paragraph(children),
             Container::Link(href) => Node::Link { href, children },

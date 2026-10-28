@@ -1,0 +1,30 @@
+{
+  "_synthetic": "Made up, in the shape Microsoft Graph documents for a drive item's thumbnails (GET /shares/{sharing token}/driveItem/thumbnails, learn.microsoft.com's driveItem: list thumbnails and thumbnailSet): no capture or probe has read one. value is a list of thumbnail sets, each with an id and its small, medium and large thumbnail (height, width and url, a pre-authenticated link that carries its own credential in its query, made up here as a placeholder on SharePoint's media host). See docs/protocol/graph.md, A shared file's thumbnail.",
+  "answer": {
+    "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#shares('<share>')/driveItem/thumbnails",
+    "value": [
+      {
+        "id": "0",
+        "large": {
+          "height": 450,
+          "url": "https://westus1-mediap.svc.ms/transform/thumbnail?provider=spo&inputFormat=mp4&cs=<made-up>&docid=<made-up>&width=800&height=800",
+          "width": 800
+        },
+        "medium": {
+          "height": 99,
+          "url": "https://westus1-mediap.svc.ms/transform/thumbnail?provider=spo&inputFormat=mp4&cs=<made-up>&docid=<made-up>&width=176&height=176",
+          "width": 176
+        },
+        "small": {
+          "height": 54,
+          "url": "https://westus1-mediap.svc.ms/transform/thumbnail?provider=spo&inputFormat=mp4&cs=<made-up>&docid=<made-up>&width=96&height=96",
+          "width": 96
+        }
+      }
+    ]
+  },
+  "empty": {
+    "@odata.context": "https://graph.microsoft.com/v1.0/$metadata#shares('<share>')/driveItem/thumbnails",
+    "value": []
+  }
+}

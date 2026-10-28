@@ -32,12 +32,13 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, div, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
-use teams_proto::chat::{MessageType, RichText, parse_html};
+use teams_proto::chat::{MessageType, RichText, SharedFile, parse_html};
 use teams_store::Message;
 
 use crate::bridge::Core;
-use crate::chat_view::{DELETED, UNSHOWN_CONTENT, UNSUPPORTED, unshown_of};
+use crate::chat_view::{DELETED, UNSHOWN_CONTENT, UNSUPPORTED, files_of, unshown_of};
 use crate::clock::{self, HourCycle};
+use crate::files;
 use crate::models::Models;
 use crate::people::Shown;
 use crate::rich_text::{self, Mentions, Rendered};
@@ -121,7 +122,10 @@ pub struct Item {
     pub arrival_time: i64,
     pub edited: bool,
     pub body: Body,
-    /// A text that carries a part no capture showed (`chat_view::unshown_of`: a received file, a card): shown with
+    /// The files a text carries (`chat_view::files_of`), each drawn as its card under it (`crate::files`).
+    pub files: Vec<SharedFile>,
+    /// A text that carries a part this build can't show (`chat_view::unshown_of`: a file entry of a shape no message
+    /// showed, a card): shown with
     /// [`UNSHOWN_CONTENT`] under it, never a guess at the part. No web button: no channel deep link was captured.
     pub unshown: bool,
 }
@@ -355,7 +359,9 @@ impl ChannelView {
 
     /// `message` showing `body`.
     fn item_with(message: &Message, body: Body, people: &HashMap<String, Shown>, me: &str) -> Item {
-        let unshown = matches!(body, Body::Text(_)) && unshown_of(message).any();
+        let text = matches!(body, Body::Text(_));
+        let unshown = text && unshown_of(message).any();
+        let files = if text { files_of(message) } else { Vec::new() };
         // a thread's own message has no sender to name: never the thread's id
         let from_thread = message.sender.as_deref().is_some_and(system_message::is_thread);
         Item {
@@ -368,6 +374,7 @@ impl ChannelView {
             arrival_time: message.arrival_time,
             edited: message.edit_time.is_some() && message.delete_time.is_none(),
             body,
+            files,
             unshown,
         }
     }
@@ -604,6 +611,10 @@ fn message_view(item: &Item, palette: Palette, cycle: HourCycle) -> AnyElement {
         Body::Event(text) => muted(text.clone()),
         Body::Unsupported => muted(UNSUPPORTED.into()),
     };
+    let files = match &item.body {
+        Body::Text(rendered) => files::file_cards(&item.id, &item.files, rendered.source.as_ref(), palette),
+        _ => None,
+    };
     let unshown = item.unshown.then(|| {
         let id = item.id.clone();
         div()
@@ -619,6 +630,7 @@ fn message_view(item: &Item, palette: Palette, cycle: HourCycle) -> AnyElement {
         .gap_1()
         .child(header)
         .child(body)
+        .children(files)
         .children(unshown)
         .into_any_element()
 }

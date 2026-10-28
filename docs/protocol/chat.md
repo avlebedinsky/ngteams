@@ -207,12 +207,13 @@ every profile lookup; the account's display name since the lookups of lab accoun
   of objects (`messageId` a number, plus `message` null, `validationResult` `Valid`, `sharedRefId`, `replyChainId`) and
   `hasValidMsgReferences` true. A 1:1 chat has no reply chains: a quote is all a "reply" is.
 - **Mentions** (fixture `mention.json`): [below](#mentions-mention).
-- **Received attachments**: not seen; every message had `amsreferences` `[]` and `files` and `cards` `"[]"`. Sending
-  images is deferred out of M1 ([Images](#images-sending-denied-ab-image)) and a file never left the web client
-  ([Files](#files-sending-denied-ab-file)), so no message with one has been read either. The native client keeps a
-  list with an entry as it came (`teams_proto::chat::Unshown`; `Message::files` is `Field::Unknown`) and shows the
-  message's text with a line saying it has content that can't be shown here and a button that opens the chat in the
-  web client (`l/chat/<chat>/0`, the id encoded as `abc-chat` encodes it), never a guess at it (M2 Task 23). A message
+- **Received attachments**: not seen in the lab; every captured message had `amsreferences` `[]` and `files` and
+  `cards` `"[]"`. A received file's shape was read since from a message of the user's own account
+  ([Files: received](#files-received)): an entry in that shape is drawn as a file card (`Message::files`,
+  `teams_proto::chat::SharedFiles`). Any other file entry, a card and an AMS object are kept as they came
+  (`teams_proto::chat::Unshown`), and the native client shows the message's text with a line saying it has content
+  that can't be shown here and a button that opens the chat in the web client (`l/chat/<chat>/0`, the id encoded as
+  `abc-chat` encodes it), never a guess at it (M2 Task 23). A message
   of a type the chat view doesn't show gets the same button under its placeholder. The read-only channel view shows
   the line without the button: no channel deep link has been captured.
 
@@ -434,6 +435,36 @@ Why sending stays out, and what would settle it, in order (`docs/backlog/file-se
 reviewed read by `POST` of the account's own state, then the upload into the account's own drive, then the share,
 which names its readers and so could be judged by `Fence::check` (every recipient a lab account, a "specific people"
 link only), then the post. The fence maps none of it.
+
+## Files: received
+
+Seen in a message the user's own account received (two videos shared from the sender's OneDrive), read locally from
+the personal build's store and never copied: the fixture `tests/fixtures/chatsvc/files.json` is written synthetic in
+its shape (two files, made-up names and links). No lab capture holds a received file.
+
+- **The text** is the caption, one `<p>` whose lines are broken by `<br>` each followed by a line feed (`<br>\n`), a
+  blank line being two of them. The line feed is markup whitespace: `teams-proto`'s reader sets whitespace as a
+  browser does (a run of it is one space, none at a line's start or end, a `pre` keeping its own), so the lines read
+  one under the other with one blank line between paragraphs, as the web client shows them.
+- **`properties.files`** is a JSON string of a list, one entry per file, in the order the cards show them. An entry:
+  `@type` `http://schema.skype.com/File`; `itemid` and `id` (the file's list item id); `fileName` and `title` (its
+  name); `fileType` and `type` (its extension, `mp4`); `fileInfo` with `fileUrl` (the file's address in the sender's
+  "Microsoft Teams Chat Files" folder, its own name for the folder in the sender's language), `siteUrl`, an empty
+  `serverRelativeUrl`, `shareUrl` (the sharing link, `https://<tenant>-my.sharepoint.com/:v:/g/personal/<user>/<id>`;
+  `:v:` is a video's kind) and `shareId`; `fileChicletState` (`serviceName` `p2p`, `state` `active`); `version` `2`;
+  `baseUrl`; `objectUrl` (as `fileUrl`); `openUrl` `null`; `state` `active`; `permissionScope` (`Anyone` for an
+  anyone link); `filePreview` with an empty `previewUrl` and sizes `0` (a video has none); `sharepointIds` (`listId`,
+  `listItemUniqueId`, `siteId`, `siteUrl`, `webId`, `driveId` `null`); `publication`; `site`. The message also carried
+  `properties.atp`, the protected links of the files.
+- **The web client draws** each file as a card under the text, side by side: a header with the file type's icon, the
+  name cut with an ellipsis, Share and "More options", then a picture of the file filling the card (a video's frame).
+  A click opens the file at its sharing link (Stream's player for a video).
+- **The native client** reads an entry only in this shape (`teams_proto::chat::shared_files`: the file's `@type`, a
+  name, `state` `active` when given, a SharePoint `https` sharing link or object URL); any other entry is kept as it
+  came and the message says it has content it can't show. It draws the card from the name, the extension and the
+  links, opens the sharing link in the browser on a click, offers "Open in browser", "Download" (the sharing link with
+  `download=1`) and "Copy link", and reads a video's or an image's picture from Graph by the sharing link
+  ([graph.md](graph.md#a-shared-files-thumbnail)). It shares nothing: Share is a contacting write.
 
 ## Mentions (mention)
 

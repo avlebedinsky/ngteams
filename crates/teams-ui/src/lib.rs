@@ -69,6 +69,7 @@ pub mod chat_view;
 pub mod clock;
 pub mod compose;
 pub mod desktop;
+pub mod files;
 pub mod first_run;
 pub mod icons;
 pub mod inline;

@@ -135,6 +135,7 @@ use crate::profiles::{PROFILE_RETRY, Person, Profiles};
 use crate::search::{Backfill, INDEX_BATCH, Step};
 use crate::sync::{CatchUp, CatchUpError, CatchUpReport, Gaps, NOTES, Synced};
 use crate::teams::{ChatListing, READING_TEAMS, TEAMS_RETRY, Teams, TeamsRead, TeamsReadError};
+use crate::thumbnails::Thumbnails;
 
 mod described;
 mod inbox;
@@ -549,6 +550,7 @@ enum Request {
     Presence(String, Responder<Availability>),
     ReactionAnimation(String, Responder<Option<Strip>>),
     MessagePicture(String, Responder<Option<PictureBytes>>),
+    FileThumbnail(String, Responder<Option<PictureBytes>>),
     Teams(Responder<Option<Vec<Team>>>),
     ChatListing(Responder<ChatListing>),
     Query(Query),
@@ -818,6 +820,14 @@ impl EngineRequests {
         self.ask(|reply| Request::MessagePicture(src, reply))
     }
 
+    /// The thumbnail of the file a message carries, by its sharing link (`teams_proto::chat::SharedFile::share_url`),
+    /// as Graph and SharePoint's media host have it ([`crate::thumbnails`]): its bytes and format, or `None` when there
+    /// is none or the link names no SharePoint file.
+    pub fn file_thumbnail(&self, share_url: impl Into<String>) -> Reply<Option<PictureBytes>> {
+        let share_url = share_url.into();
+        self.ask(|reply| Request::FileThumbnail(share_url, reply))
+    }
+
     /// The account's own stored read horizon in a conversation.
     pub fn read_horizon(&self, conversation: impl Into<String>) -> Reply<Option<ReadHorizon>> {
         let conversation = conversation.into();
@@ -1020,6 +1030,7 @@ struct Core<C, T> {
     presences: Presences<C>,
     animations: Animations<C>,
     pictures: Pictures<C>,
+    thumbnails: Thumbnails<C>,
     events: mpsc::UnboundedSender<Event>,
     options: EngineOptions,
     push: Option<Push>,
@@ -1070,6 +1081,7 @@ where
         let presences = Presences::new(Arc::clone(&parts.client), polls);
         let animations = Animations::new(Arc::clone(&parts.client));
         let pictures = Pictures::new(Arc::clone(&parts.client));
+        let thumbnails = Thumbnails::new(Arc::clone(&parts.client));
         let calling = parts
             .calls
             .map(|calls| Calling::new(calls, Arc::clone(&outbox), Arc::clone(&parts.client), events.clone()));
@@ -1085,6 +1097,7 @@ where
             presences,
             animations,
             pictures,
+            thumbnails,
             events,
             options: parts.options,
             push: parts.push,
@@ -1280,6 +1293,7 @@ where
             }
             Request::ReactionAnimation(id, reply) => self.animations.animation(id, reply),
             Request::MessagePicture(src, reply) => self.pictures.picture(&src, reply),
+            Request::FileThumbnail(share_url, reply) => self.thumbnails.thumbnail(&share_url, reply),
             Request::Person(mri, reply) => {
                 let person = self.profiles.person(&self.store, &mri);
                 let _ = reply.send(person.map_err(EngineError::from));

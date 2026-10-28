@@ -21,8 +21,9 @@ use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_fence::{Fence, FenceLog, Mri, Roster};
 use teams_proto::{
-    Client, Credentials, Endpoint, GRAPH_AUDIENCE, GraphAnswerError, GraphPicture, GraphUser, HttpError, HttpTransport,
-    MAX_PICTURE, Method, PictureFormat, Read, Refusal, Request, Response, Service, object_id,
+    Client, Credentials, Endpoint, FileThumbnails, GRAPH_AUDIENCE, GraphAnswerError, GraphPicture, GraphUser,
+    HttpError, HttpTransport, MAX_PICTURE, Method, PictureFormat, Read, Refusal, Request, Response, Service,
+    is_thumbnail_link, object_id,
 };
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -30,6 +31,9 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 const GUID_A: &str = "0000000a-0000-4000-8000-00000000000a";
 const CHAT_BASE: &str = "https://teams.microsoft.com/api/chatsvc/amer";
 const FIXTURE: &str = include_str!("../../../tests/fixtures/graph/profile.json");
+const THUMBNAILS: &str = include_str!("../../../tests/fixtures/graph/thumbnails.json");
+/// A made-up sharing link of a video, on the documentation tenant's OneDrive.
+const SHARE: &str = "https://contoso-my.sharepoint.com/:v:/g/personal/made_up_user_contoso_test/MadeUpShareLink0001";
 
 fn lab_a() -> String {
     format!("8:orgid:{GUID_A}")
@@ -381,4 +385,135 @@ async fn a_refused_graph_token_is_renewed_and_the_read_sent_once_more() {
         ["Bearer placeholder-graph-token-0", "Bearer placeholder-graph-token-1"]
     );
     assert!(tokens.audiences().iter().all(|audience| audience == GRAPH_AUDIENCE));
+}
+
+/// The thumbnail fixture's answer with its `large` picture's link pointing at `large`.
+fn thumbnails_answer(large: &str) -> String {
+    let mut answer: Value = serde_json::from_str::<Value>(THUMBNAILS).unwrap()["answer"].clone();
+    answer["value"][0]["large"]["url"] = Value::String(large.to_owned());
+    answer.to_string()
+}
+
+#[test]
+fn a_shared_files_thumbnails_are_read_by_its_sharing_link_and_the_large_ones_link_is_taken() {
+    let read = FileThumbnails::of(SHARE).unwrap();
+    assert_eq!(read.service(), Service::Graph);
+    // Graph's sharing token: `u!` and the link in base64url without padding
+    let token = format!(
+        "u!{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(SHARE.as_bytes())
+    );
+    assert_eq!(read.share(), token);
+    assert_eq!(
+        read.endpoint(),
+        Endpoint::new(["shares", token.as_str(), "driveItem", "thumbnails"])
+    );
+    // only a SharePoint `https` link names a file
+    for other in [
+        "http://contoso-my.sharepoint.com/:v:/g/x",
+        "https://example.com/:v:/g/x",
+        "https://contoso-my.sharepoint.com.example.com/x",
+        "https://user@contoso-my.sharepoint.com/x",
+        "https://contoso-my.sharepoint.com:8443/x",
+        "not a link",
+    ] {
+        assert!(FileThumbnails::of(other).is_none(), "{other}");
+    }
+    let fixture: Value = serde_json::from_str(THUMBNAILS).unwrap();
+    let answer = |body: &Value| Response::new(200, body.to_string());
+    assert!(read.read_answer(&answer(&fixture["answer"])).is_some());
+    // no thumbnail, or an answer that isn't Graph's: none
+    assert!(read.read_answer(&answer(&fixture["empty"])).is_none());
+    assert!(read.read_answer(&Response::new(200, "not json")).is_none());
+    // a `large` link off the thumbnail hosts is passed over for the `medium` one; with neither, none
+    let elsewhere = thumbnails_answer("https://example.com/thumbnail.jpg");
+    let mut neither: Value = serde_json::from_str(&elsewhere).unwrap();
+    assert!(read.read_answer(&Response::new(200, elsewhere)).is_some());
+    neither["value"][0]["medium"]["url"] = Value::String("http://westus1-mediap.svc.ms/x".to_owned());
+    assert!(read.read_answer(&answer(&neither)).is_none());
+}
+
+#[test]
+fn a_thumbnails_link_is_read_only_on_the_media_host_or_a_sharepoint_host() {
+    let link = |text: &str| url::Url::parse(text).unwrap();
+    for taken in [
+        "https://westus1-mediap.svc.ms/transform/thumbnail?provider=spo&docid=x",
+        "https://contoso-my.sharepoint.com/_api/v2.0/thumbnail?tempauth=x",
+    ] {
+        assert!(is_thumbnail_link(&link(taken)), "{taken}");
+    }
+    for refused in [
+        "http://westus1-mediap.svc.ms/transform/thumbnail",
+        "https://svc.ms/transform/thumbnail",
+        "https://westus1-mediap.svc.ms.example.com/x",
+        "https://user@westus1-mediap.svc.ms/x",
+        "https://westus1-mediap.svc.ms:444/x",
+        "https://westus1-mediap.svc.ms/x#fragment",
+        "https://graph.microsoft.com/v1.0/x",
+    ] {
+        assert!(!is_thumbnail_link(&link(refused)), "{refused}");
+    }
+}
+
+#[tokio::test]
+async fn a_thumbnail_is_listed_with_the_graph_token_and_its_picture_read_with_none() {
+    let (server, tokens, client) = setup().await;
+    let read = FileThumbnails::of(SHARE).unwrap();
+    let large = "https://westus1-mediap.svc.ms/transform/thumbnail?provider=spo&cs=made-up&docid=made-up&width=800";
+    Mock::given(method("GET"))
+        .and(path(format!("/v1.0/shares/{}/driveItem/thumbnails", read.share())))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(thumbnails_answer(large), "application/json"))
+        .mount(&server)
+        .await;
+    let jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10];
+    Mock::given(method("GET"))
+        .and(path("/transform/thumbnail"))
+        .and(query_param("docid", "made-up"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(jpeg.clone(), "image/jpeg"))
+        .mount(&server)
+        .await;
+    let listed = client.read(&read).await.unwrap();
+    let link = read.read_answer(&listed).unwrap();
+    assert!(
+        !format!("{link:?}").contains("svc.ms"),
+        "Debug shows nothing of the link"
+    );
+    let picture = client.transport().file_thumbnail(&link).await.unwrap();
+    assert_eq!(picture.body(), jpeg);
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].headers.get("authorization").unwrap().to_str().unwrap(),
+        "Bearer placeholder-graph-token-0"
+    );
+    // the picture's read carries the link's own query and no credential of the account's
+    assert_eq!(requests[1].method.as_str(), "GET");
+    assert!(requests[1].headers.get("authorization").is_none());
+    assert!(requests[1].headers.get("x-skypetoken").is_none());
+    assert_eq!(
+        requests[1].url.query(),
+        Some("provider=spo&cs=made-up&docid=made-up&width=800")
+    );
+    assert_eq!(tokens.audiences(), vec![GRAPH_AUDIENCE.to_owned()]);
+}
+
+#[tokio::test]
+async fn nothing_names_the_thumbnail_service_but_a_link_graph_handed_out() {
+    struct OnThumbnails;
+    impl Read for OnThumbnails {
+        fn service(&self) -> Service {
+            Service::FileThumbnail
+        }
+        fn endpoint(&self) -> Endpoint {
+            Endpoint::new(["transform", "thumbnail"])
+        }
+    }
+    let (server, tokens, client) = setup().await;
+    match client.read(&OnThumbnails).await {
+        Err(HttpError::Refused(Refusal::FileThumbnail)) => {}
+        other => panic!("{other:?}"),
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+    assert!(tokens.audiences().is_empty());
 }

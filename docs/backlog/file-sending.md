@@ -49,15 +49,15 @@ any allowance.
 
 ## Received files meanwhile
 
-No message with a file has ever been read in the lab: every message had `properties.files` `"[]"`. Until a capture
-shows one, `teams-proto` keeps a list with an entry as it came (`Message::files` is `Field::Unknown`,
-`teams_proto::chat::Unshown`; `properties.cards` and `amsreferences` with an entry likewise), and the app shows such a
+No message with a file has been read in the lab, but a received file's shape was read from a message of the user's
+own account (`docs/protocol/chat.md`, "Files: received"; the synthetic fixture `tests/fixtures/chatsvc/files.json`).
+`teams-proto` reads an entry in that shape (`Message::files`, `teams_proto::chat::SharedFiles`: name, type, sharing
+link) and the app draws it as Teams' file card, its thumbnail read through Graph, a click opening its sharing link
+through `open_url`; the file's content is never fetched by the app. An entry of another shape, `properties.cards` and
+`amsreferences` with an entry are kept as they came (`teams_proto::chat::Unshown`), and the app shows such a
 message's text with "This message has content that can't be shown here" and an "Open in Teams on the web" button
-(`web_chat_link`: the chat in the web client, through `open_url`), never a guess at the file; a channel post shows
-the line without the button (no channel deep link has been captured). **The file card waits
-here**: once a capture shows a file message (from step 4, or b's read of it), write synthetic fixtures of every form
-the capture shows, read the entry into a typed file (name, size, type, link), show it as a card and open its link
-through `open_url`; the file's content is never fetched by the app.
+(`web_chat_link`), never a guess at it; a channel post shows the line without the button (no channel deep link has
+been captured). A file the lab sends itself (step 4) would still want its own capture, to check the entry it posts.
 
 To pick this up: start with the read-only check above, then step 1; `ab-file` force-denies every write of a file
 meanwhile (the file services, AMS objects, and any write naming a lab file) and stays a capture scenario.

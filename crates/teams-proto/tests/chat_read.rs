@@ -17,9 +17,9 @@ use teams_auth::token::TokenError;
 use teams_fence::{Fence, FenceLog, Mri, Roster};
 use teams_mock::{AB_CHAT, ABC_CHAT, CHANNEL, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, NOTIFICATIONS, TENANT};
 use teams_proto::chat::{
-    ChatReadError, ChatReads, Conversation, ConversationKind, ConversationList, Field, MAX_CONTENT, MAX_DEPTH, Marks,
-    MemberList, MentionKind, Message, MessagePage, MessageType, Node, Quote, RichText, Thread, Unshown, WEB_CLIENT,
-    link_endpoint, parse_html, unshown_parts, web_chat_link,
+    ChatReadError, ChatReads, Conversation, ConversationKind, ConversationList, Field, FileKind, MAX_CONTENT,
+    MAX_DEPTH, Marks, MemberList, MentionKind, Message, MessagePage, MessageType, Node, Quote, RichText, SharedFile,
+    SharedFiles, Thread, Unshown, WEB_CLIENT, link_endpoint, parse_html, shared_files, unshown_parts, web_chat_link,
 };
 use teams_proto::{Client, Credentials, HttpError, HttpTransport};
 use wiremock::matchers::method;
@@ -230,7 +230,7 @@ fn a_quoted_reply_reads_its_quote_from_content_and_properties() -> TestResult {
         [Node::Quote(quote), Node::Paragraph(vec![text("a made-up reply")])]
     );
     assert_eq!(reply.mentions(), Field::Known(Vec::new()));
-    assert_eq!(reply.files(), Field::Known(Vec::new()));
+    assert_eq!(reply.files(), SharedFiles::default());
     assert_eq!(reply.ams_references, Some(Vec::new()));
     Ok(())
 }
@@ -551,7 +551,7 @@ fn what_this_build_does_not_know_is_kept_never_a_parse_failure() -> TestResult {
     assert_eq!(odd.reactions(), Field::Unknown(json!("like")));
     assert_eq!(odd.edit_time(), Field::Unknown(Value::Null));
     assert_eq!(odd.quotes(), Field::Unknown(json!([{"sender": "no id"}])));
-    assert_eq!(odd.files(), Field::Unknown(json!(3)));
+    assert_eq!(odd.files().unread, Some(json!(3)));
     Ok(())
 }
 
@@ -559,9 +559,9 @@ fn what_this_build_does_not_know_is_kept_never_a_parse_failure() -> TestResult {
 fn a_file_card_or_ams_object_no_capture_showed_is_kept_as_it_came_never_read_as_one() -> TestResult {
     // every captured message: the empty lists, as JSON strings, and no AMS object
     let reply = message(&fixture("reply.json")?["read_back"])?;
-    assert_eq!(reply.files(), Field::Known(Vec::new()));
+    assert_eq!(reply.files(), SharedFiles::default());
     assert_eq!(reply.unshown(), Vec::new());
-    // an entry in either form no capture showed: kept whole, never a file (its fields aren't read)
+    // an entry of a shape no message showed (no `@type`, a link off SharePoint): kept as it came, never a file
     let entry = r#"[{"fileName":"made-up.txt","objectUrl":"https://example.test/x"}]"#;
     let odd = message(&json!({
         "id": "18",
@@ -571,11 +571,18 @@ fn a_file_card_or_ams_object_no_capture_showed_is_kept_as_it_came_never_read_as_
         "amsreferences": ["0-wus-d1-made-up"],
         "properties": {"files": entry, "cards": [{"made": "up"}], "links": "[]", "mentions": "[]"}
     }))?;
-    assert_eq!(odd.files(), Field::Unknown(json!(entry)));
+    let unread = json!([{"fileName": "made-up.txt", "objectUrl": "https://example.test/x"}]);
+    assert_eq!(
+        odd.files(),
+        SharedFiles {
+            files: Vec::new(),
+            unread: Some(unread.clone()),
+        }
+    );
     assert_eq!(
         odd.unshown(),
         [
-            Unshown::Files(json!(entry)),
+            Unshown::Files(unread),
             Unshown::Cards(json!([{"made": "up"}])),
             Unshown::AmsReferences(json!(["0-wus-d1-made-up"])),
         ]
@@ -1254,5 +1261,152 @@ async fn an_entry_that_is_not_a_message_is_kept_apart_and_the_page_read() -> Tes
     );
     assert_eq!(page.unreadable, [json!({"no": "id"}), json!({"id": "2", "content": 5})]);
     assert_eq!(page.sync_state(), None, "an empty link is no link");
+    Ok(())
+}
+
+/// `files.json`'s message (synthetic, in the shape of a received message with two files).
+fn files_message() -> TestResult<Message> {
+    message(&fixture("files.json")?["read_back"])
+}
+
+fn text_node(text: &str) -> Node {
+    Node::Text {
+        text: text.to_owned(),
+        marks: Marks::NONE,
+    }
+}
+
+#[test]
+fn a_messages_lines_broken_by_br_and_a_line_feed_read_as_a_browser_sets_them() -> TestResult {
+    // each `<br>` followed by a line feed: the line feed is markup whitespace, never a second line break
+    let text = files_message()?.rich_text().ok_or("no rich text")?;
+    assert_eq!(
+        text.plain_text(),
+        "A made-up test: three cameras on one rehearsal, each from its own spot\n\nThe cut shows:\n1. Where each \
+         camera stood.\n2. The made-up timeline.\n3. The final edit.\n\nThe stage plan is attached too\n"
+    );
+    // runs of whitespace are one space, none at a line's start or end; a `pre` keeps its own
+    assert_eq!(
+        parse_html("<p>  one\n  two\t three  <br>\n   four </p>\r\n<p>five</p>").plain_text(),
+        "one two three\nfour\nfive\n"
+    );
+    assert_eq!(
+        parse_html("<p>a <b> bold</b> c</p>").nodes,
+        [Node::Paragraph(vec![
+            text_node("a "),
+            Node::Text {
+                text: "bold".to_owned(),
+                marks: Marks::BOLD,
+            },
+            text_node(" c"),
+        ])]
+    );
+    assert_eq!(
+        parse_html("<pre>  keep\n   this</pre>").plain_text(),
+        "  keep\n   this\n"
+    );
+    // a run of whitespace is one space across a link's or a mention's edge too, and none where a line starts
+    for (html, shown) in [
+        ("<p><a href=\"https://example.test\">x </a> y</p>", "x y\n"),
+        ("<p>x <a href=\"https://example.test\"> \n y </a> z</p>", "x y z\n"),
+        ("<p>a<br>\n <a href=\"https://example.test\"> b</a></p>", "a\nb\n"),
+        (
+            "<p>hi <span itemtype=\"http://schema.skype.com/Mention\" itemid=\"0\"> Lab A</span> there</p>",
+            "hi Lab A there\n",
+        ),
+    ] {
+        assert_eq!(parse_html(html).plain_text(), shown, "{html}");
+    }
+    // a no-break space is text, never collapsed
+    assert_eq!(parse_html("<p>a\u{a0}\u{a0}b</p>").plain_text(), "a\u{a0}\u{a0}b\n");
+    Ok(())
+}
+
+#[test]
+fn a_received_messages_files_are_read_by_name_type_and_links() -> TestResult {
+    let message = files_message()?;
+    let SharedFiles { files, unread } = message.files();
+    assert_eq!(unread, None);
+    let personal = "https://contoso-my.sharepoint.com/personal/made_up_user_contoso_test";
+    let shared = "https://contoso-my.sharepoint.com/:{kind}:/g/personal/made_up_user_contoso_test";
+    assert_eq!(
+        files,
+        [
+            SharedFile {
+                name: "02-made-up-rehearsal-cut-v3.mp4".to_owned(),
+                extension: "mp4".to_owned(),
+                share_url: Some(format!(
+                    "{}/MadeUpShareLinkForTheRehearsalCut0001",
+                    shared.replace("{kind}", "v")
+                )),
+                object_url: Some(format!(
+                    "{personal}/Documents/Microsoft Teams Chat Files/02-made-up-rehearsal-cut-v3.mp4"
+                )),
+            },
+            SharedFile {
+                name: "01-made-up-stage-plan.pdf".to_owned(),
+                extension: "pdf".to_owned(),
+                share_url: Some(format!(
+                    "{}/MadeUpShareLinkForTheStagePlan0002",
+                    shared.replace("{kind}", "b")
+                )),
+                object_url: Some(format!(
+                    "{personal}/Documents/Microsoft Teams Chat Files/01-made-up-stage-plan.pdf"
+                )),
+            },
+        ]
+    );
+    assert_eq!(message.unshown(), Vec::new(), "every file read: nothing unshown");
+    let (video, pdf) = (&files[0], &files[1]);
+    assert_eq!((video.kind(), pdf.kind()), (FileKind::Video, FileKind::Pdf));
+    assert!(video.kind().has_thumbnail() && !pdf.kind().has_thumbnail());
+    // a click opens the sharing link; Download is the same link with `download=1`
+    assert_eq!(video.open_link(), video.share_url.as_deref());
+    assert_eq!(
+        video.download_link(),
+        Some(format!(
+            "{}/MadeUpShareLinkForTheRehearsalCut0001?download=1",
+            shared.replace("{kind}", "v")
+        ))
+    );
+    Ok(())
+}
+
+#[test]
+fn a_file_entry_off_its_shape_is_kept_as_it_came_beside_the_ones_read() -> TestResult {
+    let read = files_message()?;
+    let entries: Value = serde_json::from_str(read.properties["files"].as_str().ok_or("files")?)?;
+    let good = entries[0].clone();
+    let off = |change: &dyn Fn(&mut Value)| {
+        let mut entry = good.clone();
+        change(&mut entry);
+        entry
+    };
+    let odd = [
+        off(&|entry| entry["@type"] = json!("http://schema.skype.com/Card")),
+        off(&|entry| entry["state"] = json!("deleted")),
+        off(&|entry| {
+            entry["fileName"] = json!("");
+            entry["title"] = Value::Null;
+        }),
+        off(&|entry| {
+            entry["fileInfo"]["shareUrl"] = json!("http://contoso-my.sharepoint.com/x");
+            entry["objectUrl"] = json!("https://example.com/x");
+            entry["fileInfo"]["fileUrl"] = json!("javascript:alert(1)");
+        }),
+        json!("not an object"),
+    ];
+    let mut list = vec![good.clone()];
+    list.extend(odd.iter().cloned());
+    let files = shared_files(Some(&Value::String(Value::Array(list).to_string())));
+    assert_eq!(files.files.len(), 1);
+    assert_eq!(files.unread, Some(Value::Array(odd.to_vec())));
+    // a list, not a JSON string of one, reads alike; the extension comes from the name when no type is given
+    let mut typeless = good;
+    typeless["fileType"] = Value::Null;
+    typeless["type"] = Value::Null;
+    let files = shared_files(Some(&json!([typeless])));
+    assert_eq!(files.files[0].extension, "mp4");
+    assert_eq!(files.unread, None);
     Ok(())
 }

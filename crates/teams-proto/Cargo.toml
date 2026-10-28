@@ -14,6 +14,8 @@ publish.workspace = true
 test-support = ["teams-fence/test-support"]
 
 [dependencies]
+# Graph's sharing token of a file's sharing link (base64url), for its thumbnails
+base64.workspace = true
 # the parsed message HTML's tree, walked iteratively (the version scraper takes)
 ego-tree.workspace = true
 # a call request's message id and a call's chain id (fresh GUIDs)
