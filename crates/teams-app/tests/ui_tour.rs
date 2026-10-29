@@ -9,7 +9,8 @@
 //! and the chat again in Teams Dark; a message with files, its cards and their thumbnails, in Teams Dark and Light,
 //! its first video played in its card and paused; a message of lines, small pictures and a block of code, in Teams
 //! Dark and Light; the 12-hour time format and a chat's times on it; a group chat's presence; a favourite channel
-//! opened from "Favorites"; forwarded messages) and says
+//! opened from "Favorites"; forwarded messages; a call's own window, its participants' pane, beside the main window
+//! with its in-call strip, and in Teams Dark) and says
 //! `shot <name>` after each; the parent screenshots the window and lets it go on. The views are driven from inside
 //! the app, never by screen coordinates.
 //!
@@ -30,11 +31,13 @@ use teams_auth::secrets::Secret;
 use teams_auth::session::{AccessToken, Renewal};
 use teams_auth::token::TokenError;
 use teams_core::Outbox;
+use teams_core::VideoOutput;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Parts, Push};
 use teams_core::lab::display_name;
 use teams_fence::lab::{Alias, LabConfig, record_abc_chat};
 use teams_fence::{Fence, FenceLog, LiveMembershipSource, Mri, Roster};
 use teams_media::devices::catalog::{DeviceInfo, DeviceKind, DeviceList, FixedDirectory};
+use teams_media::devices::pattern::TestPattern;
 use teams_mock::{
     AB_CHAT, ABC_CHAT, AC_CHAT, AMS_BASE, AX_CHAT, CHAT_BASE, CSA_BASE, ChatServiceMock, ECHO, LAB_A, LAB_B, LAB_C,
     OUTSIDER, PRESENCE_BASE, TEAM_CHANNEL, TrouterMock, lab_toml,
@@ -42,6 +45,8 @@ use teams_mock::{
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::Store;
 use teams_trouter::{Options, Trouter, TrouterCredentials};
+use teams_ui::VideoFeed;
+use teams_ui::call_stage::CallStage;
 use teams_ui::chat_view::{Item, MessageAction};
 use teams_ui::compose::Compose;
 use teams_ui::settings_view::Page;
@@ -70,7 +75,7 @@ const SETTLE: Duration = Duration::from_millis(1500);
 type Step = (&'static str, fn(&Entity<Shell>, &mut Window, &mut App));
 
 /// The tour.
-const STEPS: [Step; 36] = [
+const STEPS: [Step; 40] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -248,7 +253,98 @@ const STEPS: [Step; 36] = [
         });
         show_first_message(shell, cx);
     }),
+    // a call b made and a answered, as the engine would tell it (`fake_call`: the mock's engine has no calls): its
+    // own window over the main one (niri gives it the screen), b speaking on its video, the controls in its header
+    ("call-window", |shell, _, cx| fake_call(shell, cx)),
+    // its participants' pane open from People
+    ("call-window-people", |_, _, cx| {
+        with_stage(cx, |stage, cx| stage.show_roster(true, cx))
+    }),
+    // the main window beside it, its chats usable, its in-call strip the way back: the parent puts the two side by
+    // side and shoots the screen
+    ("call-side-by-side", |_, _, cx| {
+        with_stage(cx, |stage, cx| stage.show_roster(false, cx))
+    }),
+    // the call window in Teams Dark
+    ("call-window-dark", |shell, _, cx| {
+        let model = shell.read(cx).settings().clone();
+        model.update(cx, |model, cx| {
+            model.change(|settings| settings.appearance.theme = teams_ui::theme::DARK_KEY, cx);
+        });
+    }),
 ];
+
+/// The made-up call's number.
+const FAKE_CALL: u64 = 1;
+
+/// A call from b answered, told to a's models as the engine would tell it: the invitation, its answer, its media
+/// connected, the roster naming b speaking with its camera on line 0; b's picture a test pattern, fed while the tour
+/// runs.
+fn fake_call(shell: &Entity<Shell>, cx: &mut App) {
+    let models = shell.read(cx).models().clone();
+    let feed = VideoFeed::new();
+    models.calls.update(cx, |calls, _| {
+        *calls = teams_ui::Calls::shown(Some(Mri::new(ECHO))).with_video(feed.clone())
+    });
+    let call = teams_core::CallId::for_tests(FAKE_CALL);
+    let events = [
+        teams_core::Event::CallingRegistration(teams_core::RegistrationReport::Registered),
+        teams_core::Event::IncomingCall(teams_core::IncomingCall {
+            call,
+            caller: Mri::new(LAB_B),
+            caller_name: Some("Lab Bee".to_owned()),
+            group_chat: None,
+        }),
+        teams_core::Event::Call {
+            call,
+            status: teams_core::CallStatus::Answering,
+        },
+        teams_core::Event::Call {
+            call,
+            status: teams_core::CallStatus::Connected,
+        },
+        teams_core::Event::CallParticipants {
+            call,
+            view: teams_core::CallView {
+                participants: vec![teams_core::CallParticipant {
+                    mri: LAB_B.to_owned(),
+                    name: Some("Lab Bee".to_owned()),
+                    video_on: true,
+                    line: Some(0),
+                    speaking: true,
+                }],
+                speaking: false,
+                hearing: false,
+            },
+        },
+    ];
+    for event in events {
+        models.apply(event, cx);
+    }
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        let pattern = TestPattern::new(640, 360);
+        let output: &dyn VideoOutput = &feed;
+        let mut sink = output.remote(0);
+        for frame in 0.. {
+            if sink.show(&pattern.frame(frame)).is_err() {
+                break;
+            }
+            cx.background_executor().timer(Duration::from_millis(100)).await;
+        }
+    })
+    .detach();
+}
+
+/// Runs `change` on the call window's stage, when it is open.
+fn with_stage(cx: &mut App, change: impl FnOnce(&mut CallStage, &mut Context<CallStage>)) {
+    let stage = cx.windows().into_iter().find_map(|window| {
+        let kit = window.downcast::<KitRoot>()?;
+        kit.read(cx).ok()?.view().clone().downcast::<CallStage>().ok()
+    });
+    if let Some(stage) = stage {
+        stage.update(cx, change);
+    }
+}
 
 fn main() -> ExitCode {
     let outcome = match std::env::var(CHILD_ENV).as_deref() {
@@ -297,6 +393,27 @@ fn shots_dir() -> io::Result<PathBuf> {
     Ok(dir)
 }
 
+/// The step whose screenshot is the screen, the main window and the call window side by side.
+const SIDE_BY_SIDE: &str = "call-side-by-side";
+
+/// The main window and the call window put side by side, each half the screen, and the screen shot into `file`; the
+/// call window keeps the focus.
+fn side_by_side(sandbox: &Sandbox, file: &str) -> SandboxResult<PathBuf> {
+    for action in [
+        &["action", "set-column-width", "50%"][..],
+        &["action", "focus-column-left"],
+        &["action", "set-column-width", "50%"],
+        &["action", "focus-column-right"],
+    ] {
+        sandbox.niri_msg(action)?;
+        // each move done before the next is reckoned from where the columns are
+        thread::sleep(Duration::from_millis(600));
+    }
+    // niri's columns move into place
+    thread::sleep(SETTLE);
+    sandbox.screenshot(file, false)
+}
+
 fn tour(sandbox: &Sandbox) -> SandboxResult {
     let (reader, writer) = io::pipe()?;
     let fd = writer.as_raw_fd().to_string();
@@ -319,7 +436,11 @@ fn tour(sandbox: &Sandbox) -> SandboxResult {
             .line_where(WAIT, |line| line == format!("shot {name}"))
             .map_err(|error| running.fail(&format!("no shot {name}: {error:?}")))?;
         let file = format!("tour-{name}.png");
-        let png = sandbox.screenshot(&file, true)?;
+        let png = if name == SIDE_BY_SIDE {
+            side_by_side(sandbox, &file)?
+        } else {
+            sandbox.screenshot(&file, true)?
+        };
         fs::copy(&png, shots_dir()?.join(&file))?;
         fs::write(sandbox.dir().join(NEXT), "")?;
     }

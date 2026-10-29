@@ -43,9 +43,10 @@
 //!   closing the window keeps the app in the tray), both on the bus the app is given ([`bus`]) and nowhere else.
 //!   Both carry the app's icon ([`app_icon`]: the tray item its pixels, with Teams' unread badge).
 //! - [`calls`] (M3 Task 17): the account's calls as the views show them, in a build that shows them (the lab app and the
-//!   personal build), and the user's asks; [`call_view`] the incoming call's banner and the in-call bar,
-//!   [`call_alert`] the incoming call's ringtone ([`ringtone`], on the default output) and its notification with
-//!   Answer and Decline.
+//!   personal build), and the user's asks; [`call_view`] the incoming call's banner and the in-call strip of the
+//!   main window, [`call_window`] the call's own window (as Teams opens one) showing [`call_stage`]'s stage and
+//!   controls, [`call_alert`] the incoming call's ringtone ([`ringtone`], on the default output) and its notification
+//!   with Answer and Decline.
 //! - [`account_prompt`]: the personal build's first sign-in screen, a window of its own asking for the work account
 //!   before anything is signed in.
 //! - [`view`]: the window's root view; [`window`] opens it inside the kit's root, which applies the theme to the
@@ -65,7 +66,9 @@ pub mod app_icon;
 pub mod bridge;
 pub mod bus;
 pub mod call_alert;
+pub mod call_stage;
 pub mod call_view;
+pub mod call_window;
 pub mod calls;
 pub mod channel_view;
 pub mod chat_list;

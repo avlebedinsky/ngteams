@@ -231,12 +231,19 @@ impl Render for Root {
             .flex_col()
             .bg(rgb(colors.background))
             .text_color(rgb(colors.foreground));
-        // an app of accounts: the shown one's shell, which says itself when it is signed out (its rail switches away)
+        // an app of accounts: the shown one's shell, which says itself when it is signed out (its rail switches away),
+        // under the in-call strip of another account's call, the way back to its window
         if self.accounts.is_some() {
-            return match self.shell_in(cx) {
-                Some(shell) => root.child(shell.clone()),
-                None => root,
+            let Some(shown) = self.shell_in(cx).cloned() else {
+                return root;
             };
+            let elsewhere = self
+                .shells
+                .iter()
+                .filter(|shell| **shell != shown)
+                .find(|shell| shell.read(cx).models().calls.read(cx).call().is_some())
+                .map(|shell| shell.read(cx).call_bar().clone());
+            return root.children(elsewhere).child(div().flex_1().min_h_0().child(shown));
         }
         match (self.shells.first(), self.shown) {
             (Some(shell), shown) if shown != Shown::SignedOut => root.child(shell.clone()),

@@ -1,6 +1,6 @@
-//! A call's video in the window (M3 Tasks 18, 19): a 1:1 call's far end's picture, a group call's participants' (one
-//! per receiving video line), and the camera's own (the self view), as tiles of the in-call bar
-//! ([`crate::call_view::CallBar`]).
+//! A call's video (M3 Tasks 18, 19): a 1:1 call's far end's picture, a group call's participants' (one per receiving
+//! video line), and the camera's own (the self view), as tiles of the call window's stage
+//! ([`crate::call_stage::CallStage`]).
 //!
 //! - **The feed** ([`VideoFeed`]) is what the engine's call media shows its frames on ([`teams_core::VideoOutput`]):
 //!   the media's own threads hand each decoded frame (the far end's) and each frame the camera sends (the self view)
@@ -19,23 +19,18 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, ExternalSurface, FrameCompletion, FrameOutcome, InteractiveElement as _, IntoElement,
-    ParentElement as _, PixelFrame, PixelRect, PixelSurface, Styled as _, canvas, div, px,
+    ParentElement as _, PixelFrame, PixelRect, PixelSurface, Styled as _, canvas, div,
 };
 use teams_media::devices::{DeviceError, VideoFrame, VideoSink};
 use teams_media::video::convert::i420_to_bgra;
 
 use crate::trace::{TraceLine, ViewTrace};
+use crate::video_player::fitted;
 
 /// How long a tile stays after its last frame.
 pub const STALE: Duration = Duration::from_secs(2);
 /// A tile's presented frames are traced at the first and every this many after it.
 pub const TRACE_EVERY: u64 = 30;
-/// The far end's tile's height, a group call's participant's, and the self view's, in pixels (their widths follow the
-/// picture).
-const REMOTE_HEIGHT: f32 = 240.0;
-const GROUP_HEIGHT: f32 = 150.0;
-const SELF_HEIGHT: f32 = 120.0;
-
 /// The video lines a call shows: line 0 (a 1:1 call's far end) and a group call's receiving lines.
 pub const LINES: usize = 1 + teams_core::GROUP_SLOTS;
 /// Every tile: each line's, and the self view.
@@ -240,7 +235,7 @@ impl TileState {
     }
 }
 
-/// The in-call bar's video tiles (see the module docs).
+/// The call window's video tiles (see the module docs).
 pub struct Tiles {
     feed: VideoFeed,
     trace: Arc<ViewTrace>,
@@ -263,17 +258,15 @@ impl Tiles {
         &self.feed
     }
 
-    /// The 1:1 call `call`'s tiles with a fresh frame (the far end's, the self view), as elements (none while no tile
-    /// has one); traces a tile that comes or goes.
-    pub fn elements(&mut self, call: u64) -> Vec<AnyElement> {
-        [Tile::REMOTE, Tile::Own]
-            .into_iter()
-            .filter_map(|tile| self.element(tile, call))
-            .collect()
+    /// `tile` of call `call`, when it has a fresh frame, filling the box it is put in (the picture fitted inside it,
+    /// its shape kept); traces it when it comes or goes.
+    pub fn fill(&mut self, tile: Tile, call: u64) -> Option<AnyElement> {
+        let (picture, frame) = self.frame(tile, call)?;
+        Some(fill_element(tile, &picture, frame))
     }
 
-    /// `tile` of call `call`, when it has a fresh frame; traces it when it comes or goes.
-    pub fn element(&mut self, tile: Tile, call: u64) -> Option<AnyElement> {
+    /// The newest picture of `tile` and the frame that draws it, when it is fresh; traces the tile coming or going.
+    fn frame(&mut self, tile: Tile, call: u64) -> Option<(Arc<Picture>, Arc<PixelFrame>)> {
         let picture = self.feed.picture(tile);
         let state = &mut self.states[tile.index()?];
         if picture.is_some() != state.shown {
@@ -287,7 +280,7 @@ impl Tiles {
             return None;
         };
         let frame = frame_of(state, &picture, tile, call, &self.trace);
-        Some(tile_element(tile, &picture, frame))
+        Some((picture, frame))
     }
 
     /// Forgets what was drawn and the frames (the call ended); traces the tiles that go.
@@ -353,31 +346,18 @@ fn frame_of(
     frame
 }
 
-/// A tile: `frame` filling a box of the picture's shape.
-fn tile_element(tile: Tile, picture: &Picture, frame: Arc<PixelFrame>) -> AnyElement {
-    let height = match tile {
-        Tile::Line(0) => REMOTE_HEIGHT,
-        Tile::Line(_) => GROUP_HEIGHT,
-        Tile::Own => SELF_HEIGHT,
-    };
-    let side = |pixels: u32| f32::from(u16::try_from(pixels).unwrap_or(u16::MAX));
-    let aspect = if picture.height == 0 {
-        16.0 / 9.0
-    } else {
-        side(picture.width) / side(picture.height)
-    };
-    let width = height * aspect;
+/// A tile filling its box: `frame` fitted inside it, centred, its shape kept.
+fn fill_element(tile: Tile, picture: &Picture, frame: Arc<PixelFrame>) -> AnyElement {
+    let (width, height) = (picture.width, picture.height);
     let name = tile.name();
     div()
         .debug_selector(move || format!("video-tile-{name}"))
-        .flex_none()
-        .w(px(width))
-        .h(px(height))
+        .size_full()
         .child(
             canvas(
                 |_, _, _| (),
                 move |bounds, (), window, _| {
-                    window.paint_external_surface(bounds, ExternalSurface::Pixels(frame));
+                    window.paint_external_surface(fitted(bounds, width, height), ExternalSurface::Pixels(frame));
                 },
             )
             .size_full(),

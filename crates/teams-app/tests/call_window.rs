@@ -20,10 +20,12 @@
 //!   source's), and b's window presents a's picture through GPUI's external surface and a's its self view (each
 //!   counted by the trace's `video-tile presented`); a hangs up (Ctrl+Shift+H) and b's call ends with it;
 //! - a calls b again; b declines from the notification's Decline; a's call is taken by b's voicemail (as captured) and
-//!   a's in-call bar says so; a hangs up;
-//! - a places the test call from the settings' Calls page ("Make a test call"): the same call view, the echo's cell
+//!   a's call window and in-call strip say so; a hangs up;
+//! - a places the test call from the settings' Calls page ("Make a test call"): the same call window, the echo's cell
 //!   (its roster's entry), its camera turned on and the self view presented; a hangs up, and the test call's results
-//!   show every check passed;
+//!   show every check passed, in its window;
+//! - each call has its own window (the call keys pressed in it), a's beside its main window (a's screen holds two
+//!   windows side by side), each screenshotted under `target/ui-shots/teams-app-call-*.png`;
 //! - both quit; every write in either `fence.log` was permitted.
 //!
 //! Without weston 15, niri, `dbus-daemon`, PipeWire or WirePlumber it says so and passes, unless `GPUI_SMOKE_REQUIRE=1`.
@@ -153,6 +155,12 @@ fn say(line: &str) {
 
 // --- the parent ---
 
+/// niri's layout for a: its main window and its call's window side by side, each half the screen, as a desktop shows
+/// two windows.
+const SIDE_BY_SIDE: &str = "layout {\n    gaps 0\n    default-column-width { proportion 0.5; }\n    focus-ring {\n        off\n    }\n    border {\n        off\n    }\n}\n";
+/// a's screen: two windows of 1024 px side by side.
+const A_SCREEN: (u32, u32) = (2048, 800);
+
 fn sandbox_options(tone: Tone) -> SandboxOptions {
     SandboxOptions {
         niri_extra: NIRI_FULL_WINDOW,
@@ -164,8 +172,18 @@ fn sandbox_options(tone: Tone) -> SandboxOptions {
     }
 }
 
+/// a's sandbox: [`sandbox_options`], its windows side by side on a screen wide enough for two.
+fn side_by_side_options(tone: Tone) -> SandboxOptions {
+    SandboxOptions {
+        width: A_SCREEN.0,
+        height: A_SCREEN.1,
+        niri_extra: SIDE_BY_SIDE,
+        ..sandbox_options(tone)
+    }
+}
+
 fn parent() -> SandboxResult {
-    let Some(a_box) = sandbox_or_skip("teams-app calls", &sandbox_options(A_TONE))? else {
+    let Some(a_box) = sandbox_or_skip("teams-app calls", &side_by_side_options(A_TONE))? else {
         return Ok(());
     };
     let Some(b_box) = sandbox_or_skip("teams-app calls", &sandbox_options(B_TONE))? else {
@@ -281,6 +299,20 @@ impl AppUnderTest {
                     .iter()
                     .all(|kind| strings(line, "kinds").iter().any(|shown| shown == kind))
         })
+    }
+
+    /// Waits until the trace told `count` `call-window <change>` lines in all, and fails when it told more.
+    fn call_windows(&mut self, change: &str, count: usize) -> SandboxResult {
+        let is = |line: &serde_json::Value| line["view"] == "call-window" && line["change"] == change;
+        let what = format!("{}: call-window {change} #{count}", self.alias);
+        while self.trace.catch_up().iter().filter(|line| is(line)).count() < count {
+            self.trace.next_where(&what, is)?;
+        }
+        let told = self.trace.seen.iter().filter(|line| is(line)).count();
+        if told > count {
+            return Err(format!("{what}: told {told}").into());
+        }
+        Ok(())
     }
 
     /// Asks the app to quit and waits for it to exit cleanly; its `fence.log` permitted every write, the write kinds
@@ -419,8 +451,14 @@ fn recording(sandbox: &Sandbox) -> SandboxResult<PathBuf> {
     Ok(sandbox.pipewire().ok_or("no PipeWire")?.recording())
 }
 
-/// Where the screenshots are kept: `target/ui-shots/`, never committed.
+/// Screenshots the focused window of `sandbox` into `name` under `target/ui-shots/`.
 fn shot(sandbox: &Sandbox, name: &str) -> SandboxResult {
+    shot_of(sandbox, name, true)
+}
+
+/// Where the screenshots are kept: `target/ui-shots/`, never committed; the focused window's (`window`), else the
+/// screen's.
+fn shot_of(sandbox: &Sandbox, name: &str, window: bool) -> SandboxResult {
     let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
         .parent()
         .map_or_else(|| PathBuf::from("target"), Path::to_owned)
@@ -428,7 +466,7 @@ fn shot(sandbox: &Sandbox, name: &str) -> SandboxResult {
     fs::create_dir_all(&dir)?;
     // the frames after the trace's line
     thread::sleep(Duration::from_millis(500));
-    let png = sandbox.screenshot(name, true)?;
+    let png = sandbox.screenshot(name, window)?;
     fs::copy(&png, dir.join(name))?;
     Ok(())
 }
@@ -454,6 +492,8 @@ fn calls(a: &mut AppUnderTest, b: &mut AppUnderTest, a_box: &Sandbox, b_box: &Sa
     a.trace.wait_for("call-button", "shown")?;
     ctrl_shift(&mut a_keys, 'c')?;
     a.in_call(&["chat", "ringing"])?;
+    // a's call has its own window, beside the main one
+    a.call_windows("opened", 1)?;
     let banner = b.trace.wait_for("call-banner", "shown")?;
     if banner["people"] != serde_json::json!([LAB_A]) {
         return Err(format!("b's banner names another caller: {banner}").into());
@@ -474,8 +514,11 @@ fn calls(a: &mut AppUnderTest, b: &mut AppUnderTest, a_box: &Sandbox, b_box: &Sa
     b.trace.wait_for("call-notification", "answered")?;
     b.trace.wait_for("ringtone", "stopped")?;
     b.in_call(&["incoming", "connected"])?;
+    b.call_windows("opened", 1)?;
     a.in_call(&["chat", "connected"])?;
+    // a's call in its own window, beside its main window's chats and in-call strip
     shot(a_box, "teams-app-call-connected.png")?;
+    shot_of(a_box, "teams-app-call-side-by-side.png", false)?;
     thread::sleep(TALK);
     let a_heard = loudest(&recording(a_box)?, B_TONE.hz, Duration::from_secs(2))?;
     let b_heard = loudest(&recording(b_box)?, A_TONE.hz, Duration::from_secs(2))?;
@@ -507,11 +550,15 @@ fn calls(a: &mut AppUnderTest, b: &mut AppUnderTest, a_box: &Sandbox, b_box: &Sa
     ));
     shot(b_box, "teams-app-call-video.png")?;
     shot(a_box, "teams-app-call-self-view.png")?;
+    shot_of(a_box, "teams-app-call-self-view-side-by-side.png", false)?;
 
     // a hangs up: b's call ends with it
     ctrl_shift(&mut a_keys, 'h')?;
     a.in_call(&["ended", "hung-up"])?;
     b.in_call(&["ended", "remote"])?;
+    // the windows close with the call
+    a.call_windows("closed", 1)?;
+    b.call_windows("closed", 1)?;
 
     // a calls again; b declines from the notification; b's voicemail takes a's call, and a sees it
     a.trace.next_where("a: call-button shown call", |line| {
@@ -519,6 +566,7 @@ fn calls(a: &mut AppUnderTest, b: &mut AppUnderTest, a_box: &Sandbox, b_box: &Sa
     })?;
     ctrl_shift(&mut a_keys, 'c')?;
     a.in_call(&["chat", "ringing"])?;
+    a.call_windows("opened", 2)?;
     b.trace.next_where("b: call-notification shown again", |line| {
         line["view"] == "call-notification" && line["change"] == "shown"
     })?;
@@ -528,15 +576,18 @@ fn calls(a: &mut AppUnderTest, b: &mut AppUnderTest, a_box: &Sandbox, b_box: &Sa
         line["view"] == "call-notification" && line["change"] == "declined"
     })?;
     b.in_call(&["incoming", "ended", "declined"])?;
+    // a decline opens no window
+    b.call_windows("opened", 1)?;
     a.in_call(&["voicemail"])?;
     shot(a_box, "teams-app-call-declined.png")?;
     ctrl_shift(&mut a_keys, 'h')?;
     a.in_call(&["ended", "hung-up"])?;
+    a.call_windows("closed", 2)?;
     test_call(a, &mut a_keys, a_box)
 }
 
-/// a's test call, from the settings' Calls page ("Make a test call", as Teams has it): the call view a chat's call
-/// has over the settings, Echo its other participant (by its roster's entry), its camera turned on and its self view
+/// a's test call, from the settings' Calls page ("Make a test call", as Teams has it): a call window of its own as a
+/// chat's call has, the settings staying in the main window, Echo its other participant (by its roster's entry), its camera turned on and its self view
 /// presented; once a hangs up, its results (the network, the microphone, the speaker and the camera checked).
 fn test_call(a: &mut AppUnderTest, keys: &mut VirtualInput, a_box: &Sandbox) -> SandboxResult {
     ask_settings(a_box, SETTINGS_CALLS)?;
@@ -546,6 +597,7 @@ fn test_call(a: &mut AppUnderTest, keys: &mut VirtualInput, a_box: &Sandbox) -> 
     shot(a_box, "teams-app-call-settings.png")?;
     ask_settings(a_box, SETTINGS_TEST_CALL)?;
     a.in_call(&["test-call", "connected"])?;
+    a.call_windows("opened", 3)?;
     ctrl_shift(keys, 'o')?;
     a.in_call(&["test-call", "camera-on"])?;
     a.trace.next_where("a: the test call's self view presented", |line| {
@@ -574,6 +626,8 @@ fn test_call(a: &mut AppUnderTest, keys: &mut VirtualInput, a_box: &Sandbox) -> 
     }
     // the trace's line comes as the model changes, before the window draws it: a moment for the frame
     thread::sleep(Duration::from_secs(2));
+    // its window stays on its results, as Teams' test call's does
+    a.call_windows("closed", 2)?;
     shot(a_box, "teams-app-call-test-call-results.png")?;
     Ok(())
 }

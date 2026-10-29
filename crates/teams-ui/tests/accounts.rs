@@ -1,7 +1,8 @@
 //! Several accounts on one desktop, over two fake engines (`common`): the window keeps a shell per account and shows
 //! the one the rail's accounts show; every account notifies, its notifications naming it while there are several, and
 //! activating one shows its account first; the tray's total sums the accounts' unread counts; a call on one account
-//! keeps the others from entering one; an account removed takes its shell and its count with it. Every id and name is
+//! keeps the others from entering one, and has the app's one call window while the window shows another account
+//! with that call's in-call strip above it (the app staying while the call window is open); an account removed takes its shell and its count with it. Every id and name is
 //! made up.
 
 // test code throughout (its helpers unwrap like the tests do)
@@ -17,9 +18,9 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
 use common::{FakeCore, FakeEvents, LAB_A, LAB_B, Rig, Written};
-use gpui::{AppContext as _, Entity, WindowHandle};
+use gpui::{AppContext as _, Entity, VisualTestContext, WindowHandle};
 use notices::{Asked, FakeServer, chat, message};
-use teams_core::{CallId, Event, IncomingCall, MessageChange, Source};
+use teams_core::{CallId, CallStatus, End, Event, IncomingCall, MessageChange, Source};
 use teams_fence::Mri;
 use teams_store::{Applied, ConversationKind, Member};
 use teams_ui::accounts::AccountParts;
@@ -368,6 +369,49 @@ fn a_call_on_one_account_keeps_the_others_from_entering_one() {
     assert!(!d.rig.core.asked().contains(&"call"));
     let refused = d.rig.cx.read(|cx| d.rig.models.calls.read(cx).refused().cloned());
     assert_eq!(refused.map(|refused| refused.why), Some("another-account"));
+}
+
+#[test]
+fn another_account_s_call_has_the_call_window_and_its_strip_and_keeps_the_app_while_it_is_open() {
+    let d = TwoAccounts::start();
+    let window = d.open();
+    let call = CallId::for_tests(2);
+    for status in [CallStatus::Placing, CallStatus::Connected] {
+        d.second.events.send(Event::Call { call, status }).unwrap();
+    }
+    d.rig.cx.run_until_parked();
+    let showing = d.rig.cx.read(|cx| {
+        let windows = d.desktop.read(cx).call_windows().read(cx);
+        windows.showing().map(|(key, call)| (key.to_owned(), call))
+    });
+    assert_eq!(showing, Some((LAB_B.to_owned(), call)), "one window, b's call's");
+    // the main window shows a, with b's in-call strip above a's panes: the way back to b's call
+    assert_eq!(d.shown(window).0, LAB_A);
+    let cx = Box::leak(Box::new(VisualTestContext::from_window(window.into(), &d.rig.cx)));
+    cx.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(cx.debug_bounds("in-call").is_some() && cx.debug_bounds("call-return").is_some());
+
+    // the main window closed without a tray item: the call's window keeps the app
+    d.rig.cx.update(|cx| {
+        let _ = window.update(cx, |_, window, _| window.remove_window());
+    });
+    d.rig.cx.run_until_parked();
+    assert!(!d.asked.lock().unwrap().contains(&DesktopEvent::Quit));
+    // the call ends: its window closes, and with no window left the app quits
+    let ended = Event::Call {
+        call,
+        status: CallStatus::Ended(End::HungUp),
+    };
+    d.second.events.send(ended).unwrap();
+    d.rig.cx.run_until_parked();
+    assert!(
+        d.rig
+            .cx
+            .read(|cx| d.desktop.read(cx).call_windows().read(cx).window().is_none())
+    );
+    assert!(d.asked.lock().unwrap().contains(&DesktopEvent::Quit));
 }
 
 #[test]

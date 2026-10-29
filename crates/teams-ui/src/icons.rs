@@ -62,6 +62,7 @@ impl Glyph {
     pub const REPLY: Self = Self(include_bytes!("../assets/icons/reply.svg"));
     pub const RESET: Self = Self(include_bytes!("../assets/icons/rotate-ccw.svg"));
     pub const SEND: Self = Self(include_bytes!("../assets/icons/send-horizontal.svg"));
+    pub const SETTINGS: Self = Self(include_bytes!("../assets/icons/settings.svg"));
     pub const SHARE: Self = Self(include_bytes!("../assets/icons/share.svg"));
     pub const SHIELD: Self = Self(include_bytes!("../assets/icons/shield.svg"));
     pub const SHRINK: Self = Self(include_bytes!("../assets/icons/shrink.svg"));

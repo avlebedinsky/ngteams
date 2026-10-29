@@ -53,6 +53,8 @@ teams-proto = { workspace = true, features = ["test-support"] }
 teams-store.workspace = true
 # the call window test's engine relayed through the mock's TURN server (`Relay::Fixed`)
 teams-core = { workspace = true, features = ["test-support"] }
+# the tour's made-up call, told to the models as the engine tells one (`CallId::for_tests`)
+teams-call = { workspace = true, features = ["test-support"] }
 teams-trouter = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread", "time"] }
 # the window test's tray host on the sandbox's private bus: the item's title, a click, the menu's "Quit"

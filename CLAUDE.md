@@ -493,9 +493,12 @@ What the code does and why. A change that undoes one of these needs a new reason
   Available while the window was used within the idle time or a manual status is chosen, refreshed on a timer; nothing
   once idle and nothing on quit (no captured request reports Away or Offline for one endpoint); a manual status when
   chosen and its reset when Automatic is chosen again. A failed report is shown and never sent again on its own.
-- **Calls in the app** (`teams-ui/src/calls.rs`, `call_alert.rs`, `call_view.rs`, `ringtone.rs`, `video.rs`): a
-  build shows calls only when its models were made with them (`Models::with_calls`: the lab app, and the personal
-  build once its calling opened); without them it shows, rings for and asks for none, whatever the engine tells. Every
+- **Calls in the app** (`teams-ui/src/calls.rs`, `call_alert.rs`, `call_view.rs`, `call_window.rs`,
+  `call_stage.rs`, `ringtone.rs`, `video.rs`): a build shows calls only when its models were made with them
+  (`Models::with_calls`: the lab app, and the personal build once its calling opened); without them it shows, rings
+  for and asks for none, whatever the engine tells. A call shows in a window of its own, as Teams' does (one at a
+  time across the accounts, on the app's own display: the lab app's inside the UI sandbox), the main window keeping an
+  in-call strip; closing that window is the user's hang-up. Every
   ask is one `CallAction` through `Core::call`, which the engine judges again and sends under the fence, and each is
   the user's: a button, a key, a switcher command or the incoming call's notification (Answer and Decline on the bus
   the app is given). Nothing in the views answers, declines or turns the camera on by itself. The ringtone plays

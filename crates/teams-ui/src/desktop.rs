@@ -16,6 +16,9 @@
 //!   in the account menu, and the quit stops it before the app asks for its shutdown (nothing is sent on quit).
 //! - An incoming call (M3 Task 17) rings through the [`CallAlert`]: its ringtone on the default output and its
 //!   notification with Answer and Decline on the same bus; its body shows the window, where the banner is.
+//! - **A call has a window of its own** ([`CallWindows`]), any account's, one at a time: its "Device settings" shows
+//!   the main window's settings on their Calls page for its account. The app stays while it is open: the main window
+//!   closed without a tray item to stay in quits only once the call window is closed too.
 //! - [`Desktop::connect`] connects to the bus the app is given ([`crate::bus`]) and puts the notifications and the
 //!   tray item on it; without one, neither is there and nothing else is tried.
 //!
@@ -31,6 +34,7 @@
 //! What it does is traced: `window opened` (the root view's), `window closed`, `tray open`/`quit`, `tray
 //! registered`/`gone` (the item up or down), and the notifier's and the tray's own lines.
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use futures_util::StreamExt as _;
@@ -44,11 +48,13 @@ use zbus::Connection;
 use crate::accounts::{AccountParts, Accounts, AccountsEvent};
 use crate::bus::{self, BusError};
 use crate::call_alert::{CallAlert, CallAlertEvent};
+use crate::call_window::{AccountNamer, CallWindows, CallWindowsEvent};
 use crate::notify::{
     AccountLabel, BusNotifications, DEFAULT_ACTION, LabelledServer, NotificationServer, Notifier, NotifierEvent,
 };
 use crate::own_presence::OwnPresence;
 use crate::ringtone::Ringer;
+use crate::settings_view::Page;
 use crate::shell::{Main, Shell, ShellParts};
 use crate::trace::{TraceLine, ViewTrace};
 use crate::tray::{BusTray, Hosted, Tray, TrayEvent};
@@ -114,7 +120,9 @@ pub struct Desktop {
     bus: Option<Connection>,
     /// The bus's notification server, for an account added once it is up.
     server: Option<Arc<dyn NotificationServer>>,
-    _subscriptions: [Subscription; 3],
+    /// The call's own window.
+    call_windows: Entity<CallWindows>,
+    _subscriptions: [Subscription; 4],
 }
 
 impl EventEmitter<DesktopEvent> for Desktop {}
@@ -170,6 +178,7 @@ impl Desktop {
             // a desktop that is gone has no window to watch
             let _ = desktop.update(cx, |this, cx| this.closed(id, cx));
         });
+        let (call_windows, calling) = Self::make_call_windows(parts.app_id, cx);
         let first = Self::slot(&parts, shell.clone(), Arc::clone(&shell.trace), cx);
         let tray = first.tray.clone();
         let name = parts.account_name.clone();
@@ -183,10 +192,58 @@ impl Desktop {
             in_tray: false,
             bus: None,
             server: None,
-            _subscriptions: [asking, renamed, closing],
+            call_windows,
+            _subscriptions: [asking, renamed, closing, calling],
         };
         this.push(first, name, detail, cx);
         this
+    }
+
+    /// The call windows of the app's windows' app id `app_id`, a group chat's call named as the main window's list
+    /// names it, and what they ask followed.
+    fn make_call_windows(app_id: &str, cx: &mut Context<Self>) -> (Entity<CallWindows>, Subscription) {
+        // read from the windows themselves, never the desktop: a call window can draw while the desktop is updated
+        let namer: AccountNamer = Rc::new(|key: &str, chat: &str, cx: &App| {
+            cx.windows().into_iter().find_map(|window| {
+                let root = window
+                    .downcast::<KitRoot>()?
+                    .read(cx)
+                    .ok()?
+                    .view()
+                    .clone()
+                    .downcast::<Root>()
+                    .ok()?;
+                let shell = root
+                    .read(cx)
+                    .shells()
+                    .iter()
+                    .find(|shell| shell.read(cx).account() == key)?
+                    .clone();
+                let list = shell.read(cx).list().read(cx);
+                list.row(chat).map(|row| row.name.clone())
+            })
+        });
+        let windows = cx.new(|cx| {
+            let mut windows = CallWindows::new(app_id, cx);
+            windows.set_namer(namer);
+            windows
+        });
+        let asked = cx.subscribe(&windows, |this: &mut Self, _, event, cx| match event {
+            CallWindowsEvent::DeviceSettings(key) => {
+                this.switch(key, cx);
+                this.in_shell(cx, |shell, window, cx| {
+                    shell.open_settings_page(Page::Calls, window, cx)
+                });
+            }
+            CallWindowsEvent::Closed => {
+                // a call window closed for another to open in its place keeps the app
+                let open = this.call_windows.read(cx).window().is_some();
+                if this.window.is_none() && !this.in_tray && !open {
+                    this.quit(cx);
+                }
+            }
+        });
+        (windows, asked)
     }
 
     /// One account's slot over `shell`; its count traced to `trace` (the first account's: the item's total is traced
@@ -273,6 +330,8 @@ impl Desktop {
         if let Some(server) = self.server.clone() {
             hand_server(&slot, &server, cx);
         }
+        let parts = slot.shell.clone();
+        self.call_windows.update(cx, |windows, cx| windows.add(parts, cx));
         if let Some(window) = self.window {
             let parts = slot.shell.clone();
             let (accounts, own) = (self.accounts.clone(), slot.own_presence.clone());
@@ -326,6 +385,7 @@ impl Desktop {
         let slot = self.slots.remove(index);
         slot.own_presence.update(cx, OwnPresence::quit);
         self.accounts.update(cx, |accounts, cx| accounts.remove(key, cx));
+        self.call_windows.update(cx, |windows, cx| windows.remove(key, cx));
         if slot.tray == self.tray {
             // the item's total moves to the next account's count, with the others' summed in
             let icon = self.tray.update(cx, |tray, _| tray.take_icon());
@@ -411,6 +471,12 @@ impl Desktop {
     #[must_use]
     pub fn window(&self) -> Option<WindowHandle<KitRoot>> {
         self.window
+    }
+
+    /// The call's own window.
+    #[must_use]
+    pub fn call_windows(&self) -> &Entity<CallWindows> {
+        &self.call_windows
     }
 
     /// Whether the tray item is up, so closing the window keeps the app.
@@ -515,7 +581,8 @@ impl Desktop {
         }
         self.window = None;
         self.parts.shell.trace.record(&TraceLine::new("window", "closed"));
-        if !self.in_tray {
+        // a call's window keeps the app until it closes too
+        if !self.in_tray && self.call_windows.read(cx).window().is_none() {
             self.quit(cx);
         }
     }

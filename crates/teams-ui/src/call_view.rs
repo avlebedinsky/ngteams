@@ -1,66 +1,59 @@
-//! The calls in the window (M3 Task 17), at the top of the shell's right side ([`CallBar`]):
+//! The calls in the main window (M3 Task 17), at the top of the shell's right side ([`CallBar`]). The call itself has
+//! a window of its own ([`crate::call_window`], [`crate::call_stage`]), as Teams' call window is: the chats here stay
+//! usable while it runs.
 //!
 //! - **The incoming call's banner** while an invitation the engine offered rings: who calls (the caller's name as the
 //!   invitation gives it, "Someone" without one; a group call's chat by its row's name), Answer in Teams' green and
 //!   Decline in its red. The ringtone and the notification are the desktop's ([`crate::call_alert`]).
-//! - **The in-call bar** while a call is up or being set up: who it is with (a chat's members other than the account,
-//!   by their names; an invitation's caller; the test call's echo, "Echo", as a 1:1 call's other member), its state (calling, ringing, connecting, connected
-//!   with its duration, reconnecting, taken by voicemail), the microphone and the camera (a build that shows video) as
-//!   icons whose tooltips say Mute or Unmute and Turn camera on or off, Leave in Teams' red, and why an ask went
-//!   nowhere while it is up; under it, once the call's roster told who is in it, **the participant grid**: a cell per
-//!   participant (its name as the roster gives it, its video when a line shows it, a mark while it speaks) and the
-//!   account's own (its self view, a mark while it speaks); before that, the video tiles, the far end's picture and the
-//!   self view ([`crate::video::Tiles`]). Once it ended, how (or why a later ask went nowhere) until the next call or
-//!   Dismiss (an ✕); a test call's end is its results, as Teams shows them: the microphone, the speaker, the camera
-//!   (each with the device the calls use) and the network, each checked by what the call showed
-//!   ([`calls::DeviceCheck`]), with "Device settings" (the settings' Calls page, asked of the shell:
-//!   [`CallBarEvent::DeviceSettings`]).
+//! - **The in-call strip** while a call is up or being set up, the way back to its window as Teams' call monitor is:
+//!   who it is with (a chat's members other than the account, by their names; an invitation's caller; the test
+//!   call's echo, "Echo", as a 1:1 call's other member), its state (calling, ringing, connecting, connected with its
+//!   duration, reconnecting, taken by voicemail), "Return to call" (the call window brought to the front:
+//!   [`crate::call_window::raise`]), the microphone and the camera (a build that shows video) as icons whose tooltips
+//!   say Mute or Unmute and Turn camera on or off, Leave in Teams' red, and why an ask went nowhere while it is up.
+//!   Once a call ended, how (or why a later ask went nowhere) until the next call or Dismiss (an ✕); a test call's end
+//!   is its results, which its window shows ([`crate::call_stage`]), so the strip says nothing of it.
 //!
 //! A build that shows no calls draws none of it.
 //!
 //! Every button asks through [`calls::ask`], as the shell's keys and the switcher's commands do. What is shown is
-//! traced (`calling registered`/`unregistered` as the calling endpoint goes, `call-banner shown`/`hidden` with the call's number, its kind, whether the caller is named, a group call's
-//! chat and the caller's MRI; `in-call shown` with the call's number, its kind, state, end, mute, camera and voicemail,
-//! its chat and its participants' MRIs; `in-call hidden`; `test-call results` once a test call ended, a kind per
-//! check; `call-participant shown` per grid cell when the grid changed,
-//! with the call's number, the participant's MRI and kinds for its camera, its line and whether it speaks, and
-//! `call-participant self` for the account's own; the tiles' `video-tile` lines), never a name.
+//! traced (`calling registered`/`unregistered` as the calling endpoint goes, `call-banner shown`/`hidden` with the
+//! call's number, its kind, whether the caller is named, a group call's chat and the caller's MRI; `in-call shown`
+//! with the call's number, its kind, state, end, mute, camera and voicemail, its chat and its participants' MRIs;
+//! `in-call hidden`; `test-call results` once a test call ended, a kind per check), never a name.
 
 use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, AsyncApp, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement, ParentElement as _,
-    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div, px, rgb,
+    AnyElement, App, AsyncApp, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div, px, rgb,
 };
 use gpui_component::Selectable as _;
 use gpui_component::Sizable as _;
-use gpui_component::button::Button;
+use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::tooltip::Tooltip;
-use teams_core::{CallId, CallStatus, CallView, IncomingCall};
-use teams_media::devices::catalog::DeviceKind;
+use teams_core::{CallId, CallStatus, IncomingCall};
+use teams_fence::Mri;
 
 use crate::bridge::Core;
-use crate::calls::{self, ActiveCall, Ask, CallKind, Calls, DeviceCheck, Ended, Refused, Verdict};
+use crate::calls::{self, ActiveCall, Ask, CallKind, Calls, Ended, Refused, Verdict};
 use crate::chat_list::{self, ChatList};
 use crate::icons::{Glyph, icon_button, icon_button_with_key, selected_by};
 use crate::notify::SOMEONE;
 use crate::people::Shown;
-use crate::settings::SettingsModel;
-use crate::settings_view::{self, device_label};
 use crate::shell::{AnswerCall, DeclineCall, HangUpCall, ToggleCameraCall, ToggleMuteCall};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
-use crate::video::{Tile, Tiles, VideoFeed};
 
 /// What the test call's echo service is called in a call, as Teams' call window names it (its roster gives it no
 /// name). Its chat's row takes the app's own "Test call" instead ([`chat_list::ECHO`]).
 pub const ECHO_IN_CALL: &str = "Echo";
 
 /// How often the duration of a connected call is drawn again.
-const TICK: Duration = Duration::from_secs(1);
+pub(crate) const TICK: Duration = Duration::from_secs(1);
 
-/// What the in-call bar was last traced showing.
+/// What the in-call strip was last traced showing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct BarShown {
     call: CallId,
@@ -76,147 +69,52 @@ struct BarShown {
     people: Vec<String>,
 }
 
-/// What the call bar asks of the shell.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum CallBarEvent {
-    /// A test call's results' "Device settings": the settings' Calls page.
-    DeviceSettings,
-}
-
-/// The banner and the in-call bar (see the module docs). A GPUI entity the shell holds.
-pub struct CallBar {
-    core: Arc<dyn Core>,
-    calls: Entity<Calls>,
-    list: Entity<ChatList>,
-    /// The settings, for the devices a test call's results name.
-    settings: Entity<SettingsModel>,
-    /// The last test call whose results were seen, with the devices it used as named when it ended.
-    results: Option<(CallId, [String; 3])>,
-    trace: Arc<ViewTrace>,
-    banner_traced: Option<CallId>,
-    bar_traced: Option<BarShown>,
-    /// Whether the calling endpoint was last traced registered.
-    registered_traced: bool,
-    /// The call's participants other than the account, `(MRI, name)`, once read.
-    participants: Option<(CallId, Vec<(String, SharedString)>)>,
+/// Who a call is with besides the account, `(MRI, name)`, read once per call: an invitation's caller as it named
+/// itself; a chat's members other than the account, by the names the engine has (or their MRIs); the echo service for
+/// the test call, as Teams names it.
+#[derive(Default)]
+pub(crate) struct CallPeople {
+    read: Option<(CallId, Vec<(String, SharedString)>)>,
     reading: Option<Task<()>>,
-    ticking: Option<Task<()>>,
-    /// The video tiles, in a build that shows video, with the call they last drew.
-    tiles: Option<Tiles>,
-    tiles_call: Option<CallId>,
-    /// The participant grid as last traced, with its call.
-    grid_traced: Option<(CallId, CallView)>,
-    _waking: Option<Task<()>>,
-    _observing: [Subscription; 2],
 }
 
-impl CallBar {
-    /// The bar over `calls`, a chat named as `list` names it, a test call's results naming the devices `settings`
-    /// list.
-    pub fn new(
-        core: Arc<dyn Core>,
-        calls: Entity<Calls>,
-        (list, settings): (Entity<ChatList>, Entity<SettingsModel>),
-        trace: Arc<ViewTrace>,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let observing = [
-            cx.observe(&calls, |this: &mut Self, _, cx| this.changed(cx)),
-            // a chat's name read again: the banner and the bar name it as its row does
-            cx.observe(&list, |_, _, cx| cx.notify()),
-        ];
-        let feed = calls.read(cx).video().cloned();
-        let waking = feed.as_ref().map(|feed| Self::wake_on_frames(feed, cx));
-        let tiles = feed.map(|feed| Tiles::new(feed, Arc::clone(&trace)));
-        let mut bar = Self {
-            core,
-            calls,
-            list,
-            settings,
-            results: None,
-            trace,
-            banner_traced: None,
-            bar_traced: None,
-            registered_traced: false,
-            participants: None,
-            reading: None,
-            ticking: None,
-            tiles,
-            tiles_call: None,
-            grid_traced: None,
-            _waking: waking,
-            _observing: observing,
-        };
-        bar.changed(cx);
-        bar
-    }
-
-    /// A new frame wakes the bar, which draws the newest one.
-    fn wake_on_frames(feed: &VideoFeed, cx: &mut Context<Self>) -> Task<()> {
-        let woken = feed.woken();
-        cx.spawn(async move |this, cx: &mut AsyncApp| {
-            while woken.recv().await.is_ok() {
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
-                    break;
-                }
-            }
-        })
-    }
-
-    /// The call's participants other than the account, `(MRI, name)`, once read.
-    #[must_use]
-    pub fn participants(&self) -> &[(String, SharedString)] {
-        self.participants.as_ref().map_or(&[], |(_, people)| people.as_slice())
-    }
-
-    /// The calls changed: the participants read for a new call, the duration ticking while connected, and what is
-    /// shown traced.
-    fn changed(&mut self, cx: &mut Context<Self>) {
-        let active = self.calls.read(cx).call().cloned();
-        if let Some(active) = &active
-            && self.participants.as_ref().is_none_or(|(call, _)| *call != active.id)
-        {
-            self.read_participants(active, cx);
-        }
-        let up = active.as_ref().map(|active| active.id);
-        if let Some(gone) = self.tiles_call.filter(|call| Some(*call) != up)
-            && let Some(tiles) = &mut self.tiles
-        {
-            // the call ended (or another began): its frames go
-            tiles.clear(gone.get());
-        }
-        self.tiles_call = up;
-        let connected = active
+impl CallPeople {
+    /// Who `call` is with, once read (nothing for another call).
+    pub(crate) fn of(&self, call: CallId) -> &[(String, SharedString)] {
+        self.read
             .as_ref()
-            .is_some_and(|active| active.status == CallStatus::Connected);
-        if connected && self.ticking.is_none() {
-            self.ticking = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
-                let mut shown = true;
-                while shown {
-                    cx.background_executor().timer(TICK).await;
-                    shown = this.update(cx, |_, cx| cx.notify()).is_ok();
-                }
-            }));
-        } else if !connected {
-            self.ticking = None;
-        }
-        self.trace_now(cx);
-        cx.notify();
+            .filter(|(read, _)| *read == call)
+            .map_or(&[], |(_, people)| people.as_slice())
     }
 
-    /// Reads who `active` is with: an invitation's caller as it named itself; a chat's members other than the
-    /// account, by the names the engine has (or their MRIs); the echo service for the test call, as Teams names it.
-    fn read_participants(&mut self, active: &ActiveCall, cx: &mut Context<Self>) {
+    /// Who the call read last is with.
+    pub(crate) fn last(&self) -> &[(String, SharedString)] {
+        self.read.as_ref().map_or(&[], |(_, people)| people.as_slice())
+    }
+
+    /// Reads who `active` is with, unless it was read already; `slot` finds the people in the view `cx` is, and
+    /// `done` runs on it once the names came.
+    pub(crate) fn follow<V: 'static>(
+        &mut self,
+        active: &ActiveCall,
+        (core, echo): (&Arc<dyn Core>, Option<&Mri>),
+        cx: &mut Context<V>,
+        (slot, done): (fn(&mut V) -> &mut Self, fn(&mut V, &mut Context<V>)),
+    ) {
         let call = active.id;
-        self.participants = Some((call, Vec::new()));
+        if self.read.as_ref().is_some_and(|(read, _)| *read == call) {
+            return;
+        }
+        self.read = Some((call, Vec::new()));
+        self.reading = None;
         if active.kind == CallKind::TestCall {
-            let echo = self.calls.read(cx).echo().map(|echo| echo.as_str().to_owned());
-            self.participants = Some((call, echo.map(|echo| (echo, ECHO_IN_CALL.into())).into_iter().collect()));
+            let echo = echo.map(|echo| (echo.as_str().to_owned(), SharedString::from(ECHO_IN_CALL)));
+            self.read = Some((call, echo.into_iter().collect()));
             return;
         }
         if let Some(caller) = &active.caller {
             let name = active.caller_name.clone().unwrap_or_else(|| SOMEONE.to_owned());
-            self.participants = Some((call, vec![(caller.as_str().to_owned(), name.into())]));
+            self.read = Some((call, vec![(caller.as_str().to_owned(), name.into())]));
             if active.chat.is_none() {
                 return;
             }
@@ -224,40 +122,176 @@ impl CallBar {
         let Some(chat) = active.chat.clone() else {
             return;
         };
-        let core = Arc::clone(&self.core);
+        let core = Arc::clone(core);
         self.reading = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let me = core.me().to_owned();
-            let members = core.members(chat.clone()).await.unwrap_or_default();
-            let mut others: Vec<String> = members
-                .into_iter()
-                .map(|member| member.mri)
-                .filter(|mri| *mri != me)
-                .collect();
-            if others.is_empty()
-                && let Some(partner) = chat_list::one_to_one_partner(&chat, &me)
-            {
-                others.push(partner);
-            }
-            let mut people = Vec::with_capacity(others.len());
-            for mri in others {
-                let name = match core.person(mri.clone()).await {
-                    Ok(person) => Shown::of(person).name,
-                    Err(_) => None,
-                };
-                let name = name.unwrap_or_else(|| SharedString::from(mri.clone()));
-                people.push((mri, name));
-            }
-            let _ = this.update(cx, |this, cx| {
-                if this.participants.as_ref().is_some_and(|(read, _)| *read == call) {
-                    this.participants = Some((call, people));
-                    this.trace_now(cx);
-                    cx.notify();
+            let people = members_named(&core, chat).await;
+            let _ = this.update(cx, |view, cx| {
+                let slot = slot(view);
+                if slot.read.as_ref().is_some_and(|(read, _)| *read == call) {
+                    slot.read = Some((call, people));
+                    done(view, cx);
                 }
             });
         }));
     }
+}
 
-    /// Traces the banner and the bar when what they show changed.
+/// The members of `chat` other than the account, `(MRI, name)`, each by the name the engine has (or its MRI); a 1:1
+/// chat whose members aren't stored, its other member as its id names them.
+async fn members_named(core: &Arc<dyn Core>, chat: String) -> Vec<(String, SharedString)> {
+    let me = core.me().to_owned();
+    let members = core.members(chat.clone()).await.unwrap_or_default();
+    let mut others: Vec<String> = members
+        .into_iter()
+        .map(|member| member.mri)
+        .filter(|mri| *mri != me)
+        .collect();
+    if others.is_empty()
+        && let Some(partner) = chat_list::one_to_one_partner(&chat, &me)
+    {
+        others.push(partner);
+    }
+    let mut people = Vec::with_capacity(others.len());
+    for mri in others {
+        let name = match core.person(mri.clone()).await {
+            Ok(person) => Shown::of(person).name,
+            Err(_) => None,
+        };
+        let name = name.unwrap_or_else(|| SharedString::from(mri.clone()));
+        people.push((mri, name));
+    }
+    people
+}
+
+/// Who a call is with, as its title: the echo for the test call; an invitation's caller (in its group chat, named as
+/// `chat_name` names it); a chat's name.
+pub(crate) fn call_title(active: &ActiveCall, chat_name: impl Fn(&str) -> SharedString) -> SharedString {
+    match active.kind {
+        CallKind::TestCall => ECHO_IN_CALL.into(),
+        CallKind::Incoming => {
+            let caller = active.caller_name.clone().unwrap_or_else(|| SOMEONE.to_owned());
+            match &active.chat {
+                Some(chat) => format!("{caller} in {}", chat_name(chat)).into(),
+                None => caller.into(),
+            }
+        }
+        CallKind::Chat | CallKind::Join => active
+            .chat
+            .as_deref()
+            .map_or_else(|| SharedString::from("Call"), chat_name),
+    }
+}
+
+/// A call's state as the strip and the window say it, with its duration once connected.
+pub(crate) fn status_with_duration(active: &ActiveCall) -> String {
+    let status = calls::status_text(active);
+    match (&active.status, active.connected_at, active.voicemail) {
+        (CallStatus::Connected, Some(at), false) => {
+            format!("{status} · {}", calls::duration_text(at.elapsed().as_secs()))
+        }
+        _ => status,
+    }
+}
+
+/// A task that draws `cx`'s view again every [`TICK`] while it lives: a connected call's duration.
+pub(crate) fn ticking<V: 'static>(cx: &mut Context<V>) -> Task<()> {
+    cx.spawn(async move |this, cx: &mut AsyncApp| {
+        let mut shown = true;
+        while shown {
+            cx.background_executor().timer(TICK).await;
+            shown = this.update(cx, |_, cx| cx.notify()).is_ok();
+        }
+    })
+}
+
+/// The banner and the in-call strip (see the module docs). A GPUI entity the shell holds.
+pub struct CallBar {
+    core: Arc<dyn Core>,
+    calls: Entity<Calls>,
+    list: Entity<ChatList>,
+    /// The last test call whose results were traced.
+    results_traced: Option<CallId>,
+    trace: Arc<ViewTrace>,
+    banner_traced: Option<CallId>,
+    bar_traced: Option<BarShown>,
+    /// Whether the calling endpoint was last traced registered.
+    registered_traced: bool,
+    people: CallPeople,
+    ticking: Option<Task<()>>,
+    _observing: [Subscription; 2],
+}
+
+impl CallBar {
+    /// The strip over `calls`, a chat named as `list` names it.
+    pub fn new(
+        core: Arc<dyn Core>,
+        calls: Entity<Calls>,
+        list: Entity<ChatList>,
+        trace: Arc<ViewTrace>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let observing = [
+            cx.observe(&calls, |this: &mut Self, _, cx| this.changed(cx)),
+            // a chat's name read again: the banner and the strip name it as its row does
+            cx.observe(&list, |_, _, cx| cx.notify()),
+        ];
+        let mut bar = Self {
+            core,
+            calls,
+            list,
+            results_traced: None,
+            trace,
+            banner_traced: None,
+            bar_traced: None,
+            registered_traced: false,
+            people: CallPeople::default(),
+            ticking: None,
+            _observing: observing,
+        };
+        bar.changed(cx);
+        bar
+    }
+
+    /// The call's participants other than the account, `(MRI, name)`, once read.
+    #[must_use]
+    pub fn participants(&self) -> &[(String, SharedString)] {
+        self.people.last()
+    }
+
+    /// The calls changed: the participants read for a new call, the duration ticking while connected, and what is
+    /// shown traced.
+    fn changed(&mut self, cx: &mut Context<Self>) {
+        let model = self.calls.read(cx);
+        let active = model.call().cloned();
+        let echo = model.echo().cloned();
+        if let Some(active) = &active {
+            let core = Arc::clone(&self.core);
+            self.people.follow(
+                active,
+                (&core, echo.as_ref()),
+                cx,
+                (
+                    |bar| &mut bar.people,
+                    |bar, cx| {
+                        bar.trace_now(cx);
+                        cx.notify();
+                    },
+                ),
+            );
+        }
+        let connected = active
+            .as_ref()
+            .is_some_and(|active| active.status == CallStatus::Connected);
+        if connected && self.ticking.is_none() {
+            self.ticking = Some(ticking(cx));
+        } else if !connected {
+            self.ticking = None;
+        }
+        self.trace_now(cx);
+        cx.notify();
+    }
+
+    /// Traces the banner and the strip when what they show changed.
     fn trace_now(&mut self, cx: &mut Context<Self>) {
         let model = self.calls.read(cx);
         if model.registered() != self.registered_traced {
@@ -276,38 +310,11 @@ impl CallBar {
         match (shown, ended) {
             (Some(shown), _) => {
                 if self.bar_traced.as_ref() != Some(&shown) {
-                    self.record_bar(&shown);
+                    record_bar(&self.trace, &shown);
                     self.bar_traced = Some(shown);
                 }
             }
-            (None, Some(ended)) => {
-                let shown = BarShown {
-                    call: ended.id,
-                    kind: ended.kind.name(),
-                    status: "ended",
-                    end: Some(calls::end_name(&ended.end)),
-                    failed: match ended.end {
-                        teams_core::End::Failed(step) => Some(step),
-                        _ => None,
-                    },
-                    muted: false,
-                    camera: false,
-                    voicemail: ended.voicemail,
-                    chat: ended.chat.clone(),
-                    people: Vec::new(),
-                };
-                self.note_results(&ended, cx);
-                if self.bar_traced.as_ref().is_some_and(|traced| traced.call == ended.id) {
-                    if self.bar_traced.as_ref().is_none_or(|traced| traced.end.is_none()) {
-                        self.record_bar(&shown);
-                        self.bar_traced = Some(shown);
-                    }
-                } else if self.bar_traced.is_none() {
-                    // ended before it was ever shown here (an invitation declined): its end, once
-                    self.record_bar(&shown);
-                    self.bar_traced = Some(shown);
-                }
-            }
+            (None, Some(ended)) => self.trace_ended(&ended),
             (None, None) => {
                 if self.bar_traced.take().is_some() {
                     self.trace.record(&TraceLine::new("in-call", "hidden"));
@@ -316,14 +323,43 @@ impl CallBar {
         }
     }
 
-    /// A test call's results seen for the first time: the devices it used named as they are now, as it ended, and the
-    /// results traced once, a kind per check.
-    fn note_results(&mut self, ended: &Ended, cx: &App) {
+    /// Traces how the last call ended, once, and a test call's results.
+    fn trace_ended(&mut self, ended: &Ended) {
+        let shown = BarShown {
+            call: ended.id,
+            kind: ended.kind.name(),
+            status: "ended",
+            end: Some(calls::end_name(&ended.end)),
+            failed: match ended.end {
+                teams_core::End::Failed(step) => Some(step),
+                _ => None,
+            },
+            muted: false,
+            camera: false,
+            voicemail: ended.voicemail,
+            chat: ended.chat.clone(),
+            people: Vec::new(),
+        };
+        self.trace_results(ended);
+        if self.bar_traced.as_ref().is_some_and(|traced| traced.call == ended.id) {
+            if self.bar_traced.as_ref().is_none_or(|traced| traced.end.is_none()) {
+                record_bar(&self.trace, &shown);
+                self.bar_traced = Some(shown);
+            }
+        } else if self.bar_traced.is_none() {
+            // ended before it was ever shown here (an invitation declined): its end, once
+            record_bar(&self.trace, &shown);
+            self.bar_traced = Some(shown);
+        }
+    }
+
+    /// A test call's results seen for the first time: traced once, a kind per check.
+    fn trace_results(&mut self, ended: &Ended) {
         let Some(check) = ended.check else { return };
-        if self.results.as_ref().is_some_and(|(call, _)| *call == ended.id) {
+        if self.results_traced == Some(ended.id) {
             return;
         }
-        self.results = Some((ended.id, self.devices_in_use(cx)));
+        self.results_traced = Some(ended.id);
         let line = TraceLine::new("test-call", "results")
             .call(ended.id.get())
             .kind(match (check.connected, check.failed) {
@@ -347,12 +383,6 @@ impl CallBar {
                 (Verdict::Untried, _) => "camera-untried",
             });
         self.trace.record(&line);
-    }
-
-    /// The names of the devices the calls use now, in [`RESULT_DEVICES`]' order.
-    fn devices_in_use(&self, cx: &App) -> [String; 3] {
-        let model = self.settings.read(cx);
-        RESULT_DEVICES.map(|kind| settings_view::device_in_use(kind, model).unwrap_or_else(|| SYSTEM_DEVICE.to_owned()))
     }
 
     fn trace_banner(&mut self, ringing: Option<&IncomingCall>) {
@@ -397,32 +427,8 @@ impl CallBar {
             camera: active.camera,
             voicemail: active.voicemail,
             chat: active.chat.clone(),
-            people: self
-                .participants
-                .as_ref()
-                .filter(|(call, _)| *call == active.id)
-                .map(|(_, people)| people.iter().map(|(mri, _)| mri.clone()).collect())
-                .unwrap_or_default(),
+            people: self.people.of(active.id).iter().map(|(mri, _)| mri.clone()).collect(),
         }
-    }
-
-    fn record_bar(&self, shown: &BarShown) {
-        let mut line = TraceLine::new("in-call", "shown")
-            .call(shown.call.get())
-            .kind(shown.kind)
-            .kind(shown.status);
-        for kind in [shown.end, shown.failed].into_iter().flatten() {
-            line = line.kind(kind);
-        }
-        line = line.kind(if shown.muted { "muted" } else { "unmuted" });
-        line = line.kind(if shown.camera { "camera-on" } else { "camera-off" });
-        if shown.voicemail {
-            line = line.kind("voicemail");
-        }
-        if let Some(chat) = &shown.chat {
-            line = line.conversation(chat);
-        }
-        self.trace.record(&line.people(shown.people.iter().map(String::as_str)));
     }
 
     /// Asks `ask` of the calls, as a button does.
@@ -431,29 +437,8 @@ impl CallBar {
     }
 
     /// A chat's name as its row has it.
-    fn chat_name(&self, chat: &str, cx: &Context<Self>) -> SharedString {
-        self.list
-            .read(cx)
-            .row(chat)
-            .map_or_else(|| SharedString::from("a group chat"), |row| row.name.clone())
-    }
-
-    /// Who the call is with, as its title.
-    fn title(&self, active: &ActiveCall, cx: &Context<Self>) -> SharedString {
-        match active.kind {
-            CallKind::TestCall => ECHO_IN_CALL.into(),
-            CallKind::Incoming => {
-                let caller = active.caller_name.clone().unwrap_or_else(|| SOMEONE.to_owned());
-                match &active.chat {
-                    Some(chat) => format!("{caller} in {}", self.chat_name(chat, cx)).into(),
-                    None => caller.into(),
-                }
-            }
-            CallKind::Chat | CallKind::Join => active
-                .chat
-                .as_deref()
-                .map_or_else(|| SharedString::from("Call"), |chat| self.chat_name(chat, cx)),
-        }
+    fn chat_name(&self, chat: &str, cx: &App) -> SharedString {
+        chat_name_in(&self.list, chat, cx)
     }
 
     fn banner(&self, ringing: &IncomingCall, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
@@ -464,18 +449,7 @@ impl CallBar {
         };
         strip(palette)
             .debug_selector(|| "call-banner".to_owned())
-            .child(
-                div()
-                    .size(px(32.0))
-                    .flex_none()
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_full()
-                    .bg(rgb(palette.selected))
-                    .text_color(rgb(palette.brand))
-                    .child(Glyph::PHONE.icon().size(px(16.0))),
-            )
+            .child(call_mark(palette))
             .child(div().flex_1().font_weight(gpui::FontWeight::SEMIBOLD).child(text))
             .child(control(
                 "call-answer",
@@ -496,23 +470,18 @@ impl CallBar {
             .into_any_element()
     }
 
-    fn in_call(&mut self, active: &ActiveCall, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let mut status = calls::status_text(active);
-        if let (CallStatus::Connected, Some(at), false) = (&active.status, active.connected_at, active.voicemail) {
-            status = format!("{status} · {}", calls::duration_text(at.elapsed().as_secs()));
-        }
-        let with = self
-            .participants
-            .as_ref()
-            .filter(|(call, people)| *call == active.id && !people.is_empty())
-            .map(|(_, people)| {
-                let names: Vec<&str> = people.iter().map(|(_, name)| name.as_ref()).collect();
-                div()
-                    .debug_selector(|| "in-call-participants".to_owned())
-                    .text_xs()
-                    .text_color(rgb(palette.muted_foreground))
-                    .child(SharedString::from(format!("With {}", names.join(", "))))
-            });
+    /// The in-call strip: the call's mark, who it is with and its state, and its controls.
+    fn in_call(&self, active: &ActiveCall, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let people = self.people.of(active.id);
+        let with = (!people.is_empty()).then(|| {
+            let names: Vec<&str> = people.iter().map(|(_, name)| name.as_ref()).collect();
+            div()
+                .debug_selector(|| "in-call-participants".to_owned())
+                .truncate()
+                .text_xs()
+                .text_color(rgb(palette.muted_foreground))
+                .child(SharedString::from(format!("With {}", names.join(", "))))
+        });
         // an ask that went nowhere while the call is up (a second start, a mute the engine refused) is told here
         let refused = self.calls.read(cx).refused().map(|refused| {
             div()
@@ -521,52 +490,48 @@ impl CallBar {
                 .text_color(rgb(palette.muted_foreground))
                 .child(SharedString::from(refusal_text(refused)))
         });
-        let grid = self.grid(active, palette);
-        let tiles = if grid.is_none() {
-            self.video_tiles(active, palette)
-        } else {
-            None
-        };
-        let bar = strip(palette)
+        let title = call_title(active, |chat| self.chat_name(chat, cx));
+        strip(palette)
             .debug_selector(|| "in-call".to_owned())
+            .bg(rgb(palette.selected))
+            .child(call_mark(palette))
             .child(
                 div()
                     .flex_1()
+                    .min_w_0()
                     .flex()
                     .flex_col()
                     .child(
                         div()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child(self.title(active, cx)),
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .child(div().truncate().font_weight(gpui::FontWeight::SEMIBOLD).child(title))
+                            .child(
+                                div()
+                                    .debug_selector(|| "in-call-status".to_owned())
+                                    .flex_none()
+                                    .text_xs()
+                                    .text_color(rgb(palette.muted_foreground))
+                                    .child(SharedString::from(status_with_duration(active))),
+                            ),
                     )
                     .children(with)
-                    .child(
-                        div()
-                            .debug_selector(|| "in-call-status".to_owned())
-                            .text_xs()
-                            .child(SharedString::from(status)),
-                    )
                     .children(refused),
             )
-            .child(self.controls(active, palette, cx));
-        div()
-            .w_full()
-            .flex()
-            .flex_col()
-            .child(bar)
-            .children(grid)
-            .children(tiles)
+            .child(self.controls(active, palette, cx))
             .into_any_element()
     }
 
-    /// The call's controls: the microphone, the camera (a build that shows video) and Leave, in Teams' red.
+    /// The strip's controls: "Return to call", the microphone, the camera (a build that shows video) and Leave, in
+    /// Teams' red.
     fn controls(&self, active: &ActiveCall, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
         let (mic, mute) = if active.muted {
             (Glyph::MIC_OFF, "Unmute")
         } else {
             (Glyph::MIC, "Mute")
         };
-        let camera = self.tiles.is_some().then(|| {
+        let camera = self.calls.read(cx).video().is_some().then(|| {
             let (glyph, tip) = if active.camera {
                 (Glyph::VIDEO, "Turn camera off")
             } else {
@@ -581,10 +546,21 @@ impl CallBar {
                 |this, cx| this.ask(Ask::ToggleCamera, cx),
             )
         });
+        let back = selected_by(
+            "call-return",
+            Button::new("call-return")
+                .icon(Glyph::POP_OUT.icon())
+                .label("Return to call")
+                .primary()
+                .small()
+                .on_click(cx.listener(|_, _, _, cx| crate::call_window::raise(cx))),
+        );
         div()
             .flex()
+            .flex_none()
             .items_center()
             .gap_1()
+            .child(back)
             .child(control(
                 "call-mute",
                 Control::Icon(mic),
@@ -605,129 +581,12 @@ impl CallBar {
             ))
     }
 
-    /// A 1:1 call's video tiles (the far end's and the account's own), when there are any.
-    fn video_tiles(&mut self, active: &ActiveCall, palette: Palette) -> Option<gpui::Div> {
-        let tiles = self.tiles.as_mut()?.elements(active.id.get());
-        (!tiles.is_empty()).then(|| {
-            div()
-                .debug_selector(|| "video-tiles".to_owned())
-                .w_full()
-                .flex()
-                .items_end()
-                .gap_2()
-                .px_3()
-                .py_2()
-                .bg(rgb(palette.surface))
-                .children(tiles)
-        })
-    }
-
-    /// The participant grid of `active`, once its roster told who is in it: a cell per participant and the account's
-    /// own (see the module docs); traced when it changed.
-    fn grid(&mut self, active: &ActiveCall, palette: Palette) -> Option<AnyElement> {
-        let view = &active.view;
-        if view.participants.is_empty() {
-            return None;
-        }
-        self.trace_grid(active.id, view);
-        let call = active.id.get();
-        let names = self
-            .participants
-            .as_ref()
-            .filter(|(read, _)| *read == active.id)
-            .map(|(_, people)| people.clone())
-            .unwrap_or_default();
-        let mut cells = Vec::with_capacity(view.participants.len() + 1);
-        for (index, participant) in view.participants.iter().enumerate() {
-            let tile = participant
-                .line
-                .and_then(|line| self.tiles.as_mut()?.element(Tile::Line(line), call));
-            let name = participant
-                .name
-                .clone()
-                .map(SharedString::from)
-                .or_else(|| {
-                    names
-                        .iter()
-                        .find(|(mri, _)| *mri == participant.mri)
-                        .map(|(_, name)| name.clone())
-                })
-                .unwrap_or_else(|| SharedString::from(SOMEONE));
-            cells.push(cell(
-                format!("call-participant-{index}"),
-                name,
-                participant.speaking,
-                tile,
-                palette,
-            ));
-        }
-        let own = self.tiles.as_mut().and_then(|tiles| tiles.element(Tile::Own, call));
-        cells.push(cell(
-            "call-participant-self".to_owned(),
-            SharedString::from("You"),
-            view.speaking,
-            own,
-            palette,
-        ));
-        Some(
-            div()
-                .debug_selector(|| "call-grid".to_owned())
-                .w_full()
-                .flex()
-                .flex_wrap()
-                .items_end()
-                .gap_2()
-                .px_3()
-                .py_2()
-                .bg(rgb(palette.surface))
-                .children(cells)
-                .into_any_element(),
-        )
-    }
-
-    /// Traces the grid's cells when the grid of `call` changed: each participant's MRI, camera, line and speaking, and
-    /// the account's own speaking and whether its microphone hears anything (a closing `self` line).
-    fn trace_grid(&mut self, call: CallId, view: &CallView) {
-        if self
-            .grid_traced
-            .as_ref()
-            .is_some_and(|(traced, shown)| *traced == call && shown == view)
-        {
-            return;
-        }
-        for participant in &view.participants {
-            let line = TraceLine::new("call-participant", "shown")
-                .call(call.get())
-                .people([participant.mri.as_str()])
-                .kind(if participant.video_on {
-                    "camera-on"
-                } else {
-                    "camera-off"
-                })
-                .kind(participant.line.map_or("no-line", |line| Tile::Line(line).name()))
-                .kind(if participant.speaking { "speaking" } else { "quiet" });
-            self.trace.record(&line);
-        }
-        self.trace.record(
-            &TraceLine::new("call-participant", "self")
-                .call(call.get())
-                .kind(if view.speaking { "speaking" } else { "quiet" })
-                .kind(if view.hearing { "mic-sound" } else { "mic-silent" }),
-        );
-        self.grid_traced = Some((call, view.clone()));
-    }
-
-    /// How the last call ended (a test call's results), or why the last ask went nowhere, with Dismiss.
+    /// How the last call ended, or why the last ask went nowhere, with Dismiss; nothing for a test call's end, whose
+    /// results its window shows.
     fn after(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
         let model = self.calls.read(cx);
         let refused = model.refused().map(refusal_text);
-        let ended = model.ended().cloned();
-        if refused.is_none()
-            && let Some(ended) = ended.as_ref()
-            && let Some(check) = ended.check
-        {
-            return Some(self.results(ended, check, palette, cx));
-        }
+        let ended = model.ended().filter(|ended| ended.check.is_none());
         let text = refused.or_else(|| ended.map(|ended| calls::end_text(&ended.end, ended.voicemail)))?;
         Some(
             strip(palette)
@@ -747,139 +606,36 @@ impl CallBar {
                 .on_click(cx.listener(|this, _, _, cx| this.calls.update(cx, Calls::dismiss))),
         )
     }
+}
 
-    /// A test call's results, as Teams shows them once it ended: a box per check (the microphone, the speaker and the
-    /// camera, each naming the device the call used, and the network), "Device settings" and Dismiss.
-    fn results(&self, ended: &Ended, check: DeviceCheck, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
-        // the devices as they were when the call ended: a device chosen since wasn't checked
-        let named = match &self.results {
-            Some((call, named)) if *call == ended.id => named.clone(),
-            _ => self.devices_in_use(cx),
-        };
-        let verdicts = [check.microphone(), check.speaker(), check.camera()];
-        let mut checks: Vec<AnyElement> = [Glyph::MIC, Glyph::VOLUME, Glyph::VIDEO]
-            .into_iter()
-            .zip(RESULT_DEVICES.into_iter().zip(named))
-            .zip(verdicts)
-            .map(|((glyph, (kind, device)), verdict)| check_box((glyph, device_label(kind), device), verdict, palette))
-            .collect();
-        checks.push(check_box(
-            (Glyph::WIFI, "Network", "Your connection".to_owned()),
-            check.network(),
-            palette,
-        ));
-        let passed = check.passed();
-        let summary = if passed {
-            "Your devices are working.".to_owned()
-        } else {
-            calls::end_text(&ended.end, ended.voicemail)
-        };
-        let device_settings = selected_by(
-            "test-call-device-settings",
-            Button::new("test-call-device-settings")
-                .label("Device settings")
-                .outline()
-                .small()
-                .on_click(cx.listener(|_, _, _, cx| cx.emit(CallBarEvent::DeviceSettings))),
-        );
-        let verdict = if passed { Verdict::Fine } else { Verdict::Problem };
-        let header = div()
-            .debug_selector(|| "test-call-results".to_owned())
-            .flex()
-            .items_center()
-            .gap_2()
-            .child(verdict_mark(verdict, 18.0, palette))
-            .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Test call results"))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_sm()
-                    .text_color(rgb(palette.muted_foreground))
-                    .child(SharedString::from(summary)),
-            )
-            .child(device_settings)
-            .child(self.dismiss(cx));
-        strip(palette)
-            .debug_selector(|| "call-after".to_owned())
-            .flex_col()
-            .items_start()
-            .child(header.w_full())
-            .child(div().flex().flex_wrap().gap_2().children(checks))
-            .into_any_element()
+/// `chat`'s name as `list`'s row has it.
+pub(crate) fn chat_name_in(list: &Entity<ChatList>, chat: &str, cx: &App) -> SharedString {
+    list.read(cx)
+        .row(chat)
+        .map_or_else(|| SharedString::from("a group chat"), |row| row.name.clone())
+}
+
+fn record_bar(trace: &ViewTrace, shown: &BarShown) {
+    let mut line = TraceLine::new("in-call", "shown")
+        .call(shown.call.get())
+        .kind(shown.kind)
+        .kind(shown.status);
+    for kind in [shown.end, shown.failed].into_iter().flatten() {
+        line = line.kind(kind);
     }
-}
-
-/// What a test call's results name a device by while the devices aren't listed (or the system has no default).
-const SYSTEM_DEVICE: &str = "The system's default";
-
-/// The devices a test call's results name, in their boxes' order.
-const RESULT_DEVICES: [DeviceKind; 3] = [DeviceKind::Microphone, DeviceKind::Speaker, DeviceKind::Camera];
-
-/// A check's box's width, px: the four side by side in the bar, wrapped on a narrow window.
-const CHECK_WIDTH: f32 = 220.0;
-
-/// A verdict's mark: Teams' green check, its red alert, or a muted dash.
-fn verdict_mark(verdict: Verdict, size: f32, palette: Palette) -> AnyElement {
-    let (glyph, color) = match verdict {
-        Verdict::Fine => (Glyph::CIRCLE_CHECK, theme::SUCCESS),
-        Verdict::Problem => (Glyph::CIRCLE_ALERT, theme::DANGER),
-        Verdict::Untried => (Glyph::CIRCLE_MINUS, palette.muted_foreground),
-    };
-    glyph.icon().size(px(size)).text_color(rgb(color)).into_any_element()
-}
-
-/// One check of a test call's results, its test selector `test-call-check-<name>`: its device's glyph, its name, the
-/// device, and the verdict with its words.
-fn check_box(
-    (glyph, name, device): (Glyph, &'static str, String),
-    (verdict, said): (Verdict, &'static str),
-    palette: Palette,
-) -> AnyElement {
-    let selector = format!("test-call-check-{}", name.to_lowercase());
-    div()
-        .debug_selector(move || selector.clone())
-        .w(px(CHECK_WIDTH))
-        .flex()
-        .items_start()
-        .gap_2()
-        .p_2()
-        .rounded_md()
-        .border_1()
-        .border_color(rgb(palette.border))
-        .bg(rgb(palette.background))
-        .child(glyph.icon().size(px(18.0)))
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .flex()
-                .flex_col()
-                .gap_0p5()
-                .child(div().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).child(name))
-                .child(
-                    div()
-                        .truncate()
-                        .text_xs()
-                        .text_color(rgb(palette.muted_foreground))
-                        .child(SharedString::from(device)),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .text_xs()
-                        .child(verdict_mark(verdict, 14.0, palette))
-                        .child(said),
-                ),
-        )
-        .into_any_element()
+    line = line.kind(if shown.muted { "muted" } else { "unmuted" });
+    line = line.kind(if shown.camera { "camera-on" } else { "camera-off" });
+    if shown.voicemail {
+        line = line.kind("voicemail");
+    }
+    if let Some(chat) = &shown.chat {
+        line = line.conversation(chat);
+    }
+    trace.record(&line.people(shown.people.iter().map(String::as_str)));
 }
 
 /// What the user is told of an ask that went nowhere.
-fn refusal_text(refused: &Refused) -> String {
+pub(crate) fn refusal_text(refused: &Refused) -> String {
     format!("Couldn't {}: {}", ask_label(refused.ask), refused.text)
 }
 
@@ -897,33 +653,18 @@ fn ask_label(ask: &str) -> &'static str {
     }
 }
 
-/// One cell of the participant grid: its tile (when its video shows), its name, and a border in the brand colour while
-/// it speaks.
-fn cell(
-    selector: String,
-    name: SharedString,
-    speaking: bool,
-    tile: Option<AnyElement>,
-    palette: Palette,
-) -> AnyElement {
-    let border = if speaking { palette.brand } else { palette.border };
-    let marked = if speaking {
-        SharedString::from(format!("{name} · speaking"))
-    } else {
-        name
-    };
+/// A call's mark: Teams' phone in a tinted circle.
+fn call_mark(palette: Palette) -> gpui::Div {
     div()
-        .debug_selector(move || selector.clone())
+        .size(px(32.0))
+        .flex_none()
         .flex()
-        .flex_col()
-        .gap_1()
-        .p_1()
-        .rounded_md()
-        .border_2()
-        .border_color(rgb(border))
-        .children(tile)
-        .child(div().text_xs().child(marked))
-        .into_any_element()
+        .items_center()
+        .justify_center()
+        .rounded_full()
+        .bg(rgb(palette.background))
+        .text_color(rgb(palette.brand))
+        .child(Glyph::PHONE.icon().size(px(16.0)))
 }
 
 /// A strip across the top of the right side.
@@ -943,27 +684,27 @@ fn strip(palette: Palette) -> gpui::Div {
 
 /// What a call control shows: an icon alone (named by its tooltip), or an icon and a word.
 #[derive(Clone, Copy)]
-enum Control {
+pub(crate) enum Control {
     Icon(Glyph),
     Labelled(Glyph, &'static str),
 }
 
 /// How a call control looks: quiet, marked while its state is on (muted, camera off), or Teams' red or green.
 #[derive(Clone, Copy)]
-enum Look {
+pub(crate) enum Look {
     Toggle(bool),
     Danger,
     Success,
 }
 
 /// A call control whose debug selector is its id, its tooltip naming it and the key bound to `action`.
-fn control(
+pub(crate) fn control<V: 'static>(
     id: &'static str,
     shows: Control,
     (tip, action): (&'static str, &dyn gpui::Action),
     look: Look,
-    cx: &mut Context<CallBar>,
-    on: fn(&mut CallBar, &mut Context<CallBar>),
+    cx: &mut Context<V>,
+    on: fn(&mut V, &mut Context<V>),
 ) -> AnyElement {
     let (fill, hover) = match look {
         Look::Toggle(toggled) => {
@@ -993,6 +734,7 @@ fn control(
         .h(px(32.0))
         .px_3()
         .flex()
+        .flex_none()
         .items_center()
         .gap_1p5()
         .rounded_md()
@@ -1008,8 +750,6 @@ fn control(
         .children(label)
         .into_any_element()
 }
-
-impl EventEmitter<CallBarEvent> for CallBar {}
 
 impl Render for CallBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

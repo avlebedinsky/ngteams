@@ -1,0 +1,338 @@
+//! The call's own window ([`CallWindows`]), as Teams opens one for a call: the main window's chats stay usable while it
+//! runs. One window at most, whichever account the call is (one call at a time across the accounts: the call floor).
+//!
+//! - **It opens** once a call of any account is told (a start, a join, the answer of an invitation; not a decline),
+//!   brought to the front, the keyboard on it; what it shows is [`CallStage`]'s.
+//! - **It closes** once its call ended, as Teams' does; a test call's window stays on its results until it is
+//!   closed (their Close, or the window's own), as Teams' test call does. A new call takes the window of the last
+//!   test call's results.
+//! - **Closing it while the call is up leaves the call** (one hang-up, as the window's Leave asks), as closing Teams'
+//!   call window does, without asking. It isn't opened again for that call by itself; the main window's "Return to
+//!   call" ([`raise`]) brings it back while the call is still up (its leave refused, say), and else brings the open
+//!   window to the front.
+//! - **The lab app** opens it on the same display as its main window: inside the UI sandbox, where its main window is.
+//!
+//! What it does is traced on its account's trace: `call-window opened` (the call's number and kind), `call-window
+//! raised`, `call-window closed` (the call's number, and `left` when its closing left the call).
+
+use std::rc::Rc;
+use std::sync::Arc;
+
+use gpui::{
+    App, AppContext as _, Bounds, Context, Entity, EventEmitter, Global, SharedString, Subscription, TitlebarOptions,
+    WeakEntity, WindowBounds, WindowHandle, WindowId, WindowOptions, px, size,
+};
+use teams_core::{CallId, CallStatus};
+
+use crate::call_stage::{CallStage, CallStageEvent, ChatNamer, StageParts};
+use crate::calls::{self, Ask, Calls};
+use crate::shell::ShellParts;
+use crate::trace::TraceLine;
+use crate::window::KitRoot;
+
+/// The call window's size when it opens.
+const DEFAULT_SIZE: (f32, f32) = (1000.0, 680.0);
+/// The smallest it gets.
+const MIN_SIZE: (f32, f32) = (560.0, 400.0);
+
+/// What names a group chat for an account: its key (its MRI), the chat, the app.
+pub type AccountNamer = Rc<dyn Fn(&str, &str, &App) -> Option<SharedString>>;
+
+/// What the call windows ask of the app.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CallWindowsEvent {
+    /// "Device settings" in the window of the account of this MRI: the main window's settings on their Calls page.
+    DeviceSettings(String),
+    /// The window closed.
+    Closed,
+}
+
+/// One account the windows follow.
+struct Followed {
+    key: String,
+    parts: ShellParts,
+    _observing: Subscription,
+}
+
+/// The window open, for which account's call.
+struct Open {
+    key: String,
+    call: CallId,
+    window: WindowHandle<KitRoot>,
+    _events: Subscription,
+}
+
+/// The app's call window (see the module docs). A GPUI entity the desktop holds.
+pub struct CallWindows {
+    app_id: String,
+    accounts: Vec<Followed>,
+    open: Option<Open>,
+    /// The call whose window the user closed: not opened again by itself.
+    closed: Option<(String, CallId)>,
+    namer: Option<AccountNamer>,
+    _closing: Subscription,
+}
+
+/// The app's call windows, for [`raise`].
+struct Raiser(WeakEntity<CallWindows>);
+
+impl Global for Raiser {}
+
+impl EventEmitter<CallWindowsEvent> for CallWindows {}
+
+/// Brings the call window to the front ("Return to call"), opened again when its call is still up and it was closed;
+/// nothing in an app without call windows.
+pub fn raise(cx: &mut App) {
+    let Some(windows) = cx.try_global::<Raiser>().and_then(|raiser| raiser.0.upgrade()) else {
+        return;
+    };
+    windows.update(cx, CallWindows::raise);
+}
+
+impl CallWindows {
+    /// The call windows of an app whose windows have app id `app_id`, following no account yet; the app's
+    /// [`raise`] goes to them.
+    pub fn new(app_id: impl Into<String>, cx: &mut Context<Self>) -> Self {
+        let raiser = Raiser(cx.weak_entity());
+        cx.set_global(raiser);
+        let windows = cx.weak_entity();
+        let closing = cx.on_window_closed(move |cx, id| {
+            // windows that are gone have nothing open to follow
+            let _ = windows.update(cx, |this, cx| this.window_gone(id, cx));
+        });
+        Self {
+            app_id: app_id.into(),
+            accounts: Vec::new(),
+            open: None,
+            closed: None,
+            namer: None,
+            _closing: closing,
+        }
+    }
+
+    /// Names a group chat's call by `namer` from now on (the main window's chat list's row).
+    pub fn set_namer(&mut self, namer: AccountNamer) {
+        self.namer = Some(namer);
+    }
+
+    /// Follows the calls of the account `parts` are; one followed already is left as it is.
+    pub fn add(&mut self, parts: ShellParts, cx: &mut Context<Self>) {
+        let key = parts.core.me().to_owned();
+        if self.accounts.iter().any(|account| account.key == key) {
+            return;
+        }
+        let observing = cx.observe(&parts.models.calls, |this: &mut Self, _, cx| this.follow(cx));
+        self.accounts.push(Followed {
+            key,
+            parts,
+            _observing: observing,
+        });
+        self.follow(cx);
+    }
+
+    /// Follows account `key` no more; its window closes (its engine stopping ends its call).
+    pub fn remove(&mut self, key: &str, cx: &mut Context<Self>) {
+        if self.open.as_ref().is_some_and(|open| open.key == key) {
+            self.close(cx);
+        }
+        self.accounts.retain(|account| account.key != key);
+    }
+
+    /// The window, while it is open.
+    #[must_use]
+    pub fn window(&self) -> Option<WindowHandle<KitRoot>> {
+        self.open.as_ref().map(|open| open.window)
+    }
+
+    /// The account and the call the window is open for.
+    #[must_use]
+    pub fn showing(&self) -> Option<(&str, CallId)> {
+        self.open.as_ref().map(|open| (open.key.as_str(), open.call))
+    }
+
+    fn calls_of(&self, key: &str) -> Option<&Entity<Calls>> {
+        self.accounts
+            .iter()
+            .find(|account| account.key == key)
+            .map(|account| &account.parts.models.calls)
+    }
+
+    /// The calls changed: the window opens for a call up (closing one of another call), and closes once its call
+    /// ended (a test call's stays on its results).
+    fn follow(&mut self, cx: &mut Context<Self>) {
+        // an invitation being declined is no call to show
+        let up = self.accounts.iter().find_map(|account| {
+            let active = account.parts.models.calls.read(cx).call()?;
+            (active.status != CallStatus::Declining).then(|| (account.key.clone(), active.id))
+        });
+        let Some((key, call)) = up else {
+            self.closed = None;
+            let results = self.open.as_ref().is_some_and(|open| {
+                self.calls_of(&open.key)
+                    .and_then(|calls| calls.read(cx).ended())
+                    .is_some_and(|ended| ended.id == open.call && ended.check.is_some())
+            });
+            if !results {
+                self.close(cx);
+            }
+            return;
+        };
+        if self
+            .open
+            .as_ref()
+            .is_some_and(|open| open.key == key && open.call == call)
+        {
+            return;
+        }
+        self.close(cx);
+        if self.closed.as_ref() != Some(&(key.clone(), call)) {
+            self.open_for(&key, call, cx);
+        }
+    }
+
+    /// Opens the window of account `key`'s call `call`, the keyboard on it.
+    fn open_for(&mut self, key: &str, call: CallId, cx: &mut Context<Self>) {
+        let Some(account) = self.accounts.iter().find(|account| account.key == key) else {
+            return;
+        };
+        let parts = account.parts.clone();
+        let namer: Option<ChatNamer> = self.namer.clone().map(|namer| {
+            let key = key.to_owned();
+            Rc::new(move |chat: &str, cx: &App| namer(&key, chat, cx)) as ChatNamer
+        });
+        let kind = parts
+            .models
+            .calls
+            .read(cx)
+            .call()
+            .map_or("chat", |active| active.kind.name());
+        let stage_parts = StageParts {
+            core: Arc::clone(&parts.core),
+            calls: parts.models.calls.clone(),
+            settings: parts.settings.clone(),
+            trace: Arc::clone(&parts.trace),
+            namer,
+        };
+        let windows = cx.weak_entity();
+        let mut made: Option<Entity<CallStage>> = None;
+        let options = self.options(cx);
+        let opened = cx.open_window(options, |window, cx| {
+            let stage = cx.new(|cx| CallStage::new(stage_parts, call, cx));
+            stage.read(cx).focus_handle().focus(window, cx);
+            window.on_window_should_close(cx, move |_, cx| {
+                // the window's own close leaves the call, as Teams' does; the platform takes the window away
+                let _ = windows.update(cx, |this, cx| this.closed_by_user(false, cx));
+                true
+            });
+            made = Some(stage.clone());
+            cx.new(|cx| KitRoot::new(stage, window, cx))
+        });
+        let (Ok(window), Some(stage)) = (opened, made) else {
+            return;
+        };
+        let key = key.to_owned();
+        let asked = key.clone();
+        let events = cx.subscribe(&stage, move |this: &mut Self, _, event, cx| match event {
+            CallStageEvent::DeviceSettings => cx.emit(CallWindowsEvent::DeviceSettings(asked.clone())),
+            CallStageEvent::Close => this.closed_by_user(true, cx),
+        });
+        parts
+            .trace
+            .record(&TraceLine::new("call-window", "opened").call(call.get()).kind(kind));
+        self.open = Some(Open {
+            key,
+            call,
+            window,
+            _events: events,
+        });
+    }
+
+    /// How the window opens: centred, Teams' call window's size, the app's app id.
+    fn options(&self, cx: &App) -> WindowOptions {
+        let bounds = Bounds::centered(None, size(px(DEFAULT_SIZE.0), px(DEFAULT_SIZE.1)), cx);
+        WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Call".into()),
+                ..TitlebarOptions::default()
+            }),
+            app_id: Some(self.app_id.clone()),
+            window_min_size: Some(size(px(MIN_SIZE.0), px(MIN_SIZE.1))),
+            ..WindowOptions::default()
+        }
+    }
+
+    /// Closes the window, if one is open.
+    fn close(&mut self, cx: &mut Context<Self>) {
+        let Some(open) = self.open.take() else { return };
+        self.trace_closed(&open, false);
+        remove(open.window, cx);
+        cx.emit(CallWindowsEvent::Closed);
+    }
+
+    /// The user closed the window (its own close, or a test call's results' Close, which takes it away: `remove`):
+    /// the call left while it is up and not opened again for it, a test call's results dismissed.
+    fn closed_by_user(&mut self, take_away: bool, cx: &mut Context<Self>) {
+        let Some(open) = self.open.take() else { return };
+        let Some(account) = self.accounts.iter().find(|account| account.key == open.key) else {
+            return;
+        };
+        let parts = account.parts.clone();
+        let calls = parts.models.calls.clone();
+        let up = calls.read(cx).call().is_some_and(|active| active.id == open.call);
+        self.trace_closed(&open, up);
+        if up {
+            self.closed = Some((open.key.clone(), open.call));
+            calls::ask(&calls, &parts.core, &parts.trace, Ask::HangUp, cx);
+        } else {
+            calls.update(cx, Calls::dismiss);
+        }
+        if take_away {
+            remove(open.window, cx);
+        }
+        cx.emit(CallWindowsEvent::Closed);
+    }
+
+    /// A window went away: the call's, without being asked to here, is as the user closing it.
+    fn window_gone(&mut self, id: WindowId, cx: &mut Context<Self>) {
+        if self.open.as_ref().is_some_and(|open| open.window.window_id() == id) {
+            self.closed_by_user(false, cx);
+        }
+    }
+
+    fn trace_closed(&self, open: &Open, left: bool) {
+        let Some(account) = self.accounts.iter().find(|account| account.key == open.key) else {
+            return;
+        };
+        let mut line = TraceLine::new("call-window", "closed").call(open.call.get());
+        if left {
+            line = line.kind("left");
+        }
+        account.parts.trace.record(&line);
+    }
+
+    /// "Return to call": the window to the front; opened again when its call is still up and the user closed it.
+    fn raise(&mut self, cx: &mut Context<Self>) {
+        if let Some(open) = &self.open {
+            if let Some(account) = self.accounts.iter().find(|account| account.key == open.key) {
+                account
+                    .parts
+                    .trace
+                    .record(&TraceLine::new("call-window", "raised").call(open.call.get()));
+            }
+            let _ = open.window.update(cx, |_, window, _| window.activate_window());
+            return;
+        }
+        self.closed = None;
+        self.follow(cx);
+    }
+}
+
+/// Takes `window` away once the update under way is over: the platform tells its closing at once, and the windows
+/// that close it hear of it.
+fn remove(window: WindowHandle<KitRoot>, cx: &mut App) {
+    cx.defer(move |cx| {
+        // a window gone already has nothing to take away
+        let _ = window.update(cx, |_, window, _| window.remove_window());
+    });
+}

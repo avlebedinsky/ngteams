@@ -123,6 +123,51 @@ pub fn device_in_use(kind: DeviceKind, model: &SettingsModel) -> Option<String> 
         .map(|device| device.description.clone())
 }
 
+/// One choice of a device of a kind, as the settings' pickers and the call window's device menus offer it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeviceChoice {
+    /// Its key in test selectors: the device's name, or [`FOLLOW_SYSTEM`].
+    pub key: String,
+    /// What it is called: "Follow the system" (naming the system's default), a device's description, or a device
+    /// chosen that isn't there, as not connected.
+    pub label: SharedString,
+    /// It is the one the settings chose.
+    pub chosen: bool,
+    /// What choosing it sets: the device's name, `None` to follow the system.
+    pub name: Option<String>,
+}
+
+/// The choices of a device of `kind`: "Follow the system", then every device of the kind there is, then a device
+/// chosen that isn't there.
+#[must_use]
+pub fn device_choices(kind: DeviceKind, settings: &Settings, list: &DeviceList) -> Vec<DeviceChoice> {
+    let chosen = settings.device(kind).map(str::to_owned);
+    let system = match list.default_of(kind) {
+        Some(device) => format!("Follow the system ({})", device.description),
+        None => "Follow the system".to_owned(),
+    };
+    let mut choices = vec![DeviceChoice {
+        key: FOLLOW_SYSTEM.to_owned(),
+        label: system.into(),
+        chosen: chosen.is_none(),
+        name: None,
+    }];
+    let mut names: Vec<(String, String)> = list
+        .of(kind)
+        .map(|device| (device.name.clone(), device.description.clone()))
+        .collect();
+    if let Some(missing) = chosen.as_ref().filter(|name| list.find(kind, name).is_none()) {
+        names.push((missing.clone(), format!("{missing} (not connected)")));
+    }
+    choices.extend(names.into_iter().map(|(name, label)| DeviceChoice {
+        key: name.clone(),
+        label: label.into(),
+        chosen: chosen.as_deref() == Some(name.as_str()),
+        name: Some(name),
+    }));
+    choices
+}
+
 /// What the settings call each kind of device.
 #[must_use]
 pub fn device_label(kind: DeviceKind) -> &'static str {
@@ -818,33 +863,24 @@ impl SettingsView {
     }
 
     fn device_picks(&self, kind: DeviceKind, settings: &Settings, list: &DeviceList) -> Vec<Pick> {
-        let chosen = settings.device(kind).map(str::to_owned);
-        let system = match list.default_of(kind) {
-            Some(device) => format!("Follow the system ({})", device.description),
-            None => "Follow the system".to_owned(),
-        };
-        let mut picks = vec![Pick {
-            key: FOLLOW_SYSTEM.to_owned(),
-            label: system.into(),
-            status: None,
-            chosen: chosen.is_none(),
-            apply: self.changer(move |settings| settings.set_device(kind, None)),
-        }];
-        let mut names: Vec<(String, String)> = list
-            .of(kind)
-            .map(|device| (device.name.clone(), device.description.clone()))
-            .collect();
-        if let Some(missing) = chosen.as_ref().filter(|name| list.find(kind, name).is_none()) {
-            names.push((missing.clone(), format!("{missing} (not connected)")));
-        }
-        picks.extend(names.into_iter().map(|(name, label)| Pick {
-            key: name.clone(),
-            label: label.into(),
-            status: None,
-            chosen: chosen.as_deref() == Some(name.as_str()),
-            apply: self.changer(move |settings| settings.set_device(kind, Some(name.clone()))),
-        }));
-        picks
+        device_choices(kind, settings, list)
+            .into_iter()
+            .map(|choice| {
+                let DeviceChoice {
+                    key,
+                    label,
+                    chosen,
+                    name,
+                } = choice;
+                Pick {
+                    key,
+                    label,
+                    status: None,
+                    chosen,
+                    apply: self.changer(move |settings| settings.set_device(kind, name.clone())),
+                }
+            })
+            .collect()
     }
 
     /// The diagnostic log: its level (changed live; `TEAMS_APP_LOG` overrides it, said here), "Copy diagnostics", and

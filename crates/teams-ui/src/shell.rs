@@ -26,12 +26,13 @@
 //! Calls (M3 Task 17), in a build that shows them (in one that doesn't, the call keys do nothing here): the chat's
 //! header has Call (or Join, when an invitation named a running call in that group chat) while the calling endpoint is
 //! registered and no call is up, ringing or being set up; the [`CallBar`] above the panes shows the incoming call's
-//! banner (Answer, Decline) and the in-call bar (Mute, the camera, Leave). The keys: Ctrl+Shift+C calls the chat shown,
+//! banner (Answer, Decline) and, while the call runs in its own window ([`crate::call_window`]), the in-call strip
+//! (Return to call, Mute, the camera, Leave). The keys: Ctrl+Shift+C calls the chat shown,
 //! Ctrl+Shift+J joins its running call, Ctrl+Shift+S answers and Ctrl+Shift+D declines the call that rings,
 //! Ctrl+Shift+M mutes or unmutes, Ctrl+Shift+O turns the camera on or off (a build that shows video) and Ctrl+Shift+H
 //! leaves the call; the switcher offers the same as commands, with "Make a test call", which the settings' Calls page
 //! offers too, as Teams' does ([`Shell::test_call_offer`]: not while a call is up or rings on any account); a test
-//! call's results end with "Device settings", which opens that page.
+//! call's results (in its window) end with "Device settings", which opens that page ([`Shell::open_settings_page`]).
 //! Traced: `call-button shown` (the chat, and `call`, `join` or `none`).
 
 use std::rc::Rc;
@@ -53,7 +54,7 @@ use teams_proto::ManualAvailability;
 
 use crate::accounts::{AccountTile, Accounts};
 use crate::bridge::Core;
-use crate::call_view::{CallBar, CallBarEvent};
+use crate::call_view::CallBar;
 use crate::calls::{self, Ask};
 use crate::channel_view::{ChannelView, ChannelViewEvent};
 use crate::chat_list::{ChatList, ChatListEvent};
@@ -211,7 +212,7 @@ pub struct Shell {
     status_menu: bool,
     /// What the chat's header was last traced showing.
     header_traced: Option<HeaderShown>,
-    /// The incoming call's banner and the in-call bar.
+    /// The incoming call's banner and the in-call strip.
     call_bar: Entity<CallBar>,
     /// The chat whose call button was last traced, and which it showed.
     call_button_traced: Option<(String, &'static str)>,
@@ -221,7 +222,7 @@ pub struct Shell {
     chat_events: Option<Subscription>,
     /// What the channel view tells ([`Shell::follow_channel`]), once there is one.
     channel_events: Option<Subscription>,
-    _subscriptions: [Subscription; 10],
+    _subscriptions: [Subscription; 9],
 }
 
 /// What the chat's header shows, as the trace tells it: the chat, its other member's presence (a 1:1 chat's), and
@@ -272,8 +273,7 @@ impl Shell {
         // the list's rows built again (a name or a picture read): the header shows what its row shows
         let renamed = cx.observe(&list, |this: &mut Self, _, cx| this.list_changed(cx));
         let typed = Self::keystrokes_are_use(window, cx);
-        let (call_bar, calling) = Self::calls(&core, &models, (&list, &settings), &trace, cx);
-        let device_settings = Self::follow_call_bar(&call_bar, window, cx);
+        let (call_bar, calling) = Self::calls(&core, &models, &list, &trace, cx);
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         let chat_parts = ShellParts {
@@ -318,7 +318,6 @@ impl Shell {
                 renamed,
                 settled,
                 calling,
-                device_settings,
                 test_call_asked,
             ],
         }
@@ -390,31 +389,22 @@ impl Shell {
         (view, asked)
     }
 
-    /// The call bar over `models`' calls (a test call's results naming the devices `settings` list), and the
-    /// observation that keeps the header's call button up to date.
+    /// The call bar over `models`' calls, and the observation that keeps the header's call button up to date.
     fn calls(
         core: &Arc<dyn Core>,
         models: &Models,
-        (list, settings): (&Entity<ChatList>, &Entity<SettingsModel>),
+        list: &Entity<ChatList>,
         trace: &Arc<ViewTrace>,
         cx: &mut Context<Self>,
     ) -> (Entity<CallBar>, Subscription) {
         let (core, list, trace, calls) = (Arc::clone(core), list.clone(), Arc::clone(trace), models.calls.clone());
-        let settings = settings.clone();
-        let call_bar = cx.new(|cx| CallBar::new(core, calls, (list, settings), trace, cx));
+        let call_bar = cx.new(|cx| CallBar::new(core, calls, list, trace, cx));
         // a call up, rung or ended: the header's call button follows
         let calling = cx.observe(&models.calls, |this: &mut Self, _, cx| {
             this.trace_call_button(cx);
             cx.notify();
         });
         (call_bar, calling)
-    }
-
-    /// What the call bar asks: a test call's results' "Device settings" opens the settings' Calls page.
-    fn follow_call_bar(call_bar: &Entity<CallBar>, window: &mut Window, cx: &mut Context<Self>) -> Subscription {
-        cx.subscribe_in(call_bar, window, |this: &mut Self, _, event, window, cx| match event {
-            CallBarEvent::DeviceSettings => this.open_settings_page(Page::Calls, window, cx),
-        })
     }
 
     /// Shows the settings on `page`, the keyboard on their page column, as the rail's Settings does.
@@ -443,7 +433,7 @@ impl Shell {
         }
     }
 
-    /// The incoming call's banner and the in-call bar.
+    /// The incoming call's banner and the in-call strip.
     #[must_use]
     pub fn call_bar(&self) -> &Entity<CallBar> {
         &self.call_bar

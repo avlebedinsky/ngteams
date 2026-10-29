@@ -805,7 +805,7 @@ fn menu_item(what: &'static str, glyph: Glyph, label: &'static str) -> PopupMenu
 }
 
 /// `bounds` narrowed to a picture of `width` by `height` fitted inside it, centred, its aspect ratio kept.
-fn fitted(bounds: Bounds<Pixels>, width: u32, height: u32) -> Bounds<Pixels> {
+pub(crate) fn fitted(bounds: Bounds<Pixels>, width: u32, height: u32) -> Bounds<Pixels> {
     let side = |pixels: u32| f32::from(u16::try_from(pixels).unwrap_or(u16::MAX)).max(1.0);
     let (box_width, box_height) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
     let scale = (box_width / side(width)).min(box_height / side(height));

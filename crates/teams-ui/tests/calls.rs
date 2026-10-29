@@ -14,8 +14,8 @@ mod common;
 #[path = "common/notices.rs"]
 mod notices;
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use common::{LAB_A, LAB_B, Rig, Written};
 use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext};
@@ -26,14 +26,16 @@ use teams_core::{
     MessageChange, RegistrationReport, RemoteEnd, Source,
 };
 use teams_fence::Mri;
+use teams_media::devices::catalog::{DeviceDirectory as _, DeviceInfo, DeviceKind, DeviceList, FixedDirectory};
 use teams_media::devices::pattern::TestPattern;
 use teams_store::{Applied, ConversationKind, Member};
 use teams_ui::call_alert::{CallAlert, notice_of};
 use teams_ui::call_view;
+use teams_ui::call_window::{CallWindows, CallWindowsEvent};
 use teams_ui::calls::{Ask, CallKind, Verdict};
 use teams_ui::notify::NoticeKind;
 use teams_ui::ringtone::{Ringer, Ringtone};
-use teams_ui::settings::{Settings, SettingsModel};
+use teams_ui::settings::{Settings, SettingsModel, attach_devices};
 use teams_ui::settings_view::{Page, TestCallOffer};
 use teams_ui::shell::{Main, Shell, ShellParts};
 use teams_ui::switcher::CallCommand;
@@ -130,6 +132,50 @@ fn shell_window(
     let (shell, cx) = app.add_window_view(|window, cx| Shell::new(parts, window, cx));
     draw(cx);
     (shell, cx)
+}
+
+/// The call windows over `shell`'s account, as the desktop keeps them, traced to `trace`; with what they asked.
+fn call_windows(
+    rig: &Rig,
+    shell: &Entity<Shell>,
+    trace: &Arc<ViewTrace>,
+) -> (Entity<CallWindows>, Arc<Mutex<Vec<CallWindowsEvent>>>) {
+    let parts = ShellParts {
+        core: rig.cx.read(|cx| rig.bridge.read(cx).core()),
+        models: rig.models.clone(),
+        settings: rig.cx.read(|cx| shell.read(cx).settings().clone()),
+        trace: Arc::clone(trace),
+    };
+    let asked = Arc::new(Mutex::new(Vec::new()));
+    let told = Arc::clone(&asked);
+    let windows = rig.cx.update(|cx| {
+        let windows = cx.new(|cx| CallWindows::new("ngteams-test", cx));
+        windows.update(cx, |windows, cx| windows.add(parts, cx));
+        cx.subscribe(&windows, move |_, event: &CallWindowsEvent, _| {
+            told.lock().unwrap().push(event.clone());
+        })
+        .detach();
+        windows
+    });
+    (windows, asked)
+}
+
+/// The call window `windows` have open, to draw and click in.
+fn stage(rig: &Rig, windows: &Entity<CallWindows>) -> &'static mut VisualTestContext {
+    rig.cx.run_until_parked();
+    let window = rig
+        .cx
+        .read(|cx| windows.read(cx).window())
+        .expect("the call window is open");
+    let cx = Box::leak(Box::new(VisualTestContext::from_window(window.into(), &rig.cx)));
+    draw(cx);
+    cx
+}
+
+/// Whether `windows` have a window open.
+fn window_open(rig: &Rig, windows: &Entity<CallWindows>) -> bool {
+    rig.cx.run_until_parked();
+    rig.cx.read(|cx| windows.read(cx).window().is_some())
 }
 
 fn draw(cx: &mut VisualTestContext) {
@@ -934,7 +980,8 @@ fn the_test_call_shows_as_a_call_with_echo_its_camera_and_its_self_view() {
     let feed = VideoFeed::new();
     let rig = video_calling(&feed);
     let (trace, written) = trace();
-    let (shell, cx) = shell_window(&rig, Some(AB), trace);
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
     registered(&rig);
     cx.simulate_keystrokes("ctrl-k");
     cx.simulate_input("test call");
@@ -952,7 +999,13 @@ fn the_test_call_shows_as_a_call_with_echo_its_camera_and_its_self_view() {
     let up = lines(&written, "in-call", "shown").last().cloned().unwrap();
     assert_eq!(kinds(&up), ["test-call", "connected", "unmuted", "camera-off"]);
     assert_eq!(up["people"], serde_json::json!([ECHO]));
-    for control in ["call-mute", "call-camera", "call-hang-up", "in-call-participants"] {
+    for control in [
+        "call-return",
+        "call-mute",
+        "call-camera",
+        "call-hang-up",
+        "in-call-participants",
+    ] {
         assert!(drawn(cx, control), "{control}");
     }
 
@@ -983,13 +1036,17 @@ fn the_test_call_shows_as_a_call_with_echo_its_camera_and_its_self_view() {
     let output: &dyn VideoOutput = &feed;
     output.preview().unwrap().show(&pattern.frame(1)).unwrap();
     cx.run_until_parked();
+    let window = stage(&rig, &windows);
     for shown in [
         "call-grid",
         "call-participant-0",
         "call-participant-self",
         "video-tile-self",
+        "call-mute",
+        "call-camera",
+        "call-hang-up",
     ] {
-        assert!(drawn(cx, shown), "{shown}");
+        assert!(drawn(window, shown), "{shown}");
     }
     let cells = lines(&written, "call-participant", "shown");
     assert_eq!(cells.last().unwrap()["people"], serde_json::json!([ECHO]));
@@ -1001,19 +1058,22 @@ fn the_feed_s_frames_draw_as_tiles_while_the_call_is_up_and_go_with_it() {
     let feed = VideoFeed::new();
     let rig = video_calling(&feed);
     let (trace, written) = trace();
-    let (_shell, cx) = shell_window(&rig, Some(AB), trace);
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
     registered(&rig);
     cx.simulate_keystrokes("ctrl-shift-c");
     cx.run_until_parked();
     status(&rig, 1, CallStatus::Connected);
-    assert!(!drawn(cx, "video-tiles"), "no frame yet");
+    let window = stage(&rig, &windows);
+    assert!(drawn(window, "call-person-0"), "b's tile, before the roster");
+    assert!(!drawn(window, "video-tile-remote"), "no frame yet");
 
     // the call's media shows the far end's frame and the camera's on the feed (I420, the test pattern)
     let pattern = TestPattern::new(320, 180);
     let output: &dyn VideoOutput = &feed;
     output.remote(0).show(&pattern.frame(1)).unwrap();
     output.preview().unwrap().show(&pattern.frame(2)).unwrap();
-    assert!(drawn(cx, "video-tile-remote") && drawn(cx, "video-tile-self"));
+    assert!(drawn(window, "video-tile-remote") && drawn(window, "video-tile-self"));
     let shown: Vec<Vec<String>> = lines(&written, "video-tile", "shown").iter().map(kinds).collect();
     assert_eq!(shown, [["remote"], ["self"]]);
     let remote = feed.picture(Tile::REMOTE).unwrap();
@@ -1028,7 +1088,7 @@ fn the_feed_s_frames_draw_as_tiles_while_the_call_is_up_and_go_with_it() {
     assert!(output.remote(0).show(&wrong).is_err());
 
     status(&rig, 1, CallStatus::Ended(End::HungUp));
-    assert!(!drawn(cx, "video-tiles"));
+    assert!(!window_open(&rig, &windows), "a call's window closes with it");
     let hidden: Vec<Vec<String>> = lines(&written, "video-tile", "hidden").iter().map(kinds).collect();
     assert_eq!(hidden, [["remote"], ["self"]]);
     assert!(feed.picture(Tile::REMOTE).is_none(), "the call's frames go with it");
@@ -1058,11 +1118,13 @@ fn a_group_call_s_grid_shows_each_participant_its_video_and_who_speaks() {
     let feed = VideoFeed::new();
     let rig = video_calling(&feed);
     let (trace, written) = trace();
-    let (_shell, cx) = shell_window(&rig, Some(TRIO), trace);
+    let (shell, cx) = shell_window(&rig, Some(TRIO), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
     registered(&rig);
     cx.simulate_keystrokes("ctrl-shift-c");
     cx.run_until_parked();
     status(&rig, 1, CallStatus::Connected);
+    let cx = stage(&rig, &windows);
     assert!(!drawn(cx, "call-grid"), "no roster told yet");
 
     // the roster tells b (camera on, line 1) and c (camera off, line 2, speaking): a cell each and the account's own
@@ -1121,11 +1183,13 @@ fn nine_participants_each_draw_on_a_line_of_their_own() {
     let feed = VideoFeed::new();
     let rig = video_calling(&feed);
     let (trace, _written) = trace();
-    let (_shell, cx) = shell_window(&rig, Some(TRIO), trace);
+    let (shell, cx) = shell_window(&rig, Some(TRIO), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
     registered(&rig);
     cx.simulate_keystrokes("ctrl-shift-c");
     cx.run_until_parked();
     status(&rig, 1, CallStatus::Connected);
+    let cx = stage(&rig, &windows);
     let mris: Vec<String> = (1..=9)
         .map(|n| format!("8:orgid:00000000-0000-4000-8000-0000000001{n:02}"))
         .collect();
@@ -1147,6 +1211,8 @@ fn nine_participants_each_draw_on_a_line_of_their_own() {
     output.remote(10).show(&pattern.frame(1)).unwrap();
     cx.run_until_parked();
     for line in 1..=9 {
+        // a frame of its own just before the look: a loaded machine draws a grid slower than a frame goes stale
+        output.remote(line).show(&pattern.frame(2)).unwrap();
         assert!(drawn(cx, &format!("video-tile-line-{line}")), "line {line}");
     }
     assert!(feed.picture(Tile::Line(10)).is_none());
@@ -1264,7 +1330,8 @@ fn echo_heard(rig: &Rig, number: u64) {
 fn a_test_call_ends_in_its_results_and_they_lead_to_the_device_settings() {
     let rig = calling();
     let (trace, written) = trace();
-    let (shell, cx) = shell_window(&rig, Some(AB), trace);
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, asked) = call_windows(&rig, &shell, &trace);
     registered(&rig);
     cx.update(|_, cx| shell.update(cx, |shell, cx| shell.ask_call(Ask::TestCall, cx)));
     cx.run_until_parked();
@@ -1277,6 +1344,8 @@ fn a_test_call_ends_in_its_results_and_they_lead_to_the_device_settings() {
     let check = ended.check.expect("a test call's results");
     assert!(check.connected && check.heard && check.played && !check.camera);
     assert!(check.passed());
+    // its window stays, on its results, as Teams' test call's does; the main window's strip says nothing of them
+    let window = stage(&rig, &windows);
     for shown in [
         "test-call-results",
         "test-call-check-microphone",
@@ -1284,10 +1353,11 @@ fn a_test_call_ends_in_its_results_and_they_lead_to_the_device_settings() {
         "test-call-check-camera",
         "test-call-check-network",
         "test-call-device-settings",
-        "call-dismiss",
+        "test-call-close",
     ] {
-        assert!(drawn(cx, shown), "{shown}");
+        assert!(drawn(window, shown), "{shown}");
     }
+    assert!(!drawn(cx, "call-after"));
     let results = lines(&written, "test-call", "results");
     assert_eq!(results.len(), 1);
     assert_eq!(
@@ -1295,14 +1365,17 @@ fn a_test_call_ends_in_its_results_and_they_lead_to_the_device_settings() {
         ["connected", "mic-heard", "speaker-played", "camera-untried"]
     );
 
-    click(cx, "test-call-device-settings");
-    assert_eq!(cx.update(|_, cx| shell.read(cx).main().clone()), Main::Settings);
-    let page = cx.update(|_, cx| shell.read(cx).settings_view().read(cx).page());
-    assert_eq!(page, Page::Calls);
-    // the next test call can start from there
+    click(window, "test-call-device-settings");
+    let me = rig.cx.read(|cx| shell.read(cx).account().to_owned());
+    assert_eq!(*asked.lock().unwrap(), [CallWindowsEvent::DeviceSettings(me)]);
+    // the next test call can start
     assert_eq!(offer(&shell, cx), TestCallOffer::Ready);
-    click(cx, "call-dismiss");
-    assert!(!drawn(cx, "test-call-results"));
+    click(window, "test-call-close");
+    assert!(!window_open(&rig, &windows));
+    assert!(
+        rig.cx.read(|cx| calls_of(&rig).read(cx).ended().is_none()),
+        "its results dismissed"
+    );
     no_name_in(&written);
 }
 
@@ -1310,7 +1383,8 @@ fn a_test_call_ends_in_its_results_and_they_lead_to_the_device_settings() {
 fn a_test_call_that_never_connected_says_so_in_its_results() {
     let rig = calling();
     let (trace, written) = trace();
-    let (shell, cx) = shell_window(&rig, Some(AB), trace);
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
     registered(&rig);
     cx.update(|_, cx| shell.update(cx, |shell, cx| shell.ask_call(Ask::TestCall, cx)));
     cx.run_until_parked();
@@ -1323,7 +1397,7 @@ fn a_test_call_that_never_connected_says_so_in_its_results() {
     assert!(!check.passed());
     assert_eq!(check.network(), (Verdict::Problem, "Couldn't connect"));
     assert_eq!(check.microphone().0, Verdict::Untried);
-    assert!(drawn(cx, "test-call-results"));
+    assert!(drawn(stage(&rig, &windows), "test-call-results"));
     assert_eq!(
         kinds(&lines(&written, "test-call", "results")[0]),
         ["not-connected", "mic-silent", "speaker-silent", "camera-untried"]
@@ -1336,7 +1410,10 @@ fn a_test_call_that_never_connected_says_so_in_its_results() {
     let ended = cx.update(|_, cx| calls_of(&rig).read(cx).ended().cloned()).unwrap();
     assert_eq!(ended.kind, CallKind::Chat);
     assert!(ended.check.is_none());
-    assert!(!drawn(cx, "test-call-results"));
+    assert!(
+        !window_open(&rig, &windows),
+        "the new call took the results' window, and closed with it"
+    );
     assert!(drawn(cx, "call-after"));
 }
 
@@ -1494,4 +1571,171 @@ fn a_build_without_calls_offers_no_test_call_in_the_settings() {
     calls_page(&shell, cx);
     assert!(!drawn(cx, "settings-page-calls"));
     assert!(!drawn(cx, "make-test-call"));
+}
+
+// --- the call's own window ---
+
+#[test]
+fn a_call_opens_a_window_of_its_own_beside_the_chats_and_it_closes_with_the_call() {
+    let rig = calling();
+    let (trace, written) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    click(cx, "chat-call");
+    assert!(!window_open(&rig, &windows), "not before the engine told the call");
+    status(&rig, 1, CallStatus::Placing);
+    let window = stage(&rig, &windows);
+    assert!(drawn(window, "call-calling"), "who it rings, while nobody is in it");
+    for control in ["call-roster", "call-more", "call-mute", "call-hang-up"] {
+        assert!(drawn(window, control), "{control}");
+    }
+    assert!(!drawn(window, "call-camera"), "no camera without the codec");
+    let opened = lines(&written, "call-window", "opened");
+    assert_eq!((opened.len(), kinds(&opened[0])), (1, vec!["chat".to_owned()]));
+    // the main window keeps its chat, with the way back to the call above it
+    assert!(drawn(cx, "in-call") && drawn(cx, "call-return"));
+    assert_eq!(cx.update(|_, cx| shell.read(cx).main().clone()), Main::Chat(AB.into()));
+
+    // connected: b's tile; the window's own keys and buttons ask as the main window's do
+    status(&rig, 1, CallStatus::Connected);
+    assert!(drawn(window, "call-person-0"));
+    window.simulate_keystrokes("ctrl-shift-m");
+    window.run_until_parked();
+    assert_eq!(
+        actions(&rig)[1],
+        CallAction::Mute {
+            call: call(1),
+            muted: true
+        }
+    );
+    click(window, "call-roster");
+    for row in ["call-roster-pane", "call-roster-self", "call-roster-0"] {
+        assert!(drawn(window, row), "{row}");
+    }
+    click(window, "call-roster-close");
+    assert!(!drawn(window, "call-roster-pane"));
+    click(cx, "call-return");
+    assert_eq!(lines(&written, "call-window", "raised").len(), 1);
+
+    click(window, "call-hang-up");
+    assert_eq!(actions(&rig)[2], CallAction::HangUp { call: call(1) });
+    status(&rig, 1, CallStatus::Ended(End::HungUp));
+    assert!(!window_open(&rig, &windows));
+    let closed = lines(&written, "call-window", "closed");
+    assert_eq!((closed.len(), kinds(&closed[0])), (1, Vec::<String>::new()));
+    assert!(drawn(cx, "call-after"), "how it ended, in the main window");
+    no_name_in(&written);
+}
+
+#[test]
+fn closing_the_call_window_leaves_the_call_and_return_to_call_brings_it_back() {
+    let rig = calling();
+    let (trace, written) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, asked) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    click(cx, "chat-call");
+    status(&rig, 1, CallStatus::Placing);
+    status(&rig, 1, CallStatus::Connected);
+    let window = stage(&rig, &windows);
+    assert!(window.simulate_close(), "the window closes");
+    rig.cx.run_until_parked();
+    assert_eq!(actions(&rig).last(), Some(&CallAction::HangUp { call: call(1) }));
+    assert_eq!(kinds(&lines(&written, "call-window", "closed")[0]), ["left"]);
+    assert_eq!(*asked.lock().unwrap(), [CallWindowsEvent::Closed]);
+    // its leave not through yet (or refused): the call is still up, its window not opened again by itself
+    status(&rig, 1, CallStatus::Connected);
+    assert!(!window_open(&rig, &windows));
+    assert!(drawn(cx, "in-call"));
+    // "Return to call" opens it again
+    click(cx, "call-return");
+    assert!(window_open(&rig, &windows));
+    assert_eq!(lines(&written, "call-window", "opened").len(), 2);
+}
+
+#[test]
+fn the_call_window_s_device_menus_choose_the_settings_devices() {
+    let rig = calling();
+    let (trace, _written) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    let device = |kind, name: &str, description: &str| DeviceInfo {
+        kind,
+        name: name.to_owned(),
+        description: description.to_owned(),
+    };
+    let directory = FixedDirectory::new(
+        DeviceList::new(vec![
+            device(DeviceKind::Microphone, "built-in-mic", "Built-in microphone"),
+            device(DeviceKind::Microphone, "usb-mic", "USB headset"),
+            device(DeviceKind::Speaker, "built-in-speaker", "Speakers"),
+        ])
+        .with_default(DeviceKind::Microphone, Some("built-in-mic")),
+    );
+    let model = rig.cx.read(|cx| shell.read(cx).settings().clone());
+    rig.cx
+        .update(|cx| attach_devices(&model, Arc::new(directory.clone()), cx));
+    registered(&rig);
+    click(cx, "chat-call");
+    status(&rig, 1, CallStatus::Connected);
+    let window = stage(&rig, &windows);
+    click(window, "call-audio-devices");
+    for row in [
+        "call-microphone-system",
+        "call-microphone-built-in-mic",
+        "call-microphone-usb-mic",
+        "call-speaker-system",
+        "call-speaker-built-in-speaker",
+    ] {
+        assert!(drawn(window, row), "{row}");
+    }
+    click(window, "call-microphone-usb-mic");
+    let chosen = rig.cx.read(|cx| model.read(cx).settings().microphone.clone());
+    assert_eq!(chosen.as_deref(), Some("usb-mic"));
+    assert_eq!(
+        directory.chosen(DeviceKind::Microphone).as_deref(),
+        Some("usb-mic"),
+        "the call's microphone moves to it"
+    );
+    // More's "Device settings"
+    click(window, "call-more");
+    assert!(drawn(window, "call-more-device-settings"));
+}
+
+#[test]
+fn an_answered_invitation_opens_the_call_window_and_a_declined_one_none() {
+    let rig = calling();
+    let (trace, written) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    // declined: the invitation's banner goes, and no window opens for the decline
+    rig.send(Event::IncomingCall(invitation(3, Some(CALLER_NAME), None)));
+    assert!(
+        !window_open(&rig, &windows),
+        "a ringing invitation has its banner, not a window"
+    );
+    click(cx, "call-decline");
+    status(&rig, 3, CallStatus::Declining);
+    assert!(!window_open(&rig, &windows), "a decline opens no window");
+    status(&rig, 3, CallStatus::Ended(End::Declined));
+    assert!(!window_open(&rig, &windows));
+    assert!(lines(&written, "call-window", "opened").is_empty());
+
+    // answered: the window opens on the answer, the caller's tile once connected
+    rig.send(Event::IncomingCall(invitation(4, Some(CALLER_NAME), None)));
+    click(cx, "call-answer");
+    status(&rig, 4, CallStatus::Answering);
+    let window = stage(&rig, &windows);
+    assert_eq!(
+        rig.cx.read(|cx| windows.read(cx).showing().map(|(_, call)| call)),
+        Some(call(4))
+    );
+    assert!(drawn(window, "call-window"));
+    status(&rig, 4, CallStatus::Connected);
+    assert!(drawn(window, "call-person-0"), "the caller's tile");
+    let opened = lines(&written, "call-window", "opened");
+    assert_eq!((opened.len(), kinds(&opened[0])), (1, vec!["incoming".to_owned()]));
+    no_name_in(&written);
 }
