@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Task dispatch</title>
+<style>
+  /* ngterm gives a --url page its palette as --ngterm-* variables and no styling: the page reads them (never declares
+     them), with fallbacks for a plain browser. */
+  :root { color-scheme: light dark; }
+  body {
+    --bg: var(--ngterm-background, Canvas);
+    --fg: var(--ngterm-foreground, CanvasText);
+    --red: var(--ngterm-color-1, #d0453b);
+    --green: var(--ngterm-color-2, #3f9a4a);
+    --yellow: var(--ngterm-color-3, #c99a1a);
+    --blue: var(--ngterm-color-4, #3d7fd6);
+    --panel: color-mix(in srgb, var(--fg) 6%, var(--bg));
+    --line: color-mix(in srgb, var(--fg) 16%, var(--bg));
+    --muted: color-mix(in srgb, var(--fg) 62%, var(--bg));
+    background: var(--bg); color: var(--fg);
+    font: 14px/1.45 system-ui, sans-serif; margin: 0; padding: 16px;
+  }
+  h1 { font-size: 16px; margin: 0 0 4px; }
+  .sub { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+  .summary { display: flex; gap: 16px; flex-wrap: wrap; font-size: 13px; margin-bottom: 12px; }
+  .summary b { font-variant-numeric: tabular-nums; }
+  .banner { border: 1px solid color-mix(in srgb, var(--red) 60%, var(--bg)); border-left-width: 4px;
+            background: color-mix(in srgb, var(--red) 14%, var(--bg)); color: var(--fg);
+            border-radius: 6px; padding: 8px 12px; margin-bottom: 12px; font-size: 13px; font-weight: 600; }
+  .err { font-size: 12px; color: var(--red); margin: 4px 0 10px; }
+  section { margin-bottom: 18px; }
+  h2 { font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted);
+       margin: 0 0 8px; padding-bottom: 4px; border-bottom: 1px solid var(--line); }
+  section.waiting h2 { color: var(--yellow); }
+  section.failed h2 { color: var(--red); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+          padding: 10px 12px; margin-bottom: 10px; }
+  .card.waiting { border-color: color-mix(in srgb, var(--yellow) 55%, var(--bg)); border-left: 4px solid var(--yellow);
+                  background: color-mix(in srgb, var(--yellow) 11%, var(--bg)); }
+  .card.failed { border-color: color-mix(in srgb, var(--red) 55%, var(--bg)); border-left: 4px solid var(--red);
+                 background: color-mix(in srgb, var(--red) 11%, var(--bg)); }
+  .row { display: flex; align-items: baseline; gap: 8px; }
+  .num { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .title { font-weight: 600; flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .pill { font-size: 12px; font-weight: 600; padding: 1px 8px; border-radius: 999px; white-space: nowrap; }
+  .pill.running { color: var(--blue); background: color-mix(in srgb, var(--blue) 16%, var(--bg)); }
+  .pill.waiting { color: var(--yellow); background: color-mix(in srgb, var(--yellow) 20%, var(--bg)); }
+  .pill.failed { color: var(--red); background: color-mix(in srgb, var(--red) 18%, var(--bg)); }
+  .pill.queued { color: var(--muted); background: color-mix(in srgb, var(--fg) 10%, var(--bg)); }
+  .pill.completed { color: var(--green); background: color-mix(in srgb, var(--green) 16%, var(--bg)); }
+  .meta { font-size: 12px; color: var(--muted); margin-top: 4px; display: flex; gap: 6px; flex-wrap: wrap; }
+  .meta .agent { font-family: ui-monospace, monospace; }
+  .meta .eta { font-weight: 600; color: var(--fg); }
+  .meta .long { color: var(--yellow); font-weight: 600; }
+  .steps { display: flex; gap: 3px; margin-top: 8px; }
+  .step { flex: 1; min-width: 0; }
+  .step .bar { height: 4px; border-radius: 2px; background: var(--line); }
+  .step .lbl { font-size: 10px; color: var(--muted); margin-top: 2px; white-space: nowrap; overflow: hidden;
+               text-overflow: ellipsis; }
+  .step.past .bar { background: color-mix(in srgb, var(--green) 75%, var(--bg)); }
+  .step.cur .bar { background: var(--blue); }
+  .step.cur .lbl { color: var(--blue); font-weight: 600; }
+  .card.waiting .step.cur .bar { background: var(--yellow); }
+  .card.waiting .step.cur .lbl { color: var(--yellow); }
+  .card.failed .step.cur .bar { background: var(--red); }
+  .card.failed .step.cur .lbl { color: var(--red); }
+  .now { margin-top: 8px; font-size: 13px; display: flex; gap: 6px; align-items: baseline; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; flex: none; align-self: center;
+         background: color-mix(in srgb, var(--fg) 35%, var(--bg)); }
+  .dot.running { background: var(--blue); animation: pulse 1.2s ease-in-out infinite; }
+  .dot.waiting { background: var(--yellow); }
+  .dot.finished { background: var(--green); }
+  .what { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+  .ago { font-size: 12px; color: var(--muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+  .quiet { font-size: 12px; color: var(--yellow); font-weight: 600; margin-top: 4px; }
+  .bg { margin: 4px 0 0; padding: 0; list-style: none; font-size: 12px; color: var(--muted); }
+  .bg li { overflow-wrap: anywhere; }
+  .bg li::before { content: "↻ "; }
+  .said { margin-top: 4px; font-size: 12px; color: var(--muted); font-style: italic; overflow-wrap: anywhere; }
+  .note { font-size: 12px; margin-top: 4px; overflow-wrap: anywhere; }
+  .empty { color: var(--muted); font-size: 13px; }
+  details { font-size: 12px; color: var(--muted); margin-top: 14px; }
+  summary { cursor: pointer; }
+  @keyframes pulse { 50% { opacity: .3; } }
+  @media (prefers-reduced-motion: reduce) { .dot.running { animation: none; } }
+</style>
+</head>
+<body>
+<h1>Task dispatch</h1>
+<div class="sub" id="updated">Connecting to the status server…</div>
+<div class="banner" id="banner" hidden></div>
+<div class="summary" id="summary"></div>
+<div class="err" id="ledger-error" hidden></div>
+<div id="groups"></div>
+<div class="empty" id="empty" hidden>No tasks in the ledger yet.</div>
+<details>
+  <summary>How the estimate is made</summary>
+  <p id="heuristic"></p>
+</details>
+<script>
+"use strict";
+// Every string from the server is inserted with textContent only.
+const GROUPS = [["waiting", "Waiting on you"], ["failed", "Failed"], ["running", "Running"], ["queued", "Queued"],
+                ["completed", "Completed"]];
+const QUIET_MS = 10 * 60 * 1000;
+const DOWN_MS = 6000;
+let data = null, receivedAt = 0, skew = 0, lastOk = 0, lastTry = 0;
+const cards = new Map();
+const sections = new Map();
+
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text != null) e.textContent = String(text);
+  return e;
+}
+function now() { return Date.now() - skew; }
+function dur(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return s + " s";
+  const m = Math.floor(s / 60);
+  if (m < 60) return m + " min";
+  return Math.floor(m / 60) + " h " + String(m % 60).padStart(2, "0") + " min";
+}
+// Under 10 min to the minute, above that to 5 min.
+function approx(ms) {
+  const min = Math.max(0, ms) / 60000;
+  const m = min < 10 ? Math.max(1, Math.round(min)) : Math.round(min / 5) * 5;
+  if (m < 60) return "~" + m + " min";
+  return "~" + Math.floor(m / 60) + " h" + (m % 60 ? " " + (m % 60) + " min" : "");
+}
+// What changes by itself between polls is left out, so a card is rebuilt only when something it shows changed.
+function key(t) {
+  const copy = Object.assign({}, t);
+  delete copy.eta_ms; delete copy.long; delete copy.written_ms;
+  if (copy.queue) copy.queue = { place: copy.queue.place, starts: copy.queue.start_ms === 0 ? 0 : copy.queue.start_ms == null ? null : 1 };
+  return JSON.stringify(copy);
+}
+
+function section(group, label) {
+  let s = sections.get(group);
+  if (!s) {
+    const box = el("section", group);
+    const head = el("h2");
+    const list = el("div");
+    box.append(head, list);
+    s = { box, head, list, label };
+    sections.set(group, s);
+    document.getElementById("groups").append(box);
+  }
+  return s;
+}
+
+function build(t) {
+  const c = { t, el: el("article", "card " + t.group), times: [] };
+  const row = el("div", "row");
+  row.append(el("span", "num", "#" + t.num), el("span", "title", t.title || "(untitled)"),
+             el("span", "pill " + t.group, t.state));
+  c.el.append(row);
+
+  const meta = el("div", "meta");
+  meta.append(el("span", "agent", t.agent || "no agent yet"));
+  if (t.started_ms != null) {
+    const span = el("span");
+    meta.append(el("span", null, "·"), span);
+    c.times.push(() => {
+      span.textContent = t.ended_ms != null ? "took " + dur(t.ended_ms - t.started_ms)
+                                            : "running " + dur(now() - t.started_ms);
+    });
+  }
+  if (t.group === "running" && c.t.eta_ms != null) {
+    const eta = el("span", "eta"), long = el("span", "long");
+    eta.title = "An estimate from the phases' typical lengths: see 'How the estimate is made' below.";
+    meta.append(el("span", null, "·"), eta, long);
+    c.times.push(() => {
+      eta.textContent = approx(c.t.eta_ms - (Date.now() - receivedAt)) + " left (estimate)";
+      const over = c.t.long || (t.phase_since_ms != null && t.phase_typical_ms != null
+                                && now() - t.phase_since_ms > t.phase_typical_ms);
+      long.textContent = over ? "phase running long" : "";
+    });
+  }
+  if (t.group === "queued" && t.queue) {
+    const q = el("span");
+    meta.append(el("span", null, "·"), q);
+    c.times.push(() => {
+      const queue = c.t.queue;
+      let text = "#" + queue.place + " in line";
+      if (t.after != null) text += " · after #" + t.after + " lands";
+      if (queue.start_ms === 0) text += " · a slot is free";
+      else if (queue.start_ms != null)
+        text += " · starts in " + approx(queue.start_ms - (Date.now() - receivedAt)) + " (estimate)";
+      q.textContent = text;
+    });
+  }
+  c.el.append(meta);
+
+  if (t.phase != null && t.phases) {
+    const steps = el("div", "steps");
+    t.phases.forEach((name, i) => {
+      const past = t.done || i < t.phase;
+      const step = el("div", "step" + (past ? " past" : i === t.phase ? " cur" : ""));
+      step.append(el("div", "bar"), el("div", "lbl", name));
+      steps.append(step);
+    });
+    c.el.append(steps);
+  }
+
+  if (t.doing || t.waiting_for) {
+    const line = el("div", "now");
+    const dot = el("span", "dot"), what = el("span", "what"), ago = el("span", "ago");
+    line.append(dot, what, ago);
+    c.el.append(line);
+    const active = t.group === "running";
+    if (t.waiting_for && active) {
+      dot.className = "dot waiting";
+      what.textContent = "Waiting for: " + t.waiting_for.text;
+      c.times.push(() => { ago.textContent = "for " + dur(now() - t.waiting_for.started_ms); });
+    } else if (t.done) {
+      dot.className = "dot finished";
+      what.textContent = t.doing.text;
+      c.times.push(() => { ago.textContent = dur(now() - (t.doing.finished_ms ?? t.doing.started_ms)) + " ago"; });
+    } else if (active && t.doing.finished_ms == null) {
+      dot.className = "dot running";
+      what.textContent = t.doing.text;
+      c.times.push(() => { ago.textContent = "for " + dur(now() - t.doing.started_ms); });
+    } else {
+      what.textContent = t.doing.text;
+      c.times.push(() => { ago.textContent = dur(now() - (t.doing.finished_ms ?? t.doing.started_ms)) + " ago"; });
+    }
+  }
+  if (t.group === "running" && t.background && t.background.length) {
+    const list = el("ul", "bg");
+    for (const b of t.background) {
+      const item = el("li", null, "In the background: " + b.text + " · ");
+      const age = el("span");
+      item.append(age);
+      list.append(item);
+      c.times.push(() => { age.textContent = "for " + dur(now() - b.started_ms); });
+    }
+    c.el.append(list);
+  }
+  if (t.said) {
+    const said = el("div", "said");
+    const text = el("span", null, "“" + t.said.text + "”"), age = el("span");
+    said.append(text, " — ", age);
+    c.el.append(said);
+    c.times.push(() => { age.textContent = dur(now() - t.said.ms) + " ago"; });
+  }
+  if (t.note) c.el.append(el("div", "note", t.note));
+  if (t.group === "running") {
+    const quiet = el("div", "quiet");
+    c.el.append(quiet);
+    c.times.push(() => {
+      const since = c.t.written_ms != null ? now() - c.t.written_ms : 0;
+      quiet.hidden = since < QUIET_MS;
+      quiet.textContent = since < QUIET_MS ? "" : "quiet for " + dur(since);
+    });
+  }
+  if (t.transcript_error) c.el.append(el("div", "err", t.transcript_error));
+  return c;
+}
+
+function render() {
+  const d = data;
+  const summary = document.getElementById("summary");
+  const parts = [["Slots", d.slots_used + " of " + d.slots_max + " in use"], ["Queue", d.queue_len ? String(d.queue_len) : "empty"]];
+  summary.replaceChildren(...parts.map(([k, v]) => { const s = el("span", null, k + ": "); s.append(el("b", null, v)); return s; }));
+  const ledgerError = document.getElementById("ledger-error");
+  ledgerError.hidden = !d.ledger_error;
+  ledgerError.textContent = d.ledger_error || "";
+  document.getElementById("heuristic").textContent = d.heuristic || "";
+
+  const seen = new Set();
+  for (const t of d.tasks) {
+    seen.add(t.num);
+    const k = key(t);
+    const old = cards.get(t.num);
+    if (old && old.key === k) { old.t = t; continue; }
+    const c = build(t);
+    c.key = k;
+    if (old) old.el.replaceWith(c.el);
+    cards.set(t.num, c);
+  }
+  for (const [num, c] of cards) if (!seen.has(num)) { c.el.remove(); cards.delete(num); }
+
+  for (const [group, label] of GROUPS) {
+    const s = section(group, label);
+    const members = d.tasks.filter(t => t.group === group).sort((a, b) => a.num - b.num).map(t => cards.get(t.num).el);
+    s.box.hidden = members.length === 0;
+    s.head.textContent = label + " · " + members.length;
+    const current = Array.from(s.list.children);
+    // Moving a card restarts its animations: only when the order changed.
+    if (current.length !== members.length || current.some((e, i) => e !== members[i])) s.list.replaceChildren(...members);
+  }
+  document.getElementById("empty").hidden = d.tasks.length > 0;
+}
+
+function tick() {
+  for (const c of cards.values()) for (const update of c.times) update();
+  const updated = document.getElementById("updated");
+  const banner = document.getElementById("banner");
+  const down = lastTry > 0 && Date.now() - lastOk > DOWN_MS;
+  if (lastOk) updated.textContent = "Updated " + new Date(lastOk).toLocaleTimeString() + " · polls every 2 s";
+  banner.hidden = !down;
+  banner.textContent = !down ? "" : lastOk
+    ? "The status server isn't answering: last update " + dur(Date.now() - lastOk) + " ago. The cards below are from then."
+    : "The status server isn't answering.";
+}
+
+async function poll() {
+  lastTry = Date.now();
+  try {
+    const response = await fetch("/status.json", { cache: "no-store" });
+    if (response.ok) {
+      const d = await response.json();
+      if (d && Array.isArray(d.tasks)) {
+        data = d;
+        receivedAt = lastOk = Date.now();
+        skew = receivedAt - d.now_ms;
+        render();
+      }
+    }
+  } catch (e) { /* shown by the banner */ }
+  tick();
+  setTimeout(poll, 2000);
+}
+setInterval(tick, 1000);
+poll();
+</script>
+</body>
+</html>

@@ -42,7 +42,8 @@ dispatched, whether or not it mentions agents.
   reading of it) cover the same thing in the same place. Otherwise the part falls between the two briefs and nobody
   fixes it. If the scopes overlap, queue the new task after the other or let it rebase. Don't cut its scope.
 
-Keep a small ledger in your head and show it when asked, or when it changes in a way the user should know about:
+Keep a small ledger (inside ngterm also in the status page's file, below) and show it when asked, or when it changes
+in a way the user should know about:
 
 | # | Task (a few words) | Agent | State |
 |---|--------------------|-------|-------|
@@ -50,6 +51,54 @@ Keep a small ledger in your head and show it when asked, or when it changes in a
 | 2 | pinned chats | — | queued (after #1) |
 
 The states are queued, running, waiting on user, landed `<hash>`, and failed.
+
+## The status page
+
+Inside ngterm (`NGTERM_ENABLED=1`), the ledger is also shown as a live page in the session's right pane, by default:
+one card per task with its phase, what its agent is doing now and an estimated finish, read from the agents'
+transcripts (`crates/dispatch-status`). The user watches it instead of asking "what's running?". Set it up in the
+reply that starts dispatch mode:
+
+1. **The ledger file** is `<scratchpad>/dispatch-ledger.json`, `<scratchpad>` being the session's scratchpad dir
+   from the system prompt. Write it before the server starts, and again on every ledger change (a dispatch, a state
+   change, a landing, a note), to a temp file renamed over it, so a read never catches half a file:
+
+   ```json
+   {"tasks": [
+     {"num": 1, "title": "Escape closes search", "agent": "escape-search", "state": "running"},
+     {"num": 2, "title": "pinned chats", "agent": "", "state": "queued", "after": 1, "note": "needs #1's view"}
+   ]}
+   ```
+
+   `state` is the ledger's (`queued`, `running`, `waiting on user`, `landed <hash>`, `failed`). Optional: `note` (a
+   line the user should see on the card), `after` (the task a queued one waits for), `transcript` (the agent's JSONL,
+   only when its name doesn't find it: the server looks names up in this session's subagents dir) and `flow`
+   (`edit` or `scratch`, otherwise told by whether the agent has a worktree).
+2. **Start the server** with `run_in_background`, and keep its shell ID:
+
+   ```sh
+   <repo>/.claude/skills/task-dispatch/scripts/status-page.sh --ledger <scratchpad>/dispatch-ledger.json
+   ```
+
+   The script builds the server only when it was never built or its sources changed (in its own target dir, so it
+   never waits on another build's lock: a minute or two cold under load), and otherwise starts it at once. It
+   serves `http://127.0.0.1:47231/` and prints one ready line. A port in use (another session's page) gets `--port
+   <n>` and that port in the URL below.
+3. **Open it in the right pane.** The split must be shown: if `ngtermctl tree --json` gives this session
+   (`$NGTERM_SESSION_ID`) `"split": false` or no `hasSplit`, run `ngtermctl session split on --axis vertical --target
+   "$NGTERM_SESSION_ID" --socket "$NGTERM_SOCKET"` first. Then:
+
+   ```sh
+   ngtermctl session overlay open --url http://127.0.0.1:47231/ --js --chromeless --pane right \
+     --target "$NGTERM_SESSION_ID" --socket "$NGTERM_SOCKET"
+   ```
+
+4. **Stop it** when dispatch mode ends: `TaskStop` the server's shell and `ngtermctl session overlay close --pane right
+   --target "$NGTERM_SESSION_ID" --socket "$NGTERM_SOCKET"`. When the session itself ends, the server exits on its
+   own: it watches the Claude Code process that started it (`$CLAUDE_PID`).
+
+Outside ngterm nothing is started. Mention once that the page can be had at `http://127.0.0.1:47231/`, and start it
+as in step 2 if the user wants it.
 
 ## Starting an agent
 
