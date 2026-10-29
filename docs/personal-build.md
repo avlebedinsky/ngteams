@@ -61,6 +61,7 @@ personal build widens what a lab account may do.
 | config | `~/.config/teams-lab/lab.toml` | `~/.config/ngteams/accounts.toml` (written by each first sign-in, below) |
 | data dir | `$XDG_DATA_HOME/teams-lab/` (or `lab.toml`'s `data_dir`) | `$XDG_DATA_HOME/ngteams/` (`~/.local/share/ngteams/`), `0700` |
 | store | `<lab data>/store/<alias>.sqlite` | `~/.local/share/ngteams/store/<oid>.sqlite` (`0600`, as `teams-store` makes it) |
+| picture cache | `<lab data>/store/<alias>.sqlite-cache/pictures.sqlite` | `~/.local/share/ngteams/store/<oid>.sqlite-cache/pictures.sqlite` (`0600`, its dir `0700`; the pictures messages show, up to 512 MB; a snapshot leaves it out) |
 | fence log | `<lab data>/fence.log` | `~/.local/share/ngteams/fence.log` (`0600`) |
 | region (no token) | `<lab data>/auth/<alias>.json` | `~/.local/share/ngteams/regions/<oid>.json` |
 | UI settings | `<lab data>/ui/<alias>.toml` | `~/.local/share/ngteams/settings.toml` |

@@ -33,21 +33,25 @@ pub(crate) fn version(conn: &Connection) -> Result<u32, StoreError> {
 
 /// Applies every migration past the store's version; refuses a store from a newer build.
 pub(crate) fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
+    apply(conn, &MIGRATIONS, "store")
+}
+
+/// Applies every migration of `migrations` past the file's version (`user_version`), each in a transaction of its own
+/// that reads the version under the write lock; refuses a file from a newer build. `what` names the file in the log.
+pub(crate) fn apply(conn: &mut Connection, migrations: &[&str], what: &str) -> Result<(), StoreError> {
+    let supported = u32::try_from(migrations.len()).unwrap_or(u32::MAX);
     loop {
         let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let found = version(&tx)?;
-        if found > SCHEMA_VERSION {
-            return Err(StoreError::SchemaTooNew {
-                found,
-                supported: SCHEMA_VERSION,
-            });
+        if found > supported {
+            return Err(StoreError::SchemaTooNew { found, supported });
         }
-        let Some(sql) = MIGRATIONS.get(found as usize) else {
+        let Some(sql) = migrations.get(found as usize) else {
             return Ok(());
         };
         tx.execute_batch(sql)?;
         tx.pragma_update(None, "user_version", found + 1)?;
         tx.commit()?;
-        log::info!("store migrated from schema version {found} to {}", found + 1);
+        log::info!("{what} migrated from schema version {found} to {}", found + 1);
     }
 }

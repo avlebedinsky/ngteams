@@ -121,7 +121,7 @@ outside the repo:
 | `…/bundles/<version>/` | the unpacked web bundle and its `index.jsonl` |
 | `…/fence.log` | JSONL: every fence decision of every run (allows, denies, breaches, with reasons; no tokens, no participants' MRIs, scope ids verbatim), every mutating request let through because it reaches nobody (`allowed`: method, host and path shape, never a query, header or body), and every target the browser fence couldn't arm (its type, failed step, close and containment). Every lab process appends to it at once, each line under an advisory lock on the file |
 | `…/chats.toml` | the lab's group chat: the id of the a–b–c chat `abc-chat` created, recorded once as `abc` (`0600`): lab data for the scenarios and clients, which the fence doesn't read |
-| `…/store/<alias>.sqlite` | the account's native store (`teams-headless`): conversations, messages, reactions, the outbox (`0600`, its dir `0700`); `<alias>.sqlite-runs/` holds a lock per open run |
+| `…/store/<alias>.sqlite` | the account's native store (`teams-headless`): conversations, messages, reactions, the outbox (`0600`, its dir `0700`); `<alias>.sqlite-runs/` holds a lock per open run; `<alias>.sqlite-cache/pictures.sqlite` caches the pictures messages show (up to 512 MB, the least recently used let go first) |
 | `…/headless/<time>…/` | the native live runs' outputs (`teams-headless` and `chat_live`'s `summary.json`) |
 | `…/recordings/` | a native call's audio (`teams-headless … call`): the keyed tone sent and what the far end played (`0700`) |
 | `…/call-live/<time>/` | `call_live`'s traces, outputs, recordings and `summary.json` (`0700`); its screenshots go to `…/screenshots/<time>/` |

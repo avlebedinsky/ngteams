@@ -7,17 +7,28 @@
 //!   decoded, so a picture let go is read again only when a view asks for it anew); a view the service has none of (an
 //!   answer that isn't a success, or isn't a picture) is kept as missing. A read that failed on the way isn't kept and
 //!   is answered [`EngineError::PictureUnread`], so the next ask reads again.
+//! - **Cached across runs** on disk ([`Disk`]: the account's [`PictureCache`] beside its store, up to
+//!   [`PICTURE_CACHE_BYTES`], the least recently used let go first): a picture the run doesn't know yet is looked for
+//!   there before it is read, and one read is kept there, so a later run shows it without reading it again. An AMS
+//!   object's view and a GIF never change, so they are kept for as long as there is room; a missing one isn't kept.
+//!   The cache is opened (when first used), read and written on tokio's blocking pool, never on the engine's
+//!   thread; a cache that can't be opened, read or written only means the picture is read, and a cached picture whose
+//!   bytes changed or aren't a picture is read again.
 //! - **One read per picture at a time**: asks while its read runs wait for that read.
 //! - A `src` that names neither ([`InlinePicture::of`]) is answered `None` with nothing read.
-//! - Nothing is stored and nothing is written.
+//! - Nothing is sent but the reads.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::hash::Hash;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::Duration;
 
-use teams_proto::{Client, Credentials, HttpError, HttpTransport, InlinePicture, PastedPicture};
+use teams_proto::{Client, Credentials, HttpError, HttpTransport, InlinePicture, PastedFormat, PastedPicture};
+use teams_store::pictures::PICTURE_CACHE_BYTES;
+use teams_store::{PictureCache, StoreError};
 
 use crate::engine::{EngineError, Responder};
 
@@ -73,15 +84,124 @@ impl<K: Clone + Eq + Hash> Kept<K> {
     }
 }
 
+/// The account's picture cache on disk, shared by the messages' pictures and the files' thumbnails
+/// ([`crate::thumbnails`]): opened on the blocking pool by the first picture that asks for it, and every picture read
+/// once it can't be opened.
+#[derive(Clone)]
+pub(crate) struct Disk(Arc<Mutex<Opened>>);
+
+/// Whether the cache was opened.
+enum Opened {
+    /// Not yet: it is opened at this path when first used.
+    Not(PathBuf),
+    Open(PictureCache),
+    /// It couldn't be opened: this run doesn't use it.
+    Unusable,
+}
+
+impl Disk {
+    /// The cache beside the store at `store` ([`PictureCache::file_beside`]), opened when first used.
+    pub(crate) fn beside(store: &Path) -> Self {
+        Self(Arc::new(Mutex::new(Opened::Not(PictureCache::file_beside(store)))))
+    }
+
+    /// The picture `key` names, if the cache holds one stored less than `max_age` ago (any age when `None`) whose
+    /// bytes are a picture.
+    async fn get(&self, key: String, max_age: Option<Duration>) -> Option<PictureBytes> {
+        let opened = Arc::clone(&self.0);
+        let found = tokio::task::spawn_blocking(move || {
+            using(&opened, "a cached picture couldn't be read", |cache| {
+                cache.get(&key, max_age)
+            })
+        })
+        .await;
+        let bytes = found.ok().flatten().flatten()?;
+        let format = PastedFormat::sniff(&bytes)?;
+        Some(Arc::new(PastedPicture { format, bytes }))
+    }
+
+    /// The picture `key` names: the cache's ([`Self::get`]), else what `fetch` reads (`Some(None)` when the service
+    /// has none, `None` when the read failed on the way), its bytes then cached ([`Self::put`]). `fetch` runs only on
+    /// a miss.
+    pub(crate) async fn or_fetch(
+        &self,
+        key: String,
+        max_age: Option<Duration>,
+        fetch: impl Future<Output = Option<Option<PictureBytes>>>,
+    ) -> Option<Option<PictureBytes>> {
+        if let Some(cached) = self.get(key.clone(), max_age).await {
+            return Some(Some(cached));
+        }
+        let answer = fetch.await;
+        if let Some(Some(bytes)) = &answer {
+            self.put(key, bytes);
+        }
+        answer
+    }
+
+    /// Keeps `picture` as the one `key` names, written on the blocking pool while the engine goes on.
+    fn put(&self, key: String, picture: &PictureBytes) {
+        let opened = Arc::clone(&self.0);
+        let picture = Arc::clone(picture);
+        // not awaited: the asks are answered already; the runtime waits for it before the engine's lock goes
+        drop(tokio::task::spawn_blocking(move || {
+            using(&opened, "a picture couldn't be cached", |cache| {
+                cache.put(&key, &picture.bytes)
+            })
+        }));
+    }
+}
+
+/// Runs `with` on the cache, opening it first when it wasn't yet (on the blocking pool, as every caller runs it);
+/// `None` when it can't be opened or `with` failed (logged as `failed`, without the key).
+fn using<T>(
+    opened: &Mutex<Opened>,
+    failed: &str,
+    with: impl FnOnce(&mut PictureCache) -> Result<T, StoreError>,
+) -> Option<T> {
+    let mut opened = opened.lock().unwrap_or_else(PoisonError::into_inner);
+    if let Opened::Not(path) = &*opened {
+        let next = match PictureCache::open(path, PICTURE_CACHE_BYTES) {
+            Ok(cache) => Opened::Open(cache),
+            Err(error) => {
+                log::info!("the picture cache isn't used this run: {error}");
+                Opened::Unusable
+            }
+        };
+        *opened = next;
+    }
+    let Opened::Open(cache) = &mut *opened else {
+        return None;
+    };
+    match with(cache) {
+        Ok(done) => Some(done),
+        Err(error) => {
+            log::info!("{failed}: {error}");
+            None
+        }
+    }
+}
+
+/// What the cache finds a message's picture by: the AMS object and its view, or the GIF's id and file (never its
+/// link: the account's AMS base reads it, whichever host the message names).
+fn cache_key(picture: &InlinePicture) -> String {
+    match picture {
+        InlinePicture::Ams(picture) => format!("ams/{}/{}", picture.object(), picture.view()),
+        InlinePicture::Giphy(picture) => format!("giphy/{}/{}", picture.id(), picture.file()),
+    }
+}
+
 pub(crate) struct Pictures<C> {
     client: Arc<Client<HttpTransport<C>>>,
+    disk: Disk,
     kept: Rc<RefCell<Kept<InlinePicture>>>,
 }
 
 impl<C: Credentials + 'static> Pictures<C> {
-    pub(crate) fn new(client: Arc<Client<HttpTransport<C>>>) -> Self {
+    pub(crate) fn new(client: Arc<Client<HttpTransport<C>>>, disk: Disk) -> Self {
         Self {
             client,
+            disk,
             kept: Rc::default(),
         }
     }
@@ -102,27 +222,43 @@ impl<C: Credentials + 'static> Pictures<C> {
             None => {
                 kept.known.insert(picture.clone(), Known::Reading(vec![reply]));
                 // on the engine's `LocalSet`: the read waits on nothing of the engine's loop
-                tokio::task::spawn_local(read_picture(Arc::clone(&self.client), picture, Rc::clone(&self.kept)));
+                tokio::task::spawn_local(read_picture(
+                    Arc::clone(&self.client),
+                    self.disk.clone(),
+                    picture,
+                    Rc::clone(&self.kept),
+                ));
             }
         }
     }
 }
 
-/// Reads `picture` and answers every ask that waits for it; keeps it, or that there is none, unless the read failed on
-/// the way ([`EngineError::PictureUnread`]).
-async fn read_picture<C: Credentials + 'static>(
-    client: Arc<Client<HttpTransport<C>>>,
-    picture: InlinePicture,
-    kept: Rc<RefCell<Kept<InlinePicture>>>,
-) {
-    let answer = match client.read(&picture).await {
+/// Reads `picture` from the service: its bytes, `Some(None)` when the service has none, `None` when the read failed on
+/// the way.
+async fn fetch<C: Credentials + 'static>(
+    client: &Client<HttpTransport<C>>,
+    picture: &InlinePicture,
+) -> Option<Option<PictureBytes>> {
+    match client.read(picture).await {
         Ok(answer) => Some(picture.read_answer(&answer).map(Arc::new)),
         Err(HttpError::Status(_) | HttpError::BodyTooLarge) => Some(None),
         Err(error) => {
             log::info!("a message's picture couldn't be read: {error}");
             None
         }
-    };
+    }
+}
+
+/// Finds `picture` in the cache on disk, else reads it (and caches what it read); answers every ask that waits for
+/// it; keeps it, or that there is none, unless the read failed on the way ([`EngineError::PictureUnread`]).
+async fn read_picture<C: Credentials + 'static>(
+    client: Arc<Client<HttpTransport<C>>>,
+    disk: Disk,
+    picture: InlinePicture,
+    kept: Rc<RefCell<Kept<InlinePicture>>>,
+) {
+    let key = cache_key(&picture);
+    let answer = disk.or_fetch(key, None, fetch(&client, &picture)).await;
     let waiting = match answer.clone() {
         Some(bytes) => kept.borrow_mut().keep(picture, bytes),
         None => kept.borrow_mut().known.remove(&picture),

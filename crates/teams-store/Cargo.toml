@@ -1,6 +1,6 @@
 [package]
 name = "teams-store"
-description = "The native client's local store: conversations, members, messages with versions, reactions, read horizons, sync state and the outbox, in SQLite"
+description = "The native client's local store: conversations, members, messages with versions, reactions, read horizons, sync state and the outbox, in SQLite; and the pictures messages show, cached beside it"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -10,6 +10,8 @@ publish.workspace = true
 # each migration (from and to) in the app's diagnostic log
 log.workspace = true
 rusqlite.workspace = true
+# the picture cache finds a picture by the SHA-256 of what names it (`pictures`)
+sha2.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]

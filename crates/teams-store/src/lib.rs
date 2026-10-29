@@ -10,6 +10,8 @@
 //!   rows of runs that have ended (each open run holds a lock of its own, `runs`); one engine per account holds the
 //!   engine lock ([`Store::engine_lock`]);
 //! - [`search`]: local search over the messages' plain text (FTS5), the text the core hands in (M2 Task 15);
+//! - [`pictures`]: the pictures messages show, cached in a file of their own beside the store
+//!   (`<store>-cache/pictures.sqlite`), so a later run shows them without reading them again;
 //! - [`teams`]: the account's teams and their channels as CSA last listed them, and each stored channel message's
 //!   post (M2 Task 16);
 //! - [`schema`]: the migrations, applied in order on open.
@@ -24,6 +26,7 @@ pub mod conversations;
 mod file;
 pub mod messages;
 pub mod outbox;
+pub mod pictures;
 pub mod profiles;
 mod runs;
 pub mod schema;
@@ -41,6 +44,7 @@ use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 pub use conversations::{Conversation, ConversationKind, Member};
 pub use messages::{Message, MessagePage, PageCursor, Reaction, ReactionChange};
 pub use outbox::{AttemptOutcome, CheckFailed, NewOutboxEntry, OutboxEntry, OutboxKind, OutboxState};
+pub use pictures::PictureCache;
 pub use profiles::{NameSource, PictureState, Profile, StoredPicture};
 pub use schema::SCHEMA_VERSION;
 pub use search::{IndexCursor, IndexText, SearchHit};
@@ -138,6 +142,8 @@ pub enum Applied {
 #[derive(Debug)]
 pub struct Store {
     conn: Connection,
+    /// The file it was opened at.
+    path: PathBuf,
     run_id: i64,
     /// Where the runs' locks are.
     runs: PathBuf,
@@ -169,6 +175,7 @@ impl Store {
         let (run_id, run_lock) = Self::start_run(&mut conn, &runs_dir)?;
         Ok(Self {
             conn,
+            path: path.to_path_buf(),
             run_id,
             runs: runs_dir,
             _run_lock: run_lock,
@@ -212,6 +219,12 @@ impl Store {
             return Ok(true);
         }
         runs::is_open(&self.runs, run_id)
+    }
+
+    /// The file the store was opened at.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
     }
 
     /// This process's run: the outbox rows it made or adopted. Rows of other runs are never sent on their own.

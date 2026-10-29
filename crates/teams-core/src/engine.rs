@@ -129,7 +129,7 @@ use crate::calling::{
 };
 use crate::emoticons::{Animations, Strip};
 use crate::outbox::{Command, Outbox, OutboxError, Sent, Transient, TransientSent, create_chat, enqueue};
-use crate::pictures::{PictureBytes, Pictures};
+use crate::pictures::{Disk, PictureBytes, Pictures};
 use crate::presence::{Availability, PRESENCE_POLL, PRESENCE_POLL_SUBSCRIBED, PresenceDone, Presences};
 use crate::profiles::{PROFILE_RETRY, Person, Profiles};
 use crate::search::{Backfill, INDEX_BATCH, Step};
@@ -1081,8 +1081,11 @@ where
         let polls = (parts.options.presence_poll, parts.options.presence_poll_subscribed);
         let presences = Presences::new(Arc::clone(&parts.client), polls);
         let animations = Animations::new(Arc::clone(&parts.client));
-        let pictures = Pictures::new(Arc::clone(&parts.client));
-        let thumbnails = Thumbnails::new(Arc::clone(&parts.client));
+        // the pictures cached across runs, beside the store, opened when first used: only this engine opens it, under
+        // the account's lock
+        let disk = Disk::beside(parts.store.path());
+        let pictures = Pictures::new(Arc::clone(&parts.client), disk.clone());
+        let thumbnails = Thumbnails::new(Arc::clone(&parts.client), disk);
         let calling = parts
             .calls
             .map(|calls| Calling::new(calls, Arc::clone(&outbox), Arc::clone(&parts.client), events.clone()));

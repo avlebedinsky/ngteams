@@ -74,6 +74,9 @@ reads, and a file the account can't read is just a card without its picture.
 - **Kept for the run** in the engine's memory (`teams-core`'s `thumbnails.rs`), once per file: an answer that isn't a
   success (403, 404), an empty list or bytes that aren't a picture are no picture, and the card shows its placeholder;
   a read that failed on the way is asked again later. The bytes reach the card only from the engine.
+- **Cached across runs** in the account's picture cache beside its store (`teams_store::PictureCache`, by the
+  SHA-256 of the file's sharing token, never the link Graph handed out): a picture read is shown by a later run
+  without either read for a week, then read again (the file may have changed); no picture is never cached.
 
 ## Where a name comes from
 

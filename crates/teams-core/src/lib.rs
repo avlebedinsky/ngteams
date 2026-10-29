@@ -21,8 +21,8 @@
 //!   messages stored before indexed by a backfill in batches.
 //! - [`emoticons`]: reactions' and messages' emoticons' animations, read from Teams' CDN when a view asks for one and
 //!   kept for the run.
-//! - [`pictures`]: pictures pasted into messages, read from the account's AMS base when a view shows one and kept for
-//!   the run.
+//! - [`pictures`]: pictures pasted into messages, read from the account's AMS base when a view shows one, kept for
+//!   the run and cached on disk beside the store, so a later run shows them without reading them again.
 //! - [`teams`]: the account's teams and their channels, read from CSA in the background and kept in the store;
 //!   read-only, as a channel's posts are.
 //! - [`calling`]: the account's calls (M3 Task 14): the call session joining the signaling machine (`teams-call`), the

@@ -6,28 +6,37 @@
 //!   `pictures::KEPT_BYTES` of them, the oldest let go first; a file Graph lists no thumbnail of, can't be read by the account
 //!   (an answer that isn't a success) or whose picture isn't one is kept as missing. A read that failed on the way
 //!   isn't kept and is answered [`EngineError::PictureUnread`], so the next ask reads again.
+//! - **Cached across runs** on disk, in the messages' pictures' cache (`pictures::Disk`), by the file's sharing token:
+//!   looked for there before Graph is read, and kept there once read, for [`THUMBNAIL_MAX_AGE`] (a file's thumbnail
+//!   changes with the file); a missing one isn't kept.
 //! - **One read per file at a time**: asks while its reads run wait for them.
 //! - A link that isn't a SharePoint sharing link ([`FileThumbnails::of`]) is answered `None` with nothing read.
-//! - Nothing is stored and nothing is written.
+//! - Nothing is sent but the reads.
 
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use teams_proto::{Client, Credentials, FileThumbnails, HttpError, HttpTransport, PastedFormat, PastedPicture};
 
 use crate::engine::{EngineError, Responder};
-use crate::pictures::{Kept, Known, PictureBytes};
+use crate::pictures::{Disk, Kept, Known, PictureBytes};
+
+/// How long a file's thumbnail cached on disk is shown before it is read again: a week.
+pub const THUMBNAIL_MAX_AGE: Duration = Duration::from_hours(7 * 24);
 
 pub(crate) struct Thumbnails<C> {
     client: Arc<Client<HttpTransport<C>>>,
+    disk: Disk,
     kept: Rc<RefCell<Kept<FileThumbnails>>>,
 }
 
 impl<C: Credentials + 'static> Thumbnails<C> {
-    pub(crate) fn new(client: Arc<Client<HttpTransport<C>>>) -> Self {
+    pub(crate) fn new(client: Arc<Client<HttpTransport<C>>>, disk: Disk) -> Self {
         Self {
             client,
+            disk,
             kept: Rc::default(),
         }
     }
@@ -48,7 +57,12 @@ impl<C: Credentials + 'static> Thumbnails<C> {
             None => {
                 kept.known.insert(file.clone(), Known::Reading(vec![reply]));
                 // on the engine's `LocalSet`: the reads wait on nothing of the engine's loop
-                tokio::task::spawn_local(read_thumbnail(Arc::clone(&self.client), file, Rc::clone(&self.kept)));
+                tokio::task::spawn_local(read_thumbnail(
+                    Arc::clone(&self.client),
+                    self.disk.clone(),
+                    file,
+                    Rc::clone(&self.kept),
+                ));
             }
         }
     }
@@ -81,20 +95,30 @@ async fn thumbnail_of<C: Credentials + 'static>(
     }))
 }
 
-/// Reads `file`'s thumbnail and answers every ask that waits for it; keeps it, or that there is none, unless a read
-/// failed on the way ([`EngineError::PictureUnread`]).
-async fn read_thumbnail<C: Credentials + 'static>(
-    client: Arc<Client<HttpTransport<C>>>,
-    file: FileThumbnails,
-    kept: Rc<RefCell<Kept<FileThumbnails>>>,
-) {
-    let answer = match thumbnail_of(&client, &file).await {
+/// [`thumbnail_of`] as an answer to keep: `None` when a read failed on the way.
+async fn fetch<C: Credentials + 'static>(
+    client: &Client<HttpTransport<C>>,
+    file: &FileThumbnails,
+) -> Option<Option<PictureBytes>> {
+    match thumbnail_of(client, file).await {
         Ok(bytes) => Some(bytes),
         Err(error) => {
             log::info!("a file's thumbnail couldn't be read: {error}");
             None
         }
-    };
+    }
+}
+
+/// Finds `file`'s thumbnail in the cache on disk, else reads it (and caches what it read); answers every ask that waits
+/// for it; keeps it, or that there is none, unless a read failed on the way ([`EngineError::PictureUnread`]).
+async fn read_thumbnail<C: Credentials + 'static>(
+    client: Arc<Client<HttpTransport<C>>>,
+    disk: Disk,
+    file: FileThumbnails,
+    kept: Rc<RefCell<Kept<FileThumbnails>>>,
+) {
+    let key = format!("thumbnail/{}", file.share());
+    let answer = disk.or_fetch(key, Some(THUMBNAIL_MAX_AGE), fetch(&client, &file)).await;
     let waiting = match answer.clone() {
         Some(bytes) => kept.borrow_mut().keep(file, bytes),
         None => kept.borrow_mut().known.remove(&file),

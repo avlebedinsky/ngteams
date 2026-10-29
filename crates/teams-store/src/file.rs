@@ -19,7 +19,7 @@ use crate::StoreError;
 const FILE_MODE: u32 = 0o600;
 const DIR_MODE: u32 = 0o700;
 /// The files SQLite keeps next to the database.
-const SIDE_FILES: [&str; 3] = ["-wal", "-shm", "-journal"];
+pub(crate) const SIDE_FILES: [&str; 3] = ["-wal", "-shm", "-journal"];
 
 fn failed(path: &Path) -> impl FnOnce(std::io::Error) -> StoreError {
     let path = path.to_owned();
@@ -80,7 +80,7 @@ fn tighten(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn side_file(path: &Path, suffix: &str) -> PathBuf {
+pub(crate) fn side_file(path: &Path, suffix: &str) -> PathBuf {
     let mut name = OsString::from(path.as_os_str());
     name.push(suffix);
     PathBuf::from(name)
