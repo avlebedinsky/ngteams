@@ -1,4 +1,6 @@
-//! An agent's phases, which only move forward, and the estimate of what is left.
+//! An agent's phases and the estimate of what is left. Within one reading of a transcript the phase only moves
+//! forward, but for one step kept truthful: an editing agent's `check` lasts only until its next edit, so an agent
+//! gone back to fixing after a failed check shows `implement` again.
 
 use crate::signals::Signal;
 
@@ -11,16 +13,22 @@ const SKIPPED_MS: i64 = 30_000;
 /// Which steps an agent goes through.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Flow {
-    /// An agent in a worktree: it edits, reviews, commits, lands and runs the gate.
+    /// A task's agent in a worktree: it edits, checks that it compiles, commits and lands, unreviewed and ungated.
     Edit,
+    /// The review-and-gate pass over what the tasks landed: revmux rounds and their fixes, the gate, the fixes landed.
+    Review,
     /// An agent without a worktree: it investigates, does the work, checks it.
     Scratch,
 }
 
 impl Flow {
+    /// Every flow, in the order of [`Flow::index`].
+    pub const ALL: [Self; 3] = [Self::Edit, Self::Review, Self::Scratch];
+
     pub fn parse(text: &str) -> Option<Self> {
         match text {
             "edit" => Some(Self::Edit),
+            "review" => Some(Self::Review),
             "scratch" => Some(Self::Scratch),
             _ => None,
         }
@@ -29,14 +37,25 @@ impl Flow {
     pub fn name(self) -> &'static str {
         match self {
             Self::Edit => "edit",
+            Self::Review => "review",
             Self::Scratch => "scratch",
+        }
+    }
+
+    /// Where this flow is in [`Flow::ALL`].
+    pub fn index(self) -> usize {
+        match self {
+            Self::Edit => 0,
+            Self::Review => 1,
+            Self::Scratch => 2,
         }
     }
 
     /// The phases, `done` last.
     pub fn phases(self) -> &'static [&'static str] {
         match self {
-            Self::Edit => &["investigate", "implement", "revmux", "commit", "land", "gate", "done"],
+            Self::Edit => &["investigate", "implement", "check", "commit", "land", "done"],
+            Self::Review => &["review", "gate", "land", "done"],
             Self::Scratch => &["investigate", "implement", "verify", "done"],
         }
     }
@@ -49,7 +68,8 @@ impl Flow {
     /// The typical minutes of each phase but `done`, until finished tasks give their own.
     pub fn default_minutes(self) -> &'static [i64] {
         match self {
-            Self::Edit => &[10, 30, 25, 2, 6, 15],
+            Self::Edit => &[10, 30, 4, 1, 6],
+            Self::Review => &[45, 30, 8],
             Self::Scratch => &[5, 20, 10],
         }
     }
@@ -63,6 +83,17 @@ pub struct Progress {
     pub entered: Vec<Option<i64>>,
 }
 
+/// What an agent's signals so far showed.
+#[derive(Default)]
+struct Seen {
+    /// It edited a file (in the repo, or for an agent without a worktree anywhere).
+    edited: bool,
+    /// It ran a revmux round.
+    reviewed: bool,
+    /// Since when it has only been building or testing, with no edit since.
+    checking: Option<i64>,
+}
+
 impl Progress {
     /// The phase `signals` (with their times, in order) lead to from the agent's start at `first_ms`; `done_ms` is
     /// when it was done, if it is.
@@ -73,16 +104,20 @@ impl Progress {
             entered: vec![None; flow.phases().len()],
         };
         progress.entered[0] = Some(first_ms);
-        let mut landed = false;
-        let mut edited = false;
+        let mut seen = Seen::default();
         for &(at, signal) in signals {
-            let target = match flow {
-                Flow::Edit => edit_target(signal, &mut landed),
-                Flow::Scratch => scratch_target(signal, progress.phase, &mut edited),
-            };
-            if let Some(target) = target {
-                progress.reach(target, at);
+            match flow {
+                Flow::Edit => progress.edit_step(signal, at, &mut seen),
+                Flow::Review => progress.review_step(signal, at, &mut seen),
+                Flow::Scratch => progress.scratch_step(signal, at, &mut seen),
             }
+        }
+        // An editing agent building or testing since its last edit is checking it, until it edits again.
+        if flow == Flow::Edit
+            && progress.phase == 1
+            && let Some(checking) = seen.checking
+        {
+            progress.reach(2, checking);
         }
         if let Some(done_ms) = done_ms {
             progress.reach(flow.done(), done_ms);
@@ -98,6 +133,59 @@ impl Progress {
             *entered = Some(at);
         }
         self.phase = target;
+    }
+
+    /// investigate, implement, check, commit, land: the check is the builds and tests after the last edit before
+    /// the commit.
+    fn edit_step(&mut self, signal: Signal, at: i64, seen: &mut Seen) {
+        match signal {
+            Signal::Edit => {
+                seen.edited = true;
+                seen.checking = None;
+                self.reach(1, at);
+            }
+            Signal::Build | Signal::Check => {
+                self.reach(1, at);
+                if seen.edited && self.phase == 1 {
+                    seen.checking.get_or_insert(at);
+                }
+            }
+            Signal::Commit => {
+                if let Some(checking) = seen.checking.take() {
+                    self.reach(2, checking);
+                }
+                self.reach(3, at);
+            }
+            Signal::Land => self.reach(4, at),
+            Signal::ScratchEdit | Signal::Probe | Signal::Revmux => {}
+        }
+    }
+
+    /// review, gate, land: the fixes between revmux rounds belong to the review, and the gate begins with the first
+    /// clippy, test or lint run after a round.
+    fn review_step(&mut self, signal: Signal, at: i64, seen: &mut Seen) {
+        match signal {
+            Signal::Revmux => seen.reviewed = true,
+            Signal::Check if seen.reviewed => self.reach(1, at),
+            Signal::Land => self.reach(2, at),
+            _ => {}
+        }
+    }
+
+    /// investigate, implement, verify: a check or probe verifies only once the agent has edited something.
+    fn scratch_step(&mut self, signal: Signal, at: i64, seen: &mut Seen) {
+        match signal {
+            Signal::Edit | Signal::ScratchEdit => {
+                seen.edited = true;
+                self.reach(1, at);
+            }
+            Signal::Build => self.reach(1, at),
+            Signal::Check | Signal::Probe | Signal::Revmux => {
+                let target = if self.phase >= 1 && seen.edited { 2 } else { 1 };
+                self.reach(target, at);
+            }
+            Signal::Commit | Signal::Land => {}
+        }
     }
 
     pub fn is_done(&self) -> bool {
@@ -119,32 +207,6 @@ impl Progress {
                 Some(end - start).filter(|length| *length >= SKIPPED_MS)
             })
             .collect()
-    }
-}
-
-fn edit_target(signal: Signal, landed: &mut bool) -> Option<usize> {
-    match signal {
-        Signal::Edit | Signal::Build => Some(1),
-        Signal::Check => Some(if *landed { 5 } else { 1 }),
-        Signal::Revmux => Some(2),
-        Signal::Commit => Some(3),
-        Signal::Land => {
-            *landed = true;
-            Some(4)
-        }
-        Signal::ScratchEdit | Signal::Probe => None,
-    }
-}
-
-fn scratch_target(signal: Signal, phase: usize, edited: &mut bool) -> Option<usize> {
-    match signal {
-        Signal::Edit | Signal::ScratchEdit => {
-            *edited = true;
-            Some(1)
-        }
-        Signal::Build => Some(1),
-        Signal::Check | Signal::Probe | Signal::Revmux => Some(if phase >= 1 && *edited { 2 } else { 1 }),
-        Signal::Commit | Signal::Land => None,
     }
 }
 
@@ -195,30 +257,67 @@ mod tests {
 
     const M: i64 = MINUTE_MS;
 
-    #[test]
-    fn an_edit_moves_forward_only() {
-        let signals = [
-            (2 * M, Signal::Edit),
-            (40 * M, Signal::Revmux),
-            (50 * M, Signal::Build),
-            (60 * M, Signal::Check),
-            (65 * M, Signal::Commit),
-            (66 * M, Signal::Land),
-            (70 * M, Signal::Check),
-            (80 * M, Signal::Commit),
-        ];
-        let progress = Progress::new(Flow::Edit, 0, &signals, None);
-        assert_eq!(Flow::Edit.phases()[progress.phase], "gate");
-        assert_eq!(progress.since(), Some(70 * M));
-        let landed = Progress::new(Flow::Edit, 0, &signals[..6], None);
-        assert_eq!(Flow::Edit.phases()[landed.phase], "land");
+    fn phase_of(flow: Flow, signals: &[(i64, Signal)]) -> (&'static str, Option<i64>) {
+        let progress = Progress::new(flow, 0, signals, None);
+        (flow.phases()[progress.phase], progress.since())
     }
 
     #[test]
-    fn a_check_before_landing_is_no_gate() {
-        let signals = [(M, Signal::Check), (2 * M, Signal::Revmux), (3 * M, Signal::Check)];
+    fn an_edit_checks_commits_and_lands() {
+        let signals = [
+            (2 * M, Signal::Edit),
+            (10 * M, Signal::Build),
+            (20 * M, Signal::Edit),
+            (30 * M, Signal::Build),
+            (35 * M, Signal::Check),
+            (40 * M, Signal::Commit),
+            (41 * M, Signal::Land),
+            (45 * M, Signal::Edit),
+            (46 * M, Signal::Build),
+        ];
+        assert_eq!(phase_of(Flow::Edit, &signals[..2]), ("check", Some(10 * M)));
+        // An edit after a check is implementing again.
+        assert_eq!(phase_of(Flow::Edit, &signals[..3]), ("implement", Some(2 * M)));
+        assert_eq!(phase_of(Flow::Edit, &signals[..5]), ("check", Some(30 * M)));
+        assert_eq!(phase_of(Flow::Edit, &signals[..6]), ("commit", Some(40 * M)));
+        // A fix after landing (`land.sh`'s exit 3) stays in `land`.
+        assert_eq!(phase_of(Flow::Edit, &signals), ("land", Some(41 * M)));
+        let done = Progress::new(Flow::Edit, 0, &signals, Some(50 * M));
+        assert!(done.is_done());
+        assert_eq!(
+            done.lengths(),
+            vec![Some(2 * M), Some(28 * M), Some(10 * M), Some(M), Some(9 * M)]
+        );
+    }
+
+    #[test]
+    fn a_commit_without_a_check_skips_it() {
+        let signals = [(M, Signal::Build), (2 * M, Signal::Edit), (5 * M, Signal::Commit)];
+        // A build before any edit is no check of an edit.
+        assert_eq!(phase_of(Flow::Edit, &signals[..1]), ("implement", Some(M)));
         let progress = Progress::new(Flow::Edit, 0, &signals, None);
-        assert_eq!(Flow::Edit.phases()[progress.phase], "revmux");
+        assert_eq!(Flow::Edit.phases()[progress.phase], "commit");
+        assert_eq!(progress.entered[2], Some(5 * M));
+    }
+
+    #[test]
+    fn a_review_pass_reviews_gates_and_lands() {
+        let signals = [
+            (M, Signal::Check),
+            (2 * M, Signal::Revmux),
+            (20 * M, Signal::Edit),
+            (21 * M, Signal::Build),
+            (22 * M, Signal::Commit),
+            (25 * M, Signal::Revmux),
+            (40 * M, Signal::Check),
+            (60 * M, Signal::Commit),
+            (61 * M, Signal::Land),
+        ];
+        // A test before the first round is no gate.
+        assert_eq!(phase_of(Flow::Review, &signals[..1]), ("review", Some(0)));
+        assert_eq!(phase_of(Flow::Review, &signals[..6]), ("review", Some(0)));
+        assert_eq!(phase_of(Flow::Review, &signals[..8]), ("gate", Some(40 * M)));
+        assert_eq!(phase_of(Flow::Review, &signals), ("land", Some(61 * M)));
     }
 
     #[test]
@@ -242,9 +341,18 @@ mod tests {
 
     #[test]
     fn estimates_what_is_left() {
-        let typical = [10 * M, 30 * M, 25 * M, 2 * M, 6 * M, 15 * M];
+        let typical = [10 * M, 30 * M, 4 * M, M, 6 * M];
         let progress = Progress::new(Flow::Edit, 0, &[(5 * M, Signal::Edit)], None);
-        assert_eq!(estimate(&progress, &typical, 15 * M), Some((20 * M + 48 * M, false)));
-        assert_eq!(estimate(&progress, &typical, 60 * M), Some((6 * M + 48 * M, true)));
+        assert_eq!(estimate(&progress, &typical, 15 * M), Some((20 * M + 11 * M, false)));
+        assert_eq!(estimate(&progress, &typical, 60 * M), Some((6 * M + 11 * M, true)));
+    }
+
+    #[test]
+    fn every_flow_has_a_default_for_each_phase() {
+        for (index, flow) in Flow::ALL.into_iter().enumerate() {
+            assert_eq!(flow.index(), index);
+            assert_eq!(flow.default_minutes().len(), flow.done());
+            assert_eq!(Flow::parse(flow.name()), Some(flow));
+        }
     }
 }

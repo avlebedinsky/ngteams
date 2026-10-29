@@ -11,9 +11,6 @@ use crate::phase::{Flow, MINUTE_MS, Progress, estimate, typical};
 use crate::redact::shown;
 use crate::transcript::Transcript;
 
-/// At most this many agents run at once.
-const SLOTS: usize = 4;
-
 /// With a background command pending and nothing written for this long, the agent is waiting for it.
 const WAITING_AFTER_MS: i64 = 30_000;
 
@@ -99,15 +96,16 @@ impl Status {
             .filter_map(|row| row.progress.as_ref())
             .filter(|p| p.is_done())
             .collect();
-        let lengths = [Flow::Edit, Flow::Scratch].map(|flow| typical(flow, &finished));
+        let lengths = Flow::ALL.map(|flow| typical(flow, &finished));
         for row in &mut rows {
             if row.group == Group::Running
                 && let Some(progress) = row.progress.as_ref().filter(|progress| !progress.is_done())
             {
-                row.eta = estimate(progress, &lengths[flow_index(row.flow)], now_ms);
+                row.eta = estimate(progress, &lengths[row.flow.index()], now_ms);
             }
         }
-        let queue = queue_places(&rows);
+        let slots = self.ledger.slots();
+        let queue = queue_places(&rows, slots);
         let out: Vec<Value> = rows
             .iter()
             .map(|row| {
@@ -115,7 +113,7 @@ impl Status {
                 task_json(
                     row,
                     transcript,
-                    &lengths[flow_index(row.flow)],
+                    &lengths[row.flow.index()],
                     now_ms,
                     queue.get(&row.task.num),
                 )
@@ -124,7 +122,7 @@ impl Status {
         json!({
             "now_ms": now_ms,
             "slots_used": rows.iter().filter(|row| row.group == Group::Running).count(),
-            "slots_max": SLOTS,
+            "slots_max": slots,
             "queue_len": rows.iter().filter(|row| row.group == Group::Queued).count(),
             "ledger_error": self.ledger.error(),
             "heuristic": heuristic(&lengths),
@@ -230,13 +228,6 @@ fn session_subagents(projects: &Path, session: &str) -> Option<PathBuf> {
         .find(|dir| dir.is_dir())
 }
 
-fn flow_index(flow: Flow) -> usize {
-    match flow {
-        Flow::Edit => 0,
-        Flow::Scratch => 1,
-    }
-}
-
 /// Every agent's name in `dir`'s `*.meta.json`, with its transcript (the newest one of a name).
 fn scan_names(dir: &Path) -> HashMap<String, PathBuf> {
     let mut found: HashMap<String, (std::time::SystemTime, PathBuf)> = HashMap::new();
@@ -273,9 +264,9 @@ fn scan_names(dir: &Path) -> HashMap<String, PathBuf> {
 /// A queued task's place in line and its estimated start (from `now`, in ms): the ETA of the task it waits for, or
 /// the n-th smallest ETA among the running tasks once the free slots are taken, n counting only the queued tasks
 /// ahead that wait for no other task (`Some(0)` when a slot is free).
-fn queue_places(rows: &[Row]) -> HashMap<u64, (usize, Option<i64>)> {
+fn queue_places(rows: &[Row], slots: usize) -> HashMap<u64, (usize, Option<i64>)> {
     let running = rows.iter().filter(|row| row.group == Group::Running).count();
-    let free = SLOTS.saturating_sub(running);
+    let free = slots.saturating_sub(running);
     let queued_after: Vec<u64> = rows
         .iter()
         .filter(|row| row.group == Group::Queued)
@@ -384,7 +375,7 @@ fn activity(out: &mut Value, row: &Row, transcript: &Transcript, now_ms: i64) {
 }
 
 /// How the estimate is made, with the typical lengths in use now.
-fn heuristic(lengths: &[Vec<i64>; 2]) -> String {
+fn heuristic(lengths: &[Vec<i64>; 3]) -> String {
     let list = |flow: Flow, lengths: &[i64]| {
         flow.phases()
             .iter()
@@ -397,9 +388,10 @@ fn heuristic(lengths: &[Vec<i64>; 2]) -> String {
         "An estimate, not a promise: what is left of the current phase's typical length (at least a fifth of it) plus \
          the typical lengths of the phases after it. A phase's typical length is the median of the finished tasks' \
          times for it (phases skipped in under 30 s left out), or its default until one exists. Typical minutes now: \
-         an editing agent {}; an agent without a worktree {}.",
-        list(Flow::Edit, &lengths[0]),
-        list(Flow::Scratch, &lengths[1]),
+         a task's editing agent {}; the review-and-gate pass {}; an agent without a worktree {}.",
+        list(Flow::Edit, &lengths[Flow::Edit.index()]),
+        list(Flow::Review, &lengths[Flow::Review.index()]),
+        list(Flow::Scratch, &lengths[Flow::Scratch.index()]),
     )
 }
 
@@ -446,14 +438,14 @@ mod tests {
             row(6, "queued", None, None),
             row(7, "queued", None, None),
         ];
-        let places = queue_places(&full);
+        let places = queue_places(&full, 4);
         assert_eq!(places[&5], (1, Some(30)));
         assert_eq!(places[&6], (2, Some(10)));
         assert_eq!(places[&7], (3, Some(20)));
         // #5 takes the soonest slot (#2's): the line gets the ones after it.
         let mut soonest = full.clone();
         soonest[4].task.after = Some(2);
-        let places = queue_places(&soonest);
+        let places = queue_places(&soonest, 4);
         assert_eq!(places[&5], (1, Some(10)));
         assert_eq!(places[&6], (2, Some(20)));
         assert_eq!(places[&7], (3, Some(30)));
@@ -462,7 +454,15 @@ mod tests {
             row(5, "queued", Some(1), None),
             row(6, "queued", None, None),
         ];
-        assert_eq!(queue_places(&free)[&6], (2, Some(0)));
+        assert_eq!(queue_places(&free, 4)[&6], (2, Some(0)));
+        // With 2 slots, one task running leaves one free; with both in use the line starts when the sooner frees.
+        assert_eq!(queue_places(&free, 2)[&6], (2, Some(0)));
+        let two_running = [
+            row(1, "running", None, Some(30)),
+            row(2, "running", None, Some(10)),
+            row(6, "queued", None, None),
+        ];
+        assert_eq!(queue_places(&two_running, 2)[&6], (1, Some(10)));
     }
 
     #[test]
@@ -510,17 +510,19 @@ mod tests {
         ]});
         fs::write(&ledger, tasks.to_string()).unwrap();
         let mut status = Status::new(ledger.clone(), Agents::Dir(dir.clone()));
-        // 10:15, ten minutes into implementing: 20 min of it left, then revmux, commit, land and gate (48 min).
+        // 10:15, ten minutes into implementing: 20 min of it left, then check, commit and land (11 min).
         let snapshot = status.snapshot(1_793_268_900_000);
         let one = &snapshot["tasks"][0];
         assert_eq!(one["group"], "running");
         assert_eq!(one["phase"], 1);
-        assert_eq!(one["eta_ms"], 68 * 60_000);
+        assert_eq!(one["phases"][2], "check");
+        assert_eq!(one["eta_ms"], 31 * 60_000);
         assert_eq!(one["doing"]["text"], "Editing src/a.rs");
         let two = &snapshot["tasks"][1];
-        assert_eq!(two["queue"], json!({"place": 1, "start_ms": 68 * 60_000}));
+        assert_eq!(two["queue"], json!({"place": 1, "start_ms": 31 * 60_000}));
         assert_eq!(snapshot["tasks"][2]["group"], "waiting");
         assert_eq!(snapshot["slots_used"], 1);
+        assert_eq!(snapshot["slots_max"], 2);
 
         fs::write(&ledger, r#"{"tasks": [{"num": 1"#).unwrap();
         let kept = status.snapshot(1_793_268_900_000);

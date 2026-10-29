@@ -13,7 +13,8 @@ pub enum Signal {
     ScratchEdit,
     /// `cargo build`, `check`, `run` or an unchecked `fmt`.
     Build,
-    /// `cargo fmt --check`, `clippy`, `test` or `lint-report.sh`: the gate after `land.sh`, a build before it.
+    /// `cargo fmt --check`, `clippy`, `test` or `lint-report.sh`: a task's check before its commit, the review pass's
+    /// gate after its revmux rounds.
     Check,
     /// A probe of what was built (`curl`): verifies for an agent without a worktree.
     Probe,

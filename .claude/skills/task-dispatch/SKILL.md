@@ -1,13 +1,18 @@
 ---
 name: task-dispatch
-description: Session mode where the user sends tasks one after another and every task goes to a dedicated background agent of its own, up to 4 at once, the rest queued in order — each editing agent in its own git worktree, finishing with revmux, its own rebase, merge and push to main, then the gate once on the landed commit, and nothing of the task left behind afterwards (worktree, target dir, branch, shells, temp files) — while this thread stays free to take the next task, answer questions and report results. Use it whenever the user says they'll send several tasks one by one, "start an agent for each task", "dispatch these", "run tasks in parallel", "up to N agents", "agent per task", "в этой сессии буду кидать задачи по одной", "запускай агента на каждую задачу", or otherwise wants this conversation to act as a dispatcher rather than do the work itself — and keep using it for every later task in that session, even when a later message doesn't mention agents.
+description: Session mode where the user sends tasks one after another and every task goes to a dedicated background agent of its own, as many at once as the user set (2 by default), the rest queued in order — each editing agent in its own git worktree, checking only that its change compiles, then committing and doing its own rebase, merge and push to main, unreviewed and ungated; once the board drains, one review-and-gate agent runs revmux and the full gate over everything landed since the last such pass and fixes forward; nothing of a task left behind afterwards (worktree, target dir, branch, shells, temp files) — while this thread stays free to take the next task, answer questions and report results. Use it whenever the user says they'll send several tasks one by one, "start an agent for each task", "dispatch these", "run tasks in parallel", "up to N agents", "agent per task", "в этой сессии буду кидать задачи по одной", "запускай агента на каждую задачу", or otherwise wants this conversation to act as a dispatcher rather than do the work itself — and keep using it for every later task in that session, even when a later message doesn't mention agents.
 ---
 
 # Task dispatch
 
 The user wants to keep firing tasks at this session without waiting for each one to finish. So this thread is a
-dispatcher: it turns each task into a well-briefed background agent, keeps at most 4 running, and reports what they
-did. It does no task work itself, because a turn spent building or debugging is a turn the user can't talk to it.
+dispatcher: it turns each task into a well-briefed background agent, keeps the agents within the slots, and reports
+what they did. It does no task work itself, because a turn spent building or debugging is a turn the user can't talk
+to it.
+
+Review and the gate cost more per task than they find, so a task doesn't run them. Each task only checks that its
+change compiles, then commits and lands it. Once the board drains, one review-and-gate pass reviews and gates
+everything landed since the last pass, and fixes forward.
 
 The mode lasts for the rest of the session once the user has asked for it. Every later message that is a task gets
 dispatched, whether or not it mentions agents.
@@ -27,11 +32,12 @@ dispatched, whether or not it mentions agents.
 
 ## Slots and the queue
 
-- At most **4 agents run at once**. A task beyond that waits in a FIFO queue. Tell the user its place ("queued, #2
-  in line").
+- At most **2 agents run at once**, unless the user set another number ("up to 3 agents"). The number is the user's,
+  and they can change it at any time; use the latest one they gave. The review-and-gate pass holds a slot like a task.
+  A task beyond the slots waits in a FIFO queue. Tell the user its place ("queued, #2 in line").
 - When an agent finishes, start the next queued task in the same reply that reports the finished one.
 - An agent that returned with a question for the user holds no slot while it waits. When the user answers, resume it
-  with `SendMessage`. A resume counts toward the 4, and it goes before anything still queued.
+  with `SendMessage`. A resume counts toward the slots, and it goes before anything still queued.
 - **A task that depends on another** (it needs the other's code, or says "after that…") waits until that one lands,
   even when a slot is free. Say so when you queue it.
 - **Two tasks that touch the same code** can still run side by side in separate worktrees. The later one rebases onto
@@ -42,38 +48,52 @@ dispatched, whether or not it mentions agents.
   reading of it) cover the same thing in the same place. Otherwise the part falls between the two briefs and nobody
   fixes it. If the scopes overlap, queue the new task after the other or let it rebase. Don't cut its scope.
 
-Keep a small ledger (inside ngterm also in the status page's file, below) and show it when asked, or when it changes
-in a way the user should know about:
+Keep a small ledger, in this thread and in the ledger file (below), and show it when asked, or when it changes in a
+way the user should know about:
 
 | # | Task (a few words) | Agent | State |
 |---|--------------------|-------|-------|
-| 1 | Escape closes search | `escape-search` | running |
+| 1 | Escape closes search | `escape-search` | landed `a1b2c3d`, unreviewed |
 | 2 | pinned chats | — | queued (after #1) |
+| 3 | Review and gate `0f1e2d3..a1b2c3d` | `review-gate-1` | running |
 
-The states are queued, running, waiting on user, landed `<hash>`, and failed.
+The states are queued, running, waiting on user, landed `<hash>`, and failed. A landed task stays unreviewed until a
+review-and-gate pass covers its commit.
+
+## The ledger file
+
+The ledger also lives in `<scratchpad>/dispatch-ledger.json`, `<scratchpad>` being the session's scratchpad dir from
+the system prompt, in every session (inside ngterm the status page reads it). Write it when dispatch mode starts, and
+again on every change (a dispatch, a state change, a landing, a note, a new slot count, a new review base), to a temp
+file renamed over it, so a read never catches half a file:
+
+```json
+{"slots": 2, "review_base": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c", "tasks": [
+  {"num": 1, "title": "Escape closes search", "agent": "escape-search", "state": "landed a1b2c3d"},
+  {"num": 2, "title": "pinned chats", "agent": "", "state": "queued", "after": 1, "note": "needs #1's view"},
+  {"num": 3, "title": "Review and gate 0f1e2d3..a1b2c3d", "agent": "review-gate-1", "state": "running", "flow": "review"}
+]}
+```
+
+- `slots` is the user's number of agents at once (2 when they gave none).
+- `review_base` is the commit up to which everything landed has been reviewed and gated: the next pass starts from
+  it. Set it when dispatch mode starts to `git rev-parse origin/main` (after a `git fetch`), and move it only when a
+  pass returns (below). It is kept in the file so it survives this thread's context being compacted.
+- A task's `state` is the ledger's (`queued`, `running`, `waiting on user`, `landed <hash>`, `failed`). Optional:
+  `note` (a line the user should see on the card), `after` (the task a queued one waits for), `transcript` (the
+  agent's JSONL, only when its name doesn't find it: the server looks names up in this session's subagents dir) and
+  `flow`: `review` for the review-and-gate pass (always set it: it runs in a worktree, which would read as a task),
+  otherwise `edit` or `scratch`, told by whether the agent has a worktree when left out.
 
 ## The status page
 
 Inside ngterm (`NGTERM_ENABLED=1`), the ledger is also shown as a live page in the session's right pane, by default:
 one card per task with its phase, what its agent is doing now and an estimated finish, read from the agents'
-transcripts (`crates/dispatch-status`). The user watches it instead of asking "what's running?". Set it up in the
-reply that starts dispatch mode:
+transcripts (`crates/dispatch-status`). A task's phases are investigate, implement, check, commit, land; the
+review-and-gate pass's are review, gate, land. The user watches it instead of asking "what's running?". Set it up in
+the reply that starts dispatch mode:
 
-1. **The ledger file** is `<scratchpad>/dispatch-ledger.json`, `<scratchpad>` being the session's scratchpad dir
-   from the system prompt. Write it before the server starts, and again on every ledger change (a dispatch, a state
-   change, a landing, a note), to a temp file renamed over it, so a read never catches half a file:
-
-   ```json
-   {"tasks": [
-     {"num": 1, "title": "Escape closes search", "agent": "escape-search", "state": "running"},
-     {"num": 2, "title": "pinned chats", "agent": "", "state": "queued", "after": 1, "note": "needs #1's view"}
-   ]}
-   ```
-
-   `state` is the ledger's (`queued`, `running`, `waiting on user`, `landed <hash>`, `failed`). Optional: `note` (a
-   line the user should see on the card), `after` (the task a queued one waits for), `transcript` (the agent's JSONL,
-   only when its name doesn't find it: the server looks names up in this session's subagents dir) and `flow`
-   (`edit` or `scratch`, otherwise told by whether the agent has a worktree).
+1. **Write the ledger file** (above) before the server starts.
 2. **Start the server** with `run_in_background`, and keep its shell ID:
 
    ```sh
@@ -97,7 +117,7 @@ reply that starts dispatch mode:
    --target "$NGTERM_SESSION_ID" --socket "$NGTERM_SOCKET"`. When the session itself ends, the server exits on its
    own: it watches the Claude Code process that started it (`$CLAUDE_PID`).
 
-Outside ngterm nothing is started. Mention once that the page can be had at `http://127.0.0.1:47231/`, and start it
+Outside ngterm no server is started. Mention once that the page can be had at `http://127.0.0.1:47231/`, and start it
 as in step 2 if the user wants it.
 
 ## Starting an agent
@@ -106,9 +126,9 @@ Use the `Agent` tool with `subagent_type: "general-purpose"`, a short `descripti
 apart (`escape-search`, not `agent-3`). Don't use `fork`: the dispatcher's context is a pile of other tasks, and a
 clean brief serves the agent better.
 
-- **A task that edits the repo** runs with `isolation: "worktree"`. Four agents in one checkout would overwrite each
-  other's files and break each other's builds. The worktree starts at main's last commit, without the main checkout's
-  uncommitted changes. If a task needs those, say so in the brief, or ask the user to commit them first.
+- **A task that edits the repo** runs with `isolation: "worktree"`. Several agents in one checkout would overwrite
+  each other's files and break each other's builds. The worktree starts at main's last commit, without the main
+  checkout's uncommitted changes. If a task needs those, say so in the brief, or ask the user to commit them first.
 - **A read-only task** (an investigation, a question about the code, a screenshot, reading the personal build's data)
   runs in the main checkout, with no worktree.
 
@@ -121,7 +141,8 @@ don't. Write the brief the way you'd hand the task to a colleague:
    session it touches, files or crates already mentioned, the user's corrections or preferences that apply. Don't add
    your guess at the solution: an agent handed a hypothesis tends to come back with it confirmed.
 2. **How to work**:
-   - Follow CLAUDE.md's hard rules, patterns and gate. Use the `teams-ui` skill for anything the app shows.
+   - Follow CLAUDE.md's hard rules and patterns. Its gate is run by the review-and-gate pass, not by the task. Use the
+     `teams-ui` skill for anything the app shows.
    - Decide unclear details yourself, the way the user most likely means them, and say in the report what you chose.
      Come back with a question only when no reasonable choice exists or the step can't be undone. Don't stop for "rule
      questions": CLAUDE.md's first rule says which changes need sign-off.
@@ -140,11 +161,12 @@ don't. Write the brief the way you'd hand the task to a colleague:
      The one process you leave running is the installed `ngteams`, when the task asked you to start it for the user.
      Start it detached, with its working directory outside the worktree, so the worktree's cleanup doesn't kill it:
      `cd ~ && setsid -f ~/.local/bin/ngteams >/dev/null 2>&1`. Say in the report that it is running.
-3. **For an editing task, how to finish**, in this order. Clippy and the tests run once, after landing: a full gate
-   after every revmux round costs more than it finds, and `land.sh`'s workspace check catches what breaks the build.
-   1. A revmux round on the change (the `revmux:revmux` skill). Fix every major finding, the immaterial and
-      pre-existing ones too, and re-run revmux on the fixes until it is clean. Between rounds run no clippy and no
-      tests, only `cargo check -p <touched crates> --all-targets` to see it compiles.
+3. **For an editing task, how to finish**, in this order. No revmux round, no clippy, no test suite and no gate: the
+   review-and-gate pass runs those once over everything landed.
+   1. Check it compiles: `cargo fmt --all`, then `cargo check -p <touched crates> --all-targets`. You may also run the
+      one or two tests you need to see your own feature work, and a UI task still checks its screenshots in the UI
+      sandbox as the `teams-ui` skill says. Another skill's "run the gate before you're done" step (`teams-ui`'s, say)
+      is left to the review-and-gate pass.
    2. Commit on the worktree's branch with a conventional message. Add no AI attribution and no Co-Authored-By line.
    3. Land it by running `<repo>/.claude/skills/task-dispatch/scripts/land.sh` from inside the worktree, in the
       background. Give the path in full, because the worktree has its own copy of the repo. The script first rebases
@@ -153,9 +175,8 @@ don't. Write the brief the way you'd hand the task to a colleague:
       else. Then it waits for a lock shared by every worktree, rebases once more onto whatever landed meanwhile
       (checking again if that moved the branch), pushes the branch as `origin/main`, and fast-forwards the main
       checkout to it. Only the task's own commits are pushed. Its exit code says what to do next:
-      - **2** (rebase conflict): resolve it with `git rebase origin/main`, rerun only `cargo check -p <touched crates>
-        --all-targets`, not the gate, and run the script again. A resolution that changes real logic gets its own
-        revmux round first.
+      - **2** (rebase conflict): resolve it with `git rebase origin/main`, run `cargo check -p <touched crates>
+        --all-targets`, and run the script again.
       - **3** (the workspace doesn't compile on the rebased branch): fix it, commit, and run the script again.
       - **4** (the change can't land cleanly: the main checkout isn't on `main`, its `main` holds commits origin
         doesn't, its uncommitted files overlap the change, or the branch started from commits origin doesn't hold):
@@ -164,25 +185,60 @@ don't. Write the brief the way you'd hand the task to a colleague:
         report it.
       - **6** (pushed, but the main checkout couldn't fast-forward): the change is on `origin/main`. Report that the
         main checkout is behind.
-   4. The gate, once, on the landed commit in the worktree, over the crates the change touched: `cargo fmt --all
-      --check`, `cargo clippy -p … --all-targets --all-features -- -D warnings`, `scripts/lint-report.sh`, `cargo
-      test -p …`, plus `cargo test -p fixture-guard` when `tests/fixtures/` or `docs/` changed. Whatever it finds is
-      fixed in a new commit, landed the same way, and the gate runs again on that commit. Another skill's "run the
-      gate before you're done" step (`teams-ui`'s, say) is this one: its screenshots are checked before the commit,
-      its gate here.
 4. **The report**: a few lines. Say what changed and why, the landed hash (`LANDED <hash>`) or why it didn't land,
-   the revmux outcome, the gate's result after landing (a test that fails under load and passes alone is reported as
-   that, never hidden), the choices you made on unclear points, and anything left for the user. End with the
-   IDs of the background shells you started, each marked stopped. Put a question for the user first.
+   what was checked (it compiles; any test or screenshot it ran) and that the change is unreviewed and ungated, the
+   choices you made on unclear points, and anything left for the user. End with the IDs of the background shells you
+   started, each marked stopped. Put a question for the user first.
+
+## The review-and-gate pass
+
+**When it starts.** When the board drains (no agent running, nothing queued; an agent waiting on the user doesn't
+count, its work isn't landed), and `origin/main` (after a `git fetch`) has moved past the ledger's `review_base`,
+start one review-and-gate agent in the same reply that reports the last task. Record the range in the ledger first:
+`<base>` is `review_base`, `<head>` is `git rev-parse origin/main` now. Add it to the ledger as a task with `"flow":
+"review"`, titled `Review and gate <base7>..<head7>`, its agent named `review-gate-<n>`. It runs with `isolation:
+"worktree"` (it fixes and lands like a task) and holds a slot. Nothing has landed since the base: no pass.
+
+**While it runs**, a new task is dispatched as usual and lands on top. Its commit isn't in the pass's range: the next
+pass covers it.
+
+**Its brief** carries the same "How to work" bullets as a task's (2 above), then:
+
+1. The range `<base>..<head>`, and that the worktree starts at `<head>` or past it (`git merge-base --is-ancestor
+   <head> HEAD` says so).
+2. A revmux round over the whole range (the `revmux:revmux` skill, the range as the diff). Fix every major finding,
+   the immaterial and pre-existing ones too, and run revmux again on the fixes until it is clean. Between rounds run
+   only `cargo check -p <touched crates> --all-targets`. Commit the fixes as they go, conventional messages, no AI
+   attribution.
+3. The full gate, over the crates the range and the fixes touched (`git diff --name-only <base>..HEAD`; a crate is
+   touched when a file under its dir changed, named by its `Cargo.toml`'s `name`): `cargo fmt --all --check`, `cargo
+   clippy -p … --all-targets --all-features -- -D warnings`, `scripts/lint-report.sh`, `cargo test -p …
+   --no-fail-fast`, and `cargo test -p fixture-guard` when the range touched `docs/` or any `tests/fixtures/`. Fix
+   what it finds, commit, and run the failed step again until it passes. A test that fails is run again alone: one
+   that then passes is a load flake (CLAUDE.md's "Chrome under load"); one that fails or passes by turns alone is a
+   real flake, fixed when its cause is found and otherwise reported. A fence breach is never a flake.
+4. Land the fixes with `land.sh`, as a task does, with the same exit codes. A rebase conflict with a task that landed
+   meanwhile is resolved by the pass: resolve, `cargo check -p <touched crates> --all-targets`, run the script again.
+   A pass that found nothing to fix has nothing to land.
+5. The report: the range, the revmux rounds and what each fixed, each gate step's result, every test that failed
+   with its verdict (fixed, load flake that passes alone, real flake), the landed hashes (`LANDED <hash>` each) or
+   why they didn't land, and the background shells, each marked stopped.
+
+**When it returns**, move `review_base`: to the pass's last landed commit when nothing but the pass's own commits
+landed after `<head>`, otherwise to `<head>` (the pass's fixes then come up again in the next range, which costs
+little). A pass that couldn't land (exit 4, or a fix it couldn't make) leaves `review_base` where it was; report what
+is left. Clean up after it as after a task (below). If tasks landed while it ran and the board is drained again,
+start the next pass.
 
 ## When an agent comes back
 
 The completion arrives as a notification. In one reply:
 
 1. Answer anything the user asked meanwhile.
-2. Report the task in two or three lines: what it did, the commit, the gate's result after landing, and anything the
-   user must decide or check. Relay the substance, because the agent's report isn't shown to the user. A failure is
-   reported as one, with its reason, never smoothed over.
+2. Report the task in two or three lines: what it did, the commit and that it is unreviewed until the next pass, and
+   anything the user must decide or check. For the review-and-gate pass: what review found and fixed, the gate's
+   result with each failing test's verdict, its commits. Relay the substance, because the agent's report isn't shown
+   to the user. A failure is reported as one, with its reason, never smoothed over.
 3. **Once the task is done, nothing of it stays.** The worktree's `target/` alone is gigabytes, and stale worktrees
    fill the disk. Each step removes one kind of leftover:
    - Stop every shell the agent started that is still running (`TaskStop`), whatever its report says. The one
@@ -198,7 +254,8 @@ The completion arrives as a notification. In one reply:
    - A task that didn't land isn't done. Keep its worktree while it is being fixed or waits on the user, say where it
      is, and keep it out of new work. Once it lands, clean it up as above. If the user drops the task, run the script
      with `--discard`, which also deletes the unlanded work. Run it only on the user's word.
-4. Start the next queued task, if a slot is free.
+4. Start the next queued task, if a slot is free. If none is queued and nothing runs, start the review-and-gate pass
+   (above).
 
 If an agent's report is unclear or looks wrong (it claims it landed but `git log origin/main` doesn't show the commit,
 or tests "pass" with no output), check the claim before passing it on: one `git` command, not a re-run of its work.

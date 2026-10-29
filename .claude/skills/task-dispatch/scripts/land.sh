@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Lands the task worktree's branch on main and pushes it, one worktree at a time.
 #
-# Run from inside the task's worktree once the work is committed and revmux is clean; the gate runs after it lands. It
+# Run from inside the task's worktree once the work is committed and compiles; review and the gate come later, in the
+# review-and-gate pass once the board drains (that pass lands its own fixes with this script too). It
 # rebases the branch onto origin/main and checks the whole workspace compiles, then, under a lock shared by every
 # worktree of the repo, rebases once more onto whatever landed meanwhile (checking again if that moved it), pushes the
 # branch as origin's main and fast-forwards the main checkout to it. Only the task's own commits are pushed: a main
