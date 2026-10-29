@@ -61,7 +61,12 @@ pub fn open(cx: &mut App, app_id: &str, title: SharedString, parts: ShellParts) 
         let models = parts.models.clone();
         let trace = std::sync::Arc::clone(&parts.trace);
         let shell = cx.new(|cx| Shell::new(parts, window, cx));
-        let view = cx.new(|cx| Root::new(models, trace, cx).with_shell(shell).following(following));
+        let view = cx.new(|cx| {
+            Root::new(models, trace, cx)
+                .with_shell(shell)
+                .following(following)
+                .tracing_activation(window, cx)
+        });
         cx.new(|cx| KitRoot::new(view, window, cx))
     })
 }
@@ -114,6 +119,7 @@ pub fn open_accounts(
             let mut root = Root::new(models, trace, cx)
                 .with_shell(first)
                 .following(following)
+                .tracing_activation(window, cx)
                 .with_accounts(accounts.clone(), window, cx);
             for shell in rest {
                 root.add_shell(shell, cx);

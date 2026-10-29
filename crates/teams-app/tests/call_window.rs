@@ -301,6 +301,29 @@ impl AppUnderTest {
         })
     }
 
+    /// Waits until the main window has the keyboard: its last `window activated` or `deactivated` (or the call
+    /// window closing, after which the compositor hands the keyboard back) is an activation.
+    fn main_window_active(&mut self) -> SandboxResult {
+        let activation = |line: &serde_json::Value| {
+            line["view"] == "window" && (line["change"] == "activated" || line["change"] == "deactivated")
+        };
+        let what = format!("{}: window activated", self.alias);
+        loop {
+            let last = self
+                .trace
+                .catch_up()
+                .iter()
+                .rev()
+                .find(|line| activation(line) || (line["view"] == "call-window" && line["change"] == "closed"))
+                .cloned();
+            if last.is_some_and(|line| line["view"] == "window" && line["change"] == "activated") {
+                return Ok(());
+            }
+            self.trace
+                .next_where(&what, |line| line["view"] == "window" && line["change"] == "activated")?;
+        }
+    }
+
     /// Waits until the trace told `count` `call-window <change>` lines in all, and fails when it told more.
     fn call_windows(&mut self, change: &str, count: usize) -> SandboxResult {
         let is = |line: &serde_json::Value| line["view"] == "call-window" && line["change"] == change;
@@ -561,11 +584,23 @@ fn calls(a: &mut AppUnderTest, b: &mut AppUnderTest, a_box: &Sandbox, b_box: &Sa
     a.call_windows("closed", 1)?;
     b.call_windows("closed", 1)?;
 
-    // a calls again; b declines from the notification; b's voicemail takes a's call, and a sees it
+    declined_call(a, b, &mut a_keys, (a_box, b_box))?;
+    test_call(a, &mut a_keys, a_box)
+}
+
+/// a calls again; b declines from the notification; b's voicemail takes a's call, and a sees it; a hangs up.
+fn declined_call(
+    a: &mut AppUnderTest,
+    b: &mut AppUnderTest,
+    a_keys: &mut VirtualInput,
+    (a_box, b_box): (&Sandbox, &Sandbox),
+) -> SandboxResult {
     a.trace.next_where("a: call-button shown call", |line| {
         line["view"] == "call-button" && strings(line, "kinds") == ["call"]
     })?;
-    ctrl_shift(&mut a_keys, 'c')?;
+    // the keys go to a's main window once it has the keyboard again: some time after its call's window closed
+    a.main_window_active()?;
+    ctrl_shift(a_keys, 'c')?;
     a.in_call(&["chat", "ringing"])?;
     a.call_windows("opened", 2)?;
     b.trace.next_where("b: call-notification shown again", |line| {
@@ -581,15 +616,15 @@ fn calls(a: &mut AppUnderTest, b: &mut AppUnderTest, a_box: &Sandbox, b_box: &Sa
     b.call_windows("opened", 1)?;
     a.in_call(&["voicemail"])?;
     shot(a_box, "teams-app-call-declined.png")?;
-    ctrl_shift(&mut a_keys, 'h')?;
+    ctrl_shift(a_keys, 'h')?;
     a.in_call(&["ended", "hung-up"])?;
-    a.call_windows("closed", 2)?;
-    test_call(a, &mut a_keys, a_box)
+    a.call_windows("closed", 2)
 }
 
 /// a's test call, from the settings' Calls page ("Make a test call", as Teams has it): a call window of its own as a
-/// chat's call has, the settings staying in the main window, Echo its other participant (by its roster's entry), its camera turned on and its self view
-/// presented; once a hangs up, its results (the network, the microphone, the speaker and the camera checked).
+/// chat's call has, the settings staying in the main window, Echo its other participant (by its roster's entry), its
+/// camera turned on and its self view presented; once a hangs up, its results (the network, the microphone, the
+/// speaker and the camera checked).
 fn test_call(a: &mut AppUnderTest, keys: &mut VirtualInput, a_box: &Sandbox) -> SandboxResult {
     ask_settings(a_box, SETTINGS_CALLS)?;
     a.trace.next_where("a: settings opened", |line| {

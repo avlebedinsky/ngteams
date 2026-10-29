@@ -1,7 +1,9 @@
 //! The window's root view: the [`Shell`] (the rail, the sidebar, the conversation) once it is given one, the
 //! account's status alone before that; signed out, only that and what to do. It traces the window's opening, each
-//! status it shows (connecting, connected, reconnecting, offline, signed out) and each catch-up that ended
-//! (`status caught-up`: a live test waits for the first one before it reads what a chat shows).
+//! status it shows (connecting, connected, reconnecting, offline, signed out), each catch-up that ended
+//! (`status caught-up`: a live test waits for the first one before it reads what a chat shows) and the window taking
+//! and losing the keyboard (`window activated`, `window deactivated`: a live test types only into a window that took
+//! it, as the main window does again only some time after a call's window closed).
 
 use std::sync::Arc;
 
@@ -87,6 +89,8 @@ pub struct Root {
     shown_account: Option<String>,
     /// The theme following the window's appearance, while the window is open ([`Root::following`]).
     appearance: Option<Subscription>,
+    /// The window's activation, traced ([`Root::tracing_activation`]).
+    activation: Option<Subscription>,
 }
 
 impl Root {
@@ -105,7 +109,23 @@ impl Root {
             accounts: None,
             shown_account: None,
             appearance: None,
+            activation: None,
         }
+    }
+
+    /// Traces `window` taking the keyboard (`window activated`) and losing it (`window deactivated`).
+    #[must_use]
+    pub fn tracing_activation(mut self, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let trace = Arc::clone(&self.trace);
+        self.activation = Some(cx.observe_window_activation(window, move |_, window, _| {
+            let change = if window.is_window_active() {
+                "activated"
+            } else {
+                "deactivated"
+            };
+            trace.record(&TraceLine::new("window", change));
+        }));
+        self
     }
 
     /// Follows `models`' status: traced as it changes, the view drawn again.
