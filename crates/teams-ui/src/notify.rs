@@ -557,7 +557,7 @@ async fn choose(
     let mut horizon = None;
     let mut chosen = Vec::new();
     for candidate in candidates {
-        let mention = Mentions::of(candidate.message.properties.as_deref(), core.me()).names_me();
+        let mention = Mentions::of_message(&candidate.message, core.me()).names_me();
         if (level == Notifications::Mentions || channel) && !mention {
             continue;
         }

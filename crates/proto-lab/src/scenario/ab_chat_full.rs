@@ -349,7 +349,7 @@ impl Steps<'_> {
 
     /// a mentions b ([`mention_b`]) with [`Texts::mention`] after the mention.
     async fn mention(&mut self, drive: &mut Driver) -> Result<(), ScenarioError> {
-        let name = mention_b(
+        mention_b(
             drive,
             &self.writes.post,
             self.mri_b,
@@ -359,7 +359,7 @@ impl Steps<'_> {
         .await?;
         self.report
             .notes
-            .push(format!("a: mention: b offered as {name:?}, picked and mentioned"));
+            .push("a: mention: b offered by name, picked and mentioned".to_owned());
         Ok(())
     }
 
@@ -550,7 +550,8 @@ fn picker_name(mri: &str) -> String {
 }
 
 /// What the picker shows, for a failed mention's notes: whether it is open, how many suggestions it has, which one is
-/// highlighted, which hold the object id of `mri`, and the name each one shows.
+/// highlighted, which hold the object id of `mri`, and whether each one shows a name (never the name: the notes are
+/// printed).
 fn picker_state(mri: &str) -> String {
     r"(() => {
   const options = OPTIONS;
@@ -559,7 +560,7 @@ fn picker_state(mri: &str) -> String {
     count: options.length,
     selected: options.findIndex((e) => e.getAttribute('aria-selected') === 'true'),
     b: options.map((e, i) => (e.outerHTML.toLowerCase().includes(ID) ? i : -1)).filter((i) => i >= 0),
-    names: options.map((e) => NAME(e).slice(0, 60)),
+    named: options.map((e) => NAME(e) !== ''),
   };
 })()"
         .replace("OPTIONS", PICKER_OPTIONS)

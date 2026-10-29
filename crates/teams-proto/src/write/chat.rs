@@ -5,7 +5,9 @@
 //!
 //! Every chat write lands on [`Scope::Conversation`] of its chat; a message and an edit add whoever their text names
 //! ([`MessageText::participants`]: the mentioned MRIs), and a new chat is [`Scope::New`] with every member of its body
-//! added. A message's text is a [`MessageText`]: raw HTML can't be passed.
+//! added. A message's text is a [`MessageText`]: raw HTML can't be passed. A mention of everyone adds nobody: it is
+//! sent only in the chat it names ([`MessageText::mentions_everyone_only_in`]; a post or an edit with one of another
+//! chat has no wire form, so the transport sends nothing).
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -126,6 +128,10 @@ impl Mutating for SendMessage {
 /// `conversationLink` it sends (`blah/<chat>`), and `clientmessageid` when the request has one.
 impl Sealed for SendMessage {
     fn wire(&self) -> Option<Wire> {
+        // a mention of everyone in another chat would reach beyond the target: no route for it
+        if !self.text.mentions_everyone_only_in(&self.conversation) {
+            return None;
+        }
         let compose_time = iso_time(self.compose_time_ms);
         let mut body = message_body(&MessageFields {
             id: "-1",
@@ -228,6 +234,9 @@ impl Mutating for EditMessage {
 /// `properties.edittime` the same time in milliseconds.
 impl Sealed for EditMessage {
     fn wire(&self) -> Option<Wire> {
+        if !self.text.mentions_everyone_only_in(&self.conversation) {
+            return None;
+        }
         let compose_time = iso_time(self.original.compose_time_ms);
         let arrival_time = iso_time(self.original.arrival_time_ms);
         let mut body = message_body(&MessageFields {

@@ -1904,7 +1904,7 @@ impl ChatView {
         }
         let text = self.parse(message);
         self.layouts += 1;
-        let mentions = Mentions::of(message.properties.as_deref(), self.core.me());
+        let mentions = Mentions::of_message(message, self.core.me());
         let web_link = rich_text::message_web_link(&message.conversation_id, &message.id);
         // its pictures and emoticons asked of this account's engine
         let rendered = Arc::new(

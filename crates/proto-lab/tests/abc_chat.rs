@@ -253,7 +253,7 @@ fn forced_and_policy(name: ScenarioName, nonce: &str) -> Result<Option<(Vec<Forc
             [probe_rules(Some(&probe))?, ab_file::file_rules()?].concat(),
             ab_file::policy(ab)?,
         ),
-        ScenarioName::AbcChat => (forced_denies(nonce), policy(Some(GROUP))?),
+        ScenarioName::AbcChat | ScenarioName::AbcEveryone => (forced_denies(nonce), policy(Some(GROUP))?),
         ScenarioName::ChatShapes => (forced_denies(nonce), chat_shapes::policy(ab, Some(GROUP))?),
         ScenarioName::EchoCall => (echo_call::forced_rules()?, echo_call::policy()),
         // every page of a call run, the caller's and each callee's, under the earlier run's probe rules

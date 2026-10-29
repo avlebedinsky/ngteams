@@ -1,0 +1,39 @@
+{
+  "_synthetic": "Written synthetic-from-capture, made-up values: a's message mentioning everyone in the lab's a-b-c group chat, Everyone picked from the web client's mention picker (listed after the chat's members, 'Everyone' over 'Notify everyone in the chat'), abc-everyone run of 2026-10-29 (capture abc-everyone/20261029T115612Z for a, read locally; the post was held back by the run's forced deny and read as the browser held it). The post is mention-group.json's, key for key, its one mentions entry of mentionType everyone whose mri is the group chat's own id and whose displayName and span text are the label 'Everyone'. <guid:a>, <group> are made-up ids tests fill in. See docs/protocol/chat.md, 'A mention of everyone'.",
+  "request": {
+    "method": "POST",
+    "path": "/api/chatsvc/<region>/v1/users/ME/conversations/19%3A<group>%40thread.v2/messages",
+    "body": {
+      "id": "-1",
+      "type": "Message",
+      "conversationid": "19:<group>@thread.v2",
+      "conversationLink": "blah/19:<group>@thread.v2",
+      "from": "8:orgid:<guid:a>",
+      "fromUserId": "8:orgid:<guid:a>",
+      "composetime": "2026-01-01T00:03:00.000Z",
+      "originalarrivaltime": "2026-01-01T00:03:00.000Z",
+      "content": "<p><readonly class=\"skipProofing\" itemtype=\"http://schema.skype.com/Mention\" spellcheck=\"false\"><span itemtype=\"http://schema.skype.com/Mention\" itemscope itemid=\"0\">Everyone</span></readonly>&nbsp;a made-up mention of everyone</p>",
+      "messagetype": "RichText/Html",
+      "contenttype": "Text",
+      "imdisplayname": "Lab A",
+      "clientmessageid": "7777777777777777777",
+      "callId": "",
+      "state": 0,
+      "version": "0",
+      "amsreferences": [],
+      "properties": {
+        "importance": "",
+        "subject": "",
+        "title": "",
+        "cards": "[]",
+        "links": "[]",
+        "mentions": "[{\"@type\":\"http://schema.skype.com/Mention\",\"itemid\":\"0\",\"mri\":\"19:<group>@thread.v2\",\"mentionType\":\"everyone\",\"displayName\":\"Everyone\"}]",
+        "onbehalfof": null,
+        "files": "[]",
+        "policyViolation": null,
+        "formatVariant": "TEAMS"
+      },
+      "crossPostChannels": []
+    }
+  }
+}

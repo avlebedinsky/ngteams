@@ -253,6 +253,10 @@ fails the run.
   (`TYPE_FOR`, `PAUSE`, `AFTER_EMPTYING`) while b's open chat records its typing
   indicator, sends a message of three lines with a link, and mentions b in the recorded group chat
   (`docs/protocol/chat.md`).
+- `abc-everyone`: a and b in the recorded group chat (checked readable first, as `abc-chat`): after the enforcement
+  test a mentions everyone, picked from the picker, its post held back by the probe's forced deny and read; only when
+  the lab rule reads it as a message to the chat adding nobody does a send a second one, which b must show
+  (`docs/protocol/chat.md`, "A mention of everyone").
 - `own-presence-activity`, `-endpoint`, `-both`, `-manual-held`, `-manual`: account a alone, as `ab-trouter`. Its
   own availability reaches nobody, so it passes; each run holds back with a labelled forced deny what it leaves out:
   `user.activity` alone, UPS's endpoint `PUT` alone, both, then a manual status (Busy, Do not disturb, Away,

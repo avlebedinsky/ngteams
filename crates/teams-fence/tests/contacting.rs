@@ -231,6 +231,53 @@ fn a_mention_in_a_group_chat_is_a_message_there_adding_the_mentioned() -> TestRe
 }
 
 #[test]
+fn a_mention_of_everyone_is_a_message_to_its_group_chat_adding_nobody() -> TestResult {
+    let (method, url, body, _) = shaped_request("mention-everyone.json", "/request")?;
+    let group = format!("19:{GROUP}@thread.v2");
+    let target = Target::new(WriteKind::Message, Scope::Conversation { id: group.clone() });
+    assert_eq!(verdict(&method, &url, body.as_deref()), Contact::Write(target));
+    Ok(())
+}
+
+/// A mention of everyone reads only in its captured form: `mentionType` `everyone`, its `mri` the group chat it is
+/// posted to. Naming another chat, posted to a 1:1 chat, or its key in another case, it is unreadable; a `mentionType`
+/// in another case is no mention of everyone, so its `mri` is added as a participant (which no live member read takes).
+#[test]
+fn a_mention_of_everyone_in_any_other_form_is_unreadable_or_a_participant() {
+    let group = format!("19:{GROUP}@thread.v2");
+    let post = |chat: &str, entry: &str| {
+        let mentions = serde_json::to_string(&format!("[{entry}]")).unwrap_or_default();
+        let body = format!(
+            r#"{{"content":"<p>x</p>","messagetype":"RichText/Html","contenttype":"Text","properties":{{"mentions":{mentions}}}}}"#
+        );
+        let url = format!("https://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/conversations/{chat}/messages");
+        verdict("POST", &url, Some(body.as_bytes()))
+    };
+    let entry = |mri: &str, key: &str, kind: &str| {
+        format!(r#"{{"itemid":"0","mri":"{mri}","{key}":"{kind}","displayName":"Everyone"}}"#)
+    };
+    let other = "19:fedcba9876543210fedcba9876543210@thread.v2";
+    assert_eq!(
+        post(&group, &entry(other, "mentionType", "everyone")),
+        Contact::Unreadable
+    );
+    assert_eq!(
+        post(&one_to_one(), &entry(&one_to_one(), "mentionType", "everyone")),
+        Contact::Unreadable
+    );
+    assert_eq!(
+        post(&group, &entry(&group, "MentionType", "everyone")),
+        Contact::Unreadable
+    );
+    let capitalised = Target::new(WriteKind::Message, Scope::Conversation { id: group.clone() })
+        .with_added([Mri::new(group.clone())]);
+    assert_eq!(
+        post(&group, &entry(&group, "mentionType", "Everyone")),
+        Contact::Write(capitalised)
+    );
+}
+
+#[test]
 fn the_account_s_own_mri_reads_as_me_only_when_the_policy_names_it() {
     let url = format!("https://teams.microsoft.com/api/chatsvc/emea/v1/users/8:orgid:{GUID_A}/properties?name=locale");
     let request = Request::new("PUT", &url).with_body(Some(br#"{"locale":"en-us"}"#));

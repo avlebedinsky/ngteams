@@ -37,8 +37,8 @@ use teams_ui::chat_view::{
     ChatView, DEFAULT_QUICK_REACTIONS, MessageAction, PAGE, QUICK_COUNT, READ_DEBOUNCE, quick_reactions,
 };
 use teams_ui::compose::{
-    Candidate, CantEdit, Compose, DraftMention, Mode, PREVIEW_MAX, Quoted, READ_ONLY_APP, READ_ONLY_NOTES,
-    TYPING_EVERY, TypingThrottle, load, matching, mention_query, message_text,
+    Candidate, CantEdit, Compose, DraftMention, EVERYONE_MAX_MEMBERS, Mode, PREVIEW_MAX, Quoted, READ_ONLY_APP,
+    READ_ONLY_NOTES, TYPING_EVERY, TypingThrottle, load, matching, mention_query, message_text, offered,
 };
 use teams_ui::reaction_picker::{RECENT, Section};
 use teams_ui::sending::{Again, RowState};
@@ -46,6 +46,8 @@ use teams_ui::settings::{Settings, SettingsModel};
 use teams_ui::shell::Shell;
 
 const AB: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces";
+/// A group chat (made up).
+const GROUP: &str = "19:labgroup0001@thread.v2";
 /// Someone outside the lab (made up).
 const OUTSIDER: &str = "8:orgid:00000000-0000-4000-8000-0000000000ff";
 /// 2026-01-01T12:00:00Z, ms.
@@ -315,6 +317,55 @@ fn the_picker_offers_the_names_holding_the_query() {
     assert_eq!(matching(&candidates, "bE")[0].mri, LAB_B);
     assert_eq!(matching(&candidates, "lab s").len(), 1);
     assert!(matching(&candidates, "zz").is_empty());
+}
+
+#[test]
+fn a_group_chat_s_picker_offers_everyone_after_its_members_and_a_one_to_one_chat_s_never() {
+    let members = [Candidate {
+        mri: LAB_B.to_owned(),
+        name: "Lab Bee".into(),
+    }];
+    let names = |offered: Vec<Candidate>| offered.into_iter().map(|c| c.name.to_string()).collect::<Vec<_>>();
+    assert_eq!(names(offered(GROUP, &members, "")), ["Lab Bee", "Everyone"]);
+    let everyone = &offered(GROUP, &members, "EVE")[0];
+    assert_eq!(offered(GROUP, &members, "EVE").len(), 1);
+    assert!(everyone.is_everyone());
+    assert_eq!(everyone.mri, GROUP, "its token names the chat");
+    assert_eq!(names(offered(GROUP, &members, "bee")), ["Lab Bee"]);
+    assert_eq!(
+        names(offered(AB, &members, "")),
+        ["Lab Bee"],
+        "a 1:1 chat has no everyone"
+    );
+    assert_eq!(
+        names(offered("19:meeting_lab0001@thread.v2", &members, "")),
+        ["Lab Bee"],
+        "nor a meeting chat"
+    );
+    let crowd: Vec<Candidate> = (0..EVERYONE_MAX_MEMBERS)
+        .map(|n| Candidate {
+            mri: format!("8:orgid:00000000-0000-4000-8000-{n:012x}"),
+            name: format!("Member {n}").into(),
+        })
+        .collect();
+    assert!(
+        !offered(GROUP, &crowd, "").iter().any(Candidate::is_everyone),
+        "a chat of over 1,000 members gets no everyone"
+    );
+}
+
+#[test]
+fn everyone_picked_is_a_mention_of_the_chat_adding_nobody() {
+    let text = "@Everyone hi";
+    let mentions = [DraftMention {
+        range: 0..9,
+        mri: GROUP.to_owned(),
+    }];
+    let built = message_text(text, &mentions, &[]).unwrap().expect("a message");
+    assert!(built.participants().is_empty(), "it adds nobody to the target");
+    assert!(built.everyone().contains(GROUP));
+    assert!(built.mentions_everyone_only_in(GROUP));
+    assert!(!built.mentions_everyone_only_in(AB));
 }
 
 #[test]

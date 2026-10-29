@@ -2,7 +2,8 @@
 
 Status: 2026-10-21, M1 Task 7; images (sending, denied) 2026-10-21, M1 Task 20; the shapes the UI needs (every quick
 reaction, typing, lines and links, a group mention) 2026-10-21, M2 Task 10; an image's object created once and read
-2026-10-22, M2 Task 21; files (sending, denied) and received attachments 2026-10-22, M2 Task 23. Written from what the
+2026-10-22, M2 Task 21; files (sending, denied) and received attachments 2026-10-22, M2 Task 23; a mention of everyone
+in a group chat (as sent) 2026-10-29. Written from what the
 lab saw, in our own words, plus the web bundle where nothing was captured (marked so). The chat service's base,
 credential, ids, member reads and the fence's mapping of writes are in [fence-targets.md](fence-targets.md); its token
 in [auth.md](auth.md).
@@ -35,6 +36,14 @@ Sources (all outside the repository, under the lab's data dir; fixtures are writ
   `…171041Z` for a, `…165601Z`, `…170308Z` and `…171041Z-2` for b, read locally, nothing exported): a set and took back
   each quick reaction, typed while b's open chat recorded its typing indicator, sent a message of three lines with a
   link, and mentioned b in the lab's group chat ([The shapes the UI needs](#the-shapes-the-ui-needs-chat-shapes)).
+- **abc-everyone**: `proto-lab run abc-everyone` of 2026-10-29 (accounts a and b, the lab's group chat; capture
+  `captures/abc-everyone/20261029T115612Z` for a, read locally, nothing exported): a mentioned everyone, picked from
+  the mention picker, its post held back by a forced deny and read as the browser held it ([A mention of
+  everyone](#a-mention-of-everyone-abc-everyone)). The run was **breached** (a shared worker attached while the browser
+  went down at the end, held and never resumed, its close lost with the connection), and its real post was denied (the
+  live member read timed out under load). Three later runs on a loaded machine never reached the mention: one whose
+  page didn't send the probe, and two **breached** (an iframe whose resume went unanswered, the browser killed; the
+  fence denied and let through nothing in either). No read-back of a mention of everyone was captured.
 - **ab-file**: `proto-lab run ab-file` of 2026-10-22 (M2 Task 23; accounts a and b, the a–b chat, captures
   `captures/ab-file/20261022T013754Z`, `…015634Z`, `…020205Z` and `…021606Z` for a, read locally, nothing exported):
   a tried to send a made-up text file with every write of it denied ([Files](#files-sending-denied-ab-file)).
@@ -566,13 +575,38 @@ suggestion was the chat's other member, by name, once the client could read that
   camel-cased form (`messageType`, `imDisplayName`, `containerId`), with the span but no `properties`.
 
 The bundle names more `mentionType`s than `person` (`bot` with an `appId`, `everyone`, `tag`, `channel`, `team`,
-`community`, `nearby`, `share-contact`) and a reader that accepts `mentions` as a string or a list; none of those was
-seen.
+`community`, `nearby`, `share-contact`) and a reader that accepts `mentions` as a string or a list; of those only
+`everyone` was seen ([A mention of everyone](#a-mention-of-everyone-abc-everyone)).
 
 The fence's mapping takes the `mri` of each entry as an added participant of the message's (or edit's) target, so a
-mention of anyone outside the lab is denied like adding them to the chat; any other form of `mentions`, an entry
-without a string `mri` (an `everyone` or `tag` mention among them), or the key in another case, is unknown. The
-captured form is the one it reads.
+mention of anyone outside the lab is denied like adding them to the chat. An entry of `mentionType` `everyone` whose
+`mri` is the group chat the message is posted to adds nobody: it reaches that chat's members, whom the fence reads
+fresh for the write anyway. Any other form of `mentions`, an entry without a string `mri` (a `tag` mention among
+them), an `everyone` entry naming another chat or posted to a 1:1 or meeting chat, or a key in another case, is
+unknown. The captured forms are the ones it reads.
+
+## A mention of everyone (abc-everyone)
+
+Fixture: `tests/fixtures/chatsvc/mention-everyone.json`.
+
+- **The picker**: in the lab's group chat (three members) typing `@` listed the chat's other members first (picture,
+  name, address), then **Everyone** with an outlined people icon and "Notify everyone in the chat" under it, then
+  "Add someone to the chat" and "Share someone's contact info"; the first member was highlighted. The bundle offers
+  Everyone in a group chat behind a tenant setting and up to a roster size ("Not available for chats over 1,000
+  users"), in a meeting chat behind settings of its own, and never in a 1:1 chat; its suggestion is keyed by the
+  chat's id.
+- **As sent**: the post is a group mention's ([A mention in the group chat](#a-mention-in-the-group-chat-chat-shapes)),
+  key for key: the span inside the `<readonly>` element holds the label `Everyone`, and the one `properties.mentions`
+  entry is `{"@type": "http://schema.skype.com/Mention", "itemid": "0", "mri": "19:<chat>@thread.v2", "mentionType":
+  "everyone", "displayName": "Everyone"}`: its `mri` the chat's own id.
+- **As read**: not captured. Per the bundle, a reader shows its own label for an `everyone` entry whatever name it
+  carries, and marks it as mentioning the reader unless the reader sent it.
+
+The native client sends it in that form (`MessageText` takes the chat's id as the mention's MRI, writes
+`mentionType` `everyone`, and adds nobody to the write's target; a post or an edit with one naming another chat has
+no wire form). Its compose box offers Everyone after the members in a group chat of at most 1,000 members (never a 1:1
+or meeting chat). A received one shows `Everyone`, is the account's own mention in someone else's message (the "@"
+mark, a notification at the "mentions only" level), and not in the account's own.
 
 ## The native client's writes (M1 Task 12)
 

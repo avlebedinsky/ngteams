@@ -9,7 +9,8 @@
 //!   placeholder's link to the message on the web). A line break is a `\n` in the text; marks (bold, italic,
 //!   underline, strike, code) style their pieces; a mention is drawn in the brand colour, the account's own bold in
 //!   the mention colour, neither on a box (a mention's `itemid` names its entry in `properties.mentions`, whose MRI
-//!   says whom it names; an entry this build can't read names nobody); a link is a clickable range; an emoticon
+//!   says whom it names; an entry this build can't read names nobody); a mention of everyone in the chat shows
+//!   [`EVERYONE`] and is the account's own in a message someone else sent ([`Mentions::of_message`]); a link is a clickable range; an emoticon
 //!   (`<img itemtype="http://schema.skype.com/Emoji" itemid="<id>">`) keeps the place of a few spaces in its
 //!   paragraph's text ([`InlineEmoticon`]); a picture pasted into the message (an `<img>` naming a view of an AMS
 //!   object) or a GIF picked from Teams' GIF picker (one on Giphy's media host), not inside a link or a quote other
@@ -40,7 +41,7 @@ use gpui::{
 };
 use serde_json::{Value, json};
 use teams_proto::InlinePicture;
-use teams_proto::chat::{Code, Field, Image, List, Marks, Mention, Node, Quote, RichText, WEB_CLIENT};
+use teams_proto::chat::{Code, Field, Image, List, Marks, Mention, MentionKind, Node, Quote, RichText, WEB_CLIENT};
 
 pub use crate::code::CodeBlock;
 use crate::inline::{Emoticon, InlineText, LARGE_EMOTICON, Picture};
@@ -343,23 +344,46 @@ impl Rendered {
     }
 }
 
-/// The mentions of a message: which `itemid`s name the account.
+/// The mentions of a message: which `itemid`s name the account, and which mention everyone in the chat.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Mentions {
     mine: HashSet<String>,
+    everyone: HashSet<String>,
 }
+
+/// What a mention of everyone shows, whatever name its sender's client wrote in it: the web client's English label
+/// (`compose_mention_everyone_tag`), as the web client shows its own.
+pub const EVERYONE: &str = "Everyone";
 
 impl Mentions {
     /// The mentions `properties` (a stored message's `properties`, JSON text) lists, read as `teams-proto` reads
-    /// them; those naming `me` are the account's own. An entry in a form no capture showed names nobody.
+    /// them; those naming `me` are the account's own, and so is a mention of everyone in the chat (`mentionType`
+    /// `everyone`, as a message someone else sent reads: [`Self::of_message`]). An entry in a form no capture showed
+    /// names nobody.
     #[must_use]
     pub fn of(properties: Option<&str>, me: &str) -> Self {
-        let mine = read_mentions(properties)
-            .into_iter()
-            .filter(|mention| mention.mri.as_deref() == Some(me))
-            .map(|mention| mention.item_id)
-            .collect();
-        Self { mine }
+        let mut mentions = Self::default();
+        for mention in read_mentions(properties) {
+            if mention.kind == MentionKind::Everyone {
+                mentions.everyone.insert(mention.item_id.clone());
+                mentions.mine.insert(mention.item_id);
+            } else if mention.mri.as_deref() == Some(me) {
+                mentions.mine.insert(mention.item_id);
+            }
+        }
+        mentions
+    }
+
+    /// The mentions of `message` as the account reads them ([`Self::of`]): a mention of everyone names the account
+    /// only in a message someone else sent, as the web client marks one (the sender isn't notified of its own).
+    #[must_use]
+    pub fn of_message(message: &teams_store::Message, me: &str) -> Self {
+        let mut mentions = Self::of(message.properties.as_deref(), me);
+        if message.sender.as_deref() == Some(me) {
+            let Self { mine, everyone } = &mut mentions;
+            mine.retain(|item_id| !everyone.contains(item_id));
+        }
+        mentions
     }
 
     /// Whether one of them names the account.
@@ -373,6 +397,15 @@ impl Mentions {
             Mentioned::Me
         } else {
             Mentioned::Other
+        }
+    }
+
+    /// What the mention `item_id` shows: [`EVERYONE`] for a mention of everyone, else `text`, the name in the message.
+    fn shown<'t>(&self, item_id: &str, text: &'t str) -> &'t str {
+        if self.everyone.contains(item_id) {
+            EVERYONE
+        } else {
+            text
         }
     }
 }
@@ -485,7 +518,7 @@ impl<'a> Builder<'a> {
                     self.end_block();
                 }
                 Node::Mention { item_id, text } => self.push(
-                    text,
+                    self.mentions.shown(item_id, text),
                     Style {
                         mention: Some(self.mentions.whom(item_id)),
                         ..Style::default()

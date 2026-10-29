@@ -666,7 +666,7 @@ impl Shapes {
             .wait_for("a's compose box in the a-b-c chat", COMPOSE, wait)
             .await?;
         let writes = Writes::on(group).map_err(|error| setup(error.to_string()))?;
-        let name = mention_b(
+        mention_b(
             &mut pages.drive_a,
             &writes.post,
             &self.mri_b,
@@ -676,7 +676,7 @@ impl Shapes {
         .await?;
         report
             .notes
-            .push(format!("a: group mention: b offered as {name:?}, picked and mentioned"));
+            .push("a: group mention: b offered by name, picked and mentioned".to_owned());
         let opened = chat_requests(group).map_err(|error| setup(error.to_string()))?;
         pages.drive_b.navigate("b opens the a-b-c chat", &link).await?;
         pages

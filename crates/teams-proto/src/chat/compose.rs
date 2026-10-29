@@ -13,20 +13,23 @@
 //! - a mention as the web client sent it (`mention.json`, captured in `ab-chat-full` on 2026-10-21): the span of
 //!   itemtype Mention inside a `readonly` element, and its `properties.mentions` entry ([`mention_span`],
 //!   [`mention_entry`], the only place it is built); a no-break space (U+00A0) as `&nbsp;`, as the web client writes
-//!   the one after a mention;
+//!   the one after a mention; a mention of everyone in a group chat in the same form, its MRI the chat's id and its
+//!   `mentionType` `everyone` (`mention-everyone.json`, captured in `abc-everyone` on 2026-10-29);
 //! - an image is refused: sending one is an attachment (M1 Task 20 decides), not a message's text.
 //!
 //! Every mentioned MRI is a participant of the message ([`MessageText::participants`]), so the fence judges them
 //! together with the chat's members, exactly as `docs/protocol/fence-targets.md` maps a message: a quote adds nobody
-//! (the quoted message is the chat's own).
+//! (the quoted message is the chat's own), nor does a mention of everyone in a group chat, named by the chat's id
+//! ([`MessageText::everyone`]: it reaches the chat's members, and a write sends it only to that chat).
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use teams_fence::Mri;
+use teams_fence::{Mri, is_group_chat_id};
 use url::Url;
 
+use crate::chat::MentionKind;
 use crate::chat::code::{Code, language_of};
 use crate::chat::html::{List, MAX_CONTENT, MAX_DEPTH, MENTION_ITEMTYPE, Marks, Node, Quote, REPLY_ITEMTYPE, RichText};
 
@@ -42,9 +45,9 @@ pub enum ComposeError {
     /// An `item_id` given twice, or held by two mentions in the text.
     #[error("the mention {0:?} is there twice")]
     RepeatedMention(String),
-    /// A mention of anyone but a work account (`8:orgid:<object id>`): a bot's mention needs its app id, which isn't
-    /// modelled.
-    #[error("a mention of {0}, which isn't a work account")]
+    /// A mention of anyone but a work account (`8:orgid:<object id>`) or everyone in a group chat (the chat's id): a
+    /// bot's mention needs its app id, which isn't modelled.
+    #[error("a mention of {0}, which isn't a work account or a group chat")]
     NotAPerson(Mri),
     /// An image: sending one is an attachment, not a message's text.
     #[error("an image can't be sent in a message's text")]
@@ -81,6 +84,7 @@ pub struct MessageText {
     mentions: Vec<Value>,
     quoted: Vec<Value>,
     participants: BTreeSet<Mri>,
+    everyone: BTreeSet<String>,
 }
 
 impl MessageText {
@@ -88,12 +92,12 @@ impl MessageText {
     ///
     /// # Errors
     /// See [`ComposeError`]: every mention in `text` must name one entry of `mentioned` and every entry must be named
-    /// once; only work accounts are mentioned; no image, no link but `http`, `https` and `mailto`, a reply's quote
+    /// once; only work accounts and everyone in a group chat (by the chat's id) are mentioned; no image, no link but `http`, `https` and `mailto`, a reply's quote
     /// complete; the text read in full, at most [`MAX_DEPTH`] deep and its HTML at most [`MAX_CONTENT`] bytes.
     pub fn new(text: RichText, mentioned: impl IntoIterator<Item = (String, Mri)>) -> Result<Self, ComposeError> {
         let mut table = BTreeMap::new();
         for (item_id, mri) in mentioned {
-            if !is_work_account(&mri) {
+            if !is_work_account(&mri) && !is_group_chat_id(mri.as_str()) {
                 return Err(ComposeError::NotAPerson(mri));
             }
             if table.insert(item_id.clone(), mri).is_some() {
@@ -116,6 +120,7 @@ impl MessageText {
             mentions,
             quoted,
             participants,
+            everyone,
             ..
         } = render;
         Ok(Self {
@@ -125,6 +130,7 @@ impl MessageText {
             mentions,
             quoted,
             participants,
+            everyone,
         })
     }
 
@@ -162,6 +168,21 @@ impl MessageText {
     #[must_use]
     pub fn participants(&self) -> &BTreeSet<Mri> {
         &self.participants
+    }
+
+    /// The group chats whose everyone the message mentions, by the chat's id. Such a mention adds nobody to a write's
+    /// target: it reaches the members of the chat the write goes to, and a write sends it only to that chat
+    /// ([`Self::mentions_everyone_only_in`]).
+    #[must_use]
+    pub fn everyone(&self) -> &BTreeSet<String> {
+        &self.everyone
+    }
+
+    /// Whether every mention of everyone it holds is of `conversation`, the chat a write of it goes to (true without
+    /// one): a mention of everyone in another chat isn't sent.
+    #[must_use]
+    pub fn mentions_everyone_only_in(&self, conversation: &str) -> bool {
+        self.everyone.iter().all(|chat| chat == conversation)
     }
 
     /// `properties.mentions` as sent: a JSON string of the mention entries.
@@ -219,13 +240,14 @@ fn mention_span(index: usize, name: &str) -> String {
     )
 }
 
-/// A mention's entry in `properties.mentions`, as captured (`mention.json`): `itemid` a string as sent.
-fn mention_entry(index: usize, mri: &Mri, name: &str) -> Value {
+/// A mention's entry in `properties.mentions`, as captured (`mention.json`; a mention of everyone in a group chat
+/// `mention-everyone.json`, its `mri` the chat's id): `itemid` a string as sent.
+fn mention_entry(index: usize, mri: &Mri, kind: MentionKind, name: &str) -> Value {
     json!({
         "@type": MENTION_ITEMTYPE,
         "itemid": index.to_string(),
         "mri": mri.as_str(),
-        "mentionType": "person",
+        "mentionType": kind.as_str(),
         "displayName": name,
     })
 }
@@ -245,6 +267,7 @@ struct Render<'a> {
     used: BTreeSet<&'a str>,
     quoted: Vec<Value>,
     participants: BTreeSet<Mri>,
+    everyone: BTreeSet<String>,
 }
 
 /// The marks in the order they open, with their tags.
@@ -265,6 +288,7 @@ impl<'a> Render<'a> {
             used: BTreeSet::new(),
             quoted: Vec::new(),
             participants: BTreeSet::new(),
+            everyone: BTreeSet::new(),
         }
     }
 
@@ -362,8 +386,14 @@ impl<'a> Render<'a> {
         }
         let index = self.mentions.len();
         self.html.push_str(&mention_span(index, name));
-        self.mentions.push(mention_entry(index, mri, name));
-        self.participants.insert(mri.clone());
+        if is_group_chat_id(mri.as_str()) {
+            self.mentions
+                .push(mention_entry(index, mri, MentionKind::Everyone, name));
+            self.everyone.insert(mri.as_str().to_owned());
+        } else {
+            self.mentions.push(mention_entry(index, mri, MentionKind::Person, name));
+            self.participants.insert(mri.clone());
+        }
         Ok(())
     }
 

@@ -120,6 +120,63 @@ fn a_mention_is_highlighted_and_the_account_s_own_more_strongly() {
     assert_eq!(Mentions::of(Some("not json"), ME), Mentions::default());
 }
 
+/// A stored message of the group chat `GROUP` from `sender`, mentioning everyone in it as `name` (another language's
+/// label, say), its `itemid` a number as read back.
+fn everyone_message(sender: &str, name: &str) -> teams_store::Message {
+    let properties = format!(
+        "{{\"mentions\":\"[{{\\\"@type\\\":\\\"http://schema.skype.com/Mention\\\",\\\"itemid\\\":0,\\\"mri\\\":\\\"{GROUP}\\\",\\\"mentionType\\\":\\\"everyone\\\",\\\"displayName\\\":\\\"{name}\\\"}}]\"}}"
+    );
+    teams_store::Message {
+        conversation_id: GROUP.to_owned(),
+        id: "1".to_owned(),
+        version: 1,
+        client_message_id: None,
+        sender: Some(sender.to_owned()),
+        sender_name: None,
+        message_type: "RichText/Html".to_owned(),
+        content: format!(
+            "<p><span itemscope itemtype=\"http://schema.skype.com/Mention\" itemid=\"0\">{name}</span> hi</p>"
+        ),
+        properties: Some(properties),
+        arrival_time: 0,
+        compose_time: None,
+        edit_time: None,
+        delete_time: None,
+    }
+}
+
+const GROUP: &str = "19:00000000000000000000000000000abc@thread.v2";
+
+#[test]
+fn a_mention_of_everyone_is_the_account_s_own_in_someone_else_s_message_and_shows_everyone() {
+    let received = everyone_message(LAB_B, "Alle");
+    let mentions = Mentions::of_message(&received, ME);
+    assert!(mentions.names_me(), "it notifies the account");
+    let rendered = rich_text::layout(&parse_html(&received.content), &mentions);
+    let styled: Vec<(&str, Option<Mentioned>)> = text_block(&rendered, 0)
+        .styled()
+        .into_iter()
+        .map(|(text, style)| (text, style.mention))
+        .collect();
+    assert_eq!(styled, [("Everyone", Some(Mentioned::Me)), (" hi", None)]);
+    assert!(rendered.mentions_me());
+
+    let sent = everyone_message(ME, "Everyone");
+    let mentions = Mentions::of_message(&sent, ME);
+    assert!(!mentions.names_me(), "the sender isn't mentioned by its own message");
+    let rendered = rich_text::layout(&parse_html(&sent.content), &mentions);
+    assert_eq!(
+        text_block(&rendered, 0).styled()[0],
+        (
+            "Everyone",
+            Style {
+                mention: Some(Mentioned::Other),
+                ..Style::default()
+            }
+        )
+    );
+}
+
 #[test]
 fn a_link_is_a_clickable_range_and_only_the_web_s_and_mail_s_are_links() {
     let rendered = laid_out(

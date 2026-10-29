@@ -8,7 +8,9 @@
 //!   in `links`, which isn't built here); a mention is an atomic token of the kit's text area naming its MRI,
 //!   completed after `@` from the chat's members ([`Core::members`], their names from [`Core::person`]) and only from
 //!   them: a mention is never read from typed text, only by the MRI the picker put in its token; the picker shows each
-//!   member's presence dot (M2 Task 17: the engine is asked about the people offered each time they are shown).
+//!   member's presence dot (M2 Task 17: the engine is asked about the people offered each time they are shown). In a
+//!   group chat it offers Everyone after the members ([`offered`]), as the web client does: its token names the chat's id, and
+//!   the message mentions everyone in the chat (`docs/protocol/chat.md`, "A mention of everyone").
 //!   `teams-proto`'s [`MessageText`] renders the HTML, the mentions and the reply's quote from that one value. A send the engine
 //!   refuses before it makes a row gives the box its draft back.
 //! - **Keys**: Enter sends (the kit's text area hands a plain Enter on, and the box takes it as the send, or the
@@ -61,7 +63,7 @@ use gpui_component::input::{
 };
 use gpui_component::{Selectable as _, Sizable as _, Size};
 use teams_core::{Action, Availability, NOTES, Transient};
-use teams_fence::Mri;
+use teams_fence::{Mri, is_group_chat_id};
 use teams_proto::chat::{ComposeError, Marks, MessageText, MessageType, Node, Quote, RichText, parse_html};
 use teams_store::Message;
 
@@ -71,6 +73,7 @@ use crate::icons::{Glyph, icon_button, icon_button_with_key, selected_by};
 use crate::presence::{self, Presences};
 use crate::reaction_picker::{ReactionPicker, ReactionPickerEvent};
 use crate::reactions;
+use crate::rich_text;
 use crate::settings::SettingsModel;
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
@@ -218,8 +221,8 @@ fn line_nodes(text: &str, line: &Range<usize>, mentions: &[DraftMention], table:
 /// nothing but whitespace was typed.
 ///
 /// # Errors
-/// What `teams-proto` refuses in a message's text ([`ComposeError`]): a mention of anyone but a work account, a text
-/// too long, …
+/// What `teams-proto` refuses in a message's text ([`ComposeError`]): a mention of anyone but a work account or
+/// everyone in a group chat, a text too long, …
 pub fn message_text(
     text: &str,
     mentions: &[DraftMention],
@@ -458,11 +461,36 @@ pub fn mention_query<'a>(text: &'a str, cursor: usize, mentions: &[Range<usize>]
     (starts_word && !crossed && !query.starts_with(char::is_whitespace)).then_some((at, query))
 }
 
-/// Someone the mention picker offers: a member of the chat, by MRI, with the name shown.
+/// Someone the mention picker offers: a member of the chat, by MRI, with the name shown; or everyone in a group chat
+/// ([`Candidate::everyone`]), by the chat's id.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Candidate {
     pub mri: String,
     pub name: SharedString,
+}
+
+/// What the picker's Everyone says under its name, as the web client's does (`compose_mention_everyone_tag_label`).
+pub const EVERYONE_LABEL: &str = "Notify everyone in the chat";
+
+/// The most members a chat may have for the picker to offer Everyone: the web client offers it in no chat of more
+/// than 1,000 (`compose_mention_everyone_disabled_large_roster_tooltip`).
+pub const EVERYONE_MAX_MEMBERS: usize = 1000;
+
+impl Candidate {
+    /// Everyone in the group chat `conversation`: a mention of its id, shown as [`rich_text::EVERYONE`].
+    #[must_use]
+    pub fn everyone(conversation: &str) -> Self {
+        Self {
+            mri: conversation.to_owned(),
+            name: rich_text::EVERYONE.into(),
+        }
+    }
+
+    /// Whether it is everyone in a chat rather than a person.
+    #[must_use]
+    pub fn is_everyone(&self) -> bool {
+        is_group_chat_id(&self.mri)
+    }
 }
 
 /// The candidates whose name holds `query` (any case), at most [`PICKER_MAX`], in their order.
@@ -475,6 +503,17 @@ pub fn matching(candidates: &[Candidate], query: &str) -> Vec<Candidate> {
         .take(PICKER_MAX)
         .cloned()
         .collect()
+}
+
+/// What the picker offers in `conversation` for `query`, its `members` (the account's own left out) read: the members
+/// [`matching`] it, then, in a group chat of at most [`EVERYONE_MAX_MEMBERS`], Everyone when its name holds the query
+/// (any case), as the web client's picker lists them (`abc-everyone`, `docs/protocol/chat.md`).
+#[must_use]
+pub fn offered(conversation: &str, members: &[Candidate], query: &str) -> Vec<Candidate> {
+    let everyone = (is_group_chat_id(conversation) && members.len() < EVERYONE_MAX_MEMBERS)
+        .then(|| Candidate::everyone(conversation))
+        .filter(|everyone| everyone.name.to_lowercase().contains(&query.to_lowercase()));
+    matching(members, query).into_iter().chain(everyone).collect()
 }
 
 /// When typing may be sent again: at most once per [`TYPING_EVERY`], the first at once (the web client's leading-edge
@@ -993,14 +1032,20 @@ impl Compose {
         let matches = self
             .candidates
             .as_deref()
-            .map(|candidates| matching(candidates, query))
+            .map(|candidates| offered(&self.conversation, candidates, query))
             .unwrap_or_default();
         if !loading && matches.is_empty() {
             return self.close_picker(cx);
         }
         // the people offered, at most `PICKER_MAX`: asked about each time they are shown (the chat list's budget,
         // `LIST_WATCHED`, leaves them room in the engine's watch)
-        presence::watch(self.core.as_ref(), matches.iter().map(|candidate| &candidate.mri));
+        presence::watch(
+            self.core.as_ref(),
+            matches
+                .iter()
+                .filter(|candidate| !candidate.is_everyone())
+                .map(|candidate| &candidate.mri),
+        );
         let selected = self
             .picker
             .as_ref()
@@ -1342,7 +1387,7 @@ impl Compose {
         let presence = self.presence.read(cx);
         let rows = picker.matches.iter().enumerate().map(|(index, candidate)| {
             let chosen = index == picker.selected;
-            div()
+            let row = div()
                 .id(("mention", index))
                 .debug_selector(move || format!("mention-{index}"))
                 .px_2()
@@ -1352,9 +1397,21 @@ impl Compose {
                 .items_center()
                 .gap_2()
                 .when_chosen(chosen, palette)
-                .child(presence::dot(&presence.of(&candidate.mri), palette))
+                .on_click(cx.listener(move |this, _, window, cx| this.choose(index, window, cx)));
+            if candidate.is_everyone() {
+                row.child(everyone_row(&candidate.name, palette))
+            } else {
+                // the dot in a slot as wide as Everyone's icon, so every name starts in one column
+                row.child(
+                    div()
+                        .flex_none()
+                        .w(px(EVERYONE_ICON))
+                        .flex()
+                        .justify_center()
+                        .child(presence::dot(&presence.of(&candidate.mri), palette)),
+                )
                 .child(candidate.name.clone())
-                .on_click(cx.listener(move |this, _, window, cx| this.choose(index, window, cx)))
+            }
         });
         let loading = picker
             .loading
@@ -1389,6 +1446,37 @@ impl Compose {
         )
     }
 }
+
+/// The picker's Everyone, as the web client's: an outlined people icon where a person's picture would be, the name,
+/// and under it what it does ([`EVERYONE_LABEL`]).
+fn everyone_row(name: &SharedString, palette: Palette) -> impl IntoElement {
+    div()
+        .debug_selector(|| "mention-everyone".to_owned())
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(
+            div()
+                .flex_none()
+                .size(px(EVERYONE_ICON))
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_color(rgb(palette.foreground))
+                .child(Glyph::USERS.icon().size(px(18.0))),
+        )
+        .child(
+            div().flex().flex_col().child(name.clone()).child(
+                div()
+                    .text_xs()
+                    .text_color(rgb(palette.muted_foreground))
+                    .child(EVERYONE_LABEL),
+            ),
+        )
+}
+
+/// The circle the picker's Everyone shows its icon in, px.
+const EVERYONE_ICON: f32 = 28.0;
 
 /// A picker row's look when it is the one chosen.
 trait Chosen {

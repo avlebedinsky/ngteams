@@ -137,9 +137,9 @@ query key twice in any case, makes the request unreadable.
 
 | Request | Verdict |
 |---|---|
-| `POST v1/users/ME/conversations/<chat>/messages`, `messagetype` `Text`, `RichText`, `RichText/…` | `Write(Message)` on the chat, adding whoever `properties.mentions` names |
+| `POST v1/users/ME/conversations/<chat>/messages`, `messagetype` `Text`, `RichText`, `RichText/…` | `Write(Message)` on the chat, adding whoever `properties.mentions` names (a mention of everyone in the group chat itself adds nobody) |
 | same path, `messagetype` `Control/Typing` or `Control/ClearTyping`, on a chat by its id, the body only `content` (empty or absent), `contenttype` and `messagetype`; a typing body in any other form or on any other id is unreadable | `None` (typing) |
-| `PUT v1/users/ME/conversations/<chat>/messages/<msg>` | `Write(Edit)`, adding whoever `properties.mentions` names |
+| `PUT v1/users/ME/conversations/<chat>/messages/<msg>` | `Write(Edit)`, adding whoever `properties.mentions` names (a mention of everyone in the group chat itself adds nobody) |
 | `DELETE v1/users/ME/conversations/<chat>/messages/<msg>` | `Write(Delete)` |
 | `PUT`/`DELETE …/messages/<msg>/properties?name=emotions` (the only query key) | `Write(Reaction)` |
 | `PUT v1/users/ME/conversations/<chat>/properties?name=consumptionhorizon` (the only query key), on a chat by its id | `None` (read receipt) |
@@ -164,8 +164,8 @@ The mapped writes as the web client sends them (all relative to the base):
 
 | Request | Body | WriteKind | Target |
 |---|---|---|---|
-| `POST v1/users/ME/conversations/<chat>/messages` | `messagetype` `Text`, `RichText`, `RichText/…` | `Message` | `Conversation(<chat>)`, adding whoever `properties.mentions` names |
-| `PUT v1/users/ME/conversations/<chat>/messages/<msg>` | the whole message again, a message `messagetype` | `Edit` | `Conversation(<chat>)`, adding whoever `properties.mentions` names |
+| `POST v1/users/ME/conversations/<chat>/messages` | `messagetype` `Text`, `RichText`, `RichText/…` | `Message` | `Conversation(<chat>)`, adding whoever `properties.mentions` names (a mention of everyone in the group chat itself adds nobody) |
+| `PUT v1/users/ME/conversations/<chat>/messages/<msg>` | the whole message again, a message `messagetype` | `Edit` | `Conversation(<chat>)`, adding whoever `properties.mentions` names (a mention of everyone in the group chat itself adds nobody) |
 | `DELETE v1/users/ME/conversations/<chat>/messages/<msg>?behavior=softDelete` | none | `Delete` | `Conversation(<chat>)` |
 | `PUT`/`DELETE v1/users/ME/conversations/<chat>/messages/<msg>/properties?name=emotions` | `{"emotions": {"key", "value"}}` / `{"emotions": {"key"}}` | `Reaction` | `Conversation(<chat>)` |
 | `POST v1/threads` | `{members: [{id, role}], properties}` | `ChatCreate` | `New`, adding every member in the body |
@@ -214,6 +214,9 @@ and how each change reads back, are in [chat.md](chat.md):
   `properties.mentions` is a JSON string of a list, one entry per mention with its `mri` (`8:orgid:<oid>`),
   `mentionType` `person`, `displayName`, `itemid` and `@type`. The mapping added the mentioned lab account to the
   message's target, and the fence allowed it after the live member read.
+- **Mention of everyone** (2026-10-29, `abc-everyone`, held back): the same post with an entry of `mentionType`
+  `everyone` whose `mri` is the group chat's own id. The mapping adds nobody for it (the chat's members are its reach,
+  read fresh for the write); one naming another chat, or posted to a chat that isn't a group chat, is unreadable.
 
 Rules that keep the mapping fail-closed:
 

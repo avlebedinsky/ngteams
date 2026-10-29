@@ -69,7 +69,7 @@ const SETTLE: Duration = Duration::from_millis(1500);
 type Step = (&'static str, fn(&Entity<Shell>, &mut Window, &mut App));
 
 /// The tour.
-const STEPS: [Step; 32] = [
+const STEPS: [Step; 33] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -198,6 +198,11 @@ const STEPS: [Step; 32] = [
     // b's and c's badges on their avatars
     ("chat-group-presence", |shell, window, cx| {
         shell.update(cx, |shell, cx| shell.open_chat(ABC_CHAT.to_owned(), window, cx));
+    }),
+    // `@` typed in the a–b–c chat: the mention picker over the box, the chat's members, then Everyone; above it b's
+    // mention of everyone (`seed_group`), the account's own
+    ("chat-mention-everyone", |shell, window, cx| {
+        type_in_compose(shell, "@", window, cx)
     }),
     // the team's channel the mock's CSA lists as a's favourite, under "Favorites" with its team's mark, clicked there:
     // opened read-only as a channel, its row highlighted
@@ -565,7 +570,7 @@ impl MockLab {
     }
 }
 
-/// c's message in the a–b–c chat, before b's; the mock's UPS answering b as away (as the "chat" step tells it) and c
+/// c's message in the a–b–c chat, then b's mention of everyone, before b's other messages; the mock's UPS answering b as away (as the "chat" step tells it) and c
 /// as busy, so the chat's senders show two badges once the view asked about them.
 fn seed_group(mock: &ChatServiceMock, runtime: &tokio::runtime::Runtime) -> SandboxResult {
     runtime.block_on(mock.serve_presence(&[(LAB_B, "Away"), (LAB_C, "Busy")]));
@@ -575,6 +580,21 @@ fn seed_group(mock: &ChatServiceMock, runtime: &tokio::runtime::Runtime) -> Sand
         "<p>Morning all, the release notes are ready for a look</p>",
     )
     .ok_or("c's post refused")?;
+    // b's mention of everyone, as Teams sends one (`mention-everyone.json`): the chat's id as its MRI
+    let html = "<p><span itemscope=\"\" itemtype=\"http://schema.skype.com/Mention\" itemid=\"0\">Everyone</span> \
+                standup moves to 10:30 tomorrow</p>";
+    let id = mock.post_as(LAB_B, ABC_CHAT, html).ok_or("b's post refused")?;
+    let mentions = serde_json::json!([{
+        "@type": "http://schema.skype.com/Mention", "itemid": 0, "mri": ABC_CHAT, "mentionType": "everyone",
+        "displayName": "Everyone",
+    }])
+    .to_string();
+    let client_message_id = (9_000_000_000_000_000_000_u64 + id.parse::<u64>()?).to_string();
+    if !mock.change_message(ABC_CHAT, &client_message_id, |message| {
+        message["properties"]["mentions"] = serde_json::json!(mentions);
+    }) {
+        return Err("b's post isn't in the mock".into());
+    }
     Ok(())
 }
 

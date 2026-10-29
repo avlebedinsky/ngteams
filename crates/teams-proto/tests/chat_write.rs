@@ -49,6 +49,11 @@ fn oid(mri: &str) -> &str {
     mri.trim_start_matches("8:orgid:")
 }
 
+/// The mock's group chat id without its `19:` and `@thread.v2`: what a fixture's `<group>` stands for.
+fn group_inner() -> &'static str {
+    ABC_CHAT.trim_start_matches("19:").trim_end_matches("@thread.v2")
+}
+
 /// A fixture with its placeholders filled in with the mock's made-up ids.
 fn fixture(name: &str) -> TestResult<Value> {
     let text = std::fs::read_to_string(Path::new(FIXTURES).join(name))?;
@@ -56,7 +61,8 @@ fn fixture(name: &str) -> TestResult<Value> {
         .replace("<region>", "amer")
         .replace("<guid:a>", oid(LAB_A))
         .replace("<guid:b>", oid(LAB_B))
-        .replace("<guid:x>", oid(OUTSIDER));
+        .replace("<guid:x>", oid(OUTSIDER))
+        .replace("<group>", group_inner());
     Ok(serde_json::from_str(&text)?)
 }
 
@@ -737,6 +743,65 @@ async fn a_message_with_a_mention_is_sent_as_the_mention_fixture() -> TestResult
     let sent = read_listed(sent(ChatWrite::Send(request)).await?)?;
 
     assert_eq!(sent, read_listed(recorded(&fixture("mention.json")?["request"])?)?);
+    Ok(())
+}
+
+/// "Everyone\u{a0}a made-up mention of everyone" in the mock's group chat: `mention-everyone.json`'s text.
+fn mentioning_everyone() -> MessageText {
+    MessageText::new(
+        rich(vec![Node::Paragraph(vec![
+            mention("e", "Everyone"),
+            run("\u{a0}a made-up mention of everyone"),
+        ])]),
+        [("e".to_owned(), mri(ABC_CHAT))],
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn a_mention_of_everyone_is_sent_as_the_everyone_fixture() -> TestResult {
+    let request = SendMessage::new(ABC_CHAT, lab_a(), mentioning_everyone())
+        .composed_at(NEW_YEAR_MS + 180_000)
+        .with_client_message_id("7777777777777777777");
+    assert_eq!(
+        request.target(),
+        on(WriteKind::Message, ABC_CHAT),
+        "it adds nobody: the chat's members are its reach"
+    );
+
+    let sent = read_listed(sent(ChatWrite::Send(request)).await?)?;
+
+    assert_eq!(
+        sent,
+        read_listed(recorded(&fixture("mention-everyone.json")?["request"])?)?
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_mention_of_everyone_goes_only_to_the_chat_it_names() -> TestResult {
+    let text = mentioning_everyone();
+    assert!(text.participants().is_empty());
+    assert_eq!(text.everyone(), &BTreeSet::from([ABC_CHAT.to_owned()]));
+    assert!(text.mentions_everyone_only_in(ABC_CHAT));
+    assert!(!text.mentions_everyone_only_in(AC_CHAT));
+    // posted or edited anywhere else, it has no wire form: permitted, the transport still sends nothing
+    for write in [
+        ChatWrite::Send(SendMessage::new(AC_CHAT, lab_a(), text.clone())),
+        ChatWrite::Edit(EditMessage::new(AC_CHAT, "1", lab_a(), text.clone(), original())),
+    ] {
+        let server = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200))
+            .mount(&server)
+            .await;
+        let fence = lab_fence(io::sink());
+        let token = Arc::new(Token::new(Some("a-made-up-token-for-the-transport".to_owned())));
+        let transport = HttpTransport::with_mock_origin(token, Arc::clone(&fence), CHAT_BASE, &server.uri())?;
+        let permit = fence.check(write.target(), &LabOnly).await?;
+        assert!(write.deliver(&transport, permit).await.is_err());
+        assert!(server.received_requests().await.unwrap_or_default().is_empty());
+    }
     Ok(())
 }
 

@@ -21,6 +21,8 @@
 //! - [`chat_shapes`] (accounts a and b, as `ab-trouter`, plus the lab's group chat): the chat shapes the native UI
 //!   still needs, recorded: each quick reaction set and taken back, typing as a types, pauses and empties its box
 //!   (and how long b's open chat shows it), a message with line breaks and a link, a mention of b in the group chat.
+//! - [`abc_everyone`] (accounts a and b, as `abc-chat`): a mention of everyone in the lab's group chat, held back and read
+//!   first, then sent and shown on b's page; recorded.
 //! - [`own_presence`] (account a, as `ab-trouter`): what makes a show online as b reads it (`own-presence-activity`,
 //!   `-endpoint`, `-both`, each holding the other report back with a forced deny) and what a manual status sends
 //!   (`own-presence-manual-held`, `own-presence-manual`); recorded.
@@ -55,6 +57,7 @@ pub mod ab_trouter;
 pub mod abc_call;
 pub mod abc_call_mixed;
 pub mod abc_chat;
+pub mod abc_everyone;
 pub mod chat_shapes;
 pub mod dsl;
 pub mod echo_call;
@@ -103,6 +106,9 @@ pub enum ScenarioName {
     /// Accounts a and b, as `ab-trouter`: every quick reaction, typing and its indicator, a message with line breaks
     /// and a link, and a mention of b in the group chat; recorded.
     ChatShapes,
+    /// Accounts a and b in the a–b–c group chat: a mentions everyone, first held back by a forced deny and read, then
+    /// sent once the lab rule reads it as a message to the chat adding nobody; b shows it; recorded.
+    AbcEveryone,
     /// Account a places the test call to the echo service with a fake microphone playing a tone; recorded.
     EchoCall,
     /// Account a calls b from their 1:1 chat, as the run's step (`--call`) says; recorded.
@@ -144,6 +150,7 @@ impl ScenarioName {
             Self::AbTrouter => "ab-trouter",
             Self::AbTrouterQuiet => "ab-trouter-quiet",
             Self::ChatShapes => "chat-shapes",
+            Self::AbcEveryone => "abc-everyone",
             Self::EchoCall => "echo-call",
             Self::AbCall => "ab-call",
             Self::AbcCall => "abc-call",
@@ -382,6 +389,7 @@ pub async fn run(
         ScenarioName::AbTrouter => ab_trouter::run(paths, options, ab_trouter::Activity::Reported).await,
         ScenarioName::AbTrouterQuiet => ab_trouter::run(paths, options, ab_trouter::Activity::HeldBack).await,
         ScenarioName::ChatShapes => chat_shapes::run(paths, options).await,
+        ScenarioName::AbcEveryone => abc_everyone::run(paths, options).await,
         ScenarioName::EchoCall
         | ScenarioName::AbCall
         | ScenarioName::AbcCall

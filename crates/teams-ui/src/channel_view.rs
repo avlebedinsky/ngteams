@@ -442,7 +442,7 @@ impl ChannelView {
         } else {
             RichText::plain(&message.content)
         };
-        let mentions = Mentions::of(message.properties.as_deref(), self.core.me());
+        let mentions = Mentions::of_message(message, self.core.me());
         let rendered = Arc::new(
             rich_text::layout(&text, &mentions).with_source(rich_text::PictureSource::new(Arc::clone(&self.core))),
         );

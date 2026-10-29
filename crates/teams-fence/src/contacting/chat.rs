@@ -7,7 +7,7 @@ use url::Url;
 
 use super::json::{optional, strict_json};
 use super::{Contact, Parsed, Policy};
-use crate::{Mri, Scope, Target, WriteKind, chat_service_path, is_chat_id};
+use crate::{Mri, Scope, Target, WriteKind, chat_service_path, is_chat_id, is_group_chat_id};
 
 /// The conversation properties that change only the account's own view of a conversation (a chat or a channel), set
 /// with `PUT v1/users/ME/conversations/<id>/properties?name=<n>`: when it was last made a favourite (seen on a
@@ -19,6 +19,9 @@ const TYPING_KEYS: [&str; 3] = ["content", "contenttype", "messagetype"];
 
 /// The account's own streams whose items it may mark read.
 const OWN_FEEDS: [&str; 2] = ["48:notifications", "48:mentions"];
+
+/// The `mentionType` of a mention of everyone in a group chat (`docs/protocol/chat.md`, "A mention of everyone").
+const EVERYONE: &str = "everyone";
 
 /// What a mutating request on the chat service is: a mapped write, a carve-out, or unreadable.
 pub(super) fn classify(request: &Parsed<'_>, policy: &Policy) -> Contact {
@@ -200,7 +203,7 @@ fn message_write(body: &[u8], chat: &str, post: Post) -> Option<Target> {
         Post::New => WriteKind::Message,
         Post::Edit => WriteKind::Edit,
     };
-    Some(Target::new(kind, chat_scope(chat)?).with_added(mentioned(&body)?))
+    Some(Target::new(kind, chat_scope(chat)?).with_added(mentioned(&body, chat)?))
 }
 
 /// Whether a body is a message by its `messagetype`: `Text`, `RichText` or `RichText/…`.
@@ -232,21 +235,38 @@ fn chat_only(body: &Value) -> Option<()> {
 
 /// The MRIs a message body mentions: its `properties.mentions`, a JSON list sent as a string, each entry naming one
 /// `mri` (`docs/protocol/chat.md`). They are the write's added participants, so the fence judges whoever is mentioned
-/// as it judges the chat's members. No `properties`, or no `mentions` in them, is no mention. Anything else is `None`:
-/// `properties` that aren't an object, `mentions` that aren't a string holding a JSON list read by [`strict_json`], an
-/// entry that isn't an object with a string `mri`, and either key in another case ([`optional`]).
-fn mentioned(body: &Value) -> Option<Vec<Mri>> {
+/// as it judges the chat's members. An entry of `mentionType` `everyone` names the group chat it is posted to (`chat`)
+/// as its `mri` and adds nobody ([`mention_participant`]): it reaches the chat's members, whom the fence reads fresh for
+/// the write anyway. No `properties`, or no `mentions` in them, is no mention. Anything else is `None`: `properties`
+/// that aren't an object, `mentions` that aren't a string holding a JSON list read by [`strict_json`], an entry that
+/// isn't an object with a string `mri`, an `everyone` entry naming anything but `chat` or posted anywhere but a group
+/// chat, and any of those keys (`mentionType` too) in another case ([`optional`]).
+fn mentioned(body: &Value, chat: &str) -> Option<Vec<Mri>> {
     let Some(properties) = optional(body.as_object()?, "properties").ok()? else {
         return Some(Vec::new());
     };
     let Some(mentions) = optional(properties.as_object()?, "mentions").ok()? else {
         return Some(Vec::new());
     };
-    strict_json(mentions.as_str()?.as_bytes())?
-        .as_array()?
-        .iter()
-        .map(|mention| mention.as_object()?.get("mri")?.as_str().map(Mri::new))
-        .collect()
+    let entries = strict_json(mentions.as_str()?.as_bytes())?;
+    let mut added = Vec::new();
+    for entry in entries.as_array()? {
+        if let Some(mri) = mention_participant(entry.as_object()?, chat)? {
+            added.push(mri);
+        }
+    }
+    Some(added)
+}
+
+/// Whom one `properties.mentions` entry adds: `Some(Some(mri))` for its `mri`, `Some(None)` for a mention of everyone in
+/// the group chat `chat` it is posted to (`mentionType` [`EVERYONE`], `mri` the chat's id), `None` for an entry the
+/// fence can't read ([`mentioned`]).
+fn mention_participant(entry: &Map<String, Value>, chat: &str) -> Option<Option<Mri>> {
+    let mri = optional(entry, "mri").ok()??.as_str()?;
+    match optional(entry, "mentionType").ok()? {
+        Some(Value::String(kind)) if kind == EVERYONE => (mri == chat && is_group_chat_id(chat)).then_some(None),
+        _ => Some(Some(Mri::new(mri))),
+    }
 }
 
 /// The members a thread body names (`{"members": [{"id": "<mri>", …}, …]}`): all of them, or `None` when the body

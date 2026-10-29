@@ -58,6 +58,8 @@ impl Glyph {
     pub const TRANSCRIPT: Self = Self(include_bytes!("../assets/icons/file-text.svg"));
     pub const TRASH: Self = Self(include_bytes!("../assets/icons/trash.svg"));
     pub const USER: Self = Self(include_bytes!("../assets/icons/user-round.svg"));
+    /// Everyone in a chat (the mention picker's Everyone).
+    pub const USERS: Self = Self(include_bytes!("../assets/icons/users-round.svg"));
     pub const VIDEO: Self = Self(include_bytes!("../assets/icons/video.svg"));
     pub const VIDEO_OFF: Self = Self(include_bytes!("../assets/icons/video-off.svg"));
     pub const X: Self = Self(include_bytes!("../assets/icons/x.svg"));
