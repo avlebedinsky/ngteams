@@ -1,4 +1,4 @@
-//! A 1:1 call's video (M3 Task 18), on the mock and its loopback peer (H.264 the bundled source's): the camera off
+//! A 1:1 call's video (M3 Task 18), on the mock and its loopback peer (H.264 on OpenH264): the camera off
 //! when the call starts and turned on only by the account's action, as a renegotiation of the call's media the peer
 //! answers; the peer's video shown once its renegotiation offers it; the camera turned off stops what is sent; the test
 //! call's camera as a 1:1 call's, the media controller's peer answering. A group call's video is `group`'s.

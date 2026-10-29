@@ -1,9 +1,9 @@
-//! A call's video (M3 Task 18): H.264 through OpenH264 (the bundled source, as every `test-support` build has it), and
+//! A call's video (M3 Task 18): H.264 through OpenH264 (its bundled source, as every build has it), and
 //! two media sessions on loopback through the TURN test server sending each other the file backend's test pattern.
 //!
 //! - **The codec**: the test pattern encoded and decoded keeps its frame index; the first frame and every frame asked
 //!   for is an IDR; the target bitrate stays between the minimum and the maximum, and a lower one makes smaller
-//!   frames. Cisco's library is loaded only from a file that is there and is the one Cisco published.
+//!   frames.
 //! - **The session**: A turns its camera on and offers its video line; B decodes A's pattern, in order and counting
 //!   up; then B's camera too, both ways; the encoder's bitrate follows `str0m`'s bandwidth estimate; with loss on the
 //!   relay the receiver asks for keyframes and the picture comes back; a camera turned off stops what is sent; a
@@ -28,7 +28,7 @@ use teams_media::devices::pattern::{TestPattern, index_of};
 use teams_media::devices::{DeviceError, Devices, PixelFormat, VideoFrame, VideoSink, VideoSource};
 use teams_media::session::{MediaSession, SessionDevice, SessionEvent, VideoParts, VideoStats};
 use teams_media::test_turn::{Impairment, TurnServer};
-use teams_media::video::codec::{CISCO_LIBRARY, EncoderSettings, H264Library, MIN_BITRATE, VideoDecoder, VideoEncoder};
+use teams_media::video::codec::{EncoderSettings, MIN_BITRATE, VideoDecoder, VideoEncoder};
 use teams_media::video::convert::MaxSize;
 
 /// When frame `index` of a camera at `fps` was captured, into the stream.
@@ -47,8 +47,8 @@ fn settings() -> EncoderSettings {
 #[test]
 fn the_test_pattern_survives_encoding_and_decoding_with_its_index() {
     let pattern = TestPattern::new(640, 360);
-    let mut encoder = VideoEncoder::new(&H264Library::Bundled, settings()).unwrap();
-    let mut decoder = VideoDecoder::new(&H264Library::Bundled).unwrap();
+    let mut encoder = VideoEncoder::new(settings()).unwrap();
+    let mut decoder = VideoDecoder::new().unwrap();
     let mut indices = Vec::new();
     for index in 0..30 {
         let Some(unit) = encoder.encode(&pattern.frame(index), at(index, 15), false).unwrap() else {
@@ -74,7 +74,7 @@ fn the_test_pattern_survives_encoding_and_decoding_with_its_index() {
 #[test]
 fn a_keyframe_asked_for_is_an_idr() {
     let pattern = TestPattern::new(320, 240);
-    let mut encoder = VideoEncoder::new(&H264Library::Bundled, settings()).unwrap();
+    let mut encoder = VideoEncoder::new(settings()).unwrap();
     let kinds: Vec<bool> = (0..10)
         .filter_map(|index| {
             encoder
@@ -92,14 +92,14 @@ fn a_keyframe_asked_for_is_an_idr() {
 
 #[test]
 fn the_bitrate_stays_between_the_minimum_and_the_maximum_and_a_lower_one_makes_smaller_frames() {
-    let mut encoder = VideoEncoder::new(&H264Library::Bundled, settings()).unwrap();
+    let mut encoder = VideoEncoder::new(settings()).unwrap();
     assert_eq!(encoder.bitrate(), 600_000);
     assert_eq!(encoder.set_bitrate(10_000_000), 1_000_000);
     assert_eq!(encoder.set_bitrate(1_000), MIN_BITRATE);
 
     // noise: a picture no bitrate is enough for, so the rate control spends what it is given
     let size_at = |bps: u64| {
-        let mut encoder = VideoEncoder::new(&H264Library::Bundled, settings()).unwrap();
+        let mut encoder = VideoEncoder::new(settings()).unwrap();
         encoder.set_bitrate(bps);
         // past the first second (its IDR and the rate control settling), what the frames add up to
         (0..60)
@@ -134,62 +134,6 @@ fn noise(width: u32, height: u32, seed: u32) -> VideoFrame {
     }
 }
 
-#[test]
-fn ciscos_library_loads_only_from_a_file_that_is_cisco_s() {
-    let dir = tempfile::tempdir().unwrap();
-    let missing = H264Library::cisco_in(dir.path());
-    let error = missing.check().unwrap_err().to_string();
-    assert!(error.contains(CISCO_LIBRARY), "{error}");
-
-    std::fs::write(dir.path().join(CISCO_LIBRARY), b"not the library").unwrap();
-    let error = H264Library::cisco_in(dir.path()).check().unwrap_err();
-    assert!(matches!(error, Error::Video(_)), "{error}");
-    assert!(error.to_string().to_lowercase().contains("hash"), "{error}");
-    assert!(VideoEncoder::new(&H264Library::cisco_in(dir.path()), settings()).is_err());
-    assert!(VideoDecoder::new(&H264Library::cisco_in(dir.path())).is_err());
-}
-
-/// `cargo tree` of each lab binary's crate alone (its normal and build dependencies with their features): none turns on
-/// the binding's `source`, so a lab binary built normally carries no H.264 code of its own and loads only Cisco's
-/// library (the bundled source is `test-support`'s alone).
-#[test]
-fn a_lab_binary_built_alone_compiles_no_h264_source() {
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for binary in ["teams-headless", "teams-app", "proto-lab"] {
-        let output = std::process::Command::new(&cargo)
-            .current_dir(&root)
-            .args([
-                "tree",
-                "--offline",
-                "--locked",
-                "-p",
-                binary,
-                "-e",
-                "normal,build,features",
-                "--prefix",
-                "none",
-            ])
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-        let tree = String::from_utf8(output.stdout).unwrap();
-        if binary == "proto-lab" {
-            assert!(!tree.contains("openh264"), "proto-lab takes no codec");
-            continue;
-        }
-        let features: Vec<&str> = tree
-            .lines()
-            .filter(|line| line.starts_with("openh264-sys2 feature ") || line.starts_with("openh264 feature "))
-            .collect();
-        assert!(!features.is_empty(), "{binary} takes the codec: {tree}");
-        assert!(
-            features.iter().all(|line| line.ends_with(r#""libloading""#)),
-            "{binary} turns on {features:?}"
-        );
-    }
-}
-
 /// One side of a video call: its session, what it decoded of the far end, and what its self view saw.
 struct Side {
     session: MediaSession,
@@ -203,7 +147,6 @@ fn side(turn: &TurnServer, name: &str, dir: &std::path::Path) -> Side {
     let (remote, preview) = (FrameCounter::new(), FrameCounter::new());
     session
         .start_video(VideoParts {
-            library: H264Library::Bundled,
             encoder: settings(),
             max_size: MaxSize::HD,
             remote: Box::new({

@@ -210,7 +210,8 @@ pub enum CallActionError {
     /// No media runs for that call.
     #[error("no media runs for that call")]
     NoMedia,
-    /// That call's media carries no video (one whose codec didn't load).
+    /// That call's media carries no video: the engine has no video for its calls, the settings' video switch was off
+    /// when it was set up, or the codec refused its setup.
     #[error("that call carries no video")]
     NoVideo,
     /// The call's media couldn't be set up, or its SDP made.

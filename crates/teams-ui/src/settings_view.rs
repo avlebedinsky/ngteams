@@ -10,12 +10,12 @@
 //!   searchable among the system's.
 //! - **Notifications**: which messages notify.
 //! - **Privacy**: sending typing and read receipts.
-//! - **Calls** (where the app has calls, or the build has the video codec): the calls' microphone, speaker and camera
+//! - **Calls** (where the app has calls, or its calls have video): the calls' microphone, speaker and camera
 //!   ("Follow the system", naming the system's default, then every device there is, a device chosen that isn't there
 //!   shown as not connected), "Make a test call" under them as Teams has it (the echo service's test call, asked of
 //!   the shell: [`SettingsViewEvent::MakeTestCall`]; offered while no call is up or rings on any account, the calling
-//!   endpoint is registered and the app isn't read-only, else said why), and the calls' video ("OpenH264 Video Codec
-//!   provided by Cisco Systems, Inc.", as Cisco's binary licence asks beside its control).
+//!   endpoint is registered and the app isn't read-only, else said why), and the calls' video switch ("Video in
+//!   calls").
 //! - **Diagnostics**: the diagnostic log's level and "Copy diagnostics".
 //!
 //! What was wrong with the settings file (or the log) is shown above every page. Each change goes to the
@@ -53,9 +53,6 @@ pub const IDLE_CHOICES: [u32; 6] = [1, 5, 10, 15, 30, 60];
 
 /// The key of the device row that follows the system (its test selector `<kind>-system`).
 pub const FOLLOW_SYSTEM: &str = "system";
-
-/// The calls' video switch's credit: the codec named as Cisco's binary licence asks, beside the switch.
-pub const VIDEO_SWITCH: &str = "OpenH264 Video Codec provided by Cisco Systems, Inc.";
 
 /// The page column's width, px.
 const NAV_WIDTH: f32 = 240.0;
@@ -260,7 +257,7 @@ struct Pick {
 /// The settings view (see the module docs).
 pub struct SettingsView {
     model: Entity<SettingsModel>,
-    /// The build has the video codec: its switch is shown.
+    /// The app's calls have video: its switch is shown.
     video_switch: bool,
     /// The account whose own settings (its manual status) the view shows ([`SettingsView::for_account`]); `None`: the
     /// first account's.
@@ -777,7 +774,7 @@ impl SettingsView {
                 Some("Video"),
                 vec![row(
                     "Video in calls",
-                    Some(VIDEO_SWITCH),
+                    Some("When off, calls are audio only"),
                     self.switch("video-calls", settings.video_calls, |settings, on| {
                         settings.video_calls = on;
                     }),

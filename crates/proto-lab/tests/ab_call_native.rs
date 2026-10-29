@@ -43,7 +43,6 @@ fn the_run_notes_a_native_client_s_summary_lines_only() {
         "1792 call_answer call=1",
         "1792 ring_ended call=1 code=0 phrase=\"x\"",
         "1792 camera_on call=1",
-        "video_codec \"OpenH264 Video Codec provided by Cisco Systems, Inc.\"",
         "video received=120 changed=118 indexed=0 gaps=0 last_index=- sent=150",
     ] {
         assert!(is_summary(line), "{line}");

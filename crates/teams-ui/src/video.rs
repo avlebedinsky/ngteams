@@ -5,8 +5,8 @@
 //! - **The feed** ([`VideoFeed`]) is what the engine's call media shows its frames on ([`teams_core::VideoOutput`]):
 //!   the media's own threads hand each decoded frame (the far end's) and each frame the camera sends (the self view)
 //!   to it; it turns each into the premultiplied BGRA a window draws, keeps the newest of each, and wakes the window.
-//!   It also carries the settings' switch for Cisco's OpenH264 ([`VideoFeed::set_enabled`]): while it is off, a call's
-//!   media starts no video and the codec isn't used.
+//!   It also carries the settings' video switch ([`VideoFeed::set_enabled`]): while it is off, a call's media starts
+//!   no video and the codec isn't used.
 //! - **The tiles** ([`Tiles`]) draw the newest frame of each through GPUI's external surface (a texture kept per
 //!   tile, written from the frame's pixels), and count each frame the renderer presented: the trace's `video-tile
 //!   presented` line names the tile (`remote`, `line-1` … `line-9`, `self`) and how many it presented so far, at the
@@ -139,12 +139,12 @@ impl VideoFeed {
         }
     }
 
-    /// Switches Cisco's OpenH264 on or off for the calls from now on (the settings' switch).
+    /// Switches the calls' video on or off from now on (the settings' switch).
     pub fn set_enabled(&self, on: bool) {
         self.shared.enabled.store(on, Ordering::Relaxed);
     }
 
-    /// Whether the calls may use Cisco's OpenH264.
+    /// Whether the calls may use the video codec.
     #[must_use]
     pub fn enabled(&self) -> bool {
         self.shared.enabled.load(Ordering::Relaxed)

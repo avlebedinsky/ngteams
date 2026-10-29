@@ -11,9 +11,8 @@ use teams_core::{Action, EngineHandle};
 use teams_headless::cli::{CallAudio, Cli, Command, WATCH_TONE_SECONDS};
 use teams_headless::commands::{self, Answering, WatchEnd};
 use teams_headless::lab::{Lab, VideoCounts};
-use teams_headless::print::{json_line, now_ms, visible};
+use teams_headless::print::{now_ms, visible};
 use teams_headless::{availability, call, chat, echo};
-use teams_media::video::codec::CISCO_ATTRIBUTION;
 use teams_proto::chat::MessageText;
 use teams_store::OutboxState;
 use teams_trouter::Stop;
@@ -451,7 +450,7 @@ async fn watch_calls(
 ) -> Outcome {
     let length = Duration::from_secs(audio.tone_seconds.unwrap_or(WATCH_TONE_SECONDS));
     let files = call_files(lab, &audio, "watch", length)?;
-    let (video, counts) = video_of(lab, &audio, out)?;
+    let (video, counts) = video_of(&audio);
     let mut handle = lab.start_calling(files.devices(), true, video).await?;
     let end = commands::watch(&mut handle, json, answering, &lab.names, out, signals.next()).await;
     // the engine's stop ends a call still up and closes its media, and with it the recording
@@ -481,7 +480,7 @@ async fn place_call(lab: &Lab, asked: CallAsked, signals: &mut Signals, out: &mu
         .tone_seconds
         .map_or_else(|| call::CallFiles::length_for(&plan), Duration::from_secs);
     let files = call_files(lab, &audio, what, length)?;
-    let (video, counts) = video_of(lab, &audio, out)?;
+    let (video, counts) = video_of(&audio);
     let mut handle = lab.start_calling(files.devices(), false, video).await?;
     if !matches!(target, call::Target::Echo(_)) {
         let mut stderr = io::stderr();
@@ -523,32 +522,14 @@ async fn place_call(lab: &Lab, asked: CallAsked, signals: &mut Signals, out: &mu
     })
 }
 
-/// The call's video when `audio` asks for it (`--video`): the lab's copy of Cisco's OpenH264, loaded once here to check
-/// it is there and is Cisco's (the attribution printed), and the counts of what it shows. Without the flag, none: the
-/// library isn't loaded.
-///
-/// # Errors
-/// When the library isn't there or isn't the one Cisco published, or the output can't be written.
-fn video_of(
-    lab: &Lab,
-    audio: &CallAudio,
-    out: &mut impl Write,
-) -> Result<(Option<teams_core::CallVideo>, Option<VideoCounts>), Box<dyn Error>> {
+/// The call's video when `audio` asks for it (`--video`), and the counts of what it shows. Without the flag, none.
+fn video_of(audio: &CallAudio) -> (Option<teams_core::CallVideo>, Option<VideoCounts>) {
     if !audio.video {
-        return Ok((None, None));
+        return (None, None);
     }
-    let library = teams_core::lab::openh264(lab.paths());
-    library.check().map_err(|error| {
-        format!("{error} (fetch Cisco's library into the lab's data dir with scripts/fetch-openh264.sh)")
-    })?;
-    writeln!(
-        out,
-        "video_codec {}",
-        json_line(&serde_json::Value::String(CISCO_ATTRIBUTION.to_owned()))
-    )?;
     let counts = VideoCounts::default();
-    let video = teams_core::lab::call_video(library, Arc::new(counts.clone()));
-    Ok((Some(video), Some(counts)))
+    let video = teams_core::lab::call_video(Arc::new(counts.clone()));
+    (Some(video), Some(counts))
 }
 
 /// Stops the engine (after the request it is on) and gives the command's outcome; `None` when a signal cut it short.

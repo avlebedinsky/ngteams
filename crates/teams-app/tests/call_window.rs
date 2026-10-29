@@ -56,7 +56,6 @@ use teams_media::relay::{RelayOptions, RelayServer};
 use teams_media::session::SessionConfig;
 use teams_media::tone::{Tone, amplitude_at};
 use teams_media::turn::Transport as RelayTransport;
-use teams_media::video::codec::H264Library;
 use teams_mock::{AB_CHAT, CHAT_BASE, ChatServiceMock, ECHO, LAB_A, LAB_B, LAB_C, TENANT};
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::Store;
@@ -777,7 +776,7 @@ fn engine(
     };
     let media = CallMedia {
         devices,
-        video: Some(teams_core::lab::call_video(H264Library::Bundled, Arc::new(feed))),
+        video: Some(teams_core::lab::call_video(Arc::new(feed))),
         relay: Relay::Fixed(vec![RelayServer {
             addr: env(RELAY_ENV)?.parse()?,
             transport: RelayTransport::Udp,

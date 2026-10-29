@@ -1153,7 +1153,7 @@ fn nine_participants_each_draw_on_a_line_of_their_own() {
 }
 
 #[test]
-fn a_build_without_the_codec_has_no_camera_and_its_key_asks_nothing() {
+fn a_build_without_video_has_no_camera_and_its_key_asks_nothing() {
     let rig = calling();
     let (trace, written) = trace();
     let (_shell, cx) = shell_window(&rig, Some(AB), trace);
@@ -1213,7 +1213,7 @@ fn the_settings_calls_page_makes_a_test_call_as_teams_does() {
     let rig = calling();
     let (trace, written) = trace();
     let (shell, cx) = shell_window(&rig, Some(AB), trace);
-    // the Calls page is there for the test call alone (no devices listed, no video codec)
+    // the Calls page is there for the test call alone (no devices listed, no video)
     calls_page(&shell, cx);
     assert!(drawn(cx, "settings-page-calls"));
     assert_eq!(offer(&shell, cx), TestCallOffer::Connecting);

@@ -87,7 +87,7 @@ fn run(cli: &Cli) -> Result<Outcome, String> {
         setup.paths.fence_log(),
     );
     // the calls on the desktop's PipeWire, shared by every account; without it the app runs without calls
-    let devices = match CallDevices::open(&setup.paths) {
+    let devices = match CallDevices::open() {
         Ok(devices) => Some(devices),
         Err(error) => {
             eprintln!("teams: no calls: {error}");

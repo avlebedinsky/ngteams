@@ -9,7 +9,7 @@ publish.workspace = true
 [features]
 # Tests only, through dev-dependencies: a minimal TURN server on loopback (`test_turn`), for this crate's tests, the
 # mock's media and the engine's call tests, and the signals the audio processing is judged with (`test_signal`).
-test-support = ["openh264/source"]
+test-support = []
 # The personal build's devices: the desktop's PipeWire instead of the UI sandbox's (`devices::pipewire::THIS_BUILD`).
 # Only `crates/ngteams` enables it (crates/ngteams/tests/apart.rs checks every manifest); `test-support` wins over it.
 personal = []
@@ -27,8 +27,7 @@ md-5.workspace = true
 # a shared video file played in its card: GStreamer's playbin, fed by an appsrc, its frames and sound to appsinks
 gstreamer.workspace = true
 gstreamer-app.workspace = true
-# the calls' video codec: H.264 through OpenH264, Cisco's prebuilt library loaded at run time (its bundled source
-# only under `test-support`, above)
+# the calls' video codec: H.264 through OpenH264, built from the source the binding bundles
 openh264.workspace = true
 # the encoder option the safe API lacks: the bitrate following the bandwidth estimate
 openh264-sys2.workspace = true

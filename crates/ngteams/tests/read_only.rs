@@ -372,7 +372,7 @@ fn a_read_only_account_opens_no_push_channel_and_no_calling() {
             camera: PatternCamera::default(),
             pacing: Pacing::RealTime,
         });
-        Some(ngteams::calling::on_devices(devices, None).0)
+        Some(ngteams::calling::on_devices(devices, false).0)
     };
     let (push, calling) = account::listening(true, true, calls());
     assert!(!push && calling.is_none(), "read-only: neither, whatever was asked");

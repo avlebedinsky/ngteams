@@ -26,7 +26,7 @@ use crate::devices::{VideoSink, VideoSource};
 use crate::peer::ReceivedVideo;
 use crate::queue::Queue;
 use crate::video::VIDEO_CLOCK;
-use crate::video::codec::{EncodedVideo, EncoderSettings, H264Library, VideoDecoder, VideoEncoder};
+use crate::video::codec::{EncodedVideo, EncoderSettings, VideoDecoder, VideoEncoder};
 use crate::video::convert::{MaxSize, to_i420};
 
 use super::{SessionDevice, SessionEvent, Shared};
@@ -51,8 +51,6 @@ const MAX_LINES: usize = 64;
 
 /// A call's video, as [`super::MediaSession::start_video`] takes it.
 pub struct VideoParts {
-    /// The OpenH264 library the encoder and decoder run on.
-    pub library: H264Library,
     /// How the camera's frames are encoded.
     pub encoder: EncoderSettings,
     /// The largest picture sent: a bigger camera frame is scaled down to fit.
@@ -66,7 +64,6 @@ pub struct VideoParts {
 impl std::fmt::Debug for VideoParts {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VideoParts")
-            .field("library", &self.library)
             .field("encoder", &self.encoder)
             .field("max_size", &self.max_size)
             .finish_non_exhaustive()
@@ -250,7 +247,6 @@ fn rtp_time(epoch: Instant, at: Instant) -> u64 {
 
 /// The decoding thread.
 pub(super) struct DecodeLoop {
-    pub(super) library: H264Library,
     pub(super) sinks: RemoteSinks,
     pub(super) incoming: Queue<ReceivedVideo>,
     pub(super) shared: Arc<Shared>,
@@ -285,7 +281,7 @@ impl DecodeLoop {
             return;
         }
         if !self.lines.contains_key(&unit.line) {
-            let Ok(decoder) = VideoDecoder::new(&self.library) else {
+            let Ok(decoder) = VideoDecoder::new() else {
                 VideoShared::count(&video.undecoded, 1);
                 return;
             };

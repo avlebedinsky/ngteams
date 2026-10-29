@@ -62,7 +62,7 @@ use crate::peer::ReceivedVideo;
 use crate::peer::{PeerEvent, RelayedPeer};
 use crate::processing::{AudioProcessing, ProcessingConfig};
 use crate::queue::Queue;
-use crate::video::codec::{EncoderSettings, H264Library, VideoDecoder, VideoEncoder};
+use crate::video::codec::{EncoderSettings, VideoDecoder, VideoEncoder};
 use crate::video::convert::MaxSize;
 use control::Control;
 pub use control::SourceRequest;
@@ -339,7 +339,6 @@ struct SessionVideo {
 
 /// What each camera the session turns on runs with; the self view is handed from one camera thread to the next.
 struct CameraParts {
-    library: H264Library,
     encoder: EncoderSettings,
     max_size: MaxSize,
     preview: Arc<Mutex<Option<Box<dyn VideoSink>>>>,
@@ -539,16 +538,15 @@ impl MediaSession {
     /// nothing).
     ///
     /// # Errors
-    /// [`Error::Video`] when the codec's library doesn't load, [`Error::Io`] when the thread can't be started.
+    /// [`Error::Video`] when the codec refuses its setup, [`Error::Io`] when the thread can't be started.
     pub fn start_video(&self, parts: VideoParts) -> Result<(), Error> {
         let mut video = lock(&self.video);
         if video.camera_parts.is_some() {
             return Ok(());
         }
-        // the library loads (or the video doesn't start): each line's decoder is made as its first frame comes
-        drop(VideoDecoder::new(&parts.library)?);
+        // the decoder sets up (or the video doesn't start): each line's decoder is made as its first frame comes
+        drop(VideoDecoder::new()?);
         let decoding = DecodeLoop {
-            library: parts.library.clone(),
             sinks: parts.remote,
             incoming: video.incoming.clone(),
             shared: Arc::clone(&self.shared),
@@ -556,7 +554,6 @@ impl MediaSession {
         };
         self.spawn("teams-media-vid", move || decoding.run())?;
         video.camera_parts = Some(CameraParts {
-            library: parts.library,
             encoder: parts.encoder,
             max_size: parts.max_size,
             preview: Arc::new(Mutex::new(parts.preview)),
@@ -586,7 +583,7 @@ impl MediaSession {
             .camera_parts
             .as_ref()
             .ok_or_else(|| Error::Video("the session's video hasn't started".into()))?;
-        let encoder = VideoEncoder::new(&parts.library, parts.encoder)?;
+        let encoder = VideoEncoder::new(parts.encoder)?;
         let stop = Arc::new(AtomicBool::new(false));
         let camera_loop = CameraLoop {
             camera,

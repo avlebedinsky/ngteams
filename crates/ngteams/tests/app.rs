@@ -154,14 +154,14 @@ fn the_personal_build_shows_its_calls_and_an_invitation_rings_by_the_name_it_giv
         camera: PatternCamera::default(),
         pacing: Pacing::RealTime,
     });
-    let (engine_calls, calls) = ngteams::calling::on_devices(devices, None);
+    let (engine_calls, calls) = ngteams::calling::on_devices(devices, false);
     assert_eq!(
         calls.echo.as_str(),
         teams_proto::TEAMS_ECHO_BOT_MRI,
         "the web bundle's echo service"
     );
     assert!(calls.ringer.is_some() && calls.video.is_none());
-    assert!(engine_calls.media.video.is_none(), "no codec, no video");
+    assert!(engine_calls.media.video.is_none(), "no video asked, none");
     assert_eq!(
         shown_after_a_ring(Some(&calls)),
         (true, true, true, false, true),
@@ -183,7 +183,7 @@ fn a_test_build_s_devices_are_the_sandbox_s_and_its_engine_without_them_places_n
     // `test-support` wins over `personal`: outside the UI sandbox the PipeWire is refused, so no call opens the desktop's
     let dir = tempfile::tempdir().unwrap();
     let (setup, account) = signed_in_setup(&dir);
-    assert!(ngteams::calling::open(&setup.paths).is_err() || std::env::var_os("UI_SANDBOX_DIR").is_some());
+    assert!(ngteams::calling::open().is_err() || std::env::var_os("UI_SANDBOX_DIR").is_some());
     let fence = Arc::new(Fence::open_personal_with(&setup.paths, &account.upn, &setup.lab).unwrap());
     let engine = ngteams::engine::start(&setup.paths, &account, fence, MemorySecretStore::new(), false, None).unwrap();
     let refused = engine

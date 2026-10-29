@@ -3,8 +3,8 @@
 //!
 //! - **What**: the chat shown last ([`Settings::selected_chat`]), whether typing, read receipts and the account's own
 //!   availability are sent, which messages notify ([`Notifications`]), the idle time after which the account's
-//!   availability stops being reported, the account's manual status ([`ManualStatus`]), whether calls use Cisco's
-//!   OpenH264 for video ([`Settings::video_calls`], its switch shown only where the build has the codec), the calls'
+//!   availability stops being reported, the account's manual status ([`ManualStatus`]), whether calls carry
+//!   video ([`Settings::video_calls`], its switch shown only where the app's calls have video), the calls'
 //!   microphone, speaker and camera ([`Settings::microphone`] and the others: a device's name, or the system's default
 //!   when none is named), how the app looks ([`Settings::appearance`]: the theme, following the system's light or dark
 //!   mode or not, the font size and family), the clock times are shown on ([`Settings::time_format`]: the system's,
@@ -259,8 +259,7 @@ pub struct Settings {
     pub manual_status: ManualStatus,
     /// The diagnostic log's level (`teams-log`), changed live; `TEAMS_APP_LOG` overrides it.
     pub log_level: LogLevel,
-    /// Calls use Cisco's OpenH264 for video: the user's control over the codec Cisco's binary licence asks for (to
-    /// enable it, disable it, and enable it again); off, a call's media starts no video and the codec isn't used.
+    /// Calls carry video ("Video in calls"); off, a call's media starts no video and the codec isn't used.
     pub video_calls: bool,
     /// The calls' microphone by its device name; `None` follows the system's default.
     pub microphone: Option<String>,
@@ -903,7 +902,7 @@ pub struct SettingsModel {
     /// When typing, read receipts and presence may go: as their switches say, after the first run's screen
     /// ([`SettingsModel::requiring_first_run`]), or never ([`SettingsModel::read_only`]).
     signals: Signals,
-    /// The build has the video codec: the view shows its switch ([`SettingsModel::with_video_switch`]).
+    /// The app's calls have video: the view shows its switch ([`SettingsModel::with_video_switch`]).
     video_switch: bool,
     /// The calls' devices, once attached ([`attach_devices`]): where each choice goes, and the devices there are.
     devices: Option<Devices>,
@@ -973,15 +972,14 @@ impl SettingsModel {
         }
     }
 
-    /// The settings with the switch for Cisco's OpenH264 shown ([`Settings::video_calls`]): a build whose calls have the
-    /// codec.
+    /// The settings with the calls' video switch shown ([`Settings::video_calls`]): an app whose calls have video.
     #[must_use]
     pub fn with_video_switch(mut self) -> Self {
         self.video_switch = true;
         self
     }
 
-    /// Whether the view shows the switch for Cisco's OpenH264.
+    /// Whether the view shows the calls' video switch.
     #[must_use]
     pub fn shows_video_switch(&self) -> bool {
         self.video_switch

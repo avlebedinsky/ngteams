@@ -17,8 +17,8 @@
 //!   answer or the decline of the invitation that rings, a hang-up, mute or unmute, the camera on or off (off when a
 //!   call starts; a 1:1 call's video, M3 Task 18). Each is the user's: a button, a key, the switcher's command or the
 //!   incoming call's notification. Nothing here answers, declines or turns the camera on by itself.
-//! - **The video** a build shows ([`Calls::with_video`]: the lab app's or the personal build's, when it has the codec)
-//!   is the feed the call's media draws on ([`crate::video::VideoFeed`]).
+//! - **The video** a build shows ([`Calls::with_video`]: the lab app's or the personal build's, when its calls have
+//!   video) is the feed the call's media draws on ([`crate::video::VideoFeed`]).
 //!
 //! The asks are traced by the caller's trace (`call asked`, `call refused` with the ask and why), never with a name.
 
@@ -675,7 +675,7 @@ fn local_refusal_text(why: &str) -> String {
         "no-call" => "no call is up".to_owned(),
         "no-chat" => "no chat is open".to_owned(),
         "another-account" => "another account is in a call".to_owned(),
-        "no-video" => "this build has no video codec".to_owned(),
+        "no-video" => "calls here carry no video".to_owned(),
         _ => "calls aren't available".to_owned(),
     }
 }

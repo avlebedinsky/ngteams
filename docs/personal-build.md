@@ -72,7 +72,7 @@ personal build widens what a lab account may do.
 | bus | the sandbox's private bus | the user's session bus (notifications, tray, Secret Service) |
 | sign-in | `proto-lab auth` (the armed Chrome fence) | `ngteams-signin`, a second binary of `crates/ngteams` (below) |
 | live lock | `~/.local/share/teams-lab/live.lock` around every live command | none: it is the user's own app |
-| calls | the UI sandbox's private PipeWire and fake camera portal; the lab's call rule (a call judged by its entry); the echo service from `lab.toml`; OpenH264 in `<lab data>/openh264/` | the desktop's PipeWire and camera portal (fixed when built); no call rule: the fence logs every call send and denies none ([Calls](#calls)); the echo service from the web bundle (`teams_proto::TEAMS_ECHO_BOT_MRI`); OpenH264 in `~/.local/share/ngteams/openh264/` (`scripts/fetch-openh264.sh ~/.local/share/ngteams`, once; without it the calls carry audio only) |
+| calls | the UI sandbox's private PipeWire and fake camera portal; the lab's call rule (a call judged by its entry); the echo service from `lab.toml` | the desktop's PipeWire and camera portal (fixed when built); no call rule: the fence logs every call send and denies none ([Calls](#calls)); the echo service from the web bundle (`teams_proto::TEAMS_ECHO_BOT_MRI`) |
 
 `accounts.toml` holds, for each account, what its first sign-in learned, never a token: the UPN the user typed, and
 the ID token's `oid` and `tid`. Every later sign-in must give the same `oid` and `tid` (the ID token's `preferred_username` checked as

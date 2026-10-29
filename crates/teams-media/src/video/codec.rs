@@ -1,12 +1,8 @@
 //! H.264 through OpenH264 (`docs/protocol/calling.md`, "The H.264 codec").
 //!
-//! **Which library**: the build decides ([`H264Library`]), never a fallback at run time. A normal build (the lab's,
-//! the personal build) has no H.264 code of its own: it loads Cisco's prebuilt library ([`CISCO_LIBRARY`]) from a
-//! path it is given, and only when its SHA-256 is the one Cisco published for it ([`CISCO_SHA256`], checked by the
-//! binding before the library is loaded); a missing or different file means the call has no video, its audio goes on.
-//! Only a `test-support` build (the tests, which run offline) compiles the bundled source ([`H264Library::Bundled`]).
-//! Cisco's arrangement with the H.264 patent pool covers its own binary, downloaded by its user apart from the
-//! program that loads it; it covers no build from source, and nothing here claims a patent licence for one.
+//! **Which library**: the source the `openh264` binding bundles, compiled into every build (the lab's, the personal
+//! build, the tests alike), so a call's video needs nothing downloaded or installed beside the program. The build uses
+//! `nasm` for OpenH264's assembly when it finds one, plain C otherwise.
 //!
 //! **What it makes**: a camera's I420 frames encoded as constrained baseline H.264 (OpenH264's encoder makes only
 //! that), Annex B access units with their parameter sets before every IDR, as the web client's offers select
@@ -14,7 +10,6 @@
 //! estimate ([`VideoEncoder::set_bitrate`]) between [`MIN_BITRATE`] and its maximum. Received access units decode to
 //! I420 frames.
 
-use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use openh264::decoder::{Decoder, DecoderConfig};
@@ -27,54 +22,12 @@ use openh264::{OpenH264API, Timestamp};
 use crate::Error;
 use crate::devices::{PixelFormat, VideoFrame};
 
-/// The file name of Cisco's library for Linux x86-64 that the binding knows ([`CISCO_SHA256`]).
-pub const CISCO_LIBRARY: &str = "libopenh264-2.6.0-linux64.8.so";
-/// Where Cisco hosts it, compressed with bzip2.
-pub const CISCO_URL: &str = "https://ciscobinary.openh264.org/libopenh264-2.6.0-linux64.8.so.bz2";
-/// The SHA-256 of the decompressed library, as the binding (`openh264-sys2` 0.9.9) lists it.
-pub const CISCO_SHA256: &str = "2f0cde7c6a6abcf5cae76942894ea42897fa677bce4ed6c91a24dd1b041d5f04";
-/// Where Cisco's licence for its binary is published.
-pub const CISCO_LICENSE_URL: &str = "https://www.openh264.org/BINARY_LICENSE.txt";
-/// What Cisco's binary licence asks a program that uses the library to show beside its control.
-pub const CISCO_ATTRIBUTION: &str = "OpenH264 Video Codec provided by Cisco Systems, Inc.";
-
 /// The lowest bitrate the encoder is set to, whatever the estimate, in bits per second.
 pub const MIN_BITRATE: u32 = 100_000;
 
-/// The OpenH264 library a call's video runs on.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum H264Library {
-    /// Cisco's prebuilt library at this path, loaded only when its SHA-256 is [`CISCO_SHA256`].
-    Cisco(PathBuf),
-    /// The source the binding bundles, compiled into a `test-support` build only.
-    #[cfg(feature = "test-support")]
-    Bundled,
-}
-
-impl H264Library {
-    /// Cisco's library [`CISCO_LIBRARY`] in `dir`.
-    #[must_use]
-    pub fn cisco_in(dir: &Path) -> Self {
-        Self::Cisco(dir.join(CISCO_LIBRARY))
-    }
-
-    /// Loads the library: a new handle for each encoder and decoder (the binding's handles aren't shared).
-    fn api(&self) -> Result<OpenH264API, Error> {
-        match self {
-            Self::Cisco(path) => OpenH264API::from_blob_path(path)
-                .map_err(|error| Error::Video(format!("Cisco's OpenH264 at {}: {error}", path.display()))),
-            #[cfg(feature = "test-support")]
-            Self::Bundled => Ok(OpenH264API::from_source()),
-        }
-    }
-
-    /// Whether the library loads (Cisco's: the file is there and is the one Cisco published).
-    ///
-    /// # Errors
-    /// [`Error::Video`] naming why it doesn't.
-    pub fn check(&self) -> Result<(), Error> {
-        self.api().map(drop)
-    }
+/// A new handle on the bundled OpenH264 for each encoder and decoder (the binding's handles aren't shared).
+fn api() -> OpenH264API {
+    OpenH264API::from_source()
 }
 
 /// How the encoder runs.
@@ -128,11 +81,11 @@ impl std::fmt::Debug for VideoEncoder {
 }
 
 impl VideoEncoder {
-    /// An encoder on `library`.
+    /// An encoder with `settings`.
     ///
     /// # Errors
-    /// [`Error::Video`] when the library doesn't load or refuses the setup.
-    pub fn new(library: &H264Library, settings: EncoderSettings) -> Result<Self, Error> {
+    /// [`Error::Video`] when OpenH264 refuses the setup.
+    pub fn new(settings: EncoderSettings) -> Result<Self, Error> {
         let max = settings.max_bitrate.max(MIN_BITRATE);
         // the encoder is set up at its maximum (its rate control's ceiling), then set to its target
         let config = EncoderConfig::new()
@@ -144,7 +97,7 @@ impl VideoEncoder {
             // an IDR every 4 s besides those asked for: a picture comes back after a loss nobody reported
             .intra_frame_period(IntraFramePeriod::from_num_frames(u32::from(settings.fps.max(1)) * 4))
             .num_threads(1);
-        let encoder = Encoder::with_api_config(library.api()?, config).map_err(video_error)?;
+        let encoder = Encoder::with_api_config(api(), config).map_err(video_error)?;
         Ok(Self {
             encoder,
             settings: EncoderSettings {
@@ -241,12 +194,12 @@ impl std::fmt::Debug for VideoDecoder {
 }
 
 impl VideoDecoder {
-    /// A decoder on `library`.
+    /// A decoder.
     ///
     /// # Errors
-    /// [`Error::Video`] when the library doesn't load or refuses the setup.
-    pub fn new(library: &H264Library) -> Result<Self, Error> {
-        let decoder = Decoder::with_api_config(library.api()?, DecoderConfig::new()).map_err(video_error)?;
+    /// [`Error::Video`] when OpenH264 refuses the setup.
+    pub fn new() -> Result<Self, Error> {
+        let decoder = Decoder::with_api_config(api(), DecoderConfig::new()).map_err(video_error)?;
         Ok(Self { decoder })
     }
 

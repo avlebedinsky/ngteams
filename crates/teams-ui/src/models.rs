@@ -257,8 +257,8 @@ impl Models {
         Self::with(Calls::shown(echo), cx)
     }
 
-    /// The models of a build that shows calls with their video (the lab app or the personal build, with its codec), its
-    /// test call to `echo` and its 1:1 calls' video shown on `feed`.
+    /// The models of a build that shows calls with their video (the lab app or the personal build, when its calls have
+    /// video), its test call to `echo` and its calls' video shown on `feed`.
     #[must_use]
     pub fn with_video_calls(echo: Option<teams_fence::Mri>, feed: crate::video::VideoFeed, cx: &mut App) -> Self {
         Self::with(Calls::shown(echo).with_video(feed), cx)

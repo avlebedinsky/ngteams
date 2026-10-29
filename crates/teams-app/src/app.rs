@@ -206,7 +206,7 @@ impl EventSource for AppEngine {
 }
 
 /// The app's settings from `file`, with "copy diagnostics" reading from `diagnostics` and, when the calls carry video,
-/// the switch for its codec, which every account's feed in `videos` follows.
+/// the video switch, which every account's feed in `videos` follows.
 fn settings_model(
     file: SettingsFile,
     diagnostics: Option<DiagnosticsSource>,
@@ -222,7 +222,7 @@ fn settings_model(
         settings = settings.with_diagnostics(diagnostics);
     }
     if !videos.is_empty() {
-        // the user's control over Cisco's OpenH264: its switch, shown beside the attribution its licence asks for
+        // the user's control over the calls' video: its switch
         settings = settings.with_video_switch();
         for feed in &videos {
             feed.set_enabled(settings.settings().video_calls);

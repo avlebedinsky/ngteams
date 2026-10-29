@@ -8,8 +8,8 @@
 //! A call's engine ([`Lab::start_calling`]) has its calling too: its media on the file backend ([`call_devices`]: no
 //! audio server), relayed through Teams' relay, the microphone unprocessed (a file has no acoustic echo, and a keyed
 //! tone must reach the far end as it is), the account describing its client as the web client does. With `--video`
-//! a 1:1 call takes video on Cisco's OpenH264 (the lab's copy, [`teams_core::lab::openh264`]): the far end's frames
-//! counted ([`VideoCounts`]), the camera the file backend's test pattern.
+//! a call takes video ([`teams_core::lab::call_video`]): the far end's frames counted ([`VideoCounts`]), the camera
+//! the file backend's test pattern.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;

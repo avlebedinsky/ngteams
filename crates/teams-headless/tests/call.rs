@@ -955,13 +955,10 @@ impl Lab {
         self.account_relayed(mri, hz, self.relay)
     }
 
-    /// [`Self::account`] with its calls taking video (H.264 the bundled source's), what they show counted.
+    /// [`Self::account`] with its calls taking video, what they show counted.
     fn account_with_video(&self, mri: &'static str, hz: f32) -> (Account, VideoCounts) {
         let counts = VideoCounts::default();
-        let video = teams_core::lab::call_video(
-            teams_media::video::codec::H264Library::Bundled,
-            Arc::new(counts.clone()),
-        );
+        let video = teams_core::lab::call_video(Arc::new(counts.clone()));
         (self.account_with(mri, hz, self.relay, Some(video)), counts)
     }
 

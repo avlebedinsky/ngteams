@@ -102,11 +102,9 @@ flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] 
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
 # the tree scraper parses into, walked without recursion: the version scraper takes
 ego-tree = "0.11.0"
-# the calls' video codec (teams-media): H.264 through OpenH264 (BSD-2-Clause, its 2.6.0). A normal build only loads
-# Cisco's prebuilt library at run time (`libloading`, its SHA-256 checked against the binding's list), the route
-# Cisco's patent arrangement covers; the bundled source is compiled only for `teams-media`'s `test-support`
-# (`docs/protocol/calling.md`, "The H.264 codec")
-openh264 = { version = "0.9.9", default-features = false, features = ["libloading"] }
+# the calls' video codec (teams-media): H.264 through OpenH264 (BSD-2-Clause, its 2.6.0), built from the source the
+# binding bundles in every build (`docs/protocol/calling.md`, "The H.264 codec")
+openh264 = { version = "0.9.9", default-features = false, features = ["source"] }
 # a shared video file played in its card (teams-media's player): GStreamer's playbin (demultiplexing, decoding with the
 # system's plugins, A/V sync, seeking, volume) through its Rust bindings (MIT/Apache-2.0; GStreamer itself, LGPL, is
 # the system's, linked dynamically); its bytes from an appsrc the engine feeds, its frames and sound to appsinks
@@ -248,7 +246,7 @@ allow_attributes_without_reason = "deny"
 [profile.dev.package.gpui-video]
 opt-level = 3
 
-# OpenH264 (the bundled source the tests build): unoptimized, encoding one 640x360 frame takes longer than a frame
+# OpenH264 (built from its bundled source): unoptimized, encoding one 640x360 frame takes longer than a frame
 # lasts, so the debug tests of the calls' video get an optimized codec.
 [profile.dev.package.openh264-sys2]
 opt-level = 3

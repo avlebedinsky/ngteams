@@ -8,11 +8,11 @@
 //! tone in bursts, [`write_burst_tone`]); every native client plays the same tone in bursts (`--tone 440 --bursts`), so
 //! each side can hear the other's: the page by its audio tap ([`wait_for_tone_in_from`]), the native client by the
 //! tone's presence in its recording (`tone hz=440 heard=true`). In the first two phases the call carries video both
-//! ways too (M3 Task 18): the native client takes video on Cisco's OpenH264 (`--video`, the lab's copy) and turns its
-//! camera on (the file backend's test pattern) [`NATIVE_CAMERA_AFTER`] after its call connected; b's page turns its
-//! camera on (Chrome's fake camera) once it heard the native client's tone; the page must decode the native client's
-//! video ([`video_frames`] from the phase's capture on, at least [`PAGE_FRAMES`] within [`VIDEO_WAIT`]) and the native
-//! client must show the page's (its `video received=` line, at least [`NATIVE_FRAMES`]). Three phases, in order:
+//! ways too (M3 Task 18): the native client takes video (`--video`) and turns its camera on (the file backend's test
+//! pattern) [`NATIVE_CAMERA_AFTER`] after its call connected; b's page turns its camera on (Chrome's fake camera) once
+//! it heard the native client's tone; the page must decode the native client's video ([`video_frames`] from the
+//! phase's capture on, at least [`PAGE_FRAMES`] within [`VIDEO_WAIT`]) and the native client must show the page's
+//! (its `video received=` line, at least [`NATIVE_FRAMES`]). Three phases, in order:
 //! 1. **a's native client calls b** (`teams-headless a call b`): b's page must show the incoming call; it clicks
 //!    answer only on the run's own call (`ab-call`'s ring check, [`EarlierRings::OwnLeftOut`]: every invitation the
 //!    page received is a's call to b in no group chat, an earlier phase's ring of a's call to b aside, and the page
@@ -544,7 +544,7 @@ fn watch_args(flag: &str, video: bool) -> Vec<String> {
     args
 }
 
-/// The video arguments of a native client whose call carries video: Cisco's OpenH264, the camera on
+/// The video arguments of a native client whose call carries video: video on, the camera on
 /// [`NATIVE_CAMERA_AFTER`] after the call connected.
 pub(crate) fn video_args() -> Vec<String> {
     vec![
@@ -629,7 +629,6 @@ pub fn is_summary(line: &str) -> bool {
         "call_answer",
         "ring_ended",
         "camera_",
-        "video_codec",
         "video received=",
     ]
     .iter()

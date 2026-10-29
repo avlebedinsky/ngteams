@@ -10,7 +10,7 @@
 //!
 //! **Video** (M3 Task 18): a peer takes the main video line it is offered and sends its camera (the file backend's
 //! test pattern) on it once a video line is in use, its decoded frames counted in its stats; it offers video of its
-//! own in a renegotiation ([`LoopbackPeer::video_offer`]). H.264 is the bundled source's (a `test-support` build).
+//! own in a renegotiation ([`LoopbackPeer::video_offer`]). H.264 is OpenH264's, as in every build.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -31,7 +31,7 @@ use teams_media::sdp::{NgcSdp, NgcSession, SdpError, VideoLines};
 use teams_media::session::{MediaSession, SessionConfig, SessionEvent, SessionStats, VideoParts};
 use teams_media::test_turn::{PASSWORD, TurnServer, USER};
 use teams_media::turn::{Credentials, Transport};
-use teams_media::video::codec::{EncoderSettings, H264Library};
+use teams_media::video::codec::EncoderSettings;
 use teams_media::video::convert::MaxSize;
 
 /// Why the loopback peer couldn't do it.
@@ -87,7 +87,6 @@ impl LoopbackPeer {
         };
         let session = MediaSession::start(RelayedPeer::new(Instant::now(), link)?, devices, config)?;
         session.start_video(VideoParts {
-            library: H264Library::Bundled,
             encoder: EncoderSettings::default(),
             max_size: MaxSize::HD,
             remote: Box::new(|_| Box::new(FrameCounter::new()) as Box<dyn teams_media::devices::VideoSink>),

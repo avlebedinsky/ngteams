@@ -30,7 +30,7 @@ use teams_media::relay::{RelayOptions, RelayServer};
 use teams_media::session::SessionConfig;
 use teams_media::tone::{Tone, amplitude_at};
 use teams_media::turn::Transport as RelayTransport;
-use teams_media::video::codec::{EncoderSettings, H264Library};
+use teams_media::video::codec::EncoderSettings;
 use teams_media::video::convert::MaxSize;
 use teams_mock::{CHAT_BASE, ChatServiceMock, ECHO, LAB_A, LAB_B, LAB_C, TENANT, TrouterMock};
 use teams_proto::{Author, Client, ClientInfo, Credentials, HttpTransport};
@@ -207,7 +207,7 @@ impl Lab {
         account
     }
 
-    /// As [`Self::account`], its calls' media without video (no codec given to its engine).
+    /// As [`Self::account`], its calls' media without video (none given to its engine).
     pub async fn account_without_video(&self, mri: &'static str, tone: Tone) -> Account {
         let mut account = Account::start(self, mri, tone, (TENANT, false));
         account.ready().await;
@@ -333,7 +333,6 @@ impl Account {
         let video = Shown::default();
         let mut media = media(lab.relay, tone, &recording, Arc::clone(&microphones));
         media.video = video_on.then(|| CallVideo {
-            library: H264Library::Bundled,
             encoder: EncoderSettings::default(),
             max_size: MaxSize::HD,
             output: Arc::new(video.clone()),

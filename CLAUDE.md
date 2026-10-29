@@ -379,9 +379,8 @@ What the code does and why. A change that undoes one of these needs a new reason
   sockets are `teams-media`'s own, never the HTTP transport's. Media and the data channel's control plane aren't
   classified: they carry a call the signaling fence permitted. SDP goes to and from the call controller only in
   Teams' dialect (`application/sdp-ngc-1.0`; a browser's SDP is refused where the dialect is required). H.264 is
-  Cisco's prebuilt OpenH264, loaded at run time only when its SHA-256 is Cisco's (the lab's from its data dir's
-  `openh264/`, the personal build's from the user's own copy); only a `test-support` build compiles the bundled
-  source. Without the library a call carries audio only.
+  OpenH264 built from the source the `openh264` binding bundles, in every build (its SIMD code only when `nasm` was
+  installed at its first build): a call's video needs nothing downloaded.
 - **The retry table, by layer**: the transport retries a read or a plain request once (after a 401 the session
   refreshes the refused token; after a 429/503 it waits `Retry-After`, capped at 30 s, 1 s without one) and never
   resends a write; `reqwest`'s own retries are off (`retry::never()`), since an HTTP/2 retry could replay a write. The

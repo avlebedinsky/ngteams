@@ -13,10 +13,8 @@
 //! ([`CallDevices::account`]): each its own engine calling and its own video feed, one ringtone and one device choice
 //! for the app.
 //!
-//! **Video** (M3 Task 18): a 1:1 call takes video when the lab's copy of Cisco's OpenH264 is there and is Cisco's
-//! ([`teams_core::lab::openh264`], fetched by `scripts/fetch-openh264.sh`); its frames are shown on the window's
-//! [`VideoFeed`], and the settings' switch ("OpenH264 Video Codec provided by Cisco Systems, Inc.") turns the codec off
-//! and on again. Without the library the calls carry audio only.
+//! **Video** (M3 Task 18): a call takes video on the OpenH264 built into the app; its frames are shown on the
+//! window's [`VideoFeed`], and the settings' switch ("Video in calls") turns it off and on again.
 
 use std::sync::Arc;
 
@@ -27,7 +25,6 @@ use teams_media::devices::catalog::DeviceDirectory;
 use teams_media::devices::pipewire::PipeWireDevices;
 use teams_media::devices::{DeviceError, Devices};
 use teams_media::player::PlayerSetup;
-use teams_media::video::codec::H264Library;
 use teams_ui::{DeviceRinger, Ringer, VideoFeed};
 
 /// What the window's calls are made of.
@@ -37,7 +34,7 @@ pub struct AppCalls {
     pub ringer: Option<Arc<dyn Ringer>>,
     /// The echo service's MRI, for the test call; `None` until lab.toml records it.
     pub echo: Option<Mri>,
-    /// Where a 1:1 call's video is shown; `None`: the calls carry no video (no codec).
+    /// Where a call's video is shown; `None`: the calls carry no video.
     pub video: Option<VideoFeed>,
     /// The devices the settings list and choose among; `None` lists none (devices that can't be chosen).
     pub devices: Option<Arc<dyn DeviceDirectory>>,
@@ -65,18 +62,18 @@ pub fn echo_of(config: &LabConfig) -> Option<Mri> {
         .map(Mri::new)
 }
 
-/// The engine's calling and the window's calls on `devices`, a 1:1 call's video on `video`'s library (none without).
+/// The engine's calling and the window's calls on `devices`, the calls taking video when `video` (none without).
 #[must_use]
 pub fn on_devices(
     devices: Arc<dyn Devices + Send + Sync>,
     echo: Option<Mri>,
-    video: Option<H264Library>,
+    video: bool,
 ) -> (AccountCalls, AppCalls) {
     let ringer: Arc<dyn Ringer> = Arc::new(DeviceRinger::new(Arc::clone(&devices)));
-    let feed = video.as_ref().map(|_| VideoFeed::new());
-    let video = video
-        .zip(feed.clone())
-        .map(|(library, feed)| teams_core::lab::call_video(library, Arc::new(feed)));
+    let feed = video.then(VideoFeed::new);
+    let video = feed
+        .clone()
+        .map(|feed| teams_core::lab::call_video(Arc::new(feed)));
     (
         account_calls(devices, video),
         AppCalls {
@@ -88,43 +85,32 @@ pub fn on_devices(
     )
 }
 
-/// The calls' devices of the whole app, opened once: the PipeWire this build allows, the codec when it is there, the
-/// test call's echo. Every account's calls are made on them ([`CallDevices::account`]): one microphone, speaker and
-/// camera for the app, however many accounts it runs (one call at a time across them: `teams_fence::CallFloor`).
+/// The calls' devices of the whole app, opened once: the PipeWire this build allows and the test call's echo. Every
+/// account's calls are made on them ([`CallDevices::account`]): one microphone, speaker and camera for the app, however
+/// many accounts it runs (one call at a time across them: `teams_fence::CallFloor`).
 #[derive(Clone)]
 pub struct CallDevices {
     devices: Arc<PipeWireDevices>,
-    video: Option<H264Library>,
     echo: Option<Mri>,
 }
 
 impl std::fmt::Debug for CallDevices {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CallDevices")
-            .field("video", &self.video.is_some())
             .field("echo", &self.echo)
             .finish_non_exhaustive()
     }
 }
 
 impl CallDevices {
-    /// The PipeWire this build allows (see the module docs), the lab's codec when it is Cisco's, lab.toml's echo.
+    /// The PipeWire this build allows (see the module docs) and lab.toml's echo.
     ///
     /// # Errors
     /// The PipeWire is refused or can't be reached ([`PipeWireDevices::connect`]).
     pub fn connect(config: &LabConfig) -> Result<Self, DeviceError> {
         let devices = Arc::new(PipeWireDevices::connect()?);
-        let library = teams_core::lab::openh264(config.paths());
-        let video = match library.check() {
-            Ok(()) => Some(library),
-            Err(error) => {
-                log::info!("the calls carry no video: {error}");
-                None
-            }
-        };
         Ok(Self {
             devices,
-            video,
             echo: echo_of(config),
         })
     }
@@ -141,7 +127,7 @@ impl CallDevices {
     /// own; the settings list these devices.
     #[must_use]
     pub fn account(&self) -> (AccountCalls, AppCalls) {
-        let (engine, mut window) = on_devices(self.devices.clone(), self.echo.clone(), self.video.clone());
+        let (engine, mut window) = on_devices(self.devices.clone(), self.echo.clone(), true);
         window.devices = Some(self.devices.clone());
         (engine, window)
     }

@@ -22,8 +22,8 @@
 //!
 //! - [`mcp`]: a group call's media control plane, the messages the client and the call's mixer exchange over the
 //!   group call's data channel: whose video the mixer sends on each receiving video line, who speaks.
-//! - [`video`]: H.264 through OpenH264 (Cisco's prebuilt library, or the bundled source in a `test-support` build) and
-//!   the frames' conversions; the session runs a call's camera and received video on threads of their own.
+//! - [`video`]: H.264 through OpenH264 (its bundled source, compiled into every build) and the frames' conversions;
+//!   the session runs a call's camera and received video on threads of their own.
 //! - [`player`]: a video a message carries, played in its card by GStreamer's `playbin`, its bytes from the engine
 //!   (an `appsrc`), its frames to the view and its sound to the device seam's speaker.
 //!
@@ -80,7 +80,7 @@ pub enum Error {
     /// The audio processing module refused its setup or a frame.
     #[error("audio processing: {0}")]
     Processing(String),
-    /// The video codec's library didn't load, refused its setup, or failed on a frame.
+    /// The video codec refused its setup, or failed on a frame.
     #[error("video: {0}")]
     Video(String),
     /// The media session's network thread is gone.

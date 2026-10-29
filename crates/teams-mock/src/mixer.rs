@@ -39,7 +39,7 @@ use teams_media::sdp::{NgcSdp, NgcSession, VideoLines};
 use teams_media::test_turn::{PASSWORD, USER};
 use teams_media::tone::{Tone, ToneGenerator};
 use teams_media::turn::{Credentials, Transport};
-use teams_media::video::codec::{EncoderSettings, H264Library, VideoEncoder};
+use teams_media::video::codec::{EncoderSettings, VideoEncoder};
 use teams_media::video::convert::{MaxSize, to_i420};
 
 use crate::media::PeerError;
@@ -131,7 +131,7 @@ impl MixerPeer {
         };
         let link = RelayLink::allocate(server, credentials, &RelayOptions::default())?;
         let peer = RelayedPeer::new(Instant::now(), link)?;
-        let encoder = VideoEncoder::new(&H264Library::Bundled, EncoderSettings::default())?;
+        let encoder = VideoEncoder::new(EncoderSettings::default())?;
         let audio = Audio {
             encoder: Encoder::new(&OpusConfig::default())?,
             tone: ToneGenerator::new(tone),

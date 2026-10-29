@@ -21,7 +21,7 @@ use teams_auth::session::Session;
 use teams_auth::token::{EntraConfig, TokenClient, TokenError};
 use teams_call::Identity;
 use teams_fence::{CredentialSource, Fence, LiveSourceError, MembershipSource, Mri};
-use teams_media::video::codec::{EncoderSettings, H264Library};
+use teams_media::video::codec::EncoderSettings;
 use teams_media::video::convert::MaxSize;
 use teams_proto::{Author, BuildError, Client, ClientInfo, Credentials, HttpTransport};
 use teams_store::{Store, StoreError};
@@ -53,16 +53,11 @@ pub const WEB_PLATFORM_NAME: &str = "SkypeSpaces/1415/26100212018/os=linux; osVe
 /// The language an account's calls name, as the captured starts do.
 pub const CALL_LANGUAGE: &str = "en-us";
 
-/// Where a build keeps its copy of Cisco's OpenH264 library, under its data dir (`scripts/fetch-openh264.sh <data
-/// dir>` puts it there, with Cisco's licence for it beside it).
-pub const OPENH264_DIR: &str = "openh264";
-
-/// A call's video on `library`, shown on `output`: the camera encoded at up to 1.5 Mb/s, 30 frames a second, no bigger
-/// than 1280 by 720.
+/// A call's video shown on `output`: the camera encoded at up to 1.5 Mb/s, 30 frames a second, no bigger than 1280 by
+/// 720.
 #[must_use]
-pub fn call_video(library: H264Library, output: Arc<dyn crate::VideoOutput>) -> crate::CallVideo {
+pub fn call_video(output: Arc<dyn crate::VideoOutput>) -> crate::CallVideo {
     crate::CallVideo {
-        library,
         encoder: EncoderSettings::default(),
         max_size: MaxSize::HD,
         output,

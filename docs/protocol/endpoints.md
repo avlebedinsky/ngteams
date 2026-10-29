@@ -6,7 +6,7 @@ touched (its Task 28: the native reads, plain requests and writes in `teams-prot
 windows' and `proto-lab`'s probes) and against every endpoint M3 touched (the calls,
 `docs/plans/20261024-native-teams-m3-calls.md`, its Task 24: the calling registration, the calling socket's deliveries
 and delivery responses, the call writes on the flight proxy, the relay's credentials and the relay, the fence's member
-reads for a call, Cisco's OpenH264 download), each under the lab's call rule; the personal build's fence denies none
+reads for a call), each under the lab's call rule; the personal build's fence denies none
 of them (below). The rows
 themselves date from M0 to M3. One
 row per endpoint the lab has seen the web client send, a lab command sent itself, the native client sends, or the
@@ -376,17 +376,6 @@ denied but for Substrate's search reads.
 | `POST` | `https://admin.microsoft.com/api/instrument/logclient` | the admin center's client log | no | no service | [fence-targets.md](fence-targets.md#what-the-captures-showed) · M0 T11 | seen (all) |
 | `POST` | `https://editor.svc.cloud.microsoft/NLEditor/Config/V2`, `…/NLEditor/api/V1/LanguageInfo` | the compose box's spelling and grammar service | no | no service | [fence-targets.md](fence-targets.md#what-the-captures-showed) · M0 T11 | seen |
 | `POST`, `WS` | `https://augloop.office.com/`, `wss://augloop.office.com/` | AI and suggestion features | no (its socket's frames pass too) | no service | [fence-targets.md](fence-targets.md#what-the-captures-showed) · M0 T11 | seen (all) |
-
-## Cisco's OpenH264 (`ciscobinary.openh264.org`, `www.openh264.org`)
-
-Fetched by hand, once, by `scripts/fetch-openh264.sh`: into the lab's data dir, and by the user into the personal
-build's (agents never do). No client, build or test sends either; `teams-media` only names them (`CISCO_URL`,
-`CISCO_LICENSE_URL`) and loads the saved library when its SHA-256 is Cisco's.
-
-| Method | Path | What it does | Contacting? | Native | Notes · task | Evidence |
-|---|---|---|---|---|---|---|
-| `GET` | `https://ciscobinary.openh264.org/libopenh264-2.6.0-linux64.8.so.bz2` | Cisco's prebuilt OpenH264 2.6.0 for Linux x86-64, the library the lab binaries' and the personal build's calls load for H.264 (its decompressed SHA-256 checked) | no | no service: the script's `curl`, HTTPS only | [calling.md](calling.md#the-h264-codec) · M3 T18, T22 | used (the script) |
-| `GET` | `https://www.openh264.org/BINARY_LICENSE.txt` | Cisco's licence for that binary, saved beside it | no | no service: the script's `curl` | [calling.md](calling.md#the-h264-codec) · M3 T18 | used (the script) |
 
 ## Giphy (`media.giphy.com`, `media<n>.giphy.com`)
 

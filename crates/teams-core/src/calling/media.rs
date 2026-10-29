@@ -6,7 +6,7 @@
 //! once a renegotiation of ours gave way to the far end's, [`offer_camera`]), and what the session reports turned into
 //! what the call does ([`LiveMedia::poll`]: a camera whose device went away or whose encoder failed is off).
 //!
-//! **Video** (M3 Tasks 18, 19): a call's media takes video when the engine has its codec ([`CallVideo`]): the
+//! **Video** (M3 Tasks 18, 19): a call's media takes video when the engine has video for its calls ([`CallVideo`]): the
 //! session's video starts with it (received frames to the account's sinks by video line, [`VideoOutput`]). A 1:1 call's
 //! dialect takes the main video line of what the far end offers, receiving until the camera is on (its camera turned on
 //! by a renegotiation). A group call's (placed, joined or answered) takes the main video line, sent on once the camera
@@ -15,7 +15,7 @@
 //! channel), its start, join or answer describes those lines (`mediaDescriptions`), and its control plane (the data
 //! channel's) is started once the far end's SDP was applied (`teams_media::mcp`). The camera is off when a call starts;
 //! only the account's action turns it on. The test call's media is a 1:1 call's (the media controller answers it, its
-//! camera turned by a renegotiation); a call whose codec doesn't load (Cisco's library missing) carries no video.
+//! camera turned by a renegotiation); a call whose video can't start carries audio only.
 //! Every step that blocks (the allocation, opening a device, an SDP command, the session's close) runs on tokio's
 //! blocking pool, never on the engine's thread; the session's own threads carry the media.
 
@@ -30,7 +30,7 @@ use teams_media::relay::{RelayOptions, RelayServer, allocate_any, teams_relay};
 use teams_media::sdp::{NgcSdp, NgcSession, VideoLines};
 use teams_media::session::{MediaSession, RemoteSinks, SessionConfig, SessionDevice, SessionEvent, VideoParts};
 use teams_media::turn::{self, TEAMS_RELAY_HOST, TEAMS_RELAY_UDP_PORT};
-use teams_media::video::codec::{EncoderSettings, H264Library};
+use teams_media::video::codec::EncoderSettings;
 use teams_media::video::convert::MaxSize;
 use teams_proto::{
     ChannelParameters, Client, Credentials, HttpTransport, MediaContent, MediaDescription, MediaDescriptions,
@@ -91,11 +91,9 @@ pub struct CallMedia {
     pub video: Option<CallVideo>,
 }
 
-/// A 1:1 call's video: the H.264 library it runs on, how the camera is encoded, the largest picture sent, and where
-/// the frames are shown.
+/// A call's video: how the camera is encoded, the largest picture sent, and where the frames are shown.
 #[derive(Clone)]
 pub struct CallVideo {
-    pub library: H264Library,
     pub encoder: EncoderSettings,
     pub max_size: MaxSize,
     pub output: Arc<dyn VideoOutput>,
@@ -104,7 +102,6 @@ pub struct CallVideo {
 impl std::fmt::Debug for CallVideo {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CallVideo")
-            .field("library", &self.library)
             .field("encoder", &self.encoder)
             .field("max_size", &self.max_size)
             .finish_non_exhaustive()
@@ -120,7 +117,7 @@ pub trait VideoOutput: Send + Sync {
     /// The sink of our camera's frames (a self view), or `None`.
     fn preview(&self) -> Option<Box<dyn VideoSink>>;
 
-    /// Whether the calls may use the video codec now (the user's switch for Cisco's OpenH264): a call set up while it
+    /// Whether the calls may use the video codec now (the settings' video switch): a call set up while it
     /// is off starts no video.
     fn enabled(&self) -> bool {
         true
@@ -334,8 +331,8 @@ pub(super) fn descriptions(dialect: &NgcSession, sending: bool) -> MediaDescript
     }
 }
 
-/// Starts the session's video when the engine has a codec for it; whether it started (a library that doesn't load
-/// leaves the call without video, its audio as it is).
+/// Starts the session's video when the engine has video for its calls; whether it started (a codec that refuses its
+/// setup leaves the call without video, its audio as it is).
 fn start_video(session: &MediaSession, video: Option<&CallVideo>, kind: VideoKind) -> bool {
     let Some(video) = video.filter(|video| video.output.enabled()) else {
         return false;
@@ -354,7 +351,6 @@ fn start_video(session: &MediaSession, video: Option<&CallVideo>, kind: VideoKin
         };
     }
     let parts = VideoParts {
-        library: video.library.clone(),
         encoder,
         max_size,
         remote,
@@ -458,7 +454,7 @@ pub(super) struct LiveMedia {
     closed: Option<Instant>,
     /// Its devices were asked to open ([`open_devices`]).
     pub(super) devices_opened: bool,
-    /// Its camera, as the account last turned it, when it takes video (a 1:1 call whose codec loaded); `None`: no
+    /// Its camera, as the account last turned it, when it takes video (its video started); `None`: no
     /// video.
     pub(super) camera: Option<bool>,
     /// A renegotiation of ours gave way to the far end's: the far end's is answered with our camera's line only

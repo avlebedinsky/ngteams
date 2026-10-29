@@ -66,10 +66,10 @@ fn changed() -> Settings {
 }
 
 #[test]
-fn the_calls_video_codec_is_on_by_default_and_its_switch_shown_only_where_the_build_has_it() {
+fn the_calls_video_is_on_by_default_and_its_switch_shown_only_where_the_calls_have_it() {
     assert!(
         Settings::default().video_calls,
-        "Cisco's OpenH264 on until the user turns it off"
+        "video on until the user turns it off"
     );
     let (read, problems) = parse("video_calls = false").expect("TOML");
     assert!(!read.video_calls);

@@ -3,11 +3,11 @@
 //! `fence.log`, the account's own MRI, whose own availability alone it permits), the
 //! account's session over the secret store the binary hands in (the Secret Service for `teams-headless`, the
 //! credential broker's socket for the sandboxed app), the chat base from the region record `proto-lab auth` saved
-//! ([`LabPaths::region_file`], read by [`Region::load`]), 1:1, group and meeting chats' members read live
-//! ([`LiveMembershipSource::for_fence`], its credential the chat transport's), the store at [`LabPaths::store_file`],
-//! the reads' transport with the middle tier's base from the GTM `middleTier` (the profile lookup's), CSA's from the
-//! GTM `chatSvcAggAfd` (the teams read's), AMS's from the GTM `amsV2` (a message's pictures') and UPS's from the GTM
-//! `presenceUPS` (the presence read's; the writes'
+//! ([`teams_fence::lab::LabPaths::region_file`], read by [`Region::load`]), 1:1, group and meeting chats' members
+//! read live ([`LiveMembershipSource::for_fence`], its credential the chat transport's), the store at
+//! [`teams_fence::lab::LabPaths::store_file`], the reads' transport with the middle tier's base from the GTM
+//! `middleTier` (the profile lookup's), CSA's from the GTM `chatSvcAggAfd` (the teams read's), AMS's from the GTM
+//! `amsV2` (a message's pictures') and UPS's from the GTM `presenceUPS` (the presence read's; the writes'
 //! transport gets UPS's base too, for the account's own availability, M2 Task 19), the lab
 //! accounts' names as lab.toml has them ([`known_names`]), the push channel when asked for, and the calling when the
 //! binary gives its media ([`AccountCalls`]; the account describes its client in its calls as the web client does,
@@ -25,9 +25,6 @@ use teams_auth::authz::{Region, RegionFileError};
 use teams_auth::secrets::SecretStore;
 use teams_fence::lab::{Alias, LabConfig};
 use teams_fence::{Fence, LiveMembershipSource};
-
-use teams_fence::lab::LabPaths;
-use teams_media::video::codec::H264Library;
 
 use crate::account::{self, Account, AccountCalls, AccountEngine, AccountError, Membership};
 pub use crate::account::{AMS_GTM, CSA_GTM, MIDDLE_TIER_GTM, PRESENCE_GTM};
@@ -91,19 +88,11 @@ pub fn start<S: SecretStore + 'static>(
 /// How a lab account describes its client in its calls, and its calls' video: as every account does
 /// ([`crate::account::web_client_info`], [`crate::account::call_video`]).
 pub use crate::account::{
-    OPENH264_DIR, WEB_CLIENT_ENDPOINT_CAPABILITIES, WEB_ENDPOINT_CAPABILITIES, WEB_PLATFORM_NAME, call_video,
-    web_client_info,
+    WEB_CLIENT_ENDPOINT_CAPABILITIES, WEB_ENDPOINT_CAPABILITIES, WEB_PLATFORM_NAME, call_video, web_client_info,
 };
 
 /// The language a lab account's calls name, as the captured starts do.
 pub const LAB_LANGUAGE: &str = crate::account::CALL_LANGUAGE;
-
-/// The lab's H.264 library: Cisco's, in [`OPENH264_DIR`] under the lab's data dir (`scripts/fetch-openh264.sh` puts it
-/// there, with Cisco's licence for it beside it; loaded only when it is the one Cisco published).
-#[must_use]
-pub fn openh264(paths: &LabPaths) -> H264Library {
-    H264Library::cisco_in(&paths.data_dir().join(OPENH264_DIR))
-}
 
 /// The lab accounts' names as lab.toml has them ([`display_name`]), by MRI: the last a person's name comes from.
 #[must_use]

@@ -298,7 +298,7 @@ const PIPEWIRE_BINDING: [&str; 4] = ["pipewire", "libspa", "pipewire-sys", "libs
 /// The Opus binding the media's codec takes (`teams-media`): the crate and the crate that builds and binds libopus.
 const OPUS_BINDING: [&str; 2] = ["opus", "opusic-sys"];
 
-/// The video codec's binding (`teams-media`): the crate and the one that binds OpenH264 (and loads Cisco's library).
+/// The video codec's binding (`teams-media`): the crate and the one that builds and binds OpenH264.
 const OPENH264_BINDING: [&str; 2] = ["openh264", "openh264-sys2"];
 
 /// The audio processing binding the media's echo cancellation takes (`teams-media`): the crate, its configuration
@@ -380,10 +380,9 @@ fn the_media_s_audio_processing_binding_brings_no_network_client_no_logger_and_o
     audit_media_binding(&AUDIO_PROCESSING_BINDING);
 }
 
-/// OpenH264 (BSD-2-Clause: the binding's and Cisco's codec, loaded from Cisco's library or, under `test-support`, built
-/// from the source the binding bundles) logs only at the level its owner sets, which the binding leaves quiet; its
-/// tree (`libloading`, `sha2` for the library's hash) is under licences we can take. This audits licences and loggers
-/// only: it says nothing of the H.264 patents (`docs/protocol/calling.md`, "The H.264 codec").
+/// OpenH264 (BSD-2-Clause: the binding and the codec, built from the source the binding bundles) logs only at the
+/// level its owner sets, which the binding leaves quiet; its tree (`cc`, `walkdir` and `nasm-rs` to build it) is
+/// under licences we can take.
 #[test]
 fn the_media_s_openh264_binding_brings_no_network_client_no_logger_and_only_licences_we_can_take() {
     audit_media_binding(&OPENH264_BINDING);

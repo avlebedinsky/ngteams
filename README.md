@@ -23,7 +23,7 @@ Status:
   `docs/plans/completed/20261021-native-teams-m2-gpui-daily-driver.md`, outcome `docs/m2-acceptance.md`.
 - **M3 is done in the lab**: calls. 1:1 and group-chat calls, audio and video, made, answered, declined and joined
   under the fence: the web client's calls mapped from captures, then native signaling (`teams-call`), media
-  (`teams-media`: Teams' SDP dialect, TURN, Opus, echo cancellation, H.264 on Cisco's OpenH264, PipeWire devices) and
+  (`teams-media`: Teams' SDP dialect, TURN, Opus, echo cancellation, H.264 on OpenH264, PipeWire devices) and
   the app's calls, checked live for a, b and c in the UI sandbox, against each other and against the web client both
   ways (setup p50 2.1 s, a → b latency p50 230 ms, no echo above the recording's resolution). The personal build
   (`ngteams`) makes and answers the user's own calls under the rules the user approved (`docs/personal-build.md`,
@@ -72,7 +72,6 @@ Hard rules for contributors and agents are in [CLAUDE.md](CLAUDE.md).
 | `scripts/install-personal.sh`, `packaging/com.nickalie.ngteams.desktop`, `packaging/com.nickalie.ngteams.signin.desktop`, `packaging/icons/` | the personal build's release build and install under `~/.local` (its binaries, the install marker, the desktop entries of the app and its sign-in window, and the app icon), for the user to run; agents run it only when the user asks |
 | `scripts/native-call-run.sh` | one native lab call (`teams-headless` on every end: a caller, callees answering with `watch --answer-lab-calls`, a late joiner), spaced 90 s after the chat's last call, run under the live lock (M3 Task 16) |
 | `scripts/reaction-pack.py`, `crates/teams-ui/assets/reactions/` | builds the reaction pack the app draws reactions with: Teams' reaction catalog (its CDN's emoticon metadata) as `catalog.tsv`, and Fluent Emoji 3D's pictures (MIT) packed as WebP into `emoji.bin`; run it again from a `fluentui-emoji` checkout when Teams' catalog version changes |
-| `scripts/fetch-openh264.sh` | downloads Cisco's prebuilt OpenH264 and its licence into a data dir's `openh264/` (the lab's; the user's own for the personal build, run by the user), its SHA-256 checked |
 | `scripts/own-availability-native-run.sh` | one native own-availability run (`teams-headless a availability`) with b's presence reads of a sampled beside it (M2 Task 19) |
 | `tools/` | interim Node tools: `ca-probe` (the Conditional Access probe), `lab-login` (the first sign-in of the profiles) |
 
@@ -125,7 +124,6 @@ outside the repo:
 | `…/headless/<time>…/` | the native live runs' outputs (`teams-headless` and `chat_live`'s `summary.json`) |
 | `…/recordings/` | a native call's audio (`teams-headless … call`): the keyed tone sent and what the far end played (`0700`) |
 | `…/call-live/<time>/` | `call_live`'s traces, outputs, recordings and `summary.json` (`0700`); its screenshots go to `…/screenshots/<time>/` |
-| `…/openh264/` | Cisco's prebuilt OpenH264 and its licence (`scripts/fetch-openh264.sh`), which the lab binaries load for a call's video only when its SHA-256 is Cisco's |
 | `…/live.lock` | the live lock: every live run (a lab browser or a native client against the tenant) holds it with `flock` |
 | `…/auth/<alias>.json` | the account's region, partition, region GTMs and skypetoken expiry from `auth` (`0600`) |
 | `…/status-<alias>.json` | `login`'s steps, and why it stopped |
@@ -144,9 +142,10 @@ proto-lab --target-dir target/lab`), so a later `cargo test` can't rebuild it wi
 `teams-media` builds native code: libopus from the source `opusic-sys` bundles, and WebRTC's audio processing module
 from the source `webrtc-audio-processing-sys` bundles, with `meson` and `ninja` against the system's Abseil (found
 through `pkg-config`; without it meson would download Abseil during the build). Its PipeWire binding needs
-libpipewire's headers and `clang` for `bindgen`. A normal build has no H.264 code of its own: it loads Cisco's
-prebuilt OpenH264 at run time, only when its SHA-256 is Cisco's (`scripts/fetch-openh264.sh`); only a `test-support`
-build compiles the bundled OpenH264 source, for the offline tests (`docs/protocol/calling.md`, "The H.264 codec").
+libpipewire's headers and `clang` for `bindgen`. The calls' H.264 is OpenH264, compiled from the source the
+`openh264` binding bundles into every build; install `nasm` before building so it gets OpenH264's SIMD assembly
+(plain C encodes 720p at about one frame's time, too slow for a 720p camera at 30 fps; `docs/protocol/calling.md`,
+"The H.264 codec").
 Which PipeWire a build opens is fixed when it is built: the UI sandbox's private one for the lab binaries and every
 `test-support` build, the desktop's only for the personal build (`teams-media`'s `personal` feature, which only
 `crates/ngteams` enables and `test-support` overrides); `teams-headless` opens none (its media is files).
@@ -304,7 +303,7 @@ fails the run.
   `teams-headless b watch --calls` rings too, and b's page answers: b's native client's ring must end (answered
   elsewhere). Every side plays the page's tone in bursts and must hear the other's (the page by its audio tap, a native
   client in its recording); the native clients' output goes into b's capture dir. The first two calls carry video
-  both ways (`--video`, Cisco's OpenH264 from `scripts/fetch-openh264.sh` in the lab's `openh264/`): the page turns
+  both ways (`--video`): the page turns
   its camera on and must decode the native client's frames, and the native client turns its camera on 5 s in
   (`--camera-after`) and must decode the page's.
 - `abc-call-mixed` (`TEAMS_HEADLESS_BIN` as `ab-call-native`'s): a's native client calls the a–b–c group chat with
@@ -412,7 +411,7 @@ sent for it), each answer judged by the fence again; the flag exists in `teams-h
 registers the calling stack and answers nothing (an offered call rings until its ring ends). Both play `--tone` (for
 `--tone-seconds`, 180 s by default) and record each answered call, and print what the last one's recording holds when
 they end, as text: neither takes `--json`.
-`--video` (`call`, `join`, `watch`) takes video on Cisco's OpenH264 from the lab's `openh264/`: a 1:1 call's main line,
+`--video` (`call`, `join`, `watch`) takes video: a 1:1 call's main line,
 a group call's main and receiving lines, the frames received counted per line (`video_lines …` every 2 s, `video …` at
 the end); the camera, a test pattern carrying each frame's index, stays off unless `--camera-after` turns it on that
 many seconds after the media connected.
@@ -524,7 +523,7 @@ switcher (Ctrl+K) offers the commands that fit the moment ("Call", "Make a test 
 call", "Leave call", "Mute or unmute", "Turn camera on or off"). Nothing answers or declines a call but the user. The settings list
 the sandbox's microphones, speakers and cameras ("Follow the system" by default; a choice moves a running call's
 device without dropping it), "Make a test call" under them (its results, once it ended: the microphone, the speaker,
-the camera and the network as the call showed them) and the video switch, on only with Cisco's OpenH264 in the lab's `openh264/`.
+the camera and the network as the call showed them) and the video switch ("Video in calls", on by default).
 `crates/teams-app/tests/call_window.rs` runs a's and b's apps in two sandboxes, each with its private PipeWire's tone,
 on `teams-mock` with its calling media: a calls b by the keyboard, b's ringtone is in b's recording, b answers from the
 notification, each tone is in the other's recording, a hangs up; b declines a second call and a's bar says it went to
@@ -594,9 +593,8 @@ Calls (`docs/personal-build.md`, "Calls"): 1:1 and group-chat calls today, audio
 call starts or joins on the user's action; any invitation addressed to the account rings (one call at a time across the
 accounts, as a Teams client) and is answered or declined only by the user. "Make a test call" (Settings, Calls and devices, or the switcher) calls the echo service named in
 the web bundle. The microphone opens only once
-the call passed the fence; the camera is off at every start, join and answer. Video needs Cisco's OpenH264, which the
-user downloads with `scripts/fetch-openh264.sh ~/.local/share/ngteams` (the patent question is the user's:
-`docs/backlog/openh264-patents-and-the-personal-build.md`); without it calls carry audio only. Without a PipeWire the
+the call passed the fence; the camera is off at every start, join and answer. Calls carry video on the OpenH264
+built into the app, unless the settings' "Video in calls" is turned off. Without a PipeWire the
 app runs without calls. The user's own real-call run is the checklist in `docs/m3-acceptance.md`.
 
 ### The read-only mode (`scripts/run-personal-read-only.sh`)

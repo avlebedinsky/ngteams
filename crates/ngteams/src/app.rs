@@ -473,8 +473,7 @@ pub fn bridge(engine: EngineHandle, calls: Option<&PersonalCalls>, cx: &mut App)
     (models, bridge)
 }
 
-/// The settings as an entity; when the calls carry video, with the switch for its codec (shown beside the attribution
-/// its licence asks for), which `video` follows.
+/// The settings as an entity; when the calls carry video, with the video switch, which `video` follows.
 fn settings_entity(settings: SettingsModel, video: Option<VideoFeed>, cx: &mut App) -> Entity<SettingsModel> {
     let settings = match &video {
         Some(feed) => {

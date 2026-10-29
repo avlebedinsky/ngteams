@@ -197,29 +197,25 @@ travels over that channel ("Group video" below).
 
 ### The H.264 codec
 
-M3 Task 18's decision (with Codex, 2026-10-25): the calls' H.264 is OpenH264 (Cisco's, BSD-2-Clause, through the
-`openh264` 0.9.9 binding), and which library a build uses is fixed when it is built:
+The calls' H.264 is OpenH264 2.6.0 (BSD-2-Clause) through the `openh264` 0.9.9 binding, built from the source the
+binding bundles (its `source` feature) into every build: the lab binaries, the personal build and the tests alike
+(`teams_media::video::codec`).
 
-- **A normal build (the lab binaries, the personal build) has no H.264 code of its own.** It loads Cisco's prebuilt
-  library at run time (`libopenh264-2.6.0-linux64.8.so`, from Cisco's own download, `scripts/fetch-openh264.sh` for
-  the lab), and only when its SHA-256 is the one the binding lists for it; a missing or different file means the
-  call has no video and its audio goes on. Never the system's library (a distribution's rebuild is not Cisco's binary).
-- **Only a `test-support` build compiles the bundled source**, so the tests run offline; such a build refuses to run
-  against the tenant.
-- **Copyright and patents are separate questions.** The binding's and OpenH264's BSD-2-Clause licences fit this
-  project; that settles copying, not patents. Cisco's arrangement with the H.264 patent pool (MPEG LA's AVC licence)
-  covers Cisco's own binary, on conditions: it is downloaded to the user's machine apart from the program, the user
-  can turn its use off and on again, the program shows "OpenH264 Video Codec provided by Cisco Systems, Inc." where
-  that control is, and Cisco's licence text is reproduced where licensing information is shown. It covers no build
-  from source and no other copy. Nothing here claims a patent licence for the source the tests build, and neither
-  private use nor this project being unpublished is taken to settle the question.
-- **The lab meets those conditions now**: the script downloads the library from Cisco and saves its licence
-  (`BINARY_LICENSE.txt`) beside it; `teams-headless` loads it only with `--video` (without it the library isn't
-  loaded) and prints the attribution when it does; the lab app's settings show the switch "Video in calls: OpenH264
-  Video Codec provided by Cisco Systems, Inc." (on by default; off, a call starts no video). The personal build's
-  provisioning, switch, attribution and licence text are owed before its calls carry video (M3 Task 22), and whether
-  the user's work calls should rely on Cisco's patent cover is the user's own call
-  (`docs/backlog/openh264-patents-and-the-personal-build.md`).
+- **Nothing to download or install.** The codec is part of the binary, so every app with calls has video: the lab
+  app and the personal build show their calls' video and the settings' switch "Video in calls" (on by default; off,
+  a call starts no video and the codec isn't used), and `teams-headless` takes video with `--video`.
+- **Building it** takes a C and C++ compiler, and `nasm` for speed: with `nasm` on the `PATH` the build also
+  assembles OpenH264's SIMD code, without it the codec is plain C. Measured on the test pattern, one 1280×720 frame
+  took about 33 ms to encode in plain C, a whole frame's time at 30 fps, so a 720p camera loses frames to the rate
+  control's skipping; with the assembly it took 7–17 ms. At 640×360 (a group call's size) either keeps up (6–7 ms
+  and about 3 ms). The build script looks for `nasm` only when it first runs: after installing it, `cargo clean -p
+  openh264-sys2` with the build's own profile and target dir (`--release --target-dir target/personal` for the
+  personal install) makes the next build take it. `OPENH264_NO_ASM` turns the
+  assembly off. A debug build optimizes the codec anyway (`[profile.dev.package.openh264-sys2]`), so the debug tests
+  encode in time.
+- **What it makes** is constrained baseline H.264 (the only profile OpenH264's encoder makes), as the web client's
+  offers select (`profile-level-id=42e01f`, `packetization-mode=1`); its payload numbers are the call's ("Native
+  video" and "Group video" below).
 - Hardware encoding (VA-API) stays out unless Task 21's CPU numbers call for it.
 
 ### Native video
