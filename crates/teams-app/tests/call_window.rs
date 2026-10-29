@@ -305,7 +305,8 @@ impl AppUnderTest {
     fn call_windows(&mut self, change: &str, count: usize) -> SandboxResult {
         let is = |line: &serde_json::Value| line["view"] == "call-window" && line["change"] == change;
         let what = format!("{}: call-window {change} #{count}", self.alias);
-        while self.trace.catch_up().iter().filter(|line| is(line)).count() < count {
+        // only up to the line waited for: a later line stays for the next wait
+        while self.trace.seen.iter().filter(|line| is(line)).count() < count {
             self.trace.next_where(&what, is)?;
         }
         let told = self.trace.seen.iter().filter(|line| is(line)).count();

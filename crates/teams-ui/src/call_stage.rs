@@ -243,9 +243,9 @@ impl CallStage {
 
     /// Who the call is with, as the window's title says it.
     fn title(&self, active: &ActiveCall, cx: &App) -> SharedString {
-        let people = self.people.of(active.id);
+        let names = call_view::names_in_call(active, self.people.of(active.id));
         let joined = || {
-            let names: Vec<&str> = people.iter().map(|(_, name)| name.as_ref()).collect();
+            let names: Vec<&str> = names.iter().map(SharedString::as_ref).collect();
             if names.is_empty() {
                 SharedString::from("Group call")
             } else {

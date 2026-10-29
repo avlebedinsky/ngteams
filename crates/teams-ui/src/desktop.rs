@@ -220,7 +220,8 @@ impl Desktop {
                     .find(|shell| shell.read(cx).account() == key)?
                     .clone();
                 let list = shell.read(cx).list().read(cx);
-                list.row(chat).map(|row| row.name.clone())
+                // a row named by people's names or a topic: an unnamed one leaves the call its participants' names
+                list.row(chat).filter(|row| row.named).map(|row| row.name.clone())
             })
         });
         let windows = cx.new(|cx| {

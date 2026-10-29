@@ -1597,13 +1597,32 @@ fn a_call_opens_a_window_of_its_own_beside_the_chats_and_it_closes_with_the_call
     assert!(drawn(cx, "in-call") && drawn(cx, "call-return"));
     assert_eq!(cx.update(|_, cx| shell.read(cx).main().clone()), Main::Chat(AB.into()));
 
-    // connected: b's tile; the window's own keys and buttons ask as the main window's do
-    status(&rig, 1, CallStatus::Connected);
+    the_window_s_own_controls_ask(&rig, window, cx, &written);
+
+    click(window, "call-hang-up");
+    assert_eq!(actions(&rig)[2], CallAction::HangUp { call: call(1) });
+    status(&rig, 1, CallStatus::Ended(End::HungUp));
+    assert!(!window_open(&rig, &windows));
+    let closed = lines(&written, "call-window", "closed");
+    assert_eq!((closed.len(), kinds(&closed[0])), (1, Vec::<String>::new()));
+    assert!(drawn(cx, "call-after"), "how it ended, in the main window");
+    no_name_in(&written);
+}
+
+/// Connected: b's tile; the window's own keys and buttons ask as the main window's do, People opens and closes the
+/// participants' pane, and the main window's "Return to call" raises the window.
+fn the_window_s_own_controls_ask(
+    rig: &Rig,
+    window: &mut VisualTestContext,
+    cx: &mut VisualTestContext,
+    written: &Written,
+) {
+    status(rig, 1, CallStatus::Connected);
     assert!(drawn(window, "call-person-0"));
     window.simulate_keystrokes("ctrl-shift-m");
     window.run_until_parked();
     assert_eq!(
-        actions(&rig)[1],
+        actions(rig)[1],
         CallAction::Mute {
             call: call(1),
             muted: true
@@ -1616,16 +1635,7 @@ fn a_call_opens_a_window_of_its_own_beside_the_chats_and_it_closes_with_the_call
     click(window, "call-roster-close");
     assert!(!drawn(window, "call-roster-pane"));
     click(cx, "call-return");
-    assert_eq!(lines(&written, "call-window", "raised").len(), 1);
-
-    click(window, "call-hang-up");
-    assert_eq!(actions(&rig)[2], CallAction::HangUp { call: call(1) });
-    status(&rig, 1, CallStatus::Ended(End::HungUp));
-    assert!(!window_open(&rig, &windows));
-    let closed = lines(&written, "call-window", "closed");
-    assert_eq!((closed.len(), kinds(&closed[0])), (1, Vec::<String>::new()));
-    assert!(drawn(cx, "call-after"), "how it ended, in the main window");
-    no_name_in(&written);
+    assert_eq!(lines(written, "call-window", "raised").len(), 1);
 }
 
 #[test]

@@ -258,12 +258,12 @@ const STEPS: [Step; 40] = [
     ("call-window", |shell, _, cx| fake_call(shell, cx)),
     // its participants' pane open from People
     ("call-window-people", |_, _, cx| {
-        with_stage(cx, |stage, cx| stage.show_roster(true, cx))
+        with_stage(cx, |stage, cx| stage.show_roster(true, cx));
     }),
     // the main window beside it, its chats usable, its in-call strip the way back: the parent puts the two side by
     // side and shoots the screen
     ("call-side-by-side", |_, _, cx| {
-        with_stage(cx, |stage, cx| stage.show_roster(false, cx))
+        with_stage(cx, |stage, cx| stage.show_roster(false, cx));
     }),
     // the call window in Teams Dark
     ("call-window-dark", |shell, _, cx| {
@@ -284,7 +284,7 @@ fn fake_call(shell: &Entity<Shell>, cx: &mut App) {
     let models = shell.read(cx).models().clone();
     let feed = VideoFeed::new();
     models.calls.update(cx, |calls, _| {
-        *calls = teams_ui::Calls::shown(Some(Mri::new(ECHO))).with_video(feed.clone())
+        *calls = teams_ui::Calls::shown(Some(Mri::new(ECHO))).with_video(feed.clone());
     });
     let call = teams_core::CallId::for_tests(FAKE_CALL);
     let events = [

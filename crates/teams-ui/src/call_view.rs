@@ -163,10 +163,35 @@ async fn members_named(core: &Arc<dyn Core>, chat: String) -> Vec<(String, Share
             Ok(person) => Shown::of(person).name,
             Err(_) => None,
         };
-        let name = name.unwrap_or_else(|| SharedString::from(mri.clone()));
+        // never an MRI: someone without a name is "Unknown user", as the chat list calls them
+        let name = name.unwrap_or_else(|| SharedString::from(chat_list::unnamed(&mri)));
         people.push((mri, name));
     }
     people
+}
+
+/// The names of who `active` is with: the roster's, once it told who is in the call (a name the roster leaves out
+/// as `people` give it), else `people`'s.
+pub(crate) fn names_in_call(active: &ActiveCall, people: &[(String, SharedString)]) -> Vec<SharedString> {
+    if active.view.participants.is_empty() {
+        return people.iter().map(|(_, name)| name.clone()).collect();
+    }
+    active
+        .view
+        .participants
+        .iter()
+        .map(|participant| {
+            participant.name.clone().map_or_else(
+                || {
+                    people.iter().find(|(mri, _)| *mri == participant.mri).map_or_else(
+                        || SharedString::from(chat_list::unnamed(&participant.mri)),
+                        |(_, name)| name.clone(),
+                    )
+                },
+                SharedString::from,
+            )
+        })
+        .collect()
 }
 
 /// Who a call is with, as its title: the echo for the test call; an invitation's caller (in its group chat, named as
@@ -478,9 +503,9 @@ impl CallBar {
 
     /// The in-call strip: the call's mark, who it is with and its state, and its controls.
     fn in_call(&self, active: &ActiveCall, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let people = self.people.of(active.id);
-        let with = (!people.is_empty()).then(|| {
-            let names: Vec<&str> = people.iter().map(|(_, name)| name.as_ref()).collect();
+        let names = names_in_call(active, self.people.of(active.id));
+        let with = (!names.is_empty()).then(|| {
+            let names: Vec<&str> = names.iter().map(SharedString::as_ref).collect();
             div()
                 .debug_selector(|| "in-call-participants".to_owned())
                 .truncate()
