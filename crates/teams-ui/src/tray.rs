@@ -3,7 +3,8 @@
 //! - **The total** ([`Tray`]): the store's unread count summed over the chats the chat list shows (not a team's
 //!   channels, not the account's own streams), counted again a moment after the models say a chat changed, each chat
 //!   asked again only when it changed since it was counted. The item's title and tooltip say it ("ngteams: 3 unread"),
-//!   its status is `NeedsAttention` while it isn't 0, `Active` otherwise.
+//!   its status is `NeedsAttention` while it isn't 0, `Active` otherwise. Its icon is the app's, carried as pixels
+//!   ([`crate::app_icon::pixmaps`]) with Teams' red unread badge while the total isn't 0, never a name from the theme.
 //! - **The item** ([`BusTray`]): `org.kde.StatusNotifierItem` at [`ITEM_PATH`] and its menu, `com.canonical.dbusmenu`
 //!   at [`MENU_PATH`], on the connection to the bus the app is given ([`crate::bus`]), under the name
 //!   `org.kde.StatusNotifierItem-<pid>-1`, registered with the watcher (`org.kde.StatusNotifierWatcher`). Activating
@@ -29,6 +30,7 @@ use zbus::interface;
 use zbus::object_server::SignalEmitter;
 use zbus::zvariant::{OwnedObjectPath, OwnedValue, Str, Value};
 
+use crate::app_icon::{self, Pixmaps};
 use crate::bridge::Core;
 use crate::chat_list::{self, LIST_LIMIT};
 use crate::models::Models;
@@ -46,9 +48,6 @@ pub const MENU_OPEN: i32 = 1;
 pub const MENU_QUIT: i32 = 2;
 /// How long after a change the total is counted again.
 pub const COUNT_DELAY: Duration = Duration::from_millis(300);
-/// The icons from the desktop's theme: none unread, some unread.
-pub const ICON: &str = "internet-chat";
-pub const ICON_UNREAD: &str = "mail-unread";
 
 /// What the tray asks the app for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -271,9 +270,6 @@ struct Item {
     events: UnboundedSender<TrayEvent>,
 }
 
-/// An icon's pixels as the item's properties carry them (none: the icon is named from the theme).
-type Pixmaps = Vec<(i32, i32, Vec<u8>)>;
-
 #[interface(name = "org.kde.StatusNotifierItem")]
 impl Item {
     fn activate(&self, x: i32, y: i32) {
@@ -327,28 +323,35 @@ impl Item {
         0
     }
 
+    // no name: a host draws a named icon over the pixels, and the theme names no badged one
     #[zbus(property)]
+    #[expect(clippy::unused_self, reason = "a D-Bus property zbus reads on the object")]
     fn icon_name(&self) -> &'static str {
-        if self.unread == 0 { ICON } else { ICON_UNREAD }
+        ""
     }
 
     #[zbus(property)]
-    #[expect(clippy::unused_self, reason = "a D-Bus property zbus reads on the object")]
     fn icon_pixmap(&self) -> Pixmaps {
-        Vec::new()
+        app_icon::pixmaps(self.unread > 0)
     }
 
     #[zbus(property)]
     #[expect(clippy::unused_self, reason = "a D-Bus property zbus reads on the object")]
     fn attention_icon_name(&self) -> &'static str {
-        ICON_UNREAD
+        ""
+    }
+
+    #[zbus(property)]
+    #[expect(clippy::unused_self, reason = "a D-Bus property zbus reads on the object")]
+    fn attention_icon_pixmap(&self) -> Pixmaps {
+        app_icon::pixmaps(true)
     }
 
     #[zbus(property)]
     fn tool_tip(&self) -> (String, Pixmaps, String, String) {
         (
-            self.icon_name().to_owned(),
-            Vec::new(),
+            String::new(),
+            app_icon::pixmaps(self.unread > 0),
             title(&self.app, self.unread),
             String::new(),
         )

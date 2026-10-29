@@ -4,6 +4,7 @@ Name=ngteams
 GenericName=Chat
 Comment=Microsoft Teams chats for your own account, under the personal build's fence
 Exec=ngteams
+Icon=com.nickalie.ngteams
 Terminal=false
 Categories=Network;Chat;InstantMessaging;
 StartupWMClass=com.nickalie.ngteams

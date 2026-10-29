@@ -59,6 +59,9 @@ use crate::guard::{Guard, GuardEvent, GuardServer};
 
 /// The window's Wayland app id: the program name GTK gives a window that has no `GApplication`.
 pub const APP_ID: &str = "com.nickalie.ngteams.signin";
+/// The window's icon, by its name in the desktop's icon theme: the app's (`packaging/icons/`, installed by
+/// `scripts/install-personal.sh`), which the sign-in window's own desktop entry names too.
+pub const ICON_NAME: &str = "com.nickalie.ngteams";
 /// The extension module's file name, as cargo builds it.
 pub const EXTENSION_FILE: &str = "libteams_signin_extension.so";
 /// `WebKit` features switched off before anything loads: what `send-request` can't see (`WebSocket`), what sends on its
@@ -233,12 +236,7 @@ impl Window {
             (Rc::clone(&stage), Rc::clone(&refused)),
             finish.clone(),
         );
-        let window = gtk4::Window::builder()
-            .title("Sign in to Microsoft Teams")
-            .default_width(520)
-            .default_height(720)
-            .child(&view)
-            .build();
+        let window = toplevel(&view);
         let closed = finish.clone();
         window.connect_close_request(move |_| {
             closed(match refused.borrow_mut().take() {
@@ -291,6 +289,17 @@ fn finisher(main: &glib::MainLoop, answer: &Rc<RefCell<Option<WindowAnswer>>>) -
             main.quit();
         }
     })
+}
+
+/// The window holding `view`, titled and with the app's icon.
+fn toplevel(view: &WebView) -> gtk4::Window {
+    gtk4::Window::builder()
+        .title("Sign in to Microsoft Teams")
+        .icon_name(ICON_NAME)
+        .default_width(520)
+        .default_height(720)
+        .child(view)
+        .build()
 }
 
 /// A private directory (`0700`) for the guard's socket and the extension.

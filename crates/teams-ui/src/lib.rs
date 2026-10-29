@@ -41,6 +41,7 @@
 //!   [`notify`] notifications of messages that come (as the "notifications" setting says; a chat shown in a focused
 //!   window never notifies; activating one opens its chat) and the [`tray`] item (the unread total, open, quit;
 //!   closing the window keeps the app in the tray), both on the bus the app is given ([`bus`]) and nowhere else.
+//!   Both carry the app's icon ([`app_icon`]: the tray item its pixels, with Teams' unread badge).
 //! - [`calls`] (M3 Task 17): the account's calls as the views show them, in a build that shows them (the lab app and the
 //!   personal build), and the user's asks; [`call_view`] the incoming call's banner and the in-call bar,
 //!   [`call_alert`] the incoming call's ringtone ([`ringtone`], on the default output) and its notification with
@@ -60,6 +61,7 @@
 
 pub mod account_prompt;
 pub mod accounts;
+pub mod app_icon;
 pub mod bridge;
 pub mod bus;
 pub mod call_alert;

@@ -8,7 +8,9 @@
 # - Installs both binaries and the sign-in window's web process extension into ~/.local/lib/ngteams/ (the window finds
 #   the extension beside itself, `ngteams` finds the window beside itself), `ngteams` linked from ~/.local/bin/, and
 #   `packaging/com.nickalie.ngteams.desktop` into ~/.local/share/applications/ with its `Exec` pointing at the
-#   installed binary (an older install's `ngteams.desktop` removed).
+#   installed binary (an older install's `ngteams.desktop` removed), beside it the sign-in window's hidden entry
+#   (`com.nickalie.ngteams.signin.desktop`, so the desktop shows that window with the app's icon), and the app icon
+#   (`packaging/icons/`) into ~/.local/share/icons/hicolor/.
 # - Starts nothing. The first run is the user's: `ngteams`, which asks for the account (docs/personal-build.md,
 #   "The first run").
 #
@@ -33,10 +35,23 @@ extension="$target/release/libteams_signin_extension.so"
 install -m 0644 "$extension" "$lib/libteams_signin_extension.so"
 ln -sfn "$lib/ngteams" "$bin/ngteams"
 desktop="com.nickalie.ngteams.desktop"
-sed "s|^Exec=ngteams$|Exec=$lib/ngteams|" "$root/packaging/$desktop" > "$apps/$desktop"
-chmod 0644 "$apps/$desktop"
+# the sign-in window's entry, hidden from menus: the desktop finds that window's icon by its app id
+for entry in "$desktop" com.nickalie.ngteams.signin.desktop; do
+  sed "s|^Exec=ngteams$|Exec=$lib/ngteams|" "$root/packaging/$entry" > "$apps/$entry"
+  chmod 0644 "$apps/$entry"
+done
 # The entry's name before the app id became `com.nickalie.ngteams`.
 rm -f "$apps/ngteams.desktop"
+icons="$prefix/share/icons/hicolor"
+for icon in "$root"/packaging/icons/hicolor/*/apps/com.nickalie.ngteams.png; do
+  size="$(basename "$(dirname "$(dirname "$icon")")")"
+  install -D -m 0644 "$icon" "$icons/$size/apps/com.nickalie.ngteams.png"
+done
+# A cache already there must learn the icon, or desktops reading it never find it; without one they scan the dir, and
+# making one here would hide what other apps install later.
+if [[ -f "$icons/icon-theme.cache" ]]; then
+  gtk-update-icon-cache -q -t "$icons" || true
+fi
 
-echo "installed: $lib/ngteams (linked from $bin/ngteams) and $apps/$desktop"
+echo "installed: $lib/ngteams (linked from $bin/ngteams), $apps/$desktop and its icon under $icons"
 echo "first run: start Teams and enter your work account   (then review the first-run screen before anything is sent on its own)"

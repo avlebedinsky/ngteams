@@ -557,7 +557,7 @@ impl Desktop {
                 Err(error) => return vec![error.to_string()],
             };
             let mut problems = Vec::new();
-            if let Err(error) = notifications(&this, &connection, &app_name, cx).await {
+            if let Err(error) = notifications(&this, &connection, app_id, &app_name, cx).await {
                 problems.push(format!("no notifications: {error}"));
             }
             if with_tray && let Err(error) = tray(&this, &connection, app_id, &app_name, cx).await {
@@ -607,10 +607,11 @@ fn hand_server(slot: &Slot, server: &Arc<dyn NotificationServer>, cx: &mut App) 
 async fn notifications(
     this: &WeakEntity<Desktop>,
     connection: &Connection,
+    app_id: &str,
     app_name: &str,
     cx: &mut AsyncApp,
 ) -> zbus::Result<()> {
-    let (server, mut activations) = BusNotifications::start(connection, app_name).await?;
+    let (server, mut activations) = BusNotifications::start(connection, app_name, app_id).await?;
     let server: Arc<dyn NotificationServer> = Arc::new(server);
     if this.update(cx, |this, cx| this.use_server(server, cx)).is_err() {
         return Ok(());

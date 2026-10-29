@@ -8,17 +8,20 @@
 use gpui::{
     App, AppContext as _, Bounds, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement,
     ParentElement as _, Render, SharedString, Styled as _, Subscription, TitlebarOptions, Window, WindowBounds,
-    WindowHandle, WindowOptions, div, px, rgb, size,
+    WindowHandle, WindowOptions, div, img, px, rgb, size,
 };
 use gpui_component::Disableable as _;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState};
 
-use crate::theme;
 use crate::window::{KitRoot, init};
+use crate::{app_icon, theme};
 
 /// The window's size: a small dialog of its own.
-const SIZE: (f32, f32) = (480.0, 340.0);
+const SIZE: (f32, f32) = (480.0, 400.0);
+
+/// The app's icon over the title, as Teams' own sign-in shows its logo.
+const LOGO: f32 = 48.0;
 
 /// What the field asks for when it is empty.
 pub const PLACEHOLDER: &str = "name@company.com";
@@ -174,6 +177,12 @@ impl Render for AccountPrompt {
             .gap_4()
             .bg(rgb(palette.background))
             .text_color(rgb(palette.foreground))
+            .child(
+                img(app_icon::image())
+                    .debug_selector(|| "account-prompt-logo".to_owned())
+                    .size(px(LOGO))
+                    .flex_none(),
+            )
             .child(
                 div()
                     .text_xl()

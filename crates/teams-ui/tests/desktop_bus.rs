@@ -25,9 +25,9 @@ use std::process::Command;
 use std::time::Duration;
 
 use futures_util::StreamExt as _;
-use teams_ui::bus;
 use teams_ui::notify::{BusNotifications, Notice, NoticeKind, NotificationServer as _};
 use teams_ui::tray::{BusTray, Hosted, ITEM_PATH, MENU_OPEN, MENU_PATH, MENU_QUIT, TrayEvent, TrayIcon as _};
+use teams_ui::{app_icon, bus};
 use tempfile::TempDir;
 use tokio::sync::mpsc;
 use ui_sandbox::bus::PrivateBus;
@@ -76,7 +76,9 @@ fn notifications_reach_the_server_on_the_bus_given_and_its_activations_come_back
     };
     runtime().block_on(async {
         let connection = bus::connect(private.address()).await.unwrap();
-        let (server, mut activations) = BusNotifications::start(&connection, "ngteams (lab a)").await.unwrap();
+        let (server, mut activations) = BusNotifications::start(&connection, "ngteams (lab a)", "ngteams-lab")
+            .await
+            .unwrap();
         let first = server
             .show(&notice(NoticeKind::Message, "Bee", "lunch <at> noon & after"), 0)
             .await
@@ -93,11 +95,12 @@ fn notifications_reach_the_server_on_the_bus_given_and_its_activations_come_back
         let me = connection.unique_name().unwrap().to_string();
         assert_eq!(got[0].sender, me);
         assert_eq!(got[0].app_name, "ngteams (lab a)");
+        assert_eq!(got[0].app_icon, app_icon::NAME);
         assert_eq!((got[0].summary.as_str(), got[0].replaces_id), ("Bee", 0));
         // the fake reads no markup: the text as it is
         assert_eq!(got[0].body, "lunch <at> noon & after");
         assert_eq!(got[0].actions, ["default", "Open"]);
-        assert_eq!(got[0].hints, ["category", "urgency"]);
+        assert_eq!(got[0].hints, ["category", "desktop-entry", "urgency"]);
         assert_eq!(got[0].expire_timeout, -1);
         assert_eq!((got[1].summary.as_str(), got[1].replaces_id), ("Lab trio", first));
         assert_eq!(private.closed_notifications(), [first]);
@@ -121,7 +124,7 @@ fn notifications_reach_the_server_on_the_bus_given_and_its_activations_come_back
             call.actions,
             ["default", "Open", "answer", "Answer", "decline", "Decline"]
         );
-        assert_eq!(call.hints, ["urgency"]);
+        assert_eq!(call.hints, ["desktop-entry", "urgency"]);
         assert_eq!(call.expire_timeout, 0);
         private.invoke_action(ringing, "answer").unwrap();
         let answered = tokio::time::timeout(WAIT, activations.next()).await.unwrap();
@@ -155,6 +158,18 @@ const MENU: &str = "com.canonical.dbusmenu";
 type ToolTip = (String, Vec<(i32, i32, Vec<u8>)>, String, String);
 /// A menu item: its id, its properties and its children.
 type MenuItem = (i32, HashMap<String, OwnedValue>, Vec<OwnedValue>);
+
+/// The item shows the app's icon by its pixels, badged while something is `unread`, with no theme name over them.
+async fn assert_icon(host: &zbus::Connection, name: &str, unread: bool) {
+    let icon: String = property(host, name, ITEM_PATH, ITEM, "IconName").await;
+    assert_eq!(icon, "");
+    let pixmaps: Vec<(i32, i32, Vec<u8>)> = property(host, name, ITEM_PATH, ITEM, "IconPixmap").await;
+    assert_eq!(pixmaps, app_icon::pixmaps(unread));
+    let (_, tip_icon, _, _): ToolTip = property(host, name, ITEM_PATH, ITEM, "ToolTip").await;
+    assert_eq!(tip_icon, app_icon::pixmaps(unread));
+    let attention: Vec<(i32, i32, Vec<u8>)> = property(host, name, ITEM_PATH, ITEM, "AttentionIconPixmap").await;
+    assert_eq!(attention, app_icon::pixmaps(true));
+}
 
 #[test]
 fn the_tray_item_registers_shows_the_total_and_asks_for_the_window_and_the_quit() {
@@ -192,10 +207,12 @@ fn the_tray_item_registers_shows_the_total_and_asks_for_the_window_and_the_quit(
         assert_eq!(title, "ngteams (lab a): 3 unread");
         let status: String = property(&host, &name, ITEM_PATH, ITEM, "Status").await;
         assert_eq!(status, "NeedsAttention");
-        let icon: String = property(&host, &name, ITEM_PATH, ITEM, "IconName").await;
-        assert_eq!(icon, "mail-unread");
         let (_, _, tip, _): ToolTip = property(&host, &name, ITEM_PATH, ITEM, "ToolTip").await;
         assert_eq!(tip, "ngteams (lab a): 3 unread");
+        assert_icon(&host, &name, true).await;
+        tray.set_unread(0).await;
+        tokio::time::timeout(WAIT, titled.next()).await.unwrap().unwrap();
+        assert_icon(&host, &name, false).await;
 
         item.call::<_, _, ()>("Activate", &(0_i32, 0_i32)).await.unwrap();
         assert_eq!(asked.recv().await, Some(TrayEvent::Open));
@@ -330,7 +347,7 @@ fn as_the_app(mode: &str) {
             }
             "given" => {
                 let connection = connected.unwrap();
-                let (server, _) = BusNotifications::start(&connection, "child").await.unwrap();
+                let (server, _) = BusNotifications::start(&connection, "child", "child").await.unwrap();
                 server.show(&notice(NoticeKind::Message, "Bee", "hi"), 0).await.unwrap();
                 let (events, _asked) = mpsc::unbounded_channel();
                 let (_tray, _hosted) = BusTray::start(&connection, "child", "child", events).await.unwrap();
