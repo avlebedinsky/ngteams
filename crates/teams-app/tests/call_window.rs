@@ -809,6 +809,7 @@ fn child(alias: Alias) -> SandboxResult {
                 settings,
                 bus: teams_ui::bus::address_from_env(),
                 diagnostics: None,
+                playback: teams_media::player::PlayerSetup::default(),
             },
         );
         match launched {

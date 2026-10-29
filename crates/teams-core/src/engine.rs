@@ -111,7 +111,8 @@ use teams_call::{CallId, Placement, RemoteEnd};
 use teams_fence::Mri;
 use teams_proto::chat::{self, MessageText};
 use teams_proto::{
-    Client, Credentials, EndpointRegistrar, HttpError, HttpTransport, ManualAvailability, RegisteredEndpoint, Transport,
+    Client, Credentials, EndpointRegistrar, FileRange, HttpError, HttpTransport, ManualAvailability,
+    RegisteredEndpoint, Transport,
 };
 use teams_store::{
     Applied, Conversation, Member, Message, MessagePage, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction,
@@ -128,6 +129,7 @@ use crate::calling::{
     Act, CallAction, CallActionError, CallParts, CallStatus, CallView, Calling, CallingTask, IncomingCall,
 };
 use crate::emoticons::{Animations, Strip};
+use crate::file_content::FileContents;
 use crate::outbox::{Command, Outbox, OutboxError, Sent, Transient, TransientSent, create_chat, enqueue};
 use crate::pictures::{Disk, PictureBytes, Pictures};
 use crate::presence::{Availability, PRESENCE_POLL, PRESENCE_POLL_SUBSCRIBED, PresenceDone, Presences};
@@ -441,6 +443,14 @@ pub enum EngineError {
     /// again.
     #[error("the message's picture couldn't be read")]
     PictureUnread,
+    /// A shared file can't be read: its link names no SharePoint file, Graph gave no download link for it, or the
+    /// account can't read it ([`crate::file_content`]).
+    #[error("the shared file can't be read")]
+    FileUnavailable,
+    /// A part of a shared file failed to be read on the way (not an answer that it can't be had): the next ask reads
+    /// it again.
+    #[error("a part of the shared file couldn't be read")]
+    FileUnread,
     /// A call action was refused: nothing was sent.
     #[error(transparent)]
     Call(CallActionError),
@@ -467,6 +477,8 @@ impl EngineError {
             Self::Stopped => "stopped",
             Self::AnimationUnread => "animation unread",
             Self::PictureUnread => "picture unread",
+            Self::FileUnavailable => "file unavailable",
+            Self::FileUnread => "file unread",
             Self::Call(_) => "call",
         }
     }
@@ -551,6 +563,12 @@ enum Request {
     ReactionAnimation(String, Responder<Option<Strip>>),
     MessagePicture(String, Responder<Option<PictureBytes>>),
     FileThumbnail(String, Responder<Option<PictureBytes>>),
+    FileRange {
+        share_url: String,
+        offset: u64,
+        len: u32,
+        reply: Responder<FileRange>,
+    },
     Teams(Responder<Option<Vec<Team>>>),
     ChatListing(Responder<ChatListing>),
     Query(Query),
@@ -829,6 +847,20 @@ impl EngineRequests {
         self.ask(|reply| Request::FileThumbnail(share_url, reply))
     }
 
+    /// `len` bytes (at most [`teams_proto::MAX_RANGE`]) of the file a message carries, from `offset`, by its sharing
+    /// link (`teams_proto::chat::SharedFile::share_url`), as Graph's download link has them
+    /// ([`crate::file_content`]): what a view plays a video by. [`EngineError::FileUnavailable`] when the file can't be
+    /// had, [`EngineError::FileUnread`] when the read failed on the way.
+    pub fn file_range(&self, share_url: impl Into<String>, offset: u64, len: u32) -> Reply<FileRange> {
+        let share_url = share_url.into();
+        self.ask(|reply| Request::FileRange {
+            share_url,
+            offset,
+            len,
+            reply,
+        })
+    }
+
     /// The account's own stored read horizon in a conversation.
     pub fn read_horizon(&self, conversation: impl Into<String>) -> Reply<Option<ReadHorizon>> {
         let conversation = conversation.into();
@@ -1032,6 +1064,7 @@ struct Core<C, T> {
     animations: Animations<C>,
     pictures: Pictures<C>,
     thumbnails: Thumbnails<C>,
+    files: FileContents<C>,
     events: mpsc::UnboundedSender<Event>,
     options: EngineOptions,
     push: Option<Push>,
@@ -1086,6 +1119,7 @@ where
         let disk = Disk::beside(parts.store.path());
         let pictures = Pictures::new(Arc::clone(&parts.client), disk.clone());
         let thumbnails = Thumbnails::new(Arc::clone(&parts.client), disk);
+        let files = FileContents::new(Arc::clone(&parts.client));
         let calling = parts
             .calls
             .map(|calls| Calling::new(calls, Arc::clone(&outbox), Arc::clone(&parts.client), events.clone()));
@@ -1102,6 +1136,7 @@ where
             animations,
             pictures,
             thumbnails,
+            files,
             events,
             options: parts.options,
             push: parts.push,
@@ -1298,6 +1333,12 @@ where
             Request::ReactionAnimation(id, reply) => self.animations.animation(id, reply),
             Request::MessagePicture(src, reply) => self.pictures.picture(&src, reply),
             Request::FileThumbnail(share_url, reply) => self.thumbnails.thumbnail(&share_url, reply),
+            Request::FileRange {
+                share_url,
+                offset,
+                len,
+                reply,
+            } => self.files.range(&share_url, offset, len, reply),
             Request::Person(mri, reply) => {
                 let person = self.profiles.person(&self.store, &mri);
                 let _ = reply.send(person.map_err(EngineError::from));

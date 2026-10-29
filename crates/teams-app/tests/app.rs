@@ -649,6 +649,7 @@ fn several_accounts_run_in_one_window_and_the_quit_shuts_every_engine_down() -> 
                 // no bus: nothing is put on the desktop's
                 bus: Err(BusError::NotGiven),
                 diagnostics: None,
+                playback: teams_media::player::PlayerSetup::default(),
             },
         )
     });

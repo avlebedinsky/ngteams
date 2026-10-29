@@ -6,7 +6,8 @@
 //!   and picture, [`GraphUser`] and [`GraphPicture`], and a shared file's thumbnails, [`FileThumbnails`], CSA's read
 //!   of the account's teams, [`CsaTeams`], and a picture pasted into a message, [`MessagePicture`], from AMS, and a GIF
 //!   a message shows, [`GiphyPicture`], from Giphy's media host with no token; beside them a file thumbnail's picture
-//!   at the link Graph handed out, [`HttpTransport::file_thumbnail`], with no token);
+//!   at the link Graph handed out, [`HttpTransport::file_thumbnail`], with no token, and a shared file's item and its
+//!   bytes, part by part, [`FileDownload`] and [`HttpTransport::file_range`], to play a video inline);
 //! - a plain [`Request`]: any method and body, the trait open to any crate. The transport builds its URL from its
 //!   [`Service`]'s base and asks [`teams_fence::contacting`], the lab rule's one classifier: sent when it reaches nobody
 //!   (the messaging stack's [`EndpointRegistration`], the middle tier's profile lookup [`ShortProfileLookup`], UPS's
@@ -52,6 +53,7 @@ pub mod chat;
 mod client;
 mod emoticon;
 mod endpoint;
+mod file_content;
 mod frame;
 mod giphy;
 mod http;
@@ -67,6 +69,7 @@ pub use ams::{MessagePicture, PastedFormat, PastedPicture};
 pub use client::{Client, PostReadError, Response, Transport, WriteError};
 pub use emoticon::{MAX_ANIMATION, ReactionAnimation};
 pub use endpoint::{Endpoint, Method, Service};
+pub use file_content::{FileContent, FileContentLink, FileDownload, FileRange, MAX_RANGE, is_content_link};
 pub use frame::{
     AcceptanceAcknowledgement, Authenticate, ConnectParams, DeliveryResponse, Disconnect, DroppedIndicator, FrameError,
     FrameSink, FrameText, FrameWriter, InvitationReceipt, MessageLossAck, OwnFrame, PermittedResponse, Ping,

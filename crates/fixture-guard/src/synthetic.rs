@@ -40,6 +40,9 @@ pub const TEST_INPUTS: &[&str] = &[
     "crates/proto-lab/tests/fixtures/pages",
     // the miniature desktop bundle proto-lab's bundle import tests unpack
     "crates/proto-lab/tests/fixtures/mini-bundle",
+    // the made-up MP4 (FFmpeg's test pattern and a tone) the inline video player plays in teams-media's tests and the
+    // UI tour
+    "crates/teams-media/tests/fixtures/media",
 ];
 
 /// Comment openers a text fixture's `_synthetic:` header may follow.

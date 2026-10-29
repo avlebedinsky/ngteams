@@ -39,6 +39,7 @@ use teams_core::{EngineHandle, Event};
 use teams_fence::lab::Alias;
 use teams_log::diagnostics::Source as DiagnosticsSource;
 use teams_media::devices::catalog::DeviceDirectory;
+use teams_media::player::PlayerSetup;
 use teams_ui::LogLevel;
 use teams_ui::bus::BusError;
 use teams_ui::window::{KitRoot, LAB_APP_ID};
@@ -93,6 +94,8 @@ pub struct Launch {
     /// Where "copy diagnostics" reads from: the diagnostic log [`install_log`] opened (or why it couldn't), the
     /// lab's `fence.log`; `None` for an app without them (a test's).
     pub diagnostics: Option<DiagnosticsSource>,
+    /// What a video a message carries is played with (the calls' devices).
+    pub playback: PlayerSetup,
 }
 
 /// Installs the account's diagnostic log in `dir` (the lab's `LabPaths::app_log_dir`) at the settings' `setting`
@@ -317,7 +320,9 @@ pub fn launch(cx: &mut App, launch: Launch) -> Result<Launched, LaunchFailed> {
         settings,
         bus,
         diagnostics,
+        playback,
     } = launch;
+    teams_ui::video_player::set_playback(playback, cx);
     // GPUI would quit on its own as the last window closes (`QuitMode::Default` on Linux), before the engines are shut
     // down, and closing the window keeps the app in the tray: the app quits itself when the desktop asks
     // (`quit_when_asked`), once every engine is shut down

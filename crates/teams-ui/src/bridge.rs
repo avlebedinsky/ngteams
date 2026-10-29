@@ -27,6 +27,7 @@ use teams_core::{
     Action, Availability, CallAction, CallId, ChatListing, EngineHandle, EngineRequests, Event, OwnStatus, Person,
     PictureBytes, Reply, Strip, Transient, TransientSent,
 };
+use teams_proto::FileRange;
 use teams_store::{
     Conversation, Member, Message, MessagePage, OutboxEntry, PageCursor, Reaction, ReadHorizon, SearchHit, Team,
 };
@@ -84,6 +85,9 @@ pub trait Core: Send + Sync + 'static {
     /// The thumbnail of a file a message carries, by its sharing link (`teams_proto::chat::SharedFile::share_url`),
     /// read by the engine once a run; `None` when there is none.
     fn file_thumbnail(&self, share_url: String) -> Reply<Option<PictureBytes>>;
+    /// `len` bytes of a file a message carries from `offset`, by its sharing link, read by the engine at the download
+    /// link Graph handed out: what a video's card plays it by.
+    fn file_range(&self, share_url: String, offset: u64, len: u32) -> Reply<FileRange>;
     /// The account's own read horizon in a conversation.
     fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>>;
     /// Whether the store holds a conversation's whole history; `None` when it was never synced.
@@ -196,6 +200,10 @@ impl Core for EngineRequests {
 
     fn file_thumbnail(&self, share_url: String) -> Reply<Option<PictureBytes>> {
         EngineRequests::file_thumbnail(self, share_url)
+    }
+
+    fn file_range(&self, share_url: String, offset: u64, len: u32) -> Reply<FileRange> {
+        EngineRequests::file_range(self, share_url, offset, len)
     }
 
     fn recent_reactions(&self, limit: usize) -> Reply<Vec<String>> {
@@ -340,6 +348,10 @@ impl Core for StoppedCore {
     }
 
     fn file_thumbnail(&self, _: String) -> Reply<Option<PictureBytes>> {
+        stopped()
+    }
+
+    fn file_range(&self, _: String, _: u64, _: u32) -> Reply<FileRange> {
         stopped()
     }
 

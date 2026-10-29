@@ -2219,3 +2219,70 @@ async fn the_engine_indexes_what_was_stored_before_from_its_start_going_on_where
     );
     b.shutdown();
 }
+
+/// The item reads of the shared file whose sharing token is `token` the mock got.
+async fn item_reads(lab: &Lab, token: &str) -> usize {
+    let path = format!("/v1.0/shares/{token}/driveItem");
+    lab.mock
+        .received_requests()
+        .await
+        .iter()
+        .filter(|request| request.method.as_str() == "GET" && request.url.path() == path)
+        .count()
+}
+
+#[tokio::test]
+async fn a_shared_file_is_read_by_ranges_its_link_read_once_and_again_once_the_host_refuses_it() {
+    let lab = Lab::start().await;
+    let a = native(
+        &lab,
+        LAB_A,
+        How {
+            push: false,
+            ..How::default()
+        },
+    );
+    let share = "https://contoso-my.sharepoint.com/:v:/g/personal/made_up_user_contoso_test/MadeUpShareLinkEngine01";
+    let token = teams_proto::FileDownload::of(share).unwrap().share().to_owned();
+    let bytes: Vec<u8> = (0..=255_u8).cycle().take(5_000).collect();
+    let download = "/personal/made_up_user_contoso_test/_layouts/15/download.aspx";
+    let item = json!({
+        "id": "made-up",
+        "size": bytes.len(),
+        "@microsoft.graph.downloadUrl": format!("https://contoso-my.sharepoint.com{download}?UniqueId=made-up&tempauth=made-up"),
+    });
+    lab.mock
+        .serve_bytes(
+            &format!("/v1.0/shares/{token}/driveItem"),
+            "application/json",
+            item.to_string().into_bytes(),
+        )
+        .await;
+    lab.mock.serve_ranged(download, "video/mp4", bytes.clone()).await;
+
+    // two parts asked at once: one read of the item for both
+    let (first, second) = tokio::join!(a.handle.file_range(share, 0, 100), a.handle.file_range(share, 100, 100));
+    let (first, second) = (first.unwrap(), second.unwrap());
+    assert_eq!((first.bytes.as_slice(), first.total), (&bytes[..100], 5_000));
+    assert_eq!(second.bytes, bytes[100..200]);
+    assert_eq!(item_reads(&lab, &token).await, 1);
+
+    // the host refuses the link (it expired): the item is read again once, and the part comes
+    lab.mock.answer_next("GET", "download.aspx", 403, &json!({})).await;
+    let last = a.handle.file_range(share, 4_900, 200).await.unwrap();
+    assert_eq!(last.bytes, bytes[4_900..]);
+    assert_eq!(item_reads(&lab, &token).await, 2);
+
+    // a server error fails only that read; a link that names no SharePoint file can't be had
+    lab.mock.answer_next("GET", "download.aspx", 502, &json!({})).await;
+    assert!(matches!(
+        a.handle.file_range(share, 0, 10).await,
+        Err(EngineError::FileUnread)
+    ));
+    assert_eq!(a.handle.file_range(share, 0, 10).await.unwrap().bytes, bytes[..10]);
+    assert!(matches!(
+        a.handle.file_range("https://example.com/not-a-share", 0, 10).await,
+        Err(EngineError::FileUnavailable)
+    ));
+    a.shutdown();
+}

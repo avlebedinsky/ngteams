@@ -89,6 +89,7 @@ pub struct Response {
     location: Option<String>,
     retry_after: Option<Duration>,
     content_type: Option<String>,
+    content_range: Option<String>,
     body: Vec<u8>,
 }
 
@@ -99,6 +100,7 @@ impl fmt::Debug for Response {
             .field("location", &self.location)
             .field("retry_after", &self.retry_after)
             .field("content_type", &self.content_type)
+            .field("content_range", &self.content_range)
             .field("body_len", &self.body.len())
             .finish()
     }
@@ -113,6 +115,7 @@ impl Response {
             location: None,
             retry_after: None,
             content_type: None,
+            content_range: None,
             body: body.into(),
         }
     }
@@ -132,6 +135,12 @@ impl Response {
     #[must_use]
     pub fn with_content_type(mut self, content_type: impl Into<String>) -> Self {
         self.content_type = Some(content_type.into());
+        self
+    }
+
+    #[must_use]
+    pub fn with_content_range(mut self, content_range: impl Into<String>) -> Self {
+        self.content_range = Some(content_range.into());
         self
     }
 
@@ -163,9 +172,21 @@ impl Response {
         self.content_type.as_deref()
     }
 
+    /// `Content-Range`: which part of a file a ranged read's answer holds.
+    #[must_use]
+    pub fn content_range(&self) -> Option<&str> {
+        self.content_range.as_deref()
+    }
+
     #[must_use]
     pub fn body(&self) -> &[u8] {
         &self.body
+    }
+
+    /// The body, taken.
+    #[must_use]
+    pub fn into_body(self) -> Vec<u8> {
+        self.body
     }
 }
 

@@ -38,6 +38,7 @@ pub mod account;
 pub mod calling;
 pub mod emoticons;
 pub mod engine;
+pub mod file_content;
 pub mod lab;
 pub mod outbox;
 pub mod own_presence;

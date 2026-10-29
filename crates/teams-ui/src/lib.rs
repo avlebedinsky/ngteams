@@ -102,6 +102,7 @@ pub mod theme;
 pub mod trace;
 pub mod tray;
 pub mod video;
+pub mod video_player;
 pub mod view;
 pub mod window;
 

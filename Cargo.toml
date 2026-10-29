@@ -107,6 +107,11 @@ ego-tree = "0.11.0"
 # Cisco's patent arrangement covers; the bundled source is compiled only for `teams-media`'s `test-support`
 # (`docs/protocol/calling.md`, "The H.264 codec")
 openh264 = { version = "0.9.9", default-features = false, features = ["libloading"] }
+# a shared video file played in its card (teams-media's player): GStreamer's playbin (demultiplexing, decoding with the
+# system's plugins, A/V sync, seeking, volume) through its Rust bindings (MIT/Apache-2.0; GStreamer itself, LGPL, is
+# the system's, linked dynamically); its bytes from an appsrc the engine feeds, its frames and sound to appsinks
+gstreamer = "0.25.2"
+gstreamer-app = "0.25.2"
 # its raw binding, for the one encoder option the safe API lacks (a running encoder's target bitrate)
 openh264-sys2 = { version = "0.9.9", default-features = false }
 # the system random source: PKCE verifiers and OAuth state

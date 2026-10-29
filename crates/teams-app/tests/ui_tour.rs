@@ -6,9 +6,10 @@
 //! the `test-support` mock origins, a test roster and log). Once the window is drawn and the chats are listed, the
 //! child walks the views one step at a time (no chat open; the a–b chat with a message selected and its actions
 //! shown; a reply begun; the account menu; every page of the settings, Calls with made-up devices; the appearance
-//! and the chat again in Teams Dark; a message with files, its cards and their thumbnails, in Teams Dark and Light; a
-//! message of lines, small pictures and a block of code, in Teams Dark and Light; the 12-hour time format and a chat's
-//! times on it; a group chat's presence; a favourite channel opened from "Favorites"; forwarded messages) and says
+//! and the chat again in Teams Dark; a message with files, its cards and their thumbnails, in Teams Dark and Light,
+//! its first video played in its card and paused; a message of lines, small pictures and a block of code, in Teams
+//! Dark and Light; the 12-hour time format and a chat's times on it; a group chat's presence; a favourite channel
+//! opened from "Favorites"; forwarded messages) and says
 //! `shot <name>` after each; the parent screenshots the window and lets it go on. The views are driven from inside
 //! the app, never by screen coordinates.
 //!
@@ -69,7 +70,7 @@ const SETTLE: Duration = Duration::from_millis(1500);
 type Step = (&'static str, fn(&Entity<Shell>, &mut Window, &mut App));
 
 /// The tour.
-const STEPS: [Step; 33] = [
+const STEPS: [Step; 36] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -163,6 +164,12 @@ const STEPS: [Step; 33] = [
     ("chat-files-dark", |shell, window, cx| {
         shell.update(cx, |shell, cx| shell.open_chat(AC_CHAT.to_owned(), window, cx));
     }),
+    // the first video played in its card, its bytes from the mock's download link (`seed_files`): loading, then
+    // playing (its controls hidden while the pointer is elsewhere), then paused (or played to its end), its frame and
+    // its controls with the seek bar part way
+    ("chat-video-loading-dark", |_, _, cx| toggle_first_video(cx)),
+    ("chat-video-playing-dark", |_, _, _| {}),
+    ("chat-video-paused-dark", |_, _, cx| toggle_first_video(cx)),
     // x's message of text, two small pictures and a block of code (`seed_mixed`), in Teams Dark: the a–x chat opened
     // (at its newest, the forwards), then scrolled to its first message, each picture at its own size in the flow and
     // the code in Teams' code card
@@ -332,6 +339,13 @@ fn last_message(shell: &Entity<Shell>, cx: &App) -> Option<(Entity<teams_ui::cha
         _ => None,
     })?;
     Some((chat, message))
+}
+
+/// Plays the first video card drawn, or pauses it while it plays.
+fn toggle_first_video(cx: &mut App) {
+    if let Some(player) = teams_ui::video_player::players(cx).first() {
+        player.update(cx, teams_ui::video_player::VideoPlayer::toggle);
+    }
 }
 
 /// Shows the hover bar of the last message of b's (`own` false) or a's that offers actions, as the pointer over it
@@ -854,9 +868,28 @@ fn seed_files(mock: &ChatServiceMock, runtime: &tokio::runtime::Runtime) -> Sand
         let mut png = Vec::new();
         made_up_frame(dark, light).write_to(&mut io::Cursor::new(&mut png), image::ImageFormat::Png)?;
         runtime.block_on(mock.serve_bytes(&picture, "image/png", png));
+        // the file's item with its download link on the sharer's site, and the file there, read by ranges
+        let download = "/personal/made_up_user_contoso_test/_layouts/15/download.aspx";
+        let item = serde_json::json!({
+            "id": format!("made-up-item-{at}"),
+            "name": file.name,
+            "size": MADE_UP_VIDEO.len(),
+            "@microsoft.graph.downloadUrl": format!(
+                "https://contoso-my.sharepoint.com{download}?UniqueId=made-up-{at}&tempauth=made-up"
+            ),
+        });
+        runtime.block_on(mock.serve_bytes(
+            &format!("/v1.0/shares/{token}/driveItem"),
+            "application/json",
+            item.to_string().into_bytes(),
+        ));
+        runtime.block_on(mock.serve_ranged(&download, "video/mp4", MADE_UP_VIDEO.to_vec()));
     }
     Ok(())
 }
+
+/// The made-up video every video card plays: 2 s of FFmpeg's test pattern and a tone (teams-media's test input).
+const MADE_UP_VIDEO: &[u8] = include_bytes!("../../teams-media/tests/fixtures/media/made-up-test-pattern.mp4");
 
 /// A made-up video frame, 800 by 450: a gradient from `dark` to `light` with a few bars, a figure and a caption strip.
 fn made_up_frame(dark: [u8; 3], light: [u8; 3]) -> image::RgbaImage {
@@ -1029,6 +1062,8 @@ fn child_window() -> SandboxResult {
                 // the sandbox's private bus, with its fake notification server and tray watcher
                 bus: teams_ui::bus::address_from_env(),
                 diagnostics: None,
+                // the made-up video plays silently
+                playback: teams_media::player::PlayerSetup::default(),
             },
         );
         match launched {

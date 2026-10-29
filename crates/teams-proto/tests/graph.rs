@@ -21,9 +21,9 @@ use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_fence::{Fence, FenceLog, Mri, Roster};
 use teams_proto::{
-    Client, Credentials, Endpoint, FileThumbnails, GRAPH_AUDIENCE, GraphAnswerError, GraphPicture, GraphUser,
-    HttpError, HttpTransport, MAX_PICTURE, Method, PictureFormat, Read, Refusal, Request, Response, Service,
-    is_thumbnail_link, object_id,
+    Client, Credentials, Endpoint, FileDownload, FileRange, FileThumbnails, GRAPH_AUDIENCE, GraphAnswerError,
+    GraphPicture, GraphUser, HttpError, HttpTransport, MAX_PICTURE, Method, PictureFormat, Read, Refusal, Request,
+    Response, Service, is_thumbnail_link, object_id,
 };
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -512,6 +512,76 @@ async fn nothing_names_the_thumbnail_service_but_a_link_graph_handed_out() {
     let (server, tokens, client) = setup().await;
     match client.read(&OnThumbnails).await {
         Err(HttpError::Refused(Refusal::FileThumbnail)) => {}
+        other => panic!("{other:?}"),
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
+    assert!(tokens.audiences().is_empty());
+}
+
+#[tokio::test]
+async fn a_shared_files_bytes_are_read_by_ranges_at_the_link_graph_handed_out_with_no_token() {
+    let (server, tokens, client) = setup().await;
+    let read = FileDownload::of(SHARE).unwrap();
+    let link = "https://contoso-my.sharepoint.com/personal/made_up_user_contoso_test/_layouts/15/download.aspx\
+                ?UniqueId=made-up&tempauth=made-up";
+    let item = serde_json::json!({"id": "made-up", "size": 10, "@microsoft.graph.downloadUrl": link});
+    Mock::given(method("GET"))
+        .and(path(format!("/v1.0/shares/{}/driveItem", read.share())))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(item.to_string(), "application/json"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/personal/made_up_user_contoso_test/_layouts/15/download.aspx"))
+        .and(query_param("tempauth", "made-up"))
+        .respond_with(
+            ResponseTemplate::new(206)
+                .insert_header("content-range", "bytes 4-7/10")
+                .set_body_raw(b"4567".to_vec(), "video/mp4"),
+        )
+        .mount(&server)
+        .await;
+    let content = read.read_answer(&client.read(&read).await.unwrap()).unwrap();
+    assert_eq!(content.size, 10);
+    assert!(
+        !format!("{content:?}").contains("tempauth"),
+        "Debug shows nothing of the link"
+    );
+    let answer = client.transport().file_range(&content.link, 4, 4).await.unwrap();
+    let part = FileRange::read(answer, 4, 4).unwrap();
+    assert_eq!((part.bytes.as_slice(), part.total), (&b"4567"[..], 10));
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    assert_eq!(
+        requests[0].headers.get("authorization").unwrap().to_str().unwrap(),
+        "Bearer placeholder-graph-token-0"
+    );
+    assert_eq!(requests[1].headers.get("range").unwrap().to_str().unwrap(), "bytes=4-7");
+    assert!(requests[1].headers.get("authorization").is_none());
+    assert_eq!(tokens.audiences(), vec![GRAPH_AUDIENCE.to_owned()]);
+    // nothing past a ranged read's limit, and nothing empty
+    for len in [0, teams_proto::MAX_RANGE + 1] {
+        match client.transport().file_range(&content.link, 0, len).await {
+            Err(HttpError::Refused(Refusal::FileContent)) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn nothing_names_the_file_content_service_but_a_link_graph_handed_out() {
+    struct OnContent;
+    impl Read for OnContent {
+        fn service(&self) -> Service {
+            Service::FileContent
+        }
+        fn endpoint(&self) -> Endpoint {
+            Endpoint::new(["download.aspx"])
+        }
+    }
+    let (server, tokens, client) = setup().await;
+    match client.read(&OnContent).await {
+        Err(HttpError::Refused(Refusal::FileContent)) => {}
         other => panic!("{other:?}"),
     }
     assert!(server.received_requests().await.unwrap().is_empty());

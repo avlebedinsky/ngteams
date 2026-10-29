@@ -25,6 +25,7 @@ impl Glyph {
     pub const DOWNLOAD: Self = Self(include_bytes!("../assets/icons/download.svg"));
     pub const EMOJI: Self = Self(include_bytes!("../assets/icons/face-slightly-smiling.svg"));
     pub const EXTERNAL_LINK: Self = Self(include_bytes!("../assets/icons/external-link.svg"));
+    pub const FULLSCREEN: Self = Self(include_bytes!("../assets/icons/scan.svg"));
     pub const FILE: Self = Self(include_bytes!("../assets/icons/file.svg"));
     pub const FILE_ARCHIVE: Self = Self(include_bytes!("../assets/icons/file-archive.svg"));
     pub const FILE_AUDIO: Self = Self(include_bytes!("../assets/icons/file-headphone.svg"));
@@ -36,6 +37,7 @@ impl Glyph {
     pub const HEADPHONES: Self = Self(include_bytes!("../assets/icons/headphones.svg"));
     pub const INFO: Self = Self(include_bytes!("../assets/icons/info.svg"));
     pub const LINK: Self = Self(include_bytes!("../assets/icons/link.svg"));
+    pub const LOADING: Self = Self(include_bytes!("../assets/icons/loader-circle.svg"));
     pub const LOG_OUT: Self = Self(include_bytes!("../assets/icons/log-out.svg"));
     pub const MESSAGE: Self = Self(include_bytes!("../assets/icons/message-square-text.svg"));
     pub const MIC: Self = Self(include_bytes!("../assets/icons/mic.svg"));
@@ -43,18 +45,25 @@ impl Glyph {
     pub const MINUS: Self = Self(include_bytes!("../assets/icons/minus.svg"));
     pub const MORE: Self = Self(include_bytes!("../assets/icons/ellipsis.svg"));
     pub const PALETTE: Self = Self(include_bytes!("../assets/icons/palette.svg"));
+    pub const PAUSE: Self = Self(include_bytes!("../assets/icons/pause.svg"));
     pub const PENCIL: Self = Self(include_bytes!("../assets/icons/pencil.svg"));
     pub const PHONE: Self = Self(include_bytes!("../assets/icons/phone.svg"));
     pub const PHONE_OFF: Self = Self(include_bytes!("../assets/icons/phone-off.svg"));
     pub const PLAY: Self = Self(include_bytes!("../assets/icons/circle-play.svg"));
+    pub const PLAY_MEDIA: Self = Self(include_bytes!("../assets/icons/play.svg"));
     pub const PLUS: Self = Self(include_bytes!("../assets/icons/plus.svg"));
+    pub const POP_OUT: Self = Self(include_bytes!("../assets/icons/square-arrow-out-up-right.svg"));
     pub const QUOTE: Self = Self(include_bytes!("../assets/icons/quote.svg"));
     pub const REACT: Self = Self(include_bytes!("../assets/icons/smile-plus.svg"));
     pub const REFRESH: Self = Self(include_bytes!("../assets/icons/refresh-cw.svg"));
     pub const REPLY: Self = Self(include_bytes!("../assets/icons/reply.svg"));
     pub const RESET: Self = Self(include_bytes!("../assets/icons/rotate-ccw.svg"));
     pub const SEND: Self = Self(include_bytes!("../assets/icons/send-horizontal.svg"));
+    pub const SHARE: Self = Self(include_bytes!("../assets/icons/share.svg"));
     pub const SHIELD: Self = Self(include_bytes!("../assets/icons/shield.svg"));
+    pub const SHRINK: Self = Self(include_bytes!("../assets/icons/shrink.svg"));
+    pub const SKIP_BACK: Self = Self(include_bytes!("../assets/icons/rotate-ccw.svg"));
+    pub const SKIP_FORWARD: Self = Self(include_bytes!("../assets/icons/rotate-cw.svg"));
     pub const TRANSCRIPT: Self = Self(include_bytes!("../assets/icons/file-text.svg"));
     pub const TRASH: Self = Self(include_bytes!("../assets/icons/trash.svg"));
     pub const USER: Self = Self(include_bytes!("../assets/icons/user-round.svg"));
@@ -62,6 +71,8 @@ impl Glyph {
     pub const USERS: Self = Self(include_bytes!("../assets/icons/users-round.svg"));
     pub const VIDEO: Self = Self(include_bytes!("../assets/icons/video.svg"));
     pub const VIDEO_OFF: Self = Self(include_bytes!("../assets/icons/video-off.svg"));
+    pub const VOLUME: Self = Self(include_bytes!("../assets/icons/volume-2.svg"));
+    pub const VOLUME_OFF: Self = Self(include_bytes!("../assets/icons/volume-x.svg"));
     pub const X: Self = Self(include_bytes!("../assets/icons/x.svg"));
 
     /// The icon, in the text colour around it.

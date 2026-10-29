@@ -367,6 +367,39 @@ impl ChatServiceMock {
             .await;
     }
 
+    /// Answers every `GET` of exactly `path` with the part of `body` its `Range: bytes=<first>-<last>` asks for, as a
+    /// `206` with its `Content-Range` (the whole of it as a `200` without one), before the world sees it: a test's
+    /// stand-in for a shared file at the download link Graph hands out, which the world has none of. Below the answers
+    /// [`Self::answer_next`] mounts, so a test can have the host refuse the next read.
+    pub async fn serve_ranged(&self, path: &str, content_type: &str, body: Vec<u8>) {
+        let content_type = content_type.to_owned();
+        Mock::given(method("GET"))
+            .and(wiremock::matchers::path(path))
+            .respond_with(move |request: &Request| {
+                let total = body.len();
+                let asked = request
+                    .headers
+                    .get("range")
+                    .and_then(|value| value.to_str().ok())
+                    .and_then(|value| value.strip_prefix("bytes="))
+                    .and_then(|value| value.split_once('-'))
+                    .and_then(|(first, last)| Some((first.parse::<usize>().ok()?, last.parse::<usize>().ok()?)));
+                match asked {
+                    None => ResponseTemplate::new(200).set_body_raw(body.clone(), &content_type),
+                    Some((first, _)) if first >= total => ResponseTemplate::new(416),
+                    Some((first, last)) => {
+                        let last = last.min(total - 1);
+                        ResponseTemplate::new(206)
+                            .insert_header("content-range", format!("bytes {first}-{last}/{total}"))
+                            .set_body_raw(body[first..=last].to_vec(), &content_type)
+                    }
+                }
+            })
+            .with_priority(2)
+            .mount(&self.server)
+            .await;
+    }
+
     /// Answers every presence read (`POST` of UPS's `v1/presence/getpresence/` under [`PRESENCE_BASE`]) before the
     /// world sees it, in the shape of `tests/fixtures/ups/getpresence-answer.json`: one item per MRI asked, with the
     /// availability `presences` gives it, `Offline` for anyone else. A test's stand-in: the world keeps no one's

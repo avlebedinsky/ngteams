@@ -162,6 +162,13 @@ pub fn launch<S: SecretStore + 'static>(cx: &mut App, launch: Launch<S>) -> Resu
         trace,
     } = launch;
     let (hint, sign_in_again) = signing_out(read_only, sign_in_again);
+    // a video a message carries plays its sound on the calls' devices (silently without them)
+    let playback = runner
+        .devices
+        .as_ref()
+        .map(crate::calling::CallDevices::playback)
+        .unwrap_or_default();
+    teams_ui::video_player::set_playback(playback, cx);
     // closing the window keeps the app in the tray: it quits itself once the engines are shut down
     cx.set_quit_mode(QuitMode::Explicit);
     let settings = shared_settings(settings, first.calls.as_ref(), cx);

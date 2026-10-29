@@ -2,10 +2,11 @@
 //! wrapping onto the next row when the bubble is narrow.
 //!
 //! - **A card** ([`FileCard`]): a header with the file type's icon (in the colour Teams gives that type), the file's
-//!   name on one line, cut with an ellipsis, and "More options" (…); under it, for a video or an image, a picture of the
-//!   file filling the card: its thumbnail, asked of the engine by the file's sharing link (`crate::inline::thumbnail`,
-//!   never a request of the view's own), a tinted box while it is read, and a placeholder with the type's icon when
-//!   there is none. Another kind of file is its header alone.
+//!   name on one line, cut with an ellipsis, Share and "More options" (…); under it, for a video the player
+//!   that plays it in the card (`crate::video_player`, its thumbnail standing in until it plays), for another video or
+//!   an image a picture of the file filling the card: its thumbnail, asked of the engine by the file's sharing link
+//!   (`crate::inline::thumbnail`, never a request of the view's own), a tinted box while it is read, and a placeholder
+//!   with the type's icon when there is none. Another kind of file is its header alone.
 //! - **An image with a preview** (its entry's `filePreview`, a picture of it on AMS) is drawn as Teams draws it: the
 //!   picture alone, no header, at the preview's size scaled down into [`PREVIEW_MAX`] (its aspect ratio kept), with
 //!   rounded corners; "More options" over its corner while the pointer is on it. The picture is asked of the engine as
@@ -13,8 +14,8 @@
 //!   card is drawn when there is none.
 //! - **A click** on the name or the picture opens the file the way the web client does, at its sharing link in the
 //!   browser (GPUI's `open_url`); "More options" offers "Open in browser", "Download" (the sharing link with
-//!   `download=1`: the browser downloads it) and "Copy link". Nothing here reaches anyone: Teams' "Share" is left out
-//!   (sharing a file is a contacting write the app doesn't make).
+//!   `download=1`: the browser downloads it) and "Copy link". Share offers the file's link to copy, the way to share it
+//!   that reaches nobody by itself (sharing it with people from the app would be a contacting write it doesn't make).
 //! - Colours come from the palette but for the file types' own, fixed in every theme as Teams' file icons are.
 
 use gpui::{
@@ -30,6 +31,7 @@ use crate::icons::{Glyph, icon_button, selected_by};
 use crate::inline::{PictureSource, PictureState, picture, thumbnail};
 use crate::rich_text::tint;
 use crate::theme::Palette;
+use crate::video_player::{player_of, plays_inline};
 
 /// A card's width, as Teams draws one.
 pub const CARD_WIDTH: f32 = 316.0;
@@ -122,12 +124,17 @@ pub struct FileCard {
 }
 
 impl RenderOnce for FileCard {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let kind = self.file.kind();
         if let Some(preview) = self.preview(kind, cx) {
             return preview;
         }
-        let picture = kind.has_thumbnail().then(|| self.picture(kind, cx));
+        let picture = match &self.source {
+            Some(source) if plays_inline(&self.file) => {
+                Some(player_of(&self.id, &self.file, source, window, cx).into_any_element())
+            }
+            _ => kind.has_thumbnail().then(|| self.picture(kind, cx)),
+        };
         let id = self.id.clone();
         div()
             .debug_selector(move || format!("file-card-{id}"))
@@ -265,8 +272,25 @@ impl FileCard {
             .items_center()
             .gap_2()
             .child(opens)
+            .children(self.share())
             .children(self.more())
             .into_any_element()
+    }
+
+    /// Share: the file's link to copy, as Teams' Share offers it first.
+    fn share(&self) -> Option<AnyElement> {
+        let link = self.file.open_link()?.to_owned();
+        let id = self.id.clone();
+        let button = icon_button(SharedString::from(format!("file-share-{id}")), Glyph::SHARE, "Share")
+            .small()
+            .dropdown_menu(move |menu, _, _| {
+                let link = link.clone();
+                menu.item(
+                    menu_item(&id, "share-copy", Glyph::LINK, COPY_LINK)
+                        .on_click(move |_, _, cx| cx.write_to_clipboard(ClipboardItem::new_string(link.clone()))),
+                )
+            });
+        Some(selected_by(format!("file-share-{}", self.id), button).into_any_element())
     }
 
     /// "More options": the file's local actions, when it has a link to act on.

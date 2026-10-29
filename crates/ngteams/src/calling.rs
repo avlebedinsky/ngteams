@@ -25,6 +25,7 @@ use teams_fence::personal::PersonalPaths;
 use teams_media::devices::catalog::DeviceDirectory;
 use teams_media::devices::pipewire::PipeWireDevices;
 use teams_media::devices::{DeviceError, Devices};
+use teams_media::player::PlayerSetup;
 use teams_media::video::codec::H264Library;
 use teams_ui::{DeviceRinger, Ringer, VideoFeed};
 
@@ -118,6 +119,14 @@ impl CallDevices {
             }
         };
         Ok(Self { devices, video })
+    }
+
+    /// What a video a message carries is played with: its sound on these devices.
+    #[must_use]
+    pub fn playback(&self) -> PlayerSetup {
+        PlayerSetup {
+            speaker: Some(self.devices.clone()),
+        }
     }
 
     /// One account's engine calling and window calls on these devices (its own video feed).

@@ -1,6 +1,6 @@
 [package]
 name = "teams-media"
-description = "A call's media: the TURN client (RFC 8656) and its relay link, Teams' SDP dialect (sdp-ngc-1.0) to and from str0m's SDP, the relayed str0m peer, echo cancellation, noise suppression and gain control, Opus with a jitter buffer, the audio session on threads of its own, and the device seam (file and PipeWire backends)"
+description = "A call's media: the TURN client (RFC 8656) and its relay link, Teams' SDP dialect (sdp-ngc-1.0) to and from str0m's SDP, the relayed str0m peer, echo cancellation, noise suppression and gain control, Opus with a jitter buffer, the audio session on threads of its own, the device seam (file and PipeWire backends), and the player of a video a message carries (GStreamer's playbin fed by the engine)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -24,6 +24,9 @@ hmac.workspace = true
 # the PipeWire backend checks its socket belongs to this user (`getuid`)
 libc.workspace = true
 md-5.workspace = true
+# a shared video file played in its card: GStreamer's playbin, fed by an appsrc, its frames and sound to appsinks
+gstreamer.workspace = true
+gstreamer-app.workspace = true
 # the calls' video codec: H.264 through OpenH264, Cisco's prebuilt library loaded at run time (its bundled source
 # only under `test-support`, above)
 openh264.workspace = true

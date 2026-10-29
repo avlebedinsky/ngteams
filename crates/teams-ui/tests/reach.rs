@@ -309,6 +309,18 @@ const AUDIO_PROCESSING_BINDING: [&str; 3] = [
     "webrtc-audio-processing-sys",
 ];
 
+/// The GStreamer bindings the inline video player takes (`teams-media`'s `player`): the core binding and the GLib it
+/// binds through.
+const GSTREAMER_BINDING: [&str; 5] = ["gstreamer", "gstreamer-sys", "glib", "glib-sys", "gobject-sys"];
+
+/// The GStreamer app elements' binding the player's `appsrc` and appsinks take, and the base classes it binds through.
+const GSTREAMER_APP_BINDING: [&str; 4] = [
+    "gstreamer-app",
+    "gstreamer-app-sys",
+    "gstreamer-base",
+    "gstreamer-base-sys",
+];
+
 /// A native binding `teams-media` takes (its first crate the direct dependency), held to the kit's audit before it
 /// reaches the app: no HTTP or WebSocket client in its tree, only licences we can take, and no logger in the binding
 /// itself, so nothing of it can bypass `teams-log` or the compile-time cap.
@@ -375,6 +387,15 @@ fn the_media_s_audio_processing_binding_brings_no_network_client_no_logger_and_o
 #[test]
 fn the_media_s_openh264_binding_brings_no_network_client_no_logger_and_only_licences_we_can_take() {
     audit_media_binding(&OPENH264_BINDING);
+}
+
+/// GStreamer itself (LGPL, the system's, linked dynamically) is no crate of the tree; its bindings are MIT or
+/// Apache-2.0, take `log` only behind a feature left off, and bring no network client: the player feeds `playbin` from
+/// an `appsrc`, so GStreamer reads nothing from the network.
+#[test]
+fn the_media_s_gstreamer_bindings_bring_no_network_client_no_logger_and_only_licences_we_can_take() {
+    audit_media_binding(&GSTREAMER_BINDING);
+    audit_media_binding(&GSTREAMER_APP_BINDING);
 }
 
 #[test]

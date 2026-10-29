@@ -78,6 +78,32 @@ reads, and a file the account can't read is just a card without its picture.
   SHA-256 of the file's sharing token, never the link Graph handed out): a picture read is shown by a later run
   without either read for a week, then read again (the file may have changed); no picture is never cached.
 
+## A shared file's content
+
+A video a message carries is played in its card, as Teams plays it. The web client plays it through SharePoint's own
+media API (Stream's player, a SharePoint token); the native client asks for no SharePoint token and reads the file's
+bytes through Graph's documented download link instead. No capture or probe shows these reads either: they are our own
+reach, and a file the account can't read says so in its card and offers the browser.
+
+- **The item**: `GET https://graph.microsoft.com/v1.0/shares/u!<sharing link>/driveItem` with the account's Graph
+  token, the sharing token as the thumbnails' (`teams_proto::FileDownload`). The answer is documented as the file's
+  `driveItem`; the native client reads its `size` and its `@microsoft.graph.downloadUrl`, "a URL that can be used to
+  download this file's content", pre-authenticated (a `tempauth` in its query) and short-lived (about an hour). The
+  link is taken only on a SharePoint host (`teams_proto::FileContentLink`).
+- **The bytes**: `GET <download link>` with `Range: bytes=<first>-<last>` and no token of the account's
+  (`Service::FileContent`), up to 2 MiB a read, answered `206` with `Content-Range: bytes <first>-<last>/<size>`, the
+  part exactly as asked or shorter only at the file's end (a `200` with the whole file is cut to what was asked, but
+  only up to the transport's 4 MiB body: a host that ignores `Range` on a larger file can't be played). The log writes it at `info` by host and path alone, and at
+  `debug` with its `tempauth` redacted and its body by size only.
+- **Kept for the run** (`teams-core`'s `file_content.rs`): the link per file for up to 40 minutes; a 401 or 403 from the
+  file's host (an expired link) asks Graph for a new one, once per read. Any other 4xx (but a throttle) from Graph or
+  the file's host, an item without a link, or a part that isn't the one asked for means the file can't be had; a 5xx
+  or a throttle still there after the transport's one retry, or a network failure, fails that read only, and the
+  player tries the part again. The parts aren't kept by the engine: the player keeps the last 48 MiB it read
+  (`teams-media`'s `player::source`), reading 8 MiB ahead of what it plays. The bytes reach the player only from the
+  engine, and the player hands them to GStreamer's `playbin` through an `appsrc`: GStreamer reads nothing from the
+  network itself.
+
 ## Where a name comes from
 
 `teams-core`'s engine (`profiles.rs`) asks, first that answers: Graph's name; the middle tier's profile lookup

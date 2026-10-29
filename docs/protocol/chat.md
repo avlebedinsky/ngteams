@@ -534,7 +534,9 @@ its shape (two files, made-up names and links). No lab capture holds a received 
   came and the message says it has content it can't show. It draws the card from the name, the extension and the
   links, opens the sharing link in the browser on a click, offers "Open in browser", "Download" (the sharing link with
   `download=1`) and "Copy link", and reads a video's or an image's picture from Graph by the sharing link
-  ([graph.md](graph.md#a-shared-files-thumbnail)). It shares nothing: Share is a contacting write.
+  ([graph.md](graph.md#a-shared-files-thumbnail)). A video is played in its card (by GStreamer),
+  its bytes read by ranges at the download link Graph hands out ([graph.md](graph.md#a-shared-files-content)). Share
+  offers only "Copy link": sharing with people from the app would be a contacting write.
 - **An image file** (seen in a received message, an image shared alone with no caption: the message's content empty)
   carries the same entry with `fileType` `jpg` and a `filePreview` naming a picture of it on AMS: `previewUrl`
   `https://<region>-api.asm.skype.com/v1/objects/<id>/views/imgo`, `previewWidth` and `previewHeight` (501 by 500

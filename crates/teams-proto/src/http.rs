@@ -33,7 +33,9 @@
 //!   once the transport was given its base, AMS's async gateway ([`HttpTransport::with_ams`], the GTM `amsV2`:
 //!   `https://<name>.asyncgw.teams.microsoft.com`, reads of a pasted picture's view only); and a file thumbnail's
 //!   picture ([`Service::FileThumbnail`], no base of its own: only [`HttpTransport::file_thumbnail`] reads there, a
-//!   link Graph handed out on SharePoint's media host or a SharePoint host, checked again, with no token); and Giphy's
+//!   link Graph handed out on SharePoint's media host or a SharePoint host, checked again, with no token); and a shared
+//!   file's bytes ([`Service::FileContent`], no base of its own either: only [`HttpTransport::file_range`] reads there,
+//!   the download link Graph handed out on a SharePoint host, checked again, with `Range` and no token); and Giphy's
 //!   media CDN ([`Service::Giphy`]: `https://media.giphy.com/`, a GIF a message shows, no token). An endpoint with an
 //!   empty,
 //!   `.` or `..` segment is refused. Entra and authz aren't a service here (they stay in `teams-auth`'s own clients). A
@@ -88,7 +90,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use percent_encoding::percent_decode_str;
-use reqwest::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, LOCATION};
+use reqwest::header::{
+    ACCEPT, AUTHORIZATION, CONTENT_RANGE, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, LOCATION, RANGE,
+};
 use serde_json::Value;
 use teams_auth::claims::TokenSummary;
 use teams_auth::secrets::{Secret, SecretStore};
@@ -103,6 +107,7 @@ use url::Url;
 
 use crate::client::{Response, Transport};
 use crate::endpoint::{Endpoint, Service};
+use crate::file_content::{FileContentLink, MAX_RANGE, is_content_link};
 use crate::own::OwnState;
 use crate::post_read::{AuthorizedPostRead, PostRead};
 use crate::read::Read;
@@ -278,6 +283,10 @@ pub enum Refusal {
     /// ([`HttpTransport::file_thumbnail`]).
     #[error("only a thumbnail link Graph handed out is read from a thumbnail's host")]
     FileThumbnail,
+    /// A read or a plain request to a file's download host, or a ranged read of nothing or of more than
+    /// [`MAX_RANGE`]: only a download link Graph handed out is read there ([`HttpTransport::file_range`]).
+    #[error("only a download link Graph handed out is read from a file's host, a part at a time")]
+    FileContent,
     /// A call write while the credentials give no skypetoken.
     #[error("no skypetoken for the calling service")]
     NoSkypetoken,
@@ -377,6 +386,8 @@ struct Outgoing<'a> {
     url: &'a Url,
     service: Service,
     body: Option<&'a [u8]>,
+    /// A ranged read's first and last byte (`Range: bytes=<first>-<last>`).
+    range: Option<(u64, u64)>,
 }
 
 /// What goes to `fence.log` before each send of a request.
@@ -673,6 +684,7 @@ impl<C: Credentials> HttpTransport<C> {
             Service::Presence => self.presence.clone().ok_or(refused(Refusal::NoPresence)),
             Service::Calling => Err(refused(Refusal::Calling)),
             Service::FileThumbnail => Err(refused(Refusal::FileThumbnail)),
+            Service::FileContent => Err(refused(Refusal::FileContent)),
             Service::Relay => fixed(format!("https://{RELAY_HOST}/{RELAY_PATH}")),
             Service::Emoticons => fixed(format!("https://{EMOTICONS_HOST}/{EMOTICONS_PATH}")),
             Service::Giphy => fixed(format!("https://{GIPHY_HOST}/")),
@@ -732,6 +744,7 @@ impl<C: Credentials> HttpTransport<C> {
             url: &url,
             service,
             body: body.as_deref(),
+            range: None,
         };
         self.exchange(outgoing, record).await
     }
@@ -823,7 +836,10 @@ impl<C: Credentials> HttpTransport<C> {
             }),
         };
         logged.map_err(HttpError::LogUnavailable)?;
-        let headers = plain_headers(outgoing.service, outgoing.body.is_some());
+        let mut headers = plain_headers(outgoing.service, outgoing.body.is_some());
+        if let Some((first, last)) = outgoing.range {
+            headers.push((RANGE.as_str().to_owned(), format!("bytes={first}-{last}")));
+        }
         let body = outgoing.body.map(<[u8]>::to_vec);
         self.send_as(
             outgoing.method.clone(),
@@ -1117,6 +1133,38 @@ impl<C: Credentials> HttpTransport<C> {
             url,
             service: Service::FileThumbnail,
             body: None,
+            range: None,
+        };
+        self.exchange(outgoing, Record::Nothing).await
+    }
+
+    /// Reads `len` bytes of a shared file from `offset`, at the download link Graph handed out for it
+    /// ([`crate::FileDownload::read_answer`]): a `GET` on [`Service::FileContent`] with `Range: bytes=<first>-<last>`
+    /// and no token of the account's (the link carries its own credential), the link checked again before it goes
+    /// ([`is_content_link`]), with the one retry a 429 or 503 allows, as any read. The answer is read as a part of the
+    /// file by [`crate::FileRange::read`].
+    ///
+    /// # Errors
+    /// As a read's: [`Refusal::NotAllowed`] for a link off SharePoint's hosts, [`Refusal::FileContent`] for a read of
+    /// nothing or of more than [`MAX_RANGE`], [`HttpError::Status`] for an answer that isn't a success (an expired
+    /// link's 401 or 403 among them: the caller asks Graph for a new one).
+    pub async fn file_range(&self, link: &FileContentLink, offset: u64, len: u32) -> Result<Response, HttpError> {
+        let url = link.url();
+        if !is_content_link(url) {
+            return Err(HttpError::Refused(Refusal::NotAllowed));
+        }
+        if len == 0 || len > MAX_RANGE {
+            return Err(HttpError::Refused(Refusal::FileContent));
+        }
+        let last = offset
+            .checked_add(u64::from(len) - 1)
+            .ok_or(HttpError::Refused(Refusal::FileContent))?;
+        let outgoing = Outgoing {
+            method: reqwest::Method::GET,
+            url,
+            service: Service::FileContent,
+            body: None,
+            range: Some((offset, last)),
         };
         self.exchange(outgoing, Record::Nothing).await
     }
@@ -1135,6 +1183,7 @@ impl<C: Credentials> Transport for HttpTransport<C> {
                 url: &url,
                 service,
                 body: None,
+                range: None,
             };
             self.exchange(outgoing, Record::Nothing).await
         }
@@ -1283,7 +1332,12 @@ fn audience(service: Service) -> Option<&'static str> {
         Service::Graph => Some(GRAPH_AUDIENCE),
         Service::Csa => Some(CSA_AUDIENCE),
         Service::Presence => Some(PRESENCE_AUDIENCE),
-        Service::Trouter | Service::Calling | Service::Emoticons | Service::FileThumbnail | Service::Giphy => None,
+        Service::Trouter
+        | Service::Calling
+        | Service::Emoticons
+        | Service::FileThumbnail
+        | Service::FileContent
+        | Service::Giphy => None,
     }
 }
 
@@ -1303,12 +1357,15 @@ fn plain_headers(service: Service, body: bool) -> Vec<(String, String)> {
         | Service::Emoticons
         | Service::Ams
         | Service::FileThumbnail
+        | Service::FileContent
         | Service::Giphy => "application/json",
     };
     // a picture's view and a thumbnail answer an image, as a browser's `<img>` asks for one
     let accept = match service {
         Service::Ams | Service::FileThumbnail => PICTURE_ACCEPT,
         Service::Giphy => GIF_ACCEPT,
+        // a file's bytes, whatever it holds, as a browser's media element asks for them
+        Service::FileContent => "*/*",
         Service::ChatService
         | Service::Registrar
         | Service::Trouter
@@ -1361,6 +1418,7 @@ fn service_headers(service: Service) -> &'static [(&'static str, &'static str)] 
         | Service::Calling
         | Service::Emoticons
         | Service::FileThumbnail
+        | Service::FileContent
         | Service::Giphy => &[],
     }
 }
@@ -1394,6 +1452,7 @@ fn on_base(service: Service, base: &Url, url: &Url, endpoint: &Endpoint) -> bool
         | Service::Emoticons
         | Service::Ams
         | Service::FileThumbnail
+        | Service::FileContent
         | Service::Giphy => true,
     };
     plain
@@ -1588,7 +1647,7 @@ fn header_pairs(map: &HeaderMap) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Reads an answer: its status, `Location`, `Retry-After`, `Content-Type`, and its body up to [`MAX_BODY`]; with
+/// Reads an answer: its status, `Location`, `Retry-After`, `Content-Type`, `Content-Range`, and its body up to [`MAX_BODY`]; with
 /// `all_headers`, every header too, for the log's `debug` record (none otherwise).
 async fn read_answer(
     mut answer: reqwest::Response,
@@ -1603,7 +1662,7 @@ async fn read_answer(
             .and_then(|value: &HeaderValue| value.to_str().ok())
             .map(str::to_owned)
     };
-    let (location, content_type) = (text(LOCATION), text(CONTENT_TYPE));
+    let (location, content_type, content_range) = (text(LOCATION), text(CONTENT_TYPE), text(CONTENT_RANGE));
     let wait = retry_after(headers);
     let status = answer.status().as_u16();
     let mut body = Vec::new();
@@ -1619,6 +1678,9 @@ async fn read_answer(
     }
     if let Some(content_type) = content_type {
         response = response.with_content_type(content_type);
+    }
+    if let Some(content_range) = content_range {
+        response = response.with_content_range(content_range);
     }
     if let Some(wait) = wait {
         response = response.with_retry_after(wait);

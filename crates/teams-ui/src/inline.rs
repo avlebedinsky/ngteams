@@ -35,7 +35,7 @@ use gpui::{
 use image::codecs::gif::GifDecoder;
 use image::{AnimationDecoder as _, Frame, ImageDecoder as _, Limits, RgbaImage, imageops};
 use teams_core::{PictureBytes, Reply, Strip};
-use teams_proto::PastedFormat;
+use teams_proto::{FileRange, PastedFormat};
 
 use crate::bridge::Core;
 use crate::reactions;
@@ -79,6 +79,11 @@ pub trait PictureEngine: Send + Sync {
         let _ = share_url;
         Reply::ready(Ok(None))
     }
+    /// As [`Core::file_range`]; unavailable unless the engine reads files.
+    fn file_range(&self, share_url: String, offset: u64, len: u32) -> Reply<FileRange> {
+        let _ = (share_url, offset, len);
+        Reply::ready(Err(teams_core::EngineError::FileUnavailable))
+    }
     /// As [`Core::reaction_animation`].
     fn reaction_animation(&self, id: String) -> Reply<Option<Strip>>;
     /// Which engine it is, for telling two sources apart.
@@ -99,6 +104,10 @@ impl PictureEngine for CoreEngine {
 
     fn file_thumbnail(&self, share_url: String) -> Reply<Option<PictureBytes>> {
         self.0.file_thumbnail(share_url)
+    }
+
+    fn file_range(&self, share_url: String, offset: u64, len: u32) -> Reply<FileRange> {
+        self.0.file_range(share_url, offset, len)
     }
 
     fn reaction_animation(&self, id: String) -> Reply<Option<Strip>> {

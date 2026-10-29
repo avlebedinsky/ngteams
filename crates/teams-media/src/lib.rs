@@ -24,6 +24,8 @@
 //!   group call's data channel: whose video the mixer sends on each receiving video line, who speaks.
 //! - [`video`]: H.264 through OpenH264 (Cisco's prebuilt library, or the bundled source in a `test-support` build) and
 //!   the frames' conversions; the session runs a call's camera and received video on threads of their own.
+//! - [`player`]: a video a message carries, played in its card by GStreamer's `playbin`, its bytes from the engine
+//!   (an `appsrc`), its frames to the view and its sound to the device seam's speaker.
 //!
 //! Nothing here sends signaling.
 
@@ -34,6 +36,7 @@ pub mod devices;
 pub mod jitter;
 pub mod mcp;
 pub mod peer;
+pub mod player;
 pub mod processing;
 mod queue;
 pub mod relay;

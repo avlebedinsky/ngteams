@@ -66,6 +66,11 @@ pub enum Service {
     /// carries its own credential). No base of its own: only [`crate::HttpTransport::file_thumbnail`] reads here, and a
     /// read or a plain request naming this service is refused.
     FileThumbnail,
+    /// A shared file's bytes, at the pre-authenticated download link Graph handed out for it
+    /// ([`crate::FileContentLink`], a SharePoint host), read part by part with `Range`, with no token of the account's
+    /// (the link carries its own credential): a video a message carries, played in its card. No base of its own: only
+    /// [`crate::HttpTransport::file_range`] reads here, and a read or a plain request naming this service is refused.
+    FileContent,
     /// Giphy's media CDN, `https://media.giphy.com/`, with no token (Giphy's public files, which the web client's
     /// `<img>` loads as any browser does): a GIF a message shows, picked from Teams' GIF picker
     /// (`media/<id>/<file>`, [`crate::GiphyPicture`]). Reads only, nothing of the account's sent.

@@ -133,6 +133,8 @@ fn prepare(accounts: &[(Alias, RawFd)], trace_fd: Option<RawFd>) -> Result<Launc
             None
         }
     };
+    // a video a message carries plays its sound on the calls' devices (silently without them)
+    let playback = devices.as_ref().map(calling::CallDevices::playback).unwrap_or_default();
     let floor = CallFloor::new();
     let starting = Starting {
         config: &config,
@@ -160,6 +162,7 @@ fn prepare(accounts: &[(Alias, RawFd)], trace_fd: Option<RawFd>) -> Result<Launc
         // the bus the app is given, read once: nothing else is ever connected to for notifications or the tray
         bus: teams_ui::bus::address_from_env(),
         diagnostics: Some(diagnostics),
+        playback,
     })
 }
 
