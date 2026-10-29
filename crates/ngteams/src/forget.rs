@@ -1,12 +1,12 @@
-//! `teams --forget <UPN>`: signs out and forgets one account — its `teams-personal` items (the refresh token, the
+//! `ngteams --forget <UPN>`: signs out and forgets one account — its `ngteams` items (the refresh token, the
 //! skypetoken and its expiry, each under its UPN), its region (`regions/<oid>.json`) and its entry in `accounts.toml`,
 //! the other accounts kept as they are. Its store stays (`store/<oid>.sqlite`, never another account's), to delete by
 //! hand.
 //!
-//! Refused while the account's engine runs (a `teams` open, in the tray too): that engine's session keeps the tokens it
-//! holds and a renewal of its would store them again, so the account's engine lock (`teams_store::EngineLock`) is taken
-//! first, without waiting, and held until everything is deleted, so no engine starts on the account meanwhile. Its
-//! entry goes last, so a forget that fails part way can be run again.
+//! Refused while the account's engine runs (an `ngteams` open, in the tray too): that engine's session keeps the tokens
+//! it holds and a renewal of its would store them again, so the account's engine lock (`teams_store::EngineLock`) is
+//! taken first, without waiting, and held until everything is deleted, so no engine starts on the account meanwhile.
+//! Its entry goes last, so a forget that fails part way can be run again.
 
 use std::path::PathBuf;
 
@@ -18,7 +18,7 @@ use teams_store::{EngineLock, StoreError};
 
 use crate::setup::Setup;
 
-/// What `teams --forget <UPN>` did.
+/// What `ngteams --forget <UPN>` did.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Forgot {
     /// No account of that UPN.

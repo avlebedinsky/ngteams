@@ -39,7 +39,7 @@ use ui_sandbox::{NIRI_FULL_WINDOW, Running, Sandbox, SandboxOptions, SandboxResu
 /// Which mode the child runs in: the theme's key.
 const CHILD_ENV: &str = "TEAMS_UI_NOTES_WINDOW_TEST";
 /// The child window's Wayland app id.
-const APP_ID: &str = "ms-teams-notes-test";
+const APP_ID: &str = "ngteams-notes-test";
 /// From the child's start to its `ready`.
 const STARTUP: Duration = Duration::from_secs(90);
 /// Anything else the parent waits for.

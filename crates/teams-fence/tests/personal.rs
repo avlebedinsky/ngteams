@@ -256,7 +256,7 @@ fn a_personal_read_by_post_names_anyone_and_a_lab_one_keeps_its_rule() {
 
 /// The paths of a personal build under `dir`.
 fn paths_in(dir: &tempfile::TempDir) -> PersonalPaths {
-    PersonalPaths::new(dir.path().join("config/teams"), dir.path().join("share/teams"))
+    PersonalPaths::new(dir.path().join("config/ngteams"), dir.path().join("share/ngteams"))
 }
 
 /// Lab locations under `dir`, with a `lab.toml` naming lab accounts a, b and c when `text` is given.
@@ -269,7 +269,7 @@ fn lab_in(dir: &tempfile::TempDir, text: Option<&str>) -> TestResult<LabLocation
     Ok(LabLocations {
         config_file,
         data_dir: dir.path().join("share/teams-lab"),
-        personal_data_dir: dir.path().join("share/teams"),
+        personal_data_dir: dir.path().join("share/ngteams"),
     })
 }
 
@@ -540,14 +540,14 @@ fn a_personal_data_dir_overlapping_the_lab_s_is_refused() -> TestResult {
         dir.path().join("share/teams-lab/teams"),
         dir.path().join("share"),
     ] {
-        let paths = PersonalPaths::new(dir.path().join("config/teams"), data.clone());
+        let paths = PersonalPaths::new(dir.path().join("config/ngteams"), data.clone());
         assert!(
             matches!(paths.check_apart(&lab), Err(PersonalError::LabDataDir { .. })),
             "{data:?}"
         );
     }
     // lab.toml's data_dir too
-    let elsewhere = dir.path().join("share/teams");
+    let elsewhere = dir.path().join("share/ngteams");
     let lab = lab_in(&dir, Some(&format!("data_dir = {elsewhere:?}\n{}", lab_toml())))?;
     assert!(matches!(
         paths_in(&dir).check_apart(&lab),

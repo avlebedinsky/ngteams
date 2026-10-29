@@ -10,11 +10,12 @@ use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 
 /// The personal build's directory name under `$XDG_DATA_HOME` and `$XDG_CONFIG_HOME`.
-pub const PERSONAL_DIR: &str = "teams";
+pub const PERSONAL_DIR: &str = "ngteams";
 
-/// Where the personal build keeps its data and its config by default: `$XDG_DATA_HOME/teams` (`~/.local/share/teams`)
-/// and `$XDG_CONFIG_HOME/teams` (`~/.config/teams`), by the XDG rules [`crate::lab::LabLocations::resolve`] follows (an
-/// empty or relative XDG directory is ignored in favour of the `HOME` default).
+/// Where the personal build keeps its data and its config by default: `$XDG_DATA_HOME/ngteams`
+/// (`~/.local/share/ngteams`) and `$XDG_CONFIG_HOME/ngteams` (`~/.config/ngteams`), by the XDG rules
+/// [`crate::lab::LabLocations::resolve`] follows (an empty or relative XDG directory is ignored in favour of the
+/// `HOME` default).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PersonalLocations {
     pub config_dir: PathBuf,
@@ -90,11 +91,11 @@ mod tests {
     fn the_personal_dirs_follow_the_xdg_rules() {
         let locations =
             PersonalLocations::resolve(None, Some("relative".into()), Some("/home/someone".into())).unwrap();
-        assert_eq!(locations.data_dir, Path::new("/home/someone/.local/share/teams"));
-        assert_eq!(locations.config_dir, Path::new("/home/someone/.config/teams"));
+        assert_eq!(locations.data_dir, Path::new("/home/someone/.local/share/ngteams"));
+        assert_eq!(locations.config_dir, Path::new("/home/someone/.config/ngteams"));
         let locations = PersonalLocations::resolve(Some("/c".into()), Some("/d".into()), None).unwrap();
-        assert_eq!(locations.data_dir, Path::new("/d/teams"));
-        assert_eq!(locations.config_dir, Path::new("/c/teams"));
+        assert_eq!(locations.data_dir, Path::new("/d/ngteams"));
+        assert_eq!(locations.config_dir, Path::new("/c/ngteams"));
         assert!(PersonalLocations::resolve(None, None, Some("relative".into())).is_none());
     }
 
@@ -106,11 +107,11 @@ mod tests {
         let link = dir.path().join("link");
         std::os::unix::fs::symlink(&real, &link).unwrap();
         assert!(overlapping(&real, &real));
-        assert!(overlapping(&real.join("teams"), &real));
+        assert!(overlapping(&real.join(PERSONAL_DIR), &real));
         assert!(overlapping(&real, &real.join("not/yet")));
-        assert!(overlapping(&link.join("teams"), &real.join("teams")));
+        assert!(overlapping(&link.join(PERSONAL_DIR), &real.join(PERSONAL_DIR)));
         assert!(overlapping(&real.join("a/../teams"), &link.join("teams/store")));
-        assert!(!overlapping(&real.join("teams-lab"), &real.join("teams")));
+        assert!(!overlapping(&real.join("teams-lab"), &real.join(PERSONAL_DIR)));
         assert!(!overlapping(&dir.path().join("other"), &real));
     }
 

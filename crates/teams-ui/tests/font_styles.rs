@@ -24,7 +24,7 @@ use ui_sandbox::{NIRI_FULL_WINDOW, Running, SandboxOptions, SandboxResult, sandb
 /// Which mode the child runs in.
 const CHILD_ENV: &str = "TEAMS_UI_FONT_STYLES_TEST";
 /// The child window's Wayland app id.
-const APP_ID: &str = "ms-teams-font-styles-test";
+const APP_ID: &str = "ngteams-font-styles-test";
 /// From the child's start to its `ready`.
 const STARTUP: Duration = Duration::from_secs(90);
 /// Anything else the parent waits for.

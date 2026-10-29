@@ -1,6 +1,6 @@
 //! The descriptors the read-only mode is handed at its start (`crate::read_only`), taken over before anything else in
-//! the process opens one: the credential broker's socket (`teams --read-only --secrets-fd <n>`, and the broker's own
-//! end, `teams secrets --fd <n>`) and the view trace (`--trace-fd <n>`). As the lab app takes its own (`teams-app`'s
+//! the process opens one: the credential broker's socket (`ngteams --read-only --secrets-fd <n>`, and the broker's own
+//! end, `ngteams secrets --fd <n>`) and the view trace (`--trace-fd <n>`). As the lab app takes its own (`teams-app`'s
 //! `secrets::adopt_socket` and `trace::adopt_trace`): 3 or above, open, of the right kind, made close-on-exec.
 
 use std::fs::File;

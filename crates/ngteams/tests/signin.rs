@@ -1,8 +1,8 @@
-//! The personal build's sign-in and start: `teams` signs in through its sign-in window (`sh` standing in for
-//! `teams-signin-personal`, answering the redirect), the code redeemed at a local token endpoint and the skypetoken at a
+//! The personal build's sign-in and start: `ngteams` signs in through its sign-in window (`sh` standing in for
+//! `ngteams-signin`, answering the redirect), the code redeemed at a local token endpoint and the skypetoken at a
 //! local authz (wiremock), the refresh token stored under the account's UPN in the store handed in (the app hands in the
-//! desktop's Secret Service under `teams-personal`; here a `MemorySecretStore`), the account's `accounts.toml` entry given
-//! the object id and tenant, its region saved under `regions/`; a later sign-in landing in another account stores
+//! desktop's Secret Service under `ngteams`; here a `MemorySecretStore`), the account's `accounts.toml` entry
+//! given the object id and tenant, its region saved under `regions/`; a later sign-in landing in another account stores
 //! nothing; a lab account is refused; several accounts side by side (added, abandoned, signed in, forgotten one at a
 //! time), an added account whose sign-in stored nothing keeping what the user wrote into its entry (its `idp_hosts`)
 //! for the next try, and a host the window refused named with where to add it; a single account's files of an earlier
@@ -20,11 +20,11 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use ngteams::KEYRING_APPLICATION;
+use ngteams::forget::{self, ForgetError, Forgot};
+use ngteams::setup::{Setup, SetupError};
+use ngteams::signin::{self, SignInClients, SignInError};
 use serde_json::{Value, json};
-use teams::KEYRING_APPLICATION;
-use teams::forget::{self, ForgetError, Forgot};
-use teams::setup::{Setup, SetupError};
-use teams::signin::{self, SignInClients, SignInError};
 use teams_auth::authz::{AuthzClient, skypetoken_expiry_key, skypetoken_key};
 use teams_auth::refresh::refresh_token_key;
 use teams_auth::secrets::{MemorySecretStore, Secret, SecretStore};
@@ -72,9 +72,9 @@ fn paths_in(dir: &tempfile::TempDir) -> (PersonalPaths, LabLocations) {
     let lab = LabLocations {
         config_file,
         data_dir: dir.path().join("share/teams-lab"),
-        personal_data_dir: dir.path().join("share/teams"),
+        personal_data_dir: dir.path().join("share/ngteams"),
     };
-    let paths = PersonalPaths::new(dir.path().join("config/teams"), dir.path().join("share/teams"));
+    let paths = PersonalPaths::new(dir.path().join("config/ngteams"), dir.path().join("share/ngteams"));
     (paths, lab)
 }
 
@@ -95,9 +95,9 @@ async fn signed_in(setup: &Setup, upn: &str, oid: &str, store: &MemorySecretStor
 }
 
 /// `account`'s engine under its own personal fence, its secrets a store of its own (nothing is sent).
-fn start_engine(setup: &Setup, account: &PersonalAccount) -> teams::engine::PersonalEngine<MemorySecretStore> {
+fn start_engine(setup: &Setup, account: &PersonalAccount) -> ngteams::engine::PersonalEngine<MemorySecretStore> {
     let fence = Arc::new(Fence::open_personal_with(&setup.paths, &account.upn, &setup.lab).unwrap());
-    teams::engine::start(&setup.paths, account, fence, MemorySecretStore::new(), false, None).unwrap()
+    ngteams::engine::start(&setup.paths, account, fence, MemorySecretStore::new(), false, None).unwrap()
 }
 
 /// An unsigned ID token naming `upn`, `oid`, the tenant, for the native client.
@@ -177,7 +177,7 @@ async fn the_first_sign_in_stores_the_token_the_account_and_the_region_and_the_e
     assert_eq!(signed.oid.as_deref(), Some(OID));
     assert_eq!(signed.tid.as_deref(), Some(TENANT));
     assert_eq!(signed.name.as_deref(), Some(DISPLAY_NAME));
-    assert_eq!(teams::engine::display_name(&signed), DISPLAY_NAME);
+    assert_eq!(ngteams::engine::display_name(&signed), DISPLAY_NAME);
     let stored = store.get(&refresh_token_key(UPN)).await.unwrap();
     assert_eq!(stored.as_ref().map(Secret::expose), Some("made-up-refresh-token"));
     assert_eq!(PersonalAccount::load_all(&setup.paths).unwrap(), vec![signed.clone()]);
@@ -211,7 +211,7 @@ async fn the_first_sign_in_stores_the_token_the_account_and_the_region_and_the_e
         setup.paths.data_dir().join("store").join(format!("{OID}.sqlite"))
     );
     engine.handle.shutdown();
-    assert_eq!(KEYRING_APPLICATION, "teams-personal");
+    assert_eq!(KEYRING_APPLICATION, "ngteams");
 }
 
 #[tokio::test]

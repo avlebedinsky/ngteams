@@ -1,4 +1,4 @@
-//! The personal build's fence decides nothing (`docs/personal-build.md`; CLAUDE.md, "The personal build (`teams`) is
+//! The personal build's fence decides nothing (`docs/personal-build.md`; CLAUDE.md, "The personal build (`ngteams`) is
 //! the user's Teams"): it is the user's own account, used in the user's own window, so whatever the Teams client may
 //! do, it may do. [`Fence::check`] logs every write to `fence.log` and permits it: any kind, on any target (a chat of
 //! any kind, a channel, a new chat, a meeting, a call), with no member read. What it keeps:

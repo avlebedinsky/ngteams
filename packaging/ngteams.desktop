@@ -1,10 +1,10 @@
 [Desktop Entry]
 Type=Application
-Name=Teams
+Name=ngteams
 GenericName=Chat
 Comment=Microsoft Teams chats for your own account, under the personal build's fence
-Exec=teams
+Exec=ngteams
 Terminal=false
 Categories=Network;Chat;InstantMessaging;
-StartupWMClass=ms-teams
+StartupWMClass=ngteams
 StartupNotify=true

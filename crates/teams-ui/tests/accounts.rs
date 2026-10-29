@@ -104,7 +104,7 @@ impl TwoAccounts {
             let desktop = cx.new(|cx| {
                 Desktop::new(
                     DesktopParts {
-                        app_id: "ms-teams-test",
+                        app_id: "ngteams-test",
                         app_name: "Teams (test)".into(),
                         title: "Teams (test)".into(),
                         shell,
@@ -381,7 +381,7 @@ fn a_lone_account_s_notifications_name_no_account() {
         let desktop = cx.new(|cx| {
             Desktop::new(
                 DesktopParts {
-                    app_id: "ms-teams-test",
+                    app_id: "ngteams-test",
                     app_name: "Teams (test)".into(),
                     title: "Teams (test)".into(),
                     shell,

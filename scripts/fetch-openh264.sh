@@ -7,8 +7,8 @@
 # licence (BINARY_LICENSE.txt) is saved beside it.
 #
 # Run it by hand, once (again to replace a damaged copy). Nothing is fetched by a test or a build. The personal build
-# (`teams`) loads its own copy from ~/.local/share/teams/openh264/ (teams::calling::openh264): the user runs
-# `fetch-openh264.sh ~/.local/share/teams` for it; agents never do, as they never touch the personal build's data.
+# (`ngteams`) loads its own copy from ~/.local/share/ngteams/openh264/ (ngteams::calling::openh264): the user runs
+# `fetch-openh264.sh ~/.local/share/ngteams` for it; agents never do, as they never touch the personal build's data.
 #
 # Usage: fetch-openh264.sh [DATA_DIR]   (default: ${XDG_DATA_HOME:-$HOME/.local/share}/teams-lab, the lab's data dir
 #                                        unless lab.toml names another)

@@ -1,8 +1,8 @@
 //! One personal account's engine, assembled as every binary builds one (`teams_core::account::start`) from the personal
 //! build's parts: the fence the binary opened for it (`Fence::open_personal`, the account from `accounts.toml`, which
 //! logs every send and denies none, so it reads no members: its membership source is `FailClosed`, never asked), the
-//! account's own store at `~/.local/share/teams/store/<oid>.sqlite` (never another account's: a store
-//! kept after `teams --forget` stays its account's), the region its sign-in saved (`regions/<oid>.json`), the push
+//! account's own store at `~/.local/share/ngteams/store/<oid>.sqlite` (never another account's: a store
+//! kept after `ngteams --forget` stays its account's), the region its sign-in saved (`regions/<oid>.json`), the push
 //! channel, and the calling (`crate::calling`: the calling stack's socket under the same fence, the calls' media on the
 //! desktop's devices) when the devices could be opened. An app of several accounts starts one per account.
 //! Nothing is sent while it is built: the session asks its store for a token only when a request needs one.
@@ -45,7 +45,7 @@ pub fn start<S: SecretStore + 'static>(
     start_with(paths, account, fence, secrets, (push, calls), false)
 }
 
-/// `account`'s engine in the read-only mode (`teams --read-only`, `crate::read_only`): its transports send reads only
+/// `account`'s engine in the read-only mode (`ngteams --read-only`, `crate::read_only`): its transports send reads only
 /// (every write refused below the views, logged to `fence.log` as `refused_read_only`), no push channel and no calling
 /// (no endpoint registered, no second Trouter connection on the account), a catch-up by reads every
 /// `teams_core::account::READ_ONLY_POLL`. `paths` are the snapshot's, never the user's own.

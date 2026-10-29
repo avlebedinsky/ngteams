@@ -253,7 +253,7 @@ fn quit(sandbox: &Sandbox, trace: &mut TraceReader, running: &Running) -> Sandbo
     let host = sandbox.bus().connect()?;
     let item = zbus::blocking::Proxy::new(&host, name.as_str(), ITEM_PATH, "org.kde.StatusNotifierItem")?;
     let title: String = item.get_property("Title")?;
-    if !title.starts_with("Teams (lab a, b)") {
+    if !title.starts_with("ngteams (lab a, b)") {
         return Err(format!("the item's title: {title}").into());
     }
     let menu = zbus::blocking::Proxy::new(&host, name.as_str(), MENU_PATH, "com.canonical.dbusmenu")?;

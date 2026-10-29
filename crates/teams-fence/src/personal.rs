@@ -1,11 +1,11 @@
 //! The personal build's fence (`docs/personal-build.md`, approved by the user on 2026-10-23), only with the `personal`
-//! feature, which only `crates/teams` enables.
+//! feature, which only `crates/ngteams` enables.
 //!
-//! - **Its files** ([`PersonalPaths`]): `accounts.toml` in `~/.config/teams/` (the user's accounts in the order added,
-//!   each as its first sign-in signed it in: its UPN, object id and tenant, and the identity provider hosts the user
-//!   names; never a token; a single account's `account.toml` of an earlier build is moved there), and under
-//!   `~/.local/share/teams/` its `fence.log` (one for every account), each account's store and region, the settings and
-//!   the diagnostic log. The data dir is refused when
+//! - **Its files** ([`PersonalPaths`]): `accounts.toml` in `~/.config/ngteams/` (the user's accounts in the order
+//!   added, each as its first sign-in signed it in: its UPN, object id and tenant, and the identity provider hosts the
+//!   user names; never a token; a single account's `account.toml` of an earlier build is moved there), and under
+//!   `~/.local/share/ngteams/` its `fence.log` (one for every account), each account's store and region, the settings
+//!   and the diagnostic log. The data dir is refused when
 //!   it is, contains or lies inside the lab's ([`PersonalPaths::check_apart`]), and an account `lab.toml` names is
 //!   refused ([`PersonalAccount::check_not_lab`]).
 //! - **Its decision** ([`Fence::open_personal`], the only way to it outside tests): none. It is the user's own account
@@ -82,8 +82,8 @@ impl PersonalPaths {
     }
 
     /// `account`'s store (`teams-store`): `store/<oid>.sqlite`, one per account, so a store kept after
-    /// `teams --forget` is never another account's; `None` before a sign-in named its object id (or for one that isn't
-    /// a GUID).
+    /// `ngteams --forget` is never another account's; `None` before a sign-in named its object id (or for one that
+    /// isn't a GUID).
     #[must_use]
     pub fn store_file(&self, account: &PersonalAccount) -> Option<PathBuf> {
         let oid = account.oid.as_deref().filter(|oid| is_guid(oid))?;
@@ -193,7 +193,7 @@ fn lab_config(lab: &LabLocations) -> Result<Option<LabConfig>, PersonalError> {
 }
 
 /// One account the personal build signs in (an `[[account]]` of `accounts.toml`): the UPN the user gave (the first
-/// sign-in screen, the rail's "+" or `teams --account`), and once the
+/// sign-in screen, the rail's "+" or `ngteams --account`), and once the
 /// first sign-in went through, the object id and tenant its ID token named, which every later sign-in must match, and
 /// the display name it gave (`name`, refreshed by every sign-in; what the account's posts carry as their sender's
 /// name). Never a token.

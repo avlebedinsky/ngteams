@@ -84,9 +84,9 @@ don't. Write the brief the way you'd hand the task to a colleague:
      scripts, logs, screenshots in `/tmp` or the scratchpad), unless the report hands it to the user. The dispatcher
      removes the worktree itself.
    - The personal build is installed or run only as CLAUDE.md allows. Install it only when this task asks for it.
-     The one process you leave running is the installed `teams`, when the task asked you to start it for the user.
+     The one process you leave running is the installed `ngteams`, when the task asked you to start it for the user.
      Start it detached, with its working directory outside the worktree, so the worktree's cleanup doesn't kill it:
-     `cd ~ && setsid -f ~/.local/bin/teams >/dev/null 2>&1`. Say in the report that it is running.
+     `cd ~ && setsid -f ~/.local/bin/ngteams >/dev/null 2>&1`. Say in the report that it is running.
 3. **For an editing task, how to finish**, in this order:
    1. A revmux round on the change (the `revmux:revmux` skill). Fix every major finding, the immaterial and
       pre-existing ones too, and re-run revmux on the fixes until it is clean.
@@ -127,7 +127,7 @@ The completion arrives as a notification. In one reply:
 3. **Once the task is done, nothing of it stays.** The worktree's `target/` alone is gigabytes, and stale worktrees
    fill the disk. Each step removes one kind of leftover:
    - Stop every shell the agent started that is still running (`TaskStop`), whatever its report says. The one
-     exception is the personal `teams` app the task was asked to start for the user. Look at the
+     exception is the personal `ngteams` app the task was asked to start for the user. Look at the
      session's background tasks, not only the IDs the report lists. A returned agent's shells keep running: wait
      loops left behind have run for hours. Do this before ever saying "nothing is running".
    - If it landed, run `<repo>/.claude/skills/task-dispatch/scripts/cleanup.sh <worktree path>`. The script stops any

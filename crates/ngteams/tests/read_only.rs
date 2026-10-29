@@ -1,4 +1,4 @@
-//! The read-only mode (`teams::read_only`) on the mock chat service (`teams-mock`, through the `test-support` mock
+//! The read-only mode (`ngteams::read_only`) on the mock chat service (`teams-mock`, through the `test-support` mock
 //! origins) and in temporary directories, never a real account: every write kind the engine is asked for is refused
 //! below the views, before the fence is asked, and logged to `fence.log` as `refused_read_only` (method, host, path
 //! shape), with nothing sent; reads go through; the transport refuses a write, a call write, a registration and a
@@ -20,10 +20,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use clap::Parser as _;
+use ngteams::cli::{Cli, ReadOnlyMode};
+use ngteams::read_only::{self, window_allowed};
+use ngteams::snapshot;
 use serde_json::{Value, json};
-use teams::cli::{Cli, ReadOnlyMode};
-use teams::read_only::{self, window_allowed};
-use teams::snapshot;
 use teams_auth::broker::BrokerSecretStore;
 use teams_auth::refresh::refresh_token_key;
 use teams_auth::secrets::{MemorySecretStore, OverlaySecretStore, Secret, SecretKey, SecretStore};
@@ -372,7 +372,7 @@ fn a_read_only_account_opens_no_push_channel_and_no_calling() {
             camera: PatternCamera::default(),
             pacing: Pacing::RealTime,
         });
-        Some(teams::calling::on_devices(devices, None).0)
+        Some(ngteams::calling::on_devices(devices, None).0)
     };
     let (push, calling) = account::listening(true, true, calls());
     assert!(!push && calling.is_none(), "read-only: neither, whatever was asked");
@@ -410,7 +410,7 @@ fn the_window_refuses_anywhere_but_the_ui_sandbox() {
 
 #[test]
 fn the_command_line_asks_for_everything_the_read_only_mode_needs() {
-    let parse = |args: &[&str]| Cli::try_parse_from(std::iter::once("teams").chain(args.iter().copied())).unwrap();
+    let parse = |args: &[&str]| Cli::try_parse_from(std::iter::once("ngteams").chain(args.iter().copied())).unwrap();
     let full = parse(&[
         "--read-only",
         "--account",
@@ -456,7 +456,7 @@ fn the_command_line_asks_for_everything_the_read_only_mode_needs() {
     ] {
         assert!(parse(missing).read_only_mode(None).is_err(), "{missing:?}");
     }
-    assert!(Cli::try_parse_from(["teams", "--read-only", "--forget", "a@example.test"]).is_err());
+    assert!(Cli::try_parse_from(["ngteams", "--read-only", "--forget", "a@example.test"]).is_err());
 }
 
 #[tokio::test]
@@ -473,7 +473,7 @@ async fn the_broker_serves_get_only_and_the_overlay_keeps_renewals_in_memory() {
         let result = read_only::serve_broker(theirs, &scope, &*served, &mut noted).await;
         (result.is_ok(), String::from_utf8(noted).unwrap())
     });
-    let client = BrokerSecretStore::new(ours, teams::KEYRING_APPLICATION).unwrap();
+    let client = BrokerSecretStore::new(ours, ngteams::KEYRING_APPLICATION).unwrap();
     assert_eq!(client.get(&key).await.unwrap().unwrap().expose(), "stored-made-up");
     assert!(client.put(&key, &Secret::new("rotated")).await.is_err(), "put refused");
     assert!(client.delete(&key).await.is_err(), "delete refused");
@@ -519,7 +519,7 @@ fn tree(dir: &Path) -> BTreeMap<PathBuf, Vec<u8>> {
 #[test]
 fn the_snapshot_copies_what_the_mode_needs_and_leaves_its_source_as_it_was() {
     let home = tempfile::tempdir().unwrap();
-    let mine = PersonalPaths::new(home.path().join("config/teams"), home.path().join("share/teams"));
+    let mine = PersonalPaths::new(home.path().join("config/ngteams"), home.path().join("share/ngteams"));
     mine.make_dirs().unwrap();
     let account = teams_fence::personal::PersonalAccount::new(
         "someone@example.test",

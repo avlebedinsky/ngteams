@@ -1,4 +1,4 @@
-//! `teams`: the personal build's app (see the library's docs). Its refusals come first, before anything else is read
+//! `ngteams`: the personal build's app (see the library's docs). Its refusals come first, before anything else is read
 //! or opened, the window included.
 
 use std::cell::Cell;
@@ -11,14 +11,14 @@ use std::sync::Arc;
 
 use clap::Parser as _;
 use gpui::{App, AppContext as _, AsyncApp, Entity, WindowingModes};
-use teams::accounts::{self, Runner, Started};
-use teams::app::{self, Launch, SignInAgain};
-use teams::calling::CallDevices;
-use teams::cli::{Cli, Command as Subcommand, ReadOnlyMode};
-use teams::descriptors::{adopt_socket, adopt_trace};
-use teams::forget::Forgot;
-use teams::setup::Setup;
-use teams::{KEYRING_APPLICATION, read_only, snapshot};
+use ngteams::accounts::{self, Runner, Started};
+use ngteams::app::{self, Launch, SignInAgain};
+use ngteams::calling::CallDevices;
+use ngteams::cli::{Cli, Command as Subcommand, ReadOnlyMode};
+use ngteams::descriptors::{adopt_socket, adopt_trace};
+use ngteams::forget::Forgot;
+use ngteams::setup::Setup;
+use ngteams::{KEYRING_APPLICATION, read_only, snapshot};
 use teams_auth::secrets::LazyKeyring;
 use teams_fence::lab::LabLocations;
 use teams_fence::personal::{PersonalAccount, PersonalPaths};
@@ -35,7 +35,7 @@ enum Outcome {
 }
 
 fn main() -> ExitCode {
-    if let Some(refusal) = teams::refusal() {
+    if let Some(refusal) = ngteams::refusal() {
         eprintln!("teams: {refusal}");
         return ExitCode::FAILURE;
     }
@@ -53,7 +53,7 @@ fn main() -> ExitCode {
     match outcome {
         Ok(Outcome::Quit) => ExitCode::SUCCESS,
         Ok(Outcome::Restart) => {
-            let error = Command::new(std::env::current_exe().unwrap_or_else(|_| "teams".into()))
+            let error = Command::new(std::env::current_exe().unwrap_or_else(|_| "ngteams".into()))
                 .args(std::env::args_os().skip(1))
                 .exec();
             eprintln!("teams: signed in again, but it can't start again ({error}): start it again yourself");
@@ -136,8 +136,9 @@ fn run(cli: &Cli) -> Result<Outcome, String> {
     Ok(if restart.get() { Outcome::Restart } else { Outcome::Quit })
 }
 
-/// `teams secrets --account <UPN> --fd <n>`: the read-only mode's credential broker (`teams::read_only`), its socket
-/// taken over first, before anything opens a descriptor of its own; `get` only, of an account `accounts.toml` holds.
+/// `ngteams secrets --account <UPN> --fd <n>`: the read-only mode's credential broker (`ngteams::read_only`), its
+/// socket taken over first, before anything opens a descriptor of its own; `get` only, of an account
+/// `accounts.toml` holds.
 fn broker(upn: &str, fd: RawFd) -> ExitCode {
     let socket = match adopt_socket(fd) {
         Ok(socket) => socket,
@@ -167,7 +168,7 @@ fn broker(upn: &str, fd: RawFd) -> ExitCode {
     }
 }
 
-/// `teams snapshot --to <dir>`: the snapshot of the user's files the read-only mode runs on (`teams::snapshot`).
+/// `ngteams snapshot --to <dir>`: the snapshot of the user's files the read-only mode runs on (`ngteams::snapshot`).
 fn take_snapshot(to: &Path) -> ExitCode {
     let made = PersonalPaths::from_env()
         .map_err(|error| error.to_string())
@@ -188,7 +189,7 @@ fn failed(what: &str, error: &dyn std::fmt::Display) -> ExitCode {
     ExitCode::FAILURE
 }
 
-/// The read-only mode (`teams::read_only`): its descriptors taken over first, then the sandbox check, the snapshot
+/// The read-only mode (`ngteams::read_only`): its descriptors taken over first, then the sandbox check, the snapshot
 /// (apart from the user's own files), the account, its engine (read-only, no push channel, no calls) over the broker's
 /// store, and the window; nothing adds, removes or signs in an account.
 fn run_read_only(mode: &ReadOnlyMode) -> Result<Outcome, String> {
@@ -217,7 +218,7 @@ fn run_read_only(mode: &ReadOnlyMode) -> Result<Outcome, String> {
     );
     log::info!("read-only mode: nothing that writes is sent");
     let fence = Fence::open_personal(&setup.paths, &account.upn).map_err(|error| error.to_string())?;
-    let engine = teams::engine::start_read_only(&setup.paths, &account, Arc::new(fence), secrets)
+    let engine = ngteams::engine::start_read_only(&setup.paths, &account, Arc::new(fence), secrets)
         .map_err(|error| format!("{}: {error}", account.upn))?;
     let first = Started {
         account,
@@ -256,7 +257,7 @@ fn run_read_only(mode: &ReadOnlyMode) -> Result<Outcome, String> {
     Ok(Outcome::Quit)
 }
 
-/// Every account's engine: the first one's must start (another `teams` running on it, say, ends the app); a later
+/// Every account's engine: the first one's must start (another `ngteams` running on it, say, ends the app); a later
 /// one that can't is said and left out.
 fn start_accounts(runner: &Runner, ready: &[PersonalAccount]) -> Result<(Started, Vec<Started>), String> {
     let (first, rest) = ready.split_first().ok_or("no account is signed in")?;
@@ -381,7 +382,7 @@ fn sign_in_again(setup: Setup, account: PersonalAccount, restart: Rc<Cell<bool>>
     })
 }
 
-/// Signs out and forgets the account `upn` (see [`teams::forget`]): refused while Teams runs for it.
+/// Signs out and forgets the account `upn` (see [`ngteams::forget`]): refused while Teams runs for it.
 fn forget(setup: &Setup, upn: &str) -> Result<(), String> {
     match accounts::forget(setup, upn)? {
         Forgot::Nothing => eprintln!("teams: {upn} isn't one of the accounts: nothing to forget"),

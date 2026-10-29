@@ -113,9 +113,9 @@ pub trait Core: Send + Sync + 'static {
     /// invitation the engine offered, a hang-up, muting; answered with the call it acted on, or why it was refused
     /// (nothing sent). Only the user's action asks for one ([`crate::calls`]).
     fn call(&self, action: CallAction) -> Reply<CallId>;
-    /// Whether the engine sends nothing (the personal build's read-only mode, `teams --read-only`): the views offer no
-    /// write (the boxes, a message's actions, the calls, the status say "Read-only"), and one asked anyway is refused
-    /// below them, logged to `fence.log`. `false` by default.
+    /// Whether the engine sends nothing (the personal build's read-only mode, `ngteams --read-only`): the views offer
+    /// no write (the boxes, a message's actions, the calls, the status say "Read-only"), and one asked anyway is
+    /// refused below them, logged to `fence.log`. `false` by default.
     fn read_only(&self) -> bool {
         false
     }

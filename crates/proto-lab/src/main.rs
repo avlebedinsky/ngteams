@@ -223,9 +223,11 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
     if teams_fence::personal_enabled() {
-        // the personal build's fence came in with `teams` built in the same cargo invocation: a lab binary never has it
+        // the personal build's fence came in with `ngteams` built in the same cargo invocation: a lab binary never
+        // has it
         eprintln!(
-            "proto-lab: built with teams-fence's personal feature (a build with `teams`); rebuild with `cargo build -p proto-lab`"
+            "proto-lab: built with teams-fence's personal feature (a build with `ngteams`); rebuild with \
+             `cargo build -p proto-lab`"
         );
         return ExitCode::FAILURE;
     }

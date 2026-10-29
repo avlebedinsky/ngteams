@@ -50,11 +50,11 @@ use gpui_video::grid::{Grid, Source, TILES, Upload, VideoFrame};
 use image::{Frame, ImageBuffer, Rgba};
 
 /// The smoke window's Wayland app id (the window has no title).
-const APP_ID: &str = "ms-teams-gpui-smoke";
+const APP_ID: &str = "ngteams-gpui-smoke";
 /// The benchmark window's Wayland app id.
-const BENCH_APP_ID: &str = "ms-teams-gpui-video";
+const BENCH_APP_ID: &str = "ngteams-gpui-video";
 /// The text line the window draws.
-const TEXT: &str = "ms-teams GPUI smoke";
+const TEXT: &str = "ngteams GPUI smoke";
 /// Window background, 0xRRGGBB.
 const BACKGROUND: u32 = 0x0020_2830;
 /// Text colour, 0xRRGGBB: white, which the checkerboard never uses.

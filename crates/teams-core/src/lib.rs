@@ -29,7 +29,7 @@
 //!   calling stack's socket, the outbox's call kind and the call's media (`teams-media`).
 //! - [`account`]: one account's engine, assembled the one way every binary builds it (its session over the secret
 //!   store the binary hands in, the fence and the member read it opened); [`lab`] gives it a lab account's parts, the
-//!   personal build (`crates/teams`) its own.
+//!   personal build (`crates/ngteams`) its own.
 //!
 //! M1 Tasks 13, 17 and 18 (`docs/plans/20261020-native-teams-m1-headless-chat-core.md`); M2 Task 5
 //! (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).

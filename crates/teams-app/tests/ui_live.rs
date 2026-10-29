@@ -449,7 +449,7 @@ fn group_message(lab: &Lab, apps: &mut Apps, nonce: i64, found: &mut Found) {
         .into_iter()
         .rfind(|notification| notification.body.contains(&text))
         .unwrap_or_else(|| panic!("no notification of the group message on b's bus"));
-    assert_eq!(notification.app_name, "Teams (lab b)", "{notification:?}");
+    assert_eq!(notification.app_name, "ngteams (lab b)", "{notification:?}");
     apps.b.shot("notified");
     let from = apps.b.trace().mark();
     apps.b.sandbox.bus().invoke_action(notification.id, "default").unwrap();

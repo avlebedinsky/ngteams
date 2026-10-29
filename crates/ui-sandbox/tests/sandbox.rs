@@ -34,7 +34,7 @@ use zbus::zvariant::Value;
 
 const PROBE: &str = env!("CARGO_BIN_EXE_ui-sandbox-probe");
 /// The probe window's Wayland app id and colour (`src/bin/ui-sandbox-probe.rs`).
-const PROBE_APP_ID: &str = "ms-teams-ui-sandbox-probe";
+const PROBE_APP_ID: &str = "ngteams-ui-sandbox-probe";
 const PROBE_COLOR: [u8; 3] = [0x20, 0xc0, 0x60];
 /// From launch to the ready line (a cold dGPU wakes up within it).
 const STARTUP: Duration = Duration::from_secs(30);

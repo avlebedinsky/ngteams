@@ -5,7 +5,7 @@ members = [
     "crates/fence-seal",
     "crates/fixture-guard",
     "crates/proto-lab",
-    "crates/teams",
+    "crates/ngteams",
     "crates/teams-app",
     "crates/teams-auth",
     "crates/teams-call",
@@ -25,8 +25,8 @@ members = [
     "spikes/gpui-video",
     "spikes/media-loop",
 ]
-# Every member but the personal build (`crates/teams`): a plain `cargo build`, `cargo build --release` or `cargo run` at
-# the root never builds it (docs/personal-build.md; crates/teams/tests/apart.rs checks this list).
+# Every member but the personal build (`crates/ngteams`): a plain `cargo build`, `cargo build --release` or `cargo run`
+# at the root never builds it (docs/personal-build.md; crates/ngteams/tests/apart.rs checks this list).
 default-members = [
     "crates/fence-seal",
     "crates/fixture-guard",
@@ -76,7 +76,8 @@ teams-media = { path = "crates/teams-media" }
 # tests only: a crate takes it under [dev-dependencies], never [dependencies] (crates/teams-mock/tests/mock.rs checks)
 teams-mock = { path = "crates/teams-mock" }
 teams-proto = { path = "crates/teams-proto" }
-# the sign-in window; the personal build (`crates/teams`) takes its lib with the `personal` feature, for its own window
+# the sign-in window; the personal build (`crates/ngteams`) takes its lib with the `personal` feature, for its
+# own window
 teams-signin = { path = "crates/teams-signin" }
 # the sign-in window's web process extension; `teams-signin` depends on it, so its build builds the module
 teams-signin-extension = { path = "crates/teams-signin-extension" }

@@ -40,7 +40,7 @@ use zbus::zvariant::{OwnedValue, Value};
 /// Which mode the child runs in.
 const CHILD_ENV: &str = "TEAMS_UI_KIT_WINDOW_TEST";
 /// The child window's Wayland app id.
-const APP_ID: &str = "ms-teams-kit-test";
+const APP_ID: &str = "ngteams-kit-test";
 /// The text area's width: narrow, so a long line wraps.
 const WIDTH: f32 = 240.0;
 /// From the child's start to its `ready`.

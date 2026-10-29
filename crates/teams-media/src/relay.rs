@@ -18,7 +18,7 @@ use crate::turn::{
 };
 
 /// What the client calls itself in its requests' `SOFTWARE` attribute.
-const SOFTWARE: &str = "ms-teams teams-media";
+const SOFTWARE: &str = "ngteams teams-media";
 /// Largest message we read at once.
 const MAX_READ: usize = 4_096;
 /// Nap between turns while waiting for the allocation.

@@ -13,7 +13,7 @@ publish.workspace = true
 # `--all-targets`, `--all-features`) produced it.
 test-support = []
 # The personal build's fence (`Fence::open_personal`, the `personal` module: docs/personal-build.md). Only
-# crates/teams enables it (a manifest test checks every workspace manifest); every lab binary refuses to run when a
+# crates/ngteams enables it (a manifest test checks every workspace manifest); every lab binary refuses to run when a
 # build unified it in (`teams_fence::personal_enabled`).
 personal = []
 

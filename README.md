@@ -1,4 +1,4 @@
-# ms-teams
+# ngteams
 
 A native Microsoft Teams client for Linux in Rust + GPUI, for work/school accounts. Neither official client has native
 UI code to port: the Windows MSIX and the macOS pkg are both a native shell around the same React web app plus the
@@ -17,7 +17,7 @@ Status:
 - **M2 is done**: the GPUI daily driver. A three-pane GPUI app (`teams-app`) on the M1 core: the chat list, the chat
   view and compose, desktop notifications and a tray item, local search, names, pictures and presence (others' shown,
   the account's own set), teams and channels read-only, and the app's diagnostic log; checked live for a, b and c in
-  the UI sandbox (send → shown p95 1.85 s). Beside it the personal build (`teams`) for the user's own account under the
+  the UI sandbox (send → shown p95 1.85 s). Beside it the personal build (`ngteams`) for the user's own account under the
   rules the user approved (`docs/personal-build.md`), built, installed and first run by the user alone. Images and
   files are a placeholder with a link to the web client (sending stays deferred). Plan
   `docs/plans/completed/20261021-native-teams-m2-gpui-daily-driver.md`, outcome `docs/m2-acceptance.md`.
@@ -26,7 +26,7 @@ Status:
   (`teams-media`: Teams' SDP dialect, TURN, Opus, echo cancellation, H.264 on Cisco's OpenH264, PipeWire devices) and
   the app's calls, checked live for a, b and c in the UI sandbox, against each other and against the web client both
   ways (setup p50 2.1 s, a → b latency p50 230 ms, no echo above the recording's resolution). The personal build
-  (`teams`) makes and answers the user's own calls under the rules the user approved (`docs/personal-build.md`,
+  (`ngteams`) makes and answers the user's own calls under the rules the user approved (`docs/personal-build.md`,
   "Calls"), tested on the mock; the user's own real-call run, the checklist in `docs/m3-acceptance.md`, is still to
   come. Plan `docs/plans/completed/20261024-native-teams-m3-calls.md`, outcome `docs/m3-acceptance.md`.
 - **Next: M4**, meetings and the calendar (`docs/plans/20261026-native-teams-m4-meetings.md`).
@@ -50,9 +50,9 @@ Hard rules for contributors and agents are in [CLAUDE.md](CLAUDE.md).
 | `crates/teams-log` | the app's diagnostic log: one file per account (`0600` in a `0700` dir, rotated at 8 MiB, 4 older kept), our own crates' records only, written from a thread of its own; every line redacted by the logger itself (credential headers, token fields, sign-in's codes, Trouter's `user.authenticate`, a call SDP's ICE credentials, then JWT-shaped strings, `skypetoken=`, `Bearer `); full requests and frames only at `debug`; the "copy diagnostics" text |
 | `crates/teams-mock` | tests only (a dev-dependency, never a lab binary's): a local chat service and Trouter built from the synthetic fixtures in `tests/fixtures/{chatsvc,trouter,calling}/`, serving the conversation list, message pages, thread reads, the chat writes and the registrar, delivering each write to the other members' registered sockets; the calling service (the flight proxy's call requests with the account's skypetoken, their invitations, acceptances and ends delivered to the registered calling endpoints, calls of a caller it plays, their ring's end and hang-up, renegotiations); the TURN relay's credentials (`/trap/tokens`); with its `media` feature, a loopback media peer (a `teams-media` session behind the loopback TURN server answering and offering in Teams' dialect), and once a test turns the media on (`start_media`) one behind every party the mock plays (the test call's media controller, a group call's mixer, a caller of its own) and its renegotiations, on a loopback TURN server whose credentials `/trap/tokens` then hands out; clients reach it through the `test-support` mock origins |
 | `crates/teams-app` | the lab's GPUI app for one lab account, `teams-app --lab <alias> --secrets-fd <n> [--trace-fd <n>]`: its engine built as `teams-headless` builds one, its tokens only through the broker's socket; it refuses a `test-support` build and a window outside the UI sandbox or with `DISPLAY` set, reports another engine on the account, shows the account signed out when its refresh token is refused; and its credential broker `teams-app secrets --lab <alias> --fd <n>`: run outside the UI sandbox, it serves that account's own `teams-lab` Secret Service items on a socket pair's end and refuses any other account or application |
-| `crates/teams-signin` | the sign-in window: Microsoft's sign-in page in a `WebKitGTK` 6.0 webview, in a process of its own, behind a request guard that classifies every request a page sends (`teams_signin::classify`: reads, the token endpoint and authz in their captured queries, Entra's sign-in form) and logs it to `fence.log` before it goes; the `nativeclient` redirect is caught in the navigation policy and its code handed to the parent on a channel of its own, and `teams-auth` redeems it. Not a complete fence (two kinds of redirect never reach the guard, `docs/backlog/webkit-sign-in-guard-redirects.md`), so the lab's `teams-signin` binary opens only a loopback page and reaches nothing else; the `personal` feature (only `crates/teams` enables it) binds the same window to Entra's and the identity provider's hosts through a host gate |
+| `crates/teams-signin` | the sign-in window: Microsoft's sign-in page in a `WebKitGTK` 6.0 webview, in a process of its own, behind a request guard that classifies every request a page sends (`teams_signin::classify`: reads, the token endpoint and authz in their captured queries, Entra's sign-in form) and logs it to `fence.log` before it goes; the `nativeclient` redirect is caught in the navigation policy and its code handed to the parent on a channel of its own, and `teams-auth` redeems it. Not a complete fence (two kinds of redirect never reach the guard, `docs/backlog/webkit-sign-in-guard-redirects.md`), so the lab's `teams-signin` binary opens only a loopback page and reaches nothing else; the `personal` feature (only `crates/ngteams` enables it) binds the same window to Entra's and the identity provider's hosts through a host gate |
 | `crates/teams-signin-extension` | the sign-in window's `WebKitGTK` web process extension (a `cdylib`, hand FFI on the GLib `-sys` crates): connects every page's `send-request` to the guard's socket and drops each request the guard doesn't allow, every one when it has no guard |
-| `crates/teams` | the personal build (`docs/personal-build.md`): `teams`, the user's own accounts (one or several, all running at once in one window, switched from the rail's avatars and added from its "+") on the user's desktop under the personal fence (`teams-fence`'s `personal` feature, which only this crate enables), and `teams-signin-personal`, its sign-in window bound to Entra's and the identity provider's hosts through a host gate. No broker, no sandbox; its data under `~/.local/share/teams/` and `~/.config/teams/`, its tokens under `teams-personal` on the Secret Service. Left out of the root's `default-members`; both binaries refuse a `test-support` build and one `scripts/install-personal.sh` didn't make. Its calls (M3) run on the desktop's PipeWire and its camera through the desktop's camera portal (`teams::calling`). Its fence logs every send and denies none. Agents compile and mock-test it, install it only when the user asks, run it on their own only in its read-only mode, and may read its data dirs (never its keyring items or tokens) |
+| `crates/ngteams` | the personal build (`docs/personal-build.md`): `ngteams`, the user's own accounts (one or several, all running at once in one window, switched from the rail's avatars and added from its "+") on the user's desktop under the personal fence (`teams-fence`'s `personal` feature, which only this crate enables), and `ngteams-signin`, its sign-in window bound to Entra's and the identity provider's hosts through a host gate. No broker, no sandbox; its data under `~/.local/share/ngteams/` and `~/.config/ngteams/`, its tokens under `ngteams` on the Secret Service. Left out of the root's `default-members`; both binaries refuse a `test-support` build and one `scripts/install-personal.sh` didn't make. Its calls (M3) run on the desktop's PipeWire and its camera through the desktop's camera portal (`ngteams::calling`). Its fence logs every send and denies none. Agents compile and mock-test it, install it only when the user asks, run it on their own only in its read-only mode, and may read its data dirs (never its keyring items or tokens) |
 | `crates/teams-headless` | the headless lab binary: one lab account's native client (`teams-core`) from the command line, its fence from `Fence::open_lab`, its tokens from the Secret Service, its store under the lab's data dir; the live acceptance test (`tests/chat_live.rs`) |
 | `crates/proto-lab` | the lab harness CLI: Chrome for Testing, the armed browser fence (HTTP and WebSocket), login and status, native auth, read-only probes, captures and the sanitizer, bundle import and search, scenarios |
 | `crates/fixture-guard` | scans every `tests/fixtures/` and `docs/` for tokens, signatures, emails, real MRIs and GUIDs, meeting links and passcodes, and a call's network data (public IP addresses, ICE credentials, DTLS fingerprints, TURN credentials), and checks each fixture's `_synthetic` marker |
@@ -69,7 +69,7 @@ Hard rules for contributors and agents are in [CLAUDE.md](CLAUDE.md).
 | `build/patches/`, `vendor/`, `scripts/vendor-gpui.sh` | GPUI (`gpui-pre` 0.3.9) vendored with agterm-rs's external-surfaces patches, used through `[patch.crates-io]`; `scripts/vendor-gpui.sh --check` verifies it |
 | `scripts/lint-report.sh` | refuses inner `#![allow]`/`#![expect]`, lists complexity `#[expect]`s |
 | `scripts/own-presence-run.sh` | one `own-presence-*` live run with b's presence reads of a sampled beside it (M2 Task 18) |
-| `scripts/install-personal.sh`, `packaging/teams.desktop` | the personal build's release build and install under `~/.local` (its binaries, the install marker, the desktop entry), for the user to run; agents run it only when the user asks |
+| `scripts/install-personal.sh`, `packaging/ngteams.desktop` | the personal build's release build and install under `~/.local` (its binaries, the install marker, the desktop entry), for the user to run; agents run it only when the user asks |
 | `scripts/native-call-run.sh` | one native lab call (`teams-headless` on every end: a caller, callees answering with `watch --answer-lab-calls`, a late joiner), spaced 90 s after the chat's last call, run under the live lock (M3 Task 16) |
 | `scripts/reaction-pack.py`, `crates/teams-ui/assets/reactions/` | builds the reaction pack the app draws reactions with: Teams' reaction catalog (its CDN's emoticon metadata) as `catalog.tsv`, and Fluent Emoji 3D's pictures (MIT) packed as WebP into `emoji.bin`; run it again from a `fluentui-emoji` checkout when Teams' catalog version changes |
 | `scripts/fetch-openh264.sh` | downloads Cisco's prebuilt OpenH264 and its licence into a data dir's `openh264/` (the lab's; the user's own for the personal build, run by the user), its SHA-256 checked |
@@ -149,7 +149,7 @@ prebuilt OpenH264 at run time, only when its SHA-256 is Cisco's (`scripts/fetch-
 build compiles the bundled OpenH264 source, for the offline tests (`docs/protocol/calling.md`, "The H.264 codec").
 Which PipeWire a build opens is fixed when it is built: the UI sandbox's private one for the lab binaries and every
 `test-support` build, the desktop's only for the personal build (`teams-media`'s `personal` feature, which only
-`crates/teams` enables and `test-support` overrides); `teams-headless` opens none (its media is files).
+`crates/ngteams` enables and `test-support` overrides); `teams-headless` opens none (its media is files).
 
 ## `proto-lab`
 
@@ -548,20 +548,20 @@ flock ~/.local/share/teams-lab/live.lock timeout --signal=INT --kill-after=60 18
   cargo test -p teams-app --features live --test ui_live -- --nocapture
 ```
 
-## `teams` (the personal build)
+## `ngteams` (the personal build)
 
 The user's own Teams, built and installed by the user (`docs/personal-build.md`). An agent installs it, or starts it
 for the user, only on the user's request, each time; on its own it runs it only in its read-only mode (which sends
 nothing anyone sees or that changes the account, enforced by the app), to look at, screenshot and navigate it and read
 its logs and store ([The read-only mode](#the-read-only-mode-scriptsrun-personal-read-onlysh)); it may read
-`~/.local/share/teams/` and `~/.config/teams/`, never signs it in, and never reads the `teams-personal` keyring items or
+`~/.local/share/ngteams/` and `~/.config/ngteams/`, never signs it in, and never reads the `ngteams` keyring items or
 the user's tokens:
 
 ```sh
-scripts/install-personal.sh          # a release build of teams and teams-signin-personal, installed under ~/.local
-teams                                # the first run asks for your work account in its window, then signs it in
-teams --account you@your-tenant.com  # sign that account in (adding it when it is new), then start
-teams --forget you@your-tenant.com   # sign out and forget that account (quit Teams first; its store stays)
+scripts/install-personal.sh            # a release build of ngteams and ngteams-signin, installed under ~/.local
+ngteams                                # the first run asks for your work account in its window, then signs it in
+ngteams --account you@your-tenant.com  # sign that account in (adding it when it is new), then start
+ngteams --forget you@your-tenant.com   # sign out and forget that account (quit Teams first; its store stays)
 ```
 
 Several accounts run at once in one window: the rail's avatars above Settings switch between them, the "+" under them
@@ -572,8 +572,8 @@ a time across the accounts.
 The first run shows what the app sends on its own (typing, read receipts, presence) and sends none of it until that
 screen is confirmed. A refresh token Entra refuses shows "signed out", stops the engine and opens the sign-in window
 again. It may do whatever the Teams client lets its user do; its fence logs every send to
-`~/.local/share/teams/fence.log` and denies none. It sends what the user did or a setting the user turned on, and the
-follow-ups that needs. A plain `cargo build` at the root leaves it out; `cargo build -p teams`
+`~/.local/share/ngteams/fence.log` and denies none. It sends what the user did or a setting the user turned on, and the
+follow-ups that needs. A plain `cargo build` at the root leaves it out; `cargo build -p ngteams`
 gives binaries that refuse to start (no install marker).
 
 Calls (`docs/personal-build.md`, "Calls"): 1:1 and group-chat calls today, audio and video, on the desktop's PipeWire
@@ -582,14 +582,14 @@ call starts or joins on the user's action; any invitation addressed to the accou
 accounts, as a Teams client) and is answered or declined only by the user. "Test call" calls the echo service named in
 the web bundle. The microphone opens only once
 the call passed the fence; the camera is off at every start, join and answer. Video needs Cisco's OpenH264, which the
-user downloads with `scripts/fetch-openh264.sh ~/.local/share/teams` (the patent question is the user's:
+user downloads with `scripts/fetch-openh264.sh ~/.local/share/ngteams` (the patent question is the user's:
 `docs/backlog/openh264-patents-and-the-personal-build.md`); without it calls carry audio only. Without a PipeWire the
 app runs without calls. The user's own real-call run is the checklist in `docs/m3-acceptance.md`.
 
 ### The read-only mode (`scripts/run-personal-read-only.sh`)
 
-How an agent runs the personal build on its own: the installed `teams` in its read-only mode, on a snapshot of the
-user's files, in a UI sandbox of its own, its tokens through a broker outside it. The user's own running `teams` isn't
+How an agent runs the personal build on its own: the installed `ngteams` in its read-only mode, on a snapshot of the
+user's files, in a UI sandbox of its own, its tokens through a broker outside it. The user's own running `ngteams` isn't
 touched (no second push connection on the account, no endpoint or presence, the store read only by a consistent copy).
 
 ```sh
@@ -600,16 +600,16 @@ scripts/run-personal-read-only.sh --click 300 200       # a click in output pixe
 scripts/run-personal-read-only.sh --stop                # stops it all and deletes the run (--keep keeps it)
 ```
 
-The run lives in `~/.local/state/teams-read-only/run/`: `shots/`, the view trace `trace.jsonl`, `app.log`,
+The run lives in `~/.local/state/ngteams-read-only/run/`: `shots/`, the view trace `trace.jsonl`, `app.log`,
 `broker.log`, and the snapshot (`snapshot/config`, `snapshot/data`), whose `data/fence.log` gets a `refused_read_only`
 line (method, host, path shape) for every send refused and whose `data/logs/` is the app's diagnostic log. The script
-refuses a binary without the mode (`TEAMS_BIN` overrides `~/.local/lib/teams/teams`) and builds `ui-sandbox-run` into
+refuses a binary without the mode (`TEAMS_BIN` overrides `~/.local/lib/ngteams/ngteams`) and builds `ui-sandbox-run` into
 `target/lab` first. The pieces, each usable alone:
 
 ```sh
-teams snapshot --to <dir>                                # a copy of your Teams files (stores via VACUUM INTO, read-only)
-teams secrets --account <upn> --fd <n>                   # the broker: get only; put and delete refused (outside the sandbox)
-teams --read-only --account <upn> --data <dir> --secrets-fd <n> [--trace-fd <n>]   # in the UI sandbox only
+ngteams snapshot --to <dir>                                # a copy of your Teams files (stores via VACUUM INTO, read-only)
+ngteams secrets --account <upn> --fd <n>                   # the broker: get only; put and delete refused (outside the sandbox)
+ngteams --read-only --account <upn> --data <dir> --secrets-fd <n> [--trace-fd <n>]   # in the UI sandbox only
 ui-sandbox-run serve --dir <run> --broker <prog> [--broker-arg A]... --app <prog> [--app-arg A]...
 ```
 

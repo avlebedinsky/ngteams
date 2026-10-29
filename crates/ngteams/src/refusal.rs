@@ -5,8 +5,8 @@
 //!   `teams-signin`'s (a guard with test rules); cargo unifies it in from the dev-dependencies of any `cargo test`,
 //!   `--all-targets` or `--all-features` build, so every binary the gate leaves refuses to run;
 //! - **a build `scripts/install-personal.sh` didn't make**: the install marker, an environment variable only the script
-//!   sets, read at compile time ([`INSTALLED`]). A plain `cargo build -p teams`, debug or release, gives binaries that
-//!   refuse to start. It doesn't stop someone who sets the variable on purpose: agents never do (CLAUDE.md).
+//!   sets, read at compile time ([`INSTALLED`]). A plain `cargo build -p ngteams`, debug or release, gives binaries
+//!   that refuse to start. It doesn't stop someone who sets the variable on purpose: agents never do (CLAUDE.md).
 
 /// The install marker: set (to anything but empty) only when `scripts/install-personal.sh` compiled this crate.
 pub const INSTALLED: Option<&str> = option_env!("TEAMS_PERSONAL_INSTALL");

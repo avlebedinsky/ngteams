@@ -157,7 +157,7 @@ async fn another_account_application_or_no_audience_is_refused_and_reaches_no_st
     assert_eq!(value(&client, ACCOUNT, SPACES).await?.as_deref(), Some("own-1"));
 
     // another application, the account's own key: refused too
-    let (personal, _other_broker) = connect(&backing, "teams-personal")?;
+    let (personal, _other_broker) = connect(&backing, "ngteams")?;
     assert!(refused(&personal.get(&key(ACCOUNT, SPACES)).await));
     assert!(refused(
         &personal.put(&key(ACCOUNT, SPACES), &Secret::new(PLANTED)).await

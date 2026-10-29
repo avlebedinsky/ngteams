@@ -609,7 +609,7 @@ impl FenceLog {
         })
     }
 
-    /// Appends one request the personal build's read-only mode refused before anything was sent (`teams --read-only`:
+    /// Appends one request the personal build's read-only mode refused before anything was sent (`ngteams --read-only`:
     /// a write, an own-state request or a mutating plain request), as a single line, and flushes it: its method, host
     /// and path shape (every id replaced by its kind), never a query, header or body (verdict `deny`, event
     /// `refused_read_only`). Once an append has failed, every later one fails too.

@@ -14,7 +14,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use teams::setup::Setup;
+use ngteams::setup::Setup;
 use teams_auth::signin::{WindowAnswer, WindowRequest};
 use teams_auth::token::NATIVE_CLIENT_REDIRECT;
 use teams_fence::lab::{ConfigError, LabLocations, LabPaths};
@@ -95,11 +95,11 @@ fn only_this_crate_enables_the_personal_features() {
         found,
         [
             // the two crates' own tests of their personal parts, which no binary links
-            "crates/teams dependencies teams-fence",
-            "crates/teams dependencies teams-media",
-            "crates/teams dependencies teams-signin",
-            "crates/teams dev-dependencies teams-fence",
-            "crates/teams dev-dependencies teams-media",
+            "crates/ngteams dependencies teams-fence",
+            "crates/ngteams dependencies teams-media",
+            "crates/ngteams dependencies teams-signin",
+            "crates/ngteams dev-dependencies teams-fence",
+            "crates/ngteams dev-dependencies teams-media",
             "crates/teams-fence dev-dependencies teams-fence",
             // with `test-support` beside it, which wins: the build still opens only the sandbox's PipeWire
             "crates/teams-media dev-dependencies teams-media",
@@ -143,7 +143,7 @@ fn a_lab_binary_built_alone_has_neither_personal_feature() {
             assert!(!tree.contains(personal), "{lab} resolves {personal}");
         }
     }
-    let tree = features_of("teams");
+    let tree = features_of("ngteams");
     assert!(tree.contains(r#"teams-fence feature "personal""#), "{tree}");
     assert!(tree.contains(r#"teams-signin feature "personal""#), "{tree}");
     // its calls' devices: the desktop's PipeWire, and no test reach in a plain build of it
@@ -158,9 +158,12 @@ fn a_plain_build_at_the_root_leaves_the_personal_build_out() {
     let workspace = workspace();
     let members = list(&workspace, "members");
     let defaults = list(&workspace, "default-members");
-    assert!(members.contains(&"crates/teams".to_owned()));
-    assert!(!defaults.contains(&"crates/teams".to_owned()));
-    let mut rest: Vec<String> = members.into_iter().filter(|member| member != "crates/teams").collect();
+    assert!(members.contains(&"crates/ngteams".to_owned()));
+    assert!(!defaults.contains(&"crates/ngteams".to_owned()));
+    let mut rest: Vec<String> = members
+        .into_iter()
+        .filter(|member| member != "crates/ngteams")
+        .collect();
     rest.sort();
     let mut sorted = defaults;
     sorted.sort();
@@ -211,30 +214,30 @@ fn only_the_install_script_sets_the_install_marker_and_only_this_crate_reads_it(
     let marker = ["TEAMS_PERSONAL", "_INSTALL"].concat();
     assert_eq!(
         holding(&["crates", "scripts"], &marker),
-        ["crates/teams/src/refusal.rs", "scripts/install-personal.sh"]
+        ["crates/ngteams/src/refusal.rs", "scripts/install-personal.sh"]
     );
-    let refusal = fs::read_to_string(root().join("crates/teams/src/refusal.rs")).unwrap();
+    let refusal = fs::read_to_string(root().join("crates/ngteams/src/refusal.rs")).unwrap();
     assert!(refusal.contains(&format!("option_env!(\"{marker}\")")));
     let script = fs::read_to_string(root().join("scripts/install-personal.sh")).unwrap();
-    assert!(script.contains(&format!("{marker}=1")) && script.contains("--release -p teams"));
+    assert!(script.contains(&format!("{marker}=1")) && script.contains("--release -p ngteams"));
 }
 
 #[test]
 fn both_binaries_refuse_first() {
     // from the first function on (the imports above it name what comes later)
-    let text = fs::read_to_string(root().join("crates/teams/src/main.rs")).unwrap();
+    let text = fs::read_to_string(root().join("crates/ngteams/src/main.rs")).unwrap();
     let main = &text[text.find("fn main()").unwrap()..];
-    let refused = main.find("teams::refusal()").unwrap();
-    // the keyring is opened only through `teams::accounts`, which `main` reaches after the refusal
+    let refused = main.find("ngteams::refusal()").unwrap();
+    // the keyring is opened only through `ngteams::accounts`, which `main` reaches after the refusal
     for later in ["Cli::parse", "Setup::from_env", "gpui_platform", "accounts::"] {
         assert!(
             main.find(later).is_some_and(|at| at > refused),
             "{later} before the refusal"
         );
     }
-    let text = fs::read_to_string(root().join("crates/teams/src/bin/teams-signin-personal.rs")).unwrap();
+    let text = fs::read_to_string(root().join("crates/ngteams/src/bin/ngteams-signin.rs")).unwrap();
     let window = &text[text.find("fn prepare()").unwrap()..];
-    let refused = window.find("teams::refusal()").unwrap();
+    let refused = window.find("ngteams::refusal()").unwrap();
     for later in [
         "window_account",
         "Setup::from_env",
@@ -248,14 +251,15 @@ fn both_binaries_refuse_first() {
             "{later} before the refusal"
         );
     }
-    let reason = teams::refusal().unwrap();
+    let reason = ngteams::refusal().unwrap();
     assert!(reason.contains("test-support"), "a test build refuses: {reason}");
 }
 
 #[test]
 fn only_this_crate_names_the_personal_keyring_and_opens_the_personal_fence_and_never_the_lab_s() {
-    // in any crate's code (the broker's tests name it to show it refuses it)
-    let application = ["\"teams", "-personal\""].concat();
+    // as a store's application argument in any crate's code (the broker's tests name it to show it refuses it); the
+    // data dir and the app id share the name, never as an argument
+    let application = ["\"ngteams", "\")"].concat();
     let code: Vec<String> = fs::read_dir(root().join("crates"))
         .unwrap()
         .flatten()
@@ -264,20 +268,20 @@ fn only_this_crate_names_the_personal_keyring_and_opens_the_personal_fence_and_n
         .collect();
     let code: Vec<&str> = code.iter().map(String::as_str).collect();
     for file in holding(&code, &application) {
-        assert!(file.starts_with("crates/teams/"), "{file} names the personal keyring");
+        assert!(file.starts_with("crates/ngteams/"), "{file} names the personal keyring");
     }
-    assert_eq!(teams::KEYRING_APPLICATION, "teams-personal");
-    assert_ne!(teams::KEYRING_APPLICATION, LabPaths::KEYRING_APPLICATION);
-    let accounts = fs::read_to_string(root().join("crates/teams/src/accounts.rs")).unwrap();
+    assert_eq!(ngteams::KEYRING_APPLICATION, "ngteams");
+    assert_ne!(ngteams::KEYRING_APPLICATION, LabPaths::KEYRING_APPLICATION);
+    let accounts = fs::read_to_string(root().join("crates/ngteams/src/accounts.rs")).unwrap();
     assert!(accounts.contains("LazyKeyring::new(KEYRING_APPLICATION)"));
     let opener = ["open", "_personal("].concat();
     for file in holding(&["crates"], &opener) {
-        let allowed = file.starts_with("crates/teams/")
+        let allowed = file.starts_with("crates/ngteams/")
             || file.starts_with("crates/teams-fence/")
             || file.starts_with("crates/fence-seal/");
         assert!(allowed, "{file} opens the personal fence");
     }
-    for (path, text) in sources(&["crates/teams/src"]) {
+    for (path, text) in sources(&["crates/ngteams/src"]) {
         for lab in [
             "open_lab",
             "LabPaths::KEYRING_APPLICATION",
@@ -298,7 +302,7 @@ fn every_lab_binary_opening_the_lab_fence_refuses_a_build_with_personal() {
             let name = entry.file_name().to_string_lossy().into_owned();
             let src = entry.path().join("src");
             let binary = src.join("main.rs").is_file() || src.join("bin").is_dir();
-            if name == "teams" || !binary {
+            if name == "ngteams" || !binary {
                 continue;
             }
             let dir = format!("{parent}/{name}/src");
@@ -328,7 +332,7 @@ fn every_lab_binary_opening_the_lab_fence_refuses_a_build_with_personal() {
 #[test]
 fn both_binaries_built_with_test_support_refuse_and_touch_nothing() {
     let home = tempfile::tempdir().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_teams"))
+    let output = Command::new(env!("CARGO_BIN_EXE_ngteams"))
         .args(["--account", "someone@example.test"])
         .env_clear()
         .env("HOME", home.path())
@@ -341,7 +345,7 @@ fn both_binaries_built_with_test_support_refuse_and_touch_nothing() {
     assert!(String::from_utf8_lossy(&output.stderr).contains("test-support"));
     assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0, "nothing was created");
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_teams-signin-personal"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ngteams-signin"))
         .args(["--account", "someone@example.test"])
         .env_clear()
         .env("HOME", home.path())
@@ -376,22 +380,22 @@ fn each_side_refuses_the_other_s_data_dir() {
     let lab = LabLocations {
         config_file: dir.path().join("config/teams-lab/lab.toml"),
         data_dir: dir.path().join("share/teams-lab"),
-        personal_data_dir: dir.path().join("share/teams"),
+        personal_data_dir: dir.path().join("share/ngteams"),
     };
     // the personal build refuses the lab's
     let inside = PersonalPaths::new(
-        dir.path().join("config/teams"),
+        dir.path().join("config/ngteams"),
         dir.path().join("share/teams-lab/teams"),
     );
     assert!(matches!(
         Setup::new(inside, lab.clone()),
-        Err(teams::setup::SetupError::Personal(PersonalError::LabDataDir { .. }))
+        Err(ngteams::setup::SetupError::Personal(PersonalError::LabDataDir { .. }))
     ));
-    let apart = PersonalPaths::new(dir.path().join("config/teams"), dir.path().join("share/teams"));
+    let apart = PersonalPaths::new(dir.path().join("config/ngteams"), dir.path().join("share/ngteams"));
     assert!(Setup::new(apart, lab.clone()).is_ok());
     // a lab binary refuses the personal one
     let overlapping = LabLocations {
-        data_dir: dir.path().join("share/teams/lab"),
+        data_dir: dir.path().join("share/ngteams/lab"),
         ..lab
     };
     assert!(matches!(
@@ -416,9 +420,9 @@ fn a_lab_account_among_the_personal_accounts_is_refused() {
     let lab = LabLocations {
         config_file,
         data_dir: dir.path().join("share/teams-lab"),
-        personal_data_dir: dir.path().join("share/teams"),
+        personal_data_dir: dir.path().join("share/ngteams"),
     };
-    let paths = PersonalPaths::new(dir.path().join("config/teams"), dir.path().join("share/teams"));
+    let paths = PersonalPaths::new(dir.path().join("config/ngteams"), dir.path().join("share/ngteams"));
     let setup = Setup::new(paths, lab).unwrap();
     setup.ask_for("someone@example.test").unwrap();
     // written beside it by hand: every listing of the accounts refuses it, and asking for it does too
@@ -430,13 +434,13 @@ fn a_lab_account_among_the_personal_accounts_is_refused() {
         assert!(
             matches!(
                 refused,
-                Err(teams::setup::SetupError::Personal(PersonalError::LabAccount))
+                Err(ngteams::setup::SetupError::Personal(PersonalError::LabAccount))
             ),
             "{refused:?}"
         );
     }
     assert!(matches!(
         setup.ask_for("bot-a@lab.example.test"),
-        Err(teams::setup::SetupError::Personal(PersonalError::LabAccount))
+        Err(ngteams::setup::SetupError::Personal(PersonalError::LabAccount))
     ));
 }

@@ -49,7 +49,7 @@ impl Runner {
     /// Starts `account`'s engine: its fence on the floor, its calling on the devices, its push channel.
     ///
     /// # Errors
-    /// Why it couldn't start, said for the user (another `teams` runs on the account, its region can't be read).
+    /// Why it couldn't start, said for the user (another `ngteams` runs on the account, its region can't be read).
     pub fn start(&self, account: &PersonalAccount) -> Result<Started, String> {
         let fence = Fence::open_personal(&self.setup.paths, &account.upn)
             .map_err(|error| format!("{}: {error}", account.upn))?
@@ -132,7 +132,7 @@ pub fn add(setup: &Setup, upn: &str) -> Result<PersonalAccount, String> {
     })
 }
 
-/// Forgets the account `upn` (blocking), as `teams --forget` does: refused while its engine runs.
+/// Forgets the account `upn` (blocking), as `ngteams --forget` does: refused while its engine runs.
 ///
 /// # Errors
 /// Why it wasn't forgotten.

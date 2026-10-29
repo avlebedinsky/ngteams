@@ -1,5 +1,5 @@
 [package]
-name = "teams"
+name = "ngteams"
 description = "The personal build: the user's own Teams account on the user's desktop, under the personal fence (docs/personal-build.md). Agents compile and mock-test it only; it runs only when scripts/install-personal.sh built it"
 version.workspace = true
 edition.workspace = true
@@ -8,13 +8,13 @@ publish.workspace = true
 
 [[bin]]
 # the app
-name = "teams"
+name = "ngteams"
 path = "src/main.rs"
 
 [[bin]]
 # its sign-in window: teams-signin's window bound to Entra's and the identity provider's hosts
-name = "teams-signin-personal"
-path = "src/bin/teams-signin-personal.rs"
+name = "ngteams-signin"
+path = "src/bin/ngteams-signin.rs"
 
 [dependencies]
 clap.workspace = true
@@ -42,7 +42,7 @@ teams-media = { workspace = true, features = ["personal"] }
 teams-proto.workspace = true
 # the personal sign-in window: only this crate enables `personal`
 teams-signin = { workspace = true, features = ["personal"] }
-# `teams --forget` takes the account's engine lock before it deletes anything
+# `ngteams --forget` takes the account's engine lock before it deletes anything
 teams-store.workspace = true
 # the views and the bridge over the engine
 teams-ui.workspace = true

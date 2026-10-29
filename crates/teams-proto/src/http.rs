@@ -463,7 +463,7 @@ impl<C: Credentials> HttpTransport<C> {
         })
     }
 
-    /// This transport, read-only for the rest of its life (the personal build's read-only mode, `teams --read-only`):
+    /// This transport, read-only for the rest of its life (the personal build's read-only mode, `ngteams --read-only`):
     /// it sends reads (a [`Read`], a read by `POST` of the sealed list) and nothing else. A write ([`Transport::deliver`],
     /// a call write included), an own-state request (a registration) and a plain request with any method but `GET` or
     /// `HEAD` are refused before anything is sent ([`Refusal::ReadOnly`]), each logged to the fence's log as

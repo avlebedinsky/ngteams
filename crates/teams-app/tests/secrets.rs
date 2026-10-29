@@ -262,7 +262,7 @@ impl Broker {
 async fn the_broker_refuses_another_account_or_application_and_exits_when_the_socket_closes() -> TestResult {
     let broker = Broker::start()?;
     let lab = BrokerSecretStore::new(broker.socket.try_clone()?, "teams-lab")?;
-    let personal = BrokerSecretStore::new(broker.socket.try_clone()?, "teams-personal")?;
+    let personal = BrokerSecretStore::new(broker.socket.try_clone()?, "ngteams")?;
 
     assert!(refused(&lab.get(&key(UPN_A, SPACES)).await));
     assert!(refused(&lab.put(&key(UPN_A, SPACES), &Secret::new(PLANTED)).await));

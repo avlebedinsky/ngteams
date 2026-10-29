@@ -1,14 +1,14 @@
-//! The command line: `teams` (the app for the accounts `accounts.toml` holds; before the first sign-in, or when an
-//! account must sign in again, its window asks), `teams --account <UPN>` (a shortcut past that screen: the account to
-//! sign in, added when it is a new one, through the sign-in window at once), `teams --forget <UPN>` (signs out and
-//! forgets that account: its `teams-personal` items, its `accounts.toml` entry and its saved region, refused while
+//! The command line: `ngteams` (the app for the accounts `accounts.toml` holds; before the first sign-in, or when an
+//! account must sign in again, its window asks), `ngteams --account <UPN>` (a shortcut past that screen: the account to
+//! sign in, added when it is a new one, through the sign-in window at once), `ngteams --forget <UPN>` (signs out and
+//! forgets that account: its `ngteams` items, its `accounts.toml` entry and its saved region, refused while
 //! Teams runs for it; its store stays, to delete by hand).
 //!
 //! The read-only mode (`crate::read_only`, run by `scripts/run-personal-read-only.sh`):
-//! `teams --read-only --account <UPN> --data <snapshot> --secrets-fd <n> [--trace-fd <n>]` (or `TEAMS_READ_ONLY=1`
-//! in place of `--read-only`), the window over a snapshot in the UI sandbox only; `teams snapshot --to <dir>` (the
-//! snapshot of the user's files it runs on) and `teams secrets --account <UPN> --fd <n>` (its credential broker, `get`
-//! only, run outside the sandbox).
+//! `ngteams --read-only --account <UPN> --data <snapshot> --secrets-fd <n> [--trace-fd <n>]` (or `TEAMS_READ_ONLY=1`
+//! in place of `--read-only`), the window over a snapshot in the UI sandbox only; `ngteams snapshot --to <dir>` (the
+//! snapshot of the user's files it runs on) and `ngteams secrets --account <UPN> --fd <n>` (its credential broker,
+//! `get` only, run outside the sandbox).
 
 use std::os::fd::RawFd;
 use std::path::PathBuf;
@@ -17,7 +17,7 @@ use clap::{Args, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "teams",
+    name = "ngteams",
     about = "Microsoft Teams for your own accounts, under the personal build's fence. Prints no token.",
     args_conflicts_with_subcommands = true
 )]
@@ -43,11 +43,11 @@ pub struct ReadOnlyArgs {
     /// runs on a snapshot (`--data`) and only in the UI sandbox. `TEAMS_READ_ONLY=1` asks for it too.
     #[arg(long = "read-only")]
     pub read_only: bool,
-    /// The snapshot the read-only mode runs on (`teams snapshot --to <dir>`).
+    /// The snapshot the read-only mode runs on (`ngteams snapshot --to <dir>`).
     #[arg(long, value_name = "DIR")]
     pub data: Option<PathBuf>,
-    /// The credential broker's socket (`teams secrets`, the other end of a socket pair), handed to this process at its
-    /// start (3 or above): the read-only mode's only way to the account's tokens.
+    /// The credential broker's socket (`ngteams secrets`, the other end of a socket pair), handed to this process at
+    /// its start (3 or above): the read-only mode's only way to the account's tokens.
     #[arg(long, value_name = "N")]
     pub secrets_fd: Option<RawFd>,
     /// Where the view trace goes in the read-only mode: a descriptor open for writing, handed to this process at its
@@ -65,9 +65,9 @@ pub enum Command {
         #[arg(long, value_name = "DIR")]
         to: PathBuf,
     },
-    /// The read-only mode's credential broker: serves `get` of the account's own `teams-personal` Secret Service items
-    /// on descriptor `--fd` (one end of a socket pair), refuses `put`, `delete` and any other account or application;
-    /// exits when the socket closes. Run outside the UI sandbox; opens no window.
+    /// The read-only mode's credential broker: serves `get` of the account's own `ngteams` Secret Service
+    /// items on descriptor `--fd` (one end of a socket pair), refuses `put`, `delete` and any other account or
+    /// application; exits when the socket closes. Run outside the UI sandbox; opens no window.
     Secrets {
         /// The account (its UPN).
         #[arg(long, value_name = "UPN")]

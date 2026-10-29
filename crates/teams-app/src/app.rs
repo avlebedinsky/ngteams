@@ -149,11 +149,11 @@ pub fn title(alias: Alias) -> SharedString {
     titled(&[alias])
 }
 
-/// The window's title for `aliases`, the first account's first: `Teams (lab a)`, `Teams (lab a, b)`.
+/// The window's title for `aliases`, the first account's first: `ngteams (lab a)`, `ngteams (lab a, b)`.
 #[must_use]
 pub fn titled(aliases: &[Alias]) -> SharedString {
     let names: Vec<&str> = aliases.iter().map(|alias| alias.as_str()).collect();
-    format!("Teams (lab {})", names.join(", ")).into()
+    format!("ngteams (lab {})", names.join(", ")).into()
 }
 
 /// The name a lab account's avatar on the rail is shown by until its profile names it: `Lab A`.

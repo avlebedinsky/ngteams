@@ -8,7 +8,7 @@
 //!   ([`SANDBOX_CLIENT_CONF`]). Anything else is refused: no sandbox, a sandbox dir that is (or holds) the desktop's
 //!   runtime dir, a socket that leads out of the sandbox dir, the desktop's PipeWire or Pulse sockets, and a process
 //!   whose environment sets one of [`CONFIG_OVERRIDES`] (libpipewire would load that config instead of the sandbox's).
-//! - [`Reach::Desktop`] only for `personal` without `test-support` (only `crates/teams` enables `personal`): the
+//! - [`Reach::Desktop`] only for `personal` without `test-support` (only `crates/ngteams` enables `personal`): the
 //!   desktop session's server, `pipewire-0` in `PIPEWIRE_RUNTIME_DIR` or else `XDG_RUNTIME_DIR`.
 //!
 //! The socket is connected here and handed to libpipewire as a descriptor (`pw_context_connect_fd`), so libpipewire

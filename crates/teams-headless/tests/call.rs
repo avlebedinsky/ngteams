@@ -721,7 +721,7 @@ async fn join_with_no_running_call_ringing_in_time_places_nothing() {
 #[test]
 fn answering_lab_calls_lives_in_teams_headless_alone() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    for krate in ["teams-core", "teams-call", "teams-ui", "teams-app", "teams"] {
+    for krate in ["teams-core", "teams-call", "teams-ui", "teams-app", "ngteams"] {
         let files = sources(&root.join("crates").join(krate));
         assert!(!files.is_empty(), "{krate} has sources");
         for path in files {

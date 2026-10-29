@@ -627,8 +627,8 @@ impl EngineRequests {
         &self.me
     }
 
-    /// Whether the engine sends nothing (its outbox is read-only: the personal build's `teams --read-only`): every write
-    /// it is asked for is refused below the views, before the fence is asked, and logged to `fence.log` as
+    /// Whether the engine sends nothing (its outbox is read-only: the personal build's `ngteams --read-only`): every
+    /// write it is asked for is refused below the views, before the fence is asked, and logged to `fence.log` as
     /// `refused_read_only` ([`Outbox::is_read_only`]). Fixed when the engine starts.
     #[must_use]
     pub fn read_only(&self) -> bool {

@@ -1,7 +1,7 @@
 //! The personal sign-in window's host bound (`docs/personal-build.md`, "Its sign-in", Choice C, approved on
 //! 2026-10-23): Entra's sign-in host, its static content hosts, and the federated identity provider's hosts the user
 //! names in the account's `accounts.toml` entry (`idp_hosts`), `https` on 443 only. No Teams, Office or Graph host is on it: the window can
-//! only sign in. Only with the `personal` feature, which only `crates/teams` enables.
+//! only sign in. Only with the `personal` feature, which only `crates/ngteams` enables.
 
 use url::Url;
 

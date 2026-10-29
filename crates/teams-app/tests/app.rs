@@ -151,12 +151,12 @@ fn several_accounts_pair_each_lab_with_its_broker_s_socket_in_order() -> TestRes
 
 #[test]
 fn several_accounts_are_titled_and_named_by_their_aliases() {
-    assert_eq!(app::title(Alias::A).as_ref(), "Teams (lab a)");
-    assert_eq!(app::titled(&[Alias::A]).as_ref(), "Teams (lab a)");
-    assert_eq!(app::titled(&[Alias::A, Alias::B]).as_ref(), "Teams (lab a, b)");
+    assert_eq!(app::title(Alias::A).as_ref(), "ngteams (lab a)");
+    assert_eq!(app::titled(&[Alias::A]).as_ref(), "ngteams (lab a)");
+    assert_eq!(app::titled(&[Alias::A, Alias::B]).as_ref(), "ngteams (lab a, b)");
     assert_eq!(
         app::titled(&[Alias::C, Alias::A, Alias::B]).as_ref(),
-        "Teams (lab c, a, b)"
+        "ngteams (lab c, a, b)"
     );
     assert_eq!(app::account_name(Alias::B).as_ref(), "Lab B");
     assert_eq!(app::account_detail(Alias::B).as_ref(), "lab b");
@@ -231,7 +231,7 @@ fn a_build_with_test_support_refuses_to_run_before_it_touches_the_lab() -> TestR
 
 #[test]
 fn a_build_with_the_personal_fence_refuses_to_run() {
-    // `cargo test -p teams-app` builds without it; a workspace build with `teams` unifies it in
+    // `cargo test -p teams-app` builds without it; a workspace build with `ngteams` unifies it in
     let refusal = teams_app::guard::personal_refusal();
     assert_eq!(refusal.is_some(), teams_fence::personal_enabled());
     if let Some(refusal) = refusal {

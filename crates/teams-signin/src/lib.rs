@@ -20,8 +20,8 @@
 //! anywhere else only through [`egress::BlackHole`], which refuses it. The window is tested offline, and the lab keeps
 //! signing in through `proto-lab auth` (`docs/backlog/webkit-sign-in-guard-redirects.md`).
 //!
-//! **The personal sign-in window** (the `personal` feature, which only `crates/teams` enables, for its
-//! `teams-signin-personal` binary; `docs/personal-build.md`, Choice C, approved on 2026-10-23): the same window, guard
+//! **The personal sign-in window** (the `personal` feature, which only `crates/ngteams` enables, for its
+//! `ngteams-signin` binary; `docs/personal-build.md`, Choice C, approved on 2026-10-23): the same window, guard
 //! and hardening, bound to Entra's sign-in hosts and the identity provider's hosts the user names (`hosts`) instead of
 //! loopback: the guard denies every request off that bound (`Guard::hosts_only`), the navigation policy refuses every
 //! navigation off it, and the network session's only way out is the host gate (`egress::HostGate`), which opens a

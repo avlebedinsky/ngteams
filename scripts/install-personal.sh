@@ -1,14 +1,15 @@
 #!/usr/bin/env bash
-# Builds the personal build (`crates/teams`, docs/personal-build.md) as a release and installs it under ~/.local, for
+# Builds the personal build (`crates/ngteams`, docs/personal-build.md) as a release and installs it under ~/.local, for
 # the user to run on their own desktop. **Agents run this script only when the user asks** (CLAUDE.md): it is the only
 # thing that sets the install marker, without which both personal binaries refuse to start.
 #
-# - Builds `teams` and `teams-signin-personal` with one `cargo build --release -p teams`, its target dir apart from
+# - Builds `ngteams` and `ngteams-signin` with one `cargo build --release -p ngteams`, its target dir apart from
 #   every other build (`target/personal`), so no `test-support` or lab build is unified in.
-# - Installs both binaries and the sign-in window's web process extension into ~/.local/lib/teams/ (the window finds
-#   the extension beside itself, `teams` finds the window beside itself), `teams` linked from ~/.local/bin/, and
-#   `packaging/teams.desktop` into ~/.local/share/applications/ with its `Exec` pointing at the installed binary.
-# - Starts nothing. The first run is the user's: `teams`, which asks for the account (docs/personal-build.md, "The first run").
+# - Installs both binaries and the sign-in window's web process extension into ~/.local/lib/ngteams/ (the window finds
+#   the extension beside itself, `ngteams` finds the window beside itself), `ngteams` linked from ~/.local/bin/, and
+#   `packaging/ngteams.desktop` into ~/.local/share/applications/ with its `Exec` pointing at the installed binary.
+# - Starts nothing. The first run is the user's: `ngteams`, which asks for the account (docs/personal-build.md,
+#   "The first run").
 #
 # Usage: scripts/install-personal.sh   (PREFIX overrides ~/.local)
 set -euo pipefail
@@ -18,20 +19,20 @@ prefix="${PREFIX:-$HOME/.local}"
 target="$root/target/personal"
 
 cd "$root"
-TEAMS_PERSONAL_INSTALL=1 cargo build --release -p teams --target-dir "$target"
+TEAMS_PERSONAL_INSTALL=1 cargo build --release -p ngteams --target-dir "$target"
 
-lib="$prefix/lib/teams"
+lib="$prefix/lib/ngteams"
 bin="$prefix/bin"
 apps="$prefix/share/applications"
 install -d -m 0755 "$lib" "$bin" "$apps"
-install -m 0755 "$target/release/teams" "$lib/teams"
-install -m 0755 "$target/release/teams-signin-personal" "$lib/teams-signin-personal"
+install -m 0755 "$target/release/ngteams" "$lib/ngteams"
+install -m 0755 "$target/release/ngteams-signin" "$lib/ngteams-signin"
 extension="$target/release/libteams_signin_extension.so"
 [[ -f "$extension" ]] || extension="$target/release/deps/libteams_signin_extension.so"
 install -m 0644 "$extension" "$lib/libteams_signin_extension.so"
-ln -sfn "$lib/teams" "$bin/teams"
-sed "s|^Exec=teams$|Exec=$lib/teams|" "$root/packaging/teams.desktop" > "$apps/teams.desktop"
-chmod 0644 "$apps/teams.desktop"
+ln -sfn "$lib/ngteams" "$bin/ngteams"
+sed "s|^Exec=ngteams$|Exec=$lib/ngteams|" "$root/packaging/ngteams.desktop" > "$apps/ngteams.desktop"
+chmod 0644 "$apps/ngteams.desktop"
 
-echo "installed: $lib/teams (linked from $bin/teams) and $apps/teams.desktop"
+echo "installed: $lib/ngteams (linked from $bin/ngteams) and $apps/ngteams.desktop"
 echo "first run: start Teams and enter your work account   (then review the first-run screen before anything is sent on its own)"

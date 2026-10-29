@@ -38,8 +38,8 @@ teams-signin = { path = ".", features = ["test-support", "personal"] }
 # a guard with test rules (`Guard::with_own`, `SignInHosts::for_tests`): tests only; the binary refuses to run with it
 test-support = []
 # the personal sign-in window (docs/personal-build.md, Choice C): the host bound (`hosts`), the host gate
-# (`egress::HostGate`) and the guard and navigation policy bound to it. Only crates/teams enables it (a manifest test
-# checks every workspace manifest), for its `teams-signin-personal` binary; the lab's `teams-signin` binary refuses to
+# (`egress::HostGate`) and the guard and navigation policy bound to it. Only crates/ngteams enables it (a manifest test
+# checks every workspace manifest), for its `ngteams-signin` binary; the lab's `teams-signin` binary refuses to
 # run when a build unified it in
 personal = []
 

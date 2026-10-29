@@ -20,12 +20,12 @@ pub fn test_support_refusal() -> Option<&'static str> {
 }
 
 /// Why a build with the personal build's fence doesn't run (`teams-fence`'s `personal`, unified in by a build with
-/// `teams`), or `None` for a lab build.
+/// `ngteams`), or `None` for a lab build.
 #[must_use]
 pub fn personal_refusal() -> Option<&'static str> {
     teams_fence::personal_enabled().then_some(
-        "built with teams-fence's personal feature (a build with `teams`, --workspace or --all-features unify it in); \
-         rebuild with `cargo build -p teams-app`",
+        "built with teams-fence's personal feature (a build with `ngteams`, --workspace or --all-features unify it \
+         in); rebuild with `cargo build -p teams-app`",
     )
 }
 

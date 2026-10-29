@@ -1,4 +1,4 @@
-//! The read-only mode (`teams --read-only`, or `TEAMS_READ_ONLY=1`; CLAUDE.md, "Agents run the personal build only
+//! The read-only mode (`ngteams --read-only`, or `TEAMS_READ_ONLY=1`; CLAUDE.md, "Agents run the personal build only
 //! read-only"; `docs/personal-build.md`, "What agents may do"): the user's own account, looked at and navigated in a
 //! window of the UI sandbox, sending nothing that anyone sees or that changes the account. It is decided at the start
 //! and nothing turns it off while the app runs. `scripts/run-personal-read-only.sh` runs it.
@@ -10,7 +10,7 @@
 //!   every kind go (reads by `POST` too), and the session's own token renewal. The views offer no write
 //!   (`teams_ui::Core::read_only`), the settings send no typing, read receipt or presence
 //!   (`teams_ui::SettingsModel::read_only`), the rail adds and removes no account.
-//! - **No socket on the account**: no push channel (the user's own `teams` keeps its one Trouter connection and its
+//! - **No socket on the account**: no push channel (the user's own `ngteams` keeps its one Trouter connection and its
 //!   endpoint's presence; this one catches up by reads, `teams_core::account::READ_ONLY_POLL`) and no calling (no
 //!   PipeWire, camera or portal is opened, no calling endpoint registered, no call shown).
 //! - **Only in the UI sandbox** ([`window_allowed`]): no window on the desktop, `DISPLAY` unset; no tray item, and the
@@ -18,7 +18,7 @@
 //! - **On a snapshot** ([`crate::snapshot`]): its files are a copy (`--data <dir>`, laid out as
 //!   [`crate::snapshot::layout`]), refused when they overlap the user's own ([`check_apart`]), so it never opens the
 //!   user's store, never takes its engine lock and writes its own `fence.log`, settings and logs.
-//! - **Its credentials through a broker** started outside the sandbox (`teams secrets --account <UPN> --fd <n>`,
+//! - **Its credentials through a broker** started outside the sandbox (`ngteams secrets --account <UPN> --fd <n>`,
 //!   [`broker_scope`]: `get` only, a `put` or a `delete` refused), the app's end (`--secrets-fd`) used through an
 //!   [`OverlaySecretStore`]: a token renewed while it runs (a rotated refresh token included) lives in its memory only,
 //!   and the user's stored items stay as they are. An account whose stored token can't be used shows "signed out" and
@@ -95,8 +95,8 @@ pub fn check_apart(snapshot: &PersonalPaths, mine: &PersonalPaths) -> Result<(),
         for theirs in [mine.config_dir(), mine.data_dir()] {
             if overlapping(ours, theirs) {
                 return Err(format!(
-                    "read-only: {} overlaps your own Teams files ({}); it runs only on a snapshot (teams snapshot --to \
-                     <dir>)",
+                    "read-only: {} overlaps your own Teams files ({}); it runs only on a snapshot \
+                     (ngteams snapshot --to <dir>)",
                     ours.display(),
                     theirs.display()
                 ));
@@ -115,7 +115,7 @@ pub fn snapshot_paths(dir: &Path, mine: &PersonalPaths) -> Result<PersonalPaths,
     check_apart(&paths, mine)?;
     if !paths.accounts_file().is_file() {
         return Err(format!(
-            "read-only: {} holds no snapshot (no {}): make one with teams snapshot --to <dir>",
+            "read-only: {} holds no snapshot (no {}): make one with ngteams snapshot --to <dir>",
             dir.display(),
             paths.accounts_file().display()
         ));
@@ -123,7 +123,7 @@ pub fn snapshot_paths(dir: &Path, mine: &PersonalPaths) -> Result<PersonalPaths,
     Ok(paths)
 }
 
-/// What the read-only mode's broker serves (`teams secrets --account <UPN>`): `upn`'s `teams-personal` items, `get`
+/// What the read-only mode's broker serves (`ngteams secrets --account <UPN>`): `upn`'s `ngteams` items, `get`
 /// only.
 #[must_use]
 pub fn broker_scope(upn: &str) -> BrokerScope {

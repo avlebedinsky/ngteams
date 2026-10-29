@@ -1,13 +1,13 @@
 //! One account's engine, assembled the one way every binary builds it: the lab's (`crate::lab`: `teams-headless`,
-//! `teams-app`) and the personal build's (`crates/teams`). The binary hands in the account (its UPN, MRI and name, its
-//! store's file, its region as authz gave it), the fence it opened, the secret store its session takes its tokens from,
-//! and how the fence reads a target's members ([`Membership`]: the lab's live member read, or the personal fence's own
-//! source); [`start`] builds the account's [`Session`], the writes' transport (the chat base from the region's GTMs,
-//! UPS's base for the account's own availability), the member read with that transport's credential, the reads'
-//! transport (the middle tier's base from the GTM `middleTier`, the profile lookup's; CSA's from `chatSvcAggAfd`, the
-//! teams read's; UPS's from `presenceUPS`, the presence read's; AMS's from `amsV2`, the messages' pictures'), the push channel
-//! ([`Trouter`]) when asked for, the calling ([`AccountCalls`]: the calling stack's socket over the writes' transport, the
-//! account in its calls, their media) when asked for, and starts the engine.
+//! `teams-app`) and the personal build's (`crates/ngteams`). The binary hands in the account (its UPN, MRI and name,
+//! its store's file, its region as authz gave it), the fence it opened, the secret store its session takes its tokens
+//! from, and how the fence reads a target's members ([`Membership`]: the lab's live member read, or the personal
+//! fence's own source); [`start`] builds the account's [`Session`], the writes' transport (the chat base from the
+//! region's GTMs, UPS's base for the account's own availability), the member read with that transport's credential, the
+//! reads' transport (the middle tier's base from the GTM `middleTier`, the profile lookup's; CSA's from
+//! `chatSvcAggAfd`, the teams read's; UPS's from `presenceUPS`, the presence read's; AMS's from `amsV2`, the messages'
+//! pictures'), the push channel ([`Trouter`]) when asked for, the calling ([`AccountCalls`]: the calling stack's socket
+//! over the writes' transport, the account in its calls, their media) when asked for, and starts the engine.
 //!
 //! Nothing here reads or prints a token, and nothing is sent while the engine is built: the session asks its store for
 //! a token only when a request needs one.
@@ -132,7 +132,7 @@ pub struct Account<S> {
     pub known_names: Vec<(String, String)>,
     /// Whether, and how, the account calls; `None` runs the engine without calling.
     pub calls: Option<AccountCalls>,
-    /// Read-only (the personal build's `teams --read-only`, [`READ_ONLY_POLL`]): see [`start`].
+    /// Read-only (the personal build's `ngteams --read-only`, [`READ_ONLY_POLL`]): see [`start`].
     pub read_only: bool,
 }
 

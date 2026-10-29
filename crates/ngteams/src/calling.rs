@@ -7,13 +7,13 @@
 //!
 //! - **The devices** are the PipeWire this build allows ([`PipeWireDevices::connect`]): the personal build's is the
 //!   desktop's, its camera through the desktop's camera portal (fixed when `teams-media` is built with `personal`,
-//!   which only this crate enables; a test build's is the UI sandbox's only, so `cargo test -p teams` opens neither).
+//!   which only this crate enables; a test build's is the UI sandbox's only, so `cargo test -p ngteams` opens neither).
 //!   Without them the app runs without calls: no call is shown, and the engine has no calling socket.
 //! - **The test call** goes to the echo service by its MRI from the web bundle ([`echo`],
 //!   `teams_proto::TEAMS_ECHO_BOT_MRI`), never one taken from the network or the UI.
 //! - **Video**: a call takes video when the user's copy of Cisco's OpenH264 is in the personal data dir and is Cisco's
-//!   ([`openh264`]: `scripts/fetch-openh264.sh ~/.local/share/teams`); the settings' switch turns the codec off and on.
-//!   Without it the calls carry audio only.
+//!   ([`openh264`]: `scripts/fetch-openh264.sh ~/.local/share/ngteams`); the settings' switch turns the codec off and
+//!   on. Without it the calls carry audio only.
 //!
 //! The fence decides every call write (`teams_fence`'s personal call rule); nothing here sends anything.
 

@@ -3,7 +3,7 @@
 //! window is opened again, once; the settings ask for the first run's screen. The personal build's window shows calls
 //! when its devices opened (its test call to the web bundle's echo service, an invitation ringing by the name it
 //! gives), and none without them; a test build opens no PipeWire outside the UI sandbox. The engine is the personal
-//! build's own (`teams::engine::start`) over a `MemorySecretStore` holding no refresh token, so no request leaves the
+//! build's own (`ngteams::engine::start`) over a `MemorySecretStore` holding no refresh token, so no request leaves the
 //! process; the calls themselves run in `tests/calls.rs`. The rail's "+" opens the window asking for the account, and
 //! the account it names reaches the app as it runs (an account it runs already said on that window).
 
@@ -17,10 +17,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{TestAppContext, WindowHandle};
-use teams::accounts::{Runner, Started};
-use teams::app::{self, Launch, SIGNED_OUT_HINT, SignInAgain};
-use teams::calling::PersonalCalls;
-use teams::setup::Setup;
+use ngteams::accounts::{Runner, Started};
+use ngteams::app::{self, Launch, SIGNED_OUT_HINT, SignInAgain};
+use ngteams::calling::PersonalCalls;
+use ngteams::setup::Setup;
 use teams_auth::secrets::MemorySecretStore;
 use teams_core::{CallAction, CallActionError, CallId, EngineError, Event, IncomingCall, RegistrationReport};
 use teams_fence::lab::LabLocations;
@@ -39,9 +39,9 @@ fn signed_in_setup(dir: &tempfile::TempDir) -> (Setup, PersonalAccount) {
     let lab = LabLocations {
         config_file: dir.path().join("config/teams-lab/lab.toml"),
         data_dir: dir.path().join("share/teams-lab"),
-        personal_data_dir: dir.path().join("share/teams"),
+        personal_data_dir: dir.path().join("share/ngteams"),
     };
-    let paths = PersonalPaths::new(dir.path().join("config/teams"), dir.path().join("share/teams"));
+    let paths = PersonalPaths::new(dir.path().join("config/ngteams"), dir.path().join("share/ngteams"));
     let setup = Setup::new(paths, lab).unwrap();
     let account = PersonalAccount::new(
         "someone@example.test",
@@ -79,7 +79,7 @@ fn signed_out_shows_it_stops_the_engine_and_opens_the_sign_in_window_again() {
     let dir = tempfile::tempdir().unwrap();
     let (setup, account) = signed_in_setup(&dir);
     let fence = Arc::new(Fence::open_personal_with(&setup.paths, &account.upn, &setup.lab).unwrap());
-    let engine = teams::engine::start(&setup.paths, &account, fence, MemorySecretStore::new(), false, None).unwrap();
+    let engine = ngteams::engine::start(&setup.paths, &account, fence, MemorySecretStore::new(), false, None).unwrap();
     let core = engine.handle.requests();
     let cx = TestAppContext::single();
     let (models, bridge) = cx.update(|cx| app::bridge(engine.handle, None, cx));
@@ -118,7 +118,7 @@ fn shown_after_a_ring(calls: Option<&PersonalCalls>) -> (bool, bool, bool, bool,
     let (setup, account) = signed_in_setup(&dir);
     let fence = Arc::new(Fence::open_personal_with(&setup.paths, &account.upn, &setup.lab).unwrap());
     // the engine without calling: the models' side alone is under test here (tests/calls.rs runs the calls)
-    let engine = teams::engine::start(&setup.paths, &account, fence, MemorySecretStore::new(), false, None).unwrap();
+    let engine = ngteams::engine::start(&setup.paths, &account, fence, MemorySecretStore::new(), false, None).unwrap();
     let cx = TestAppContext::single();
     let (models, _bridge) = cx.update(|cx| app::bridge(engine.handle, calls, cx));
     cx.update(|cx| {
@@ -154,7 +154,7 @@ fn the_personal_build_shows_its_calls_and_an_invitation_rings_by_the_name_it_giv
         camera: PatternCamera::default(),
         pacing: Pacing::RealTime,
     });
-    let (engine_calls, calls) = teams::calling::on_devices(devices, None);
+    let (engine_calls, calls) = ngteams::calling::on_devices(devices, None);
     assert_eq!(
         calls.echo.as_str(),
         teams_proto::TEAMS_ECHO_BOT_MRI,
@@ -183,14 +183,14 @@ fn a_test_build_s_devices_are_the_sandbox_s_and_its_engine_without_them_places_n
     // `test-support` wins over `personal`: outside the UI sandbox the PipeWire is refused, so no call opens the desktop's
     let dir = tempfile::tempdir().unwrap();
     let (setup, account) = signed_in_setup(&dir);
-    assert!(teams::calling::open(&setup.paths).is_err() || std::env::var_os("UI_SANDBOX_DIR").is_some());
+    assert!(ngteams::calling::open(&setup.paths).is_err() || std::env::var_os("UI_SANDBOX_DIR").is_some());
     let fence = Arc::new(Fence::open_personal_with(&setup.paths, &account.upn, &setup.lab).unwrap());
-    let engine = teams::engine::start(&setup.paths, &account, fence, MemorySecretStore::new(), false, None).unwrap();
+    let engine = ngteams::engine::start(&setup.paths, &account, fence, MemorySecretStore::new(), false, None).unwrap();
     let refused = engine
         .handle
         .requests()
         .call(CallAction::TestCall {
-            echo: teams::calling::echo(),
+            echo: ngteams::calling::echo(),
         })
         .blocking_wait();
     assert!(
@@ -229,7 +229,7 @@ fn the_rail_s_plus_asks_for_an_account_and_says_one_the_app_runs_already() {
     let dir = tempfile::tempdir().unwrap();
     let (setup, account) = signed_in_setup(&dir);
     let fence = Arc::new(Fence::open_personal_with(&setup.paths, &account.upn, &setup.lab).unwrap());
-    let engine = teams::engine::start(&setup.paths, &account, fence, MemorySecretStore::new(), false, None).unwrap();
+    let engine = ngteams::engine::start(&setup.paths, &account, fence, MemorySecretStore::new(), false, None).unwrap();
     let cx = TestAppContext::single();
     let launch = Launch {
         first: Started {
@@ -285,7 +285,7 @@ fn the_read_only_mode_adds_removes_and_signs_in_no_account_and_says_signed_out_o
     let dir = tempfile::tempdir().unwrap();
     let (setup, account) = signed_in_setup(&dir);
     let fence = Arc::new(Fence::open_personal_with(&setup.paths, &account.upn, &setup.lab).unwrap());
-    let engine = teams::engine::start_read_only(&setup.paths, &account, fence, MemorySecretStore::new()).unwrap();
+    let engine = ngteams::engine::start_read_only(&setup.paths, &account, fence, MemorySecretStore::new()).unwrap();
     let core = engine.handle.requests();
     assert!(core.read_only(), "the views see the read-only mode");
     let signed_out = engine.session.watch_signed_out();

@@ -201,7 +201,7 @@ impl Notifications {
 
     #[expect(clippy::unused_self, reason = "a D-Bus method zbus calls on the object")]
     fn get_server_information(&self) -> (&'static str, &'static str, &'static str, &'static str) {
-        ("ui-sandbox", "ms-teams", "0", "1.2")
+        ("ui-sandbox", "ngteams", "0", "1.2")
     }
 }
 

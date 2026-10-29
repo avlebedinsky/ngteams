@@ -25,8 +25,9 @@
 //! any), the decision logged. The lab's native client sends its reads by `POST` as plain requests instead.
 //!
 //! The personal build's fence (`docs/personal-build.md`), which logs every send and denies none, is the `personal`
-//! module and `decision/audit.rs`, behind the `personal` feature only `crates/teams` enables: [`Fence::open_personal`] is its only constructor outside tests, and every lab binary refuses
-//! to run in a build that has it ([`personal_enabled`]). The keep-apart paths both builds check are [`apart`].
+//! module and `decision/audit.rs`, behind the `personal` feature only `crates/ngteams` enables:
+//! [`Fence::open_personal`] is its only constructor outside tests, and every lab binary refuses to run in a build that
+//! has it ([`personal_enabled`]). The keep-apart paths both builds check are [`apart`].
 //!
 //! Nothing outside this crate can bend a decision: a lab binary builds its fence only with [`Fence::open_lab`] (the
 //! roster from `lab.toml`, the log at the lab's `fence.log`), and [`MembershipSource`] is sealed, so its sources are
@@ -85,8 +86,8 @@ pub const fn test_support_enabled() -> bool {
 }
 
 /// Whether this build has the `personal` feature: the personal build's fence ([`Fence::open_personal`], the
-/// `personal` module). Only `crates/teams` enables it, but cargo unifies features across one build, so a lab binary
-/// built in one cargo invocation with `teams` (`--workspace`, `--all-features`) gets it too; every lab binary checks
+/// `personal` module). Only `crates/ngteams` enables it, but cargo unifies features across one build, so a lab binary
+/// built in one cargo invocation with `ngteams` (`--workspace`, `--all-features`) gets it too; every lab binary checks
 /// this and refuses to run.
 #[must_use]
 pub const fn personal_enabled() -> bool {

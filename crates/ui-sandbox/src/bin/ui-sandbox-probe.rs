@@ -25,7 +25,7 @@ use gpui::{
 };
 
 /// The probe window's Wayland app id.
-const APP_ID: &str = "ms-teams-ui-sandbox-probe";
+const APP_ID: &str = "ngteams-ui-sandbox-probe";
 /// The window's colour, 0xRRGGBB: a green no compositor background uses.
 const COLOR: u32 = 0x0020_c060;
 /// Frames presented before the window reports ready.

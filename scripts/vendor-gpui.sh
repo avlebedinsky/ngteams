@@ -41,14 +41,14 @@ case "${1:-}" in
   *) die "unknown argument: $1 (see --help)" ;;
 esac
 
-scratch="$(mktemp -d "${TMPDIR:-/tmp}/ms-teams-gpui-XXXXXX")"
+scratch="$(mktemp -d "${TMPDIR:-/tmp}/ngteams-gpui-XXXXXX")"
 trap 'rm -rf "$scratch"' EXIT
 
 # The verified crates.io source of $1 with its patches applied, in $scratch/built/$1.
 built() {
   local crate="$1" archive sum patch
   archive="$scratch/$crate-$GPUI_VERSION.crate"
-  curl -sSfL -A ms-teams-dev -o "$archive" "https://static.crates.io/crates/$crate/$crate-$GPUI_VERSION.crate"
+  curl -sSfL -A ngteams-dev -o "$archive" "https://static.crates.io/crates/$crate/$crate-$GPUI_VERSION.crate"
   sum="$(sha256sum "$archive" | cut -d' ' -f1)"
   [[ "$sum" == "${SHA256[$crate]}" ]] || die "$crate $GPUI_VERSION: sha256 $sum, expected ${SHA256[$crate]}"
   mkdir -p "$scratch/unpack" "$scratch/built"

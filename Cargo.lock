@@ -5020,6 +5020,38 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "650eef8c711430f1a879fdd01d4745a7deea475becfb90269c06775983bbf086"
 
 [[package]]
+name = "ngteams"
+version = "0.1.0"
+dependencies = [
+ "base64 0.23.1",
+ "clap",
+ "gpui-pre",
+ "gpui-pre-platform",
+ "libc",
+ "log",
+ "rustix",
+ "serde_json",
+ "teams-auth",
+ "teams-call",
+ "teams-core",
+ "teams-fence",
+ "teams-log",
+ "teams-media",
+ "teams-mock",
+ "teams-proto",
+ "teams-signin",
+ "teams-store",
+ "teams-trouter",
+ "teams-ui",
+ "tempfile",
+ "thiserror 2.0.21",
+ "tokio",
+ "toml 1.1.8+spec-1.1.0",
+ "ui-sandbox",
+ "wiremock",
+]
+
+[[package]]
 name = "nix"
 version = "0.31.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8189,38 +8221,6 @@ dependencies = [
  "thiserror 2.0.21",
  "windows 0.62.2",
  "windows-version",
-]
-
-[[package]]
-name = "teams"
-version = "0.1.0"
-dependencies = [
- "base64 0.23.1",
- "clap",
- "gpui-pre",
- "gpui-pre-platform",
- "libc",
- "log",
- "rustix",
- "serde_json",
- "teams-auth",
- "teams-call",
- "teams-core",
- "teams-fence",
- "teams-log",
- "teams-media",
- "teams-mock",
- "teams-proto",
- "teams-signin",
- "teams-store",
- "teams-trouter",
- "teams-ui",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "toml 1.1.8+spec-1.1.0",
- "ui-sandbox",
- "wiremock",
 ]
 
 [[package]]

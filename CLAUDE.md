@@ -1,4 +1,4 @@
-# ms-teams
+# ngteams
 
 A native Microsoft Teams client for Linux in Rust + GPUI, written against Teams' internal APIs with the web client as
 the reference. The next work is M4, meetings and the calendar (`docs/plans/20261026-native-teams-m4-meetings.md`);
@@ -9,7 +9,7 @@ finished plans are in `docs/plans/completed/`. Commands and layout are in [READM
 These hold for every agent and every change, with no exceptions. **Lab accounts contact only each other; everything
 else is allowed.** The lab browser's fence and the native client (its HTTP transport and its Trouter frames) follow
 this rule. The rules about writes, calls and the browser fence govern the lab and every lab binary; the personal build
-(`teams`) is the user's Teams, under the two rules about it below. The rules on the native client's sealed types,
+(`ngteams`) is the user's Teams, under the two rules about it below. The rules on the native client's sealed types,
 captures and tokens, agents and protocol notes hold for both builds.
 
 - **A change that fits a rule's test is an ordinary change and goes ahead**, with no stop to ask the user: a new read,
@@ -79,12 +79,12 @@ captures and tokens, agents and protocol notes hold for both builds.
   or `Fence::open_lab_account` (roster from `lab.toml`, the lab's `fence.log`), and `teams-fence`'s `test-support`
   feature (any roster, any log, fake membership sources) is enabled only under `[dev-dependencies]`, never as a
   normal dependency.
-- **The personal build (`teams`) is the user's Teams.** It is the user's own work accounts on the user's desktop (each
-  one the user added and signed in, all running at once, each with its own engine and fence): the `teams` and
-  `teams-signin-personal` binaries, its data under `~/.local/share/teams/` and `~/.config/teams/`, its Secret Service
-  items under `teams-personal`, no broker, no sandbox. Whatever the Teams client lets its user do, it may do: writes of
+- **The personal build (`ngteams`) is the user's Teams.** It is the user's own work accounts on the user's desktop (each
+  one the user added and signed in, all running at once, each with its own engine and fence): the `ngteams` and
+  `ngteams-signin` binaries, its data under `~/.local/share/ngteams/` and `~/.config/ngteams/`, its Secret Service
+  items under `ngteams`, no broker, no sandbox. Whatever the Teams client lets its user do, it may do: writes of
   every kind to any target, reads of every kind, calls of every kind. **Its fence logs every send and denies none**
-  (`teams-fence`'s personal policy, behind the `personal` feature only `crates/teams` enables, opened only by
+  (`teams-fence`'s personal policy, behind the `personal` feature only `crates/ngteams` enables, opened only by
   `Fence::open_personal`, one per account): a write goes through the outbox as a sealed `Mutating` type sent as
   `Authorized<_>` under the permit `Fence::check` gives it, and every write, plain request, read by `POST` and frame is
   logged to its `fence.log` before it goes (one that can't be logged isn't sent). It sends what the user did in the UI
@@ -93,21 +93,21 @@ captures and tokens, agents and protocol notes hold for both builds.
   reaching only Entra's sign-in hosts and the identity provider's hosts `accounts.toml` names, so the account's
   credentials go only to Microsoft's sign-in. Nothing in it changes a lab rule: every lab binary keeps the lab fence,
   refuses the personal data dir, keyring items and accounts, and refuses to run with `personal` or `test-support`
-  built in; `teams` refuses the lab's.
+  built in; `ngteams` refuses the lab's.
 - **Agents run the personal build only read-only, and install it only when the user asks.** Agents may compile the
-  `teams` crate in the gate and test it on `teams-mock`; any other `teams` or `teams-signin-personal` binary they leave
+  `ngteams` crate in the gate and test it on `teams-mock`; any other `ngteams` or `ngteams-signin` binary they leave
   is a `test-support` one, which refuses to run. Only on the user's explicit request in the conversation, each time,
   an agent runs `scripts/install-personal.sh` (the only way an agent builds a runnable personal binary or sets the
-  install marker; never a plain `cargo build -p teams`, which the root's `default-members` leave out), and may start
-  the installed `teams` detached for the user, its output discarded, then leave it alone. On their own initiative
+  install marker; never a plain `cargo build -p ngteams`, which the root's `default-members` leave out), and may start
+  the installed `ngteams` detached for the user, its output discarded, then leave it alone. On their own initiative
   agents may start it only in its read-only mode, look at and screenshot its window, drive its UI to navigate, and
-  read its logs and store while it runs; they may read `~/.local/share/teams/` and `~/.config/teams/` at any time.
+  read its logs and store while it runs; they may read `~/.local/share/ngteams/` and `~/.config/ngteams/` at any time.
   Read-only mode sends nothing anyone else sees or that changes the account (no message, edit, delete, reaction, call
   start, join, answer or decline, chat created, typing, read receipt, availability or status write, nor a delivery
   response that answers a call); reads, the app's own token renewal and the push socket's own session frames go. The
   app enforces it, not the agent's care: a send attempted in read-only mode is refused and logged. Agents start it
   only through `scripts/run-personal-read-only.sh`, which refuses an installed binary without that mode. Agents never sign it in, never drive, test or capture with it in
-  its sending mode, never read or write the `teams-personal` items and never receive the user's tokens.
+  its sending mode, never read or write the `ngteams` items and never receive the user's tokens.
 - **Protocol notes are written in our own words** in `docs/protocol/`. Microsoft JS is never copied into the repo.
 
 ## Patterns
@@ -400,7 +400,7 @@ What the code does and why. A change that undoes one of these needs a new reason
   fence first (`Fence::observe_delivery`): an invitation it doesn't offer or can't read is ignored and nothing is sent
   for it, the rest go to their consumer, answered only through the delivery's own connection by `FrameSink::respond`
   (or its two halves, above); the personal build opens its calling socket only when its devices opened
-  (`teams::calling::open`), its registration an own-state entry and its frames logged. The native client sends no
+  (`ngteams::calling::open`), its registration an own-state entry and its frames logged. The native client sends no
   `user.activity`; what makes an account show online is UPS's endpoint
   `PUT`, not `user.activity` (`docs/protocol/trouter.md`, "Own presence"). Its own availability goes out only as the sealed writes
   `SetEndpointAvailability` and `ForceAvailability`, transient writes of the outbox on `Scope::Account`, which the
@@ -439,7 +439,7 @@ What the code does and why. A change that undoes one of these needs a new reason
   demand without a push channel); a failed one is retried from the tick. **One engine per account**: `engine::start`
   takes `Store::engine_lock` (`flock` on `<store>-runs/engine.lock`) without waiting and is refused
   (`EngineError::AlreadyRunning`) while another engine holds it, in any process (`teams-app`, `teams-headless`,
-  `teams`): two would mean two Trouter sockets and doubled typing, read receipts and presence. The store's run locks
+  `ngteams`): two would mean two Trouter sockets and doubled typing, read receipts and presence. The store's run locks
   are apart from it.
 
 ### The app (`crates/teams-ui`, `teams-app`, `ui-sandbox`, `teams-signin`)
@@ -453,14 +453,14 @@ What the code does and why. A change that undoes one of these needs a new reason
   `DISPLAY` too (the UI kit's GPUI features would let it fall back to X11). Notifications and the tray go over `zbus`
   only to the session bus the app is given (`DBUS_SESSION_BUS_ADDRESS`), never `$XDG_RUNTIME_DIR/bus`; links open only
   through GPUI's `open_url`. The personal build runs on the user's desktop; agents run it only in its read-only mode.
-- **The personal build's read-only mode** (`crates/teams/src/read_only.rs`, `scripts/run-personal-read-only.sh`):
+- **The personal build's read-only mode** (`crates/ngteams/src/read_only.rs`, `scripts/run-personal-read-only.sh`):
   decided at start (`--read-only` or `TEAMS_READ_ONLY=1`), never turned off. Its engine's transports are read-only
   (`HttpTransport::read_only`): every write, call write, own-state request and mutating plain request is refused before
   the fence is asked (`Transport::read_only_refusal`, the outbox's first step) and logged as `refused_read_only`; the
   engine gets no push channel and no calling whatever was asked (`teams_core::account::listening`) and polls by reads
-  (`EngineOptions::poll`). It runs only on a snapshot (`teams snapshot`, stores copied with `VACUUM INTO` from a
+  (`EngineOptions::poll`). It runs only on a snapshot (`ngteams snapshot`, stores copied with `VACUUM INTO` from a
   read-only connection) apart from the user's files, only in the UI sandbox, with no tray and no PipeWire; its tokens
-  come from `teams secrets` (a `get`-only broker) through an `OverlaySecretStore`, so a renewal stays in memory, and it
+  come from `ngteams secrets` (a `get`-only broker) through an `OverlaySecretStore`, so a renewal stays in memory, and it
   never signs in. The views ask `Core::read_only` and the settings `SettingsModel::read_only` to offer no write.
 - **Several accounts in one window** (`teams-ui/src/accounts.rs`, `desktop.rs`): every account runs at once, each its
   own engine, bridge, models, notifier, call alert, own presence and tray count; the window holds a shell per account
@@ -508,7 +508,7 @@ What the code does and why. A change that undoes one of these needs a new reason
   in once linked (make before break), so a call's device never says it closed. Which PipeWire a build opens is fixed
   when it is built, never by an argument (`devices::pipewire::THIS_BUILD`): the UI sandbox's private one for the lab
   and for every `test-support` build (even with `personal` on, as `--all-features` builds it), the desktop's only for
-  `personal` alone, which only `crates/teams` enables; `teams-headless` opens none (its media is files). The lab app
+  `personal` alone, which only `crates/ngteams` enables; `teams-headless` opens none (its media is files). The lab app
   refuses a PipeWire outside the sandbox as it refuses a window outside it. The personal build's camera comes
   through the desktop's camera portal; a sandbox build asks only a portal on a bus inside the sandbox dir, where the
   sandbox's fake answers. WirePlumber moves a stream whose `target.object` names the current default to every later

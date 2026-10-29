@@ -48,7 +48,7 @@ const ANSWER_MISSING: u8 = 2;
 const ANSWER_REFUSED: u8 = 3;
 const ANSWER_FAILED: u8 = 4;
 
-/// What a broker serves: one application namespace (the lab's `teams-lab`, the personal build's `teams-personal`) and
+/// What a broker serves: one application namespace (the lab's `teams-lab`, the personal build's `ngteams`) and
 /// one account (its UPN), every audience under it; `get`, `put` and `delete`, or `get` alone ([`BrokerScope::get_only`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BrokerScope {
@@ -67,7 +67,7 @@ impl BrokerScope {
         }
     }
 
-    /// The same scope served read-only (the personal build's read-only mode, `teams secrets`): a `put` and a `delete`
+    /// The same scope served read-only (the personal build's read-only mode, `ngteams secrets`): a `put` and a `delete`
     /// are answered "refused" and reach no store, so the stored items are never rotated, overwritten or removed.
     #[must_use]
     pub fn get_only(mut self) -> Self {

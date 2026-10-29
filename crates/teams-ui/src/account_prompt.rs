@@ -1,5 +1,5 @@
 //! The personal build's first sign-in screen (`docs/personal-build.md`, "How the implementation reads it"): the window
-//! `teams` opens when no account is signed in yet, asking for the work account as Teams' own sign-in does, with "Sign
+//! `ngteams` opens when no account is signed in yet, asking for the work account as Teams' own sign-in does, with "Sign
 //! in". Enter or the button asks the app to sign that account in ([`AccountPromptEvent::SignIn`]); while Microsoft's
 //! sign-in window is open the field and the button wait, and a sign-in that stored nothing comes back as a line under
 //! the field ([`AccountPrompt::failed`]), the field open again. It sends nothing itself: the account goes only to the

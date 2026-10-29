@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Runs the installed personal build (`teams`) in its read-only mode for an agent to look at the user's real chats
+# Runs the installed personal build (`ngteams`) in its read-only mode for an agent to look at the user's real chats
 # (CLAUDE.md, "Agents run the personal build only read-only"; docs/personal-build.md, "What agents may do"):
 #
-# - a snapshot of the user's Teams files (`teams snapshot`: the accounts, the settings, the regions and a consistent
-#   copy of each store, read without writing it), so the user's own running `teams` is never touched;
+# - a snapshot of the user's Teams files (`ngteams snapshot`: the accounts, the settings, the regions and a consistent
+#   copy of each store, read without writing it), so the user's own running `ngteams` is never touched;
 # - a UI sandbox of its own (`ui-sandbox-run serve`: a nested niri on a headless weston, a private bus), with
-#   `teams secrets` outside it (the account's `teams-personal` items, `get` only) and `teams --read-only` inside it,
-#   on the snapshot, which sends nothing that anyone sees or that changes the account, opens no push channel and no
+#   `ngteams secrets` outside it (the account's `ngteams` items, `get` only) and `ngteams --read-only` inside
+#   it, on the snapshot, which sends nothing that anyone sees or that changes the account, opens no push channel and no
 #   calls, and logs every refusal to the snapshot's `fence.log`.
 #
 # The agent never sees a token: the broker hands them to the app over a socket pair.
@@ -22,16 +22,17 @@
 #   scripts/run-personal-read-only.sh --stop [--keep]   stops it all; deletes the run (the snapshot of your chats
 #                                                       included) unless --keep
 #
-# TEAMS_BIN overrides the installed binary (default: ~/.local/lib/teams/teams, as scripts/install-personal.sh puts it).
-# It refuses a binary without the read-only mode. It needs no live lock (it isn't a lab run; its sandbox is its own).
+# TEAMS_BIN overrides the installed binary (default: ~/.local/lib/ngteams/ngteams, as scripts/install-personal.sh
+# puts it). It refuses a binary without the read-only mode. It needs no live lock (it isn't a lab run; its sandbox is
+# its own).
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
-state="${XDG_STATE_HOME:-$HOME/.local/state}/teams-read-only"
+state="${XDG_STATE_HOME:-$HOME/.local/state}/ngteams-read-only"
 run="$state/run"
 pidfile="$run/holder.pid"
 runner="$root/target/lab/debug/ui-sandbox-run"
-teams="${TEAMS_BIN:-$HOME/.local/lib/teams/teams}"
+teams="${TEAMS_BIN:-$HOME/.local/lib/ngteams/ngteams}"
 
 die() {
     echo "run-personal-read-only: $*" >&2
@@ -89,7 +90,7 @@ stop() {
 start() {
     local upn="$1"
     running && die "already running ($run): stop it first with $0 --stop"
-    [[ -x "$teams" ]] || die "no installed teams at $teams (the user installs it: scripts/install-personal.sh)"
+    [[ -x "$teams" ]] || die "no installed ngteams at $teams (the user installs it: scripts/install-personal.sh)"
     # without executing it: a build with the read-only mode reads its switch's variable
     grep -qa "TEAMS_READ_ONLY" "$teams" ||
         die "$teams has no read-only mode: it needs a reinstall (the user's: scripts/install-personal.sh)"
@@ -129,7 +130,7 @@ start() {
 }
 
 case "${1:-}" in
-"" | -h | --help) sed -n '2,26s/^# \{0,1\}//p' "$0" ;;
+"" | -h | --help) sed -n '2,27s/^# \{0,1\}//p' "$0" ;;
 --stop) stop "$([[ "${2:-}" == --keep ]] && echo keep || echo delete)" ;;
 --status)
     if running; then echo "running"; else echo "not running"; fi

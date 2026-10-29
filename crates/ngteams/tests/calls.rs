@@ -1,9 +1,9 @@
 //! The personal build's calls on the mock (`teams-mock`'s calling service, its Trouter and its media: a loopback TURN
 //! server and a loopback peer behind each party it plays), under the personal fence (`docs/personal-build.md`,
-//! "Calls"): each account an engine of its own, as `crates/teams` assembles one, with the personal fence of its account
-//! (which logs every send and denies none, so it reads no members), its own `fence.log`, its messaging socket and its
-//! calling socket, its calls' media on the file backend (a tone in, a recording out, each opening of the microphone and the
-//! camera counted). No PipeWire and no portal is opened (`test-support` wins over `personal`).
+//! "Calls"): each account an engine of its own, as `crates/ngteams` assembles one, with the personal fence of its
+//! account (which logs every send and denies none, so it reads no members), its own `fence.log`, its messaging socket
+//! and its calling socket, its calls' media on the file backend (a tone in, a recording out, each opening of the
+//! microphone and the camera counted). No PipeWire and no portal is opened (`test-support` wins over `personal`).
 //!
 //! - the test call to the web bundle's echo service: every write permitted and logged, its registration an own-state
 //!   entry, its frames logged, no plain request, the microphone opened only once the start passed, the camera never;
@@ -488,7 +488,7 @@ fn heard(path: &Path, tone: Tone, stretch: Duration) -> f32 {
 
 /// The test call's echo service: the web bundle's, as the personal build's "Test call" names it.
 fn echo() -> Mri {
-    teams::calling::echo()
+    ngteams::calling::echo()
 }
 
 #[tokio::test]

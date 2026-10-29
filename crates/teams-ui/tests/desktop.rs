@@ -170,7 +170,7 @@ impl OnDesktop {
             let desktop = cx.new(|cx| {
                 Desktop::new(
                     DesktopParts {
-                        app_id: "ms-teams-test",
+                        app_id: "ngteams-test",
                         app_name: "Teams (test)".into(),
                         title: "Teams (test)".into(),
                         shell,

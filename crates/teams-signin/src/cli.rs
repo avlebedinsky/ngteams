@@ -61,11 +61,11 @@ pub fn test_support_refusal() -> Option<&'static str> {
 }
 
 /// Why a lab window may not run: a build with the personal build's features (`teams-signin`'s or `teams-fence`'s
-/// `personal`), which a lab binary built in one cargo invocation with `teams` gets unified in.
+/// `personal`), which a lab binary built in one cargo invocation with `ngteams` gets unified in.
 #[must_use]
 pub fn personal_refusal() -> Option<&'static str> {
     (cfg!(feature = "personal") || teams_fence::personal_enabled()).then_some(
-        "built with the personal build's `personal` feature (unified in by a build with `teams`): build it with \
+        "built with the personal build's `personal` feature (unified in by a build with `ngteams`): build it with \
          `cargo build -p teams-signin`",
     )
 }

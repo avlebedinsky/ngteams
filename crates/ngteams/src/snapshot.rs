@@ -1,9 +1,9 @@
-//! `teams snapshot --to <dir>`: a copy of the user's personal files for the read-only mode to run on
+//! `ngteams snapshot --to <dir>`: a copy of the user's personal files for the read-only mode to run on
 //! (`crate::read_only`), so it never opens, locks or writes the user's own store, settings or `fence.log`.
 //!
 //! Copied, under `<dir>` laid out as [`layout`] names it: `accounts.toml` (and an earlier build's `account.toml`), the
 //! settings, every account's region and every account's store, each store as a consistent copy read without writing
-//! it ([`teams_store::snapshot::snapshot`]: `VACUUM INTO` from a read-only connection, the user's running `teams`
+//! it ([`teams_store::snapshot::snapshot`]: `VACUUM INTO` from a read-only connection, the user's running `ngteams`
 //! included). Left out: `fence.log`, the diagnostic logs, OpenH264, a store's run and engine locks: the read-only mode
 //! makes its own. Nothing of the source is written; `<dir>` must be new (or empty) and lie apart from the user's
 //! own directories, and is made `0700`, its files `0600`.
@@ -31,7 +31,7 @@ pub enum SnapshotError {
 }
 
 /// The personal files laid out under a snapshot's root `dir`: `<dir>/config` and `<dir>/data`, as
-/// `~/.config/teams/` and `~/.local/share/teams/` hold them.
+/// `~/.config/ngteams/` and `~/.local/share/ngteams/` hold them.
 #[must_use]
 pub fn layout(dir: &Path) -> PersonalPaths {
     PersonalPaths::new(dir.join("config"), dir.join("data"))

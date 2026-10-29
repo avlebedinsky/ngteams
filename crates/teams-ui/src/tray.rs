@@ -2,7 +2,7 @@
 //!
 //! - **The total** ([`Tray`]): the store's unread count summed over the chats the chat list shows (not a team's
 //!   channels, not the account's own streams), counted again a moment after the models say a chat changed, each chat
-//!   asked again only when it changed since it was counted. The item's title and tooltip say it ("Teams: 3 unread"),
+//!   asked again only when it changed since it was counted. The item's title and tooltip say it ("ngteams: 3 unread"),
 //!   its status is `NeedsAttention` while it isn't 0, `Active` otherwise.
 //! - **The item** ([`BusTray`]): `org.kde.StatusNotifierItem` at [`ITEM_PATH`] and its menu, `com.canonical.dbusmenu`
 //!   at [`MENU_PATH`], on the connection to the bus the app is given ([`crate::bus`]), under the name
@@ -673,8 +673,8 @@ mod tests {
 
     #[test]
     fn the_title_says_the_total() {
-        assert_eq!(title("Teams", 0), "Teams");
-        assert_eq!(title("Teams", 3), "Teams: 3 unread");
+        assert_eq!(title("App", 0), "App");
+        assert_eq!(title("App", 3), "App: 3 unread");
         assert_eq!(status(0), "Active");
         assert_eq!(status(1), "NeedsAttention");
     }

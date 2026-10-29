@@ -454,7 +454,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         &self.me
     }
 
-    /// Whether the outbox sends nothing (its transport is read-only: the personal build's `teams --read-only`): every
+    /// Whether the outbox sends nothing (its transport is read-only: the personal build's `ngteams --read-only`): every
     /// write it is asked for, a row's, a transient's or a call's, is refused before the fence is asked and logged to
     /// `fence.log` as `refused_read_only`; a row is failed, a transient dropped, a call write not sent.
     #[must_use]
@@ -827,7 +827,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
     }
 
     async fn deliver<R: Mutating + Send>(&self, request: R) -> Tried {
-        // read-only (the personal build's `teams --read-only`): refused before the fence is asked, logged by the
+        // read-only (the personal build's `ngteams --read-only`): refused before the fence is asked, logged by the
         // transport as `refused_read_only`; nothing is sent, and nothing tries it again
         if let Some(refused) = self.transport.read_only_refusal(&request) {
             log::info!("read-only: {} refused", request.target().kind());

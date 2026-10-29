@@ -259,7 +259,7 @@ fn load_reads_the_file_and_names_it_on_error() {
     let locations = LabLocations {
         config_file: file.clone(),
         data_dir: dir.path().join("data"),
-        personal_data_dir: dir.path().join("teams"),
+        personal_data_dir: dir.path().join("ngteams"),
     };
     let config = LabConfig::load(&locations).unwrap();
     assert_eq!(config.paths().data_dir(), dir.path().join("data"));
@@ -277,7 +277,7 @@ fn lab_paths_follow_lab_toml_and_need_none() {
     let locations = LabLocations {
         config_file: file.clone(),
         data_dir: dir.path().join("default"),
-        personal_data_dir: dir.path().join("teams"),
+        personal_data_dir: dir.path().join("ngteams"),
     };
 
     // no lab.toml: the default data dir
@@ -358,7 +358,7 @@ fn lab_file(text: &str) -> std::io::Result<(tempfile::TempDir, LabLocations)> {
     let locations = LabLocations {
         config_file: file,
         data_dir: dir.path().join("data"),
-        personal_data_dir: dir.path().join("teams"),
+        personal_data_dir: dir.path().join("ngteams"),
     };
     Ok((dir, locations))
 }
@@ -581,17 +581,17 @@ fn only_a_group_chat_id_is_recorded_or_read() {
 }
 
 #[test]
-fn the_personal_data_dir_is_where_the_xdg_data_home_puts_teams() {
+fn the_personal_data_dir_is_where_the_xdg_data_home_puts_ngteams() {
     let locations = LabLocations::resolve(None, Some("/data".into()), Some("/home/someone".into())).unwrap();
     assert_eq!(locations.data_dir, Path::new("/data/teams-lab"));
-    assert_eq!(locations.personal_data_dir, Path::new("/data/teams"));
+    assert_eq!(locations.personal_data_dir, Path::new("/data/ngteams"));
 }
 
 #[test]
 fn a_lab_data_dir_that_is_holds_or_lies_inside_the_personal_one_is_refused() {
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("lab.toml");
-    let personal = dir.path().join("share/teams");
+    let personal = dir.path().join("share/ngteams");
     // no lab.toml: the default data dir is checked as lab_paths falls back to it
     for default in [personal.clone(), personal.join("lab"), dir.path().join("share")] {
         let locations = LabLocations {

@@ -135,7 +135,7 @@ notifications, the README and the tests for the old name. Errors say what happen
    user's files, a sandbox of its own, nothing sent; `--shot <name>`, `--key <spec>`, `--type <text>`,
    `--click <x> <y>` drive it, `--stop` ends it and deletes the snapshot). It shows what the *installed* build does,
    not your change, and the user's chats are private: describe what you saw, never paste names or message text. The
-   script refuses a binary without the read-only mode; never start `teams` any other way.
+   script refuses a binary without the read-only mode; never start `ngteams` any other way.
 
 When reporting, list the surfaces changed and which shots you looked at; offer the personal-build install only when the
 user asks for it (CLAUDE.md: agents install it only on request, and start it on their own only read-only).

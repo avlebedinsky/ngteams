@@ -76,7 +76,7 @@ fn notifications_reach_the_server_on_the_bus_given_and_its_activations_come_back
     };
     runtime().block_on(async {
         let connection = bus::connect(private.address()).await.unwrap();
-        let (server, mut activations) = BusNotifications::start(&connection, "Teams (lab a)").await.unwrap();
+        let (server, mut activations) = BusNotifications::start(&connection, "ngteams (lab a)").await.unwrap();
         let first = server
             .show(&notice(NoticeKind::Message, "Bee", "lunch <at> noon & after"), 0)
             .await
@@ -92,7 +92,7 @@ fn notifications_reach_the_server_on_the_bus_given_and_its_activations_come_back
         assert_eq!(got.len(), 2, "{got:?}");
         let me = connection.unique_name().unwrap().to_string();
         assert_eq!(got[0].sender, me);
-        assert_eq!(got[0].app_name, "Teams (lab a)");
+        assert_eq!(got[0].app_name, "ngteams (lab a)");
         assert_eq!((got[0].summary.as_str(), got[0].replaces_id), ("Bee", 0));
         // the fake reads no markup: the text as it is
         assert_eq!(got[0].body, "lunch <at> noon & after");
@@ -164,7 +164,7 @@ fn the_tray_item_registers_shows_the_total_and_asks_for_the_window_and_the_quit(
     runtime().block_on(async {
         let connection = bus::connect(private.address()).await.unwrap();
         let (events, mut asked) = mpsc::unbounded_channel();
-        let (tray, _hosted) = BusTray::start(&connection, "ms-teams-lab", "Teams (lab a)", events)
+        let (tray, _hosted) = BusTray::start(&connection, "ngteams-lab", "ngteams (lab a)", events)
             .await
             .unwrap();
         let name = tray.name().to_owned();
@@ -178,9 +178,9 @@ fn the_tray_item_registers_shows_the_total_and_asks_for_the_window_and_the_quit(
         let host = private.connect().unwrap();
         let host: zbus::Connection = host.into();
         let title: String = property(&host, &name, ITEM_PATH, ITEM, "Title").await;
-        assert_eq!(title, "Teams (lab a)");
+        assert_eq!(title, "ngteams (lab a)");
         let id: String = property(&host, &name, ITEM_PATH, ITEM, "Id").await;
-        assert_eq!(id, "ms-teams-lab");
+        assert_eq!(id, "ngteams-lab");
         let menu: zbus::zvariant::OwnedObjectPath = property(&host, &name, ITEM_PATH, ITEM, "Menu").await;
         assert_eq!(menu.as_str(), MENU_PATH);
 
@@ -189,13 +189,13 @@ fn the_tray_item_registers_shows_the_total_and_asks_for_the_window_and_the_quit(
         tray.set_unread(3).await;
         tokio::time::timeout(WAIT, titled.next()).await.unwrap().unwrap();
         let title: String = property(&host, &name, ITEM_PATH, ITEM, "Title").await;
-        assert_eq!(title, "Teams (lab a): 3 unread");
+        assert_eq!(title, "ngteams (lab a): 3 unread");
         let status: String = property(&host, &name, ITEM_PATH, ITEM, "Status").await;
         assert_eq!(status, "NeedsAttention");
         let icon: String = property(&host, &name, ITEM_PATH, ITEM, "IconName").await;
         assert_eq!(icon, "mail-unread");
         let (_, _, tip, _): ToolTip = property(&host, &name, ITEM_PATH, ITEM, "ToolTip").await;
-        assert_eq!(tip, "Teams (lab a): 3 unread");
+        assert_eq!(tip, "ngteams (lab a): 3 unread");
 
         item.call::<_, _, ()>("Activate", &(0_i32, 0_i32)).await.unwrap();
         assert_eq!(asked.recv().await, Some(TrayEvent::Open));
@@ -246,7 +246,7 @@ fn the_tray_item_follows_its_watcher_and_is_gone_with_the_bus() {
     runtime().block_on(async {
         let connection = bus::connect(private.address()).await.unwrap();
         let (events, _asked) = mpsc::unbounded_channel();
-        let (tray, mut hosted) = BusTray::start(&connection, "ms-teams-lab", "Teams (lab a)", events)
+        let (tray, mut hosted) = BusTray::start(&connection, "ngteams-lab", "ngteams (lab a)", events)
             .await
             .unwrap();
         assert_eq!(private.tray_items().len(), 1);

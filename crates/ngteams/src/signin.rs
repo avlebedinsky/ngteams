@@ -4,7 +4,7 @@
 //! 1. the authorize request for the account `accounts.toml` holds (its UPN as `login_hint`; once known, its object id
 //!    and tenant required of the ID token), the native client `1fec8e78-…` with the `nativeclient` redirect, never
 //!    another client id or a borrowed device claim;
-//! 2. the sign-in window, `teams-signin-personal --account <UPN>` beside this binary ([`window_command`]; its arguments
+//! 2. the sign-in window, `ngteams-signin --account <UPN>` beside this binary ([`window_command`]; its arguments
 //!    read by [`window_account`]), bound to that account's identity provider hosts, which answers the redirect
 //!    (`teams_auth::signin`);
 //! 3. the code redeemed only for that account: the refresh token stored under the account's UPN in the store handed in
@@ -42,8 +42,8 @@ use teams_fence::personal::{PersonalAccount, PersonalError};
 
 use crate::setup::Setup;
 
-/// The sign-in window's binary, beside `teams`.
-pub const WINDOW_BINARY: &str = "teams-signin-personal";
+/// The sign-in window's binary, beside `ngteams`.
+pub const WINDOW_BINARY: &str = "ngteams-signin";
 
 /// Why a sign-in stored nothing.
 #[derive(Debug, thiserror::Error)]

@@ -1025,7 +1025,7 @@ impl SettingsModel {
         self
     }
 
-    /// The settings of the app's read-only mode (the personal build's `teams --read-only`): typing, read receipts
+    /// The settings of the app's read-only mode (the personal build's `ngteams --read-only`): typing, read receipts
     /// and presence are never sent whatever their switches say, and no first run's screen is shown (it asks only about
     /// those).
     #[must_use]

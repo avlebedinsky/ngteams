@@ -28,7 +28,7 @@ use tempfile::TempDir;
 
 const SMOKE: &str = env!("CARGO_BIN_EXE_gpui-video");
 /// The smoke window's Wayland app id.
-const APP_ID: &str = "ms-teams-gpui-smoke";
+const APP_ID: &str = "ngteams-gpui-smoke";
 /// From launch to the ready line (a cold dGPU wakes up within it).
 const STARTUP: Duration = Duration::from_secs(30);
 /// From the compositor's close request to the process exit.

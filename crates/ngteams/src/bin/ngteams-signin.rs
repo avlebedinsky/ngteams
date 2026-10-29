@@ -1,6 +1,6 @@
-//! `teams-signin-personal`: the personal build's sign-in window (`docs/personal-build.md`, Choice C), `teams-signin`'s
+//! `ngteams-signin`: the personal build's sign-in window (`docs/personal-build.md`, Choice C), `teams-signin`'s
 //! window bound to Entra's sign-in hosts and the identity provider's hosts `accounts.toml` names for the account it signs
-//! in, through its host gate. `teams` starts it from beside itself as `teams-signin-personal --account <UPN>` (an
+//! in, through its host gate. `ngteams` starts it from beside itself as `ngteams-signin --account <UPN>` (an
 //! account `accounts.toml` holds; any other arguments, or an account it doesn't hold, are refused) with the request as
 //! one line on stdin; the answer goes as one line on stdout, nothing else there. Its refusals come first (after stdout is taken for the answer), before the request is read and
 //! before any window: a `test-support` build and one `scripts/install-personal.sh` didn't make. Its decisions go to the
@@ -10,8 +10,8 @@ use std::io;
 use std::process::ExitCode;
 use std::sync::Arc;
 
-use teams::setup::Setup;
-use teams::signin;
+use ngteams::setup::Setup;
+use ngteams::signin;
 use teams_auth::signin::{WindowAnswer, WindowRequest, read_line};
 use teams_fence::FenceLog;
 use teams_fence::personal::PersonalAccount;
@@ -24,7 +24,7 @@ fn main() -> ExitCode {
     let mut out = match cli::take_stdout() {
         Ok(out) => out,
         Err(error) => {
-            eprintln!("teams-signin-personal: can't take stdout for the answer: {error}");
+            eprintln!("ngteams-signin: can't take stdout for the answer: {error}");
             return ExitCode::FAILURE;
         }
     };
@@ -34,10 +34,10 @@ fn main() -> ExitCode {
     };
     let redirected = matches!(answer, WindowAnswer::Redirect(_));
     if let WindowAnswer::Failed(reason) = &answer {
-        eprintln!("teams-signin-personal: {reason}");
+        eprintln!("ngteams-signin: {reason}");
     }
     if let Err(error) = cli::write_answer(&mut out, &answer) {
-        eprintln!("teams-signin-personal: can't write the answer: {error}");
+        eprintln!("ngteams-signin: can't write the answer: {error}");
         return ExitCode::FAILURE;
     }
     if redirected {
@@ -48,11 +48,11 @@ fn main() -> ExitCode {
 }
 
 fn prepare() -> Result<WindowConfig, String> {
-    if let Some(refusal) = teams::refusal() {
+    if let Some(refusal) = ngteams::refusal() {
         return Err(refusal.into());
     }
     let upn = signin::window_account(std::env::args_os().skip(1))
-        .ok_or("usage: teams-signin-personal --account <UPN> (the request on stdin, the answer on stdout)")?;
+        .ok_or("usage: ngteams-signin --account <UPN> (the request on stdin, the answer on stdout)")?;
     let setup = Setup::from_env().map_err(|error| error.to_string())?;
     let account = PersonalAccount::find(&setup.paths, &upn)
         .map_err(|error| error.to_string())?

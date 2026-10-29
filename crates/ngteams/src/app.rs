@@ -9,8 +9,8 @@
 //! **Adding an account** (the rail's "+"): the window asking for the account opens (the first sign-in's), the account
 //! is signed in through the sign-in window off GPUI's foreground ([`crate::accounts::add`]), and once that goes through
 //! its engine starts ([`Runner::start`]) and the window shows it; nothing else restarts. **Removing one** ("Sign out
-//! and remove" in its account menu): its engine is shut down, then it is forgotten as `teams --forget` forgets it, then
-//! it leaves the window; the last one removed quits the app.
+//! and remove" in its account menu): its engine is shut down, then it is forgotten as `ngteams --forget` forgets it,
+//! then it leaves the window; the last one removed quits the app.
 //!
 //! **Signed out** ([`watch_sign_out`]): once an account's session can't renew its tokens (`invalid_grant`: a sign-in
 //! frequency policy, a password change, a revoked session; or no refresh token stored), its shell shows
@@ -42,7 +42,7 @@ use crate::calling::PersonalCalls;
 use crate::engine::display_name;
 
 /// The window's title and the app's name on its notifications and tray item.
-pub const TITLE: &str = "Teams";
+pub const TITLE: &str = "ngteams";
 
 /// What the window says once the account is signed out.
 pub const SIGNED_OUT_HINT: &str = "Signed out: sign in again in the window that opened";
@@ -71,14 +71,14 @@ pub struct Launch<S = LazyKeyring> {
     pub sign_in_again: Rc<dyn Fn(&PersonalAccount) -> SignInAgain>,
     /// What starts more accounts (the rail's "+") and forgets one ("Sign out and remove").
     pub runner: Runner,
-    /// The read-only mode (`teams --read-only`, [`crate::read_only`]): no account is added, removed or signed in, the
+    /// The read-only mode (`ngteams --read-only`, [`crate::read_only`]): no account is added, removed or signed in, the
     /// rail offers neither, and a sign-out only says so ([`READ_ONLY_SIGNED_OUT_HINT`]).
     pub read_only: bool,
     /// Where the view trace goes (`--trace-fd`, the read-only mode's runner reads it); off otherwise.
     pub trace: Arc<ViewTrace>,
 }
 
-/// The settings in `file` (`~/.local/share/teams/settings.toml`) with the first run's screen asked for: none of
+/// The settings in `file` (`~/.local/share/ngteams/settings.toml`) with the first run's screen asked for: none of
 /// typing, read receipts and presence is sent until the user confirms it (`docs/personal-build.md`, "The settings that
 /// write on their own"); with where "copy diagnostics" reads from.
 #[must_use]
@@ -387,7 +387,7 @@ impl Running {
     }
 
     /// "Sign out and remove" of the account `key`: its engine shut down, then the account forgotten as
-    /// `teams --forget` forgets it (its store stays), then it leaves the window. The last account removed quits the
+    /// `ngteams --forget` forgets it (its store stays), then it leaves the window. The last account removed quits the
     /// app (the next start asks for an account).
     fn remove(&mut self, key: &str, cx: &mut gpui::Context<Self>) {
         if self.read_only {

@@ -54,7 +54,7 @@ pub const SPEAKER_RECORDING: &str = "recordings/speaker.wav";
 /// system's default as it comes.
 pub const DEVICE_PRIORITY: u32 = 2000;
 /// WirePlumber's profile, defined by the sandbox's drop-in.
-const PROFILE: &str = "ms-teams-sandbox";
+const PROFILE: &str = "ngteams-sandbox";
 /// How long the server and the session manager get to stop on `SIGTERM` before they are killed.
 const STOP_WAIT: Duration = Duration::from_secs(3);
 
@@ -501,7 +501,7 @@ impl Layout {
         fs::write(self.config.join("pipewire.conf"), server_config(options))?;
         fs::write(self.config.join(client_conf_name()?), CLIENT_CONFIG)?;
         let drop_in = private_dir(self.wireplumber_config().join("wireplumber.conf.d"))?;
-        fs::write(drop_in.join("90-ms-teams-sandbox.conf"), WIREPLUMBER_PROFILE)?;
+        fs::write(drop_in.join("90-ngteams-sandbox.conf"), WIREPLUMBER_PROFILE)?;
         Ok(())
     }
 
@@ -562,7 +562,7 @@ context.modules = [
 /// WirePlumber's profile: the policy alone (linking, default nodes), no hardware monitor, no D-Bus, no saved state.
 const WIREPLUMBER_PROFILE: &str = "\
 wireplumber.profiles = {
-  ms-teams-sandbox = {
+  ngteams-sandbox = {
     inherits = [ policy, mixin.systemwide-session, mixin.stateless ]
     support.dbus = disabled
     support.system-dbus = disabled

@@ -295,7 +295,7 @@ pub fn record_abc_chat(paths: &LabPaths, id: &str) -> Result<ChatRecord, ChatsEr
 pub struct LabLocations {
     pub config_file: PathBuf,
     pub data_dir: PathBuf,
-    /// The personal build's data dir (`$XDG_DATA_HOME/teams`, [`crate::apart::PersonalLocations`]).
+    /// The personal build's data dir (`$XDG_DATA_HOME/ngteams`, [`crate::apart::PersonalLocations`]).
     pub personal_data_dir: PathBuf,
 }
 
