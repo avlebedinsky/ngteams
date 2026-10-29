@@ -232,7 +232,7 @@ impl Desktop {
             CallWindowsEvent::DeviceSettings(key) => {
                 this.switch(key, cx);
                 this.in_shell(cx, |shell, window, cx| {
-                    shell.open_settings_page(Page::Calls, window, cx)
+                    shell.open_settings_page(Page::Calls, window, cx);
                 });
             }
             CallWindowsEvent::Closed => {

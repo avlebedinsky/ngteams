@@ -353,7 +353,7 @@ impl CallStage {
             .items_center()
             .gap_1()
             .child(roster)
-            .child(self.more(palette, cx))
+            .child(Self::more(palette, cx))
             .child(div().w(px(1.0)).h(px(32.0)).mx_1().bg(rgb(palette.border)))
             .children(camera)
             .child(
@@ -396,7 +396,7 @@ impl CallStage {
     }
 
     /// More: Device settings.
-    fn more(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn more(palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let stage = cx.weak_entity();
         let face = tool_face(Glyph::MORE, "More", palette);
         selected_by(
@@ -674,13 +674,13 @@ impl CallStage {
                             .border_color(rgb(palette.border))
                             .children(checks),
                     )
-                    .child(self.results_buttons(cx)),
+                    .child(Self::results_buttons(cx)),
             )
             .into_any_element()
     }
 
     /// The results' "Device settings" and Close.
-    fn results_buttons(&self, cx: &mut Context<Self>) -> gpui::Div {
+    fn results_buttons(cx: &mut Context<Self>) -> gpui::Div {
         let device_settings = selected_by(
             "test-call-device-settings",
             Button::new("test-call-device-settings")
@@ -846,7 +846,7 @@ fn device_item(kind: DeviceKind, choice: DeviceChoice, model: &Entity<SettingsMo
     .on_click(move |_, _, cx| {
         let name = name.clone();
         model.update(cx, |model, cx| {
-            model.change(|settings| settings.set_device(kind, name.clone()), cx)
+            model.change(|settings| settings.set_device(kind, name.clone()), cx);
         });
     })
 }

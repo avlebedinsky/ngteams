@@ -69,6 +69,12 @@ struct BarShown {
     people: Vec<String>,
 }
 
+/// Where a view keeps its [`CallPeople`].
+pub(crate) type PeopleSlot<V> = fn(&mut V) -> &mut CallPeople;
+
+/// What a view does once the names of who its call is with came.
+pub(crate) type PeopleRead<V> = fn(&mut V, &mut Context<V>);
+
 /// Who a call is with besides the account, `(MRI, name)`, read once per call: an invitation's caller as it named
 /// itself; a chat's members other than the account, by the names the engine has (or their MRIs); the echo service for
 /// the test call, as Teams names it.
@@ -99,7 +105,7 @@ impl CallPeople {
         active: &ActiveCall,
         (core, echo): (&Arc<dyn Core>, Option<&Mri>),
         cx: &mut Context<V>,
-        (slot, done): (fn(&mut V) -> &mut Self, fn(&mut V, &mut Context<V>)),
+        (slot, done): (PeopleSlot<V>, PeopleRead<V>),
     ) {
         let call = active.id;
         if self.read.as_ref().is_some_and(|(read, _)| *read == call) {
@@ -592,13 +598,13 @@ impl CallBar {
             strip(palette)
                 .debug_selector(|| "call-after".to_owned())
                 .child(div().flex_1().child(SharedString::from(text)))
-                .child(self.dismiss(cx))
+                .child(Self::dismiss(cx))
                 .into_any_element(),
         )
     }
 
     /// Dismiss (an ✕): how the last call ended, or the refusal, goes.
-    fn dismiss(&self, cx: &mut Context<Self>) -> gpui::Div {
+    fn dismiss(cx: &mut Context<Self>) -> gpui::Div {
         selected_by(
             "call-dismiss",
             icon_button("call-dismiss", Glyph::X, "Dismiss")
