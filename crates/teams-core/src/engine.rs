@@ -392,6 +392,9 @@ pub enum Event {
     /// couldn't be offered again): nothing more is sent on it until the account turns it on again
     /// ([`CallAction::Camera`]).
     CameraOff { call: CallId },
+    /// The microphone (`microphone`) or the speaker of the account's call went away for good (its stream ended, not
+    /// moved to another device): the call goes on, nothing recorded or played on it.
+    AudioClosed { call: CallId, microphone: bool },
     /// Who is in the account's call besides it, whose video each line shows, and who is speaking ([`CallView`]):
     /// told whenever that changed.
     CallParticipants { call: CallId, view: CallView },

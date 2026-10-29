@@ -86,6 +86,110 @@ pub struct ActiveCall {
     /// Who is in it besides the account, as its roster tells it, whose video each line shows and who speaks
     /// ([`teams_core::Event::CallParticipants`]); empty until told.
     pub view: CallView,
+    /// What the call showed of the devices so far: a test call's results once it ended.
+    pub check: DeviceCheck,
+}
+
+impl ActiveCall {
+    /// Its results, when it is the test call.
+    fn test_check(&self) -> Option<DeviceCheck> {
+        (self.kind == CallKind::TestCall).then_some(self.check)
+    }
+}
+
+/// What a call showed of the account's devices and its network, as a test call's results tell it once it ended
+/// (Teams' "Test call results"): each a sign the call itself gave, never a guess.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DeviceCheck {
+    /// Its media connected: the network carried it.
+    pub connected: bool,
+    /// The microphone picked up sound ([`CallView::hearing`], or the account speaking).
+    pub heard: bool,
+    /// The microphone went away for good during the call ([`teams_core::Event::AudioClosed`]): whatever it picked up
+    /// before, it doesn't work now.
+    pub microphone_lost: bool,
+    /// The speaker went away for good during the call.
+    pub speaker_lost: bool,
+    /// The far end's audio played on the speaker (a participant speaking: the echo's greeting, the playback).
+    pub played: bool,
+    /// The camera was turned on.
+    pub camera: bool,
+    /// The camera stopped by itself while on (its device gone, its encoder failed), or the media couldn't turn it on:
+    /// it doesn't work.
+    pub camera_failed: bool,
+    /// The call failed (`End::Failed`: its media lost, a step not taken): whatever worked before, it didn't hold.
+    pub failed: bool,
+}
+
+/// How one check of a test call came out.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    /// It worked.
+    Fine,
+    /// It showed a problem.
+    Problem,
+    /// It wasn't tried: the camera never turned on, or the call never connected to check the rest.
+    Untried,
+}
+
+impl DeviceCheck {
+    /// The call's view told: the microphone heard something, the far end was heard.
+    fn saw(&mut self, view: &CallView) {
+        self.heard |= view.hearing || view.speaking;
+        self.played |= view.participants.iter().any(|participant| participant.speaking);
+    }
+
+    /// The microphone's verdict and its words: nothing checked unless the call connected.
+    #[must_use]
+    pub fn microphone(self) -> (Verdict, &'static str) {
+        match (self.connected, self.microphone_lost, self.heard) {
+            (false, _, _) => (Verdict::Untried, "Not checked"),
+            (true, true, _) => (Verdict::Problem, "Stopped during the call"),
+            (true, false, true) => (Verdict::Fine, "Picked up sound"),
+            (true, false, false) => (Verdict::Problem, "Picked up no sound"),
+        }
+    }
+
+    /// The speaker's: the echo's voice played, and the speaker didn't go away afterwards.
+    #[must_use]
+    pub fn speaker(self) -> (Verdict, &'static str) {
+        match (self.connected, self.speaker_lost, self.played) {
+            (false, _, _) => (Verdict::Untried, "Not checked"),
+            (true, true, _) => (Verdict::Problem, "Stopped during the call"),
+            (true, false, true) => (Verdict::Fine, "Played the call"),
+            (true, false, false) => (Verdict::Problem, "Played nothing"),
+        }
+    }
+
+    /// The camera's: only one turned on is checked, and one that stopped by itself failed.
+    #[must_use]
+    pub fn camera(self) -> (Verdict, &'static str) {
+        if self.camera_failed {
+            (Verdict::Problem, "Didn't work")
+        } else if self.camera {
+            (Verdict::Fine, "Turned on")
+        } else {
+            (Verdict::Untried, "Not turned on")
+        }
+    }
+
+    /// The network's: the call's media connected, and the call didn't fail afterwards.
+    #[must_use]
+    pub fn network(self) -> (Verdict, &'static str) {
+        match (self.connected, self.failed) {
+            (false, _) => (Verdict::Problem, "Couldn't connect"),
+            (true, true) => (Verdict::Problem, "The call dropped"),
+            (true, false) => (Verdict::Fine, "Connected"),
+        }
+    }
+
+    /// Whether no check showed a problem (a camera not turned on isn't one).
+    #[must_use]
+    pub fn passed(self) -> bool {
+        [self.microphone(), self.speaker(), self.camera(), self.network()]
+            .iter()
+            .all(|(verdict, _)| *verdict != Verdict::Problem)
+    }
 }
 
 /// How the last call ended, shown until the next one.
@@ -96,6 +200,9 @@ pub struct Ended {
     pub chat: Option<String>,
     pub end: End,
     pub voicemail: bool,
+    /// A test call's results: what it showed of the devices and the network ([`DeviceCheck`]); `None` for any other
+    /// call.
+    pub check: Option<DeviceCheck>,
 }
 
 /// What the user asks of the calls.
@@ -273,12 +380,14 @@ impl Calls {
         self.ringing = None;
         self.asked = None;
         if let Some(active) = self.call.take() {
+            let check = active.test_check();
             self.ended = Some(Ended {
                 id: active.id,
                 kind: active.kind,
                 chat: active.chat,
                 end: End::HungUp,
                 voicemail: active.voicemail,
+                check,
             });
             self.refused = None;
         }
@@ -309,6 +418,7 @@ impl Calls {
                     | Event::Call { .. }
                     | Event::Voicemail { .. }
                     | Event::CameraOff { .. }
+                    | Event::AudioClosed { .. }
                     | Event::CallParticipants { .. }
             );
         }
@@ -333,13 +443,18 @@ impl Calls {
                     active.voicemail = true;
                 }
             }
+            Event::AudioClosed { call, microphone } => self.audio_closed(*call, *microphone),
             Event::CameraOff { call } => {
                 if let Some(active) = self.call.as_mut().filter(|active| active.id == *call) {
+                    // a camera that was on stopped by itself (its device gone, its encoder failed; the engine tells
+                    // no other): not a camera that works, whether or not its turning on was answered here yet
+                    active.check.camera_failed = true;
                     active.camera = false;
                 }
             }
             Event::CallParticipants { call, view } => {
                 if let Some(active) = self.call.as_mut().filter(|active| active.id == *call) {
+                    active.check.saw(view);
                     active.view = view.clone();
                 }
             }
@@ -347,6 +462,17 @@ impl Calls {
         }
         cx.notify();
         true
+    }
+
+    /// The microphone (`microphone`) or the speaker of `call` went away for good: its check fails.
+    fn audio_closed(&mut self, call: CallId, microphone: bool) {
+        if let Some(active) = self.call.as_mut().filter(|active| active.id == call) {
+            if microphone {
+                active.check.microphone_lost = true;
+            } else {
+                active.check.speaker_lost = true;
+            }
+        }
     }
 
     /// A call of the account's moved on.
@@ -360,14 +486,17 @@ impl Calls {
         active.status = status.clone();
         if *status == CallStatus::Connected && active.connected_at.is_none() {
             active.connected_at = Some(Instant::now());
+            active.check.connected = true;
         }
         if let CallStatus::Ended(end) = status {
+            active.check.failed = matches!(end, End::Failed(_));
             self.ended = Some(Ended {
                 id: call,
                 kind: active.kind,
                 chat: active.chat.clone(),
                 end: end.clone(),
                 voicemail: active.voicemail,
+                check: active.test_check(),
             });
             // a refusal during the call was shown in its bar: how it ended is what is told now
             self.refused = None;
@@ -401,6 +530,7 @@ impl Calls {
             camera: false,
             voicemail: false,
             view: CallView::default(),
+            check: DeviceCheck::default(),
         }
     }
 
@@ -480,7 +610,10 @@ impl Calls {
                 };
                 match action {
                     CallAction::Mute { muted, .. } => active.muted = *muted,
-                    CallAction::Camera { on, .. } => active.camera = *on,
+                    CallAction::Camera { on, .. } => {
+                        active.camera = *on;
+                        active.check.camera |= *on;
+                    }
                     _ => return,
                 }
                 cx.notify();
@@ -489,6 +622,13 @@ impl Calls {
                 if ask.starts().is_some() {
                     // the one start asked for (another is refused as busy meanwhile)
                     self.asked = None;
+                }
+                // a camera the media couldn't turn on (its device missing, the portal refusing it): it doesn't work
+                if let (CallAction::Camera { call, on: true }, EngineError::Call(CallActionError::Media(_))) =
+                    (action, &error)
+                    && let Some(active) = self.call.as_mut().filter(|active| active.id == *call)
+                {
+                    active.check.camera_failed = true;
                 }
                 self.refuse(ask, refusal_kind(&error), refusal_text(&error), cx);
             }

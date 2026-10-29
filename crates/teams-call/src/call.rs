@@ -81,6 +81,8 @@ pub(crate) enum Ending {
     Media,
     /// The far end closed the call's media and its end wasn't delivered ([`crate::Calls::media_closed`]).
     Closed,
+    /// The test call's echo left once it played the recording back: the call is over, as the web client ends it.
+    EchoLeft,
 }
 
 /// The name a call whose media failed ends with ([`End::Failed`]).
@@ -92,7 +94,7 @@ impl Ending {
             Self::HungUp => End::HungUp,
             Self::Failed(step) => End::Failed(step.name()),
             Self::Media => End::Failed(MEDIA),
-            Self::Closed => End::Remote(crate::RemoteEnd::default()),
+            Self::Closed | Self::EchoLeft => End::Remote(crate::RemoteEnd::default()),
         }
     }
 }
@@ -234,6 +236,9 @@ pub(crate) struct Call {
     pub(crate) group_media: GroupMediaLinks,
     /// Who is in the call, as its roster updates tell it.
     pub(crate) roster: Roster,
+    /// The test call's echo was in its roster (it joined after its `add`): once it isn't any more, the test call is
+    /// over.
+    pub(crate) echo_joined: bool,
     /// A renegotiation delivered to the account and not answered yet: its offer and the `mediaAnswer` link its answer
     /// goes to.
     pub(crate) negotiation: Option<Negotiation>,
@@ -293,6 +298,7 @@ impl Call {
             renegotiation: None,
             group_media: GroupMediaLinks::default(),
             roster: Roster::default(),
+            echo_joined: false,
             negotiation: None,
             deferred: None,
             negotiated: Vec::new(),

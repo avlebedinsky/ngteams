@@ -13,9 +13,10 @@
 //! **The cases** (`CALL_LIVE_PHASES`, comma-separated, picks some; all by default, in this order; `web` is
 //! `web-answer` and `web-place`; `CALL_LIVE_APP_LOG` sets the apps' diagnostic log level, `TEAMS_APP_LOG`):
 //! - `test-call`: a headset plugged into a's sandbox plays a keyed tone (990 Hz on and off in 200 ms slots of a shift
-//!   register's pattern); a's test call ("Test call" in the switcher) shows the echo's cell, its camera goes on
-//!   (Ctrl+Shift+O) and the self view is presented, as in a chat's call; the call is held until the echo service
-//!   played back what it recorded, and the tone must come back in a's recording: each 2 s of it lined up with what
+//!   register's pattern); a's test call ("Make a test call" in the switcher) shows the echo's cell, its camera goes on
+//!   (Ctrl+Shift+O) and the self view is presented, as in a chat's call; the echo service plays back what it
+//!   recorded and leaves, the call ends by itself and its results show every check passed; the tone must come back
+//!   in a's recording: each 2 s of it lined up with what
 //!   the headset played, on the one clock, gives a delay, and the one at least three blocks agree on is the echo's
 //!   round trip.
 //! - `web`: b's web client and a's app call each other, both ways, with audio and video: a calls (Ctrl+Shift+C) and
@@ -153,8 +154,9 @@ const CONNECT: Duration = Duration::from_secs(90);
 const TONE_WAIT: Duration = Duration::from_secs(30);
 /// How long video may take to be presented once the camera is on.
 const VIDEO_WAIT: Duration = Duration::from_secs(90);
-/// How long the test call is held once connected: the echo service plays back what it recorded about 41 s in.
-const ECHO_HOLD: Duration = Duration::from_secs(48);
+/// How long the test call may run once connected: the echo service plays back what it recorded about 41 s in and
+/// leaves about 50 s in, and the call ends by itself then.
+const ECHO_END: Duration = Duration::from_secs(90);
 /// How long the echo canceller gets to converge before the echo is measured, and over how long it is measured.
 const ECHO_SETTLE: Duration = Duration::from_secs(8);
 const ECHO_FOR: Duration = Duration::from_secs(6);
@@ -433,7 +435,7 @@ fn test_call(a: &mut App, found: &mut Found) {
     thread::sleep(Duration::from_secs(2));
     let heard = recording(a);
     let from = a.trace().mark();
-    a.command("Test call");
+    a.command("Make a test call");
     // from the app's own ask (the switcher's typing and the wait before its Enter left out)
     let asked = a.trace().wait_from(from, apps::STEP, "the test call asked", |line| {
         is(line, "call", "asked") && strings(line, "kinds").contains(&"test-call".to_owned())
@@ -452,10 +454,16 @@ fn test_call(a: &mut App, found: &mut Found) {
         is(line, "call-participant", "shown") && strings(line, "people").iter().any(|mri| mri.starts_with("28:"))
     });
     a.shot("test-call");
-    thread::sleep(ECHO_HOLD);
+    // the echo plays back what it recorded and leaves: the call ends by itself, as Teams' test call does, and its
+    // results show what it found
+    a.in_call(from, ECHO_END, &["test-call", "ended", "remote"]);
     let held_until = now_us();
-    a.ctrl_shift('h');
-    a.in_call(from, apps::STEP, &["test-call", "ended", "hung-up"]);
+    a.trace()
+        .wait_from(from, apps::STEP, "the test call's results", |line| {
+            is(line, "test-call", "results")
+                && strings(line, "kinds") == ["connected", "mic-heard", "speaker-played", "camera-on"]
+        });
+    a.shot("test-call-results");
     let blocks = lags(
         &heard,
         headset.timeline().unwrap(),

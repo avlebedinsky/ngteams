@@ -12,8 +12,10 @@
 //! - **Privacy**: sending typing and read receipts.
 //! - **Calls** (where the app has calls, or the build has the video codec): the calls' microphone, speaker and camera
 //!   ("Follow the system", naming the system's default, then every device there is, a device chosen that isn't there
-//!   shown as not connected), and the calls' video ("OpenH264 Video Codec provided by Cisco Systems, Inc.", as
-//!   Cisco's binary licence asks beside its control).
+//!   shown as not connected), "Make a test call" under them as Teams has it (the echo service's test call, asked of
+//!   the shell: [`SettingsViewEvent::MakeTestCall`]; offered while no call is up or rings on any account, the calling
+//!   endpoint is registered and the app isn't read-only, else said why), and the calls' video ("OpenH264 Video Codec
+//!   provided by Cisco Systems, Inc.", as Cisco's binary licence asks beside its control).
 //! - **Diagnostics**: the diagnostic log's level and "Copy diagnostics".
 //!
 //! What was wrong with the settings file (or the log) is shown above every page. Each change goes to the
@@ -22,9 +24,9 @@
 use std::rc::Rc;
 
 use gpui::{
-    Anchor, AnyElement, App, AppContext as _, Context, Entity, FocusHandle, InteractiveElement as _, IntoElement,
-    KeyDownEvent, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
-    Window, div, prelude::FluentBuilder as _, px, rgb,
+    Anchor, AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _,
+    IntoElement, KeyDownEvent, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::IndexPath;
 use gpui_component::button::Button;
@@ -69,6 +71,60 @@ const MENU_HEIGHT: f32 = 320.0;
 
 /// What a choice's control does when it is chosen.
 type Apply = Rc<dyn Fn(&mut App)>;
+
+/// Whether the Calls page offers its test call now, as the shell tells it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TestCallOffer {
+    /// Not at all: the build shows no calls, the echo service isn't known, or the app is read-only.
+    Hidden,
+    /// It can start now.
+    Ready,
+    /// Not while this account has a call up, ringing or being set up.
+    InCall,
+    /// Not while another account of the app has one.
+    OtherAccount,
+    /// Not until the calling endpoint is registered.
+    Connecting,
+}
+
+impl TestCallOffer {
+    /// What its row says under its name: what the test call does, or why it can't start now.
+    fn description(self) -> &'static str {
+        match self {
+            Self::Hidden | Self::Ready => TEST_CALL_DESCRIPTION,
+            Self::InCall => "You can make a test call once your call ends.",
+            Self::OtherAccount => "You can make a test call once the call on your other account ends.",
+            Self::Connecting => "Calls are connecting. You can make a test call in a moment.",
+        }
+    }
+}
+
+/// What the test call's row says it does, as Teams' test call does it.
+pub const TEST_CALL_DESCRIPTION: &str =
+    "Check your microphone, speaker and camera: Echo plays a message, records yours and plays it back.";
+
+/// What the shell tells the view of its test call, asked each time the Calls page draws.
+pub type TestCallState = Rc<dyn Fn(&App) -> TestCallOffer>;
+
+/// What the settings view asks of the shell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SettingsViewEvent {
+    /// The user pressed "Make a test call".
+    MakeTestCall,
+}
+
+/// The name the device of `kind` the calls use goes by: the one the settings chose while it is there, else the
+/// system's default; `None` while the devices aren't listed (or the system has no default).
+#[must_use]
+pub fn device_in_use(kind: DeviceKind, model: &SettingsModel) -> Option<String> {
+    let list = model.devices()?;
+    model
+        .settings()
+        .device(kind)
+        .and_then(|name| list.find(kind, name))
+        .or_else(|| list.default_of(kind))
+        .map(|device| device.description.clone())
+}
 
 /// What the settings call each kind of device.
 #[must_use]
@@ -215,8 +271,12 @@ pub struct SettingsView {
     focus: FocusHandle,
     /// The font picker, made the first time the view draws it (it needs the window).
     fonts: Option<Fonts>,
+    /// Whether the test call is offered now, as the shell tells it ([`SettingsView::with_test_call`]); `None`: never.
+    test_call: Option<TestCallState>,
     _observing: Subscription,
 }
+
+impl EventEmitter<SettingsViewEvent> for SettingsView {}
 
 impl SettingsView {
     pub fn new(model: Entity<SettingsModel>, cx: &mut Context<Self>) -> Self {
@@ -229,8 +289,29 @@ impl SettingsView {
             page: Page::General,
             focus: cx.focus_handle(),
             fonts: None,
+            test_call: None,
             _observing: observing,
         }
+    }
+
+    /// The view offering the test call on its Calls page as `state` tells it each time the page draws (the shell's:
+    /// its account's calls and the app's other accounts).
+    #[must_use]
+    pub fn with_test_call(mut self, state: TestCallState) -> Self {
+        self.test_call = Some(state);
+        self
+    }
+
+    /// Whether the test call is offered now.
+    #[must_use]
+    pub fn test_call_offer(&self, cx: &App) -> TestCallOffer {
+        self.test_call.as_ref().map_or(TestCallOffer::Hidden, |state| state(cx))
+    }
+
+    /// "Make a test call" pressed: asked of the shell, which asks the calls (and refuses it as any start is refused
+    /// while a call is up on any account).
+    pub fn make_test_call(&mut self, cx: &mut Context<Self>) {
+        cx.emit(SettingsViewEvent::MakeTestCall);
     }
 
     /// The view showing `account`'s own settings (its MRI): an app of several accounts has a view per account.
@@ -293,9 +374,11 @@ impl SettingsView {
         self.show_page(pages[to], cx);
     }
 
-    /// Whether the Calls page has anything to show: the calls' devices, or the video switch.
+    /// Whether the Calls page has anything to show: the calls' devices, the test call, or the video switch.
     fn has_calls(&self, cx: &App) -> bool {
-        self.video_switch || self.model.read(cx).devices().is_some()
+        self.video_switch
+            || self.model.read(cx).devices().is_some()
+            || self.test_call_offer(cx) != TestCallOffer::Hidden
     }
 
     /// A change of the settings, as a control's handler makes it.
@@ -674,10 +757,20 @@ impl SettingsView {
         )]
     }
 
-    fn calls(&self, settings: &Settings, palette: Palette, cx: &App) -> Vec<AnyElement> {
+    fn calls(&self, settings: &Settings, palette: Palette, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut groups = Vec::new();
-        if let Some(list) = self.model.read(cx).devices() {
-            groups.push(self.devices(settings, list, palette));
+        let mut rows = self
+            .model
+            .read(cx)
+            .devices()
+            .map(|list| self.devices(settings, list, palette))
+            .unwrap_or_default();
+        let offer = self.test_call_offer(cx);
+        if offer != TestCallOffer::Hidden {
+            rows.push(self.test_call_row(offer, palette, cx));
+        }
+        if !rows.is_empty() {
+            groups.push(group(Some("Devices"), rows, palette));
         }
         if self.video_switch {
             groups.push(group(
@@ -699,15 +792,32 @@ impl SettingsView {
     /// The calls' devices: for each kind, a picker of "Follow the system" (naming the system's default), then every
     /// device there is, and a device chosen that isn't there, as not connected. Each picker's test selector is its
     /// kind's key, each of its rows' `<kind>-<key>`: the device's name, or [`FOLLOW_SYSTEM`].
-    fn devices(&self, settings: &Settings, list: &DeviceList, palette: Palette) -> AnyElement {
-        let rows = DeviceKind::ALL
+    fn devices(&self, settings: &Settings, list: &DeviceList, palette: Palette) -> Vec<AnyElement> {
+        DeviceKind::ALL
             .map(|kind| {
                 let picks = self.device_picks(kind, settings, list);
                 row(device_label(kind), None, picker(kind.key(), picks, palette), palette)
             })
             .into_iter()
-            .collect();
-        group(Some("Devices"), rows, palette)
+            .collect()
+    }
+
+    /// "Make a test call" under the devices, as Teams has it: what it does, or why it can't start now with the button
+    /// disabled. The button's test selector is `make-test-call`.
+    fn test_call_row(&self, offer: TestCallOffer, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let button = Button::new("make-test-call")
+            .icon(Glyph::PHONE.icon())
+            .label("Make a test call")
+            .outline()
+            .small()
+            .disabled(offer != TestCallOffer::Ready)
+            .on_click(cx.listener(|this, _, _, cx| this.make_test_call(cx)));
+        row(
+            "Test call",
+            Some(offer.description()),
+            selected_by("make-test-call", button),
+            palette,
+        )
     }
 
     fn device_picks(&self, kind: DeviceKind, settings: &Settings, list: &DeviceList) -> Vec<Pick> {

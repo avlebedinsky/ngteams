@@ -370,7 +370,8 @@ What the code does and why. A change that undoes one of these needs a new reason
   retransmissions `99`: it takes only its own numbers); whose video each receiving line shows is a source request
   on the data channel's control plane, which is media (never classified, never a write). Who is in a call, 1:1 or
   group, comes from the `rosterUpdate` deliveries (a participant counts when it is `active` with an endpoint holding a
-  `call`: `teams-call`'s `read::roster`), read only to show it: nothing is sent for them and the fence reads no roster.
+  `call`: `teams-call`'s `read::roster`), read to show it and, in the test call, to end it once the echo left (its
+  `leave`, as the web client's): nothing else is sent for them and the fence reads no roster.
 - **A call's media reach** (`teams-media`): the peer gathers and writes only relayed candidates, through Teams' fixed
   relay host (`TEAMS_RELAY_HOST`, resolved when the call's media is set up: every address over UDP 3478, then TCP 443,
   a `300 Try Alternate` followed once; `RelayTokens` gives only the credentials and their expiry), never a host

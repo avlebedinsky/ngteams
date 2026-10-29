@@ -21,8 +21,9 @@
 //!   counted by the trace's `video-tile presented`); a hangs up (Ctrl+Shift+H) and b's call ends with it;
 //! - a calls b again; b declines from the notification's Decline; a's call is taken by b's voicemail (as captured) and
 //!   a's in-call bar says so; a hangs up;
-//! - a places the test call from the switcher: the same call view, the echo's cell (its roster's entry), its camera
-//!   turned on and the self view presented; a hangs up;
+//! - a places the test call from the settings' Calls page ("Make a test call"): the same call view, the echo's cell
+//!   (its roster's entry), its camera turned on and the self view presented; a hangs up, and the test call's results
+//!   show every check passed;
 //! - both quit; every write in either `fence.log` was permitted.
 //!
 //! Without weston 15, niri, `dbus-daemon`, PipeWire or WirePlumber it says so and passes, unless `GPUI_SMOKE_REQUIRE=1`.
@@ -63,6 +64,8 @@ use teams_trouter::{CallStack, Options, Trouter, TrouterCredentials};
 use teams_ui::Desktop;
 use teams_ui::ringtone::{DeviceRinger, RINGTONE};
 use teams_ui::settings::Settings;
+use teams_ui::settings_view::{Page, SettingsView};
+use teams_ui::view::Root;
 use teams_ui::{Bridge, Ringer, SettingsFile, VideoFeed};
 use tokio::sync::broadcast;
 use ui_sandbox::input::{Modifier, VirtualInput};
@@ -87,6 +90,12 @@ const QUIT_TRIGGER: &str = "quit";
 /// The file in the sandbox dir the parent writes to have the child's settings choose a microphone: the device's
 /// name, or nothing to follow the system.
 const MICROPHONE_TRIGGER: &str = "microphone";
+/// The file in the sandbox dir the parent writes to have the child's settings show their Calls page
+/// ([`SETTINGS_CALLS`]) or press its "Make a test call" ([`SETTINGS_TEST_CALL`]), as the settings view's button does:
+/// the sandbox's virtual pointer has no way to find the button, and the button's own click is the view test's.
+const SETTINGS_TRIGGER: &str = "settings";
+const SETTINGS_CALLS: &str = "calls";
+const SETTINGS_TEST_CALL: &str = "test-call";
 /// From the child's start to its `ready`.
 const STARTUP: Duration = Duration::from_secs(120);
 /// Anything else the parent waits for.
@@ -527,17 +536,16 @@ fn calls(a: &mut AppUnderTest, b: &mut AppUnderTest, a_box: &Sandbox, b_box: &Sa
     test_call(a, &mut a_keys, a_box)
 }
 
-/// a's test call, from the switcher: the call view a chat's call has, Echo its other participant (by its roster's
-/// entry), its camera turned on and its self view presented.
+/// a's test call, from the settings' Calls page ("Make a test call", as Teams has it): the call view a chat's call
+/// has over the settings, Echo its other participant (by its roster's entry), its camera turned on and its self view
+/// presented; once a hangs up, its results (the network, the microphone, the speaker and the camera checked).
 fn test_call(a: &mut AppUnderTest, keys: &mut VirtualInput, a_box: &Sandbox) -> SandboxResult {
-    let (k, _) = keys.keymap().key_for('k').ok_or("not on the US keymap")?;
-    keys.key_with(&[Modifier::Ctrl], k)?;
-    a.trace.next_where("a: switcher opened", |line| {
-        line["view"] == "switcher" && line["change"] == "opened"
+    ask_settings(a_box, SETTINGS_CALLS)?;
+    a.trace.next_where("a: settings opened", |line| {
+        line["view"] == "settings" && line["change"] == "opened"
     })?;
-    keys.type_text("test call")?;
-    thread::sleep(Duration::from_millis(500));
-    keys.key(ui_sandbox::input::keys::ENTER)?;
+    shot(a_box, "teams-app-call-settings.png")?;
+    ask_settings(a_box, SETTINGS_TEST_CALL)?;
     a.in_call(&["test-call", "connected"])?;
     ctrl_shift(keys, 'o')?;
     a.in_call(&["test-call", "camera-on"])?;
@@ -556,6 +564,27 @@ fn test_call(a: &mut AppUnderTest, keys: &mut VirtualInput, a_box: &Sandbox) -> 
     shot(a_box, "teams-app-call-test-call.png")?;
     ctrl_shift(keys, 'h')?;
     a.in_call(&["test-call", "ended", "hung-up"])?;
+    let wanted = ["connected", "mic-heard", "speaker-played", "camera-on"];
+    let results = |line: &serde_json::Value| line["view"] == "test-call" && line["change"] == "results";
+    let line = match a.trace.catch_up().iter().find(|line| results(line)).cloned() {
+        Some(line) => line,
+        None => a.trace.next_where("a: the test call's results", results)?,
+    };
+    if strings(&line, "kinds") != wanted {
+        return Err(format!("a: the test call's results {line}, not {wanted:?}").into());
+    }
+    // the trace's line comes as the model changes, before the window draws it: a moment for the frame
+    thread::sleep(Duration::from_secs(2));
+    shot(a_box, "teams-app-call-test-call-results.png")?;
+    Ok(())
+}
+
+/// Asks a's app to show the settings' Calls page ([`SETTINGS_CALLS`]) or to press its "Make a test call"
+/// ([`SETTINGS_TEST_CALL`]).
+fn ask_settings(a_box: &Sandbox, what: &str) -> SandboxResult {
+    let staged = a_box.path("settings.staged");
+    fs::write(&staged, what)?;
+    fs::rename(&staged, a_box.path(SETTINGS_TRIGGER))?;
     Ok(())
 }
 
@@ -814,7 +843,8 @@ fn child(alias: Alias) -> SandboxResult {
         );
         match launched {
             Ok(launched) => {
-                choose_when_asked(launched.desktop, cx);
+                choose_when_asked(launched.desktop.clone(), cx);
+                settings_when_asked(launched.desktop, cx);
                 quit_when_asked(launched.bridge, cx);
                 say("ready");
             }
@@ -850,6 +880,50 @@ fn choose_when_asked(desktop: gpui::Entity<Desktop>, cx: &mut App) {
             cx.update(|cx| {
                 let settings = desktop.read(cx).settings().clone();
                 settings.update(cx, |model, cx| model.change(|settings| settings.microphone = name, cx));
+            });
+        }
+    })
+    .detach();
+}
+
+/// Each time the parent writes [`SETTINGS_TRIGGER`] in the sandbox dir: the shell shows the settings' Calls page, or
+/// its settings view's "Make a test call" is pressed.
+fn settings_when_asked(desktop: gpui::Entity<Desktop>, cx: &mut App) {
+    let Some(dir) = std::env::var_os(ui_sandbox::SANDBOX_ENV) else {
+        say("no sandbox dir");
+        return;
+    };
+    let trigger = PathBuf::from(dir).join(SETTINGS_TRIGGER);
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        loop {
+            cx.background_executor().timer(Duration::from_millis(100)).await;
+            let Ok(asked) = fs::read_to_string(&trigger) else {
+                continue;
+            };
+            let _ = fs::remove_file(&trigger);
+            let Some(window) = cx.update(|cx| desktop.read(cx).window()) else {
+                say("no window");
+                continue;
+            };
+            let _ = window.update(cx, |kit, window, cx| {
+                let Some(shell) = kit
+                    .view()
+                    .clone()
+                    .downcast::<Root>()
+                    .ok()
+                    .and_then(|root| root.read(cx).shell_in(cx).cloned())
+                else {
+                    return;
+                };
+                let view = shell.read(cx).settings_view().clone();
+                match asked.as_str() {
+                    // as the rail's Settings opens them: the keyboard on their pages, so the call keys still work
+                    SETTINGS_CALLS => {
+                        shell.update(cx, |shell, cx| shell.open_settings_page(Page::Calls, window, cx));
+                    }
+                    SETTINGS_TEST_CALL => view.update(cx, SettingsView::make_test_call),
+                    _ => say("an unknown settings ask"),
+                }
             });
         }
     })

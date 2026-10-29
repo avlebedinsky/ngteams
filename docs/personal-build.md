@@ -201,7 +201,7 @@ unknown outcome (a call controller acting twice is worse than a failed step) and
 
 What the app does, as Teams does:
 
-- **A start or a join** goes on the user's action ("Call", "Join", "Test call"); the fence reads no chat for it.
+- **A start or a join** goes on the user's action ("Call", "Join", "Make a test call"); the fence reads no chat for it.
 - **Any readable invitation addressed to the account** is offered (rung, notified, shown with the name the invitation
   gives), whoever it is from, and answered or declined only by the user's action on it; a decline is the captured
   rejection, not a dismissed banner. It stops being offered when its ring ends.

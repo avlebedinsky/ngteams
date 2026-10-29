@@ -27,7 +27,8 @@
 //!   way, the call's modalities naming `Video` while a video line is in use. One the call controller turned away
 //!   (`491`) for the far end's (both cameras turned on together) gives way: the far end's is answered with our
 //!   camera's line only receiving, then that line is offered again as the camera goes. A camera that stops by itself
-//!   (its device gone, its encoder failed) is off, told as [`Event::CameraOff`].
+//!   (its device gone, its encoder failed) is off, told as [`Event::CameraOff`]; a microphone or speaker whose stream
+//!   ended for good (not moved) is told as [`Event::AudioClosed`], the call going on.
 //! - **The media's SDP steps run one at a time, in the order the signaling asked for them** (the far end's answer
 //!   applied, its renegotiation answered, our own offered): each waits for the one before, so an acceptance followed
 //!   at once by a renegotiation reaches the session in that order.
@@ -1016,6 +1017,7 @@ where
                     log::warn!("call {}: its camera went off", call.get());
                     self.emit(Event::CameraOff { call });
                 }
+                MediaChange::AudioClosed { microphone } => self.emit(Event::AudioClosed { call, microphone }),
                 MediaChange::Speakers(speakers) => {
                     if let Some(live) = self.live.as_mut() {
                         live.gallery.speakers(&speakers);

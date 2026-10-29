@@ -1,6 +1,6 @@
 //! Calls in the app (M3 Task 17) on GPUI's test context, over the fake engine (`common`): the chat header's Call (once
 //! the calling endpoint is registered) and Join (where an invitation named a running call); the switcher's call
-//! commands as they fit the moment, "Test call" among them; the incoming call's banner, ringtone and notification with
+//! commands as they fit the moment, "Make a test call" among them; the incoming call's banner, ringtone and notification with
 //! Answer and Decline, only for an invitation the engine offered, its caller named as the invitation names them, all
 //! gone once its ring ends or the account signs out; the in-call view (who it is with, mute, hang up, the duration, the
 //! call's state, how it ended, an ask refused while it is up or after, voicemail); one start at a time, its media's
@@ -30,10 +30,11 @@ use teams_media::devices::pattern::TestPattern;
 use teams_store::{Applied, ConversationKind, Member};
 use teams_ui::call_alert::{CallAlert, notice_of};
 use teams_ui::call_view;
-use teams_ui::calls::CallKind;
+use teams_ui::calls::{Ask, CallKind, Verdict};
 use teams_ui::notify::NoticeKind;
 use teams_ui::ringtone::{Ringer, Ringtone};
 use teams_ui::settings::{Settings, SettingsModel};
+use teams_ui::settings_view::{Page, TestCallOffer};
 use teams_ui::shell::{Main, Shell, ShellParts};
 use teams_ui::switcher::CallCommand;
 use teams_ui::video::{Tile, VideoFeed};
@@ -592,13 +593,13 @@ fn the_switcher_offers_the_call_commands_that_fit_the_moment() {
     cx.simulate_keystrokes("ctrl-k");
     cx.simulate_input("call");
     cx.run_until_parked();
-    assert_eq!(commands(cx), ["Call", "Test call"]);
+    assert_eq!(commands(cx), ["Call", "Make a test call"]);
     cx.simulate_keystrokes("escape");
     cx.run_until_parked();
     cx.simulate_keystrokes("ctrl-k");
     cx.simulate_input("test call");
     cx.run_until_parked();
-    assert_eq!(commands(cx), ["Test call"]);
+    assert_eq!(commands(cx), ["Make a test call"]);
     cx.simulate_keystrokes("enter");
     cx.run_until_parked();
     assert_eq!(actions(&rig), [CallAction::TestCall { echo: Mri::new(ECHO) }]);
@@ -1191,4 +1192,306 @@ fn a_notification_says_who_calls_as_the_invitation_names_them() {
         (group.summary.as_str(), group.body.as_str(), group.conversation.as_str()),
         ("Someone is calling", "Incoming group call", TRIO)
     );
+}
+
+/// The settings shown on their Calls page.
+fn calls_page(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    cx.update(|_, cx| {
+        shell.update(cx, Shell::show_settings);
+        let view = shell.read(cx).settings_view().clone();
+        view.update(cx, |view, cx| view.show_page(Page::Calls, cx));
+    });
+    draw(cx);
+}
+
+fn offer(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> TestCallOffer {
+    cx.update(|_, cx| shell.read(cx).test_call_offer(cx))
+}
+
+#[test]
+fn the_settings_calls_page_makes_a_test_call_as_teams_does() {
+    let rig = calling();
+    let (trace, written) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), trace);
+    // the Calls page is there for the test call alone (no devices listed, no video codec)
+    calls_page(&shell, cx);
+    assert!(drawn(cx, "settings-page-calls"));
+    assert_eq!(offer(&shell, cx), TestCallOffer::Connecting);
+    click(cx, "make-test-call");
+    assert!(
+        actions(&rig).is_empty(),
+        "disabled until the calling endpoint is registered"
+    );
+
+    registered(&rig);
+    assert_eq!(offer(&shell, cx), TestCallOffer::Ready);
+    click(cx, "make-test-call");
+    assert_eq!(actions(&rig), [CallAction::TestCall { echo: Mri::new(ECHO) }]);
+    let asked = lines(&written, "call", "asked");
+    assert_eq!(kinds(asked.last().unwrap()), ["test-call"]);
+    // the call shows in the call bar over the settings, which stay
+    status(&rig, 1, CallStatus::Placing);
+    assert!(drawn(cx, "call-hang-up"));
+    assert_eq!(cx.update(|_, cx| shell.read(cx).main().clone()), Main::Settings);
+
+    // while it is up the button is disabled, and a press asks nothing
+    status(&rig, 1, CallStatus::Connected);
+    assert_eq!(offer(&shell, cx), TestCallOffer::InCall);
+    click(cx, "make-test-call");
+    assert_eq!(actions(&rig).len(), 1);
+    no_name_in(&written);
+}
+
+/// The echo's voice playing, the microphone hearing the account.
+fn echo_heard(rig: &Rig, number: u64) {
+    rig.send(Event::CallParticipants {
+        call: call(number),
+        view: CallView {
+            participants: vec![CallParticipant {
+                mri: ECHO.to_owned(),
+                name: None,
+                video_on: false,
+                line: None,
+                speaking: true,
+            }],
+            speaking: false,
+            hearing: true,
+        },
+    });
+}
+
+#[test]
+fn a_test_call_ends_in_its_results_and_they_lead_to_the_device_settings() {
+    let rig = calling();
+    let (trace, written) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), trace);
+    registered(&rig);
+    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.ask_call(Ask::TestCall, cx)));
+    cx.run_until_parked();
+    status(&rig, 1, CallStatus::Placing);
+    status(&rig, 1, CallStatus::Connected);
+    echo_heard(&rig, 1);
+    // the echo left once it played the recording back: the call ended by itself
+    status(&rig, 1, CallStatus::Ended(End::Remote(RemoteEnd::default())));
+    let ended = cx.update(|_, cx| calls_of(&rig).read(cx).ended().cloned()).unwrap();
+    let check = ended.check.expect("a test call's results");
+    assert!(check.connected && check.heard && check.played && !check.camera);
+    assert!(check.passed());
+    for shown in [
+        "test-call-results",
+        "test-call-check-microphone",
+        "test-call-check-speaker",
+        "test-call-check-camera",
+        "test-call-check-network",
+        "test-call-device-settings",
+        "call-dismiss",
+    ] {
+        assert!(drawn(cx, shown), "{shown}");
+    }
+    let results = lines(&written, "test-call", "results");
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        kinds(&results[0]),
+        ["connected", "mic-heard", "speaker-played", "camera-untried"]
+    );
+
+    click(cx, "test-call-device-settings");
+    assert_eq!(cx.update(|_, cx| shell.read(cx).main().clone()), Main::Settings);
+    let page = cx.update(|_, cx| shell.read(cx).settings_view().read(cx).page());
+    assert_eq!(page, Page::Calls);
+    // the next test call can start from there
+    assert_eq!(offer(&shell, cx), TestCallOffer::Ready);
+    click(cx, "call-dismiss");
+    assert!(!drawn(cx, "test-call-results"));
+    no_name_in(&written);
+}
+
+#[test]
+fn a_test_call_that_never_connected_says_so_in_its_results() {
+    let rig = calling();
+    let (trace, written) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), trace);
+    registered(&rig);
+    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.ask_call(Ask::TestCall, cx)));
+    cx.run_until_parked();
+    status(&rig, 1, CallStatus::Placing);
+    status(&rig, 1, CallStatus::Ended(End::Failed("media")));
+    let check = cx
+        .update(|_, cx| calls_of(&rig).read(cx).ended().cloned())
+        .and_then(|ended| ended.check)
+        .unwrap();
+    assert!(!check.passed());
+    assert_eq!(check.network(), (Verdict::Problem, "Couldn't connect"));
+    assert_eq!(check.microphone().0, Verdict::Untried);
+    assert!(drawn(cx, "test-call-results"));
+    assert_eq!(
+        kinds(&lines(&written, "test-call", "results")[0]),
+        ["not-connected", "mic-silent", "speaker-silent", "camera-untried"]
+    );
+    // a call from a chat ends as before, with no results
+    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.ask_call(Ask::Call { chat: AB.to_owned() }, cx)));
+    cx.run_until_parked();
+    status(&rig, 2, CallStatus::Placing);
+    status(&rig, 2, CallStatus::Ended(End::HungUp));
+    let ended = cx.update(|_, cx| calls_of(&rig).read(cx).ended().cloned()).unwrap();
+    assert_eq!(ended.kind, CallKind::Chat);
+    assert!(ended.check.is_none());
+    assert!(!drawn(cx, "test-call-results"));
+    assert!(drawn(cx, "call-after"));
+}
+
+#[test]
+fn a_camera_turned_on_in_the_test_call_is_checked() {
+    let feed = VideoFeed::new();
+    let rig = video_calling(&feed);
+    let (trace, _written) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), trace);
+    registered(&rig);
+    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.ask_call(Ask::TestCall, cx)));
+    cx.run_until_parked();
+    status(&rig, 1, CallStatus::Placing);
+    status(&rig, 1, CallStatus::Connected);
+    click(cx, "call-camera");
+    let up = cx.update(|_, cx| calls_of(&rig).read(cx).call().cloned()).unwrap();
+    assert!(up.camera && up.check.camera);
+    status(&rig, 1, CallStatus::Ended(End::HungUp));
+    let check = cx
+        .update(|_, cx| calls_of(&rig).read(cx).ended().cloned())
+        .and_then(|ended| ended.check)
+        .unwrap();
+    assert_eq!(check.camera(), (Verdict::Fine, "Turned on"));
+}
+
+#[test]
+fn a_camera_that_stopped_by_itself_in_the_test_call_failed_its_check() {
+    let feed = VideoFeed::new();
+    let rig = video_calling(&feed);
+    let (trace, written) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), trace);
+    registered(&rig);
+    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.ask_call(Ask::TestCall, cx)));
+    cx.run_until_parked();
+    status(&rig, 1, CallStatus::Placing);
+    status(&rig, 1, CallStatus::Connected);
+    echo_heard(&rig, 1);
+    click(cx, "call-camera");
+    // its device gone: the camera stops by itself
+    rig.send(Event::CameraOff { call: call(1) });
+    status(&rig, 1, CallStatus::Ended(End::Remote(RemoteEnd::default())));
+    let check = cx
+        .update(|_, cx| calls_of(&rig).read(cx).ended().cloned())
+        .and_then(|ended| ended.check)
+        .unwrap();
+    assert_eq!(check.camera(), (Verdict::Problem, "Didn't work"));
+    assert!(!check.passed());
+    assert_eq!(
+        kinds(&lines(&written, "test-call", "results")[0]),
+        ["connected", "mic-heard", "speaker-played", "camera-failed"]
+    );
+}
+
+#[test]
+fn a_test_call_that_failed_after_it_connected_doesn_t_pass() {
+    let rig = calling();
+    let (trace, written) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), trace);
+    registered(&rig);
+    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.ask_call(Ask::TestCall, cx)));
+    cx.run_until_parked();
+    status(&rig, 1, CallStatus::Placing);
+    status(&rig, 1, CallStatus::Connected);
+    echo_heard(&rig, 1);
+    // its media lost for good: the engine fails the call
+    status(&rig, 1, CallStatus::Ended(End::Failed("media")));
+    let check = cx
+        .update(|_, cx| calls_of(&rig).read(cx).ended().cloned())
+        .and_then(|ended| ended.check)
+        .unwrap();
+    assert_eq!(check.network(), (Verdict::Problem, "The call dropped"));
+    assert!(!check.passed());
+    assert_eq!(
+        kinds(&lines(&written, "test-call", "results")[0]),
+        ["dropped", "mic-heard", "speaker-played", "camera-untried"]
+    );
+}
+
+#[test]
+fn a_microphone_or_speaker_that_went_away_in_the_test_call_failed_its_check() {
+    for microphone in [true, false] {
+        let rig = calling();
+        let (trace, written) = trace();
+        let (shell, cx) = shell_window(&rig, Some(AB), trace);
+        registered(&rig);
+        cx.update(|_, cx| shell.update(cx, |shell, cx| shell.ask_call(Ask::TestCall, cx)));
+        cx.run_until_parked();
+        status(&rig, 1, CallStatus::Placing);
+        status(&rig, 1, CallStatus::Connected);
+        echo_heard(&rig, 1);
+        // it worked, then its stream ended for good (the sound server restarted)
+        rig.send(Event::AudioClosed {
+            call: call(1),
+            microphone,
+        });
+        status(&rig, 1, CallStatus::Ended(End::Remote(RemoteEnd::default())));
+        let check = cx
+            .update(|_, cx| calls_of(&rig).read(cx).ended().cloned())
+            .and_then(|ended| ended.check)
+            .unwrap();
+        let (lost, kept) = if microphone {
+            (check.microphone(), check.speaker())
+        } else {
+            (check.speaker(), check.microphone())
+        };
+        assert_eq!(lost, (Verdict::Problem, "Stopped during the call"));
+        assert_eq!(kept.0, Verdict::Fine);
+        assert!(!check.passed());
+        let expected = if microphone {
+            ["connected", "mic-lost", "speaker-played", "camera-untried"]
+        } else {
+            ["connected", "mic-heard", "speaker-lost", "camera-untried"]
+        };
+        assert_eq!(kinds(&lines(&written, "test-call", "results")[0]), expected);
+    }
+}
+
+#[test]
+fn a_camera_that_couldn_t_turn_on_in_the_test_call_failed_its_check() {
+    let feed = VideoFeed::new();
+    let rig = video_calling(&feed);
+    let (trace, _written) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), trace);
+    registered(&rig);
+    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.ask_call(Ask::TestCall, cx)));
+    cx.run_until_parked();
+    status(&rig, 1, CallStatus::Placing);
+    status(&rig, 1, CallStatus::Connected);
+    echo_heard(&rig, 1);
+    // the media can't open the camera: the ask is refused, and the camera failed
+    rig.core
+        .call_answers
+        .lock()
+        .unwrap()
+        .push_back(Err(EngineError::Call(CallActionError::Media("no camera".to_owned()))));
+    click(cx, "call-camera");
+    status(&rig, 1, CallStatus::Ended(End::Remote(RemoteEnd::default())));
+    let check = cx
+        .update(|_, cx| calls_of(&rig).read(cx).ended().cloned())
+        .and_then(|ended| ended.check)
+        .unwrap();
+    assert_eq!(check.camera(), (Verdict::Problem, "Didn't work"));
+    assert!(!check.passed());
+}
+
+#[test]
+fn a_build_without_calls_offers_no_test_call_in_the_settings() {
+    let rig = Rig::start();
+    seed(&rig);
+    rig.cx.update(teams_ui::window::init);
+    let (trace, _written) = trace();
+    let (shell, cx) = shell_window(&rig, None, trace);
+    registered(&rig);
+    assert_eq!(offer(&shell, cx), TestCallOffer::Hidden);
+    calls_page(&shell, cx);
+    assert!(!drawn(cx, "settings-page-calls"));
+    assert!(!drawn(cx, "make-test-call"));
 }

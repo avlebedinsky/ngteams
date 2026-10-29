@@ -133,6 +133,11 @@ fn plain(event: &Event) -> String {
         Event::Call { call, status } => format!("call {}: {status:?}", call.get()),
         Event::Voicemail { call } => format!("call {}: taken by the callee's voicemail", call.get()),
         Event::CameraOff { call } => format!("call {}: its camera went off", call.get()),
+        Event::AudioClosed { call, microphone } => format!(
+            "call {}: its {} went away",
+            call.get(),
+            if *microphone { "microphone" } else { "speaker" }
+        ),
         // no names: how many, which lines, who of them speaks
         Event::CallParticipants { call, view } => format!(
             "call {}: {} participant(s), cameras on {}, lines {:?}, speaking {}{}",

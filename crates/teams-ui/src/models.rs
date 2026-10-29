@@ -337,6 +337,7 @@ impl Models {
             | Event::Call { .. }
             | Event::Voicemail { .. }
             | Event::CameraOff { .. }
+            | Event::AudioClosed { .. }
             | Event::CallParticipants { .. } => {
                 self.calls.update(cx, |calls, cx| calls.apply(&event, cx));
             }

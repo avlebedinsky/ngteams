@@ -19,6 +19,9 @@ impl Glyph {
     pub const CALENDAR: Self = Self(include_bytes!("../assets/icons/calendar.svg"));
     pub const CHECK: Self = Self(include_bytes!("../assets/icons/check.svg"));
     pub const CHEVRON_DOWN: Self = Self(include_bytes!("../assets/icons/chevron-down.svg"));
+    pub const CIRCLE_ALERT: Self = Self(include_bytes!("../assets/icons/circle-alert.svg"));
+    pub const CIRCLE_CHECK: Self = Self(include_bytes!("../assets/icons/circle-check.svg"));
+    pub const CIRCLE_MINUS: Self = Self(include_bytes!("../assets/icons/circle-minus.svg"));
     pub const CLOCK: Self = Self(include_bytes!("../assets/icons/clock.svg"));
     pub const CODE: Self = Self(include_bytes!("../assets/icons/square-code.svg"));
     pub const COPY: Self = Self(include_bytes!("../assets/icons/copy.svg"));
@@ -73,6 +76,7 @@ impl Glyph {
     pub const VIDEO_OFF: Self = Self(include_bytes!("../assets/icons/video-off.svg"));
     pub const VOLUME: Self = Self(include_bytes!("../assets/icons/volume-2.svg"));
     pub const VOLUME_OFF: Self = Self(include_bytes!("../assets/icons/volume-x.svg"));
+    pub const WIFI: Self = Self(include_bytes!("../assets/icons/wifi.svg"));
     pub const X: Self = Self(include_bytes!("../assets/icons/x.svg"));
 
     /// The icon, in the text colour around it.

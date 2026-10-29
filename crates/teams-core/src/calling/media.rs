@@ -486,6 +486,11 @@ pub(super) enum MediaChange {
     /// The camera went off by itself (its device went away, or its encoder failed): nothing more is sent on our video
     /// line until the account turns it on again.
     CameraOff,
+    /// The microphone (`true`) or the speaker (`false`) went away for good (its stream ended, not moved): nothing is
+    /// recorded or played on it any more, while the call goes on.
+    AudioClosed {
+        microphone: bool,
+    },
     /// Who spoke last in a group call: the dominant speakers' audio source ids, as its mixer told them.
     Speakers(Vec<i64>),
 }
@@ -537,9 +542,7 @@ impl LiveMedia {
                 SessionEvent::Failed(why) => changes.push(MediaChange::Failed(why)),
                 SessionEvent::DeviceClosed(device) => {
                     log::warn!("call {}: the {device:?} went away", self.call.get());
-                    if device == SessionDevice::Camera {
-                        changes.extend(self.camera_stopped());
-                    }
+                    changes.extend(self.device_closed(device));
                 }
                 SessionEvent::VideoFailed(why) => {
                     log::warn!("call {}: its camera's video stopped: {why}", self.call.get());
@@ -576,6 +579,16 @@ impl LiveMedia {
             None => {}
         }
         changes
+    }
+
+    /// A device of the session went away for good: the camera as [`Self::camera_stopped`], the microphone or the
+    /// speaker told as it is.
+    fn device_closed(&mut self, device: SessionDevice) -> Option<MediaChange> {
+        match device {
+            SessionDevice::Camera => self.camera_stopped(),
+            SessionDevice::Microphone => Some(MediaChange::AudioClosed { microphone: true }),
+            SessionDevice::Speaker => Some(MediaChange::AudioClosed { microphone: false }),
+        }
     }
 
     /// The camera stopped by itself: off, told once while it was on.

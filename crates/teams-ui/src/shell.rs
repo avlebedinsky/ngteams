@@ -29,9 +29,12 @@
 //! banner (Answer, Decline) and the in-call bar (Mute, the camera, Leave). The keys: Ctrl+Shift+C calls the chat shown,
 //! Ctrl+Shift+J joins its running call, Ctrl+Shift+S answers and Ctrl+Shift+D declines the call that rings,
 //! Ctrl+Shift+M mutes or unmutes, Ctrl+Shift+O turns the camera on or off (a build that shows video) and Ctrl+Shift+H
-//! leaves the call; the switcher offers the same as commands, with "Test call".
+//! leaves the call; the switcher offers the same as commands, with "Make a test call", which the settings' Calls page
+//! offers too, as Teams' does ([`Shell::test_call_offer`]: not while a call is up or rings on any account); a test
+//! call's results end with "Device settings", which opens that page.
 //! Traced: `call-button shown` (the chat, and `call`, `join` or `none`).
 
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
@@ -50,7 +53,7 @@ use teams_proto::ManualAvailability;
 
 use crate::accounts::{AccountTile, Accounts};
 use crate::bridge::Core;
-use crate::call_view::CallBar;
+use crate::call_view::{CallBar, CallBarEvent};
 use crate::calls::{self, Ask};
 use crate::channel_view::{ChannelView, ChannelViewEvent};
 use crate::chat_list::{ChatList, ChatListEvent};
@@ -64,7 +67,7 @@ use crate::people;
 use crate::presence;
 use crate::search::{HitTarget, Search, SearchEvent};
 use crate::settings::{ManualStatus, SettingsModel};
-use crate::settings_view::{self, Page, SettingsView};
+use crate::settings_view::{self, Page, SettingsView, SettingsViewEvent, TestCallOffer, TestCallState};
 use crate::sidebar::Sidebar;
 use crate::switcher::{CallCommand, Switcher, SwitcherEvent};
 use crate::teams_list::{ChannelChosen, TeamsList, TeamsListEvent};
@@ -218,7 +221,7 @@ pub struct Shell {
     chat_events: Option<Subscription>,
     /// What the channel view tells ([`Shell::follow_channel`]), once there is one.
     channel_events: Option<Subscription>,
-    _subscriptions: [Subscription; 8],
+    _subscriptions: [Subscription; 10],
 }
 
 /// What the chat's header shows, as the trace tells it: the chat, its other member's presence (a 1:1 chat's), and
@@ -257,8 +260,7 @@ impl Shell {
             let (list, teams, models, trace) = sidebar_parts;
             Sidebar::new(list, teams, models, trace, cx)
         });
-        let account = core.me().to_owned();
-        let settings_view = cx.new(|cx| SettingsView::new(settings.clone(), cx).for_account(account));
+        let (settings_view, test_call_asked) = Self::make_settings_view(&core, &settings, cx);
         let first_run = cx.new(|cx| FirstRun::new(settings.clone(), cx));
         // the first run's screen comes and goes with the settings
         let settled = cx.observe(&settings, |_: &mut Self, _, cx| cx.notify());
@@ -270,7 +272,8 @@ impl Shell {
         // the list's rows built again (a name or a picture read): the header shows what its row shows
         let renamed = cx.observe(&list, |this: &mut Self, _, cx| this.list_changed(cx));
         let typed = Self::keystrokes_are_use(window, cx);
-        let (call_bar, calling) = Self::calls(&core, &models, &list, &trace, cx);
+        let (call_bar, calling) = Self::calls(&core, &models, (&list, &settings), &trace, cx);
+        let device_settings = Self::follow_call_bar(&call_bar, window, cx);
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         let chat_parts = ShellParts {
@@ -315,6 +318,8 @@ impl Shell {
                 renamed,
                 settled,
                 calling,
+                device_settings,
+                test_call_asked,
             ],
         }
     }
@@ -360,22 +365,82 @@ impl Shell {
         Some((chat, events))
     }
 
-    /// The call bar over `models`' calls, and the observation that keeps the header's call button up to date.
+    /// The settings view of the account `core` is, offering the test call as the shell says
+    /// ([`Shell::test_call_offer`]), and the subscription that asks for it when the user presses it.
+    fn make_settings_view(
+        core: &Arc<dyn Core>,
+        settings: &Entity<SettingsModel>,
+        cx: &mut Context<Self>,
+    ) -> (Entity<SettingsView>, Subscription) {
+        let account = core.me().to_owned();
+        let shell = cx.weak_entity();
+        let offer: TestCallState = Rc::new(move |cx: &App| {
+            shell
+                .upgrade()
+                .map_or(TestCallOffer::Hidden, |shell| shell.read(cx).test_call_offer(cx))
+        });
+        let view = cx.new(|cx| {
+            SettingsView::new(settings.clone(), cx)
+                .for_account(account)
+                .with_test_call(offer)
+        });
+        let asked = cx.subscribe(&view, |this: &mut Self, _, event, cx| match event {
+            SettingsViewEvent::MakeTestCall => this.ask_call(Ask::TestCall, cx),
+        });
+        (view, asked)
+    }
+
+    /// The call bar over `models`' calls (a test call's results naming the devices `settings` list), and the
+    /// observation that keeps the header's call button up to date.
     fn calls(
         core: &Arc<dyn Core>,
         models: &Models,
-        list: &Entity<ChatList>,
+        (list, settings): (&Entity<ChatList>, &Entity<SettingsModel>),
         trace: &Arc<ViewTrace>,
         cx: &mut Context<Self>,
     ) -> (Entity<CallBar>, Subscription) {
         let (core, list, trace, calls) = (Arc::clone(core), list.clone(), Arc::clone(trace), models.calls.clone());
-        let call_bar = cx.new(|cx| CallBar::new(core, calls, list, trace, cx));
+        let settings = settings.clone();
+        let call_bar = cx.new(|cx| CallBar::new(core, calls, (list, settings), trace, cx));
         // a call up, rung or ended: the header's call button follows
         let calling = cx.observe(&models.calls, |this: &mut Self, _, cx| {
             this.trace_call_button(cx);
             cx.notify();
         });
         (call_bar, calling)
+    }
+
+    /// What the call bar asks: a test call's results' "Device settings" opens the settings' Calls page.
+    fn follow_call_bar(call_bar: &Entity<CallBar>, window: &mut Window, cx: &mut Context<Self>) -> Subscription {
+        cx.subscribe_in(call_bar, window, |this: &mut Self, _, event, window, cx| match event {
+            CallBarEvent::DeviceSettings => this.open_settings_page(Page::Calls, window, cx),
+        })
+    }
+
+    /// Shows the settings on `page`, the keyboard on their page column, as the rail's Settings does.
+    pub fn open_settings_page(&mut self, page: Page, window: &mut Window, cx: &mut Context<Self>) {
+        self.settings_view.update(cx, |view, cx| view.show_page(page, cx));
+        self.show_settings(cx);
+        self.settings_view.update(cx, |view, cx| view.focus_pages(window, cx));
+    }
+
+    /// Whether the settings' Calls page offers the test call now: not in a build that shows no calls, without the
+    /// echo service or read-only; not while this account or another has a call up, ringing or being set up (one call
+    /// at a time across the accounts), nor before the calling endpoint is registered.
+    #[must_use]
+    pub fn test_call_offer(&self, cx: &App) -> TestCallOffer {
+        let calls = self.models.calls.read(cx);
+        if !calls.shows() || !calls.has_test_call() || self.core.read_only() {
+            TestCallOffer::Hidden
+        } else if calls.busy() {
+            TestCallOffer::InCall
+        } else if self.busy_elsewhere(cx) {
+            TestCallOffer::OtherAccount
+        } else if !calls.registered() {
+            TestCallOffer::Connecting
+        } else {
+            TestCallOffer::Ready
+        }
     }
 
     /// The incoming call's banner and the in-call bar.
@@ -1002,10 +1067,7 @@ impl Shell {
         });
         self.trace.record(&TraceLine::new("diagnostics", "copied"));
         self.close_switcher(window, cx);
-        self.settings_view
-            .update(cx, |view, cx| view.show_page(Page::Diagnostics, cx));
-        self.show_settings(cx);
-        self.settings_view.update(cx, |view, cx| view.focus_pages(window, cx));
+        self.open_settings_page(Page::Diagnostics, window, cx);
     }
 
     /// Closes the switcher; the shell takes the focus back only when the switcher had it (one moved elsewhere, into

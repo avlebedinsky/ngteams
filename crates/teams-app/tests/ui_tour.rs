@@ -36,8 +36,8 @@ use teams_fence::lab::{Alias, LabConfig, record_abc_chat};
 use teams_fence::{Fence, FenceLog, LiveMembershipSource, Mri, Roster};
 use teams_media::devices::catalog::{DeviceInfo, DeviceKind, DeviceList, FixedDirectory};
 use teams_mock::{
-    AB_CHAT, ABC_CHAT, AC_CHAT, AMS_BASE, AX_CHAT, CHAT_BASE, CSA_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, OUTSIDER,
-    PRESENCE_BASE, TEAM_CHANNEL, TrouterMock, lab_toml,
+    AB_CHAT, ABC_CHAT, AC_CHAT, AMS_BASE, AX_CHAT, CHAT_BASE, CSA_BASE, ChatServiceMock, ECHO, LAB_A, LAB_B, LAB_C,
+    OUTSIDER, PRESENCE_BASE, TEAM_CHANNEL, TrouterMock, lab_toml,
 };
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::Store;
@@ -121,12 +121,24 @@ const STEPS: [Step; 36] = [
     }),
     ("settings-privacy", |shell, _, cx| show_page(shell, Page::Privacy, cx)),
     ("settings-calls", |shell, _, cx| {
-        // the mock's engine has no calls: made-up devices give the settings their Calls page
+        // the mock's engine has no calls: made-up devices give the settings their Calls page, and calls shown with the
+        // calling endpoint registered its "Make a test call"
         let model = shell.read(cx).settings().clone();
         teams_ui::settings::attach_devices(&model, Arc::new(FixedDirectory::new(made_up_devices())), cx);
+        let models = shell.read(cx).models().clone();
+        models
+            .calls
+            .update(cx, |calls, _| *calls = teams_ui::Calls::shown(Some(Mri::new(ECHO))));
+        models.apply(
+            teams_core::Event::CallingRegistration(teams_core::RegistrationReport::Registered),
+            cx,
+        );
         show_page(shell, Page::Calls, cx);
     }),
     ("settings-diagnostics", |shell, _, cx| {
+        // the calls shown for the Calls page go again: the mock's engine has none
+        let calls = shell.read(cx).models().calls.clone();
+        calls.update(cx, |calls, _| *calls = teams_ui::Calls::default());
         show_page(shell, Page::Diagnostics, cx);
     }),
     ("settings-appearance-dark", |shell, _, cx| {

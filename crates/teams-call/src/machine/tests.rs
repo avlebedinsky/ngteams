@@ -887,6 +887,66 @@ fn the_echo_is_added_only_once_the_endpoint_metadata_was_taken() {
     );
 }
 
+/// A roster update naming the echo `state` (`active` with an endpoint in the call, or `inactive`), at `version`.
+fn echo_roster(state: &str, version: u64) -> Value {
+    json!({"participants": {"28:00000000-0000-4000-8000-0000000000ec": {
+        "version": version,
+        "state": state,
+        "details": {"displayName": ""},
+        "endpoints": {"made-up-endpoint": {"call": {"mediaStreams": [{"label": "main-audio", "sourceId": 1}]}}},
+    }}})
+}
+
+#[test]
+fn the_test_call_ends_by_itself_once_the_echo_left() {
+    let now = Instant::now();
+    let (mut calls, call, _) = connected_test_call(now);
+    let roster = calls
+        .call
+        .as_ref()
+        .and_then(|call| call.path_of(Kind::Conversation, "rosterUpdate"))
+        .unwrap()
+        .to_owned();
+    // a roster without the echo before it joined ends nothing
+    calls.on_delivery(&delivery(&roster, &json!({"participants": {}})), Observed::Nothing, now);
+    assert!(names(&effects(&mut calls)).is_empty());
+    calls.on_delivery(&delivery(&roster, &echo_roster("active", 1)), Observed::Nothing, now);
+    let joined = effects(&mut calls);
+    assert!(names(&joined).is_empty(), "{joined:#?}");
+    // the echo played the recording back and left: the call leaves, and ends as the far end's once its leave is taken
+    calls.on_delivery(&delivery(&roster, &echo_roster("inactive", 2)), Observed::Nothing, now);
+    let left = effects(&mut calls);
+    let [(leave, "leave")] = sent(&left)[..] else {
+        panic!("{left:#?}");
+    };
+    calls.on_outcome(leave, &ok(&json!({})), now);
+    assert!(matches!(
+        events(&effects(&mut calls)).last(),
+        Some(CallEvent::Ended {
+            call: ended,
+            end: End::Remote(_),
+        }) if *ended == call
+    ));
+}
+
+#[test]
+fn a_chat_s_call_doesn_t_end_when_someone_leaves_its_roster() {
+    let now = Instant::now();
+    let (mut calls, _) = ringing_call(now);
+    let path = acceptance_path(&calls);
+    calls.on_delivery(&delivery(&path, &acceptance()), Observed::Acceptance, now);
+    let _ = effects(&mut calls);
+    let roster = calls
+        .call
+        .as_ref()
+        .and_then(|call| call.path_of(Kind::Conversation, "rosterUpdate"))
+        .unwrap()
+        .to_owned();
+    calls.on_delivery(&delivery(&roster, &echo_roster("active", 1)), Observed::Nothing, now);
+    calls.on_delivery(&delivery(&roster, &echo_roster("inactive", 2)), Observed::Nothing, now);
+    assert!(!names(&effects(&mut calls)).contains(&"leave"));
+}
+
 #[test]
 fn an_acceptance_before_the_start_s_answer_is_applied_once_it_came() {
     let now = Instant::now();

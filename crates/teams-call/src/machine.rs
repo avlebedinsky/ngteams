@@ -62,7 +62,7 @@ impl CallId {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Placement {
     /// The test call: a conversation of the account alone, the echo service `echo` added once the media controller
-    /// accepted it (`docs/protocol/calling-echo.md`).
+    /// accepted it; it ends by itself, with a `leave`, once the echo left its roster (`docs/protocol/calling-echo.md`).
     TestCall { echo: Mri },
     /// A call from a chat: a 1:1 chat's one callee (`group_chat` `None`), or a group chat and its other members.
     Chat {
@@ -1091,7 +1091,10 @@ impl Calls {
             (Kind::Call, "mediaRenegotiation") => self.renegotiated(delivery, observed, now),
             (Kind::Call, "mediaAnswer") => self.media_answered(delivery, now),
             (Kind::Call, "rejection") => self.reoffer_rejected(delivery, now),
-            (Kind::Conversation, "rosterUpdate") => self.roster_updated(delivery),
+            (Kind::Conversation, "rosterUpdate") => {
+                self.roster_updated(delivery);
+                self.echo_present(now);
+            }
             // progress and conversation updates, an add's outcome: read by nothing yet
             _ => {}
         }
@@ -1324,6 +1327,29 @@ impl Calls {
         if let Some(participants) = call.roster.apply(update, &self.identity.mri) {
             let id = call.id;
             self.out.event(CallEvent::Participants { call: id, participants });
+        }
+    }
+
+    /// The test call's echo in its roster, or no longer: it leaves once it played the recording back (its entry turns
+    /// inactive about 50 s after the media connected; the call controller ends nothing by itself), and the test call
+    /// ends then with a `leave`, as the web client ends it ([`End::Remote`]). Nothing for any other call, nor before
+    /// the echo was in it.
+    fn echo_present(&mut self, now: Instant) {
+        let Some(call) = self.call.as_mut().filter(|call| call.phase == Phase::Connected) else {
+            return;
+        };
+        let Side::Placed { echo: Some(echo) } = &call.side else {
+            return;
+        };
+        if call
+            .roster
+            .participants()
+            .iter()
+            .any(|participant| participant.mri == *echo)
+        {
+            call.echo_joined = true;
+        } else if call.echo_joined {
+            self.leave(Ending::EchoLeft, now);
         }
     }
 

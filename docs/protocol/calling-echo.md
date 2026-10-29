@@ -269,6 +269,13 @@ pseudo-random pattern, the speaker is recorded, and the recording is searched fo
   ends before the echo plays anything back.
 - **The end.** In one run the call controller delivered `call/end` (`CallEndReasonLocalUserInitiated`) for our `leave`
   before the `leave`'s own `204`; the native client ends a call it is leaving as hung up whichever comes first.
+- **The echo leaves by itself** (one live run of 2026-10-29: `teams-headless a call echo --seconds 150`, the lab build,
+  account a). Its roster entry came about 2 s after the media connected and went (the participants empty) about 50 s
+  after, once it had played the recording back and spoken again; nothing else came: no `call/end`, no
+  `conversationEnd`, and the call stayed up with the account alone in it until our `leave` at 150 s. The web client
+  leaves the test call once the echo has left (the M0 runs saw it leave by itself after the echo left a silent
+  recording), and so does the native client now: the echo's entry gone from a connected test call's roster sends the
+  `leave`, and the call ends as the far end's.
 - **Its camera, as a 1:1 call's** (one live run of 2026-10-28: `teams-headless a call echo --video --camera-after 3
   --seconds 45`, the lab build, account a). The start offers a 1:1 call's main video line, receiving; the acceptance
   hands out `mediaRenegotiation` but no `updateMediaDescriptions`, so the camera goes on as in a 1:1 call: a

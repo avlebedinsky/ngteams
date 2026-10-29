@@ -305,6 +305,9 @@ fn call_fields(event: &Event, names: &LabNames) -> Value {
         }),
         Event::Voicemail { call } => json!({"event": "voicemail", "call": call.get()}),
         Event::CameraOff { call } => json!({"event": "camera_off", "call": call.get()}),
+        Event::AudioClosed { call, microphone } => {
+            json!({"event": "audio_closed", "call": call.get(), "microphone": microphone})
+        }
         // each by lab name, never the name the roster gives
         Event::CallParticipants { call, view } => json!({
             "event": "call_participants",

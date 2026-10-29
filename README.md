@@ -520,10 +520,11 @@ view, or in a group call the participant grid (a cell per participant as the ros
 line shows it, a mark while it speaks). The camera is off at every start, join and answer; only the user turns it on.
 Keys: Ctrl+Shift+C calls the chat shown, Ctrl+Shift+J joins its running call, Ctrl+Shift+S answers, Ctrl+Shift+D
 declines, Ctrl+Shift+M mutes or unmutes, Ctrl+Shift+O turns the camera on or off, Ctrl+Shift+H leaves the call; the
-switcher (Ctrl+K) offers the commands that fit the moment ("Call", "Test call", "Join call", "Answer call", "Decline
+switcher (Ctrl+K) offers the commands that fit the moment ("Call", "Make a test call", "Join call", "Answer call", "Decline
 call", "Leave call", "Mute or unmute", "Turn camera on or off"). Nothing answers or declines a call but the user. The settings list
 the sandbox's microphones, speakers and cameras ("Follow the system" by default; a choice moves a running call's
-device without dropping it) and the video switch, on only with Cisco's OpenH264 in the lab's `openh264/`.
+device without dropping it), "Make a test call" under them (its results, once it ended: the microphone, the speaker,
+the camera and the network as the call showed them) and the video switch, on only with Cisco's OpenH264 in the lab's `openh264/`.
 `crates/teams-app/tests/call_window.rs` runs a's and b's apps in two sandboxes, each with its private PipeWire's tone,
 on `teams-mock` with its calling media: a calls b by the keyboard, b's ringtone is in b's recording, b answers from the
 notification, each tone is in the other's recording, a hangs up; b declines a second call and a's bar says it went to
@@ -591,7 +592,7 @@ gives binaries that refuse to start (no install marker).
 Calls (`docs/personal-build.md`, "Calls"): 1:1 and group-chat calls today, audio and video, on the desktop's PipeWire
 (fixed when the build is made) with the camera through the desktop's camera portal; the fence limits none of them. A
 call starts or joins on the user's action; any invitation addressed to the account rings (one call at a time across the
-accounts, as a Teams client) and is answered or declined only by the user. "Test call" calls the echo service named in
+accounts, as a Teams client) and is answered or declined only by the user. "Make a test call" (Settings, Calls and devices, or the switcher) calls the echo service named in
 the web bundle. The microphone opens only once
 the call passed the fence; the camera is off at every start, join and answer. Video needs Cisco's OpenH264, which the
 user downloads with `scripts/fetch-openh264.sh ~/.local/share/ngteams` (the patent question is the user's:

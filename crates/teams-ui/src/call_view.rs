@@ -11,14 +11,18 @@
 //!   participant (its name as the roster gives it, its video when a line shows it, a mark while it speaks) and the
 //!   account's own (its self view, a mark while it speaks); before that, the video tiles, the far end's picture and the
 //!   self view ([`crate::video::Tiles`]). Once it ended, how (or why a later ask went nowhere) until the next call or
-//!   Dismiss (an ✕).
+//!   Dismiss (an ✕); a test call's end is its results, as Teams shows them: the microphone, the speaker, the camera
+//!   (each with the device the calls use) and the network, each checked by what the call showed
+//!   ([`calls::DeviceCheck`]), with "Device settings" (the settings' Calls page, asked of the shell:
+//!   [`CallBarEvent::DeviceSettings`]).
 //!
 //! A build that shows no calls draws none of it.
 //!
 //! Every button asks through [`calls::ask`], as the shell's keys and the switcher's commands do. What is shown is
 //! traced (`calling registered`/`unregistered` as the calling endpoint goes, `call-banner shown`/`hidden` with the call's number, its kind, whether the caller is named, a group call's
 //! chat and the caller's MRI; `in-call shown` with the call's number, its kind, state, end, mute, camera and voicemail,
-//! its chat and its participants' MRIs; `in-call hidden`; `call-participant shown` per grid cell when the grid changed,
+//! its chat and its participants' MRIs; `in-call hidden`; `test-call results` once a test call ended, a kind per
+//! check; `call-participant shown` per grid cell when the grid changed,
 //! with the call's number, the participant's MRI and kinds for its camera, its line and whether it speaks, and
 //! `call-participant self` for the account's own; the tiles' `video-tile` lines), never a name.
 
@@ -26,20 +30,24 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, AsyncApp, Context, Entity, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div, px, rgb,
+    AnyElement, App, AsyncApp, Context, Entity, EventEmitter, InteractiveElement as _, IntoElement, ParentElement as _,
+    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div, px, rgb,
 };
 use gpui_component::Selectable as _;
 use gpui_component::Sizable as _;
+use gpui_component::button::Button;
 use gpui_component::tooltip::Tooltip;
 use teams_core::{CallId, CallStatus, CallView, IncomingCall};
+use teams_media::devices::catalog::DeviceKind;
 
 use crate::bridge::Core;
-use crate::calls::{self, ActiveCall, Ask, CallKind, Calls, Refused};
+use crate::calls::{self, ActiveCall, Ask, CallKind, Calls, DeviceCheck, Ended, Refused, Verdict};
 use crate::chat_list::{self, ChatList};
 use crate::icons::{Glyph, icon_button, icon_button_with_key, selected_by};
 use crate::notify::SOMEONE;
 use crate::people::Shown;
+use crate::settings::SettingsModel;
+use crate::settings_view::{self, device_label};
 use crate::shell::{AnswerCall, DeclineCall, HangUpCall, ToggleCameraCall, ToggleMuteCall};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
@@ -68,11 +76,22 @@ struct BarShown {
     people: Vec<String>,
 }
 
+/// What the call bar asks of the shell.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallBarEvent {
+    /// A test call's results' "Device settings": the settings' Calls page.
+    DeviceSettings,
+}
+
 /// The banner and the in-call bar (see the module docs). A GPUI entity the shell holds.
 pub struct CallBar {
     core: Arc<dyn Core>,
     calls: Entity<Calls>,
     list: Entity<ChatList>,
+    /// The settings, for the devices a test call's results name.
+    settings: Entity<SettingsModel>,
+    /// The last test call whose results were seen, with the devices it used as named when it ended.
+    results: Option<(CallId, [String; 3])>,
     trace: Arc<ViewTrace>,
     banner_traced: Option<CallId>,
     bar_traced: Option<BarShown>,
@@ -92,10 +111,12 @@ pub struct CallBar {
 }
 
 impl CallBar {
+    /// The bar over `calls`, a chat named as `list` names it, a test call's results naming the devices `settings`
+    /// list.
     pub fn new(
         core: Arc<dyn Core>,
         calls: Entity<Calls>,
-        list: Entity<ChatList>,
+        (list, settings): (Entity<ChatList>, Entity<SettingsModel>),
         trace: Arc<ViewTrace>,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -111,6 +132,8 @@ impl CallBar {
             core,
             calls,
             list,
+            settings,
+            results: None,
             trace,
             banner_traced: None,
             bar_traced: None,
@@ -273,6 +296,7 @@ impl CallBar {
                     chat: ended.chat.clone(),
                     people: Vec::new(),
                 };
+                self.note_results(&ended, cx);
                 if self.bar_traced.as_ref().is_some_and(|traced| traced.call == ended.id) {
                     if self.bar_traced.as_ref().is_none_or(|traced| traced.end.is_none()) {
                         self.record_bar(&shown);
@@ -290,6 +314,45 @@ impl CallBar {
                 }
             }
         }
+    }
+
+    /// A test call's results seen for the first time: the devices it used named as they are now, as it ended, and the
+    /// results traced once, a kind per check.
+    fn note_results(&mut self, ended: &Ended, cx: &App) {
+        let Some(check) = ended.check else { return };
+        if self.results.as_ref().is_some_and(|(call, _)| *call == ended.id) {
+            return;
+        }
+        self.results = Some((ended.id, self.devices_in_use(cx)));
+        let line = TraceLine::new("test-call", "results")
+            .call(ended.id.get())
+            .kind(match (check.connected, check.failed) {
+                (false, _) => "not-connected",
+                (true, true) => "dropped",
+                (true, false) => "connected",
+            })
+            .kind(match (check.microphone_lost, check.heard) {
+                (true, _) => "mic-lost",
+                (false, true) => "mic-heard",
+                (false, false) => "mic-silent",
+            })
+            .kind(match (check.speaker_lost, check.played) {
+                (true, _) => "speaker-lost",
+                (false, true) => "speaker-played",
+                (false, false) => "speaker-silent",
+            })
+            .kind(match check.camera() {
+                (Verdict::Problem, _) => "camera-failed",
+                (Verdict::Fine, _) => "camera-on",
+                (Verdict::Untried, _) => "camera-untried",
+            });
+        self.trace.record(&line);
+    }
+
+    /// The names of the devices the calls use now, in [`RESULT_DEVICES`]' order.
+    fn devices_in_use(&self, cx: &App) -> [String; 3] {
+        let model = self.settings.read(cx);
+        RESULT_DEVICES.map(|kind| settings_view::device_in_use(kind, model).unwrap_or_else(|| SYSTEM_DEVICE.to_owned()))
     }
 
     fn trace_banner(&mut self, ringing: Option<&IncomingCall>) {
@@ -654,25 +717,165 @@ impl CallBar {
         self.grid_traced = Some((call, view.clone()));
     }
 
-    /// How the last call ended, or why the last ask went nowhere, with Dismiss.
+    /// How the last call ended (a test call's results), or why the last ask went nowhere, with Dismiss.
     fn after(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
         let model = self.calls.read(cx);
         let refused = model.refused().map(refusal_text);
-        let ended = model.ended().map(|ended| calls::end_text(&ended.end, ended.voicemail));
-        let text = refused.or(ended)?;
+        let ended = model.ended().cloned();
+        if refused.is_none()
+            && let Some(ended) = ended.as_ref()
+            && let Some(check) = ended.check
+        {
+            return Some(self.results(ended, check, palette, cx));
+        }
+        let text = refused.or_else(|| ended.map(|ended| calls::end_text(&ended.end, ended.voicemail)))?;
         Some(
             strip(palette)
                 .debug_selector(|| "call-after".to_owned())
                 .child(div().flex_1().child(SharedString::from(text)))
-                .child(selected_by(
-                    "call-dismiss",
-                    icon_button("call-dismiss", Glyph::X, "Dismiss")
-                        .small()
-                        .on_click(cx.listener(|this, _, _, cx| this.calls.update(cx, Calls::dismiss))),
-                ))
+                .child(self.dismiss(cx))
                 .into_any_element(),
         )
     }
+
+    /// Dismiss (an ✕): how the last call ended, or the refusal, goes.
+    fn dismiss(&self, cx: &mut Context<Self>) -> gpui::Div {
+        selected_by(
+            "call-dismiss",
+            icon_button("call-dismiss", Glyph::X, "Dismiss")
+                .small()
+                .on_click(cx.listener(|this, _, _, cx| this.calls.update(cx, Calls::dismiss))),
+        )
+    }
+
+    /// A test call's results, as Teams shows them once it ended: a box per check (the microphone, the speaker and the
+    /// camera, each naming the device the call used, and the network), "Device settings" and Dismiss.
+    fn results(&self, ended: &Ended, check: DeviceCheck, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        // the devices as they were when the call ended: a device chosen since wasn't checked
+        let named = match &self.results {
+            Some((call, named)) if *call == ended.id => named.clone(),
+            _ => self.devices_in_use(cx),
+        };
+        let verdicts = [check.microphone(), check.speaker(), check.camera()];
+        let mut checks: Vec<AnyElement> = [Glyph::MIC, Glyph::VOLUME, Glyph::VIDEO]
+            .into_iter()
+            .zip(RESULT_DEVICES.into_iter().zip(named))
+            .zip(verdicts)
+            .map(|((glyph, (kind, device)), verdict)| check_box((glyph, device_label(kind), device), verdict, palette))
+            .collect();
+        checks.push(check_box(
+            (Glyph::WIFI, "Network", "Your connection".to_owned()),
+            check.network(),
+            palette,
+        ));
+        let passed = check.passed();
+        let summary = if passed {
+            "Your devices are working.".to_owned()
+        } else {
+            calls::end_text(&ended.end, ended.voicemail)
+        };
+        let device_settings = selected_by(
+            "test-call-device-settings",
+            Button::new("test-call-device-settings")
+                .label("Device settings")
+                .outline()
+                .small()
+                .on_click(cx.listener(|_, _, _, cx| cx.emit(CallBarEvent::DeviceSettings))),
+        );
+        let verdict = if passed { Verdict::Fine } else { Verdict::Problem };
+        let header = div()
+            .debug_selector(|| "test-call-results".to_owned())
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(verdict_mark(verdict, 18.0, palette))
+            .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Test call results"))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_sm()
+                    .text_color(rgb(palette.muted_foreground))
+                    .child(SharedString::from(summary)),
+            )
+            .child(device_settings)
+            .child(self.dismiss(cx));
+        strip(palette)
+            .debug_selector(|| "call-after".to_owned())
+            .flex_col()
+            .items_start()
+            .child(header.w_full())
+            .child(div().flex().flex_wrap().gap_2().children(checks))
+            .into_any_element()
+    }
+}
+
+/// What a test call's results name a device by while the devices aren't listed (or the system has no default).
+const SYSTEM_DEVICE: &str = "The system's default";
+
+/// The devices a test call's results name, in their boxes' order.
+const RESULT_DEVICES: [DeviceKind; 3] = [DeviceKind::Microphone, DeviceKind::Speaker, DeviceKind::Camera];
+
+/// A check's box's width, px: the four side by side in the bar, wrapped on a narrow window.
+const CHECK_WIDTH: f32 = 220.0;
+
+/// A verdict's mark: Teams' green check, its red alert, or a muted dash.
+fn verdict_mark(verdict: Verdict, size: f32, palette: Palette) -> AnyElement {
+    let (glyph, color) = match verdict {
+        Verdict::Fine => (Glyph::CIRCLE_CHECK, theme::SUCCESS),
+        Verdict::Problem => (Glyph::CIRCLE_ALERT, theme::DANGER),
+        Verdict::Untried => (Glyph::CIRCLE_MINUS, palette.muted_foreground),
+    };
+    glyph.icon().size(px(size)).text_color(rgb(color)).into_any_element()
+}
+
+/// One check of a test call's results, its test selector `test-call-check-<name>`: its device's glyph, its name, the
+/// device, and the verdict with its words.
+fn check_box(
+    (glyph, name, device): (Glyph, &'static str, String),
+    (verdict, said): (Verdict, &'static str),
+    palette: Palette,
+) -> AnyElement {
+    let selector = format!("test-call-check-{}", name.to_lowercase());
+    div()
+        .debug_selector(move || selector.clone())
+        .w(px(CHECK_WIDTH))
+        .flex()
+        .items_start()
+        .gap_2()
+        .p_2()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(palette.border))
+        .bg(rgb(palette.background))
+        .child(glyph.icon().size(px(18.0)))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap_0p5()
+                .child(div().text_sm().font_weight(gpui::FontWeight::SEMIBOLD).child(name))
+                .child(
+                    div()
+                        .truncate()
+                        .text_xs()
+                        .text_color(rgb(palette.muted_foreground))
+                        .child(SharedString::from(device)),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .text_xs()
+                        .child(verdict_mark(verdict, 14.0, palette))
+                        .child(said),
+                ),
+        )
+        .into_any_element()
 }
 
 /// What the user is told of an ask that went nowhere.
@@ -805,6 +1008,8 @@ fn control(
         .children(label)
         .into_any_element()
 }
+
+impl EventEmitter<CallBarEvent> for CallBar {}
 
 impl Render for CallBar {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {

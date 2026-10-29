@@ -2,7 +2,7 @@
 //! (`docs/personal-build.md`, "Several accounts"): a bridge per account over its engine, the main window
 //! (`teams-ui`'s desktop with a shell per account, the rail's avatars switching between them, and the first run's
 //! screen of the writes that happen on their own, [`settings`]), the notifications and the tray on the desktop's
-//! session bus, the calls when the engines have their calling ([`PersonalCalls`]: a call button and "Test call", an
+//! session bus, the calls when the engines have their calling ([`PersonalCalls`]: a call button and "Make a test call", an
 //! incoming call's ringtone, notification and banner, the in-call view, the video switch and the devices in the
 //! settings; one call at a time across the accounts), the sign-out and the quit.
 //!
