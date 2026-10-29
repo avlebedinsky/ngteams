@@ -1,5 +1,5 @@
-//! The player's thread: GStreamer's `playbin` on an `appsrc://` whose bytes come from the [`Cache`], its frames and its
-//! sound to appsinks, driven by the [`Command`]s and watched through its bus (see `crate::player`'s docs).
+//! The player's thread: `GStreamer`'s `playbin` on an `appsrc://` whose bytes come from the [`Cache`], its frames and
+//! its sound to appsinks, driven by the [`Command`]s and watched through its bus (see `crate::player`'s docs).
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError};
@@ -70,8 +70,7 @@ pub(super) fn run(
         Err(failure) => {
             status.state = State::Failed(failure);
             output.status(status);
-            // stays until it is dropped, so its owner keeps telling the failure
-            while commands.recv().is_ok() {}
+            outlast(commands);
             return;
         }
     };
@@ -86,6 +85,7 @@ pub(super) fn run(
         loaded: false,
         told: Instant::now(),
         stalled_since: None,
+        format_unread: false,
     };
     playing.lead(commands);
     // a read waiting for the network gives up, so the pipeline's threads can stop
@@ -301,8 +301,10 @@ fn play(sound: &Mutex<Sound>, bytes: &[u8]) {
     };
     pending.extend(
         bytes
-            .chunks_exact(4)
-            .map(|sample| f32::from_le_bytes([sample[0], sample[1], sample[2], sample[3]])),
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|sample| f32::from_le_bytes(*sample)),
     );
     let mut failed = false;
     while pending.len() >= FRAME_SAMPLES {
@@ -338,6 +340,9 @@ struct Playing {
     told: Instant,
     /// Since when a read has waited for the network while playing (a stall is buffering after [`STALL`]).
     stalled_since: Option<Instant>,
+    /// No element plugged reads the file's own format (neither a picture's nor a sound's: a playlist, whose adaptive
+    /// demuxer is never plugged, or a container no installed plugin reads): it fails as [`Failure::Unsupported`].
+    format_unread: bool,
 }
 
 impl Playing {
@@ -357,7 +362,7 @@ impl Playing {
                 if matches!(self.status.state, State::Failed(_)) {
                     self.feed.cache.close();
                     let _ = self.pipeline.set_state(gst::State::Null);
-                    while commands.recv().is_ok() {}
+                    outlast(commands);
                     return;
                 }
             }
@@ -452,7 +457,7 @@ impl Playing {
                 let refused = *self.feed.refused.lock().unwrap_or_else(PoisonError::into_inner);
                 let failure = match source {
                     Some(source) => failure_of(source),
-                    None if refused => Failure::Unsupported,
+                    None if refused || self.format_unread => Failure::Unsupported,
                     None => failure_of_error(&error.error()),
                 };
                 self.status.state = State::Failed(failure);
@@ -464,7 +469,8 @@ impl Playing {
 
     /// A stream no installed plugin decodes: playbin goes on with the others (a warning, not an error), so a video whose
     /// picture can't be decoded fails here ([`Failure::NoCodec`]) rather than play its sound over the poster; one whose
-    /// sound can't be, plays silently and says so.
+    /// sound can't be, plays silently and says so; one for the file's own format (`format_unread`) makes the
+    /// error that follows [`Failure::Unsupported`].
     fn missing_plugin(&mut self, structure: Option<&gst::StructureRef>) {
         let Some(structure) = structure.filter(|structure| structure.name() == "missing-plugin") else {
             return;
@@ -481,6 +487,8 @@ impl Playing {
             let mut sound = self.sound.lock().unwrap_or_else(PoisonError::into_inner);
             sound.speaker = None;
             sound.silenced = true;
+        } else {
+            self.format_unread = true;
         }
         self.tell();
     }
@@ -541,13 +549,19 @@ impl Playing {
     }
 }
 
-/// What a GStreamer error says of the file: a format or codec no plugin plays, or a file that doesn't add up.
+/// What a `GStreamer` error says of the file: a format or codec no plugin plays, or a file that doesn't add up.
 fn failure_of_error(error: &gst::glib::Error) -> Failure {
     if error.matches(gst::CoreError::MissingPlugin) || error.matches(gst::StreamError::CodecNotFound) {
         Failure::NoCodec
     } else {
         Failure::Unsupported
     }
+}
+
+/// Waits for the player to be dropped (its commands end), taking nothing more: a failed player stays until then, so
+/// its owner keeps telling the failure.
+fn outlast(commands: &Receiver<Command>) {
+    while commands.recv().is_ok() {}
 }
 
 fn nanos(at: Duration) -> u64 {

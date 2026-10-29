@@ -153,12 +153,16 @@ fn a_mention_of_everyone_is_the_account_s_own_in_someone_else_s_message_and_show
     let mentions = Mentions::of_message(&received, ME);
     assert!(mentions.names_me(), "it notifies the account");
     let rendered = rich_text::layout(&parse_html(&received.content), &mentions);
-    let styled: Vec<(&str, Option<Mentioned>)> = text_block(&rendered, 0)
+    // the name the sender's client wrote is shown as Everyone, the rest of the text as it is (unstyled, so not among
+    // the styled pieces)
+    let block = text_block(&rendered, 0);
+    assert_eq!(block.text, "Everyone hi");
+    let styled: Vec<(&str, Option<Mentioned>)> = block
         .styled()
         .into_iter()
         .map(|(text, style)| (text, style.mention))
         .collect();
-    assert_eq!(styled, [("Everyone", Some(Mentioned::Me)), (" hi", None)]);
+    assert_eq!(styled, [("Everyone", Some(Mentioned::Me))]);
     assert!(rendered.mentions_me());
 
     let sent = everyone_message(ME, "Everyone");

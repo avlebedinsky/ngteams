@@ -242,7 +242,7 @@ fn mention_span(index: usize, name: &str) -> String {
 
 /// A mention's entry in `properties.mentions`, as captured (`mention.json`; a mention of everyone in a group chat
 /// `mention-everyone.json`, its `mri` the chat's id): `itemid` a string as sent.
-fn mention_entry(index: usize, mri: &Mri, kind: MentionKind, name: &str) -> Value {
+fn mention_entry(index: usize, mri: &Mri, kind: &MentionKind, name: &str) -> Value {
     json!({
         "@type": MENTION_ITEMTYPE,
         "itemid": index.to_string(),
@@ -388,10 +388,11 @@ impl<'a> Render<'a> {
         self.html.push_str(&mention_span(index, name));
         if is_group_chat_id(mri.as_str()) {
             self.mentions
-                .push(mention_entry(index, mri, MentionKind::Everyone, name));
+                .push(mention_entry(index, mri, &MentionKind::Everyone, name));
             self.everyone.insert(mri.as_str().to_owned());
         } else {
-            self.mentions.push(mention_entry(index, mri, MentionKind::Person, name));
+            self.mentions
+                .push(mention_entry(index, mri, &MentionKind::Person, name));
             self.participants.insert(mri.clone());
         }
         Ok(())

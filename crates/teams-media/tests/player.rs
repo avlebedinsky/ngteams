@@ -1,6 +1,6 @@
-//! The inline video player on a made-up MP4 (`tests/fixtures/media/made-up-test-pattern.mp4`: 2 s of FFmpeg's test
+//! The inline video player on a made-up MP4 (`tests/fixtures/media/made-up-test-pattern.mp4`: 2 s of `FFmpeg`'s test
 //! pattern, 480×270 H.264 High with B-frames, and a 1 kHz tone in stereo AAC-LC at 44.1 kHz, its `moov` after its
-//! media): read part by part from a source that answers late, played by the system's GStreamer (its H.264 and AAC
+//! media): read part by part from a source that answers late, played by the system's `GStreamer` (its H.264 and AAC
 //! decoders installed, as the app needs them), the sound played on a speaker that keeps what it is given.
 
 // test code throughout (its helpers unwrap like the tests do)
@@ -193,17 +193,10 @@ fn a_file_that_isnt_an_mp4_is_unsupported() {
     );
 }
 
-/// A file whose bytes are an HLS playlist (a "video" by its name only) would have GStreamer plug its HLS demuxer,
+/// A file whose bytes are an HLS playlist (a "video" by its name only) would have `GStreamer` plug its HLS demuxer,
 /// which fetches the playlist's links itself: the player plugs none, fails it as unsupported, and nothing is fetched.
 #[test]
 fn a_playlist_s_links_are_never_fetched() {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    listener.set_nonblocking(true).unwrap();
-    let port = listener.local_addr().unwrap().port();
-    let playlist = format!(
-        "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nhttp://127.0.0.1:{port}/segment-0.ts\n\
-         #EXTINF:2.0,\nhttp://127.0.0.1:{port}/segment-1.ts\n#EXT-X-ENDLIST\n"
-    );
     struct Playlist(Vec<u8>);
     impl ByteSource for Playlist {
         fn read(&self, offset: u64, len: u32) -> Result<(Vec<u8>, u64), SourceError> {
@@ -212,6 +205,13 @@ fn a_playlist_s_links_are_never_fetched() {
             Ok((self.0[start..end].to_vec(), self.0.len() as u64))
         }
     }
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let playlist = format!(
+        "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXTINF:2.0,\nhttp://127.0.0.1:{port}/segment-0.ts\n\
+         #EXTINF:2.0,\nhttp://127.0.0.1:{port}/segment-1.ts\n#EXT-X-ENDLIST\n"
+    );
     let seen = Arc::new(Seen::default());
     let output: Arc<dyn PlayerOutput> = seen.clone();
     let _player = Player::open(

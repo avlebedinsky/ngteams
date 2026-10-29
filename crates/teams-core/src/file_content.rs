@@ -26,7 +26,7 @@ use tokio::sync::oneshot;
 use crate::engine::{EngineError, Responder};
 
 /// How long a download link Graph handed out is used before it is asked for again.
-pub const LINK_LIFE: Duration = Duration::from_secs(40 * 60);
+pub const LINK_LIFE: Duration = Duration::from_mins(40);
 
 /// Why a file's item gave no link: it can't be had, or the read failed on the way.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

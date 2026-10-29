@@ -809,7 +809,7 @@ impl SettingsView {
             .unwrap_or_default();
         let offer = self.test_call_offer(cx);
         if offer != TestCallOffer::Hidden {
-            rows.push(self.test_call_row(offer, palette, cx));
+            rows.push(Self::test_call_row(offer, palette, cx));
         }
         if !rows.is_empty() {
             groups.push(group(Some("Devices"), rows, palette));
@@ -846,7 +846,7 @@ impl SettingsView {
 
     /// "Make a test call" under the devices, as Teams has it: what it does, or why it can't start now with the button
     /// disabled. The button's test selector is `make-test-call`.
-    fn test_call_row(&self, offer: TestCallOffer, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn test_call_row(offer: TestCallOffer, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let button = Button::new("make-test-call")
             .icon(Glyph::PHONE.icon())
             .label("Make a test call")

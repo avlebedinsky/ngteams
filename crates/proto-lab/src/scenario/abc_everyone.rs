@@ -71,7 +71,7 @@ const SHOWN_NAME: &str = r"((e) => (e.innerText ?? '').split(/\n/).map((l) => l.
 /// The page expression of the index of the picker's highlighted suggestion (`aria-selected`, else the first).
 const SELECTED: &str = r"(() => { const o = OPTIONS; const i = o.findIndex((e) => e.getAttribute('aria-selected') === 'true'); return o.length ? Math.max(i, 0) : -1; })()";
 
-/// ArrowDown: moves the picker's highlight to the next suggestion.
+/// `ArrowDown`: moves the picker's highlight to the next suggestion.
 const ARROW_DOWN: Key = Key {
     key: "ArrowDown",
     code: "ArrowDown",
@@ -275,30 +275,37 @@ impl Steps<'_> {
                 report.notes.push(note);
             }
         }
-        let highlighted = format!(
-            "(() => {{ const o = {OPTIONS}; const i = {}; return i >= 0 && {SHOWN_NAME}(o[i]) === {}; }})()",
-            SELECTED.replace("OPTIONS", OPTIONS),
-            js_string(EVERYONE)
-        );
-        let mut steps = 0;
-        while !drive
-            .evaluate("whether Everyone is highlighted", &highlighted)
-            .await?
-            .as_bool()
-            .unwrap_or(false)
-        {
-            if steps == MOST_STEPS {
-                return Err(setup(format!(
-                    "the picker's highlight never reached Everyone in {MOST_STEPS} steps"
-                )));
-            }
-            drive.press("a moves the picker's highlight", ARROW_DOWN).await?;
-            steps += 1;
-        }
+        highlight_everyone(drive).await?;
         drive.press_enter("a picks Everyone").await?;
         drive.skip_seen();
         super::ab_chat::send(drive, "a (the mention of everyone)", &format!(" {text}")).await
     }
+}
+
+/// Moves the picker's highlight down until it is on [`EVERYONE`], at most [`MOST_STEPS`] times.
+async fn highlight_everyone(drive: &mut Driver) -> Result<(), ScenarioError> {
+    let highlighted = format!(
+        "(() => {{ const o = {OPTIONS}; const i = {}; return i >= 0 && {SHOWN_NAME}(o[i]) === {}; }})()",
+        SELECTED.replace("OPTIONS", OPTIONS),
+        js_string(EVERYONE)
+    );
+    // checked before each step and once after the last
+    for step in 0..=MOST_STEPS {
+        let on = drive
+            .evaluate("whether Everyone is highlighted", &highlighted)
+            .await?
+            .as_bool()
+            .unwrap_or(false);
+        if on {
+            return Ok(());
+        }
+        if step < MOST_STEPS {
+            drive.press("a moves the picker's highlight", ARROW_DOWN).await?;
+        }
+    }
+    Err(setup(format!(
+        "the picker's highlight never reached Everyone in {MOST_STEPS} steps"
+    )))
 }
 
 /// What the picker shows, for the notes, without a name or an address of anyone it offers (the notes are printed):

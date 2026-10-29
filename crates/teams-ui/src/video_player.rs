@@ -4,7 +4,7 @@
 //! - **Before it plays**: the file's thumbnail (Graph's, as the card shows it, `crate::inline::thumbnail`) with the
 //!   controls over it. Play, a click on the picture or Space starts it: a [`Player`] (`teams-media`) on a thread of its
 //!   own, reading the file part by part from the engine ([`Core::file_range`](crate::bridge::Core::file_range), through
-//!   the card's [`PictureSource`]: no view builds a request), played by GStreamer, each frame shown here through
+//!   the card's [`PictureSource`]: no view builds a request), played by `GStreamer`, each frame shown here through
 //!   GPUI's external surface, its sound on the speaker of the devices the app gave ([`set_playback`]).
 //! - **The controls**, as Teams' player has them: play/pause, back 10 s, forward 10 s, mute, "More options" (open in
 //!   the browser, download, copy link), full screen (the video over the whole window, the window full screen; Esc or
@@ -12,7 +12,7 @@
 //!   where it is clicked or dragged to, its tooltip the time. While it plays the controls show only while the pointer
 //!   is on the video; paused, always. Space plays or pauses, Left and Right go 10 s back or forward, M mutes.
 //! - **Its states**: loading and buffering show a spinner over the picture; a video that can't be played here (a
-//!   format no installed GStreamer plugin plays, a file the account can't read, the network) says so and offers the
+//!   format no installed `GStreamer` plugin plays, a file the account can't read, the network) says so and offers the
 //!   browser.
 //! - The player lives as long as its card is drawn: a card scrolled away stops it. One plays at a time: starting one
 //!   pauses the others, as in Teams.
@@ -25,11 +25,11 @@ use std::time::{Duration, Instant};
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, Bounds, ClipboardItem, Context, Entity, ExternalSurface, FocusHandle, FontWeight, FrameCompletion,
-    Global, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ObjectFit, ParentElement as _, PixelFrame, PixelRect, PixelSurface, Pixels, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, StyledImage as _, Task, WeakEntity, Window, anchored, canvas,
-    deferred, div, hsla, img, point, px, relative, size,
+    AnyElement, App, Bounds, ClipboardItem, Context, Div, Entity, ExternalSurface, FocusHandle, FontWeight,
+    FrameCompletion, Global, InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ObjectFit, ParentElement as _, PixelFrame, PixelRect, PixelSurface, Pixels, Render,
+    SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _, Task, WeakEntity, Window, anchored,
+    canvas, deferred, div, hsla, img, point, px, relative, size,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
@@ -122,6 +122,16 @@ impl PlayerOutput for Screen {
     }
 }
 
+/// Whether a player's video fills the window, and what it did to the window for it.
+#[derive(Default)]
+struct FullScreen {
+    on: bool,
+    /// The window was made full screen by this player (and is put back when it leaves).
+    made: bool,
+    /// The window is put back from full screen when this player goes (registered at its first full screen).
+    hooked: bool,
+}
+
 /// One card's player (see the module docs).
 pub struct VideoPlayer {
     /// The card's id: the message's and the file's place.
@@ -134,11 +144,7 @@ pub struct VideoPlayer {
     surface: Arc<PixelSurface>,
     drawn: Option<(u64, Arc<PixelFrame>)>,
     muted: bool,
-    fullscreen: bool,
-    /// The window was made full screen by this player (and is put back when it leaves).
-    made_fullscreen: bool,
-    /// The window is put back from full screen when this player goes (registered at its first full screen).
-    release_hooked: bool,
+    full_screen: FullScreen,
     /// Where the seek bar was drawn, for a click's place on it.
     bar: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// The seek bar's place while it is dragged, as a fraction.
@@ -181,9 +187,7 @@ impl VideoPlayer {
             surface: PixelSurface::new(),
             drawn: None,
             muted: false,
-            fullscreen: false,
-            made_fullscreen: false,
-            release_hooked: false,
+            full_screen: FullScreen::default(),
             bar: Rc::new(Cell::new(None)),
             dragging: None,
             focus: cx.focus_handle(),
@@ -275,29 +279,35 @@ impl VideoPlayer {
     }
 
     fn toggle_fullscreen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.fullscreen = !self.fullscreen;
-        if self.fullscreen && !window.is_fullscreen() {
+        let full = &mut self.full_screen;
+        full.on = !full.on;
+        if full.on && !window.is_fullscreen() {
             window.toggle_fullscreen();
-            self.made_fullscreen = true;
-            if !self.release_hooked {
-                // a card that goes while its video fills the screen (the chat switched, the list moved) puts the window
-                // back as it found it
-                self.release_hooked = true;
-                cx.on_release_in(window, |this, window, _| {
-                    if this.made_fullscreen && window.is_fullscreen() {
-                        window.toggle_fullscreen();
-                    }
-                })
-                .detach();
-            }
-        } else if !self.fullscreen && self.made_fullscreen {
+            full.made = true;
+            self.hook_release(window, cx);
+        } else if !full.on && full.made {
             if window.is_fullscreen() {
                 window.toggle_fullscreen();
             }
-            self.made_fullscreen = false;
+            full.made = false;
         }
         window.focus(&self.focus, cx);
         cx.notify();
+    }
+
+    /// A card that goes while its video fills the screen (the chat switched, the list moved) puts the window back as it
+    /// found it: registered once, at its first full screen.
+    fn hook_release(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.full_screen.hooked {
+            return;
+        }
+        self.full_screen.hooked = true;
+        cx.on_release_in(window, |this, window, _| {
+            if this.full_screen.made && window.is_fullscreen() {
+                window.toggle_fullscreen();
+            }
+        })
+        .detach();
     }
 
     /// The seek bar's fraction under `position`, when the bar was drawn.
@@ -318,7 +328,7 @@ impl VideoPlayer {
             "left" => self.skip(true, cx),
             "right" => self.skip(false, cx),
             "m" => self.toggle_mute(cx),
-            "escape" if self.fullscreen => self.toggle_fullscreen(window, cx),
+            "escape" if self.full_screen.on => self.toggle_fullscreen(window, cx),
             _ => return,
         }
         cx.stop_propagation();
@@ -360,13 +370,13 @@ impl VideoPlayer {
 impl Render for VideoPlayer {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let id = self.id.clone();
-        let inline = if self.fullscreen {
+        let inline = if self.full_screen.on {
             // the video is drawn over the whole window; the card keeps its place, black
             div().size_full().bg(gpui::black()).into_any_element()
         } else {
             self.screen_box(cx)
         };
-        let overlay = self.fullscreen.then(|| {
+        let overlay = self.full_screen.on.then(|| {
             let viewport = window.viewport_size();
             let screen = self.screen_box(cx);
             deferred(
@@ -442,7 +452,14 @@ impl VideoPlayer {
                 thumbnail(share_url, &self.source, cx)
             });
         match poster {
-            PictureState::Shown(image, _) => img(image).size_full().object_fit(ObjectFit::Contain).into_any_element(),
+            PictureState::Shown(image, _) => {
+                let id = self.id.clone();
+                div()
+                    .debug_selector(move || format!("video-poster-{id}"))
+                    .size_full()
+                    .child(img(image).size_full().object_fit(ObjectFit::Contain))
+                    .into_any_element()
+            }
             PictureState::Reading | PictureState::Missing => div().size_full().into_any_element(),
         }
     }
@@ -620,6 +637,17 @@ impl VideoPlayer {
 
     /// Play, back, forward and mute on the left; "More options", full screen and the browser on the right.
     fn buttons(&self, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(self.left_buttons(cx))
+            .child(self.right_buttons(cx))
+            .into_any_element()
+    }
+
+    /// Play, back, forward and mute.
+    fn left_buttons(&self, cx: &mut Context<Self>) -> Div {
         let id = &self.id;
         let (play_glyph, play_tip) = if self.playing() {
             (Glyph::PAUSE, "Pause")
@@ -635,13 +663,7 @@ impl VideoPlayer {
         } else {
             (Glyph::VOLUME, "Mute")
         };
-        let (screen_glyph, screen_tip) = if self.fullscreen {
-            (Glyph::SHRINK, "Exit full screen")
-        } else {
-            (Glyph::FULLSCREEN, "Full screen")
-        };
-        let open = self.file.open_link().map(str::to_owned);
-        let left = div()
+        div()
             .flex()
             .items_center()
             .gap_1()
@@ -676,8 +698,19 @@ impl VideoPlayer {
                 volume_tip,
                 None,
                 cx.listener(|this, _, _, cx| this.toggle_mute(cx)),
-            ));
-        let right = div()
+            ))
+    }
+
+    /// "More options", full screen and the browser.
+    fn right_buttons(&self, cx: &mut Context<Self>) -> Div {
+        let id = &self.id;
+        let (screen_glyph, screen_tip) = if self.full_screen.on {
+            (Glyph::SHRINK, "Exit full screen")
+        } else {
+            (Glyph::FULLSCREEN, "Full screen")
+        };
+        let open = self.file.open_link().map(str::to_owned);
+        div()
             .flex()
             .items_center()
             .gap_1()
@@ -701,14 +734,7 @@ impl VideoPlayer {
                         cx.open_url(&link);
                     },
                 )
-            }));
-        div()
-            .flex()
-            .items_center()
-            .justify_between()
-            .child(left)
-            .child(right)
-            .into_any_element()
+            }))
     }
 
     /// "More options" on the video: the file's own actions, as the card's header offers them.

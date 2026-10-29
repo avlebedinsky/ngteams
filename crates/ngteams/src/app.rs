@@ -162,13 +162,7 @@ pub fn launch<S: SecretStore + 'static>(cx: &mut App, launch: Launch<S>) -> Resu
         trace,
     } = launch;
     let (hint, sign_in_again) = signing_out(read_only, sign_in_again);
-    // a video a message carries plays its sound on the calls' devices (silently without them)
-    let playback = runner
-        .devices
-        .as_ref()
-        .map(crate::calling::CallDevices::playback)
-        .unwrap_or_default();
-    teams_ui::video_player::set_playback(playback, cx);
+    play_videos_on(runner.devices.as_ref(), cx);
     // closing the window keeps the app in the tray: it quits itself once the engines are shut down
     cx.set_quit_mode(QuitMode::Explicit);
     let settings = shared_settings(settings, first.calls.as_ref(), cx);
@@ -235,6 +229,12 @@ pub fn launch<S: SecretStore + 'static>(cx: &mut App, launch: Launch<S>) -> Resu
     follow_desktop(&desktop, running, cx);
     connect(&desktop, bus, cx);
     Ok(Launched { window, desktop })
+}
+
+/// A video a message carries plays its sound on the calls' devices (silently without them).
+fn play_videos_on(devices: Option<&crate::calling::CallDevices>, cx: &mut App) {
+    let playback = devices.map(crate::calling::CallDevices::playback).unwrap_or_default();
+    teams_ui::video_player::set_playback(playback, cx);
 }
 
 /// What a sign-out shows and opens: the sign-in window again with [`SIGNED_OUT_HINT`], or in the read-only mode

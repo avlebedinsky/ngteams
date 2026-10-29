@@ -226,7 +226,7 @@ const STEPS: [Step; 40] = [
     // `@` typed in the a–b–c chat: the mention picker over the box, the chat's members, then Everyone; above it b's
     // mention of everyone (`seed_group`), the account's own
     ("chat-mention-everyone", |shell, window, cx| {
-        type_in_compose(shell, "@", window, cx)
+        type_in_compose(shell, "@", window, cx);
     }),
     // the team's channel the mock's CSA lists as a's favourite, under "Favorites" with its team's mark, clicked there:
     // opened read-only as a channel, its row highlighted
@@ -1016,12 +1016,12 @@ fn seed_files(mock: &ChatServiceMock, runtime: &tokio::runtime::Runtime) -> Sand
             "application/json",
             item.to_string().into_bytes(),
         ));
-        runtime.block_on(mock.serve_ranged(&download, "video/mp4", MADE_UP_VIDEO.to_vec()));
+        runtime.block_on(mock.serve_ranged(download, "video/mp4", MADE_UP_VIDEO.to_vec()));
     }
     Ok(())
 }
 
-/// The made-up video every video card plays: 2 s of FFmpeg's test pattern and a tone (teams-media's test input).
+/// The made-up video every video card plays: 2 s of `FFmpeg`'s test pattern and a tone (teams-media's test input).
 const MADE_UP_VIDEO: &[u8] = include_bytes!("../../teams-media/tests/fixtures/media/made-up-test-pattern.mp4");
 
 /// A made-up video frame, 800 by 450: a gradient from `dark` to `light` with a few bars, a figure and a caption strip.

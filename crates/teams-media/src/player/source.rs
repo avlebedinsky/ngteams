@@ -234,22 +234,7 @@ fn want(state: &mut State, index: u64, urgent: bool) {
 /// [`MAX_BLOCKS`].
 fn read_blocks(shared: &Shared) {
     loop {
-        let index = {
-            let mut state = shared.state.lock().unwrap_or_else(PoisonError::into_inner);
-            loop {
-                if state.closed || state.failed.is_some() {
-                    return;
-                }
-                if let Some(index) = state.queue.pop_front() {
-                    if matches!(state.blocks.get(&index), Some(Block::Wanted)) {
-                        state.blocks.insert(index, Block::Reading);
-                        break index;
-                    }
-                    continue;
-                }
-                state = shared.changed.wait(state).unwrap_or_else(PoisonError::into_inner);
-            }
-        };
+        let Some(index) = next_wanted(shared) else { return };
         let read = read_block(shared, index);
         let mut state = shared.state.lock().unwrap_or_else(PoisonError::into_inner);
         match read {
@@ -264,6 +249,25 @@ fn read_blocks(shared: &Shared) {
             }
         }
         shared.changed.notify_all();
+    }
+}
+
+/// The most urgent wanted block, taken to be read (waiting for one); `None` once the cache is closed or failed.
+fn next_wanted(shared: &Shared) -> Option<u64> {
+    let mut state = shared.state.lock().unwrap_or_else(PoisonError::into_inner);
+    loop {
+        if state.closed || state.failed.is_some() {
+            return None;
+        }
+        match state.queue.pop_front() {
+            Some(index) if matches!(state.blocks.get(&index), Some(Block::Wanted)) => {
+                state.blocks.insert(index, Block::Reading);
+                return Some(index);
+            }
+            // asked for and then read or let go meanwhile
+            Some(_) => {}
+            None => state = shared.changed.wait(state).unwrap_or_else(PoisonError::into_inner),
+        }
     }
 }
 
@@ -327,7 +331,7 @@ mod tests {
     }
 
     fn data(len: usize) -> Vec<u8> {
-        (0..len).map(|at| (at % 251) as u8).collect()
+        (0..len).map(|at| u8::try_from(at % 251).unwrap()).collect()
     }
 
     #[test]
@@ -341,7 +345,8 @@ mod tests {
         assert_eq!(cache.total(), Ok(bytes.len() as u64));
         let at = u64::from(BLOCK) - 10;
         let read = cache.read_at(at, 30, true).unwrap().unwrap();
-        assert_eq!(read, bytes[at as usize..at as usize + 30]);
+        let start = usize::try_from(at).unwrap();
+        assert_eq!(read, bytes[start..start + 30]);
         let tail = cache.read_at(bytes.len() as u64 - 20, 50, true).unwrap().unwrap();
         assert_eq!(tail, bytes[bytes.len() - 20..]);
     }

@@ -263,15 +263,7 @@ impl Shell {
         });
         let (settings_view, test_call_asked) = Self::make_settings_view(&core, &settings, cx);
         let first_run = cx.new(|cx| FirstRun::new(settings.clone(), cx));
-        // the first run's screen comes and goes with the settings
-        let settled = cx.observe(&settings, |_: &mut Self, _, cx| cx.notify());
-        // a presence the engine told: the chat's header draws its dot again
-        let presence = cx.observe(&models.presence, |this: &mut Self, _, cx| {
-            this.trace_header(cx);
-            cx.notify();
-        });
-        // the list's rows built again (a name or a picture read): the header shows what its row shows
-        let renamed = cx.observe(&list, |this: &mut Self, _, cx| this.list_changed(cx));
+        let [settled, presence, renamed] = Self::observe_header(&settings, &models, &list, cx);
         let typed = Self::keystrokes_are_use(window, cx);
         let (call_bar, calling) = Self::calls(&core, &models, &list, &trace, cx);
         let focus = cx.focus_handle();
@@ -321,6 +313,24 @@ impl Shell {
                 test_call_asked,
             ],
         }
+    }
+
+    /// What the shell draws again as it changes: the settings (the first run's screen comes and goes with them), a
+    /// presence the engine told (the chat's header draws its dot again) and the list's rows built again (a name or a
+    /// picture read: the header shows what its row shows).
+    fn observe_header(
+        settings: &Entity<SettingsModel>,
+        models: &Models,
+        list: &Entity<ChatList>,
+        cx: &mut Context<Self>,
+    ) -> [Subscription; 3] {
+        let settled = cx.observe(settings, |_: &mut Self, _, cx| cx.notify());
+        let presence = cx.observe(&models.presence, |this: &mut Self, _, cx| {
+            this.trace_header(cx);
+            cx.notify();
+        });
+        let renamed = cx.observe(list, |this: &mut Self, _, cx| this.list_changed(cx));
+        [settled, presence, renamed]
     }
 
     /// The Teams list, with the subscriptions that open a channel it chose, and a channel kept as the selected chat.

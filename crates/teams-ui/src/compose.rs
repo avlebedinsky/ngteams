@@ -727,13 +727,15 @@ impl Compose {
         self.picker.as_ref()
     }
 
-    /// The presence the open picker shows beside each person it offers, in its order; empty while it is closed.
+    /// The presence the open picker shows beside each person it offers, in its order (Everyone has none); empty while
+    /// it is closed.
     #[must_use]
     pub fn picker_presence(&self, cx: &App) -> Vec<(String, Availability)> {
         let presence = self.presence.read(cx);
         self.picker
             .iter()
             .flat_map(|picker| &picker.matches)
+            .filter(|candidate| !candidate.is_everyone())
             .map(|candidate| (candidate.mri.clone(), presence.of(&candidate.mri)))
             .collect()
     }

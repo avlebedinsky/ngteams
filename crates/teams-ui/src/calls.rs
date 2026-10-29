@@ -99,6 +99,10 @@ impl ActiveCall {
 
 /// What a call showed of the account's devices and its network, as a test call's results tell it once it ended
 /// (Teams' "Test call results"): each a sign the call itself gave, never a guess.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each is a sign of its own the call gave, set by its own event and read by its own check"
+)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct DeviceCheck {
     /// Its media connected: the network carried it.

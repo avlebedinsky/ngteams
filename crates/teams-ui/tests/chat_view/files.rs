@@ -1,10 +1,10 @@
 //! The files a message carries, drawn as Teams draws them (`teams_ui::files`), on GPUI's test context over the fake
-//! engine: a card per file under the text, side by side and wrapping when the window is narrow; a video's thumbnail
-//! asked of the engine by its sharing link and drawn on its card, a placeholder without one, a document's card its
-//! header alone; a click on the name opens the sharing link, "More options" downloads it or copies the link; nothing
-//! about the files is said to be unshown; an image with a preview is drawn as the picture alone, its card when the
-//! preview can't be had. The message is the synthetic fixture `tests/fixtures/chatsvc/files.json`:
-//! every name, link and id is made up.
+//! engine: a card per file under the text, side by side and wrapping when the window is narrow; a video's card holding
+//! its player, the video's thumbnail asked of the engine by its sharing link and shown in it until it plays (the
+//! player's black box without one), a document's card its header alone; a click on the name opens the sharing link,
+//! "More options" downloads it or copies the link; nothing about the files is said to be unshown; an image with a
+//! preview is drawn as the picture alone, its card when the preview can't be had. The message is the synthetic fixture
+//! `tests/fixtures/chatsvc/files.json`: every name, link and id is made up.
 
 use std::sync::Arc;
 
@@ -120,42 +120,44 @@ fn a_messages_files_are_cards_side_by_side_under_its_text() {
 }
 
 #[test]
-fn a_videos_thumbnail_is_asked_of_the_engine_and_a_click_opens_the_file() {
+fn a_videos_thumbnail_is_asked_of_the_engine_and_shown_in_its_player_and_a_click_on_its_name_opens_it() {
     let (rig, _view, cx) = shown_with_thumbnail();
     let shares = share_urls();
     let video = bounds(cx, &format!("file-card-{ID}-0")).expect("the video's card");
-    // the video's thumbnail, asked of the engine by its sharing link, fills its card's width; the document has none
+    // the video's card holds its player, its thumbnail (asked of the engine by its sharing link) standing in until it
+    // plays, the card's width; the document has neither
+    let player = bounds(cx, &format!("video-player-{ID}-0")).expect("the video's player");
+    assert!(
+        player.size.width >= video.size.width - px(3.0),
+        "{player:?} in {video:?}"
+    );
     let asked = rig.core.asked();
     assert_eq!(asked.iter().filter(|asked| **asked == "file_thumbnail").count(), 1);
-    let picture = bounds(cx, &format!("file-thumbnail-{ID}-0")).expect("the thumbnail is drawn");
+    let poster = bounds(cx, &format!("video-poster-{ID}-0")).expect("the thumbnail is drawn");
     assert!(
-        picture.size.width >= video.size.width - px(3.0),
-        "{picture:?} in {video:?}"
+        poster.size.width >= video.size.width - px(3.0),
+        "{poster:?} in {video:?}"
     );
-    assert!(bounds(cx, &format!("file-thumbnail-{ID}-1")).is_none());
-    assert!(bounds(cx, &format!("file-thumbnail-none-{ID}-1")).is_none());
+    for none in ["video-player", "video-poster", "file-thumbnail", "file-thumbnail-none"] {
+        assert!(bounds(cx, &format!("{none}-{ID}-1")).is_none(), "{none}");
+    }
 
-    // a click on the name opens the file at its sharing link, through GPUI's opener
+    // a click on the name opens the file at its sharing link, through GPUI's opener; another file's name opens its own
     click(cx, &format!("file-name-{ID}-0"));
-    assert_eq!(cx.opened_url().as_deref(), Some(shares[0].as_str()));
-    // as does one on its picture; another file's name opens its own
-    click(cx, &format!("file-thumbnail-{ID}-0"));
     assert_eq!(cx.opened_url().as_deref(), Some(shares[0].as_str()));
     click(cx, &format!("file-name-{ID}-1"));
     assert_eq!(cx.opened_url().as_deref(), Some(shares[1].as_str()));
 }
 
 #[test]
-fn a_video_without_a_thumbnail_shows_its_placeholder_and_narrow_cards_wrap() {
+fn a_video_without_a_thumbnail_shows_its_players_black_box_and_narrow_cards_wrap() {
     let rig = rig();
     let (written_trace, _) = trace();
     let (_view, cx) = chat_window(&rig, written_trace);
     cx.simulate_resize(size(px(480.0), px(700.0)));
     draw(cx);
-    assert!(
-        bounds(cx, &format!("file-thumbnail-none-{ID}-0")).is_some(),
-        "the placeholder"
-    );
+    assert!(bounds(cx, &format!("video-player-{ID}-0")).is_some(), "the player");
+    assert!(bounds(cx, &format!("video-poster-{ID}-0")).is_none(), "no thumbnail");
     let video = bounds(cx, &format!("file-card-{ID}-0")).expect("the video's card");
     let document = bounds(cx, &format!("file-card-{ID}-1")).expect("the document's card");
     assert!(

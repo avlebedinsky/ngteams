@@ -14,7 +14,8 @@
 //!   and every row a read finds may have arrived (an entry it couldn't read carrying its `clientmessageid`): one event
 //!   per change of the row, the last one the row as it now stands ([`Outbox::take_arrived`]); a row just made (or
 //!   adopted by a resend) is told first as [`Event::Queued`], before its first attempt. Once a write went
-//!   through, its conversation is synced, so the account's own change is in the store (a new chat with it). A row can
+//!   through, its conversation is synced before its row is told, so the account's own change is in the store (a new
+//!   chat with it) by the time its owner hears it went. A row can
 //!   be read back by its id ([`EngineRequests::outbox_entry`]).
 //! - **Events → store**: each delivery of the push channel ([`teams_trouter`]) goes through the catch-up's
 //!   [`CatchUp::receive_message`], the path a sync takes, so a message that comes both ways is stored once, at its
@@ -1643,14 +1644,12 @@ where
         Ok(message)
     }
 
-    /// A row as it settled: told to the owner, and once it went through, its conversation synced (a new chat's
-    /// thread), so the account's own change is in the store.
+    /// A row as it settled: once it went through, its conversation synced (a new chat's thread), so the account's own
+    /// change is in the store; then told to the owner. Told after the sync, not before: the store answers queries
+    /// while the sync waits on the service, so an owner told first could look for the change and not find it yet.
     async fn settled(&mut self, row: &OutboxEntry) {
-        self.emit(Event::Outbox(row.clone()));
-        if row.state != OutboxState::Sent {
-            return;
-        }
         let conversation = match row.kind {
+            _ if row.state != OutboxState::Sent => None,
             OutboxKind::ReadReceipt => None,
             OutboxKind::CreateChat => row.message_id.clone(),
             _ => row.conversation_id.clone(),
@@ -1660,6 +1659,7 @@ where
         {
             self.missed("the sync after a write", error);
         }
+        self.emit(Event::Outbox(row.clone()));
     }
 
     // --- calls ---

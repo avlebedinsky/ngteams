@@ -10,18 +10,19 @@
 //!   underline, strike, code) style their pieces; a mention is drawn in the brand colour, the account's own bold in
 //!   the mention colour, neither on a box (a mention's `itemid` names its entry in `properties.mentions`, whose MRI
 //!   says whom it names; an entry this build can't read names nobody); a mention of everyone in the chat shows
-//!   [`EVERYONE`] and is the account's own in a message someone else sent ([`Mentions::of_message`]); a link is a clickable range; an emoticon
-//!   (`<img itemtype="http://schema.skype.com/Emoji" itemid="<id>">`) keeps the place of a few spaces in its
-//!   paragraph's text ([`InlineEmoticon`]); a picture pasted into the message (an `<img>` naming a view of an AMS
-//!   object) or a GIF picked from Teams' GIF picker (one on Giphy's media host), not inside a link or a quote other
-//!   than a forward, is a block of its own ([`Block::Picture`], a GIF playing); any other image is a placeholder
-//!   (`Image`, with its `alt`), followed in a chat's message by a link that opens the message in Teams on the web
-//!   ([`layout_with_web_link`], [`message_web_link`]), as is a picture that can't be shown. A message of emoticons
-//!   alone ([`Rendered::emoticons_only`]) is drawn as Teams draws one: large, playing, without its bubble. A list is
-//!   [`Block::List`]: each item's blocks beside its marker (its number, or a bullet by how deep the list is nested:
-//!   disc, circle, square), indented as a browser indents one. A paragraph of no-break spaces alone (the web client's
-//!   `<p>&nbsp;</p>`, its blank line) is drawn as a blank line; one of ASCII whitespace alone, none. A block of code
-//!   is [`Block::Code`]: Teams' code card ([`crate::code`]), its lines numbered and its tokens coloured by their kind.
+//!   [`EVERYONE`] and is the account's own in a message someone else sent ([`Mentions::of_message`]); a link is a
+//!   clickable range; an emoticon (`<img itemtype="http://schema.skype.com/Emoji" itemid="<id>">`) keeps the place of
+//!   a few spaces in its paragraph's text ([`InlineEmoticon`]); a picture pasted into the message (an `<img>` naming
+//!   a view of an AMS object) or a GIF picked from Teams' GIF picker (one on Giphy's media host), not inside a link
+//!   or a quote other than a forward, is a block of its own ([`Block::Picture`], a GIF playing); any other image is a
+//!   placeholder (`Image`, with its `alt`), followed in a chat's message by a link that opens the message in Teams on
+//!   the web ([`layout_with_web_link`], [`message_web_link`]), as is a picture that can't be shown. A message of
+//!   emoticons alone ([`Rendered::emoticons_only`]) is drawn as Teams draws one: large, playing, without its bubble. A
+//!   list is [`Block::List`]: each item's blocks beside its marker (its number, or a bullet by how deep the list is
+//!   nested: disc, circle, square), indented as a browser indents one. A paragraph of no-break spaces alone (the web
+//!   client's `<p>&nbsp;</p>`, its blank line) is drawn as a blank line; one of ASCII whitespace alone, none. A block
+//!   of code is [`Block::Code`]: Teams' code card ([`crate::code`]), its lines numbered and its tokens coloured by
+//!   their kind.
 //! - [`render`] draws it: paragraphs line under line with no gap between them, as Teams sets them; a forward as
 //!   Teams' card, a bordered box with its header (the arrow, the original's sender and time, the view's to make:
 //!   [`render_with_header`]) above the content; pictures and emoticons through `crate::inline`, their bytes asked of

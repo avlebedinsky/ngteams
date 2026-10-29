@@ -251,21 +251,32 @@ fn mentioned(body: &Value, chat: &str) -> Option<Vec<Mri>> {
     let entries = strict_json(mentions.as_str()?.as_bytes())?;
     let mut added = Vec::new();
     for entry in entries.as_array()? {
-        if let Some(mri) = mention_participant(entry.as_object()?, chat)? {
-            added.push(mri);
+        match mention_participant(entry.as_object()?, chat)? {
+            Mentioned::Person(mri) => added.push(mri),
+            Mentioned::EveryoneHere => {}
         }
     }
     Some(added)
 }
 
-/// Whom one `properties.mentions` entry adds: `Some(Some(mri))` for its `mri`, `Some(None)` for a mention of everyone in
-/// the group chat `chat` it is posted to (`mentionType` [`EVERYONE`], `mri` the chat's id), `None` for an entry the
+/// Whom one `properties.mentions` entry names ([`mention_participant`]).
+enum Mentioned {
+    /// Its `mri`, added to the write's target.
+    Person(Mri),
+    /// Everyone in the group chat the write is posted to: nobody added.
+    EveryoneHere,
+}
+
+/// Whom one `properties.mentions` entry names: [`Mentioned::EveryoneHere`] for a mention of everyone in the group chat
+/// `chat` it is posted to (`mentionType` [`EVERYONE`], `mri` the chat's id), else its `mri`; `None` for an entry the
 /// fence can't read ([`mentioned`]).
-fn mention_participant(entry: &Map<String, Value>, chat: &str) -> Option<Option<Mri>> {
+fn mention_participant(entry: &Map<String, Value>, chat: &str) -> Option<Mentioned> {
     let mri = optional(entry, "mri").ok()??.as_str()?;
     match optional(entry, "mentionType").ok()? {
-        Some(Value::String(kind)) if kind == EVERYONE => (mri == chat && is_group_chat_id(chat)).then_some(None),
-        _ => Some(Some(Mri::new(mri))),
+        Some(Value::String(kind)) if kind == EVERYONE => {
+            (mri == chat && is_group_chat_id(chat)).then_some(Mentioned::EveryoneHere)
+        }
+        _ => Some(Mentioned::Person(Mri::new(mri))),
     }
 }
 

@@ -1,14 +1,14 @@
 //! A video file played inline in a chat, as Teams' card plays a video a message carries, its bytes read part by part
 //! from a [`ByteSource`] (the engine's ranged reads, in the app).
 //!
-//! - **GStreamer plays it**: `playbin` (the system's GStreamer and plugins) demultiplexes, decodes, keeps sound and
+//! - **`GStreamer` plays it**: `playbin` (the system's `GStreamer` and plugins) demultiplexes, decodes, keeps sound and
 //!   picture in step, seeks and mutes. It reads the file from an `appsrc` fed by [`source`]'s blocks (read ahead of
 //!   what plays, so it rarely waits on the network), never from the network itself: the elements that would fetch
 //!   anything (an adaptive demuxer a playlist's bytes would plug, a network source) are never plugged, and one that is
 //!   made anyway fails the player before it starts. Its frames go to an appsink as BGRA and its sound to another as
 //!   48 kHz mono, which plays them on the device seam's speaker ([`crate::devices`], the PipeWire the build allows),
-//!   never on a sink of GStreamer's own. Hardware video decoders are left out too: making one probes the GPU's drivers,
-//!   which can take seconds.
+//!   never on a sink of `GStreamer`'s own. Hardware video decoders are left out too: making one probes the GPU's
+//!   drivers, which can take seconds.
 //! - **Its thread**: a [`Player`] runs on a thread of its own and is told what to do by [`Command`]s; it tells its
 //!   [`PlayerOutput`] each frame to show and its [`Status`]. Dropped, it stops: its blocks' cache is closed at once, so
 //!   a read waiting for the network gives up and the pipeline's threads end.
@@ -49,9 +49,9 @@ pub enum Failure {
     Unavailable,
     /// Its parts failed to arrive (the network).
     Network,
-    /// Not a video the player plays (not a format GStreamer reads, or a file that doesn't add up).
+    /// Not a video the player plays (not a format `GStreamer` reads, or a file that doesn't add up).
     Unsupported,
-    /// No decoder for its codec among the installed GStreamer plugins (or no GStreamer).
+    /// No decoder for its codec among the installed `GStreamer` plugins (or no `GStreamer`).
     NoCodec,
     /// The player couldn't start (its thread wasn't made).
     Internal,
@@ -92,7 +92,7 @@ pub enum Command {
     Muted(bool),
 }
 
-/// Where a player's frames and status go; called on GStreamer's and the player's threads.
+/// Where a player's frames and status go; called on `GStreamer`'s and the player's threads.
 pub trait PlayerOutput: Send + Sync {
     /// A frame to show now (BGRA, opaque).
     fn frame(&self, frame: VideoFrame);
@@ -129,23 +129,21 @@ impl Player {
         let spawned = thread::Builder::new()
             .name("video-player".into())
             .spawn(move || run::run(theirs, &setup, &output, &received, play));
-        match spawned {
-            Ok(thread) => Some(Self {
-                commands,
-                cache,
-                _thread: thread,
-            }),
-            Err(_) => {
-                cache.close();
-                told.status(Status {
-                    state: State::Failed(Failure::Internal),
-                    position: Duration::ZERO,
-                    duration: Duration::ZERO,
-                    sound: false,
-                });
-                None
-            }
-        }
+        let Ok(thread) = spawned else {
+            cache.close();
+            told.status(Status {
+                state: State::Failed(Failure::Internal),
+                position: Duration::ZERO,
+                duration: Duration::ZERO,
+                sound: false,
+            });
+            return None;
+        };
+        Some(Self {
+            commands,
+            cache,
+            _thread: thread,
+        })
     }
 
     /// Tells the player `command`.

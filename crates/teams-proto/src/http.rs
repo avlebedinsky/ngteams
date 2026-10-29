@@ -1647,8 +1647,8 @@ fn header_pairs(map: &HeaderMap) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Reads an answer: its status, `Location`, `Retry-After`, `Content-Type`, `Content-Range`, and its body up to [`MAX_BODY`]; with
-/// `all_headers`, every header too, for the log's `debug` record (none otherwise).
+/// Reads an answer: its status, `Location`, `Retry-After`, `Content-Type`, `Content-Range`, and its body up to
+/// [`MAX_BODY`]; with `all_headers`, every header too, for the log's `debug` record (none otherwise).
 async fn read_answer(
     mut answer: reqwest::Response,
     all_headers: bool,
