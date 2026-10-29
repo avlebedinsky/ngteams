@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
 # Lands the task worktree's branch on main and pushes it, one worktree at a time.
 #
-# Run from inside the task's worktree once the work is committed, revmux is clean and the gate is green. It rebases
-# the branch onto origin/main and checks the whole workspace compiles, then, under a lock shared by every worktree of
-# the repo, rebases once more onto whatever landed meanwhile (checking again if that moved it), pushes the branch as
-# origin's main and fast-forwards the main checkout to it. Only the task's own commits are pushed: a main checkout
-# holding commits origin doesn't, or on another branch, stops it before anything is sent.
+# Run from inside the task's worktree once the work is committed and revmux is clean; the gate runs after it lands. It
+# rebases the branch onto origin/main and checks the whole workspace compiles, then, under a lock shared by every
+# worktree of the repo, rebases once more onto whatever landed meanwhile (checking again if that moved it), pushes the
+# branch as origin's main and fast-forwards the main checkout to it. Only the task's own commits are pushed: a main
+# checkout holding commits origin doesn't, or on another branch, stops it before anything is sent.
 #
 # Exit codes: 0 landed (prints `LANDED <hash>`); 1 a precondition failed; 2 the rebase conflicts (aborted; resolve it
-# with `git rebase origin/main` yourself, rerun the gate on the touched crates, then run this again); 3 the workspace
-# doesn't compile on the rebased branch (fix, commit, run again); 4 the main checkout can't take the change (it isn't
-# on main, its main holds commits origin doesn't, or its uncommitted files overlap the change): nothing was pushed,
-# report it, and never stash, reset, force or touch its files; 5 the fetch or the push failed: nothing changed
-# locally, run again; 6 pushed, but the main checkout couldn't be fast-forwarded: the change is on origin, report
-# that the checkout is behind.
+# with `git rebase origin/main` yourself, rerun `cargo check` on the touched crates, then run this again); 3 the
+# workspace doesn't compile on the rebased branch (fix, commit, run again); 4 the main checkout can't take the change
+# (it isn't on main, its main holds commits origin doesn't, or its uncommitted files overlap the change): nothing was
+# pushed, report it, and never stash, reset, force or touch its files; 5 the fetch or the push failed: nothing changed
+# locally, run again; 6 pushed, but the main checkout couldn't be fast-forwarded: the change is on origin, report that
+# the checkout is behind.
 set -euo pipefail
 
 die() {

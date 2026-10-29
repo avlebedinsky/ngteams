@@ -1,6 +1,6 @@
 ---
 name: task-dispatch
-description: Session mode where the user sends tasks one after another and every task goes to a dedicated background agent of its own, up to 4 at once, the rest queued in order — each editing agent in its own git worktree, finishing with revmux, the gate, its own rebase, merge and push to main, and nothing of the task left behind afterwards (worktree, target dir, branch, shells, temp files) — while this thread stays free to take the next task, answer questions and report results. Use it whenever the user says they'll send several tasks one by one, "start an agent for each task", "dispatch these", "run tasks in parallel", "up to N agents", "agent per task", "в этой сессии буду кидать задачи по одной", "запускай агента на каждую задачу", or otherwise wants this conversation to act as a dispatcher rather than do the work itself — and keep using it for every later task in that session, even when a later message doesn't mention agents.
+description: Session mode where the user sends tasks one after another and every task goes to a dedicated background agent of its own, up to 4 at once, the rest queued in order — each editing agent in its own git worktree, finishing with revmux, its own rebase, merge and push to main, then the gate once on the landed commit, and nothing of the task left behind afterwards (worktree, target dir, branch, shells, temp files) — while this thread stays free to take the next task, answer questions and report results. Use it whenever the user says they'll send several tasks one by one, "start an agent for each task", "dispatch these", "run tasks in parallel", "up to N agents", "agent per task", "в этой сессии буду кидать задачи по одной", "запускай агента на каждую задачу", or otherwise wants this conversation to act as a dispatcher rather than do the work itself — and keep using it for every later task in that session, even when a later message doesn't mention agents.
 ---
 
 # Task dispatch
@@ -78,6 +78,10 @@ don't. Write the brief the way you'd hand the task to a colleague:
      questions": CLAUDE.md's first rule says which changes need sign-off.
    - Run anything over ~30 s (cargo, tests, revmux) with `run_in_background` and pick it up from its notification.
      Never use polling loops: `until ! pgrep -f …` matches its own command line and never ends.
+   - **When the session runs under a CPU cap** (the `cpu-cap` skill), the brief gives its size: run cargo with
+     `CARGO_BUILD_JOBS=<n>` and tests with about n threads (`-- --test-threads=<n>`). Read n from
+     `~/.claude/skills/cpu-cap/scripts/cpu-cap.sh status` before writing the brief: its `quota:` line, rounded down,
+     at least 1. With `cap: none` or `quota: none`, leave the bullet out.
    - **Leave nothing running or lying around.** Your background shells outlive you: they keep running after you
      report. So before you report, stop every one you started (`TaskStop`), finished or not, along with anything they
      spawned (a test binary, a dev server, a browser), and delete every file you made outside the worktree (scratch
@@ -87,23 +91,22 @@ don't. Write the brief the way you'd hand the task to a colleague:
      The one process you leave running is the installed `ngteams`, when the task asked you to start it for the user.
      Start it detached, with its working directory outside the worktree, so the worktree's cleanup doesn't kill it:
      `cd ~ && setsid -f ~/.local/bin/ngteams >/dev/null 2>&1`. Say in the report that it is running.
-3. **For an editing task, how to finish**, in this order:
+3. **For an editing task, how to finish**, in this order. Clippy and the tests run once, after landing: a full gate
+   after every revmux round costs more than it finds, and `land.sh`'s workspace check catches what breaks the build.
    1. A revmux round on the change (the `revmux:revmux` skill). Fix every major finding, the immaterial and
-      pre-existing ones too, and re-run revmux on the fixes until it is clean.
-   2. The gate over the crates the change touched: `cargo fmt --all --check`, `cargo clippy -p … --all-targets
-      --all-features -- -D warnings`, `scripts/lint-report.sh`, `cargo test -p …`, plus `cargo test -p fixture-guard`
-      when `tests/fixtures/` or `docs/` changed.
-   3. Commit on the worktree's branch with a conventional message. Add no AI attribution and no Co-Authored-By line.
-   4. Land it by running `<repo>/.claude/skills/task-dispatch/scripts/land.sh` from inside the worktree, in the
+      pre-existing ones too, and re-run revmux on the fixes until it is clean. Between rounds run no clippy and no
+      tests, only `cargo check -p <touched crates> --all-targets` to see it compiles.
+   2. Commit on the worktree's branch with a conventional message. Add no AI attribution and no Co-Authored-By line.
+   3. Land it by running `<repo>/.claude/skills/task-dispatch/scripts/land.sh` from inside the worktree, in the
       background. Give the path in full, because the worktree has its own copy of the repo. The script first rebases
-      the branch onto `origin/main` and runs `cargo check --workspace --all-targets`. The per-crate gate doesn't
-      compile a crate the change didn't touch, so this check is what catches a caller that main's newer commits
-      added somewhere else. Then it waits for a lock shared by every worktree, rebases once more onto whatever
-      landed meanwhile (checking again if that moved the branch), pushes the branch as `origin/main`, and
-      fast-forwards the main checkout to it. Only the task's own commits are pushed. Its exit code says what to do
-      next:
-      - **2** (rebase conflict): resolve it with `git rebase origin/main`, rerun the gate on the touched crates, and
-        run the script again. A resolution that changes real logic gets its own revmux round first.
+      the branch onto `origin/main` and runs `cargo check --workspace --all-targets`. Nothing before it compiles a
+      crate the change didn't touch, so this check is what catches a caller that main's newer commits added somewhere
+      else. Then it waits for a lock shared by every worktree, rebases once more onto whatever landed meanwhile
+      (checking again if that moved the branch), pushes the branch as `origin/main`, and fast-forwards the main
+      checkout to it. Only the task's own commits are pushed. Its exit code says what to do next:
+      - **2** (rebase conflict): resolve it with `git rebase origin/main`, rerun only `cargo check -p <touched crates>
+        --all-targets`, not the gate, and run the script again. A resolution that changes real logic gets its own
+        revmux round first.
       - **3** (the workspace doesn't compile on the rebased branch): fix it, commit, and run the script again.
       - **4** (the change can't land cleanly: the main checkout isn't on `main`, its `main` holds commits origin
         doesn't, its uncommitted files overlap the change, or the branch started from commits origin doesn't hold):
@@ -112,8 +115,15 @@ don't. Write the brief the way you'd hand the task to a colleague:
         report it.
       - **6** (pushed, but the main checkout couldn't fast-forward): the change is on `origin/main`. Report that the
         main checkout is behind.
+   4. The gate, once, on the landed commit in the worktree, over the crates the change touched: `cargo fmt --all
+      --check`, `cargo clippy -p … --all-targets --all-features -- -D warnings`, `scripts/lint-report.sh`, `cargo
+      test -p …`, plus `cargo test -p fixture-guard` when `tests/fixtures/` or `docs/` changed. Whatever it finds is
+      fixed in a new commit, landed the same way, and the gate runs again on that commit. Another skill's "run the
+      gate before you're done" step (`teams-ui`'s, say) is this one: its screenshots are checked before the commit,
+      its gate here.
 4. **The report**: a few lines. Say what changed and why, the landed hash (`LANDED <hash>`) or why it didn't land,
-   the revmux and gate outcome, the choices you made on unclear points, and anything left for the user. End with the
+   the revmux outcome, the gate's result after landing (a test that fails under load and passes alone is reported as
+   that, never hidden), the choices you made on unclear points, and anything left for the user. End with the
    IDs of the background shells you started, each marked stopped. Put a question for the user first.
 
 ## When an agent comes back
@@ -121,9 +131,9 @@ don't. Write the brief the way you'd hand the task to a colleague:
 The completion arrives as a notification. In one reply:
 
 1. Answer anything the user asked meanwhile.
-2. Report the task in two or three lines: what it did, the commit, and anything the user must decide or check. Relay
-   the substance, because the agent's report isn't shown to the user. A failure is reported as one, with its reason,
-   never smoothed over.
+2. Report the task in two or three lines: what it did, the commit, the gate's result after landing, and anything the
+   user must decide or check. Relay the substance, because the agent's report isn't shown to the user. A failure is
+   reported as one, with its reason, never smoothed over.
 3. **Once the task is done, nothing of it stays.** The worktree's `target/` alone is gigabytes, and stale worktrees
    fill the disk. Each step removes one kind of leftover:
    - Stop every shell the agent started that is still running (`TaskStop`), whatever its report says. The one
