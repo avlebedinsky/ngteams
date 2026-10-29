@@ -37,6 +37,10 @@ dispatched, whether or not it mentions agents.
 - **Two tasks that touch the same code** can still run side by side in separate worktrees. The later one rebases onto
   the earlier one's commit when it lands. When both clearly rework the same function or file, run them one after the
   other: the second agent's conflict resolution would undo work it never saw.
+- **Don't trim a task to keep it out of another's way.** A new task owns everything its message and screenshots
+  show to be wrong. Leave a part of it to another task only when that task's own words (the user's message, not your
+  reading of it) cover the same thing in the same place. Otherwise the part falls between the two briefs and nobody
+  fixes it. If the scopes overlap, queue the new task after the other or let it rebase. Don't cut its scope.
 
 Keep a small ledger in your head and show it when asked, or when it changes in a way the user should know about:
 
