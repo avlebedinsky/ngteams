@@ -258,7 +258,7 @@ fn both_binaries_refuse_first() {
 #[test]
 fn only_this_crate_names_the_personal_keyring_and_opens_the_personal_fence_and_never_the_lab_s() {
     // as a store's application argument in any crate's code (the broker's tests name it to show it refuses it); the
-    // data dir and the app id share the name, never as an argument
+    // data dir shares the name, never as an argument
     let application = ["\"ngteams", "\")"].concat();
     let code: Vec<String> = fs::read_dir(root().join("crates"))
         .unwrap()

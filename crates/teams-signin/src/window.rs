@@ -58,7 +58,7 @@ use crate::egress::{BYPASS, BlackHole};
 use crate::guard::{Guard, GuardEvent, GuardServer};
 
 /// The window's Wayland app id: the program name GTK gives a window that has no `GApplication`.
-pub const APP_ID: &str = "dev.teams-native.signin";
+pub const APP_ID: &str = "com.nickalie.ngteams.signin";
 /// The extension module's file name, as cargo builds it.
 pub const EXTENSION_FILE: &str = "libteams_signin_extension.so";
 /// `WebKit` features switched off before anything loads: what `send-request` can't see (`WebSocket`), what sends on its

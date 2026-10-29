@@ -6,5 +6,5 @@ Comment=Microsoft Teams chats for your own account, under the personal build's f
 Exec=ngteams
 Terminal=false
 Categories=Network;Chat;InstantMessaging;
-StartupWMClass=ngteams
+StartupWMClass=com.nickalie.ngteams
 StartupNotify=true

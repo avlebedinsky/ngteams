@@ -7,7 +7,8 @@
 #   every other build (`target/personal`), so no `test-support` or lab build is unified in.
 # - Installs both binaries and the sign-in window's web process extension into ~/.local/lib/ngteams/ (the window finds
 #   the extension beside itself, `ngteams` finds the window beside itself), `ngteams` linked from ~/.local/bin/, and
-#   `packaging/ngteams.desktop` into ~/.local/share/applications/ with its `Exec` pointing at the installed binary.
+#   `packaging/com.nickalie.ngteams.desktop` into ~/.local/share/applications/ with its `Exec` pointing at the
+#   installed binary (an older install's `ngteams.desktop` removed).
 # - Starts nothing. The first run is the user's: `ngteams`, which asks for the account (docs/personal-build.md,
 #   "The first run").
 #
@@ -31,8 +32,11 @@ extension="$target/release/libteams_signin_extension.so"
 [[ -f "$extension" ]] || extension="$target/release/deps/libteams_signin_extension.so"
 install -m 0644 "$extension" "$lib/libteams_signin_extension.so"
 ln -sfn "$lib/ngteams" "$bin/ngteams"
-sed "s|^Exec=ngteams$|Exec=$lib/ngteams|" "$root/packaging/ngteams.desktop" > "$apps/ngteams.desktop"
-chmod 0644 "$apps/ngteams.desktop"
+desktop="com.nickalie.ngteams.desktop"
+sed "s|^Exec=ngteams$|Exec=$lib/ngteams|" "$root/packaging/$desktop" > "$apps/$desktop"
+chmod 0644 "$apps/$desktop"
+# The entry's name before the app id became `com.nickalie.ngteams`.
+rm -f "$apps/ngteams.desktop"
 
-echo "installed: $lib/ngteams (linked from $bin/ngteams) and $apps/ngteams.desktop"
+echo "installed: $lib/ngteams (linked from $bin/ngteams) and $apps/$desktop"
 echo "first run: start Teams and enter your work account   (then review the first-run screen before anything is sent on its own)"

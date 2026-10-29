@@ -14,8 +14,9 @@ use crate::{clock, shell, theme};
 /// The lab app's Wayland app id.
 pub const LAB_APP_ID: &str = "ngteams-lab";
 
-/// The personal build's Wayland app id (`crates/ngteams`, `packaging/ngteams.desktop`'s `StartupWMClass`).
-pub const PERSONAL_APP_ID: &str = "ngteams";
+/// The personal build's Wayland app id (`crates/ngteams`), also the name of its desktop entry
+/// (`packaging/com.nickalie.ngteams.desktop`, its `StartupWMClass`).
+pub const PERSONAL_APP_ID: &str = "com.nickalie.ngteams";
 
 /// The window's size when it opens.
 const DEFAULT_SIZE: (f32, f32) = (1100.0, 720.0);

@@ -324,7 +324,7 @@ token and no Conditional Access block (`docs/spikes/ca-probe.md`, M0 Task 14); t
 
 The first run, for the user (agents never do any of it):
 
-1. Run `scripts/install-personal.sh` (a release build installed under `~/.local/`, with `packaging/ngteams.desktop`).
+1. Run `scripts/install-personal.sh` (a release build installed under `~/.local/`, with `packaging/com.nickalie.ngteams.desktop`).
    Know that the tenant's sign-in logs show a sign-in of the Teams desktop client from Linux.
 2. Start `ngteams`, type the work UPN, sign in through the window, completing any multi-factor or identity-provider
    prompt.
