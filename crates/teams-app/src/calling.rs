@@ -64,16 +64,10 @@ pub fn echo_of(config: &LabConfig) -> Option<Mri> {
 
 /// The engine's calling and the window's calls on `devices`, the calls taking video when `video` (none without).
 #[must_use]
-pub fn on_devices(
-    devices: Arc<dyn Devices + Send + Sync>,
-    echo: Option<Mri>,
-    video: bool,
-) -> (AccountCalls, AppCalls) {
+pub fn on_devices(devices: Arc<dyn Devices + Send + Sync>, echo: Option<Mri>, video: bool) -> (AccountCalls, AppCalls) {
     let ringer: Arc<dyn Ringer> = Arc::new(DeviceRinger::new(Arc::clone(&devices)));
     let feed = video.then(VideoFeed::new);
-    let video = feed
-        .clone()
-        .map(|feed| teams_core::lab::call_video(Arc::new(feed)));
+    let video = feed.clone().map(|feed| teams_core::lab::call_video(Arc::new(feed)));
     (
         account_calls(devices, video),
         AppCalls {
