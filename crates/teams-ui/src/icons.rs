@@ -13,12 +13,21 @@ pub struct Glyph(&'static [u8]);
 
 impl Glyph {
     pub const ARROW_DOWN: Self = Self(include_bytes!("../assets/icons/arrow-down.svg"));
+    pub const ARROW_UP: Self = Self(include_bytes!("../assets/icons/arrow-up.svg"));
     pub const BELL: Self = Self(include_bytes!("../assets/icons/bell.svg"));
     pub const BOT: Self = Self(include_bytes!("../assets/icons/bot.svg"));
     pub const BUG: Self = Self(include_bytes!("../assets/icons/bug.svg"));
     pub const CALENDAR: Self = Self(include_bytes!("../assets/icons/calendar.svg"));
+    pub const CALENDAR_ADD: Self = Self(include_bytes!("../assets/icons/calendar-plus.svg"));
+    pub const CALENDAR_DAYS: Self = Self(include_bytes!("../assets/icons/calendar-days.svg"));
+    pub const CALENDAR_TODAY: Self = Self(include_bytes!("../assets/icons/calendar-1.svg"));
     pub const CHECK: Self = Self(include_bytes!("../assets/icons/check.svg"));
+    /// A ticked box (a calendar shown in the calendar's list).
+    pub const CHECKBOX: Self = Self(include_bytes!("../assets/icons/square-check.svg"));
     pub const CHEVRON_DOWN: Self = Self(include_bytes!("../assets/icons/chevron-down.svg"));
+    pub const CHEVRON_LEFT: Self = Self(include_bytes!("../assets/icons/chevron-left.svg"));
+    pub const CHEVRON_RIGHT: Self = Self(include_bytes!("../assets/icons/chevron-right.svg"));
+    pub const CHEVRON_UP: Self = Self(include_bytes!("../assets/icons/chevron-up.svg"));
     pub const CIRCLE_ALERT: Self = Self(include_bytes!("../assets/icons/circle-alert.svg"));
     pub const CIRCLE_CHECK: Self = Self(include_bytes!("../assets/icons/circle-check.svg"));
     pub const CIRCLE_MINUS: Self = Self(include_bytes!("../assets/icons/circle-minus.svg"));
@@ -37,17 +46,20 @@ impl Glyph {
     pub const FILE_SPREADSHEET: Self = Self(include_bytes!("../assets/icons/file-spreadsheet.svg"));
     pub const FILE_VIDEO: Self = Self(include_bytes!("../assets/icons/file-play.svg"));
     pub const FORWARD: Self = Self(include_bytes!("../assets/icons/forward.svg"));
+    pub const HASH: Self = Self(include_bytes!("../assets/icons/hash.svg"));
     pub const HEADPHONES: Self = Self(include_bytes!("../assets/icons/headphones.svg"));
     pub const INFO: Self = Self(include_bytes!("../assets/icons/info.svg"));
     pub const LINK: Self = Self(include_bytes!("../assets/icons/link.svg"));
     pub const LOADING: Self = Self(include_bytes!("../assets/icons/loader-circle.svg"));
     pub const LOG_OUT: Self = Self(include_bytes!("../assets/icons/log-out.svg"));
+    pub const MAP_PIN: Self = Self(include_bytes!("../assets/icons/map-pin.svg"));
     pub const MESSAGE: Self = Self(include_bytes!("../assets/icons/message-square-text.svg"));
     pub const MIC: Self = Self(include_bytes!("../assets/icons/mic.svg"));
     pub const MIC_OFF: Self = Self(include_bytes!("../assets/icons/mic-off.svg"));
     pub const MINUS: Self = Self(include_bytes!("../assets/icons/minus.svg"));
     pub const MORE: Self = Self(include_bytes!("../assets/icons/ellipsis.svg"));
     pub const PALETTE: Self = Self(include_bytes!("../assets/icons/palette.svg"));
+    pub const PANEL_LEFT: Self = Self(include_bytes!("../assets/icons/panel-left.svg"));
     pub const PAUSE: Self = Self(include_bytes!("../assets/icons/pause.svg"));
     pub const PENCIL: Self = Self(include_bytes!("../assets/icons/pencil.svg"));
     pub const PHONE: Self = Self(include_bytes!("../assets/icons/phone.svg"));
@@ -59,6 +71,9 @@ impl Glyph {
     pub const QUOTE: Self = Self(include_bytes!("../assets/icons/quote.svg"));
     pub const REACT: Self = Self(include_bytes!("../assets/icons/smile-plus.svg"));
     pub const REFRESH: Self = Self(include_bytes!("../assets/icons/refresh-cw.svg"));
+    /// A recurring event; [`Self::REPEAT_OFF`] a cancelled one of a series.
+    pub const REPEAT: Self = Self(include_bytes!("../assets/icons/repeat.svg"));
+    pub const REPEAT_OFF: Self = Self(include_bytes!("../assets/icons/repeat-off.svg"));
     pub const REPLY: Self = Self(include_bytes!("../assets/icons/reply.svg"));
     pub const RESET: Self = Self(include_bytes!("../assets/icons/rotate-ccw.svg"));
     pub const SEND: Self = Self(include_bytes!("../assets/icons/send-horizontal.svg"));

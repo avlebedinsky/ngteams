@@ -40,6 +40,10 @@
 //! /api/csa/<region>/api/v3/teams/users/me` with the web client's query), from `tests/fixtures/csa/teams.json`, under
 //! the CSA base `https://teams.microsoft.com/api/csa/amer`, taking the account's token alone.
 //!
+//! **The calendar** (`calendar.rs`): the middle tier's calendar view (`GET /api/mt/part/amer-03/v2.0/me/calendars/
+//! default/calendarView` with the web client's query) under [`MIDDLE_TIER_BASE`], taking the account's token alone: the
+//! same made-up working week for every account, repeated every week.
+//!
 //! **UPS** (`ups.rs`, M2 Task 19): the account's own availability, its presence endpoint's `PUT` and its manual status
 //! (set, or cleared with no body), in the shapes the web client sent, under the presence base [`PRESENCE_BASE`],
 //! naming an endpoint the account registered with the registrar here; answered `201` and `200` with no body, as UPS
@@ -75,6 +79,7 @@
 //! `capabilities` among them) with the `uniquerosterthread` the conversation list gives the chat; its `fixedRoster`
 //! and its own capabilities aren't known, so they aren't made up.
 
+mod calendar;
 mod calling;
 mod chatsvc;
 mod csa;
@@ -113,6 +118,10 @@ pub const CHAT_BASE: &str = "https://teams.microsoft.com/api/chatsvc/amer";
 /// The CSA base a client is given (`chatSvcAggAfd` as the region's GTMs give it); its requests go to
 /// [`ChatServiceMock::origin`] with this base's path.
 pub const CSA_BASE: &str = "https://teams.microsoft.com/api/csa/amer";
+
+/// The middle-tier base a client is given (`middleTier` as the region's GTMs give it); its calendar view
+/// (`calendar.rs`) is served at [`ChatServiceMock::origin`] with this base's path.
+pub const MIDDLE_TIER_BASE: &str = "https://teams.microsoft.com/api/mt/part/amer-03";
 
 /// The AMS base a client is given (`amsV2` as the region's GTMs give it: the async gateway); its requests go to
 /// [`ChatServiceMock::origin`] with this base's path, where [`ChatServiceMock::serve_bytes`] answers them.

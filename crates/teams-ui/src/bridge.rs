@@ -24,8 +24,8 @@ use futures_util::future::{Either, Shared, select};
 use gpui::{AppContext as _, AsyncApp, Context, SharedString, Task};
 use teams_core::sync::{CatchUpReport, Synced};
 use teams_core::{
-    Action, Availability, CallAction, CallId, ChatListing, EngineHandle, EngineRequests, Event, OwnStatus, Person,
-    PictureBytes, Reply, Strip, Transient, TransientSent,
+    Action, Availability, CalendarEvent, CallAction, CallId, ChatListing, EngineHandle, EngineRequests, Event,
+    OwnStatus, Person, PictureBytes, Reply, Strip, Transient, TransientSent,
 };
 use teams_proto::FileRange;
 use teams_store::{
@@ -123,11 +123,21 @@ pub trait Core: Send + Sync + 'static {
     fn read_only(&self) -> bool {
         false
     }
+    /// The account's calendar events between `start_ms` and `end_ms` (ms since the epoch), read from the service now
+    /// (`teams_core::calendar`). None by default (a fake core's calendar is empty).
+    fn calendar(&self, start_ms: i64, end_ms: i64) -> Reply<Vec<CalendarEvent>> {
+        let _ = (start_ms, end_ms);
+        Reply::ready(Ok(Vec::new()))
+    }
 }
 
 impl Core for EngineRequests {
     fn me(&self) -> &str {
         EngineRequests::me(self)
+    }
+
+    fn calendar(&self, start_ms: i64, end_ms: i64) -> Reply<Vec<CalendarEvent>> {
+        EngineRequests::calendar(self, start_ms, end_ms)
     }
 
     fn read_only(&self) -> bool {
@@ -281,6 +291,10 @@ fn stopped<T>() -> Reply<T> {
 impl Core for StoppedCore {
     fn me(&self) -> &str {
         &self.me
+    }
+
+    fn calendar(&self, _: i64, _: i64) -> Reply<Vec<CalendarEvent>> {
+        stopped()
     }
 
     fn write(&self, _: Action) -> Reply<OutboxEntry> {

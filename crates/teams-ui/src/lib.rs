@@ -28,6 +28,10 @@
 //!   service's search; a hit opens its chat at the message.
 //! - [`teams_list`]: the sidebar's teams section, the account's teams and their channels (M2 Task 16); [`channel_view`] a
 //!   channel's posts with their reply chains, read-only: no composer, and no write a channel could take.
+//! - [`calendar_view`]: the rail's Calendar, Teams' calendar app: the month and the account's calendars in its own
+//!   pane, the toolbar (Today, the arrows, the views: Day, Work week, Week, Month), the time grid or the month with the
+//!   account's events from the engine's calendar read, and an event's card with Join for a meeting whose call runs;
+//!   [`calendar`] its dates and layout.
 //! - [`own_presence`]: the account's own presence as the app reports it (M2 Task 20): `teams-core`'s policy driven by
 //!   the window's use, the push channel's registration, the settings' manual status (the shell's account menu) and idle
 //!   time, held by the desktop for the app's life.
@@ -65,6 +69,8 @@ pub mod accounts;
 pub mod app_icon;
 pub mod bridge;
 pub mod bus;
+pub mod calendar;
+pub mod calendar_view;
 pub mod call_alert;
 pub mod call_stage;
 pub mod call_view;

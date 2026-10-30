@@ -54,6 +54,7 @@ use teams_proto::ManualAvailability;
 
 use crate::accounts::{AccountTile, Accounts};
 use crate::bridge::Core;
+use crate::calendar_view::{CalendarView, CalendarViewEvent};
 use crate::call_view::CallBar;
 use crate::calls::{self, Ask};
 use crate::channel_view::{ChannelView, ChannelViewEvent};
@@ -78,6 +79,7 @@ use crate::view::status_text;
 
 actions!(teams_ui, [ToggleSwitcher, ToggleSearch, NextAccount, PreviousAccount]);
 actions!(teams_ui, [FontLarger, FontSmaller, FontReset]);
+actions!(teams_ui, [ShowChats, ShowCalendar]);
 actions!(
     teams_ui,
     [
@@ -124,6 +126,10 @@ impl RailItem {
         icon: include_bytes!("../assets/icons/settings.svg"),
         label: "Settings",
     };
+    const CALENDAR: Self = Self {
+        icon: include_bytes!("../assets/icons/calendar.svg"),
+        label: "Calendar",
+    };
 }
 
 /// Marks the shell's key bindings as installed.
@@ -148,6 +154,9 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-+", FontLarger, None),
         KeyBinding::new("ctrl--", FontSmaller, None),
         KeyBinding::new("ctrl-0", FontReset, None),
+        // Teams' keys for its apps on the rail
+        KeyBinding::new("ctrl-2", ShowChats, None),
+        KeyBinding::new("ctrl-4", ShowCalendar, None),
         KeyBinding::new("ctrl-shift-c", CallChat, None),
         KeyBinding::new("ctrl-shift-j", JoinCall, None),
         KeyBinding::new("ctrl-shift-s", AnswerCall, None),
@@ -171,6 +180,8 @@ pub enum Main {
     /// A team's channel, read-only.
     Channel(String),
     Settings,
+    /// The calendar, across both panes.
+    Calendar,
 }
 
 /// What the shell is made of: the engine's request side, the models, the settings and the view trace.
@@ -197,6 +208,8 @@ pub struct Shell {
     /// The channel opened in the conversation pane, with the names its header shows.
     channel: Option<(Entity<ChannelView>, ChannelChosen)>,
     settings_view: Entity<SettingsView>,
+    /// The calendar, shown across both panes from the rail's Calendar.
+    calendar: Entity<CalendarView>,
     /// The first run's screen, shown over everything while it waits ([`SettingsModel::awaiting_first_run`]).
     first_run: Entity<FirstRun>,
     switcher: Option<(Entity<Switcher>, Subscription)>,
@@ -222,7 +235,7 @@ pub struct Shell {
     chat_events: Option<Subscription>,
     /// What the channel view tells ([`Shell::follow_channel`]), once there is one.
     channel_events: Option<Subscription>,
-    _subscriptions: [Subscription; 9],
+    _subscriptions: [Subscription; 10],
 }
 
 /// What the chat's header shows, as the trace tells it: the chat, its other member's presence (a 1:1 chat's), and
@@ -263,6 +276,7 @@ impl Shell {
         });
         let (settings_view, test_call_asked) = Self::make_settings_view(&core, &settings, cx);
         let first_run = cx.new(|cx| FirstRun::new(settings.clone(), cx));
+        let (calendar, calendar_events) = Self::calendar(&core, &models, &trace, window, cx);
         let [settled, presence, renamed] = Self::observe_header(&settings, &models, &list, cx);
         let typed = Self::keystrokes_are_use(window, cx);
         let (call_bar, calling) = Self::calls(&core, &models, &list, &trace, cx);
@@ -286,6 +300,7 @@ impl Shell {
             chat,
             channel: None,
             settings_view,
+            calendar,
             first_run,
             switcher: None,
             search: None,
@@ -311,6 +326,7 @@ impl Shell {
                 settled,
                 calling,
                 test_call_asked,
+                calendar_events,
             ],
         }
     }
@@ -415,6 +431,59 @@ impl Shell {
             cx.notify();
         });
         (call_bar, calling)
+    }
+
+    /// The calendar, and what it tells the shell: a meeting's chat to open, or its running call to join.
+    fn calendar(
+        core: &Arc<dyn Core>,
+        models: &Models,
+        trace: &Arc<ViewTrace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (Entity<CalendarView>, Subscription) {
+        let (core, calls, trace) = (Arc::clone(core), models.calls.clone(), Arc::clone(trace));
+        let calendar = cx.new(|cx| CalendarView::new(core, calls, trace, cx));
+        let events = cx.subscribe_in(&calendar, window, |this: &mut Self, _, event, window, cx| match event {
+            CalendarViewEvent::OpenChat(chat) => this.open_chat(chat.clone(), window, cx),
+            CalendarViewEvent::Join(chat) => {
+                this.open_chat(chat.clone(), window, cx);
+                this.ask_call(Ask::Join { chat: chat.clone() }, cx);
+            }
+        });
+        (calendar, events)
+    }
+
+    /// The calendar.
+    pub fn calendar_view(&self) -> &Entity<CalendarView> {
+        &self.calendar
+    }
+
+    /// The rail's Calendar (and Ctrl+4): the calendar across both panes; the chat it hides is kept, but isn't shown.
+    pub fn show_calendar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.main == Main::Calendar {
+            return;
+        }
+        self.trace.record(&TraceLine::new("calendar", "opened"));
+        let before = std::mem::replace(&mut self.main, Main::Calendar);
+        if before != Main::Settings {
+            self.before_settings = before;
+        }
+        if let Some(chat) = &self.chat {
+            chat.update(cx, |chat, cx| chat.set_shown(false, cx));
+        }
+        self.close_switcher(window, cx);
+        self.close_search(window, cx);
+        self.calendar
+            .update(cx, |calendar, cx| calendar.set_shown(true, window, cx));
+        cx.notify();
+    }
+
+    /// The calendar is left for something else.
+    fn hide_calendar(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.calendar.read(cx).shown() {
+            self.calendar
+                .update(cx, |calendar, cx| calendar.set_shown(false, window, cx));
+        }
     }
 
     /// Shows the settings on `page`, the keyboard on their page column, as the rail's Settings does.
@@ -808,6 +877,7 @@ impl Shell {
             chat.update(cx, |chat, cx| chat.set_shown(false, cx));
         }
         self.main = Main::Channel(chosen.id);
+        self.hide_calendar(window, cx);
         self.close_switcher(window, cx);
         self.close_search(window, cx);
         self.focus.focus(window, cx);
@@ -868,6 +938,7 @@ impl Shell {
             return;
         }
         self.trace.record(&TraceLine::new("chat", "opened").conversation(&id));
+        self.hide_calendar(window, cx);
         let shown = self.chat.as_ref().map(|chat| chat.read(cx).conversation() == id);
         if shown != Some(true) {
             let parts = self.parts();
@@ -974,7 +1045,10 @@ impl Shell {
     pub fn show_settings(&mut self, cx: &mut Context<Self>) {
         if self.main != Main::Settings {
             self.trace.record(&TraceLine::new("settings", "opened"));
-            self.before_settings = std::mem::replace(&mut self.main, Main::Settings);
+            let before = std::mem::replace(&mut self.main, Main::Settings);
+            if before != Main::Calendar {
+                self.before_settings = before;
+            }
             if let Some(chat) = &self.chat {
                 chat.update(cx, |chat, cx| chat.set_shown(false, cx));
             }
@@ -985,13 +1059,14 @@ impl Shell {
     /// The rail's Chat: leaves the settings for what they hid (the chat or the channel shown before them, opened
     /// again), or nothing; elsewhere it does nothing.
     pub fn show_chats(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.main != Main::Settings {
+        if !matches!(self.main, Main::Settings | Main::Calendar) {
             return;
         }
+        self.hide_calendar(window, cx);
         match std::mem::replace(&mut self.before_settings, Main::Nothing) {
             Main::Chat(id) => self.open_chat(id, window, cx),
             Main::Channel(id) => self.open_channel_id(id, window, cx),
-            Main::Nothing | Main::Settings => {
+            Main::Nothing | Main::Settings | Main::Calendar => {
                 self.main = Main::Nothing;
                 cx.notify();
             }
@@ -1021,6 +1096,8 @@ impl Shell {
             .on_action(cx.listener(|this, _: &FontLarger, _, cx| this.step_font(Some(1), cx)))
             .on_action(cx.listener(|this, _: &FontSmaller, _, cx| this.step_font(Some(-1), cx)))
             .on_action(cx.listener(|this, _: &FontReset, _, cx| this.step_font(None, cx)))
+            .on_action(cx.listener(|this, _: &ShowChats, window, cx| this.show_chats(window, cx)))
+            .on_action(cx.listener(|this, _: &ShowCalendar, window, cx| this.show_calendar(window, cx)))
     }
 
     /// Opens the switcher, or closes it when it is open.
@@ -1157,7 +1234,7 @@ impl Shell {
     }
 
     fn rail_view(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        let chats = self.main != Main::Settings;
+        let chats = !matches!(self.main, Main::Settings | Main::Calendar);
         div()
             .debug_selector(|| "rail".to_owned())
             .w(px(RAIL_WIDTH))
@@ -1178,6 +1255,14 @@ impl Shell {
                 cx,
                 Self::show_chats,
             ))
+            .child(Self::rail_button(
+                "rail-calendar",
+                RailItem::CALENDAR,
+                self.main == Main::Calendar,
+                palette,
+                cx,
+                Self::show_calendar,
+            ))
             .child(div().flex_1())
             .children(self.account_rail(palette, cx))
             .children(self.accounts.is_none().then(|| self.status_button(palette, cx)))
@@ -1188,6 +1273,7 @@ impl Shell {
                 palette,
                 cx,
                 |this, window, cx| {
+                    this.hide_calendar(window, cx);
                     this.show_settings(cx);
                     this.settings_view.update(cx, |view, cx| view.focus_pages(window, cx));
                 },
@@ -1562,7 +1648,7 @@ impl Shell {
                     .into_any_element()
             }
             // the settings are drawn across both panes (`body`), never here
-            Main::Nothing | Main::Settings => pane.child(no_chat(palette)).into_any_element(),
+            Main::Nothing | Main::Settings | Main::Calendar => pane.child(no_chat(palette)).into_any_element(),
         }
     }
 }
@@ -1756,6 +1842,9 @@ impl Shell {
     fn body(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         if self.main == Main::Settings {
             return self.settings_view.clone().into_any_element();
+        }
+        if self.main == Main::Calendar {
+            return self.calendar.clone().into_any_element();
         }
         let panes = h_resizable("panes")
             .with_state(&self.panes)

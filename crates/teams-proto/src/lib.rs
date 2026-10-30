@@ -50,6 +50,7 @@
 //! the account's `ic3` token and the transport's chat base.
 
 mod ams;
+mod calendar;
 pub mod chat;
 mod client;
 mod emoticon;
@@ -68,6 +69,10 @@ mod urlp;
 mod write;
 
 pub use ams::{MessagePicture, PastedFormat, PastedPicture};
+pub use calendar::{
+    Attendee, CALENDAR_VIEW_PATH, CalendarAnswer, CalendarAnswerError, CalendarEvent, CalendarView, EventKind,
+    EventTime, FloatingTime, MAX_CALENDAR_WINDOW_MS, Response as EventResponse, ShowAs, join_url_chat,
+};
 pub use client::{Client, PostReadError, Response, Transport, WriteError};
 pub use emoticon::{MAX_ANIMATION, ReactionAnimation};
 pub use endpoint::{Endpoint, Method, Service};

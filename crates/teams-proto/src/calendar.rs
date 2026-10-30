@@ -1,0 +1,468 @@
+//! The account's calendar, read as the web client reads it for its calendar and its meeting cards: the middle tier's
+//! calendar view, `GET <middle tier>/v2.0/me/calendars/default/calendarView?StartDate=<ISO>&EndDate=<ISO>&shouldDecryptData=true`
+//! ([`CalendarView`]), the window's ends in UTC with milliseconds (`2026-10-26T00:00:00.000Z`), with the account's
+//! token for `https://api.spaces.skype.com` (`docs/protocol/calendar.md`).
+//!
+//! Its answer is `{"type": "Microsoft.SkypeSpaces.MiddleTier.Models.CalendarEvent", "value": [<event>…]}`, every event
+//! in the window, recurring ones as their occurrences; an event's fields are the web client's own select list
+//! (`objectId`, `subject`, `startTime`, `endTime`, `isAllDayEvent`, `eventType`, `isCancelled`, `isOnlineMeeting`,
+//! `skypeTeamsMeetingUrl`, `skypeTeamsData`, `organizerName`, `myResponseType`, `showAs`, …). Only an empty answer was
+//! captured (the lab accounts' calendars hold nothing), so an event is read leniently: a field in a form it doesn't
+//! take is left out, an event without a readable id, start or end is skipped and counted, never guessed.
+
+use percent_encoding::percent_decode_str;
+use serde_json::Value;
+use time::OffsetDateTime;
+use time::format_description::well_known::Rfc3339;
+
+use crate::endpoint::{Endpoint, Service};
+use crate::read::Read;
+
+/// The calendar view's path under the middle-tier base.
+pub const CALENDAR_VIEW_PATH: [&str; 5] = ["v2.0", "me", "calendars", "default", "calendarView"];
+
+/// The widest window one read asks for: 62 days (a month view's six weeks fit with room to spare).
+pub const MAX_CALENDAR_WINDOW_MS: i64 = 62 * 24 * 3_600_000;
+
+/// `GET <middle tier>/v2.0/me/calendars/default/calendarView?StartDate&EndDate&shouldDecryptData=true`: the account's
+/// events between two instants. Its answer is read with [`CalendarView::read_answer`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CalendarView {
+    start: String,
+    end: String,
+}
+
+impl CalendarView {
+    /// The read of the events between `start_ms` and `end_ms` (ms since the epoch); `None` when the window is empty,
+    /// reversed, wider than [`MAX_CALENDAR_WINDOW_MS`] or out of range.
+    #[must_use]
+    pub fn between(start_ms: i64, end_ms: i64) -> Option<Self> {
+        if end_ms <= start_ms || end_ms - start_ms > MAX_CALENDAR_WINDOW_MS {
+            return None;
+        }
+        Some(Self {
+            start: iso_utc(start_ms)?,
+            end: iso_utc(end_ms)?,
+        })
+    }
+
+    /// The events the answer `body` gives, in its order, a recurring series' master left out (its occurrences come
+    /// as events of their own).
+    ///
+    /// # Errors
+    /// [`CalendarAnswerError::Malformed`] unless the body is a JSON object with a `value` array.
+    pub fn read_answer(body: &[u8]) -> Result<CalendarAnswer, CalendarAnswerError> {
+        let answer: Value = serde_json::from_slice(body).map_err(|_| CalendarAnswerError::Malformed)?;
+        let entries = answer
+            .get("value")
+            .and_then(Value::as_array)
+            .ok_or(CalendarAnswerError::Malformed)?;
+        let mut read = CalendarAnswer::default();
+        for entry in entries {
+            match CalendarEvent::of(entry) {
+                Some(event) if event.kind == EventKind::RecurringMaster => {}
+                Some(event) => read.events.push(event),
+                None => read.skipped += 1,
+            }
+        }
+        Ok(read)
+    }
+}
+
+impl Read for CalendarView {
+    fn service(&self) -> Service {
+        Service::MiddleTier
+    }
+
+    fn endpoint(&self) -> Endpoint {
+        Endpoint::new(CALENDAR_VIEW_PATH)
+            .with_query("StartDate", self.start.as_str())
+            .with_query("EndDate", self.end.as_str())
+            .with_query("shouldDecryptData", "true")
+    }
+}
+
+/// Why a calendar answer wasn't taken.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum CalendarAnswerError {
+    #[error("the calendar's answer isn't in the shape the web client reads")]
+    Malformed,
+}
+
+/// What a calendar read gave.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct CalendarAnswer {
+    pub events: Vec<CalendarEvent>,
+    /// Events left out: no string `objectId`, or a `startTime` or `endTime` that doesn't read.
+    pub skipped: usize,
+}
+
+/// When an event starts or ends, as the answer gives it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum EventTime {
+    /// An instant, the answer naming its offset: ms since the epoch.
+    Instant(i64),
+    /// A date and time with no offset, which the web client reads as the viewer's local time (a JavaScript `Date`
+    /// parses such a string so): the view places it in its own time zone.
+    Floating(FloatingTime),
+}
+
+/// A date and time without an offset.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct FloatingTime {
+    pub year: i32,
+    pub month: u8,
+    pub day: u8,
+    pub hour: u8,
+    pub minute: u8,
+    pub second: u8,
+}
+
+/// An event's kind, its `eventType`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum EventKind {
+    Single,
+    /// One occurrence of a recurring series.
+    Occurrence,
+    /// An occurrence of a recurring series changed on its own.
+    Exception,
+    /// A recurring series itself.
+    RecurringMaster,
+    /// A kind no capture or bundle showed, as it came (or empty when there was none).
+    Other(String),
+}
+
+impl EventKind {
+    /// Whether the event belongs to a recurring series (Teams marks it with its recurring icon).
+    #[must_use]
+    pub fn recurring(&self) -> bool {
+        matches!(self, Self::Occurrence | Self::Exception | Self::RecurringMaster)
+    }
+}
+
+/// The account's answer to an invitation, its `myResponseType`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Response {
+    /// The account organizes the meeting.
+    Organizer,
+    Accepted,
+    Tentative,
+    Declined,
+    NotResponded,
+    /// `None`: no answer is asked for (an appointment of the account's own).
+    NoResponse,
+    Other(String),
+}
+
+/// How the event shows the account's time, its `showAs`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum ShowAs {
+    Free,
+    Tentative,
+    Busy,
+    /// Out of office.
+    Away,
+    WorkingElsewhere,
+    Other(String),
+}
+
+/// Someone an event invites.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Attendee {
+    pub name: Option<String>,
+    pub address: Option<String>,
+}
+
+/// One event of the account's calendar.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct CalendarEvent {
+    /// Its `objectId`.
+    pub id: String,
+    /// Its subject (empty when it has none).
+    pub subject: String,
+    pub start: EventTime,
+    pub end: EventTime,
+    pub all_day: bool,
+    pub kind: EventKind,
+    pub cancelled: bool,
+    /// A Teams meeting (`isOnlineMeeting`, or a join link).
+    pub online: bool,
+    /// The meeting's join link (`skypeTeamsMeetingUrl`, else `joinOnlineMeetingUrl`), an `https` link only.
+    pub join_url: Option<String>,
+    /// The meeting's chat (`19:meeting_…@thread.v2`), from `skypeTeamsData`'s `cid` or the join link's path.
+    pub meeting_chat: Option<String>,
+    pub location: Option<String>,
+    pub organizer_name: Option<String>,
+    pub organizer_address: Option<String>,
+    pub is_organizer: bool,
+    pub response: Response,
+    pub show_as: ShowAs,
+    pub private: bool,
+    /// The start of its body as text (`bodyPreview`), when the answer has one.
+    pub preview: Option<String>,
+    /// The meeting's dial-in conference id (`onlineMeetingConferenceId`).
+    pub conference_id: Option<String>,
+    pub attendees: Vec<Attendee>,
+}
+
+impl CalendarEvent {
+    /// The event `entry` describes; `None` without a string `objectId` or a readable `startTime` and `endTime`.
+    fn of(entry: &Value) -> Option<Self> {
+        let text = |key: &str| {
+            entry
+                .get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+                .map(str::to_owned)
+        };
+        let flag = |key: &str| entry.get(key).and_then(Value::as_bool).unwrap_or(false);
+        let id = text("objectId")?;
+        let start = event_time(entry.get("startTime")?.as_str()?)?;
+        let end = event_time(entry.get("endTime")?.as_str()?)?;
+        let join_url = text("skypeTeamsMeetingUrl")
+            .or_else(|| text("joinOnlineMeetingUrl"))
+            .filter(|url| url.starts_with("https://"));
+        let meeting_chat = text("skypeTeamsData")
+            .and_then(|data| teams_data_chat(&data))
+            .or_else(|| join_url.as_deref().and_then(join_url_chat));
+        Some(Self {
+            id,
+            subject: text("subject").unwrap_or_default(),
+            start,
+            end,
+            all_day: flag("isAllDayEvent"),
+            kind: event_kind(text("eventType").as_deref()),
+            cancelled: flag("isCancelled"),
+            online: flag("isOnlineMeeting") || join_url.is_some(),
+            join_url,
+            meeting_chat,
+            location: text("location").or_else(|| location_name(entry.get("location"))),
+            organizer_name: text("organizerName"),
+            organizer_address: text("organizerAddress"),
+            is_organizer: flag("isOrganizer"),
+            response: response(text("myResponseType").as_deref()),
+            show_as: show_as(text("showAs").as_deref()),
+            private: flag("isPrivate"),
+            preview: text("bodyPreview"),
+            conference_id: text("onlineMeetingConferenceId"),
+            attendees: attendees(entry.get("attendees")),
+        })
+    }
+}
+
+/// `ms` as the window's ends are written: UTC, milliseconds, `Z`.
+fn iso_utc(ms: i64) -> Option<String> {
+    let time = OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000).ok()?;
+    Some(format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        time.year(),
+        u8::from(time.month()),
+        time.day(),
+        time.hour(),
+        time.minute(),
+        time.second(),
+        time.millisecond()
+    ))
+}
+
+/// An event's start or end: an RFC 3339 instant, or an ISO date and time without an offset (any fraction digits).
+fn event_time(text: &str) -> Option<EventTime> {
+    let text = text.trim();
+    if let Ok(time) = OffsetDateTime::parse(text, &Rfc3339) {
+        return i64::try_from(time.unix_timestamp_nanos() / 1_000_000)
+            .ok()
+            .map(EventTime::Instant);
+    }
+    floating(text).map(EventTime::Floating)
+}
+
+/// `YYYY-MM-DDTHH:MM[:SS[.fraction]]` with no offset, the fraction dropped.
+fn floating(text: &str) -> Option<FloatingTime> {
+    let (date, clock) = text.split_once(['T', ' '])?;
+    let mut date = date.split('-');
+    let year = date.next()?.parse().ok()?;
+    let month: u8 = date.next()?.parse().ok()?;
+    let day: u8 = date.next()?.parse().ok()?;
+    let clock = clock.split_once('.').map_or(clock, |(whole, fraction)| {
+        if fraction.bytes().all(|byte| byte.is_ascii_digit()) {
+            whole
+        } else {
+            ""
+        }
+    });
+    let mut clock = clock.split(':');
+    let hour: u8 = clock.next()?.parse().ok()?;
+    let minute: u8 = clock.next()?.parse().ok()?;
+    let second: u8 = clock.next().map_or(Some(0), |second| second.parse().ok())?;
+    let valid = date.next().is_none()
+        && clock.next().is_none()
+        && (1..=12).contains(&month)
+        && (1..=31).contains(&day)
+        && hour < 24
+        && minute < 60
+        && second < 61;
+    valid.then_some(FloatingTime {
+        year,
+        month,
+        day,
+        hour,
+        minute,
+        second,
+    })
+}
+
+fn event_kind(kind: Option<&str>) -> EventKind {
+    match kind {
+        Some("Single") => EventKind::Single,
+        Some("Occurrence") => EventKind::Occurrence,
+        Some("Exception") => EventKind::Exception,
+        Some("RecurringMaster") => EventKind::RecurringMaster,
+        other => EventKind::Other(other.unwrap_or_default().to_owned()),
+    }
+}
+
+fn response(response: Option<&str>) -> Response {
+    match response {
+        Some("Organizer") => Response::Organizer,
+        Some("Accepted") => Response::Accepted,
+        Some("Tentative" | "TentativelyAccepted") => Response::Tentative,
+        Some("Declined") => Response::Declined,
+        Some("NotResponded") => Response::NotResponded,
+        Some("None") => Response::NoResponse,
+        other => Response::Other(other.unwrap_or_default().to_owned()),
+    }
+}
+
+fn show_as(show_as: Option<&str>) -> ShowAs {
+    match show_as {
+        Some("Free") => ShowAs::Free,
+        Some("Tentative") => ShowAs::Tentative,
+        Some("Busy") => ShowAs::Busy,
+        Some("OOF" | "Oof") => ShowAs::Away,
+        Some("WorkingElsewhere") => ShowAs::WorkingElsewhere,
+        other => ShowAs::Other(other.unwrap_or_default().to_owned()),
+    }
+}
+
+/// A location given as an object rather than a string: its `displayName`.
+fn location_name(location: Option<&Value>) -> Option<String> {
+    location?
+        .get("displayName")?
+        .as_str()
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+        .map(str::to_owned)
+}
+
+/// The attendees `attendees` lists, each with a name or an address (a plain one, or an `emailAddress` object's).
+fn attendees(attendees: Option<&Value>) -> Vec<Attendee> {
+    let Some(attendees) = attendees.and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    attendees
+        .iter()
+        .filter_map(|attendee| {
+            let inner = attendee.get("emailAddress").unwrap_or(attendee);
+            let text = |keys: &[&str]| {
+                keys.iter()
+                    .find_map(|key| inner.get(*key).and_then(Value::as_str))
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty())
+                    .map(str::to_owned)
+            };
+            let name = text(&["name", "displayName"]);
+            let address = text(&["address", "smtpAddress", "email"]);
+            (name.is_some() || address.is_some()).then_some(Attendee { name, address })
+        })
+        .collect()
+}
+
+/// The meeting chat `skypeTeamsData` (a JSON object as a string) names by its `cid`.
+fn teams_data_chat(data: &str) -> Option<String> {
+    let data: Value = serde_json::from_str(data).ok()?;
+    data.get("cid")
+        .and_then(Value::as_str)
+        .filter(|cid| is_meeting_thread(cid))
+        .map(str::to_owned)
+}
+
+/// The meeting chat a join link names: `https://teams.microsoft.com/l/meetup-join/<thread, percent-encoded>/…`.
+#[must_use]
+pub fn join_url_chat(url: &str) -> Option<String> {
+    let rest = url.split_once("/l/meetup-join/")?.1;
+    let segment = rest.split(['/', '?', '#']).next()?;
+    let thread = percent_decode_str(segment).decode_utf8().ok()?;
+    is_meeting_thread(&thread).then(|| thread.into_owned())
+}
+
+/// A thread id a meeting's chat can have: `19:<id>@thread.<v2|skype|tacv2>`, no spaces or slashes.
+fn is_meeting_thread(id: &str) -> bool {
+    id.starts_with("19:")
+        && ["@thread.v2", "@thread.skype", "@thread.tacv2"]
+            .iter()
+            .any(|suffix| id.ends_with(suffix))
+        && !id.contains([' ', '/', '?', '#'])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_window_is_written_in_utc_with_milliseconds() {
+        let view = CalendarView::between(1_792_962_000_000, 1_793_221_200_000).unwrap();
+        let endpoint = view.endpoint();
+        assert_eq!(endpoint.segments(), CALENDAR_VIEW_PATH);
+        let query: Vec<(&str, &str)> = endpoint
+            .query()
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        assert_eq!(
+            query,
+            [
+                ("StartDate", "2026-10-25T21:00:00.000Z"),
+                ("EndDate", "2026-10-28T21:00:00.000Z"),
+                ("shouldDecryptData", "true"),
+            ]
+        );
+        assert!(CalendarView::between(10, 10).is_none());
+        assert!(CalendarView::between(0, MAX_CALENDAR_WINDOW_MS + 1).is_none());
+    }
+
+    #[test]
+    fn times_read_with_or_without_an_offset() {
+        assert_eq!(
+            event_time("2026-10-26T14:00:00.0000000Z"),
+            Some(EventTime::Instant(1_793_023_200_000))
+        );
+        assert_eq!(
+            event_time("2026-10-26T14:00:00+02:00"),
+            Some(EventTime::Instant(1_793_016_000_000))
+        );
+        assert_eq!(
+            event_time("2026-10-26T14:30:00.0000000"),
+            Some(EventTime::Floating(FloatingTime {
+                year: 2026,
+                month: 10,
+                day: 26,
+                hour: 14,
+                minute: 30,
+                second: 0
+            }))
+        );
+        assert_eq!(event_time("tomorrow"), None);
+        assert_eq!(event_time("2026-13-26T14:30:00"), None);
+    }
+
+    #[test]
+    fn a_join_link_names_its_meeting_chat() {
+        let url = "https://teams.microsoft.com/l/meetup-join/19%3ameeting_MadeUpId0001%40thread.v2/0?context=%7b%7d";
+        assert_eq!(join_url_chat(url).as_deref(), Some("19:meeting_MadeUpId0001@thread.v2"));
+        assert_eq!(
+            join_url_chat("https://teams.microsoft.com/l/chat/19%3aabc%40thread.v2/0"),
+            None
+        );
+    }
+}

@@ -461,7 +461,12 @@ the foot while it has the focus) with Emoji and, behind a divider, Send inside i
 Ctrl+;) opens every emoji Teams offers, searchable, and puts the one picked at the cursor; Send does what Enter does. Ctrl+K opens the chat switcher (fuzzy over the chats' names; Enter opens,
 Escape closes). Settings take the place of the sidebar and the conversation pane, as in Teams: a column of pages
 (General, Appearance, Notifications, Privacy, Calls and devices where the app has calls, Diagnostics; Up and Down move
-between them) beside the page shown, each a set of titled boxes of rows. The settings (the selected chat, typing, read
+between them) beside the page shown, each a set of titled boxes of rows. The rail's Calendar (Ctrl+4; Ctrl+2 goes back
+to the chats) takes their place the same way, as Teams' calendar app: the month and "My calendars" in its own pane, the
+toolbar's Today, previous and next (Left, Right and T while it has the focus) and views (Day, Work week, Week, Month;
+Ctrl+Alt+1–4), the account's events read from the middle tier's calendar view, and an event's card (Chat with
+participants, Copy link, and Join once a call runs in the meeting's chat); New and "Join with an ID" say they aren't
+available yet. The settings (the selected chat, typing, read
 receipts, notifications, the idle time, the manual status, the log's level, the theme, the font and the
 time format, the system's clock or a 12-hour or 24-hour one) live in
 `<data_dir>/ui/<alias>.toml` (`0600`, its directory `0700`); a file that can't be read gives the defaults, a bad value keeps its default, and either is

@@ -17,9 +17,9 @@ pub enum Service {
     Trouter,
     /// The middle tier at the account's middle-tier base, the region's GTM `middleTier`
     /// (`https://<AFD host>/api/mt/part/<partition>`, the partition a region and a number: `amer-03`), which a
-    /// transport reaches only once it was given one (`HttpTransport::with_middle_tier`). Its endpoints are under
-    /// `beta/users/`. It takes the account's token for `https://api.spaces.skype.com`. The profile lookups go here
-    /// ([`crate::ShortProfileLookup`]).
+    /// transport reaches only once it was given one (`HttpTransport::with_middle_tier`). It takes the account's token
+    /// for `https://api.spaces.skype.com`. The profile lookups go here (`beta/users/…`, [`crate::ShortProfileLookup`]),
+    /// and the calendar's read (`v2.0/me/calendars/default/calendarView`, [`crate::CalendarView`]).
     MiddleTier,
     /// Microsoft Graph, `https://graph.microsoft.com/v1.0/`, with the account's token for `https://graph.microsoft.com`:
     /// a user's name (`users/<object id>?$select=id,displayName`, [`crate::GraphUser`]) and their 96×96 picture

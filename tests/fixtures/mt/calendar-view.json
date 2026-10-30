@@ -1,0 +1,102 @@
+{
+  "_synthetic": "Made up, in the shape of the middle tier's answer to the web client's calendar view (GET <middleTier>/v2.0/me/calendars/default/calendarView?StartDate&EndDate&shouldDecryptData=true, ab-chat's and load's captures of 2026-10-20 to 2026-10-24: HTTP 200, the body {\"type\": ..., \"value\": [...]}). Every captured answer held no event (the lab calendars are empty), so the events below take the field names and enum values the web client's code reads an event by (docs/protocol/calendar.md), every value made up: a single meeting with its join link and skypeTeamsData, a recurring series' occurrence with an offset in its times, a cancelled occurrence, an all-day appointment with times that carry no offset, a declined meeting, a series master, and two entries that don't read (no objectId; a startTime that isn't a time).",
+  "type": "Microsoft.SkypeSpaces.MiddleTier.Models.CalendarEvent",
+  "value": [
+    {
+      "objectId": "AAMkMadeUpEvent0001",
+      "subject": "Code review",
+      "startTime": "2026-10-28T14:00:00.0000000Z",
+      "endTime": "2026-10-28T15:00:00.0000000Z",
+      "isAllDayEvent": false,
+      "eventType": "Single",
+      "isCancelled": false,
+      "isOnlineMeeting": true,
+      "skypeTeamsMeetingUrl": "https://teams.microsoft.com/l/meetup-join/19%3ameeting_MadeUpMeeting0001%40thread.v2/0?context=%7b%7d",
+      "skypeTeamsData": "{\"cid\":\"19:meeting_MadeUpMeeting0001@thread.v2\",\"type\":0}",
+      "organizerName": "Avery Example",
+      "organizerAddress": "avery@example.com",
+      "isOrganizer": false,
+      "myResponseType": "Accepted",
+      "showAs": "Busy",
+      "location": "Microsoft Teams Meeting",
+      "isPrivate": false,
+      "bodyPreview": "Walk through the open changes.",
+      "attendees": [
+        {"name": "Avery Example", "address": "avery@example.com"},
+        {"name": "Jordan Sample", "address": "jordan@example.com"}
+      ]
+    },
+    {
+      "objectId": "AAMkMadeUpEvent0002",
+      "subject": "Weekly sync",
+      "startTime": "2026-10-30T15:30:00+00:00",
+      "endTime": "2026-10-30T16:00:00+00:00",
+      "isAllDayEvent": false,
+      "eventType": "Occurrence",
+      "isCancelled": false,
+      "isOnlineMeeting": true,
+      "joinOnlineMeetingUrl": "https://teams.microsoft.com/l/meetup-join/19%3ameeting_MadeUpMeeting0002%40thread.v2/0",
+      "organizerName": "Jordan Sample",
+      "isOrganizer": false,
+      "myResponseType": "NotResponded",
+      "showAs": "Tentative",
+      "seriesMasterId": "AAMkMadeUpSeries0002"
+    },
+    {
+      "objectId": "AAMkMadeUpEvent0003",
+      "subject": "Canceled: Team standup",
+      "startTime": "2026-10-26T17:30:00.0000000Z",
+      "endTime": "2026-10-26T17:45:00.0000000Z",
+      "isAllDayEvent": false,
+      "eventType": "Occurrence",
+      "isCancelled": true,
+      "isOnlineMeeting": true,
+      "organizerName": "Riley Placeholder",
+      "isOrganizer": false,
+      "myResponseType": "Accepted",
+      "showAs": "Free"
+    },
+    {
+      "objectId": "AAMkMadeUpEvent0004",
+      "subject": "Release day",
+      "startTime": "2026-10-29T00:00:00.0000000",
+      "endTime": "2026-10-30T00:00:00.0000000",
+      "isAllDayEvent": true,
+      "eventType": "Single",
+      "isCancelled": false,
+      "isOnlineMeeting": false,
+      "isOrganizer": true,
+      "myResponseType": "Organizer",
+      "showAs": "Free",
+      "location": ""
+    },
+    {
+      "objectId": "AAMkMadeUpEvent0005",
+      "subject": "Vendor demo",
+      "startTime": "2026-10-27T10:00:00.0000000Z",
+      "endTime": "2026-10-27T11:00:00.0000000Z",
+      "eventType": "Single",
+      "isOnlineMeeting": true,
+      "myResponseType": "Declined",
+      "showAs": "Free"
+    },
+    {
+      "objectId": "AAMkMadeUpSeries0002",
+      "subject": "Weekly sync",
+      "startTime": "2026-10-02T15:30:00.0000000Z",
+      "endTime": "2026-10-02T16:00:00.0000000Z",
+      "eventType": "RecurringMaster"
+    },
+    {
+      "subject": "No id",
+      "startTime": "2026-10-27T10:00:00.0000000Z",
+      "endTime": "2026-10-27T11:00:00.0000000Z"
+    },
+    {
+      "objectId": "AAMkMadeUpEvent0007",
+      "subject": "No start",
+      "startTime": "soon",
+      "endTime": "2026-10-27T11:00:00.0000000Z"
+    }
+  ]
+}

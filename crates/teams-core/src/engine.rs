@@ -112,7 +112,7 @@ use teams_call::{CallId, Placement, RemoteEnd};
 use teams_fence::Mri;
 use teams_proto::chat::{self, MessageText};
 use teams_proto::{
-    Client, Credentials, EndpointRegistrar, FileRange, HttpError, HttpTransport, ManualAvailability,
+    CalendarEvent, Client, Credentials, EndpointRegistrar, FileRange, HttpError, HttpTransport, ManualAvailability,
     RegisteredEndpoint, Transport,
 };
 use teams_store::{
@@ -126,6 +126,7 @@ use teams_trouter::{
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior};
 
+use crate::calendar::Calendar;
 use crate::calling::{
     Act, CallAction, CallActionError, CallParts, CallStatus, CallView, Calling, CallingTask, IncomingCall,
 };
@@ -455,6 +456,9 @@ pub enum EngineError {
     /// it again.
     #[error("a part of the shared file couldn't be read")]
     FileUnread,
+    /// The calendar couldn't be read, or its answer wasn't in the shape the web client reads ([`crate::calendar`]).
+    #[error("the calendar couldn't be read")]
+    CalendarUnread,
     /// A call action was refused: nothing was sent.
     #[error(transparent)]
     Call(CallActionError),
@@ -483,6 +487,7 @@ impl EngineError {
             Self::PictureUnread => "picture unread",
             Self::FileUnavailable => "file unavailable",
             Self::FileUnread => "file unread",
+            Self::CalendarUnread => "calendar unread",
             Self::Call(_) => "call",
         }
     }
@@ -575,6 +580,11 @@ enum Request {
     },
     Teams(Responder<Option<Vec<Team>>>),
     ChatListing(Responder<ChatListing>),
+    Calendar {
+        start_ms: i64,
+        end_ms: i64,
+        reply: Responder<Vec<CalendarEvent>>,
+    },
     Query(Query),
     Shutdown,
 }
@@ -843,6 +853,16 @@ impl EngineRequests {
         self.ask(|reply| Request::MessagePicture(src, reply))
     }
 
+    /// The account's calendar events between `start_ms` and `end_ms` (ms since the epoch), read from the middle tier
+    /// now ([`crate::calendar`]): [`EngineError::CalendarUnread`] when the read failed.
+    pub fn calendar(&self, start_ms: i64, end_ms: i64) -> Reply<Vec<CalendarEvent>> {
+        self.ask(|reply| Request::Calendar {
+            start_ms,
+            end_ms,
+            reply,
+        })
+    }
+
     /// The thumbnail of the file a message carries, by its sharing link (`teams_proto::chat::SharedFile::share_url`),
     /// as Graph and SharePoint's media host have it ([`crate::thumbnails`]): its bytes and format, or `None` when there
     /// is none or the link names no SharePoint file.
@@ -1069,6 +1089,7 @@ struct Core<C, T> {
     pictures: Pictures<C>,
     thumbnails: Thumbnails<C>,
     files: FileContents<C>,
+    calendar: Calendar<C>,
     events: mpsc::UnboundedSender<Event>,
     options: EngineOptions,
     push: Option<Push>,
@@ -1124,6 +1145,7 @@ where
         let pictures = Pictures::new(Arc::clone(&parts.client), disk.clone());
         let thumbnails = Thumbnails::new(Arc::clone(&parts.client), disk);
         let files = FileContents::new(Arc::clone(&parts.client));
+        let calendar = Calendar::new(Arc::clone(&parts.client));
         let calling = parts
             .calls
             .map(|calls| Calling::new(calls, Arc::clone(&outbox), Arc::clone(&parts.client), events.clone()));
@@ -1141,6 +1163,7 @@ where
             pictures,
             thumbnails,
             files,
+            calendar,
             events,
             options: parts.options,
             push: parts.push,
@@ -1337,6 +1360,11 @@ where
             Request::ReactionAnimation(id, reply) => self.animations.animation(id, reply),
             Request::MessagePicture(src, reply) => self.pictures.picture(&src, reply),
             Request::FileThumbnail(share_url, reply) => self.thumbnails.thumbnail(&share_url, reply),
+            Request::Calendar {
+                start_ms,
+                end_ms,
+                reply,
+            } => self.calendar.view(start_ms, end_ms, reply),
             Request::FileRange {
                 share_url,
                 offset,

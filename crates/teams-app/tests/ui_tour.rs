@@ -40,7 +40,7 @@ use teams_media::devices::catalog::{DeviceInfo, DeviceKind, DeviceList, FixedDir
 use teams_media::devices::pattern::TestPattern;
 use teams_mock::{
     AB_CHAT, ABC_CHAT, AC_CHAT, AMS_BASE, AX_CHAT, CHAT_BASE, CSA_BASE, ChatServiceMock, ECHO, LAB_A, LAB_B, LAB_C,
-    OUTSIDER, PRESENCE_BASE, TEAM_CHANNEL, TrouterMock, lab_toml,
+    MIDDLE_TIER_BASE, OUTSIDER, PRESENCE_BASE, TEAM_CHANNEL, TrouterMock, lab_toml,
 };
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::Store;
@@ -75,7 +75,7 @@ const SETTLE: Duration = Duration::from_millis(1500);
 type Step = (&'static str, fn(&Entity<Shell>, &mut Window, &mut App));
 
 /// The tour.
-const STEPS: [Step; 42] = [
+const STEPS: [Step; 47] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -248,6 +248,48 @@ const STEPS: [Step; 42] = [
     ("favorite-channel", |shell, _, cx| {
         let list = shell.read(cx).list().clone();
         list.update(cx, |list, cx| list.open(TEAM_CHANNEL.to_owned(), cx));
+    }),
+    // the rail's Calendar: the work week of today, the mock's made-up week of meetings in it (recurring, cancelled,
+    // overlapping, tentative, all day), the current time's line
+    ("calendar", |shell, window, cx| {
+        shell.update(cx, |shell, cx| shell.show_calendar(window, cx));
+    }),
+    // a meeting's card, opened by a click on its block
+    ("calendar-card", |shell, _, cx| {
+        let calendar = shell.read(cx).calendar_view().clone();
+        let meeting = calendar.read(cx).events().and_then(|events| {
+            events
+                .iter()
+                .find(|shown| shown.event.online && !shown.event.cancelled)
+                .cloned()
+        });
+        if let Some(meeting) = meeting {
+            calendar.update(cx, |calendar, cx| calendar.open_card(meeting, cx));
+        } else {
+            say("no meeting in the calendar");
+        }
+    }),
+    ("calendar-month", |shell, _, cx| {
+        let calendar = shell.read(cx).calendar_view().clone();
+        calendar.update(cx, |calendar, cx| {
+            calendar.close_card(cx);
+            calendar.set_mode(teams_ui::calendar::Mode::Month, cx);
+        });
+    }),
+    ("calendar-day", |shell, _, cx| {
+        let calendar = shell.read(cx).calendar_view().clone();
+        calendar.update(cx, |calendar, cx| calendar.set_mode(teams_ui::calendar::Mode::Day, cx));
+    }),
+    // the work week in Teams Dark, as the user's screenshot shows it
+    ("calendar-dark", |shell, _, cx| {
+        let calendar = shell.read(cx).calendar_view().clone();
+        calendar.update(cx, |calendar, cx| {
+            calendar.set_mode(teams_ui::calendar::Mode::WorkWeek, cx)
+        });
+        let model = shell.read(cx).settings().clone();
+        model.update(cx, |model, cx| {
+            model.change(|settings| settings.appearance.theme = teams_ui::theme::DARK_KEY, cx);
+        });
     }),
     // two messages b sent in the a–b–c chat, forwarded to a by the outsider (`seed_forwards`): each in Teams' card
     // under the arrow, b's avatar and name and the original's time, the second's picture drawn in it
@@ -745,7 +787,8 @@ impl MockLab {
                 http()?
                     .with_ams(AMS_BASE)?
                     .with_presence(PRESENCE_BASE)?
-                    .with_csa(CSA_BASE)?,
+                    .with_csa(CSA_BASE)?
+                    .with_middle_tier(MIDDLE_TIER_BASE)?,
             )),
             outbox: Outbox::new(transport, fence, Arc::new(membership), author),
             push: Some(Push::new(trouter_client)),

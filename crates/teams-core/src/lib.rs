@@ -35,6 +35,7 @@
 //! (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
 
 pub mod account;
+pub mod calendar;
 pub mod calling;
 pub mod emoticons;
 pub mod engine;
@@ -79,5 +80,8 @@ pub use sync::{
 pub use teams::{ChatListing, READING_TEAMS, TEAMS_MAX_AGE, TEAMS_RETRY, TeamsReadError};
 /// A call, how it ended and how its services ended it, as [`Event::Call`] and [`Event::RingEnded`] tell them.
 pub use teams_call::{CallError, CallId, End, Identity, RemoteEnd};
+pub use teams_proto::{
+    Attendee, CalendarEvent, EventKind, EventResponse, EventTime, FloatingTime, ShowAs, join_url_chat,
+};
 /// How a registration of the push channel's endpoint went, as [`Event::Registration`] tells it.
 pub use teams_trouter::RegistrationReport;
