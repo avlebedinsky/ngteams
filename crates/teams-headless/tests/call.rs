@@ -31,7 +31,6 @@ use teams_headless::cli::{Cli, Command as CliCommand, DEFAULT_TONE_HZ};
 use teams_headless::commands::{self, Answering, WatchEnd};
 use teams_headless::lab::{VideoCounts, call_media};
 use teams_media::relay::RelayServer;
-use teams_media::turn::Transport as RelayTransport;
 use teams_mock::{
     AB_CHAT, ABC_CHAT, AC_CHAT, CALLING_APP, CHAT_BASE, ChatServiceMock, ECHO, LAB_A, LAB_B, LAB_C, OUTSIDER, TENANT,
     TIMED_OUT, TrouterMock,
@@ -233,7 +232,7 @@ fn the_keyed_tone_is_written_beside_the_recording_long_enough_for_the_whole_call
 
 // --- the calls on the mock ---
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn call_echo_places_the_test_call_holds_it_hangs_it_up_and_finds_its_tone_played_back() {
     let lab = Lab::start_echo().await;
     let mut a = lab.account(LAB_A, 1_000.0);
@@ -278,7 +277,7 @@ async fn call_echo_places_the_test_call_holds_it_hangs_it_up_and_finds_its_tone_
     assert_eq!(files.heard(660.0).unwrap(), None);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn call_b_places_a_call_from_the_chat_that_b_s_own_action_answers_and_b_hears_the_tone() {
     let lab = Lab::start_echo().await;
     let mut a = lab.account(LAB_A, 1_000.0);
@@ -299,7 +298,7 @@ async fn call_b_places_a_call_from_the_chat_that_b_s_own_action_answers_and_b_he
     assert!(heard_by_b.is_some() && heard_by_a.is_some());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_call_nobody_answers_is_hung_up_once_its_time_to_connect_is_over() {
     let lab = Lab::start_echo().await;
     let mut a = lab.account(LAB_A, 1_000.0);
@@ -317,7 +316,7 @@ async fn a_call_nobody_answers_is_hung_up_once_its_time_to_connect_is_over() {
     assert!(log.denials().is_empty(), "{:#?}", log.denials());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_signal_before_the_calling_socket_registered_places_nothing() {
     let lab = Lab::start_echo().await;
     let mut a = lab.account(LAB_A, 1_000.0);
@@ -345,7 +344,7 @@ async fn a_signal_before_the_calling_socket_registered_places_nothing() {
     assert!(log.permitted().is_empty(), "{:#?}", log.permitted());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_signal_while_the_call_s_media_is_set_up_places_nothing() {
     let lab = Lab::start_echo().await;
     // a relay that never answers: the media's setup waits for its allocation
@@ -382,7 +381,7 @@ async fn a_signal_while_the_call_s_media_is_set_up_places_nothing() {
     assert!(log.permitted().is_empty(), "{:#?}", log.permitted());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_call_whose_media_isn_t_set_up_within_its_time_to_connect_isn_t_placed() {
     let lab = Lab::start_echo().await;
     let silent = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
@@ -402,7 +401,7 @@ async fn a_call_whose_media_isn_t_set_up_within_its_time_to_connect_isn_t_placed
 
 // --- watch --answer-lab-calls, and join ---
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn watch_answering_lab_calls_answers_a_s_call_from_the_chat_and_each_side_hears_the_other() {
     let lab = Lab::start_echo().await;
     let mut a = lab.account(LAB_A, 1_000.0);
@@ -434,7 +433,7 @@ async fn watch_answering_lab_calls_answers_a_s_call_from_the_chat_and_each_side_
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_call_with_video_prints_the_frames_each_line_brought_while_it_runs() {
     let lab = Lab::start_echo().await;
     let (mut a, counts) = lab.account_with_video(LAB_A, 1_000.0);
@@ -464,7 +463,7 @@ async fn a_call_with_video_prints_the_frames_each_line_brought_while_it_runs() {
     assert!(counts.progress().is_some_and(|line| line.starts_with("received=0:")));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn watch_as_json_prints_its_answer_as_a_json_object_too() {
     let lab = Lab::start_echo().await;
     let mut b = lab.account(LAB_B, 660.0);
@@ -486,7 +485,7 @@ async fn watch_as_json_prints_its_answer_as_a_json_object_too() {
     assert!(answer["call"].is_u64() && answer["received_ms"].is_i64(), "{answer}");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn watch_answering_lab_calls_sends_nothing_for_an_outsider_s_call_and_answers_the_lab_s_after_it() {
     let lab = Lab::start_echo().await;
     let mut b = lab.account(LAB_B, 660.0);
@@ -535,7 +534,7 @@ async fn watch_answering_lab_calls_sends_nothing_for_an_outsider_s_call_and_answ
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn watch_answering_with_the_camera_turns_it_on_once_connected_and_counts_the_far_end_s_video() {
     let lab = Lab::start_echo().await;
     let (mut b, counts) = lab.account_with_video(LAB_B, 660.0);
@@ -584,7 +583,7 @@ fn camera_after_needs_video() {
     assert_eq!(audio.camera_after, Some(5));
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn watch_without_the_flag_answers_nothing_and_the_call_rings_out() {
     let lab = Lab::start_echo().await;
     let mut b = lab.account(LAB_B, 660.0);
@@ -610,7 +609,7 @@ async fn watch_without_the_flag_answers_nothing_and_the_call_rings_out() {
     assert!(log.denials().is_empty(), "{:#?}", log.denials());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_call_answered_on_another_endpoint_of_b_ends_the_ring_of_b_s_watch_that_answers_nothing() {
     let lab = Lab::start_echo().await;
     let mut ringing = lab.account(LAB_B, 660.0);
@@ -651,7 +650,7 @@ async fn a_call_answered_on_another_endpoint_of_b_ends_the_ring_of_b_s_watch_tha
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn join_lets_the_running_group_call_ring_out_then_joins_it_and_hears_the_mixer() {
     let lab = Lab::start_echo().await;
     let mut c = lab.account(LAB_C, 880.0);
@@ -702,7 +701,7 @@ async fn join_lets_the_running_group_call_ring_out_then_joins_it_and_hears_the_m
     assert!(files.heard(880.0).unwrap().is_some());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn join_with_no_running_call_ringing_in_time_places_nothing() {
     let lab = Lab::start_echo().await;
     let mut c = lab.account(LAB_C, 880.0);
@@ -998,7 +997,9 @@ impl Lab {
             .unwrap()
             .with_options(Options {
                 ping_interval: Duration::from_millis(300),
-                pong_timeout: Duration::from_millis(1_500),
+                // the production wait: the mock's media (libwebrtc offers and answers of its peers and mixers) holds the
+                // mock up for most of a second at times, and no test waits for a pong that never comes
+                pong_timeout: Duration::from_secs(5),
                 backoff_base: Duration::from_millis(50),
                 backoff_cap: Duration::from_millis(200),
                 backoff_jitter_percent: 0,
@@ -1007,10 +1008,7 @@ impl Lab {
             .for_calls(CallStack::new(Arc::clone(&fence), Arc::clone(&members)));
         let name = mri.rsplit(':').next().unwrap();
         let files = CallFiles::write(self.dir.path().join(format!("{name}-call.wav")), hz, &PLAN).unwrap();
-        let relay = Relay::Fixed(vec![RelayServer {
-            addr: relay,
-            transport: RelayTransport::Udp,
-        }]);
+        let relay = Relay::Fixed(vec![RelayServer::udp(relay)]);
         let identity = Identity {
             mri: Mri::new(mri),
             display_name: Some("Lab".into()),

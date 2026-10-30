@@ -5,16 +5,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Condvar, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
-use str0m::change::{SdpAnswer, SdpOffer};
 use teams_media::devices::file::{AudioInput, FileDevices, Pacing, PatternCamera};
 use teams_media::devices::{AudioFrame, AudioSink, AudioSource, DeviceError, Devices, SAMPLE_RATE, VideoSource, wav};
-use teams_media::peer::RelayedPeer;
 use teams_media::processing::ProcessingConfig;
-use teams_media::relay::{RelayLink, RelayOptions, RelayServer};
-use teams_media::session::{MediaSession, SessionConfig, SessionEvent};
-use teams_media::test_turn::{PASSWORD, TurnServer, USER};
-use teams_media::tone::{Tone, amplitude_at};
-use teams_media::turn::{Credentials, Transport};
+use teams_media::relay::RelayConfig;
+use teams_media::session::{MediaSession, SdpAnswer, SdpOffer, SessionConfig, SessionEvent};
+use teams_media::test_turn::TurnServer;
+use teams_media::tone::{Tone, amplitude_at, level_at};
 
 /// How long ICE and DTLS may take through the relay on a loaded machine.
 pub const CONNECT_WAIT: Duration = Duration::from_secs(20);
@@ -28,18 +25,9 @@ pub const B_TONE: Tone = Tone {
     amplitude: 0.5,
 };
 
-/// A peer behind its own allocation on `turn`.
-pub fn relayed(turn: &TurnServer) -> RelayedPeer {
-    let server = RelayServer {
-        addr: turn.udp,
-        transport: Transport::Udp,
-    };
-    let credentials = Credentials {
-        username: USER.into(),
-        password: PASSWORD.into(),
-    };
-    let link = RelayLink::allocate(server, credentials, &RelayOptions::default()).unwrap();
-    RelayedPeer::new(Instant::now(), link).unwrap()
+/// The loopback TURN server `turn` as a session's relay, over UDP.
+pub fn relay(turn: &TurnServer) -> RelayConfig {
+    teams_media::test_turn::relay(turn.udp)
 }
 
 /// The file backend at the device's pace: `tone` in, a recording at `recording` out.
@@ -106,6 +94,11 @@ impl Heard {
     /// The level of `hz` over the whole stretch.
     pub fn level(&self, hz: f32) -> f32 {
         amplitude_at(self.stretch(), hz)
+    }
+
+    /// The level of `hz` over the stretch's 100 ms windows ([`level_at`]).
+    pub fn windowed_level(&self, hz: f32) -> f32 {
+        level_at(self.stretch(), hz)
     }
 
     /// The RMS level of the whole stretch.
@@ -348,8 +341,21 @@ impl Devices for LoopbackDevices {
 }
 
 /// Where a test's recordings go.
+///
+/// The process's libwebrtc is warmed up first (its factory's threads take most of a second to start, once): a test
+/// takes its time base after naming its recordings, and a recording's samples count from that base.
 pub fn recording(dir: &Path, name: &str) -> PathBuf {
+    warm();
     dir.join(format!("{name}.wav"))
+}
+
+/// Starts the process's libwebrtc, once: a session made and dropped.
+pub fn warm() {
+    static WARM: std::sync::Once = std::sync::Once::new();
+    WARM.call_once(|| {
+        let turn = TurnServer::start().unwrap();
+        drop(MediaSession::start_without_devices(&relay(&turn), SessionConfig::default()).unwrap());
+    });
 }
 
 /// Starts a session on `devices` behind its own allocation on `turn`, its microphone unprocessed: these tests judge
@@ -362,9 +368,6 @@ pub fn start(turn: &TurnServer, devices: &dyn Devices) -> MediaSession {
 
 /// Starts a session on `devices` behind its own allocation on `turn`, its microphone through `processing`.
 pub fn start_with(turn: &TurnServer, devices: &dyn Devices, processing: ProcessingConfig) -> MediaSession {
-    let config = SessionConfig {
-        processing,
-        ..SessionConfig::default()
-    };
-    MediaSession::start(relayed(turn), devices, config).unwrap()
+    let config = SessionConfig { processing };
+    MediaSession::start(&relay(turn), devices, config).unwrap()
 }

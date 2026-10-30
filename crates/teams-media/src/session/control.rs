@@ -1,4 +1,4 @@
-//! A group call's control plane in the session's network thread ([`crate::mcp`]): started once the call's media is
+//! A group call's control plane in the session's event thread ([`crate::mcp`]): started once the call's media is
 //! a group call's ([`super::MediaSession::start_control`]), its `syn` sent when the data channel opens, and the
 //! source requests the caller wants ([`super::MediaSession::request_sources`]) sent once the mixer answered: each
 //! receiving line's change, only when it changed. A handshake the mixer doesn't answer, the dominant speakers it tells
@@ -6,9 +6,8 @@
 
 use std::time::Instant;
 
-use crate::Error;
 use crate::mcp::{CLIENT_CAPABILITIES, ControlPlane, McpEvent, ReceiveLimits};
-use crate::peer::Peer;
+use crate::rtc::Peer;
 
 use super::{SessionEvent, Shared};
 
@@ -38,25 +37,23 @@ impl Control {
     }
 
     /// One turn of the network thread: the handshake begun once the data channel is open, its timeout told.
-    pub(super) fn turn(&mut self, now: Instant, peer: &mut Peer, shared: &Shared) -> Result<(), Error> {
+    pub(super) fn turn(&mut self, now: Instant, peer: &Peer, shared: &Shared) {
         if !self.started && peer.channel_open() {
-            self.started = true;
             let syn = self.plane.start(now);
-            peer.write_channel(&syn)?;
+            self.started = peer.send_channel(&syn);
         }
         if let Some(McpEvent::TimedOut) = self.plane.poll(now) {
             shared.report(SessionEvent::ControlTimedOut);
         }
-        Ok(())
     }
 
     /// A message the data channel received.
-    pub(super) fn receive(&mut self, data: &[u8], peer: &mut Peer, shared: &Shared) -> Result<(), Error> {
+    pub(super) fn receive(&mut self, data: &[u8], peer: &Peer, shared: &Shared) {
         for event in self.plane.receive(data) {
             match event {
                 McpEvent::Active { send, receive } => {
                     shared.report(SessionEvent::ControlActive { send, receive });
-                    self.flush(peer, shared)?;
+                    self.flush(peer, shared);
                 }
                 McpEvent::DominantSpeakers(speakers) => shared.report(SessionEvent::DominantSpeakers(speakers)),
                 McpEvent::SourceResult { sequence, result } => {
@@ -65,25 +62,19 @@ impl Control {
                 McpEvent::TimedOut | McpEvent::Other(_) => {}
             }
         }
-        Ok(())
     }
 
     /// The caller wants `wanted` now: each line's change goes once the mixer takes source requests.
-    pub(super) fn request(
-        &mut self,
-        wanted: Vec<SourceRequest>,
-        peer: &mut Peer,
-        shared: &Shared,
-    ) -> Result<(), Error> {
+    pub(super) fn request(&mut self, wanted: Vec<SourceRequest>, peer: &Peer, shared: &Shared) {
         self.wanted = wanted;
-        self.flush(peer, shared)
+        self.flush(peer, shared);
     }
 
     /// Sends each wanted line whose source changed since it last went (a line no longer wanted gets `-1`); a line that
     /// never had a source isn't told it has none.
-    fn flush(&mut self, peer: &mut Peer, shared: &Shared) -> Result<(), Error> {
+    fn flush(&mut self, peer: &Peer, shared: &Shared) {
         if !self.plane.takes_source_requests() {
-            return Ok(());
+            return;
         }
         let had_source =
             |stream: u32, sent: &[SourceRequest]| sent.iter().any(|(at, source)| *at == stream && *source != -1);
@@ -102,11 +93,11 @@ impl Control {
         );
         for (stream, source) in changes {
             let Ok((sequence, packet)) = self.plane.request_source(stream, source, ReceiveLimits::HD) else {
-                return Ok(());
+                return;
             };
-            if !peer.write_channel(&packet)? {
+            if !peer.send_channel(&packet) {
                 // the channel took nothing: what wasn't sent goes at the next change
-                return Ok(());
+                return;
             }
             shared.report(SessionEvent::SourceRequested {
                 sequence,
@@ -116,6 +107,5 @@ impl Control {
             self.sent.retain(|(sent, _)| *sent != stream);
             self.sent.push((stream, source));
         }
-        Ok(())
     }
 }

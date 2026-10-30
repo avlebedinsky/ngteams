@@ -40,7 +40,9 @@ teams-core = { workspace = true, features = ["test-support"] }
 teams-mock = { workspace = true, features = ["media"] }
 teams-proto = { workspace = true, features = ["test-support"] }
 teams-trouter = { workspace = true, features = ["test-support"] }
-tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+# the call tests run on two workers: the mock's media blocks the handler that makes it, the mock's sockets answer
+# pings meanwhile
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync", "time"] }
 
 [features]
 # builds the live acceptance test (`tests/chat_live.rs`); it still runs only with PROTO_LAB_LIVE=1, so `--all-features`

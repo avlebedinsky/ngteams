@@ -1,6 +1,6 @@
 [package]
 name = "teams-media"
-description = "A call's media: the TURN client (RFC 8656) and its relay link, Teams' SDP dialect (sdp-ngc-1.0) to and from str0m's SDP, the relayed str0m peer, echo cancellation, noise suppression and gain control, Opus with a jitter buffer, the audio session on threads of its own, the device seam (file and PipeWire backends), and the player of a video a message carries (GStreamer's playbin fed by the engine)"
+description = "A call's media: Teams' SDP dialect (sdp-ngc-1.0) to and from libwebrtc's SDP, the relayed libwebrtc peer and its session (the microphone through the audio processing to libwebrtc, libwebrtc's audio to the speaker, the camera and the received video), a group call's control plane, the device seam (file and PipeWire backends), and the player of a video a message carries (GStreamer's playbin fed by the engine)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,44 +9,43 @@ publish.workspace = true
 [features]
 # Tests only, through dev-dependencies: a minimal TURN server on loopback (`test_turn`), for this crate's tests, the
 # mock's media and the engine's call tests, and the signals the audio processing is judged with (`test_signal`).
-test-support = []
+test-support = ["dep:crc32fast", "dep:hmac", "dep:md-5", "dep:sha1"]
 # The personal build's devices: the desktop's PipeWire instead of the UI sandbox's (`devices::pipewire::THIS_BUILD`).
 # Only `crates/ngteams` enables it (crates/ngteams/tests/apart.rs checks every manifest); `test-support` wins over it.
 personal = []
 
 [dependencies]
-# STUN FINGERPRINT (CRC-32)
-crc32fast.workspace = true
-# STUN transaction ids
+# the test TURN server's STUN codec (`test-support`): FINGERPRINT (CRC-32), MESSAGE-INTEGRITY (HMAC-SHA1 over the
+# long-term key MD5(username:realm:password))
+crc32fast = { workspace = true, optional = true }
+hmac = { workspace = true, optional = true }
+md-5 = { workspace = true, optional = true }
+sha1 = { workspace = true, optional = true }
+# libwebrtc's answers (SDP, a description applied) are futures: run on the asking thread
+futures-executor.workspace = true
+futures-util.workspace = true
+# STUN transaction ids (the test TURN server) and the data line's SSRC
 getrandom.workspace = true
-# STUN MESSAGE-INTEGRITY (HMAC-SHA1 over the long-term key MD5(username:realm:password))
-hmac.workspace = true
 # the PipeWire backend checks its socket belongs to this user (`getuid`)
 libc.workspace = true
-md-5.workspace = true
 # a shared video file played in its card: GStreamer's playbin, fed by an appsrc, its frames and sound to appsinks
 gstreamer.workspace = true
 gstreamer-app.workspace = true
-# the calls' video codec: H.264 through OpenH264, built from the source the binding bundles
-openh264.workspace = true
-# the encoder option the safe API lacks: the bitrate following the bandwidth estimate
-openh264-sys2.workspace = true
-# the calls' audio codec (libopus, built from its bundled source): 20 ms packets, in-band FEC, DTX
-opus.workspace = true
-sha1.workspace = true
+# the call's media: the peer connection (ICE through Teams' relay, DTLS-SRTP, Opus and H.264, the jitter buffer,
+# bandwidth estimation, A/V sync), the audio processing module, the data channel
+libwebrtc.workspace = true
+log.workspace = true
 # the device seam's PipeWire backend: microphone, speaker and camera streams on the PipeWire the build allows
 pipewire.workspace = true
 # a group call's control plane: its messages are JSON (`mcp`)
 serde_json.workspace = true
-# the SDP the call's peer speaks: offers and answers taken from and handed to it
-str0m.workspace = true
 thiserror.workspace = true
+# libwebrtc's video source keeps its track alive on a tokio task until the camera's first frame, and the media's
+# threads wait for libwebrtc's streams with a timeout: the media's own runtime runs both
+tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
 # the personal build's camera: the desktop's camera portal, asked on the bus the backend is given (blocking calls, on
 # the blocking pool a device opens on; the async-io flavour the app's notifications use, so one zbus in the tree)
 zbus.workspace = true
-# the microphone's echo cancellation (AEC3), noise suppression and gain control: WebRTC's audio processing module,
-# built from the source the binding bundles (BSD-3-Clause; it logs nothing)
-webrtc-audio-processing.workspace = true
 
 [dev-dependencies]
 # this crate's own tests run against the loopback TURN server, and with `personal` on too they show `test-support`

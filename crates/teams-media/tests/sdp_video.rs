@@ -1,23 +1,37 @@
-//! The video lines in Teams' dialect, through the call's own peer (`teams_media::peer::Peer`: Opus and H.264):
-//! which of an offer's video lines a call takes ([`VideoLines`]) and how our camera's line is offered.
+//! The video lines in Teams' dialect, through the call's own media session (libwebrtc: Opus and H.264): which of an
+//! offer's video lines a call takes ([`VideoLines`]) and how our camera's line is offered.
 //!
 //! - A 1:1 call takes the main video line of the web client's camera-on offer and rejects the sharing line; with our
 //!   camera off it answers that it only receives, with it on that it sends too; H.264 as the web client numbers
 //!   constrained baseline.
 //! - An audio-only call (a group call's, until it takes video) rejects every video line as the web client writes a
-//!   rejected line (`m=video 0 RTP/SAVP 34`), the mixer's twelve too, and leaves them out of the bundle: as before
-//!   H.264 was configured (M3 Task 16's `410 SdpParsingFailure`).
+//!   rejected line (`m=video 0 RTP/SAVP 34`), the mixer's twelve too, and leaves them out of the bundle (M3 Task 16's
+//!   `410 SdpParsingFailure`).
 //! - Our camera's line offered in a renegotiation is written as the web client writes its main video line, and a
-//!   native far end that reads it takes it and answers it. A line whose offer was turned away (`491`) is no line:
-//!   the camera turned off and on again before it went again offers it anew, numbered as it was.
+//!   native far end that reads it takes it and answers it. A line whose offer was turned away (`491`) is offered again
+//!   as it was: the camera turned off and on again before it went again offers it numbered as it was.
+//!
+//! Each session runs behind a loopback TURN server of its own, its only candidates relayed.
 
-use std::time::Instant;
+// test code throughout (its helpers unwrap like the tests do)
+#![cfg(test)]
+
+#[expect(
+    dead_code,
+    reason = "the helpers of tests/session.rs, of which these tests take the relay"
+)]
+mod support;
 
 use serde_json::Value;
-use str0m::Candidate;
-use str0m::net::Protocol;
-use teams_media::peer::{H264_PT, Peer};
+use teams_media::devices::Devices as _;
+use teams_media::devices::VideoSink;
+use teams_media::devices::file::{AudioInput, FileDevices, FrameCounter, Pacing, PatternCamera};
+use teams_media::processing::ProcessingConfig;
 use teams_media::sdp::{NgcSdp, NgcSession, VideoLines};
+use teams_media::session::{MediaSession, SessionConfig, VideoParts};
+use teams_media::test_turn::TurnServer;
+use teams_media::video::codec::EncoderSettings;
+use teams_media::video::convert::MaxSize;
 
 const FIXTURE: &str = include_str!("fixtures/sdp/captured.json");
 
@@ -30,14 +44,53 @@ fn captured(name: &str) -> TestResult<NgcSdp> {
     Ok(NgcSdp::new(content_type, blob)?)
 }
 
-/// The call's peer behind a relayed candidate (a documentation address), as the native client's is.
-fn peer(port: u16) -> TestResult<Peer> {
-    let candidate = Candidate::relayed(
-        format!("192.0.2.50:{port}").parse()?,
-        "0.0.0.0:41000".parse()?,
-        Protocol::Udp,
-    )?;
-    Ok(Peer::with_candidate(Instant::now(), candidate)?)
+/// A call's media session behind a loopback TURN server of its own, its video started (the camera's track on the
+/// main video line, off). The session goes before its relay.
+struct Peer {
+    session: MediaSession,
+    _turn: TurnServer,
+}
+
+impl Peer {
+    fn new() -> TestResult<Self> {
+        let turn = TurnServer::start()?;
+        let config = SessionConfig {
+            processing: ProcessingConfig::OFF,
+        };
+        let session = MediaSession::start_without_devices(&support::relay(&turn), config)?;
+        session.start_video(VideoParts {
+            encoder: EncoderSettings::default(),
+            max_size: MaxSize::HD,
+            remote: Box::new(|_| Box::new(FrameCounter::new()) as Box<dyn VideoSink>),
+            preview: None,
+        })?;
+        Ok(Self { session, _turn: turn })
+    }
+
+    /// Turns the test pattern camera on.
+    fn camera_on(&self) -> TestResult {
+        let devices = FileDevices {
+            input: AudioInput::Silence,
+            recording: None,
+            camera: PatternCamera::default(),
+            pacing: Pacing::RealTime,
+        };
+        let camera = devices.camera()?;
+        Ok(self.session.set_camera(Some(camera))?)
+    }
+}
+
+/// The port of the first relayed candidate of a standard SDP.
+fn relayed_port(text: &str) -> TestResult<String> {
+    let candidate = text
+        .lines()
+        .find_map(|line| line.trim_end().strip_prefix("a=candidate:"))
+        .ok_or("no candidate")?;
+    Ok(candidate
+        .split(' ')
+        .nth(5)
+        .ok_or("a candidate without a port")?
+        .to_owned())
 }
 
 /// The media sections of an SDP, as lines.
@@ -62,9 +115,9 @@ fn has(section: &[&str], line: &str) -> bool {
 fn answer(name: &str, lines: VideoLines) -> TestResult<String> {
     let mut session = NgcSession::new();
     session.set_video(lines);
-    let mut peer = peer(50000)?;
+    let peer = Peer::new()?;
     let offer = session.read_offer(&captured(name)?)?;
-    let answer = peer.accept_offer(offer)?;
+    let answer = peer.session.accept_offer(offer)?;
     Ok(session.write_answer(&answer)?.as_str().to_owned())
 }
 
@@ -129,24 +182,44 @@ fn the_mixers_video_lines_stay_rejected_in_a_group_call() -> TestResult {
     Ok(())
 }
 
-#[test]
-fn our_cameras_line_is_offered_as_the_web_clients_main_video_line_and_a_native_far_end_takes_it() -> TestResult {
-    // the call: our audio offer answered by a native far end
-    let (mut ours, mut theirs) = (peer(50000)?, peer(50002)?);
+/// Our audio offer answered by a native far end whose camera is off: the two sessions and their dialects.
+fn call() -> TestResult<(Peer, Peer, NgcSession, NgcSession)> {
+    let (ours, theirs) = (Peer::new()?, Peer::new()?);
     let (mut our_dialect, mut their_dialect) = (NgcSession::new(), NgcSession::new());
     their_dialect.set_video(VideoLines::Main { sending: false });
-    let (offer, pending) = ours.offer_audio()?;
-    let offer = our_dialect.write_offer(&offer)?;
-    let answer = theirs.accept_offer(their_dialect.read_offer(&offer)?)?;
-    ours.accept_answer(pending, our_dialect.read_answer(&their_dialect.write_answer(&answer)?)?)?;
+    let offer = our_dialect.write_offer(&ours.session.offer_audio()?)?;
+    let answer = theirs.session.accept_offer(their_dialect.read_offer(&offer)?)?;
+    ours.session
+        .accept_answer(our_dialect.read_answer(&their_dialect.write_answer(&answer)?)?)?;
+    Ok((ours, theirs, our_dialect, their_dialect))
+}
+
+#[test]
+fn our_cameras_line_is_offered_as_the_web_clients_main_video_line_and_a_native_far_end_takes_it() -> TestResult {
+    let (ours, theirs, mut our_dialect, mut their_dialect) = call()?;
 
     // our camera goes on: the renegotiation adds our video line
-    let (offer, pending) = ours.offer_video(true)?.ok_or("an offer")?;
-    let offer = our_dialect.write_offer(&offer)?;
+    ours.camera_on()?;
+    let standard = ours.session.offer_video(true)?.ok_or("an offer")?;
+    let port = relayed_port(standard.as_str())?;
+    let offer = our_dialect.write_offer(&standard)?;
     let lines = sections(offer.as_str());
     let video = &lines[1];
-    assert!(video[0].starts_with("m=video 50000 RTP/SAVP "), "{video:?}");
-    assert!(has(video, &format!("a=rtpmap:{H264_PT} H264/90000")), "{video:?}");
+    assert!(video[0].starts_with(&format!("m=video {port} RTP/SAVP ")), "{video:?}");
+    // H.264 alone (with its retransmissions), packetization mode 1, as the web client offers it
+    let h264: Vec<&str> = video
+        .iter()
+        .filter_map(|line| line.strip_prefix("a=rtpmap:"))
+        .filter(|rtpmap| rtpmap.ends_with(" H264/90000"))
+        .collect();
+    assert!(!h264.is_empty(), "{video:?}");
+    assert!(
+        video
+            .iter()
+            .filter_map(|line| line.strip_prefix("a=rtpmap:"))
+            .all(|rtpmap| rtpmap.ends_with(" H264/90000") || rtpmap.ends_with(" rtx/90000")),
+        "{video:?}"
+    );
     assert!(has(video, "a=sendrecv"));
     assert!(has(video, "a=mid:1") && has(video, "a=label:main-video"), "{video:?}");
     assert!(
@@ -155,54 +228,50 @@ fn our_cameras_line_is_offered_as_the_web_clients_main_video_line_and_a_native_f
     );
 
     // the far end (camera off) takes it receiving
-    let answer = theirs.accept_offer(their_dialect.read_offer(&offer)?)?;
+    let answer = theirs.session.accept_offer(their_dialect.read_offer(&offer)?)?;
     let answer = their_dialect.write_answer(&answer)?;
     assert!(has(&sections(answer.as_str())[1], "a=recvonly"), "{}", answer.as_str());
-    ours.accept_answer(pending, our_dialect.read_answer(&answer)?)?;
-    assert!(ours.video_sending(), "our line sends");
-    // (the far end names the lines of an offer it took once the media connects)
-    assert!(ours.video_mid().is_some());
+    ours.session.accept_answer(our_dialect.read_answer(&answer)?)?;
     Ok(())
 }
 
 #[test]
-fn a_camera_turned_off_and_on_while_its_offer_was_turned_away_offers_its_line_anew() -> TestResult {
-    let (mut ours, mut theirs) = (peer(50000)?, peer(50002)?);
-    let (mut our_dialect, mut their_dialect) = (NgcSession::new(), NgcSession::new());
-    their_dialect.set_video(VideoLines::Main { sending: false });
-    let (offer, pending) = ours.offer_audio()?;
-    let offer = our_dialect.write_offer(&offer)?;
-    let answer = theirs.accept_offer(their_dialect.read_offer(&offer)?)?;
-    ours.accept_answer(pending, our_dialect.read_answer(&their_dialect.write_answer(&answer)?)?)?;
+fn a_camera_turned_off_and_on_while_its_offer_was_turned_away_offers_its_line_as_it_was() -> TestResult {
+    let (ours, theirs, mut our_dialect, mut their_dialect) = call()?;
 
     // our camera goes on: the call controller turns its offer away (`491`), so no answer commits its line
-    let (offer, _turned_away) = ours.offer_video(true)?.ok_or("an offer")?;
+    ours.camera_on()?;
+    let offer = ours.session.offer_video(true)?.ok_or("an offer")?;
     let _ = our_dialect.write_offer(&offer)?;
-    assert_eq!(ours.video_mid(), None, "no line until an answer commits it");
 
-    // off and on again before that offer went again: each offers the line anew, never `str0m`'s pending line (a
-    // stream declared on it panics)
-    let (offer, _) = ours.offer_video(false)?.ok_or("an offer")?;
+    // off and on again before that offer went again: each offers the line again, numbered as the first
+    ours.session.set_camera(None)?;
+    let offer = ours.session.offer_video(false)?.ok_or("an offer")?;
     let _ = our_dialect.write_offer(&offer)?;
-    let (offer, pending) = ours.offer_video(true)?.ok_or("an offer")?;
+    ours.camera_on()?;
+    let offer = ours.session.offer_video(true)?.ok_or("an offer")?;
     let offer = our_dialect.write_offer(&offer)?;
     let lines = sections(offer.as_str());
-    assert_eq!(lines.len(), 2, "the lines turned away aren't offered: {lines:?}");
+    assert_eq!(
+        lines.len(),
+        2,
+        "one video line, however often it was offered: {lines:?}"
+    );
     assert!(
         has(&lines[1], "a=mid:1") && has(&lines[1], "a=sendrecv"),
         "numbered as the first: {:?}",
         lines[1]
     );
 
-    // the far end takes it: the line is ours, and the camera's next turn changes it
-    let answer = theirs.accept_offer(their_dialect.read_offer(&offer)?)?;
-    ours.accept_answer(pending, our_dialect.read_answer(&their_dialect.write_answer(&answer)?)?)?;
-    assert!(ours.video_sending(), "our line sends");
-    let line = ours.video_mid();
-    assert!(line.is_some());
-    let (offer, _) = ours.offer_video(false)?.ok_or("an offer")?;
-    assert_eq!(ours.video_mid(), line);
+    // the far end takes it, and the camera's next turn offers the same line
+    let answer = theirs.session.accept_offer(their_dialect.read_offer(&offer)?)?;
+    ours.session
+        .accept_answer(our_dialect.read_answer(&their_dialect.write_answer(&answer)?)?)?;
+    ours.session.set_camera(None)?;
+    let offer = ours.session.offer_video(false)?.ok_or("an offer")?;
     let offer = our_dialect.write_offer(&offer)?;
-    assert_eq!(sections(offer.as_str()).len(), 2);
+    let lines = sections(offer.as_str());
+    assert_eq!(lines.len(), 2);
+    assert!(has(&lines[1], "a=mid:1"), "{:?}", lines[1]);
     Ok(())
 }

@@ -54,10 +54,9 @@ use teams_fence::{Fence, FenceLog, LiveMembershipSource, MembershipSource, Mri, 
 use teams_media::devices::pipewire::PipeWireDevices;
 use teams_media::devices::{Devices, SAMPLE_RATE, wav};
 use teams_media::processing::ProcessingConfig;
-use teams_media::relay::{RelayOptions, RelayServer};
+use teams_media::relay::RelayServer;
 use teams_media::session::SessionConfig;
 use teams_media::tone::{Tone, amplitude_at};
-use teams_media::turn::Transport as RelayTransport;
 use teams_mock::{AB_CHAT, CHAT_BASE, ChatServiceMock, ECHO, LAB_A, LAB_B, LAB_C, TENANT};
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::Store;
@@ -867,14 +866,9 @@ fn engine(
     let media = CallMedia {
         devices,
         video: Some(teams_core::lab::call_video(Arc::new(feed))),
-        relay: Relay::Fixed(vec![RelayServer {
-            addr: env(RELAY_ENV)?.parse()?,
-            transport: RelayTransport::Udp,
-        }]),
-        relay_options: RelayOptions::default(),
+        relay: Relay::Fixed(vec![RelayServer::udp(env(RELAY_ENV)?.parse()?)]),
         session: SessionConfig {
             processing: ProcessingConfig::OFF,
-            ..SessionConfig::default()
         },
     };
     let push = Push::new(trouter()?);

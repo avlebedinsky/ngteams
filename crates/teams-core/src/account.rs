@@ -76,7 +76,6 @@ pub fn account_calls(
         media: CallMedia {
             devices,
             relay: crate::Relay::Teams,
-            relay_options: teams_media::relay::RelayOptions::default(),
             session: teams_media::session::SessionConfig::default(),
             video,
         },

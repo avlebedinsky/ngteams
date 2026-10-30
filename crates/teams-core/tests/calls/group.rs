@@ -169,7 +169,7 @@ async fn hang_up(account: &mut Account, call: CallId) {
     assert_eq!(account.ended(call).await, End::HungUp);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_group_call_shows_each_participant_on_a_line_of_its_own() {
     let lab = Lab::start_group_video().await;
     let mut a = lab.account(LAB_A, A_TONE).await;
@@ -267,7 +267,7 @@ async fn a_group_call_shows_each_participant_on_a_line_of_its_own() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_late_joiner_is_shown_and_sees_everyone() {
     let lab = Lab::start_group_video().await;
     let mut a = lab.account(LAB_A, A_TONE).await;
@@ -319,7 +319,7 @@ async fn a_late_joiner_is_shown_and_sees_everyone() {
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_group_call_without_video_shows_nobody_on_a_line_and_nobody_speaking() {
     let lab = Lab::start_group_video().await;
     let mut a = lab.account_without_video(LAB_A, A_TONE).await;

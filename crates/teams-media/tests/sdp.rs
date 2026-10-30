@@ -1,22 +1,34 @@
 //! `sdp-ngc-1.0` both ways, on the shapes the M3 calling runs captured (`tests/fixtures/sdp/captured.json`, synthetic):
-//! `str0m`'s offer written as the web client writes its call start's and read back from the media controller's and a
-//! callee's answers; an invitation's offer (the caller's, and the mixer's in `sdp-ngc-0.5`) read into `str0m` and our
+//! libwebrtc's offer written as the web client writes its call start's and read back from the media controller's and a
+//! callee's answers; an invitation's offer (the caller's, and the mixer's in `sdp-ngc-0.5`) read into libwebrtc and our
 //! answer written; renegotiations offered by either side; a browser's SDP refused where the dialect is required.
+//!
+//! The standard side is a real media session (libwebrtc) behind a loopback TURN server of its own, as the native
+//! client's is behind Teams' relay: its only candidates are relayed.
 
-use std::sync::{Arc, LazyLock};
-use std::time::Instant;
+// test code throughout (its helpers unwrap like the tests do)
+#![cfg(test)]
+
+#[expect(
+    dead_code,
+    reason = "the helpers of tests/session.rs, of which these tests take the relay"
+)]
+mod support;
+
+use std::ops::Deref;
+use std::sync::LazyLock;
 
 use serde_json::Value;
-use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
-use str0m::media::{Direction, MediaKind, Mid};
-use str0m::net::Protocol;
-use str0m::{Candidate, Rtc};
+use teams_media::devices::VideoSink;
+use teams_media::devices::file::FrameCounter;
+use teams_media::processing::ProcessingConfig;
 use teams_media::sdp::{Dialect, NgcSdp, NgcSession, SDP_NGC, SDP_NGC_MIXER, SdpError, VideoLines};
+use teams_media::session::{MediaSession, SdpAnswer, SdpOffer, SessionConfig, VideoParts};
+use teams_media::test_turn::TurnServer;
+use teams_media::video::codec::EncoderSettings;
+use teams_media::video::convert::MaxSize;
 
 const FIXTURE: &str = include_str!("fixtures/sdp/captured.json");
-/// Our relayed candidate: the allocation (a documentation address) and the socket to the relay.
-const RELAYED: &str = "192.0.2.50:50000";
-const RELAY_BASE: &str = "0.0.0.0:41000";
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -36,24 +48,55 @@ fn captured(name: &str) -> TestResult<NgcSdp> {
     Ok(NgcSdp::new(content_type, captured_text(name)?)?)
 }
 
-/// A `str0m` peer whose only candidate is relayed, as the native client's is.
-fn relayed_peer() -> TestResult<Rtc> {
-    let mut rtc = Rtc::builder()
-        .set_crypto_provider(Arc::new(str0m::crypto::from_feature_flags()))
-        .build(Instant::now());
-    rtc.add_local_candidate(Candidate::relayed(
-        RELAYED.parse()?,
-        RELAY_BASE.parse()?,
-        Protocol::Udp,
-    )?);
-    Ok(rtc)
+/// A call's media session (libwebrtc) behind a loopback TURN server of its own: its only candidates relayed, as the
+/// native client's are. The session goes before its relay.
+struct Peer {
+    session: MediaSession,
+    _turn: TurnServer,
 }
 
-fn audio_offer(rtc: &mut Rtc) -> TestResult<(Mid, SdpOffer, SdpPendingOffer)> {
-    let mut change = rtc.sdp_api();
-    let mid = change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None);
-    let (offer, pending) = change.apply().ok_or("no offer")?;
-    Ok((mid, offer, pending))
+impl Peer {
+    fn new() -> TestResult<Self> {
+        let turn = TurnServer::start()?;
+        let config = SessionConfig {
+            processing: ProcessingConfig::OFF,
+        };
+        let session = MediaSession::start_without_devices(&support::relay(&turn), config)?;
+        Ok(Self { session, _turn: turn })
+    }
+
+    /// A session whose video started (the camera's track on the main video line, off).
+    fn with_video() -> TestResult<Self> {
+        let peer = Self::new()?;
+        peer.session.start_video(VideoParts {
+            encoder: EncoderSettings::default(),
+            max_size: MaxSize::HD,
+            remote: Box::new(|_| Box::new(FrameCounter::new()) as Box<dyn VideoSink>),
+            preview: None,
+        })?;
+        Ok(peer)
+    }
+}
+
+impl Deref for Peer {
+    type Target = MediaSession;
+
+    fn deref(&self) -> &MediaSession {
+        &self.session
+    }
+}
+
+/// The address and port of the first relayed candidate of a standard SDP.
+fn relayed(text: &str) -> TestResult<(String, String)> {
+    let candidate = text
+        .lines()
+        .find_map(|line| line.trim_end().strip_prefix("a=candidate:"))
+        .ok_or("no candidate")?;
+    let fields: Vec<&str> = candidate.split(' ').collect();
+    match fields[..] {
+        [_, _, _, _, address, port, "typ", "relay", ..] => Ok((address.to_owned(), port.to_owned())),
+        _ => Err(format!("not a relayed candidate: {candidate}").into()),
+    }
 }
 
 /// The lines of an SDP, without empty ones.
@@ -118,11 +161,12 @@ fn video_session() -> NgcSession {
     session
 }
 
-/// A session that read and answered the mixer's offer, as a callee in a group call.
-fn mixer_session(rtc: &mut Rtc) -> TestResult<NgcSession> {
-    let mut session = video_session();
+/// A session that read and answered the mixer's offer with `lines`, as a callee in a group call.
+fn mixer_session(peer: &Peer, lines: VideoLines) -> TestResult<NgcSession> {
+    let mut session = NgcSession::new();
+    session.set_video(lines);
     let offer = session.read_offer(&captured("mixer_offer")?)?;
-    let answer = rtc.sdp_api().accept_offer(offer)?;
+    let answer = peer.accept_offer(offer)?;
     session.write_answer(&answer)?;
     Ok(session)
 }
@@ -131,8 +175,8 @@ fn mixer_session(rtc: &mut Rtc) -> TestResult<NgcSession> {
 
 #[test]
 fn our_offer_is_written_in_the_shape_of_the_web_clients_call_start() -> TestResult {
-    let mut rtc = relayed_peer()?;
-    let (_, offer, _) = audio_offer(&mut rtc)?;
+    let peer = Peer::new()?;
+    let offer = peer.offer_audio()?;
     let mut session = NgcSession::new();
 
     let ngc = session.write_offer(&offer).unwrap();
@@ -142,28 +186,51 @@ fn our_offer_is_written_in_the_shape_of_the_web_clients_call_start() -> TestResu
     let ours = sections(ngc.as_str());
     let web = sections(captured_text("start_offer")?);
     assert_eq!(shape(&ours[0]), shape(&web[0]), "the session part");
-    assert_eq!(shape(&ours[1]), shape(&web[1]), "the audio line");
+    assert_eq!(shape(&ours[1]), shape(&web[1]), "the audio line:\n{}", ngc.as_str());
     assert_eq!(ours.len(), 2, "audio only");
     assert!(!ngc.as_str().contains("UDP/TLS"));
-    assert!(!ngc.as_str().contains("str0m"));
     Ok(())
+}
+
+/// Our candidates as Teams writes them: foundations numbered from 1, component 1 over UDP, relayed, no related address
+/// and no extension.
+fn assert_teams_candidates(candidates: &[&str]) {
+    assert!(!candidates.is_empty(), "no candidate");
+    for candidate in candidates {
+        let fields: Vec<&str> = candidate.split(' ').collect();
+        let foundation = fields[0].strip_prefix("a=candidate:").unwrap_or_default();
+        assert!(
+            foundation
+                .parse::<usize>()
+                .is_ok_and(|number| (1..=candidates.len()).contains(&number)),
+            "foundations numbered from 1: {candidates:#?}"
+        );
+        assert_eq!(fields[1..3], ["1", "udp"], "{candidate}");
+        assert_eq!(
+            fields[6..],
+            ["typ", "relay", "raddr", "0.0.0.0", "rport", "0"],
+            "relayed, no related address, no ufrag extension: {candidate}"
+        );
+    }
 }
 
 #[test]
 fn our_offer_carries_the_relayed_candidate_and_teams_own_lines() -> TestResult {
-    let mut rtc = relayed_peer()?;
-    let (_, offer, _) = audio_offer(&mut rtc)?;
+    let peer = Peer::new()?;
+    let offer = peer.offer_audio()?;
+    let (address, port) = relayed(offer.as_str())?;
     let ngc = NgcSession::new().write_offer(&offer)?;
     let ours = sections(ngc.as_str());
     let web = sections(captured_text("start_offer")?);
 
     let audio = &ours[1];
     assert_eq!(
-        audio[0], "m=audio 50000 RTP/SAVP 111",
-        "the relayed candidate's port, Opus"
+        audio[0],
+        format!("m=audio {port} RTP/SAVP 111"),
+        "the relayed candidate's port, Opus alone"
     );
-    assert_eq!(audio[1], "c=IN IP4 192.0.2.50");
-    assert_eq!(value(audio, "rtcp"), Some("50000"));
+    assert_eq!(audio[1], format!("c=IN IP4 {address}"));
+    assert_eq!(value(audio, "rtcp"), Some(port.as_str()));
     assert_eq!(value(audio, "mid"), Some("0"), "Teams numbers its lines");
     assert_eq!(value(audio, "label"), Some("main-audio"));
     assert_eq!(value(&ours[0], "group"), Some("BUNDLE 0"));
@@ -175,11 +242,8 @@ fn our_offer_carries_the_relayed_candidate_and_teams_own_lines() -> TestResult {
         .filter(|line| line.starts_with("a=candidate:"))
         .copied()
         .collect();
-    assert_eq!(
-        candidates,
-        ["a=candidate:1 1 udp 37748479 192.0.2.50 50000 typ relay raddr 0.0.0.0 rport 0"],
-        "one relayed candidate, no related address, no ufrag extension"
-    );
+    assert_teams_candidates(&candidates);
+    assert!(candidates[0].contains(&format!(" {address} {port} typ relay")));
     // Teams' own lines exactly as the web client writes them
     for line in [
         "a=x-signaling-fb:* x-message app recv:dsh",
@@ -200,9 +264,9 @@ fn our_offer_carries_the_relayed_candidate_and_teams_own_lines() -> TestResult {
 }
 
 #[test]
-fn the_media_controllers_answer_reads_back_for_str0m() -> TestResult {
-    let mut rtc = relayed_peer()?;
-    let (mid, offer, pending) = audio_offer(&mut rtc)?;
+fn the_media_controllers_answer_reads_back_for_libwebrtc() -> TestResult {
+    let peer = Peer::new()?;
+    let offer = peer.offer_audio()?;
     let mut session = NgcSession::new();
     session.write_offer(&offer).unwrap();
 
@@ -216,13 +280,13 @@ fn the_media_controllers_answer_reads_back_for_str0m() -> TestResult {
         "only the line we offered; the other twelve dropped:\n{text}"
     );
     let audio = &parts[1];
-    // str0m writes its own placeholder port back: the address is in the candidates
+    // the answer's own port and formats, on the standard transport
     assert!(
-        audio[0].starts_with("m=audio 9 UDP/TLS/RTP/SAVPF 120 111 "),
+        audio[0].starts_with("m=audio 3478 UDP/TLS/RTP/SAVPF 120 111 "),
         "{}",
         audio[0]
     );
-    assert_eq!(value(audio, "mid"), Some(mid.to_string().as_str()), "str0m's own mid");
+    assert_eq!(value(audio, "mid"), Some("0"), "libwebrtc's own mid");
     assert!(
         audio.contains(&"a=ssrc:1000 cname:teams-ngc"),
         "the stream x-ssrc-range names"
@@ -247,7 +311,7 @@ fn the_media_controllers_answer_reads_back_for_str0m() -> TestResult {
         assert!(!text.contains(teams), "{teams} left in:\n{text}");
     }
 
-    rtc.sdp_api().accept_answer(pending, answer).unwrap();
+    peer.accept_answer(answer).unwrap();
     Ok(())
 }
 
@@ -267,8 +331,8 @@ fn an_answer_with_a_data_line_we_never_offered_drops_it() -> TestResult {
         .collect();
     let blob = [session_part, full[1].clone(), full[13].clone()].concat().join("\r\n") + "\r\n";
     let answer = NgcSdp::new(SDP_NGC, &blob).unwrap();
-    let mut rtc = relayed_peer()?;
-    let (_, offer, pending) = audio_offer(&mut rtc)?;
+    let peer = Peer::new()?;
+    let offer = peer.offer_audio()?;
     let mut session = NgcSession::new();
     session.write_offer(&offer).unwrap();
 
@@ -276,14 +340,14 @@ fn an_answer_with_a_data_line_we_never_offered_drops_it() -> TestResult {
 
     let text = read.to_sdp_string();
     assert!(!text.contains("m=application"), "{text}");
-    rtc.sdp_api().accept_answer(pending, read).unwrap();
+    peer.accept_answer(read).unwrap();
     Ok(())
 }
 
 #[test]
-fn an_answer_that_numbers_opus_otherwise_is_read_back_with_our_number() -> TestResult {
+fn an_answer_that_numbers_opus_otherwise_keeps_its_number() -> TestResult {
     // the media controller's answer to an audio-only offer, Opus numbered 102 where the offer said 111, as a live
-    // test call answered (and it sent Opus as 111 all the same)
+    // test call answered: libwebrtc, like the web client's browser, sends with the answer's number
     let full = sections(captured_text("controller_answer")?);
     let session_part: Vec<&str> = full[0]
         .iter()
@@ -312,15 +376,12 @@ fn an_answer_that_numbers_opus_otherwise_is_read_back_with_our_number() -> TestR
     let audio: Vec<&str> = audio.iter().map(String::as_str).collect();
     let blob = [session_part, audio].concat().join("\r\n") + "\r\n";
     let answer = NgcSdp::new(SDP_NGC, &blob).unwrap();
-    let mut rtc = relayed_peer()?;
-    let (mid, offer, pending) = audio_offer(&mut rtc)?;
-    let offered = offer.to_sdp_string();
-    let opus = offered
-        .lines()
-        .find_map(|line| line.strip_prefix("a=rtpmap:").filter(|rest| rest.contains("opus")))
-        .and_then(|rest| rest.split(' ').next())
-        .ok_or("str0m offers Opus")?
-        .to_owned();
+    let peer = Peer::new()?;
+    let offer = peer.offer_audio()?;
+    assert!(
+        offer.as_str().contains("a=rtpmap:111 opus/48000/2"),
+        "libwebrtc offers Opus as 111"
+    );
     let mut session = NgcSession::new();
     session.write_offer(&offer).unwrap();
 
@@ -328,45 +389,33 @@ fn an_answer_that_numbers_opus_otherwise_is_read_back_with_our_number() -> TestR
 
     let text = read.to_sdp_string();
     assert!(
-        text.to_ascii_lowercase()
-            .contains(&format!("a=rtpmap:{opus} opus/48000/2")),
-        "{text}"
+        text.to_ascii_lowercase().contains("a=rtpmap:102 opus/48000/2"),
+        "the answer's number kept:\n{text}"
     );
-    assert!(!text.contains("a=rtpmap:102 "), "{text}");
-    rtc.sdp_api().accept_answer(pending, read).unwrap();
-    let writer = rtc.writer(mid).ok_or("the audio line")?;
-    let sent_as = writer
-        .payload_params()
-        .find(|params| params.spec().codec == str0m::format::Codec::Opus)
-        .map(|params| params.pt().to_string());
-    assert_eq!(sent_as, Some(opus), "str0m keeps our number for Opus, both ways");
+    assert!(!text.contains("a=rtpmap:111 "), "{text}");
+    peer.accept_answer(read).unwrap();
     Ok(())
 }
 
-/// Our offer in the web client's 1:1 shape: audio, the main video line receiving, the sharing line inactive, data.
-fn one_to_one_offer(rtc: &mut Rtc) -> TestResult<(Vec<Mid>, SdpOffer, SdpPendingOffer)> {
-    let mut change = rtc.sdp_api();
-    let mids = vec![
-        change.add_media(MediaKind::Audio, Direction::SendRecv, None, None, None),
-        change.add_media(MediaKind::Video, Direction::RecvOnly, None, None, None),
-        change.add_media(MediaKind::Video, Direction::Inactive, None, None, None),
-    ];
-    change.add_channel("data".to_owned());
-    let (offer, pending) = change.apply().ok_or("no offer")?;
-    Ok((mids, offer, pending))
+/// Our offer in the web client's shape of four lines: audio, the main video line, the sharing line, data (libwebrtc's
+/// group offer with no receiving line).
+fn four_line_offer(peer: &Peer) -> TestResult<SdpOffer> {
+    Ok(peer.offer_group(0)?)
 }
 
 #[test]
 fn a_callees_answer_in_a_one_to_one_call_reads_back() -> TestResult {
-    let mut rtc = relayed_peer()?;
-    let (mids, offer, pending) = one_to_one_offer(&mut rtc)?;
+    let peer = Peer::new()?;
+    let offer = four_line_offer(&peer)?;
+    let (_, port) = relayed(offer.as_str())?;
     let mut session = NgcSession::new();
     let ngc = session.write_offer(&offer).unwrap();
     let ours = sections(ngc.as_str());
     assert_eq!(value(&ours[0], "group"), Some("BUNDLE 0 1 2 3"));
     let data = &ours[4];
     assert_eq!(
-        data[0], "m=x-data 50000 RTP/SAVP 127 126",
+        data[0],
+        format!("m=x-data {port} RTP/SAVP 127 126"),
         "the data channel as Teams writes it"
     );
     assert_eq!(
@@ -388,13 +437,13 @@ fn a_callees_answer_in_a_one_to_one_call_reads_back() -> TestResult {
     assert_eq!(parts.len(), 5, "{text}");
     assert_eq!(
         value(&parts[3], "mid"),
-        Some(mids[2].to_string().as_str()),
+        mids(&sections(offer.as_str()))[2],
         "the rejected line, by its place"
     );
     assert!(parts[3][0].starts_with("m=video 0 "), "{}", parts[3][0]);
     assert!(parts[4][0].starts_with("m=application "), "{}", parts[4][0]);
     assert_eq!(value(&parts[4], "sctp-port"), Some("5000"));
-    rtc.sdp_api().accept_answer(pending, answer).unwrap();
+    peer.accept_answer(answer).unwrap();
     Ok(())
 }
 
@@ -402,7 +451,7 @@ fn a_callees_answer_in_a_one_to_one_call_reads_back() -> TestResult {
 
 #[test]
 fn an_invitations_offer_is_answered_in_teams_dialect() -> TestResult {
-    let mut rtc = relayed_peer()?;
+    let peer = Peer::new()?;
     let mut session = NgcSession::new();
 
     let offer = session.read_offer(&captured("invitation_offer")?).unwrap();
@@ -415,10 +464,11 @@ fn an_invitations_offer_is_answered_in_teams_dialect() -> TestResult {
     );
     assert!(read.contains(" typ relay "), "{read}");
     assert!(
-        read.contains("m=application 9 UDP/DTLS/SCTP webrtc-datachannel"),
+        read.contains("m=application 50000 UDP/DTLS/SCTP webrtc-datachannel"),
         "{read}"
     );
-    let answer = rtc.sdp_api().accept_offer(offer).unwrap();
+    let answer = peer.accept_offer(offer).unwrap();
+    let (_, port) = relayed(answer.as_str())?;
     let ngc = session.write_answer(&answer).unwrap();
 
     let ours = sections(ngc.as_str());
@@ -426,7 +476,8 @@ fn an_invitations_offer_is_answered_in_teams_dialect() -> TestResult {
     assert_eq!(
         shape(&ours[1]),
         shape(&web[1]),
-        "the audio line, as the web client's accept carries it"
+        "the audio line, as the web client's accept carries it:\n{}",
+        ngc.as_str()
     );
     assert_eq!(ours.len(), web.len(), "every offered line answered:\n{}", ngc.as_str());
     assert_eq!(
@@ -443,11 +494,11 @@ fn an_invitations_offer_is_answered_in_teams_dialect() -> TestResult {
     assert_eq!(value(&ours[1], "rtcp"), None, "an answer has no a=rtcp");
     assert_eq!(
         ours[1][0].split(' ').nth(1),
-        Some("50000"),
+        Some(port.as_str()),
         "our relayed candidate's port"
     );
     assert!(
-        ours[4][0].starts_with("m=x-data 50000 RTP/SAVP 127 126"),
+        ours[4][0].starts_with(&format!("m=x-data {port} RTP/SAVP 127 126")),
         "{}",
         ours[4][0]
     );
@@ -464,7 +515,7 @@ fn a_mixers_offer_in_its_older_dialect_is_read_and_answered() -> TestResult {
     let mixer = captured("mixer_offer")?;
     assert_eq!(mixer.dialect(), Dialect::Mixer);
     assert_eq!(mixer.content_type(), SDP_NGC_MIXER);
-    let mut rtc = relayed_peer()?;
+    let peer = Peer::new()?;
     let mut session = video_session();
 
     let offer = session.read_offer(&mixer).unwrap();
@@ -484,8 +535,8 @@ fn a_mixers_offer_in_its_older_dialect_is_read_and_answered() -> TestResult {
         );
         assert_eq!(
             value(section, "setup"),
-            Some("passive"),
-            "the mixer's offer names no setup: we take the client's part"
+            Some("actpass"),
+            "the mixer's offer names no setup: the role is left to us (libwebrtc takes the client's part)"
         );
     }
     assert!(
@@ -494,7 +545,7 @@ fn a_mixers_offer_in_its_older_dialect_is_read_and_answered() -> TestResult {
     );
     assert!(parts[13][0].starts_with("m=application "), "{}", parts[13][0]);
     assert_eq!(value(&parts[13], "sctp-port"), Some("5000"));
-    let answer = rtc.sdp_api().accept_offer(offer).unwrap();
+    let answer = peer.accept_offer(offer).unwrap();
     let ngc = session.write_answer(&answer).unwrap();
     assert_eq!(
         ngc.content_type(),
@@ -509,14 +560,14 @@ fn a_mixers_offer_in_its_older_dialect_is_read_and_answered() -> TestResult {
 
 #[test]
 fn a_renegotiation_offered_to_the_callee_names_the_same_lines() -> TestResult {
-    let mut rtc = relayed_peer()?;
+    let peer = Peer::new()?;
     let mut session = video_session();
     let offer = session.read_offer(&captured("invitation_offer")?).unwrap();
-    let answer = rtc.sdp_api().accept_offer(offer).unwrap();
+    let answer = peer.accept_offer(offer).unwrap();
     session.write_answer(&answer).unwrap();
 
     let renegotiation = session.read_offer(&captured("renegotiation_offer")?).unwrap();
-    let answer = rtc.sdp_api().accept_offer(renegotiation).unwrap();
+    let answer = peer.accept_offer(renegotiation).unwrap();
     let ngc = session.write_answer(&answer).unwrap();
 
     let ours = sections(ngc.as_str());
@@ -527,20 +578,20 @@ fn a_renegotiation_offered_to_the_callee_names_the_same_lines() -> TestResult {
 
 #[test]
 fn a_renegotiation_offered_to_the_caller_maps_back_to_its_own_mids() -> TestResult {
-    let mut rtc = relayed_peer()?;
-    let (mids, offer, pending) = one_to_one_offer(&mut rtc)?;
+    let peer = Peer::new()?;
+    let offer = four_line_offer(&peer)?;
+    let offered = offer.to_sdp_string();
     let mut session = video_session();
     session.write_offer(&offer).unwrap();
-    rtc.sdp_api()
-        .accept_answer(pending, session.read_answer(&captured("callee_answer")?).unwrap())
+    peer.accept_answer(session.read_answer(&captured("callee_answer")?).unwrap())
         .unwrap();
 
     let renegotiation = session.read_offer(&captured("callee_renegotiation_offer")?).unwrap();
 
     let text = renegotiation.to_sdp_string();
     let parts = sections(&text);
-    assert_eq!(value(&parts[2], "mid"), Some(mids[1].to_string().as_str()), "{text}");
-    let answer = rtc.sdp_api().accept_offer(renegotiation).unwrap();
+    assert_eq!(value(&parts[2], "mid"), mids(&sections(&offered))[1], "{text}");
+    let answer = peer.accept_offer(renegotiation).unwrap();
     let ngc = session.write_answer(&answer).unwrap();
     assert_eq!(value(&sections(ngc.as_str())[2], "mid"), Some("1"));
     Ok(())
@@ -548,18 +599,16 @@ fn a_renegotiation_offered_to_the_caller_maps_back_to_its_own_mids() -> TestResu
 
 #[test]
 fn a_renegotiation_offered_by_us_keeps_the_numbering() -> TestResult {
-    let mut rtc = relayed_peer()?;
-    let (mids, offer, pending) = one_to_one_offer(&mut rtc)?;
+    // the camera's track is on the main video line from the first offer on, sending nothing until the camera turns
+    let peer = Peer::with_video()?;
+    let offer = four_line_offer(&peer)?;
     let mut session = NgcSession::new();
     session.write_offer(&offer).unwrap();
-    rtc.sdp_api()
-        .accept_answer(pending, session.read_answer(&captured("callee_answer")?).unwrap())
+    peer.accept_answer(session.read_answer(&captured("callee_answer")?).unwrap())
         .unwrap();
 
-    // the camera comes on: the main video line sends too
-    let mut change = rtc.sdp_api();
-    change.set_direction(mids[1], Direction::SendRecv);
-    let (offer, pending) = change.apply().unwrap();
+    // the camera comes on: the renegotiation offers the main video line as it is, sending
+    let offer = peer.offer_video(true)?.ok_or("an offer")?;
     let ngc = session.write_offer(&offer).unwrap();
 
     let ours = sections(ngc.as_str());
@@ -571,20 +620,17 @@ fn a_renegotiation_offered_by_us_keeps_the_numbering() -> TestResult {
         "the camera's stream named as Teams names it"
     );
     let answer = session.read_answer(&captured("caller_renegotiation_answer")?).unwrap();
-    rtc.sdp_api().accept_answer(pending, answer).unwrap();
+    peer.accept_answer(answer).unwrap();
     Ok(())
 }
 
 #[test]
 fn the_mixers_renegotiation_is_read_and_answered() -> TestResult {
-    let mut rtc = relayed_peer()?;
-    let mut session = NgcSession::new();
-    let offer = session.read_offer(&captured("mixer_offer")?).unwrap();
-    let answer = rtc.sdp_api().accept_offer(offer).unwrap();
-    session.write_answer(&answer).unwrap();
+    let peer = Peer::new()?;
+    let mut session = mixer_session(&peer, VideoLines::None)?;
 
     let renegotiation = session.read_offer(&captured("mixer_renegotiation_offer")?).unwrap();
-    let answer = rtc.sdp_api().accept_offer(renegotiation).unwrap();
+    let answer = peer.accept_offer(renegotiation).unwrap();
     let ngc = session.write_answer(&answer).unwrap();
 
     assert_eq!(sections(ngc.as_str()).len(), 14);
@@ -593,21 +639,33 @@ fn the_mixers_renegotiation_is_read_and_answered() -> TestResult {
 
 #[test]
 fn a_line_we_add_in_a_group_call_is_numbered_past_the_mixers_mids() -> TestResult {
-    let mut rtc = relayed_peer()?;
-    let mut session = mixer_session(&mut rtc)?;
+    // an audio-only group call (every video line of the mixer's rejected): our camera comes on as a line of its own
+    let peer = Peer::with_video()?;
+    let mut session = mixer_session(&peer, VideoLines::None)?;
+    let offer = peer.offer_video(true)?.ok_or("an offer")?;
+    let standard = offer.to_sdp_string();
+    let camera_place = sections(&standard)
+        .iter()
+        .position(|section| section[0].starts_with("m=video ") && !section[0].starts_with("m=video 0 "))
+        .ok_or("the camera's line in libwebrtc's offer")?;
+    let camera = value(&sections(&standard)[camera_place], "mid")
+        .ok_or("the camera line's mid")?
+        .to_owned();
 
-    // our camera comes on as a line of its own
-    let mut change = rtc.sdp_api();
-    let camera = change.add_media(MediaKind::Video, Direction::SendOnly, None, None, None);
-    let (offer, pending) = change.apply().ok_or("no offer")?;
     let ngc = session.write_offer(&offer).unwrap();
 
     let ours = sections(ngc.as_str());
     let named = mids(&ours);
-    assert_eq!(named.len(), 14, "{}", ngc.as_str());
-    assert_eq!(named[13], Some("14"), "one past the mixer's highest mid");
-    // the lines in use are named once each (the mixer's other video lines, which the call doesn't take, are written
-    // rejected, naming no mid)
+    assert_eq!(
+        named[camera_place - 1],
+        Some("14"),
+        "one past the mixer's highest mid:\n{}",
+        ngc.as_str()
+    );
+    assert_eq!(value(&ours[camera_place], "label"), Some("main-video"));
+    assert!(ours[camera_place].contains(&"a=sendrecv"), "{:?}", ours[camera_place]);
+    // the lines in use are named once each (the mixer's video lines the call doesn't take are written rejected,
+    // naming no mid)
     for (place, mid) in named.iter().enumerate().filter(|(_, mid)| mid.is_some()) {
         assert_eq!(
             named.iter().filter(|other| *other == mid).count(),
@@ -622,49 +680,35 @@ fn a_line_we_add_in_a_group_call_is_numbered_past_the_mixers_mids() -> TestResul
         .collect();
     assert_eq!(bundle.len(), named.iter().flatten().count());
     assert_eq!(bundle.iter().filter(|mid| **mid == "14").count(), 1);
-    assert_eq!(
-        bundle.iter().filter(|mid| **mid == "2").count(),
-        1,
-        "the main video line the call took"
-    );
-    assert_eq!(value(&ours[14], "label"), Some("main-video"));
 
-    // the mixer's answer to it, made from its later lines in `sdp-ngc-1.0` (its own ICE credentials and
-    // `a=setup:passive`), with one more for the camera, which it receives
-    let mut answer = sections(captured_text("mixer_renegotiation_offer")?);
-    for line in &mut answer[0] {
-        if line.starts_with("a=group:BUNDLE ") {
-            *line = "a=group:BUNDLE 1 2 5 6 7 8 9 10 11 12 13 3 4 14";
-        }
-    }
-    let camera_answer: Vec<&str> = answer[2]
-        .iter()
-        .map(|line| match *line {
-            "a=mid:2" => "a=mid:14",
-            "a=sendrecv" | "a=sendonly" | "a=inactive" => "a=recvonly",
-            other => other,
-        })
-        .collect();
-    answer.push(camera_answer);
-    let read = session.read_answer(&NgcSdp::new(SDP_NGC, &joined(&answer))?).unwrap();
+    // a far end taking every line as offered answers it, and its answer goes back to the camera's own line
+    let far = Peer::new()?;
+    let mut theirs = NgcSession::new();
+    theirs.set_video(VideoLines::Offered);
+    let answer = far.accept_offer(theirs.read_offer(&ngc)?)?;
+    let answer = theirs.write_answer(&answer)?;
+    let read = session.read_answer(&answer).unwrap();
 
     let text = read.to_sdp_string();
     let parts = sections(&text);
-    assert_eq!(parts.len(), 15, "{text}");
     assert_eq!(
-        value(&parts[14], "mid"),
-        Some(camera.to_string().as_str()),
-        "the camera's answer goes to the camera's line"
+        value(&parts[camera_place], "mid"),
+        Some(camera.as_str()),
+        "the camera's answer goes to the camera's line:\n{text}"
     );
-    assert_eq!(value(&parts[2], "mid"), Some("2"), "the mixer's line stays its own");
-    rtc.sdp_api().accept_answer(pending, read).unwrap();
+    assert_eq!(
+        value(&parts[1], "mid"),
+        Some("1"),
+        "the mixer's audio line stays its own"
+    );
+    peer.accept_answer(read).unwrap();
     Ok(())
 }
 
 #[test]
 fn a_rejected_line_without_a_mid_in_a_mixers_renegotiation_is_the_line_at_its_place() -> TestResult {
-    let mut rtc = relayed_peer()?;
-    let mut session = mixer_session(&mut rtc)?;
+    let peer = Peer::new()?;
+    let mut session = mixer_session(&peer, VideoLines::Main { sending: true })?;
 
     // the mixer's renegotiation with its sharing line (mid 3, at place 11) rejected, named only by its label
     let mut parts = sections(captured_text("mixer_renegotiation_offer")?);
@@ -689,7 +733,7 @@ fn a_rejected_line_without_a_mid_in_a_mixers_renegotiation_is_the_line_at_its_pl
         1,
         "the camera line keeps mid 11 to itself"
     );
-    let answer = rtc.sdp_api().accept_offer(offer).unwrap();
+    let answer = peer.accept_offer(offer).unwrap();
     let ngc = session.write_answer(&answer).unwrap();
     assert_eq!(sections(ngc.as_str()).len(), 14);
     Ok(())
@@ -697,14 +741,14 @@ fn a_rejected_line_without_a_mid_in_a_mixers_renegotiation_is_the_line_at_its_pl
 
 #[test]
 fn our_offer_names_no_line_naming_header_extension_and_our_answer_keeps_the_offers() -> TestResult {
-    // seen live (M3 Task 16): str0m's packets carry its own mid, which Teams' dialect renames; a web client that
-    // answered an offer naming the mid extension dropped every packet of ours
-    let mut rtc = relayed_peer()?;
-    let (_, offer, _) = audio_offer(&mut rtc)?;
+    // seen live (M3 Task 16): our packets carry our own mid, which Teams' dialect renames; a web client that answered
+    // an offer naming the mid extension dropped every packet of ours
+    let peer = Peer::new()?;
+    let offer = peer.offer_audio()?;
     let standard = offer.to_sdp_string();
     assert!(
         standard.contains("urn:ietf:params:rtp-hdrext:sdes:mid"),
-        "str0m offers it"
+        "libwebrtc offers it"
     );
     let ngc = NgcSession::new().write_offer(&offer)?;
     for uri in ["sdes:mid", "sdes:rtp-stream-id", "sdes:repaired-rtp-stream-id"] {
@@ -712,12 +756,12 @@ fn our_offer_names_no_line_naming_header_extension_and_our_answer_keeps_the_offe
     }
     assert!(ngc.as_str().contains("abs-send-time"), "the other extensions stay");
     // answering an offer that names it, it stays: our answer names the offer's own mids
-    let mut answerer = relayed_peer()?;
+    let answerer = Peer::new()?;
     let mut session = NgcSession::new();
     let invitation = captured("invitation_offer")?;
     let read = session.read_offer(&invitation)?;
     let offered_mid = invitation.as_str().contains("sdes:mid");
-    let answer = answerer.sdp_api().accept_offer(read)?;
+    let answer = answerer.accept_offer(read)?;
     let written = session.write_answer(&answer)?;
     assert_eq!(
         written.as_str().contains("sdes:mid"),
@@ -757,21 +801,13 @@ fn a_rejected_line_may_name_any_profile_and_a_line_in_use_only_teams_own() -> Te
 
 #[test]
 fn an_audio_only_answer_to_the_mixer_names_a_format_on_each_rejected_video_line() -> TestResult {
-    // the native peer has no video yet: str0m rejects every video line, naming no format, and the dialect writes the
-    // web client's static `34`, never an m-line without a format (the mixer refuses that: `SdpParsingFailure`)
-    let mut rtc = Rtc::builder()
-        .set_crypto_provider(Arc::new(str0m::crypto::from_feature_flags()))
-        .clear_codecs()
-        .enable_opus(true, false)
-        .build(Instant::now());
-    rtc.add_local_candidate(Candidate::relayed(
-        RELAYED.parse()?,
-        RELAY_BASE.parse()?,
-        Protocol::Udp,
-    )?);
+    // an audio-only call: every video line read rejected, and libwebrtc answers each one rejected; the dialect writes
+    // the web client's static `34` on each, never an m-line without a format (the mixer refuses that:
+    // `SdpParsingFailure`)
+    let peer = Peer::new()?;
     let mut session = NgcSession::new();
     let offer = session.read_offer(&captured("mixer_offer")?)?;
-    let answer = rtc.sdp_api().accept_offer(offer)?;
+    let answer = peer.accept_offer(offer)?;
     let ngc = session.write_answer(&answer)?;
     let parts = sections(ngc.as_str());
     assert_eq!(parts.len(), 14);
@@ -806,11 +842,11 @@ fn a_browsers_sdp_is_refused_where_teams_dialect_is_required() -> TestResult {
             "a browser's SDP as it is"
         );
     }
-    let mut rtc = relayed_peer()?;
-    let (_, offer, _) = audio_offer(&mut rtc)?;
+    let peer = Peer::new()?;
+    let offer = peer.offer_audio()?;
     assert!(
         NgcSdp::new(SDP_NGC, &offer.to_sdp_string()).is_err(),
-        "str0m's as it is"
+        "libwebrtc's as it is"
     );
     assert!(
         NgcSdp::new(SDP_NGC, "m=audio 50000 RTP/SAVP 111\r\n").is_err(),
@@ -841,13 +877,32 @@ fn a_browsers_sdp_is_refused_where_teams_dialect_is_required() -> TestResult {
     Ok(())
 }
 
+/// libwebrtc's offer with each candidate's line changed by `edit` (`None`: left out).
+fn with_candidates(offer: &SdpOffer, edit: impl Fn(&str) -> Option<String>) -> TestResult<SdpOffer> {
+    let text = offer.to_sdp_string();
+    let edited: Vec<String> = text
+        .split("\r\n")
+        .filter_map(|line| {
+            if line.starts_with("a=candidate:") {
+                edit(line)
+            } else {
+                Some(line.to_owned())
+            }
+        })
+        .collect();
+    Ok(SdpOffer::from_sdp_string(&edited.join("\r\n"))?)
+}
+
 #[test]
 fn a_local_address_never_goes_out() -> TestResult {
-    let mut rtc = Rtc::builder()
-        .set_crypto_provider(Arc::new(str0m::crypto::from_feature_flags()))
-        .build(Instant::now());
-    rtc.add_local_candidate(Candidate::host("192.0.2.60:40000".parse().unwrap(), Protocol::Udp).unwrap());
-    let (_, offer, _) = audio_offer(&mut rtc)?;
+    // the peer gathers relayed candidates only: a host candidate written into its offer stands for one that slipped
+    let peer = Peer::new()?;
+    let offer = with_candidates(&peer.offer_audio()?, |line| {
+        let mut fields: Vec<&str> = line.split(' ').take(6).collect();
+        fields[4] = "192.0.2.60";
+        Some(format!("{} typ host", fields.join(" ")))
+    })?;
+    assert!(offer.as_str().contains(" typ host"), "{}", offer.as_str());
 
     let error = NgcSession::new().write_offer(&offer).unwrap_err();
 
@@ -857,10 +912,8 @@ fn a_local_address_never_goes_out() -> TestResult {
 
 #[test]
 fn an_offer_without_a_relayed_candidate_is_unwritable() -> TestResult {
-    let mut rtc = Rtc::builder()
-        .set_crypto_provider(Arc::new(str0m::crypto::from_feature_flags()))
-        .build(Instant::now());
-    let (_, offer, _) = audio_offer(&mut rtc)?;
+    let peer = Peer::new()?;
+    let offer = with_candidates(&peer.offer_audio()?, |_| None)?;
 
     let error = NgcSession::new().write_offer(&offer).unwrap_err();
 
@@ -885,9 +938,9 @@ fn the_sdp_never_shows_in_debug() -> TestResult {
 
 #[test]
 fn every_captured_answer_reads_as_an_answer() -> TestResult {
-    // `SdpAnswer` and `SdpOffer` are str0m's parse: the conversion of each captured form must be one it takes
-    let mut rtc = relayed_peer()?;
-    let (_, offer, _) = one_to_one_offer(&mut rtc)?;
+    // `SdpAnswer` and `SdpOffer` are libwebrtc's parse: the conversion of each captured form must be one it takes
+    let peer = Peer::new()?;
+    let offer = four_line_offer(&peer)?;
     let mut session = NgcSession::new();
     session.write_offer(&offer).unwrap();
     for name in ["callee_answer", "caller_renegotiation_answer", "renegotiation_answer"] {

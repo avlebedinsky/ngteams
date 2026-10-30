@@ -10,14 +10,11 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use teams_media::devices::file::{AudioInput, FileDevices, Pacing, PatternCamera};
-use teams_media::peer::RelayedPeer;
 use teams_media::processing::ProcessingConfig;
-use teams_media::relay::{RelayLink, RelayOptions, RelayServer};
 use teams_media::sdp::{NgcSdp, NgcSession, SDP_NGC};
 use teams_media::session::{MediaSession, SessionConfig, SessionEvent};
-use teams_media::test_turn::{PASSWORD, TurnServer, USER};
+use teams_media::test_turn::TurnServer;
 use teams_media::tone::Tone;
-use teams_media::turn::{Credentials, Transport};
 use teams_mock::media::LoopbackPeer;
 
 /// How long ICE and DTLS may take through the relay on a loaded machine.
@@ -43,22 +40,13 @@ fn devices(tone: Tone, recording: &Path) -> FileDevices {
     }
 }
 
-/// The native client's session behind its own allocation on `turn`.
+/// The native client's session relayed through `turn`.
 fn native(turn: &TurnServer, devices: &FileDevices) -> MediaSession {
-    let server = RelayServer {
-        addr: turn.udp,
-        transport: Transport::Udp,
-    };
-    let credentials = Credentials {
-        username: USER.into(),
-        password: PASSWORD.into(),
-    };
-    let link = RelayLink::allocate(server, credentials, &RelayOptions::default()).unwrap();
+    let relay = teams_media::test_turn::relay(turn.udp);
     let config = SessionConfig {
         processing: ProcessingConfig::OFF,
-        ..SessionConfig::default()
     };
-    MediaSession::start(RelayedPeer::new(Instant::now(), link).unwrap(), devices, config).unwrap()
+    MediaSession::start(&relay, devices, config).unwrap()
 }
 
 fn connected(session: &MediaSession) {

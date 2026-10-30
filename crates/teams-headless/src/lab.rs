@@ -30,7 +30,6 @@ use teams_fence::{Fence, Mri, OpenError};
 use teams_media::devices::file::{AudioInput, FileDevices, FrameCounter, FrameCounts, Pacing, PatternCamera};
 use teams_media::devices::{AudioSink, AudioSource, DeviceError, Devices, VideoSink, VideoSource};
 use teams_media::processing::ProcessingConfig;
-use teams_media::relay::RelayOptions;
 use teams_media::session::SessionConfig;
 use teams_store::{Store, StoreError};
 
@@ -312,10 +311,8 @@ pub fn call_media(devices: impl Devices + Send + Sync + 'static, relay: Relay) -
     CallMedia {
         devices: Arc::new(devices),
         relay,
-        relay_options: RelayOptions::default(),
         session: SessionConfig {
             processing: ProcessingConfig::OFF,
-            ..SessionConfig::default()
         },
         video: None,
     }

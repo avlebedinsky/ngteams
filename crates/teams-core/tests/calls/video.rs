@@ -13,7 +13,7 @@ use teams_mock::{AB_CHAT, ECHO, LAB_A, LAB_B, LAB_C};
 /// Frames a side must have decoded of the other's test pattern.
 const FRAMES: u64 = 20;
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_camera_goes_on_by_the_account_s_action_and_both_ways_carry_video() {
     let lab = Lab::start().await;
     let mut b = lab.account(LAB_B, B_TONE).await;
@@ -65,7 +65,7 @@ async fn the_camera_goes_on_by_the_account_s_action_and_both_ways_carry_video() 
     assert!(b.log.denials().is_empty(), "{:#?}", b.log.denials());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_test_call_s_camera_goes_on_as_a_one_to_one_call_s_and_shows_the_self_view() {
     let lab = Lab::start().await;
     let mut a = lab.account(LAB_A, A_TONE).await;
@@ -108,7 +108,7 @@ async fn the_test_call_s_camera_goes_on_as_a_one_to_one_call_s_and_shows_the_sel
     assert!(a.log.denials().is_empty(), "{:#?}", a.log.denials());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_far_end_s_video_is_shown_while_the_camera_stays_off() {
     let lab = Lab::start().await;
     let mut b = lab.account(LAB_B, B_TONE).await;
@@ -141,7 +141,7 @@ async fn the_far_end_s_video_is_shown_while_the_camera_stays_off() {
     assert!(b.log.denials().is_empty(), "{:#?}", b.log.denials());
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn native_ends_turn_their_cameras_on_and_each_shows_the_other_s() {
     let lab = Lab::start().await;
     let mut a = lab.account(LAB_A, A_TONE).await;

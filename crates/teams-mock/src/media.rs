@@ -1,6 +1,6 @@
 //! The loopback media peer (the `media` feature, M3 Task 13): the far end of a call's media on loopback, for the
 //! calls that have no native client at their other end (the test call's media controller, a caller or a callee the
-//! mock plays). It is a `teams-media` session on the file backend behind its own allocation on a loopback TURN server
+//! mock plays). It is a `teams-media` session on the file backend relayed through a loopback TURN server
 //! (`teams_media::test_turn`), speaking Teams' dialect as the call controller and media controller do: it answers an
 //! offer in `sdp-ngc-1.0` and offers in it, and takes the answer to its offer (`teams_media::sdp::NgcSession` keeping
 //! the lines' two namings for the call's life). With the feature on, the calling service puts one behind its answers
@@ -10,7 +10,7 @@
 //!
 //! **Video** (M3 Task 18): a peer takes the main video line it is offered and sends its camera (the file backend's
 //! test pattern) on it once a video line is in use, its decoded frames counted in its stats; it offers video of its
-//! own in a renegotiation ([`LoopbackPeer::video_offer`]). H.264 is OpenH264's, as in every build.
+//! own in a renegotiation ([`LoopbackPeer::video_offer`]). Its media is libwebrtc's, as the native client's.
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -24,13 +24,10 @@ use teams_media::devices::file::FrameCounter;
 use teams_media::devices::{
     AudioFrame, AudioSink, AudioSource, DeviceError, Devices, FRAME_DURATION, FRAME_SAMPLES, VideoSource,
 };
-use teams_media::peer::RelayedPeer;
 use teams_media::processing::ProcessingConfig;
-use teams_media::relay::{RelayLink, RelayOptions, RelayServer};
 use teams_media::sdp::{NgcSdp, NgcSession, SdpError, VideoLines};
 use teams_media::session::{MediaSession, SessionConfig, SessionEvent, SessionStats, VideoParts};
-use teams_media::test_turn::{PASSWORD, TurnServer, USER};
-use teams_media::turn::{Credentials, Transport};
+use teams_media::test_turn::TurnServer;
 use teams_media::video::codec::EncoderSettings;
 use teams_media::video::convert::MaxSize;
 
@@ -58,7 +55,7 @@ impl fmt::Debug for LoopbackPeer {
 }
 
 impl LoopbackPeer {
-    /// A peer behind its own UDP allocation on `turn`, its media on `devices`, its microphone unprocessed (a test's
+    /// A peer relayed over UDP through `turn`, its media on `devices`, its microphone unprocessed (a test's
     /// steady tone goes out as it is).
     ///
     /// # Errors
@@ -72,20 +69,11 @@ impl LoopbackPeer {
     /// # Errors
     /// [`PeerError::Media`] when the allocation or the session can't be made.
     pub fn start_at(turn: SocketAddr, devices: &dyn Devices) -> Result<Self, PeerError> {
-        let server = RelayServer {
-            addr: turn,
-            transport: Transport::Udp,
-        };
-        let credentials = Credentials {
-            username: USER.into(),
-            password: PASSWORD.into(),
-        };
-        let link = RelayLink::allocate(server, credentials, &RelayOptions::default())?;
+        let relay = teams_media::test_turn::relay(turn);
         let config = SessionConfig {
             processing: ProcessingConfig::OFF,
-            ..SessionConfig::default()
         };
-        let session = MediaSession::start(RelayedPeer::new(Instant::now(), link)?, devices, config)?;
+        let session = MediaSession::start(&relay, devices, config)?;
         session.start_video(VideoParts {
             encoder: EncoderSettings::default(),
             max_size: MaxSize::HD,
@@ -145,7 +133,7 @@ impl LoopbackPeer {
         Ok(self.dialect.write_offer(&offer)?)
     }
 
-    /// Its offer of the running call's media again (an ICE restart, `MediaSession::reoffer`), in `sdp-ngc-1.0`: a
+    /// Its offer of the running call's media again (`MediaSession::reoffer`, its lines as they are), in `sdp-ngc-1.0`: a
     /// renegotiation of its own.
     ///
     /// # Errors

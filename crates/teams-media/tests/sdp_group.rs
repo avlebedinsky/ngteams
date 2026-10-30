@@ -1,4 +1,4 @@
-//! A group call's video lines in Teams' dialect (M3 Task 19), through the call's own peer: the mixer's offer
+//! A group call's video lines in Teams' dialect (M3 Task 19), through the call's own media session (libwebrtc): the mixer's offer
 //! (`sdp-ngc-0.5`, the captured shape) read with [`VideoLines::Group`], and our group offer.
 //!
 //! - The callee's answer takes the main video line and up to the slots' count of the other video lines both ways (as
@@ -13,13 +13,24 @@
 //! - A line we send nothing on (a 1:1 call's main line while the camera is off) names the stream `1` and no media
 //!   stream, as the web client's receive-only lines.
 
-use std::time::Instant;
+// test code throughout (its helpers unwrap like the tests do)
+#![cfg(test)]
+
+#[expect(
+    dead_code,
+    reason = "the helpers of tests/session.rs, of which these tests take the relay"
+)]
+mod support;
 
 use serde_json::Value;
-use str0m::Candidate;
-use str0m::net::Protocol;
-use teams_media::peer::Peer;
+use teams_media::devices::VideoSink;
+use teams_media::devices::file::FrameCounter;
+use teams_media::processing::ProcessingConfig;
 use teams_media::sdp::{NgcSdp, NgcSession, VideoLines};
+use teams_media::session::{MediaSession, SessionConfig, VideoParts};
+use teams_media::test_turn::TurnServer;
+use teams_media::video::codec::EncoderSettings;
+use teams_media::video::convert::MaxSize;
 
 const FIXTURE: &str = include_str!("fixtures/sdp/captured.json");
 
@@ -32,13 +43,28 @@ fn captured(name: &str) -> TestResult<NgcSdp> {
     Ok(NgcSdp::new(content_type, blob)?)
 }
 
-fn peer(port: u16) -> TestResult<Peer> {
-    let candidate = Candidate::relayed(
-        format!("192.0.2.50:{port}").parse()?,
-        "0.0.0.0:41000".parse()?,
-        Protocol::Udp,
-    )?;
-    Ok(Peer::with_candidate(Instant::now(), candidate)?)
+/// A call's media session behind a loopback TURN server of its own (its only candidates relayed), its video started:
+/// the camera's track on the main video line, off. The session goes before its relay.
+struct Peer {
+    session: MediaSession,
+    _turn: TurnServer,
+}
+
+impl Peer {
+    fn new() -> TestResult<Self> {
+        let turn = TurnServer::start()?;
+        let config = SessionConfig {
+            processing: ProcessingConfig::OFF,
+        };
+        let session = MediaSession::start_without_devices(&support::relay(&turn), config)?;
+        session.start_video(VideoParts {
+            encoder: EncoderSettings::default(),
+            max_size: MaxSize::HD,
+            remote: Box::new(|_| Box::new(FrameCounter::new()) as Box<dyn VideoSink>),
+            preview: None,
+        })?;
+        Ok(Self { session, _turn: turn })
+    }
 }
 
 /// The media sections of an SDP, as lines.
@@ -63,10 +89,9 @@ fn value<'a>(section: &[&'a str], name: &str) -> Option<&'a str> {
 fn mixer_answer(slots: usize) -> TestResult<(NgcSession, String)> {
     let mut session = NgcSession::new();
     session.set_video(VideoLines::Group { slots });
-    let mut peer = peer(50000)?;
-    peer.take_slots();
+    let peer = Peer::new()?;
     let offer = session.read_offer(&captured("mixer_offer")?)?;
-    let answer = peer.accept_offer(offer)?;
+    let answer = peer.session.accept_offer(offer)?;
     let text = session.write_answer(&answer)?.as_str().to_owned();
     Ok((session, text))
 }
@@ -155,8 +180,8 @@ fn the_lines_are_described_as_the_web_client_describes_them() -> TestResult {
 fn our_group_offer_is_the_web_client_s_kind() -> TestResult {
     let mut session = NgcSession::new();
     session.set_video(VideoLines::Group { slots: 9 });
-    let mut peer = peer(50002)?;
-    let (offer, _pending) = peer.offer_group(9)?;
+    let peer = Peer::new()?;
+    let offer = peer.session.offer_group(9)?;
     let text = session.write_offer(&offer)?.as_str().to_owned();
     let lines = sections(&text);
     assert_eq!(lines.len(), 13, "{text}");
@@ -195,9 +220,9 @@ fn a_line_we_send_nothing_on_names_the_stream_one_as_the_web_client_s() -> TestR
     // a 1:1 call's main line while the camera is off: receive-only
     let mut session = NgcSession::new();
     session.set_video(VideoLines::Main { sending: false });
-    let mut peer = peer(50004)?;
+    let peer = Peer::new()?;
     let offer = session.read_offer(&captured("caller_renegotiation_offer")?)?;
-    let answer = peer.accept_offer(offer)?;
+    let answer = peer.session.accept_offer(offer)?;
     let text = session.write_answer(&answer)?.as_str().to_owned();
     let lines = sections(&text);
     let video = lines

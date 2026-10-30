@@ -1,4 +1,4 @@
-//! Teams' SDP dialect, `application/sdp-ngc-1.0`, to and from the standard SDP `str0m` speaks
+//! Teams' SDP dialect, `application/sdp-ngc-1.0`, to and from the standard SDP libwebrtc speaks
 //! (`docs/protocol/calling.md`, "The SDP dialect").
 //!
 //! The call controller and the media controller take and give offers and answers only in their own dialect (a
@@ -16,13 +16,13 @@
 //!   is refused ([`SdpError::LocalCandidate`]).
 //! - **Their side, read** ([`NgcSession::read_answer`], [`NgcSession::read_offer`]): back to the standard
 //!   transports; Teams' own attributes, labels, `a=rtcp`, SDES keys (`a=crypto`, the mixer's) and every attribute
-//!   `str0m` has no use for dropped; `a=rtcp-fb:*` written out per payload type (without Teams' `x-message`);
+//!   libwebrtc has no use for dropped; `a=rtcp-fb:*` written out per payload type (without Teams' `x-message`);
 //!   backslashes in extension URIs turned back; candidates kept for component 1 over UDP only, Teams' own extensions
 //!   (`MTURNID`) dropped; an `a=ssrc` (with a cname) added from `a=x-ssrc-range` or `a=ssrc-group` where the line
 //!   names none, as the web client does; what a line leaves out (the mixer's lines name no `a=setup`) taken from the
-//!   bundle's first line; an offer's `a=setup:actpass` (or none) is read as `passive`, so that
-//!   `str0m` answers `active`, the DTLS client, as the web client does.
-//! - **Mids**: `str0m` names its m-lines with mids of its own; Teams' lines are numbered (`0`, `1`, … in our offers;
+//!   bundle's first line; an offer that names no `a=setup` (the mixer's) is read as `actpass`, so that libwebrtc
+//!   answers `active`, the DTLS client, as the web client does (and keeps the call's role in a renegotiation).
+//! - **Mids**: libwebrtc names its m-lines with mids of its own; Teams' lines are numbered (`0`, `1`, … in our offers;
 //!   the mixer numbers its lines from `1` and out of line order). The session keeps the pairs for the whole call, so
 //!   a renegotiation offered by either side names the same lines, and keeps each line's label; a line new to the call
 //!   is numbered one past the highest number the session has.
@@ -31,17 +31,19 @@
 //!   is `applicationsharing-video`, as in the web client's 1:1 and group offers.
 //!
 //! - **Video** ([`NgcSession::set_video`], [`VideoLines`]): which of an offer's video lines the call takes is the
-//!   session's to say before `str0m` sees it: an audio-only call (a group call's, until it takes video) reads every
-//!   video line as rejected, so `str0m` answers each one rejected as an audio-only client does; a 1:1 call takes its
+//!   session's to say before libwebrtc sees it: an audio-only call (a group call's, until it takes video) reads every
+//!   video line as rejected, so libwebrtc answers each one rejected as an audio-only client does; a 1:1 call takes its
 //!   main video line (the first one that isn't the sharing line, then the same line for the call's life) and reads
 //!   the others rejected. While our camera is off, the line taken is read as one the far end only sends on (its
-//!   `sendrecv` as `sendonly`, its `recvonly` as `inactive`), so `str0m` answers that we only receive.
+//!   `sendrecv` as `sendonly`, its `recvonly` as `inactive`), so libwebrtc answers that we only receive, and our own
+//!   offer writes that line `recvonly` (the camera's track stays on it, sending nothing). A group call's main and
+//!   receiving lines are answered both ways, as the web client answers them, whichever way libwebrtc took them.
 //!
-//! A browser's SDP (or `str0m`'s as it is) is refused where the dialect is required ([`NgcSdp::new`]).
+//! A browser's SDP (or libwebrtc's as it is) is refused where the dialect is required ([`NgcSdp::new`]).
 
 use std::fmt;
 
-use str0m::change::{SdpAnswer, SdpOffer};
+use crate::rtc::{SdpAnswer, SdpOffer};
 
 /// The content type of Teams' SDP dialect: every offer and answer the native client sends, and what the call
 /// controller and the media controller hand back.
@@ -57,7 +59,7 @@ const BACKSLASHED: [&str; 2] = [
 ];
 
 /// The attributes of an audio or video line the standard side keeps; everything else is Teams' own (or of no use to
-/// `str0m`) and is dropped.
+/// libwebrtc) and is dropped.
 const KEPT_RTP: [&str; 21] = [
     "rtpmap",
     "fmtp",
@@ -148,15 +150,15 @@ pub enum SdpError {
     /// The `contentType` names neither of Teams' dialects.
     #[error("not one of Teams' SDP dialects: content type {0:?}")]
     ContentType(String),
-    /// The blob isn't an SDP in Teams' dialect (a browser's or `str0m`'s, or not an SDP at all).
+    /// The blob isn't an SDP in Teams' dialect (a browser's or libwebrtc's, or not an SDP at all).
     #[error("not an SDP in Teams' dialect: {0}")]
     NotNgc(&'static str),
     /// A line in use isn't on Teams' profile (`RTP/SAVP`; the mixer's dialect also `RTP/AVP`): a browser's SDP, or a
     /// form no capture showed. Its kind, port and profile, nothing else of it.
     #[error("not an SDP in Teams' dialect: a {media} line on port {port} is on {proto}, not RTP/SAVP")]
     Profile { media: String, port: String, proto: String },
-    /// `str0m`'s SDP can't be written in Teams' dialect.
-    #[error("str0m's SDP can't be written in Teams' dialect: {0}")]
+    /// libwebrtc's SDP can't be written in Teams' dialect.
+    #[error("libwebrtc's SDP can't be written in Teams' dialect: {0}")]
     Unwritable(&'static str),
     /// An offer or answer of ours would carry a local address: only relayed candidates go out.
     #[error("only relayed candidates go out, not a {0} candidate (a local address)")]
@@ -164,8 +166,8 @@ pub enum SdpError {
     /// An answer names lines of an offer we never made, or our answer lines of an offer we never read.
     #[error("the m-lines don't match the offer: {0}")]
     Mismatch(&'static str),
-    /// `str0m` refused the standard SDP the conversion produced.
-    #[error("str0m refused the SDP: {0}")]
+    /// libwebrtc refused the standard SDP the conversion produced.
+    #[error("libwebrtc refused the SDP: {0}")]
     Refused(String),
     /// No random source for the data line's SSRC.
     #[error("no random source: {0}")]
@@ -411,7 +413,7 @@ impl Parsed {
         })
     }
 
-    /// Reads `str0m`'s standard SDP.
+    /// Reads libwebrtc's standard SDP.
     fn standard(text: &str) -> Result<Self, SdpError> {
         Self::split(text, |fields| {
             let kind = match (fields.media, fields.proto) {
@@ -456,7 +458,7 @@ fn attribute_name(line: &str) -> Option<&str> {
     Some(rest.split_once(':').map_or(rest, |(name, _)| name))
 }
 
-/// One m-line of a call in both namings: `str0m`'s mid, Teams' mid, and the line's label; `ours` when an offer of
+/// One m-line of a call in both namings: libwebrtc's mid, Teams' mid, and the line's label; `ours` when an offer of
 /// ours added it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Line {
@@ -495,7 +497,7 @@ enum Taken {
     Offered,
 }
 
-/// One call's media session as Teams' dialect sees it: the pairs of `str0m`'s and Teams' mids for every m-line and
+/// One call's media session as Teams' dialect sees it: the pairs of libwebrtc's and Teams' mids for every m-line and
 /// each line's label, kept for the call's life so that a renegotiation, offered by either side, names the same
 /// lines. On the caller's side our offer numbers the lines; on the callee's side the offer it reads does.
 #[derive(Clone, Debug, Default)]
@@ -509,9 +511,6 @@ pub struct NgcSession {
     slots: Vec<String>,
     /// Each line's stream id (`a=x-source-streamid`) as the far end's last offer or answer named it, by Teams mid.
     stream_ids: Vec<(String, u32)>,
-    /// The payload types our latest offer gave each codec, by `str0m`'s mid: `(codec, payload type)`, the codec as
-    /// its `rtpmap` names it, in lower case.
-    offered: Vec<(String, Vec<(String, String)>)>,
 }
 
 /// Which half of an exchange an SDP is.
@@ -606,7 +605,7 @@ impl NgcSession {
         }
     }
 
-    /// A group call's receiving video lines, in the order the call took them: each line's `str0m` mid and its stream
+    /// A group call's receiving video lines, in the order the call took them: each line's libwebrtc mid and its stream
     /// id (what a source request names it by), when the far end named one.
     #[must_use]
     pub fn video_slots(&self) -> Vec<(String, Option<u32>)> {
@@ -686,7 +685,7 @@ impl NgcSession {
             .to_string()
     }
 
-    /// The place among `parsed`'s sections of the line that becomes the sharing line when `str0m` adds it: the last
+    /// The place among `parsed`'s sections of the line that becomes the sharing line when libwebrtc adds it: the last
     /// video line of an offer with more than one, while the call has no sharing line yet.
     fn sharing_place(&self, parsed: &Parsed) -> Option<usize> {
         if self.lines.iter().any(|line| line.label == SHARING_LABEL) {
@@ -702,8 +701,8 @@ impl NgcSession {
         if video.len() > 1 { video.last().copied() } else { None }
     }
 
-    /// Our offer (`str0m`'s, at a call's start or in a renegotiation) in Teams' dialect, for the start's, a join's or
-    /// a `mediaNegotiation`'s `mediaContent`. A line `str0m` adds is numbered one past the highest number the session
+    /// Our offer (libwebrtc's, at a call's start or in a renegotiation) in Teams' dialect, for the start's, a join's or
+    /// a `mediaNegotiation`'s `mediaContent`. A line libwebrtc adds is numbered one past the highest number the session
     /// has, and labelled as the web client labels a line of its kind (the last video line of an offer with more than
     /// one, while the call has no sharing line, is the sharing line).
     ///
@@ -746,14 +745,13 @@ impl NgcSession {
                 }
             }
             names.push(name);
-            self.offered.retain(|(mid, _)| mid != local);
-            self.offered.push((local.to_owned(), payloads(section)));
         }
+        let parsed = self.directed(parsed, &names, Role::Offer);
         write(&parsed, &names, Role::Offer)
     }
 
     /// Forgets the lines an earlier offer of ours added that `parsed` (our new offer) no longer has: that offer was
-    /// turned away and replaced, so no answer committed them (`str0m` offers every line the session has), and the new
+    /// turned away and replaced, so no answer committed them (libwebrtc offers every line the session has), and the new
     /// offer's lines are numbered and its video line taken as if they had never been offered.
     fn forget_unanswered(&mut self, parsed: &Parsed) {
         let offered = |line: &Line| {
@@ -775,23 +773,14 @@ impl NgcSession {
         }
     }
 
-    /// `section` of an answer to our offer's line `local`, with each codec numbered as our offer numbered it.
-    fn our_numbers(&self, section: &Section, local: &str) -> Section {
-        match self.offered.iter().find(|(mid, _)| mid == local) {
-            Some((_, offered)) => renumbered(section, offered),
-            None => section.clone(),
-        }
-    }
-
-    /// The answer to our offer (the media controller's, or a callee's in a 1:1 call), for `str0m`. A line of an offer
-    /// we never made (the media controller's `m=x-data` to an offer without one) is left out.
-    ///
-    /// A codec the answer numbers otherwise than our offer did is read back with our number (the media controller
-    /// answered Opus offered as `111` with `102`, and sends it as `111`): `str0m` keeps one payload type per codec for
-    /// both ways, and the far end sends us a codec with the number our offer gave it.
+    /// The answer to our offer (the media controller's, or a callee's in a 1:1 call), for libwebrtc. A line of an
+    /// offer we never made (the media controller's `m=x-data` to an offer without one) is left out. A codec the answer
+    /// numbers otherwise than our offer did keeps the answer's number: libwebrtc sends with the answer's numbers and
+    /// takes the far end's media with our offer's, as the web client does (the media controller answers Opus offered as
+    /// `111` with `102`, and the mixer H.264 with `107`).
     ///
     /// # Errors
-    /// [`SdpError::Mismatch`] when no line of the answer is one of ours, [`SdpError::Refused`] when `str0m` refuses
+    /// [`SdpError::Mismatch`] when no line of the answer is one of ours, [`SdpError::Refused`] when libwebrtc refuses
     /// what the conversion made.
     pub fn read_answer(&mut self, answer: &NgcSdp) -> Result<SdpAnswer, SdpError> {
         let parsed = Parsed::ngc(answer.as_str(), answer.dialect())?;
@@ -805,7 +794,7 @@ impl NgcSession {
                 None => None,
             };
             if let Some(line) = line {
-                ours.push((self.our_numbers(section, &line.local), line.local.clone()));
+                ours.push((section.clone(), line.local.clone()));
             }
         }
         let kept: Vec<(&Section, String)> = ours.iter().map(|(section, local)| (section, local.clone())).collect();
@@ -815,16 +804,16 @@ impl NgcSession {
         let text = read(&parsed, &kept, Role::Answer, |mid| {
             self.by_remote(mid).map(|line| line.local.clone())
         });
-        SdpAnswer::from_sdp_string(&text).map_err(|error| SdpError::Refused(error.to_string()))
+        SdpAnswer::from_sdp_string(&text).map_err(SdpError::Refused)
     }
 
-    /// An offer we received (the caller's or the mixer's in an invitation, or a renegotiation), for `str0m`. Lines the
-    /// session knows keep their `str0m` mids; a new line keeps Teams' mid on our side too. A rejected line that names
+    /// An offer we received (the caller's or the mixer's in an invitation, or a renegotiation), for libwebrtc. Lines
+    /// the session knows keep their libwebrtc mids; a new line keeps Teams' mid on our side too. A rejected line that names
     /// no mid is the session's line at its place (or, new to the call, numbered as a line we add).
     ///
     /// # Errors
-    /// [`SdpError::NotNgc`] when a line that isn't rejected names no mid, or one too long for `str0m`;
-    /// [`SdpError::Refused`] when `str0m` refuses what the conversion made.
+    /// [`SdpError::NotNgc`] when a line that isn't rejected names no mid, or one too long for libwebrtc;
+    /// [`SdpError::Refused`] when libwebrtc refuses what the conversion made.
     pub fn read_offer(&mut self, offer: &NgcSdp) -> Result<SdpOffer, SdpError> {
         let parsed = Parsed::ngc(offer.as_str(), offer.dialect())?;
         self.keep_stream_ids(&parsed);
@@ -857,10 +846,10 @@ impl NgcSession {
         let text = read(&parsed, &kept, Role::Offer, |mid| {
             self.by_remote(mid).map(|line| line.local.clone())
         });
-        SdpOffer::from_sdp_string(&text).map_err(|error| SdpError::Refused(error.to_string()))
+        SdpOffer::from_sdp_string(&text).map_err(SdpError::Refused)
     }
 
-    /// Our answer (`str0m`'s) to an offer [`NgcSession::read_offer`] read, in Teams' dialect, for the `accept`'s or a
+    /// Our answer (libwebrtc's) to an offer [`NgcSession::read_offer`] read, in Teams' dialect, for the `accept`'s or a
     /// `mediaAnswer`'s `mediaContent`.
     ///
     /// # Errors
@@ -879,8 +868,60 @@ impl NgcSession {
                     .ok_or(SdpError::Mismatch("the answer has an m-line the offer didn't"))
             })
             .collect::<Result<Vec<_>, _>>()?;
+        let parsed = self.directed(parsed, &names, Role::Answer);
         write(&parsed, &names, Role::Answer)
     }
+
+    /// `parsed` (ours) with each video line going as Teams is to hear it: in an offer, a 1:1 call's main line
+    /// `recvonly` while the camera is off (libwebrtc keeps the camera's track on it, sending nothing); in an answer, a
+    /// group call's main and receiving lines both ways, as the web client answers them (libwebrtc answers a line it has
+    /// no track for receive-only; the mixer refuses that: `410 SdpParsingFailure`).
+    fn directed(&self, mut parsed: Parsed, names: &[Line], role: Role) -> Parsed {
+        for (section, name) in parsed.media.iter_mut().zip(names) {
+            if section.kind != Kind::Video || section.rejected() {
+                continue;
+            }
+            let main = self.video_line.as_deref() == Some(name.remote.as_str());
+            let slot = self.slots.contains(&name.remote);
+            match (role, self.video) {
+                (Role::Offer, VideoLines::Main { sending: false }) if main => directed(section, "recvonly"),
+                // a receiving line sends nothing: both ways, naming no stream of ours, as the web client writes it
+                (_, VideoLines::Group { .. }) if slot => {
+                    directed(section, "sendrecv");
+                    unnamed(section);
+                }
+                (Role::Answer, VideoLines::Group { .. }) if main && section.direction() == Some("recvonly") => {
+                    directed(section, "sendrecv");
+                }
+                _ => {}
+            }
+            // a line we send nothing on names no stream of ours (libwebrtc names the camera's track on it anyway)
+            if matches!(section.direction(), Some("recvonly" | "inactive")) {
+                unnamed(section);
+            }
+        }
+        parsed
+    }
+}
+
+/// `section` going `direction`; a line we send nothing on names no stream of ours.
+fn directed(section: &mut Section, direction: &str) {
+    section.lines.retain(|line| {
+        !["sendrecv", "sendonly", "recvonly", "inactive"]
+            .iter()
+            .any(|d| line == &format!("a={d}"))
+    });
+    if direction == "recvonly" || direction == "inactive" {
+        unnamed(section);
+    }
+    section.lines.push(format!("a={direction}"));
+}
+
+/// `section` naming no stream of ours (its SSRCs and media stream left out).
+fn unnamed(section: &mut Section) {
+    section
+        .lines
+        .retain(|line| !matches!(attribute_name(line), Some("ssrc" | "ssrc-group" | "msid")));
 }
 
 /// A video line the far end offered to send and receive on, read as one it only sends on (our camera is off).
@@ -901,77 +942,9 @@ fn only_theirs(section: &mut Section) {
     }
 }
 
-/// A section's codecs as its `rtpmap` lines number them: `(codec in lower case, payload type)`.
-fn payloads(section: &Section) -> Vec<(String, String)> {
-    section
-        .values("rtpmap")
-        .filter_map(|value| {
-            let (pt, codec) = value.split_once(' ')?;
-            Some((codec.to_ascii_lowercase(), pt.to_owned()))
-        })
-        .collect()
-}
-
-/// `section` with each codec `offered` numbers otherwise renumbered to the offer's number, wherever the section names
-/// it: its m-line, `rtpmap`, `fmtp` (RED's list of payload types too) and `rtcp-fb`. A number the section already
-/// gives another codec is left as it is.
-fn renumbered(section: &Section, offered: &[(String, String)]) -> Section {
-    let answered = payloads(section);
-    let mut renames: Vec<(String, String)> = Vec::new();
-    for (codec, pt) in &answered {
-        let Some((_, ours)) = offered.iter().find(|(key, _)| key == codec) else {
-            continue;
-        };
-        let taken = answered.iter().any(|(_, other)| other == ours) || renames.iter().any(|(_, to)| to == ours);
-        if ours != pt && !taken {
-            renames.push((pt.clone(), ours.clone()));
-        }
-    }
-    if renames.is_empty() {
-        return section.clone();
-    }
-    let rename = |pt: &str| {
-        renames
-            .iter()
-            .find(|(from, _)| from == pt)
-            .map_or(pt, |(_, to)| to.as_str())
-            .to_owned()
-    };
-    let mut out = section.clone();
-    out.formats = section.formats.iter().map(|pt| rename(pt)).collect();
-    out.lines = section
-        .lines
-        .iter()
-        .map(|line| renumbered_line(line, &rename))
-        .collect();
-    out
-}
-
-/// An `rtpmap`, `fmtp` or `rtcp-fb` line with its payload type (and a RED `fmtp`'s list of them) renamed.
-fn renumbered_line(line: &str, rename: &impl Fn(&str) -> String) -> String {
-    for name in ["rtpmap", "fmtp", "rtcp-fb"] {
-        let Some(value) = attribute(line, name) else {
-            continue;
-        };
-        let (pt, rest) = value.split_once(' ').unwrap_or((value, ""));
-        let red = name == "fmtp" && !rest.is_empty() && rest.split('/').all(|part| part.parse::<u8>().is_ok());
-        let rest = if red {
-            rest.split('/').map(rename).collect::<Vec<_>>().join("/")
-        } else {
-            rest.to_owned()
-        };
-        return if rest.is_empty() {
-            format!("a={name}:{}", rename(pt))
-        } else {
-            format!("a={name}:{} {rest}", rename(pt))
-        };
-    }
-    line.to_owned()
-}
-
 // ---- standard → Teams' dialect ----
 
-/// Writes `parsed` (`str0m`'s) in Teams' dialect, each section named by its entry of `names`.
+/// Writes `parsed` (libwebrtc's) in Teams' dialect, each section named by its entry of `names`.
 fn write(parsed: &Parsed, names: &[Line], role: Role) -> Result<NgcSdp, SdpError> {
     let mut foundations = Vec::new();
     let candidates = parsed
@@ -988,12 +961,13 @@ fn write(parsed: &Parsed, names: &[Line], role: Role) -> Result<NgcSdp, SdpError
     write_session(parsed, names, &mut out)?;
     for ((section, name), ours) in parsed.media.iter().zip(names).zip(candidates) {
         if section.rejected() {
-            // a line names at least one format: one `str0m` rejected names none, so it gets the static one the web
-            // client's rejected lines name (`34` for video; `0`, PCMU, for audio)
-            let formats = match (section.formats.is_empty(), section.kind) {
-                (false, _) => section.formats.join(" "),
-                (true, Kind::Video) => "34".to_owned(),
-                (true, _) => "0".to_owned(),
+            // a rejected line names the static format the web client's rejected lines name (`34` for video; `0`, PCMU,
+            // for audio), whatever libwebrtc listed
+            let formats = match section.kind {
+                Kind::Video => "34".to_owned(),
+                Kind::Audio => "0".to_owned(),
+                Kind::Data if section.formats.is_empty() => "0".to_owned(),
+                Kind::Data => section.formats.join(" "),
             };
             out.push(format!("m={} 0 RTP/SAVP {formats}", section.kind.ngc()));
             out.push(format!("a=label:{}", name.label));
@@ -1137,6 +1111,8 @@ fn write_section(
                 .lines
                 .iter()
                 .filter(|line| attribute_name(line).is_some_and(|name| kept.contains(&name)))
+                // reduced-size RTCP only on video lines, as the web client writes them (libwebrtc names it on audio too)
+                .filter(|line| section.kind == Kind::Video || attribute_name(line) != Some("rtcp-rsize"))
                 .cloned(),
         );
         if kept.contains(&"ssrc") && section.kind != Kind::Data && !section.has("ssrc") {
@@ -1147,8 +1123,7 @@ fn write_section(
     }
     if section.kind == Kind::Video && !section.has("rtcp-rsize") {
         // reduced-size RTCP on every video line, as the web client's (Chrome's) are: the mixer refuses a group call's
-        // answer whose receiving lines don't name it (`410 SdpParsingFailure`, M3 Task 19); `str0m` reads RTCP packet
-        // by packet, so a reduced-size one reads as well as a compound one
+        // answer whose receiving lines don't name it (`410 SdpParsingFailure`, M3 Task 19)
         out.push("a=rtcp-rsize".to_owned());
     }
     out.push(format!("a=label:{}", name.label));
@@ -1236,11 +1211,11 @@ fn rtcp_feedback(section: &Section) -> Vec<String> {
     feedback.into_iter().map(|kind| format!("a=rtcp-fb:* {kind}")).collect()
 }
 
-/// The header extensions that carry a line's mid or a stream's id in every packet. `str0m` names our lines with mids of
-/// its own, and Teams' dialect names them otherwise ([`NgcSession`]): offered, the far end would take our packets for
-/// a line it doesn't know and drop them (seen live, M3 Task 16: a web client answering our offer received nothing),
-/// so our offers name none of them; without them in the answer `str0m` sends none. An answer of ours keeps them: it
-/// answers the offer's own mids.
+/// The header extensions that carry a line's mid or a stream's id in every packet. Teams' dialect may name our lines
+/// otherwise than libwebrtc does ([`NgcSession`]): offered, the far end would take our packets for a line it doesn't
+/// know and drop them (seen live, M3 Task 16: a web client answering our offer received nothing), so our offers name
+/// none of them; without them in the answer libwebrtc sends none. An answer of ours keeps them: it answers the offer's
+/// own mids.
 const LINE_NAMING_EXTENSIONS: [&str; 3] = [
     "urn:ietf:params:rtp-hdrext:sdes:mid",
     "urn:ietf:params:rtp-hdrext:sdes:rtp-stream-id",
@@ -1303,7 +1278,7 @@ fn backslashed(value: &str) -> String {
 
 // ---- Teams' dialect → standard ----
 
-/// Writes the `kept` sections of `parsed` (Teams') as standard SDP, each named by its `str0m` mid; `local` maps a
+/// Writes the `kept` sections of `parsed` (Teams') as standard SDP, each named by its libwebrtc mid; `local` maps a
 /// Teams mid of the bundle to ours.
 fn read(parsed: &Parsed, kept: &[(&Section, String)], role: Role, local: impl Fn(&str) -> Option<String>) -> String {
     let mut out = read_session(parsed, &local);
@@ -1384,10 +1359,9 @@ fn read_section(
             .value(name)
             .or_else(|| first.and_then(|first| first.value(name)));
         match (name, value, role) {
-            // an offer leaving the DTLS role to us (`actpass`, or no setup: the mixer's) is read as `passive`, so
-            // that `str0m` takes the client's part as the web client does (RFC 5763 asks it of an answerer); its own
-            // choice for `actpass` would be the server's
-            ("setup", None | Some("actpass"), Role::Offer) => out.push("a=setup:passive".to_owned()),
+            // an offer naming no DTLS role (the mixer's) leaves it to us, as `actpass` does: libwebrtc then takes the
+            // client's part, as the web client does, and in a renegotiation keeps the role the call has
+            ("setup", None, Role::Offer) => out.push("a=setup:actpass".to_owned()),
             (_, Some(value), _) => out.push(format!("a={name}:{value}")),
             (_, None, _) => {}
         }
@@ -1402,6 +1376,9 @@ fn read_section(
     for line in &section.lines {
         let Some(name) = attribute_name(line) else { continue };
         if !kept.contains(&name) || INHERITED.contains(&name) || ["mid", "candidate"].contains(&name) {
+            continue;
+        }
+        if name == "ssrc" && placeholder_stream(line) {
             continue;
         }
         out.extend(standard_attribute(section, name, line));
@@ -1471,6 +1448,19 @@ fn standard_candidate(candidate: &str) -> Option<String> {
     ))
 }
 
+/// The stream a line that sends nothing names (`a=ssrc:1`, `a=x-ssrc-range:1-1`, as the web client writes such a line):
+/// no stream at all, so it is left out of the standard side (a peer would take the same SSRC on several lines for one
+/// stream and refuse the description).
+const PLACEHOLDER_SSRC: u32 = 1;
+
+/// Whether an `a=ssrc` line names [`PLACEHOLDER_SSRC`].
+fn placeholder_stream(line: &str) -> bool {
+    attribute(line, "ssrc")
+        .and_then(|value| value.split(' ').next())
+        .and_then(|ssrc| ssrc.parse::<u32>().ok())
+        == Some(PLACEHOLDER_SSRC)
+}
+
 /// `a=ssrc` lines for a line that names its streams only by Teams' `a=ssrc-group` or `a=x-ssrc-range`.
 fn synthesized_ssrcs(section: &Section) -> Vec<String> {
     let grouped: Vec<&str> = section
@@ -1489,7 +1479,7 @@ fn synthesized_ssrcs(section: &Section) -> Vec<String> {
     };
     ssrcs
         .into_iter()
-        .filter(|ssrc| ssrc.parse::<u32>().is_ok())
+        .filter(|ssrc| ssrc.parse::<u32>().is_ok_and(|ssrc| ssrc != PLACEHOLDER_SSRC))
         .map(|ssrc| format!("a=ssrc:{ssrc} cname:{SYNTHESIZED_CNAME}"))
         .collect()
 }

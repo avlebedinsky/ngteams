@@ -242,18 +242,18 @@ pseudo-random pattern, the speaker is recorded, and the recording is searched fo
   on hanging up, `leave` (`204`). Every write was permitted by the fence on the call it registered; nothing was
   denied, and no delivery was answered but the acceptance.
 - **The relay.** Over UDP 3478 the relay answers the Allocate with `300 Try Alternate`, naming another relay address
-  on the same port. The native client follows it once, on the same transport, and allocates there, as a browser's
-  TURN client does. Before it followed the redirect it fell back to TCP 443, which also carried the call: the relay
+  on the same port. A TURN client follows it once, on the same transport, and allocates there (libwebrtc's does, as
+  the browser's). Before it followed the redirect it fell back to TCP 443, which also carried the call: the relay
   speaks TURN's own framing over TCP (`ChannelData` padded to 4 bytes), not RFC 4571's length prefix. TURN over TLS
   wasn't needed, and the credentials worked as given (ASCII).
 - **Opus's payload type.** Answering an Opus-only offer that numbered Opus `111` (the web client's number), the media
   controller answered `m=audio … 102` with `a=rtpmap:102 OPUS/48000/2`, its own number, then sent its audio numbered
   `111`, the number the offer gave it (a sender uses the receiver's numbers), and played back nothing of what we sent
-  as `111`. `str0m` keeps one number per codec for both directions: it took `102` from the answer and dropped every
-  packet that came in as `111`. (Its answer to the web client's offer of nine audio codecs kept Opus at `111` and gave
-  comfort noise and telephone events numbers of its own.) So the native client offers Opus as `102`: the media
-  controller answers `102`, and both directions agree. An answer that still numbers an offered codec otherwise is read
-  back with the offer's number (`NgcSession::read_answer`), so at least what comes in plays.
+  as `111`. A peer that keeps one number per codec for both directions (the native client's first one) took `102`
+  from the answer and dropped every packet that came in as `111`. (Its answer to the web client's offer of nine audio
+  codecs kept Opus at `111` and gave comfort noise and telephone events numbers of its own.) libwebrtc, as the web
+  client's browser, sends with the answer's number and takes what comes in with the offer's, so the native client
+  offers Opus with libwebrtc's own number and reads the answer as it is.
 - **The media path.** Our side offers its relayed candidate only; the media controller answers with relay candidates
   of its own on port 3478, and ICE and DTLS connect through the relay. From the action to the media connected took
   2.3–2.9 s.

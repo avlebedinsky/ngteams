@@ -547,6 +547,8 @@ impl ChatServiceMock {
         dir: &std::path::Path,
         tone: teams_media::tone::Tone,
     ) -> std::io::Result<std::net::SocketAddr> {
+        // libwebrtc started before the first peer: its start would hold up the mock's own runtime
+        teams_media::rtc::warm_up();
         self.lock().peers.start(dir, tone)
     }
 
@@ -562,6 +564,8 @@ impl ChatServiceMock {
         dir: &std::path::Path,
         tone: teams_media::tone::Tone,
     ) -> std::io::Result<std::net::SocketAddr> {
+        // libwebrtc started before the first peer: its start would hold up the mock's own runtime
+        teams_media::rtc::warm_up();
         self.lock().peers.start_group_video(dir, tone)
     }
 
@@ -600,6 +604,8 @@ impl ChatServiceMock {
         dir: &std::path::Path,
         delay: std::time::Duration,
     ) -> std::io::Result<std::net::SocketAddr> {
+        // libwebrtc started before the first peer: its start would hold up the mock's own runtime
+        teams_media::rtc::warm_up();
         self.lock().peers.start_echo(dir, delay)
     }
 

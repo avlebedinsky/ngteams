@@ -1,57 +1,46 @@
-//! The session's video: the camera thread (`teams-media-cam`) and the decoding thread (`teams-media-vid`), and what
-//! they share with the network thread.
+//! The session's video: the camera thread (`teams-media-cam`) and the decoding threads (`teams-media-vid`).
 //!
 //! - **The camera thread** runs while the camera is on ([`super::MediaSession::set_camera`]): each frame turned into
-//!   I420 at the size the call sends ([`crate::video::convert::to_i420`]), shown to the self view, encoded at the
-//!   target bitrate (an IDR when one is wanted: the far end asked, or our line just began to send) and queued for the
-//!   network thread, which keeps the newest [`SEND_QUEUE`] frames and sends them while our line is negotiated to send.
-//!   A camera that fails (`DeviceClosed(Camera)`) or whose encoder fails (`VideoFailed`) ends the thread and turns
-//!   the camera off; the rest of the session goes on.
-//! - **The decoding thread** runs once the session's video started ([`super::MediaSession::start_video`]): each
-//!   access unit the network thread hands over decoded by its video line's own decoder and shown on that line's sink
-//!   (made the first time the line brings a frame, [`RemoteSinks`]); a gap or a frame that doesn't decode asks the far
-//!   end for a keyframe of that line (at most every [`KEYFRAME_ASK_EVERY`]) and nothing is shown on it until one
-//!   comes.
-//! - **The bitrate** follows the bandwidth estimate: the network thread keeps the newest estimate, the camera thread
-//!   sets the encoder to it less what the audio takes ([`AUDIO_HEADROOM`]), between the encoder's minimum and maximum.
+//!   I420 at the size the call sends ([`crate::video::convert::to_i420`]), shown to the self view, and handed to
+//!   libwebrtc's video source, which encodes it (an IDR whenever the far end asks) at the rate its bandwidth estimate
+//!   allows. A camera that fails (`DeviceClosed(Camera)`) ends the thread and turns the camera off; the rest of the
+//!   session goes on.
+//! - **A decoding thread** runs for each video track the far end sends on: libwebrtc decodes, and each picture goes to
+//!   its video line's sink (made the first time the line brings a frame, [`RemoteSinks`]) once the session's video
+//!   started; a line the negotiated SDP doesn't name (the sharing line) shows nothing.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::thread;
+use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use crate::Error;
-use crate::devices::{VideoSink, VideoSource};
-use crate::peer::ReceivedVideo;
-use crate::queue::Queue;
-use crate::video::VIDEO_CLOCK;
-use crate::video::codec::{EncodedVideo, EncoderSettings, VideoDecoder, VideoEncoder};
+use libwebrtc::rtp_transceiver::RtpTransceiver;
+use libwebrtc::video_frame::{I420Buffer, VideoBuffer as _, VideoFrame as RtcVideoFrame, VideoRotation};
+use libwebrtc::video_source::native::NativeVideoSource;
+use libwebrtc::video_stream::native::NativeVideoStream;
+use libwebrtc::video_track::RtcVideoTrack;
+
+use crate::devices::{PixelFormat, VideoFrame, VideoSink, VideoSource};
+use crate::rtc::{Next, Peer, next_within};
+use crate::video::codec::EncoderSettings;
 use crate::video::convert::{MaxSize, to_i420};
 
 use super::{SessionDevice, SessionEvent, Shared};
 
-/// Encoded frames the network thread may hold before it sends them; more drops the oldest.
-pub(super) const SEND_QUEUE: usize = 3;
-/// Received access units the decoding thread may hold; more drops the oldest (and asks for a keyframe).
-pub(super) const DECODE_QUEUE: usize = 30;
 /// How long the camera and decoding threads wait for a frame before they check whether to stop.
 const FRAME_WAIT: Duration = Duration::from_millis(100);
-/// The least time between two keyframe requests of the decoding thread.
-pub(super) const KEYFRAME_ASK_EVERY: Duration = Duration::from_millis(500);
-/// What the estimate leaves to the audio, in bits per second.
-pub(super) const AUDIO_HEADROOM: u64 = 64_000;
 
 /// Where the far end's decoded frames (I420) go: the sink of each video line, made the first time the line brings a
 /// frame (0 the main video line, 1, 2, … a group call's receiving lines).
 pub type RemoteSinks = Box<dyn FnMut(usize) -> Box<dyn VideoSink> + Send>;
 
-/// The receiving lines a session's video decodes, at most: line numbers past it are dropped.
-const MAX_LINES: usize = 64;
+/// Where our camera's frames go as they are sent, handed from one camera thread to the next.
+pub(super) type SelfView = Arc<Mutex<Option<Box<dyn VideoSink>>>>;
 
 /// A call's video, as [`super::MediaSession::start_video`] takes it.
 pub struct VideoParts {
-    /// How the camera's frames are encoded.
+    /// The bounds the camera is sent within.
     pub encoder: EncoderSettings,
     /// The largest picture sent: a bigger camera frame is scaled down to fit.
     pub max_size: MaxSize,
@@ -75,55 +64,36 @@ impl std::fmt::Debug for VideoParts {
 pub struct VideoStats {
     /// Frames the camera handed over.
     pub captured: u64,
-    /// Frames the encoder made.
-    pub encoded: u64,
-    /// IDRs among them.
-    pub keyframes: u64,
-    /// Encoded frames handed to the peer.
+    /// Frames handed to libwebrtc to encode and send.
     pub sent: u64,
-    /// Encoded frames never sent: our line wasn't negotiated to send, the media wasn't connected, or the queue was full.
+    /// Camera frames that didn't convert, or that libwebrtc didn't take.
     pub unsent: u64,
-    /// Access units that arrived.
+    /// Pictures libwebrtc decoded.
     pub received: u64,
-    /// Pictures decoded and shown.
+    /// Pictures shown on a line's sink.
     pub shown: u64,
-    /// Access units that didn't decode, or that were skipped while a keyframe was awaited.
-    pub undecoded: u64,
-    /// Keyframe requests the far end sent us.
-    pub keyframes_asked: u64,
-    /// Keyframe requests we sent.
-    pub keyframes_requested: u64,
-    /// The newest bandwidth estimate, in bits per second (0 before one).
-    pub estimate: u64,
-    /// The encoder's target bitrate now, in bits per second (0 while no camera runs).
-    pub bitrate: u64,
 }
 
-/// What the video threads share with the network thread.
+/// The counts and flags the session's threads share.
 #[derive(Default)]
 pub(super) struct VideoShared {
-    /// The video started: received access units go to the decoding thread.
     pub(super) started: AtomicBool,
-    /// The bitrate the estimate is to look for while the camera is on.
-    pub(super) desired: AtomicU64,
-    /// The camera is on (its thread runs).
     pub(super) camera_on: AtomicBool,
-    /// The next frame encoded is to be an IDR.
-    pub(super) keyframe_wanted: AtomicBool,
-    /// The video lines the decoding thread wants a keyframe of (bit `n` line `n`; the network thread asks).
-    pub(super) keyframe_needed: AtomicU64,
-    pub(super) captured: AtomicU64,
-    pub(super) encoded: AtomicU64,
-    pub(super) keyframes: AtomicU64,
-    pub(super) sent: AtomicU64,
-    pub(super) unsent: AtomicU64,
-    pub(super) received: AtomicU64,
-    pub(super) shown: AtomicU64,
-    pub(super) undecoded: AtomicU64,
-    pub(super) keyframes_asked: AtomicU64,
-    pub(super) keyframes_requested: AtomicU64,
-    pub(super) estimate: AtomicU64,
-    pub(super) bitrate: AtomicU64,
+    captured: AtomicU64,
+    sent: AtomicU64,
+    unsent: AtomicU64,
+    received: AtomicU64,
+    shown: AtomicU64,
+    /// The sinks of the far end's video, by line, once the video started.
+    sinks: Mutex<Option<LineSinks>>,
+    /// The decoding threads.
+    decoders: Mutex<Vec<JoinHandle<()>>>,
+}
+
+/// Each line's sink, made from [`RemoteSinks`] the first time the line brings a frame.
+struct LineSinks {
+    make: RemoteSinks,
+    made: HashMap<usize, Box<dyn VideoSink>>,
 }
 
 impl VideoShared {
@@ -131,222 +101,283 @@ impl VideoShared {
         let read = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
         VideoStats {
             captured: read(&self.captured),
-            encoded: read(&self.encoded),
-            keyframes: read(&self.keyframes),
             sent: read(&self.sent),
             unsent: read(&self.unsent),
             received: read(&self.received),
             shown: read(&self.shown),
-            undecoded: read(&self.undecoded),
-            keyframes_asked: read(&self.keyframes_asked),
-            keyframes_requested: read(&self.keyframes_requested),
-            estimate: read(&self.estimate),
-            bitrate: read(&self.bitrate),
         }
     }
 
-    pub(super) fn count(counter: &AtomicU64, by: u64) {
-        counter.fetch_add(by, Ordering::Relaxed);
+    fn count(counter: &AtomicU64) {
+        counter.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Asks the network thread for a keyframe of video line `line`.
-    pub(super) fn want_keyframe(&self, line: usize) {
-        if line < MAX_LINES {
-            self.keyframe_needed.fetch_or(1 << line, Ordering::Relaxed);
-        }
+    /// Shows `frame` on line `line`'s sink (made now when it is the line's first); whether it was shown.
+    fn show(&self, line: usize, frame: &VideoFrame) -> bool {
+        let mut sinks = self.sinks.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(sinks) = sinks.as_mut() else {
+            return false;
+        };
+        let LineSinks { make, made } = sinks;
+        let sink = made.entry(line).or_insert_with(|| make(line));
+        sink.show(frame).is_ok()
     }
 }
 
-/// An encoded frame on its way from the camera thread to the network thread.
-pub(super) struct OutgoingVideo {
-    pub(super) frame: EncodedVideo,
-    pub(super) rtp_time: u64,
-    pub(super) captured: Instant,
+/// The session's camera: what it runs with once the video started, and the camera thread running now.
+#[derive(Default)]
+pub(super) struct SessionVideo {
+    max_size: Option<MaxSize>,
+    preview: SelfView,
+    pub(super) camera: Option<(Arc<AtomicBool>, JoinHandle<()>)>,
+    shared: Option<Arc<Shared>>,
+}
+
+impl SessionVideo {
+    pub(super) fn start(&mut self, parts: VideoParts, shared: &Arc<Shared>) {
+        self.max_size = Some(parts.max_size);
+        *self.preview.lock().unwrap_or_else(PoisonError::into_inner) = parts.preview;
+        *shared.video.sinks.lock().unwrap_or_else(PoisonError::into_inner) = Some(LineSinks {
+            make: parts.remote,
+            made: HashMap::new(),
+        });
+        self.shared = Some(Arc::clone(shared));
+    }
+
+    /// The largest picture sent and the self view, once the video started.
+    pub(super) fn camera_parts(&self) -> Option<(MaxSize, SelfView)> {
+        Some((self.max_size?, Arc::clone(&self.preview)))
+    }
+
+    /// Stops the camera thread, if one runs, and waits for it.
+    pub(super) fn stop_camera(&mut self) {
+        if let Some((stop, handle)) = self.camera.take() {
+            stop.store(true, Ordering::Relaxed);
+            let _ = handle.join();
+        }
+    }
+
+    /// Waits for the decoding threads (the session is stopping).
+    pub(super) fn join_decoders(&mut self) {
+        if let Some(shared) = &self.shared {
+            let decoders = std::mem::take(&mut *shared.video.decoders.lock().unwrap_or_else(PoisonError::into_inner));
+            for handle in decoders {
+                let _ = handle.join();
+            }
+        }
+    }
 }
 
 /// The camera thread.
 pub(super) struct CameraLoop {
-    pub(super) camera: Box<dyn VideoSource>,
-    pub(super) encoder: VideoEncoder,
-    pub(super) max_size: MaxSize,
-    pub(super) preview: Arc<Mutex<Option<Box<dyn VideoSink>>>>,
-    pub(super) outgoing: Queue<OutgoingVideo>,
     pub(super) shared: Arc<Shared>,
-    /// This camera's own stop (the session's stop ends it too).
+    pub(super) peer: Arc<Peer>,
+    pub(super) source: NativeVideoSource,
+    pub(super) camera: Box<dyn VideoSource>,
+    pub(super) max_size: MaxSize,
+    pub(super) preview: SelfView,
     pub(super) stop: Arc<AtomicBool>,
-    /// The session's video clock's start: RTP times count from it.
-    pub(super) epoch: Instant,
 }
 
 impl CameraLoop {
     pub(super) fn run(mut self) {
-        let shared = Arc::clone(&self.shared);
-        let video = &shared.video;
-        video.keyframe_wanted.store(true, Ordering::Relaxed);
-        while !self.shared.stopping() && !self.stop.load(Ordering::Relaxed) {
-            match self.camera.next_frame(FRAME_WAIT) {
-                Ok(Some(frame)) => {
-                    VideoShared::count(&video.captured, 1);
-                    if let Err(error) = self.encode(&frame) {
-                        video.camera_on.store(false, Ordering::Relaxed);
-                        self.shared.report(SessionEvent::VideoFailed(error.to_string()));
-                        break;
-                    }
-                }
-                Ok(None) => {}
-                Err(_) => {
-                    video.camera_on.store(false, Ordering::Relaxed);
+        let epoch = Instant::now();
+        while !self.stop.load(Ordering::Relaxed) && !self.shared.stopping() {
+            let frame = match self.camera.next_frame(FRAME_WAIT) {
+                Ok(Some(frame)) => frame,
+                Ok(None) => continue,
+                Err(error) => {
+                    log::warn!("the camera stopped: {error}");
+                    self.off();
                     self.shared.report(SessionEvent::DeviceClosed(SessionDevice::Camera));
-                    break;
+                    return;
                 }
-            }
-        }
-        video.bitrate.store(0, Ordering::Relaxed);
-    }
-
-    fn encode(&mut self, frame: &crate::devices::VideoFrame) -> Result<(), Error> {
-        let captured = Instant::now();
-        let Some(frame) = to_i420(frame, self.max_size) else {
-            return Ok(());
-        };
-        if let Some(preview) = self.preview.lock().unwrap_or_else(PoisonError::into_inner).as_mut() {
-            // a self view that can't take a frame misses it; the call goes on
-            let _ = preview.show(&frame);
-        }
-        let video = &self.shared.video;
-        let estimate = video.estimate.load(Ordering::Relaxed);
-        if estimate > 0 {
-            self.encoder.set_bitrate(estimate.saturating_sub(AUDIO_HEADROOM));
-        }
-        video
-            .bitrate
-            .store(u64::from(self.encoder.bitrate()), Ordering::Relaxed);
-        let keyframe = video.keyframe_wanted.swap(false, Ordering::Relaxed);
-        let at = captured.saturating_duration_since(self.epoch);
-        let Some(encoded) = self.encoder.encode(&frame, at, keyframe)? else {
-            return Ok(());
-        };
-        VideoShared::count(&video.encoded, 1);
-        VideoShared::count(&video.keyframes, u64::from(encoded.keyframe));
-        let rtp_time = rtp_time(self.epoch, captured);
-        let dropped = self.outgoing.push(OutgoingVideo {
-            frame: encoded,
-            rtp_time,
-            captured,
-        });
-        VideoShared::count(&video.unsent, u64::try_from(dropped).unwrap_or(u64::MAX));
-        Ok(())
-    }
-}
-
-/// The 90 kHz media time of `at`, counted from `epoch`.
-fn rtp_time(epoch: Instant, at: Instant) -> u64 {
-    let micros = at.saturating_duration_since(epoch).as_micros();
-    u64::try_from(micros * u128::from(VIDEO_CLOCK) / 1_000_000).unwrap_or(u64::MAX)
-}
-
-/// The decoding thread.
-pub(super) struct DecodeLoop {
-    pub(super) sinks: RemoteSinks,
-    pub(super) incoming: Queue<ReceivedVideo>,
-    pub(super) shared: Arc<Shared>,
-    /// Each video line's decoder and sink, made the first time the line brings a frame.
-    pub(super) lines: HashMap<usize, LineDecoder>,
-}
-
-/// One video line's decoding.
-pub(super) struct LineDecoder {
-    decoder: VideoDecoder,
-    sink: Box<dyn VideoSink>,
-    /// Waiting for a keyframe: what comes before it isn't decoded.
-    broken: bool,
-    asked: Option<Instant>,
-}
-
-impl DecodeLoop {
-    pub(super) fn run(mut self) {
-        while !self.shared.stopping() {
-            match self.incoming.recv(FRAME_WAIT) {
-                Ok(Some(unit)) => self.decode(&unit),
-                Ok(None) => {}
-                Err(_) => break,
-            }
-        }
-    }
-
-    fn decode(&mut self, unit: &ReceivedVideo) {
-        let video = &self.shared.video;
-        if unit.line >= MAX_LINES {
-            VideoShared::count(&video.undecoded, 1);
-            return;
-        }
-        if !self.lines.contains_key(&unit.line) {
-            let Ok(decoder) = VideoDecoder::new() else {
-                VideoShared::count(&video.undecoded, 1);
-                return;
             };
-            let sink = (self.sinks)(unit.line);
-            self.lines.insert(
-                unit.line,
-                LineDecoder {
-                    decoder,
-                    sink,
-                    broken: false,
-                    asked: None,
-                },
-            );
+            VideoShared::count(&self.shared.video.captured);
+            let Some(i420) = to_i420(&frame, self.max_size) else {
+                VideoShared::count(&self.shared.video.unsent);
+                continue;
+            };
+            if let Some(preview) = self.preview.lock().unwrap_or_else(PoisonError::into_inner).as_mut() {
+                let _ = preview.show(&i420);
+            }
+            let mut sent = RtcVideoFrame::new(VideoRotation::VideoRotation0, to_buffer(&i420));
+            sent.timestamp_us = i64::try_from(epoch.elapsed().as_micros()).unwrap_or(i64::MAX);
+            if self.source.capture_frame(&sent) {
+                VideoShared::count(&self.shared.video.sent);
+            } else {
+                VideoShared::count(&self.shared.video.unsent);
+            }
         }
-        let Some(line) = self.lines.get_mut(&unit.line) else {
+    }
+
+    /// The camera went away: nothing more is sent on our line.
+    fn off(&self) {
+        self.shared.video.camera_on.store(false, Ordering::Relaxed);
+        self.peer.set_sending(false);
+    }
+}
+
+/// An I420 frame of ours (each plane's stride its width) as libwebrtc's buffer.
+pub(crate) fn to_buffer(frame: &VideoFrame) -> I420Buffer {
+    let mut buffer = I420Buffer::new(frame.width, frame.height);
+    let (stride_y, stride_u, stride_v) = buffer.strides();
+    let (width, height) = (to_usize(frame.width), to_usize(frame.height));
+    let (chroma_width, chroma_height) = (width / 2, height / 2);
+    let luma_size = width * height;
+    let (y, u, v) = buffer.data_mut();
+    copy_plane(&frame.data, width, y, to_usize(stride_y), width, height);
+    copy_plane(
+        frame.data.get(luma_size..).unwrap_or_default(),
+        chroma_width,
+        u,
+        to_usize(stride_u),
+        chroma_width,
+        chroma_height,
+    );
+    copy_plane(
+        frame.data.get(luma_size + luma_size / 4..).unwrap_or_default(),
+        chroma_width,
+        v,
+        to_usize(stride_v),
+        chroma_width,
+        chroma_height,
+    );
+    buffer
+}
+
+/// Copies `rows` rows of `columns` bytes from `from` (rows `from_stride` apart) to `to` (rows `to_stride` apart).
+fn copy_plane(from: &[u8], from_stride: usize, to: &mut [u8], to_stride: usize, columns: usize, rows: usize) {
+    for row in 0..rows {
+        let (Some(source), Some(target)) = (
+            from.get(row * from_stride..row * from_stride + columns),
+            to.get_mut(row * to_stride..row * to_stride + columns),
+        ) else {
             return;
         };
-        if line.decode(unit, video) {
-            video.want_keyframe(unit.line);
-        }
+        target.copy_from_slice(source);
     }
 }
 
-impl LineDecoder {
-    /// Decodes and shows `unit`; whether a keyframe is to be asked for now (a gap, a frame that didn't decode, at most
-    /// every [`KEYFRAME_ASK_EVERY`]).
-    fn decode(&mut self, unit: &ReceivedVideo, video: &VideoShared) -> bool {
-        if !unit.contiguous && !unit.keyframe {
-            self.broken = true;
-        }
-        if unit.keyframe {
-            self.broken = false;
-        }
-        if self.broken {
-            VideoShared::count(&video.undecoded, 1);
-            return self.ask_keyframe();
-        }
-        match self.decoder.decode(&unit.data) {
-            Ok(Some(frame)) => {
-                if self.sink.show(&frame).is_ok() {
-                    VideoShared::count(&video.shown, 1);
-                }
-                false
-            }
-            Ok(None) => false,
-            Err(_) => {
-                VideoShared::count(&video.undecoded, 1);
-                self.broken = true;
-                self.ask_keyframe()
-            }
-        }
+/// A decoded picture as our I420 (even sides, each plane's stride its width).
+fn from_buffer(buffer: &I420Buffer) -> Option<VideoFrame> {
+    let (width, height) = (buffer.width() & !1, buffer.height() & !1);
+    if width == 0 || height == 0 {
+        return None;
     }
+    let (stride_y, stride_u, stride_v) = buffer.strides();
+    let (from_y, from_u, from_v) = buffer.data();
+    let (columns, rows) = (to_usize(width), to_usize(height));
+    let mut data = vec![0_u8; columns * rows * 3 / 2];
+    let (luma, chroma) = data.split_at_mut(columns * rows);
+    let (u_plane, v_plane) = chroma.split_at_mut(columns * rows / 4);
+    let (half_columns, half_rows) = (columns / 2, rows / 2);
+    copy_plane(from_y, to_usize(stride_y), luma, columns, columns, rows);
+    copy_plane(
+        from_u,
+        to_usize(stride_u),
+        u_plane,
+        half_columns,
+        half_columns,
+        half_rows,
+    );
+    copy_plane(
+        from_v,
+        to_usize(stride_v),
+        v_plane,
+        half_columns,
+        half_columns,
+        half_rows,
+    );
+    Some(VideoFrame {
+        width,
+        height,
+        format: PixelFormat::I420,
+        stride: width,
+        data,
+    })
+}
 
-    /// Whether to ask for a keyframe now: at most every [`KEYFRAME_ASK_EVERY`].
-    fn ask_keyframe(&mut self) -> bool {
-        let now = Instant::now();
-        if self.asked.is_some_and(|asked| now < asked + KEYFRAME_ASK_EVERY) {
-            return false;
-        }
-        self.asked = Some(now);
-        true
+/// A decoding thread's parts: the far end's video track and the line it came on.
+pub(super) struct Decoder {
+    pub(super) shared: Arc<Shared>,
+    pub(super) lines: Arc<Mutex<Vec<String>>>,
+    pub(super) track: RtcVideoTrack,
+    pub(super) transceiver: RtpTransceiver,
+    /// The lines a decoding thread runs for, and this one's: taken out when it ends.
+    pub(super) running: (Arc<Mutex<HashSet<String>>>, String),
+}
+
+/// Starts a decoding thread for the track `decoder` names.
+pub(super) fn spawn_decoder(shared: &Arc<Shared>, decoder: Decoder) {
+    match thread::Builder::new()
+        .name("teams-media-vid".into())
+        .spawn(move || decoder.run())
+    {
+        Ok(handle) => shared
+            .video
+            .decoders
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(handle),
+        Err(error) => log::warn!("the far end's video can't be shown: {error}"),
     }
 }
 
-/// Starts a thread named `name` running `run`.
-pub(super) fn spawn(name: &str, run: impl FnOnce() + Send + 'static) -> Result<thread::JoinHandle<()>, Error> {
-    Ok(thread::Builder::new().name(name.to_owned()).spawn(run)?)
+impl Decoder {
+    fn run(self) {
+        let mut stream = NativeVideoStream::new(self.track.clone());
+        while !self.shared.stopping() {
+            let frame = match next_within(&mut stream, FRAME_WAIT) {
+                Ok(Next::Item(frame)) => frame,
+                Ok(Next::Ended) | Err(_) => break,
+                Ok(Next::Quiet) => continue,
+            };
+            VideoShared::count(&self.shared.video.received);
+            if !self.shared.video.started.load(Ordering::Relaxed) {
+                continue;
+            }
+            let Some(line) = self
+                .transceiver
+                .mid()
+                .and_then(|mid| Peer::video_line(&self.lines, &mid))
+            else {
+                continue;
+            };
+            let Some(picture) = from_buffer(&frame.buffer.to_i420()) else {
+                continue;
+            };
+            if self.shared.video.show(line, &picture) {
+                VideoShared::count(&self.shared.video.shown);
+            }
+        }
+        stream.close();
+        let (running, line) = &self.running;
+        running.lock().unwrap_or_else(PoisonError::into_inner).remove(line);
+    }
+}
+
+fn to_usize(value: u32) -> usize {
+    usize::try_from(value).unwrap_or(usize::MAX)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_i420_frame_goes_to_libwebrtc_and_back_unchanged() {
+        let (width, height) = (8, 4);
+        let data: Vec<u8> = (0..width * height * 3 / 2)
+            .map(|i| u8::try_from(i % 251).unwrap_or(0))
+            .collect();
+        let frame = VideoFrame {
+            width: 8,
+            height: 4,
+            format: PixelFormat::I420,
+            stride: 8,
+            data,
+        };
+        assert_eq!(from_buffer(&to_buffer(&frame)), Some(frame));
+    }
 }

@@ -24,7 +24,6 @@ members = [
     "crates/teams-ui",
     "crates/ui-sandbox",
     "spikes/gpui-video",
-    "spikes/media-loop",
 ]
 # Every member but the personal build (`crates/ngteams`): a plain `cargo build`, `cargo build --release` or `cargo run`
 # at the root never builds it (docs/personal-build.md; crates/ngteams/tests/apart.rs checks this list).
@@ -50,7 +49,6 @@ default-members = [
     "crates/teams-ui",
     "crates/ui-sandbox",
     "spikes/gpui-video",
-    "spikes/media-loop",
 ]
 # Patched crates.io sources (scripts/vendor-gpui.sh), used through [patch.crates-io], never workspace members.
 exclude = ["vendor"]
@@ -72,8 +70,8 @@ teams-core = { path = "crates/teams-core" }
 teams-fence = { path = "crates/teams-fence" }
 # the app's diagnostic log (M2 Task 24a): installed by the app crates only, through its `install`
 teams-log = { path = "crates/teams-log" }
-# a call's media: the TURN client and its relay link, Teams' SDP dialect (sdp-ngc-1.0), the relayed str0m peer, Opus
-# with a jitter buffer, the audio session and the device seam
+# a call's media: Teams' SDP dialect (sdp-ngc-1.0), the relayed libwebrtc peer and its session, the mixer's control
+# plane and the device seam
 teams-media = { path = "crates/teams-media" }
 # tests only: a crate takes it under [dev-dependencies], never [dependencies] (crates/teams-mock/tests/mock.rs checks)
 teams-mock = { path = "crates/teams-mock" }
@@ -102,18 +100,15 @@ crc32fast = "1.5.2"
 # gzip only, on the zlib-rs backend zip already uses
 flate2 = { version = "1.1.10", default-features = false, features = ["zlib-rs"] }
 futures-util = { version = "0.3.34", default-features = false, features = ["sink", "std"] }
+# the futures libwebrtc's bindings return, run to completion on the media's own threads (no runtime of theirs)
+futures-executor = "0.3.34"
 # the tree scraper parses into, walked without recursion: the version scraper takes
 ego-tree = "0.11.0"
-# the calls' video codec (teams-media): H.264 through OpenH264 (BSD-2-Clause, its 2.6.0), built from the source the
-# binding bundles in every build (`docs/protocol/calling.md`, "The H.264 codec")
-openh264 = { version = "0.9.9", default-features = false, features = ["source"] }
 # a shared video file played in its card (teams-media's player): GStreamer's playbin (demultiplexing, decoding with the
 # system's plugins, A/V sync, seeking, volume) through its Rust bindings (MIT/Apache-2.0; GStreamer itself, LGPL, is
 # the system's, linked dynamically); its bytes from an appsrc the engine feeds, its frames and sound to appsinks
 gstreamer = "0.25.2"
 gstreamer-app = "0.25.2"
-# its raw binding, for the one encoder option the safe API lacks (a running encoder's target bitrate)
-openh264-sys2 = { version = "0.9.9", default-features = false }
 # the system random source: PKCE verifiers and OAuth state
 getrandom = "0.4.3"
 # GPUI as agterm-rs takes it: the crates.io `gpui-pre` snapshot, pinned exactly so agterm-rs's patches apply as they
@@ -142,6 +137,13 @@ httpdate = "1.0.3"
 # the UI sandbox's spawn marks every inherited descriptor but the named ones close-on-exec (`close_range`, which rustix
 # doesn't wrap): the version the workspace already links
 libc = "0.2.191"
+# The calls' media (teams-media): Google's libwebrtc, the engine Chrome and Teams' web client run, through LiveKit's
+# bindings (Apache-2.0). ICE through Teams' TURN relay, DTLS-SRTP, Opus and H.264 (hardware encoding through VA-API
+# where libva is installed), the jitter buffer, bandwidth estimation, A/V sync and the audio processing module are
+# libwebrtc's. Its build script downloads LiveKit's prebuilt static libwebrtc (`webrtc-linux-x64-release`, with
+# FFmpeg's H.264 decoder in it) from GitHub on a clean build (`LK_CUSTOM_WEBRTC` names a local one instead), so the
+# build-time `reqwest` it pulls in never reaches a binary. Pinned exactly: its API moves between patch releases.
+libwebrtc = "=0.3.55"
 log = "0.4.34"
 # the STUN long-term credential key: MD5(username:realm:password), RFC 8489 9.2.2
 md-5 = "0.11.0"
@@ -151,8 +153,6 @@ percent-encoding = "2.3.2"
 # `tokio` on, and workspace builds unify features, so oo7's default `tokio` would break every workspace build with
 # GPUI in it. async-io runs its own reactor thread, so the futures still run under tokio.
 oo7 = { version = "0.6.0", default-features = false, features = ["async-std", "native_crypto"] }
-# libopus, built from source by opusic-sys (its default `bundled` feature)
-opus = "0.4.0"
 # The device seam's PipeWire backend (teams-media): audio and the camera on one server, the sandbox's or the
 # desktop's as the build fixes it (libpipewire through bindgen; MIT)
 pipewire = { version = "0.10.1", features = ["v0_3_49"] }
@@ -173,9 +173,6 @@ serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 sha1 = "0.11.0"
 sha2 = "0.11.1"
-# sans-IO WebRTC; rust-crypto does DTLS and SRTP in pure Rust (no OpenSSL), but dimpl generates its certificate with
-# rcgen on aws-lc-rs, so the aws-lc-sys C build stays; no example web server
-str0m = { version = "0.24.1", default-features = false, features = ["rust-crypto"] }
 tempfile = "3.27.0"
 thiserror = "2.0.21"
 # the chat service's ISO times (a message's `composetime`, `originalarrivaltime`), read as RFC 3339
@@ -196,11 +193,6 @@ url = "2.5.8"
 wayland-client = "0.31.15"
 wayland-protocols-misc = { version = "0.3.12", features = ["client"] }
 wayland-protocols-wlr = { version = "0.3.12", features = ["client"] }
-# The calls' echo cancellation (AEC3), noise suppression and gain control (teams-media): WebRTC's audio processing
-# module, built by meson and ninja from the source the binding bundles (`bundled`: the system's
-# webrtc-audio-processing is 1.x and the binding needs 2.x), against the system's Abseil, which meson finds through
-# pkg-config (without one, meson would download Abseil itself)
-webrtc-audio-processing = { version = "2.1.0", features = ["bundled"] }
 wiremock = "0.6.5"
 # the virtual keyboard's keymap and its text-to-key table: the version GPUI already links, without its features
 xkbcommon = { version = "0.8.0", default-features = false }
@@ -246,11 +238,6 @@ allow_attributes_without_reason = "deny"
 # The gpui-video spike converts 1280x720 frames on the CPU; unoptimized, one conversion takes ~250 ms, so even the
 # debug tests of its video grid get optimized code for that crate (its dependencies stay as they are).
 [profile.dev.package.gpui-video]
-opt-level = 3
-
-# OpenH264 (built from its bundled source): unoptimized, encoding one 640x360 frame takes longer than a frame
-# lasts, so the debug tests of the calls' video get an optimized codec.
-[profile.dev.package.openh264-sys2]
 opt-level = 3
 
 # GPUI with agterm-rs's external-surfaces patches (M0 Task 16, approach (b) of the video spike):

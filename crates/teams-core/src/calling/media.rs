@@ -1,10 +1,10 @@
 //! A call's media in the engine: set up before the account's start, join or answer goes ([`prepare`]: the relay's
-//! credentials read, an allocation on the relay, the session started without its devices, our offer or our answer
+//! credentials read, the session started without its devices (libwebrtc allocating on the relay), our offer or our answer
 //! written in Teams' dialect), its devices opened once that start, join or answer passed the fence and was taken
 //! ([`open_devices`]), the far end's SDP applied and renegotiations answered or offered while it runs ([`apply`],
 //! [`answer`], [`reoffer`]), the camera turned on or off with the renegotiation it takes ([`camera`]; offered again
 //! once a renegotiation of ours gave way to the far end's, [`offer_camera`]), and what the session reports turned into
-//! what the call does ([`LiveMedia::poll`]: a camera whose device went away or whose encoder failed is off).
+//! what the call does ([`LiveMedia::poll`]: a camera whose device went away is off).
 //!
 //! **Video** (M3 Tasks 18, 19): a call's media takes video when the engine has video for its calls ([`CallVideo`]): the
 //! session's video starts with it (received frames to the account's sinks by video line, [`VideoOutput`]). A 1:1 call's
@@ -19,17 +19,14 @@
 //! Every step that blocks (the allocation, opening a device, an SDP command, the session's close) runs on tokio's
 //! blocking pool, never on the engine's thread; the session's own threads carry the media.
 
-use std::net::{IpAddr, ToSocketAddrs};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use teams_call::CallId;
 use teams_media::devices::{Devices, VideoSink};
-use teams_media::peer::RelayedPeer;
-use teams_media::relay::{RelayOptions, RelayServer, allocate_any, teams_relay};
+use teams_media::relay::{self, RelayConfig, RelayServer, teams_relay};
 use teams_media::sdp::{NgcSdp, NgcSession, VideoLines};
 use teams_media::session::{MediaSession, RemoteSinks, SessionConfig, SessionDevice, SessionEvent, VideoParts};
-use teams_media::turn::{self, TEAMS_RELAY_HOST, TEAMS_RELAY_UDP_PORT};
 use teams_media::video::codec::EncoderSettings;
 use teams_media::video::convert::MaxSize;
 use teams_proto::{
@@ -53,8 +50,8 @@ pub const GROUP_SLOTS: usize = 9;
 /// Where a call's media is relayed.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Relay {
-    /// Teams' relay host ([`TEAMS_RELAY_HOST`]), resolved when a call's media is set up: every address over UDP 3478,
-    /// then over TCP 443 ([`teams_relay`]).
+    /// Teams' relay host, as the web client names it: UDP 3478, TCP 443 and TLS 443 ([`teams_relay`]); libwebrtc
+    /// resolves it and allocates over what it reaches.
     Teams,
     /// These servers, in order: a test's loopback TURN server. Tests only (`test-support`).
     #[cfg(feature = "test-support")]
@@ -62,31 +59,23 @@ pub enum Relay {
 }
 
 impl Relay {
-    /// The servers to try, in order (resolving Teams' relay host blocks).
-    fn servers(&self) -> Result<Vec<RelayServer>, String> {
+    /// The servers libwebrtc allocates on.
+    fn servers(&self) -> Vec<RelayServer> {
         match self {
-            Self::Teams => {
-                let addresses: Vec<IpAddr> = (TEAMS_RELAY_HOST, TEAMS_RELAY_UDP_PORT)
-                    .to_socket_addrs()
-                    .map_err(|error| format!("the relay's host doesn't resolve: {error}"))?
-                    .map(|address| address.ip())
-                    .collect();
-                Ok(teams_relay(&addresses))
-            }
+            Self::Teams => teams_relay(),
             #[cfg(feature = "test-support")]
-            Self::Fixed(servers) => Ok(servers.clone()),
+            Self::Fixed(servers) => servers.clone(),
         }
     }
 }
 
 /// What a call's media is made of: the devices it opens (the microphone and the speaker, only once the account's
 /// start, join or answer passed the fence and was taken; the camera only on the account's action), the relay it goes
-/// through, how the allocation is made, how the session runs, and its video (`None`: calls without video).
+/// through, how the session runs, and its video (`None`: calls without video).
 #[derive(Clone)]
 pub struct CallMedia {
     pub devices: Arc<dyn Devices + Send + Sync>,
     pub relay: Relay,
-    pub relay_options: RelayOptions,
     pub session: SessionConfig,
     pub video: Option<CallVideo>,
 }
@@ -208,7 +197,7 @@ async fn set_up_with<C: Credentials + 'static>(
         .into_iter()
         .next()
         .ok_or("the relay handed out no credential")?;
-    let credentials = turn::Credentials {
+    let credentials = relay::Credentials {
         username: credential.username,
         password: credential.password.expose().to_owned(),
     };
@@ -220,34 +209,23 @@ async fn set_up_with<C: Credentials + 'static>(
 /// The blocking part of [`prepare`].
 fn set_up(
     media: &CallMedia,
-    credentials: &turn::Credentials,
+    credentials: &relay::Credentials,
     offer: Option<&MediaContent>,
     kind: VideoKind,
 ) -> Result<Prepared, String> {
     let text = |error: &dyn std::fmt::Display| error.to_string();
-    let servers = media.relay.servers()?;
-    let (link, failed) = allocate_any(&servers, credentials, &media.relay_options).map_err(|error| text(&error))?;
-    for (server, why) in &failed {
-        log::info!("a relay allocation over {:?} failed: {why}", server.transport);
-    }
-    // which way the media goes: the transport, the family, how many allocations failed first
-    let server = link.server();
-    let family = if server.addr.is_ipv4() { "IPv4" } else { "IPv6" };
-    log::info!(
-        "the call's media is relayed over {:?} ({family}), after {} failed",
-        server.transport,
-        failed.len()
-    );
-    let peer = RelayedPeer::new(Instant::now(), link).map_err(|error| text(&error))?;
+    let relay = RelayConfig {
+        servers: media.relay.servers(),
+        credentials: credentials.clone(),
+    };
     // no device opens before the call's start, join or answer passed the fence (`open_devices`)
-    let session = MediaSession::start_without_devices(peer, media.session).map_err(|error| text(&error))?;
+    let session = MediaSession::start_without_devices(&relay, media.session).map_err(|error| text(&error))?;
     let mut dialect = NgcSession::new();
     let video = start_video(&session, media.video.as_ref(), kind);
     let group = video && kind == VideoKind::Group;
     if group {
         // the main line, and the receiving lines each a participant's video
         dialect.set_video(VideoLines::Group { slots: GROUP_SLOTS });
-        session.take_slots().map_err(|error| text(&error))?;
     } else if video {
         // the far end's main video line is taken, receiving until the camera is on
         dialect.set_video(VideoLines::Main { sending: false });
@@ -479,8 +457,8 @@ pub(super) enum MediaChange {
     Failed(String),
     /// The far end closed the media and the call's own end didn't come within [`CLOSED_GRACE`]: the far end left.
     Closed,
-    /// The camera went off by itself (its device went away, or its encoder failed): nothing more is sent on our video
-    /// line until the account turns it on again.
+    /// The camera went off by itself (its device went away): nothing more is sent on our video line until the account
+    /// turns it on again.
     CameraOff,
     /// The microphone (`true`) or the speaker (`false`) went away for good (its stream ended, not moved): nothing is
     /// recorded or played on it any more, while the call goes on.
@@ -539,10 +517,6 @@ impl LiveMedia {
                 SessionEvent::DeviceClosed(device) => {
                     log::warn!("call {}: the {device:?} went away", self.call.get());
                     changes.extend(self.device_closed(device));
-                }
-                SessionEvent::VideoFailed(why) => {
-                    log::warn!("call {}: its camera's video stopped: {why}", self.call.get());
-                    changes.extend(self.camera_stopped());
                 }
                 SessionEvent::ControlActive { send, receive } => {
                     log::info!(
@@ -717,7 +691,7 @@ pub(super) fn answer(live: &LiveMedia, offer: MediaContent) -> impl FnOnce() -> 
     }
 }
 
-/// Offers the running media again (an ICE restart), off the engine's thread; `reply` is answered once the machine
+/// Offers the running media again (its lines as they are), off the engine's thread; `reply` is answered once the machine
 /// took it.
 pub(super) fn reoffer(live: &LiveMedia, reply: super::Waiting) -> impl FnOnce() -> MediaDone + Send + use<> {
     let (call, session, dialect) = (live.call, Arc::clone(&live.session), Arc::clone(&live.dialect));

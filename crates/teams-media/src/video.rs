@@ -1,11 +1,7 @@
-//! A call's video (M3 Task 18): H.264 as the web client's offers and answers select it, through OpenH264.
-//!
-//! - [`codec`]: the H.264 encoder and decoder, on the OpenH264 source the binding bundles, compiled into every build.
-//! - [`convert`]: a camera's frame turned into the I420 the encoder takes (scaled down to the size the call sends),
-//!   and a decoded I420 frame turned into the premultiplied BGRA a window draws.
-//!
-//! The session ([`crate::session`]) runs them on threads of their own: the camera's frames through the encoder to the
-//! peer, the peer's frames through the decoder to the sink the caller gave.
+//! A call's video: what the camera is sent with ([`codec`]), and the frames' conversions ([`convert`]): a camera's
+//! frame turned into the I420 libwebrtc takes (scaled down to the size the call sends), and a decoded I420 frame turned
+//! into the premultiplied BGRA a window draws. libwebrtc encodes and decodes; the session ([`crate::session`]) hands it
+//! the camera's frames and the sinks what it decoded, on threads of their own.
 
 pub mod codec;
 pub mod convert;

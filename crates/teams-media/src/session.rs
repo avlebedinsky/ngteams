@@ -1,100 +1,80 @@
-//! A call's media session: the microphone through Opus to the relayed peer, and the peer through the jitter buffer and
-//! Opus to the speaker, on threads of its own; and once its video started, the camera through H.264 to the peer and
-//! the peer's H.264 to a sink ([`video`]).
+//! A call's media session: the microphone through the audio processing to libwebrtc, libwebrtc's audio to the
+//! speaker, and once its video started, the camera to libwebrtc and libwebrtc's video to a sink ([`video`]).
 //!
-//! Three threads for the audio, and two more for the video once it started, none of them the caller's (and never an
-//! async runtime's):
+//! libwebrtc ([`crate::rtc`]) carries the media: ICE through the relay, DTLS-SRTP, Opus and H.264, the jitter buffer,
+//! bandwidth estimation and A/V sync. The session moves frames between it and the device seam, on threads of its own,
+//! none of them the caller's (and never an async runtime's):
 //!
 //! - **the capture thread** (`teams-media-mic`) reads the microphone, runs each 10 ms frame through the audio
-//!   processing (echo cancellation, noise suppression, gain control: [`SessionConfig::processing`]), encodes every two
-//!   frames into a 20 ms packet and queues it for the network thread;
-//! - **the network thread** (`teams-media-net`) owns the [`RelayedPeer`]: it turns the relay and `str0m`, sends the
-//!   queued packets, puts arriving ones into the jitter buffer, and runs the caller's SDP commands;
-//! - **the playout thread** (`teams-media-spk`) keeps the speaker's pace (one 10 ms frame every 10 ms), taking from
-//!   the jitter buffer what to decode, recover or conceal; each frame it hands the speaker is the one it hands the
-//!   audio processing as the far end, so the echo canceller hears exactly what is played;
-//! - **the decoding thread** (`teams-media-vid`), once the video started ([`MediaSession::start_video`]), decodes the
-//!   far end's H.264 the network thread hands it and shows each video line's on that line's sink (a group call
-//!   receives one participant's video on each of its receiving lines);
-//! - **the camera thread** (`teams-media-cam`), while the camera is on ([`MediaSession::set_camera`]), encodes the
-//!   camera's frames and queues them for the network thread, which sends them while our video line is negotiated to
-//!   send.
+//!   processing (echo cancellation, noise suppression, gain control: [`SessionConfig::processing`]) and hands it to
+//!   libwebrtc's audio source (silence while muted);
+//! - **the playout thread** (`teams-media-spk`) takes the far end's audio from libwebrtc, 10 ms at a time at
+//!   libwebrtc's own pace, and plays it; each frame it hands the speaker is the one it hands the audio processing as the
+//!   far end, so the echo canceller hears exactly what is played;
+//! - **the event thread** (`teams-media-net`) takes what libwebrtc tells (connected, lost, failed, a track the far end
+//!   sends on) and runs a group call's control plane ([`control`]) on the data channel;
+//! - **the decoding threads** (`teams-media-vid`, one per video track the far end sends on) show each decoded picture
+//!   on its video line's sink, once the session's video started ([`MediaSession::start_video`]);
+//! - **the camera thread** (`teams-media-cam`), while the camera is on ([`MediaSession::set_camera`]), hands the
+//!   camera's frames to libwebrtc, which encodes and sends them while our video line is negotiated to send.
 //!
-//! The handoffs are bounded both ways: the capture queue keeps the newest [`SessionConfig::send_queue`] packets (a
-//! network thread that falls behind loses the backlog, not the present), and the jitter buffer holds at most its
-//! capacity. No thread waits on another's device: a stuck speaker fills only the jitter buffer, and a stuck
-//! microphone only stops what is sent.
+//! No thread waits on another's device: a stuck speaker only stops what is played, a stuck microphone only what is
+//! sent.
 //!
-//! A session may start without its devices ([`MediaSession::start_without_devices`]): the network thread makes and
-//! takes the SDP and connects the media, and the capture and playout threads start only once
-//! [`MediaSession::open_devices`] opened the microphone and the speaker (a call's devices open only once the call
-//! went).
+//! A session may start without its devices ([`MediaSession::start_without_devices`]): libwebrtc makes and takes the
+//! SDP and connects the media, and the capture and playout threads start only once [`MediaSession::open_devices`]
+//! opened the microphone and the speaker (a call's devices open only once the call went).
 //!
-//! SDP crosses as `str0m`'s own (`teams_media::sdp` converts it to and from Teams' dialect); each command is answered
-//! by the network thread within [`COMMAND_TIMEOUT`]. The encoder starts as [`SessionConfig::opus`] says and turns DTX
-//! on or off as the far end's Opus line asks once its offer or answer is applied. [`MediaSession::close`] (or dropping
-//! the session) hangs up the peer, releases the allocation, and joins every thread. A thread that fails (the relay,
-//! `str0m`, the codec, the audio processing) reports [`SessionEvent::Failed`] and stops the session: the other threads
-//! end, and the network thread says goodbye and releases the allocation as well as it still can on its way out. The
-//! camera failing (its device gone: [`SessionEvent::DeviceClosed`]) or its encoder failing
-//! ([`SessionEvent::VideoFailed`]) stops only the camera thread and turns the camera off; the session goes on.
+//! SDP crosses as libwebrtc's standard SDP ([`SdpOffer`], [`SdpAnswer`]; `teams_media::sdp` converts it to and from
+//! Teams' dialect). [`MediaSession::close`] (or dropping the session) hangs up the peer and joins every thread. The
+//! connection failing reports [`SessionEvent::Failed`]; the camera failing (its device gone:
+//! [`SessionEvent::DeviceClosed`]) stops only the camera thread and turns the camera off; the session goes on.
 //!
-//! A group call's media also runs its control plane on the network thread ([`MediaSession::start_control`],
-//! [`control`]): the source requests the caller wants ([`MediaSession::request_sources`]) go to the call's mixer over
-//! the data channel, and what the mixer tells comes back as events (the dominant speakers). The levels of what the
-//! microphone hears and of what the speaker plays are kept ([`MediaSession::levels`]): who speaks in a 1:1 call.
+//! A group call's media also runs its control plane ([`MediaSession::start_control`], [`control`]): the source
+//! requests the caller wants ([`MediaSession::request_sources`]) go to the call's mixer over the data channel, and what
+//! the mixer tells comes back as events (the dominant speakers). The levels of what the microphone hears and of what
+//! the speaker plays are kept ([`MediaSession::levels`]): who speaks in a 1:1 call.
 
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use str0m::change::{SdpAnswer, SdpOffer, SdpPendingOffer};
+use futures_executor::block_on;
+use libwebrtc::audio_frame::AudioFrame as RtcAudioFrame;
+use libwebrtc::audio_stream::native::NativeAudioStream;
+use libwebrtc::audio_track::RtcAudioTrack;
 
 use crate::Error;
-use crate::codec::{Decoder, Encoder, OpusConfig, Packet, packet_samples};
-use crate::devices::{AudioFrame, AudioSink, AudioSource, Devices, FRAME_DURATION, FRAME_SAMPLES};
-use crate::devices::{VideoSink, VideoSource};
-use crate::jitter::{JitterBuffer, JitterConfig, JitterStats, Playout};
-use crate::peer::ReceivedVideo;
-use crate::peer::{PeerEvent, RelayedPeer};
-use crate::processing::{AudioProcessing, ProcessingConfig};
-use crate::queue::Queue;
-use crate::video::codec::{EncoderSettings, VideoDecoder, VideoEncoder};
-use crate::video::convert::MaxSize;
+use crate::devices::VideoSource;
+use crate::devices::{AudioFrame, AudioSink, AudioSource, Devices, FRAME_DURATION, FRAME_SAMPLES, SAMPLE_RATE};
+use crate::processing::{AudioProcessing, ProcessingConfig, from_i16, to_i16};
+use crate::relay::RelayConfig;
+use crate::rtc::{Next, Peer, PeerEvent, next_within};
+pub use crate::rtc::{SdpAnswer, SdpOffer};
 use control::Control;
 pub use control::SourceRequest;
-use video::{CameraLoop, DecodeLoop, OutgoingVideo, VideoShared};
+#[cfg(feature = "test-support")]
+pub(crate) use video::to_buffer as to_rtc_buffer;
+use video::{CameraLoop, VideoShared};
 pub use video::{RemoteSinks, VideoParts, VideoStats};
 
 mod control;
 mod video;
 
-/// How long the network thread may take to answer an SDP command.
-pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
-/// How long the network thread waits for a packet to send before it turns the relay again.
-const NET_WAIT: Duration = Duration::from_millis(1);
 /// How long the capture thread waits for the microphone before it checks whether to stop.
 const MIC_WAIT: Duration = Duration::from_millis(100);
-/// How far the playout may fall behind its clock (a stalled speaker or scheduler) before it starts its clock again
-/// instead of catching up in a burst.
-const MAX_PLAYOUT_LAG: Duration = Duration::from_millis(200);
+/// How long the event thread waits for an event before it turns the control plane.
+const NET_WAIT: Duration = Duration::from_millis(50);
 /// Events kept for a caller that doesn't read them; beyond it the newest are dropped.
 const EVENT_QUEUE: usize = 64;
-/// SDP commands waiting for the network thread.
-const COMMAND_QUEUE: usize = 8;
 
 /// How the session runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SessionConfig {
-    /// How the encoder starts; DTX then follows the far end's Opus line (`usedtx=1`) once its SDP is applied.
-    pub opus: OpusConfig,
-    pub jitter: JitterConfig,
-    /// Packets the capture thread may queue for the network thread (20 ms each); more drops the oldest.
-    pub send_queue: usize,
-    /// What the microphone's frames go through before they are encoded ([`ProcessingConfig::CALL`] by default;
+    /// What the microphone's frames go through before they are sent ([`ProcessingConfig::CALL`] by default;
     /// [`ProcessingConfig::OFF`] leaves them as they are).
     pub processing: ProcessingConfig,
 }
@@ -102,9 +82,6 @@ pub struct SessionConfig {
 impl Default for SessionConfig {
     fn default() -> Self {
         Self {
-            opus: OpusConfig::default(),
-            jitter: JitterConfig::default(),
-            send_queue: 10,
             processing: ProcessingConfig::CALL,
         }
     }
@@ -125,15 +102,12 @@ pub enum SessionEvent {
     Connected,
     /// ICE lost the far end; it may come back.
     Disconnected,
-    /// The far end closed the media. Final.
+    /// The far end closed the media (it went away once the media was up). Final.
     Closed,
-    /// The relay, `str0m`, the codec or the audio processing failed, and the session stopped: every thread ended, the
-    /// peer said goodbye and released the allocation as well as it still could. Final.
+    /// The connection or the audio processing failed, and the session stopped. Final.
     Failed(String),
     /// A device went away (or failed); its side of the media stopped, the rest goes on.
     DeviceClosed(SessionDevice),
-    /// The camera's encoder failed: what the camera sends stopped, the rest goes on.
-    VideoFailed(String),
     /// A group call's control plane is up: the mixer answered its handshake, naming what it sends and what it takes.
     ControlActive { send: Vec<String>, receive: Vec<String> },
     /// A source request went: numbered `sequence`, the line by its stream id, the source (`-1` for none).
@@ -168,25 +142,21 @@ fn rms(samples: &[f32]) -> f32 {
     (energy / count).sqrt()
 }
 
-/// The session's counts since it started.
+/// The session's counts since it started, in 10 ms audio frames.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct SessionStats {
-    /// Packets the encoder made.
+    /// Frames the microphone delivered.
     pub encoded: u64,
-    /// Packets handed to the peer.
+    /// Frames handed to libwebrtc.
     pub sent: u64,
-    /// Packets never sent: the capture queue was full, or the media wasn't connected.
+    /// Frames libwebrtc didn't take.
     pub unsent: u64,
-    /// Audio packets that arrived.
+    /// Frames of the far end's audio libwebrtc handed over.
     pub received: u64,
-    /// Arrived packets that weren't readable Opus, or failed to decode.
+    /// Frames of the far end's audio in a shape the speaker doesn't take.
     pub malformed: u64,
-    /// 10 ms frames handed to the speaker.
+    /// Frames handed to the speaker.
     pub frames_played: u64,
-    /// Packets in the jitter buffer now: the receiving side's delay, in packets.
-    pub buffered: usize,
-    /// The jitter buffer's counts.
-    pub jitter: JitterStats,
     /// The video's counts.
     pub video: VideoStats,
 }
@@ -207,11 +177,10 @@ struct Shared {
     /// The microphone is muted: the capture thread sends silence in its place.
     muted: AtomicBool,
     counters: Counters,
-    jitter: Mutex<JitterBuffer>,
-    /// The encoder's configuration once the far end's SDP changed it, for the capture thread to take.
-    negotiated: Mutex<Option<OpusConfig>>,
     events: SyncSender<SessionEvent>,
     video: VideoShared,
+    /// The far end's audio track, once it came.
+    far_audio: Mutex<Option<RtcAudioTrack>>,
     /// [`AudioLevels`], each an `f32`'s bits.
     near_level: AtomicU32,
     far_level: AtomicU32,
@@ -219,15 +188,14 @@ struct Shared {
 }
 
 impl Shared {
-    fn new(jitter: JitterConfig, events: SyncSender<SessionEvent>) -> Self {
+    fn new(events: SyncSender<SessionEvent>) -> Self {
         Self {
             stop: AtomicBool::new(false),
             muted: AtomicBool::new(false),
             counters: Counters::default(),
-            jitter: Mutex::new(JitterBuffer::new(jitter)),
-            negotiated: Mutex::new(None),
             events,
             video: VideoShared::default(),
+            far_audio: Mutex::new(None),
             near_level: AtomicU32::new(0),
             far_level: AtomicU32::new(0),
             captured_level: AtomicU32::new(0),
@@ -242,10 +210,6 @@ impl Shared {
         }
     }
 
-    fn jitter(&self) -> MutexGuard<'_, JitterBuffer> {
-        self.jitter.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
     fn stopping(&self) -> bool {
         self.stop.load(Ordering::Relaxed)
     }
@@ -257,10 +221,9 @@ impl Shared {
         }
     }
 
-    /// Reports that a thread failed with `error` and stops the session: the other threads end at their next turn, the
-    /// network thread hanging up on its way out.
-    fn fail(&self, error: &Error) {
-        self.report(SessionEvent::Failed(error.to_string()));
+    /// Reports that the session failed with `why` and stops it: the other threads end at their next turn.
+    fn fail(&self, why: String) {
+        self.report(SessionEvent::Failed(why));
         self.stop.store(true, Ordering::Relaxed);
     }
 
@@ -271,7 +234,6 @@ impl Shared {
     fn stats(&self) -> SessionStats {
         let read = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
         let counters = &self.counters;
-        let jitter = self.jitter();
         SessionStats {
             encoded: read(&counters.encoded),
             sent: read(&counters.sent),
@@ -279,394 +241,322 @@ impl Shared {
             received: read(&counters.received),
             malformed: read(&counters.malformed),
             frames_played: read(&counters.frames_played),
-            buffered: jitter.len(),
-            jitter: jitter.stats(),
             video: self.video.stats(),
         }
     }
 
-    fn negotiated(&self) -> MutexGuard<'_, Option<OpusConfig>> {
-        self.negotiated.lock().unwrap_or_else(PoisonError::into_inner)
+    fn far_audio(&self) -> MutexGuard<'_, Option<RtcAudioTrack>> {
+        self.far_audio.lock().unwrap_or_else(PoisonError::into_inner)
     }
 }
 
-/// A packet on its way from the capture thread to the network thread.
-struct Outgoing {
-    packet: Packet,
-    captured: Instant,
+/// The capture and playout threads' parts, waiting for the devices: the processing they share.
+struct Unopened {
+    processing: Option<Arc<AudioProcessing>>,
 }
 
-enum Command {
-    Offer(Sender<Result<SdpOffer, Error>>),
-    Reoffer(Sender<Result<SdpOffer, Error>>),
-    AcceptAnswer(SdpAnswer, Sender<Result<(), Error>>),
-    AcceptOffer(SdpOffer, Sender<Result<SdpAnswer, Error>>),
-    OfferVideo(bool, Sender<Result<Option<SdpOffer>, Error>>),
-    OfferGroup(usize, Sender<Result<SdpOffer, Error>>),
-    TakeSlots(Sender<Result<(), Error>>),
-    StartControl(Option<u32>, Sender<Result<(), Error>>),
+/// What the event thread takes: libwebrtc's events and the caller's control plane commands.
+enum Input {
+    Peer(PeerEvent),
+    StartControl(Option<u32>),
     RequestSources(Vec<SourceRequest>),
 }
 
 /// A running media session.
 pub struct MediaSession {
     shared: Arc<Shared>,
-    commands: SyncSender<Command>,
+    peer: Arc<Peer>,
+    inputs: Sender<Input>,
     /// Behind a lock so a session is shared between threads (`Sync`): an engine asks it from one thread and runs its
-    /// SDP commands from another.
+    /// SDP steps from another.
     events: Mutex<Receiver<SessionEvent>>,
     /// Behind a lock so the devices open on a shared session ([`MediaSession::open_devices`]).
     threads: Mutex<Vec<JoinHandle<()>>>,
     /// What the capture and playout threads take once the devices open; `None` once they did.
     unopened: Mutex<Option<Unopened>>,
-    /// The video's queues, and what its camera runs with once it started ([`MediaSession::start_video`]).
-    video: Mutex<SessionVideo>,
-}
-
-/// The session's video: its queues, and once it started, what a camera runs with and the camera running now.
-struct SessionVideo {
-    /// Encoded frames, from the camera thread to the network thread.
-    outgoing: Queue<OutgoingVideo>,
-    /// Received access units, from the network thread to the decoding thread.
-    incoming: Queue<ReceivedVideo>,
-    /// What a camera runs with, once the video started.
-    camera_parts: Option<CameraParts>,
-    /// The camera thread running now, with its own stop.
-    camera: Option<(Arc<AtomicBool>, JoinHandle<()>)>,
-    /// The session's video clock's start.
-    epoch: Instant,
-}
-
-/// What each camera the session turns on runs with; the self view is handed from one camera thread to the next.
-struct CameraParts {
-    encoder: EncoderSettings,
-    max_size: MaxSize,
-    preview: Arc<Mutex<Option<Box<dyn VideoSink>>>>,
-}
-
-/// The capture and playout threads' parts, made when the session starts, waiting for the devices.
-struct Unopened {
-    encoder: Encoder,
-    decoder: Decoder,
-    processing: Option<Arc<AudioProcessing>>,
-    outgoing: Queue<Outgoing>,
+    /// The camera running now, and what it runs with once the video started.
+    video: Mutex<video::SessionVideo>,
+    /// One SDP step at a time: libwebrtc takes its descriptions in the order they are applied.
+    negotiation: Mutex<()>,
 }
 
 impl MediaSession {
-    /// Opens the microphone and the speaker of `devices` and starts the session's threads on `peer`: as
+    /// Opens the microphone and the speaker of `devices` and starts the session relayed through `relay`: as
     /// [`MediaSession::start_without_devices`], then [`MediaSession::open_devices`]. Nothing is sent until the SDP is
     /// exchanged and the media connects.
     ///
     /// # Errors
-    /// As those two's.
-    pub fn start(peer: RelayedPeer, devices: &dyn Devices, config: SessionConfig) -> Result<Self, Error> {
-        let session = Self::start_without_devices(peer, config)?;
+    /// As [`MediaSession::start_without_devices`] and [`MediaSession::open_devices`].
+    pub fn start(relay: &RelayConfig, devices: &dyn Devices, config: SessionConfig) -> Result<Self, Error> {
+        let session = Self::start_without_devices(relay, config)?;
         session.open_devices(devices)?;
         Ok(session)
     }
 
-    /// Starts the session's network thread on `peer`, its devices not opened: the SDP and the media's connection run,
-    /// nothing is captured, sent or played until [`MediaSession::open_devices`] (a call's offer or answer is made
-    /// before the call goes, its devices opened only once it went).
+    /// Starts the session relayed through `relay` with no device open: its peer makes and takes the SDP and connects
+    /// the media, and [`MediaSession::open_devices`] later starts what the devices carry.
     ///
     /// # Errors
-    /// [`Error::Opus`] when libopus refuses the setup, [`Error::Processing`] when the audio processing can't be set
-    /// up, [`Error::Io`] when the thread can't be started.
-    pub fn start_without_devices(peer: RelayedPeer, config: SessionConfig) -> Result<Self, Error> {
-        let encoder = Encoder::new(&config.opus)?;
-        let decoder = Decoder::new()?;
+    /// [`Error::Rtc`] when libwebrtc refuses the peer, [`Error::Processing`] when the audio processing can't be set
+    /// up, [`Error::Io`] when a thread can't be spawned.
+    pub fn start_without_devices(relay: &RelayConfig, config: SessionConfig) -> Result<Self, Error> {
         let processing = if config.processing.any() {
             Some(Arc::new(AudioProcessing::new(config.processing)?))
         } else {
             None
         };
-        let (events_tx, events) = mpsc::sync_channel(EVENT_QUEUE);
-        let (commands, commands_rx) = mpsc::sync_channel(COMMAND_QUEUE);
-        let shared = Arc::new(Shared::new(config.jitter, events_tx));
-        let outgoing = Queue::new(config.send_queue.max(1));
-        let video_out = Queue::new(video::SEND_QUEUE);
-        let video_in = Queue::new(video::DECODE_QUEUE);
-        let session = Self {
+        let (event_tx, event_rx) = mpsc::sync_channel(EVENT_QUEUE);
+        let shared = Arc::new(Shared::new(event_tx));
+        let (inputs, input_rx) = mpsc::channel();
+        let peer_inputs = Mutex::new(inputs.clone());
+        let events: crate::rtc::Events = Arc::new(move |event| {
+            let _ = peer_inputs
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .send(Input::Peer(event));
+        });
+        let peer = Arc::new(Peer::new(relay, events)?);
+        let net = Network {
             shared: Arc::clone(&shared),
-            commands,
-            events: Mutex::new(events),
-            threads: Mutex::new(Vec::with_capacity(3)),
-            unopened: Mutex::new(Some(Unopened {
-                encoder,
-                decoder,
-                processing,
-                outgoing: outgoing.clone(),
-            })),
-            video: Mutex::new(SessionVideo {
-                outgoing: video_out.clone(),
-                incoming: video_in.clone(),
-                camera_parts: None,
-                camera: None,
-                epoch: Instant::now(),
-            }),
-        };
-        let network = Network {
-            peer,
-            shared,
-            commands: commands_rx,
-            outgoing,
-            pending: None,
-            opus: config.opus,
-            opus_pending: false,
-            video_out,
-            video_in,
-            was_sending: false,
-            desired: 0,
+            peer: Arc::clone(&peer),
+            inputs: input_rx,
             control: None,
+            decoding: Arc::new(Mutex::new(HashSet::new())),
         };
-        session.spawn("teams-media-net", move || network.run())?;
-        Ok(session)
+        let handle = thread::Builder::new()
+            .name("teams-media-net".into())
+            .spawn(move || net.run())?;
+        Ok(Self {
+            shared,
+            peer,
+            inputs,
+            events: Mutex::new(event_rx),
+            threads: Mutex::new(vec![handle]),
+            unopened: Mutex::new(Some(Unopened { processing })),
+            video: Mutex::new(video::SessionVideo::default()),
+            negotiation: Mutex::new(()),
+        })
     }
 
-    /// Opens the microphone and the speaker of `devices` and starts the capture and playout threads; once only (a
-    /// later call opens nothing).
+    /// Opens the microphone and the speaker of `devices` and starts the capture and playout threads; nothing when
+    /// they are open already.
     ///
     /// # Errors
-    /// [`Error::Device`] when a device can't be opened (the session goes on without them, and they may be opened
-    /// again), [`Error::Io`] when a thread can't be started.
+    /// [`Error::Device`] when a device can't be opened, [`Error::Io`] when a thread can't be spawned.
     pub fn open_devices(&self, devices: &dyn Devices) -> Result<(), Error> {
-        let mut unopened = lock(&self.unopened);
-        if unopened.is_none() {
+        let mut unopened = self.unopened.lock().unwrap_or_else(PoisonError::into_inner);
+        let Some(Unopened { processing }) = unopened.as_ref() else {
             return Ok(());
-        }
+        };
         let microphone = devices.microphone()?;
         let speaker = devices.speaker()?;
-        let Some(parts) = unopened.take() else {
-            return Ok(());
-        };
         let capture = Capture {
+            shared: Arc::clone(&self.shared),
+            peer: Arc::clone(&self.peer),
             microphone,
-            encoder: parts.encoder,
-            processing: parts.processing.clone(),
-            outgoing: parts.outgoing,
-            shared: Arc::clone(&self.shared),
+            processing: processing.clone(),
         };
-        self.spawn("teams-media-mic", move || capture.run())?;
-        let playout = PlayoutLoop {
+        let playout = Playout {
+            shared: Arc::clone(&self.shared),
             speaker,
-            decoder: parts.decoder,
-            processing: parts.processing,
-            shared: Arc::clone(&self.shared),
-            pcm: Vec::with_capacity(crate::codec::MAX_PACKET_SAMPLES + FRAME_SAMPLES),
+            processing: processing.clone(),
         };
-        self.spawn("teams-media-spk", move || playout.run())?;
+        let mut threads = self.threads.lock().unwrap_or_else(PoisonError::into_inner);
+        threads.push(
+            thread::Builder::new()
+                .name("teams-media-mic".into())
+                .spawn(move || capture.run())?,
+        );
+        threads.push(
+            thread::Builder::new()
+                .name("teams-media-spk".into())
+                .spawn(move || playout.run())?,
+        );
+        *unopened = None;
         Ok(())
     }
 
-    fn spawn(&self, name: &str, run: impl FnOnce() + Send + 'static) -> Result<(), Error> {
-        let handle = thread::Builder::new().name(name.to_owned()).spawn(run)?;
-        lock(&self.threads).push(handle);
-        Ok(())
+    fn negotiating(&self) -> MutexGuard<'_, ()> {
+        self.negotiation.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Offers one send-and-receive audio line; the answer goes to [`MediaSession::accept_answer`].
+    /// Our offer of one send-and-receive audio line (a 1:1 call's start). Pass the answer to
+    /// [`MediaSession::accept_answer`].
     ///
     /// # Errors
-    /// [`Error::Rtc`] if `str0m` fails, [`Error::Timeout`] or [`Error::SessionEnded`] when the network thread doesn't
-    /// answer.
+    /// [`Error::Rtc`] when libwebrtc makes no offer, or the relay allocated nothing.
     pub fn offer_audio(&self) -> Result<SdpOffer, Error> {
-        self.request(Command::Offer)
+        let _step = self.negotiating();
+        self.peer.offer_audio()
     }
 
-    /// Offers the running line again with fresh ICE credentials (an ICE restart, [`crate::peer::Peer::reoffer`]): a
-    /// renegotiation of the call's media; the answer goes to [`MediaSession::accept_answer`].
+    /// Offers the session again, its lines as they are.
     ///
     /// # Errors
-    /// [`Error::Rtc`] if `str0m` fails, [`Error::Timeout`] or [`Error::SessionEnded`] when the network thread doesn't
-    /// answer.
+    /// As [`MediaSession::offer_audio`].
     pub fn reoffer(&self) -> Result<SdpOffer, Error> {
-        self.request(Command::Reoffer)
+        let _step = self.negotiating();
+        self.peer.offer()
     }
 
-    /// Offers a group call's media ([`crate::peer::Peer::offer_group`]: audio, the main video line, `slots` receiving
-    /// video lines, the sharing line and the data channel); the answer goes to [`MediaSession::accept_answer`].
+    /// A group call's offer, as the web client makes it: audio, the main video line, `slots` receiving video lines,
+    /// the sharing line and the data channel.
     ///
     /// # Errors
-    /// As [`MediaSession::offer_audio`]'s.
+    /// As [`MediaSession::offer_audio`].
     pub fn offer_group(&self, slots: usize) -> Result<SdpOffer, Error> {
-        self.request(|reply| Command::OfferGroup(slots, reply))
+        let _step = self.negotiating();
+        self.peer.offer_group(slots)
     }
 
-    /// From the far end's next offer on, the video lines after its main one are receiving lines (a group call's
-    /// mixer's offer, [`crate::peer::Peer::take_slots`]).
+    /// Starts a group call's control plane, sending as `source` (the data line's stream id, when the far end named
+    /// one): the data channel opened on the far end's data line when our offer didn't make it, `syn` sent once it is
+    /// open.
     ///
     /// # Errors
-    /// [`Error::Timeout`] or [`Error::SessionEnded`] when the network thread doesn't answer.
-    pub fn take_slots(&self) -> Result<(), Error> {
-        self.request(Command::TakeSlots)
-    }
-
-    /// Starts a group call's control plane, sending as `source` (the call's data line's stream id, when known): the
-    /// data channel opened on the far end's data line (or the one our group offer made), its handshake once it opens.
-    /// Once only (a later call changes nothing).
-    ///
-    /// # Errors
-    /// [`Error::Rtc`] if `str0m` fails, [`Error::Timeout`] or [`Error::SessionEnded`] when the network thread doesn't
-    /// answer.
+    /// [`Error::Rtc`] when the data channel can't be made, [`Error::SessionEnded`] once the session stopped.
     pub fn start_control(&self, source: Option<u32>) -> Result<(), Error> {
-        self.request(|reply| Command::StartControl(source, reply))
+        self.peer.open_channel()?;
+        self.inputs
+            .send(Input::StartControl(source))
+            .map_err(|_| Error::SessionEnded)
     }
 
-    /// Which participant's video to receive on which receiving line ([`SourceRequest`]s, the lines by their stream
-    /// ids): sent to the mixer once its control plane is up, each line only when it changed (a line left out gets no
-    /// source). It doesn't wait for the network thread (an engine asks it from its own thread).
+    /// The sources the caller wants on the receiving lines now; each line's change goes to the mixer once its control
+    /// plane is up.
     ///
     /// # Errors
-    /// [`Error::Timeout`] when the network thread's commands are full (the next request carries what this one would
-    /// have), [`Error::SessionEnded`] when it is gone.
+    /// [`Error::SessionEnded`] once the session stopped.
     pub fn request_sources(&self, wanted: Vec<SourceRequest>) -> Result<(), Error> {
-        match self.commands.try_send(Command::RequestSources(wanted)) {
-            Ok(()) => Ok(()),
-            Err(TrySendError::Full(_)) => Err(Error::Timeout("the media session's network thread")),
-            Err(TrySendError::Disconnected(_)) => Err(Error::SessionEnded),
-        }
+        self.inputs
+            .send(Input::RequestSources(wanted))
+            .map_err(|_| Error::SessionEnded)
     }
 
-    /// How loud the call is on each side now ([`AudioLevels`]).
+    /// How loud the call is on each side now.
     #[must_use]
     pub fn levels(&self) -> AudioLevels {
         self.shared.levels()
     }
 
-    /// Starts the session's video ([`VideoParts`]): the decoding thread, showing what the far end sends on `remote`,
-    /// and what each camera turned on later runs with ([`MediaSession::set_camera`]). Once only (a later call starts
-    /// nothing).
+    /// Starts the session's video: the far end's video shown on `parts.remote`'s sinks, the camera sent as
+    /// `parts.encoder` says once it is on.
     ///
     /// # Errors
-    /// [`Error::Video`] when the codec refuses its setup, [`Error::Io`] when the thread can't be started.
+    /// [`Error::Rtc`] when libwebrtc's video can't start.
     pub fn start_video(&self, parts: VideoParts) -> Result<(), Error> {
-        let mut video = lock(&self.video);
-        if video.camera_parts.is_some() {
-            return Ok(());
-        }
-        // the decoder sets up (or the video doesn't start): each line's decoder is made as its first frame comes
-        drop(VideoDecoder::new()?);
-        let decoding = DecodeLoop {
-            sinks: parts.remote,
-            incoming: video.incoming.clone(),
-            shared: Arc::clone(&self.shared),
-            lines: HashMap::new(),
-        };
-        self.spawn("teams-media-vid", move || decoding.run())?;
-        video.camera_parts = Some(CameraParts {
-            encoder: parts.encoder,
-            max_size: parts.max_size,
-            preview: Arc::new(Mutex::new(parts.preview)),
-        });
+        self.peer.start_video(parts.encoder)?;
         self.shared.video.started.store(true, Ordering::Relaxed);
+        self.video
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .start(parts, &self.shared);
         Ok(())
     }
 
-    /// Turns the camera on with `camera` (its frames encoded and sent while our video line is negotiated to send), or
-    /// off with `None` (its thread stopped and joined; nothing more is sent). A camera already on is replaced.
+    /// Turns the camera on (`Some`: its frames sent from now on) or off (`None`); the line's direction goes by the SDP
+    /// the caller offers next.
     ///
     /// # Errors
-    /// [`Error::Video`] before the video started or when the encoder can't be set up, [`Error::Io`] when the thread
-    /// can't be started.
+    /// [`Error::Video`] when the video didn't start, [`Error::Io`] when the camera thread can't be spawned.
     pub fn set_camera(&self, camera: Option<Box<dyn VideoSource>>) -> Result<(), Error> {
-        let mut video = lock(&self.video);
-        if let Some((stop, thread)) = video.camera.take() {
-            stop.store(true, Ordering::Relaxed);
-            let _ = thread.join();
-        }
-        let shared = &self.shared.video;
-        shared.camera_on.store(false, Ordering::Relaxed);
+        let mut video = self.video.lock().unwrap_or_else(PoisonError::into_inner);
+        video.stop_camera();
         let Some(camera) = camera else {
+            self.peer.set_sending(false);
+            self.shared.video.camera_on.store(false, Ordering::Relaxed);
             return Ok(());
         };
-        let parts = video
-            .camera_parts
-            .as_ref()
-            .ok_or_else(|| Error::Video("the session's video hasn't started".into()))?;
-        let encoder = VideoEncoder::new(parts.encoder)?;
-        let stop = Arc::new(AtomicBool::new(false));
-        let camera_loop = CameraLoop {
-            camera,
-            encoder,
-            max_size: parts.max_size,
-            preview: Arc::clone(&parts.preview),
-            outgoing: video.outgoing.clone(),
-            shared: Arc::clone(&self.shared),
-            stop: Arc::clone(&stop),
-            epoch: video.epoch,
+        let Some(source) = self.peer.video_source() else {
+            return Err(Error::Video("the session's video didn't start".into()));
         };
-        shared.desired.store(
-            u64::from(parts.encoder.max_bitrate) + video::AUDIO_HEADROOM,
-            Ordering::Relaxed,
-        );
-        let thread = video::spawn("teams-media-cam", move || camera_loop.run())?;
-        shared.camera_on.store(true, Ordering::Relaxed);
-        video.camera = Some((stop, thread));
+        let (max_size, preview) = video
+            .camera_parts()
+            .ok_or_else(|| Error::Video("the session's video didn't start".into()))?;
+        let stop = Arc::new(AtomicBool::new(false));
+        let camera = CameraLoop {
+            shared: Arc::clone(&self.shared),
+            peer: Arc::clone(&self.peer),
+            source,
+            camera,
+            max_size,
+            preview,
+            stop: Arc::clone(&stop),
+        };
+        // on before the thread runs: a camera that fails at once turns it off again from there
+        self.shared.video.camera_on.store(true, Ordering::Relaxed);
+        self.peer.set_sending(true);
+        let handle = match thread::Builder::new()
+            .name("teams-media-cam".into())
+            .spawn(move || camera.run())
+        {
+            Ok(handle) => handle,
+            Err(error) => {
+                self.shared.video.camera_on.store(false, Ordering::Relaxed);
+                self.peer.set_sending(false);
+                return Err(error.into());
+            }
+        };
+        video.camera = Some((stop, handle));
         Ok(())
     }
 
-    /// Whether the camera is on ([`MediaSession::set_camera`]).
+    /// Whether the camera is on.
     #[must_use]
     pub fn camera_on(&self) -> bool {
         self.shared.video.camera_on.load(Ordering::Relaxed)
     }
 
-    /// Offers the session again with our video line sending (`true`, the camera on) or only receiving
-    /// ([`crate::peer::Peer::offer_video`]); the answer goes to [`MediaSession::accept_answer`]. `None` when the line
-    /// already goes that way: nothing to offer.
+    /// Our offer with the main video line on (added when the call has none), for the camera turned on or off
+    /// (`sending`: the dialect writes the line's direction as the camera goes).
     ///
     /// # Errors
-    /// [`Error::Rtc`] if `str0m` fails, [`Error::Timeout`] or [`Error::SessionEnded`] when the network thread doesn't
-    /// answer.
+    /// As [`MediaSession::offer_audio`]; [`Error::Video`] when the video didn't start.
     pub fn offer_video(&self, sending: bool) -> Result<Option<SdpOffer>, Error> {
-        self.request(|reply| Command::OfferVideo(sending, reply))
+        if self.peer.video_source().is_none() {
+            return Err(Error::Video("the session's video didn't start".into()));
+        }
+        let _step = self.negotiating();
+        self.peer.set_sending(sending && self.camera_on());
+        self.peer.offer_video().map(Some)
     }
 
-    /// Mutes (`true`) or unmutes the microphone: while muted the capture thread encodes and sends silence in place of
-    /// what it hears (the line and its timing go on), and the device stays open.
+    /// Mutes or unmutes the microphone: muted, silence is sent in its place.
     pub fn set_muted(&self, muted: bool) {
         self.shared.muted.store(muted, Ordering::Relaxed);
     }
 
-    /// Whether the microphone is muted ([`MediaSession::set_muted`]).
     #[must_use]
     pub fn is_muted(&self) -> bool {
         self.shared.muted.load(Ordering::Relaxed)
     }
 
-    /// Applies the far end's answer to our last offer.
+    /// Applies the far end's answer to our latest offer.
     ///
     /// # Errors
-    /// [`Error::Rtc`] if `str0m` refuses it or no offer is pending, [`Error::Timeout`] or [`Error::SessionEnded`] when
-    /// the network thread doesn't answer.
+    /// [`Error::Rtc`] when libwebrtc refuses it.
     pub fn accept_answer(&self, answer: SdpAnswer) -> Result<(), Error> {
-        self.request(|reply| Command::AcceptAnswer(answer, reply))
+        let _step = self.negotiating();
+        self.peer.accept_answer(answer)
     }
 
     /// Answers the far end's offer.
     ///
     /// # Errors
-    /// [`Error::Rtc`] if `str0m` refuses it, [`Error::Timeout`] or [`Error::SessionEnded`] when the network thread
-    /// doesn't answer.
+    /// [`Error::Rtc`] when libwebrtc refuses it, or the relay allocated nothing.
     pub fn accept_offer(&self, offer: SdpOffer) -> Result<SdpAnswer, Error> {
-        self.request(|reply| Command::AcceptOffer(offer, reply))
+        let _step = self.negotiating();
+        self.peer.accept_offer(offer)
     }
 
-    fn request<T>(&self, command: impl FnOnce(Sender<Result<T, Error>>) -> Command) -> Result<T, Error> {
-        let (reply, answer) = mpsc::channel();
-        self.commands.send(command(reply)).map_err(|_| Error::SessionEnded)?;
-        match answer.recv_timeout(COMMAND_TIMEOUT) {
-            Ok(result) => result,
-            Err(RecvTimeoutError::Timeout) => Err(Error::Timeout("the media session's network thread")),
-            Err(RecvTimeoutError::Disconnected) => Err(Error::SessionEnded),
-        }
-    }
-
-    /// The next event, waiting up to `timeout`.
-    #[must_use]
+    /// The next event, waiting at most `timeout` (`Duration::ZERO`: only one already there).
     pub fn next_event(&self, timeout: Duration) -> Option<SessionEvent> {
         let events = self.events.lock().unwrap_or_else(PoisonError::into_inner);
-        events.recv_timeout(timeout).ok()
+        if timeout.is_zero() {
+            events.try_recv().ok()
+        } else {
+            events.recv_timeout(timeout).ok()
+        }
     }
 
     #[must_use]
@@ -674,431 +564,311 @@ impl MediaSession {
         self.shared.stats()
     }
 
-    /// Hangs up: the peer says goodbye, the allocation is released, every thread is joined. Returns the final counts.
-    #[must_use]
+    /// Hangs up and joins every thread; the counts as they ended.
     pub fn close(mut self) -> SessionStats {
-        self.stop();
+        self.shut_down();
         self.shared.stats()
     }
 
-    fn stop(&mut self) {
+    fn shut_down(&mut self) {
         self.shared.stop.store(true, Ordering::Relaxed);
-        let camera = lock(&self.video).camera.take();
-        if let Some((stop, thread)) = camera {
-            stop.store(true, Ordering::Relaxed);
-            let _ = thread.join();
-        }
-        let threads = std::mem::take(self.threads.get_mut().unwrap_or_else(PoisonError::into_inner));
+        self.video.lock().unwrap_or_else(PoisonError::into_inner).stop_camera();
+        self.peer.close();
+        let threads = std::mem::take(&mut *self.threads.lock().unwrap_or_else(PoisonError::into_inner));
         for handle in threads {
-            // a thread that panicked has nothing left to stop
             let _ = handle.join();
         }
+        self.video
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .join_decoders();
     }
 }
 
 impl Drop for MediaSession {
     fn drop(&mut self) {
-        self.stop();
+        self.shut_down();
     }
 }
 
-/// The network thread.
+/// The event thread: libwebrtc's events turned into the session's, a group call's control plane turned.
 struct Network {
-    peer: RelayedPeer,
     shared: Arc<Shared>,
-    commands: Receiver<Command>,
-    outgoing: Queue<Outgoing>,
-    pending: Option<SdpPendingOffer>,
-    /// The encoder's starting configuration, which the far end's SDP changes only in DTX.
-    opus: OpusConfig,
-    /// The far end's SDP was applied and its Opus line not yet read.
-    opus_pending: bool,
-    /// Encoded frames from the camera thread.
-    video_out: Queue<OutgoingVideo>,
-    /// Received access units for the decoding thread.
-    video_in: Queue<ReceivedVideo>,
-    /// Our video line was negotiated to send at the last turn.
-    was_sending: bool,
-    /// The bitrate the bandwidth estimate was last asked to look for.
-    desired: u64,
-    /// A group call's control plane, once started.
+    peer: Arc<Peer>,
+    inputs: Receiver<Input>,
     control: Option<Control>,
+    /// The video lines a decoding thread runs for now, by mid (a thread takes its line out when it ends).
+    decoding: Arc<Mutex<HashSet<String>>>,
 }
 
 impl Network {
     fn run(mut self) {
         while !self.shared.stopping() {
-            if let Err(error) = self.turn() {
-                self.shared.fail(&error);
-                break;
+            match self.inputs.recv_timeout(NET_WAIT) {
+                Ok(input) => self.take(input),
+                Err(RecvTimeoutError::Timeout) => {}
+                Err(RecvTimeoutError::Disconnected) => break,
+            }
+            if let Some(control) = self.control.as_mut() {
+                control.turn(Instant::now(), &self.peer, &self.shared);
             }
         }
-        self.hang_up();
     }
 
-    fn turn(&mut self) -> Result<(), Error> {
-        while let Ok(command) = self.commands.try_recv() {
-            self.command(command);
-        }
-        let now = Instant::now();
-        self.peer.turn(now)?;
-        while let Some(event) = self.peer.peer().poll_event() {
-            match (event, &mut self.control) {
-                (PeerEvent::ChannelData(data), Some(control)) => {
-                    control.receive(&data, self.peer.peer(), &self.shared)?;
-                }
-                (event, _) => self.on_event(event),
+    fn take(&mut self, input: Input) {
+        match input {
+            Input::Peer(event) => self.peer_event(event),
+            Input::StartControl(source) => {
+                let mut control = Control::new(source);
+                control.turn(Instant::now(), &self.peer, &self.shared);
+                self.control = Some(control);
             }
-        }
-        if let Some(control) = &mut self.control {
-            control.turn(now, self.peer.peer(), &self.shared)?;
-            self.peer.flush(now)?;
-        }
-        self.negotiate_opus();
-        self.video_turn()?;
-        match self.outgoing.recv(NET_WAIT) {
-            Ok(Some(first)) => {
-                self.send(&first)?;
-                while let Ok(Some(next)) = self.outgoing.recv(Duration::ZERO) {
-                    self.send(&next)?;
-                }
-            }
-            Ok(None) => {}
-            // the microphone is gone: keep receiving, at the same pace
-            Err(_) => thread::sleep(NET_WAIT),
-        }
-        Ok(())
-    }
-
-    fn command(&mut self, command: Command) {
-        let peer = self.peer.peer();
-        // a caller that stopped waiting has nothing to hear: an answer it can't take is dropped
-        match command {
-            Command::Offer(reply) => {
-                let offer = peer.offer_audio().map(|(offer, pending)| {
-                    self.pending = Some(pending);
-                    offer
-                });
-                let _ = reply.send(offer);
-            }
-            Command::Reoffer(reply) => {
-                let offer = peer.reoffer().map(|(offer, pending)| {
-                    self.pending = Some(pending);
-                    offer
-                });
-                let _ = reply.send(offer);
-            }
-            Command::AcceptAnswer(answer, reply) => {
-                let result = match self.pending.take() {
-                    Some(pending) => peer.accept_answer(pending, answer),
-                    None => Err(Error::Rtc("no offer is waiting for an answer".into())),
-                };
-                self.opus_pending |= result.is_ok();
-                let _ = reply.send(result);
-            }
-            Command::AcceptOffer(offer, reply) => {
-                let result = peer.accept_offer(offer);
-                self.opus_pending |= result.is_ok();
-                let _ = reply.send(result);
-            }
-            Command::OfferVideo(sending, reply) => {
-                let offer = peer.offer_video(sending).map(|offered| {
-                    offered.map(|(offer, pending)| {
-                        self.pending = Some(pending);
-                        offer
-                    })
-                });
-                let _ = reply.send(offer);
-            }
-            Command::OfferGroup(slots, reply) => {
-                let offer = peer.offer_group(slots).map(|(offer, pending)| {
-                    self.pending = Some(pending);
-                    offer
-                });
-                let _ = reply.send(offer);
-            }
-            Command::TakeSlots(reply) => {
-                peer.take_slots();
-                let _ = reply.send(Ok(()));
-            }
-            Command::StartControl(source, reply) => {
-                let result = peer.open_channel();
-                if result.is_ok() && self.control.is_none() {
-                    self.control = Some(Control::new(source));
-                }
-                let _ = reply.send(result);
-            }
-            Command::RequestSources(wanted) => {
-                // without a control plane there is nobody to ask: a 1:1 call's media has none
-                if let Some(control) = &mut self.control
-                    && let Err(error) = control.request(wanted, peer, &self.shared)
-                {
-                    self.shared.fail(&error);
+            Input::RequestSources(wanted) => {
+                if let Some(control) = self.control.as_mut() {
+                    control.request(wanted, &self.peer, &self.shared);
                 }
             }
         }
     }
 
-    /// The video's part of a turn: the bitrate the estimate looks for, a keyframe the decoding thread wants, and the
-    /// camera's encoded frames sent while our line is negotiated to send (the first one after it began to send asked
-    /// to be an IDR).
-    fn video_turn(&mut self) -> Result<(), Error> {
-        let video = &self.shared.video;
-        let desired = if video.camera_on.load(Ordering::Relaxed) {
-            video.desired.load(Ordering::Relaxed)
-        } else {
-            video::AUDIO_HEADROOM
-        };
-        let peer = self.peer.peer();
-        if desired != self.desired {
-            self.desired = desired;
-            peer.set_desired_bitrate(desired);
-        }
-        let needed = video.keyframe_needed.swap(0, Ordering::Relaxed);
-        for line in (0..64).filter(|line| needed & (1 << line) != 0) {
-            if peer.request_keyframe(line) {
-                VideoShared::count(&video.keyframes_requested, 1);
-            }
-        }
-        let sending = peer.is_connected() && peer.video_sending();
-        if sending && !self.was_sending {
-            video.keyframe_wanted.store(true, Ordering::Relaxed);
-        }
-        self.was_sending = sending;
-        let now = Instant::now();
-        while let Ok(Some(frame)) = self.video_out.recv(Duration::ZERO) {
-            let peer = self.peer.peer();
-            // a frame `str0m` won't take (our line's new direction offered and not yet answered: no sending stream
-            // yet) isn't sent; the call's audio goes on
-            if peer
-                .write_video(now, frame.captured, frame.rtp_time, &frame.frame.data)
-                .is_ok()
-            {
-                VideoShared::count(&video.sent, 1);
-            } else {
-                VideoShared::count(&video.unsent, 1);
-            }
-            self.peer.flush(now)?;
-        }
-        Ok(())
-    }
-
-    /// Once the far end's SDP was applied and the audio line is known (at once for our offer, once the media connects
-    /// for theirs), hands the capture thread the encoder's configuration with DTX as the far end's Opus line asks.
-    fn negotiate_opus(&mut self) {
-        let peer = self.peer.peer();
-        if !self.opus_pending || peer.audio_mid().is_none() {
-            return;
-        }
-        self.opus_pending = false;
-        if let Some(remote) = peer.remote_opus() {
-            *self.shared.negotiated() = Some(OpusConfig {
-                dtx: remote.dtx,
-                ..self.opus
-            });
-        }
-    }
-
-    fn on_event(&self, event: PeerEvent) {
-        let video = &self.shared.video;
+    fn peer_event(&mut self, event: PeerEvent) {
         match event {
             PeerEvent::Connected => self.shared.report(SessionEvent::Connected),
             PeerEvent::Disconnected => self.shared.report(SessionEvent::Disconnected),
+            PeerEvent::Failed(why) => self.shared.fail(why),
             PeerEvent::Closed => self.shared.report(SessionEvent::Closed),
-            PeerEvent::Audio(audio) => {
-                Shared::count(&self.shared.counters.received, 1);
-                match packet_samples(&audio.payload) {
-                    Some(samples) => {
-                        let ticks = u64::try_from(samples).unwrap_or(u64::MAX);
-                        self.shared.jitter().push(audio.rtp_time, ticks, audio.payload);
-                    }
-                    None => Shared::count(&self.shared.counters.malformed, 1),
+            PeerEvent::Audio(track) => {
+                let mut far = self.shared.far_audio();
+                if far.is_none() {
+                    *far = Some(track);
                 }
             }
-            PeerEvent::Video(unit) => {
-                VideoShared::count(&video.received, 1);
-                let line = unit.line;
-                // nobody decodes before the video started: what comes is dropped
-                if video.started.load(Ordering::Relaxed) && self.video_in.push(unit) > 0 {
-                    video.want_keyframe(line);
+            PeerEvent::Video(track, transceiver) => {
+                // libwebrtc tells a line's track again whenever the line receives again (the far end's camera back
+                // on): one decoding thread per line at a time (a track's id is the far end's to choose, and two
+                // lines may share one); a thread whose stream ended has left its line for the next
+                let line = transceiver.mid().unwrap_or_else(|| track.id());
+                if !self
+                    .decoding
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .insert(line.clone())
+                {
+                    return;
+                }
+                let decoder = video::Decoder {
+                    shared: Arc::clone(&self.shared),
+                    lines: self.peer.lines(),
+                    track,
+                    transceiver,
+                    running: (Arc::clone(&self.decoding), line),
+                };
+                video::spawn_decoder(&self.shared, decoder);
+            }
+            PeerEvent::ChannelOpen => {
+                if let Some(control) = self.control.as_mut() {
+                    control.turn(Instant::now(), &self.peer, &self.shared);
                 }
             }
-            PeerEvent::KeyframeRequested => {
-                VideoShared::count(&video.keyframes_asked, 1);
-                video.keyframe_wanted.store(true, Ordering::Relaxed);
+            PeerEvent::ChannelMessage(data) => {
+                if let Some(control) = self.control.as_mut() {
+                    control.receive(&data, &self.peer, &self.shared);
+                }
             }
-            PeerEvent::Bitrate(bps) => video.estimate.store(bps, Ordering::Relaxed),
-            // a data channel with no control plane started carries nothing the session reads
-            PeerEvent::ChannelOpen | PeerEvent::ChannelData(_) => {}
         }
-    }
-
-    fn send(&mut self, outgoing: &Outgoing) -> Result<(), Error> {
-        let counters = &self.shared.counters;
-        let now = Instant::now();
-        let peer = self.peer.peer();
-        if !peer.is_connected() {
-            Shared::count(&counters.unsent, 1);
-            return Ok(());
-        }
-        match peer.write_audio(
-            now,
-            outgoing.captured,
-            outgoing.packet.rtp_time,
-            &outgoing.packet.payload,
-        ) {
-            Ok(()) => Shared::count(&counters.sent, 1),
-            Err(Error::NotConnected) => Shared::count(&counters.unsent, 1),
-            Err(error) => return Err(error),
-        }
-        self.peer.flush(now)
-    }
-
-    /// Says goodbye (RTCP BYE, DTLS close) and releases the allocation, best effort: the session ends either way.
-    fn hang_up(&mut self) {
-        let now = Instant::now();
-        if self.peer.peer().close().is_ok() {
-            let _ = self.peer.flush(now);
-        }
-        let _ = self.peer.link().close(now);
     }
 }
 
-/// The capture thread.
+/// The capture thread: the microphone through the processing to libwebrtc's audio source.
 struct Capture {
-    microphone: Box<dyn AudioSource>,
-    encoder: Encoder,
-    /// The near end's processing, shared with the playout thread, which feeds it the far end.
-    processing: Option<Arc<AudioProcessing>>,
-    outgoing: Queue<Outgoing>,
     shared: Arc<Shared>,
+    peer: Arc<Peer>,
+    microphone: Box<dyn AudioSource>,
+    processing: Option<Arc<AudioProcessing>>,
 }
 
 impl Capture {
     fn run(mut self) {
+        let mut quiet_since = Instant::now();
         while !self.shared.stopping() {
-            match self.microphone.next_frame(MIC_WAIT) {
-                Ok(Some(frame)) => {
-                    if let Err(error) = self.encode(frame) {
-                        self.shared.fail(&error);
-                        break;
+            let mut frame = match self.microphone.next_frame(MIC_WAIT) {
+                Ok(Some(frame)) => frame,
+                Ok(None) => {
+                    if quiet_since.elapsed() >= MIC_WAIT {
+                        self.shared.captured_level.store(0, Ordering::Relaxed);
                     }
+                    continue;
                 }
-                // no frame for a while: the microphone hears nothing now (its last level isn't kept)
-                Ok(None) => self.shared.captured_level.store(0, Ordering::Relaxed),
-                Err(_) => {
-                    // a closed microphone hears nothing from now on
-                    self.shared.captured_level.store(0, Ordering::Relaxed);
+                Err(error) => {
+                    log::warn!("the microphone stopped: {error}");
                     self.shared
                         .report(SessionEvent::DeviceClosed(SessionDevice::Microphone));
-                    break;
-                }
-            }
-        }
-        // however the capture ended (a frame that couldn't be encoded among it), its last level isn't kept
-        self.shared.captured_level.store(0, Ordering::Relaxed);
-        self.outgoing.close();
-    }
-
-    fn encode(&mut self, mut frame: AudioFrame) -> Result<(), Error> {
-        let captured = Instant::now();
-        self.shared
-            .captured_level
-            .store(rms(frame.samples()).to_bits(), Ordering::Relaxed);
-        if let Some(processing) = &self.processing {
-            processing.near_end(&mut frame)?;
-        }
-        if self.shared.muted.load(Ordering::Relaxed) {
-            frame = AudioFrame::silence();
-        }
-        self.shared
-            .near_level
-            .store(rms(frame.samples()).to_bits(), Ordering::Relaxed);
-        let negotiated = self.shared.negotiated().take();
-        if let Some(config) = negotiated {
-            self.encoder.configure(&config)?;
-        }
-        if let Some(packet) = self.encoder.push(&frame)? {
-            let counters = &self.shared.counters;
-            Shared::count(&counters.encoded, 1);
-            let dropped = self.outgoing.push(Outgoing { packet, captured });
-            Shared::count(&counters.unsent, u64::try_from(dropped).unwrap_or(u64::MAX));
-        }
-        Ok(())
-    }
-}
-
-/// The playout thread.
-struct PlayoutLoop {
-    speaker: Box<dyn AudioSink>,
-    decoder: Decoder,
-    /// The audio processing the capture thread runs, which hears every played frame as the far end.
-    processing: Option<Arc<AudioProcessing>>,
-    shared: Arc<Shared>,
-    /// Decoded samples not yet played.
-    pcm: Vec<f32>,
-}
-
-impl PlayoutLoop {
-    fn run(mut self) {
-        let mut start = Instant::now();
-        let mut played: u32 = 0;
-        while !self.shared.stopping() {
-            let due = start + FRAME_DURATION * played;
-            let now = Instant::now();
-            if due > now {
-                thread::sleep(due - now);
-                continue;
-            }
-            if now - due > MAX_PLAYOUT_LAG {
-                start = now;
-                played = 0;
-            }
-            let frame = self.next_frame();
-            if let Some(processing) = &self.processing
-                && let Err(error) = processing.far_end(&frame)
-            {
-                self.shared.fail(&error);
-                return;
-            }
-            self.shared
-                .far_level
-                .store(rms(frame.samples()).to_bits(), Ordering::Relaxed);
-            if self.speaker.play(&frame).is_err() {
-                self.shared.report(SessionEvent::DeviceClosed(SessionDevice::Speaker));
-                return;
-            }
-            Shared::count(&self.shared.counters.frames_played, 1);
-            played = played.saturating_add(1);
-        }
-    }
-
-    /// The next 10 ms to play, decoding (or recovering, or concealing) as much as it takes.
-    fn next_frame(&mut self) -> AudioFrame {
-        while self.pcm.len() < FRAME_SAMPLES {
-            let playout = self.shared.jitter().pop();
-            let decoded = match playout {
-                Playout::Packet(packet) => self.decoder.decode(&packet, &mut self.pcm),
-                Playout::Recover { next, samples } => self.decoder.recover(&next, samples, &mut self.pcm),
-                Playout::Conceal { samples } => self.decoder.conceal(samples, &mut self.pcm),
-                Playout::Silence => {
-                    self.pcm.resize(self.pcm.len() + FRAME_SAMPLES, 0.0);
-                    Ok(FRAME_SAMPLES)
+                    return;
                 }
             };
-            if decoded.is_err() {
-                Shared::count(&self.shared.counters.malformed, 1);
-                self.pcm.resize(self.pcm.len() + FRAME_SAMPLES, 0.0);
+            quiet_since = Instant::now();
+            Shared::count(&self.shared.counters.encoded, 1);
+            self.shared
+                .captured_level
+                .store(rms(frame.samples()).to_bits(), Ordering::Relaxed);
+            if let Some(processing) = &self.processing
+                && let Err(error) = processing.near_end(&mut frame)
+            {
+                self.shared.fail(error.to_string());
+                return;
+            }
+            if self.shared.muted.load(Ordering::Relaxed) {
+                frame = AudioFrame::silence();
+            }
+            self.shared
+                .near_level
+                .store(rms(frame.samples()).to_bits(), Ordering::Relaxed);
+            let samples = to_i16(&frame);
+            let sent = RtcAudioFrame {
+                data: samples.as_slice().into(),
+                sample_rate: SAMPLE_RATE,
+                num_channels: 1,
+                samples_per_channel: u32::try_from(FRAME_SAMPLES).unwrap_or(u32::MAX),
+            };
+            match block_on(self.peer.audio().capture_frame(&sent)) {
+                Ok(()) => Shared::count(&self.shared.counters.sent, 1),
+                Err(_) => Shared::count(&self.shared.counters.unsent, 1),
             }
         }
-        let frame = AudioFrame::from_samples(&self.pcm[..FRAME_SAMPLES]).unwrap_or_else(AudioFrame::silence);
-        self.pcm.drain(..FRAME_SAMPLES);
-        frame
     }
 }
 
-fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
-    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+/// How far the speaker may fall behind its clock before silence fills the gap: libwebrtc's own playout runs every
+/// 10 ms, a little late at times.
+const PLAYOUT_SLACK: Duration = Duration::from_millis(30);
+/// How long libwebrtc may hand nothing over before the speaker plays silence in its place: its playout runs every
+/// 10 ms once a far end's audio flows, so only its start (or a stall) is this quiet.
+const PLAYOUT_QUIET: Duration = Duration::from_millis(100);
+
+/// The speaker's clock: how many frames it played since it started, and when libwebrtc last handed one over.
+struct Pace {
+    start: Instant,
+    played: u32,
+    heard: Option<Instant>,
+}
+
+impl Pace {
+    fn new() -> Self {
+        Self {
+            start: Instant::now(),
+            played: 0,
+            heard: None,
+        }
+    }
+
+    fn played(&mut self) {
+        self.played = self.played.saturating_add(1);
+    }
+
+    /// libwebrtc handed a frame over now.
+    fn heard(&mut self) {
+        self.heard = Some(Instant::now());
+    }
+
+    /// Whether libwebrtc has handed nothing over for [`PLAYOUT_QUIET`] (or never).
+    fn quiet(&self) -> bool {
+        self.heard.is_none_or(|heard| heard.elapsed() >= PLAYOUT_QUIET)
+    }
+
+    /// Whether the speaker played less than its clock asks, by more than [`PLAYOUT_SLACK`].
+    fn behind(&self) -> bool {
+        self.start + FRAME_DURATION * self.played + PLAYOUT_SLACK < Instant::now()
+    }
+}
+
+/// The playout thread: libwebrtc's audio of the far end to the speaker, and to the processing as the far end.
+struct Playout {
+    shared: Arc<Shared>,
+    speaker: Box<dyn AudioSink>,
+    processing: Option<Arc<AudioProcessing>>,
+}
+
+impl Playout {
+    fn run(mut self) {
+        let rate = i32::try_from(SAMPLE_RATE).unwrap_or(i32::MAX);
+        let mut pace = Pace::new();
+        let mut stream: Option<NativeAudioStream> = None;
+        while !self.shared.stopping() {
+            // the far end's audio track comes once its SDP was applied
+            if stream.is_none()
+                && let Some(track) = self.shared.far_audio().clone()
+            {
+                stream = Some(NativeAudioStream::new(track, rate, 1));
+            }
+            let received = match stream.as_mut().map(|stream| next_within(stream, FRAME_DURATION)) {
+                Some(Ok(Next::Item(received))) => Some(received),
+                Some(Ok(Next::Ended)) => break,
+                Some(Ok(Next::Quiet)) => None,
+                Some(Err(error)) => {
+                    self.shared.fail(error.to_string());
+                    break;
+                }
+                None => {
+                    thread::sleep(FRAME_DURATION);
+                    None
+                }
+            };
+            if let Some(received) = received {
+                pace.heard();
+                if !self.play_received(&received, &mut pace) {
+                    return;
+                }
+            }
+            // the speaker keeps its pace while libwebrtc hands nothing over (before the far end's track, while the
+            // media connects): silence for the time that fell behind, so a speaker that went away is noticed too
+            while pace.quiet() && pace.behind() {
+                if !self.play(&AudioFrame::silence()) {
+                    return;
+                }
+                pace.played();
+            }
+        }
+        if let Some(mut stream) = stream {
+            stream.close();
+        }
+    }
+
+    /// Plays what libwebrtc handed over, 10 ms at a time; whether the speaker is still there.
+    fn play_received(&mut self, received: &RtcAudioFrame<'_>, pace: &mut Pace) -> bool {
+        Shared::count(&self.shared.counters.received, 1);
+        for samples in received.data.chunks(FRAME_SAMPLES) {
+            let floats: Vec<f32> = samples.iter().map(|&sample| from_i16(sample)).collect();
+            let Some(frame) = AudioFrame::from_samples(&floats) else {
+                Shared::count(&self.shared.counters.malformed, 1);
+                continue;
+            };
+            if !self.play(&frame) {
+                return false;
+            }
+            pace.played();
+        }
+        true
+    }
+
+    /// Plays one frame; whether the speaker is still there.
+    fn play(&mut self, frame: &AudioFrame) -> bool {
+        self.shared
+            .far_level
+            .store(rms(frame.samples()).to_bits(), Ordering::Relaxed);
+        if let Some(processing) = &self.processing
+            && let Err(error) = processing.far_end(frame)
+        {
+            self.shared.fail(error.to_string());
+            return false;
+        }
+        if let Err(error) = self.speaker.play(frame) {
+            log::warn!("the speaker stopped: {error}");
+            self.shared.report(SessionEvent::DeviceClosed(SessionDevice::Speaker));
+            return false;
+        }
+        Shared::count(&self.shared.counters.frames_played, 1);
+        true
+    }
 }
 
 #[cfg(test)]
@@ -1106,14 +876,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_thread_that_fails_reports_it_and_stops_the_session() {
-        let (events, reported) = mpsc::sync_channel(EVENT_QUEUE);
-        let shared = Shared::new(JitterConfig::default(), events);
-        shared.fail(&Error::Processing("a refused frame".into()));
-        assert_eq!(
-            reported.try_recv(),
-            Ok(SessionEvent::Failed("audio processing: a refused frame".into()))
-        );
-        assert!(shared.stopping(), "the other threads go on");
+    fn a_frame_level_is_its_rms() {
+        assert!((rms(&[0.5; 480]) - 0.5).abs() < 1e-6);
+        assert!(rms(&[]).abs() < f32::EPSILON);
     }
 }

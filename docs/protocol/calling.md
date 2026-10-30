@@ -195,28 +195,27 @@ updates name only the lines' directions, and the group call's remote description
 (`m=application … webrtc-datachannel`, `a=sctp-port:5000`; the `m=x-data` line in `sdp-ngc`); the source selection
 travels over that channel ("Group video" below).
 
-### The H.264 codec
+### The media engine
 
-The calls' H.264 is OpenH264 2.6.0 (BSD-2-Clause) through the `openh264` 0.9.9 binding, built from the source the
-binding bundles (its `source` feature) into every build: the lab binaries, the personal build and the tests alike
-(`teams_media::video::codec`).
+The native client's media is libwebrtc's, the engine the web client's browser runs, through LiveKit's Rust bindings
+(`libwebrtc` and `webrtc-sys`, Apache-2.0; their prebuilt static libwebrtc is downloaded by the build):
+`teams_media::rtc`. libwebrtc does ICE, DTLS-SRTP, Opus and H.264, the jitter buffer, FEC and retransmissions,
+bandwidth estimation, pacing and A/V sync; the native client keeps only what is Teams' own (the SDP dialect below,
+the mixer's control plane, the media descriptions and the bandwidth seed) and the device seam.
 
-- **Nothing to download or install.** The codec is part of the binary, so every app with calls has video: the lab
-  app and the personal build show their calls' video and the settings' switch "Video in calls" (on by default; off,
-  a call starts no video and the codec isn't used), and `teams-headless` takes video with `--video`.
-- **Building it** takes a C and C++ compiler, and `nasm` for speed: with `nasm` on the `PATH` the build also
-  assembles OpenH264's SIMD code, without it the codec is plain C. Measured on the test pattern, one 1280×720 frame
-  took about 33 ms to encode in plain C, a whole frame's time at 30 fps, so a 720p camera loses frames to the rate
-  control's skipping; with the assembly it took 7–17 ms. At 640×360 (a group call's size) either keeps up (6–7 ms
-  and about 3 ms). The build script looks for `nasm` only when it first runs: after installing it, `cargo clean -p
-  openh264-sys2` with the build's own profile and target dir (`--release --target-dir target/personal` for the
-  personal install) makes the next build take it. `OPENH264_NO_ASM` turns the
-  assembly off. A debug build optimizes the codec anyway (`[profile.dev.package.openh264-sys2]`), so the debug tests
-  encode in time.
-- **What it makes** is constrained baseline H.264 (the only profile OpenH264's encoder makes), as the web client's
-  offers select (`profile-level-id=42e01f`, `packetization-mode=1`); its payload numbers are the call's ("Native
-  video" and "Group video" below).
-- Hardware encoding (VA-API) stays out unless Task 21's CPU numbers call for it.
+- **Codecs**: every line is restricted to what the web client offers, Opus on audio and H.264 in packetization mode 1
+  (with its retransmissions) on video, by libwebrtc's codec preferences; libwebrtc numbers them itself and sends
+  with the answer's numbers, as the browser does.
+- **Hardware**: libwebrtc encodes H.264 through VA-API where the build found libva and the machine's driver takes
+  it, otherwise in software, and decodes in software. NVIDIA's NVENC and NVDEC are left out of the build (`CUDA_HOME`
+  unset): with a decoder alive at exit, NVIDIA's decoder library hangs the process in its exit handler. Its encoder follows its own bandwidth estimate within the call's bounds
+  (`EncoderSettings`: up to 1.5 Mb/s and 30 fps; a group call's 600 kb/s and 640 by 360).
+- **The audio devices stay ours**: libwebrtc runs with no audio device of its own (LiveKit's synthetic one paces its
+  playout every 10 ms); the session hands it the microphone's frames after libwebrtc's own audio processing module
+  (AEC3, noise suppression, AGC2) and plays its audio on the device seam's speaker, each played frame handed to the
+  module as the far end.
+- **The video switch**: the settings' "Video in calls" (on by default; off, a call starts no video), and
+  `teams-headless` takes video with `--video`.
 
 ### Native video
 
@@ -232,18 +231,14 @@ A 1:1 call's video in the native client (M3 Task 18), as the web client's camera
   (`m=video 0 RTP/SAVP 34`). A group call's video lines (a start's in a group chat, a join's, a group call
   answered) follow "Group video" below; the test call's media takes a 1:1 call's main video line, its camera turned
   on by a renegotiation the media controller answers ([calling-echo.md](calling-echo.md#the-native-echo-call)).
-- **H.264** is offered as constrained baseline (`profile-level-id=42e01f`, `packetization-mode=1`) on the payload
-  type a group call's mixer gives it, `107`, with its retransmissions on `99` (the web client offers `108` and `109`;
-  the mixer answers any offer with its own numbers and takes only those, "Group video" below); an offer we answer
-  keeps its own numbers. The encoder
-  makes 20-30 fps camera pictures up to 1280 by 720 at a target bitrate that follows `str0m`'s bandwidth estimate
-  (transport-wide congestion control) less what the audio takes, between 100 kb/s and 1.5 Mb/s; an IDR comes first,
-  every 4 s, and whenever the far end asks (PLI or FIR); a receiver that loses a frame asks for one (PLI) and shows
-  nothing until it comes.
+- **H.264** is what every video line offers (libwebrtc's own payload numbers; it sends with the answer's, the mixer's
+  `107` among them), encoded by libwebrtc at the rate its bandwidth estimate allows, a keyframe whenever the far end
+  asks; the camera's track stays on the main video line from its first negotiation and sends only while the camera is
+  on (its encoding active), and while it is off a 1:1 call's offer writes that line `recvonly`.
 - **A line the far end's offer added names its stream when it begins to send**: our offers name no line-naming
-  header extension (the dialect renames our lines' mids, Task 16), so when a line we only received on turns
-  `sendrecv` (our camera on) the native client declares its sending stream before it offers, and the offer names its
-  SSRCs (and the retransmissions', `ssrc-group:FID`); without them the far end could tell the stream by nothing.
+  header extension (Task 16), so the offer that turns a line we only received on `sendrecv` (our camera on) names its
+  SSRCs (and the retransmissions', `ssrc-group:FID`), as libwebrtc writes them; without them the far end could tell
+  the stream by nothing.
 - **Every negotiation delivery gets its receipt.** The web client answers the renegotiation, the answer and the
   answer's acknowledgement (delivered at its `mediaAcknowledgement` callback) each with an empty `200` delivery
   response, as it answers an invitation. Native runs without them showed the call controller holding the call: the
@@ -443,7 +438,7 @@ Every offer and answer in the signaling is a `mediaContent` object: the SDP as `
 whoever wrote it. The one exception is a group call's invitation: the mixer's offer there is
 `application/sdp-ngc-0.5` (below). The web client turns each into standard SDP before its `RTCPeerConnection` takes it,
 and its own standard SDP into the dialect before it sends it; both forms were captured side by side (the WebRTC hooks
-record what the page hands its peer connection). `teams-media`'s `sdp` module does the same conversion for `str0m`
+record what the page hands its peer connection). `teams-media`'s `sdp` module does the same conversion for libwebrtc
 (fixture `crates/teams-media/tests/fixtures/sdp/captured.json`, synthetic).
 
 **From standard SDP to the dialect** (what the web client sends):
@@ -485,45 +480,45 @@ G.722, H.264 and AV1). The web client reads it as DTLS-SRTP: the SDES keys and t
 `a=setup:actpass`, and only the codecs it knows; it answers in `sdp-ngc-1.0`, as it answers the mixer's later renegotiations (which come in `sdp-ngc-1.0`,
 `a=setup:passive`).
 
-**What the native client does differently**: it writes only its relayed candidate, with `raddr 0.0.0.0 rport 0`
-(no local address leaves it) and a numbered foundation, refusing to write an SDP with any other candidate; it reads
-only the UDP candidates of component 1 (its media goes through its UDP relay allocation, which a TCP candidate is out
-of reach of); and it reads an offer's `actpass` (or the mixer's missing setup) as `passive`, so `str0m`, which would
-take the server's part for `actpass`, takes the client's, as the web client does. `str0m` names its lines with mids of
-its own; the conversion keeps both namings for the call's life, so a renegotiation offered by either side names the
-same lines. A line it adds is numbered one past the highest mid of the call (the mixer's numbering starts at `1` and
-runs out of line order, so neither the count of lines nor a line's place is free), and a rejected line that names no
-mid is the call's line at its place. It labels its lines as the web client does: the last video line of an offer with
-more than one, while the call has no sharing line, is `applicationsharing-video`, the others `main-video`. It offers
-Opus as `102`, the media controller's own number for it: the media controller answered an Opus-only offer's `111`
-with `102` and took nothing sent as `111`, while `str0m` keeps one number per codec for both directions
-([calling-echo.md](calling-echo.md#the-native-echo-call)); an answer that still numbers an offered codec otherwise is
-read back with the offer's number.
+**What the native client does differently**: it writes only its relayed candidates, with `raddr 0.0.0.0 rport 0`
+(no local address leaves it) and numbered foundations, refusing to write an SDP with any other candidate, and only
+once libwebrtc's gathering ended (Teams takes no trickled candidate); it reads only the UDP candidates of component 1
+(its media reaches the far end through the relay, whose relayed addresses are UDP); and it reads the mixer's missing
+setup as `actpass`, so libwebrtc takes the client's part, as the web client does, and keeps the call's role in a
+renegotiation.
+The conversion keeps both namings of every line (libwebrtc's mid, Teams' mid) for the call's life, so a
+renegotiation offered by either side names the same lines. A line it adds is numbered one past the highest mid of
+the call (the mixer's numbering starts at `1` and runs out of line order, so neither the count of lines nor a line's
+place is free), and a rejected line that names no mid is the call's line at its place. It labels its lines as the
+web client does: the last video line of an offer with more than one, while the call has no sharing line, is
+`applicationsharing-video`, the others `main-video`. A codec the answer numbers otherwise than our offer did (the
+media controller answers Opus offered as `111` with `102`, [calling-echo.md](calling-echo.md#the-native-echo-call))
+is left as answered: libwebrtc sends with the answer's number and takes the far end's media with our offer's, as the
+browser does. A group call's main and receiving lines are answered `sendrecv` whichever way libwebrtc answered them
+(it answers a line it has no track for receive-only, which the mixer refuses), a rejected line is written as the web
+client writes one (`m=video 0 RTP/SAVP 34`, `m=audio 0 RTP/SAVP 0`).
 
 Three things the native lab calls (M3 Task 16) showed live, each now the native client's way:
 
-- **No video yet: every video line is answered rejected.** Answering a group call's mixer with `str0m`'s default
-  codecs put twelve `sendrecv` H.264 lines in the `accept`; the call controller ended the leg at once with `410
-  SdpParsingFailure`. With audio alone configured, `str0m` answers each video line rejected, and the dialect writes
-  it as the web client writes a rejected line, `m=video 0 RTP/SAVP 34` with its label (`str0m`'s own form names no
-  format at all, which no SDP may do); the mixer takes that answer. A caller's 1:1 offer's video lines are answered
-  the same way, and a web client takes it.
+- **A call without video answers every video line rejected.** Twelve `sendrecv` H.264 lines in an `accept` that
+  described none of them made the call controller end the leg at once with `410 SdpParsingFailure`; answered
+  rejected, written as the web client writes a rejected line (`m=video 0 RTP/SAVP 34` with its label), the mixer takes
+  the answer. A caller's 1:1 offer's video lines are answered the same way when the call takes no video, and a web
+  client takes it.
 - **A rejected line may name any profile.** The mixer's renegotiation that follows (within a fraction of a second of
   the call being up) names the lines we rejected on a profile other than `RTP/SAVP`; a line on port 0 is read as
   rejected whatever it names, and only a line in use must be on Teams' profile (the error names its kind, port and
   profile, nothing else).
 - **Our offers name no line-naming header extension** (`sdes:mid`, `sdes:rtp-stream-id`,
-  `sdes:repaired-rtp-stream-id`). `str0m` names its lines with mids of its own, which the dialect renames: a web client
-  that answered an offer naming the mid extension took every packet of ours, carrying `str0m`'s mid, for a line it
+  `sdes:repaired-rtp-stream-id`). The dialect may name our lines otherwise than our peer does: a web client that
+  answered an offer naming the mid extension took every packet of ours, carrying our peer's own mid, for a line it
   doesn't know and dropped it (its candidate pair counted them, no inbound stream was made); the page heard nothing.
-  Without them in the answer `str0m` sends none. Our answers keep the offer's: they answer the offer's own mids.
+  Without them in the answer libwebrtc sends none. Our answers keep the offer's: they answer the offer's own mids.
 
 **Opus as the lines ask for it**: every captured Opus line carries `a=ptime:20` and `a=fmtp:111
-minptime=10;useinbandfec=1` (the media controller's answer adds `usedtx=1`). The native client sends 20 ms packets
-of mono Opus with in-band FEC (each packet also carries a coarse copy of the one before it), turns DTX on only when
-the far end's line asks for it (silence then goes out as a keep-alive now and then, and the media time keeps counting
-through the gap), and on receipt plays packets in media-time order from a jitter buffer kept near its depth, decoding
-a lost packet from the next one's FEC when it has it and concealing it otherwise.
+minptime=10;useinbandfec=1` (the media controller's answer adds `usedtx=1`). libwebrtc encodes and decodes Opus as
+the lines negotiate it (in-band FEC, DTX when the far end's line asks for it) and plays what arrives through its own
+jitter buffer (NetEq), which recovers or conceals what was lost.
 
 ## Seen beside the call
 

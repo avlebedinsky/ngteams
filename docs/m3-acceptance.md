@@ -311,7 +311,8 @@ log showed in the user's own words, never a chat id, a name, a token or an excer
    your camera only when you turn it on." What the build sends for calls without a click: the ring-time sends of an
    invitation it rings for (its receipt, `attach`, `progress`), and once the user's call is up that call's own setup,
    keep-alive and end writes.
-2. **Video.** The H.264 codec (OpenH264) is built into the app, so nothing is downloaded: the settings show the
+2. **Video.** The calls' media is libwebrtc's, built into the app (H.264 on the GPU through VA-API where it
+   can), so nothing is downloaded at run time: the settings show the
    switch "Video in calls" and the in-call bar a "Camera on" button. With the switch off (it is on by default, and
    read at each call's start) calls are audio only, but the bar keeps its "Camera on" button and
    answers it with "Couldn't turn the camera on or off: this call carries no video". Keep the switch on for step 4.

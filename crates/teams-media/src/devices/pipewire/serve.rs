@@ -141,6 +141,10 @@ fn text(error: impl std::fmt::Display) -> String {
 }
 
 fn serve(start: Start<'_>, started: &mpsc::Sender<Result<(), String>>) -> Result<(), String> {
+    // libwebrtc's stubs of libpipewire's functions stand in for its own in this binary: loaded first
+    if !crate::rtc::load_pipewire() {
+        log::warn!("libwebrtc couldn't load libpipewire into its stubs");
+    }
     pipewire::init();
     let main_loop = MainLoopRc::new(None).map_err(text)?;
     let mut context_props = PropertiesBox::new();

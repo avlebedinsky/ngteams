@@ -27,7 +27,7 @@
 //!   way, the call's modalities naming `Video` while a video line is in use. One the call controller turned away
 //!   (`491`) for the far end's (both cameras turned on together) gives way: the far end's is answered with our
 //!   camera's line only receiving, then that line is offered again as the camera goes. A camera that stops by itself
-//!   (its device gone, its encoder failed) is off, told as [`Event::CameraOff`]; a microphone or speaker whose stream
+//!   (its device gone) is off, told as [`Event::CameraOff`]; a microphone or speaker whose stream
 //!   ended for good (not moved) is told as [`Event::AudioClosed`], the call going on.
 //! - **The media's SDP steps run one at a time, in the order the signaling asked for them** (the far end's answer
 //!   applied, its renegotiation answered, our own offered): each waits for the one before, so an acceptance followed
@@ -150,7 +150,7 @@ pub enum CallAction {
     /// The microphone muted (`true`) or not: silence goes in its place, nothing is sent to the call's services (no
     /// capture shows the web client telling them).
     Mute { call: CallId, muted: bool },
-    /// The call's media offered again (an ICE restart) as a renegotiation.
+    /// The call's media offered again (its lines as they are) as a renegotiation.
     Renegotiate { call: CallId },
     /// The camera of a call that takes video turned on (`true`) or off, the camera's frames sent while it is on: a 1:1
     /// call's video line offered again going that way (a renegotiation); a group call's lines described again
@@ -1258,25 +1258,17 @@ fn close(call: CallId, session: Arc<teams_media::session::MediaSession>) {
     let stats = session.stats();
     let video = stats.video;
     log::info!(
-        "call {}: its video closes: {} frames captured, {} encoded ({} keyframes), {} sent, {} unsent; {} received, \
-         {} shown, {} not decoded; keyframes asked {} and requested {}; estimate {} b/s, bitrate {} b/s",
+        "call {}: its video closes: {} frames captured, {} sent, {} unsent; {} received, {} shown",
         call.get(),
         video.captured,
-        video.encoded,
-        video.keyframes,
         video.sent,
         video.unsent,
         video.received,
         video.shown,
-        video.undecoded,
-        video.keyframes_asked,
-        video.keyframes_requested,
-        video.estimate,
-        video.bitrate
     );
     log::info!(
-        "call {}: its media closes: {} packets encoded, {} sent, {} unsent; {} received, {} malformed; {} frames \
-         played; jitter {:?}",
+        "call {}: its media closes: {} audio frames captured, {} sent, {} unsent; {} received, {} malformed; {} \
+         played",
         call.get(),
         stats.encoded,
         stats.sent,
@@ -1284,7 +1276,6 @@ fn close(call: CallId, session: Arc<teams_media::session::MediaSession>) {
         stats.received,
         stats.malformed,
         stats.frames_played,
-        stats.jitter
     );
     drop(session);
 }

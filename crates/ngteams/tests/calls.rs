@@ -38,10 +38,9 @@ use teams_fence::{FailClosed, Fence, FenceLog, MembershipSource, Mri, Scope, Tar
 use teams_media::devices::file::{AudioInput, FileDevices, Pacing, PatternCamera};
 use teams_media::devices::{AudioSink, AudioSource, DeviceError, Devices, VideoSource, wav};
 use teams_media::processing::ProcessingConfig;
-use teams_media::relay::{RelayOptions, RelayServer};
+use teams_media::relay::RelayServer;
 use teams_media::session::SessionConfig;
-use teams_media::tone::{Tone, amplitude_at};
-use teams_media::turn::Transport as RelayTransport;
+use teams_media::tone::{Tone, level_at};
 use teams_mock::{
     AB_CHAT, ABC_CHAT, AX_CHAT, CALLING_APP, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, OUTSIDER, TENANT, TIMED_OUT,
     TrouterMock,
@@ -225,7 +224,9 @@ impl Lab {
 fn options() -> Options {
     Options {
         ping_interval: Duration::from_millis(300),
-        pong_timeout: Duration::from_millis(1_500),
+        // the production wait: the mock's media (libwebrtc offers and answers of its peers and mixers) holds the
+        // mock up for most of a second at times, and no test waits for a pong that never comes
+        pong_timeout: Duration::from_secs(5),
         backoff_base: Duration::from_millis(50),
         backoff_cap: Duration::from_millis(200),
         backoff_jitter_percent: 0,
@@ -458,14 +459,9 @@ fn media(relay: std::net::SocketAddr, tone: Tone, recording: &Path, opened: Open
             },
             opened,
         }),
-        relay: Relay::Fixed(vec![RelayServer {
-            addr: relay,
-            transport: RelayTransport::Udp,
-        }]),
-        relay_options: RelayOptions::default(),
+        relay: Relay::Fixed(vec![RelayServer::udp(relay)]),
         session: SessionConfig {
             processing: ProcessingConfig::OFF,
-            ..SessionConfig::default()
         },
         video: None,
     }
@@ -483,7 +479,7 @@ fn heard(path: &Path, tone: Tone, stretch: Duration) -> f32 {
         path.display(),
         samples.len()
     );
-    amplitude_at(&samples[start..end], tone.hz)
+    level_at(&samples[start..end], tone.hz)
 }
 
 /// The test call's echo service: the web bundle's, as the personal build's "Test call" names it.
@@ -491,7 +487,7 @@ fn echo() -> Mri {
     ngteams::calling::echo()
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_test_call_goes_to_the_echo_service_every_write_logged_and_no_plain_request_sent() {
     let lab = Lab::start().await;
     let mut a = lab.account(LAB_A, A_TONE).await;
@@ -551,7 +547,7 @@ async fn the_test_call_goes_to_the_echo_service_every_write_logged_and_no_plain_
     a.shut_down().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_call_in_a_chat_listing_the_account_rings_and_the_callee_answers_only_by_its_action() {
     let lab = Lab::start().await;
     let mut a = lab.account(LAB_A, A_TONE).await;
@@ -597,7 +593,7 @@ fn call_start(id: &str, caller: &str, callees: &[&str]) -> Target {
         .with_added(std::iter::once(caller).chain(callees.iter().copied()).map(Mri::new))
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_start_passes_the_personal_fence_unread_and_logged() {
     let mock = ChatServiceMock::start().await.unwrap();
     let decide = |own: &'static str, target: Target| async move {
@@ -625,7 +621,7 @@ async fn every_start_passes_the_personal_fence_unread_and_logged() {
     assert!(mock.received_requests().await.is_empty(), "no chat read");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_outsider_s_invitation_rings_by_its_name_and_is_answered_or_declined_only_by_the_action() {
     let lab = Lab::start().await;
     let mut a = lab.account(LAB_A, A_TONE).await;
@@ -669,7 +665,7 @@ async fn an_outsider_s_invitation_rings_by_its_name_and_is_answered_or_declined_
     a.shut_down().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_attach_refused_with_a_401_goes_again_and_the_invitation_rings_and_is_answered() {
     let lab = Lab::start().await;
     let mut a = lab.account(LAB_A, A_TONE).await;
@@ -694,7 +690,7 @@ async fn an_attach_refused_with_a_401_goes_again_and_the_invitation_rings_and_is
 
 /// An invitation whose `attach` failed for good (refused for a reason no further attempt clears, or never sent for a
 /// credential that couldn't be had) is let go: it never rings, and it holds no call open, so the next one rings.
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_invitation_whose_attach_failed_for_good_is_let_go_and_the_next_one_rings() {
     for credential in [false, true] {
         let lab = Lab::start().await;
@@ -720,7 +716,7 @@ async fn an_invitation_whose_attach_failed_for_good_is_let_go_and_the_next_one_r
     }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_invitation_during_a_call_is_not_offered_and_nothing_is_sent_for_it() {
     let lab = Lab::start().await;
     let mut a = lab.account(LAB_A, A_TONE).await;
@@ -739,7 +735,7 @@ async fn an_invitation_during_a_call_is_not_offered_and_nothing_is_sent_for_it()
     a.shut_down().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_running_group_call_is_joined_in_a_chat_listing_the_account() {
     let lab = Lab::start().await;
     let mut a = lab.account(LAB_A, A_TONE).await;
@@ -763,7 +759,7 @@ async fn a_running_group_call_is_joined_in_a_chat_listing_the_account() {
     a.shut_down().await;
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_plain_requests_a_lab_call_sends_each_have_a_personal_route() {
     // a lab call's requests besides its sealed call writes and typed frames: the calling registration (an `allowed`
     // line in the lab's fence.log), the TURN credentials (a `GET`). Through the personal fence the first is its

@@ -366,21 +366,34 @@ What the code does and why. A change that undoes one of these needs a new reason
   `docs/protocol/calling.md`, "Group video") goes through the call's mixer: every video line answered and offered
   `sendrecv` as the web client does, which way each really goes told by the media descriptions; the start, join,
   `accept` and every answer to the mixer's renegotiations carry the descriptions and the bandwidth seed (without
-  them the mixer sends no video on the receiving lines); our offers number H.264 as the mixer does (`107`, its
-  retransmissions `99`: it takes only its own numbers); whose video each receiving line shows is a source request
-  on the data channel's control plane, which is media (never classified, never a write). Who is in a call, 1:1 or
+  them the mixer sends no video on the receiving lines); libwebrtc sends with the answer's payload numbers (the
+  mixer's `107` for H.264) as the web client's Chrome does, so no number is rewritten; whose video each receiving
+  line shows is a source request on the data channel's control plane, which is media (never classified, never a write). Who is in a call, 1:1 or
   group, comes from the `rosterUpdate` deliveries (a participant counts when it is `active` with an endpoint holding a
   `call`: `teams-call`'s `read::roster`), read to show it and, in the test call, to end it once the echo left (its
   `leave`, as the web client's): nothing else is sent for them and the fence reads no roster.
-- **A call's media reach** (`teams-media`): the peer gathers and writes only relayed candidates, through Teams' fixed
-  relay host (`TEAMS_RELAY_HOST`, resolved when the call's media is set up: every address over UDP 3478, then TCP 443,
-  a `300 Try Alternate` followed once; `RelayTokens` gives only the credentials and their expiry), never a host
-  candidate or a local address in an offer; its
-  sockets are `teams-media`'s own, never the HTTP transport's. Media and the data channel's control plane aren't
-  classified: they carry a call the signaling fence permitted. SDP goes to and from the call controller only in
-  Teams' dialect (`application/sdp-ngc-1.0`; a browser's SDP is refused where the dialect is required). H.264 is
-  OpenH264 built from the source the `openh264` binding bundles, in every build (its SIMD code only when `nasm` was
-  installed at its first build): a call's video needs nothing downloaded.
+- **A call's media is libwebrtc's** (`teams-media/src/rtc.rs`, LiveKit's `libwebrtc` bindings, its prebuilt static
+  libwebrtc downloaded by the build): ICE, DTLS-SRTP, Opus and H.264 (VA-API's encoder where the machine has one,
+  else software; NVIDIA's codecs stay out of the build, `CUDA_HOME` unset: its decoder library hangs the process at
+  exit), the jitter buffer, bandwidth estimation and A/V sync are libwebrtc's, not ours; we keep
+  only Teams' SDP dialect, the mixer's control plane, the device seam and the relay's credentials. Its ICE policy is
+  relay-only through Teams' relay host (`TEAMS_RELAY_HOST`, the web client's three URLs: UDP 3478, TCP 443, TLS 443;
+  `RelayTokens` gives only the credentials), so it gathers relayed candidates alone and never writes a host candidate
+  or a local address in an offer (the dialect refuses one, `SdpError::LocalCandidate`); an offer or answer goes out
+  only once gathering ended, its candidates on the bundle's first line. Its sockets are libwebrtc's own, never the HTTP
+  transport's. Media and the data channel's control plane aren't classified: they carry a call the signaling fence
+  permitted. SDP goes to and from the call controller only in Teams' dialect (`application/sdp-ngc-1.0`; a browser's
+  SDP is refused where the dialect is required). libwebrtc's own log lines (target `libwebrtc`) never reach
+  `teams-log`'s file. The camera's track sits on the main video line from its first negotiation and sends only while
+  the camera is on (its encoding active), so a group call's camera changes no SDP. The prebuilt carries weak stubs of
+  libpipewire's functions (`pipewire_stubs.o`) that stand in for libpipewire's own in every binary linking both:
+  `rtc::load_pipewire` (libwebrtc's `InitializePipeWire`) loads libpipewire into them, and runs before every
+  `pipewire::init` (the device seam's, the UI sandbox's), or the first `pw_init` calls a null pointer. One idle
+  peer of the factory's own lives for the process (`rtc::factory`): without it the bindings' synthetic audio device
+  dies with the first call's peer and no later call plays anything. Only Opus and constrained baseline H.264 are
+  offered and answered (the web client's choice, and the only profile VA-API's encoder takes), and the camera keeps
+  its resolution under pressure (`MaintainResolution`: libwebrtc's scaler would halve it behind VA-API's rate
+  control).
 - **The retry table, by layer**: the transport retries a read or a plain request once (after a 401 the session
   refreshes the refused token; after a 429/503 it waits `Retry-After`, capped at 30 s, 1 s without one) and never
   resends a write; `reqwest`'s own retries are off (`retry::never()`), since an HTTP/2 retry could replay a write. The

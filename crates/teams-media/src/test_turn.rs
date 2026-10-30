@@ -20,6 +20,18 @@ use crate::stun::{
     classify, verify_integrity,
 };
 
+/// The relay a session reaches this server's UDP port `udp` as, with its credentials.
+#[must_use]
+pub fn relay(udp: SocketAddr) -> crate::relay::RelayConfig {
+    crate::relay::RelayConfig {
+        servers: vec![crate::relay::RelayServer::udp(udp)],
+        credentials: crate::relay::Credentials {
+            username: USER.into(),
+            password: PASSWORD.into(),
+        },
+    }
+}
+
 pub const USER: &str = "lab-user";
 pub const PASSWORD: &str = "lab-password";
 pub const REALM: &str = "turn.test";

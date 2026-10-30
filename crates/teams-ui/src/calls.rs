@@ -118,7 +118,7 @@ pub struct DeviceCheck {
     pub played: bool,
     /// The camera was turned on.
     pub camera: bool,
-    /// The camera stopped by itself while on (its device gone, its encoder failed), or the media couldn't turn it on:
+    /// The camera stopped by itself while on (its device gone), or the media couldn't turn it on:
     /// it doesn't work.
     pub camera_failed: bool,
     /// The call failed (`End::Failed`: its media lost, a step not taken): whatever worked before, it didn't hold.
@@ -450,7 +450,7 @@ impl Calls {
             Event::AudioClosed { call, microphone } => self.audio_closed(*call, *microphone),
             Event::CameraOff { call } => {
                 if let Some(active) = self.call.as_mut().filter(|active| active.id == *call) {
-                    // a camera that was on stopped by itself (its device gone, its encoder failed; the engine tells
+                    // a camera that was on stopped by itself (its device gone; the engine tells
                     // no other): not a camera that works, whether or not its turning on was answered here yet
                     active.check.camera_failed = true;
                     active.camera = false;

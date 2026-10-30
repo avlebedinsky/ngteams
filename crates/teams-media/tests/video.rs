@@ -1,13 +1,10 @@
-//! A call's video (M3 Task 18): H.264 through OpenH264 (its bundled source, as every build has it), and
-//! two media sessions on loopback through the TURN test server sending each other the file backend's test pattern.
+//! A call's video through libwebrtc (H.264): two media sessions on loopback through the TURN test server sending each
+//! other the file backend's test pattern.
 //!
-//! - **The codec**: the test pattern encoded and decoded keeps its frame index; the first frame and every frame asked
-//!   for is an IDR; the target bitrate stays between the minimum and the maximum, and a lower one makes smaller
-//!   frames.
-//! - **The session**: A turns its camera on and offers its video line; B decodes A's pattern, in order and counting
-//!   up; then B's camera too, both ways; the encoder's bitrate follows `str0m`'s bandwidth estimate; with loss on the
-//!   relay the receiver asks for keyframes and the picture comes back; a camera turned off stops what is sent; a
-//!   camera that goes away is off, the rest of the session going on.
+//! A turns its camera on and offers its video line in a renegotiation; B shows A's pattern on its line-0 sink, in order
+//! and counting up; then B's camera too, both ways; a far end that only received turns its camera on later; with loss
+//! on the relay the picture goes on (libwebrtc's retransmissions and keyframe requests); a camera turned off stops what
+//! is sent; a camera that goes away is off, the rest of the session going on.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
@@ -20,117 +17,20 @@ mod support;
 
 use std::time::{Duration, Instant};
 
-use str0m::change::{SdpAnswer, SdpOffer};
 use support::{A_TONE, B_TONE, CONNECT_WAIT, file_devices, negotiate, recording, start, wait_for};
 use teams_media::Error;
 use teams_media::devices::file::{FrameCounter, FrameCounts};
-use teams_media::devices::pattern::{TestPattern, index_of};
-use teams_media::devices::{DeviceError, Devices, PixelFormat, VideoFrame, VideoSink, VideoSource};
-use teams_media::session::{MediaSession, SessionDevice, SessionEvent, VideoParts, VideoStats};
+use teams_media::devices::{DeviceError, Devices, VideoFrame, VideoSink, VideoSource};
+use teams_media::session::{MediaSession, SdpAnswer, SdpOffer, SessionDevice, SessionEvent, VideoParts};
 use teams_media::test_turn::{Impairment, TurnServer};
-use teams_media::video::codec::{EncoderSettings, MIN_BITRATE, VideoDecoder, VideoEncoder};
+use teams_media::video::codec::EncoderSettings;
 use teams_media::video::convert::MaxSize;
-
-/// When frame `index` of a camera at `fps` was captured, into the stream.
-fn at(index: u32, fps: u32) -> Duration {
-    Duration::from_secs(1) * index / fps
-}
 
 fn settings() -> EncoderSettings {
     EncoderSettings {
         max_bitrate: 1_000_000,
         start_bitrate: 600_000,
         fps: 15,
-    }
-}
-
-#[test]
-fn the_test_pattern_survives_encoding_and_decoding_with_its_index() {
-    let pattern = TestPattern::new(640, 360);
-    let mut encoder = VideoEncoder::new(settings()).unwrap();
-    let mut decoder = VideoDecoder::new().unwrap();
-    let mut indices = Vec::new();
-    for index in 0..30 {
-        let Some(unit) = encoder.encode(&pattern.frame(index), at(index, 15), false).unwrap() else {
-            continue;
-        };
-        assert_eq!(
-            unit.keyframe,
-            index == 0,
-            "the first frame alone is an IDR (frame {index})"
-        );
-        assert!(unit.data.starts_with(&[0, 0, 0, 1]), "Annex B");
-        if let Some(frame) = decoder.decode(&unit.data).unwrap() {
-            assert_eq!((frame.width, frame.height), (640, 360));
-            indices.push(index_of(&frame));
-        }
-    }
-    assert!(indices.len() >= 25, "{} of 30 frames decoded", indices.len());
-    let read: Vec<u32> = indices.iter().flatten().copied().collect();
-    assert!(read.len() + 2 >= indices.len(), "the index is readable: {indices:?}");
-    assert!(read.windows(2).all(|pair| pair[0] < pair[1]), "in order: {read:?}");
-}
-
-#[test]
-fn a_keyframe_asked_for_is_an_idr() {
-    let pattern = TestPattern::new(320, 240);
-    let mut encoder = VideoEncoder::new(settings()).unwrap();
-    let kinds: Vec<bool> = (0..10)
-        .filter_map(|index| {
-            encoder
-                .encode(&pattern.frame(index), at(index, 15), index == 6)
-                .unwrap()
-        })
-        .map(|unit| unit.keyframe)
-        .collect();
-    assert!(kinds[0], "the first frame");
-    assert!(
-        kinds.iter().skip(1).filter(|keyframe| **keyframe).count() == 1,
-        "{kinds:?}"
-    );
-}
-
-#[test]
-fn the_bitrate_stays_between_the_minimum_and_the_maximum_and_a_lower_one_makes_smaller_frames() {
-    let mut encoder = VideoEncoder::new(settings()).unwrap();
-    assert_eq!(encoder.bitrate(), 600_000);
-    assert_eq!(encoder.set_bitrate(10_000_000), 1_000_000);
-    assert_eq!(encoder.set_bitrate(1_000), MIN_BITRATE);
-
-    // noise: a picture no bitrate is enough for, so the rate control spends what it is given
-    let size_at = |bps: u64| {
-        let mut encoder = VideoEncoder::new(settings()).unwrap();
-        encoder.set_bitrate(bps);
-        // past the first second (its IDR and the rate control settling), what the frames add up to
-        (0..60)
-            .filter_map(|index| encoder.encode(&noise(320, 240, index), at(index, 15), false).unwrap())
-            .skip(15)
-            .map(|unit| unit.data.len())
-            .sum::<usize>()
-    };
-    let (low, high) = (size_at(150_000), size_at(1_000_000));
-    assert!(low * 2 < high, "150 kb/s made {low} bytes, 1 Mb/s {high}");
-}
-
-/// An I420 frame of noise (seeded by `seed`), grey chroma.
-fn noise(width: u32, height: u32, seed: u32) -> VideoFrame {
-    let luma = (width * height) as usize;
-    let mut state = u64::from(seed).wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
-    let mut data: Vec<u8> = (0..luma)
-        .map(|_| {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            state.to_be_bytes()[4]
-        })
-        .collect();
-    data.resize(luma * 3 / 2, 128);
-    VideoFrame {
-        width,
-        height,
-        format: PixelFormat::I420,
-        stride: width,
-        data,
     }
 }
 
@@ -151,7 +51,11 @@ fn side(turn: &TurnServer, name: &str, dir: &std::path::Path) -> Side {
             max_size: MaxSize::HD,
             remote: Box::new({
                 let remote = remote.clone();
-                move |_| Box::new(remote.clone()) as Box<dyn VideoSink>
+                // a 1:1 call's video comes on its main line (line 0); anything on another line isn't counted
+                move |line| {
+                    let sink = if line == 0 { remote.clone() } else { FrameCounter::new() };
+                    Box::new(sink) as Box<dyn VideoSink>
+                }
             }),
             preview: Some(Box::new(preview.clone())),
         })
@@ -228,7 +132,7 @@ fn a_camera_turned_on_reaches_the_far_end_in_order_both_ways() {
     let (a, b) = (a.session.close(), b.session.close());
     for (who, stats) in [("A", a.video), ("B", b.video)] {
         assert!(
-            stats.keyframes >= 1 && stats.sent > 30 && stats.shown > 30,
+            stats.sent > 30 && stats.received > 30 && stats.shown > 30,
             "{who}: {stats:?}"
         );
     }
@@ -301,31 +205,7 @@ fn a_far_end_that_only_received_turns_its_camera_on_later_and_names_its_stream()
 }
 
 #[test]
-fn the_encoder_follows_the_bandwidth_estimate() {
-    let turn = TurnServer::start().unwrap();
-    let dir = tempfile::tempdir().unwrap();
-    let (a, b) = connected(&turn, dir.path());
-    camera_on(&a.session, &b.session);
-    wait_frames(&b.remote, 45, Duration::from_secs(15));
-    let stats: VideoStats = a.session.stats().video;
-    assert!(stats.estimate > 0, "str0m estimated the bandwidth: {stats:?}");
-    let expected = stats
-        .estimate
-        .saturating_sub(64_000)
-        .clamp(u64::from(MIN_BITRATE), 1_000_000);
-    // the encoder takes the newest estimate at its next frame: within one estimate's change of it
-    let off = stats.bitrate.abs_diff(expected);
-    assert!(
-        off <= expected / 4,
-        "target {} for estimate {}: {stats:?}",
-        stats.bitrate,
-        stats.estimate
-    );
-    let _ = (a.session.close(), b.session.close());
-}
-
-#[test]
-fn with_loss_the_receiver_asks_for_keyframes_and_the_picture_goes_on() {
+fn with_loss_the_picture_goes_on() {
     let turn = TurnServer::start_impaired(Impairment {
         loss_percent: 5,
         reorder_percent: 0,
@@ -339,11 +219,11 @@ fn with_loss_the_receiver_asks_for_keyframes_and_the_picture_goes_on() {
     assert!(at_b.indexed >= 60, "the picture went on: {at_b:?}");
     let (a, b) = (a.session.close(), b.session.close());
     assert!(
-        b.video.keyframes_requested >= 1 || b.video.undecoded == 0,
-        "a broken picture asked for a keyframe: {:?}",
+        a.video.sent >= 60 && b.video.shown >= 60,
+        "A {:?}, B {:?}",
+        a.video,
         b.video
     );
-    assert!(a.video.keyframes >= 1, "{:?}", a.video);
 }
 
 #[test]
@@ -359,7 +239,6 @@ fn a_camera_turned_off_stops_what_is_sent() {
     let sent = a.session.stats().video.sent;
     std::thread::sleep(Duration::from_secs(1));
     assert_eq!(a.session.stats().video.sent, sent, "nothing more is sent");
-    assert_eq!(a.session.stats().video.bitrate, 0);
     let _ = (a.session.close(), b.session.close());
 }
 

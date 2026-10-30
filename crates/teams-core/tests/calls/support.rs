@@ -26,10 +26,9 @@ use teams_fence::{Fence, FenceLog, LiveMembershipSource, MembershipSource, Mri, 
 use teams_media::devices::file::{AudioInput, FileDevices, FrameCounter, Pacing, PatternCamera};
 use teams_media::devices::{AudioSink, AudioSource, DeviceError, Devices, VideoSink, VideoSource, wav};
 use teams_media::processing::ProcessingConfig;
-use teams_media::relay::{RelayOptions, RelayServer};
+use teams_media::relay::RelayServer;
 use teams_media::session::SessionConfig;
-use teams_media::tone::{Tone, amplitude_at};
-use teams_media::turn::Transport as RelayTransport;
+use teams_media::tone::{Tone, level_at};
 use teams_media::video::codec::EncoderSettings;
 use teams_media::video::convert::MaxSize;
 use teams_mock::{CHAT_BASE, ChatServiceMock, ECHO, LAB_A, LAB_B, LAB_C, TENANT, TrouterMock};
@@ -246,7 +245,9 @@ impl Lab {
 fn options() -> Options {
     Options {
         ping_interval: Duration::from_millis(300),
-        pong_timeout: Duration::from_millis(1_500),
+        // the production wait: the mock's media (libwebrtc offers and answers of its peers and mixers) holds the
+        // mock up for most of a second at times, and no test waits for a pong that never comes
+        pong_timeout: Duration::from_secs(5),
         backoff_base: Duration::from_millis(50),
         backoff_cap: Duration::from_millis(200),
         backoff_jitter_percent: 0,
@@ -523,14 +524,9 @@ fn media(relay: std::net::SocketAddr, tone: Tone, recording: &Path, microphones:
             },
             microphones,
         }),
-        relay: Relay::Fixed(vec![RelayServer {
-            addr: relay,
-            transport: RelayTransport::Udp,
-        }]),
-        relay_options: RelayOptions::default(),
+        relay: Relay::Fixed(vec![RelayServer::udp(relay)]),
         session: SessionConfig {
             processing: ProcessingConfig::OFF,
-            ..SessionConfig::default()
         },
         video: None,
     }
@@ -554,7 +550,7 @@ pub fn heard_before(path: &Path, tone: Tone, stretch: Duration, before: Duration
         path.display(),
         samples.len()
     );
-    amplitude_at(&samples[start..end], tone.hz)
+    level_at(&samples[start..end], tone.hz)
 }
 
 /// Waits until `done` holds (a request the mock got is recorded a moment after its answer went).

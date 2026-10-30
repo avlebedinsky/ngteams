@@ -185,13 +185,9 @@ const LICENCES: [&str; 14] = [
     "Unicode-DFS-2016",
 ];
 
-/// Packages that give their licence as a file rather than an SPDX id, read as BSD-3-Clause: the audio processing
-/// binding's crates, whose files are Google's BSD-3-Clause text for WebRTC.
-const BSD_3_CLAUSE_FILES: [&str; 3] = [
-    "webrtc-audio-processing",
-    "webrtc-audio-processing-config",
-    "webrtc-audio-processing-sys",
-];
+/// Packages that give their licence as a file rather than an SPDX id, read as BSD-3-Clause (none in the tree today;
+/// the check stays for the next one).
+const BSD_3_CLAUSE_FILES: [&str; 0] = [];
 
 /// What a licence file must say to be read as BSD-3-Clause: its grant, its third clause and its disclaimer.
 const BSD_3_CLAUSE_TEXT: [&str; 3] = [
@@ -295,19 +291,14 @@ fn the_kit_brings_no_network_client_and_only_licences_we_can_take() {
 /// The PipeWire binding the device seam's backend takes (`teams-media`): the crate and the crates it binds through.
 const PIPEWIRE_BINDING: [&str; 4] = ["pipewire", "libspa", "pipewire-sys", "libspa-sys"];
 
-/// The Opus binding the media's codec takes (`teams-media`): the crate and the crate that builds and binds libopus.
-const OPUS_BINDING: [&str; 2] = ["opus", "opusic-sys"];
+/// The calls' media engine (`teams-media`): the safe binding of libwebrtc and the crate that binds and links the
+/// prebuilt static libwebrtc (`LiveKit`'s).
+const LIBWEBRTC_BINDING: [&str; 2] = ["libwebrtc", "webrtc-sys"];
 
-/// The video codec's binding (`teams-media`): the crate and the one that builds and binds OpenH264.
-const OPENH264_BINDING: [&str; 2] = ["openh264", "openh264-sys2"];
-
-/// The audio processing binding the media's echo cancellation takes (`teams-media`): the crate, its configuration
-/// types and the crate that builds and binds WebRTC's module.
-const AUDIO_PROCESSING_BINDING: [&str; 3] = [
-    "webrtc-audio-processing",
-    "webrtc-audio-processing-config",
-    "webrtc-audio-processing-sys",
-];
+/// The one crate allowed an HTTP client in libwebrtc's tree, and only as a build dependency: `webrtc-sys`'s build
+/// helper, which downloads `LiveKit`'s prebuilt libwebrtc from GitHub on a clean build (`LK_CUSTOM_WEBRTC` names a local
+/// one instead). Its `reqwest` runs in the build script and links into no binary.
+const LIBWEBRTC_BUILD_HELPER: &str = "webrtc-sys-build";
 
 /// The `GStreamer` bindings the inline video player takes (`teams-media`'s `player`): the core binding and the `GLib`
 /// it binds through.
@@ -368,25 +359,86 @@ fn the_media_s_pipewire_binding_brings_no_network_client_no_logger_and_only_lice
     audit_media_binding(&PIPEWIRE_BINDING);
 }
 
-/// libopus (BSD-3-Clause, built from the source `opusic-sys` bundles) logs nothing.
-#[test]
-fn the_media_s_opus_binding_brings_no_network_client_no_logger_and_only_licences_we_can_take() {
-    audit_media_binding(&OPUS_BINDING);
+/// The ids of the package `id`'s direct normal dependencies (what links into a binary), as resolved.
+fn runtime_dependency_ids(metadata: &Value, id: &Value) -> Vec<Value> {
+    node(metadata, id)["deps"]
+        .as_array()
+        .expect("deps")
+        .iter()
+        .filter(|dep| {
+            dep["dep_kinds"]
+                .as_array()
+                .is_some_and(|kinds| kinds.iter().any(|kind| kind["kind"].is_null()))
+        })
+        .map(|dep| dep["pkg"].clone())
+        .collect()
 }
 
-/// WebRTC's audio processing module is built from the source the binding bundles with `NDEBUG` defined, which
-/// leaves its logger off (`rtc_base/logging.cc`); the binding's crates take `log` only for their examples.
-#[test]
-fn the_media_s_audio_processing_binding_brings_no_network_client_no_logger_and_only_licences_we_can_take() {
-    audit_media_binding(&AUDIO_PROCESSING_BINDING);
+/// Every package `name` links in through normal dependencies, itself among them.
+fn runtime_closure<'a>(metadata: &'a Value, name: &str) -> Vec<&'a Value> {
+    let mut seen: Vec<Value> = Vec::new();
+    let mut pending = vec![package_id(metadata, name)];
+    while let Some(id) = pending.pop() {
+        if seen.contains(&id) {
+            continue;
+        }
+        pending.extend(runtime_dependency_ids(metadata, &id));
+        seen.push(id);
+    }
+    seen.iter().map(|id| package(metadata, id)).collect()
 }
 
-/// OpenH264 (BSD-2-Clause: the binding and the codec, built from the source the binding bundles) logs only at the
-/// level its owner sets, which the binding leaves quiet; its tree (`cc`, `walkdir` and `nasm-rs` to build it) is
-/// under licences we can take.
+/// libwebrtc is held to the media bindings' audit with two stated exceptions, both outside what runs:
+/// - **its build downloads**: `webrtc-sys`'s build helper ([`LIBWEBRTC_BUILD_HELPER`]) fetches the prebuilt library
+///   with `reqwest`; no HTTP client is in what links into a binary, and the media's network is libwebrtc's own sockets
+///   to the call's relay, which the signaling fence permitted (media isn't classified).
+/// - **its logger**: the binding forwards libwebrtc's own log lines to `log` at `debug` under the target
+///   `libwebrtc`; `teams-log` writes only our crates' targets (`teams_…`), so none of them reaches the log file.
+///
+/// The prebuilt itself (BSD-3-Clause libwebrtc with `FFmpeg`'s H.264 decoder, LGPL, linked statically) is no crate of
+/// the tree: the personal build is the user's own and never distributed.
 #[test]
-fn the_media_s_openh264_binding_brings_no_network_client_no_logger_and_only_licences_we_can_take() {
-    audit_media_binding(&OPENH264_BINDING);
+fn the_media_s_libwebrtc_binding_downloads_only_at_build_time_and_logs_nowhere_we_write() {
+    let metadata = metadata();
+    assert!(
+        direct_dependencies(&metadata, "teams-media")
+            .iter()
+            .any(|name| name == LIBWEBRTC_BINDING[0]),
+        "teams-media takes libwebrtc"
+    );
+    let linked = runtime_closure(&metadata, LIBWEBRTC_BINDING[0]);
+    for name in LIBWEBRTC_BINDING {
+        assert!(linked.iter().any(|found| found["name"] == name), "{name} links in");
+    }
+    let clients: Vec<&str> = linked
+        .iter()
+        .filter_map(|found| found["name"].as_str())
+        .filter(|name| NETWORK_CLIENTS.contains(name))
+        .collect();
+    assert!(clients.is_empty(), "libwebrtc links in {clients:?}");
+    // the build's tree: a network client only under the build helper
+    let built = closure(&metadata, LIBWEBRTC_BINDING[0]);
+    let helper = closure(&metadata, LIBWEBRTC_BUILD_HELPER);
+    let outside: Vec<&str> = built
+        .iter()
+        .filter(|found| !helper.iter().any(|ours| ours["id"] == found["id"]))
+        .filter_map(|found| found["name"].as_str())
+        .filter(|name| NETWORK_CLIENTS.contains(name))
+        .collect();
+    assert!(
+        outside.is_empty(),
+        "a network client outside the build helper: {outside:?}"
+    );
+    let refused: Vec<String> = linked
+        .iter()
+        .filter(|found| !licensed_for_us(found))
+        .map(|found| format!("{} {} ({})", found["name"], found["version"], found["license"]))
+        .collect();
+    assert!(refused.is_empty(), "under a licence we can't take: {refused:?}");
+    assert!(
+        !teams_log::ours(&log::Metadata::builder().target("libwebrtc").build()),
+        "teams-log keeps only our crates' lines"
+    );
 }
 
 /// `GStreamer` itself (LGPL, the system's, linked dynamically) is no crate of the tree; its bindings are MIT or
@@ -396,22 +448,6 @@ fn the_media_s_openh264_binding_brings_no_network_client_no_logger_and_only_lice
 fn the_media_s_gstreamer_bindings_bring_no_network_client_no_logger_and_only_licences_we_can_take() {
     audit_media_binding(&GSTREAMER_BINDING);
     audit_media_binding(&GSTREAMER_APP_BINDING);
-}
-
-#[test]
-fn a_licence_file_counts_only_for_the_packages_read_and_only_with_the_licence_s_text() {
-    let metadata = metadata();
-    for name in BSD_3_CLAUSE_FILES {
-        let found = package(&metadata, &package_id(&metadata, name));
-        assert!(found["license"].is_null(), "{name} now names its licence");
-        assert_eq!(licence_of(found).as_deref(), Some("BSD-3-Clause"), "{name}");
-    }
-    let mut unread = package(&metadata, &package_id(&metadata, "webrtc-audio-processing")).clone();
-    unread["name"] = "not-read".into();
-    assert_eq!(licence_of(&unread), None, "a package not on the list");
-    let mut elsewhere = package(&metadata, &package_id(&metadata, "webrtc-audio-processing")).clone();
-    elsewhere["license_file"] = "Cargo.toml".into();
-    assert_eq!(licence_of(&elsewhere), None, "a file without the licence's text");
 }
 
 #[test]

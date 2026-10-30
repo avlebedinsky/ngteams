@@ -57,7 +57,9 @@ teams-trouter = { workspace = true, features = ["test-support"] }
 tempfile.workspace = true
 # a post's ISO compose time read back, to compare with the row's
 time.workspace = true
-tokio = { workspace = true, features = ["macros", "rt", "time"] }
+# the call tests run on two workers: the mock's media (its peers' and mixers' libwebrtc offers and answers) blocks
+# the handler that makes it, and the mock's sockets answer pings meanwhile
+tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
 wiremock.workspace = true
 
 [lints]
