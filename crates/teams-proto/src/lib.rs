@@ -64,6 +64,7 @@ mod post_read;
 mod read;
 mod relay;
 mod request;
+mod search;
 mod thumbnail;
 mod urlp;
 mod write;
@@ -111,6 +112,10 @@ pub use read::{
 };
 pub use relay::{RelayAnswer, RelayAnswerError, RelayCredential, RelayTokens};
 pub use request::Request;
+pub use search::{
+    ALL_PAGE, Found, FoundChannel, FoundChat, FoundFile, FoundMessage, FoundPerson, PAGE, SUBSTRATE_AUDIENCE,
+    SUBSTRATE_HOST, SearchAnswerError, SearchKind, SubstrateSearch, highlighted,
+};
 pub use thumbnail::{FileThumbnails, THUMBNAIL_HOST_SUFFIX, ThumbnailLink, is_thumbnail_link};
 pub use urlp::LinkPreviewPicture;
 pub use write::{

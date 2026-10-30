@@ -10,7 +10,7 @@ use gpui::{AppContext as _, Entity, TestAppContext};
 use teams_core::sync::{CatchUpReport, Synced};
 use teams_core::{
     Action, Answer, Availability, CallAction, CallId, ChatListing, EngineError, Event, NameFrom, OwnStatus, Person,
-    PictureBytes, Reply, Strip, Transient, TransientSent,
+    PictureBytes, Reply, SearchAnswer, SearchScope, Strip, Transient, TransientSent,
 };
 use teams_store::{
     Conversation, Member, Message, MessagePage, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction,
@@ -106,6 +106,10 @@ pub struct FakeCore {
     pub earlier: Mutex<Vec<OutboxEntry>>,
     /// Every search asked for, its query, in order.
     pub searches: Mutex<Vec<String>>,
+    /// What the service's search answers, whatever is asked.
+    pub service_answer: Mutex<SearchAnswer>,
+    /// Every search asked of the service, its query and scope, in order.
+    pub service_searches: Mutex<Vec<(String, SearchScope)>>,
     /// The account's teams as the store has them; `None` before a read settled them.
     pub teams: Mutex<Option<Vec<Team>>>,
     /// The favourite chats and the conversations the service calls empty, as `chat_listing` answers them.
@@ -168,6 +172,8 @@ impl Default for FakeCore {
             unsettled_before_hold: Mutex::new(0),
             earlier: Mutex::default(),
             searches: Mutex::default(),
+            service_answer: Mutex::default(),
+            service_searches: Mutex::default(),
             teams: Mutex::default(),
             listing: Mutex::default(),
             roots: Mutex::default(),
@@ -487,6 +493,12 @@ impl Core for FakeCore {
 
     fn left_by_earlier_runs(&self) -> Reply<Vec<OutboxEntry>> {
         self.answer("left_by_earlier_runs", || locked(&self.earlier).clone())
+    }
+
+    fn search_service(&self, query: String, scope: SearchScope) -> Reply<SearchAnswer> {
+        locked(&self.service_searches).push((query, scope));
+        let answer = locked(&self.service_answer).clone();
+        self.answer("search_service", || answer)
     }
 
     /// The store's search, played on the messages held: a message of a conversation of `within`, not deleted, whose

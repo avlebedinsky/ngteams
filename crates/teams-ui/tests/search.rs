@@ -1,10 +1,12 @@
-//! Local search on GPUI's test context, over the fake engine (`common`, whose search plays the store's on the messages
-//! it holds): Ctrl+Shift+F's search lists the messages of the chats the list shows (a channel's left out), the newest
-//! first, with the chat, the sender ("You" for the account) and the matched text; a query too short asks nothing; a hit
-//! chosen opens its chat at the message, read back from beyond the newest page, selected and scrolled to; the switcher
-//! lists the same hits under its chats; Escape closes, and the switcher and the search take turns; an Escape while the
-//! focus is out of the switcher or the search goes where the focus is (the compose box's reply or edit). The store's own
-//! quoting of FTS syntax is `teams-store`'s test. Every id, name and text is made up.
+//! The title bar's search on GPUI's test context, over the fake engine (`common`, whose store search plays the store's
+//! on the messages it holds, and whose service search answers what a test gives it): Ctrl+E puts the keyboard in the
+//! box, typing suggests the chats, channels and people the lists know at once (and the service's once it answers),
+//! Down and Enter open one; Enter shows the results across the panes, the messages of the chats the list shows (a
+//! channel's left out) beside the service's, the newest first, with the chat, the sender ("You" for the account) and
+//! the matched text; a query too short asks the store nothing; a message opened shows its chat at the message, read
+//! back from beyond the newest page, selected and scrolled to; Ctrl+Alt+G goes right to a chat by its name; Escape
+//! closes the suggestions and leaves the results; Back and Forward go through the places shown. The store's own quoting
+//! of FTS syntax is `teams-store`'s test. Every id, name and text is made up.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
@@ -18,15 +20,17 @@ use std::sync::Arc;
 
 use common::{LAB_A, LAB_B, Rig, Written};
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, point, px, size};
-use teams_core::{Action, Event};
+use teams_core::{Action, Event, SearchScope};
+use teams_proto::{Found, FoundFile, FoundMessage, FoundPerson, SearchKind, highlighted};
 use teams_store::search::{MATCH_END, MATCH_START};
 use teams_store::{Conversation, ConversationKind, Member, Message};
+use teams_ui::ViewTrace;
 use teams_ui::chat_view::{ChatView, MessageAction, PAGE, READ_DEBOUNCE};
 use teams_ui::compose::Mode;
+use teams_ui::global_search::{Mode as SearchMode, SUGGEST_DELAY, Suggestion};
 use teams_ui::search::{MAX_HITS, MIN_QUERY, YOU, searchable, split_snippet};
 use teams_ui::settings::Settings;
 use teams_ui::shell::{Main, Shell};
-use teams_ui::{HitTarget, ViewTrace};
 
 const LAB_C: &str = "8:orgid:00000000-0000-4000-8000-00000000000c";
 const AB: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces";
@@ -155,27 +159,6 @@ fn shell_window(rig: &Rig, trace: Arc<ViewTrace>) -> (Entity<Shell>, &'static mu
     (shell, cx)
 }
 
-/// The hits the search shows: (conversation, message, chat, sender, snippet).
-fn search_hits(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<(String, String, String, String, String)> {
-    cx.update(|_, cx| {
-        let search = shell.read(cx).search().cloned().expect("the search is open");
-        search
-            .read(cx)
-            .hits()
-            .iter()
-            .map(|hit| {
-                (
-                    hit.target.conversation.clone(),
-                    hit.target.message.clone(),
-                    hit.chat.to_string(),
-                    hit.sender.to_string(),
-                    hit.snippet.to_string(),
-                )
-            })
-            .collect()
-    })
-}
-
 fn chat_view(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<ChatView> {
     cx.update(|_, cx| shell.read(cx).chat().cloned())
         .expect("a chat is open")
@@ -205,18 +188,81 @@ fn changes(written: &Written, view: &str) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// The messages the results show: (conversation, message, chat, sender, snippet).
+fn result_hits(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Vec<(String, String, String, String, String)> {
+    cx.update(|_, cx| {
+        let search = shell.read(cx).search().clone();
+        search
+            .read(cx)
+            .message_hits(cx)
+            .iter()
+            .map(|hit| {
+                (
+                    hit.target.conversation.clone(),
+                    hit.target.message.clone(),
+                    hit.chat.to_string(),
+                    hit.sender.to_string(),
+                    hit.snippet.to_string(),
+                )
+            })
+            .collect()
+    })
+}
+
+/// Searches for `query` from the title bar: Ctrl+E, the query typed, Enter.
+fn search_for(cx: &mut VisualTestContext, query: &str) {
+    cx.simulate_keystrokes("ctrl-e");
+    draw(cx);
+    cx.simulate_input(query);
+    draw(cx);
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+}
+
+/// Clicks the element drawn with `selector`.
+fn click(cx: &mut VisualTestContext, selector: &'static str) {
+    let drawn = cx
+        .debug_bounds(selector)
+        .unwrap_or_else(|| panic!("{selector} is drawn"));
+    cx.simulate_click(drawn.center(), Modifiers::none());
+    draw(cx);
+}
+
+fn suggestions_open(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> bool {
+    cx.update(|_, cx| shell.read(cx).search().read(cx).is_open())
+}
+
+fn box_has_focus(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> bool {
+    cx.update(|window, cx| shell.read(cx).search().read(cx).holds_focus(window, cx))
+}
+
 #[test]
-fn ctrl_shift_f_finds_the_listed_chats_messages_the_newest_first_and_enter_opens_the_chat_at_the_message() {
+fn ctrl_e_then_enter_shows_the_listed_chats_messages_the_newest_first_and_a_message_opens_its_chat_at_it() {
     let rig = seeded();
     let (trace, written) = trace();
     let (shell, cx) = shell_window(&rig, trace);
-    cx.simulate_keystrokes("ctrl-shift-f");
-    cx.run_until_parked();
-    assert!(cx.update(|_, cx| shell.read(cx).search().is_some()), "open");
-
+    cx.simulate_keystrokes("ctrl-e");
+    draw(cx);
+    assert!(
+        box_has_focus(&shell, cx),
+        "Ctrl+E puts the keyboard in the title bar's search"
+    );
+    assert!(suggestions_open(&shell, cx));
     cx.simulate_input("zeppelin");
     draw(cx);
-    let hits = search_hits(&shell, cx);
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).main().clone()),
+        Main::Nothing,
+        "typing only suggests"
+    );
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    assert_eq!(cx.update(|_, cx| shell.read(cx).main().clone()), Main::Search);
+    assert!(
+        cx.debug_bounds("search-results").is_some(),
+        "the results take the panes' place"
+    );
+    let hits = result_hits(&shell, cx);
     let shown: Vec<(&str, &str, &str, &str)> = hits
         .iter()
         .map(|(conversation, message, chat, sender, _)| {
@@ -236,17 +282,14 @@ fn ctrl_shift_f_finds_the_listed_chats_messages_the_newest_first_and_enter_opens
     let (_, _, _, _, snippet) = &hits[2];
     assert!(snippet.contains("zeppelin"), "{snippet}");
     assert!(!snippet.contains(MATCH_START) && !snippet.contains(MATCH_END));
-    let matched = cx.update(|_, cx| shell.read(cx).search().unwrap().read(cx).hits()[2].matched.clone());
-    assert_eq!(matched.len(), 1);
-    assert_eq!(&snippet[matched[0].clone()], "zeppelin");
-
-    // the old message is the third: down twice, then Enter
-    cx.simulate_keystrokes("down down enter");
-    draw(cx);
-    assert!(
-        cx.update(|_, cx| shell.read(cx).search().is_none()),
-        "closed once a hit opened"
+    let asked = rig.core.service_searches.lock().unwrap().clone();
+    assert_eq!(
+        asked.last(),
+        Some(&("zeppelin".to_owned(), SearchScope::All)),
+        "and the service asked"
     );
+
+    click(cx, "search-message-7");
     opened_at(&shell, cx, AB, OLD);
     let view = chat_view(&shell, cx);
     assert!(
@@ -255,9 +298,14 @@ fn ctrl_shift_f_finds_the_listed_chats_messages_the_newest_first_and_enter_opens
     );
 
     let search = changes(&written, "search");
-    let named: Vec<&str> = search.iter().map(|line| line["change"].as_str().unwrap()).collect();
-    assert_eq!(named, ["opened", "shown", "closed"]);
-    assert_eq!(search[1]["messages"], serde_json::json!(["9002", "9001", OLD]));
+    let shown_line = search
+        .iter()
+        .rev()
+        .find(|line| line["change"] == "shown")
+        .expect("the results traced");
+    assert_eq!(shown_line["messages"], serde_json::json!(["9002", "9001", OLD]));
+    assert!(search.iter().any(|line| line["change"] == "opened"));
+    assert!(search.iter().any(|line| line["change"] == "results"));
     assert!(!written.text().contains("zeppelin"), "no query or text in the trace");
     let revealed: Vec<serde_json::Value> = changes(&written, "chat-view")
         .into_iter()
@@ -289,10 +337,8 @@ fn hits_of_chats_the_list_doesn_t_show_never_take_the_listed_chats_places() {
     }
     drop(messages);
     let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
-    cx.simulate_keystrokes("ctrl-shift-f");
-    cx.simulate_input("zeppelin");
-    draw(cx);
-    let shown: Vec<(String, String)> = search_hits(&shell, cx)
+    search_for(cx, "zeppelin");
+    let shown: Vec<(String, String)> = result_hits(&shell, cx)
         .into_iter()
         .map(|(conversation, message, ..)| (conversation, message))
         .collect();
@@ -308,22 +354,24 @@ fn hits_of_chats_the_list_doesn_t_show_never_take_the_listed_chats_places() {
 }
 
 #[test]
-fn a_query_too_short_asks_nothing_and_a_longer_one_is_asked_as_typed() {
+fn a_query_too_short_asks_the_store_nothing_and_a_longer_one_is_asked_as_entered() {
     let rig = seeded();
     let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
-    cx.simulate_keystrokes("ctrl-shift-f");
-    cx.simulate_input("z");
-    draw(cx);
+    search_for(cx, "z");
     assert!(
         rig.core.searches.lock().unwrap().is_empty(),
-        "one character asks nothing"
+        "one character asks the store nothing"
     );
-    assert!(search_hits(&shell, cx).is_empty());
+    assert!(result_hits(&shell, cx).is_empty());
+    cx.simulate_keystrokes("ctrl-e");
     cx.simulate_input("e");
+    cx.simulate_keystrokes("enter");
     draw(cx);
     assert_eq!(*rig.core.searches.lock().unwrap(), ["ze"]);
     // FTS syntax goes to the engine as typed: the store quotes it
+    cx.simulate_keystrokes("ctrl-e");
     cx.simulate_input(" (NEAR \"-*:");
+    cx.simulate_keystrokes("enter");
     draw(cx);
     assert_eq!(
         rig.core.searches.lock().unwrap().last().map(String::as_str),
@@ -334,54 +382,162 @@ fn a_query_too_short_asks_nothing_and_a_longer_one_is_asked_as_typed() {
 }
 
 #[test]
-fn the_switcher_lists_the_messages_found_under_the_chats_and_one_chosen_opens_its_chat_at_it() {
+fn the_suggestions_list_the_people_and_chats_the_lists_know_at_once_and_down_enter_opens_one() {
     let rig = seeded();
     let (trace, written) = trace();
     let (shell, cx) = shell_window(&rig, trace);
-    cx.simulate_keystrokes("ctrl-k");
-    cx.simulate_input("zeppelin plan");
+    cx.simulate_keystrokes("ctrl-e");
     draw(cx);
-    let switcher = cx.update(|_, cx| shell.read(cx).switcher().cloned()).expect("open");
-    let (chats, hits) = cx.update(|_, cx| {
-        let switcher = switcher.read(cx);
-        (
-            switcher.matches().len(),
-            switcher
-                .hits()
-                .iter()
-                .map(|hit| hit.target.clone())
-                .collect::<Vec<HitTarget>>(),
-        )
-    });
-    assert_eq!(chats, 0, "no chat's name matches");
-    assert_eq!(hits.len(), 1);
-    assert_eq!((hits[0].conversation.as_str(), hits[0].message.as_str()), (AB, OLD));
+    // nothing typed: the recent chats
+    let recent = cx.update(|_, cx| shell.read(cx).search().read(cx).suggestions().to_vec());
+    assert!(
+        recent
+            .iter()
+            .all(|suggestion| matches!(suggestion, Suggestion::Chat { .. }))
+            && !recent.is_empty()
+    );
+    cx.simulate_input("trio");
+    draw(cx);
+    let suggested = cx.update(|_, cx| shell.read(cx).search().read(cx).suggestions().to_vec());
+    assert!(
+        matches!(&suggested[0], Suggestion::Chat { id, .. } if id == TRIO),
+        "the trio's chat first: {suggested:?}"
+    );
+    assert_eq!(suggested.last(), Some(&Suggestion::Results), "then all the results");
+    assert!(
+        cx.debug_bounds("title-search-suggestions").is_some(),
+        "drawn under the box"
+    );
+    cx.simulate_keystrokes("down enter");
+    draw(cx);
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).main().clone()),
+        Main::Chat(TRIO.to_owned())
+    );
+    assert!(!suggestions_open(&shell, cx), "closed once one opened");
+    let suggested_lines: Vec<serde_json::Value> = changes(&written, "search")
+        .into_iter()
+        .filter(|line| line["change"] == "suggested")
+        .collect();
+    assert!(!suggested_lines.is_empty());
+    assert!(!written.text().contains("trio\""), "no query in the trace");
+}
+
+#[test]
+fn the_service_s_people_files_and_messages_show_in_the_suggestions_and_the_results() {
+    let rig = seeded();
+    *rig.core.service_answer.lock().unwrap() = Found {
+        people: vec![FoundPerson {
+            mri: Some(LAB_B.to_owned()),
+            name: "Lab Bee".to_owned(),
+            email: Some("bee@lab.example.com".to_owned()),
+            job_title: Some("Tester".to_owned()),
+            department: None,
+        }],
+        files: vec![FoundFile {
+            name: "Zeppelin plan.docx".to_owned(),
+            url: "https://contoso.example.com/plan.docx".to_owned(),
+            kind: Some("docx".to_owned()),
+            location: Some("Lab site".to_owned()),
+            modified_by: Some("Lab Sea".to_owned()),
+            modified_ms: Some(NOON),
+            snippet: "the zeppelin plan".to_owned(),
+            matched: vec![4..12],
+        }],
+        messages: vec![FoundMessage {
+            conversation: AB.to_owned(),
+            id: "5".to_owned(),
+            parent: Some("5".to_owned()),
+            sent_ms: NOON - 200 * MINUTE,
+            sender_mri: Some(LAB_B.to_owned()),
+            sender_name: Some("Lab Bee".to_owned()),
+            to: None,
+            snippet: "an older zeppelin".to_owned(),
+            matched: vec![9..17],
+        }],
+        ..Found::default()
+    };
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    cx.simulate_keystrokes("ctrl-e");
+    cx.simulate_input("bee");
+    draw(cx);
+    cx.executor().advance_clock(SUGGEST_DELAY);
+    draw(cx);
+    let suggested = cx.update(|_, cx| shell.read(cx).search().read(cx).suggestions().to_vec());
+    let person = suggested
+        .iter()
+        .find(|suggestion| matches!(suggestion, Suggestion::Person { .. }))
+        .expect("a person suggested");
+    assert!(
+        matches!(person, Suggestion::Person { chat: Some(chat), detail, .. } if chat == AB && detail == "Tester"),
+        "b, with their job, opening the a–b chat: {person:?}"
+    );
+    assert!(
+        suggested
+            .iter()
+            .any(|suggestion| matches!(suggestion, Suggestion::File { name, .. } if name == "Zeppelin plan.docx"))
+    );
+    let asked = rig.core.service_searches.lock().unwrap().clone();
+    assert!(asked.contains(&("bee".to_owned(), SearchScope::Suggestions)));
 
     cx.simulate_keystrokes("enter");
     draw(cx);
-    assert!(cx.update(|_, cx| shell.read(cx).switcher().is_none()));
-    opened_at(&shell, cx, AB, OLD);
-    assert!(
-        changes(&written, "chat-view")
-            .iter()
-            .any(|line| line["change"] == "revealed" && line["messages"] == serde_json::json!([OLD]))
+    let search = cx.update(|_, cx| shell.read(cx).search().clone());
+    let (people, files) = cx.update(|_, cx| (search.read(cx).people(), search.read(cx).files()));
+    assert_eq!(people.len(), 1);
+    assert_eq!(files.len(), 1);
+    // the service's message is shown beside the store's, once
+    let messages: Vec<String> = result_hits(&shell, cx).into_iter().map(|hit| hit.1).collect();
+    assert!(messages.contains(&"5".to_owned()), "{messages:?}");
+    // a tab of its own asks the service for that kind
+    click(cx, "search-tab-people");
+    let asked = rig.core.service_searches.lock().unwrap().clone();
+    assert_eq!(
+        asked.last(),
+        Some(&("bee".to_owned(), SearchScope::Only(SearchKind::People)))
     );
+    assert!(cx.debug_bounds("search-person-0").is_some());
+    click(cx, "search-person-0");
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).main().clone()),
+        Main::Chat(AB.to_owned())
+    );
+}
 
-    // a chat's name still comes first: Enter opens the chat, not a message
-    cx.simulate_keystrokes("ctrl-k");
+#[test]
+fn ctrl_alt_g_goes_right_to_a_chat_or_a_channel_by_its_name() {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    cx.simulate_keystrokes("ctrl-alt-g");
+    draw(cx);
+    let mode = cx.update(|_, cx| shell.read(cx).search().read(cx).mode());
+    assert_eq!(mode, SearchMode::GoTo);
     cx.simulate_input("trio");
     draw(cx);
-    let switcher = cx.update(|_, cx| shell.read(cx).switcher().cloned()).expect("open");
-    let hits = cx.update(|_, cx| switcher.read(cx).hits().len());
-    assert_eq!(hits, 1, "the trio's message is found too");
+    let search = cx.update(|_, cx| shell.read(cx).search().clone());
+    let (suggested, highlighted) = cx.update(|_, cx| {
+        let search = search.read(cx);
+        (search.suggestions().to_vec(), search.highlighted())
+    });
+    assert!(
+        suggested
+            .iter()
+            .all(|suggestion| matches!(suggestion, Suggestion::Chat { .. } | Suggestion::Channel { .. })),
+        "chats and channels only: {suggested:?}"
+    );
+    assert_eq!(highlighted, Some(0), "the first highlighted");
+    assert!(
+        rig.core.service_searches.lock().unwrap().is_empty(),
+        "nothing asked of the service"
+    );
     cx.simulate_keystrokes("enter");
     draw(cx);
     assert_eq!(
         cx.update(|_, cx| shell.read(cx).main().clone()),
         Main::Chat(TRIO.to_owned())
     );
-    let view = chat_view(&shell, cx);
-    assert_eq!(cx.update(|_, cx| view.read(cx).selected().map(str::to_owned)), None);
+    let mode = cx.update(|_, cx| shell.read(cx).search().read(cx).mode());
+    assert_eq!(mode, SearchMode::Search, "the go-to mode ends");
 }
 
 #[test]
@@ -393,11 +549,8 @@ fn a_hit_in_the_chat_already_open_scrolls_its_view_to_the_message() {
     let before = chat_view(&shell, cx);
     assert!(cx.update(|_, cx| before.read(cx).list_state().is_following_tail()));
     assert_eq!(cx.update(|_, cx| before.read(cx).selected().map(str::to_owned)), None);
-    cx.simulate_keystrokes("ctrl-shift-f");
-    cx.simulate_input("zeppelin plan");
-    draw(cx);
-    cx.simulate_keystrokes("enter");
-    draw(cx);
+    search_for(cx, "zeppelin plan");
+    click(cx, "search-message-7");
     opened_at(&shell, cx, AB, OLD);
     assert_eq!(chat_view(&shell, cx), before, "the same view");
 }
@@ -428,14 +581,11 @@ fn a_hit_s_chat_sends_no_read_receipt_for_the_newest_while_it_reads_back_to_the_
     let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
     cx.update(|window, _| window.activate_window());
     draw(cx);
+    search_for(cx, "zeppelin plan");
     // the newest page's load is answered, the load reading back to the hit held (the engine busy elsewhere)
     *rig.core.unsettled_before_hold.lock().unwrap() = 1;
     *rig.core.hold_unsettled.lock().unwrap() = true;
-    cx.simulate_keystrokes("ctrl-shift-f");
-    cx.simulate_input("zeppelin plan");
-    draw(cx);
-    cx.simulate_keystrokes("enter");
-    draw(cx);
+    click(cx, "search-message-7");
     assert_eq!(
         rig.core.held_unsettled.lock().unwrap().len(),
         1,
@@ -462,126 +612,95 @@ fn a_hit_s_chat_sends_no_read_receipt_for_the_newest_while_it_reads_back_to_the_
 }
 
 #[test]
-fn escape_closes_the_search_and_the_switcher_and_the_search_take_turns() {
+fn escape_closes_the_suggestions_and_leaves_the_results_for_where_the_user_was() {
     let rig = seeded();
     let (trace, written) = trace();
     let (shell, cx) = shell_window(&rig, trace);
-    let open = |cx: &mut VisualTestContext| {
-        cx.update(|_, cx| {
-            let shell = shell.read(cx);
-            (shell.search().is_some(), shell.switcher().is_some())
-        })
-    };
-    cx.simulate_keystrokes("ctrl-shift-f");
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(TRIO.to_owned(), window, cx)));
+    draw(cx);
+    cx.simulate_keystrokes("ctrl-e");
     cx.simulate_input("zeppelin");
     draw(cx);
-    assert_eq!(open(cx), (true, false));
+    assert!(suggestions_open(&shell, cx));
     cx.simulate_keystrokes("escape");
     draw(cx);
-    assert_eq!(open(cx), (false, false), "Escape closes it whatever was typed");
-    assert_eq!(cx.update(|_, cx| shell.read(cx).main().clone()), Main::Nothing);
+    assert!(!suggestions_open(&shell, cx), "Escape closes them whatever was typed");
+    assert!(!box_has_focus(&shell, cx), "and gives the keyboard back");
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).main().clone()),
+        Main::Chat(TRIO.to_owned())
+    );
 
-    cx.simulate_keystrokes("ctrl-shift-f");
+    search_for(cx, "zeppelin");
+    assert_eq!(cx.update(|_, cx| shell.read(cx).main().clone()), Main::Search);
+    cx.simulate_keystrokes("escape");
     draw(cx);
-    cx.simulate_keystrokes("ctrl-shift-f");
-    draw(cx);
-    assert_eq!(open(cx), (false, false), "Ctrl+Shift+F toggles it");
-
-    cx.simulate_keystrokes("ctrl-shift-f");
-    draw(cx);
-    cx.simulate_keystrokes("ctrl-k");
-    draw(cx);
-    assert_eq!(open(cx), (false, true), "the switcher takes the search's place");
-    cx.simulate_keystrokes("ctrl-shift-f");
-    draw(cx);
-    assert_eq!(open(cx), (true, false), "and the other way round");
-    let named: Vec<String> = written
-        .lines()
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).main().clone()),
+        Main::Chat(TRIO.to_owned()),
+        "Escape on the results goes back to the chat"
+    );
+    let named: Vec<String> = changes(&written, "search")
         .iter()
-        .filter(|line| line["view"] == "search" || line["view"] == "switcher")
-        .map(|line| {
-            format!(
-                "{} {}",
-                line["view"].as_str().unwrap(),
-                line["change"].as_str().unwrap()
-            )
-        })
+        .map(|line| line["change"].as_str().unwrap().to_owned())
+        .filter(|change| change == "opened" || change == "closed")
         .collect();
     assert_eq!(
         named,
-        [
-            "search opened",
-            "search shown",
-            "search closed",
-            "search opened",
-            "search closed",
-            "search opened",
-            "search closed",
-            "switcher opened",
-            "switcher closed",
-            "search opened",
-        ]
+        ["opened", "closed", "opened", "closed"],
+        "{:?}",
+        changes(&written, "search")
     );
 }
 
-/// The dialog Ctrl+K (the switcher) or Ctrl+Shift+F (the search) opens.
-#[derive(Clone, Copy, Debug)]
-enum Dialog {
-    Switcher,
-    Search,
+#[test]
+fn an_escape_meant_for_the_compose_box_is_never_the_search_s() {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    // an active window: the box hears that it lost the keyboard
+    cx.update(|window, _| window.activate_window());
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(AB.to_owned(), window, cx)));
+    draw(cx);
+    let view = chat_view(&shell, cx);
+    cx.simulate_keystrokes("ctrl-e");
+    draw(cx);
+    assert!(box_has_focus(&shell, cx));
+    act(&view, cx, MessageAction::Reply, "9001");
+    assert!(matches!(mode(&view, cx), Mode::Reply(_)), "replying");
+    assert!(!box_has_focus(&shell, cx), "the compose box has the keyboard");
+    assert!(
+        !suggestions_open(&shell, cx),
+        "the suggestions closed as the box let go"
+    );
+    escape(cx);
+    assert_eq!(mode(&view, cx), Mode::New, "the compose box's Escape cancels the reply");
 }
 
-impl Dialog {
-    fn key(self) -> &'static str {
-        match self {
-            Self::Switcher => "ctrl-k",
-            Self::Search => "ctrl-shift-f",
-        }
-    }
+#[test]
+fn a_click_in_the_suggestions_keeps_the_box_s_keyboard() {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    cx.simulate_keystrokes("ctrl-e");
+    cx.simulate_input("qqqqqq");
+    draw(cx);
+    let drawn = cx
+        .debug_bounds("title-search-suggestions")
+        .expect("the suggestions are drawn");
+    // the chips' row, which opens nothing but where it is clicked
+    let at = point(drawn.right() - px(8.0), drawn.top() + px(8.0));
+    cx.simulate_click(at, Modifiers::none());
+    draw(cx);
+    assert!(box_has_focus(&shell, cx), "the box keeps the keyboard");
+    assert!(suggestions_open(&shell, cx), "and the suggestions stay");
+    cx.simulate_input("x");
+    draw(cx);
+    let query = cx.update(|_, cx| shell.read(cx).search().read(cx).query(cx));
+    assert_eq!(query, "qqqqqqx");
+}
 
-    fn selector(self) -> &'static str {
-        match self {
-            Self::Switcher => "switcher",
-            Self::Search => "search",
-        }
-    }
-
-    fn is_open(self, shell: &Entity<Shell>, cx: &mut VisualTestContext) -> bool {
-        cx.update(|_, cx| match self {
-            Self::Switcher => shell.read(cx).switcher().is_some(),
-            Self::Search => shell.read(cx).search().is_some(),
-        })
-    }
-
-    fn query(self, shell: &Entity<Shell>, cx: &mut VisualTestContext) -> String {
-        cx.update(|_, cx| match self {
-            Self::Switcher => shell.read(cx).switcher().unwrap().read(cx).query().to_owned(),
-            Self::Search => shell.read(cx).search().unwrap().read(cx).query().to_owned(),
-        })
-    }
-
-    /// Whether the focus is in the dialog.
-    fn holds_focus(self, shell: &Entity<Shell>, cx: &mut VisualTestContext) -> bool {
-        cx.update(|window, cx| match self {
-            Self::Switcher => shell.read(cx).switcher().unwrap().read(cx).holds_focus(window, cx),
-            Self::Search => shell.read(cx).search().unwrap().read(cx).holds_focus(window, cx),
-        })
-    }
-
-    /// Moves the focus back to the dialog's query field.
-    fn focus(self, shell: &Entity<Shell>, cx: &mut VisualTestContext) {
-        cx.update(|window, cx| match self {
-            Self::Switcher => {
-                let switcher = shell.read(cx).switcher().cloned().unwrap();
-                switcher.update(cx, |switcher, cx| switcher.focus(window, cx));
-            }
-            Self::Search => {
-                let search = shell.read(cx).search().cloned().unwrap();
-                search.update(cx, |search, cx| search.focus(window, cx));
-            }
-        });
-        draw(cx);
-    }
+/// The dialog Ctrl+K (the switcher) opens.
+fn switcher_open(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> bool {
+    cx.update(|_, cx| shell.read(cx).switcher().is_some())
 }
 
 fn mode(view: &Entity<ChatView>, cx: &mut VisualTestContext) -> Mode {
@@ -598,115 +717,68 @@ fn escape(cx: &mut VisualTestContext) {
     draw(cx);
 }
 
+/// With the switcher open and the focus moved out of it, into the compose box, an Escape is the box's; with the focus
+/// back in its field it is the switcher's, and Ctrl+K closes it wherever the focus is.
 #[test]
 fn an_escape_meant_for_the_compose_box_is_never_the_switcher_s() {
-    an_escape_meant_for_the_compose_box_is_never(Dialog::Switcher);
-}
-
-#[test]
-fn an_escape_meant_for_the_compose_box_is_never_the_search_s() {
-    an_escape_meant_for_the_compose_box_is_never(Dialog::Search);
-}
-
-/// With `dialog` open and the focus moved out of it, into the compose box, an Escape is the box's; with the focus back
-/// in the dialog's field it is the dialog's, and the dialog's key closes it wherever the focus is.
-fn an_escape_meant_for_the_compose_box_is_never(dialog: Dialog) {
     let rig = seeded();
     let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
     cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(AB.to_owned(), window, cx)));
     draw(cx);
     let view = chat_view(&shell, cx);
-    cx.simulate_keystrokes(dialog.key());
+    let holds = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| shell.read(cx).switcher().unwrap().read(cx).holds_focus(window, cx))
+    };
+    cx.simulate_keystrokes("ctrl-k");
     draw(cx);
-    assert!(dialog.is_open(&shell, cx), "{dialog:?} opens");
-    assert!(dialog.holds_focus(&shell, cx), "{dialog:?} takes the focus");
-
-    the_box_s_escapes_pass(dialog, &shell, &view, cx);
-
-    // the focus back in its field: Escape is the dialog's again
-    dialog.focus(&shell, cx);
+    assert!(switcher_open(&shell, cx));
+    assert!(holds(cx), "the switcher takes the focus");
+    act(&view, cx, MessageAction::Reply, "9001");
+    assert!(!holds(cx), "the box has the focus");
     escape(cx);
-    assert!(!dialog.is_open(&shell, cx), "{dialog:?}: Escape in its field closes it");
-
+    assert_eq!(mode(&view, cx), Mode::New, "the box's Escape cancels the reply");
+    assert!(switcher_open(&shell, cx), "the switcher doesn't take the box's Escape");
+    act(&view, cx, MessageAction::Edit, "9001");
+    escape(cx);
+    assert_eq!(mode(&view, cx), Mode::New, "nor the edit's");
+    assert!(switcher_open(&shell, cx));
+    // the focus back in its field: Escape is the switcher's again
+    cx.update(|window, cx| {
+        let switcher = shell.read(cx).switcher().cloned().unwrap();
+        switcher.update(cx, |switcher, cx| switcher.focus(window, cx));
+    });
+    draw(cx);
+    escape(cx);
+    assert!(!switcher_open(&shell, cx), "Escape in its field closes it");
     // and its key closes it wherever the focus is
-    cx.simulate_keystrokes(dialog.key());
+    cx.simulate_keystrokes("ctrl-k");
     draw(cx);
     act(&view, cx, MessageAction::Reply, "9001");
-    cx.simulate_keystrokes(dialog.key());
+    cx.simulate_keystrokes("ctrl-k");
     draw(cx);
-    assert!(
-        !dialog.is_open(&shell, cx),
-        "{dialog:?}: its key closes it from the box"
-    );
-    assert!(matches!(mode(&view, cx), Mode::Reply(_)), "{dialog:?}: the reply kept");
-    let compose = cx.update(|_, cx| view.read(cx).compose().clone());
-    assert!(
-        cx.update(|window, cx| compose.read(cx).focused(window, cx)),
-        "{dialog:?}: the box keeps the focus"
-    );
-}
-
-/// With `dialog` open, the focus moved out of it into the compose box: the box's Escape cancels its reply, then its
-/// edit, and the dialog stays open.
-fn the_box_s_escapes_pass(dialog: Dialog, shell: &Entity<Shell>, view: &Entity<ChatView>, cx: &mut VisualTestContext) {
-    act(view, cx, MessageAction::Reply, "9001");
-    assert!(matches!(mode(view, cx), Mode::Reply(_)), "{dialog:?}: replying");
-    assert!(!dialog.holds_focus(shell, cx), "{dialog:?}: the box has the focus");
-    escape(cx);
-    assert_eq!(
-        mode(view, cx),
-        Mode::New,
-        "{dialog:?}: the box's Escape cancels the reply"
-    );
-    assert!(dialog.is_open(shell, cx), "{dialog:?} doesn't take the box's Escape");
-    act(view, cx, MessageAction::Edit, "9001");
-    assert!(matches!(mode(view, cx), Mode::Edit { .. }), "{dialog:?}: editing");
-    escape(cx);
-    assert_eq!(
-        mode(view, cx),
-        Mode::New,
-        "{dialog:?}: the box's Escape cancels the edit"
-    );
-    assert!(dialog.is_open(shell, cx), "{dialog:?} doesn't take the box's Escape");
+    assert!(!switcher_open(&shell, cx), "Ctrl+K closes it from the box");
+    assert!(matches!(mode(&view, cx), Mode::Reply(_)), "the reply kept");
 }
 
 #[test]
 fn escape_closes_the_switcher_once_its_list_was_clicked() {
-    escape_closes_once_its_list_was_clicked(Dialog::Switcher);
-}
-
-#[test]
-fn escape_closes_the_search_once_its_list_was_clicked() {
-    escape_closes_once_its_list_was_clicked(Dialog::Search);
-}
-
-/// A click in `dialog`'s list moves the focus off its query field but keeps it in the dialog: Escape still closes it.
-fn escape_closes_once_its_list_was_clicked(dialog: Dialog) {
     let rig = seeded();
     let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
-    cx.simulate_keystrokes(dialog.key());
+    cx.simulate_keystrokes("ctrl-k");
     // a query nothing matches: the list holds only its empty text, which no click chooses
     cx.simulate_input("qqqqqq");
     draw(cx);
-    let drawn = cx
-        .debug_bounds(dialog.selector())
-        .unwrap_or_else(|| panic!("{dialog:?} is drawn"));
-    // below the query field, in the list
+    let drawn = cx.debug_bounds("switcher").expect("the switcher is drawn");
     let at = point(drawn.center().x, drawn.bottom() - px(8.0));
     cx.simulate_click(at, Modifiers::none());
     draw(cx);
-    assert!(dialog.is_open(&shell, cx), "{dialog:?}: a click in it keeps it open");
-    assert!(dialog.holds_focus(&shell, cx), "{dialog:?}: the focus is in it");
-    // but no longer in its field: what is typed now isn't a query
+    assert!(switcher_open(&shell, cx), "a click in it keeps it open");
     cx.simulate_input("x");
     draw(cx);
-    assert_eq!(
-        dialog.query(&shell, cx),
-        "qqqqqq",
-        "{dialog:?}: the focus left its field"
-    );
+    let query = cx.update(|_, cx| shell.read(cx).switcher().unwrap().read(cx).query().to_owned());
+    assert_eq!(query, "qqqqqq", "the focus left its field");
     escape(cx);
-    assert!(!dialog.is_open(&shell, cx), "{dialog:?}: Escape closes it");
+    assert!(!switcher_open(&shell, cx), "Escape closes it");
 }
 
 #[test]
@@ -721,13 +793,61 @@ fn once_the_engine_stopped_a_query_shows_no_hit() {
     assert_eq!(rig.shutdowns(), 1);
     // the stopped engine answers every request `Stopped`
     *rig.core.stopped.lock().unwrap() = true;
-    cx.simulate_keystrokes("ctrl-shift-f");
-    cx.simulate_input("zeppelin");
-    draw(cx);
+    search_for(cx, "zeppelin");
     assert!(rig.core.asked().contains(&"search"), "asked, and answered stopped");
-    assert!(search_hits(&shell, cx).is_empty());
-    let searching = cx.update(|_, cx| shell.read(cx).search().unwrap().read(cx).searching());
-    assert!(!searching);
+    assert!(result_hits(&shell, cx).is_empty());
+    assert!(cx.debug_bounds("search-results-empty").is_some(), "said so");
+}
+
+#[test]
+fn back_and_forward_go_through_the_places_shown_and_the_list_pane_hides() {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    assert!(cx.debug_bounds("title-bar").is_some(), "the title bar is drawn");
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(AB.to_owned(), window, cx)));
+    draw(cx);
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(TRIO.to_owned(), window, cx)));
+    draw(cx);
+    // the rail's Settings: the keyboard on their pages
+    click(cx, "rail-settings");
+    cx.simulate_keystrokes("alt-left");
+    draw(cx);
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).main().clone()),
+        Main::Chat(TRIO.to_owned())
+    );
+    click(cx, "title-back");
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).main().clone()),
+        Main::Chat(AB.to_owned())
+    );
+    cx.simulate_keystrokes("alt-right");
+    draw(cx);
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).main().clone()),
+        Main::Chat(TRIO.to_owned())
+    );
+    // a new place drops what was ahead
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.show_calendar(window, cx)));
+    draw(cx);
+    assert!(!cx.update(|_, cx| shell.read(cx).history().can_go_forward()));
+
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(AB.to_owned(), window, cx)));
+    draw(cx);
+    assert!(cx.debug_bounds("list-pane").is_some());
+    click(cx, "title-list-toggle");
+    assert!(cx.debug_bounds("list-pane").is_none(), "the list pane hidden");
+    assert!(cx.debug_bounds("conversation-pane").is_some());
+    click(cx, "title-list-toggle");
+    assert!(cx.debug_bounds("list-pane").is_some(), "and shown again");
+}
+
+#[test]
+fn the_service_s_marked_text_becomes_plain_text_and_the_ranges_of_its_matches() {
+    let (text, matched) = highlighted("Acme <c0>Lab</c0>s &amp; the <c0>lab</c0><ddd/> <a href=\"x\">link</a>");
+    assert_eq!(text, "Acme Labs & the lab… link");
+    let parts: Vec<&str> = matched.iter().map(|range| &text[range.clone()]).collect();
+    assert_eq!(parts, ["Lab", "lab"]);
 }
 
 #[test]

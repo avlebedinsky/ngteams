@@ -5,26 +5,22 @@
 //!
 //! It reads the chat list's rows (one model for both), so a chat that changes while it is open shows changed. Under
 //! the chats come the teams' channels the Teams list shows ("<team> › <channel>", matched the same way): one chosen
-//! opens read-only, as from the Teams list. Then the messages the query finds in the store ([`crate::search`]): one
-//! chosen opens its chat at the message. Last come the app's commands the query matches ([`COMMANDS`]: "Copy
+//! opens read-only, as from the Teams list. Messages are found by the title bar's search ([`crate::global_search`]),
+//! the app's one search, not here. Last come the app's commands the query matches ([`COMMANDS`]: "Copy
 //! diagnostics", and "Set status: …" for each status the account menu offers, so the account's status is set from the
 //! keyboard too), and in a build that shows calls the call commands that fit the moment ([`CallCommand`]: "Call" the
 //! chat shown, "Make a test call", "Join call", "Answer call", "Decline call", "Leave call", "Mute or unmute", M3 Task 17;
 //! "Camera on or off", Task 18).
 
-use std::sync::Arc;
-
 use gpui::{
-    App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, Styled as _, Subscription, Task, Window, div, px, rgb,
+    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _, IntoElement,
+    ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div, px, rgb,
 };
 use gpui_component::IndexPath;
 use gpui_component::command::{Command, CommandGroup, CommandItem, CommandState};
 
-use crate::bridge::Core;
 use crate::calls::Calls;
 use crate::chat_list::{ChatList, RowKind};
-use crate::search::{self, Hit, HitTarget};
 use crate::settings::ManualStatus;
 use crate::teams_list::TeamsList;
 use crate::theme;
@@ -106,8 +102,6 @@ pub enum SwitcherEvent {
     Open(String),
     /// Open this team's channel, read-only.
     OpenChannel(String),
-    /// Open this chat at this message (a message the query found).
-    OpenMessage(HitTarget),
     /// Close the switcher.
     Dismissed,
     /// Put the diagnostics on the clipboard (the "Copy diagnostics" command).
@@ -183,8 +177,7 @@ impl CallCommand {
 /// The palette's sections in order (an empty one is hidden, and keeps its number).
 const CHATS: usize = 0;
 const CHANNELS: usize = 1;
-const MESSAGES: usize = 2;
-const COMMAND_SECTION: usize = 3;
+const COMMAND_SECTION: usize = 2;
 
 /// One of the app's commands the palette offers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -233,15 +226,10 @@ pub struct Switcher {
     state: Entity<CommandState>,
     list: Entity<ChatList>,
     teams: Entity<TeamsList>,
-    core: Arc<dyn Core>,
     query: String,
     matches: Vec<(String, SharedString)>,
     /// The channels the query matches, the best first: `(id, "<team> › <channel>")`.
     channels: Vec<(String, SharedString)>,
-    /// The messages the query finds, the newest first.
-    hits: Vec<Hit>,
-    /// The search for the latest query: a later query drops it.
-    searching: Option<Task<()>>,
     /// The call commands that fit the moment, first of the commands.
     call_commands: Vec<CallCommand>,
     _observing: [Subscription; 3],
@@ -259,7 +247,6 @@ impl Switcher {
     pub fn new(
         list: Entity<ChatList>,
         teams: Entity<TeamsList>,
-        core: Arc<dyn Core>,
         (calls, chat): (Entity<Calls>, Option<String>),
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -299,12 +286,9 @@ impl Switcher {
             state,
             list,
             teams,
-            core,
             query: String::new(),
             matches: Vec::new(),
             channels: Vec::new(),
-            hits: Vec::new(),
-            searching: None,
             call_commands,
             _observing: observing,
             focus: cx.focus_handle(),
@@ -338,12 +322,6 @@ impl Switcher {
         &self.query
     }
 
-    /// The messages the query finds, listed under the chats, the newest first.
-    #[must_use]
-    pub fn hits(&self) -> &[Hit] {
-        &self.hits
-    }
-
     /// The channels listed now, the best match first: `(id, "<team> › <channel>")`.
     #[must_use]
     pub fn channels(&self) -> &[(String, SharedString)] {
@@ -366,36 +344,9 @@ impl Switcher {
             .collect()
     }
 
-    /// Whether a search for the query runs.
-    #[must_use]
-    pub fn searching(&self) -> bool {
-        self.searching.is_some()
-    }
-
     fn set_query(&mut self, query: &str, cx: &mut Context<Self>) {
         query.clone_into(&mut self.query);
         self.refilter(cx);
-        self.search(cx);
-    }
-
-    /// Looks for the query's messages ([`search::find`]); a query too short finds none.
-    fn search(&mut self, cx: &mut Context<Self>) {
-        if !search::searchable(&self.query) {
-            self.searching = None;
-            self.hits.clear();
-            return;
-        }
-        let core = Arc::clone(&self.core);
-        let chats = search::listed_chats(&self.list, cx);
-        let query = self.query.clone();
-        self.searching = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let hits = search::find(&*core, query, chats).await;
-            let _ = this.update(cx, |this, cx| {
-                this.searching = None;
-                this.hits = hits;
-                cx.notify();
-            });
-        }));
     }
 
     fn refilter(&mut self, cx: &mut Context<Self>) {
@@ -434,10 +385,6 @@ impl Switcher {
                 .channels
                 .get(index.row)
                 .map(|(id, _)| SwitcherEvent::OpenChannel(id.clone())),
-            MESSAGES => self
-                .hits
-                .get(index.row)
-                .map(|hit| SwitcherEvent::OpenMessage(hit.target.clone())),
             COMMAND_SECTION => self.matching_commands().get(index.row).map(|command| command.event()),
             _ => None,
         };
@@ -459,7 +406,7 @@ impl Render for Switcher {
         // the sections in order (an empty one is hidden, and keeps its number)
         let command = Command::new(&self.state)
             .filterable(false)
-            .placeholder("Go to a chat or a channel, find a message, or run a command")
+            .placeholder("Go to a chat or a channel, or run a command")
             .group(CommandGroup::new().label("Chats").items(chats))
             .group(
                 CommandGroup::new().label("Channels").items(
@@ -467,11 +414,6 @@ impl Render for Switcher {
                         .iter()
                         .map(|(_, name)| CommandItem::new().label(name.clone())),
                 ),
-            )
-            .group(
-                CommandGroup::new()
-                    .label("Messages")
-                    .items(self.hits.iter().map(search::hit_item)),
             )
             .group(
                 CommandGroup::new()
@@ -485,7 +427,7 @@ impl Render for Switcher {
             .on_confirm(move |index, _, cx| {
                 let _ = on_confirm.update(cx, |this, cx| this.confirm(index, cx));
             })
-            .empty(|_, _, _| div().p_2().child("No chat, channel, message or command matches"));
+            .empty(|_, _, _| div().p_2().child("No chat, channel or command matches"));
         div()
             .debug_selector(|| "switcher".to_owned())
             .track_focus(&self.focus)

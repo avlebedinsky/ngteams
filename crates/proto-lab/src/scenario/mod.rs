@@ -44,6 +44,8 @@
 //!
 //! - [`ab_meeting`] (account a, as `ab-chat`): a schedules a Teams meeting with b from the scheduling form, changes its
 //!   title and cancels it; recorded.
+//! - [`search`] (account a, fail-closed as `load`): a searches from the title bar (the suggestions as it types, the
+//!   results and each of their tabs, a message found opened); recorded.
 //!
 //! The steps are in [`dsl`]. A run fails (`proto-lab run` exits non-zero) when its goal isn't reached, when the fence
 //! was breached, and on any **unexpected** deny: what a scenario expects is its [`DenyPolicy`]. The writing scenarios
@@ -68,6 +70,7 @@ pub mod echo_call;
 pub mod expected;
 pub mod load;
 pub mod own_presence;
+pub mod search;
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -131,6 +134,8 @@ pub enum ScenarioName {
     /// Account a schedules a Teams meeting with b, changes its title and cancels it, after the same enforcement test;
     /// recorded.
     AbMeeting,
+    /// Account a searches from the title bar: the suggestions, the results and their tabs; recorded.
+    Search,
     /// Account a's availability reported by the `user.activity` frame alone (the presence endpoint denied); recorded.
     OwnPresenceActivity,
     /// Account a's availability reported by the presence endpoint alone (every `user.activity` held back); recorded.
@@ -165,6 +170,7 @@ impl ScenarioName {
             Self::AbcCallMixed => "abc-call-mixed",
             Self::AbCallApp => "ab-call-app",
             Self::AbMeeting => "ab-meeting",
+            Self::Search => "search",
             Self::OwnPresenceActivity => "own-presence-activity",
             Self::OwnPresenceEndpoint => "own-presence-endpoint",
             Self::OwnPresenceBoth => "own-presence-both",
@@ -399,6 +405,7 @@ pub async fn run(
         ScenarioName::ChatShapes => chat_shapes::run(paths, options).await,
         ScenarioName::AbcEveryone => abc_everyone::run(paths, options).await,
         ScenarioName::AbMeeting => ab_meeting::run(paths, options).await,
+        ScenarioName::Search => search::run(paths, options).await,
         ScenarioName::EchoCall
         | ScenarioName::AbCall
         | ScenarioName::AbcCall

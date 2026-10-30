@@ -13,14 +13,19 @@
 //! input and every keystroke in its window (the ones a key binding takes included) tell the own presence the window is
 //! used.
 //!
+//! The title bar ([`title_bar`]) runs across the top, as Teams': the launcher, the list pane's toggle, Back and Forward
+//! (Alt+Left, Alt+Right), the search box ([`GlobalSearch`]), "Settings and more" and the account's avatar, which opens
+//! the account menu under it.
+//!
 //! The keyboard: Ctrl+Alt+Down and Ctrl+Alt+Up show the app's next and previous account ([`crate::accounts`]); Ctrl+K
 //! opens the [`Switcher`] over the panes (and closes it again); a chat chosen there or clicked in
 //! the list opens in the conversation pane and is kept as the selected chat in the settings, so the app opens it again
 //! at its next start; a channel chosen there opens read-only, and a "Set status: …" command chosen there sets the
-//! account's status as the account menu does. Ctrl+Shift+F opens the [`Search`] of the stored messages the same way (one of the two at a
-//! time); a message found there or in the switcher opens its chat at the message ([`ChatView::reveal`]). What the
-//! shell shows is traced (`chat opened`, `channel opened`, `settings opened`, `switcher opened`/`closed`, `search
-//! opened`/`closed`, `status-menu opened`/`closed`/`chosen` with the status's key, and `header shown`: the chat's
+//! account's status as the account menu does. Ctrl+E (and Ctrl+Shift+F) puts the keyboard in the title bar's search,
+//! Ctrl+Alt+G in its "go to" mode; its results take the place of the panes (`Main::Search`), and a message found opens
+//! its chat at the message ([`ChatView::reveal`]). What the
+//! shell shows is traced (`chat opened`, `channel opened`, `settings opened`, `switcher opened`/`closed`, the search's
+//! own lines, `status-menu opened`/`closed`/`chosen` with the status's key, and `header shown`: the chat's
 //! header's presence and whether its name and avatar came from people's names and a picture, never the name).
 //!
 //! Calls (M3 Task 17), in a build that shows them (in one that doesn't, the call keys do nothing here): the chat's
@@ -62,12 +67,13 @@ use crate::chat_list::{ChatList, ChatListEvent};
 use crate::chat_view::{self, ChatView, ChatViewEvent};
 use crate::first_run::FirstRun;
 use crate::forwarded::Original;
+use crate::global_search::{self, GlobalSearch, GlobalSearchEvent, Mode as SearchMode};
 use crate::icons::{Glyph, icon_button_with_key, selected_by};
 use crate::models::{Account, Models};
 use crate::own_presence::{self, OwnPresence};
 use crate::people;
 use crate::presence;
-use crate::search::{HitTarget, Search, SearchEvent};
+use crate::search::HitTarget;
 use crate::settings::{ManualStatus, SettingsModel};
 use crate::settings_view::{self, Page, SettingsView, SettingsViewEvent, TestCallOffer, TestCallState};
 use crate::sidebar::Sidebar;
@@ -77,7 +83,11 @@ use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 use crate::view::status_text;
 
-actions!(teams_ui, [ToggleSwitcher, ToggleSearch, NextAccount, PreviousAccount]);
+mod title_bar;
+
+pub use title_bar::{FocusSearch, GoBack, GoForward, History, RIGHT_WIDTH, SEARCH_MAX, TITLE_HEIGHT, ToggleListPane};
+
+actions!(teams_ui, [ToggleSwitcher, NextAccount, PreviousAccount, GoToChat]);
 actions!(teams_ui, [FontLarger, FontSmaller, FontReset]);
 actions!(teams_ui, [ShowChats, ShowCalendar]);
 actions!(
@@ -137,16 +147,22 @@ struct Bound;
 
 impl Global for Bound {}
 
-/// Binds the shell's keys (Ctrl+K: the switcher; Ctrl+Shift+F: the search) and the chat view's, once per app.
+/// Binds the shell's keys (Ctrl+K: the switcher; Ctrl+E, Ctrl+Shift+F: the search; Ctrl+Alt+G: its go-to mode; Alt+Left
+/// and Alt+Right: Back and Forward) and the chat view's, once per app.
 pub fn init(cx: &mut App) {
     chat_view::init(cx);
     if cx.has_global::<Bound>() {
         return;
     }
     cx.set_global(Bound);
+    global_search::init(cx);
     cx.bind_keys([
         KeyBinding::new("ctrl-k", ToggleSwitcher, None),
-        KeyBinding::new("ctrl-shift-f", ToggleSearch, None),
+        KeyBinding::new("ctrl-e", FocusSearch, None),
+        KeyBinding::new("ctrl-shift-f", FocusSearch, None),
+        KeyBinding::new("ctrl-alt-g", GoToChat, None),
+        KeyBinding::new("alt-left", GoBack, None),
+        KeyBinding::new("alt-right", GoForward, None),
         KeyBinding::new("ctrl-alt-down", NextAccount, None),
         KeyBinding::new("ctrl-alt-up", PreviousAccount, None),
         // Teams' zoom keys, on the base font size
@@ -182,6 +198,15 @@ pub enum Main {
     Settings,
     /// The calendar, across both panes.
     Calendar,
+    /// The search's results, across both panes.
+    Search,
+}
+
+/// Where the account menu opens: over the rail's account, or under the title bar's avatar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuAnchor {
+    Rail,
+    TitleBar,
 }
 
 /// What the shell is made of: the engine's request side, the models, the settings and the view trace.
@@ -213,7 +238,12 @@ pub struct Shell {
     /// The first run's screen, shown over everything while it waits ([`SettingsModel::awaiting_first_run`]).
     first_run: Entity<FirstRun>,
     switcher: Option<(Entity<Switcher>, Subscription)>,
-    search: Option<(Entity<Search>, Subscription)>,
+    /// The title bar's search: its box, its suggestions and its results.
+    search_box: Entity<GlobalSearch>,
+    /// The places shown, for Back and Forward.
+    history: History,
+    /// The list pane is shown (the title bar's toggle hides it).
+    list_shown: bool,
     main: Main,
     /// What the settings hid, shown again when the rail's Chat leaves them.
     before_settings: Main,
@@ -223,6 +253,8 @@ pub struct Shell {
     own_presence: Option<(Entity<OwnPresence>, Subscription)>,
     /// The account menu is open.
     status_menu: bool,
+    /// Where it opened.
+    status_anchor: MenuAnchor,
     /// What the chat's header was last traced showing.
     header_traced: Option<HeaderShown>,
     /// The incoming call's banner and the in-call strip.
@@ -235,7 +267,7 @@ pub struct Shell {
     chat_events: Option<Subscription>,
     /// What the channel view tells ([`Shell::follow_channel`]), once there is one.
     channel_events: Option<Subscription>,
-    _subscriptions: [Subscription; 10],
+    _subscriptions: [Subscription; 11],
 }
 
 /// What the chat's header shows, as the trace tells it: the chat, its other member's presence (a 1:1 chat's), and
@@ -289,6 +321,7 @@ impl Shell {
             trace: Arc::clone(&trace),
         };
         let (chat, chat_events) = Self::kept_chat(chat_parts, selected.clone(), window, cx).unzip();
+        let (search_box, searched) = Self::search_box(&core, &list, &teams, &trace, window, cx);
         Self {
             core,
             models,
@@ -303,13 +336,16 @@ impl Shell {
             calendar,
             first_run,
             switcher: None,
-            search: None,
+            search_box,
+            history: History::default(),
+            list_shown: true,
             main: selected.map_or(Main::Nothing, Main::Chat),
             before_settings: Main::Nothing,
             panes: cx.new(|_| ResizableState::default()),
             focus,
             own_presence: None,
             status_menu: false,
+            status_anchor: MenuAnchor::Rail,
             header_traced: None,
             call_bar,
             call_button_traced: None,
@@ -327,6 +363,7 @@ impl Shell {
                 calling,
                 test_call_asked,
                 calendar_events,
+                searched,
             ],
         }
     }
@@ -347,6 +384,32 @@ impl Shell {
         });
         let renamed = cx.observe(list, |this: &mut Self, _, cx| this.list_changed(cx));
         [settled, presence, renamed]
+    }
+
+    /// The title bar's search, and what it tells the shell followed.
+    fn search_box(
+        core: &Arc<dyn Core>,
+        list: &Entity<ChatList>,
+        teams: &Entity<TeamsList>,
+        trace: &Arc<ViewTrace>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (Entity<GlobalSearch>, Subscription) {
+        let (core, list, teams, trace) = (Arc::clone(core), list.clone(), teams.clone(), Arc::clone(trace));
+        let search = cx.new(|cx| GlobalSearch::new(core, list, teams, trace, window, cx));
+        let events = cx.subscribe_in(&search, window, |this: &mut Self, _, event, window, cx| match event {
+            GlobalSearchEvent::OpenChat(id) => this.open_chat(id.clone(), window, cx),
+            GlobalSearchEvent::OpenChannel(id) => this.open_channel_id(id.clone(), window, cx),
+            GlobalSearchEvent::OpenMessage(target) => this.open_message(target.clone(), window, cx),
+            GlobalSearchEvent::ShowResults => this.show_search_results(window, cx),
+            GlobalSearchEvent::LeaveResults => this.leave_search_results(window, cx),
+            GlobalSearchEvent::Done => {
+                if this.search_box.read(cx).holds_focus(window, cx) {
+                    this.take_focus(window, cx);
+                }
+            }
+        });
+        (search, events)
     }
 
     /// The Teams list, with the subscriptions that open a channel it chose, and a channel kept as the selected chat.
@@ -465,14 +528,14 @@ impl Shell {
         }
         self.trace.record(&TraceLine::new("calendar", "opened"));
         let before = std::mem::replace(&mut self.main, Main::Calendar);
-        if before != Main::Settings {
+        if !matches!(before, Main::Settings | Main::Search) {
             self.before_settings = before;
         }
         if let Some(chat) = &self.chat {
             chat.update(cx, |chat, cx| chat.set_shown(false, cx));
         }
         self.close_switcher(window, cx);
-        self.close_search(window, cx);
+        self.close_search(cx);
         self.calendar
             .update(cx, |calendar, cx| calendar.set_shown(true, window, cx));
         cx.notify();
@@ -742,8 +805,14 @@ impl Shell {
         self.status_menu
     }
 
-    /// Opens the account menu, or closes it when it is open.
+    /// Opens the account menu (under the title bar's avatar), or closes it when it is open.
     pub fn toggle_status_menu(&mut self, cx: &mut Context<Self>) {
+        self.toggle_status_menu_at(MenuAnchor::TitleBar, cx);
+    }
+
+    /// Opens the account menu at `anchor`, or closes it when it is open.
+    pub fn toggle_status_menu_at(&mut self, anchor: MenuAnchor, cx: &mut Context<Self>) {
+        self.status_anchor = anchor;
         self.status_menu = !self.status_menu;
         let change = if self.status_menu { "opened" } else { "closed" };
         self.trace.record(&TraceLine::new("status-menu", change));
@@ -879,7 +948,7 @@ impl Shell {
         self.main = Main::Channel(chosen.id);
         self.hide_calendar(window, cx);
         self.close_switcher(window, cx);
-        self.close_search(window, cx);
+        self.close_search(cx);
         self.focus.focus(window, cx);
         cx.notify();
     }
@@ -918,10 +987,59 @@ impl Shell {
         self.switcher.as_ref().map(|(switcher, _)| switcher)
     }
 
-    /// The search, while it is open.
+    /// The title bar's search.
     #[must_use]
-    pub fn search(&self) -> Option<&Entity<Search>> {
-        self.search.as_ref().map(|(search, _)| search)
+    pub fn search(&self) -> &Entity<GlobalSearch> {
+        &self.search_box
+    }
+
+    /// Ctrl+E, Ctrl+Shift+F (`mode` search) and Ctrl+Alt+G (`mode` go-to): the keyboard in the title bar's search.
+    pub fn focus_search(&mut self, mode: SearchMode, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_switcher(window, cx);
+        self.status_menu = false;
+        self.search_box
+            .update(cx, |search, cx| search.focus_box(mode, window, cx));
+        cx.notify();
+    }
+
+    /// The search's results across both panes, the keyboard on them (Escape leaves them); the chat they hide is kept
+    /// but isn't shown.
+    pub fn show_search_results(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search_box.read(cx).results().is_none() {
+            return;
+        }
+        self.hide_calendar(window, cx);
+        if self.main != Main::Search {
+            let before = std::mem::replace(&mut self.main, Main::Search);
+            if !matches!(before, Main::Settings | Main::Calendar) {
+                self.before_settings = before;
+            }
+            if let Some(chat) = &self.chat {
+                chat.update(cx, |chat, cx| chat.set_shown(false, cx));
+            }
+        }
+        let focus = self.search_box.read(cx).results_focus().clone();
+        focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Escape on the results: back where the user was.
+    pub fn leave_search_results(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.main != Main::Search {
+            return;
+        }
+        self.search_box
+            .update(cx, |search, cx| search.clear_results(window, cx));
+        if self.history.can_go_back() {
+            self.go_back(window, cx);
+        } else {
+            self.main = Main::Nothing;
+            self.focus.focus(window, cx);
+        }
+        if self.main == Main::Search {
+            self.main = Main::Nothing;
+        }
+        cx.notify();
     }
 
     /// The chat view of the chat opened, if one is.
@@ -958,7 +1076,7 @@ impl Shell {
         self.give_title(cx);
         self.trace_call_button(cx);
         self.close_switcher(window, cx);
-        self.close_search(window, cx);
+        self.close_search(cx);
         // the chat opened takes what is typed next, and is shown (read receipts may go)
         if let Some(chat) = &self.chat {
             chat.update(cx, |chat, cx| chat.set_shown(true, cx));
@@ -1046,7 +1164,7 @@ impl Shell {
         if self.main != Main::Settings {
             self.trace.record(&TraceLine::new("settings", "opened"));
             let before = std::mem::replace(&mut self.main, Main::Settings);
-            if before != Main::Calendar {
+            if !matches!(before, Main::Calendar | Main::Search) {
                 self.before_settings = before;
             }
             if let Some(chat) = &self.chat {
@@ -1059,14 +1177,14 @@ impl Shell {
     /// The rail's Chat: leaves the settings for what they hid (the chat or the channel shown before them, opened
     /// again), or nothing; elsewhere it does nothing.
     pub fn show_chats(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !matches!(self.main, Main::Settings | Main::Calendar) {
+        if !matches!(self.main, Main::Settings | Main::Calendar | Main::Search) {
             return;
         }
         self.hide_calendar(window, cx);
         match std::mem::replace(&mut self.before_settings, Main::Nothing) {
             Main::Chat(id) => self.open_chat(id, window, cx),
             Main::Channel(id) => self.open_channel_id(id, window, cx),
-            Main::Nothing | Main::Settings | Main::Calendar => {
+            Main::Nothing | Main::Settings | Main::Calendar | Main::Search => {
                 self.main = Main::Nothing;
                 cx.notify();
             }
@@ -1090,7 +1208,13 @@ impl Shell {
     fn shell_keys(shell: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
         shell
             .on_action(cx.listener(|this, _: &ToggleSwitcher, window, cx| this.toggle_switcher(window, cx)))
-            .on_action(cx.listener(|this, _: &ToggleSearch, window, cx| this.toggle_search(window, cx)))
+            .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
+                this.focus_search(SearchMode::Search, window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &GoToChat, window, cx| this.focus_search(SearchMode::GoTo, window, cx)))
+            .on_action(cx.listener(|this, _: &GoBack, window, cx| this.go_back(window, cx)))
+            .on_action(cx.listener(|this, _: &GoForward, window, cx| this.go_forward(window, cx)))
+            .on_action(cx.listener(|this, _: &ToggleListPane, _, cx| this.toggle_list_pane(cx)))
             .on_action(cx.listener(|this, _: &NextAccount, _, cx| this.cycle_account(true, cx)))
             .on_action(cx.listener(|this, _: &PreviousAccount, _, cx| this.cycle_account(false, cx)))
             .on_action(cx.listener(|this, _: &FontLarger, _, cx| this.step_font(Some(1), cx)))
@@ -1106,19 +1230,17 @@ impl Shell {
             self.close_switcher(window, cx);
             return;
         }
-        self.close_search(window, cx);
+        self.close_search(cx);
         let (list, teams) = (self.list.clone(), self.teams.clone());
-        let core = Arc::clone(&self.core);
         let shown = match &self.main {
             Main::Chat(id) => Some(id.clone()),
             _ => None,
         };
         let calls = (self.models.calls.clone(), shown);
-        let switcher = cx.new(|cx| Switcher::new(list, teams, core, calls, window, cx));
+        let switcher = cx.new(|cx| Switcher::new(list, teams, calls, window, cx));
         let events = cx.subscribe_in(&switcher, window, |this: &mut Self, _, event, window, cx| match event {
             SwitcherEvent::Open(id) => this.open_chat(id.clone(), window, cx),
             SwitcherEvent::OpenChannel(id) => this.open_channel_id(id.clone(), window, cx),
-            SwitcherEvent::OpenMessage(target) => this.open_message(target.clone(), window, cx),
             SwitcherEvent::Dismissed => this.close_switcher(window, cx),
             SwitcherEvent::CopyDiagnostics => this.copy_diagnostics(window, cx),
             SwitcherEvent::SetStatus(status) => {
@@ -1159,34 +1281,9 @@ impl Shell {
         }
     }
 
-    /// Opens the search of the stored messages (the switcher closes), or closes it when it is open.
-    pub fn toggle_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.search.is_some() {
-            self.close_search(window, cx);
-            return;
-        }
-        self.close_switcher(window, cx);
-        let (core, list, trace) = (Arc::clone(&self.core), self.list.clone(), Arc::clone(&self.trace));
-        let search = cx.new(|cx| Search::new(core, list, trace, window, cx));
-        let events = cx.subscribe_in(&search, window, |this: &mut Self, _, event, window, cx| match event {
-            SearchEvent::Open(target) => this.open_message(target.clone(), window, cx),
-            SearchEvent::Dismissed => this.close_search(window, cx),
-        });
-        search.update(cx, |search, cx| search.focus(window, cx));
-        self.search = Some((search, events));
-        self.trace.record(&TraceLine::new("search", "opened"));
-        cx.notify();
-    }
-
-    /// Closes the search; the shell takes the focus back only when the search had it (as [`Self::close_switcher`]).
-    fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some((search, _)) = self.search.take() {
-            self.trace.record(&TraceLine::new("search", "closed"));
-            if search.read(cx).holds_focus(window, cx) {
-                self.focus.focus(window, cx);
-            }
-            cx.notify();
-        }
+    /// Closes the search's suggestions (its results stay until left).
+    fn close_search(&mut self, cx: &mut Context<Self>) {
+        self.search_box.update(cx, GlobalSearch::close_suggestions);
     }
 
     /// A rail item as Teams draws it: its icon over a small caption, the chosen one in the brand colour with a mark on
@@ -1265,7 +1362,6 @@ impl Shell {
             ))
             .child(div().flex_1())
             .children(self.account_rail(palette, cx))
-            .children(self.accounts.is_none().then(|| self.status_button(palette, cx)))
             .child(Self::rail_button(
                 "rail-settings",
                 RailItem::SETTINGS,
@@ -1416,7 +1512,7 @@ impl Shell {
             .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
             .on_click(cx.listener(move |this, _, _, cx| {
                 if this.core.me() == key {
-                    this.toggle_status_menu(cx);
+                    this.toggle_status_menu_at(MenuAnchor::Rail, cx);
                 } else if let Some((accounts, _)) = &this.accounts {
                     accounts.update(cx, |accounts, cx| accounts.switch(&key, cx));
                 }
@@ -1425,60 +1521,6 @@ impl Shell {
             .children(dot)
             .children(badge)
             .into_any_element()
-    }
-
-    /// The rail's status button: a dot for what the own presence reports, opening the account menu.
-    fn status_button(&self, palette: Palette, cx: &mut Context<Self>) -> impl IntoElement {
-        let reporting = self.own_reporting(cx);
-        let failed = self.own_presence().is_some_and(|own| own.read(cx).failure().is_some());
-        // the account's own dot, with a selector of its own: the `presence-…` ones are others' (the views' dots)
-        let dot = reporting.map(|reporting| {
-            let shown = shown_as(reporting);
-            let dot = div()
-                .debug_selector(|| "rail-status-dot".to_owned())
-                .size(px(presence::DOT))
-                .flex_none()
-                .rounded_full()
-                .border_1()
-                .border_color(rgb(palette.background));
-            match presence::fill(&shown) {
-                Some(color) => dot.bg(rgb(color)),
-                None => dot
-                    .border_color(rgb(palette.muted_foreground))
-                    .bg(rgb(palette.background)),
-            }
-        });
-        div()
-            .debug_selector(|| "rail-status".to_owned())
-            .id("rail-status")
-            .mx_auto()
-            .mb_1()
-            .flex()
-            .items_center()
-            .justify_center()
-            .cursor_pointer()
-            .relative()
-            .size(px(ACCOUNT_AVATAR))
-            .flex_none()
-            .rounded_full()
-            .text_color(rgb(if failed {
-                theme::DANGER
-            } else {
-                palette.muted_foreground
-            }))
-            .hover(move |button| button.bg(rgb(palette.hover)))
-            .when(self.status_menu, |button| button.bg(rgb(palette.border)))
-            .tooltip(move |window, cx| {
-                Tooltip::new(if failed {
-                    "Your status (the last report failed)"
-                } else {
-                    "Your status"
-                })
-                .build(window, cx)
-            })
-            .child(Glyph::USER.icon().size(px(RAIL_ICON)))
-            .children(dot.map(|dot| dot.absolute().right(px(2.0)).bottom(px(2.0))))
-            .on_click(cx.listener(|this, _, _, cx| this.toggle_status_menu(cx)))
     }
 
     /// The account menu's account: its name and what tells it apart above the statuses, and its "Sign out and remove"
@@ -1566,12 +1608,12 @@ impl Shell {
                     )))
             });
         let (header, remove) = self.account_menu_parts(palette, cx);
-        div()
-            .debug_selector(|| "status-menu".to_owned())
-            .absolute()
-            .left(px(RAIL_WIDTH + 4.0))
-            .bottom(px(48.0))
-            .w(px(260.0))
+        let menu = div().debug_selector(|| "status-menu".to_owned()).absolute();
+        let menu = match self.status_anchor {
+            MenuAnchor::Rail => menu.left(px(RAIL_WIDTH + 4.0)).bottom(px(48.0)),
+            MenuAnchor::TitleBar => menu.right(px(8.0)).top(px(TITLE_HEIGHT - 4.0)),
+        };
+        menu.w(px(260.0))
             .p_1()
             .flex()
             .flex_col()
@@ -1647,8 +1689,10 @@ impl Shell {
                     .child(div().flex_1().min_h_0().children(shown.map(|(view, _)| view.clone())))
                     .into_any_element()
             }
-            // the settings are drawn across both panes (`body`), never here
-            Main::Nothing | Main::Settings | Main::Calendar => pane.child(no_chat(palette)).into_any_element(),
+            // the settings, the calendar and the search's results are drawn across both panes (`body`), never here
+            Main::Nothing | Main::Settings | Main::Calendar | Main::Search => {
+                pane.child(no_chat(palette)).into_any_element()
+            }
         }
     }
 }
@@ -1735,12 +1779,14 @@ fn pane_header(face: Option<Avatar>, title: impl Into<SharedString>, palette: Pa
 }
 
 impl Render for Shell {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = theme::current(cx);
+        self.history.note(&self.main);
+        let suggestions = self.search_suggestions(palette, window, cx);
         let overlay = |view: AnyView| {
             div()
                 .absolute()
-                .top(px(56.0))
+                .top(px(TITLE_HEIGHT + 8.0))
                 .left_0()
                 .right_0()
                 .flex()
@@ -1748,7 +1794,6 @@ impl Render for Shell {
                 .child(view)
         };
         let switcher = self.switcher().map(|switcher| overlay(switcher.clone().into()));
-        let search = self.search().map(|search| overlay(search.clone().into()));
         let status_menu = self.status_menu.then(|| self.status_menu_view(palette, cx));
         let first_run = self.settings.read(cx).awaiting_first_run().then(|| {
             div()
@@ -1786,19 +1831,28 @@ impl Render for Shell {
             .relative()
             .size_full()
             .flex()
-            .child(self.rail_view(palette, cx))
+            .flex_col()
+            .child(self.title_bar(palette, cx))
             .child(
                 div()
                     .flex_1()
-                    .h_full()
-                    .min_w_0()
+                    .min_h_0()
+                    .w_full()
                     .flex()
-                    .flex_col()
-                    .child(self.call_bar.clone())
-                    .child(div().flex_1().min_h_0().child(self.body(palette, cx))),
+                    .child(self.rail_view(palette, cx))
+                    .child(
+                        div()
+                            .flex_1()
+                            .h_full()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .child(self.call_bar.clone())
+                            .child(div().flex_1().min_h_0().child(self.body(palette, cx))),
+                    ),
             )
+            .children(suggestions)
             .children(switcher)
-            .children(search)
             .children(status_menu)
             .children(first_run)
     }
@@ -1846,6 +1900,12 @@ impl Shell {
         if self.main == Main::Calendar {
             return self.calendar.clone().into_any_element();
         }
+        if self.main == Main::Search {
+            return global_search::results_page(&self.search_box, palette, cx);
+        }
+        if !self.list_shown {
+            return self.panes_or_signed_out(self.main_pane(palette, cx), palette, cx);
+        }
         let panes = h_resizable("panes")
             .with_state(&self.panes)
             .child(
@@ -1872,6 +1932,24 @@ impl Shell {
             .text_color(rgb(palette.muted_foreground))
             .child(status_text(status))
             .into_any_element()
+    }
+}
+
+impl Shell {
+    /// The search's suggestions under the title bar's box, lined up with it, while they are shown.
+    fn search_suggestions(&self, palette: Palette, window: &Window, cx: &App) -> Option<AnyElement> {
+        let suggestions = global_search::dropdown(&self.search_box, palette, window, cx)?;
+        let left = self.title_left_width(cx) + 8.0;
+        let width = f32::from(window.viewport_size().width) - left - RIGHT_WIDTH - 16.0;
+        Some(
+            div()
+                .absolute()
+                .top(px(TITLE_HEIGHT - 6.0))
+                .left(px(left))
+                .w(px(width.clamp(240.0, SEARCH_MAX)))
+                .child(suggestions)
+                .into_any_element(),
+        )
     }
 }
 

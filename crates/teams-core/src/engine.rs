@@ -127,6 +127,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::calendar::{Calendar, EventWrite, EventWritten, Invitable};
+use crate::service_search::{SearchAnswer, SearchScope, ServiceSearch};
 
 /// How many people the attendee picker suggests at most.
 const INVITABLE: usize = 8;
@@ -466,6 +467,10 @@ pub enum EngineError {
     /// happened (refused, the service's answer, no answer).
     #[error("the event's {kind} wasn't saved: {why}")]
     EventNotSaved { kind: &'static str, why: String },
+    /// The service's search couldn't be read, or its answer wasn't in a shape the app reads
+    /// ([`crate::service_search`]).
+    #[error("the search couldn't be read")]
+    SearchFailed,
     /// A call action was refused: nothing was sent.
     #[error(transparent)]
     Call(CallActionError),
@@ -496,6 +501,7 @@ impl EngineError {
             Self::FileUnread => "file unread",
             Self::CalendarUnread => "calendar unread",
             Self::EventNotSaved { .. } => "event not saved",
+            Self::SearchFailed => "search failed",
             Self::Call(_) => "call",
         }
     }
@@ -611,6 +617,11 @@ enum Request {
     Invitable {
         query: String,
         reply: Responder<Vec<Invitable>>,
+    },
+    SearchService {
+        query: String,
+        scope: SearchScope,
+        reply: Responder<SearchAnswer>,
     },
     Query(Query),
     Shutdown,
@@ -910,6 +921,14 @@ impl EngineRequests {
         self.ask(|reply| Request::Invitable { query, reply })
     }
 
+    /// What the service's search finds for `query` in `scope` (read now: [`crate::service_search`]): the title bar's
+    /// suggestions as the user types, and its results once the query is entered; [`EngineError::SearchFailed`] when the
+    /// read failed.
+    pub fn search_service(&self, query: impl Into<String>, scope: SearchScope) -> Reply<SearchAnswer> {
+        let query = query.into();
+        self.ask(|reply| Request::SearchService { query, scope, reply })
+    }
+
     /// The thumbnail of the file a message carries, by its sharing link (`teams_proto::chat::SharedFile::share_url`),
     /// as Graph and SharePoint's media host have it ([`crate::thumbnails`]): its bytes and format, or `None` when there
     /// is none or the link names no SharePoint file.
@@ -1159,6 +1178,7 @@ struct Core<C, T> {
     thumbnails: Thumbnails<C>,
     files: FileContents<C>,
     calendar: Calendar<C, T>,
+    service_search: ServiceSearch<C>,
     events: mpsc::UnboundedSender<Event>,
     options: EngineOptions,
     push: Option<Push>,
@@ -1215,6 +1235,7 @@ where
         let thumbnails = Thumbnails::new(Arc::clone(&parts.client), disk);
         let files = FileContents::new(Arc::clone(&parts.client));
         let calendar = Calendar::new(Arc::clone(&parts.client), Arc::clone(&outbox));
+        let service_search = ServiceSearch::new(Arc::clone(&parts.client));
         let calling = parts
             .calls
             .map(|calls| Calling::new(calls, Arc::clone(&outbox), Arc::clone(&parts.client), events.clone()));
@@ -1233,6 +1254,7 @@ where
             thumbnails,
             files,
             calendar,
+            service_search,
             events,
             options: parts.options,
             push: parts.push,
@@ -1436,6 +1458,7 @@ where
             } => self.calendar.view(start_ms, end_ms, reply),
             Request::CalendarEvent { id, reply } => self.calendar.event(&id, reply),
             Request::WriteEvent { write, reply } => self.calendar.write(write, reply),
+            Request::SearchService { query, scope, reply } => self.service_search.search(query, scope, reply),
             Request::Invitable { query, reply } => match self.store.profiles_named(&query, INVITABLE) {
                 Ok(named) => self.calendar.invitable(named, reply),
                 Err(error) => {

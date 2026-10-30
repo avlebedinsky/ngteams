@@ -490,9 +490,9 @@ fn the_account_menu_sets_a_manual_status_and_shows_what_is_reported() {
     let (rig, shell, _, cx) = shell_with_own(Settings::default());
     registered(&rig);
     assert_eq!(asked(&rig), [OwnStatus::Available]);
-    assert!(bounds(cx, "rail-status").is_some());
+    assert!(bounds(cx, "title-account").is_some());
     assert!(bounds(cx, "status-menu").is_none(), "closed at the start");
-    click(cx, "rail-status");
+    click(cx, "title-account");
     assert!(cx.update(|_, cx| shell.read(cx).status_menu_open()));
     assert!(bounds(cx, "status-menu-reported").is_some());
     // only Automatic and the captured manual statuses are offered
@@ -518,7 +518,7 @@ fn the_account_menu_sets_a_manual_status_and_shows_what_is_reported() {
         Some(Reporting::Manual(ManualAvailability::Busy))
     );
 
-    click(cx, "rail-status");
+    click(cx, "title-account");
     click(cx, "status-menu-automatic");
     assert_eq!(asked(&rig), [OwnStatus::ClearManual]);
 }
@@ -534,13 +534,13 @@ fn the_account_menu_shows_a_failed_report() {
             reason: "HTTP 403".to_owned(),
         }));
     registered(&rig);
-    click(cx, "rail-status");
+    click(cx, "title-account");
     assert!(bounds(cx, "status-menu-failure").is_some());
 }
 
 /// Opens the account menu and chooses `status` in it.
 fn choose_in_menu(cx: &mut VisualTestContext, status: ManualStatus) {
-    click(cx, "rail-status");
+    click(cx, "title-account");
     click(cx, &format!("status-menu-{}", status.key()));
 }
 
@@ -571,7 +571,7 @@ fn a_failed_manual_status_chosen_again_in_the_account_menu_is_sent_again() {
     assert_eq!(shown(cx, &shell), not_set);
     assert!(own_presence::reporting_label(not_set).contains("not set"));
     assert_eq!(shell::shown_as(not_set), Availability::Unknown);
-    click(cx, "rail-status");
+    click(cx, "title-account");
     assert!(bounds(cx, "status-menu-reported").is_some());
     assert!(bounds(cx, "status-menu-failure").is_some());
     // nothing goes out on its own, nor on a change of another setting
@@ -665,7 +665,7 @@ fn the_window_s_use_brings_available_back_after_idle() {
 fn the_account_s_own_dot_is_not_one_of_the_others_presence_dots() {
     let (rig, _, _, cx) = shell_with_own(Settings::default());
     registered(&rig);
-    assert!(bounds(cx, "rail-status-dot").is_some());
+    assert!(bounds(cx, "title-account-dot").is_some());
     // the shell's own chats are empty here: any `presence-…` dot would be the account's, and there is none
     assert!(bounds(cx, "presence-available").is_none());
     assert!(bounds(cx, "presence-unknown").is_none());

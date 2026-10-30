@@ -120,6 +120,13 @@ pub enum Command {
     /// sent as a `POST`, for a name Graph doesn't give), by MRI, whoever they are; prints `profile <alias or MRI>
     /// <source>` per person: where the name the engine has came from (`graph`, `short_profile`, `message`, `known`,
     /// or `none`), never the name. Reads only.
+    /// Asks the service's search (Substrate, `docs/protocol/search.md`) for `query`, as the title bar's search does:
+    /// its suggestions, then its results of every kind; prints `search <scope> <kind> <count>` per kind found, and the
+    /// ids of the chats its messages are in, never a name or a text. A read, whoever its answer lists.
+    Search {
+        /// What to search for.
+        query: String,
+    },
     Profile {
         /// Their MRIs (`8:orgid:…`).
         #[arg(required = true, value_name = "MRI")]

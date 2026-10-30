@@ -30,7 +30,7 @@
 //!   Automatic"); b's header for the 1:1 chat names a from people's names with a's picture, and shows a available;
 //!   a sets Busy from the switcher's "Set status: Busy", b's header shows busy; a sets Automatic again, b's header
 //!   shows available.
-//! - b's search (Ctrl+Shift+F) finds one of a's messages; a channel opens read-only from the switcher ("General"):
+//! - b's search (Ctrl+Shift+F, the title bar's, then Enter) finds one of a's messages; a channel opens read-only from the switcher ("General"):
 //!   no compose box is made for it (no `compose` line, `opened` included, while it is shown); nothing is typed in it.
 //! - b's window closed into the tray: a sends, b notifies once, and the window opened again from the tray shows it.
 //! - b's app quit from the tray (its broker exits with it): a sends [`GAP_MESSAGES`], b's app started again shows every
@@ -556,7 +556,8 @@ fn names_and_presence(lab: &Lab, apps: &mut Apps, found: &mut Found) {
     );
 }
 
-/// b's search (Ctrl+Shift+F) finds `target`, one of a's messages, by the words it was sent with; then a channel opens
+/// b's search (Ctrl+Shift+F, the title bar's; Enter shows the results) finds `target`, one of a's messages, by the
+/// words it was sent with, and Escape leaves the results; then a channel opens
 /// read-only from the switcher ("General"), and b goes back to the 1:1 chat.
 fn search_and_channel(lab: &Lab, apps: &mut Apps, nonce: i64, target: &Sent, found: &mut Found) {
     let b = &mut apps.b;
@@ -566,6 +567,9 @@ fn search_and_channel(lab: &Lab, apps: &mut Apps, nonce: i64, target: &Sent, fou
     b.trace()
         .wait_from(from, STEP, "search opened", |line| is(line, "search", "opened"));
     b.type_text(&format!("{nonce} m07"));
+    // Enter shows the results, the store's messages among them
+    thread::sleep(SETTLE);
+    b.key(keys::ENTER);
     let id = target.id.clone();
     let hits = b
         .trace()

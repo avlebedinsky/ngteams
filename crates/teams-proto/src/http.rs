@@ -38,9 +38,11 @@
 //!   [`HttpTransport::file_stream`] read there, the download link Graph handed out on a SharePoint host, checked
 //!   again, with `Range` and no token); and Giphy's
 //!   media CDN ([`Service::Giphy`]: `https://media.giphy.com/`, a GIF a message shows, no token). An endpoint with an
-//!   empty,
-//!   `.` or `..` segment is refused. Entra and authz aren't a service here (they stay in `teams-auth`'s own clients). A
-//!   new service is a code change: a variant, its base and its token's audience.
+//!   empty, `.` or `..` segment is refused. Substrate's search ([`Service::Substrate`]: `https://substrate.office.com/`,
+//!   the account's `https://outlook.office.com/search` token) takes only the title bar's search reads
+//!   ([`HttpTransport::search`]), a read or a plain request naming it refused. Entra and authz aren't a service here
+//!   (they stay in `teams-auth`'s own clients). A new service is a code change: a variant, its base and its token's
+//!   audience.
 //! - **The client**: `https` only, no proxy (an environment's `HTTPS_PROXY` could point anywhere), no redirects (a 3xx
 //!   is an answer, never followed: a region hop is the caller's to report), no retries of its own (reqwest's default
 //!   replays a request after an HTTP/2 GOAWAY or `REFUSED_STREAM`, which would send a write again and a plain request
@@ -113,6 +115,7 @@ use crate::own::OwnState;
 use crate::post_read::{AuthorizedPostRead, PostRead};
 use crate::read::Read;
 use crate::request::Request;
+use crate::search::{SUBSTRATE_AUDIENCE, SUBSTRATE_HOST, SubstrateSearch};
 use crate::thumbnail::{ThumbnailLink, is_thumbnail_link};
 use crate::write::{Authorized, CallWire, Mutating, Registry, on_calling_base};
 
@@ -292,6 +295,9 @@ pub enum Refusal {
     /// [`MAX_RANGE`]: only a download link Graph handed out is read there ([`HttpTransport::file_range`]).
     #[error("only a download link Graph handed out is read from a file's host, a part at a time")]
     FileContent,
+    /// A read or a plain request to Substrate: only its search reads go there ([`HttpTransport::search`]).
+    #[error("only the search's reads go to Substrate")]
+    Substrate,
     /// A call write while the credentials give no skypetoken.
     #[error("no skypetoken for the calling service")]
     NoSkypetoken,
@@ -367,7 +373,8 @@ pub struct HttpTransport<C> {
     /// Tests only: every request goes to this origin instead, with the path and query it was built and checked with.
     /// Only [`HttpTransport::with_mock_origin`] (`test-support`) sets it; without that feature it is always `None`.
     mock_origin: Option<Url>,
-    /// Read-only ([`HttpTransport::read_only`]): only reads (a `GET`, a read by `POST` of the sealed list) go out.
+    /// Read-only ([`HttpTransport::read_only`]): only reads (a `GET`, a read by `POST` of the sealed list, a search) go
+    /// out.
     read_only: bool,
 }
 
@@ -480,10 +487,10 @@ impl<C: Credentials> HttpTransport<C> {
     }
 
     /// This transport, read-only for the rest of its life (the personal build's read-only mode, `ngteams --read-only`):
-    /// it sends reads (a [`Read`], a read by `POST` of the sealed list) and nothing else. A write ([`Transport::deliver`],
-    /// a call write included), an own-state request (a registration) and a plain request with any method but `GET` or
-    /// `HEAD` are refused before anything is sent ([`Refusal::ReadOnly`]), each logged to the fence's log as
-    /// `refused_read_only` (its method, host and path shape). Nothing turns it off again.
+    /// it sends reads (a [`Read`], a read by `POST` of the sealed list, a search: [`Self::search`]) and nothing else. A
+    /// write ([`Transport::deliver`], a call write included), an own-state request (a registration) and a plain request
+    /// with any method but `GET` or `HEAD` are refused before anything is sent ([`Refusal::ReadOnly`]), each logged to
+    /// the fence's log as `refused_read_only` (its method, host and path shape). Nothing turns it off again.
     #[must_use]
     pub fn read_only(mut self) -> Self {
         self.read_only = true;
@@ -693,6 +700,7 @@ impl<C: Credentials> HttpTransport<C> {
             Service::Relay => fixed(format!("https://{RELAY_HOST}/{RELAY_PATH}")),
             Service::Emoticons => fixed(format!("https://{EMOTICONS_HOST}/{EMOTICONS_PATH}")),
             Service::Giphy => fixed(format!("https://{GIPHY_HOST}/")),
+            Service::Substrate => fixed(format!("https://{SUBSTRATE_HOST}/")),
             Service::Ams => self.ams.clone().ok_or(refused(Refusal::NoAms)),
         }
     }
@@ -735,6 +743,9 @@ impl<C: Credentials> HttpTransport<C> {
         body: Option<&Value>,
         record: Record,
     ) -> Result<Response, HttpError> {
+        if service == Service::Substrate {
+            return Err(HttpError::Refused(Refusal::Substrate));
+        }
         let url = self.url_for(service, endpoint)?;
         if self.read_only && !matches!(method, reqwest::Method::GET | reqwest::Method::HEAD) {
             return Err(self.refused_read_only(method.as_str(), url.as_str()));
@@ -1085,6 +1096,34 @@ impl<C: Credentials> HttpTransport<C> {
         .await
     }
 
+    /// Sends one of the title bar's search reads ([`SubstrateSearch`]) to Substrate: a `POST` of its JSON body to its
+    /// path on [`Service::Substrate`] with the account's search token, asked of the classifier as any plain request
+    /// (a search reaches nobody, whoever its answer lists) and logged to `fence.log` as `allowed` before it goes; one
+    /// the classifier doesn't let through is refused, nothing sent. A read, it goes in the read-only mode too, with the
+    /// one retry a 401, 429 or 503 allows, as any read.
+    ///
+    /// # Errors
+    /// As a plain request's.
+    pub async fn search(&self, search: &SubstrateSearch) -> Result<Response, HttpError> {
+        let service = search.service();
+        let endpoint = search.endpoint();
+        let url = self.url_for(service, &endpoint)?;
+        let body = search.body().to_string().into_bytes();
+        let method = reqwest::Method::POST;
+        let record = match self.judge(&method, &url, &plain_headers(service, true), Some(&body))? {
+            Some(contact) => Record::Unjudged(contact),
+            None => Record::Allowed,
+        };
+        let outgoing = Outgoing {
+            method,
+            url: &url,
+            service,
+            body: Some(&body),
+            range: None,
+        };
+        self.exchange(outgoing, record).await
+    }
+
     /// Sends a permitted read by `POST` of the sealed list, once, logged to `fence.log` before it goes, and only in its
     /// entry's captured shape ([`HttpError::Unknown`] otherwise, with nothing sent).
     ///
@@ -1296,6 +1335,9 @@ impl<C: Credentials> Transport for HttpTransport<C> {
         let service = request.service();
         let endpoint = request.endpoint();
         async move {
+            if service == Service::Substrate {
+                return Err(HttpError::Refused(Refusal::Substrate));
+            }
             let url = self.url_for(service, &endpoint)?;
             let outgoing = Outgoing {
                 method: reqwest::Method::GET,
@@ -1461,6 +1503,7 @@ fn audience(service: Service) -> Option<&'static str> {
         Service::Graph => Some(GRAPH_AUDIENCE),
         Service::Csa => Some(CSA_AUDIENCE),
         Service::Presence => Some(PRESENCE_AUDIENCE),
+        Service::Substrate => Some(SUBSTRATE_AUDIENCE),
         Service::Trouter
         | Service::Calling
         | Service::Emoticons
@@ -1487,7 +1530,8 @@ fn plain_headers(service: Service, body: bool) -> Vec<(String, String)> {
         | Service::Ams
         | Service::FileThumbnail
         | Service::FileContent
-        | Service::Giphy => "application/json",
+        | Service::Giphy
+        | Service::Substrate => "application/json",
     };
     // a picture's view and a thumbnail answer an image, as a browser's `<img>` asks for one
     let accept = match service {
@@ -1504,7 +1548,8 @@ fn plain_headers(service: Service, body: bool) -> Vec<(String, String)> {
         | Service::Presence
         | Service::Calling
         | Service::Relay
-        | Service::Emoticons => "application/json",
+        | Service::Emoticons
+        | Service::Substrate => "application/json",
     };
     let mut headers = vec![(ACCEPT.as_str().to_owned(), accept.to_owned())];
     if body {
@@ -1548,7 +1593,8 @@ fn service_headers(service: Service) -> &'static [(&'static str, &'static str)] 
         | Service::Emoticons
         | Service::FileThumbnail
         | Service::FileContent
-        | Service::Giphy => &[],
+        | Service::Giphy
+        | Service::Substrate => &[],
     }
 }
 
@@ -1582,7 +1628,8 @@ fn on_base(service: Service, base: &Url, url: &Url, endpoint: &Endpoint) -> bool
         | Service::Ams
         | Service::FileThumbnail
         | Service::FileContent
-        | Service::Giphy => true,
+        | Service::Giphy
+        | Service::Substrate => true,
     };
     plain
         && url.host_str() == base.host_str()

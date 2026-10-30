@@ -258,6 +258,9 @@ fails the run.
 
 - `load`: account a loads the web client, fail-closed (every write whose target's members have to be read is denied;
   a new chat naming only lab accounts can still pass); every deny is expected.
+- `search`: account a alone, fail-closed as `load`: the title bar's go-to mode (Ctrl+Alt+G), then a search (Ctrl+E):
+  the suggestions as it types, the results and each of their tabs, a message found opened (`docs/protocol/search.md`;
+  `PROTO_LAB_SEARCH_QUERY` picks the query, `lab` by default); recorded, every deny expected.
 - `ab-chat`: a and b; a opens the a–b 1:1 chat by b's MRI and sends a message, and b must show it (clicking "Jump to
   newest" or "New messages" when the native runs left it unread).
 - `ab-chat-full`: the a–b chat beyond a message, as captured for `docs/protocol/chat.md`: a sends, edits, reacts and
@@ -384,6 +387,7 @@ teams-headless b watch --answer-lab-calls|--calls [--tone 1000] [--bursts] [--he
   [--tone-seconds 180]                    # as watch, the calling stack registered: answers each offered lab call, or none
 teams-headless a presence [--wait 30] [--mri <mri>]...  # b's and c's presence, and anyone's by MRI, read from UPS
 teams-headless a profile <mri>... [--wait 30]           # where the engine's name for each comes from (Graph, the middle tier's lookup)
+teams-headless a search <query>                         # the service's search (Substrate): counts of each kind found, the chats by id
 teams-headless a availability [--manual busy|do-not-disturb|away|available] [--manual-after 60] [--reset-after <s>] \
   [--hold 300]                            # a's own availability, from its push channel's endpoint
 teams-headless a call echo|b|abc|<id> [--tone 1000] [--bursts] [--hear <hz>] [--record <wav>] [--seconds 45] \
@@ -493,7 +497,12 @@ first, then Teams' 👍 ❤️ 😆 😮 😢 😡), React, Edit on the account'
 each named by its tooltip with its key. The compose box is drawn as Teams' (a rounded box with its accent line along
 the foot while it has the focus) with Emoji and, behind a divider, Send inside it on the right: Emoji (also Ctrl+. or
 Ctrl+;) opens every emoji Teams offers, searchable, and puts the one picked at the cursor; Send does what Enter does. Ctrl+K opens the chat switcher (fuzzy over the chats' names; Enter opens,
-Escape closes). A click on a picture in a message opens it in a window of its own at its full size, fitted to the
+Escape closes). The title bar runs across the top as Teams': the launcher (the app's places), the list pane's toggle, Back
+and Forward (Alt+Left, Alt+Right), the search box, Settings and more (the settings, the zoom, Copy diagnostics) and the
+account's avatar with its presence (the account menu). Ctrl+E (or Ctrl+Shift+F, or a click) searches: suggestions as you
+type (people, chats, channels, files; Up, Down and Enter open one), Enter shows the results with Teams' tabs (All,
+Messages, People, Files, Group chats, Teams and channels; a message opens its chat at it), Escape closes or leaves them;
+Ctrl+Alt+G goes right to a chat or channel by its name. A click on a picture in a message opens it in a window of its own at its full size, fitted to the
 window and never enlarged past it, its sender and time over it: Zoom in and Zoom out (also Ctrl+= and Ctrl+-, Ctrl and
 the wheel), fit or its own size (Ctrl+0 fits), dragging or the wheel to pan a picture larger than the window, Previous
 and Next (Left and Right) through the chat's pictures, Download (Ctrl+S: the desktop's file chooser, starting in the

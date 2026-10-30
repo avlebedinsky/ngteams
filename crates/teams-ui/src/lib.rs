@@ -24,8 +24,10 @@
 //!   from ([`forwarded`]).
 //! - [`compose`]: the compose box under a chat's messages: text with line breaks, links and mentions (by MRI, from the
 //!   chat's members) into a message, Enter sends, replies and edits, typing; every write through the engine.
-//! - [`search`]: local search (Ctrl+Shift+F, and the switcher's messages) over the messages the store holds, never the
-//!   service's search; a hit opens its chat at the message.
+//! - [`global_search`]: the title bar's search (Ctrl+E, Ctrl+Shift+F; Ctrl+Alt+G to go right to a chat or channel):
+//!   suggestions as the user types, from the lists at once and the service's search, and the results with Teams' tabs
+//!   across the panes; a message found opens its chat at the message. [`search`] is its local part: the messages the
+//!   store holds.
 //! - [`teams_list`]: the sidebar's teams section, the account's teams and their channels (M2 Task 16); [`channel_view`] a
 //!   channel's posts with their reply chains, read-only: no composer, and no write a channel could take.
 //! - [`calendar_view`]: the rail's Calendar, Teams' calendar app: the month and the account's calendars in its own
@@ -87,6 +89,7 @@ pub mod event_form;
 pub mod files;
 pub mod first_run;
 pub mod forwarded;
+pub mod global_search;
 pub mod icons;
 pub mod inline;
 pub mod link_preview;
@@ -131,13 +134,14 @@ pub use chat_view::{ChatView, ChatViewEvent, MessageAction};
 pub use compose::{Compose, ComposeEvent, ComposeParts};
 pub use desktop::{Desktop, DesktopEvent, DesktopParts};
 pub use first_run::FirstRun;
+pub use global_search::{GlobalSearch, GlobalSearchEvent};
 pub use models::{Account, Chats, Engine, Feed, FeedEvent, Link, Models, Status};
 pub use notify::{Notice, NoticeKind, NotificationServer, Notifier, NotifierEvent};
 pub use own_presence::OwnPresence;
 pub use people::Shown;
 pub use presence::Presences;
 pub use ringtone::{DeviceRinger, Ringer, Ringtone};
-pub use search::{Hit, HitTarget, Search, SearchEvent};
+pub use search::{Hit, HitTarget};
 pub use settings::{Copied, FirstRunState, LogLevel, Settings, SettingsFile, SettingsModel};
 pub use shell::{Shell, ShellParts};
 pub use switcher::Switcher;

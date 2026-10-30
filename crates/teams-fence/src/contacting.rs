@@ -415,8 +415,10 @@ fn path_ends_with(request: &Parsed<'_>, tail: &[&str]) -> bool {
             .all(|(segment, wanted)| *wanted == "*" || segment.eq_ignore_ascii_case(wanted))
 }
 
-/// A Substrate search or suggestion read, sent as a `POST`: `/search/api/<version>/suggestions` or `…/query` on
-/// `substrate.office.com`.
+/// A Substrate search or suggestion read, sent as a `POST` on `substrate.office.com`: `/search/api/<version>/suggestions`
+/// or `…/query`, the web client's title-bar search `/searchservice/api/<version>/query` (`docs/protocol/search.md`),
+/// and the search's own telemetry `/search/api/<version>/events` (with or without its trailing slash): what the
+/// account searched and was shown, told to the search service alone.
 fn is_substrate_search(request: &Parsed<'_>) -> bool {
     request.method == "POST"
         && request
@@ -424,12 +426,19 @@ fn is_substrate_search(request: &Parsed<'_>) -> bool {
             .host_str()
             .is_some_and(|host| under(&host.to_ascii_lowercase(), "substrate.office.com"))
         && decoded_segments(request.url).is_some_and(|segments| {
-            matches!(
-                segments.iter().map(|segment| segment.to_ascii_lowercase()).collect::<Vec<_>>().as_slice(),
-                [search, api, version, read]
-                    if search == "search" && api == "api" && is_version(version)
-                        && (read == "suggestions" || read == "query")
-            )
+            let lower: Vec<String> = segments.iter().map(|segment| segment.to_ascii_lowercase()).collect();
+            let lower: Vec<&str> = lower.iter().map(String::as_str).collect();
+            let lower = match lower.as_slice() {
+                [rest @ .., ""] => rest,
+                all => all,
+            };
+            match lower {
+                ["search", "api", version, read] => {
+                    is_version(version) && matches!(*read, "suggestions" | "query" | "events")
+                }
+                ["searchservice", "api", version, "query"] => is_version(version),
+                _ => false,
+            }
         })
 }
 

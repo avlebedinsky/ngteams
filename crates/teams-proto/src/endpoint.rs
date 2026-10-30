@@ -77,6 +77,11 @@ pub enum Service {
     /// `<img>` loads as any browser does): a GIF a message shows, picked from Teams' GIF picker
     /// (`media/<id>/<file>`, [`crate::GiphyPicture`]). Reads only, nothing of the account's sent.
     Giphy,
+    /// Substrate's search, `https://substrate.office.com/`, with the account's token for
+    /// `https://outlook.office.com/search` ([`crate::SUBSTRATE_AUDIENCE`]): the title bar's search
+    /// ([`crate::SubstrateSearch`], `search/api/v1/suggestions` and `searchservice/api/v2/query`), reads by `POST`
+    /// sent only by [`crate::HttpTransport::search`]; a read or a plain request naming this service is refused.
+    Substrate,
 }
 
 /// A request's path under its service's base, as path segments (each sent as one encoded segment, so a `/` inside one

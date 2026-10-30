@@ -1,46 +1,28 @@
-//! Local search (Ctrl+Shift+F): the messages the account's store holds, found by their text as the user types, the
-//! newest first; a hit chosen opens its chat at the message. The chat switcher (Ctrl+K) lists the same hits under its
-//! chats ([`crate::switcher`]).
+//! Local search: the messages the account's store holds, found by their text, the newest first, for the title bar's
+//! search ([`crate::global_search`]), whose results show them beside the service's.
 //!
-//! - **Only the store** ([`Core::search`]): the engine's index of each stored message's plain text. The service's
-//!   search (Substrate) is never asked: its answers list other tenant users, which the lab's rules never let through,
-//!   and the app has no request path of its own anyway.
+//! - **Only the store** ([`Core::search`]): the engine's index of each stored message's plain text.
 //! - **The query** is what the user typed, at least [`MIN_QUERY`] characters; the store quotes it, so nothing typed is
-//!   read as search syntax. Each change asks again; an answer to an earlier query is dropped.
+//!   read as search syntax.
 //! - **The hits** are those of the chats the chat list shows (a channel's or the account's own streams' are left
 //!   out), at most [`MAX_HITS`]: the chat's name as the list has it, the sender (their name as the engine has it,
 //!   "You" for the account), the time, and the text around the match with the matched terms marked.
-//! - **It closes** on Escape while the focus is in it (an Escape elsewhere goes where the focus is), on Ctrl+Shift+F
-//!   again, and once a hit is chosen.
-//! - What it shows is traced (`search opened`/`closed`, `search shown` with the hits' conversation and message ids),
-//!   never a query or a text.
+//! - What the results show is traced ([`trace_hits`]: the hits' conversation and message ids), never a query or a text.
 
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
-use std::sync::Arc;
 
-use chrono::Local;
-use gpui::{
-    App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, FocusHandle, FontWeight, HighlightStyle,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _, StyledText,
-    Subscription, Task, Window, div, px, rgb,
-};
-use gpui_component::IndexPath;
-use gpui_component::command::{Command, CommandItem, CommandState};
+use gpui::{App, Entity, SharedString};
 use teams_store::search::{MATCH_END, MATCH_START};
 
 use crate::bridge::Core;
 use crate::chat_list::{ChatList, RowKind};
-use crate::clock::{self, HourCycle};
-use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 
 /// The fewest characters (spaces left out) a query is looked for with.
 pub const MIN_QUERY: usize = 2;
 /// The most hits shown.
 pub const MAX_HITS: usize = 50;
-/// The search's width, px.
-pub const WIDTH: f32 = 640.0;
 /// Who the account's own messages are from.
 pub const YOU: &str = "You";
 
@@ -174,224 +156,4 @@ pub fn trace_hits(trace: &ViewTrace, view: &'static str, hits: &[Hit]) {
             .conversations(conversations)
             .messages(hits.iter().map(|hit| hit.target.message.as_str())),
     );
-}
-
-/// A hit's row: the chat, the sender and the time (on `cycle`'s clock) over the text around the match, the matched
-/// terms marked.
-#[must_use]
-pub fn hit_row(hit: &Hit, palette: Palette, cycle: HourCycle) -> gpui::Div {
-    let when = clock::list_time(hit.target.arrival_time, &Local::now(), cycle);
-    let marked = HighlightStyle {
-        font_weight: Some(FontWeight::BOLD),
-        color: Some(rgb(palette.brand).into()),
-        ..HighlightStyle::default()
-    };
-    let snippet =
-        StyledText::new(hit.snippet.clone()).with_highlights(hit.matched.iter().map(|range| (range.clone(), marked)));
-    div()
-        .w_full()
-        .min_w_0()
-        .flex()
-        .flex_col()
-        .child(
-            div()
-                .flex()
-                .gap_2()
-                .text_xs()
-                .text_color(rgb(palette.muted_foreground))
-                .child(div().font_weight(FontWeight::BOLD).child(hit.chat.clone()))
-                .child(hit.sender.clone())
-                .child(div().flex_1())
-                .child(when),
-        )
-        .child(div().text_sm().truncate().child(snippet))
-}
-
-/// A hit as an item of the kit's command palette.
-#[must_use]
-pub fn hit_item(hit: &Hit) -> CommandItem {
-    let shown = hit.clone();
-    CommandItem::new()
-        .label(hit.snippet.clone())
-        .child(move |_, cx| hit_row(&shown, theme::current(cx), clock::cycle(cx)))
-}
-
-/// What the search tells the shell.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SearchEvent {
-    /// Open this chat at this message.
-    Open(HitTarget),
-    /// Close the search.
-    Dismissed,
-}
-
-/// The search (see the module docs): the kit's command palette, its own filter off, over the store's hits.
-pub struct Search {
-    state: Entity<CommandState>,
-    core: Arc<dyn Core>,
-    list: Entity<ChatList>,
-    trace: Arc<ViewTrace>,
-    query: String,
-    hits: Vec<Hit>,
-    /// The query the hits are of; `None` before any was looked for.
-    found_for: Option<String>,
-    /// The search running, for the latest query: a later query drops it.
-    searching: Option<Task<()>>,
-    /// Tracked on the dialog's root: the focus is in it while its query field or the palette's list has it.
-    focus: FocusHandle,
-    /// Escape, before the palette's own binding (which first clears the query).
-    _escape: Subscription,
-}
-
-impl EventEmitter<SearchEvent> for Search {}
-
-impl Search {
-    pub fn new(
-        core: Arc<dyn Core>,
-        list: Entity<ChatList>,
-        trace: Arc<ViewTrace>,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        let state = cx.new(|cx| CommandState::new(window, cx));
-        let this = cx.weak_entity();
-        // the interceptor sees every keystroke of the app: an Escape is the search's only while the focus is in it (a
-        // search left open in a shell not shown, another account's, or with the focus moved out of it, never takes
-        // the Escape meant for where the focus is)
-        let escape = cx.intercept_keystrokes(move |event, window, cx| {
-            let keystroke = &event.keystroke;
-            if keystroke.key != "escape" || keystroke.modifiers.number_of_modifiers() != 0 {
-                return;
-            }
-            let dismissed = this.update(cx, |this, cx| {
-                let held = this.holds_focus(window, cx);
-                if held {
-                    cx.emit(SearchEvent::Dismissed);
-                }
-                held
-            });
-            if matches!(dismissed, Ok(true)) {
-                cx.stop_propagation();
-            }
-        });
-        Self {
-            state,
-            core,
-            list,
-            trace,
-            query: String::new(),
-            hits: Vec::new(),
-            found_for: None,
-            searching: None,
-            focus: cx.focus_handle(),
-            _escape: escape,
-        }
-    }
-
-    /// Moves the keyboard focus to the query field.
-    pub fn focus(&self, window: &mut Window, cx: &mut App) {
-        self.state.update(cx, |state, cx| state.focus(window, cx));
-    }
-
-    /// Whether the focus is in the search (its query field, or its list once clicked): the focus may have moved
-    /// elsewhere since it opened. Read from the last frame, which GPUI draws before it dispatches a key; one not drawn
-    /// (in a shell not shown) never holds it.
-    #[must_use]
-    pub fn holds_focus(&self, window: &Window, cx: &App) -> bool {
-        self.focus.contains_focused(window, cx)
-    }
-
-    #[must_use]
-    pub fn query(&self) -> &str {
-        &self.query
-    }
-
-    /// The hits shown, the newest first.
-    #[must_use]
-    pub fn hits(&self) -> &[Hit] {
-        &self.hits
-    }
-
-    /// Whether a search runs.
-    #[must_use]
-    pub fn searching(&self) -> bool {
-        self.searching.is_some()
-    }
-
-    /// Looks for `query`: the hits shown are its once they come; a query too short shows none at once.
-    pub fn set_query(&mut self, query: &str, cx: &mut Context<Self>) {
-        query.clone_into(&mut self.query);
-        if !searchable(query) {
-            self.searching = None;
-            self.show(None, Vec::new(), cx);
-            return;
-        }
-        let core = Arc::clone(&self.core);
-        let chats = listed_chats(&self.list, cx);
-        let asked = query.to_owned();
-        self.searching = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
-            let hits = find(&*core, asked.clone(), chats).await;
-            let _ = this.update(cx, |this, cx| {
-                this.searching = None;
-                this.show(Some(asked), hits, cx);
-            });
-        }));
-    }
-
-    fn show(&mut self, found_for: Option<String>, hits: Vec<Hit>, cx: &mut Context<Self>) {
-        let changed = self.hits != hits || (found_for.is_some() && self.found_for != found_for);
-        self.found_for = found_for;
-        self.hits = hits;
-        if changed {
-            trace_hits(&self.trace, "search", &self.hits);
-        }
-        cx.notify();
-    }
-
-    fn confirm(&mut self, index: IndexPath, cx: &mut Context<Self>) {
-        if let Some(hit) = self.hits.get(index.row) {
-            cx.emit(SearchEvent::Open(hit.target.clone()));
-        }
-    }
-
-    /// What the list says while it has no hit.
-    fn empty_text(&self) -> &'static str {
-        if !searchable(&self.query) {
-            "Type at least two characters to search your messages"
-        } else if self.searching.is_some() {
-            "Searching…"
-        } else {
-            "No message matches"
-        }
-    }
-}
-
-impl Render for Search {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let palette = theme::current(cx);
-        let on_query = cx.weak_entity();
-        let on_confirm = cx.weak_entity();
-        let empty: SharedString = self.empty_text().into();
-        let command = Command::new(&self.state)
-            .filterable(false)
-            .placeholder("Search messages")
-            .items(self.hits.iter().map(hit_item))
-            .on_query(move |query, _, cx| {
-                // a search already closed has nothing to look for
-                let _ = on_query.update(cx, |this, cx| this.set_query(query, cx));
-            })
-            .on_confirm(move |index, _, cx| {
-                let _ = on_confirm.update(cx, |this, cx| this.confirm(index, cx));
-            })
-            .empty(move |_, _, _| div().p_2().child(empty.clone()));
-        div()
-            .debug_selector(|| "search".to_owned())
-            .track_focus(&self.focus)
-            .w(px(WIDTH))
-            .rounded_md()
-            .border_1()
-            .border_color(rgb(palette.border))
-            .bg(rgb(palette.surface))
-            .child(command)
-    }
 }

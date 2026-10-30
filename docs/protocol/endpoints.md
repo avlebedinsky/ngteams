@@ -352,12 +352,15 @@ is refused.
 ## Microsoft 365 around Teams
 
 Graph, Outlook and Substrate, and SharePoint and OneDrive are contacting services: a mutating request on them is
-denied but for Substrate's search reads.
+denied but for Substrate's search reads and the search's own telemetry.
 
 | Method | Path | What it does | Contacting? | Native | Notes · task | Evidence |
 |---|---|---|---|---|---|---|
-| `POST` | `https://substrate.office.com/search/api/v1/suggestions` `?scenario` (also `…/query`) | search suggestions (people, files) | carve-out (a search read, whoever it lists) | no service | [fence-targets.md](fence-targets.md#reads-by-post) · M0 T11 | seen (all) |
-| `GET` | `https://substrate.office.com/search/api/v2/init` `?scenario&cvid` | initialises a search session | no | no service | this file | seen, not reviewed (`ab-chat`, `ab-chat-full`, `echo-call`) |
+| `POST` | `https://substrate.office.com/search/api/v1/suggestions` `?scenario` (also `…/query`) | search suggestions: at load the people and files caches (`peoplecache`, `filescache`, empty query); as the user types in the title bar (`powerbar`) a few people, files, chats, teams, channels, messages, events and apps | carve-out (a search read, whoever it lists) | `SubstrateSearch::suggestions` (`Service::Substrate`, the account's `https://outlook.office.com/search` token), sent by `HttpTransport::search` as the title bar's suggestions, logged `allowed`; goes in the read-only mode (a read) | [search.md](search.md#the-suggestions) · M0 T11, 2026-10-31 | seen (all; `search`) |
+| `POST` | `https://substrate.office.com/searchservice/api/v2/query` | the title bar's results: one entity request per kind (`Message`, `People`, `File`, `Chat`, `TeamsChannel`), a few of each for All, a page of one for its tab; also an empty `PowerbarContextual` ask when the box opens (answered 400) | carve-out (a search read, whoever it lists) | `SubstrateSearch::query`, sent by `HttpTransport::search` for the results' tabs, logged `allowed`; goes in the read-only mode | [search.md](search.md#the-results) · 2026-10-31 | seen (`search`; denied as unreadable before 2026-10-31) |
+| `POST` | `https://substrate.office.com/search/api/v1/events` (and `…/events/`) `?scenario` | the search's own telemetry: what was asked, shown and clicked | carve-out (reaches the search service alone) | not used | [search.md](search.md#what-else-the-web-client-sends) · 2026-10-31 | seen (`search`; denied as unreadable before 2026-10-31) |
+| `GET` | `https://substrate.office.com/search/api/v2/init` `?scenario&cvid` | initialises a search session (the box opened) | no | not used | [search.md](search.md#what-else-the-web-client-sends) | seen (`ab-chat`, `ab-chat-full`, `echo-call`, `search`) |
+| `GET` | `https://substrate.office.com/search/api/v1/suggestions` `?scenario=powerbar&query&cvid&logicalId` | the zero-query suggestions as the box opens | no | not used | [search.md](search.md#what-else-the-web-client-sends) | seen (`search`) |
 | `GET` | `https://substrate.office.com/userknowledgebase/v1.0/<id>/teams/affinityscore` | people affinity scores (the Outlook token) | no | no service | [auth.md](auth.md#audience--service-table) · M0 T11 | seen (all) |
 | `GET` | `https://outlook.office.com/api/v2.0/me/messages` `?$filter&$select&$top&$expand` | the account's mail | no | no service | this file | seen, not reviewed (`echo-call`) |
 | `POST` | `https://outlook.office.com/owa/startupdata.ashx` | the embedded Outlook calendar app's startup | yes (unreadable: no Outlook row reads it) | no service | [calendar.md](calendar.md#writing-an-event) · 2026-10-31 | seen, not reviewed (`ab-meeting`, denied: on the expected-deny list; the calendar app shows an error) |

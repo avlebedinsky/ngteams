@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use teams_core::{Action, EngineHandle};
+use teams_core::{Action, EngineHandle, SearchScope};
 use teams_headless::cli::{CallAudio, Cli, Command, WATCH_TONE_SECONDS};
 use teams_headless::commands::{self, Answering, WatchEnd};
 use teams_headless::lab::{self, Lab, VideoCounts};
@@ -112,6 +112,7 @@ async fn run(cli: Cli) -> Outcome {
         Command::Profile { mris, wait } => {
             profile(&lab, &mris, Duration::from_secs(wait), &mut signals, &mut out).await
         }
+        Command::Search { query } => search(&lab, &query, &mut out).await,
         Command::Availability {
             manual,
             manual_after,
@@ -244,6 +245,37 @@ async fn profile(lab: &Lab, whom: &[String], wait: Duration, signals: &mut Signa
     finish(handle, looked_up.map(|looked_up| looked_up.map(|()| ExitCode::SUCCESS)))
 }
 
+/// The service's search for `query` (`teams-headless search`): the suggestions, then the results of every kind, each
+/// kind's count printed, and the chats the messages found are in by id.
+async fn search(lab: &Lab, query: &str, out: &mut impl Write) -> Outcome {
+    let handle = lab.start_engine(false).await?;
+    let mut failed = false;
+    for (name, scope) in [("suggestions", SearchScope::Suggestions), ("all", SearchScope::All)] {
+        match handle.search_service(query, scope).await {
+            Ok(found) => {
+                for (kind, count) in [
+                    ("messages", found.messages.len()),
+                    ("people", found.people.len()),
+                    ("files", found.files.len()),
+                    ("chats", found.chats.len()),
+                    ("channels", found.channels.len()),
+                ] {
+                    writeln!(out, "search {name} {kind} {count}")?;
+                }
+                for message in &found.messages {
+                    writeln!(out, "search {name} message-in {}", message.conversation)?;
+                }
+            }
+            Err(error) => {
+                writeln!(out, "search {name} failed {}", error.kind())?;
+                failed = true;
+            }
+        }
+    }
+    let code = if failed { ExitCode::FAILURE } else { ExitCode::SUCCESS };
+    finish(handle, Some(Ok::<_, io::Error>(code)))
+}
+
 /// The conversation a command's chat argument names for the lab account.
 fn conversation(lab: &Lab, chat: &str) -> Result<String, chat::ChatError> {
     chat::resolve(chat, lab.alias, &lab.names, lab.abc.as_deref())
@@ -315,6 +347,7 @@ fn write_action(lab: &Lab, command: Command) -> Result<(Action, Duration), Box<d
         | Command::Watch { .. }
         | Command::Presence { .. }
         | Command::Profile { .. }
+        | Command::Search { .. }
         | Command::Availability { .. }
         | Command::Call { .. }
         | Command::Join { .. } => {

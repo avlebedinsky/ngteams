@@ -25,8 +25,8 @@ use gpui::{AppContext as _, AsyncApp, Context, SharedString, Task};
 use teams_core::sync::{CatchUpReport, Synced};
 use teams_core::{
     Action, Availability, CalendarEvent, CallAction, CallId, ChatListing, EngineHandle, EngineRequests, Event,
-    EventWrite, EventWritten, FileStream, FullEvent, Invitable, OwnStatus, Person, PictureBytes, Reply, Strip,
-    Transient, TransientSent,
+    EventWrite, EventWritten, FileStream, FullEvent, Invitable, OwnStatus, Person, PictureBytes, Reply, SearchAnswer,
+    SearchScope, Strip, Transient, TransientSent,
 };
 use teams_store::{
     Conversation, Member, Message, MessagePage, OutboxEntry, PageCursor, Reaction, ReadHorizon, SearchHit, Team,
@@ -153,6 +153,12 @@ pub trait Core: Send + Sync + 'static {
         let _ = query;
         Reply::ready(Ok(Vec::new()))
     }
+    /// What the service's search (Substrate) finds for `query` in `scope`, read now: the title bar's suggestions and
+    /// results ([`crate::global_search`]). A fake core finds nothing.
+    fn search_service(&self, query: String, scope: SearchScope) -> Reply<SearchAnswer> {
+        let _ = (query, scope);
+        Reply::ready(Ok(SearchAnswer::default()))
+    }
 }
 
 impl Core for EngineRequests {
@@ -174,6 +180,10 @@ impl Core for EngineRequests {
 
     fn invitable(&self, query: String) -> Reply<Vec<Invitable>> {
         EngineRequests::invitable(self, query)
+    }
+
+    fn search_service(&self, query: String, scope: SearchScope) -> Reply<SearchAnswer> {
+        EngineRequests::search_service(self, query, scope)
     }
 
     fn read_only(&self) -> bool {

@@ -76,6 +76,9 @@ impl Glyph {
     pub const MIC_OFF: Self = Self(include_bytes!("../assets/icons/mic-off.svg"));
     pub const MINUS: Self = Self(include_bytes!("../assets/icons/minus.svg"));
     pub const MORE: Self = Self(include_bytes!("../assets/icons/ellipsis.svg"));
+    /// The app launcher's grid of dots (the title bar's left corner).
+    pub const GRIP: Self = Self(include_bytes!("../assets/icons/grip.svg"));
+    pub const SEARCH: Self = Self(include_bytes!("../assets/icons/search.svg"));
     pub const PALETTE: Self = Self(include_bytes!("../assets/icons/palette.svg"));
     pub const PANEL_LEFT: Self = Self(include_bytes!("../assets/icons/panel-left.svg"));
     pub const PAUSE: Self = Self(include_bytes!("../assets/icons/pause.svg"));

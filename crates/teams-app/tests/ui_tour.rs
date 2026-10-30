@@ -50,6 +50,7 @@ use teams_ui::VideoFeed;
 use teams_ui::call_stage::CallStage;
 use teams_ui::chat_view::{Item, MessageAction};
 use teams_ui::compose::Compose;
+use teams_ui::global_search::{Mode as SearchMode, Tab};
 use teams_ui::settings_view::Page;
 use teams_ui::shell::Shell;
 use teams_ui::view::Root;
@@ -77,7 +78,7 @@ const SETTLE: Duration = Duration::from_millis(1500);
 type Step = (&'static str, fn(&Entity<Shell>, &mut Window, &mut App));
 
 /// The tour.
-const STEPS: [Step; 51] = [
+const STEPS: [Step; 54] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -123,6 +124,28 @@ const STEPS: [Step; 51] = [
             chat.read(cx).text_selection().open_menu(at);
             window.refresh();
         }
+    }),
+    // the title bar's search: its suggestions as "lab" is typed, its go-to mode, its results
+    ("search-suggestions", |shell, window, cx| {
+        if let Some(chat) = shell.read(cx).chat() {
+            chat.read(cx).text_selection().clear();
+        }
+        shell.update(cx, |shell, cx| shell.focus_search(SearchMode::Search, window, cx));
+        let search = shell.read(cx).search().clone();
+        search.update(cx, |search, cx| search.set_query("lab", window, cx));
+    }),
+    ("search-goto", |shell, window, cx| {
+        shell.update(cx, |shell, cx| shell.focus_search(SearchMode::GoTo, window, cx));
+        let search = shell.read(cx).search().clone();
+        search.update(cx, |search, cx| search.set_query("la", window, cx));
+    }),
+    ("search-results", |shell, window, cx| {
+        let search = shell.read(cx).search().clone();
+        search.update(cx, |search, cx| {
+            search.escape(window, cx);
+            search.set_query("lab", window, cx);
+            search.show_results(Tab::All, cx);
+        });
     }),
     ("account-menu", |shell, window, cx| {
         if let Some(chat) = shell.read(cx).chat() {

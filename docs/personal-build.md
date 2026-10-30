@@ -172,7 +172,7 @@ still goes only to its own service's host, and none to a third party.
 |---|---|---|
 | channel writes | denied (no lab-only team) | allowed by the fence; the app has no composer for them yet |
 | starting a chat | allowed among lab accounts (`CreateChat`) | allowed by the fence; the app doesn't offer it yet |
-| server search | a read, allowed | allowed; the app's search is local today |
+| server search | a read, allowed | allowed; the title bar's search asks Substrate (`docs/protocol/search.md`), in the read-only mode too |
 | meeting chats | none in the lab | allowed |
 | chats with guests or other tenants | none in the lab | allowed |
 | calls | lab-only calls | the user's calls, no fence limit ([Calls](#calls)) |

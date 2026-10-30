@@ -19,6 +19,8 @@
 //! - [`presence`]: others' presence, read from UPS by polling for the people the views asked about; never stored.
 //! - [`search`]: local search: each message's plain text handed to the store's index as it is stored, and the
 //!   messages stored before indexed by a backfill in batches.
+//! - [`service_search`]: the service's search (Substrate), read when the title bar's search asks: its suggestions and
+//!   its results of every kind; nothing kept.
 //! - [`emoticons`]: reactions' and messages' emoticons' animations, read from Teams' CDN when a view asks for one and
 //!   kept for the run.
 //! - [`pictures`]: pictures pasted into messages, read from the account's AMS base when a view shows one, kept for
@@ -47,6 +49,7 @@ pub mod pictures;
 pub mod presence;
 pub mod profiles;
 pub mod search;
+pub mod service_search;
 pub mod sync;
 pub mod teams;
 pub mod thumbnails;
@@ -75,6 +78,7 @@ pub use presence::{
 };
 pub use profiles::{MAX_LOOKUPS, NameFrom, PROFILE_MAX_AGE, PROFILE_RETRY, Person};
 pub use search::{Backfill, INDEX_BATCH, search_text};
+pub use service_search::{SearchAnswer, SearchScope};
 pub use sync::{
     CLOCK_SKEW_MS, CatchUp, CatchUpError, CatchUpReport, Changes, ConversationFailed, DRAFTS, Gaps, MAX_PAGES, NOTES,
     StoredMessage, Synced,
