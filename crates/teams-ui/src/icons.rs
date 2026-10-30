@@ -36,6 +36,8 @@ impl Glyph {
     pub const COPY: Self = Self(include_bytes!("../assets/icons/copy.svg"));
     pub const DOWNLOAD: Self = Self(include_bytes!("../assets/icons/download.svg"));
     pub const EMOJI: Self = Self(include_bytes!("../assets/icons/face-slightly-smiling.svg"));
+    /// A picture at its own size (the picture viewer's "Actual size").
+    pub const EXPAND: Self = Self(include_bytes!("../assets/icons/expand.svg"));
     pub const EXTERNAL_LINK: Self = Self(include_bytes!("../assets/icons/external-link.svg"));
     pub const FULLSCREEN: Self = Self(include_bytes!("../assets/icons/scan.svg"));
     pub const FILE: Self = Self(include_bytes!("../assets/icons/file.svg"));
@@ -94,6 +96,8 @@ impl Glyph {
     pub const VOLUME_OFF: Self = Self(include_bytes!("../assets/icons/volume-x.svg"));
     pub const WIFI: Self = Self(include_bytes!("../assets/icons/wifi.svg"));
     pub const X: Self = Self(include_bytes!("../assets/icons/x.svg"));
+    pub const ZOOM_IN: Self = Self(include_bytes!("../assets/icons/zoom-in.svg"));
+    pub const ZOOM_OUT: Self = Self(include_bytes!("../assets/icons/zoom-out.svg"));
 
     /// The icon, in the text colour around it.
     #[must_use]

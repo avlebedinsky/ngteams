@@ -13,7 +13,9 @@
 //!   [`PICTURE_BOX`]) sits in a square frame of [`PICTURE_BOX`], fitted (a small one at its own size); any other one is
 //!   [`PICTURE_BOX`] high; a wide one (twice as wide as high) keeps its own size, at most [`WIDE_MAX_WIDTH`] wide and,
 //!   once larger than Teams' bounds, [`PICTURE_BOX`] high. The empty frame stands in while it is read. One the engine
-//!   has none of, or none can be asked of (no engine), is drawn as the message's fallback (its placeholder text).
+//!   has none of, or none can be asked of (no engine), is drawn as the message's fallback (its placeholder text). Once
+//!   shown, a click on it opens it in the picture viewer when its view opens pictures ([`Picture::opening`]:
+//!   `crate::picture_viewer`), a pointing hand over it; a press on it starts no text selection.
 //! - **An emoticon** ([`emoticon`]) is drawn from Teams' own animation of it (its CDN's strip of frames, read by the
 //!   engine as a reaction's is, [`reactions::animation`]): playing when `animated` (an emoticon-only message's, drawn
 //!   large), else standing on its first frame (one inside text, at the text's height, as Teams draws it until hovered).
@@ -26,13 +28,14 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::ops::Range;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, AvailableSpace, Bounds, Element, ElementId, GlobalElementId, Hsla, InspectorElementId,
-    InteractiveElement, IntoElement, LayoutId, ParentElement as _, Pixels, RenderImage, RenderOnce, Size, Style,
-    Styled as _, TextLayout, Window, div, img, px, size,
+    InteractiveElement, IntoElement, LayoutId, ParentElement as _, Pixels, RenderImage, RenderOnce, SharedString, Size,
+    StatefulInteractiveElement as _, Style, Styled as _, TextLayout, Window, div, img, px, size,
 };
 use image::codecs::gif::GifDecoder;
 use image::{AnimationDecoder as _, Frame, ImageDecoder as _, Limits, RgbaImage, imageops};
@@ -269,11 +272,19 @@ fn asked(named: Named, source: &PictureSource, cx: &mut App) -> PictureState {
     PictureState::Reading
 }
 
-/// A picture's bytes as the frames GPUI draws (BGRA), and the size the bytes have; `None` when they don't decode.
+/// A picture's bytes as the frames GPUI draws (BGRA), each scaled down to at most [`MAX_DECODED_SIDE`] on its longer
+/// side, and the size the bytes have; `None` when they don't decode.
 #[must_use]
 pub fn decode(picture: &PictureBytes) -> Option<(RenderImage, (u32, u32))> {
+    decode_within(picture, MAX_DECODED_SIDE)
+}
+
+/// [`decode`], each frame scaled down to at most `max_side` on its longer side instead (the picture viewer's, which
+/// draws a picture at its own size).
+#[must_use]
+pub fn decode_within(picture: &PictureBytes, max_side: u32) -> Option<(RenderImage, (u32, u32))> {
     let format = match picture.format {
-        PastedFormat::Gif => return decode_gif(&picture.bytes),
+        PastedFormat::Gif => return decode_gif(&picture.bytes, max_side),
         PastedFormat::Png => image::ImageFormat::Png,
         PastedFormat::Jpeg => image::ImageFormat::Jpeg,
         PastedFormat::Webp => image::ImageFormat::WebP,
@@ -282,7 +293,7 @@ pub fn decode(picture: &PictureBytes) -> Option<(RenderImage, (u32, u32))> {
         .ok()?
         .into_rgba8();
     let natural = decoded.dimensions();
-    let mut shown = scaled_down(decoded);
+    let mut shown = scaled_down(decoded, max_side);
     to_bgra(&mut shown);
     Some((RenderImage::new(vec![Frame::new(shown)]), natural))
 }
@@ -290,7 +301,7 @@ pub fn decode(picture: &PictureBytes) -> Option<(RenderImage, (u32, u32))> {
 /// A GIF's frames, each scaled down as a still picture is, up to the first that doesn't decode (a truncated file's
 /// decoder keeps failing rather than ending) and within [`MAX_GIF_FRAMES`] and [`MAX_GIF_BYTES`]; `None` when not even
 /// the first decodes or its canvas is larger than [`MAX_GIF_SIDE`].
-fn decode_gif(bytes: &[u8]) -> Option<(RenderImage, (u32, u32))> {
+fn decode_gif(bytes: &[u8], max_side: u32) -> Option<(RenderImage, (u32, u32))> {
     let mut decoder = GifDecoder::new(std::io::Cursor::new(bytes)).ok()?;
     let mut limits = Limits::default();
     limits.max_image_width = Some(MAX_GIF_SIDE);
@@ -302,7 +313,7 @@ fn decode_gif(bytes: &[u8]) -> Option<(RenderImage, (u32, u32))> {
     let mut kept = 0_usize;
     for frame in decoder.into_frames().take(MAX_GIF_FRAMES).map_while(Result::ok) {
         let (left, top, delay) = (frame.left(), frame.top(), frame.delay());
-        let mut shown = scaled_down(frame.into_buffer());
+        let mut shown = scaled_down(frame.into_buffer(), max_side);
         let size = shown.as_raw().len();
         if !frames.is_empty() && kept.saturating_add(size) > MAX_GIF_BYTES {
             break;
@@ -314,16 +325,16 @@ fn decode_gif(bytes: &[u8]) -> Option<(RenderImage, (u32, u32))> {
     (!frames.is_empty()).then(|| (RenderImage::new(frames), natural))
 }
 
-/// `image` scaled down to at most [`MAX_DECODED_SIDE`] on its longer side, keeping its aspect ratio.
-fn scaled_down(image: RgbaImage) -> RgbaImage {
+/// `image` scaled down to at most `max_side` on its longer side, keeping its aspect ratio.
+fn scaled_down(image: RgbaImage, max_side: u32) -> RgbaImage {
     let (width, height) = image.dimensions();
     let longer = width.max(height);
-    if longer <= MAX_DECODED_SIDE {
+    if longer <= max_side {
         return image;
     }
     let scale = |side: u32| {
-        u32::try_from(u64::from(side) * u64::from(MAX_DECODED_SIDE) / u64::from(longer))
-            .unwrap_or(MAX_DECODED_SIDE)
+        u32::try_from(u64::from(side) * u64::from(max_side) / u64::from(longer))
+            .unwrap_or(max_side)
             .max(1)
     };
     imageops::resize(&image, scale(width), scale(height), imageops::FilterType::Triangle)
@@ -346,8 +357,14 @@ pub struct Picture {
     frame: Hsla,
     /// Drawn when there is none.
     fallback: Option<AnyElement>,
+    /// What a click on it does once it is shown (the picture viewer opened on it), and the element id (and test
+    /// selector) of what takes the click.
+    open: Option<(SharedString, OnOpen)>,
     child: Option<AnyElement>,
 }
+
+/// What a click on a shown picture calls.
+pub type OnOpen = Rc<dyn Fn(&mut Window, &mut App)>;
 
 impl Picture {
     #[must_use]
@@ -366,8 +383,17 @@ impl Picture {
             source,
             frame,
             fallback: Some(fallback),
+            open: None,
             child: None,
         }
+    }
+
+    /// It opened by `open` on a click once it is shown, a pointing hand over it; `id` names the element that takes the
+    /// click (its test selector too).
+    #[must_use]
+    pub fn opening(mut self, id: impl Into<SharedString>, open: OnOpen) -> Self {
+        self.open = Some((id.into(), open));
+        self
     }
 }
 
@@ -460,7 +486,7 @@ impl Element for Picture {
                         .rounded(px(FRAME_RADIUS - FRAME_BORDER))
                 });
                 let Size { width, height } = shape.outer();
-                let mut sized = div()
+                let frame = div()
                     .debug_selector(|| "rich-picture-drawn".to_owned())
                     .w(width)
                     .h(height)
@@ -472,8 +498,24 @@ impl Element for Picture {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .children(drawn)
-                    .into_any_element();
+                    .children(drawn);
+                let mut sized = match (&self.open, image.is_some()) {
+                    // a click on it opens it; a press on it starts no text selection (it isn't text)
+                    (Some((id, open)), true) => {
+                        let open = Rc::clone(open);
+                        let selector = id.to_string();
+                        div()
+                            .id(ElementId::Name(id.clone()))
+                            .debug_selector(move || selector)
+                            .w(width)
+                            .h(height)
+                            .cursor_pointer()
+                            .on_click(move |_, window, cx| open(window, cx))
+                            .child(frame)
+                            .into_any_element()
+                    }
+                    _ => frame.into_any_element(),
+                };
                 sized.prepaint_as_root(
                     bounds.origin,
                     size(width, height).map(AvailableSpace::Definite),

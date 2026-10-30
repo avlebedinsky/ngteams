@@ -8,7 +8,8 @@
 //! shown; a reply begun; the account menu; every page of the settings, Calls with made-up devices; the appearance
 //! and the chat again in Teams Dark; a message with files, its cards and their thumbnails, in Teams Dark and Light,
 //! its first video played in its card and paused; a message of lines, small pictures and a block of code, in Teams
-//! Dark and Light; the 12-hour time format and a chat's times on it; a group chat's presence; a favourite channel
+//! Dark and Light; a picture opened in the picture viewer, fitted and zoomed; the 12-hour time format and a chat's
+//! times on it; a group chat's presence; a favourite channel
 //! opened from "Favorites"; forwarded messages; a call's own window, its participants' pane, beside the main window
 //! with its in-call strip, and in Teams Dark) and says
 //! `shot <name>` after each; the parent screenshots the window and lets it go on. The views are driven from inside
@@ -49,6 +50,7 @@ use teams_ui::VideoFeed;
 use teams_ui::call_stage::CallStage;
 use teams_ui::chat_view::{Item, MessageAction};
 use teams_ui::compose::Compose;
+use teams_ui::picture_viewer;
 use teams_ui::settings_view::Page;
 use teams_ui::shell::Shell;
 use teams_ui::view::Root;
@@ -75,7 +77,7 @@ const SETTLE: Duration = Duration::from_millis(1500);
 type Step = (&'static str, fn(&Entity<Shell>, &mut Window, &mut App));
 
 /// The tour.
-const STEPS: [Step; 47] = [
+const STEPS: [Step; 49] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -191,9 +193,31 @@ const STEPS: [Step; 47] = [
     }),
     // the same once its pictures were read and decoded: the pasted picture, and c's GIF on one of its frames
     ("chat-pictures-read", |_, _, _| {}),
+    // b's phone screenshot, the chat's third picture, opened in the picture viewer's window as a click on it opens it:
+    // fitted to the window, b's avatar, name and the time in its header, "3 of 3", the zoom, Download and Close, and
+    // Previous over the stage's left side, in Teams Dark
+    ("picture-viewer-dark", |shell, _, cx| {
+        if let Some(chat) = shell.read(cx).chat().cloned() {
+            chat.update(cx, |chat, cx| chat.open_nth_picture(2, cx));
+        }
+    }),
+    // zoomed in three steps from the fit, past the window's height
+    ("picture-viewer-zoomed-dark", |_, _, cx| {
+        let (Some(viewer), Some(handle)) = (picture_viewer::shown(cx), picture_viewer::window(cx)) else {
+            return;
+        };
+        let _ = handle.update(cx, |_, window, cx| {
+            viewer.update(cx, |viewer, cx| {
+                for _ in 0..3 {
+                    viewer.zoom_step(true, window, cx);
+                }
+            });
+        });
+    }),
     // c's message with two videos and a document (`seed_files`): its lines, then the files' cards, the videos' with
     // their thumbnails as Graph and the media host (the mock) gave them, in Teams Dark
     ("chat-files-dark", |shell, window, cx| {
+        picture_viewer::close(cx);
         shell.update(cx, |shell, cx| shell.open_chat(AC_CHAT.to_owned(), window, cx));
     }),
     // the first video played in its card, its bytes from the mock's download link (`seed_files`): loading, then

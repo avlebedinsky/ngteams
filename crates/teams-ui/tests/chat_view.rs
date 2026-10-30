@@ -28,6 +28,9 @@ mod meeting;
 // names and pictures in the chat list and the chat view (M2 Task 12)
 #[path = "chat_view/people.rs"]
 mod people;
+// a message's picture opened in the picture viewer's window
+#[path = "chat_view/viewer.rs"]
+mod viewer;
 
 use std::cell::RefCell;
 use std::rc::Rc;

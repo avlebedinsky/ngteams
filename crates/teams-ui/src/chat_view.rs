@@ -110,6 +110,7 @@ use crate::icons::{Glyph, icon_button, icon_button_with_key, selected_by};
 use crate::link_preview;
 use crate::models::Models;
 use crate::people::{Face, Shown};
+use crate::picture_viewer::{self, OpenPicture, Viewed, Viewing};
 use crate::reaction_picker::{ReactionPicker, ReactionPickerEvent};
 use crate::reactions;
 use crate::rich_text::{self, Mentions, Rendered};
@@ -1102,6 +1103,65 @@ impl ChatView {
     #[must_use]
     pub fn items(&self) -> &[Item] {
         &self.items
+    }
+
+    /// What a click on a picture of message `id` calls: the viewer opened on it ([`Self::open_picture`]).
+    fn picture_opener(&self, id: &str, cx: &Context<Self>) -> OpenPicture {
+        let view = cx.entity().downgrade();
+        let id = id.to_owned();
+        OpenPicture::new(move |src, _, cx| {
+            let _ = view.update(cx, |this, cx| this.open_picture(&id, src, cx));
+        })
+    }
+
+    /// The pictures of the messages the view holds, in its order (`crate::picture_viewer`'s Previous and Next), and
+    /// where they are asked for.
+    fn pictures(&self) -> (Vec<Viewed>, Option<rich_text::PictureSource>) {
+        let mut source = None;
+        let mut pictures = Vec::new();
+        for item in self.message_items() {
+            let Body::Text(text) = &item.body else { continue };
+            for picture in text.0.pictures() {
+                source = source.or_else(|| text.0.source.clone());
+                pictures.push(Viewed {
+                    src: picture.src.clone(),
+                    message: item.id.clone(),
+                    sender: item.sender_name.clone(),
+                    face: item.face.clone(),
+                    time: item.arrival_time,
+                });
+            }
+        }
+        (pictures, source)
+    }
+
+    /// Opens the picture `src` of message `message` in the picture viewer, with the chat's other pictures before and
+    /// after it.
+    pub fn open_picture(&mut self, message: &str, src: &str, cx: &mut Context<Self>) {
+        let (pictures, source) = self.pictures();
+        let (Some(source), Some(at)) = (
+            source,
+            pictures
+                .iter()
+                .position(|picture| picture.message == message && picture.src == src),
+        ) else {
+            return;
+        };
+        self.trace.record(
+            &TraceLine::new("chat-view", "picture opened")
+                .conversation(&self.conversation)
+                .messages([message]),
+        );
+        picture_viewer::open(Viewing { source, pictures, at }, cx);
+    }
+
+    /// Opens the chat's `n`th picture (the oldest first) in the picture viewer; whether it has one.
+    pub fn open_nth_picture(&mut self, n: usize, cx: &mut Context<Self>) -> bool {
+        let (pictures, _) = self.pictures();
+        let Some(picture) = pictures.get(n) else { return false };
+        let (message, src) = (picture.message.clone(), picture.src.clone());
+        self.open_picture(&message, &src, cx);
+        true
     }
 
     /// The message rows, the oldest first.
@@ -2518,6 +2578,7 @@ impl ChatView {
                 &InChat {
                     conversation: &self.conversation,
                     selection: &self.text_selection,
+                    open: Some(self.picture_opener(&item.id, cx)),
                 },
                 highlighted,
                 palette,
@@ -3583,10 +3644,12 @@ fn bubble_line(
         .child(div().w(px(MARK_COLUMN)).flex_none().pt_1().pl_2().children(mark))
 }
 
-/// Where a message's bubble is drawn: its chat (for its links to Teams on the web) and the view's text selection.
+/// Where a message's bubble is drawn: its chat (for its links to Teams on the web), the view's text selection, and
+/// what a click on one of its pictures opens.
 struct InChat<'a> {
     conversation: &'a str,
     selection: &'a TextSelection,
+    open: Option<OpenPicture>,
 }
 
 fn bubble(
@@ -3612,7 +3675,10 @@ fn bubble(
     };
     let content = match &item.body {
         Body::Text(text) => {
-            let scope = Scope::new(chat.selection, message_key(item));
+            let mut scope = Scope::new(chat.selection, message_key(item));
+            if let Some(open) = chat.open.clone() {
+                scope = scope.opening(open);
+            }
             rich_text::render_selectable(&id, &text.0, palette, forward, Some(&scope))
         }
         Body::Deleted => muted(DELETED, palette),

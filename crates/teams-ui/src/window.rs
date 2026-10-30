@@ -9,7 +9,7 @@ use crate::accounts::Accounts;
 use crate::own_presence::OwnPresence;
 use crate::shell::{Shell, ShellParts};
 use crate::view::Root;
-use crate::{clock, shell, theme};
+use crate::{clock, picture_viewer, shell, theme};
 
 /// The lab app's Wayland app id.
 pub const LAB_APP_ID: &str = "ngteams-lab";
@@ -27,11 +27,12 @@ const DEFAULT_SIZE: (f32, f32) = (1100.0, 720.0);
 /// whatever the theme says, and the kit's dialogs have nowhere to open.
 pub type KitRoot = gpui_component::Root;
 
-/// Sets the app up for the views, once per app: the UI kit with our theme ([`theme::init`]) and the shell's keys
-/// ([`shell::init`]).
+/// Sets the app up for the views, once per app: the UI kit with our theme ([`theme::init`]), the shell's keys
+/// ([`shell::init`]) and the picture viewer's ([`picture_viewer::init`]).
 pub fn init(cx: &mut App) {
     theme::init(cx);
     shell::init(cx);
+    picture_viewer::init(cx);
 }
 
 /// Opens the main window, titled `title`, with app id `app_id`: the kit's root ([`KitRoot`]) holding our root view,
@@ -53,6 +54,7 @@ pub fn open(cx: &mut App, app_id: &str, title: SharedString, parts: ShellParts) 
         ..WindowOptions::default()
     };
     init(cx);
+    picture_viewer::set_app_id(app_id, cx);
     cx.open_window(options, |window, cx| {
         let following = Subscription::join(
             Subscription::join(theme::follow_settings(&parts.settings, cx), theme::follow(window, cx)),
@@ -96,6 +98,7 @@ pub fn open_accounts(
         ..WindowOptions::default()
     };
     init(cx);
+    picture_viewer::set_app_id(app_id, cx);
     cx.open_window(options, |window, cx| {
         // one settings model for the app: the first account's parts hold it
         let following = Subscription::join(

@@ -31,6 +31,7 @@ use gpui::{
 use gpui_component::kbd::Kbd;
 
 use crate::icons::Glyph;
+use crate::picture_viewer::OpenPicture;
 use crate::rich_text::{self, LinkRange, Rendered};
 use crate::theme::Palette;
 
@@ -407,11 +408,13 @@ impl Place {
     }
 }
 
-/// A message's units' selection: the view's selection and the message's key, for `rich_text` to place each unit.
+/// A message's units' selection: the view's selection and the message's key, for `rich_text` to place each unit; and
+/// what a click on one of the message's pictures opens (the picture viewer), when the view opens them.
 #[derive(Clone, Debug)]
 pub struct Scope {
     pub selection: TextSelection,
     pub message: MessageKey,
+    pub open: Option<OpenPicture>,
 }
 
 impl Scope {
@@ -420,7 +423,15 @@ impl Scope {
         Self {
             selection: selection.clone(),
             message,
+            open: None,
         }
+    }
+
+    /// It, a click on one of the message's pictures calling `open` with the picture's `src`.
+    #[must_use]
+    pub fn opening(mut self, open: OpenPicture) -> Self {
+        self.open = Some(open);
+        self
     }
 
     /// The unit at `path`.

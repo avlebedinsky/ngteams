@@ -46,7 +46,8 @@ use crate::files;
 use crate::forwarded::{self, ForwardOrigin, Original};
 use crate::link_preview;
 use crate::models::Models;
-use crate::people::Shown;
+use crate::people::{Face, Shown};
+use crate::picture_viewer::{self, OpenPicture, Viewed, Viewing};
 use crate::rich_text::{self, Mentions, Rendered};
 use crate::selection::{self, MessageKey, Scope, TextSelection};
 use crate::system_message::{self, Naming, Shown as SystemShown};
@@ -509,7 +510,10 @@ impl ChannelView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let post = match &thread.post {
-            Some(post) => message_view(post, &Scope::new(selection, post_key(index, post)), palette, cycle, cx),
+            Some(post) => {
+                let scope = Scope::new(selection, post_key(index, post)).opening(picture_opener(&post.id, cx));
+                message_view(post, &scope, palette, cycle, cx)
+            }
             None => div()
                 .debug_selector(move || format!("earlier-post-{index}"))
                 .italic()
@@ -523,7 +527,7 @@ impl ChannelView {
             .iter()
             .enumerate()
             .map(|(at, reply)| {
-                let scope = Scope::new(selection, reply_key(index, at, reply));
+                let scope = Scope::new(selection, reply_key(index, at, reply)).opening(picture_opener(&reply.id, cx));
                 div()
                     .pl_6()
                     .pt_1()
@@ -636,6 +640,15 @@ async fn read(core: &dyn Core, channel: &str, limit: usize) -> Option<Read> {
 /// A thread's post's place among the view's messages for the text selection: as the threads are shown.
 fn post_key(thread: usize, post: &Item) -> MessageKey {
     MessageKey::new((i64::try_from(thread).unwrap_or(i64::MAX), 0), post.id.clone())
+}
+
+/// What a click on a picture of message `id` calls: the viewer opened on it ([`ChannelView::open_picture`]).
+fn picture_opener(id: &str, cx: &Context<ChannelView>) -> OpenPicture {
+    let view = cx.entity().downgrade();
+    let id = id.to_owned();
+    OpenPicture::new(move |src, _, cx| {
+        let _ = view.update(cx, |this, cx| this.open_picture(&id, src, cx));
+    })
 }
 
 /// A reply's place among the view's messages for the text selection: under its thread's post, in order.
@@ -753,6 +766,43 @@ impl ChannelView {
     #[must_use]
     pub fn text_selection(&self) -> &TextSelection {
         &self.text_selection
+    }
+
+    /// Opens the picture `src` of message `message` in the picture viewer, with the channel's other pictures (its
+    /// threads' posts and replies, as shown) before and after it.
+    pub fn open_picture(&mut self, message: &str, src: &str, cx: &mut Context<Self>) {
+        let mut source = None;
+        let mut pictures = Vec::new();
+        let items = self
+            .threads
+            .iter()
+            .flat_map(|thread| thread.post.iter().chain(&thread.replies));
+        for item in items {
+            let Body::Text(rendered) = &item.body else { continue };
+            for picture in rendered.pictures() {
+                source = source.or_else(|| rendered.source.clone());
+                pictures.push(Viewed {
+                    src: picture.src.clone(),
+                    message: item.id.clone(),
+                    sender: item.sender_name.clone(),
+                    face: Face {
+                        named: true,
+                        picture: None,
+                    },
+                    time: item.arrival_time,
+                });
+            }
+        }
+        let at = pictures
+            .iter()
+            .position(|picture| picture.message == message && picture.src == src);
+        let (Some(source), Some(at)) = (source, at) else { return };
+        self.trace.record(
+            &TraceLine::new("channel-view", "picture opened")
+                .conversation(&self.channel)
+                .messages([message]),
+        );
+        picture_viewer::open(Viewing { source, pictures, at }, cx);
     }
 
     /// The right-click menu over the text selected with the mouse, while it is open: "Copy", with its key.

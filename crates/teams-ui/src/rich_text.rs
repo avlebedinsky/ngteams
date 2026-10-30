@@ -33,11 +33,12 @@
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::ops::Range;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, FontStyle, FontWeight, HighlightStyle, InteractiveElement as _, IntoElement, ParentElement as _,
-    SharedString, StrikethroughStyle, Styled as _, UnderlineStyle, div, px, rgb,
+    AnyElement, App, FontStyle, FontWeight, HighlightStyle, InteractiveElement as _, IntoElement, ParentElement as _,
+    SharedString, StrikethroughStyle, Styled as _, UnderlineStyle, Window, div, px, rgb,
 };
 use serde_json::{Value, json};
 use teams_proto::InlinePicture;
@@ -454,6 +455,25 @@ impl Rendered {
     #[must_use]
     pub fn mentions_me(&self) -> bool {
         self.blocks.iter().any(Block::mentions_me)
+    }
+
+    /// The pictures it draws as its own (a forward's and a list's too, not a quote's), in the order they are drawn: the
+    /// ones a click opens in the picture viewer.
+    #[must_use]
+    pub fn pictures(&self) -> Vec<&PictureBlock> {
+        fn walk<'r>(blocks: &'r [Block], into: &mut Vec<&'r PictureBlock>) {
+            for block in blocks {
+                match block {
+                    Block::Picture(picture) => into.push(picture),
+                    Block::List(list) => list.items.iter().for_each(|item| walk(item, into)),
+                    Block::Forward(forward) => walk(&forward.blocks, into),
+                    Block::Text(_) | Block::Quote(_) | Block::Code(_) => {}
+                }
+            }
+        }
+        let mut pictures = Vec::new();
+        walk(&self.blocks, &mut pictures);
+        pictures
     }
 }
 
@@ -926,22 +946,33 @@ fn blocks(draw: &Draw<'_>, path: &mut Vec<usize>, blocks: &[Block]) -> Vec<AnyEl
 }
 
 /// A picture of the message's own, as Teams draws one: in its frame of the border colour, bounded by Teams' sizes and
-/// the bubble's width, its aspect ratio kept (`crate::inline`); its placeholder when it can't be shown.
+/// the bubble's width, its aspect ratio kept (`crate::inline`); its placeholder when it can't be shown. A click on it
+/// opens it in the picture viewer when the view opens pictures (its scope's [`Scope::open`]), on the element (and
+/// test selector) `<id>-open-<path>`.
 fn picture_block(draw: &Draw<'_>, path: &[usize], picture: &PictureBlock) -> AnyElement {
     // a picture's placeholder isn't selectable: a picture is never copied as text
     let fallback = text_block(draw, path, &picture.fallback, None);
     let frame = rgb(draw.palette.border).into();
+    let mut drawn = Picture::new(
+        SharedString::from(format!("{}-picture-{path:?}", draw.id)),
+        &picture.src,
+        picture.size,
+        draw.source.cloned(),
+        frame,
+        fallback,
+    );
+    // a click on it opens it in the picture viewer, when the view opens pictures
+    if let Some(open) = draw.scope.and_then(|scope| scope.open.clone()) {
+        let src = picture.src.clone();
+        drawn = drawn.opening(
+            SharedString::from(format!("{}-open-{path:?}", draw.id)),
+            Rc::new(move |window: &mut Window, cx: &mut App| open.open(&src, window, cx)),
+        );
+    }
     div()
         .debug_selector(|| "rich-picture".to_owned())
         .py_1()
-        .child(Picture::new(
-            SharedString::from(format!("{}-picture-{path:?}", draw.id)),
-            &picture.src,
-            picture.size,
-            draw.source.cloned(),
-            frame,
-            fallback,
-        ))
+        .child(drawn)
         .into_any_element()
 }
 

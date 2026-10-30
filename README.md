@@ -470,7 +470,11 @@ first, then Teams' 👍 ❤️ 😆 😮 😢 😡), React, Edit on the account'
 each named by its tooltip with its key. The compose box is drawn as Teams' (a rounded box with its accent line along
 the foot while it has the focus) with Emoji and, behind a divider, Send inside it on the right: Emoji (also Ctrl+. or
 Ctrl+;) opens every emoji Teams offers, searchable, and puts the one picked at the cursor; Send does what Enter does. Ctrl+K opens the chat switcher (fuzzy over the chats' names; Enter opens,
-Escape closes). Settings take the place of the sidebar and the conversation pane, as in Teams: a column of pages
+Escape closes). A click on a picture in a message opens it in a window of its own at its full size, fitted to the
+window and never enlarged past it, its sender and time over it: Zoom in and Zoom out (also Ctrl+= and Ctrl+-, Ctrl and
+the wheel), fit or its own size (Ctrl+0 fits), dragging or the wheel to pan a picture larger than the window, Previous
+and Next (Left and Right) through the chat's pictures, Download (Ctrl+S: the desktop's file chooser, starting in the
+downloads folder) and Close (Escape). Settings take the place of the sidebar and the conversation pane, as in Teams: a column of pages
 (General, Appearance, Notifications, Privacy, Calls and devices where the app has calls, Diagnostics; Up and Down move
 between them) beside the page shown, each a set of titled boxes of rows. The rail's Calendar (Ctrl+4; Ctrl+2 goes back
 to the chats) takes their place the same way, as Teams' calendar app: the month and "My calendars" in its own pane, the
