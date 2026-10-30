@@ -65,8 +65,9 @@ below. The rules on sealed types, captures and tokens, agents and protocol notes
   copy's shape with made-up values, marked (`"_synthetic"` top-level in JSON, first line of JSONL, a `_synthetic:`
   first-line header elsewhere). `crates/fixture-guard` must pass on every `tests/fixtures/` and `docs/`; every fixture
   carries the marker except `fixture_guard::synthetic::TEST_INPUTS`. The sanitizer is defence in depth, not
-  permission. Tokens never reach logs or stdout: print only aud, exp, scopes and tenant. Both builds (the personal one
-  makes no captures).
+  permission. Debug logs and `fence.log` of either build are lab or user data like captures: never in the repo, not
+  even sanitized. Tokens never reach logs or stdout: print only aud, exp, scopes and tenant. Both builds (the personal
+  one makes no captures).
 - **Lab binaries get a `WritePermit` only from the lab policy** (`Fence::open_lab`, `Fence::open_lab_account`: roster
   from `lab.toml`, the lab's `fence.log`); `teams-fence`'s `test-support` is only a `[dev-dependencies]` feature.
 - **The personal build (`ngteams`) is the user's Teams** ([docs/personal-build.md](docs/personal-build.md)): the user's
