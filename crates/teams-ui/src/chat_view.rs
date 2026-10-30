@@ -91,7 +91,7 @@ use gpui::{
 };
 use gpui_component::Selectable as _;
 use gpui_component::button::{Button, ButtonRounded, ButtonVariants as _};
-use gpui_component::input::Escape as ComposeEscape;
+use gpui_component::input::{Copy as ComposeCopy, Escape as ComposeEscape};
 use gpui_component::kbd::Kbd;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Sizable as _, Size};
@@ -113,6 +113,7 @@ use crate::people::{Face, Shown};
 use crate::reaction_picker::{ReactionPicker, ReactionPickerEvent};
 use crate::reactions;
 use crate::rich_text::{self, Mentions, Rendered};
+use crate::selection::{self, MessageKey, Scope, TextSelection};
 use crate::sending::{self, Again, Note, RowState};
 use crate::settings::SettingsModel;
 use crate::shell::ShellParts;
@@ -842,6 +843,8 @@ pub struct ChatView {
     quick: Vec<String>,
     /// How many reactions of the account's the rows held when its most used were last asked for.
     own_reactions: Option<usize>,
+    /// The text selected with the mouse, in any of the messages ([`crate::selection`]).
+    text_selection: TextSelection,
     /// The message whose more-options menu is open.
     options: Option<String>,
     /// Where the open more-options menu's button was last drawn, in the window: the menu opens under it.
@@ -940,6 +943,7 @@ impl ChatView {
             quick_bar: Rc::default(),
             quick: quick_reactions(&[]),
             own_reactions: None,
+            text_selection: TextSelection::default(),
             options: None,
             options_at: Rc::default(),
             deleting: None,
@@ -1411,6 +1415,29 @@ impl ChatView {
         }
     }
 
+    /// Puts the text selected with the mouse on the clipboard, as plain text; whether there was any.
+    pub fn copy_selection(&self, cx: &mut App) -> bool {
+        let messages = self.items.iter().filter_map(|item| match item {
+            Item::Message(message) => match &message.body {
+                Body::Text(text) => Some((message_key(message), &*text.0)),
+                _ => None,
+            },
+            Item::Pending(pending) => pending.body.as_ref().map(|text| (pending_key(pending), &*text.0)),
+            _ => None,
+        });
+        let Some(text) = self.text_selection.text(messages) else {
+            return false;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        true
+    }
+
+    /// The text selected with the mouse.
+    #[must_use]
+    pub fn text_selection(&self) -> &TextSelection {
+        &self.text_selection
+    }
+
     /// Opens the more-options menu on `message`, or closes it when it is open there.
     pub fn toggle_options(&mut self, message: &str, cx: &mut Context<Self>) {
         self.options = if self.options.as_deref() == Some(message) {
@@ -1526,7 +1553,8 @@ impl ChatView {
         let open = self.reacting.take().is_some()
             | self.deleting.take().is_some()
             | self.resending.take().is_some()
-            | self.options.take().is_some();
+            | self.options.take().is_some()
+            | self.text_selection.clear();
         if open {
             cx.notify();
         } else if self.selected.is_some() {
@@ -2396,7 +2424,7 @@ impl ChatView {
                 let item = item.clone();
                 self.message_row(&item, palette, cx)
             }
-            Some(Item::Pending(pending)) => pending_row(pending, palette, cx),
+            Some(Item::Pending(pending)) => pending_row(pending, &self.text_selection, palette, cx),
             None => div().into_any_element(),
         }
     }
@@ -2487,7 +2515,10 @@ impl ChatView {
             .children(item.header.then(|| header_line(item, palette, clock::cycle(cx))))
             .child(bubble_line(
                 item,
-                &self.conversation,
+                &InChat {
+                    conversation: &self.conversation,
+                    selection: &self.text_selection,
+                },
                 highlighted,
                 palette,
                 bar,
@@ -2776,6 +2807,17 @@ impl ChatView {
     }
 }
 
+impl ChatView {
+    /// The right-click menu over the text selected with the mouse, while it is open: "Copy", with its key.
+    fn selection_menu(&self, palette: Palette, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let key = Kbd::binding_for_action(&CopySelected, Some(CONTEXT), window).map(Kbd::outline);
+        let view = cx.entity().downgrade();
+        selection::menu(&self.text_selection, palette, key, move |_, cx| {
+            let _ = view.update(cx, |this, cx| this.copy_selection(cx));
+        })
+    }
+}
+
 /// An empty element over its parent that keeps where the parent was last drawn in `drawn_at`, for a popup to open by.
 pub(crate) fn measured(drawn_at: &Rc<Cell<Option<Bounds<Pixels>>>>) -> AnyElement {
     let drawn_at = Rc::clone(drawn_at);
@@ -2949,11 +2991,17 @@ fn note_line(note: &Note, palette: Palette, cx: &mut Context<ChatView>) -> AnyEl
 }
 
 /// A message post on its way: the account's bubble, muted, with the row's state.
-fn pending_row(pending: &PendingItem, palette: Palette, cx: &mut Context<ChatView>) -> AnyElement {
+fn pending_row(
+    pending: &PendingItem,
+    selection: &TextSelection,
+    palette: Palette,
+    cx: &mut Context<ChatView>,
+) -> AnyElement {
     let row = pending.note.row;
     let id: SharedString = format!("pending-text-{row}").into();
+    let scope = Scope::new(selection, pending_key(pending));
     let content = match &pending.body {
-        Some(text) => rich_text::render(&id, &text.0, palette),
+        Some(text) => rich_text::render_selectable(&id, &text.0, palette, None, Some(&scope)),
         None => muted(UNSUPPORTED, palette),
     };
     div()
@@ -2976,6 +3024,17 @@ fn pending_row(pending: &PendingItem, palette: Palette, cx: &mut Context<ChatVie
         )
         .child(note_line(&pending.note, palette, cx))
         .into_any_element()
+}
+
+/// A message's place among the view's messages for the text selection: as the list orders them.
+#[must_use]
+pub fn message_key(item: &MessageItem) -> MessageKey {
+    MessageKey::new((item.arrival_time, 0), item.id.clone())
+}
+
+/// A pending post's place among the view's messages for the text selection: after every message, by its row.
+fn pending_key(pending: &PendingItem) -> MessageKey {
+    MessageKey::new((i64::MAX, pending.note.row), format!("pending-{}", pending.note.row))
 }
 
 /// Whether a load read the account's read horizon, and what it was.
@@ -3499,7 +3558,7 @@ fn mentions_me(item: &MessageItem) -> bool {
 /// header) and, for someone else's, the column right of it that holds Teams' "@" when it mentions the account.
 fn bubble_line(
     item: &MessageItem,
-    conversation: &str,
+    chat: &InChat<'_>,
     highlighted: bool,
     palette: Palette,
     bar: Option<AnyElement>,
@@ -3509,7 +3568,7 @@ fn bubble_line(
     if item.own {
         return line
             .justify_end()
-            .child(bubble(item, conversation, highlighted, palette, bar, forward));
+            .child(bubble(item, chat, highlighted, palette, bar, forward));
     }
     let id = item.id.clone();
     let mark = mentions_me(item).then(|| {
@@ -3520,13 +3579,19 @@ fn bubble_line(
             .text_color(rgb(palette.mention))
             .child("@")
     });
-    line.child(bubble(item, conversation, highlighted, palette, bar, forward))
+    line.child(bubble(item, chat, highlighted, palette, bar, forward))
         .child(div().w(px(MARK_COLUMN)).flex_none().pt_1().pl_2().children(mark))
+}
+
+/// Where a message's bubble is drawn: its chat (for its links to Teams on the web) and the view's text selection.
+struct InChat<'a> {
+    conversation: &'a str,
+    selection: &'a TextSelection,
 }
 
 fn bubble(
     item: &MessageItem,
-    conversation: &str,
+    chat: &InChat<'_>,
     highlighted: bool,
     palette: Palette,
     bar: Option<AnyElement>,
@@ -3546,13 +3611,16 @@ fn bubble(
         _ => (None, None),
     };
     let content = match &item.body {
-        Body::Text(text) => rich_text::render_with_header(&id, &text.0, palette, forward),
+        Body::Text(text) => {
+            let scope = Scope::new(chat.selection, message_key(item));
+            rich_text::render_selectable(&id, &text.0, palette, forward, Some(&scope))
+        }
         Body::Deleted => muted(DELETED, palette),
         Body::Unsupported(_) => web_line(
             &format!("unsupported-{}", item.id),
             UNSUPPORTED,
             &item.id,
-            conversation,
+            chat.conversation,
             palette,
         ),
         Body::Event(_) | Body::TimedEvent(_) | Body::Card(_) | Body::UnsupportedEvent(_) => div().into_any_element(),
@@ -3584,7 +3652,7 @@ fn bubble(
                     &format!("unshown-{}", item.id),
                     UNSHOWN_CONTENT,
                     &item.id,
-                    conversation,
+                    chat.conversation,
                     palette,
                 ))
                 .into_any_element()
@@ -3745,7 +3813,10 @@ fn hover_bar_keys(list: gpui::Div, cx: &mut Context<ChatView>) -> gpui::Div {
         .on_action(cx.listener(|this, _: &PickFourth, _, cx| this.pick(3, cx)))
         .on_action(cx.listener(|this, _: &PickMore, window, cx| this.open_more(window, cx)))
         .on_action(cx.listener(|this, _: &CopySelected, window, cx| {
-            this.act_on_selected(MessageAction::Copy, window, cx);
+            // the text selected with the mouse first, as Teams copies it; else the message selected with the keyboard
+            if !this.copy_selection(cx) {
+                this.act_on_selected(MessageAction::Copy, window, cx);
+            }
         }))
 }
 
@@ -3794,6 +3865,7 @@ impl Render for ChatView {
         self.drawn.clear();
         let more = self.more_overlay();
         let options = self.options_overlay(palette, window, cx);
+        let selection_menu = self.selection_menu(palette, window, cx);
         let rows = list(
             self.list.clone(),
             cx.processor(|this: &mut Self, index: usize, _window, cx| this.render_item(index, cx)),
@@ -3834,6 +3906,26 @@ impl Render for ChatView {
             .debug_selector(|| "chat-view".to_owned())
             // Escape the compose box handed on (nothing to cancel there): the list takes the focus
             .on_action(cx.listener(|this, _: &ComposeEscape, window, cx| this.focus_messages(window, cx)))
+            // a press anywhere in the view lets the selected text go (a press on text then starts a new selection;
+            // Shift+click extends it), and brings the focus into the view when it was elsewhere, so Ctrl+C reaches it
+            .capture_any_mouse_down(cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                if event.button != MouseButton::Left {
+                    return;
+                }
+                if !this.focus.is_focused(window) && !this.compose.read(cx).focused(window, cx) {
+                    this.focus.focus(window, cx);
+                }
+                if !event.modifiers.shift && this.text_selection.clear() {
+                    cx.notify();
+                }
+            }))
+            // Ctrl+C in the compose box copies the messages' selected text while there is any, as a browser copies
+            // the page's one selection
+            .capture_action(cx.listener(|this, _: &ComposeCopy, _, cx| {
+                if this.copy_selection(cx) {
+                    cx.stop_propagation();
+                }
+            }))
             .size_full()
             .flex()
             .flex_col()
@@ -3844,5 +3936,6 @@ impl Render for ChatView {
             .child(self.compose.clone())
             .children(more)
             .children(options)
+            .children(selection_menu)
     }
 }

@@ -94,6 +94,7 @@ pub mod reactions;
 pub mod rich_text;
 pub mod ringtone;
 pub mod search;
+pub mod selection;
 pub mod sending;
 pub mod settings;
 pub mod settings_view;

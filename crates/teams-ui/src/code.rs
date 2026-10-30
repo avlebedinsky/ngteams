@@ -7,13 +7,14 @@ use std::ops::Range;
 
 use gpui::{
     AnyElement, App, ClipboardItem, FontStyle, HighlightStyle, InteractiveElement as _, IntoElement,
-    ParentElement as _, RenderOnce, SharedString, Styled as _, StyledText, Window, div, rgb,
+    ParentElement as _, RenderOnce, SharedString, Styled as _, Window, div, rgb,
 };
 use gpui_component::Sizable as _;
 use teams_proto::chat::{Code, Token};
 
 use crate::icons::{Glyph, icon_button, selected_by};
 use crate::rich_text::tint;
+use crate::selection::{self, Place, SelectableText};
 use crate::theme::Palette;
 
 /// The copy button's tooltip.
@@ -185,13 +186,15 @@ pub fn token_style(kind: Token, palette: Palette) -> HighlightStyle {
     }
 }
 
-/// `block` drawn as Teams' code card; `id` keeps its copy button apart from another card's.
+/// `block` drawn as Teams' code card; `id` keeps its copy button apart from another card's. Its lines are selectable
+/// at `place` (each line the unit under it: [`crate::selection`]) when it has one.
 #[must_use]
-pub fn card(id: SharedString, block: &CodeBlock, palette: Palette) -> AnyElement {
+pub fn card(id: SharedString, block: &CodeBlock, palette: Palette, place: Option<Place>) -> AnyElement {
     CodeCard {
         id,
         block: block.clone(),
         palette,
+        place,
     }
     .into_any_element()
 }
@@ -202,6 +205,7 @@ struct CodeCard {
     id: SharedString,
     block: CodeBlock,
     palette: Palette,
+    place: Option<Place>,
 }
 
 impl CodeCard {
@@ -243,9 +247,18 @@ impl CodeCard {
             let (shown, tokens) = line.shown();
             let highlights = tokens
                 .into_iter()
-                .map(|(range, kind)| (range, token_style(kind, palette)));
+                .map(|(range, kind)| (range, token_style(kind, palette)))
+                .collect();
             // an empty line keeps its height
             let text = if shown.is_empty() { " ".to_owned() } else { shown };
+            let text = SelectableText::new(
+                SharedString::from(format!("{}-line-{at}", self.id)),
+                SharedString::from(text),
+                highlights,
+                Vec::new(),
+                self.place.as_ref().map(|place| place.child(at)),
+                selection::colour(palette),
+            );
             div()
                 .flex()
                 .items_start()
@@ -259,12 +272,7 @@ impl CodeCard {
                         .text_color(rgb(palette.muted_foreground))
                         .child((at + 1).to_string()),
                 )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .child(StyledText::new(text).with_highlights(highlights)),
-                )
+                .child(div().flex_1().min_w_0().child(text))
         });
         let body = div()
             .debug_selector(|| "rich-code-lines".to_owned())

@@ -29,10 +29,13 @@ use std::sync::Arc;
 
 use chrono::Local;
 use gpui::{
-    AnyElement, AsyncApp, Context, InteractiveElement as _, IntoElement, ParentElement as _, Render, ScrollHandle,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, div, rgb,
+    AnyElement, App, AsyncApp, ClipboardItem, Context, FocusHandle, InteractiveElement as _, IntoElement, MouseButton,
+    ParentElement as _, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
+    Task, WeakEntity, Window, div, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::input::Copy;
+use gpui_component::kbd::Kbd;
 use teams_proto::chat::{LinkPreview, MessageType, RichText, SharedFile, parse_html};
 use teams_store::Message;
 
@@ -45,6 +48,7 @@ use crate::link_preview;
 use crate::models::Models;
 use crate::people::Shown;
 use crate::rich_text::{self, Mentions, Rendered};
+use crate::selection::{self, MessageKey, Scope, TextSelection};
 use crate::system_message::{self, Naming, Shown as SystemShown};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
@@ -184,6 +188,10 @@ pub struct ChannelView {
     /// The view went to the newest posts after its first load with any.
     placed: bool,
     traced: Option<Vec<(String, &'static str)>>,
+    /// The text selected with the mouse, in any of the posts and replies ([`crate::selection`]).
+    text_selection: TextSelection,
+    /// Takes the focus on a press in the posts, so Ctrl+C reaches the view.
+    focus: FocusHandle,
     _observing: Subscription,
 }
 
@@ -227,6 +235,8 @@ impl ChannelView {
             scroll: ScrollHandle::new(),
             placed: false,
             traced: None,
+            text_selection: TextSelection::default(),
+            focus: cx.focus_handle(),
             _observing: observing,
         };
         view.sync(cx);
@@ -493,12 +503,13 @@ impl ChannelView {
     fn thread_view(
         index: usize,
         thread: &Thread<Item>,
+        selection: &TextSelection,
         palette: Palette,
         cycle: HourCycle,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let post = match &thread.post {
-            Some(post) => message_view(post, palette, cycle, cx),
+            Some(post) => message_view(post, &Scope::new(selection, post_key(index, post)), palette, cycle, cx),
             None => div()
                 .debug_selector(move || format!("earlier-post-{index}"))
                 .italic()
@@ -510,13 +521,15 @@ impl ChannelView {
         let replies: Vec<AnyElement> = thread
             .replies
             .iter()
-            .map(|reply| {
+            .enumerate()
+            .map(|(at, reply)| {
+                let scope = Scope::new(selection, reply_key(index, at, reply));
                 div()
                     .pl_6()
                     .pt_1()
                     .border_t_1()
                     .border_color(rgb(palette.border))
-                    .child(message_view(reply, palette, cycle, cx))
+                    .child(message_view(reply, &scope, palette, cycle, cx))
                     .into_any_element()
             })
             .collect();
@@ -620,8 +633,26 @@ async fn read(core: &dyn Core, channel: &str, limit: usize) -> Option<Read> {
     })
 }
 
-/// A message: its sender's name and time (in Teams' words, on `cycle`'s clock) over its body.
-fn message_view(item: &Item, palette: Palette, cycle: HourCycle, cx: &mut Context<ChannelView>) -> AnyElement {
+/// A thread's post's place among the view's messages for the text selection: as the threads are shown.
+fn post_key(thread: usize, post: &Item) -> MessageKey {
+    MessageKey::new((i64::try_from(thread).unwrap_or(i64::MAX), 0), post.id.clone())
+}
+
+/// A reply's place among the view's messages for the text selection: under its thread's post, in order.
+fn reply_key(thread: usize, at: usize, reply: &Item) -> MessageKey {
+    let at = i64::try_from(at).unwrap_or(i64::MAX - 1);
+    MessageKey::new((i64::try_from(thread).unwrap_or(i64::MAX), at + 1), reply.id.clone())
+}
+
+/// A message: its sender's name and time (in Teams' words, on `cycle`'s clock) over its body, its text selectable in
+/// `scope`.
+fn message_view(
+    item: &Item,
+    scope: &Scope,
+    palette: Palette,
+    cycle: HourCycle,
+    cx: &mut Context<ChannelView>,
+) -> AnyElement {
     let time = clock::message_time(item.arrival_time, &Local::now(), cycle);
     let header = div()
         .flex()
@@ -659,7 +690,8 @@ fn message_view(item: &Item, palette: Palette, cycle: HourCycle, cx: &mut Contex
     });
     let body = match &item.body {
         Body::Text(rendered) => {
-            rich_text::render_with_header(&format!("channel-text-{}", item.id).into(), rendered, palette, forward)
+            let id = format!("channel-text-{}", item.id).into();
+            rich_text::render_selectable(&id, rendered, palette, forward, Some(scope))
         }
         Body::Deleted => muted(DELETED.into()),
         Body::Event(text) => muted(text.clone()),
@@ -695,9 +727,48 @@ fn message_view(item: &Item, palette: Palette, cycle: HourCycle, cx: &mut Contex
 
 impl gpui::EventEmitter<ChannelViewEvent> for ChannelView {}
 
+impl ChannelView {
+    /// Puts the text selected with the mouse on the clipboard, as plain text; whether there was any.
+    pub fn copy_selection(&self, cx: &mut App) -> bool {
+        let messages = self.threads.iter().enumerate().flat_map(|(index, thread)| {
+            let post = thread.post.iter().map(move |post| (post_key(index, post), post));
+            let replies = thread
+                .replies
+                .iter()
+                .enumerate()
+                .map(move |(at, reply)| (reply_key(index, at, reply), reply));
+            post.chain(replies).filter_map(|(key, item)| match &item.body {
+                Body::Text(rendered) => Some((key, &**rendered)),
+                _ => None,
+            })
+        });
+        let Some(text) = self.text_selection.text(messages) else {
+            return false;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(text));
+        true
+    }
+
+    /// The text selected with the mouse.
+    #[must_use]
+    pub fn text_selection(&self) -> &TextSelection {
+        &self.text_selection
+    }
+
+    /// The right-click menu over the text selected with the mouse, while it is open: "Copy", with its key.
+    fn selection_menu(&self, palette: Palette, window: &Window, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let key = Kbd::binding_for_action_in(&Copy, &self.focus, window).map(Kbd::outline);
+        let view = cx.entity().downgrade();
+        selection::menu(&self.text_selection, palette, key, move |_, cx| {
+            let _ = view.update(cx, |this, cx| this.copy_selection(cx));
+        })
+    }
+}
+
 impl Render for ChannelView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = theme::current(cx);
+        let selection_menu = self.selection_menu(palette, window, cx);
         let older = self.has_older().then(|| {
             div().p_2().flex().justify_center().child(
                 Button::new("channel-older")
@@ -719,7 +790,7 @@ impl Render for ChannelView {
             .threads
             .iter()
             .enumerate()
-            .map(|(index, thread)| Self::thread_view(index, thread, palette, cycle, cx))
+            .map(|(index, thread)| Self::thread_view(index, thread, &self.text_selection, palette, cycle, cx))
             .collect();
         let posts = div()
             .id("channel-posts")
@@ -744,11 +815,29 @@ impl Render for ChannelView {
             .child(READ_ONLY);
         div()
             .debug_selector(|| "channel-view".to_owned())
+            .track_focus(&self.focus)
+            // a press anywhere in the view lets the selected text go (a press on text then starts a new selection;
+            // Shift+click extends it) and takes the focus, so Ctrl+C reaches the view
+            .capture_any_mouse_down(cx.listener(|this, event: &gpui::MouseDownEvent, window, cx| {
+                if event.button != MouseButton::Left {
+                    return;
+                }
+                this.focus.focus(window, cx);
+                if !event.modifiers.shift && this.text_selection.clear() {
+                    cx.notify();
+                }
+            }))
+            .on_action(cx.listener(|this, _: &Copy, _, cx| {
+                if !this.copy_selection(cx) {
+                    cx.propagate();
+                }
+            }))
             .size_full()
             .flex()
             .flex_col()
             .bg(rgb(palette.background))
             .child(posts)
             .child(note)
+            .children(selection_menu)
     }
 }

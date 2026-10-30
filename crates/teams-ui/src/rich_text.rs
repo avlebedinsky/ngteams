@@ -36,9 +36,8 @@ use std::ops::Range;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, App, FontStyle, FontWeight, HighlightStyle, InteractiveElement as _, InteractiveText, IntoElement,
-    ParentElement as _, SharedString, StrikethroughStyle, Styled as _, StyledText, UnderlineStyle, Window, div, px,
-    rgb,
+    AnyElement, FontStyle, FontWeight, HighlightStyle, InteractiveElement as _, IntoElement, ParentElement as _,
+    SharedString, StrikethroughStyle, Styled as _, UnderlineStyle, div, px, rgb,
 };
 use serde_json::{Value, json};
 use teams_proto::InlinePicture;
@@ -47,6 +46,7 @@ use teams_proto::chat::{Code, Field, Image, List, Marks, Mention, MentionKind, N
 pub use crate::code::CodeBlock;
 use crate::inline::{Emoticon, InlineText, LARGE_EMOTICON, Picture};
 pub use crate::inline::{PictureEngine, PictureSource};
+use crate::selection::{self, Place, Scope, SelectableText};
 use crate::theme::Palette;
 
 /// What an image that isn't shown says.
@@ -164,6 +164,23 @@ impl TextBlock {
             at = emoticon.range.end;
         }
         plain.push_str(&self.text[at..]);
+        plain
+    }
+
+    /// The text in `range` of its drawn text as a reader would copy it: an emoticon the range reaches as its emoji.
+    #[must_use]
+    pub fn plain_range(&self, range: Range<usize>) -> String {
+        let mut plain = String::with_capacity(range.len());
+        let mut at = range.start;
+        for emoticon in &self.emoticons {
+            if emoticon.range.end <= range.start || emoticon.range.start >= range.end {
+                continue;
+            }
+            plain.push_str(&self.text[at..emoticon.range.start.max(at)]);
+            plain.push_str(emoticon.alt.as_deref().unwrap_or_default());
+            at = emoticon.range.end.min(range.end);
+        }
+        plain.push_str(&self.text[at..range.end]);
         plain
     }
 
@@ -295,6 +312,95 @@ impl Block {
             Self::Code(code) => code.lines.iter().map(|line| line.text.clone()).collect(),
             Self::Quote(_) | Self::Picture(_) => Vec::new(),
         }
+    }
+}
+
+/// A unit of a message's text that is selected as one: a paragraph, or a line of a block of code ([`units`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unit<'r> {
+    /// Its path among the message's blocks, as [`render_selectable`] places it.
+    pub path: Vec<usize>,
+    text: UnitText<'r>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum UnitText<'r> {
+    Paragraph(&'r TextBlock),
+    /// A line of code as drawn (a tab as spaces).
+    Code(String),
+}
+
+impl Unit<'_> {
+    /// The length of its drawn text, bytes.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        match &self.text {
+            UnitText::Paragraph(block) => block.text.len(),
+            UnitText::Code(line) => line.len(),
+        }
+    }
+
+    /// Whether its drawn text is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// `range` of its drawn text as a reader copies it (an emoticon as its emoji).
+    #[must_use]
+    pub fn copied(&self, range: Range<usize>) -> String {
+        let drawn = match &self.text {
+            UnitText::Paragraph(block) => block.text.as_str(),
+            UnitText::Code(line) => line.as_str(),
+        };
+        // a selection made before the text changed (an edit came) may fall inside a character
+        let range = drawn.floor_char_boundary(range.start)..drawn.floor_char_boundary(range.end);
+        match &self.text {
+            UnitText::Paragraph(block) => block.plain_range(range),
+            UnitText::Code(line) => line.get(range).unwrap_or_default().to_owned(),
+        }
+    }
+}
+
+/// The selectable units of `rendered`, in reading order: each paragraph (a quote's, a list item's and a forward's
+/// too) and each line of a block of code; a picture's placeholder isn't one.
+#[must_use]
+pub fn units(rendered: &Rendered) -> Vec<Unit<'_>> {
+    let mut units = Vec::new();
+    collect_units(&rendered.blocks, &mut Vec::new(), &mut units);
+    units
+}
+
+/// `blocks`' units into `units`, their paths as [`blocks`] places them.
+fn collect_units<'r>(blocks: &'r [Block], path: &mut Vec<usize>, units: &mut Vec<Unit<'r>>) {
+    for (at, block) in blocks.iter().enumerate() {
+        path.push(at);
+        match block {
+            Block::Text(text) => units.push(Unit {
+                path: path.clone(),
+                text: UnitText::Paragraph(text),
+            }),
+            Block::Quote(QuoteBlock { blocks, .. }) | Block::Forward(ForwardBlock { blocks }) => {
+                collect_units(blocks, path, units);
+            }
+            Block::List(list) => {
+                for (index, item) in list.items.iter().enumerate() {
+                    path.push(index);
+                    collect_units(item, path, units);
+                    path.pop();
+                }
+            }
+            Block::Code(code) => units.extend(code.lines.iter().enumerate().map(|(index, line)| {
+                let mut path = path.clone();
+                path.push(index);
+                Unit {
+                    path,
+                    text: UnitText::Code(line.shown().0),
+                }
+            })),
+            Block::Picture(_) => {}
+        }
+        path.pop();
     }
 }
 
@@ -736,11 +842,25 @@ pub fn render_with_header(
     palette: Palette,
     header: Option<AnyElement>,
 ) -> AnyElement {
+    render_selectable(id, rendered, palette, header, None)
+}
+
+/// Draws `rendered` as [`render_with_header`] does, its text selectable in `scope` (its message's place in its view's
+/// selection: [`crate::selection`]).
+#[must_use]
+pub fn render_selectable(
+    id: &SharedString,
+    rendered: &Arc<Rendered>,
+    palette: Palette,
+    header: Option<AnyElement>,
+    scope: Option<&Scope>,
+) -> AnyElement {
     let draw = Draw {
         id,
         palette,
         source: rendered.source.as_ref(),
         header: Cell::new(header),
+        scope,
     };
     if let Some(emoticons) = rendered.emoticons_only() {
         return div()
@@ -774,6 +894,8 @@ struct Draw<'a> {
     source: Option<&'a PictureSource>,
     /// The header of the first forward's card, until it is drawn.
     header: Cell<Option<AnyElement>>,
+    /// Where its text is selected, when it is selectable.
+    scope: Option<&'a Scope>,
 }
 
 /// The elements of `blocks`; `path` names the block's place, for its element id. Recursive over quotes, as deep as
@@ -785,7 +907,7 @@ fn blocks(draw: &Draw<'_>, path: &mut Vec<usize>, blocks: &[Block]) -> Vec<AnyEl
         .map(|(at, block)| {
             path.push(at);
             let element = match block {
-                Block::Text(text) => text_block(draw, path, text),
+                Block::Text(text) => text_block(draw, path, text, draw.scope.map(|scope| scope.at(path))),
                 Block::Quote(quote) => quote_block(draw, path, quote),
                 Block::Picture(picture) => picture_block(draw, path, picture),
                 Block::List(list) => list_block(draw, path, list),
@@ -794,6 +916,7 @@ fn blocks(draw: &Draw<'_>, path: &mut Vec<usize>, blocks: &[Block]) -> Vec<AnyEl
                     SharedString::from(format!("{}-code-{path:?}", draw.id)),
                     code,
                     draw.palette,
+                    draw.scope.map(|scope| scope.at(path)),
                 ),
             };
             path.pop();
@@ -805,7 +928,8 @@ fn blocks(draw: &Draw<'_>, path: &mut Vec<usize>, blocks: &[Block]) -> Vec<AnyEl
 /// A picture of the message's own, as Teams draws one: in its frame of the border colour, bounded by Teams' sizes and
 /// the bubble's width, its aspect ratio kept (`crate::inline`); its placeholder when it can't be shown.
 fn picture_block(draw: &Draw<'_>, path: &[usize], picture: &PictureBlock) -> AnyElement {
-    let fallback = text_block(draw, path, &picture.fallback);
+    // a picture's placeholder isn't selectable: a picture is never copied as text
+    let fallback = text_block(draw, path, &picture.fallback, None);
     let frame = rgb(draw.palette.border).into();
     div()
         .debug_selector(|| "rich-picture".to_owned())
@@ -918,24 +1042,24 @@ pub fn highlights(block: &TextBlock, palette: Palette) -> Vec<(Range<usize>, Hig
         .collect()
 }
 
-fn text_block(draw: &Draw<'_>, path: &[usize], block: &TextBlock) -> AnyElement {
-    let highlights = highlights(block, draw.palette);
-    let styled = StyledText::new(block.text.clone()).with_highlights(highlights);
-    let layout = styled.layout().clone();
-    let (selector, text) = if block.links.is_empty() {
-        ("rich-text", styled.into_any_element())
+/// A paragraph: its styled text, selectable at `place` when it has one, its links opening on a click, its emoticons
+/// drawn over their places.
+fn text_block(draw: &Draw<'_>, path: &[usize], block: &TextBlock, place: Option<Place>) -> AnyElement {
+    let selector = if block.links.is_empty() {
+        "rich-text"
     } else {
-        let element_id = SharedString::from(format!("{}-{path:?}", draw.id));
-        let hrefs: Vec<String> = block.links.iter().map(|link| link.href.clone()).collect();
-        let ranges = block.links.iter().map(|link| link.range.clone()).collect();
-        let text =
-            InteractiveText::new(element_id, styled).on_click(ranges, move |at, _: &mut Window, cx: &mut App| {
-                if let Some(href) = hrefs.get(at).filter(|href| opens(href)) {
-                    cx.open_url(href);
-                }
-            });
-        ("rich-link", text.into_any_element())
+        "rich-link"
     };
+    let text = SelectableText::new(
+        SharedString::from(format!("{}-{path:?}", draw.id)),
+        SharedString::from(block.text.clone()),
+        highlights(block, draw.palette),
+        block.links.clone(),
+        place,
+        selection::colour(draw.palette),
+    );
+    let layout = text.layout().clone();
+    let text = text.into_any_element();
     let text = if block.emoticons.is_empty() {
         text
     } else {

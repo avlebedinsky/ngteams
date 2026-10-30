@@ -75,7 +75,7 @@ const SETTLE: Duration = Duration::from_millis(1500);
 type Step = (&'static str, fn(&Entity<Shell>, &mut Window, &mut App));
 
 /// The tour.
-const STEPS: [Step; 40] = [
+const STEPS: [Step; 42] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -111,7 +111,22 @@ const STEPS: [Step; 40] = [
     ("chat-compose", |shell, window, cx| {
         type_in_compose(shell, "Lunch at noon?", window, cx);
     }),
-    ("account-menu", |shell, _, cx| {
+    // text selected with the mouse from the second-to-last message into the last, on the selection colour, then its
+    // right-click menu
+    ("chat-selection", |shell, _, cx| select_across_last_two(shell, cx)),
+    ("chat-selection-menu", |shell, window, cx| {
+        if let Some(chat) = shell.read(cx).chat() {
+            let size = window.viewport_size();
+            let at = gpui::point(size.width * 0.5, size.height * 0.5);
+            chat.read(cx).text_selection().open_menu(at);
+            window.refresh();
+        }
+    }),
+    ("account-menu", |shell, window, cx| {
+        if let Some(chat) = shell.read(cx).chat() {
+            chat.read(cx).text_selection().clear();
+            window.refresh();
+        }
         shell.update(cx, Shell::toggle_status_menu);
     }),
     ("settings-general", |shell, _, cx| {
@@ -472,6 +487,36 @@ fn last_message(shell: &Entity<Shell>, cx: &App) -> Option<(Entity<teams_ui::cha
         _ => None,
     })?;
     Some((chat, message))
+}
+
+/// Selects text from the fourth character of the chat's second-to-last text message to the eighth of its last, as a
+/// drag with the mouse would.
+fn select_across_last_two(shell: &Entity<Shell>, cx: &mut App) {
+    let Some(chat) = shell.read(cx).chat().cloned() else {
+        return;
+    };
+    let view = chat.read(cx);
+    let texts: Vec<(teams_ui::selection::MessageKey, Vec<usize>, usize)> = view
+        .message_items()
+        .filter_map(|message| match &message.body {
+            teams_ui::chat_view::Body::Text(text) => teams_ui::rich_text::units(&text.0)
+                .first()
+                .map(|unit| (teams_ui::chat_view::message_key(message), unit.path.clone(), unit.len())),
+            _ => None,
+        })
+        .collect();
+    let [.., from, to] = texts.as_slice() else {
+        return;
+    };
+    let spot = |(message, path, len): &(teams_ui::selection::MessageKey, Vec<usize>, usize), offset: usize| {
+        teams_ui::selection::Spot {
+            message: message.clone(),
+            path: path.clone(),
+            offset: offset.min(*len),
+        }
+    };
+    view.text_selection().select(spot(from, 3), spot(to, 8));
+    chat.update(cx, |_, cx| cx.notify());
 }
 
 /// Plays the first video card drawn, or pauses it while it plays.

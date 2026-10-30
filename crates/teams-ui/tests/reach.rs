@@ -615,7 +615,7 @@ fn no_message_html_reaches_a_markdown_or_html_view() {
     assert!(read >= 11, "the app crates' sources were read ({read} files)");
     // the chat view draws a message's content through our renderer
     let chat_view = fs::read_to_string(workspace_root().join("crates/teams-ui/src/chat_view.rs")).expect("UTF-8");
-    assert!(chat_view.contains("rich_text::render("));
+    assert!(chat_view.contains("rich_text::render_selectable("));
 }
 
 /// What reaches a bus other than the one the app is given: `zbus`'s session-bus constructors (an address from the
