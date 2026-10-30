@@ -13,9 +13,10 @@ the lab and every lab binary; the personal build (`ngteams`) is the user's Teams
 The rules on the native client's sealed types, captures and tokens, agents and protocol notes hold for both builds.
 
 - **A change that fits a rule's test is an ordinary change and goes ahead**, with no stop to ask the user: a new read,
-  own-state request or frame that passes its rule's test, say; the examples a rule names are today's, not a closed
-  list. Only a change to a test itself, or in the lab a new contacting write kind or widening whom a request may name
-  or reach, needs the user's sign-off; the personal build has no such limit.
+  own-state request or frame that passes its rule's test, say, or in the lab a new contacting write kind (a meeting's,
+  say) mapped from a capture and let through only by the contacting write's test below; the examples a rule names are
+  today's, not a closed list. Only a change to a test itself, or in the lab widening whom a request may name or reach,
+  needs the user's sign-off; the personal build has no such limit.
 - **A contacting write goes only to the lab.** A contacting write is one that reaches other people: a message (a
   post, reply, edit, delete, forward, channel post, a scheduled or drafted send), a reaction, a call (starting,
   joining or answering one), a chat created, a member added or removed, an invite, a meeting, a mail, a share. It is
