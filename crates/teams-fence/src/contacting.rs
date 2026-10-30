@@ -19,6 +19,7 @@
 //! unreadable), path segments percent-decoded, query values exact, and a query key twice (in any case) makes a chat
 //! service request unreadable.
 
+mod calendar;
 pub(crate) mod call;
 mod chat;
 pub(crate) mod json;
@@ -267,7 +268,9 @@ pub fn contacting(request: &Request<'_>, policy: &Policy) -> Contact {
         Service::Graph | Service::SharePoint => Contact::Unreadable,
         Service::Outlook => none_if(is_substrate_search(&parsed)),
         Service::Ams => none_if(is_token_exchange(&parsed)),
-        Service::MiddleTier => none_if(!is_middle_tier_contacting(&parsed)),
+        Service::MiddleTier => {
+            calendar::classify(&parsed).unwrap_or_else(|| none_if(!is_middle_tier_contacting(&parsed)))
+        }
         Service::Csa => none_if(is_csa_read(&parsed)),
     }
 }

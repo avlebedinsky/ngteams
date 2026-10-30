@@ -42,6 +42,9 @@
 //!   app's live test runs and spawns this scenario beside: b's page answers a's call (`--call answer`) or calls a
 //!   (`--call place`), with audio and video, saying how far it got on stdout as it goes; recorded.
 //!
+//! - [`ab_meeting`] (account a, as `ab-chat`): a schedules a Teams meeting with b from the scheduling form, changes its
+//!   title and cancels it; recorded.
+//!
 //! The steps are in [`dsl`]. A run fails (`proto-lab run` exits non-zero) when its goal isn't reached, when the fence
 //! was breached, and on any **unexpected** deny: what a scenario expects is its [`DenyPolicy`]. The writing scenarios
 //! judge by the reviewed expected-deny list ([`expected`]), which never changes what the fence denies.
@@ -53,6 +56,7 @@ pub mod ab_chat;
 pub mod ab_chat_full;
 pub mod ab_file;
 pub mod ab_image;
+pub mod ab_meeting;
 pub mod ab_trouter;
 pub mod abc_call;
 pub mod abc_call_mixed;
@@ -124,6 +128,9 @@ pub enum ScenarioName {
     /// b's web client, the far end of a call with a's app (run by the app's live test): b answers a's call (`--call
     /// answer`) or calls a (`--call place`), with audio and video; recorded.
     AbCallApp,
+    /// Account a schedules a Teams meeting with b, changes its title and cancels it, after the same enforcement test;
+    /// recorded.
+    AbMeeting,
     /// Account a's availability reported by the `user.activity` frame alone (the presence endpoint denied); recorded.
     OwnPresenceActivity,
     /// Account a's availability reported by the presence endpoint alone (every `user.activity` held back); recorded.
@@ -157,6 +164,7 @@ impl ScenarioName {
             Self::AbCallNative => "ab-call-native",
             Self::AbcCallMixed => "abc-call-mixed",
             Self::AbCallApp => "ab-call-app",
+            Self::AbMeeting => "ab-meeting",
             Self::OwnPresenceActivity => "own-presence-activity",
             Self::OwnPresenceEndpoint => "own-presence-endpoint",
             Self::OwnPresenceBoth => "own-presence-both",
@@ -390,6 +398,7 @@ pub async fn run(
         ScenarioName::AbTrouterQuiet => ab_trouter::run(paths, options, ab_trouter::Activity::HeldBack).await,
         ScenarioName::ChatShapes => chat_shapes::run(paths, options).await,
         ScenarioName::AbcEveryone => abc_everyone::run(paths, options).await,
+        ScenarioName::AbMeeting => ab_meeting::run(paths, options).await,
         ScenarioName::EchoCall
         | ScenarioName::AbCall
         | ScenarioName::AbcCall

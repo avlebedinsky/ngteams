@@ -85,15 +85,27 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
     /// One attempt at a call write: a fresh `Fence::check` (its `fence.log` line), then the transport, which sends it
     /// once (see the module docs).
     pub async fn try_call<R: Mutating + Send>(&self, write: R) -> CallTried {
-        let tried = match self.deliver(write).await {
+        let tried = self.try_once(write).await;
+        log::info!("call write: {}", tried.summary());
+        tried
+    }
+
+    /// One attempt at a calendar write (an event created, changed, cancelled or deleted: `crate::calendar`), as a call
+    /// write's: no row, its answer back to the asker, another attempt only as [`CallRetries`] says.
+    pub async fn try_calendar<R: Mutating + Send>(&self, write: R) -> CallTried {
+        let tried = self.try_once(write).await;
+        log::info!("calendar write: {}", tried.summary());
+        tried
+    }
+
+    async fn try_once<R: Mutating + Send>(&self, write: R) -> CallTried {
+        match self.deliver(write).await {
             Tried::Answered(answer) => CallTried::Answered(answer),
             Tried::Denied(denied) => CallTried::Denied(denied.to_string()),
             Tried::NotSent(why) => CallTried::NotSent(why),
             Tried::Throttled { wait, .. } => CallTried::Throttled(wait),
             Tried::Uncertain(why) => CallTried::Uncertain(why),
-        };
-        log::info!("call write: {}", tried.summary());
-        tried
+        }
     }
 }
 

@@ -3,7 +3,7 @@
 
 use chrono::{Datelike as _, NaiveDate, NaiveDateTime, Timelike as _};
 use gpui::{
-    AnyElement, Context, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
+    AnyElement, ClickEvent, Context, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
     StatefulInteractiveElement as _, Styled as _, div, point, prelude::FluentBuilder as _, px, relative, rgb,
 };
 
@@ -199,6 +199,31 @@ impl CalendarView {
                     .bg(rgb(mix(palette.background, palette.border, 550))),
             ]
         });
+        // the half hours, behind the events: a double click on an empty one schedules an event there
+        let cells = (0..48u16)
+            .map(|half| {
+                let start = date.and_time(chrono::NaiveTime::MIN) + chrono::Duration::minutes(i64::from(half) * 30);
+                let selector = format!("calendar-slot-{}-{half}", date.format("%Y-%m-%d"));
+                div()
+                    .debug_selector(move || selector.clone())
+                    .id(SharedString::from(format!(
+                        "calendar-slot-{}-{half}",
+                        date.format("%Y%m%d")
+                    )))
+                    .absolute()
+                    .top(px(f32::from(half) * HOUR_HEIGHT / 2.0))
+                    .left_0()
+                    .right_0()
+                    .h(px(HOUR_HEIGHT / 2.0))
+                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                        if event.click_count() >= 2 {
+                            let slot =
+                                crate::event_form::Slot::new(start, start + crate::event_form::model::DEFAULT_LENGTH);
+                            this.new_event(slot, false, cx);
+                        }
+                    }))
+            })
+            .collect::<Vec<_>>();
         let slots = calendar::day_slots(events, date, MIN_MINUTES);
         let blocks: Vec<AnyElement> = slots
             .into_iter()
@@ -217,6 +242,7 @@ impl CalendarView {
                 column.bg(rgb(mix(palette.background, palette.surface, 500)))
             })
             .children(lines)
+            .children(cells)
             .children(blocks)
             .children(now_line)
             .into_any_element()
@@ -343,7 +369,14 @@ impl CalendarView {
                     .child(edge(look, palette))
                     .child(text)
                     .children(mark.map(|mark| div().absolute().right(px(4.0)).bottom(px(3.0)).child(mark)))
-                    .on_click(cx.listener(move |this, _, _, cx| this.open_card(shown.clone(), cx))),
+                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                        // a double click opens the account's own event to change, as Teams does
+                        if event.click_count() >= 2 && shown.event.is_organizer && !shown.event.cancelled {
+                            this.edit_event(shown.event.id.clone(), cx);
+                        } else {
+                            this.open_card(shown.clone(), cx);
+                        }
+                    })),
             )
             .into_any_element()
     }

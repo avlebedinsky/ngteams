@@ -55,6 +55,7 @@ pub fn open(cx: &mut App, app_id: &str, title: SharedString, parts: ShellParts) 
     };
     init(cx);
     picture_viewer::set_app_id(app_id, cx);
+    crate::event_form::set_app_id(app_id, cx);
     cx.open_window(options, |window, cx| {
         let following = Subscription::join(
             Subscription::join(theme::follow_settings(&parts.settings, cx), theme::follow(window, cx)),
@@ -99,6 +100,7 @@ pub fn open_accounts(
     };
     init(cx);
     picture_viewer::set_app_id(app_id, cx);
+    crate::event_form::set_app_id(app_id, cx);
     cx.open_window(options, |window, cx| {
         // one settings model for the app: the first account's parts hold it
         let following = Subscription::join(

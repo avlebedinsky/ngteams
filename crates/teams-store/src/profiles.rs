@@ -107,6 +107,35 @@ impl Store {
         Ok(profile)
     }
 
+    /// Up to `limit` people whose stored name holds `query` (in any case), as (MRI, name), names that begin with it
+    /// first, then by name: what the scheduling form's attendee picker suggests.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] when the read fails.
+    pub fn profiles_named(&self, query: &str, limit: usize) -> Result<Vec<(String, String)>, StoreError> {
+        let query = query.trim().to_lowercase();
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+        let escaped: String = query
+            .chars()
+            .flat_map(|c| match c {
+                '%' | '_' | '\\' => vec!['\\', c],
+                c => vec![c],
+            })
+            .collect();
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut statement = self.conn.prepare_cached(
+            "SELECT mri, name FROM profiles
+             WHERE name IS NOT NULL AND lower(name) LIKE '%' || ?1 || '%' ESCAPE '\\'
+             ORDER BY lower(name) LIKE ?1 || '%' ESCAPE '\\' DESC, lower(name)
+             LIMIT ?2",
+        )?;
+        let rows = statement.query_map(params![escaped, limit], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        Ok(rows.collect::<Result<_, _>>()?)
+    }
+
     /// Stores `profile` in place of the one stored for its MRI.
     ///
     /// # Errors

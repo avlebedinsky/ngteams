@@ -1,4 +1,4 @@
-# The calendar (read)
+# The calendar
 
 Status: 2026-10-30. Written from the web client's captures of its calendar read (`ab-chat`, `load`, 2026-10-20 to
 2026-10-24: method, path, query names and value forms, header names, statuses and the answer's key paths only) and from
@@ -58,5 +58,108 @@ Other selected fields (`categories`, `cleanGlobalObjectId`, `iCalUid`, `eventTim
 - **Joining**: a meeting's Join goes through the call machinery's join of a running call in its chat
   (`docs/protocol/calling.md`, "Joining a running call"), offered only once an invitation named a running call in the
   meeting's chat. Joining a meeting nobody's call has rung for yet (its conversation looked up by its link) was never
-  captured, nor were a meeting's creation (the calendar's New) and its lookup by meeting id and passcode ("Join with an
-  ID"): the calendar says so instead of sending them.
+  captured, nor was a meeting's lookup by meeting id and passcode ("Join with an ID"): the calendar says so instead of
+  sending them. Writing an event is below.
+
+## Writing an event
+
+Written 2026-10-31 from the web client's code (the bundle the lab keeps, read locally) and the `ab-meeting` captures
+of that day (method, path, query, header names, body keys and value forms, statuses and the answers' key paths). The
+runs captured a's Teams meeting with b made from the scheduling form, and what the form sends around it; the change
+and the cancellation the scenario goes on to make (from the meeting's chat, "Details") weren't reached in the runs of
+that day (the web client stopped answering on a loaded machine), so their shapes below are the bundle's. The lab's calendar
+app is Outlook's, embedded (its writes go to Outlook's own service, which the lab fence doesn't let through); the
+scheduling form the web client opens on its new-meeting deep link (`/l/meeting/new?subject&attendees&startTime&endTime`)
+and on a meeting's chat ("Details") is Teams' own, and writes through the middle tier. The native client writes as
+that form does.
+
+Every write goes to the middle tier with the account's `api.spaces.skype.com` token, `Content-Type:
+application/json`, and the web client's `x-ms-client-*` headers beside it (`x-ms-client-caller` naming the form's
+operation, `x-ms-client-type: cdlworker`, `x-ms-migration: True`, `x-client-ui-language`).
+
+### Before the save
+
+- `GET beta/me/calendarEvents/timeZoneSettingsWithOffset?timezone=<IANA zone>` (a read): the desktop's zone as
+  Exchange names it, `{"timeZone", "utcOffsetInMinutes", "local": {"timeZone", "utcOffsetInMinutes"}, "remote": {…}}`.
+  An event carries `local.timeZone` (`TurkeySt` for `Europe/Istanbul`) as its `eventTimeZone`.
+- `PUT v2.0/me/calendars/findMeetingTimes` and `PUT v2.0/me/calendars/schedules` (reads sent as a `PUT`, the people
+  asked about and the window in the body): the scheduling assistant's free and busy times, sent as attendees are
+  added. They reach nobody: the lab rule lets them through, and the native client doesn't send them.
+- `GET v2.0/me/calendars/masterCategories` (a read): the account's categories, `[{"id", "displayName", "color"}]` (a
+  new mailbox has Outlook's six, red to purple).
+
+### A Teams meeting's online meeting
+
+`POST beta/me/calendarEvents/privateMeeting/schedulingService/create` with `{"isStreamEnabled": false,
+"meetingType": "Scheduled"}` (no query): the meeting's join link and chat, with only the organizer in it, made when
+the form opens on a Teams meeting. It answered `201` with `{"value": {"expiryTime", "groupContext": {"threadId":
+"19:meeting_…@thread.v2"}, "etag", "meetingUrl", "links": {"join", "update", "shortJoinUrl"}, "views": {"html": <the
+invitation's join block as a data URL>}, "onlineMeetingConfLink", "onlineMeetingConferenceId", …}}`. It reaches nobody
+(no attendee is named; a body naming a chat, `threadId`, stays unreadable).
+
+On closing, the form deleted the online meeting it had made, even the one its saved event had just taken: `PUT
+beta/me/calendarEvents/schedulingService/delete` with `{"links": {"update": <its update link>}}`. The fence can't tie
+it to the meeting's attendees, so it stays denied; the native client never sends it.
+
+### Creating
+
+`POST v2.0/me/calendars/default/events?isOnlineMeeting=<true|false>&shouldDecryptData=true` with:
+
+- `calendarEvent`: `subject`; `startTime` and `endTime` in local time with their offset, no fraction
+  (`2026-10-31T01:30:00+03:00`); `eventTimeZone` and `utcOffset` (minutes); `isAllDayEvent`; `attendees`, the organizer
+  first (`{"address", "mri", "name", "role": "Admin", "type": "Organizer"}`; the form's first state had it with no
+  address), then each invitee (`{"address", "mri", "name", "role": "Admin", "type": "Required"|"Optional"}`);
+  `location` (text); `showAs`; `isReminderSet` and `reminderMinutesBeforeStart`; `isPrivate`; `isResponseRequested`;
+  `isOrganizer`; `isAppointment` (`true` while it invites nobody); `eventType: "Single"`; `doNotForward`;
+  `organizerAddress` and `organizerName`; `primarySpokenLanguage`; `clientOptimisticEventId` and `TransactionId` (one
+  id, five random 32-bit numbers joined by `-`); for a Teams meeting `joinMeetingLabel`, `meetingTemplateId:
+  "default"` and `skypeTeamsData` (`{"uid": <organizer MRI>, "type": 0, "private": true}` as a string); the text as
+  `bodyContentType` and `bodyContent` when it has one (the form left both out of an empty one, with
+  `emptyBodyPlaceholder`);
+- `schedulingServiceEvent`: for a Teams meeting, the online meeting made before, as its answer gave it.
+
+It answered `201` with `{"type": "Microsoft.SkypeSpaces.MiddleTier.Models.CalendarEvent", "value": [<the event>]}`:
+the event as the calendar view reads it (`objectId`, times in UTC, `skypeTeamsData` naming the meeting's chat,
+`shortOnlineMeetingJoinUrl`, `bodyPreview` holding the invitation's join block, `location: "Microsoft Teams
+Meeting"`).
+
+### Changing, cancelling, deleting
+
+- `GET v2.0/me/calendars/events/<id>?shouldDecryptData=true` (a read): one event whole, as the form opens on it.
+- `PUT v2.0/me/calendars/events/<id>?isOnlineMeeting=<bool>` with `{"updatedCalendarEvent": <the event>}`: the
+  event as read with the form's fields over it; its update goes to every attendee (and a cancellation to one taken
+  off). The bundle expects `204`.
+- `PUT v2.0/me/calendars/events/<id>/cancel` with `{"conversationId"?: <the meeting's chat>, "cancellationMessage"?:
+  <text>}`: the organizer's meeting cancelled, each attendee told. `204`.
+- `DELETE v2.0/me/calendars/events/<id>` (no body): the event taken off the account's calendar (an appointment, a
+  meeting its organizer cancelled). `204`.
+
+The bundle also names an event's forward, an answer to an invitation (`…/respond`), a channel meeting's writes and a
+webinar's; none was captured, and the native client sends none.
+
+### What the fence makes of them
+
+Each write is a `WriteKind::Meeting` (`crates/teams-fence/src/contacting/calendar.rs`), judged by whom it reaches,
+each attendee by its address (`Mri::mail`, matched against `lab.toml`'s UPNs):
+
+- a creation is on `Scope::New`, adding the organizer and every invitee the body names; one that names a team's or a
+  chat's members (`inviteAllMembers`, `parentConversationId`, `originalGroupChatThreadId`, `broadcastSettings`,
+  `conflictingMeetings`) or picks people in its meeting options is unreadable, and so is an attendee with no address
+  but the organizer's own entry. An appointment inviting nobody reaches nobody and is permitted.
+- a change, a cancellation and a delete are on `Scope::Event` of the event the path names; the fence reads that event
+  fresh (`GET v2.0/me/calendars/events/<id>`, with the page's or the native client's own middle-tier token,
+  `MiddleTierCredential`) and judges its organizer and attendees, with any attendee a change adds. A change whose body
+  names another event is unreadable.
+- the online meeting's creation (without a chat) and the free/busy reads reach nobody and pass, logged.
+
+### What the native client does
+
+- **New, Edit, Cancel meeting, Delete** (`crates/teams-ui/src/event_form.rs`, the calendar's card): each a sealed
+  write (`teams-proto` `CreateEvent`, `UpdateEvent`, `CancelEvent`, `DeleteEvent`) through the outbox's calendar kind
+  (`Outbox::try_calendar`): one attempt under a fresh `Fence::check`, one more only after a 401 or a short throttle,
+  never after an unknown outcome. A Teams meeting's creation first makes its online meeting (`CreateOnlineMeeting`, a
+  plain request) and carries it. The engine fills in the organizer (the account's MRI, its profile's address, its
+  name) and the time zone (`TimeZoneSettings`, from `TZ` or `/etc/localtime`), each read once a run.
+- A change sends the event as `EventRead` gave it with the form's fields over it, so what the form doesn't show goes
+  back as it came; a Teams meeting stays one.
+- It sends neither the scheduling assistant's reads nor the online meeting's delete.

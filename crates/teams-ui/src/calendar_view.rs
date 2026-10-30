@@ -16,8 +16,13 @@
 //!   running call, offered only once a call there is known: [`crate::calls::Calls::joinable`]), "Chat with
 //!   participants" (the meeting's chat) and "Copy link". A build that shows no call, and the read-only mode, offer no
 //!   Join.
-//! - **New and Join with an ID** need writes no capture has shown (a meeting's creation, a meeting's lookup by its id
-//!   and passcode): they say so rather than send a guess. So do "Add calendar" (other people's and shared calendars).
+//! - **New** (its menu: an event or a Teams meeting), a double click on an empty half hour of the grid, and an
+//!   event's Edit (its card's, or a double click on it) open the scheduling form in a window of its own
+//!   ([`crate::event_form`]); a save there reads the days shown again. The card of the account's own meeting offers
+//!   Cancel meeting, of its appointment Delete, and of a meeting cancelled by its organizer Remove from calendar, each
+//!   confirmed first.
+//! - **Join with an ID** needs a write no capture has shown (a meeting's lookup by its id and passcode): it says so
+//!   rather than send a guess. So does "Add calendar" (other people's and shared calendars).
 //! - **Keys** while the calendar has the focus: Left and Right the previous and next days, T today, Ctrl+Alt+1–4 the
 //!   views, Escape closes a card or the month picker.
 //! - **Traced**: `calendar shown` with the view's key, `calendar read` with the view's key when its events came,
@@ -148,6 +153,8 @@ pub struct CalendarView {
     reading: Option<(Span, Task<()>)>,
     /// The card of the event clicked.
     card: Option<Shown>,
+    /// The card asks to confirm its Cancel meeting, Delete or Remove from calendar, and one is being sent.
+    removal: Removal,
     /// What a control that can't act yet says, until closed.
     notice: Option<&'static str>,
     scroll: ScrollHandle,
@@ -195,6 +202,7 @@ impl CalendarView {
             loaded: HashMap::new(),
             reading: None,
             card: None,
+            removal: Removal::None,
             notice: None,
             scroll: ScrollHandle::new(),
             _ticker: ticker,
@@ -296,6 +304,96 @@ impl CalendarView {
     /// Closes the event's card.
     pub fn close_card(&mut self, cx: &mut Context<Self>) {
         self.card = None;
+        self.removal = Removal::None;
+        cx.notify();
+    }
+
+    /// The slot New opens with: the next half hour.
+    #[must_use]
+    pub fn next_slot(&self) -> crate::event_form::Slot {
+        crate::event_form::Slot::next_half_hour(calendar::now().naive_local())
+    }
+
+    /// Opens the scheduling form on a new event in `slot`, a Teams meeting when `online` (New, its menu, a double click
+    /// on an empty half hour).
+    pub fn new_event(&mut self, slot: crate::event_form::Slot, online: bool, cx: &mut Context<Self>) {
+        let seed = crate::event_form::Seed::New { slot, online };
+        crate::event_form::open(
+            Arc::clone(&self.core),
+            Arc::clone(&self.trace),
+            seed,
+            self.saved(cx),
+            cx,
+        );
+    }
+
+    /// Opens the scheduling form on the event `id`, read whole first (its card's Edit, a double click on it).
+    pub fn edit_event(&mut self, id: String, cx: &mut Context<Self>) {
+        let reply = self.core.calendar_event(id);
+        self.card = None;
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let answer = reply.await;
+            let _ = this.update(cx, |view, cx| match answer {
+                Ok(full) => {
+                    let seed = crate::event_form::Seed::Change(Box::new(full));
+                    crate::event_form::open(
+                        Arc::clone(&view.core),
+                        Arc::clone(&view.trace),
+                        seed,
+                        view.saved(cx),
+                        cx,
+                    );
+                }
+                Err(teams_core::EngineError::Stopped) => {}
+                Err(_) => view.say(EVENT_UNREAD, cx),
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// What a save in the scheduling form tells this view: read the days shown again.
+    fn saved(&self, cx: &mut Context<Self>) -> crate::event_form::Saved {
+        let view = cx.entity().downgrade();
+        crate::event_form::Saved::new(move |cx| {
+            let _ = view.update(cx, |view, cx| {
+                view.read(true, cx);
+                cx.notify();
+            });
+        })
+    }
+
+    /// Sends the card's confirmed removal of its event: Cancel meeting, Delete or Remove from calendar.
+    pub fn remove_carded(&mut self, cx: &mut Context<Self>) {
+        let Some(shown) = &self.card else { return };
+        let event = &shown.event;
+        let write = if event.is_organizer && !event.attendees.is_empty() && !event.cancelled {
+            teams_core::EventWrite::Cancel {
+                id: event.id.clone(),
+                chat: event.meeting_chat.clone(),
+                message: None,
+            }
+        } else {
+            teams_core::EventWrite::Delete { id: event.id.clone() }
+        };
+        self.removal = Removal::Sending;
+        let reply = self.core.write_event(write);
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let answer = reply.await;
+            let _ = this.update(cx, |view, cx| {
+                view.removal = Removal::None;
+                match answer {
+                    Ok(_) => {
+                        view.card = None;
+                        view.read(true, cx);
+                    }
+                    Err(teams_core::EngineError::Stopped) => {}
+                    Err(_) => view.say(EVENT_NOT_REMOVED, cx),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -408,9 +506,21 @@ impl CalendarView {
     }
 }
 
-/// What New says: a meeting's creation was never captured.
-pub const NEW_UNAVAILABLE: &str =
-    "Scheduling a meeting from here isn't available yet. Schedule it in Teams on the web or in Outlook.";
+/// What Edit says when the event can't be read.
+pub const EVENT_UNREAD: &str = "The event couldn't be opened. Check the connection, then try again.";
+/// What the card says when its Cancel meeting or Delete didn't go through.
+pub const EVENT_NOT_REMOVED: &str = "The event couldn't be canceled or deleted. Check the connection, then try again.";
+
+/// Where the card's Cancel meeting, Delete or Remove from calendar stands.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Removal {
+    #[default]
+    None,
+    /// Asked: the card asks to confirm it.
+    Asked,
+    /// Confirmed: being sent.
+    Sending,
+}
 /// What Join with an ID says: joining by a meeting's id and passcode was never captured.
 pub const JOIN_ID_UNAVAILABLE: &str =
     "Joining by a meeting ID isn't available yet. Open the meeting from your calendar or its link instead.";
@@ -437,7 +547,7 @@ fn time_text(time: NaiveDateTime, cycle: HourCycle) -> String {
 }
 
 /// An hour's label in the gutter: "1 PM" or "13:00".
-fn hour_label(hour: u32, cycle: HourCycle) -> String {
+pub(crate) fn hour_label(hour: u32, cycle: HourCycle) -> String {
     match cycle {
         HourCycle::Twelve => {
             let shown = if hour % 12 == 0 { 12 } else { hour % 12 };

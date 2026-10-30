@@ -11,7 +11,7 @@ use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{Disableable as _, Sizable as _};
 use teams_core::{CalendarEvent, EventResponse};
 
-use super::{CalendarView, CalendarViewEvent, mix, time_text};
+use super::{CalendarView, CalendarViewEvent, Removal, mix, time_text};
 use crate::clock;
 use crate::icons::{Glyph, icon_button, selected_by};
 use crate::theme::{self, Palette};
@@ -85,6 +85,7 @@ impl CalendarView {
             text
         });
         let actions = self.card_actions(&event, joinable, palette, cx);
+        let manage = self.manage_actions(&event, palette, cx);
         let card = div()
             .debug_selector(|| "calendar-card".to_owned())
             .id("calendar-card")
@@ -151,7 +152,8 @@ impl CalendarView {
                     .overflow_hidden()
                     .child(preview)
             }))
-            .children(actions);
+            .children(actions)
+            .children(manage);
         Some(
             div()
                 .id("calendar-card-backdrop")
@@ -166,6 +168,99 @@ impl CalendarView {
                 .on_click(cx.listener(|this, _, _, cx| this.close_card(cx)))
                 .child(card),
         )
+    }
+
+    /// The card's Edit and its removal (Cancel meeting for the account's own meeting, Delete for its appointment,
+    /// Remove from calendar for a meeting its organizer cancelled), the removal confirmed first; none in the read-only
+    /// mode, none for someone else's meeting that still stands.
+    pub(super) fn manage_actions(
+        &self,
+        event: &Rc<CalendarEvent>,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> Option<gpui::Div> {
+        if self.core.read_only() {
+            return None;
+        }
+        let own = event.is_organizer;
+        let meeting = own && !event.attendees.is_empty() && !event.cancelled;
+        let removal = if meeting {
+            "Cancel meeting"
+        } else if own {
+            "Delete"
+        } else if event.cancelled {
+            "Remove from calendar"
+        } else {
+            return None;
+        };
+        let edit = (own && !event.cancelled).then(|| {
+            let id = event.id.clone();
+            selected_by(
+                "calendar-card-edit",
+                Button::new("calendar-card-edit")
+                    .icon(Glyph::PENCIL.icon())
+                    .label("Edit")
+                    .outline()
+                    .on_click(cx.listener(move |this, _, _, cx| this.edit_event(id.clone(), cx))),
+            )
+        });
+        let row = match self.removal {
+            Removal::None => div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .children(edit)
+                .child(div().flex_1())
+                .child(selected_by(
+                    "calendar-card-remove",
+                    Button::new("calendar-card-remove")
+                        .icon(if meeting { Glyph::CALENDAR_CANCEL } else { Glyph::TRASH }.icon())
+                        .label(removal)
+                        .ghost()
+                        .text_color(rgb(theme::DANGER))
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.removal = Removal::Asked;
+                            cx.notify();
+                        })),
+                )),
+            Removal::Asked | Removal::Sending => {
+                let question = if meeting {
+                    "Cancel this meeting? Everyone invited gets a cancellation."
+                } else {
+                    "Delete this event from your calendar?"
+                };
+                div()
+                    .debug_selector(|| "calendar-card-confirm".to_owned())
+                    .p_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .rounded_md()
+                    .bg(rgb(mix(palette.surface, theme::DANGER, 100)))
+                    .child(div().flex_1().text_sm().child(question))
+                    .child(selected_by(
+                        "calendar-card-keep",
+                        Button::new("calendar-card-keep")
+                            .label("Don't")
+                            .outline()
+                            .small()
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                this.removal = Removal::None;
+                                cx.notify();
+                            })),
+                    ))
+                    .child(selected_by(
+                        "calendar-card-remove-confirm",
+                        Button::new("calendar-card-remove-confirm")
+                            .label(removal)
+                            .danger()
+                            .small()
+                            .disabled(self.removal == Removal::Sending)
+                            .on_click(cx.listener(|this, _, _, cx| this.remove_carded(cx))),
+                    ))
+            }
+        };
+        Some(div().pt_2().border_t_1().border_color(rgb(palette.border)).child(row))
     }
 
     /// A meeting's card's actions: Join, Chat with participants, Copy link; and why Join isn't offered yet.

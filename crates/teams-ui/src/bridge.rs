@@ -25,7 +25,8 @@ use gpui::{AppContext as _, AsyncApp, Context, SharedString, Task};
 use teams_core::sync::{CatchUpReport, Synced};
 use teams_core::{
     Action, Availability, CalendarEvent, CallAction, CallId, ChatListing, EngineHandle, EngineRequests, Event,
-    FileStream, OwnStatus, Person, PictureBytes, Reply, Strip, Transient, TransientSent,
+    EventWrite, EventWritten, FileStream, FullEvent, Invitable, OwnStatus, Person, PictureBytes, Reply, Strip,
+    Transient, TransientSent,
 };
 use teams_store::{
     Conversation, Member, Message, MessagePage, OutboxEntry, PageCursor, Reaction, ReadHorizon, SearchHit, Team,
@@ -131,6 +132,27 @@ pub trait Core: Send + Sync + 'static {
         let _ = (start_ms, end_ms);
         Reply::ready(Ok(Vec::new()))
     }
+    /// One event of the account's calendar, read whole now: what the scheduling form opens on to change it
+    /// (`teams_core::calendar`). A fake core has none.
+    fn calendar_event(&self, id: String) -> Reply<FullEvent> {
+        let _ = id;
+        Reply::ready(Err(teams_core::EngineError::CalendarUnread))
+    }
+    /// Creates, changes, cancels or deletes an event of the account's calendar, through the outbox under the fence
+    /// (`teams_core::calendar`); only the user's Save, Cancel meeting or Delete asks for one. A fake core saves
+    /// nothing.
+    fn write_event(&self, write: EventWrite) -> Reply<EventWritten> {
+        Reply::ready(Err(teams_core::EngineError::EventNotSaved {
+            kind: write.kind(),
+            why: "nothing saves here".to_owned(),
+        }))
+    }
+    /// People the account knows whose name holds `query`, with their addresses: the attendee picker's suggestions. A
+    /// fake core knows nobody.
+    fn invitable(&self, query: String) -> Reply<Vec<Invitable>> {
+        let _ = query;
+        Reply::ready(Ok(Vec::new()))
+    }
 }
 
 impl Core for EngineRequests {
@@ -140,6 +162,18 @@ impl Core for EngineRequests {
 
     fn calendar(&self, start_ms: i64, end_ms: i64) -> Reply<Vec<CalendarEvent>> {
         EngineRequests::calendar(self, start_ms, end_ms)
+    }
+
+    fn calendar_event(&self, id: String) -> Reply<FullEvent> {
+        EngineRequests::calendar_event(self, id)
+    }
+
+    fn write_event(&self, write: EventWrite) -> Reply<EventWritten> {
+        EngineRequests::write_event(self, write)
+    }
+
+    fn invitable(&self, query: String) -> Reply<Vec<Invitable>> {
+        EngineRequests::invitable(self, query)
     }
 
     fn read_only(&self) -> bool {

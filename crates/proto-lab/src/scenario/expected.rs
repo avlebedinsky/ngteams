@@ -184,6 +184,25 @@ pub const REQUESTS: &[ExpectedRequest] = &[
                  account's own streams; the call scenarios read no call log",
     },
     ExpectedRequest {
+        class: "scheduling form's online meeting dropped",
+        hosts: TEAMS,
+        method: "PUT",
+        path: "/api/mt/part/*/beta/me/calendarEvents/schedulingService/delete",
+        reason: "the scheduling form, closing, deletes the online meeting it made when the form opened (by the \
+                 meeting's `update` link alone), even one its saved event already uses: the fence can't tie the \
+                 meeting to its event's attendees, so it stays denied, and `ab-meeting` keeps its meeting with its \
+                 event",
+    },
+    ExpectedRequest {
+        class: "Outlook calendar startup",
+        hosts: Hosts::Exact(&["outlook.office.com"]),
+        method: "POST",
+        path: "/owa/startupdata.ashx",
+        reason: "the calendar app is Outlook's, embedded: it starts by posting for its startup data, which no row of \
+                 Outlook's reads, so it stays denied and the app shows an error; `ab-meeting` changes and cancels its \
+                 meeting from the meeting's chat, never the calendar app",
+    },
+    ExpectedRequest {
         class: "file browser prewarm",
         hosts: Hosts::OneLabelUnder("sharepoint.com"),
         method: "POST",

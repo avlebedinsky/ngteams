@@ -35,6 +35,8 @@ pub enum WriteKind {
     /// in, resolved to a call this run's fence registered under the call registry's.
     CallFollowUp,
     Invite,
+    /// A calendar event created, changed, cancelled or deleted ([`Scope::New`] for a new one, [`Scope::Event`] for one
+    /// that exists): its invitation, update or cancellation reaches every attendee.
     Meeting,
     MemberChange,
     ChatCreate,
@@ -125,11 +127,28 @@ impl Mri {
         Self(mri.into())
     }
 
+    /// A participant known by a mail address alone: a calendar event's attendee or organizer, whom Exchange reaches by
+    /// address. Kept as `smtp:<address in lower case>`, a form no Teams MRI takes, so it matches only the roster's lab
+    /// addresses ([`crate::Roster::admits`]), never an MRI.
+    #[must_use]
+    pub fn mail(address: &str) -> Self {
+        Self(format!("{MAIL_PREFIX}{}", address.trim().to_lowercase()))
+    }
+
+    /// The address of a participant made by [`Mri::mail`].
+    #[must_use]
+    pub fn mail_address(&self) -> Option<&str> {
+        self.0.strip_prefix(MAIL_PREFIX)
+    }
+
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
+
+/// The prefix of a participant known by a mail address ([`Mri::mail`]).
+const MAIL_PREFIX: &str = "smtp:";
 
 impl fmt::Display for Mri {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -171,6 +190,9 @@ pub enum Scope {
         #[serde(skip)]
         joins: Option<String>,
     },
+    /// A calendar event of the account's calendar, by its id (`objectId`): a meeting whose attendees and organizer,
+    /// read fresh from the event, are its members (each by address, [`Mri::mail`]).
+    Event { id: String },
     /// Something the write creates: a new chat, call or meeting. It has no members to fetch yet: its participants are
     /// exactly the target's added participants. Only kinds that [create a target](WriteKind::creates_target) may use
     /// it; the fence denies any other kind on `New`.
@@ -188,6 +210,7 @@ impl fmt::Display for Scope {
             Self::Channel { team, channel } => write!(f, "channel {channel} of team {team}"),
             Self::Team { id } => write!(f, "team {id}"),
             Self::Call { id } => write!(f, "call {id}"),
+            Self::Event { id } => write!(f, "event {id}"),
             Self::CallOperation { operation, url, .. } => write!(f, "{operation} on the call at {url}"),
             Self::New => f.write_str("a new target"),
             Self::Account { mri } => write!(f, "account {mri}"),

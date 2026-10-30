@@ -6,10 +6,15 @@ use teams_fence::{Target, WritePermit};
 use crate::endpoint::{Endpoint, Method, Service};
 
 mod availability;
+mod calendar;
 mod call;
 mod chat;
 
 pub use availability::{ForceAvailability, ManualAvailability, SetEndpointAvailability};
+pub use calendar::{
+    CancelEvent, CreateEvent, CreateOnlineMeeting, DeleteEvent, EventAttendee, EventDraft, EventShowAs, Organizer,
+    UpdateEvent, ZonedTime,
+};
 pub use call::{
     AcceptCall, AcceptParts, AcknowledgeAcceptance, AcknowledgeMediaAnswer, AddParts, AddToCall, AnswerMedia,
     AnswerMediaParts, ApplyChannelParameters, AttachCall, AttachParts, CALL_START_URL, CALLING_BASE, CALLING_HOST,

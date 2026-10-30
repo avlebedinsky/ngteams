@@ -405,6 +405,145 @@ fn is_meeting_thread(id: &str) -> bool {
         && !id.contains([' ', '/', '?', '#'])
 }
 
+/// `GET v2.0/me/calendars/events/<id>?shouldDecryptData=true`: one event, as the web client reads it before it opens
+/// the scheduling form on it. Its answer is the event itself ([`EventRead::read_answer`]): what the form fills in from,
+/// and what a change sends back with the form's fields over it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EventRead {
+    id: String,
+}
+
+impl EventRead {
+    /// The read of the event `id`; `None` for an empty id.
+    #[must_use]
+    pub fn new(id: &str) -> Option<Self> {
+        (!id.trim().is_empty()).then(|| Self { id: id.to_owned() })
+    }
+
+    /// The event the answer `body` is.
+    ///
+    /// # Errors
+    /// [`CalendarAnswerError::Malformed`] unless it is an event object whose id is the one read (the answer may also
+    /// wrap it in `value`).
+    pub fn read_answer(&self, body: &[u8]) -> Result<FullEvent, CalendarAnswerError> {
+        let answer: Value = serde_json::from_slice(body).map_err(|_| CalendarAnswerError::Malformed)?;
+        let raw = match answer.get("value") {
+            Some(Value::Object(inner)) => inner.clone(),
+            _ => answer.as_object().cloned().ok_or(CalendarAnswerError::Malformed)?,
+        };
+        let event = CalendarEvent::of(&Value::Object(raw.clone())).ok_or(CalendarAnswerError::Malformed)?;
+        if event.id != self.id {
+            return Err(CalendarAnswerError::Malformed);
+        }
+        let body_html = raw
+            .get("bodyContent")
+            .or_else(|| raw.get("body").and_then(|body| body.get("content")))
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let reminder_minutes = raw
+            .get("isReminderSet")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+            .then(|| raw.get("reminderMinutesBeforeStart").and_then(Value::as_u64))
+            .flatten()
+            .and_then(|minutes| u32::try_from(minutes).ok());
+        let categories = raw
+            .get("categories")
+            .and_then(Value::as_array)
+            .map(|names| names.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+            .unwrap_or_default();
+        let optional = raw
+            .get("attendees")
+            .and_then(Value::as_array)
+            .map(|list| {
+                list.iter()
+                    .filter(|attendee| attendee.get("type").and_then(Value::as_str) == Some("Optional"))
+                    .filter_map(|attendee| {
+                        let inner = attendee.get("emailAddress").unwrap_or(attendee);
+                        inner.get("address").and_then(Value::as_str).map(str::to_lowercase)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        Ok(FullEvent {
+            event,
+            raw,
+            body_html,
+            reminder_minutes,
+            categories,
+            optional,
+        })
+    }
+}
+
+impl Read for EventRead {
+    fn service(&self) -> Service {
+        Service::MiddleTier
+    }
+
+    fn endpoint(&self) -> Endpoint {
+        Endpoint::new(["v2.0", "me", "calendars", "events", self.id.as_str()]).with_query("shouldDecryptData", "true")
+    }
+}
+
+/// One event as [`EventRead`] gave it: read as the calendar reads its events, the whole answer kept, and what the
+/// scheduling form shows beyond the calendar's fields.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FullEvent {
+    pub event: CalendarEvent,
+    /// The answer as it came: a change sends it back with the form's fields over it.
+    pub raw: serde_json::Map<String, Value>,
+    /// Its text as HTML (`bodyContent`), when the answer has it.
+    pub body_html: Option<String>,
+    /// Minutes before its start its reminder goes off, when one is set.
+    pub reminder_minutes: Option<u32>,
+    pub categories: Vec<String>,
+    /// The addresses (lower case) of the attendees it invites as optional.
+    pub optional: Vec<String>,
+}
+
+/// `GET beta/me/calendarEvents/timeZoneSettingsWithOffset?timezone=<IANA name>`: the desktop's time zone as Exchange
+/// names it, which the web client reads before it writes an event (`eventTimeZone`). Its answer is `{"timeZone",
+/// "utcOffsetInMinutes", "local": {"timeZone", …}, "remote": {…}}`; the event carries `local`'s name
+/// ([`TimeZoneSettings::read_answer`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TimeZoneSettings {
+    zone: String,
+}
+
+impl TimeZoneSettings {
+    /// The read for the IANA zone `zone` (`Europe/Istanbul`).
+    #[must_use]
+    pub fn new(zone: &str) -> Self {
+        Self { zone: zone.to_owned() }
+    }
+
+    /// The zone's Exchange name: `local.timeZone`, else the top-level `timeZone`.
+    #[must_use]
+    pub fn read_answer(body: &[u8]) -> Option<String> {
+        let answer: Value = serde_json::from_slice(body).ok()?;
+        answer
+            .get("local")
+            .and_then(|local| local.get("timeZone"))
+            .or_else(|| answer.get("timeZone"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+    }
+}
+
+impl Read for TimeZoneSettings {
+    fn service(&self) -> Service {
+        Service::MiddleTier
+    }
+
+    fn endpoint(&self) -> Endpoint {
+        Endpoint::new(["beta", "me", "calendarEvents", "timeZoneSettingsWithOffset"])
+            .with_query("timezone", self.zone.as_str())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

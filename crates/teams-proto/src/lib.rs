@@ -71,7 +71,8 @@ mod write;
 pub use ams::{MessagePicture, PastedFormat, PastedPicture};
 pub use calendar::{
     Attendee, CALENDAR_VIEW_PATH, CalendarAnswer, CalendarAnswerError, CalendarEvent, CalendarView, EventKind,
-    EventTime, FloatingTime, MAX_CALENDAR_WINDOW_MS, Response as EventResponse, ShowAs, join_url_chat,
+    EventRead, EventTime, FloatingTime, FullEvent, MAX_CALENDAR_WINDOW_MS, Response as EventResponse, ShowAs,
+    TimeZoneSettings, join_url_chat,
 };
 pub use client::{Client, PostReadError, Response, Transport, WriteError};
 pub use emoticon::{MAX_ANIMATION, ReactionAnimation};
@@ -122,4 +123,8 @@ pub use write::{
     SendMessage, SetEndpointAvailability, SetReaction, StartCall, StartParts, TEAMS_ECHO_BOT_MRI, TEST_CALL_SCENARIO,
     TargetMismatch, Typing, UpdateEndpointMetadata, UpdateEndpointState, UpdateMediaDescriptions,
     UpdateParticipantProperties, VoiceConsent, Wire,
+};
+pub use write::{
+    CancelEvent, CreateEvent, CreateOnlineMeeting, DeleteEvent, EventAttendee, EventDraft, EventShowAs, Organizer,
+    UpdateEvent, ZonedTime,
 };

@@ -283,6 +283,10 @@ fails the run.
   test a mentions everyone, picked from the picker, its post held back by the probe's forced deny and read; only when
   the lab rule reads it as a message to the chat adding nobody does a send a second one, which b must show
   (`docs/protocol/chat.md`, "A mention of everyone").
+- `ab-meeting`: account a alone, after the enforcement test: a schedules a Teams meeting with b from the scheduling
+  form (the new-meeting deep link, b picked in its attendees), then opens it from the meeting's chat (Details),
+  changes its title and sends the update, and cancels it; each write judged by the meeting's attendees, read fresh
+  from the middle tier (`docs/protocol/calendar.md`, "Writing an event").
 - `own-presence-activity`, `-endpoint`, `-both`, `-manual-held`, `-manual`: account a alone, as `ab-trouter`. Its
   own availability reaches nobody, so it passes; each run holds back with a labelled forced deny what it leaves out:
   `user.activity` alone, UPS's endpoint `PUT` alone, both, then a manual status (Busy, Do not disturb, Away,
@@ -499,8 +503,14 @@ between them) beside the page shown, each a set of titled boxes of rows. The rai
 to the chats) takes their place the same way, as Teams' calendar app: the month and "My calendars" in its own pane, the
 toolbar's Today, previous and next (Left, Right and T while it has the focus) and views (Day, Work week, Week, Month;
 Ctrl+Alt+1–4), the account's events read from the middle tier's calendar view, and an event's card (Chat with
-participants, Copy link, and Join once a call runs in the meeting's chat); New and "Join with an ID" say they aren't
-available yet. The settings (the selected chat, typing, read
+participants, Copy link, and Join once a call runs in the meeting's chat; for the account's own events Edit, and
+Cancel meeting, Delete or Remove from calendar, each confirmed). New event (its menu: an event or a Teams meeting), a
+double click on an empty half hour of the grid, and an event's Edit (or a double click on it) open the scheduling form
+in a window of its own ("New event - Calendar"): the title, required and optional attendees (people the account knows
+by name, or any address), the date and times or all day, the location, the Microsoft Teams meeting switch, the text,
+Show as, the reminder, categories and private, the day beside it with the event's block to drag; Save (Send, Send
+update; Ctrl+S) writes through the engine and the calendar reads its days again (`docs/protocol/calendar.md`, "Writing
+an event"). "Join with an ID" says it isn't available yet. The settings (the selected chat, typing, read
 receipts, notifications, the idle time, the manual status, the log's level, the theme, the font and the
 time format, the system's clock or a 12-hour or 24-hour one) live in
 `<data_dir>/ui/<alias>.toml` (`0600`, its directory `0700`); a file that can't be read gives the defaults, a bad value keeps its default, and either is

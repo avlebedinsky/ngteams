@@ -51,6 +51,7 @@ pub mod sync;
 pub mod teams;
 pub mod thumbnails;
 
+pub use calendar::{EventWrite, EventWritten, Invitable};
 pub use calling::{
     CallAction, CallActionError, CallMedia, CallParticipant, CallParts, CallStatus, CallVideo, CallView, GROUP_SLOTS,
     IncomingCall, Relay, VideoOutput,
@@ -82,7 +83,8 @@ pub use teams::{ChatListing, READING_TEAMS, TEAMS_MAX_AGE, TEAMS_RETRY, TeamsRea
 /// A call, how it ended and how its services ended it, as [`Event::Call`] and [`Event::RingEnded`] tell them.
 pub use teams_call::{CallError, CallId, End, Identity, RemoteEnd};
 pub use teams_proto::{
-    Attendee, CalendarEvent, EventKind, EventResponse, EventTime, FloatingTime, ShowAs, join_url_chat,
+    Attendee, CalendarEvent, EventAttendee, EventDraft, EventKind, EventResponse, EventShowAs, EventTime, FloatingTime,
+    FullEvent, Organizer, ShowAs, ZonedTime, join_url_chat,
 };
 /// How a registration of the push channel's endpoint went, as [`Event::Registration`] tells it.
 pub use teams_trouter::RegistrationReport;

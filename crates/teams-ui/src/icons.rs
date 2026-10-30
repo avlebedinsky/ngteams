@@ -12,16 +12,32 @@ use gpui_component::button::{Button, ButtonVariants as _};
 pub struct Glyph(&'static [u8]);
 
 impl Glyph {
+    pub const ACCESSIBILITY: Self = Self(include_bytes!("../assets/icons/accessibility.svg"));
+    pub const ALARM: Self = Self(include_bytes!("../assets/icons/alarm-clock.svg"));
     pub const ARROW_DOWN: Self = Self(include_bytes!("../assets/icons/arrow-down.svg"));
+    pub const ARROW_RIGHT: Self = Self(include_bytes!("../assets/icons/arrow-right.svg"));
     pub const ARROW_UP: Self = Self(include_bytes!("../assets/icons/arrow-up.svg"));
     pub const BELL: Self = Self(include_bytes!("../assets/icons/bell.svg"));
     pub const BOT: Self = Self(include_bytes!("../assets/icons/bot.svg"));
     pub const BUG: Self = Self(include_bytes!("../assets/icons/bug.svg"));
     pub const CALENDAR: Self = Self(include_bytes!("../assets/icons/calendar.svg"));
     pub const CALENDAR_ADD: Self = Self(include_bytes!("../assets/icons/calendar-plus.svg"));
+    pub const CALENDAR_CANCEL: Self = Self(include_bytes!("../assets/icons/calendar-x.svg"));
+    pub const CALENDAR_CLOCK: Self = Self(include_bytes!("../assets/icons/calendar-clock.svg"));
     pub const CALENDAR_DAYS: Self = Self(include_bytes!("../assets/icons/calendar-days.svg"));
     pub const CALENDAR_TODAY: Self = Self(include_bytes!("../assets/icons/calendar-1.svg"));
     pub const CHECK: Self = Self(include_bytes!("../assets/icons/check.svg"));
+    pub const IMAGE: Self = Self(include_bytes!("../assets/icons/image.svg"));
+    pub const LOCK: Self = Self(include_bytes!("../assets/icons/lock.svg"));
+    pub const LOCK_OPEN: Self = Self(include_bytes!("../assets/icons/lock-open.svg"));
+    pub const NOTES: Self = Self(include_bytes!("../assets/icons/notebook-text.svg"));
+    pub const PAPERCLIP: Self = Self(include_bytes!("../assets/icons/paperclip.svg"));
+    pub const PRINTER: Self = Self(include_bytes!("../assets/icons/printer.svg"));
+    pub const SAVE: Self = Self(include_bytes!("../assets/icons/save.svg"));
+    pub const SUN: Self = Self(include_bytes!("../assets/icons/sun.svg"));
+    pub const TAG: Self = Self(include_bytes!("../assets/icons/tag.svg"));
+    pub const TEXT_FORMAT: Self = Self(include_bytes!("../assets/icons/type.svg"));
+    pub const USER_COG: Self = Self(include_bytes!("../assets/icons/user-cog.svg"));
     /// A ticked box (a calendar shown in the calendar's list).
     pub const CHECKBOX: Self = Self(include_bytes!("../assets/icons/square-check.svg"));
     pub const CHEVRON_DOWN: Self = Self(include_bytes!("../assets/icons/chevron-down.svg"));

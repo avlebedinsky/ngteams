@@ -34,7 +34,8 @@
 //!
 //! For a run that writes, [`HttpFence::with_credentials`] hands the live membership source the lab account's chat
 //! service credential: [`HttpFence::handle`] offers every paused request's URL and headers, from the raw event, to
-//! [`ChatCredential::from_request`] before it builds the [`PausedRequest`], which holds every header's name but the
+//! [`ChatCredential::from_request`] (and its middle-tier token, for a calendar event's members, to
+//! [`MiddleTierCredential::from_request`]) before it builds the [`PausedRequest`], which holds every header's name but the
 //! value only of the method overrides the classifier reads ([`OVERRIDE_HEADERS`]), never a token or a cookie. The raw
 //! event, headers included, has been handed to the run's event watchers and offered to the capture recorder before
 //! that.
@@ -46,8 +47,8 @@ use serde_json::{Value, json};
 use teams_auth::redirect::{RedirectError, RedirectUri};
 use teams_auth::secrets::Secret;
 use teams_fence::{
-    AllowedRecord, Channel, ChatCredential, Fence, LiveMembershipSource, MembershipSource, OVERRIDE_HEADERS,
-    RequestOutcome, RequestRecord,
+    AllowedRecord, Channel, ChatCredential, Fence, LiveMembershipSource, MembershipSource, MiddleTierCredential,
+    OVERRIDE_HEADERS, RequestOutcome, RequestRecord,
 };
 use tokio::sync::mpsc;
 use url::Url;
@@ -433,11 +434,16 @@ impl HttpFence {
         let (Some(url), Some(headers)) = (request["url"].as_str(), request["headers"].as_object()) else {
             return;
         };
-        let headers = headers
+        let headers: Vec<(&str, &str)> = headers
             .iter()
-            .filter_map(|(name, value)| Some((name.as_str(), value.as_str()?)));
-        if let Some(credential) = ChatCredential::from_request(url, headers) {
+            .filter_map(|(name, value)| Some((name.as_str(), value.as_str()?)))
+            .collect();
+        if let Some(credential) = ChatCredential::from_request(url, headers.iter().copied()) {
             live.set_credential(credential);
+        }
+        // a calendar event's members are read from the middle tier, with the page's own token for it
+        if let Some(credential) = MiddleTierCredential::from_request(url, headers.iter().copied()) {
+            live.set_middle_tier_credential(credential);
         }
     }
 

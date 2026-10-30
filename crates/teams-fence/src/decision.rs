@@ -47,6 +47,9 @@ pub struct Roster {
     lab: BTreeSet<Mri>,
     services: BTreeSet<Mri>,
     call_guests: BTreeSet<Mri>,
+    /// The lab accounts' mail addresses (their UPNs), in lower case: a calendar event's attendees are judged by them
+    /// ([`Mri::mail`]).
+    lab_mail: BTreeSet<String>,
 }
 
 impl Roster {
@@ -62,7 +65,19 @@ impl Roster {
             lab: lab.into_iter().collect(),
             services: services.into_iter().collect(),
             call_guests: BTreeSet::new(),
+            lab_mail: BTreeSet::new(),
         }
+    }
+
+    /// This roster with `addresses` as the lab accounts' mail addresses. Tests only (`test-support`).
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn with_lab_mail<'a>(mut self, addresses: impl IntoIterator<Item = &'a str>) -> Self {
+        self.lab_mail = addresses
+            .into_iter()
+            .map(|address| address.trim().to_lowercase())
+            .collect();
+        self
     }
 
     /// This roster with `guests` as its call guests. Tests only (`test-support`).
@@ -90,13 +105,24 @@ impl Roster {
         );
         Self {
             call_guests: config.call_guests().iter().map(|guest| Mri::new(&guest.mri)).collect(),
+            lab_mail: config
+                .accounts()
+                .iter()
+                .map(|account| account.upn.trim().to_lowercase())
+                .collect(),
             ..roster
         }
     }
 
+    /// Whether `mri` is a lab account or an approved service, by exact MRI, or a participant known by address
+    /// ([`Mri::mail`]) whose address is a lab account's.
     #[must_use]
     pub fn admits(&self, mri: &Mri) -> bool {
-        self.lab.contains(mri) || self.services.contains(mri)
+        self.lab.contains(mri)
+            || self.services.contains(mri)
+            || mri
+                .mail_address()
+                .is_some_and(|address| self.lab_mail.contains(address))
     }
 
     /// Whether `mri` may take part in a call write: [`Self::admits`] it, or it is a call guest.
@@ -968,7 +994,9 @@ impl Fence {
             return Verdict::Deny(DenyReason::NoMembers);
         }
         let participants: BTreeSet<&Mri> = current.iter().chain(target.added()).collect();
-        if participants.is_empty() {
+        // a new calendar event inviting nobody reaches nobody: an appointment of the account's own
+        let appointment = !fetched && target.kind() == WriteKind::Meeting;
+        if participants.is_empty() && !appointment {
             return Verdict::Deny(DenyReason::NoMembers);
         }
         self.admits_all(participants.into_iter(), is_call_write(target))

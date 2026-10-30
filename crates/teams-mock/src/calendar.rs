@@ -134,6 +134,9 @@ pub(crate) fn calendar_view(state: &State, request: &Request) -> Option<Response
     if token.and_then(|token| state.account_by_token(token)).is_none() {
         return Some(status(401));
     }
+    if let Some(answer) = writes(request, rest) {
+        return Some(answer);
+    }
     let query: Vec<(String, String)> = request.url.query_pairs().into_owned().collect();
     let window = match query.as_slice() {
         [(start_name, start), (end_name, end), (decrypt, yes)]
@@ -156,6 +159,68 @@ pub(crate) fn calendar_view(state: &State, request: &Request) -> Option<Response
             }),
         ),
         _ => status(404),
+    })
+}
+
+/// The scheduling form's requests (`docs/protocol/calendar.md`, "Writing an event"), answered as the service did and
+/// kept nowhere: an event's creation (its body's event back with a made-up id), a change, a cancellation and a delete
+/// (`204`), one event read whole (from the made-up weeks around now), a Teams meeting's online meeting and the time
+/// zone's name. `None` for any other request.
+fn writes(request: &Request, rest: &[String]) -> Option<ResponseTemplate> {
+    let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
+    let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
+    Some(match (request.method.as_str(), rest.as_slice()) {
+        ("POST", ["v2.0", "me", "calendars", "default", "events"]) => {
+            let mut event = body.get("calendarEvent").cloned().unwrap_or_else(|| json!({}));
+            event["objectId"] = json!("AAMkMadeUpCreated");
+            answer(
+                201,
+                &json!({"type": "Microsoft.SkypeSpaces.MiddleTier.Models.CalendarEvent", "value": [event]}),
+            )
+        }
+        ("PUT", ["v2.0", "me", "calendars", "events", _] | ["v2.0", "me", "calendars", "events", _, "cancel"])
+        | ("DELETE", ["v2.0", "me", "calendars", "events", _]) => status(204),
+        ("GET", ["v2.0", "me", "calendars", "events", id]) => {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| i64::try_from(since.as_millis()).unwrap_or(0));
+            let start = now.div_euclid(DAY_MS) * DAY_MS - 35 * DAY_MS;
+            match events(start, start + 70 * DAY_MS)
+                .into_iter()
+                .find(|event| event["objectId"] == *id)
+            {
+                Some(mut event) => {
+                    event["bodyContentType"] = json!("html");
+                    event["bodyContent"] = json!("<div>Made-up notes</div>");
+                    event["isReminderSet"] = json!(true);
+                    event["reminderMinutesBeforeStart"] = json!(15);
+                    answer(200, &event)
+                }
+                None => status(404),
+            }
+        }
+        (
+            "POST",
+            [
+                "beta",
+                "me",
+                "calendarEvents",
+                "privateMeeting",
+                "schedulingService",
+                "create",
+            ],
+        ) => answer(
+            201,
+            &json!({"value": {
+                "groupContext": {"threadId": "19:meeting_MadeUpNewMeeting@thread.v2"},
+                "links": {"join": "https://teams.microsoft.com/l/meetup-join/19%3ameeting_MadeUpNewMeeting%40thread.v2/0"},
+            }}),
+        ),
+        ("GET", ["beta", "me", "calendarEvents", "timeZoneSettingsWithOffset"]) => answer(
+            200,
+            &json!({"timeZone": "UTC", "local": {"timeZone": "UTC", "utcOffsetInMinutes": 0}}),
+        ),
+        _ => return None,
     })
 }
 

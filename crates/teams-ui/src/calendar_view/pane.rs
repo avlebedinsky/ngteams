@@ -10,9 +10,7 @@ use gpui_component::Sizable as _;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 
-use super::{
-    ADD_CALENDAR_UNAVAILABLE, CalendarView, JOIN_ID_UNAVAILABLE, NEW_UNAVAILABLE, PANE_WIDTH, Toggle, separator,
-};
+use super::{ADD_CALENDAR_UNAVAILABLE, CalendarView, JOIN_ID_UNAVAILABLE, PANE_WIDTH, Toggle, separator};
 use crate::calendar::{self, Mode};
 use crate::icons::{Glyph, icon_button, selected_by};
 use crate::theme::Palette;
@@ -547,17 +545,48 @@ impl CalendarView {
                     .rounded_l_md()
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .child(Glyph::CALENDAR_ADD.icon().size(px(16.0)))
-                    .child("New")
-                    .on_click(cx.listener(|this, _, _, cx| this.say(NEW_UNAVAILABLE, cx))),
+                    .child("New event")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let slot = this.next_slot();
+                        this.new_event(slot, false, cx);
+                    })),
             )
-            .child(
-                part("calendar-new-more")
-                    .px_2()
-                    .rounded_r_md()
-                    .child(Glyph::CHEVRON_DOWN.icon().size(px(14.0)))
-                    .on_click(cx.listener(|this, _, _, cx| this.say(NEW_UNAVAILABLE, cx))),
-            )
+            .child(self.new_menu(palette, cx))
             .into_any_element()
+    }
+
+    /// The split New's menu: a new event, or a new Teams meeting.
+    fn new_menu(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let view = cx.entity().downgrade();
+        selected_by(
+            "calendar-new-more",
+            Button::new("calendar-new-more")
+                .h(px(32.0))
+                .px_2()
+                .rounded_r_md()
+                .bg(rgb(palette.brand))
+                .text_color(rgb(palette.on_brand))
+                .tooltip("More ways to schedule")
+                .child(Glyph::CHEVRON_DOWN.icon().size(px(14.0)))
+                .dropdown_menu(move |menu, _, _| {
+                    menu.min_w(px(200.0))
+                        .item(new_item(
+                            view.clone(),
+                            "calendar-new-event",
+                            Glyph::CALENDAR,
+                            "Event",
+                            false,
+                        ))
+                        .item(new_item(
+                            view.clone(),
+                            "calendar-new-meeting",
+                            Glyph::VIDEO,
+                            "Teams meeting",
+                            true,
+                        ))
+                }),
+        )
+        .into_any_element()
     }
 
     /// What a control that can't act yet says, with its close.
@@ -644,4 +673,29 @@ impl CalendarView {
                 .child(self.month_grid("calendar-picker", month, false, true, palette, cx)),
         )
     }
+}
+
+/// A row of New's menu: a new event, or a Teams meeting (`online`), at the next half hour.
+fn new_item(
+    view: gpui::WeakEntity<CalendarView>,
+    id: &'static str,
+    glyph: Glyph,
+    label: &'static str,
+    online: bool,
+) -> PopupMenuItem {
+    PopupMenuItem::element(move |_, _| {
+        div()
+            .debug_selector(move || id.to_owned())
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(glyph.icon().size(px(14.0)))
+            .child(label)
+    })
+    .on_click(move |_, _, cx: &mut App| {
+        let _ = view.update(cx, |view, cx| {
+            let slot = view.next_slot();
+            view.new_event(slot, online, cx);
+        });
+    })
 }

@@ -50,11 +50,11 @@ use teams_ui::VideoFeed;
 use teams_ui::call_stage::CallStage;
 use teams_ui::chat_view::{Item, MessageAction};
 use teams_ui::compose::Compose;
-use teams_ui::picture_viewer;
 use teams_ui::settings_view::Page;
 use teams_ui::shell::Shell;
 use teams_ui::view::Root;
 use teams_ui::window::KitRoot;
+use teams_ui::{event_form, picture_viewer};
 use tokio::sync::broadcast;
 use ui_sandbox::{NIRI_FULL_WINDOW, Running, Sandbox, SandboxOptions, SandboxResult, sandbox_or_skip};
 
@@ -77,7 +77,7 @@ const SETTLE: Duration = Duration::from_millis(1500);
 type Step = (&'static str, fn(&Entity<Shell>, &mut Window, &mut App));
 
 /// The tour.
-const STEPS: [Step; 49] = [
+const STEPS: [Step; 51] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -315,9 +315,40 @@ const STEPS: [Step; 49] = [
             model.change(|settings| settings.appearance.theme = teams_ui::theme::DARK_KEY, cx);
         });
     }),
+    // the calendar's New: the scheduling form in a window of its own ("New event - Calendar"), at the next half hour,
+    // the day beside it with the new event's block, in Teams Dark as the user's screenshot has it
+    ("event-form-dark", |shell, _, cx| {
+        let calendar = shell.read(cx).calendar_view().clone();
+        calendar.update(cx, |calendar, cx| {
+            let slot = calendar.next_slot();
+            calendar.new_event(slot, false, cx);
+        });
+    }),
+    // filled in: a title, b invited and c as optional, a Teams meeting, a line of text
+    ("event-form-filled-dark", |_, _, cx| {
+        let (Some(form), Some(handle)) = (event_form::shown(cx), event_form::window(cx)) else {
+            say("no scheduling form");
+            return;
+        };
+        let _ = handle.update(cx, |_, window, cx| {
+            form.update(cx, |form, cx| {
+                form.fill_in(
+                    "Planning",
+                    &[
+                        ("bot-b@lab.example.com", "Bot B", true),
+                        ("bot-c@lab.example.com", "Bot C", false),
+                    ],
+                    "Agenda: the next milestone.",
+                    window,
+                    cx,
+                );
+            });
+        });
+    }),
     // two messages b sent in the a–b–c chat, forwarded to a by the outsider (`seed_forwards`): each in Teams' card
     // under the arrow, b's avatar and name and the original's time, the second's picture drawn in it
     ("chat-forward", |shell, window, cx| {
+        event_form::close(cx);
         shell.update(cx, |shell, cx| shell.open_chat(AX_CHAT.to_owned(), window, cx));
     }),
     ("chat-forward-dark", |shell, _, cx| {

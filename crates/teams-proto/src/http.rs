@@ -100,9 +100,9 @@ use teams_auth::secrets::{Secret, SecretStore};
 use teams_auth::session::Session;
 use teams_auth::token::{SPACES_RESOURCE, TokenError, retry_after};
 use teams_fence::{
-    AFD_HOSTS, AllowedRecord, Channel, ChatCredential, Contact, CredentialFuture, CredentialSource, Fence, Mri,
-    PendingAnswer, PendingStart, Policy, Request as FenceRequest, RequestOutcome, RequestRecord, WritePermit,
-    chat_service_path, contacting,
+    AFD_HOSTS, AllowedRecord, Channel, ChatCredential, Contact, CredentialFuture, CredentialSource, Fence,
+    MiddleTierCredential, MiddleTierFuture, Mri, PendingAnswer, PendingStart, Policy, Request as FenceRequest,
+    RequestOutcome, RequestRecord, WritePermit, chat_service_path, contacting,
 };
 use url::Url;
 
@@ -1351,8 +1351,8 @@ impl<C: Credentials> Transport for HttpTransport<C> {
         let wire = write.wire().ok_or(HttpError::NoRoute)?;
         let service = wire.service();
         match service {
-            // the chat service's writes, and UPS's: the account's own availability
-            Service::ChatService | Service::Presence => {}
+            // the chat service's writes, UPS's (the account's own availability) and the middle tier's (its calendar)
+            Service::ChatService | Service::Presence | Service::MiddleTier => {}
             _ => return Err(HttpError::NoRoute),
         }
         let url = self.url_for(service, wire.endpoint())?;
@@ -1400,6 +1400,16 @@ impl<C: Credentials> CredentialSource for HttpTransport<C> {
             let refused = Secret::new(rejected.expose_token());
             let token = self.credentials.bearer_rejected(IC3_AUDIENCE, &refused).await.ok()?;
             ChatCredential::bearer(self.chat_base.as_str(), token.expose())
+        })
+    }
+
+    /// A calendar event's members are read with the transport's middle-tier base and the account's token for it, as
+    /// its calendar read is; none without a middle-tier base.
+    fn middle_tier(&self) -> MiddleTierFuture<'_> {
+        Box::pin(async move {
+            let base = self.middle_tier.as_ref()?;
+            let token = self.credentials.bearer(MIDDLE_TIER_AUDIENCE).await.ok()?;
+            MiddleTierCredential::bearer(base.as_str(), token.expose())
         })
     }
 }

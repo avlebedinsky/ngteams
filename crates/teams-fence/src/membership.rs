@@ -41,6 +41,10 @@ use zeroize::Zeroizing;
 use crate::decision::{Fence, FetchFailure, Membership, MembershipFuture, MembershipSource, PartialReason};
 use crate::target::{Mri, Scope};
 
+mod event;
+
+pub use event::{MiddleTierCredential, parse_event};
+
 /// The hosts the chat service is reached on through Azure Front Door, as `https://<host>/api/chatsvc/<region>/`: the
 /// commercial cloud's two Teams origins.
 pub const AFD_HOSTS: [&str; 2] = ["teams.microsoft.com", "teams.cloud.microsoft"];
@@ -260,8 +264,11 @@ fn is_token(token: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
 }
 
-/// The future of a [`CredentialSource`]'s credential.
+/// The future of a [`CredentialSource`]'s chat credential.
 pub type CredentialFuture<'a> = Pin<Box<dyn Future<Output = Option<ChatCredential>> + Send + 'a>>;
+
+/// The future of a [`CredentialSource`]'s middle-tier credential.
+pub type MiddleTierFuture<'a> = Pin<Box<dyn Future<Output = Option<MiddleTierCredential>> + Send + 'a>>;
 
 /// Where a native client's live read takes its credential from, fresh for every read: the account's own `ic3` token as
 /// its session has it now, and the chat base its region gives ([`ChatCredential::bearer`]). `None` when there is no
@@ -281,6 +288,12 @@ pub trait CredentialSource: Send + Sync {
     /// none to give. By default there is none, and the read stays refused.
     fn credential_rejected<'a>(&'a self, rejected: &'a ChatCredential) -> CredentialFuture<'a> {
         let _ = rejected;
+        Box::pin(async { None })
+    }
+
+    /// The middle-tier credential to read a calendar event's members with now ([`Scope::Event`]); by default none,
+    /// and such a read is [`PartialReason::NoCredential`].
+    fn middle_tier(&self) -> MiddleTierFuture<'_> {
         Box::pin(async { None })
     }
 }
@@ -317,6 +330,8 @@ pub struct LiveSourceError(#[source] reqwest::Error);
 pub struct LiveMembershipSource {
     client: reqwest::Client,
     credential: Mutex<Credential>,
+    /// The middle-tier credential a page's request gave ([`Self::set_middle_tier_credential`]), for an event's read.
+    middle_tier: Mutex<Option<MiddleTierCredential>>,
     /// How long a group or meeting chat's whole read may take, its credential and renewal included ([`FETCH_TIMEOUT`];
     /// shorter in tests).
     deadline: Duration,
@@ -355,6 +370,7 @@ impl LiveMembershipSource {
         Ok(Self {
             client: client(https_only)?,
             credential: Mutex::new(Credential::None),
+            middle_tier: Mutex::new(None),
             deadline: FETCH_TIMEOUT,
             #[cfg(feature = "test-support")]
             mock_origin: None,
@@ -392,6 +408,42 @@ impl LiveMembershipSource {
     /// a native client's own token, renewed as its session renews it.
     pub fn set_credential_source(&self, source: Arc<dyn CredentialSource>) {
         *self.credential.lock().unwrap_or_else(PoisonError::into_inner) = Credential::Source(source);
+    }
+
+    /// Uses `credential` for every calendar event's read from now on (the newest one wins): a lab page's middle-tier
+    /// token. A native client's comes from its [`CredentialSource`] instead.
+    pub fn set_middle_tier_credential(&self, credential: MiddleTierCredential) {
+        *self.middle_tier.lock().unwrap_or_else(PoisonError::into_inner) = Some(credential);
+    }
+
+    /// The calendar event `id`'s membership ([`parse_event`]): read once, within this source's deadline, with the
+    /// middle-tier credential set or the credential source's.
+    async fn event(&self, id: &str) -> Membership {
+        let fixed = self.middle_tier.lock().unwrap_or_else(PoisonError::into_inner).clone();
+        let read = async {
+            let credential = match (fixed, self.current()) {
+                (Some(credential), _) => credential,
+                (None, Credential::Source(source)) => match source.middle_tier().await {
+                    Some(credential) => credential,
+                    None => return Membership::Partial(PartialReason::NoCredential),
+                },
+                (None, _) => return Membership::Partial(PartialReason::NoCredential),
+            };
+            let origin = credential.origin();
+            #[cfg(feature = "test-support")]
+            let origin = self.mock_origin.clone().unwrap_or(origin);
+            let Some(url) = credential.event_url(&origin, id) else {
+                return Membership::Partial(MALFORMED);
+            };
+            match event::fetch(&self.client, url, &credential).await {
+                Ok(body) => serde_json::from_slice::<Value>(&body)
+                    .map_or(Membership::Partial(MALFORMED), |answer| parse_event(id, &answer)),
+                Err(reason) => Membership::Partial(reason),
+            }
+        };
+        tokio::time::timeout(self.deadline, read)
+            .await
+            .unwrap_or(Membership::Partial(PartialReason::FetchFailed(FetchFailure::Timeout)))
     }
 
     /// Whether a credential or a credential source has been set.
@@ -543,10 +595,11 @@ impl LiveMembershipSource {
     /// will be denied.
     #[must_use]
     pub fn reads_in_full(&self, scope: &Scope) -> bool {
-        let Scope::Conversation { id } = scope else {
-            return false;
-        };
-        is_chat_id(id)
+        match scope {
+            Scope::Conversation { id } => is_chat_id(id),
+            Scope::Event { id } => !id.is_empty(),
+            _ => false,
+        }
     }
 }
 
@@ -559,6 +612,7 @@ impl MembershipSource for LiveMembershipSource {
                     None if is_group_chat_id(id) || is_meeting_chat_id(id) => self.group(id).await,
                     None => Membership::Partial(PartialReason::Unsupported),
                 },
+                Scope::Event { id } if !id.is_empty() => self.event(id).await,
                 _ => Membership::Partial(PartialReason::Unsupported),
             }
         })

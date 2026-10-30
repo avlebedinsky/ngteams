@@ -237,6 +237,7 @@ fn forced_and_policy(name: ScenarioName, nonce: &str) -> Result<Option<(Vec<Forc
     Ok(Some(match name {
         ScenarioName::Load => return Ok(None),
         ScenarioName::AbChat | ScenarioName::AbChatFull => (probe_rules(Some(&probe))?, ab_chat::policy(ab)?),
+        ScenarioName::AbMeeting => (probe_rules(Some(&probe))?, proto_lab::scenario::ab_meeting::policy(ab)?),
         ScenarioName::AbTrouter => (
             probe_rules(Some(&probe))?,
             ab_trouter::trouter_policy(ab_trouter::Activity::Reported, ab)?,
