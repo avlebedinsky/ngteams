@@ -845,9 +845,9 @@ fn apply_sending(video: &mut Video) {
         encoding.max_bitrate = Some(u64::from(video.settings.max_bitrate));
         encoding.max_framerate = Some(f64::from(video.settings.fps));
     }
-    // the picture keeps the size the call sends (`MaxSize`): short of bandwidth or of encoder, frames are dropped
-    // rather than the picture scaled down (libwebrtc's own scaler halves it eagerly)
-    parameters.set_degradation_preference(DegradationPreference::MaintainResolution);
+    // short of bandwidth or of encoder, both the frame rate and the size give a little, as Chrome's camera tracks do:
+    // keeping the size alone dropped about a quarter of a movie's frames in software (a choppy picture)
+    parameters.set_degradation_preference(DegradationPreference::Balanced);
     if let Err(error) = sender.set_parameters(parameters) {
         log::debug!("the camera's encoding can't be set: {}", error.message);
     }
