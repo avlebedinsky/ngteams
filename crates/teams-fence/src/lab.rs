@@ -1,5 +1,5 @@
-//! The lab config, `~/.config/teams-lab/lab.toml`: the 3 lab accounts, the approved service participants and the lab
-//! directories. It lives here because the fence's roster (the account and service MRIs) and its log
+//! The lab config, `~/.config/teams-lab/lab.toml`: the 3 lab accounts, the approved service participants, the call
+//! guests and the lab directories. It lives here because the fence's roster (the account and service MRIs) and its log
 //! (`<data_dir>/fence.log`) come from it: [`Fence::open_lab`](crate::Fence::open_lab) is the only way a lab binary
 //! builds a fence.
 //!
@@ -14,7 +14,15 @@
 //! [[service_participants]]
 //! name = "echo"                   # approved by the user
 //! # mri = "..."                   # filled in from a capture; without it the participant matches nothing
+//!
+//! [[call_guests]]
+//! name = "me"                     # the user's own account, approved for calls only
+//! mri = "8:orgid:<guid>"          # required: a work account's MRI
 //! ```
+//!
+//! A call guest is the user's own account, approved as a participant of the lab's calls and nothing else: a lab account
+//! may call it, answer its call and start or join a call in a chat of lab accounts plus it, while every other write
+//! (a message, a reaction, a chat created, a member added, an invite) still reaches only the lab.
 //!
 //! Passwords never go in this file. An account's MRI is written into it by [`record_account_mri`] after the account's
 //! first login, and an approved service participant's by [`record_service_mri`] once it is established; nothing else
@@ -102,6 +110,15 @@ pub struct ServiceParticipant {
     /// The participant's MRI. Until it is filled in, the participant is approved in name only and matches nobody.
     #[serde(default)]
     pub mri: Option<String>,
+}
+
+/// The user's own account, approved as a participant of the lab's calls only ([`crate::Roster`]).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CallGuest {
+    pub name: String,
+    /// The account's MRI, `8:orgid:<lowercase guid>`.
+    pub mri: String,
 }
 
 /// The lab directories, all under one data dir outside the repo.
@@ -412,6 +429,12 @@ pub enum ConfigError {
     EmptyServiceName,
     #[error("service participant {0} is listed more than once")]
     DuplicateService(String),
+    #[error("a call guest without a name")]
+    EmptyGuestName,
+    #[error("call guest {0} is listed more than once")]
+    DuplicateGuest(String),
+    #[error("not a work account's MRI (8:orgid:<lowercase guid>): {0:?}")]
+    NotAWorkAccountMri(String),
     #[error("data_dir must be absolute: {}", .0.display())]
     RelativeDataDir(PathBuf),
     #[error("not a lab account alias (a, b or c): {0:?}")]
@@ -436,6 +459,8 @@ struct RawConfig {
     accounts: Vec<Account>,
     #[serde(default)]
     service_participants: Vec<ServiceParticipant>,
+    #[serde(default)]
+    call_guests: Vec<CallGuest>,
 }
 
 /// A validated lab config.
@@ -444,6 +469,7 @@ pub struct LabConfig {
     accounts: [Account; ACCOUNT_COUNT],
     tenant_domain: String,
     service_participants: Vec<ServiceParticipant>,
+    call_guests: Vec<CallGuest>,
     paths: LabPaths,
 }
 
@@ -467,8 +493,8 @@ impl LabConfig {
     ///
     /// # Errors
     /// On invalid TOML or unknown fields, a count other than 3 accounts, a duplicate alias or UPN, a malformed UPN, UPNs
-    /// in more than one domain, an empty MRI or one given to two participants, a duplicate or empty service name, or a
-    /// relative `data_dir`.
+    /// in more than one domain, an empty MRI or one given to two participants, a duplicate or empty service or call guest
+    /// name, a call guest's MRI that isn't a work account's, or a relative `data_dir`.
     pub fn parse(text: &str, default_data_dir: &Path) -> Result<Self, ConfigError> {
         let raw: RawConfig = toml::from_str(text)?;
         let data_dir = match raw.data_dir {
@@ -478,11 +504,13 @@ impl LabConfig {
         };
         let (accounts, tenant_domain) = validate_accounts(raw.accounts)?;
         validate_services(&raw.service_participants)?;
-        validate_unique_mris(&accounts, &raw.service_participants)?;
+        validate_guests(&raw.call_guests)?;
+        validate_unique_mris(&accounts, &raw.service_participants, &raw.call_guests)?;
         Ok(Self {
             accounts,
             tenant_domain,
             service_participants: raw.service_participants,
+            call_guests: raw.call_guests,
             paths: LabPaths::new(data_dir),
         })
     }
@@ -507,6 +535,18 @@ impl LabConfig {
     #[must_use]
     pub fn service_participants(&self) -> &[ServiceParticipant] {
         &self.service_participants
+    }
+
+    /// The user's own accounts approved as participants of the lab's calls only.
+    #[must_use]
+    pub fn call_guests(&self) -> &[CallGuest] {
+        &self.call_guests
+    }
+
+    /// The call guest named `name`.
+    #[must_use]
+    pub fn call_guest(&self, name: &str) -> Option<&CallGuest> {
+        self.call_guests.iter().find(|guest| guest.name == name)
     }
 
     #[must_use]
@@ -562,8 +602,28 @@ fn validate_services(services: &[ServiceParticipant]) -> Result<(), ConfigError>
     Ok(())
 }
 
-/// One MRI names one participant: an account and a service, or two accounts, can't share it.
-fn validate_unique_mris(accounts: &[Account], services: &[ServiceParticipant]) -> Result<(), ConfigError> {
+fn validate_guests(guests: &[CallGuest]) -> Result<(), ConfigError> {
+    let mut names = BTreeSet::new();
+    for guest in guests {
+        if guest.name.is_empty() {
+            return Err(ConfigError::EmptyGuestName);
+        }
+        if !names.insert(guest.name.as_str()) {
+            return Err(ConfigError::DuplicateGuest(guest.name.clone()));
+        }
+        if !guest.mri.strip_prefix("8:orgid:").is_some_and(is_lowercase_guid) {
+            return Err(ConfigError::NotAWorkAccountMri(guest.mri.clone()));
+        }
+    }
+    Ok(())
+}
+
+/// One MRI names one participant: an account, a service or a call guest, or two of any, can't share it.
+fn validate_unique_mris(
+    accounts: &[Account],
+    services: &[ServiceParticipant],
+    guests: &[CallGuest],
+) -> Result<(), ConfigError> {
     let owners = accounts
         .iter()
         .map(|account| (account.mri.as_deref(), account.alias.to_string()))
@@ -571,6 +631,11 @@ fn validate_unique_mris(accounts: &[Account], services: &[ServiceParticipant]) -
             services
                 .iter()
                 .map(|service| (service.mri.as_deref(), service.name.clone())),
+        )
+        .chain(
+            guests
+                .iter()
+                .map(|guest| (Some(guest.mri.as_str()), guest.name.clone())),
         );
     let mut seen = BTreeSet::new();
     for (mri, owner) in owners {
@@ -663,9 +728,11 @@ pub fn record_service_mri(locations: &LabLocations, name: &str, mri: &str) -> Re
 
 /// `28:` and a lowercase GUID (`8-4-4-4-12` hex digits), nothing else.
 fn is_bot_mri(mri: &str) -> bool {
-    let Some(guid) = mri.strip_prefix("28:") else {
-        return false;
-    };
+    mri.strip_prefix("28:").is_some_and(is_lowercase_guid)
+}
+
+/// A lowercase GUID (`8-4-4-4-12` hex digits), nothing else.
+fn is_lowercase_guid(guid: &str) -> bool {
     let groups: Vec<&str> = guid.split('-').collect();
     groups.len() == 5
         && groups.iter().zip([8, 4, 4, 4, 12]).all(|(group, len)| {

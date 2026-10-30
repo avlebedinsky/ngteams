@@ -6,8 +6,8 @@ finished plans are in `docs/plans/completed/`. Commands and layout are in [READM
 
 ## Hard rules
 
-These hold for every agent and every change, with no exceptions. **Lab accounts contact only each other; everything
-else is allowed.** The lab browser's fence and the native client (its HTTP transport and its Trouter frames) follow
+These hold for every agent and every change, with no exceptions. **Lab accounts contact only each other (and call
+the user's own accounts named as call guests); everything else is allowed.** The lab browser's fence and the native client (its HTTP transport and its Trouter frames) follow
 this rule. The rules about writes, calls and the browser fence govern the lab and every lab binary; the personal build
 (`ngteams`) is the user's Teams, under the two rules about it below. The rules on the native client's sealed types,
 captures and tokens, agents and protocol notes hold for both builds.
@@ -20,8 +20,9 @@ captures and tokens, agents and protocol notes hold for both builds.
   post, reply, edit, delete, forward, channel post, a scheduled or drafted send), a reaction, a call (starting,
   joining or answering one), a chat created, a member added or removed, an invite, a meeting, a mail, a share. It is
   allowed only when every participant of its target, read fresh and complete (no paging key), is one of the 3 lab
-  accounts (`lab.toml`'s MRIs) or an approved service participant (the echo service, by its MRI). A target whose
-  members can't be read in full, or a write the fence can't tie to a target with certainty, is denied.
+  accounts (`lab.toml`'s MRIs) or an approved service participant (the echo service, by its MRI); for a call alone, a
+  call guest too (below). A target whose members can't be read in full, or a write the fence can't tie to a target
+  with certainty, is denied.
 - **Everything else is allowed**, in the lab browser and in the native client, with no capture or review needed:
   reads by any method (a `POST` search or people lookup too, whoever its results list), the account's own session,
   tokens and settings (out-of-office with automatic replies included), presence, a status note, typing and read
@@ -33,25 +34,29 @@ captures and tokens, agents and protocol notes hold for both builds.
 - **No token or credential goes to a third party** (a bot, an app's backend): a bot invoke stays denied. Sign-in and
   token renewal stay in `teams-auth`'s own clients and touch only the account's own credentials.
 - **Calls go only to the lab, both ways.** A call is a contacting write whose participants are its caller, its callees
-  and whoever it adds; every call write is mapped only from a capture, in its captured shape. The fence judges a call's
-  entry, each a fresh decision. A start is permitted when every callee it names is a lab account or the echo service
-  and the chat it is tied to is lab-only by a fresh, complete member read; a start is tied to its chat by what it
-  carries (the chat it names, or for a 1:1 start naming only its callee, the two accounts' 1:1 chat as the chat service
-  names it), never by the client's context, and the test call's start, which names no chat, passes only in its captured
-  shape. A running call is joined only in the chat the join names, when that chat's fresh, complete member read lists
-  the joiner and only lab accounts. An `add` is judged per invitee like a start. An incoming call's invitation is
-  **offered** only when it is readable, addressed to the account, and names a caller and participants that are all lab
-  accounts or the echo service; only an offered invitation is answered or declined (a decline rejects the call as the
-  web client does), tied to it by the call leg the answer's link names, and only until its ring ends (answered,
-  declined, cancelled, answered elsewhere, timed out). Every other incoming call (the user's own account's included) is
-  ignored: no answer, decline or join for it, and no scenario click. Everything a call sends once its start, join or
-  answer was let in goes without a further decision, each send logged: its follow-ups (media and endpoint updates,
-  renegotiation and its answers and acknowledgements, keep-alive, channel parameters, the acceptance's
-  acknowledgement), its `leave` and end exchange, what the callee's client sends by itself while it rings, and its
-  Trouter delivery responses; no call registry or link binding stands between a call and these. The native client
-  still sends each as a sealed type in its captured shape, and a delivery response only as a typed `OwnFrame` for the
-  delivery it answers. No transfer, forwarding or replacement is mapped. The roster isn't watched. Media (TURN, ICE,
-  DTLS-SRTP) isn't classified: it carries a call the signaling fence permitted.
+  and whoever it adds; every call write is mapped only from a capture, in its captured shape. Here "the lab" also holds
+  the **call guests**: the user's own accounts `lab.toml`'s `call_guests` names by MRI, approved for calls only (a
+  start, a join, an answer or a decline, an `add`, and what a call sends once let in), in their 1:1 chat with a lab
+  account or a chat of lab accounts plus them; a call guest is never a sender, and nothing else of the lab reaches one
+  (no message, reaction, chat created, member added or invite, even in a chat that holds one). The fence judges a call's
+  entry, each a fresh decision. A start is permitted when every callee it names is a lab account, a call guest or the
+  echo service and the chat it is tied to is lab-only by a fresh, complete member read; a start is tied to its chat by
+  what it carries (the chat it names, or for a 1:1 start naming only its callee, the two accounts' 1:1 chat as the chat
+  service names it), never by the client's context, and the test call's start, which names no chat, passes only in its
+  captured shape. A running call is joined only in the chat the join names, when that chat's fresh, complete member read
+  lists the joiner and only lab accounts and call guests. An `add` is judged per invitee like a start. An incoming
+  call's invitation is **offered** only when it is readable, addressed to the account, and names a caller and
+  participants that are all lab accounts, call guests or the echo service; only an offered invitation is answered or
+  declined (a decline rejects the call as the web client does), tied to it by the call leg the answer's link names, and
+  only until its ring ends (answered, declined, cancelled, answered elsewhere, timed out). Every other incoming call
+  (the user's own account's unless it is a call guest) is ignored: no answer, decline or join for it, and no scenario
+  click. Everything a call sends once its start, join or answer was let in goes without a further decision, each send
+  logged: its follow-ups (media and endpoint updates, renegotiation and its answers and acknowledgements, keep-alive,
+  channel parameters, the acceptance's acknowledgement), its `leave` and end exchange, what the callee's client sends by
+  itself while it rings, and its Trouter delivery responses; no call registry or link binding stands between a call and
+  these. The native client still sends each as a sealed type in its captured shape, and a delivery response only as a
+  typed `OwnFrame` for the delivery it answers. No transfer, forwarding or replacement is mapped. The roster isn't
+  watched. Media (TURN, ICE, DTLS-SRTP) isn't classified: it carries a call the signaling fence permitted.
 - **Nothing runs live against the tenant before the browser fence is armed**: HTTP interception on every host and
   target, the WebSocket guard, the service worker neutralized.
 - **The native client sends a contacting write only as `Authorized<_>`** with a `WritePermit` from `Fence::check`

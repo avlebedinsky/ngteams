@@ -1848,3 +1848,102 @@ async fn under_the_lab_rule_a_leave_the_log_refuses_leaves_the_registry_as_it_wa
     );
     Ok(())
 }
+
+// --- a call guest (`lab.toml`'s `call_guests`): the user's own account, a participant of the lab's calls only ---
+
+const GUEST: &str = "8:orgid:00000000-0000-4000-8000-0000000000f0";
+
+/// [`lab_rule`]'s lab with [`GUEST`] as its call guest.
+fn lab_rule_with_guest() -> TestResult<Lab> {
+    let dir = tempfile::tempdir()?;
+    let log = dir.path().join("fence.log");
+    let roster = Roster::new([Mri::new(LAB_A), Mri::new(LAB_B), Mri::new(LAB_C)], [Mri::new(ECHO)])
+        .with_call_guests([Mri::new(GUEST)]);
+    let fence = Fence::new(roster, FenceLog::open(&log)?);
+    Ok(Lab { _dir: dir, log, fence })
+}
+
+#[tokio::test]
+async fn a_call_guest_is_called_in_its_1_1_chat_and_in_a_chat_of_lab_accounts_plus_it() -> TestResult {
+    let lab = lab_rule_with_guest()?;
+    let judged = async |target: Target, source: &Members| {
+        lab.fence
+            .check(target, source)
+            .await
+            .map(drop)
+            .map_err(|denied| *denied.reason())
+    };
+    let one = chat_start(&chat_start_body(&[GUEST], None))?;
+    assert_eq!(
+        one.scope(),
+        &Scope::Conversation {
+            id: one_to_one(LAB_A, GUEST)
+        }
+    );
+    assert_eq!(judged(one, &Members::of(&[LAB_A, GUEST])).await, Ok(()));
+    let group = chat_start(&chat_start_body(&[LAB_B, LAB_C, GUEST], Some(GROUP_CHAT)))?;
+    assert_eq!(
+        judged(group.clone(), &Members::of(&[LAB_A, LAB_B, LAB_C, GUEST])).await,
+        Ok(())
+    );
+    // anyone else is still outside the lab, a guest or not
+    let outsider = chat_start(&chat_start_body(&[COWORKER], None))?;
+    assert_eq!(
+        judged(outsider, &Members::of(&[LAB_A, COWORKER])).await,
+        Err(DenyReason::Outsiders { count: 1 })
+    );
+    assert_eq!(
+        judged(group, &Members::of(&[LAB_A, LAB_B, LAB_C, GUEST, COWORKER])).await,
+        Err(DenyReason::Outsiders { count: 1 }),
+        "a chat with the guest and an outsider"
+    );
+    // an `add` of the guest to a running call, never of anyone else
+    let url = op_url(CallOperation::Add, "conv-1");
+    assert_eq!(
+        verdict(&lab.fence, write(CallOperation::Add, &url, &[GUEST])?).await,
+        Ok(())
+    );
+    assert_eq!(
+        verdict(&lab.fence, write(CallOperation::Add, &url, &[COWORKER])?).await,
+        Err(DenyReason::Outsiders { count: 1 })
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn nothing_but_a_call_reaches_a_call_guest() -> TestResult {
+    let lab = lab_rule_with_guest()?;
+    let with_guest = Members::of(&[LAB_A, LAB_B, LAB_C, GUEST]);
+    let lab_only = Members::of(&[LAB_A, LAB_B, LAB_C]);
+    let pair = Members::of(&[LAB_A, GUEST]);
+    let nobody = Members::of(&[]);
+    let group = Scope::Conversation { id: GROUP_CHAT.into() };
+    let one = Scope::Conversation {
+        id: one_to_one(LAB_A, GUEST),
+    };
+    let guest = || [Mri::new(GUEST)];
+    let writes = [
+        (Target::new(WriteKind::Message, group.clone()), &with_guest),
+        (Target::new(WriteKind::Reaction, group.clone()), &with_guest),
+        (Target::new(WriteKind::Edit, group.clone()), &with_guest),
+        (Target::new(WriteKind::Message, one), &pair),
+        (
+            Target::new(WriteKind::MemberChange, group.clone()).with_added(guest()),
+            &lab_only,
+        ),
+        (Target::new(WriteKind::Invite, group).with_added(guest()), &lab_only),
+        (
+            Target::new(WriteKind::ChatCreate, Scope::New).with_added([Mri::new(LAB_A), Mri::new(GUEST)]),
+            &nobody,
+        ),
+    ];
+    for (target, members) in writes {
+        let denied = lab.fence.check(target.clone(), members).await;
+        assert_eq!(
+            denied.err().map(|denied| *denied.reason()),
+            Some(DenyReason::Outsiders { count: 1 }),
+            "{target}"
+        );
+    }
+    Ok(())
+}

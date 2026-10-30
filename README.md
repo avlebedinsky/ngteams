@@ -111,7 +111,7 @@ outside the repo:
 
 | where | what |
 |---|---|
-| `~/.config/teams-lab/lab.toml` | the 3 accounts (alias, UPN, MRI once recorded) and the approved service participants (`echo`, the Teams echo service, with its MRI); optionally `data_dir`. Mode `0600`, never holds a password. `login` and `service-mri` fill in MRIs, nothing else writes it |
+| `~/.config/teams-lab/lab.toml` | the 3 accounts (alias, UPN, MRI once recorded) and the approved service participants (`echo`, the Teams echo service, with its MRI); optionally the call guests (`[[call_guests]]`, `name` and `mri`: the user's own accounts, which the lab may call, answer and join calls with, and nothing else); optionally `data_dir`. Mode `0600`, never holds a password. `login` and `service-mri` fill in MRIs, nothing else writes it |
 | `~/.local/share/teams-lab/` (or `data_dir`) | the lab's data dir |
 | `…/chrome/<version>/` | the pinned Chrome for Testing (155.0.8059.84 linux64, checksum-verified) |
 | `…/profiles/{a,b,c}/` | each account's persistent Chrome profile, signed in to Microsoft |
@@ -371,7 +371,8 @@ teams-headless c join abc [--ring-wait 180] [--tone …] [--seconds 45] [--wait 
 ```
 
 A chat is `a`, `b` or `c` (the 1:1 chat with that account, from the MRIs in `lab.toml`), `abc` (the group chat
-recorded in `chats.toml`), or a conversation id. Each write first catches up (its summary on stderr), then waits up to
+recorded in `chats.toml`), a call guest's name (or `guest` when `lab.toml` names one: the 1:1 chat with it, which the
+fence lets only a call reach), or a conversation id. Each write first catches up (its summary on stderr), then waits up to
 `--wait` seconds (120) for a write that has to wait out a `Retry-After`; it exits non-zero unless the write went
 through. `watch` answers no delivery and no call (but with `--answer-lab-calls`, below); it exits 0 on SIGINT or SIGTERM,
 non-zero when the push channel
@@ -406,7 +407,7 @@ clock: a far end's recording lines up with the tone sent by them, two processes 
 `--ring-wait` seconds for an invitation to the group chat's running call to ring here, lets it ring out unanswered,
 then joins the running call (a join is judged like a start in that chat) and holds it as `call` does. `watch
 --answer-lab-calls` registers the calling stack too and answers each call the engine offers: only an invitation from
-a lab account naming only lab accounts, which the lab fence offers (every other one rings unanswered and nothing is
+a lab account or a call guest naming only them, which the lab fence offers (every other one rings unanswered and nothing is
 sent for it), each answer judged by the fence again; the flag exists in `teams-headless` alone. `watch --calls`
 registers the calling stack and answers nothing (an offered call rings until its ring ends). Both play `--tone` (for
 `--tone-seconds`, 180 s by default) and record each answered call, and print what the last one's recording holds when

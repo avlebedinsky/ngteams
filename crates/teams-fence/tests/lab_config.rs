@@ -242,6 +242,61 @@ fn a_duplicate_or_empty_service_name_is_refused() {
     assert!(matches!(parse(&empty).unwrap_err(), ConfigError::EmptyServiceName));
 }
 
+const GUEST_MRI: &str = "8:orgid:00000000-0000-4000-8000-0000000000f0";
+
+fn guest(name: &str, mri: &str) -> String {
+    format!("[[call_guests]]\nname = \"{name}\"\nmri = \"{mri}\"\n\n")
+}
+
+#[test]
+fn a_call_guest_is_a_named_work_account_s_mri() {
+    let config = parse(&format!("{}{}", three(), guest("me", GUEST_MRI))).unwrap();
+    assert_eq!(config.call_guests().len(), 1);
+    assert_eq!(config.call_guest("me").map(|guest| guest.mri.as_str()), Some(GUEST_MRI));
+    assert!(config.call_guest("you").is_none());
+    assert!(parse(&three()).unwrap().call_guests().is_empty(), "none by default");
+
+    let cases = [
+        (guest("me", "28:00000000-0000-4000-8000-0000000000f0"), "a bot's"),
+        (
+            guest("me", "8:orgid:00000000-0000-4000-8000-0000000000F0"),
+            "upper case",
+        ),
+        (guest("me", "8:orgid:"), "no guid"),
+        (guest("me", ""), "empty"),
+    ];
+    for (text, why) in cases {
+        assert!(
+            matches!(
+                parse(&format!("{}{text}", three())).unwrap_err(),
+                ConfigError::NotAWorkAccountMri(_)
+            ),
+            "{why}"
+        );
+    }
+}
+
+#[test]
+fn a_call_guest_without_an_mri_or_name_or_twice_or_a_lab_account_is_refused() {
+    let no_mri = format!("{}[[call_guests]]\nname = \"me\"\n", three());
+    assert!(matches!(parse(&no_mri).unwrap_err(), ConfigError::Parse(_)));
+    let twice = format!("{}{}{}", three(), guest("me", GUEST_MRI), guest("me", GUEST_MRI));
+    assert!(matches!(parse(&twice).unwrap_err(), ConfigError::DuplicateGuest(_)));
+    let unnamed = format!("{}{}", three(), guest("", GUEST_MRI));
+    assert!(matches!(parse(&unnamed).unwrap_err(), ConfigError::EmptyGuestName));
+    // a lab account is never a guest too
+    let lab_too = format!(
+        "{}[[accounts]]\nalias = \"c\"\nupn = \"bot-c@lab.example.com\"\nmri = \"{GUEST_MRI}\"\n\n{}",
+        [
+            account("a", "bot-a@lab.example.com"),
+            account("b", "bot-b@lab.example.com")
+        ]
+        .concat(),
+        guest("me", GUEST_MRI)
+    );
+    assert!(matches!(parse(&lab_too).unwrap_err(), ConfigError::DuplicateMri(_)));
+}
+
 #[test]
 fn aliases_round_trip_through_text() {
     for alias in Alias::ALL {

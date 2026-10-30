@@ -1,5 +1,5 @@
 //! The decision: [`Fence::check`] fetches the target's members fresh and issues a [`WritePermit`] only when every
-//! participant is a lab account or an approved service. A write that reaches nobody ([`WriteKind::is_contacting`]
+//! participant is a lab account or an approved service (or, for a call write alone, a call guest: [`Roster`]). A write that reaches nobody ([`WriteKind::is_contacting`]
 //! false) is judged without a member read: typing and read receipts on a chat (1:1, group or meeting), and the
 //! account's own availability ([`WriteKind::OwnAvailability`] on [`Scope::Account`]), which the fence permits only
 //! for its own account ([`Fence::own_account`]), so that a lab account never sets another's presence.
@@ -34,7 +34,10 @@ use crate::target::{CallOperation, Mri, Scope, Target, WriteKind};
 mod audit;
 
 /// Who may take part in a write: the lab accounts and the approved service participants, by exact MRI. A lab account
-/// or service whose MRI isn't known yet is simply left out, so it matches nobody.
+/// or service whose MRI isn't known yet is simply left out, so it matches nobody. The call guests (`lab.toml`'s
+/// `call_guests`, the user's own accounts) may take part in a call write alone ([`Roster::admits_on_call`]): a start,
+/// a join, an answer or a decline, an `add` and what a call sends once it was let in; never a message, a reaction, a
+/// chat created, a member added or an invite, even in a chat that holds one.
 ///
 /// A lab binary's roster comes only from `lab.toml`, through [`Fence::open_lab`]. [`Roster::new`], which takes any
 /// MRIs, exists only with the `test-support` feature.
@@ -42,6 +45,7 @@ mod audit;
 pub struct Roster {
     lab: BTreeSet<Mri>,
     services: BTreeSet<Mri>,
+    call_guests: BTreeSet<Mri>,
 }
 
 impl Roster {
@@ -56,12 +60,22 @@ impl Roster {
         Self {
             lab: lab.into_iter().collect(),
             services: services.into_iter().collect(),
+            call_guests: BTreeSet::new(),
         }
     }
 
-    /// The MRIs `lab.toml` gives its accounts and approved service participants; one without an MRI is left out.
+    /// This roster with `guests` as its call guests. Tests only (`test-support`).
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn with_call_guests(mut self, guests: impl IntoIterator<Item = Mri>) -> Self {
+        self.call_guests = guests.into_iter().collect();
+        self
+    }
+
+    /// The MRIs `lab.toml` gives its accounts, approved service participants and call guests; one without an MRI is
+    /// left out.
     fn from_lab(config: &LabConfig) -> Self {
-        Self::of(
+        let roster = Self::of(
             config
                 .accounts()
                 .iter()
@@ -72,12 +86,22 @@ impl Roster {
                 .iter()
                 .filter_map(|service| service.mri.as_deref())
                 .map(Mri::new),
-        )
+        );
+        Self {
+            call_guests: config.call_guests().iter().map(|guest| Mri::new(&guest.mri)).collect(),
+            ..roster
+        }
     }
 
     #[must_use]
     pub fn admits(&self, mri: &Mri) -> bool {
         self.lab.contains(mri) || self.services.contains(mri)
+    }
+
+    /// Whether `mri` may take part in a call write: [`Self::admits`] it, or it is a call guest.
+    #[must_use]
+    pub fn admits_on_call(&self, mri: &Mri) -> bool {
+        self.admits(mri) || self.call_guests.contains(mri)
     }
 
     /// Whether `mri` is one of the lab accounts, by exact MRI (an approved service isn't).
@@ -523,8 +547,9 @@ impl Fence {
     ///   `add` by its sender and invitees; and it permits every other operation (what a call sends once it was let in)
     ///   with no member read and no registry lookup, logged. Under the registry's rule ([`Fence::tracks_calls`]) the
     ///   call registry ([`crate::calls`]) resolves it to a live call this fence permitted and registered, with no
-    ///   member read. Either way the participants (with any invitee and the chat's members) must all be lab accounts
-    ///   or approved services.
+    ///   member read. Either way the participants (with any invitee and the chat's members) must all be lab accounts,
+    ///   approved services or call guests ([`Roster::admits_on_call`]), and a join or an `add` is sent by neither a
+    ///   call guest nor anyone else outside the lab.
     ///
     /// Nothing else lands on [`Scope::Account`]. Every decision is appended to `fence.log`; an allow that can't be
     /// logged is denied.
@@ -634,6 +659,13 @@ impl Fence {
             return self.decided(target, Verdict::Deny(DenyReason::CallMismatch));
         };
         let sender: BTreeSet<Mri> = from.iter().cloned().collect();
+        // a call guest takes part in the lab's calls, but no join or `add` is sent as one
+        if matches!(operation, CallOperation::Join | CallOperation::Add)
+            && !sender.iter().all(|mri| self.roster.admits(mri))
+        {
+            let count = sender.iter().filter(|mri| !self.roster.admits(mri)).count();
+            return self.decided(target, Verdict::Deny(DenyReason::Outsiders { count }));
+        }
         let resolved = match operation {
             CallOperation::Join if joins.is_some() && !sender.is_empty() && target.added().is_empty() => {
                 Ok(Resolved::unbound(sender, joins.clone()))
@@ -682,7 +714,7 @@ impl Fence {
         let verdict = if participants.is_empty() {
             Verdict::Deny(DenyReason::NoMembers)
         } else {
-            self.admits_all(participants.into_iter())
+            self.admits_all(participants.into_iter(), true)
         };
         let permit = self.decided(target, verdict)?;
         self.calls.permitted(&resolved);
@@ -808,7 +840,7 @@ impl Fence {
         };
         // the personal build's: any readable invitation addressed to the account, whoever it is from, one at a time
         let admitted = self.is_personal()
-            || (self.roster.is_lab_account(&invitation.callee) && self.roster.admits(&invitation.caller));
+            || (self.roster.is_lab_account(&invitation.callee) && self.roster.admits_on_call(&invitation.caller));
         let offered =
             self.own.as_ref() == Some(&invitation.callee) && admitted && invitation.caller != invitation.callee;
         if !offered {
@@ -867,7 +899,7 @@ impl Fence {
                     }
                     Ok(members) => {
                         let all = participants.iter().chain(&members);
-                        match self.admits_all(all) {
+                        match self.admits_all(all, true) {
                             Verdict::Allow => Ok(delivery),
                             Verdict::Deny(_) => Err(crate::calls::DeliveryDenyReason::Parties),
                         }
@@ -929,18 +961,26 @@ impl Fence {
         if participants.is_empty() {
             return Verdict::Deny(DenyReason::NoMembers);
         }
-        self.admits_all(participants.into_iter())
+        self.admits_all(participants.into_iter(), is_call_write(target))
     }
 
     /// The decision on typing or a read receipt on a chat: it reaches nobody, so the chat's members aren't read and
     /// only the participants it names itself, if any, are judged.
     fn judge_added(&self, target: &Target) -> Verdict {
-        self.admits_all(target.added().iter())
+        self.admits_all(target.added().iter(), false)
     }
 
-    /// Allow when the roster admits every one of `participants`.
-    fn admits_all<'a>(&self, participants: impl Iterator<Item = &'a Mri>) -> Verdict {
-        let count = participants.filter(|mri| !self.roster.admits(mri)).count();
+    /// Allow when the roster admits every one of `participants`: for a call write (`on_call`) a call guest too
+    /// ([`Roster::admits_on_call`]).
+    fn admits_all<'a>(&self, participants: impl Iterator<Item = &'a Mri>, on_call: bool) -> Verdict {
+        let admits = |mri: &Mri| {
+            if on_call {
+                self.roster.admits_on_call(mri)
+            } else {
+                self.roster.admits(mri)
+            }
+        };
+        let count = participants.filter(|mri| !admits(mri)).count();
         if count > 0 {
             Verdict::Deny(DenyReason::Outsiders { count })
         } else {
@@ -975,6 +1015,20 @@ const ACKNOWLEDGEMENT: &str = "call_acceptance_acknowledgement";
 const RECEIPT: &str = "call_invitation_receipt";
 const NEGOTIATION_RECEIPT: &str = "call_negotiation_receipt";
 const DELIVERY_RESPONSE: &str = "call_delivery_response";
+
+/// Whether `target` is a call write, which a call guest may take part in ([`Roster::admits_on_call`]): a start (on a
+/// chat, or a new one), an answer, a decline, what a callee's client sends while it rings, a call's follow-ups, and
+/// any operation on a call (an `add` included). An invite or a member change off a call is not.
+fn is_call_write(target: &Target) -> bool {
+    matches!(
+        target.kind(),
+        WriteKind::Call
+            | WriteKind::CallAnswer
+            | WriteKind::CallDecline
+            | WriteKind::CallRinging
+            | WriteKind::CallFollowUp
+    ) || matches!(target.scope(), Scope::CallOperation { .. })
+}
 
 /// Whether `target` is typing or a read receipt on a chat by its id ([`is_chat_id`]: a 1:1, group or meeting chat, the
 /// same rule [`crate::contacting`] carves them out by), which the fence permits without a member read. On anything else

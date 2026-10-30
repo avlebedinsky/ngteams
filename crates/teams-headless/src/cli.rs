@@ -27,7 +27,8 @@ pub struct Cli {
 }
 
 /// A chat, as a command names it: `a`, `b` or `c` (the account's 1:1 chat with that lab account), `abc` (the lab's
-/// group chat, from `<data_dir>/chats.toml`), or a conversation id as it is (`19:…`).
+/// group chat, from `<data_dir>/chats.toml`), a call guest's name from `lab.toml` (or `guest` when there is one: the
+/// account's 1:1 chat with it, for a call only), or a conversation id as it is (`19:…`).
 pub type ChatArg = String;
 
 #[derive(Debug, Subcommand)]
@@ -154,7 +155,7 @@ pub enum Command {
         #[arg(long, conflicts_with_all = ["answer_lab_calls", "calls"])]
         json: bool,
         /// Also registers the calling stack and answers each call the engine offers: only an invitation from a lab
-        /// account naming only lab accounts (the lab fence offers no other; every other one rings unanswered and
+        /// account or a call guest naming only them (the lab fence offers no other; every other one rings unanswered and
         /// nothing is sent for it). The call's media is files, as `call`'s; at the end it prints what the (last)
         /// call's recording holds of the tone at `--hear`. A write others see, through the fence.
         #[arg(long)]
@@ -168,13 +169,13 @@ pub enum Command {
     },
     /// Places a call once the calling socket is registered, holds it `--seconds` once its media connected, then hangs
     /// it up: `echo` (the test call of lab.toml's echo service, which plays back what it hears), or a chat (`a`, `b`,
-    /// `c`, `abc` or a conversation id; a catch-up first). Its media is files, never an audio server: the microphone
+    /// `c`, `abc`, a call guest or a conversation id; a catch-up first). Its media is files, never an audio server: the microphone
     /// plays a tone keyed on and off in 200 ms slots of a fixed pattern, the speaker records to `--record`. Prints each
     /// event, a summary (setup time, how it ended) and what the recording holds of the keyed tone at `--hear` (its
     /// level and round trips). A write others see, through the fence. Exits 0 only when the call connected, was held
     /// and hung up, and, for `echo`, the tone came back.
     Call {
-        /// `echo`, `a`, `b`, `c`, `abc` or a conversation id.
+        /// `echo`, `a`, `b`, `c`, `abc`, a call guest (`guest` or its name) or a conversation id.
         target: String,
         #[command(flatten)]
         audio: CallAudio,
