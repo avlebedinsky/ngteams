@@ -5,6 +5,8 @@
 //! session they came from) go out in arrival order through [`Events`]. Nothing here acts on an event by itself: a
 //! target that auto-attaches with `waitForDebuggerOnStart` stays paused until the caller resumes it with
 //! `Runtime.runIfWaitingForDebugger`, which is what the browser fence needs to arm a target before its code runs.
+//! That is why the client is our own: `chromiumoxide` resumes every target paused that way by itself, before its
+//! caller can arm it, and detaches service workers.
 //!
 //! The connection lives as long as a [`Cdp`] or [`Session`] handle does: dropping the last one closes the websocket, so
 //! the browser sees the client detach (and releases whatever it held for it), and [`Events`] then ends.
