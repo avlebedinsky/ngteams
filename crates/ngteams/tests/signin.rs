@@ -1,5 +1,5 @@
-//! The personal build's sign-in and start: `ngteams` signs in through its sign-in window (`sh` standing in for
-//! `ngteams-signin`, answering the redirect), the code redeemed at a local token endpoint and the skypetoken at a
+//! The personal build's sign-in and start: `ngteams` signs in through its sign-in window (a closure standing in
+//! for the app's window, answering the redirect), the code redeemed at a local token endpoint and the skypetoken at a
 //! local authz (wiremock), the refresh token stored under the account's UPN in the store handed in (the app hands in the
 //! desktop's Secret Service under `ngteams`; here a `MemorySecretStore`), the account's `accounts.toml` entry
 //! given the object id and tenant, its region saved under `regions/`; a later sign-in landing in another account stores
@@ -15,7 +15,6 @@
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
-use std::process::Command;
 use std::sync::Arc;
 
 use base64::Engine as _;
@@ -28,7 +27,7 @@ use serde_json::{Value, json};
 use teams_auth::authz::{AuthzClient, skypetoken_expiry_key, skypetoken_key};
 use teams_auth::refresh::refresh_token_key;
 use teams_auth::secrets::{MemorySecretStore, Secret, SecretStore};
-use teams_auth::signin::{WindowAnswer, WindowSignInError};
+use teams_auth::signin::{WindowAnswer, WindowRequest, WindowSignInError};
 use teams_auth::token::{EntraConfig, NATIVE_CLIENT_REDIRECT, TEAMS_NATIVE_CLIENT_ID, TokenClient, TokenError};
 use teams_fence::Fence;
 use teams_fence::lab::LabLocations;
@@ -149,14 +148,20 @@ async fn clients(server: &MockServer, upn: &str, oid: &str) -> SignInClients {
     }
 }
 
-/// `sh` standing in for the sign-in window: it reads the request and answers the redirect to it, its `state` taken
-/// from the request's authorize URL.
-fn window() -> Command {
-    let mut command = Command::new("sh");
-    command.arg("-c").arg(format!(
-        r#"read -r line; state=$(printf '%s' "$line" | sed -n 's/.*[?&]state=\([^&"]*\).*/\1/p'); printf '{{"redirect":"{NATIVE_CLIENT_REDIRECT}?code=made-up-code&state=%s"}}\n' "$state""#
-    ));
-    command
+/// Standing in for the sign-in window: it answers the redirect to the request, its `state` taken from the request's
+/// authorize URL.
+fn window() -> signin::Window {
+    Box::new(|request: WindowRequest| {
+        let state = request
+            .authorize
+            .split(['?', '&'])
+            .find_map(|pair| pair.strip_prefix("state="))
+            .unwrap_or_default()
+            .to_owned();
+        WindowAnswer::Redirect(Secret::new(format!(
+            "{NATIVE_CLIENT_REDIRECT}?code=made-up-code&state={state}"
+        )))
+    })
 }
 
 #[tokio::test]
@@ -241,13 +246,8 @@ async fn a_later_sign_in_that_lands_in_another_account_stores_nothing() {
     assert_eq!(PersonalAccount::load_all(&setup.paths).unwrap(), vec![account.clone()]);
     assert!(!setup.paths.data_dir().join("regions").exists());
     // a window closed before the redirect stores nothing either
-    let mut closed = Command::new("sh");
-    closed.arg("-c").arg(format!(
-        "read -r line; printf '%s\\n' '{}'",
-        WindowAnswer::Closed.to_line().expose()
-    ));
     assert!(
-        signin::sign_in(&setup, &account, &clients, &store, closed)
+        signin::sign_in(&setup, &account, &clients, &store, answering(&WindowAnswer::Closed))
             .await
             .is_err()
     );
@@ -357,13 +357,10 @@ async fn an_abandoned_account_goes_only_while_no_sign_in_named_it() {
     assert!(!added.is_signed_in());
 }
 
-/// `sh` standing in for the sign-in window, answering `answer` to the request.
-fn answering(answer: &WindowAnswer) -> Command {
-    let mut command = Command::new("sh");
-    command
-        .arg("-c")
-        .arg(format!("read -r line; printf '%s\\n' '{}'", answer.to_line().expose()));
-    command
+/// Standing in for the sign-in window, answering `answer` to the request.
+fn answering(answer: &WindowAnswer) -> signin::Window {
+    let line = answer.to_line();
+    Box::new(move |_| WindowAnswer::parse(line.expose()).unwrap())
 }
 
 /// `UPN`'s entry as the user writes it by hand into `accounts.toml`: its identity provider's host.
@@ -627,25 +624,4 @@ async fn a_single_account_of_an_earlier_build_is_moved_into_the_files_of_several
     // a second setup over the moved files changes nothing
     let again = Setup::new(setup.paths.clone(), setup.lab.clone()).unwrap();
     assert_eq!(again.accounts().unwrap(), vec![held]);
-}
-
-#[test]
-fn the_sign_in_window_is_given_exactly_the_account_it_signs_in() {
-    let account = PersonalAccount::pending(UPN).unwrap();
-    let command = signin::window_command(&account).unwrap();
-    assert!(command.get_program().to_string_lossy().ends_with(signin::WINDOW_BINARY));
-    let args: Vec<OsString> = command.get_args().map(ToOwned::to_owned).collect();
-    assert_eq!(signin::window_account(args), Some(UPN.to_owned()));
-    let parse = |args: &[&str]| signin::window_account(args.iter().map(OsString::from));
-    assert_eq!(parse(&["--account", UPN]), Some(UPN.to_owned()));
-    for refused in [
-        &[][..],
-        &["--account"][..],
-        &[UPN][..],
-        &["--account", UPN, "--account", UPN][..],
-        &["--upn", UPN][..],
-        &["--account=someone@example.test"][..],
-    ] {
-        assert_eq!(parse(refused), None, "{refused:?}");
-    }
 }

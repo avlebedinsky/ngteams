@@ -1,21 +1,20 @@
-//! The sign-in window's `WebKitGTK` web process extension (M2 Task 24).
+//! The sign-in window's WPE `WebKit` web process extension.
 //!
-//! `WebKit` loads this module into every web process of `teams-signin`'s web context and calls
-//! [`webkit_web_process_extension_initialize_with_user_data`] with the path of the guard's socket. The extension
-//! connects there ([`client::GuardClient`]), connects each new page's `send-request` signal, tells the guard the page
-//! is armed, and from then on asks the guard about every request the page sends, redirects that come back to the
-//! page included; it drops each one the guard doesn't allow (the handler returns `TRUE`), and every one when it has no
-//! guard. The guard classifies and logs; nothing is decided here.
+//! `WebKit` loads this module into every web process of the sign-in engine (`teams-signin` over `teams-wpe`, its web
+//! context's extensions directory) and calls [`webkit_web_process_extension_initialize_with_user_data`] with the path
+//! of the guard's socket. The extension connects there ([`client::GuardClient`]), connects each new page's
+//! `send-request` signal, tells the guard the page is armed, and from then on asks the guard about every request the
+//! page sends, redirects that come back to the page included; it drops each one the guard doesn't allow (the handler
+//! returns `TRUE`), and every one when it has no guard. The guard classifies and logs; nothing is decided here.
 //!
-//! What this can't see (the plan's Task 24, decided with Codex): a synchronous load's redirects and a kept-alive load's
-//! redirects after its page is gone are followed by the network process without a second `send-request`, and
-//! `WebSockets` never pass it. So the window is not a complete fence; `teams-signin` keeps the features it can switch
-//! off off and stays on loopback for the whole run: it opens only a loopback page, its guard and navigation policy
-//! refuse everything off loopback, and its network session reaches anything else only through a proxy that refuses
-//! it (`teams_signin::egress`).
+//! What this can't see: a synchronous load's redirects and a kept-alive load's redirects after its page is gone are
+//! followed by the network process without a second `send-request`, and `WebSockets` never pass it
+//! (`docs/backlog/webkit-sign-in-guard-redirects.md`). So the window is not a complete fence; `teams-signin` keeps the
+//! features it can switch off off and holds the network session's way out: the lab's window reaches nothing off
+//! loopback but a proxy that refuses it, the personal window nothing but its sign-in hosts (`teams_signin::egress`).
 //!
 //! The FFI is by hand: no Rust binding has `WebKit`'s web process extension API. Only the three `WebKit` functions
-//! below and two signals are used.
+//! below and two signals are used; they live in `libWPEWebKit-2.0`, which `build.rs` links.
 
 pub mod client;
 pub mod protocol;
@@ -38,7 +37,6 @@ pub struct Opaque {
     _private: [u8; 0],
 }
 
-#[link(name = "webkitgtk-6.0")]
 unsafe extern "C" {
     fn webkit_web_page_get_id(page: *mut Opaque) -> u64;
     fn webkit_uri_request_get_uri(request: *mut Opaque) -> *const c_char;

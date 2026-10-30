@@ -1,0 +1,37 @@
+[package]
+name = "teams-wpe"
+description = "WPE WebKit offscreen, taken from ngterm's ngterm-wpe (MIT): web views on an engine of their own (a worker process under the vendored package's overlay), frames out as SHM pixels or dmabufs, input in"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license = "MIT"
+# no library of its own: the key that hands dependents' build scripts the library directories (DEP_TEAMS_WPE_LIBDIRS)
+links = "teams-wpe"
+
+[dependencies]
+wpe-webkit-sys.workspace = true
+wpe-platform-sys.workspace = true
+wpe-javascriptcore-sys.workspace = true
+async-channel.workspace = true
+# `serde`: the worker's messages carry the input's modifiers and the pages' settings
+bitflags.workspace = true
+gio.workspace = true
+glib.workspace = true
+libc.workspace = true
+log.workspace = true
+# the worker's transport (`worker`): a SOCK_SEQPACKET pair, descriptors passed with SCM_RIGHTS, sealed memfds, polls
+rustix = { workspace = true, features = ["event", "fs", "net"] }
+# the worker's messages, as JSON
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[build-dependencies]
+pkg-config.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

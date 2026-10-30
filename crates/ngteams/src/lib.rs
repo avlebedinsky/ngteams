@@ -2,13 +2,13 @@
 //! desktop (`docs/personal-build.md`, approved by the user on 2026-10-23; M2 Task 27 of
 //! `docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
 //!
-//! - [`refusal`]: what both binaries refuse before anything else, the window included: a build with `test-support`
+//! - [`refusal`]: what the binary refuses before anything else, the window included: a build with `test-support`
 //!   (any `cargo test`, `--all-targets` or `--all-features` build), and a build `scripts/install-personal.sh` didn't
 //!   make (its install marker, read at compile time). Agents never produce a runnable personal binary.
 //! - [`setup`]: its files (`~/.config/ngteams/accounts.toml`, the user's accounts in the order added;
 //!   `~/.local/share/ngteams/`), kept apart from the lab's: a data dir overlapping the lab's and an account `lab.toml`
 //!   names are refused. A single account's `account.toml` of an earlier build is moved into them.
-//! - [`signin`]: one account's sign-in through `ngteams-signin --account <UPN>` (the window bound to Entra's
+//! - [`signin`]: one account's sign-in through the app's own sign-in window (`teams_signin::window`, bound to Entra's
 //!   hosts and that account's identity provider hosts), the code redeemed only for that account (its object id and
 //!   tenant once known), the refresh token stored under its UPN and [`KEYRING_APPLICATION`] on the desktop's Secret
 //!   Service, its region from authz (`regions/<oid>.json`).

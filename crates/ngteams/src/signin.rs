@@ -4,9 +4,9 @@
 //! 1. the authorize request for the account `accounts.toml` holds (its UPN as `login_hint`; once known, its object id
 //!    and tenant required of the ID token), the native client `1fec8e78-…` with the `nativeclient` redirect, never
 //!    another client id or a borrowed device claim;
-//! 2. the sign-in window, `ngteams-signin --account <UPN>` beside this binary ([`window_command`]; its arguments
-//!    read by [`window_account`]), bound to that account's identity provider hosts, which answers the redirect
-//!    (`teams_auth::signin`);
+//! 2. the sign-in window, a window of this app ([`window_for`]: `teams_signin::window`, its page's engine this binary
+//!    run again as its worker), bound to Entra's sign-in hosts and that account's identity provider hosts, which
+//!    answers the redirect (`teams_auth::signin`);
 //! 3. the code redeemed only for that account: the refresh token stored under the account's UPN in the store handed in
 //!    (the desktop's Secret Service under [`crate::KEYRING_APPLICATION`]); a sign-in that lands in another account or
 //!    tenant stores nothing; a lab account (by its MRI, now known), or an account another entry of `accounts.toml`
@@ -25,25 +25,45 @@
 //! that host to the entry's `idp_hosts` by hand and sign in again, which takes the entry up. Nothing adds a host by
 //! itself, and an entry no sign-in named never starts an engine.
 
-use std::ffi::OsString;
 use std::fs::{self, DirBuilder};
 use std::io::{self, Write as _};
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::sync::Arc;
 
+use gpui::{App, Global};
 use teams_auth::authz::{AuthzClient, AuthzError, AuthzKind, Region};
 use teams_auth::pkce::PkceError;
 use teams_auth::refresh::refresh_token_key;
 use teams_auth::secrets::{SecretError, SecretStore};
-use teams_auth::signin::{WindowError, WindowSignInError, sign_in_with_window};
+use teams_auth::signin::{WindowAnswer, WindowError, WindowRequest, WindowSignInError, sign_in_with};
 use teams_auth::token::{Authorization, EntraConfig, Scope, TokenClient, TokenError};
+use teams_fence::FenceLog;
 use teams_fence::personal::{PersonalAccount, PersonalError};
+use teams_signin::hosts::{HostRefused, SignInHosts};
+use teams_signin::window::{self, Bound, WindowConfig, Windows};
+use teams_ui::window::PERSONAL_APP_ID;
 
 use crate::setup::Setup;
 
-/// The sign-in window's binary, beside `ngteams`.
-pub const WINDOW_BINARY: &str = "ngteams-signin";
+/// A sign-in window for one request: shows the request's page and gives its answer (blocking: it waits for the person
+/// signing in). The app's own is [`window_for`]'s; a test's answers by itself.
+pub type Window = Box<dyn FnOnce(WindowRequest) -> WindowAnswer + Send>;
+
+/// The app's sign-in windows, opened on GPUI's foreground for the sign-ins running off it.
+struct SignInWindows(Windows);
+
+impl Global for SignInWindows {}
+
+/// The app's sign-in windows ([`Windows`], under the app's own app id), served from the first ask on.
+pub fn windows(cx: &mut App) -> Windows {
+    if let Some(windows) = cx.try_global::<SignInWindows>() {
+        return windows.0.clone();
+    }
+    let windows = Windows::serve(PERSONAL_APP_ID, cx);
+    cx.set_global(SignInWindows(windows.clone()));
+    windows
+}
 
 /// Why a sign-in stored nothing.
 #[derive(Debug, thiserror::Error)]
@@ -62,8 +82,10 @@ pub enum SignInError {
     Personal(#[from] PersonalError),
     #[error("the region can't be saved to {}: {source}", path.display())]
     Region { path: PathBuf, source: io::Error },
-    #[error("where the sign-in window is: {0}")]
+    #[error("the sign-in window's page: {0}")]
     NoWindow(io::Error),
+    #[error(transparent)]
+    Hosts(#[from] HostRefused),
 }
 
 /// The clients a sign-in talks to: Entra's token endpoint (and the authorize request's config) and authz.
@@ -89,26 +111,44 @@ impl SignInClients {
     }
 }
 
-/// The sign-in window's command for `account`: [`WINDOW_BINARY`] beside the running executable, `--account <UPN>`.
+/// The sign-in window for `account`, opened through `windows`: bound to Entra's sign-in hosts and the identity
+/// provider's hosts its `accounts.toml` entry names ([`SignInHosts::entra_with`]), its decisions in the personal
+/// `fence.log`, its web process extension the one beside this binary. A request whose authorize URL isn't on that
+/// bound opens no window.
 ///
 /// # Errors
-/// [`SignInError::NoWindow`] when the running executable can't be found.
-pub fn window_command(account: &PersonalAccount) -> Result<Command, SignInError> {
+/// [`SignInError::Hosts`] for an `idp_hosts` entry the bound refuses, [`SignInError::NoWindow`] when the running
+/// executable or the extension beside it can't be found.
+pub fn window_for(setup: &Setup, account: &PersonalAccount, windows: &Windows) -> Result<Window, SignInError> {
+    let hosts = Arc::new(SignInHosts::entra_with(&account.idp_hosts)?);
     let exe = std::env::current_exe().map_err(SignInError::NoWindow)?;
-    let mut command = Command::new(exe.with_file_name(WINDOW_BINARY));
-    command.arg("--account").arg(&account.upn);
-    Ok(command)
-}
-
-/// The UPN the sign-in window's arguments (`args`, its own name left out) give: exactly `--account <UPN>`, as
-/// [`window_command`] passes it; `None` for anything else (the window's usage error).
-#[must_use]
-pub fn window_account(args: impl IntoIterator<Item = OsString>) -> Option<String> {
-    let mut args = args.into_iter();
-    let (Some(flag), Some(upn), None) = (args.next(), args.next(), args.next()) else {
-        return None;
-    };
-    (flag == "--account").then(|| upn.into_string().ok()).flatten()
+    let extension = window::extension_beside(&exe).ok_or_else(|| {
+        SignInError::NoWindow(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("no {} beside {}", window::EXTENSION_FILE, exe.display()),
+        ))
+    })?;
+    let paths = setup.paths.clone();
+    let windows = windows.clone();
+    Ok(Box::new(move |request: WindowRequest| {
+        if !hosts.admits_url(&request.authorize) {
+            return WindowAnswer::Failed("the authorize URL isn't on the sign-in window's hosts".into());
+        }
+        if let Err(error) = paths.make_dirs() {
+            return WindowAnswer::Failed(format!("the personal data dir: {error}"));
+        }
+        let log = match FenceLog::open(&paths.fence_log()) {
+            Ok(log) => log,
+            Err(error) => return WindowAnswer::Failed(format!("fence.log can't be opened: {error}")),
+        };
+        windows.ask(WindowConfig {
+            request,
+            bound: Bound::Hosts(hosts),
+            extension,
+            log,
+            setup: Box::new(|guard| guard),
+        })
+    }))
 }
 
 /// Whether `account` can start without a sign-in: a sign-in named its object id, its region is saved, and a refresh
@@ -135,14 +175,14 @@ pub async fn sign_in<S: SecretStore>(
     account: &PersonalAccount,
     clients: &SignInClients,
     store: &S,
-    window: Command,
+    window: Window,
 ) -> Result<PersonalAccount, SignInError> {
     account.check_not_lab(&setup.lab)?;
     let mut authorization = Authorization::new(&clients.entra, &account.upn, Scope::spaces())?;
     if let (Some(oid), Some(tid)) = (&account.oid, &account.tid) {
         authorization = authorization.expect_object_id(oid).expect_tenant(tid);
     }
-    let signed = sign_in_with_window(&clients.token, store, &authorization, window).await?;
+    let signed = sign_in_with(&clients.token, store, &authorization, window).await?;
     let named = account.signed_in_as(
         &signed.account.object_id,
         &signed.account.tenant,
@@ -188,7 +228,7 @@ pub async fn add<S: SecretStore>(
     upn: &str,
     clients: &SignInClients,
     store: &S,
-    window: impl FnOnce(&PersonalAccount) -> Result<Command, SignInError>,
+    window: impl FnOnce(&PersonalAccount) -> Result<Window, SignInError>,
 ) -> Result<PersonalAccount, String> {
     let account = setup.ask_for(upn).map_err(|error| error.to_string())?;
     let signed = match window(&account) {

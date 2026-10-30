@@ -1,4 +1,4 @@
-//! What both personal binaries refuse before anything else (`docs/personal-build.md`, "What agents never build a
+//! What the personal binary refuses before anything else (`docs/personal-build.md`, "What agents never build a
 //! personal build means once the code exists"):
 //!
 //! - **a build with `test-support`**: `teams-fence`'s (a fence over any roster and log, mock origins) or

@@ -71,7 +71,7 @@ below. The rules on sealed types, captures and tokens, agents and protocol notes
 - **Lab binaries get a `WritePermit` only from the lab policy** (`Fence::open_lab`, `Fence::open_lab_account`: roster
   from `lab.toml`, the lab's `fence.log`); `teams-fence`'s `test-support` is only a `[dev-dependencies]` feature.
 - **The personal build (`ngteams`) is the user's Teams** ([docs/personal-build.md](docs/personal-build.md)): the user's
-  own accounts on their desktop, each with its own engine and fence; binaries `ngteams` and `ngteams-signin`; data in
+  own accounts on their desktop, each with its own engine and fence; one binary, `ngteams` (its sign-in window included); data in
   `~/.local/share/ngteams/` and `~/.config/ngteams/`; Secret Service items under `ngteams`; no broker, no sandbox. It
   may do whatever the Teams client lets its user do, to any target. **Its fence logs every send and denies none** (the
   personal policy, behind the `personal` feature only `crates/ngteams` enables, opened only by `Fence::open_personal`,
@@ -82,7 +82,7 @@ below. The rules on sealed types, captures and tokens, agents and protocol notes
   the identity provider hosts `accounts.toml` names. A lab binary refuses the personal data, keyring items and
   accounts and refuses to run with `personal` or `test-support` built in; `ngteams` refuses the lab's.
 - **Agents run the personal build only read-only, and install it only when the user asks.**
-  - Compile `ngteams` in the gate and test it on `teams-mock`; any other `ngteams`/`ngteams-signin` binary an agent
+  - Compile `ngteams` in the gate and test it on `teams-mock`; any other `ngteams` binary an agent
     leaves is a `test-support` one, which refuses to run.
   - Only on the user's explicit request, each time: `scripts/install-personal.sh` (never `cargo build -p ngteams`),
     then optionally start the installed `ngteams` detached, output discarded, and leave it alone.
@@ -128,7 +128,9 @@ cargo test -p <crate> [-p <crate> ...]
 - Split a function over a `clippy.toml` limit; the only exception is an outer `#[expect(clippy::..., reason = "...")]`
   on that item. `#[allow]` and inner `#![allow]`/`#![expect]` are refused. Thresholds are only lowered.
 - A `rust-toolchain.toml` bump is a change of its own. Every crate (spikes too) has `[lints] workspace = true` and is
-  in the root `members`; shared dependency versions live in `[workspace.dependencies]`.
+  in the root `members`; shared dependency versions live in `[workspace.dependencies]`. The one exception to the lints
+  is generated gir bindings (`wpe-webkit-sys`, `wpe-platform-sys`, `wpe-javascriptcore-sys`), listed in
+  `scripts/lint-report.sh`'s `EXEMPT_CRATES`; their safe wrapper (`teams-wpe`) is under every lint.
 - Never edit a released store migration; add a new one (`crates/teams-store`).
 - Keep a value in a form no capture showed, never guess it (`teams_proto::chat::Field::Unknown`); a fixture covers a
   field's whole captured range, not only its common form.
@@ -157,7 +159,14 @@ Undoing one needs a new reason, not a cleanup; the why is in each path's module 
 - Message text is drawn only from sanitized `RichText`; the UI kit is held to `crates/teams-ui/tests/reach.rs`; no Zed
   code is copied (GPL).
 - Call media is libwebrtc's (`crates/teams-media/src/rtc.rs`): relay-only ICE, SDP only in Teams' dialect.
-- The lab's sign-in window stays on loopback; the lab signs in through `proto-lab auth`.
+- The sign-in window (`crates/teams-signin`) is Microsoft's page in a WPE WebKit view (`crates/teams-wpe`, from
+  ngterm) drawn in a GPUI window of the app that asks; its engine is that app's executable run again as a worker
+  (`teams_wpe::worker::serve_if_asked` early in `main`; under `bwrap` with `scripts/fetch-wpe.sh`'s package where WPE
+  WebKit isn't the system's). Every request a page sends is decided and logged to `fence.log` by the guard before it
+  goes (`teams-signin-extension` in every web process); the guard isn't a complete fence
+  (`docs/backlog/webkit-sign-in-guard-redirects.md`), so the network session's only way out is the egress proxy. The
+  lab's window (`teams-signin --lab`) stays on loopback; the lab signs in through `proto-lab auth`. The personal
+  window opens in `ngteams` itself, bound to Entra's and the identity provider's hosts (`egress::HostGate`).
 
 ## Where things live
 

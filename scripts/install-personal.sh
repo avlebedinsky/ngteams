@@ -3,14 +3,17 @@
 # the user to run on their own desktop. **Agents run this script only when the user asks** (CLAUDE.md): it is the only
 # thing that sets the install marker, without which both personal binaries refuse to start.
 #
-# - Builds `ngteams` and `ngteams-signin` with one `cargo build --release -p ngteams`, its target dir apart from
-#   every other build (`target/personal`), so no `test-support` or lab build is unified in.
-# - Installs both binaries and the sign-in window's web process extension into ~/.local/lib/ngteams/ (the window finds
-#   the extension beside itself, `ngteams` finds the window beside itself), `ngteams` linked from ~/.local/bin/, and
-#   `packaging/com.nickalie.ngteams.desktop` into ~/.local/share/applications/ with its `Exec` pointing at the
-#   installed binary (an older install's `ngteams.desktop` removed), beside it the sign-in window's hidden entry
-#   (`com.nickalie.ngteams.signin.desktop`, so the desktop shows that window with the app's icon), and the app icon
-#   (`packaging/icons/`) into ~/.local/share/icons/hicolor/.
+# - Makes sure WPE WebKit is there for the sign-in window's page: the system's `wpewebkit` (2.54 or newer), else the
+#   vendored package (scripts/fetch-wpe.sh, under ~/.cache/ngteams/vendor/, which the binary's rpath names; its page
+#   engine then runs under `bwrap`).
+# - Builds `ngteams` with `cargo build --release -p ngteams`, its target dir apart from every other build
+#   (`target/personal`), so no `test-support` or lab build is unified in. The sign-in window lives in it: it opens
+#   that window itself and runs itself again as the window's page engine.
+# - Installs it and the sign-in window's web process extension into ~/.local/lib/ngteams/ (the app finds the extension
+#   beside itself), `ngteams` linked from ~/.local/bin/, and `packaging/com.nickalie.ngteams.desktop` into
+#   ~/.local/share/applications/ with its `Exec` pointing at the installed binary, and the app icon
+#   (`packaging/icons/`) into ~/.local/share/icons/hicolor/. What an older install left that no longer exists goes
+#   (`ngteams.desktop`, the separate sign-in window's `ngteams-signin` and its desktop entry).
 # - Starts nothing. The first run is the user's: `ngteams`, which asks for the account (docs/personal-build.md,
 #   "The first run").
 #
@@ -28,6 +31,11 @@ if ! command -v nasm > /dev/null; then
   echo "warning: nasm isn't installed: the calls' video codec is built without its SIMD code (slow at 720p);" >&2
   echo "         install nasm, then: cargo clean --release -p openh264-sys2 --target-dir $target, and run this again" >&2
 fi
+if ! pkg-config --atleast-version=2.54 wpe-webkit-2.0 2> /dev/null; then
+  "$root/scripts/fetch-wpe.sh" > /dev/null
+  command -v bwrap > /dev/null || echo "warning: bwrap isn't installed: the sign-in window's page can't run" \
+    "from the vendored WPE WebKit; install bubblewrap (or the distribution's wpewebkit)" >&2
+fi
 TEAMS_PERSONAL_INSTALL=1 cargo build --release -p ngteams --target-dir "$target"
 
 lib="$prefix/lib/ngteams"
@@ -35,19 +43,16 @@ bin="$prefix/bin"
 apps="$prefix/share/applications"
 install -d -m 0755 "$lib" "$bin" "$apps"
 install -m 0755 "$target/release/ngteams" "$lib/ngteams"
-install -m 0755 "$target/release/ngteams-signin" "$lib/ngteams-signin"
 extension="$target/release/libteams_signin_extension.so"
 [[ -f "$extension" ]] || extension="$target/release/deps/libteams_signin_extension.so"
 install -m 0644 "$extension" "$lib/libteams_signin_extension.so"
 ln -sfn "$lib/ngteams" "$bin/ngteams"
 desktop="com.nickalie.ngteams.desktop"
-# the sign-in window's entry, hidden from menus: the desktop finds that window's icon by its app id
-for entry in "$desktop" com.nickalie.ngteams.signin.desktop; do
-  sed "s|^Exec=ngteams$|Exec=$lib/ngteams|" "$root/packaging/$entry" > "$apps/$entry"
-  chmod 0644 "$apps/$entry"
-done
-# The entry's name before the app id became `com.nickalie.ngteams`.
-rm -f "$apps/ngteams.desktop"
+sed "s|^Exec=ngteams$|Exec=$lib/ngteams|" "$root/packaging/$desktop" > "$apps/$desktop"
+chmod 0644 "$apps/$desktop"
+# What older installs left: the entry's name before the app id became `com.nickalie.ngteams`, and the sign-in
+# window's binary and hidden entry from before the window moved into the app.
+rm -f "$apps/ngteams.desktop" "$apps/com.nickalie.ngteams.signin.desktop" "$lib/ngteams-signin"
 icons="$prefix/share/icons/hicolor"
 for icon in "$root"/packaging/icons/hicolor/*/apps/com.nickalie.ngteams.png; do
   size="$(basename "$(dirname "$(dirname "$icon")")")"

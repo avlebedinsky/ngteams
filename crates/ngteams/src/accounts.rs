@@ -10,6 +10,7 @@ use std::sync::Arc;
 use teams_auth::secrets::LazyKeyring;
 use teams_fence::personal::PersonalAccount;
 use teams_fence::{CallFloor, Fence};
+use teams_signin::window::Windows;
 
 use crate::KEYRING_APPLICATION;
 use crate::calling::{CallDevices, PersonalCalls};
@@ -98,15 +99,16 @@ pub fn ready(setup: &Setup, account: &PersonalAccount) -> Result<bool, String> {
         .map_err(|error| error.to_string())
 }
 
-/// Signs `account` in through the sign-in window (blocking: run it off GPUI's foreground), as [`signin::sign_in`].
+/// Signs `account` in through the sign-in window `windows` opens (blocking: run it off GPUI's foreground), as
+/// [`signin::sign_in`].
 ///
 /// # Errors
 /// Why the sign-in stored nothing, as the user is told it ([`signin::failure`]).
-pub fn sign_in(setup: &Setup, account: &PersonalAccount) -> Result<PersonalAccount, String> {
+pub fn sign_in(setup: &Setup, account: &PersonalAccount, windows: &Windows) -> Result<PersonalAccount, String> {
     let store = LazyKeyring::new(KEYRING_APPLICATION);
     runtime()?.block_on(async {
         let clients = SignInClients::live().map_err(|error| error.to_string())?;
-        let signed = match signin::window_command(account) {
+        let signed = match signin::window_for(setup, account, windows) {
             Ok(window) => signin::sign_in(setup, account, &clients, &store, window).await,
             Err(error) => Err(error),
         }
@@ -122,11 +124,12 @@ pub fn sign_in(setup: &Setup, account: &PersonalAccount) -> Result<PersonalAccou
 ///
 /// # Errors
 /// Why it wasn't added, as the user is told it ([`signin::failure`]).
-pub fn add(setup: &Setup, upn: &str) -> Result<PersonalAccount, String> {
+pub fn add(setup: &Setup, upn: &str, windows: &Windows) -> Result<PersonalAccount, String> {
     let store = LazyKeyring::new(KEYRING_APPLICATION);
     runtime()?.block_on(async {
         let clients = SignInClients::live().map_err(|error| error.to_string())?;
-        let signed = signin::add(setup, upn, &clients, &store, signin::window_command).await?;
+        let window = |account: &PersonalAccount| signin::window_for(setup, account, windows);
+        let signed = signin::add(setup, upn, &clients, &store, window).await?;
         log::info!("an account was added (its tenant matched)");
         Ok(signed)
     })

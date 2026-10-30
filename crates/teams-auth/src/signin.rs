@@ -1,7 +1,9 @@
-//! The parent's side of the sign-in window (`teams-signin`, M2 Task 24): Microsoft's sign-in page in a `WebKitGTK`
-//! webview, in a process of its own, which hands back the redirect that carries the authorization code.
+//! The asking side of the sign-in window (`teams-signin`): Microsoft's sign-in page in a WPE `WebKit` view, which hands
+//! back the redirect that carries the authorization code. The personal build shows it in a window of its own app and
+//! hands its answer straight in ([`sign_in_with`]); the lab's `teams-signin --lab` is a process of its own, spoken to
+//! over a pipe ([`sign_in_with_window`]).
 //!
-//! The wire is one JSON line each way:
+//! The pipe's wire is one JSON line each way:
 //! - on the window's stdin, the request: `{"authorize": <the authorize URL>, "redirect_uri": <the registered redirect
 //!   URI>}` ([`WindowRequest`]);
 //! - on its stdout, the answer ([`WindowAnswer`]): `{"redirect": <the URL Entra redirected to>}`, `{"closed": true}`
@@ -260,7 +262,17 @@ pub fn code_from_window(
         .and_then(|()| input.flush())
         .map_err(WindowError::Io)?;
     let answer = read_line(output)?.ok_or(WindowError::NoAnswer)?;
-    match WindowAnswer::parse(&answer)? {
+    code_from_answer(authorization, WindowAnswer::parse(&answer)?)
+}
+
+/// The code in a window's `answer` to `authorization`'s request, once the redirect is shown to answer this request
+/// ([`Authorization::code_from_redirect`]).
+///
+/// # Errors
+/// [`WindowError::Closed`], [`WindowError::Refused`] or [`WindowError::Failed`] when the window gave no redirect;
+/// [`WindowError::Redirect`] when the redirect isn't this request's or carries Entra's refusal.
+pub fn code_from_answer(authorization: &Authorization, answer: WindowAnswer) -> Result<Secret, WindowError> {
+    match answer {
         WindowAnswer::Redirect(url) => Ok(authorization.code_from_redirect(url.expose())?),
         WindowAnswer::Closed => Err(WindowError::Closed),
         WindowAnswer::Refused(host) => Err(WindowError::Refused(host)),
@@ -268,7 +280,31 @@ pub fn code_from_window(
     }
 }
 
-/// Starts `command` (the `teams-signin` binary with its arguments) with its stdin and stdout piped, asks it for
+/// Signs `authorization`'s account in through `window`, which shows the request's page and gives its answer
+/// (blocking, run on tokio's blocking pool: the person signing in takes their time; the personal build's in-app
+/// window, say), then redeems the code ([`TokenClient::exchange_code`]): the refresh token is stored only once the ID
+/// token names the authorization's account.
+///
+/// # Errors
+/// [`WindowSignInError::Window`] when the window gave no code for this request, [`WindowSignInError::Token`] when the
+/// redemption failed or named another account (nothing stored then).
+pub async fn sign_in_with<S: SecretStore>(
+    client: &TokenClient,
+    store: &S,
+    authorization: &Authorization,
+    window: impl FnOnce(WindowRequest) -> WindowAnswer + Send + 'static,
+) -> Result<SignIn, WindowSignInError> {
+    let request = authorization.clone();
+    let code = tokio::task::spawn_blocking(move || {
+        let answer = window(WindowRequest::for_authorization(&request));
+        code_from_answer(&request, answer)
+    })
+    .await
+    .map_err(|error| WindowError::Io(io::Error::other(error.to_string())))??;
+    Ok(client.exchange_code(store, authorization, code.expose()).await?)
+}
+
+/// Starts `command` (the lab's `teams-signin` binary with its arguments) with its stdin and stdout piped, asks it for
 /// `authorization`'s sign-in and reads its answer ([`code_from_window`]); then waits for it to exit, killing it after
 /// [`EXIT_GRACE`]. Blocks until the window answers: the person signing in takes their time.
 ///

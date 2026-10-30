@@ -70,7 +70,7 @@ personal build widens what a lab account may do.
 | credentials | through the broker (`teams-app secrets`) | `KeyringSecretStore::new("ngteams")` in-process: **no broker** |
 | window | only in the UI sandbox (`UI_SANDBOX_DIR`), `DISPLAY` unset | the user's desktop session: **no sandbox** |
 | bus | the sandbox's private bus | the user's session bus (notifications, tray, Secret Service) |
-| sign-in | `proto-lab auth` (the armed Chrome fence) | `ngteams-signin`, a second binary of `crates/ngteams` (below) |
+| sign-in | `proto-lab auth` (the armed Chrome fence) | its own sign-in window, a window of `ngteams` itself (below) |
 | live lock | `~/.local/share/teams-lab/live.lock` around every live command | none: it is the user's own app |
 | calls | the UI sandbox's private PipeWire and fake camera portal; the lab's call rule (a call judged by its entry); the echo service from `lab.toml` | the desktop's PipeWire and camera portal (fixed when built); no call rule: the fence logs every call send and denies none ([Calls](#calls)); the echo service from the web bundle (`teams_proto::TEAMS_ECHO_BOT_MRI`) |
 
@@ -240,26 +240,28 @@ device of their own signed in as that account. The user places it when no lab li
 ## Its sign-in
 
 The lab signs in through `proto-lab auth` in the armed Chrome; the sign-in window (`teams-signin`) is offline-only,
-because its WebKit guard has three known gaps (`docs/backlog/webkit-sign-in-guard-redirects.md`): a synchronous
+because its WebKit guard (WPE WebKit's `send-request` in a web process extension) has three known gaps (`docs/backlog/webkit-sign-in-guard-redirects.md`): a synchronous
 load's redirect and a kept-alive load's redirect after its page is gone are followed without asking it, and a later
 web process whose extension didn't load (a process swap, a restarted process) sends its requests without asking it,
 since arming is checked for the view's first page only. So it can't promise that every request is decided and logged
 before it goes. The personal build has no lab profile, so it needs the window, under a policy for the user's own
 sign-in:
 
-- **A binary of its own, built only with the personal build**: `ngteams-signin`, a second binary of
-  `crates/ngteams`, so it is gated as `Fence::open_personal` is. The window, the guard and the egress code stay in
-  `teams-signin`'s lib; the host gate below and the code that lifts `NOT_LIVE` sit behind a `personal` feature of
-  `teams-signin` that only `crates/ngteams` enables (the same manifest test as `teams-fence/personal`). The lab's
-  `teams-signin` binary keeps only `--lab`, `NOT_LIVE` and its loopback bound, and a normal build of it has no live
-  mode compiled in; built in one cargo invocation with `ngteams`, it gets the feature unified in and refuses to run,
-  as every lab binary does (below). `ngteams` starts `ngteams-signin` from beside its own executable with the
-  authorize request on stdin (as `teams_auth::signin` does now); it logs to the personal `fence.log` through the
-  personal paths, never `LabLocations`. It opens on the user's desktop: the lab window's sandbox check
+- **A window of the personal build's own app**: `ngteams` opens the sign-in window itself, a GPUI window beside its
+  others (`teams_signin::window::Windows`, asked from the sign-in running off GPUI's foreground), so it is gated as
+  `Fence::open_personal` is. The page's engine is `ngteams` run again as a worker process (`teams_wpe::worker`, served
+  right after `ngteams`' refusals), under `bwrap` with the vendored WPE WebKit overlaid where the system has none. The
+  window, the guard and the egress code stay in `teams-signin`'s lib; the host gate below and the code that lifts
+  `NOT_LIVE` sit behind a `personal` feature of `teams-signin` that only `crates/ngteams` enables (the same manifest
+  test as `teams-fence/personal`). The lab's `teams-signin` binary keeps only `--lab`, `NOT_LIVE` and its loopback
+  bound, and a normal build of it has no live mode compiled in; built in one cargo invocation with `ngteams`, it gets
+  the feature unified in and refuses to run, as every lab binary does (below). The window takes the authorize request
+  and hands back the redirect in process (`teams_auth::signin::sign_in_with`); it logs to the personal `fence.log`
+  through the personal paths, never `LabLocations`. It opens on the user's desktop: the lab window's sandbox check
   (`cli::window_refusal`: `DISPLAY` unset, the UI sandbox's compositor) is replaced by `ngteams`' own refusals (no
   `test-support`, the install marker and the data-dir check, below), all of them before a window opens.
-  `scripts/install-personal.sh` builds both binaries with one `cargo build --release -p ngteams` and installs them with
-  the web process extension module beside them.
+  `scripts/install-personal.sh` builds `ngteams` with `cargo build --release -p ngteams` and installs it with the web
+  process extension module beside it.
 - **A bounded set of hosts**: Entra's sign-in host (`login.microsoftonline.com`), its static content hosts (the
   `aadcdn`/`logincdn` hosts the sign-in page loads from), and the federated identity provider's hosts the user
   names in the account's `accounts.toml` entry (`idp_hosts`, empty by default), `https` only. The network session's egress proxy (today
@@ -284,7 +286,7 @@ sign-in:
   nothing the window can reach is a Teams service: whatever a sign-in page sends there changes only the account's
   own sign-in state.
 - **Multi-factor prompts and federated sign-in** (the lab showed neither): the user completes them in the window
-  (Authenticator number matching, a code by text or call, the identity provider's own form). What WebKitGTK can't
+  (Authenticator number matching, a code by text or call, the identity provider's own form). What WPE WebKit can't
   do is not worked around: a passkey or security key (WebAuthn), a client certificate or a device-bound broker
   (Windows Hello, Intune's company portal) fails in the window, and the app says so. Registering a new method
   (`mysignins`, `aka.ms/mfasetup`) isn't on the host list: the user does that in a normal browser.
@@ -363,20 +365,19 @@ The first run, for the user (agents never do any of it):
   installed binary without the mode.
 - **Only on the user's request**, each time: running `scripts/install-personal.sh`, and starting the installed `ngteams`
   detached for the user, its output discarded, then leaving it alone.
-- **Not allowed**: producing an `ngteams` or `ngteams-signin` binary without `test-support` other than through
+- **Not allowed**: producing an `ngteams` binary without `test-support` other than through
   `scripts/install-personal.sh` on the user's request (a plain `cargo build` or `cargo build --release` at the
   workspace root, `cargo build -p ngteams`, `cargo run -p ngteams`, `cargo build --workspace`, `cargo install`); signing it
   in; driving, testing or capturing with it in its sending mode; reading or writing the `ngteams` Secret
   Service items; receiving the user's tokens. Tests of the personal build use temporary dirs and
-  `MemorySecretStore`; a source test checks that only `crates/ngteams`' two `main`s name the `ngteams`
-  application.
+  `MemorySecretStore`; a source test checks that only `crates/ngteams` names the `ngteams` application.
 
 The rule doesn't rest on conduct alone. Two mechanisms make a runnable personal binary hard to produce by accident:
 
 - **`default-members`** in the root `Cargo.toml` lists every member but `crates/ngteams`, so a plain `cargo build`,
   `cargo build --release` or `cargo run` at the root skips it; only `-p ngteams`, `--workspace` or the gate's
   commands reach it, and the gate's leave only `test-support` binaries.
-- **An install marker**: `ngteams` and `ngteams-signin` refuse to run unless they were compiled with an
+- **An install marker**: `ngteams` refuses to run unless it was compiled with an
   environment variable only `scripts/install-personal.sh` sets (read with `option_env!`), checked before anything
   else, the window included. A `cargo build -p ngteams` gives a binary that refuses to start.
 
@@ -401,11 +402,10 @@ sending.
   `teams-lab`. Neither reads, writes or deletes the other's items.
 - **Accounts**: `ngteams` refuses to sign in, or to keep, an account `lab.toml` names (its UPNs and MRIs), so a lab
   account is never driven by the personal fence; the lab binaries know only `lab.toml`'s accounts.
-- **`test-support`**: both refuse a build with it (`teams_fence::test_support_enabled`), as every lab binary does
-  today.
+- **`test-support`**: it refuses a build with it (`teams_fence::test_support_enabled`), as every lab binary does.
 - **The sign-in windows**: the lab's `teams-signin` has only `--lab`, keeps `NOT_LIVE`, its loopback bound and its
-  sandbox check (`cli::window_refusal`), and is a lab binary under every rule here; the personal window is
-  `ngteams-signin`, a binary of `crates/ngteams`, with `ngteams`' refusals in place of the sandbox check. The host
+  sandbox check (`cli::window_refusal`), and is a lab binary under every rule here; the personal window is a
+  window of `ngteams` itself, with `ngteams`' refusals in place of the sandbox check. The host
   gate and the lifted `NOT_LIVE` exist only under `teams-signin/personal`.
 - **The `personal` feature**: only `crates/ngteams/Cargo.toml` enables `teams-fence/personal` and
   `teams-signin/personal` (a manifest test over every workspace manifest). Feature unification would bring them into
@@ -530,7 +530,7 @@ Written after the approval and the lab fence's rewrite, by Task 27:
   and read receipts are writes like any other there. An allow `fence.log` can't take is still `LogUnavailable`.
 - **`accounts.toml`.** Before the first sign-in, `ngteams` opens a window of its own asking for the work account
   (`teams_ui::account_prompt`); "Sign in" adds the UPN there (the user may add `idp_hosts`) and opens the sign-in
-  window (`ngteams-signin --account <UPN>`), which adds the object id and tenant; that account's fence opens
+  window (bound to that account's hosts), which adds the object id and tenant; that account's fence opens
   only once both are there, and a sign-in that goes through starts the app afresh. A UPN typed that is one already is
   that account; another is a new account, taken out again when its sign-in stores nothing while its entry holds only
   its UPN (one with `idp_hosts`, or whose window refused an identity provider's host, stays pending). The rail's "+"

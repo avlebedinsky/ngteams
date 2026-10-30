@@ -363,7 +363,8 @@ impl Running {
             return;
         }
         let setup = self.runner.setup.clone();
-        let signing = cx.background_spawn(async move { accounts::add(&setup, &upn) });
+        let windows = crate::signin::windows(cx);
+        let signing = cx.background_spawn(async move { accounts::add(&setup, &upn, &windows) });
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let signed = signing.await;
             let _ = this.update(cx, |running, cx| {

@@ -1,4 +1,4 @@
-//! The binary's checks and its answer channel, kept apart from GTK so they are tested on their own.
+//! The lab binary's checks and its answer channel, kept apart from GPUI so they are tested on their own.
 
 use std::ffi::OsStr;
 use std::fs::File;
@@ -43,7 +43,7 @@ pub fn is_local_page(url: &str) -> bool {
     matches!(url.scheme(), "http" | "https") && loopback
 }
 
-/// Why a window may not open here: outside the UI sandbox, or with an X display GTK could pick.
+/// Why a window may not open here: outside the UI sandbox, or with an X display set.
 #[must_use]
 pub fn window_refusal(display: Option<&OsStr>) -> Option<String> {
     if display.is_some_and(|display| !display.is_empty()) {
@@ -71,7 +71,7 @@ pub fn personal_refusal() -> Option<&'static str> {
 }
 
 /// Takes stdout for the answer: a private copy of the descriptor (close-on-exec, so no child inherits it) is returned,
-/// and stdout itself now writes to stderr, so nothing GTK, `WebKit` or their processes print can reach the answer.
+/// and stdout itself now writes to stderr, so nothing GPUI, `WebKit` or their processes print can reach the answer.
 ///
 /// # Errors
 /// When the descriptors can't be duplicated.

@@ -2,21 +2,18 @@
 //! `personal` features of `teams-fence`, `teams-signin` and `teams-media` (every workspace manifest read; the last
 //! picks the desktop's PipeWire over the UI sandbox's), and building a lab binary alone resolves them without those
 //! features (`cargo tree`); the workspace's default members leave this crate out; only the install
-//! script sets the install marker, and both binaries refuse to run without it and with `test-support`, before anything
-//! else; only this crate names the personal Secret Service application and opens the personal fence, and it never opens
+//! script sets the install marker, and the binary refuses to run without it and with `test-support`, before anything
+//! else (the sign-in window's page engine included, which it serves as its own worker); only this crate names the personal Secret Service application and opens the personal fence, and it never opens
 //! the lab's; each side refuses the other's data dir, and a lab account.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
 
 use std::fs;
-use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use ngteams::setup::Setup;
-use teams_auth::signin::{WindowAnswer, WindowRequest};
-use teams_auth::token::NATIVE_CLIENT_REDIRECT;
 use teams_fence::lab::{ConfigError, LabLocations, LabPaths};
 use teams_fence::personal::{PersonalAccount, PersonalError, PersonalPaths};
 use toml::Value;
@@ -223,31 +220,22 @@ fn only_the_install_script_sets_the_install_marker_and_only_this_crate_reads_it(
 }
 
 #[test]
-fn both_binaries_refuse_first() {
+fn the_binary_refuses_first() {
     // from the first function on (the imports above it name what comes later)
     let text = fs::read_to_string(root().join("crates/ngteams/src/main.rs")).unwrap();
     let main = &text[text.find("fn main()").unwrap()..];
     let refused = main.find("ngteams::refusal()").unwrap();
-    // the keyring is opened only through `ngteams::accounts`, which `main` reaches after the refusal
-    for later in ["Cli::parse", "Setup::from_env", "gpui_platform", "accounts::"] {
-        assert!(
-            main.find(later).is_some_and(|at| at > refused),
-            "{later} before the refusal"
-        );
-    }
-    let text = fs::read_to_string(root().join("crates/ngteams/src/bin/ngteams-signin.rs")).unwrap();
-    let window = &text[text.find("fn prepare()").unwrap()..];
-    let refused = window.find("ngteams::refusal()").unwrap();
+    // the keyring is opened only through `ngteams::accounts`, which `main` reaches after the refusal; the sign-in
+    // window's page engine is served after it too
     for later in [
-        "window_account",
+        "serve_if_asked",
+        "Cli::parse",
         "Setup::from_env",
-        "PersonalAccount::find",
-        "read_line",
-        "FenceLog::open",
-        "WindowConfig {",
+        "gpui_platform",
+        "accounts::",
     ] {
         assert!(
-            window.find(later).is_some_and(|at| at > refused),
+            main.find(later).is_some_and(|at| at > refused),
             "{later} before the refusal"
         );
     }
@@ -330,7 +318,7 @@ fn every_lab_binary_opening_the_lab_fence_refuses_a_build_with_personal() {
 }
 
 #[test]
-fn both_binaries_built_with_test_support_refuse_and_touch_nothing() {
+fn the_binary_built_with_test_support_refuses_and_touches_nothing() {
     let home = tempfile::tempdir().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_ngteams"))
         .args(["--account", "someone@example.test"])
@@ -343,34 +331,6 @@ fn both_binaries_built_with_test_support_refuse_and_touch_nothing() {
     assert_eq!(output.status.code(), Some(1), "{output:?}");
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("test-support"));
-    assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0, "nothing was created");
-
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ngteams-signin"))
-        .args(["--account", "someone@example.test"])
-        .env_clear()
-        .env("HOME", home.path())
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-    let request = WindowRequest {
-        authorize: "https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize".into(),
-        redirect_uri: NATIVE_CLIENT_REDIRECT.into(),
-    };
-    if let Some(mut stdin) = child.stdin.take() {
-        // it may have refused and gone before reading
-        let _ = stdin.write_all(format!("{}\n", request.to_line()).as_bytes());
-    }
-    let output = child.wait_with_output().unwrap();
-    assert!(!output.status.success());
-    let stdout = String::from_utf8(output.stdout).unwrap();
-    let lines: Vec<&str> = stdout.lines().collect();
-    assert_eq!(lines.len(), 1, "one answer line: {stdout:?}");
-    let WindowAnswer::Failed(reason) = WindowAnswer::parse(lines[0]).unwrap() else {
-        panic!("a failure: {stdout}");
-    };
-    assert!(reason.contains("test-support"), "{reason}");
     assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0, "nothing was created");
 }
 

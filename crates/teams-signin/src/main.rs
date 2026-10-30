@@ -1,5 +1,6 @@
-//! `teams-signin --lab`: the sign-in window (see the library's docs). The request comes as one line on stdin, the
-//! answer goes as one line on stdout (`teams_auth::signin`); nothing else is ever written there.
+//! `teams-signin --lab`: the lab's sign-in window, an app of its own in the UI sandbox (see the library's docs). The
+//! request comes as one line on stdin, the answer goes as one line on stdout (`teams_auth::signin`); nothing else is
+//! ever written there. The page's engine is this executable run again as its worker.
 
 use std::io;
 use std::process::ExitCode;
@@ -11,6 +12,8 @@ use teams_signin::cli::{self, NOT_LIVE};
 use teams_signin::window::{self, Bound, WindowConfig};
 
 fn main() -> ExitCode {
+    // SAFETY: first thing in `main`, while the process has one thread.
+    unsafe { teams_wpe::worker::serve_if_asked(|| {}) };
     // stdout is the answer's alone from here: everything else printed goes to stderr
     let mut out = match cli::take_stdout() {
         Ok(out) => out,

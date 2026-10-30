@@ -22,7 +22,11 @@ members = [
     "crates/teams-store",
     "crates/teams-trouter",
     "crates/teams-ui",
+    "crates/teams-wpe",
     "crates/ui-sandbox",
+    "crates/wpe-javascriptcore-sys",
+    "crates/wpe-platform-sys",
+    "crates/wpe-webkit-sys",
     "spikes/gpui-video",
 ]
 # Every member but the personal build (`crates/ngteams`): a plain `cargo build`, `cargo build --release` or `cargo run`
@@ -47,7 +51,11 @@ default-members = [
     "crates/teams-store",
     "crates/teams-trouter",
     "crates/teams-ui",
+    "crates/teams-wpe",
     "crates/ui-sandbox",
+    "crates/wpe-javascriptcore-sys",
+    "crates/wpe-platform-sys",
+    "crates/wpe-webkit-sys",
     "spikes/gpui-video",
 ]
 # Patched crates.io sources (scripts/vendor-gpui.sh), used through [patch.crates-io], never workspace members.
@@ -85,6 +93,13 @@ teams-store = { path = "crates/teams-store" }
 teams-trouter = { path = "crates/teams-trouter" }
 # the GPUI views and models over the engine
 teams-ui = { path = "crates/teams-ui" }
+# WPE WebKit offscreen (taken from ngterm's `ngterm-wpe`, MIT): the sign-in window's engine, in a worker process of
+# its own, its frames in shared memory and the window's input forwarded to it
+teams-wpe = { path = "crates/teams-wpe" }
+# the gir bindings `teams-wpe` is written over (taken from ngterm, MIT; generated, so they set their own lints)
+wpe-javascriptcore-sys = { path = "crates/wpe-javascriptcore-sys" }
+wpe-platform-sys = { path = "crates/wpe-platform-sys" }
+wpe-webkit-sys = { path = "crates/wpe-webkit-sys" }
 # tests and lab runs only: the private compositor, bus, input and URI opener every GUI process runs in
 ui-sandbox = { path = "crates/ui-sandbox" }
 # The video source hands frames to GPUI's foreground executor: the version GPUI already links.
@@ -115,15 +130,19 @@ getrandom = "0.4.3"
 # are. Wayland only: without `x11`, GPUI's Linux platform has no X11 backend to fall back to.
 gpui-pre = { version = "=0.3.9", default-features = false, features = ["wayland"] }
 gpui-pre-platform = { version = "=0.3.9", default-features = false, features = ["wayland"] }
-# The sign-in window's web process extension (M2 Task 24): `g_variant_*` and `g_signal_connect_data` by hand, on
-# the -sys crates of the GLib that webkit6 and gtk4 link
+# The sign-in window's engine (`teams-wpe`) and its web process extension: GLib and GIO as WPE WebKit 2.54 links
+# them, through gtk-rs; the extension calls `g_variant_*` and `g_signal_connect_data` by hand on the -sys crates
+gio = "0.22.10"
+gio-sys = "0.22.9"
+glib = "0.22.10"
 glib-sys = "0.22.9"
 gobject-sys = "0.22.9"
-# The sign-in window (M2 Task 24): GTK 4 and WebKitGTK 6.0 (2.54 on the machine; `v2_52` is the newest API level the
-# binding has), in `teams-signin`'s own process, apart from GPUI's main loop
-# `v4_10`: webkit6 0.6.1 names `gtk::Accessible`, which gtk4 has only from that API level on (GTK 4.24 here)
-gtk4 = { version = "0.11.5", features = ["v4_10"] }
-webkit6 = { version = "0.6.1", features = ["v2_52"] }
+soup-sys = { package = "soup3-sys", version = "0.9.0" }
+# the WPE bindings' build scripts find WPE WebKit through pkg-config (scripts/pkg-config.sh)
+pkg-config = "0.3.34"
+system-deps = "7.0.8"
+# `teams-wpe`'s input modifiers and page settings
+bitflags = { version = "2.13.2", features = ["serde"] }
 # The UI kit (Apache-2.0; M2 Task 7's audit): built for `gpui-pre =0.3.9`, so it resolves to the vendored patched
 # copy above. It takes `gpui-pre` with its default features, so the workspace's GPUI gains `x11`, `font-kit` and
 # `windows-manifest` (the lab app refuses a set `DISPLAY`); none of the kit's own optional features.

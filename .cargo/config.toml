@@ -1,0 +1,5 @@
+# Every cargo build resolves native libraries through scripts/pkg-config.sh: the system pkg-config, with the vendored
+# WPE WebKit prefix (scripts/fetch-wpe.sh) offered where the system has no WPE WebKit of the bound API (the sign-in
+# window's engine, `teams-wpe`). An exported PKG_CONFIG wins over this one.
+[env]
+PKG_CONFIG = { value = "scripts/pkg-config.sh", relative = true }

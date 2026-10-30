@@ -1,8 +1,12 @@
-//! The window: Microsoft's sign-in page (or, offline, a local fake of it) in a `WebKitGTK` webview behind the guard.
+//! The window: Microsoft's sign-in page (or, offline, a local fake of it) in a WPE `WebKit` view behind the guard,
+//! drawn in a GPUI window ([`crate::view`]).
 //!
-//! [`run`] sets the webview up before anything loads:
+//! [`Page::start`] sets the page up before anything loads:
 //! - the web process extension (`teams-signin-extension`) copied alone into a private directory `WebKit` loads it from,
 //!   given the guard's socket; the guard ([`crate::guard`]) serving on that socket;
+//! - the engine ([`teams_wpe::Host::start_worker`]): this executable run again as a worker process of its own (under
+//!   the vendored package's overlay where WPE `WebKit` isn't the system's), rendering on the CPU into shared memory,
+//!   every web process it starts loading the extension;
 //! - an ephemeral network session (no website data kept), Intelligent Tracking Prevention off, downloads cancelled,
 //!   and its proxy set by the window's [`Bound`]: with [`Bound::Loopback`] it reaches numeric loopback addresses
 //!   directly and anything else only through [`crate::egress::BlackHole`], which refuses it; with `Bound::Hosts` (the
@@ -11,57 +15,55 @@
 //! - the guard in the bound's mode: loopback-only ([`Guard::local_only`]) or bound to the sign-in hosts
 //!   (`Guard::hosts_only`);
 //! - the `WebKit` features the guard can't see or that would send on their own switched off ([`FEATURES_OFF`]), WebRTC,
-//!   developer extras, the page cache and script-opened windows off (`WebKitGTK` 2.50 dropped the hyperlink auditing
-//!   setting and 2.48 the DNS prefetching one; an `<a ping>` goes through the cached-resource loader, so the guard
-//!   decides it like any other request);
-//! - `decide-policy`: no new window, no response `WebKit` can't show (a download), no navigation before the page is
-//!   armed, none off the bound (refused and logged: anything but a page on a loopback address or `about:blank` for
-//!   the loopback window, anything `SignInHosts::admits_url` doesn't take for the personal one), and the redirect to
-//!   the registered redirect URI caught before it loads.
+//!   developer extras, the page cache and script-opened windows off (no new window is ever made: the engine leaves
+//!   `create` unanswered);
+//! - the policy questions ([`Page::navigation`], [`Page::response`]): no new window, no response `WebKit` can't show (a
+//!   download), no navigation before the page is armed, none off the bound (refused and logged: anything but a page on
+//!   a loopback address or `about:blank` for the loopback window, anything `SignInHosts::admits_url` doesn't take for
+//!   the personal one), and the redirect to the registered redirect URI caught before it loads.
 //!
 //! Then it loads `about:blank`, which makes `WebKit` create the page, and opens the authorize URL only once that page
-//! has told the guard it is armed. The redirect, from `decide-policy` or from the guard, whichever comes first, ends the
-//! run with [`WindowAnswer::Redirect`]; closing the window with [`WindowAnswer::Closed`], or with
-//! [`WindowAnswer::Refused`] naming the last host a refused navigation went to that the user could add to the
-//! account's `idp_hosts` (the personal window: `SignInHosts::idp_candidate`, the host alone); the page's web process
-//! ending (a crash: a process `WebKit` started again might not be armed) with [`WEB_PROCESS_ENDED`]. However the run
-//! ends, the view's web process is then terminated and the window destroyed (the black hole, or the host gate, keeps
-//! deciding whatever a kept-alive load still sends from the network process).
+//! (by the id the engine reports for it) has told the guard it is armed. The redirect, from the policy or from the
+//! guard, whichever comes first, ends the run with [`WindowAnswer::Redirect`]; closing the window with
+//! [`WindowAnswer::Closed`], or with [`WindowAnswer::Refused`] naming the last host a refused navigation went to that
+//! the user could add to the account's `idp_hosts` (the personal window: `SignInHosts::idp_candidate`, the host alone);
+//! the page's web process ending (a crash: a process `WebKit` started again might not be armed) with
+//! [`WEB_PROCESS_ENDED`]. However the run ends, the engine is shut down (every web process ended, the worker reaped)
+//! and the window closed (the black hole, or the host gate, keeps deciding whatever might still reach it).
 //!
-//! Not a complete fence (the plan's Task 24): a synchronous load's redirects and a kept-alive load's redirects after
-//! its page is gone never reach the guard (on this machine only the black hole gets them), and only the view's first
-//! arming is waited for: a later web process whose extension failed to load would be unguarded, and it is not
-//! detected (`docs/backlog/webkit-sign-in-guard-redirects.md`).
+//! Not a complete fence: a synchronous load's redirects and a kept-alive load's redirects after its page is gone never
+//! reach the guard (only the egress proxy gets them), and only the view's first arming is waited for: a later web
+//! process whose extension failed to load would be unguarded, and it is not detected
+//! (`docs/backlog/webkit-sign-in-guard-redirects.md`).
 
-use std::cell::{Cell, RefCell};
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
-use gtk4::glib;
-use gtk4::prelude::*;
+use async_channel::Receiver;
+use gpui::{App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, WindowingModes, px, size};
 use teams_auth::redirect::RedirectUri;
 use teams_auth::secrets::Secret;
 use teams_auth::signin::{WindowAnswer, WindowRequest};
 use teams_fence::FenceLog;
 use teams_signin_extension::ENTRY_POINT;
-use webkit6::prelude::*;
-use webkit6::{
-    NetworkProxyMode, NetworkProxySettings, NetworkSession, PolicyDecisionType, Settings, WebContext, WebView,
+use teams_wpe::{
+    Event, FrameMode, Geometry, Host, HostConfig, Load, SessionSpec, Settings, ViewId, ViewSpec, WebProcessExtensions,
 };
 
 use crate::cli::is_local_page;
 use crate::egress::{BYPASS, BlackHole};
 use crate::guard::{Guard, GuardEvent, GuardServer};
+use crate::view::SignInView;
 
-/// The window's Wayland app id: the program name GTK gives a window that has no `GApplication`.
+/// The lab window's Wayland app id (the personal build opens its window under the app's own).
 pub const APP_ID: &str = "com.nickalie.ngteams.signin";
-/// The window's icon, by its name in the desktop's icon theme: the app's (`packaging/icons/`, installed by
-/// `scripts/install-personal.sh`), which the sign-in window's own desktop entry names too.
-pub const ICON_NAME: &str = "com.nickalie.ngteams";
+/// The window's title.
+pub const TITLE: &str = "Sign in to Microsoft Teams";
+/// The window's size, in logical pixels.
+pub const SIZE: (u16, u16) = (520, 720);
 /// The extension module's file name, as cargo builds it.
 pub const EXTENSION_FILE: &str = "libteams_signin_extension.so";
 /// `WebKit` features switched off before anything loads: what `send-request` can't see (`WebSocket`), what sends on its
@@ -86,12 +88,13 @@ pub const FEATURES_OFF: [&str; 14] = [
 ];
 /// How long the page has to report armed.
 pub const ARM_TIMEOUT: Duration = Duration::from_secs(30);
-const PUMP: Duration = Duration::from_millis(20);
+/// How often the guard's events are read on the window's thread.
+pub(crate) const PUMP: Duration = Duration::from_millis(20);
 /// Why the run failed when the page's web process ended.
 pub const WEB_PROCESS_ENDED: &str = "the page's web process ended";
 
 /// The guard's own setup: a hook for tests that add a local own-state rule (`Guard::with_own`).
-pub type GuardSetup = Box<dyn FnOnce(Guard) -> Guard>;
+pub type GuardSetup = Box<dyn FnOnce(Guard) -> Guard + Send>;
 
 /// Where the window may go.
 #[derive(Clone, Debug)]
@@ -142,8 +145,8 @@ pub struct WindowConfig {
     pub setup: GuardSetup,
 }
 
-/// Where the extension module is for the binary at `exe`: next to it, else in its `deps/` (where a `cargo build` of
-/// `teams-signin` leaves it, as a dependency's).
+/// Where the extension module is for the binary at `exe`: next to it, else in its `deps/` (where a `cargo build`
+/// leaves it, as a dependency's).
 #[must_use]
 pub fn extension_beside(exe: &Path) -> Option<PathBuf> {
     let dir = exe.parent()?;
@@ -152,44 +155,151 @@ pub fn extension_beside(exe: &Path) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-/// Runs the window until the redirect is caught, the window is closed, or it fails. Must run on the main thread.
+/// Runs the window as an app of its own until the redirect is caught, the window is closed, or it fails: the lab's
+/// `teams-signin --lab` and the window test. Must run on the main thread, in a program that serves the engine's
+/// worker first thing in its `main` (`teams_wpe::worker::serve_if_asked`).
 #[must_use]
 pub fn run(config: WindowConfig) -> WindowAnswer {
-    match Window::open(config) {
-        Ok(window) => window.wait(),
-        Err(reason) => WindowAnswer::Failed(reason),
+    let answer = Arc::new(std::sync::Mutex::new(None));
+    let kept = Arc::clone(&answer);
+    gpui_platform::linux(WindowingModes::WAYLAND).run(move |cx: &mut App| {
+        open(config, APP_ID, cx, move |given, cx| {
+            *kept.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(given);
+            cx.quit();
+        });
+    });
+    let taken = answer.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+    taken.unwrap_or_else(|| WindowAnswer::Failed("the window ended without an answer".into()))
+}
+
+/// What a sign-in is told once its window answered.
+pub type Done = Box<dyn FnOnce(WindowAnswer, &mut App)>;
+
+/// Opens the sign-in window for `config` in the running app, under `app_id`; `done` gets its answer once (a page that
+/// can't be set up answers at once, with no window).
+pub fn open(config: WindowConfig, app_id: &str, cx: &mut App, done: impl FnOnce(WindowAnswer, &mut App) + 'static) {
+    let page = match Page::start(config) {
+        Ok(page) => page,
+        Err(reason) => {
+            done(WindowAnswer::Failed(reason), cx);
+            return;
+        }
+    };
+    let bounds = Bounds::centered(None, size(px(f32::from(SIZE.0)), px(f32::from(SIZE.1))), cx);
+    let options = WindowOptions {
+        window_bounds: Some(WindowBounds::Windowed(bounds)),
+        titlebar: Some(TitlebarOptions {
+            title: Some(TITLE.into()),
+            ..TitlebarOptions::default()
+        }),
+        app_id: Some(app_id.to_owned()),
+        ..WindowOptions::default()
+    };
+    let done: Done = Box::new(done);
+    let slot = std::rc::Rc::new(std::cell::RefCell::new(Some((page, done))));
+    let taken = std::rc::Rc::clone(&slot);
+    let opened = cx.open_window(options, move |window, cx| {
+        let run = taken.borrow_mut().take();
+        cx.new(|cx| SignInView::new(run, window, cx))
+    });
+    if let Err(error) = opened {
+        // the view never took them: answer here
+        if let Some((page, done)) = slot.borrow_mut().take() {
+            page.shut_down(cx);
+            done(WindowAnswer::Failed(format!("the window can't be opened: {error}")), cx);
+        }
+    }
+}
+
+/// Opens sign-in windows on GPUI's foreground for code that runs elsewhere: the personal build's sign-in, which
+/// runs on a background thread and blocks on the window's answer ([`Windows::ask`]).
+#[derive(Clone)]
+pub struct Windows {
+    asks: async_channel::Sender<(WindowConfig, mpsc::Sender<WindowAnswer>)>,
+}
+
+impl Windows {
+    /// Serves the asks in the running app, each a window under `app_id`, until every [`Windows`] is gone.
+    #[must_use]
+    pub fn serve(app_id: &str, cx: &mut App) -> Self {
+        let (asks, waiting) = async_channel::unbounded::<(WindowConfig, mpsc::Sender<WindowAnswer>)>();
+        let app_id = app_id.to_owned();
+        cx.spawn(async move |cx| {
+            while let Ok((config, reply)) = waiting.recv().await {
+                let app_id = app_id.clone();
+                cx.update(|cx| {
+                    open(config, &app_id, cx, move |answer, _| {
+                        let _ = reply.send(answer);
+                    });
+                });
+            }
+        })
+        .detach();
+        Self { asks }
+    }
+
+    /// Opens a window for `config` and waits for its answer (blocking: never call it on GPUI's foreground).
+    #[must_use]
+    pub fn ask(&self, config: WindowConfig) -> WindowAnswer {
+        let (reply, answer) = mpsc::channel();
+        if self.asks.send_blocking((config, reply)).is_err() {
+            return WindowAnswer::Failed("the app has no window for the sign-in any more".into());
+        }
+        answer
+            .recv()
+            .unwrap_or_else(|_| WindowAnswer::Failed("the sign-in window went without an answer".into()))
     }
 }
 
 /// Where the run is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Stage {
+pub(crate) enum Stage {
     /// `about:blank` loaded; waiting for the page to be armed.
     Arming,
     /// The authorize URL is open.
     Open,
 }
 
-struct Window {
-    main: glib::MainLoop,
-    answer: Rc<RefCell<Option<WindowAnswer>>>,
-    view: WebView,
-    toplevel: gtk4::Window,
-    pump: glib::SourceId,
+/// One sign-in's page: the engine and its view, the guard behind it and what it was asked to open.
+pub(crate) struct Page {
+    pub(crate) host: Arc<Host>,
+    pub(crate) view: ViewId,
+    pub(crate) events: Receiver<Event>,
+    pub(crate) guard_events: mpsc::Receiver<GuardEvent>,
+    guard: Arc<Guard>,
+    redirect: RedirectUri,
+    bound: Bound,
+    authorize: String,
+    stage: Stage,
+    /// The view's page id, once the engine reported it.
+    page_id: Option<u64>,
+    /// The pages the guard was told are armed (arming is per page: `GuardEvent::Armed`).
+    armed: Vec<u64>,
+    deadline: Instant,
+    /// The last refused navigation's host the user could add to `idp_hosts`.
+    refused: Option<String>,
     // kept alive until the run ends: the guard's socket and the extension live there
     _dir: tempfile::TempDir,
     _server: GuardServer,
 }
 
-impl Window {
-    fn open(config: WindowConfig) -> Result<Self, String> {
+/// What the window does after a policy question or a guard event.
+#[derive(Debug)]
+pub(crate) enum Outcome {
+    /// Nothing more.
+    Continue,
+    /// The run ends with this answer.
+    Finish(WindowAnswer),
+}
+
+impl Page {
+    /// Sets everything up (module docs) and loads `about:blank`.
+    pub(crate) fn start(config: WindowConfig) -> Result<Self, String> {
         let redirect =
             RedirectUri::parse(&config.request.redirect_uri).map_err(|_| "the redirect URI isn't usable".to_owned())?;
-        glib::set_prgname(Some(APP_ID));
-        gtk4::init().map_err(|error| format!("GTK can't start: {error}"))?;
         let dir = private_dir()?;
         let extensions = install_extension(&config.extension, dir.path())?;
-        let (sender, events) = mpsc::channel();
+        let (sender, guard_events) = mpsc::channel();
         let guard = Guard::new(config.log, redirect.clone(), sender);
         let guard = Arc::new((config.setup)(match &config.bound {
             Bound::Loopback => guard.local_only(),
@@ -199,107 +309,146 @@ impl Window {
         let socket = dir.path().join("guard.sock");
         let server = GuardServer::start(&socket, Arc::clone(&guard))
             .map_err(|error| format!("the guard's socket can't be bound: {error}"))?;
-        let (proxy, bypass): (String, &[&str]) = match &config.bound {
-            Bound::Loopback => {
-                let black_hole = BlackHole::start(Arc::clone(&guard))
-                    .map_err(|error| format!("the egress proxy can't be bound: {error}"))?;
-                (black_hole.uri(), &BYPASS)
-            }
-            #[cfg(feature = "personal")]
-            Bound::Hosts(hosts) => {
-                let gate = crate::egress::HostGate::start(Arc::clone(&guard), Arc::clone(hosts))
-                    .map_err(|error| format!("the egress gate can't be bound: {error}"))?;
-                // nothing goes direct: every connection asks the gate
-                (gate.uri(), &[])
-            }
-        };
-
-        let context = WebContext::new();
-        context.set_web_process_extensions_directory(&extensions.to_string_lossy());
-        context.set_web_process_extensions_initialization_user_data(&socket.to_string_lossy().to_variant());
-        context.add_path_to_sandbox(dir.path(), true);
-        let session = network_session(&proxy, bypass);
-        let view = WebView::builder()
-            .web_context(&context)
-            .network_session(&session)
-            .settings(&settings()?)
-            .build();
-
-        let main = glib::MainLoop::new(None, false);
-        let answer = Rc::new(RefCell::new(None));
-        let finish = finisher(&main, &answer);
-        let stage = Rc::new(Cell::new(Stage::Arming));
-        let refused = Rc::new(RefCell::new(None));
-        connect_policy(
-            &view,
-            (redirect, guard, config.bound),
-            (Rc::clone(&stage), Rc::clone(&refused)),
-            finish.clone(),
-        );
-        let window = toplevel(&view);
-        let closed = finish.clone();
-        window.connect_close_request(move |_| {
-            closed(match refused.borrow_mut().take() {
-                Some(host) => WindowAnswer::Refused(host),
-                None => WindowAnswer::Closed,
-            });
-            glib::Propagation::Proceed
+        let (proxy, bypass) = egress(&config.bound, &guard)?;
+        let (host, events) = Host::start_worker(HostConfig {
+            frames: FrameMode::Shm,
+            schemes: Vec::new(),
+            extensions: Some(WebProcessExtensions {
+                directory: extensions,
+                data: socket.to_string_lossy().into_owned(),
+                sandbox_paths: vec![dir.path().to_path_buf()],
+            }),
+        })
+        .map_err(|error| format!("the page's engine can't start: {error}"))?;
+        let session = host.create_session(SessionSpec::Guarded {
+            proxy,
+            ignore_hosts: bypass,
         });
-        let ended = finish.clone();
-        view.connect_web_process_terminated(move |_, reason| {
-            ended(WindowAnswer::Failed(format!("{WEB_PROCESS_ENDED} ({reason:?})")));
+        let view = host.create_view(ViewSpec {
+            session,
+            settings: Settings::JAVASCRIPT_MARKUP | Settings::MEDIA_REQUIRES_USER_GESTURE,
+            scripts: Vec::new(),
+            message_handlers: Vec::new(),
+            zoom: 1.0,
+            background: None,
+            geometry: Geometry {
+                width: u32::from(SIZE.0),
+                height: u32::from(SIZE.1),
+                scale: 1.0,
+            },
+            features_off: FEATURES_OFF.iter().map(|feature| (*feature).to_owned()).collect(),
         });
-        let pump = pump(&view, events, stage, config.request.authorize, finish);
-        window.present();
-        view.load_uri("about:blank");
+        host.load(view, Load::Uri("about:blank".into()));
         Ok(Self {
-            main,
-            answer,
+            host: Arc::new(host),
             view,
-            toplevel: window,
-            pump,
+            events,
+            guard_events,
+            guard,
+            redirect,
+            bound: config.bound,
+            authorize: config.request.authorize,
+            stage: Stage::Arming,
+            page_id: None,
+            armed: Vec::new(),
+            deadline: Instant::now() + ARM_TIMEOUT,
+            refused: None,
             _dir: dir,
             _server: server,
         })
     }
 
-    /// Runs until the answer, then tears the page down: its web process terminated, the window destroyed.
-    fn wait(self) -> WindowAnswer {
-        self.main.run();
-        self.pump.remove();
-        self.view.terminate_web_process();
-        self.toplevel.destroy();
-        self.answer
-            .borrow_mut()
-            .take()
-            .unwrap_or_else(|| WindowAnswer::Failed("the window ended without an answer".into()))
+    /// The engine reported the view's page id.
+    pub(crate) fn created(&mut self, page_id: u64) {
+        self.page_id = Some(page_id);
+        self.open_once_armed();
+    }
+
+    /// Opens the authorize URL once the view's own page is armed (the engine's report of its id and the guard's of its
+    /// arming come on different channels, in either order).
+    fn open_once_armed(&mut self) {
+        let armed = self.page_id.is_some_and(|id| self.armed.contains(&id));
+        if armed && self.stage == Stage::Arming {
+            self.stage = Stage::Open;
+            self.host.load(self.view, Load::Uri(self.authorize.clone()));
+        }
+    }
+
+    /// A navigation question: answered here, the redirect caught.
+    pub(crate) fn navigation(&mut self, uri: &str, method: Option<&str>, new_window: bool) -> (bool, Outcome) {
+        if new_window {
+            return (false, Outcome::Continue);
+        }
+        match navigation(uri, self.stage, &self.redirect, &self.bound) {
+            Navigation::Redirect => {
+                self.guard.caught_navigation(uri);
+                (false, Outcome::Finish(WindowAnswer::Redirect(Secret::new(uri))))
+            }
+            Navigation::Use => (true, Outcome::Continue),
+            Navigation::Refuse => {
+                self.guard.refuse(method.unwrap_or("GET"), uri);
+                if let Some(host) = self.bound.idp_candidate(uri) {
+                    self.refused = Some(host);
+                }
+                (false, Outcome::Continue)
+            }
+            Navigation::Hold => (false, Outcome::Continue),
+        }
+    }
+
+    /// A response question: only what `WebKit` can show goes on (a download never does).
+    pub(crate) const fn response(mime_supported: bool) -> bool {
+        mime_supported
+    }
+
+    /// Reads the guard's events: the authorize URL opens once the view's own page is armed; a caught redirect ends
+    /// the run; no arming within [`ARM_TIMEOUT`] fails it.
+    pub(crate) fn pump(&mut self) -> Outcome {
+        while let Ok(event) = self.guard_events.try_recv() {
+            match event {
+                GuardEvent::Armed { page } => self.armed.push(page),
+                GuardEvent::Redirect(url) => return Outcome::Finish(WindowAnswer::Redirect(url)),
+            }
+        }
+        self.open_once_armed();
+        if self.stage == Stage::Arming && Instant::now() > self.deadline {
+            return Outcome::Finish(WindowAnswer::Failed("the page wasn't armed in time".into()));
+        }
+        Outcome::Continue
+    }
+
+    /// The answer when the window is closed before a redirect.
+    pub(crate) fn closed(&mut self) -> WindowAnswer {
+        match self.refused.take() {
+            Some(host) => WindowAnswer::Refused(host),
+            None => WindowAnswer::Closed,
+        }
+    }
+
+    /// Shuts the engine down off the foreground: every web process ended, the worker reaped.
+    pub(crate) fn shut_down(self, cx: &App) {
+        let host = Arc::clone(&self.host);
+        cx.background_spawn(async move { host.shutdown() }).detach();
     }
 }
 
-type Finish = Rc<dyn Fn(WindowAnswer)>;
-
-/// The one way the run ends: the first answer is kept and the main loop quits.
-fn finisher(main: &glib::MainLoop, answer: &Rc<RefCell<Option<WindowAnswer>>>) -> Finish {
-    let main = main.clone();
-    let answer = Rc::clone(answer);
-    Rc::new(move |given| {
-        let mut kept = answer.borrow_mut();
-        if kept.is_none() {
-            *kept = Some(given);
-            main.quit();
+/// The network session's proxy and what bypasses it, for `bound`: the black hole with numeric loopback bypassing it,
+/// or the personal window's host gate with nothing bypassing it.
+fn egress(bound: &Bound, guard: &Arc<Guard>) -> Result<(String, Vec<String>), String> {
+    match bound {
+        Bound::Loopback => {
+            let black_hole = BlackHole::start(Arc::clone(guard))
+                .map_err(|error| format!("the egress proxy can't be bound: {error}"))?;
+            Ok((black_hole.uri(), BYPASS.iter().map(|host| (*host).to_owned()).collect()))
         }
-    })
-}
-
-/// The window holding `view`, titled and with the app's icon.
-fn toplevel(view: &WebView) -> gtk4::Window {
-    gtk4::Window::builder()
-        .title("Sign in to Microsoft Teams")
-        .icon_name(ICON_NAME)
-        .default_width(520)
-        .default_height(720)
-        .child(view)
-        .build()
+        #[cfg(feature = "personal")]
+        Bound::Hosts(hosts) => {
+            let gate = crate::egress::HostGate::start(Arc::clone(guard), Arc::clone(hosts))
+                .map_err(|error| format!("the egress gate can't be bound: {error}"))?;
+            // nothing goes direct: every connection asks the gate
+            Ok((gate.uri(), Vec::new()))
+        }
+    }
 }
 
 /// A private directory (`0700`) for the guard's socket and the extension.
@@ -331,102 +480,16 @@ fn install_extension(module: &Path, dir: &Path) -> Result<PathBuf, String> {
     Ok(extensions)
 }
 
-/// An ephemeral network session (no website data), ITP off, downloads cancelled, reaching anything but `bypass` only
-/// through the proxy at `proxy` (the black hole, or the personal window's host gate with nothing bypassing it).
-fn network_session(proxy: &str, bypass: &[&str]) -> NetworkSession {
-    let session = NetworkSession::new_ephemeral();
-    session.set_itp_enabled(false);
-    session.connect_download_started(|_, download| download.cancel());
-    let proxy = NetworkProxySettings::new(Some(proxy), bypass);
-    session.set_proxy_settings(NetworkProxyMode::Custom, Some(&proxy));
-    session
-}
-
-/// The webview's settings: [`FEATURES_OFF`] and the rest of the list in the module docs.
-fn settings() -> Result<Settings, String> {
-    let settings = Settings::new();
-    let features = Settings::all_features().ok_or("WebKit lists no features")?;
-    for wanted in FEATURES_OFF {
-        let feature = (0..features.length())
-            .filter_map(|index| features.get(index))
-            .find(|feature| feature.identifier().as_deref() == Some(wanted))
-            .ok_or_else(|| format!("WebKit has no feature {wanted} to switch off"))?;
-        settings.set_feature_enabled(&feature, false);
-    }
-    settings.set_enable_webrtc(false);
-    settings.set_enable_developer_extras(false);
-    settings.set_enable_page_cache(false);
-    settings.set_javascript_can_open_windows_automatically(false);
-    Ok(settings)
-}
-
-/// `decide-policy` and `create`: see the module docs. A refused navigation's host the user could add to `idp_hosts`
-/// is kept in `refused` (the last one), for the answer when the window is closed.
-fn connect_policy(
-    view: &WebView,
-    (redirect, guard, bound): (RedirectUri, Arc<Guard>, Bound),
-    (stage, refused): (Rc<Cell<Stage>>, Rc<RefCell<Option<String>>>),
-    finish: Finish,
-) {
-    view.connect_create(|_, _| None);
-    view.connect_decide_policy(move |_, decision, kind| match kind {
-        PolicyDecisionType::NavigationAction => {
-            let request = decision
-                .downcast_ref::<webkit6::NavigationPolicyDecision>()
-                .and_then(webkit6::NavigationPolicyDecision::navigation_action)
-                .and_then(|action| action.request());
-            let uri = request.as_ref().and_then(webkit6::URIRequest::uri).map(String::from);
-            let Some(uri) = uri else {
-                decision.ignore();
-                return true;
-            };
-            match navigation(&uri, stage.get(), &redirect, &bound) {
-                Navigation::Redirect => {
-                    decision.ignore();
-                    guard.caught_navigation(&uri);
-                    finish(WindowAnswer::Redirect(Secret::new(uri.as_str())));
-                }
-                Navigation::Use => decision.use_(),
-                Navigation::Refuse => {
-                    decision.ignore();
-                    let method = request.as_ref().and_then(webkit6::URIRequest::http_method);
-                    guard.refuse(method.as_deref().unwrap_or("GET"), &uri);
-                    if let Some(host) = bound.idp_candidate(&uri) {
-                        *refused.borrow_mut() = Some(host);
-                    }
-                }
-                Navigation::Hold => decision.ignore(),
-            }
-            true
-        }
-        PolicyDecisionType::Response => {
-            let shown = decision
-                .downcast_ref::<webkit6::ResponsePolicyDecision>()
-                .is_some_and(webkit6::ResponsePolicyDecision::is_mime_type_supported);
-            if !shown {
-                decision.ignore();
-                return true;
-            }
-            false
-        }
-        // a new window, or anything WebKit adds later
-        _ => {
-            decision.ignore();
-            true
-        }
-    });
-}
-
 /// What the navigation policy does with a navigation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Navigation {
     /// The registered redirect: caught, never loaded, handed to the parent.
     Redirect,
-    /// `about:blank`, or a page on a loopback address once the page is armed.
+    /// `about:blank`, or a page on the bound once the page is armed.
     Use,
     /// Anything else before the page is armed: ignored.
     Hold,
-    /// Off loopback once the page is armed: ignored and logged as denied.
+    /// Off the bound once the page is armed: ignored and logged as denied.
     Refuse,
 }
 
@@ -443,35 +506,6 @@ fn navigation(uri: &str, stage: Stage, redirect: &RedirectUri, bound: &Bound) ->
     } else {
         Navigation::Refuse
     }
-}
-
-/// Moves the guard's events onto the main loop: the authorize URL opens once the view's own page is armed; a caught
-/// redirect ends the run; no arming within [`ARM_TIMEOUT`] fails it.
-fn pump(
-    view: &WebView,
-    events: mpsc::Receiver<GuardEvent>,
-    stage: Rc<Cell<Stage>>,
-    authorize: String,
-    finish: Finish,
-) -> glib::SourceId {
-    let view = view.clone();
-    let deadline = Instant::now() + ARM_TIMEOUT;
-    glib::timeout_add_local(PUMP, move || {
-        while let Ok(event) = events.try_recv() {
-            match event {
-                GuardEvent::Armed { page } if page == view.page_id() && stage.get() == Stage::Arming => {
-                    stage.set(Stage::Open);
-                    view.load_uri(&authorize);
-                }
-                GuardEvent::Armed { .. } => {}
-                GuardEvent::Redirect(url) => finish(WindowAnswer::Redirect(url)),
-            }
-        }
-        if stage.get() == Stage::Arming && Instant::now() > deadline {
-            finish(WindowAnswer::Failed("the page wasn't armed in time".into()));
-        }
-        glib::ControlFlow::Continue
-    })
 }
 
 #[cfg(test)]

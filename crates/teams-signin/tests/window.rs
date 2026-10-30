@@ -1,4 +1,4 @@
-//! The sign-in window in the UI sandbox, on a local fake sign-in page (`harness = false`: GTK runs on the process's
+//! The sign-in window in the UI sandbox, on a local fake sign-in page (`harness = false`: GPUI runs on the process's
 //! main thread).
 //!
 //! The parent runs a local HTTP server that records every request it gets, and a TCP listener for `WebSockets` that
@@ -25,8 +25,9 @@
 //!   The listeners must accept no connection, the gap's two redirects must reach the window's refusing proxy (its
 //!   `GET http://…` and `CONNECT host:port` denied in `fence.log`), and the rest must be denied in `fence.log`. Without a
 //!   non-loopback address the listeners' check is skipped with a note (an error under `GPUI_SMOKE_REQUIRE=1`).
-//! - `crash`: once the page is up the window has its app id in niri's window list; then the test kills the child's
-//!   web processes, and the window must answer that its page's web process ended.
+//! - `crash`: once the page (a fake sign-in form) is up the window has its app id in niri's window list and is kept as
+//!   `target/ui-shots/teams-signin-window.png`; then the test kills the child's web processes, and the window must
+//!   answer that its page's web process ended.
 //!
 //! Without weston 15, niri or `dbus-daemon` it says so and passes, unless `GPUI_SMOKE_REQUIRE=1`.
 
@@ -58,6 +59,9 @@ const RUN: Duration = Duration::from_secs(120);
 const WAIT: Duration = Duration::from_secs(30);
 
 fn main() -> ExitCode {
+    // the page's engine is this executable run again as its worker
+    // SAFETY: first thing in `main`, while the process has one thread.
+    unsafe { teams_wpe::worker::serve_if_asked(|| {}) };
     let outcome = match std::env::var(MODE_ENV).as_deref() {
         Ok(scenario @ ("channels" | "gaps" | "remote" | "crash")) => child(scenario),
         Ok(other) => Err(format!("unknown mode {other}").into()),
@@ -221,7 +225,6 @@ fn run_scenario(sandbox: &Sandbox, scenario: &str, remote: &Remote, during: Duri
             ("XDG_DATA_HOME", &data),
             ("XDG_CACHE_HOME", &cache),
             ("XDG_CONFIG_HOME", &config),
-            ("GTK_A11Y", "none"),
         ],
     )?;
     let mut running = Running::new(child)?;
@@ -504,9 +507,10 @@ fn kill_web_processes(sandbox: &Sandbox, running: &mut Running, server: &Server)
     if !windows.contains(window::APP_ID) {
         return Err(format!("no window with the app id {}: {windows}", window::APP_ID).into());
     }
+    keep_screenshot(sandbox)?;
     let web_processes: Vec<u32> = descendants(running.pid())
         .into_iter()
-        .filter(|(_, name)| name.starts_with("WebKitWebProces"))
+        .filter(|(_, name)| name.starts_with("WPEWebProcess"))
         .map(|(pid, _)| pid)
         .collect();
     if web_processes.is_empty() {
@@ -520,6 +524,15 @@ fn kill_web_processes(sandbox: &Sandbox, running: &mut Running, server: &Server)
             return Err(format!("web process {pid} couldn't be killed").into());
         }
     }
+    Ok(())
+}
+
+/// The window with its page drawn, kept as `target/ui-shots/teams-signin-window.png` (never committed).
+fn keep_screenshot(sandbox: &Sandbox) -> SandboxResult {
+    let shot = sandbox.screenshot("signin-window.png", true)?;
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ui-shots");
+    fs::create_dir_all(&dir)?;
+    fs::copy(shot, dir.join("teams-signin-window.png"))?;
     Ok(())
 }
 
@@ -714,9 +727,12 @@ fn route(path: &str, port: u16, hosts: &Hosts) -> Response {
     match path.split('?').next().unwrap_or_default() {
         "/authorize" if path.contains("scenario=channels") => page(&channels_page(hosts.web_socket_port, &redirect_to)),
         "/authorize" if path.contains("scenario=remote") => page(&remote_page(http)),
-        "/authorize" if path.contains("scenario=crash") => {
-            page("<script>fetch('/report?ready=1').catch(() => {});</script>")
-        }
+        "/authorize" if path.contains("scenario=crash") => page(
+            "<div style=\"font-family: sans-serif; margin: 48px 40px\"><h2>Sign in</h2>\
+                 <input style=\"width: 100%; font-size: 16px\" placeholder=\"someone@example.test\">\
+                 <p><button>Next</button></p></div>\
+                 <script>setTimeout(() => fetch('/report?ready=1').catch(() => {}), 1000);</script>",
+        ),
         "/authorize" => page(&gaps_page()),
         "/gap-http" => redirect("302 Found", &format!("http://{http}/gap-http-target")),
         "/gap-https" => redirect("302 Found", &format!("https://{tls}/gap-https-target")),

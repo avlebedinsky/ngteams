@@ -1,9 +1,0 @@
-[Desktop Entry]
-Type=Application
-Name=ngteams sign-in
-Comment=Microsoft's sign-in window of ngteams
-Exec=ngteams
-Icon=com.nickalie.ngteams
-NoDisplay=true
-Terminal=false
-StartupWMClass=com.nickalie.ngteams.signin

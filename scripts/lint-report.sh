@@ -7,7 +7,7 @@
 #   with its file, line, item, lint and reason, then the count, an expect wrapped in #[cfg_attr(..., expect(...))]
 #   included. Markdown, so CI can append it to the job summary.
 # - Fails (exit 1) on any inner #![allow(...)] or #![expect(...)], or an inner #![cfg_attr(...)] carrying one,
-#   outside generated -sys crates that set their own lints (listed in EXEMPT_CRATES; none yet): an exception must be
+#   outside generated -sys crates that set their own lints (listed in EXEMPT_CRATES): an exception must be
 #   an outer #[expect] on the one item, with a reason.
 #
 # Usage: scripts/lint-report.sh [ROOT]   (default: the repository root)
@@ -31,7 +31,7 @@ COMPLEXITY = {
     "struct_excessive_bools",
 }
 # generated -sys crates (bindgen/gir output), by exact name; their safe wrappers stay under every lint
-EXEMPT_CRATES: set[str] = set()
+EXEMPT_CRATES: set[str] = {"wpe-webkit-sys", "wpe-platform-sys", "wpe-javascriptcore-sys"}
 # An attribute that is, or may carry (cfg_attr), a lint level; group 1 is "!" for an inner one.
 ATTRIBUTE = re.compile(r"#(!?)\[\s*(allow|expect|cfg_attr)\s*\(")
 LEVEL = re.compile(r"\b(allow|expect)\s*\(")

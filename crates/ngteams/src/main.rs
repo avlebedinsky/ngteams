@@ -39,6 +39,9 @@ fn main() -> ExitCode {
         eprintln!("teams: {refusal}");
         return ExitCode::FAILURE;
     }
+    // run again as the sign-in window's page engine (`teams_wpe::worker`), it serves that and ends here
+    // SAFETY: before anything else but the refusal (which starts no thread), while the process has one thread.
+    unsafe { teams_wpe::worker::serve_if_asked(|| {}) };
     let cli = Cli::parse();
     match &cli.command {
         Some(Subcommand::Secrets { account, fd }) => return broker(account, *fd),
@@ -74,7 +77,10 @@ fn run(cli: &Cli) -> Result<Outcome, String> {
     }
     if let Some(asked) = cli.account.as_deref() {
         // the shortcut: that account, through the sign-in window at once when it isn't signed in
-        signed_in(&setup, asked)?;
+        let account = setup.ask_for(asked).map_err(|error| error.to_string())?;
+        if !(account.is_signed_in() && accounts::ready(&setup, &account)?) {
+            return sign_in_first(setup, asked.to_owned());
+        }
     }
     let (ready, unready) = ready_accounts(&setup)?;
     if ready.is_empty() {
@@ -334,7 +340,8 @@ fn sign_in_from_prompt(
     restart: Rc<Cell<bool>>,
     cx: &mut App,
 ) {
-    let signing = cx.background_spawn(async move { accounts::add(&setup, &upn) });
+    let windows = ngteams::signin::windows(cx);
+    let signing = cx.background_spawn(async move { accounts::add(&setup, &upn, &windows) });
     cx.spawn(async move |cx: &mut AsyncApp| match signing.await {
         Ok(_) => {
             restart.set(true);
@@ -348,17 +355,35 @@ fn sign_in_from_prompt(
     .detach();
 }
 
-/// The account `upn` (`--account`), signed in: added when it is new, then through the sign-in window first when it
-/// isn't signed in yet (no object id, region or refresh token); one that doesn't go through leaves its entry as the
-/// rail's "+" does ([`accounts::add`]).
-fn signed_in(setup: &Setup, upn: &str) -> Result<PersonalAccount, String> {
-    let account = setup.ask_for(upn).map_err(|error| error.to_string())?;
-    if account.is_signed_in() && accounts::ready(setup, &account)? {
-        return Ok(account);
+/// The account `upn` (`--account`) that isn't signed in yet (no object id, region or refresh token): added when it is
+/// new, then its sign-in window, alone; one that goes through starts the app afresh (`main`: the process runs itself
+/// again, the account now ready), one that doesn't leaves its entry as the rail's "+" does ([`accounts::add`]) and
+/// ends the app.
+fn sign_in_first(setup: Setup, upn: String) -> Result<Outcome, String> {
+    let restart = Rc::new(Cell::new(false));
+    let failure = Rc::new(std::cell::RefCell::new(None));
+    let (restart_in_app, failure_in_app) = (Rc::clone(&restart), Rc::clone(&failure));
+    gpui_platform::linux(WindowingModes::WAYLAND).run(move |cx: &mut App| {
+        // the sign-in window is the only one: closing it mustn't quit before the sign-in is done
+        cx.set_quit_mode(gpui::QuitMode::Explicit);
+        let windows = ngteams::signin::windows(cx);
+        let signing = cx.background_spawn(async move { accounts::add(&setup, &upn, &windows) });
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            match signing.await {
+                Ok(signed) => {
+                    eprintln!("teams: signed in as {} (its tenant matched)", signed.upn);
+                    restart_in_app.set(true);
+                }
+                Err(error) => *failure_in_app.borrow_mut() = Some(error),
+            }
+            cx.update(|cx| cx.quit());
+        })
+        .detach();
+    });
+    if let Some(error) = failure.borrow_mut().take() {
+        return Err(error);
     }
-    let signed = accounts::add(setup, upn)?;
-    eprintln!("teams: signed in as {} (its tenant matched)", signed.upn);
-    Ok(signed)
+    Ok(if restart.get() { Outcome::Restart } else { Outcome::Quit })
 }
 
 /// Once an account is signed out: its sign-in window again, off GPUI's foreground; a sign-in that goes through quits
@@ -367,7 +392,8 @@ fn signed_in(setup: &Setup, upn: &str) -> Result<PersonalAccount, String> {
 fn sign_in_again(setup: Setup, account: PersonalAccount, restart: Rc<Cell<bool>>) -> SignInAgain {
     Rc::new(move |cx: &mut App| {
         let (setup, account, restart) = (setup.clone(), account.clone(), Rc::clone(&restart));
-        let signing = cx.background_spawn(async move { accounts::sign_in(&setup, &account) });
+        let windows = ngteams::signin::windows(cx);
+        let signing = cx.background_spawn(async move { accounts::sign_in(&setup, &account, &windows) });
         cx.spawn(async move |cx: &mut AsyncApp| match signing.await {
             Ok(_) => {
                 restart.set(true);

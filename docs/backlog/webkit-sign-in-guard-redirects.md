@@ -17,6 +17,11 @@ which logs its decision to `fence.log` and answers before the request goes. Two 
 - **A kept-alive load's redirect after its page is gone** (`NetworkResourceLoader.cpp:1476–1483`): the window test sees
   a kept-alive `GET` redirected 1.5 s after the page navigated away reach its target with no decision.
 
+The window now renders with WPE WebKit 2.54.1 instead of WebKitGTK (`teams-wpe`, the engine in a worker process of the
+app's own executable). That changes nothing here: WPE and WebKitGTK are ports of the same WebKit sources, the network
+process and its `NetworkResourceLoader` are shared code, and WPE's web process extension API offers the same
+`send-request` and no other per-request hook. Both gaps, and the unchecked later web process below, stay as they are.
+
 `NetworkLoadChecker` doesn't apply content rules on those paths (`NetworkLoadChecker.h:199`, `.cpp:625–628`), a content
 rule list couldn't log a decision anyway, and WebKitGTK 2.54.1 has no setting that turns synchronous XHR or keepalive
 off. Either gap breaks "every decision logged before the request goes", so the guard isn't a complete fence and
