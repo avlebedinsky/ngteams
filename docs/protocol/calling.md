@@ -206,9 +206,8 @@ the mixer's control plane, the media descriptions and the bandwidth seed) and th
 - **Codecs**: every line is restricted to what the web client offers, Opus on audio and H.264 in packetization mode 1
   (with its retransmissions) on video, by libwebrtc's codec preferences; libwebrtc numbers them itself and sends
   with the answer's numbers, as the browser does.
-- **Hardware**: libwebrtc encodes H.264 through VA-API where the build found libva and the machine's driver takes
-  it, otherwise in software, and decodes in software. NVIDIA's NVENC and NVDEC are left out of the build (`CUDA_HOME`
-  unset): with a decoder alive at exit, NVIDIA's decoder library hangs the process in its exit handler. Its encoder follows its own bandwidth estimate within the call's bounds
+- **Hardware**: libwebrtc encodes and decodes H.264 in software. NVIDIA's NVENC and NVDEC are left out of the build
+  (`CUDA_HOME` unset): with a decoder alive at exit, NVIDIA's decoder library hangs the process in its exit handler. Its encoder follows its own bandwidth estimate within the call's bounds
   (`EncoderSettings`: up to 1.5 Mb/s and 30 fps; a group call's 600 kb/s and 640 by 360).
 - **The audio devices stay ours**: libwebrtc runs with no audio device of its own (LiveKit's synthetic one paces its
   playout every 10 ms); the session hands it the microphone's frames after libwebrtc's own audio processing module

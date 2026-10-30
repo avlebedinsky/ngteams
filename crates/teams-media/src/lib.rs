@@ -1,7 +1,7 @@
 //! A call's media, apart from its signaling (`docs/protocol/calling.md`, `docs/protocol/calling-echo.md`).
 //!
-//! libwebrtc carries it ([`rtc`]): ICE through Teams' relay only, DTLS-SRTP, Opus and H.264 (VA-API's encoder where
-//! the machine has one), the jitter buffer, bandwidth estimation, retransmissions and A/V sync. What is ours:
+//! libwebrtc carries it ([`rtc`]): ICE through Teams' relay only, DTLS-SRTP, Opus and H.264 (its software
+//! encoder), the jitter buffer, bandwidth estimation, retransmissions and A/V sync. What is ours:
 //!
 //! - [`sdp`]: Teams' SDP dialect, `application/sdp-ngc-1.0`, to and from libwebrtc's standard SDP, both ways and on
 //!   both sides of a call: our offer written for the call start and the media controller's or the callee's answer

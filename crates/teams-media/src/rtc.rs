@@ -1,8 +1,8 @@
 //! The call's WebRTC peer: one libwebrtc `PeerConnection`, relayed through the call's TURN servers only.
 //!
 //! libwebrtc does everything below the SDP: ICE (relay-only: [`IceTransportsType::Relay`], so it gathers relayed
-//! candidates alone and no local address goes into an offer), DTLS-SRTP, Opus and H.264 (VA-API's encoder where the
-//! machine has one), the jitter buffer, bandwidth estimation, retransmissions and A/V sync. What stays ours:
+//! candidates alone and no local address goes into an offer), DTLS-SRTP, Opus and H.264 (its software encoder:
+//! [`Peer::attach_video`]), the jitter buffer, bandwidth estimation, retransmissions and A/V sync. What stays ours:
 //!
 //! - **The lines** of a Teams call: an offer of ours has the lines the web client's has (a 1:1 call's audio, and its
 //!   video line once the camera turns; a group call's audio, the main video line, the receiving lines, the sharing
@@ -39,7 +39,7 @@ use libwebrtc::peer_connection_factory::{
     ContinualGatheringPolicy, IceServer, IceTransportsType, PeerConnectionFactory, RtcConfiguration,
 };
 use libwebrtc::rtp_parameters::{DegradationPreference, RtpCodecCapability};
-use libwebrtc::rtp_sender::RtpSender;
+use libwebrtc::rtp_sender::{RtpSender, VideoEncoderBackend};
 use libwebrtc::rtp_transceiver::{RtpTransceiver, RtpTransceiverDirection, RtpTransceiverInit};
 use libwebrtc::session_description::{SdpType, SessionDescription};
 use libwebrtc::video_source::VideoResolution;
@@ -334,6 +334,9 @@ struct Video {
     settings: EncoderSettings,
     /// The camera is on: the main video line's encoding is active.
     sending: bool,
+    /// An offer of ours was rolled back since the last negotiation: the send stream libwebrtc makes again for the line
+    /// keeps its SSRC and gets no source, so the track is put on the sender again ([`Peer::negotiated`]).
+    rolled_back: bool,
 }
 
 /// The call's peer.
@@ -502,6 +505,7 @@ impl Peer {
             sender: None,
             settings,
             sending: false,
+            rolled_back: false,
         });
         Ok(())
     }
@@ -536,7 +540,8 @@ impl Peer {
     }
 
     /// Puts the camera's track on the main video line (a new one, or the far end's offer's first), once the video
-    /// started; whether it is there.
+    /// started; whether it is there. It is encoded in software: the prebuilt's VA-API encoder renders no slice in a
+    /// real call (`vaRenderPicture` refuses its packed slice header), so nothing of it would ever be sent.
     fn attach_video(&self) -> Result<bool, Error> {
         let mut video = self.video();
         let Some(video) = video.as_mut() else {
@@ -547,6 +552,7 @@ impl Peer {
                 .pc
                 .add_track(MediaStreamTrack::Video(video.track.clone()), &[STREAM_ID])
                 .map_err(rtc)?;
+            sender.set_video_encoder_backend(VideoEncoderBackend::Software);
             video.sender = Some(sender);
             apply_sending(video);
         }
@@ -639,7 +645,11 @@ impl Peer {
         }
         let rollback = SessionDescription::parse("", SdpType::Rollback)
             .map_err(|error| Error::Rtc(format!("{}: {}", error.description, error.line)))?;
-        block_on(self.pc.set_local_description(rollback)).map_err(rtc)
+        block_on(self.pc.set_local_description(rollback)).map_err(rtc)?;
+        if let Some(video) = self.video().as_mut() {
+            video.rolled_back = true;
+        }
+        Ok(())
     }
 
     /// Applies the far end's answer to our offer.
@@ -709,8 +719,7 @@ impl Peer {
     }
 
     /// Restricts every line's codecs to what the web client offers: Opus, and constrained baseline H.264 in
-    /// packetization mode 1 with its retransmissions. Constrained baseline is also the one profile VA-API's encoder
-    /// takes: a call negotiated on another profile is encoded in software.
+    /// packetization mode 1 with its retransmissions.
     fn prefer_codecs(&self) {
         let audio = preferred(MediaType::Audio, |codec| {
             codec.mime_type.eq_ignore_ascii_case("audio/opus")
@@ -741,7 +750,8 @@ impl Peer {
     }
 
     /// The negotiated SDP named the lines anew: line 0 the main video line, then the receiving lines (the sharing
-    /// line of a group offer of ours left out); the camera's encoding set again.
+    /// line of a group offer of ours left out); the camera's track put on its sender again after a rollback, and its
+    /// encoding set again.
     fn negotiated(&self) {
         let Some(local) = self.pc.current_local_description() else {
             return;
@@ -752,12 +762,19 @@ impl Peer {
             .unwrap_or_else(PoisonError::into_inner)
             .as_ref()
             .and_then(RtpTransceiver::mid);
-        let lines: Vec<String> = video_mids(&local.to_string())
+        let text = local.to_string();
+        let lines: Vec<String> = video_mids(&text)
             .into_iter()
             .filter(|mid| Some(mid) != sharing.as_ref())
             .collect();
+        let main_sends = lines.first().is_some_and(|mid| line_sends(&text, mid));
         *self.lines.lock().unwrap_or_else(PoisonError::into_inner) = lines;
         if let Some(video) = self.video().as_mut() {
+            // the send stream is made again once the line sends: an answer that only receives makes none
+            if video.rolled_back && main_sends {
+                video.rolled_back = false;
+                reattach(video);
+            }
             apply_sending(video);
         }
     }
@@ -800,6 +817,20 @@ fn watch_channel(channel: &DataChannel, events: &Events) {
     })));
 }
 
+/// The camera's track put on its sender again (the bindings' `set_track` takes no `None`: it dereferences the track),
+/// so the line's send stream takes it as its source again, and the software encoder asked for again: the sender hands
+/// its encoder choice to a stream only when its SSRC changes, and the remade stream keeps the old SSRC.
+fn reattach(video: &Video) {
+    let Some(sender) = video.sender.as_ref() else {
+        return;
+    };
+    let track = MediaStreamTrack::Video(video.track.clone());
+    if let Err(error) = sender.set_track(Some(track)) {
+        log::debug!("the camera's track can't be put on its line again: {}", error.message);
+    }
+    sender.set_video_encoder_backend(VideoEncoderBackend::Software);
+}
+
 /// The camera's encoding active as the camera is, within its bounds.
 fn apply_sending(video: &mut Video) {
     let Some(sender) = video.sender.as_ref() else {
@@ -815,7 +846,7 @@ fn apply_sending(video: &mut Video) {
         encoding.max_framerate = Some(f64::from(video.settings.fps));
     }
     // the picture keeps the size the call sends (`MaxSize`): short of bandwidth or of encoder, frames are dropped
-    // rather than the picture scaled down (libwebrtc's own scaler halves it eagerly behind VA-API's rate control)
+    // rather than the picture scaled down (libwebrtc's own scaler halves it eagerly)
     parameters.set_degradation_preference(DegradationPreference::MaintainResolution);
     if let Err(error) = sender.set_parameters(parameters) {
         log::debug!("the camera's encoding can't be set: {}", error.message);
@@ -845,6 +876,26 @@ fn video_mids(text: &str) -> Vec<String> {
         }
     }
     mids
+}
+
+/// Whether the line `mid` of `text` sends (`sendrecv` or `sendonly`).
+fn line_sends(text: &str, mid: &str) -> bool {
+    let mut this_line = false;
+    let mut found = false;
+    for line in text.lines().map(|line| line.trim_end_matches('\r')) {
+        if line.starts_with("m=") {
+            if found {
+                return false;
+            }
+            this_line = false;
+        } else if line.strip_prefix("a=mid:") == Some(mid) {
+            this_line = true;
+            found = true;
+        } else if this_line && matches!(line, "a=sendrecv" | "a=sendonly") {
+            return true;
+        }
+    }
+    false
 }
 
 /// `text` with `candidates` (`a=candidate:` values) written into its first line in use, after its ICE credentials: the
@@ -886,5 +937,14 @@ mod tests {
         let written = with_candidates(text, &["1 1 udp 2 192.0.2.1 5000 typ relay".to_owned()]);
         assert_eq!(written.matches("a=candidate:1 1 udp").count(), 1, "{written}");
         assert_eq!(video_mids(&written), ["2"]);
+    }
+
+    #[test]
+    fn a_line_sends_when_its_own_direction_says_so() {
+        let text = "m=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\na=sendrecv\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\n\
+                    a=mid:1\r\na=recvonly\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\na=mid:2\r\na=sendonly\r\n";
+        assert!(!line_sends(text, "1"));
+        assert!(line_sends(text, "2"));
+        assert!(!line_sends(text, "3"));
     }
 }

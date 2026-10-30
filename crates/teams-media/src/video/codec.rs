@@ -1,5 +1,5 @@
-//! How a call's camera is sent: libwebrtc encodes it (H.264 as the call negotiated it, through VA-API where the
-//! machine has it, OpenH264 otherwise) and follows its own bandwidth estimate within these bounds.
+//! How a call's camera is sent: libwebrtc encodes it (H.264 as the call negotiated it, in software: OpenH264) and
+//! follows its own bandwidth estimate within these bounds.
 
 /// The bounds the sender runs within.
 #[derive(Clone, Copy, Debug, PartialEq)]
