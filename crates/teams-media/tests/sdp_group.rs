@@ -12,7 +12,7 @@
 //!   and the data line, as the web client's group offer.
 //! - A receiving line goes both ways naming a stream of its own (never the placeholder `1`: the mixer refuses a line
 //!   going both ways that names it, `410 SdpParsingFailure`), the same one in every offer and answer of the call.
-//! - A line we send nothing on (a 1:1 call's main line while the camera is off) names the stream `1` and no media
+//! - A receive-only line (a 1:1 call's main line while the camera is off) names the stream `1` and no media
 //!   stream, as the web client's receive-only lines.
 
 // test code throughout (its helpers unwrap like the tests do)
@@ -269,19 +269,38 @@ fn a_receiving_line_keeps_a_stream_of_its_own_for_the_call() -> TestResult {
     let caller = Peer::new()?;
     let text = ours.write_offer(&caller.session.offer_group(9)?)?.as_str().to_owned();
     for slot in &sections(&text)[2..11] {
-        assert_taken_stream(slot);
+        assert_own_stream(slot);
     }
+    let offered = slot_streams(&text);
+    let mut distinct = offered.clone();
+    distinct.sort();
+    distinct.dedup();
+    assert_eq!(distinct.len(), 9, "each offered line a stream of its own: {offered:?}");
+    // a renegotiation's offer keeps them
+    let again = ours.write_offer(&caller.session.offer_group(9)?)?.as_str().to_owned();
+    assert_eq!(
+        slot_streams(&again),
+        offered,
+        "the same streams in every offer of the call"
+    );
     Ok(())
 }
 
-/// A line going both ways that names a stream of its own, not the placeholder.
-fn assert_taken_stream(slot: &[&str]) {
+/// A line going both ways that names a stream of its own (its range and its `a=ssrc`), not the placeholder.
+fn assert_own_stream(slot: &[&str]) {
     assert!(slot.contains(&"a=sendrecv"), "{slot:?}");
-    assert_ne!(value(slot, "x-ssrc-range"), Some("1-1"), "{slot:?}");
+    let range = value(slot, "x-ssrc-range").unwrap_or_default();
+    assert!(!range.is_empty() && range != "1-1", "{slot:?}");
+    let ssrc = range.split('-').next().unwrap_or_default();
+    assert!(
+        slot.iter()
+            .any(|line| line.starts_with(&format!("a=ssrc:{ssrc} cname:"))),
+        "its stream named by its range: {slot:?}"
+    );
 }
 
 #[test]
-fn a_line_we_send_nothing_on_names_the_stream_one_as_the_web_client_s() -> TestResult {
+fn a_receive_only_line_names_the_stream_one_as_the_web_client_s() -> TestResult {
     // a 1:1 call's main line while the camera is off: receive-only
     let mut session = NgcSession::new();
     session.set_video(VideoLines::Main { sending: false });

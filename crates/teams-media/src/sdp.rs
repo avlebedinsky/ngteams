@@ -920,7 +920,7 @@ impl NgcSession {
                 }
                 _ => {}
             }
-            // a line we send nothing on names no stream of ours (libwebrtc names the camera's track on it anyway)
+            // a receive-only line names no stream of ours (libwebrtc names the camera's track on it anyway)
             if matches!(section.direction(), Some("recvonly" | "inactive")) {
                 unnamed(section);
             }
@@ -942,7 +942,7 @@ fn fresh_ssrc() -> u32 {
     (u32::from_be_bytes(bytes) & 0x7fff_ffff).max(PLACEHOLDER_SSRC + 1)
 }
 
-/// `section` going `direction`; a line we send nothing on names no stream of ours.
+/// `section` going `direction`; a receive-only or inactive line names no stream of ours.
 fn directed(section: &mut Section, direction: &str) {
     section.lines.retain(|line| {
         !["sendrecv", "sendonly", "recvonly", "inactive"]
@@ -1154,8 +1154,8 @@ fn write_section(
                 .cloned(),
         );
         if kept.contains(&"ssrc") && section.kind != Kind::Data && !section.has("ssrc") {
-            // a line we send nothing on names the stream `1`, as the web client writes its receive-only lines (with
-            // its `a=x-ssrc-range:1-1`)
+            // a line naming no stream names the stream `1`, as the web client writes its receive-only lines (with its
+            // `a=x-ssrc-range:1-1`)
             out.push(format!("a=ssrc:1 cname:{SYNTHESIZED_CNAME}"));
         }
     }
@@ -1183,8 +1183,8 @@ fn write_rtp_payload(section: &Section, port: &str, role: Role, out: &mut Vec<St
         Kind::Audio => "a=x-signaling-fb:* x-message app recv:dsh".to_owned(),
         Kind::Video | Kind::Data => "a=x-signaling-fb:* x-message app send:src recv:src,vc".to_owned(),
     });
-    // a line we send nothing on names the range `1-1`, as the web client writes its receive-only lines (the mixer
-    // refuses an answer whose line names no range: `410 SdpParsingFailure`, M3 Task 19)
+    // a line naming no stream names the range `1-1`, as the web client writes its receive-only lines (the mixer
+    // refuses an answer whose line names no range: `410 SdpParsingFailure`)
     match section.values("ssrc").next().and_then(|ssrc| ssrc.split(' ').next()) {
         Some(ssrc) => out.push(format!("a=x-ssrc-range:{ssrc}-{ssrc}")),
         None => out.push("a=x-ssrc-range:1-1".to_owned()),
@@ -1486,7 +1486,7 @@ fn standard_candidate(candidate: &str) -> Option<String> {
     ))
 }
 
-/// The stream a line that sends nothing names (`a=ssrc:1`, `a=x-ssrc-range:1-1`, as the web client writes such a line):
+/// The stream a receive-only line names (`a=ssrc:1`, `a=x-ssrc-range:1-1`, as the web client writes such a line):
 /// no stream at all, so it is left out of the standard side (a peer would take the same SSRC on several lines for one
 /// stream and refuse the description).
 const PLACEHOLDER_SSRC: u32 = 1;
