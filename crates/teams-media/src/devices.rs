@@ -5,7 +5,8 @@
 //! backends stand behind it:
 //!
 //! - [`file`]: no audio server at all. A tone or a WAV file in, a WAV recording out, a generated test pattern as the
-//!   camera ([`pattern`]), received frames counted. `teams-headless` and the tests use it.
+//!   camera ([`pattern`]), received frames counted, or a movie file decoded by `ffmpeg` as the microphone and the
+//!   camera ([`movie`]). `teams-headless` and the tests use it.
 //! - [`pipewire`]: one PipeWire server for audio and the camera. Which server a build may open is fixed when it is
 //!   built ([`pipewire::THIS_BUILD`]): the UI sandbox's private one for the lab and every `test-support` build, the
 //!   desktop's for the personal build only, whose camera comes through the desktop's camera portal ([`portal`]: a
@@ -20,6 +21,7 @@ use std::time::Duration;
 
 pub mod catalog;
 pub mod file;
+pub mod movie;
 pub mod pattern;
 pub mod pipewire;
 pub mod portal;
@@ -121,6 +123,9 @@ pub enum DeviceError {
     /// A WAV file this backend can't read.
     #[error("WAV: {0}")]
     Wav(String),
+    /// A movie file that can't be probed or decoded (`ffmpeg`, [`movie`]).
+    #[error("the movie: {0}")]
+    Movie(String),
     #[error("PipeWire: {0}")]
     PipeWire(String),
     /// The desktop's camera portal (or the bus it is on) failed or didn't answer.

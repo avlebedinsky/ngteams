@@ -432,7 +432,7 @@ fn video_format(param: &Pod) -> Option<(PixelFormat, u32, u32)> {
 /// `MAP_BUFFERS`), or plain memory. Without it the link allows every type and a camera that allocates its own buffers
 /// (a V4L2 node, `uvcvideo`) maps them as plain memory in the PipeWire daemon, which a client can't be handed: the
 /// server refuses the buffers (`mix use buffers failed: -22`) and the stream errs before its first frame. With it,
-/// such a camera exports its buffers as DMA-BUFs, as it does for GStreamer's `pipewiresrc` and libwebrtc's capturer.
+/// such a camera exports its buffers as DMA-BUFs, as it does for the `pipewiresrc` element and libwebrtc's capturer.
 fn camera_buffers() -> Result<Vec<u8>, String> {
     let types: u32 =
         (1 << spa::sys::SPA_DATA_DmaBuf) | (1 << spa::sys::SPA_DATA_MemFd) | (1 << spa::sys::SPA_DATA_MemPtr);

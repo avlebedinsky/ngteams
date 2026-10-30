@@ -9,16 +9,16 @@
 //! audio server), relayed through Teams' relay, the microphone unprocessed (a file has no acoustic echo, and a keyed
 //! tone must reach the far end as it is), the account describing its client as the web client does. With `--video`
 //! a call takes video ([`teams_core::lab::call_video`]): the far end's frames counted ([`VideoCounts`]), the camera
-//! the file backend's test pattern.
+//! the file backend's test pattern. With `--media` a movie is the microphone and the camera ([`call_movie`]).
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs::DirBuilder;
 use std::io;
 use std::os::unix::fs::DirBuilderExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use teams_auth::secrets::{KeyringSecretStore, SecretError};
 use teams_core::account::AccountCalls;
@@ -28,6 +28,7 @@ use teams_core::{CallMedia, CallVideo, Relay, VideoOutput};
 use teams_fence::lab::{Alias, ChatsError, ConfigError, LabChats, LabConfig, LabLocations, LabPaths};
 use teams_fence::{Fence, Mri, OpenError};
 use teams_media::devices::file::{AudioInput, FileDevices, FrameCounter, FrameCounts, Pacing, PatternCamera};
+use teams_media::devices::movie::Movie;
 use teams_media::devices::{AudioSink, AudioSource, DeviceError, Devices, VideoSink, VideoSource};
 use teams_media::processing::ProcessingConfig;
 use teams_media::session::SessionConfig;
@@ -175,6 +176,51 @@ pub fn call_devices(sent: PathBuf, recording: PathBuf) -> FileDevices {
     }
 }
 
+/// The camera's size and frame rate when a movie is the camera (`--media`): 720p at the movie's own 24 fps.
+pub const MEDIA_CAMERA: PatternCamera = PatternCamera {
+    width: 1280,
+    height: 720,
+    fps: 24,
+};
+
+/// The movie at `path` from `from` seconds (once, or `looped`) as a call's microphone and camera
+/// ([`MEDIA_CAMERA`]), probed now.
+///
+/// # Errors
+/// When it can't be probed or `from` isn't in it.
+pub fn call_movie(path: PathBuf, from: f64, looped: bool) -> Result<Movie, DeviceError> {
+    let from = Duration::try_from_secs_f64(from)
+        .map_err(|_| DeviceError::Movie(format!("{from} isn't an offset in seconds")))?;
+    Movie::open(path, from, looped, MEDIA_CAMERA, Pacing::RealTime)
+}
+
+/// The `media` line printed when a movie is a call's microphone and camera: `media file=<name> from_s=<n>
+/// loop=<bool> duration_s=<n|-> source=<w>x<h>@<fps>|- audio=<bool> camera=<w>x<h>@<fps>` (the file's name, not its
+/// path).
+#[must_use]
+pub fn media_line(path: &Path, from: f64, looped: bool, movie: &Movie) -> String {
+    let info = movie.info();
+    let name = path
+        .file_name()
+        .map_or_else(|| "-".to_owned(), |name| name.to_string_lossy().into_owned());
+    let duration = info
+        .duration
+        .map_or_else(|| "-".to_owned(), |duration| format!("{:.1}", duration.as_secs_f64()));
+    let source = info.video.map_or_else(
+        || "-".to_owned(),
+        |(width, height, fps)| format!("{width}x{height}@{fps:.3}"),
+    );
+    let camera = movie.camera_format();
+    format!(
+        "media file={} from_s={from:.1} loop={looped} duration_s={duration} source={source} audio={} camera={}x{}@{}",
+        serde_json::Value::String(name),
+        info.audio,
+        camera.width,
+        camera.height,
+        camera.fps
+    )
+}
+
 /// When a call's devices last opened, by the wall clock: what lines the far end's recording up with the tone sent, two
 /// processes apart ([`TimedDevices`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -183,10 +229,12 @@ pub struct Opened {
     pub speaker: Option<SystemTime>,
 }
 
-/// File devices that note when each one opens ([`Opened`]; a later call's open replaces an earlier one's).
+/// File devices that note when each one opens ([`Opened`]; a later call's open replaces an earlier one's); with a
+/// movie, its audio and video are the microphone and the camera.
 #[derive(Clone, Debug)]
 pub struct TimedDevices {
     pub files: FileDevices,
+    pub movie: Option<Movie>,
     opened: Arc<Mutex<Opened>>,
 }
 
@@ -195,7 +243,17 @@ impl TimedDevices {
     pub fn new(files: FileDevices) -> Self {
         Self {
             files,
+            movie: None,
             opened: Arc::default(),
+        }
+    }
+
+    /// The same devices, `movie` the microphone and the camera.
+    #[must_use]
+    pub fn with_movie(self, movie: Movie) -> Self {
+        Self {
+            movie: Some(movie),
+            ..self
         }
     }
 
@@ -216,7 +274,10 @@ impl TimedDevices {
 impl Devices for TimedDevices {
     fn microphone(&self) -> Result<Box<dyn AudioSource>, DeviceError> {
         self.note(|opened, now| opened.microphone = Some(now));
-        self.files.microphone()
+        match &self.movie {
+            Some(movie) => movie.microphone(),
+            None => self.files.microphone(),
+        }
     }
 
     fn speaker(&self) -> Result<Box<dyn AudioSink>, DeviceError> {
@@ -225,7 +286,10 @@ impl Devices for TimedDevices {
     }
 
     fn camera(&self) -> Result<Box<dyn VideoSource>, DeviceError> {
-        self.files.camera()
+        match &self.movie {
+            Some(movie) => movie.camera(),
+            None => self.files.camera(),
+        }
     }
 }
 

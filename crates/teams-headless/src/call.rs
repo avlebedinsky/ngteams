@@ -485,6 +485,22 @@ impl CallFiles {
         })
     }
 
+    /// The same files, `movie` the microphone and the camera instead of the tone and the test pattern: nothing is
+    /// looked for in the recording then ([`CallFiles::plays_movie`]).
+    #[must_use]
+    pub fn with_movie(self, movie: teams_media::devices::movie::Movie) -> Self {
+        Self {
+            devices: self.devices.with_movie(movie),
+            ..self
+        }
+    }
+
+    /// Whether a movie is the microphone (the tone isn't played).
+    #[must_use]
+    pub fn plays_movie(&self) -> bool {
+        self.devices.movie.is_some()
+    }
+
     /// The call's devices on these files ([`crate::lab::call_devices`]), noting when they open.
     #[must_use]
     pub fn devices(&self) -> TimedDevices {

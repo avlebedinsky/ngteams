@@ -10,7 +10,7 @@ use clap::Parser;
 use teams_core::{Action, EngineHandle};
 use teams_headless::cli::{CallAudio, Cli, Command, WATCH_TONE_SECONDS};
 use teams_headless::commands::{self, Answering, WatchEnd};
-use teams_headless::lab::{Lab, VideoCounts};
+use teams_headless::lab::{self, Lab, VideoCounts};
 use teams_headless::print::{now_ms, visible};
 use teams_headless::{availability, call, chat, echo};
 use teams_proto::chat::MessageText;
@@ -143,7 +143,7 @@ async fn calling_command(lab: &Lab, command: Command, signals: &mut Signals, out
             audio,
         } => {
             if answer_lab_calls || calls {
-                let answering = match (answer_lab_calls, audio.camera_after) {
+                let answering = match (answer_lab_calls, audio.camera_after()) {
                     (true, Some(after)) => Answering::LabCallsWithCamera(Duration::from_secs(after)),
                     (true, None) => Answering::LabCalls,
                     (false, _) => Answering::Nothing,
@@ -165,7 +165,7 @@ async fn calling_command(lab: &Lab, command: Command, signals: &mut Signals, out
             } else {
                 call::Target::Chat(conversation(lab, &target)?)
             };
-            let plan = call_plan(seconds, wait, 0, audio.camera_after);
+            let plan = call_plan(seconds, wait, 0, audio.camera_after());
             let asked = CallAsked { target, audio, plan };
             place_call(lab, asked, signals, out).await
         }
@@ -176,7 +176,7 @@ async fn calling_command(lab: &Lab, command: Command, signals: &mut Signals, out
             wait,
             ring_wait,
         } => {
-            let plan = call_plan(seconds, wait, ring_wait, audio.camera_after);
+            let plan = call_plan(seconds, wait, ring_wait, audio.camera_after());
             let asked = CallAsked {
                 target: call::Target::Join(conversation(lab, &chat)?),
                 audio,
@@ -389,8 +389,14 @@ struct CallAsked {
 }
 
 /// The call's files: the tone written as `audio` asks, for `length`, beside the recording (`audio.record`, or
-/// `<data_dir>/recordings/<alias>-<what>-<ms>.wav`).
-fn call_files(lab: &Lab, audio: &CallAudio, what: &str, length: Duration) -> Result<call::CallFiles, Box<dyn Error>> {
+/// `<data_dir>/recordings/<alias>-<what>-<ms>.wav`); with `--media`, the movie as the microphone and the camera,
+/// probed first and its `media` line printed.
+fn call_files(
+    lab: &Lab,
+    audio: &CallAudio,
+    (what, length): (&str, Duration),
+    out: &mut impl Write,
+) -> Result<call::CallFiles, Box<dyn Error>> {
     let recording = match &audio.record {
         Some(path) => path.clone(),
         None => lab
@@ -402,7 +408,17 @@ fn call_files(lab: &Lab, audio: &CallAudio, what: &str, length: Duration) -> Res
     } else {
         call::Keying::Keyed
     };
-    Ok(call::CallFiles::write_for(recording, audio.tone, keying, length)?)
+    let files = call::CallFiles::write_for(recording, audio.tone, keying, length)?;
+    let Some(path) = &audio.media else {
+        return Ok(files);
+    };
+    let movie = lab::call_movie(path.clone(), audio.media_from, audio.media_loop)?;
+    writeln!(
+        out,
+        "{}",
+        lab::media_line(path, audio.media_from, audio.media_loop, &movie)
+    )?;
+    Ok(files.with_movie(movie))
 }
 
 /// What the recording holds of each tone `audio` asks to hear (its own tone when it names none): the keyed tone's
@@ -418,6 +434,11 @@ fn heard_lines(
     if files.opened().speaker.is_none() {
         // the call ended before its media was set up: nothing was recorded
         writeln!(out, "echo heard=false")?;
+        return Ok(None);
+    }
+    if files.plays_movie() {
+        // the microphone played the movie, not the tone: there is no tone to look for
+        writeln!(out, "echo not_applicable media=true")?;
         return Ok(None);
     }
     let hear = if audio.hear.is_empty() {
@@ -449,7 +470,7 @@ async fn watch_calls(
     out: &mut impl Write,
 ) -> Outcome {
     let length = Duration::from_secs(audio.tone_seconds.unwrap_or(WATCH_TONE_SECONDS));
-    let files = call_files(lab, &audio, "watch", length)?;
+    let files = call_files(lab, &audio, ("watch", length), out)?;
     let (video, counts) = video_of(&audio);
     let mut handle = lab.start_calling(files.devices(), true, video).await?;
     let end = commands::watch(&mut handle, json, answering, &lab.names, out, signals.next()).await;
@@ -479,7 +500,7 @@ async fn place_call(lab: &Lab, asked: CallAsked, signals: &mut Signals, out: &mu
     let length = audio
         .tone_seconds
         .map_or_else(|| call::CallFiles::length_for(&plan), Duration::from_secs);
-    let files = call_files(lab, &audio, what, length)?;
+    let files = call_files(lab, &audio, (what, length), out)?;
     let (video, counts) = video_of(&audio);
     let mut handle = lab.start_calling(files.devices(), false, video).await?;
     if !matches!(target, call::Target::Echo(_)) {
@@ -515,16 +536,18 @@ async fn place_call(lab: &Lab, asked: CallAsked, signals: &mut Signals, out: &mu
     if let Some(counts) = counts {
         writeln!(out, "{}", counts.line())?;
     }
-    Ok(if report.completed() && (!echo || heard.is_some()) {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    })
+    Ok(
+        if report.completed() && (!echo || heard.is_some() || files.plays_movie()) {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::FAILURE
+        },
+    )
 }
 
 /// The call's video when `audio` asks for it (`--video`), and the counts of what it shows. Without the flag, none.
 fn video_of(audio: &CallAudio) -> (Option<teams_core::CallVideo>, Option<VideoCounts>) {
-    if !audio.video {
+    if !audio.takes_video() {
         return (None, None);
     }
     let counts = VideoCounts::default();

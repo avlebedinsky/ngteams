@@ -364,7 +364,7 @@ teams-headless a profile <mri>... [--wait 30]           # where the engine's nam
 teams-headless a availability [--manual busy|do-not-disturb|away|available] [--manual-after 60] [--reset-after <s>] \
   [--hold 300]                            # a's own availability, from its push channel's endpoint
 teams-headless a call echo|b|abc|<id> [--tone 1000] [--bursts] [--hear <hz>] [--record <wav>] [--seconds 45] \
-  [--wait 60] [--tone-seconds <s>] [--video [--camera-after <s>]]
+  [--wait 60] [--tone-seconds <s>] [--video [--camera-after <s>]] [--media <movie> [--media-from <s>] [--media-loop]]
                                           # a call through the engine, its media on files; held, hung up, its tone looked for
 teams-headless c join abc [--ring-wait 180] [--tone …] [--seconds 45] [--wait 60] \
                                           # the group chat's running call joined late, once its invitation rang out here
@@ -416,6 +416,16 @@ they end, as text: neither takes `--json`.
 a group call's main and receiving lines, the frames received counted per line (`video_lines …` every 2 s, `video …` at
 the end); the camera, a test pattern carrying each frame's index, stays off unless `--camera-after` turns it on that
 many seconds after the media connected.
+`--media <file> [--media-from <seconds>] [--media-loop]` (`call`, `join`, `watch`) makes a movie the microphone and
+the camera instead: `ffmpeg` (and `ffprobe`, from `PATH`) decodes it as the call runs from that offset, its first audio
+stream mixed down to 48 kHz mono (raised 6 dB) and its first video stream scaled to 1280×720 at 24 fps, each through a
+pipe and a short queue at the device's pace (nothing decoded to disk; the decoders are killed with their devices). A
+camera turned on later starts as far into the movie as the time since the microphone started; a looped movie wraps at
+its end, one played once goes silent on its last picture. It implies `--video`, turns the camera on as soon as the media connected
+(unless `--camera-after` says later), prints `media file=<name> from_s=… duration_s=… source=… camera=…` first, and
+looks for no tone in the recording (`echo not_applicable media=true`). The movie lives under the lab's data dir
+(`<data_dir>/media/`), never in the repo; say `teams-headless b watch --answer-lab-calls --media
+~/.local/share/teams-lab/media/bbb/big_buck_bunny_1080p_h264.mov --media-from 120`.
 `TEAMS_HEADLESS_LOG=debug` logs our own crates' debug lines on
 stderr (Trouter's packets and deliveries by kind and size, never a payload); nothing else is logged.
 

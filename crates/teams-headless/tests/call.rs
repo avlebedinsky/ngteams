@@ -116,6 +116,65 @@ fn call_takes_a_target_its_tone_what_to_hear_a_recording_and_its_times() {
 }
 
 #[test]
+fn a_movie_as_the_media_takes_video_and_turns_the_camera_on_at_once() {
+    let audio = |args: &[&str]| match Cli::try_parse_from(args).map(|cli| cli.command) {
+        Ok(CliCommand::Call { audio, .. } | CliCommand::Join { audio, .. } | CliCommand::Watch { audio, .. }) => {
+            Ok(audio)
+        }
+        Ok(other) => panic!("{other:?}"),
+        Err(error) => Err(error),
+    };
+    let plain = audio(&["teams-headless", "a", "call", "b"]).unwrap();
+    assert!(plain.media.is_none() && !plain.takes_video() && plain.camera_after().is_none());
+
+    let movie = audio(&[
+        "teams-headless",
+        "a",
+        "call",
+        "b",
+        "--media",
+        "/m/bbb.mov",
+        "--media-from",
+        "90.5",
+    ])
+    .unwrap();
+    assert_eq!(movie.media.as_deref(), Some(Path::new("/m/bbb.mov")));
+    assert!((movie.media_from - 90.5).abs() < f64::EPSILON && !movie.media_loop);
+    assert!(movie.takes_video() && !movie.video, "--media implies video");
+    assert_eq!(movie.camera_after(), Some(0));
+
+    let later = audio(&[
+        "teams-headless",
+        "b",
+        "watch",
+        "--answer-lab-calls",
+        "--media",
+        "/m/bbb.mov",
+        "--media-loop",
+        "--camera-after",
+        "5",
+    ])
+    .unwrap();
+    assert!(later.media_loop);
+    assert_eq!(
+        later.camera_after(),
+        Some(5),
+        "--camera-after without --video, with --media"
+    );
+    let joined = audio(&["teams-headless", "c", "join", "abc", "--media", "/m/bbb.mov"]).unwrap();
+    assert!(joined.media_from.abs() < f64::EPSILON);
+
+    for alone in [&["--media-from", "3"][..], &["--media-loop"], &["--camera-after", "1"]] {
+        let args: Vec<&str> = ["teams-headless", "a", "call", "b"]
+            .iter()
+            .chain(alone)
+            .copied()
+            .collect();
+        assert!(audio(&args).is_err(), "{alone:?} needs its source");
+    }
+}
+
+#[test]
 fn join_takes_a_chat_the_call_s_audio_and_how_long_the_ring_may_take() {
     let parsed = Cli::try_parse_from(["teams-headless", "c", "join", "abc"]).unwrap();
     match parsed.command {

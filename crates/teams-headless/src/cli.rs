@@ -209,8 +209,9 @@ pub enum Command {
 }
 
 /// A call's audio on files: the microphone's tone and how it is keyed, the tone looked for in the far end's recording,
-/// and where that goes.
+/// and where that goes; or a movie as the microphone and the camera.
 #[derive(Clone, Debug, PartialEq, clap::Args)]
+#[command(group(clap::ArgGroup::new("takes_video").args(["video", "media"]).multiple(true)))]
 pub struct CallAudio {
     /// The microphone's tone, in Hz.
     #[arg(long, default_value_t = DEFAULT_TONE_HZ)]
@@ -237,10 +238,37 @@ pub struct CallAudio {
     /// camera stays off unless `--camera-after`.
     #[arg(long)]
     pub video: bool,
-    /// Turns the camera (the test pattern, frames carrying their index) on this many seconds after the call's media
-    /// connected (for `watch`, after an answered call's).
-    #[arg(long, requires = "video")]
+    /// Turns the camera (the test pattern, frames carrying their index, or `--media`'s video) on this many seconds
+    /// after the call's media connected (for `watch`, after an answered call's).
+    #[arg(long, requires = "takes_video")]
     pub camera_after: Option<u64>,
+    /// A movie file as the microphone and the camera instead of the tone and the test pattern, decoded by `ffmpeg`
+    /// as the call runs (its first audio stream mixed down to mono, its first video stream at
+    /// [`MEDIA_CAMERA`](crate::lab::MEDIA_CAMERA)'s size and frame rate). Implies `--video`; the camera goes on as
+    /// soon as the media connected unless `--camera-after` says later. The tone isn't played, so nothing is looked
+    /// for in the recording.
+    #[arg(long, value_name = "FILE")]
+    pub media: Option<PathBuf>,
+    /// Where in the movie the call starts, in seconds.
+    #[arg(long, value_name = "SECONDS", default_value_t = 0.0, requires = "media")]
+    pub media_from: f64,
+    /// Plays the movie in a loop (else once, then silence and its last picture).
+    #[arg(long, requires = "media")]
+    pub media_loop: bool,
+}
+
+impl CallAudio {
+    /// Whether the call takes video: `--video`, or `--media`.
+    #[must_use]
+    pub fn takes_video(&self) -> bool {
+        self.video || self.media.is_some()
+    }
+
+    /// When the camera goes on, in seconds after the media connected: `--camera-after`, or at once with `--media`.
+    #[must_use]
+    pub fn camera_after(&self) -> Option<u64> {
+        self.camera_after.or_else(|| self.media.as_ref().map(|_| 0))
+    }
 }
 
 /// How long `watch`'s tone lasts by default, in seconds.

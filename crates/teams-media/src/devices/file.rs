@@ -1,6 +1,6 @@
 //! The file backend: no audio server and no camera. The microphone is a tone, a WAV file or silence; the speaker
 //! records to a WAV file (or nowhere); the camera is the [`TestPattern`]; received video is counted
-//! ([`FrameCounter`]).
+//! ([`FrameCounter`]). A movie file can stand in for the microphone and the camera instead ([`super::movie`]).
 //!
 //! With [`Pacing::RealTime`] (what a call needs) a source hands out frames as fast as a device would: the next frame
 //! is due one frame's time after the last, counted from the first, and a read waits for it (or gives `None` when the
@@ -99,7 +99,7 @@ impl Devices for FileDevices {
 }
 
 /// When the next frame is due.
-struct Clock {
+pub(super) struct Clock {
     pacing: Pacing,
     period: Duration,
     start: Option<Instant>,
@@ -107,7 +107,7 @@ struct Clock {
 }
 
 impl Clock {
-    fn new(pacing: Pacing, period: Duration) -> Self {
+    pub(super) fn new(pacing: Pacing, period: Duration) -> Self {
         Self {
             pacing,
             period,
@@ -117,7 +117,7 @@ impl Clock {
     }
 
     /// Waits for the next frame's time, up to `timeout`; whether it came.
-    fn wait(&mut self, timeout: Duration) -> bool {
+    pub(super) fn wait(&mut self, timeout: Duration) -> bool {
         if self.pacing == Pacing::Unpaced {
             return true;
         }
@@ -133,7 +133,7 @@ impl Clock {
         true
     }
 
-    fn handed_one(&mut self) {
+    pub(super) fn handed_one(&mut self) {
         self.handed = self.handed.saturating_add(1);
     }
 }
