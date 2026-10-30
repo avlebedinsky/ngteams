@@ -10,6 +10,8 @@
 //!   `sendrecv` while it is on, each receiving line `recvonly`.
 //! - Our group offer (a caller's or a joiner's) has audio, the main line, the receiving lines, the sharing line last
 //!   and the data line, as the web client's group offer.
+//! - A receiving line goes both ways naming a stream of its own (never the placeholder `1`: the mixer refuses a line
+//!   going both ways that names it, `410 SdpParsingFailure`), the same one in every offer and answer of the call.
 //! - A line we send nothing on (a 1:1 call's main line while the camera is off) names the stream `1` and no media
 //!   stream, as the web client's receive-only lines.
 
@@ -103,7 +105,17 @@ fn assert_taken(slot: &[&str]) {
     assert!(slot.contains(&"a=sendrecv"), "{slot:?}");
     assert!(slot.contains(&"a=rtcp-rsize"), "{slot:?}");
     assert!(slot.contains(&"a=rtcp-fb:* nack pli"), "{slot:?}");
-    assert!(value(slot, "x-ssrc-range").is_some(), "{slot:?}");
+    let range = value(slot, "x-ssrc-range").unwrap_or_default();
+    assert!(
+        !range.is_empty() && range != "1-1",
+        "a line going both ways names a stream of its own: {slot:?}"
+    );
+    let ssrc = range.split('-').next().unwrap_or_default();
+    assert!(
+        slot.iter()
+            .any(|line| line.starts_with(&format!("a=ssrc:{ssrc} cname:"))),
+        "its stream named by its range: {slot:?}"
+    );
     assert!(
         value(slot, "fmtp").is_some_and(|fmtp| fmtp.contains("max-fs=3600")),
         "the largest picture taken: {slot:?}"
@@ -213,6 +225,59 @@ fn our_group_offer_is_the_web_client_s_kind() -> TestResult {
         .collect();
     assert_eq!(described, offered);
     Ok(())
+}
+
+/// The stream each receiving line of `text` names, in line order.
+fn slot_streams(text: &str) -> Vec<String> {
+    sections(text)[2..11]
+        .iter()
+        .filter_map(|slot| value(slot, "x-ssrc-range"))
+        .map(str::to_owned)
+        .collect()
+}
+
+#[test]
+fn a_receiving_line_keeps_a_stream_of_its_own_for_the_call() -> TestResult {
+    // the callee's answer, then its answer to the mixer's renegotiation (the same offer again)
+    let mut session = NgcSession::new();
+    session.set_video(VideoLines::Group { slots: 9 });
+    let peer = Peer::new()?;
+    let offer = session.read_offer(&captured("mixer_offer")?)?;
+    let first = session
+        .write_answer(&peer.session.accept_offer(offer)?)?
+        .as_str()
+        .to_owned();
+    let offer = session.read_offer(&captured("mixer_offer")?)?;
+    let again = session
+        .write_answer(&peer.session.accept_offer(offer)?)?
+        .as_str()
+        .to_owned();
+    let streams = slot_streams(&first);
+    assert_eq!(streams.len(), 9, "{first}");
+    let mut distinct = streams.clone();
+    distinct.sort();
+    distinct.dedup();
+    assert_eq!(distinct.len(), 9, "each line a stream of its own: {streams:?}");
+    assert_eq!(
+        slot_streams(&again),
+        streams,
+        "the same streams in every answer of the call"
+    );
+    // and a caller's group offer's receiving lines, the same way
+    let mut ours = NgcSession::new();
+    ours.set_video(VideoLines::Group { slots: 9 });
+    let caller = Peer::new()?;
+    let text = ours.write_offer(&caller.session.offer_group(9)?)?.as_str().to_owned();
+    for slot in &sections(&text)[2..11] {
+        assert_taken_stream(slot);
+    }
+    Ok(())
+}
+
+/// A line going both ways that names a stream of its own, not the placeholder.
+fn assert_taken_stream(slot: &[&str]) {
+    assert!(slot.contains(&"a=sendrecv"), "{slot:?}");
+    assert_ne!(value(slot, "x-ssrc-range"), Some("1-1"), "{slot:?}");
 }
 
 #[test]

@@ -37,7 +37,8 @@
 //!   the others rejected. While our camera is off, the line taken is read as one the far end only sends on (its
 //!   `sendrecv` as `sendonly`, its `recvonly` as `inactive`), so libwebrtc answers that we only receive, and our own
 //!   offer writes that line `recvonly` (the camera's track stays on it, sending nothing). A group call's main and
-//!   receiving lines are answered both ways, as the web client answers them, whichever way libwebrtc took them.
+//!   receiving lines are answered both ways, as the web client answers them, whichever way libwebrtc took them; each
+//!   receiving line names a stream of its own, drawn once for the call, on which nothing is ever sent.
 //!
 //! A browser's SDP (or libwebrtc's as it is) is refused where the dialect is required ([`NgcSdp::new`]).
 
@@ -511,6 +512,9 @@ pub struct NgcSession {
     slots: Vec<String>,
     /// Each line's stream id (`a=x-source-streamid`) as the far end's last offer or answer named it, by Teams mid.
     stream_ids: Vec<(String, u32)>,
+    /// A group call's receiving lines' own streams (an SSRC each, by Teams mid), drawn once when the line is taken
+    /// and named by every offer and answer of the call: nothing is ever sent on them.
+    slot_streams: Vec<(String, u32)>,
 }
 
 /// Which half of an exchange an SDP is.
@@ -566,7 +570,7 @@ impl NgcSession {
                     if let Some(mid) = mid
                         && !self.slots.contains(&mid)
                     {
-                        self.slots.push(mid);
+                        self.take_slot(mid);
                     }
                     // taken as offered (both ways): the web client answers the receiving lines it shows both ways
                     // and describes them receive-only; the mixer refuses a line described receive-only that the
@@ -603,6 +607,14 @@ impl NgcSession {
             (VideoLines::Group { slots }, Some(_)) if !sharing && self.slots.len() < slots => Taken::Slot,
             _ => Taken::No,
         }
+    }
+
+    /// Takes the receiving line `mid` (by Teams mid), with a stream of its own.
+    fn take_slot(&mut self, mid: String) {
+        if !self.slot_streams.iter().any(|(slot, _)| *slot == mid) {
+            self.slot_streams.push((mid.clone(), fresh_ssrc()));
+        }
+        self.slots.push(mid);
     }
 
     /// A group call's receiving video lines, in the order the call took them: each line's libwebrtc mid and its stream
@@ -741,7 +753,7 @@ impl NgcSession {
                     && main != name.remote
                     && !self.slots.contains(&name.remote)
                 {
-                    self.slots.push(name.remote.clone());
+                    self.take_slot(name.remote.clone());
                 }
             }
             names.push(name);
@@ -877,6 +889,13 @@ impl NgcSession {
     /// group call's main and receiving lines both ways, as the web client answers them (libwebrtc answers a line it has
     /// no track for receive-only; the mixer refuses that: `410 SdpParsingFailure`).
     fn directed(&self, mut parsed: Parsed, names: &[Line], role: Role) -> Parsed {
+        // the call's own cname, as libwebrtc names its streams (a receiving line's stream takes it too)
+        let call_cname = parsed
+            .media
+            .iter()
+            .flat_map(|section| section.values("ssrc"))
+            .find_map(|value| value.split_once(" cname:").map(|(_, cname)| cname.to_owned()))
+            .unwrap_or_else(|| SYNTHESIZED_CNAME.to_owned());
         for (section, name) in parsed.media.iter_mut().zip(names) {
             if section.kind != Kind::Video || section.rejected() {
                 continue;
@@ -885,10 +904,16 @@ impl NgcSession {
             let slot = self.slots.contains(&name.remote);
             match (role, self.video) {
                 (Role::Offer, VideoLines::Main { sending: false }) if main => directed(section, "recvonly"),
-                // a receiving line sends nothing: both ways, naming no stream of ours, as the web client writes it
+                // a receiving line sends nothing, yet goes both ways naming a stream of its own, as the web client
+                // writes the receiving lines it shows: the mixer refuses a line going both ways that names the
+                // placeholder stream (`410 SdpParsingFailure`), and one going receive-only that it describes so
+                // (`410 InvalidFinalAnswerMediaDescriptions`)
                 (_, VideoLines::Group { .. }) if slot => {
                     directed(section, "sendrecv");
                     unnamed(section);
+                    if let Some((_, ssrc)) = self.slot_streams.iter().find(|(mid, _)| *mid == name.remote) {
+                        section.lines.push(format!("a=ssrc:{ssrc} cname:{call_cname}"));
+                    }
                 }
                 (Role::Answer, VideoLines::Group { .. }) if main && section.direction() == Some("recvonly") => {
                     directed(section, "sendrecv");
@@ -902,6 +927,19 @@ impl NgcSession {
         }
         parsed
     }
+}
+
+/// A stream id (SSRC) of our own, drawn at random: never `0` or the placeholder stream [`PLACEHOLDER_SSRC`].
+fn fresh_ssrc() -> u32 {
+    let mut bytes = [0; 4];
+    if getrandom::fill(&mut bytes).is_err() {
+        // no randomness to be had: the clock's nanoseconds, distinct enough for the lines of one call
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.subsec_nanos());
+        bytes = nanos.to_be_bytes();
+    }
+    (u32::from_be_bytes(bytes) & 0x7fff_ffff).max(PLACEHOLDER_SSRC + 1)
 }
 
 /// `section` going `direction`; a line we send nothing on names no stream of ours.
