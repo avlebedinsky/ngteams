@@ -58,6 +58,7 @@ impl CalendarView {
                 .children(all_day.into_iter().map(|day| {
                     div()
                         .flex_1()
+                        .w_0()
                         .min_w_0()
                         .p_1()
                         .flex()
@@ -120,6 +121,7 @@ impl CalendarView {
             .debug_selector(move || selector.clone())
             .id(SharedString::from(format!("calendar-day-{}", date.format("%Y%m%d"))))
             .flex_1()
+            .w_0()
             .min_w_0()
             .relative()
             .h(px(68.0))
@@ -192,10 +194,9 @@ impl CalendarView {
                     .top(px(top + HOUR_HEIGHT / 2.0))
                     .left_0()
                     .right_0()
-                    .h(px(0.0))
-                    .border_t_1()
-                    .border_dashed()
-                    .border_color(rgb(palette.border)),
+                    .h(px(1.0))
+                    // the renderer draws no dashes on a line this thin: a fainter line stands for Teams' dotted one
+                    .bg(rgb(mix(palette.background, palette.border, 550))),
             ]
         });
         let slots = calendar::day_slots(events, date, MIN_MINUTES);
@@ -206,6 +207,7 @@ impl CalendarView {
         let now_line = self.now_line(date, now, palette);
         div()
             .flex_1()
+            .w_0()
             .min_w_0()
             .relative()
             .h(px(24.0 * HOUR_HEIGHT))
@@ -220,7 +222,7 @@ impl CalendarView {
             .into_any_element()
     }
 
-    /// The current time's line: in today's column the brand line with its dot, across the other days a dashed one.
+    /// The current time's line: in today's column the brand line with its dot, across the other days a faint one.
     pub(super) fn now_line(&self, date: NaiveDate, now: NaiveDateTime, palette: Palette) -> Option<gpui::Div> {
         if !self.span().contains(now.date()) {
             return None;
@@ -242,17 +244,11 @@ impl CalendarView {
                     .child(div().flex_1().h(px(2.0)).bg(rgb(palette.brand))),
             )
         } else {
-            Some(
-                div()
-                    .absolute()
-                    .top(px(top))
-                    .left_0()
-                    .right_0()
-                    .h(px(0.0))
-                    .border_t_1()
-                    .border_dashed()
-                    .border_color(rgb(palette.muted_foreground)),
-            )
+            Some(div().absolute().top(px(top)).left_0().right_0().h(px(1.0)).bg(rgb(mix(
+                palette.background,
+                palette.brand,
+                450,
+            ))))
         }
     }
 
@@ -427,6 +423,7 @@ impl CalendarView {
                 .map(|name| {
                     div()
                         .flex_1()
+                        .w_0()
                         .px_2()
                         .py_2()
                         .text_sm()
@@ -506,6 +503,7 @@ impl CalendarView {
         });
         div()
             .flex_1()
+            .w_0()
             .min_w_0()
             .p_1()
             .flex()

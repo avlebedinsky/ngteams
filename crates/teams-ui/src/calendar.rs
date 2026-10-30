@@ -7,7 +7,9 @@
 
 use std::rc::Rc;
 
-use chrono::{DateTime, Datelike as _, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Weekday};
+use chrono::{
+    DateTime, Datelike as _, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Timelike as _, Weekday,
+};
 use teams_core::{CalendarEvent, EventResponse, EventTime, ShowAs};
 
 /// How many days a view shows, as Teams' view switcher offers them.
@@ -176,6 +178,17 @@ pub fn local(time: EventTime) -> Option<NaiveDateTime> {
     }
 }
 
+/// The midnight nearest `time` (noon and later round to the next day's).
+fn nearest_midnight(time: NaiveDateTime) -> NaiveDateTime {
+    let day = time.date();
+    let date = if time.hour() >= 12 {
+        day + Duration::days(1)
+    } else {
+        day
+    };
+    date.and_time(NaiveTime::MIN)
+}
+
 /// How an event's block is drawn, by the account's answer and what the event is.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Look {
@@ -200,8 +213,13 @@ impl Shown {
     /// ending as it starts.
     #[must_use]
     pub fn of(event: Rc<CalendarEvent>) -> Option<Self> {
-        let start = local(event.start)?;
-        let end = local(event.end)?.max(start);
+        let mut start = local(event.start)?;
+        let mut end = local(event.end)?.max(start);
+        if event.all_day {
+            // an all-day event's ends are midnights, whatever zone they were written in: the nearest local ones
+            start = nearest_midnight(start);
+            end = nearest_midnight(end).max(start + Duration::days(1));
+        }
         Some(Self { event, start, end })
     }
 
@@ -468,5 +486,16 @@ mod tests {
         assert!(all_day.on(date(2026, 10, 28)));
         assert!(!all_day.on(date(2026, 10, 29)));
         assert!(day_slots(&[all_day], date(2026, 10, 28), 20).is_empty());
+    }
+
+    #[test]
+    fn an_all_day_event_snaps_to_the_nearest_midnights() {
+        // written as the midnights of a zone three hours ahead of this one
+        let mut event = (*event("y", at(27, 21, 0), at(28, 21, 0)).event).clone();
+        event.all_day = true;
+        let shown = Shown::of(Rc::new(event)).unwrap();
+        assert!(shown.on(date(2026, 10, 28)));
+        assert!(!shown.on(date(2026, 10, 27)));
+        assert!(!shown.on(date(2026, 10, 29)));
     }
 }

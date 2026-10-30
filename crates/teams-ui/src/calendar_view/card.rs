@@ -7,8 +7,8 @@ use gpui::{
     App, ClipboardItem, Context, InteractiveElement as _, ParentElement as _, StatefulInteractiveElement as _,
     Styled as _, div, px, relative, rgb,
 };
-use gpui_component::Sizable as _;
 use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::{Disableable as _, Sizable as _};
 use teams_core::{CalendarEvent, EventResponse};
 
 use super::{CalendarView, CalendarViewEvent, mix, time_text};
@@ -180,13 +180,15 @@ impl CalendarView {
             return None;
         }
         let chat = event.meeting_chat.clone();
-        let join = chat.clone().filter(|_| joinable).map(|chat| {
+        // Teams' Join on every meeting: usable once a call runs in its chat
+        let join = chat.clone().map(|chat| {
             selected_by(
                 "calendar-card-join",
                 Button::new("calendar-card-join")
                     .icon(Glyph::VIDEO.icon())
                     .label("Join")
                     .primary()
+                    .disabled(!joinable)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.card = None;
                         cx.emit(CalendarViewEvent::Join(chat.clone()));

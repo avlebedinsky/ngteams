@@ -168,8 +168,7 @@ impl CalendarView {
     ) -> AnyElement {
         let in_month = date.month() == month.month();
         let is_today = date == today;
-        let chosen = self.mode == Mode::Day && date == self.anchor
-            || self.mode == Mode::Month && date.month() == self.anchor.month() && date.year() == self.anchor.year();
+        let chosen = self.mode == Mode::Day && date == self.anchor;
         let selector = format!("{id}-{}", date.format("%Y-%m-%d"));
         let face = div()
             .size(px(26.0))
