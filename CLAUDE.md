@@ -87,7 +87,9 @@ captures and tokens, agents and protocol notes hold for both builds.
   (`teams-fence`'s personal policy, behind the `personal` feature only `crates/ngteams` enables, opened only by
   `Fence::open_personal`, one per account): a write goes through the outbox as a sealed `Mutating` type sent as
   `Authorized<_>` under the permit `Fence::check` gives it, and every write, plain request, read by `POST` and frame is
-  logged to its `fence.log` before it goes (one that can't be logged isn't sent). It sends what the user did in the UI
+  logged to its `fence.log` before it goes (one that can't be logged isn't sent). That covers the app's own transport
+  and sockets; an embedded engine with networking of its own (a web view showing documents, say) is outside it, its
+  requests logged where that is cheap, never a blocker. It sends what the user did in the UI
   or a setting the user turned on, and the follow-ups that action needs, as Teams does; one call at a time across its
   accounts, as a Teams client holds one. Sign-in and token renewal stay in `teams-auth`'s clients, its sign-in window
   reaching only Entra's sign-in hosts and the identity provider's hosts `accounts.toml` names, so the account's
@@ -109,6 +111,14 @@ captures and tokens, agents and protocol notes hold for both builds.
   only through `scripts/run-personal-read-only.sh`, which refuses an installed binary without that mode. Agents never sign it in, never drive, test or capture with it in
   its sending mode, never read or write the `ngteams` items and never receive the user's tokens.
 - **Protocol notes are written in our own words** in `docs/protocol/`. Microsoft JS is never copied into the repo.
+
+## Weighing the rules
+
+- The rules above guard the lab. For the personal build the fence and the transport are an audit log, not a limit: a
+  personal-build feature is designed as any desktop Teams client would build it, and the fence, the transport,
+  `fence.log` or the lab rule are never put forward as an obstacle, a "design question" or a reason for extra work.
+- Bring up a lab constraint only when the change touches lab code, in one sentence. An answer about how something
+  works, or about a feature of the personal build, carries no fence or lab caveats the question didn't ask about.
 
 ## Patterns
 
