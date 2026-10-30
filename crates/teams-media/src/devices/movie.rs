@@ -250,6 +250,7 @@ impl Movie {
             height,
             period: Duration::from_secs(1) / fps,
             clock: Clock::new(self.pacing, Duration::from_secs(1) / fps),
+            owed: 0,
         }))
     }
 
@@ -462,16 +463,28 @@ struct MovieVideo {
     height: u32,
     period: Duration,
     clock: Clock,
+    /// The last picture handed out again in place of a decoder frame that was late: as many of the decoder's frames
+    /// are skipped once they come.
+    owed: u64,
 }
 
 impl MovieVideo {
-    /// `data`, or a later frame the decoder already has in its place when the clock is more than a frame behind (the
-    /// decoder started or stalled late): the frames skipped count as handed out, so the picture stays on the movie's
-    /// clock.
+    /// `data`, or a later frame the decoder already has in its place: first the frames the repeated pictures stood
+    /// for, then one per frame the clock is behind (the decoder started late): the frames skipped by the clock count
+    /// as handed out, so the picture stays on the movie's clock.
     fn catch_up(&mut self, mut data: Vec<u8>) -> Vec<u8> {
         let Some(decoder) = &self.decoder else {
             return data;
         };
+        while self.owed > 0 {
+            match decoder.chunks.try_recv() {
+                Ok(later) => {
+                    data = later;
+                    self.owed -= 1;
+                }
+                Err(_) => break,
+            }
+        }
         for _ in 0..self.clock.overdue() {
             match decoder.chunks.try_recv() {
                 Ok(later) => {
@@ -510,7 +523,10 @@ impl VideoSource for MovieVideo {
                 self.frame(data)
             }
             Err(RecvTimeoutError::Timeout) => match &self.last {
-                Some(last) => last.clone(),
+                Some(last) => {
+                    self.owed += 1;
+                    last.clone()
+                }
                 // the decoder hasn't started: nothing to show yet
                 None => return Ok(None),
             },
@@ -622,6 +638,31 @@ mod tests {
         assert_eq!(audio.take(), Some(vec![4, 4]));
         audio.handed += 1;
         assert_eq!(audio.take(), None, "the decoder is done");
+    }
+
+    #[test]
+    fn pictures_a_repeat_stood_for_are_skipped_once_they_come() {
+        let mut command = Command::new("printf");
+        command
+            .arg(r"\001\001\002\002\003\003")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let decoder = Decoder::spawn(command, 2, 8).unwrap();
+        thread::sleep(Duration::from_millis(300));
+        // the last picture went out twice while the decoder stalled: its frames 0 and 1 are skipped
+        let mut video = MovieVideo {
+            decoder: Some(decoder),
+            last: None,
+            width: 1,
+            height: 1,
+            period: Duration::from_millis(100),
+            clock: Clock::new(Pacing::Unpaced, Duration::from_millis(100)),
+            owed: 2,
+        };
+        let first = video.decoder.as_ref().unwrap().chunks.recv().unwrap();
+        assert_eq!(video.catch_up(first), vec![3, 3]);
+        assert_eq!(video.owed, 0);
     }
 
     fn ffmpeg_present() -> bool {
@@ -742,6 +783,7 @@ mod tests {
             height: 2,
             period: Duration::from_millis(100),
             clock: Clock::new(Pacing::Unpaced, Duration::from_millis(100)),
+            owed: 0,
         };
         thread::sleep(Duration::from_millis(300));
         assert!(video.decoding());
