@@ -30,8 +30,8 @@ use pipewire::spa::param::format::{FormatProperties, MediaSubtype, MediaType};
 use pipewire::spa::param::format_utils;
 use pipewire::spa::param::video::{VideoFormat, VideoInfoRaw};
 use pipewire::spa::pod::serialize::PodSerializer;
-use pipewire::spa::pod::{self, Pod, Value};
-use pipewire::spa::utils::{Direction, Fraction, Rectangle, SpaTypes};
+use pipewire::spa::pod::{self, ChoiceValue, Pod, Value};
+use pipewire::spa::utils::{Choice, ChoiceEnum, ChoiceFlags, Direction, Fraction, Rectangle, SpaTypes};
 use pipewire::stream::{StreamFlags, StreamListener, StreamRc, StreamState};
 
 use crate::devices::{AudioFrame, FRAME_SAMPLES, PixelFormat, SAMPLE_RATE, VideoFrame};
@@ -338,6 +338,8 @@ fn fill(bytes: &mut [u8], requested: usize, queue: Option<&Queue<f32>>) -> usize
 struct CameraState {
     format: Option<(PixelFormat, u32, u32)>,
     frames: Feed<VideoFrame>,
+    /// The buffers the stream takes ([`camera_buffers`]), answered to every format.
+    buffers: Vec<u8>,
 }
 
 pub(super) fn camera(
@@ -359,12 +361,19 @@ pub(super) fn camera(
     let state = CameraState {
         format: None,
         frames: Feed::new(frames, gate),
+        buffers: camera_buffers()?,
     };
     let listener = stream
         .add_local_listener_with_user_data(state)
-        .param_changed(|_, state, id, param| {
+        .param_changed(|stream, state, id, param| {
             if id == ParamType::Format.as_raw() {
                 state.format = param.and_then(video_format);
+                if state.format.is_some()
+                    && let Some(buffers) = Pod::from_bytes(&state.buffers)
+                {
+                    // a refused update leaves the link without buffers: the stream errs and the camera reports closed
+                    let _ = stream.update_params(&mut [buffers]);
+                }
             }
         })
         .process(|stream, state| {
@@ -417,6 +426,31 @@ fn video_format(param: &Pod) -> Option<(PixelFormat, u32, u32)> {
         .find(|(video, _)| *video == info.format())
         .map(|(_, pixel)| *pixel)?;
     Some((format, info.size().width, info.size().height))
+}
+
+/// The memory a camera's buffers may come in: a DMA-BUF or a memfd (shared with this process, mapped by the stream's
+/// `MAP_BUFFERS`), or plain memory. Without it the link allows every type and a camera that allocates its own buffers
+/// (a V4L2 node, `uvcvideo`) maps them as plain memory in the PipeWire daemon, which a client can't be handed: the
+/// server refuses the buffers (`mix use buffers failed: -22`) and the stream errs before its first frame. With it,
+/// such a camera exports its buffers as DMA-BUFs, as it does for GStreamer's `pipewiresrc` and libwebrtc's capturer.
+fn camera_buffers() -> Result<Vec<u8>, String> {
+    let types: u32 =
+        (1 << spa::sys::SPA_DATA_DmaBuf) | (1 << spa::sys::SPA_DATA_MemFd) | (1 << spa::sys::SPA_DATA_MemPtr);
+    let types = i32::try_from(types).map_err(text)?;
+    serialize(pod::Object {
+        type_: SpaTypes::ObjectParamBuffers.as_raw(),
+        id: ParamType::Buffers.as_raw(),
+        properties: vec![pod::Property::new(
+            spa::sys::SPA_PARAM_BUFFERS_dataType,
+            Value::Choice(ChoiceValue::Int(Choice(
+                ChoiceFlags::empty(),
+                ChoiceEnum::Flags {
+                    default: types,
+                    flags: Vec::new(),
+                },
+            ))),
+        )],
+    })
 }
 
 /// The camera's offer: any of [`CAMERA_FORMATS`], 640x360 at 15 frames a second preferred, anything up to 4K.
@@ -484,6 +518,31 @@ mod tests {
 
     use super::*;
     use crate::devices::DeviceError;
+
+    #[test]
+    fn the_camera_takes_dma_bufs_and_memfds_so_a_v4l2_camera_s_buffers_reach_it() {
+        let bytes = camera_buffers().expect("the buffers param");
+        let (_, value) = pod::deserialize::PodDeserializer::deserialize_any_from(&bytes).expect("a pod");
+        let Value::Object(object) = value else {
+            panic!("not an object: {value:?}");
+        };
+        assert_eq!(object.type_, SpaTypes::ObjectParamBuffers.as_raw());
+        assert_eq!(object.id, ParamType::Buffers.as_raw());
+        let [property] = object.properties.as_slice() else {
+            panic!("one property: {:?}", object.properties);
+        };
+        assert_eq!(property.key, spa::sys::SPA_PARAM_BUFFERS_dataType);
+        let Value::Choice(ChoiceValue::Int(Choice(_, ChoiceEnum::Flags { default, .. }))) = property.value else {
+            panic!("not a flags choice: {:?}", property.value);
+        };
+        for wanted in [
+            spa::sys::SPA_DATA_DmaBuf,
+            spa::sys::SPA_DATA_MemFd,
+            spa::sys::SPA_DATA_MemPtr,
+        ] {
+            assert_ne!(default & (1 << wanted), 0, "data type {wanted}");
+        }
+    }
 
     #[test]
     fn a_live_feed_closes_its_queue_when_its_stream_ends_or_goes_and_a_retired_one_never_does() {
