@@ -1,7 +1,8 @@
 //! Pictures messages show, read when a view shows one ([`InlinePicture`]): a picture pasted into a message
 //! ([`teams_proto::MessagePicture`]: a `GET` of the picture's view from the account's AMS base, the way the web client
-//! reads it), or a GIF picked from Teams' GIF picker ([`teams_proto::GiphyPicture`]: a `GET` of the GIF from Giphy's
-//! media host, no token), as [`crate::emoticons`] reads reactions' animations.
+//! reads it), a GIF picked from Teams' GIF picker ([`teams_proto::GiphyPicture`]: a `GET` of the GIF from Giphy's
+//! media host, no token), or a link preview's picture ([`teams_proto::LinkPreviewPicture`]: a `GET` of the async
+//! gateway's thumbnail of it), as [`crate::emoticons`] reads reactions' animations.
 //!
 //! - **Kept for the run**, in memory, up to [`KEPT_BYTES`] of them (the oldest read let go first: a view keeps what it
 //!   decoded, so a picture let go is read again only when a view asks for it anew); a view the service has none of (an
@@ -182,12 +183,14 @@ fn using<T>(
     }
 }
 
-/// What the cache finds a message's picture by: the AMS object and its view, or the GIF's id and file (never its
-/// link: the account's AMS base reads it, whichever host the message names).
+/// What the cache finds a message's picture by: the AMS object and its view, the GIF's id and file, or the page's
+/// picture a link preview's thumbnail is of (never the link the message names: the account's AMS base reads it,
+/// whichever host the message names).
 fn cache_key(picture: &InlinePicture) -> String {
     match picture {
         InlinePicture::Ams(picture) => format!("ams/{}/{}", picture.object(), picture.view()),
         InlinePicture::Giphy(picture) => format!("giphy/{}/{}", picture.id(), picture.file()),
+        InlinePicture::LinkPreview(picture) => format!("urlp/thumbnail/{}", picture.picture()),
     }
 }
 

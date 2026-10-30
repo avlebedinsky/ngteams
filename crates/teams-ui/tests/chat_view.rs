@@ -20,6 +20,9 @@ mod files;
 // forwarded messages, in their card
 #[path = "chat_view/forward.rs"]
 mod forward;
+// a link's preview card
+#[path = "chat_view/links.rs"]
+mod links;
 #[path = "chat_view/meeting.rs"]
 mod meeting;
 // names and pictures in the chat list and the chat view (M2 Task 12)
@@ -349,6 +352,7 @@ fn row(id: &str, sender: &str, at: i64) -> MessageItem {
         reactions: Vec::new(),
         outbox: Vec::new(),
         files: Arc::default(),
+        links: Arc::default(),
         unshown: UnshownParts::default(),
         writes: ChatWrites::Taken,
         forwarded: None,

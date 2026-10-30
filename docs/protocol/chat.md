@@ -400,9 +400,17 @@ how the web client draws them, from its bundle.
   carry `Authorization: skype_token <skypetoken>`. The native client reads the view with the `ic3` bearer token and
   `x-ms-migration: True` instead, the form the async gateway answered the object read in (`proto-lab probe object`);
   that form's answer to a view read hasn't been seen live.
-- **How Teams draws it**: at the size the message gives it, scaled down to the bubble's width with its aspect ratio
-  kept, at the start of its line and in the flow of the text (a small one in a wide bubble stays small); no link next
-  to it. A picture pasted from a dense screen gives half its pixels' size (`width="198" height="53"` for 396 by 106).
+- **How Teams draws it** (the bundle's inline image styles, its `rem` 10 px, and the user's screenshot of Teams beside
+  ours): sorted by the size the message gives it into a `data-image-type`, then sized by it, never upscaled, its aspect
+  ratio kept, in a frame of `colorNeutralStroke3` (a 1 px border and the background behind it, `borderRadiusLarge`
+  corners) at the start of its line. *Tall* (at least twice as high as wide, `812 / 406`): fitted (`object-fit:
+  contain`) into an `18rem` square. *Super-small* (lower than `18rem`, not long): an `18rem` square, the picture at its
+  own size in it (`scale-down`). *Standard*: `18rem` high, as wide as its aspect ratio makes it (`max-width: 100%`).
+  *Thin* and *ultra-wide* (at least twice as wide as high, lower or not than `18rem`): their own size, or once wider
+  than `62rem` or higher than `48rem` scaled to at most `62rem` wide and `18rem` high (`--calculatedWideImageWidth`),
+  never higher than `25rem` nor wider than the bubble. A narrow layout (side chat) uses `9rem` for `18rem`. A message
+  of pictures alone has no bubble: the frames sit on the background. A picture pasted from a dense screen gives half
+  its pixels' size (`width="198" height="53"` for 396 by 106), so it is drawn at that size.
 - **An emoticon** is an `<img>` with `itemtype="http://schema.skype.com/Emoji"`, `itemid` its id in Teams' emoticon
   catalog (`speechless`, `smile`, `1f44b_wavinghand`), `alt` its emoji and a `src` on the CDN
   (`…/emoticons/<id>/default/20_f.png`, sometimes `100_f.png?v=<n>`), wrapped in a `<span>` whose `class` is
@@ -417,10 +425,34 @@ how the web client draws them, from its bundle.
   base64url note of where it was picked). The common form has no `itemtype`, its size as `width` and `height`
   attributes, `alt` `"<title> (GIF Image)"` and `style="height:auto; margin-top:4px; max-width:100%"`, alone between
   two `<p>&nbsp;</p>`; an older one has `itemtype="http://schema.skype.com/Giphy"`, its size in its `style`
-  (`width:400px; height:300px`) and sits in a `<div>` after text and a `<br>`. Teams draws it as a picture: at its
-  size, scaled down to the bubble's width, playing. The native client reads it from `https://media.giphy.com/media/<id>/
+  (`width:400px; height:300px`) and sits in a `<div>` after text and a `<br>`. The native client sizes it as a pasted
+  picture, playing. The native client reads it from `https://media.giphy.com/media/<id>/
   <file>` with no token, leaving Giphy's token, the shard and any query out (Giphy serves the same bytes without them;
   [endpoints.md](endpoints.md#giphy-mediagiphycom-mediangiphycom)), and plays it as a pasted GIF is played.
+
+## Link previews
+
+How a received message carries the preview of a link, from the user's own chats as the personal build stored them,
+read for their shape only (`tests/fixtures/chatsvc/link-preview.json`), and how Teams draws it, from the user's
+screenshot of Teams.
+
+- **The shape**: the link is an anchor in the text (`<a href="http://<site>" target="_blank" rel="noreferrer
+  noopener">`), and `properties.links` is a JSON string of a list with one entry per link: `@type`
+  `http://schema.skype.com/HyperLink`, `itemid` (`"0"`), `url`, `previewenabled` (`true`; a channel post's link had it
+  `false`) and `preview`: `title`, `description`, `previewurl` and `previewMetadata` (`width` and `height` of the
+  picture as numbers, `320.0` by `167.0`). `previewurl` is the async gateway's URL preview thumbnail of the page's
+  picture: `https://us-prod.asyncgw.teams.microsoft.com/urlp/v1/url/image/Thumbnail?url=<the page's picture,
+  percent-encoded>`. A link the compose box sent before its preview was read carries only `"preview": {"previewurl":
+  ""}` ([Lines and links](#lines-and-links-chat-shapes)).
+- **How Teams draws it**: a card under the message's text, in the bubble: the picture on the left (cropped to fill),
+  beside it the title (semibold, one line), the description (two lines at most) and the site (the link's host,
+  muted), on a surface a shade off the bubble's with rounded corners; a click opens the link. No card for a link whose
+  preview is off or has no title.
+- **Where the picture is read**: the web client asks the URL preview service on the async gateway with the `ic3`
+  bearer token and `x-ms-migration: True` (its `urlp/v1/url/info` read in `chat-shapes`); the native client reads the
+  thumbnail the entry names in that form (`teams_proto::LinkPreviewPicture` on `Service::Ams`), the page's picture
+  link the only thing it sends. That read's answer hasn't been seen live; a card whose picture can't be read is drawn
+  without it.
 
 ## Forwarded messages
 

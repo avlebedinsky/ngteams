@@ -1666,3 +1666,34 @@ fn a_file_entry_off_its_shape_is_kept_as_it_came_beside_the_ones_read() -> TestR
     assert_eq!(files.unread, None);
     Ok(())
 }
+
+#[test]
+fn a_link_s_preview_is_read_from_its_entry_and_one_turned_off_is_left_out() -> TestResult {
+    let message = message(&fixture("link-preview.json")?["read_back"])?;
+    let previews = message.link_previews();
+    assert_eq!(previews.len(), 1, "the preview turned off is left out: {previews:#?}");
+    let preview = &previews[0];
+    assert_eq!(preview.url, "http://made-up.example.test");
+    assert_eq!(preview.site, "made-up.example.test");
+    assert_eq!(preview.title, "Made-up Site, a page invented for the test");
+    assert!(
+        preview
+            .description
+            .as_deref()
+            .is_some_and(|text| text.starts_with("A made-up page's"))
+    );
+    assert_eq!(
+        preview.picture.as_deref(),
+        Some(
+            "https://us-prod.asyncgw.teams.microsoft.com/urlp/v1/url/image/Thumbnail?url=https%3a%2f%2fcdn.example.\
+             test%2fmade-up%2fcard-800x418.png"
+        )
+    );
+    assert_eq!(preview.picture_size, Some((320, 167)));
+    // a link the compose box sent before its preview was read draws no card
+    let unread = json!(
+        r#"[{"@type":"http://schema.skype.com/HyperLink","itemid":"0","url":"https://example.test/","previewenabled":true,"preview":{"previewurl":""}}]"#
+    );
+    assert!(teams_proto::chat::link_previews(Some(&unread)).is_empty());
+    Ok(())
+}

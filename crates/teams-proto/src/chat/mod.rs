@@ -21,6 +21,7 @@ mod compose;
 mod event;
 mod files;
 mod html;
+mod links;
 mod model;
 mod read;
 
@@ -38,6 +39,7 @@ pub use html::{
     MENTION_ITEMTYPE, Marks, Node, Quote, REPLY_ITEMTYPE, RichText, ThreadActivity, parse as parse_html,
     thread_activity,
 };
+pub use links::{HYPERLINK_TYPE, LinkPreview, link_previews};
 pub use model::{
     ConsumptionHorizon, Conversation, ConversationKind, ConversationList, Field, Forwarded, Malformed, MemberList,
     Mention, MentionKind, Message, MessagePage, MessageType, QuotedMessage, Reaction, ReactionUser, Thread,

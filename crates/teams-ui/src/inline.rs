@@ -7,11 +7,13 @@
 //!   ([`Core::message_picture`]), decoded here off the foreground (every frame scaled down to at most
 //!   [`MAX_DECODED_SIDE`] on its longer side; a GIF with its frames up to the first that doesn't decode, at most
 //!   [`MAX_GIF_FRAMES`] and [`MAX_GIF_BYTES`] of them, its canvas at most [`MAX_GIF_SIDE`]) and kept for the run. It is
-//!   drawn at the size the message gives it (else its own), scaled down to the width there is and keeping its aspect
-//!   ratio, at the start of its line, as Teams draws a picture in its bubble (never stretched to the bubble's width:
-//!   its block may be wider than the picture, which is drawn at exactly its own size inside it); a box of that size
-//!   stands in while it is read. One the engine has
-//!   none of, or none can be asked of (no engine), is drawn as the message's fallback (its placeholder text).
+//!   drawn as Teams draws a picture in a message ([`Shape::of`]): sized by the size the message gives it (else its
+//!   own), never upscaled, its aspect ratio kept, in a frame of the border colour (1 px, rounded) at the start of its
+//!   line, never wider than the width there is. A tall one (twice as high as wide) or a small one (lower than
+//!   [`PICTURE_BOX`]) sits in a square frame of [`PICTURE_BOX`], fitted (a small one at its own size); any other one is
+//!   [`PICTURE_BOX`] high; a wide one (twice as wide as high) keeps its own size, at most [`WIDE_MAX_WIDTH`] wide and,
+//!   once larger than Teams' bounds, [`PICTURE_BOX`] high. The empty frame stands in while it is read. One the engine
+//!   has none of, or none can be asked of (no engine), is drawn as the message's fallback (its placeholder text).
 //! - **An emoticon** ([`emoticon`]) is drawn from Teams' own animation of it (its CDN's strip of frames, read by the
 //!   engine as a reaction's is, [`reactions::animation`]): playing when `animated` (an emoticon-only message's, drawn
 //!   large), else standing on its first frame (one inside text, at the text's height, as Teams draws it until hovered).
@@ -66,6 +68,26 @@ const RETRY_AFTER: Duration = Duration::from_secs(30);
 
 /// The size a picture is held at while it is read, when the message gives none.
 const UNKNOWN_SIZE: (u32, u32) = (320, 180);
+
+/// The side of the square frame a tall or small picture is drawn in, and the height of any other but a wide one
+/// (Teams' `18rem`, its `rem` 10 px).
+pub const PICTURE_BOX: f32 = 180.0;
+
+/// The widest a wide picture is drawn (Teams' `62rem`).
+pub const WIDE_MAX_WIDTH: f32 = 620.0;
+
+/// The highest a wide picture is drawn at its own size before Teams bounds it (Teams' `48rem`).
+const WIDE_OWN_MAX_HEIGHT: f32 = 480.0;
+
+/// The highest a wide picture is ever drawn (Teams' `25rem`).
+const WIDE_MAX_HEIGHT: f32 = 250.0;
+
+/// How much higher than wide a picture is to be tall, or wider than high to be wide (Teams' `812 / 406`).
+const LONG_RATIO: f32 = 2.0;
+
+/// A picture's frame: its border's width, and its corners' radius (Teams' `borderRadiusLarge`).
+const FRAME_BORDER: f32 = 1.0;
+const FRAME_RADIUS: f32 = 6.0;
 
 /// The part of the engine's request side a message's pictures and emoticons are asked of ([`Core`]'s, through
 /// [`PictureSource::new`]; a view test's own fake through [`PictureSource::of`]).
@@ -320,8 +342,8 @@ pub struct Picture {
     src: String,
     given: Option<(u32, u32)>,
     source: Option<PictureSource>,
-    /// Drawn while it is read.
-    reading: Hsla,
+    /// Its frame's border and background, which is all that is drawn while it is read.
+    frame: Hsla,
     /// Drawn when there is none.
     fallback: Option<AnyElement>,
     child: Option<AnyElement>,
@@ -334,7 +356,7 @@ impl Picture {
         src: &str,
         given: Option<(u32, u32)>,
         source: Option<PictureSource>,
-        reading: Hsla,
+        frame: Hsla,
         fallback: AnyElement,
     ) -> Self {
         Self {
@@ -342,7 +364,7 @@ impl Picture {
             src: src.to_owned(),
             given,
             source,
-            reading,
+            frame,
             fallback: Some(fallback),
             child: None,
         }
@@ -353,8 +375,9 @@ impl Picture {
 pub enum Laid {
     /// As its fallback, laid out as a child.
     Fallback,
-    /// Measured: its frames (`None` while it is read) and the size it is drawn at, before it is fitted to its block.
-    Measured(Option<Arc<RenderImage>>, (u32, u32)),
+    /// Measured: its frames (`None` while it is read), the size it is shaped by (the message's, else its bytes') and
+    /// the size of its bytes (the shaping size while it is read).
+    Measured(Option<Arc<RenderImage>>, (u32, u32), (u32, u32)),
 }
 
 impl IntoElement for Picture {
@@ -388,20 +411,23 @@ impl Element for Picture {
             Some(source) => picture(&self.src, source, cx),
             None => PictureState::Missing,
         };
-        let (image, natural) = match state {
+        let (image, given, own) = match state {
             PictureState::Missing => {
                 let mut fallback = self.fallback.take().unwrap_or_else(|| div().into_any_element());
                 let layout = fallback.request_layout(window, cx);
                 self.child = Some(fallback);
                 return (layout, Laid::Fallback);
             }
-            PictureState::Reading => (None, self.given.unwrap_or(UNKNOWN_SIZE)),
-            PictureState::Shown(image, own) => (Some(image), self.given.unwrap_or(own)),
+            PictureState::Reading => {
+                let given = self.given.unwrap_or(UNKNOWN_SIZE);
+                (None, given, given)
+            }
+            PictureState::Shown(image, own) => (Some(image), self.given.unwrap_or(own), own),
         };
         let layout = window.request_measured_layout(Style::default(), move |known, available, _, _| {
-            fitted(natural, known, available)
+            Shape::of(given, own, room(known, available)).outer()
         });
-        (layout, Laid::Measured(image, natural))
+        (layout, Laid::Measured(image, given, own))
     }
 
     fn prepaint(
@@ -419,42 +445,34 @@ impl Element for Picture {
                     child.prepaint(window, cx);
                 }
             }
-            Laid::Measured(image, natural) => {
-                // its own size within its block, which a block or flex parent stretches to the width there is: the
-                // picture is never drawn wider (nor, its aspect ratio kept, taller) than that
-                let room = Size {
-                    width: Some(bounds.size.width),
-                    height: None,
-                };
-                let shown = fitted(*natural, room, bounds.size.map(AvailableSpace::Definite));
-                // nor taller than its block, should its block be lower than its fitted height
-                let scale = if shown.height > bounds.size.height && shown.height > px(0.0) {
-                    bounds.size.height / shown.height
-                } else {
-                    1.0
-                };
-                let (width, height) = (shown.width * scale, shown.height * scale);
-                let drawn = match image {
+            Laid::Measured(image, given, own) => {
+                // shaped for the width of its block, which a block or flex parent stretches to the width there is,
+                // and never taller than its block, should its block be lower
+                let shape = Shape::of(*given, *own, Some(bounds.size.width)).within_height(bounds.size.height);
+                let drawn = image.as_ref().map(|image| {
                     // an id of its own: GPUI keeps a GIF's frame in the element's state; its size given outright, so
                     // the image's own aspect ratio sets nothing
-                    Some(image) => InteractiveElement::id(img(Arc::clone(image)), self.id.clone())
-                        .w(width)
-                        .h(height)
-                        .rounded(px(4.0))
-                        .into_any_element(),
-                    None => div()
-                        .w(width)
-                        .h(height)
-                        .rounded(px(4.0))
-                        .bg(self.reading)
-                        .into_any_element(),
-                };
+                    InteractiveElement::id(img(Arc::clone(image)), self.id.clone())
+                        .w(shape.image.width)
+                        .h(shape.image.height)
+                        .flex_none()
+                        // within the frame's rounded corners, should it fill the frame
+                        .rounded(px(FRAME_RADIUS - FRAME_BORDER))
+                });
+                let Size { width, height } = shape.outer();
                 let mut sized = div()
                     .debug_selector(|| "rich-picture-drawn".to_owned())
                     .w(width)
                     .h(height)
+                    .border(px(FRAME_BORDER))
+                    .border_color(self.frame)
+                    .rounded(px(FRAME_RADIUS))
+                    .bg(self.frame)
                     .overflow_hidden()
-                    .child(drawn)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .children(drawn)
                     .into_any_element();
                 sized.prepaint_as_root(
                     bounds.origin,
@@ -483,20 +501,114 @@ impl Element for Picture {
     }
 }
 
-/// The size a picture of `natural` size is drawn at: its own, scaled down to the width there is (`known`'s, else a
-/// definite `available`), its aspect ratio kept; under a min-content constraint none (it shrinks with its bubble, as
-/// an image of `max-width: 100%` does).
-#[must_use]
-pub fn fitted(natural: (u32, u32), known: Size<Option<Pixels>>, available: Size<AvailableSpace>) -> Size<Pixels> {
-    #[expect(clippy::cast_precision_loss, reason = "a picture's side is at most 100 000 pixels")]
-    let (width, height) = (natural.0.max(1) as f32, natural.1.max(1) as f32);
-    let room = known.width.or(match available.width {
+/// The width there is for a picture: `known`'s, else a definite `available`; any under a max-content constraint, none
+/// under a min-content one (it shrinks with its bubble, as an image of `max-width: 100%` does).
+fn room(known: Size<Option<Pixels>>, available: Size<AvailableSpace>) -> Option<Pixels> {
+    known.width.or(match available.width {
         AvailableSpace::Definite(room) => Some(room),
         AvailableSpace::MaxContent => None,
         AvailableSpace::MinContent => Some(px(0.0)),
-    });
-    let shown = room.map_or(width, |room| width.min(f32::from(room).max(0.0)));
-    size(px(shown), px(shown * height / width))
+    })
+}
+
+/// How Teams sizes a picture in a message, by the size it is given (its `data-image-type`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// At least twice as high as wide: fitted into a square frame of [`PICTURE_BOX`].
+    Tall,
+    /// Lower than [`PICTURE_BOX`] and not long: at its own size in a square frame of [`PICTURE_BOX`] (scaled down only
+    /// to fit it).
+    Small,
+    /// Neither long nor small: [`PICTURE_BOX`] high.
+    Standard,
+    /// At least twice as wide as high: its own size, or once larger than Teams' bounds at most [`WIDE_MAX_WIDTH`] wide
+    /// and [`PICTURE_BOX`] high.
+    Wide,
+}
+
+impl Kind {
+    /// The kind of a picture given `width` by `height`.
+    #[must_use]
+    pub fn of(width: f32, height: f32) -> Self {
+        let (width, height) = (width.max(1.0), height.max(1.0));
+        if height / width >= LONG_RATIO {
+            Self::Tall
+        } else if width / height >= LONG_RATIO {
+            Self::Wide
+        } else if height < PICTURE_BOX {
+            Self::Small
+        } else {
+            Self::Standard
+        }
+    }
+}
+
+/// The frame a picture is drawn in, inside its border, and the size its bytes are drawn at, centred in the frame.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Shape {
+    pub frame: Size<Pixels>,
+    pub image: Size<Pixels>,
+}
+
+impl Shape {
+    /// The shape of a picture the message gives `given` (else its bytes' size) and whose bytes are `own`, in `room` (the
+    /// width there is; `None` for any), as Teams draws one: its frame by its [`Kind`], no wider than `room` (a wide one
+    /// keeping its aspect ratio), its bytes contained in the frame, a small one's never past the size it is given.
+    #[must_use]
+    pub fn of(given: (u32, u32), own: (u32, u32), room: Option<Pixels>) -> Self {
+        #[expect(clippy::cast_precision_loss, reason = "a picture's side is at most 100 000 pixels")]
+        let (width, height) = (given.0.max(1) as f32, given.1.max(1) as f32);
+        #[expect(clippy::cast_precision_loss, reason = "a picture's side is at most 100 000 pixels")]
+        let aspect = own.0.max(1) as f32 / own.1.max(1) as f32;
+        let room = room.map_or(f32::INFINITY, |room| (f32::from(room) - 2.0 * FRAME_BORDER).max(0.0));
+        let kind = Kind::of(width, height);
+        let frame = match kind {
+            Kind::Tall | Kind::Small => (PICTURE_BOX.min(room), PICTURE_BOX),
+            Kind::Standard => ((PICTURE_BOX * width / height).min(room), PICTURE_BOX),
+            Kind::Wide => {
+                let bounded = if width > WIDE_MAX_WIDTH || height > WIDE_OWN_MAX_HEIGHT {
+                    (WIDE_MAX_WIDTH / width).min(PICTURE_BOX / height)
+                } else {
+                    1.0
+                };
+                let scale = bounded.min(WIDE_MAX_HEIGHT / height).min(room / width);
+                (width * scale, height * scale)
+            }
+        };
+        let mut image = if frame.1 > 0.0 && frame.0 / frame.1 > aspect {
+            (frame.1 * aspect, frame.1)
+        } else {
+            (frame.0, frame.0 / aspect)
+        };
+        if kind == Kind::Small && image.0 > width {
+            image = (width, width / aspect);
+        }
+        Self {
+            frame: size(px(frame.0), px(frame.1)),
+            image: size(px(image.0), px(image.1)),
+        }
+    }
+
+    /// It scaled down, its aspect ratio kept, so that its frame with its border is at most `height` high.
+    #[must_use]
+    pub fn within_height(self, height: Pixels) -> Self {
+        let outer = self.outer().height;
+        if outer <= height || outer <= px(0.0) {
+            return self;
+        }
+        let scale = (height / outer).max(0.0);
+        Self {
+            frame: size(self.frame.width * scale, self.frame.height * scale),
+            image: size(self.image.width * scale, self.image.height * scale),
+        }
+    }
+
+    /// Its frame's size with its border.
+    #[must_use]
+    pub fn outer(&self) -> Size<Pixels> {
+        let border = px(2.0 * FRAME_BORDER);
+        size(self.frame.width + border, self.frame.height + border)
+    }
 }
 
 /// An emoticon of a message, drawn as the module docs say.

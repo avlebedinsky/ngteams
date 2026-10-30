@@ -1,7 +1,7 @@
 //! A message's pasted GIF decoded as `inline::decode` keeps it for the run: every frame of a normal one, the frames
 //! before the first that doesn't decode (a truncated file ends at once, never spins), at most `MAX_GIF_FRAMES` and
 //! `MAX_GIF_BYTES` of them, each scaled down to `MAX_DECODED_SIDE`, and none for a canvas past `MAX_GIF_SIDE`. Every
-//! GIF here is made up in the test.
+//! GIF here is made up in the test. A picture is shaped as Teams sizes one (`inline::Shape`).
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
@@ -14,7 +14,9 @@ use gpui::{DevicePixels, RenderImage, size};
 use image::codecs::gif::GifEncoder;
 use image::{Delay, Frame, Rgba, RgbaImage};
 use teams_proto::{PastedFormat, PastedPicture};
-use teams_ui::inline::{self, MAX_DECODED_SIDE, MAX_GIF_BYTES, MAX_GIF_FRAMES, MAX_GIF_SIDE};
+use teams_ui::inline::{
+    self, Kind, MAX_DECODED_SIDE, MAX_GIF_BYTES, MAX_GIF_FRAMES, MAX_GIF_SIDE, PICTURE_BOX, Shape, WIDE_MAX_WIDTH,
+};
 
 /// How long a decode may take before the test calls it stuck.
 const STUCK: Duration = Duration::from_secs(20);
@@ -122,4 +124,65 @@ fn past_the_byte_budget_the_frames_before_are_kept() {
     let fit = MAX_GIF_BYTES / per_frame;
     let (image, _) = decode(with_canvas(gif(1, 1, fit + 4), side, side / 2)).expect("decoded");
     assert_eq!(image.frame_count(), fit);
+}
+
+/// `shape`'s frame and image, rounded to whole pixels: `((frame width, frame height), (image width, image height))`.
+fn sides(shape: Shape) -> ((f32, f32), (f32, f32)) {
+    let round = |side: gpui::Pixels| f32::from(side).round();
+    (
+        (round(shape.frame.width), round(shape.frame.height)),
+        (round(shape.image.width), round(shape.image.height)),
+    )
+}
+
+#[test]
+fn a_picture_is_sized_by_its_kind_as_teams_sizes_it() {
+    let any = None;
+    // a phone's screenshot: fitted into the square frame, never stretched to the bubble
+    assert_eq!(Kind::of(1080.0, 2520.0), Kind::Tall);
+    assert_eq!(
+        sides(Shape::of((1080, 2520), (1080, 2520), any)),
+        ((PICTURE_BOX, PICTURE_BOX), (77.0, PICTURE_BOX))
+    );
+    // a small one: at its own size in the square frame, never upscaled
+    assert_eq!(Kind::of(100.0, 100.0), Kind::Small);
+    assert_eq!(
+        sides(Shape::of((100, 100), (200, 200), any)),
+        ((PICTURE_BOX, PICTURE_BOX), (100.0, 100.0))
+    );
+    // a photo: as high as the frame's side, its aspect ratio kept
+    assert_eq!(Kind::of(800.0, 600.0), Kind::Standard);
+    assert_eq!(
+        sides(Shape::of((800, 600), (800, 600), any)),
+        ((240.0, PICTURE_BOX), (240.0, PICTURE_BOX))
+    );
+    // a wide one: its own size while within Teams' bounds, else at most the widest and the frame's side high
+    assert_eq!(Kind::of(500.0, 200.0), Kind::Wide);
+    assert_eq!(
+        sides(Shape::of((500, 200), (500, 200), any)),
+        ((500.0, 200.0), (500.0, 200.0))
+    );
+    assert_eq!(
+        sides(Shape::of((2000, 500), (2000, 500), any)),
+        ((WIDE_MAX_WIDTH, 155.0), (WIDE_MAX_WIDTH, 155.0))
+    );
+    assert_eq!(
+        sides(Shape::of((1000, 450), (1000, 450), any)),
+        ((400.0, PICTURE_BOX), (400.0, PICTURE_BOX))
+    );
+}
+
+#[test]
+fn a_picture_is_never_wider_than_the_width_there_is() {
+    let room = Some(gpui::px(102.0));
+    // a photo's frame narrows, the picture contained in it
+    assert_eq!(
+        sides(Shape::of((800, 600), (800, 600), room)),
+        ((100.0, PICTURE_BOX), (100.0, 75.0))
+    );
+    // a wide one keeps its aspect ratio
+    assert_eq!(
+        sides(Shape::of((500, 200), (500, 200), room)),
+        ((100.0, 40.0), (100.0, 40.0))
+    );
 }

@@ -19,6 +19,7 @@ use gpui::{
 use teams_proto::chat::Token;
 use teams_proto::chat::{Marks, parse_html};
 use teams_ui::code::token_style;
+use teams_ui::inline::{PICTURE_BOX, WIDE_MAX_WIDTH};
 use teams_ui::rich_text::{
     self, Block, IMAGE_PLACEHOLDER, LinkRange, ListBlock, Mentioned, Mentions, QuoteBlock, Rendered, Style, TextBlock,
     highlight, opens,
@@ -754,6 +755,20 @@ fn a_message_of_emoticons_alone_is_drawn_bare() {
     }
 }
 
+#[test]
+fn a_message_of_pictures_alone_is_drawn_bare() {
+    let alone = format!(
+        "<p><img alt=\"Media\" itemscope=\"\" itemtype=\"http://schema.skype.com/AMSImage\" src=\"{PICTURE}\" \
+         width=\"1080\" height=\"2520\"></p>"
+    );
+    let rendered = rich_text::layout(&parse_html(&alone), &Mentions::default());
+    assert!(rendered.pictures_only() && rendered.bare, "{rendered:#?}");
+
+    let with_text = format!("<p>look</p><p><img src=\"{PICTURE}\"></p>");
+    let rendered = rich_text::layout(&parse_html(&with_text), &Mentions::default());
+    assert!(!rendered.pictures_only() && !rendered.bare, "{rendered:#?}");
+}
+
 /// The engine's side a message's pictures and emoticons are asked of: answers from its own pictures, no animation,
 /// and records what it was asked.
 #[derive(Default)]
@@ -807,7 +822,7 @@ fn a_pasted_picture_is_asked_of_the_engine_and_drawn_within_the_width_there_is()
             bytes: png(40, 10),
         }),
     );
-    // the message gives it a size wider than any window: drawn at the width there is, a quarter as high
+    // the message gives it a size wider than any window: drawn no wider than the width there is, a quarter as high
     let content = format!("<p>look</p><p><img src=\"{PICTURE}\" width=\"40000\" height=\"10000\"></p>");
     let source = rich_text::PictureSource::of(core.clone());
     let rendered = Arc::new(rich_text::layout(&parse_html(&content), &Mentions::default()).with_source(source));
@@ -821,15 +836,12 @@ fn a_pasted_picture_is_asked_of_the_engine_and_drawn_within_the_width_there_is()
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    let drawn = cx.debug_bounds("rich-picture").expect("the picture is drawn");
+    let drawn = cx.debug_bounds("rich-picture-drawn").expect("the picture is drawn");
     let window = cx.update(|window, _| window.viewport_size());
     assert!(drawn.size.width <= window.width, "{drawn:?} in {window:?}");
-    // its block's padding aside, a quarter as high as wide
-    let picture_height = drawn.size.height - px(8.0);
-    assert!(
-        (f32::from(picture_height) - f32::from(drawn.size.width) / 4.0).abs() < 2.0,
-        "{drawn:?}"
-    );
+    // its frame's border aside, a quarter as high as wide
+    let (width, height) = (drawn.size.width - px(2.0), drawn.size.height - px(2.0));
+    assert!((f32::from(height) - f32::from(width) / 4.0).abs() < 2.0, "{drawn:?}");
 }
 
 /// A made-up animated GIF, `width` by `height`, of `frames` frames in turn red and blue.
@@ -886,10 +898,14 @@ fn a_gif_is_asked_of_the_engine_and_drawn_with_every_frame_at_its_size() {
     cx.update(|window, cx| {
         let _ = window.draw(cx);
     });
-    let drawn = cx.debug_bounds("rich-picture").expect("the GIF is drawn");
-    // its block the width there is; the GIF as high as the message gives it (so as wide: it isn't scaled down), its
-    // block's padding aside
-    assert_eq!(drawn.size.height - px(8.0), px(200.0), "{drawn:?}");
+    let drawn = cx.debug_bounds("rich-picture-drawn").expect("the GIF is drawn");
+    // as Teams draws a picture neither long nor small: as high as its frame's side, its aspect ratio kept, the
+    // frame's border aside
+    assert_eq!(
+        (drawn.size.width, drawn.size.height),
+        (px(225.0 + 2.0), px(PICTURE_BOX + 2.0)),
+        "{drawn:?}"
+    );
 }
 
 #[test]
@@ -954,19 +970,19 @@ fn drawn_with(core: &Arc<FakePictures>, content: &str) -> &'static mut gpui::Vis
 }
 
 #[test]
-fn a_small_picture_is_drawn_at_its_own_size_inside_its_block() {
+fn a_thin_picture_is_drawn_at_its_own_size_inside_its_block() {
     let core = Arc::new(FakePictures::default());
     let content = picture_between_lines(&core, 198, 53);
     let cx = drawn_with(&core, &content);
     let window = cx.update(|window, _| window.viewport_size());
     assert!(window.width > px(400.0), "{window:?}");
-    // its block spans the width there is, the picture in it only its own size at the start of its line, never
-    // stretched to the block's width nor drawn past its bottom (over the line after it)
+    // its block spans the width there is, the picture in it only its own size (in its frame's border) at the start of
+    // its line, never stretched to the block's width nor drawn past its bottom (over the line after it)
     let block = cx.debug_bounds("rich-picture").expect("its block");
     let drawn = cx.debug_bounds("rich-picture-drawn").expect("the picture is drawn");
     assert_eq!(
         (drawn.size.width, drawn.size.height),
-        (px(198.0), px(53.0)),
+        (px(198.0 + 2.0), px(53.0 + 2.0)),
         "{drawn:?}"
     );
     assert_eq!(drawn.origin.x, block.origin.x, "{drawn:?} in {block:?}");
@@ -977,18 +993,34 @@ fn a_small_picture_is_drawn_at_its_own_size_inside_its_block() {
 }
 
 #[test]
-fn a_picture_wider_than_the_bubble_is_scaled_down_to_it_inside_its_block() {
+fn a_large_wide_picture_is_bounded_as_teams_bounds_it_inside_its_block() {
     let core = Arc::new(FakePictures::default());
     let content = picture_between_lines(&core, 4000, 1000);
     let cx = drawn_with(&core, &content);
     let block = cx.debug_bounds("rich-picture").expect("its block");
     let drawn = cx.debug_bounds("rich-picture-drawn").expect("the picture is drawn");
-    assert_eq!(drawn.size.width, block.size.width, "{drawn:?} in {block:?}");
+    // at most Teams' widest (its frame's border aside), and no wider than its block
+    let widest = px(WIDE_MAX_WIDTH + 2.0).min(block.size.width);
+    assert!((drawn.size.width - widest).abs() < px(1.0), "{drawn:?} in {block:?}");
     assert!(
-        (f32::from(drawn.size.height) - f32::from(drawn.size.width) / 4.0).abs() < 1.0,
+        (f32::from(drawn.size.height - px(2.0)) - f32::from(drawn.size.width - px(2.0)) / 4.0).abs() < 1.0,
         "its aspect ratio kept: {drawn:?}"
     );
     assert!(drawn.bottom() <= block.bottom(), "{drawn:?} in {block:?}");
+}
+
+#[test]
+fn a_tall_picture_is_fitted_into_a_square_frame_never_upscaled() {
+    let core = Arc::new(FakePictures::default());
+    // a phone's screenshot, as Teams sends one: 1080 by 2520
+    let content = picture_between_lines(&core, 1080, 2520);
+    let cx = drawn_with(&core, &content);
+    let drawn = cx.debug_bounds("rich-picture-drawn").expect("the picture is drawn");
+    assert_eq!(
+        (drawn.size.width, drawn.size.height),
+        (px(PICTURE_BOX + 2.0), px(PICTURE_BOX + 2.0)),
+        "a square frame: {drawn:?}"
+    );
 }
 
 /// A block of code as Teams' code block editor sends one, every value made up.

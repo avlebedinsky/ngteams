@@ -97,7 +97,7 @@ use gpui_component::tooltip::Tooltip;
 use gpui_component::{Sizable as _, Size};
 use teams_core::{Action, Command, EngineError, NOTES};
 use teams_proto::chat::{
-    MessageType, RichText, SharedFile, Unshown, parse_html, shared_files, unshown_parts, web_chat_link,
+    LinkPreview, MessageType, RichText, SharedFile, Unshown, parse_html, shared_files, unshown_parts, web_chat_link,
 };
 use teams_store::{Message, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction};
 
@@ -107,6 +107,7 @@ use crate::compose::{self, Compose, ComposeEvent, ComposeParts, Quoted};
 use crate::files;
 use crate::forwarded::{self, ForwardOrigin, Original};
 use crate::icons::{Glyph, icon_button, icon_button_with_key, selected_by};
+use crate::link_preview;
 use crate::models::Models;
 use crate::people::{Face, Shown};
 use crate::reaction_picker::{ReactionPicker, ReactionPickerEvent};
@@ -447,6 +448,8 @@ pub struct MessageItem {
     /// The files it carries ([`files_of`]), each drawn as its card under its text (`crate::files`). Behind one
     /// pointer: a row stays small whether or not it has any.
     pub files: Arc<Vec<SharedFile>>,
+    /// The previews of the links it carries (`crate::link_preview::previews_of`), each drawn as its card under its text.
+    pub links: Arc<Vec<LinkPreview>>,
     /// What it carries beside its text that this build can't show ([`unshown_of`]): a file entry of a shape no message
     /// showed, a card. With any, it shows [`UNSHOWN_CONTENT`] and a way to open the chat in Teams on the web, never a
     /// guess at the part.
@@ -2002,10 +2005,14 @@ impl ChatView {
         }
         let me = self.core.me().to_owned();
         let body = self.body(message)?;
-        let (files, unshown) = if matches!(body, Body::Text(_)) {
-            (Arc::new(files_of(message)), unshown_of(message))
+        let (files, links, unshown) = if matches!(body, Body::Text(_)) {
+            (
+                Arc::new(files_of(message)),
+                Arc::new(link_preview::previews_of(message.properties.as_deref())),
+                unshown_of(message),
+            )
         } else {
-            (Arc::default(), UnshownParts::default())
+            (Arc::default(), Arc::default(), UnshownParts::default())
         };
         let (sender_name, named) = self.sender_of(message);
         let picture = message
@@ -2038,6 +2045,7 @@ impl ChatView {
             reactions,
             outbox: notes.get(&message.id).cloned().unwrap_or_default(),
             files,
+            links,
             unshown,
             writes: if self.core.read_only() {
                 ChatWrites::AppReadOnly
@@ -3530,9 +3538,12 @@ fn bubble(
         (false, false) => palette.surface,
     };
     let id: SharedString = format!("message-text-{}", item.id).into();
-    let files = match &item.body {
-        Body::Text(text) => files::file_cards(&item.id, &item.files, text.0.source.as_ref(), palette),
-        _ => None,
+    let (files, links) = match &item.body {
+        Body::Text(text) => (
+            files::file_cards(&item.id, &item.files, text.0.source.as_ref(), palette),
+            link_preview::cards(&item.id, &item.links, text.0.source.as_ref(), palette),
+        ),
+        _ => (None, None),
     };
     let content = match &item.body {
         Body::Text(text) => rich_text::render_with_header(&id, &text.0, palette, forward),
@@ -3564,6 +3575,7 @@ fn bubble(
     let bubble = if item.own { bubble.max_w(relative(0.8)) } else { bubble };
     bubble
         .child(content)
+        .children(links)
         .children(files)
         .children(item.unshown.any().then(|| {
             div()

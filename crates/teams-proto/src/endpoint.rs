@@ -59,7 +59,9 @@ pub enum Service {
     /// (`https://<name>.asyncgw.teams.microsoft.com`), which a transport reaches only once it was given one
     /// (`HttpTransport::with_ams`), with the account's `ic3` token and `x-ms-migration: True` (the object read's form,
     /// `docs/protocol/chat.md`): a picture pasted into a message, read by its view (`v1/objects/<id>/views/<view>`,
-    /// [`crate::MessagePicture`]). Reads only: AMS is a contacting service, and the transport sends it nothing else.
+    /// [`crate::MessagePicture`]), and a link preview's picture from the gateway's URL preview service
+    /// (`urlp/v1/url/image/Thumbnail?url=<picture>`, [`crate::LinkPreviewPicture`]). Reads only: AMS is a contacting
+    /// service, and the transport sends it nothing else.
     Ams,
     /// A file thumbnail's picture, at the pre-authenticated link Graph handed out for it ([`crate::ThumbnailLink`]:
     /// SharePoint's media host `https://<name>.svc.ms`, or a SharePoint host), with no token of the account's (the link

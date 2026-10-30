@@ -172,8 +172,8 @@ fn a_forward_is_drawn_in_its_card_under_where_it_came_from() {
     );
     assert!(within(picture, bubble), "{picture:?} {bubble:?}");
     assert!(
-        picture.size.height > px(240.0),
-        "drawn at its height, not a line of text: {picture:?}"
+        picture.size.height > px(180.0),
+        "drawn in its frame, as high as Teams draws it, not a line of text: {picture:?}"
     );
 }
 

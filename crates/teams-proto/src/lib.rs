@@ -4,7 +4,8 @@
 //! A request comes in one of three classes, and a [`Transport`] takes nothing else:
 //! - a [`Read`]: always sent as a `GET`, with no body (the chat service's, Microsoft Graph's reads of a person's name
 //!   and picture, [`GraphUser`] and [`GraphPicture`], and a shared file's thumbnails, [`FileThumbnails`], CSA's read
-//!   of the account's teams, [`CsaTeams`], and a picture pasted into a message, [`MessagePicture`], from AMS, and a GIF
+//!   of the account's teams, [`CsaTeams`], and a picture pasted into a message, [`MessagePicture`], from AMS, a link
+//!   preview's picture, [`LinkPreviewPicture`], from the async gateway's URL preview service, and a GIF
 //!   a message shows, [`GiphyPicture`], from Giphy's media host with no token; beside them a file thumbnail's picture
 //!   at the link Graph handed out, [`HttpTransport::file_thumbnail`], with no token, and a shared file's item and its
 //!   bytes, part by part, [`FileDownload`] and [`HttpTransport::file_range`], to play a video inline);
@@ -63,6 +64,7 @@ mod read;
 mod relay;
 mod request;
 mod thumbnail;
+mod urlp;
 mod write;
 
 pub use ams::{MessagePicture, PastedFormat, PastedPicture};
@@ -102,6 +104,7 @@ pub use read::{
 pub use relay::{RelayAnswer, RelayAnswerError, RelayCredential, RelayTokens};
 pub use request::Request;
 pub use thumbnail::{FileThumbnails, THUMBNAIL_HOST_SUFFIX, ThumbnailLink, is_thumbnail_link};
+pub use urlp::LinkPreviewPicture;
 pub use write::{
     AcceptCall, AcceptParts, AcknowledgeAcceptance, AcknowledgeMediaAnswer, AddParts, AddToCall, AnswerMedia,
     AnswerMediaParts, ApplyChannelParameters, AttachCall, AttachParts, Author, Authorized, CALL_START_URL,

@@ -169,8 +169,8 @@ const STEPS: [Step; 40] = [
     ("chat-dark-emoji", |shell, window, cx| {
         with_compose(shell, cx, |compose, cx| compose.toggle_emoji(window, cx));
     }),
-    // b's pasted picture with an emoticon in its text, b's wave alone and c's GIF from the GIF picker
-    // (`seed_pictures`), in Teams Dark
+    // b's pasted picture with an emoticon in its text, b's wave alone, c's GIF from the GIF picker, b's link with its
+    // preview card and b's phone screenshot alone in its square frame (`seed_pictures`), in Teams Dark
     ("chat-pictures", |shell, window, cx| {
         shell.update(cx, |shell, cx| shell.open_chat(ABC_CHAT.to_owned(), window, cx));
     }),
@@ -786,6 +786,57 @@ fn seed_pictures(mock: &ChatServiceMock, runtime: &tokio::runtime::Runtime) -> S
          <p>&nbsp;</p>"
     );
     mock.post_as(LAB_C, ABC_CHAT, &picked).ok_or("c's GIF refused")?;
+    seed_link_and_screenshot(mock, runtime)
+}
+
+/// A made-up phone screenshot's object, and the size its message gives it (a phone's, twice as high as wide and more).
+const SCREENSHOT_OBJECT: &str = "0-eus-d9-00000000000000000000000000000ab3";
+
+/// The made-up page picture b's link preview names, as the async gateway's URL preview thumbnail of it.
+const PREVIEW_PICTURE: &str = "https%3a%2f%2fcdn.example.test%2fmade-up%2fcard-800x418.png";
+
+/// b's link with its preview (`link-preview.json`'s shape: `properties.links`, its picture through the async gateway's
+/// URL preview service, served by the mock), then b's phone screenshot alone, as the message Teams draws as a thumbnail
+/// in a square frame with no bubble.
+fn seed_link_and_screenshot(mock: &ChatServiceMock, runtime: &tokio::runtime::Runtime) -> SandboxResult {
+    let mut png = Vec::new();
+    made_up_panel(640, 334).write_to(&mut io::Cursor::new(&mut png), image::ImageFormat::Png)?;
+    runtime.block_on(mock.serve_bytes("/urlp/v1/url/image/Thumbnail", "image/png", png));
+    let html = "<p>Is this the right <a href=\"http://made-up.example.test\" target=\"_blank\" \
+                rel=\"noreferrer noopener\">made-up.example.test</a> account </p>";
+    let id = mock.post_as(LAB_B, ABC_CHAT, html).ok_or("b's link refused")?;
+    let links = serde_json::json!([{
+        "itemid": "0",
+        "preview": {
+            "description": "A made-up page's description, long enough to run over two lines of the card: every word \
+                            of it is invented for the tour and names nothing real.",
+            "previewMetadata": {"height": 167.0, "width": 320.0},
+            "previewurl": format!(
+                "https://us-prod.asyncgw.teams.microsoft.com/urlp/v1/url/image/Thumbnail?url={PREVIEW_PICTURE}"
+            ),
+            "title": "Made-up Site, your made-up page for the tour",
+        },
+        "previewenabled": true,
+        "@type": "http://schema.skype.com/HyperLink",
+        "url": "http://made-up.example.test",
+    }])
+    .to_string();
+    let client_message_id = (9_000_000_000_000_000_000_u64 + id.parse::<u64>()?).to_string();
+    if !mock.change_message(ABC_CHAT, &client_message_id, |message| {
+        message["properties"]["links"] = serde_json::json!(links);
+    }) {
+        return Err("b's link isn't in the mock".into());
+    }
+    let mut png = Vec::new();
+    made_up_panel(540, 1260).write_to(&mut io::Cursor::new(&mut png), image::ImageFormat::Png)?;
+    runtime.block_on(mock.serve_bytes(&format!("/v1/objects/{SCREENSHOT_OBJECT}/views/imgo"), "image/png", png));
+    let screenshot = format!(
+        "<p><img alt=\"Media\" itemscope=\"\" itemtype=\"http://schema.skype.com/AMSImage\" \
+         src=\"https://us-api.asm.skype.com/v1/objects/{SCREENSHOT_OBJECT}/views/imgo\" width=\"1080\" \
+         height=\"2520\"></p>"
+    );
+    mock.post_as(LAB_B, ABC_CHAT, &screenshot)
+        .ok_or("b's screenshot refused")?;
     Ok(())
 }
 

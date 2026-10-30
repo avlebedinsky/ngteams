@@ -1,0 +1,25 @@
+{
+  "_synthetic": "Written synthetic-from-a-received-message, made-up values: a message whose one link the sender's client previewed, read from the user's own store locally (never copied: every word, link and id here is made up), in the shape it had. Its text is one paragraph holding the link's anchor; properties.links is a JSON string of a list: @type http://schema.skype.com/HyperLink, itemid, url, previewenabled true, and preview with description, previewMetadata (height and width as numbers), previewurl (the async gateway's urlp Thumbnail link, the page's picture its url) and title. A second entry, whose preview the sender turned off (previewenabled false, as a captured channel post's link had it), is made up beside it. The real message also carried skipfanouttobots and languageStamp. <guid:a>, <guid:b> are lab accounts' object ids; tests fill them in. See docs/protocol/chat.md, Link previews.",
+  "read_back": {
+    "sequenceId": 9,
+    "conversationid": "19:<guid:a>_<guid:b>@unq.gbl.spaces",
+    "conversationLink": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/conversations/19:<guid:a>_<guid:b>@unq.gbl.spaces",
+    "contenttype": "Text",
+    "type": "Message",
+    "amsreferences": [],
+    "fromDisplayNameInToken": "Lab B",
+    "id": "1760000090000",
+    "clientmessageid": "9999999999999999999",
+    "version": "1760000090000",
+    "messagetype": "RichText/Html",
+    "content": "<p>Is this the right <a href=\"http://made-up.example.test\" target=\"_blank\" rel=\"noreferrer noopener\">made-up.example.test</a> page </p>",
+    "from": "https://teams.microsoft.com/api/chatsvc/<region>/v1/users/ME/contacts/8:orgid:<guid:b>",
+    "imdisplayname": "Lab B",
+    "composetime": "2026-01-01T00:01:30.0000000Z",
+    "originalarrivaltime": "2026-01-01T00:01:30.0000000Z",
+    "properties": {
+      "skipfanouttobots": false,
+      "links": "[{\"itemid\":\"0\",\"preview\":{\"description\":\"A made-up page's description, long enough to run over two lines of the card: every word of it is invented for the test and names nothing real.\",\"previewMetadata\":{\"height\":167.0,\"width\":320.0},\"previewurl\":\"https://us-prod.asyncgw.teams.microsoft.com/urlp/v1/url/image/Thumbnail?url=https%3a%2f%2fcdn.example.test%2fmade-up%2fcard-800x418.png\",\"title\":\"Made-up Site, a page invented for the test\"},\"previewenabled\":true,\"@type\":\"http://schema.skype.com/HyperLink\",\"url\":\"http://made-up.example.test\"},{\"@type\":\"http://schema.skype.com/HyperLink\",\"itemid\":\"1\",\"url\":\"https://off.example.test/\",\"previewenabled\":false,\"preview\":{\"previewurl\":\"https://us-prod.asyncgw.teams.microsoft.com/urlp/v1/url/image/Thumbnail?url=https%3a%2f%2fcdn.example.test%2foff.png\",\"title\":\"Turned off\"}}]"
+    }
+  }
+}

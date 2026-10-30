@@ -33,7 +33,7 @@ use gpui::{
     SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, div, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
-use teams_proto::chat::{MessageType, RichText, SharedFile, parse_html};
+use teams_proto::chat::{LinkPreview, MessageType, RichText, SharedFile, parse_html};
 use teams_store::Message;
 
 use crate::bridge::Core;
@@ -41,6 +41,7 @@ use crate::chat_view::{DELETED, UNSHOWN_CONTENT, UNSUPPORTED, files_of, unshown_
 use crate::clock::{self, HourCycle};
 use crate::files;
 use crate::forwarded::{self, ForwardOrigin, Original};
+use crate::link_preview;
 use crate::models::Models;
 use crate::people::Shown;
 use crate::rich_text::{self, Mentions, Rendered};
@@ -134,6 +135,8 @@ pub struct Item {
     pub body: Body,
     /// The files a text carries (`chat_view::files_of`), each drawn as its card under it (`crate::files`).
     pub files: Vec<SharedFile>,
+    /// The previews of the links a text carries (`crate::link_preview::previews_of`), each drawn as its card under it.
+    pub links: Vec<LinkPreview>,
     /// A text that carries a part this build can't show (`chat_view::unshown_of`: a file entry of a shape no message
     /// showed, a card): shown with
     /// [`UNSHOWN_CONTENT`] under it, never a guess at the part. No web button: no channel deep link was captured.
@@ -375,6 +378,11 @@ impl ChannelView {
         let text = matches!(body, Body::Text(_));
         let unshown = text && unshown_of(message).any();
         let files = if text { files_of(message) } else { Vec::new() };
+        let links = if text {
+            link_preview::previews_of(message.properties.as_deref())
+        } else {
+            Vec::new()
+        };
         let forwarded = text
             .then(|| forwarded::forwarded_from(message.properties.as_deref()))
             .flatten()
@@ -392,6 +400,7 @@ impl ChannelView {
             edited: message.edit_time.is_some() && message.delete_time.is_none(),
             body,
             files,
+            links,
             unshown,
             forwarded,
         }
@@ -656,9 +665,12 @@ fn message_view(item: &Item, palette: Palette, cycle: HourCycle, cx: &mut Contex
         Body::Event(text) => muted(text.clone()),
         Body::Unsupported => muted(UNSUPPORTED.into()),
     };
-    let files = match &item.body {
-        Body::Text(rendered) => files::file_cards(&item.id, &item.files, rendered.source.as_ref(), palette),
-        _ => None,
+    let (files, links) = match &item.body {
+        Body::Text(rendered) => (
+            files::file_cards(&item.id, &item.files, rendered.source.as_ref(), palette),
+            link_preview::cards(&item.id, &item.links, rendered.source.as_ref(), palette),
+        ),
+        _ => (None, None),
     };
     let unshown = item.unshown.then(|| {
         let id = item.id.clone();
@@ -675,6 +687,7 @@ fn message_view(item: &Item, palette: Palette, cycle: HourCycle, cx: &mut Contex
         .gap_1()
         .child(header)
         .child(body)
+        .children(links)
         .children(files)
         .children(unshown)
         .into_any_element()

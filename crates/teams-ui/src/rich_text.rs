@@ -305,8 +305,8 @@ pub struct Rendered {
     /// The content was longer than `teams-proto` reads: only its first part is shown.
     pub truncated: bool,
     /// Drawn bare, with no bubble behind it: Teams draws a message that is only an emoticon or a sticker large and on
-    /// the background (the header and the avatar stay). The chat view reads it for each message's bubble; what counts
-    /// as emoji-only is the emoji renderer's to decide, when it lays the message out (none is yet).
+    /// the background, and one of pictures alone as its pictures' frames on the background (the header and the avatar
+    /// stay). The chat view reads it for each message's bubble.
     pub bare: bool,
     /// Where its pictures and emoticons are asked for; without one a picture is its placeholder and an emoticon the
     /// reaction pack's picture.
@@ -336,6 +336,12 @@ impl Rendered {
         (1..=MOST_LARGE_EMOTICONS)
             .contains(&emoticons.len())
             .then_some(emoticons)
+    }
+
+    /// Whether it shows pictures alone (one at least): a message Teams draws without its bubble ([`Self::bare`]).
+    #[must_use]
+    pub fn pictures_only(&self) -> bool {
+        !self.blocks.is_empty() && self.blocks.iter().all(|block| matches!(block, Block::Picture(_)))
     }
 
     /// Whether its own text (not a quote of another message) mentions the account.
@@ -453,7 +459,7 @@ pub fn layout_with_web_link(text: &RichText, mentions: &Mentions, web_link: Opti
         bare: false,
         source: None,
     };
-    rendered.bare = rendered.emoticons_only().is_some();
+    rendered.bare = rendered.emoticons_only().is_some() || rendered.pictures_only();
     rendered
 }
 
@@ -796,11 +802,11 @@ fn blocks(draw: &Draw<'_>, path: &mut Vec<usize>, blocks: &[Block]) -> Vec<AnyEl
         .collect()
 }
 
-/// A picture of the message's own, as Teams draws one: at its size, scaled down to the bubble's width, its aspect
-/// ratio kept; its placeholder when it can't be shown.
+/// A picture of the message's own, as Teams draws one: in its frame of the border colour, bounded by Teams' sizes and
+/// the bubble's width, its aspect ratio kept (`crate::inline`); its placeholder when it can't be shown.
 fn picture_block(draw: &Draw<'_>, path: &[usize], picture: &PictureBlock) -> AnyElement {
     let fallback = text_block(draw, path, &picture.fallback);
-    let reading = tint(draw.palette.border, 0.6);
+    let frame = rgb(draw.palette.border).into();
     div()
         .debug_selector(|| "rich-picture".to_owned())
         .py_1()
@@ -809,7 +815,7 @@ fn picture_block(draw: &Draw<'_>, path: &[usize], picture: &PictureBlock) -> Any
             &picture.src,
             picture.size,
             draw.source.cloned(),
-            reading,
+            frame,
             fallback,
         ))
         .into_any_element()

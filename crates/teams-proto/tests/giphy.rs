@@ -16,8 +16,8 @@ use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_fence::{Fence, FenceLog, Mri, Roster};
 use teams_proto::{
-    Client, Credentials, GIPHY_HOST, GiphyPicture, HttpError, HttpTransport, InlinePicture, MAX_BODY, MAX_PICTURE_BODY,
-    MessagePicture, PastedFormat, Read as _, Service,
+    Client, Credentials, GIPHY_HOST, GiphyPicture, HttpError, HttpTransport, InlinePicture, LinkPreviewPicture,
+    MAX_BODY, MAX_PICTURE_BODY, MessagePicture, PastedFormat, Read as _, Service,
 };
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -115,6 +115,36 @@ fn an_inline_picture_is_an_ams_view_or_a_gif() {
     assert_eq!(ams, InlinePicture::Ams(MessagePicture::of(view).unwrap()));
     assert_eq!(ams.service(), Service::Ams);
     assert!(InlinePicture::of("https://images.example.test/made-up.png").is_none());
+}
+
+#[test]
+fn a_link_preview_s_picture_is_read_from_the_gateway_with_only_the_picture_s_link() {
+    let thumbnail = "https://us-prod.asyncgw.teams.microsoft.com/urlp/v1/url/image/Thumbnail?url=https%3a%2f%2fcdn.\
+                     example.test%2fmade-up%2fcard.png";
+    let read = LinkPreviewPicture::of(thumbnail).unwrap();
+    assert_eq!(read.picture(), "https://cdn.example.test/made-up/card.png");
+    assert_eq!(
+        InlinePicture::of(thumbnail),
+        Some(InlinePicture::LinkPreview(read.clone()))
+    );
+    assert_eq!(read.service(), Service::Ams);
+    let endpoint = read.endpoint();
+    assert_eq!(endpoint.segments(), ["urlp", "v1", "url", "image", "Thumbnail"]);
+    assert_eq!(
+        endpoint.query(),
+        [("url".to_owned(), "https://cdn.example.test/made-up/card.png".to_owned())]
+    );
+    for other in [
+        // not the gateway, not https, another path, another query, a picture link that isn't the web's
+        "https://cdn.example.test/urlp/v1/url/image/Thumbnail?url=https%3a%2f%2fcdn.example.test%2fa.png",
+        "http://us-prod.asyncgw.teams.microsoft.com/urlp/v1/url/image/Thumbnail?url=https%3a%2f%2fcdn.example.test%2fa.png",
+        "https://us-prod.asyncgw.teams.microsoft.com/urlp/v1/url/image/Favicon?url=https%3a%2f%2fcdn.example.test%2fa.png",
+        "https://us-prod.asyncgw.teams.microsoft.com/urlp/v1/url/image/Thumbnail?url=https%3a%2f%2fcdn.example.test%2fa.png&x=1",
+        "https://us-prod.asyncgw.teams.microsoft.com/urlp/v1/url/image/Thumbnail?url=file%3a%2f%2f%2fetc%2fpasswd",
+        "https://us-prod.asyncgw.teams.microsoft.com/urlp/v1/url/image/Thumbnail",
+    ] {
+        assert!(LinkPreviewPicture::of(other).is_none(), "{other}");
+    }
 }
 
 #[tokio::test]

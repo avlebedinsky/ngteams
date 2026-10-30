@@ -19,6 +19,7 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::chat::files::{SharedFiles, shared_files};
 use crate::chat::html::{self, RichText, ThreadActivity};
+use crate::chat::links::{LinkPreview, link_previews};
 
 /// A value that may be missing, in a form a capture showed ([`Field::Known`]), or in another one, kept as it came
 /// ([`Field::Unknown`]). A named field that came as `null` is `Unknown(Value::Null)`: no capture showed one.
@@ -512,6 +513,13 @@ impl Message {
     #[must_use]
     pub fn files(&self) -> SharedFiles {
         shared_files(self.properties.get("files"))
+    }
+
+    /// `properties.links`, a JSON string of a list: the previews of the links the message carries ([`link_previews`]),
+    /// each entry read only in the shape `docs/protocol/chat.md` records ("Link previews"); any other is left out.
+    #[must_use]
+    pub fn link_previews(&self) -> Vec<LinkPreview> {
+        link_previews(self.properties.get("links"))
     }
 
     /// What the message carries beside its text that this build can't show ([`unshown_parts`]): file entries it can't

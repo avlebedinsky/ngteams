@@ -82,6 +82,7 @@ pub mod first_run;
 pub mod forwarded;
 pub mod icons;
 pub mod inline;
+pub mod link_preview;
 pub mod models;
 pub mod notify;
 pub mod own_presence;
