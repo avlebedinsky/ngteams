@@ -267,15 +267,15 @@ pending one, acknowledgements and receipts denied on a live call):
 | Operation | Judged by |
 |---|---|
 | a start (`epconv`) | its callees and the chat it carries, read fresh ([above](#writes)), as before |
-| a join (`POST …/conv/<id>`, roster-only or with a call invitation) | the group chat it names (`joins`), read fresh: complete, listing the joiner, lab-only; no invitation need bind the conversation to it |
+| a join (`POST …/conv/<id>`, roster-only or with a call invitation) | the group chat it names (`joins`), read fresh: complete, listing the joiner, only lab accounts and call guests; no invitation need bind the conversation to it |
 | an answer (`accept`) or a decline (`reject` 603) | an invitation this fence offered (below), tied to it by the call leg its link names (`…/cc/v1/incoming/<call>/…`, the call the invitation's `attach` link names: `CallRegistry::resolve_answer`), the answer from its callee, while it is open for the operation (ringing; the same `accept` again once answered, the same `reject` once declined), its group chat read fresh; no attach answer need have bound the link |
-| an `add` | its sender and every invitee lab accounts or approved services (the row maps it only naming the 1:1 chat of the sender and its one invitee, and the sender as organizer) |
+| an `add` | its sender a lab account or an approved service, every invitee one or a call guest (the row maps it only naming the 1:1 chat of the sender and its one invitee, and the sender as organizer) |
 | every other operation: the follow-ups (endpoint metadata and state, participant properties, the acceptance's acknowledgement, channel parameters, renegotiation, media answers and acknowledgements, media descriptions, the keep-alive), the callee's `attach` and `progress`, `leave` | permitted with no member read and no lookup, logged (`call_follow_up`, `call_ringing`) |
 | a Trouter delivery response | the browser's frame rule lets every `3:::` through on a Trouter socket, logged `allowed`; the native client's typed responses are permitted by `Fence::check_delivery_response` when they name a delivery id, logged (`delivery_response`, by the kind the registry knows them as, else `call_delivery_response`) |
 
 The browser fence reads no call answer at the response stage and registers or binds nothing. The registry still reads
 every delivery the account's calling socket receives (`Fence::observe_delivery`): it offers the account's own
-invitations from lab callers (only an offered one is answered or declined), ends an invitation's ring at the callbacks
+invitations from lab callers and call guests (only an offered one is answered or declined), ends an invitation's ring at the callbacks
 its `attach` handed out, and, for the native client, registers its own starts from their answers and binds their
 acceptances, which is how its call machine reads its deliveries (`Observed::Acceptance`, `Observed::Renegotiation`).
 None of that decides a lab write. The native transport refuses a call write the registry won't pend only on a fence
@@ -302,7 +302,8 @@ Task 5, [calling.md](calling.md#the-start)), `WriteKind::Call` on the `Scope::Co
 by what it carries, the caller and every callee it names added. The chat is the group chat `groupChat.threadId` names
 (a group chat's id), or, for a start whose `groupChat` is `null` and that names one callee, the 1:1 chat of the caller
 and that callee by `one_to_one_id`; never one taken from the client's context. So `Fence::check` reads that chat's
-members fresh and permits the start only when they and every callee are lab accounts (a lab-only chat with one more
+members fresh and permits the start only when they and every callee are lab accounts or call guests (`lab.toml`'s
+`call_guests`, the user's own accounts, for calls only) and its caller a lab account (a lab-only chat with one more
 lab member than the start calls passes; a callee outside the lab is denied, however lab-only the chat). The callees
 must be work accounts (`8:orgid:<guid>`), at least one, none twice, none the caller, and `groupChat` must be there.
 Decided with Codex (M3 Task 5, transcript under
@@ -328,7 +329,8 @@ never by a member read: a live call holding that URL for that operation, its sen
 operation's body names one) the call's caller, invitees only on an `add`, and every callback link the body hands the
 call's services (an acknowledgement's `callAcceptanceAcknowledgement.links`, an `add`'s `links`) on the start's own
 endpoint and call agent, as the acceptance's delivery response must be (below; a call whose start named no call agent
-takes none); the call's participants and any invitee must all be lab accounts or approved services. Otherwise
+takes none); the call's participants and any invitee must all be lab accounts, approved services or call guests.
+Otherwise
 `Partial(UnregisteredCall)` (a call this fence didn't permit, whose answer or acceptance wasn't read, or another
 run's), `Partial(CallEnded)` or `CallMismatch`. An `add` maps only naming its sender's own chat and meeting: a
 `groupChat` must name exactly the 1:1 chat of the sender and the add's one invitee (`19:<id>_<id>@unq.gbl.spaces`,
@@ -362,7 +364,7 @@ context, and the call's kind in a captured shape: a 1:1 call's (107) naming no g
 group call's (109) naming its group chat by a group chat's id, `isMultiParty` true (its chat is the only field naming
 its other participants, so a group call naming none is no invitation). `Fence::observe_delivery` offers it only when it is addressed
 to the fence's own account (the browser fence is now each account's own, `Fence::open_lab_account`), a lab account,
-and its caller is a lab account or the echo service; any other invitation is ignored and nothing passes for it, as
+and its caller is a lab account, the echo service or a call guest; any other invitation is ignored and nothing passes for it, as
 is a delivery at the root that may be an invitation but doesn't read (`Observed::Ignored`: an `evt` 107 or 109, or a
 `callNotification` at its top or in a `gp` that decodes, or a body that isn't a strictly read JSON object with a
 numeric `evt`; the root's `evt` 115 and 116 aren't). A

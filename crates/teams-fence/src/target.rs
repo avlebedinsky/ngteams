@@ -408,6 +408,7 @@ pub struct Target {
     kind: WriteKind,
     scope: Scope,
     added: BTreeSet<Mri>,
+    sender: Option<Mri>,
 }
 
 impl Target {
@@ -417,7 +418,16 @@ impl Target {
             kind,
             scope,
             added: BTreeSet::new(),
+            sender: None,
         }
+    }
+
+    /// Names who sends the write (a call start's caller, also among [`Target::added`]): the fence admits only a lab
+    /// account or an approved service as a sender, never a call guest.
+    #[must_use]
+    pub fn with_sender(mut self, sender: Mri) -> Self {
+        self.sender = Some(sender);
+        self
     }
 
     /// Adds participants that the write brings in.
@@ -441,6 +451,12 @@ impl Target {
     pub fn added(&self) -> &BTreeSet<Mri> {
         &self.added
     }
+
+    /// Who sends the write, when it names one ([`Target::with_sender`]).
+    #[must_use]
+    pub fn sender(&self) -> Option<&Mri> {
+        self.sender.as_ref()
+    }
 }
 
 impl fmt::Debug for Target {
@@ -449,6 +465,7 @@ impl fmt::Debug for Target {
             .field("kind", &self.kind)
             .field("scope", &self.scope)
             .field("added", &self.added.len())
+            .field("sender", &self.sender.is_some())
             .finish()
     }
 }

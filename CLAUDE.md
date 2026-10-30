@@ -6,11 +6,11 @@ finished plans are in `docs/plans/completed/`. Commands and layout are in [READM
 
 ## Hard rules
 
-These hold for every agent and every change, with no exceptions. **Lab accounts contact only each other (and call
-the user's own accounts named as call guests); everything else is allowed.** The lab browser's fence and the native client (its HTTP transport and its Trouter frames) follow
-this rule. The rules about writes, calls and the browser fence govern the lab and every lab binary; the personal build
-(`ngteams`) is the user's Teams, under the two rules about it below. The rules on the native client's sealed types,
-captures and tokens, agents and protocol notes hold for both builds.
+These hold for every agent and every change, with no exceptions. **Lab accounts contact only each other (and call the
+user's own accounts named as call guests); everything else is allowed.** The lab browser's fence and the native client
+(its HTTP transport and its Trouter frames) follow this rule. The rules about writes, calls and the browser fence govern
+the lab and every lab binary; the personal build (`ngteams`) is the user's Teams, under the two rules about it below.
+The rules on the native client's sealed types, captures and tokens, agents and protocol notes hold for both builds.
 
 - **A change that fits a rule's test is an ordinary change and goes ahead**, with no stop to ask the user: a new read,
   own-state request or frame that passes its rule's test, say; the examples a rule names are today's, not a closed
@@ -37,26 +37,27 @@ captures and tokens, agents and protocol notes hold for both builds.
   and whoever it adds; every call write is mapped only from a capture, in its captured shape. Here "the lab" also holds
   the **call guests**: the user's own accounts `lab.toml`'s `call_guests` names by MRI, approved for calls only (a
   start, a join, an answer or a decline, an `add`, and what a call sends once let in), in their 1:1 chat with a lab
-  account or a chat of lab accounts plus them; a call guest is never a sender, and nothing else of the lab reaches one
-  (no message, reaction, chat created, member added or invite, even in a chat that holds one). The fence judges a call's
-  entry, each a fresh decision. A start is permitted when every callee it names is a lab account, a call guest or the
-  echo service and the chat it is tied to is lab-only by a fresh, complete member read; a start is tied to its chat by
-  what it carries (the chat it names, or for a 1:1 start naming only its callee, the two accounts' 1:1 chat as the chat
-  service names it), never by the client's context, and the test call's start, which names no chat, passes only in its
-  captured shape. A running call is joined only in the chat the join names, when that chat's fresh, complete member read
-  lists the joiner and only lab accounts and call guests. An `add` is judged per invitee like a start. An incoming
-  call's invitation is **offered** only when it is readable, addressed to the account, and names a caller and
-  participants that are all lab accounts, call guests or the echo service; only an offered invitation is answered or
-  declined (a decline rejects the call as the web client does), tied to it by the call leg the answer's link names, and
-  only until its ring ends (answered, declined, cancelled, answered elsewhere, timed out). Every other incoming call
-  (the user's own account's unless it is a call guest) is ignored: no answer, decline or join for it, and no scenario
-  click. Everything a call sends once its start, join or answer was let in goes without a further decision, each send
-  logged: its follow-ups (media and endpoint updates, renegotiation and its answers and acknowledgements, keep-alive,
-  channel parameters, the acceptance's acknowledgement), its `leave` and end exchange, what the callee's client sends by
-  itself while it rings, and its Trouter delivery responses; no call registry or link binding stands between a call and
-  these. The native client still sends each as a sealed type in its captured shape, and a delivery response only as a
-  typed `OwnFrame` for the delivery it answers. No transfer, forwarding or replacement is mapped. The roster isn't
-  watched. Media (TURN, ICE, DTLS-SRTP) isn't classified: it carries a call the signaling fence permitted.
+  account or a chat of lab accounts plus them; a call guest is never the caller, joiner, answerer or adder of a lab
+  write, and nothing else of the lab reaches one (no message, reaction, chat created, member added or invite, even in a
+  chat that holds one). The fence judges a call's entry, each a fresh decision. A start is permitted when every callee
+  it names is a lab account, a call guest or the echo service and the chat it is tied to holds only lab accounts and
+  call guests by a fresh, complete member read; a start is tied to its chat by what it carries (the chat it names, or
+  for a 1:1 start naming only its callee, the two accounts' 1:1 chat as the chat service names it), never by the
+  client's context, and the test call's start, which names no chat, passes only in its captured shape. A running call is
+  joined only in the chat the join names, when that chat's fresh, complete member read lists the joiner and only lab
+  accounts and call guests. An `add` is judged per invitee like a start. An incoming call's invitation is **offered**
+  only when it is readable, addressed to the account, and names a caller and participants that are all lab accounts,
+  call guests or the echo service; only an offered invitation is answered or declined (a decline rejects the call as the
+  web client does), tied to it by the call leg the answer's link names, and only until its ring ends (answered,
+  declined, cancelled, answered elsewhere, timed out). Every other incoming call (the user's own account's unless it is
+  a call guest) is ignored: no answer, decline or join for it, and no scenario click. Everything a call sends once its
+  start, join or answer was let in goes without a further decision, each send logged: its follow-ups (media and endpoint
+  updates, renegotiation and its answers and acknowledgements, keep-alive, channel parameters, the acceptance's
+  acknowledgement), its `leave` and end exchange, what the callee's client sends by itself while it rings, and its
+  Trouter delivery responses; no call registry or link binding stands between a call and these. The native client still
+  sends each as a sealed type in its captured shape, and a delivery response only as a typed `OwnFrame` for the delivery
+  it answers. No transfer, forwarding or replacement is mapped. The roster isn't watched. Media (TURN, ICE, DTLS-SRTP)
+  isn't classified: it carries a call the signaling fence permitted.
 - **Nothing runs live against the tenant before the browser fence is armed**: HTTP interception on every host and
   target, the WebSocket guard, the service worker neutralized.
 - **The native client sends a contacting write only as `Authorized<_>`** with a `WritePermit` from `Fence::check`
@@ -212,26 +213,26 @@ What the code does and why. A change that undoes one of these needs a new reason
   only with `name` its one query key.
 - **A call start** maps in two captured shapes (`contacting/call.rs`): the echo test call's (`WriteKind::Call` on
   `Scope::New`, the caller and the echo service added), and a chat header's call (`chat_call_start`): `WriteKind::Call`
-  on the `Scope::Conversation` it is tied to by what it carries (`groupChat.threadId`, a group chat's id, or for a
-  start whose `groupChat` is `null` and that names one callee, the 1:1 chat of the caller and that callee by
-  `one_to_one_id`), the caller and every callee of `participants.to` added; so `Fence::check` reads that chat fresh
-  and admits the start only when its members and every callee are lab accounts. The callees are work accounts
-  (`8:orgid:<guid>`), at least one, none twice, none the caller.
+  on the `Scope::Conversation` it is tied to by what it carries (`groupChat.threadId`, a group chat's id, or for a start
+  whose `groupChat` is `null` and that names one callee, the 1:1 chat of the caller and that callee by `one_to_one_id`),
+  the caller and every callee of `participants.to` added; so `Fence::check` reads that chat fresh and admits the start
+  only when its members and every callee are lab accounts or call guests, its caller (`Target::sender`) a lab account.
+  The callees are work accounts (`8:orgid:<guid>`), at least one, none twice, none the caller.
 - **The lab's call rule** (`decision.rs`'s `CallRule::Entry`, every lab fence's): a call is judged by its entry, every
-  other operation on it passes. A start as above. A join (`POST` to a conversation controller, with a call invitation
-  or roster-only) is `WriteKind::Call` on `Scope::CallOperation` naming the group chat it joins (`joins`); the fence
-  reads that chat fresh and permits the join only when the read is complete, lists the joiner and is lab-only. An
-  answer (`accept`, `CallAnswer`) or a decline (`reject` `603`, `CallDecline`) passes only on an invitation this fence
-  offered (below), tied to it by the call leg its link names (`…/cc/v1/incoming/<call>/…`, the call the invitation's
-  `attach` link names: `CallRegistry::resolve_answer`), the answer from the invitation's callee, while the invitation
-  is open for it (ringing; the same `accept` again once answered, the same `reject` once declined), its group chat
-  read fresh. An `add` passes when its sender and every invitee are lab accounts or approved services (its row maps
-  it only naming the 1:1 chat of the sender and its one invitee and the sender as organizer). Every other call
-  operation (`CallFollowUp`, `CallRinging`: the follow-ups, the callee's ring-time sends, `leave`) is permitted with no
-  member read and no registry lookup, logged like every decision; `Fence::check_delivery_response` permits every
-  delivery response that names a delivery id, logged. The registry still reads the deliveries and what passes (an
-  acceptance, a call's end, an `attach`'s ring-end callbacks), so the native client's call machine sees the same
-  deliveries, but it decides nothing for a lab fence.
+  other operation on it passes. A start as above. A join (`POST` to a conversation controller, with a call invitation or
+  roster-only) is `WriteKind::Call` on `Scope::CallOperation` naming the group chat it joins (`joins`); the fence reads
+  that chat fresh and permits the join only when the read is complete, lists the joiner and holds only lab accounts and
+  call guests. An answer (`accept`, `CallAnswer`) or a decline (`reject` `603`, `CallDecline`) passes only on an
+  invitation this fence offered (below), tied to it by the call leg its link names (`…/cc/v1/incoming/<call>/…`, the
+  call the invitation's `attach` link names: `CallRegistry::resolve_answer`), the answer from the invitation's callee,
+  while the invitation is open for it (ringing; the same `accept` again once answered, the same `reject` once declined),
+  its group chat read fresh. An `add` passes when its sender is a lab account or an approved service and every invitee
+  one or a call guest (its row maps it only naming the 1:1 chat of the sender and its one invitee and the sender as
+  organizer). Every other call operation (`CallFollowUp`, `CallRinging`: the follow-ups, the callee's ring-time sends,
+  `leave`) is permitted with no member read and no registry lookup, logged like every decision;
+  `Fence::check_delivery_response` permits every delivery response that names a delivery id, logged. The registry still
+  reads the deliveries and what passes (an acceptance, a call's end, an `attach`'s ring-end callbacks), so the native
+  client's call machine sees the same deliveries, but it decides nothing for a lab fence.
 - **The call registry** (`crates/teams-fence/src/calls.rs`, one per fence) keeps every fence's call bookkeeping. Its
   own rule (`CallRule::Registry`, `Fence::tracks_calls`) is no build's fence's: tests turn it on over a lab roster
   (`Fence::tracking_calls`, `test-support` only) to check the registry's resolution as verdicts, the resolution the
@@ -273,25 +274,23 @@ What the code does and why. A change that undoes one of these needs a new reason
   the registries weakly; an offer is decided under its lock, never the other way round; an entering write's check
   reads it without the lock, and the app's views keep two starts apart (`Accounts::busy_elsewhere`), so a refused
   ask never reaches the engine.
-- **Offered invitations** (`crates/teams-fence/src/calls/offer.rs`): an invitation delivery (Trouter `evt` 107 or
-  109, `callNotification`) to the fence's own account (`Fence::open_lab_account`) from a lab caller is offered by
-  `observe_delivery` (a personal fence offers one from any caller but the account itself, one at a time: above);
-  under the lab's rule a group call's invitation names only its caller, callee and group chat, so every decision on
-  it also reads that chat fresh. Every other invitation is ignored, and nothing answers or declines it under either
-  rule.
-  Under the lab's call rule only an offered invitation's answer and decline are judged (above). Under the registry's
-  rule, on it pass, each to exactly a link the invitation or an answer bound
-  (`Scope::CallOperation`, `joins` naming the conversation an `attach` subscribes to): its receipt, the `attach`
-  (`CallRinging`: its one roster-only conversation join joins no call), `progress` (`ringing`), the endpoint state,
-  the answer (`accept`, `CallAnswer`) and the decline (`reject` `603`, `CallDecline`) while it rings; once answered,
-  the answered call's follow-ups until the callee leaves. A permitted `accept`, `reject` or `leave` passes again (the
-  browser decides a request on two layers). A join (`POST` to a conversation controller with a call invitation) is a
-  `Call` start on the group chat the conversation's invitation bound it to, from that invitation's callee, and its
-  answer registers the call; a roster-only conversation join passes on the same binding. A renegotiation or its answer
-  delivered at a call's own `mediaRenegotiation` or `mediaAnswer` callback binds the `answer` or `acknowledge` link it
-  names, and one at its `mediaAcknowledgement` callback binds nothing; each of them may get its receipt, once (without
-  one the call controller holds the call's next negotiation); the caller's `renegotiate` and `updateMediaDescriptions`
-  come from the acceptance.
+- **Offered invitations** (`crates/teams-fence/src/calls/offer.rs`): an invitation delivery (Trouter `evt` 107 or 109,
+  `callNotification`) to the fence's own account (`Fence::open_lab_account`) from a lab caller or a call guest is
+  offered by `observe_delivery` (a personal fence offers one from any caller but the account itself, one at a time:
+  above); under the lab's rule a group call's invitation names only its caller, callee and group chat, so every decision
+  on it also reads that chat fresh. Every other invitation is ignored, and nothing answers or declines it under either
+  rule. Under the lab's call rule only an offered invitation's answer and decline are judged (above). Under the
+  registry's rule, on it pass, each to exactly a link the invitation or an answer bound (`Scope::CallOperation`, `joins`
+  naming the conversation an `attach` subscribes to): its receipt, the `attach` (`CallRinging`: its one roster-only
+  conversation join joins no call), `progress` (`ringing`), the endpoint state, the answer (`accept`, `CallAnswer`) and
+  the decline (`reject` `603`, `CallDecline`) while it rings; once answered, the answered call's follow-ups until the
+  callee leaves. A permitted `accept`, `reject` or `leave` passes again (the browser decides a request on two layers). A
+  join (`POST` to a conversation controller with a call invitation) is a `Call` start on the group chat the
+  conversation's invitation bound it to, from that invitation's callee, and its answer registers the call; a roster-only
+  conversation join passes on the same binding. A renegotiation or its answer delivered at a call's own
+  `mediaRenegotiation` or `mediaAnswer` callback binds the `answer` or `acknowledge` link it names, and one at its
+  `mediaAcknowledgement` callback binds nothing; each of them may get its receipt, once (without one the call controller
+  holds the call's next negotiation); the caller's `renegotiate` and `updateMediaDescriptions` come from the acceptance.
 - A group or meeting chat is judged like a 1:1 chat, by its fresh member list: a lab-only one is writable, a group
   chat the native client creates included. `chats.toml` is lab data for the scenarios and clients (`abc-chat` records
   the lab's a–b–c chat in it, once); the fence doesn't read it.

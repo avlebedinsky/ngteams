@@ -1947,3 +1947,41 @@ async fn nothing_but_a_call_reaches_a_call_guest() -> TestResult {
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn no_call_start_is_sent_as_a_call_guest() -> TestResult {
+    let lab = lab_rule_with_guest()?;
+    let as_guest = |callees: &[&str], group: Option<&str>| -> TestResult<Target> {
+        let mut body: Value = serde_json::from_slice(&chat_start_body(callees, group))?;
+        *body
+            .pointer_mut("/participants/from/id")
+            .ok_or("the start names no caller")? = json!(GUEST);
+        let target = chat_start(&serde_json::to_vec(&body)?)?;
+        assert_eq!(
+            target.sender(),
+            Some(&Mri::new(GUEST)),
+            "the start is sent as the guest"
+        );
+        Ok(target)
+    };
+    let one = as_guest(&[LAB_A], None)?;
+    assert_eq!(
+        one.scope(),
+        &Scope::Conversation {
+            id: one_to_one(GUEST, LAB_A)
+        }
+    );
+    let group = as_guest(&[LAB_A, LAB_B, LAB_C], Some(GROUP_CHAT))?;
+    for (target, members) in [
+        (one, Members::of(&[LAB_A, GUEST])),
+        (group, Members::of(&[LAB_A, LAB_B, LAB_C, GUEST])),
+    ] {
+        let denied = lab.fence.check(target.clone(), &members).await;
+        assert_eq!(
+            denied.err().map(|denied| *denied.reason()),
+            Some(DenyReason::Outsiders { count: 1 }),
+            "{target}"
+        );
+    }
+    Ok(())
+}

@@ -4,9 +4,12 @@
 //! ([`Pacing`]). Nothing is decoded ahead of what the pipe and the queue hold, so a long movie takes no disk and little
 //! memory.
 //!
-//! Both devices play the same movie time: the first one opened sets the movie's clock at the offset asked, and one
-//! opened later (the camera, turned on after the call connected) starts as far into the movie as the time since
-//! then; a looped movie wraps at its end, one played once goes silent and keeps its last picture.
+//! Both devices play the same movie time: opening the microphone (once a call, as its media is set up) starts the
+//! movie's clock at the offset asked, so every call starts there, and a camera opened later (turned on after the call
+//! connected) starts as far into the movie as the time since then; a looped movie wraps at its end, one played once
+//! goes silent and keeps its last picture. Each device stays on that clock: a frame the decoder was too late for is
+//! filled (silence, the last picture) and the frames it stood for are skipped once they come, so a slow start or a
+//! stall never puts the soundtrack behind the picture.
 //!
 //! Each decoder is an `ffmpeg` child of this process, killed and reaped when its device is dropped; its own messages
 //! (at `error` level) are logged, a few at most.
@@ -130,7 +133,7 @@ pub struct Movie {
     info: MovieInfo,
     camera: PatternCamera,
     pacing: Pacing,
-    /// When the movie was at `from`: set by the first device opened.
+    /// When the movie was at `from`: set by the microphone's opening (or a camera opened before one).
     epoch: Arc<Mutex<Option<Instant>>>,
 }
 
@@ -187,12 +190,14 @@ impl Movie {
         self.camera
     }
 
-    /// The movie's audio from where its clock is now, mixed down to mono and raised by [`AUDIO_GAIN`] (a film's
-    /// surround track mixed down is quiet, and the call's audio processing is off); silence for a movie without audio.
+    /// The movie's audio from `from`, its clock started anew (each call opens its microphone once), mixed down to mono
+    /// and raised by [`AUDIO_GAIN`] (a film's surround track mixed down is quiet, and the call's audio processing is
+    /// off); silence for a movie without audio.
     ///
     /// # Errors
     /// [`DeviceError::Movie`] when `ffmpeg` can't be started.
     pub fn microphone(&self) -> Result<Box<dyn AudioSource>, DeviceError> {
+        let at = self.restart();
         let decoder = if self.info.audio {
             let output = [
                 "-map",
@@ -208,12 +213,15 @@ impl Movie {
                 "-f",
                 "s16le",
             ];
-            Some(self.decode(&output, AUDIO_FRAME_BYTES, AUDIO_QUEUE)?)
+            Some(self.decode(at, &output, AUDIO_FRAME_BYTES, AUDIO_QUEUE)?)
         } else {
             None
         };
         Ok(Box::new(MovieAudio {
             decoder,
+            handed: 0,
+            taken: 0,
+            paced: self.pacing != Pacing::Unpaced,
             clock: Clock::new(self.pacing, FRAME_DURATION),
         }))
     }
@@ -231,7 +239,7 @@ impl Movie {
                  pad={width}:{height}:(ow-iw)/2:(oh-ih)/2,format=yuv420p"
             );
             let output = ["-map", "0:v:0", "-vf", &filter, "-f", "rawvideo"];
-            Some(self.decode(&output, i420_len(width, height), VIDEO_QUEUE)?)
+            Some(self.decode(self.position(), &output, i420_len(width, height), VIDEO_QUEUE)?)
         } else {
             None
         };
@@ -245,8 +253,14 @@ impl Movie {
         }))
     }
 
-    /// Where in the movie a device opened now starts: `from` for the first one, later ones as far on as the time
-    /// since (a looped movie wrapped at its end).
+    /// Starts the movie's clock anew: the movie is at `from` now.
+    fn restart(&self) -> Duration {
+        *self.epoch.lock().unwrap_or_else(PoisonError::into_inner) = Some(Instant::now());
+        self.from
+    }
+
+    /// Where in the movie a device opened now starts: as far on from `from` as the time since the clock started (now,
+    /// when it hasn't), a looped movie wrapped at its end.
     fn position(&self) -> Duration {
         let now = Instant::now();
         let epoch = *self
@@ -263,10 +277,10 @@ impl Movie {
         }
     }
 
-    /// An `ffmpeg` decoding from [`Movie::position`] with `output`'s options to its standard output, read in chunks
-    /// of `chunk` bytes into a queue of `queue`.
-    fn decode(&self, output: &[&str], chunk: usize, queue: usize) -> Result<Decoder, DeviceError> {
-        let at = format!("{:.3}", self.position().as_secs_f64());
+    /// An `ffmpeg` decoding from `at` with `output`'s options to its standard output, read in chunks of `chunk` bytes
+    /// into a queue of `queue`.
+    fn decode(&self, at: Duration, output: &[&str], chunk: usize, queue: usize) -> Result<Decoder, DeviceError> {
+        let at = format!("{:.3}", at.as_secs_f64());
         let mut command = Command::new(FFMPEG);
         command.args(["-nostdin", "-hide_banner", "-loglevel", "error", "-ss", &at]);
         if self.looped {
@@ -342,21 +356,28 @@ impl Decoder {
         let stdout: Option<ChildStdout> = child.stdout.take();
         let stderr = child.stderr.take();
         let (sender, chunks) = sync_channel(queue);
-        let mut readers = Vec::new();
-        let mut started = |name: &str, body: Box<dyn FnOnce() + Send>| {
-            thread::Builder::new()
-                .name(name.to_owned())
-                .spawn(body)
-                .map(|reader| readers.push(reader))
-                .map_err(|error| DeviceError::Movie(format!("a reader thread can't be started: {error}")))
+        // made first, so a reader that can't be started drops it: the child killed and reaped, a started reader joined
+        let mut decoder = Self {
+            chunks,
+            child,
+            readers: Vec::new(),
         };
         if let Some(stdout) = stdout {
-            started("movie-decoder", Box::new(move || read_chunks(stdout, chunk, &sender)))?;
+            decoder.start("movie-decoder", move || read_chunks(stdout, chunk, &sender))?;
         }
         if let Some(stderr) = stderr {
-            started("movie-messages", Box::new(move || log_messages(stderr)))?;
+            decoder.start("movie-messages", move || log_messages(stderr))?;
         }
-        Ok(Self { chunks, child, readers })
+        Ok(decoder)
+    }
+
+    fn start(&mut self, name: &str, body: impl FnOnce() + Send + 'static) -> Result<(), DeviceError> {
+        let reader = thread::Builder::new()
+            .name(name.to_owned())
+            .spawn(body)
+            .map_err(|error| DeviceError::Movie(format!("a reader thread can't be started: {error}")))?;
+        self.readers.push(reader);
+        Ok(())
     }
 }
 
@@ -383,10 +404,32 @@ fn log_messages(stderr: impl Read) {
     }
 }
 
-/// The movie's audio, at the device's pace: silence while the decoder is behind or done.
+/// The movie's audio, at the device's pace: frame `n` handed out is the decoder's frame `n` (the movie at the offset
+/// plus `n` frames' time), silence when the decoder is behind or done; a frame it was late for is skipped once it
+/// comes, so the soundtrack stays on the movie's clock.
 struct MovieAudio {
     decoder: Option<Decoder>,
+    /// Frames handed out (unpaced, only the decoder's: there is no clock to stay on).
+    handed: u64,
+    /// The decoder's frames taken (handed out or skipped).
+    taken: u64,
+    paced: bool,
     clock: Clock,
+}
+
+impl MovieAudio {
+    /// The decoder's frame for the one handed out now, the ones before it it was late for skipped; `None` while it is
+    /// behind or done.
+    fn take(&mut self) -> Option<Vec<u8>> {
+        let decoder = self.decoder.as_ref()?;
+        while self.taken < self.handed {
+            decoder.chunks.try_recv().ok()?;
+            self.taken += 1;
+        }
+        let bytes = decoder.chunks.try_recv().ok()?;
+        self.taken += 1;
+        Some(bytes)
+    }
 }
 
 impl AudioSource for MovieAudio {
@@ -396,7 +439,11 @@ impl AudioSource for MovieAudio {
         }
         self.clock.handed_one();
         let mut frame = AudioFrame::silence();
-        if let Some(bytes) = self.decoder.as_ref().and_then(|decoder| decoder.chunks.try_recv().ok()) {
+        let bytes = self.take();
+        if bytes.is_some() || self.paced {
+            self.handed += 1;
+        }
+        if let Some(bytes) = bytes {
             let (pairs, _) = bytes.as_chunks::<2>();
             for (sample, pair) in frame.samples_mut().iter_mut().zip(pairs) {
                 *sample = f32::from(i16::from_le_bytes(*pair)) / 32_768.0;
@@ -418,6 +465,25 @@ struct MovieVideo {
 }
 
 impl MovieVideo {
+    /// `data`, or a later frame the decoder already has in its place when the clock is more than a frame behind (the
+    /// decoder started or stalled late): the frames skipped count as handed out, so the picture stays on the movie's
+    /// clock.
+    fn catch_up(&mut self, mut data: Vec<u8>) -> Vec<u8> {
+        let Some(decoder) = &self.decoder else {
+            return data;
+        };
+        for _ in 0..self.clock.overdue() {
+            match decoder.chunks.try_recv() {
+                Ok(later) => {
+                    data = later;
+                    self.clock.handed_one();
+                }
+                Err(_) => break,
+            }
+        }
+        data
+    }
+
     fn frame(&self, data: Vec<u8>) -> VideoFrame {
         VideoFrame {
             width: self.width,
@@ -439,7 +505,10 @@ impl VideoSource for MovieVideo {
             None => Err(RecvTimeoutError::Disconnected),
         };
         let frame = match next {
-            Ok(data) => self.frame(data),
+            Ok(data) => {
+                let data = self.catch_up(data);
+                self.frame(data)
+            }
             Err(RecvTimeoutError::Timeout) => match &self.last {
                 Some(last) => last.clone(),
                 // the decoder hasn't started: nothing to show yet
@@ -530,6 +599,31 @@ mod tests {
         assert_eq!(frame.data, vec![16, 16, 16, 16, 16, 16, 16, 16, 128, 128, 128, 128]);
     }
 
+    #[test]
+    fn audio_the_decoder_was_late_for_is_skipped_once_it_comes() {
+        let mut command = Command::new("printf");
+        command
+            .arg(r"\001\001\002\002\003\003\004\004")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let decoder = Decoder::spawn(command, 2, 8).unwrap();
+        thread::sleep(Duration::from_millis(300));
+        // two frames went out as silence while the decoder started: its frames 0 and 1 are skipped
+        let mut audio = MovieAudio {
+            decoder: Some(decoder),
+            handed: 2,
+            taken: 0,
+            paced: true,
+            clock: Clock::new(Pacing::Unpaced, FRAME_DURATION),
+        };
+        assert_eq!(audio.take(), Some(vec![3, 3]));
+        audio.handed += 1;
+        assert_eq!(audio.take(), Some(vec![4, 4]));
+        audio.handed += 1;
+        assert_eq!(audio.take(), None, "the decoder is done");
+    }
+
     fn ffmpeg_present() -> bool {
         [FFMPEG, FFPROBE].iter().all(|tool| {
             Command::new(tool)
@@ -545,7 +639,7 @@ mod tests {
     fn test_movie(dir: &Path) -> PathBuf {
         let path = dir.join("test.mkv");
         let status = Command::new(FFMPEG)
-            .args(["-nostdin", "-hide_banner", "-loglevel", "error"])
+            .args(["-nostdin", "-hide_banner", "-loglevel", "error", "-y"])
             .args(["-f", "lavfi", "-i", "testsrc=size=320x240:rate=24:duration=4"])
             .args(["-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=44100:duration=4"])
             .args(["-c:v", "ffv1", "-c:a", "pcm_s16le", "-ac", "2"])
@@ -633,8 +727,16 @@ mod tests {
         assert_eq!(movie.position(), Duration::ZERO);
         thread::sleep(Duration::from_millis(300));
         assert!(movie.position() >= Duration::from_millis(300));
+        // the next call's microphone starts the movie at its offset again
+        assert_eq!(movie.restart(), Duration::ZERO);
+        assert!(movie.position() < Duration::from_millis(300));
+        thread::sleep(Duration::from_millis(300));
         let video = MovieVideo {
-            decoder: Some(movie.decode(&["-map", "0:v:0", "-f", "rawvideo"], 16, 1).unwrap()),
+            decoder: Some(
+                movie
+                    .decode(movie.position(), &["-map", "0:v:0", "-f", "rawvideo"], 16, 1)
+                    .unwrap(),
+            ),
             last: None,
             width: 2,
             height: 2,

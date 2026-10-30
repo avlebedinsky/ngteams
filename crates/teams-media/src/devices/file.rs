@@ -136,6 +136,15 @@ impl Clock {
     pub(super) fn handed_one(&mut self) {
         self.handed = self.handed.saturating_add(1);
     }
+
+    /// How many whole frames past the one due now the clock is behind (none unpaced or before the first wait).
+    pub(super) fn overdue(&self) -> u32 {
+        let Some(start) = self.start.filter(|_| self.pacing != Pacing::Unpaced) else {
+            return 0;
+        };
+        let elapsed = Instant::now().saturating_duration_since(start).as_nanos() / self.period.as_nanos().max(1);
+        u32::try_from(elapsed).unwrap_or(u32::MAX).saturating_sub(self.handed)
+    }
 }
 
 enum Samples {

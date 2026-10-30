@@ -383,7 +383,11 @@ pub(crate) fn call_start(
         [only] => only.get("id").and_then(Value::as_str) == Some(echo.as_str()),
         _ => false,
     };
-    echo_only.then(|| Target::new(WriteKind::Call, Scope::New).with_added([caller, echo.clone()]))
+    echo_only.then(|| {
+        Target::new(WriteKind::Call, Scope::New)
+            .with_added([caller.clone(), echo.clone()])
+            .with_sender(caller)
+    })
 }
 
 /// Whether `method url` is where a call starts: `POST` [`CALL_START_URL`] with no query.
@@ -445,7 +449,11 @@ fn chat_start_target(start: &Value) -> Option<Target> {
         }
     };
     let scope = Scope::Conversation { id: chat };
-    Some(Target::new(WriteKind::Call, scope).with_added(std::iter::once(caller).chain(callees)))
+    Some(
+        Target::new(WriteKind::Call, scope)
+            .with_added(std::iter::once(caller.clone()).chain(callees))
+            .with_sender(caller),
+    )
 }
 
 /// The target a call start's body gives, as the permit for it was given: the test call's row with the echo service

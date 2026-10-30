@@ -504,7 +504,9 @@ fn start_verdict(body: &str, policy: &Policy) -> Contact {
 
 #[test]
 fn the_test_call_start_is_a_call_with_the_caller_and_the_echo_service() {
-    let expected = Target::new(WriteKind::Call, Scope::New).with_added([Mri::new(CALLER), Mri::new(ECHO)]);
+    let expected = Target::new(WriteKind::Call, Scope::New)
+        .with_added([Mri::new(CALLER), Mri::new(ECHO)])
+        .with_sender(Mri::new(CALLER));
     assert_eq!(start_verdict(&test_call(), &policy()), Contact::Write(expected.clone()));
     let named = call_start(
         &format!(r#"{{"id":"{ECHO}"}}"#),
@@ -597,7 +599,13 @@ fn a_call_start_from_a_chat_is_a_call_in_the_chat_it_carries_with_the_caller_and
                 id: case["chat"].as_str().ok_or("chat")?.to_owned(),
             },
         )
-        .with_added(added);
+        .with_added(added)
+        .with_sender(Mri::new(
+            case["body"]
+                .pointer("/participants/from/id")
+                .and_then(Value::as_str)
+                .ok_or("a caller")?,
+        ));
         assert_eq!(
             start_verdict(&body, &policy()),
             Contact::Write(expected.clone()),

@@ -1,8 +1,9 @@
 //! The decision: [`Fence::check`] fetches the target's members fresh and issues a [`WritePermit`] only when every
-//! participant is a lab account or an approved service (or, for a call write alone, a call guest: [`Roster`]). A write that reaches nobody ([`WriteKind::is_contacting`]
-//! false) is judged without a member read: typing and read receipts on a chat (1:1, group or meeting), and the
-//! account's own availability ([`WriteKind::OwnAvailability`] on [`Scope::Account`]), which the fence permits only
-//! for its own account ([`Fence::own_account`]), so that a lab account never sets another's presence.
+//! participant is a lab account or an approved service (or, for a call write alone, a call guest: [`Roster`]). A write
+//! that reaches nobody ([`WriteKind::is_contacting`] false) is judged without a member read: typing and read receipts
+//! on a chat (1:1, group or meeting), and the account's own availability ([`WriteKind::OwnAvailability`] on
+//! [`Scope::Account`]), which the fence permits only for its own account ([`Fence::own_account`]), so that a lab
+//! account never sets another's presence.
 //!
 //! A personal fence (`Fence::open_personal`, only with the `personal` feature) decides nothing: it logs every write and
 //! permits it (`decision/audit.rs`), keeping only the call floor's one call at a time across the app's accounts.
@@ -349,8 +350,9 @@ pub struct Fence {
 /// (`decision/audit.rs`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CallRule {
-    /// The lab's: only a call's entry is judged. A join by the chat it joins (read fresh, complete, lab-only), an
-    /// answer or a decline only of an offered invitation (a lab caller's, to the fence's own account, its group chat
+    /// The lab's: only a call's entry is judged. A join by the chat it joins (read fresh, complete, lab accounts and
+    /// call guests only), an answer or a decline only of an offered invitation (a lab caller's or a call guest's, to the
+    /// fence's own account, its group chat
     /// read fresh), an `add` by its invitees; everything else a call sends once it was let in (its follow-ups, its
     /// ring-time sends, its `leave`, its delivery responses) is permitted and logged with no registry lookup. The
     /// registry still reads what passes (its deliveries, its answers), so the native client's call machine sees the
@@ -548,8 +550,8 @@ impl Fence {
     ///   with no member read and no registry lookup, logged. Under the registry's rule ([`Fence::tracks_calls`]) the
     ///   call registry ([`crate::calls`]) resolves it to a live call this fence permitted and registered, with no
     ///   member read. Either way the participants (with any invitee and the chat's members) must all be lab accounts,
-    ///   approved services or call guests ([`Roster::admits_on_call`]), and a join or an `add` is sent by neither a
-    ///   call guest nor anyone else outside the lab.
+    ///   approved services or call guests ([`Roster::admits_on_call`]), and a start, a join or an `add` is sent by
+    ///   neither a call guest nor anyone else outside the lab ([`Target::sender`] for a start).
     ///
     /// Nothing else lands on [`Scope::Account`]. Every decision is appended to `fence.log`; an allow that can't be
     /// logged is denied.
@@ -628,7 +630,7 @@ impl Fence {
     /// open for the operation (ringing, answered, leaving or declined), or, for a join, the group chat an offered
     /// invitation bound the conversation to ([`crate::calls`]); the participants (the call's; the invitation's caller and
     /// callee, or the joiner, with every member of the group chat, read fresh and complete) together with any invitee
-    /// must all be lab accounts or approved services, and an invitation must still be open for the operation once the
+    /// must all be lab accounts, approved services or call guests, and an invitation must still be open for the operation once the
     /// chat was read. A permitted `leave` moves its call (or its answered invitation) to leaving, a permitted `attach`
     /// binds its invitation's call agent and the callbacks its ring ends at, a permitted `accept` answers its invitation
     /// and a permitted `reject` declines it.
@@ -643,11 +645,12 @@ impl Fence {
     /// The lab's decision on an operation on a call ([`CallRule::Entry`]): only a call's entry is judged, by who takes
     /// part in it.
     /// - a join (a `POST` to a conversation): the group chat it names (`joins`), read fresh, complete and listing the
-    ///   joiner, every member and the joiner a lab account or an approved service;
-    /// - an answer (`accept`) or a decline (`reject`): only of an invitation this fence offered (a lab caller's, to its
-    ///   own account), by the call leg its link names, still open for it; the invitation's parties and its group chat,
-    ///   read fresh, all lab accounts or approved services;
-    /// - an `add`: its sender and every invitee lab accounts or approved services;
+    ///   joiner, every member a lab account, an approved service or a call guest and the joiner a lab account or an
+    ///   approved service;
+    /// - an answer (`accept`) or a decline (`reject`): only of an invitation this fence offered (a lab caller's or a
+    ///   call guest's, to its own account), by the call leg its link names, still open for it; the invitation's parties
+    ///   and its group chat, read fresh, all lab accounts, approved services or call guests;
+    /// - an `add`: its sender a lab account or an approved service, every invitee one or a call guest;
     /// - anything else (a follow-up of a call let in, a ring-time send, a `leave`): permitted and logged, with no member
     ///   read and no registry lookup. The registry still reads it (a `leave` ends its call there, an `attach` binds the
     ///   callbacks its ring ends at), but decides nothing.
@@ -826,7 +829,7 @@ impl Fence {
     /// Reads a Trouter delivery the account's socket received ([`crate::calls`]): a pending or registered call's
     /// acceptance binds its call controller's links, and the end of a call ends it; an incoming call's invitation is
     /// offered when it is addressed to this fence's [own account](Fence::own_account), a lab account, and its caller
-    /// is a lab account or an approved service (a fence of no account offers none; a personal fence offers any one
+    /// is a lab account, an approved service or a call guest (a fence of no account offers none; a personal fence offers any one
     /// addressed to its account whose caller isn't the account, one at a time, as a Teams client rings for one call at
     /// a time), and a delivery at an offered
     /// invitation's end callback ends its ring. A delivery at an endpoint's root that may be an invitation but doesn't
@@ -869,8 +872,9 @@ impl Fence {
     /// delivery ([`crate::calls`]): permitted only as the captured acknowledgement of a pending
     /// acceptance delivery of a live call on that connection, as the captured receipt (an empty body) of a renegotiation
     /// or its answer delivered on that connection at a live call's or an answered invitation's own callback, or as the
-    /// captured response to an offered invitation's delivery on that connection while it rings, its caller and callee lab accounts or approved services and the
-    /// group chat it names, if any, lab-only by a fresh, complete read from `source` (listing both). A decision is
+    /// captured response to an offered invitation's delivery on that connection while it rings, its caller and callee
+    /// lab accounts, approved services or call guests and the group chat it names, if any, of them only by a fresh,
+    /// complete read from `source` (listing both). A decision is
     /// logged; a response to no pending delivery is [`DeliveryDecision::NotPending`], neither decided nor logged.
     pub async fn check_delivery_response(
         &self,
@@ -941,6 +945,12 @@ impl Fence {
     fn judge(&self, target: &Target, membership: Membership) -> Verdict {
         if target.kind() == WriteKind::OwnAvailability || matches!(target.scope(), Scope::Account { .. }) {
             return self.judge_own(target);
+        }
+        // a call guest takes part in the lab's calls, but no start is sent as one
+        if let Some(sender) = target.sender()
+            && !self.roster.admits(sender)
+        {
+            return Verdict::Deny(DenyReason::Outsiders { count: 1 });
         }
         let fetched = !matches!(target.scope(), Scope::New);
         if !fetched && !target.kind().creates_target() {
