@@ -2284,5 +2284,20 @@ async fn a_shared_file_is_read_by_ranges_its_link_read_once_and_again_once_the_h
         a.handle.file_range("https://example.com/not-a-share", 0, 10).await,
         Err(EngineError::FileUnavailable)
     ));
+
+    // a stream: its size told by its answer, its bytes as they came, fewer where the file ends
+    let mut stream = a.handle.file_stream(share, 1_000, 10_000).await.unwrap();
+    assert_eq!((stream.offset, stream.len, stream.total), (1_000, 4_000, 5_000));
+    let mut streamed = Vec::new();
+    while let Some(piece) = stream.next().await {
+        streamed.extend(piece.unwrap());
+    }
+    assert_eq!(streamed, bytes[1_000..]);
+    // the size, from the item whose link is kept
+    assert_eq!(a.handle.file_size(share).await.unwrap(), 5_000);
+    assert!(matches!(
+        a.handle.file_stream("https://example.com/not-a-share", 0, 10).await,
+        Err(EngineError::FileUnavailable)
+    ));
     a.shutdown();
 }

@@ -25,9 +25,8 @@ use gpui::{AppContext as _, AsyncApp, Context, SharedString, Task};
 use teams_core::sync::{CatchUpReport, Synced};
 use teams_core::{
     Action, Availability, CalendarEvent, CallAction, CallId, ChatListing, EngineHandle, EngineRequests, Event,
-    OwnStatus, Person, PictureBytes, Reply, Strip, Transient, TransientSent,
+    FileStream, OwnStatus, Person, PictureBytes, Reply, Strip, Transient, TransientSent,
 };
-use teams_proto::FileRange;
 use teams_store::{
     Conversation, Member, Message, MessagePage, OutboxEntry, PageCursor, Reaction, ReadHorizon, SearchHit, Team,
 };
@@ -85,9 +84,12 @@ pub trait Core: Send + Sync + 'static {
     /// The thumbnail of a file a message carries, by its sharing link (`teams_proto::chat::SharedFile::share_url`),
     /// read by the engine once a run; `None` when there is none.
     fn file_thumbnail(&self, share_url: String) -> Reply<Option<PictureBytes>>;
-    /// `len` bytes of a file a message carries from `offset`, by its sharing link, read by the engine at the download
-    /// link Graph handed out: what a video's card plays it by.
-    fn file_range(&self, share_url: String, offset: u64, len: u32) -> Reply<FileRange>;
+    /// A stream of `len` bytes of a file a message carries from `offset`, by its sharing link, read by the engine at
+    /// the download link Graph handed out, its bytes handed on as they arrive: what a video's card plays it by.
+    fn file_stream(&self, share_url: String, offset: u64, len: u64) -> Reply<FileStream>;
+    /// The size of a file a message carries, by its sharing link: asked for when a video's card is drawn, so the
+    /// engine knows its download link before Play is pressed.
+    fn file_size(&self, share_url: String) -> Reply<u64>;
     /// The account's own read horizon in a conversation.
     fn read_horizon(&self, conversation: String) -> Reply<Option<ReadHorizon>>;
     /// Whether the store holds a conversation's whole history; `None` when it was never synced.
@@ -212,8 +214,12 @@ impl Core for EngineRequests {
         EngineRequests::file_thumbnail(self, share_url)
     }
 
-    fn file_range(&self, share_url: String, offset: u64, len: u32) -> Reply<FileRange> {
-        EngineRequests::file_range(self, share_url, offset, len)
+    fn file_stream(&self, share_url: String, offset: u64, len: u64) -> Reply<FileStream> {
+        EngineRequests::file_stream(self, share_url, offset, len)
+    }
+
+    fn file_size(&self, share_url: String) -> Reply<u64> {
+        EngineRequests::file_size(self, share_url)
     }
 
     fn recent_reactions(&self, limit: usize) -> Reply<Vec<String>> {
@@ -365,7 +371,11 @@ impl Core for StoppedCore {
         stopped()
     }
 
-    fn file_range(&self, _: String, _: u64, _: u32) -> Reply<FileRange> {
+    fn file_stream(&self, _: String, _: u64, _: u64) -> Reply<FileStream> {
+        stopped()
+    }
+
+    fn file_size(&self, _: String) -> Reply<u64> {
         stopped()
     }
 

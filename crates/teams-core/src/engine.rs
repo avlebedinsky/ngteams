@@ -131,7 +131,7 @@ use crate::calling::{
     Act, CallAction, CallActionError, CallParts, CallStatus, CallView, Calling, CallingTask, IncomingCall,
 };
 use crate::emoticons::{Animations, Strip};
-use crate::file_content::FileContents;
+use crate::file_content::{FileContents, FileStream};
 use crate::outbox::{Command, Outbox, OutboxError, Sent, Transient, TransientSent, create_chat, enqueue};
 use crate::pictures::{Disk, PictureBytes, Pictures};
 use crate::presence::{Availability, PRESENCE_POLL, PRESENCE_POLL_SUBSCRIBED, PresenceDone, Presences};
@@ -578,6 +578,13 @@ enum Request {
         len: u32,
         reply: Responder<FileRange>,
     },
+    FileStream {
+        share_url: String,
+        offset: u64,
+        len: u64,
+        reply: Responder<FileStream>,
+    },
+    FileSize(String, Responder<u64>),
     Teams(Responder<Option<Vec<Team>>>),
     ChatListing(Responder<ChatListing>),
     Calendar {
@@ -883,6 +890,28 @@ impl EngineRequests {
             len,
             reply,
         })
+    }
+
+    /// A stream of `len` bytes (at most [`teams_proto::MAX_STREAM`]) of the file a message carries, from `offset`, by
+    /// its sharing link, as Graph's download link has them ([`crate::file_content`]): answered once the read's
+    /// headers came, its bytes then handed on as they arrive. Dropping the reply or the stream stops the read: what a
+    /// view plays a video by. [`EngineError::FileUnavailable`] when the file can't be had, [`EngineError::FileUnread`]
+    /// when the read failed on the way.
+    pub fn file_stream(&self, share_url: impl Into<String>, offset: u64, len: u64) -> Reply<FileStream> {
+        let share_url = share_url.into();
+        self.ask(|reply| Request::FileStream {
+            share_url,
+            offset,
+            len,
+            reply,
+        })
+    }
+
+    /// The size of the file a message carries, by its sharing link, as its item gives it ([`crate::file_content`]);
+    /// its download link is kept for the reads that follow, so asking early spares the first read that wait.
+    pub fn file_size(&self, share_url: impl Into<String>) -> Reply<u64> {
+        let share_url = share_url.into();
+        self.ask(|reply| Request::FileSize(share_url, reply))
     }
 
     /// The account's own stored read horizon in a conversation.
@@ -1371,6 +1400,13 @@ where
                 len,
                 reply,
             } => self.files.range(&share_url, offset, len, reply),
+            Request::FileStream {
+                share_url,
+                offset,
+                len,
+                reply,
+            } => self.files.stream(&share_url, offset, len, reply),
+            Request::FileSize(share_url, reply) => self.files.size(&share_url, reply),
             Request::Person(mri, reply) => {
                 let person = self.profiles.person(&self.store, &mri);
                 let _ = reply.send(person.map_err(EngineError::from));

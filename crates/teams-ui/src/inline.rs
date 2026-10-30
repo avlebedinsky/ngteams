@@ -40,7 +40,7 @@ use gpui::{
 use image::codecs::gif::GifDecoder;
 use image::{AnimationDecoder as _, Frame, ImageDecoder as _, Limits, RgbaImage, imageops};
 use teams_core::{PictureBytes, Reply, Strip};
-use teams_proto::{FileRange, PastedFormat};
+use teams_proto::PastedFormat;
 
 use crate::bridge::Core;
 use crate::reactions;
@@ -104,9 +104,14 @@ pub trait PictureEngine: Send + Sync {
         let _ = share_url;
         Reply::ready(Ok(None))
     }
-    /// As [`Core::file_range`]; unavailable unless the engine reads files.
-    fn file_range(&self, share_url: String, offset: u64, len: u32) -> Reply<FileRange> {
+    /// As [`Core::file_stream`]; unavailable unless the engine reads files.
+    fn file_stream(&self, share_url: String, offset: u64, len: u64) -> Reply<teams_core::FileStream> {
         let _ = (share_url, offset, len);
+        Reply::ready(Err(teams_core::EngineError::FileUnavailable))
+    }
+    /// As [`Core::file_size`]; unavailable unless the engine reads files.
+    fn file_size(&self, share_url: String) -> Reply<u64> {
+        let _ = share_url;
         Reply::ready(Err(teams_core::EngineError::FileUnavailable))
     }
     /// As [`Core::reaction_animation`].
@@ -131,8 +136,12 @@ impl PictureEngine for CoreEngine {
         self.0.file_thumbnail(share_url)
     }
 
-    fn file_range(&self, share_url: String, offset: u64, len: u32) -> Reply<FileRange> {
-        self.0.file_range(share_url, offset, len)
+    fn file_stream(&self, share_url: String, offset: u64, len: u64) -> Reply<teams_core::FileStream> {
+        self.0.file_stream(share_url, offset, len)
+    }
+
+    fn file_size(&self, share_url: String) -> Reply<u64> {
+        self.0.file_size(share_url)
     }
 
     fn reaction_animation(&self, id: String) -> Reply<Option<Strip>> {

@@ -95,14 +95,24 @@ reach, and a file the account can't read says so in its card and offers the brow
   part exactly as asked or shorter only at the file's end (a `200` with the whole file is cut to what was asked, but
   only up to the transport's 4 MiB body: a host that ignores `Range` on a larger file can't be played). The log writes it at `info` by host and path alone, and at
   `debug` with its `tempauth` redacted and its body by size only.
-- **Kept for the run** (`teams-core`'s `file_content.rs`): the link per file for up to 40 minutes; a 401 or 403 from the
-  file's host (an expired link) asks Graph for a new one, once per read. Any other 4xx (but a throttle) from Graph or
-  the file's host, an item without a link, or a part that isn't the one asked for means the file can't be had; a 5xx
-  or a throttle still there after the transport's one retry, or a network failure, fails that read only, and the
-  player tries the part again. The parts aren't kept by the engine: the player keeps the last 48 MiB it read
-  (`teams-media`'s `player::source`), reading 8 MiB ahead of what it plays. The bytes reach the player only from the
-  engine, and the player hands them to GStreamer's `playbin` through an `appsrc`: GStreamer reads nothing from the
-  network itself.
+- **Streamed** (what a playing video reads by, `HttpTransport::file_stream`): the same `GET` with
+  `Range: bytes=<first>-<last>` for up to 64 MiB (16 MiB as the player asks), its body handed on as it arrives instead
+  of read whole, answered `206` as above (or a `200` with the whole file to a read from its start). Dropping it resets
+  its HTTP/2 stream, so a seek stops the old place's read at once; its timeout is 10 minutes end to end, and the engine
+  fails a body silent for 20 s. On a link measured from a laptop (about 170 ms to the file's host, about 400 KB/s on
+  one connection), a 1 MiB part took 3 to 10 s whole, so reading by whole parts kept a video's first frame and a seek
+  waiting seconds on bytes it didn't need yet; streamed, the first bytes come one round trip after the headers.
+- **Kept for the run** (`teams-core`'s `file_content.rs`): the link per file for up to 40 minutes, read as soon as a
+  video's card is drawn (its size asked for), so Play doesn't wait for Graph; a 401 or 403 from the file's host (an
+  expired link) asks Graph for a new one, once per read. Any other 4xx (but a throttle) from Graph or the file's host,
+  an item without a link, or a part that isn't the one asked for means the file can't be had; a 5xx, a throttle or a
+  network failure fails that read only, and the player streams from there again. The bytes aren't kept by the
+  engine: the player keeps the last 128 MiB it read (`teams-media`'s `player::source`), streaming up to 8 MiB ahead of
+  what it plays, at most three streams at once (a stream nobody read for half a second gives way), a seek's new place
+  first; an MP4 whose index (`moov`) follows its media has the index streamed as soon as the file's first box headers
+  came, alongside GStreamer's setup and type finding. The bytes reach the
+  player only from the engine, and the player hands them to GStreamer's `playbin` through an `appsrc`: GStreamer reads
+  nothing from the network itself.
 
 ## Where a name comes from
 

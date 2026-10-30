@@ -11,6 +11,9 @@
 //!   ([`Service::FileContent`]): the account's credentials never reach it.
 //! - [`FileRange`] is one part of the file as that read answered it: a `206` with its `Content-Range`, or a `200` with
 //!   the whole file (a server that ignores `Range` for a small file).
+//! - [`StreamStart`] is where a streamed read of the file starts and how much it holds, as its answer's status and
+//!   headers say ([`crate::HttpTransport::file_stream`]: the same `GET` with `Range`, its body handed on part by part
+//!   as it arrives, never held whole), what a playing video reads by.
 //!
 //! No capture shows either read (the web client plays a video through SharePoint's own media API with a SharePoint
 //! token the native client doesn't ask for): they are our own reach, as the thumbnails' are. A file the account can't
@@ -33,6 +36,10 @@ const MAX_CONTENT_LINK: usize = 8192;
 
 /// The most bytes one ranged read asks for: well under the transport's [`crate::MAX_BODY`].
 pub const MAX_RANGE: u32 = 2 * 1024 * 1024;
+
+/// The most bytes one streamed read asks for ([`crate::HttpTransport::file_stream`]): its body is handed on as it
+/// arrives, so this bounds only how long one answer runs.
+pub const MAX_STREAM: u64 = 64 * 1024 * 1024;
 
 /// `GET https://graph.microsoft.com/v1.0/shares/u!<link>/driveItem`: the item of the file a sharing link names, with
 /// its size and its download link. Its answer is read with [`FileDownload::read_answer`].
@@ -197,6 +204,46 @@ impl FileRange {
     }
 }
 
+/// Where a streamed read of a file starts, how many bytes its body holds and the file's whole size, as its answer said.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct StreamStart {
+    pub offset: u64,
+    /// The bytes its body holds (what was asked, or fewer where the file ends).
+    pub len: u64,
+    pub total: u64,
+}
+
+impl StreamStart {
+    /// What the answer to a streamed read of `len` bytes from `offset` holds: a `206` whose `Content-Range` (`range`,
+    /// `bytes <first>-<last>/<total>`) starts at `offset` and holds `len` bytes, or fewer only where the file ends;
+    /// or a `200` (the whole file, `content_length` its size) to a read from the file's start, of which `len` bytes are
+    /// taken. `None` for anything else: a part that isn't the one asked for would leave a gap the reader can't see.
+    #[must_use]
+    pub fn read(status: u16, range: Option<&str>, content_length: Option<u64>, offset: u64, len: u64) -> Option<Self> {
+        match status {
+            206 => {
+                let (first, last, total) = content_range(range?)?;
+                let got = last.checked_sub(first)?.checked_add(1)?;
+                let whole = got == len || last.checked_add(1)? == total;
+                (first == offset && got <= len && last < total && whole).then_some(Self {
+                    offset,
+                    len: got,
+                    total,
+                })
+            }
+            200 if offset == 0 => {
+                let total = content_length?;
+                Some(Self {
+                    offset,
+                    len: len.min(total),
+                    total,
+                })
+            }
+            _ => None,
+        }
+    }
+}
+
 /// `bytes <first>-<last>/<total>` as its three numbers, `first <= last`.
 fn content_range(header: &str) -> Option<(u64, u64, u64)> {
     let rest = header.trim().strip_prefix("bytes ")?;
@@ -271,6 +318,39 @@ mod tests {
         ] {
             assert!(FileContentLink::parse(refused).is_none(), "{refused}");
         }
+    }
+
+    #[test]
+    fn a_streamed_read_starts_where_it_was_asked() {
+        let asked = |status, range, length| StreamStart::read(status, range, length, 1_000, 500);
+        assert_eq!(
+            asked(206, Some("bytes 1000-1499/9000"), None),
+            Some(StreamStart {
+                offset: 1_000,
+                len: 500,
+                total: 9_000
+            })
+        );
+        // fewer only where the file ends
+        assert_eq!(
+            asked(206, Some("bytes 1000-1199/1200"), None).map(|start| start.len),
+            Some(200)
+        );
+        assert_eq!(asked(206, Some("bytes 1000-1199/9000"), None), None);
+        assert_eq!(asked(206, Some("bytes 900-1399/9000"), None), None);
+        assert_eq!(asked(206, Some("bytes 1000-1599/9000"), None), None);
+        assert_eq!(asked(206, None, None), None);
+        // a whole file only for a read from its start
+        assert_eq!(asked(200, None, Some(9_000)), None);
+        assert_eq!(
+            StreamStart::read(200, None, Some(300), 0, 500),
+            Some(StreamStart {
+                offset: 0,
+                len: 300,
+                total: 300
+            })
+        );
+        assert_eq!(StreamStart::read(200, None, None, 0, 500), None);
     }
 
     #[test]

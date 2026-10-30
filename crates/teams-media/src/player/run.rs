@@ -102,6 +102,10 @@ fn pipeline(
     gst::init().map_err(|_| Failure::NoCodec)?;
     nothing_that_fetches_or_probes();
     let total = feed.cache.total().map_err(failure_of)?;
+    if let Some(index) = index_after_media(&feed.cache, total) {
+        // the demuxer reads it before any frame: it arrives while `GStreamer` sets up and guesses the type
+        feed.cache.prefetch(index);
+    }
     let video = video_sink(output);
     let audio = audio_sink(sound);
     let playbin = gst::ElementFactory::make("playbin")
@@ -169,6 +173,37 @@ fn fetches(element: &gst::Element) -> bool {
         .unwrap_or(false)
 }
 
+/// The top-level boxes of an ISO media file (MP4, MOV, M4V) looked at for where its media ends.
+const BOXES: usize = 8;
+
+/// Where an ISO media file's index (its `moov` box) starts when it comes after its media (`mdat`), as a recording
+/// that wasn't made for streaming has it: the end of its `mdat` box, by its top-level boxes' headers; `None` for a
+/// file that isn't one, or whose index comes first.
+fn index_after_media(cache: &Cache, total: u64) -> Option<u64> {
+    let mut at = 0;
+    for _ in 0..BOXES {
+        let head = cache.read_at(at, 16, true).ok()??;
+        let size = u64::from(u32::from_be_bytes(head.get(0..4)?.try_into().ok()?));
+        let kind = head.get(4..8)?;
+        if at == 0 && kind != b"ftyp" {
+            return None;
+        }
+        let size = match size {
+            // to the file's end
+            0 => return None,
+            1 => u64::from_be_bytes(head.get(8..16)?.try_into().ok()?),
+            size => size,
+        };
+        let end = at.checked_add(size).filter(|end| *end > at)?;
+        match kind {
+            b"moov" => return None,
+            b"mdat" => return (end < total).then_some(end),
+            _ => at = end,
+        }
+    }
+    None
+}
+
 /// The appsrc reads the file at random: each read from where the last seek put it, as many bytes as asked.
 fn set_up_source(source: &gst_app::AppSrc, feed: Arc<Feed>, total: u64) {
     source.set_stream_type(gst_app::AppStreamType::RandomAccess);
@@ -194,9 +229,11 @@ fn set_up_source(source: &gst_app::AppSrc, feed: Arc<Feed>, total: u64) {
                         feed.at.store(at + bytes.len() as u64, Ordering::Relaxed);
                         let _ = source.push_buffer(gst::Buffer::from_mut_slice(bytes));
                     }
-                    Ok(_) => {
+                    Ok(Some(_)) => {
                         let _ = source.end_of_stream();
                     }
+                    // let go for a seek: nothing is pushed, and the seek's flush ends the wait for it
+                    Ok(None) => {}
                     Err(error) => {
                         *feed.failed.lock().unwrap_or_else(PoisonError::into_inner) = Some(error);
                         gst::element_error!(source, gst::ResourceError::Read, ["the file couldn't be read"]);
@@ -386,7 +423,7 @@ impl Playing {
                     self.tell();
                 }
             }
-            Command::Seek(at) => {
+            Command::Seek(at) | Command::SeekNear(at) => {
                 if self.loaded {
                     // kept within the movie, once its length is known
                     let at = if self.status.duration.is_zero() {
@@ -394,7 +431,7 @@ impl Playing {
                     } else {
                         at.min(self.status.duration)
                     };
-                    self.seek(at);
+                    self.seek_to(at, matches!(command, Command::Seek(_)));
                     if self.status.state == State::Ended {
                         self.status.state = State::Paused;
                     }
@@ -408,7 +445,7 @@ impl Playing {
 
     fn play(&mut self) {
         if self.status.state == State::Ended {
-            self.seek(Duration::ZERO);
+            self.seek_to(Duration::ZERO, true);
         }
         let mut sound = self.sound.lock().unwrap_or_else(PoisonError::into_inner);
         if sound.speaker.is_none() && !sound.silenced {
@@ -422,8 +459,16 @@ impl Playing {
         self.tell();
     }
 
-    fn seek(&self, at: Duration) {
-        let flags = gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE;
+    /// Seeks to `at`, `exactly` or to the key frame nearest it. The read the pipeline waits on is let go first, and the
+    /// old place's streams give way to the new place's (a flushing seek waits for the source's read to return, which
+    /// could take the old place's bytes' time).
+    fn seek_to(&self, at: Duration, exactly: bool) {
+        let flags = if exactly {
+            gst::SeekFlags::FLUSH | gst::SeekFlags::ACCURATE
+        } else {
+            gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT | gst::SeekFlags::SNAP_NEAREST
+        };
+        self.feed.cache.interrupt();
         let _ = self
             .pipeline
             .seek_simple(flags, gst::ClockTime::from_nseconds(nanos(at)));

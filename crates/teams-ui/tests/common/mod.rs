@@ -426,8 +426,12 @@ impl Core for FakeCore {
         self.answer("file_thumbnail", || locked(&self.thumbnails).get(&share_url).cloned())
     }
 
-    fn file_range(&self, _: String, _: u64, _: u32) -> Reply<teams_proto::FileRange> {
+    fn file_stream(&self, _: String, _: u64, _: u64) -> Reply<teams_core::FileStream> {
         // the fake has no file's bytes: a video's card shows that it can't be opened
+        Reply::ready(Err(teams_core::EngineError::FileUnavailable))
+    }
+
+    fn file_size(&self, _: String) -> Reply<u64> {
         Reply::ready(Err(teams_core::EngineError::FileUnavailable))
     }
 

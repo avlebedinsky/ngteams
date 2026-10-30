@@ -76,7 +76,9 @@ pub use calendar::{
 pub use client::{Client, PostReadError, Response, Transport, WriteError};
 pub use emoticon::{MAX_ANIMATION, ReactionAnimation};
 pub use endpoint::{Endpoint, Method, Service};
-pub use file_content::{FileContent, FileContentLink, FileDownload, FileRange, MAX_RANGE, is_content_link};
+pub use file_content::{
+    FileContent, FileContentLink, FileDownload, FileRange, MAX_RANGE, MAX_STREAM, StreamStart, is_content_link,
+};
 pub use frame::{
     AcceptanceAcknowledgement, Authenticate, ConnectParams, DeliveryResponse, Disconnect, DroppedIndicator, FrameError,
     FrameSink, FrameText, FrameWriter, InvitationReceipt, MessageLossAck, OwnFrame, PermittedResponse, Ping,
@@ -85,9 +87,9 @@ pub use frame::{
 pub use giphy::{GiphyPicture, InlinePicture};
 pub use http::{
     AMS_HOST_SUFFIX, BuildError, CONNECT_TIMEOUT, CSA_AUDIENCE, Credentials, DEFAULT_RETRY_WAIT, EMOTICONS_HOST,
-    Failure, GIPHY_HOST, GRAPH_AUDIENCE, GRAPH_HOST, HttpError, HttpTransport, IC3_AUDIENCE, MAX_BODY,
+    Failure, FileBody, GIPHY_HOST, GRAPH_AUDIENCE, GRAPH_HOST, HttpError, HttpTransport, IC3_AUDIENCE, MAX_BODY,
     MAX_PICTURE_BODY, MAX_RETRY_WAIT, MIDDLE_TIER_AUDIENCE, PRESENCE_AUDIENCE, RELAY_HOST, REQUEST_TIMEOUT, Refusal,
-    TROUTER_HOST,
+    STREAM_TIMEOUT, TROUTER_HOST,
 };
 #[cfg(feature = "test-support")]
 pub use own::ProbeOwnState;

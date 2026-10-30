@@ -7,6 +7,13 @@
 //!   per part. One read of a file's item at a time: asks while it runs wait for it.
 //! - **A part** is read when asked, never kept here (the player keeps what it read); at most
 //!   [`teams_proto::MAX_RANGE`] bytes of it.
+//! - **A stream** ([`FileStream`], what a playing video reads by) is a part of up to [`teams_proto::MAX_STREAM`] bytes
+//!   handed on as it arrives ([`HttpTransport::file_stream`]), a few of its pieces held at a time: its reader takes
+//!   them as fast as it wants them, and dropping it (or its [`crate::engine::Reply`] before it was answered) stops the
+//!   read at once, so a seek's new place never shares the network with the old one's. A stream whose body stalls for
+//!   [`STALLED`] fails ([`EngineError::FileUnread`]).
+//! - **Its size** ([`FileContents::size`]) is the item's, read with its link: asked for when a video's card is drawn,
+//!   so its link is already known when Play is pressed.
 //! - A file the account can't read (no item, no download link, a 4xx answer from Graph or from the file's host but the
 //!   refused link's one 401 or 403, a part that isn't the one asked for), or a link that isn't a SharePoint sharing
 //!   link ([`FileDownload::of`]), is [`EngineError::FileUnavailable`]. A read that failed on the way (the network, a
@@ -20,13 +27,59 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use teams_proto::{Client, Credentials, FileContent, FileDownload, FileRange, HttpError, HttpTransport};
-use tokio::sync::oneshot;
+use teams_proto::{
+    Client, Credentials, FileBody, FileContent, FileDownload, FileRange, HttpError, HttpTransport, StreamStart,
+};
+use tokio::sync::{mpsc, oneshot};
 
 use crate::engine::{EngineError, Responder};
 
 /// How long a download link Graph handed out is used before it is asked for again.
 pub const LINK_LIFE: Duration = Duration::from_mins(40);
+
+/// How long a stream's body may stay silent before the stream fails.
+pub const STALLED: Duration = Duration::from_secs(20);
+
+/// The pieces of a stream held for its reader at a time (each as the network handed it: a few kilobytes).
+const STREAM_PIECES: usize = 64;
+
+/// A part of a file streamed as it arrives ([`crate::EngineRequests::file_stream`]): where it starts, how many bytes it
+/// holds, the file's whole size, and its bytes piece by piece. Dropped, its read stops.
+#[derive(Debug)]
+pub struct FileStream {
+    pub offset: u64,
+    /// The bytes it holds (what was asked, or fewer where the file ends).
+    pub len: u64,
+    /// The file's whole size.
+    pub total: u64,
+    pieces: mpsc::Receiver<Result<Vec<u8>, EngineError>>,
+}
+
+impl FileStream {
+    /// A stream of `bytes` from `offset` of a file of `total` bytes, in pieces of `piece` bytes: for a stand-in of the
+    /// engine (a UI test's fake core) to hand back.
+    #[must_use]
+    pub fn of(offset: u64, bytes: &[u8], total: u64, piece: usize) -> Self {
+        let pieces: Vec<&[u8]> = bytes.chunks(piece.max(1)).collect();
+        let (tell, told) = mpsc::channel(pieces.len().max(1));
+        for piece in pieces {
+            // the receiver is held right here and there is room for every piece
+            let _ = tell.try_send(Ok(piece.to_vec()));
+        }
+        Self {
+            offset,
+            len: bytes.len() as u64,
+            total,
+            pieces: told,
+        }
+    }
+
+    /// The next piece, in order; `None` once all of it came. [`EngineError::FileUnread`] when the read failed on the
+    /// way (it ends there).
+    pub async fn next(&mut self) -> Option<Result<Vec<u8>, EngineError>> {
+        self.pieces.recv().await
+    }
+}
 
 /// Why a file's item gave no link: it can't be had, or the read failed on the way.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,6 +134,131 @@ impl<C: Credentials + 'static> FileContents<C> {
     }
 }
 
+impl<C: Credentials + 'static> FileContents<C> {
+    /// Answers `reply` with a stream of `len` bytes of the file `share_url` is the sharing link of, from `offset`, once
+    /// its answer's headers came; its pieces follow as they arrive, until its reader drops it.
+    pub(crate) fn stream(&self, share_url: &str, offset: u64, len: u64, mut reply: Responder<FileStream>) {
+        let Some(file) = FileDownload::of(share_url) else {
+            let _ = reply.send(Err(EngineError::FileUnavailable));
+            return;
+        };
+        let (client, links) = (Arc::clone(&self.client), Rc::clone(&self.links));
+        tokio::task::spawn_local(async move {
+            let opened = tokio::select! {
+                opened = open_stream(&client, &links, &file, offset, len) => opened,
+                // asked for and let go before it was answered (the player sought elsewhere)
+                () = reply.closed() => return,
+            };
+            let (body, start) = match opened {
+                Ok(opened) => opened,
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                    return;
+                }
+            };
+            let (tell, pieces) = mpsc::channel(STREAM_PIECES);
+            let stream = FileStream {
+                offset,
+                len: start.len,
+                total: start.total,
+                pieces,
+            };
+            if reply.send(Ok(stream)).is_ok() {
+                hand_on(body, &tell).await;
+            }
+        });
+    }
+
+    /// Answers `reply` with the size of the file `share_url` is the sharing link of, as its item gives it; its link is
+    /// kept for the reads that follow.
+    pub(crate) fn size(&self, share_url: &str, reply: Responder<u64>) {
+        let Some(file) = FileDownload::of(share_url) else {
+            let _ = reply.send(Err(EngineError::FileUnavailable));
+            return;
+        };
+        let (client, links) = (Arc::clone(&self.client), Rc::clone(&self.links));
+        tokio::task::spawn_local(async move {
+            let _ = reply.send(link(&client, &links, &file).await.map(|content| content.size));
+        });
+    }
+}
+
+/// Hands `body`'s pieces on to `tell` as they arrive, until all came, it fails, it stalls for [`STALLED`], or its reader
+/// let go of it (dropping `body` stops the read).
+async fn hand_on(mut body: FileBody, tell: &mpsc::Sender<Result<Vec<u8>, EngineError>>) {
+    loop {
+        let piece = tokio::select! {
+            piece = tokio::time::timeout(STALLED, body.chunk()) => piece,
+            () = tell.closed() => return,
+        };
+        let piece = match piece {
+            Ok(Ok(Some(bytes))) => Ok(bytes),
+            Ok(Ok(None)) => return,
+            Ok(Err(error)) => {
+                log::info!("a shared file's stream broke off: {error}");
+                Err(EngineError::FileUnread)
+            }
+            Err(_) => {
+                log::info!("a shared file's stream stalled");
+                Err(EngineError::FileUnread)
+            }
+        };
+        let failed = piece.is_err();
+        if tell.send(piece).await.is_err() || failed {
+            return;
+        }
+    }
+}
+
+/// A stream of the part of `file` asked for, as [`read_range`] reads a part: at the link known, else one read now; a
+/// link the host refused is read again once.
+async fn open_stream<C: Credentials + 'static>(
+    client: &Arc<Client<HttpTransport<C>>>,
+    links: &Links,
+    file: &FileDownload,
+    offset: u64,
+    len: u64,
+) -> Result<(FileBody, StreamStart), EngineError> {
+    let mut fresh = false;
+    loop {
+        let content = link(client, links, file).await?;
+        // a read past the end asks for the file's last byte, which tells its size
+        let len = len.min(content.size.saturating_sub(offset)).max(1);
+        match client.transport().file_stream(&content.link, offset, len).await {
+            Ok(body) => {
+                let start = body.start().ok_or(EngineError::FileUnavailable)?;
+                return Ok((body, start));
+            }
+            Err(HttpError::Status(answer)) if matches!(answer.status(), 401 | 403) && !fresh => {
+                // the link expired: forget it and ask Graph again
+                forget(links, file, &content);
+                fresh = true;
+            }
+            Err(HttpError::Status(answer)) if !gone(answer.status()) => {
+                log::info!("a shared file's stream couldn't be read: HTTP {}", answer.status());
+                return Err(EngineError::FileUnread);
+            }
+            Err(HttpError::Status(_) | HttpError::BodyTooLarge | HttpError::Refused(_)) => {
+                return Err(EngineError::FileUnavailable);
+            }
+            Err(error) => {
+                log::info!("a shared file's stream couldn't be read: {error}");
+                return Err(EngineError::FileUnread);
+            }
+        }
+    }
+}
+
+/// Forgets `file`'s link `content`, which its host refused (it expired), unless another ask replaced it meanwhile.
+fn forget(links: &Links, file: &FileDownload, content: &FileContent) {
+    let mut known = links.borrow_mut();
+    if let Some(Link::Known(kept, _)) = known.get(file)
+        && kept == content
+    {
+        known.remove(file);
+    }
+}
+
 /// The part of `file` asked for: at the link known, else one read now; a link the host refused is read again once.
 async fn read_range<C: Credentials + 'static>(
     client: &Arc<Client<HttpTransport<C>>>,
@@ -95,13 +273,8 @@ async fn read_range<C: Credentials + 'static>(
         match client.transport().file_range(&content.link, offset, len).await {
             Ok(answer) => return FileRange::read(answer, offset, len).ok_or(EngineError::FileUnavailable),
             Err(HttpError::Status(answer)) if matches!(answer.status(), 401 | 403) && !fresh => {
-                // the link expired: forget it (unless another ask replaced it meanwhile) and ask Graph again
-                let mut known = links.borrow_mut();
-                if let Some(Link::Known(kept, _)) = known.get(file)
-                    && *kept == content
-                {
-                    known.remove(file);
-                }
+                // the link expired: forget it and ask Graph again
+                forget(links, file, &content);
                 fresh = true;
             }
             Err(HttpError::Status(answer)) if !gone(answer.status()) => {

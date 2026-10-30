@@ -60,6 +60,7 @@ pub use engine::{
     Action, Answer, Cause, EngineError, EngineHandle, EngineOptions, EngineRequests, Event, MessageChange, OwnStatus,
     Parts, Push, Reply, Source,
 };
+pub use file_content::FileStream;
 pub use outbox::{
     Arrival, CHECK_RETRY_WAIT, CallRetries, CallTried, Clock, Command, ConversationSync, DueFailed, Lane, MAX_ATTEMPTS,
     MAX_FAILED_CHECKS, MAX_TRANSIENT_WAIT, Outbox, OutboxError, Received, Sent, SentDue, SyncError, Transient,

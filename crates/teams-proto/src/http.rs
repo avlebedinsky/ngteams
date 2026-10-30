@@ -34,8 +34,9 @@
 //!   `https://<name>.asyncgw.teams.microsoft.com`, reads of a pasted picture's view only); and a file thumbnail's
 //!   picture ([`Service::FileThumbnail`], no base of its own: only [`HttpTransport::file_thumbnail`] reads there, a
 //!   link Graph handed out on SharePoint's media host or a SharePoint host, checked again, with no token); and a shared
-//!   file's bytes ([`Service::FileContent`], no base of its own either: only [`HttpTransport::file_range`] reads there,
-//!   the download link Graph handed out on a SharePoint host, checked again, with `Range` and no token); and Giphy's
+//!   file's bytes ([`Service::FileContent`], no base of its own either: only [`HttpTransport::file_range`] and
+//!   [`HttpTransport::file_stream`] read there, the download link Graph handed out on a SharePoint host, checked
+//!   again, with `Range` and no token); and Giphy's
 //!   media CDN ([`Service::Giphy`]: `https://media.giphy.com/`, a GIF a message shows, no token). An endpoint with an
 //!   empty,
 //!   `.` or `..` segment is refused. Entra and authz aren't a service here (they stay in `teams-auth`'s own clients). A
@@ -107,7 +108,7 @@ use url::Url;
 
 use crate::client::{Response, Transport};
 use crate::endpoint::{Endpoint, Service};
-use crate::file_content::{FileContentLink, MAX_RANGE, is_content_link};
+use crate::file_content::{FileContentLink, MAX_RANGE, MAX_STREAM, StreamStart, is_content_link};
 use crate::own::OwnState;
 use crate::post_read::{AuthorizedPostRead, PostRead};
 use crate::read::Read;
@@ -149,6 +150,10 @@ pub const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// How long one request may take, end to end.
 pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How long one streamed read of a file may take, end to end ([`HttpTransport::file_stream`]): its body comes at the
+/// network's pace, which [`REQUEST_TIMEOUT`] would cut short; its reader gives up on a stalled one sooner.
+pub const STREAM_TIMEOUT: Duration = Duration::from_mins(10);
 
 /// The longest a throttled read, plain or own-state request waits before it is sent again, by default.
 pub const MAX_RETRY_WAIT: Duration = Duration::from_secs(30);
@@ -861,33 +866,8 @@ impl<C: Credentials> HttpTransport<C> {
         auth: Auth<'_>,
         body: Option<Vec<u8>>,
     ) -> Result<Response, HttpError> {
-        let mut map = HeaderMap::new();
-        for (name, value) in headers {
-            let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| HttpError::Unknown)?;
-            let value = HeaderValue::from_str(value).map_err(|_| HttpError::Unknown)?;
-            map.append(name, value);
-        }
-        let credential = match auth {
-            Auth::None => None,
-            Auth::Bearer(token) => Some((AUTHORIZATION, format!("Bearer {}", token.expose()))),
-            Auth::Skypetoken(token) => Some((HeaderName::from_static(SKYPETOKEN_HEADER), token.expose().to_owned())),
-        };
-        if let Some((name, value)) = credential {
-            let mut value = HeaderValue::from_str(&value).map_err(|_| HttpError::Refused(Refusal::Token))?;
-            value.set_sensitive(true);
-            map.insert(name, value);
-        }
-        let full = log::log_enabled!(log::Level::Debug);
-        if full {
-            let headers = header_pairs(&map);
-            let request = teams_log::wire::Request {
-                method: method.as_str(),
-                url: url.as_str(),
-                headers: &headers,
-                body: body.as_deref(),
-            };
-            log::debug!(target: teams_log::wire::HTTP_TARGET, "{request}");
-        }
+        let map = header_map(headers, auth)?;
+        let full = log_request(&method, url, &map, body.as_deref());
         let shown = format!("{method} {}{}", url.host_str().unwrap_or_default(), url.path());
         let started = Instant::now();
         let mut request = self.client.request(method.clone(), self.destination(url)).headers(map);
@@ -1167,6 +1147,145 @@ impl<C: Credentials> HttpTransport<C> {
             range: Some((offset, last)),
         };
         self.exchange(outgoing, Record::Nothing).await
+    }
+
+    /// Streams `len` bytes (at most [`MAX_STREAM`]) of a shared file from `offset`, at the download link Graph handed
+    /// out for it: the [`HttpTransport::file_range`] `GET` (`Range: bytes=<first>-<last>`, no token of the account's,
+    /// the link checked again before it goes), its answer handed back once its headers came and its body read part by
+    /// part as it arrives ([`FileBody`]), never held whole; dropping it stops the read. It may take up to
+    /// [`STREAM_TIMEOUT`], and nothing retries it here (its reader starts another where this one stopped).
+    ///
+    /// # Errors
+    /// [`Refusal::NotAllowed`] for a link off SharePoint's hosts, [`Refusal::FileContent`] for a read of nothing or of
+    /// more than [`MAX_STREAM`], [`HttpError::Status`] for an answer that isn't a success (an expired link's 401 or 403
+    /// among them: the caller asks Graph for a new one), [`HttpError::Failed`] when it failed on the way.
+    pub async fn file_stream(&self, link: &FileContentLink, offset: u64, len: u64) -> Result<FileBody, HttpError> {
+        let url = link.url();
+        if !is_content_link(url) {
+            return Err(HttpError::Refused(Refusal::NotAllowed));
+        }
+        if len == 0 || len > MAX_STREAM {
+            return Err(HttpError::Refused(Refusal::FileContent));
+        }
+        let last = offset
+            .checked_add(len - 1)
+            .ok_or(HttpError::Refused(Refusal::FileContent))?;
+        let mut headers = plain_headers(Service::FileContent, false);
+        headers.push((RANGE.as_str().to_owned(), format!("bytes={offset}-{last}")));
+        let map = header_map(&headers, Auth::None)?;
+        let method = reqwest::Method::GET;
+        let full = log_request(&method, url, &map, None);
+        let shown = format!("GET {}{}", url.host_str().unwrap_or_default(), url.path());
+        let started = Instant::now();
+        let sent = self
+            .client
+            .get(self.destination(url))
+            .headers(map)
+            .timeout(STREAM_TIMEOUT)
+            .send()
+            .await;
+        let answer = match sent {
+            Ok(answer) => answer,
+            Err(error) => {
+                let error = failure(&error);
+                log::info!("{shown} failed after {} ms: {error}", started.elapsed().as_millis());
+                return Err(error);
+            }
+        };
+        let status = answer.status().as_u16();
+        log::info!(
+            "{shown} -> HTTP {status} in {} ms, streamed",
+            started.elapsed().as_millis()
+        );
+        if !answer.status().is_success() {
+            let (response, kept) = read_answer(answer, full, MAX_BODY).await?;
+            log_response(&method, url, &response, &kept, started.elapsed(), full);
+            return Err(HttpError::Status(Box::new(response)));
+        }
+        let content_range = answer
+            .headers()
+            .get(CONTENT_RANGE)
+            .and_then(|value| value.to_str().ok());
+        let start = StreamStart::read(status, content_range, answer.content_length(), offset, len);
+        if full {
+            let kept = header_pairs(answer.headers());
+            log_response(
+                &method,
+                url,
+                &Response::new(status, Vec::new()),
+                &kept,
+                started.elapsed(),
+                full,
+            );
+        }
+        Ok(FileBody {
+            start,
+            left: start.map_or(0, |start| start.len),
+            response: answer,
+            shown,
+            started,
+            streamed: 0,
+        })
+    }
+}
+
+/// A streamed read's answer ([`HttpTransport::file_stream`]): what it holds, and its body part by part as it arrives.
+/// Dropped before its end, the read stops (its HTTP/2 stream is reset).
+pub struct FileBody {
+    start: Option<StreamStart>,
+    response: reqwest::Response,
+    /// The bytes still to come.
+    left: u64,
+    shown: String,
+    started: Instant,
+    streamed: u64,
+}
+
+impl fmt::Debug for FileBody {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FileBody")
+            .field("start", &self.start)
+            .field("left", &self.left)
+            .finish_non_exhaustive()
+    }
+}
+
+impl FileBody {
+    /// Where the answer starts and what it holds; `None` when it isn't the part asked for ([`StreamStart::read`]).
+    #[must_use]
+    pub const fn start(&self) -> Option<StreamStart> {
+        self.start
+    }
+
+    /// The next part of the body, in order (never past what [`FileBody::start`] holds); `None` once all of it came.
+    ///
+    /// # Errors
+    /// [`HttpError::Failed`] when the body broke off or ended short.
+    pub async fn chunk(&mut self) -> Result<Option<Vec<u8>>, HttpError> {
+        if self.left == 0 {
+            return Ok(None);
+        }
+        let Some(chunk) = self.response.chunk().await.map_err(|error| failure(&error))? else {
+            return Err(HttpError::Failed(Failure::Body));
+        };
+        let take = usize::try_from(self.left).unwrap_or(usize::MAX).min(chunk.len());
+        let taken = chunk.get(..take).unwrap_or_default().to_vec();
+        self.left -= taken.len() as u64;
+        self.streamed += taken.len() as u64;
+        Ok(Some(taken))
+    }
+}
+
+impl Drop for FileBody {
+    /// Tells the log how much came, and whether it stopped before its end (its reader let it go).
+    fn drop(&mut self) {
+        log::info!(
+            "{}: {} bytes streamed in {} ms{}",
+            self.shown,
+            self.streamed,
+            self.started.elapsed().as_millis(),
+            if self.left == 0 { "" } else { ", stopped before its end" }
+        );
     }
 }
 
@@ -1636,6 +1755,66 @@ fn shown(outgoing: &Outgoing<'_>) -> String {
 
 /// Every header of `map` as text, for the log's `debug` records (which redact the credentials'): a value that isn't
 /// text is taken lossily.
+/// `headers` (lower-cased names, none of them a credential) and the credential `auth` as a request's header map.
+fn header_map(headers: &[(String, String)], auth: Auth<'_>) -> Result<HeaderMap, HttpError> {
+    let mut map = HeaderMap::new();
+    for (name, value) in headers {
+        let name = HeaderName::from_bytes(name.as_bytes()).map_err(|_| HttpError::Unknown)?;
+        let value = HeaderValue::from_str(value).map_err(|_| HttpError::Unknown)?;
+        map.append(name, value);
+    }
+    let credential = match auth {
+        Auth::None => None,
+        Auth::Bearer(token) => Some((AUTHORIZATION, format!("Bearer {}", token.expose()))),
+        Auth::Skypetoken(token) => Some((HeaderName::from_static(SKYPETOKEN_HEADER), token.expose().to_owned())),
+    };
+    if let Some((name, value)) = credential {
+        let mut value = HeaderValue::from_str(&value).map_err(|_| HttpError::Refused(Refusal::Token))?;
+        value.set_sensitive(true);
+        map.insert(name, value);
+    }
+    Ok(map)
+}
+
+/// Writes the request to the app's debug log (its credentials redacted by the logger) when that level is on, and says
+/// whether it is.
+fn log_request(method: &reqwest::Method, url: &Url, map: &HeaderMap, body: Option<&[u8]>) -> bool {
+    let full = log::log_enabled!(log::Level::Debug);
+    if full {
+        let headers = header_pairs(map);
+        let request = teams_log::wire::Request {
+            method: method.as_str(),
+            url: url.as_str(),
+            headers: &headers,
+            body,
+        };
+        log::debug!(target: teams_log::wire::HTTP_TARGET, "{request}");
+    }
+    full
+}
+
+/// Writes an answer to the app's debug log when `full` (its level on).
+fn log_response(
+    method: &reqwest::Method,
+    url: &Url,
+    answer: &Response,
+    headers: &[(String, String)],
+    elapsed: Duration,
+    full: bool,
+) {
+    if full {
+        let response = teams_log::wire::Response {
+            method: method.as_str(),
+            url: url.as_str(),
+            status: answer.status(),
+            headers,
+            body: answer.body(),
+            elapsed,
+        };
+        log::debug!(target: teams_log::wire::HTTP_TARGET, "{response}");
+    }
+}
+
 fn header_pairs(map: &HeaderMap) -> Vec<(String, String)> {
     map.iter()
         .map(|(name, value)| {

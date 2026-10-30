@@ -1,17 +1,21 @@
-//! A video file played inline in a chat, as Teams' card plays a video a message carries, its bytes read part by part
-//! from a [`ByteSource`] (the engine's ranged reads, in the app).
+//! A video file played inline in a chat, as Teams' card plays a video a message carries, its bytes streamed from a
+//! [`ByteSource`] (the engine's streamed reads, in the app).
 //!
 //! - **`GStreamer` plays it**: `playbin` (the system's `GStreamer` and plugins) demultiplexes, decodes, keeps sound and
-//!   picture in step, seeks and mutes. It reads the file from an `appsrc` fed by [`source`]'s blocks (read ahead of
-//!   what plays, so it rarely waits on the network), never from the network itself: the elements that would fetch
-//!   anything (an adaptive demuxer a playlist's bytes would plug, a network source) are never plugged, and one that is
-//!   made anyway fails the player before it starts. Its frames go to an appsink as BGRA and its sound to another as
-//!   48 kHz mono, which plays them on the device seam's speaker ([`crate::devices`], the PipeWire the build allows),
-//!   never on a sink of `GStreamer`'s own. Hardware video decoders are left out too: making one probes the GPU's
-//!   drivers, which can take seconds.
+//!   picture in step, seeks and mutes. It reads the file from an `appsrc` fed by [`source`]'s cache (its bytes taken
+//!   as they arrive, and read ahead of what plays, so it rarely waits on the network), never from the network itself:
+//!   the elements that would fetch anything (an adaptive demuxer a playlist's bytes would plug, a network source) are
+//!   never plugged, and one that is made anyway fails the player before it starts. Its frames go to an appsink as BGRA
+//!   and its sound to another as 48 kHz mono, which plays them on the device seam's speaker ([`crate::devices`], the
+//!   PipeWire the build allows), never on a sink of `GStreamer`'s own. Hardware video decoders are left out too: making
+//!   one probes the GPU's drivers, which can take seconds.
+//! - **Seeking**: a seek first lets go of the read the pipeline waits on and of the streams of the old place (the
+//!   pipeline can't flush while a read holds it), so the new place's bytes are asked for at once and have the network to
+//!   themselves. A seek bar's seek lands on the nearest key frame ([`Command::SeekNear`]: shown as soon as that frame
+//!   arrives, as a scrubbed player does); a skip lands exactly ([`Command::Seek`]).
 //! - **Its thread**: a [`Player`] runs on a thread of its own and is told what to do by [`Command`]s; it tells its
-//!   [`PlayerOutput`] each frame to show and its [`Status`]. Dropped, it stops: its blocks' cache is closed at once, so
-//!   a read waiting for the network gives up and the pipeline's threads end.
+//!   [`PlayerOutput`] each frame to show and its [`Status`]. Dropped, it stops: its cache is closed at once, so a read
+//!   waiting for the network gives up and the pipeline's threads end.
 //! - A format no installed plugin plays, or a file that isn't a video, is [`Failure::Unsupported`] or
 //!   [`Failure::NoCodec`]; a file that can't be had, [`Failure::Unavailable`]; one whose parts fail to arrive,
 //!   [`Failure::Network`].
@@ -26,7 +30,7 @@ use std::time::Duration;
 
 use crate::devices::{Devices, VideoFrame};
 
-pub use source::{ByteSource, Cache, SourceError};
+pub use source::{Abandon, ByteSource, ByteStream, Cache, Pieces, SourceError};
 
 /// What a player is made with: the devices whose speaker plays the sound (none: it plays silently).
 #[derive(Clone, Default)]
@@ -87,8 +91,10 @@ pub struct Status {
 pub enum Command {
     Play,
     Pause,
-    /// Goes to this time (kept within the movie).
+    /// Goes to this time exactly (kept within the movie).
     Seek(Duration),
+    /// Goes to the key frame nearest this time (kept within the movie): what a seek bar asks, shown at once.
+    SeekNear(Duration),
     Muted(bool),
 }
 
@@ -125,6 +131,8 @@ impl Player {
     ) -> Option<Self> {
         let (commands, received) = mpsc::channel();
         let cache = Arc::new(Cache::new(source));
+        // its first bytes come while `GStreamer` sets up
+        cache.begin();
         let (theirs, told) = (Arc::clone(&cache), Arc::clone(&output));
         let spawned = thread::Builder::new()
             .name("video-player".into())

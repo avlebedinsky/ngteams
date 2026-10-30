@@ -3,7 +3,7 @@
 //!
 //! - **Before it plays**: the file's thumbnail (Graph's, as the card shows it, `crate::inline::thumbnail`) with the
 //!   controls over it. Play, a click on the picture or Space starts it: a [`Player`] (`teams-media`) on a thread of its
-//!   own, reading the file part by part from the engine ([`Core::file_range`](crate::bridge::Core::file_range), through
+//!   own, streaming the file from the engine ([`Core::file_stream`](crate::bridge::Core::file_stream), through
 //!   the card's [`PictureSource`]: no view builds a request), played by `GStreamer`, each frame shown here through
 //!   GPUI's external surface, its sound on the speaker of the devices the app gave ([`set_playback`]).
 //! - **The controls**, as Teams' player has them: play/pause, back 10 s, forward 10 s, mute, "More options" (open in
@@ -34,10 +34,10 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::tooltip::Tooltip;
-use teams_core::EngineError;
+use teams_core::{EngineError, FileStream};
 use teams_media::devices::{PixelFormat, VideoFrame};
 use teams_media::player::{
-    ByteSource, Command, Failure, Player, PlayerOutput, PlayerSetup, SourceError, State, Status,
+    Abandon, ByteSource, ByteStream, Command, Failure, Player, PlayerOutput, PlayerSetup, SourceError, State, Status,
 };
 use teams_proto::chat::{FileKind, SharedFile};
 
@@ -70,21 +70,47 @@ pub fn plays_inline(file: &SharedFile) -> bool {
     file.kind() == FileKind::Video && file.share_url.is_some()
 }
 
-/// A file's bytes as the engine reads them, for the player's threads.
+/// A file's bytes as the engine streams them, for the player's threads.
 struct EngineBytes {
     source: PictureSource,
     share_url: String,
 }
 
 impl ByteSource for EngineBytes {
-    fn read(&self, offset: u64, len: u32) -> Result<(Vec<u8>, u64), SourceError> {
-        let asked = self.source.engine().file_range(self.share_url.clone(), offset, len);
-        match asked.blocking_wait() {
-            Ok(range) => Ok((range.bytes, range.total)),
-            Err(EngineError::FileUnavailable) => Err(SourceError::Unavailable),
-            Err(EngineError::Stopped) => Err(SourceError::Stopped),
-            Err(_) => Err(SourceError::Failed),
+    fn open(&self, offset: u64, len: u64, abandon: &Abandon) -> Result<Box<dyn ByteStream>, SourceError> {
+        let asked = self.source.engine().file_stream(self.share_url.clone(), offset, len);
+        // let go before it was answered, the reply dropped stops its read
+        match abandon.wait_for(asked) {
+            None => Err(SourceError::Stopped),
+            Some(Ok(stream)) => Ok(Box::new(EngineStream(stream))),
+            Some(Err(error)) => Err(source_error(error)),
         }
+    }
+}
+
+/// A stream the engine answered; dropped, its read stops.
+struct EngineStream(FileStream);
+
+impl ByteStream for EngineStream {
+    fn total(&self) -> u64 {
+        self.0.total
+    }
+
+    fn next(&mut self, abandon: &Abandon) -> Result<Option<Vec<u8>>, SourceError> {
+        match abandon.wait_for(self.0.next()) {
+            None => Err(SourceError::Stopped),
+            Some(None) => Ok(None),
+            Some(Some(Ok(bytes))) => Ok(Some(bytes)),
+            Some(Some(Err(error))) => Err(source_error(error)),
+        }
+    }
+}
+
+fn source_error(error: EngineError) -> SourceError {
+    match error {
+        EngineError::FileUnavailable => SourceError::Unavailable,
+        EngineError::Stopped => SourceError::Stopped,
+        _ => SourceError::Failed,
     }
 }
 
@@ -154,8 +180,13 @@ pub struct VideoPlayer {
 }
 
 impl VideoPlayer {
-    /// The player of `file`, the card `id`'s, reading through `source`'s engine; nothing plays until asked.
+    /// The player of `file`, the card `id`'s, reading through `source`'s engine; nothing plays until asked, but the
+    /// engine reads the file's download link now (its size asked for), so Play doesn't wait for Graph.
     pub fn new(id: String, file: SharedFile, source: PictureSource, cx: &mut Context<Self>) -> Self {
+        if let Some(share_url) = &file.share_url {
+            // the engine keeps the link whether or not the answer is heard
+            drop(source.engine().file_size(share_url.clone()));
+        }
         let me = cx.weak_entity();
         let shown = &mut cx.default_global::<Players>().0;
         shown.retain(|player| player.upgrade().is_some());
@@ -257,12 +288,16 @@ impl VideoPlayer {
                 ahead.min(status.duration)
             }
         };
-        self.seek(to, cx);
+        self.seek(Command::Seek(to), cx);
     }
 
-    fn seek(&mut self, to: Duration, cx: &mut Context<Self>) {
+    /// Seeks (`seek` is [`Command::Seek`] or [`Command::SeekNear`]), the bar showing its time at once.
+    fn seek(&mut self, seek: Command, cx: &mut Context<Self>) {
+        let (Command::Seek(to) | Command::SeekNear(to)) = seek else {
+            return;
+        };
         if let Some(player) = &self.player {
-            player.send(Command::Seek(to));
+            player.send(seek);
             if let Some(status) = self.status.as_mut() {
                 status.position = to;
             }
@@ -319,7 +354,7 @@ impl VideoPlayer {
 
     fn seek_to_fraction(&mut self, fraction: f32, cx: &mut Context<Self>) {
         let Some(status) = self.status else { return };
-        self.seek(status.duration.mul_f32(fraction), cx);
+        self.seek(Command::SeekNear(status.duration.mul_f32(fraction)), cx);
     }
 
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {

@@ -1,7 +1,7 @@
 //! The inline video player on a made-up MP4 (`tests/fixtures/media/made-up-test-pattern.mp4`: 2 s of `FFmpeg`'s test
 //! pattern, 480×270 H.264 High with B-frames, and a 1 kHz tone in stereo AAC-LC at 44.1 kHz, its `moov` after its
-//! media): read part by part from a source that answers late, played by the system's `GStreamer` (its H.264 and AAC
-//! decoders installed, as the app needs them), the sound played on a speaker that keeps what it is given.
+//! media): streamed from a source that answers late, played by the system's `GStreamer` (its H.264 and AAC decoders
+//! installed, as the app needs them), the sound played on a speaker that keeps what it is given.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
@@ -11,24 +11,35 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use teams_media::devices::{AudioFrame, AudioSink, AudioSource, DeviceError, Devices, VideoFrame, VideoSource};
-use teams_media::player::{ByteSource, Command, Player, PlayerOutput, PlayerSetup, SourceError, State, Status};
+use teams_media::player::{
+    Abandon, ByteSource, ByteStream, Command, Pieces, Player, PlayerOutput, PlayerSetup, SourceError, State, Status,
+};
 use teams_media::tone::amplitude_at;
 
 const MOVIE: &[u8] = include_bytes!("fixtures/media/made-up-test-pattern.mp4");
 
-/// The file's bytes, each read answered after a pause, as a network would; counts the reads.
+/// The file's bytes, each stream answered after a pause, as a network would; counts the streams.
 struct SlowFile {
     reads: Mutex<usize>,
 }
 
 impl ByteSource for SlowFile {
-    fn read(&self, offset: u64, len: u32) -> Result<(Vec<u8>, u64), SourceError> {
+    fn open(&self, offset: u64, len: u64, _: &Abandon) -> Result<Box<dyn ByteStream>, SourceError> {
         *self.reads.lock().unwrap() += 1;
         thread::sleep(Duration::from_millis(20));
-        let start = usize::try_from(offset).unwrap().min(MOVIE.len());
-        let end = (start + len as usize).min(MOVIE.len());
-        Ok((MOVIE[start..end].to_vec(), MOVIE.len() as u64))
+        Ok(Box::new(Pieces::new(
+            slice(MOVIE, offset, len),
+            MOVIE.len() as u64,
+            4096,
+        )))
     }
+}
+
+/// `len` bytes of `bytes` from `offset`, fewer where they end.
+fn slice(bytes: &[u8], offset: u64, len: u64) -> &[u8] {
+    let start = usize::try_from(offset).unwrap().min(bytes.len());
+    let end = start.saturating_add(usize::try_from(len).unwrap()).min(bytes.len());
+    &bytes[start..end]
 }
 
 /// What the player showed and told.
@@ -180,8 +191,9 @@ fn a_paused_seek_shows_the_frame_there() {
 fn a_file_that_isnt_an_mp4_is_unsupported() {
     struct NotMp4;
     impl ByteSource for NotMp4 {
-        fn read(&self, _: u64, _: u32) -> Result<(Vec<u8>, u64), SourceError> {
-            Ok((b"\x00\x00\x00\x10junkjunkjunkjunk".to_vec(), 16))
+        fn open(&self, offset: u64, len: u64, _: &Abandon) -> Result<Box<dyn ByteStream>, SourceError> {
+            let junk = b"\x00\x00\x00\x10junkjunkjunkjunk";
+            Ok(Box::new(Pieces::new(slice(junk, offset, len), 16, 4096)))
         }
     }
     let seen = Arc::new(Seen::default());
@@ -199,10 +211,12 @@ fn a_file_that_isnt_an_mp4_is_unsupported() {
 fn a_playlist_s_links_are_never_fetched() {
     struct Playlist(Vec<u8>);
     impl ByteSource for Playlist {
-        fn read(&self, offset: u64, len: u32) -> Result<(Vec<u8>, u64), SourceError> {
-            let start = usize::try_from(offset).unwrap().min(self.0.len());
-            let end = (start + len as usize).min(self.0.len());
-            Ok((self.0[start..end].to_vec(), self.0.len() as u64))
+        fn open(&self, offset: u64, len: u64, _: &Abandon) -> Result<Box<dyn ByteStream>, SourceError> {
+            Ok(Box::new(Pieces::new(
+                slice(&self.0, offset, len),
+                self.0.len() as u64,
+                4096,
+            )))
         }
     }
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -233,7 +247,7 @@ fn a_playlist_s_links_are_never_fetched() {
 fn a_player_dropped_while_its_read_waits_stops() {
     struct Never(Arc<(Mutex<bool>, std::sync::Condvar)>);
     impl ByteSource for Never {
-        fn read(&self, _: u64, _: u32) -> Result<(Vec<u8>, u64), SourceError> {
+        fn open(&self, _: u64, _: u64, _: &Abandon) -> Result<Box<dyn ByteStream>, SourceError> {
             let (released, changed) = &*self.0;
             let mut released = released.lock().unwrap();
             while !*released {
