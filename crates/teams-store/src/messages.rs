@@ -320,12 +320,14 @@ impl Store {
     /// reactions.
     ///
     /// `reactions`, when given, is the message's whole reaction set as of its `version` (the chat service's time of
-    /// the change, in milliseconds, on the clock reaction times use). It is merged per user, like a
-    /// [`ReactionChange`] for each reaction in it and a removal for each stored one not in it, all at that version:
-    /// a stored change that is later stays, and a reaction left out stays absent against a later-arriving older
-    /// change, so a set and the per-user changes leave the same rows in whichever order they arrive. A stale
+    /// the change, in milliseconds, on the clock reaction times use). For a live stored message it is merged per
+    /// user, like a [`ReactionChange`] for each reaction in it and a removal for each stored one not in it, all at
+    /// that version: a stored change that is later stays, and a reaction left out stays absent against a later-arriving
+    /// older change, so a set and the per-user changes leave the same rows in whichever order they arrive. A stale
     /// version's set is merged too and changes only what is older than it. When not given, the stored reactions
-    /// stay.
+    /// stay. If the effective stored message is deleted, any incoming set is ignored and every reaction is cleared,
+    /// regardless of its change time. Cleared rows retain their change times to order later sets if the message is
+    /// restored.
     ///
     /// # Errors
     ///

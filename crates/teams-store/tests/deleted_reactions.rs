@@ -1,4 +1,4 @@
-//! Message and sync failures preserve durable state on a real SQLite database.
+//! Stored deletions clear reactions, reject old copies and preserve reaction clock order through restoration.
 
 #![cfg(test)]
 
