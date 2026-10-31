@@ -13,7 +13,7 @@ wpe-webkit-sys = "generated gir bindings"
 # Only measured crates belong here. Missing baselines fail the local gate.
 # Floors are measured with one `-p <crate>` alone; combined runs also count dependent crates' tests.
 [baselines]
-teams-store = { lines = 93, functions = 94, regions = 82 }
+teams-store = { lines = 93, functions = 94, regions = 90 }
 teams-log = { lines = 90, functions = 90, regions = 90 }
 
 # Individually inspected sources LLVM does not map. Any content change invalidates the review.
