@@ -394,6 +394,28 @@ pub async fn run(
     options: RunOptions,
 ) -> Result<ScenarioReport, ScenarioError> {
     match scenario {
+        ScenarioName::EchoCall
+        | ScenarioName::AbCall
+        | ScenarioName::AbcCall
+        | ScenarioName::AbCallNative
+        | ScenarioName::AbcCallMixed
+        | ScenarioName::AbCallApp => run_call(scenario, paths, options).await,
+        ScenarioName::OwnPresenceActivity
+        | ScenarioName::OwnPresenceEndpoint
+        | ScenarioName::OwnPresenceBoth
+        | ScenarioName::OwnPresenceManualHeld
+        | ScenarioName::OwnPresenceManual => own_presence::run_named(paths, options, scenario).await,
+        _ => run_other(scenario, paths, options).await,
+    }
+}
+
+/// Runs one of the scenarios that are neither a call nor own presence ([`run`]).
+async fn run_other(
+    scenario: ScenarioName,
+    paths: &LabPaths,
+    options: RunOptions,
+) -> Result<ScenarioReport, ScenarioError> {
+    match scenario {
         ScenarioName::Load => load::run(paths, options).await,
         ScenarioName::AbChat => ab_chat::run(paths, options).await,
         ScenarioName::AbChatFull => ab_chat_full::run(paths, options).await,
@@ -406,17 +428,8 @@ pub async fn run(
         ScenarioName::AbcEveryone => abc_everyone::run(paths, options).await,
         ScenarioName::AbMeeting => ab_meeting::run(paths, options).await,
         ScenarioName::Search => search::run(paths, options).await,
-        ScenarioName::EchoCall
-        | ScenarioName::AbCall
-        | ScenarioName::AbcCall
-        | ScenarioName::AbCallNative
-        | ScenarioName::AbcCallMixed
-        | ScenarioName::AbCallApp => run_call(scenario, paths, options).await,
-        ScenarioName::OwnPresenceActivity
-        | ScenarioName::OwnPresenceEndpoint
-        | ScenarioName::OwnPresenceBoth
-        | ScenarioName::OwnPresenceManualHeld
-        | ScenarioName::OwnPresenceManual => own_presence::run_named(paths, options, scenario).await,
+        // a call or own presence: `run` sends those to `run_call` and `own_presence`
+        _ => Err(ScenarioError::Setup(format!("{scenario:?} isn't a scenario of `run_other`"))),
     }
 }
 

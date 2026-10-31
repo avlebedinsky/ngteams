@@ -68,7 +68,9 @@
 //!   ([`Core::sync_conversation`]); their messages offer no action and send no read receipt, and the compose box says
 //!   they can't be written ([`compose::READ_ONLY_NOTES`]).
 //! - **Opened at a message** ([`ChatView::reveal`], a search's hit, M2 Task 15): the view reads the store back to the
-//!   message, scrolls to it and selects it; the list stops following the newest. Until the message is shown no read
+//!   message, scrolls to it and selects it; the list stops following the newest. A message older than the store holds
+//!   (the service's search finds what was never synced) is read for through the service's older pages, up to
+//!   [`MAX_SEEK`] of them. Until the message is shown no read
 //!   receipt goes, and one already waiting is dropped.
 //!
 //! What the view shows is traced (`chat-view shown`: the conversation, its newest message ids and their kinds;
@@ -198,6 +200,9 @@ pub const OPEN_ON_THE_WEB: &str = "Open in Teams on the web";
 pub const NEW_MESSAGES: &str = "New messages";
 /// Older loads in a row that may bring nothing before rows near the top stop asking for more by themselves.
 pub const MAX_FRUITLESS: u32 = 3;
+/// How many older pages the view reads at most for a message it opens at that the store didn't hold
+/// ([`ChatView::reveal`]).
+pub const MAX_SEEK: u32 = 20;
 /// How many quick reactions the hover bar shows, as Teams' does; keys 1–4 pick them once react is chosen, and key 5
 /// opens every other.
 pub const QUICK_COUNT: usize = 4;
@@ -877,6 +882,9 @@ pub struct ChatView {
     reveal: Option<(i64, String)>,
     /// The message the running window load reads back to, shown once it ends.
     revealing: Option<(i64, String)>,
+    /// A message to open at that the store didn't hold (a search finds what was never synced), with the older pages
+    /// read for it so far: shown once an older page brings it, given up after [`MAX_SEEK`] pages or at the beginning.
+    seeking: Option<((i64, String), u32)>,
     /// The models' changes, the compose box's events, the window's activation and the presence model's changes.
     _subscriptions: [Subscription; 4],
 }
@@ -961,6 +969,7 @@ impl ChatView {
             outbox_traced: None,
             reveal: None,
             revealing: None,
+            seeking: None,
             _subscriptions: subscriptions,
         };
         view.kick(cx);
@@ -1295,12 +1304,28 @@ impl ChatView {
     }
 
     /// Shows the message a window load read back to ([`ChatView::reveal`]).
-    fn revealed(&mut self, (_, message): (i64, String), cx: &mut Context<Self>) {
+    fn revealed(&mut self, target: (i64, String), cx: &mut Context<Self>) {
+        self.reveal_at(target, 0, cx);
+    }
+
+    /// Shows `target` when it is held; else, when it is older than what is held, reads the next older page for it
+    /// (`pages` read so far, [`MAX_SEEK`] at most) and looks again once that page is in.
+    fn reveal_at(&mut self, target: (i64, String), pages: u32, cx: &mut Context<Self>) {
+        let message = target.1.clone();
         let Some(index) = self
             .items
             .iter()
             .position(|item| matches!(item, Item::Message(item) if item.id == message))
         else {
+            let older = self
+                .messages
+                .first()
+                .is_none_or(|oldest| (oldest.arrival_time, &oldest.id) > (target.0, &target.1));
+            let more = !matches!(self.history, History::Complete | History::Failed);
+            if older && more && pages < MAX_SEEK {
+                self.seeking = Some((target, pages + 1));
+                self.load_older(cx);
+            }
             return;
         };
         self.select(Some(message.clone()), cx);
@@ -1723,6 +1748,11 @@ impl ChatView {
             && let Some(target) = self.revealing.take()
         {
             self.revealed(target, cx);
+        }
+        if load == Load::Older
+            && let Some((target, pages)) = self.seeking.take()
+        {
+            self.reveal_at(target, pages, cx);
         }
         self.kick(cx);
         self.want_receipt(cx);
@@ -2354,6 +2384,7 @@ impl ChatView {
             && self.active == Activation::Active
             && self.reveal.is_none()
             && self.revealing.is_none()
+            && self.seeking.is_none()
             && self.list.is_following_tail()
             && self.conversation != NOTES
             && !self.core.read_only()

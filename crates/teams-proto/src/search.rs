@@ -16,6 +16,7 @@
 //! with the matched terms between `<c0>` and `</c0>` and a cut as `<ddd/>`; any other markup in it is dropped and its
 //! entities decoded ([`highlighted`]).
 
+use std::fmt::Write as _;
 use std::ops::Range;
 
 use serde_json::{Value, json};
@@ -114,6 +115,7 @@ impl SearchKind {
             Self::People => "People",
             Self::Files => "Files",
             Self::Chats => "GroupChats",
+            // no capture shows this tab's own request (the app shows the All answer's channels for it instead)
             Self::Channels => "TeamsAndChannels",
         }
     }
@@ -193,8 +195,6 @@ pub struct Found {
     pub files: Vec<FoundFile>,
     pub chats: Vec<FoundChat>,
     pub channels: Vec<FoundChannel>,
-    /// The kinds asked for that came back with nothing the app could read (a result set it couldn't take).
-    pub failed: Vec<SearchKind>,
     /// Whether the service has more of the kinds asked for than it gave.
     pub more: bool,
 }
@@ -220,7 +220,6 @@ enum Path {
 pub struct SubstrateSearch {
     path: Path,
     body: Value,
-    kinds: Vec<SearchKind>,
 }
 
 impl SubstrateSearch {
@@ -268,13 +267,6 @@ impl SubstrateSearch {
         Self {
             path: Path::Suggestions,
             body,
-            kinds: vec![
-                SearchKind::People,
-                SearchKind::Files,
-                SearchKind::Chats,
-                SearchKind::Channels,
-                SearchKind::Messages,
-            ],
         }
     }
 
@@ -284,6 +276,19 @@ impl SubstrateSearch {
     pub fn query(query: &str, kinds: &[SearchKind], size: u32, from: u32) -> Self {
         let query = query.trim();
         let asked = || json!({ "queryString": query, "displayQueryString": query });
+        // the All tab's message request leaves out messages deleted on the client, as the web client's does; a tab of
+        // messages alone is asked with the bare query, as captured
+        let all = kinds.len() > 1;
+        let messages = || {
+            if all {
+                json!({
+                    "queryString": format!("NOT (isClientSoftDeleted:TRUE) AND {query}"),
+                    "displayQueryString": query,
+                })
+            } else {
+                asked()
+            }
+        };
         let requests: Vec<Value> = kinds
             .iter()
             .map(|kind| match kind {
@@ -292,7 +297,7 @@ impl SubstrateSearch {
                     "contentSources": ["Teams"],
                     "fields": MESSAGE_FIELDS,
                     "propertySet": "Optimized",
-                    "query": asked(),
+                    "query": messages(),
                     "from": from,
                     "size": size,
                     "topResultsCount": 5,
@@ -358,14 +363,7 @@ impl SubstrateSearch {
         Self {
             path: Path::Query,
             body,
-            kinds: kinds.to_vec(),
         }
-    }
-
-    /// The kinds it asks for.
-    #[must_use]
-    pub fn kinds(&self) -> &[SearchKind] {
-        &self.kinds
     }
 
     /// Its service: [`Service::Substrate`].
@@ -451,7 +449,10 @@ fn fresh_id() -> String {
     }
     bytes[6] = (bytes[6] & 0x0f) | 0x40;
     bytes[8] = (bytes[8] & 0x3f) | 0x80;
-    let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+    let hex: String = bytes.iter().fold(String::new(), |mut hex, byte| {
+        let _ = write!(hex, "{byte:02x}");
+        hex
+    });
     format!(
         "{}-{}-{}-{}-{}",
         &hex[..8],
@@ -662,16 +663,13 @@ pub fn highlighted(raw: &str) -> (String, Vec<Range<usize>>) {
         } else {
             let end = rest.find(';').filter(|end| *end <= 10);
             let decoded = end.and_then(|end| entity(&rest[1..end]));
-            match (end, decoded) {
-                (Some(end), Some(ch)) => {
-                    let mut buf = [0_u8; 4];
-                    push_folded(&mut out, ch.encode_utf8(&mut buf));
-                    rest = &rest[end + 1..];
-                }
-                _ => {
-                    push_folded(&mut out, "&");
-                    rest = &rest[1..];
-                }
+            if let (Some(end), Some(ch)) = (end, decoded) {
+                let mut buf = [0_u8; 4];
+                push_folded(&mut out, ch.encode_utf8(&mut buf));
+                rest = &rest[end + 1..];
+            } else {
+                push_folded(&mut out, "&");
+                rest = &rest[1..];
             }
         }
     }

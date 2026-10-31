@@ -245,16 +245,17 @@ impl Ended {
             EndReason::Voicemail
         } else if remote.chat_has_running_call() {
             EndReason::ChatHasCall
+        // the conversation's own ends come before who sent them: a real one names the last to leave as its sender
+        } else if remote.sub_code == Some(NOBODY_JOINED) {
+            EndReason::NobodyJoined
+        } else if remote.sub_code == Some(EVERYONE_LEFT) {
+            EndReason::EveryoneLeft
         } else if let Some(by) = &remote.by {
             if by.as_str().eq_ignore_ascii_case(me) {
                 EndReason::EndedElsewhere
             } else {
                 EndReason::EndedBy(remote.by_name.clone())
             }
-        } else if remote.sub_code == Some(NOBODY_JOINED) {
-            EndReason::NobodyJoined
-        } else if remote.sub_code == Some(EVERYONE_LEFT) {
-            EndReason::EveryoneLeft
         } else if remote.failed() && self.duration.is_some() {
             EndReason::Dropped
         } else if remote.failed() {

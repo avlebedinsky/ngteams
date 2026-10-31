@@ -90,6 +90,15 @@ impl History {
         Some(to)
     }
 
+    /// Takes `place` off both lists (a place that can't be shown again: the search results once left).
+    pub fn forget(&mut self, place: &Main) {
+        self.back.retain(|kept| kept != place);
+        self.forward.retain(|kept| kept != place);
+        if self.current.as_ref() == Some(place) {
+            self.current = None;
+        }
+    }
+
     #[must_use]
     pub fn can_go_back(&self) -> bool {
         !self.back.is_empty()

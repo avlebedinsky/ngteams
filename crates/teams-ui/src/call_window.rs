@@ -221,6 +221,12 @@ impl CallWindows {
             settings: parts.settings.clone(),
             trace: Arc::clone(&parts.trace),
             namer,
+            others: self
+                .accounts
+                .iter()
+                .filter(|other| other.key != key)
+                .map(|other| other.parts.models.calls.clone())
+                .collect(),
         };
         let windows = cx.weak_entity();
         let mut made: Option<Entity<CallStage>> = None;

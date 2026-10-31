@@ -717,6 +717,28 @@ fn older_pages_come_from_the_store_then_the_service_until_the_beginning() {
 }
 
 #[test]
+fn opened_at_a_message_the_store_never_had_the_view_reads_the_service_back_to_it() {
+    // a search's hit older than what was synced: 200 stored, 100 more at the service in two pages
+    let all = many(300);
+    let rig = rig_with(all[100..].to_vec());
+    let pages: Vec<Vec<Message>> = [&all[50..100], &all[..50]]
+        .into_iter()
+        .map(|page| page.iter().rev().cloned().collect())
+        .collect();
+    rig.core.older.lock().unwrap().insert(AB.to_owned(), pages);
+    let (view, cx) = chat_window(&rig, Arc::new(ViewTrace::off()));
+    assert!(!ids(&view, cx).contains(&"10".to_owned()), "not held at first");
+
+    let target = &all[9];
+    cx.update(|_, cx| {
+        view.update(cx, |view, cx| view.reveal(target.arrival_time, target.id.clone(), cx));
+    });
+    draw(cx);
+    assert_eq!(cx.update(|_, cx| view.read(cx).selected().map(str::to_owned)), Some("10".to_owned()));
+    assert!(ids(&view, cx).contains(&"10".to_owned()));
+}
+
+#[test]
 fn a_long_chat_scrolls_without_loading_everything_at_once() {
     const ROWS_IN_A_FRAME: usize = 80;
     let rig = rig_with(many(1_000));

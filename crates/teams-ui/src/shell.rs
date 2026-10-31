@@ -245,7 +245,7 @@ pub struct Shell {
     /// The list pane is shown (the title bar's toggle hides it).
     list_shown: bool,
     main: Main,
-    /// What the settings hid, shown again when the rail's Chat leaves them.
+    /// What the settings, the calendar or the search results hid, shown again when the rail's Chat leaves them.
     before_settings: Main,
     panes: Entity<ResizableState>,
     focus: FocusHandle,
@@ -1039,6 +1039,8 @@ impl Shell {
         if self.main == Main::Search {
             self.main = Main::Nothing;
         }
+        // the results are gone: Back and Forward never stop at them again
+        self.history.forget(&Main::Search);
         cx.notify();
     }
 
@@ -1174,8 +1176,8 @@ impl Shell {
         }
     }
 
-    /// The rail's Chat: leaves the settings for what they hid (the chat or the channel shown before them, opened
-    /// again), or nothing; elsewhere it does nothing.
+    /// The rail's Chat (and Ctrl+2): leaves the settings, the calendar or the search results for what they hid (the
+    /// chat or the channel shown before them, opened again), or nothing; elsewhere it does nothing.
     pub fn show_chats(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !matches!(self.main, Main::Settings | Main::Calendar | Main::Search) {
             return;

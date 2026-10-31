@@ -126,17 +126,46 @@ async fn steps(
     load(ACCOUNT, a, options.load_timeout).await?;
     size(a).await?;
     pause(drive).await;
+    let query = query();
+    go_to(a, drive, report, &query).await?;
+    focus_box(drive, report).await?;
+    suggest_and_query(a, drive, report, &query).await?;
+    report.notes.push(tabs_note(drive).await);
+    for tab in TABS {
+        visit_tab(a, drive, report, tab).await?;
+    }
+    drive.press("a closes the search", Key::ESCAPE).await?;
+    pause(drive).await;
+    shot(a, report, "search-closed.png").await;
+    Ok(())
+}
+
+/// The go-to mode (Ctrl+Alt+G) with a chat's name typed, then left, and the box too.
+async fn go_to(
+    a: &mut LabSession,
+    drive: &mut Driver,
+    report: &mut ScenarioReport,
+    query: &str,
+) -> Result<(), ScenarioError> {
     drive.press("a presses Ctrl+Alt+G", CTRL_ALT_G).await?;
     tokio::time::sleep(Duration::from_millis(800)).await;
-    let query = query();
-    drive.insert_text("a types a chat's name", &query).await?;
+    drive.insert_text("a types a chat's name", query).await?;
     pause(drive).await;
     shot(a, report, "search-goto.png").await;
     drive.press("a leaves the go-to mode", Key::ESCAPE).await?;
     pause(drive).await;
     drive.press("a leaves the search box", Key::ESCAPE).await?;
     pause(drive).await;
-    focus_box(drive, report).await?;
+    Ok(())
+}
+
+/// The query typed a character at a time (the suggestions), then entered (the results).
+async fn suggest_and_query(
+    a: &mut LabSession,
+    drive: &mut Driver,
+    report: &mut ScenarioReport,
+    query: &str,
+) -> Result<(), ScenarioError> {
     let since = drive.seen_so_far();
     for ch in query.chars() {
         drive.insert_text("a types the query", &ch.to_string()).await?;
@@ -153,33 +182,37 @@ async fn steps(
     queried?;
     pause(drive).await;
     shot(a, report, "search-results.png").await;
-    report.notes.push(tabs_note(drive).await);
-    for tab in TABS {
-        let since = drive.seen_so_far();
-        if !click_tab(drive, tab).await? {
-            report.notes.push(format!("a: no {tab} tab shown"));
-            continue;
-        }
-        let asked = answered(drive, tab, QUERY_URL, since).await;
-        report.notes.push(note(tab, &asked));
-        pause(drive).await;
-        shot(
-            a,
-            report,
-            &format!("search-tab-{}.png", tab.replace(' ', "-").to_lowercase()),
-        )
-        .await;
-        if tab == "Messages" {
-            open_first_message(a, drive, report).await;
-            pause(drive).await;
-            focus_box(drive, report).await?;
-            drive.press_enter("a enters the query again").await?;
-            pause(drive).await;
-        }
+    Ok(())
+}
+
+/// One results tab clicked and what it asked; on Messages, the first message opened and the query entered again.
+async fn visit_tab(
+    a: &mut LabSession,
+    drive: &mut Driver,
+    report: &mut ScenarioReport,
+    tab: &str,
+) -> Result<(), ScenarioError> {
+    let since = drive.seen_so_far();
+    if !click_tab(drive, tab).await? {
+        report.notes.push(format!("a: no {tab} tab shown"));
+        return Ok(());
     }
-    drive.press("a closes the search", Key::ESCAPE).await?;
+    let asked = answered(drive, tab, QUERY_URL, since).await;
+    report.notes.push(note(tab, &asked));
     pause(drive).await;
-    shot(a, report, "search-closed.png").await;
+    shot(
+        a,
+        report,
+        &format!("search-tab-{}.png", tab.replace(' ', "-").to_lowercase()),
+    )
+    .await;
+    if tab == "Messages" {
+        open_first_message(a, drive, report).await;
+        pause(drive).await;
+        focus_box(drive, report).await?;
+        drive.press_enter("a enters the query again").await?;
+        pause(drive).await;
+    }
     Ok(())
 }
 

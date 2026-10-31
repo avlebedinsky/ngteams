@@ -106,6 +106,9 @@ pub struct StageParts {
     pub settings: Entity<SettingsModel>,
     pub trace: Arc<ViewTrace>,
     pub namer: Option<ChatNamer>,
+    /// The app's other accounts' calls: Call back and Rejoin wait while one of them is busy (one call at a time across
+    /// the accounts, as the shell's call buttons do).
+    pub others: Vec<Entity<Calls>>,
 }
 
 /// One tile of the stage: its test selector, its name, whether it speaks, and the video line showing it.
@@ -123,6 +126,8 @@ pub struct CallStage {
     settings: Entity<SettingsModel>,
     trace: Arc<ViewTrace>,
     namer: Option<ChatNamer>,
+    /// The other accounts' calls ([`StageParts::others`]).
+    others: Vec<Entity<Calls>>,
     /// The call the window is for.
     call: CallId,
     people: CallPeople,
@@ -161,6 +166,7 @@ impl CallStage {
             settings,
             trace,
             namer,
+            others,
         } = parts;
         let observing = [
             cx.observe(&calls, |this: &mut Self, _, cx| this.changed(cx)),
@@ -182,6 +188,7 @@ impl CallStage {
             settings,
             trace,
             namer,
+            others,
             call,
             people: CallPeople::default(),
             tiles,
@@ -363,7 +370,7 @@ impl CallStage {
     /// Call back or Rejoin, as the end offers it (its button or its key); nothing while the call is up or another
     /// rings or sets up.
     fn act_on_end(&mut self, rejoin: bool, cx: &mut Context<Self>) {
-        if self.calls.read(cx).busy() {
+        if self.calls.read(cx).busy() || self.others.iter().any(|calls| calls.read(cx).busy()) {
             return;
         }
         let Some(ended) = self.end_card(cx) else { return };

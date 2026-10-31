@@ -60,6 +60,20 @@ fn the_results_ask_one_request_per_kind_and_name_a_single_kind_s_tab() {
     assert_eq!(body["scenario"]["Dimensions"][0]["DimensionValue"], "GroupChats");
 }
 
+#[test]
+fn the_all_tab_leaves_out_messages_deleted_on_the_client_and_the_messages_tab_asks_the_bare_query() {
+    let all = SubstrateSearch::query(" lab ", &[SearchKind::Messages, SearchKind::People], 5, 0);
+    let body = all.body();
+    let query = &body["EntityRequests"][0]["query"];
+    assert_eq!(query["queryString"], "NOT (isClientSoftDeleted:TRUE) AND lab");
+    assert_eq!(query["displayQueryString"], "lab");
+    assert_eq!(body["EntityRequests"][1]["query"]["queryString"], "lab", "people asked plainly");
+    let messages = SubstrateSearch::query("lab", &[SearchKind::Messages], 25, 0);
+    let query = &messages.body()["EntityRequests"][0]["query"];
+    assert_eq!(query["queryString"], "lab");
+    assert_eq!(query["displayQueryString"], "lab");
+}
+
 fn message_result(id: &str, conversation: &str, summary: &str) -> Value {
     json!({
         "Type": "Message",

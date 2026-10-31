@@ -141,6 +141,16 @@ impl Tab {
             Self::Channels => SearchScope::Only(SearchKind::Channels),
         }
     }
+
+    /// The tab whose answer it shows: its own, but the Teams and channels tab shows the All tab's channels (no capture
+    /// shows the web client's own request for that tab, so it isn't asked in a guessed form).
+    #[must_use]
+    pub fn asked(self) -> Self {
+        match self {
+            Self::Channels => Self::All,
+            tab => tab,
+        }
+    }
 }
 
 /// One row of the suggestions.
@@ -241,7 +251,7 @@ impl Results {
     /// Whether the service hasn't answered the tab shown yet.
     #[must_use]
     pub fn loading(&self) -> bool {
-        self.loading.contains(&self.tab)
+        self.loading.contains(&self.tab.asked())
     }
 
     /// The answer the tab shown reads: its own, else the All tab's.
@@ -605,6 +615,7 @@ impl GlobalSearch {
         };
         results.tab = tab;
         self.trace.record(&TraceLine::new("search", "results").kind(tab.key()));
+        let tab = tab.asked();
         let asked = results.answers.contains_key(&tab) || results.loading.contains(&tab);
         if !asked {
             results.loading.insert(tab);
@@ -635,7 +646,7 @@ impl GlobalSearch {
         cx.notify();
     }
 
-    /// Leaves the results (Escape on them): forgotten, the box keeps the query.
+    /// Leaves the results (Escape on them): forgotten, and the box emptied.
     pub fn clear_results(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.results.take().is_some() {
             self.trace.record(&TraceLine::new("search", "closed"));
@@ -676,7 +687,8 @@ impl GlobalSearch {
             .iter()
             .map(|message| service_hit(message, list, self.core.me()))
             .chain(results.local.iter().cloned())
-            .filter(|hit| seen.insert(hit.target.message.clone()))
+            // a message is its chat's and its id (ids are arrival times: two chats may share one)
+            .filter(|hit| seen.insert((hit.target.conversation.clone(), hit.target.message.clone())))
             .collect();
         hits.sort_by(|left, right| right.target.arrival_time.cmp(&left.target.arrival_time));
         if results.tab == Tab::All {
@@ -795,7 +807,7 @@ impl GlobalSearch {
     pub fn failed(&self) -> bool {
         self.results
             .as_ref()
-            .is_some_and(|results| results.failed.contains(&results.tab))
+            .is_some_and(|results| results.failed.contains(&results.tab.asked()))
     }
 }
 
@@ -1468,10 +1480,14 @@ fn section(title: &'static str, tab: Tab, shown: Tab, search: &Entity<GlobalSear
 
 /// A card's frame on the results.
 fn card(id: String, palette: Palette) -> gpui::Stateful<gpui::Div> {
-    let selector = id.clone();
+    keyed_card(id.clone(), id, palette)
+}
+
+/// A card whose element id (`key`, unique among the cards) differs from its test selector.
+fn keyed_card(selector: String, key: String, palette: Palette) -> gpui::Stateful<gpui::Div> {
     div()
         .debug_selector(move || selector.clone())
-        .id(SharedString::from(id))
+        .id(SharedString::from(key))
         .w_full()
         .px_4()
         .py_3()
@@ -1509,7 +1525,11 @@ fn message_card(hit: &Hit, search: &Entity<GlobalSearch>, palette: Palette, cycl
     let when = clock::list_time(hit.target.arrival_time, &Local::now(), cycle);
     let target = hit.target.clone();
     let search = search.clone();
-    card(format!("search-message-{}", hit.target.message), palette)
+    keyed_card(
+        format!("search-message-{}", hit.target.message),
+        format!("search-message-{}-{}", hit.target.conversation, hit.target.message),
+        palette,
+    )
         .on_click(move |_, _, cx| {
             let target = target.clone();
             search.update(cx, |_, cx| cx.emit(GlobalSearchEvent::OpenMessage(target)));

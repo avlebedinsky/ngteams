@@ -1806,6 +1806,13 @@ fn an_end_is_told_by_its_cause_in_plain_words_never_by_its_code() {
     };
     assert_eq!(reason(conversation_end(5013), true), EndReason::NobodyJoined);
     assert_eq!(reason(conversation_end(5002), true), EndReason::EveryoneLeft);
+    // as captured, the conversation's end names the last to leave as its sender: still everyone else left
+    let mut last_left = conversation_end(5002);
+    if let End::Remote(remote) = &mut last_left {
+        remote.by = Some(Mri::new(LAB_B));
+        remote.by_name = Some("Lab Bee".to_owned());
+    }
+    assert_eq!(reason(last_left, true), EndReason::EveryoneLeft);
     // a failure: dropped once connected, else never connected
     let gave_up = End::Remote(RemoteEnd {
         phrase: Some("SdpParsingFailure".to_owned()),
