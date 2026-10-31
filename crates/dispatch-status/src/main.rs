@@ -185,7 +185,37 @@ fn local_host(head: &str, port: u16) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::local_host;
+    use super::{DEFAULT_PORT, local_host, options};
+
+    #[test]
+    fn options_keep_the_default_port_and_accept_explicit_overrides() {
+        let defaults = options(["--ledger", "synthetic.json"].map(str::to_owned).into_iter()).unwrap();
+        assert_eq!(defaults.port, DEFAULT_PORT);
+        assert_eq!(defaults.ledger, std::path::PathBuf::from("synthetic.json"));
+        let explicit = options(
+            [
+                "--ledger",
+                "first.json",
+                "--ledger",
+                "second.json",
+                "--port",
+                "0",
+                "--subagents",
+                "synthetic-agents",
+                "--exit-with",
+                "7",
+            ]
+            .map(str::to_owned)
+            .into_iter(),
+        )
+        .unwrap();
+        assert_eq!(explicit.port, 0);
+        assert_eq!(explicit.ledger, std::path::PathBuf::from("second.json"));
+        assert_eq!(explicit.exit_with, Some(7));
+        assert!(
+            matches!(explicit.agents, crate::status::Agents::Dir(path) if path == std::path::Path::new("synthetic-agents"))
+        );
+    }
 
     #[test]
     fn takes_only_its_own_host() {
