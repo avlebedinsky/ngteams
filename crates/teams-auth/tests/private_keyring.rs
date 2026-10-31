@@ -14,6 +14,7 @@ mod tests {
     const CHILD_ROOT: &str = "NGTEAMS_PRIVATE_KEYRING_TEST_ROOT";
     const TEST_NAME: &str = "tests::private_keyring_stores_and_lazy_connections_use_only_the_private_service";
     const WAIT: Duration = Duration::from_secs(15);
+    const KEYRING_READY_WAIT: Duration = Duration::from_secs(5);
 
     struct Process {
         child: Child,
@@ -128,7 +129,7 @@ mod tests {
     }
 
     async fn wait_for_keyring(daemon: &mut Process) -> KeyringSecretStore {
-        let deadline = Instant::now() + WAIT;
+        let deadline = Instant::now() + KEYRING_READY_WAIT;
         loop {
             if let Ok(store) = KeyringSecretStore::new("synthetic-private-main").await {
                 return store;
@@ -168,6 +169,7 @@ mod tests {
         store.delete(first).await.unwrap();
         assert_value(store, first, None).await;
         assert_value(store, others[0], Some("audience")).await;
+        assert_value(store, others[1], Some("account")).await;
         for key in others {
             store.delete(key).await.unwrap();
             assert_value(store, key, None).await;
