@@ -775,6 +775,40 @@ cargo test -p <crate> [-p <crate> ...]   # the crates the change touched
 A change to any `tests/fixtures/` or `docs/` also runs `cargo test -p fixture-guard`. The whole workspace
 (`cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace`) runs when asked.
 
+### Coverage
+
+Install `cargo-llvm-cov` (`cargo install cargo-llvm-cov --locked`) and the pinned Rust toolchain's LLVM tools
+(`rustup component add llvm-tools-preview`). The reporting helper requires Python 3.11 or newer; the wrapper uses
+Bash and `flock`. Run a selected crate's tests and local coverage gate with:
+
+```sh
+scripts/coverage.sh -p teams-store
+scripts/coverage.sh -p teams-store --require-target   # require 90% on every measured metric
+scripts/coverage.sh -p teams-log --no-gate            # measure a crate before establishing its baseline
+python3 -B -m unittest discover -s scripts -p test_coverage_report.py
+```
+
+`coverage.toml` holds the 90% target and the measured baseline floors. Only `teams-store` and `teams-log` have baselines so far;
+other crates fail the gate until measured. Raise floors as tests improve; never lower them or exclude runnable code
+to pass. No CI pipeline is configured in this repository, so these are local gates. Running the script without
+`-p` selects all 22 non-generated crates, including the lab and test-support tooling; generated WPE bindings and
+the standalone video spike are excluded. Third-party code and tests outside `src/` do not enter the totals.
+
+Reports go to `target/coverage/<sorted-package-selection>/llvm.json` and `summary.json`; the summary ranks source
+files by uncovered lines, functions and regions. Instrumented build artifacts stay in `target/coverage-build` and
+measurements serialize on a lock. `--report-only` rechecks an existing export without running tests; use a fresh
+measurement for change validation. Every selected `src/**/*.rs` must appear in the LLVM export, including zero-hit
+files: missing files fail even with `--no-gate`, so omitted feature-gated code cannot silently inflate coverage.
+Declaration-only modules may have no LLVM mapping; diagnose those explicitly before establishing that crate's gate.
+
+Stable Rust supplies line, function and region coverage here; regions are not statements or branches. Inline unit
+test functions in `src/` also appear in LLVM's source totals. This first measurement uses default features and the
+features enabled by development dependencies, not a merged feature matrix. Code behind `personal`, `test-support`
+or other optional features still needs appropriate mock-backed variant measurements before claiming full coverage.
+The wrapper never enables `live` and removes live-test and external TURN-server environment variables. Browser and
+GUI tests still need the local dependencies below; set `PROTO_LAB_REQUIRE_CHROME=1 GPUI_SMOKE_REQUIRE=1` when
+measuring their crates so missing dependencies fail rather than skip tests. Never run tenant activity for coverage.
+
 `cargo test --workspace` is offline: the native client is tested against `teams-mock` (two or three native clients
 talking through it), the browser fence against local pages in Chrome. The fence suite alone: `cargo test -p
 teams-fence -p teams-proto -p fence-seal -p teams-trouter` plus `cargo test -p proto-lab --test fence_http --test
