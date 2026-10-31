@@ -1,6 +1,6 @@
-//! Finds the system's WPE WebKit web process extension library (pkg-config `wpe-web-process-extension-2.0`) for the
-//! module's link: the module calls three of its functions (`webkit_web_page_get_id`, `webkit_uri_request_get_*`), which the web process
-//! that loads it has already loaded.
+//! Finds the system's `wpewebkit` web process extension library (pkg-config `wpe-web-process-extension-2.0`) for
+//! the module's link: the module calls three of its functions (`webkit_web_page_get_id`,
+//! `webkit_uri_request_get_*`), which the web process that loads it has already loaded.
 
 fn main() {
     println!("cargo::rerun-if-env-changed=PKG_CONFIG_PATH");

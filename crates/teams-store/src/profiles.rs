@@ -107,8 +107,9 @@ impl Store {
         Ok(profile)
     }
 
-    /// Up to `limit` people whose stored name holds `query` (in any case), as (MRI, name), names that begin with it
-    /// first, then by name: what the scheduling form's attendee picker suggests.
+    /// Up to `limit` people whose stored name holds `query` (in any case, any script's: compared lowercased in Rust,
+    /// as SQLite's own `lower` folds only ASCII), as (MRI, name), names that begin with it first, then by name: what
+    /// the scheduling form's attendee picker suggests.
     ///
     /// # Errors
     ///
@@ -118,22 +119,20 @@ impl Store {
         if query.is_empty() {
             return Ok(Vec::new());
         }
-        let escaped: String = query
-            .chars()
-            .flat_map(|c| match c {
-                '%' | '_' | '\\' => vec!['\\', c],
-                c => vec![c],
-            })
-            .collect();
-        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
-        let mut statement = self.conn.prepare_cached(
-            "SELECT mri, name FROM profiles
-             WHERE name IS NOT NULL AND lower(name) LIKE '%' || ?1 || '%' ESCAPE '\\'
-             ORDER BY lower(name) LIKE ?1 || '%' ESCAPE '\\' DESC, lower(name)
-             LIMIT ?2",
-        )?;
-        let rows = statement.query_map(params![escaped, limit], |row| Ok((row.get(0)?, row.get(1)?)))?;
-        Ok(rows.collect::<Result<_, _>>()?)
+        let mut statement = self
+            .conn
+            .prepare_cached("SELECT mri, name FROM profiles WHERE name IS NOT NULL")?;
+        let rows = statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+        let mut found: Vec<(bool, String, (String, String))> = Vec::new();
+        for row in rows {
+            let (mri, name) = row?;
+            let lower = name.to_lowercase();
+            if lower.contains(&query) {
+                found.push((!lower.starts_with(&query), lower, (mri, name)));
+            }
+        }
+        found.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+        Ok(found.into_iter().take(limit).map(|(_, _, person)| person).collect())
     }
 
     /// Stores `profile` in place of the one stored for its MRI.

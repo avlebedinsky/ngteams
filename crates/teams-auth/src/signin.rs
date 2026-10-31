@@ -1,7 +1,8 @@
 //! The asking side of the sign-in window (`teams-signin`): Microsoft's sign-in page in a WPE `WebKit` view, which hands
 //! back the redirect that carries the authorization code. The personal build shows it in a window of its own app and
-//! hands its answer straight in ([`sign_in_with`]); the lab's `teams-signin --lab` is a process of its own, spoken to
-//! over a pipe ([`sign_in_with_window`]).
+//! hands its answer straight in ([`sign_in_with`]); a window run as a process of its own (`teams-signin`'s window
+//! binary) is spoken to over a pipe ([`sign_in_with_window`]); no binary signs in that way today (the lab signs in
+//! through `proto-lab auth`), and the pipe's tests keep the path whole.
 //!
 //! The pipe's wire is one JSON line each way:
 //! - on the window's stdin, the request: `{"authorize": <the authorize URL>, "redirect_uri": <the registered redirect

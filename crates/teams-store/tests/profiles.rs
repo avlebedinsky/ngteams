@@ -89,3 +89,43 @@ fn a_stored_profile_in_a_form_this_build_doesnt_know_is_read_as_never_read() {
         "a picture without its bytes isn't one"
     );
 }
+
+#[test]
+fn people_are_found_by_any_part_of_their_name_in_any_case_and_script() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(&store_path(&dir)).expect("open");
+    let people = [
+        ("8:orgid:00000000-0000-4000-8000-0000000000d1", Some("Жанна Петрова")),
+        ("8:orgid:00000000-0000-4000-8000-0000000000d2", Some("Élodie Martin")),
+        ("8:orgid:00000000-0000-4000-8000-0000000000d3", Some("Ivan Жанович")),
+        ("8:orgid:00000000-0000-4000-8000-0000000000d4", Some("Bot 100%_sure")),
+        ("8:orgid:00000000-0000-4000-8000-0000000000d5", None),
+    ];
+    for (mri, name) in people {
+        store
+            .put_profile(&Profile {
+                mri: mri.to_owned(),
+                name: name.map(str::to_owned),
+                name_source: name.map(|_| NameSource::Graph),
+                picture: PictureState::Unread,
+                read_at: 1,
+            })
+            .expect("put");
+    }
+    let names = |query: &str, limit: usize| -> Vec<String> {
+        store
+            .profiles_named(query, limit)
+            .expect("read")
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect()
+    };
+    // a name beginning with it first, then one holding it
+    assert_eq!(names("ЖАН", 10), ["Жанна Петрова", "Ivan Жанович"]);
+    assert_eq!(names("жан", 1), ["Жанна Петрова"]);
+    assert_eq!(names("Élodie", 10), ["Élodie Martin"]);
+    assert_eq!(names("éLODIE", 10), ["Élodie Martin"]);
+    // LIKE's wildcards are plain characters
+    assert_eq!(names("%_", 10), ["Bot 100%_sure"]);
+    assert!(names("  ", 10).is_empty());
+}

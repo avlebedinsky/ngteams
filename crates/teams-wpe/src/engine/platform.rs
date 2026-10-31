@@ -2,7 +2,7 @@
 //! view that hands its frames to the consumer, and a toplevel that carries the page's size and scale.
 //!
 //! These are subclasses of the abstract `WPEDisplay`, `WPEView` and `WPEToplevel` rather than the headless platform's
-//! classes with patched vfuncs (Task 2's spike): the frames, the buffer set and the acknowledgements are this crate's
+//! classes with patched vfuncs (ngterm's Task 2 spike): the frames, the buffer set and the acknowledgements are this crate's
 //! (crate `frames`), and the device and formats are the consumer's ([`crate::DmaBufTarget`]). Two things are borrowed
 //! from a private headless display on the same device: the DRM device, which it resolves through libdrm (the primary
 //! node beside the render node), and the EGL display it opens on that device through GBM, which saves linking GBM and
@@ -26,7 +26,7 @@ use crate::platform_sys as platform;
 use crate::spec::ViewId;
 
 // WPEPlatformHeadless lives in libWPEWebKit-2.0 with the rest of WPEPlatform; the -sys crates bind no Headless
-// namespace (Task 30), so the constructor used here is declared here.
+// namespace (ngterm's Task 30), so the constructor used here is declared here.
 unsafe extern "C" {
     fn wpe_display_headless_new_for_device(
         name: *const c_char,
@@ -554,8 +554,8 @@ impl View {
 
     /// Runs `acks` from a source of their own on the engine's context (the thread-default one; glib's
     /// `idle_add_local` would attach to the global default context, which nothing runs here), never in place:
-    /// acknowledging while `WebKit` hands over a frame re-enters it before it recorded the frame as pending (Task 2,
-    /// quirk 6).
+    /// acknowledging while `WebKit` hands over a frame re-enters it before it recorded the frame as pending (ngterm's
+    /// Task 2, quirk 6).
     fn schedule(&self, acks: Vec<Ack>) {
         if acks.is_empty() {
             return;

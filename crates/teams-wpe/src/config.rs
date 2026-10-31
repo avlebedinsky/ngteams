@@ -2,8 +2,8 @@
 //! ([`HostConfig`]).
 //!
 //! The dmabuf target comes from the consumer (the GPUI frontend's wgpu adapter): `WebKit` has to render on the GPU that
-//! imports its buffers, since a dmabuf made on another GPU fails to import (`docs/spikes/20261014-wpe-dmabuf.md`,
-//! quirk 1), and offer only formats and modifiers that device imports.
+//! imports its buffers, since a dmabuf made on another GPU fails to import (ngterm's spike
+//! `docs/spikes/20261014-wpe-dmabuf.md`, quirk 1), and offer only formats and modifiers that device imports.
 
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -42,9 +42,9 @@ pub struct DmaBufTarget {
 pub enum FrameMode {
     /// Zero-copy GPU buffers on the consumer's device: the path for everything, video included.
     DmaBuf(DmaBufTarget),
-    /// Pixels in shared memory, copied out per damaged rectangle: a last-resort correctness fallback for documents
-    /// when dmabuf import fails on a driver, never a performance path (Task 2: 80–115 % CPU on 1080p video, 2.5 fps on
-    /// `YouTube`). `WebKit` renders on the CPU in this mode.
+    /// Pixels in shared memory, copied out per damaged rectangle: `WebKit` renders on the CPU in this mode. Slow for
+    /// video (ngterm's Task 2 measured 80–115 % CPU on 1080p video), it is the sign-in window's mode here: a
+    /// Microsoft sign-in page, drawn without a GPU device of its own.
     Shm,
 }
 
