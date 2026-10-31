@@ -267,16 +267,20 @@ import json
 import os
 import shutil
 import sys
-assert Path("target/coverage-build/CACHEDIR.TAG").read_text().startswith(
+assert (Path(os.environ["CARGO_LLVM_COV_TARGET_DIR"]) / "CACHEDIR.TAG").read_text().startswith(
     "Signature: 8a477f597d28d172789f06886806bc55")
 keys = ["PROTO_LAB_REQUIRE_CHROME", "GPUI_SMOKE_REQUIRE", "PROTO_LAB_LIVE",
-        "TEAMS_MEDIA_TURN_SERVER", "TEAMS_MEDIA_TURN_USER", "TEAMS_MEDIA_TURN_PASSWORD"]
+        "TEAMS_MEDIA_TURN_SERVER", "TEAMS_MEDIA_TURN_USER", "TEAMS_MEDIA_TURN_PASSWORD",
+        "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "LLVM_PROFILE_FILE_NAME",
+        "CARGO_LLVM_COV_TARGET_DIR", "LK_CUSTOM_WEBRTC"]
 Path("execution.json").write_text(json.dumps({
     "args": sys.argv[1:], "environment": {key: os.environ.get(key) for key in keys}}))
 shutil.copyfile("llvm-fixture.json", sys.argv[sys.argv.index("--output-path") + 1])
 ''')
         binary.chmod(0o755)
         self.environment = dict(os.environ, PATH=str(binary.parent) + os.pathsep + os.environ["PATH"])
+        for key in ["RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "LK_CUSTOM_WEBRTC"]:
+            self.environment.pop(key, None)
         self.command = ["bash", str(scripts / "coverage.sh"), "-p", "example"]
         self.execution = self.root / "execution.json"
 
@@ -288,7 +292,7 @@ shutil.copyfile("llvm-fixture.json", sys.argv[sys.argv.index("--output-path") + 
         result = self.run_wrapper()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue(self.execution.exists())
-        tag = self.root / "target/coverage-build/CACHEDIR.TAG"
+        tag = self.root / "target/coverage-continuous-build/CACHEDIR.TAG"
         tag.write_text("unrecognized cache directory\n")
         self.execution.unlink()
         result = self.run_wrapper()
@@ -307,11 +311,79 @@ shutil.copyfile("llvm-fixture.json", sys.argv[sys.argv.index("--output-path") + 
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         execution = json.loads(self.execution.read_text())
         self.assertEqual(execution["args"][-3:], ["--", "--test-threads", "1"])
-        self.assertEqual(execution["environment"], {
+        self.assertEqual({key: execution["environment"][key] for key in [
+            "PROTO_LAB_REQUIRE_CHROME", "GPUI_SMOKE_REQUIRE", "PROTO_LAB_LIVE",
+            "TEAMS_MEDIA_TURN_SERVER", "TEAMS_MEDIA_TURN_USER", "TEAMS_MEDIA_TURN_PASSWORD"]}, {
             "PROTO_LAB_REQUIRE_CHROME": "1", "GPUI_SMOKE_REQUIRE": "1", "PROTO_LAB_LIVE": None,
             "TEAMS_MEDIA_TURN_SERVER": None, "TEAMS_MEDIA_TURN_USER": None,
             "TEAMS_MEDIA_TURN_PASSWORD": None,
         })
+
+    def test_continuous_flags_preserve_cargo_precedence_and_argument_boundaries(self):
+        for encoded in [None, "", "--cfg\x1ffeature=\"synthetic value\""]:
+            with self.subTest(encoded=encoded):
+                self.environment["RUSTFLAGS"] = "--cfg synthetic_flag"
+                if encoded is None:
+                    self.environment.pop("CARGO_ENCODED_RUSTFLAGS", None)
+                else:
+                    self.environment["CARGO_ENCODED_RUSTFLAGS"] = encoded
+                result = self.run_wrapper()
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                environment = json.loads(self.execution.read_text())["environment"]
+                self.assertEqual(environment["LLVM_PROFILE_FILE_NAME"], "%p-%m%c.profraw")
+                if encoded is None:
+                    self.assertEqual(environment["RUSTFLAGS"],
+                                     "--cfg synthetic_flag -C llvm-args=-runtime-counter-relocation")
+                else:
+                    expected = (encoded + "\x1f" if encoded else "") + "-C\x1fllvm-args=-runtime-counter-relocation"
+                    self.assertEqual(environment["CARGO_ENCODED_RUSTFLAGS"], expected)
+                    self.assertEqual(environment["RUSTFLAGS"], "--cfg synthetic_flag")
+
+    def test_modes_keep_builds_reports_and_report_only_separate(self):
+        result = self.run_wrapper()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.execution.unlink()
+        result = self.run_wrapper("--profile-mode", "ordinary", "--report-only")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(self.execution.exists())
+        self.environment["LLVM_PROFILE_FILE_NAME"] = "inherited-%c.profraw"
+        self.environment["RUSTFLAGS"] = "--cfg ordinary_flag"
+        result = self.run_wrapper("--profile-mode", "ordinary")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        environment = json.loads(self.execution.read_text())["environment"]
+        self.assertEqual(environment["LLVM_PROFILE_FILE_NAME"], "%p-%m.profraw")
+        self.assertEqual(environment["RUSTFLAGS"], "--cfg ordinary_flag")
+        self.assertEqual(environment["CARGO_LLVM_COV_TARGET_DIR"], str(self.root / "target/coverage-build"))
+        for report in ["target/coverage/all/summary.json", "target/coverage/continuous/all/summary.json"]:
+            self.assertTrue((self.root / report).is_file())
+        for build in ["coverage-build", "coverage-continuous-build"]:
+            self.assertTrue((self.root / "target" / build / "CACHEDIR.TAG").is_file())
+        self.execution.unlink()
+        for arguments in [(), ("--profile-mode", "ordinary")]:
+            result = self.run_wrapper(*arguments, "--report-only")
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertFalse(self.execution.exists())
+
+    def test_sdk_cache_is_validated_forwarded_and_otherwise_preserved(self):
+        self.environment["LK_CUSTOM_WEBRTC"] = "existing-sdk"
+        result = self.run_wrapper()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(self.execution.read_text())["environment"]["LK_CUSTOM_WEBRTC"], "existing-sdk")
+        sdk = self.root / "SDK with spaces"
+        (sdk / "include").mkdir(parents=True)
+        (sdk / "lib").mkdir()
+        (sdk / "lib/libwebrtc.a").touch()
+        result = self.run_wrapper("--webrtc-cache", str(sdk))
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(self.execution.read_text())["environment"]["LK_CUSTOM_WEBRTC"], str(sdk))
+        self.execution.unlink()
+        for arguments in [("--webrtc-cache",), ("--webrtc-cache", ""),
+                          ("--webrtc-cache", str(self.root)), ("--profile-mode",),
+                          ("--profile-mode", "unknown")]:
+            with self.subTest(arguments=arguments):
+                result = self.run_wrapper(*arguments)
+                self.assertEqual(result.returncode, 2)
+                self.assertFalse(self.execution.exists())
 
     def test_thread_override_is_forwarded_but_invalid_values_never_run_cargo(self):
         result = self.run_wrapper("--test-threads", "3")

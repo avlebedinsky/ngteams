@@ -786,6 +786,8 @@ scripts/coverage.sh -p teams-store
 scripts/coverage.sh -p teams-store --require-target   # require 90% on every measured metric
 scripts/coverage.sh -p teams-log --no-gate            # measure a crate before establishing its baseline
 scripts/coverage.sh -p teams-log --test-threads 3     # explicitly change test-harness concurrency
+scripts/coverage.sh -p teams-log --profile-mode ordinary  # diagnostic exit-time profiling
+scripts/coverage.sh --webrtc-cache /absolute/path/to/linux-x64-release  # reuse a matching SDK
 python3 -B -m unittest discover -s scripts -p test_coverage_report.py
 ```
 
@@ -806,10 +808,21 @@ not enter the totals.
 Baseline floors are measured and validated with one `-p <crate>` alone. Combined runs also count hits from dependent
 crates' tests, so use them to find gaps; their higher totals cannot establish or validate an individual crate's floor.
 
-Reports go to `target/coverage/<selection>/llvm.json` and `summary.json`: one crate uses its name, the full workspace
-uses `all`, and long partial selections use a short hash. The summary records every selected package and ranks source
-files by uncovered lines, functions and regions. Instrumented build artifacts stay in `target/coverage-build` and
-measurements serialize on a lock. `--report-only` rechecks an existing export without running tests; use a fresh
+On Linux the wrapper uses LLVM continuous profiling with counter relocation and `%p-%m%c.profraw`, verified on the
+pinned Rust toolchain. Counters stay in a mapped profile when a sandbox worker is killed, so its executed code still
+counts. Existing `RUSTFLAGS` or the higher-precedence `CARGO_ENCODED_RUSTFLAGS` are preserved when adding relocation.
+See [LLVM's continuous profiling documentation](https://clang.llvm.org/docs/SourceBasedCodeCoverage.html#running-the-instrumented-program).
+`--profile-mode ordinary` selects exit-time profiling for diagnostics; killed workers can lose their counters in that
+mode. Other platforms default to ordinary mode; continuous mode is verified and accepted only on Linux.
+
+Continuous reports go to `target/coverage/continuous/<selection>/llvm.json` and `summary.json`, with instrumented builds
+in `target/coverage-continuous-build`. Ordinary mode keeps separate reports in `target/coverage/<selection>/` and builds
+in `target/coverage-build`. One crate uses its name, the full workspace uses `all`, and long partial selections use a
+short hash. The summary records every selected package and ranks source files by uncovered lines, functions and regions.
+Measurements serialize on one lock across both modes. `--webrtc-cache DIR` passes an existing SDK with `include/` and
+`lib/libwebrtc.a` to the upstream build as `LK_CUSTOM_WEBRTC`; choose the SDK version and platform matching the locked
+dependency. The wrapper does not select or download an SDK itself, and preserves an existing `LK_CUSTOM_WEBRTC` when
+this option is absent. `--report-only` rechecks the selected mode's existing export without running tests; use a fresh
 measurement for change validation. Every executable selected `src/**/*.rs` must appear in the LLVM export, including
 zero-hit files: missing files fail even with `--no-gate`, so omitted feature-gated code cannot silently inflate
 coverage. `coverage.toml` lists individually reviewed declaration/type-only files and separate unit-test modules that
