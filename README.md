@@ -797,7 +797,8 @@ starts. Serial execution avoids that overlap in coverage runs; ordinary `cargo t
 concurrency. `--test-threads N` accepts a positive integer to change the harness concurrency; concurrency exercised
 inside a test stays part of that test.
 
-`coverage.toml` holds the 90% target and the measured baseline floors. `teams-store`, `teams-log`, `fixture-guard`, `teams-trouter` and `teams-call` have baselines so far;
+`coverage.toml` holds the 90% target and the measured baseline floors. `teams-store`, `teams-log`, `fixture-guard`,
+`teams-trouter`, `teams-call` and `teams-auth` have baselines so far;
 other crates fail the gate until measured. Raise floors as tests improve; never lower them or exclude runnable code
 to pass. No CI pipeline is configured in this repository, so these are local gates. Running the script without
 `-p` selects all 21 crates with runtime code, including the lab and test-support tooling. Generated WPE bindings,
@@ -841,6 +842,10 @@ or other optional features still needs appropriate mock-backed variant measureme
 The wrapper never enables `live` and removes live-test and external TURN-server environment variables. Browser and
 GUI tests need the local dependencies below; the wrapper sets `PROTO_LAB_REQUIRE_CHROME=1 GPUI_SMOKE_REQUIRE=1`
 so missing dependencies fail rather than skip tests. Never run tenant activity for coverage.
+
+The automatic `teams-auth` private-keyring test requires `/usr/bin/dbus-run-session`, `/usr/bin/gnome-keyring-daemon`
+and `/usr/bin/kill`. It starts a private bus and keyring service with temporary HOME/XDG directories, without using
+the desktop keyring. The separate manual user-keyring test remains ignored by default.
 
 `cargo test --workspace` is offline: the native client is tested against `teams-mock` (two or three native clients
 talking through it), the browser fence against local pages in Chrome. The fence suite alone: `cargo test -p
