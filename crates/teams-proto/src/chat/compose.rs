@@ -31,7 +31,10 @@ use url::Url;
 
 use crate::chat::MentionKind;
 use crate::chat::code::{Code, language_of};
-use crate::chat::html::{List, MAX_CONTENT, MAX_DEPTH, MENTION_ITEMTYPE, Marks, Node, Quote, REPLY_ITEMTYPE, RichText};
+use crate::chat::html::{
+    INDENT_STEP, List, MAX_CONTENT, MAX_DEPTH, MAX_INDENT, MENTION_ITEMTYPE, Marks, Node, Quote, REPLY_ITEMTYPE,
+    RichText, SpanStyle,
+};
 
 /// Why a [`MessageText`] can't be built.
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
@@ -270,12 +273,13 @@ struct Render<'a> {
     everyone: BTreeSet<String>,
 }
 
-/// The marks in the order they open, with their tags.
+/// The marks in the order they open, with their tags: bold as Teams' editor writes it (`strong`), and nested as its
+/// output nests them (`<i><strong>…</strong></i>`).
 const MARK_TAGS: [(Marks, &str); 5] = [
-    (Marks::BOLD, "b"),
     (Marks::ITALIC, "i"),
-    (Marks::UNDERLINE, "u"),
     (Marks::STRIKE, "s"),
+    (Marks::BOLD, "strong"),
+    (Marks::UNDERLINE, "u"),
     (Marks::CODE, "code"),
 ];
 
@@ -323,10 +327,32 @@ impl<'a> Render<'a> {
                 if !is_link(href) {
                     return Err(ComposeError::LinkScheme);
                 }
-                self.push(&["<a href=\"", &escape(href), "\">"]);
+                // as the web client writes a link (`docs/protocol/chat.md`, "Lines and links")
+                let href = escape(href);
+                self.push(&[
+                    "<a href=\"",
+                    &href,
+                    "\" rel=\"noreferrer noopener\" title=\"",
+                    &href,
+                    "\" target=\"_blank\">",
+                ]);
                 self.nodes(children, depth + 1)?;
                 self.html.push_str("</a>");
             }
+            Node::Span { style, children } => self.span(*style, children, depth)?,
+            Node::Heading { level, children } => {
+                let tag = format!("h{}", (*level).clamp(1, 6));
+                self.push(&["<", &tag, ">"]);
+                self.nodes(children, depth + 1)?;
+                self.push(&["</", &tag, ">"]);
+            }
+            Node::Indented { depth: steps, children } => {
+                let margin = u32::from((*steps).clamp(1, MAX_INDENT)) * INDENT_STEP;
+                self.push(&["<p style=\"margin-left:", &margin.to_string(), "px\">"]);
+                self.nodes(children, depth + 1)?;
+                self.html.push_str("</p>");
+            }
+            Node::Rule => self.html.push_str("<hr>"),
             Node::Image(_) => return Err(ComposeError::Image),
             Node::Quote(quote) => self.quote(quote, depth)?,
             Node::List(list) => self.list(list, depth)?,
@@ -360,6 +386,28 @@ impl<'a> Render<'a> {
             self.html.push_str("<br>");
         }
         self.html.push_str("</code></pre>");
+    }
+
+    /// A span of Teams' editor: its colours and size in one `style`, its declarations in the order the editor's
+    /// output has them (`background-color`, `color`, `font-size`); a span of no style gives just its content.
+    fn span(&mut self, style: SpanStyle, children: &[Node], depth: usize) -> Result<(), ComposeError> {
+        if style.is_empty() {
+            return self.nodes(children, depth + 1);
+        }
+        let mut declarations = Vec::new();
+        if let Some(highlight) = style.highlight {
+            declarations.push(format!("background-color:{}", highlight.hex()));
+        }
+        if let Some(color) = style.color {
+            declarations.push(format!("color:{}", color.hex()));
+        }
+        if let Some(size) = style.size {
+            declarations.push(format!("font-size:{}", size.css()));
+        }
+        self.push(&["<span style=\"", &declarations.join("; "), "\">"]);
+        self.nodes(children, depth + 1)?;
+        self.html.push_str("</span>");
+        Ok(())
     }
 
     fn text(&mut self, text: &str, marks: Marks) {
@@ -463,14 +511,18 @@ fn within_depth(nodes: &[Node], depth: usize) -> Result<(), ComposeError> {
     }
     for node in nodes {
         match node {
-            Node::Paragraph(children) | Node::Link { children, .. } => within_depth(children, depth + 1)?,
+            Node::Paragraph(children)
+            | Node::Link { children, .. }
+            | Node::Span { children, .. }
+            | Node::Heading { children, .. }
+            | Node::Indented { children, .. } => within_depth(children, depth + 1)?,
             Node::Quote(quote) => within_depth(&quote.body, depth + 1)?,
             Node::List(list) => {
                 for item in &list.items {
                     within_depth(item, depth + 2)?;
                 }
             }
-            Node::Text { .. } | Node::Break | Node::Mention { .. } | Node::Image(_) | Node::Code(_) => {}
+            Node::Text { .. } | Node::Break | Node::Mention { .. } | Node::Image(_) | Node::Code(_) | Node::Rule => {}
         }
     }
     Ok(())

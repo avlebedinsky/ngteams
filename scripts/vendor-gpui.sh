@@ -7,6 +7,8 @@
 #   gpui-pre-wgpu  the renderer's side: dmabufs imported through wgpu-hal Vulkan and copied on the GPU, CPU pixels
 #                  uploaded into a texture kept per surface, by damaged rectangle (0001); and, our own, a weight or
 #                  style the family has no face of drawn anyway: a variable face at that weight, else synthesized (0002)
+#   gpui-pre-linux our own: the HTML another program puts on the Wayland clipboard beside its text, kept as the
+#                  item's metadata for the rich-text editor's paste (0001)
 #
 # Each source is the crates.io archive of GPUI_VERSION, verified against SHA256 below (the release's crates.io
 # checksum: the `cksum` of its line in https://index.crates.io/gp/ui/<crate>, also what Cargo.lock recorded for the
@@ -14,7 +16,7 @@
 # patched. Bump GPUI_VERSION and the sums together with the workspace's `gpui-pre` pin, run this, and check that the
 # patches still apply.
 #
-# Usage: scripts/vendor-gpui.sh           (re)create vendor/gpui-pre and vendor/gpui-pre-wgpu
+# Usage: scripts/vendor-gpui.sh           (re)create vendor/gpui-pre, vendor/gpui-pre-wgpu and vendor/gpui-pre-linux
 #        scripts/vendor-gpui.sh --check   rebuild into a scratch dir and fail if a vendored crate differs
 set -euo pipefail
 shopt -s nullglob
@@ -23,8 +25,9 @@ GPUI_VERSION="0.3.9"
 declare -A SHA256=(
   [gpui-pre]="34f61c1cfd36fc9c436af09308c963822ae27a45a84feb21a77ba5c9e051f1c0"
   [gpui-pre-wgpu]="5b1cdb26c1503bf9662ee8fbc5ab0b44b2deeee4b5c12dc67491ba6fb5fc544b"
+  [gpui-pre-linux]="e28213c3fde6f13e91ba0b74b90cbaadec9373e36a031eda98561d31059870f3"
 )
-CRATES=(gpui-pre gpui-pre-wgpu)
+CRATES=(gpui-pre gpui-pre-wgpu gpui-pre-linux)
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 

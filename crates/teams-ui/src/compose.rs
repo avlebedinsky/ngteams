@@ -1,35 +1,39 @@
 //! The compose box under a chat's messages (M2 Task 13): what the user types becomes a message's text, and every
 //! write goes out through the engine ([`Core::write`]), its outbox and the fence; the box builds no request.
 //!
-//! - **Text** ([`message_text`]): each line a paragraph (Shift-Enter breaks the line, and the web client sent each
-//!   line as a paragraph of its own: `docs/protocol/chat.md`, "Lines and links"), blank lines at either end dropped; a
-//!   URL typed stays text, as the capture's link inserted with its text went out (plain text, `properties.links`
-//!   `"[]"`: `lines.json`'s `unlinked_content`), never an anchor (the web client's anchor carries a `HyperLink` entry
-//!   in `links`, which isn't built here); a mention is an atomic token of the kit's text area naming its MRI,
-//!   completed after `@` from the chat's members ([`Core::members`], their names from [`Core::person`]) and only from
-//!   them: a mention is never read from typed text, only by the MRI the picker put in its token; the picker shows each
-//!   member's presence dot (M2 Task 17: the engine is asked about the people offered each time they are shown). In a
-//!   group chat it offers Everyone after the members ([`offered`]), as the web client does: its token names the chat's id, and
-//!   the message mentions everyone in the chat (`docs/protocol/chat.md`, "A mention of everyone").
-//!   `teams-proto`'s [`MessageText`] renders the HTML, the mentions and the reply's quote from that one value. A send the engine
-//!   refuses before it makes a row gives the box its draft back.
-//! - **Keys**: Enter sends (the kit's text area hands a plain Enter on, and the box takes it as the send, or the
-//!   platform would type it as a line break: M2 Task 7), Shift-Enter breaks the line; with the mention picker open, Up
+//! - **Text**: the box is our own rich-text editor ([`Editor`], WYSIWYG), and what it holds is sent as Teams' editor
+//!   sends a message (`docs/protocol/chat.md`, "Formatted text": `RichText/Html`, its paragraphs, marks, colours,
+//!   lists, quotes, headings, links and blocks of code as the web client writes them; `crate::editor::convert`).
+//!   Blank lines at either end aren't sent. A URL typed stays text, as the capture's link inserted with its text went
+//!   out (`lines.json`'s `unlinked_content`); a link is one the format bar's "Insert link" made. A mention is an atom of
+//!   the editor naming its MRI, completed after `@` from the chat's members ([`Core::members`], their names from
+//!   [`Core::person`]) and only from them: a mention is never read from typed text, only by the MRI the picker put in
+//!   it; the picker shows each member's presence dot (M2 Task 17: the engine is asked about the people offered each
+//!   time they are shown). In a group chat it offers Everyone after the members ([`offered`]), as the web client does:
+//!   it names the chat's id, and the message mentions everyone in the chat (`docs/protocol/chat.md`, "A mention of
+//!   everyone"). `teams-proto`'s [`MessageText`] renders the HTML, the mentions and the reply's quote from that one
+//!   value. A send the engine refuses before it makes a row gives the box its draft back.
+//! - **Keys** (the editor's, `crate::editor`): Enter sends and Shift+Enter starts a new paragraph, as Teams' box
+//!   first shows; Ctrl+Shift+X (or the Format button) expands the box with its format bar, as Teams' does, and then
+//!   Enter starts a new paragraph, Shift+Enter breaks the line and Ctrl+Enter sends. With the mention picker open, Up
 //!   and Down move in it, Enter or Tab chooses, Escape closes it; Escape cancels a reply or an edit, and with nothing
 //!   to cancel is handed on (the chat view moves the focus to its message list); Up in an empty box asks to edit the
 //!   account's last message ([`ComposeEvent::EditLast`], which the chat view carries out).
 //! - **Reply** ([`Compose::reply_to`]): the quoted message's id, sender, sender's name, time and a one-line preview of
-//!   its text, sent as the captured reply's quote (`reply.json`). **Edit** ([`Compose::edit`]): the message's text
-//!   loaded back into the box ([`load`]), its mentions as tokens again by their MRI, its quote kept as it was; Enter
-//!   sends the edit.
+//!   its text, sent as the captured reply's quote (`reply.json`). **Edit** ([`Compose::edit`]): the message's rich
+//!   text loaded back into the editor ([`load`]) with its formats, its mentions as atoms again by their MRI, its quote
+//!   kept as it was; Enter (Ctrl+Enter expanded) sends the edit.
 //! - **Typing** ([`Core::transient`], never a stored row): sent while the box has the focus and holds text, at most once
 //!   per [`TYPING_EVERY`] per chat (the web client's throttle, M2 Task 10; kept for the app, so a chat opened again
 //!   doesn't start it over), never while editing, and only with the "send typing" setting on. Nothing is sent when
 //!   typing stops: the web client never sent `Control/ClearTyping`.
 //!
-//! - **The box** is drawn as Teams' compose box: the text area on a raised, rounded surface with a hairline border
+//! - **The box** is drawn as Teams' compose box: the editor on a raised, rounded surface with a hairline border
 //!   ([`BOX_HEIGHT`] at least), Teams' accent line in the brand colour along its foot while it has the focus, and its
-//!   toolbar inside it on the right: Emoji, a thin divider, then Send.
+//!   controls inside it on the right: Format, Emoji, Attach, Loop and Actions and apps (the last three shown disabled,
+//!   saying the app doesn't have them yet), a thin divider, then Send. Expanded, the format bar
+//!   ([`crate::editor::toolbar::FormatBar`]) runs along its top, the editor is taller, and the controls sit along its
+//!   foot; Discard on the bar empties the box (and ends a reply or an edit).
 //! - **Emoji** ([`Compose::toggle_emoji`], the button or Ctrl+.): every emoji Teams offers ([`ReactionPicker::for_emoji`],
 //!   searchable) over the box; the one picked goes in at the cursor, in place of the text selected, as if typed. It
 //!   is only text in the box: nothing is sent until the message is.
@@ -51,21 +55,22 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use gpui::{
-    AnyElement, App, AppContext as _, AsyncApp, Bounds, Context, Entity, EventEmitter, Focusable as _, Global,
-    InteractiveElement as _, IntoElement, KeyBinding, ParentElement as _, Pixels, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, actions, anchored, deferred, div,
-    prelude::FluentBuilder as _, px, rgb,
+    AnyElement, App, AppContext as _, AsyncApp, Bounds, Context, Entity, EventEmitter, Global, InteractiveElement as _,
+    IntoElement, KeyBinding, ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Task, Window, actions, anchored, deferred, div, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::Disableable as _;
-use gpui_component::input::{
-    Enter, Escape, IndentInline, InlineToken, InlineTokenSpan, InputContent, InputEvent, MoveDown, MoveUp, Textarea,
-    TextareaState,
-};
 use gpui_component::{Selectable as _, Sizable as _, Size};
 use teams_core::{Action, Availability, NOTES, Transient};
-use teams_fence::{Mri, is_group_chat_id};
+use teams_fence::is_group_chat_id;
 use teams_proto::chat::{ComposeError, Marks, MessageText, MessageType, Node, Quote, RichText, parse_html};
 use teams_store::Message;
+
+pub use crate::editor::Editor;
+use crate::editor::convert::{self, CantLoad};
+use crate::editor::doc::{Attrs, Block, Doc, Kind, Run};
+use crate::editor::toolbar::{FormatBar, FormatBarEvent, unavailable};
+use crate::editor::{self, EditorEvent, EnterMode};
 
 use crate::bridge::Core;
 use crate::chat_view::measured;
@@ -86,6 +91,12 @@ pub const BOX_HEIGHT: f32 = 56.0;
 const BOX_PADDING: f32 = 6.0;
 /// A toolbar button in the box, px (its icon three quarters of it).
 const TOOL: f32 = 28.0;
+/// The editor's least height expanded, px: Teams' expanded box's writing area.
+const EXPANDED_MIN: f32 = 96.0;
+/// The editor's most height expanded, px, before it scrolls.
+const EXPANDED_MAX: f32 = 320.0;
+/// The editor's most height in the box as first shown, px: [`MAX_ROWS`] lines.
+const COLLAPSED_MAX: f32 = 8.0 * 22.0;
 
 actions!(
     compose,
@@ -131,104 +142,52 @@ pub const PREVIEW_MAX: usize = 300;
 /// The most rows the box grows to.
 pub const MAX_ROWS: usize = 8;
 
-/// A mention in the typed text: where its name stands (bytes) and whom it names.
+/// A mention in typed text: where its name stands (bytes) and whom it names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DraftMention {
     pub range: Range<usize>,
     pub mri: String,
 }
 
-/// A text run with no marks.
-fn text_node(text: &str) -> Node {
-    Node::Text {
-        text: text.to_owned(),
-        marks: Marks::NONE,
-    }
-}
-
-fn push_text(nodes: &mut Vec<Node>, text: &str) {
-    if !text.is_empty() {
-        nodes.push(text_node(text));
-    }
-}
-
-/// Each line's range in `text` (bytes), its `\n` left out.
-fn lines(text: &str) -> Vec<Range<usize>> {
-    let mut lines = Vec::new();
-    let mut start = 0;
-    for (at, _) in text.match_indices('\n') {
-        lines.push(start..at);
-        start = at + 1;
-    }
-    lines.push(start..text.len());
-    lines
-}
-
-/// The mentions within `line`.
-fn mentions_in<'a>(mentions: &'a [DraftMention], line: &Range<usize>) -> impl Iterator<Item = &'a DraftMention> {
-    let line = line.clone();
-    mentions
-        .iter()
-        .filter(move |mention| line.start <= mention.range.start && mention.range.end <= line.end)
-}
-
-/// Whether `line` shows nothing: whitespace only, no mention.
-fn blank(text: &str, line: &Range<usize>, mentions: &[DraftMention]) -> bool {
-    text[line.clone()].trim().is_empty() && mentions_in(mentions, line).next().is_none()
-}
-
-/// The text typed as the rich text a message is written from, with the MRI each mention names by its `item_id`
-/// (`0`, `1`, … in order): each line a paragraph, blank lines at either end dropped, mentions at their ranges, the
-/// rest text (a URL too: see the module docs). No paragraph when nothing but whitespace was typed.
+/// Text typed as the editor's document: each line a paragraph, `mentions` at their ranges (a mention that crosses a
+/// line, or another, stays text).
 #[must_use]
-pub fn draft_nodes(text: &str, mentions: &[DraftMention]) -> (Vec<Node>, Vec<(String, Mri)>) {
-    let all = lines(text);
-    let first = all.iter().position(|line| !blank(text, line, mentions));
-    let last = all.iter().rposition(|line| !blank(text, line, mentions));
-    let (Some(first), Some(last)) = (first, last) else {
-        return (Vec::new(), Vec::new());
-    };
-    let mut table = Vec::new();
-    let paragraphs = all[first..=last]
-        .iter()
-        .map(|line| Node::Paragraph(line_nodes(text, line, mentions, &mut table)))
-        .collect();
-    (paragraphs, table)
-}
-
-/// One line's nodes: its mentions at their ranges (each added to `table`), text in the rest.
-fn line_nodes(text: &str, line: &Range<usize>, mentions: &[DraftMention], table: &mut Vec<(String, Mri)>) -> Vec<Node> {
-    let mut nodes = Vec::new();
-    let mut at = line.start;
-    for mention in mentions_in(mentions, line) {
-        if mention.range.start < at {
-            continue;
+pub fn typed_doc(text: &str, mentions: &[DraftMention]) -> Doc {
+    let mut blocks = Vec::new();
+    let mut start = 0;
+    for line in text.split('\n') {
+        let end = start + line.len();
+        let mut runs = Vec::new();
+        let mut at = start;
+        for mention in mentions {
+            if mention.range.start < at || mention.range.end > end || mention.range.start >= mention.range.end {
+                continue;
+            }
+            runs.push(Run::new(&text[at..mention.range.start], Attrs::default()));
+            runs.push(Run::new(
+                &text[mention.range.clone()],
+                Attrs {
+                    mention: Some(mention.mri.clone()),
+                    ..Attrs::default()
+                },
+            ));
+            at = mention.range.end;
         }
-        push_text(&mut nodes, &text[at..mention.range.start]);
-        let item_id = table.len().to_string();
-        nodes.push(Node::Mention {
-            item_id: item_id.clone(),
-            text: text[mention.range.clone()].to_owned(),
-        });
-        table.push((item_id, Mri::new(mention.mri.clone())));
-        at = mention.range.end;
+        runs.push(Run::new(&text[at..end], Attrs::default()));
+        blocks.push(Block::new(Kind::Paragraph, 0, runs));
+        start = end + 1;
     }
-    push_text(&mut nodes, &text[at..line.end]);
-    nodes
+    Doc::new(blocks)
 }
 
-/// The message the text typed makes, after `quotes` (a reply's, or the quote an edited message keeps); `None` when
-/// nothing but whitespace was typed.
+/// The message `doc` makes, after `quotes` (a reply's, or the quote an edited message keeps); `None` when it shows
+/// nothing.
 ///
 /// # Errors
 /// What `teams-proto` refuses in a message's text ([`ComposeError`]): a mention of anyone but a work account or
 /// everyone in a group chat, a text too long, …
-pub fn message_text(
-    text: &str,
-    mentions: &[DraftMention],
-    quotes: &[Node],
-) -> Result<Option<MessageText>, ComposeError> {
-    let (nodes, mentioned) = draft_nodes(text, mentions);
+pub fn message_of(doc: &Doc, quotes: &[Node]) -> Result<Option<MessageText>, ComposeError> {
+    let (nodes, mentioned) = convert::to_nodes(doc);
     if nodes.is_empty() {
         return Ok(None);
     }
@@ -242,6 +201,26 @@ pub fn message_text(
         mentioned,
     )
     .map(Some)
+}
+
+/// The message plain typed text makes ([`typed_doc`], [`message_of`]).
+///
+/// # Errors
+/// As [`message_of`].
+pub fn message_text(
+    text: &str,
+    mentions: &[DraftMention],
+    quotes: &[Node],
+) -> Result<Option<MessageText>, ComposeError> {
+    message_of(&typed_doc(text, mentions), quotes)
+}
+
+/// A text run with no marks.
+fn text_node(text: &str) -> Node {
+    Node::Text {
+        text: text.to_owned(),
+        marks: Marks::NONE,
+    }
 }
 
 /// The quote a reply carries: the quoted message, its sender and the name shown for them, its time and a preview of
@@ -323,122 +302,37 @@ fn preview(message: &Message) -> String {
     cut
 }
 
-/// A mention loaded back for an edit: where its name stands, whom it names.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct LoadedMention {
-    pub range: Range<usize>,
-    pub mri: String,
-    pub name: String,
-}
-
 /// A message's text loaded back into the box for an edit ([`load`]).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Loaded {
-    pub text: String,
-    pub mentions: Vec<LoadedMention>,
-    /// Its quotes, kept as they were and sent again before the edited text.
+    /// What the editor holds: the message's text with its formats, its mentions as atoms by their MRI.
+    pub doc: Doc,
+    /// Its quotes (a reply's, a forward's), kept as they were and sent again before the edited text.
     pub quotes: Vec<Node>,
 }
 
 /// Why a message can't be edited in the box.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum CantEdit {
-    #[error("it shows an image")]
-    Image,
-    /// A block of code: the box writes none, and its lines as text would lose their card and their indentation.
-    #[error("it shows a block of code")]
-    Code,
-    #[error("it was read only in part")]
-    Truncated,
-}
+pub type CantEdit = CantLoad;
 
-impl Loaded {
-    fn new_line(&mut self) {
-        if !self.text.is_empty() {
-            self.text.push('\n');
-        }
-    }
-
-    fn inline<S: BuildHasher>(
-        &mut self,
-        nodes: &[Node],
-        mentioned: &HashMap<String, String, S>,
-    ) -> Result<(), CantEdit> {
-        for node in nodes {
-            self.node(node, mentioned)?;
-        }
-        Ok(())
-    }
-
-    fn node<S: BuildHasher>(&mut self, node: &Node, mentioned: &HashMap<String, String, S>) -> Result<(), CantEdit> {
-        match node {
-            Node::Text { text, .. } => self.text.push_str(text),
-            Node::Break => self.text.push('\n'),
-            Node::Mention { item_id, text } => self.mention(item_id, text, mentioned),
-            Node::Link { children, .. } => self.inline(children, mentioned)?,
-            Node::Paragraph(children) => {
-                self.new_line();
-                self.inline(children, mentioned)?;
-            }
-            Node::Quote(quote) => self.inline(&quote.body, mentioned)?,
-            Node::List(list) => {
-                // each item a line after its marker as text: the box writes no list
-                for (index, item) in list.items.iter().enumerate() {
-                    self.new_line();
-                    let marker = if list.ordered {
-                        let number = u64::from(list.start) + u64::try_from(index).unwrap_or(u64::MAX);
-                        format!("{number}. ")
-                    } else {
-                        "\u{2022} ".to_owned()
-                    };
-                    self.text.push_str(&marker);
-                    // an item's first paragraph (`<li><p>…</p></li>`) is on its marker's line
-                    match item.split_first() {
-                        Some((Node::Paragraph(first), rest)) => {
-                            self.inline(first, mentioned)?;
-                            self.inline(rest, mentioned)?;
-                        }
-                        _ => self.inline(item, mentioned)?,
-                    }
-                }
-            }
-            Node::Code(_) => return Err(CantEdit::Code),
-            Node::Image(_) => return Err(CantEdit::Image),
-        }
-        Ok(())
-    }
-
-    fn mention<S: BuildHasher>(&mut self, item_id: &str, name: &str, mentioned: &HashMap<String, String, S>) {
-        let start = self.text.len();
-        self.text.push_str(name);
-        let tokenable = !name.trim().is_empty() && !name.chars().any(char::is_control);
-        if let Some(mri) = mentioned.get(item_id).filter(|_| tokenable) {
-            self.mentions.push(LoadedMention {
-                range: start..self.text.len(),
-                mri: mri.clone(),
-                name: name.to_owned(),
-            });
-        }
-    }
-}
-
-/// A message's rich text as the box edits it: its paragraphs as lines, its mentions (those `mentioned` names by
-/// `itemid`) as tokens again, a link as its text, its top-level quotes kept aside.
+/// A message's rich text as the box edits it: its top-level quotes of another message (a reply's, a forward's) kept
+/// aside, the rest loaded into the editor with its formats and its mentions (those `mentioned` names by `itemid`)
+/// as atoms again.
 ///
 /// # Errors
-/// [`CantEdit`]: the text shows an image or a block of code (the box can send neither), or was read only in part.
+/// [`CantEdit`]: the text shows a picture (the box sends none), or was read only in part.
 pub fn load<S: BuildHasher>(text: &RichText, mentioned: &HashMap<String, String, S>) -> Result<Loaded, CantEdit> {
     if text.truncated {
-        return Err(CantEdit::Truncated);
+        return Err(CantLoad::Truncated);
     }
-    let mut loaded = Loaded::default();
-    for node in &text.nodes {
-        match node {
-            Node::Quote(_) => loaded.quotes.push(node.clone()),
-            other => loaded.node(other, mentioned)?,
-        }
-    }
-    Ok(loaded)
+    let (quotes, rest): (Vec<Node>, Vec<Node>) = text
+        .nodes
+        .iter()
+        .cloned()
+        .partition(|node| matches!(node, Node::Quote(quote) if quote.message_id.is_some() || quote.forward));
+    Ok(Loaded {
+        doc: convert::from_nodes(&rest, mentioned, true)?,
+        quotes,
+    })
 }
 
 /// The mention being typed before `cursor`: the `@`'s byte offset and the query after it. An `@` opens one when it
@@ -569,6 +463,15 @@ pub struct Picker {
 /// What a read-only box says in place of its text area: the account's own notes take no write from this app.
 pub const READ_ONLY_NOTES: &str = "Notes can't be written from this app yet";
 
+/// What Attach says: sending a file isn't in this app yet (`docs/protocol/chat.md`, "Files: sending, denied").
+pub const NO_ATTACH: &str = "Attaching files isn't available in this app yet";
+
+/// What Loop says: Loop components aren't in this app.
+pub const NO_LOOP: &str = "Loop components aren't available in this app";
+
+/// What Actions and apps says: apps aren't in this app.
+pub const NO_APPS: &str = "Actions and apps aren't available in this app";
+
 /// What every box says in the app's read-only mode ([`crate::Core::read_only`]): nothing is sent from it.
 pub const READ_ONLY_APP: &str = "Read-only: this window sends nothing";
 
@@ -581,7 +484,7 @@ pub enum ComposeEvent {
 
 /// What a send took from the box: given back when the engine refuses the write.
 struct Draft {
-    content: InputContent,
+    doc: Doc,
     mode: Mode,
 }
 
@@ -602,7 +505,10 @@ pub struct Compose {
     trace: Arc<ViewTrace>,
     presence: Entity<Presences>,
     conversation: String,
-    input: Entity<TextareaState>,
+    editor: Entity<Editor>,
+    format_bar: Entity<FormatBar>,
+    /// The box expanded with its format bar (Ctrl+Shift+X, the Format button).
+    expanded: bool,
     mode: Mode,
     picker: Option<Picker>,
     /// The chat's members the picker offers, once read.
@@ -619,7 +525,8 @@ pub struct Compose {
     emoji_at: Rc<Cell<Option<Bounds<Pixels>>>>,
     /// Whether the picker was open as the emoji button was pressed: its click then closes it.
     emoji_on_press: bool,
-    _input_events: Subscription,
+    _editor_events: Subscription,
+    _bar_events: Subscription,
     _presence: Subscription,
 }
 
@@ -655,19 +562,14 @@ impl Compose {
         parts
             .trace
             .record(&TraceLine::new("compose", "opened").conversation(&conversation));
-        let input = cx.new(|cx| {
-            TextareaState::new(window, cx)
-                .submit_on_enter(true)
-                .soft_wrap(true)
-                .auto_grow(1, MAX_ROWS)
-                .placeholder("Type a message")
-        });
-        let input_events = cx.subscribe_in(&input, window, |this: &mut Self, _, event, window, cx| {
-            if matches!(event, InputEvent::Focus | InputEvent::Blur) {
-                // the box's accent line follows the focus
-                cx.notify();
-            }
-            if matches!(event, InputEvent::Change) {
+        let editor = cx.new(|cx| Editor::new(window, cx).placeholder("Type a message"));
+        editor.update(cx, |editor, cx| editor.set_heights(None, Some(px(COLLAPSED_MAX)), cx));
+        let editor_events = cx.subscribe_in(&editor, window, |this: &mut Self, _, event, window, cx| match event {
+            // the box's accent line follows the focus
+            EditorEvent::Focus | EditorEvent::Blur => cx.notify(),
+            // moving the cursor changes no text: an `@` the cursor left closes the picker
+            EditorEvent::Moved => this.revalidate_picker(cx),
+            EditorEvent::Changed => {
                 // what the box holds changed: traced without the text, so a test driving the keyboard can tell
                 // when the app has taken in what it typed
                 this.trace
@@ -677,7 +579,16 @@ impl Compose {
                 // the send button follows whether there is anything to send
                 cx.notify();
             }
+            EditorEvent::Submit => this.send(window, cx),
         });
+        let format_bar = cx.new(|cx| FormatBar::new(editor.clone(), cx));
+        let bar_events = cx.subscribe_in(
+            &format_bar,
+            window,
+            |this: &mut Self, _, event, window, cx| match event {
+                FormatBarEvent::Discard => this.discard(window, cx),
+            },
+        );
         // a presence the engine told: an open picker draws its dots again
         let presence = cx.observe(&parts.presence, |this: &mut Self, _, cx| {
             if this.picker.is_some() {
@@ -696,7 +607,9 @@ impl Compose {
             presence: parts.presence,
             read_only: note,
             conversation,
-            input,
+            editor,
+            format_bar,
+            expanded: false,
             mode: Mode::New,
             picker: None,
             candidates: None,
@@ -705,15 +618,65 @@ impl Compose {
             emoji: None,
             emoji_at: Rc::default(),
             emoji_on_press: false,
-            _input_events: input_events,
+            _editor_events: editor_events,
+            _bar_events: bar_events,
             _presence: presence,
         }
     }
 
-    /// The kit's text area.
+    /// The rich-text editor the box writes with.
     #[must_use]
-    pub fn input(&self) -> &Entity<TextareaState> {
-        &self.input
+    pub fn editor(&self) -> &Entity<Editor> {
+        &self.editor
+    }
+
+    /// The format bar shown while the box is expanded.
+    #[must_use]
+    pub fn format_bar(&self) -> &Entity<FormatBar> {
+        &self.format_bar
+    }
+
+    /// Whether the box is expanded with its format bar.
+    #[must_use]
+    pub fn is_expanded(&self) -> bool {
+        self.expanded
+    }
+
+    /// Expands the box with its format bar, or collapses it (Ctrl+Shift+X, the Format button): expanded, Enter
+    /// starts a new paragraph and Ctrl+Enter sends. The editor keeps the focus.
+    pub fn toggle_expanded(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.read_only.is_some() {
+            return;
+        }
+        self.set_expanded(!self.expanded, cx);
+        self.focus(window, cx);
+    }
+
+    fn set_expanded(&mut self, expanded: bool, cx: &mut Context<Self>) {
+        self.expanded = expanded;
+        let (mode, min, max) = if expanded {
+            (EnterMode::NewLine, Some(px(EXPANDED_MIN)), px(EXPANDED_MAX))
+        } else {
+            (EnterMode::Send, None, px(COLLAPSED_MAX))
+        };
+        self.editor.update(cx, |editor, cx| {
+            editor.set_enter_mode(mode, cx);
+            editor.set_heights(min, Some(max), cx);
+        });
+        self.trace.record(
+            &TraceLine::new("compose", if expanded { "expanded" } else { "collapsed" })
+                .conversation(&self.conversation),
+        );
+        cx.notify();
+    }
+
+    /// Discard: empties the box and ends a reply or an edit.
+    pub fn discard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.editor.update(cx, |editor, cx| editor.clear(cx));
+        if self.mode != Mode::New {
+            self.cancel(window, cx);
+        }
+        self.focus(window, cx);
     }
 
     #[must_use]
@@ -746,10 +709,10 @@ impl Compose {
         self.problem.as_ref()
     }
 
-    /// The text typed.
+    /// The text typed, a line per block.
     #[must_use]
     pub fn value(&self, cx: &App) -> SharedString {
-        self.input.read(cx).value()
+        self.editor.read(cx).text().into()
     }
 
     /// Whether the box takes no text: the account's own notes ([`READ_ONLY_NOTES`]).
@@ -763,13 +726,14 @@ impl Compose {
         if self.read_only.is_some() {
             return;
         }
-        self.input.update(cx, |input, cx| input.focus(window, cx));
+        let focus = self.editor.read(cx).focus.clone();
+        window.focus(&focus, cx);
     }
 
     /// Whether the box has the focus.
     #[must_use]
     pub fn focused(&self, window: &Window, cx: &App) -> bool {
-        self.input.read(cx).focus_handle(cx).is_focused(window)
+        self.editor.read(cx).is_focused(window)
     }
 
     /// Shows `problem` over the box.
@@ -804,22 +768,7 @@ impl Compose {
                 .conversation(&self.conversation)
                 .messages([message_id.as_str()]),
         );
-        let content = loaded
-            .mentions
-            .iter()
-            .fold(InputContent::new(loaded.text.clone()), |content, mention| {
-                let token = InlineToken::new(mention.mri.clone(), mention.name.clone());
-                // a mention whose name the text doesn't hold as it stands stays text
-                content
-                    .clone()
-                    .with_token(mention.range.clone(), token)
-                    .unwrap_or(content)
-            });
-        let end = loaded.text.len();
-        self.input.update(cx, |input, cx| {
-            input.set_value(content, window, cx);
-            input.set_selected_range(end..end, cx);
-        });
+        self.editor.update(cx, |editor, cx| editor.set_doc(loaded.doc, cx));
         self.mode = Mode::Edit {
             message_id,
             quotes: loaded.quotes,
@@ -836,8 +785,9 @@ impl Compose {
             return;
         }
         if matches!(self.mode, Mode::Edit { .. }) {
-            self.input.update(cx, |input, cx| input.set_value("", window, cx));
+            self.editor.update(cx, |editor, cx| editor.set_doc(Doc::default(), cx));
         }
+        let _ = window;
         self.mode = Mode::New;
         self.picker = None;
         self.trace
@@ -847,45 +797,20 @@ impl Compose {
 
     /// Puts a mention of `mri`, shown as `name`, at the cursor (the picker's choice puts it over the `@` typed).
     pub fn insert_mention(&mut self, mri: &str, name: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let cursor = self.input.read(cx).cursor();
+        let (_, cursor, _) = self.editor.read(cx).cursor_block();
         self.place_mention(cursor..cursor, mri, name, window, cx);
     }
 
-    fn place_mention(
-        &mut self,
-        range: Range<usize>,
-        mri: &str,
-        name: &str,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let token = InlineToken::new(mri.to_owned(), name.to_owned());
-        let placed = self.input.update(cx, |input, cx| {
-            let placed = input.replace_range_with_token(range, token, window, cx);
-            if placed.is_ok() {
-                input.insert(" ", window, cx);
-            }
-            placed
-        });
+    /// Puts a mention in place of `range` of the cursor's block, a space after it.
+    fn place_mention(&mut self, range: Range<usize>, mri: &str, name: &str, _: &mut Window, cx: &mut Context<Self>) {
         self.picker = None;
-        if let Err(error) = placed {
-            self.problem = Some(format!("That mention can't be added: {error}").into());
+        if name.trim().is_empty() || name.chars().any(char::is_control) {
+            self.problem = Some("That mention can't be added: it has no name to show".into());
+            return cx.notify();
         }
+        self.editor
+            .update(cx, |editor, cx| editor.insert_mention(range, mri, name, cx));
         cx.notify();
-    }
-
-    /// The text typed and its mentions, by the MRIs their tokens name.
-    fn draft(&self, cx: &App) -> (String, Vec<DraftMention>) {
-        let input = self.input.read(cx);
-        let mentions = input
-            .tokens()
-            .iter()
-            .map(|span| DraftMention {
-                range: span.range(),
-                mri: span.token().id().to_string(),
-            })
-            .collect();
-        (input.value().to_string(), mentions)
     }
 
     /// Sends what the box holds (see the module docs); the box is emptied once the write is asked for, and given its
@@ -895,13 +820,13 @@ impl Compose {
         if self.read_only.is_some() {
             return;
         }
-        let (text, mentions) = self.draft(cx);
+        let doc = self.editor.read(cx).doc().clone();
         let quotes = match &self.mode {
             Mode::New => Vec::new(),
             Mode::Reply(quoted) => vec![quoted.node()],
             Mode::Edit { quotes, .. } => quotes.clone(),
         };
-        let built = match message_text(&text, &mentions, &quotes) {
+        let built = match message_of(&doc, &quotes) {
             Ok(Some(built)) => built,
             Ok(None) => return,
             Err(error) => return self.show_problem(format!("This message can't be sent: {error}"), cx),
@@ -932,7 +857,7 @@ impl Compose {
             ),
         };
         let draft = Draft {
-            content: self.input.read(cx).content(),
+            doc,
             mode: self.mode.clone(),
         };
         let reply = self.core.write(action);
@@ -954,29 +879,24 @@ impl Compose {
     }
 
     /// Puts a refused send's draft back in the box, unless the box holds something new or writes something else now.
-    fn give_back(&mut self, draft: Draft, window: &mut Window, cx: &mut Context<Self>) {
-        let empty = {
-            let input = self.input.read(cx);
-            input.value().is_empty() && input.tokens().is_empty()
-        };
-        if !empty || self.mode != Mode::New {
+    fn give_back(&mut self, draft: Draft, _: &mut Window, cx: &mut Context<Self>) {
+        if !self.editor.read(cx).is_empty() || self.mode != Mode::New {
             return;
         }
-        let end = draft.content.text().len();
-        self.input.update(cx, |input, cx| {
-            input.set_value(draft.content, window, cx);
-            input.set_selected_range(end..end, cx);
-        });
+        self.editor.update(cx, |editor, cx| editor.set_doc(draft.doc, cx));
         self.mode = draft.mode;
         cx.notify();
     }
 
-    /// Empties the box and ends a reply or an edit.
-    fn clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.input.update(cx, |input, cx| input.set_value("", window, cx));
+    /// Empties the box, ends a reply or an edit, and collapses an expanded box, as Teams' does once it sent.
+    fn clear(&mut self, _: &mut Window, cx: &mut Context<Self>) {
+        self.editor.update(cx, |editor, cx| editor.set_doc(Doc::default(), cx));
         self.mode = Mode::New;
         self.picker = None;
         self.problem = None;
+        if self.expanded {
+            self.set_expanded(false, cx);
+        }
         cx.notify();
     }
 
@@ -1005,8 +925,7 @@ impl Compose {
     }
 
     fn holds_text(&self, cx: &App) -> bool {
-        let input = self.input.read(cx);
-        !input.value().trim().is_empty() || !input.tokens().is_empty()
+        !self.editor.read(cx).is_blank()
     }
 
     // --- the mention picker ---
@@ -1021,11 +940,7 @@ impl Compose {
 
     /// Opens, moves or closes the picker after the text changed, or before a key it would take.
     fn refresh_picker(&mut self, cx: &mut Context<Self>) {
-        let (text, cursor, tokens) = {
-            let input = self.input.read(cx);
-            let tokens: Vec<Range<usize>> = input.tokens().iter().map(InlineTokenSpan::range).collect();
-            (input.value(), input.cursor(), tokens)
-        };
+        let (text, cursor, tokens) = self.editor.read(cx).cursor_block();
         let Some((at, query)) = mention_query(&text, cursor, &tokens) else {
             return self.close_picker(cx);
         };
@@ -1167,24 +1082,24 @@ impl Compose {
         self.emoji = None;
         self.focus(window, cx);
         let emoji = reactions::glyph(key);
-        self.input.update(cx, |input, cx| input.replace(emoji, window, cx));
+        self.editor.update(cx, |editor, cx| editor.insert(&emoji, cx));
         cx.notify();
     }
 
     // --- keys ---
 
-    fn capture_up(&mut self, _: &MoveUp, _: &mut Window, cx: &mut Context<Self>) {
+    fn capture_up(&mut self, _: &editor::MoveUp, _: &mut Window, cx: &mut Context<Self>) {
         self.revalidate_picker(cx);
         if self.picker.is_some() {
             self.step_picker(-1, cx);
             cx.stop_propagation();
-        } else if self.mode == Mode::New && self.input.read(cx).value().is_empty() {
+        } else if self.mode == Mode::New && self.editor.read(cx).is_empty() {
             cx.emit(ComposeEvent::EditLast);
             cx.stop_propagation();
         }
     }
 
-    fn capture_down(&mut self, _: &MoveDown, _: &mut Window, cx: &mut Context<Self>) {
+    fn capture_down(&mut self, _: &editor::MoveDown, _: &mut Window, cx: &mut Context<Self>) {
         self.revalidate_picker(cx);
         if self.picker.is_some() {
             self.step_picker(1, cx);
@@ -1192,15 +1107,7 @@ impl Compose {
         }
     }
 
-    fn capture_enter(&mut self, enter: &Enter, window: &mut Window, cx: &mut Context<Self>) {
-        self.revalidate_picker(cx);
-        if self.offering() && !enter.shift {
-            self.choose_selected(window, cx);
-            cx.stop_propagation();
-        }
-    }
-
-    fn capture_tab(&mut self, _: &IndentInline, window: &mut Window, cx: &mut Context<Self>) {
+    fn capture_enter(&mut self, _: &editor::Enter, window: &mut Window, cx: &mut Context<Self>) {
         self.revalidate_picker(cx);
         if self.offering() {
             self.choose_selected(window, cx);
@@ -1208,14 +1115,15 @@ impl Compose {
         }
     }
 
-    /// The plain Enter the text area handed on: the send.
-    fn on_enter(&mut self, enter: &Enter, window: &mut Window, cx: &mut Context<Self>) {
-        if !enter.shift {
-            self.send(window, cx);
+    fn capture_tab(&mut self, _: &editor::Tab, window: &mut Window, cx: &mut Context<Self>) {
+        self.revalidate_picker(cx);
+        if self.offering() {
+            self.choose_selected(window, cx);
+            cx.stop_propagation();
         }
     }
 
-    fn on_escape(&mut self, _: &Escape, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_escape(&mut self, _: &editor::Escape, window: &mut Window, cx: &mut Context<Self>) {
         self.revalidate_picker(cx);
         if self.picker.is_some() {
             self.close_picker(cx);
@@ -1266,14 +1174,15 @@ impl Compose {
         )
     }
 
-    /// Send (Enter does the same), as Teams draws it: a quiet icon, in the brand colour once the box holds something
-    /// to send and greyed while it holds nothing.
+    /// Send (Enter does the same; Ctrl+Enter expanded), as Teams draws it: a quiet icon, in the brand colour once the
+    /// box holds something to send and greyed while it holds nothing.
     fn send_button(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let empty = self.input.read(cx).value().trim().is_empty();
-        let tip = if matches!(self.mode, Mode::Edit { .. }) {
-            "Save (Enter)"
-        } else {
-            "Send (Enter)"
+        let empty = self.editor.read(cx).is_blank();
+        let tip = match (matches!(self.mode, Mode::Edit { .. }), self.expanded) {
+            (true, false) => "Save (Enter)",
+            (true, true) => "Save (Ctrl+Enter)",
+            (false, false) => "Send (Enter)",
+            (false, true) => "Send (Ctrl+Enter)",
         };
         let glyph = Glyph::SEND
             .icon()
@@ -1302,7 +1211,26 @@ impl Compose {
             .into_any_element()
     }
 
-    /// The box's toolbar, inside it on the right as Teams has it: emoji, a thin divider, then send.
+    /// Format, as Teams' box has it: expands the box with its format bar, highlighted while it is expanded.
+    fn format_button(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let tip = if self.expanded {
+            "Hide formatting options"
+        } else {
+            "Show formatting options"
+        };
+        let glyph = Glyph::TEXT_FORMAT
+            .icon()
+            .when(self.expanded, |icon| icon.text_color(rgb(palette.brand)));
+        let button = icon_button_with_key("compose-format", Glyph::TEXT_FORMAT, tip, &editor::ToggleExpanded)
+            .icon(glyph)
+            .with_size(Size::Size(px(TOOL)))
+            .selected(self.expanded)
+            .on_click(cx.listener(|this, _, window, cx| this.toggle_expanded(window, cx)));
+        selected_by("compose-format", button).into_any_element()
+    }
+
+    /// The box's controls, inside it on the right as Teams has them: Format, Emoji, Attach, Loop and Actions and
+    /// apps (the last three not in this app yet: shown disabled, saying so), a thin divider, then Send.
     fn toolbar(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         div()
             .debug_selector(|| "compose-toolbar".to_owned())
@@ -1312,7 +1240,11 @@ impl Compose {
             .gap_1()
             // the box's inside, its padding and border taken off: centred on one line, at the foot of more
             .h(px(BOX_HEIGHT - 2.0 * BOX_PADDING - 2.0))
+            .child(self.format_button(palette, cx))
             .child(self.emoji_button(cx))
+            .child(unavailable("compose-attach", Glyph::PAPERCLIP, NO_ATTACH))
+            .child(unavailable("compose-loop", Glyph::REPEAT, NO_LOOP))
+            .child(unavailable("compose-apps", Glyph::PLUS, NO_APPS))
             .child(div().w(px(1.0)).h(px(20.0)).mx_1().bg(rgb(palette.border)))
             .child(self.send_button(palette, cx))
             .into_any_element()
@@ -1342,8 +1274,9 @@ impl Compose {
         )
     }
 
-    /// The box itself: the text area and its toolbar on a raised, rounded surface with a hairline border, and Teams'
-    /// accent line along its foot while it has the focus.
+    /// The box itself: the editor and its controls on a raised, rounded surface with a hairline border, and Teams'
+    /// accent line along its foot while it has the focus; expanded, the format bar along its top and the controls
+    /// along its foot.
     fn input_box(&self, palette: Palette, focused: bool, cx: &mut Context<Self>) -> AnyElement {
         let accent = focused.then(|| {
             div()
@@ -1356,20 +1289,36 @@ impl Compose {
                 .rounded_b_md()
                 .bg(rgb(palette.brand))
         });
-        div()
+        let surface = div()
             .debug_selector(|| "compose-box".to_owned())
             .relative()
-            .flex()
-            .items_end()
-            .gap_1()
             .min_h(px(BOX_HEIGHT))
-            .pl_1()
-            .pr_2()
-            .py(px(BOX_PADDING))
             .rounded_md()
             .border_1()
             .border_color(rgb(palette.border))
             .bg(rgb(palette.surface))
+            .text_color(rgb(palette.foreground));
+        if self.expanded {
+            return surface
+                .flex()
+                .flex_col()
+                .gap_1()
+                .px_3()
+                .pt_2()
+                .pb(px(BOX_PADDING))
+                .child(self.format_bar.clone())
+                .child(div().px_1().pt_1().child(self.editor.clone()))
+                .child(div().flex().justify_end().child(self.toolbar(palette, cx)))
+                .children(accent)
+                .into_any_element();
+        }
+        surface
+            .flex()
+            .items_end()
+            .gap_1()
+            .pl_3()
+            .pr_2()
+            .py(px(BOX_PADDING))
             .overflow_hidden()
             .child(
                 div()
@@ -1377,7 +1326,8 @@ impl Compose {
                     .min_w_0()
                     // one line sits in the middle of the box; more lines grow it, the toolbar staying at its foot
                     .self_center()
-                    .child(Textarea::new(&self.input).appearance(false).with_size(Size::Large)),
+                    .py_1()
+                    .child(self.editor.clone()),
             )
             .child(self.toolbar(palette, cx))
             .children(accent)
@@ -1533,8 +1483,8 @@ impl Render for Compose {
             .capture_action(cx.listener(Self::capture_down))
             .capture_action(cx.listener(Self::capture_enter))
             .capture_action(cx.listener(Self::capture_tab))
-            .on_action(cx.listener(Self::on_enter))
             .on_action(cx.listener(Self::on_escape))
+            .on_action(cx.listener(|this, _: &editor::ToggleExpanded, window, cx| this.toggle_expanded(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleEmoji, window, cx| this.toggle_emoji(window, cx)))
             .flex()
             .flex_col()

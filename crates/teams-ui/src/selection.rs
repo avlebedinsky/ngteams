@@ -360,7 +360,7 @@ pub fn with_selection(
 }
 
 /// The character boundary in `layout` nearest `position` (the start of the text above it, the end below it).
-fn closest_index(layout: &TextLayout, position: Point<Pixels>) -> usize {
+pub(crate) fn closest_index(layout: &TextLayout, position: Point<Pixels>) -> usize {
     let bounds = layout.bounds();
     let line_height = layout.line_height();
     if position.y < bounds.top() {

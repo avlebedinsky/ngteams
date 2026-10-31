@@ -499,9 +499,49 @@ for their shape only, and how Teams draws one, from its window.
   (a `br` a line feed, a no-break space a space, any element in it giving its text) and each run's token kind from its
   `hljs-` class, nothing else of the markup; the editor's paragraph is dropped. It draws Teams' card
   (`teams-ui/src/code.rs`), the language named as Teams names it, else its id, `Plain text` without one; the copy
-  button copies the code's lines as they came (a tab drawn as four spaces, copied as a tab). The compose box writes
-  no block of code, so editing a message with one says it can't be edited there ("it shows a block of code");
-  `teams-proto` can write one (as the editor does, without the token spans), but nothing in the app sends one yet.
+  button copies the code's lines as they came (a tab drawn as four spaces, copied as a tab). The compose box's
+  editor writes one (Ctrl+Shift+B, or the format bar's code button over more than a line) as
+  `<pre class="language-plaintext"><code>…</code></pre>`, without the editor's paragraph and the token spans, and
+  loads one back for an edit.
+
+## Formatted text
+
+How Teams' message box formats text, from its web client's bundle (its editor is CKEditor 5 with Teams' own
+configuration and hotkeys) and from the shapes of formatted messages in the user's own chats as the personal build
+stored them, read for their markup only (tags, attributes and style properties counted; no text kept).
+
+- **Marks**: bold is `<strong>` (`<b>` too in older and pasted messages), italic `<i>`, underline `<u>`,
+  strikethrough `<s>`, inline code `<code>`; nested italic outermost (`<i><strong>…</strong></i>`).
+- **Colour, highlight and size**: one `span` per run of the same ones, its `style` holding them in the order
+  `background-color`, `color`, `font-size`, around the marks: `<span style="background-color:#EBD3E1;
+  color:#1E53A3; font-size:inherit"><strong>…</strong></span>`. The editor wraps most text in
+  `<span style="font-size:inherit">` (its Medium): no format. The sizes are Small `font-size:xx-small`, Medium
+  `inherit` and Large `font-size:x-large` (a hidden size, `0`, also exists). The font colours (the web client's
+  palette, named as its menu names them): Red `#B6424C`, Tuscan orange `#CD5937`, Sunglow `#FDC030`, Pear `#BDCB4C`,
+  Eucalyptus `#2B9B62`, Faded jade `#37797B`, Fun blue `#1E53A3`, Tyrian purple `#A5397A`, and Automatic (none). The
+  highlights: Cranberry `#DF9299`, Pumpkin `#F4A593`, Marigold `#FDD472`, Forest `#E5F18F`, Seafoam `#82CDA8`, Light
+  teal `#9DD9DB`, Blue `#C7D4E8`, Lilac `#EBD3E1` (the web client draws them through its theme's palette tokens and
+  sends these hex fallbacks).
+- **Blocks**: a paragraph `p` (an empty line `<p>&nbsp;</p>`), headings `h1`–`h3`, a quote
+  `<blockquote><p>…</p></blockquote>`, lists `ul`/`ol` of `li` holding their text directly, a nested list inside
+  the item before it (`<li>a<ul><li>b</li></ul></li>`), an indented paragraph `<p style="margin-left:40px">` (40 px
+  a step), a horizontal rule `<hr>`, tables `<table><tbody><tr><td>` (seen pasted). Paragraphs often carry
+  `margin-left:0` and margins of the editor's own, which say nothing.
+- **Hotkeys** in the box (the web client's compose hotkeys): Ctrl+Enter sends from the expanded box, Shift+Enter is a
+  new line, Ctrl+Shift+X expands and collapses the box ("ComposeFull"), Ctrl+B, Ctrl+I, Ctrl+U, Ctrl+Alt+X
+  strikethrough (Ctrl+Shift+X is taken by the expand), Ctrl+K a link, Ctrl+Shift+C inline code, Ctrl+Shift+B a block
+  of code, Ctrl+Shift+7 and Ctrl+Shift+8 numbered and bulleted lists, Ctrl+Alt+4 a quote, Ctrl+Alt+1 to 3 headings,
+  Ctrl+Alt+P a paragraph, Ctrl+Z undo.
+- **The native client** reads `span` colours (`#RGB`, `#RRGGBB`, `rgb()`), highlights and sizes (keywords, and a
+  length under 12 px small, over 18 px large) into `teams_proto::chat::Node::Span`, headings, indented paragraphs
+  and rules into nodes of their own, and draws them (a heading larger and semibold, a paragraph at the size most of
+  its text has, since GPUI lays a line out at one size; a colour that wouldn't read on the theme moved toward the
+  text colour, a highlight at half strength on a dark theme). The compose box is its own rich-text editor
+  (`teams-ui/src/editor`), which writes exactly the shapes above: `strong` for bold, a link as the web client's
+  anchor (`rel="noreferrer noopener" title="<url>" target="_blank"`, `properties.links` left `"[]"`), a space after a
+  space or at a line's edge as `&nbsp;`. Its keys are the web client's, but Ctrl+K stays the app's chat switcher
+  (the format bar inserts a link) and Ctrl+Shift+C inserts inline code in the box, as in Teams. Writing tables isn't
+  supported yet: the "More" menu shows the entry disabled.
 
 ## Files: sending, denied (ab-file)
 

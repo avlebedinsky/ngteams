@@ -594,6 +594,45 @@ fn what_is_sent_reads_back_as_the_same_rich_text() {
 }
 
 #[test]
+fn formatted_text_is_written_as_teams_editor_writes_it_and_reads_back() {
+    let style = teams_proto::chat::SpanStyle {
+        color: Some(teams_proto::chat::Rgb(0x1E_53A3)),
+        highlight: Some(teams_proto::chat::Rgb(0xEB_D3E1)),
+        size: Some(teams_proto::chat::FontSize::Large),
+    };
+    let nodes = vec![
+        Node::Heading {
+            level: 2,
+            children: vec![run("Plan")],
+        },
+        Node::Paragraph(vec![Node::Span {
+            style,
+            children: vec![Node::Text {
+                text: "bold".to_owned(),
+                marks: Marks::BOLD,
+            }],
+        }]),
+        Node::Indented {
+            depth: 1,
+            children: vec![run("in")],
+        },
+        Node::Rule,
+    ];
+    let text = MessageText::new(rich(nodes.clone()), []).unwrap();
+    assert_eq!(
+        text.html(),
+        "<h2>Plan</h2><p><span style=\"background-color:#EBD3E1; color:#1E53A3; font-size:x-large\">\
+         <strong>bold</strong></span></p><p style=\"margin-left:40px\">in</p><hr>"
+    );
+    assert_eq!(parse_html(text.html()), rich(nodes));
+    // what the editor writes for Medium, and a colour of no form read, give nothing
+    assert_eq!(
+        parse_html("<p><span style=\"font-size:inherit; color:var(--x)\">x</span></p>"),
+        rich(vec![Node::Paragraph(vec![run("x")])])
+    );
+}
+
+#[test]
 fn a_stored_text_is_checked_again_when_read() {
     let text = mentioning_b();
     let stored = serde_json::to_string(&text).unwrap();

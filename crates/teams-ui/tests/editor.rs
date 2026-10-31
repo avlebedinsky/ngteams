@@ -1,0 +1,425 @@
+//! The rich-text editor (`teams_ui::editor`): its document's edits, what it sends (Teams' editor's HTML, read back by
+//! `teams-proto` as the same rich text), what it loads, and the keys as a user types them on GPUI's test context:
+//! formats toggled on and typed with, lists continued by Enter, Enter in each mode, undo, a rich copy and paste.
+//! Every text is made up.
+
+// test code throughout (its helpers unwrap like the tests do)
+#![cfg(test)]
+
+use std::collections::HashMap;
+
+use gpui::{
+    AppContext as _, Context, Entity, Focusable as _, IntoElement, ParentElement as _, Render, Styled as _,
+    TestAppContext, VisualTestContext, Window, div, px,
+};
+use teams_proto::chat::{FontSize, Marks, MessageText, Node, Rgb, RichText, SpanStyle, parse_html};
+use teams_ui::editor::convert::{from_nodes, to_nodes};
+use teams_ui::editor::doc::{Attrs, Block, Doc, Kind, Pos, Run};
+use teams_ui::editor::{Editor, EditorEvent, EnterMode};
+
+fn html_of(doc: &Doc) -> String {
+    let (nodes, mentioned) = to_nodes(doc);
+    MessageText::new(
+        RichText {
+            nodes,
+            truncated: false,
+        },
+        mentioned,
+    )
+    .unwrap()
+    .html()
+    .to_owned()
+}
+
+fn bold() -> Attrs {
+    Attrs {
+        marks: Marks::BOLD,
+        ..Attrs::default()
+    }
+}
+
+#[test]
+fn a_document_is_sent_as_teams_editor_writes_it() {
+    let lilac_blue = Attrs {
+        span: SpanStyle {
+            color: Some(Rgb(0x1E_53A3)),
+            highlight: Some(Rgb(0xEB_D3E1)),
+            size: None,
+        },
+        ..bold()
+    };
+    let doc = Doc::new(vec![
+        Block::new(Kind::Heading(2), 0, vec![Run::new("Title", Attrs::default())]),
+        Block::new(
+            Kind::Paragraph,
+            0,
+            vec![
+                Run::new("plain ", Attrs::default()),
+                Run::new("both", lilac_blue),
+                Run::new(" and ", Attrs::default()),
+                Run::new(
+                    "a link",
+                    Attrs {
+                        link: Some("https://example.test/a".to_owned()),
+                        ..Attrs::default()
+                    },
+                ),
+            ],
+        ),
+        Block::new(Kind::Paragraph, 0, Vec::new()),
+        Block::new(Kind::Bullet, 0, vec![Run::new("one", Attrs::default())]),
+        Block::new(Kind::Bullet, 1, vec![Run::new("inner", Attrs::default())]),
+        Block::new(Kind::Bullet, 0, vec![Run::new("two", Attrs::default())]),
+        Block::new(Kind::Numbered, 0, vec![Run::new("first", Attrs::default())]),
+        Block::new(Kind::Quote, 0, vec![Run::new("quoted", Attrs::default())]),
+        Block::new(Kind::Paragraph, 1, vec![Run::new("indented", Attrs::default())]),
+        Block::new(Kind::Rule, 0, Vec::new()),
+        Block::new(Kind::Paragraph, 0, vec![Run::new("a  b ", Attrs::default())]),
+    ]);
+    assert_eq!(
+        html_of(&doc),
+        "<h2>Title</h2>\
+         <p>plain <span style=\"background-color:#EBD3E1; color:#1E53A3\"><strong>both</strong></span> and \
+         <a href=\"https://example.test/a\" rel=\"noreferrer noopener\" title=\"https://example.test/a\" \
+         target=\"_blank\">a link</a></p>\
+         <p>&nbsp;</p>\
+         <ul><li>one<ul><li>inner</li></ul></li><li>two</li></ul>\
+         <ol><li>first</li></ol>\
+         <blockquote><p>quoted</p></blockquote>\
+         <p style=\"margin-left:40px\">indented</p>\
+         <hr>\
+         <p>a &nbsp;b&nbsp;</p>"
+    );
+}
+
+#[test]
+fn what_is_sent_reads_back_as_the_same_document() {
+    let large_red = Attrs {
+        span: SpanStyle {
+            color: Some(Rgb(0xB6_424C)),
+            highlight: None,
+            size: Some(FontSize::Large),
+        },
+        marks: Marks::ITALIC.with(Marks::UNDERLINE),
+        ..Attrs::default()
+    };
+    let doc = Doc::new(vec![
+        Block::new(Kind::Heading(1), 0, vec![Run::new("Head", Attrs::default())]),
+        Block::new(
+            Kind::Paragraph,
+            0,
+            vec![
+                Run::new("big red", large_red),
+                Run::new(" then ", Attrs::default()),
+                Run::new(
+                    "struck",
+                    Attrs {
+                        marks: Marks::STRIKE,
+                        ..Attrs::default()
+                    },
+                ),
+                Run::new(" and ", Attrs::default()),
+                Run::new(
+                    "code",
+                    Attrs {
+                        marks: Marks::CODE,
+                        ..Attrs::default()
+                    },
+                ),
+            ],
+        ),
+        Block::new(Kind::Numbered, 0, vec![Run::new("one", Attrs::default())]),
+        Block::new(Kind::Numbered, 1, vec![Run::new("one.one", Attrs::default())]),
+        Block::new(Kind::Quote, 0, vec![Run::new("a line\nbroken", Attrs::default())]),
+        Block::new(
+            Kind::Code,
+            0,
+            vec![Run::new("fn main() {\n    go();\n}", Attrs::default())],
+        ),
+        Block::new(Kind::Rule, 0, Vec::new()),
+        Block::new(Kind::Paragraph, 2, vec![Run::new("deep", Attrs::default())]),
+    ]);
+    let html = html_of(&doc);
+    let read = from_nodes(&parse_html(&html).nodes, &HashMap::<String, String>::new(), true).unwrap();
+    assert_eq!(read, doc, "{html}");
+}
+
+#[test]
+fn a_mention_is_an_atom_deleted_whole() {
+    let mut doc = Doc::new(vec![Block::new(
+        Kind::Paragraph,
+        0,
+        vec![
+            Run::new("hi ", Attrs::default()),
+            Run::new(
+                "Lab Bee",
+                Attrs {
+                    mention: Some("8:orgid:00000000-0000-4000-8000-00000000000b".to_owned()),
+                    ..Attrs::default()
+                },
+            ),
+            Run::new("!", Attrs::default()),
+        ],
+    )]);
+    assert_eq!(
+        doc.clamp(Pos::new(0, 6), false),
+        Pos::new(0, 3),
+        "no place inside a mention"
+    );
+    assert_eq!(
+        doc.before(Pos::new(0, 10)),
+        Some(Pos::new(0, 3)),
+        "a step back goes over it whole"
+    );
+    let at = doc.delete(Pos::new(0, 5), Pos::new(0, 11));
+    assert_eq!((doc.plain_text(), at), ("hi ".to_owned(), Pos::new(0, 3)));
+}
+
+#[test]
+fn a_fragment_pasted_joins_the_blocks_at_its_edges() {
+    let mut doc = Doc::new(vec![Block::paragraph("startend")]);
+    let fragment = vec![
+        Block::new(Kind::Paragraph, 0, vec![Run::new("one", bold())]),
+        Block::new(Kind::Bullet, 0, vec![Run::new("two", Attrs::default())]),
+    ];
+    let at = doc.insert_fragment(Pos::new(0, 5), fragment);
+    assert_eq!(doc.plain_text(), "startone\ntwoend");
+    assert_eq!(at, Pos::new(1, 3));
+    assert_eq!(doc.blocks[1].kind, Kind::Bullet);
+    assert_eq!(doc.blocks[0].runs[1].attrs, bold());
+
+    let mut ruled = Doc::new(vec![Block::paragraph("ab")]);
+    let at = ruled.insert_fragment(Pos::new(0, 1), vec![Block::new(Kind::Rule, 0, Vec::new())]);
+    let kinds: Vec<Kind> = ruled.blocks.iter().map(|block| block.kind).collect();
+    assert_eq!(kinds, [Kind::Paragraph, Kind::Rule, Kind::Paragraph]);
+    assert_eq!((ruled.plain_text(), at), ("a\n\nb".to_owned(), Pos::new(2, 0)));
+}
+
+#[test]
+fn pasted_html_keeps_what_the_editor_writes() {
+    let html = "<div><p><b>Bold</b> <span style=\"color:rgb(205,89,55);font-size:24px\">orange</span></p>\
+                <ul><li>item</li></ul><h3>Head</h3><table><tr><td>cell</td></tr></table><script>x()</script></div>";
+    let doc = from_nodes(&parse_html(html).nodes, &HashMap::<String, String>::new(), false).unwrap();
+    assert_eq!(doc.plain_text(), "Bold orange\nitem\nHead\ncell");
+    assert_eq!(doc.blocks[0].runs[0].attrs.marks, Marks::BOLD);
+    assert_eq!(doc.blocks[0].runs[2].attrs.span.color, Some(Rgb(0xCD_5937)));
+    assert_eq!(doc.blocks[0].runs[2].attrs.span.size, Some(FontSize::Large));
+    assert_eq!(doc.blocks[1].kind, Kind::Bullet);
+    assert_eq!(doc.blocks[2].kind, Kind::Heading(3));
+}
+
+// --- typed, on GPUI's test context ---
+
+/// The editor in a window, as its owner holds it.
+struct Host {
+    editor: Entity<Editor>,
+    submitted: usize,
+    _events: gpui::Subscription,
+}
+
+impl Render for Host {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div().w(px(500.0)).child(self.editor.clone())
+    }
+}
+
+fn editor_window() -> (Entity<Host>, &'static mut VisualTestContext) {
+    let app: &'static mut TestAppContext = Box::leak(Box::new(TestAppContext::single()));
+    app.update(|cx| {
+        gpui_component::init(cx);
+        teams_ui::theme::init(cx);
+    });
+    let (host, cx) = app.add_window_view(|window, cx| {
+        let editor = cx.new(|cx| Editor::new(window, cx).placeholder("Type a message"));
+        let events = cx.subscribe(&editor, |host: &mut Host, _, event, _| {
+            if *event == EditorEvent::Submit {
+                host.submitted += 1;
+            }
+        });
+        Host {
+            editor,
+            submitted: 0,
+            _events: events,
+        }
+    });
+    let editor = cx.update(|_, cx| host.read(cx).editor.clone());
+    cx.update(|window, cx| {
+        let focus = editor.read(cx).focus_handle(cx);
+        window.focus(&focus, cx);
+    });
+    draw(cx);
+    (host, cx)
+}
+
+/// Draws the window a few times, as the views' tests do, so the input handler is in place.
+fn draw(cx: &mut VisualTestContext) {
+    for _ in 0..3 {
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            let _ = window.draw(cx);
+        });
+    }
+    cx.run_until_parked();
+}
+
+fn editor_of(host: &Entity<Host>, cx: &mut VisualTestContext) -> Entity<Editor> {
+    cx.update(|_, cx| host.read(cx).editor.clone())
+}
+
+fn doc_of(host: &Entity<Host>, cx: &mut VisualTestContext) -> Doc {
+    let editor = editor_of(host, cx);
+    cx.update(|_, cx| editor.read(cx).doc().clone())
+}
+
+#[test]
+fn ctrl_b_turns_bold_on_for_what_is_typed_next_and_off_again() {
+    let (host, cx) = editor_window();
+    cx.simulate_input("plain ");
+    cx.simulate_keystrokes("ctrl-b");
+    cx.simulate_input("bold");
+    cx.simulate_keystrokes("ctrl-b");
+    cx.simulate_input(" again");
+    let doc = doc_of(&host, cx);
+    let runs: Vec<(&str, bool)> = doc.blocks[0]
+        .runs
+        .iter()
+        .map(|run| (run.text.as_str(), run.attrs.marks.contains(Marks::BOLD)))
+        .collect();
+    assert_eq!(runs, [("plain ", false), ("bold", true), (" again", false)]);
+}
+
+#[test]
+fn a_selection_made_italic_and_underlined_by_its_keys() {
+    let (host, cx) = editor_window();
+    cx.simulate_input("one two");
+    cx.simulate_keystrokes("shift-left shift-left shift-left ctrl-i ctrl-u");
+    let doc = doc_of(&host, cx);
+    let last = doc.blocks[0].runs.last().unwrap();
+    assert_eq!(last.text, "two");
+    assert!(last.attrs.marks.contains(Marks::ITALIC) && last.attrs.marks.contains(Marks::UNDERLINE));
+    cx.simulate_keystrokes("ctrl-z ctrl-z");
+    assert_eq!(doc_of(&host, cx).blocks[0].runs.len(), 1, "undone");
+}
+
+#[test]
+fn enter_in_a_list_starts_the_next_item_and_on_an_empty_one_ends_the_list() {
+    let (host, cx) = editor_window();
+    cx.simulate_keystrokes("ctrl-shift-8");
+    cx.simulate_input("one");
+    cx.simulate_keystrokes("enter");
+    cx.simulate_input("two");
+    cx.simulate_keystrokes("shift-enter");
+    cx.simulate_input("more");
+    cx.simulate_keystrokes("enter enter");
+    cx.simulate_input("after");
+    let doc = doc_of(&host, cx);
+    let blocks: Vec<(Kind, String)> = doc.blocks.iter().map(|block| (block.kind, block.text())).collect();
+    assert_eq!(
+        blocks,
+        [
+            (Kind::Bullet, "one".to_owned()),
+            (Kind::Bullet, "two\nmore".to_owned()),
+            (Kind::Paragraph, "after".to_owned()),
+        ]
+    );
+    assert_eq!(
+        cx.update(|_, cx| host.read(cx).submitted),
+        0,
+        "Enter in a list sends nothing"
+    );
+}
+
+#[test]
+fn enter_sends_until_the_box_is_expanded_then_ctrl_enter_does() {
+    let (host, cx) = editor_window();
+    cx.simulate_input("line");
+    cx.simulate_keystrokes("shift-enter");
+    cx.simulate_input("next");
+    cx.simulate_keystrokes("enter");
+    assert_eq!(cx.update(|_, cx| host.read(cx).submitted), 1);
+    assert_eq!(doc_of(&host, cx).blocks.len(), 2, "Shift+Enter starts a paragraph");
+
+    let editor = editor_of(&host, cx);
+    cx.update(|_, cx| editor.update(cx, |editor, cx| editor.set_enter_mode(EnterMode::NewLine, cx)));
+    cx.simulate_keystrokes("enter");
+    cx.simulate_input("third");
+    cx.simulate_keystrokes("shift-enter");
+    cx.simulate_input("broken");
+    assert_eq!(
+        cx.update(|_, cx| host.read(cx).submitted),
+        1,
+        "expanded, Enter is a new paragraph"
+    );
+    let doc = doc_of(&host, cx);
+    assert_eq!(doc.blocks.len(), 3);
+    assert_eq!(doc.blocks[2].text(), "third\nbroken", "and Shift+Enter breaks the line");
+    cx.simulate_keystrokes("ctrl-enter");
+    assert_eq!(cx.update(|_, cx| host.read(cx).submitted), 2);
+}
+
+#[test]
+fn a_rich_copy_pastes_with_its_formats() {
+    let (host, cx) = editor_window();
+    cx.simulate_keystrokes("ctrl-b");
+    cx.simulate_input("strong");
+    cx.simulate_keystrokes("ctrl-b");
+    cx.simulate_input(" text");
+    cx.simulate_keystrokes("ctrl-a ctrl-c ctrl-end shift-enter ctrl-v");
+    let doc = doc_of(&host, cx);
+    assert_eq!(doc.plain_text(), "strong text\nstrong text");
+    assert!(
+        doc.blocks[1].runs[0].attrs.marks.contains(Marks::BOLD),
+        "bold survives the paste"
+    );
+    let copied = cx.read_from_clipboard().and_then(|item| item.text());
+    assert_eq!(
+        copied.as_deref(),
+        Some("strong text"),
+        "and its plain text is on the clipboard"
+    );
+}
+
+#[test]
+fn backspace_at_a_list_item_s_start_makes_it_a_paragraph() {
+    let (host, cx) = editor_window();
+    cx.simulate_keystrokes("ctrl-shift-7");
+    cx.simulate_input("x");
+    cx.simulate_keystrokes("backspace backspace");
+    let doc = doc_of(&host, cx);
+    assert_eq!((doc.blocks[0].kind, doc.plain_text()), (Kind::Paragraph, String::new()));
+    let editor = editor_of(&host, cx);
+    let empty = cx.update(|_, cx| editor.read(cx).is_empty());
+    assert!(empty);
+}
+
+#[test]
+fn a_node_tree_of_the_web_client_loads_into_blocks() {
+    let nodes = vec![Node::List(teams_proto::chat::List {
+        ordered: false,
+        start: 1,
+        items: vec![vec![
+            Node::Text {
+                text: "a".to_owned(),
+                marks: Marks::NONE,
+            },
+            Node::List(teams_proto::chat::List {
+                ordered: true,
+                start: 1,
+                items: vec![vec![Node::Text {
+                    text: "b".to_owned(),
+                    marks: Marks::NONE,
+                }]],
+            }),
+        ]],
+    })];
+    let doc = from_nodes(&nodes, &HashMap::<String, String>::new(), true).unwrap();
+    let blocks: Vec<(Kind, u8, String)> = doc
+        .blocks
+        .iter()
+        .map(|block| (block.kind, block.indent, block.text()))
+        .collect();
+    assert_eq!(
+        blocks,
+        [(Kind::Bullet, 0, "a".to_owned()), (Kind::Numbered, 1, "b".to_owned())]
+    );
+}

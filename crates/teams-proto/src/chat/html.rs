@@ -71,7 +71,14 @@ const DROPPED: &[&str] = &[
 ];
 
 /// Elements read as a paragraph.
-const PARAGRAPHS: &[&str] = &["p", "div", "li", "h1", "h2", "h3", "h4", "h5", "h6"];
+const PARAGRAPHS: &[&str] = &["p", "div", "li"];
+
+/// How far one step of indentation moves a paragraph, in CSS pixels: Teams' editor indents by 40 px
+/// (`<p style="margin-left:40px">`).
+pub const INDENT_STEP: u32 = 40;
+
+/// The deepest a paragraph is indented, in steps.
+pub const MAX_INDENT: u8 = 8;
 
 /// A message's content as rich text. It is also what a message is written from
 /// ([`MessageText`](crate::chat::MessageText)), and serializes for the outbox's stored commands.
@@ -131,6 +138,219 @@ pub enum Node {
     Quote(Quote),
     List(List),
     Code(Code),
+    /// A `span` whose style gives its runs a font colour, a highlight or a size, as Teams' editor writes one
+    /// (`<span style="background-color:#EBD3E1; color:#1E53A3; font-size:x-large">`).
+    Span {
+        style: SpanStyle,
+        children: Vec<Node>,
+    },
+    /// A heading (`h1`–`h6`), its level 1 to 6.
+    Heading {
+        level: u8,
+        children: Vec<Node>,
+    },
+    /// A paragraph indented by `depth` steps of [`INDENT_STEP`] (`<p style="margin-left:40px">`), 1 to
+    /// [`MAX_INDENT`].
+    Indented {
+        depth: u8,
+        children: Vec<Node>,
+    },
+    /// A horizontal rule (`hr`).
+    Rule,
+}
+
+impl Node {
+    /// Whether it is a block: a paragraph, a heading, an indented paragraph, a quote, a list, a block of code or a
+    /// rule. A line starts at its edges.
+    #[must_use]
+    pub const fn is_block(&self) -> bool {
+        matches!(
+            self,
+            Self::Paragraph(_)
+                | Self::Heading { .. }
+                | Self::Indented { .. }
+                | Self::Quote(_)
+                | Self::List(_)
+                | Self::Code(_)
+                | Self::Rule
+        )
+    }
+}
+
+/// A colour as `0xRRGGBB`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Rgb(pub u32);
+
+impl Rgb {
+    /// `#RRGGBB`, upper case, as Teams' editor writes its colours.
+    #[must_use]
+    pub fn hex(self) -> String {
+        format!("#{:06X}", self.0 & 0x00FF_FFFF)
+    }
+
+    /// A CSS colour: `#RRGGBB`, `#RGB` or `rgb(r, g, b)` (`rgba` with its alpha ignored); `None` for anything else
+    /// (`inherit`, a name, a variable).
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim();
+        if let Some(hex) = text.strip_prefix('#') {
+            if !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                return None;
+            }
+            return match hex.len() {
+                6 => u32::from_str_radix(hex, 16).ok().map(Self),
+                3 => {
+                    let wide: String = hex.chars().flat_map(|c| [c, c]).collect();
+                    u32::from_str_radix(&wide, 16).ok().map(Self)
+                }
+                _ => None,
+            };
+        }
+        let inner = text
+            .strip_prefix("rgb(")
+            .or_else(|| text.strip_prefix("rgba("))?
+            .strip_suffix(')')?;
+        let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
+        if !(3..=4).contains(&parts.len()) {
+            return None;
+        }
+        let mut value = 0u32;
+        for part in &parts[..3] {
+            let channel: u8 = part.parse().ok()?;
+            value = value << 8 | u32::from(channel);
+        }
+        Some(Self(value))
+    }
+}
+
+/// The size Teams' editor gives a run: its Small (`font-size:xx-small`) and Large (`font-size:x-large`), as its
+/// font size menu writes them; Medium is no size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FontSize {
+    Small,
+    Large,
+}
+
+impl FontSize {
+    /// The CSS value Teams' editor writes for it.
+    #[must_use]
+    pub const fn css(self) -> &'static str {
+        match self {
+            Self::Small => "xx-small",
+            Self::Large => "x-large",
+        }
+    }
+
+    /// The size a CSS `font-size` gives: a keyword below `medium` small, above it large; a length under 12 px small
+    /// and over 18 px large; `None` for `medium`, `inherit`, `0`, a length between and anything unread.
+    #[must_use]
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim().to_ascii_lowercase();
+        match text.as_str() {
+            "xx-small" | "x-small" | "small" | "smaller" => return Some(Self::Small),
+            "large" | "x-large" | "xx-large" | "xxx-large" | "larger" => return Some(Self::Large),
+            _ => {}
+        }
+        // in hundredths of a pixel: a point is 4/3 of one
+        let (number, per_unit) = if let Some(number) = text.strip_suffix("px") {
+            (number, 300)
+        } else if let Some(number) = text.strip_suffix("pt") {
+            (number, 400)
+        } else {
+            return None;
+        };
+        let scaled = hundredths(number)?.checked_mul(per_unit)? / 300;
+        match scaled {
+            0 => None,
+            1..1200 => Some(Self::Small),
+            1801.. => Some(Self::Large),
+            _ => None,
+        }
+    }
+}
+
+/// A non-negative decimal number in hundredths (`14.6667` is 1466); `None` for anything else.
+fn hundredths(number: &str) -> Option<u32> {
+    let number = number.trim();
+    let (whole, fraction) = number.split_once('.').unwrap_or((number, ""));
+    let digits = |part: &str| part.bytes().all(|byte| byte.is_ascii_digit());
+    if whole.is_empty() || whole.len() > 6 || !digits(whole) || !digits(fraction) {
+        return None;
+    }
+    let cents = fraction
+        .bytes()
+        .chain(std::iter::repeat(b'0'))
+        .take(2)
+        .fold(0, |sum, digit| sum * 10 + u32::from(digit - b'0'));
+    whole.parse::<u32>().ok()?.checked_mul(100)?.checked_add(cents)
+}
+
+/// What a `span`'s style gives its runs (see [`Node::Span`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SpanStyle {
+    /// The font colour (`color`).
+    pub color: Option<Rgb>,
+    /// The highlight (`background-color`).
+    pub highlight: Option<Rgb>,
+    pub size: Option<FontSize>,
+}
+
+impl SpanStyle {
+    /// Whether it gives nothing.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.color.is_none() && self.highlight.is_none() && self.size.is_none()
+    }
+
+    /// The style a `style` attribute gives: its `color`, `background-color` (or a `background` that is just a
+    /// colour) and `font-size`.
+    #[must_use]
+    pub fn of_css(style: &str) -> Self {
+        let mut found = Self::default();
+        for (name, value) in declarations(style) {
+            match name.as_str() {
+                "color" => found.color = Rgb::parse(value),
+                "background-color" | "background" => found.highlight = Rgb::parse(value),
+                "font-size" => found.size = FontSize::parse(value),
+                _ => {}
+            }
+        }
+        found
+    }
+
+    /// It, with what `inner` sets taking its place: a span's style inside this one's.
+    #[must_use]
+    pub fn under(self, inner: Self) -> Self {
+        Self {
+            color: inner.color.or(self.color),
+            highlight: inner.highlight.or(self.highlight),
+            size: inner.size.or(self.size),
+        }
+    }
+}
+
+/// A `style` attribute's declarations: each property's name (lower case) and its value.
+fn declarations(style: &str) -> impl Iterator<Item = (String, &str)> {
+    style.split(';').filter_map(|declaration| {
+        let (name, value) = declaration.split_once(':')?;
+        Some((name.trim().to_ascii_lowercase(), value.trim()))
+    })
+}
+
+/// How many steps a paragraph's `style` indents it: its `margin-left` in pixels, [`INDENT_STEP`] a step (rounded),
+/// at most [`MAX_INDENT`]; `0` without one.
+fn indent_of(style: &str) -> u8 {
+    let step = INDENT_STEP * 100;
+    declarations(style)
+        .filter(|(name, _)| name == "margin-left")
+        .filter_map(|(_, value)| hundredths(value.strip_suffix("px")?))
+        .filter(|cents| *cents > 0)
+        .map(|cents| {
+            let steps = (cents + step / 2) / step;
+            u8::try_from(steps.max(1)).unwrap_or(MAX_INDENT).min(MAX_INDENT)
+        })
+        .last()
+        .unwrap_or(0)
 }
 
 /// A list (`ol` or `ul`): its items, each what one `li` holds.
@@ -211,6 +431,12 @@ impl Marks {
     pub const fn with(self, other: Self) -> Self {
         Self(self.0 | other.0)
     }
+
+    /// It without `other`'s marks.
+    #[must_use]
+    pub const fn without(self, other: Self) -> Self {
+        Self(self.0 & !other.0)
+    }
 }
 
 /// A thread's event (`ThreadActivity/AddMember`), its XML content read: `<addmember>` with `eventtime`, `initiator`,
@@ -253,12 +479,7 @@ pub fn parse(content: &str) -> RichText {
 /// `chat-shapes` captures of 2026-10-21, `docs/protocol/chat.md`), which would otherwise read as blank lines. A
 /// no-break space is text, and whitespace between inline nodes stays.
 fn drop_block_gaps(nodes: &mut Vec<Node>) {
-    let is_block = |node: Option<&Node>| {
-        matches!(
-            node,
-            Some(Node::Paragraph(_) | Node::Quote(_) | Node::List(_) | Node::Code(_))
-        )
-    };
+    let is_block = |node: Option<&Node>| node.is_some_and(Node::is_block);
     let is_gap = |node: &Node| matches!(node, Node::Text { text, .. } if text.chars().all(|c| c.is_ascii_whitespace()));
     let keep: Vec<bool> = (0..nodes.len())
         .map(|index| {
@@ -274,12 +495,7 @@ fn drop_block_gaps(nodes: &mut Vec<Node>) {
 /// paragraph, a quote): a text run's leading spaces at the start of the container, after a `br` or a block, its
 /// trailing ones at the end, before a `br` or a block. A browser draws none of them. Runs left empty go.
 fn trim_line_edges(nodes: &mut Vec<Node>) {
-    let edge = |node: Option<&Node>| {
-        matches!(
-            node,
-            None | Some(Node::Break | Node::Paragraph(_) | Node::Quote(_) | Node::List(_) | Node::Code(_))
-        )
-    };
+    let edge = |node: Option<&Node>| node.is_none_or(|node| matches!(node, Node::Break) || node.is_block());
     for index in 0..nodes.len() {
         let starts = edge(index.checked_sub(1).and_then(|before| nodes.get(before)));
         let ends = edge(nodes.get(index + 1));
@@ -399,6 +615,12 @@ enum Container {
     },
     /// A block of code (`pre`): its text is collected in it, not as children.
     Code(Code),
+    /// A `span` whose style gives something ([`SpanStyle`]).
+    Span(SpanStyle),
+    /// A heading, its level.
+    Heading(u8),
+    /// A paragraph indented by that many steps.
+    Indented(u8),
 }
 
 impl Container {
@@ -406,7 +628,12 @@ impl Container {
     const fn is_block(&self) -> bool {
         matches!(
             self,
-            Self::Paragraph | Self::Quote(..) | Self::List { .. } | Self::Code(_)
+            Self::Paragraph
+                | Self::Quote(..)
+                | Self::List { .. }
+                | Self::Code(_)
+                | Self::Heading(_)
+                | Self::Indented(_)
         )
     }
 }
@@ -571,6 +798,10 @@ impl Builder {
                 self.after_space = true;
                 self.children().push(Node::Break);
             }
+            "hr" => {
+                self.after_space = true;
+                self.children().push(Node::Rule);
+            }
             "img" => {
                 self.after_space = false;
                 match image(element) {
@@ -596,6 +827,9 @@ impl Builder {
         }
         let node = match kind {
             Container::Paragraph => Node::Paragraph(children),
+            Container::Span(style) => Node::Span { style, children },
+            Container::Heading(level) => Node::Heading { level, children },
+            Container::Indented(depth) => Node::Indented { depth, children },
             Container::Link(href) => Node::Link { href, children },
             Container::Mention(item_id) => {
                 let mut text = String::new();
@@ -660,9 +894,24 @@ fn mark(name: &str) -> Option<Marks> {
 fn container(element: &Element) -> Option<Container> {
     let name = element.name();
     if PARAGRAPHS.contains(&name) {
-        return Some(Container::Paragraph);
+        let depth = if name == "li" {
+            0
+        } else {
+            element.attr("style").map_or(0, indent_of)
+        };
+        return Some(if depth > 0 {
+            Container::Indented(depth)
+        } else {
+            Container::Paragraph
+        });
     }
     match name {
+        "h1" | "h2" | "h3" | "h4" | "h5" | "h6" => Some(Container::Heading(name.as_bytes()[1] - b'0')),
+        "span" if element.attr("itemtype").is_none() => element
+            .attr("style")
+            .map(SpanStyle::of_css)
+            .filter(|style| !style.is_empty())
+            .map(Container::Span),
         "pre" => Some(Container::Code(Code {
             language: element.attr("class").and_then(language_of),
             runs: Vec::new(),
@@ -807,8 +1056,15 @@ fn plain_text(nodes: &[Node], out: &mut String) {
         match node {
             Node::Text { text, .. } | Node::Mention { text, .. } => out.push_str(text),
             Node::Break => out.push('\n'),
-            Node::Paragraph(children) => paragraph_text(children, out),
-            Node::Link { children, .. } => plain_text(children, out),
+            Node::Paragraph(children) | Node::Heading { children, .. } | Node::Indented { children, .. } => {
+                paragraph_text(children, out);
+            }
+            Node::Link { children, .. } | Node::Span { children, .. } => plain_text(children, out),
+            Node::Rule => {
+                if !out.is_empty() && !out.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
             Node::Image(image) => out.push_str(image.alt.as_deref().unwrap_or_default()),
             Node::Quote(quote) => plain_text(&quote.body, out),
             Node::Code(code) => {

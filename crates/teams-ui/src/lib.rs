@@ -85,6 +85,7 @@ pub mod clock;
 pub mod code;
 pub mod compose;
 pub mod desktop;
+pub mod editor;
 pub mod event_form;
 pub mod files;
 pub mod first_run;

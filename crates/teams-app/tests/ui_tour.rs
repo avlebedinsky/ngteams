@@ -78,7 +78,7 @@ const SETTLE: Duration = Duration::from_millis(1500);
 type Step = (&'static str, fn(&Entity<Shell>, &mut Window, &mut App));
 
 /// The tour.
-const STEPS: [Step; 54] = [
+const STEPS: [Step; 58] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -113,6 +113,26 @@ const STEPS: [Step; 54] = [
     // the box with the focus and text in it: its accent line, Send in the brand colour
     ("chat-compose", |shell, window, cx| {
         type_in_compose(shell, "Lunch at noon?", window, cx);
+    }),
+    // the box expanded with its format bar (Ctrl+Shift+X), holding formatted text: a heading, bold, a colour and a
+    // highlight, a bulleted list
+    ("chat-compose-expanded", |shell, window, cx| {
+        expand_with_formats(shell, window, cx)
+    }),
+    // the font colour menu under its button
+    ("chat-compose-colours", |shell, window, cx| {
+        with_compose(shell, cx, |compose, cx| {
+            compose.format_bar().update(cx, |bar, cx| {
+                bar.toggle(teams_ui::editor::toolbar::Menu::FontColour, window, cx)
+            });
+        });
+    }),
+    // sent: drawn by the message renderer as the editor showed it, the box collapsed again
+    ("chat-formatted-sent", |shell, window, cx| {
+        with_compose(shell, cx, |compose, cx| {
+            compose.format_bar().update(cx, |bar, cx| bar.close(window, cx));
+            compose.send(window, cx);
+        });
     }),
     // text selected with the mouse from the second-to-last message into the last, on the selection colour, then its
     // right-click menu
@@ -205,6 +225,9 @@ const STEPS: [Step; 54] = [
     }),
     ("chat-dark-compose", |shell, window, cx| {
         type_in_compose(shell, "Lunch at noon?\nThe usual place, or the new one?", window, cx);
+    }),
+    ("chat-dark-compose-expanded", |shell, window, cx| {
+        expand_with_formats(shell, window, cx)
     }),
     ("chat-dark-emoji", |shell, window, cx| {
         with_compose(shell, cx, |compose, cx| compose.toggle_emoji(window, cx));
@@ -687,6 +710,51 @@ fn with_compose(shell: &Entity<Shell>, cx: &mut App, change: impl FnOnce(&mut Co
     }
 }
 
+/// Expands the compose box with its format bar and fills it with formatted text (made up): a heading, a paragraph of
+/// bold, coloured and highlighted runs, and a bulleted list, the cursor at its end.
+fn expand_with_formats(shell: &Entity<Shell>, window: &mut Window, cx: &mut App) {
+    use teams_proto::chat::{Marks, Rgb, SpanStyle};
+    use teams_ui::editor::doc::{Attrs, Block, Doc, Kind, Run};
+    let bold = Attrs {
+        marks: Marks::BOLD,
+        ..Attrs::default()
+    };
+    let coloured = Attrs {
+        span: SpanStyle {
+            color: Some(Rgb(0x1E_53A3)),
+            highlight: Some(Rgb(0xEB_D3E1)),
+            size: None,
+        },
+        ..Attrs::default()
+    };
+    let doc = Doc::new(vec![
+        Block::new(Kind::Heading(2), 0, vec![Run::new("Friday's plan", Attrs::default())]),
+        Block::new(
+            Kind::Paragraph,
+            0,
+            vec![
+                Run::new("Lunch is ", Attrs::default()),
+                Run::new("at noon", bold),
+                Run::new(", then the ", Attrs::default()),
+                Run::new("review", coloured),
+                Run::new(":", Attrs::default()),
+            ],
+        ),
+        Block::new(Kind::Bullet, 0, vec![Run::new("slides from Lab Bee", Attrs::default())]),
+        Block::new(Kind::Bullet, 0, vec![Run::new("the demo", Attrs::default())]),
+    ]);
+    with_compose(shell, cx, |compose, cx| {
+        if compose.emoji_picker().is_some() {
+            compose.toggle_emoji(window, cx);
+        }
+        if !compose.is_expanded() {
+            compose.toggle_expanded(window, cx);
+        }
+        compose.editor().update(cx, |editor, cx| editor.set_doc(doc, cx));
+        compose.focus(window, cx);
+    });
+}
+
 /// Closes the emoji picker if it is open, gives the compose box the focus and types `text` into it, in place of what
 /// an earlier step left there.
 fn type_in_compose(shell: &Entity<Shell>, text: &str, window: &mut Window, cx: &mut App) {
@@ -695,9 +763,9 @@ fn type_in_compose(shell: &Entity<Shell>, text: &str, window: &mut Window, cx: &
             compose.toggle_emoji(window, cx);
         }
         compose.focus(window, cx);
-        compose.input().update(cx, |input, cx| {
-            input.set_value("", window, cx);
-            input.insert(text.to_owned(), window, cx);
+        compose.editor().update(cx, |editor, cx| {
+            editor.set_doc(teams_ui::editor::doc::Doc::default(), cx);
+            editor.insert(text, cx);
         });
     });
 }

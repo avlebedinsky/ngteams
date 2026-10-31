@@ -38,6 +38,26 @@ impl Glyph {
     pub const TAG: Self = Self(include_bytes!("../assets/icons/tag.svg"));
     pub const TEXT_FORMAT: Self = Self(include_bytes!("../assets/icons/type.svg"));
     pub const USER_COG: Self = Self(include_bytes!("../assets/icons/user-cog.svg"));
+    // the message box's formats
+    pub const BOLD: Self = Self(include_bytes!("../assets/icons/bold.svg"));
+    pub const ITALIC: Self = Self(include_bytes!("../assets/icons/italic.svg"));
+    pub const UNDERLINE: Self = Self(include_bytes!("../assets/icons/underline.svg"));
+    pub const STRIKETHROUGH: Self = Self(include_bytes!("../assets/icons/strikethrough.svg"));
+    pub const LIST: Self = Self(include_bytes!("../assets/icons/list.svg"));
+    pub const LIST_ORDERED: Self = Self(include_bytes!("../assets/icons/list-ordered.svg"));
+    pub const HIGHLIGHTER: Self = Self(include_bytes!("../assets/icons/highlighter.svg"));
+    pub const FONT_COLOUR: Self = Self(include_bytes!("../assets/icons/baseline.svg"));
+    pub const FONT_SIZE: Self = Self(include_bytes!("../assets/icons/a-large-small.svg"));
+    pub const PILCROW: Self = Self(include_bytes!("../assets/icons/pilcrow.svg"));
+    pub const HEADING_1: Self = Self(include_bytes!("../assets/icons/heading-1.svg"));
+    pub const HEADING_2: Self = Self(include_bytes!("../assets/icons/heading-2.svg"));
+    pub const HEADING_3: Self = Self(include_bytes!("../assets/icons/heading-3.svg"));
+    pub const INDENT: Self = Self(include_bytes!("../assets/icons/list-indent-increase.svg"));
+    pub const OUTDENT: Self = Self(include_bytes!("../assets/icons/list-indent-decrease.svg"));
+    pub const REMOVE_FORMATTING: Self = Self(include_bytes!("../assets/icons/remove-formatting.svg"));
+    pub const UNDO: Self = Self(include_bytes!("../assets/icons/undo-2.svg"));
+    pub const REDO: Self = Self(include_bytes!("../assets/icons/redo-2.svg"));
+    pub const TABLE: Self = Self(include_bytes!("../assets/icons/table.svg"));
     /// A ticked box (a calendar shown in the calendar's list).
     pub const CHECKBOX: Self = Self(include_bytes!("../assets/icons/square-check.svg"));
     pub const CHEVRON_DOWN: Self = Self(include_bytes!("../assets/icons/chevron-down.svg"));

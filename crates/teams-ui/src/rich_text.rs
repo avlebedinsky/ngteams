@@ -36,13 +36,16 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, FontStyle, FontWeight, HighlightStyle, InteractiveElement as _, IntoElement, ParentElement as _,
     SharedString, StrikethroughStyle, Styled as _, UnderlineStyle, Window, div, px, rgb,
 };
 use serde_json::{Value, json};
 use teams_proto::InlinePicture;
-use teams_proto::chat::{Code, Field, Image, List, Marks, Mention, MentionKind, Node, Quote, RichText, WEB_CLIENT};
+use teams_proto::chat::{
+    Code, Field, FontSize, Image, List, Marks, Mention, MentionKind, Node, Quote, RichText, SpanStyle, WEB_CLIENT,
+};
 
 pub use crate::code::CodeBlock;
 use crate::inline::{Emoticon, InlineText, LARGE_EMOTICON, Picture};
@@ -89,6 +92,8 @@ pub struct Style {
     pub link: bool,
     /// An image's placeholder.
     pub image: bool,
+    /// Its font colour, highlight and size (Teams' editor's `span`s).
+    pub span: SpanStyle,
 }
 
 /// Whom a mention names, as far as the message says.
@@ -116,13 +121,18 @@ pub struct InlineEmoticon {
     pub alt: Option<String>,
 }
 
-/// A paragraph's text, its styled pieces (in order, not overlapping, covering the text), its links and its emoticons.
+/// A paragraph's text, its styled pieces (in order, not overlapping, covering the text), its links and its emoticons;
+/// and what kind of paragraph it is (a heading, an indented one).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TextBlock {
     pub text: String,
     pub pieces: Vec<(Range<usize>, Style)>,
     pub links: Vec<LinkRange>,
     pub emoticons: Vec<InlineEmoticon>,
+    /// A heading's level (1 to 6).
+    pub heading: Option<u8>,
+    /// How many steps it is indented ([`INDENT`] each).
+    pub indent: u8,
 }
 
 impl TextBlock {
@@ -195,6 +205,30 @@ impl TextBlock {
             at = emoticon.range.end;
         }
         self.text[at..].trim().is_empty() && self.links.is_empty()
+    }
+
+    /// The size most of its text has (by bytes), Teams' editor's Small or Large; `None` for Medium. GPUI lays a
+    /// paragraph out at one size, so a paragraph of mixed sizes is drawn at the one most of it has.
+    #[must_use]
+    pub fn size(&self) -> Option<FontSize> {
+        let mut counts = [0usize; 3];
+        for (range, style) in &self.pieces {
+            let slot = match style.span.size {
+                None => 0,
+                Some(FontSize::Small) => 1,
+                Some(FontSize::Large) => 2,
+            };
+            counts[slot] += range.len();
+        }
+        let (most, _) = counts
+            .iter()
+            .enumerate()
+            .max_by_key(|(slot, count)| (**count, std::cmp::Reverse(*slot)))?;
+        match most {
+            1 => Some(FontSize::Small),
+            2 => Some(FontSize::Large),
+            _ => None,
+        }
     }
 
     /// The pieces with any style but the plain one.
@@ -281,6 +315,8 @@ pub enum Block {
     List(ListBlock),
     Forward(ForwardBlock),
     Code(CodeBlock),
+    /// A horizontal rule.
+    Rule,
 }
 
 impl Block {
@@ -293,7 +329,7 @@ impl Block {
                 .any(|(_, style)| style.mention == Some(Mentioned::Me)),
             Self::List(list) => list.items.iter().flatten().any(Self::mentions_me),
             // a forward's mentions are the original's, of its own chat
-            Self::Quote(_) | Self::Picture(_) | Self::Forward(_) | Self::Code(_) => false,
+            Self::Quote(_) | Self::Picture(_) | Self::Forward(_) | Self::Code(_) | Self::Rule => false,
         }
     }
 
@@ -311,7 +347,7 @@ impl Block {
                 .collect(),
             Self::Forward(forward) => forward.blocks.iter().flat_map(Self::plain_lines).collect(),
             Self::Code(code) => code.lines.iter().map(|line| line.text.clone()).collect(),
-            Self::Quote(_) | Self::Picture(_) => Vec::new(),
+            Self::Quote(_) | Self::Picture(_) | Self::Rule => Vec::new(),
         }
     }
 }
@@ -399,7 +435,7 @@ fn collect_units<'r>(blocks: &'r [Block], path: &mut Vec<usize>, units: &mut Vec
                     text: UnitText::Code(line.shown().0),
                 }
             })),
-            Block::Picture(_) => {}
+            Block::Picture(_) | Block::Rule => {}
         }
         path.pop();
     }
@@ -467,7 +503,7 @@ impl Rendered {
                     Block::Picture(picture) => into.push(picture),
                     Block::List(list) => list.items.iter().for_each(|item| walk(item, into)),
                     Block::Forward(forward) => walk(&forward.blocks, into),
-                    Block::Text(_) | Block::Quote(_) | Block::Code(_) => {}
+                    Block::Text(_) | Block::Quote(_) | Block::Code(_) | Block::Rule => {}
                 }
             }
         }
@@ -602,6 +638,8 @@ struct Builder<'a> {
     quoted: bool,
     /// How many lists the walk is in.
     level: usize,
+    /// The style the `span`s the walk is in give.
+    span: SpanStyle,
 }
 
 impl<'a> Builder<'a> {
@@ -614,12 +652,14 @@ impl<'a> Builder<'a> {
             web_link: None,
             quoted: false,
             level: 0,
+            span: SpanStyle::default(),
         }
     }
 
     fn push(&mut self, text: &str, style: Style) {
         let style = Style {
             link: self.link.is_some(),
+            span: self.span,
             ..style
         };
         self.current.push(text, style, self.link.as_deref());
@@ -666,8 +706,29 @@ impl<'a> Builder<'a> {
                 Node::Quote(quote) => self.quote(quote),
                 Node::List(list) => self.list(list),
                 Node::Code(code) => self.code(code),
+                Node::Span { style, children } => {
+                    let outer = self.span;
+                    self.span = outer.under(*style);
+                    self.walk(children);
+                    self.span = outer;
+                }
+                Node::Heading { level, children } => self.paragraph_of(Some(*level), 0, children),
+                Node::Indented { depth, children } => self.paragraph_of(None, *depth, children),
+                Node::Rule => {
+                    self.end_block();
+                    self.blocks.push(Block::Rule);
+                }
             }
         }
+    }
+
+    /// A heading or an indented paragraph: a paragraph of its own, marked so.
+    fn paragraph_of(&mut self, heading: Option<u8>, indent: u8, children: &[Node]) {
+        self.end_block();
+        self.current.heading = heading;
+        self.current.indent = indent;
+        self.walk(children);
+        self.end_block();
     }
 
     /// A block of code: a block of its own, cutting the paragraph it is in.
@@ -688,6 +749,7 @@ impl<'a> Builder<'a> {
                 inner.link.clone_from(&self.link);
                 inner.quoted = self.quoted;
                 inner.level = self.level + 1;
+                inner.span = self.span;
                 inner.walk(item);
                 inner.finish()
             })
@@ -797,6 +859,89 @@ pub fn opens(href: &str) -> bool {
         .any(|scheme| lower.starts_with(scheme))
 }
 
+/// The relative luminance of `color` (0xRRGGBB), as WCAG computes it.
+fn luminance(color: u32) -> f32 {
+    let channel = |shift: u32| {
+        let value = f32::from(u8::try_from((color >> shift) & 0xff).unwrap_or(0)) / 255.0;
+        if value <= 0.039_28 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * channel(16) + 0.7152 * channel(8) + 0.0722 * channel(0)
+}
+
+/// The contrast ratio between two colours (1 to 21).
+fn contrast(one: u32, other: u32) -> f32 {
+    let (one, other) = (luminance(one), luminance(other));
+    (one.max(other) + 0.05) / (one.min(other) + 0.05)
+}
+
+/// `color` mixed toward `toward` by `quarters` quarters (0 to 4).
+fn mix(color: u32, toward: u32, quarters: u32) -> u32 {
+    let quarters = quarters.min(4);
+    let channel = |shift: u32| {
+        let from = (color >> shift) & 0xff;
+        let to = (toward >> shift) & 0xff;
+        // a channel's value, 0 to 255: a weighted mean of two of them
+        ((from * (4 - quarters) + to * quarters + 2) / 4) << shift
+    };
+    channel(16) | channel(8) | channel(0)
+}
+
+/// The least contrast a font colour keeps against the surface it is drawn on.
+const LEAST_CONTRAST: f32 = 3.0;
+
+/// Whether `palette` is a dark one: its surface darker than mid grey.
+#[must_use]
+pub fn is_dark(palette: Palette) -> bool {
+    luminance(palette.surface) < 0.2
+}
+
+/// A font colour as drawn on `on` (the surface, or the highlight under it): as given while it reads there, else
+/// moved toward `palette`'s text colour until it does, as Teams lightens a dark colour in its dark theme (a pasted
+/// black stays readable).
+#[must_use]
+pub fn font_colour(color: u32, on: u32, palette: Palette) -> u32 {
+    let mut shown = color;
+    for step in 1..=4u8 {
+        if contrast(shown, on) >= LEAST_CONTRAST {
+            break;
+        }
+        shown = mix(color, palette.foreground, u32::from(step));
+    }
+    shown
+}
+
+/// A highlight as drawn on `palette`: Teams' colour itself on a light theme; on a dark one a dark shade of it (three
+/// quarters of the way to the surface), as Teams' dark theme draws its highlights, so its light text reads on it.
+#[must_use]
+pub fn highlight_colour(color: u32, palette: Palette) -> u32 {
+    if is_dark(palette) {
+        mix(color, palette.surface, 3)
+    } else {
+        color
+    }
+}
+
+/// The text size, px, a paragraph is drawn at: a heading's by its level, else Teams' editor's Small or Large; `None`
+/// for the view's own size.
+#[must_use]
+pub fn block_text_size(heading: Option<u8>, size: Option<FontSize>) -> Option<f32> {
+    match (heading, size) {
+        (Some(1), _) => Some(24.0),
+        (Some(2), _) => Some(20.0),
+        (Some(3), _) => Some(17.0),
+        (Some(_), _) | (None, Some(FontSize::Large)) => Some(20.0),
+        (None, Some(FontSize::Small)) => Some(11.0),
+        (None, None) => None,
+    }
+}
+
+/// How far a paragraph is indented per step, px: Teams' editor's 40.
+pub const INDENT: f32 = 40.0;
+
 /// A tint of `color` (0xRRGGBB) at `alpha`.
 pub(crate) fn tint(color: u32, alpha: f32) -> gpui::Hsla {
     let mut tinted: gpui::Hsla = rgb(color).into();
@@ -826,6 +971,14 @@ pub fn highlight(style: Style, palette: Palette) -> HighlightStyle {
             thickness: px(1.0),
             ..StrikethroughStyle::default()
         });
+    }
+    let under = style.span.highlight.map(|color| highlight_colour(color.0, palette));
+    if let Some(under) = under {
+        highlight.background_color = Some(rgb(under).into());
+    }
+    if let Some(color) = style.span.color {
+        let on = under.unwrap_or(palette.surface);
+        highlight.color = Some(rgb(font_colour(color.0, on, palette)).into());
     }
     if style.marks.contains(Marks::CODE) {
         highlight.background_color = Some(tint(palette.border, 1.0));
@@ -932,6 +1085,7 @@ fn blocks(draw: &Draw<'_>, path: &mut Vec<usize>, blocks: &[Block]) -> Vec<AnyEl
                 Block::Picture(picture) => picture_block(draw, path, picture),
                 Block::List(list) => list_block(draw, path, list),
                 Block::Forward(forward) => forward_block(draw, path, forward),
+                Block::Rule => rule(draw.palette),
                 Block::Code(code) => crate::code::card(
                     SharedString::from(format!("{}-code-{path:?}", draw.id)),
                     code,
@@ -973,6 +1127,15 @@ fn picture_block(draw: &Draw<'_>, path: &[usize], picture: &PictureBlock) -> Any
         .debug_selector(|| "rich-picture".to_owned())
         .py_1()
         .child(drawn)
+        .into_any_element()
+}
+
+/// A horizontal rule: a hairline across the message, with a little room above and below.
+fn rule(palette: Palette) -> AnyElement {
+    div()
+        .debug_selector(|| "rich-rule".to_owned())
+        .py_2()
+        .child(div().h(px(1.0)).w_full().bg(rgb(palette.border)))
         .into_any_element()
 }
 
@@ -1113,6 +1276,11 @@ fn text_block(draw: &Draw<'_>, path: &[usize], block: &TextBlock, place: Option<
     div()
         .w_full()
         .debug_selector(move || selector.to_owned())
+        .when_some(block_text_size(block.heading, block.size()), |div, size| {
+            div.text_size(px(size)).line_height(px(size * 1.35))
+        })
+        .when(block.heading.is_some(), |div| div.font_weight(FontWeight::SEMIBOLD))
+        .when(block.indent > 0, |div| div.pl(px(INDENT * f32::from(block.indent))))
         .child(text)
         .into_any_element()
 }

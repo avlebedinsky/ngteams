@@ -245,6 +245,7 @@ fn a_reply_s_quote_names_its_sender_and_a_plain_quote_none() {
             pieces: vec![(0..12, Style::default())],
             links: Vec::new(),
             emoticons: Vec::new(),
+            ..TextBlock::default()
         })]
     );
     assert_eq!(text_block(&rendered, 1).text, "my answer");
@@ -338,7 +339,9 @@ fn an_image_of_a_chat_message_is_followed_by_its_link_to_the_web() {
         .iter()
         .find_map(|block| match block {
             Block::Quote(quote) => Some(quote),
-            Block::Text(_) | Block::Picture(_) | Block::List(_) | Block::Forward(_) | Block::Code(_) => None,
+            Block::Text(_) | Block::Picture(_) | Block::List(_) | Block::Forward(_) | Block::Code(_) | Block::Rule => {
+                None
+            }
         })
         .unwrap();
     let Block::Text(inner) = &quoted.blocks[0] else {
@@ -632,7 +635,9 @@ fn a_gif_from_the_gif_picker_is_a_picture_block_at_its_size() {
         .iter()
         .filter_map(|block| match block {
             Block::Picture(picture) => Some(picture),
-            Block::Text(_) | Block::Quote(_) | Block::List(_) | Block::Forward(_) | Block::Code(_) => None,
+            Block::Text(_) | Block::Quote(_) | Block::List(_) | Block::Forward(_) | Block::Code(_) | Block::Rule => {
+                None
+            }
         })
         .collect();
     assert_eq!(pictures.len(), 1, "{rendered:#?}");
@@ -640,7 +645,8 @@ fn a_gif_from_the_gif_picker_is_a_picture_block_at_its_size() {
     assert!(
         rendered.blocks.iter().all(|block| match block {
             Block::Text(text) => !text.text.contains(IMAGE_PLACEHOLDER),
-            Block::Picture(_) | Block::Quote(_) | Block::List(_) | Block::Forward(_) | Block::Code(_) => true,
+            Block::Picture(_) | Block::Quote(_) | Block::List(_) | Block::Forward(_) | Block::Code(_) | Block::Rule =>
+                true,
         }),
         "no placeholder beside it: {rendered:#?}"
     );

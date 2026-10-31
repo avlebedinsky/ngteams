@@ -112,11 +112,12 @@ checking:
 No Zed code is in the repo: Zed's UI crates are GPL-3.0 and served as a design reference only. The rest of the UI is our
 own, on the kit's widgets and gpui-pre's examples (Apache-2.0).
 
-The kit's `Textarea` (the compose box) is tested on GPUI's test context (`crates/teams-ui/tests/kit.rs`: typing,
-selection, the clipboard with plain text only, undo, soft wrap, IME composition, Enter and Shift-Enter) and on the
-real platform in the UI sandbox (`crates/teams-ui/tests/kit_window.rs`, which also switches the theme live through a
-fake settings portal on the sandbox's bus, and clicks a message's link drawn by our rich text renderer, which goes to
-the sandbox's no-op opener).
+The kit's `Textarea` is tested on GPUI's test context (`crates/teams-ui/tests/kit.rs`: typing, selection, the
+clipboard with plain text only, undo, soft wrap, IME composition, Enter and Shift-Enter) and on the real platform in
+the UI sandbox (`crates/teams-ui/tests/kit_window.rs`, which also switches the theme live through a fake settings
+portal on the sandbox's bus, and clicks a message's link drawn by our rich text renderer, which goes to the sandbox's
+no-op opener). The compose box is our own rich-text editor (`crates/teams-ui/src/editor`, tested in
+`crates/teams-ui/tests/editor.rs`), drawn with GPUI's text elements as the renderer draws messages.
 
 ## The lab
 
@@ -489,8 +490,16 @@ its text), Delete (the account's own) and Escape (clear the selection) act on it
 Teams' hover bar over its bubble's top right: the quick reactions (the account's most used on its stored messages
 first, then Teams' 👍 ❤️ 😆 😮 😢 😡), React, Edit on the account's own, Reply and "More options" (Copy text, Delete),
 each named by its tooltip with its key. The compose box is drawn as Teams' (a rounded box with its accent line along
-the foot while it has the focus) with Emoji and, behind a divider, Send inside it on the right: Emoji (also Ctrl+. or
-Ctrl+;) opens every emoji Teams offers, searchable, and puts the one picked at the cursor; Send does what Enter does. Ctrl+K opens the chat switcher (fuzzy over the chats' names; Enter opens,
+the foot while it has the focus) with Format, Emoji, Attach, Loop and Actions and apps (the last three disabled: not in
+this app yet) and, behind a divider, Send inside it on the right: Emoji (also Ctrl+. or Ctrl+;) opens every emoji Teams
+offers, searchable, and puts the one picked at the cursor; Send does what Enter does. It is a rich-text editor, its
+formats shown as they will look and sent as Teams' own editor sends them: Ctrl+B, Ctrl+I, Ctrl+U, Ctrl+Alt+X
+(strikethrough), Ctrl+Shift+C (inline code), Ctrl+Shift+B (a block of code), Ctrl+Shift+7 and Ctrl+Shift+8 (numbered
+and bulleted lists; Enter goes on to the next item, Shift+Enter breaks the line, Tab nests), Ctrl+Alt+4 (a quote),
+Ctrl+Alt+1–3 and Ctrl+Alt+P (headings, a paragraph), Ctrl+Z and Ctrl+Y; a paste keeps the formats of what another
+program or the box itself copied. Format (Ctrl+Shift+X) expands the box with Teams' format bar (the marks, the lists,
+highlight, font colour and size, quote, link, code, and More: paragraph styles, indent, a horizontal line, clear
+formatting, undo and redo; Discard empties the box); expanded, Enter starts a new paragraph and Ctrl+Enter sends. Ctrl+K opens the chat switcher (fuzzy over the chats' names; Enter opens,
 Escape closes). The title bar runs across the top as Teams': the launcher (the app's places), the list pane's toggle, Back
 and Forward (Alt+Left, Alt+Right), the search box, Settings and more (the settings, the zoom, Copy diagnostics) and the
 account's avatar with its presence (the account menu). Ctrl+E (or Ctrl+Shift+F, or a click) searches: suggestions as you

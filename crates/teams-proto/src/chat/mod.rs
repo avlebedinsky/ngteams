@@ -35,9 +35,9 @@ pub use files::{
     FILE_TYPE, FileKind, FilePreview, SharedFile, SharedFiles, is_file_link, is_sharepoint_host, shared_files,
 };
 pub use html::{
-    AMS_IMAGE_ITEMTYPE, EMOJI_ITEMTYPE, FORWARD_ITEMTYPE, Image, List, MAX_CONTENT, MAX_DEPTH, MAX_LIST_START,
-    MENTION_ITEMTYPE, Marks, Node, Quote, REPLY_ITEMTYPE, RichText, ThreadActivity, parse as parse_html,
-    thread_activity,
+    AMS_IMAGE_ITEMTYPE, EMOJI_ITEMTYPE, FORWARD_ITEMTYPE, FontSize, INDENT_STEP, Image, List, MAX_CONTENT, MAX_DEPTH,
+    MAX_INDENT, MAX_LIST_START, MENTION_ITEMTYPE, Marks, Node, Quote, REPLY_ITEMTYPE, Rgb, RichText, SpanStyle,
+    ThreadActivity, parse as parse_html, thread_activity,
 };
 pub use links::{HYPERLINK_TYPE, LinkPreview, link_previews};
 pub use model::{

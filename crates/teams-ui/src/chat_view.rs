@@ -81,6 +81,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
+use crate::editor::{Copy as ComposeCopy, Escape as ComposeEscape};
 use chrono::{DateTime, Datelike as _, Local, NaiveDate, TimeZone, Utc};
 use gpui::ClipboardItem;
 use gpui::{
@@ -91,7 +92,6 @@ use gpui::{
 };
 use gpui_component::Selectable as _;
 use gpui_component::button::{Button, ButtonRounded, ButtonVariants as _};
-use gpui_component::input::{Copy as ComposeCopy, Escape as ComposeEscape};
 use gpui_component::kbd::Kbd;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Sizable as _, Size};

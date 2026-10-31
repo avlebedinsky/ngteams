@@ -69,8 +69,8 @@ fn each_line_is_a_paragraph_and_blank_lines_at_either_end_are_dropped() {
     assert_eq!(html("one\ntwo", &[], &[]), "<p>one</p><p>two</p>");
     assert_eq!(
         html("\n  \none\n\ntwo\n \n", &[], &[]),
-        "<p>one</p><p></p><p>two</p>",
-        "an empty line inside stays"
+        "<p>one</p><p>&nbsp;</p><p>two</p>",
+        "an empty line inside stays, as the web client writes one"
     );
     assert_eq!(html("a < b & \"c\"", &[], &[]), "<p>a &lt; b &amp; &quot;c&quot;</p>");
     assert!(message_text("", &[], &[]).unwrap().is_none());
@@ -251,13 +251,42 @@ fn an_edit_loads_the_text_back_its_mentions_by_mri_and_keeps_its_quote() {
     };
     let mentioned = HashMap::from([("0".to_owned(), LAB_B.to_owned())]);
     let loaded = load(&text, &mentioned).unwrap();
-    assert_eq!(loaded.text, "hi Lab BeeNobody\na link\nend");
-    assert_eq!(loaded.mentions.len(), 1, "a mention naming nobody known stays text");
-    assert_eq!(
-        (loaded.mentions[0].range.clone(), loaded.mentions[0].mri.as_str()),
-        (3..10, LAB_B)
+    assert_eq!(loaded.doc.plain_text(), "hi Lab BeeNobody\na link\nend");
+    let mentions: Vec<(usize, &str)> = loaded
+        .doc
+        .blocks
+        .iter()
+        .enumerate()
+        .flat_map(|(index, block)| block.runs.iter().map(move |run| (index, run)))
+        .filter_map(|(index, run)| Some((index, run.attrs.mention.as_deref()?)))
+        .collect();
+    assert_eq!(mentions, [(0, LAB_B)], "a mention naming nobody known stays text");
+    assert_eq!(loaded.doc.blocks[0].mention_ranges(), [3..10]);
+    assert!(
+        loaded.doc.blocks[0].runs[0]
+            .attrs
+            .marks
+            .contains(teams_proto::chat::Marks::BOLD),
+        "its formats load with it"
     );
-    assert_eq!(loaded.quotes.len(), 1);
+    assert_eq!(
+        loaded.doc.blocks[1].runs[0].attrs.link.as_deref(),
+        Some("https://example.test"),
+        "and its links"
+    );
+    assert!(loaded.quotes.is_empty(), "a quote of nothing is the text's own");
+    let reply = RichText {
+        nodes: vec![Node::Quote(teams_proto::chat::Quote {
+            message_id: Some("1".to_owned()),
+            ..teams_proto::chat::Quote::default()
+        })],
+        truncated: false,
+    };
+    assert_eq!(
+        load(&reply, &mentioned).unwrap().quotes.len(),
+        1,
+        "a reply's quote is kept aside"
+    );
 
     let image = RichText {
         nodes: vec![Node::Image(teams_proto::chat::Image {
@@ -274,11 +303,12 @@ fn an_edit_loads_the_text_back_its_mentions_by_mri_and_keeps_its_quote() {
         truncated: true,
     };
     assert_eq!(load(&partial, &mentioned), Err(CantEdit::Truncated));
-    // a block of code, which the box would send back as plain lines without its card or its indentation
+    // a block of code loads as one, its lines as they were
     let code = teams_proto::chat::parse_html(
         "<p>see</p><pre class=\"language-json\"><code>{<br>&nbsp; \"a\": 1<br>}</code></pre>",
     );
-    assert_eq!(load(&code, &mentioned), Err(CantEdit::Code));
+    let loaded = load(&code, &mentioned).unwrap();
+    assert_eq!(loaded.doc.blocks[1].text(), "{\n  \"a\": 1\n}");
 }
 
 #[test]
@@ -910,8 +940,9 @@ fn typing_goes_out_while_the_box_has_text_and_focus_no_more_often_than_the_captu
     let compose = compose(&view, cx);
     focus_list(&view, cx);
     cx.update(|window, cx| {
+        let _ = window;
         compose.update(cx, |compose, cx| {
-            compose.input().update(cx, |input, cx| input.insert("o", window, cx));
+            compose.editor().update(cx, |editor, cx| editor.insert("o", cx));
         });
     });
     draw(cx);
@@ -1292,7 +1323,7 @@ fn a_send_the_engine_refuses_gives_the_box_its_draft_back() {
     let compose = compose(&view, cx);
     let (tokens, problem) = cx.update(|_, cx| {
         let compose = compose.read(cx);
-        (compose.input().read(cx).tokens().len(), compose.problem().cloned())
+        (compose.editor().read(cx).mention_count(), compose.problem().cloned())
     });
     assert_eq!(tokens, 1, "the mention, still a token");
     assert!(problem.is_some_and(|problem| problem.starts_with("Not sent")));
