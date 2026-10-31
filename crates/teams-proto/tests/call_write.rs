@@ -426,7 +426,9 @@ async fn the_test_call_start_goes_to_the_flight_proxy_with_the_skypetoken_and_re
     assert_eq!(message.len(), 36, "a fresh GUID: {message}");
     assert_eq!(header(&request, "ms-teams-region"), Some("amer"));
     assert_eq!(header(&request, "ms-teams-partition"), Some("amer01"));
-    let target = Target::new(WriteKind::Call, Scope::New).with_added([Mri::new(LAB_A), Mri::new(ECHO)]);
+    let target = Target::new(WriteKind::Call, Scope::New)
+        .with_added([Mri::new(LAB_A), Mri::new(ECHO)])
+        .with_sender(Mri::new(LAB_A));
     let policy = Policy::new().with_echo_callee(Mri::new(ECHO));
     assert_eq!(classified(&request, CALL_START_URL, &policy), Contact::Write(target));
     let body = body_of(&request);
@@ -451,16 +453,16 @@ async fn a_chat_call_start_targets_the_chat_it_carries_with_every_callee() {
     let chat = one_to_one_id(LAB_A, LAB_B).unwrap();
     assert_eq!(
         one.target(),
-        Target::new(WriteKind::Call, Scope::Conversation { id: chat }).with_added([Mri::new(LAB_A), Mri::new(LAB_B)])
+        Target::new(WriteKind::Call, Scope::Conversation { id: chat })
+            .with_added([Mri::new(LAB_A), Mri::new(LAB_B)])
+            .with_sender(Mri::new(LAB_A))
     );
     let group = StartCall::in_chat(&context(), &parts, &[invitee(LAB_B), invitee(LAB_C)], Some(GROUP)).unwrap();
     assert_eq!(
         group.target(),
-        Target::new(WriteKind::Call, Scope::Conversation { id: GROUP.into() }).with_added([
-            Mri::new(LAB_A),
-            Mri::new(LAB_B),
-            Mri::new(LAB_C)
-        ])
+        Target::new(WriteKind::Call, Scope::Conversation { id: GROUP.into() })
+            .with_added([Mri::new(LAB_A), Mri::new(LAB_B), Mri::new(LAB_C)])
+            .with_sender(Mri::new(LAB_A))
     );
     assert_eq!(one.echo(), None);
 
@@ -478,6 +480,7 @@ async fn a_chat_call_start_targets_the_chat_it_carries_with_every_callee() {
                 }
             )
             .with_added([Mri::new(LAB_A), Mri::new(LAB_B)])
+            .with_sender(Mri::new(LAB_A))
         )
     );
     let outsider = StartCall::in_chat(&context(), &parts, &[invitee(OUTSIDER)], None).unwrap();

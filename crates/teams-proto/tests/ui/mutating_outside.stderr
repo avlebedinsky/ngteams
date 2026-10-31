@@ -17,8 +17,8 @@ help: the trait `teams_proto::write::sealed::Sealed` is not implemented for `Els
             AddToCall
             AnswerMedia
             AttachCall
+            CancelEvent
             CreateChat
-            DeclineCall
           and $N others
 note: required by a bound in `Mutating`
  --> src/write.rs
@@ -29,10 +29,10 @@ note: required by a bound in `Mutating`
   = help: the following types implement the trait:
             teams_proto::SetEndpointAvailability
             teams_proto::ForceAvailability
+            teams_proto::CreateEvent
+            teams_proto::UpdateEvent
+            teams_proto::CancelEvent
+            teams_proto::DeleteEvent
             teams_proto::StartCall
             teams_proto::AddToCall
-            teams_proto::JoinCall
-            teams_proto::AttachCall
-            teams_proto::ReportRinging
-            teams_proto::UpdateEndpointState
           and $N others

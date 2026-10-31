@@ -152,7 +152,9 @@ fn classify_start(classifier: &Classifier, body: &str) -> Classification {
 #[test]
 fn the_test_call_start_is_a_call_with_the_caller_and_the_echo_service() {
     let classifier = Classifier::new().with_test_call_callee(Mri::new(ECHO));
-    let expected = Target::new(WriteKind::Call, Scope::New).with_added([Mri::new(CALLER), Mri::new(ECHO)]);
+    let expected = Target::new(WriteKind::Call, Scope::New)
+        .with_added([Mri::new(CALLER), Mri::new(ECHO)])
+        .with_sender(Mri::new(CALLER));
     assert_eq!(
         classify_start(&classifier, &test_call()),
         Classification::Write(expected)
@@ -171,7 +173,9 @@ fn a_test_call_start_is_unknown_without_the_echo_service_s_mri() {
 #[test]
 fn a_test_call_start_may_name_the_echo_service_and_nobody_else() {
     let classifier = Classifier::new().with_test_call_callee(Mri::new(ECHO));
-    let expected = Target::new(WriteKind::Call, Scope::New).with_added([Mri::new(CALLER), Mri::new(ECHO)]);
+    let expected = Target::new(WriteKind::Call, Scope::New)
+        .with_added([Mri::new(CALLER), Mri::new(ECHO)])
+        .with_sender(Mri::new(CALLER));
     let test_call = r#","scenario":"UserInitiatedTestCall""#;
     for to in [
         format!(r#"{{"id":"{ECHO}"}}"#),
@@ -339,8 +343,15 @@ fn expected(name: &str) -> Option<Classification> {
         Some(("chat_create", list)) => {
             Classification::Write(Target::new(WriteKind::ChatCreate, Scope::New).with_added(participants(list)))
         }
+        // a start names its caller, the first of its participants, as its sender
         Some(("call", list)) => {
-            Classification::Write(Target::new(WriteKind::Call, Scope::New).with_added(participants(list)))
+            let added = participants(list);
+            let caller = added.first()?.clone();
+            Classification::Write(
+                Target::new(WriteKind::Call, Scope::New)
+                    .with_added(added)
+                    .with_sender(caller),
+            )
         }
         _ => return None,
     })
