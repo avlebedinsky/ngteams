@@ -797,7 +797,7 @@ starts. Serial execution avoids that overlap in coverage runs; ordinary `cargo t
 concurrency. `--test-threads N` accepts a positive integer to change the harness concurrency; concurrency exercised
 inside a test stays part of that test.
 
-`coverage.toml` holds the 90% target and the measured baseline floors. `teams-store`, `teams-log` and `fixture-guard` have baselines so far;
+`coverage.toml` holds the 90% target and the measured baseline floors. `teams-store`, `teams-log`, `fixture-guard` and `teams-trouter` have baselines so far;
 other crates fail the gate until measured. Raise floors as tests improve; never lower them or exclude runnable code
 to pass. No CI pipeline is configured in this repository, so these are local gates. Running the script without
 `-p` selects all 21 crates with runtime code, including the lab and test-support tooling. Generated WPE bindings,
