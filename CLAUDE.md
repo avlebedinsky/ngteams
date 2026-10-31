@@ -174,3 +174,7 @@ Undoing one needs a new reason, not a cleanup; the why is in each path's module 
 - [README.md](README.md): layout, building, each binary's commands, captures, fixtures and tests. `docs/protocol/`:
   how each Teams service works, `endpoints.md`, `fence-targets.md`. `docs/backlog/`: deferred work. `docs/plans/`:
   plans as decided then, not the current design. Lab: `~/.local/share/teams-lab/`, `~/.config/teams-lab/lab.toml`.
+- This file is loaded by every agent, so it holds only rules, commands and one-line invariants with paths: no dates,
+  incidents or how a bug was found, and no mechanism detail (versions, flags, encoders, field names, how a fix works).
+  A fix's why goes in a comment at the code, how a service works in `docs/protocol/`. Edit this file only when a rule
+  changes or a sentence here turns false, and then fix that sentence without adding detail.
