@@ -385,6 +385,20 @@ shutil.copyfile("llvm-fixture.json", sys.argv[sys.argv.index("--output-path") + 
                 self.assertEqual(result.returncode, 2)
                 self.assertFalse(self.execution.exists())
 
+    def test_relative_sdk_cache_uses_callers_directory_even_with_a_repository_decoy(self):
+        caller = self.root / "caller"
+        caller.mkdir()
+        relative = "SDK with spaces"
+        for sdk in [caller / relative, self.root / relative]:
+            (sdk / "include").mkdir(parents=True)
+            (sdk / "lib").mkdir()
+            (sdk / "lib/libwebrtc.a").touch()
+        result = subprocess.run(self.command + ["--webrtc-cache", relative], cwd=caller,
+                                env=self.environment, capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(self.execution.read_text())["environment"]["LK_CUSTOM_WEBRTC"],
+                         str(caller / relative))
+
     def test_thread_override_is_forwarded_but_invalid_values_never_run_cargo(self):
         result = self.run_wrapper("--test-threads", "3")
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

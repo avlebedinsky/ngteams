@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Offline coverage: one selection at a time, with isolated instrumentation artifacts.
 set -euo pipefail
+caller_dir=$PWD
 cd "$(dirname "$0")/.."
 
 packages=()
@@ -41,11 +42,15 @@ while (($#)); do
             shift 2
             ;;
         --webrtc-cache)
-            [[ $# -ge 2 && -d "$2/include" && -f "$2/lib/libwebrtc.a" ]] || {
+            webrtc_cache=${2:-}
+            if [[ -n "$webrtc_cache" && "$webrtc_cache" != /* ]]; then
+                webrtc_cache="$caller_dir/$webrtc_cache"
+            fi
+            [[ -n "$webrtc_cache" && -d "$webrtc_cache/include" && -f "$webrtc_cache/lib/libwebrtc.a" ]] || {
                 echo "--webrtc-cache requires an SDK directory with include/ and lib/libwebrtc.a" >&2
                 exit 2
             }
-            webrtc_cache=$(cd -- "$2" && pwd -P)
+            webrtc_cache=$(cd -- "$webrtc_cache" && pwd -P)
             shift 2
             ;;
         -h|--help)

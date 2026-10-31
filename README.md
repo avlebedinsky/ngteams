@@ -820,10 +820,11 @@ in `target/coverage-continuous-build`. Ordinary mode keeps separate reports in `
 in `target/coverage-build`. One crate uses its name, the full workspace uses `all`, and long partial selections use a
 short hash. The summary records every selected package and ranks source files by uncovered lines, functions and regions.
 Measurements serialize on one lock across both modes. `--webrtc-cache DIR` passes an existing SDK with `include/` and
-`lib/libwebrtc.a` to the upstream build as `LK_CUSTOM_WEBRTC`; choose the SDK version and platform matching the locked
-dependency. The wrapper does not select or download an SDK itself, and preserves an existing `LK_CUSTOM_WEBRTC` when
-this option is absent. `--report-only` rechecks the selected mode's existing export without running tests; use a fresh
-measurement for change validation. Every executable selected `src/**/*.rs` must appear in the LLVM export, including
+`lib/libwebrtc.a` to the upstream build as `LK_CUSTOM_WEBRTC`; relative paths resolve from the caller's directory.
+Choose the SDK version and platform matching the locked dependency. The wrapper does not select or download an SDK
+itself, and preserves an existing `LK_CUSTOM_WEBRTC` when this option is absent. `--report-only` rechecks the selected
+mode's existing export without running tests; use a fresh measurement for change validation. Every executable selected
+`src/**/*.rs` must appear in the LLVM export, including
 zero-hit files: missing files fail even with `--no-gate`, so omitted feature-gated code cannot silently inflate
 coverage. `coverage.toml` lists individually reviewed declaration/type-only files and separate unit-test modules that
 LLVM does not map because `cargo-llvm-cov` filters test filenames such as `tests.rs`. Each entry records its SHA-256
