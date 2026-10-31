@@ -687,22 +687,26 @@ fn no_view_offers_creating_a_chat() {
     assert!(compose.contains("self.core.write(action)"));
 }
 
-/// The crates the native client's requests are built and sent in, besides the app crates.
-const CLIENT_CRATES: [&str; 4] = ["teams-proto", "teams-core", "teams-trouter", "teams-store"];
+/// The crates the native client's requests are sent from or kept in, besides the app crates and `teams-proto` (where
+/// every request is built).
+const CLIENT_CRATES: [&str; 3] = ["teams-core", "teams-trouter", "teams-store"];
 
 /// What names the service's search (Substrate): its host, and its search and suggestion paths.
-const SERVER_SEARCH: [&str; 4] = [
+const SERVER_SEARCH: [&str; 5] = [
     "substrate.office.com",
     "search/api/",
+    "searchservice/api",
     "/suggestions",
     "userknowledgebase",
 ];
 
-/// The search is the store's (M2 Task 15), never the service's: Substrate's answers list other tenant users, so the lab
-/// never lets it through. No crate of the native client names its host or its paths (the transport reaches only the
-/// hosts of its `Service`s), the views ask only the engine's `search`, and the engine answers it from the store.
+/// The search is the store's and the service's, each only through the engine: the chats' search (M2 Task 15) is
+/// answered from the store, and the title bar's (people, files, messages) by Substrate, a read by `POST`. Substrate is
+/// `teams-proto`'s alone: its `Service`, host and paths are named there and nowhere else of the native client (the
+/// engine sends its typed request, the transport reaches only the hosts of its `Service`s), and the views ask only the
+/// engine's `search` and `search_service`.
 #[test]
-fn the_search_is_the_store_s_and_never_the_service_s() {
+fn the_search_is_the_store_s_and_the_service_s_only_through_the_engine() {
     let mut read = 0;
     for package in APP_CRATES.iter().chain(&CLIENT_CRATES) {
         for (path, text) in sources(&workspace_root().join("crates").join(package).join("src")) {
@@ -710,16 +714,28 @@ fn the_search_is_the_store_s_and_never_the_service_s() {
             for named in SERVER_SEARCH {
                 assert!(!text.contains(named), "{} names {named}", path.display());
             }
+            assert!(
+                !text.contains("SUBSTRATE_HOST"),
+                "{} names Substrate's host",
+                path.display()
+            );
         }
     }
-    assert!(read >= 40, "the client crates' sources were read ({read} files)");
+    assert!(read >= 100, "the client crates' sources were read ({read} files)");
     let search = fs::read_to_string(workspace_root().join("crates/teams-ui/src/search.rs")).expect("UTF-8");
     assert!(search.contains("core.search(query, within, MAX_HITS)"));
+    let global = fs::read_to_string(workspace_root().join("crates/teams-ui/src/global_search.rs")).expect("UTF-8");
+    assert!(global.contains("core.search_service("), "the title bar asks the engine");
     let engine = fs::read_to_string(workspace_root().join("crates/teams-core/src/engine/inbox.rs")).expect("UTF-8");
     assert!(engine.contains("Some(within) => store.search_in(&query, &within, limit),"));
     assert!(engine.contains("None => store.search(&query, limit),"));
     let services = fs::read_to_string(workspace_root().join("crates/teams-proto/src/endpoint.rs")).expect("UTF-8");
-    assert!(!services.to_lowercase().contains("substrate"), "no Service for it");
+    assert!(
+        services.contains("    Substrate,\n"),
+        "Substrate is a Service of teams-proto's"
+    );
+    let proto = fs::read_to_string(workspace_root().join("crates/teams-proto/src/search.rs")).expect("UTF-8");
+    assert!(proto.contains("pub const SUBSTRATE_HOST: &str = \"substrate.office.com\";"));
 }
 
 /// Teams and channels are read-only (M2 Task 16): no write type of the native client targets a channel post's kind
