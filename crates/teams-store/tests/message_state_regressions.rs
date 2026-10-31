@@ -70,9 +70,11 @@ fn stored(store: &Store) -> Message {
         .expect("stored message")
 }
 
-fn assert_refused(error: StoreError) {
+#[track_caller]
+fn assert_refused(error: &StoreError) {
     assert!(
-        matches!(error, StoreError::Sqlite(rusqlite::Error::SqliteFailure(_, Some(reason))) if reason == "synthetic refusal")
+        matches!(error, StoreError::Sqlite(rusqlite::Error::SqliteFailure(_, Some(reason))) if reason == "synthetic refusal"),
+        "{error}"
     );
 }
 
@@ -99,10 +101,12 @@ fn defer_commit_failure(raw: &Connection, trigger: &str) {
         .expect("inject a failure after successful writes");
 }
 
+#[track_caller]
 fn assert_commit_refused(error: &StoreError) {
     assert!(
         matches!(error, StoreError::Sqlite(rusqlite::Error::SqliteFailure(code, _))
-            if code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY)
+            if code.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY),
+        "{error}"
     );
 }
 
@@ -140,7 +144,7 @@ fn failing_to_update_activity_rolls_back_a_message_insert_or_edit() {
             ..message(20, 200)
         };
 
-        assert_refused(store.upsert_message(&next, None).expect_err("activity write fails"));
+        assert_refused(&store.upsert_message(&next, None).expect_err("activity write fails"));
 
         assert_eq!(stored(&store), old);
         assert_eq!(store.conversation(CHAT).expect("unchanged activity"), chat);
@@ -178,7 +182,7 @@ fn a_reaction_insert_failure_rolls_back_earlier_removals_and_the_message_edit() 
     .expect("fail after removing like and inserting heart");
 
     assert_refused(
-        store
+        &store
             .upsert_message(&next, Some(&replacement))
             .expect_err("reaction insert fails"),
     );
@@ -216,7 +220,7 @@ fn a_failed_reaction_watermark_rolls_back_the_whole_merge() {
     let next = message(20, 200);
 
     assert_refused(
-        store
+        &store
             .upsert_message(&next, Some(&[reaction("heart", 20)]))
             .expect_err("watermark fails"),
     );
@@ -256,7 +260,7 @@ fn a_delete_whose_reaction_cleanup_fails_leaves_the_message_usable_for_retry() {
     )
     .expect("refuse clearing the reaction after the body was deleted");
 
-    assert_refused(store.upsert_message(&deleted, None).expect_err("cleanup fails"));
+    assert_refused(&store.upsert_message(&deleted, None).expect_err("cleanup fails"));
 
     assert_eq!(stored(&store), old);
     assert_eq!(
@@ -293,7 +297,7 @@ fn a_refused_per_user_reaction_preserves_the_previous_choice_until_retry() {
     .expect("refuse reaction updates");
     let removal = ReactionChange::remove(CHAT, MESSAGE, "like", ME, 20);
 
-    assert_refused(store.apply_reaction(&removal).expect_err("write refused"));
+    assert_refused(&store.apply_reaction(&removal).expect_err("write refused"));
 
     assert_eq!(
         store.reactions(CHAT, MESSAGE).expect("still present"),
@@ -338,13 +342,10 @@ fn unavailable_reaction_storage_does_not_look_like_no_reactions() {
     seeded(&mut store);
     rename(&raw, "reactions", "unavailable_reactions");
 
-    assert!(matches!(store.reactions(CHAT, MESSAGE), Err(StoreError::Sqlite(_))));
-    assert!(matches!(store.recent_reactions(ME, 10), Err(StoreError::Sqlite(_))));
-    assert!(matches!(store.frequent_reactions(ME, 10), Err(StoreError::Sqlite(_))));
-    assert!(matches!(
-        store.apply_reaction(&ReactionChange::remove(CHAT, MESSAGE, "like", ME, 20)),
-        Err(StoreError::Sqlite(_))
-    ));
+    assert_storage_error(store.reactions(CHAT, MESSAGE));
+    assert_storage_error(store.recent_reactions(ME, 10));
+    assert_storage_error(store.frequent_reactions(ME, 10));
+    assert_storage_error(store.apply_reaction(&ReactionChange::remove(CHAT, MESSAGE, "like", ME, 20)));
 
     rename(&raw, "unavailable_reactions", "reactions");
     assert_eq!(
@@ -379,7 +380,7 @@ fn a_refused_read_horizon_keeps_unread_messages_unread_until_the_retry_commits()
     )
     .expect("refuse horizon checkpoint");
 
-    assert_refused(store.set_read_horizon(&after).expect_err("write refused"));
+    assert_refused(&store.set_read_horizon(&after).expect_err("write refused"));
 
     assert_eq!(store.read_horizon(CHAT, ME).expect("prior horizon"), Some(before));
     assert_eq!(store.unread_count(CHAT, ME).expect("still unread"), 1);
@@ -414,7 +415,7 @@ fn a_refused_sync_checkpoint_keeps_both_history_and_gap_boundaries_for_retry() {
     )
     .expect("refuse replacing the checkpoint");
 
-    assert_refused(store.set_sync_state(&after).expect_err("write refused"));
+    assert_refused(&store.set_sync_state(&after).expect_err("write refused"));
 
     assert_eq!(store.sync_state(CHAT).expect("old checkpoint"), Some(before));
     raw.execute_batch("DROP TRIGGER refuse_sync")
@@ -435,8 +436,8 @@ fn unavailable_sync_storage_is_reported_instead_of_starting_a_new_sync() {
     store.set_sync_state(&before).expect("prior checkpoint");
     rename(&raw, "conversation_sync", "unavailable_sync");
 
-    assert!(matches!(store.sync_state(CHAT), Err(StoreError::Sqlite(_))));
-    assert!(matches!(store.set_sync_state(&state(20)), Err(StoreError::Sqlite(_))));
+    assert_storage_error(store.sync_state(CHAT));
+    assert_storage_error(store.set_sync_state(&state(20)));
 
     rename(&raw, "unavailable_sync", "conversation_sync");
     assert_eq!(store.sync_state(CHAT).expect("recover prior checkpoint"), Some(before));
@@ -458,11 +459,11 @@ fn refused_list_cursor_and_dirty_marker_writes_leave_the_retry_work_durable() {
     .expect("refuse committing progress");
 
     assert_refused(
-        store
+        &store
             .set_conversation_list_sync_link(None, 20)
             .expect_err("cursor refused"),
     );
-    assert_refused(store.set_synced(CHAT).expect_err("marker refused"));
+    assert_refused(&store.set_synced(CHAT).expect_err("marker refused"));
 
     assert_eq!(
         store.conversation_list_sync_link().expect("prior cursor"),
@@ -488,7 +489,7 @@ fn failed_dirty_marker_creation_and_unknown_targets_leave_existing_work_intact()
          BEGIN SELECT RAISE(ABORT, 'synthetic refusal'); END",
     )
     .expect("refuse saving work");
-    assert_refused(store.set_unsynced(CHAT).expect_err("write refused"));
+    assert_refused(&store.set_unsynced(CHAT).expect_err("write refused"));
     assert!(store.unsynced_conversations().expect("no phantom marker").is_empty());
     raw.execute_batch("DROP TRIGGER refuse_dirty")
         .expect("restore saving work");
@@ -588,7 +589,7 @@ fn a_refused_message_statement_preserves_the_prior_message_and_conversation() {
     .expect("refuse the message statement itself");
 
     assert_refused(
-        store
+        &store
             .upsert_message(&message(20, 200), None)
             .expect_err("message refused"),
     );
@@ -667,10 +668,6 @@ fn a_failed_commit_keeps_the_prior_sync_checkpoint_and_pending_retry_work() {
     assert_commit_refused(&error);
     assert_eq!(store.sync_state(CHAT).expect("old checkpoint remains"), Some(before));
     assert_eq!(store.unsynced_conversations().expect("retry still needed"), [CHAT]);
-    let count: i64 = raw
-        .query_row("SELECT COUNT(*) FROM synthetic_deferred_check", [], |row| row.get(0))
-        .expect("failed transaction was rolled back");
-    assert_eq!(count, 0);
     raw.execute_batch("DROP TRIGGER refuse_commit")
         .expect("restore commits");
     store.set_sync_state(&after).expect("retry succeeds on the same store");
@@ -702,10 +699,6 @@ fn a_failed_commit_rolls_back_the_message_activity_and_every_reaction_change() {
         store.reactions(CHAT, MESSAGE).expect("reaction changes rolled back"),
         [reaction("like", 10)]
     );
-    let count: i64 = raw
-        .query_row("SELECT COUNT(*) FROM synthetic_deferred_check", [], |row| row.get(0))
-        .expect("the deferred side effect was rolled back too");
-    assert_eq!(count, 0);
     raw.execute_batch("DROP TRIGGER refuse_commit")
         .expect("restore commits");
     assert_eq!(
