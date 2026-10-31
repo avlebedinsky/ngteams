@@ -19,7 +19,8 @@
 //!   code Enter breaks the line (twice at its end leaves it). Ctrl+Enter always asks to send.
 //! - **Copy and paste**: a copy puts the selection's plain text on the clipboard with the rich text itself beside it,
 //!   so a paste into an editor keeps every format it has; a paste of HTML another program offers keeps what the editor
-//!   writes; any other paste is plain text, a paragraph per line.
+//!   writes; any other paste, and every paste into a block of code, is plain text, a paragraph per line (in a list
+//!   item an item per line, in a block of code its lines).
 //! - **Typing goes through GPUI's input handler** ([`EntityInputHandler`]), so an input method composes text in place.
 
 pub mod convert;
@@ -40,8 +41,7 @@ use gpui::{
     App, ClipboardItem, Context, EventEmitter, FocusHandle, Focusable, Pixels, ScrollHandle, SharedString,
     Subscription, TextLayout, Window,
 };
-use teams_fence::Mri;
-use teams_proto::chat::{FontSize, Marks, Node, Rgb, RichText};
+use teams_proto::chat::{FontSize, Marks, Node, Rgb};
 
 pub use convert::CantLoad;
 use doc::{Attrs, Block, Doc, Kind, MAX_INDENT, Pos, Run, Selection};
@@ -263,23 +263,6 @@ impl Editor {
         self.doc.blocks.len() == 1 && self.doc.blocks[0].is_empty() && self.doc.blocks[0].kind == Kind::Paragraph
     }
 
-    /// How many mentions it holds.
-    #[must_use]
-    pub fn mention_count(&self) -> usize {
-        self.doc
-            .blocks
-            .iter()
-            .flat_map(|block| &block.runs)
-            .filter(|run| run.attrs.mention.is_some())
-            .count()
-    }
-
-    /// What it holds as rich text, and the MRI each mention names by its `item_id`; nothing when it shows nothing.
-    #[must_use]
-    pub fn rich_text(&self) -> (Vec<Node>, Vec<(String, Mri)>) {
-        convert::to_nodes(&self.doc)
-    }
-
     /// Replaces what it holds with `doc`, the cursor at its end; no undo step, no [`EditorEvent::Changed`] (a load,
     /// not an edit).
     pub fn set_doc(&mut self, doc: Doc, cx: &mut Context<Self>) {
@@ -289,11 +272,13 @@ impl Editor {
         self.reset_transient();
         self.undo.clear();
         self.redo.clear();
+        self.last_step = None;
         self.reveal.set(true);
         cx.notify();
     }
 
-    /// Loads `nodes` (a message's text), their mentions' MRIs by `itemid` in `mentioned`.
+    /// Loads `nodes` (a text kept as it was until edited, an event's body: [`convert::Load::Body`]), their mentions'
+    /// MRIs by `itemid` in `mentioned`.
     ///
     /// # Errors
     /// [`CantLoad::Image`]: a picture, which the editor can't send back.
@@ -303,7 +288,7 @@ impl Editor {
         mentioned: &HashMap<String, String, S>,
         cx: &mut Context<Self>,
     ) -> Result<(), CantLoad> {
-        let doc = convert::from_nodes(nodes, mentioned, true)?;
+        let doc = convert::from_nodes(nodes, mentioned, convert::Load::Body)?;
         self.set_doc(doc, cx);
         Ok(())
     }
@@ -928,23 +913,28 @@ impl Editor {
         }
     }
 
-    /// Pastes what the clipboard holds: an editor's rich text with its formats, else its text.
+    /// Pastes what the clipboard holds: an editor's rich text with its formats, else its text. Into a block of code
+    /// it is plain text, as Teams pastes there; and rich text that shows nothing (a paragraph break copied alone) gives
+    /// way to the text beside it.
     pub fn paste(&mut self, plain: bool, cx: &mut Context<Self>) {
         let Some(item) = cx.read_from_clipboard() else { return };
+        let text = item.text();
         let rich = (!plain)
             .then(|| item.metadata().and_then(|metadata| input::doc_of_metadata(metadata)))
             .flatten();
+        let in_code = self.block_kind() == Kind::Code;
         match rich {
-            Some(doc) => self.paste_doc(doc, cx),
-            None => {
-                if let Some(text) = item.text() {
+            Some(doc) if !in_code && (!doc.is_blank() || text.is_none()) => self.paste_doc(doc, cx),
+            rich => {
+                if let Some(text) = text.or_else(|| rich.map(|doc| doc.plain_text())) {
                     self.paste_plain(&text, cx);
                 }
             }
         }
     }
 
-    /// Pastes `text`, a paragraph per line (in a block of code or a list item, its lines stay in the block).
+    /// Pastes `text`: in a block of code its lines stay in the block; in a list item each line is an item of its
+    /// list; elsewhere a paragraph per line.
     pub fn paste_plain(&mut self, text: &str, cx: &mut Context<Self>) {
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
         let kind = self.block_kind();
@@ -957,7 +947,15 @@ impl Editor {
                 Selection::caret(doc.insert_text(at, &text, attrs))
             });
         }
-        let blocks: Vec<Block> = text.split('\n').map(Block::paragraph).collect();
+        let (kind, indent) = if kind.is_list() {
+            (kind, self.doc.blocks[self.selection.head.block].indent)
+        } else {
+            (Kind::Paragraph, 0)
+        };
+        let blocks: Vec<Block> = text
+            .split('\n')
+            .map(|line| Block::new(kind, indent, vec![Run::new(line, Attrs::default())]))
+            .collect();
         self.paste_doc(Doc::new(blocks), cx);
     }
 
@@ -968,18 +966,5 @@ impl Editor {
             let at = into.delete(start, end);
             Selection::caret(into.insert_fragment(at, doc.blocks))
         });
-    }
-
-    // --- loading a message's rich text, for the owner ---
-
-    /// The document of `text` for an edit of a message: its mentions by `mentioned`.
-    ///
-    /// # Errors
-    /// [`CantLoad`]: a picture, or a text read only in part.
-    pub fn doc_of<S: BuildHasher>(text: &RichText, mentioned: &HashMap<String, String, S>) -> Result<Doc, CantLoad> {
-        if text.truncated {
-            return Err(CantLoad::Truncated);
-        }
-        convert::from_nodes(&text.nodes, mentioned, true)
     }
 }

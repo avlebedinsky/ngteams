@@ -68,7 +68,7 @@ use teams_store::Message;
 
 pub use crate::editor::Editor;
 use crate::editor::convert::{self, CantLoad};
-use crate::editor::doc::{Attrs, Block, Doc, Kind, Run};
+use crate::editor::doc::Doc;
 use crate::editor::toolbar::{FormatBar, FormatBarEvent, unavailable};
 use crate::editor::{self, EditorEvent, EnterMode};
 
@@ -142,44 +142,6 @@ pub const PREVIEW_MAX: usize = 300;
 /// The most rows the box grows to.
 pub const MAX_ROWS: usize = 8;
 
-/// A mention in typed text: where its name stands (bytes) and whom it names.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DraftMention {
-    pub range: Range<usize>,
-    pub mri: String,
-}
-
-/// Text typed as the editor's document: each line a paragraph, `mentions` at their ranges (a mention that crosses a
-/// line, or another, stays text).
-#[must_use]
-pub fn typed_doc(text: &str, mentions: &[DraftMention]) -> Doc {
-    let mut blocks = Vec::new();
-    let mut start = 0;
-    for line in text.split('\n') {
-        let end = start + line.len();
-        let mut runs = Vec::new();
-        let mut at = start;
-        for mention in mentions {
-            if mention.range.start < at || mention.range.end > end || mention.range.start >= mention.range.end {
-                continue;
-            }
-            runs.push(Run::new(&text[at..mention.range.start], Attrs::default()));
-            runs.push(Run::new(
-                &text[mention.range.clone()],
-                Attrs {
-                    mention: Some(mention.mri.clone()),
-                    ..Attrs::default()
-                },
-            ));
-            at = mention.range.end;
-        }
-        runs.push(Run::new(&text[at..end], Attrs::default()));
-        blocks.push(Block::new(Kind::Paragraph, 0, runs));
-        start = end + 1;
-    }
-    Doc::new(blocks)
-}
-
 /// The message `doc` makes, after `quotes` (a reply's, or the quote an edited message keeps); `None` when it shows
 /// nothing.
 ///
@@ -201,18 +163,6 @@ pub fn message_of(doc: &Doc, quotes: &[Node]) -> Result<Option<MessageText>, Com
         mentioned,
     )
     .map(Some)
-}
-
-/// The message plain typed text makes ([`typed_doc`], [`message_of`]).
-///
-/// # Errors
-/// As [`message_of`].
-pub fn message_text(
-    text: &str,
-    mentions: &[DraftMention],
-    quotes: &[Node],
-) -> Result<Option<MessageText>, ComposeError> {
-    message_of(&typed_doc(text, mentions), quotes)
 }
 
 /// A text run with no marks.
@@ -311,16 +261,14 @@ pub struct Loaded {
     pub quotes: Vec<Node>,
 }
 
-/// Why a message can't be edited in the box.
-pub type CantEdit = CantLoad;
-
 /// A message's rich text as the box edits it: its top-level quotes of another message (a reply's, a forward's) kept
 /// aside, the rest loaded into the editor with its formats and its mentions (those `mentioned` names by `itemid`)
 /// as atoms again.
 ///
 /// # Errors
-/// [`CantEdit`]: the text shows a picture (the box sends none), or was read only in part.
-pub fn load<S: BuildHasher>(text: &RichText, mentioned: &HashMap<String, String, S>) -> Result<Loaded, CantEdit> {
+/// [`CantLoad`]: the text shows a picture (the box sends none), has formatting the box would send back changed (a
+/// block of code in a language, a numbered list from another number), or was read only in part.
+pub fn load<S: BuildHasher>(text: &RichText, mentioned: &HashMap<String, String, S>) -> Result<Loaded, CantLoad> {
     if text.truncated {
         return Err(CantLoad::Truncated);
     }
@@ -330,7 +278,7 @@ pub fn load<S: BuildHasher>(text: &RichText, mentioned: &HashMap<String, String,
         .cloned()
         .partition(|node| matches!(node, Node::Quote(quote) if quote.message_id.is_some() || quote.forward));
     Ok(Loaded {
-        doc: convert::from_nodes(&rest, mentioned, true)?,
+        doc: convert::from_nodes(&rest, mentioned, convert::Load::Edit)?,
         quotes,
     })
 }

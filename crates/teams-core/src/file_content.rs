@@ -291,32 +291,35 @@ async fn read_range<C: Credentials + 'static>(
 }
 
 /// `file`'s download link: the one known while it is younger than [`LINK_LIFE`], else Graph's answer, read once for
-/// every ask that waits for it.
+/// every ask that waits for it. The read runs apart from the ask that started it (on the engine's `LocalSet`), so an
+/// ask let go of while it runs (a stream's, by a seek) leaves it to answer the others, never a read no one finishes.
 async fn link<C: Credentials + 'static>(
     client: &Arc<Client<HttpTransport<C>>>,
     links: &Links,
     file: &FileDownload,
 ) -> Result<FileContent, EngineError> {
-    let waiting = {
+    let (tell, told) = oneshot::channel();
+    {
         let mut known = links.borrow_mut();
         match known.get_mut(file) {
             Some(Link::Known(content, at)) if at.elapsed() < LINK_LIFE => return Ok(content.clone()),
-            Some(Link::Reading(waiting)) => {
-                let (tell, told) = oneshot::channel();
-                waiting.push(tell);
-                Some(told)
-            }
+            Some(Link::Reading(waiting)) => waiting.push(tell),
             Some(Link::Known(..)) | None => {
-                known.insert(file.clone(), Link::Reading(Vec::new()));
-                None
+                known.insert(file.clone(), Link::Reading(vec![tell]));
+                let (client, links, file) = (Arc::clone(client), Rc::clone(links), file.clone());
+                tokio::task::spawn_local(async move {
+                    let answer = read_link(&client, &file).await;
+                    settle(&links, &file, &answer);
+                });
             }
         }
-    };
-    if let Some(told) = waiting {
-        return Ok(told.await.unwrap_or(Err(LinkFailure::Unread))?);
     }
-    let answer = read_link(client, file).await;
-    let waiting = match &answer {
+    Ok(told.await.unwrap_or(Err(LinkFailure::Unread))?)
+}
+
+/// Keeps `file`'s link `answer` (or forgets the read that failed) and hands it to every ask waiting for it.
+fn settle(links: &Links, file: &FileDownload, answer: &LinkAnswer) {
+    let waiting = match answer {
         Ok(content) => links
             .borrow_mut()
             .insert(file.clone(), Link::Known(content.clone(), Instant::now())),
@@ -327,7 +330,6 @@ async fn link<C: Credentials + 'static>(
             let _ = tell.send(answer.clone());
         }
     }
-    Ok(answer?)
 }
 
 /// Whether an answer's `status` says the file can't be had: a 4xx but a throttle (`429`); a 5xx may pass.

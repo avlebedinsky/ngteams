@@ -13,7 +13,7 @@ use gpui::{
     TestAppContext, VisualTestContext, Window, div, px,
 };
 use teams_proto::chat::{FontSize, Marks, MessageText, Node, Rgb, RichText, SpanStyle, parse_html};
-use teams_ui::editor::convert::{from_nodes, to_nodes};
+use teams_ui::editor::convert::{Load, from_nodes, to_nodes};
 use teams_ui::editor::doc::{Attrs, Block, Doc, Kind, Pos, Run};
 use teams_ui::editor::{Editor, EditorEvent, EnterMode};
 
@@ -140,7 +140,7 @@ fn what_is_sent_reads_back_as_the_same_document() {
         Block::new(Kind::Paragraph, 2, vec![Run::new("deep", Attrs::default())]),
     ]);
     let html = html_of(&doc);
-    let read = from_nodes(&parse_html(&html).nodes, &HashMap::<String, String>::new(), true).unwrap();
+    let read = from_nodes(&parse_html(&html).nodes, &HashMap::<String, String>::new(), Load::Edit).unwrap();
     assert_eq!(read, doc, "{html}");
 }
 
@@ -199,7 +199,7 @@ fn a_fragment_pasted_joins_the_blocks_at_its_edges() {
 fn pasted_html_keeps_what_the_editor_writes() {
     let html = "<div><p><b>Bold</b> <span style=\"color:rgb(205,89,55);font-size:24px\">orange</span></p>\
                 <ul><li>item</li></ul><h3>Head</h3><table><tr><td>cell</td></tr></table><script>x()</script></div>";
-    let doc = from_nodes(&parse_html(html).nodes, &HashMap::<String, String>::new(), false).unwrap();
+    let doc = from_nodes(&parse_html(html).nodes, &HashMap::<String, String>::new(), Load::Paste).unwrap();
     assert_eq!(doc.plain_text(), "Bold orange\nitem\nHead\ncell");
     assert_eq!(doc.blocks[0].runs[0].attrs.marks, Marks::BOLD);
     assert_eq!(doc.blocks[0].runs[2].attrs.span.color, Some(Rgb(0xCD_5937)));
@@ -412,7 +412,7 @@ fn a_node_tree_of_the_web_client_loads_into_blocks() {
             }),
         ]],
     })];
-    let doc = from_nodes(&nodes, &HashMap::<String, String>::new(), true).unwrap();
+    let doc = from_nodes(&nodes, &HashMap::<String, String>::new(), Load::Edit).unwrap();
     let blocks: Vec<(Kind, u8, String)> = doc
         .blocks
         .iter()
@@ -422,4 +422,101 @@ fn a_node_tree_of_the_web_client_loads_into_blocks() {
         blocks,
         [(Kind::Bullet, 0, "a".to_owned()), (Kind::Numbered, 1, "b".to_owned())]
     );
+}
+
+#[test]
+fn a_block_of_code_pasted_on_an_empty_line_is_one_and_other_text_takes_the_line_s_kind() {
+    let code = Block::new(Kind::Code, 0, vec![Run::new("a\nb", Attrs::default())]);
+    let mut doc = Doc::default();
+    doc.insert_fragment(Pos::new(0, 0), vec![code.clone()]);
+    assert_eq!(doc.blocks, [code.clone()]);
+    // on a line with text, its text joins the line
+    let mut doc = Doc::new(vec![Block::paragraph("x")]);
+    doc.insert_fragment(Pos::new(0, 1), vec![code]);
+    assert_eq!(
+        (doc.blocks[0].kind, doc.plain_text()),
+        (Kind::Paragraph, "xa\nb".to_owned())
+    );
+    // a paragraph's text on an empty list item leaves it an item
+    let mut doc = Doc::new(vec![Block::new(Kind::Bullet, 1, Vec::new())]);
+    doc.insert_fragment(Pos::new(0, 0), vec![Block::paragraph("word")]);
+    assert_eq!((doc.blocks[0].kind, doc.blocks[0].indent), (Kind::Bullet, 1));
+}
+
+#[test]
+fn blank_lines_at_either_end_of_a_message_load_as_none() {
+    let nbsp = || {
+        Node::Paragraph(vec![Node::Text {
+            text: "\u{a0}".to_owned(),
+            marks: Marks::NONE,
+        }])
+    };
+    let text = |text: &str| {
+        Node::Paragraph(vec![Node::Text {
+            text: text.to_owned(),
+            marks: Marks::NONE,
+        }])
+    };
+    let nodes = vec![nbsp(), nbsp(), text("a"), nbsp(), text("b"), nbsp()];
+    let doc = from_nodes(&nodes, &HashMap::<String, String>::new(), Load::Edit).unwrap();
+    assert_eq!(doc.plain_text(), "a\n \nb");
+    let blank = from_nodes(&[nbsp(), nbsp()], &HashMap::<String, String>::new(), Load::Edit).unwrap();
+    assert_eq!(blank.blocks.len(), 1, "one block stays");
+}
+
+#[test]
+fn a_rich_paste_into_a_block_of_code_is_its_plain_text() {
+    let (host, cx) = editor_window();
+    cx.simulate_keystrokes("ctrl-b");
+    cx.simulate_input("one");
+    cx.simulate_keystrokes("ctrl-b shift-enter");
+    cx.simulate_input("two");
+    cx.simulate_keystrokes("ctrl-a ctrl-c ctrl-end shift-enter ctrl-shift-b ctrl-v");
+    let doc = doc_of(&host, cx);
+    let blocks: Vec<(Kind, String)> = doc.blocks.iter().map(|block| (block.kind, block.text())).collect();
+    assert_eq!(
+        blocks,
+        [
+            (Kind::Paragraph, "one".to_owned()),
+            (Kind::Paragraph, "two".to_owned()),
+            (Kind::Code, "one\ntwo".to_owned()),
+        ]
+    );
+    assert_eq!(doc.blocks[2].runs[0].attrs, Attrs::default(), "with no formats");
+}
+
+#[test]
+fn a_paragraph_break_copied_alone_pastes_as_one() {
+    let (host, cx) = editor_window();
+    cx.simulate_input("a");
+    cx.simulate_keystrokes("shift-enter");
+    cx.simulate_input("b");
+    cx.simulate_keystrokes("ctrl-home right shift-right ctrl-c ctrl-end ctrl-v");
+    assert_eq!(doc_of(&host, cx).plain_text(), "a\nb\n");
+}
+
+#[test]
+fn lines_pasted_into_a_list_item_are_items_of_its_list() {
+    let (host, cx) = editor_window();
+    cx.simulate_keystrokes("ctrl-shift-8");
+    cx.simulate_input("one");
+    let editor = editor_of(&host, cx);
+    cx.update(|_, cx| editor.update(cx, |editor, cx| editor.paste_plain("two\nthree", cx)));
+    let doc = doc_of(&host, cx);
+    let blocks: Vec<(Kind, String)> = doc.blocks.iter().map(|block| (block.kind, block.text())).collect();
+    assert_eq!(
+        blocks,
+        [(Kind::Bullet, "onetwo".to_owned()), (Kind::Bullet, "three".to_owned())]
+    );
+}
+
+#[test]
+fn typing_right_after_a_load_is_a_step_of_its_own() {
+    let (host, cx) = editor_window();
+    cx.simulate_input("sent");
+    let editor = editor_of(&host, cx);
+    cx.update(|_, cx| editor.update(cx, |editor, cx| editor.set_doc(Doc::default(), cx)));
+    cx.simulate_input("next");
+    cx.simulate_keystrokes("ctrl-z");
+    assert_eq!(doc_of(&host, cx).plain_text(), "", "the typing undone");
 }

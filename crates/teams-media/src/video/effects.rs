@@ -231,9 +231,8 @@ pub fn import(source: &Path, dir: &Path) -> Result<PathBuf, String> {
     // written under a name `added` doesn't list, then renamed: a write that fails leaves no broken picture behind
     let path = dir.join(format!("{name}.jpg"));
     let partial = dir.join(format!("{name}.jpg.part"));
-    let written = write_jpeg(&partial, &picture.to_rgb8()).and_then(|()| {
-        std::fs::rename(&partial, &path).map_err(|error| error.to_string())
-    });
+    let written = write_jpeg(&partial, &picture.to_rgb8())
+        .and_then(|()| std::fs::rename(&partial, &path).map_err(|error| error.to_string()));
     if written.is_err() {
         let _ = std::fs::remove_file(&partial);
     }

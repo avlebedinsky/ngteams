@@ -50,10 +50,10 @@ pub(super) fn doc_of_metadata(metadata: &str) -> Option<Doc> {
                     .collect()
             })
             .unwrap_or_default();
-        return convert::from_nodes(&text.nodes, &mentioned, false).ok();
+        return convert::from_nodes(&text.nodes, &mentioned, convert::Load::Paste).ok();
     }
     let html = value.get(HTML_KEY)?.as_str()?;
-    convert::from_nodes(&parse_html(html).nodes, &HashMap::new(), false).ok()
+    convert::from_nodes(&parse_html(html).nodes, &HashMap::new(), convert::Load::Paste).ok()
 }
 
 impl Editor {

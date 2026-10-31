@@ -1089,9 +1089,16 @@ impl Shell {
     }
 
     /// Opens a message's chat ([`Shell::open_chat`]) at the message: the chat view reads back to it, shows it and
-    /// selects it ([`ChatView::reveal`]).
+    /// selects it ([`ChatView::reveal`]); a channel's opens at the message's thread ([`ChannelView::reveal`]).
     pub fn open_message(&mut self, target: HitTarget, window: &mut Window, cx: &mut Context<Self>) {
         self.open_chat(target.conversation.clone(), window, cx);
+        if self.main == Main::Channel(target.conversation.clone()) {
+            if let Some((channel, _)) = &self.channel {
+                let thread = target.thread.unwrap_or_else(|| target.message.clone());
+                channel.update(cx, |channel, cx| channel.reveal(thread, target.message, cx));
+            }
+            return;
+        }
         if self.main != Main::Chat(target.conversation.clone()) {
             return;
         }

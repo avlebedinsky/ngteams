@@ -5,8 +5,8 @@
 #![cfg(test)]
 
 use teams_proto::{
-    CALENDAR_VIEW_PATH, CalendarAnswerError, CalendarEvent, CalendarView, EventKind, EventResponse, EventTime, FloatingTime, Read,
-    Service, ShowAs,
+    CALENDAR_VIEW_PATH, CalendarAnswerError, CalendarEvent, CalendarView, EventKind, EventResponse, EventTime,
+    FloatingTime, Read, Service, ShowAs,
 };
 
 const FIXTURE: &str = include_str!("../../../tests/fixtures/mt/calendar-view.json");

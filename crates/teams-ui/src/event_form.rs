@@ -1991,10 +1991,7 @@ impl Render for EventForm {
             .bg(rgb(palette.background))
             .text_color(rgb(palette.foreground))
             .on_mouse_move(cx.listener(Self::dragged))
-            .on_mouse_up(
-                gpui::MouseButton::Left,
-                cx.listener(|form, _, _, cx| form.end_drag(cx)),
-            )
+            .on_mouse_up(gpui::MouseButton::Left, cx.listener(|form, _, _, cx| form.end_drag(cx)))
             .child(self.toolbar(palette, cx))
             .child(div().flex_1().min_h_0().flex().gap_4().child(left).child(side))
             .children(confirm)

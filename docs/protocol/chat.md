@@ -532,16 +532,17 @@ stored them, read for their markup only (tags, attributes and style properties c
   strikethrough (Ctrl+Shift+X is taken by the expand), Ctrl+K a link, Ctrl+Shift+C inline code, Ctrl+Shift+B a block
   of code, Ctrl+Shift+7 and Ctrl+Shift+8 numbered and bulleted lists, Ctrl+Alt+4 a quote, Ctrl+Alt+1 to 3 headings,
   Ctrl+Alt+P a paragraph, Ctrl+Z undo.
-- **The native client** reads `span` colours (`#RGB`, `#RRGGBB`, `rgb()`), highlights and sizes (keywords, and a
-  length under 12 px small, over 18 px large) into `teams_proto::chat::Node::Span`, headings, indented paragraphs
-  and rules into nodes of their own, and draws them (a heading larger and semibold, a paragraph at the size most of
-  its text has, since GPUI lays a line out at one size; a colour that wouldn't read on the theme moved toward the
-  text colour, a highlight at half strength on a dark theme). The compose box is its own rich-text editor
-  (`teams-ui/src/editor`), which writes exactly the shapes above: `strong` for bold, a link as the web client's
-  anchor (`rel="noreferrer noopener" title="<url>" target="_blank"`, `properties.links` left `"[]"`), a space after a
-  space or at a line's edge as `&nbsp;`. Its keys are the web client's, but Ctrl+K stays the app's chat switcher
-  (the format bar inserts a link) and Ctrl+Shift+C inserts inline code in the box, as in Teams. Writing tables isn't
-  supported yet: the "More" menu shows the entry disabled.
+- **The native client** reads `span` colours (`#RGB`, `#RRGGBB`, `rgb()`, `rgba()`; one fully transparent, as a
+  browser's copy of plain text carries, is none), highlights and sizes (keywords, and a length under 12 px small, over
+  18 px large) into `teams_proto::chat::Node::Span`, headings, indented paragraphs and rules into nodes of their own,
+  and draws them (a heading larger and semibold, a paragraph at the size most of its text has, since GPUI lays a line
+  out at one size; a colour that wouldn't read on the theme moved toward the text colour, a highlight at a quarter
+  strength on a dark theme, three quarters of the way to the surface). The compose box is its own rich-text editor
+  (`teams-ui/src/editor`), which writes exactly the shapes above: `strong` for bold, a link as the web client's anchor
+  (`rel="noreferrer noopener" title="<url>" target="_blank"`, `properties.links` left `"[]"`), a space after a space or
+  at a line's edge as `&nbsp;`. Its keys are the web client's, but Ctrl+K stays the app's chat switcher (the format bar
+  inserts a link) and Ctrl+Shift+C inserts inline code in the box, as in Teams. Writing tables isn't supported yet: the
+  "More" menu shows the entry disabled.
 
 ## Files: sending, denied (ab-file)
 

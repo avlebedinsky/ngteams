@@ -1697,3 +1697,32 @@ fn a_link_s_preview_is_read_from_its_entry_and_one_turned_off_is_left_out() -> T
     assert!(teams_proto::chat::link_previews(Some(&unread)).is_empty());
     Ok(())
 }
+
+#[test]
+fn a_fully_transparent_colour_is_no_colour_and_a_tint_its_colour() {
+    use teams_proto::chat::{Rgb, SpanStyle};
+    assert_eq!(Rgb::parse("rgba(0, 0, 0, 0)"), None);
+    assert_eq!(Rgb::parse("rgba(255,255,255,0.0)"), None);
+    assert_eq!(Rgb::parse("rgba(1, 2, 3, 0%)"), None);
+    assert_eq!(Rgb::parse("transparent"), None);
+    assert_eq!(
+        Rgb::parse("rgba(1, 2, 3, x)"),
+        None,
+        "an alpha unread is a colour unread"
+    );
+    assert_eq!(Rgb::parse("rgba(1, 2, 3, 0.5)"), Some(Rgb(0x01_0203)));
+    assert_eq!(Rgb::parse("rgba(1, 2, 3, 40%)"), Some(Rgb(0x01_0203)));
+    assert_eq!(Rgb::parse("rgba(1, 2, 3, 1)"), Some(Rgb(0x01_0203)));
+    assert_eq!(Rgb::parse("rgb(1, 2, 3)"), Some(Rgb(0x01_0203)));
+    // a browser's copy of plain text: no highlight, its colour kept
+    let style = SpanStyle::of_css("color: rgb(36, 36, 36); background-color: rgba(0, 0, 0, 0)");
+    assert_eq!((style.color, style.highlight), (Some(Rgb(0x24_2424)), None));
+    let read = parse_html("<p><span style=\"background-color: transparent\">plain</span></p>");
+    assert_eq!(
+        read.nodes,
+        vec![Node::Paragraph(vec![Node::Text {
+            text: "plain".to_owned(),
+            marks: Marks::NONE,
+        }])]
+    );
+}

@@ -216,7 +216,6 @@ fn instant(text: &str) -> Option<i64> {
     i64::try_from(time.unix_timestamp_nanos() / 1_000_000).ok()
 }
 
-
 #[cfg(test)]
 mod tests {
     use teams_fence::{Contact, Policy, Request as FenceRequest, contacting};

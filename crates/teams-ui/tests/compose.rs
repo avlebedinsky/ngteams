@@ -37,9 +37,11 @@ use teams_ui::chat_view::{
     ChatView, DEFAULT_QUICK_REACTIONS, MessageAction, PAGE, QUICK_COUNT, READ_DEBOUNCE, quick_reactions,
 };
 use teams_ui::compose::{
-    Candidate, CantEdit, Compose, DraftMention, EVERYONE_MAX_MEMBERS, Mode, PREVIEW_MAX, Quoted, READ_ONLY_APP,
-    READ_ONLY_NOTES, TYPING_EVERY, TypingThrottle, load, matching, mention_query, message_text, offered,
+    Candidate, Compose, EVERYONE_MAX_MEMBERS, Mode, PREVIEW_MAX, Quoted, READ_ONLY_APP, READ_ONLY_NOTES, TYPING_EVERY,
+    TypingThrottle, load, matching, mention_query, message_of, offered,
 };
+use teams_ui::editor::CantLoad;
+use teams_ui::editor::doc::{Attrs, Block, Doc, Kind, Run};
 use teams_ui::reaction_picker::{RECENT, Section};
 use teams_ui::sending::{Again, RowState};
 use teams_ui::settings::{Settings, SettingsModel};
@@ -55,6 +57,44 @@ const NOON: i64 = 1_767_268_800_000;
 const MINUTE: i64 = 60_000;
 
 // --- the text typed as a message's text ---
+
+/// A mention in typed text: where its name stands (bytes) and whom it names.
+struct DraftMention {
+    range: std::ops::Range<usize>,
+    mri: String,
+}
+
+/// Text typed as the editor's document: each line a paragraph, `mentions` at their ranges.
+fn typed_doc(text: &str, mentions: &[DraftMention]) -> Doc {
+    let mut blocks = Vec::new();
+    let mut start = 0;
+    for line in text.split('\n') {
+        let end = start + line.len();
+        let mut runs = Vec::new();
+        let mut at = start;
+        for mention in mentions {
+            if mention.range.start < at || mention.range.end > end {
+                continue;
+            }
+            runs.push(Run::new(&text[at..mention.range.start], Attrs::default()));
+            let attrs = Attrs {
+                mention: Some(mention.mri.clone()),
+                ..Attrs::default()
+            };
+            runs.push(Run::new(&text[mention.range.clone()], attrs));
+            at = mention.range.end;
+        }
+        runs.push(Run::new(&text[at..end], Attrs::default()));
+        blocks.push(Block::new(Kind::Paragraph, 0, runs));
+        start = end + 1;
+    }
+    Doc::new(blocks)
+}
+
+/// The message typed text makes.
+fn message_text(text: &str, mentions: &[DraftMention], quotes: &[Node]) -> Result<Option<MessageText>, ComposeError> {
+    message_of(&typed_doc(text, mentions), quotes)
+}
 
 fn html(text: &str, mentions: &[DraftMention], quotes: &[Node]) -> String {
     message_text(text, mentions, quotes)
@@ -297,18 +337,36 @@ fn an_edit_loads_the_text_back_its_mentions_by_mri_and_keeps_its_quote() {
         })],
         truncated: false,
     };
-    assert_eq!(load(&image, &mentioned), Err(CantEdit::Image));
+    assert_eq!(load(&image, &mentioned), Err(CantLoad::Image));
     let partial = RichText {
         nodes: Vec::new(),
         truncated: true,
     };
-    assert_eq!(load(&partial, &mentioned), Err(CantEdit::Truncated));
-    // a block of code loads as one, its lines as they were
-    let code = teams_proto::chat::parse_html(
-        "<p>see</p><pre class=\"language-json\"><code>{<br>&nbsp; \"a\": 1<br>}</code></pre>",
+    assert_eq!(load(&partial, &mentioned), Err(CantLoad::Truncated));
+    // a block of code loads as one, its lines as they were, and what loads goes back as it was: a heading past the
+    // format bar's three, a numbered list from 1, a mention
+    let kept = teams_proto::chat::parse_html(
+        "<p>see</p><pre class=\"language-plaintext\"><code>{<br>&nbsp; \"a\": 1<br>}</code></pre>\
+         <h5>Five</h5><ol><li>one</li><li>two</li></ol>\
+         <p>hi <span itemtype=\"http://schema.skype.com/Mention\" itemid=\"0\">Lab Bee</span></p>",
     );
-    let loaded = load(&code, &mentioned).unwrap();
+    let loaded = load(&kept, &mentioned).unwrap();
     assert_eq!(loaded.doc.blocks[1].text(), "{\n  \"a\": 1\n}");
+    let sent = message_of(&loaded.doc, &loaded.quotes).unwrap().expect("a message");
+    assert_eq!(
+        teams_proto::chat::parse_html(sent.html()).nodes,
+        kept.nodes,
+        "{}",
+        sent.html()
+    );
+    // what would go back changed though the edit didn't touch it can't be edited here
+    for changed in [
+        "<p>see</p><pre class=\"language-json\"><code>{<br>&nbsp; \"a\": 1<br>}</code></pre>",
+        "<ol start=\"3\"><li>three</li></ol>",
+    ] {
+        let text = teams_proto::chat::parse_html(changed);
+        assert_eq!(load(&text, &mentioned), Err(CantLoad::Formatting), "{changed}");
+    }
 }
 
 #[test]
@@ -1323,7 +1381,9 @@ fn a_send_the_engine_refuses_gives_the_box_its_draft_back() {
     let compose = compose(&view, cx);
     let (tokens, problem) = cx.update(|_, cx| {
         let compose = compose.read(cx);
-        (compose.editor().read(cx).mention_count(), compose.problem().cloned())
+        let doc = compose.editor().read(cx).doc();
+        let tokens = doc.blocks.iter().flat_map(|block| block.mention_ranges()).count();
+        (tokens, compose.problem().cloned())
     });
     assert_eq!(tokens, 1, "the mention, still a token");
     assert!(problem.is_some_and(|problem| problem.starts_with("Not sent")));

@@ -40,7 +40,7 @@ use teams_proto::chat::{LinkPreview, MessageType, RichText, SharedFile, parse_ht
 use teams_store::Message;
 
 use crate::bridge::Core;
-use crate::chat_view::{DELETED, UNSHOWN_CONTENT, UNSUPPORTED, files_of, unshown_of};
+use crate::chat_view::{DELETED, MAX_SEEK, UNSHOWN_CONTENT, UNSUPPORTED, files_of, unshown_of};
 use crate::clock::{self, HourCycle};
 use crate::files;
 use crate::forwarded::{self, ForwardOrigin, Original};
@@ -188,6 +188,9 @@ pub struct ChannelView {
     scroll: ScrollHandle,
     /// The view went to the newest posts after its first load with any.
     placed: bool,
+    /// The thread to open at (its post's id, and the message in it), with the older pages read for it so far: a
+    /// search's hit ([`ChannelView::reveal`]).
+    reveal: Option<(String, String, u32)>,
     traced: Option<Vec<(String, &'static str)>>,
     /// The text selected with the mouse, in any of the posts and replies ([`crate::selection`]).
     text_selection: TextSelection,
@@ -235,6 +238,7 @@ impl ChannelView {
             older: None,
             scroll: ScrollHandle::new(),
             placed: false,
+            reveal: None,
             traced: None,
             text_selection: TextSelection::default(),
             focus: cx.focus_handle(),
@@ -307,6 +311,42 @@ impl ChannelView {
         }));
     }
 
+    /// Opens the view at `message` in the thread of post `thread` (a search's hit): the thread scrolled to once a load
+    /// holds it, the older pages read for it while it is older than what is held (up to [`MAX_SEEK`] of them).
+    pub fn reveal(&mut self, thread: String, message: String, cx: &mut Context<Self>) {
+        self.reveal = Some((thread, message, 0));
+        self.placed = true;
+        if self.loading.is_none() && self.loads > 0 {
+            self.seek(cx);
+        }
+    }
+
+    /// Scrolls to the thread [`ChannelView::reveal`] asked for when it is shown, else reads an older page for it.
+    fn seek(&mut self, cx: &mut Context<Self>) {
+        let Some((thread, message, pages)) = self.reveal.take() else {
+            return;
+        };
+        let index = self.threads.iter().position(|shown| {
+            shown.root == thread || shown.post.iter().chain(&shown.replies).any(|item| item.id == message)
+        });
+        if let Some(index) = index {
+            // the button for older posts comes first while there are any
+            let offset = usize::from(self.has_older());
+            self.scroll.scroll_to_item(index + offset);
+            self.trace.record(
+                &TraceLine::new("channel-view", "revealed")
+                    .conversation(&self.channel)
+                    .messages([message.as_str()]),
+            );
+            cx.notify();
+            return;
+        }
+        if self.has_older() && pages < MAX_SEEK {
+            self.reveal = Some((thread, message, pages + 1));
+            self.load_older(cx);
+        }
+    }
+
     /// Shows a page more: the store's when it holds more, else the service's next older page read into it first.
     pub fn load_older(&mut self, cx: &mut Context<Self>) {
         if self.older.is_some() || !self.has_older() {
@@ -349,6 +389,8 @@ impl ChannelView {
         cx.notify();
         if self.dirty {
             self.reload(cx);
+        } else if self.older.is_none() {
+            self.seek(cx);
         }
     }
 
@@ -509,9 +551,10 @@ impl ChannelView {
         cycle: HourCycle,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let order = thread_order(thread);
         let post = match &thread.post {
             Some(post) => {
-                let scope = Scope::new(selection, post_key(index, post)).opening(picture_opener(&post.id, cx));
+                let scope = Scope::new(selection, post_key(order, post)).opening(picture_opener(&post.id, cx));
                 message_view(post, &scope, palette, cycle, cx)
             }
             None => div()
@@ -525,9 +568,8 @@ impl ChannelView {
         let replies: Vec<AnyElement> = thread
             .replies
             .iter()
-            .enumerate()
-            .map(|(at, reply)| {
-                let scope = Scope::new(selection, reply_key(index, at, reply)).opening(picture_opener(&reply.id, cx));
+            .map(|reply| {
+                let scope = Scope::new(selection, reply_key(order, reply)).opening(picture_opener(&reply.id, cx));
                 div()
                     .pl_6()
                     .pt_1()
@@ -637,9 +679,20 @@ async fn read(core: &dyn Core, channel: &str, limit: usize) -> Option<Read> {
     })
 }
 
-/// A thread's post's place among the view's messages for the text selection: as the threads are shown.
-fn post_key(thread: usize, post: &Item) -> MessageKey {
-    MessageKey::new((i64::try_from(thread).unwrap_or(i64::MAX), 0), post.id.clone())
+/// Where a thread stands among the view's threads, as [`arrange_threads`] orders them: its post's arrival, or without
+/// the post its oldest reply's.
+fn thread_order(thread: &Thread<Item>) -> i64 {
+    thread
+        .post
+        .as_ref()
+        .or_else(|| thread.replies.first())
+        .map_or(i64::MAX, |first| first.arrival_time)
+}
+
+/// A thread's post's place among the view's messages for the text selection: as the threads are shown, by what the
+/// post is rather than where it stands, so a selection held over a reload stays on its messages.
+fn post_key(thread: i64, post: &Item) -> MessageKey {
+    MessageKey::new((thread, i64::MIN), post.id.clone())
 }
 
 /// What a click on a picture of message `id` calls: the viewer opened on it ([`ChannelView::open_picture`]).
@@ -651,10 +704,10 @@ fn picture_opener(id: &str, cx: &Context<ChannelView>) -> OpenPicture {
     })
 }
 
-/// A reply's place among the view's messages for the text selection: under its thread's post, in order.
-fn reply_key(thread: usize, at: usize, reply: &Item) -> MessageKey {
-    let at = i64::try_from(at).unwrap_or(i64::MAX - 1);
-    MessageKey::new((i64::try_from(thread).unwrap_or(i64::MAX), at + 1), reply.id.clone())
+/// A reply's place among the view's messages for the text selection: under its thread's post, by its arrival (as
+/// [`arrange_threads`] orders replies).
+fn reply_key(thread: i64, reply: &Item) -> MessageKey {
+    MessageKey::new((thread, reply.arrival_time), reply.id.clone())
 }
 
 /// A message: its sender's name and time (in Teams' words, on `cycle`'s clock) over its body, its text selectable in
@@ -743,13 +796,10 @@ impl gpui::EventEmitter<ChannelViewEvent> for ChannelView {}
 impl ChannelView {
     /// Puts the text selected with the mouse on the clipboard, as plain text; whether there was any.
     pub fn copy_selection(&self, cx: &mut App) -> bool {
-        let messages = self.threads.iter().enumerate().flat_map(|(index, thread)| {
-            let post = thread.post.iter().map(move |post| (post_key(index, post), post));
-            let replies = thread
-                .replies
-                .iter()
-                .enumerate()
-                .map(move |(at, reply)| (reply_key(index, at, reply), reply));
+        let messages = self.threads.iter().flat_map(|thread| {
+            let order = thread_order(thread);
+            let post = thread.post.iter().map(move |post| (post_key(order, post), post));
+            let replies = thread.replies.iter().map(move |reply| (reply_key(order, reply), reply));
             post.chain(replies).filter_map(|(key, item)| match &item.body {
                 Body::Text(rendered) => Some((key, &**rendered)),
                 _ => None,

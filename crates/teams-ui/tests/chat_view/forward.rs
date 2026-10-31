@@ -145,6 +145,7 @@ fn a_forward_is_drawn_in_its_card_under_where_it_came_from() {
             conversation: GROUP.to_owned(),
             message: FIRST_ORIGINAL.to_owned(),
             arrival_time: 1_760_000_040_123,
+            thread: None,
         }
     );
     assert_eq!(
@@ -265,6 +266,7 @@ fn the_shell_opens_the_original_in_its_chat_or_on_the_web() {
             conversation: elsewhere.to_owned(),
             message: FIRST_ORIGINAL.to_owned(),
             arrival_time: 1_760_000_040_123,
+            thread: None,
         },
         web_link: teams_ui::rich_text::message_web_link(elsewhere, FIRST_ORIGINAL),
     };

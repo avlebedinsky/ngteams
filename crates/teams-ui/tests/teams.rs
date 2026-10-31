@@ -308,6 +308,41 @@ fn a_channel_clicked_opens_read_only_with_its_posts_and_their_replies() {
     assert_channel_traced(&written);
 }
 
+#[test]
+fn a_channel_message_found_opens_the_channel_at_its_thread_read_back_from_the_service() {
+    const OLD_POST: &str = "1750000000000";
+    let rig = rig();
+    *rig.core.teams.lock().unwrap() = Some(teams());
+    let (messages, roots) = channel_store();
+    rig.core.messages.lock().unwrap().insert(CHANNEL.to_owned(), messages);
+    rig.core.roots.lock().unwrap().insert(CHANNEL.to_owned(), roots);
+    // a post older than the store holds, at the service
+    rig.core.older.lock().unwrap().insert(
+        CHANNEL.to_owned(),
+        vec![vec![message(OLD_POST, LAB_C, "<p>old post</p>")]],
+    );
+    let written = Written::default();
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::new(written.clone())));
+    let target = teams_ui::search::HitTarget {
+        conversation: CHANNEL.to_owned(),
+        message: OLD_POST.to_owned(),
+        arrival_time: 1_750_000_000_000,
+        thread: Some(OLD_POST.to_owned()),
+    };
+    shell.update_in(cx, |shell, window, cx| shell.open_message(target, window, cx));
+    cx.run_until_parked();
+    let view: Entity<ChannelView> = cx.update(|_, cx| shell.read(cx).channel().cloned().expect("a channel view"));
+    let roots: Vec<String> = thread_shapes(&view, cx).into_iter().map(|(root, _, _)| root).collect();
+    assert!(roots.contains(&OLD_POST.to_owned()), "read back to it: {roots:?}");
+    let revealed: Vec<serde_json::Value> = written
+        .lines()
+        .into_iter()
+        .filter(|line| line["view"] == "channel-view" && line["change"] == "revealed")
+        .collect();
+    assert_eq!(revealed.len(), 1, "{}", written.text());
+    assert_eq!(revealed[0]["messages"], serde_json::json!([OLD_POST]));
+}
+
 /// A thread as compared: its post's id, the post's id when it is held, its replies' ids.
 type ThreadShape = (String, Option<String>, Vec<String>);
 

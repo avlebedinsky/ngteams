@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::hash::BuildHasher;
 
 use teams_fence::Mri;
-use teams_proto::chat::{Code, CodeRun, List, Marks, Node, Quote, SpanStyle, Token};
+use teams_proto::chat::{Code, CodeRun, List, Marks, Node, Quote, Token};
 
 use super::doc::{Attrs, Block, Doc, Kind, MAX_INDENT, Run};
 
@@ -25,6 +25,23 @@ pub enum CantLoad {
     Image,
     #[error("it was read only in part")]
     Truncated,
+    /// What the editor would send back otherwise than it was (a block of code in a language, a numbered list from
+    /// another number), though the edit didn't change it.
+    #[error("it has formatting the box can't keep")]
+    Formatting,
+}
+
+/// What a load is for, which sets what is done with what the editor can't send back as it was.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Load {
+    /// An edit of a message: a picture, a block of code in a language (but `plaintext`) and a numbered list from
+    /// another number than 1 are refused, so the edit sends back only what the user changed.
+    Edit,
+    /// A text shown to edit but kept as it was until edited (an event's body): a picture refused; a block of code's
+    /// language and a list's first number dropped.
+    Body,
+    /// A paste: a picture is its `alt`; a block of code's language and a list's first number dropped.
+    Paste,
 }
 
 /// The document as rich text, and the MRI each mention names by its `item_id` (`0`, `1`, … in order). Nothing when
@@ -258,29 +275,36 @@ fn spaced(runs: &[Run]) -> Vec<Run> {
     out
 }
 
-/// The document `nodes` make, its mentions' MRIs by their `itemid` in `mentioned` (a mention naming nobody there is
-/// its text). An emoticon is its emoji; a quote that names a message (a reply's) or a forward's is its text.
+/// The document `nodes` make for `load`, its mentions' MRIs by their `itemid` in `mentioned` (a mention naming nobody
+/// there is its text). An emoticon is its emoji; a quote that names a message (a reply's) or a forward's is its text.
 ///
 /// # Errors
-/// [`CantLoad::Image`] for a picture, when `pictures` refuses them (an edit); a paste takes its `alt` instead.
+/// [`CantLoad::Image`] for a picture, unless `load` is a paste (which takes its `alt`); [`CantLoad::Formatting`],
+/// for an edit, what the editor would send back changed ([`Load::Edit`]).
 pub fn from_nodes<S: BuildHasher>(
     nodes: &[Node],
     mentioned: &HashMap<String, String, S>,
-    refuse_pictures: bool,
+    load: Load,
 ) -> Result<Doc, CantLoad> {
     let mut loader = Loader {
         mentioned,
         blocks: Vec::new(),
         current: None,
-        refuse_pictures,
+        load,
     };
     loader.walk(nodes, &Context::default())?;
     loader.flush();
     let mut blocks = loader.blocks;
-    // the empty lines a message ends or starts with are none in the box
+    // the empty lines a message ends or starts with are none in the box (one block stays)
     while blocks.len() > 1 && blocks.last().is_some_and(Block::is_blank) {
         blocks.pop();
     }
+    let leading = blocks
+        .iter()
+        .take(blocks.len().saturating_sub(1))
+        .take_while(|block| block.is_blank())
+        .count();
+    blocks.drain(..leading);
     Ok(Doc::new(blocks))
 }
 
@@ -298,7 +322,7 @@ struct Loader<'m, S> {
     mentioned: &'m HashMap<String, String, S>,
     blocks: Vec<Block>,
     current: Option<Block>,
-    refuse_pictures: bool,
+    load: Load,
 }
 
 impl<S: BuildHasher> Loader<'_, S> {
@@ -356,7 +380,7 @@ impl<S: BuildHasher> Loader<'_, S> {
                 if image.is_emoji() {
                     let alt = image.alt.clone().unwrap_or_default();
                     self.push(&alt, context.attrs.clone(), context);
-                } else if self.refuse_pictures {
+                } else if self.load != Load::Paste {
                     return Err(CantLoad::Image);
                 } else if let Some(alt) = &image.alt {
                     self.push(alt, context.attrs.clone(), context);
@@ -365,7 +389,7 @@ impl<S: BuildHasher> Loader<'_, S> {
             Node::Paragraph(children) => self.block(children, context)?,
             Node::Heading { level, children } => {
                 let inner = Context {
-                    kind: Kind::Heading((*level).clamp(1, 3)),
+                    kind: Kind::Heading((*level).clamp(1, 6)),
                     indent: 0,
                     ..context.clone()
                 };
@@ -392,6 +416,10 @@ impl<S: BuildHasher> Loader<'_, S> {
             }
             Node::List(list) => self.list(list, context)?,
             Node::Code(code) => {
+                let plain = code.language.as_deref().is_none_or(|language| language == "plaintext");
+                if self.load == Load::Edit && !plain {
+                    return Err(CantLoad::Formatting);
+                }
                 self.flush();
                 self.blocks.push(Block::new(
                     Kind::Code,
@@ -421,6 +449,9 @@ impl<S: BuildHasher> Loader<'_, S> {
     }
 
     fn list(&mut self, list: &List, context: &Context) -> Result<(), CantLoad> {
+        if self.load == Load::Edit && list.ordered && list.start != 1 {
+            return Err(CantLoad::Formatting);
+        }
         self.flush();
         let inner = Context {
             kind: if list.ordered { Kind::Numbered } else { Kind::Bullet },
@@ -432,16 +463,5 @@ impl<S: BuildHasher> Loader<'_, S> {
             self.block(item, &inner)?;
         }
         Ok(())
-    }
-}
-
-/// The marks and style of plain text.
-#[must_use]
-pub fn plain_attrs() -> Attrs {
-    Attrs {
-        marks: Marks::NONE,
-        span: SpanStyle::default(),
-        link: None,
-        mention: None,
     }
 }

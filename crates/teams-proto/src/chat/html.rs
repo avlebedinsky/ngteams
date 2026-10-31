@@ -188,8 +188,9 @@ impl Rgb {
         format!("#{:06X}", self.0 & 0x00FF_FFFF)
     }
 
-    /// A CSS colour: `#RRGGBB`, `#RGB` or `rgb(r, g, b)` (`rgba` with its alpha ignored); `None` for anything else
-    /// (`inherit`, a name, a variable).
+    /// A CSS colour: `#RRGGBB`, `#RGB`, `rgb(r, g, b)` or `rgba(r, g, b, a)` (a tint taken as its colour); `None` for
+    /// one fully transparent (an alpha of 0, `transparent`: a browser's copy of text with no highlight) and anything
+    /// else (`inherit`, a name, a variable).
     #[must_use]
     pub fn parse(text: &str) -> Option<Self> {
         let text = text.trim();
@@ -213,6 +214,12 @@ impl Rgb {
         let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
         if !(3..=4).contains(&parts.len()) {
             return None;
+        }
+        if let Some(alpha) = parts.get(3) {
+            let alpha: f64 = alpha.strip_suffix('%').unwrap_or(alpha).trim_end().parse().ok()?;
+            if alpha.is_nan() || alpha <= 0.0 {
+                return None;
+            }
         }
         let mut value = 0u32;
         for part in &parts[..3] {
@@ -254,14 +261,12 @@ impl FontSize {
         // in hundredths of a pixel: a point is 4/3 of one
         let (number, per_unit) = if let Some(number) = text.strip_suffix("px") {
             (number, 300)
-        } else if let Some(number) = text.strip_suffix("pt") {
-            (number, 400)
         } else {
-            return None;
+            (text.strip_suffix("pt")?, 400)
         };
         let scaled = hundredths(number)?.checked_mul(per_unit)? / 300;
+        // 0, and a size between the two, is no size of its own
         match scaled {
-            0 => None,
             1..1200 => Some(Self::Small),
             1801.. => Some(Self::Large),
             _ => None,

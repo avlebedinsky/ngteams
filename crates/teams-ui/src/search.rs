@@ -33,6 +33,8 @@ pub struct HitTarget {
     pub message: String,
     /// The message's arrival time (ms): how far back the chat view reads to show it.
     pub arrival_time: i64,
+    /// In a channel, the thread it is in (its post's id), the service's search says: where the channel view opens.
+    pub thread: Option<String>,
 }
 
 /// One hit as the views show it.
@@ -119,6 +121,7 @@ pub async fn find(core: &dyn Core, query: String, chats: Vec<(String, SharedStri
                 conversation: hit.conversation_id,
                 message: hit.message_id,
                 arrival_time: hit.arrival_time,
+                thread: None,
             },
             chat: chat.clone(),
             sender,

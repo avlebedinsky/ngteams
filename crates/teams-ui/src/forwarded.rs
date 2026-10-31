@@ -95,6 +95,7 @@ impl Original {
                 conversation,
                 message,
                 arrival_time,
+                thread: None,
             },
             web_link,
         })

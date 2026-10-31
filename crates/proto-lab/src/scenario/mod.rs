@@ -429,7 +429,9 @@ async fn run_other(
         ScenarioName::AbMeeting => ab_meeting::run(paths, options).await,
         ScenarioName::Search => search::run(paths, options).await,
         // a call or own presence: `run` sends those to `run_call` and `own_presence`
-        _ => Err(ScenarioError::Setup(format!("{scenario:?} isn't a scenario of `run_other`"))),
+        _ => Err(ScenarioError::Setup(format!(
+            "{scenario:?} isn't a scenario of `run_other`"
+        ))),
     }
 }
 

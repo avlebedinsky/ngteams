@@ -425,7 +425,10 @@ fn cover(picture: &RgbImage, width: u32, height: u32) -> RgbImage {
     let (to_width, to_height) = (u64::from(width.max(1)), u64::from(height.max(1)));
     // wider than the frame: its sides are cropped; else its top and bottom
     let (crop_width, crop_height) = if from_width * to_height > from_height * to_width {
-        ((from_height * to_width).div_ceil(to_height).min(from_width), from_height)
+        (
+            (from_height * to_width).div_ceil(to_height).min(from_width),
+            from_height,
+        )
     } else {
         (from_width, (from_width * to_height).div_ceil(to_width).min(from_height))
     };

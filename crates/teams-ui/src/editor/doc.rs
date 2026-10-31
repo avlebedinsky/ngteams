@@ -62,7 +62,7 @@ impl Run {
 pub enum Kind {
     #[default]
     Paragraph,
-    /// A heading, its level 1 to 3 (Teams' paragraph styles).
+    /// A heading, its level 1 to 6 (Teams' paragraph styles make 1 to 3; a message read may hold the others).
     Heading(u8),
     /// A line of a quote; quote lines one after the other are one quote.
     Quote,
@@ -369,7 +369,7 @@ impl Doc {
         }
     }
 
-    /// Plain text, a line per block (a list item after its marker, as copied).
+    /// Plain text, a line per block.
     #[must_use]
     pub fn plain_text(&self) -> String {
         self.blocks.iter().map(Block::text).collect::<Vec<_>>().join("\n")
@@ -454,8 +454,14 @@ impl Doc {
         }
         let host_kind = self.blocks[at.block].kind;
         if fragment.len() == 1 && fragment[0].kind != Kind::Rule && host_kind != Kind::Rule {
-            let runs = fragment.remove(0).runs;
-            let offset = self.blocks[at.block].insert_runs(at.offset, runs);
+            let one = fragment.remove(0);
+            let host = &mut self.blocks[at.block];
+            if host.is_empty() && one.kind == Kind::Code {
+                // code pasted on an empty line is a block of code; other text, copied within its block, takes the
+                // line's kind (an empty list item stays one)
+                (host.kind, host.indent) = (one.kind, one.indent);
+            }
+            let offset = host.insert_runs(at.offset, one.runs);
             return Pos::new(at.block, offset);
         }
         let mut head = self.blocks.remove(at.block);

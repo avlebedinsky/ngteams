@@ -827,6 +827,7 @@ fn service_hit(message: &FoundMessage, list: &ChatList, me: &str) -> Hit {
             conversation: message.conversation.clone(),
             message: message.id.clone(),
             arrival_time: message.sent_ms,
+            thread: message.parent.clone(),
         },
         chat,
         sender,
@@ -1530,39 +1531,39 @@ fn message_card(hit: &Hit, search: &Entity<GlobalSearch>, palette: Palette, cycl
         format!("search-message-{}-{}", hit.target.conversation, hit.target.message),
         palette,
     )
-        .on_click(move |_, _, cx| {
-            let target = target.clone();
-            search.update(cx, |_, cx| cx.emit(GlobalSearchEvent::OpenMessage(target)));
-        })
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .pb_2()
-                .border_b_1()
-                .border_color(rgb(palette.border))
-                .text_xs()
-                .text_color(rgb(palette.muted_foreground))
-                .child(Glyph::MESSAGE.icon().size(px(14.0)))
-                .child(div().truncate().child(hit.chat.clone())),
-        )
-        .child(
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(people::avatar(Some(&hit.sender), None, Size::XSmall))
-                .child(
-                    div()
-                        .text_sm()
-                        .font_weight(FontWeight::SEMIBOLD)
-                        .child(hit.sender.clone()),
-                )
-                .child(div().text_xs().text_color(rgb(palette.muted_foreground)).child(when)),
-        )
-        .child(div().text_sm().child(marked(&hit.snippet, &hit.matched, palette)))
-        .into_any_element()
+    .on_click(move |_, _, cx| {
+        let target = target.clone();
+        search.update(cx, |_, cx| cx.emit(GlobalSearchEvent::OpenMessage(target)));
+    })
+    .child(
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .pb_2()
+            .border_b_1()
+            .border_color(rgb(palette.border))
+            .text_xs()
+            .text_color(rgb(palette.muted_foreground))
+            .child(Glyph::MESSAGE.icon().size(px(14.0)))
+            .child(div().truncate().child(hit.chat.clone())),
+    )
+    .child(
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(people::avatar(Some(&hit.sender), None, Size::XSmall))
+            .child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(hit.sender.clone()),
+            )
+            .child(div().text_xs().text_color(rgb(palette.muted_foreground)).child(when)),
+    )
+    .child(div().text_sm().child(marked(&hit.snippet, &hit.matched, palette)))
+    .into_any_element()
 }
 
 /// A person found: their name and job; a click opens their 1:1 chat when the list has one.

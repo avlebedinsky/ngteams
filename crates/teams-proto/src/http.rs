@@ -893,17 +893,7 @@ impl<C: Credentials> HttpTransport<C> {
         match &answered {
             Ok((answer, headers)) => {
                 log::info!("{shown} -> HTTP {} in {} ms", answer.status(), elapsed.as_millis());
-                if full {
-                    let response = teams_log::wire::Response {
-                        method: method.as_str(),
-                        url: url.as_str(),
-                        status: answer.status(),
-                        headers,
-                        body: answer.body(),
-                        elapsed,
-                    };
-                    log::debug!(target: teams_log::wire::HTTP_TARGET, "{response}");
-                }
+                log_response(&method, url, answer, headers, elapsed, full);
             }
             Err(error) => log::info!("{shown} failed after {} ms: {error}", elapsed.as_millis()),
         }
@@ -1810,8 +1800,6 @@ fn shown(outgoing: &Outgoing<'_>) -> String {
     )
 }
 
-/// Every header of `map` as text, for the log's `debug` records (which redact the credentials'): a value that isn't
-/// text is taken lossily.
 /// `headers` (lower-cased names, none of them a credential) and the credential `auth` as a request's header map.
 fn header_map(headers: &[(String, String)], auth: Auth<'_>) -> Result<HeaderMap, HttpError> {
     let mut map = HeaderMap::new();
@@ -1872,6 +1860,8 @@ fn log_response(
     }
 }
 
+/// Every header of `map` as text, for the log's `debug` records (which redact the credentials'): a value that isn't
+/// text is taken lossily.
 fn header_pairs(map: &HeaderMap) -> Vec<(String, String)> {
     map.iter()
         .map(|(name, value)| {

@@ -734,7 +734,10 @@ fn opened_at_a_message_the_store_never_had_the_view_reads_the_service_back_to_it
         view.update(cx, |view, cx| view.reveal(target.arrival_time, target.id.clone(), cx));
     });
     draw(cx);
-    assert_eq!(cx.update(|_, cx| view.read(cx).selected().map(str::to_owned)), Some("10".to_owned()));
+    assert_eq!(
+        cx.update(|_, cx| view.read(cx).selected().map(str::to_owned)),
+        Some("10".to_owned())
+    );
     assert!(ids(&view, cx).contains(&"10".to_owned()));
 }
 
