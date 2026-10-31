@@ -6,6 +6,7 @@ cd "$(dirname "$0")/.."
 packages=()
 report_args=()
 report_only=false
+test_threads=1
 while (($#)); do
     case "$1" in
         -p|--package)
@@ -21,8 +22,16 @@ while (($#)); do
             report_only=true
             shift
             ;;
+        --test-threads)
+            [[ $# -ge 2 && "$2" =~ ^[1-9][0-9]*$ ]] || {
+                echo "--test-threads requires a positive integer" >&2
+                exit 2
+            }
+            test_threads=$2
+            shift 2
+            ;;
         -h|--help)
-            echo "Usage: scripts/coverage.sh [-p crate ...] [--no-gate|--require-target] [--report-only]"
+            echo "Usage: scripts/coverage.sh [-p crate ...] [--no-gate|--require-target] [--report-only] [--test-threads N]"
             exit 0
             ;;
         *) echo "unknown argument: $1" >&2; exit 2 ;;
@@ -50,7 +59,9 @@ if ! "$report_only"; then
     # Never enable the live feature or accept cargo arguments that could enable it.
     env -u PROTO_LAB_LIVE -u TEAMS_MEDIA_TURN_SERVER -u TEAMS_MEDIA_TURN_USER \
         -u TEAMS_MEDIA_TURN_PASSWORD CARGO_LLVM_COV_TARGET_DIR="$PWD/target/coverage-build" \
-        cargo llvm-cov "${package_args[@]}" --locked --json --output-path "$output/llvm.json"
+        PROTO_LAB_REQUIRE_CHROME=1 GPUI_SMOKE_REQUIRE=1 \
+        cargo llvm-cov "${package_args[@]}" --locked --json --output-path "$output/llvm.json" \
+        -- --test-threads "$test_threads"
 fi
 python3 scripts/coverage-report.py report "$output/llvm.json" \
     --output "$output/summary.json" "${report_args[@]}" --packages "${selected[@]}"

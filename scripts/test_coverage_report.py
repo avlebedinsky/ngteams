@@ -124,6 +124,18 @@ class CoverageGateTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "review is stale.*lib.rs"):
             self.run_report()
 
+    def test_audit_context_does_not_exempt_its_executable_file_from_mapping(self):
+        relative = self.audit_declarations()
+        self.config["unmapped_sources"][relative]["context"] = {
+            "crates/example/src/lib.rs": hashlib.sha256(self.used.read_bytes()).hexdigest(),
+        }
+        self.entries.clear()
+        self.args.no_gate = True
+        failed, summary = self.run_report()
+        self.assertTrue(failed)
+        self.assertEqual(summary["crates"]["example"]["missing_source_files"],
+                         ["crates/example/src/lib.rs"])
+
     def test_audited_mapping_still_counts_and_unreviewed_missing_source_still_fails(self):
         self.audit_declarations()
         # A supplied zero-hit mapping remains in the denominator even for a reviewed file.
@@ -227,50 +239,93 @@ class CoverageGateTests(unittest.TestCase):
 
 
 class CoverageWrapperTests(unittest.TestCase):
-    def test_measurement_prepares_cargos_cache_tag_and_refuses_an_invalid_existing_tag(self):
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            scripts = root / "scripts"
-            scripts.mkdir()
-            for name in ["coverage.sh", "coverage-report.py"]:
-                shutil.copy2(Path(__file__).with_name(name), scripts / name)
-            source = root / "crates/example/src/lib.rs"
-            source.parent.mkdir(parents=True)
-            source.write_text("pub fn example() {}\n")
-            (source.parent.parent / "Cargo.toml").write_text('[package]\nname = "example"\n')
-            (root / "Cargo.toml").write_text('[workspace]\nmembers = ["crates/example"]\n')
-            (root / "coverage.toml").write_text(
-                'target = 90\nmetrics = ["lines", "functions", "regions"]\n'
-                '[excluded]\n[baselines]\nexample = { lines = 90, functions = 90, regions = 90 }\n')
-            entry = CoverageGateTests.entry(source, 100, 100)
-            (root / "llvm-fixture.json").write_text(json.dumps({
-                "type": "llvm.coverage.json.export", "data": [{"files": [entry]}],
-            }))
-            binary = root / "bin/cargo"
-            binary.parent.mkdir()
-            binary.write_text('''#!/usr/bin/env python3
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        self.root = Path(self.directory.name)
+        scripts = self.root / "scripts"
+        scripts.mkdir()
+        for name in ["coverage.sh", "coverage-report.py"]:
+            shutil.copy2(Path(__file__).with_name(name), scripts / name)
+        source = self.root / "crates/example/src/lib.rs"
+        source.parent.mkdir(parents=True)
+        source.write_text("pub fn example() {}\n")
+        (source.parent.parent / "Cargo.toml").write_text('[package]\nname = "example"\n')
+        (self.root / "Cargo.toml").write_text('[workspace]\nmembers = ["crates/example"]\n')
+        (self.root / "coverage.toml").write_text(
+            'target = 90\nmetrics = ["lines", "functions", "regions"]\n'
+            '[excluded]\n[baselines]\nexample = { lines = 90, functions = 90, regions = 90 }\n')
+        entry = CoverageGateTests.entry(source, 100, 100)
+        (self.root / "llvm-fixture.json").write_text(json.dumps({
+            "type": "llvm.coverage.json.export", "data": [{"files": [entry]}],
+        }))
+        binary = self.root / "bin/cargo"
+        binary.parent.mkdir()
+        binary.write_text('''#!/usr/bin/env python3
 from pathlib import Path
+import json
+import os
 import shutil
 import sys
 assert Path("target/coverage-build/CACHEDIR.TAG").read_text().startswith(
     "Signature: 8a477f597d28d172789f06886806bc55")
-Path("cargo-invoked").touch()
+keys = ["PROTO_LAB_REQUIRE_CHROME", "GPUI_SMOKE_REQUIRE", "PROTO_LAB_LIVE",
+        "TEAMS_MEDIA_TURN_SERVER", "TEAMS_MEDIA_TURN_USER", "TEAMS_MEDIA_TURN_PASSWORD"]
+Path("execution.json").write_text(json.dumps({
+    "args": sys.argv[1:], "environment": {key: os.environ.get(key) for key in keys}}))
 shutil.copyfile("llvm-fixture.json", sys.argv[sys.argv.index("--output-path") + 1])
 ''')
-            binary.chmod(0o755)
-            environment = dict(os.environ, PATH=str(binary.parent) + os.pathsep + os.environ["PATH"])
-            command = ["bash", str(scripts / "coverage.sh"), "-p", "example"]
-            result = subprocess.run(command, env=environment, capture_output=True, text=True, check=False)
-            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-            self.assertTrue((root / "cargo-invoked").exists())
-            tag = root / "target/coverage-build/CACHEDIR.TAG"
-            tag.write_text("unrecognized cache directory\n")
-            (root / "cargo-invoked").unlink()
-            result = subprocess.run(command, env=environment, capture_output=True, text=True, check=False)
-            self.assertEqual(result.returncode, 2)
-            self.assertIn("invalid cache signature", result.stderr)
-            self.assertEqual(tag.read_text(), "unrecognized cache directory\n")
-            self.assertFalse((root / "cargo-invoked").exists())
+        binary.chmod(0o755)
+        self.environment = dict(os.environ, PATH=str(binary.parent) + os.pathsep + os.environ["PATH"])
+        self.command = ["bash", str(scripts / "coverage.sh"), "-p", "example"]
+        self.execution = self.root / "execution.json"
+
+    def run_wrapper(self, *arguments):
+        return subprocess.run(self.command + list(arguments), env=self.environment,
+                              capture_output=True, text=True, check=False)
+
+    def test_measurement_prepares_cargos_cache_tag_and_refuses_an_invalid_existing_tag(self):
+        result = self.run_wrapper()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(self.execution.exists())
+        tag = self.root / "target/coverage-build/CACHEDIR.TAG"
+        tag.write_text("unrecognized cache directory\n")
+        self.execution.unlink()
+        result = self.run_wrapper()
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("invalid cache signature", result.stderr)
+        self.assertEqual(tag.read_text(), "unrecognized cache directory\n")
+        self.assertFalse(self.execution.exists())
+
+    def test_measurement_is_serial_requires_dependencies_and_removes_live_configuration(self):
+        self.environment.update({
+            "PROTO_LAB_REQUIRE_CHROME": "0", "GPUI_SMOKE_REQUIRE": "0", "RUST_TEST_THREADS": "12",
+            "PROTO_LAB_LIVE": "1", "TEAMS_MEDIA_TURN_SERVER": "synthetic-server",
+            "TEAMS_MEDIA_TURN_USER": "synthetic-user", "TEAMS_MEDIA_TURN_PASSWORD": "synthetic-password",
+        })
+        result = self.run_wrapper()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        execution = json.loads(self.execution.read_text())
+        self.assertEqual(execution["args"][-3:], ["--", "--test-threads", "1"])
+        self.assertEqual(execution["environment"], {
+            "PROTO_LAB_REQUIRE_CHROME": "1", "GPUI_SMOKE_REQUIRE": "1", "PROTO_LAB_LIVE": None,
+            "TEAMS_MEDIA_TURN_SERVER": None, "TEAMS_MEDIA_TURN_USER": None,
+            "TEAMS_MEDIA_TURN_PASSWORD": None,
+        })
+
+    def test_thread_override_is_forwarded_but_invalid_values_never_run_cargo(self):
+        result = self.run_wrapper("--test-threads", "3")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(self.execution.read_text())["args"][-3:],
+                         ["--", "--test-threads", "3"])
+        self.execution.unlink()
+        for arguments in [("--test-threads",), ("--test-threads", "0"), ("--test-threads", "-1"),
+                          ("--test-threads", "many"), ("--test-threads", "1 --features live")]:
+            with self.subTest(arguments=arguments):
+                result = self.run_wrapper(*arguments)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn("positive integer", result.stderr)
+                self.assertFalse(self.execution.exists())
 
 
 if __name__ == "__main__":

@@ -51,3 +51,56 @@ reason = "Request trait signatures and imports only; no default methods or execu
 [unmapped_sources."crates/teams-trouter/src/lib.rs"]
 sha256 = "7c105a6c32de4761bd5e86bf6002b2781aabd9902d858a49f0910f09ea25dfff"
 reason = "module declarations, re-exports and documentation only; no executable items"
+
+[unmapped_sources."crates/ngteams/src/lib.rs"]
+sha256 = "7934af26b9a0351beef265e1d1b1b4a2bee71afae48739a53bdea732f4aa66ff"
+reason = "module declarations, re-exports, documentation and a string constant only; no executable bodies"
+
+[unmapped_sources."crates/proto-lab/src/bundles.rs"]
+sha256 = "91b8fa5c32139ecb8aa673323b8acb4ad0b80a1e4e2629854aeff0d6ee067e8e"
+reason = "module declarations and documentation only; no executable bodies"
+
+[unmapped_sources."crates/proto-lab/src/commands.rs"]
+sha256 = "2eecebd31a3e9cbf23ddb16701b634f807043dbdd91aec1d52c77079bcc00d2f"
+reason = "module declarations and documentation only; no executable bodies"
+
+[unmapped_sources."crates/proto-lab/src/config.rs"]
+sha256 = "4bb2922b854fd2bb6ce02c35d580ce0ecf8adfbf615f5458ebc982a866769794"
+reason = "configuration type and constant re-exports only; no executable bodies"
+
+[unmapped_sources."crates/proto-lab/src/lib.rs"]
+sha256 = "d8d2041bdc82b46de0aba6e7ef19cbe737ed6fd96e38047704a37a66b9bf75a1"
+reason = "module declarations and documentation only; no executable bodies"
+
+[unmapped_sources."crates/teams-app/src/lib.rs"]
+sha256 = "19ac3256c6b7e3e7ae142cb464ba5a55cb135f77623c7a4fff64402fc79e9f91"
+reason = "module declarations and documentation only; no executable bodies"
+
+[unmapped_sources."crates/teams-core/src/lib.rs"]
+sha256 = "23a722985ddc1e7ec8246949e1f113da5bada8e8c25989143d9ba09baae844e8"
+reason = "module declarations, re-exports and documentation only; no executable bodies"
+
+[unmapped_sources."crates/teams-headless/src/lib.rs"]
+sha256 = "d82c6ebc457e095c65eee8d82618b73efc222ed07a99450e34bcdf6dae8db1fb"
+reason = "module declarations and documentation only; no executable bodies"
+
+[unmapped_sources."crates/teams-media/src/lib.rs"]
+sha256 = "a407cf664eff6d0427a49672c5affa5aaa33a84e95497dcdf4b1b2e139f6e770"
+reason = "module declarations and derived error type only; no authored executable bodies"
+
+[unmapped_sources."crates/teams-media/src/video.rs"]
+sha256 = "791b1a682ea3701df3d9862e4b8834f415976eb96f2ef9e4e188bc56f0adf7bd"
+reason = "module declarations, documentation and an integer constant only; no executable bodies"
+
+[unmapped_sources."crates/teams-signin/src/lib.rs"]
+sha256 = "5f9d9bd4143625b8c831ea36b2f96b374df717284d4574e1d4e01edcf30a6f92"
+reason = "module declarations and documentation only; no executable bodies"
+
+[unmapped_sources."crates/teams-ui/src/lib.rs"]
+sha256 = "6745afaf316af1f94e954e7e09f36d205785be1d6057073d09e4126aed39ada9"
+reason = "module declarations, re-exports and documentation only; no executable bodies"
+
+[unmapped_sources."crates/teams-wpe/src/event.rs"]
+sha256 = "6d8a54166d0eb886e365b99deb6b50ee95b13615bfde95e12c1753b93403d01b"
+reason = "event types and raw_ids macro invocations; LLVM maps all token from_raw/raw bodies to their definition in lib.rs, which remains required in the report"
+context = { "crates/teams-wpe/src/lib.rs" = "ecb603f1c58ea351e1ba86ff268fe75f23c3f439af757e4a049b35744a638f5b" }
