@@ -763,17 +763,19 @@ and mini bundle); the guard still scans them.
 
 ## Tests
 
-The gate, which every change passes:
+The checks, picked per change by what it can break (CLAUDE.md, "Checks"):
 
 ```sh
 cargo fmt --all --check
-cargo clippy -p <crate> [-p <crate> ...] --all-targets --all-features -- -D warnings   # the crates the change touched
+cargo check -p <crate> [-p <crate> ...] --all-targets
+cargo clippy -p <crate> [-p <crate> ...] --all-targets --all-features -- -D warnings
 scripts/lint-report.sh
-cargo test -p <crate> [-p <crate> ...]   # the crates the change touched
+cargo test -p <crate> [-p <crate> ...] [--test <name>] [<test filter>]
+cargo test -p fixture-guard   # what's under any tests/fixtures/ or docs/
 ```
 
-A change to any `tests/fixtures/` or `docs/` also runs `cargo test -p fixture-guard`. The whole workspace
-(`cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test --workspace`) runs when asked.
+The whole workspace (`cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test
+--workspace`) is the widest check.
 
 ### Coverage
 
@@ -888,4 +890,8 @@ runs in the same sandbox; its measurement is ignored by default and run by hand 
 `cargo test --release -p gpui-video --test bench -- --ignored --nocapture`. Results and the decision are in
 `docs/spikes/gpui-video.md`.
 
-Known flakes under heavy machine load are listed in [CLAUDE.md](CLAUDE.md#chrome-under-load).
+### Known flakes under load
+
+When the machine is loaded, `browser::a_browser_that_exits_early_is_reported` (`crates/proto-lab/tests/browser.rs`)
+can fail on timing, and Chrome can be slow enough to start that a test times out at `Browser::launch`. Rerun such a test
+alone before calling it a failure. A fence breach is never one of these.
