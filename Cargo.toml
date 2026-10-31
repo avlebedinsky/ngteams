@@ -258,6 +258,11 @@ multiple_unsafe_ops_per_block = "deny"
 allow_attributes = "deny"
 allow_attributes_without_reason = "deny"
 
+# Debug builds keep line tables only (file:line in backtraces and panics, no variable info for a debugger): full
+# debuginfo, statically linked into every test binary, grew target/ to hundreds of GB.
+[profile.dev]
+debug = "line-tables-only"
+
 # The gpui-video spike converts 1280x720 frames on the CPU; unoptimized, one conversion takes ~250 ms, so even the
 # debug tests of its video grid get optimized code for that crate (its dependencies stay as they are).
 [profile.dev.package.gpui-video]
