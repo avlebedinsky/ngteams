@@ -213,10 +213,27 @@ mod tests {
         let server = Server::start(&[], &[]);
         assert!(server.request(b"").is_empty());
         assert!(server.request(b"GET / HTTP/1.1\r\n").is_empty());
+        let mut small = format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nX-Large: ", server.port).into_bytes();
+        small.extend(vec![b'x'; 1024]);
+        small.extend_from_slice(b"\r\n\r\n");
+        assert_eq!(
+            response(&server.request(&small), "200 OK", "text/html; charset=utf-8"),
+            include_bytes!("../assets/index.html")
+        );
         let mut large = format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nX-Large: ", server.port).into_bytes();
         large.extend(vec![b'x'; 16 * 1024]);
-        large.extend_from_slice(b"\r\n");
-        assert!(server.request(&large).is_empty());
+        large.extend_from_slice(b"\r\n\r\n");
+        let mut oversized = server.connect();
+        oversized.write_all(&large).unwrap();
+        oversized.shutdown(Shutdown::Write).unwrap();
+        let mut rejected = Vec::new();
+        if let Err(error) = oversized.read_to_end(&mut rejected) {
+            assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+        }
+        assert!(
+            rejected.is_empty(),
+            "an oversized complete head must not get a response"
+        );
         let mut stalled = server.connect();
         stalled.write_all(b"GET / HTTP/1.1\r\n").unwrap();
         let mut ignored = Vec::new();
@@ -281,7 +298,7 @@ mod tests {
                 .contains(&session.files.0.join(".claude/projects").display().to_string())
         );
         let empty = Server::start(&[("CLAUDE_CODE_SESSION_ID", ""), ("CLAUDE_PID", "invalid")], &[]);
-        assert!(empty.stdout().contains("agents in "));
+        assert!(empty.stdout().contains("agents in the ledger's transcript paths only"));
         assert!(!empty.stdout().contains(".claude/projects"));
         assert_eq!(
             response(&empty.get("/status.json"), "200 OK", "application/json").first(),
@@ -299,10 +316,17 @@ mod tests {
         assert!(follower.wait().success());
         assert!(follower.stdout().contains("ended, stopping"));
         // Override the environment PID: zero has no /proc directory, so it must stop even though this test is alive.
-        let mut gone = Server::start(
-            &[("CLAUDE_PID", &std::process::id().to_string())],
-            &["--exit-with", "0"],
-        );
+        let files = Files::new();
+        let child = files
+            .command()
+            .args(["--ledger", "synthetic.json", "--port", "0", "--exit-with", "0"])
+            .env("CLAUDE_PID", std::process::id().to_string())
+            .stdout(fs::File::create(files.0.join("stdout")).unwrap())
+            .stderr(fs::File::create(files.0.join("stderr")).unwrap())
+            .spawn()
+            .unwrap();
+        // This process can exit before announcing readiness; only its exit and stop message matter.
+        let mut gone = Server { child, port: 0, files };
         assert!(gone.wait().success());
         assert!(gone.stdout().contains("process 0 ended, stopping"));
     }
