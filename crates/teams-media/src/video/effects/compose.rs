@@ -278,12 +278,12 @@ fn planes(frame: &mut VideoFrame) -> [Plane<'_>; 3] {
 
 /// Blends each row of `plane` toward the background row `background` makes, by `alpha` (255 keeps the frame).
 fn blend_rows(plane: Plane<'_>, alpha: &[u8], mut background: impl FnMut(usize, &mut [u8])) {
-    let mut behind = vec![0_u8; plane.width];
-    for (row, (line, weights)) in plane
-        .data
-        .chunks_exact_mut(plane.width)
-        .zip(alpha.chunks_exact(plane.width))
-        .take(plane.height)
+    let Plane { data, width, height } = plane;
+    let mut behind = vec![0_u8; width];
+    for (row, (line, weights)) in data
+        .chunks_exact_mut(width)
+        .zip(alpha.chunks_exact(width))
+        .take(height)
         .enumerate()
     {
         if weights.iter().all(|&weight| weight == 255) {
@@ -417,22 +417,24 @@ pub(super) fn read_picture(path: &Path) -> Result<image::DynamicImage, String> {
         .map_err(|error| error.to_string())
 }
 
-/// `picture` scaled to cover `width` by `height` (its shape kept) and cropped to it, centred.
+/// `picture` scaled to cover `width` by `height` (its shape kept) and cropped to it, centred: cropped to the frame's
+/// shape first, so a picture of an odd shape (1920 by 1, say) never scales up into a huge one before the crop.
 #[must_use]
 fn cover(picture: &RgbImage, width: u32, height: u32) -> RgbImage {
     let (from_width, from_height) = (u64::from(picture.width().max(1)), u64::from(picture.height().max(1)));
-    let (to_width, to_height) = (u64::from(width), u64::from(height));
-    // wider than the frame: its height fits and its sides are cropped; else its width fits
-    let (scaled_width, scaled_height) = if from_width * to_height > from_height * to_width {
-        ((from_width * to_height).div_ceil(from_height), to_height)
+    let (to_width, to_height) = (u64::from(width.max(1)), u64::from(height.max(1)));
+    // wider than the frame: its sides are cropped; else its top and bottom
+    let (crop_width, crop_height) = if from_width * to_height > from_height * to_width {
+        ((from_height * to_width).div_ceil(to_height).min(from_width), from_height)
     } else {
-        (to_width, (from_height * to_width).div_ceil(from_width))
+        (from_width, (from_width * to_height).div_ceil(to_width).min(from_height))
     };
-    let (scaled_width, scaled_height) = (
-        u32::try_from(scaled_width).unwrap_or(width).max(width),
-        u32::try_from(scaled_height).unwrap_or(height).max(height),
+    let (crop_width, crop_height) = (
+        u32::try_from(crop_width).unwrap_or(1).max(1),
+        u32::try_from(crop_height).unwrap_or(1).max(1),
     );
-    let scaled = imageops::resize(picture, scaled_width, scaled_height, FilterType::Triangle);
-    let (left, top) = ((scaled_width - width) / 2, (scaled_height - height) / 2);
-    imageops::crop_imm(&scaled, left, top, width, height).to_image()
+    let left = (picture.width().saturating_sub(crop_width)) / 2;
+    let top = (picture.height().saturating_sub(crop_height)) / 2;
+    let cropped = imageops::crop_imm(picture, left, top, crop_width, crop_height).to_image();
+    imageops::resize(&cropped, width, height, FilterType::Triangle)
 }

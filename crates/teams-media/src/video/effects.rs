@@ -6,7 +6,7 @@
 //! - **The choice** ([`BackgroundChoice`]) is shared: the app sets it (the settings' video effects), and the camera's
 //!   thread reads it at each frame, so a change shows on the next frame. Choosing an effect never turns a camera on:
 //!   it only changes the frames of a camera something else turned on.
-//! - **The model** is Google's MediaPipe selfie segmenter (landscape, 256 by 144; Apache-2.0), converted to ONNX
+//! - **The model** is Google's `MediaPipe` selfie segmenter (landscape, 256 by 144; Apache-2.0), converted to ONNX
 //!   (`tools/selfie-segmenter/convert.py`) and run by tract on the CPU, on a thread of its own beside the camera's
 //!   ([`segment`]: the camera's thread never waits for it, and takes its newest mask), loaded once per process on the
 //!   first frame that needs it. Until its first mask, and when it can't load, there is no person in the frame
@@ -15,6 +15,7 @@
 //!   frame's shape and kept as I420 at the frame's size until the choice or the size changes. One that can't be read
 //!   is blurred instead, for the same reason.
 
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -223,15 +224,30 @@ pub fn import(source: &Path, dir: &Path) -> Result<PathBuf, String> {
     std::fs::create_dir_all(dir).map_err(|error| error.to_string())?;
     let mut name = [0_u8; 8];
     getrandom::fill(&mut name).map_err(|error| error.to_string())?;
-    let name: String = name.iter().map(|byte| format!("{byte:02x}")).collect();
+    let name: String = name.iter().fold(String::new(), |mut hex, byte| {
+        let _ = write!(hex, "{byte:02x}");
+        hex
+    });
+    // written under a name `added` doesn't list, then renamed: a write that fails leaves no broken picture behind
     let path = dir.join(format!("{name}.jpg"));
-    let file = std::fs::File::create(&path).map_err(|error| error.to_string())?;
+    let partial = dir.join(format!("{name}.jpg.part"));
+    let written = write_jpeg(&partial, &picture.to_rgb8()).and_then(|()| {
+        std::fs::rename(&partial, &path).map_err(|error| error.to_string())
+    });
+    if written.is_err() {
+        let _ = std::fs::remove_file(&partial);
+    }
+    written.map(|()| path)
+}
+
+/// `picture` as a JPEG file at `path`.
+fn write_jpeg(path: &Path, picture: &image::RgbImage) -> Result<(), String> {
+    let file = std::fs::File::create(path).map_err(|error| error.to_string())?;
     let mut writer = std::io::BufWriter::new(file);
     image::codecs::jpeg::JpegEncoder::new_with_quality(&mut writer, 90)
-        .encode_image(&picture.to_rgb8())
+        .encode_image(picture)
         .map_err(|error| error.to_string())?;
-    std::io::Write::flush(&mut writer).map_err(|error| error.to_string())?;
-    Ok(path)
+    std::io::Write::flush(&mut writer).map_err(|error| error.to_string())
 }
 
 /// The pictures the user added in `dir` ([`import`]), the oldest first; none when it can't be read.

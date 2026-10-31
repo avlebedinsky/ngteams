@@ -123,6 +123,26 @@ fn an_added_picture_is_scaled_down_and_listed() {
     assert!(import(&dir.path().join("missing.png"), dir.path()).is_err());
 }
 
+#[test]
+fn the_bundled_model_loads_and_gives_a_mask_of_its_size() {
+    // without it every frame would be all background: the person blurred or replaced too
+    let plan = segment::plan().unwrap();
+    let mask = segment::run(&plan, &segment::model_input(&ramp(1280, 720))).unwrap();
+    assert_eq!(mask.len(), MODEL_WIDTH * MODEL_HEIGHT);
+    assert!(mask.iter().all(|value| value.is_finite()), "confidences");
+}
+
+#[test]
+fn a_picture_of_an_odd_shape_is_cropped_before_it_is_scaled() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = dir.path().join("thin.png");
+    image::RgbImage::from_pixel(1920, 1, image::Rgb([10, 200, 30]))
+        .save(&source)
+        .unwrap();
+    let picture = compose::backdrop_frame(&Backdrop::File(source), 1280, 720).unwrap();
+    assert_eq!((picture.width, picture.height), (1280, 720));
+}
+
 /// What a 720p frame costs: the model's run (on its own thread) and the camera thread's part (the frame scaled for
 /// the model and put together with each effect). Timed in a release build (`cargo test --release -p teams-media
 /// effects -- --ignored --nocapture`): the debug build's numbers say nothing.

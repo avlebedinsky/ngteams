@@ -93,7 +93,7 @@ pub enum ChatError {
     NoGroupChat,
     #[error("`{0}` is neither a, b, c, abc, a call guest nor a conversation id")]
     NotAChat(String),
-    #[error("lab.toml has no MRI for {0} yet (run `proto-lab login {0}`), so it has no 1:1 chat with the call guest")]
+    #[error("the MRIs of {0} and the call guest don't make a 1:1 chat id")]
     NoGuestChat(Alias),
 }
 

@@ -1,4 +1,4 @@
-//! Where the person is in a frame: MediaPipe's selfie segmenter (landscape) on tract, its confidence smoothed over
+//! Where the person is in a frame: `MediaPipe`'s selfie segmenter (landscape) on tract, its confidence smoothed over
 //! frames, as an 8-bit mask at the model's size (255 surely the person, 0 surely the background; the compositor
 //! sharpens the edge once it scaled the mask up).
 //!

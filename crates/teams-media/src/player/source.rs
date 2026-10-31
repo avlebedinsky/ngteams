@@ -313,9 +313,9 @@ impl Cache {
     pub fn interrupt(&self) {
         let mut state = self.lock();
         state.interrupts += 1;
-        let stale = Instant::now().checked_sub(LIVE);
+        let long_ago = Instant::now().checked_sub(LIVE);
         for stream in &mut state.streams {
-            stream.used = stale.unwrap_or(stream.used);
+            stream.used = long_ago.unwrap_or(stream.used);
         }
         self.shared.changed.notify_all();
     }
@@ -410,7 +410,7 @@ impl State {
     }
 
     /// Stops `stream` (taken out of the streams); its run stays, unless it holds nothing.
-    fn let_go(&mut self, stream: Stream) {
+    fn let_go(&mut self, stream: &Stream) {
         stream.abandon.set();
         if self.runs.get(&stream.start).is_some_and(|run| run.bytes.is_empty()) {
             self.runs.remove(&stream.start);
@@ -425,7 +425,7 @@ impl State {
             .partition(|stream| now.duration_since(stream.used) < LIVE);
         self.streams = kept;
         for stream in stale {
-            self.let_go(stream);
+            self.let_go(&stream);
         }
     }
 
@@ -500,7 +500,7 @@ fn start_stream(shared: &Arc<Shared>, state: &mut State, at: u64) {
             break;
         };
         let stream = state.streams.remove(oldest);
-        state.let_go(stream);
+        state.let_go(&stream);
     }
     for stream in &mut state.streams {
         if stream.start < at && at < stream.end {
@@ -561,28 +561,20 @@ fn stream_bytes(shared: &Arc<Shared>, id: u64, abandon: &Abandon) {
             return;
         };
         let failed = match shared.source.open(front, len, abandon) {
-            Ok(mut stream) => {
-                taken_total(shared, id, stream.total());
-                loop {
-                    match stream.next(abandon) {
-                        Ok(Some(bytes)) => {
-                            tries = 0;
-                            if !keep(shared, id, &bytes) {
-                                return;
-                            }
-                        }
-                        // ended before its end: as if it failed on the way
-                        Ok(None) => break SourceError::Failed,
-                        Err(error) => break error,
-                    }
-                }
-            }
+            Ok(mut stream) => match drain(shared, id, stream.as_mut(), abandon, &mut tries) {
+                Some(error) => error,
+                None => return,
+            },
             Err(error) => error,
         };
         match failed {
             SourceError::Stopped => return,
             SourceError::Unavailable => return fail(shared, SourceError::Unavailable),
             SourceError::Failed => {
+                // a stream that brought bytes since its last failure starts its pauses over too
+                if tries == 0 {
+                    pause = Duration::from_millis(250);
+                }
                 tries += 1;
                 if tries >= TRIES {
                     return fail(shared, SourceError::Failed);
@@ -590,6 +582,30 @@ fn stream_bytes(shared: &Arc<Shared>, id: u64, abandon: &Abandon) {
                 thread::sleep(pause);
                 pause *= 2;
             }
+        }
+    }
+}
+
+/// Takes what `stream` brings into stream `id`'s run (each piece resets `tries`): `None` once it was let go or reached
+/// its end, else how it failed (one that ended before its end failed on the way).
+fn drain(
+    shared: &Arc<Shared>,
+    id: u64,
+    stream: &mut dyn ByteStream,
+    abandon: &Abandon,
+    tries: &mut u32,
+) -> Option<SourceError> {
+    taken_total(shared, id, stream.total());
+    loop {
+        match stream.next(abandon) {
+            Ok(Some(bytes)) => {
+                *tries = 0;
+                if !keep(shared, id, &bytes) {
+                    return None;
+                }
+            }
+            Ok(None) => return Some(SourceError::Failed),
+            Err(error) => return Some(error),
         }
     }
 }
@@ -606,7 +622,7 @@ fn next_step(shared: &Arc<Shared>, id: u64) -> Step {
         return Step::Open(front, end - front);
     }
     let stream = state.streams.remove(index);
-    state.let_go(stream);
+    state.let_go(&stream);
     read_ahead(shared, &mut state);
     shared.changed.notify_all();
     Step::Stop
@@ -654,7 +670,7 @@ fn fail(shared: &Shared, error: SourceError) {
     state.failed = Some(error);
     let streams = std::mem::take(&mut state.streams);
     for stream in streams {
-        state.let_go(stream);
+        state.let_go(&stream);
     }
     shared.changed.notify_all();
 }

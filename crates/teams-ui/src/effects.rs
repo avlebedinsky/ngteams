@@ -422,6 +422,11 @@ impl EffectsPicker {
                 .flatten()
                 .and_then(|paths| paths.into_iter().next())
             else {
+                // cancelled (or the chooser failed): Add new works again
+                let _ = this.update(cx, |picker, cx| {
+                    picker.adding = None;
+                    cx.notify();
+                });
                 return;
             };
             let imported = cx.background_spawn(async move { effects::import(&source, &dir) }).await;
