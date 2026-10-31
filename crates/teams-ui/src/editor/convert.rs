@@ -378,6 +378,8 @@ impl<S: BuildHasher> Loader<'_, S> {
             }
             Node::Image(image) => {
                 if image.is_emoji() {
+                    // Teams' own editor keeps a message with emoticons editable; this one has no emoticon run, so an
+                    // emoticon is edited (and goes back) as its emoji
                     let alt = image.alt.clone().unwrap_or_default();
                     self.push(&alt, context.attrs.clone(), context);
                 } else if self.load != Load::Paste {
