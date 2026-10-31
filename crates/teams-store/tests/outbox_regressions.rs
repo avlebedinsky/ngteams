@@ -185,7 +185,7 @@ fn mutations() -> [Case; 6] {
 }
 
 #[test]
-fn rejected_sql_updates_roll_back_the_entire_command_and_allow_a_later_retry() {
+fn sql_update_refusals_preserve_the_command_and_allow_a_later_retry() {
     for (prepare, mutate) in mutations() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("store.sqlite");
@@ -194,24 +194,58 @@ fn rejected_sql_updates_roll_back_the_entire_command_and_allow_a_later_retry() {
         prepare(&mut store, id);
         let before = row(&store, id);
         let raw = Connection::open(&path).expect("second connection");
-        // An AFTER trigger fails after SQLite has changed the row: the statement must roll everything back.
         raw.execute_batch(
             "CREATE TRIGGER refuse_update AFTER UPDATE ON outbox BEGIN
             SELECT RAISE(ABORT, 'synthetic update refused'); END;",
         )
-        .expect("install refusal");
+        .expect("reject the update statement");
 
-        let error = mutate(&mut store, id).expect_err("database rejected the write");
+        let error = mutate(&mut store, id).expect_err("the database refused the statement");
 
         assert!(matches!(error, StoreError::Sqlite(_)), "{error}");
-        assert_eq!(row(&store, id), before, "a failed mutation preserves every field");
+        assert_eq!(row(&store, id), before, "a refused statement preserves every field");
         raw.execute_batch("DROP TRIGGER refuse_update").expect("remove refusal");
         mutate(&mut store, id).expect("a later retry can apply the same operation");
     }
 }
 
 #[test]
-fn a_failed_insert_does_not_reserve_the_client_message_id_or_leave_a_partial_command() {
+fn failed_outbox_reads_roll_back_successful_updates_and_allow_a_later_retry() {
+    for (prepare, mutate) in mutations() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("store.sqlite");
+        let mut store = Store::open(&path).expect("open");
+        let id = store.enqueue(&command()).expect("enqueue").id;
+        prepare(&mut store, id);
+        let before = row(&store, id);
+        let raw = Connection::open(&path).expect("second connection");
+        // The UPDATE succeeds, but its result can't be decoded: the command's transaction must restore the row.
+        raw.execute_batch(
+            "CREATE TRIGGER corrupt_update AFTER UPDATE ON outbox
+            WHEN NEW.kind <> 'post-write-unknown-kind' BEGIN
+            UPDATE outbox SET kind = 'post-write-unknown-kind' WHERE id = NEW.id; END;",
+        )
+        .expect("corrupt the result of a successful update");
+
+        let error = mutate(&mut store, id).expect_err("the updated row cannot be decoded");
+
+        assert_post_write_read_failure(error);
+        assert_eq!(row(&store, id), before, "a failed mutation preserves every field");
+        raw.execute_batch("DROP TRIGGER corrupt_update")
+            .expect("remove corruption");
+        mutate(&mut store, id).expect("a later retry can apply the same operation");
+    }
+}
+
+fn assert_post_write_read_failure(error: StoreError) {
+    let StoreError::Sqlite(rusqlite::Error::FromSqlConversionFailure(_, _, cause)) = error else {
+        panic!("expected the successful write's result to fail conversion, got {error}");
+    };
+    assert!(cause.to_string().contains("post-write-unknown-kind"), "{cause}");
+}
+
+#[test]
+fn a_refused_insert_leaves_the_client_message_id_available_for_a_durable_retry() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("store.sqlite");
     let mut store = Store::open(&path).expect("open");
@@ -220,11 +254,37 @@ fn a_failed_insert_does_not_reserve_the_client_message_id_or_leave_a_partial_com
         "CREATE TRIGGER refuse_insert AFTER INSERT ON outbox BEGIN
         SELECT RAISE(ABORT, 'synthetic insert refused'); END;",
     )
-    .expect("install refusal");
+    .expect("reject the insert statement");
     assert!(matches!(store.enqueue(&command()), Err(StoreError::Sqlite(_))));
     assert_eq!(store.outbox_by_client_message_id(CMID).expect("lookup"), None);
     assert!(store.outbox_due(i64::MAX).expect("no partial command").is_empty());
     raw.execute_batch("DROP TRIGGER refuse_insert").expect("remove refusal");
+    let pending = store.enqueue(&command()).expect("retry the same command");
+    drop(store);
+    let reopened = Store::open(&path).expect("reopen");
+    assert_eq!(row(&reopened, pending.id), pending, "the successful retry is durable");
+}
+
+#[test]
+fn a_failed_insert_read_does_not_reserve_the_client_message_id_or_leave_a_partial_command() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("store.sqlite");
+    let mut store = Store::open(&path).expect("open");
+    let raw = Connection::open(&path).expect("second connection");
+    raw.execute_batch(
+        "CREATE TRIGGER corrupt_insert AFTER INSERT ON outbox BEGIN
+        UPDATE outbox SET kind = 'post-write-unknown-kind' WHERE id = NEW.id; END;",
+    )
+    .expect("corrupt the result of a successful insert");
+    assert_post_write_read_failure(
+        store
+            .enqueue(&command())
+            .expect_err("the inserted row cannot be decoded"),
+    );
+    assert_eq!(store.outbox_by_client_message_id(CMID).expect("lookup"), None);
+    assert!(store.outbox_due(i64::MAX).expect("no partial command").is_empty());
+    raw.execute_batch("DROP TRIGGER corrupt_insert")
+        .expect("remove corruption");
     let pending = store.enqueue(&command()).expect("retry the same command");
     drop(store);
     let reopened = Store::open(&path).expect("reopen");
@@ -287,6 +347,8 @@ fn lock_cleanup_preserves_files_that_do_not_name_a_run() {
     let path = dir.path().join("store.sqlite");
     let owner = Store::open(&path).expect("owner");
     let runs = run_directory(&path);
+    let owner_lock = runs.join(format!("{}.lock", owner.run_id()));
+    assert!(owner_lock.exists(), "the run holds a lock file before it ends");
     let names = [
         "not-a-run.lock".into(),
         ".lock".into(),
@@ -298,6 +360,7 @@ fn lock_cleanup_preserves_files_that_do_not_name_a_run() {
     }
     drop(owner);
     let _next = Store::open(&path).expect("sweep ended locks");
+    assert!(!owner_lock.exists(), "the finished run's lock was swept");
     for name in names {
         assert_eq!(
             fs::read(runs.join(name)).expect("unrelated file survives"),
