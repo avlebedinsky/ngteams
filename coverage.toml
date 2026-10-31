@@ -14,7 +14,7 @@ wpe-webkit-sys = "generated gir bindings"
 # Floors are measured with one `-p <crate>` alone; combined runs also count dependent crates' tests.
 [baselines]
 teams-store = { lines = 93, functions = 94, regions = 82 }
-teams-log = { lines = 90, functions = 89, regions = 90 }
+teams-log = { lines = 90, functions = 90, regions = 90 }
 
 # Individually inspected sources LLVM does not map. Any content change invalidates the review.
 # These entries never suppress coverage counts when LLVM supplies a mapping for the file.
