@@ -1,7 +1,8 @@
 //! The session's video: the camera thread (`teams-media-cam`) and the decoding threads (`teams-media-vid`).
 //!
 //! - **The camera thread** runs while the camera is on ([`super::MediaSession::set_camera`]): each frame turned into
-//!   I420 at the size the call sends ([`crate::video::convert::to_i420`]), shown to the self view, and handed to
+//!   I420 at the size the call sends ([`crate::video::convert::to_i420`]), its background blurred or replaced as the
+//!   choice says at that frame ([`crate::video::effects`]), shown to the self view, and handed to
 //!   libwebrtc's video source, which encodes it (an IDR whenever the far end asks) at the rate its bandwidth estimate
 //!   allows. A camera that fails (`DeviceClosed(Camera)`) ends the thread and turns the camera off; the rest of the
 //!   session goes on.
@@ -25,6 +26,7 @@ use crate::devices::{PixelFormat, VideoFrame, VideoSink, VideoSource};
 use crate::rtc::{Next, Peer, next_within};
 use crate::video::codec::EncoderSettings;
 use crate::video::convert::{MaxSize, to_i420};
+use crate::video::effects::{BackgroundChoice, Effects};
 
 use super::{SessionDevice, SessionEvent, Shared};
 
@@ -48,6 +50,8 @@ pub struct VideoParts {
     pub remote: RemoteSinks,
     /// Where our camera's frames go as they are sent (I420): the self view; `None` for none.
     pub preview: Option<Box<dyn VideoSink>>,
+    /// The background the camera's frames are sent with, as chosen at each frame.
+    pub background: BackgroundChoice,
 }
 
 impl std::fmt::Debug for VideoParts {
@@ -128,6 +132,7 @@ impl VideoShared {
 #[derive(Default)]
 pub(super) struct SessionVideo {
     max_size: Option<MaxSize>,
+    background: BackgroundChoice,
     preview: SelfView,
     pub(super) camera: Option<(Arc<AtomicBool>, JoinHandle<()>)>,
     shared: Option<Arc<Shared>>,
@@ -136,6 +141,7 @@ pub(super) struct SessionVideo {
 impl SessionVideo {
     pub(super) fn start(&mut self, parts: VideoParts, shared: &Arc<Shared>) {
         self.max_size = Some(parts.max_size);
+        self.background = parts.background;
         *self.preview.lock().unwrap_or_else(PoisonError::into_inner) = parts.preview;
         *shared.video.sinks.lock().unwrap_or_else(PoisonError::into_inner) = Some(LineSinks {
             make: parts.remote,
@@ -144,9 +150,9 @@ impl SessionVideo {
         self.shared = Some(Arc::clone(shared));
     }
 
-    /// The largest picture sent and the self view, once the video started.
-    pub(super) fn camera_parts(&self) -> Option<(MaxSize, SelfView)> {
-        Some((self.max_size?, Arc::clone(&self.preview)))
+    /// The largest picture sent, the self view and the background chosen, once the video started.
+    pub(super) fn camera_parts(&self) -> Option<(MaxSize, SelfView, BackgroundChoice)> {
+        Some((self.max_size?, Arc::clone(&self.preview), self.background.clone()))
     }
 
     /// Stops the camera thread, if one runs, and waits for it.
@@ -176,12 +182,14 @@ pub(super) struct CameraLoop {
     pub(super) camera: Box<dyn VideoSource>,
     pub(super) max_size: MaxSize,
     pub(super) preview: SelfView,
+    pub(super) background: BackgroundChoice,
     pub(super) stop: Arc<AtomicBool>,
 }
 
 impl CameraLoop {
     pub(super) fn run(mut self) {
         let epoch = Instant::now();
+        let mut effects = Effects::new();
         while !self.stop.load(Ordering::Relaxed) && !self.shared.stopping() {
             let frame = match self.camera.next_frame(FRAME_WAIT) {
                 Ok(Some(frame)) => frame,
@@ -194,10 +202,11 @@ impl CameraLoop {
                 }
             };
             VideoShared::count(&self.shared.video.captured);
-            let Some(i420) = to_i420(&frame, self.max_size) else {
+            let Some(mut i420) = to_i420(&frame, self.max_size) else {
                 VideoShared::count(&self.shared.video.unsent);
                 continue;
             };
+            effects.apply(&mut i420, &self.background.get());
             if let Some(preview) = self.preview.lock().unwrap_or_else(PoisonError::into_inner).as_mut() {
                 let _ = preview.show(&i420);
             }

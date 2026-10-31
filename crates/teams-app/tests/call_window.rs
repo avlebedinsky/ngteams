@@ -918,6 +918,7 @@ fn child(alias: Alias) -> SandboxResult {
                         ringer: Some(ringer),
                         echo: Some(Mri::new(ECHO)),
                         video: Some(feed),
+                        camera: Some(pipewire.clone()),
                         devices: Some(pipewire),
                     }),
                     ..LaunchAccount::bare(alias, engine)

@@ -11,9 +11,10 @@ use std::path::{Path, PathBuf};
 
 use gpui::{AppContext as _, TestAppContext};
 use teams_media::devices::catalog::{DeviceDirectory as _, DeviceInfo, DeviceKind, DeviceList, FixedDirectory};
+use teams_media::video::effects::{Backdrop, Background};
 use teams_ui::settings::{
     AccountSettings, DEFAULT_IDLE_MINUTES, DIR_MODE, FILE_MODE, FirstRunState, LogLevel, ManualStatus, Notifications,
-    Problem, Settings, SettingsFile, SettingsModel, TimeFormat, attach_devices, parse, render,
+    Problem, Settings, SettingsFile, SettingsModel, TimeFormat, VideoEffect, attach_devices, parse, render,
 };
 use teams_ui::theme::{self, Appearance, THEMES};
 
@@ -44,6 +45,7 @@ fn changed() -> Settings {
         microphone: Some("alsa_input.usb-headset".to_owned()),
         speaker: None,
         camera: Some("v4l2_camera".to_owned()),
+        video_effect: VideoEffect::Stock("waves"),
         appearance: Appearance {
             follow_system: false,
             theme: "nord",
@@ -63,6 +65,65 @@ fn changed() -> Settings {
         .into(),
         first_account: None,
     }
+}
+
+#[test]
+fn the_video_effect_is_none_by_default_and_kept_by_its_key() {
+    assert_eq!(Settings::default().video_effect, VideoEffect::None);
+    for (text, effect) in [
+        ("video_effect = \"blur\"", VideoEffect::Blur),
+        ("video_effect = \"stock/forest\"", VideoEffect::Stock("forest")),
+        (
+            "video_effect = \"added/0a1b2c3d.jpg\"",
+            VideoEffect::Added("0a1b2c3d.jpg".to_owned()),
+        ),
+        ("video_effect = \"none\"", VideoEffect::None),
+    ] {
+        let (read, problems) = parse(text).expect("TOML");
+        assert_eq!(read.video_effect, effect, "{text}");
+        assert!(problems.is_empty(), "{text}");
+        assert_eq!(
+            parse(&render(&read)).expect("TOML").0.video_effect,
+            effect,
+            "{text} round-trips"
+        );
+    }
+    for bad in [
+        "stock/nothing",
+        "added/../settings.toml",
+        "added/.hidden",
+        "sparkles",
+        "added/a/b.jpg",
+    ] {
+        let (read, problems) = parse(&format!("video_effect = \"{bad}\"")).expect("TOML");
+        assert_eq!(read.video_effect, VideoEffect::None, "{bad} keeps the default");
+        assert_eq!(problems.len(), 1, "{bad} is reported");
+    }
+}
+
+#[test]
+fn a_picture_the_user_added_is_looked_for_beside_the_settings() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    let (file, path) = file_in(&dir);
+    let added = Settings {
+        video_effect: VideoEffect::Added("0a1b.jpg".to_owned()),
+        ..Settings::default()
+    };
+    file.save(&added).expect("saved");
+    let model = SettingsModel::load(file);
+    let backgrounds = path.parent().expect("a directory").join("backgrounds");
+    assert_eq!(model.backgrounds_dir(), Some(backgrounds.clone()));
+    assert_eq!(
+        model.background(),
+        Background::Picture(Backdrop::File(backgrounds.join("0a1b.jpg")))
+    );
+    let in_memory = SettingsModel::in_memory(added);
+    assert_eq!(in_memory.backgrounds_dir(), None);
+    assert_eq!(
+        in_memory.background(),
+        Background::Blur,
+        "nothing to look in: blurred, never as it is"
+    );
 }
 
 #[test]

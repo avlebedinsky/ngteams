@@ -79,6 +79,7 @@ impl LoopbackPeer {
             max_size: MaxSize::HD,
             remote: Box::new(|_| Box::new(FrameCounter::new()) as Box<dyn teams_media::devices::VideoSink>),
             preview: None,
+            background: teams_media::video::effects::BackgroundChoice::default(),
         })?;
         let mut dialect = NgcSession::new();
         dialect.set_video(VideoLines::Main { sending: true });

@@ -58,6 +58,7 @@ fn side(turn: &TurnServer, name: &str, dir: &std::path::Path) -> Side {
                 }
             }),
             preview: Some(Box::new(preview.clone())),
+            background: teams_media::video::effects::BackgroundChoice::default(),
         })
         .unwrap();
     Side {

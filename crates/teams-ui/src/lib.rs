@@ -51,7 +51,7 @@
 //! - [`calls`] (M3 Task 17): the account's calls as the views show them, in a build that shows them (the lab app and the
 //!   personal build), and the user's asks; [`call_view`] the incoming call's banner and the in-call strip of the
 //!   main window, [`call_window`] the call's own window (as Teams opens one) showing [`call_stage`]'s stage and
-//!   controls, [`call_alert`] the incoming call's ringtone ([`ringtone`], on the default output) and its notification
+//!   controls, [`effects`] the camera's background effects (blur, a picture) and their self-preview, [`call_alert`] the incoming call's ringtone ([`ringtone`], on the default output) and its notification
 //!   with Answer and Decline.
 //! - [`account_prompt`]: the personal build's first sign-in screen, a window of its own asking for the work account
 //!   before anything is signed in.
@@ -86,6 +86,7 @@ pub mod code;
 pub mod compose;
 pub mod desktop;
 pub mod editor;
+pub mod effects;
 pub mod event_form;
 pub mod files;
 pub mod first_run;
@@ -134,6 +135,7 @@ pub use chat_list::{ChatList, ChatListEvent, ChatRow};
 pub use chat_view::{ChatView, ChatViewEvent, MessageAction};
 pub use compose::{Compose, ComposeEvent, ComposeParts};
 pub use desktop::{Desktop, DesktopEvent, DesktopParts};
+pub use effects::{CameraPreview, EffectsPicker, PickerPlace};
 pub use first_run::FirstRun;
 pub use global_search::{GlobalSearch, GlobalSearchEvent};
 pub use models::{Account, Chats, Engine, Feed, FeedEvent, Link, Models, Status};

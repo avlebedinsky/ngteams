@@ -34,6 +34,8 @@ pub struct PersonalCalls {
     pub echo: Mri,
     /// Where a call's video is shown; `None`: the calls carry no video.
     pub video: Option<VideoFeed>,
+    /// The camera the video effects' preview opens (the settings' camera); `None`: no preview.
+    pub camera: Option<Arc<dyn Devices + Send + Sync>>,
     /// The devices the settings list and choose among; `None` lists none.
     pub devices: Option<Arc<dyn DeviceDirectory>>,
 }
@@ -43,6 +45,7 @@ impl std::fmt::Debug for PersonalCalls {
         f.debug_struct("PersonalCalls")
             .field("ringer", &self.ringer.is_some())
             .field("video", &self.video.is_some())
+            .field("camera", &self.camera.is_some())
             .field("devices", &self.devices.is_some())
             .finish_non_exhaustive()
     }
@@ -59,6 +62,7 @@ pub fn echo() -> Mri {
 pub fn on_devices(devices: Arc<dyn Devices + Send + Sync>, video: bool) -> (AccountCalls, PersonalCalls) {
     let ringer: Arc<dyn Ringer> = Arc::new(DeviceRinger::new(Arc::clone(&devices)));
     let feed = video.then(VideoFeed::new);
+    let camera = video.then(|| Arc::clone(&devices));
     let video = feed.clone().map(|feed| call_video(Arc::new(feed)));
     (
         account_calls(devices, video),
@@ -66,6 +70,7 @@ pub fn on_devices(devices: Arc<dyn Devices + Send + Sync>, video: bool) -> (Acco
             ringer: Some(ringer),
             echo: echo(),
             video: feed,
+            camera,
             devices: None,
         },
     )

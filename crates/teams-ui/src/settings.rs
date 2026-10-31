@@ -6,7 +6,8 @@
 //!   availability stops being reported, the account's manual status ([`ManualStatus`]), whether calls carry
 //!   video ([`Settings::video_calls`], its switch shown only where the app's calls have video), the calls'
 //!   microphone, speaker and camera ([`Settings::microphone`] and the others: a device's name, or the system's default
-//!   when none is named), how the app looks ([`Settings::appearance`]: the theme, following the system's light or dark
+//!   when none is named), the camera's background in calls ([`Settings::video_effect`]: none, blurred, one of the
+//!   app's pictures or one the user added, kept in [`SettingsModel::backgrounds_dir`]), how the app looks ([`Settings::appearance`]: the theme, following the system's light or dark
 //!   mode or not, the font size and family), the clock times are shown on ([`Settings::time_format`]: the system's,
 //!   12-hour or 24-hour), and whether the first run's screen of the writes that happen on their
 //!   own was confirmed.
@@ -44,9 +45,11 @@ use teams_core::Choice;
 pub use teams_log::Level as LogLevel;
 use teams_log::diagnostics::{Report, Source as DiagnosticsSource};
 use teams_media::devices::catalog::{DeviceDirectory, DeviceKind, DeviceList};
+use teams_media::video::effects::{self, Backdrop, Background};
 use teams_proto::ManualAvailability;
 use toml::{Table, Value};
 
+use crate::effects::CameraPreview;
 use crate::theme::{self, Appearance};
 
 /// The settings file's mode.
@@ -63,6 +66,80 @@ pub const MAX_CHAT_ID: usize = 512;
 pub const MAX_FILE: u64 = 64 * 1024;
 /// The longest device name kept as a choice.
 pub const MAX_DEVICE_NAME: usize = 256;
+/// The longest name of a background picture the user added, kept as a choice.
+pub const MAX_PICTURE_NAME: usize = 64;
+/// The directory beside the settings file the user's background pictures are kept in.
+pub const BACKGROUNDS_DIR: &str = "backgrounds";
+
+/// The camera's background in calls ([`crate::effects`]), as Teams' video effects offer it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum VideoEffect {
+    /// The camera's picture as it is.
+    #[default]
+    None,
+    /// The background blurred.
+    Blur,
+    /// One of the app's pictures, by its key ([`effects::STOCK`]).
+    Stock(&'static str),
+    /// A picture the user added, by its file's name in [`SettingsModel::backgrounds_dir`].
+    Added(String),
+}
+
+impl VideoEffect {
+    /// Its name in the file: `none`, `blur`, `stock/<key>` or `added/<file name>`.
+    #[must_use]
+    pub fn key(&self) -> String {
+        match self {
+            Self::None => "none".to_owned(),
+            Self::Blur => "blur".to_owned(),
+            Self::Stock(key) => format!("stock/{key}"),
+            Self::Added(name) => format!("added/{name}"),
+        }
+    }
+
+    fn from_key(key: &str) -> Option<Self> {
+        match key {
+            "none" => Some(Self::None),
+            "blur" => Some(Self::Blur),
+            _ => {
+                if let Some(stock) = key.strip_prefix("stock/") {
+                    return effects::stock(stock).map(|stock| Self::Stock(stock.key));
+                }
+                key.strip_prefix("added/")
+                    .filter(|name| is_picture_name(name))
+                    .map(|name| Self::Added(name.to_owned()))
+            }
+        }
+    }
+
+    /// The background the media applies for it; a picture the user added is looked for in `dir`, and blurred when
+    /// there is no `dir` (settings kept in memory) to look in.
+    #[must_use]
+    pub fn background(&self, dir: Option<&Path>) -> Background {
+        match self {
+            Self::None => Background::None,
+            Self::Blur => Background::Blur,
+            Self::Stock(key) => {
+                effects::stock(key).map_or(Background::Blur, |stock| Background::Picture(Backdrop::Stock(stock)))
+            }
+            Self::Added(name) => dir.map_or(Background::Blur, |dir| {
+                Background::Picture(Backdrop::File(dir.join(name)))
+            }),
+        }
+    }
+}
+
+/// Whether `name` is a picture's file name as the settings keep one: 1 to [`MAX_PICTURE_NAME`] ASCII letters, digits,
+/// dots, dashes and underscores, not starting with a dot.
+#[must_use]
+pub fn is_picture_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_PICTURE_NAME
+        && !name.starts_with('.')
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+}
 
 /// Which messages notify.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -267,6 +344,8 @@ pub struct Settings {
     pub speaker: Option<String>,
     /// The calls' camera; `None` follows the system's default.
     pub camera: Option<String>,
+    /// The camera's background in calls, the app's for every account.
+    pub video_effect: VideoEffect,
     /// How the app looks: its theme, font size and font family, the app's for every account.
     pub appearance: Appearance,
     /// The clock times are shown on, the app's for every account.
@@ -412,6 +491,7 @@ impl Default for Settings {
             microphone: None,
             speaker: None,
             camera: None,
+            video_effect: VideoEffect::None,
             appearance: Appearance::default(),
             time_format: TimeFormat::default(),
             accounts: BTreeMap::new(),
@@ -435,6 +515,7 @@ pub mod keys {
     pub const MICROPHONE: &str = "microphone";
     pub const SPEAKER: &str = "speaker";
     pub const CAMERA: &str = "camera";
+    pub const VIDEO_EFFECT: &str = "video_effect";
     pub const FOLLOW_SYSTEM_THEME: &str = "follow_system_theme";
     pub const THEME: &str = "theme";
     pub const LIGHT_THEME: &str = "light_theme";
@@ -533,6 +614,7 @@ fn take(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem
             settings.video_calls = value.as_bool().ok_or(bad(keys::VIDEO_CALLS, "not true or false"))?;
         }
         keys::MICROPHONE | keys::SPEAKER | keys::CAMERA => take_device(settings, key, value)?,
+        keys::VIDEO_EFFECT => take_video_effect(settings, value)?,
         keys::FOLLOW_SYSTEM_THEME
         | keys::THEME
         | keys::LIGHT_THEME
@@ -632,6 +714,18 @@ fn take_appearance(appearance: &mut Appearance, key: &str, value: &Value) -> Res
     Ok(())
 }
 
+/// Takes the camera's background in calls.
+fn take_video_effect(settings: &mut Settings, value: &Value) -> Result<(), Problem> {
+    settings.video_effect = value
+        .as_str()
+        .and_then(VideoEffect::from_key)
+        .ok_or(Problem::BadValue {
+            key: keys::VIDEO_EFFECT,
+            why: "not one of none, blur, stock/<a picture of the app's>, added/<a picture's file name>",
+        })?;
+    Ok(())
+}
+
 /// Takes a device's choice: a device name, as the settings keep one.
 fn take_device(settings: &mut Settings, key: &str, value: &Value) -> Result<(), Problem> {
     let (kind, key) = match key {
@@ -705,6 +799,10 @@ pub fn render(settings: &Settings) -> String {
             table.insert(key.to_owned(), Value::String(name.to_owned()));
         }
     }
+    table.insert(
+        keys::VIDEO_EFFECT.to_owned(),
+        Value::String(settings.video_effect.key()),
+    );
     render_appearance(&settings.appearance, &mut table);
     table.insert(
         keys::TIME_FORMAT.to_owned(),
@@ -906,6 +1004,8 @@ pub struct SettingsModel {
     video_switch: bool,
     /// The calls' devices, once attached ([`attach_devices`]): where each choice goes, and the devices there are.
     devices: Option<Devices>,
+    /// The camera's preview of the video effects, once attached ([`attach_camera_preview`]).
+    preview: Option<CameraPreview>,
 }
 
 /// When the settings let typing, read receipts and presence go ([`SettingsModel::sends_typing`] and the others).
@@ -952,6 +1052,7 @@ impl SettingsModel {
             signals: Signals::AsSwitched,
             video_switch: false,
             devices: None,
+            preview: None,
         }
     }
 
@@ -969,6 +1070,7 @@ impl SettingsModel {
             signals: Signals::AsSwitched,
             video_switch: false,
             devices: None,
+            preview: None,
         }
     }
 
@@ -989,6 +1091,27 @@ impl SettingsModel {
     #[must_use]
     pub fn devices(&self) -> Option<&DeviceList> {
         self.devices.as_ref().map(|devices| &devices.list)
+    }
+
+    /// Where the background pictures the user added are kept: [`BACKGROUNDS_DIR`] beside the settings file; `None` for
+    /// settings kept in memory (nothing can be added).
+    #[must_use]
+    pub fn backgrounds_dir(&self) -> Option<PathBuf> {
+        let file = self.file.as_ref()?;
+        Some(file.path().parent()?.join(BACKGROUNDS_DIR))
+    }
+
+    /// The background the camera is sent with, as the settings choose it ([`Settings::video_effect`]).
+    #[must_use]
+    pub fn background(&self) -> Background {
+        self.settings.video_effect.background(self.backgrounds_dir().as_deref())
+    }
+
+    /// The camera's preview of the video effects, once attached ([`attach_camera_preview`]); `None` without (no
+    /// camera to preview).
+    #[must_use]
+    pub fn camera_preview(&self) -> Option<&CameraPreview> {
+        self.preview.as_ref()
     }
 
     /// Hands the device directory the choice of each kind the settings hold.
@@ -1162,6 +1285,11 @@ impl SettingsModel {
         {
             self.apply_devices();
         }
+        if self.settings.video_effect != before.video_effect
+            && let Some(preview) = &self.preview
+        {
+            preview.set_background(self.background());
+        }
         self.problems
             .retain(|problem| !matches!(problem, Problem::Unsaved { .. }));
         if let Some(file) = &self.file {
@@ -1179,6 +1307,16 @@ impl SettingsModel {
         }
         cx.notify();
     }
+}
+
+/// Attaches the camera's preview of the video effects to the settings: the views offer it, and it applies the
+/// background the settings choose, now and on every change.
+pub fn attach_camera_preview(model: &Entity<SettingsModel>, preview: CameraPreview, cx: &mut App) {
+    model.update(cx, |model, cx| {
+        preview.set_background(model.background());
+        model.preview = Some(preview);
+        cx.notify();
+    });
 }
 
 /// Attaches the calls' devices to the settings (see the module docs): the list there is now, each change of it as it

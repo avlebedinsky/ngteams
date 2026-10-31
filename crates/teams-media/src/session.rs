@@ -470,7 +470,7 @@ impl MediaSession {
         let Some(source) = self.peer.video_source() else {
             return Err(Error::Video("the session's video didn't start".into()));
         };
-        let (max_size, preview) = video
+        let (max_size, preview, background) = video
             .camera_parts()
             .ok_or_else(|| Error::Video("the session's video didn't start".into()))?;
         let stop = Arc::new(AtomicBool::new(false));
@@ -481,6 +481,7 @@ impl MediaSession {
             camera,
             max_size,
             preview,
+            background,
             stop: Arc::clone(&stop),
         };
         // on before the thread runs: a camera that fails at once turns it off again from there

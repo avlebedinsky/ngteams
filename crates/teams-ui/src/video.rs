@@ -6,7 +6,8 @@
 //!   the media's own threads hand each decoded frame (the far end's) and each frame the camera sends (the self view)
 //!   to it; it turns each into the premultiplied BGRA a window draws, keeps the newest of each, and wakes the window.
 //!   It also carries the settings' video switch ([`VideoFeed::set_enabled`]): while it is off, a call's media starts
-//!   no video and the codec isn't used.
+//!   no video and the codec isn't used; and the camera's background the settings choose ([`VideoFeed::set_background`],
+//!   applied by the media to each frame it sends). [`follow_settings`] keeps both as the settings say.
 //! - **The tiles** ([`Tiles`]) draw the newest frame of each through GPUI's external surface (a texture kept per
 //!   tile, written from the frame's pixels), and count each frame the renderer presented: the trace's `video-tile
 //!   presented` line names the tile (`remote`, `line-1` … `line-9`, `self`) and how many it presented so far, at the
@@ -23,7 +24,9 @@ use gpui::{
 };
 use teams_media::devices::{DeviceError, VideoFrame, VideoSink};
 use teams_media::video::convert::i420_to_bgra;
+use teams_media::video::effects::{Background, BackgroundChoice};
 
+use crate::settings::SettingsModel;
 use crate::trace::{TraceLine, ViewTrace};
 use crate::video_player::fitted;
 
@@ -91,6 +94,7 @@ pub struct Picture {
 /// What the media's threads and the window share.
 struct Shared {
     enabled: AtomicBool,
+    background: BackgroundChoice,
     pictures: Vec<Mutex<Option<Arc<Picture>>>>,
     serials: Vec<AtomicU64>,
     wake: async_channel::Sender<()>,
@@ -126,6 +130,7 @@ impl VideoFeed {
         Self {
             shared: Arc::new(Shared {
                 enabled: AtomicBool::new(true),
+                background: BackgroundChoice::default(),
                 pictures: (0..TILES).map(|_| Mutex::new(None)).collect(),
                 serials: (0..TILES).map(|_| AtomicU64::new(0)).collect(),
                 wake,
@@ -143,6 +148,18 @@ impl VideoFeed {
     #[must_use]
     pub fn enabled(&self) -> bool {
         self.shared.enabled.load(Ordering::Relaxed)
+    }
+
+    /// Sends the camera with `background` from its next frame on (the settings' video effects), a call's camera on
+    /// now included. It never turns a camera on.
+    pub fn set_background(&self, background: Background) {
+        self.shared.background.set(background);
+    }
+
+    /// The camera's background as chosen now.
+    #[must_use]
+    pub fn background(&self) -> Background {
+        self.shared.background.get()
     }
 
     /// The newest frame of `tile`, unless it is older than [`STALE`].
@@ -163,6 +180,12 @@ impl VideoFeed {
     #[must_use]
     pub fn woken(&self) -> async_channel::Receiver<()> {
         self.shared.woken.clone()
+    }
+
+    /// Wakes the window without a frame (the preview stopped: its picture went).
+    pub(crate) fn wake(&self) {
+        // full means a wake is already waiting
+        let _ = self.shared.wake.try_send(());
     }
 
     /// Takes `frame` (I420) as `tile`'s newest.
@@ -202,6 +225,17 @@ impl teams_core::VideoOutput for VideoFeed {
     fn enabled(&self) -> bool {
         VideoFeed::enabled(self)
     }
+
+    fn background(&self) -> BackgroundChoice {
+        self.shared.background.clone()
+    }
+}
+
+/// Sets `feed`'s video switch and the camera's background as `settings` say (an app calls it at the start and on
+/// every change of its settings).
+pub fn follow_settings(feed: &VideoFeed, settings: &SettingsModel) {
+    feed.set_enabled(settings.settings().video_calls);
+    feed.set_background(settings.background());
 }
 
 /// A sink of one tile's frames, on the media's threads.

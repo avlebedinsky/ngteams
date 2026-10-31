@@ -3,8 +3,8 @@
 //!
 //! - **The header**: who the call is with (a chat's name, an invitation's caller, "Echo" for the test call) and its
 //!   state (calling, ringing, connecting, connected with its duration, reconnecting, taken by voicemail); on its right
-//!   Teams' call controls: People (the participants' pane), More (Device settings: the main window's settings on their
-//!   Calls page), the camera (a build that shows video) and the microphone, each with a menu of the devices the
+//!   Teams' call controls: People (the participants' pane), More (Video effects, in a build that shows video; Device
+//!   settings: the main window's settings on their Calls page), the camera (a build that shows video) and the microphone, each with a menu of the devices the
 //!   settings list (the camera's; the microphone's and the speaker's) when they are listed, and Leave in Teams' red.
 //!   Each control's tooltip names it and its key (Ctrl+Shift+O, Ctrl+Shift+M, Ctrl+Shift+H, the main window's keys).
 //! - **The stage**: before anyone is in the call, the callee's avatar with the call's state, as Teams shows it while it
@@ -13,6 +13,10 @@
 //!   person the call is with (a 1:1 call's far end's video on its tile). The account's own tile (its self view, a
 //!   border while it speaks) floats at the stage's bottom right, as Teams' self view does.
 //! - **The participants' pane** (People): who is in the call, the account first, and who speaks.
+//! - **The video effects' pane** (More's or the camera menu's Video effects; one pane at a time, as Teams has it):
+//!   the self-preview over the background effects ([`crate::effects::EffectsPicker`]): what the call sends while the
+//!   camera is on, else a preview only the user's Preview turns on. A background chosen applies to the call's camera
+//!   at once and is kept for the next calls.
 //! - **How a call ended**, when the user didn't end it (the far end hung up, it dropped, never connected, went to
 //!   voicemail): who it was with (their avatar and name), why it ended in plain words ([`calls::Ended::reason`]: "Lab
 //!   Bee ended the call", "No one else joined the call", never a code the service sent), how long it lasted, and
@@ -34,9 +38,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::{
-    Anchor, AnyElement, App, AsyncApp, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
-    Task, WeakEntity, Window, div, prelude::FluentBuilder as _, px, relative, rgb,
+    Anchor, AnyElement, App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, FocusHandle,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Task, WeakEntity, Window, div, prelude::FluentBuilder as _, px, relative, rgb,
 };
 use gpui_component::Sizable as _;
 use gpui_component::Size;
@@ -49,6 +53,7 @@ use teams_media::devices::catalog::DeviceKind;
 use crate::bridge::Core;
 use crate::call_view::{self, CallPeople, Control, Look, control};
 use crate::calls::{self, ActiveCall, Ask, CallKind, Calls, DeviceCheck, EndReason, Ended, Verdict};
+use crate::effects::{EffectsPicker, PickerPlace};
 use crate::icons::{Glyph, icon_button, selected_by};
 use crate::notify::SOMEONE;
 use crate::people;
@@ -125,6 +130,8 @@ pub struct CallStage {
     tiles: Option<Tiles>,
     /// The participants' pane is open.
     roster: bool,
+    /// The video effects' pane, while it is open.
+    effects: Option<Entity<EffectsPicker>>,
     /// The devices a test call used, named as it ended.
     results: Option<[String; 3]>,
     /// The grid as last traced.
@@ -179,6 +186,7 @@ impl CallStage {
             people: CallPeople::default(),
             tiles,
             roster: false,
+            effects: None,
             results: None,
             grid_traced: None,
             titled: None,
@@ -197,7 +205,31 @@ impl CallStage {
     /// Opens or closes the participants' pane, as People does.
     pub fn show_roster(&mut self, open: bool, cx: &mut Context<Self>) {
         self.roster = open;
+        if open {
+            self.effects = None;
+        }
         cx.notify();
+    }
+
+    /// Opens or closes the video effects' pane, as More's Video effects does (a build that shows video).
+    pub fn show_effects(&mut self, open: bool, cx: &mut Context<Self>) {
+        if !open {
+            self.effects = None;
+        } else if self.effects.is_none()
+            && let Some(feed) = self.calls.read(cx).video().cloned()
+        {
+            let (settings, trace, call) = (self.settings.clone(), Arc::clone(&self.trace), self.call.get());
+            self.effects =
+                Some(cx.new(|cx| EffectsPicker::new(settings, trace, PickerPlace::CallPane, cx).in_call(feed, call)));
+            self.roster = false;
+        }
+        cx.notify();
+    }
+
+    /// Whether the video effects' pane is open.
+    #[must_use]
+    pub fn effects_shown(&self) -> bool {
+        self.effects.is_some()
     }
 
     /// What takes the window's keyboard, so the call keys reach the window's controls.
@@ -447,8 +479,8 @@ impl CallStage {
             palette,
             cx,
             |this, cx| {
-                this.roster = !this.roster;
-                cx.notify();
+                let open = !this.roster;
+                this.show_roster(open, cx);
             },
         );
         let camera = self
@@ -476,7 +508,7 @@ impl CallStage {
             .items_center()
             .gap_1()
             .child(roster)
-            .child(Self::more(palette, cx))
+            .child(self.more(palette, cx))
             .child(div().w(px(1.0)).h(px(32.0)).mx_1().bg(rgb(palette.border)))
             .children(camera)
             .child(
@@ -515,12 +547,13 @@ impl CallStage {
                 cx,
                 |this, cx| this.ask(Ask::ToggleCamera, cx),
             ))
-            .children(self.devices_menu("call-camera-devices", CAMERAS, "Choose camera", cx))
+            .children(self.devices_menu("call-camera-devices", CAMERAS, "Choose camera and video effects", cx))
     }
 
-    /// More: Device settings.
-    fn more(palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    /// More: Video effects (a build that shows video) and Device settings.
+    fn more(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let stage = cx.weak_entity();
+        let video = self.calls.read(cx).video().is_some();
         let face = tool_face(Glyph::MORE, "More", palette);
         selected_by(
             "call-more",
@@ -530,6 +563,11 @@ impl CallStage {
                 .child(face)
                 .tooltip("More actions")
                 .dropdown_menu_with_anchor(Anchor::TopRight, move |menu: PopupMenu, _, _| {
+                    let menu = if video {
+                        menu.item(effects_item("call-more-video-effects", stage.clone()))
+                    } else {
+                        menu
+                    };
                     let stage = stage.clone();
                     menu.min_w(px(200.0)).item(
                         PopupMenuItem::element(|_, _| {
@@ -555,10 +593,12 @@ impl CallStage {
         id: &'static str,
         kinds: &'static [DeviceKind],
         tip: &'static str,
-        cx: &App,
+        cx: &Context<Self>,
     ) -> Option<AnyElement> {
         self.settings.read(cx).devices()?;
         let model = self.settings.clone();
+        let stage = cx.weak_entity();
+        let effects = kinds == CAMERAS;
         Some(
             selected_by(
                 id,
@@ -568,7 +608,13 @@ impl CallStage {
                     .icon(Glyph::CHEVRON_DOWN.icon())
                     .tooltip(tip)
                     .dropdown_menu_with_anchor(Anchor::TopRight, move |menu: PopupMenu, _, cx| {
-                        device_items(menu, kinds, &model, cx)
+                        let menu = device_items(menu, kinds, &model, cx);
+                        if effects {
+                            menu.separator()
+                                .item(effects_item("call-camera-video-effects", stage.clone()))
+                        } else {
+                            menu
+                        }
                     }),
             )
             .into_any_element(),
@@ -743,6 +789,58 @@ impl CallStage {
             .into_any_element()
     }
 
+    /// The video effects' pane while it is open: its title and Close over the picker, which learns whether the call's
+    /// camera is on.
+    fn effects_pane(&self, active: &ActiveCall, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let picker = self.effects.clone()?;
+        picker.update(cx, |picker, cx| picker.set_camera_on(active.camera, cx));
+        let close = selected_by(
+            "call-effects-close",
+            icon_button("call-effects-close", Glyph::X, "Close video effects")
+                .small()
+                .on_click(cx.listener(|this, _, _, cx| this.show_effects(false, cx))),
+        );
+        Some(
+            div()
+                .debug_selector(|| "call-effects-pane".to_owned())
+                .w(px(ROSTER_WIDTH))
+                .flex_none()
+                .h_full()
+                .flex()
+                .flex_col()
+                .bg(rgb(palette.surface))
+                .border_l_1()
+                .border_color(rgb(palette.border))
+                .child(
+                    div()
+                        .h(px(48.0))
+                        .px_4()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_lg()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child("Video effects"),
+                        )
+                        .child(close),
+                )
+                .child(
+                    div()
+                        .id("call-effects-scroll")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .px_3()
+                        .pb_3()
+                        .child(picker),
+                )
+                .into_any_element(),
+        )
+    }
+
     /// A test call's results, as Teams shows them in its call window once it ended: a row per check (the microphone,
     /// the speaker and the camera, each naming the device the call used, and the network), "Device settings" and
     /// Close.
@@ -854,11 +952,13 @@ impl CallStage {
         if let Some(active) = live {
             let stage = self.stage(active, title, palette);
             let roster = self.roster.then(|| self.roster_pane(active, palette, cx));
+            let effects = self.effects_pane(active, palette, cx);
             return div()
                 .size_full()
                 .flex()
                 .child(stage)
                 .children(roster)
+                .children(effects)
                 .into_any_element();
         }
         match (ended, ended.and_then(|ended| ended.check)) {
@@ -1032,6 +1132,24 @@ fn wake_on_frames(feed: &VideoFeed, cx: &mut Context<CallStage>) -> Task<()> {
             if this.update(cx, |_, cx| cx.notify()).is_err() {
                 break;
             }
+        }
+    })
+}
+
+/// The menus' Video effects: opens the video effects' pane.
+fn effects_item(selector: &'static str, stage: WeakEntity<CallStage>) -> PopupMenuItem {
+    PopupMenuItem::element(move |_, _| {
+        div()
+            .debug_selector(move || selector.to_owned())
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(Glyph::SPARKLES.icon().size(px(14.0)))
+            .child("Video effects")
+    })
+    .on_click(move |_, _, cx| {
+        if let Some(stage) = stage.upgrade() {
+            stage.update(cx, |stage, cx| stage.show_effects(true, cx));
         }
     })
 }

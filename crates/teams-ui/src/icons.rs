@@ -17,6 +17,7 @@ impl Glyph {
     pub const ARROW_DOWN: Self = Self(include_bytes!("../assets/icons/arrow-down.svg"));
     pub const ARROW_RIGHT: Self = Self(include_bytes!("../assets/icons/arrow-right.svg"));
     pub const ARROW_UP: Self = Self(include_bytes!("../assets/icons/arrow-up.svg"));
+    pub const BAN: Self = Self(include_bytes!("../assets/icons/ban.svg"));
     pub const BELL: Self = Self(include_bytes!("../assets/icons/bell.svg"));
     pub const BOT: Self = Self(include_bytes!("../assets/icons/bot.svg"));
     pub const BUG: Self = Self(include_bytes!("../assets/icons/bug.svg"));
@@ -30,6 +31,7 @@ impl Glyph {
     pub const CALENDAR_TODAY: Self = Self(include_bytes!("../assets/icons/calendar-1.svg"));
     pub const CHECK: Self = Self(include_bytes!("../assets/icons/check.svg"));
     pub const IMAGE: Self = Self(include_bytes!("../assets/icons/image.svg"));
+    pub const IMAGE_PLUS: Self = Self(include_bytes!("../assets/icons/image-plus.svg"));
     pub const LOCK: Self = Self(include_bytes!("../assets/icons/lock.svg"));
     pub const LOCK_OPEN: Self = Self(include_bytes!("../assets/icons/lock-open.svg"));
     pub const NOTES: Self = Self(include_bytes!("../assets/icons/notebook-text.svg"));
@@ -122,6 +124,7 @@ impl Glyph {
     pub const SEND: Self = Self(include_bytes!("../assets/icons/send-horizontal.svg"));
     pub const SETTINGS: Self = Self(include_bytes!("../assets/icons/settings.svg"));
     pub const SHARE: Self = Self(include_bytes!("../assets/icons/share.svg"));
+    pub const SPARKLES: Self = Self(include_bytes!("../assets/icons/sparkles.svg"));
     pub const SHIELD: Self = Self(include_bytes!("../assets/icons/shield.svg"));
     pub const SHRINK: Self = Self(include_bytes!("../assets/icons/shrink.svg"));
     pub const SKIP_BACK: Self = Self(include_bytes!("../assets/icons/rotate-ccw.svg"));

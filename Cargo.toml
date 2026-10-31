@@ -202,6 +202,10 @@ tokio-tungstenite = "0.30.0"
 toml = "1.1.8"
 # edits lab.toml in place (the MRI of an account after its first login), keeping its comments
 toml_edit = "0.25.17"
+# The camera's background effects (teams-media): MediaPipe's selfie segmenter, converted to ONNX, run on the CPU by
+# tract (Sonos; MIT/Apache-2.0), pure Rust: no system library, a few milliseconds a frame. Without its `transformers`
+# ops, which the model doesn't use.
+tract-onnx = { version = "0.23.9", default-features = false }
 # tests only: the UI kit's `tracing` events forwarded to `log` (its `log` feature, no subscriber), the version the kit
 # already links
 tracing = { version = "0.1.44", default-features = false }
@@ -257,6 +261,13 @@ allow_attributes_without_reason = "deny"
 # The gpui-video spike converts 1280x720 frames on the CPU; unoptimized, one conversion takes ~250 ms, so even the
 # debug tests of its video grid get optimized code for that crate (its dependencies stay as they are).
 [profile.dev.package.gpui-video]
+opt-level = 3
+
+# The person segmentation of the camera's background effects runs tract's kernels on every frame: unoptimized they
+# take most of a second a frame, so a debug build (the lab app, the tests) gets them optimized.
+[profile.dev.package.tract-linalg]
+opt-level = 3
+[profile.dev.package.tract-core]
 opt-level = 3
 
 # GPUI with agterm-rs's external-surfaces patches (M0 Task 16, approach (b) of the video spike):

@@ -36,6 +36,8 @@ pub struct AppCalls {
     pub echo: Option<Mri>,
     /// Where a call's video is shown; `None`: the calls carry no video.
     pub video: Option<VideoFeed>,
+    /// The camera the video effects' preview opens (the settings' camera); `None`: no preview.
+    pub camera: Option<Arc<dyn Devices + Send + Sync>>,
     /// The devices the settings list and choose among; `None` lists none (devices that can't be chosen).
     pub devices: Option<Arc<dyn DeviceDirectory>>,
 }
@@ -46,6 +48,7 @@ impl std::fmt::Debug for AppCalls {
             .field("ringer", &self.ringer.is_some())
             .field("echo", &self.echo)
             .field("video", &self.video.is_some())
+            .field("camera", &self.camera.is_some())
             .field("devices", &self.devices.is_some())
             .finish()
     }
@@ -67,6 +70,7 @@ pub fn echo_of(config: &LabConfig) -> Option<Mri> {
 pub fn on_devices(devices: Arc<dyn Devices + Send + Sync>, echo: Option<Mri>, video: bool) -> (AccountCalls, AppCalls) {
     let ringer: Arc<dyn Ringer> = Arc::new(DeviceRinger::new(Arc::clone(&devices)));
     let feed = video.then(VideoFeed::new);
+    let camera = video.then(|| Arc::clone(&devices));
     let video = feed.clone().map(|feed| teams_core::lab::call_video(Arc::new(feed)));
     (
         account_calls(devices, video),
@@ -74,6 +78,7 @@ pub fn on_devices(devices: Arc<dyn Devices + Send + Sync>, echo: Option<Mri>, vi
             ringer: Some(ringer),
             echo,
             video: feed,
+            camera,
             devices: None,
         },
     )

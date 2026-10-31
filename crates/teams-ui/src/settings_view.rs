@@ -14,19 +14,21 @@
 //!   ("Follow the system", naming the system's default, then every device there is, a device chosen that isn't there
 //!   shown as not connected), "Make a test call" under them as Teams has it (the echo service's test call, asked of
 //!   the shell: [`SettingsViewEvent::MakeTestCall`]; offered while no call is up or rings on any account, the calling
-//!   endpoint is registered and the app isn't read-only, else said why), and the calls' video switch ("Video in
-//!   calls").
+//!   endpoint is registered and the app isn't read-only, else said why), the calls' video switch ("Video in
+//!   calls"), and the camera's video effects (blur, a picture behind the person) with their self-preview
+//!   ([`crate::effects::EffectsPicker`], made while the page shows and dropped as it goes, its preview with it).
 //! - **Diagnostics**: the diagnostic log's level and "Copy diagnostics".
 //!
 //! What was wrong with the settings file (or the log) is shown above every page. Each change goes to the
 //! [`SettingsModel`] (and so to the file, and a device's to the calls) at once.
 
 use std::rc::Rc;
+use std::sync::Arc;
 
 use gpui::{
     Anchor, AnyElement, App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _,
-    IntoElement, KeyDownEvent, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
+    IntoElement, KeyDownEvent, ParentElement as _, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::IndexPath;
 use gpui_component::button::Button;
@@ -39,11 +41,13 @@ use teams_log::diagnostics::WARNING;
 use teams_media::devices::catalog::{DeviceKind, DeviceList};
 
 use crate::clock::{self, HourCycle};
+use crate::effects::{EffectsPicker, PickerPlace};
 use crate::icons::{Glyph, icon_button, selected_by};
 use crate::presence;
 use crate::settings::{LogLevel, ManualStatus, Notifications, Settings, SettingsModel, TimeFormat};
 use crate::shell::shown_as;
 use crate::theme::{self, Appearance, FONT_SIZE, FONT_SIZES, Palette, THEMES, ThemeSpec};
+use crate::trace::ViewTrace;
 
 /// The font picker's first row: the system's UI font (no family named).
 pub const SYSTEM_FONT_LABEL: &str = "System font";
@@ -315,6 +319,10 @@ pub struct SettingsView {
     fonts: Option<Fonts>,
     /// Whether the test call is offered now, as the shell tells it ([`SettingsView::with_test_call`]); `None`: never.
     test_call: Option<TestCallState>,
+    /// The video effects' picker while the Calls page shows.
+    effects: Option<Entity<EffectsPicker>>,
+    /// The page's scrolling.
+    scroll: ScrollHandle,
     _observing: Subscription,
 }
 
@@ -332,6 +340,8 @@ impl SettingsView {
             focus: cx.focus_handle(),
             fonts: None,
             test_call: None,
+            effects: None,
+            scroll: ScrollHandle::new(),
             _observing: observing,
         }
     }
@@ -383,6 +393,27 @@ impl SettingsView {
         }
     }
 
+    /// The settings went out of sight: the video effects' picker goes, and its preview with it.
+    pub fn put_away(&mut self) {
+        self.effects = None;
+    }
+
+    /// The video effects' picker, while the Calls page shows it.
+    #[must_use]
+    pub fn effects_picker(&self) -> Option<&Entity<EffectsPicker>> {
+        self.effects.as_ref()
+    }
+
+    /// Scrolls the page to its end.
+    pub fn scroll_to_end(&self) {
+        self.scroll.scroll_to_bottom();
+    }
+
+    /// Whether the Calls page offers the video effects: the app's calls have video, or there is a camera to preview.
+    fn shows_effects(&self, cx: &App) -> bool {
+        self.video_switch || self.model.read(cx).camera_preview().is_some()
+    }
+
     /// Gives the page column the keyboard, as Settings opens.
     pub fn focus_pages(&self, window: &mut Window, cx: &mut App) {
         self.focus.focus(window, cx);
@@ -418,7 +449,7 @@ impl SettingsView {
 
     /// Whether the Calls page has anything to show: the calls' devices, the test call, or the video switch.
     fn has_calls(&self, cx: &App) -> bool {
-        self.video_switch
+        self.shows_effects(cx)
             || self.model.read(cx).devices().is_some()
             || self.test_call_offer(cx) != TestCallOffer::Hidden
     }
@@ -799,7 +830,7 @@ impl SettingsView {
         )]
     }
 
-    fn calls(&self, settings: &Settings, palette: Palette, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn calls(&mut self, settings: &Settings, palette: Palette, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut groups = Vec::new();
         let mut rows = self
             .model
@@ -828,7 +859,40 @@ impl SettingsView {
                 palette,
             ));
         }
+        if self.shows_effects(cx) {
+            groups.push(self.video_effects(palette, cx));
+        }
         groups
+    }
+
+    /// The camera's video effects: what they do, the self-preview and the backgrounds.
+    fn video_effects(&mut self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let model = self.model.clone();
+        let picker = self
+            .effects
+            .get_or_insert_with(|| {
+                cx.new(|cx| EffectsPicker::new(model, Arc::new(ViewTrace::off()), PickerPlace::Settings, cx))
+            })
+            .clone();
+        group(
+            Some("Video effects"),
+            vec![
+                div()
+                    .debug_selector(|| "video-effects".to_owned())
+                    .px_4()
+                    .py_3()
+                    .flex()
+                    .flex_col()
+                    .gap_3()
+                    .child(div().text_sm().text_color(rgb(palette.muted_foreground)).child(
+                        "Blur your background or put a picture behind you in calls. Your choice is kept for \
+                                 every call, and a call with your camera on changes at once.",
+                    ))
+                    .child(picker)
+                    .into_any_element(),
+            ],
+            palette,
+        )
     }
 
     /// The calls' devices: for each kind, a picker of "Follow the system" (naming the system's default), then every
@@ -1369,6 +1433,9 @@ impl Render for SettingsView {
         if self.page == Page::Calls && !self.has_calls(cx) {
             self.page = Page::General;
         }
+        if self.page != Page::Calls {
+            self.put_away();
+        }
         let settings = self.model.read(cx).settings().clone();
         let content = self.page_content(&settings, palette, window, cx);
         let problems = problems(self.model.read(cx));
@@ -1388,6 +1455,7 @@ impl Render for SettingsView {
                     .h_full()
                     .min_w_0()
                     .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
                     .child(
                         div()
                             .w_full()

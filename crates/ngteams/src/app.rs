@@ -271,6 +271,10 @@ fn shared_settings(settings: SettingsModel, calls: Option<&PersonalCalls>, cx: &
     if let Some(devices) = calls.and_then(|calls| calls.devices.clone()) {
         teams_ui::settings::attach_devices(&settings, devices, cx);
     }
+    if let Some(camera) = calls.and_then(|calls| calls.camera.clone()) {
+        // the video effects' preview, on the camera the settings choose
+        teams_ui::settings::attach_camera_preview(&settings, teams_ui::CameraPreview::new(camera), cx);
+    }
     settings
 }
 
@@ -292,9 +296,9 @@ impl Running {
     fn add_started<S: SecretStore + 'static>(&mut self, started: Started<S>, cx: &mut gpui::Context<Self>) {
         let Started { account, engine, calls } = started;
         if let Some(feed) = calls.as_ref().and_then(|calls| calls.video.clone()) {
-            feed.set_enabled(self.settings.read(cx).settings().video_calls);
+            teams_ui::video::follow_settings(&feed, self.settings.read(cx));
             cx.observe(&self.settings, move |_, model, cx| {
-                feed.set_enabled(model.read(cx).settings().video_calls);
+                teams_ui::video::follow_settings(&feed, model.read(cx));
             })
             .detach();
         }
@@ -479,7 +483,7 @@ fn settings_entity(settings: SettingsModel, video: Option<VideoFeed>, cx: &mut A
     let settings = match &video {
         Some(feed) => {
             let settings = settings.with_video_switch();
-            feed.set_enabled(settings.settings().video_calls);
+            teams_ui::video::follow_settings(feed, &settings);
             settings
         }
         None => settings,
@@ -487,7 +491,7 @@ fn settings_entity(settings: SettingsModel, video: Option<VideoFeed>, cx: &mut A
     let settings = cx.new(|_| settings);
     if let Some(feed) = video {
         cx.observe(&settings, move |model, cx| {
-            feed.set_enabled(model.read(cx).settings().video_calls);
+            teams_ui::video::follow_settings(&feed, model.read(cx));
         })
         .detach();
     }

@@ -38,6 +38,7 @@ use teams_core::lab::LabError;
 use teams_core::{EngineHandle, Event};
 use teams_fence::lab::Alias;
 use teams_log::diagnostics::Source as DiagnosticsSource;
+use teams_media::devices::Devices;
 use teams_media::devices::catalog::DeviceDirectory;
 use teams_media::player::PlayerSetup;
 use teams_ui::LogLevel;
@@ -225,15 +226,14 @@ fn settings_model(
         // the user's control over the calls' video: its switch
         settings = settings.with_video_switch();
         for feed in &videos {
-            feed.set_enabled(settings.settings().video_calls);
+            teams_ui::video::follow_settings(feed, &settings);
         }
     }
     let settings = cx.new(|_| settings);
     if !videos.is_empty() {
         cx.observe(&settings, move |model, cx| {
-            let enabled = model.read(cx).settings().video_calls;
             for feed in &videos {
-                feed.set_enabled(enabled);
+                teams_ui::video::follow_settings(feed, model.read(cx));
             }
         })
         .detach();
@@ -249,6 +249,7 @@ struct Started {
     ringer: Option<Arc<dyn Ringer>>,
     video: Option<VideoFeed>,
     devices: Option<Arc<dyn DeviceDirectory>>,
+    camera: Option<Arc<dyn Devices + Send + Sync>>,
 }
 
 /// Hands `account`'s engine to a bridge of its own over models with its calls, and watches its session for a sign-out.
@@ -260,15 +261,15 @@ fn start_account(account: LaunchAccount, cx: &mut App) -> Started {
         signed_out,
         calls,
     } = account;
-    let (models, ringer, video, devices) = match calls {
+    let (models, ringer, video, (devices, camera)) = match calls {
         Some(calls) => {
             let models = match calls.video.clone() {
                 Some(feed) => Models::with_video_calls(calls.echo, feed, cx),
                 None => Models::with_calls(calls.echo, cx),
             };
-            (models, calls.ringer, calls.video, calls.devices)
+            (models, calls.ringer, calls.video, (calls.devices, calls.camera))
         }
-        None => (Models::new(cx), None, None, None),
+        None => (Models::new(cx), None, None, (None, None)),
     };
     let core: Arc<dyn Core> = Arc::new(engine.requests());
     let drained = models.clone();
@@ -284,6 +285,7 @@ fn start_account(account: LaunchAccount, cx: &mut App) -> Started {
         ringer,
         video,
         devices,
+        camera,
     }
 }
 
@@ -349,6 +351,10 @@ pub fn launch(cx: &mut App, launch: Launch) -> Result<Launched, LaunchFailed> {
     if let Some(devices) = first.devices.clone() {
         // the calls' devices as the settings choose them, from the start
         teams_ui::settings::attach_devices(&settings, devices, cx);
+    }
+    if let Some(camera) = first.camera.clone() {
+        // the video effects' preview, on the camera the settings choose
+        teams_ui::settings::attach_camera_preview(&settings, teams_ui::CameraPreview::new(camera), cx);
     }
     let desktop = desktop(first, &aliases, settings, trace, cx);
     for other in others {

@@ -28,6 +28,9 @@ futures-util.workspace = true
 getrandom.workspace = true
 # the PipeWire backend checks its socket belongs to this user (`getuid`)
 libc.workspace = true
+# the camera's background effects: a picture (the app's own JPEGs, or the user's JPEG or PNG) decoded and scaled, and
+# a user's picture written as a JPEG: the version and decoders GPUI already links
+image = { workspace = true, features = ["png", "jpeg", "gif", "webp"] }
 # a shared video file played in its card: GStreamer's playbin, fed by an appsrc, its frames and sound to appsinks
 gstreamer.workspace = true
 gstreamer-app.workspace = true
@@ -40,6 +43,8 @@ pipewire.workspace = true
 # a group call's control plane: its messages are JSON (`mcp`)
 serde_json.workspace = true
 thiserror.workspace = true
+# the camera's background effects: the person segmentation model (ONNX), run on the CPU
+tract-onnx.workspace = true
 # libwebrtc's video source keeps its track alive on a tokio task until the camera's first frame, and the media's
 # threads wait for libwebrtc's streams with a timeout: the media's own runtime runs both
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }

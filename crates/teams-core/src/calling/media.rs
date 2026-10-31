@@ -29,6 +29,7 @@ use teams_media::sdp::{NgcSdp, NgcSession, VideoLines};
 use teams_media::session::{MediaSession, RemoteSinks, SessionConfig, SessionDevice, SessionEvent, VideoParts};
 use teams_media::video::codec::EncoderSettings;
 use teams_media::video::convert::MaxSize;
+use teams_media::video::effects::BackgroundChoice;
 use teams_proto::{
     ChannelParameters, Client, Credentials, HttpTransport, MediaContent, MediaDescription, MediaDescriptions,
     RelayTokens,
@@ -110,6 +111,12 @@ pub trait VideoOutput: Send + Sync {
     /// is off starts no video.
     fn enabled(&self) -> bool {
         true
+    }
+
+    /// The background our camera's frames are sent with (the settings' video effects), as chosen at each frame;
+    /// none by default.
+    fn background(&self) -> BackgroundChoice {
+        BackgroundChoice::default()
     }
 }
 
@@ -333,6 +340,7 @@ fn start_video(session: &MediaSession, video: Option<&CallVideo>, kind: VideoKin
         max_size,
         remote,
         preview: video.output.preview(),
+        background: video.output.background(),
     };
     match session.start_video(parts) {
         Ok(()) => true,

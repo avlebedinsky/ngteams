@@ -51,6 +51,7 @@ use teams_ui::call_stage::CallStage;
 use teams_ui::chat_view::{Item, MessageAction};
 use teams_ui::compose::Compose;
 use teams_ui::global_search::{Mode as SearchMode, Tab};
+use teams_ui::settings::VideoEffect;
 use teams_ui::settings_view::Page;
 use teams_ui::shell::Shell;
 use teams_ui::view::Root;
@@ -78,7 +79,7 @@ const SETTLE: Duration = Duration::from_millis(1500);
 type Step = (&'static str, fn(&Entity<Shell>, &mut Window, &mut App));
 
 /// The tour.
-const STEPS: [Step; 61] = [
+const STEPS: [Step; 65] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -199,6 +200,35 @@ const STEPS: [Step; 61] = [
             cx,
         );
         show_page(shell, Page::Calls, cx);
+    }),
+    // the Calls page's video effects, scrolled to: a camera to preview (the test pattern), one of the app's pictures
+    // chosen, the camera off with Preview
+    ("settings-video-effects", |shell, _, cx| {
+        let model = shell.read(cx).settings().clone();
+        let camera = Arc::new(teams_media::devices::file::FileDevices {
+            input: teams_media::devices::file::AudioInput::Silence,
+            recording: None,
+            camera: teams_media::devices::file::PatternCamera::default(),
+            pacing: teams_media::devices::file::Pacing::RealTime,
+        });
+        teams_ui::settings::attach_camera_preview(&model, teams_ui::CameraPreview::new(camera), cx);
+        model.update(cx, |model, cx| {
+            model.change(|settings| settings.video_effect = VideoEffect::Stock("office"), cx);
+        });
+        show_page(shell, Page::Calls, cx);
+        shell.read(cx).settings_view().read(cx).scroll_to_end();
+    }),
+    // Blur chosen and the preview turned on (the user's Preview): the test pattern, blurred
+    ("settings-video-effects-preview", |shell, _, cx| {
+        let model = shell.read(cx).settings().clone();
+        model.update(cx, |model, cx| {
+            model.change(|settings| settings.video_effect = VideoEffect::Blur, cx)
+        });
+        let view = shell.read(cx).settings_view().clone();
+        if let Some(picker) = view.read(cx).effects_picker().cloned() {
+            picker.update(cx, |picker, cx| picker.start_preview(cx));
+        }
+        view.read(cx).scroll_to_end();
     }),
     ("settings-diagnostics", |shell, _, cx| {
         // the calls shown for the Calls page go again: the mock's engine has none
@@ -435,10 +465,17 @@ const STEPS: [Step; 61] = [
     ("call-window-people", |_, _, cx| {
         with_stage(cx, |stage, cx| stage.show_roster(true, cx));
     }),
+    // its video effects' pane open from More: the camera off with Preview, the backgrounds, Blur chosen
+    ("call-window-effects", |_, _, cx| {
+        with_stage(cx, |stage, cx| stage.show_effects(true, cx));
+    }),
     // the main window beside it, its chats usable, its in-call strip the way back: the parent puts the two side by
     // side and shoots the screen
     ("call-side-by-side", |_, _, cx| {
-        with_stage(cx, |stage, cx| stage.show_roster(false, cx));
+        with_stage(cx, |stage, cx| {
+            stage.show_effects(false, cx);
+            stage.show_roster(false, cx);
+        });
     }),
     // the call window in Teams Dark
     ("call-window-dark", |shell, _, cx| {
@@ -446,6 +483,10 @@ const STEPS: [Step; 61] = [
         model.update(cx, |model, cx| {
             model.change(|settings| settings.appearance.theme = teams_ui::theme::DARK_KEY, cx);
         });
+    }),
+    // and its video effects' pane in Teams Dark
+    ("call-window-effects-dark", |_, _, cx| {
+        with_stage(cx, |stage, cx| stage.show_effects(true, cx));
     }),
 ];
 

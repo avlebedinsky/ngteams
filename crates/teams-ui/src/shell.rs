@@ -1897,6 +1897,8 @@ impl Shell {
         if self.main == Main::Settings {
             return self.settings_view.clone().into_any_element();
         }
+        // out of sight: the settings' video effects go, and a preview of the camera with them
+        self.settings_view.update(cx, |view, _| view.put_away());
         if self.main == Main::Calendar {
             return self.calendar.clone().into_any_element();
         }

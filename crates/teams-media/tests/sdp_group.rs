@@ -64,6 +64,7 @@ impl Peer {
             max_size: MaxSize::HD,
             remote: Box::new(|_| Box::new(FrameCounter::new()) as Box<dyn VideoSink>),
             preview: None,
+            background: teams_media::video::effects::BackgroundChoice::default(),
         })?;
         Ok(Self { session, _turn: turn })
     }
