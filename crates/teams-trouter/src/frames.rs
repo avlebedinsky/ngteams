@@ -297,7 +297,46 @@ pub fn message_loss(event: &Event) -> Option<Vec<DroppedIndicator>> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DecodeError, Incoming, decode};
+    use super::{DecodeError, Incoming, decode, unreadable_delivery};
+
+    #[test]
+    fn unreadable_delivery_diagnostics_describe_shape_without_field_values() {
+        assert_eq!(unreadable_delivery(None), "a delivery without data");
+        for text in ["null", "[]", "7", "true", r#""synthetic-secret""#] {
+            assert_eq!(
+                unreadable_delivery(Some(text)),
+                format!("a delivery of {} bytes that isn't a JSON object", text.len())
+            );
+        }
+        for text in ["{", "{\n\"body\":synthetic-secret}"] {
+            let diagnostic = unreadable_delivery(Some(text));
+            assert!(diagnostic.contains(&format!("a delivery of {} bytes that isn't JSON:", text.len())));
+            assert!(diagnostic.contains(" at line "));
+            assert!(diagnostic.contains(" column "));
+            assert!(!diagnostic.contains("synthetic-secret"));
+        }
+        for (value, kind) in [
+            (serde_json::Value::Null, "null"),
+            (serde_json::json!(true), "bool"),
+            (serde_json::json!([]), "array"),
+            (serde_json::json!({"private":"synthetic-secret"}), "object"),
+            (serde_json::json!(7), "integer"),
+            (serde_json::json!(1.5), "number"),
+            (serde_json::json!("synthetic-secret"), "string"),
+        ] {
+            let text =
+                serde_json::json!({"id":value,"method":value,"url":value,"body":value,"headers":value}).to_string();
+            let diagnostic = unreadable_delivery(Some(&text));
+            for field in ["id", "method", "url", "body", "headers"] {
+                assert!(diagnostic.contains(&format!("{field} {kind}")), "{diagnostic}");
+            }
+            assert!(!diagnostic.contains("synthetic-secret"));
+        }
+        assert_eq!(
+            unreadable_delivery(Some("{}")),
+            "a delivery of 2 bytes: id missing, method missing, url missing, body missing, headers missing; keys []"
+        );
+    }
 
     #[test]
     fn packets_are_read_by_their_type() {

@@ -7,7 +7,7 @@
 use serde_json::Value;
 use teams_proto::DroppedIndicator;
 use teams_proto::chat::MessageType;
-use teams_trouter::frames::{Connected, Incoming, decode, message_loss};
+use teams_trouter::frames::{Connected, DecodeError, Event, Incoming, decode, message_loss};
 use teams_trouter::socket::allowed;
 use teams_trouter::{Change, ChatEvent, Delivery};
 use url::Url;
@@ -350,4 +350,295 @@ fn a_socket_connects_only_to_the_global_or_a_regional_trouter_host() {
     ] {
         assert!(!allowed(&Url::parse(url).unwrap()), "{url}");
     }
+}
+
+#[test]
+fn malformed_packet_envelopes_and_typed_payloads_are_rejected() {
+    for text in ["1", "1:", "10::", "-1::", "a::", "１::", ":id:"] {
+        assert_eq!(decode(text), Err(DecodeError::NotAPacket), "{text}");
+    }
+    for text in ["3::", "3:::null", "3:::[]", "3:::false", "3:::not-json"] {
+        assert_eq!(decode(text), Err(DecodeError::Data(3)), "{text}");
+    }
+    for kind in [4, 7, 8, 9] {
+        assert_eq!(
+            decode(&format!("{kind}:::opaque:payload")),
+            Ok(Incoming::Other { kind })
+        );
+    }
+    for data in ["", "null", "[]", "{}", r#"{"reason":7}"#, "bad-json"] {
+        assert_eq!(
+            decode(&format!("0:::{data}")),
+            Ok(Incoming::Disconnect { reason: None })
+        );
+    }
+    assert_eq!(
+        decode(r#"0:::{"reason":"synthetic:closed"}"#),
+        Ok(Incoming::Disconnect {
+            reason: Some("synthetic:closed".to_owned())
+        })
+    );
+}
+
+#[test]
+fn deliveries_require_typed_identifiers_methods_urls_and_object_headers() {
+    let valid = serde_json::json!({"id": 7, "method": "POST", "url": "/synthetic"});
+    for key in ["id", "method", "url"] {
+        let mut missing = valid.clone();
+        missing.as_object_mut().unwrap().remove(key);
+        assert_eq!(
+            decode(&format!("3:::{missing}")),
+            Err(DecodeError::Data(3)),
+            "missing {key}"
+        );
+        for bad in [
+            Value::Null,
+            Value::Bool(true),
+            serde_json::json!([]),
+            serde_json::json!({}),
+        ] {
+            let mut wrong = valid.clone();
+            wrong[key] = bad;
+            assert_eq!(decode(&format!("3:::{wrong}")), Err(DecodeError::Data(3)), "{wrong}");
+        }
+    }
+    for bad in [
+        Value::Null,
+        Value::Bool(false),
+        serde_json::json!([]),
+        serde_json::json!("text"),
+    ] {
+        let mut wrong = valid.clone();
+        wrong["headers"] = bad;
+        assert_eq!(decode(&format!("3:::{wrong}")), Err(DecodeError::Data(3)), "{wrong}");
+    }
+    for id in [i64::MIN, i64::MAX] {
+        let mut data = valid.clone();
+        data["id"] = Value::from(id);
+        let Incoming::Delivery(delivery) = decode(&format!("3:::{data}")).unwrap() else {
+            panic!("a delivery");
+        };
+        assert_eq!(delivery.id, id);
+        assert!(delivery.body.is_empty());
+        assert!(delivery.headers.is_empty());
+    }
+    let mut overflow = valid;
+    overflow["id"] = Value::from(u64::MAX);
+    assert_eq!(decode(&format!("3:::{overflow}")), Err(DecodeError::Data(3)));
+}
+
+#[test]
+fn stored_delivery_headers_are_case_insensitive_and_only_boolean_true_marks_replay() {
+    for value in ["not-json", "null", "{}", r#"{"mstore":false}"#, r#"{"mstore":"true"}"#] {
+        let data = serde_json::json!({
+            "id": 1, "method": "POST", "url": "/synthetic",
+            "headers": {"TrOuTeR-ReQuEsT": value, "Numeric": 7}, "body": 7
+        });
+        let Incoming::Delivery(raw) = decode(&format!("3:::{data}")).unwrap() else {
+            panic!("a delivery");
+        };
+        assert_eq!(raw.header("TROUTER-REQUEST"), Some(value));
+        assert_eq!(raw.header("Numeric"), None);
+        assert_eq!(raw.header("missing"), None);
+        assert!(!raw.is_stored(), "{value}");
+        assert!(raw.body.is_empty());
+    }
+    let data = serde_json::json!({
+        "id": 1, "method": "POST", "url": "/synthetic",
+        "headers": {"TROUTER-REQUEST": r#"{"mstore":true}"#}, "body": "synthetic:payload"
+    });
+    let Incoming::Delivery(raw) = decode(&format!("3:::{data}")).unwrap() else {
+        panic!("a delivery");
+    };
+    assert!(raw.is_stored());
+    let debug = format!("{raw:?}");
+    assert!(debug.contains("body_len: 17"));
+    assert!(!debug.contains("synthetic:payload"));
+    assert!(!debug.contains("mstore"));
+}
+
+#[test]
+fn event_ids_and_arguments_preserve_valid_values_and_reject_invalid_shapes() {
+    for (id, number, acknowledged) in [
+        ("", None, false),
+        ("0007", Some(7), false),
+        ("0+", Some(0), true),
+        ("18446744073709551615+", Some(u64::MAX), true),
+    ] {
+        let read = event(&format!(
+            r#"5:{id}::{{"name":"synthetic:event","args":[{{"colon":"a:b"}},7]}}"#
+        ));
+        assert_eq!(read.id, number);
+        assert_eq!(read.acknowledged, acknowledged);
+        assert_eq!(read.name, "synthetic:event");
+        assert_eq!(read.args, vec![serde_json::json!({"colon":"a:b"}), Value::from(7)]);
+    }
+    for id in ["+", "-1", "1++", " 1", "１", "18446744073709551616"] {
+        assert_eq!(
+            decode(&format!(r#"5:{id}::{{"name":"synthetic"}}"#)),
+            Err(DecodeError::Data(5)),
+            "{id}"
+        );
+    }
+    for data in ["", "null", "[]", "{}", r#"{"name":7}"#, r#"{"name":"x","args":false}"#] {
+        assert_eq!(decode(&format!("5:::{data}")), Err(DecodeError::Data(5)), "{data}");
+    }
+    for data in [r#"{"name":"synthetic"}"#, r#"{"name":"synthetic","args":null}"#] {
+        assert_eq!(event(&format!("5:::{data}")).args, Vec::<Value>::new());
+    }
+    assert_eq!(decode("5::"), Err(DecodeError::Data(5)));
+}
+
+#[test]
+fn acknowledgements_accept_empty_or_json_payloads_but_require_an_unsigned_id() {
+    for (data, id, args) in [
+        ("0+", 0, Value::Null),
+        ("0007+[]", 7, serde_json::json!([])),
+        (
+            "18446744073709551615+{\"value\":\"a:b+c\"}",
+            u64::MAX,
+            serde_json::json!({"value":"a:b+c"}),
+        ),
+    ] {
+        assert_eq!(decode(&format!("6:::{data}")), Ok(Incoming::Ack { id, args }));
+    }
+    for data in [
+        "",
+        "7",
+        "+[]",
+        "-1+[]",
+        "1.5+[]",
+        "18446744073709551616+[]",
+        "7+not-json",
+    ] {
+        assert_eq!(decode(&format!("6:::{data}")), Err(DecodeError::Data(6)), "{data}");
+    }
+    assert_eq!(decode("6::"), Err(DecodeError::Data(6)));
+}
+
+#[cfg(test)]
+fn synthetic_event(name: &str, args: Vec<Value>) -> Event {
+    Event {
+        id: None,
+        acknowledged: false,
+        name: name.to_owned(),
+        args,
+    }
+}
+
+#[test]
+fn connected_requires_its_identity_and_push_url_and_treats_optional_metadata_independently() {
+    assert_eq!(Connected::from_event(&synthetic_event("other", vec![])), None);
+    assert_eq!(
+        Connected::from_event(&synthetic_event("trouter.connected", vec![])),
+        None
+    );
+    for info in [
+        Value::Null,
+        serde_json::json!({"surl":"/synthetic"}),
+        serde_json::json!({"id":7,"surl":"/synthetic"}),
+        serde_json::json!({"id":"x","surl":false}),
+    ] {
+        assert_eq!(
+            Connected::from_event(&synthetic_event("trouter.connected", vec![info])),
+            None
+        );
+    }
+    for (ttl, expected) in [
+        (Value::Null, None),
+        (Value::from(-1), None),
+        (Value::from(1.5), None),
+        (Value::from("-1"), None),
+        (Value::from("18446744073709551616"), None),
+        (Value::from("0007"), Some(7)),
+        (Value::from(0), Some(0)),
+        (Value::from(u64::MAX), Some(u64::MAX)),
+    ] {
+        let info = serde_json::json!({"id":"synthetic-id","surl":"/synthetic","ttl":ttl,"reconnectUrl":false});
+        let connected = Connected::from_event(&synthetic_event("trouter.connected", vec![info])).unwrap();
+        assert_eq!(connected.id, "synthetic-id");
+        assert_eq!(connected.push_url, "/synthetic");
+        assert_eq!(connected.ttl, expected);
+        assert_eq!(connected.reconnect_url, None);
+        assert_eq!(connected.params, None);
+    }
+}
+
+#[test]
+fn reconnect_parameters_are_retained_only_when_all_seven_strings_are_present() {
+    let params =
+        serde_json::json!({"issuer":"issuer","scae":"scae","sig":"sig","sr":"sr","sp":"sp","se":"se","st":"st"});
+    let read = |params: Value| {
+        Connected::from_event(&synthetic_event(
+            "trouter.connected",
+            vec![serde_json::json!({
+                "id":"synthetic-id", "surl":"/synthetic", "connectparams":params
+            })],
+        ))
+        .unwrap()
+    };
+    let complete = read(params.clone()).params.unwrap();
+    assert_eq!(
+        (complete.issuer.as_str(), complete.scae.as_str(), complete.sig.as_str()),
+        ("issuer", "scae", "sig")
+    );
+    assert_eq!(
+        (
+            complete.sr.as_str(),
+            complete.sp.as_str(),
+            complete.se.as_str(),
+            complete.st.as_str()
+        ),
+        ("sr", "sp", "se", "st")
+    );
+    for key in ["issuer", "scae", "sig", "sr", "sp", "se", "st"] {
+        let mut missing = params.clone();
+        missing.as_object_mut().unwrap().remove(key);
+        assert_eq!(read(missing).params, None, "missing {key}");
+        let mut wrong = params.clone();
+        wrong[key] = Value::from(7);
+        assert_eq!(read(wrong).params, None, "non-string {key}");
+    }
+}
+
+#[test]
+fn message_loss_is_all_or_nothing_and_preserves_empty_and_ordered_reports() {
+    let read = |args| message_loss(&synthetic_event("trouter.message_loss", args));
+    assert_eq!(read(vec![]), None);
+    for info in [
+        Value::Null,
+        serde_json::json!({}),
+        serde_json::json!({"droppedIndicators":{}}),
+    ] {
+        assert_eq!(read(vec![info]), None);
+    }
+    assert_eq!(read(vec![serde_json::json!({"droppedIndicators":[]})]), Some(vec![]));
+    let first = serde_json::json!({"tag":"first","etag":"one"});
+    for invalid in [
+        Value::Null,
+        serde_json::json!({"tag":"x"}),
+        serde_json::json!({"etag":"x"}),
+        serde_json::json!({"tag":7,"etag":"x"}),
+        serde_json::json!({"tag":"x","etag":7}),
+    ] {
+        assert_eq!(
+            read(vec![serde_json::json!({"droppedIndicators":[first,invalid]})]),
+            None
+        );
+    }
+    assert_eq!(
+        read(vec![
+            serde_json::json!({"droppedIndicators":[first,{"tag":"second","etag":"two"}]})
+        ]),
+        Some(vec![
+            DroppedIndicator {
+                tag: "first".to_owned(),
+                etag: "one".to_owned()
+            },
+            DroppedIndicator {
+                tag: "second".to_owned(),
+                etag: "two".to_owned()
+            }
+        ])
+    );
 }
