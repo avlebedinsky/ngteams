@@ -611,7 +611,8 @@ enum Request {
         reply: Responder<FullEvent>,
     },
     WriteEvent {
-        write: EventWrite,
+        // boxed: an event's draft and the event as read are far larger than any other request
+        write: Box<EventWrite>,
         reply: Responder<EventWritten>,
     },
     Invitable {
@@ -917,7 +918,10 @@ impl EngineRequests {
     /// Creates, changes, cancels or deletes an event of the account's calendar through the outbox, under the fence
     /// ([`crate::calendar`]); [`EngineError::EventNotSaved`] when it wasn't saved.
     pub fn write_event(&self, write: EventWrite) -> Reply<EventWritten> {
-        self.ask(|reply| Request::WriteEvent { write, reply })
+        self.ask(|reply| Request::WriteEvent {
+            write: Box::new(write),
+            reply,
+        })
     }
 
     /// Up to eight people the account knows whose name holds `query`, each with the address their profile gives
@@ -1471,6 +1475,16 @@ where
                 let synced = synced.map_err(EngineError::from);
                 let _ = reply.send(logged(synced, || format!("sync of {conversation}")));
             }
+            Request::Query(query) => self.answer(query),
+            Request::Shutdown => {}
+            lookup => self.on_lookup(lookup),
+        }
+    }
+
+    /// A request a part of the engine answers on its own (a picture, a file's bytes, the calendar, the search, a
+    /// person): handed to that part (`on_request` takes the rest).
+    fn on_lookup(&mut self, request: Request) {
+        match request {
             Request::ReactionAnimation(id, reply) => self.animations.animation(id, reply),
             Request::MessagePicture(src, reply) => self.pictures.picture(&src, reply),
             Request::FileThumbnail(share_url, reply) => self.thumbnails.thumbnail(&share_url, reply),
@@ -1480,7 +1494,7 @@ where
                 reply,
             } => self.calendar.view(start_ms, end_ms, reply),
             Request::CalendarEvent { id, reply } => self.calendar.event(&id, reply),
-            Request::WriteEvent { write, reply } => self.calendar.write(write, reply),
+            Request::WriteEvent { write, reply } => self.calendar.write(*write, reply),
             Request::SearchService { query, scope, reply } => self.service_search.search(query, scope, reply),
             Request::MeetingAvailability {
                 attendees,
@@ -1530,8 +1544,8 @@ where
                 let listing = self.teams.chat_listing(&self.store);
                 let _ = reply.send(listing.map_err(EngineError::from));
             }
-            Request::Query(query) => self.answer(query),
-            Request::Shutdown => {}
+            // the engine's own: `on_request` takes them
+            _ => {}
         }
     }
 

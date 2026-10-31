@@ -572,7 +572,7 @@ mod tests {
         )
     }
 
-    fn object(value: Value) -> Map<String, Value> {
+    fn object(value: &Value) -> Map<String, Value> {
         value.as_object().cloned().unwrap_or_default()
     }
 
@@ -581,7 +581,7 @@ mod tests {
         let meeting = json!({"links": {"join": "https://teams.microsoft.com/l/meetup-join/x"}});
         let create = CreateEvent::new(draft(), Some(meeting));
         assert_eq!(classified(&create), Contact::Write(create.target()));
-        let event = object(json!({"objectId": "AAMkEvent", "subject": "Old", "iCalUId": "kept"}));
+        let event = object(&json!({"objectId": "AAMkEvent", "subject": "Old", "iCalUId": "kept"}));
         let update = UpdateEvent::new("AAMkEvent".to_owned(), event, draft()).expect("an update");
         assert_eq!(classified(&update), Contact::Write(update.target()));
         let cancel = CancelEvent::new("AAMkEvent".to_owned(), Some("19:meeting_x@thread.v2".to_owned()), None)
@@ -633,12 +633,12 @@ mod tests {
         assert_eq!(event["eventRecurrenceRange"]["startDate"], "2026-10-30T00:00:00+03:00");
         assert_eq!(classified(&create), Contact::Write(create.target()));
         // a change of one occurrence keeps its kind and the series' recurrence as read
-        let occurrence = object(json!({"objectId": "AAMkOne", "eventType": "Occurrence",
+        let occurrence = object(&json!({"objectId": "AAMkOne", "eventType": "Occurrence",
             "eventRecurrencePattern": {"patternType": 1, "daily": {"interval": 1}}}));
         let merged = draft().over(&occurrence).expect("merged");
         assert_eq!(merged["eventType"], "Occurrence");
         assert_eq!(merged["eventRecurrencePattern"]["patternType"], 1);
-        let master = object(json!({"objectId": "AAMkSeries", "eventType": "RecurringMaster"}));
+        let master = object(&json!({"objectId": "AAMkSeries", "eventType": "RecurringMaster"}));
         let merged = series.over(&master).expect("merged");
         assert_eq!(merged["eventType"], "RecurringMaster");
         assert_eq!(merged["eventRecurrencePattern"]["weekly"]["daysOfTheWeek"], json!([5]));
@@ -646,19 +646,19 @@ mod tests {
 
     #[test]
     fn a_change_keeps_what_the_form_doesn_t_edit() {
-        let event = object(json!({"objectId": "AAMkEvent", "subject": "Old", "iCalUId": "kept",
+        let event = object(&json!({"objectId": "AAMkEvent", "subject": "Old", "iCalUId": "kept",
             "skypeTeamsData": "{\"cid\":\"19:meeting_x@thread.v2\"}"}));
         let merged = draft().over(&event).expect("merged");
         assert_eq!(merged["iCalUId"], "kept");
         assert_eq!(merged["subject"], "Planning");
         assert_eq!(merged["skypeTeamsData"], "{\"cid\":\"19:meeting_x@thread.v2\"}");
-        let other = object(json!({"objectId": "Another"}));
+        let other = object(&json!({"objectId": "Another"}));
         assert!(UpdateEvent::new("AAMkEvent".to_owned(), other, draft()).is_none());
     }
 
     #[test]
     fn a_change_clears_a_body_and_categories_the_form_emptied() {
-        let event = object(json!({"objectId": "AAMkEvent", "bodyContentType": "html",
+        let event = object(&json!({"objectId": "AAMkEvent", "bodyContentType": "html",
             "bodyContent": "<p>Old notes</p>", "categories": ["Red category"]}));
         let merged = draft().over(&event).expect("merged");
         assert_eq!(merged["bodyContent"], "");
@@ -671,7 +671,7 @@ mod tests {
         assert_eq!(merged["bodyContent"], "<p>New notes</p>");
         assert_eq!(merged["categories"], json!(["Blue category"]));
         // an event without them gets none
-        let bare = object(json!({"objectId": "AAMkEvent"}));
+        let bare = object(&json!({"objectId": "AAMkEvent"}));
         let merged = draft().over(&bare).expect("merged");
         assert!(!merged.contains_key("bodyContent"));
         assert!(!merged.contains_key("categories"));
@@ -679,7 +679,7 @@ mod tests {
 
     #[test]
     fn a_change_without_the_account_s_zone_keeps_the_event_s() {
-        let event = object(json!({"objectId": "AAMkEvent", "eventTimeZone": "TurkeySt", "utcOffset": 180}));
+        let event = object(&json!({"objectId": "AAMkEvent", "eventTimeZone": "TurkeySt", "utcOffset": 180}));
         let mut unzoned = draft();
         unzoned.time_zone = None;
         let merged = unzoned.over(&event).expect("merged");

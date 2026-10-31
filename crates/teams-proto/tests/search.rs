@@ -2,7 +2,7 @@
 //! read into what the app shows. Every answer here is written by hand in the captured shape, with made-up values.
 
 use serde_json::{Value, json};
-use teams_proto::{SearchKind, Service, SubstrateSearch, highlighted};
+use teams_proto::{Found, SearchKind, Service, SubstrateSearch, highlighted};
 
 const B: &str = "8:orgid:00000000-0000-4000-8000-00000000000b";
 const AB: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-00000000000b@unq.gbl.spaces";
@@ -123,6 +123,11 @@ fn a_results_answer_reads_into_messages_people_files_chats_and_teams() {
     let ask = SubstrateSearch::query("zeppelin", &[SearchKind::Messages], 25, 0);
     let found = ask.read_answer(answer.to_string().as_bytes()).unwrap();
     assert!(found.more);
+    the_message_reads(&found);
+    the_others_read(&found);
+}
+
+fn the_message_reads(found: &Found) {
     assert_eq!(found.messages.len(), 1);
     let message = &found.messages[0];
     assert_eq!(message.conversation, AB);
@@ -132,6 +137,9 @@ fn a_results_answer_reads_into_messages_people_files_chats_and_teams() {
     assert_eq!(message.sender_name.as_deref(), Some("Lab Sea"));
     assert_eq!(message.snippet, "the zeppelin plan");
     assert_eq!(&message.snippet[message.matched[0].clone()], "zeppelin");
+}
+
+fn the_others_read(found: &Found) {
     assert_eq!(found.people.len(), 1);
     assert_eq!(found.people[0].mri.as_deref(), Some(B));
     assert_eq!(found.people[0].email.as_deref(), Some("bee@lab.example.com"));

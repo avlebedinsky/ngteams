@@ -58,35 +58,42 @@ pub(crate) struct SignInView {
 }
 
 impl SignInView {
+    /// Hands each of the engine's events to the view, until the engine ends (the run then fails, unless answered).
+    fn follow_events(events: async_channel::Receiver<Event>, window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |view, cx| {
+            while let Ok(event) = events.recv().await {
+                let followed = view.update_in(cx, |view, window, cx| view.event(event, window, cx));
+                if followed.is_err() {
+                    return;
+                }
+            }
+            let _ = view.update_in(cx, |view, window, cx| {
+                view.finish(WindowAnswer::Failed("the page's engine ended".into()), window, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Runs the view's [`SignInView::pump`] every [`PUMP`] while it asks to go on.
+    fn pump_on(window: &mut Window, cx: &mut Context<Self>) {
+        cx.spawn_in(window, async move |view, cx| {
+            loop {
+                cx.background_executor().timer(PUMP).await;
+                match view.update_in(cx, Self::pump) {
+                    Ok(true) => {}
+                    Ok(false) | Err(_) => return,
+                }
+            }
+        })
+        .detach();
+    }
+
     pub(crate) fn new(run: Option<(Page, Done)>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         if let Some((page, _)) = &run {
-            let events = page.events.clone();
-            cx.spawn_in(window, async move |view, cx| {
-                while let Ok(event) = events.recv().await {
-                    if view
-                        .update_in(cx, |view, window, cx| view.event(event, window, cx))
-                        .is_err()
-                    {
-                        return;
-                    }
-                }
-                let _ = view.update_in(cx, |view, window, cx| {
-                    view.finish(WindowAnswer::Failed("the page's engine ended".into()), window, cx);
-                });
-            })
-            .detach();
-            cx.spawn_in(window, async move |view, cx| {
-                loop {
-                    cx.background_executor().timer(PUMP).await;
-                    match view.update_in(cx, |view, window, cx| view.pump(window, cx)) {
-                        Ok(true) => {}
-                        Ok(false) | Err(_) => return,
-                    }
-                }
-            })
-            .detach();
+            Self::follow_events(page.events.clone(), window, cx);
+            Self::pump_on(window, cx);
         }
         let closing = cx.entity().downgrade();
         window.on_window_should_close(cx, move |_, cx| {

@@ -175,6 +175,13 @@ pub fn run(config: WindowConfig) -> WindowAnswer {
 /// What a sign-in is told once its window answered.
 pub type Done = Box<dyn FnOnce(WindowAnswer, &mut App)>;
 
+/// [`open`], its answer sent to `reply` (a [`Windows`] ask's).
+fn open_answering(config: WindowConfig, app_id: &str, reply: mpsc::Sender<WindowAnswer>, cx: &mut App) {
+    open(config, app_id, cx, move |answer, _| {
+        let _ = reply.send(answer);
+    });
+}
+
 /// Opens the sign-in window for `config` in the running app, under `app_id`; `done` gets its answer once (a page that
 /// can't be set up answers at once, with no window).
 pub fn open(config: WindowConfig, app_id: &str, cx: &mut App, done: impl FnOnce(WindowAnswer, &mut App) + 'static) {
@@ -226,12 +233,7 @@ impl Windows {
         let app_id = app_id.to_owned();
         cx.spawn(async move |cx| {
             while let Ok((config, reply)) = waiting.recv().await {
-                let app_id = app_id.clone();
-                cx.update(|cx| {
-                    open(config, &app_id, cx, move |answer, _| {
-                        let _ = reply.send(answer);
-                    });
-                });
+                cx.update(|cx| open_answering(config, &app_id, reply, cx));
             }
         })
         .detach();
@@ -272,7 +274,7 @@ pub(crate) struct Page {
     authorize: String,
     stage: Stage,
     /// The view's page id, once the engine reported it.
-    page_id: Option<u64>,
+    id: Option<u64>,
     /// The pages the guard was told are armed (arming is per page: `GuardEvent::Armed`).
     armed: Vec<u64>,
     deadline: Instant,
@@ -349,7 +351,7 @@ impl Page {
             bound: config.bound,
             authorize: config.request.authorize,
             stage: Stage::Arming,
-            page_id: None,
+            id: None,
             armed: Vec::new(),
             deadline: Instant::now() + ARM_TIMEOUT,
             refused: None,
@@ -360,14 +362,14 @@ impl Page {
 
     /// The engine reported the view's page id.
     pub(crate) fn created(&mut self, page_id: u64) {
-        self.page_id = Some(page_id);
+        self.id = Some(page_id);
         self.open_once_armed();
     }
 
     /// Opens the authorize URL once the view's own page is armed (the engine's report of its id and the guard's of its
     /// arming come on different channels, in either order).
     fn open_once_armed(&mut self) {
-        let armed = self.page_id.is_some_and(|id| self.armed.contains(&id));
+        let armed = self.id.is_some_and(|id| self.armed.contains(&id));
         if armed && self.stage == Stage::Arming {
             self.stage = Stage::Open;
             self.host.load(self.view, Load::Uri(self.authorize.clone()));

@@ -5,7 +5,7 @@
 #![cfg(test)]
 
 use teams_proto::{
-    CALENDAR_VIEW_PATH, CalendarAnswerError, CalendarView, EventKind, EventResponse, EventTime, FloatingTime, Read,
+    CALENDAR_VIEW_PATH, CalendarAnswerError, CalendarEvent, CalendarView, EventKind, EventResponse, EventTime, FloatingTime, Read,
     Service, ShowAs,
 };
 
@@ -42,7 +42,14 @@ fn the_answer_reads_every_form_of_an_event() {
         ]
     );
 
-    let meeting = &answer.events[0];
+    the_meeting_reads_whole(&answer.events[0]);
+    the_occurrence_reads_its_series_and_chat(&answer.events[1]);
+    assert!(answer.events[2].cancelled);
+    the_all_day_event_reads_its_local_day(&answer.events[3]);
+    assert_eq!(answer.events[4].response, EventResponse::Declined);
+}
+
+fn the_meeting_reads_whole(meeting: &CalendarEvent) {
     assert_eq!(meeting.subject, "Code review");
     assert_eq!(meeting.start, EventTime::Instant(1_793_196_000_000));
     assert!(meeting.online);
@@ -60,8 +67,9 @@ fn the_answer_reads_every_form_of_an_event() {
     assert_eq!(meeting.response, EventResponse::Accepted);
     assert_eq!(meeting.attendees.len(), 2);
     assert_eq!(meeting.preview.as_deref(), Some("Walk through the open changes."));
+}
 
-    let occurrence = &answer.events[1];
+fn the_occurrence_reads_its_series_and_chat(occurrence: &CalendarEvent) {
     assert_eq!(occurrence.kind, EventKind::Occurrence);
     assert!(occurrence.kind.recurring());
     assert_eq!(occurrence.response, EventResponse::NotResponded);
@@ -71,10 +79,9 @@ fn the_answer_reads_every_form_of_an_event() {
         occurrence.meeting_chat.as_deref(),
         Some("19:meeting_MadeUpMeeting0002@thread.v2")
     );
+}
 
-    assert!(answer.events[2].cancelled);
-
-    let all_day = &answer.events[3];
+fn the_all_day_event_reads_its_local_day(all_day: &CalendarEvent) {
     assert!(all_day.all_day);
     assert!(all_day.is_organizer);
     assert_eq!(all_day.location, None);
@@ -89,8 +96,6 @@ fn the_answer_reads_every_form_of_an_event() {
             second: 0
         })
     );
-
-    assert_eq!(answer.events[4].response, EventResponse::Declined);
 }
 
 #[test]

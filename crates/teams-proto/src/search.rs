@@ -275,74 +275,10 @@ impl SubstrateSearch {
     #[must_use]
     pub fn query(query: &str, kinds: &[SearchKind], size: u32, from: u32) -> Self {
         let query = query.trim();
-        let asked = || json!({ "queryString": query, "displayQueryString": query });
-        // the All tab's message request leaves out messages deleted on the client, as the web client's does; a tab of
-        // messages alone is asked with the bare query, as captured
         let all = kinds.len() > 1;
-        let messages = || {
-            if all {
-                json!({
-                    "queryString": format!("NOT (isClientSoftDeleted:TRUE) AND {query}"),
-                    "displayQueryString": query,
-                })
-            } else {
-                asked()
-            }
-        };
         let requests: Vec<Value> = kinds
             .iter()
-            .map(|kind| match kind {
-                SearchKind::Messages => json!({
-                    "entityType": "Message",
-                    "contentSources": ["Teams"],
-                    "fields": MESSAGE_FIELDS,
-                    "propertySet": "Optimized",
-                    "query": messages(),
-                    "from": from,
-                    "size": size,
-                    "topResultsCount": 5,
-                }),
-                SearchKind::People => json!({
-                    "entityType": "People",
-                    "contentSources": ["Exchange"],
-                    "Filter": people_filter(true),
-                    "query": asked(),
-                    "from": from,
-                    "size": size,
-                }),
-                SearchKind::Files => json!({
-                    "entityType": "File",
-                    "contentSources": ["OneDriveBusiness", "SharePoint", "Exchange"],
-                    "Fields": FILE_FIELDS,
-                    "EnableQueryUnderstanding": false,
-                    "EnableSpeller": false,
-                    "HitHighlight": { "HitHighlightedProperties": ["HitHighlightedSummary"], "SummaryLength": 200 },
-                    "IdFormat": "EwsId",
-                    "ParserType": "None",
-                    "propertySet": "Optimized",
-                    "query": asked(),
-                    "from": from,
-                    "size": size,
-                }),
-                SearchKind::Chats => json!({
-                    "entityType": "Chat",
-                    "contentSources": ["Teams"],
-                    "propertySet": "Optimized",
-                    "fields": [],
-                    "query": asked(),
-                    "from": from,
-                    "size": size,
-                }),
-                SearchKind::Channels => json!({
-                    "entityType": "TeamsChannel",
-                    "contentSources": ["Teams"],
-                    "HitHighlight": { "HitHighlightedProperties": ["HitHighlightedSummary"], "SummaryLength": 200 },
-                    "fields": [],
-                    "query": asked(),
-                    "from": from,
-                    "size": size,
-                }),
-            })
+            .map(|kind| entity_request(*kind, query, all, size, from))
             .collect();
         let query_type = match kinds {
             [one] => one.query_type(),
@@ -438,6 +374,76 @@ fn people_filter(results: bool) -> Value {
         { "Or": subtypes },
         { "Or": [{ "Term": { "Flags": "NonHidden" } }] },
     ] })
+}
+
+/// The results' entity request of `kind` for `query`, `size` of them from `from` on; `all` when it is one of the All
+/// tab's.
+fn entity_request(kind: SearchKind, query: &str, all: bool, size: u32, from: u32) -> Value {
+    let asked = json!({ "queryString": query, "displayQueryString": query });
+    match kind {
+        SearchKind::Messages => {
+            // the All tab's message request leaves out messages deleted on the client, as the web client's does; a tab
+            // of messages alone is asked with the bare query, as captured
+            let asked = if all {
+                json!({
+                    "queryString": format!("NOT (isClientSoftDeleted:TRUE) AND {query}"),
+                    "displayQueryString": query,
+                })
+            } else {
+                asked
+            };
+            json!({
+                "entityType": "Message",
+                "contentSources": ["Teams"],
+                "fields": MESSAGE_FIELDS,
+                "propertySet": "Optimized",
+                "query": asked,
+                "from": from,
+                "size": size,
+                "topResultsCount": 5,
+            })
+        }
+        SearchKind::People => json!({
+            "entityType": "People",
+            "contentSources": ["Exchange"],
+            "Filter": people_filter(true),
+            "query": asked,
+            "from": from,
+            "size": size,
+        }),
+        SearchKind::Files => json!({
+            "entityType": "File",
+            "contentSources": ["OneDriveBusiness", "SharePoint", "Exchange"],
+            "Fields": FILE_FIELDS,
+            "EnableQueryUnderstanding": false,
+            "EnableSpeller": false,
+            "HitHighlight": { "HitHighlightedProperties": ["HitHighlightedSummary"], "SummaryLength": 200 },
+            "IdFormat": "EwsId",
+            "ParserType": "None",
+            "propertySet": "Optimized",
+            "query": asked,
+            "from": from,
+            "size": size,
+        }),
+        SearchKind::Chats => json!({
+            "entityType": "Chat",
+            "contentSources": ["Teams"],
+            "propertySet": "Optimized",
+            "fields": [],
+            "query": asked,
+            "from": from,
+            "size": size,
+        }),
+        SearchKind::Channels => json!({
+            "entityType": "TeamsChannel",
+            "contentSources": ["Teams"],
+            "HitHighlight": { "HitHighlightedProperties": ["HitHighlightedSummary"], "SummaryLength": 200 },
+            "fields": [],
+            "query": asked,
+            "from": from,
+            "size": size,
+        }),
+    }
 }
 
 /// A fresh lowercase GUID: a search's correlation ids (`cvid`, `logicalId`), which name nothing of the account.

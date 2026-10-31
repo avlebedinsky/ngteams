@@ -176,6 +176,11 @@ pub struct Attendee {
 
 /// One event of the account's calendar.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "each is a flag of its own the event's answer carries (`isAllDayEvent`, `isCancelled`, \
+              `isOnlineMeeting`, `isOrganizer`, `isPrivate`)"
+)]
 pub struct CalendarEvent {
     /// Its `objectId`.
     pub id: String,
