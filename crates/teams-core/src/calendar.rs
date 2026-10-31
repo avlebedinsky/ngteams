@@ -5,7 +5,9 @@
 //!   events; nothing is kept: the view asks again as it moves and refreshes. A window that is empty, reversed or wider
 //!   than [`teams_proto::MAX_CALENDAR_WINDOW_MS`] is answered with no events and nothing read. A read that failed, or an
 //!   answer that isn't in the shape the web client reads, is [`EngineError::CalendarUnread`]. One event is read whole
-//!   ([`EventRead`]) before the form opens on it.
+//!   ([`EventRead`]) before the form opens on it (a series' master too, when the form changes a whole series). The
+//!   form's Scheduler reads the attendees' busy times and the suggested times ([`MeetingAvailability`]): two reads sent as a
+//!   `PUT`, which reach nobody.
 //! - **Writes** ([`EventWrite`]): an event created, changed, cancelled or deleted, each a sealed `teams-proto` write
 //!   through the outbox's calendar kind ([`Outbox::try_calendar`]): every attempt under a fresh `Fence::check` with its
 //!   `fence.log` line, no row, nothing sent again by a later run; one more attempt only after a 401 or a short
@@ -18,8 +20,8 @@ use serde_json::{Map, Value};
 use teams_fence::Mri;
 use teams_proto::{
     Author, CalendarEvent, CalendarView, CancelEvent, Client, CreateEvent, CreateOnlineMeeting, Credentials,
-    DeleteEvent, EventDraft, EventRead, FullEvent, HttpError, HttpTransport, Mutating, Organizer, ShortProfileLookup,
-    TimeZoneSettings, Transport, UpdateEvent,
+    DeleteEvent, EventAttendee, EventDraft, EventRead, FreeBusyAsk, FullEvent, HttpError, HttpTransport, MeetingTimes,
+    Mutating, Organizer, PersonSchedule, Schedules, ShortProfileLookup, TimeZoneSettings, Transport, UpdateEvent,
 };
 
 use crate::engine::{EngineError, Responder};
@@ -66,6 +68,15 @@ pub struct Invitable {
     pub mri: String,
     pub name: String,
     pub address: String,
+}
+
+/// What the scheduling form's Scheduler shows ([`Calendar::availability`]): each person's busy times (the account's
+/// own among them) and the starts every attendee is free for the meeting's length.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct MeetingAvailability {
+    pub people: Vec<PersonSchedule>,
+    /// Suggested starts, ms since the epoch, in the service's order.
+    pub suggestions: Vec<i64>,
 }
 
 /// What a write gave: the new event, as the service answered its creation (`None` for any other write, or an answer
@@ -170,6 +181,58 @@ where
         });
     }
 
+    /// Answers `reply` with the busy times of `attendees` and the account from `start_ms` (the local midnight of the
+    /// day the form shows) and the starts all of them are free for `meeting_minutes`: the scheduling form's two
+    /// free/busy reads ([`Schedules`], [`MeetingTimes`]), plain requests that reach nobody, sent together. One that
+    /// failed leaves its part empty; both failing is [`EngineError::CalendarUnread`].
+    pub(crate) fn availability(
+        &self,
+        attendees: Vec<EventAttendee>,
+        start_ms: i64,
+        meeting_minutes: u32,
+        reply: Responder<MeetingAvailability>,
+    ) {
+        let outbox = Arc::clone(&self.outbox);
+        let client = Arc::clone(&self.client);
+        let whom = Arc::clone(&self.whom);
+        tokio::task::spawn_local(async move {
+            let me = outbox.me().clone();
+            let known = known(&client, &whom, &me).await;
+            let ask = FreeBusyAsk {
+                attendees,
+                organizer: organizer(&me, &known),
+                start_ms,
+                meeting_minutes: meeting_minutes.max(1),
+            };
+            let schedules = Schedules(ask.clone());
+            let times = MeetingTimes(ask);
+            let (schedules, times) = tokio::join!(client.send(&schedules), client.send(&times));
+            let people = match schedules {
+                Ok(answer) => Schedules::read_answer(answer.body()),
+                Err(error) => {
+                    log::info!("the attendees' busy times couldn't be read: {error}");
+                    None
+                }
+            };
+            let suggestions = match times {
+                Ok(answer) => MeetingTimes::read_answer(answer.body()),
+                Err(error) => {
+                    log::info!("the suggested times couldn't be read: {error}");
+                    None
+                }
+            };
+            let answer = if people.is_none() && suggestions.is_none() {
+                Err(EngineError::CalendarUnread)
+            } else {
+                Ok(MeetingAvailability {
+                    people: people.unwrap_or_default(),
+                    suggestions: suggestions.unwrap_or_default(),
+                })
+            };
+            let _ = reply.send(answer);
+        });
+    }
+
     /// Sends `write` (see the module docs) and answers `reply` with what it gave.
     pub(crate) fn write(&self, write: EventWrite, reply: Responder<EventWritten>) {
         let outbox = Arc::clone(&self.outbox);
@@ -214,7 +277,7 @@ where
                 },
             };
             let _ = reply.send(answer.map(|body| EventWritten {
-                created: (kind == "creation").then(|| created(&body)).flatten(),
+                created: (kind == "creation").then(|| CalendarEvent::created(&body)).flatten(),
             }));
         });
     }
@@ -227,25 +290,37 @@ async fn complete<C: Credentials + 'static>(
     me: &Author,
     mut draft: EventDraft,
 ) -> EventDraft {
-    let known = whom.lock().unwrap_or_else(PoisonError::into_inner).clone();
-    let known = match known {
-        Some(known) => known,
-        None => {
-            let read = Whom {
-                address: own_address(client, me.mri()).await,
-                time_zone: time_zone(client).await,
-            };
-            *whom.lock().unwrap_or_else(PoisonError::into_inner) = Some(read.clone());
-            read
-        }
-    };
-    draft.organizer = Organizer {
-        mri: me.mri().as_str().to_owned(),
-        address: known.address,
-        name: Some(me.display_name().to_owned()).filter(|name| !name.trim().is_empty()),
-    };
+    let known = known(client, whom, me).await;
+    draft.organizer = organizer(me, &known);
     draft.time_zone = known.time_zone;
     draft
+}
+
+/// What the account's events say of it ([`Whom`]), read the first time it is asked for.
+async fn known<C: Credentials + 'static>(
+    client: &Client<HttpTransport<C>>,
+    whom: &Mutex<Option<Whom>>,
+    me: &Author,
+) -> Whom {
+    let known = whom.lock().unwrap_or_else(PoisonError::into_inner).clone();
+    if let Some(known) = known {
+        return known;
+    }
+    let read = Whom {
+        address: own_address(client, me.mri()).await,
+        time_zone: time_zone(client).await,
+    };
+    *whom.lock().unwrap_or_else(PoisonError::into_inner) = Some(read.clone());
+    read
+}
+
+/// The account as the organizer: its MRI, its address and its name.
+fn organizer(me: &Author, known: &Whom) -> Organizer {
+    Organizer {
+        mri: me.mri().as_str().to_owned(),
+        address: known.address.clone(),
+        name: Some(me.display_name().to_owned()).filter(|name| !name.trim().is_empty()),
+    }
 }
 
 /// The account's address, as its profile gives it.
@@ -328,18 +403,6 @@ fn not_saved(kind: &'static str, why: &str) -> EngineError {
         kind,
         why: why.to_owned(),
     }
-}
-
-/// The event a creation's answer gives (`{"value": <event>}`, or the event itself).
-fn created(body: &[u8]) -> Option<CalendarEvent> {
-    let answer: Value = serde_json::from_slice(body).ok()?;
-    let event = answer.get("value").filter(|value| value.is_object()).unwrap_or(&answer);
-    let wrapped = serde_json::json!({ "value": [event] });
-    CalendarView::read_answer(wrapped.to_string().as_bytes())
-        .ok()?
-        .events
-        .into_iter()
-        .next()
 }
 
 async fn read<C: Credentials + 'static>(

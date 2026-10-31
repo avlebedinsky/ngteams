@@ -120,6 +120,17 @@ pub enum Command {
     /// sent as a `POST`, for a name Graph doesn't give), by MRI, whoever they are; prints `profile <alias or MRI>
     /// <source>` per person: where the name the engine has came from (`graph`, `short_profile`, `message`, `known`,
     /// or `none`), never the name. Reads only.
+    /// Proves the scheduling form's series and Scheduler with an appointment series of the account's own, which invites
+    /// nobody (`series.rs`): creates a weekly series from tomorrow, reads it back and prints its recurrence, reads the
+    /// account's free and busy times, then deletes the series (unless `--keep`; `--cleanup` deletes what a run left).
+    Series {
+        /// Leave the series in the calendar.
+        #[arg(long)]
+        keep: bool,
+        /// Only delete the probe series an earlier run left in the calendar.
+        #[arg(long)]
+        cleanup: bool,
+    },
     /// Asks the service's search (Substrate, `docs/protocol/search.md`) for `query`, as the title bar's search does:
     /// its suggestions, then its results of every kind; prints `search <scope> <kind> <count>` per kind found, and the
     /// ids of the chats its messages are in, never a name or a text. A read, whoever its answer lists.

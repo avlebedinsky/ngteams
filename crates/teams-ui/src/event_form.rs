@@ -2,23 +2,35 @@
 //! calendar's New (or its menu, or a double click on an empty slot of the grid), or an event of the account's opened
 //! to change (its card's Edit, or a double click on it).
 //!
-//! - **Its toolbar**: Event (Series, a repeating event, isn't offered yet), Show as, the reminder, the categories,
-//!   private, Print (not offered) and Save (Send while it invites anyone, Send update for a meeting's change); on a
-//!   change also Cancel meeting (the organizer's meeting with attendees, with a note for them) or Delete.
+//! - **Its toolbar**: Event and Series (a new event repeats while Series is on; a change of an occurrence edits that
+//!   occurrence, or the whole series once Series is picked: its master read and shown), Show as, the reminder, the
+//!   categories, private, Print ([`print`]: the event's page in the desktop's browser, which prints it) and Save (Send
+//!   while it invites anyone, Send update for a meeting's change); on a change also Cancel meeting (occurrence, series:
+//!   the organizer's meeting with attendees, with a note for them) or Delete.
 //! - **Its form**: the title; the required attendees and, by the attendee options, the optional ones (people the
-//!   account knows by name, picked from the suggestions, or any address typed in full); the date and times (a start
-//!   and an end every half hour, all day); the location; the Microsoft Teams meeting switch; the text (plain lines; an
-//!   event's own text goes back as it came while it isn't edited).
+//!   account knows by name and people the directory finds, picked from the suggestions, or any address typed in
+//!   full); the date and times (a start and an end every half hour, all day), the suggested times and the Scheduler;
+//!   for a series its recurrence ([`repeat`]: Teams' presets, a custom one, its end, its summary); the location; the
+//!   Microsoft Teams meeting switch; the text, in the app's rich-text editor ([`crate::editor`]) with Teams' format bar
+//!   (Format) and emoji, sent as the HTML the editor writes (an event's own text goes back as it came while it isn't
+//!   edited).
 //! - **Its day**: the date's hours beside the form, the new event's block in green over the day's events, moved by a
-//!   drag (its top and bottom handles change its start and end) or a click on an empty half hour.
+//!   drag (its top and bottom handles change its start and end) or a click on an empty half hour. The Scheduler
+//!   ([`scheduler`]) takes its place: everyone's busy times in a column each, and the times all of them are free.
 //! - **Save** goes through the engine (`teams_core::calendar`): one write, under the fence; the window closes once it
 //!   went through and the calendar reads its days again, and stays open saying why when it didn't.
 //! - **Read-only** (`Core::read_only`): the form shows the event and offers no Save, Cancel or Delete.
 //! - **Traced**: `event-form opened` (`new` or `change`), `event-form saved` / `not-saved` with the write's kind.
 
+mod body;
 mod day;
 pub(crate) mod model;
+mod people;
+pub mod print;
+pub mod repeat;
+mod scheduler;
 
+use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -30,24 +42,29 @@ use gpui::{
     WindowBounds, WindowHandle, WindowOptions, div, prelude::FluentBuilder as _, px, rgb, size,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
-use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
+use gpui_component::date_picker::{DatePickerEvent, DatePickerState};
+use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::switch::Switch;
 use gpui_component::{Disableable as _, Selectable as _, Sizable as _};
 use serde_json::{Map, Value};
-use teams_core::{CalendarEvent, EventAttendee, EventShowAs, EventWrite, FullEvent, Invitable};
+use teams_core::{CalendarEvent, EventAttendee, EventKind, EventShowAs, EventWrite, FullEvent, Invitable};
 
 use crate::bridge::Core;
 use crate::calendar::{self, Shown};
 use crate::calendar_view::mix;
 use crate::clock;
+use crate::editor::toolbar::FormatBar;
+use crate::editor::{Editor, EditorEvent, EnterMode};
 use crate::icons::{Glyph, icon_button, selected_by};
+use crate::reaction_picker::ReactionPicker;
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 use crate::window::KitRoot;
 
 pub use model::Slot;
 use model::{CATEGORIES, Fields, REMINDERS};
+use repeat::{Custom, Repeat};
 
 /// How the window opens, px.
 const DEFAULT_SIZE: (f32, f32) = (1400.0, 900.0);
@@ -173,6 +190,24 @@ struct Editing {
     event: CalendarEvent,
 }
 
+/// What the form's Event and Series stand for.
+#[derive(Clone, Debug)]
+enum Series {
+    /// A new event: Event, or Series while it repeats ([`EventForm::repeat`]).
+    New,
+    /// A change of an event of its own, which doesn't repeat.
+    Single,
+    /// A change of an occurrence of the series `master_id`: the occurrence, or the whole series while `whole` (its
+    /// master read into the form); the occurrence as read kept to go back to.
+    Occurrence {
+        occurrence: Box<FullEvent>,
+        master_id: String,
+        whole: bool,
+    },
+    /// A change of a series' master itself.
+    Master,
+}
+
 /// Which list of attendees an attendee box adds to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Need {
@@ -185,6 +220,15 @@ enum Need {
 enum Confirm {
     Cancel,
     Delete,
+}
+
+/// What shows beside the form.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    /// The event's day.
+    Day,
+    /// The Scheduler: everyone's busy times.
+    Scheduler,
 }
 
 /// A drag of the new event's block in the day beside the form: what moves, from where, and the slot it began on.
@@ -201,14 +245,29 @@ pub struct EventForm {
     trace: Arc<ViewTrace>,
     focus: FocusHandle,
     editing: Option<Editing>,
+    series: Series,
+    /// How the event repeats, while it is a series.
+    repeat: Option<Repeat>,
+    /// The custom recurrence dialog, while it is open.
+    custom: Option<Custom>,
+    /// The series' end beside the repeat drop-down, and the custom dialog's.
+    until_picker: Entity<DatePickerState>,
+    custom_until_picker: Entity<DatePickerState>,
     title: Entity<InputState>,
     required: Entity<InputState>,
     optional: Entity<InputState>,
     location: Entity<InputState>,
-    body: Entity<TextareaState>,
+    /// The text, in the app's rich-text editor, and its format bar (shown by Format).
+    body: Entity<Editor>,
+    format_bar: Entity<FormatBar>,
+    formatting: bool,
+    /// The event's own text (HTML) as it was read: sent back as it came while the editor isn't changed.
+    body_seed: Option<String>,
+    body_changed: bool,
+    /// The emoji picker over the text, while it is open, and where its button was last drawn.
+    emoji: Option<(Entity<ReactionPicker>, Subscription)>,
+    emoji_at: Rc<Cell<Option<Bounds<Pixels>>>>,
     cancel_note: Entity<InputState>,
-    /// The text as the form opened with it, and the event's HTML of it: sent back as it came while unchanged.
-    body_seed: (String, Option<String>),
     attendees: Vec<EventAttendee>,
     optional_shown: bool,
     slot: Slot,
@@ -225,6 +284,13 @@ pub struct EventForm {
     day_events: Rc<Vec<Shown>>,
     day_read: Option<Task<()>>,
     day_scroll: ScrollHandle,
+    /// The day or the Scheduler, and what the Scheduler read.
+    side: Side,
+    availability: scheduler::Read,
+    availability_key: Option<scheduler::ReadKey>,
+    availability_read: Option<Task<()>>,
+    /// A series' master being read, as Series is picked on an occurrence.
+    series_read: Option<Task<()>>,
     drag: Option<Drag>,
     confirm: Option<Confirm>,
     saving: Option<Task<()>>,
@@ -251,36 +317,49 @@ impl EventForm {
         let optional = input("Invite optional attendees", window, cx);
         let location = input("Add a room or location", window, cx);
         let cancel_note = input("Add a message for the attendees (optional)", window, cx);
-        let body = cx.new(|cx| TextareaState::new(window, cx).rows(12));
-        let subscriptions = vec![
-            cx.subscribe_in(
-                &required,
-                window,
-                |this: &mut Self, _, event: &InputEvent, window, cx| {
-                    this.attendee_input(Need::Required, event, window, cx);
-                },
-            ),
-            cx.subscribe_in(
-                &optional,
-                window,
-                |this: &mut Self, _, event: &InputEvent, window, cx| {
-                    this.attendee_input(Need::Optional, event, window, cx);
-                },
-            ),
-        ];
+        let body = cx.new(|cx| Editor::new(window, cx).placeholder("Type details for this new meeting"));
+        let read_only = core.read_only();
+        body.update(cx, |editor, cx| {
+            editor.set_enter_mode(EnterMode::NewLine, cx);
+            editor.set_heights(Some(px(160.0)), None, cx);
+            editor.set_read_only(read_only, cx);
+        });
+        let format_bar = cx.new(|cx| FormatBar::new(body.clone(), cx).without_discard());
+        let picker = |window: &mut Window, cx: &mut Context<Self>| {
+            cx.new(|cx| DatePickerState::new(window, cx).date_format("%a %-m/%-d/%Y"))
+        };
+        let until_picker = picker(window, cx);
+        let custom_until_picker = picker(window, cx);
+        let subscriptions = Self::subscriptions(
+            [&required, &optional],
+            &body,
+            [&until_picker, &custom_until_picker],
+            window,
+            cx,
+        );
         let now = calendar::now().naive_local();
         let mut form = Self {
             core,
             trace,
             focus: cx.focus_handle(),
             editing: None,
+            series: Series::New,
+            repeat: None,
+            custom: None,
+            until_picker,
+            custom_until_picker,
             title,
             required,
             optional,
             location,
             body,
+            format_bar,
+            formatting: false,
+            body_seed: None,
+            body_changed: false,
+            emoji: None,
+            emoji_at: Rc::default(),
             cancel_note,
-            body_seed: (String::new(), None),
             attendees: Vec::new(),
             optional_shown: false,
             slot: Slot::next_half_hour(now),
@@ -295,6 +374,11 @@ impl EventForm {
             day_events: Rc::default(),
             day_read: None,
             day_scroll: ScrollHandle::new(),
+            side: Side::Day,
+            availability: scheduler::Read::None,
+            availability_key: None,
+            availability_read: None,
+            series_read: None,
             drag: None,
             confirm: None,
             saving: None,
@@ -302,17 +386,7 @@ impl EventForm {
             saved,
             _subscriptions: subscriptions,
         };
-        let kind = match seed {
-            Seed::New { slot, online } => {
-                form.slot = slot;
-                form.online = online;
-                "new"
-            }
-            Seed::Change(full) => {
-                form.fill(*full, window, cx);
-                "change"
-            }
-        };
+        let kind = form.seed(seed, window, cx);
         form.day = form.slot.start.date();
         form.day_scroll
             .set_offset(gpui::point(px(0.0), px(-day::scroll_to(form.slot.start.time()))));
@@ -322,8 +396,88 @@ impl EventForm {
         form
     }
 
-    /// Fills the form from an event read whole.
-    fn fill(&mut self, full: FullEvent, window: &mut Window, cx: &mut Context<Self>) {
+    /// What the form listens to: the attendee boxes, the text, and the series' two end pickers.
+    fn subscriptions(
+        boxes: [&Entity<InputState>; 2],
+        body: &Entity<Editor>,
+        pickers: [&Entity<DatePickerState>; 2],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Vec<Subscription> {
+        let [required, optional] = boxes;
+        let [until, custom_until] = pickers;
+        vec![
+            cx.subscribe_in(
+                required,
+                window,
+                |this: &mut Self, _, event: &InputEvent, window, cx| {
+                    this.attendee_input(Need::Required, event, window, cx);
+                },
+            ),
+            cx.subscribe_in(
+                optional,
+                window,
+                |this: &mut Self, _, event: &InputEvent, window, cx| {
+                    this.attendee_input(Need::Optional, event, window, cx);
+                },
+            ),
+            cx.subscribe_in(body, window, |this: &mut Self, _, event: &EditorEvent, _, cx| {
+                if *event == EditorEvent::Changed {
+                    this.body_changed = true;
+                }
+                cx.notify();
+            }),
+            cx.subscribe_in(until, window, |this: &mut Self, _, event: &DatePickerEvent, _, cx| {
+                let DatePickerEvent::Change(picked) = event;
+                let start = this.slot.start.date();
+                if let Some(repeat) = &mut this.repeat {
+                    repeat.until = repeat::picked_until(picked.start().map(|time| time.date()), start);
+                }
+                cx.notify();
+            }),
+            cx.subscribe_in(
+                custom_until,
+                window,
+                |this: &mut Self, _, event: &DatePickerEvent, _, cx| {
+                    let DatePickerEvent::Change(picked) = event;
+                    let start = this.slot.start.date();
+                    if let Some(custom) = &mut this.custom {
+                        custom.until = repeat::picked_until(picked.start().map(|time| time.date()), start);
+                    }
+                    cx.notify();
+                },
+            ),
+        ]
+    }
+
+    /// Opens the form on `seed`; what it is, for the trace.
+    fn seed(&mut self, seed: Seed, window: &mut Window, cx: &mut Context<Self>) -> &'static str {
+        match seed {
+            Seed::New { slot, online } => {
+                self.slot = slot;
+                self.online = online;
+                "new"
+            }
+            Seed::Change(full) => {
+                let event = &full.event;
+                self.series = match (&event.kind, &event.series_master_id) {
+                    (EventKind::Occurrence | EventKind::Exception, Some(master_id)) => Series::Occurrence {
+                        occurrence: full.clone(),
+                        master_id: master_id.clone(),
+                        whole: false,
+                    },
+                    (EventKind::RecurringMaster, _) => Series::Master,
+                    _ => Series::Single,
+                };
+                let repeats = matches!(self.series, Series::Master);
+                self.fill(*full, repeats, window, cx);
+                "change"
+            }
+        }
+    }
+
+    /// Fills the form from an event read whole; `repeats` takes its recurrence too (a series changed whole).
+    fn fill(&mut self, full: FullEvent, repeats: bool, window: &mut Window, cx: &mut Context<Self>) {
         let event = full.event.clone();
         if let Some(shown) = Shown::of(Rc::new(event.clone())) {
             self.slot = Slot {
@@ -343,30 +497,19 @@ impl EventForm {
         self.reminder = full.reminder_minutes;
         self.private = event.private;
         self.categories = full.categories.clone();
-        let organizer = event.organizer_address.as_deref().map(str::to_lowercase);
-        self.attendees = event
-            .attendees
-            .iter()
-            .filter_map(|attendee| {
-                let address = attendee.address.clone()?;
-                // the organizer is the account itself: listed by the service, never invited by the form
-                (organizer.as_deref() != Some(address.to_lowercase().as_str())).then(|| EventAttendee {
-                    required: !full.optional.contains(&address.to_lowercase()),
-                    address,
-                    name: attendee.name.clone(),
-                    mri: None,
-                })
-            })
-            .collect();
+        self.attendees = invited(&full);
         self.optional_shown = self.attendees.iter().any(|attendee| !attendee.required);
-        let text = full.body_html.as_deref().map(model::html_text).unwrap_or_default();
-        self.body_seed = (text.clone(), full.body_html.clone());
+        self.repeat = full.recurrence.as_ref().filter(|_| repeats).map(Repeat::of);
+        let until = self.repeat.as_ref().and_then(|repeat| repeat.until);
+        self.until_picker.update(cx, |picker, cx| {
+            picker.set_date(gpui_component::calendar::Date::Single(until), window, cx);
+        });
+        self.load_body(full.body_html.as_deref(), cx);
         let subject = event.subject.clone();
         let location = event.location.clone().unwrap_or_default();
         self.title.update(cx, |input, cx| input.set_value(subject, window, cx));
         self.location
             .update(cx, |input, cx| input.set_value(location, window, cx));
-        self.body.update(cx, |input, cx| input.set_value(text, window, cx));
         self.editing = Some(Editing {
             id: event.id.clone(),
             raw: full.raw,
@@ -400,30 +543,43 @@ impl EventForm {
 
     /// What the form holds.
     fn fields(&self, cx: &App) -> Fields {
-        let body = self.body.read(cx).value().to_string();
-        let body_html = (body == self.body_seed.0).then(|| self.body_seed.1.clone()).flatten();
+        let body_html = if self.body_changed {
+            self.body_html(cx)
+        } else {
+            self.body_seed.clone().unwrap_or_else(|| self.body_html(cx))
+        };
+        let start = self.slot.start.date();
         Fields {
             subject: self.title.read(cx).value().to_string(),
             slot: self.slot,
             attendees: self.attendees.clone(),
             location: self.location.read(cx).value().to_string(),
-            body,
             body_html,
             online: self.online,
             show_as: self.show_as,
             reminder: self.reminder,
             private: self.private,
             categories: self.categories.clone(),
+            recurrence: self
+                .repeat
+                .as_ref()
+                .filter(|_| self.edits_series())
+                .map(|repeat| repeat.recurrence(start)),
         }
     }
 
-    /// Moves the event to `slot`, and the day beside it to its date.
+    /// Moves the event to `slot`, and the day beside it to its date; a series' preset follows the new day.
     pub fn set_slot(&mut self, slot: Slot, cx: &mut Context<Self>) {
+        let from = self.slot.start.date();
         self.slot = slot;
+        if let Some(repeat) = &self.repeat {
+            self.repeat = Some(repeat.moved(from, slot.start.date()));
+        }
         if slot.start.date() != self.day {
             self.day = slot.start.date();
             self.read_day(cx);
         }
+        self.read_side(cx);
         cx.notify();
     }
 
@@ -431,7 +587,34 @@ impl EventForm {
     fn show_day(&mut self, date: NaiveDate, cx: &mut Context<Self>) {
         self.day = date;
         self.read_day(cx);
+        self.read_side(cx);
         cx.notify();
+    }
+
+    /// Shows the day or the Scheduler beside the form.
+    pub fn show_side(&mut self, side: Side, cx: &mut Context<Self>) {
+        self.side = side;
+        self.trace
+            .record(&TraceLine::new("event-form", "side").kind(match side {
+                Side::Day => "day",
+                Side::Scheduler => "scheduler",
+            }));
+        self.read_side(cx);
+        cx.notify();
+    }
+
+    /// What shows beside the form.
+    #[must_use]
+    pub fn side(&self) -> Side {
+        self.side
+    }
+
+    /// The free and busy times are read again when what they are about changed, as the web client's form reads them
+    /// while it names attendees (the suggested times) or shows the Scheduler.
+    fn read_side(&mut self, cx: &mut Context<Self>) {
+        if self.side == Side::Scheduler || !self.attendees.is_empty() {
+            self.read_availability(cx);
+        }
     }
 
     /// Reads the day beside the form's events.
@@ -495,21 +678,7 @@ impl EventForm {
                     self.invite_typed(need, window, cx);
                     return;
                 }
-                let reply = self.core.invitable(query.clone());
-                self.suggesting = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-                    let found = reply.await.unwrap_or_default();
-                    let _ = this.update(cx, |form, cx| {
-                        let input = match need {
-                            Need::Required => &form.required,
-                            Need::Optional => &form.optional,
-                        };
-                        // an answer to what the box no longer says is dropped
-                        if input.read(cx).value().trim() == query {
-                            form.suggestions = Some((need, found));
-                            cx.notify();
-                        }
-                    });
-                }));
+                self.suggest(need, query, cx);
             }
             _ => {}
         }
@@ -524,7 +693,7 @@ impl EventForm {
         let text = input.read(cx).value().to_string();
         match model::typed_attendee(&text, need == Need::Required) {
             Some(attendee) => {
-                self.add_attendee(attendee);
+                self.add_attendee(attendee, cx);
                 input.update(cx, |input, cx| input.set_value("", window, cx));
                 self.suggestions = None;
                 self.problem = None;
@@ -539,12 +708,15 @@ impl EventForm {
 
     /// Invites `person` from the suggestions.
     fn invite_person(&mut self, person: &Invitable, need: Need, window: &mut Window, cx: &mut Context<Self>) {
-        self.add_attendee(EventAttendee {
-            address: person.address.clone(),
-            name: Some(person.name.clone()),
-            mri: Some(person.mri.clone()),
-            required: need == Need::Required,
-        });
+        self.add_attendee(
+            EventAttendee {
+                address: person.address.clone(),
+                name: Some(person.name.clone()),
+                mri: Some(person.mri.clone()).filter(|mri| !mri.is_empty()),
+                required: need == Need::Required,
+            },
+            cx,
+        );
         let input = match need {
             Need::Required => self.required.clone(),
             Need::Optional => self.optional.clone(),
@@ -555,10 +727,11 @@ impl EventForm {
         cx.notify();
     }
 
-    fn add_attendee(&mut self, attendee: EventAttendee) {
+    fn add_attendee(&mut self, attendee: EventAttendee, cx: &mut Context<Self>) {
         let address = attendee.address.to_lowercase();
         self.attendees.retain(|known| known.address.to_lowercase() != address);
         self.attendees.push(attendee);
+        self.read_side(cx);
     }
 
     /// Fills the form in as a person typing would: `subject`, each of `invited` (address, name, required), a Teams
@@ -574,16 +747,20 @@ impl EventForm {
         let subject = subject.to_owned();
         self.title.update(cx, |input, cx| input.set_value(subject, window, cx));
         for (address, name, required) in invited {
-            self.add_attendee(EventAttendee {
-                address: (*address).to_owned(),
-                name: Some((*name).to_owned()),
-                mri: None,
-                required: *required,
-            });
+            self.add_attendee(
+                EventAttendee {
+                    address: (*address).to_owned(),
+                    name: Some((*name).to_owned()),
+                    mri: None,
+                    required: *required,
+                },
+                cx,
+            );
             self.optional_shown |= !required;
         }
-        let text = text.to_owned();
-        self.body.update(cx, |input, cx| input.set_value(text, window, cx));
+        let doc = crate::editor::doc::Doc::new(text.lines().map(crate::editor::doc::Block::paragraph).collect());
+        self.body.update(cx, |editor, cx| editor.set_doc(doc, cx));
+        self.body_changed = true;
         self.online = true;
         cx.notify();
     }
@@ -592,6 +769,7 @@ impl EventForm {
     pub fn remove_attendee(&mut self, address: &str, cx: &mut Context<Self>) {
         let address = address.to_lowercase();
         self.attendees.retain(|known| known.address.to_lowercase() != address);
+        self.read_side(cx);
         cx.notify();
     }
 
@@ -682,6 +860,7 @@ impl EventForm {
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
         match keystroke.key.as_str() {
+            "escape" if self.custom.is_some() => self.custom = None,
             "escape" if self.confirm.is_some() => self.confirm = None,
             "escape" if self.suggestions.is_some() => self.suggestions = None,
             "s" if keystroke.modifiers.control && !keystroke.modifiers.alt => self.save(window, cx),
@@ -700,6 +879,155 @@ impl EventForm {
             _ => "Save",
         }
     }
+
+    // --- Event and Series ---
+
+    /// Whether what the form saves is a whole series: a new one, a series' master, or an occurrence's series picked.
+    fn edits_series(&self) -> bool {
+        match &self.series {
+            Series::New => self.repeat.is_some(),
+            Series::Master => true,
+            Series::Occurrence { whole, .. } => *whole,
+            Series::Single => false,
+        }
+    }
+
+    /// Whether the series being changed must stay one (its repeat offers no "Does not repeat").
+    fn series_fixed(&self) -> bool {
+        !matches!(self.series, Series::New)
+    }
+
+    /// Whether the form is on its Series tab.
+    #[must_use]
+    pub fn on_series(&self) -> bool {
+        self.edits_series()
+    }
+
+    /// The toolbar's Event (`false`) or Series (`true`): a new event repeats weekly from its start's day or no longer
+    /// repeats; a change of an occurrence edits that occurrence or reads its series' master and edits the series.
+    pub fn choose_series(&mut self, series: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if series == self.edits_series() {
+            return;
+        }
+        match &self.series {
+            Series::New => {
+                let start = self.slot.start.date();
+                let repeat = series.then(|| Repeat::preset(repeat::Preset::Weekly, start));
+                self.set_repeat(repeat, window, cx);
+            }
+            Series::Occurrence {
+                occurrence, master_id, ..
+            } => {
+                if series {
+                    let master_id = master_id.clone();
+                    self.read_series(master_id, window, cx);
+                } else {
+                    let occurrence = (**occurrence).clone();
+                    self.fill(occurrence, false, window, cx);
+                    self.set_whole(false);
+                    self.after_refill(cx);
+                }
+            }
+            Series::Single | Series::Master => {}
+        }
+        cx.notify();
+    }
+
+    /// Reads the series' master `master_id`, then changes the form over to the whole series.
+    fn read_series(&mut self, master_id: String, window: &mut Window, cx: &mut Context<Self>) {
+        let reply = self.core.calendar_event(master_id);
+        self.problem = None;
+        self.series_read = Some(cx.spawn_in(window, async move |this, cx| {
+            let answer = reply.await;
+            let _ = this.update_in(cx, |form: &mut Self, window, cx| {
+                form.series_read = None;
+                match answer {
+                    Ok(master) => {
+                        form.fill(master, true, window, cx);
+                        form.set_whole(true);
+                        form.after_refill(cx);
+                    }
+                    Err(_) => form.problem = Some("The series couldn't be read. Try again.".into()),
+                }
+                cx.notify();
+            });
+        }));
+    }
+
+    fn set_whole(&mut self, to: bool) {
+        if let Series::Occurrence { whole, .. } = &mut self.series {
+            *whole = to;
+        }
+    }
+
+    /// The day and the free/busy times follow an event filled in again.
+    fn after_refill(&mut self, cx: &mut Context<Self>) {
+        self.day = self.slot.start.date();
+        self.read_day(cx);
+        self.read_side(cx);
+    }
+
+    /// Sets how the event repeats (`None`: it doesn't), its end's picker with it.
+    fn set_repeat(&mut self, repeat: Option<Repeat>, window: &mut Window, cx: &mut Context<Self>) {
+        let until = repeat.as_ref().and_then(|repeat| repeat.until);
+        self.repeat = repeat;
+        self.until_picker.update(cx, |picker, cx| {
+            picker.set_date(gpui_component::calendar::Date::Single(until), window, cx);
+        });
+        cx.notify();
+    }
+
+    /// Opens the custom recurrence dialog on the series' recurrence.
+    pub fn open_custom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let start = self.slot.start.date();
+        let custom = Custom::of(self.repeat.as_ref(), start);
+        let until = custom.until;
+        self.custom = Some(custom);
+        self.custom_until_picker.update(cx, |picker, cx| {
+            picker.set_date(gpui_component::calendar::Date::Single(until), window, cx);
+        });
+        cx.notify();
+    }
+
+    /// Closes the custom recurrence dialog, keeping the series' recurrence as it was (its Cancel).
+    pub fn close_custom(&mut self, cx: &mut Context<Self>) {
+        self.custom = None;
+        cx.notify();
+    }
+
+    /// Changes the open custom dialog's choices.
+    fn edit_custom(&mut self, change: impl FnOnce(&mut Custom), cx: &mut Context<Self>) {
+        if let Some(custom) = &mut self.custom {
+            change(custom);
+            cx.notify();
+        }
+    }
+
+    /// The custom dialog's Save: its recurrence becomes the series'.
+    fn save_custom(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(custom) = self.custom.take() else { return };
+        let repeat = custom.repeat(self.slot.start.date());
+        self.set_repeat(Some(repeat), window, cx);
+    }
+}
+
+/// Whom an event read whole invites: its attendees with an address, the organizer (the account itself, listed by the
+/// service, never invited by the form) left out.
+fn invited(full: &FullEvent) -> Vec<EventAttendee> {
+    let organizer = full.event.organizer_address.as_deref().map(str::to_lowercase);
+    full.event
+        .attendees
+        .iter()
+        .filter_map(|attendee| {
+            let address = attendee.address.clone()?;
+            (organizer.as_deref() != Some(address.to_lowercase().as_str())).then(|| EventAttendee {
+                required: !full.optional.contains(&address.to_lowercase()),
+                address,
+                name: attendee.name.clone(),
+                mri: None,
+            })
+        })
+        .collect()
 }
 
 /// `text` with its first letter capitalized.
@@ -893,33 +1221,7 @@ impl EventForm {
                         )
                 })
         };
-        let removing = self.editing.as_ref().filter(|_| writes).map(|editing| {
-            let meeting = editing.event.is_organizer && !editing.event.attendees.is_empty();
-            let (id, label, glyph, confirm) = if meeting {
-                (
-                    "event-cancel-meeting",
-                    "Cancel meeting",
-                    Glyph::CALENDAR_CANCEL,
-                    Confirm::Cancel,
-                )
-            } else {
-                ("event-delete", "Delete", Glyph::TRASH, Confirm::Delete)
-            };
-            selected_by(
-                id,
-                Button::new(id)
-                    .ghost()
-                    .small()
-                    .icon(glyph.icon())
-                    .label(label)
-                    .text_color(rgb(theme::DANGER))
-                    .disabled(self.saving.is_some())
-                    .on_click(cx.listener(move |form, _, _, cx| {
-                        form.confirm = Some(confirm);
-                        cx.notify();
-                    })),
-            )
-        });
+        let removing = self.removing(writes, cx);
         let save_label = self.save_label();
         let save = selected_by(
             "event-save",
@@ -943,25 +1245,7 @@ impl EventForm {
             .flex()
             .items_center()
             .gap_1()
-            .child(selected_by(
-                "event-kind-event",
-                Button::new("event-kind-event")
-                    .outline()
-                    .small()
-                    .icon(Glyph::CALENDAR.icon())
-                    .label("Event")
-                    .selected(true),
-            ))
-            .child(selected_by(
-                "event-kind-series",
-                Button::new("event-kind-series")
-                    .ghost()
-                    .small()
-                    .icon(Glyph::REPEAT.icon())
-                    .label("Series")
-                    .disabled(true)
-                    .tooltip("Repeating events aren't available yet"),
-            ))
+            .children(self.kind_tabs(cx))
             .child(separator())
             .child(selected_by("event-show-as", show_as_menu))
             .child(selected_by("event-reminder", reminder_menu))
@@ -970,13 +1254,153 @@ impl EventForm {
             .child(separator())
             .child(selected_by(
                 "event-print",
-                icon_button("event-print", Glyph::PRINTER, "Printing isn't available yet")
+                icon_button("event-print", Glyph::PRINTER, "Print")
                     .small()
-                    .disabled(true),
+                    .on_click(cx.listener(|form, _, _, cx| form.print(cx))),
             ))
             .child(div().flex_1())
             .children(removing)
             .child(save)
+    }
+
+    /// The toolbar's Event and Series, as Teams' form has them: a new event's (Series makes it repeat), an occurrence's
+    /// (Occurrence, or the whole series), a series' own (Series alone); a single event's change offers Event alone.
+    fn kind_tabs(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let on_series = self.edits_series();
+        let (first, series_offered) = match &self.series {
+            Series::New => ("Event", true),
+            Series::Occurrence { .. } => ("Occurrence", true),
+            Series::Single => ("Event", false),
+            Series::Master => ("Event", true),
+        };
+        let reading = self.series_read.is_some();
+        let tab = |id: &'static str, glyph: Glyph, label: &'static str, chosen: bool, series: bool| {
+            let button = Button::new(id)
+                .small()
+                .icon(glyph.icon())
+                .label(label)
+                .selected(chosen)
+                .when(chosen, |button| button.outline())
+                .when(!chosen, |button| button.ghost())
+                .disabled(reading || matches!(self.series, Series::Master) && !series)
+                .on_click(cx.listener(move |form, _, window, cx| form.choose_series(series, window, cx)));
+            selected_by(id, button).into_any_element()
+        };
+        let mut tabs = vec![tab("event-kind-event", Glyph::CALENDAR, first, !on_series, false)];
+        if series_offered {
+            tabs.push(tab("event-kind-series", Glyph::REPEAT, "Series", on_series, true));
+        }
+        tabs
+    }
+
+    /// Cancel meeting or Delete (of an occurrence, or of the series while the form changes it whole), on a change.
+    fn removing(&self, writes: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let editing = self.editing.as_ref().filter(|_| writes)?;
+        let meeting = editing.event.is_organizer && !editing.event.attendees.is_empty();
+        let what = self.removal_noun();
+        let (id, label, glyph, confirm) = match (meeting, what) {
+            (true, "occurrence") => (
+                "event-cancel-meeting",
+                "Cancel occurrence",
+                Glyph::CALENDAR_CANCEL,
+                Confirm::Cancel,
+            ),
+            (true, "series") => (
+                "event-cancel-meeting",
+                "Cancel series",
+                Glyph::CALENDAR_CANCEL,
+                Confirm::Cancel,
+            ),
+            (true, _) => (
+                "event-cancel-meeting",
+                "Cancel meeting",
+                Glyph::CALENDAR_CANCEL,
+                Confirm::Cancel,
+            ),
+            (false, "occurrence") => ("event-delete", "Delete occurrence", Glyph::TRASH, Confirm::Delete),
+            (false, "series") => ("event-delete", "Delete series", Glyph::TRASH, Confirm::Delete),
+            (false, _) => ("event-delete", "Delete", Glyph::TRASH, Confirm::Delete),
+        };
+        Some(
+            selected_by(
+                id,
+                Button::new(id)
+                    .ghost()
+                    .small()
+                    .icon(glyph.icon())
+                    .label(label)
+                    .text_color(rgb(theme::DANGER))
+                    .disabled(self.saving.is_some() || self.series_read.is_some())
+                    .on_click(cx.listener(move |form, _, _, cx| {
+                        form.confirm = Some(confirm);
+                        cx.notify();
+                    })),
+            )
+            .into_any_element(),
+        )
+    }
+
+    /// What a removal removes: `occurrence`, `series` or `event`.
+    fn removal_noun(&self) -> &'static str {
+        match &self.series {
+            Series::Occurrence { whole: false, .. } => "occurrence",
+            Series::Occurrence { whole: true, .. } | Series::Master => "series",
+            Series::New | Series::Single => "event",
+        }
+    }
+
+    /// Print: the event's page, written and opened in the desktop's browser, which prints it ([`print`]).
+    pub fn print(&mut self, cx: &mut Context<Self>) {
+        let page = print::page(&self.printable(cx));
+        match print::write(&page) {
+            Ok(link) => {
+                self.trace.record(&TraceLine::new("event-form", "printed"));
+                cx.open_url(&link);
+            }
+            Err(why) => self.problem = Some(capitalized(&why).into()),
+        }
+        cx.notify();
+    }
+
+    /// What the printed page shows.
+    #[must_use]
+    pub fn printable(&self, cx: &App) -> print::Printable {
+        let cycle = clock::cycle(cx);
+        let start = self.slot.start.date();
+        let names = |required: bool| {
+            self.attendees
+                .iter()
+                .filter(|attendee| attendee.required == required)
+                .map(|attendee| match &attendee.name {
+                    Some(name) if name != &attendee.address => format!("{name} <{}>", attendee.address),
+                    _ => attendee.address.clone(),
+                })
+                .collect()
+        };
+        let editor = self.body.read(cx);
+        let body_html = crate::compose::message_of(editor.doc(), &[])
+            .ok()
+            .flatten()
+            .map(|message| message.html().to_owned());
+        print::Printable {
+            title: self.title.read(cx).value().to_string(),
+            when: self.slot.text(cycle),
+            repeats: self
+                .repeat
+                .as_ref()
+                .filter(|_| self.edits_series())
+                .map(|repeat| repeat.summary(start)),
+            location: self.location.read(cx).value().to_string(),
+            online: self.online,
+            required: names(true),
+            optional: names(false),
+            show_as: model::show_as_label(self.show_as).to_owned(),
+            reminder: model::reminder_label(self.reminder),
+            categories: self.categories.clone(),
+            private: self.private,
+            body_html,
+            body_text: editor.text(),
+        }
     }
 
     fn title_row(&self, palette: Palette, window: &Window, cx: &App) -> gpui::Div {
@@ -1156,7 +1580,10 @@ impl EventForm {
                 let selector = format!("event-suggestion-{}", person.address.to_lowercase());
                 div()
                     .debug_selector(move || selector.clone())
-                    .id(SharedString::from(format!("event-suggestion-{}", person.mri)))
+                    .id(SharedString::from(format!(
+                        "event-suggestion-{}",
+                        person.address.to_lowercase()
+                    )))
                     .px_3()
                     .py_2()
                     .flex()
@@ -1285,17 +1712,69 @@ impl EventForm {
             .children(end_menu.map(|menu| selected_by("event-end", menu)))
             .child(div().flex_1())
             .child(selected_by("event-all-day", all_day))
+            .child(self.suggested_times(cx))
             .child(selected_by(
                 "event-scheduler",
                 Button::new("event-scheduler")
                     .ghost()
                     .small()
-                    .icon(Glyph::CALENDAR_DAYS.icon())
+                    .icon(Glyph::CALENDAR_RANGE.icon())
                     .label("Scheduler")
-                    .disabled(true)
-                    .tooltip("The scheduling assistant isn't available yet"),
+                    .selected(self.side == Side::Scheduler)
+                    .tooltip(if self.side == Side::Scheduler {
+                        "Show the day"
+                    } else {
+                        "See when everyone is free"
+                    })
+                    .on_click(cx.listener(|form, _, _, cx| {
+                        let side = if form.side == Side::Scheduler {
+                            Side::Day
+                        } else {
+                            Side::Scheduler
+                        };
+                        form.show_side(side, cx);
+                    })),
             ));
         field_row(palette, Glyph::CLOCK, content, false)
+    }
+
+    /// The suggested times beside the time: the starts on the day shown that every attendee is free at, each moving the
+    /// event there; offered once there are attendees.
+    fn suggested_times(&self, cx: &mut Context<Self>) -> AnyElement {
+        let cycle = clock::cycle(cx);
+        let suggestions = self.suggestions_on_day();
+        let form = cx.entity().downgrade();
+        let tip = if self.attendees.is_empty() {
+            "Add attendees to see suggested times"
+        } else {
+            "Suggested times"
+        };
+        let button = Button::new("event-suggested-times")
+            .ghost()
+            .small()
+            .icon(Glyph::CALENDAR_SEARCH.icon())
+            .tooltip(tip)
+            .disabled(self.attendees.is_empty())
+            .dropdown_menu(move |menu, _, _| {
+                let menu = menu.min_w(px(200.0)).scrollable(true).max_h(px(360.0));
+                if suggestions.is_empty() {
+                    return menu.item(PopupMenuItem::new("No suggested times on this day").disabled(true));
+                }
+                suggestions.iter().fold(menu, |menu, start| {
+                    let (form, start) = (form.clone(), *start);
+                    menu.item(
+                        PopupMenuItem::new(start.format(cycle.time_of_day()).to_string()).on_click(
+                            move |_, _, cx: &mut App| {
+                                let _ = form.update(cx, |form, cx| {
+                                    let slot = form.slot.starting(start);
+                                    form.set_slot(slot, cx);
+                                });
+                            },
+                        ),
+                    )
+                })
+            });
+        selected_by("event-suggested-times", button).into_any_element()
     }
 
     fn location_row(&self, palette: Palette, window: &Window, cx: &App) -> gpui::Div {
@@ -1340,72 +1819,6 @@ impl EventForm {
             ))
     }
 
-    fn body_card(&self, palette: Palette) -> gpui::Div {
-        let tool = |id: &'static str, glyph: Glyph, tip: &'static str| {
-            selected_by(id, icon_button(id, glyph, tip).small().disabled(true))
-        };
-        card(palette)
-            .flex_1()
-            .min_h(px(200.0))
-            .p_4()
-            .flex()
-            .gap_3()
-            .child(
-                div().w(px(40.0)).flex_none().flex().justify_center().pt_2().child(
-                    Glyph::NOTES
-                        .icon()
-                        .size(px(18.0))
-                        .text_color(rgb(palette.muted_foreground)),
-                ),
-            )
-            .child(
-                div()
-                    .debug_selector(|| "event-body".to_owned())
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(rgb(palette.border))
-                    .child(
-                        div()
-                            .flex_1()
-                            .p_2()
-                            .child(Textarea::new(&self.body).appearance(false).h_full()),
-                    )
-                    .child(
-                        div()
-                            .h(px(44.0))
-                            .px_2()
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .border_t_1()
-                            .border_color(rgb(palette.border))
-                            .bg(rgb(mix(palette.surface, palette.background, 400)))
-                            .child(tool(
-                                "event-attach",
-                                Glyph::PAPERCLIP,
-                                "Attaching files isn't available yet",
-                            ))
-                            .child(tool("event-picture", Glyph::IMAGE, "Pictures aren't available yet"))
-                            .child(tool("event-emoji", Glyph::EMOJI, "Emoji aren't available yet"))
-                            .child(tool(
-                                "event-format",
-                                Glyph::TEXT_FORMAT,
-                                "Formatting isn't available yet",
-                            ))
-                            .child(tool("event-loop", Glyph::SUN, "Loop components aren't available yet"))
-                            .child(tool(
-                                "event-accessibility",
-                                Glyph::ACCESSIBILITY,
-                                "The accessibility checker isn't available yet",
-                            )),
-                    ),
-            )
-    }
-
     fn problem_bar(&self, palette: Palette) -> Option<gpui::Div> {
         let problem = self.problem.clone()?;
         Some(
@@ -1428,13 +1841,33 @@ impl EventForm {
     /// The confirmation of Cancel meeting (with a note for the attendees) or Delete, over the form.
     fn confirm_view(&self, palette: Palette, cx: &mut Context<Self>) -> Option<gpui::Stateful<gpui::Div>> {
         let confirm = self.confirm?;
-        let (title, text, action) = match confirm {
-            Confirm::Cancel => (
+        let (title, text, action) = match (confirm, self.removal_noun()) {
+            (Confirm::Cancel, "occurrence") => (
+                "Cancel occurrence?",
+                "The attendees get a cancellation of this occurrence, with your message if you add one.",
+                "Cancel occurrence",
+            ),
+            (Confirm::Cancel, "series") => (
+                "Cancel series?",
+                "The attendees get a cancellation of every occurrence, with your message if you add one.",
+                "Cancel series",
+            ),
+            (Confirm::Cancel, _) => (
                 "Cancel meeting?",
                 "The attendees get a cancellation, with your message if you add one.",
                 "Cancel meeting",
             ),
-            Confirm::Delete => ("Delete this event?", "It's removed from your calendar.", "Delete"),
+            (Confirm::Delete, "occurrence") => (
+                "Delete this occurrence?",
+                "It's removed from your calendar; the rest of the series stays.",
+                "Delete occurrence",
+            ),
+            (Confirm::Delete, "series") => (
+                "Delete this series?",
+                "Every occurrence is removed from your calendar.",
+                "Delete series",
+            ),
+            (Confirm::Delete, _) => ("Delete this event?", "It's removed from your calendar.", "Delete"),
         };
         let dialog = div()
             .debug_selector(|| "event-confirm".to_owned())
@@ -1520,6 +1953,7 @@ impl Render for EventForm {
                     .flatten(),
             )
             .child(self.when_row(palette, cx))
+            .children(self.repeat_row(palette, cx))
             .child(self.location_row(palette, window, cx))
             .child(self.online_row(palette, cx));
         let left = div()
@@ -1530,8 +1964,13 @@ impl Render for EventForm {
             .gap_3()
             .children(self.problem_bar(palette))
             .child(form_card)
-            .child(self.body_card(palette));
+            .child(self.body_card(palette, cx));
+        let side = match self.side {
+            Side::Day => self.day_view(palette, cx),
+            Side::Scheduler => self.scheduler_view(palette, cx),
+        };
         let confirm = self.confirm_view(palette, cx);
+        let custom = self.custom_view(palette, cx);
         div()
             .debug_selector(|| "event-form".to_owned())
             .key_context("EventForm")
@@ -1555,15 +1994,9 @@ impl Render for EventForm {
                 }),
             )
             .child(self.toolbar(palette, cx))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .gap_4()
-                    .child(left)
-                    .child(self.day_view(palette, cx)),
-            )
+            .child(div().flex_1().min_h_0().flex().gap_4().child(left).child(side))
             .children(confirm)
+            .children(custom)
+            .children(self.emoji_overlay())
     }
 }

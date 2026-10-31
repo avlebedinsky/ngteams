@@ -54,7 +54,7 @@ pub mod sync;
 pub mod teams;
 pub mod thumbnails;
 
-pub use calendar::{EventWrite, EventWritten, Invitable};
+pub use calendar::{EventWrite, EventWritten, Invitable, MeetingAvailability};
 pub use calling::{
     CallAction, CallActionError, CallMedia, CallParticipant, CallParts, CallStatus, CallVideo, CallView, GROUP_SLOTS,
     IncomingCall, Relay, VideoOutput,

@@ -383,6 +383,7 @@ teams-headless b watch --answer-lab-calls|--calls [--tone 1000] [--bursts] [--he
 teams-headless a presence [--wait 30] [--mri <mri>]...  # b's and c's presence, and anyone's by MRI, read from UPS
 teams-headless a profile <mri>... [--wait 30]           # where the engine's name for each comes from (Graph, the middle tier's lookup)
 teams-headless a search <query>                         # the service's search (Substrate): counts of each kind found, the chats by id
+teams-headless a series [--keep]                        # an appointment series of its own (nobody invited): created, read back, its free/busy read, deleted
 teams-headless a availability [--manual busy|do-not-disturb|away|available] [--manual-after 60] [--reset-after <s>] \
   [--hold 300]                            # a's own availability, from its push channel's endpoint
 teams-headless a call echo|b|abc|<id> [--tone 1000] [--bursts] [--hear <hz>] [--record <wav>] [--seconds 45] \
@@ -518,9 +519,12 @@ Ctrl+Alt+1–4), the account's events read from the middle tier's calendar view,
 participants, Copy link, and Join once a call runs in the meeting's chat; for the account's own events Edit, and
 Cancel meeting, Delete or Remove from calendar, each confirmed). New event (its menu: an event or a Teams meeting), a
 double click on an empty half hour of the grid, and an event's Edit (or a double click on it) open the scheduling form
-in a window of its own ("New event - Calendar"): the title, required and optional attendees (people the account knows
-by name, or any address), the date and times or all day, the location, the Microsoft Teams meeting switch, the text,
-Show as, the reminder, categories and private, the day beside it with the event's block to drag; Save (Send, Send
+in a window of its own ("New event - Calendar"): Event and Series (a series' repeat: Teams' presets, a custom
+recurrence, its end; an occurrence's change edits it or, by Series, the whole series), the title, required and optional
+attendees (people the account knows and people the directory finds, or any address), the date and times or all day,
+the suggested times and the Scheduler (everyone's busy times beside the form), the location, the Microsoft Teams
+meeting switch, the text in the rich-text editor (Format, Emoji), Show as, the reminder, categories, private and Print
+(the event's page in the browser, which prints it), the day beside it with the event's block to drag; Save (Send, Send
 update; Ctrl+S) writes through the engine and the calendar reads its days again (`docs/protocol/calendar.md`, "Writing
 an event"). "Join with an ID" says it isn't available yet. The settings (the selected chat, typing, read
 receipts, notifications, the idle time, the manual status, the log's level, the theme, the font and the

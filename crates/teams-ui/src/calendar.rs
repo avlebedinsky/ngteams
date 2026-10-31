@@ -425,6 +425,7 @@ mod tests {
             preview: None,
             conference_id: None,
             attendees: Vec::new(),
+            series_master_id: None,
         }))
         .unwrap()
     }

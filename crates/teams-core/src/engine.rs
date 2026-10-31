@@ -112,8 +112,8 @@ use teams_call::{CallId, Placement, RemoteEnd};
 use teams_fence::Mri;
 use teams_proto::chat::{self, MessageText};
 use teams_proto::{
-    CalendarEvent, Client, Credentials, EndpointRegistrar, FileRange, FullEvent, HttpError, HttpTransport,
-    ManualAvailability, RegisteredEndpoint, Transport,
+    CalendarEvent, Client, Credentials, EndpointRegistrar, EventAttendee, FileRange, FullEvent, HttpError,
+    HttpTransport, ManualAvailability, RegisteredEndpoint, Transport,
 };
 use teams_store::{
     Applied, Conversation, Member, Message, MessagePage, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction,
@@ -126,7 +126,7 @@ use teams_trouter::{
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior};
 
-use crate::calendar::{Calendar, EventWrite, EventWritten, Invitable};
+use crate::calendar::{Calendar, EventWrite, EventWritten, Invitable, MeetingAvailability};
 use crate::service_search::{SearchAnswer, SearchScope, ServiceSearch};
 
 /// How many people the attendee picker suggests at most.
@@ -618,6 +618,12 @@ enum Request {
         query: String,
         reply: Responder<Vec<Invitable>>,
     },
+    MeetingAvailability {
+        attendees: Vec<EventAttendee>,
+        start_ms: i64,
+        meeting_minutes: u32,
+        reply: Responder<MeetingAvailability>,
+    },
     SearchService {
         query: String,
         scope: SearchScope,
@@ -919,6 +925,23 @@ impl EngineRequests {
     pub fn invitable(&self, query: impl Into<String>) -> Reply<Vec<Invitable>> {
         let query = query.into();
         self.ask(|reply| Request::Invitable { query, reply })
+    }
+
+    /// The busy times of `attendees` and the account, and the starts all of them are free for `meeting_minutes`, from
+    /// `start_ms` (read now: [`crate::calendar`]): the scheduling form's Scheduler; [`EngineError::CalendarUnread`]
+    /// when neither read went through.
+    pub fn availability(
+        &self,
+        attendees: Vec<EventAttendee>,
+        start_ms: i64,
+        meeting_minutes: u32,
+    ) -> Reply<MeetingAvailability> {
+        self.ask(|reply| Request::MeetingAvailability {
+            attendees,
+            start_ms,
+            meeting_minutes,
+            reply,
+        })
     }
 
     /// What the service's search finds for `query` in `scope` (read now: [`crate::service_search`]): the title bar's
@@ -1459,6 +1482,12 @@ where
             Request::CalendarEvent { id, reply } => self.calendar.event(&id, reply),
             Request::WriteEvent { write, reply } => self.calendar.write(write, reply),
             Request::SearchService { query, scope, reply } => self.service_search.search(query, scope, reply),
+            Request::MeetingAvailability {
+                attendees,
+                start_ms,
+                meeting_minutes,
+                reply,
+            } => self.calendar.availability(attendees, start_ms, meeting_minutes, reply),
             Request::Invitable { query, reply } => match self.store.profiles_named(&query, INVITABLE) {
                 Ok(named) => self.calendar.invitable(named, reply),
                 Err(error) => {

@@ -78,7 +78,7 @@ const SETTLE: Duration = Duration::from_millis(1500);
 type Step = (&'static str, fn(&Entity<Shell>, &mut Window, &mut App));
 
 /// The tour.
-const STEPS: [Step; 58] = [
+const STEPS: [Step; 61] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -391,6 +391,23 @@ const STEPS: [Step; 58] = [
             });
         });
     }),
+    // Series: the event repeats weekly on its day, the repeat row under its time with the end and Teams' summary
+    ("event-form-series-dark", |_, _, cx| {
+        with_event_form(cx, |form, window, cx| form.choose_series(true, window, cx));
+    }),
+    // the repeat drop-down's Custom: the custom recurrence dialog over the form
+    ("event-form-custom-repeat-dark", |_, _, cx| {
+        with_event_form(cx, |form, window, cx| form.open_custom(window, cx));
+    }),
+    // the Scheduler in the day's place (b's and c's made-up busy times, the suggested times), and Format: Teams'
+    // format bar over the text
+    ("event-form-scheduler-dark", |_, _, cx| {
+        with_event_form(cx, |form, window, cx| {
+            form.close_custom(cx);
+            form.show_side(event_form::Side::Scheduler, cx);
+            form.toggle_formatting(window, cx);
+        });
+    }),
     // two messages b sent in the a–b–c chat, forwarded to a by the outsider (`seed_forwards`): each in Teams' card
     // under the arrow, b's avatar and name and the original's time, the second's picture drawn in it
     ("chat-forward", |shell, window, cx| {
@@ -502,6 +519,18 @@ fn with_stage(cx: &mut App, change: impl FnOnce(&mut CallStage, &mut Context<Cal
     if let Some(stage) = stage {
         stage.update(cx, change);
     }
+}
+
+/// Runs `change` on the scheduling form, in its window, when it is open.
+fn with_event_form(
+    cx: &mut App,
+    change: impl FnOnce(&mut event_form::EventForm, &mut Window, &mut Context<event_form::EventForm>),
+) {
+    let (Some(form), Some(handle)) = (event_form::shown(cx), event_form::window(cx)) else {
+        say("no scheduling form");
+        return;
+    };
+    let _ = handle.update(cx, |_, window, cx| form.update(cx, |form, cx| change(form, window, cx)));
 }
 
 fn main() -> ExitCode {

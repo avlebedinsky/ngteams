@@ -25,8 +25,8 @@ use gpui::{AppContext as _, AsyncApp, Context, SharedString, Task};
 use teams_core::sync::{CatchUpReport, Synced};
 use teams_core::{
     Action, Availability, CalendarEvent, CallAction, CallId, ChatListing, EngineHandle, EngineRequests, Event,
-    EventWrite, EventWritten, FileStream, FullEvent, Invitable, OwnStatus, Person, PictureBytes, Reply, SearchAnswer,
-    SearchScope, Strip, Transient, TransientSent,
+    EventAttendee, EventWrite, EventWritten, FileStream, FullEvent, Invitable, MeetingAvailability, OwnStatus, Person,
+    PictureBytes, Reply, SearchAnswer, SearchScope, Strip, Transient, TransientSent,
 };
 use teams_store::{
     Conversation, Member, Message, MessagePage, OutboxEntry, PageCursor, Reaction, ReadHorizon, SearchHit, Team,
@@ -159,6 +159,18 @@ pub trait Core: Send + Sync + 'static {
         let _ = (query, scope);
         Reply::ready(Ok(SearchAnswer::default()))
     }
+    /// The busy times of `attendees` and the account from `start_ms`, and the starts all of them are free for
+    /// `meeting_minutes`, read now: the scheduling form's Scheduler (`teams_core::calendar`). A fake core knows of no
+    /// busy time.
+    fn availability(
+        &self,
+        attendees: Vec<EventAttendee>,
+        start_ms: i64,
+        meeting_minutes: u32,
+    ) -> Reply<MeetingAvailability> {
+        let _ = (attendees, start_ms, meeting_minutes);
+        Reply::ready(Ok(MeetingAvailability::default()))
+    }
 }
 
 impl Core for EngineRequests {
@@ -184,6 +196,15 @@ impl Core for EngineRequests {
 
     fn search_service(&self, query: String, scope: SearchScope) -> Reply<SearchAnswer> {
         EngineRequests::search_service(self, query, scope)
+    }
+
+    fn availability(
+        &self,
+        attendees: Vec<EventAttendee>,
+        start_ms: i64,
+        meeting_minutes: u32,
+    ) -> Reply<MeetingAvailability> {
+        EngineRequests::availability(self, attendees, start_ms, meeting_minutes)
     }
 
     fn read_only(&self) -> bool {

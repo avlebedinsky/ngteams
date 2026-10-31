@@ -5,6 +5,7 @@ use chrono::{
     Datelike as _, Duration, Local, NaiveDate, NaiveDateTime, NaiveTime, Offset as _, TimeZone as _, Timelike as _,
 };
 use teams_core::{EventAttendee, EventDraft, EventShowAs, Organizer, ZonedTime};
+use teams_proto::Recurrence;
 
 use crate::clock::HourCycle;
 
@@ -280,15 +281,15 @@ pub struct Fields {
     pub slot: Slot,
     pub attendees: Vec<EventAttendee>,
     pub location: String,
-    /// The text, as typed (plain lines).
-    pub body: String,
-    /// The text as the event had it (HTML), while it is unchanged: sent back as it came.
-    pub body_html: Option<String>,
+    /// The text as HTML: the editor's, or the event's own while it is unchanged (empty for none).
+    pub body_html: String,
     pub online: bool,
     pub show_as: EventShowAs,
     pub reminder: Option<u32>,
     pub private: bool,
     pub categories: Vec<String>,
+    /// How a series repeats (`None` for a single event, or a change of one occurrence).
+    pub recurrence: Option<Recurrence>,
 }
 
 impl Fields {
@@ -309,12 +310,13 @@ impl Fields {
             },
             attendees: self.attendees.clone(),
             location: self.location.trim().to_owned(),
-            body_html: self.body_html.clone().unwrap_or_else(|| text_html(&self.body)),
+            body_html: self.body_html.clone(),
             online: self.online,
             show_as: self.show_as,
             reminder_minutes: self.reminder,
             private: self.private,
             categories: self.categories.clone(),
+            recurrence: self.recurrence.clone(),
         }
     }
 }

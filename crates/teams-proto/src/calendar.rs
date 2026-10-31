@@ -17,6 +17,7 @@ use time::format_description::well_known::Rfc3339;
 
 use crate::endpoint::{Endpoint, Service};
 use crate::read::Read;
+use crate::recurrence::Recurrence;
 
 /// The calendar view's path under the middle-tier base.
 pub const CALENDAR_VIEW_PATH: [&str; 5] = ["v2.0", "me", "calendars", "default", "calendarView"];
@@ -203,9 +204,25 @@ pub struct CalendarEvent {
     /// The meeting's dial-in conference id (`onlineMeetingConferenceId`).
     pub conference_id: Option<String>,
     pub attendees: Vec<Attendee>,
+    /// The series an occurrence or exception belongs to (`seriesMasterId`): the event a change of the whole series
+    /// reads and writes.
+    pub series_master_id: Option<String>,
 }
 
 impl CalendarEvent {
+    /// The event a creation's answer gives (`{"value": [<event>]}` as captured, `{"value": <event>}`, or the event
+    /// itself), a series' master too; `None` when it doesn't read.
+    #[must_use]
+    pub fn created(body: &[u8]) -> Option<Self> {
+        let answer: Value = serde_json::from_slice(body).ok()?;
+        let event = match answer.get("value") {
+            Some(Value::Array(events)) => events.first()?,
+            Some(event @ Value::Object(_)) => event,
+            _ => &answer,
+        };
+        Self::of(event)
+    }
+
     /// The event `entry` describes; `None` without a string `objectId` or a readable `startTime` and `endTime`.
     fn of(entry: &Value) -> Option<Self> {
         let text = |key: &str| {
@@ -247,6 +264,7 @@ impl CalendarEvent {
             preview: text("bodyPreview"),
             conference_id: text("onlineMeetingConferenceId"),
             attendees: attendees(entry.get("attendees")),
+            series_master_id: text("seriesMasterId"),
         })
     }
 }
@@ -465,6 +483,7 @@ impl EventRead {
                     .collect()
             })
             .unwrap_or_default();
+        let recurrence = Recurrence::read(&raw);
         Ok(FullEvent {
             event,
             raw,
@@ -472,6 +491,7 @@ impl EventRead {
             reminder_minutes,
             categories,
             optional,
+            recurrence,
         })
     }
 }
@@ -500,6 +520,9 @@ pub struct FullEvent {
     pub categories: Vec<String>,
     /// The addresses (lower case) of the attendees it invites as optional.
     pub optional: Vec<String>,
+    /// How it repeats, when the answer gives a recurrence that reads (a series' master; an occurrence may carry its
+    /// series').
+    pub recurrence: Option<Recurrence>,
 }
 
 /// `GET beta/me/calendarEvents/timeZoneSettingsWithOffset?timezone=<IANA name>`: the desktop's time zone as Exchange

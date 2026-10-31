@@ -208,11 +208,13 @@ pub fn start<S: SecretStore + 'static>(
     let base = session.service_base(CHAT_BASE_GTM).ok_or(AccountError::NoChatBase)?;
     let presence = session.service_base(PRESENCE_GTM);
     // the writes' transport (the outbox's, the push channel's registration): UPS's base too, for the account's own
-    // availability (M2 Task 19), which goes out only as an authorized write under the fence's permit
-    let transport = Arc::new(with_presence(
-        writable(HttpTransport::new(Arc::clone(&session), Arc::clone(&fence), &base)?),
-        presence.as_deref(),
-    )?);
+    // availability (M2 Task 19), and the middle tier's, for the calendar's writes (the scheduling form's events and
+    // its event member read), each of which goes out only as an authorized write under the fence's permit
+    let writes = with_middle_tier(
+        || HttpTransport::new(Arc::clone(&session), Arc::clone(&fence), &base).map(writable),
+        session.service_base(MIDDLE_TIER_GTM).as_deref(),
+    )?;
+    let transport = Arc::new(with_presence(writes, presence.as_deref())?);
     let members = membership(&fence, transport.clone())?;
     let reads = with_middle_tier(
         || HttpTransport::new(Arc::clone(&session), Arc::clone(&fence), &base).map(writable),

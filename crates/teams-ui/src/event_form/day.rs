@@ -18,9 +18,9 @@ use crate::icons::{Glyph, icon_button, selected_by};
 use crate::theme::{self, Palette};
 
 /// One hour's height in the day, px.
-const HOUR: f32 = 64.0;
+pub(super) const HOUR: f32 = 64.0;
 /// The time gutter's width, px.
-const GUTTER: f32 = 60.0;
+pub(super) const GUTTER: f32 = 60.0;
 
 /// What a drag of the new event's block moves.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -34,7 +34,7 @@ pub(super) enum Part {
 }
 
 /// A time of day's offset from the top of the day, px.
-fn top_of(time: NaiveTime) -> f32 {
+pub(super) fn top_of(time: NaiveTime) -> f32 {
     let minutes = u16::try_from(time.hour() * 60 + time.minute()).unwrap_or(0);
     f32::from(minutes) / 60.0 * HOUR
 }
@@ -42,6 +42,36 @@ fn top_of(time: NaiveTime) -> f32 {
 impl EventForm {
     /// The day beside the form.
     pub(super) fn day_view(&self, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
+        let body = div()
+            .id("event-day-hours")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.day_scroll)
+            .child(
+                div()
+                    .flex()
+                    .child(self.gutter(palette, cx))
+                    .child(self.day_column(palette, cx)),
+            );
+        div()
+            .debug_selector(|| "event-day".to_owned())
+            .w(px(440.0))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(palette.border))
+            .bg(rgb(palette.surface))
+            .overflow_hidden()
+            .child(self.day_header(palette, cx))
+            .child(body)
+    }
+
+    /// The day's header (the day and the Scheduler share it): the previous and next days, the event's day, and the
+    /// date's own picker.
+    pub(super) fn day_header(&self, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
         let day = self.day;
         let form = cx.entity().downgrade();
         let date_menu = Button::new("event-day-date")
@@ -70,7 +100,7 @@ impl EventForm {
                     )
                 })
             });
-        let header = div()
+        div()
             .h(px(52.0))
             .px_2()
             .flex()
@@ -99,35 +129,10 @@ impl EventForm {
                     .small()
                     .on_click(cx.listener(move |form, _, _, cx| form.show_day(day + Duration::days(1), cx))),
             ))
-            .child(selected_by("event-day-date", date_menu));
-        let body = div()
-            .id("event-day-hours")
-            .flex_1()
-            .min_h_0()
-            .overflow_y_scroll()
-            .track_scroll(&self.day_scroll)
-            .child(
-                div()
-                    .flex()
-                    .child(self.gutter(palette, cx))
-                    .child(self.day_column(palette, cx)),
-            );
-        div()
-            .debug_selector(|| "event-day".to_owned())
-            .w(px(440.0))
-            .flex_none()
-            .flex()
-            .flex_col()
-            .rounded_lg()
-            .border_1()
-            .border_color(rgb(palette.border))
-            .bg(rgb(palette.surface))
-            .overflow_hidden()
-            .child(header)
-            .child(body)
+            .child(selected_by("event-day-date", date_menu))
     }
 
-    fn gutter(&self, palette: Palette, cx: &App) -> gpui::Div {
+    pub(super) fn gutter(&self, palette: Palette, cx: &App) -> gpui::Div {
         let cycle = clock::cycle(cx);
         div()
             .w(px(GUTTER))

@@ -17,6 +17,7 @@ use time::{OffsetDateTime, UtcOffset};
 use super::sealed::Sealed;
 use super::{Mutating, Wire};
 use crate::endpoint::{Endpoint, Method, Service};
+use crate::recurrence::Recurrence;
 use crate::request::Request;
 
 /// Someone an event invites: their address, their name, and whether they are required.
@@ -135,6 +136,9 @@ pub struct EventDraft {
     pub private: bool,
     /// Its categories, by name.
     pub categories: Vec<String>,
+    /// How it repeats: a series (its creation makes the series' master), else a single event. A change of an
+    /// occurrence leaves it `None` and keeps what the event read has.
+    pub recurrence: Option<Recurrence>,
 }
 
 /// The label the web client gives a Teams meeting's join.
@@ -171,7 +175,8 @@ impl EventDraft {
             "doNotForward": false,
             "endTime": self.end.iso()?,
             "eventTimeZone": self.time_zone.clone().unwrap_or_else(|| "Utc".to_owned()),
-            "eventType": "Single",
+            // what the form's creation names it: a series' master when it repeats (a change keeps the event's own)
+            "eventType": if self.recurrence.is_some() { "RecurringMaster" } else { "Single" },
             "isAllDayEvent": self.all_day,
             "isAppointment": self.attendees.is_empty(),
             "isOrganizer": true,
@@ -200,6 +205,10 @@ impl EventDraft {
         if let Some(name) = &self.organizer.name {
             object.insert("organizerName".to_owned(), json!(name));
         }
+        if let Some(recurrence) = &self.recurrence {
+            object.insert("eventRecurrencePattern".to_owned(), recurrence.pattern.wire());
+            object.insert("eventRecurrenceRange".to_owned(), recurrence.range_wire()?);
+        }
         if self.online {
             object.insert("joinMeetingLabel".to_owned(), json!(JOIN_LABEL));
             object.insert("meetingTemplateId".to_owned(), json!("default"));
@@ -210,13 +219,16 @@ impl EventDraft {
     }
 
     /// `event` (an event as it was read) with this draft's fields over it: what a change sends. The meeting's own
-    /// fields (its join links, its chat) stay as they were read.
+    /// fields (its join links, its chat) and the event's kind (`eventType`: an occurrence stays one, a series' master
+    /// one) stay as they were read, and so does its recurrence unless the draft sets one (a series changed whole).
     #[must_use]
     pub fn over(&self, event: &Map<String, Value>) -> Option<Map<String, Value>> {
         let mut merged = event.clone();
         let mut fields = self.fields()?;
-        if event.contains_key("skypeTeamsData") {
-            fields.remove("skypeTeamsData");
+        for kept in ["skypeTeamsData", "eventType"] {
+            if event.contains_key(kept) {
+                fields.remove(kept);
+            }
         }
         merged.extend(fields);
         Some(merged)
@@ -519,6 +531,7 @@ mod tests {
             reminder_minutes: Some(15),
             private: false,
             categories: Vec::new(),
+            recurrence: None,
         }
     }
 
@@ -576,6 +589,40 @@ mod tests {
             wire.endpoint().query()[0],
             ("isOnlineMeeting".to_owned(), "false".to_owned())
         );
+    }
+
+    #[test]
+    fn a_series_is_created_as_its_master_with_its_recurrence() {
+        use crate::recurrence::{Pattern, Weekday};
+        let mut series = draft();
+        series.recurrence = Some(Recurrence {
+            pattern: Pattern::Weekly {
+                interval: 1,
+                days: vec![Weekday::Friday],
+            },
+            start: ZonedTime {
+                ms: 1_793_307_600_000,
+                offset_minutes: 180,
+            },
+            end: None,
+        });
+        let create = CreateEvent::new(series.clone(), None);
+        let wire = create.wire().expect("a wire form");
+        let event = &wire.body().expect("a body")["calendarEvent"];
+        assert_eq!(event["eventType"], "RecurringMaster");
+        assert_eq!(event["eventRecurrencePattern"]["patternType"], 2);
+        assert_eq!(event["eventRecurrenceRange"]["startDate"], "2026-10-30T00:00:00+03:00");
+        assert_eq!(classified(&create), Contact::Write(create.target()));
+        // a change of one occurrence keeps its kind and the series' recurrence as read
+        let occurrence = object(json!({"objectId": "AAMkOne", "eventType": "Occurrence",
+            "eventRecurrencePattern": {"patternType": 1, "daily": {"interval": 1}}}));
+        let merged = draft().over(&occurrence).expect("merged");
+        assert_eq!(merged["eventType"], "Occurrence");
+        assert_eq!(merged["eventRecurrencePattern"]["patternType"], 1);
+        let master = object(json!({"objectId": "AAMkSeries", "eventType": "RecurringMaster"}));
+        let merged = series.over(&master).expect("merged");
+        assert_eq!(merged["eventType"], "RecurringMaster");
+        assert_eq!(merged["eventRecurrencePattern"]["weekly"]["daysOfTheWeek"], json!([5]));
     }
 
     #[test]

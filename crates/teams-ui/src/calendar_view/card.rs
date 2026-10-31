@@ -184,8 +184,17 @@ impl CalendarView {
         }
         let own = event.is_organizer;
         let meeting = own && !event.attendees.is_empty() && !event.cancelled;
-        let removal = if meeting {
+        // an occurrence's card acts on that occurrence alone, as Teams' card says (its series is changed in the form)
+        let occurrence = matches!(
+            event.kind,
+            teams_core::EventKind::Occurrence | teams_core::EventKind::Exception
+        );
+        let removal = if meeting && occurrence {
+            "Cancel occurrence"
+        } else if meeting {
             "Cancel meeting"
+        } else if own && occurrence {
+            "Delete occurrence"
         } else if own {
             "Delete"
         } else if event.cancelled {
@@ -224,8 +233,12 @@ impl CalendarView {
                         })),
                 )),
             Removal::Asked | Removal::Sending => {
-                let question = if meeting {
+                let question = if meeting && occurrence {
+                    "Cancel this occurrence? Everyone invited gets a cancellation of it; the rest of the series stays."
+                } else if meeting {
                     "Cancel this meeting? Everyone invited gets a cancellation."
+                } else if occurrence && own {
+                    "Delete this occurrence from your calendar? The rest of the series stays."
                 } else {
                     "Delete this event from your calendar?"
                 };

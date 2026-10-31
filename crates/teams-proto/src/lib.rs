@@ -62,8 +62,10 @@ mod http;
 mod own;
 mod post_read;
 mod read;
+mod recurrence;
 mod relay;
 mod request;
+mod schedule;
 mod search;
 mod thumbnail;
 mod urlp;
@@ -110,8 +112,12 @@ pub use read::{
     CSA_TEAMS_PATH, CSA_TEAMS_QUERY, Channel, CsaAnswerError, CsaTeams, GRAPH_PICTURE_SIZE, GRAPH_USER_SELECT,
     GraphAnswerError, GraphPicture, GraphUser, MAX_PICTURE, Picture, PictureFormat, Read, Team, TeamsAnswer, object_id,
 };
+pub use recurrence::{Pattern as RecurrencePattern, Recurrence, WeekIndex, Weekday};
 pub use relay::{RelayAnswer, RelayAnswerError, RelayCredential, RelayTokens};
 pub use request::Request;
+pub use schedule::{
+    AVAILABILITY_DAYS, BusyTime, FreeBusy, FreeBusyAsk, MeetingTimes, PersonSchedule, SUGGESTION_DAYS, Schedules,
+};
 pub use search::{
     ALL_PAGE, Found, FoundChannel, FoundChat, FoundFile, FoundMessage, FoundPerson, PAGE, SUBSTRATE_AUDIENCE,
     SUBSTRATE_HOST, SearchAnswerError, SearchKind, SubstrateSearch, highlighted,

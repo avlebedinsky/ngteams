@@ -164,12 +164,21 @@ pub(crate) fn calendar_view(state: &State, request: &Request) -> Option<Response
 
 /// The scheduling form's requests (`docs/protocol/calendar.md`, "Writing an event"), answered as the service did and
 /// kept nowhere: an event's creation (its body's event back with a made-up id), a change, a cancellation and a delete
-/// (`204`), one event read whole (from the made-up weeks around now), a Teams meeting's online meeting and the time
-/// zone's name. `None` for any other request.
+/// (`204`), one event read whole (from the made-up weeks around now; a made-up series' master with its weekly
+/// recurrence), a Teams meeting's online meeting, the time zone's name, and the Scheduler's free/busy reads (made-up
+/// busy times, and the half hours they leave free). `None` for any other request.
 fn writes(request: &Request, rest: &[String]) -> Option<ResponseTemplate> {
     let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
     let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
     Some(match (request.method.as_str(), rest.as_slice()) {
+        ("PUT", ["v2.0", "me", "calendars", "findMeetingTimes"]) => answer(200, &free_busy::meeting_times(&body)),
+        ("PUT", ["v2.0", "me", "calendars", "schedules"]) => answer(200, &free_busy::schedules(&body)),
+        ("GET", ["v2.0", "me", "calendars", "events", id]) if id.starts_with(SERIES_PREFIX) => {
+            match series_master(&id[SERIES_PREFIX.len()..]) {
+                Some(master) => answer(200, &master),
+                None => status(404),
+            }
+        }
         ("POST", ["v2.0", "me", "calendars", "default", "events"]) => {
             let mut event = body.get("calendarEvent").cloned().unwrap_or_else(|| json!({}));
             event["objectId"] = json!("AAMkMadeUpCreated");
@@ -279,11 +288,173 @@ fn event_json(event: &Planned, index: usize, day: i64) -> Value {
             {"name": "Lab Account A", "address": "a@example.com"},
         ],
     });
+    if let Some(series) = event.series {
+        value["seriesMasterId"] = json!(format!("{SERIES_PREFIX}{series}"));
+    }
     if event.online {
         value["skypeTeamsMeetingUrl"] = Value::String(link);
         value["skypeTeamsData"] = Value::String(json!({"cid": thread, "type": 0}).to_string());
     }
     value
+}
+
+/// The id a made-up series' master has: this, then the series' name.
+const SERIES_PREFIX: &str = "AAMkMadeUpSeries";
+
+/// The master of the made-up series `series`: its first occurrence four weeks before the week around now, with its
+/// weekly recurrence on its weekdays (the model's numbers: Sunday 0).
+fn series_master(series: &str) -> Option<Value> {
+    let (index, planned) = WEEK
+        .iter()
+        .enumerate()
+        .find(|(_, planned)| planned.series == Some(series))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |since| i64::try_from(since.as_millis()).unwrap_or(0));
+    let today = now.div_euclid(DAY_MS) * DAY_MS;
+    let weekday = (today.div_euclid(DAY_MS) + 3).rem_euclid(7);
+    let day = today + (planned.weekday - weekday) * DAY_MS - 28 * DAY_MS;
+    let mut days: Vec<i64> = WEEK
+        .iter()
+        .filter(|other| other.series == Some(series))
+        .map(|other| (other.weekday + 1) % 7)
+        .collect();
+    days.sort_unstable();
+    days.dedup();
+    let mut master = event_json(planned, index, day);
+    master["objectId"] = json!(format!("{SERIES_PREFIX}{series}"));
+    master["eventType"] = json!("RecurringMaster");
+    master["eventRecurrencePattern"] = json!({"patternType": 2, "weekly": {"interval": 1, "daysOfTheWeek": days}});
+    master["eventRecurrenceRange"] = json!({"startDate": iso(day)});
+    master["bodyContentType"] = json!("html");
+    master["bodyContent"] = json!("<div>Made-up notes of the series</div>");
+    if let Some(object) = master.as_object_mut() {
+        object.remove("seriesMasterId");
+    }
+    Some(master)
+}
+
+/// The Scheduler's two reads, answered with made-up busy times.
+mod free_busy {
+    use serde_json::{Value, json};
+
+    use super::{DAY_MS, HOUR_MS, events, iso, iso_ms};
+
+    /// The window a read asks about (`startTime` and `numberOfDays`), and its people by address (the organizer's
+    /// marked).
+    fn window(body: &Value) -> (i64, i64, Vec<(String, bool)>) {
+        let start = body
+            .get("startTime")
+            .and_then(Value::as_str)
+            .and_then(iso_ms)
+            .unwrap_or_default();
+        let days = body
+            .get("numberOfDays")
+            .and_then(Value::as_i64)
+            .unwrap_or(1)
+            .clamp(1, 7);
+        let people = body
+            .get("attendees")
+            .and_then(Value::as_array)
+            .map(|attendees| {
+                attendees
+                    .iter()
+                    .filter_map(|attendee| {
+                        let address = attendee.get("address")?.as_str()?.to_owned();
+                        let organizer = attendee.get("type").and_then(Value::as_str) == Some("Organizer");
+                        Some((address, organizer))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        (start, start + days * DAY_MS, people)
+    }
+
+    /// A made-up attendee's busy times in `[start, end)`: an hour a day from 10:00 UTC (an hour later per place in the
+    /// list), and a tentative half hour at 15:00 UTC for every second one.
+    fn made_up(place: i64, start: i64, end: i64) -> Vec<(i64, i64, &'static str)> {
+        let mut busy = Vec::new();
+        let mut day = start.div_euclid(DAY_MS) * DAY_MS;
+        while day < end {
+            let begins = day + (10 + place) * HOUR_MS;
+            busy.push((begins, begins + HOUR_MS, "Busy"));
+            if place % 2 == 1 {
+                busy.push((day + 15 * HOUR_MS, day + 15 * HOUR_MS + HOUR_MS / 2, "Tentative"));
+            }
+            day += DAY_MS;
+        }
+        busy.retain(|(from, to, _)| *to > start && *from < end);
+        busy
+    }
+
+    /// The organizer's busy times: the made-up week's events (not cancelled) in the window.
+    fn organizer(start: i64, end: i64) -> Vec<(i64, i64, &'static str)> {
+        let time = |value: &Value| iso_ms(&value.as_str()?.replace(".0000000Z", ".000Z"));
+        events(start, end)
+            .iter()
+            .filter(|event| !event["isCancelled"].as_bool().unwrap_or(false))
+            .filter_map(|event| {
+                let status = if event["showAs"] == "Tentative" {
+                    "Tentative"
+                } else {
+                    "Busy"
+                };
+                Some((time(&event["startTime"])?, time(&event["endTime"])?, status))
+            })
+            .collect()
+    }
+
+    fn offset_iso(ms: i64) -> String {
+        iso(ms).replace(".0000000Z", "+00:00")
+    }
+
+    /// `v2.0/me/calendars/schedules`: the organizer's busy times from the made-up week, each attendee's made up.
+    pub(super) fn schedules(body: &Value) -> Value {
+        let (start, end, people) = window(body);
+        let mut place = 0;
+        let entries: Vec<Value> = people
+            .iter()
+            .map(|(address, is_organizer)| {
+                let busy = if *is_organizer {
+                    organizer(start, end)
+                } else {
+                    place += 1;
+                    made_up(place, start, end)
+                };
+                let busy: Vec<Value> = busy
+                    .iter()
+                    .map(|(from, to, status)| {
+                        json!({"freeBusyStatus": status, "startTime": offset_iso(*from),
+                            "endTime": offset_iso(*to), "details": {}})
+                    })
+                    .collect();
+                json!({"userPrincipalName": address, "freeBusyEvents": busy})
+            })
+            .collect();
+        Value::Array(entries)
+    }
+
+    /// `v2.0/me/calendars/findMeetingTimes`: each half hour of the working day (08:00 to 17:00 UTC) no made-up
+    /// attendee is busy at.
+    pub(super) fn meeting_times(body: &Value) -> Value {
+        let (start, end, people) = window(body);
+        let attendees = i64::try_from(people.iter().filter(|(_, organizer)| !organizer).count()).unwrap_or(0);
+        let busy: Vec<(i64, i64, &str)> = (1..=attendees).flat_map(|place| made_up(place, start, end)).collect();
+        let half = HOUR_MS / 2;
+        let mut suggestions = Vec::new();
+        let mut day = start.div_euclid(DAY_MS) * DAY_MS;
+        while day < end {
+            for step in 16..34 {
+                let at = day + step * half;
+                let free = busy.iter().all(|(from, to, _)| at + half <= *from || at >= *to);
+                if free && (start..end).contains(&at) {
+                    suggestions.push(json!({"meetingTime": offset_iso(at), "confidence": 100.0}));
+                }
+            }
+            day += DAY_MS;
+        }
+        json!({ "timeSuggestions": suggestions })
+    }
 }
 
 /// `ms` as the service writes an event's time: UTC with seven fraction digits.

@@ -113,6 +113,15 @@ async fn run(cli: Cli) -> Outcome {
             profile(&lab, &mris, Duration::from_secs(wait), &mut signals, &mut out).await
         }
         Command::Search { query } => search(&lab, &query, &mut out).await,
+        Command::Series { keep, cleanup } => {
+            let handle = lab.start_engine(false).await?;
+            let probed = tokio::select! {
+                probed = teams_headless::series::probe(&handle, now_ms(), keep, cleanup, &mut out) => Some(probed),
+                () = signals.next() => None,
+            };
+            let code = |fine: bool| if fine { ExitCode::SUCCESS } else { ExitCode::FAILURE };
+            finish(handle, probed.map(|probed| probed.map(code)))
+        }
         Command::Availability {
             manual,
             manual_after,
@@ -348,6 +357,7 @@ fn write_action(lab: &Lab, command: Command) -> Result<(Action, Duration), Box<d
         | Command::Presence { .. }
         | Command::Profile { .. }
         | Command::Search { .. }
+        | Command::Series { .. }
         | Command::Availability { .. }
         | Command::Call { .. }
         | Command::Join { .. } => {

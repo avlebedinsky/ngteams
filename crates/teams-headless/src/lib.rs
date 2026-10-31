@@ -1,5 +1,6 @@
 //! `teams-headless`: one lab account's native Teams client from the command line, the M1 core (`teams-core`) without a
-//! UI. `teams-headless <alias> sync|list|show|send|edit|delete|react|read|watch|presence|profile|availability|call`.
+//! UI. `teams-headless <alias> sync|list|show|send|edit|delete|react|read|watch|presence|profile|availability|call|
+//! series`.
 //!
 //! - The fence is [`teams_fence::Fence::open_lab_account`]'s: the roster from `lab.toml` (and the account's own MRI,
 //!   whose own availability alone it permits), every decision in the lab's
@@ -13,7 +14,7 @@
 //!
 //! [`commands`] (and [`availability`], the account's own availability, and [`call`], one call with its media on the
 //! file backend, its tone keyed and found again by [`echo`]) run on any engine and print to any writer;
-//! [`lab`] builds the lab's engine; [`print`] is the output;
+//! [`lab`] builds the lab's engine; [`print`] is the output; [`series`] proves the calendar's series and Scheduler;
 //! [`debug_log`] is an opt-in diagnostic log on stderr (`TEAMS_HEADLESS_LOG=debug`).
 //!
 //! M1 Task 19 (`docs/plans/20261020-native-teams-m1-headless-chat-core.md`).
@@ -27,3 +28,4 @@ pub mod debug_log;
 pub mod echo;
 pub mod lab;
 pub mod print;
+pub mod series;

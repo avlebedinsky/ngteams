@@ -25,6 +25,8 @@ impl Glyph {
     pub const CALENDAR_CANCEL: Self = Self(include_bytes!("../assets/icons/calendar-x.svg"));
     pub const CALENDAR_CLOCK: Self = Self(include_bytes!("../assets/icons/calendar-clock.svg"));
     pub const CALENDAR_DAYS: Self = Self(include_bytes!("../assets/icons/calendar-days.svg"));
+    pub const CALENDAR_RANGE: Self = Self(include_bytes!("../assets/icons/calendar-range.svg"));
+    pub const CALENDAR_SEARCH: Self = Self(include_bytes!("../assets/icons/calendar-search.svg"));
     pub const CALENDAR_TODAY: Self = Self(include_bytes!("../assets/icons/calendar-1.svg"));
     pub const CHECK: Self = Self(include_bytes!("../assets/icons/check.svg"));
     pub const IMAGE: Self = Self(include_bytes!("../assets/icons/image.svg"));

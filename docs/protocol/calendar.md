@@ -47,9 +47,10 @@ enums):
 | `location` | where | text (or an object's `displayName`) |
 | `attendees` | who is invited | each one's name and address, when readable |
 | `isPrivate`, `bodyPreview`, `onlineMeetingConferenceId` | private, the start of its text, the dial-in id | read; the text is shown in the event's card |
+| `seriesMasterId` | an occurrence's or exception's series (its master's id) | the event the scheduling form reads and writes to change the whole series |
 
 Other selected fields (`categories`, `cleanGlobalObjectId`, `iCalUid`, `eventTimeZone`, `lastModifiedTime`,
-`schedulingServiceUpdateUrl`, `seriesMasterId`, `meetingTemplateId`, the dial-in numbers, …) aren't read.
+`schedulingServiceUpdateUrl`, `meetingTemplateId`, the dial-in numbers, …) aren't read.
 
 ## What the native client does with it
 
@@ -84,7 +85,7 @@ operation, `x-ms-client-type: cdlworker`, `x-ms-migration: True`, `x-client-ui-l
   An event carries `local.timeZone` (`TurkeySt` for `Europe/Istanbul`) as its `eventTimeZone`.
 - `PUT v2.0/me/calendars/findMeetingTimes` and `PUT v2.0/me/calendars/schedules` (reads sent as a `PUT`, the people
   asked about and the window in the body): the scheduling assistant's free and busy times, sent as attendees are
-  added. They reach nobody: the lab rule lets them through, and the native client doesn't send them.
+  added. They reach nobody: the lab rule lets them through. Their shapes are under "The Scheduler" below.
 - `GET v2.0/me/calendars/masterCategories` (a read): the account's categories, `[{"id", "displayName", "color"}]` (a
   new mailbox has Outlook's six, red to purple).
 
@@ -137,6 +138,61 @@ Meeting"`).
 The bundle also names an event's forward, an answer to an invitation (`…/respond`), a channel meeting's writes and a
 webinar's; none was captured, and the native client sends none.
 
+### A series
+
+Written from the bundle (its scheduling form, its recurrence model and the other callers that build an event), and
+checked live on 2026-10-31 by the native client (`teams-headless a series`: an appointment series of lab account a's
+own, weekly, three weeks): the creation in the form below was answered with a 2xx and the master (`eventType`
+`RecurringMaster`); the calendar view then gave its four occurrences (`Occurrence`, each with `seriesMasterId`); the
+master read whole gave the recurrence back by names (`{"patternType": "Weekly", "weekly": {"daysOfTheWeek":
+["Sunday"], "interval": 1}}`) and the range as written (`{"startDate": "2026-11-01T00:00:00+00:00", "endDate":
+"2026-11-22T00:00:00+00:00"}`), beside `recurrencePattern` and `recurrenceEnd`. An appointment (nobody invited) reads
+back with no `attendees` key at all. A repeating event is one more pair of fields on the event the creation and the
+change send:
+
+- `eventRecurrencePattern`: `{"patternType": <n>, "<kind>": {…}}`, the pattern types numbered as the model numbers
+  them (1 daily, 2 weekly, 3 monthly, 4 relative monthly, 5 yearly, 6 relative yearly; 0 none) and the kind's object
+  beside it: `daily: {interval}`, `weekly: {interval, daysOfTheWeek: [<day>…]}` (0 Sunday to 6 Saturday),
+  `monthly: {interval, dayOfMonth}`, `relativeMonthly: {interval, dayOfTheWeek, dayOfTheWeekIndex}` (0 first to 4
+  last), `yearly: {month, dayOfTheMonth}` (month 1 to 12), `relativeYearly: {month, dayOfTheWeek,
+  dayOfTheWeekIndex}`. A read may give the same values as names or as numbers in strings (the web client turns them
+  into numbers as it reads them).
+- `eventRecurrenceRange`: `{"startDate", "endDate"?}`, the series' first day as its local midnight in ISO with its
+  offset (`2026-10-27T00:00:00+03:00`, date-fns' `formatISO` of the start's day), and its last day the same way when
+  it ends (none: it never ends).
+- `eventType`: the form names a new event `RecurringMaster` when it has both fields, else `Single`; a change keeps the
+  event's own.
+
+The form's repeat drop-down offers Does not repeat, Every weekday (Mon - Fri) (weekly on Monday to Friday), Daily,
+Weekly (on the start's weekday), Monthly (relative: the start's weekday of its week of the month, the last when the
+start is in the month's last seven days), Yearly (the start's month and day) and Custom (its own dialog: repeat every
+n days, weeks on chosen days, months on a day or a weekday, years; an end date). A preset's range starts on the
+start's day and never ends.
+
+The calendar view gives a series as its occurrences (`eventType` `Occurrence`, or `Exception` for one changed on its
+own), each naming its series by `seriesMasterId`. A change, a cancellation or a delete of the occurrence's own id acts
+on that occurrence; of the master's id, on the whole series (the master read whole first, `GET
+v2.0/me/calendars/events/<master id>`, which carries the recurrence). The fence judges each by the event the path
+names, as any change.
+
+### The Scheduler
+
+Captured in `ab-meeting` (2026-10-30, the web client's form as attendees were added): the two free/busy reads, sent
+as a `PUT` on the middle tier with the same body, `{"attendees": [<attendee>…, <organizer>], "minimumSuggestionQuality":
+"Good", "numberOfDays", "requestType", "startDate", "startTime", "startDateTimeZone": "Utc",
+"meetingDurationInMinutes", "endTime"}`: each attendee as the event lists it (`{"type": "Required"|"Optional",
+"address", "name", "mri", "role": "Admin"}`), the organizer last (`"type": "Organizer"`); `startDate` and `startTime`
+the local midnight of the form's day in UTC with milliseconds, `endTime` that and `numberOfDays` days; the meeting's
+length in minutes.
+
+- `PUT v2.0/me/calendars/findMeetingTimes` with `requestType: "SuggestedTimesOnly"` and two days: `200` with
+  `{"timeSuggestions": [{"meetingTime": "2026-10-30T05:00:00+00:00", "confidence": 100.0}…]}`, the starts every
+  attendee is free at for the meeting's length, every half hour.
+- `PUT v2.0/me/calendars/schedules` with `requestType: "AttendeeAvailabilityOnly"` and five days: `200` with
+  `[{"userPrincipalName", "timeZone"?, "timeZoneOffset"?, "timeZoneName"?, "freeBusyEvents": [{"freeBusyStatus":
+  "Busy"|"Tentative"|…, "startTime", "endTime", "details": {"subject"?, "location"?, "isPrivate"?}}]}]`, one entry
+  per person asked about; the details (and the time zone) only for the account's own calendar.
+
 ### What the fence makes of them
 
 Each write is a `WriteKind::Meeting` (`crates/teams-fence/src/contacting/calendar.rs`), judged by whom it reaches,
@@ -161,5 +217,12 @@ each attendee by its address (`Mri::mail`, matched against `lab.toml`'s UPNs):
   plain request) and carries it. The engine fills in the organizer (the account's MRI, its profile's address, its
   name) and the time zone (`TimeZoneSettings`, from `TZ` or `/etc/localtime`), each read once a run.
 - A change sends the event as `EventRead` gave it with the form's fields over it, so what the form doesn't show goes
-  back as it came; a Teams meeting stays one.
-- It sends neither the scheduling assistant's reads nor the online meeting's delete.
+  back as it came; a Teams meeting stays one, an occurrence one and a series' master one.
+- **A series** (`crates/teams-ui/src/event_form/repeat.rs`, `teams-proto`'s `Recurrence`): the form's Series makes a
+  new event repeat; an occurrence's change edits that occurrence, or the whole series once Series is picked (its
+  master read and changed by its id). The form's text is the app's rich-text editor, sent as the HTML it writes for a
+  message; an event's own text goes back as it came while it isn't edited.
+- **The Scheduler** (`crates/teams-ui/src/event_form/scheduler.rs`): both free/busy reads (`teams-proto`'s
+  `MeetingTimes` and `Schedules`, plain requests) for the form's day, sent together when it shows the Scheduler or
+  names attendees, and again as the day, the attendees or the length change.
+- It never sends the online meeting's delete.
