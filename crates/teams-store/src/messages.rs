@@ -275,28 +275,41 @@ pub(crate) fn upsert(
     reactions: Option<&[Reaction]>,
 ) -> Result<Applied, StoreError> {
     Store::require_conversation(conn, &message.conversation_id)?;
-    let stored: Option<i64> = conn
+    let stored: Option<(i64, bool)> = conn
         .query_row(
-            "SELECT version FROM messages WHERE conversation_id = ?1 AND id = ?2",
+            "SELECT version, delete_time IS NOT NULL FROM messages WHERE conversation_id = ?1 AND id = ?2",
             params![message.conversation_id, message.id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
     let applied = match stored {
         None => Applied::Inserted,
-        Some(version) if message.version > version => Applied::Updated,
+        Some((version, _)) if message.version > version => Applied::Updated,
         Some(_) => Applied::Ignored,
     };
     if applied != Applied::Ignored {
         write_message(conn, message)?;
     }
-    let reactions = if message.delete_time.is_some() {
+    let deleted = if applied == Applied::Ignored {
+        stored.is_some_and(|(_, deleted)| deleted)
+    } else {
+        message.delete_time.is_some()
+    };
+    let reactions = if deleted || message.delete_time.is_some() {
         Some(&[][..])
     } else {
         reactions
     };
     if let Some(reactions) = reactions {
         merge_reactions(conn, message, reactions)?;
+    }
+    if deleted {
+        // Deletion is decided by the stored body, independently of reaction clocks. Keep the facts as tombstones
+        // so a newer nondeleted body cannot revive them through an older reaction snapshot.
+        conn.execute(
+            "UPDATE reactions SET present = 0 WHERE conversation_id = ?1 AND message_id = ?2 AND present = 1",
+            params![message.conversation_id, message.id],
+        )?;
     }
     Ok(applied)
 }
@@ -307,12 +320,14 @@ impl Store {
     /// reactions.
     ///
     /// `reactions`, when given, is the message's whole reaction set as of its `version` (the chat service's time of
-    /// the change, in milliseconds, on the clock reaction times use). It is merged per user, like a
-    /// [`ReactionChange`] for each reaction in it and a removal for each stored one not in it, all at that version:
-    /// a stored change that is later stays, and a reaction left out stays absent against a later-arriving older
-    /// change, so a set and the per-user changes leave the same rows in whichever order they arrive. A stale
+    /// the change, in milliseconds, on the clock reaction times use). For a live stored message it is merged per
+    /// user, like a [`ReactionChange`] for each reaction in it and a removal for each stored one not in it, all at
+    /// that version: a stored change that is later stays, and a reaction left out stays absent against a later-arriving
+    /// older change, so a set and the per-user changes leave the same rows in whichever order they arrive. A stale
     /// version's set is merged too and changes only what is older than it. When not given, the stored reactions
-    /// stay.
+    /// stay. If the effective stored message is deleted, any incoming set is ignored and every reaction is cleared,
+    /// regardless of its change time. Cleared rows retain their change times to order later sets if the message is
+    /// restored.
     ///
     /// # Errors
     ///

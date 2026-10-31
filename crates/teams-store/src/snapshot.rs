@@ -53,6 +53,10 @@ fn wal_of(source: &Path) -> PathBuf {
 
 /// One `VACUUM INTO` from `source`, opened read-only (and `immutable` when asked) to `dest`.
 fn copy(source: &Path, dest: &Path, immutable: bool) -> Result<(), StoreError> {
+    // A lossy conversion could name a different database instead of the requested source.
+    let source = source
+        .to_str()
+        .ok_or(rusqlite::Error::InvalidPath(source.to_path_buf()))?;
     let mut uri = format!("file:{}?mode=ro", uri_path(source));
     if immutable {
         uri.push_str("&immutable=1");
@@ -73,9 +77,9 @@ fn intact(path: &Path) -> Result<bool, StoreError> {
 }
 
 /// `path` as a URI's path: the characters a URI gives a meaning (`%`, `?`, `#`) escaped.
-fn uri_path(path: &Path) -> String {
+fn uri_path(path: &str) -> String {
     let mut text = String::new();
-    for character in path.to_string_lossy().chars() {
+    for character in path.chars() {
         match character {
             '%' => text.push_str("%25"),
             '?' => text.push_str("%3f"),

@@ -176,6 +176,7 @@ fn one_descriptor_named_for_both_the_broker_and_the_trace_is_refused_before_eith
     let output = Command::new(BINARY)
         .args(["--lab", "a", "--secrets-fd", "3", "--trace-fd", "3"])
         .env_clear()
+        .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|value| ("LLVM_PROFILE_FILE", value)))
         .env("HOME", home.path())
         .output()?;
     assert_eq!(output.status.code(), Some(1), "{output:?}");
@@ -193,6 +194,7 @@ fn an_account_given_twice_is_refused_before_any_descriptor_is_taken() -> TestRes
     let output = Command::new(BINARY)
         .args(["--lab", "a", "--secrets-fd", "3", "--lab", "a", "--secrets-fd", "4"])
         .env_clear()
+        .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|value| ("LLVM_PROFILE_FILE", value)))
         .env("HOME", home.path())
         .output()?;
     assert_eq!(output.status.code(), Some(1), "{output:?}");
@@ -215,6 +217,7 @@ fn a_build_with_test_support_refuses_to_run_before_it_touches_the_lab() -> TestR
     let output = Command::new(BINARY)
         .args(["--lab", "a", "--secrets-fd", &fd])
         .env_clear()
+        .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|value| ("LLVM_PROFILE_FILE", value)))
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", home.path().join("config"))
         .env("XDG_DATA_HOME", home.path().join("data"))

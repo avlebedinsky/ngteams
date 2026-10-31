@@ -175,3 +175,25 @@ fn a_log_not_written_is_said_and_a_missing_file_has_no_lines() {
     );
     assert!(report.text.contains("== fence.log: the last 0 line(s) =="));
 }
+
+#[test]
+fn an_unreadable_log_is_reported_without_losing_the_other_section() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut source = source(&dir, "", &fence_lines(1));
+    // Opening a directory succeeds on Unix, but reading it as a file fails independently of permission or uid.
+    source.log_file = Some(dir.path().to_owned());
+
+    let report = source.collect_with(LevelState {
+        level: Level::Info,
+        overridden: false,
+    });
+
+    assert!(!report.has_debug);
+    assert!(report.text.contains("== the log: can't be read ("), "{}", report.text);
+    assert!(
+        report.text.contains("== fence.log: the last 1 line(s) =="),
+        "{}",
+        report.text
+    );
+    assert!(report.text.contains(r#""ts_ms":0,"#), "{}", report.text);
+}

@@ -777,6 +777,78 @@ cargo test -p fixture-guard   # what's under any tests/fixtures/ or docs/
 The whole workspace (`cargo clippy --workspace --all-targets --all-features -- -D warnings`, `cargo test
 --workspace`) is the widest check.
 
+### Coverage
+
+Install `cargo-llvm-cov` (`cargo install cargo-llvm-cov --locked`) and the pinned Rust toolchain's LLVM tools
+(`rustup component add llvm-tools-preview`). The reporting helper requires Python 3.11 or newer; the wrapper uses
+Bash and `flock`. Run a selected crate's tests and local coverage gate with:
+
+```sh
+scripts/coverage.sh -p teams-store
+scripts/coverage.sh -p teams-store --require-target   # require 90% on every measured metric
+scripts/coverage.sh -p teams-log --no-gate            # measure a crate before establishing its baseline
+scripts/coverage.sh -p teams-log --test-threads 3     # explicitly change test-harness concurrency
+scripts/coverage.sh -p teams-log --profile-mode ordinary  # diagnostic exit-time profiling
+scripts/coverage.sh --webrtc-cache /absolute/path/to/linux-x64-release  # reuse a matching SDK
+python3 -B -m unittest discover -s scripts -p test_coverage_report.py
+```
+
+Coverage runs every selected test with `--test-threads 1` by default. Overlapping harness cases can fork while
+another case still holds a generated fake-browser script open for writing, causing `ExecutableFileBusy` when it
+starts. Serial execution avoids that overlap in coverage runs; ordinary `cargo test` keeps its configured harness
+concurrency. `--test-threads N` accepts a positive integer to change the harness concurrency; concurrency exercised
+inside a test stays part of that test.
+
+`coverage.toml` holds the 90% target and the measured baseline floors. `teams-store`, `teams-log`, `fixture-guard`,
+`teams-trouter`, `teams-call` and `teams-auth` have baselines so far;
+other crates fail the gate until measured. Raise floors as tests improve; never lower them or exclude runnable code
+to pass. No CI pipeline is configured in this repository, so these are local gates. Running the script without
+`-p` selects all 21 crates with runtime code, including the lab and test-support tooling. Generated WPE bindings,
+the standalone video spike and `fence-seal` (a compile-test harness with a documentation-only library) are excluded.
+`fence-seal`'s compile checks still run through the normal test gate. Third-party code and tests outside `src/` do
+not enter the totals.
+
+Baseline floors are measured and validated with one `-p <crate>` alone. Combined runs also count hits from dependent
+crates' tests, so use them to find gaps; their higher totals cannot establish or validate an individual crate's floor.
+
+On Linux the wrapper uses LLVM continuous profiling with counter relocation and `%p-%m%c.profraw`, verified on the
+pinned Rust toolchain. Counters stay in a mapped profile when a sandbox worker is killed, so its executed code still
+counts. Existing `RUSTFLAGS` or the higher-precedence `CARGO_ENCODED_RUSTFLAGS` are preserved when adding relocation.
+See [LLVM's continuous profiling documentation](https://clang.llvm.org/docs/SourceBasedCodeCoverage.html#running-the-instrumented-program).
+`--profile-mode ordinary` selects exit-time profiling for diagnostics; killed workers can lose their counters in that
+mode. Other platforms default to ordinary mode; continuous mode is verified and accepted only on Linux.
+
+Continuous reports go to `target/coverage/continuous/<selection>/llvm.json` and `summary.json`, with instrumented builds
+in `target/coverage-continuous-build`. Ordinary mode keeps separate reports in `target/coverage/<selection>/` and builds
+in `target/coverage-build`. One crate uses its name, the full workspace uses `all`, and long partial selections use a
+short hash. The summary records every selected package and ranks source files by uncovered lines, functions and regions.
+Measurements serialize on one lock across both modes. `--webrtc-cache DIR` passes an existing SDK with `include/` and
+`lib/libwebrtc.a` to the upstream build as `LK_CUSTOM_WEBRTC`; relative paths resolve from the caller's directory.
+Choose the SDK version and platform matching the locked dependency. The wrapper does not select or download an SDK
+itself, and preserves an existing `LK_CUSTOM_WEBRTC` when this option is absent. `--report-only` rechecks the selected
+mode's existing export without running tests; use a fresh measurement for change validation. Every executable selected
+`src/**/*.rs` must appear in the LLVM export, including
+zero-hit files: missing files fail even with `--no-gate`, so omitted feature-gated code cannot silently inflate
+coverage. `coverage.toml` lists individually reviewed declaration/type-only files and separate unit-test modules that
+LLVM does not map because `cargo-llvm-cov` filters test filenames such as `tests.rs`. Each entry records its SHA-256
+and reason; test modules also pin the file that includes them under `cfg(test)`. A macro invocation whose executable
+bodies are mapped at its definition pins that definition's file, which remains required in the report. A content
+change invalidates the review and fails the report until inspected again. The summary lists these audited unmapped
+files explicitly. If LLVM supplies a mapping for one, its counts still contribute to the totals; the review never
+discards reported executable code.
+
+Stable Rust supplies line, function and region coverage here; regions are not statements or branches. Inline unit
+test functions in `src/` also appear in LLVM's source totals. This first measurement uses default features and the
+features enabled by development dependencies, not a merged feature matrix. Code behind `personal`, `test-support`
+or other optional features still needs appropriate mock-backed variant measurements before claiming full coverage.
+The wrapper never enables `live` and removes live-test and external TURN-server environment variables. Browser and
+GUI tests need the local dependencies below; the wrapper sets `PROTO_LAB_REQUIRE_CHROME=1 GPUI_SMOKE_REQUIRE=1`
+so missing dependencies fail rather than skip tests. Never run tenant activity for coverage.
+
+The automatic `teams-auth` private-keyring test requires `/usr/bin/dbus-run-session`, `/usr/bin/gnome-keyring-daemon`
+and `/usr/bin/kill`. It starts a private bus and keyring service with temporary HOME/XDG directories, without using
+the desktop keyring. The separate manual user-keyring test remains ignored by default.
+
 `cargo test --workspace` is offline: the native client is tested against `teams-mock` (two or three native clients
 talking through it), the browser fence against local pages in Chrome. The fence suite alone: `cargo test -p
 teams-fence -p teams-proto -p fence-seal -p teams-trouter` plus `cargo test -p proto-lab --test fence_http --test

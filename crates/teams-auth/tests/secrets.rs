@@ -6,7 +6,9 @@
 
 use std::fmt::Debug;
 
-use teams_auth::secrets::{KeyringSecretStore, MemorySecretStore, Secret, SecretError, SecretKey, SecretStore};
+use teams_auth::secrets::{
+    KeyringSecretStore, LazyKeyring, MemorySecretStore, OverlaySecretStore, Secret, SecretError, SecretKey, SecretStore,
+};
 
 const SPACES: &str = "https://api.spaces.skype.com";
 const SKYPETOKEN: &str = "skypetoken";
@@ -179,6 +181,110 @@ fn a_key_shows_its_account_and_audience() {
     let key = key("a@lab.example.com", SPACES);
     assert_eq!(key.account(), "a@lab.example.com");
     assert_eq!(key.audience(), SPACES);
+}
+
+#[tokio::test]
+async fn overlay_reads_untouched_keys_and_never_changes_the_underlying_store() {
+    let original = MemorySecretStore::new();
+    put(&original, "a", SPACES, "original-a").await.unwrap();
+    put(&original, "a", SKYPETOKEN, "original-skype").await.unwrap();
+    put(&original, "b", SPACES, "original-b").await.unwrap();
+    let overlay = OverlaySecretStore::new(original);
+    assert_eq!(
+        value(&overlay, "a", SPACES).await.unwrap().as_deref(),
+        Some("original-a")
+    );
+    exercise(&overlay, "synthetic-overlay").await.unwrap();
+    put(&overlay, "a", SPACES, PLANTED).await.unwrap();
+    assert_eq!(value(&overlay, "a", SPACES).await.unwrap().as_deref(), Some(PLANTED));
+    assert_eq!(
+        value(overlay.inner(), "a", SPACES).await.unwrap().as_deref(),
+        Some("original-a")
+    );
+    overlay.delete(&key("a", SKYPETOKEN)).await.unwrap();
+    assert!(value(&overlay, "a", SKYPETOKEN).await.unwrap().is_none());
+    assert_eq!(
+        value(overlay.inner(), "a", SKYPETOKEN).await.unwrap().as_deref(),
+        Some("original-skype")
+    );
+    assert_eq!(
+        value(&overlay, "b", SPACES).await.unwrap().as_deref(),
+        Some("original-b")
+    );
+    assert!(
+        value(overlay.inner(), "synthetic-overlay", SPACES)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let shown = format!("{overlay:?}");
+    assert!(!shown.contains(PLANTED), "{shown}");
+    assert!(!shown.contains("original-a"), "{shown}");
+}
+
+#[tokio::test]
+async fn overlay_tombstones_hide_later_inner_changes_and_can_be_replaced() {
+    let overlay = OverlaySecretStore::new(MemorySecretStore::new());
+    let deleted = key("a", SPACES);
+    overlay.delete(&deleted).await.unwrap();
+    overlay
+        .inner()
+        .put(&deleted, &Secret::new("later-inner-value"))
+        .await
+        .unwrap();
+    assert!(overlay.get(&deleted).await.unwrap().is_none());
+    overlay.delete(&deleted).await.unwrap();
+    overlay.put(&deleted, &Secret::new("replacement")).await.unwrap();
+    assert_eq!(overlay.get(&deleted).await.unwrap().unwrap().expose(), "replacement");
+    assert_eq!(
+        overlay.inner().get(&deleted).await.unwrap().unwrap().expose(),
+        "later-inner-value"
+    );
+    overlay.delete(&deleted).await.unwrap();
+    assert!(overlay.get(&deleted).await.unwrap().is_none());
+}
+
+#[derive(Default)]
+struct UnavailableStore(std::sync::atomic::AtomicUsize);
+
+impl SecretStore for UnavailableStore {
+    fn put(&self, _key: &SecretKey, _secret: &Secret) -> impl Future<Output = Result<(), SecretError>> + Send {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::future::ready(Err(SecretError::NotUtf8))
+    }
+
+    fn get(&self, _key: &SecretKey) -> impl Future<Output = Result<Option<Secret>, SecretError>> + Send {
+        std::future::ready(Err(SecretError::NotUtf8))
+    }
+
+    fn delete(&self, _key: &SecretKey) -> impl Future<Output = Result<(), SecretError>> + Send {
+        self.0.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        std::future::ready(Err(SecretError::NotUtf8))
+    }
+}
+
+#[tokio::test]
+async fn overlay_preserves_read_errors_but_answers_its_own_changes_without_the_backend() {
+    let overlay = OverlaySecretStore::new(UnavailableStore::default());
+    let changed = key("a", SPACES);
+    assert!(matches!(overlay.get(&changed).await, Err(SecretError::NotUtf8)));
+    overlay.put(&changed, &Secret::new(PLANTED)).await.unwrap();
+    assert_eq!(overlay.get(&changed).await.unwrap().unwrap().expose(), PLANTED);
+    assert!(matches!(
+        overlay.get(&key("b", SPACES)).await,
+        Err(SecretError::NotUtf8)
+    ));
+    overlay.delete(&changed).await.unwrap();
+    assert!(overlay.get(&changed).await.unwrap().is_none());
+    assert_eq!(overlay.inner().0.load(std::sync::atomic::Ordering::Relaxed), 0);
+}
+
+#[test]
+fn lazy_keyring_construction_and_debug_do_not_connect() {
+    let store = LazyKeyring::new("synthetic-unconnected-store");
+    assert!(!store.connected());
+    assert!(format!("{store:?}").contains("synthetic-unconnected-store"));
+    assert!(!store.connected());
 }
 
 #[tokio::test]
