@@ -46,11 +46,12 @@ fn diagnostics_before_installation_use_the_setting() {
     assert!(!before.has_debug);
 }
 
-fn diagnostics_after_installation_flush_records_at_the_effective_level(logger: &teams_log::FileLog) {
+fn diagnostics_after_installation_show_records_at_the_effective_level(logger: &teams_log::FileLog) {
     log::warn!(target: "teams_core::test", "synthetic warning before collection");
     log::debug!(target: "teams_core::test", "synthetic debug that stays filtered");
 
-    // Callers collect diagnostics directly, without explicitly flushing the logger first.
+    // This checks the caller-visible report with a running writer. The writer may already have consumed the
+    // warning, so it does not isolate collect's flush; file.rs tests acknowledgement with the writer held.
     let report = source(Some(logger.path().to_owned())).collect(Level::Debug);
 
     assert!(
@@ -69,7 +70,7 @@ fn diagnostics_after_installation_flush_records_at_the_effective_level(logger: &
 }
 
 #[test]
-fn diagnostics_use_the_setting_until_install_then_the_effective_level_and_flushed_records() {
+fn diagnostics_use_the_setting_until_install_then_the_effective_level_and_current_records() {
     let dir = tempfile::tempdir().expect("tempdir");
     diagnostics_before_installation_use_the_setting();
     let config = Config {
@@ -83,11 +84,12 @@ fn diagnostics_use_the_setting_until_install_then_the_effective_level_and_flushe
     assert_eq!(logger.level(), Level::Warn);
     assert_eq!(apply_setting(Level::Debug), Some(Level::Warn));
     assert_eq!(log::max_level(), log::LevelFilter::Warn);
-    diagnostics_after_installation_flush_records_at_the_effective_level(logger);
+    diagnostics_after_installation_show_records_at_the_effective_level(logger);
 
     log::warn!(target: "teams_core::test", "synthetic warning before facade flush");
     log::logger().flush();
-    let text = fs::read_to_string(logger.path()).expect("the facade flush wrote the queued warning");
+    // The facade's end-to-end result is checked here; the writer may have consumed the record before the call.
+    let text = fs::read_to_string(logger.path()).expect("read the current records after the facade flush");
     assert!(text.contains("synthetic warning before facade flush"), "{text}");
 
     let error = install(&config).expect_err("the successful installation remains exclusive");

@@ -250,6 +250,33 @@ fn only_our_crates_records_at_the_level_that_applies_reach_the_file() {
 }
 
 #[test]
+fn a_flush_requires_the_writers_acknowledgement_and_recovers_after_a_timeout() {
+    let dir = tempfile::tempdir().unwrap();
+    let config = config(dir.path(), Level::Info, None);
+    let (sink, paused) = Sink::open_paused(&config.dir, "teams-app.log", config.rotation, 2).unwrap();
+    let log = FileLog::with_sink(sink, &config);
+    record(&log, LogLevel::Warn, "teams_core::test", "synthetic queued warning");
+
+    // The writer cannot consume either the record or the flush request until it is explicitly resumed.
+    assert!(
+        !log.flush_written(),
+        "a held writer cannot acknowledge the queued record"
+    );
+    assert_eq!(fs::read_to_string(log.path()).unwrap(), "");
+    assert_eq!(log.dropped(), 0);
+
+    paused.resume();
+    assert!(
+        log.flush_written(),
+        "the writer recovers after the earlier request timed out"
+    );
+    let text = fs::read_to_string(log.path()).unwrap();
+    assert_eq!(text.lines().count(), 1, "{text}");
+    assert!(text.contains("synthetic queued warning"), "{text}");
+    assert_eq!(log.dropped(), 0);
+}
+
+#[test]
 fn the_settings_level_changes_live_unless_teams_app_log_overrides_it() {
     let dir = tempfile::tempdir().unwrap();
     let log = FileLog::open(&config(dir.path(), Level::Warn, None)).unwrap();
