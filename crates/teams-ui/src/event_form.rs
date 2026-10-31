@@ -278,6 +278,8 @@ pub struct EventForm {
     categories: Vec<String>,
     /// The suggestions under an attendee box, for that box.
     suggestions: Option<(Need, Vec<Invitable>)>,
+    /// What the box said when the suggestions were found: Enter takes the first only while it still says that.
+    suggested_for: String,
     suggesting: Option<Task<()>>,
     /// The day beside the form, and its events once read.
     day: NaiveDate,
@@ -369,6 +371,7 @@ impl EventForm {
             private: false,
             categories: Vec::new(),
             suggestions: None,
+            suggested_for: String::new(),
             suggesting: None,
             day: now.date(),
             day_events: Rc::default(),
@@ -655,10 +658,12 @@ impl EventForm {
         let text = input.read(cx).value().to_string();
         match event {
             InputEvent::PressEnter { .. } => {
+                // suggestions found for what the box said before belong to someone else
+                let current = self.suggested_for == text.trim();
                 let first = self
                     .suggestions
                     .as_ref()
-                    .filter(|(for_need, _)| *for_need == need)
+                    .filter(|(for_need, _)| current && *for_need == need)
                     .and_then(|(_, found)| found.first().cloned());
                 if let Some(person) = first {
                     self.invite_person(&person, need, window, cx);
@@ -773,9 +778,10 @@ impl EventForm {
         cx.notify();
     }
 
-    /// Whether the form may send anything: not in the read-only mode, not while a save is under way.
+    /// Whether the form may send anything: not in the read-only mode, not while a save is under way, not while the
+    /// series chosen is still being read (the form still holds the occurrence).
     fn may_write(&self) -> bool {
-        !self.core.read_only() && self.saving.is_none()
+        !self.core.read_only() && self.saving.is_none() && self.series_read.is_none()
     }
 
     /// Save (or Send, Send update): the event created or changed, through the engine.
@@ -1987,11 +1993,7 @@ impl Render for EventForm {
             .on_mouse_move(cx.listener(Self::dragged))
             .on_mouse_up(
                 gpui::MouseButton::Left,
-                cx.listener(|form, _, _, cx| {
-                    if form.drag.take().is_some() {
-                        cx.notify();
-                    }
-                }),
+                cx.listener(|form, _, _, cx| form.end_drag(cx)),
             )
             .child(self.toolbar(palette, cx))
             .child(div().flex_1().min_h_0().flex().gap_4().child(left).child(side))

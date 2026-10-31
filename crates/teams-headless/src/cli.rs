@@ -116,10 +116,6 @@ pub enum Command {
         #[arg(long = "mri", value_name = "MRI")]
         mris: Vec<String>,
     },
-    /// People's names as the engine looks them up (Graph's user record, then the middle tier's profile lookup, a read
-    /// sent as a `POST`, for a name Graph doesn't give), by MRI, whoever they are; prints `profile <alias or MRI>
-    /// <source>` per person: where the name the engine has came from (`graph`, `short_profile`, `message`, `known`,
-    /// or `none`), never the name. Reads only.
     /// Proves the scheduling form's series and Scheduler with an appointment series of the account's own, which invites
     /// nobody (`series.rs`): creates a weekly series from tomorrow, reads it back and prints its recurrence, reads the
     /// account's free and busy times, then deletes the series (unless `--keep`; `--cleanup` deletes what a run left).
@@ -138,6 +134,10 @@ pub enum Command {
         /// What to search for.
         query: String,
     },
+    /// People's names as the engine looks them up (Graph's user record, then the middle tier's profile lookup, a read
+    /// sent as a `POST`, for a name Graph doesn't give), by MRI, whoever they are; prints `profile <alias or MRI>
+    /// <source>` per person: where the name the engine has came from (`graph`, `short_profile`, `message`, `known`,
+    /// or `none`), never the name. Reads only.
     Profile {
         /// Their MRIs (`8:orgid:…`).
         #[arg(required = true, value_name = "MRI")]

@@ -36,6 +36,7 @@ impl EventForm {
                 // an answer to what the box no longer says is dropped
                 if input.read(cx).value().trim() == query {
                     form.suggestions = Some((need, people));
+                    form.suggested_for = query;
                     cx.notify();
                 }
             });

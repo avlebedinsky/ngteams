@@ -320,8 +320,7 @@ impl EventForm {
     pub(super) fn dragged(&mut self, event: &MouseMoveEvent, _: &mut Window, cx: &mut Context<Self>) {
         let Some(drag) = self.drag else { return };
         if event.pressed_button != Some(MouseButton::Left) {
-            self.drag = None;
-            cx.notify();
+            self.end_drag(cx);
             return;
         }
         let moved = f32::from(event.position.y - drag.from) / HOUR * 60.0;
@@ -336,6 +335,19 @@ impl EventForm {
             self.slot = slot;
             cx.notify();
         }
+    }
+
+    /// The drag ended: where it left the event is set as a slot picked anywhere else is (the series moved with it,
+    /// the free and busy times read again for the new times).
+    pub(super) fn end_drag(&mut self, cx: &mut Context<Self>) {
+        let Some(drag) = self.drag.take() else { return };
+        let slot = self.slot;
+        if slot == drag.slot {
+            cx.notify();
+            return;
+        }
+        self.slot = drag.slot;
+        self.set_slot(slot, cx);
     }
 }
 

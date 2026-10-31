@@ -94,7 +94,7 @@ pub(crate) struct Calendar<C, T> {
 }
 
 /// What an event the account writes says of the account: its address (its profile's) and its time zone as Exchange
-/// names it, each read once a run.
+/// names it, each kept once read; one that didn't read is asked again at the next write.
 #[derive(Clone, Debug, Default)]
 struct Whom {
     address: Option<String>,
@@ -240,6 +240,7 @@ where
         let whom = Arc::clone(&self.whom);
         tokio::task::spawn_local(async move {
             let kind = write.kind();
+            let creates = matches!(write, EventWrite::Create(_));
             let me = outbox.me().clone();
             let write = match write {
                 EventWrite::Create(draft) => EventWrite::Create(complete(&client, &whom, &me, draft).await),
@@ -277,13 +278,13 @@ where
                 },
             };
             let _ = reply.send(answer.map(|body| EventWritten {
-                created: (kind == "creation").then(|| CalendarEvent::created(&body)).flatten(),
+                created: creates.then(|| CalendarEvent::created(&body)).flatten(),
             }));
         });
     }
 }
 
-/// `draft` with the account as its organizer and its time zone, as read once a run ([`Whom`]).
+/// `draft` with the account as its organizer and its time zone, as read ([`Whom`]).
 async fn complete<C: Credentials + 'static>(
     client: &Client<HttpTransport<C>>,
     whom: &Mutex<Option<Whom>>,
@@ -296,22 +297,29 @@ async fn complete<C: Credentials + 'static>(
     draft
 }
 
-/// What the account's events say of it ([`Whom`]), read the first time it is asked for.
+/// What the account's events say of it ([`Whom`]): each part read the first time it is asked for, and again while it
+/// didn't read (a failed read isn't kept for the run).
 async fn known<C: Credentials + 'static>(
     client: &Client<HttpTransport<C>>,
     whom: &Mutex<Option<Whom>>,
     me: &Author,
 ) -> Whom {
-    let known = whom.lock().unwrap_or_else(PoisonError::into_inner).clone();
-    if let Some(known) = known {
+    let mut known = whom
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clone()
+        .unwrap_or_default();
+    if known.address.is_some() && known.time_zone.is_some() {
         return known;
     }
-    let read = Whom {
-        address: own_address(client, me.mri()).await,
-        time_zone: time_zone(client).await,
-    };
-    *whom.lock().unwrap_or_else(PoisonError::into_inner) = Some(read.clone());
-    read
+    if known.address.is_none() {
+        known.address = own_address(client, me.mri()).await;
+    }
+    if known.time_zone.is_none() {
+        known.time_zone = time_zone(client).await;
+    }
+    *whom.lock().unwrap_or_else(PoisonError::into_inner) = Some(known.clone());
+    known
 }
 
 /// The account as the organizer: its MRI, its address and its name.

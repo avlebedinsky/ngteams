@@ -75,9 +75,9 @@ fn a_new_event_is_a_meeting_inviting_its_attendees_by_address() {
     );
     // the web client lists the organizer, the account itself, with no address
     let mut with_organizer = event(&[LAB_B]);
-    with_organizer["attendees"]
-        .as_array_mut()
-        .map(|list| list.push(json!({"role": "Admin", "type": "Organizer"})));
+    if let Some(list) = with_organizer["attendees"].as_array_mut() {
+        list.push(json!({"role": "Admin", "type": "Organizer"}));
+    }
     let body = json!({"calendarEvent": with_organizer});
     assert_eq!(
         verdict("POST", &create_url(), Some(&body)),
@@ -262,9 +262,18 @@ fn an_event_s_members_are_its_organizer_and_attendees_when_the_answer_is_that_ev
     let mut nameless = answer.clone();
     nameless["attendees"] = json!([{"name": "no address"}]);
     assert_eq!(parse_event(EVENT, &nameless), malformed);
-    let mut no_list = answer;
-    no_list.as_object_mut().map(|object| object.remove("attendees"));
-    assert_eq!(parse_event(EVENT, &no_list), malformed);
+    let mut not_a_list = answer.clone();
+    not_a_list["attendees"] = json!({"address": LAB_B});
+    assert_eq!(parse_event(EVENT, &not_a_list), malformed);
+    // an appointment reads back with no `attendees` key: its organizer alone
+    let mut appointment = answer;
+    if let Some(object) = appointment.as_object_mut() {
+        object.remove("attendees");
+    }
+    assert_eq!(
+        parse_event(EVENT, &appointment),
+        Membership::Complete(vec![Mri::mail(LAB_A)])
+    );
 }
 
 #[test]

@@ -156,7 +156,8 @@ pub(super) async fn fetch(
 /// Reads one event's answer as the membership of the event `id`: [`Membership::Complete`] with its organizer and its
 /// attendees (each by address, [`Mri::mail`]) when it is an object whose `objectId` is `id`, with a string
 /// `organizerAddress` and an `attendees` array every entry of which has a string `address` (a plain one, or an
-/// `emailAddress` object's); anything else is malformed.
+/// `emailAddress` object's), or no `attendees` key at all (an appointment: its organizer alone); anything else is
+/// malformed.
 #[must_use]
 pub fn parse_event(id: &str, event: &Value) -> Membership {
     let malformed = Membership::Partial(PartialReason::FetchFailed(FetchFailure::Malformed));
@@ -173,8 +174,13 @@ pub fn parse_event(id: &str, event: &Value) -> Membership {
     else {
         return malformed;
     };
-    let Some(listed) = object.get("attendees").and_then(Value::as_array) else {
-        return malformed;
+    // an appointment (nobody invited) reads back with no `attendees` key at all (docs/protocol/calendar.md, "A
+    // series"): it reaches its organizer alone; a key that is there and not a list is malformed
+    let none = Vec::new();
+    let listed = match object.get("attendees") {
+        None => &none,
+        Some(Value::Array(listed)) => listed,
+        Some(_) => return malformed,
     };
     let attendees = listed
         .iter()

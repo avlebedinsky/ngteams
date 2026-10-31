@@ -31,6 +31,22 @@ pub struct EventAttendee {
     pub required: bool,
 }
 
+impl EventAttendee {
+    /// Its entry in an event's `attendees` (and in the free/busy reads' list of people).
+    pub(crate) fn entry(&self) -> Value {
+        let mut entry = json!({
+            "address": self.address,
+            "name": self.name.clone().unwrap_or_else(|| self.address.clone()),
+            "role": "Admin",
+            "type": if self.required { "Required" } else { "Optional" },
+        });
+        if let Some(mri) = &self.mri {
+            entry["mri"] = json!(mri);
+        }
+        entry
+    }
+}
+
 /// How the event shows the account's time (`showAs`), as the form's Show as offers it.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum EventShowAs {
@@ -158,18 +174,7 @@ impl EventDraft {
         organizer.insert("role".to_owned(), json!("Admin"));
         organizer.insert("type".to_owned(), json!("Organizer"));
         let mut attendees = vec![Value::Object(organizer)];
-        attendees.extend(self.attendees.iter().map(|attendee| {
-            let mut entry = json!({
-                "address": attendee.address,
-                "name": attendee.name.clone().unwrap_or_else(|| attendee.address.clone()),
-                "role": "Admin",
-                "type": if attendee.required { "Required" } else { "Optional" },
-            });
-            if let Some(mri) = &attendee.mri {
-                entry["mri"] = json!(mri);
-            }
-            entry
-        }));
+        attendees.extend(self.attendees.iter().map(EventAttendee::entry));
         let mut fields = json!({
             "attendees": attendees,
             "doNotForward": false,
@@ -220,7 +225,9 @@ impl EventDraft {
 
     /// `event` (an event as it was read) with this draft's fields over it: what a change sends. The meeting's own
     /// fields (its join links, its chat) and the event's kind (`eventType`: an occurrence stays one, a series' master
-    /// one) stay as they were read, and so does its recurrence unless the draft sets one (a series changed whole).
+    /// one) stay as they were read, and so does its recurrence unless the draft sets one (a series changed whole). A
+    /// body or categories the draft cleared are written out empty, so the event's own don't stay; without a zone of its
+    /// own the draft keeps the event's.
     #[must_use]
     pub fn over(&self, event: &Map<String, Value>) -> Option<Map<String, Value>> {
         let mut merged = event.clone();
@@ -229,6 +236,18 @@ impl EventDraft {
             if event.contains_key(kept) {
                 fields.remove(kept);
             }
+        }
+        // without the account's zone the event keeps the one it was read with, rather than going to UTC
+        if self.time_zone.is_none() && event.contains_key("eventTimeZone") {
+            fields.remove("eventTimeZone");
+            fields.remove("utcOffset");
+        }
+        if event.contains_key("categories") && !fields.contains_key("categories") {
+            fields.insert("categories".to_owned(), json!([]));
+        }
+        if event.contains_key("bodyContent") && !fields.contains_key("bodyContent") {
+            fields.insert("bodyContentType".to_owned(), json!("html"));
+            fields.insert("bodyContent".to_owned(), json!(""));
         }
         merged.extend(fields);
         Some(merged)
@@ -635,6 +654,39 @@ mod tests {
         assert_eq!(merged["skypeTeamsData"], "{\"cid\":\"19:meeting_x@thread.v2\"}");
         let other = object(json!({"objectId": "Another"}));
         assert!(UpdateEvent::new("AAMkEvent".to_owned(), other, draft()).is_none());
+    }
+
+    #[test]
+    fn a_change_clears_a_body_and_categories_the_form_emptied() {
+        let event = object(json!({"objectId": "AAMkEvent", "bodyContentType": "html",
+            "bodyContent": "<p>Old notes</p>", "categories": ["Red category"]}));
+        let merged = draft().over(&event).expect("merged");
+        assert_eq!(merged["bodyContent"], "");
+        assert_eq!(merged["categories"], json!([]));
+        // kept as the form has them when it has them
+        let mut filled = draft();
+        filled.body_html = "<p>New notes</p>".to_owned();
+        filled.categories = vec!["Blue category".to_owned()];
+        let merged = filled.over(&event).expect("merged");
+        assert_eq!(merged["bodyContent"], "<p>New notes</p>");
+        assert_eq!(merged["categories"], json!(["Blue category"]));
+        // an event without them gets none
+        let bare = object(json!({"objectId": "AAMkEvent"}));
+        let merged = draft().over(&bare).expect("merged");
+        assert!(!merged.contains_key("bodyContent"));
+        assert!(!merged.contains_key("categories"));
+    }
+
+    #[test]
+    fn a_change_without_the_account_s_zone_keeps_the_event_s() {
+        let event = object(json!({"objectId": "AAMkEvent", "eventTimeZone": "TurkeySt", "utcOffset": 180}));
+        let mut unzoned = draft();
+        unzoned.time_zone = None;
+        let merged = unzoned.over(&event).expect("merged");
+        assert_eq!(merged["eventTimeZone"], "TurkeySt");
+        assert_eq!(merged["utcOffset"], 180);
+        let merged = draft().over(&event).expect("merged");
+        assert_eq!(merged["eventTimeZone"], "TurkeySt");
     }
 
     #[test]

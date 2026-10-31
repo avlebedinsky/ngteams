@@ -269,8 +269,8 @@ impl CalendarEvent {
     }
 }
 
-/// `ms` as the window's ends are written: UTC, milliseconds, `Z`.
-fn iso_utc(ms: i64) -> Option<String> {
+/// `ms` as the window's ends are written: UTC, milliseconds, `Z` (the free/busy reads' too).
+pub(crate) fn iso_utc(ms: i64) -> Option<String> {
     let time = OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000).ok()?;
     Some(format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",

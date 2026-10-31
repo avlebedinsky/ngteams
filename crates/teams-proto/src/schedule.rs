@@ -19,6 +19,7 @@ use serde_json::{Value, json};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 
+use crate::calendar::iso_utc;
 use crate::endpoint::{Endpoint, Method, Service};
 use crate::request::Request;
 use crate::write::{EventAttendee, Organizer};
@@ -43,22 +44,7 @@ pub struct FreeBusyAsk {
 
 impl FreeBusyAsk {
     fn body(&self, request_type: &str, days: u32) -> Option<Value> {
-        let mut attendees: Vec<Value> = self
-            .attendees
-            .iter()
-            .map(|attendee| {
-                let mut entry = json!({
-                    "type": if attendee.required { "Required" } else { "Optional" },
-                    "address": attendee.address,
-                    "name": attendee.name.clone().unwrap_or_else(|| attendee.address.clone()),
-                    "role": "Admin",
-                });
-                if let Some(mri) = &attendee.mri {
-                    entry["mri"] = json!(mri);
-                }
-                entry
-            })
-            .collect();
+        let mut attendees: Vec<Value> = self.attendees.iter().map(EventAttendee::entry).collect();
         let mut organizer = json!({"type": "Organizer", "role": "Admin", "mri": self.organizer.mri});
         if let Some(address) = &self.organizer.address {
             organizer["address"] = json!(address);
@@ -67,8 +53,8 @@ impl FreeBusyAsk {
             organizer["name"] = json!(name);
         }
         attendees.push(organizer);
-        let start = utc(self.start_ms)?;
-        let end = utc(self.start_ms.checked_add(i64::from(days) * DAY_MS)?)?;
+        let start = iso_utc(self.start_ms)?;
+        let end = iso_utc(self.start_ms.checked_add(i64::from(days) * DAY_MS)?)?;
         Some(json!({
             "attendees": attendees,
             "minimumSuggestionQuality": "Good",
@@ -230,20 +216,6 @@ fn instant(text: &str) -> Option<i64> {
     i64::try_from(time.unix_timestamp_nanos() / 1_000_000).ok()
 }
 
-/// `ms` as the window's ends are written: UTC, milliseconds, `Z`.
-fn utc(ms: i64) -> Option<String> {
-    let time = OffsetDateTime::from_unix_timestamp_nanos(i128::from(ms) * 1_000_000).ok()?;
-    Some(format!(
-        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
-        time.year(),
-        u8::from(time.month()),
-        time.day(),
-        time.hour(),
-        time.minute(),
-        time.second(),
-        time.millisecond()
-    ))
-}
 
 #[cfg(test)]
 mod tests {

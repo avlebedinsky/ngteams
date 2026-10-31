@@ -151,6 +151,9 @@ pub struct CalendarView {
     /// What each span read last.
     loaded: HashMap<Span, Loaded>,
     reading: Option<(Span, Task<()>)>,
+    /// A read asked again (`again`, after a write) while that span was being read: it runs once that read is over, so
+    /// the answer from before the write isn't the last one.
+    read_again: bool,
     /// The card of the event clicked.
     card: Option<Shown>,
     /// The card asks to confirm its Cancel meeting, Delete or Remove from calendar, and one is being sent.
@@ -201,6 +204,7 @@ impl CalendarView {
             picker: None,
             loaded: HashMap::new(),
             reading: None,
+            read_again: false,
             card: None,
             removal: Removal::None,
             notice: None,
@@ -401,6 +405,7 @@ impl CalendarView {
     fn read(&mut self, again: bool, cx: &mut Context<Self>) {
         let span = self.span();
         if self.reading.as_ref().is_some_and(|(reading, _)| *reading == span) {
+            self.read_again |= again;
             return;
         }
         if !again && matches!(self.loaded.get(&span), Some(Loaded::Events(_))) {
@@ -442,9 +447,10 @@ impl CalendarView {
                 self.loaded.entry(span).or_insert(Loaded::Failed);
             }
         }
-        // the view moved on meanwhile: read what it shows now
-        if self.reading.is_none() && self.span() != span {
-            self.read(false, cx);
+        // asked again meanwhile, or the view moved on: read what it shows now
+        if self.reading.is_none() && (self.read_again || self.span() != span) {
+            let again = std::mem::take(&mut self.read_again);
+            self.read(again, cx);
         }
         cx.notify();
     }

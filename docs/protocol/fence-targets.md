@@ -255,7 +255,9 @@ Rules that keep the mapping fail-closed:
   operations on a call, each in its captured shape: a join, an answer, a decline, an `add`, the follow-ups and the
   callee's ring-time sends, judged by the lab's call rule ([below](#the-labs-call-rule)); any other write on a call
   stays unreadable ([calling-echo.md](calling-echo.md), [calling.md](calling.md)).
-  Meetings, invites, mail and channel posts aren't mapped.
+  The calendar's event writes (a creation, a change, a cancellation, a delete) are mapped as meetings, judged by
+  whom the event reaches ([calendar.md](calendar.md#what-the-fence-makes-of-them)); invites, mail and channel posts
+  aren't mapped.
 
 ## The lab's call rule
 

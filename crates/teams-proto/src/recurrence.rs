@@ -207,54 +207,12 @@ impl Pattern {
     /// type's object is missing or out of range.
     #[must_use]
     pub fn read(value: &Value) -> Option<Self> {
-        let kind = value.get("patternType")?;
-        let names = [
-            "Daily",
-            "Weekly",
-            "Monthly",
-            "RelativeMonthly",
-            "Yearly",
-            "RelativeYearly",
-        ];
-        let type_number = number(kind).or_else(|| {
-            let name = kind.as_str()?;
-            names
-                .iter()
-                .position(|known| known.eq_ignore_ascii_case(name))
-                .and_then(|at| u64::try_from(at + 1).ok())
-        })?;
-        let interval = |inner: &Value| {
-            inner
-                .get("interval")
-                .map_or(Some(1), number)
-                .and_then(|interval| u32::try_from(interval).ok())
-                .filter(|interval| (1..=999).contains(interval))
-        };
-        let small = |inner: &Value, key: &str, range: std::ops::RangeInclusive<u8>| {
-            number(inner.get(key)?)
-                .and_then(|value| u8::try_from(value).ok())
-                .filter(|value| range.contains(value))
-        };
+        let type_number = pattern_type(value.get("patternType")?)?;
         Some(match type_number {
             1 => Self::Daily {
                 interval: interval(value.get("daily")?)?,
             },
-            2 => {
-                let inner = value.get("weekly")?;
-                let days: Vec<Weekday> = inner
-                    .get("daysOfTheWeek")?
-                    .as_array()?
-                    .iter()
-                    .map(Weekday::read)
-                    .collect::<Option<_>>()?;
-                if days.is_empty() {
-                    return None;
-                }
-                Self::Weekly {
-                    interval: interval(inner)?,
-                    days,
-                }
-            }
+            2 => weekly(value.get("weekly")?)?,
             3 => {
                 let inner = value.get("monthly")?;
                 Self::Monthly {
@@ -288,6 +246,58 @@ impl Pattern {
             _ => return None,
         })
     }
+}
+
+/// A pattern's type number (`patternType`: its number, or its name in any case); `None` for anything else.
+fn pattern_type(kind: &Value) -> Option<u64> {
+    const NAMES: [&str; 6] = [
+        "Daily",
+        "Weekly",
+        "Monthly",
+        "RelativeMonthly",
+        "Yearly",
+        "RelativeYearly",
+    ];
+    number(kind).or_else(|| {
+        let name = kind.as_str()?;
+        NAMES
+            .iter()
+            .position(|known| known.eq_ignore_ascii_case(name))
+            .and_then(|at| u64::try_from(at + 1).ok())
+    })
+}
+
+/// A pattern's `interval` (1 when absent); `None` when it is out of range.
+fn interval(inner: &Value) -> Option<u32> {
+    inner
+        .get("interval")
+        .map_or(Some(1), number)
+        .and_then(|interval| u32::try_from(interval).ok())
+        .filter(|interval| (1..=999).contains(interval))
+}
+
+/// A small number at `key` within `range`; `None` when it is missing or out of range.
+fn small(inner: &Value, key: &str, range: std::ops::RangeInclusive<u8>) -> Option<u8> {
+    number(inner.get(key)?)
+        .and_then(|value| u8::try_from(value).ok())
+        .filter(|value| range.contains(value))
+}
+
+/// A weekly pattern's object (`weekly`); `None` without a day or with one that doesn't read.
+fn weekly(inner: &Value) -> Option<Pattern> {
+    let days: Vec<Weekday> = inner
+        .get("daysOfTheWeek")?
+        .as_array()?
+        .iter()
+        .map(Weekday::read)
+        .collect::<Option<_>>()?;
+    if days.is_empty() {
+        return None;
+    }
+    Some(Pattern::Weekly {
+        interval: interval(inner)?,
+        days,
+    })
 }
 
 /// A series' recurrence: how it repeats, from its first day, until its last day when it ends.

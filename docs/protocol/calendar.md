@@ -22,9 +22,9 @@ The web client reads the account's calendar from the middle tier (`Service::Midd
 - It answered `200` with `{"type": "Microsoft.SkypeSpaces.MiddleTier.Models.CalendarEvent", "value": []}`: every event
   of the window in `value`, no paging key.
 
-The bundle names more of the same service's calendar paths (an event by id, by its iCal uid, by its join link, a
-group's or a connected account's calendar view, the scheduling form's reads and an event's creation, forward and
-import); none of them was captured, and the native client uses none.
+The bundle names more of the same service's calendar paths; the event by id, the scheduling form's reads and an
+event's writes are described below. The rest (an event by its iCal uid, by its join link, a group's or a connected
+account's calendar view, forward and import) were never captured, and the native client uses none of them.
 
 ## An event
 
@@ -54,8 +54,8 @@ Other selected fields (`categories`, `cleanGlobalObjectId`, `iCalUid`, `eventTim
 
 ## What the native client does with it
 
-- **Reads only**: one read per window a view shows, when it changes, on Refresh and every five minutes while the
-  calendar is shown; nothing is stored. A window wider than 62 days is never asked for.
+- **The calendar view's read**: one read per window a view shows, when it changes, on Refresh and every five minutes
+  while the calendar is shown; nothing is stored (the writes are under "What the native client does" below). A window wider than 62 days is never asked for.
 - **Joining**: a meeting's Join goes through the call machinery's join of a running call in its chat
   (`docs/protocol/calling.md`, "Joining a running call"), offered only once an invitation named a running call in the
   meeting's chat. Joining a meeting nobody's call has rung for yet (its conversation looked up by its link) was never
@@ -215,7 +215,8 @@ each attendee by its address (`Mri::mail`, matched against `lab.toml`'s UPNs):
   (`Outbox::try_calendar`): one attempt under a fresh `Fence::check`, one more only after a 401 or a short throttle,
   never after an unknown outcome. A Teams meeting's creation first makes its online meeting (`CreateOnlineMeeting`, a
   plain request) and carries it. The engine fills in the organizer (the account's MRI, its profile's address, its
-  name) and the time zone (`TimeZoneSettings`, from `TZ` or `/etc/localtime`), each read once a run.
+  name) and the time zone (`TimeZoneSettings`, from `TZ` or `/etc/localtime`), each kept once read (one that didn't
+  read is asked again at the next write; a change without the zone keeps the event's own).
 - A change sends the event as `EventRead` gave it with the form's fields over it, so what the form doesn't show goes
   back as it came; a Teams meeting stays one, an occurrence one and a series' master one.
 - **A series** (`crates/teams-ui/src/event_form/repeat.rs`, `teams-proto`'s `Recurrence`): the form's Series makes a

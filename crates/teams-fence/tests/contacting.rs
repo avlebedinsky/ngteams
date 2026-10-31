@@ -117,10 +117,11 @@ fn expected(expect: &Value) -> TestResult<Contact> {
         .into_iter()
         .find(|kind| expect["kind"] == kind.as_str())
         .ok_or("an unknown kind")?;
-    let scope = match expect["conversation"].as_str() {
-        Some(id) => Scope::Conversation { id: id.to_owned() },
-        None if expect["new"] == true => Scope::New,
-        None => return Err("no scope".into()),
+    let scope = match (expect["conversation"].as_str(), expect["event"].as_str()) {
+        (Some(id), _) => Scope::Conversation { id: id.to_owned() },
+        (None, Some(id)) => Scope::Event { id: id.to_owned() },
+        (None, None) if expect["new"] == true => Scope::New,
+        (None, None) => return Err("no scope".into()),
     };
     let added: Vec<Mri> = expect["added"]
         .as_array()

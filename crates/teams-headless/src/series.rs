@@ -3,11 +3,8 @@
 //! a weekly series (tomorrow at 06:00 UTC for half an hour, on that weekday, ending three weeks on), reads it back whole
 //! and prints the recurrence the answer gives, reads the account's free and busy times and suggested times for that
 //! day, and deletes the series again (unless `--keep`; `--cleanup` only deletes the probe series it finds). Prints
-//! each step's outcome, never a subject or a body.
-//!
-//! The lab fence refuses the delete today: the service reads an appointment back with no `attendees` list at all, which
-//! the fence's event member read takes as malformed (the probe prints what that read makes of it); the series stays
-//! in the account's calendar, reaching nobody, until that read takes an appointment.
+//! each step's outcome, never a subject or a body. The service reads an appointment back with no `attendees` list at
+//! all, which the fence's event member read takes as the organizer alone, so the lab fence lets the delete through.
 
 use std::io::{self, Write};
 
