@@ -44,6 +44,24 @@ def percentage(counts):
     return 100 * counts["covered"] / counts["count"] if counts["count"] else None
 
 
+def reviewed_sources(config, expected):
+    """Accept only individually reviewed, unchanged sources with no LLVM mapping."""
+    reviewed = {}
+    for relative, audit in config.get("unmapped_sources", {}).items():
+        path = (ROOT / relative).resolve()
+        if path not in expected:
+            continue
+        reason = audit["reason"]
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError(f"missing unmapped-source review reason: {relative}")
+        checks = [(relative, audit["sha256"]), *audit.get("context", {}).items()]
+        for checked, digest in checks:
+            if hashlib.sha256((ROOT / checked).read_bytes()).hexdigest() != digest:
+                raise ValueError(f"unmapped-source review is stale; inspect this file again: {checked}")
+        reviewed[path] = {"file": relative, **audit}
+    return reviewed
+
+
 def collect(report, expected, metrics):
     files = {}
     for unit in report["data"]:
@@ -72,6 +90,7 @@ def summarize(args, config, crates, selected):
         for name in selected
     }
     expected = {path for paths in inventory.values() for path in paths}
+    reviewed = reviewed_sources(config, expected)
     report = json.loads(args.report.read_text())
     if report.get("type") != "llvm.coverage.json.export":
         raise ValueError("expected LLVM coverage JSON export")
@@ -81,10 +100,14 @@ def summarize(args, config, crates, selected):
     for name in selected:
         totals = {metric: {"count": 0, "covered": 0} for metric in metrics}
         missing = []
+        audited_unmapped = []
         for path in inventory[name]:
             relative = str(path.relative_to(ROOT))
             if path not in files:
-                missing.append(relative)
+                if path in reviewed:
+                    audited_unmapped.append(reviewed[path])
+                else:
+                    missing.append(relative)
                 continue
             summary = files[path]
             for metric in metrics:
@@ -99,12 +122,16 @@ def summarize(args, config, crates, selected):
         baseline = config["baselines"].get(name)
         result["crates"][name] = {
             "counts": totals, "percent": rates, "baseline": baseline,
-            "source_files": len(inventory[name]), "reported_files": len(inventory[name]) - len(missing),
+            "source_files": len(inventory[name]),
+            "reported_files": len(inventory[name]) - len(missing) - len(audited_unmapped),
             "missing_source_files": missing,
+            "audited_unmapped_files": audited_unmapped,
         }
         rendered = ", ".join(f"{metric} {rate:.2f}%" if rate is not None else f"{metric} unmeasured"
                              for metric, rate in rates.items())
-        print(f"{name}: {rendered}; sources {len(inventory[name]) - len(missing)}/{len(inventory[name])}")
+        mapped = result["crates"][name]["reported_files"]
+        print(f"{name}: {rendered}; sources {mapped}/{len(inventory[name])}; "
+              f"reviewed without LLVM mapping {len(audited_unmapped)}")
         if missing:
             failures.append(f"{name}: sources absent from LLVM export (feature-gated or without instrumentable code): "
                             + ", ".join(missing))

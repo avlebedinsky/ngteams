@@ -791,8 +791,10 @@ python3 -B -m unittest discover -s scripts -p test_coverage_report.py
 `coverage.toml` holds the 90% target and the measured baseline floors. Only `teams-store` and `teams-log` have baselines so far;
 other crates fail the gate until measured. Raise floors as tests improve; never lower them or exclude runnable code
 to pass. No CI pipeline is configured in this repository, so these are local gates. Running the script without
-`-p` selects all 22 non-generated crates, including the lab and test-support tooling; generated WPE bindings and
-the standalone video spike are excluded. Third-party code and tests outside `src/` do not enter the totals.
+`-p` selects all 21 crates with runtime code, including the lab and test-support tooling. Generated WPE bindings,
+the standalone video spike and `fence-seal` (a compile-test harness with a documentation-only library) are excluded.
+`fence-seal`'s compile checks still run through the normal test gate. Third-party code and tests outside `src/` do
+not enter the totals.
 
 Baseline floors are measured and validated with one `-p <crate>` alone. Combined runs also count hits from dependent
 crates' tests, so use them to find gaps; their higher totals cannot establish or validate an individual crate's floor.
@@ -801,9 +803,13 @@ Reports go to `target/coverage/<selection>/llvm.json` and `summary.json`: one cr
 uses `all`, and long partial selections use a short hash. The summary records every selected package and ranks source
 files by uncovered lines, functions and regions. Instrumented build artifacts stay in `target/coverage-build` and
 measurements serialize on a lock. `--report-only` rechecks an existing export without running tests; use a fresh
-measurement for change validation. Every selected `src/**/*.rs` must appear in the LLVM export, including zero-hit
-files: missing files fail even with `--no-gate`, so omitted feature-gated code cannot silently inflate coverage.
-Declaration-only modules may have no LLVM mapping; diagnose those explicitly before establishing that crate's gate.
+measurement for change validation. Every executable selected `src/**/*.rs` must appear in the LLVM export, including
+zero-hit files: missing files fail even with `--no-gate`, so omitted feature-gated code cannot silently inflate
+coverage. `coverage.toml` lists individually reviewed declaration-only files and a separate unit-test module that
+LLVM does not map. Each entry records its SHA-256 and reason; the test module also pins the file that includes it
+under `cfg(test)`. A content change invalidates the review and fails the report until inspected again. The summary
+lists these audited unmapped files explicitly. If LLVM supplies a mapping
+for one, its counts still contribute to the totals; the review never discards reported executable code.
 
 Stable Rust supplies line, function and region coverage here; regions are not statements or branches. Inline unit
 test functions in `src/` also appear in LLVM's source totals. This first measurement uses default features and the

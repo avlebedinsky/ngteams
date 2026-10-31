@@ -1,6 +1,7 @@
 """The coverage gate must not silently omit untested source or accept partial metrics."""
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -80,6 +81,63 @@ class CoverageGateTests(unittest.TestCase):
         self.assertTrue(failed)
         self.assertEqual(summary["crates"]["example"]["missing_source_files"],
                          ["crates/example/src/unused.rs"])
+
+    def audit_declarations(self):
+        self.unused.write_text("pub trait Marker {}\n")
+        relative = str(self.unused.relative_to(self.root))
+        self.config["unmapped_sources"] = {relative: {
+            "sha256": hashlib.sha256(self.unused.read_bytes()).hexdigest(),
+            "reason": "reviewed trait declaration with no executable body",
+        }}
+        return relative
+
+    def test_reviewed_declarations_are_reported_explicitly_instead_of_missing(self):
+        relative = self.audit_declarations()
+        self.entries.pop()
+        self.args.require_target = True
+        failed, summary = self.run_report()
+        self.assertFalse(failed)
+        crate = summary["crates"]["example"]
+        self.assertEqual((crate["source_files"], crate["reported_files"]), (2, 1))
+        self.assertEqual(crate["missing_source_files"], [])
+        self.assertEqual(crate["audited_unmapped_files"][0]["file"], relative)
+        self.assertEqual(crate["audited_unmapped_files"][0]["sha256"],
+                         self.config["unmapped_sources"][relative]["sha256"])
+        self.assertIn("reviewed without LLVM mapping 1", self.report_output)
+
+    def test_changed_reviewed_source_cannot_hide_new_executable_code(self):
+        self.audit_declarations()
+        self.entries.pop()
+        self.args.no_gate = True
+        self.unused.write_text("pub fn newly_added() {}\n")
+        with self.assertRaisesRegex(ValueError, "review is stale"):
+            self.run_report()
+
+    def test_changed_test_module_inclusion_invalidates_its_review(self):
+        relative = self.audit_declarations()
+        self.config["unmapped_sources"][relative]["context"] = {
+            "crates/example/src/lib.rs": hashlib.sha256(self.used.read_bytes()).hexdigest(),
+        }
+        self.entries.pop()
+        self.args.no_gate = True
+        self.used.write_text("mod unused;\n")
+        with self.assertRaisesRegex(ValueError, "review is stale.*lib.rs"):
+            self.run_report()
+
+    def test_audited_mapping_still_counts_and_unreviewed_missing_source_still_fails(self):
+        self.audit_declarations()
+        # A supplied zero-hit mapping remains in the denominator even for a reviewed file.
+        failed, summary = self.run_report()
+        self.assertFalse(failed)
+        self.assertEqual(summary["crates"]["example"]["percent"], dict.fromkeys(METRICS, 50))
+        self.assertEqual(summary["crates"]["example"]["audited_unmapped_files"], [])
+        new_source = self.source / "new.rs"
+        new_source.write_text("pub fn untested() {}\n")
+        self.args.no_gate = True
+        failed, summary = self.run_report()
+        self.assertTrue(failed)
+        self.assertEqual(summary["crates"]["example"]["missing_source_files"],
+                         ["crates/example/src/new.rs"])
 
     def test_one_failing_metric_fails_the_gate(self):
         self.config["baselines"]["example"]["regions"] = 51

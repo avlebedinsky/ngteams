@@ -4,6 +4,7 @@ target = 90
 metrics = ["lines", "functions", "regions"]
 
 [excluded]
+fence-seal = "compile-test harness only; its library contains documentation and no runtime code"
 gpui-video = "standalone video spike"
 wpe-javascriptcore-sys = "generated gir bindings"
 wpe-platform-sys = "generated gir bindings"
@@ -14,3 +15,34 @@ wpe-webkit-sys = "generated gir bindings"
 [baselines]
 teams-store = { lines = 93, functions = 94, regions = 82 }
 teams-log = { lines = 90, functions = 89, regions = 90 }
+
+# Individually inspected sources LLVM does not map. Any content change invalidates the review.
+# These entries never suppress coverage counts when LLVM supplies a mapping for the file.
+[unmapped_sources."crates/teams-auth/src/lib.rs"]
+sha256 = "f977642661f3385c9e5b250e07d58b9feea88e143a126309624c16973309eed8"
+reason = "module declarations and documentation only; no executable items"
+
+[unmapped_sources."crates/teams-call/src/lib.rs"]
+sha256 = "ef92d5c3fd2fd3d42dc5e64e6e8928a9e9a166682bb5f490eab6bffb61c50a97"
+reason = "module declarations, re-exports and documentation only; no executable items"
+
+[unmapped_sources."crates/teams-call/src/machine/tests.rs"]
+sha256 = "1b1cfd35eab895d1f50e0951d34bc28722ec7d884948c1ecf6bd63b22569919a"
+reason = "unit-test module included only by machine.rs cfg(test); omitted by cargo-llvm-cov's test-file filter"
+context = { "crates/teams-call/src/machine.rs" = "40988c0160aac6afcdd101333f122f6809f7d4563aed047bc548f496d0c8666c" }
+
+[unmapped_sources."crates/teams-proto/src/lib.rs"]
+sha256 = "69b870b417b55373a3453e8688c289ef0ad303a0196b6fded37f17257a26233a"
+reason = "module declarations, re-exports and documentation only; no executable items"
+
+[unmapped_sources."crates/teams-proto/src/chat/mod.rs"]
+sha256 = "1e0510218ed45e3703761d4c716e0f38a7a513e5baa1634411dcf1b2d4353454"
+reason = "module declarations, re-exports and documentation only; no executable items"
+
+[unmapped_sources."crates/teams-proto/src/request.rs"]
+sha256 = "193b9e4c3809503f703c1f673c9b0bff91ee27005e939d6fb2ff2d26ac98857e"
+reason = "Request trait signatures and imports only; no default methods or executable bodies"
+
+[unmapped_sources."crates/teams-trouter/src/lib.rs"]
+sha256 = "7c105a6c32de4761bd5e86bf6002b2781aabd9902d858a49f0910f09ea25dfff"
+reason = "module declarations, re-exports and documentation only; no executable items"
