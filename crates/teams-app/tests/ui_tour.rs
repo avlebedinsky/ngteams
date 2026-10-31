@@ -118,13 +118,13 @@ const STEPS: [Step; 65] = [
     // the box expanded with its format bar (Ctrl+Shift+X), holding formatted text: a heading, bold, a colour and a
     // highlight, a bulleted list
     ("chat-compose-expanded", |shell, window, cx| {
-        expand_with_formats(shell, window, cx)
+        expand_with_formats(shell, window, cx);
     }),
     // the font colour menu under its button
     ("chat-compose-colours", |shell, window, cx| {
         with_compose(shell, cx, |compose, cx| {
             compose.format_bar().update(cx, |bar, cx| {
-                bar.toggle(teams_ui::editor::toolbar::Menu::FontColour, window, cx)
+                bar.toggle(teams_ui::editor::toolbar::Menu::FontColour, window, cx);
             });
         });
     }),
@@ -149,7 +149,7 @@ const STEPS: [Step; 65] = [
     // the title bar's search: its suggestions as "lab" is typed, its go-to mode, its results
     ("search-suggestions", |shell, window, cx| {
         if let Some(chat) = shell.read(cx).chat() {
-            chat.read(cx).text_selection().clear();
+            let _ = chat.read(cx).text_selection().clear();
         }
         shell.update(cx, |shell, cx| shell.focus_search(SearchMode::Search, window, cx));
         let search = shell.read(cx).search().clone();
@@ -170,7 +170,7 @@ const STEPS: [Step; 65] = [
     }),
     ("account-menu", |shell, window, cx| {
         if let Some(chat) = shell.read(cx).chat() {
-            chat.read(cx).text_selection().clear();
+            let _ = chat.read(cx).text_selection().clear();
             window.refresh();
         }
         shell.update(cx, Shell::toggle_status_menu);
@@ -222,11 +222,11 @@ const STEPS: [Step; 65] = [
     ("settings-video-effects-preview", |shell, _, cx| {
         let model = shell.read(cx).settings().clone();
         model.update(cx, |model, cx| {
-            model.change(|settings| settings.video_effect = VideoEffect::Blur, cx)
+            model.change(|settings| settings.video_effect = VideoEffect::Blur, cx);
         });
         let view = shell.read(cx).settings_view().clone();
         if let Some(picker) = view.read(cx).effects_picker().cloned() {
-            picker.update(cx, |picker, cx| picker.start_preview(cx));
+            picker.update(cx, teams_ui::EffectsPicker::start_preview);
         }
         view.read(cx).scroll_to_end();
     }),
@@ -257,7 +257,7 @@ const STEPS: [Step; 65] = [
         type_in_compose(shell, "Lunch at noon?\nThe usual place, or the new one?", window, cx);
     }),
     ("chat-dark-compose-expanded", |shell, window, cx| {
-        expand_with_formats(shell, window, cx)
+        expand_with_formats(shell, window, cx);
     }),
     ("chat-dark-emoji", |shell, window, cx| {
         with_compose(shell, cx, |compose, cx| compose.toggle_emoji(window, cx));
@@ -384,7 +384,7 @@ const STEPS: [Step; 65] = [
     ("calendar-dark", |shell, _, cx| {
         let calendar = shell.read(cx).calendar_view().clone();
         calendar.update(cx, |calendar, cx| {
-            calendar.set_mode(teams_ui::calendar::Mode::WorkWeek, cx)
+            calendar.set_mode(teams_ui::calendar::Mode::WorkWeek, cx);
         });
         let model = shell.read(cx).settings().clone();
         model.update(cx, |model, cx| {
@@ -427,7 +427,7 @@ const STEPS: [Step; 65] = [
     }),
     // the repeat drop-down's Custom: the custom recurrence dialog over the form
     ("event-form-custom-repeat-dark", |_, _, cx| {
-        with_event_form(cx, |form, window, cx| form.open_custom(window, cx));
+        with_event_form(cx, teams_ui::event_form::EventForm::open_custom);
     }),
     // the Scheduler in the day's place (b's and c's made-up busy times, the suggested times), and Format: Teams'
     // format bar over the text
