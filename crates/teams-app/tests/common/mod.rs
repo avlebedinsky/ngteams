@@ -280,7 +280,7 @@ pub struct App {
 
 /// The variables the broker takes from this process: its bus (the user's session bus, where the lab's tokens are)
 /// and where the lab's config and data are. Nothing of a display.
-const BROKER_ENV: [&str; 7] = [
+const BROKER_ENV: [&str; 8] = [
     "PATH",
     "HOME",
     "LANG",
@@ -288,6 +288,7 @@ const BROKER_ENV: [&str; 7] = [
     "XDG_RUNTIME_DIR",
     "XDG_CONFIG_HOME",
     "XDG_DATA_HOME",
+    "LLVM_PROFILE_FILE",
 ];
 
 impl App {

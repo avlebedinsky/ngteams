@@ -88,6 +88,68 @@ fn a_missing_sandbox_skips_or_fails() {
     assert!(error.contains("GPUI_SMOKE_REQUIRE=1"), "{error}");
 }
 
+/// The subprocess supplies its own environment, avoiding changes to this test process's shared environment.
+#[test]
+fn clean_commands_keep_only_the_profile_path_and_the_allowed_environment() {
+    const CHILD: &str = "UI_SANDBOX_CHECK_PROFILE_ENV";
+    const PARENT_ONLY: [&str; 5] = [
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "XDG_RUNTIME_DIR",
+        "UI_SANDBOX_SECRET_CANARY",
+    ];
+    if std::env::var_os(CHILD).is_some() {
+        let output = clean_command("/usr/bin/env").output().unwrap();
+        assert!(output.status.success());
+        let environment: HashMap<_, _> = String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .filter_map(|line| line.split_once('='))
+            .map(|(name, value)| (name.to_owned(), value.to_owned()))
+            .collect();
+        assert_eq!(
+            environment.get("LLVM_PROFILE_FILE").map(OsStr::new),
+            std::env::var_os("LLVM_PROFILE_FILE").as_deref()
+        );
+        for name in PARENT_ONLY.into_iter().chain([CHILD]) {
+            assert!(
+                !environment.contains_key(name),
+                "parent-only variable inherited: {name}"
+            );
+        }
+        assert!(
+            environment
+                .keys()
+                .all(|name| ui_sandbox::PASSED_ENV.contains(&name.as_str()))
+        );
+        return;
+    }
+
+    let dir = TempDir::new().unwrap();
+    let profile = std::env::var_os("LLVM_PROFILE_FILE")
+        .unwrap_or_else(|| dir.path().join("child-%p-%m.profraw").into_os_string());
+    for present in [false, true] {
+        let mut command = Command::new(std::env::current_exe().unwrap());
+        command
+            .args([
+                "--exact",
+                "clean_commands_keep_only_the_profile_path_and_the_allowed_environment",
+            ])
+            .current_dir(dir.path())
+            .env(CHILD, "1")
+            .env_remove("LLVM_PROFILE_FILE");
+        for name in PARENT_ONLY {
+            command.env(name, "synthetic-parent-canary");
+        }
+        if present {
+            command.env("LLVM_PROFILE_FILE", &profile);
+        }
+        let output = command.output().unwrap();
+        assert!(output.status.success(), "profile present={present}: {output:?}");
+    }
+}
+
 #[test]
 fn the_opener_records_and_opens_nothing() {
     let dir = TempDir::new().unwrap();

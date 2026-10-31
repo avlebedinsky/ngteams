@@ -323,6 +323,7 @@ fn the_binary_built_with_test_support_refuses_and_touches_nothing() {
     let output = Command::new(env!("CARGO_BIN_EXE_ngteams"))
         .args(["--account", "someone@example.test"])
         .env_clear()
+        .envs(std::env::var_os("LLVM_PROFILE_FILE").map(|value| ("LLVM_PROFILE_FILE", value)))
         .env("HOME", home.path())
         .env("XDG_CONFIG_HOME", home.path().join("config"))
         .env("XDG_DATA_HOME", home.path().join("data"))
