@@ -30,9 +30,10 @@ use teams_media::devices::catalog::{DeviceDirectory as _, DeviceInfo, DeviceKind
 use teams_media::devices::pattern::TestPattern;
 use teams_store::{Applied, ConversationKind, Member};
 use teams_ui::call_alert::{CallAlert, notice_of};
+use teams_ui::call_stage::AUTO_CLOSE;
 use teams_ui::call_view;
 use teams_ui::call_window::{CallWindows, CallWindowsEvent};
-use teams_ui::calls::{Ask, CallKind, Verdict};
+use teams_ui::calls::{Ask, CallKind, EndReason, Ended, Verdict};
 use teams_ui::notify::NoticeKind;
 use teams_ui::ringtone::{Ringer, Ringtone};
 use teams_ui::settings::{Settings, SettingsModel, attach_devices};
@@ -725,10 +726,7 @@ fn the_in_call_view_tells_a_refusal_a_failure_and_voicemail() {
         ["chat", "ended", "failed", "media", "unmuted", "camera-off"]
     );
     let ended = rig.cx.read(|cx| calls_of(&rig).read(cx).ended().cloned()).unwrap();
-    assert_eq!(
-        teams_ui::calls::end_text(&ended.end, ended.voicemail),
-        "Call failed (media)"
-    );
+    assert_eq!(teams_ui::calls::end_text(&ended.end, ended.voicemail), "Call failed");
 }
 
 #[test]
@@ -1414,7 +1412,7 @@ fn a_test_call_that_never_connected_says_so_in_its_results() {
         !window_open(&rig, &windows),
         "the new call took the results' window, and closed with it"
     );
-    assert!(drawn(cx, "call-after"));
+    assert!(!drawn(cx, "call-after"), "the main window says nothing of it");
 }
 
 #[test]
@@ -1605,7 +1603,10 @@ fn a_call_opens_a_window_of_its_own_beside_the_chats_and_it_closes_with_the_call
     assert!(!window_open(&rig, &windows));
     let closed = lines(&written, "call-window", "closed");
     assert_eq!((closed.len(), kinds(&closed[0])), (1, Vec::<String>::new()));
-    assert!(drawn(cx, "call-after"), "how it ended, in the main window");
+    assert!(
+        !drawn(cx, "call-after"),
+        "the main window says nothing of a hang-up of the user's"
+    );
     no_name_in(&written);
 }
 
@@ -1747,5 +1748,218 @@ fn an_answered_invitation_opens_the_call_window_and_a_declined_one_none() {
     assert!(drawn(window, "call-person-0"), "the caller's tile");
     let opened = lines(&written, "call-window", "opened");
     assert_eq!((opened.len(), kinds(&opened[0])), (1, vec!["incoming".to_owned()]));
+    no_name_in(&written);
+}
+
+// --- how a call ended, in its window ---
+
+/// The far end's hang-up, in the captured shape: its own end ("local" to its sender), naming its sender.
+fn hung_up_by(mri: &str, name: &str) -> End {
+    End::Remote(RemoteEnd {
+        code: Some(0),
+        sub_code: Some(0),
+        phrase: Some("CallEndReasonLocalUserInitiated".to_owned()),
+        by: Some(Mri::new(mri)),
+        by_name: Some(name.to_owned()),
+        categories: vec!["Success".to_owned()],
+        ..RemoteEnd::default()
+    })
+}
+
+/// How call 1, connected for `connected` or never, ended with `end`.
+fn ended_with(end: End, chat: Option<&str>, connected: bool) -> Ended {
+    Ended {
+        id: call(1),
+        kind: CallKind::Chat,
+        chat: chat.map(str::to_owned),
+        caller: None,
+        caller_name: None,
+        end,
+        voicemail: false,
+        duration: connected.then(|| std::time::Duration::from_secs(63)),
+        check: None,
+    }
+}
+
+#[test]
+fn an_end_is_told_by_its_cause_in_plain_words_never_by_its_code() {
+    let reason = |end: End, connected: bool| ended_with(end, Some(AB), connected).reason(LAB_A);
+    let ended_by_b = reason(hung_up_by(LAB_B, "Lab Bee"), true);
+    assert_eq!(ended_by_b, EndReason::EndedBy(Some("Lab Bee".to_owned())));
+    assert_eq!(ended_by_b.text("B").as_deref(), Some("Lab Bee ended the call"));
+    // the same end sent by the account's own other device
+    assert_eq!(reason(hung_up_by(LAB_A, "Lab A"), true), EndReason::EndedElsewhere);
+    // the user's own hang-up and decline close the window
+    assert_eq!(reason(End::HungUp, true), EndReason::Own);
+    assert!(!ended_with(End::HungUp, Some(AB), true).stays_in_window());
+    assert!(!ended_with(End::Declined, Some(AB), false).stays_in_window());
+    assert!(ended_with(hung_up_by(LAB_B, "Lab Bee"), Some(AB), true).stays_in_window());
+    // a conversation's end that names nobody, by its sub-code
+    let conversation_end = |sub_code| {
+        End::Remote(RemoteEnd {
+            code: Some(0),
+            sub_code: Some(sub_code),
+            phrase: Some("This conversation has ended as no one else has joined the group call.".to_owned()),
+            categories: vec!["Success".to_owned()],
+            ..RemoteEnd::default()
+        })
+    };
+    assert_eq!(reason(conversation_end(5013), true), EndReason::NobodyJoined);
+    assert_eq!(reason(conversation_end(5002), true), EndReason::EveryoneLeft);
+    // a failure: dropped once connected, else never connected
+    let gave_up = End::Remote(RemoteEnd {
+        phrase: Some("SdpParsingFailure".to_owned()),
+        categories: vec!["JoinFailure".to_owned(), "MediaNegotiationFailure".to_owned()],
+        ..RemoteEnd::default()
+    });
+    assert_eq!(reason(gave_up.clone(), true), EndReason::Dropped);
+    assert_eq!(reason(gave_up, false), EndReason::NotConnected);
+    assert_eq!(reason(End::Failed("media"), true), EndReason::Dropped);
+    assert_eq!(reason(End::Failed("start"), false), EndReason::NotConnected);
+    assert_eq!(reason(End::Remote(RemoteEnd::default()), true), EndReason::Ended);
+    let mut voicemail = ended_with(End::Remote(RemoteEnd::default()), Some(AB), true);
+    voicemail.voicemail = true;
+    assert_eq!(voicemail.reason(LAB_A), EndReason::Voicemail);
+    // no reason's words carry a code or a phrase the service sent
+    for reason in [
+        EndReason::EndedBy(None),
+        EndReason::EndedElsewhere,
+        EndReason::Voicemail,
+        EndReason::NobodyJoined,
+        EndReason::EveryoneLeft,
+        EndReason::ChatHasCall,
+        EndReason::Dropped,
+        EndReason::NotConnected,
+    ] {
+        let text = reason.text("Lab Bee").unwrap();
+        assert!(!text.contains("CallEndReason") && !text.contains('('), "{text}");
+    }
+}
+
+#[test]
+fn a_call_the_far_end_hung_up_keeps_its_window_on_who_ended_it_with_call_back() {
+    let rig = calling();
+    let (trace, written) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    click(cx, "chat-call");
+    status(&rig, 1, CallStatus::Placing);
+    status(&rig, 1, CallStatus::Connected);
+    let window = stage(&rig, &windows);
+    status(&rig, 1, CallStatus::Ended(hung_up_by(LAB_B, "Lab Bee")));
+    assert!(window_open(&rig, &windows), "the window stays on how the call ended");
+    for part in [
+        "call-end",
+        "call-end-heading",
+        "call-end-reason",
+        "call-end-duration",
+        "call-end-call-back",
+        "call-end-close",
+    ] {
+        assert!(drawn(window, part), "{part}");
+    }
+    assert!(!drawn(window, "call-hang-up"), "no call controls once it ended");
+    assert!(
+        !drawn(cx, "call-after") && !drawn(cx, "in-call"),
+        "the main window says nothing of it"
+    );
+    let ended = rig.cx.read(|cx| calls_of(&rig).read(cx).ended().cloned()).unwrap();
+    assert_eq!(ended.reason(LAB_A), EndReason::EndedBy(Some("Lab Bee".to_owned())));
+    let told = lines(&written, "call-window", "ended");
+    assert_eq!(
+        (told.len(), kinds(&told[0])),
+        (1, vec!["ended-by-other".to_owned(), "call-back".to_owned()])
+    );
+
+    // Call back: a new call to the same chat, the user's ask
+    click(window, "call-end-call-back");
+    assert_eq!(actions(&rig).last(), Some(&CallAction::Call { chat: AB.into() }));
+    assert!(!drawn(window, "call-end-call-back"), "not asked twice while it sets up");
+    status(&rig, 2, CallStatus::Placing);
+    assert_eq!(
+        rig.cx.read(|cx| windows.read(cx).showing().map(|(_, call)| call)),
+        Some(call(2)),
+        "the new call takes the window"
+    );
+    no_name_in(&written);
+}
+
+#[test]
+fn a_call_s_end_closes_by_itself_or_by_close() {
+    let rig = calling();
+    let (trace, written) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, asked) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    // dropped once connected: said, then gone by itself
+    click(cx, "chat-call");
+    status(&rig, 1, CallStatus::Placing);
+    status(&rig, 1, CallStatus::Connected);
+    let window = stage(&rig, &windows);
+    status(&rig, 1, CallStatus::Ended(End::Failed("media")));
+    assert!(drawn(window, "call-end") && drawn(window, "call-end-call-back"));
+    let told = lines(&written, "call-window", "ended");
+    assert_eq!(kinds(&told[0]), ["dropped", "call-back"]);
+    rig.cx.executor().advance_clock(AUTO_CLOSE / 2);
+    assert!(window_open(&rig, &windows), "not before its time");
+    rig.cx.executor().advance_clock(AUTO_CLOSE);
+    assert!(!window_open(&rig, &windows), "closed by itself");
+    assert!(
+        rig.cx.read(|cx| calls_of(&rig).read(cx).ended().is_none()),
+        "and dismissed"
+    );
+    assert_eq!(asked.lock().unwrap().last(), Some(&CallWindowsEvent::Closed));
+
+    // never connected: Close
+    click(cx, "chat-call");
+    status(&rig, 2, CallStatus::Placing);
+    let window = stage(&rig, &windows);
+    status(&rig, 2, CallStatus::Ended(End::Failed("start")));
+    assert!(drawn(window, "call-end"));
+    assert!(!drawn(window, "call-end-duration"), "it never lasted");
+    assert_eq!(
+        kinds(&lines(&written, "call-window", "ended")[1]),
+        ["not-connected", "call-back"]
+    );
+    click(window, "call-end-close");
+    assert!(!window_open(&rig, &windows));
+    assert_eq!(actions(&rig).len(), 2, "nothing asked of the engine but the two calls");
+}
+
+#[test]
+fn a_dropped_group_call_offers_rejoin_and_a_one_to_one_invitation_call_back_by_their_keys() {
+    let rig = calling();
+    let (trace, written) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    // a group call answered, then dropped: it runs on without the account, to be joined again
+    rig.send(Event::IncomingCall(invitation(4, Some(CALLER_NAME), Some(TRIO))));
+    click(cx, "call-answer");
+    status(&rig, 4, CallStatus::Answering);
+    status(&rig, 4, CallStatus::Connected);
+    let window = stage(&rig, &windows);
+    status(&rig, 4, CallStatus::Ended(End::Failed("media")));
+    assert!(drawn(window, "call-end-rejoin") && !drawn(window, "call-end-call-back"));
+    window.simulate_keystrokes("ctrl-shift-j");
+    window.run_until_parked();
+    assert_eq!(actions(&rig).last(), Some(&CallAction::Join { chat: TRIO.into() }));
+    status(&rig, 5, CallStatus::Joining);
+    status(&rig, 5, CallStatus::Ended(End::HungUp));
+    assert!(!window_open(&rig, &windows), "the user's own hang-up closes it at once");
+
+    // a 1:1 invitation answered, the caller hanging up: Call back goes to the two's chat
+    rig.send(Event::IncomingCall(invitation(6, Some(CALLER_NAME), None)));
+    click(cx, "call-answer");
+    status(&rig, 6, CallStatus::Connected);
+    let window = stage(&rig, &windows);
+    status(&rig, 6, CallStatus::Ended(hung_up_by(LAB_B, CALLER_NAME)));
+    assert!(drawn(window, "call-end-call-back"));
+    window.simulate_keystrokes("ctrl-shift-c");
+    window.run_until_parked();
+    assert_eq!(actions(&rig).last(), Some(&CallAction::Call { chat: AB.into() }));
+    let told: Vec<Vec<String>> = lines(&written, "call-window", "ended").iter().map(kinds).collect();
+    assert_eq!(told, [["dropped", "rejoin"], ["ended-by-other", "call-back"]]);
     no_name_in(&written);
 }

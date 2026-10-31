@@ -153,6 +153,7 @@ fn a_start_refused_by_a_running_call_says_so_and_names_that_call() {
         sub_code: Some(5704),
         phrase: Some("Conversation cannot be created due to a failure to resolve ownership.".to_owned()),
         conversation: Some(conversation.to_owned()),
+        ..RemoteEnd::default()
     };
     assert_eq!(
         end_word(&End::Remote(refused.clone())),

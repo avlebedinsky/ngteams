@@ -3,9 +3,11 @@
 //!
 //! - **It opens** once a call of any account is told (a start, a join, the answer of an invitation; not a decline),
 //!   brought to the front, the keyboard on it; what it shows is [`CallStage`]'s.
-//! - **It closes** once its call ended, as Teams' does; a test call's window stays on its results until it is
-//!   closed (their Close, or the window's own), as Teams' test call does. A new call takes the window of the last
-//!   test call's results.
+//! - **It closes** once its call ended by the user's own hang-up (or decline). A call that ended any other way (the
+//!   far end hung up, it dropped or never connected) keeps its window on how it ended ([`CallStage`]: who it was
+//!   with, why it ended in plain words, how long it lasted, Call back or Rejoin, Close) until it is closed, by Close,
+//!   the window's own close or by itself a few seconds later; a test call's window stays on its results until it is
+//!   closed, as Teams' test call does. A new call takes the window of the last call's end.
 //! - **Closing it while the call is up leaves the call** (one hang-up, as the window's Leave asks), as closing Teams'
 //!   call window does, without asking. It isn't opened again for that call by itself; the main window's "Return to
 //!   call" ([`raise`]) brings it back while the call is still up (its leave refused, say), and else brings the open
@@ -79,6 +81,13 @@ struct Raiser(WeakEntity<CallWindows>);
 impl Global for Raiser {}
 
 impl EventEmitter<CallWindowsEvent> for CallWindows {}
+
+/// Whether the app has call windows: the end of a call is theirs to tell, not the main window's.
+#[must_use]
+pub fn present(cx: &App) -> bool {
+    cx.try_global::<Raiser>()
+        .is_some_and(|raiser| raiser.0.upgrade().is_some())
+}
 
 /// Brings the call window to the front ("Return to call"), opened again when its call is still up and it was closed;
 /// nothing in an app without call windows.
@@ -158,7 +167,7 @@ impl CallWindows {
     }
 
     /// The calls changed: the window opens for a call up (closing one of another call), and closes once its call
-    /// ended (a test call's stays on its results).
+    /// ended by the user's hang-up (one that ended otherwise stays on its end, a test call's on its results).
     fn follow(&mut self, cx: &mut Context<Self>) {
         // an invitation being declined is no call to show
         let up = self.accounts.iter().find_map(|account| {
@@ -167,12 +176,12 @@ impl CallWindows {
         });
         let Some((key, call)) = up else {
             self.closed = None;
-            let results = self.open.as_ref().is_some_and(|open| {
+            let stays = self.open.as_ref().is_some_and(|open| {
                 self.calls_of(&open.key)
                     .and_then(|calls| calls.read(cx).ended())
-                    .is_some_and(|ended| ended.id == open.call && ended.check.is_some())
+                    .is_some_and(|ended| ended.id == open.call && ended.stays_in_window())
             });
-            if !results {
+            if !stays {
                 self.close(cx);
             }
             return;
@@ -270,8 +279,8 @@ impl CallWindows {
         cx.emit(CallWindowsEvent::Closed);
     }
 
-    /// The user closed the window (its own close, or a test call's results' Close, which takes it away: `remove`):
-    /// the call left while it is up and not opened again for it, a test call's results dismissed.
+    /// The user closed the window (its own close, or the Close of a call's end or a test call's results, which takes
+    /// it away: `remove`): the call left while it is up and not opened again for it, how it ended dismissed.
     fn closed_by_user(&mut self, take_away: bool, cx: &mut Context<Self>) {
         let Some(open) = self.open.take() else { return };
         let Some(account) = self.accounts.iter().find(|account| account.key == open.key) else {

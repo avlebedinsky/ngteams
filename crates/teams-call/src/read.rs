@@ -321,6 +321,15 @@ pub struct RemoteEnd {
     /// The conversation a conversation's end names (`conversationUrl.Location`, its query left out): a start refused
     /// because the chat already has a running call names that call's (code 409, sub-code 5704).
     pub conversation: Option<String>,
+    /// Whose action ended it: the end's `sender` (a conversation's end's `callControllerTransactionEnd.sender`), its
+    /// MRI. A far end that hung up sends the end as its own, so its phrase reads `CallEndReasonLocalUserInitiated`
+    /// ("local" to the sender, not to the account); `None` when the service ended it by itself (`sender: null`).
+    pub by: Option<Mri>,
+    /// The sender's name as the end gives it (`displayName`).
+    pub by_name: Option<String>,
+    /// The end's `resultCategories` as delivered: `Success`, or for a call the service gave up on `JoinFailure`,
+    /// `MediaNegotiationFailure`, ….
+    pub categories: Vec<String>,
 }
 
 impl RemoteEnd {
@@ -329,6 +338,12 @@ impl RemoteEnd {
     #[must_use]
     pub fn chat_has_running_call(&self) -> bool {
         self.code == Some(409) && self.sub_code == Some(5704)
+    }
+
+    /// Whether the service gave the call up as a failure: a result category other than `Success`.
+    #[must_use]
+    pub fn failed(&self) -> bool {
+        self.categories.iter().any(|category| category != "Success")
     }
 }
 
@@ -343,6 +358,19 @@ pub(crate) fn remote_end(body: &[u8]) -> RemoteEnd {
         .get("callEnd")
         .or_else(|| body.get("conversationEnd"))
         .unwrap_or(&body);
+    // a conversation's end names who ended the call under its call controller's part, its own `sender` null
+    let sender = end
+        .get("sender")
+        .filter(|sender| sender.is_object())
+        .or_else(|| end.pointer("/callControllerTransactionEnd/sender"))
+        .filter(|sender| sender.is_object());
+    let text = |key: &str| {
+        sender
+            .and_then(|sender| sender.get(key))
+            .and_then(Value::as_str)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned)
+    };
     RemoteEnd {
         code: end.get("code").and_then(Value::as_i64),
         sub_code: end.get("subCode").and_then(Value::as_i64),
@@ -351,6 +379,13 @@ pub(crate) fn remote_end(body: &[u8]) -> RemoteEnd {
             .pointer("/conversationUrl/Location")
             .and_then(Value::as_str)
             .map(|url| url.split(['?', '#']).next().unwrap_or_default().to_owned()),
+        by: text("id").map(Mri::new),
+        by_name: text("displayName"),
+        categories: end
+            .get("resultCategories")
+            .and_then(Value::as_array)
+            .map(|categories| categories.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+            .unwrap_or_default(),
     }
 }
 
@@ -525,6 +560,34 @@ mod tests {
         assert!(bare.chat_has_running_call());
         assert_eq!(bare.conversation, None);
         assert!(!end.chat_has_running_call());
+        assert_eq!((end.by, end.by_name), (None, None));
+    }
+
+    #[test]
+    fn an_end_names_who_ended_the_call() {
+        let b = "8:orgid:00000000-0000-4000-8000-00000000000b";
+        // the far end's hang-up, in the captured shape: its own end, "local" to it
+        let hung_up = json!({"callEnd": {"reason": "noError", "sender": {"id": b, "displayName": "Synthetic B",
+            "endpointId": "e", "participantId": "p", "hidden": false}, "code": 0, "subCode": 0,
+            "phrase": "CallEndReasonLocalUserInitiated", "resultCategories": ["Success"]}});
+        let end = remote_end(hung_up.to_string().as_bytes());
+        assert_eq!(end.by.as_ref().map(teams_fence::Mri::as_str), Some(b));
+        assert_eq!(end.by_name.as_deref(), Some("Synthetic B"));
+        assert!(!end.failed());
+        // a conversation's end names it under its call controller's part
+        let all_left = json!({"code": 0, "subCode": 5002, "phrase": "All left.", "sender": null,
+            "resultCategories": ["Success"], "callControllerTransactionEnd": {"sender": {"id": b,
+            "displayName": "Synthetic B"}, "phrase": "CallEndReasonLocalUserInitiated"}});
+        let end = remote_end(all_left.to_string().as_bytes());
+        assert_eq!(
+            (end.sub_code, end.by_name.as_deref()),
+            (Some(5002), Some("Synthetic B"))
+        );
+        // the service's own end names nobody; a failure says so by its categories
+        let failed = json!({"callEnd": {"reason": "clientError", "sender": null, "code": 0, "subCode": 301_000,
+            "phrase": "SdpParsingFailure", "resultCategories": ["JoinFailure", "MediaNegotiationFailure"]}});
+        let end = remote_end(failed.to_string().as_bytes());
+        assert_eq!((end.by.as_ref(), end.failed()), (None, true));
     }
 
     #[test]

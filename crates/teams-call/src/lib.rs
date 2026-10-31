@@ -46,8 +46,8 @@
 //!   machine, and one that comes while a call is up isn't offered: nothing is sent for it.
 //! - **Ends**: any delivery at the call's own `call/end` or `conversationEnd` callback ends the call (or the ring, an
 //!   offered invitation's: [`CallEvent::RingEnded`]), whatever its body; what the body says is kept as delivered
-//!   ([`RemoteEnd`]), no reason read into a code no capture named. A step that fails (not sent, or not answered `2xx`)
-//!   ends the call, with a `leave` when the account was in it; nothing else of it is ever sent again (a write that
+//!   ([`RemoteEnd`]: its code, phrase, sender and categories), no reason read into a code no capture named. A step
+//!   that fails (not sent, or not answered `2xx`) ends the call, with a `leave` when the account was in it; nothing else of it is ever sent again (a write that
 //!   waits for the failed one, or that wasn't handed out yet, never goes). A decline or a `leave` that wasn't taken
 //!   ends it [`End::Failed`] too.
 //! - **Keep-alives**: the interval the acceptance or the `accept`'s answer asks for (`callKeepAliveInterval`) is kept

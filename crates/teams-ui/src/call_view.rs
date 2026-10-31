@@ -11,8 +11,9 @@
 //!   duration, reconnecting, taken by voicemail), "Return to call" (the call window brought to the front:
 //!   [`crate::call_window::raise`]), the microphone and the camera (a build that shows video) as icons whose tooltips
 //!   say Mute or Unmute and Turn camera on or off, Leave in Teams' red, and why an ask went nowhere while it is up.
-//!   Once a call ended, how (or why a later ask went nowhere) until the next call or Dismiss (an ✕); a test call's end
-//!   is its results, which its window shows ([`crate::call_stage`]), so the strip says nothing of it.
+//!   Once a call ended, why a later ask went nowhere until the next call or Dismiss (an ✕). How a call ended is its
+//!   window's to tell ([`crate::call_stage`]: who ended it, a test call's results), so in an app with call windows the
+//!   strip says nothing of it; a view without them (tests of the shell alone) says it here in a few words.
 //!
 //! A build that shows no calls draws none of it.
 //!
@@ -612,12 +613,14 @@ impl CallBar {
             ))
     }
 
-    /// How the last call ended, or why the last ask went nowhere, with Dismiss; nothing for a test call's end, whose
-    /// results its window shows.
+    /// How the last call ended, or why the last ask went nowhere, with Dismiss. In an app with call windows the end is
+    /// the window's to tell ([`crate::call_stage`]), as Teams' main window says nothing of it; elsewhere, nothing for a
+    /// test call's end either, whose results its window shows.
     fn after(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let windows = crate::call_window::present(cx);
         let model = self.calls.read(cx);
         let refused = model.refused().map(refusal_text);
-        let ended = model.ended().filter(|ended| ended.check.is_none());
+        let ended = model.ended().filter(|ended| ended.check.is_none() && !windows);
         let text = refused.or_else(|| ended.map(|ended| calls::end_text(&ended.end, ended.voicemail)))?;
         Some(
             strip(palette)

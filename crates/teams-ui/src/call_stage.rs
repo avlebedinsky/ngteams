@@ -13,6 +13,12 @@
 //!   person the call is with (a 1:1 call's far end's video on its tile). The account's own tile (its self view, a
 //!   border while it speaks) floats at the stage's bottom right, as Teams' self view does.
 //! - **The participants' pane** (People): who is in the call, the account first, and who speaks.
+//! - **How a call ended**, when the user didn't end it (the far end hung up, it dropped, never connected, went to
+//!   voicemail): who it was with (their avatar and name), why it ended in plain words ([`calls::Ended::reason`]: "Lab
+//!   Bee ended the call", "No one else joined the call", never a code the service sent), how long it lasted, and
+//!   Call back (a 1:1 or a group chat's call, Ctrl+Shift+C) or Rejoin (a group call that runs on without the account,
+//!   Ctrl+Shift+J), each a new start or join the user asks for, and Close. Left alone it closes by itself
+//!   ([`AUTO_CLOSE`]) unless Call back or Rejoin was asked.
 //! - **A test call's results** once it ended, as Teams shows them in its call window: the microphone, the speaker and
 //!   the camera (each naming the device the call used) and the network, each checked by what the call showed
 //!   ([`calls::DeviceCheck`]), with "Device settings" and Close.
@@ -20,10 +26,12 @@
 //! Every control asks through [`calls::ask`], as the main window's do; a device chosen goes to the settings, as the
 //! settings' own pickers do it. What it shows is traced (`call-participant shown` per grid cell when the grid changed,
 //! with the call's number, the participant's MRI and kinds for its camera, its line and whether it speaks, and
-//! `call-participant self` for the account's own; the tiles' `video-tile` lines), never a name.
+//! `call-participant self` for the account's own; the tiles' `video-tile` lines; `call-window ended` with the call's
+//! number, why it ended and what it offers: `call-back`, `rejoin` or `none`), never a name.
 
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::{
     Anchor, AnyElement, App, AsyncApp, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _,
@@ -40,13 +48,13 @@ use teams_media::devices::catalog::DeviceKind;
 
 use crate::bridge::Core;
 use crate::call_view::{self, CallPeople, Control, Look, control};
-use crate::calls::{self, ActiveCall, Ask, Calls, DeviceCheck, Ended, Verdict};
+use crate::calls::{self, ActiveCall, Ask, CallKind, Calls, DeviceCheck, EndReason, Ended, Verdict};
 use crate::icons::{Glyph, icon_button, selected_by};
 use crate::notify::SOMEONE;
 use crate::people;
 use crate::settings::SettingsModel;
 use crate::settings_view::{self, DeviceChoice, device_label};
-use crate::shell::{HangUpCall, ToggleCameraCall, ToggleMuteCall};
+use crate::shell::{CallChat, HangUpCall, JoinCall, ToggleCameraCall, ToggleMuteCall};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 use crate::video::{Tile, Tiles, VideoFeed};
@@ -60,10 +68,11 @@ const HEADER_HEIGHT: f32 = 56.0;
 const SELF_VIEW: (f32, f32) = (224.0, 126.0);
 /// The participants' pane's width, px.
 const ROSTER_WIDTH: f32 = 280.0;
-/// The avatar of the one the call rings, px.
-const CALLING_AVATAR: f32 = 96.0;
-/// A tile's avatar, px.
-const TILE_AVATAR: f32 = 72.0;
+/// The avatar of the one the call rings (or ended with) and of a tile without video: the kit's large one (80 px),
+/// whose initials it sizes and centres (a custom size leaves them small, at its top left).
+const BIG_AVATAR: Size = Size::Large;
+/// How long a call's end stays shown when the user does nothing.
+pub const AUTO_CLOSE: Duration = Duration::from_secs(8);
 
 /// What names a group chat's call in its window: the main window's chat list's row for it, when the list is there.
 pub type ChatNamer = Rc<dyn Fn(&str, &App) -> Option<SharedString>>;
@@ -73,8 +82,15 @@ pub type ChatNamer = Rc<dyn Fn(&str, &App) -> Option<SharedString>>;
 pub enum CallStageEvent {
     /// More's (or a test call's results') "Device settings": the main window's settings on their Calls page.
     DeviceSettings,
-    /// A test call's results' Close.
+    /// Close on a call's end or a test call's results, or the end left alone for [`AUTO_CLOSE`].
     Close,
+}
+
+/// What a call's end offers: a new start to its chat, or a join of its group call that runs on.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct FollowUp {
+    ask: Ask,
+    rejoin: bool,
 }
 
 /// What the stage is made of: the account's engine (its request side), its calls, the app's settings, the view
@@ -115,6 +131,12 @@ pub struct CallStage {
     grid_traced: Option<CallView>,
     /// The window's title as last set.
     titled: Option<SharedString>,
+    /// Who the call was with, as last said while it was up: its end still names them.
+    with: Option<SharedString>,
+    /// The call's end was shown (and traced).
+    end_shown: bool,
+    /// The end closing by itself, while it is due.
+    closing: Option<Task<()>>,
     focus: FocusHandle,
     ticking: Option<Task<()>>,
     _waking: Option<Task<()>>,
@@ -160,6 +182,9 @@ impl CallStage {
             results: None,
             grid_traced: None,
             titled: None,
+            with: None,
+            end_shown: false,
+            closing: None,
             focus: cx.focus_handle(),
             ticking: None,
             _waking: waking,
@@ -218,6 +243,7 @@ impl CallStage {
             if self.results.is_none() && self.ended(cx).is_some_and(|ended| ended.check.is_some()) {
                 self.results = Some(self.devices_in_use(cx));
             }
+            self.end_seen(cx);
         }
         let connected = live
             .as_ref()
@@ -228,6 +254,96 @@ impl CallStage {
             self.ticking = None;
         }
         cx.notify();
+    }
+
+    /// The call's end, shown for the first time (one the user didn't choose, not a test call's): traced, and due to
+    /// close by itself.
+    fn end_seen(&mut self, cx: &mut Context<Self>) {
+        if self.end_shown {
+            return;
+        }
+        let Some(ended) = self.end_card(cx) else { return };
+        self.end_shown = true;
+        let offers = match self.follow_up(&ended, cx) {
+            Some(FollowUp { rejoin: true, .. }) => "rejoin",
+            Some(_) => "call-back",
+            None => "none",
+        };
+        self.trace.record(
+            &TraceLine::new("call-window", "ended")
+                .call(self.call.get())
+                .kind(ended.reason(self.core.me()).name())
+                .kind(offers),
+        );
+        self.close_later(cx);
+    }
+
+    /// The end closes by itself after [`AUTO_CLOSE`].
+    fn close_later(&mut self, cx: &mut Context<Self>) {
+        self.closing = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
+            cx.background_executor().timer(AUTO_CLOSE).await;
+            // a stage that is gone has nothing left to close
+            let _ = this.update(cx, |this, cx| {
+                this.closing = None;
+                cx.emit(CallStageEvent::Close);
+            });
+        }));
+    }
+
+    /// How this window's call ended, when the window shows it as its end: one the user didn't choose, not a test
+    /// call's (whose results it shows).
+    fn end_card(&self, cx: &App) -> Option<Ended> {
+        self.ended(cx)
+            .filter(|ended| ended.check.is_none() && ended.stays_in_window())
+    }
+
+    /// What the end offers: Rejoin for a group call that runs on without the account (it dropped, never got in, or
+    /// the chat's call was running already) and that an invitation named; else Call back to its chat, or for a 1:1
+    /// invitation to the caller's chat; nothing in the read-only mode or for a test call.
+    fn follow_up(&self, ended: &Ended, cx: &App) -> Option<FollowUp> {
+        if self.core.read_only() || ended.kind == CallKind::TestCall {
+            return None;
+        }
+        let reason = ended.reason(self.core.me());
+        if reason == EndReason::Own {
+            return None;
+        }
+        if let Some(chat) = ended.group_chat() {
+            let runs_on = matches!(
+                reason,
+                EndReason::Dropped | EndReason::NotConnected | EndReason::ChatHasCall
+            );
+            if runs_on && self.calls.read(cx).joinable(chat) {
+                let ask = Ask::Join { chat: chat.to_owned() };
+                return Some(FollowUp { ask, rejoin: true });
+            }
+            if reason == EndReason::ChatHasCall {
+                return None;
+            }
+        }
+        let chat = ended.call_back_chat(self.core.me())?;
+        Some(FollowUp {
+            ask: Ask::Call { chat },
+            rejoin: false,
+        })
+    }
+
+    /// Call back or Rejoin, as the end offers it (its button or its key); nothing while the call is up or another
+    /// rings or sets up.
+    fn act_on_end(&mut self, rejoin: bool, cx: &mut Context<Self>) {
+        if self.calls.read(cx).busy() {
+            return;
+        }
+        let Some(ended) = self.end_card(cx) else { return };
+        let Some(follow_up) = self
+            .follow_up(&ended, cx)
+            .filter(|follow_up| follow_up.rejoin == rejoin)
+        else {
+            return;
+        };
+        // the user acted: the end no longer closes by itself
+        self.closing = None;
+        self.ask(follow_up.ask, cx);
     }
 
     /// The names of the devices the calls use now, in [`RESULT_DEVICES`]' order.
@@ -278,6 +394,13 @@ impl CallStage {
     ) -> gpui::Div {
         let state: SharedString = match (live, self.ended(cx)) {
             (Some(active), _) => call_view::status_with_duration(active).into(),
+            (None, Some(ended)) if ended.check.is_none() => {
+                let heading = ended.reason(self.core.me()).heading();
+                match ended.duration {
+                    Some(lasted) => format!("{heading} · {}", calls::duration_text(lasted.as_secs())).into(),
+                    None => heading.into(),
+                }
+            }
             (None, Some(ended)) => calls::end_text(&ended.end, ended.voicemail).into(),
             (None, None) => "Call ended".into(),
         };
@@ -738,10 +861,109 @@ impl CallStage {
                 .children(roster)
                 .into_any_element();
         }
-        match ended.and_then(|ended| Some((ended, ended.check?))) {
-            Some((ended, check)) => self.results_card(ended, check, palette, cx),
-            None => calling(title, "Call ended", palette),
+        match (ended, ended.and_then(|ended| ended.check)) {
+            (Some(ended), Some(check)) => self.results_card(ended, check, palette, cx),
+            (Some(ended), None) => self.end_view(ended, title, palette, cx),
+            (None, _) => calling(title, "Call ended", palette),
         }
+    }
+
+    /// How the call ended, as the window shows it once it did: who it was with, why it ended, how long it lasted,
+    /// Call back or Rejoin, and Close.
+    fn end_view(&self, ended: &Ended, title: &SharedString, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let group = ended.group_chat().is_some();
+        let reason = match ended.reason(self.core.me()) {
+            // a 1:1 call's far end goes by the name the app shows them by (the window's title), not the one its
+            // client sent with the end
+            EndReason::EndedBy(_) if !group => EndReason::EndedBy(None),
+            reason => reason,
+        };
+        // a group call's end that names nobody isn't the chat's doing
+        let other = if group { SOMEONE } else { title.as_ref() };
+        let why = reason.text(other).map(|why| {
+            div()
+                .debug_selector(|| "call-end-reason".to_owned())
+                .text_color(rgb(palette.foreground))
+                .child(SharedString::from(why))
+        });
+        let lasted = ended.duration.map(|lasted| {
+            div()
+                .debug_selector(|| "call-end-duration".to_owned())
+                .text_sm()
+                .text_color(rgb(palette.muted_foreground))
+                .child(SharedString::from(format!(
+                    "Duration {}",
+                    calls::duration_text(lasted.as_secs())
+                )))
+        });
+        let follow_up = self
+            .follow_up(ended, cx)
+            .filter(|_| !self.calls.read(cx).busy())
+            .map(|follow_up| follow_up_button(follow_up.rejoin, cx));
+        let close = selected_by(
+            "call-end-close",
+            Button::new("call-end-close")
+                .label("Close")
+                .outline()
+                .on_click(cx.listener(|_, _, _, cx| cx.emit(CallStageEvent::Close))),
+        );
+        div()
+            .debug_selector(|| "call-end".to_owned())
+            .size_full()
+            .flex()
+            .flex_col()
+            .items_center()
+            .justify_center()
+            .gap_2()
+            .p_4()
+            .bg(rgb(palette.background))
+            .child(ended_avatar(title, palette))
+            .child(
+                div()
+                    .mt_2()
+                    .max_w_full()
+                    .truncate()
+                    .text_xl()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(title.clone()),
+            )
+            .child(
+                div()
+                    .debug_selector(|| "call-end-heading".to_owned())
+                    .text_lg()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .child(reason.heading()),
+            )
+            .children(why)
+            .children(lasted)
+            .child(
+                div()
+                    .mt_4()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .children(follow_up)
+                    .child(close),
+            )
+            .into_any_element()
+    }
+
+    /// Who the call was with, as its end names them: as last said while it was up, else as the end knows them.
+    fn ended_title(&self, ended: &Ended, cx: &App) -> SharedString {
+        if let Some(with) = &self.with {
+            return with.clone();
+        }
+        let chat_name = |chat: &str| self.namer.as_ref().and_then(|namer| namer(chat, cx));
+        match (ended.kind, &ended.chat) {
+            (CallKind::Incoming, None) => ended.caller_name.clone().map(SharedString::from),
+            (_, Some(chat)) => chat_name(chat),
+            _ => None,
+        }
+        .or_else(|| {
+            let names: Vec<&str> = self.people.last().iter().map(|(_, name)| name.as_ref()).collect();
+            (!names.is_empty()).then(|| SharedString::from(names.join(", ")))
+        })
+        .unwrap_or_else(|| SharedString::from("Call"))
     }
 }
 
@@ -751,14 +973,22 @@ impl Render for CallStage {
         let live = self.live(cx);
         let ended = self.ended(cx);
         let title = match (&live, &ended) {
-            (Some(active), _) => self.title(active, cx),
+            (Some(active), _) => {
+                let title = self.title(active, cx);
+                self.with = Some(title.clone());
+                title
+            }
             (None, Some(ended)) if ended.check.is_some() => SharedString::from("Test call"),
-            _ => SharedString::from("Call"),
+            (None, Some(ended)) => self.ended_title(ended, cx),
+            (None, None) => SharedString::from("Call"),
         };
         self.retitle(&title, window);
         let body = self.body((live.as_ref(), ended.as_ref()), &title, palette, cx);
         let header = self.header(live.as_ref(), title, palette, cx);
-        let refused = live.as_ref().and_then(|_| self.refused(palette, cx));
+        // a refusal while the call is up, or of a call back from its end
+        let refused = (live.is_some() || ended.as_ref().is_some_and(|ended| ended.check.is_none()))
+            .then(|| self.refused(palette, cx))
+            .flatten();
         div()
             .debug_selector(|| "call-window".to_owned())
             .key_context(CONTEXT)
@@ -766,6 +996,8 @@ impl Render for CallStage {
             .on_action(cx.listener(|this, _: &ToggleMuteCall, _, cx| this.ask(Ask::ToggleMute, cx)))
             .on_action(cx.listener(|this, _: &ToggleCameraCall, _, cx| this.ask(Ask::ToggleCamera, cx)))
             .on_action(cx.listener(|this, _: &HangUpCall, _, cx| this.ask(Ask::HangUp, cx)))
+            .on_action(cx.listener(|this, _: &CallChat, _, cx| this.act_on_end(false, cx)))
+            .on_action(cx.listener(|this, _: &JoinCall, _, cx| this.act_on_end(true, cx)))
             .size_full()
             .flex()
             .flex_col()
@@ -908,7 +1140,7 @@ fn calling(title: &SharedString, state: &str, palette: Palette) -> AnyElement {
         .items_center()
         .justify_center()
         .gap_3()
-        .child(people::avatar(Some(title), None, Size::Size(px(CALLING_AVATAR))))
+        .child(people::avatar(Some(title), None, BIG_AVATAR))
         .child(
             div()
                 .text_xl()
@@ -921,6 +1153,52 @@ fn calling(title: &SharedString, state: &str, palette: Palette) -> AnyElement {
                 .child(SharedString::from(state.to_owned())),
         )
         .into_any_element()
+}
+
+/// The avatar of who an ended call was with, a red hung-up mark on it.
+fn ended_avatar(title: &SharedString, palette: Palette) -> gpui::Div {
+    div()
+        .relative()
+        .child(people::avatar(Some(title), None, BIG_AVATAR))
+        .child(
+            div()
+                .absolute()
+                .bottom_0()
+                .right_0()
+                .size(px(32.0))
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded_full()
+                .border_2()
+                .border_color(rgb(palette.background))
+                .bg(rgb(theme::DANGER))
+                .text_color(rgb(0x00ff_ffff))
+                .child(Glyph::PHONE_OFF.icon().size(px(16.0))),
+        )
+}
+
+/// Call back (Teams' green) or Rejoin, with its key.
+fn follow_up_button(rejoin: bool, cx: &mut Context<CallStage>) -> AnyElement {
+    if rejoin {
+        control(
+            "call-end-rejoin",
+            Control::Labelled(Glyph::PHONE, "Rejoin"),
+            ("Rejoin the call", &JoinCall),
+            Look::Success,
+            cx,
+            |this, cx| this.act_on_end(true, cx),
+        )
+    } else {
+        control(
+            "call-end-call-back",
+            Control::Labelled(Glyph::PHONE, "Call back"),
+            ("Call back", &CallChat),
+            Look::Success,
+            cx,
+            |this, cx| this.act_on_end(false, cx),
+        )
+    }
 }
 
 /// The tiles in a grid of near-square rows, each tile as wide as a column, a short last row centred: Teams' gallery.
@@ -964,7 +1242,7 @@ fn tile_view(tile: StageTile, video: Option<AnyElement>, palette: Palette) -> An
             .flex()
             .items_center()
             .justify_center()
-            .child(people::avatar(Some(&name), None, Size::Size(px(TILE_AVATAR))))
+            .child(people::avatar(Some(&name), None, BIG_AVATAR))
             .into_any_element()
     });
     div()

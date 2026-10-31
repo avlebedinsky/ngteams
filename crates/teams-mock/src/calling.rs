@@ -585,17 +585,30 @@ fn leave(state: &mut State, index: usize, body: &Value) {
         .and_then(Value::as_str)
         .unwrap_or("CallEndReasonLocalUserInitiated")
         .to_owned();
-    end_call(state, index, code, &phrase);
+    let call = state.calling.calls[index].clone();
+    if call.phase == CallPhase::Ended {
+        return;
+    }
+    // the end names who left as its sender, as the service's does
+    let mut end = end_body(code, &phrase);
+    if let Some(from) = body.pointer("/participants/from").filter(|from| from.is_object()) {
+        end["callEnd"]["sender"] = from.clone();
+    }
+    end_call_with(state, index, end);
 }
 
 /// Ends call `index` for everyone in it, with `code` and `phrase`: every endpoint that attached to a leg not answered
 /// elsewhere, the one that answered, the caller and those who joined get the call's end.
 fn end_call(state: &mut State, index: usize, code: i64, phrase: &str) {
+    end_call_with(state, index, end_body(code, phrase));
+}
+
+/// Ends call `index` for everyone in it with the end `body`.
+fn end_call_with(state: &mut State, index: usize, body: Value) {
     let call = state.calling.calls[index].clone();
     if call.phase == CallPhase::Ended {
         return;
     }
-    let body = end_body(code, phrase);
     let mut ends: Vec<Option<String>> = call
         .legs
         .iter()

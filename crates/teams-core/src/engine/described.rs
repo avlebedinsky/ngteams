@@ -130,6 +130,19 @@ fn plain(event: &Event) -> String {
         Event::RingEnded { call, end } => {
             format!("call {}: its ring ended ({:?}, {:?})", call.get(), end.code, end.phrase)
         }
+        // an end by its code, phrase, sender's MRI and categories: never the sender's name
+        Event::Call {
+            call,
+            status: crate::CallStatus::Ended(crate::End::Remote(end)),
+        } => format!(
+            "call {}: ended remotely ({:?}, {:?}, {:?}, by {}, {:?})",
+            call.get(),
+            end.code,
+            end.sub_code,
+            end.phrase,
+            end.by.as_ref().map_or("nobody", |by| by.as_str()),
+            end.categories
+        ),
         Event::Call { call, status } => format!("call {}: {status:?}", call.get()),
         Event::Voicemail { call } => format!("call {}: taken by the callee's voicemail", call.get()),
         Event::CameraOff { call } => format!("call {}: its camera went off", call.get()),

@@ -432,6 +432,26 @@ call; a native callee whose call ended while its endpoint metadata was on its wa
   after the invitation, `code 487`, `phrase: "Call cancelled on timeout."`, at the attach's `call/end` callback; the
   call runs on, and the invitation's conversation stays joinable.
 
+## How a call's end reads
+
+Seen in the personal build's own calls (2026-10-30). An end delivered at the call's `call/end` callback is
+`{"callEnd": {"reason", "sender", "code", "subCode", "phrase", "resultCategories"}, "debugContent"}`:
+
+- **The far end hung up**: `sender` is the far end (its MRI and `displayName`), `reason` `noError`, `code` 0, `phrase`
+  `CallEndReasonLocalUserInitiated`, `resultCategories` `["Success"]`. The phrase is from the sender's side: "local"
+  means the sender's own user, so the same phrase comes back with the account as `sender` after its own `leave`. Who
+  ended a call is told by `sender`, never by the phrase.
+- **The service gave the call up**: `sender` null, `reason` `clientError`, and `resultCategories` naming the failure
+  (`JoinFailure`, `MediaNegotiationFailure`; `phrase` `SdpParsingFailure`, `subCode` 301000 for a group join whose
+  answer the mixer didn't take).
+- **A conversation's end** at the `conversationEnd` callback: `sender` null, its `phrase` a sentence of the service's
+  own and its `subCode` the cause: 5002 when everyone left the audio-video modality (with
+  `callControllerTransactionEnd.sender` naming who left last, its phrase again `CallEndReasonLocalUserInitiated`),
+  5013 when no one else joined a group call. The call `end` and the conversation's end both come, either first, each
+  delivered again 5–13 s later (the machine ends the call on the first).
+
+The app names the cause in plain words from these (`teams_ui::calls::Ended::reason`) and shows no code or phrase.
+
 ## The SDP dialect
 
 Every offer and answer in the signaling is a `mediaContent` object: the SDP as `blob` and `contentType`

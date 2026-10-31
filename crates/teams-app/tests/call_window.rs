@@ -18,7 +18,8 @@
 //!   (following the system), and back once the headset is unplugged, b hearing each one's tone alone in turn and the
 //!   call never ending; a turns its camera on (Ctrl+Shift+O: the sandbox's fake camera, H.264 the bundled
 //!   source's), and b's window presents a's picture through GPUI's external surface and a's its self view (each
-//!   counted by the trace's `video-tile presented`); a hangs up (Ctrl+Shift+H) and b's call ends with it;
+//!   counted by the trace's `video-tile presented`); a hangs up (Ctrl+Shift+H) and b's call ends with it, b's
+//!   window staying on who ended it (with Call back) until it closes by itself;
 //! - a calls b again; b declines from the notification's Decline; a's call is taken by b's voicemail (as captured) and
 //!   a's call window and in-call strip say so; a hangs up;
 //! - a places the test call from the settings' Calls page ("Make a test call"): the same call window, the echo's cell
@@ -579,8 +580,13 @@ fn calls(a: &mut AppUnderTest, b: &mut AppUnderTest, a_box: &Sandbox, b_box: &Sa
     ctrl_shift(&mut a_keys, 'h')?;
     a.in_call(&["ended", "hung-up"])?;
     b.in_call(&["ended", "remote"])?;
-    // the windows close with the call
+    // a's window closes with its own hang-up; b's says who ended the call, with Call back, then closes by itself
     a.call_windows("closed", 1)?;
+    let ended = b.trace.wait_for("call-window", "ended")?;
+    if strings(&ended, "kinds") != ["ended-by-other", "call-back"] {
+        return Err(format!("b's call window tells another end: {ended}").into());
+    }
+    shot(b_box, "teams-app-call-ended.png")?;
     b.call_windows("closed", 1)?;
 
     declined_call(a, b, &mut a_keys, (a_box, b_box))?;

@@ -24,7 +24,7 @@
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui::{App, AsyncApp, Context, Entity};
 use teams_core::{
@@ -202,11 +202,170 @@ pub struct Ended {
     pub id: CallId,
     pub kind: CallKind,
     pub chat: Option<String>,
+    /// Who called, for an invitation answered.
+    pub caller: Option<Mri>,
+    /// The caller's name as the invitation gave it.
+    pub caller_name: Option<String>,
     pub end: End,
     pub voicemail: bool,
+    /// How long it was connected (from its media's connect to its end); `None` when it never connected.
+    pub duration: Option<Duration>,
     /// A test call's results: what it showed of the devices and the network ([`DeviceCheck`]); `None` for any other
     /// call.
     pub check: Option<DeviceCheck>,
+}
+
+impl Ended {
+    /// How `active` ended with `end`, now.
+    fn of(active: ActiveCall, end: End) -> Self {
+        let check = active.test_check();
+        Self {
+            id: active.id,
+            kind: active.kind,
+            chat: active.chat,
+            caller: active.caller,
+            caller_name: active.caller_name,
+            end,
+            voicemail: active.voicemail,
+            duration: active.connected_at.map(|at| at.elapsed()),
+            check,
+        }
+    }
+
+    /// Why it ended, in the user's terms; `me` is the account's MRI.
+    #[must_use]
+    pub fn reason(&self, me: &str) -> EndReason {
+        let remote = match &self.end {
+            End::HungUp | End::Declined => return EndReason::Own,
+            End::Failed(_) if self.duration.is_some() => return EndReason::Dropped,
+            End::Failed(_) => return EndReason::NotConnected,
+            End::Remote(remote) => remote,
+        };
+        if self.voicemail {
+            EndReason::Voicemail
+        } else if remote.chat_has_running_call() {
+            EndReason::ChatHasCall
+        } else if let Some(by) = &remote.by {
+            if by.as_str().eq_ignore_ascii_case(me) {
+                EndReason::EndedElsewhere
+            } else {
+                EndReason::EndedBy(remote.by_name.clone())
+            }
+        } else if remote.sub_code == Some(NOBODY_JOINED) {
+            EndReason::NobodyJoined
+        } else if remote.sub_code == Some(EVERYONE_LEFT) {
+            EndReason::EveryoneLeft
+        } else if remote.failed() && self.duration.is_some() {
+            EndReason::Dropped
+        } else if remote.failed() {
+            EndReason::NotConnected
+        } else {
+            EndReason::Ended
+        }
+    }
+
+    /// Whether its window stays open on how it ended: a test call's results, and any end the user didn't choose
+    /// (the far end hung up, the call dropped or never connected); a hang-up or a decline of the user's closes it.
+    #[must_use]
+    pub fn stays_in_window(&self) -> bool {
+        self.check.is_some() || !matches!(self.end, End::HungUp | End::Declined)
+    }
+
+    /// The group chat it was in, if it was a group call (a 1:1 chat's id names its two members).
+    #[must_use]
+    pub fn group_chat(&self) -> Option<&str> {
+        self.chat
+            .as_deref()
+            .filter(|chat| teams_fence::one_to_one_pair(chat).is_none())
+    }
+
+    /// The chat a call back goes to: the call's chat, or for a 1:1 invitation the chat of the account (`me`) and its
+    /// caller.
+    #[must_use]
+    pub fn call_back_chat(&self, me: &str) -> Option<String> {
+        self.chat.clone().or_else(|| {
+            let caller = self.caller.as_ref()?;
+            teams_fence::one_to_one_id(me, caller.as_str())
+        })
+    }
+}
+
+/// A conversation's end's sub-code when nobody else joined a group call ("…as no one else has joined the group
+/// call.", seen 2026-10-30).
+const NOBODY_JOINED: i64 = 5013;
+/// A conversation's end's sub-code when everyone left the call ("…as all participants left the audio-video
+/// modality.", seen 2026-10-30).
+const EVERYONE_LEFT: i64 = 5002;
+
+/// Why a call ended, as the user is told it: never a code the service sent.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EndReason {
+    /// The user hung up or declined here.
+    Own,
+    /// Someone else in the call ended it (a 1:1 call's far end hung up), named as the end names them.
+    EndedBy(Option<String>),
+    /// The account ended it on another of its devices.
+    EndedElsewhere,
+    /// The callee's voicemail took it (declined there, or not answered), and the call ended there.
+    Voicemail,
+    /// Nobody else joined the group call.
+    NobodyJoined,
+    /// Everyone else left the call.
+    EveryoneLeft,
+    /// The chat already has a call running: the start was turned away.
+    ChatHasCall,
+    /// It connected, then dropped (its media lost, a step not taken, the service gave it up).
+    Dropped,
+    /// It never connected.
+    NotConnected,
+    /// It ended, and the end says nothing more.
+    Ended,
+}
+
+impl EndReason {
+    /// The trace's name for it.
+    #[must_use]
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Own => "own",
+            Self::EndedBy(_) => "ended-by-other",
+            Self::EndedElsewhere => "ended-elsewhere",
+            Self::Voicemail => "voicemail",
+            Self::NobodyJoined => "nobody-joined",
+            Self::EveryoneLeft => "everyone-left",
+            Self::ChatHasCall => "chat-has-call",
+            Self::Dropped => "dropped",
+            Self::NotConnected => "not-connected",
+            Self::Ended => "ended",
+        }
+    }
+
+    /// The heading the window shows.
+    #[must_use]
+    pub fn heading(&self) -> &'static str {
+        match self {
+            Self::NotConnected | Self::ChatHasCall => "Couldn't connect the call",
+            Self::Dropped => "Call dropped",
+            _ => "Call ended",
+        }
+    }
+
+    /// What it says of why, `other` naming the one the call was with when the end names nobody; nothing when there is
+    /// nothing more to say than its heading.
+    #[must_use]
+    pub fn text(&self, other: &str) -> Option<String> {
+        Some(match self {
+            Self::Own | Self::Ended => return None,
+            Self::EndedBy(name) => format!("{} ended the call", name.as_deref().unwrap_or(other)),
+            Self::EndedElsewhere => "You left the call on another device".to_owned(),
+            Self::Voicemail => format!("{other} didn't pick up: the call went to voicemail"),
+            Self::NobodyJoined => "No one else joined the call".to_owned(),
+            Self::EveryoneLeft => "Everyone else left the call".to_owned(),
+            Self::ChatHasCall => "A call is already going on in this chat".to_owned(),
+            Self::Dropped => "The connection was lost".to_owned(),
+            Self::NotConnected => "Check your network and try again".to_owned(),
+        })
+    }
 }
 
 /// What the user asks of the calls.
@@ -384,15 +543,7 @@ impl Calls {
         self.ringing = None;
         self.asked = None;
         if let Some(active) = self.call.take() {
-            let check = active.test_check();
-            self.ended = Some(Ended {
-                id: active.id,
-                kind: active.kind,
-                chat: active.chat,
-                end: End::HungUp,
-                voicemail: active.voicemail,
-                check,
-            });
+            self.ended = Some(Ended::of(active, End::HungUp));
             self.refused = None;
         }
         cx.notify();
@@ -494,17 +645,9 @@ impl Calls {
         }
         if let CallStatus::Ended(end) = status {
             active.check.failed = matches!(end, End::Failed(_));
-            self.ended = Some(Ended {
-                id: call,
-                kind: active.kind,
-                chat: active.chat.clone(),
-                end: end.clone(),
-                voicemail: active.voicemail,
-                check: active.test_check(),
-            });
             // a refusal during the call was shown in its bar: how it ended is what is told now
             self.refused = None;
-            self.call = None;
+            self.ended = self.call.take().map(|active| Ended::of(active, end.clone()));
         }
     }
 
@@ -787,18 +930,15 @@ pub fn status_text(active: &ActiveCall) -> String {
     }
 }
 
-/// What the in-call view says of how a call ended.
+/// What the in-call view says of how a call ended, in a few words and never with a code the service sent (the
+/// call window says why: [`Ended::reason`]).
 #[must_use]
 pub fn end_text(end: &End, voicemail: bool) -> String {
     match end {
         _ if voicemail => "Call ended (it went to voicemail)".to_owned(),
-        End::HungUp => "Call ended".to_owned(),
+        End::HungUp | End::Remote(_) => "Call ended".to_owned(),
         End::Declined => "Call declined".to_owned(),
-        End::Remote(remote) => match &remote.phrase {
-            Some(phrase) => format!("Call ended by the other side ({phrase})"),
-            None => "Call ended by the other side".to_owned(),
-        },
-        End::Failed(step) => format!("Call failed ({step})"),
+        End::Failed(_) => "Call failed".to_owned(),
     }
 }
 
