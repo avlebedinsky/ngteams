@@ -3,9 +3,8 @@
 # the user to run on their own desktop. **Agents run this script only when the user asks** (CLAUDE.md): it is the only
 # thing that sets the install marker, without which both personal binaries refuse to start.
 #
-# - Makes sure WPE WebKit is there for the sign-in window's page: the system's `wpewebkit` (2.54 or newer), else the
-#   vendored package (scripts/fetch-wpe.sh, under ~/.cache/ngteams/vendor/, which the binary's rpath names; its page
-#   engine then runs under `bwrap`).
+# - Requires the system's `wpewebkit` (2.54 or newer, README.md "WPE WebKit") for the sign-in window's page: the
+#   build links it and the installed binary runs its helper processes, so without it the script stops before building.
 # - Builds `ngteams` with `cargo build --release -p ngteams`, its target dir apart from every other build
 #   (`target/personal`), so no `test-support` or lab build is unified in. The sign-in window lives in it: it opens
 #   that window itself and runs itself again as the window's page engine.
@@ -31,10 +30,10 @@ if ! command -v nasm > /dev/null; then
   echo "warning: nasm isn't installed: the calls' video codec is built without its SIMD code (slow at 720p);" >&2
   echo "         install nasm, then: cargo clean --release -p openh264-sys2 --target-dir $target, and run this again" >&2
 fi
-if ! pkg-config --atleast-version=2.54 wpe-webkit-2.0 2> /dev/null; then
-  "$root/scripts/fetch-wpe.sh" > /dev/null
-  command -v bwrap > /dev/null || echo "warning: bwrap isn't installed: the sign-in window's page can't run" \
-    "from the vendored WPE WebKit; install bubblewrap (or the distribution's wpewebkit)" >&2
+if ! pkg-config --atleast-version=2.54 wpe-webkit-2.0 wpe-web-process-extension-2.0 2> /dev/null; then
+  echo "error: the sign-in window needs the system's WPE WebKit 2.54 or newer (the wpewebkit package)," >&2
+  echo "       which isn't installed or is older: sudo pacman -S wpewebkit, then run this again" >&2
+  exit 1
 fi
 TEAMS_PERSONAL_INSTALL=1 cargo build --release -p ngteams --target-dir "$target"
 

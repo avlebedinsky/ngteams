@@ -94,8 +94,8 @@ mod tests {
     fn descendants_are_found_through_their_parents_and_a_loop_ends() {
         let table: HashMap<u32, (u32, String)> = [
             (10, (1, "app".to_owned())),
-            (11, (10, "bwrap".to_owned())),
-            (12, (11, "bwrap".to_owned())),
+            (11, (10, "worker".to_owned())),
+            (12, (11, "sh".to_owned())),
             (13, (12, WEB_PROCESS.to_owned())),
             (20, (1, WEB_PROCESS.to_owned())),
             (30, (31, "x".to_owned())),

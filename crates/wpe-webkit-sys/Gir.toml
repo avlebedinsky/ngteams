@@ -8,8 +8,7 @@ version = "2.0"
 # the WPE API the GPUI frontend targets (WPE_API_VERSION of build/pins.env): nothing older is probed or bound
 min_cfg_version = "2.54"
 single_version_file = "."
-# build.rs is generated once and then kept: it says where WPE WebKit comes from when the probe fails, and adds the
-# tests' rpath to a vendored WPE (scripts/fetch-wpe.sh)
+# build.rs is generated once and then kept: it says which package brings WPE WebKit when the probe fails
 split_build_rs = true
 external_libraries = ["GLib", "GObject", "Gio"]
 

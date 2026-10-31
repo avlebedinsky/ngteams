@@ -4,9 +4,9 @@
 //! [`Page::start`] sets the page up before anything loads:
 //! - the web process extension (`teams-signin-extension`) copied alone into a private directory `WebKit` loads it from,
 //!   given the guard's socket; the guard ([`crate::guard`]) serving on that socket;
-//! - the engine ([`teams_wpe::Host::start_worker`]): this executable run again as a worker process of its own (under
-//!   the vendored package's overlay where WPE `WebKit` isn't the system's), rendering on the CPU into shared memory,
-//!   every web process it starts loading the extension;
+//! - the engine ([`teams_wpe::Host::start_worker`]): this executable run again as a worker process of its own (so
+//!   the window opens again in the same process), rendering on the CPU into shared memory, every web process it starts
+//!   loading the extension;
 //! - an ephemeral network session (no website data kept), Intelligent Tracking Prevention off, downloads cancelled,
 //!   and its proxy set by the window's [`Bound`]: with [`Bound::Loopback`] it reaches numeric loopback addresses
 //!   directly and anything else only through [`crate::egress::BlackHole`], which refuses it; with `Bound::Hosts` (the

@@ -19,7 +19,7 @@ glib-sys.workspace = true
 gobject-sys.workspace = true
 
 [build-dependencies]
-# where WPE WebKit's library is (`wpe-web-process-extension-2.0`, through scripts/pkg-config.sh)
+# where WPE WebKit's library is (`wpe-web-process-extension-2.0`, through pkg-config)
 pkg-config.workspace = true
 
 [lints]

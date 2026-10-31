@@ -161,9 +161,10 @@ Undoing one needs a new reason, not a cleanup; the why is in each path's module 
 - Call media is libwebrtc's (`crates/teams-media/src/rtc.rs`): relay-only ICE, SDP only in Teams' dialect.
 - The sign-in window (`crates/teams-signin`) is Microsoft's page in a WPE WebKit view (`crates/teams-wpe`, from
   ngterm) drawn in a GPUI window of the app that asks; its engine is that app's executable run again as a worker
-  (`teams_wpe::worker::serve_if_asked` early in `main`; under `bwrap` with `scripts/fetch-wpe.sh`'s package where WPE
-  WebKit isn't the system's). Every request a page sends is decided and logged to `fence.log` by the guard before it
-  goes (`teams-signin-extension` in every web process); the guard isn't a complete fence
+  (`teams_wpe::worker::serve_if_asked` early in `main`), on the system's `wpewebkit` (2.54 or newer, found by
+  pkg-config; its helpers are started from `/usr/lib/wpe-webkit-2.0/`, so it is never vendored or linked statically).
+  Every request a page sends is decided and logged to `fence.log` by the guard before it goes
+  (`teams-signin-extension` in every web process); the guard isn't a complete fence
   (`docs/backlog/webkit-sign-in-guard-redirects.md`), so the network session's only way out is the egress proxy. The
   lab's window (`teams-signin --lab`) stays on loopback; the lab signs in through `proto-lab auth`. The personal
   window opens in `ngteams` itself, bound to Entra's and the identity provider's hosts (`egress::HostGate`).

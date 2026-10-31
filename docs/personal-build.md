@@ -250,7 +250,7 @@ sign-in:
 - **A window of the personal build's own app**: `ngteams` opens the sign-in window itself, a GPUI window beside its
   others (`teams_signin::window::Windows`, asked from the sign-in running off GPUI's foreground), so it is gated as
   `Fence::open_personal` is. The page's engine is `ngteams` run again as a worker process (`teams_wpe::worker`, served
-  right after `ngteams`' refusals), under `bwrap` with the vendored WPE WebKit overlaid where the system has none. The
+  right after `ngteams`' refusals), on the system's `wpewebkit`, which the install requires. The
   window, the guard and the egress code stay in `teams-signin`'s lib; the host gate below and the code that lifts
   `NOT_LIVE` sit behind a `personal` feature of `teams-signin` that only `crates/ngteams` enables (the same manifest
   test as `teams-fence/personal`). The lab's `teams-signin` binary keeps only `--lab`, `NOT_LIVE` and its loopback

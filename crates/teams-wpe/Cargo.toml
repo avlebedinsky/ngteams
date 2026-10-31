@@ -1,13 +1,11 @@
 [package]
 name = "teams-wpe"
-description = "WPE WebKit offscreen, taken from ngterm's ngterm-wpe (MIT): web views on an engine of their own (a worker process under the vendored package's overlay), frames out as SHM pixels or dmabufs, input in"
+description = "WPE WebKit offscreen, taken from ngterm's ngterm-wpe (MIT): web views on an engine of their own (in process or in a worker process), frames out as SHM pixels or dmabufs, input in"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 license = "MIT"
-# no library of its own: the key that hands dependents' build scripts the library directories (DEP_TEAMS_WPE_LIBDIRS)
-links = "teams-wpe"
 
 [dependencies]
 wpe-webkit-sys.workspace = true
@@ -26,9 +24,6 @@ rustix = { workspace = true, features = ["event", "fs", "net"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-
-[build-dependencies]
-pkg-config.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

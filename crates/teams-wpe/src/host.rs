@@ -213,26 +213,18 @@ pub struct Host {
 }
 
 impl Host {
-    /// Starts the engine where this build's WPE `WebKit` can run it: on a thread of this process for the system's
-    /// package, or in a process already inside the vendored package's overlay (the worker itself, an engine-only
-    /// test); in a worker under that overlay otherwise, so this process never enters it (crate `worker`). Events
-    /// arrive on the returned receiver until the engine ends.
+    /// Starts the engine on a thread of this process. Events arrive on the returned receiver until the engine ends.
     ///
     /// # Errors
     ///
     /// An invalid `config`, a second start in this process, a thread or a worker that cannot be started, or a
     /// display that does not connect (a render node `WebKit` cannot use).
     pub fn start(config: HostConfig) -> Result<(Self, Receiver<Event>), StartError> {
-        let backend = if crate::launcher::helpers_reachable() {
-            Backend::InProcess
-        } else {
-            Backend::Worker
-        };
-        Self::start_in(config, backend)
+        Self::start_in(config, Backend::InProcess)
     }
 
-    /// Starts the engine in a worker process whatever the provider: under the vendored package's overlay, or plainly
-    /// for the system's (where [`Host::start`] would run it in process).
+    /// Starts the engine in a worker process of its own (crate `worker`): this program run again, so a process may
+    /// start one after another.
     ///
     /// # Errors
     ///

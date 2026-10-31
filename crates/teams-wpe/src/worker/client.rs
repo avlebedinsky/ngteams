@@ -43,7 +43,6 @@ use crate::config::HostConfig;
 use crate::event::{Event, SchemeError, SchemeResponse};
 use crate::frames::{BufferId, DmaBuf, Frame, FrameContent};
 use crate::host::{Command as EngineCommand, Evaluation, StartError, ViewCommand};
-use crate::launcher::{self, Provider};
 use crate::spec::ViewId;
 
 /// How long the worker may take to say hello and start its engine.
@@ -337,7 +336,7 @@ struct Evaluations {
     ended: bool,
 }
 
-/// The worker process: its `bwrap` (or itself) and the process group they lead.
+/// The worker process and the process group it leads.
 struct Worker {
     child: Mutex<Option<Child>>,
     group: i32,
@@ -388,7 +387,6 @@ impl std::fmt::Debug for Client {
 }
 
 /// This process's own image, open for the worker to run: the image the app runs even if its file was replaced since.
-/// (The worker cannot reach it as `/proc/<pid>/exe` from inside the overlay's user namespace.)
 fn own_image() -> Result<OwnedFd, StartError> {
     use std::os::unix::fs::OpenOptionsExt as _;
     std::fs::OpenOptions::new()
@@ -399,19 +397,9 @@ fn own_image() -> Result<OwnedFd, StartError> {
         .map_err(|err| StartError::Worker(format!("this program cannot open its own image: {err}")))
 }
 
-/// What the worker runs: the image `image` names (inherited as that descriptor), under the overlay for a vendored WPE
-/// `WebKit`.
+/// What the worker runs: the image `image` names (inherited as that descriptor).
 fn worker_command(image: i32) -> Command {
-    let image = PathBuf::from(format!("/proc/self/fd/{image}"));
-    match launcher::provider() {
-        Provider::System => Command::new(image),
-        Provider::Vendored { libdir } => {
-            let cwd = std::env::current_dir().ok();
-            let mut command = Command::new("bwrap");
-            command.args(launcher::overlay_args(&libdir, cwd.as_deref(), false, &[], &image));
-            command
-        }
-    }
+    Command::new(PathBuf::from(format!("/proc/self/fd/{image}")))
 }
 
 impl Client {

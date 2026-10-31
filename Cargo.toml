@@ -138,7 +138,7 @@ glib = "0.22.10"
 glib-sys = "0.22.9"
 gobject-sys = "0.22.9"
 soup-sys = { package = "soup3-sys", version = "0.9.0" }
-# the WPE bindings' build scripts find WPE WebKit through pkg-config (scripts/pkg-config.sh)
+# the WPE bindings' build scripts find the system's WPE WebKit through pkg-config
 pkg-config = "0.3.34"
 system-deps = "7.0.8"
 # `teams-wpe`'s input modifiers and page settings

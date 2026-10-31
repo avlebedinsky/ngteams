@@ -8037,7 +8037,6 @@ dependencies = [
  "glib",
  "libc",
  "log",
- "pkg-config",
  "rustix",
  "serde",
  "serde_json",

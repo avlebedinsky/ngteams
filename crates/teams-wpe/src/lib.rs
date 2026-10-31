@@ -25,10 +25,11 @@
 //! - The `WebKit` surface the overlay uses: browser stores ([`SessionSpec`]: in memory, or on disk for saved logins;
 //!   downloads refused), [`Settings`], user scripts and script message handlers, navigation and response policy, URI
 //!   schemes, and what a page may not do (new windows, dialogs, file choosers, permissions, full screen) refused.
-//! - [`worker`]: the engine in a process of its own, which the vendored WPE `WebKit` (its helpers at a compiled-in
-//!   path, reachable only inside an overlay of `/usr/lib`, [`launcher`]) always gets, so the consumer itself never runs
-//!   in that overlay's user namespace; [`Host::start_worker`] asks for one anywhere. Every program that may start an
-//!   engine calls [`worker::serve_if_asked`] first thing in its `main`.
+//! - [`worker`]: the engine in a process of its own, which [`Host::start_worker`] asks for: a consumer that starts
+//!   engines one after another, or keeps `WebKit`'s main thread out of its own process. Every program that may start
+//!   one calls [`worker::serve_if_asked`] first thing in its `main`.
+//! - WPE `WebKit` is the system's (`wpewebkit`, found through pkg-config by the -sys crates): its library and its
+//!   helper processes (`/usr/lib/wpe-webkit-2.0/`) where the distribution put them.
 //!
 //! - What `WebKitGTK` draws itself and an offscreen page cannot (module `engine::interaction`): the clipboard
 //!   (`WPEPlatform`'s is the engine's own: a page's copy is reported, the desktop's text is handed in before a paste),
@@ -67,7 +68,6 @@ mod event;
 mod frames;
 mod host;
 mod input;
-pub mod launcher;
 mod spec;
 pub mod worker;
 

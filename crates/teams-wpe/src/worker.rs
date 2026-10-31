@@ -1,14 +1,10 @@
-//! The engine in a process of its own: the worker, which a vendored WPE `WebKit` needs (crate `launcher`) and
-//! [`crate::Host::start_worker`] asks for anywhere.
+//! The engine in a process of its own: the worker, which [`crate::Host::start_worker`] asks for.
 //!
-//! The vendored package's helpers sit at a path compiled into its library, reachable only inside a mount namespace
-//! that overlays the package on `/usr/lib` (`bwrap --ro-overlay`). That namespace comes with a user namespace and
-//! `PR_SET_NO_NEW_PRIVS`, which every process started inside it inherits, so the app itself must never run there: its
-//! terminals, their sessions and everything they start would lose `sudo` and every setuid program, and see root's
-//! files as `nobody`'s. Only `WebKit` goes there: the app re-runs its own executable as the worker (the image it runs,
-//! opened from `/proc/self/exe` and passed down as a descriptor, so a file replaced since does not matter), under the
-//! overlay for the vendored package and plainly for the system's, and drives the engine through a [`crate::Host`] whose
-//! calls travel over a socket. The worker runs the ordinary in-process engine and nothing else.
+//! An in-process engine is once per process (`WebKit` binds its main run loop to a thread that never ends), so a
+//! program that opens pages again later (the app's sign-in window, once per account added) runs each engine in a
+//! worker. The app re-runs its own executable as the worker (the image it runs, opened from `/proc/self/exe` and passed
+//! down as a descriptor, so a file replaced since does not matter) and drives the engine through a [`crate::Host`]
+//! whose calls travel over a socket. The worker runs the ordinary in-process engine and nothing else.
 //!
 //! - Every program that may start an engine calls [`serve_if_asked`] first thing in its `main`: in the worker it serves
 //!   the engine and ends the process; anywhere else it returns at once.
@@ -21,8 +17,8 @@
 //! - The start: the worker says hello (protocol, build, pid) and the app hands it the configuration; the engine's start
 //!   comes back as the in-process one would (a missing render node fails as `StartError::Display`), all within
 //!   `START_TIMEOUT`, after which the worker is killed. The worker runs in a process group of its own, so a terminal's
-//!   Ctrl-C reaches the app alone; it ends when the app quits it or goes away (the end of its socket), never through
-//!   `bwrap --die-with-parent`, which would kill it with the thread that started it.
+//!   Ctrl-C reaches the app alone; it ends when the app quits it or goes away (the end of its socket), never with the
+//!   thread that started it.
 //! - The end: [`crate::Host::shutdown`] quits the engine (pages closed and every web process ended, its last answer
 //!   flushed before the worker exits) and waits `STOP_TIMEOUT` for it, then closes the socket, which frees a writer
 //!   stuck on a worker that stopped reading, and reaps the worker, killing its group when it does not end at once. A

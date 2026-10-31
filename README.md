@@ -52,7 +52,7 @@ Hard rules for contributors and agents are in [CLAUDE.md](CLAUDE.md).
 | `crates/teams-app` | the lab's GPUI app for one lab account, `teams-app --lab <alias> --secrets-fd <n> [--trace-fd <n>]`: its engine built as `teams-headless` builds one, its tokens only through the broker's socket; it refuses a `test-support` build and a window outside the UI sandbox or with `DISPLAY` set, reports another engine on the account, shows the account signed out when its refresh token is refused; and its credential broker `teams-app secrets --lab <alias> --fd <n>`: run outside the UI sandbox, it serves that account's own `teams-lab` Secret Service items on a socket pair's end and refuses any other account or application |
 | `crates/teams-signin` | the sign-in window: Microsoft's sign-in page in a WPE WebKit view (`teams-wpe`) drawn in a GPUI window of the app that asks, behind a request guard that classifies every request a page sends (`teams_signin::classify`: reads, the token endpoint and authz in their captured queries, Entra's sign-in form) and logs it to `fence.log` before it goes; the `nativeclient` redirect is caught in the navigation policy and its code handed to the sign-in, and `teams-auth` redeems it. Not a complete fence (two kinds of redirect never reach the guard, `docs/backlog/webkit-sign-in-guard-redirects.md`), so the lab's `teams-signin --lab` (an app of its own in the UI sandbox) opens only a loopback page and reaches nothing else; the `personal` feature (only `crates/ngteams` enables it) binds the same window, opened in `ngteams` itself, to Entra's and the identity provider's hosts through a host gate |
 | `crates/teams-signin-extension` | the sign-in window's WPE WebKit web process extension (a `cdylib`, hand FFI on the GLib `-sys` crates, linked to `libWPEWebKit-2.0`): connects every page's `send-request` to the guard's socket and drops each request the guard doesn't allow, every one when it has no guard |
-| `crates/teams-wpe`, `crates/wpe-webkit-sys`, `crates/wpe-platform-sys`, `crates/wpe-javascriptcore-sys` | WPE WebKit offscreen, taken from ngterm (MIT; its `ngterm-wpe` and the gir bindings it generated): web views on an engine of their own, run in a worker process (the app's own executable run again, under `bwrap` with the vendored package overlaid where WPE WebKit isn't the system's), frames out in shared memory (or dmabufs), input in; the sign-in window's page |
+| `crates/teams-wpe`, `crates/wpe-webkit-sys`, `crates/wpe-platform-sys`, `crates/wpe-javascriptcore-sys` | WPE WebKit offscreen, taken from ngterm (MIT; its `ngterm-wpe` and the gir bindings it generated): web views on an engine of their own, run in a worker process (the app's own executable run again), frames out in shared memory (or dmabufs), input in; the sign-in window's page |
 | `crates/ngteams` | the personal build (`docs/personal-build.md`): `ngteams`, the user's own accounts (one or several, all running at once in one window, switched from the rail's avatars and added from its "+") on the user's desktop under the personal fence (`teams-fence`'s `personal` feature, which only this crate enables), its sign-in window included (in its own app, bound to Entra's and the identity provider's hosts through a host gate; its page's engine is `ngteams` run again as a worker). No broker, no sandbox; its data under `~/.local/share/ngteams/` and `~/.config/ngteams/`, its tokens under `ngteams` on the Secret Service. Left out of the root's `default-members`; it refuses a `test-support` build and one `scripts/install-personal.sh` didn't make. Its calls (M3) run on the desktop's PipeWire and its camera through the desktop's camera portal (`ngteams::calling`). Its fence logs every send and denies none. Agents compile and mock-test it, install it only when the user asks, run it on their own only in its read-only mode, and may read its data dirs (never its keyring items or tokens) |
 | `crates/teams-headless` | the headless lab binary: one lab account's native client (`teams-core`) from the command line, its fence from `Fence::open_lab`, its tokens from the Secret Service, its store under the lab's data dir; the live acceptance test (`tests/chat_live.rs`) |
 | `crates/proto-lab` | the lab harness CLI: Chrome for Testing, the armed browser fence (HTTP and WebSocket), login and status, native auth, read-only probes, captures and the sanitizer, bundle import and search, scenarios |
@@ -71,7 +71,6 @@ Hard rules for contributors and agents are in [CLAUDE.md](CLAUDE.md).
 | `scripts/lint-report.sh` | refuses inner `#![allow]`/`#![expect]`, lists complexity `#[expect]`s |
 | `scripts/own-presence-run.sh` | one `own-presence-*` live run with b's presence reads of a sampled beside it (M2 Task 18) |
 | `scripts/install-personal.sh`, `packaging/com.nickalie.ngteams.desktop`, `packaging/icons/` | the personal build's release build and install under `~/.local` (its binary and the sign-in window's web process extension, the install marker, the app's desktop entry and its icon), for the user to run; agents run it only when the user asks |
-| `scripts/fetch-wpe.sh`, `scripts/pkg-config.sh`, `.cargo/config.toml` | WPE WebKit for the sign-in window: the pinned Arch package unpacked into `~/.cache/ngteams/vendor/` where the system has no `wpewebkit` 2.54, and every build's pkg-config offering it ([WPE WebKit](#wpe-webkit)) |
 | `scripts/native-call-run.sh` | one native lab call (`teams-headless` on every end: a caller, callees answering with `watch --answer-lab-calls`, a late joiner), spaced 90 s after the chat's last call, run under the live lock (M3 Task 16) |
 | `scripts/reaction-pack.py`, `crates/teams-ui/assets/reactions/` | builds the reaction pack the app draws reactions with: Teams' reaction catalog (its CDN's emoticon metadata) as `catalog.tsv`, and Fluent Emoji 3D's pictures (MIT) packed as WebP into `emoji.bin`; run it again from a `fluentui-emoji` checkout when Teams' catalog version changes |
 | `scripts/own-availability-native-run.sh` | one native own-availability run (`teams-headless a availability`) with b's presence reads of a sampled beside it (M2 Task 19) |
@@ -79,18 +78,13 @@ Hard rules for contributors and agents are in [CLAUDE.md](CLAUDE.md).
 
 ### WPE WebKit
 
-The sign-in window renders Microsoft's page with WPE WebKit 2.54 or newer (`teams-wpe`, found through pkg-config's
-`wpe-webkit-2.0` and `wpe-web-process-extension-2.0`):
-
-- The distribution's `wpewebkit` (`sudo pacman -S wpewebkit`) wins when it is installed; the page's engine then runs
-  plainly in its worker process.
-- Without it, `scripts/fetch-wpe.sh` checks the pinned Arch package against its sha256 and unpacks it into
-  `~/.cache/ngteams/vendor/wpe-<version>-<release>/` (no root; glibc 2.44 or newer), which `scripts/pkg-config.sh`
-  (every cargo build's pkg-config, `.cargo/config.toml`) then offers and the binaries' rpath names. Its helper
-  processes' path is compiled in (`/usr/lib/wpe-webkit-2.0`), so the engine's worker runs under `bwrap` with the
-  prefix's `lib/` overlaid on `/usr/lib` (`teams_wpe::launcher`), a user namespace only the worker enters. After
-  installing or removing either, `cargo clean -p teams-wpe -p wpe-webkit-sys -p wpe-platform-sys -p
-  wpe-javascriptcore-sys -p teams-signin-extension`.
+The sign-in window renders Microsoft's page with the system's WPE WebKit, 2.54 or newer: the distribution's
+`wpewebkit` (`sudo pacman -S wpewebkit`), which every build of the WPE crates needs. The build finds it through the
+system's pkg-config (`wpe-webkit-2.0`, `wpe-web-process-extension-2.0`), the binaries load `libWPEWebKit-2.0.so` from
+the loader's own path, and the engine starts the package's helper processes (`WPEWebProcess`, `WPENetworkProcess`,
+`WPEGPUProcess`) from `/usr/lib/wpe-webkit-2.0/`, where their path is compiled into the library; GStreamer loads its
+plugins at run time. None of it can be linked in statically, so the installed `ngteams` needs the package at run time
+too, and `scripts/install-personal.sh` refuses to build without it.
 
 The worker is the asking program's own executable run again: every `main` that opens a sign-in window
 (`ngteams`, `teams-signin`, the window test) calls `teams_wpe::worker::serve_if_asked` early.
