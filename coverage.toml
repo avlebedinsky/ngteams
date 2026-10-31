@@ -31,6 +31,11 @@ sha256 = "1b1cfd35eab895d1f50e0951d34bc28722ec7d884948c1ecf6bd63b22569919a"
 reason = "unit-test module included only by machine.rs cfg(test); omitted by cargo-llvm-cov's test-file filter"
 context = { "crates/teams-call/src/machine.rs" = "40988c0160aac6afcdd101333f122f6809f7d4563aed047bc548f496d0c8666c" }
 
+[unmapped_sources."crates/teams-media/src/video/effects/tests.rs"]
+sha256 = "f67bd56fdf5683e1b7bd150f306db4e7b7714039d13ce592a602b755d24a4ffb"
+reason = "unit-test module included only by effects.rs cfg(test); omitted by cargo-llvm-cov's test-file filter"
+context = { "crates/teams-media/src/video/effects.rs" = "8750279e6eb40593be4f2a107fcbf05892259a47824dbe753c8d6d149ce85305" }
+
 [unmapped_sources."crates/teams-proto/src/lib.rs"]
 sha256 = "69b870b417b55373a3453e8688c289ef0ad303a0196b6fded37f17257a26233a"
 reason = "module declarations, re-exports and documentation only; no executable items"

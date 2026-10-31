@@ -805,9 +805,10 @@ files by uncovered lines, functions and regions. Instrumented build artifacts st
 measurements serialize on a lock. `--report-only` rechecks an existing export without running tests; use a fresh
 measurement for change validation. Every executable selected `src/**/*.rs` must appear in the LLVM export, including
 zero-hit files: missing files fail even with `--no-gate`, so omitted feature-gated code cannot silently inflate
-coverage. `coverage.toml` lists individually reviewed declaration-only files and a separate unit-test module that
-LLVM does not map. Each entry records its SHA-256 and reason; the test module also pins the file that includes it
-under `cfg(test)`. A content change invalidates the review and fails the report until inspected again. The summary
+coverage. `coverage.toml` lists individually reviewed declaration-only files and separate unit-test modules that
+LLVM does not map because `cargo-llvm-cov` filters test filenames such as `tests.rs`. Each entry records its SHA-256
+and reason; test modules also pin the file that includes them under `cfg(test)`. A content change invalidates the
+review and fails the report until inspected again. The summary
 lists these audited unmapped files explicitly. If LLVM supplies a mapping
 for one, its counts still contribute to the totals; the review never discards reported executable code.
 
