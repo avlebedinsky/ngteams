@@ -225,3 +225,32 @@ fn an_invalid_destination_returns_an_error_and_leaves_the_source_readable() {
     assert!(!dest.exists());
     assert_eq!(topic(&source), "original");
 }
+
+#[test]
+fn a_non_utf8_source_never_reads_a_different_file_with_the_lossy_name() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let original = dir.path().join("original.sqlite");
+    drop(store(&original));
+    let source = dir
+        .path()
+        .join(std::ffi::OsString::from_vec(b"source-\xff.sqlite".to_vec()));
+    fs::rename(&original, &source).expect("move the source to a non-UTF-8 name");
+    let lossy = PathBuf::from(source.to_string_lossy().into_owned());
+    let mut decoy = store(&lossy);
+    decoy
+        .upsert_conversation(&conversation("a different database", 2))
+        .expect("decoy data");
+    drop(decoy);
+    let source_before = fs::read(&source).expect("source bytes");
+    let decoy_before = fs::read(&lossy).expect("decoy bytes");
+    let dest = dir.path().join("copy.sqlite");
+
+    let error = snapshot(&source, &dest).expect_err("an unsupported source path must be rejected");
+
+    assert!(matches!(error, StoreError::Sqlite(rusqlite::Error::InvalidPath(path)) if path == source));
+    assert!(!dest.exists());
+    assert_eq!(fs::read(&source).expect("unchanged source"), source_before);
+    assert_eq!(fs::read(&lossy).expect("unchanged decoy"), decoy_before);
+    assert_no_side_files(&source);
+    assert_no_side_files(&lossy);
+}
