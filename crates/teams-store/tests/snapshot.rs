@@ -145,7 +145,11 @@ fn an_uncommitted_write_is_not_included_and_the_writer_can_commit_after_the_snap
     snapshot(&source, &dest).expect("read while a write is pending");
 
     assert_eq!(topic(&dest), "original");
-    transaction.commit().expect("the snapshot did not keep a read lock");
+    transaction.commit().expect("the writer can still commit");
+    let busy: i64 = writer
+        .query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get(0))
+        .expect("checkpoint the source after the snapshot");
+    assert_eq!(busy, 0, "the snapshot did not keep a reader that blocks a checkpoint");
     assert_eq!(topic(&source), "not committed");
     assert_eq!(topic(&dest), "original");
 }
@@ -182,7 +186,7 @@ fn an_existing_destination_is_refused_and_never_overwritten() {
         );
         assert_eq!(fs::read(&dest).expect("existing contents"), bytes);
         assert_eq!(mode(&dest), 0o640);
-        assert!(!source.exists(), "destination is checked before opening a source");
+        assert!(!source.exists(), "the missing source was not created");
     }
 }
 
