@@ -246,6 +246,45 @@ mod tests {
     }
 
     #[test]
+    fn accepts_a_head_at_the_byte_limit_received_in_parts() {
+        let server = Server::start(&[], &[]);
+        let mut head = format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nX-Large: ", server.port).into_bytes();
+        head.resize(16 * 1024 - 4, b'x');
+        head.extend_from_slice(b"\r\n\r\n");
+        let mut stream = server.connect();
+        for part in head.chunks(317) {
+            stream.write_all(part).unwrap();
+        }
+        stream.shutdown(Shutdown::Write).unwrap();
+        let mut wire = Vec::new();
+        stream.read_to_end(&mut wire).unwrap();
+        assert_eq!(
+            response(&wire, "200 OK", "text/html; charset=utf-8"),
+            include_bytes!("../assets/index.html")
+        );
+    }
+
+    #[test]
+    fn rejects_an_unterminated_oversized_head_then_serves_the_next_client() {
+        let server = Server::start(&[], &[]);
+        let mut stream = server.connect();
+        stream.set_read_timeout(Some(Duration::from_millis(500))).unwrap();
+        let mut head = format!("GET / HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nX-Large: ", server.port).into_bytes();
+        head.extend(vec![b'x'; 16 * 1024]);
+        stream.write_all(&head).unwrap();
+        // Keep the write side open: exceeding the byte budget must end the read without LF or EOF.
+        let mut rejected = Vec::new();
+        if let Err(error) = stream.read_to_end(&mut rejected) {
+            assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+        }
+        assert!(rejected.is_empty());
+        assert_eq!(
+            response(&server.get("/"), "200 OK", "text/html; charset=utf-8"),
+            include_bytes!("../assets/index.html")
+        );
+    }
+
+    #[test]
     fn reports_argument_errors_without_starting_a_server() {
         let files = Files::new();
         let cases = [

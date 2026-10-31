@@ -20,7 +20,7 @@ mod status;
 mod time;
 mod transcript;
 
-use std::io::{BufRead as _, BufReader, Write as _};
+use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -130,7 +130,9 @@ fn serve(stream: TcpStream, status: &mut Status, port: u16) -> std::io::Result<(
     let mut head = Vec::new();
     loop {
         let before = head.len();
-        if reader.read_until(b'\n', &mut head)? == 0 || head.len() > HEAD_MAX {
+        // Read only one byte past the remaining budget, even when a line never ends.
+        let remaining = (HEAD_MAX + 1 - before) as u64;
+        if reader.by_ref().take(remaining).read_until(b'\n', &mut head)? == 0 || head.len() > HEAD_MAX {
             return Ok(());
         }
         if head[before..] == *b"\r\n" || head[before..] == *b"\n" {
