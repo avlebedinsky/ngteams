@@ -789,10 +789,11 @@ scripts/coverage.sh -p teams-log --test-threads 3     # explicitly change test-h
 python3 -B -m unittest discover -s scripts -p test_coverage_report.py
 ```
 
-Coverage runs every selected test with `--test-threads 1` by default. A parallel baseline encountered
-`ExecutableFileBusy` while starting a generated fake-browser script; serial execution avoids overlapping harness
-cases while that failed run remains recorded. `--test-threads N` accepts a positive integer to change the
-harness concurrency; concurrency exercised inside a test stays part of that test.
+Coverage runs every selected test with `--test-threads 1` by default. Overlapping harness cases can fork while
+another case still holds a generated fake-browser script open for writing, causing `ExecutableFileBusy` when it
+starts. Serial execution avoids that overlap in coverage runs; ordinary `cargo test` keeps its configured harness
+concurrency. `--test-threads N` accepts a positive integer to change the harness concurrency; concurrency exercised
+inside a test stays part of that test.
 
 `coverage.toml` holds the 90% target and the measured baseline floors. Only `teams-store` and `teams-log` have baselines so far;
 other crates fail the gate until measured. Raise floors as tests improve; never lower them or exclude runnable code
