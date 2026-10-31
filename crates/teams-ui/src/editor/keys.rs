@@ -128,7 +128,8 @@ pub(super) fn bind(cx: &mut App) {
         KeyBinding::new("ctrl-i", Italic, context),
         KeyBinding::new("ctrl-u", Underline, context),
         KeyBinding::new("ctrl-alt-x", Strikethrough, context),
-        KeyBinding::new("ctrl-shift-c", InlineCode, context),
+        // no Ctrl+Shift+C for inline code: the message box takes the keys first as a chat opens, and Ctrl+Shift+C
+        // calls the chat shown (the shell's), as Teams' calling keys do from anywhere in the chat
         KeyBinding::new("ctrl-shift-b", CodeBlock, context),
         KeyBinding::new("ctrl-shift-7", NumberedList, context),
         KeyBinding::new("ctrl-&", NumberedList, context),

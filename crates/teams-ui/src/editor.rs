@@ -9,7 +9,7 @@
 //!   ([`convert`]), so what is sent is what Teams' editor sends and what our renderer draws (`crate::rich_text`): the
 //!   editor draws its runs with the renderer's own styles ([`crate::rich_text::highlight`]).
 //! - **Keys** (Teams' own, from its web client's compose hotkeys): Ctrl+B, Ctrl+I, Ctrl+U, Ctrl+Alt+X strikethrough,
-//!   Ctrl+Shift+C inline code, Ctrl+Shift+B a block of code, Ctrl+Shift+7 and Ctrl+Shift+8 numbered and bulleted
+//!   Ctrl+Shift+B a block of code (Ctrl+Shift+C stays the call's key), Ctrl+Shift+7 and Ctrl+Shift+8 numbered and bulleted
 //!   lists, Ctrl+Alt+4 a quote, Ctrl+Alt+1 to 3 headings and Ctrl+Alt+P a paragraph; Ctrl+Z and Ctrl+Y (Ctrl+Shift+Z)
 //!   undo and redo; Ctrl+C, Ctrl+X, Ctrl+V (Ctrl+Shift+V as plain text); Tab and Shift+Tab nest and un-nest a list
 //!   item. **Enter** ([`EnterMode`]): with [`EnterMode::Send`] (the message box as Teams first shows it) Enter asks to
