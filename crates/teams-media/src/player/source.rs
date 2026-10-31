@@ -737,7 +737,7 @@ mod tests {
 
     #[test]
     fn a_read_far_ahead_starts_a_stream_where_it_wants() {
-        let bytes = data(STREAM_LEN as usize * 2);
+        let bytes = data(usize::try_from(STREAM_LEN).unwrap() * 2);
         let source = Bytes::new(bytes.clone(), 0);
         let cache = Cache::new(source.clone());
         let at = STREAM_LEN + 12_345;

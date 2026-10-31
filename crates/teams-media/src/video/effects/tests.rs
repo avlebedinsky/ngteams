@@ -212,7 +212,12 @@ fn effects_on_a_sample_picture() {
         let mut frame = picture.clone();
         effects.apply(&mut frame, &background);
         let bgra = crate::video::convert::i420_to_bgra(&frame).unwrap();
-        let rgba: Vec<u8> = bgra.chunks_exact(4).flat_map(|p| [p[2], p[1], p[0], 255]).collect();
+        let rgba: Vec<u8> = bgra
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|&[b, g, r, _]| [r, g, b, 255])
+            .collect();
         image::RgbaImage::from_raw(1280, 720, rgba)
             .unwrap()
             .save(std::path::Path::new(&out).join(format!("effects-{name}.png")))
