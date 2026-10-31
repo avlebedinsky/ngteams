@@ -6,16 +6,16 @@ description: How to build and change the native Teams client's UI (crates/teams-
 # Teams UI
 
 The app is meant to replace Microsoft Teams for daily use, so a view is done when it looks and behaves like the real
-client, not when it merely works. The user checks the personal build by hand: every visible slip costs them a rebuild
-and a restart. This skill is the UI side of the project's rules; CLAUDE.md's hard rules (no view builds a request, every
-call action is the user's, the view trace never carries text) still hold for every change.
+client, not when it merely works. The user checks the personal build by hand, so every visible slip costs them a
+rebuild and a restart. CLAUDE.md's rules and design invariants apply to every UI change; this skill adds the UI side.
 
 ## Before you build
 
 - **Find the Teams reference.** When the user shows a screenshot or says "like Teams", list every behavior it shows
-  (layout, sections, scrolling, hover, empty and fallback states) and build all of it, or say up front what you leave
-  out. Where unclear, look at the web client. A feature real Teams has and the app lacks is a gap to fix, never
-  "by design".
+  (layout, sections, scrolling, hover, empty and fallback states) and build all of it. Where unclear, look at the web
+  client. A feature real Teams has and the app lacks is a gap to fix, not "by design". A control drawn disabled, a
+  "not available yet" note or a "Not done" list doesn't finish the job. If a part needs a capture, a read or a lab run
+  nobody has made yet, make it. Leave a part out only when it truly can't be built now, and say what blocks it.
 - **Look at the current state first**: run the UI tour (below) and read the shots of the surfaces you will touch.
 - **Reuse what exists** before writing new widgets: `crates/teams-ui/src/icons.rs` (icons, icon buttons),
   `settings_view.rs` (`group`, `row`, `segmented`, `picker`, `theme_tile`, `caption`), `shell.rs` (`menu_row`,
@@ -41,10 +41,10 @@ call action is the user's, the view trace never carries text) still hold for eve
 - **The read-only mode** (`Core::read_only`): a new control that writes (sends, reacts, calls, sets a status, adds or
   removes an account) offers nothing there, the way the compose box shows `READ_ONLY_APP` and a message offers only
   Copy (`ChatWrites::AppReadOnly`); the engine refuses it anyway, but the view shouldn't offer it.
-- **Icons are Lucide SVGs** (ISC, `crates/teams-ui/assets/icons/LICENSE-LUCIDE`). A new one is copied from
-  `~/.cargo/registry/src/*/gpui-kit-assets-*/assets/icons/<name>.svg` into `crates/teams-ui/assets/icons/` and added
-  as a `Glyph` constant; never draw one ad hoc. Sizes: 14 px in menus and small buttons, 16–18 px in toolbars and nav,
-  22 px on the rail.
+- **Icons are Lucide SVGs** (ISC, `crates/teams-ui/assets/icons/LICENSE-LUCIDE`). Copy a new one from
+  `~/.cargo/registry/src/*/gpui-kit-assets-*/assets/icons/<name>.svg` into `crates/teams-ui/assets/icons/` and add it
+  as a `Glyph` constant rather than drawing one ad hoc. Sizes: 14 px in menus and small buttons, 16–18 px in toolbars
+  and nav, 22 px on the rail.
 
 ### Structure
 
@@ -54,7 +54,7 @@ call action is the user's, the view trace never carries text) still hold for eve
   list pane's place, as in Teams).
 - **Pick the control by the choice**: a switch for on/off; a segmented control (`segmented`) for 2–4 short options; a
   dropdown (`picker`) for longer lists or long labels (statuses, durations, devices); preview tiles for visual choices
-  (themes); a stepper with −/+/reset icons for a number. Never a wall of radio buttons.
+  (themes); a stepper with −/+/reset icons for a number. Avoid walls of radio buttons.
 - **Menus** (account menu, pickers) are rows of icon/mark + label + a check on the chosen one, on a raised surface with
   a shadow — `menu_row` in `shell.rs`.
 - **Headers line up**: the list header and the conversation header are both 48 px with a bottom border; a chat header
@@ -91,7 +91,7 @@ call action is the user's, the view trace never carries text) still hold for eve
 
 Write from the user's side, plainly: "Report my availability", "Stop reporting me available after", "Turn camera on" —
 not the internal names (fence, outbox, endpoint, trace). Active verbs, and one name for an action everywhere it is
-offered: the call bar's Leave (tooltip "Leave call"), the Ctrl+K command "Leave call" and the README all say leave, never
+offered: the call bar's Leave (tooltip "Leave call"), the Ctrl+K command "Leave call" and the README all say leave, not
 "hang up" in one place and "leave" in another. When you rename an action, grep the switcher (`switcher.rs`), the
 notifications, the README and the tests for the old name. Errors say what happened and what to do, without apologising.
 
@@ -104,8 +104,8 @@ notifications, the README and the tests for the old name. Errors say what happen
   click the picker, then the row.
 - `Tooltip::new(text).action(&action, None)` shows a key on a plain `div`'s `.tooltip(..)` (needs
   `StatefulInteractiveElement`, so the div needs an `.id`).
-- Never use the kit's Markdown/HTML views for message text (CLAUDE.md, "The UI kit"); never call
-  `ThemeRegistry::watch_dir`.
+- Don't use the kit's Markdown/HTML views for message text (it is drawn only from sanitized `RichText`, CLAUDE.md's
+  design invariants), and don't call `ThemeRegistry::watch_dir`.
 
 ## Keep tests and the trace working
 
@@ -115,7 +115,10 @@ notifications, the README and the tests for the old name. Errors say what happen
 - Give every new control a stable selector of the same shape (`<group>-<key>`).
 - The view trace records view and change names and service ids only, never displayed text.
 
-## Check it rendered — before you say it's done
+## Check it rendered
+
+A change to what the app shows is checked by looking at it. Pick the shots that cover the surfaces you touched; the
+rest of the checks follow CLAUDE.md's "Checks".
 
 1. `GPUI_SMOKE_REQUIRE=1 cargo test -p teams-app --test ui_tour` (run in the background; it builds and drives the app
    on the mock in the UI sandbox) writes `target/ui-shots/tour-*.png`: no chat, a chat with a message's actions (shown
@@ -126,16 +129,11 @@ notifications, the README and the tests for the old name. Errors say what happen
 3. **Read the screenshots** (the Read tool shows images) and fix what looks off — alignment, clipped text, a control
    that looks disabled, a colour that vanished in dark mode. Say plainly what a still shot can't show (hover, open
    menus, animation) and that you haven't seen it.
-4. The gate (CLAUDE.md): `cargo fmt --all --check`, `cargo clippy -p teams-ui -p teams-app --all-targets
-   --all-features -- -D warnings`, `scripts/lint-report.sh`, `cargo test -p teams-ui -p teams-app`. Render functions
-   grow fast: split one over clippy's line limit into helpers (a `controls`, a `no_chat`), never `#[expect]` it.
+4. **The user's real chats** (a bug only real data shows, a layout with real names and long chats): run the installed
+   personal build read-only with `scripts/run-personal-read-only.sh <upn>` (`--shot <name>`, `--key <spec>`,
+   `--type <text>`, `--click <x> <y>` drive it, `--stop` ends it and deletes the snapshot). It shows what the
+   *installed* build does, not your change. The user's chats are private: describe what you saw, never paste names or
+   message text.
 
-5. **The user's real chats** (a bug only real data shows, a layout with real names and long chats): run the installed
-   personal build read-only, on its own initiative, with `scripts/run-personal-read-only.sh <upn>` (a snapshot of the
-   user's files, a sandbox of its own, nothing sent; `--shot <name>`, `--key <spec>`, `--type <text>`,
-   `--click <x> <y>` drive it, `--stop` ends it and deletes the snapshot). It shows what the *installed* build does,
-   not your change, and the user's chats are private: describe what you saw, never paste names or message text. The
-   script refuses a binary without the read-only mode; never start `ngteams` any other way.
-
-When reporting, list the surfaces changed and which shots you looked at; offer the personal-build install only when the
-user asks for it (CLAUDE.md: agents install it only on request, and start it on their own only read-only).
+Render functions grow fast: split one over clippy's line limit into helpers (a `controls`, a `no_chat`) rather than
+excusing it. When reporting, list the surfaces changed and which shots you looked at.
