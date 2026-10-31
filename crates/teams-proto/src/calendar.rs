@@ -12,8 +12,8 @@
 
 use percent_encoding::percent_decode_str;
 use serde_json::Value;
-use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
+use time::{Month, OffsetDateTime};
 
 use crate::endpoint::{Endpoint, Service};
 use crate::read::Read;
@@ -38,7 +38,7 @@ impl CalendarView {
     /// reversed, wider than [`MAX_CALENDAR_WINDOW_MS`] or out of range.
     #[must_use]
     pub fn between(start_ms: i64, end_ms: i64) -> Option<Self> {
-        if end_ms <= start_ms || end_ms - start_ms > MAX_CALENDAR_WINDOW_MS {
+        if end_ms <= start_ms || end_ms.checked_sub(start_ms)? > MAX_CALENDAR_WINDOW_MS {
             return None;
         }
         Some(Self {
@@ -307,6 +307,7 @@ fn floating(text: &str) -> Option<FloatingTime> {
     let year = date.next()?.parse().ok()?;
     let month: u8 = date.next()?.parse().ok()?;
     let day: u8 = date.next()?.parse().ok()?;
+    let max_day = Month::try_from(month).ok()?.length(year);
     let clock = clock.split_once('.').map_or(clock, |(whole, fraction)| {
         if fraction.bytes().all(|byte| byte.is_ascii_digit()) {
             whole
@@ -320,8 +321,7 @@ fn floating(text: &str) -> Option<FloatingTime> {
     let second: u8 = clock.next().map_or(Some(0), |second| second.parse().ok())?;
     let valid = date.next().is_none()
         && clock.next().is_none()
-        && (1..=12).contains(&month)
-        && (1..=31).contains(&day)
+        && (1..=max_day).contains(&day)
         && hour < 24
         && minute < 60
         && second < 61;
