@@ -147,6 +147,10 @@ fn clean_commands_keep_only_the_profile_path_and_the_allowed_environment() {
         }
         let output = command.output().unwrap();
         assert!(output.status.success(), "profile present={present}: {output:?}");
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("test result: ok. 1 passed; 0 failed;"),
+            "child check did not run with profile present={present}: {output:?}"
+        );
     }
 }
 

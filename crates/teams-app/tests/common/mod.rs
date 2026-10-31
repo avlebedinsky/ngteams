@@ -279,7 +279,8 @@ pub struct App {
 }
 
 /// The variables the broker takes from this process: its bus (the user's session bus, where the lab's tokens are)
-/// and where the lab's config and data are. Nothing of a display.
+/// and where the lab's config and data are. `LLVM_PROFILE_FILE` keeps broker profiles in the coverage output
+/// directory. Nothing of a display.
 const BROKER_ENV: [&str; 8] = [
     "PATH",
     "HOME",
