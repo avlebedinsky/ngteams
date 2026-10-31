@@ -17,6 +17,7 @@ teams-store = { lines = 93, functions = 94, regions = 90 }
 teams-log = { lines = 90, functions = 90, regions = 90 }
 fixture-guard = { lines = 95, functions = 91, regions = 92 }
 teams-trouter = { lines = 92, functions = 95, regions = 91 }
+teams-call = { lines = 93, functions = 95, regions = 90 }
 
 # Individually inspected sources LLVM does not map. Any content change invalidates the review.
 # These entries never suppress coverage counts when LLVM supplies a mapping for the file.
