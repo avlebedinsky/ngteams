@@ -4,7 +4,10 @@ import contextlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
+import shutil
+import subprocess
 import tempfile
 import types
 import unittest
@@ -61,6 +64,7 @@ class CoverageGateTests(unittest.TestCase):
             failed = REPORTER.summarize(
                 self.args, self.config, {"example": self.source.parent}, ["example"]
             )
+        self.report_output = output.getvalue()
         return failed, json.loads(self.args.output.read_text())
 
     def test_zero_hit_source_counts_against_every_metric_and_ranks_first(self):
@@ -83,7 +87,50 @@ class CoverageGateTests(unittest.TestCase):
 
     def test_target_gate_uses_ninety_instead_of_baseline(self):
         self.args.require_target = True
+        self.config["baselines"]["example"] = dict.fromkeys(METRICS, 95)
+        self.entries = [self.entry(path, 100, 90) for path in [self.used, self.unused]]
+        self.assertFalse(self.run_report()[0])
+        for entry in self.entries:
+            entry["summary"]["regions"]["covered"] = 89
         self.assertTrue(self.run_report()[0])
+        self.assertIn("regions below 90%", self.report_output)
+
+    def test_unequal_files_use_weighted_counts_and_each_metrics_own_rate(self):
+        self.config["baselines"]["example"] = dict.fromkeys(METRICS, 0)
+        self.entries[0]["summary"] = {
+            "lines": {"count": 10, "covered": 10},
+            "functions": {"count": 2, "covered": 2},
+            "regions": {"count": 8, "covered": 8},
+        }
+        self.entries[1]["summary"] = {
+            "lines": {"count": 30, "covered": 0},
+            "functions": {"count": 8, "covered": 0},
+            "regions": {"count": 2, "covered": 0},
+        }
+        failed, summary = self.run_report()
+        self.assertFalse(failed)
+        self.assertEqual(summary["crates"]["example"]["percent"],
+                         {"lines": 25, "functions": 20, "regions": 80})
+        self.assertEqual(summary["packages"], ["example"])
+        self.config["baselines"]["example"]["functions"] = 21
+        self.assertTrue(self.run_report()[0])
+        self.assertIn("functions below 21%", self.report_output)
+
+    def test_workspace_and_long_partial_selections_have_bounded_directory_names(self):
+        _, crates = REPORTER.configuration()
+        all_packages = REPORTER.select(crates, [])
+        self.assertEqual(REPORTER.selection_directory(crates, all_packages), "all")
+        self.assertEqual(REPORTER.selection_directory(crates, ["teams-store"]), "teams-store")
+        large_names = ["package-" + str(index) + "-" + "x" * 70 for index in range(10)]
+        large_crates = dict.fromkeys(large_names)
+        partial = REPORTER.select(large_crates, large_names[:-1])
+        directory = REPORTER.selection_directory(large_crates, partial)
+        self.assertLessEqual(len(directory.encode()), 200)
+        # Ordering the same selection differently must reuse its report directory.
+        self.assertEqual(directory, REPORTER.selection_directory(
+            large_crates, REPORTER.select(large_crates, list(reversed(partial)))))
+        other = REPORTER.selection_directory(large_crates, large_names[1:])
+        self.assertNotEqual(directory, other)
 
     def test_no_baseline_does_not_claim_a_passing_gate(self):
         self.config["baselines"].clear()
@@ -119,6 +166,53 @@ class CoverageGateTests(unittest.TestCase):
     def test_unknown_and_excluded_packages_are_rejected(self):
         with self.assertRaisesRegex(ValueError, "unknown or excluded"):
             REPORTER.select({"example": self.source.parent}, ["wpe-platform-sys"])
+
+
+class CoverageWrapperTests(unittest.TestCase):
+    def test_measurement_prepares_cargos_cache_tag_and_refuses_an_invalid_existing_tag(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            scripts = root / "scripts"
+            scripts.mkdir()
+            for name in ["coverage.sh", "coverage-report.py"]:
+                shutil.copy2(Path(__file__).with_name(name), scripts / name)
+            source = root / "crates/example/src/lib.rs"
+            source.parent.mkdir(parents=True)
+            source.write_text("pub fn example() {}\n")
+            (source.parent.parent / "Cargo.toml").write_text('[package]\nname = "example"\n')
+            (root / "Cargo.toml").write_text('[workspace]\nmembers = ["crates/example"]\n')
+            (root / "coverage.toml").write_text(
+                'target = 90\nmetrics = ["lines", "functions", "regions"]\n'
+                '[excluded]\n[baselines]\nexample = { lines = 90, functions = 90, regions = 90 }\n')
+            entry = CoverageGateTests.entry(source, 100, 100)
+            (root / "llvm-fixture.json").write_text(json.dumps({
+                "type": "llvm.coverage.json.export", "data": [{"files": [entry]}],
+            }))
+            binary = root / "bin/cargo"
+            binary.parent.mkdir()
+            binary.write_text('''#!/usr/bin/env python3
+from pathlib import Path
+import shutil
+import sys
+assert Path("target/coverage-build/CACHEDIR.TAG").read_text().startswith(
+    "Signature: 8a477f597d28d172789f06886806bc55")
+Path("cargo-invoked").touch()
+shutil.copyfile("llvm-fixture.json", sys.argv[sys.argv.index("--output-path") + 1])
+''')
+            binary.chmod(0o755)
+            environment = dict(os.environ, PATH=str(binary.parent) + os.pathsep + os.environ["PATH"])
+            command = ["bash", str(scripts / "coverage.sh"), "-p", "example"]
+            result = subprocess.run(command, env=environment, capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertTrue((root / "cargo-invoked").exists())
+            tag = root / "target/coverage-build/CACHEDIR.TAG"
+            tag.write_text("unrecognized cache directory\n")
+            (root / "cargo-invoked").unlink()
+            result = subprocess.run(command, env=environment, capture_output=True, text=True, check=False)
+            self.assertEqual(result.returncode, 2)
+            self.assertIn("invalid cache signature", result.stderr)
+            self.assertEqual(tag.read_text(), "unrecognized cache directory\n")
+            self.assertFalse((root / "cargo-invoked").exists())
 
 
 if __name__ == "__main__":

@@ -32,12 +32,21 @@ mapfile -t selected < <(python3 scripts/coverage-report.py list "${packages[@]}"
 ((${#selected[@]})) || { echo "no coverage packages selected" >&2; exit 2; }
 package_args=()
 for package in "${selected[@]}"; do package_args+=(-p "$package"); done
-selection=$(IFS=+; echo "${selected[*]}")
+selection=$(python3 scripts/coverage-report.py directory "${selected[@]}")
 output="target/coverage/$selection"
 mkdir -p "$output"
 exec 9>target/coverage/measurement.lock
 flock 9
 if ! "$report_only"; then
+    # llvm-cov creates this directory before Cargo does, so Cargo may leave its cache tag absent.
+    cache_tag=target/coverage-build/CACHEDIR.TAG
+    mkdir -p target/coverage-build
+    if [[ ! -e "$cache_tag" ]]; then
+        printf '%s\n' 'Signature: 8a477f597d28d172789f06886806bc55' > "$cache_tag"
+    elif ! head -n 1 "$cache_tag" | grep -Fxq 'Signature: 8a477f597d28d172789f06886806bc55'; then
+        echo "invalid cache signature: $cache_tag; inspect the directory before measuring" >&2
+        exit 2
+    fi
     # Never enable the live feature or accept cargo arguments that could enable it.
     env -u PROTO_LAB_LIVE -u TEAMS_MEDIA_TURN_SERVER -u TEAMS_MEDIA_TURN_USER \
         -u TEAMS_MEDIA_TURN_PASSWORD CARGO_LLVM_COV_TARGET_DIR="$PWD/target/coverage-build" \

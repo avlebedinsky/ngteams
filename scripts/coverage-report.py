@@ -2,6 +2,7 @@
 """Inventory selected Rust sources, gate per-crate LLVM coverage and rank gaps."""
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -27,6 +28,15 @@ def select(crates, requested):
     if unknown:
         raise ValueError(f"unknown or excluded packages: {', '.join(sorted(unknown))}")
     return sorted(set(requested) if requested else crates)
+
+
+def selection_directory(crates, selected):
+    if set(selected) == set(crates):
+        return "all"
+    name = "+".join(selected)
+    if len(name.encode()) <= 200:
+        return name
+    return "selection-" + hashlib.sha256(name.encode()).hexdigest()[:16]
 
 
 def percentage(counts):
@@ -66,7 +76,7 @@ def summarize(args, config, crates, selected):
     if report.get("type") != "llvm.coverage.json.export":
         raise ValueError("expected LLVM coverage JSON export")
     files = collect(report, expected, metrics)
-    result = {"target": config["target"], "crates": {}, "gaps": []}
+    result = {"target": config["target"], "packages": selected, "crates": {}, "gaps": []}
     failures = []
     for name in selected:
         totals = {metric: {"count": 0, "covered": 0} for metric in metrics}
@@ -121,6 +131,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("list").add_argument("packages", nargs="*")
+    commands.add_parser("directory").add_argument("packages", nargs="*")
     report = commands.add_parser("report")
     report.add_argument("report", type=Path)
     report.add_argument("--output", type=Path, required=True)
@@ -134,6 +145,9 @@ def main():
     selected = select(crates, args.packages)
     if args.command == "list":
         print("\n".join(selected))
+        return 0
+    if args.command == "directory":
+        print(selection_directory(crates, selected))
         return 0
     return summarize(args, config, crates, selected)
 

@@ -10,6 +10,7 @@ wpe-platform-sys = "generated gir bindings"
 wpe-webkit-sys = "generated gir bindings"
 
 # Only measured crates belong here. Missing baselines fail the local gate.
+# Floors are measured with one `-p <crate>` alone; combined runs also count dependent crates' tests.
 [baselines]
 teams-store = { lines = 93, functions = 94, regions = 82 }
 teams-log = { lines = 90, functions = 89, regions = 90 }

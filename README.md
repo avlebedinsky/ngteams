@@ -794,7 +794,11 @@ to pass. No CI pipeline is configured in this repository, so these are local gat
 `-p` selects all 22 non-generated crates, including the lab and test-support tooling; generated WPE bindings and
 the standalone video spike are excluded. Third-party code and tests outside `src/` do not enter the totals.
 
-Reports go to `target/coverage/<sorted-package-selection>/llvm.json` and `summary.json`; the summary ranks source
+Baseline floors are measured and validated with one `-p <crate>` alone. Combined runs also count hits from dependent
+crates' tests, so use them to find gaps; their higher totals cannot establish or validate an individual crate's floor.
+
+Reports go to `target/coverage/<selection>/llvm.json` and `summary.json`: one crate uses its name, the full workspace
+uses `all`, and long partial selections use a short hash. The summary records every selected package and ranks source
 files by uncovered lines, functions and regions. Instrumented build artifacts stay in `target/coverage-build` and
 measurements serialize on a lock. `--report-only` rechecks an existing export without running tests; use a fresh
 measurement for change validation. Every selected `src/**/*.rs` must appear in the LLVM export, including zero-hit
