@@ -302,10 +302,7 @@ impl Shell {
         });
         let (teams, [channel_opened, kept_channel]) = Self::teams_list(&core, &models, &trace, window, cx);
         let sidebar_parts = (list.clone(), teams.clone(), models.clone(), Arc::clone(&trace));
-        let sidebar = cx.new(|cx| {
-            let (list, teams, models, trace) = sidebar_parts;
-            Sidebar::new(list, teams, models, trace, cx)
-        });
+        let sidebar = cx.new(|cx| Sidebar::new(sidebar_parts.0, sidebar_parts.1, sidebar_parts.2, sidebar_parts.3, cx));
         let (settings_view, test_call_asked) = Self::make_settings_view(&core, &settings, cx);
         let first_run = cx.new(|cx| FirstRun::new(settings.clone(), cx));
         let (calendar, calendar_events) = Self::calendar(&core, &models, &trace, window, cx);
@@ -517,6 +514,7 @@ impl Shell {
     }
 
     /// The calendar.
+    #[must_use]
     pub fn calendar_view(&self) -> &Entity<CalendarView> {
         &self.calendar
     }

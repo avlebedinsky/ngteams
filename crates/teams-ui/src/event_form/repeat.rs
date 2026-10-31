@@ -7,10 +7,12 @@
 //! What a series sends is `teams-proto`'s [`Recurrence`]: the pattern, the start's day and the end's, as local
 //! midnights (`docs/protocol/calendar.md`, "A series").
 
+use std::fmt::Write as _;
+
 use chrono::{Datelike as _, NaiveDate, NaiveTime};
 use gpui::{
     AnyElement, App, Context, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
-    StatefulInteractiveElement as _, Styled as _, div, prelude::FluentBuilder as _, px, rgb,
+    StatefulInteractiveElement as _, Styled as _, Window, div, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::Disableable as _;
 use gpui_component::Sizable as _;
@@ -249,6 +251,15 @@ pub struct Custom {
 const MAX_INTERVAL: u32 = 99;
 
 impl Custom {
+    /// Turns `day` on among a weekly series' days, or off when it is on.
+    fn toggle(&mut self, day: Weekday) {
+        if self.days.contains(&day) {
+            self.days.retain(|known| *known != day);
+        } else {
+            self.days.push(day);
+        }
+    }
+
     /// The dialog on `repeat` (a series starting on `start`), or on a weekly series when there is none.
     #[must_use]
     pub fn of(repeat: Option<&Repeat>, start: NaiveDate) -> Self {
@@ -398,56 +409,8 @@ impl EventForm {
     pub(super) fn repeat_row(&self, palette: Palette, cx: &mut Context<Self>) -> Option<gpui::Div> {
         let repeat = self.repeat.clone()?;
         let start = self.slot.start.date();
-        let form = cx.entity().downgrade();
-        let fixed = self.series_fixed();
         let summary = repeat.summary(start);
-        let label = repeat.label(start);
-        let menu = Button::new("event-repeat")
-            .ghost()
-            .small()
-            .tooltip("Repeat")
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(label)
-                    .child(Glyph::CHEVRON_DOWN.icon().size(px(12.0))),
-            )
-            .dropdown_menu(move |menu, _, _| {
-                let mut menu = menu.min_w(px(240.0));
-                if !fixed {
-                    let form = form.clone();
-                    menu = menu.item(
-                        PopupMenuItem::new("Does not repeat").on_click(move |_, window, cx: &mut App| {
-                            let _ = form.update(cx, |form, cx| form.set_repeat(None, window, cx));
-                        }),
-                    );
-                }
-                let chosen = repeat.which(start);
-                let menu = Preset::ALL.into_iter().fold(menu, |menu, preset| {
-                    let form = form.clone();
-                    menu.item(
-                        PopupMenuItem::new(preset.label())
-                            .checked(chosen == Some(preset))
-                            .on_click(move |_, window, cx: &mut App| {
-                                let _ = form.update(cx, |form, cx| {
-                                    let start = form.slot.start.date();
-                                    let until = form.repeat.as_ref().and_then(|repeat| repeat.until);
-                                    let mut repeat = Repeat::preset(preset, start);
-                                    repeat.until = until;
-                                    form.set_repeat(Some(repeat), window, cx);
-                                });
-                            }),
-                    )
-                });
-                let form = form.clone();
-                menu.item(PopupMenuItem::new("Custom").checked(chosen.is_none()).on_click(
-                    move |_, window, cx: &mut App| {
-                        let _ = form.update(cx, |form, cx| form.open_custom(window, cx));
-                    },
-                ))
-            });
+        let menu = self.repeat_menu(repeat, start, cx);
         let content = div()
             .debug_selector(|| "event-repeat-row".to_owned())
             .flex_1()
@@ -482,6 +445,62 @@ impl EventForm {
         Some(super::field_row(palette, Glyph::REPEAT, content, false))
     }
 
+    /// The repeat drop-down: Does not repeat (unless the series is fixed), the presets, and Custom.
+    fn repeat_menu(&self, repeat: Repeat, start: NaiveDate, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let form = cx.entity().downgrade();
+        let fixed = self.series_fixed();
+        let label = repeat.label(start);
+        Button::new("event-repeat")
+            .ghost()
+            .small()
+            .tooltip("Repeat")
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .child(label)
+                    .child(Glyph::CHEVRON_DOWN.icon().size(px(12.0))),
+            )
+            .dropdown_menu(move |menu, _, _| {
+                let mut menu = menu.min_w(px(240.0));
+                if !fixed {
+                    let form = form.clone();
+                    menu = menu.item(
+                        PopupMenuItem::new("Does not repeat").on_click(move |_, window, cx: &mut App| {
+                            let _ = form.update(cx, |form, cx| form.set_repeat(None, window, cx));
+                        }),
+                    );
+                }
+                let chosen = repeat.which(start);
+                let menu = Preset::ALL.into_iter().fold(menu, |menu, preset| {
+                    let form = form.clone();
+                    menu.item(
+                        PopupMenuItem::new(preset.label())
+                            .checked(chosen == Some(preset))
+                            .on_click(move |_, window, cx: &mut App| {
+                                let _ = form.update(cx, |form, cx| form.choose_preset(preset, window, cx));
+                            }),
+                    )
+                });
+                let form = form.clone();
+                menu.item(PopupMenuItem::new("Custom").checked(chosen.is_none()).on_click(
+                    move |_, window, cx: &mut App| {
+                        let _ = form.update(cx, |form, cx| form.open_custom(window, cx));
+                    },
+                ))
+            })
+    }
+
+    /// Repeats the event by `preset` from its day, keeping the end it has.
+    fn choose_preset(&mut self, preset: Preset, window: &mut Window, cx: &mut Context<Self>) {
+        let start = self.slot.start.date();
+        let until = self.repeat.as_ref().and_then(|repeat| repeat.until);
+        let mut repeat = Repeat::preset(preset, start);
+        repeat.until = until;
+        self.set_repeat(Some(repeat), window, cx);
+    }
+
     /// The custom recurrence dialog, over the form while it is open.
     pub(super) fn custom_view(&self, palette: Palette, cx: &mut Context<Self>) -> Option<gpui::Stateful<gpui::Div>> {
         let custom = self.custom.clone()?;
@@ -512,9 +531,9 @@ impl EventForm {
             .child(custom_line(
                 palette,
                 "Repeat every",
-                self.interval_controls(&custom, cx),
+                Self::interval_controls(&custom, cx),
             ))
-            .children(self.unit_details(&custom, start, palette, cx))
+            .children(Self::unit_details(&custom, start, palette, cx))
             .child(custom_line(
                 palette,
                 "Ends",
@@ -532,7 +551,7 @@ impl EventForm {
                     .text_color(rgb(palette.muted_foreground))
                     .child(preview.summary(start)),
             )
-            .child(self.custom_buttons(cx));
+            .child(Self::custom_buttons(cx));
         Some(
             div()
                 .id("event-custom-backdrop")
@@ -553,7 +572,7 @@ impl EventForm {
     }
 
     /// Repeat every: the number with − and +, and the unit.
-    fn interval_controls(&self, custom: &Custom, cx: &mut Context<Self>) -> gpui::Div {
+    fn interval_controls(custom: &Custom, cx: &mut Context<Self>) -> gpui::Div {
         let interval = custom.interval;
         let units = Unit::ALL.into_iter().map(|unit| {
             let id = SharedString::from(format!("event-custom-unit-{}", unit.key()));
@@ -561,8 +580,8 @@ impl EventForm {
                 id.clone(),
                 Button::new(id)
                     .small()
-                    .when(unit == custom.unit, |button| button.primary())
-                    .when(unit != custom.unit, |button| button.outline())
+                    .when(unit == custom.unit, gpui_component::button::ButtonVariants::primary)
+                    .when(unit != custom.unit, gpui_component::button::Button::outline)
                     .label(unit.label())
                     .on_click(cx.listener(move |form, _, _, cx| form.edit_custom(|custom| custom.unit = unit, cx))),
             )
@@ -602,16 +621,10 @@ impl EventForm {
     }
 
     /// What the unit asks: the days of a week; a month's or a year's date or weekday.
-    fn unit_details(
-        &self,
-        custom: &Custom,
-        start: NaiveDate,
-        palette: Palette,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::Div> {
+    fn unit_details(custom: &Custom, start: NaiveDate, palette: Palette, cx: &mut Context<Self>) -> Option<gpui::Div> {
         match custom.unit {
             Unit::Day => None,
-            Unit::Week => Some(custom_line(palette, "On", self.day_toggles(custom, palette, cx))),
+            Unit::Week => Some(custom_line(palette, "On", Self::day_toggles(custom, palette, cx))),
             Unit::Month | Unit::Year => {
                 let yearly = custom.unit == Unit::Year;
                 let absolute = if yearly {
@@ -621,7 +634,7 @@ impl EventForm {
                 };
                 let mut relative = format!("On the {} {}", week_index(start).name(), weekday(start).name());
                 if yearly {
-                    relative.push_str(&format!(" of {}", month_name(month(start))));
+                    let _ = write!(relative, " of {}", month_name(month(start)));
                 }
                 Some(
                     div()
@@ -636,7 +649,7 @@ impl EventForm {
     }
 
     /// The week's day toggles, Sunday first.
-    fn day_toggles(&self, custom: &Custom, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
+    fn day_toggles(custom: &Custom, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
         div()
             .flex()
             .gap_1()
@@ -667,22 +680,11 @@ impl EventForm {
                     })
                     .tooltip(move |window, cx| gpui_component::tooltip::Tooltip::new(day.name()).build(window, cx))
                     .child(letter)
-                    .on_click(cx.listener(move |form, _, _, cx| {
-                        form.edit_custom(
-                            |custom| {
-                                if custom.days.contains(&day) {
-                                    custom.days.retain(|known| *known != day);
-                                } else {
-                                    custom.days.push(day);
-                                }
-                            },
-                            cx,
-                        );
-                    }))
+                    .on_click(cx.listener(move |form, _, _, cx| form.edit_custom(|custom| custom.toggle(day), cx)))
             }))
     }
 
-    fn custom_buttons(&self, cx: &mut Context<Self>) -> gpui::Div {
+    fn custom_buttons(cx: &mut Context<Self>) -> gpui::Div {
         div()
             .flex()
             .justify_end()

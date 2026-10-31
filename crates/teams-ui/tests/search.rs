@@ -296,8 +296,13 @@ fn ctrl_e_then_enter_shows_the_listed_chats_messages_the_newest_first_and_a_mess
         cx.update(|_, cx| view.read(cx).held()) >= MANY - 6,
         "read back to the message, beyond the newest page"
     );
+    shown_and_revealed_traced(&written);
+}
 
-    let search = changes(&written, "search");
+/// The trace of the search above: the results shown (by their ids), the opened message revealed, and no query or
+/// text.
+fn shown_and_revealed_traced(written: &Written) {
+    let search = changes(written, "search");
     let shown_line = search
         .iter()
         .rev()
@@ -307,7 +312,7 @@ fn ctrl_e_then_enter_shows_the_listed_chats_messages_the_newest_first_and_a_mess
     assert!(search.iter().any(|line| line["change"] == "opened"));
     assert!(search.iter().any(|line| line["change"] == "results"));
     assert!(!written.text().contains("zeppelin"), "no query or text in the trace");
-    let revealed: Vec<serde_json::Value> = changes(&written, "chat-view")
+    let revealed: Vec<serde_json::Value> = changes(written, "chat-view")
         .into_iter()
         .filter(|line| line["change"] == "revealed")
         .collect();
@@ -442,7 +447,7 @@ fn the_service_s_people_files_and_messages_show_in_the_suggestions_and_the_resul
             modified_by: Some("Lab Sea".to_owned()),
             modified_ms: Some(NOON),
             snippet: "the zeppelin plan".to_owned(),
-            matched: vec![4..12],
+            matched: std::iter::once(4..12).collect(),
         }],
         messages: vec![FoundMessage {
             conversation: AB.to_owned(),
@@ -453,7 +458,7 @@ fn the_service_s_people_files_and_messages_show_in_the_suggestions_and_the_resul
             sender_name: Some("Lab Bee".to_owned()),
             to: None,
             snippet: "an older zeppelin".to_owned(),
-            matched: vec![9..17],
+            matched: std::iter::once(9..17).collect(),
         }],
         ..Found::default()
     };

@@ -301,7 +301,9 @@ fn an_edit_loads_the_text_back_its_mentions_by_mri_and_keeps_its_quote() {
         .filter_map(|(index, run)| Some((index, run.attrs.mention.as_deref()?)))
         .collect();
     assert_eq!(mentions, [(0, LAB_B)], "a mention naming nobody known stays text");
-    assert_eq!(loaded.doc.blocks[0].mention_ranges(), [3..10]);
+    let mentions = loaded.doc.blocks[0].mention_ranges();
+    assert_eq!(mentions.len(), 1);
+    assert_eq!(mentions[0], 3..10);
     assert!(
         loaded.doc.blocks[0].runs[0]
             .attrs
@@ -327,7 +329,11 @@ fn an_edit_loads_the_text_back_its_mentions_by_mri_and_keeps_its_quote() {
         1,
         "a reply's quote is kept aside"
     );
+}
 
+#[test]
+fn an_edit_sends_back_what_it_loaded_and_refuses_what_it_can_t_keep() {
+    let mentioned = HashMap::from([("0".to_owned(), LAB_B.to_owned())]);
     let image = RichText {
         nodes: vec![Node::Image(teams_proto::chat::Image {
             src: "https://example.test/i.png".to_owned(),
@@ -1382,7 +1388,11 @@ fn a_send_the_engine_refuses_gives_the_box_its_draft_back() {
     let (tokens, problem) = cx.update(|_, cx| {
         let compose = compose.read(cx);
         let doc = compose.editor().read(cx).doc();
-        let tokens = doc.blocks.iter().flat_map(|block| block.mention_ranges()).count();
+        let tokens = doc
+            .blocks
+            .iter()
+            .flat_map(teams_ui::editor::doc::Block::mention_ranges)
+            .count();
         (tokens, compose.problem().cloned())
     });
     assert_eq!(tokens, 1, "the mention, still a token");

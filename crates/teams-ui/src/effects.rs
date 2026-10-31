@@ -65,12 +65,15 @@ pub struct CameraPreview {
     inner: Arc<PreviewInner>,
 }
 
+/// A running preview's number, its stop flag and its thread.
+type Running = (u64, Arc<AtomicBool>, JoinHandle<()>);
+
 struct PreviewInner {
     devices: Arc<dyn Devices + Send + Sync>,
     feed: VideoFeed,
     background: BackgroundChoice,
     /// The preview's thread while one runs (or is stopping), and its number.
-    running: Mutex<Option<(u64, Arc<AtomicBool>, JoinHandle<()>)>>,
+    running: Mutex<Option<Running>>,
     /// Why the last preview stopped by itself (the camera couldn't be opened or went away).
     failure: Arc<Mutex<Option<String>>>,
     /// When a picker last drew the running preview.
@@ -383,7 +386,7 @@ impl EffectsPicker {
         };
         self.trace.record(&TraceLine::new("video-effect", "chosen").kind(kind));
         self.settings.update(cx, |settings, cx| {
-            settings.change(|settings| settings.video_effect = effect, cx)
+            settings.change(|settings| settings.video_effect = effect, cx);
         });
     }
 
@@ -466,7 +469,7 @@ impl EffectsPicker {
             if let Err(error) = removing.await {
                 log::warn!("a background picture can't be removed: {error}");
             }
-            let _ = this.update(cx, |picker, cx| picker.reload_added(cx));
+            let _ = this.update(cx, EffectsPicker::reload_added);
         })
         .detach();
     }
@@ -481,17 +484,20 @@ impl EffectsPicker {
             let decoding = cx.background_spawn(async move { source.decode() });
             cx.spawn(async move |this, cx: &mut AsyncApp| {
                 let decoded = decoding.await;
-                let _ = this.update(cx, |picker, cx| {
-                    picker.decoding.remove(&key);
-                    if let Some(decoded) = decoded {
-                        picker.thumbs.insert(key, Arc::new(decoded));
-                        cx.notify();
-                    }
-                });
+                let _ = this.update(cx, |picker, cx| picker.decoded(key, decoded, cx));
             })
             .detach();
         }
         None
+    }
+
+    /// Keeps `key`'s thumbnail once decoded (none when it can't be).
+    fn decoded(&mut self, key: String, decoded: Option<RenderImage>, cx: &mut Context<Self>) {
+        self.decoding.remove(&key);
+        if let Some(decoded) = decoded {
+            self.thumbs.insert(key, Arc::new(decoded));
+            cx.notify();
+        }
     }
 }
 
@@ -774,7 +780,7 @@ impl EffectsPicker {
         .rounded_md()
         .bg(rgb(palette.surface))
         .invisible()
-        .group_hover(group.clone(), |style| style.visible());
+        .group_hover(group.clone(), gpui::Styled::visible);
         let face = div()
             .relative()
             .size_full()

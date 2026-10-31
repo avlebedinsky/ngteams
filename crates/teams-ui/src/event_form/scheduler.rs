@@ -36,7 +36,8 @@ pub(super) enum Read {
     None,
     /// Asked; the answer to come.
     Reading,
-    Read(Rc<MeetingAvailability>),
+    /// The answer.
+    Known(Rc<MeetingAvailability>),
     /// The reads failed.
     Failed,
 }
@@ -84,7 +85,7 @@ impl EventForm {
                     return;
                 }
                 form.availability = match answer {
-                    Ok(read) => Read::Read(Rc::new(read)),
+                    Ok(read) => Read::Known(Rc::new(read)),
                     Err(_) => Read::Failed,
                 };
                 cx.notify();
@@ -95,7 +96,7 @@ impl EventForm {
 
     /// The suggested starts on the day shown, when they were read.
     pub(super) fn suggestions_on_day(&self) -> Vec<NaiveDateTime> {
-        let Read::Read(read) = &self.availability else {
+        let Read::Known(read) = &self.availability else {
             return Vec::new();
         };
         read.suggestions
@@ -118,7 +119,7 @@ impl EventForm {
             .child(
                 div()
                     .flex()
-                    .child(self.gutter(palette, cx))
+                    .child(Self::gutter(palette, cx))
                     .child(self.people_columns(&columns, palette, cx)),
             );
         div()
@@ -141,7 +142,7 @@ impl EventForm {
     /// The account's column, then each attendee's, with what their calendars say.
     fn columns(&self) -> Vec<Column> {
         let people = match &self.availability {
-            Read::Read(read) => read.people.clone(),
+            Read::Known(read) => read.people.clone(),
             _ => Vec::new(),
         };
         let invited: Vec<String> = self
@@ -180,8 +181,8 @@ impl EventForm {
             (_, true, _) => Some("Add attendees to see when everyone is free"),
             (Read::Reading | Read::None, _, _) => Some("Looking for times everyone is free…"),
             (Read::Failed, _, _) => Some("Their calendars couldn't be read. Try another day."),
-            (Read::Read(_), _, true) => Some("No time on this day suits everyone"),
-            (Read::Read(_), _, false) => None,
+            (Read::Known(_), _, true) => Some("No time on this day suits everyone"),
+            (Read::Known(_), _, false) => None,
         };
         let buttons = suggestions.into_iter().take(12).map(|start| {
             let id = SharedString::from(format!("event-suggested-{}", start.format("%H%M")));

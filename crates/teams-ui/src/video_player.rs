@@ -83,7 +83,7 @@ impl ByteSource for EngineBytes {
         match abandon.wait_for(asked) {
             None => Err(SourceError::Stopped),
             Some(Ok(stream)) => Ok(Box::new(EngineStream(stream))),
-            Some(Err(error)) => Err(source_error(error)),
+            Some(Err(error)) => Err(source_error(&error)),
         }
     }
 }
@@ -101,12 +101,12 @@ impl ByteStream for EngineStream {
             None => Err(SourceError::Stopped),
             Some(None) => Ok(None),
             Some(Some(Ok(bytes))) => Ok(Some(bytes)),
-            Some(Some(Err(error))) => Err(source_error(error)),
+            Some(Some(Err(error))) => Err(source_error(&error)),
         }
     }
 }
 
-fn source_error(error: EngineError) -> SourceError {
+fn source_error(error: &EngineError) -> SourceError {
     match error {
         EngineError::FileUnavailable => SourceError::Unavailable,
         EngineError::Stopped => SourceError::Stopped,

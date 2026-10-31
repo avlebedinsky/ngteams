@@ -137,7 +137,7 @@ impl Editor {
         };
         if let Some((start, end)) = self.marked.filter(|(start, _)| start.block == index && !placeholder) {
             let range = start.offset..if end.block == index { end.offset } else { block.len() };
-            highlights = underlined(highlights, &range);
+            highlights = underlined(&highlights, &range);
         }
         let selected = self
             .selected_in(index, block.len())
@@ -212,7 +212,7 @@ impl Editor {
                     .border_1()
                     .border_color(rgb(palette.border))
                     .bg(rgb(palette.hover))
-                    .when_some(mono, |row, mono| row.font_family(mono))
+                    .when_some(mono, gpui::Styled::font_family)
                     .text_sm()
                     .child(body)
                     .into_any_element()
@@ -318,7 +318,7 @@ impl Editor {
 /// `highlights` with `range` underlined (as an input method's text being composed is drawn), split where it crosses
 /// them.
 fn underlined(
-    highlights: Vec<(Range<usize>, HighlightStyle)>,
+    highlights: &[(Range<usize>, HighlightStyle)],
     range: &Range<usize>,
 ) -> Vec<(Range<usize>, HighlightStyle)> {
     let underline = UnderlineStyle {
@@ -326,7 +326,7 @@ fn underlined(
         ..UnderlineStyle::default()
     };
     let mut cuts = vec![range.start, range.end];
-    for (piece, _) in &highlights {
+    for (piece, _) in highlights {
         cuts.extend([piece.start, piece.end]);
     }
     cuts.sort_unstable();
@@ -368,8 +368,8 @@ impl Render for Editor {
             .id("rich-editor-scroll")
             .track_scroll(&self.scroll)
             .overflow_y_scroll()
-            .when_some(self.max_height, |scroll, max| scroll.max_h(max))
-            .when_some(self.min_height, |scroll, min| scroll.min_h(min))
+            .when_some(self.max_height, gpui::Styled::max_h)
+            .when_some(self.min_height, gpui::Styled::min_h)
             .flex()
             .flex_col()
             .children(rows);
@@ -524,8 +524,8 @@ impl Element for BlockText {
         _id: Option<&GlobalElementId>,
         inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        _: &mut (),
-        _: &mut (),
+        (): &mut (),
+        (): &mut (),
         window: &mut Window,
         cx: &mut App,
     ) {

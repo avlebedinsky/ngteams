@@ -36,7 +36,7 @@ impl CalendarView {
             .border_b_1()
             .border_color(rgb(palette.border))
             .child(div().w(px(GUTTER)).flex_none())
-            .children(span.dates().map(|date| self.day_header(date, now.date(), palette, cx)));
+            .children(span.dates().map(|date| day_header(date, now.date(), palette, cx)));
         let all_day: Vec<Vec<Shown>> = span
             .dates()
             .map(|date| {
@@ -47,45 +47,11 @@ impl CalendarView {
                     .collect()
             })
             .collect();
-        let strip = all_day.iter().any(|day| !day.is_empty()).then(|| {
-            div()
-                .debug_selector(|| "calendar-all-day".to_owned())
-                .flex()
-                .flex_none()
-                .border_b_1()
-                .border_color(rgb(palette.border))
-                .child(div().w(px(GUTTER)).flex_none())
-                .children(all_day.into_iter().map(|day| {
-                    div()
-                        .flex_1()
-                        .w_0()
-                        .min_w_0()
-                        .p_1()
-                        .flex()
-                        .flex_col()
-                        .gap_1()
-                        .border_l_1()
-                        .border_color(rgb(palette.border))
-                        .children(day.into_iter().map(|shown| self.chip(shown, true, cycle, palette, cx)))
-                }))
-        });
-        let gutter = div()
-            .w(px(GUTTER))
-            .flex_none()
-            .relative()
-            .h(px(24.0 * HOUR_HEIGHT))
-            .children((1..24).map(|hour| {
-                div()
-                    .absolute()
-                    .top(px(units(hour) * HOUR_HEIGHT + 4.0))
-                    .left(px(8.0))
-                    .text_xs()
-                    .text_color(rgb(palette.muted_foreground))
-                    .child(hour_label(hour, cycle))
-            }));
+        let strip = all_day_strip(all_day, cycle, palette, cx);
+        let gutter = hours_gutter(cycle, palette);
         let columns: Vec<AnyElement> = span
             .dates()
-            .map(|date| self.day_column(date, &events, now, cycle, palette, cx))
+            .map(|date| self.day_column(date, &events, now, palette, cx))
             .collect();
         let body = div()
             .id("calendar-hours")
@@ -106,79 +72,16 @@ impl CalendarView {
             .child(body)
     }
 
-    /// A day's header: its number and weekday, today's in the brand colour under a brand line; clicked, the day.
-    pub(super) fn day_header(
-        &self,
-        date: NaiveDate,
-        today: NaiveDate,
-        palette: Palette,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let is_today = date == today;
-        let color = if is_today { palette.brand } else { palette.foreground };
-        let selector = format!("calendar-day-{}", date.format("%Y-%m-%d"));
-        div()
-            .debug_selector(move || selector.clone())
-            .id(SharedString::from(format!("calendar-day-{}", date.format("%Y%m%d"))))
-            .flex_1()
-            .w_0()
-            .min_w_0()
-            .relative()
-            .h(px(68.0))
-            .px_4()
-            .flex()
-            .flex_col()
-            .justify_center()
-            .border_l_1()
-            .border_color(rgb(palette.border))
-            // Teams' brand line over today
-            .when(is_today, |header| {
-                header.child(
-                    div()
-                        .absolute()
-                        .top_0()
-                        .left_0()
-                        .right_0()
-                        .h(px(3.0))
-                        .bg(rgb(palette.brand)),
-                )
-            })
-            .cursor_pointer()
-            .hover(move |header| header.bg(rgb(palette.hover)))
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.go_to(date, cx);
-                this.set_mode(Mode::Day, cx);
-            }))
-            .child(
-                div()
-                    .text_2xl()
-                    .text_color(rgb(color))
-                    .when(is_today, |number| number.font_weight(gpui::FontWeight::SEMIBOLD))
-                    .child(date.day().to_string()),
-            )
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(if is_today {
-                        palette.brand
-                    } else {
-                        palette.muted_foreground
-                    }))
-                    .child(date.format("%a").to_string()),
-            )
-            .into_any_element()
-    }
-
     /// A day's column of hours: its hour and half-hour lines, its events and, today, the current time's line.
     pub(super) fn day_column(
         &self,
         date: NaiveDate,
         events: &[Shown],
         now: NaiveDateTime,
-        cycle: HourCycle,
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let cycle = clock::cycle(cx);
         let lines = (0..24).flat_map(|hour| {
             let top = units(hour) * HOUR_HEIGHT;
             [
@@ -225,10 +128,7 @@ impl CalendarView {
             })
             .collect::<Vec<_>>();
         let slots = calendar::day_slots(events, date, MIN_MINUTES);
-        let blocks: Vec<AnyElement> = slots
-            .into_iter()
-            .map(|slot| self.block(slot, cycle, palette, cx))
-            .collect();
+        let blocks: Vec<AnyElement> = slots.into_iter().map(|slot| block(slot, cycle, palette, cx)).collect();
         let now_line = self.now_line(date, now, palette);
         div()
             .flex_1()
@@ -278,166 +178,11 @@ impl CalendarView {
         }
     }
 
-    /// An event's block in the time grid.
-    pub(super) fn block(&self, slot: Slot, cycle: HourCycle, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let top = units(slot.top) / 60.0 * HOUR_HEIGHT;
-        let height = units(slot.length) / 60.0 * HOUR_HEIGHT;
-        let width = 1.0 / units(slot.columns);
-        let left = units(slot.column) * width;
-        let shown = slot.shown;
-        let look = shown.look();
-        let one_line = height < 40.0;
-        let title = shown.title();
-        let organizer = shown.event.organizer_name.clone().filter(|_| !shown.event.is_organizer);
-        let mark = mark(&shown, palette);
-        let text = div()
-            .flex_1()
-            .min_w_0()
-            .pl_2()
-            .pr_1()
-            .py_1()
-            .overflow_hidden()
-            .text_sm()
-            .when(one_line, |text| {
-                text.flex()
-                    .gap_1()
-                    .whitespace_nowrap()
-                    .child(
-                        div()
-                            .flex_none()
-                            .max_w_full()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .child(title.clone()),
-                    )
-                    .children(organizer.clone().map(|name| {
-                        div()
-                            .min_w_0()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .text_color(rgb(palette.muted_foreground))
-                            .child(name)
-                    }))
-            })
-            .when(!one_line, |text| {
-                let time = (height >= 72.0)
-                    .then(|| format!("{} – {}", time_text(shown.start, cycle), time_text(shown.end, cycle)));
-                text.flex()
-                    .flex_col()
-                    .child(
-                        div()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .child(title.clone()),
-                    )
-                    .children(organizer.clone().map(|name| {
-                        div()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .whitespace_nowrap()
-                            .text_color(rgb(palette.muted_foreground))
-                            .child(name)
-                    }))
-                    .children(time.map(|time| {
-                        div()
-                            .text_xs()
-                            .whitespace_nowrap()
-                            .text_color(rgb(palette.muted_foreground))
-                            .child(time)
-                    }))
-            });
-        let selector = format!("calendar-event-{}", shown.event.id);
-        let id = SharedString::from(format!("calendar-event-{}-{}", shown.event.id, slot.top));
-        div()
-            .absolute()
-            .top(px(top + 1.0))
-            .left(relative(left))
-            .w(relative(width))
-            .h(px((height - 2.0).max(14.0)))
-            .pr(px(4.0))
-            .pl(px(2.0))
-            .child(
-                event_face(look, palette)
-                    .debug_selector(move || selector.clone())
-                    .id(id)
-                    .size_full()
-                    .relative()
-                    .flex()
-                    .overflow_hidden()
-                    .cursor_pointer()
-                    .child(edge(look, palette))
-                    .child(text)
-                    .children(mark.map(|mark| div().absolute().right(px(4.0)).bottom(px(3.0)).child(mark)))
-                    .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
-                        // a double click opens the account's own event to change, as Teams does
-                        if event.click_count() >= 2 && shown.event.is_organizer && !shown.event.cancelled {
-                            this.edit_event(shown.event.id.clone(), cx);
-                        } else {
-                            this.open_card(shown.clone(), cx);
-                        }
-                    })),
-            )
-            .into_any_element()
-    }
-
-    /// An event as one line (the all-day strip's, a month day's): its time unless all day, its title, its mark.
-    pub(super) fn chip(
-        &self,
-        shown: Shown,
-        all_day: bool,
-        cycle: HourCycle,
-        palette: Palette,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        let look = shown.look();
-        let selector = format!("calendar-event-{}", shown.event.id);
-        let id = SharedString::from(format!(
-            "calendar-chip-{}-{}",
-            shown.event.id,
-            shown.start.and_utc().timestamp()
-        ));
-        let time = (!all_day && !shown.all_day()).then(|| time_text(shown.start, cycle));
-        let mark = mark(&shown, palette);
-        event_face(look, palette)
-            .debug_selector(move || selector.clone())
-            .id(id)
-            .h(px(24.0))
-            .flex()
-            .items_center()
-            .gap_1()
-            .overflow_hidden()
-            .cursor_pointer()
-            .text_sm()
-            .child(edge(look, palette))
-            .children(time.map(|time| {
-                div()
-                    .pl_1()
-                    .flex_none()
-                    .text_color(rgb(palette.muted_foreground))
-                    .child(time)
-            }))
-            .child(
-                div()
-                    .pl_1()
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .child(shown.title()),
-            )
-            .children(mark.map(|mark| div().pr_1().child(mark)))
-            .on_click(cx.listener(move |this, _, _, cx| this.open_card(shown.clone(), cx)))
-            .into_any_element()
-    }
-
     /// The month view: the weekday names over six weeks of days, each listing its events.
     pub(super) fn month_view(&self, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
         let span = self.span();
         let events = self.visible();
         let today = calendar::now().date_naive();
-        let cycle = clock::cycle(cx);
         let names = div()
             .flex()
             .flex_none()
@@ -474,7 +219,7 @@ impl CalendarView {
                 .border_color(rgb(palette.border))
                 .children(
                     week.iter()
-                        .map(|date| self.month_day(*date, &events, today, cycle, palette, cx)),
+                        .map(|date| self.month_day(*date, &events, today, palette, cx)),
                 )
         });
         div()
@@ -487,15 +232,16 @@ impl CalendarView {
             .children(weeks)
     }
 
+    /// A month's day: its number (today's on the brand colour), its first events and how many more there are.
     pub(super) fn month_day(
         &self,
         date: NaiveDate,
         events: &[Shown],
         today: NaiveDate,
-        cycle: HourCycle,
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let cycle = clock::cycle(cx);
         let listed = calendar::day_list(events, date);
         let more = listed.len().saturating_sub(MONTH_LISTED);
         let in_month = date.month() == self.anchor.month();
@@ -553,11 +299,268 @@ impl CalendarView {
                 listed
                     .into_iter()
                     .take(MONTH_LISTED)
-                    .map(|shown| self.chip(shown, false, cycle, palette, cx)),
+                    .map(|shown| chip(shown, false, cycle, palette, cx)),
             )
             .children(more)
             .into_any_element()
     }
+}
+
+/// A day's header: its number and weekday, today's in the brand colour under a brand line; clicked, the day.
+fn day_header(date: NaiveDate, today: NaiveDate, palette: Palette, cx: &mut Context<CalendarView>) -> AnyElement {
+    let is_today = date == today;
+    let color = if is_today { palette.brand } else { palette.foreground };
+    let selector = format!("calendar-day-{}", date.format("%Y-%m-%d"));
+    div()
+        .debug_selector(move || selector.clone())
+        .id(SharedString::from(format!("calendar-day-{}", date.format("%Y%m%d"))))
+        .flex_1()
+        .w_0()
+        .min_w_0()
+        .relative()
+        .h(px(68.0))
+        .px_4()
+        .flex()
+        .flex_col()
+        .justify_center()
+        .border_l_1()
+        .border_color(rgb(palette.border))
+        // Teams' brand line over today
+        .when(is_today, |header| {
+            header.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .left_0()
+                    .right_0()
+                    .h(px(3.0))
+                    .bg(rgb(palette.brand)),
+            )
+        })
+        .cursor_pointer()
+        .hover(move |header| header.bg(rgb(palette.hover)))
+        .on_click(cx.listener(move |this, _, _, cx| {
+            this.go_to(date, cx);
+            this.set_mode(Mode::Day, cx);
+        }))
+        .child(
+            div()
+                .text_2xl()
+                .text_color(rgb(color))
+                .when(is_today, |number| number.font_weight(gpui::FontWeight::SEMIBOLD))
+                .child(date.day().to_string()),
+        )
+        .child(
+            div()
+                .text_sm()
+                .text_color(rgb(if is_today {
+                    palette.brand
+                } else {
+                    palette.muted_foreground
+                }))
+                .child(date.format("%a").to_string()),
+        )
+        .into_any_element()
+}
+
+/// The all-day strip under the days' headers, when any day shown has an all-day event: each day's as chips.
+fn all_day_strip(
+    all_day: Vec<Vec<Shown>>,
+    cycle: HourCycle,
+    palette: Palette,
+    cx: &mut Context<CalendarView>,
+) -> Option<gpui::Div> {
+    if all_day.iter().all(Vec::is_empty) {
+        return None;
+    }
+    let days: Vec<gpui::Div> = all_day
+        .into_iter()
+        .map(|day| {
+            div()
+                .flex_1()
+                .w_0()
+                .min_w_0()
+                .p_1()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .border_l_1()
+                .border_color(rgb(palette.border))
+                .children(day.into_iter().map(|shown| chip(shown, true, cycle, palette, cx)))
+        })
+        .collect();
+    Some(
+        div()
+            .debug_selector(|| "calendar-all-day".to_owned())
+            .flex()
+            .flex_none()
+            .border_b_1()
+            .border_color(rgb(palette.border))
+            .child(div().w(px(GUTTER)).flex_none())
+            .children(days),
+    )
+}
+
+/// The hours' labels left of the time grid.
+fn hours_gutter(cycle: HourCycle, palette: Palette) -> gpui::Div {
+    div()
+        .w(px(GUTTER))
+        .flex_none()
+        .relative()
+        .h(px(24.0 * HOUR_HEIGHT))
+        .children((1..24).map(|hour| {
+            div()
+                .absolute()
+                .top(px(units(hour) * HOUR_HEIGHT + 4.0))
+                .left(px(8.0))
+                .text_xs()
+                .text_color(rgb(palette.muted_foreground))
+                .child(hour_label(hour, cycle))
+        }))
+}
+
+/// An event's block in the time grid.
+fn block(slot: Slot, cycle: HourCycle, palette: Palette, cx: &mut Context<CalendarView>) -> AnyElement {
+    let top = units(slot.top) / 60.0 * HOUR_HEIGHT;
+    let height = units(slot.length) / 60.0 * HOUR_HEIGHT;
+    let width = 1.0 / units(slot.columns);
+    let left = units(slot.column) * width;
+    let shown = slot.shown;
+    let look = shown.look();
+    let mark = mark(&shown, palette);
+    let text = block_text(&shown, height, cycle, palette);
+    let selector = format!("calendar-event-{}", shown.event.id);
+    let id = SharedString::from(format!("calendar-event-{}-{}", shown.event.id, slot.top));
+    div()
+        .absolute()
+        .top(px(top + 1.0))
+        .left(relative(left))
+        .w(relative(width))
+        .h(px((height - 2.0).max(14.0)))
+        .pr(px(4.0))
+        .pl(px(2.0))
+        .child(
+            event_face(look, palette)
+                .debug_selector(move || selector.clone())
+                .id(id)
+                .size_full()
+                .relative()
+                .flex()
+                .overflow_hidden()
+                .cursor_pointer()
+                .child(edge(look, palette))
+                .child(text)
+                .children(mark.map(|mark| div().absolute().right(px(4.0)).bottom(px(3.0)).child(mark)))
+                .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                    // a double click opens the account's own event to change, as Teams does
+                    if event.click_count() >= 2 && shown.event.is_organizer && !shown.event.cancelled {
+                        this.edit_event(shown.event.id.clone(), cx);
+                    } else {
+                        this.open_card(shown.clone(), cx);
+                    }
+                })),
+        )
+        .into_any_element()
+}
+
+/// A block's text, by its `height`: the title and organizer on one line in a short block, else under each other with
+/// the time once there is room for it.
+fn block_text(shown: &Shown, height: f32, cycle: HourCycle, palette: Palette) -> gpui::Div {
+    let title = shown.title();
+    let organizer = shown.event.organizer_name.clone().filter(|_| !shown.event.is_organizer);
+    let text = div()
+        .flex_1()
+        .min_w_0()
+        .pl_2()
+        .pr_1()
+        .py_1()
+        .overflow_hidden()
+        .text_sm();
+    if height < 40.0 {
+        return text
+            .flex()
+            .gap_1()
+            .whitespace_nowrap()
+            .child(
+                div()
+                    .flex_none()
+                    .max_w_full()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .child(title),
+            )
+            .children(organizer.map(|name| {
+                div()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .text_color(rgb(palette.muted_foreground))
+                    .child(name)
+            }));
+    }
+    let time = (height >= 72.0).then(|| format!("{} – {}", time_text(shown.start, cycle), time_text(shown.end, cycle)));
+    text.flex()
+        .flex_col()
+        .child(div().overflow_hidden().text_ellipsis().whitespace_nowrap().child(title))
+        .children(organizer.map(|name| {
+            div()
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .text_color(rgb(palette.muted_foreground))
+                .child(name)
+        }))
+        .children(time.map(|time| {
+            div()
+                .text_xs()
+                .whitespace_nowrap()
+                .text_color(rgb(palette.muted_foreground))
+                .child(time)
+        }))
+}
+
+/// An event as one line (the all-day strip's, a month day's): its time unless all day, its title, its mark.
+fn chip(shown: Shown, all_day: bool, cycle: HourCycle, palette: Palette, cx: &mut Context<CalendarView>) -> AnyElement {
+    let look = shown.look();
+    let selector = format!("calendar-event-{}", shown.event.id);
+    let id = SharedString::from(format!(
+        "calendar-chip-{}-{}",
+        shown.event.id,
+        shown.start.and_utc().timestamp()
+    ));
+    let time = (!all_day && !shown.all_day()).then(|| time_text(shown.start, cycle));
+    let mark = mark(&shown, palette);
+    event_face(look, palette)
+        .debug_selector(move || selector.clone())
+        .id(id)
+        .h(px(24.0))
+        .flex()
+        .items_center()
+        .gap_1()
+        .overflow_hidden()
+        .cursor_pointer()
+        .text_sm()
+        .child(edge(look, palette))
+        .children(time.map(|time| {
+            div()
+                .pl_1()
+                .flex_none()
+                .text_color(rgb(palette.muted_foreground))
+                .child(time)
+        }))
+        .child(
+            div()
+                .pl_1()
+                .flex_1()
+                .min_w_0()
+                .overflow_hidden()
+                .text_ellipsis()
+                .whitespace_nowrap()
+                .child(shown.title()),
+        )
+        .children(mark.map(|mark| div().pr_1().child(mark)))
+        .on_click(cx.listener(move |this, _, _, cx| this.open_card(shown.clone(), cx)))
+        .into_any_element()
 }
 
 /// An event's block or chip by its look: filled with the brand colour's tint, a cancelled one only outlined.

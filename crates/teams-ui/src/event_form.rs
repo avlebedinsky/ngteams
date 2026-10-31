@@ -34,7 +34,7 @@ use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use chrono::{Duration, Local, NaiveDate, NaiveDateTime};
+use chrono::{Duration, Local, NaiveDate};
 use gpui::{
     AnyElement, App, AppContext as _, AsyncApp, Bounds, Context, Entity, FocusHandle, Focusable as _, Global,
     InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Pixels, Render, ScrollHandle, SharedString,
@@ -240,6 +240,10 @@ struct Drag {
 }
 
 /// The scheduling form (see the module docs).
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "the form's own switches (Format shown, text changed, optional shown) beside the event's online and private"
+)]
 pub struct EventForm {
     core: Arc<dyn Core>,
     trace: Arc<ViewTrace>,
@@ -319,19 +323,10 @@ impl EventForm {
         let optional = input("Invite optional attendees", window, cx);
         let location = input("Add a room or location", window, cx);
         let cancel_note = input("Add a message for the attendees (optional)", window, cx);
-        let body = cx.new(|cx| Editor::new(window, cx).placeholder("Type details for this new meeting"));
-        let read_only = core.read_only();
-        body.update(cx, |editor, cx| {
-            editor.set_enter_mode(EnterMode::NewLine, cx);
-            editor.set_heights(Some(px(160.0)), None, cx);
-            editor.set_read_only(read_only, cx);
-        });
+        let body = Self::body_editor(core.read_only(), window, cx);
         let format_bar = cx.new(|cx| FormatBar::new(body.clone(), cx).without_discard());
-        let picker = |window: &mut Window, cx: &mut Context<Self>| {
-            cx.new(|cx| DatePickerState::new(window, cx).date_format("%a %-m/%-d/%Y"))
-        };
-        let until_picker = picker(window, cx);
-        let custom_until_picker = picker(window, cx);
+        let until_picker = Self::date_picker(window, cx);
+        let custom_until_picker = Self::date_picker(window, cx);
         let subscriptions = Self::subscriptions(
             [&required, &optional],
             &body,
@@ -397,6 +392,22 @@ impl EventForm {
         form.read_day(cx);
         form.title.update(cx, |title, cx| title.focus(window, cx));
         form
+    }
+
+    /// The event's text editor: Enter a new line, at least 160px high; read-only in the read-only mode.
+    fn body_editor(read_only: bool, window: &mut Window, cx: &mut Context<Self>) -> Entity<Editor> {
+        let body = cx.new(|cx| Editor::new(window, cx).placeholder("Type details for this new meeting"));
+        body.update(cx, |editor, cx| {
+            editor.set_enter_mode(EnterMode::NewLine, cx);
+            editor.set_heights(Some(px(160.0)), None, cx);
+            editor.set_read_only(read_only, cx);
+        });
+        body
+    }
+
+    /// A date picker of the form's (the series' end, the custom dialog's).
+    fn date_picker(window: &mut Window, cx: &mut Context<Self>) -> Entity<DatePickerState> {
+        cx.new(|cx| DatePickerState::new(window, cx).date_format("%a %-m/%-d/%Y"))
     }
 
     /// What the form listens to: the attendee boxes, the text, and the series' two end pickers.
@@ -499,7 +510,7 @@ impl EventForm {
         };
         self.reminder = full.reminder_minutes;
         self.private = event.private;
-        self.categories = full.categories.clone();
+        self.categories.clone_from(&full.categories);
         self.attendees = invited(&full);
         self.optional_shown = self.attendees.iter().any(|attendee| !attendee.required);
         self.repeat = full.recurrence.as_ref().filter(|_| repeats).map(Repeat::of);
@@ -845,7 +856,7 @@ impl EventForm {
                     }
                     Err(error) => {
                         form.trace.record(&TraceLine::new("event-form", "not-saved").kind(kind));
-                        form.problem = Some(format!("{}", capitalized(&error.to_string())).into());
+                        form.problem = Some(capitalized(&error.to_string()).into());
                     }
                 }
                 cx.notify();
@@ -1037,6 +1048,45 @@ fn invited(full: &FullEvent) -> Vec<EventAttendee> {
 }
 
 /// `text` with its first letter capitalized.
+/// The confirmation's title, text and button, by what is removed (`noun`: the occurrence, the series, or the event).
+fn confirm_words(confirm: Confirm, noun: &str) -> (&'static str, &'static str, &'static str) {
+    match (confirm, noun) {
+        (Confirm::Cancel, "occurrence") => (
+            "Cancel occurrence?",
+            "The attendees get a cancellation of this occurrence, with your message if you add one.",
+            "Cancel occurrence",
+        ),
+        (Confirm::Cancel, "series") => (
+            "Cancel series?",
+            "The attendees get a cancellation of every occurrence, with your message if you add one.",
+            "Cancel series",
+        ),
+        (Confirm::Cancel, _) => (
+            "Cancel meeting?",
+            "The attendees get a cancellation, with your message if you add one.",
+            "Cancel meeting",
+        ),
+        (Confirm::Delete, "occurrence") => (
+            "Delete this occurrence?",
+            "It's removed from your calendar; the rest of the series stays.",
+            "Delete occurrence",
+        ),
+        (Confirm::Delete, "series") => (
+            "Delete this series?",
+            "Every occurrence is removed from your calendar.",
+            "Delete series",
+        ),
+        (Confirm::Delete, _) => ("Delete this event?", "It's removed from your calendar.", "Delete"),
+    }
+}
+
+/// A menu item `label` that moves the form's event by `change`.
+fn slot_item(form: WeakEntity<EventForm>, label: String, change: impl Fn(Slot) -> Slot + 'static) -> PopupMenuItem {
+    PopupMenuItem::new(label).on_click(move |_, _, cx: &mut App| {
+        let _ = form.update(cx, |form, cx| form.set_slot(change(form.slot), cx));
+    })
+}
+
 fn capitalized(text: &str) -> String {
     let mut chars = text.chars();
     chars
@@ -1085,148 +1135,10 @@ fn field_row(palette: Palette, glyph: Glyph, content: impl IntoElement, focused:
 impl EventForm {
     fn toolbar(&self, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
         let writes = !self.core.read_only();
-        let form = cx.entity().downgrade();
-        let show_as = self.show_as;
-        let show_as_menu = {
-            let form = form.clone();
-            Button::new("event-show-as")
-                .ghost()
-                .small()
-                .tooltip("Show as")
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .child(Glyph::CALENDAR_CLOCK.icon().size(px(16.0)))
-                        .child(model::show_as_label(show_as))
-                        .child(Glyph::CHEVRON_DOWN.icon().size(px(12.0))),
-                )
-                .dropdown_menu(move |menu, _, _| {
-                    EventShowAs::ALL.iter().fold(menu.min_w(px(200.0)), |menu, choice| {
-                        let (form, choice) = (form.clone(), *choice);
-                        menu.item(
-                            PopupMenuItem::new(model::show_as_label(choice))
-                                .checked(choice == show_as)
-                                .on_click(move |_, _, cx: &mut App| {
-                                    let _ = form.update(cx, |form, cx| {
-                                        form.show_as = choice;
-                                        cx.notify();
-                                    });
-                                }),
-                        )
-                    })
-                })
-        };
-        let reminder = self.reminder;
-        let reminder_menu = {
-            let form = form.clone();
-            Button::new("event-reminder")
-                .ghost()
-                .small()
-                .tooltip(format!("Reminder: {}", model::reminder_label(reminder)))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .child(Glyph::ALARM.icon().size(px(16.0)))
-                        .child(Glyph::CHEVRON_DOWN.icon().size(px(12.0))),
-                )
-                .dropdown_menu(move |menu, _, _| {
-                    REMINDERS.iter().fold(menu.min_w(px(200.0)), |menu, (choice, label)| {
-                        let (form, choice) = (form.clone(), *choice);
-                        menu.item(PopupMenuItem::new(*label).checked(choice == reminder).on_click(
-                            move |_, _, cx: &mut App| {
-                                let _ = form.update(cx, |form, cx| {
-                                    form.reminder = choice;
-                                    cx.notify();
-                                });
-                            },
-                        ))
-                    })
-                })
-        };
-        let categories = self.categories.clone();
-        let category_menu = {
-            let form = form.clone();
-            let tip = if categories.is_empty() {
-                "Categorize".to_owned()
-            } else {
-                format!("Categories: {}", categories.join(", "))
-            };
-            Button::new("event-category")
-                .ghost()
-                .small()
-                .tooltip(tip)
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .child(Glyph::TAG.icon().size(px(16.0)))
-                        .child(Glyph::CHEVRON_DOWN.icon().size(px(12.0))),
-                )
-                .dropdown_menu(move |menu, _, _| {
-                    let mut names: Vec<String> = CATEGORIES.iter().map(|name| (*name).to_owned()).collect();
-                    names.extend(
-                        categories
-                            .iter()
-                            .filter(|name| !CATEGORIES.contains(&name.as_str()))
-                            .cloned(),
-                    );
-                    names.into_iter().fold(menu.min_w(px(200.0)), |menu, name| {
-                        let form = form.clone();
-                        let chosen = categories.contains(&name);
-                        menu.item(PopupMenuItem::new(name.clone()).checked(chosen).on_click(
-                            move |_, _, cx: &mut App| {
-                                let _ = form.update(cx, |form, cx| {
-                                    if chosen {
-                                        form.categories.retain(|known| *known != name);
-                                    } else {
-                                        form.categories.push(name.clone());
-                                    }
-                                    cx.notify();
-                                });
-                            },
-                        ))
-                    })
-                })
-        };
-        let private = self.private;
-        let privacy_menu = {
-            let form = form.clone();
-            Button::new("event-privacy")
-                .ghost()
-                .small()
-                .tooltip(if private { "Private" } else { "Not private" })
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_1()
-                        .child(
-                            if private { Glyph::LOCK } else { Glyph::LOCK_OPEN }
-                                .icon()
-                                .size(px(16.0)),
-                        )
-                        .child(Glyph::CHEVRON_DOWN.icon().size(px(12.0))),
-                )
-                .dropdown_menu(move |menu, _, _| {
-                    let form = form.clone();
-                    menu.min_w(px(200.0))
-                        .item(
-                            PopupMenuItem::new("Private")
-                                .checked(private)
-                                .on_click(move |_, _, cx: &mut App| {
-                                    let _ = form.update(cx, |form, cx| {
-                                        form.private = !form.private;
-                                        cx.notify();
-                                    });
-                                }),
-                        )
-                })
-        };
+        let show_as_menu = self.show_as_menu(cx);
+        let reminder_menu = self.reminder_menu(cx);
+        let category_menu = self.category_menu(cx);
+        let privacy_menu = self.privacy_menu(cx);
         let removing = self.removing(writes, cx);
         let save_label = self.save_label();
         let save = selected_by(
@@ -1269,15 +1181,153 @@ impl EventForm {
             .child(save)
     }
 
+    /// The toolbar's drop-down button `id`: its `glyph`, what `label` it shows, its chevron.
+    fn toolbar_menu(id: &'static str, glyph: Glyph, label: Option<&'static str>) -> Button {
+        Button::new(id).ghost().small().child(
+            div()
+                .flex()
+                .items_center()
+                .gap_1()
+                .child(glyph.icon().size(px(16.0)))
+                .children(label)
+                .child(Glyph::CHEVRON_DOWN.icon().size(px(12.0))),
+        )
+    }
+
+    /// Show as: Free, Working elsewhere, Tentative, Busy, Away; the event's checked.
+    fn show_as_menu(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let form = cx.entity().downgrade();
+        let show_as = self.show_as;
+        Self::toolbar_menu(
+            "event-show-as",
+            Glyph::CALENDAR_CLOCK,
+            Some(model::show_as_label(show_as)),
+        )
+        .tooltip("Show as")
+        .dropdown_menu(move |menu, _, _| {
+            EventShowAs::ALL.iter().fold(menu.min_w(px(200.0)), |menu, choice| {
+                let (form, choice) = (form.clone(), *choice);
+                menu.item(
+                    PopupMenuItem::new(model::show_as_label(choice))
+                        .checked(choice == show_as)
+                        .on_click(move |_, _, cx: &mut App| {
+                            let _ = form.update(cx, |form, cx| form.set_show_as(choice, cx));
+                        }),
+                )
+            })
+        })
+    }
+
+    /// The reminder's drop-down; the event's checked.
+    fn reminder_menu(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let form = cx.entity().downgrade();
+        let reminder = self.reminder;
+        Self::toolbar_menu("event-reminder", Glyph::ALARM, None)
+            .tooltip(format!("Reminder: {}", model::reminder_label(reminder)))
+            .dropdown_menu(move |menu, _, _| {
+                REMINDERS.iter().fold(menu.min_w(px(200.0)), |menu, (choice, label)| {
+                    let (form, choice) = (form.clone(), *choice);
+                    menu.item(PopupMenuItem::new(*label).checked(choice == reminder).on_click(
+                        move |_, _, cx: &mut App| {
+                            let _ = form.update(cx, |form, cx| form.set_reminder(choice, cx));
+                        },
+                    ))
+                })
+            })
+    }
+
+    /// Categorize: Outlook's categories and the event's own, each checked while the event has it.
+    fn category_menu(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let form = cx.entity().downgrade();
+        let categories = self.categories.clone();
+        let tip = if categories.is_empty() {
+            "Categorize".to_owned()
+        } else {
+            format!("Categories: {}", categories.join(", "))
+        };
+        Self::toolbar_menu("event-category", Glyph::TAG, None)
+            .tooltip(tip)
+            .dropdown_menu(move |menu, _, _| {
+                let mut names: Vec<String> = CATEGORIES.iter().map(|name| (*name).to_owned()).collect();
+                names.extend(
+                    categories
+                        .iter()
+                        .filter(|name| !CATEGORIES.contains(&name.as_str()))
+                        .cloned(),
+                );
+                names.into_iter().fold(menu.min_w(px(200.0)), |menu, name| {
+                    let form = form.clone();
+                    let chosen = categories.contains(&name);
+                    menu.item(
+                        PopupMenuItem::new(name.clone())
+                            .checked(chosen)
+                            .on_click(move |_, _, cx: &mut App| {
+                                let _ = form.update(cx, |form, cx| form.toggle_category(&name, cx));
+                            }),
+                    )
+                })
+            })
+    }
+
+    /// Private, checked while the event is.
+    fn privacy_menu(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let form = cx.entity().downgrade();
+        let private = self.private;
+        let glyph = if private { Glyph::LOCK } else { Glyph::LOCK_OPEN };
+        Self::toolbar_menu("event-privacy", glyph, None)
+            .tooltip(if private { "Private" } else { "Not private" })
+            .dropdown_menu(move |menu, _, _| {
+                let form = form.clone();
+                menu.min_w(px(200.0))
+                    .item(
+                        PopupMenuItem::new("Private")
+                            .checked(private)
+                            .on_click(move |_, _, cx: &mut App| {
+                                let _ = form.update(cx, Self::flip_private);
+                            }),
+                    )
+            })
+    }
+
+    fn set_show_as(&mut self, show_as: EventShowAs, cx: &mut Context<Self>) {
+        self.show_as = show_as;
+        cx.notify();
+    }
+
+    fn set_reminder(&mut self, reminder: Option<u32>, cx: &mut Context<Self>) {
+        self.reminder = reminder;
+        cx.notify();
+    }
+
+    /// Takes category `name` off the event when it has it, else puts it on.
+    fn toggle_category(&mut self, name: &str, cx: &mut Context<Self>) {
+        if self.categories.iter().any(|known| known == name) {
+            self.categories.retain(|known| known != name);
+        } else {
+            self.categories.push(name.to_owned());
+        }
+        cx.notify();
+    }
+
+    fn flip_private(&mut self, cx: &mut Context<Self>) {
+        self.private = !self.private;
+        cx.notify();
+    }
+
+    /// Shows the optional attendees' box, or hides it.
+    fn flip_optional(&mut self, cx: &mut Context<Self>) {
+        self.optional_shown = !self.optional_shown;
+        cx.notify();
+    }
+
     /// The toolbar's Event and Series, as Teams' form has them: a new event's (Series makes it repeat), an occurrence's
     /// (Occurrence, or the whole series), a series' own (Series alone); a single event's change offers Event alone.
     fn kind_tabs(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let on_series = self.edits_series();
         let (first, series_offered) = match &self.series {
-            Series::New => ("Event", true),
+            Series::New | Series::Master => ("Event", true),
             Series::Occurrence { .. } => ("Occurrence", true),
             Series::Single => ("Event", false),
-            Series::Master => ("Event", true),
         };
         let reading = self.series_read.is_some();
         let tab = |id: &'static str, glyph: Glyph, label: &'static str, chosen: bool, series: bool| {
@@ -1286,8 +1336,8 @@ impl EventForm {
                 .icon(glyph.icon())
                 .label(label)
                 .selected(chosen)
-                .when(chosen, |button| button.outline())
-                .when(!chosen, |button| button.ghost())
+                .when(chosen, gpui_component::button::Button::outline)
+                .when(!chosen, gpui_component::button::ButtonVariants::ghost)
                 .disabled(reading || matches!(self.series, Series::Master) && !series)
                 .on_click(cx.listener(move |form, _, window, cx| form.choose_series(series, window, cx)));
             selected_by(id, button).into_any_element()
@@ -1457,7 +1507,7 @@ impl EventForm {
             .attendees
             .iter()
             .filter(|attendee| attendee.required == (need == Need::Required))
-            .map(|attendee| self.chip(attendee, palette, cx))
+            .map(|attendee| Self::chip(attendee, palette, cx))
             .collect();
         let options = (need == Need::Required).then(|| {
             let form = cx.entity().downgrade();
@@ -1481,10 +1531,7 @@ impl EventForm {
                         menu.min_w(px(220.0))
                             .item(PopupMenuItem::new("Optional attendees").checked(shown).on_click(
                                 move |_, _, cx: &mut App| {
-                                    let _ = form.update(cx, |form, cx| {
-                                        form.optional_shown = !form.optional_shown;
-                                        cx.notify();
-                                    });
+                                    let _ = form.update(cx, Self::flip_optional);
                                 },
                             ))
                     }),
@@ -1519,7 +1566,7 @@ impl EventForm {
         field_row(palette, glyph, content, focused)
     }
 
-    fn chip(&self, attendee: &EventAttendee, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn chip(attendee: &EventAttendee, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let address = attendee.address.clone();
         let label = attendee.name.clone().unwrap_or_else(|| attendee.address.clone());
         let id = SharedString::from(format!("event-attendee-{}", attendee.address.to_lowercase()));
@@ -1627,78 +1674,10 @@ impl EventForm {
     }
 
     fn when_row(&self, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
-        let cycle = clock::cycle(cx);
         let slot = self.slot;
-        let form = cx.entity().downgrade();
-        let date_menu = {
-            let form = form.clone();
-            Button::new("event-date")
-                .ghost()
-                .small()
-                .tooltip("Date")
-                .label(slot.start.format("%a %-m/%-d/%Y").to_string())
-                .dropdown_menu(move |menu, _, _| {
-                    let menu = menu.min_w(px(220.0)).scrollable(true).max_h(px(420.0));
-                    (0..42).fold(menu, |menu, offset| {
-                        let date = Local::now().date_naive() + Duration::days(offset - 7);
-                        let form = form.clone();
-                        menu.item(
-                            PopupMenuItem::new(date.format("%a %-m/%-d/%Y").to_string())
-                                .checked(date == slot.start.date())
-                                .on_click(move |_, _, cx: &mut App| {
-                                    let _ = form.update(cx, |form, cx| form.set_slot(form.slot.on(date), cx));
-                                }),
-                        )
-                    })
-                })
-        };
-        let time_text = |time: NaiveDateTime| time.format(cycle.time_of_day()).to_string();
-        let start_menu = (!slot.all_day).then(|| {
-            let form = form.clone();
-            Button::new("event-start")
-                .ghost()
-                .small()
-                .tooltip("Start time")
-                .label(time_text(slot.start))
-                .dropdown_menu(move |menu, _, _| {
-                    let menu = menu.min_w(px(160.0)).scrollable(true).max_h(px(420.0));
-                    model::day_times(slot.start.date())
-                        .into_iter()
-                        .fold(menu, |menu, time| {
-                            let form = form.clone();
-                            menu.item(
-                                PopupMenuItem::new(time.format(cycle.time_of_day()).to_string())
-                                    .checked(time == slot.start)
-                                    .on_click(move |_, _, cx: &mut App| {
-                                        let _ = form.update(cx, |form, cx| form.set_slot(form.slot.starting(time), cx));
-                                    }),
-                            )
-                        })
-                })
-        });
-        let end_menu = (!slot.all_day).then(|| {
-            let form = form.clone();
-            Button::new("event-end")
-                .ghost()
-                .small()
-                .tooltip("End time")
-                .label(time_text(slot.end))
-                .dropdown_menu(move |menu, _, _| {
-                    let menu = menu.min_w(px(200.0)).scrollable(true).max_h(px(420.0));
-                    model::end_times(slot.start)
-                        .into_iter()
-                        .fold(menu, |menu, (time, length)| {
-                            let form = form.clone();
-                            menu.item(
-                                PopupMenuItem::new(format!("{} ({length})", time.format(cycle.time_of_day())))
-                                    .checked(time == slot.end)
-                                    .on_click(move |_, _, cx: &mut App| {
-                                        let _ = form.update(cx, |form, cx| form.set_slot(form.slot.ending(time), cx));
-                                    }),
-                            )
-                        })
-                })
-        });
+        let date_menu = self.date_menu(cx);
+        let start_menu = (!slot.all_day).then(|| self.start_menu(cx));
+        let end_menu = (!slot.all_day).then(|| self.end_menu(cx));
         let all_day = Switch::new("event-all-day")
             .checked(slot.all_day)
             .label("All day")
@@ -1744,6 +1723,75 @@ impl EventForm {
         field_row(palette, Glyph::CLOCK, content, false)
     }
 
+    /// The event's date: six weeks of days from a week ago.
+    fn date_menu(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let slot = self.slot;
+        let form = cx.entity().downgrade();
+        Button::new("event-date")
+            .ghost()
+            .small()
+            .tooltip("Date")
+            .label(slot.start.format("%a %-m/%-d/%Y").to_string())
+            .dropdown_menu(move |menu, _, _| {
+                let menu = menu.min_w(px(220.0)).scrollable(true).max_h(px(420.0));
+                (0..42).fold(menu, |menu, offset| {
+                    let date = Local::now().date_naive() + Duration::days(offset - 7);
+                    menu.item(
+                        slot_item(form.clone(), date.format("%a %-m/%-d/%Y").to_string(), move |slot| {
+                            slot.on(date)
+                        })
+                        .checked(date == slot.start.date()),
+                    )
+                })
+            })
+    }
+
+    /// The event's start: the day's half hours.
+    fn start_menu(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let cycle = clock::cycle(cx);
+        let slot = self.slot;
+        let form = cx.entity().downgrade();
+        Button::new("event-start")
+            .ghost()
+            .small()
+            .tooltip("Start time")
+            .label(slot.start.format(cycle.time_of_day()).to_string())
+            .dropdown_menu(move |menu, _, _| {
+                let menu = menu.min_w(px(160.0)).scrollable(true).max_h(px(420.0));
+                model::day_times(slot.start.date())
+                    .into_iter()
+                    .fold(menu, |menu, time| {
+                        let label = time.format(cycle.time_of_day()).to_string();
+                        menu.item(
+                            slot_item(form.clone(), label, move |slot| slot.starting(time)).checked(time == slot.start),
+                        )
+                    })
+            })
+    }
+
+    /// The event's end: the times after its start, each with the length it makes.
+    fn end_menu(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+        let cycle = clock::cycle(cx);
+        let slot = self.slot;
+        let form = cx.entity().downgrade();
+        Button::new("event-end")
+            .ghost()
+            .small()
+            .tooltip("End time")
+            .label(slot.end.format(cycle.time_of_day()).to_string())
+            .dropdown_menu(move |menu, _, _| {
+                let menu = menu.min_w(px(200.0)).scrollable(true).max_h(px(420.0));
+                model::end_times(slot.start)
+                    .into_iter()
+                    .fold(menu, |menu, (time, length)| {
+                        let label = format!("{} ({length})", time.format(cycle.time_of_day()));
+                        menu.item(
+                            slot_item(form.clone(), label, move |slot| slot.ending(time)).checked(time == slot.end),
+                        )
+                    })
+            })
+    }
+
     /// The suggested times beside the time: the starts on the day shown that every attendee is free at, each moving the
     /// event there; offered once there are attendees.
     fn suggested_times(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -1767,17 +1815,9 @@ impl EventForm {
                     return menu.item(PopupMenuItem::new("No suggested times on this day").disabled(true));
                 }
                 suggestions.iter().fold(menu, |menu, start| {
-                    let (form, start) = (form.clone(), *start);
-                    menu.item(
-                        PopupMenuItem::new(start.format(cycle.time_of_day()).to_string()).on_click(
-                            move |_, _, cx: &mut App| {
-                                let _ = form.update(cx, |form, cx| {
-                                    let slot = form.slot.starting(start);
-                                    form.set_slot(slot, cx);
-                                });
-                            },
-                        ),
-                    )
+                    let start = *start;
+                    let label = start.format(cycle.time_of_day()).to_string();
+                    menu.item(slot_item(form.clone(), label, move |slot| slot.starting(start)))
                 })
             });
         selected_by("event-suggested-times", button).into_any_element()
@@ -1847,34 +1887,7 @@ impl EventForm {
     /// The confirmation of Cancel meeting (with a note for the attendees) or Delete, over the form.
     fn confirm_view(&self, palette: Palette, cx: &mut Context<Self>) -> Option<gpui::Stateful<gpui::Div>> {
         let confirm = self.confirm?;
-        let (title, text, action) = match (confirm, self.removal_noun()) {
-            (Confirm::Cancel, "occurrence") => (
-                "Cancel occurrence?",
-                "The attendees get a cancellation of this occurrence, with your message if you add one.",
-                "Cancel occurrence",
-            ),
-            (Confirm::Cancel, "series") => (
-                "Cancel series?",
-                "The attendees get a cancellation of every occurrence, with your message if you add one.",
-                "Cancel series",
-            ),
-            (Confirm::Cancel, _) => (
-                "Cancel meeting?",
-                "The attendees get a cancellation, with your message if you add one.",
-                "Cancel meeting",
-            ),
-            (Confirm::Delete, "occurrence") => (
-                "Delete this occurrence?",
-                "It's removed from your calendar; the rest of the series stays.",
-                "Delete occurrence",
-            ),
-            (Confirm::Delete, "series") => (
-                "Delete this series?",
-                "Every occurrence is removed from your calendar.",
-                "Delete series",
-            ),
-            (Confirm::Delete, _) => ("Delete this event?", "It's removed from your calendar.", "Delete"),
-        };
+        let (title, text, action) = confirm_words(confirm, self.removal_noun());
         let dialog = div()
             .debug_selector(|| "event-confirm".to_owned())
             .id("event-confirm")

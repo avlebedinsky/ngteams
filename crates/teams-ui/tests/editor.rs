@@ -429,7 +429,7 @@ fn a_block_of_code_pasted_on_an_empty_line_is_one_and_other_text_takes_the_line_
     let code = Block::new(Kind::Code, 0, vec![Run::new("a\nb", Attrs::default())]);
     let mut doc = Doc::default();
     doc.insert_fragment(Pos::new(0, 0), vec![code.clone()]);
-    assert_eq!(doc.blocks, [code.clone()]);
+    assert_eq!(doc.blocks, std::slice::from_ref(&code));
     // on a line with text, its text joins the line
     let mut doc = Doc::new(vec![Block::paragraph("x")]);
     doc.insert_fragment(Pos::new(0, 1), vec![code]);

@@ -1,6 +1,7 @@
 //! An event's card: its title, when, its series, where, the organizer and the account's answer, who is invited and
 //! its text; for a Teams meeting Join (once a call there is known), Chat with participants and Copy link.
 
+use std::fmt::Write as _;
 use std::rc::Rc;
 
 use gpui::{
@@ -11,8 +12,8 @@ use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::{Disableable as _, Sizable as _};
 use teams_core::{CalendarEvent, EventResponse};
 
-use super::{CalendarView, CalendarViewEvent, Removal, mix, time_text};
-use crate::clock;
+use super::{CalendarView, CalendarViewEvent, Removal, Shown, mix, time_text};
+use crate::clock::{self, HourCycle};
 use crate::icons::{Glyph, icon_button, selected_by};
 use crate::theme::{self, Palette};
 
@@ -28,62 +29,10 @@ impl CalendarView {
             .meeting_chat
             .as_deref()
             .is_some_and(|chat| calls.shows() && !read_only && calls.joinable(chat));
-        let row = |glyph: Glyph, text: String| {
-            div()
-                .flex()
-                .items_start()
-                .gap_3()
-                .child(
-                    div()
-                        .pt(px(2.0))
-                        .child(glyph.icon().size(px(16.0)).text_color(rgb(palette.muted_foreground))),
-                )
-                .child(div().flex_1().min_w_0().child(text))
-        };
-        let when = if shown.all_day() {
-            format!("{} (all day)", shown.start.format("%A, %B %-d, %Y"))
-        } else if shown.start.date() == shown.end.date() {
-            format!(
-                "{} {} – {}",
-                shown.start.format("%A, %B %-d, %Y"),
-                time_text(shown.start, cycle),
-                time_text(shown.end, cycle)
-            )
-        } else {
-            format!(
-                "{} {} – {} {}",
-                shown.start.format("%a %b %-d"),
-                time_text(shown.start, cycle),
-                shown.end.format("%a %b %-d"),
-                time_text(shown.end, cycle)
-            )
-        };
-        let organizer = if event.is_organizer {
-            Some("You're the organizer".to_owned())
-        } else {
-            event.organizer_name.clone().map(|name| format!("Organizer: {name}"))
-        };
-        let answer = match &event.response {
-            EventResponse::Accepted => Some("You accepted"),
-            EventResponse::Tentative => Some("You tentatively accepted"),
-            EventResponse::NotResponded => Some("You haven't responded"),
-            EventResponse::Declined => Some("You declined"),
-            EventResponse::Organizer | EventResponse::NoResponse | EventResponse::Other(_) => None,
-        };
-        let invited = (!event.attendees.is_empty()).then(|| {
-            let names: Vec<&str> = event
-                .attendees
-                .iter()
-                .filter_map(|attendee| attendee.name.as_deref().or(attendee.address.as_deref()))
-                .take(6)
-                .collect();
-            let rest = event.attendees.len().saturating_sub(names.len());
-            let mut text = format!("{} invited: {}", event.attendees.len(), names.join(", "));
-            if rest > 0 {
-                text.push_str(&format!(" and {rest} more"));
-            }
-            text
-        });
+        let row = |glyph: Glyph, text: String| card_row(glyph, text, palette);
+        let when = when_text(&shown, cycle);
+        let organizer = organizer_text(&event);
+        let invited = invited_text(&event);
         let actions = self.card_actions(&event, joinable, palette, cx);
         let manage = self.manage_actions(&event, palette, cx);
         let card = div()
@@ -102,27 +51,7 @@ impl CalendarView {
             .bg(rgb(palette.surface))
             .shadow_lg()
             .on_click(|_, _, cx| cx.stop_propagation())
-            .child(
-                div()
-                    .flex()
-                    .items_start()
-                    .gap_3()
-                    .child(div().mt(px(6.0)).size(px(12.0)).rounded_sm().bg(rgb(palette.brand)))
-                    .child(
-                        div()
-                            .flex_1()
-                            .min_w_0()
-                            .text_xl()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .child(shown.title()),
-                    )
-                    .child(selected_by(
-                        "calendar-card-close",
-                        icon_button("calendar-card-close", Glyph::X, "Close")
-                            .small()
-                            .on_click(cx.listener(|this, _, _, cx| this.close_card(cx))),
-                    )),
-            )
+            .child(card_header(shown.title(), palette, cx))
             .children(event.cancelled.then(|| {
                 div()
                     .px_3()
@@ -139,10 +68,7 @@ impl CalendarView {
                     .then(|| row(Glyph::REPEAT, "Part of a series".to_owned())),
             )
             .children(event.location.clone().map(|location| row(Glyph::MAP_PIN, location)))
-            .children(organizer.map(|organizer| {
-                let text = answer.map_or_else(|| organizer.clone(), |answer| format!("{organizer} · {answer}"));
-                row(Glyph::USER, text)
-            }))
+            .children(organizer.map(|organizer| row(Glyph::USER, organizer)))
             .children(invited.map(|invited| row(Glyph::USERS, invited)))
             .children(event.preview.clone().map(|preview| {
                 div()
@@ -242,38 +168,49 @@ impl CalendarView {
                 } else {
                     "Delete this event from your calendar?"
                 };
-                div()
-                    .debug_selector(|| "calendar-card-confirm".to_owned())
-                    .p_3()
-                    .flex()
-                    .items_center()
-                    .gap_2()
-                    .rounded_md()
-                    .bg(rgb(mix(palette.surface, theme::DANGER, 100)))
-                    .child(div().flex_1().text_sm().child(question))
-                    .child(selected_by(
-                        "calendar-card-keep",
-                        Button::new("calendar-card-keep")
-                            .label("Don't")
-                            .outline()
-                            .small()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.removal = Removal::None;
-                                cx.notify();
-                            })),
-                    ))
-                    .child(selected_by(
-                        "calendar-card-remove-confirm",
-                        Button::new("calendar-card-remove-confirm")
-                            .label(removal)
-                            .danger()
-                            .small()
-                            .disabled(self.removal == Removal::Sending)
-                            .on_click(cx.listener(|this, _, _, cx| this.remove_carded(cx))),
-                    ))
+                self.removal_confirm(question, removal, palette, cx)
             }
         };
         Some(div().pt_2().border_t_1().border_color(rgb(palette.border)).child(row))
+    }
+
+    /// The removal's confirmation: its `question`, Don't, and the `removal` itself (off while it is being sent).
+    fn removal_confirm(
+        &self,
+        question: &'static str,
+        removal: &'static str,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> gpui::Div {
+        div()
+            .debug_selector(|| "calendar-card-confirm".to_owned())
+            .p_3()
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded_md()
+            .bg(rgb(mix(palette.surface, theme::DANGER, 100)))
+            .child(div().flex_1().text_sm().child(question))
+            .child(selected_by(
+                "calendar-card-keep",
+                Button::new("calendar-card-keep")
+                    .label("Don't")
+                    .outline()
+                    .small()
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.removal = Removal::None;
+                        cx.notify();
+                    })),
+            ))
+            .child(selected_by(
+                "calendar-card-remove-confirm",
+                Button::new("calendar-card-remove-confirm")
+                    .label(removal)
+                    .danger()
+                    .small()
+                    .disabled(self.removal == Removal::Sending)
+                    .on_click(cx.listener(|this, _, _, cx| this.remove_carded(cx))),
+            ))
     }
 
     /// A meeting's card's actions: Join, Chat with participants, Copy link; and why Join isn't offered yet.
@@ -355,4 +292,102 @@ impl CalendarView {
                 .children(waiting),
         )
     }
+}
+
+/// One of the card's lines: its glyph, then its text.
+fn card_row(glyph: Glyph, text: String, palette: Palette) -> gpui::Div {
+    div()
+        .flex()
+        .items_start()
+        .gap_3()
+        .child(
+            div()
+                .pt(px(2.0))
+                .child(glyph.icon().size(px(16.0)).text_color(rgb(palette.muted_foreground))),
+        )
+        .child(div().flex_1().min_w_0().child(text))
+}
+
+/// The card's title line: the calendar's colour, the title and Close.
+fn card_header(title: String, palette: Palette, cx: &mut Context<CalendarView>) -> gpui::Div {
+    div()
+        .flex()
+        .items_start()
+        .gap_3()
+        .child(div().mt(px(6.0)).size(px(12.0)).rounded_sm().bg(rgb(palette.brand)))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .text_xl()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child(title),
+        )
+        .child(selected_by(
+            "calendar-card-close",
+            icon_button("calendar-card-close", Glyph::X, "Close")
+                .small()
+                .on_click(cx.listener(|this, _, _, cx| this.close_card(cx))),
+        ))
+}
+
+/// When the event is: its day (or days) and times, or its day and "all day".
+fn when_text(shown: &Shown, cycle: HourCycle) -> String {
+    if shown.all_day() {
+        format!("{} (all day)", shown.start.format("%A, %B %-d, %Y"))
+    } else if shown.start.date() == shown.end.date() {
+        format!(
+            "{} {} – {}",
+            shown.start.format("%A, %B %-d, %Y"),
+            time_text(shown.start, cycle),
+            time_text(shown.end, cycle)
+        )
+    } else {
+        format!(
+            "{} {} – {} {}",
+            shown.start.format("%a %b %-d"),
+            time_text(shown.start, cycle),
+            shown.end.format("%a %b %-d"),
+            time_text(shown.end, cycle)
+        )
+    }
+}
+
+/// Who organizes the event, with the account's answer beside it.
+fn organizer_text(event: &CalendarEvent) -> Option<String> {
+    let organizer = if event.is_organizer {
+        "You're the organizer".to_owned()
+    } else {
+        format!("Organizer: {}", event.organizer_name.as_deref()?)
+    };
+    let answer = match &event.response {
+        EventResponse::Accepted => Some("You accepted"),
+        EventResponse::Tentative => Some("You tentatively accepted"),
+        EventResponse::NotResponded => Some("You haven't responded"),
+        EventResponse::Declined => Some("You declined"),
+        EventResponse::Organizer | EventResponse::NoResponse | EventResponse::Other(_) => None,
+    };
+    Some(match answer {
+        Some(answer) => format!("{organizer} · {answer}"),
+        None => organizer,
+    })
+}
+
+/// Who is invited: how many, the first six by name and how many more.
+fn invited_text(event: &CalendarEvent) -> Option<String> {
+    if event.attendees.is_empty() {
+        return None;
+    }
+    let names: Vec<&str> = event
+        .attendees
+        .iter()
+        .filter_map(|attendee| attendee.name.as_deref().or(attendee.address.as_deref()))
+        .take(6)
+        .collect();
+    let rest = event.attendees.len().saturating_sub(names.len());
+    let mut text = format!("{} invited: {}", event.attendees.len(), names.join(", "));
+    if rest > 0 {
+        let _ = write!(text, " and {rest} more");
+    }
+    Some(text)
 }

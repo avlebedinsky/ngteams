@@ -103,21 +103,21 @@ impl CalendarView {
             .flex_col()
             .gap_1()
             .child(header)
-            .child(self.month_grid("calendar-mini", month, folded, false, palette, cx))
+            .child(self.month_grid(month, false, palette, cx))
     }
 
-    /// A small month (the left pane's, or the toolbar's picker): the weekday letters and its weeks, the days shown
-    /// marked, today circled; `folded` shows only the anchor's week. A day clicked shows its days (and closes the
-    /// picker).
+    /// A small month (the left pane's, or the toolbar's `picker`): the weekday letters and its weeks, the days shown
+    /// marked, today circled; the pane's folded shows only the anchor's week. A day clicked shows its days (and closes
+    /// the picker).
     pub(super) fn month_grid(
         &self,
-        id: &'static str,
         month: NaiveDate,
-        folded: bool,
         picker: bool,
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
+        let id = if picker { "calendar-picker" } else { "calendar-mini" };
+        let folded = !picker && self.toggles.on(Toggle::MiniFolded);
         let today = calendar::now().date_naive();
         let span = self.span();
         let first = calendar::monday(month);
@@ -248,26 +248,7 @@ impl CalendarView {
     /// Add calendar, My calendars with the account's calendar, Show all.
     pub(super) fn calendars_list(&self, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
         let ticked = !self.toggles.on(Toggle::Hidden);
-        let tick = move |selector: &'static str| {
-            div()
-                .debug_selector(move || selector.to_owned())
-                .size(px(18.0))
-                .flex()
-                .items_center()
-                .justify_center()
-                .rounded_sm()
-                .border_1()
-                .border_color(rgb(if ticked {
-                    palette.brand
-                } else {
-                    palette.muted_foreground
-                }))
-                .when(ticked, |tick| {
-                    tick.bg(rgb(palette.brand))
-                        .text_color(rgb(palette.on_brand))
-                        .child(Glyph::CHECK.icon().size(px(12.0)))
-                })
-        };
+        let tick = move |selector: &'static str| calendar_tick(selector, ticked, palette);
         let toggle_tick = cx.listener(|this: &mut Self, _: &ClickEvent, _, cx| {
             this.toggles.flip(Toggle::Hidden);
             cx.notify();
@@ -276,19 +257,7 @@ impl CalendarView {
             this.toggles.flip(Toggle::Hidden);
             cx.notify();
         });
-        let row = |id: &'static str| {
-            div()
-                .debug_selector(move || id.to_owned())
-                .id(id)
-                .h(px(36.0))
-                .px_2()
-                .flex()
-                .items_center()
-                .gap_3()
-                .rounded_md()
-                .cursor_pointer()
-                .hover(move |row| row.bg(rgb(palette.hover)))
-        };
+        let row = |id: &'static str| calendar_row(id, palette);
         let add = row("calendar-add")
             .text_color(rgb(palette.brand))
             .child(Glyph::CALENDAR_ADD.icon().size(px(18.0)))
@@ -340,7 +309,22 @@ impl CalendarView {
                 .text_color(rgb(palette.muted_foreground))
                 .child("No other calendars")
         });
-        let show_all = div()
+        div()
+            .px_3()
+            .pt_1()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(add)
+            .child(group)
+            .children(own)
+            .children(others)
+            .child(div().flex().child(self.show_all(palette, cx)))
+    }
+
+    /// Show all (or Show less) under the calendars.
+    fn show_all(&self, palette: Palette, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        div()
             .debug_selector(|| "calendar-show-all".to_owned())
             .id("calendar-show-all")
             .ml(px(36.0))
@@ -360,27 +344,16 @@ impl CalendarView {
             .on_click(cx.listener(|this, _, _, cx| {
                 this.toggles.flip(Toggle::ShowAll);
                 cx.notify();
-            }));
-        div()
-            .px_3()
-            .pt_1()
-            .flex()
-            .flex_col()
-            .gap_2()
-            .child(add)
-            .child(group)
-            .children(own)
-            .children(others)
-            .child(div().flex().child(show_all))
+            }))
     }
 
     /// The toolbar over the grid.
     pub(super) fn toolbar(&self, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
         let mode = self.mode;
-        let pane_tip = if !self.toggles.on(Toggle::PaneHidden) {
-            "Hide the calendar pane"
-        } else {
+        let pane_tip = if self.toggles.on(Toggle::PaneHidden) {
             "Show the calendar pane"
+        } else {
+            "Hide the calendar pane"
         };
         let today = Button::new("calendar-today")
             .icon(Glyph::CALENDAR_TODAY.icon())
@@ -443,7 +416,7 @@ impl CalendarView {
             .child(selected_by("calendar-dates", dates))
             .child(div().flex_1())
             .child(self.mode_switcher(cx))
-            .child(self.more_menu(cx))
+            .child(Self::more_menu(cx))
             .child(separator(palette))
             .child(selected_by(
                 "calendar-join-id",
@@ -453,7 +426,7 @@ impl CalendarView {
                     .ghost()
                     .on_click(cx.listener(|this, _, _, cx| this.say(JOIN_ID_UNAVAILABLE, cx))),
             ))
-            .child(self.new_button(palette, cx))
+            .child(Self::new_button(palette, cx))
     }
 
     /// The view switcher: its icon, the view's name and a menu of the views.
@@ -494,7 +467,7 @@ impl CalendarView {
     }
 
     /// "…": Refresh.
-    pub(super) fn more_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn more_menu(cx: &mut Context<Self>) -> AnyElement {
         let view = cx.entity().downgrade();
         selected_by(
             "calendar-more",
@@ -520,7 +493,7 @@ impl CalendarView {
     }
 
     /// The split New: the brand button and its menu's chevron.
-    pub(super) fn new_button(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn new_button(palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let part = |id: &'static str| {
             div()
                 .debug_selector(move || id.to_owned())
@@ -551,12 +524,12 @@ impl CalendarView {
                         this.new_event(slot, false, cx);
                     })),
             )
-            .child(self.new_menu(palette, cx))
+            .child(Self::new_menu(palette, cx))
             .into_any_element()
     }
 
     /// The split New's menu: a new event, or a new Teams meeting.
-    fn new_menu(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn new_menu(palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let view = cx.entity().downgrade();
         selected_by(
             "calendar-new-more",
@@ -670,9 +643,46 @@ impl CalendarView {
                 .bg(rgb(palette.surface))
                 .shadow_lg()
                 .child(header)
-                .child(self.month_grid("calendar-picker", month, false, true, palette, cx)),
+                .child(self.month_grid(month, true, palette, cx)),
         )
     }
+}
+
+/// A calendar's tick box: brand-filled with a check while its events are shown.
+fn calendar_tick(selector: &'static str, ticked: bool, palette: Palette) -> gpui::Div {
+    div()
+        .debug_selector(move || selector.to_owned())
+        .size(px(18.0))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded_sm()
+        .border_1()
+        .border_color(rgb(if ticked {
+            palette.brand
+        } else {
+            palette.muted_foreground
+        }))
+        .when(ticked, |tick| {
+            tick.bg(rgb(palette.brand))
+                .text_color(rgb(palette.on_brand))
+                .child(Glyph::CHECK.icon().size(px(12.0)))
+        })
+}
+
+/// A row of the calendars' list.
+fn calendar_row(id: &'static str, palette: Palette) -> gpui::Stateful<gpui::Div> {
+    div()
+        .debug_selector(move || id.to_owned())
+        .id(id)
+        .h(px(36.0))
+        .px_2()
+        .flex()
+        .items_center()
+        .gap_3()
+        .rounded_md()
+        .cursor_pointer()
+        .hover(move |row| row.bg(rgb(palette.hover)))
 }
 
 /// A row of New's menu: a new event, or a Teams meeting (`online`), at the next half hour.

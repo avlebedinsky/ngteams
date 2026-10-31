@@ -1794,7 +1794,25 @@ fn an_end_is_told_by_its_cause_in_plain_words_never_by_its_code() {
     assert!(!ended_with(End::HungUp, Some(AB), true).stays_in_window());
     assert!(!ended_with(End::Declined, Some(AB), false).stays_in_window());
     assert!(ended_with(hung_up_by(LAB_B, "Lab Bee"), Some(AB), true).stays_in_window());
-    // a conversation's end that names nobody, by its sub-code
+    // a failure: dropped once connected, else never connected
+    let gave_up = End::Remote(RemoteEnd {
+        phrase: Some("SdpParsingFailure".to_owned()),
+        categories: vec!["JoinFailure".to_owned(), "MediaNegotiationFailure".to_owned()],
+        ..RemoteEnd::default()
+    });
+    assert_eq!(reason(gave_up.clone(), true), EndReason::Dropped);
+    assert_eq!(reason(gave_up, false), EndReason::NotConnected);
+    assert_eq!(reason(End::Failed("media"), true), EndReason::Dropped);
+    assert_eq!(reason(End::Failed("start"), false), EndReason::NotConnected);
+    assert_eq!(reason(End::Remote(RemoteEnd::default()), true), EndReason::Ended);
+    let mut voicemail = ended_with(End::Remote(RemoteEnd::default()), Some(AB), true);
+    voicemail.voicemail = true;
+    assert_eq!(voicemail.reason(LAB_A), EndReason::Voicemail);
+}
+
+#[test]
+fn a_conversation_s_end_that_names_nobody_is_told_by_its_sub_code() {
+    let reason = |end: End, connected: bool| ended_with(end, Some(AB), connected).reason(LAB_A);
     let conversation_end = |sub_code| {
         End::Remote(RemoteEnd {
             code: Some(0),
@@ -1813,20 +1831,6 @@ fn an_end_is_told_by_its_cause_in_plain_words_never_by_its_code() {
         remote.by_name = Some("Lab Bee".to_owned());
     }
     assert_eq!(reason(last_left, true), EndReason::EveryoneLeft);
-    // a failure: dropped once connected, else never connected
-    let gave_up = End::Remote(RemoteEnd {
-        phrase: Some("SdpParsingFailure".to_owned()),
-        categories: vec!["JoinFailure".to_owned(), "MediaNegotiationFailure".to_owned()],
-        ..RemoteEnd::default()
-    });
-    assert_eq!(reason(gave_up.clone(), true), EndReason::Dropped);
-    assert_eq!(reason(gave_up, false), EndReason::NotConnected);
-    assert_eq!(reason(End::Failed("media"), true), EndReason::Dropped);
-    assert_eq!(reason(End::Failed("start"), false), EndReason::NotConnected);
-    assert_eq!(reason(End::Remote(RemoteEnd::default()), true), EndReason::Ended);
-    let mut voicemail = ended_with(End::Remote(RemoteEnd::default()), Some(AB), true);
-    voicemail.voicemail = true;
-    assert_eq!(voicemail.reason(LAB_A), EndReason::Voicemail);
     // no reason's words carry a code or a phrase the service sent
     for reason in [
         EndReason::EndedBy(None),

@@ -622,7 +622,7 @@ pub enum Item {
     Top(History),
     Day(NaiveDate),
     NewMessages,
-    Message(MessageItem),
+    Message(Box<MessageItem>),
     /// A message post on its way, after every message.
     Pending(PendingItem),
 }
@@ -681,7 +681,7 @@ pub fn arrange<Tz: TimeZone>(messages: Vec<MessageItem>, history: History, horiz
         }
         item.header = new_day || divider || !before.as_ref().is_some_and(|before| continues(before, &item));
         before = Some(item.clone());
-        items.push(Item::Message(item));
+        items.push(Item::Message(Box::new(item)));
     }
     items
 }
@@ -894,6 +894,7 @@ impl EventEmitter<ChatViewEvent> for ChatView {}
 impl ChatView {
     /// The view of `conversation` with its compose box, loading from the store at once.
     pub fn new(parts: ShellParts, conversation: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let compose = Self::compose_box(&parts, &conversation, window, cx);
         let ShellParts {
             core,
             models,
@@ -901,14 +902,6 @@ impl ChatView {
             trace,
         } = parts;
         let list = Self::following_list(cx);
-        let compose_parts = ComposeParts {
-            core: Arc::clone(&core),
-            settings: settings.clone(),
-            trace: Arc::clone(&trace),
-            presence: models.presence.clone(),
-        };
-        let compose_of = conversation.clone();
-        let compose = cx.new(|cx| Compose::new(compose_parts, compose_of, window, cx));
         let subscriptions = Self::subscriptions(&models, &compose, window, cx);
         let seen = models.chats.read(cx).changed_at(&conversation);
         let people_seen = models.chats.read(cx).revision();
@@ -976,6 +969,23 @@ impl ChatView {
         view.typing_changed(cx);
         view.sync_notes(cx);
         view
+    }
+
+    /// The compose box of `conversation`, on the shell's parts.
+    fn compose_box(
+        parts: &ShellParts,
+        conversation: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<Compose> {
+        let compose_parts = ComposeParts {
+            core: Arc::clone(&parts.core),
+            settings: parts.settings.clone(),
+            trace: Arc::clone(&parts.trace),
+            presence: parts.models.presence.clone(),
+        };
+        let conversation = conversation.to_owned();
+        cx.new(|cx| Compose::new(compose_parts, conversation, window, cx))
     }
 
     /// The account's own notes ([`NOTES`]), which no conversation list brings, synced from the service as the view
@@ -1115,7 +1125,7 @@ impl ChatView {
     }
 
     /// What a click on a picture of message `id` calls: the viewer opened on it ([`Self::open_picture`]).
-    fn picture_opener(&self, id: &str, cx: &Context<Self>) -> OpenPicture {
+    fn picture_opener(id: &str, cx: &Context<Self>) -> OpenPicture {
         let view = cx.entity().downgrade();
         let id = id.to_owned();
         OpenPicture::new(move |src, _, cx| {
@@ -1176,7 +1186,7 @@ impl ChatView {
     /// The message rows, the oldest first.
     pub fn message_items(&self) -> impl Iterator<Item = &MessageItem> {
         self.items.iter().filter_map(|item| match item {
-            Item::Message(message) => Some(message),
+            Item::Message(message) => Some(&**message),
             _ => None,
         })
     }
@@ -2609,7 +2619,7 @@ impl ChatView {
                 &InChat {
                     conversation: &self.conversation,
                     selection: &self.text_selection,
-                    open: Some(self.picture_opener(&item.id, cx)),
+                    open: Some(Self::picture_opener(&item.id, cx)),
                 },
                 highlighted,
                 palette,

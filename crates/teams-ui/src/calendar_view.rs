@@ -64,7 +64,7 @@ const GUTTER: f32 = 60.0;
 /// The left pane's width, px.
 const PANE_WIDTH: f32 = 280.0;
 /// How often the shown events are read again while the calendar is shown.
-const REFRESH: StdDuration = StdDuration::from_secs(5 * 60);
+const REFRESH: StdDuration = StdDuration::from_mins(5);
 /// How often the current time's line moves.
 const TICK: StdDuration = StdDuration::from_secs(30);
 /// The events a month day lists before "+N more".
@@ -179,14 +179,7 @@ impl CalendarView {
                 if refresh {
                     since_read = StdDuration::ZERO;
                 }
-                let alive = this.update(cx, |view, cx| {
-                    if view.toggles.on(Toggle::Shown) {
-                        if refresh {
-                            view.read(true, cx);
-                        }
-                        cx.notify();
-                    }
-                });
+                let alive = this.update(cx, |view, cx| view.tick(refresh, cx));
                 if alive.is_err() {
                     break;
                 }
@@ -326,7 +319,7 @@ impl CalendarView {
             Arc::clone(&self.core),
             Arc::clone(&self.trace),
             seed,
-            self.saved(cx),
+            Self::saved(cx),
             cx,
         );
     }
@@ -344,7 +337,7 @@ impl CalendarView {
                         Arc::clone(&view.core),
                         Arc::clone(&view.trace),
                         seed,
-                        view.saved(cx),
+                        Self::saved(cx),
                         cx,
                     );
                 }
@@ -356,8 +349,19 @@ impl CalendarView {
         cx.notify();
     }
 
+    /// The ticker's beat while the calendar shows: the current time's line moves, and on a `refresh` the days shown
+    /// are read again.
+    fn tick(&mut self, refresh: bool, cx: &mut Context<Self>) {
+        if self.toggles.on(Toggle::Shown) {
+            if refresh {
+                self.read(true, cx);
+            }
+            cx.notify();
+        }
+    }
+
     /// What a save in the scheduling form tells this view: read the days shown again.
-    fn saved(&self, cx: &mut Context<Self>) -> crate::event_form::Saved {
+    fn saved(cx: &mut Context<Self>) -> crate::event_form::Saved {
         let view = cx.entity().downgrade();
         crate::event_form::Saved::new(move |cx| {
             let _ = view.update(cx, |view, cx| {
@@ -556,7 +560,7 @@ fn time_text(time: NaiveDateTime, cycle: HourCycle) -> String {
 pub(crate) fn hour_label(hour: u32, cycle: HourCycle) -> String {
     match cycle {
         HourCycle::Twelve => {
-            let shown = if hour % 12 == 0 { 12 } else { hour % 12 };
+            let shown = if hour.is_multiple_of(12) { 12 } else { hour % 12 };
             format!("{shown} {}", if hour < 12 { "AM" } else { "PM" })
         }
         HourCycle::TwentyFour => format!("{hour:02}:00"),

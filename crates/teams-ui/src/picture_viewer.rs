@@ -142,7 +142,10 @@ pub fn set_app_id(app_id: &str, cx: &mut App) {
 /// What a click on a message's picture calls with the picture's `src`: the view the message is in opening the viewer
 /// on it ([`open`]).
 #[derive(Clone)]
-pub struct OpenPicture(Rc<dyn Fn(&str, &mut Window, &mut App)>);
+pub struct OpenPicture(Rc<OpenFn>);
+
+/// What [`OpenPicture`] calls.
+type OpenFn = dyn Fn(&str, &mut Window, &mut App);
 
 impl OpenPicture {
     #[must_use]
@@ -411,8 +414,10 @@ pub struct PictureViewer {
     /// Counts the pictures shown, so a read of one shown before lands nowhere.
     generation: u64,
     focus: FocusHandle,
-    _reading: Option<Task<()>>,
-    _note: Option<Task<()>>,
+    /// The picture being read, dropped (and so stopped) when another is shown.
+    reading: Option<Task<()>>,
+    /// What takes the note away again.
+    note_timer: Option<Task<()>>,
 }
 
 impl PictureViewer {
@@ -425,8 +430,8 @@ impl PictureViewer {
             note: None,
             generation: 0,
             focus: cx.focus_handle(),
-            _reading: None,
-            _note: None,
+            reading: None,
+            note_timer: None,
         };
         viewer.read(cx);
         viewer
@@ -487,7 +492,7 @@ impl PictureViewer {
         self.generation += 1;
         let generation = self.generation;
         let reply = self.viewing.source.engine().message_picture(src);
-        self._reading = Some(cx.spawn(async move |this, cx| {
+        self.reading = Some(cx.spawn(async move |this, cx| {
             let loaded = match reply.await {
                 Ok(Some(bytes)) => cx
                     .background_executor()
@@ -636,7 +641,7 @@ impl PictureViewer {
     /// Says `note` over the stage for a while.
     fn say(&mut self, note: (SharedString, bool), cx: &mut Context<Self>) {
         self.note = Some(note);
-        self._note = Some(cx.spawn(async move |this, cx| {
+        self.note_timer = Some(cx.spawn(async move |this, cx| {
             cx.background_executor().timer(NOTE_FOR).await;
             let _ = this.update(cx, |this, cx| {
                 this.note = None;
@@ -842,23 +847,38 @@ impl PictureViewer {
             .items_center()
             .gap_1()
             .children(counter)
-            .child(self.button(("picture-zoom-out", Glyph::ZOOM_OUT, "Zoom out", &ZoomOut), shown, cx))
+            .child(Self::button(
+                ("picture-zoom-out", Glyph::ZOOM_OUT, "Zoom out", &ZoomOut),
+                shown,
+                cx,
+            ))
             .child(percent)
-            .child(self.button(("picture-zoom-in", Glyph::ZOOM_IN, "Zoom in", &ZoomIn), shown, cx))
-            .child(self.button(("picture-fit", fit_glyph, fit_tip, &ZoomFit), fit_does, cx))
+            .child(Self::button(
+                ("picture-zoom-in", Glyph::ZOOM_IN, "Zoom in", &ZoomIn),
+                shown,
+                cx,
+            ))
+            .child(Self::button(
+                ("picture-fit", fit_glyph, fit_tip, &ZoomFit),
+                fit_does,
+                cx,
+            ))
             .child(div().w(px(1.0)).h(px(20.0)).mx_2().bg(rgb(palette.border)))
-            .child(self.button(
+            .child(Self::button(
                 ("picture-download", Glyph::DOWNLOAD, "Download", &DownloadPicture),
                 shown,
                 cx,
             ))
-            .child(self.button(("picture-close", Glyph::X, "Close", &CloseViewer), true, cx))
+            .child(Self::button(
+                ("picture-close", Glyph::X, "Close", &CloseViewer),
+                true,
+                cx,
+            ))
             .into_any_element()
     }
 
     /// A header button, `enabled` or not: its click dispatches its action, as its key does.
     fn button(
-        &self,
         (id, glyph, tip, action): (&'static str, Glyph, &'static str, &dyn gpui::Action),
         enabled: bool,
         cx: &mut Context<Self>,
@@ -894,7 +914,7 @@ impl PictureViewer {
                     .top(bounds.origin.y)
                     .w(bounds.size.width)
                     .h(bounds.size.height)
-                    .when(pans, |image| image.cursor_grab())
+                    .when(pans, gpui::Styled::cursor_grab)
                     .into_any_element()
             }
             Loaded::Reading => standing_in(Glyph::LOADING, None, palette),

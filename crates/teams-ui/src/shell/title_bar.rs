@@ -208,7 +208,7 @@ impl Shell {
                     .flex_none()
                     .flex()
                     .justify_center()
-                    .child(self.launcher(cx)),
+                    .child(Self::launcher(cx)),
             )
             .child(self.list_toggle(cx))
             .child(drag_area())
@@ -258,7 +258,7 @@ impl Shell {
     }
 
     /// The app launcher: the app's own places, as Teams lists its apps.
-    fn launcher(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn launcher(cx: &mut Context<Self>) -> AnyElement {
         let shell = cx.weak_entity();
         let button = icon_button("title-launcher", Glyph::GRIP, "Apps").dropdown_menu(move |menu, _, _| {
             let place = |label: &'static str, glyph: Glyph, page: Option<Main>| {
@@ -334,19 +334,19 @@ impl Shell {
                 .label(SharedString::from(format!("Zoom: {zoom}%")))
                 .item(
                     act("Zoom in".into(), Glyph::ZOOM_IN, |shell, _, cx| {
-                        shell.step_font(Some(1), cx)
+                        shell.step_font(Some(1), cx);
                     })
                     .action(Box::new(FontLarger)),
                 )
                 .item(
                     act("Zoom out".into(), Glyph::ZOOM_OUT, |shell, _, cx| {
-                        shell.step_font(Some(-1), cx)
+                        shell.step_font(Some(-1), cx);
                     })
                     .action(Box::new(FontSmaller)),
                 )
                 .item(
                     act("Reset zoom".into(), Glyph::RESET, |shell, _, cx| {
-                        shell.step_font(None, cx)
+                        shell.step_font(None, cx);
                     })
                     .action(Box::new(FontReset)),
                 )

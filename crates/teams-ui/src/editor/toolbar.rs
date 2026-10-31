@@ -208,6 +208,10 @@ impl FormatBar {
     // --- drawing ---
 
     /// A format's button: its tooltip names its key; selected while the format is on.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one toolbar button: its id, glyph, tip, key, state and press"
+    )]
     fn format_button(
         id: &'static str,
         glyph: Glyph,
@@ -342,13 +346,17 @@ impl FormatBar {
                 )
                 .with_size(Size::Size(px(BUTTON)))
                 .selected(code)
-                .on_click(cx.listener(|this, _, window, cx| this.act(window, cx, |e, cx| e.code(cx))));
+                .on_click(cx.listener(|this, _, window, cx| this.act(window, cx, super::Editor::code)));
                 selected_by("format-code", button).into_any_element()
             },
         ]
     }
 
     /// A swatch of `colour` named `name`, choosing it; `None` is the swatch that takes the colour off.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one swatch: its id, name, colour, state and choice"
+    )]
     fn swatch(
         id: String,
         name: &'static str,
@@ -446,6 +454,10 @@ impl FormatBar {
     }
 
     /// A row of a menu: an icon, a label, a check when chosen; disabled with `disabled` (its tooltip saying why).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one menu row: its id, glyph, label, state and choice"
+    )]
     fn menu_row(
         id: &'static str,
         glyph: Option<Glyph>,
@@ -521,7 +533,6 @@ impl FormatBar {
     }
 
     fn more_menu(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let kind = self.editor.read(cx).block_kind();
         let separator = || div().h(px(1.0)).my_1().bg(rgb(palette.border));
         let table = div()
             .id("format-table")
@@ -540,50 +551,7 @@ impl FormatBar {
             .w(px(220.0))
             .flex()
             .flex_col()
-            .child(Self::menu_row(
-                "format-paragraph",
-                Some(Glyph::PILCROW),
-                "Paragraph",
-                kind == Kind::Paragraph,
-                palette,
-                cx,
-                |e, cx| {
-                    e.set_kind(Kind::Paragraph, cx);
-                },
-            ))
-            .child(Self::menu_row(
-                "format-heading-1",
-                Some(Glyph::HEADING_1),
-                "Heading 1",
-                kind == Kind::Heading(1),
-                palette,
-                cx,
-                |e, cx| {
-                    e.set_kind(Kind::Heading(1), cx);
-                },
-            ))
-            .child(Self::menu_row(
-                "format-heading-2",
-                Some(Glyph::HEADING_2),
-                "Heading 2",
-                kind == Kind::Heading(2),
-                palette,
-                cx,
-                |e, cx| {
-                    e.set_kind(Kind::Heading(2), cx);
-                },
-            ))
-            .child(Self::menu_row(
-                "format-heading-3",
-                Some(Glyph::HEADING_3),
-                "Heading 3",
-                kind == Kind::Heading(3),
-                palette,
-                cx,
-                |e, cx| {
-                    e.set_kind(Kind::Heading(3), cx);
-                },
-            ))
+            .children(self.kind_rows(palette, cx))
             .child(separator())
             .child(Self::menu_row(
                 "format-indent",
@@ -592,9 +560,7 @@ impl FormatBar {
                 false,
                 palette,
                 cx,
-                |e, cx| {
-                    e.indent(true, cx);
-                },
+                |e, cx| e.indent(true, cx),
             ))
             .child(Self::menu_row(
                 "format-outdent",
@@ -603,9 +569,7 @@ impl FormatBar {
                 false,
                 palette,
                 cx,
-                |e, cx| {
-                    e.indent(false, cx);
-                },
+                |e, cx| e.indent(false, cx),
             ))
             .child(Self::menu_row(
                 "format-rule",
@@ -614,42 +578,63 @@ impl FormatBar {
                 false,
                 palette,
                 cx,
-                |e, cx| {
-                    e.insert_rule(cx);
-                },
+                super::Editor::insert_rule,
             ))
             .child(table)
             .child(separator())
-            .child(Self::menu_row(
+            .children(Self::history_rows(palette, cx))
+            .into_any_element()
+    }
+
+    /// More's rows that set the block's kind: Paragraph and the headings, the cursor's checked.
+    fn kind_rows(&self, palette: Palette, cx: &mut Context<Self>) -> Vec<gpui::Stateful<gpui::Div>> {
+        let current = self.editor.read(cx).block_kind();
+        [
+            ("format-paragraph", Glyph::PILCROW, "Paragraph", Kind::Paragraph),
+            ("format-heading-1", Glyph::HEADING_1, "Heading 1", Kind::Heading(1)),
+            ("format-heading-2", Glyph::HEADING_2, "Heading 2", Kind::Heading(2)),
+            ("format-heading-3", Glyph::HEADING_3, "Heading 3", Kind::Heading(3)),
+        ]
+        .into_iter()
+        .map(|(id, glyph, label, kind)| {
+            Self::menu_row(id, Some(glyph), label, current == kind, palette, cx, move |e, cx| {
+                e.set_kind(kind, cx);
+            })
+        })
+        .collect()
+    }
+
+    /// More's last rows: Clear formatting, Undo and Redo.
+    fn history_rows(palette: Palette, cx: &mut Context<Self>) -> [gpui::Stateful<gpui::Div>; 3] {
+        [
+            Self::menu_row(
                 "format-clear",
                 Some(Glyph::REMOVE_FORMATTING),
                 "Clear formatting",
                 false,
                 palette,
                 cx,
-                |e, cx| {
-                    e.clear_formatting(cx);
-                },
-            ))
-            .child(Self::menu_row(
+                super::Editor::clear_formatting,
+            ),
+            Self::menu_row(
                 "format-undo",
                 Some(Glyph::UNDO),
                 "Undo",
                 false,
                 palette,
                 cx,
-                |e, cx| e.undo(cx),
-            ))
-            .child(Self::menu_row(
+                super::Editor::undo,
+            ),
+            Self::menu_row(
                 "format-redo",
                 Some(Glyph::REDO),
                 "Redo",
                 false,
                 palette,
                 cx,
-                |e, cx| e.redo(cx),
-            ))
-            .into_any_element()
+                super::Editor::redo,
+            ),
+        ]
     }
 
     fn link_menu(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -678,7 +663,7 @@ impl FormatBar {
                 .ghost()
                 .small()
                 .label("Remove link")
-                .on_click(cx.listener(|this, _, window, cx| this.act(window, cx, |e, cx| e.remove_link(cx))))
+                .on_click(cx.listener(|this, _, window, cx| this.act(window, cx, super::Editor::remove_link)))
         });
         Some(
             div()

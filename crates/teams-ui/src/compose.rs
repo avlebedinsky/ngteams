@@ -620,7 +620,7 @@ impl Compose {
 
     /// Discard: empties the box and ends a reply or an edit.
     pub fn discard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.editor.update(cx, |editor, cx| editor.clear(cx));
+        self.editor.update(cx, super::editor::Editor::clear);
         if self.mode != Mode::New {
             self.cancel(window, cx);
         }

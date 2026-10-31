@@ -124,6 +124,7 @@ impl TextSelection {
     }
 
     /// Selects nothing (and closes the menu); whether anything was selected or open.
+    #[must_use]
     pub fn clear(&self) -> bool {
         let mut state = self.0.borrow_mut();
         let had = state.anchor.is_some() || state.menu.is_some();
@@ -500,8 +501,7 @@ impl SelectableText {
         let layout = self.text.layout();
         let on_link = layout
             .index_for_position(window.mouse_position())
-            .ok()
-            .is_some_and(|index| Self::link_at(&self.links, index).is_some());
+            .is_ok_and(|index| Self::link_at(&self.links, index).is_some());
         if on_link {
             window.set_cursor_style(CursorStyle::PointingHand, hitbox);
         } else if self.place.is_some() {
@@ -646,7 +646,7 @@ impl Element for SelectableText {
         id: Option<&GlobalElementId>,
         inspector_id: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
-        _: &mut (),
+        (): &mut (),
         hitbox: &mut Hitbox,
         window: &mut Window,
         cx: &mut App,
@@ -762,7 +762,7 @@ mod tests {
         assert_eq!(selection.range_in(&second, &[1], 8), Some(0..4));
         assert_eq!(selection.range_in(&second, &[2], 8), None);
         assert!(!selection.is_empty());
-        selection.clear();
+        let _ = selection.clear();
         assert!(selection.is_empty());
     }
 

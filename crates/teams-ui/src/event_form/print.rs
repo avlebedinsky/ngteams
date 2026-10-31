@@ -7,6 +7,7 @@
 //! written again as the editor writes a message (`teams-proto`'s message text: no script, no style, links only
 //! `http`, `https` and `mailto`), never the HTML an invitation came with; the page's policy lets nothing load.
 
+use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::PathBuf;
 
@@ -70,17 +71,16 @@ pub fn page(event: &Printable) -> String {
     if event.private {
         rows.push(("Private", "Yes".to_owned()));
     }
-    let table: String = rows
-        .iter()
-        .map(|(name, value)| format!("<tr><th>{name}</th><td>{}</td></tr>", escape(value)))
-        .collect();
+    let table = rows.iter().fold(String::new(), |mut table, (name, value)| {
+        let _ = write!(table, "<tr><th>{name}</th><td>{}</td></tr>", escape(value));
+        table
+    });
     let body = match &event.body_html {
         Some(html) => html.clone(),
-        None => event
-            .body_text
-            .lines()
-            .map(|line| format!("<p>{}</p>", escape(line)))
-            .collect(),
+        None => event.body_text.lines().fold(String::new(), |mut body, line| {
+            let _ = write!(body, "<p>{}</p>", escape(line));
+            body
+        }),
     };
     format!(
         "<!doctype html><html><head><meta charset=\"utf-8\">\

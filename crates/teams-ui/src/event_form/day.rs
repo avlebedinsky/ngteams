@@ -51,7 +51,7 @@ impl EventForm {
             .child(
                 div()
                     .flex()
-                    .child(self.gutter(palette, cx))
+                    .child(Self::gutter(palette, cx))
                     .child(self.day_column(palette, cx)),
             );
         div()
@@ -132,7 +132,7 @@ impl EventForm {
             .child(selected_by("event-day-date", date_menu))
     }
 
-    pub(super) fn gutter(&self, palette: Palette, cx: &App) -> gpui::Div {
+    pub(super) fn gutter(palette: Palette, cx: &App) -> gpui::Div {
         let cycle = clock::cycle(cx);
         div()
             .w(px(GUTTER))
@@ -324,7 +324,11 @@ impl EventForm {
             return;
         }
         let moved = f32::from(event.position.y - drag.from) / HOUR * 60.0;
-        #[expect(clippy::cast_possible_truncation, reason = "a drag moves by minutes of a day")]
+        #[expect(
+            clippy::cast_possible_truncation,
+            clippy::cast_precision_loss,
+            reason = "a drag moves by minutes of a day"
+        )]
         let minutes = (moved / STEP_MINUTES as f32).round() as i64 * STEP_MINUTES;
         let slot = match drag.part {
             Part::Whole => drag.slot.moved(minutes),

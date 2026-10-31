@@ -154,14 +154,14 @@ async fn read_back(engine: &EngineRequests, id: &str, out: &mut impl Write) -> i
             let attendees = raw.get("attendees").map(|attendees| {
                 attendees.as_array().map(|list| {
                     list.iter()
-                        .map(|attendee| attendee.get("address").map(|address| address.is_string()))
+                        .map(|attendee| attendee.get("address").map(serde_json::Value::is_string))
                         .collect::<Vec<_>>()
                 })
             });
             writeln!(
                 out,
                 "series read organizerAddress={:?} attendees={attendees:?} fence={:?}",
-                raw.get("organizerAddress").map(|address| address.is_string()),
+                raw.get("organizerAddress").map(serde_json::Value::is_string),
                 teams_fence::parse_event(id, &raw)
             )?;
             for key in ["eventRecurrencePattern", "eventRecurrenceRange"] {

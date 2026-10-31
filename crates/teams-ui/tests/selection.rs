@@ -38,7 +38,7 @@ impl Render for Messages {
             // as the views do: a press anywhere lets the selection go before the text takes it
             .capture_any_mouse_down(move |event, _, _| {
                 if event.button == MouseButton::Left && !event.modifiers.shift {
-                    selection.clear();
+                    let _ = selection.clear();
                 }
             })
             .children(self.messages.iter().map(|(key, rendered)| {

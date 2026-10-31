@@ -682,30 +682,7 @@ impl Editor {
         self.edit(Step::Other, cx, move |doc, selection| {
             let (start, end) = selection.range();
             let range = doc.blocks_of(start, end);
-            let mut index = range.start;
-            let mut last = range.end;
-            while index < last {
-                let block = &mut doc.blocks[index];
-                if block.kind == Kind::Code && kind != Kind::Code {
-                    let lines: Vec<Block> = block
-                        .text()
-                        .split('\n')
-                        .map(|line| Block::new(kind, 0, vec![Run::new(line, Attrs::default())]))
-                        .collect();
-                    let count = lines.len();
-                    doc.blocks.splice(index..=index, lines);
-                    index += count;
-                    last += count - 1;
-                    continue;
-                }
-                if block.kind != Kind::Rule {
-                    if !(kind.is_list() && block.kind.is_list()) {
-                        block.indent = 0;
-                    }
-                    block.kind = kind;
-                }
-                index += 1;
-            }
+            set_kinds(doc, range, kind);
             Selection {
                 anchor: doc.clamp(selection.anchor, false),
                 head: doc.clamp(selection.head, false),
@@ -966,5 +943,34 @@ impl Editor {
             let at = into.delete(start, end);
             Selection::caret(into.insert_fragment(at, doc.blocks))
         });
+    }
+}
+
+/// Makes `doc`'s blocks in `range` of `kind`: a block of code becomes a block per line, a rule stays, and the indent
+/// is kept only from list to list.
+fn set_kinds(doc: &mut Doc, range: Range<usize>, kind: Kind) {
+    let mut index = range.start;
+    let mut last = range.end;
+    while index < last {
+        let block = &mut doc.blocks[index];
+        if block.kind == Kind::Code && kind != Kind::Code {
+            let lines: Vec<Block> = block
+                .text()
+                .split('\n')
+                .map(|line| Block::new(kind, 0, vec![Run::new(line, Attrs::default())]))
+                .collect();
+            let count = lines.len();
+            doc.blocks.splice(index..=index, lines);
+            index += count;
+            last += count - 1;
+            continue;
+        }
+        if block.kind != Kind::Rule {
+            if !(kind.is_list() && block.kind.is_list()) {
+                block.indent = 0;
+            }
+            block.kind = kind;
+        }
+        index += 1;
     }
 }

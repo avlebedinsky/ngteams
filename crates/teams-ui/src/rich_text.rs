@@ -931,7 +931,6 @@ pub fn highlight_colour(color: u32, palette: Palette) -> u32 {
 pub fn block_text_size(heading: Option<u8>, size: Option<FontSize>) -> Option<f32> {
     match (heading, size) {
         (Some(1), _) => Some(24.0),
-        (Some(2), _) => Some(20.0),
         (Some(3), _) => Some(17.0),
         (Some(_), _) | (None, Some(FontSize::Large)) => Some(20.0),
         (None, Some(FontSize::Small)) => Some(11.0),

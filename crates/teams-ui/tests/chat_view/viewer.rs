@@ -173,5 +173,11 @@ fn the_downloads_folder_comes_from_user_dirs() {
         None
     );
     let name = picture_viewer::file_name(NOON, teams_proto::PastedFormat::Jpeg);
-    assert!(name.starts_with("Image 2026-01-0") && name.ends_with(".jpg"), "{name}");
+    assert!(
+        name.starts_with("Image 2026-01-0")
+            && std::path::Path::new(&name)
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("jpg")),
+        "{name}"
+    );
 }

@@ -21,6 +21,7 @@
 //!   their conversations), `search closed`; never a query or a text.
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -234,7 +235,8 @@ pub struct Results {
     answers: HashMap<Tab, SearchAnswer>,
     loading: HashSet<Tab>,
     failed: HashSet<Tab>,
-    _asks: Vec<Task<()>>,
+    /// The reads under way for these results, dropped (and so stopped) with them.
+    asks: Vec<Task<()>>,
 }
 
 impl Results {
@@ -581,9 +583,9 @@ impl GlobalSearch {
                 answers: HashMap::new(),
                 loading: HashSet::new(),
                 failed: HashSet::new(),
-                _asks: Vec::new(),
+                asks: Vec::new(),
             };
-            results._asks.push(self.find_local(query, cx));
+            results.asks.push(self.find_local(query, cx));
             self.results = Some(results);
         }
         self.open = false;
@@ -622,25 +624,28 @@ impl GlobalSearch {
             results.failed.remove(&tab);
             let reply = self.core.search_service(results.query.clone(), tab.scope());
             let query = results.query.clone();
-            results._asks.push(cx.spawn(async move |this, cx: &mut AsyncApp| {
-                let answer = reply.await;
-                let _ = this.update(cx, |this, cx| {
-                    let Some(results) = this.results.as_mut().filter(|results| results.query == query) else {
-                        return;
-                    };
-                    results.loading.remove(&tab);
-                    match answer {
-                        Ok(answer) => {
-                            results.answers.insert(tab, answer);
-                        }
-                        Err(_) => {
-                            results.failed.insert(tab);
-                        }
-                    }
-                    this.trace_shown(cx);
-                    cx.notify();
-                });
+            results.asks.push(cx.spawn(async move |this, cx: &mut AsyncApp| {
+                let answer = reply.await.ok();
+                let _ = this.update(cx, |this, cx| this.answered(&query, tab, answer, cx));
             }));
+        }
+        self.trace_shown(cx);
+        cx.notify();
+    }
+
+    /// The service's `answer` to `tab` of `query`'s results (none when it failed), kept while those results show.
+    fn answered(&mut self, query: &str, tab: Tab, answer: Option<SearchAnswer>, cx: &mut Context<Self>) {
+        let Some(results) = self.results.as_mut().filter(|results| results.query == query) else {
+            return;
+        };
+        results.loading.remove(&tab);
+        match answer {
+            Some(answer) => {
+                results.answers.insert(tab, answer);
+            }
+            None => {
+                results.failed.insert(tab);
+            }
         }
         self.trace_shown(cx);
         cx.notify();
@@ -690,7 +695,7 @@ impl GlobalSearch {
             // a message is its chat's and its id (ids are arrival times: two chats may share one)
             .filter(|hit| seen.insert((hit.target.conversation.clone(), hit.target.message.clone())))
             .collect();
-        hits.sort_by(|left, right| right.target.arrival_time.cmp(&left.target.arrival_time));
+        hits.sort_by_key(|hit| std::cmp::Reverse(hit.target.arrival_time));
         if results.tab == Tab::All {
             hits.truncate(ALL_MESSAGES);
         }
@@ -1314,6 +1319,42 @@ fn chips(search: &Entity<GlobalSearch>, palette: Palette) -> gpui::Div {
         .children(chips)
 }
 
+/// The results' group chats and teams' channels, on All and on their own tabs.
+fn place_sections(
+    this: &GlobalSearch,
+    tab: Tab,
+    search: &Entity<GlobalSearch>,
+    palette: Palette,
+    cx: &App,
+) -> Vec<AnyElement> {
+    let mut sections = Vec::new();
+    if matches!(tab, Tab::All | Tab::GroupChats) {
+        let chats = this.group_chats(cx);
+        if !chats.is_empty() {
+            sections.push(section("Group chats", Tab::GroupChats, tab, search, palette).into_any_element());
+            sections.extend(
+                chats
+                    .iter()
+                    .enumerate()
+                    .map(|(at, chat)| place_row("chat", at, chat, search, palette)),
+            );
+        }
+    }
+    if matches!(tab, Tab::All | Tab::Channels) {
+        let channels = this.channels(cx);
+        if !channels.is_empty() {
+            sections.push(section("Teams and channels", Tab::Channels, tab, search, palette).into_any_element());
+            sections.extend(
+                channels
+                    .iter()
+                    .enumerate()
+                    .map(|(at, channel)| place_row("channel", at, channel, search, palette)),
+            );
+        }
+    }
+    sections
+}
+
 /// The results page (see the module docs): the query, the tabs, the results of the tab shown.
 #[must_use]
 pub fn results_page(search: &Entity<GlobalSearch>, palette: Palette, cx: &App) -> AnyElement {
@@ -1344,30 +1385,7 @@ pub fn results_page(search: &Entity<GlobalSearch>, palette: Palette, cx: &App) -
         sections.push(section("Files", Tab::Files, tab, search, palette).into_any_element());
         sections.extend(files.iter().enumerate().map(|(at, file)| file_row(at, file, palette)));
     }
-    if matches!(tab, Tab::All | Tab::GroupChats) {
-        let chats = this.group_chats(cx);
-        if !chats.is_empty() {
-            sections.push(section("Group chats", Tab::GroupChats, tab, search, palette).into_any_element());
-            sections.extend(
-                chats
-                    .iter()
-                    .enumerate()
-                    .map(|(at, chat)| place_row("chat", at, chat, search, palette)),
-            );
-        }
-    }
-    if matches!(tab, Tab::All | Tab::Channels) {
-        let channels = this.channels(cx);
-        if !channels.is_empty() {
-            sections.push(section("Teams and channels", Tab::Channels, tab, search, palette).into_any_element());
-            sections.extend(
-                channels
-                    .iter()
-                    .enumerate()
-                    .map(|(at, channel)| place_row("channel", at, channel, search, palette)),
-            );
-        }
-    }
+    sections.extend(place_sections(this, tab, search, palette, cx));
     if sections.is_empty() {
         sections.push(empty_results(results.loading(), this.failed(), palette).into_any_element());
     }
@@ -1467,7 +1485,7 @@ fn section(title: &'static str, tab: Tab, shown: Tab, search: &Entity<GlobalSear
             .text_sm()
             .text_color(rgb(palette.brand))
             .cursor_pointer()
-            .hover(|link| link.underline())
+            .hover(gpui::Styled::underline)
             .on_click(move |_, _, cx| search.update(cx, |this, cx| this.set_tab(tab, cx)))
             .child("See all")
     });
@@ -1593,7 +1611,7 @@ fn person_row(
         .flex_row()
         .items_center()
         .gap_3()
-        .when(!chat, |row| row.cursor_default())
+        .when(!chat, gpui::Styled::cursor_default)
         .on_click(move |_, _, cx| search.update(cx, |this, cx| this.open_person(mri.as_deref(), cx)))
         .child(people::avatar(Some(&name), None, Size::Medium))
         .child(two_lines(name, detail, palette))
@@ -1613,7 +1631,7 @@ fn file_row(at: usize, file: &FoundFile, palette: Palette) -> AnyElement {
         if !detail.is_empty() {
             detail.push_str(" · ");
         }
-        detail.push_str(&format!("Modified by {by}{when}"));
+        let _ = write!(detail, "Modified by {by}{when}");
     }
     let snippet: SharedString = file.snippet.clone().into();
     card(format!("search-file-{at}"), palette)
