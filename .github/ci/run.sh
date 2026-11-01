@@ -14,5 +14,7 @@ coverage-ci-smoke
 CARGO_TARGET_DIR=target/ci-bootstrap-build cargo run --locked -p proto-lab -- chrome install
 chrome_path=$(target/ci-bootstrap-build/debug/proto-lab chrome path)
 coverage-ci-smoke "$chrome_path"
+# The patched platform's ownership regressions are outside the runtime workspace selection below.
+CARGO_TARGET_DIR=target/ci-bootstrap-build cargo test --locked -p gpui-pre-linux --lib local_selection_tests
 rm -rf -- target/ci-bootstrap-build
 exec scripts/coverage.sh --require-target

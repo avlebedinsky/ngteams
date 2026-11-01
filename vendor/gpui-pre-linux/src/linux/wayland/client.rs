@@ -509,7 +509,7 @@ where
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DataSourceKind {
-    Clipboard,
+    Clipboard(u64),
     Drag,
 }
 
@@ -1438,18 +1438,18 @@ impl WaylandConnection {
             return;
         };
         if state.mouse_focused_window.is_some() || state.keyboard_focused_window.is_some() {
-            state.clipboard.set_primary(item);
             let Some(serial) = state.serial_tracker.selection_serial() else {
                 log::warn!(
                     "Skipping Wayland primary selection ownership request because no keyboard or pointer press serial has been received"
                 );
                 return;
             };
-            let data_source = primary_selection_manager.create_source(&state.globals.qh, ());
+            let (source, mime) = state.clipboard.set_primary(item);
+            let data_source = primary_selection_manager.create_source(&state.globals.qh, source);
             for mime_type in TEXT_MIME_TYPES {
                 data_source.offer(mime_type.to_string());
             }
-            data_source.offer(state.clipboard.self_mime());
+            data_source.offer(mime);
             primary_selection.set_selection(Some(&data_source), serial.as_raw());
         }
     }
@@ -1463,29 +1463,33 @@ impl WaylandConnection {
             return;
         };
         if state.mouse_focused_window.is_some() || state.keyboard_focused_window.is_some() {
-            state.clipboard.set(item);
             let Some(serial) = state.serial_tracker.selection_serial() else {
                 log::warn!(
                     "Skipping Wayland clipboard ownership request because no keyboard or pointer press serial has been received"
                 );
                 return;
             };
+            let (source, mime) = state.clipboard.set(item);
             let data_source = data_device_manager
-                .create_data_source(&state.globals.qh, DataSourceKind::Clipboard);
+                .create_data_source(&state.globals.qh, DataSourceKind::Clipboard(source));
             for mime_type in TEXT_MIME_TYPES {
                 data_source.offer(mime_type.to_string());
             }
-            data_source.offer(state.clipboard.self_mime());
+            data_source.offer(mime);
             data_device.set_selection(Some(&data_source), serial.as_raw());
         }
     }
 
     pub(crate) fn read_from_primary(&self) -> Option<gpui::ClipboardItem> {
-        self.0.borrow_mut().clipboard.read_primary()
+        let mut state = self.0.borrow_mut();
+        let focused = state.keyboard_focused_window.is_some();
+        state.clipboard.read_primary(focused)
     }
 
     pub(crate) fn read_from_clipboard(&self) -> Option<gpui::ClipboardItem> {
-        self.0.borrow_mut().clipboard.read()
+        let mut state = self.0.borrow_mut();
+        let focused = state.keyboard_focused_window.is_some();
+        state.clipboard.read(focused)
     }
 
     pub(crate) fn active_window(&self) -> Option<AnyWindowHandle> {
@@ -3044,10 +3048,11 @@ impl Dispatch<wl_data_source::WlDataSource, DataSourceKind> for WaylandClientSta
         let mut state = client.borrow_mut();
 
         match (kind, event) {
-            (DataSourceKind::Clipboard, wl_data_source::Event::Send { mime_type, fd }) => {
-                state.clipboard.send(mime_type, fd);
+            (DataSourceKind::Clipboard(source), wl_data_source::Event::Send { mime_type, fd }) => {
+                state.clipboard.send(*source, mime_type, fd);
             }
-            (DataSourceKind::Clipboard, wl_data_source::Event::Cancelled) => {
+            (DataSourceKind::Clipboard(source), wl_data_source::Event::Cancelled) => {
+                state.clipboard.cancelled(*source);
                 data_source.destroy();
             }
             (DataSourceKind::Drag, wl_data_source::Event::Send { fd, .. }) => {
@@ -3135,25 +3140,26 @@ impl Dispatch<zwp_primary_selection_offer_v1::ZwpPrimarySelectionOfferV1, ()>
     }
 }
 
-impl Dispatch<zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1, ()>
+impl Dispatch<zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1, u64>
     for WaylandClientStatePtr
 {
     fn event(
         this: &mut Self,
         selection_source: &zwp_primary_selection_source_v1::ZwpPrimarySelectionSourceV1,
         event: zwp_primary_selection_source_v1::Event,
-        _: &(),
+        source: &u64,
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
         let client = this.get_client();
-        let state = client.borrow_mut();
+        let mut state = client.borrow_mut();
 
         match event {
             zwp_primary_selection_source_v1::Event::Send { mime_type, fd } => {
-                state.clipboard.send_primary(mime_type, fd);
+                state.clipboard.send_primary(*source, mime_type, fd);
             }
             zwp_primary_selection_source_v1::Event::Cancelled => {
+                state.clipboard.primary_cancelled(*source);
                 selection_source.destroy();
             }
             _ => {}

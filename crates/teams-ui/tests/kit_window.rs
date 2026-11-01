@@ -16,7 +16,8 @@
 //!
 //! Without weston 15, niri or `dbus-daemon` it says so and passes, unless `GPUI_SMOKE_REQUIRE=1`.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::collections::VecDeque;
 use std::io::{self, Write as _};
 use std::process::ExitCode;
 use std::rc::Rc;
@@ -145,15 +146,30 @@ impl Portal {
 struct Session {
     running: Running,
     input: VirtualInput,
+    recent: RefCell<VecDeque<String>>,
 }
 
 impl Session {
+    /// Keep a bounded trace of this synthetic child's output, including the lines an expectation skips.
+    fn line_where(&self, wanted: impl Fn(&str) -> bool) -> Result<String, ui_sandbox::LineError> {
+        self.running.line_where(WAIT, |line| {
+            let mut recent = self.recent.borrow_mut();
+            if recent.len() == 16 {
+                recent.pop_front();
+            }
+            recent.push_back(line.to_owned());
+            wanted(line)
+        })
+    }
+
     /// Waits for the child's line `line`; the lines before it are skipped.
     fn expect(&mut self, line: &str) -> SandboxResult {
-        self.running
-            .line_where(WAIT, |got| got == line)
-            .map(|_| ())
-            .map_err(|error| self.running.fail(&format!("no line {line:?}: {error:?}")))
+        self.line_where(|got| got == line).map(|_| ()).map_err(|error| {
+            self.running.fail(&format!(
+                "no line {line:?}: {error:?}; recent child output: {:?}",
+                self.recent.borrow()
+            ))
+        })
     }
 
     /// Waits for every line of `lines`, in any order (an action's handler runs before the event it emits is
@@ -161,10 +177,12 @@ impl Session {
     fn expect_all(&mut self, lines: &[&str]) -> SandboxResult {
         let mut missing: Vec<&str> = lines.to_vec();
         while !missing.is_empty() {
-            let line = self
-                .running
-                .line_where(WAIT, |got| missing.contains(&got))
-                .map_err(|error| self.running.fail(&format!("no lines {missing:?}: {error:?}")))?;
+            let line = self.line_where(|got| missing.contains(&got)).map_err(|error| {
+                self.running.fail(&format!(
+                    "no lines {missing:?}: {error:?}; recent child output: {:?}",
+                    self.recent.borrow()
+                ))
+            })?;
             missing.retain(|wanted| *wanted != line);
         }
         Ok(())
@@ -210,6 +228,7 @@ fn drive(sandbox: &Sandbox, portal: &Portal) -> SandboxResult {
     let mut session = Session {
         running,
         input: sandbox.input()?,
+        recent: RefCell::default(),
     };
     session.expect("theme light")?;
     typing_and_the_clipboard(&mut session)?;
@@ -268,8 +287,7 @@ fn a_long_line_wraps(session: &mut Session) -> SandboxResult {
     session.input.type_text(long)?;
     session.expect_value(long)?;
     let rows = session
-        .running
-        .line_where(WAIT, |line| {
+        .line_where(|line| {
             line.strip_prefix("rows ")
                 .and_then(|rows| rows.parse::<usize>().ok())
                 .is_some_and(|rows| rows > 1)

@@ -8,7 +8,8 @@
 #                  uploaded into a texture kept per surface, by damaged rectangle (0001); and, our own, a weight or
 #                  style the family has no face of drawn anyway: a variable face at that weight, else synthesized (0002)
 #   gpui-pre-linux our own: the HTML another program puts on the Wayland clipboard beside its text, kept as the
-#                  item's metadata for the rich-text editor's paste (0001)
+#                  item's metadata for the rich-text editor's paste (0001); immediate reads of local clipboard
+#                  writes, source generations, and validated private rich-copy recovery after a manager handoff (0002)
 #
 # Each source is the crates.io archive of GPUI_VERSION, verified against SHA256 below (the release's crates.io
 # checksum: the `cksum` of its line in https://index.crates.io/gp/ui/<crate>, also what Cargo.lock recorded for the

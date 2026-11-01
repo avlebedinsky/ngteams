@@ -41,6 +41,8 @@ devices. The sandbox forwards this graphics setting alongside its existing small
 
 The image installs the repository's pinned Rust toolchain and LLVM tools plus `cargo-llvm-cov` 0.9.1. The entry
 script downloads checksum-verified Chrome using the normal lab CLI, then executes the full strict coverage gate.
+Before measurement it also runs the patched Wayland clipboard's ownership regressions; these vendor-library tests
+are separate from the runtime-crate selection. The native UI test still exercises copy, cut and paste end to end.
 The image sets `TZ=Etc/UTC` so calendar fixtures do not depend on the host's `/etc/localtime` configuration.
 Tool installation uses the network; test traffic stays synthetic and offline from the tenant. No lab configuration
 or secret is required. The workflow frees unused hosted SDKs to make space for the instrumented native binaries.
