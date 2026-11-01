@@ -11,6 +11,9 @@ The hosted `Coverage gate tests` job checks the reporter and the wrapper's failu
 in each metric and a second crate whose coverage is lower than the first one's. This fast job does not replace the
 full measurement. The coverage artifact contains only `summary.json`, including per-crate counts and gaps. Raw
 profiles, screenshots, captures and runtime logs are not uploaded.
+The job summary displays each crate's measured lines, functions and regions. If tests fail, the wrapper attempts
+to export the current profiles for diagnosis and labels those results as partial; it still exits with the original
+test failure. A failed build or export cannot reuse a previous measurement's summary.
 
 ## Hosted CPU runner
 
@@ -19,6 +22,12 @@ Both jobs use GitHub-hosted Ubuntu runners. The full measurement runs in the
 keyring tools and Mesa's software OpenGL/Vulkan drivers. Tests run as a non-root user. The container is privileged
 so WebKit can create its own sandbox namespaces, and `/dev/dri` is hidden explicitly. It runs on a disposable
 hosted VM, with only the checkout mounted; no self-hosted runner, personal files or tenant credentials are used.
+Ubuntu 24.04 also restricts unprivileged user namespaces on the host, including those requested from within the
+container. The workflow disables that restriction only for the disposable VM's current boot, using the setting
+documented in [Ubuntu's release notes](https://documentation.ubuntu.com/release-notes/24.04/#unprivileged-user-namespace-restrictions).
+Chrome's and WebKit's internal sandboxes remain enabled. Before compiling Rust, a preflight checks user-ID mapping
+and bubblewrap; after installing Chrome, it renders a synthetic page with no network or desktop access. These
+checks fail early with diagnostics if the hosted environment cannot support the browser tests.
 
 `TEAMS_WPE_TEST_SKIP_DMA=1` excludes only the native WPE test's real DMA-buffer subcase. Its worker and in-process
 SHM cases still run, as do the other native GUI, media and browser tests. Local runs leave this variable unset and
@@ -30,6 +39,7 @@ devices. The sandbox forwards this graphics setting alongside its existing small
 
 The image installs the repository's pinned Rust toolchain and LLVM tools plus `cargo-llvm-cov` 0.9.1. The entry
 script downloads checksum-verified Chrome using the normal lab CLI, then executes the full strict coverage gate.
+The image sets `TZ=Etc/UTC` so calendar fixtures do not depend on the host's `/etc/localtime` configuration.
 Tool installation uses the network; test traffic stays synthetic and offline from the tenant. No lab configuration
 or secret is required. The workflow frees unused hosted SDKs to make space for the instrumented native binaries.
 The one-shot build disables incremental caches and DWARF debug information while retaining LLVM coverage maps and

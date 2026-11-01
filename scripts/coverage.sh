@@ -75,7 +75,10 @@ fi
 mkdir -p "$output"
 exec 9>target/coverage/measurement.lock
 flock 9
+measurement_status=0
 if ! "$report_only"; then
+    # A failed build/export must never leave the previous run's successful summary available for upload.
+    rm -f -- "$output/llvm.json" "$output/summary.json"
     # llvm-cov creates this directory before Cargo does, so Cargo may leave its cache tag absent.
     cache_tag="$build_dir/CACHEDIR.TAG"
     mkdir -p "$build_dir"
@@ -110,7 +113,22 @@ if ! "$report_only"; then
     # copy of a selected library. Remove all workspace artifacts; third-party dependency builds remain cached.
     "${measurement_env[@]}" cargo llvm-cov clean --workspace
     "${measurement_env[@]}" cargo llvm-cov "${package_args[@]}" --locked --no-fail-fast --json --output-path "$output/llvm.json" \
-        -- --test-threads "$test_threads"
+        -- --test-threads "$test_threads" || measurement_status=$?
+    if ((measurement_status)); then
+        # cargo-llvm-cov does not export after failed tests. Preserve their status while making the retained
+        # profiles inspectable; partial coverage cannot turn a failing test run green.
+        echo "Tests or instrumentation exited $measurement_status; exporting partial coverage from this run." >&2
+        "${measurement_env[@]}" cargo llvm-cov report "${package_args[@]}" --json --output-path "$output/llvm.json" || {
+            echo "Coverage export failed; no current summary is available." >&2
+            exit "$measurement_status"
+        }
+    fi
 fi
+report_status=0
 python3 scripts/coverage-report.py report "$output/llvm.json" \
-    --output "$output/summary.json" "${report_args[@]}" --packages "${selected[@]}"
+    --output "$output/summary.json" "${report_args[@]}" --packages "${selected[@]}" || report_status=$?
+if ((measurement_status)); then
+    echo "The coverage report is partial; tests or instrumentation failed with status $measurement_status." >&2
+    exit "$measurement_status"
+fi
+exit "$report_status"

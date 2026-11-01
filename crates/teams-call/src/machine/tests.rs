@@ -1,6 +1,9 @@
 //! The machine on its own, fed by hand: what each delivery, outcome and action makes it do (the whole flows on the
 //! mock are `tests/mock.rs`).
 
+#[path = "../../tests/support/decline_ordering.rs"]
+mod decline_ordering;
+
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;

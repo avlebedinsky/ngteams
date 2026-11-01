@@ -1499,6 +1499,10 @@ impl Calls {
                 drop(self.end_call());
                 self.out.event(CallEvent::RingEnded { call: id, end });
             }
+            // The end callback can precede the reject's HTTP answer. Only that write's outcome tells us whether
+            // the local decline succeeded: a concurrent remote end cannot prove the reject was accepted. Keep
+            // waiting for on_outcome, which reports Declined on 2xx and Failed("reject") otherwise.
+            Some((_, Phase::Declining)) | None => {}
             Some((
                 _,
                 Phase::Leaving {
@@ -1507,7 +1511,6 @@ impl Calls {
                 },
             )) => self.finish(leaving.end()),
             Some(_) => self.finish(End::Remote(end)),
-            None => {}
         }
     }
 

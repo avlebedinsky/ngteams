@@ -287,7 +287,14 @@ import shutil
 import sys
 assert (Path(os.environ["CARGO_LLVM_COV_TARGET_DIR"]) / "CACHEDIR.TAG").read_text().startswith(
     "Signature: 8a477f597d28d172789f06886806bc55")
+with Path("commands.jsonl").open("a") as commands:
+    commands.write(json.dumps(sys.argv[1:]) + "\\n")
 if sys.argv[1:] == ["llvm-cov", "clean", "--workspace"]:
+    sys.exit(0)
+if sys.argv[1:3] == ["llvm-cov", "report"]:
+    if status := int(os.environ.get("SYNTHETIC_EXPORT_EXIT", "0")):
+        sys.exit(status)
+    shutil.copyfile("llvm-fixture.json", sys.argv[sys.argv.index("--output-path") + 1])
     sys.exit(0)
 keys = ["PROTO_LAB_REQUIRE_CHROME", "GPUI_SMOKE_REQUIRE", "PROTO_LAB_LIVE",
         "TEAMS_MEDIA_TURN_SERVER", "TEAMS_MEDIA_TURN_USER", "TEAMS_MEDIA_TURN_PASSWORD",
@@ -295,6 +302,8 @@ keys = ["PROTO_LAB_REQUIRE_CHROME", "GPUI_SMOKE_REQUIRE", "PROTO_LAB_LIVE",
         "CARGO_LLVM_COV_TARGET_DIR", "LK_CUSTOM_WEBRTC"]
 Path("execution.json").write_text(json.dumps({
     "args": sys.argv[1:], "environment": {key: os.environ.get(key) for key in keys}}))
+if status := int(os.environ.get("SYNTHETIC_TEST_EXIT", "0")):
+    sys.exit(status)
 shutil.copyfile("llvm-fixture.json", sys.argv[sys.argv.index("--output-path") + 1])
 ''')
         binary.chmod(0o755)
@@ -307,6 +316,40 @@ shutil.copyfile("llvm-fixture.json", sys.argv[sys.argv.index("--output-path") + 
     def run_wrapper(self, *arguments):
         return subprocess.run(self.command + list(arguments), env=self.environment,
                               capture_output=True, text=True, check=False)
+
+    def test_failed_tests_export_current_partial_coverage_without_losing_their_exit_status(self):
+        self.environment["SYNTHETIC_TEST_EXIT"] = "101"
+        for covered in [100, 89]:
+            with self.subTest(covered=covered):
+                source = self.root / "crates/example/src/lib.rs"
+                (self.root / "llvm-fixture.json").write_text(json.dumps({
+                    "type": "llvm.coverage.json.export", "data": [{
+                        "files": [CoverageGateTests.entry(source, 100, covered)]}],
+                }))
+                result = self.run_wrapper("--require-target")
+                self.assertEqual(result.returncode, 101, result.stdout + result.stderr)
+                self.assertIn("report is partial", result.stderr)
+                report = self.root / "target/coverage/continuous/all/summary.json"
+                summary = json.loads(report.read_text())
+                self.assertEqual(summary["crates"]["example"]["percent"], dict.fromkeys(METRICS, covered))
+                if covered < 90:
+                    self.assertIn("below 90%", result.stderr)
+                commands = [json.loads(line) for line in (self.root / "commands.jsonl").read_text().splitlines()]
+                self.assertEqual(commands[-1][:2], ["llvm-cov", "report"])
+                self.assertIn("example", commands[-1])
+                self.assertNotIn("--ignore-run-fail", json.loads(self.execution.read_text())["args"])
+
+    def test_failed_export_cannot_reuse_a_previous_successful_report(self):
+        result = self.run_wrapper("--require-target")
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        output = self.root / "target/coverage/continuous/all"
+        self.assertTrue((output / "summary.json").is_file())
+        self.environment.update(SYNTHETIC_TEST_EXIT="101", SYNTHETIC_EXPORT_EXIT="17")
+        result = self.run_wrapper("--require-target")
+        self.assertEqual(result.returncode, 101, result.stdout + result.stderr)
+        self.assertIn("no current summary", result.stderr)
+        self.assertFalse((output / "summary.json").exists())
+        self.assertFalse((output / "llvm.json").exists())
 
     def test_workspace_target_gate_exits_nonzero_for_each_low_metric_in_any_crate(self):
         source = self.root / "crates/other/src/lib.rs"

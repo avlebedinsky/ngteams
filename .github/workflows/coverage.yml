@@ -37,18 +37,27 @@ jobs:
       - name: Free space for instrumented native test binaries
         run: |
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup
+      - name: Allow browser sandbox namespaces on this disposable VM
+        # Ubuntu's host policy applies inside privileged containers too. Browser sandboxes stay enabled.
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
       - name: Build the native test environment with software graphics
         run: |
           rust_version=$(python3 -c 'import tomllib; print(tomllib.load(open("rust-toolchain.toml", "rb"))["toolchain"]["channel"])')
           docker build --build-arg "RUST_VERSION=$rust_version" --build-arg "CI_UID=$(id -u)" \
             --tag ngteams-coverage .github/ci
       - name: Require 90% lines, functions and regions in every runtime crate
+        id: measurement
         # WebKit creates its own sandbox namespaces. This privileged container runs only on a disposable hosted VM.
         run: |
           docker run --rm --init --privileged --shm-size=2g \
             --tmpfs /dev/dri:rw,nosuid,nodev,noexec,size=1m \
             --volume "$GITHUB_WORKSPACE:/workspace" \
             ngteams-coverage
+      - name: Show measured coverage
+        if: always()
+        env:
+          COVERAGE_TEST_OUTCOME: ${{ steps.measurement.outcome }}
+        run: python3 .github/ci/summary.py >> "$GITHUB_STEP_SUMMARY"
       - name: Save coverage summary
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

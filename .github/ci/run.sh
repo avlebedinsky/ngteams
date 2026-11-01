@@ -10,6 +10,9 @@ export CARGO_INCREMENTAL=0
 export CARGO_PROFILE_DEV_DEBUG=0
 export CARGO_PROFILE_TEST_DEBUG=0
 
+coverage-ci-smoke
 CARGO_TARGET_DIR=target/ci-bootstrap-build cargo run --locked -p proto-lab -- chrome install
+chrome_path=$(target/ci-bootstrap-build/debug/proto-lab chrome path)
+coverage-ci-smoke "$chrome_path"
 rm -rf -- target/ci-bootstrap-build
 exec scripts/coverage.sh --require-target

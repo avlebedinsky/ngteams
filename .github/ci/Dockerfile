@@ -19,6 +19,8 @@ RUN test -n "$RUST_VERSION" \
     && rustup component add llvm-tools-preview \
     && cargo install --locked cargo-llvm-cov --version 0.9.1
 
+ENV TZ="Etc/UTC"
 COPY --chmod=755 run.sh /usr/local/bin/coverage-ci
+COPY --chmod=755 smoke.sh /usr/local/bin/coverage-ci-smoke
 WORKDIR /workspace
 ENTRYPOINT ["/usr/local/bin/coverage-ci"]
