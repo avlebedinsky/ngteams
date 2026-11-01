@@ -46,8 +46,9 @@ These protect real people, the user's account and the user's data. They hold for
 
 ## Checks
 
-There is no fixed gate and no CI. Choose the checks, waits and review each change needs from what it can break, and
-stop once they cover that. A small change gets a small, fast check (the test that exercises it, or `cargo check` of
+CI requires 90% coverage per runtime crate ([CPU runner and hardware-test exception](docs/ci.md)). Choose additional
+checks, waits and review each change needs from what it can break, and stop once they cover that. A small change
+gets a small, fast check (the test that exercises it, or `cargo check` of
 its crate), not every suite of every crate it touched; a change to shared API, the fence, the write path or calls
 earns more. Rerun only what failed. Say what you ran and what you left out. Commands: [README.md](README.md#tests).
 
@@ -56,7 +57,8 @@ What the tooling enforces when it runs:
 - clippy denies the workspace lints (`all`, `pedantic`, `unwrap`/`expect`/`panic`, the complexity limits in
   `clippy.toml`); `scripts/lint-report.sh` fails on an inner `#![allow]`/`#![expect]`.
 - `cargo test -p fixture-guard` fails on an unmarked fixture or a secret in any `tests/fixtures/` or `docs/`.
-- `scripts/coverage.sh --require-target` fails a crate below its floors in `coverage.toml`.
+- `scripts/coverage.sh --require-target` fails any runtime crate below 90% in lines, functions or regions; without
+  that flag, the script checks the saved standalone floors in `coverage.toml`.
 - A binary built with `test-support` (anything `cargo test`, `--all-targets` or `--all-features` built) refuses to run.
 
 ### Live runs

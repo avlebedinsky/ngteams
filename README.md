@@ -804,7 +804,8 @@ inside a test stays part of that test.
 as tests improve; never lower them or exclude runnable code to pass. Baselines are measured with each crate selected alone. Some standalone floors remain below 90%; the full
 workspace also exercises libraries through their consumers' integration suites and can cover more code.
 `--require-target` always enforces 90% for every selected crate, independently of those baseline floors.
-No CI pipeline is configured in this repository, so these are local gates. Running the script without
+The [Coverage CI workflow](docs/ci.md) requires the 90% target on pull requests and `main`, using hosted CPU runners
+and software graphics; only the hardware DMA test is excluded there. Running the script without
 `-p` selects all 21 crates with runtime code, including the lab and test-support tooling. Generated WPE bindings,
 the standalone video spike and `fence-seal` (a compile-test harness with a documentation-only library) are excluded.
 `fence-seal`'s compile checks still run through the normal test gate. Third-party code and tests outside `src/` do
@@ -868,6 +869,8 @@ fence_ws --test fence_targets --test calling --test expected_denies`.
 | `PROTO_LAB_CHROME=<binary>` | the Chrome the browser tests use; by default the pinned install in the lab's `chrome/` dir (`proto-lab chrome install`) |
 | `PROTO_LAB_REQUIRE_CHROME=1` | without a Chrome the browser tests fail instead of skipping |
 | `GPUI_SMOKE_REQUIRE=1` | without weston ≥ 15.0 (for `--fake-seat`), niri, `dbus-daemon`, `pipewire` and `wireplumber` on `PATH`, and the PipeWire plugins and modules the sandbox's PipeWire links (`spa-0.2`, `pipewire-0.3`, `wireplumber-0.5`, WirePlumber's data dir), the UI sandbox's and the GPUI smoke tests fail instead of skipping |
+| `TEAMS_WPE_TEST_SKIP_DMA=1` | CPU-only CI excludes the native WPE hardware DMA subcase; worker and in-process SHM tests still run. Unset locally to require all three modes. This does not exclude any runtime source from coverage. |
+| `WGPU_BACKEND=vulkan` | select GPUI's Vulkan backend; CPU CI uses Mesa Lavapipe. The sandbox forwards this graphics choice while keeping the session's display, bus and credentials out. |
 | `--features live` + `PROTO_LAB_LIVE=1` | the live lab tests: `crates/proto-lab/tests/auth_live.rs` (a, b and c sign in natively, refresh, and get a skypetoken, tokens kept in memory), `crates/teams-headless/tests/chat_live.rs` (M1's acceptance: it only spawns the normally built `teams-headless` and reads its output and `fence.log`), `crates/teams-app/tests/ui_live.rs` (M2's acceptance: the normally built `teams-app` for a, b and c, each in a UI sandbox of its own with its broker outside, driven by the keyboard and read through its view trace and `fence.log`) and `crates/teams-app/tests/call_live.rs` (M3's acceptance of calls, as `ui_live` with each sandbox's private PipeWire, and b's web client from a spawned `proto-lab run ab-call-app`); without the feature they aren't built, without the variable they skip |
 | `TEAMS_HEADLESS_BIN=<binary>` | the normally built `teams-headless` that `chat_live` spawns (required: a test build refuses to run) |
 | `TEAMS_APP_BIN=<binary>` | the normally built `teams-app` that `ui_live` and `call_live` spawn, and whose `secrets` subcommand they start as each app's broker (required, as above) |

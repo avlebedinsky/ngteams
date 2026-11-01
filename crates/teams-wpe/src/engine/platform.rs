@@ -868,3 +868,7 @@ unsafe extern "C" fn view_set_cursor(view: *mut platform::WPEView, name: *const 
         view.set_cursor(name);
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/display_formats.rs"]
+mod cpu_dma_tests;

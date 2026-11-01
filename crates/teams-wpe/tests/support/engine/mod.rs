@@ -15,6 +15,8 @@ use ui_sandbox::{Running, SandboxOptions};
 
 pub const CHILD: &str = "TEAMS_WPE_ENGINE_TEST_CHILD";
 const ROOT: &str = "TEAMS_WPE_ENGINE_TEST_ROOT";
+/// CPU-only CI still exercises both real native SHM hosts; only kernel DMA-buffer export requires hardware.
+const SKIP_DMA: &str = "TEAMS_WPE_TEST_SKIP_DMA";
 type Result<T = ()> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 pub fn entry() -> Result {
@@ -39,10 +41,20 @@ pub fn entry() -> Result {
 }
 
 fn parent() -> Result {
+    let skip_dma = match std::env::var(SKIP_DMA).as_deref() {
+        Err(std::env::VarError::NotPresent) | Ok("0") => false,
+        Ok("1") => true,
+        _ => return Err(format!("{SKIP_DMA} must be unset, 0 or 1").into()),
+    };
     let Some(sandbox) = ui_sandbox::sandbox_or_skip("native WPE engine", &SandboxOptions::default())? else {
         return Ok(());
     };
-    for mode in ["worker", "local", "dmabuf"] {
+    let modes: &[&str] = if skip_dma {
+        &["worker", "local"]
+    } else {
+        &["worker", "local", "dmabuf"]
+    };
+    for &mode in modes {
         let root = tempfile::tempdir()?;
         let mut command = ui_sandbox::clean_command(std::env::current_exe()?);
         command
@@ -65,7 +77,10 @@ fn parent() -> Result {
         let (status, stderr) = running.finish(Duration::from_secs(20))?;
         succeeded(status, &stderr)?;
     }
-    println!("native WPE hosts: worker, local, dmabuf passed");
+    println!("native WPE hosts: {} passed", modes.join(", "));
+    if skip_dma {
+        println!("native WPE dmabuf: skipped because {SKIP_DMA}=1 (CPU-only test environment)");
+    }
     Ok(())
 }
 

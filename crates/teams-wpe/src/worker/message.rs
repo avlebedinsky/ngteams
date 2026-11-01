@@ -695,3 +695,7 @@ mod tests {
         assert!(serde_json::to_vec(&FromWorker::Event(frame)).is_err());
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/dma_message.rs"]
+mod cpu_dma_tests;

@@ -102,8 +102,9 @@ impl Default for SandboxOptions {
 }
 
 /// The variables a sandboxed child takes from this process: only these, never the session's display, bus or
-/// runtime dir. `LLVM_PROFILE_FILE` keeps instrumented children in the coverage run's output directory.
-pub const PASSED_ENV: [&str; 4] = ["PATH", "HOME", "LANG", "LLVM_PROFILE_FILE"];
+/// runtime dir. `LLVM_PROFILE_FILE` keeps instrumented children in the coverage run's output directory;
+/// `WGPU_BACKEND` selects graphics APIs, so CPU-only tests can use Vulkan's software renderer without probing GL.
+pub const PASSED_ENV: [&str; 5] = ["PATH", "HOME", "LANG", "LLVM_PROFILE_FILE", "WGPU_BACKEND"];
 
 /// A command whose environment holds only [`PASSED_ENV`] of this process.
 pub fn clean_command(program: impl AsRef<OsStr>) -> Command {

@@ -166,6 +166,23 @@ class CoverageGateTests(unittest.TestCase):
         self.assertTrue(self.run_report()[0])
         self.assertIn("regions below 90%", self.report_output)
 
+    def test_target_gate_rejects_each_metric_just_below_ninety_despite_low_baselines(self):
+        self.args.require_target = True
+        for metric in METRICS:
+            with self.subTest(metric=metric):
+                self.entries = [self.entry(path, 10_000, 10_000) for path in [self.used, self.unused]]
+                for entry in self.entries:
+                    entry["summary"][metric]["covered"] = 8_999
+                failed, summary = self.run_report()
+                self.assertTrue(failed)
+                expected = dict.fromkeys(METRICS, 100)
+                expected[metric] = 89.99
+                self.assertEqual(summary["crates"]["example"]["percent"], expected)
+                self.assertIn(f"{metric} below 90%", self.report_output)
+                for entry in self.entries:
+                    entry["summary"][metric]["covered"] = 9_000
+                self.assertFalse(self.run_report()[0], self.report_output)
+
     def test_unequal_files_use_weighted_counts_and_each_metrics_own_rate(self):
         self.config["baselines"]["example"] = dict.fromkeys(METRICS, 0)
         self.entries[0]["summary"] = {
@@ -290,6 +307,43 @@ shutil.copyfile("llvm-fixture.json", sys.argv[sys.argv.index("--output-path") + 
     def run_wrapper(self, *arguments):
         return subprocess.run(self.command + list(arguments), env=self.environment,
                               capture_output=True, text=True, check=False)
+
+    def test_workspace_target_gate_exits_nonzero_for_each_low_metric_in_any_crate(self):
+        source = self.root / "crates/other/src/lib.rs"
+        source.parent.mkdir(parents=True)
+        source.write_text("pub fn other() {}\n")
+        (source.parent.parent / "Cargo.toml").write_text('[package]\nname = "other"\n')
+        (self.root / "Cargo.toml").write_text(
+            '[workspace]\nmembers = ["crates/example", "crates/other"]\n')
+        (self.root / "coverage.toml").write_text(
+            'target = 90\nmetrics = ["lines", "functions", "regions"]\n'
+            '[excluded]\n[baselines]\n'
+            'example = { lines = 50, functions = 50, regions = 50 }\n'
+            'other = { lines = 0, functions = 0, regions = 0 }\n')
+        self.command = self.command[:2]
+        example = self.root / "crates/example/src/lib.rs"
+        for metric in METRICS:
+            with self.subTest(metric=metric):
+                entries = [CoverageGateTests.entry(path, 10_000, 10_000) for path in [example, source]]
+                for covered in [8_999, 9_000]:
+                    entries[1]["summary"][metric]["covered"] = covered
+                    (self.root / "llvm-fixture.json").write_text(json.dumps({
+                        "type": "llvm.coverage.json.export", "data": [{"files": entries}],
+                    }))
+                    result = self.run_wrapper("--require-target")
+                    if covered == 8_999:
+                        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                        self.assertIn(f"other: {metric} below 90%", result.stderr)
+                    else:
+                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    execution = json.loads(self.execution.read_text())["args"]
+                    selected = [execution[index + 1] for index, value in enumerate(execution) if value == "-p"]
+                    self.assertCountEqual(selected, ["example", "other"])
+                    report = self.root / "target/coverage/continuous/all/summary.json"
+                    summary = json.loads(report.read_text())
+                    self.assertEqual(summary["packages"], ["example", "other"])
+                    self.assertEqual(summary["crates"]["example"]["percent"], dict.fromkeys(METRICS, 100))
+                    self.assertEqual(summary["crates"]["other"]["percent"][metric], covered / 100)
 
     def test_measurement_prepares_cargos_cache_tag_and_refuses_an_invalid_existing_tag(self):
         result = self.run_wrapper()

@@ -116,6 +116,7 @@ fn clean_commands_keep_only_the_profile_path_and_the_allowed_environment() {
             environment.get("LLVM_PROFILE_FILE").map(OsStr::new),
             std::env::var_os("LLVM_PROFILE_FILE").as_deref()
         );
+        assert_eq!(environment.get("WGPU_BACKEND").map(String::as_str), Some("vulkan"));
         for name in PARENT_ONLY.into_iter().chain([CHILD]) {
             assert!(
                 !environment.contains_key(name),
@@ -142,6 +143,7 @@ fn clean_commands_keep_only_the_profile_path_and_the_allowed_environment() {
             ])
             .current_dir(dir.path())
             .env(CHILD, "1")
+            .env("WGPU_BACKEND", "vulkan")
             .env_remove("LLVM_PROFILE_FILE");
         for name in PARENT_ONLY {
             command.env(name, "synthetic-parent-canary");
