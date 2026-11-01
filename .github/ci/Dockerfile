@@ -22,5 +22,7 @@ RUN test -n "$RUST_VERSION" \
 ENV TZ="Etc/UTC"
 COPY --chmod=755 run.sh /usr/local/bin/coverage-ci
 COPY --chmod=755 smoke.sh /usr/local/bin/coverage-ci-smoke
+COPY --chmod=755 enter.sh /usr/local/bin/coverage-ci-enter
 WORKDIR /workspace
-ENTRYPOINT ["/usr/local/bin/coverage-ci"]
+ENTRYPOINT ["/usr/local/bin/coverage-ci-enter"]
+CMD ["/usr/local/bin/coverage-ci"]

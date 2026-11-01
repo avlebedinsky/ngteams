@@ -22,6 +22,8 @@ Both jobs use GitHub-hosted Ubuntu runners. The full measurement runs in the
 keyring tools and Mesa's software OpenGL/Vulkan drivers. Tests run as a non-root user. The container is privileged
 so WebKit can create its own sandbox namespaces, and `/dev/dri` is hidden explicitly. It runs on a disposable
 hosted VM, with only the checkout mounted; no self-hosted runner, personal files or tenant credentials are used.
+The entrypoint also creates a fresh device filesystem: privileged container runtimes can otherwise repopulate DRM
+nodes after mounting `/dev/dri`. Only the container's shared-memory mount is carried into that device filesystem.
 Ubuntu 24.04 also restricts unprivileged user namespaces on the host, including those requested from within the
 container. The workflow disables that restriction only for the disposable VM's current boot, using the setting
 documented in [Ubuntu's release notes](https://documentation.ubuntu.com/release-notes/24.04/#unprivileged-user-namespace-restrictions).
