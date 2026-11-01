@@ -145,3 +145,7 @@ mod tests {
         assert_eq!(PointerKind::Leave.event_type(), platform::WPE_EVENT_POINTER_LEAVE);
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/support/input.rs"]
+mod history_tests;

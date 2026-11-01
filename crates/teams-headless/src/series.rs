@@ -67,7 +67,10 @@ pub async fn probe(
     out: &mut impl Write,
 ) -> io::Result<bool> {
     if cleanup {
-        let found = probe_series(engine, now_ms, out).await?;
+        let Some(found) = probe_series(engine, now_ms, out).await? else {
+            // An unread calendar cannot prove there is nothing left to clean up.
+            return Ok(false);
+        };
         for id in &found {
             read_back(engine, id, out).await?;
         }
@@ -90,13 +93,15 @@ pub async fn probe(
             .as_ref()
             .map_or("unread".to_owned(), |event| format!("{:?}", event.kind))
     )?;
-    let mut found = probe_series(engine, now_ms, out).await?;
+    let calendar_read = probe_series(engine, now_ms, out).await?;
+    let calendar_was_read = calendar_read.is_some();
+    let mut found = calendar_read.unwrap_or_default();
     if let Some(created) = created
         && !found.contains(&created.id)
     {
         found.push(created.id);
     }
-    let mut fine = !found.is_empty();
+    let mut fine = calendar_was_read && !found.is_empty();
     for id in &found {
         fine &= read_back(engine, id, out).await?;
     }
@@ -109,14 +114,14 @@ pub async fn probe(
 }
 
 /// The probe's series in the calendar from tomorrow on (by their occurrences' series, else their own ids), the
-/// occurrences counted.
-async fn probe_series(engine: &EngineRequests, now_ms: i64, out: &mut impl Write) -> io::Result<Vec<String>> {
+/// occurrences counted; `None` when its calendar could not be read, distinct from a successful empty read.
+async fn probe_series(engine: &EngineRequests, now_ms: i64, out: &mut impl Write) -> io::Result<Option<Vec<String>>> {
     let from = now_ms.div_euclid(DAY_MS) * DAY_MS;
     let events = match engine.calendar(from, from + 30 * DAY_MS).await {
         Ok(events) => events,
         Err(error) => {
             writeln!(out, "series calendar read failed {}", error.kind())?;
-            return Ok(Vec::new());
+            return Ok(None);
         }
     };
     let probes: Vec<_> = events.iter().filter(|event| event.subject == SUBJECT).collect();
@@ -133,7 +138,7 @@ async fn probe_series(engine: &EngineRequests, now_ms: i64, out: &mut impl Write
         probes.len(),
         ids.len()
     )?;
-    Ok(ids)
+    Ok(Some(ids))
 }
 
 /// Reads the series `id` back whole and prints the recurrence its answer gives.

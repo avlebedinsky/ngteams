@@ -76,6 +76,10 @@ fn missing_tools_are_named() {
 
 #[test]
 fn a_missing_sandbox_skips_or_fails() {
+    assert_eq!(
+        required(),
+        std::env::var_os(ui_sandbox::REQUIRE_ENV).is_some_and(|value| value == "1")
+    );
     assert!(
         unavailable::<()>("some_test", "no niri on PATH", false)
             .unwrap()
@@ -233,6 +237,19 @@ fn spawn_passes_only_the_named_descriptors() {
 
 /// `Notify` and `CloseNotification` on the fake server, recorded with their sender.
 fn check_notifications(bus: &PrivateBus, client: &zbus::blocking::Connection) -> SandboxResult {
+    let server = zbus::blocking::Proxy::new(client, NOTIFICATIONS_NAME, NOTIFICATIONS_PATH, NOTIFICATIONS_NAME)?;
+    let capabilities: Vec<String> = server.call("GetCapabilities", &())?;
+    assert_eq!(capabilities, ["body", "actions"]);
+    let information: (String, String, String, String) = server.call("GetServerInformation", &())?;
+    assert_eq!(
+        information,
+        (
+            "ui-sandbox".to_owned(),
+            "ngteams".to_owned(),
+            "0".to_owned(),
+            "1.2".to_owned()
+        )
+    );
     let me = client.unique_name().ok_or("no unique name")?.to_string();
     let hints = HashMap::from([("urgency", Value::U8(1)), ("category", Value::from("im.received"))]);
     let reply = client.call_method(
@@ -295,6 +312,14 @@ fn check_watcher(bus: &PrivateBus, client: &zbus::blocking::Connection) -> Sandb
     let watcher = zbus::blocking::Proxy::new(client, WATCHER_NAME, WATCHER_PATH, WATCHER_NAME)?;
     let registered: Vec<String> = watcher.get_property("RegisteredStatusNotifierItems")?;
     assert_eq!(registered, ["/StatusNotifierItem"]);
+    watcher.call_method("RegisterStatusNotifierHost", &("synthetic-host",))?;
+    assert_eq!(bus.tray_hosts(), ["synthetic-host"]);
+    bus.stop_watcher()?;
+    bus.stop_watcher()?;
+    let daemon = zbus::blocking::fdo::DBusProxy::new(client)?;
+    assert!(!daemon.name_has_owner(WATCHER_NAME.try_into()?)?);
+    bus.start_watcher()?;
+    assert!(daemon.name_has_owner(WATCHER_NAME.try_into()?)?);
     Ok(())
 }
 
@@ -656,6 +681,11 @@ fn drive_probe(sandbox: &Sandbox, lines: &mut Lines, url: &str) -> SandboxResult
     lines.wait_for(ECHO, |line| line.contains(" name=enter "))?;
     input.click(400, 300, keys::BTN_LEFT)?;
     lines.wait_for(ECHO, |line| line == "down x=400 y=300 button=Left")?;
+    input.click(400, 300, keys::BTN_RIGHT)?;
+    lines.wait_for(ECHO, |line| line == "down x=400 y=300 button=Right")?;
+    assert!(input.type_text("☃").is_err());
+    let logs = sandbox.logs();
+    assert!(logs.contains("weston.log") && logs.contains("niri.log"));
     Ok(())
 }
 
@@ -668,6 +698,7 @@ fn everything_together_with_canaries_planted() {
     assert!(!canary.is_empty() && OsStr::new(&canary) != OsStr::new("/"));
     let options = SandboxOptions {
         niri_extra: NIRI_FULL_WINDOW,
+        refresh_mhz: Some(60_000),
         ..SandboxOptions::default()
     };
     let Some(sandbox) = ui_sandbox::sandbox_or_skip(CANARY_CHILD, &options).unwrap() else {
@@ -677,4 +708,24 @@ fn everything_together_with_canaries_planted() {
     if let Err(error) = checked {
         panic!("{error}\n{}", sandbox.logs());
     }
+}
+
+#[test]
+fn a_failed_running_client_is_reaped_and_retains_its_stderr() {
+    let child = Command::new("/bin/sh")
+        .args([
+            "-c",
+            "printf 'synthetic stderr\\n' >&2; printf 'ready\\n'; exec /bin/sleep 30",
+        ])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut running = Running::new(child).unwrap();
+    assert_eq!(running.line(Duration::from_secs(5)).unwrap(), "ready");
+    let error = running.fail(&"synthetic failure").to_string();
+    assert!(error.contains("synthetic failure"));
+    assert!(error.contains("synthetic stderr"));
+    assert!(error.contains("client:"));
+    assert_eq!(running.take_stderr(), "<stderr already taken>");
 }

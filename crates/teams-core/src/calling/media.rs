@@ -851,3 +851,7 @@ mod tests {
         assert_eq!(up.overdue(start + Duration::from_secs(3_600)), None);
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/media_fallbacks.rs"]
+mod fallback_tests;

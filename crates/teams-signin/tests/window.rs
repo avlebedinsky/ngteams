@@ -4,7 +4,7 @@
 //! The parent runs a local HTTP server that records every request it gets, and a TCP listener for `WebSockets` that
 //! must never be connected to. It runs itself again inside the sandbox ([`Sandbox::spawn`]: the sandbox's compositor
 //! and bus, nothing of the desktop's, a private `HOME`), where the child opens the window ([`window::run`]) on the
-//! fake page with a `fence.log` of the test's own, and prints its answer. Two scenarios:
+//! fake page with a `fence.log` of the test's own, and prints its answer. Scenarios:
 //!
 //! - `channels`: the page tries a `fetch` `POST`, a beacon, an image, a frame whose form posts, a worker whose
 //!   `fetch` posts, a `WebSocket` and `window.open`, reports what it saw by `GET`, then navigates to the `nativeclient`
@@ -12,6 +12,8 @@
 //!   may reach the server, the `WebSocket` listener must stay unconnected, service workers, `WebSocket` and beacons
 //!   must be off, every request the server got must have its `fence.log` line, the code must not be in `fence.log`, and the
 //!   private `HOME` must hold no website data.
+//! - `service`: the same channel probes through the running app's `Windows` service.
+//! - `close`: the service's page is closed by the sandbox compositor and answers `Closed`.
 //! - `gaps`: pins what the guard can't see (the plan's Task 24; `docs/backlog/webkit-sign-in-guard-redirects.md`): a
 //!   synchronous `GET` redirected by a 302 and a synchronous `POST` the guard allows (a test-only local own-state rule)
 //!   redirected by a 307 reach their targets with no decision and no `fence.log` line; the same `POST` sent
@@ -41,6 +43,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 use std::{fs, thread};
 
+use gpui::{App, AppContext as _, AsyncApp, WindowingModes};
 use serde_json::Value;
 use teams_auth::signin::{WindowAnswer, WindowRequest};
 use teams_auth::token::NATIVE_CLIENT_REDIRECT;
@@ -63,7 +66,7 @@ fn main() -> ExitCode {
     // SAFETY: first thing in `main`, while the process has one thread.
     unsafe { teams_wpe::worker::serve_if_asked(|| {}) };
     let outcome = match std::env::var(MODE_ENV).as_deref() {
-        Ok(scenario @ ("channels" | "gaps" | "remote" | "crash")) => child(scenario),
+        Ok(scenario @ ("channels" | "service" | "close" | "gaps" | "remote" | "crash")) => child(scenario),
         Ok(other) => Err(format!("unknown mode {other}").into()),
         Err(_) => parent(),
     };
@@ -102,23 +105,50 @@ fn child(scenario: &str) -> SandboxResult {
     } else {
         Box::new(|guard| guard)
     };
-    let answer = window::run(WindowConfig {
+    let page_scenario = match scenario {
+        "service" => "channels",
+        "close" => "crash",
+        other => other,
+    };
+    let config = WindowConfig {
         bound: window::Bound::Loopback,
         request: WindowRequest {
-            authorize: format!("{origin}/authorize?scenario={scenario}&state={STATE}"),
+            authorize: format!("{origin}/authorize?scenario={page_scenario}&state={STATE}"),
             redirect_uri: NATIVE_CLIENT_REDIRECT.into(),
         },
         extension,
         log,
         setup,
-    });
+    };
+    if matches!(scenario, "service" | "close") {
+        serve_window(config);
+        return Ok(());
+    }
+    report_answer(window::run(config));
+    Ok(())
+}
+
+fn report_answer(answer: WindowAnswer) {
     match answer {
         WindowAnswer::Redirect(url) => say(&format!("answer redirect {}", url.expose())),
         WindowAnswer::Closed => say("answer closed"),
         WindowAnswer::Refused(host) => say(&format!("answer refused {host}")),
         WindowAnswer::Failed(reason) => say(&format!("answer failed {reason}")),
     }
-    Ok(())
+}
+
+/// The same guarded page, opened by an already-running app's window service rather than the standalone runner.
+fn serve_window(config: WindowConfig) {
+    gpui_platform::linux(WindowingModes::WAYLAND).run(move |cx: &mut App| {
+        cx.set_quit_mode(gpui::QuitMode::Explicit);
+        let windows = window::Windows::serve(window::APP_ID, cx);
+        let asking = cx.background_spawn(async move { windows.ask(config) });
+        cx.spawn(async move |cx: &mut AsyncApp| {
+            report_answer(asking.await);
+            cx.update(|cx| cx.quit());
+        })
+        .detach();
+    });
 }
 
 // --- the parent: the server, the sandbox and the checks ---
@@ -134,6 +164,16 @@ fn parent() -> SandboxResult {
         say(&format!("{:?}\n{}", channels.requests, channels.log_text));
     }
     check_channels(&channels)?;
+    let service = run_scenario(&sandbox, "service", &none, |_, _, _| Ok(()))
+        .map_err(|error| format!("window service: {error}{}", sandbox.logs()))?;
+    check_channels(&service)?;
+    let closed = run_scenario(&sandbox, "close", &none, close_window)
+        .map_err(|error| format!("window service close: {error}{}", sandbox.logs()))?;
+    check(
+        closed.answer == "answer closed",
+        "the service reports a user-closed window",
+        &closed,
+    )?;
     let gaps = run_scenario(&sandbox, "gaps", &none, |_, _, _| Ok(()))
         .map_err(|error| format!("gaps: {error}{}", sandbox.logs()))?;
     if std::env::var_os("TEAMS_SIGNIN_TEST_DUMP").is_some() {
@@ -507,6 +547,7 @@ fn kill_web_processes(sandbox: &Sandbox, running: &mut Running, server: &Server)
     if !windows.contains(window::APP_ID) {
         return Err(format!("no window with the app id {}: {windows}", window::APP_ID).into());
     }
+    exercise_input(sandbox, server)?;
     keep_screenshot(sandbox)?;
     let web_processes: Vec<u32> = descendants(running.pid())
         .into_iter()
@@ -524,6 +565,74 @@ fn kill_web_processes(sandbox: &Sandbox, running: &mut Running, server: &Server)
             return Err(format!("web process {pid} couldn't be killed").into());
         }
     }
+    Ok(())
+}
+
+fn exercise_input(sandbox: &Sandbox, server: &Server) -> SandboxResult {
+    use ui_sandbox::input::{keys, parse_key};
+    let mut input = sandbox.input()?;
+    input.type_text("synthetic")?;
+    if wait_until(WAIT, || {
+        server
+            .requests()
+            .iter()
+            .any(|(_, path)| path == "/report?typed=synthetic")
+            .then_some(())
+    })
+    .is_none()
+    {
+        return Err("the sign-in form did not receive keyboard input".into());
+    }
+    for spec in ["ctrl+a", "ctrl+c", "ctrl+x"] {
+        let (modifiers, key) = parse_key(spec, input.keymap()).ok_or("unknown synthetic shortcut")?;
+        input.key_with(&modifiers, key)?;
+    }
+    if wait_until(WAIT, || {
+        server
+            .requests()
+            .iter()
+            .any(|(_, path)| path == "/report?typed=")
+            .then_some(())
+    })
+    .is_none()
+    {
+        return Err("the sign-in form did not receive cut".into());
+    }
+    let before_paste = server.requests().len();
+    let (modifiers, key) = parse_key("ctrl+v", input.keymap()).ok_or("unknown paste shortcut")?;
+    input.key_with(&modifiers, key)?;
+    if wait_until(WAIT, || {
+        server
+            .requests()
+            .iter()
+            .skip(before_paste)
+            .any(|(_, path)| path == "/report?typed=synthetic")
+            .then_some(())
+    })
+    .is_none()
+    {
+        return Err("the sign-in form did not receive pasted text".into());
+    }
+    input.key(keys::LEFT)?;
+    input.key(keys::RIGHT)?;
+    input.move_to(80, 80)?;
+    input.click(80, 80, keys::BTN_LEFT)?;
+    Ok(())
+}
+
+fn close_window(sandbox: &Sandbox, _: &mut Running, server: &Server) -> SandboxResult {
+    if wait_until(RUN, || {
+        server
+            .requests()
+            .iter()
+            .any(|(_, path)| path == "/report?ready=1")
+            .then_some(())
+    })
+    .is_none()
+    {
+        return Err("the service's page never became ready".into());
+    }
+    sandbox.niri_msg(&["action", "close-window"])?;
     Ok(())
 }
 
@@ -729,9 +838,11 @@ fn route(path: &str, port: u16, hosts: &Hosts) -> Response {
         "/authorize" if path.contains("scenario=remote") => page(&remote_page(http)),
         "/authorize" if path.contains("scenario=crash") => page(
             "<div style=\"font-family: sans-serif; margin: 48px 40px\"><h2>Sign in</h2>\
-                 <input style=\"width: 100%; font-size: 16px\" placeholder=\"someone@example.test\">\
+                 <input autofocus style=\"width: 100%; font-size: 16px\" placeholder=\"someone@example.test\">\
                  <p><button>Next</button></p></div>\
-                 <script>setTimeout(() => fetch('/report?ready=1').catch(() => {}), 1000);</script>",
+                 <script>document.querySelector('input').addEventListener('input', e => \
+                 fetch('/report?typed=' + encodeURIComponent(e.target.value)).catch(() => {}));\
+                 setTimeout(() => fetch('/report?ready=1').catch(() => {}), 1000);</script>",
         ),
         "/authorize" => page(&gaps_page()),
         "/gap-http" => redirect("302 Found", &format!("http://{http}/gap-http-target")),

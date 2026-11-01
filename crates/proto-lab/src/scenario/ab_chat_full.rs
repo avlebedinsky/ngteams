@@ -40,7 +40,7 @@ use crate::browser::Media;
 use crate::classify::strict_json;
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
 use crate::fence_http::without_query;
-use crate::session::{LabSession, SessionOptions};
+use crate::session::{LabSession, SessionError, SessionOptions};
 
 use super::ab_chat::{
     self, COMPOSE, DELIVERY, EXPECTED_FORCED, chat_in_url, chat_link, chat_requests, chat_url, deny_probes, enforce,
@@ -146,6 +146,17 @@ impl Writes {
 /// When the run can't start: no lab config, no Chrome, no fence, a browser that can't be armed.
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
     let config = LabConfig::load(&LabLocations::from_env()?)?;
+    run_with(&config, options, async |alias, options| {
+        LabSession::open_with(paths, alias, options).await
+    })
+    .await
+}
+
+async fn run_with(
+    config: &LabConfig,
+    options: RunOptions,
+    mut open: impl AsyncFnMut(Alias, SessionOptions) -> Result<LabSession, SessionError>,
+) -> Result<ScenarioReport, ScenarioError> {
     let session_options = SessionOptions {
         live_members: true,
         capture: Some(ScenarioName::AbChatFull.as_str().to_owned()),
@@ -155,8 +166,8 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         user_agent: None,
         ..SessionOptions::fail_closed()
     };
-    let mut a = LabSession::open_with(paths, Alias::A, session_options.clone()).await?;
-    let mut b = match LabSession::open_with(paths, Alias::B, session_options).await {
+    let a = open(Alias::A, session_options.clone()).await?;
+    let b = match open(Alias::B, session_options).await {
         Ok(b) => b,
         Err(error) => {
             // a's browser goes down whatever happened
@@ -164,27 +175,38 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
             return Err(error.into());
         }
     };
-    let mut report = ScenarioReport::new(ScenarioName::AbChatFull);
     let nonce = nonce();
-    // before a's page loads: the client sends an earlier run's unsent probe again as soon as it can
-    if let Err(error) = deny_probes(&a, Some(&probe_text(&nonce))) {
-        report.failures.push(error.to_string());
-    }
     let mri = |alias| config.account(alias).mri.clone().unwrap_or_default();
     let chat_id = one_to_one_id(&mri(Alias::A), &mri(Alias::B));
-    let policy = ab_chat::policy(chat_id.as_deref()).unwrap_or_else(|error| {
-        report
-            .failures
-            .push(format!("can't tell the a–b chat in a URL: {error}"));
-        DenyPolicy::Reviewed(Review::new().expecting_forced(&EXPECTED_FORCED))
-    });
     let full = Full {
         mri_a: mri(Alias::A),
         mri_b: mri(Alias::B),
         nonce: nonce.clone(),
         texts: Texts::new(&nonce),
     };
-    if let Err(error) = full.run(chat_id.as_deref(), &mut a, &mut b, &mut report, options).await {
+    Ok(run_sessions(&full, chat_id.as_deref(), options, a, b).await)
+}
+
+/// Runs and settles both already-armed pages with the same forced probes and report policy.
+async fn run_sessions(
+    full: &Full,
+    chat_id: Option<&str>,
+    options: RunOptions,
+    mut a: LabSession,
+    mut b: LabSession,
+) -> ScenarioReport {
+    let mut report = ScenarioReport::new(ScenarioName::AbChatFull);
+    // before a's page loads: the client sends an earlier run's unsent probe again as soon as it can
+    if let Err(error) = deny_probes(&a, Some(&probe_text(&full.nonce))) {
+        report.failures.push(error.to_string());
+    }
+    let policy = ab_chat::policy(chat_id).unwrap_or_else(|error| {
+        report
+            .failures
+            .push(format!("can't tell the a–b chat in a URL: {error}"));
+        DenyPolicy::Reviewed(Review::new().expecting_forced(&EXPECTED_FORCED))
+    });
+    if let Err(error) = full.run(chat_id, &mut a, &mut b, &mut report, options).await {
         report.failures.push(error.to_string());
         for (alias, session) in [(Alias::A, &a), (Alias::B, &b)] {
             if let Some(note) = save_screenshot_as(alias, session, "failure.png").await {
@@ -196,7 +218,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
     for (alias, session) in [(Alias::A, a), (Alias::B, b)] {
         report.close_account(alias, session, &policy).await;
     }
-    Ok(report)
+    report
 }
 
 /// One run's accounts and texts.
@@ -750,3 +772,7 @@ async fn cancel_edit(drive: &mut Driver, text: &str) {
         let _ = drive.press("a cancels the edit", Key::ESCAPE).await;
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/scenario/ab_chat_full_driver_tests.rs"]
+pub(super) mod tests;

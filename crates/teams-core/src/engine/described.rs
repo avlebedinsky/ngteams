@@ -172,48 +172,5 @@ fn plain(event: &Event) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use log::{Level, LevelFilter};
-
-    use super::super::{EngineError, Event};
-    use super::logged;
-
-    fn failed() -> Event {
-        Event::Failed {
-            during: "indexing stored messages for search",
-            error: EngineError::Deleted {
-                message: "1700000000000".to_owned(),
-            },
-        }
-    }
-
-    #[test]
-    fn a_failure_is_logged_at_warn_and_an_info_event_isn_t() {
-        let (level, line) = logged(&failed(), LevelFilter::Warn).expect("a warning at warn");
-        assert_eq!(level, Level::Warn);
-        assert!(line.starts_with("failed indexing stored messages for search"), "{line}");
-        assert!(logged(&Event::Teams, LevelFilter::Warn).is_none());
-        assert_eq!(
-            logged(&Event::Teams, LevelFilter::Info).map(|(level, _)| level),
-            Some(Level::Info)
-        );
-    }
-
-    #[test]
-    fn a_presence_change_is_logged_at_info_by_mri_and_availability() {
-        let event = Event::Presence {
-            mri: "8:orgid:00000000-0000-0000-0000-00000000000b".to_owned(),
-            availability: crate::presence::Availability::Away,
-        };
-        let (level, line) = logged(&event, LevelFilter::Info).expect("a line at info");
-        assert_eq!(level, Level::Info);
-        assert_eq!(line, "presence of 8:orgid:00000000-0000-0000-0000-00000000000b: Away");
-        assert!(logged(&event, LevelFilter::Warn).is_none());
-    }
-
-    #[test]
-    fn nothing_is_logged_below_the_event_s_level() {
-        assert!(logged(&failed(), LevelFilter::Error).is_none());
-        assert!(logged(&failed(), LevelFilter::Off).is_none());
-    }
-}
+#[path = "../../tests/support/described.rs"]
+mod tests;

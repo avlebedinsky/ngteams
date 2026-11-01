@@ -40,6 +40,7 @@ fn the_run_notes_a_native_client_s_summary_lines_only() {
         "tone hz=440 heard=true seconds=12.0 first_ms=900 peak=0.12",
         "echo heard=false",
         "devices microphone_opened_ms=1 speaker_opened_ms=2",
+        "samples microphone_started_ms=3 speaker_started_ms=4",
         "1792 call_answer call=1",
         "1792 ring_ended call=1 code=0 phrase=\"x\"",
         "1792 camera_on call=1",

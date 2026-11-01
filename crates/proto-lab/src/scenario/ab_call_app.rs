@@ -30,9 +30,9 @@ use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
 use crate::session::{LabSession, SessionOptions};
 
 use super::ab_call::{
-    CONNECT_WAIT, CallStep, CalleeRole, EarlierRings, HANG_UP_CSS, INCOMING_CALL, Modality, RunCall, back_to_chat,
-    check_ring, hang_up_page, judge_callee, mri, note_microphone, place_call, policy, stand_up_calling,
-    switch_microphone, wait_calling_socket, watch_controls,
+    CONNECT_WAIT, CallPauses, CallStep, CalleeRole, EarlierRings, HANG_UP_CSS, INCOMING_CALL, Modality, RunCall,
+    back_to_chat, check_ring, hang_up_page, judge_callee, mri, note_microphone, place_call, policy,
+    stand_up_calling_with, switch_microphone, wait_calling_socket, watch_controls,
 };
 use super::ab_call_native::{ANSWER, hear_on_page, now_ms, see_on_page};
 use super::ab_chat::{EARLIER_RUN_PROBE, chat_link, load_at, probe_rules, save_screenshot, setup};
@@ -63,6 +63,32 @@ pub const MIC_TRIES: usize = 3;
 const MIC_WAIT: Duration = Duration::from_secs(5);
 /// A level of the page's own microphone (WebRTC's `media-source` `audioLevel`, 0–1) at which it plays the tone.
 pub const MIC_SOUNDS: f64 = 0.05;
+
+/// Existing live waits, carried by the concrete-session driver so offline pages need no recording pauses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Pauses {
+    calling: CallPauses,
+    ring: Duration,
+    app_hold: Duration,
+    answer: Duration,
+    page_hold: Duration,
+    connect: Duration,
+    microphone: Duration,
+}
+
+impl Default for Pauses {
+    fn default() -> Self {
+        Self {
+            calling: CallPauses::default(),
+            ring: APP_RING_WAIT,
+            app_hold: APP_HOLD,
+            answer: ANSWER_WAIT,
+            page_hold: PAGE_HOLD,
+            connect: CONNECT_WAIT,
+            microphone: MIC_WAIT,
+        }
+    }
+}
 
 /// Whether the capture's `text` holds a statistics report of the page's own audio source at [`MIC_SOUNDS`] or louder:
 /// what its microphone sends into the call.
@@ -132,24 +158,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         caller: mri_a.clone(),
         group_chat: None,
     };
-    let outcome = match options.call {
-        CallStep::Place => place(&mut session, &mri_a, options, &mut report).await.map(|()| None),
-        _ => answer(&mut session, (&call, &mri_b), options, &mut report).await,
-    };
-    let rang = match outcome {
-        Ok(rang) => rang,
-        Err(error) => {
-            report.failures.push(error.to_string());
-            if let Some(note) = save_screenshot(Alias::B, &session).await {
-                report.notes.push(note);
-            }
-            None
-        }
-    };
-    if hang_up_page(Alias::B, &session, &mut report).await.unwrap_or(false) {
-        report.notes.push("b: hung up at the run's end".to_owned());
-    }
-    progress("ended");
+    let rang = drive(&mut session, (&call, &mri_b), options, &mut report, &Pauses::default()).await;
     let dir = session.capture_dir().map(Path::to_path_buf);
     report.close_account(Alias::B, session, &policy(forced)).await;
     if let Some(dir) = dir {
@@ -159,17 +168,49 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
     Ok(report)
 }
 
+/// Drives an already armed page; browser admission, forced rules and capture closing stay in `run`.
+async fn drive(
+    session: &mut LabSession,
+    (call, mri_b): (&RunCall, &str),
+    options: RunOptions,
+    report: &mut ScenarioReport,
+    pauses: &Pauses,
+) -> Option<u64> {
+    let outcome = match options.call {
+        CallStep::Place => place(session, &call.caller, options, report, pauses)
+            .await
+            .map(|()| None),
+        _ => answer(session, (call, mri_b), options, report, pauses).await,
+    };
+    let rang = match outcome {
+        Ok(rang) => rang,
+        Err(error) => {
+            report.failures.push(error.to_string());
+            if let Some(note) = save_screenshot(Alias::B, session).await {
+                report.notes.push(note);
+            }
+            None
+        }
+    };
+    if hang_up_page(Alias::B, session, report).await.unwrap_or(false) {
+        report.notes.push("b: hung up at the run's end".to_owned());
+    }
+    progress("ended");
+    rang
+}
+
 /// The page loaded at the a–b chat with its calling stack up, its ring controls watched.
 async fn stand_up(
     session: &mut LabSession,
     mri_a: &str,
     options: RunOptions,
     report: &mut ScenarioReport,
+    pauses: &Pauses,
 ) -> Result<(), ScenarioError> {
     load_at(Alias::B, session, &chat_link(mri_a), options.load_timeout).await?;
     size_page(session).await?;
     report.notes.push("b: the web client loaded at the a-b chat".to_owned());
-    stand_up_calling(Alias::B, &mut session.driver(), report).await?;
+    stand_up_calling_with(Alias::B, &mut session.driver(), report, pauses.calling).await?;
     back_to_chat(Alias::B, &mut session.driver(), report).await?;
     wait_calling_socket(Alias::B, session, report).await?;
     watch_controls(Alias::B, session).await
@@ -181,13 +222,14 @@ async fn answer(
     (call, mri_b): (&RunCall, &str),
     options: RunOptions,
     report: &mut ScenarioReport,
+    pauses: &Pauses,
 ) -> Result<Option<u64>, ScenarioError> {
-    stand_up(session, &call.caller, options, report).await?;
+    stand_up(session, &call.caller, options, report, pauses).await?;
     let since = now_ms();
     progress("ready");
     session
         .driver()
-        .wait_for("b shows a's incoming call", INCOMING_CALL, APP_RING_WAIT)
+        .wait_for("b shows a's incoming call", INCOMING_CALL, pauses.ring)
         .await?;
     report
         .notes
@@ -207,13 +249,14 @@ async fn answer(
     report.notes.push(format!("b: clicked answer at {}", now_ms()));
     session
         .driver()
-        .wait_for("b's call screen", HANG_UP, CONNECT_WAIT)
+        .wait_for("b's call screen", HANG_UP, pauses.connect)
         .await?;
-    in_call(session, CallStep::Answer, report).await?;
-    if !screen_gone_within(session, APP_HOLD).await {
-        report
-            .failures
-            .push(format!("a didn't hang up within {APP_HOLD:?} of b's seeing its video"));
+    in_call(session, CallStep::Answer, report, pauses).await?;
+    if !screen_gone_within(session, pauses.app_hold).await {
+        report.failures.push(format!(
+            "a didn't hang up within {:?} of b's seeing its video",
+            pauses.app_hold
+        ));
     }
     Ok(Some(since))
 }
@@ -224,23 +267,24 @@ async fn place(
     mri_a: &str,
     options: RunOptions,
     report: &mut ScenarioReport,
+    pauses: &Pauses,
 ) -> Result<(), ScenarioError> {
-    stand_up(session, mri_a, options, report).await?;
+    stand_up(session, mri_a, options, report, pauses).await?;
     back_to_chat(Alias::B, &mut session.driver(), report).await?;
     progress("ready");
     place_call((Alias::B, session), Modality::Audio, report).await?;
     session
         .driver()
-        .wait_for("b's call screen, a having answered", HANG_UP, ANSWER_WAIT)
+        .wait_for("b's call screen, a having answered", HANG_UP, pauses.answer)
         .await?;
-    in_call(session, CallStep::Place, report).await?;
-    linger(session, PAGE_HOLD).await;
+    in_call(session, CallStep::Place, report, pauses).await?;
+    linger(session, pauses.page_hold).await;
     if !hang_up_page(Alias::B, session, report).await? {
         report
             .failures
             .push("b's call screen was gone before b hung up".to_owned());
     }
-    if !screen_gone_within(session, CONNECT_WAIT).await {
+    if !screen_gone_within(session, pauses.connect).await {
         report
             .failures
             .push("b's call screen stayed after b hung up".to_owned());
@@ -250,7 +294,12 @@ async fn place(
 
 /// In the call: says `in-call`, then must hear a's tone (`heard`) and decode a's video once its own camera is on
 /// (`saw`); a step that doesn't come is a failure of the run, and the run goes on.
-async fn in_call(session: &mut LabSession, step: CallStep, report: &mut ScenarioReport) -> Result<(), ScenarioError> {
+async fn in_call(
+    session: &mut LabSession,
+    step: CallStep,
+    report: &mut ScenarioReport,
+    pauses: &Pauses,
+) -> Result<(), ScenarioError> {
     report.notes.push(format!("b: in the call at {}", now_ms()));
     progress("in-call");
     let from = super::ab_call_native::capture_len(session);
@@ -259,7 +308,7 @@ async fn in_call(session: &mut LabSession, step: CallStep, report: &mut Scenario
     if report.failures.len() == failures {
         progress("heard");
     }
-    sound_microphone(session, (from, step), report).await?;
+    sound_microphone(session, (from, step), report, pauses.microphone).await?;
     let failures = report.failures.len();
     see_on_page(session, from, report).await?;
     if report.failures.len() == failures {
@@ -278,6 +327,7 @@ async fn sound_microphone(
     session: &mut LabSession,
     (from, step): (u64, CallStep),
     report: &mut ScenarioReport,
+    microphone_wait: Duration,
 ) -> Result<(), ScenarioError> {
     let Some(file) = session.capture_dir().map(|dir| dir.join(EVENTS_FILE)) else {
         return Err(setup("the run records no capture to read the microphone in".to_owned()));
@@ -288,7 +338,7 @@ async fn sound_microphone(
         }
         note_microphone(Alias::B, session, report).await;
         let since = super::ab_call_native::capture_len(session).max(from);
-        let deadline = tokio::time::Instant::now() + MIC_WAIT;
+        let deadline = tokio::time::Instant::now() + microphone_wait;
         while tokio::time::Instant::now() < deadline {
             linger(session, Duration::from_millis(500)).await;
             if microphone_sounds(&super::ab_call_native::read_from(&file, since)) {
@@ -338,3 +388,7 @@ fn judge(step: CallStep, (call, mri_b, rang): (&RunCall, &str, Option<u64>), dir
         judge_callee((Alias::B, mri_b, CalleeRole::Other), call, rang, dir, report);
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/scenario/ab_call_app_driver_tests.rs"]
+mod driver_tests;

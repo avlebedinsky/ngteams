@@ -423,10 +423,11 @@ offsets, and the round trips' p50, p95 and max. It exits 0 only when the call co
 for `echo`, the tone came back. It answers nothing. `--bursts` plays the tone in bursts (1.6 s on, 0.9 s off, a lab
 browser's page hears those) instead of keyed, `--tone-seconds` cuts the tone short (silence after it: a long call's
 files stay small), `--hear` may be given more than once (one report each, a group call's every other tone), and an
-offset or round trip of a far end in another process may be negative (its devices opened after this one's: line it up
-with the far end's `devices` line); after the call it also prints `tone` (how much of the tone at `--hear`
-the recording holds, however it was keyed) and `devices` (when the microphone and the speaker opened, by the wall
-clock: a far end's recording lines up with the tone sent by them, two processes apart). `join` (M3 Task 16) waits
+offset or round trip of a far end in another process may be negative. Line up the files with the far end's
+`samples` line (`microphone_started_ms` and `speaker_started_ms`, wall-clock times of the first successful source
+frame and sink write). Device construction may take time before either stream starts, so the separate `devices`
+line records opening diagnostics and is not a sample origin. After the call it also prints `tone` (how much of the
+tone at `--hear` the recording holds, however it was keyed). `join` (M3 Task 16) waits
 `--ring-wait` seconds for an invitation to the group chat's running call to ring here, lets it ring out unanswered,
 then joins the running call (a join is judged like a start in that chat) and holds it as `call` does. `watch
 --answer-lab-calls` registers the calling stack too and answers each call the engine offers: only an invitation from
@@ -799,10 +800,11 @@ starts. Serial execution avoids that overlap in coverage runs; ordinary `cargo t
 concurrency. `--test-threads N` accepts a positive integer to change the harness concurrency; concurrency exercised
 inside a test stays part of that test.
 
-`coverage.toml` holds the 90% target and the measured baseline floors. `teams-store`, `teams-log`, `fixture-guard`,
-`teams-trouter`, `teams-call` and `teams-auth` have baselines so far;
-other crates fail the gate until measured. Raise floors as tests improve; never lower them or exclude runnable code
-to pass. No CI pipeline is configured in this repository, so these are local gates. Running the script without
+`coverage.toml` holds the 90% target and measured standalone baseline floors for all 21 runtime crates. Raise floors
+as tests improve; never lower them or exclude runnable code to pass. Baselines are measured with each crate selected alone. Some standalone floors remain below 90%; the full
+workspace also exercises libraries through their consumers' integration suites and can cover more code.
+`--require-target` always enforces 90% for every selected crate, independently of those baseline floors.
+No CI pipeline is configured in this repository, so these are local gates. Running the script without
 `-p` selects all 21 crates with runtime code, including the lab and test-support tooling. Generated WPE bindings,
 the standalone video spike and `fence-seal` (a compile-test harness with a documentation-only library) are excluded.
 `fence-seal`'s compile checks still run through the normal test gate. Third-party code and tests outside `src/` do
@@ -822,7 +824,9 @@ Continuous reports go to `target/coverage/continuous/<selection>/llvm.json` and 
 in `target/coverage-continuous-build`. Ordinary mode keeps separate reports in `target/coverage/<selection>/` and builds
 in `target/coverage-build`. One crate uses its name, the full workspace uses `all`, and long partial selections use a
 short hash. The summary records every selected package and ranks source files by uncovered lines, functions and regions.
-Measurements serialize on one lock across both modes. `--webrtc-cache DIR` passes an existing SDK with `include/` and
+Measurements serialize on one lock across both modes. Before each run, the wrapper clears workspace artifacts from
+the instrumentation build so LLVM cannot count obsolete code embedded in an unselected consumer; third-party builds
+remain cached. `--webrtc-cache DIR` passes an existing SDK with `include/` and
 `lib/libwebrtc.a` to the upstream build as `LK_CUSTOM_WEBRTC`; relative paths resolve from the caller's directory.
 Choose the SDK version and platform matching the locked dependency. The wrapper does not select or download an SDK
 itself, and preserves an existing `LK_CUSTOM_WEBRTC` when this option is absent. `--report-only` rechecks the selected
@@ -844,6 +848,11 @@ or other optional features still needs appropriate mock-backed variant measureme
 The wrapper never enables `live` and removes live-test and external TURN-server environment variables. Browser and
 GUI tests need the local dependencies below; the wrapper sets `PROTO_LAB_REQUIRE_CHROME=1 GPUI_SMOKE_REQUIRE=1`
 so missing dependencies fail rather than skip tests. Never run tenant activity for coverage.
+
+Coverage builds also make the profiling output directory writable inside WebKit's subprocess sandbox; otherwise the
+extension cannot persist its profiles in the host's output directory. Ordinary builds do not add this
+directory. The extension's standalone suite shares the sign-in window's offline sandbox scenarios to exercise its real
+WebKit callbacks, alongside socket, protocol and GLib boundary tests.
 
 The automatic `teams-auth` private-keyring test requires `/usr/bin/dbus-run-session`, `/usr/bin/gnome-keyring-daemon`
 and `/usr/bin/kill`. It starts a private bus and keyring service with temporary HOME/XDG directories, without using
@@ -889,6 +898,11 @@ inside the dir `UI_SANDBOX_DIR` names, which only the sandbox sets. The video gr
 runs in the same sandbox; its measurement is ignored by default and run by hand with a release build:
 `cargo test --release -p gpui-video --test bench -- --ignored --nocapture`. Results and the decision are in
 `docs/spikes/gpui-video.md`.
+
+The standalone WPE native engine test runs worker and in-process SHM modes and a DMA worker inside `ui-sandbox`,
+with disposable HOME/XDG directories and synthetic URI-scheme pages. Its DMA mode requires a readable
+`/dev/dri/renderD128` with a working EGL/DRM driver; it asserts actual DMA frames before testing SHM fallback.
+It exercises no external page or network service.
 
 ### Known flakes under load
 

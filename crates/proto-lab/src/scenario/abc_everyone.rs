@@ -120,8 +120,8 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         user_agent: None,
         ..SessionOptions::fail_closed()
     };
-    let mut a = LabSession::open_with(paths, Alias::A, session_options.clone()).await?;
-    let mut b = match LabSession::open_with(paths, Alias::B, session_options).await {
+    let a = LabSession::open_with(paths, Alias::A, session_options.clone()).await?;
+    let b = match LabSession::open_with(paths, Alias::B, session_options).await {
         Ok(b) => b,
         Err(error) => {
             let _ = a.close().await;
@@ -129,20 +129,22 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         }
     };
     let nonce = nonce();
-    for rule in abc_chat::forced_denies(&nonce) {
+    Ok(drive(&group, &nonce, options, a, b).await)
+}
+
+/// Runs and closes the already-open armed sessions; startup above remains responsible for eligibility and opening.
+async fn drive(group: &str, nonce: &str, options: RunOptions, mut a: LabSession, mut b: LabSession) -> ScenarioReport {
+    let mut report = ScenarioReport::new(ScenarioName::AbcEveryone);
+    for rule in abc_chat::forced_denies(nonce) {
         a.force_deny(rule);
     }
-    let policy = abc_chat::policy(Some(&group)).unwrap_or_else(|error| {
+    let policy = abc_chat::policy(Some(group)).unwrap_or_else(|error| {
         report
             .failures
             .push(format!("can't tell the a-b-c chat in a URL: {error}"));
         super::DenyPolicy::Reviewed(super::expected::Review::new().expecting_forced(&abc_chat::EXPECTED_FORCED))
     });
-    let steps = Steps {
-        group: &group,
-        nonce: &nonce,
-        options,
-    };
+    let steps = Steps { group, nonce, options };
     if let Err(error) = steps.run(&mut a, &mut b, &mut report).await {
         report.failures.push(error.to_string());
         for (alias, session) in [(Alias::A, &a), (Alias::B, &b)] {
@@ -154,7 +156,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
     for (alias, session) in [(Alias::A, a), (Alias::B, b)] {
         report.close_account(alias, session, &policy).await;
     }
-    Ok(report)
+    report
 }
 
 struct Steps<'a> {
@@ -376,3 +378,7 @@ pub fn judged_as_the_chat(url: &str, body: &str, group: &str) -> Result<(), Stri
         other => Err(format!("the lab rule reads it as {other:?}")),
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/scenario/abc_everyone_driver_tests.rs"]
+mod tests;

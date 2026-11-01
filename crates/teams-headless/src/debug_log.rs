@@ -2,7 +2,7 @@
 //! crates (`teams_*`: Trouter's packets and deliveries by kind, never a payload); nothing else is shown, and without
 //! the variable nothing is logged at all. `log` is capped at `debug` at compile time (`teams-trouter` takes it with
 //! `max_level_debug`, and log's features unify), so no crate's `trace!` (tungstenite's frames, the authentication
-//! frame's token with them) exists in this binary to log. Each line goes through [`visible`].
+//! frame's token with them) exists in this binary to log. Each line is redacted by the same final pass as the app's log, then goes through [`visible`].
 
 use std::io::Write as _;
 
@@ -24,12 +24,12 @@ pub fn shown(metadata: &Metadata<'_>, level: Level) -> bool {
 /// One log line: `<ms> <level> <target>: <message>`, [`visible`].
 #[must_use]
 pub fn line(at_ms: i64, record: &Record<'_>) -> String {
-    visible(&format!(
+    visible(&teams_log::redact::line(&format!(
         "{at_ms} {} {}: {}",
         record.level(),
         record.target(),
         record.args()
-    ))
+    )))
 }
 
 /// The log; its level is `log`'s max level, set once in [`init_from_env`].

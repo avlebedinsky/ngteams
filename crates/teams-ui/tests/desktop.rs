@@ -437,3 +437,110 @@ fn the_chat_shown_in_the_focused_window_never_notifies() {
     assert_eq!(shown.len(), 2);
     assert_eq!(shown[1].conversation, AB);
 }
+
+#[test]
+fn a_channel_opened_from_the_desktop_reuses_the_window_and_never_offers_a_composer() {
+    let d = OnDesktop::start();
+    d.rig.cx.update(|cx| {
+        d.desktop
+            .update(cx, |desktop, cx| desktop.open_channel(CHANNEL.to_owned(), cx));
+    });
+    d.rig.cx.run_until_parked();
+    assert_eq!(d.main(), Some(Main::Channel(CHANNEL.to_owned())));
+    let first = d.window().unwrap();
+    let again = d.open();
+    assert_eq!(first, again);
+    assert!(!d.rig.cx.read(|cx| d.desktop.read(cx).in_tray()));
+    let mut visual = gpui::VisualTestContext::from_window(first.into(), &d.rig.cx);
+    visual.update(|window, cx| {
+        let _ = window.draw(cx);
+    });
+    assert!(visual.debug_bounds("channel-read-only").is_some());
+    assert!(visual.debug_bounds("compose").is_none());
+    d.rig.cx.update(|cx| {
+        d.desktop.update(cx, |desktop, cx| {
+            desktop.open_channel_of(LAB_A, CHANNEL.to_owned(), cx);
+            desktop.set_in_tray(false, cx);
+        });
+    });
+    assert_eq!(d.window(), Some(first));
+    assert!(d.rig.core.actions.lock().unwrap().is_empty());
+}
+
+#[test]
+fn an_account_added_to_an_open_window_keeps_the_active_shell_and_inherits_the_notification_server() {
+    use teams_ui::accounts::AccountParts;
+    use teams_ui::models::Models;
+
+    let d = OnDesktop::start();
+    let window = d.open();
+    let icon = Arc::new(FakeIcon::default());
+    d.rig.cx.update(|cx| {
+        d.desktop.update(cx, |desktop, cx| {
+            desktop.use_server(d.server.clone(), cx);
+            desktop.tray().update(cx, |tray, cx| tray.set_icon(icon.clone(), cx));
+        });
+    });
+    let core = Arc::new(common::FakeCore {
+        me: LAB_B.to_owned(),
+        ..common::FakeCore::default()
+    });
+    let models = d.rig.cx.update(Models::new);
+    let second = AccountParts {
+        core,
+        models,
+        name: "Synthetic second account".into(),
+        detail: "second@example.test".into(),
+    };
+    d.rig.cx.update(|cx| {
+        d.desktop.update(cx, |desktop, cx| {
+            desktop.add_account(second.clone(), cx);
+            desktop.add_account(second, cx);
+        });
+    });
+    d.rig.cx.run_until_parked();
+    let active = d.rig.cx.update(|cx| {
+        let root = window::content(window, cx).unwrap();
+        root.read(cx).shell_in(cx).unwrap().read(cx).account().to_owned()
+    });
+    assert_eq!(active, LAB_A);
+    assert_eq!(
+        d.rig.cx.read(|cx| d.desktop.read(cx).accounts().read(cx).tiles().len()),
+        2
+    );
+    assert!(d.rig.cx.read(|cx| d.desktop.read(cx).notifier_of(LAB_B).is_some()));
+    d.rig.cx.update(|cx| {
+        d.desktop.update(cx, |desktop, cx| {
+            desktop.remove_account("missing", cx);
+            desktop.remove_account(LAB_A, cx);
+        });
+    });
+    d.rig.cx.run_until_parked();
+    assert_eq!(
+        d.rig.cx.read(|cx| d.desktop.read(cx).accounts().read(cx).tiles().len()),
+        1
+    );
+    assert!(d.rig.cx.read(|cx| d.desktop.read(cx).tray().read(cx).has_icon()));
+    assert!(d.rig.cx.read(|cx| d.desktop.read(cx).notifier_of(LAB_A).is_none()));
+    assert_eq!(d.window(), Some(window));
+    assert!(d.asked.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_refused_bus_connection_reports_why_and_leaves_the_open_window_usable() {
+    use futures_util::FutureExt as _;
+    let d = OnDesktop::start();
+    let window = d.open();
+    let task = d.rig.cx.update(|cx| {
+        d.desktop.update(cx, |desktop, cx| {
+            desktop.connect(Err(teams_ui::bus::BusError::NotGiven), cx)
+        })
+    });
+    d.rig.cx.run_until_parked();
+    let problems = task.now_or_never().unwrap();
+    assert_eq!(problems.len(), 1);
+    assert!(problems[0].contains("no session bus was given"));
+    assert_eq!(d.window(), Some(window));
+    d.tray(TrayEvent::Open);
+    assert!(d.asked.lock().unwrap().is_empty());
+}

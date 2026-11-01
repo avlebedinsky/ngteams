@@ -32,6 +32,7 @@ ui-sandbox.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+gpui-pre = { workspace = true, features = ["test-support"] }
 serde_json.workspace = true
 # a fence.log that refuses every append (`FenceLog::from_writer`)
 teams-fence = { workspace = true, features = ["test-support"] }

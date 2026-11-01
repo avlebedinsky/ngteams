@@ -19,6 +19,8 @@ use teams_store::{
 use teams_ui::{Bridge, Core, EventSource, Models};
 use tokio::sync::mpsc;
 
+pub mod calendar;
+
 pub const LAB_A: &str = "8:orgid:00000000-0000-4000-8000-00000000000a";
 pub const LAB_B: &str = "8:orgid:00000000-0000-4000-8000-00000000000b";
 
@@ -133,6 +135,8 @@ pub struct FakeCore {
     pub held_calls: Mutex<Vec<Answer<CallId>>>,
     /// The app's read-only mode, as `Core::read_only` answers it.
     pub read_only: Mutex<bool>,
+    /// The scheduling tests' calendar service; its defaults match Core's empty, unsaved calendar.
+    pub calendar: Mutex<calendar::CalendarFake>,
 }
 
 impl Default for FakeCore {
@@ -185,12 +189,14 @@ impl Default for FakeCore {
             hold_calls: Mutex::new(false),
             held_calls: Mutex::default(),
             read_only: Mutex::new(false),
+            calendar: Mutex::default(),
         }
     }
 }
 
 /// The store's page of `messages` (the newest first) older than `before`: at most `limit`, with the cursor for the
 /// next when more are older.
+#[must_use]
 pub fn page_of(messages: &[Message], before: Option<&PageCursor>, limit: usize) -> MessagePage {
     let mut sorted: Vec<&Message> = messages.iter().collect();
     sorted.sort_by(|one, other| (other.arrival_time, &other.id).cmp(&(one.arrival_time, &one.id)));
@@ -216,6 +222,7 @@ fn locked<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 /// A made-up outbox row `id` of `kind` in `state`, with no conversation and an empty payload.
+#[must_use]
 pub fn outbox_row(id: i64, kind: OutboxKind, state: OutboxState) -> OutboxEntry {
     OutboxEntry {
         id,
@@ -285,6 +292,35 @@ impl FakeCore {
 }
 
 impl Core for FakeCore {
+    fn calendar(&self, start_ms: i64, end_ms: i64) -> Reply<Vec<teams_core::CalendarEvent>> {
+        locked(&self.calendar).read(start_ms, end_ms)
+    }
+
+    fn calendar_event(&self, id: String) -> Reply<teams_core::FullEvent> {
+        let mut calendar = locked(&self.calendar);
+        calendar.full_reads.push(id.clone());
+        Reply::ready(calendar.full.get(&id).cloned().ok_or(EngineError::CalendarUnread))
+    }
+
+    fn write_event(&self, write: teams_core::EventWrite) -> Reply<teams_core::EventWritten> {
+        locked(&self.calendar).write(write)
+    }
+
+    fn invitable(&self, query: String) -> Reply<Vec<teams_core::Invitable>> {
+        let mut calendar = locked(&self.calendar);
+        calendar.people_queries.push(query);
+        Reply::ready(Ok(calendar.people.clone()))
+    }
+
+    fn availability(
+        &self,
+        _: Vec<teams_core::EventAttendee>,
+        _: i64,
+        _: u32,
+    ) -> Reply<teams_core::MeetingAvailability> {
+        Reply::ready(Ok(locked(&self.calendar).availability.clone()))
+    }
+
     fn me(&self) -> &str {
         &self.me
     }
@@ -641,11 +677,15 @@ impl Rig {
     }
 
     /// Hands the bridge an event and lets the drain apply it.
+    ///
+    /// # Panics
+    /// The bridge has already stopped receiving events.
     pub fn send(&self, event: Event) {
         self.events.send(event).expect("the drain is listening");
         self.cx.run_until_parked();
     }
 
+    #[must_use]
     pub fn shutdowns(&self) -> usize {
         self.shutdowns.load(Ordering::SeqCst)
     }
@@ -656,10 +696,19 @@ impl Rig {
 pub struct Written(pub Arc<Mutex<Vec<u8>>>);
 
 impl Written {
+    /// The trace as UTF-8.
+    ///
+    /// # Panics
+    /// A writer handed the trace bytes that aren't UTF-8.
     pub fn text(&self) -> String {
         String::from_utf8(self.0.lock().unwrap_or_else(PoisonError::into_inner).clone()).expect("UTF-8")
     }
 
+    #[must_use]
+    /// The trace's JSON records.
+    ///
+    /// # Panics
+    /// The trace isn't UTF-8 or one of its lines isn't a JSON record.
     pub fn lines(&self) -> Vec<serde_json::Value> {
         self.text()
             .lines()

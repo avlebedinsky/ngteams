@@ -72,6 +72,10 @@ pub mod load;
 pub mod own_presence;
 pub mod search;
 
+#[cfg(test)]
+#[path = "../../tests/support/scenario/test_page.rs"]
+pub(crate) mod test_page;
+
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;

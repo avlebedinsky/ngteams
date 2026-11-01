@@ -11,8 +11,11 @@ use std::sync::Arc;
 
 use clap::Parser as _;
 use gpui::{App, AppContext as _, AsyncApp, Entity, WindowingModes};
+#[cfg(not(test))]
 use ngteams::accounts::{self, Runner, Started};
-use ngteams::app::{self, Launch, SignInAgain};
+#[cfg(not(test))]
+use ngteams::app;
+use ngteams::app::{Launch, SignInAgain};
 use ngteams::calling::CallDevices;
 use ngteams::cli::{Cli, Command as Subcommand, ReadOnlyMode};
 use ngteams::descriptors::{adopt_socket, adopt_trace};
@@ -23,9 +26,24 @@ use teams_auth::secrets::LazyKeyring;
 use teams_fence::lab::LabLocations;
 use teams_fence::personal::{PersonalAccount, PersonalPaths};
 use teams_fence::{CallFloor, Fence};
-use teams_ui::account_prompt::{self, AccountPrompt, AccountPromptEvent};
+#[cfg(not(test))]
+use teams_ui::account_prompt;
+use teams_ui::account_prompt::{AccountPrompt, AccountPromptEvent};
 use teams_ui::window::PERSONAL_APP_ID;
 use teams_ui::{SettingsFile, ViewTrace};
+
+#[cfg(test)]
+#[path = "../tests/support/startup.rs"]
+mod startup_tests;
+#[cfg(test)]
+use startup_tests::accounts::{self, Runner, Started};
+#[cfg(test)]
+use startup_tests::{app, platform as gpui_platform, prompt as account_prompt, window_runner};
+
+#[cfg(not(test))]
+fn window_runner(runner: Runner) -> Runner {
+    runner
+}
 
 /// How the app ended.
 enum Outcome {
@@ -121,7 +139,7 @@ fn run(cli: &Cli) -> Result<Outcome, String> {
             sign_in_again: Rc::new(move |account| {
                 sign_in_again(again_setup.clone(), account.clone(), Rc::clone(&again_restart))
             }),
-            runner,
+            runner: window_runner(runner),
             read_only: false,
             trace: Arc::new(ViewTrace::off()),
         };
@@ -226,7 +244,7 @@ fn run_read_only(mode: &ReadOnlyMode) -> Result<Outcome, String> {
     let fence = Fence::open_personal(&setup.paths, &account.upn).map_err(|error| error.to_string())?;
     let engine = ngteams::engine::start_read_only(&setup.paths, &account, Arc::new(fence), secrets)
         .map_err(|error| format!("{}: {error}", account.upn))?;
-    let first = Started {
+    let first = ngteams::accounts::Started {
         account,
         engine,
         calls: None,
@@ -247,7 +265,7 @@ fn run_read_only(mode: &ReadOnlyMode) -> Result<Outcome, String> {
             bus: teams_ui::bus::address_from_env(),
             // it never signs in: a sign-out only says so
             sign_in_again: Rc::new(|_| Rc::new(|_| {})),
-            runner,
+            runner: window_runner(runner),
             read_only: true,
             trace: Arc::new(trace),
         };

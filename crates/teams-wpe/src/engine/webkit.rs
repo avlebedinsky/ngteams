@@ -798,6 +798,28 @@ impl WebContext {
         unsafe { from_glib_none(raw) }
     }
 
+    /// Lets instrumented extensions keep their counters outside `WebKit`'s private filesystem. This is compiled only
+    /// for coverage builds: ordinary engines never grant this additional writable path.
+    #[cfg(coverage)]
+    pub(crate) fn set_profiling_directory(&self) {
+        let directory = std::env::var_os("LLVM_PROFILE_FILE")
+            .and_then(|pattern| {
+                std::path::Path::new(&pattern)
+                    .parent()
+                    .map(std::path::Path::to_path_buf)
+            })
+            .filter(|directory| directory.is_absolute())
+            .and_then(|directory| directory.canonicalize().ok());
+        let Some(directory) = directory else {
+            return;
+        };
+        let path = c_string(&directory.to_string_lossy());
+        // SAFETY: a live context, before any web process starts, and a NUL-terminated path it copies.
+        unsafe {
+            webkit::webkit_web_context_add_path_to_sandbox(self.to_glib_none().0, path.as_ptr(), glib::ffi::GFALSE);
+        }
+    }
+
     /// Loads every module in `directory` into each web process the context starts from now on, handing each one
     /// `data` (a `GVariant` string) when it initializes, and makes each of `sandbox_paths` visible (read-only) inside
     /// the web processes' sandbox.

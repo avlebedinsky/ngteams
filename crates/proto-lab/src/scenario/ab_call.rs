@@ -65,7 +65,7 @@ use crate::classify::Classifier;
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
 use crate::fence_http::{Denial, DenyCause, ForcedDeny, without_query};
 use crate::fence_ws::delivery_of;
-use crate::session::{LabSession, SessionOptions, TEAMS_URL};
+use crate::session::{LabSession, SessionError, SessionOptions, TEAMS_URL};
 
 use super::ab_chat::{EARLIER_RUN_PROBE, chat_link, load_at, probe_rules, save_screenshot, save_screenshot_as, setup};
 use super::dsl::{Driver, Selector, js_string};
@@ -305,6 +305,43 @@ pub(crate) struct CallPlan {
     pub(crate) held_starts: &'static [Modality],
     pub(crate) step: CallStep,
     pub(crate) options: RunOptions,
+    /// Recording pauses between actions; the live defaults remain the documented scenario timings.
+    pub(crate) pauses: CallPauses,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CallPauses {
+    pub(crate) page_steady: Duration,
+    pub(crate) calling_warm: Duration,
+    pub(crate) before_cancel: Duration,
+    pub(crate) unanswered: Duration,
+    pub(crate) after_action: Duration,
+    pub(crate) after_ring: Duration,
+    pub(crate) video_for: Duration,
+    pub(crate) video_wait: Duration,
+    pub(crate) keep_alive_hold: Duration,
+    pub(crate) hold_check: Duration,
+    pub(crate) dropped_for: Duration,
+    pub(crate) after_drop: Duration,
+}
+
+impl Default for CallPauses {
+    fn default() -> Self {
+        Self {
+            page_steady: PAGE_STEADY,
+            calling_warm: CALLS_APP_WARM,
+            before_cancel: RING_BEFORE_CANCEL,
+            unanswered: UNANSWERED,
+            after_action: AFTER_ACTION,
+            after_ring: AFTER_RING,
+            video_for: VIDEO_FOR,
+            video_wait: VIDEO_WAIT,
+            keep_alive_hold: KEEP_ALIVE_HOLD,
+            hold_check: HOLD_CHECK,
+            dropped_for: DROPPED_FOR,
+            after_drop: AFTER_DROP,
+        }
+    }
 }
 
 /// Runs `ab-call` (see the module docs).
@@ -325,6 +362,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         held_starts: &[Modality::Audio, Modality::Video],
         step: options.call,
         options,
+        pauses: CallPauses::default(),
     };
     run_plan(paths, &plan).await
 }
@@ -374,7 +412,16 @@ pub(crate) async fn run_plan(paths: &LabPaths, plan: &CallPlan) -> Result<Scenar
             .chain(plan.callees.iter().map(|(alias, _)| *alias))
             .collect()
     };
-    let mut sessions = open_all(paths, &aliases, &options).await?;
+    let sessions = open_all(paths, &aliases, &options).await?;
+    Ok(run_sessions(plan, sessions, report).await)
+}
+
+/// Runs the opened pages and preserves diagnosis, hang-up and judgment after any phase failure.
+async fn run_sessions(
+    plan: &CallPlan,
+    mut sessions: Vec<(Alias, LabSession)>,
+    mut report: ScenarioReport,
+) -> ScenarioReport {
     for (_, session) in &sessions {
         // before the page loads: the client sends an earlier run's unsent probe again as soon as it can
         match probe_rules(None) {
@@ -390,7 +437,7 @@ pub(crate) async fn run_plan(paths: &LabPaths, plan: &CallPlan) -> Result<Scenar
     }
     close_all(sessions, plan, placed, &mut report).await;
     judge_held(plan.step, &mut report);
-    Ok(report)
+    report
 }
 
 /// A conversation's `leave`, as a URL pattern (`POST`): what a page that hangs up sends to leave the call.
@@ -541,9 +588,20 @@ async fn open_all(
     aliases: &[Alias],
     options: &SessionOptions,
 ) -> Result<Vec<(Alias, LabSession)>, ScenarioError> {
+    open_all_with(aliases, options, async |alias, options| {
+        LabSession::open_with(paths, alias, options).await
+    })
+    .await
+}
+
+async fn open_all_with(
+    aliases: &[Alias],
+    options: &SessionOptions,
+    mut open: impl AsyncFnMut(Alias, SessionOptions) -> Result<LabSession, SessionError>,
+) -> Result<Vec<(Alias, LabSession)>, ScenarioError> {
     let mut sessions: Vec<(Alias, LabSession)> = Vec::new();
     for alias in aliases {
-        match LabSession::open_with(paths, *alias, options.clone()).await {
+        match open(*alias, options.clone()).await {
             Ok(session) => sessions.push((*alias, session)),
             Err(error) => {
                 for (_, opened) in sessions {
@@ -614,10 +672,10 @@ impl CallPlan {
             size_page(session).await?;
             report.notes.push(format!("{alias}: the web client loaded"));
         }
-        stand_up_calling(CALLER, &mut caller.driver(), report).await?;
+        stand_up_calling_with(CALLER, &mut caller.driver(), report, self.pauses).await?;
         back_to_chat(CALLER, &mut caller.driver(), report).await?;
         for (alias, session) in callees.iter_mut() {
-            stand_up_calling(*alias, &mut session.driver(), report).await?;
+            stand_up_calling_with(*alias, &mut session.driver(), report, self.pauses).await?;
         }
         Ok(())
     }
@@ -643,15 +701,15 @@ impl CallPlan {
                 wait_ring_end(callees, RING_END, report).await;
             }
             None if self.step == CallStep::Cancel => {
-                linger(caller, RING_BEFORE_CANCEL).await;
+                linger(caller, self.pauses.before_cancel).await;
                 hang_up(caller, report).await?;
             }
             None => {
-                linger(caller, UNANSWERED).await;
+                linger(caller, self.pauses.unanswered).await;
                 hang_up(caller, report).await?;
             }
         }
-        linger(caller, AFTER_RING).await;
+        linger(caller, self.pauses.after_ring).await;
         note_ring_controls(callees, report).await;
         Ok(())
     }
@@ -692,12 +750,12 @@ impl CallPlan {
             self.step,
             CallStep::Answer | CallStep::Video | CallStep::Dropped | CallStep::KeepAlive
         ) {
-            converse(self.step, caller, callees, report).await?;
+            converse(self.step, caller, callees, report, self.pauses).await?;
         }
         if self.step == CallStep::Join {
             self.join_late(placed, callees, report).await?;
         }
-        linger(caller, AFTER_ACTION).await;
+        linger(caller, self.pauses.after_action).await;
         hang_up(caller, report).await
     }
 }
@@ -972,17 +1030,18 @@ async fn wait_held(caller: &mut LabSession, count: usize) -> Result<(), Scenario
 
 /// Starts the web client's calling stack in `alias`'s page: the Calls app starts it (the client defers it until then;
 /// `echo-call`'s step 2).
-pub(crate) async fn stand_up_calling(
+pub(crate) async fn stand_up_calling_with(
     alias: Alias,
     driver: &mut Driver,
     report: &mut ScenarioReport,
+    pauses: CallPauses,
 ) -> Result<(), ScenarioError> {
     // the client may load once more on its way to the origin it assigns the account: the app bar has to stay
     driver.wait_for("the Calls app", CALLS_APP, PAGE_OPEN).await?;
-    tokio::time::sleep(PAGE_STEADY).await;
+    tokio::time::sleep(pauses.page_steady).await;
     driver.wait_for("the Calls app", CALLS_APP, PAGE_OPEN).await?;
     driver.click(&format!("{alias} opens the Calls app"), CALLS_APP).await?;
-    tokio::time::sleep(CALLS_APP_WARM).await;
+    tokio::time::sleep(pauses.calling_warm).await;
     report
         .notes
         .push(format!("{alias}: the Calls app started the calling stack"));
@@ -1156,7 +1215,7 @@ impl CallPlan {
             .wait_for(&format!("{alias}'s call screen after the join"), HANG_UP, CONNECT_WAIT)
             .await?;
         report.notes.push(format!("{alias}: in the call at {}", unix_ms()));
-        linger(joiner, AFTER_ACTION).await;
+        linger(joiner, self.pauses.after_action).await;
         if let Some(note) = save_screenshot_as(alias, joiner, "joined.png").await {
             report.notes.push(note);
         }
@@ -1242,6 +1301,7 @@ async fn converse(
     caller: &mut LabSession,
     callees: &mut [(Alias, LabSession)],
     report: &mut ScenarioReport,
+    pauses: CallPauses,
 ) -> Result<(), ScenarioError> {
     for (alias, session) in callees.iter_mut() {
         session
@@ -1254,9 +1314,9 @@ async fn converse(
     note_tones(caller, callees, report).await;
     judge_audio(caller, callees, report);
     match step {
-        CallStep::Video => show_video(caller, callees, report).await?,
-        CallStep::Dropped => drop_off(caller, callees, report).await?,
-        CallStep::KeepAlive => keep_alive(caller, callees, report).await,
+        CallStep::Video => show_video(caller, callees, report, pauses).await?,
+        CallStep::Dropped => drop_off(caller, callees, report, pauses).await?,
+        CallStep::KeepAlive => keep_alive(caller, callees, report, pauses).await,
         _ => {}
     }
     for (alias, session) in callees.iter_mut() {
@@ -1351,10 +1411,16 @@ const HOLD_CHECK: Duration = Duration::from_secs(60);
 
 /// `keep-alive`: holds the answered call [`KEEP_ALIVE_HOLD`] ([`hold_long`]); a call that ended before fails the run,
 /// and so does a page whose fence let no keep-alive through ([`keep_alives`]).
-async fn keep_alive(caller: &mut LabSession, callees: &mut [(Alias, LabSession)], report: &mut ScenarioReport) {
-    if !hold_long(caller, callees, KEEP_ALIVE_HOLD, report).await {
+async fn keep_alive(
+    caller: &mut LabSession,
+    callees: &mut [(Alias, LabSession)],
+    report: &mut ScenarioReport,
+    pauses: CallPauses,
+) {
+    if !hold_long(caller, callees, pauses.keep_alive_hold, pauses.hold_check, report).await {
         report.failures.push(format!(
-            "the call ended before it was held {KEEP_ALIVE_HOLD:?}: no keep-alive is due before then"
+            "the call ended before it was held {:?}: no keep-alive is due before then",
+            pauses.keep_alive_hold
         ));
     }
     let mut pages: Vec<(Alias, &mut LabSession)> = vec![(CALLER, &mut *caller)];
@@ -1376,19 +1442,20 @@ async fn keep_alive(caller: &mut LabSession, callees: &mut [(Alias, LabSession)]
 }
 
 /// Holds the answered call `hold`, every page's events taken in turn, the caller's call screen looked at every
-/// [`HOLD_CHECK`]: a call that ended meanwhile ends the hold (noted with its time). Whether the call was held the whole
-/// `hold`.
+/// `check_every` ([`HOLD_CHECK`] in a live run): a call that ended meanwhile ends the hold (noted with its time).
+/// Whether the call was held the whole `hold`.
 async fn hold_long(
     caller: &mut LabSession,
     callees: &mut [(Alias, LabSession)],
     hold: Duration,
+    check_every: Duration,
     report: &mut ScenarioReport,
 ) -> bool {
     let started = tokio::time::Instant::now();
     report
         .notes
         .push(format!("{CALLER}: holding the call from {}", unix_ms()));
-    let share = HOLD_CHECK / u32::try_from(callees.len() + 1).unwrap_or(1);
+    let share = check_every / u32::try_from(callees.len() + 1).unwrap_or(1);
     while started.elapsed() < hold {
         linger(caller, share).await;
         for (_, session) in callees.iter_mut() {
@@ -1432,6 +1499,7 @@ async fn show_video(
     caller: &mut LabSession,
     callees: &mut [(Alias, LabSession)],
     report: &mut ScenarioReport,
+    pauses: CallPauses,
 ) -> Result<(), ScenarioError> {
     caller.driver().click("a turns its camera on", CAMERA).await?;
     report.notes.push(format!("{CALLER}: camera on at {}", unix_ms()));
@@ -1442,12 +1510,12 @@ async fn show_video(
             .await?;
         report.notes.push(format!("{alias}: camera on at {}", unix_ms()));
     }
-    linger(caller, VIDEO_FOR).await;
+    linger(caller, pauses.video_for).await;
     let mut pages: Vec<(Alias, &mut LabSession)> = vec![(CALLER, caller)];
     pages.extend(callees.iter_mut().map(|(alias, session)| (*alias, session)));
     for (alias, session) in pages {
         let file = session.capture_dir().map(|dir| dir.join(EVENTS_FILE));
-        let deadline = tokio::time::Instant::now() + VIDEO_WAIT;
+        let deadline = tokio::time::Instant::now() + pauses.video_wait;
         loop {
             let frames = file.as_ref().map_or(0, |file| {
                 video_frames(&std::fs::read_to_string(file).unwrap_or_default())
@@ -1459,7 +1527,7 @@ async fn show_video(
             if tokio::time::Instant::now() >= deadline {
                 report
                     .failures
-                    .push(format!("{alias} decoded no video within {VIDEO_WAIT:?}"));
+                    .push(format!("{alias} decoded no video within {:?}", pauses.video_wait));
                 break;
             }
             linger(session, Duration::from_secs(1)).await;
@@ -1551,6 +1619,7 @@ async fn drop_off(
     caller: &mut LabSession,
     callees: &mut [(Alias, LabSession)],
     report: &mut ScenarioReport,
+    pauses: CallPauses,
 ) -> Result<(), ScenarioError> {
     let Some((alias, session)) = callees.last_mut() else {
         return Ok(());
@@ -1566,7 +1635,7 @@ async fn drop_off(
     report.notes.push(format!("{alias}: off the network at {}", unix_ms()));
     let dropped = drop_calling_socket(alias, session, report).await;
     if dropped.is_ok() {
-        linger(session, DROPPED_FOR).await;
+        linger(session, pauses.dropped_for).await;
     }
     session
         .cdp()
@@ -1577,7 +1646,7 @@ async fn drop_off(
         .notes
         .push(format!("{alias}: back on the network at {}", unix_ms()));
     dropped?;
-    linger(caller, AFTER_DROP).await;
+    linger(caller, pauses.after_drop).await;
     let mut pages: Vec<(Alias, &mut LabSession)> = vec![(CALLER, caller)];
     pages.extend(callees.iter_mut().map(|(alias, session)| (*alias, session)));
     for (alias, session) in pages {
@@ -2167,3 +2236,7 @@ fn unix_ms() -> u128 {
 fn now_ms() -> u64 {
     u64::try_from(unix_ms()).unwrap_or(u64::MAX)
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/scenario/ab_call_tests.rs"]
+mod tests;

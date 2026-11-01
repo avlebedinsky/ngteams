@@ -18,7 +18,7 @@ use std::io;
 use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use teams_auth::secrets::{KeyringSecretStore, SecretError};
 use teams_core::account::AccountCalls;
@@ -29,7 +29,7 @@ use teams_fence::lab::{Alias, ChatsError, ConfigError, LabChats, LabConfig, LabL
 use teams_fence::{Fence, Mri, OpenError};
 use teams_media::devices::file::{AudioInput, FileDevices, FrameCounter, FrameCounts, Pacing, PatternCamera};
 use teams_media::devices::movie::Movie;
-use teams_media::devices::{AudioSink, AudioSource, DeviceError, Devices, VideoSink, VideoSource};
+use teams_media::devices::{AudioFrame, AudioSink, AudioSource, DeviceError, Devices, VideoSink, VideoSource};
 use teams_media::processing::ProcessingConfig;
 use teams_media::session::SessionConfig;
 use teams_store::{Store, StoreError};
@@ -221,12 +221,37 @@ pub fn media_line(path: &Path, from: f64, looped: bool, movie: &Movie) -> String
     )
 }
 
-/// When a call's devices last opened, by the wall clock: what lines the far end's recording up with the tone sent, two
-/// processes apart ([`TimedDevices`]).
+/// When a call's devices last began opening, by the wall clock. These construction diagnostics are separate from
+/// the audio sample origins ([`SampleStarts`]), because loading a WAV can delay the first frame.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Opened {
     pub microphone: Option<SystemTime>,
     pub speaker: Option<SystemTime>,
+}
+
+/// The first audio frame's time: a monotonic clock for one process's measurements and the wall clock for comparing
+/// recordings made by separate processes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SampleStart {
+    pub wall: SystemTime,
+    pub(crate) instant: Instant,
+}
+
+impl SampleStart {
+    fn now() -> Self {
+        Self {
+            instant: Instant::now(),
+            wall: SystemTime::now(),
+        }
+    }
+}
+
+/// When the latest microphone first returned a frame and the latest speaker first accepted one. Merely constructing
+/// a device supplies no sample origin; an unsuccessful read or write supplies none either.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SampleStarts {
+    pub microphone: Option<SampleStart>,
+    pub speaker: Option<SampleStart>,
 }
 
 /// File devices that note when each one opens ([`Opened`]; a later call's open replaces an earlier one's); with a
@@ -236,6 +261,7 @@ pub struct TimedDevices {
     pub files: FileDevices,
     pub movie: Option<Movie>,
     opened: Arc<Mutex<Opened>>,
+    samples: Arc<Mutex<SampleStarts>>,
 }
 
 impl TimedDevices {
@@ -245,6 +271,7 @@ impl TimedDevices {
             files,
             movie: None,
             opened: Arc::default(),
+            samples: Arc::default(),
         }
     }
 
@@ -263,6 +290,12 @@ impl TimedDevices {
         *self.opened.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
+    /// The latest streams' actual first-sample times, independent of how long constructing a device took.
+    #[must_use]
+    pub fn sample_starts(&self) -> SampleStarts {
+        *self.samples.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     fn note(&self, what: impl FnOnce(&mut Opened, SystemTime)) {
         what(
             &mut self.opened.lock().unwrap_or_else(PoisonError::into_inner),
@@ -274,15 +307,27 @@ impl TimedDevices {
 impl Devices for TimedDevices {
     fn microphone(&self) -> Result<Box<dyn AudioSource>, DeviceError> {
         self.note(|opened, now| opened.microphone = Some(now));
-        match &self.movie {
+        self.samples.lock().unwrap_or_else(PoisonError::into_inner).microphone = None;
+        let source = match &self.movie {
             Some(movie) => movie.microphone(),
             None => self.files.microphone(),
-        }
+        }?;
+        Ok(Box::new(TimedSource {
+            source,
+            samples: Arc::clone(&self.samples),
+            started: false,
+        }))
     }
 
     fn speaker(&self) -> Result<Box<dyn AudioSink>, DeviceError> {
         self.note(|opened, now| opened.speaker = Some(now));
-        self.files.speaker()
+        self.samples.lock().unwrap_or_else(PoisonError::into_inner).speaker = None;
+        let sink = self.files.speaker()?;
+        Ok(Box::new(TimedSink {
+            sink,
+            samples: Arc::clone(&self.samples),
+            started: false,
+        }))
     }
 
     fn camera(&self) -> Result<Box<dyn VideoSource>, DeviceError> {
@@ -290,6 +335,41 @@ impl Devices for TimedDevices {
             Some(movie) => movie.camera(),
             None => self.files.camera(),
         }
+    }
+}
+
+struct TimedSource {
+    source: Box<dyn AudioSource>,
+    samples: Arc<Mutex<SampleStarts>>,
+    started: bool,
+}
+
+impl AudioSource for TimedSource {
+    fn next_frame(&mut self, timeout: Duration) -> Result<Option<AudioFrame>, DeviceError> {
+        let frame = self.source.next_frame(timeout)?;
+        if frame.is_some() && !self.started {
+            self.samples.lock().unwrap_or_else(PoisonError::into_inner).microphone = Some(SampleStart::now());
+            self.started = true;
+        }
+        Ok(frame)
+    }
+}
+
+struct TimedSink {
+    sink: Box<dyn AudioSink>,
+    samples: Arc<Mutex<SampleStarts>>,
+    started: bool,
+}
+
+impl AudioSink for TimedSink {
+    fn play(&mut self, frame: &AudioFrame) -> Result<(), DeviceError> {
+        let at = (!self.started).then(SampleStart::now);
+        self.sink.play(frame)?;
+        if let Some(at) = at {
+            self.samples.lock().unwrap_or_else(PoisonError::into_inner).speaker = Some(at);
+            self.started = true;
+        }
+        Ok(())
     }
 }
 
@@ -381,3 +461,7 @@ pub fn call_media(devices: impl Devices + Send + Sync + 'static, relay: Relay) -
         video: None,
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/support/sample_starts.rs"]
+mod sample_tests;

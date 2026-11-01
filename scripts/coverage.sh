@@ -103,10 +103,13 @@ if ! "$report_only"; then
     fi
     [[ -z "$webrtc_cache" ]] || build_env+=("LK_CUSTOM_WEBRTC=$webrtc_cache")
     # Never enable the live feature or accept cargo arguments that could enable it.
-    env -u PROTO_LAB_LIVE -u TEAMS_MEDIA_TURN_SERVER -u TEAMS_MEDIA_TURN_USER \
-        -u TEAMS_MEDIA_TURN_PASSWORD CARGO_LLVM_COV_TARGET_DIR="$PWD/$build_dir" \
-        PROTO_LAB_REQUIRE_CHROME=1 GPUI_SMOKE_REQUIRE=1 \
-        "${build_env[@]}" cargo llvm-cov "${package_args[@]}" --locked --json --output-path "$output/llvm.json" \
+    measurement_env=(env -u PROTO_LAB_LIVE -u TEAMS_MEDIA_TURN_SERVER -u TEAMS_MEDIA_TURN_USER
+        -u TEAMS_MEDIA_TURN_PASSWORD CARGO_LLVM_COV_TARGET_DIR="$PWD/$build_dir"
+        PROTO_LAB_REQUIRE_CHROME=1 GPUI_SMOKE_REQUIRE=1 "${build_env[@]}")
+    # LLVM scans every workspace executable in this target dir, including unselected consumers that embed an old
+    # copy of a selected library. Remove all workspace artifacts; third-party dependency builds remain cached.
+    "${measurement_env[@]}" cargo llvm-cov clean --workspace
+    "${measurement_env[@]}" cargo llvm-cov "${package_args[@]}" --locked --no-fail-fast --json --output-path "$output/llvm.json" \
         -- --test-threads "$test_threads"
 fi
 python3 scripts/coverage-report.py report "$output/llvm.json" \

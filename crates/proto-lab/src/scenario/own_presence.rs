@@ -278,8 +278,18 @@ pub async fn run(paths: &LabPaths, options: RunOptions, report_with: Report) -> 
         user_agent: None,
         ..SessionOptions::fail_closed()
     };
-    let mut a = LabSession::open_with(paths, Alias::A, session_options).await?;
-    let mut report = ScenarioReport::new(name);
+    let a = LabSession::open_with(paths, Alias::A, session_options).await?;
+    Ok(finish(a, &config, options, report_with, PresenceWaits::default()).await)
+}
+
+async fn finish(
+    mut a: LabSession,
+    config: &LabConfig,
+    options: RunOptions,
+    report_with: Report,
+    waits: PresenceWaits,
+) -> ScenarioReport {
+    let mut report = ScenarioReport::new(report_with.scenario());
     let nonce = nonce();
     if let Err(error) = deny_probes(&a, Some(&probe_text(&nonce))) {
         report.failures.push(error.to_string());
@@ -303,6 +313,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions, report_with: Report) -> 
         nonce: &nonce,
         options,
         report_with,
+        waits,
     };
     if let Err(error) = steps.run(&mut a, &mut report).await {
         report.failures.push(error.to_string());
@@ -315,7 +326,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions, report_with: Report) -> 
     report
         .notes
         .push(format!("a: the browser closed at unix {}", unix_now()));
-    Ok(report)
+    report
 }
 
 struct Steps<'a> {
@@ -324,6 +335,30 @@ struct Steps<'a> {
     nonce: &'a str,
     options: RunOptions,
     report_with: Report,
+    waits: PresenceWaits,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PresenceWaits {
+    observe: Duration,
+    status_hold: Duration,
+    report: Duration,
+    status_sent: Duration,
+    menu: Duration,
+    glance: Duration,
+}
+
+impl Default for PresenceWaits {
+    fn default() -> Self {
+        Self {
+            observe: OBSERVE,
+            status_hold: STATUS_HOLD,
+            report: REPORT,
+            status_sent: STATUS_SENT,
+            menu: MENU,
+            glance: GLANCE,
+        }
+    }
 }
 
 impl Steps<'_> {
@@ -357,9 +392,9 @@ impl Steps<'_> {
             report.notes.push(format!(
                 "observing from unix {} for {:?}, nothing driven",
                 unix_now(),
-                OBSERVE
+                self.waits.observe
             ));
-            tokio::time::sleep(OBSERVE).await;
+            tokio::time::sleep(self.waits.observe).await;
         }
         drive.seen_so_far();
         let endpoint = RequestPattern::new(Some("PUT"), ENDPOINT_PUT).map_err(|error| setup(error.to_string()))?;
@@ -385,7 +420,7 @@ impl Steps<'_> {
                     "a's presence endpoint PUT is answered",
                     "a presence endpoint PUT answered with a 2xx",
                     0,
-                    REPORT,
+                    self.waits.report,
                     |seen| {
                         endpoint.matches(&seen.method, &seen.url)
                             && seen.status.is_some_and(|status| (200..300).contains(&status))
@@ -411,7 +446,7 @@ impl Steps<'_> {
                     "a's presence endpoint PUT is denied",
                     "a presence endpoint PUT that failed",
                     0,
-                    REPORT,
+                    self.waits.report,
                     |seen| endpoint.matches(&seen.method, &seen.url) && seen.failed.is_some(),
                 )
                 .await;
@@ -443,20 +478,28 @@ impl Steps<'_> {
     ) -> Result<(), ScenarioError> {
         let manual = RequestPattern::new(None, MANUAL_STATUS).map_err(|error| setup(error.to_string()))?;
         let opened = async {
-            if drive.wait_for("the entry, already shown", entry, GLANCE).await.is_ok() {
+            if drive
+                .wait_for("the entry, already shown", entry, self.waits.glance)
+                .await
+                .is_ok()
+            {
                 return Ok(());
             }
             if drive
-                .wait_for("the status entry, already shown", STATUS_MENU, GLANCE)
+                .wait_for("the status entry, already shown", STATUS_MENU, self.waits.glance)
                 .await
                 .is_err()
             {
-                drive.wait_for("the account menu", ACCOUNT_MENU, MENU).await?;
+                drive
+                    .wait_for("the account menu", ACCOUNT_MENU, self.waits.menu)
+                    .await?;
                 drive.click("a opens the account menu", ACCOUNT_MENU).await?;
-                drive.wait_for("the status entry", STATUS_MENU, MENU).await?;
+                drive.wait_for("the status entry", STATUS_MENU, self.waits.menu).await?;
             }
             drive.click("a opens the status entry", STATUS_MENU).await?;
-            drive.wait_for(&format!("the {what} entry"), entry, MENU).await?;
+            drive
+                .wait_for(&format!("the {what} entry"), entry, self.waits.menu)
+                .await?;
             Ok::<_, ScenarioError>(())
         };
         if let Err(error) = opened.await {
@@ -471,7 +514,7 @@ impl Steps<'_> {
                 &format!("a's {what} request"),
                 "a manual status request, answered or failed",
                 since,
-                STATUS_SENT,
+                self.waits.status_sent,
                 |seen| manual.matches(&seen.method, &seen.url) && (seen.status.is_some() || seen.failed.is_some()),
             )
             .await;
@@ -485,7 +528,7 @@ impl Steps<'_> {
             ),
             Err(error) => format!("a: {what} chosen at unix {chosen}: no manual status request settled: {error}"),
         });
-        tokio::time::sleep(STATUS_HOLD).await;
+        tokio::time::sleep(self.waits.status_hold).await;
         Ok(())
     }
 }
@@ -503,3 +546,7 @@ async fn menu_tids(driver: &Driver) -> String {
         Err(error) => format!("a: can't list the account menu controls: {error}"),
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/scenario/own_presence_driver_tests.rs"]
+mod tests;

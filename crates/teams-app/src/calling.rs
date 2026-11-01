@@ -22,10 +22,17 @@ use teams_core::account::{AccountCalls, account_calls};
 use teams_fence::Mri;
 use teams_fence::lab::LabConfig;
 use teams_media::devices::catalog::DeviceDirectory;
+#[cfg(not(test))]
 use teams_media::devices::pipewire::PipeWireDevices;
 use teams_media::devices::{DeviceError, Devices};
 use teams_media::player::PlayerSetup;
 use teams_ui::{DeviceRinger, Ringer, VideoFeed};
+
+#[cfg(test)]
+#[path = "../tests/support/calling.rs"]
+mod tests;
+#[cfg(test)]
+use tests::PipeWireDevices;
 
 /// What the window's calls are made of.
 #[derive(Clone)]

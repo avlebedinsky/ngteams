@@ -408,3 +408,7 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/support/input.rs"]
+mod key_parser_tests;

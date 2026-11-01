@@ -232,6 +232,7 @@ zip = { version = "9.0.5", default-features = false, features = ["deflate"] }
 # not excused: the only exception is an outer `#[expect(clippy::..., reason = "...")]` on that one item.
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)'] }
 
 [workspace.lints.clippy]
 all = { level = "deny", priority = -1 }

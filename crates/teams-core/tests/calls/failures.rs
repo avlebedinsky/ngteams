@@ -239,13 +239,107 @@ async fn a_start_sent_again_after_a_throttle_connects_and_its_acceptance_is_ackn
         "the throttled start and the one sent again: {:#?}",
         a.log.permitted()
     );
-    assert_eq!(
-        lab.sent_by(LAB_A),
-        ["start", "updateEndpointMetadata", "add", "leave"],
-        "the follow-ups on the call the start sent again registered"
-    );
-    assert_eq!(lab.responses_of(LAB_A), 1, "the acceptance's acknowledgement");
+    assert_acceptance_route(&lab, &a.log).await;
     assert!(a.log.denials().is_empty(), "{:#?}", a.log.denials());
+}
+
+/// The acceptance uses its delivery response, or the documented HTTP fallback when that connection went away.
+/// Validate the optional request before removing its one position from the ordered call operations.
+async fn assert_acceptance_route(lab: &Lab, log: &SharedLog) {
+    let operations = lab.sent_by(LAB_A);
+    let acknowledgements: Vec<usize> = operations
+        .iter()
+        .enumerate()
+        .filter_map(|(at, operation)| (operation == "acknowledge").then_some(at))
+        .collect();
+    assert!(acknowledgements.len() <= 1, "one acknowledgement route: {operations:?}");
+    let all = lab.mock.received_requests().await;
+    let http: Vec<_> = all
+        .iter()
+        .filter(|request| {
+            request.url.path().contains("/callAcceptance/") && request.url.path().ends_with("/acknowledge")
+        })
+        .collect();
+    assert_eq!(http.len(), acknowledgements.len());
+    let permits: Vec<_> = log
+        .lines()
+        .into_iter()
+        .filter(|line| {
+            line["kind"] == "call_follow_up" && line["scope"]["call_operation"]["operation"] == "acknowledge"
+        })
+        .collect();
+    assert_eq!(permits.len(), http.len(), "each fallback was checked by the fence");
+    if let Some(&at) = acknowledgements.first() {
+        assert!(at > 1 && at < operations.len() - 1, "{operations:?}");
+        let call = lab.mock.calls().pop().unwrap();
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../../tests/fixtures/calling/echo/answers.json")).unwrap();
+        let expected = fixture["acceptance_callback"]["body"]["callAcceptance"]["links"]["acknowledgement"]
+            .as_str()
+            .unwrap()
+            .replace("<guid:5>", &call.id);
+        let url = reqwest::Url::parse(&expected).unwrap();
+        assert_eq!(http[0].method.as_str(), "POST");
+        assert_eq!(http[0].url.path(), url.path(), "the link belongs to this accepted call");
+        assert_eq!(http[0].url.query(), url.query());
+        assert_eq!(permits[0]["verdict"], "allow");
+        assert_eq!(permits[0]["scope"]["call_operation"]["url"], expected);
+        assert_acknowledgement_payload(http[0], &all);
+        eprintln!(
+            "call {}: acceptance acknowledged once by its admitted HTTP fallback",
+            call.id
+        );
+    } else {
+        eprintln!("acceptance acknowledged once by its delivery response");
+    }
+    let ordered: Vec<_> = operations
+        .iter()
+        .enumerate()
+        .filter(|(at, _)| !acknowledgements.contains(at))
+        .map(|(_, operation)| operation.as_str())
+        .collect();
+    assert_eq!(ordered, ["start", "updateEndpointMetadata", "add", "leave"]);
+    assert_eq!(
+        lab.responses_of(LAB_A) + http.len(),
+        1,
+        "one way, with no duplicate acknowledgement"
+    );
+}
+
+fn assert_acknowledgement_payload(request: &wiremock::Request, requests: &[wiremock::Request]) {
+    let start = requests
+        .iter()
+        .find(|request| {
+            request.url.path().ends_with("/epconv")
+                && serde_json::from_slice::<serde_json::Value>(&request.body).is_ok()
+        })
+        .unwrap();
+    let started: serde_json::Value = serde_json::from_slice(&start.body).unwrap();
+    let acceptance = started["callInvitation"]["links"]["acceptance"].as_str().unwrap();
+    let callback = acceptance.strip_suffix("/call/acceptance/").unwrap();
+    let agent = format!("{}/", callback.rsplit_once('/').unwrap().0);
+    let body: serde_json::Value = serde_json::from_slice(&request.body).unwrap();
+    assert_eq!(body.as_object().unwrap().len(), 1);
+    let acknowledgement = body["callAcceptanceAcknowledgement"].as_object().unwrap();
+    assert_eq!(acknowledgement.len(), 1);
+    let links = acknowledgement["links"].as_object().unwrap();
+    assert_eq!(links.len(), 7);
+    for name in [
+        "mediaRenegotiation",
+        "transfer",
+        "replacement",
+        "balanceUpdate",
+        "retargetCompletion",
+        "controlVideoStreaming",
+        "updateMediaDescriptions",
+    ] {
+        let link = links[name].as_str().unwrap();
+        assert!(
+            link.starts_with(&agent),
+            "the fallback hands out only this call agent's callbacks"
+        );
+        assert!(link.ends_with(&format!("/call/{name}/")));
+    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

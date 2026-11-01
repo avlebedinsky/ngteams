@@ -30,12 +30,20 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         display: options.display,
         ..SessionOptions::fail_closed()
     };
-    let mut session = LabSession::open_with(paths, ACCOUNT, session_options).await?;
+    let session = LabSession::open_with(paths, ACCOUNT, session_options).await?;
+    finish(session, options, LINGER).await
+}
+
+async fn finish(
+    mut session: LabSession,
+    options: RunOptions,
+    duration: Duration,
+) -> Result<ScenarioReport, ScenarioError> {
     let state = match session.navigate(TEAMS_URL).await {
         Ok(()) => {
             let state = session.settle(options.load_timeout).await;
             if state == SessionState::Loaded {
-                linger(&mut session, LINGER).await;
+                linger(&mut session, duration).await;
             }
             Ok(state)
         }
@@ -47,21 +55,10 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
     // the browser goes down, and the capture is finished, whatever happened
     let (fence, capture) = session.close_recorded().await?;
     let state = state?;
-    let mut report = ScenarioReport::new(ScenarioName::Load);
-    let status = account_status(&state, options.load_timeout, last_authz);
-    report.notes.push(format!("{ACCOUNT}: {status}"));
-    report
-        .notes
-        .push(format!("{ACCOUNT}: {} (fail-closed: expected)", fence.summary()));
-    if let Some(dir) = &capture {
-        report.notes.push(format!("recorded into {}", dir.display()));
-    }
-    if state != SessionState::Loaded {
-        report
-            .failures
-            .push(format!("{ACCOUNT}: the web client didn't load: {status}"));
-    }
-    report.add_account(
+    Ok(report(
+        &state,
+        options,
+        last_authz,
         AccountRun {
             alias: ACCOUNT,
             fence,
@@ -69,9 +66,26 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
             frame_denials,
             capture,
         },
-        &DenyPolicy::AllExpected,
-    );
-    Ok(report)
+    ))
+}
+
+fn report(state: &SessionState, options: RunOptions, last_authz: Option<u16>, run: AccountRun) -> ScenarioReport {
+    let mut report = ScenarioReport::new(ScenarioName::Load);
+    let status = account_status(state, options.load_timeout, last_authz);
+    report.notes.push(format!("{ACCOUNT}: {status}"));
+    report
+        .notes
+        .push(format!("{ACCOUNT}: {} (fail-closed: expected)", run.fence.summary()));
+    if let Some(dir) = &run.capture {
+        report.notes.push(format!("recorded into {}", dir.display()));
+    }
+    if state != &SessionState::Loaded {
+        report
+            .failures
+            .push(format!("{ACCOUNT}: the web client didn't load: {status}"));
+    }
+    report.add_account(run, &DenyPolicy::AllExpected);
+    report
 }
 
 /// Keeps the session's events flowing (and recorded) for `duration`, or until the connection goes.
@@ -83,3 +97,7 @@ async fn linger(session: &mut LabSession, duration: Duration) {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/scenario/load_tests.rs"]
+mod tests;

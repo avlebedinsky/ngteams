@@ -10,7 +10,7 @@
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
 
-mod common;
+pub mod common;
 #[path = "common/notices.rs"]
 mod notices;
 
@@ -893,6 +893,44 @@ fn a_refusal_during_a_call_shows_in_its_bar_and_its_end_replaces_it() {
 }
 
 // --- video (M3 Task 18) ---
+
+#[test]
+fn video_effects_and_participants_share_one_call_pane_without_turning_the_camera_on() {
+    let feed = VideoFeed::new();
+    let rig = video_calling(&feed);
+    let (trace, written) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    cx.simulate_keystrokes("ctrl-shift-c");
+    cx.run_until_parked();
+    status(&rig, 1, CallStatus::Connected);
+    let window = stage(&rig, &windows);
+    let before = actions(&rig).len();
+    click(window, "call-more");
+    click(window, "call-more-video-effects");
+    assert!(drawn(window, "call-effects-pane"));
+    assert!(drawn(window, "effects-picker"));
+    assert!(!drawn(window, "call-roster-pane"));
+    click(window, "effect-blur");
+    let settings = rig.cx.read(|cx| shell.read(cx).settings().clone());
+    assert_eq!(
+        rig.cx.read(|cx| settings.read(cx).settings().video_effect.clone()),
+        teams_ui::settings::VideoEffect::Blur
+    );
+    assert_eq!(actions(&rig).len(), before, "choosing an effect starts no call action");
+    click(window, "call-roster");
+    assert!(drawn(window, "call-roster-pane"));
+    assert!(!drawn(window, "call-effects-pane"));
+    click(window, "call-more");
+    click(window, "call-more-video-effects");
+    assert!(drawn(window, "call-effects-pane"));
+    assert!(!drawn(window, "call-roster-pane"));
+    click(window, "call-effects-close");
+    assert!(!drawn(window, "call-effects-pane"));
+    assert!(!rig.cx.read(|cx| calls_of(&rig).read(cx).call().unwrap().camera));
+    no_name_in(&written);
+}
 
 /// The rig of a build that shows calls with their video, on `feed`.
 fn video_calling(feed: &VideoFeed) -> Rig {

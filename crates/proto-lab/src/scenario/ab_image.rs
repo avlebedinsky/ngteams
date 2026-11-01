@@ -75,6 +75,24 @@ pub const SETTLE: Duration = Duration::from_secs(30);
 /// How long the compose box gets to show a pasted image.
 const PASTE_WAIT: Duration = Duration::from_secs(15);
 
+/// The attachment, upload and observation intervals of the attachment scenarios.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct AttachmentWaits {
+    pub(super) attach: Duration,
+    pub(super) upload: Duration,
+    pub(super) settle: Duration,
+}
+
+impl Default for AttachmentWaits {
+    fn default() -> Self {
+        Self {
+            attach: PASTE_WAIT,
+            upload: MEDIA_WAIT,
+            settle: SETTLE,
+        }
+    }
+}
+
 /// The page expression that marks the newest message showing an image whose text holds `caption` as
 /// [`super::ab_chat_full::MARKED`] (the mark taken off any other), `true` when there is one.
 ///
@@ -241,8 +259,8 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         user_agent: None,
         ..SessionOptions::fail_closed()
     };
-    let mut a = LabSession::open_with(paths, Alias::A, session_options.clone()).await?;
-    let mut b = match LabSession::open_with(paths, Alias::B, session_options).await {
+    let a = LabSession::open_with(paths, Alias::A, session_options.clone()).await?;
+    let b = match LabSession::open_with(paths, Alias::B, session_options).await {
         Ok(b) => b,
         Err(error) => {
             // a's browser goes down whatever happened
@@ -250,30 +268,36 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
             return Err(error.into());
         }
     };
-    let mut report = ScenarioReport::new(ScenarioName::AbImage);
     let nonce = nonce();
-    // before a's page loads: the client sends an earlier run's unsent probe, or image, again as soon as it can
-    for denied in [deny_probes(&a, Some(&probe_text(&nonce))), deny_media_writes(&a)] {
-        if let Err(error) = denied {
-            report.failures.push(error.to_string());
-        }
-    }
     let mri = |alias| config.account(alias).mri.clone().unwrap_or_default();
     let chat_id = one_to_one_id(&mri(Alias::A), &mri(Alias::B));
-    let policy = policy(chat_id.as_deref()).unwrap_or_else(|error| {
-        report
-            .failures
-            .push(format!("can't tell the a–b chat in a URL: {error}"));
-        DenyPolicy::Reviewed(Review::new().expecting_forced(&EXPECTED_FORCED))
-    });
     let image = Image {
         mri_a: mri(Alias::A),
         mri_b: mri(Alias::B),
         texts: Texts::new(&nonce),
         probe: probe_text(&nonce),
         options,
+        waits: AttachmentWaits::default(),
     };
-    if let Err(error) = image.run(chat_id.as_deref(), &mut a, &mut b, &mut report).await {
+
+    Ok(finish(a, b, chat_id.as_deref(), &image).await)
+}
+
+async fn finish(mut a: LabSession, mut b: LabSession, chat_id: Option<&str>, image: &Image) -> ScenarioReport {
+    let mut report = ScenarioReport::new(ScenarioName::AbImage);
+    // Arm the rules before either client loads or retries an earlier attachment.
+    for denied in [deny_probes(&a, Some(&image.probe)), deny_media_writes(&a)] {
+        if let Err(error) = denied {
+            report.failures.push(error.to_string());
+        }
+    }
+    let policy = policy(chat_id).unwrap_or_else(|error| {
+        report
+            .failures
+            .push(format!("can't tell the a–b chat in a URL: {error}"));
+        DenyPolicy::Reviewed(Review::new().expecting_forced(&EXPECTED_FORCED))
+    });
+    if let Err(error) = image.run(chat_id, &mut a, &mut b, &mut report).await {
         report.failures.push(error.to_string());
         for (alias, session) in [(Alias::A, &a), (Alias::B, &b)] {
             if let Some(note) = save_screenshot_as(alias, session, "failure.png").await {
@@ -287,7 +311,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
     for (alias, session) in [(Alias::A, a), (Alias::B, b)] {
         report.close_account(alias, session, &policy).await;
     }
-    Ok(report)
+    report
 }
 
 /// One run's accounts, texts and probe.
@@ -297,6 +321,7 @@ struct Image {
     texts: Texts,
     probe: String,
     options: RunOptions,
+    waits: AttachmentWaits,
 }
 
 impl Image {
@@ -351,7 +376,7 @@ impl Image {
         drive
             .type_into("a types the caption", COMPOSE, &self.texts.caption)
             .await?;
-        let taken = put_image(drive, &self.texts.file_name).await?;
+        let taken = put_image(drive, &self.texts.file_name, self.waits.attach).await?;
         report.notes.push(match taken {
             Some(how) => format!("a: the compose box took the image ({how})"),
             None => "a: the compose box showed no image after a paste and a drop".to_owned(),
@@ -361,16 +386,16 @@ impl Image {
             .notes
             .push(format!("a: {early} media write(s) denied before Enter"));
         drive.press_enter("a sends the image").await?;
-        let Some(first) = wait_media_write(a, before, MEDIA_WAIT).await else {
+        let Some(first) = wait_media_write(a, before, self.waits.upload).await else {
             return Err(setup(format!(
                 "the client tried no media write within {}s of the image",
-                MEDIA_WAIT.as_secs()
+                self.waits.upload.as_secs()
             )));
         };
         report
             .notes
             .push(format!("a: first media write denied: {} {}", first.method, first.url));
-        tokio::time::sleep(SETTLE).await;
+        tokio::time::sleep(self.waits.settle).await;
         for denial in &media_writes(a)[before..] {
             report
                 .notes
@@ -396,11 +421,11 @@ impl Image {
     async fn reload(&self, a: &mut LabSession, report: &mut ScenarioReport) -> Result<(), ScenarioError> {
         let before = media_writes(a).len();
         load(Alias::A, a, self.options.load_timeout).await?;
-        tokio::time::sleep(SETTLE).await;
+        tokio::time::sleep(self.waits.settle).await;
         let again = media_writes(a).len().saturating_sub(before);
         report.notes.push(format!(
             "a: after loading again, {again} media write(s) denied within {}s",
-            SETTLE.as_secs()
+            self.waits.settle.as_secs()
         ));
         let outcome = self.discard_unsent(a).await;
         report.notes.push(match outcome {
@@ -427,7 +452,7 @@ impl Image {
                 "a finds this run's unsent image",
                 &mark,
                 "a message with an image and this run's caption",
-                PASTE_WAIT,
+                self.waits.attach,
             )
             .await;
         match found {
@@ -441,7 +466,7 @@ impl Image {
                 "a's unsent image is gone",
                 &format!("!{mark}"),
                 "no message with an image and this run's caption",
-                PASTE_WAIT,
+                self.waits.attach,
             )
             .await;
         Ok(match gone {
@@ -482,7 +507,11 @@ impl Image {
 ///
 /// # Errors
 /// When the compose box is gone, or the page doesn't answer.
-async fn put_image(drive: &mut Driver, file_name: &str) -> Result<Option<&'static str>, ScenarioError> {
+async fn put_image(
+    drive: &mut Driver,
+    file_name: &str,
+    attach_wait: Duration,
+) -> Result<Option<&'static str>, ScenarioError> {
     let png = test_png(0x40);
     for how in ["paste", "drop"] {
         let event = image_event(&png, file_name, how);
@@ -494,7 +523,7 @@ async fn put_image(drive: &mut Driver, file_name: &str) -> Result<Option<&'stati
                 &format!("a's compose box shows the image ({how})"),
                 &compose_has_image(),
                 "an image in the compose box",
-                PASTE_WAIT,
+                attach_wait,
             )
             .await
         {
@@ -524,3 +553,7 @@ async fn wait_media_write(session: &LabSession, before: usize, timeout: Duration
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/scenario/ab_image_driver_tests.rs"]
+mod driver_tests;

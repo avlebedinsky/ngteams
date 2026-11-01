@@ -57,6 +57,13 @@ fn prepare() -> Result<WindowConfig, String> {
         .map_err(|error| format!("the request can't be read: {error}"))?
         .ok_or("no request on stdin")?;
     let request = WindowRequest::parse(&line).map_err(|error| format!("the request: {error}"))?;
+    request_config(request, std::env::current_exe)
+}
+
+fn request_config(
+    request: WindowRequest,
+    executable: impl FnOnce() -> io::Result<std::path::PathBuf>,
+) -> Result<WindowConfig, String> {
     if !cli::is_local_page(&request.authorize) {
         return Err(NOT_LIVE.into());
     }
@@ -67,7 +74,7 @@ fn prepare() -> Result<WindowConfig, String> {
         .and_then(|locations| locations.lab_paths())
         .map_err(|error| format!("the lab's directories: {error}"))?;
     let log = FenceLog::open(&paths.fence_log()).map_err(|error| format!("fence.log can't be opened: {error}"))?;
-    let exe = std::env::current_exe().map_err(|error| format!("where am I: {error}"))?;
+    let exe = executable().map_err(|error| format!("where am I: {error}"))?;
     let extension = window::extension_beside(&exe)
         .ok_or_else(|| format!("no {} beside {}", window::EXTENSION_FILE, exe.display()))?;
     Ok(WindowConfig {
@@ -78,3 +85,7 @@ fn prepare() -> Result<WindowConfig, String> {
         setup: Box::new(|guard| guard),
     })
 }
+
+#[cfg(test)]
+#[path = "../tests/support/cli.rs"]
+mod tests;

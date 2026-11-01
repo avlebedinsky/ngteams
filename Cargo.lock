@@ -8169,7 +8169,16 @@ version = "0.1.0"
 dependencies = [
  "glib-sys",
  "gobject-sys",
+ "gpui-pre",
+ "gpui-pre-platform",
  "pkg-config",
+ "serde_json",
+ "teams-auth",
+ "teams-fence",
+ "teams-signin",
+ "teams-wpe",
+ "tempfile",
+ "ui-sandbox",
 ]
 
 [[package]]
@@ -8256,6 +8265,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
+ "ui-sandbox",
  "wpe-javascriptcore-sys",
  "wpe-platform-sys",
  "wpe-webkit-sys",

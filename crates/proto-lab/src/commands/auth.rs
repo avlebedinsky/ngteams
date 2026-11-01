@@ -149,15 +149,46 @@ pub async fn authorize<S: SecretStore>(
     store: &S,
     options: &AuthOptions,
 ) -> Result<AuthReport, AuthError> {
-    let account = config.account(alias);
     let entra = EntraConfig::teams_native();
+    authorize_with(
+        config,
+        alias,
+        store,
+        options,
+        entra.clone(),
+        AuthSteps {
+            redirect: async |authorization: &Authorization| {
+                redirect_through_profile(config.paths(), alias, &entra, authorization, options.timeout).await
+            },
+            skype: async |tokens: &Tokens| skypetoken(store, &config.account(alias).upn, tokens).await,
+        },
+    )
+    .await
+}
+
+struct AuthSteps<D, K> {
+    redirect: D,
+    skype: K,
+}
+
+async fn authorize_with<S: SecretStore>(
+    config: &LabConfig,
+    alias: Alias,
+    store: &S,
+    options: &AuthOptions,
+    entra: EntraConfig,
+    steps: AuthSteps<
+        impl AsyncFnOnce(&Authorization) -> Result<(Secret, FenceReport), AuthError>,
+        impl AsyncFnOnce(&Tokens) -> Result<SkypetokenSummary, AuthzError>,
+    >,
+) -> Result<AuthReport, AuthError> {
+    let account = config.account(alias);
     let mut authorization = Authorization::new(&entra, &account.upn, Scope::spaces())?;
     if let Some(mri) = &account.mri {
         let object_id = mri.strip_prefix("8:orgid:").ok_or(AuthError::BadMri)?;
         authorization = authorization.expect_object_id(object_id);
     }
-    let (redirect, fence) =
-        redirect_through_profile(config.paths(), alias, &entra, &authorization, options.timeout).await?;
+    let (redirect, fence) = (steps.redirect)(&authorization).await?;
     let code = authorization.code_from_redirect(redirect.expose())?;
 
     let client = TokenClient::new(entra)?;
@@ -176,7 +207,7 @@ pub async fn authorize<S: SecretStore>(
         }
     }
     let skypetoken = if options.skypetoken {
-        Some(skypetoken(store, &account.upn, &refreshed).await)
+        Some((steps.skype)(&refreshed).await)
     } else {
         None
     };
@@ -194,7 +225,16 @@ async fn skypetoken<S: SecretStore>(
     account: &str,
     spaces: &Tokens,
 ) -> Result<SkypetokenSummary, AuthzError> {
-    let skypetoken = AuthzClient::new()?
+    skypetoken_with(store, account, spaces, &AuthzClient::new()?).await
+}
+
+async fn skypetoken_with<S: SecretStore>(
+    store: &S,
+    account: &str,
+    spaces: &Tokens,
+    client: &AuthzClient,
+) -> Result<SkypetokenSummary, AuthzError> {
+    let skypetoken = client
         .exchange_and_store(
             store,
             account,
@@ -217,10 +257,19 @@ async fn redirect_through_profile(
     timeout: Duration,
 ) -> Result<(Secret, FenceReport), AuthError> {
     let (catch, mut caught) = RedirectCatch::new(&entra.authorize_endpoint(), entra.redirect_uri())?;
-    let mut session = LabSession::open_catching(paths, alias, catch).await?;
+    let session = LabSession::open_catching(paths, alias, catch).await?;
+    redirect_from_session(session, authorization, &mut caught, timeout).await
+}
+
+async fn redirect_from_session(
+    mut session: LabSession,
+    authorization: &Authorization,
+    caught: &mut mpsc::UnboundedReceiver<Secret>,
+    timeout: Duration,
+) -> Result<(Secret, FenceReport), AuthError> {
     let redirect = within(timeout, async {
         session.navigate(authorization.url()).await?;
-        wait_for_redirect(&mut session, &mut caught).await
+        wait_for_redirect(&mut session, caught).await
     })
     .await;
     let fence = session.close().await?;
@@ -359,3 +408,7 @@ fn when(time: SystemTime, now: SystemTime) -> String {
     };
     format!("{} ({relative})", httpdate::fmt_http_date(time))
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/commands/auth.rs"]
+mod tests;

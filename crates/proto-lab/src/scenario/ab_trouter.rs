@@ -187,12 +187,21 @@ fn answered_2xx(request: &SeenRequest) -> bool {
 /// [`StepError::Timeout`] when none is answered so in time (saying how many other stacks' or unreadable ones were),
 /// [`StepError::Closed`] when the connection goes.
 pub async fn wait_registered(driver: &mut Driver, step: &str, since: usize) -> Result<SeenRequest, StepError> {
+    wait_registered_with(driver, step, since, REGISTER).await
+}
+
+async fn wait_registered_with(
+    driver: &mut Driver,
+    step: &str,
+    since: usize,
+    timeout: Duration,
+) -> Result<SeenRequest, StepError> {
     let pattern = registration().map_err(|error| StepError::Failed {
         step: step.to_owned(),
         reason: error.to_string(),
     })?;
     let waiting_for = format!("{pattern} answered with a 2xx");
-    let deadline = Instant::now() + REGISTER;
+    let deadline = Instant::now() + timeout;
     let mut passed_over = Vec::<(Option<SessionId>, String)>::new();
     let (mut other_stack, mut unreadable) = (0, 0);
     loop {
@@ -207,7 +216,7 @@ pub async fn wait_registered(driver: &mut Driver, step: &str, since: usize) -> R
             .map_err(|error| match error {
                 StepError::Timeout { step, .. } => StepError::Timeout {
                     step,
-                    waited: REGISTER,
+                    waited: timeout,
                     waiting_for: format!(
                         "{waiting_for} ({other_stack} other stack's and {unreadable} unreadable registration(s) \
                          answered with a 2xx passed over)"
@@ -306,8 +315,8 @@ pub async fn run(paths: &LabPaths, options: RunOptions, activity: Activity) -> R
         user_agent: None,
         ..SessionOptions::fail_closed()
     };
-    let mut a = LabSession::open_with(paths, Alias::A, session_options.clone()).await?;
-    let mut b = match LabSession::open_with(paths, Alias::B, session_options).await {
+    let a = LabSession::open_with(paths, Alias::A, session_options.clone()).await?;
+    let b = match LabSession::open_with(paths, Alias::B, session_options).await {
         Ok(b) => b,
         Err(error) => {
             // a's browser goes down whatever happened
@@ -315,9 +324,25 @@ pub async fn run(paths: &LabPaths, options: RunOptions, activity: Activity) -> R
             return Err(error.into());
         }
     };
-    let mut report = ScenarioReport::new(name);
     let nonce = nonce();
-    if let Err(error) = deny_probes(&a, Some(&probe_text(&nonce))) {
+    let mri = |alias| config.account(alias).mri.as_deref().unwrap_or_default();
+    let chat_id = one_to_one_id(mri(Alias::A), mri(Alias::B));
+    let steps = Steps {
+        mri_a: mri(Alias::A),
+        mri_b: mri(Alias::B),
+        chat_id: chat_id.as_deref(),
+        nonce: &nonce,
+        options,
+        observe: observation(activity),
+        reaction_waits: ReactionWaits::default(),
+    };
+    Ok(finish(a, b, activity, &steps).await)
+}
+
+/// Drives both admitted accounts and closes both even when a step, a screenshot or the first close fails.
+async fn finish(mut a: LabSession, mut b: LabSession, activity: Activity, steps: &Steps<'_>) -> ScenarioReport {
+    let mut report = ScenarioReport::new(scenario(activity));
+    if let Err(error) = deny_probes(&a, Some(&probe_text(steps.nonce))) {
         report.failures.push(error.to_string());
     }
     if activity == Activity::HeldBack {
@@ -329,22 +354,12 @@ pub async fn run(paths: &LabPaths, options: RunOptions, activity: Activity) -> R
             Err(error) => report.failures.push(format!("can't hold the activity back: {error}")),
         }
     }
-    let mri = |alias| config.account(alias).mri.as_deref().unwrap_or_default();
-    let chat_id = one_to_one_id(mri(Alias::A), mri(Alias::B));
-    let policy = trouter_policy(activity, chat_id.as_deref()).unwrap_or_else(|error| {
+    let policy = trouter_policy(activity, steps.chat_id).unwrap_or_else(|error| {
         report
             .failures
             .push(format!("can't tell the a–b chat in a URL: {error}"));
         DenyPolicy::Reviewed(Review::new().expecting_forced(expected_forced(activity)))
     });
-    let steps = Steps {
-        mri_a: mri(Alias::A),
-        mri_b: mri(Alias::B),
-        chat_id: chat_id.as_deref(),
-        nonce: &nonce,
-        options,
-        observe: observation(activity),
-    };
     if let Err(error) = steps.run(&mut a, &mut b, &mut report).await {
         report.failures.push(error.to_string());
         for (alias, session) in [(Alias::A, &a), (Alias::B, &b)] {
@@ -356,7 +371,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions, activity: Activity) -> R
     for (alias, session) in [(Alias::A, a), (Alias::B, b)] {
         report.close_account(alias, session, &policy).await;
     }
-    Ok(report)
+    report
 }
 
 struct Steps<'a> {
@@ -367,6 +382,22 @@ struct Steps<'a> {
     options: RunOptions,
     /// How long both pages stay open after a's last action ([`observation`]).
     observe: Duration,
+    reaction_waits: ReactionWaits,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ReactionWaits {
+    quick: Duration,
+    action: Duration,
+}
+
+impl Default for ReactionWaits {
+    fn default() -> Self {
+        Self {
+            quick: QUICK_LOOK,
+            action: ACTION,
+        }
+    }
 }
 
 impl Steps<'_> {
@@ -492,7 +523,7 @@ impl Steps<'_> {
             _ => message,
         };
         let clicked = Instant::now();
-        match react(a, drive_a, &shown).await {
+        match react(a, drive_a, &shown, self.reaction_waits).await {
             Ok(way) => report.notes.push(format!(
                 "a reacted to its message with a like from {way}, answered {} ms after it began",
                 clicked.elapsed().as_millis()
@@ -594,10 +625,15 @@ async fn edit(a: &LabSession, drive_a: &mut Driver, message: &str, edited: &str)
 /// message shows ([`LIKE`], as `ab-chat-full` reacts), then a click on the message, then its context menu (a right
 /// click; [`ANY_REACTION`] for both, the menu given [`ACTION`]). The reaction's `PUT` must go out and be answered with a
 /// 2xx within [`ACTION`]. Gives where the like was found.
-async fn react(a: &LabSession, drive_a: &mut Driver, message: &str) -> Result<&'static str, ScenarioError> {
+async fn react(
+    a: &LabSession,
+    drive_a: &mut Driver,
+    message: &str,
+    waits: ReactionWaits,
+) -> Result<&'static str, ScenarioError> {
     let put = RequestPattern::new(Some("PUT"), REACTION).map_err(|error| setup(error.to_string()))?;
     let point = hover(a, drive_a, message).await?;
-    let way = if click_visible(drive_a, "a likes it on the hover bar", LIKE, QUICK_LOOK)
+    let way = if click_visible(drive_a, "a likes it on the hover bar", LIKE, waits.quick)
         .await
         .is_ok()
     {
@@ -608,7 +644,7 @@ async fn react(a: &LabSession, drive_a: &mut Driver, message: &str) -> Result<&'
             drive_a,
             "a likes it once it clicked the message",
             ANY_REACTION,
-            QUICK_LOOK,
+            waits.quick,
         )
         .await
         .is_ok()
@@ -620,18 +656,24 @@ async fn react(a: &LabSession, drive_a: &mut Driver, message: &str) -> Result<&'
                 drive_a,
                 "a likes it from the message's context menu",
                 ANY_REACTION,
-                ACTION,
+                waits.action,
             )
             .await?;
             "its context menu"
         }
     };
-    let sent = drive_a.wait_for_request("a's reaction goes out", &put, ACTION).await?;
+    let sent = drive_a
+        .wait_for_request("a's reaction goes out", &put, waits.action)
+        .await?;
     let same = |seen: &SeenRequest| seen.session == sent.session && seen.request_id == sent.request_id;
     let answer = drive_a
-        .wait_for_seen("a's reaction is answered", "the reaction's answer", 0, ACTION, |seen| {
-            same(seen) && (seen.status.is_some() || seen.failed.is_some())
-        })
+        .wait_for_seen(
+            "a's reaction is answered",
+            "the reaction's answer",
+            0,
+            waits.action,
+            |seen| same(seen) && (seen.status.is_some() || seen.failed.is_some()),
+        )
         .await?;
     match (answer.status, answer.failed) {
         (Some(200..=299), _) => Ok(way),
@@ -673,3 +715,7 @@ async fn tids_note(who: &str, driver: &Driver) -> String {
 fn setup(reason: String) -> ScenarioError {
     ScenarioError::Setup(reason)
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/scenario/ab_trouter_driver_tests.rs"]
+mod tests;

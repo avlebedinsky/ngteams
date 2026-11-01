@@ -824,3 +824,11 @@ impl LabSession {
         Ok((self.close().await?, dir))
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/support/session.rs"]
+mod tests;
+
+#[cfg(test)]
+#[path = "../tests/support/session_startup.rs"]
+mod startup_tests;

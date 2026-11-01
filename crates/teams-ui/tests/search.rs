@@ -11,7 +11,7 @@
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
 
-mod common;
+pub mod common;
 // the shell's parts over the rig
 #[path = "common/parts.rs"]
 mod parts;
@@ -21,9 +21,9 @@ use std::sync::Arc;
 use common::{LAB_A, LAB_B, Rig, Written};
 use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, point, px, size};
 use teams_core::{Action, Event, SearchScope};
-use teams_proto::{Found, FoundFile, FoundMessage, FoundPerson, SearchKind, highlighted};
+use teams_proto::{Found, FoundChannel, FoundChat, FoundFile, FoundMessage, FoundPerson, SearchKind, highlighted};
 use teams_store::search::{MATCH_END, MATCH_START};
-use teams_store::{Conversation, ConversationKind, Member, Message};
+use teams_store::{Conversation, ConversationKind, Member, Message, Team, TeamChannel};
 use teams_ui::ViewTrace;
 use teams_ui::chat_view::{ChatView, MessageAction, PAGE, READ_DEBOUNCE};
 use teams_ui::compose::Mode;
@@ -853,6 +853,196 @@ fn the_service_s_marked_text_becomes_plain_text_and_the_ranges_of_its_matches() 
     assert_eq!(text, "Acme Labs & the lab… link");
     let parts: Vec<&str> = matched.iter().map(|range| &text[range.clone()]).collect();
     assert_eq!(parts, ["Lab", "lab"]);
+}
+
+fn team_in_search(rig: &Rig) {
+    *rig.core.teams.lock().unwrap() = Some(vec![Team {
+        id: CHANNEL.to_owned(),
+        name: "Lab rocket".to_owned(),
+        archived: false,
+        channels: vec![TeamChannel {
+            id: CHANNEL.to_owned(),
+            name: "Release notes".to_owned(),
+            general: true,
+        }],
+    }]);
+}
+
+#[test]
+fn go_to_finds_a_local_channel_by_its_team_and_channel_names_without_contacting_anyone() {
+    let rig = seeded();
+    team_in_search(&rig);
+    let (trace, written) = trace();
+    let (shell, cx) = shell_window(&rig, trace);
+    cx.simulate_keystrokes("ctrl-alt-g");
+    cx.simulate_input("Release");
+    draw(cx);
+    let suggestions = cx.update(|_, cx| shell.read(cx).search().read(cx).suggestions().to_vec());
+    assert!(suggestions.iter().any(|suggestion| matches!(suggestion,
+        Suggestion::Channel { id, name, team } if id == CHANNEL && name == "Release notes" && team == "Lab rocket")));
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).main().clone()),
+        Main::Channel(CHANNEL.to_owned())
+    );
+    assert!(rig.core.synced.lock().unwrap().contains(&CHANNEL.to_owned()));
+    assert!(rig.core.actions.lock().unwrap().is_empty());
+    assert!(!written.text().contains("Release notes"));
+    assert!(!written.text().contains("Lab rocket"));
+}
+
+#[test]
+fn group_and_channel_results_merge_local_and_service_entries_and_open_the_selected_place() {
+    let rig = seeded();
+    team_in_search(&rig);
+    let remote_chat = "19:synthetic-service-chat@thread.v2";
+    let remote_channel = "19:synthetic-service-channel@thread.tacv2";
+    *rig.core.service_answer.lock().unwrap() = Found {
+        chats: vec![
+            FoundChat {
+                id: TRIO.to_owned(),
+                name: "Service name".to_owned(),
+            },
+            FoundChat {
+                id: remote_chat.to_owned(),
+                name: "Lab remote chat".to_owned(),
+            },
+        ],
+        channels: vec![
+            FoundChannel {
+                id: CHANNEL.to_owned(),
+                name: "Service channel name".to_owned(),
+                team: None,
+            },
+            FoundChannel {
+                id: remote_channel.to_owned(),
+                name: "Lab remote channel".to_owned(),
+                team: Some("Remote team".to_owned()),
+            },
+        ],
+        ..Found::default()
+    };
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    search_for(cx, "Lab");
+    let search = cx.update(|_, cx| shell.read(cx).search().clone());
+    cx.update(|_, cx| {
+        let search = search.read(cx);
+        assert_eq!(search.results().unwrap().query(), "Lab");
+        assert_eq!(search.results().unwrap().tab(), teams_ui::global_search::Tab::All);
+        assert_eq!(search.group_chats(cx).len(), 2);
+        assert_eq!(search.channels(cx).len(), 2);
+    });
+    click(cx, "search-see-all-group-chats");
+    assert_eq!(
+        rig.core.service_searches.lock().unwrap().last(),
+        Some(&("Lab".to_owned(), SearchScope::Only(SearchKind::Chats)))
+    );
+    click(cx, "search-chat-1");
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).main().clone()),
+        Main::Chat(remote_chat.to_owned())
+    );
+    cx.simulate_keystrokes("ctrl-e ctrl-a");
+    cx.simulate_input("Lab");
+    draw(cx);
+    cx.simulate_keystrokes("enter");
+    draw(cx);
+    click(cx, "search-tab-channels");
+    let channels = cx.update(|_, cx| search.read(cx).channels(cx));
+    assert!(matches!(&channels[0], Suggestion::Channel { name, .. } if name == "Release notes"));
+    click(cx, "search-channel-1");
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).main().clone()),
+        Main::Channel(remote_channel.to_owned())
+    );
+    assert!(rig.core.actions.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_person_without_an_existing_chat_opens_people_results_and_never_creates_a_chat_by_itself() {
+    let rig = seeded();
+    rig.core.service_answer.lock().unwrap().people = vec![FoundPerson {
+        mri: Some("8:orgid:00000000-0000-4000-8000-00000000000d".to_owned()),
+        name: "Synthetic analyst".to_owned(),
+        email: Some("analyst@lab.example.test".to_owned()),
+        job_title: None,
+        department: Some("Research".to_owned()),
+    }];
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    cx.simulate_keystrokes("ctrl-e");
+    cx.simulate_input("analyst");
+    draw(cx);
+    cx.executor().advance_clock(SUGGEST_DELAY);
+    draw(cx);
+    let search = cx.update(|_, cx| shell.read(cx).search().clone());
+    let at = cx.update(|_, cx| {
+        search
+            .read(cx)
+            .suggestions()
+            .iter()
+            .position(|suggestion| matches!(suggestion, Suggestion::Person { chat: None, .. }))
+            .unwrap()
+    });
+    cx.update(|window, cx| search.update(cx, |search, cx| search.choose(at, window, cx)));
+    draw(cx);
+    assert_eq!(cx.update(|_, cx| shell.read(cx).main().clone()), Main::Search);
+    assert_eq!(
+        cx.update(|_, cx| search.read(cx).results().unwrap().tab()),
+        teams_ui::global_search::Tab::People
+    );
+    click(cx, "search-person-0");
+    assert_eq!(cx.update(|_, cx| shell.read(cx).main().clone()), Main::Search);
+    assert!(rig.core.actions.lock().unwrap().is_empty());
+}
+
+#[test]
+fn suggested_files_and_the_files_chip_open_only_the_mock_browser_url_and_clear_keeps_focus() {
+    let rig = seeded();
+    let file = |url: &str| FoundFile {
+        name: "Synthetic manual.pdf".to_owned(),
+        url: url.to_owned(),
+        kind: Some("pdf".to_owned()),
+        location: None,
+        modified_by: None,
+        modified_ms: None,
+        snippet: String::new(),
+        matched: Vec::new(),
+    };
+    rig.core.service_answer.lock().unwrap().files = vec![file("https://files.example.test/first.pdf")];
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    let search = cx.update(|_, cx| shell.read(cx).search().clone());
+    cx.update(|window, cx| search.update(cx, |search, cx| search.set_query("manual", window, cx)));
+    draw(cx);
+    cx.executor().advance_clock(SUGGEST_DELAY);
+    draw(cx);
+    let at = cx.update(|_, cx| {
+        search
+            .read(cx)
+            .suggestions()
+            .iter()
+            .position(|suggestion| matches!(suggestion, Suggestion::File { .. }))
+            .unwrap()
+    });
+    cx.update(|window, cx| search.update(cx, |search, cx| search.choose(at, window, cx)));
+    draw(cx);
+    assert_eq!(cx.opened_url().as_deref(), Some("https://files.example.test/first.pdf"));
+    rig.core.service_answer.lock().unwrap().files = vec![file("https://files.example.test/second.pdf")];
+    cx.simulate_keystrokes("ctrl-e");
+    cx.simulate_input("manual again");
+    draw(cx);
+    click(cx, "title-search-chip-files");
+    click(cx, "search-file-0");
+    assert_eq!(
+        cx.opened_url().as_deref(),
+        Some("https://files.example.test/second.pdf")
+    );
+    cx.simulate_keystrokes("ctrl-e");
+    draw(cx);
+    click(cx, "title-search-clear");
+    assert_eq!(cx.update(|_, cx| search.read(cx).query(cx)), "");
+    assert!(box_has_focus(&shell, cx));
+    assert!(rig.core.actions.lock().unwrap().is_empty());
 }
 
 #[test]

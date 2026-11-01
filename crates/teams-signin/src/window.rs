@@ -58,6 +58,10 @@ use crate::egress::{BYPASS, BlackHole};
 use crate::guard::{Guard, GuardEvent, GuardServer};
 use crate::view::SignInView;
 
+#[cfg(test)]
+#[path = "../tests/support/windows.rs"]
+mod service_tests;
+
 /// The lab window's Wayland app id (the personal build opens its window under the app's own).
 pub const APP_ID: &str = "com.nickalie.ngteams.signin";
 /// The window's title.

@@ -141,3 +141,7 @@ fn copy_file(from: &Path, to: &Path) -> Result<(), SnapshotError> {
         source,
     })
 }
+
+#[cfg(test)]
+#[path = "../tests/support/snapshot.rs"]
+mod tests;

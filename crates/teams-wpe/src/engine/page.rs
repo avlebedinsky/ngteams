@@ -713,3 +713,7 @@ fn keycode_for(view: *mut platform::WPEView, keyval: u32) -> u32 {
     unsafe { glib::ffi::g_free(entries.cast()) };
     keycode
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/page.rs"]
+mod tests;

@@ -200,12 +200,23 @@ fn mri(config: &LabConfig, alias: Alias) -> Result<&str, ScenarioError> {
 /// The creation run (see the module docs).
 async fn create(paths: &LabPaths, config: &LabConfig, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
     let others = [mri(config, Alias::B)?, mri(config, Alias::C)?];
-    let mut a = LabSession::open_with(paths, Alias::A, session_options(options)).await?;
-    let mut report = ScenarioReport::new(ScenarioName::AbcChat);
+    let a = LabSession::open_with(paths, Alias::A, session_options(options)).await?;
     let nonce = nonce();
-    deny_markers(&a, &nonce);
+    Ok(create_session(paths, a, &others, &nonce, options).await)
+}
+
+/// Creation after the browser was opened, including recording the id before any later evidence can fail.
+async fn create_session(
+    paths: &LabPaths,
+    mut a: LabSession,
+    others: &[&str],
+    nonce: &str,
+    options: RunOptions,
+) -> ScenarioReport {
+    let mut report = ScenarioReport::new(ScenarioName::AbcChat);
+    deny_markers(&a, nonce);
     let mut created = None;
-    let outcome = create_steps(&mut a, &others, &nonce, options, &mut report, &mut created).await;
+    let outcome = create_steps(&mut a, others, nonce, options, &mut report, &mut created).await;
     if outcome.is_err()
         && let Some(note) = save_screenshot(Alias::A, &a).await
     {
@@ -214,7 +225,7 @@ async fn create(paths: &LabPaths, config: &LabConfig, options: RunOptions) -> Re
     let chat_id = record_creation(paths, created, outcome, &mut report);
     let policy = scenario_policy(chat_id.as_deref(), &mut report);
     report.close_account(Alias::A, a, &policy).await;
-    Ok(report)
+    report
 }
 
 /// Settles a creation run in `report`: the error its steps stopped at, if they did, is a failure; the chat's id, once
@@ -285,17 +296,27 @@ async fn create_steps(
 
 /// The messaging run (see the module docs).
 async fn message(paths: &LabPaths, chat_id: &str, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
-    let mut sessions = open_all(paths, options).await?;
-    let mut report = ScenarioReport::new(ScenarioName::AbcChat);
+    let sessions = open_all(paths, options).await?;
     let nonce = nonce();
+    message_sessions(chat_id, options, &nonce, sessions).await
+}
+
+/// Message and close the already-open sessions; each caller supplies the same armed session type as startup.
+async fn message_sessions(
+    chat_id: &str,
+    options: RunOptions,
+    nonce: &str,
+    mut sessions: Vec<(Alias, LabSession)>,
+) -> Result<ScenarioReport, ScenarioError> {
+    let mut report = ScenarioReport::new(ScenarioName::AbcChat);
     if let Some((_, a)) = sessions.first() {
-        deny_markers(a, &nonce);
+        deny_markers(a, nonce);
     }
     let names_chat = chat_url(chat_id).map_err(|error| setup(error.to_string()))?;
     let steps = MessageSteps {
         chat_id,
         names_chat: &names_chat,
-        nonce: &nonce,
+        nonce,
         options,
     };
     if let Err(error) = steps.run(&mut sessions, &mut report).await {
@@ -472,3 +493,7 @@ fn no_deny(session: &LabSession, label: &str) -> ScenarioError {
 fn setup(reason: String) -> ScenarioError {
     ScenarioError::Setup(reason)
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/scenario/abc_chat_driver_tests.rs"]
+mod tests;

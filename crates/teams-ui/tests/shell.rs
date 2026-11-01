@@ -736,6 +736,82 @@ fn the_settings_view_changes_the_settings() {
 }
 
 #[test]
+fn the_title_bar_menus_open_each_place_and_change_zoom_without_losing_the_chat() {
+    let rig = seeded();
+    let (shell, cx) = shell_window(&rig, Settings::default(), Arc::new(ViewTrace::off()));
+    click(cx, "chat-row-1");
+    let chat = cx.update(|_, cx| shell.read(cx).main().clone());
+    click(cx, "title-launcher");
+    cx.simulate_keystrokes("down down down enter");
+    let _ = bounds(cx, "title-launcher");
+    assert_eq!(cx.update(|_, cx| shell.read(cx).main().clone()), Main::Calendar);
+    click(cx, "title-launcher");
+    cx.simulate_keystrokes("down down down down enter");
+    let _ = bounds(cx, "title-launcher");
+    assert_eq!(cx.update(|_, cx| shell.read(cx).main().clone()), Main::Settings);
+    click(cx, "title-launcher");
+    cx.simulate_keystrokes("down down enter");
+    let _ = bounds(cx, "title-launcher");
+    assert_eq!(cx.update(|_, cx| shell.read(cx).main().clone()), chat);
+    let initial = settings_of(&shell, cx).appearance.font_size;
+    for (keys, expected) in [
+        ("down down enter", initial + 1),
+        ("down down down enter", initial),
+        ("down down down down enter", teams_ui::theme::FONT_SIZE),
+    ] {
+        click(cx, "title-more");
+        cx.simulate_keystrokes(keys);
+        let _ = bounds(cx, "title-more");
+        assert_eq!(settings_of(&shell, cx).appearance.font_size, expected);
+        assert_eq!(cx.update(|_, cx| shell.read(cx).main().clone()), chat);
+    }
+    click(cx, "title-more");
+    cx.simulate_keystrokes("down enter");
+    let _ = bounds(cx, "title-more");
+    assert_eq!(cx.update(|_, cx| shell.read(cx).main().clone()), Main::Settings);
+    click(cx, "title-back");
+    assert_eq!(cx.update(|_, cx| shell.read(cx).main().clone()), chat);
+    click(cx, "title-forward");
+    assert_eq!(cx.update(|_, cx| shell.read(cx).main().clone()), Main::Settings);
+}
+
+#[test]
+fn the_calls_settings_keep_video_effects_without_starting_a_camera_and_drop_the_picker_when_hidden() {
+    let rig = seeded();
+    let model = SettingsModel::in_memory(Settings::default()).with_video_switch();
+    let (shell, cx) = shell_window_with(&rig, model, Arc::new(ViewTrace::off()));
+    click(cx, "rail-settings");
+    click(cx, "settings-page-calls");
+    assert!(bounds(cx, "video-effects").is_some());
+    let settings = cx.update(|_, cx| shell.read(cx).settings_view().clone());
+    assert!(cx.update(|_, cx| settings.read(cx).effects_picker().is_some()));
+    click(cx, "video-calls");
+    assert!(!settings_of(&shell, cx).video_calls);
+    click(cx, "settings-page-privacy");
+    assert!(cx.update(|_, cx| settings.read(cx).effects_picker().is_none()));
+    click(cx, "settings-page-calls");
+    assert!(cx.update(|_, cx| settings.read(cx).effects_picker().is_some()));
+    click(cx, "rail-chats");
+    assert!(cx.update(|_, cx| settings.read(cx).effects_picker().is_none()));
+    assert!(rig.core.actions.lock().unwrap().is_empty());
+}
+
+#[test]
+fn the_font_picker_can_replace_a_missing_family_with_the_system_font() {
+    let rig = seeded();
+    let mut settings = Settings::default();
+    settings.appearance.font_family = Some("Synthetic missing family".to_owned());
+    let (shell, cx) = shell_window(&rig, settings, Arc::new(ViewTrace::off()));
+    cx.simulate_resize(gpui::size(px(1400.), px(1400.)));
+    click(cx, "rail-settings");
+    click(cx, "settings-page-appearance");
+    click(cx, "font-family");
+    cx.simulate_keystrokes("up enter");
+    let _ = bounds(cx, "font-family");
+    assert_eq!(settings_of(&shell, cx).appearance.font_family, None);
+}
+
+#[test]
 fn the_settings_view_chooses_the_theme_and_the_font_size_and_the_zoom_keys_step_it() {
     let rig = seeded();
     let (shell, cx) = shell_window(&rig, Settings::default(), Arc::new(ViewTrace::off()));

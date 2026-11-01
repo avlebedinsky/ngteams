@@ -22,5 +22,23 @@ gobject-sys.workspace = true
 # where WPE WebKit's library is (`wpe-web-process-extension-2.0`, through pkg-config)
 pkg-config.workspace = true
 
+[dev-dependencies]
+# Drive the actual module in WebKit using the sign-in window's existing offline sandbox scenarios.
+gpui-pre.workspace = true
+gpui-pre-platform.workspace = true
+serde_json.workspace = true
+teams-auth.workspace = true
+teams-fence.workspace = true
+teams-signin = { workspace = true, features = ["test-support"] }
+teams-wpe.workspace = true
+tempfile.workspace = true
+ui-sandbox.workspace = true
+
+[[test]]
+# Share the real engine harness: the extension's callbacks cannot be driven by a socket peer alone.
+name = "window"
+path = "../teams-signin/tests/window.rs"
+harness = false
+
 [lints]
 workspace = true

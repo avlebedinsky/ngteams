@@ -9,7 +9,9 @@ use std::sync::Arc;
 
 use clap::Parser;
 use gpui::{App, WindowingModes};
-use teams_app::app::{self, Launch, LaunchAccount};
+#[cfg(not(test))]
+use teams_app::app;
+use teams_app::app::{Launch, LaunchAccount};
 use teams_app::calling;
 use teams_app::cli::{Cli, Mode, ModeError};
 use teams_app::guard;
@@ -19,6 +21,12 @@ use teams_auth::broker::BrokerSecretStore;
 use teams_fence::lab::{Alias, LabConfig, LabLocations, LabPaths};
 use teams_fence::{CallFloor, Fence};
 use teams_ui::{SettingsFile, ViewTrace};
+
+#[cfg(test)]
+#[path = "../tests/support/startup.rs"]
+mod startup_tests;
+#[cfg(test)]
+use startup_tests::{app, platform as gpui_platform};
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
@@ -65,6 +73,11 @@ fn run_app(accounts: &[(Alias, RawFd)], trace_fd: Option<RawFd>) -> ExitCode {
         Ok(launch) => launch,
         Err(error) => return fail("app", &error),
     };
+    run_window(launch)
+}
+
+/// Runs an already prepared launch; the binary's refusal checks and descriptor adoption precede this.
+fn run_window(launch: Launch) -> ExitCode {
     let failed = std::rc::Rc::new(std::cell::Cell::new(false));
     let failed_in_app = std::rc::Rc::clone(&failed);
     gpui_platform::linux(WindowingModes::WAYLAND).run(move |cx: &mut App| {

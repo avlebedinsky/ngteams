@@ -592,3 +592,7 @@ fn cause_value(cause: DenyCause) -> Value {
         DenyCause::Fenced(reason) => json!({"fenced": serde_json::to_value(reason).unwrap_or(Value::Null)}),
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/support/capture.rs"]
+mod tests;

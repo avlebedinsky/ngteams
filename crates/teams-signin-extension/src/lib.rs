@@ -19,6 +19,10 @@
 pub mod client;
 pub mod protocol;
 
+#[cfg(test)]
+#[path = "../tests/support/ffi.rs"]
+mod ffi_tests;
+
 use std::ffi::{CStr, c_char};
 use std::path::Path;
 use std::sync::{Mutex, PoisonError};

@@ -314,13 +314,16 @@ async fn run_login(alias: Alias, timeout: u64) -> Result<(), Box<dyn std::error:
     let options = LoginOptions {
         timeout: Duration::from_secs(timeout),
     };
-    let report = login::login(alias, options).await?;
+    show_login(alias, &login::login(alias, options).await?)
+}
+
+fn show_login(alias: Alias, report: &login::LoginReport) -> Result<(), Box<dyn std::error::Error>> {
     let how = if report.signed_in {
         "signed in"
     } else {
         "already signed in"
     };
-    let mri = match report.mri {
+    let mri = match &report.mri {
         MriRecord::Recorded => "MRI recorded in lab.toml",
         MriRecord::AlreadyRecorded => "MRI already in lab.toml",
     };
@@ -343,13 +346,17 @@ async fn run_auth(alias: Alias, options: &AuthOptions) -> Result<(), Box<dyn std
     let config = LabConfig::load(&LabLocations::from_env()?)?;
     let store = teams_auth::secrets::KeyringSecretStore::new(KEYRING_APPLICATION).await?;
     let report = auth::authorize(&config, alias, &store, options).await?;
+    show_auth(config.paths(), alias, &report)
+}
+
+fn show_auth(paths: &LabPaths, alias: Alias, report: &auth::AuthReport) -> Result<(), Box<dyn std::error::Error>> {
     for line in report.lines(std::time::SystemTime::now()) {
         println!("{alias}: {line}");
     }
     match &report.skypetoken {
         None => Ok(()),
         Some(Ok(skypetoken)) => {
-            let file = auth::save_region(config.paths(), alias, skypetoken)?;
+            let file = auth::save_region(paths, alias, skypetoken)?;
             println!("{alias}: region saved to {}", file.display());
             Ok(())
         }
@@ -378,29 +385,9 @@ async fn run_probe_chat(
         origin: probe::Origin::ChatService,
     };
     let report = probe::probe_chat(&store, &tokens, request, teams_fence::LiveMembershipSource::new()?).await?;
-    for line in report.lines(std::time::SystemTime::now()) {
-        println!("{line}");
-    }
-    let Some(name) = save else {
-        return Ok(());
-    };
-    let identities = Identities::from_lab(&config);
-    let exported = export::export_events(
-        &report.reference_events(),
-        name,
-        &reference_dir,
-        &identities,
-        export::Checks::Warn,
-    )?;
-    for line in exported.warnings.summary() {
-        eprintln!("warning: {line}");
-    }
-    println!(
-        "{alias}: wrote a sanitized reference copy of {} read(s) to {}; it stays outside the repository",
-        exported.events,
-        exported.path.display()
-    );
-    Ok(())
+    show_reads(&config, alias, report.lines(std::time::SystemTime::now()), save, || {
+        report.reference_events()
+    })
 }
 
 async fn run_probe_thread(alias: Alias, save: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
@@ -422,28 +409,9 @@ async fn run_probe_thread(alias: Alias, save: Option<&str>) -> Result<(), Box<dy
         teams_fence::LiveMembershipSource::for_fence(&teams_fence::Fence::open_lab()?)?,
     )
     .await?;
-    for line in report.lines(std::time::SystemTime::now()) {
-        println!("{line}");
-    }
-    let Some(name) = save else {
-        return Ok(());
-    };
-    let exported = export::export_events(
-        &report.reference_events(),
-        name,
-        &reference_dir,
-        &Identities::from_lab(&config),
-        export::Checks::Warn,
-    )?;
-    for line in exported.warnings.summary() {
-        eprintln!("warning: {line}");
-    }
-    println!(
-        "{alias}: wrote a sanitized reference copy of {} read(s) to {}; it stays outside the repository",
-        exported.events,
-        exported.path.display()
-    );
-    Ok(())
+    show_reads(&config, alias, report.lines(std::time::SystemTime::now()), save, || {
+        report.reference_events()
+    })
 }
 
 async fn run_probe_profile(alias: Alias) -> Result<(), Box<dyn std::error::Error>> {
@@ -451,10 +419,13 @@ async fn run_probe_profile(alias: Alias) -> Result<(), Box<dyn std::error::Error
     let store = teams_auth::secrets::KeyringSecretStore::new(KEYRING_APPLICATION).await?;
     let tokens = teams_auth::token::TokenClient::new(teams_auth::token::EntraConfig::teams_native())?;
     let report = profile_probe::probe_profile(&store, &tokens, &config, alias, &probe::Origin::ChatService).await?;
-    for line in report.lines(std::time::SystemTime::now()) {
-        println!("{line}");
-    }
-    Ok(())
+    show_reads(
+        &config,
+        alias,
+        report.lines(std::time::SystemTime::now()),
+        None,
+        Vec::new,
+    )
 }
 
 async fn run_probe_teams(alias: Alias) -> Result<(), Box<dyn std::error::Error>> {
@@ -462,10 +433,13 @@ async fn run_probe_teams(alias: Alias) -> Result<(), Box<dyn std::error::Error>>
     let store = teams_auth::secrets::KeyringSecretStore::new(KEYRING_APPLICATION).await?;
     let tokens = teams_auth::token::TokenClient::new(teams_auth::token::EntraConfig::teams_native())?;
     let report = teams_probe::probe_teams(&store, &tokens, &config, alias, &probe::Origin::ChatService).await?;
-    for line in report.lines(std::time::SystemTime::now()) {
-        println!("{line}");
-    }
-    Ok(())
+    show_reads(
+        &config,
+        alias,
+        report.lines(std::time::SystemTime::now()),
+        None,
+        Vec::new,
+    )
 }
 
 async fn run_probe_object(alias: Alias, id: &str, save: Option<&str>) -> Result<(), Box<dyn std::error::Error>> {
@@ -478,17 +452,30 @@ async fn run_probe_object(alias: Alias, id: &str, save: Option<&str>) -> Result<
     let store = teams_auth::secrets::KeyringSecretStore::new(KEYRING_APPLICATION).await?;
     let tokens = teams_auth::token::TokenClient::new(teams_auth::token::EntraConfig::teams_native())?;
     let report = object_probe::probe_object(&store, &tokens, &config, alias, id, &probe::Origin::ChatService).await?;
-    for line in report.lines(std::time::SystemTime::now()) {
+    show_reads(&config, alias, report.lines(std::time::SystemTime::now()), save, || {
+        report.reference_events()
+    })
+}
+
+/// Prints the report's value-free summary and, only when asked, writes its reference events outside the repository.
+fn show_reads(
+    config: &LabConfig,
+    alias: Alias,
+    lines: Vec<String>,
+    save: Option<&str>,
+    references: impl FnOnce() -> Vec<serde_json::Value>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for line in lines {
         println!("{line}");
     }
     let Some(name) = save else {
         return Ok(());
     };
     let exported = export::export_events(
-        &report.reference_events(),
+        &references(),
         name,
-        &reference_dir,
-        &Identities::from_lab(&config),
+        &export::reference_dir(config.paths().data_dir()),
+        &Identities::from_lab(config),
         export::Checks::Warn,
     )?;
     for line in exported.warnings.summary() {
@@ -504,6 +491,20 @@ async fn run_probe_object(alias: Alias, id: &str, save: Option<&str>) -> Result<
 
 async fn run_status(aliases: Vec<Alias>, timeout: u64) -> Result<(), Box<dyn std::error::Error>> {
     let config = LabConfig::load(&LabLocations::from_env()?)?;
+    check_status(&config, aliases, timeout, status::check).await
+}
+
+async fn check_status(
+    config: &LabConfig,
+    aliases: Vec<Alias>,
+    timeout: u64,
+    mut check: impl AsyncFnMut(
+        &LabPaths,
+        Alias,
+        Duration,
+    )
+        -> Result<(AccountStatus, proto_lab::session::FenceReport), proto_lab::session::SessionError>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let aliases = if aliases.is_empty() {
         Alias::ALL.to_vec()
     } else {
@@ -512,7 +513,7 @@ async fn run_status(aliases: Vec<Alias>, timeout: u64) -> Result<(), Box<dyn std
     let timeout = Duration::from_secs(timeout);
     let mut all_ok = true;
     for alias in aliases {
-        let (state, fence) = status::check(config.paths(), alias, timeout).await?;
+        let (state, fence) = check(config.paths(), alias, timeout).await?;
         println!("{alias}: {state}");
         eprintln!("{alias}: {} (fail-closed: expected)", fence.summary());
         if fence.breached() {
@@ -539,7 +540,11 @@ async fn run_scenario(
         load_timeout: Duration::from_secs(timeout),
         call,
     };
-    let report = scenario::run(scenario, &paths, options).await?;
+    show_scenario(&scenario::run(scenario, &paths, options).await?)
+}
+
+fn show_scenario(report: &scenario::ScenarioReport) -> Result<(), Box<dyn std::error::Error>> {
+    let scenario = report.scenario;
     for note in &report.notes {
         println!("{note}");
     }
@@ -650,3 +655,7 @@ fn search(
     eprintln!("{matches} match(es) in bundle {version}");
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "../tests/support/cli.rs"]
+mod tests;

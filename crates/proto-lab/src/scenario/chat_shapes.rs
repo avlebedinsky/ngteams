@@ -41,7 +41,7 @@ use tokio::time::Instant;
 
 use crate::browser::Media;
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
-use crate::session::{LabSession, SessionOptions};
+use crate::session::{LabSession, SessionError, SessionOptions};
 
 use super::ab_chat::{
     CHAT_OPEN, COMPOSE, COMPOSE_CSS, DELIVERY, chat_link, chat_requests, chat_url, enforce, load, nonce, not_received,
@@ -345,7 +345,6 @@ fn now_ms() -> u64 {
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
     let config = LabConfig::load(&LabLocations::from_env()?)?;
     let chats = teams_fence::lab::LabChats::load(paths).map_err(|error| setup(error.to_string()))?;
-    let mut report = ScenarioReport::new(ScenarioName::ChatShapes);
     // checked before any browser opens, as `abc-chat` does: a message the fence would deny is sent again on every
     // later load of a's profile
     let group = match chats.abc {
@@ -355,6 +354,18 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
             None => Ok(chat_id),
         },
     };
+    run_with(&config, options, group, async |alias, options| {
+        LabSession::open_with(paths, alias, options).await
+    })
+    .await
+}
+
+async fn run_with(
+    config: &LabConfig,
+    options: RunOptions,
+    group: Result<String, String>,
+    mut open: impl AsyncFnMut(Alias, SessionOptions) -> Result<LabSession, SessionError>,
+) -> Result<ScenarioReport, ScenarioError> {
     let session_options = SessionOptions {
         live_members: true,
         capture: Some(ScenarioName::ChatShapes.as_str().to_owned()),
@@ -364,8 +375,8 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         user_agent: None,
         ..SessionOptions::fail_closed()
     };
-    let mut a = LabSession::open_with(paths, Alias::A, session_options.clone()).await?;
-    let mut b = match LabSession::open_with(paths, Alias::B, session_options).await {
+    let a = open(Alias::A, session_options.clone()).await?;
+    let b = match open(Alias::B, session_options).await {
         Ok(b) => b,
         Err(error) => {
             // a's browser goes down whatever happened
@@ -374,26 +385,37 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         }
     };
     let nonce = nonce();
-    for rule in abc_chat::forced_denies(&nonce) {
-        a.force_deny(rule);
-    }
     let mri = |alias| config.account(alias).mri.clone().unwrap_or_default();
     let ab_chat_id = one_to_one_id(&mri(Alias::A), &mri(Alias::B));
-    let policy = policy(ab_chat_id.as_deref(), group.as_deref().ok()).unwrap_or_else(|error| {
-        report.failures.push(format!("can't tell a chat in a URL: {error}"));
-        DenyPolicy::Reviewed(Review::new().expecting_forced(&abc_chat::EXPECTED_FORCED))
-    });
     let shapes = Shapes {
         mri_a: mri(Alias::A),
         mri_b: mri(Alias::B),
         texts: Texts::new(&nonce),
         probe: probe_text(&nonce),
         options,
+        waits: Waits::default(),
     };
-    if let Err(error) = shapes
-        .run(ab_chat_id.as_deref(), group, &mut a, &mut b, &mut report)
-        .await
-    {
+
+    Ok(finish(a, b, ab_chat_id.as_deref(), group, &nonce, &shapes).await)
+}
+
+async fn finish(
+    mut a: LabSession,
+    mut b: LabSession,
+    ab_chat_id: Option<&str>,
+    group: Result<String, String>,
+    nonce: &str,
+    shapes: &Shapes,
+) -> ScenarioReport {
+    let mut report = ScenarioReport::new(ScenarioName::ChatShapes);
+    for rule in abc_chat::forced_denies(nonce) {
+        a.force_deny(rule);
+    }
+    let policy = policy(ab_chat_id, group.as_deref().ok()).unwrap_or_else(|error| {
+        report.failures.push(format!("can't tell a chat in a URL: {error}"));
+        DenyPolicy::Reviewed(Review::new().expecting_forced(&abc_chat::EXPECTED_FORCED))
+    });
+    if let Err(error) = shapes.run(ab_chat_id, group, &mut a, &mut b, &mut report).await {
         report.failures.push(error.to_string());
         for (alias, session) in [(Alias::A, &a), (Alias::B, &b)] {
             if let Some(note) = save_screenshot_as(alias, session, "failure.png").await {
@@ -405,7 +427,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
     for (alias, session) in [(Alias::A, a), (Alias::B, b)] {
         report.close_account(alias, session, &policy).await;
     }
-    Ok(report)
+    report
 }
 
 /// One run's accounts and texts.
@@ -415,6 +437,33 @@ struct Shapes {
     texts: Texts,
     probe: String,
     options: RunOptions,
+    waits: Waits,
+}
+
+/// Existing observation intervals, grouped so offline page tests need no wall-clock minute-long pauses.
+#[derive(Clone, Copy)]
+struct Waits {
+    quiet: Duration,
+    typing: Duration,
+    every: Duration,
+    pause: Duration,
+    emptied: Duration,
+    lines: Duration,
+    reaction: Duration,
+}
+
+impl Default for Waits {
+    fn default() -> Self {
+        Self {
+            quiet: QUIET_BEFORE_TYPING,
+            typing: TYPE_FOR,
+            every: TYPE_EVERY,
+            pause: PAUSE,
+            emptied: AFTER_EMPTYING,
+            lines: LINES_SETTLE,
+            reaction: REACTION_SETTLE,
+        }
+    }
 }
 
 /// The two pages, once both show the a–b chat.
@@ -552,7 +601,7 @@ impl Shapes {
     async fn typing(&self, pages: &mut Pages<'_>, report: &mut ScenarioReport) -> Result<(), ScenarioError> {
         let drive = &mut pages.drive_a;
         drive.type_into("a goes to its compose box", COMPOSE, "").await?;
-        tokio::time::sleep(QUIET_BEFORE_TYPING).await;
+        tokio::time::sleep(self.waits.quiet).await;
         let mark = drive.seen_so_far();
         let mut run = TypingRun {
             began: now_ms(),
@@ -561,15 +610,15 @@ impl Shapes {
         let typing = Instant::now();
         // keys pressed, not text inserted: the run that inserted the text (2026-10-21) sent no typing post in 45 s of
         // it, so key presses were tried; they brought none while a typed either, and why is not known (chat.md)
-        while typing.elapsed() < TYPE_FOR {
+        while typing.elapsed() < self.waits.typing {
             drive.press("a types a character", TYPED_KEY).await?;
-            tokio::time::sleep(TYPE_EVERY).await;
+            tokio::time::sleep(self.waits.every).await;
         }
         run.stopped = now_ms();
-        tokio::time::sleep(PAUSE).await;
+        tokio::time::sleep(self.waits.pause).await;
         run.emptied = now_ms();
         empty_compose(drive).await?;
-        tokio::time::sleep(AFTER_EMPTYING).await;
+        tokio::time::sleep(self.waits.emptied).await;
         run.ended = now_ms();
         drive.seen_so_far();
         run.posts = typing_posts(&drive.requests()[mark..], &pages.writes.post);
@@ -607,7 +656,7 @@ impl Shapes {
         let seen = drive.wait_for_answer("a's lines are posted", &post, STEP).await?;
         answered("a's lines", &seen)?;
         wait_for_newest(&mut pages.drive_b, "b shows a's lines", first, DELIVERY).await?;
-        tokio::time::sleep(LINES_SETTLE).await;
+        tokio::time::sleep(self.waits.lines).await;
         let log = pages.drive_b.evaluate("b's typing indicator log", TYPING_LOG).await?;
         let posted = seen.sent_ms.unwrap_or(began);
         let changes = indicator_changes(&log)
@@ -644,7 +693,15 @@ impl Shapes {
             .push(format!("a: the hover bar offers {}", tids.join(", ")));
         for (what, method) in [("sets", "PUT"), ("takes back", "DELETE")] {
             for tid in &tids {
-                let outcome = react(drive, &pages.writes.reaction, &self.texts.first, tid, method).await?;
+                let outcome = react(
+                    drive,
+                    &pages.writes.reaction,
+                    &self.texts.first,
+                    tid,
+                    method,
+                    self.waits.reaction,
+                )
+                .await?;
                 report.notes.push(format!("a {what} {tid}: {outcome}"));
             }
         }
@@ -704,6 +761,7 @@ async fn react(
     text: &str,
     tid: &str,
     method: &str,
+    settle: Duration,
 ) -> Result<String, ScenarioError> {
     find_message(drive, "a finds its first message", text).await?;
     drive.hover("a points at the message", MARKED).await?;
@@ -719,7 +777,7 @@ async fn react(
         })
         .await?;
     answered(&step, &seen)?;
-    tokio::time::sleep(REACTION_SETTLE).await;
+    tokio::time::sleep(settle).await;
     drive.seen_so_far();
     let caused: Vec<String> = drive.requests()[mark..]
         .iter()
@@ -777,3 +835,7 @@ async fn settle(pages: &mut Pages<'_>, step: &str, outcome: Result<(), ScenarioE
         let _ = pages.drive_a.press("close what is open", Key::ESCAPE).await;
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/scenario/chat_shapes_driver_tests.rs"]
+mod tests;

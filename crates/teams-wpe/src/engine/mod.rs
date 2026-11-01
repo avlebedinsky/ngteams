@@ -126,6 +126,8 @@ fn start(config: &HostConfig) -> Result<Display, String> {
     };
     let display = Display::connect(target)?;
     let context = WebContext::default().ok_or("WebKit has no default web context")?;
+    #[cfg(coverage)]
+    context.set_profiling_directory();
     for scheme in &config.schemes {
         context.register_uri_scheme(scheme);
     }

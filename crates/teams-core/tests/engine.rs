@@ -2301,3 +2301,273 @@ async fn a_shared_file_is_read_by_ranges_its_link_read_once_and_again_once_the_h
     ));
     a.shutdown();
 }
+
+#[tokio::test]
+async fn service_search_keeps_scopes_separate_and_reports_unreadable_answers_and_failed_reads() {
+    use teams_core::SearchScope;
+    use teams_proto::SearchKind;
+
+    let lab = Lab::start().await;
+    let a = native(
+        &lab,
+        LAB_A,
+        How {
+            push: false,
+            ..How::default()
+        },
+    );
+    assert!(!a.handle.search_service("  ", SearchScope::All).await.unwrap().more);
+    for (scope, endpoint, response) in [
+        (SearchScope::Suggestions, "suggestions", json!({"Groups": []})),
+        (SearchScope::All, "query", json!({"EntitySets": []})),
+        (
+            SearchScope::Only(SearchKind::People),
+            "query",
+            json!({"EntitySets": []}),
+        ),
+    ] {
+        lab.mock.answer_next("POST", endpoint, 200, &response).await;
+        assert!(!a.handle.search_service("synthetic query", scope).await.unwrap().more);
+    }
+    for (status, response) in [(200, json!({"not": "search results"})), (403, Value::Null)] {
+        lab.mock.answer_next("POST", "query", status, &response).await;
+        assert!(matches!(
+            a.handle.search_service("synthetic query", SearchScope::All).await,
+            Err(EngineError::SearchFailed)
+        ));
+    }
+    a.reads_fail.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        a.handle.search_service("synthetic query", SearchScope::All).await,
+        Err(EngineError::SearchFailed)
+    ));
+    a.shutdown();
+}
+
+#[tokio::test]
+async fn reaction_history_and_animation_queries_are_answered_without_exposing_write_capabilities() {
+    let lab = Lab::start().await;
+    let a = native(&lab, LAB_A, QUIET);
+    a.handle.sync().await.unwrap();
+    assert!(!a.handle.read_only());
+    assert!(a.handle.recent_reactions(0).await.unwrap().is_empty());
+    assert!(a.handle.frequent_reactions(0).await.unwrap().is_empty());
+    let recent = a.handle.recent_reactions(20).await.unwrap();
+    let frequent = a.handle.frequent_reactions(20).await.unwrap();
+    assert!(recent.iter().all(|key| frequent.contains(key)));
+    assert!(
+        a.handle
+            .reaction_animation("../not-a-reaction")
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let animation = "/evergreen-assets/personal-expressions/v2/assets/emoticons/wow/default/50_anim_f.png";
+    lab.mock
+        .serve_bytes(animation, "image/png", b"synthetic animation strip".to_vec())
+        .await;
+    let (one, two) = tokio::join!(a.handle.reaction_animation("wow"), a.handle.reaction_animation("wow"));
+    assert_eq!(one.unwrap().unwrap().as_ref(), b"synthetic animation strip");
+    assert_eq!(two.unwrap().unwrap().as_ref(), b"synthetic animation strip");
+    assert!(a.handle.reaction_animation("missing").await.unwrap().is_none());
+    assert!(a.handle.reaction_animation("missing").await.unwrap().is_none());
+    let requests = lab.mock.received_requests().await;
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.path() == animation)
+            .count(),
+        1
+    );
+    assert_eq!(
+        requests
+            .iter()
+            .filter(|request| request.url.path().contains("/emoticons/missing/"))
+            .count(),
+        1
+    );
+    a.shutdown();
+}
+
+fn conversation_delivery(id: &str, horizon: Option<&str>) -> Value {
+    let mut resource = json!({"id": id});
+    if let Some(horizon) = horizon {
+        resource["properties"] = json!({"consumptionhorizon": horizon});
+        resource["propertiesUpdated"] = json!(["consumptionhorizon"]);
+    }
+    json!({"type": "EventMessage", "resourceType": "ConversationUpdate", "resource": resource})
+}
+
+#[tokio::test]
+async fn a_conversation_delivery_updates_known_chats_and_syncs_new_ones_without_answering_it() {
+    let lab = Lab::start().await;
+    let mut a = native(&lab, LAB_A, How::default());
+    a.ready().await;
+    lab.trouter.deliver_chat(LAB_A, &conversation_delivery(AB_CHAT, None));
+    a.event(|event| {
+        matches!(event, Event::ConversationChanged { conversation } if conversation == AB_CHAT).then_some(())
+    })
+    .await;
+    let horizon = "9999999999999;9999999999999;synthetic";
+    lab.trouter
+        .deliver_chat(LAB_A, &conversation_delivery(AB_CHAT, Some(horizon)));
+    a.event(|event| matches!(event, Event::ReadHorizon { conversation } if conversation == AB_CHAT).then_some(()))
+        .await;
+    assert_eq!(
+        a.handle.read_horizon(AB_CHAT).await.unwrap().unwrap().raw.as_deref(),
+        Some(horizon)
+    );
+    lab.trouter
+        .deliver_chat(LAB_A, &conversation_delivery(teams_mock::TEAM_CHANNEL, None));
+    a.event(|event| {
+        matches!(event, Event::ConversationChanged { conversation } if conversation == teams_mock::TEAM_CHANNEL)
+            .then_some(())
+    })
+    .await;
+    assert!(
+        !a.handle
+            .messages(teams_mock::TEAM_CHANNEL, None, 50)
+            .await
+            .unwrap()
+            .messages
+            .is_empty()
+    );
+    assert!(
+        lab.trouter
+            .sockets()
+            .iter()
+            .flat_map(|socket| &socket.frames)
+            .all(|frame| !frame.starts_with("3:::")),
+        "chat deliveries are never answered"
+    );
+    a.shutdown();
+}
+
+#[tokio::test]
+async fn a_delivery_of_an_unreadable_conversation_reports_failure_and_schedules_recovery() {
+    let lab = Lab::start().await;
+    let mut a = native(&lab, LAB_A, How::default());
+    a.ready().await;
+    a.failures_expected = true;
+    let absent = "19:synthetic-missing@thread.v2";
+    lab.trouter.deliver_chat(LAB_A, &conversation_delivery(absent, None));
+    a.event(|event| {
+        matches!(
+            event,
+            Event::Failed {
+                during: "adding a changed conversation",
+                ..
+            }
+        )
+        .then_some(())
+    })
+    .await;
+    a.event(|event| {
+        matches!(
+            event,
+            Event::CaughtUp {
+                cause: Cause::Retry,
+                ..
+            }
+        )
+        .then_some(())
+    })
+    .await;
+    lab.trouter.deliver_chat(
+        LAB_A,
+        &conversation_delivery(absent, Some("9999999999999;9999999999999;synthetic")),
+    );
+    a.event(|event| {
+        matches!(
+            event,
+            Event::CaughtUp {
+                cause: Cause::Retry,
+                ..
+            }
+        )
+        .then_some(())
+    })
+    .await;
+    assert!(a.handle.read_horizon(absent).await.unwrap().is_none());
+    a.shutdown();
+}
+
+#[tokio::test]
+async fn bounded_shutdown_releases_a_held_read_and_the_blocking_event_api_receives_queued_events() {
+    let lab = Lab::start().await;
+    let a = native(&lab, LAB_A, QUIET);
+    a.reads_held.send_replace(true);
+    let request = a.handle.sync();
+    let released = Arc::new(AtomicBool::new(false));
+    let marked = Arc::clone(&released);
+    a.handle.shutdown_within(Duration::ZERO, || {
+        marked.store(true, Ordering::SeqCst);
+        a.reads_held.send_replace(false);
+    });
+    assert!(released.load(Ordering::SeqCst));
+    assert!(request.await.is_ok());
+    let Native {
+        mut handle,
+        _dir: directory,
+        ..
+    } = native(&lab, LAB_A, QUIET);
+    tokio::task::spawn_blocking(move || {
+        let _keep = directory;
+        assert!(matches!(handle.blocking_next_event(), Some(Event::Indexed { .. })));
+        handle.shutdown_within(WAIT, || panic!("an idle engine must stop within its normal grace"));
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+async fn incomplete_original_identity_refuses_edits_and_read_receipts_before_an_outbox_row_exists() {
+    for (field, missing) in [("clientmessageid", "clientmessageid"), ("composetime", "compose time")] {
+        let lab = Lab::start().await;
+        assert!(lab.mock.change_message(AB_CHAT, "1111111111111111111", |message| {
+            message.as_object_mut().unwrap().remove(field);
+        }));
+        let account = native(&lab, LAB_A, QUIET);
+        account.handle.sync().await.unwrap();
+        let error = account
+            .handle
+            .write(Action::Edit {
+                conversation: AB_CHAT.into(),
+                message_id: A_EDITED.into(),
+                text: MessageText::plain("synthetic edit refused before enqueue").unwrap(),
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error,EngineError::Unknown {missing: actual,action:"edited",..} if actual == missing),
+            "{error:?}"
+        );
+        if field == "clientmessageid" {
+            let error = account
+                .handle
+                .write(Action::Read {
+                    conversation: AB_CHAT.into(),
+                    message_id: A_EDITED.into(),
+                })
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                EngineError::Unknown {
+                    missing: "clientmessageid",
+                    action: "read up to",
+                    ..
+                }
+            ));
+        }
+        let error = account
+            .handle
+            .write(Action::CreateChat { others: vec![] })
+            .await
+            .unwrap_err();
+        assert!(matches!(error, EngineError::NotAChat));
+        assert!(account.log.lines().is_empty());
+        assert!(account.handle.outbox_entry(1).await.unwrap().is_none());
+        account.shutdown();
+    }
+}

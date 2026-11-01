@@ -167,8 +167,8 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         user_agent: None,
         ..SessionOptions::fail_closed()
     };
-    let mut a = LabSession::open_with(paths, Alias::A, session_options.clone()).await?;
-    let mut b = match LabSession::open_with(paths, Alias::B, session_options).await {
+    let a = LabSession::open_with(paths, Alias::A, session_options.clone()).await?;
+    let b = match LabSession::open_with(paths, Alias::B, session_options).await {
         Ok(b) => b,
         Err(error) => {
             // a's browser goes down whatever happened
@@ -176,21 +176,9 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
             return Err(error.into());
         }
     };
-    let mut report = ScenarioReport::new(ScenarioName::AbChat);
     let nonce = nonce();
-    // before a's page loads: the client sends an earlier run's unsent probe again as soon as it can
-    if let Err(error) = deny_probes(&a, Some(&probe_text(&nonce))) {
-        report.failures.push(error.to_string());
-    }
     let mri = |alias| config.account(alias).mri.as_deref().unwrap_or_default();
     let chat_id = one_to_one_id(mri(Alias::A), mri(Alias::B));
-    let policy = policy(chat_id.as_deref()).unwrap_or_else(|error| {
-        // the run fails, and a's and b's denies are still listed
-        report
-            .failures
-            .push(format!("can't tell the a–b chat in a URL: {error}"));
-        DenyPolicy::Reviewed(Review::new().expecting_forced(&EXPECTED_FORCED))
-    });
     let steps = Steps {
         mri_a: mri(Alias::A),
         mri_b: mri(Alias::B),
@@ -198,6 +186,23 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         nonce: &nonce,
         options,
     };
+    Ok(run_sessions(&steps, a, b).await)
+}
+
+/// Drives and settles the opened pair without changing the normal setup or admission policy.
+async fn run_sessions(steps: &Steps<'_>, mut a: LabSession, mut b: LabSession) -> ScenarioReport {
+    let mut report = ScenarioReport::new(ScenarioName::AbChat);
+    // before a's page loads: the client sends an earlier run's unsent probe again as soon as it can
+    if let Err(error) = deny_probes(&a, Some(&probe_text(steps.nonce))) {
+        report.failures.push(error.to_string());
+    }
+    let policy = policy(steps.chat_id).unwrap_or_else(|error| {
+        // the run fails, and a's and b's denies are still listed
+        report
+            .failures
+            .push(format!("can't tell the a–b chat in a URL: {error}"));
+        DenyPolicy::Reviewed(Review::new().expecting_forced(&EXPECTED_FORCED))
+    });
     let outcome = steps.run(&mut a, &mut b, &mut report).await;
     if let Err(error) = outcome {
         report.failures.push(error.to_string());
@@ -211,7 +216,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
     for (alias, session) in [(Alias::A, a), (Alias::B, b)] {
         report.close_account(alias, session, &policy).await;
     }
-    Ok(report)
+    report
 }
 
 struct Steps<'a> {
@@ -573,3 +578,7 @@ pub(crate) async fn load_at(
 pub(crate) fn setup(reason: String) -> ScenarioError {
     ScenarioError::Setup(reason)
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/scenario/ab_chat_driver_tests.rs"]
+mod driver_tests;

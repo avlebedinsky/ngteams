@@ -191,3 +191,7 @@ unsafe extern "C" fn set_cursor_area(
     let area = Area { x, y, width, height };
     view.report(|id| Event::ImeCursorArea { view: id, area });
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/ime.rs"]
+mod tests;

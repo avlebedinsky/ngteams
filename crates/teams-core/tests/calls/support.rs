@@ -165,6 +165,7 @@ pub struct Lab {
 
 impl Lab {
     pub async fn start() -> Self {
+        super::diagnostics::install();
         let mock = ChatServiceMock::start().await.unwrap();
         let trouter = mock.start_trouter().unwrap();
         let dir = tempfile::tempdir().unwrap();
@@ -179,6 +180,7 @@ impl Lab {
 
     /// The mock with its calls' media on, a group call's parties each with a mixer of its own (group video).
     pub async fn start_group_video() -> Self {
+        super::diagnostics::install();
         let mock = ChatServiceMock::start().await.unwrap();
         let trouter = mock.start_trouter().unwrap();
         let dir = tempfile::tempdir().unwrap();
@@ -194,6 +196,13 @@ impl Lab {
     /// `mri`'s engine, its calls' media playing `tone`, ready: both its sockets registered.
     pub async fn account(&self, mri: &'static str, tone: Tone) -> Account {
         let mut account = Account::start(self, mri, tone, (TENANT, true));
+        account.ready().await;
+        account
+    }
+
+    /// A synthetic device backend that may deliberately fail after signaling was admitted.
+    pub async fn account_with_devices(&self, devices: Arc<dyn Devices + Send + Sync>) -> Account {
+        let mut account = Account::start_devices(self, LAB_A, A_TONE, (TENANT, true), Some(devices));
         account.ready().await;
         account
     }
@@ -306,6 +315,16 @@ impl VideoOutput for Shown {
 impl Account {
     /// `mri`'s engine on `lab`, knowing `tenant` (none: empty), its calls' media with video when `video`.
     fn start(lab: &Lab, mri: &'static str, tone: Tone, (tenant, video_on): (&str, bool)) -> Self {
+        Self::start_devices(lab, mri, tone, (tenant, video_on), None)
+    }
+
+    fn start_devices(
+        lab: &Lab,
+        mri: &'static str,
+        tone: Tone,
+        (tenant, video_on): (&str, bool),
+        devices: Option<Arc<dyn Devices + Send + Sync>>,
+    ) -> Self {
         let log = SharedLog::default();
         let fence = Arc::new(
             Fence::new(
@@ -333,12 +352,20 @@ impl Account {
         let microphones = Arc::new(AtomicUsize::new(0));
         let video = Shown::default();
         let mut media = media(lab.relay, tone, &recording, Arc::clone(&microphones));
+        if let Some(devices) = devices {
+            media.devices = devices;
+        }
         media.video = video_on.then(|| CallVideo {
             encoder: EncoderSettings::default(),
             max_size: MaxSize::HD,
             output: Arc::new(video.clone()),
         });
         let calls = CallParts::new(calling, identity(mri, tenant), media);
+        let description = format!("{calls:?}");
+        assert!(description.contains(mri));
+        assert!(!description.contains("Lab"));
+        assert!(!description.contains(&tokens.ic3));
+        assert!(!description.contains(&tokens.skypetoken));
         let push = Push::new(trouter());
         let client = Arc::new(Client::new(http()));
         let outbox = Outbox::new(transport, fence, members, Author::new(Mri::new(mri), "Lab"));

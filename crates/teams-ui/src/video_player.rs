@@ -939,24 +939,5 @@ pub fn player_of(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn times_are_written_as_the_player_writes_them() {
-        assert_eq!(clock(Duration::from_secs(5)), "0:05");
-        assert_eq!(clock(Duration::from_secs(754)), "12:34");
-        assert_eq!(clock(Duration::from_secs(3_723)), "1:02:03");
-    }
-
-    #[test]
-    fn a_picture_is_fitted_inside_its_box() {
-        let bounds = Bounds {
-            origin: point(px(10.0), px(20.0)),
-            size: size(px(320.0), px(180.0)),
-        };
-        let fit = fitted(bounds, 640, 480);
-        assert_eq!(fit.size, size(px(240.0), px(180.0)));
-        assert_eq!(fit.origin, point(px(50.0), px(20.0)));
-    }
-}
+#[path = "../tests/support/video_player_units.rs"]
+mod tests;

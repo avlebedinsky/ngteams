@@ -10,13 +10,22 @@ use clap::Parser;
 use teams_core::{Action, EngineHandle, SearchScope};
 use teams_headless::cli::{CallAudio, Cli, Command, WATCH_TONE_SECONDS};
 use teams_headless::commands::{self, Answering, WatchEnd};
-use teams_headless::lab::{self, Lab, VideoCounts};
+#[cfg(not(test))]
+use teams_headless::lab::Lab;
+use teams_headless::lab::{self, VideoCounts};
 use teams_headless::print::{now_ms, visible};
 use teams_headless::{availability, call, chat, echo};
 use teams_proto::chat::MessageText;
 use teams_store::OutboxState;
 use teams_trouter::Stop;
+#[cfg(not(test))]
 use tokio::signal::unix::{Signal, SignalKind, signal};
+
+#[cfg(test)]
+#[path = "../tests/main/mod.rs"]
+mod tests;
+#[cfg(test)]
+use tests::{Signals, TestLab as Lab};
 
 /// How long `availability` and `call` wait for their socket's registration.
 const REGISTER_WAIT: Duration = Duration::from_secs(90);
@@ -67,11 +76,13 @@ fn main() -> ExitCode {
 }
 
 /// SIGINT and SIGTERM, taken over before anything is set up, so a signal ends a command between its steps.
+#[cfg(not(test))]
 struct Signals {
     interrupt: Signal,
     terminate: Signal,
 }
 
+#[cfg(not(test))]
 impl Signals {
     fn new() -> io::Result<Self> {
         Ok(Self {
@@ -92,31 +103,33 @@ async fn run(cli: Cli) -> Outcome {
     let mut signals = Signals::new()?;
     let lab = Lab::load(cli.alias)?;
     let mut out = io::stdout().lock();
-    match cli.command {
+    dispatch(&lab, cli.command, &mut signals, &mut out).await
+}
+
+/// Runs the parsed command on the account already loaded above. Tests supply only a loopback account here; the
+/// runnable binary always gets its concrete lab from `run`, after the build's refusal checks in `main`.
+async fn dispatch(lab: &Lab, command: Command, signals: &mut Signals, out: &mut impl Write) -> Outcome {
+    match command {
         Command::List { limit } => {
-            commands::list(&lab.open_store()?, limit, &lab.names, &mut out)?;
+            commands::list(&lab.open_store()?, limit, &lab.names, out)?;
             Ok(ExitCode::SUCCESS)
         }
         Command::Show { chat, limit } => {
-            let conversation = conversation(&lab, &chat)?;
-            commands::show(&lab.open_store()?, &conversation, limit, &lab.names, &mut out)?;
+            let conversation = conversation(lab, &chat)?;
+            commands::show(&lab.open_store()?, &conversation, limit, &lab.names, out)?;
             Ok(ExitCode::SUCCESS)
         }
-        Command::Sync => sync(&lab, &mut signals, &mut out).await,
+        Command::Sync => sync(lab, signals, out).await,
         command @ (Command::Watch { .. } | Command::Call { .. } | Command::Join { .. }) => {
-            calling_command(&lab, command, &mut signals, &mut out).await
+            calling_command(lab, command, signals, out).await
         }
-        Command::Presence { wait, mris } => {
-            presence(&lab, &mris, Duration::from_secs(wait), &mut signals, &mut out).await
-        }
-        Command::Profile { mris, wait } => {
-            profile(&lab, &mris, Duration::from_secs(wait), &mut signals, &mut out).await
-        }
-        Command::Search { query } => search(&lab, &query, &mut out).await,
+        Command::Presence { wait, mris } => presence(lab, &mris, Duration::from_secs(wait), signals, out).await,
+        Command::Profile { mris, wait } => profile(lab, &mris, Duration::from_secs(wait), signals, out).await,
+        Command::Search { query } => search(lab, &query, out).await,
         Command::Series { keep, cleanup } => {
             let handle = lab.start_engine(false).await?;
             let probed = tokio::select! {
-                probed = teams_headless::series::probe(&handle, now_ms(), keep, cleanup, &mut out) => Some(probed),
+                probed = teams_headless::series::probe(&handle, now_ms(), keep, cleanup, out) => Some(probed),
                 () = signals.next() => None,
             };
             let code = |fine: bool| if fine { ExitCode::SUCCESS } else { ExitCode::FAILURE };
@@ -134,11 +147,11 @@ async fn run(cli: Cli) -> Outcome {
                 hold: Duration::from_secs(hold),
                 register_wait: REGISTER_WAIT,
             };
-            own_availability(&lab, plan, &mut signals, &mut out).await
+            own_availability(lab, plan, signals, out).await
         }
         command => {
-            let (action, wait) = write_action(&lab, command)?;
-            one_write(&lab, action, wait, &mut signals, &mut out).await
+            let (action, wait) = write_action(lab, command)?;
+            one_write(lab, action, wait, signals, out).await
         }
     }
 }
@@ -470,10 +483,12 @@ fn call_files(
 fn heard_lines(
     files: &call::CallFiles,
     audio: &CallAudio,
+    own_echo: bool,
     out: &mut impl Write,
 ) -> Result<Option<echo::Echo>, Box<dyn Error>> {
     writeln!(out, "recording {}", visible(&files.recording.display().to_string()))?;
     writeln!(out, "{}", call::devices_line(files.opened()))?;
+    writeln!(out, "{}", call::samples_line(files.sample_starts()))?;
     if files.opened().speaker.is_none() {
         // the call ended before its media was set up: nothing was recorded
         writeln!(out, "echo heard=false")?;
@@ -491,7 +506,11 @@ fn heard_lines(
     };
     let mut first = None;
     for (index, hz) in hear.into_iter().enumerate() {
-        let heard = files.heard(hz)?;
+        let heard = if own_echo {
+            files.heard_own_echo(hz)?
+        } else {
+            files.heard(hz)?
+        };
         writeln!(out, "{}", call::echo_line(heard.as_ref()))?;
         writeln!(out, "{}", call::tone_line(hz, &files.presence(hz)?))?;
         if index == 0 {
@@ -521,7 +540,7 @@ async fn watch_calls(
     handle.shutdown();
     let end = end?;
     if files.opened().speaker.is_some() {
-        heard_lines(&files, &audio, out)?;
+        heard_lines(&files, &audio, false, out)?;
     }
     if let Some(counts) = counts {
         writeln!(out, "{}", counts.line())?;
@@ -575,7 +594,7 @@ async fn place_call(lab: &Lab, asked: CallAsked, signals: &mut Signals, out: &mu
         eprintln!("teams-headless: interrupted");
         return Ok(ExitCode::from(INTERRUPTED));
     }
-    let heard = heard_lines(&files, &audio, out)?;
+    let heard = heard_lines(&files, &audio, echo, out)?;
     if let Some(counts) = counts {
         writeln!(out, "{}", counts.line())?;
     }

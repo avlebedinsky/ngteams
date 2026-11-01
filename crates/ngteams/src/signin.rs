@@ -128,9 +128,13 @@ pub fn window_for(setup: &Setup, account: &PersonalAccount, windows: &Windows) -
             format!("no {} beside {}", window::EXTENSION_FILE, exe.display()),
         ))
     })?;
+    Ok(bound_window(setup, hosts, windows, extension))
+}
+
+fn bound_window(setup: &Setup, hosts: Arc<SignInHosts>, windows: &Windows, extension: PathBuf) -> Window {
     let paths = setup.paths.clone();
     let windows = windows.clone();
-    Ok(Box::new(move |request: WindowRequest| {
+    Box::new(move |request: WindowRequest| {
         if !hosts.admits_url(&request.authorize) {
             return WindowAnswer::Failed("the authorize URL isn't on the sign-in window's hosts".into());
         }
@@ -148,7 +152,7 @@ pub fn window_for(setup: &Setup, account: &PersonalAccount, windows: &Windows) -
             log,
             setup: Box::new(|guard| guard),
         })
-    }))
+    })
 }
 
 /// Whether `account` can start without a sign-in: a sign-in named its object id, its region is saved, and a refresh
@@ -303,3 +307,7 @@ fn save_region(path: &Path, region: &Region) -> Result<(), SignInError> {
 fn serde_json_text(region: &Region) -> String {
     format!("{:#}\n", region.to_json())
 }
+
+#[cfg(test)]
+#[path = "../tests/support/signin_window.rs"]
+mod tests;

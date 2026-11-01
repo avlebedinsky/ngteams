@@ -1,0 +1,304 @@
+//! File driver fallback, forced-deny evidence and cleanup against synthetic CDP pages.
+
+use super::*;
+use crate::browser::Display;
+use crate::scenario::ab_call::CallStep;
+use crate::scenario::ab_chat_full::tests::page as chat_page;
+
+use crate::scenario::ab_chat_full::tests::attachments as peer;
+use peer::{Kind, Unsent, Upload};
+
+fn file() -> File {
+    File {
+        mri_a: "8:orgid:synthetic-a".to_owned(),
+        mri_b: "8:orgid:00000000-0000-0000-0000-00000000000b".to_owned(),
+        texts: Texts::new("synthetic-file"),
+        content: test_file("synthetic-file"),
+        probe: probe_text("synthetic-file"),
+        options: RunOptions {
+            display: Display::Headless,
+            load_timeout: Duration::from_secs(1),
+            call: CallStep::Answer,
+        },
+        waits: AttachmentWaits {
+            attach: Duration::from_secs(1),
+            upload: Duration::from_secs(1),
+            settle: Duration::ZERO,
+        },
+    }
+}
+
+#[test]
+fn attachment_defaults_keep_the_live_observation_intervals() {
+    let defaults = AttachmentWaits::default();
+    assert_eq!(defaults.attach, ATTACH_WAIT);
+    assert_eq!(defaults.upload, FILE_WAIT);
+    assert_eq!(defaults.settle, SETTLE);
+}
+
+#[tokio::test]
+async fn file_runs_try_each_editor_fallback_and_prove_the_upload_and_caption_denied_before_recipient_readback() {
+    for take in ["drop", "paste", "picker"] {
+        let mut a = peer::page(Kind::File, take, Upload::Denied, Unsent::Delete).await;
+        let mut b = chat_page(false, false).await;
+        let a_dir = tempfile::tempdir().unwrap();
+        let b_dir = tempfile::tempdir().unwrap();
+        let mut sender = a.session(a_dir.path(), true);
+        let mut recipient = b.session(b_dir.path(), false);
+        let scenario = file();
+        deny_probes(&sender, Some(&scenario.probe)).unwrap();
+        deny_file_writes(&sender).unwrap();
+        let mut report = ScenarioReport::new(ScenarioName::AbFile);
+        scenario
+            .run(
+                Some("19:synthetic-ab@thread.v2"),
+                &mut sender,
+                &mut recipient,
+                &mut report,
+            )
+            .await
+            .unwrap();
+        assert!(report.failures.is_empty(), "{report:?}");
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.contains(&format!("took the file ({take})")))
+        );
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.contains("unsent file: deleted from its actions")),
+            "{report:?}"
+        );
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note.contains("message and not the probe"))
+        );
+        assert!(
+            report
+                .notes
+                .iter()
+                .any(|note| note == "b: shows the file's name: false")
+        );
+        let denials = sender.denials();
+        assert!(denials.iter().any(|denial| denial.label.as_deref() == Some(FILE_WRITE)));
+        assert!(
+            denials
+                .iter()
+                .any(|denial| denial.label.as_deref() == Some(FILE_MESSAGE))
+        );
+        assert!(
+            a.commands()
+                .iter()
+                .any(|command| command["method"] == "Fetch.failRequest")
+        );
+        assert!(recipient.denials().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn refusing_every_attachment_path_clears_the_caption_and_reports_the_pages_storage_notice() {
+    let mut page = peer::page(Kind::File, "none", Upload::Missing, Unsent::Absent).await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = page.session(dir.path(), false);
+    let mut report = ScenarioReport::new(ScenarioName::AbFile);
+    let error = file()
+        .send_file(&session, &mut page.driver, &mut report)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("showed no file after a drop, a paste"));
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|note| note.contains("Synthetic storage unavailable"))
+    );
+    assert!(
+        report
+            .notes
+            .iter()
+            .any(|note| note.ends_with("caption taken out of the compose box: true"))
+    );
+    assert!(
+        page.commands()
+            .iter()
+            .all(|command| command["params"]["key"] != "Enter")
+    );
+}
+
+#[tokio::test]
+async fn an_attachment_without_a_real_forced_deny_times_out_and_editor_errors_are_not_reported_as_success() {
+    for take in ["drop", "gone", "error"] {
+        let mut page = peer::page(Kind::File, take, Upload::Missing, Unsent::Absent).await;
+        let dir = tempfile::tempdir().unwrap();
+        let session = page.session(dir.path(), false);
+        let mut scenario = file();
+        scenario.waits.upload = Duration::ZERO;
+        let mut report = ScenarioReport::new(ScenarioName::AbFile);
+        let error = scenario
+            .send_file(&session, &mut page.driver, &mut report)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains(match take {
+            "drop" => "tried no write",
+            "gone" => "compose box went away",
+            _ => "synthetic attachment editor failure",
+        }));
+        assert!(session.denials().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn reload_reports_absent_still_visible_and_unreadable_unsent_files_without_deleting_other_messages() {
+    for unsent in [Unsent::Absent, Unsent::Stays, Unsent::Broken] {
+        let mut page = peer::page(Kind::File, "none", Upload::Missing, unsent).await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = page.session(dir.path(), false);
+        let mut report = ScenarioReport::new(ScenarioName::AbFile);
+        file().reload(&mut session, &mut report).await.unwrap();
+        assert!(report.failures.is_empty());
+        assert!(
+            report.notes.iter().any(|note| note.contains(match unsent {
+                Unsent::Absent => "none of this run's shown",
+                Unsent::Stays => "still shown",
+                _ => "couldn't delete it",
+            })),
+            "{report:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn admitted_file_runs_finalize_both_accounts_and_captures_after_success_or_partial_failure() {
+    for (chat, taken, recorded) in [
+        (Some("19:synthetic-ab@thread.v2"), "drop", true),
+        (Some("19:synthetic-ab@thread.v2"), "gone", true),
+        (None, "drop", false),
+    ] {
+        let mut a = peer::page(Kind::File, taken, Upload::Denied, Unsent::Delete).await;
+        let mut b = chat_page(false, false).await;
+        let a_dir = tempfile::tempdir().unwrap();
+        let b_dir = tempfile::tempdir().unwrap();
+        let (sender, sender_pid) = a.managed_session(a_dir.path(), recorded);
+        let (recipient, recipient_pid) = b.managed_session(b_dir.path(), true);
+        let report = finish(sender, recipient, chat, &file()).await;
+        assert_eq!(report.accounts.len(), 2, "{report:?}");
+        assert_eq!(report.accounts[0].alias, Alias::A);
+        assert_eq!(report.accounts[1].alias, Alias::B);
+        assert_eq!(report.accounts[0].capture.is_some(), recorded);
+        assert!(report.accounts[1].capture.is_some());
+        for pid in [sender_pid, recipient_pid] {
+            assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+        }
+        if chat.is_some() && taken == "drop" {
+            assert!(report.failures.is_empty(), "{report:?}");
+            assert!(report.notes.iter().any(|note| note.ends_with("denied in all")));
+            assert!(!report.accounts[0].denials.is_empty());
+            assert!(
+                !report.accounts[0]
+                    .capture
+                    .as_ref()
+                    .unwrap()
+                    .join("failure.png")
+                    .exists()
+            );
+        } else {
+            assert_eq!(report.failures.len(), 1, "{report:?}");
+            assert!(report.failures[0].contains(if chat.is_none() {
+                "has no MRI"
+            } else {
+                "compose box went away"
+            }));
+            for capture in report.accounts.iter().filter_map(|account| account.capture.as_ref()) {
+                assert!(capture.join("failure.png").is_file());
+            }
+        }
+        for page in [&a, &b] {
+            let commands = page.commands();
+            let close = commands
+                .iter()
+                .position(|command| command["method"] == "Browser.close")
+                .unwrap();
+            assert!(
+                commands[close + 1..]
+                    .iter()
+                    .all(|command| command["method"] != "Page.captureScreenshot")
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_visible_attach_menu_without_an_upload_item_never_claims_the_file_was_handed_over() {
+    use crate::scenario::test_page::evaluated;
+    use serde_json::json;
+    let mut page = peer::page_with(Kind::File, "none", Upload::Missing, Unsent::Absent, |command, _| {
+        let expression = command["params"]["expression"].as_str()?;
+        (expression == CLICK_ATTACH).then(|| Ok(evaluated(json!("Attach files"))))
+    })
+    .await;
+    let mut report = ScenarioReport::new(ScenarioName::AbFile);
+    let mut scenario = file();
+    scenario.waits.attach = Duration::from_secs(1);
+    assert_eq!(scenario.attach(&mut page.driver, &mut report).await.unwrap(), None);
+    assert!(report.notes.iter().any(|note| note == "a: upload item picked: false"));
+    assert!(
+        page.commands()
+            .iter()
+            .all(|command| command["params"]["key"] != "Enter")
+    );
+}
+
+#[tokio::test]
+async fn failure_to_inspect_an_attachment_propagates_instead_of_trying_other_input_paths() {
+    let mut page = peer::page_with(Kind::File, "drop", Upload::Missing, Unsent::Absent, |command, _| {
+        let expression = command["params"]["expression"].as_str()?;
+        expression
+            .contains("e.tagName !== 'SCRIPT'")
+            .then(|| Err("synthetic attachment inspection failed".to_owned()))
+    })
+    .await;
+    let error = file()
+        .attach(&mut page.driver, &mut ScenarioReport::new(ScenarioName::AbFile))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("attachment inspection failed"));
+    assert_eq!(
+        page.commands()
+            .iter()
+            .filter(|command| command["params"]["expression"]
+                .as_str()
+                .is_some_and(|e| e.contains("editor.dispatchEvent(new ClipboardEvent")))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn upload_observation_ignores_earlier_denials_and_waits_for_a_new_real_forced_denial() {
+    use serde_json::json;
+    let mut page = peer::page(Kind::File, "none", Upload::Missing, Unsent::Absent).await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = page.session(dir.path(), false);
+    deny_file_writes(&session).unwrap();
+    for (id, delay) in [("earlier", Duration::ZERO), ("later", Duration::from_millis(20))] {
+        let wire = page.sender();
+        let send = tokio::spawn(async move {
+            tokio::time::sleep(delay).await;
+            wire.send(json!({"method":"Fetch.requestPaused","sessionId":"synthetic-page", "params":{
+                "requestId":format!("paused-{id}"),"networkId":format!("synthetic-{id}"),"resourceType":"XHR",
+                "request":{"method":"POST","url":"https://synthetic.sharepoint.com/drive/delayed","postData":"synthetic","headers":{}}
+            }})).unwrap();
+        });
+        let before = usize::from(id == "later");
+        let found = wait_file_write(&session, before, Duration::from_secs(1)).await.unwrap();
+        send.await.unwrap();
+        assert_eq!(found.label.as_deref(), Some(FILE_WRITE));
+        assert_eq!(file_writes(&session).len(), before + 1);
+    }
+    assert!(wait_file_write(&session, 2, Duration::ZERO).await.is_none());
+}

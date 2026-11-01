@@ -505,31 +505,20 @@ pub async fn login(alias: Alias, options: LoginOptions) -> Result<LoginReport, L
         let accounts = AccountsFile::load(Path::new(ACCOUNTS_FILE), |name| std::env::var(name).ok())?;
         let credentials = accounts.for_alias(alias, &upn)?;
         status.write("starting", &json!({})).map_err(LoginError::Status)?;
-        let mut session = LabSession::open_with(&paths, alias, session_options()).await?;
+        let session = LabSession::open_with(&paths, alias, session_options()).await?;
         let run = Run {
             upn: &upn,
             credentials,
             status: &status,
             options,
         };
-        let signed = run.drive(&mut session).await;
-        // the browser goes down whatever happened, before anything else is reported
-        let closed = session.close_recorded().await;
-        let signed = signed?;
-        let (fence, capture) = closed?;
-        if fence.breached() {
-            return Err(LoginError::Breach(fence.summary()));
-        }
-        let mri = record_account_mri(&locations, alias, &signed.mri)?;
-        Ok(LoginReport {
-            signed_in: signed.signed_in,
-            refused: signed.refused,
-            mri,
-            fence,
-            capture,
-        })
+        run.finish(session, &locations, alias).await
     }
     .await;
+    finish_status(&status, outcome)
+}
+
+fn finish_status(status: &StatusFile, outcome: Result<LoginReport, LoginError>) -> Result<LoginReport, LoginError> {
     let written = match &outcome {
         Ok(report) => match report.refused {
             None => status.write("done", &json!({"fence": report.fence.summary()})),
@@ -568,6 +557,30 @@ struct SignIn {
 }
 
 impl Run<'_> {
+    async fn finish(
+        &self,
+        mut session: LabSession,
+        locations: &LabLocations,
+        alias: Alias,
+    ) -> Result<LoginReport, LoginError> {
+        let signed = self.drive(&mut session).await;
+        // the browser goes down whatever happened, before anything else is reported
+        let closed = session.close_recorded().await;
+        let signed = signed?;
+        let (fence, capture) = closed?;
+        if fence.breached() {
+            return Err(LoginError::Breach(fence.summary()));
+        }
+        let mri = record_account_mri(locations, alias, &signed.mri)?;
+        Ok(LoginReport {
+            signed_in: signed.signed_in,
+            refused: signed.refused,
+            mri,
+            fence,
+            capture,
+        })
+    }
+
     /// Opens Teams and signs in where asked, until the web client loads (or Teams refuses the signed-in account); then
     /// waits for the identity.
     async fn drive(&self, session: &mut LabSession) -> Result<BrowserOutcome, LoginError> {
@@ -648,3 +661,7 @@ impl Run<'_> {
         self.status.write(state, &json!({})).map_err(LoginError::Status)
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/commands/login.rs"]
+mod tests;

@@ -8,8 +8,9 @@
 //! The call's media runs on the file backend the binary gives the engine (`teams-headless` opens no audio server): the
 //! microphone plays [`crate::echo::keyed`]'s tone (or [`crate::echo::bursts`]), the speaker records what comes back,
 //! and [`heard`] looks for the keyed tone in the recording afterwards ([`CallFiles::presence`] for any tone); the
-//! devices note when they open ([`crate::lab::TimedDevices`]), so two processes' files line up.
+//! devices note when their first samples start ([`crate::lab::TimedDevices`]), so two processes' files line up.
 
+use std::borrow::Cow;
 use std::future::Future;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -18,13 +19,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use serde_json::Value;
 use teams_core::{CallAction, CallId, CallStatus, End, EngineHandle, Event, RegistrationReport};
 use teams_fence::Mri;
-use teams_media::devices::wav;
+use teams_media::devices::{SAMPLE_RATE, wav};
 use teams_media::tone::Tone;
 
 use crate::chat::LabNames;
 use crate::commands::CommandError;
 use crate::echo::{self, Echo, Presence};
-use crate::lab::{Opened, TimedDevices, VideoCounts};
+use crate::lab::{Opened, SampleStarts, TimedDevices, VideoCounts};
 use crate::print::{end_word, event_line, json_line, now_ms};
 
 /// Whom a call goes to.
@@ -513,6 +514,12 @@ impl CallFiles {
         self.devices.opened()
     }
 
+    /// When the microphone first returned audio and the speaker first accepted audio.
+    #[must_use]
+    pub fn sample_starts(&self) -> SampleStarts {
+        self.devices.sample_starts()
+    }
+
     /// How much of the tone at `hz` the recording holds, however it was keyed ([`echo::presence`]).
     ///
     /// # Errors
@@ -522,13 +529,50 @@ impl CallFiles {
         Ok(echo::presence(hz, &samples))
     }
 
-    /// The keyed tone at `hz` in the recording ([`echo::find`]), at any offset the call's length allows; `None` when
-    /// it isn't there.
+    /// The keyed tone at `hz` from a far end whose microphone may have started earlier ([`heard`]).
+    /// Frequency does not identify a source: another headless peer may use the same tone.
     ///
     /// # Errors
     /// [`CommandError::Recording`] when the recording can't be read.
     pub fn heard(&self, hz: f32) -> Result<Option<Echo>, CommandError> {
         heard(&self.recording, hz, self.length, self.length)
+    }
+
+    /// Our own keyed tone returned by the echo service, using the microphone's sample origin and causal offsets.
+    /// The caller must know the far end is echoing this source; matching frequencies do not establish that.
+    ///
+    /// # Errors
+    /// [`CommandError::Recording`] when the recording can't be read.
+    pub fn heard_own_echo(&self, hz: f32) -> Result<Option<Echo>, CommandError> {
+        let samples = wav::read(&self.recording).map_err(|error| CommandError::Recording(error.to_string()))?;
+        let Some(aligned) = microphone_timeline(&samples, self.sample_starts(), self.length.saturating_mul(2)) else {
+            return Ok(None);
+        };
+        // A short capture can accidentally match an unplayed later block of the long source file. Unlike another
+        // process's recording, our own echo cannot precede the microphone: never grant it the generic 60 s lead.
+        Ok(echo::find(hz, self.length, &aligned, self.length))
+    }
+}
+
+/// The speaker's samples on the microphone's clock. A later speaker leaves its unrecorded prefix empty; an earlier
+/// speaker's leading samples precede anything the microphone could have played. No valid arrival can start after
+/// the last source sample plus the maximum delay, so a larger clock difference supplies no evidence.
+fn microphone_timeline(samples: &[f32], started: SampleStarts, latest: Duration) -> Option<Cow<'_, [f32]>> {
+    let microphone = started.microphone?.instant;
+    let speaker = started.speaker?.instant;
+    let count =
+        |duration: Duration| usize::try_from(duration.as_nanos() * u128::from(SAMPLE_RATE) / 1_000_000_000).ok();
+    match speaker.checked_duration_since(microphone) {
+        Some(later) if later > latest => None,
+        Some(later) if later.is_zero() => Some(Cow::Borrowed(samples)),
+        Some(later) => {
+            let mut aligned = vec![0.0; count(later)?];
+            aligned.extend_from_slice(samples);
+            Some(Cow::Owned(aligned))
+        }
+        None => Some(Cow::Borrowed(
+            samples.get(count(microphone.duration_since(speaker))?..)?,
+        )),
     }
 }
 
@@ -561,21 +605,31 @@ pub fn tone_line(hz: f32, presence: &Presence) -> String {
     )
 }
 
-/// When the devices opened as printed, by the wall clock in Unix ms: `devices microphone_opened_ms=<n|->
-/// speaker_opened_ms=<n|->`. The far end's recording lines up with the tone sent by them: a block found `offset` into
-/// it went into the microphone at `microphone_opened + sent_at` and came out of the far speaker at `speaker_opened +
-/// sent_at + offset`.
+/// When device construction began, in Unix ms. Sample origins for aligning recordings are printed separately by
+/// [`samples_line`]; constructing a device can block before any audio runs.
 #[must_use]
 pub fn devices_line(opened: Opened) -> String {
-    let ms = |at: Option<SystemTime>| {
-        at.and_then(|at| at.duration_since(UNIX_EPOCH).ok())
-            .map_or_else(|| "-".to_owned(), |since| since.as_millis().to_string())
-    };
     format!(
         "devices microphone_opened_ms={} speaker_opened_ms={}",
-        ms(opened.microphone),
-        ms(opened.speaker)
+        wall_ms(opened.microphone),
+        wall_ms(opened.speaker),
     )
+}
+
+/// The first source frame and sink write, in Unix ms. A block found at signed `offset` in another process's recording
+/// arrived at `speaker_started + sent_at + offset`; its source sent it at `microphone_started + sent_at`.
+#[must_use]
+pub fn samples_line(started: SampleStarts) -> String {
+    format!(
+        "samples microphone_started_ms={} speaker_started_ms={}",
+        wall_ms(started.microphone.map(|start| start.wall)),
+        wall_ms(started.speaker.map(|start| start.wall)),
+    )
+}
+
+fn wall_ms(at: Option<SystemTime>) -> String {
+    at.and_then(|at| at.duration_since(UNIX_EPOCH).ok())
+        .map_or_else(|| "-".to_owned(), |since| since.as_millis().to_string())
 }
 
 /// What was heard as printed: `echo heard=false`, or `echo heard=true level=<n> blocks=<n> sent_from_ms=<n>
@@ -608,3 +662,7 @@ pub fn echo_line(echo: Option<&Echo>) -> String {
         signed(echo.delays.last().copied()),
     )
 }
+
+#[cfg(test)]
+#[path = "../tests/support/call_timeline.rs"]
+mod timeline_tests;

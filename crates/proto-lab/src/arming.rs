@@ -1251,3 +1251,7 @@ async fn close_target(cdp: &Cdp, target_id: &str) -> CloseOutcome {
         Ok(_) => CloseOutcome::Refused,
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/support/arming_process.rs"]
+mod test_process;

@@ -66,6 +66,25 @@ const ANSWERED: Duration = Duration::from_secs(30);
 /// A step's pause: the page showing what it was answered.
 const SETTLE: Duration = Duration::from_secs(3);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SearchWaits {
+    settle: Duration,
+    shortcut: Duration,
+    character: Duration,
+    answered: Duration,
+}
+
+impl Default for SearchWaits {
+    fn default() -> Self {
+        Self {
+            settle: SETTLE,
+            shortcut: Duration::from_millis(800),
+            character: Duration::from_millis(400),
+            answered: ANSWERED,
+        }
+    }
+}
+
 /// Ctrl+E: Teams' key for the search box.
 const CTRL_E: Key = Key {
     key: "e",
@@ -95,10 +114,14 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         display: options.display,
         ..SessionOptions::fail_closed()
     };
-    let mut a = LabSession::open_with(paths, ACCOUNT, session_options).await?;
+    let a = LabSession::open_with(paths, ACCOUNT, session_options).await?;
+    Ok(finish(a, options, SearchWaits::default()).await)
+}
+
+async fn finish(mut a: LabSession, options: RunOptions, waits: SearchWaits) -> ScenarioReport {
     let mut report = ScenarioReport::new(ScenarioName::Search);
     let mut drive = a.driver();
-    if let Err(error) = steps(&mut a, &mut drive, &mut report, options).await {
+    if let Err(error) = steps(&mut a, &mut drive, &mut report, options, waits).await {
         report.failures.push(error.to_string());
         shot(&a, &mut report, "search-failure.png").await;
     }
@@ -114,7 +137,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         }
     }
     report.close_account(ACCOUNT, a, &DenyPolicy::AllExpected).await;
-    Ok(report)
+    report
 }
 
 async fn steps(
@@ -122,20 +145,21 @@ async fn steps(
     drive: &mut Driver,
     report: &mut ScenarioReport,
     options: RunOptions,
+    waits: SearchWaits,
 ) -> Result<(), ScenarioError> {
     load(ACCOUNT, a, options.load_timeout).await?;
     size(a).await?;
-    pause(drive).await;
+    pause(drive, waits.settle).await;
     let query = query();
-    go_to(a, drive, report, &query).await?;
-    focus_box(drive, report).await?;
-    suggest_and_query(a, drive, report, &query).await?;
+    go_to(a, drive, report, &query, waits).await?;
+    focus_box(drive, report, waits.shortcut).await?;
+    suggest_and_query(a, drive, report, &query, waits).await?;
     report.notes.push(tabs_note(drive).await);
     for tab in TABS {
-        visit_tab(a, drive, report, tab).await?;
+        visit_tab(a, drive, report, tab, waits).await?;
     }
     drive.press("a closes the search", Key::ESCAPE).await?;
-    pause(drive).await;
+    pause(drive, waits.settle).await;
     shot(a, report, "search-closed.png").await;
     Ok(())
 }
@@ -146,16 +170,17 @@ async fn go_to(
     drive: &mut Driver,
     report: &mut ScenarioReport,
     query: &str,
+    waits: SearchWaits,
 ) -> Result<(), ScenarioError> {
     drive.press("a presses Ctrl+Alt+G", CTRL_ALT_G).await?;
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    tokio::time::sleep(waits.shortcut).await;
     drive.insert_text("a types a chat's name", query).await?;
-    pause(drive).await;
+    pause(drive, waits.settle).await;
     shot(a, report, "search-goto.png").await;
     drive.press("a leaves the go-to mode", Key::ESCAPE).await?;
-    pause(drive).await;
+    pause(drive, waits.settle).await;
     drive.press("a leaves the search box", Key::ESCAPE).await?;
-    pause(drive).await;
+    pause(drive, waits.settle).await;
     Ok(())
 }
 
@@ -165,22 +190,23 @@ async fn suggest_and_query(
     drive: &mut Driver,
     report: &mut ScenarioReport,
     query: &str,
+    waits: SearchWaits,
 ) -> Result<(), ScenarioError> {
     let since = drive.seen_so_far();
     for ch in query.chars() {
         drive.insert_text("a types the query", &ch.to_string()).await?;
-        tokio::time::sleep(Duration::from_millis(400)).await;
+        tokio::time::sleep(waits.character).await;
     }
-    let suggested = answered(drive, "the suggestions", ANY_SEARCH, since).await;
+    let suggested = answered(drive, "the suggestions", ANY_SEARCH, since, waits.answered).await;
     report.notes.push(note("suggestions", &suggested));
-    pause(drive).await;
+    pause(drive, waits.settle).await;
     shot(a, report, "search-suggestions.png").await;
     let since = drive.seen_so_far();
     drive.press_enter("a enters the query").await?;
-    let queried = answered(drive, "the query", QUERY_URL, since).await;
+    let queried = answered(drive, "the query", QUERY_URL, since, waits.answered).await;
     report.notes.push(note("query", &queried));
     queried?;
-    pause(drive).await;
+    pause(drive, waits.settle).await;
     shot(a, report, "search-results.png").await;
     Ok(())
 }
@@ -191,15 +217,16 @@ async fn visit_tab(
     drive: &mut Driver,
     report: &mut ScenarioReport,
     tab: &str,
+    waits: SearchWaits,
 ) -> Result<(), ScenarioError> {
     let since = drive.seen_so_far();
     if !click_tab(drive, tab).await? {
         report.notes.push(format!("a: no {tab} tab shown"));
         return Ok(());
     }
-    let asked = answered(drive, tab, QUERY_URL, since).await;
+    let asked = answered(drive, tab, QUERY_URL, since, waits.answered).await;
     report.notes.push(note(tab, &asked));
-    pause(drive).await;
+    pause(drive, waits.settle).await;
     shot(
         a,
         report,
@@ -207,19 +234,19 @@ async fn visit_tab(
     )
     .await;
     if tab == "Messages" {
-        open_first_message(a, drive, report).await;
-        pause(drive).await;
-        focus_box(drive, report).await?;
+        open_first_message(a, drive, report, waits.settle).await;
+        pause(drive, waits.settle).await;
+        focus_box(drive, report, waits.shortcut).await?;
         drive.press_enter("a enters the query again").await?;
-        pause(drive).await;
+        pause(drive, waits.settle).await;
     }
     Ok(())
 }
 
 /// Ctrl+Alt+G, then the box clicked when the key left the focus elsewhere.
-async fn focus_box(drive: &mut Driver, report: &mut ScenarioReport) -> Result<(), ScenarioError> {
+async fn focus_box(drive: &mut Driver, report: &mut ScenarioReport, shortcut: Duration) -> Result<(), ScenarioError> {
     drive.press("a presses Ctrl+E", CTRL_E).await?;
-    tokio::time::sleep(Duration::from_millis(800)).await;
+    tokio::time::sleep(shortcut).await;
     let focused = drive
         .evaluate(
             "the search box has the focus",
@@ -267,7 +294,7 @@ async fn click_tab(drive: &mut Driver, name: &str) -> Result<bool, StepError> {
 }
 
 /// Opens the first message the Messages tab lists, and notes what it read.
-async fn open_first_message(a: &LabSession, drive: &mut Driver, report: &mut ScenarioReport) {
+async fn open_first_message(a: &LabSession, drive: &mut Driver, report: &mut ScenarioReport, settle: Duration) {
     let since = drive.seen_so_far();
     let expression = "(() => { const items = [...document.querySelectorAll('[role=\"listitem\"], [role=\"option\"], \
                       [role=\"row\"], [data-tid*=\"search\"] [role=\"button\"]')].filter(e => \
@@ -276,7 +303,7 @@ async fn open_first_message(a: &LabSession, drive: &mut Driver, report: &mut Sce
                       return true; })()";
     match drive.evaluate("a opens the first message found", expression).await {
         Ok(value) if value.as_bool() == Some(true) => {
-            tokio::time::sleep(SETTLE).await;
+            tokio::time::sleep(settle).await;
             drive.seen_so_far();
             let reads: Vec<String> = drive
                 .requests()
@@ -314,6 +341,7 @@ async fn answered(
     what: &str,
     pattern: &str,
     since: usize,
+    timeout: Duration,
 ) -> Result<super::dsl::SeenRequest, ScenarioError> {
     let wanted = RequestPattern::new(Some("POST"), pattern).map_err(|error| ScenarioError::Setup(error.to_string()))?;
     drive
@@ -321,7 +349,7 @@ async fn answered(
             &format!("{what} is answered"),
             &format!("{what}, answered or failed"),
             since,
-            ANSWERED,
+            timeout,
             |seen| wanted.matches(&seen.method, &seen.url) && (seen.status.is_some() || seen.failed.is_some()),
         )
         .await
@@ -341,8 +369,8 @@ fn note(what: &str, outcome: &Result<super::dsl::SeenRequest, ScenarioError>) ->
     }
 }
 
-async fn pause(drive: &mut Driver) {
-    tokio::time::sleep(SETTLE).await;
+async fn pause(drive: &mut Driver, settle: Duration) {
+    tokio::time::sleep(settle).await;
     drive.seen_so_far();
 }
 
@@ -351,3 +379,11 @@ async fn shot(a: &LabSession, report: &mut ScenarioReport, name: &str) {
         report.notes.push(note);
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/scenario/search_tests.rs"]
+mod tests;
+
+#[cfg(test)]
+#[path = "../../tests/support/scenario/search_driver_tests.rs"]
+mod driver_tests;

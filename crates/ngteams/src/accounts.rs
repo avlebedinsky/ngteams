@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use teams_auth::secrets::LazyKeyring;
+use teams_auth::secrets::{LazyKeyring, SecretStore};
 use teams_fence::personal::PersonalAccount;
 use teams_fence::{CallFloor, Fence};
 use teams_signin::window::Windows;
@@ -55,20 +55,22 @@ impl Runner {
         let fence = Fence::open_personal(&self.setup.paths, &account.upn)
             .map_err(|error| format!("{}: {error}", account.upn))?
             .sharing_calls(&self.floor);
+        self.start_on(account, fence, LazyKeyring::new(KEYRING_APPLICATION))
+    }
+
+    fn start_on<S: SecretStore + 'static>(
+        &self,
+        account: &PersonalAccount,
+        fence: Fence,
+        secrets: S,
+    ) -> Result<Started<S>, String> {
         let (engine_calls, calls) = self
             .devices
             .as_ref()
             .map(CallDevices::for_account)
             .map_or((None, None), |(engine, window)| (Some(engine), Some(window)));
-        let engine = engine::start(
-            &self.setup.paths,
-            account,
-            Arc::new(fence),
-            LazyKeyring::new(KEYRING_APPLICATION),
-            true,
-            engine_calls,
-        )
-        .map_err(|error| format!("{}: {error}", account.upn))?;
+        let engine = engine::start(&self.setup.paths, account, Arc::new(fence), secrets, true, engine_calls)
+            .map_err(|error| format!("{}: {error}", account.upn))?;
         Ok(Started {
             account: account.clone(),
             engine,
@@ -145,3 +147,7 @@ pub fn forget(setup: &Setup, upn: &str) -> Result<Forgot, String> {
         .block_on(forget::forget(setup, upn, &store))
         .map_err(|error| error.to_string())
 }
+
+#[cfg(test)]
+#[path = "../tests/support/accounts.rs"]
+mod tests;

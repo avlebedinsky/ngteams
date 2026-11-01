@@ -169,6 +169,28 @@ pub struct SdpOffer(String);
 #[derive(Clone, PartialEq, Eq)]
 pub struct SdpAnswer(String);
 
+/// Parser text and the rejected line can contain ICE credentials or other SDP payload. Only its structural location
+/// is diagnostic; even the parser's prose may quote an invalid field value.
+fn sdp_parse_error(line: &str) -> String {
+    let field = match line.split_once('=') {
+        Some(("v", _)) => "version line",
+        Some(("o", _)) => "origin line",
+        Some(("s", _)) => "session name line",
+        Some(("t", _)) => "timing line",
+        Some(("m", _)) => "media line",
+        Some(("c", _)) => "connection line",
+        Some(("a", value)) => match value.split(':').next() {
+            Some("ice-pwd" | "ice-ufrag") => "ICE credential attribute",
+            Some("candidate") => "ICE candidate attribute",
+            Some("fingerprint") => "DTLS fingerprint attribute",
+            Some("rtpmap" | "fmtp") => "codec attribute",
+            _ => "attribute",
+        },
+        _ => "session description",
+    };
+    format!("invalid SDP {field}")
+}
+
 macro_rules! sdp_text {
     ($name:ident, $kind:expr) => {
         impl $name {
@@ -177,8 +199,7 @@ macro_rules! sdp_text {
             /// # Errors
             /// The text isn't an SDP libwebrtc reads.
             pub fn from_sdp_string(text: &str) -> Result<Self, String> {
-                SessionDescription::parse(text, $kind)
-                    .map_err(|error| format!("{}: {}", error.description, error.line))?;
+                SessionDescription::parse(text, $kind).map_err(|error| sdp_parse_error(&error.line))?;
                 Ok(Self(text.to_owned()))
             }
 
@@ -194,8 +215,7 @@ macro_rules! sdp_text {
             }
 
             fn description(self) -> Result<SessionDescription, Error> {
-                SessionDescription::parse(&self.0, $kind)
-                    .map_err(|error| Error::Rtc(format!("{}: {}", error.description, error.line)))
+                SessionDescription::parse(&self.0, $kind).map_err(|error| Error::Rtc(sdp_parse_error(&error.line)))
             }
         }
 
@@ -644,7 +664,7 @@ impl Peer {
             return Ok(());
         }
         let rollback = SessionDescription::parse("", SdpType::Rollback)
-            .map_err(|error| Error::Rtc(format!("{}: {}", error.description, error.line)))?;
+            .map_err(|error| Error::Rtc(sdp_parse_error(&error.line)))?;
         block_on(self.pc.set_local_description(rollback)).map_err(rtc)?;
         if let Some(video) = self.video().as_mut() {
             video.rolled_back = true;
@@ -948,3 +968,7 @@ mod tests {
         assert!(!line_sends(text, "3"));
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/support/sdp_diagnostics.rs"]
+mod diagnostic_tests;

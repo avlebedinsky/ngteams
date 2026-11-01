@@ -389,6 +389,20 @@ impl TrouterMock {
         );
     }
 
+    /// Delivers a synthetic chat `EventMessage` on the account's messaging sockets, as the captured messaging
+    /// deliveries do. Calling sockets receive none, and no delivery response is requested or produced.
+    pub fn deliver_chat(&self, account: &str, body: &Value) {
+        let sockets = self.shared.sockets();
+        for (index, owner, commands) in &sockets.commands {
+            if owner == account && sockets.records.get(*index).is_some_and(|record| !record.calling) {
+                let _ = commands.send(Command::Deliver {
+                    path: "messaging".to_owned(),
+                    body: body.to_string(),
+                });
+            }
+        }
+    }
+
     fn command(&self, account: &str, command: &Command) {
         let sockets = self.shared.sockets();
         for (_, owner, commands) in &sockets.commands {

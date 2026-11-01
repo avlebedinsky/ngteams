@@ -131,6 +131,148 @@ fn click(cx: &mut VisualTestContext, selector: &str) {
     cx.run_until_parked();
 }
 
+#[test]
+fn channel_text_selection_copies_posts_and_replies_from_the_model_and_the_context_menu() {
+    use teams_ui::selection::{MessageKey, Spot};
+
+    let rig = rig();
+    *rig.core.teams.lock().unwrap() = Some(teams());
+    let (messages, roots) = channel_store();
+    rig.core.messages.lock().unwrap().insert(CHANNEL.to_owned(), messages);
+    rig.core.roots.lock().unwrap().insert(CHANNEL.to_owned(), roots);
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    click(cx, "channel-row-1");
+    let view = cx.update(|_, cx| shell.read(cx).channel().unwrap().clone());
+    assert!(!cx.update(|_, cx| view.update(cx, |view, cx| view.copy_selection(cx))));
+    let selection = cx.update(|_, cx| view.read(cx).text_selection().clone());
+    selection.select(
+        Spot {
+            message: MessageKey::new((1_760_000_300_000, i64::MIN), POST),
+            path: vec![0],
+            offset: 0,
+        },
+        Spot {
+            message: MessageKey::new((1_760_000_300_000, 1_760_000_300_200), "1760000300200"),
+            path: vec![0],
+            offset: "my reply".len(),
+        },
+    );
+    assert!(cx.update(|_, cx| view.update(cx, |view, cx| view.copy_selection(cx))));
+    let expected = "first post\n\na reply\n\nmy reply";
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|item| item.text()).as_deref(),
+        Some(expected)
+    );
+    selection.open_menu(gpui::point(gpui::px(400.), gpui::px(200.)));
+    cx.update(|window, _| window.refresh());
+    click(cx, "selection-copy");
+    assert!(selection.menu().is_none());
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|item| item.text()).as_deref(),
+        Some(expected)
+    );
+    let at = bounds(cx, "channel-read-only").unwrap().center();
+    cx.simulate_click(at, Modifiers::none());
+    assert!(selection.is_empty());
+    cx.simulate_keystrokes("ctrl-c");
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|item| item.text()).as_deref(),
+        Some(expected)
+    );
+    assert_read_only(&rig, cx);
+}
+
+#[test]
+fn channel_pictures_open_in_thread_order_and_a_missing_target_leaves_the_viewer_closed() {
+    let rig = rig();
+    *rig.core.teams.lock().unwrap() = Some(teams());
+    let first = "https://us-api.asm.skype.com/v1/objects/0-eus-d9-channel-first/views/imgo";
+    let second = "https://us-api.asm.skype.com/v1/objects/0-eus-d9-channel-second/views/imgo";
+    let picture = |id, src| {
+        message(
+            id,
+            LAB_B,
+            &format!(
+                "<p><img src=\"{src}\" itemtype=\"http://schema.skype.com/AMSImage\" width=\"64\" height=\"32\" alt=\"synthetic\"></p>"
+            ),
+        )
+    };
+    let mut bytes = Vec::new();
+    image::RgbaImage::from_pixel(64, 32, image::Rgba([40, 120, 200, 255]))
+        .write_to(&mut std::io::Cursor::new(&mut bytes), image::ImageFormat::Png)
+        .unwrap();
+    let png = Arc::new(teams_proto::PastedPicture {
+        format: teams_proto::PastedFormat::Png,
+        bytes,
+    });
+    rig.core
+        .pictures
+        .lock()
+        .unwrap()
+        .extend([(first.to_owned(), png.clone()), (second.to_owned(), png)]);
+    rig.core.messages.lock().unwrap().insert(
+        CHANNEL.to_owned(),
+        vec![picture("1760000300100", second), picture(POST, first)],
+    );
+    rig.core
+        .roots
+        .lock()
+        .unwrap()
+        .insert(CHANNEL.to_owned(), vec![("1760000300100".to_owned(), POST.to_owned())]);
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    click(cx, "channel-row-1");
+    let view = cx.update(|_, cx| shell.read(cx).channel().unwrap().clone());
+    cx.update(|_, cx| view.update(cx, |view, cx| view.open_picture("missing", first, cx)));
+    assert!(cx.update(|_, cx| teams_ui::picture_viewer::shown(cx).is_none()));
+    click(cx, "channel-text-1760000300000-open-[0]");
+    let viewer = cx.update(|_, cx| teams_ui::picture_viewer::shown(cx).unwrap());
+    assert_eq!(cx.update(|_, cx| viewer.read(cx).at()), (0, 2));
+    cx.update(|_, cx| viewer.update(cx, teams_ui::picture_viewer::PictureViewer::next));
+    cx.run_until_parked();
+    assert_eq!(cx.update(|_, cx| viewer.read(cx).at()), (1, 2));
+    cx.update(|_, cx| teams_ui::picture_viewer::close(cx));
+    assert_read_only(&rig, cx);
+}
+
+#[test]
+fn a_channel_forward_opens_its_original_in_the_mock_browser_when_that_chat_is_not_listed() {
+    let rig = rig();
+    *rig.core.teams.lock().unwrap() = Some(teams());
+    let fixture: serde_json::Value = serde_json::from_str(
+        &include_str!("../../../tests/fixtures/chatsvc/forward.json")
+            .replace("<guid:c>", &LAB_C["8:orgid:".len()..])
+            .replace("<group>", "000000000000000000000000000group"),
+    )
+    .unwrap();
+    let forward = &fixture["read_back"][0];
+    let mut post = message(POST, LAB_B, forward["content"].as_str().unwrap());
+    post.properties = Some(forward["properties"].to_string());
+    rig.core.messages.lock().unwrap().insert(CHANNEL.to_owned(), vec![post]);
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    click(cx, "channel-row-1");
+    let view = cx.update(|_, cx| shell.read(cx).channel().unwrap().clone());
+    let original = cx.update(|_, cx| {
+        view.read(cx).threads()[0]
+            .post
+            .as_ref()
+            .unwrap()
+            .forwarded
+            .as_ref()
+            .unwrap()
+            .original
+            .as_ref()
+            .unwrap()
+            .clone()
+    });
+    click(cx, "forward-time-1760000300000");
+    assert_eq!(cx.opened_url(), original.web_link);
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).main().clone()),
+        Main::Channel(CHANNEL.to_owned())
+    );
+    assert_read_only(&rig, cx);
+}
+
 fn teams_of(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> Entity<TeamsList> {
     cx.update(|_, cx| shell.read(cx).teams().clone())
 }

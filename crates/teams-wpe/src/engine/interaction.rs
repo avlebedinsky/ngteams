@@ -313,3 +313,7 @@ pub(super) fn editing_command(web_view: &WebView, command: EditingCommand) {
     // SAFETY: a live web view and one of WebKit's NUL-terminated command names.
     unsafe { webkit::webkit_web_view_execute_editing_command(web_view.raw(), name.as_ptr().cast()) };
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/interaction.rs"]
+mod tests;

@@ -41,13 +41,13 @@ use crate::browser::Media;
 use crate::capture::{EVENTS_FILE, TAP_TONE_HZ};
 use crate::classify::Classifier;
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
-use crate::session::{LabSession, SessionOptions};
+use crate::session::{LabSession, SessionError, SessionOptions};
 
 use super::ab_call::{
-    ACCEPT_AUDIO_CSS, CAMERA, CONNECT_WAIT, CalleeAction, CalleeRole, EarlierRings, HANG_UP_CSS, INCOMING_CALL,
-    Modality, RING_LOOK, RING_WAIT, RunCall, TONE_WAIT, VIDEO_WAIT, back_to_chat, check_ring, hang_up_after_failure,
-    hang_up_page, judge_callee, mri, native_call_conflict, place_call, policy, stand_up_calling, switch_microphone,
-    video_frames, wait_calling_socket, watch_controls,
+    ACCEPT_AUDIO_CSS, CAMERA, CONNECT_WAIT, CallPauses, CalleeAction, CalleeRole, EarlierRings, HANG_UP_CSS,
+    INCOMING_CALL, Modality, RING_LOOK, RING_WAIT, RunCall, TONE_WAIT, VIDEO_WAIT, back_to_chat, check_ring,
+    hang_up_after_failure, hang_up_page, judge_callee, mri, native_call_conflict, place_call, policy,
+    stand_up_calling_with, switch_microphone, video_frames, wait_calling_socket, watch_controls,
 };
 use super::ab_chat::{EARLIER_RUN_PROBE, chat_link, load_at, probe_rules, save_screenshot, setup};
 use super::dsl::{Selector, js_string};
@@ -108,8 +108,21 @@ const SCREEN_GONE: Duration = Duration::from_secs(30);
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
     let binary = headless_binary()?;
     let config = LabConfig::load(&LabLocations::from_env()?)?;
-    let (mri_a, mri_b) = (mri(&config, Alias::A)?, mri(&config, Alias::B)?);
-    let mut report = ScenarioReport::new(ScenarioName::AbCallNative);
+    run_with(binary, paths, &config, options, async |options| {
+        LabSession::open_with(paths, Alias::B, options).await
+    })
+    .await
+}
+
+async fn run_with(
+    binary: PathBuf,
+    paths: &LabPaths,
+    config: &LabConfig,
+    options: RunOptions,
+    open: impl AsyncFnOnce(SessionOptions) -> Result<LabSession, SessionError>,
+) -> Result<ScenarioReport, ScenarioError> {
+    let (mri_a, mri_b) = (mri(config, Alias::A)?, mri(config, Alias::B)?);
+    let report = ScenarioReport::new(ScenarioName::AbCallNative);
     let tone = write_burst_tone(paths).map_err(|error| setup(format!("can't write the tone: {error}")))?;
     let session_options = SessionOptions {
         classifier: Classifier::new(),
@@ -120,12 +133,12 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         media: Media::Fake { audio: Some(tone) },
         user_agent: Some(USER_AGENT.to_owned()),
     };
-    let mut session = LabSession::open_with(paths, Alias::B, session_options).await?;
+    let session = open(session_options).await?;
     for rule in probe_rules(None).map_err(|error| setup(error.to_string()))? {
         session.force_deny(rule);
     }
     let dir = session.capture_dir().map(Path::to_path_buf);
-    let mut run = Run {
+    let run = Run {
         binary,
         dir: dir.clone().unwrap_or_else(|| paths.data_dir().join("headless")),
         call: RunCall {
@@ -133,11 +146,17 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
             group_chat: None,
         },
         mri_a,
-        mri_b: mri_b.clone(),
+        mri_b,
         options,
         natives: Vec::new(),
         first_ring: None,
     };
+    Ok(finish_run(run, session, report).await)
+}
+
+/// Settles all native clients and the opened browser after any phase outcome.
+async fn finish_run(mut run: Run, mut session: LabSession, mut report: ScenarioReport) -> ScenarioReport {
+    let dir = session.capture_dir().map(Path::to_path_buf);
     if let Err(error) = run.drive(&mut session, &mut report).await {
         report.failures.push(error.to_string());
         if let Some(note) = save_screenshot(Alias::B, &session).await {
@@ -148,10 +167,10 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
     run.stop_natives(&mut session, &mut report).await;
     report.close_account(Alias::B, session, &policy(FORCED)).await;
     if let Some(dir) = dir {
-        judge_page(&dir, &run, &mri_b, &mut report);
+        judge_page(&dir, &run, &run.mri_b, &mut report);
         report.notes.push(format!("b: recorded into {}", dir.display()));
     }
-    Ok(report)
+    report
 }
 
 /// The `teams-headless` binary from [`HEADLESS_BIN`].
@@ -204,10 +223,19 @@ struct Run {
 
 impl Run {
     async fn drive(&mut self, session: &mut LabSession, report: &mut ScenarioReport) -> Result<(), ScenarioError> {
+        self.drive_with(session, report, CallPauses::default()).await
+    }
+
+    async fn drive_with(
+        &mut self,
+        session: &mut LabSession,
+        report: &mut ScenarioReport,
+        pauses: CallPauses,
+    ) -> Result<(), ScenarioError> {
         load_at(Alias::B, session, &chat_link(&self.mri_a), self.options.load_timeout).await?;
         size_page(session).await?;
         report.notes.push("b: the web client loaded at the a-b chat".to_owned());
-        stand_up_calling(Alias::B, &mut session.driver(), report).await?;
+        stand_up_calling_with(Alias::B, &mut session.driver(), report, pauses).await?;
         back_to_chat(Alias::B, &mut session.driver(), report).await?;
         wait_calling_socket(Alias::B, session, report).await?;
         watch_controls(Alias::B, session).await?;
@@ -626,6 +654,7 @@ pub fn is_summary(line: &str) -> bool {
         "tone hz=",
         "echo heard=",
         "devices ",
+        "samples ",
         "call_answer",
         "ring_ended",
         "camera_",
@@ -806,3 +835,7 @@ pub(crate) fn now_ms() -> u64 {
         .and_then(|since| u64::try_from(since.as_millis()).ok())
         .unwrap_or(u64::MAX)
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/scenario/ab_call_native_tests.rs"]
+mod tests;

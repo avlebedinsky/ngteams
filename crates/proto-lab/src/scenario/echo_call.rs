@@ -538,13 +538,22 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         media: Media::Fake { audio: Some(tone) },
         user_agent: Some(USER_AGENT.to_owned()),
     };
-    let mut session = LabSession::open_with(paths, ACCOUNT, session_options).await?;
+    let session = LabSession::open_with(paths, ACCOUNT, session_options).await?;
+    Ok(drive(session, options, report, Pauses::default()).await)
+}
+
+async fn drive(
+    mut session: LabSession,
+    options: RunOptions,
+    mut report: ScenarioReport,
+    pauses: Pauses,
+) -> ScenarioReport {
     // before the page loads: the client sends an earlier run's unsent probe again as soon as it can
     match forced_rules() {
         Ok(rules) => rules.into_iter().for_each(|rule| session.force_deny(rule)),
         Err(error) => report.failures.push(format!("can't force the probe denies: {error}")),
     }
-    if let Err(error) = call(&mut session, options, &mut report).await {
+    if let Err(error) = call(&mut session, options, &mut report, pauses).await {
         report.failures.push(error.to_string());
         if let Some(note) = save_screenshot(ACCOUNT, &session).await {
             report.notes.push(note);
@@ -557,28 +566,55 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         judge_capture(&dir, &mut report);
         report.notes.push(format!("recorded into {}", dir.display()));
     }
-    Ok(report)
+    report
+}
+
+/// The existing observation/recording intervals, supplied explicitly by offline driver tests.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Pauses {
+    steady: Duration,
+    warm: Duration,
+    echo_wait: Duration,
+    after_tone: Duration,
+    after_hang_up: Duration,
+}
+
+impl Default for Pauses {
+    fn default() -> Self {
+        Self {
+            steady: PAGE_STEADY,
+            warm: CALLS_APP_WARM,
+            echo_wait: ECHO_WAIT,
+            after_tone: AFTER_TONE,
+            after_hang_up: AFTER_HANG_UP,
+        }
+    }
 }
 
 /// Steps 1–4: load, start the calling stack and open Devices, place the test call, stay, hang up.
-async fn call(session: &mut LabSession, options: RunOptions, report: &mut ScenarioReport) -> Result<(), ScenarioError> {
+async fn call(
+    session: &mut LabSession,
+    options: RunOptions,
+    report: &mut ScenarioReport,
+    pauses: Pauses,
+) -> Result<(), ScenarioError> {
     load(ACCOUNT, session, options.load_timeout).await?;
     report.notes.push(format!("{ACCOUNT}: the web client loaded"));
     size_page(session).await?;
     let mut driver = session.driver();
-    stand_up_calling(&mut driver, report).await?;
+    stand_up_calling(&mut driver, report, pauses).await?;
     driver.click("a makes a test call", TEST_CALL_BUTTON).await?;
     driver.wait_for("the call screen", HANG_UP, CALL_START).await?;
     report.notes.push(format!("{ACCOUNT}: the call screen is up"));
     turn_off_noise_suppression(ACCOUNT, &mut driver, report).await?;
     super::ab_call::switch_microphone(ACCOUNT, &mut driver, report).await?;
-    let waited = wait_for_tone(session, ECHO_WAIT).await;
+    let waited = wait_for_tone(session, pauses.echo_wait).await;
     report.notes.push(match waited {
         ToneWait::Back(after) => format!("{ACCOUNT}: the tone came back {after:?} after the call screen showed"),
-        ToneWait::TimedOut => format!("{ACCOUNT}: no tone came back within {ECHO_WAIT:?}"),
+        ToneWait::TimedOut => format!("{ACCOUNT}: no tone came back within {:?}", pauses.echo_wait),
         ToneWait::Lost => format!("{ACCOUNT}: the browser connection went before the tone came back"),
     });
-    linger(session, AFTER_TONE).await;
+    linger(session, pauses.after_tone).await;
     let still_up = driver
         .evaluate(
             "the call screen",
@@ -593,7 +629,7 @@ async fn call(session: &mut LabSession, options: RunOptions, report: &mut Scenar
             "{ACCOUNT}: the call screen was gone before the run hung up: nothing to hang up"
         ));
     }
-    linger(session, AFTER_HANG_UP).await;
+    linger(session, pauses.after_hang_up).await;
     Ok(())
 }
 
@@ -674,14 +710,18 @@ pub(crate) async fn turn_off_noise_suppression(
 /// for before that waits for it forever (`Deferring calling stack Initialization. [entryPoint:startEchoBotCall]` in the
 /// client's own log, 2026-10-20). Settings' deep link reloads the page, which loses the stack again, so Settings is
 /// opened from the account menu.
-async fn stand_up_calling(driver: &mut Driver, report: &mut ScenarioReport) -> Result<(), ScenarioError> {
+async fn stand_up_calling(
+    driver: &mut Driver,
+    report: &mut ScenarioReport,
+    pauses: Pauses,
+) -> Result<(), ScenarioError> {
     // the client may load once more on its way to the origin it assigns the account: the app bar has to stay
     driver.wait_for("the Calls app", CALLS_APP, PAGE_OPEN).await?;
-    tokio::time::sleep(PAGE_STEADY).await;
+    tokio::time::sleep(pauses.steady).await;
     driver.wait_for("the Calls app", CALLS_APP, PAGE_OPEN).await?;
     let document = driver.evaluate("the web client", "performance.timeOrigin").await?;
     driver.click("a opens the Calls app", CALLS_APP).await?;
-    tokio::time::sleep(CALLS_APP_WARM).await;
+    tokio::time::sleep(pauses.warm).await;
     driver.click("a opens the account menu", SETTINGS_MENU).await?;
     driver
         .wait_for("the Settings item", SETTINGS_ITEM, CONTROL_WAIT)
@@ -892,3 +932,7 @@ pub(crate) async fn linger(session: &mut LabSession, duration: Duration) -> bool
     }
     true
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/scenario/echo_call_driver_tests.rs"]
+mod tests;

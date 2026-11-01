@@ -74,27 +74,33 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         user_agent: None,
         ..SessionOptions::fail_closed()
     };
-    let mut a = LabSession::open_with(paths, Alias::A, session_options).await?;
-    let mut report = ScenarioReport::new(ScenarioName::AbMeeting);
+    let a = LabSession::open_with(paths, Alias::A, session_options).await?;
     let nonce = nonce();
-    if let Err(error) = deny_probes(&a, Some(&probe_text(&nonce))) {
-        report.failures.push(error.to_string());
-    }
     let mri = |alias| config.account(alias).mri.as_deref().unwrap_or_default();
     let chat_id = one_to_one_id(mri(Alias::A), mri(Alias::B));
-    let policy = policy(chat_id.as_deref()).unwrap_or_else(|error| {
-        report
-            .failures
-            .push(format!("can't tell the a–b chat or a calendar write in a URL: {error}"));
-        DenyPolicy::Reviewed(Review::new().expecting_forced(&EXPECTED_FORCED))
-    });
     let steps = Steps {
         mri_b: mri(Alias::B),
         upn_b: &config.account(Alias::B).upn,
         chat_id: chat_id.as_deref(),
         nonce: &nonce,
         options,
+        pauses: FormPauses::default(),
     };
+    Ok(finish(a, &steps).await)
+}
+
+/// Runs and settles an already admitted session; every failed step is diagnosed before the browser closes.
+async fn finish(mut a: LabSession, steps: &Steps<'_>) -> ScenarioReport {
+    let mut report = ScenarioReport::new(ScenarioName::AbMeeting);
+    if let Err(error) = deny_probes(&a, Some(&probe_text(steps.nonce))) {
+        report.failures.push(error.to_string());
+    }
+    let policy = policy(steps.chat_id).unwrap_or_else(|error| {
+        report
+            .failures
+            .push(format!("can't tell the a–b chat or a calendar write in a URL: {error}"));
+        DenyPolicy::Reviewed(Review::new().expecting_forced(&EXPECTED_FORCED))
+    });
     if let Err(error) = steps.run(&mut a, &mut report).await {
         report.failures.push(error.to_string());
         let mut drive = a.driver();
@@ -113,7 +119,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         ));
     }
     report.close_account(Alias::A, a, &policy).await;
-    Ok(report)
+    report
 }
 
 /// How a run judges its denies: `ab-chat`'s forced denies and mapped chat, and every write of the account's events
@@ -130,12 +136,31 @@ pub fn policy(chat_id: Option<&str>) -> Result<DenyPolicy, regex::Error> {
     Ok(DenyPolicy::Reviewed(review))
 }
 
+/// Original pauses while the attendee picker and cancellation form settle.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct FormPauses {
+    suggestion: Duration,
+    invited: Duration,
+    cancel: Duration,
+}
+
+impl Default for FormPauses {
+    fn default() -> Self {
+        Self {
+            suggestion: Duration::from_secs(2),
+            invited: Duration::from_secs(2),
+            cancel: Duration::from_secs(3),
+        }
+    }
+}
+
 struct Steps<'a> {
     mri_b: &'a str,
     upn_b: &'a str,
     chat_id: Option<&'a str>,
     nonce: &'a str,
     options: RunOptions,
+    pauses: FormPauses,
 }
 
 impl Steps<'_> {
@@ -218,9 +243,9 @@ impl Steps<'_> {
                 FORM,
             )
             .await?;
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(self.pauses.suggestion).await;
         drive.press("a takes the suggestion", Key::ENTER).await?;
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(self.pauses.invited).await;
         Ok(())
     }
 
@@ -255,7 +280,7 @@ impl Steps<'_> {
         drive: &mut Driver,
         report: &mut ScenarioReport,
     ) -> Result<(), ScenarioError> {
-        tokio::time::sleep(Duration::from_secs(3)).await;
+        tokio::time::sleep(self.pauses.cancel).await;
         wait_for_button(drive, "the details' Cancel meeting", &["Cancel meeting"], FORM).await?;
         click_button(
             drive,
@@ -543,3 +568,7 @@ mod tests {
         assert!(link.starts_with("https://teams.microsoft.com/l/meeting/new?subject=lab+meeting+x&attendees=b%40lab"));
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/scenario/ab_meeting_driver_tests.rs"]
+mod driver_tests;

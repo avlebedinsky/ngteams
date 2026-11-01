@@ -323,7 +323,7 @@ async fn call_echo_places_the_test_call_holds_it_hangs_it_up_and_finds_its_tone_
     }
 
     // the echo stand-in played the tone back ECHO_DELAY later, plus the way there and back
-    let echo = files.heard(1_000.0).unwrap().expect("the tone came back");
+    let echo = files.heard_own_echo(1_000.0).unwrap().expect("the tone came back");
     eprintln!("{}", call::echo_line(Some(&echo)));
     assert!(!echo.blocks.is_empty() && echo.delays.len() >= 3, "{echo:?}");
     let p50 = echo.delay_percentile(50).unwrap();

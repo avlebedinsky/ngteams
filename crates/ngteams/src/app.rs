@@ -385,7 +385,7 @@ impl Running {
     }
 
     /// An account added: started, shown, and the prompt that asked for it closed.
-    fn added(&mut self, started: Started, cx: &mut gpui::Context<Self>) {
+    fn added<S: SecretStore + 'static>(&mut self, started: Started<S>, cx: &mut gpui::Context<Self>) {
         self.add_started(started, cx);
         if let Some(key) = self.bridges.last().map(|(key, _, _)| key.clone()) {
             self.desktop.update(cx, |desktop, cx| {
@@ -549,3 +549,7 @@ pub fn quit_after(stopped: Task<()>, cx: &mut App) {
     })
     .detach();
 }
+
+#[cfg(test)]
+#[path = "../tests/support/app.rs"]
+pub(crate) mod tests;

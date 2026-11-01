@@ -234,7 +234,9 @@ fn the_socket_answers_the_extension_line_by_line() -> TestResult {
     let lab = lab()?;
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("guard.sock");
-    let _server = GuardServer::start(&path, Arc::new(lab.guard))?;
+    assert!(format!("{:?}", lab.guard).contains("Guard"));
+    let server = GuardServer::start(&path, Arc::new(lab.guard))?;
+    assert_eq!(server.path(), path);
 
     let mut client = GuardClient::connect(&path);
     assert!(!client.allows(PAGE, None, "https://example.test/"), "not armed yet");

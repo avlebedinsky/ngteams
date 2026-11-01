@@ -38,13 +38,13 @@ use crate::browser::Media;
 use crate::capture::EVENTS_FILE;
 use crate::classify::Classifier;
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
-use crate::session::{LabSession, SessionOptions};
+use crate::session::{LabSession, SessionError, SessionOptions};
 
 use super::ab_call::{
-    ACCEPT_AUDIO_CSS, CAMERA, CHAT_JOIN, CHAT_JOIN_CSS, CONNECT_WAIT, CalleeRole, EarlierRings, HANG_UP_CSS,
-    INCOMING_CALL, RING_WAIT, RingCheck, RunCall, TONE_WAIT, VIDEO_WAIT, chat_shown, chat_shown_script, check_ring,
-    hang_up_after_failure, hang_up_page, invitations, judge_callee, mri, open_join, policy, ring_check,
-    stand_up_calling, switch_microphone, video_frames, wait_calling_socket, watch_controls,
+    ACCEPT_AUDIO_CSS, CAMERA, CHAT_JOIN, CHAT_JOIN_CSS, CONNECT_WAIT, CallPauses, CalleeRole, EarlierRings,
+    HANG_UP_CSS, INCOMING_CALL, RING_WAIT, RingCheck, RunCall, TONE_WAIT, VIDEO_WAIT, chat_shown, chat_shown_script,
+    check_ring, hang_up_after_failure, hang_up_page, invitations, judge_callee, mri, open_join, policy, ring_check,
+    stand_up_calling_with, switch_microphone, video_frames, wait_calling_socket, watch_controls,
 };
 use super::ab_call_native::{
     ANSWER, NATIVE_CONNECT, NATIVE_EXIT, NATIVE_FRAMES, Native, PAGE_FRAMES, TONE_HZ, capture_len, headless_binary,
@@ -91,9 +91,9 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
     let [Ok(mri_a), Ok(mri_b), Ok(mri_c)] = mris else {
         return Err(setup("lab.toml names no MRI for a, b or c".to_owned()));
     };
-    let mut pages = open_pages(paths, options, [(Alias::B, mri_b), (Alias::C, mri_c)]).await?;
+    let pages = open_pages(paths, options, [(Alias::B, mri_b), (Alias::C, mri_c)]).await?;
     let dir = pages[0].session.capture_dir().map(Path::to_path_buf);
-    let mut run = Mixed {
+    let run = Mixed {
         binary,
         dir: dir.clone().unwrap_or_else(|| paths.data_dir().join("headless")),
         chat: chat.clone(),
@@ -104,7 +104,13 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         native: None,
         placed: None,
         options,
+        observe_within: NATIVE_SHOWS,
     };
+    Ok(finish_run(run, pages, report).await)
+}
+
+/// Drives and settles every opened account even when a call phase fails.
+async fn finish_run(mut run: Mixed, mut pages: Vec<Page>, mut report: ScenarioReport) -> ScenarioReport {
     if let Err(error) = run.drive(&mut pages, &mut report).await {
         report.failures.push(error.to_string());
         for page in &pages {
@@ -127,7 +133,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
     for page in pages {
         close_page(page, &run, &mut report).await;
     }
-    Ok(report)
+    report
 }
 
 /// b's and c's pages opened in the armed browser, each under the earlier run's probe rules.
@@ -135,6 +141,18 @@ async fn open_pages(
     paths: &LabPaths,
     options: RunOptions,
     accounts: [(Alias, String); 2],
+) -> Result<Vec<Page>, ScenarioError> {
+    open_pages_with(paths, options, accounts, async |alias, options| {
+        LabSession::open_with(paths, alias, options).await
+    })
+    .await
+}
+
+async fn open_pages_with(
+    paths: &LabPaths,
+    options: RunOptions,
+    accounts: [(Alias, String); 2],
+    mut open: impl AsyncFnMut(Alias, SessionOptions) -> Result<LabSession, SessionError>,
 ) -> Result<Vec<Page>, ScenarioError> {
     let tone = write_burst_tone(paths).map_err(|error| setup(format!("can't write the tone: {error}")))?;
     let session_options = SessionOptions {
@@ -148,7 +166,7 @@ async fn open_pages(
     };
     let mut pages: Vec<Page> = Vec::new();
     for (alias, mri) in accounts {
-        let session = match LabSession::open_with(paths, alias, session_options.clone()).await {
+        let session = match open(alias, session_options.clone()).await {
             Ok(session) => session,
             Err(error) => {
                 for page in pages {
@@ -200,10 +218,20 @@ struct Mixed {
     native: Option<Native>,
     placed: Option<u64>,
     options: RunOptions,
+    observe_within: Duration,
 }
 
 impl Mixed {
     async fn drive(&mut self, pages: &mut [Page], report: &mut ScenarioReport) -> Result<(), ScenarioError> {
+        self.drive_with(pages, report, CallPauses::default()).await
+    }
+
+    async fn drive_with(
+        &mut self,
+        pages: &mut [Page],
+        report: &mut ScenarioReport,
+        pauses: CallPauses,
+    ) -> Result<(), ScenarioError> {
         let link = chat_link_by_id(&self.chat);
         for page in pages.iter_mut() {
             load_at(page.alias, &mut page.session, &link, self.options.load_timeout).await?;
@@ -211,7 +239,7 @@ impl Mixed {
             report
                 .notes
                 .push(format!("{}: the web client loaded at the group chat", page.alias));
-            stand_up_calling(page.alias, &mut page.session.driver(), report).await?;
+            stand_up_calling_with(page.alias, &mut page.session.driver(), report, pauses).await?;
             wait_calling_socket(page.alias, &mut page.session, report).await?;
             watch_controls(page.alias, &page.session).await?;
         }
@@ -305,7 +333,7 @@ impl Mixed {
             .native
             .as_ref()
             .ok_or_else(|| setup("no native client runs".to_owned()))?;
-        let deadline = tokio::time::Instant::now() + NATIVE_SHOWS;
+        let deadline = tokio::time::Instant::now() + self.observe_within;
         loop {
             if let Some(counts) = video_lines_after(&native.output(), after) {
                 report
@@ -335,7 +363,7 @@ impl Mixed {
             .native
             .as_ref()
             .ok_or_else(|| setup("no native client runs".to_owned()))?;
-        let deadline = tokio::time::Instant::now() + NATIVE_SHOWS;
+        let deadline = tokio::time::Instant::now() + self.observe_within;
         loop {
             let output = native.output();
             let line = latest_participants(&output)
@@ -406,7 +434,7 @@ impl Mixed {
             .native
             .as_ref()
             .ok_or_else(|| setup("no native client runs".to_owned()))?;
-        let deadline = tokio::time::Instant::now() + NATIVE_SHOWS;
+        let deadline = tokio::time::Instant::now() + self.observe_within;
         loop {
             let shown = latest_participants(&native.output());
             if shows(shown.as_deref(), who) {
@@ -502,6 +530,15 @@ async fn answer(
 /// `page` in the call opens its microphone (noise suppression off, another microphone), must hear the tone within
 /// [`TONE_WAIT`], and its call audio must go both ways (the capture from byte `from` on).
 async fn hear(page: &mut Page, from: u64, report: &mut ScenarioReport) -> Result<(), ScenarioError> {
+    hear_within(page, from, report, TONE_WAIT).await
+}
+
+async fn hear_within(
+    page: &mut Page,
+    from: u64,
+    report: &mut ScenarioReport,
+    within: Duration,
+) -> Result<(), ScenarioError> {
     let alias = page.alias;
     turn_off_noise_suppression(alias, &mut page.session.driver(), report).await?;
     switch_microphone(alias, &mut page.session.driver(), report).await?;
@@ -509,7 +546,7 @@ async fn hear(page: &mut Page, from: u64, report: &mut ScenarioReport) -> Result
         return Err(setup("the run records no capture to hear the tone in".to_owned()));
     };
     let session = &mut page.session;
-    let heard = wait_for_tone_in_from(&file, from, TONE_WAIT, async |poll| linger(session, poll).await).await;
+    let heard = wait_for_tone_in_from(&file, from, within, async |poll| linger(session, poll).await).await;
     match heard {
         ToneWait::Back(after) => report.notes.push(format!(
             "{alias}: heard the tone ({TONE_HZ} Hz) {after:?} into the wait"
@@ -530,6 +567,15 @@ async fn hear(page: &mut Page, from: u64, report: &mut ScenarioReport) -> Result
 /// `page` turns its camera on and must decode at least [`PAGE_FRAMES`] of video within [`VIDEO_WAIT`] (the capture
 /// from byte `from` on).
 async fn see(page: &mut Page, from: u64, report: &mut ScenarioReport) -> Result<(), ScenarioError> {
+    see_within(page, from, report, VIDEO_WAIT).await
+}
+
+async fn see_within(
+    page: &mut Page,
+    from: u64,
+    report: &mut ScenarioReport,
+    within: Duration,
+) -> Result<(), ScenarioError> {
     let alias = page.alias;
     page.session
         .driver()
@@ -538,7 +584,7 @@ async fn see(page: &mut Page, from: u64, report: &mut ScenarioReport) -> Result<
     let Some(file) = page.session.capture_dir().map(|dir| dir.join(EVENTS_FILE)) else {
         return Err(setup("the run records no capture to read the video in".to_owned()));
     };
-    let deadline = tokio::time::Instant::now() + VIDEO_WAIT;
+    let deadline = tokio::time::Instant::now() + within;
     loop {
         let frames = video_frames(&read_from(&file, from));
         if frames >= PAGE_FRAMES {
@@ -652,3 +698,7 @@ pub fn native_lines(output: &str) -> Vec<(u64, u64)> {
         })
         .collect()
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/scenario/abc_call_mixed_driver_tests.rs"]
+mod tests;

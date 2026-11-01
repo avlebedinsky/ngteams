@@ -49,7 +49,7 @@ use super::ab_chat::{
     enforce, load, nonce, not_received, one_to_one_id, probe_text, save_screenshot_as, send, setup, wait_for_newest,
 };
 use super::ab_chat_full::{CHAT_OPEN, PAGE_CALL, clear_compose, message_action};
-use super::ab_image::{MEDIA_WRITE, SETTLE, media_rules};
+use super::ab_image::{AttachmentWaits, MEDIA_WRITE, SETTLE, media_rules};
 use super::dsl::{Driver, Key, RequestPattern, StepError, js_string};
 use super::expected::Review;
 use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport};
@@ -364,8 +364,8 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         user_agent: None,
         ..SessionOptions::fail_closed()
     };
-    let mut a = LabSession::open_with(paths, Alias::A, session_options.clone()).await?;
-    let mut b = match LabSession::open_with(paths, Alias::B, session_options).await {
+    let a = LabSession::open_with(paths, Alias::A, session_options.clone()).await?;
+    let b = match LabSession::open_with(paths, Alias::B, session_options).await {
         Ok(b) => b,
         Err(error) => {
             // a's browser goes down whatever happened
@@ -373,22 +373,9 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
             return Err(error.into());
         }
     };
-    let mut report = ScenarioReport::new(ScenarioName::AbFile);
     let nonce = nonce();
-    // before a's page loads: the client sends an earlier run's unsent probe, or file, again as soon as it can
-    for denied in [deny_probes(&a, Some(&probe_text(&nonce))), deny_file_writes(&a)] {
-        if let Err(error) = denied {
-            report.failures.push(error.to_string());
-        }
-    }
     let mri = |alias| config.account(alias).mri.clone().unwrap_or_default();
     let chat_id = one_to_one_id(&mri(Alias::A), &mri(Alias::B));
-    let policy = policy(chat_id.as_deref()).unwrap_or_else(|error| {
-        report
-            .failures
-            .push(format!("can't tell the a–b chat in a URL: {error}"));
-        DenyPolicy::Reviewed(Review::new().expecting_forced(&EXPECTED_FORCED))
-    });
     let file = File {
         mri_a: mri(Alias::A),
         mri_b: mri(Alias::B),
@@ -396,8 +383,31 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         content: test_file(&nonce),
         probe: probe_text(&nonce),
         options,
+        waits: AttachmentWaits {
+            attach: ATTACH_WAIT,
+            upload: FILE_WAIT,
+            settle: SETTLE,
+        },
     };
-    if let Err(error) = file.run(chat_id.as_deref(), &mut a, &mut b, &mut report).await {
+
+    Ok(finish(a, b, chat_id.as_deref(), &file).await)
+}
+
+async fn finish(mut a: LabSession, mut b: LabSession, chat_id: Option<&str>, file: &File) -> ScenarioReport {
+    let mut report = ScenarioReport::new(ScenarioName::AbFile);
+    // Arm the rules before either client loads or retries an earlier attachment.
+    for denied in [deny_probes(&a, Some(&file.probe)), deny_file_writes(&a)] {
+        if let Err(error) = denied {
+            report.failures.push(error.to_string());
+        }
+    }
+    let policy = policy(chat_id).unwrap_or_else(|error| {
+        report
+            .failures
+            .push(format!("can't tell the a–b chat in a URL: {error}"));
+        DenyPolicy::Reviewed(Review::new().expecting_forced(&EXPECTED_FORCED))
+    });
+    if let Err(error) = file.run(chat_id, &mut a, &mut b, &mut report).await {
         report.failures.push(error.to_string());
         for (alias, session) in [(Alias::A, &a), (Alias::B, &b)] {
             if let Some(note) = save_screenshot_as(alias, session, "failure.png").await {
@@ -413,7 +423,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
     for (alias, session) in [(Alias::A, a), (Alias::B, b)] {
         report.close_account(alias, session, &policy).await;
     }
-    Ok(report)
+    report
 }
 
 /// One run's accounts, texts, file and probe.
@@ -424,6 +434,7 @@ struct File {
     content: Vec<u8>,
     probe: String,
     options: RunOptions,
+    waits: AttachmentWaits,
 }
 
 impl File {
@@ -510,11 +521,11 @@ impl File {
             .notes
             .push(format!("a: {early} write(s) of the file denied before Enter"));
         drive.press_enter("a sends the file").await?;
-        let Some(first) = wait_file_write(a, before_file, FILE_WAIT).await else {
+        let Some(first) = wait_file_write(a, before_file, self.waits.upload).await else {
             note_denials(a, before, report);
             return Err(setup(format!(
                 "the client tried no write of the file within {}s of it",
-                FILE_WAIT.as_secs()
+                self.waits.upload.as_secs()
             )));
         };
         report.notes.push(format!(
@@ -523,7 +534,7 @@ impl File {
             first.url,
             first.label.as_deref().unwrap_or("-")
         ));
-        tokio::time::sleep(SETTLE).await;
+        tokio::time::sleep(self.waits.settle).await;
         note_denials(a, before, report);
         let caption_post = RequestPattern::new(Some("POST"), super::ab_chat::MESSAGE_POST)
             .map_err(|error| setup(error.to_string()))?
@@ -584,7 +595,7 @@ impl File {
                 "a picks the upload item",
                 PICK_UPLOAD,
                 "an upload item in a menu",
-                ATTACH_WAIT,
+                self.waits.attach,
             )
             .await;
         report.notes.push(format!("a: upload item picked: {}", picked.is_ok()));
@@ -604,7 +615,7 @@ impl File {
                 &format!("a's compose box shows the file ({how})"),
                 &shows_attachment(&self.texts.file_name),
                 "the file's name beside the compose box",
-                ATTACH_WAIT,
+                self.waits.attach,
             )
             .await
         {
@@ -619,11 +630,11 @@ impl File {
     async fn reload(&self, a: &mut LabSession, report: &mut ScenarioReport) -> Result<(), ScenarioError> {
         let before = file_writes(a).len();
         load(Alias::A, a, self.options.load_timeout).await?;
-        tokio::time::sleep(SETTLE).await;
+        tokio::time::sleep(self.waits.settle).await;
         let again = file_writes(a).len().saturating_sub(before);
         report.notes.push(format!(
             "a: after loading again, {again} write(s) of the file denied within {}s",
-            SETTLE.as_secs()
+            self.waits.settle.as_secs()
         ));
         let outcome = self.discard_unsent(a).await;
         report.notes.push(match outcome {
@@ -648,7 +659,7 @@ impl File {
                 "a finds this run's unsent file",
                 &mark,
                 "a message naming this run's file",
-                ATTACH_WAIT,
+                self.waits.attach,
             )
             .await;
         match found {
@@ -662,7 +673,7 @@ impl File {
                 "a's unsent file is gone",
                 &format!("!{mark}"),
                 "no message naming this run's file",
-                ATTACH_WAIT,
+                self.waits.attach,
             )
             .await;
         Ok(match gone {
@@ -728,3 +739,7 @@ async fn wait_file_write(session: &LabSession, before: usize, timeout: Duration)
         tokio::time::sleep(Duration::from_millis(250)).await;
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/scenario/ab_file_driver_tests.rs"]
+mod driver_tests;

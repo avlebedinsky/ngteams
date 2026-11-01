@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import tempfile
 import types
 import unittest
@@ -269,6 +270,8 @@ import shutil
 import sys
 assert (Path(os.environ["CARGO_LLVM_COV_TARGET_DIR"]) / "CACHEDIR.TAG").read_text().startswith(
     "Signature: 8a477f597d28d172789f06886806bc55")
+if sys.argv[1:] == ["llvm-cov", "clean", "--workspace"]:
+    sys.exit(0)
 keys = ["PROTO_LAB_REQUIRE_CHROME", "GPUI_SMOKE_REQUIRE", "PROTO_LAB_LIVE",
         "TEAMS_MEDIA_TURN_SERVER", "TEAMS_MEDIA_TURN_USER", "TEAMS_MEDIA_TURN_PASSWORD",
         "RUSTFLAGS", "CARGO_ENCODED_RUSTFLAGS", "LLVM_PROFILE_FILE_NAME",
@@ -412,6 +415,75 @@ shutil.copyfile("llvm-fixture.json", sys.argv[sys.argv.index("--output-path") + 
                 self.assertEqual(result.returncode, 2)
                 self.assertIn("positive integer", result.stderr)
                 self.assertFalse(self.execution.exists())
+
+
+@unittest.skipUnless(sys.platform == "linux" and shutil.which("cargo") and
+                     subprocess.run(["cargo", "llvm-cov", "--version"], stdout=subprocess.DEVNULL,
+                                    stderr=subprocess.DEVNULL).returncode == 0,
+                     "requires Linux and the coverage toolchain")
+class CoverageArtifactTests(unittest.TestCase):
+    def test_a_changed_library_is_not_measured_against_an_old_unselected_consumer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            scripts = root / "scripts"
+            scripts.mkdir()
+            for name in ["coverage.sh", "coverage-report.py"]:
+                shutil.copy2(Path(__file__).with_name(name), scripts / name)
+            (root / "Cargo.toml").write_text(
+                '[workspace]\nresolver = "3"\nmembers = ["example", "consumer"]\n')
+            for name in ["example", "consumer"]:
+                source = root / name / "src"
+                source.mkdir(parents=True)
+                dependencies = '\n[dependencies]\nexample = { path = "../example" }\n' if name == "consumer" else ''
+                (source.parent / "Cargo.toml").write_text(
+                    f'[package]\nname = "{name}"\nversion = "0.1.0"\nedition = "2024"\n{dependencies}')
+            library = root / "example/src/lib.rs"
+            library.write_text('pub fn value() -> u32 {\n let mut n = 0;\n' + ' n += 1;\n' * 30 + ' n\n}\n')
+            (root / "consumer/src/main.rs").write_text(
+                'fn main() { assert_eq!(example::value(), 30); }\n'
+                '#[test] fn uses_library() { main(); }\n')
+            (root / "coverage.toml").write_text(
+                'target = 90\nmetrics = ["lines", "functions", "regions"]\n'
+                '[excluded]\n[baselines]\nexample = { lines = 90, functions = 90, regions = 90 }\n')
+            environment = dict(os.environ)
+            for name in ["CARGO_ENCODED_RUSTFLAGS", "RUSTFLAGS", "CARGO_TARGET_DIR", "CARGO_BUILD_BUILD_DIR",
+                         "CARGO_LLVM_COV_BUILD_DIR"]:
+                environment.pop(name, None)
+            sysroot = subprocess.check_output(["rustc", "--print", "sysroot"], text=True).strip()
+            environment.update(
+                RUSTUP_TOOLCHAIN=Path(sysroot).name,
+                CARGO_LLVM_COV_TARGET_DIR=str(root / "target/coverage-continuous-build"),
+                RUSTFLAGS="-C llvm-args=-runtime-counter-relocation",
+                LLVM_PROFILE_FILE_NAME="%p-%m%c.profraw",
+            )
+
+            def run(*args):
+                return subprocess.run(args, cwd=root, env=environment, capture_output=True, text=True)
+
+            locked = run("cargo", "generate-lockfile", "--offline")
+            self.assertEqual(locked.returncode, 0, locked.stderr)
+            warm = run("cargo", "llvm-cov", "-p", "consumer", "--locked", "--no-report")
+            self.assertEqual(warm.returncode, 0, warm.stdout + warm.stderr)
+            stale = [path for path in (root / "target/coverage-continuous-build/debug/deps").glob("consumer-*")
+                     if path.suffix == "" and os.access(path, os.X_OK)]
+            self.assertTrue(stale, "the old consumer must actually exist")
+            library.write_text('pub fn value() -> u32 { 42 }\n'
+                               '#[test] fn current_value() { assert_eq!(value(), 42); }\n')
+            wrapper = scripts / "coverage.sh"
+            fixed = wrapper.read_text()
+            # Reproduce the previous selection-only cleanup with a real consumer binary and LLVM export.
+            wrapper.write_text(fixed.replace('"${measurement_env[@]}" cargo llvm-cov clean --workspace', ':'))
+            environment.pop("RUSTFLAGS")
+            broken = run("bash", str(wrapper), "-p", "example", "--require-target")
+            self.assertNotEqual(broken.returncode, 0, broken.stdout + broken.stderr)
+            self.assertIn("below 90%", broken.stdout + broken.stderr)
+            self.assertTrue(any(path.exists() for path in stale))
+            wrapper.write_text(fixed)
+            measured = run("bash", str(wrapper), "-p", "example", "--require-target")
+            self.assertEqual(measured.returncode, 0, measured.stdout + measured.stderr)
+            self.assertFalse(any(path.exists() for path in stale))
+            summary = json.loads((root / "target/coverage/continuous/example/summary.json").read_text())
+            self.assertEqual(summary["crates"]["example"]["percent"], dict.fromkeys(METRICS, 100))
 
 
 if __name__ == "__main__":

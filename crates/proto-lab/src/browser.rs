@@ -329,3 +329,7 @@ async fn wait_for_endpoint(child: &mut Child, dir: &Path) -> Result<DevToolsEndp
         tokio::time::sleep(POLL).await;
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/support/browser_process.rs"]
+mod test_process;

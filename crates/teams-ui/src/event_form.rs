@@ -700,26 +700,29 @@ impl EventForm {
         }
     }
 
-    /// Invites the address an attendee box holds, when it is one.
-    fn invite_typed(&mut self, need: Need, window: &mut Window, cx: &mut Context<Self>) {
+    /// Invites the address an attendee box holds, when it is one; false keeps an invalid pending address visible.
+    fn invite_typed(&mut self, need: Need, window: &mut Window, cx: &mut Context<Self>) -> bool {
         let input = match need {
             Need::Required => self.required.clone(),
             Need::Optional => self.optional.clone(),
         };
         let text = input.read(cx).value().to_string();
-        match model::typed_attendee(&text, need == Need::Required) {
+        let accepted = match model::typed_attendee(&text, need == Need::Required) {
             Some(attendee) => {
                 self.add_attendee(attendee, cx);
                 input.update(cx, |input, cx| input.set_value("", window, cx));
                 self.suggestions = None;
                 self.problem = None;
+                true
             }
             None if !text.trim().is_empty() => {
                 self.problem = Some("Type a whole email address, or pick someone from the suggestions.".into());
+                false
             }
-            None => {}
-        }
+            None => true,
+        };
         cx.notify();
+        accepted
     }
 
     /// Invites `person` from the suggestions.
@@ -806,8 +809,9 @@ impl EventForm {
                 Need::Required => &self.required,
                 Need::Optional => &self.optional,
             };
-            if !input.read(cx).value().trim().is_empty() {
-                self.invite_typed(need, window, cx);
+            // Saving must not omit someone whose pending address failed validation.
+            if !input.read(cx).value().trim().is_empty() && !self.invite_typed(need, window, cx) {
+                return;
             }
         }
         let draft = self.fields(cx).draft();
@@ -1624,7 +1628,9 @@ impl EventForm {
                 .hover(move |row| row.bg(rgb(palette.hover)))
                 .child(Glyph::PLUS.icon().size(px(14.0)))
                 .child(format!("Invite {}", attendee.address))
-                .on_click(cx.listener(move |form, _, window, cx| form.invite_typed(need, window, cx)))
+                .on_click(cx.listener(move |form, _, window, cx| {
+                    form.invite_typed(need, window, cx);
+                }))
         });
         let rows: Vec<AnyElement> = found
             .iter()

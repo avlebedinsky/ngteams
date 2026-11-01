@@ -50,6 +50,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         held_starts: &[Modality::Audio],
         step: options.call,
         options,
+        pauses: super::ab_call::CallPauses::default(),
     };
     run_plan(paths, &plan).await
 }
