@@ -8,6 +8,13 @@ web bundle's reading (`26260.1717.5229.7049`) until a write gets through**. See 
 client's writes are `crates/teams-proto/src/write/team.rs`, its reads `team_read.rs`, the engine's part `teams-core`'s
 `team_admin`, the pages `teams-ui`'s `teams_page`, `manage_team`, `join_team`, `team_dialogs` and `team_menu`.
 
+**2026-11-03**: with the lab's fence reading a team's members ([The fence](#the-fence)), `team-manage` with
+`PROTO_LAB_TEAM_WRITES=1` wrote on the lab's own team, each write permitted and answered: Team details' Edit (`PATCH`, 200),
+Add member b (`bulkUpdateRoledMembers`, 200), b promoted (`PUT …/members`, `Promoted`, 200), the team code made and taken away
+(`PUT` 200, `DELETE` 200), a member-permissions box and back (`spaceAdminSettings`, 200), the tags' box (`tagSettings`, 200), a
+tag made with b and deleted (`POST …/tags` 200, `DELETE …/tags/<tag>` 204), archived and restored (`archive` and `unarchive`,
+202 each), and the hidden team's General channel shown again (200). These are **seen live** now.
+
 ## What a team's entry holds
 
 CSA's teams read ([channels.md](channels.md#what-the-native-client-reads)) has it all for the page:
@@ -127,8 +134,14 @@ page showed live and nothing was joined.
 `teams_fence::contacting`'s `contacting/team.rs`. A new private team names nobody: `TeamCreate` on `Scope::New`, which passes,
 as a new appointment does; a public or org-wide one has nobody to judge: `OpenTeamCreate`, which the lab's fence denies. Anything
 else on a team is `TeamChange` or `MemberChange` on `Scope::Team`, the people it adds named on it. The own-view writes above reach
-nobody. The fence doesn't read a team's members (`LiveMembershipSource` answers `Unsupported` for `Scope::Team`, as before), so
-**the lab's fence denies every write on every team, its own team too**. Reading them from the team's thread wouldn't change that:
-its member list (`GET v1/threads/<thread>/members`, seen live) holds a new team's three apps (`28:<guid>`), which aren't lab
-accounts or the echo service. Either step changes the rule's test and needs the user's sign-off. The personal build logs and
-sends them all.
+nobody. The personal build logs and sends them all.
+
+The lab's fence reads a team's members from its thread (`LiveMembershipSource`, the user's sign-off of 2026-11-03,
+[lab-rules.md](../lab-rules.md)): `GET v1/threads/<thread>?view=msnp24Equivalent` first, which must be that thread with
+`properties.threadType` `space` (a team's root; a channel's thread is `topic`, and isn't read as a team) and a
+`properties.groupId`; then `GET v1/threads/<thread>/members?view=msnp24Equivalent&pageSize=100`, complete as a group chat's is.
+A write that names the team by its group (archive, the provisioning service's channel paths) is read only once a read of the
+thread in the same run named that group; before, it is denied. Teams' own apps every new team holds (`28:<guid>`, role
+`User`, no `tenantId`; the same three on the lab's team and on a tenant team of 87 members) are `lab.toml`'s `team_apps` and
+aren't counted. An app someone adds to a team shows in the same shape, so nothing but its MRI tells them apart: any other
+`28:` member is someone the write reaches, and denies.

@@ -125,7 +125,7 @@ outside the repo:
 
 | where | what |
 |---|---|
-| `~/.config/teams-lab/lab.toml` | the 3 accounts (alias, UPN, MRI once recorded) and the approved service participants (`echo`, the Teams echo service, with its MRI); optionally the call guests (`[[call_guests]]`, `name` and `mri`: the user's own accounts, which the lab may call, answer and join calls with, and nothing else); optionally `data_dir`. Mode `0600`, never holds a password. `login` and `service-mri` fill in MRIs, nothing else writes it |
+| `~/.config/teams-lab/lab.toml` | the 3 accounts (alias, UPN, MRI once recorded) and the approved service participants (`echo`, the Teams echo service, with its MRI); optionally the call guests (`[[call_guests]]`, `name` and `mri`: the user's own accounts, which the lab may call, answer and join calls with, and nothing else); optionally the team apps (`[[team_apps]]`, `name` and `mri`: Teams' own apps every new team holds, not counted as people on a team, [lab-rules.md](docs/lab-rules.md)); optionally `data_dir`. Mode `0600`, never holds a password. `login` and `service-mri` fill in MRIs, nothing else writes it |
 | `~/.local/share/teams-lab/` (or `data_dir`) | the lab's data dir |
 | `…/chrome/<version>/` | the pinned Chrome for Testing (155.0.8059.84 linux64, checksum-verified) |
 | `…/profiles/{a,b,c}/` | each account's persistent Chrome profile, signed in to Microsoft |
@@ -290,7 +290,10 @@ fails the run.
 - `channel-create`: account a alone, fail-closed as `load`, every write that could make a channel force-denied on any
   host from before the page loads: a's team's "..." menu and its "Add channel", the "Create a channel" dialog and its types,
   then the dialog filled and Create pressed for each channel type and layout, what it sends recorded and held back
-  (`docs/protocol/channels.md`, "Creating a channel"); nothing is made.
+  (`docs/protocol/channels.md`, "Creating a channel"); nothing is made. With `PROTO_LAB_CHANNEL_WRITES=1` and
+  `PROTO_LAB_TEAM=<name>` (a team of the lab's own) it writes instead: a probe channel force-denied first, then each
+  channel made for real by the lab rule, the private one's add-people step adding b; it deletes nothing (delete the team
+  with `team-manage` after).
 - `meeting-steps`: one account's page (`PROTO_LAB_ACCOUNT`, a by default) driven step by step over a Unix socket
   (`PROTO_LAB_STEPS_SOCKET`) as `team-manage` is, plus `hold <method> <regex> [+text|-text]` (a forced deny from then
   on), after the enforcement test (a probe to its 1:1 chat with `PROTO_LAB_PEER`); `PROTO_LAB_SCHEDULE=<title>`

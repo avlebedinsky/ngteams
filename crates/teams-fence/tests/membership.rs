@@ -118,9 +118,10 @@ async fn without_a_credential_nothing_is_read() -> TestResult {
 }
 
 #[tokio::test]
-async fn scopes_other_than_a_chat_are_unsupported_and_never_read() -> TestResult {
-    // a group or meeting chat is read (tests/group_chat.rs); a malformed 1:1 id, a stream, a channel, a team or a call
-    // isn't
+async fn scopes_other_than_a_chat_or_a_team_are_unsupported_and_never_read() -> TestResult {
+    // a group or meeting chat is read (tests/group_chat.rs), and a team or its channel by the team's thread or a group
+    // a read of its thread named (tests/team.rs); a malformed 1:1 id, a stream, a team or a channel named any other way
+    // and a call aren't
     let server = MockServer::start().await;
     let source = source(&server)?;
     let scopes = [
@@ -137,11 +138,15 @@ async fn scopes_other_than_a_chat_are_unsupported_and_never_read() -> TestResult
             id: "48:notes".to_owned(),
         },
         Scope::Channel {
-            team: "19:team@thread.tacv2".to_owned(),
+            team: GUID_X.to_owned(),
             channel: "19:channel@thread.tacv2".to_owned(),
         },
+        Scope::Team { id: GUID_X.to_owned() },
         Scope::Team {
-            id: "19:team@thread.tacv2".to_owned(),
+            id: "19:team@thread.v2".to_owned(),
+        },
+        Scope::Team {
+            id: "19:team@thread.tacv2;messageid=1".to_owned(),
         },
         Scope::Call {
             id: "call-1".to_owned(),
@@ -564,13 +569,20 @@ fn group_chat() -> Scope {
 }
 
 #[test]
-fn every_source_reads_one_to_one_group_and_meeting_chats_and_nothing_else() -> TestResult {
+fn every_source_reads_chats_and_teams_by_their_thread_and_nothing_else() -> TestResult {
     let source = LiveMembershipSource::new()?;
     for scope in [
         chat(),
         group_chat(),
         Scope::Conversation {
             id: "19:meeting_0123456789abcdef@thread.v2".to_owned(),
+        },
+        Scope::Channel {
+            team: "19:team@thread.tacv2".to_owned(),
+            channel: "19:channel@thread.tacv2".to_owned(),
+        },
+        Scope::Team {
+            id: "19:team@thread.tacv2".to_owned(),
         },
     ] {
         assert!(source.reads_in_full(&scope), "{scope}");
@@ -586,12 +598,10 @@ fn every_source_reads_one_to_one_group_and_meeting_chats_and_nothing_else() -> T
             id: "48:notes".to_owned(),
         },
         Scope::Channel {
-            team: "19:team@thread.tacv2".to_owned(),
+            team: GUID_X.to_owned(),
             channel: "19:channel@thread.tacv2".to_owned(),
         },
-        Scope::Team {
-            id: "19:team@thread.tacv2".to_owned(),
-        },
+        Scope::Team { id: GUID_X.to_owned() },
         Scope::Call {
             id: "call-1".to_owned(),
         },

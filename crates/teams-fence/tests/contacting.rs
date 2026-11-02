@@ -340,6 +340,32 @@ fn every_own_view_property_is_carved_out_on_a_chat() {
     }
 }
 
+#[test]
+fn a_new_channel_s_favourite_flag_with_its_joined_state_is_the_account_s_own() {
+    let channel =
+        "https://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/conversations/19:abc@thread.tacv2/properties";
+    let body = Some(&br#"{"favorite":"true"}"#[..]);
+    for flag in ["true", "false"] {
+        let url = format!("{channel}?name=favorite&requirePermanentJoinedState={flag}");
+        assert_eq!(verdict("PUT", &url, body), Contact::None, "{flag}");
+    }
+    // another property, another flag value, another order or an extra key stay the service's general rule
+    for query in [
+        "name=consumptionhorizon&requirePermanentJoinedState=true",
+        "name=topic&requirePermanentJoinedState=true",
+        "name=favorite&requirePermanentJoinedState=yes",
+        "requirePermanentJoinedState=true&name=favorite",
+        "name=favorite&requirePermanentJoinedState=true&x=1",
+        "name=favorite&other=true",
+    ] {
+        assert_eq!(
+            verdict("PUT", &format!("{channel}?{query}"), body),
+            Contact::Unreadable,
+            "{query}"
+        );
+    }
+}
+
 /// The bodies `proto-lab`'s `fence_targets.rs` pins as ones the chat service could read differently from the fence:
 /// a thread's members (`POST threads`, `PUT threads/<chat>/members`), each unreadable.
 fn ambiguous_members() -> Vec<String> {

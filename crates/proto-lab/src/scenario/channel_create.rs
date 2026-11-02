@@ -16,6 +16,13 @@
 //!
 //! Every step saves a screenshot in the capture dir. The run fails when no team offers the dialog or when Create sends
 //! nothing it could deny; every deny is expected.
+//!
+//! **Writing** (`PROTO_LAB_CHANNEL_WRITES=1`, on a team of the lab's own named by `PROTO_LAB_TEAM`): nothing is forced
+//! but the enforcement probe, and the team's members are read live, so a channel is made only when the lab rule lets it
+//! through ([`teams_fence::Fence::check`]: everyone on the team a lab account, Teams' own apps not counted). A first
+//! channel named with [`PROBE`] is force-denied and must fail in the page; then each of [`ATTEMPTS`] is made for real,
+//! and the private one's add-people step adds b ([`MEMBER`]). The run fails when a creation or the add isn't answered
+//! with a success. It deletes nothing: the team is deleted after the run (`team-manage`).
 
 use std::time::Duration;
 
@@ -31,6 +38,24 @@ use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport}
 
 /// The account that drives the dialog.
 pub const ACCOUNT: Alias = Alias::A;
+
+/// The account a writing run adds to the private channel it makes.
+pub const MEMBER: Alias = Alias::B;
+
+/// What a writing run's first channel name holds, force-denied: the enforcement probe.
+pub const PROBE: &str = "lab channel probe";
+
+/// The label of the probe's forced deny.
+pub const PROBE_LABEL: &str = "the channel probe";
+
+/// What a writing run's private channel's add-people step sends.
+const MEMBERS_URL: &str = r"(?i)/channels/[^/]+/users([?]|$)";
+
+/// How a writing run goes: the team it writes on and the address of the account it adds.
+struct Writing {
+    team: String,
+    member: String,
+}
 
 /// The label of the forced deny of every write that could make a channel.
 pub const CHANNEL_WRITE: &str = "a channel's creation";
@@ -90,16 +115,23 @@ fn texts(query: &str) -> String {
 /// # Errors
 /// When the run can't start: no Chrome, no fence, a browser that can't be armed.
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
+    let writing = writing()?;
     let session_options = SessionOptions {
         capture: Some(ScenarioName::ChannelCreate.as_str().to_owned()),
         capture_request_bodies: true,
         display: options.display,
+        live_members: writing.is_some(),
         ..SessionOptions::fail_closed()
     };
     let mut a = LabSession::open_with(paths, ACCOUNT, session_options).await?;
     let mut report = ScenarioReport::new(ScenarioName::ChannelCreate);
     let mut drive = a.driver();
-    let forced = channel_rules().map_err(|error| ScenarioError::Setup(error.to_string()));
+    let forced = if writing.is_some() {
+        probe_rule().map(|rule| vec![rule])
+    } else {
+        channel_rules()
+    }
+    .map_err(|error| ScenarioError::Setup(error.to_string()));
     match forced {
         Ok(rules) => rules.into_iter().for_each(|rule| a.force_deny(rule)),
         Err(error) => {
@@ -108,12 +140,278 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
             return Ok(report);
         }
     }
-    if let Err(error) = steps(&mut a, &mut drive, &mut report, options).await {
+    let ran = match &writing {
+        Some(writing) => write_steps(&mut a, &mut drive, &mut report, options, writing).await,
+        None => steps(&mut a, &mut drive, &mut report, options).await,
+    };
+    if let Err(error) = ran {
         report.failures.push(error.to_string());
         shot(&a, &mut report, "channel-failure.png").await;
     }
     report.close_account(ACCOUNT, a, &DenyPolicy::AllExpected).await;
     Ok(report)
+}
+
+/// A writing run's settings, from `PROTO_LAB_CHANNEL_WRITES`, `PROTO_LAB_TEAM` and `lab.toml`; `None` for a run that
+/// writes nothing.
+fn writing() -> Result<Option<Writing>, ScenarioError> {
+    if std::env::var("PROTO_LAB_CHANNEL_WRITES").as_deref() != Ok("1") {
+        return Ok(None);
+    }
+    let team = std::env::var("PROTO_LAB_TEAM")
+        .ok()
+        .filter(|team| !team.trim().is_empty())
+        .ok_or_else(|| {
+            ScenarioError::Setup("a writing run needs PROTO_LAB_TEAM, a team of the lab's own".to_owned())
+        })?;
+    let config =
+        crate::config::LabConfig::load(&crate::config::LabLocations::from_env().map_err(setup)?).map_err(setup)?;
+    Ok(Some(Writing {
+        team,
+        member: config.account(MEMBER).upn.clone(),
+    }))
+}
+
+fn setup(error: impl std::fmt::Display) -> ScenarioError {
+    ScenarioError::Setup(error.to_string())
+}
+
+/// A writing run's forced deny: a channel named with [`PROBE`].
+///
+/// # Errors
+/// Never: the pattern is fixed.
+pub fn probe_rule() -> Result<ForcedDeny, regex::Error> {
+    Ok(ForcedDeny::new("POST", CHANNEL_URL)?
+        .with_body_containing(PROBE)
+        .labelled(PROBE_LABEL))
+}
+
+/// A writing run (see the module docs).
+async fn write_steps(
+    a: &mut LabSession,
+    drive: &mut Driver,
+    report: &mut ScenarioReport,
+    options: RunOptions,
+    writing: &Writing,
+) -> Result<(), ScenarioError> {
+    load(ACCOUNT, a, options.load_timeout).await?;
+    size(a).await?;
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    shot(a, report, "channel-loaded.png").await;
+    open_managed_dialog(a, drive, report, &writing.team).await?;
+    let nonce = super::ab_chat::nonce();
+    // the probe: held back, the page must fail it
+    fill_named(drive, report, 9, &format!("{PROBE} {nonce}"), ("Standard", "Threads")).await?;
+    let probe = created(drive, report, 9, CHANNEL_URL).await?;
+    if probe.status.is_some_and(|status| (200..300).contains(&status)) {
+        report
+            .failures
+            .push(format!("the probe went through: {:?}", probe.status));
+        return Ok(());
+    }
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    shot(a, report, "channel-probe.png").await;
+    leave_error(drive, report, 9).await?;
+    for (at, attempted) in ATTEMPTS.into_iter().enumerate() {
+        make_channel(a, drive, report, at, attempted, writing).await?;
+    }
+    Ok(())
+}
+
+/// One channel made for real: the dialog filled, Create answered with a success, a private one's member added.
+async fn make_channel(
+    a: &LabSession,
+    drive: &mut Driver,
+    report: &mut ScenarioReport,
+    at: usize,
+    (kind, layout): (&str, &str),
+    writing: &Writing,
+) -> Result<(), ScenarioError> {
+    open_managed_dialog(a, drive, report, &writing.team).await?;
+    let name = format!("lab {kind} {layout} {at}");
+    fill_named(drive, report, at, &name, (kind, layout)).await?;
+    let made = created(drive, report, at, CHANNEL_URL).await?;
+    if !made.status.is_some_and(|status| (200..300).contains(&status)) {
+        report.failures.push(format!(
+            "attempt {at} ({kind}, {layout}): {} {:?}",
+            made.url, made.status
+        ));
+    }
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    shot(a, report, &format!("channel-made-{at}.png")).await;
+    if kind == "Private" {
+        add_member(a, drive, report, at, &writing.member).await?;
+    }
+    leave_error(drive, report, at).await
+}
+
+/// The dialog opened from the team named `name`'s own page: "Your teams and channels", its row, then the page's "..." and
+/// its "Add channel" (a team with a single channel has no "..." on its sidebar line).
+async fn open_managed_dialog(
+    a: &LabSession,
+    drive: &mut Driver,
+    report: &mut ScenarioReport,
+    name: &str,
+) -> Result<(), ScenarioError> {
+    let _ = drive.press("a closes what is open", Key::ESCAPE).await;
+    let listed = drive
+        .evaluate(
+            "a opens the list's options",
+            &click_named("button,[role=\"button\"]", "^More list options$"),
+        )
+        .await?;
+    tokio::time::sleep(SETTLE).await;
+    let teams = drive
+        .evaluate(
+            "a opens its teams",
+            &click_named("[role=\"menuitem\"]", "^Your teams and channels"),
+        )
+        .await?;
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    let row = drive
+        .evaluate("a opens the team", &click_named("[role=\"row\"]", name))
+        .await?;
+    report.notes.push(format!(
+        "a: list options {listed}, teams page {teams}, {name}'s row {row}"
+    ));
+    if row.as_bool() != Some(true) {
+        return Err(ScenarioError::Setup(format!("no team named {name}")));
+    }
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    drive
+        .pointer_click(
+            "a opens the team's menu",
+            Selector::Css("[data-tid^=\"team-context-menu-more-button\"]"),
+        )
+        .await?;
+    tokio::time::sleep(SETTLE).await;
+    shot(a, report, &format!("channel-team-menu-{}.png", super::ab_chat::nonce())).await;
+    let added = drive
+        .evaluate(
+            "a clicks Add channel",
+            &click_named("[role=\"menuitem\"]", "^Add channel$"),
+        )
+        .await?;
+    if added.as_bool() != Some(true) {
+        return Err(ScenarioError::Setup(format!("{name}'s menu offers no Add channel")));
+    }
+    drive
+        .wait_for_tid("the dialog opens", "channel-name-input", Duration::from_secs(30))
+        .await?;
+    tokio::time::sleep(SETTLE).await;
+    Ok(())
+}
+
+/// The dialog filled with `name`, the type and the layout.
+async fn fill_named(
+    drive: &mut Driver,
+    report: &mut ScenarioReport,
+    at: usize,
+    name: &str,
+    (kind, layout): (&str, &str),
+) -> Result<(), ScenarioError> {
+    fill_form_named(drive, report, at, name, kind, layout).await
+}
+
+/// Create pressed: the write it sends to `url`, once answered (or failed).
+async fn created(
+    drive: &mut Driver,
+    report: &mut ScenarioReport,
+    at: usize,
+    url: &str,
+) -> Result<super::dsl::SeenRequest, ScenarioError> {
+    let since = drive.seen_so_far();
+    let pressed = drive
+        .evaluate(
+            "a presses Create",
+            &click_named("[data-tid=\"create-and-edit-submit-button\"]", "Create"),
+        )
+        .await?;
+    report.notes.push(format!("a: attempt {at}: Create pressed: {pressed}"));
+    let wanted = RequestPattern::new(Some("POST"), url).map_err(setup)?;
+    let write = drive
+        .wait_for_seen("Create sends a write", "a channel write", since, SENT, |request| {
+            wanted.matches_request(request)
+                && !request.url.contains("channelsWarmup")
+                && (request.status.is_some() || request.failed.is_some())
+        })
+        .await?;
+    report.notes.push(format!(
+        "a: attempt {at}: {} {} -> {:?} {:?}",
+        write.method, write.url, write.status, write.failed
+    ));
+    Ok(write)
+}
+
+/// The private channel's add-people step: `member` typed, picked and added; the add must be answered with a success.
+async fn add_member(
+    a: &LabSession,
+    drive: &mut Driver,
+    report: &mut ScenarioReport,
+    at: usize,
+    member: &str,
+) -> Result<(), ScenarioError> {
+    let words = drive
+        .evaluate(
+            "the step's words",
+            "(() => { const d = [...document.querySelectorAll('[role=\"dialog\"]')].pop(); return d ? d.innerText.replace(/\\s+/g, ' ') : 'none'; })()",
+        )
+        .await?;
+    report
+        .notes
+        .push(format!("a: attempt {at}: the add-people step: {words}"));
+    let typed = drive
+        .evaluate(
+            "a finds the people box",
+            "(() => { const d = [...document.querySelectorAll('[role=\"dialog\"]')].pop(); const input = d && [...d.querySelectorAll('input')].filter(e => e.getClientRects().length && e.type !== 'checkbox' && e.type !== 'radio')[0]; if (!input) return false; input.setAttribute('data-lab-people', '1'); input.focus(); return true; })()",
+        )
+        .await?;
+    if typed.as_bool() != Some(true) {
+        report.failures.push(format!("attempt {at}: no people box"));
+        return Ok(());
+    }
+    let local = member.split('@').next().unwrap_or(member);
+    drive
+        .type_into("a types the member", Selector::Css("[data-lab-people]"), local)
+        .await?;
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    shot(a, report, &format!("channel-people-{at}.png")).await;
+    let picked = drive
+        .evaluate("a picks the member", &click_named("[role=\"option\"]", local))
+        .await?;
+    report.notes.push(format!("a: attempt {at}: picked {local}: {picked}"));
+    tokio::time::sleep(SETTLE).await;
+    let since = drive.seen_so_far();
+    let added = drive
+        .evaluate(
+            "a presses Add",
+            "(() => { const d = [...document.querySelectorAll('[role=\"dialog\"]')].pop(); const add = d && [...d.querySelectorAll('button')].filter(e => e.getClientRects().length && /^\\s*Add\\s*$/i.test(e.innerText || ''))[0]; if (!add) return false; add.click(); return true; })()",
+        )
+        .await?;
+    report.notes.push(format!("a: attempt {at}: Add pressed: {added}"));
+    let wanted = RequestPattern::new(Some("POST"), MEMBERS_URL).map_err(setup)?;
+    match drive
+        .wait_for_seen("Add sends the member", "the member's add", since, SENT, |request| {
+            wanted.matches_request(request) && (request.status.is_some() || request.failed.is_some())
+        })
+        .await
+    {
+        Ok(write) => {
+            report.notes.push(format!(
+                "a: attempt {at}: {} {} -> {:?} {:?}",
+                write.method, write.url, write.status, write.failed
+            ));
+            if !write.status.is_some_and(|status| (200..300).contains(&status)) {
+                report
+                    .failures
+                    .push(format!("attempt {at}: the member's add: {:?}", write.status));
+            }
+        }
+        Err(error) => report.failures.push(format!("attempt {at}: {error}")),
+    }
+    tokio::time::sleep(Duration::from_secs(8)).await;
+    shot(a, report, &format!("channel-added-{at}.png")).await;
+    Ok(())
 }
 
 /// The rules the run forces.
@@ -336,9 +634,20 @@ async fn fill_form(
     kind: &str,
     layout: &str,
 ) -> Result<(), ScenarioError> {
-    let name = format!("lab dialog shape {at}");
+    fill_form_named(drive, report, at, &format!("lab dialog shape {at}"), kind, layout).await
+}
+
+/// The dialog's fields: `name`, a description, the type and the layout.
+async fn fill_form_named(
+    drive: &mut Driver,
+    report: &mut ScenarioReport,
+    at: usize,
+    name: &str,
+    kind: &str,
+    layout: &str,
+) -> Result<(), ScenarioError> {
     drive
-        .type_into("a names the channel", Selector::Tid("channel-name-input"), &name)
+        .type_into("a names the channel", Selector::Tid("channel-name-input"), name)
         .await?;
     drive
         .type_into(

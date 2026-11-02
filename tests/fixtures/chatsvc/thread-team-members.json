@@ -1,0 +1,72 @@
+{
+  "_synthetic": "Written by hand, synthetic-from-capture: the shape of the chat service's member list of a new private team (GET v1/threads/19:<team>@thread.tacv2/members?view=msnp24Equivalent&pageSize=100), every value made up. The web client read it per role (selectMemberRoles=Admin, then User|Guest; proto-lab run team-manage, 2026-11-02), each page with the team's whole totalMemberCount, 4: its creator as Admin and the three of Teams' own apps every new team gets as User (28:<guid>, no tenantId), no next link; here the two pages are one, as the fence's read asks without a role. <guid:a> stands for the owner's object id, <app:1> to <app:3> for the apps' GUIDs, <team> for the thread's id; tests fill them in.",
+  "request": {
+    "method": "GET",
+    "path": "/api/chatsvc/<region>/v1/threads/19:<team>@thread.tacv2/members",
+    "query": "view=msnp24Equivalent&pageSize=100",
+    "headers": {
+      "Authorization": "Bearer <token:1>",
+      "Accept": "application/json"
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "totalMemberCount": 4,
+      "members": [
+        {
+          "id": "8:orgid:<guid:a>",
+          "type": "ThreadMember",
+          "userLink": "https://<region>.example.test/v1/users/8:orgid:<guid:a>",
+          "role": "Admin",
+          "capabilities": ["kickMember"],
+          "linkedMri": "",
+          "cid": "0",
+          "isFollowing": false,
+          "shareHistoryTime": 0,
+          "hidden": false,
+          "interest": "Interested"
+        },
+        {
+          "id": "28:<app:1>",
+          "type": "ThreadMember",
+          "userLink": "https://<region>.example.test/v1/users/28:<app:1>",
+          "role": "User",
+          "capabilities": ["kickMember"],
+          "linkedMri": "",
+          "cid": "0",
+          "isFollowing": false,
+          "shareHistoryTime": 0,
+          "hidden": false
+        },
+        {
+          "id": "28:<app:2>",
+          "type": "ThreadMember",
+          "userLink": "https://<region>.example.test/v1/users/28:<app:2>",
+          "role": "User",
+          "capabilities": ["kickMember"],
+          "linkedMri": "",
+          "cid": "0",
+          "isFollowing": false,
+          "shareHistoryTime": 0,
+          "hidden": false
+        },
+        {
+          "id": "28:<app:3>",
+          "type": "ThreadMember",
+          "userLink": "https://<region>.example.test/v1/users/28:<app:3>",
+          "role": "User",
+          "capabilities": ["kickMember"],
+          "linkedMri": "",
+          "cid": "0",
+          "isFollowing": false,
+          "shareHistoryTime": 0,
+          "hidden": false
+        }
+      ],
+      "rosterVersion": 1760000000000,
+      "eTag": "\"1760000000000\"",
+      "isDeleted": false
+    }
+  }
+}

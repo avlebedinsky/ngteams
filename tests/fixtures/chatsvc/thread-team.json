@@ -1,0 +1,38 @@
+{
+  "_synthetic": "Written by hand, synthetic-from-capture: the shape of the chat service's read of a team's root thread (GET v1/threads/19:<team>@thread.tacv2?view=msnp24Equivalent) as the web client's Manage team page read the lab's own private team (proto-lab run team-manage, 2026-11-02), every value made up and most properties left out. threadType space marks a team's root; groupId names the team's group. Its members array listed only the reading account. <team> stands for the thread's id, <group> for the group's GUID, <guid:a> for the owner's object id; tests fill them in.",
+  "request": {
+    "method": "GET",
+    "path": "/api/chatsvc/<region>/v1/threads/19:<team>@thread.tacv2",
+    "query": "view=msnp24Equivalent",
+    "headers": {
+      "Authorization": "Bearer <token:1>",
+      "Accept": "application/json"
+    }
+  },
+  "response": {
+    "status": 200,
+    "body": {
+      "id": "19:<team>@thread.tacv2",
+      "tenantId": "<tenant>",
+      "type": "Thread",
+      "properties": {
+        "groupId": "<group>",
+        "RootResourceGroupId": "92:<team>@thread.tacv2",
+        "spaceThreadTopic": "lab team",
+        "topicThreadTopic": "first channel",
+        "spaceType": "standard",
+        "threadType": "space",
+        "visibility": "private"
+      },
+      "members": [
+        {
+          "id": "8:orgid:<guid:a>",
+          "role": "Admin",
+          "isFollowing": false,
+          "isReader": false
+        }
+      ],
+      "version": 1760000000000
+    }
+  }
+}

@@ -111,13 +111,27 @@ fn typing(request: &Parsed<'_>, chat: &str) -> Option<Contact> {
 
 /// A conversation property that reaches nobody, set with exactly one query key: the read horizon on a chat by its id
 /// ([`is_chat_id`], the rule `Fence::check` permits a read receipt by; a read receipt, which others may see), or one
-/// of [`OWN_VIEW_PROPERTIES`] on a chat or a channel.
+/// of [`OWN_VIEW_PROPERTIES`] on a chat or a channel; or the favourite flag as the web client sets it on a channel it
+/// just made ([`is_favorite_joined`]).
 fn own_property(request: &Parsed<'_>, id: &str) -> bool {
     match request.only_query("name") {
         Some("consumptionhorizon") => is_chat_id(id),
         Some(name) => OWN_VIEW_PROPERTIES.contains(&name) && is_conversation(id),
-        None => false,
+        None => is_favorite_joined(request) && is_conversation(id),
     }
+}
+
+/// The query `name=favorite&requirePermanentJoinedState=<boolean>`, in that order and nothing else: the web client's
+/// favourite flag on each channel it made (`channel-create`, 2026-11-03), the account's own list alone.
+fn is_favorite_joined(request: &Parsed<'_>) -> bool {
+    matches!(
+        request.query.as_slice(),
+        [(name, favorite), (joined, flag)]
+            if name == "name"
+                && favorite == "favorite"
+                && joined == "requirePermanentJoinedState"
+                && matches!(flag.as_str(), "true" | "false")
+    )
 }
 
 /// A feed item's read mark: exactly `{"isread": <string>}`.

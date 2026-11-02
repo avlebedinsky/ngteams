@@ -739,8 +739,8 @@ fn the_search_is_the_store_s_and_the_service_s_only_through_the_engine() {
 }
 
 /// Teams and channels are read-only (M2 Task 16): no write type of the native client targets a channel post's kind
-/// (`teams-proto` maps none: a channel write needs a team of the lab accounts only first, the backlog's
-/// `channel-writes-need-a-lab-only-team.md`), and the views that show teams and channels hold no write, no composer and
+/// (`teams-proto` maps none: a channel post needs a capture of the web client's in a team of the lab's own first), and
+/// the views that show teams and channels hold no write, no composer and
 /// no transient: nothing there can post, reply, react, mark read or type.
 #[test]
 fn no_channel_write_exists_and_the_teams_views_write_nothing() {

@@ -17,6 +17,11 @@ Trouter frames alike). The personal build is under its own rules ([personal-buil
   read fresh and complete (no paging key), is one of the 3 lab accounts (`lab.toml`'s MRIs) or an approved service
   participant (the echo service, by MRI); for a call alone, a call guest too. A target whose members can't be read in
   full, or a write the fence can't tie to a target with certainty, is denied.
+- **A team and its channels** (approved by the user on 2026-11-03): a write on a team, or on one of its channels, is
+  judged by the team's members, read fresh and complete from the team's own thread. Teams' own apps that every new team
+  holds as members (`lab.toml`'s `team_apps`, by MRI, from a capture) aren't counted as people it reaches; anyone else
+  on the team, an app or a bot someone added included, must be a lab account or an approved service participant. A
+  team app is never someone a write may add, and counts nowhere but on a team.
 - **Everything else is allowed**, with no capture or review: reads by any method (a `POST` search or people lookup
   too), the account's own session, tokens and settings (out-of-office included), presence, a status note, typing and
   read receipts.

@@ -145,7 +145,9 @@ POST <middleTier>/beta/teams/<team thread>/channels
  "chatModalityType": "Conversational" | "PostReply"}
 ```
 
-The bundle reads its answer as `{"value": {"objectId": <channel thread>}}`.
+**Seen live** (`channel-create` writing on the lab's own team, 2026-11-03), for Threads and Posts alike: 201 with
+`{"value": {"objectId": <channel thread>, "createdDateTime", "displayName", "description", "groupId": <team group>,
+"channelState": "Active", "isFavoriteByDefault": false, "chatModalityType"}, "type": …}`.
 
 **A private channel** goes on the teams' provisioning service, the GTM `teamsAndChannelsProvisioningService`
 (`https://<AFD host>/fabric/<region>/templates/api`), with a token for `https://templates.teams.microsoft.com` (the
@@ -159,7 +161,8 @@ POST <provisioning>/teams/<team group>/channels?forceSync=false
 
 Before it, as the type is picked, the web client sent `POST <provisioning>/teams/<team group>/channelsWarmup` with no body
 and the same key in `x-routingparameter-sessionkey`. The bundle attaches the key only behind a flag; the native client
-sends neither. The bundle reads the answer as `{"groupId": "OID:<channel group>@<tenant>", "threadId"?}`: the thread can
+sends neither. **Seen live**: 200 with `{"groupId": "OID:<channel group>@<tenant>", "displayName", "description",
+"hostTeamId": <team group>, "hostTenantId", "createdTime", "chatModalityType"}`, no `threadId`: the thread can
 come later, from `GET <provisioning>/teams/<team group>/channels/OID:<channel group>@<tenant>` (`threadId`), read every 4 s.
 
 **The step after a private channel** is the add-people dialog, in the create flow with Skip: "Add members to the
@@ -171,7 +174,11 @@ POST <provisioning>/teams/<team group>/channels/OID:<channel group>@<tenant>/use
 {"users": [{"id": "OID:<object id>@<tenant>", "role": 1}]}
 ```
 
-Its answer's `multipleStatus` lists those that failed (`id`, `statusSubCode`, `message`). The box's search is a read sent as
+**Seen live** adding b: 200 with `{"multipleStatus": [], "asyncOperations": []}`; the bundle reads `multipleStatus` as those
+that failed (`id`, `statusSubCode`, `message`). No error code was seen live: every write here succeeded. After each creation
+the web client sets the new channel a favourite of the account's (`PUT v1/users/ME/conversations/<channel>/properties?name=favorite&requirePermanentJoinedState=true`,
+`{"favorite": "true"}`, its own list alone) and marks it read (`consumptionhorizon`, which the lab's fence leaves denied on a
+channel). The box's search is a read sent as
 a `POST` on the user profile service (GTM `userProfileService`, `https://<AFD host>/api/userprofilesvc/<region>`, the
 middle tier's token): `api/v1.0/teams/<team thread>/users/profilesearch?top=15&includeDLs=false&includeBots=false&
 enableGuest=true` with `{"keyword": …}`, answered with a list of people (`mri`, `displayName`, `email`, `jobTitle`,
@@ -194,9 +201,11 @@ under its team, by name, and keeps it against reads that don't name it for ten m
 a lock (`channelType` 1; 0 is standard, 2 shared).
 
 **The fence**: a new channel and its people reach the team, so the rows are writes on the team or the channel
-(`WriteKind::ChannelChange`, `MemberChange`; `teams_fence::contacting`'s `contacting/channel.rs`), and every team's members
-hold Teams' own apps ([teams.md](teams.md#the-fence)): the lab's fence denies them (the dialog then says "We ran into a problem creating your
-channel"). The personal build's logs and sends them. The provisioning service is a contacting service: everything mutating
+(`WriteKind::ChannelChange`, `MemberChange`; `teams_fence::contacting`'s `contacting/channel.rs`), judged by the team's
+members read from its thread, Teams' own apps not counted ([teams.md](teams.md#the-fence)): the lab's fence lets them through
+on a team of the lab's own and denies them on any other (the dialog then says "We ran into a problem creating your
+channel"). A private channel's people step names the team by its group, so it is judged once the channel's creation read
+the team's thread. The personal build's logs and sends them. The provisioning service is a contacting service: everything mutating
 there but these rows is unreadable.
 
 ## No other channel write

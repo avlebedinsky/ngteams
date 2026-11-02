@@ -1,6 +1,6 @@
 //! The decision: [`Fence::check`] fetches the target's members fresh and issues a [`WritePermit`] only when every
-//! participant is a lab account or an approved service (or, for a call write alone, a call guest: [`Roster`]). A write
-//! that reaches nobody ([`WriteKind::is_contacting`] false) is judged without a member read: typing and read receipts
+//! participant is a lab account or an approved service (or, for a call write alone, a call guest; on a team or one of its
+//! channels, Teams' own team apps aren't counted: [`Roster`]). A write that reaches nobody ([`WriteKind::is_contacting`] false) is judged without a member read: typing and read receipts
 //! on a chat (1:1, group or meeting), and the account's own availability ([`WriteKind::OwnAvailability`] on
 //! [`Scope::Account`]), which the fence permits only for its own account ([`Fence::own_account`]), so that a lab
 //! account never sets another's presence.
@@ -40,6 +40,11 @@ mod audit;
 /// a join, an answer or a decline, an `add` and what a call sends once it was let in; never a message, a reaction, a
 /// chat created, a member added or an invite, even in a chat that holds one.
 ///
+/// Teams' own team apps (`lab.toml`'s `team_apps`: the apps Teams makes a member of every new team, by exact MRI) aren't
+/// people a write reaches: a team's or a channel's current member that is one is left out of the participants
+/// ([`Roster::is_team_app`]). They are admitted nowhere else, and never as someone a write adds: a write that adds one,
+/// or a member read of any other scope that lists one, is judged as for anyone outside the lab.
+///
 /// A lab binary's roster comes only from `lab.toml`, through [`Fence::open_lab`]. [`Roster::new`], which takes any
 /// MRIs, exists only with the `test-support` feature.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -47,6 +52,8 @@ pub struct Roster {
     lab: BTreeSet<Mri>,
     services: BTreeSet<Mri>,
     call_guests: BTreeSet<Mri>,
+    /// Teams' own team apps ([`Roster::is_team_app`]).
+    team_apps: BTreeSet<Mri>,
     /// The lab accounts' mail addresses (their UPNs), in lower case: a calendar event's attendees are judged by them
     /// ([`Mri::mail`]).
     lab_mail: BTreeSet<String>,
@@ -65,6 +72,7 @@ impl Roster {
             lab: lab.into_iter().collect(),
             services: services.into_iter().collect(),
             call_guests: BTreeSet::new(),
+            team_apps: BTreeSet::new(),
             lab_mail: BTreeSet::new(),
         }
     }
@@ -88,8 +96,16 @@ impl Roster {
         self
     }
 
-    /// The MRIs `lab.toml` gives its accounts, approved service participants and call guests; one without an MRI is
-    /// left out.
+    /// This roster with `apps` as Teams' own team apps. Tests only (`test-support`).
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn with_team_apps(mut self, apps: impl IntoIterator<Item = Mri>) -> Self {
+        self.team_apps = apps.into_iter().collect();
+        self
+    }
+
+    /// The MRIs `lab.toml` gives its accounts, approved service participants, call guests and team apps; one without an
+    /// MRI is left out.
     fn from_lab(config: &LabConfig) -> Self {
         let roster = Self::of(
             config
@@ -105,6 +121,7 @@ impl Roster {
         );
         Self {
             call_guests: config.call_guests().iter().map(|guest| Mri::new(&guest.mri)).collect(),
+            team_apps: config.team_apps().iter().map(|app| Mri::new(&app.mri)).collect(),
             lab_mail: config
                 .accounts()
                 .iter()
@@ -129,6 +146,13 @@ impl Roster {
     #[must_use]
     pub fn admits_on_call(&self, mri: &Mri) -> bool {
         self.admits(mri) || self.call_guests.contains(mri)
+    }
+
+    /// Whether `mri` is one of Teams' own team apps, by exact MRI: a team's or a channel's member the fence doesn't count
+    /// among the people a write on it reaches. Nothing else admits it.
+    #[must_use]
+    pub fn is_team_app(&self, mri: &Mri) -> bool {
+        self.team_apps.contains(mri)
     }
 
     /// Whether `mri` is one of the lab accounts, by exact MRI (an approved service isn't).
@@ -985,11 +1009,15 @@ impl Fence {
         if is_signal_on_a_chat(target) {
             return self.judge_added(target);
         }
-        let current = match membership {
+        let mut current = match membership {
             Membership::Complete(members) => members,
             Membership::Partial(reason) => return Verdict::Deny(DenyReason::Partial(reason)),
             Membership::OrgWide => return Verdict::Deny(DenyReason::OrgWide),
         };
+        // Teams' own apps on a team aren't people it reaches; anyone else on it, an app someone added too, is judged
+        if matches!(target.scope(), Scope::Team { .. } | Scope::Channel { .. }) {
+            current.retain(|mri| !self.roster.is_team_app(mri));
+        }
         if fetched && current.is_empty() {
             return Verdict::Deny(DenyReason::NoMembers);
         }

@@ -20,13 +20,25 @@
 //! the native client created too: one fresh read of the chat's member list, complete only in the shape
 //! [`parse_members`] takes (no paging key, the count equal to the members listed, nobody hidden or deleted, nobody
 //! twice, every member an MRI in a form the reads showed). Whether those members are all lab accounts or approved
-//! services is the fence's to judge. Channels, teams and calls are [`PartialReason::Unsupported`] until evidence shows
-//! how their full membership can be confirmed.
+//! services is the fence's to judge.
+//!
+//! **Teams** ([`Scope::Team`]) and their channels ([`Scope::Channel`], judged by their team's members: a standard
+//! channel reaches its whole team, a private channel's people are drawn from it, and no shared channel is made or
+//! changed by a lab write): the team's root thread, read twice, fresh. First the thread itself, which must be that exact
+//! thread, a team's root (`threadType` `space`) naming its group (`groupId`, a GUID) ([`parse_team_thread`]); a
+//! channel's thread or anything else is [`PartialReason::Unsupported`]. Then its member list, judged as a group chat's
+//! ([`parse_members`]). A team named by its group alone (the provisioning service's paths) is read only once a read of
+//! its thread in this source has named that group ([`LiveMembershipSource::learned`]): the group is never mapped from
+//! anything but the chat service's own answer, and its thread's `groupId` must name the group again. The members
+//! include Teams' own team apps (`28:<guid>`); which of them the fence doesn't count is the roster's to say
+//! ([`crate::Roster::is_team_app`]). Calls are [`PartialReason::Unsupported`] until evidence shows how their full
+//! membership can be confirmed.
 //!
 //! Anything less than a clean answer is [`Membership::Partial`]: no credential yet, a failed or slow request, a
 //! non-success status, a body over [`MAX_BODY`] (truncated), a pagination marker, a member count above the listed
 //! members, or a body that isn't the expected thread.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -332,6 +344,8 @@ pub struct LiveMembershipSource {
     credential: Mutex<Credential>,
     /// The middle-tier credential a page's request gave ([`Self::set_middle_tier_credential`]), for an event's read.
     middle_tier: Mutex<Option<MiddleTierCredential>>,
+    /// Each team's thread by its group (lowercase), as a read of the thread named it ([`Self::learned`]).
+    teams: Mutex<BTreeMap<String, String>>,
     /// How long a group or meeting chat's whole read may take, its credential and renewal included ([`FETCH_TIMEOUT`];
     /// shorter in tests).
     deadline: Duration,
@@ -371,6 +385,7 @@ impl LiveMembershipSource {
             client: client(https_only)?,
             credential: Mutex::new(Credential::None),
             middle_tier: Mutex::new(None),
+            teams: Mutex::new(BTreeMap::new()),
             deadline: FETCH_TIMEOUT,
             #[cfg(feature = "test-support")]
             mock_origin: None,
@@ -502,6 +517,61 @@ impl LiveMembershipSource {
         }
     }
 
+    /// The team `team`'s membership (a team's thread, or its group once [`Self::learned`]): its root thread read and
+    /// checked ([`parse_team_thread`]), then its member list ([`parse_members`]), all within this source's deadline.
+    async fn team(&self, team: &str) -> Membership {
+        let (thread, group) = if is_team_thread_id(team) {
+            (team.to_owned(), None)
+        } else if is_guid(team) {
+            match self.learned(team) {
+                Some(thread) => (thread, Some(team.to_ascii_lowercase())),
+                None => return Membership::Partial(PartialReason::Unsupported),
+            }
+        } else {
+            return Membership::Partial(PartialReason::Unsupported);
+        };
+        let read = async {
+            let body = match self.read_renewing(&thread, ThreadRead::Thread).await {
+                Ok(body) => body,
+                Err(reason) => return Membership::Partial(reason),
+            };
+            let named = match serde_json::from_slice::<Value>(&body) {
+                Ok(answer) => parse_team_thread(&thread, &answer),
+                Err(_) => Err(MALFORMED),
+            };
+            match named {
+                Ok(named) if group.as_ref().is_none_or(|group| *group == named) => self.learn(named, &thread),
+                Ok(_) => return Membership::Partial(MALFORMED),
+                Err(reason) => return Membership::Partial(reason),
+            }
+            match self.read_renewing(&thread, ThreadRead::Members).await {
+                Ok(body) => serde_json::from_slice::<Value>(&body)
+                    .map_or(Membership::Partial(MALFORMED), |members| parse_members(&members)),
+                Err(reason) => Membership::Partial(reason),
+            }
+        };
+        tokio::time::timeout(self.deadline, read)
+            .await
+            .unwrap_or(Membership::Partial(PartialReason::FetchFailed(FetchFailure::Timeout)))
+    }
+
+    /// The thread of the team whose group is `group`, when a read of that thread in this source named it.
+    #[must_use]
+    pub fn learned(&self, group: &str) -> Option<String> {
+        self.teams
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&group.to_ascii_lowercase())
+            .cloned()
+    }
+
+    fn learn(&self, group: String, thread: &str) {
+        self.teams
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(group, thread.to_owned());
+    }
+
     /// A group or meeting chat's membership: its member list, read once within this source's deadline
     /// ([`FETCH_TIMEOUT`]: the credential, a renewal, the read and its body), judged by [`parse_members`].
     async fn group(&self, id: &str) -> Membership {
@@ -589,7 +659,8 @@ impl LiveMembershipSource {
 
 impl LiveMembershipSource {
     /// Whether this source reads `scope`'s membership at all: a 1:1 chat's ([`one_to_one_pair`]), a group chat's
-    /// ([`is_group_chat_id`]) or a meeting chat's ([`is_meeting_chat_id`]). Every other scope is
+    /// ([`is_group_chat_id`]), a meeting chat's ([`is_meeting_chat_id`]), or a team's or its channel's by the team's
+    /// thread ([`is_team_thread_id`]) or by a group a read of its thread named ([`Self::learned`]). Every other scope is
     /// [`PartialReason::Unsupported`], answered without a read. It is eligibility, not a verdict: whether the read is
     /// complete and its members all in the lab is decided on every write. A caller can tell before a write that it
     /// will be denied.
@@ -598,6 +669,9 @@ impl LiveMembershipSource {
         match scope {
             Scope::Conversation { id } => is_chat_id(id),
             Scope::Event { id } => !id.is_empty(),
+            Scope::Team { id: team } | Scope::Channel { team, .. } => {
+                is_team_thread_id(team) || (is_guid(team) && self.learned(team).is_some())
+            }
             _ => false,
         }
     }
@@ -613,6 +687,7 @@ impl MembershipSource for LiveMembershipSource {
                     None => Membership::Partial(PartialReason::Unsupported),
                 },
                 Scope::Event { id } if !id.is_empty() => self.event(id).await,
+                Scope::Team { id: team } | Scope::Channel { team, .. } => self.team(team).await,
                 _ => Membership::Partial(PartialReason::Unsupported),
             }
         })
@@ -696,6 +771,53 @@ pub fn is_group_chat_id(id: &str) -> bool {
 #[must_use]
 pub fn is_meeting_chat_id(id: &str) -> bool {
     thread_v2(id).is_some_and(|inner| has_meeting_prefix(inner) && inner.len() > MEETING_PREFIX.len())
+}
+
+/// Whether `id` is a team's or a channel's thread id: `19:<id>@thread.tacv2` or `19:<id>@thread.skype`, the id 1–128
+/// ASCII letters, digits, `_` or `-` (no reply chain).
+#[must_use]
+pub fn is_team_thread_id(id: &str) -> bool {
+    let Some(rest) = id.strip_prefix("19:") else {
+        return false;
+    };
+    let Some(inner) = rest
+        .strip_suffix("@thread.tacv2")
+        .or_else(|| rest.strip_suffix("@thread.skype"))
+    else {
+        return false;
+    };
+    (1..=128).contains(&inner.len())
+        && inner
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+/// Reads a chat service thread (`GET v1/threads/<id>?view=msnp24Equivalent`) as a team's root thread: its group, in lower
+/// case, when the answer is the thread `id` itself (an object whose `id` is `id`), with `properties.threadType` `space`
+/// (a team's root, as the lab's own team's read showed it) and `properties.groupId` a GUID. A thread of another type (a
+/// channel's, a chat's) is [`PartialReason::Unsupported`], a pagination marker [`PartialReason::Paginated`], anything
+/// else malformed.
+///
+/// # Errors
+/// As above.
+pub fn parse_team_thread(id: &str, thread: &Value) -> Result<String, PartialReason> {
+    let object = thread.as_object().ok_or(MALFORMED)?;
+    if object.keys().any(|key| is_page_marker(key)) {
+        return Err(PartialReason::Paginated);
+    }
+    if object.get("id").and_then(Value::as_str) != Some(id) {
+        return Err(MALFORMED);
+    }
+    let properties = object.get("properties").and_then(Value::as_object).ok_or(MALFORMED)?;
+    if properties.get("threadType").and_then(Value::as_str) != Some("space") {
+        return Err(PartialReason::Unsupported);
+    }
+    properties
+        .get("groupId")
+        .and_then(Value::as_str)
+        .filter(|group| is_guid(group))
+        .map(str::to_ascii_lowercase)
+        .ok_or(MALFORMED)
 }
 
 /// The prefix of a meeting chat's inner id.

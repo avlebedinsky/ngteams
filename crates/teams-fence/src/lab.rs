@@ -18,11 +18,19 @@
 //! [[call_guests]]
 //! name = "me"                     # the user's own account, approved for calls only
 //! mri = "8:orgid:<guid>"          # required: a work account's MRI
+//!
+//! [[team_apps]]
+//! name = "app 1"                  # one of the apps Teams makes a member of every new team
+//! mri = "28:<guid>"               # required: a bot's MRI, from a capture of a new team's member list
 //! ```
 //!
 //! A call guest is the user's own account, approved as a participant of the lab's calls and nothing else: a lab account
 //! may call it, answer its call and start or join a call in a chat of lab accounts plus it, while every other write
 //! (a message, a reaction, a chat created, a member added, an invite) still reaches only the lab.
+//!
+//! A team app is one of Teams' own apps that every new team holds as a member (`docs/protocol/teams.md`): on a team or
+//! one of its channels it isn't counted among the people a write reaches, and nowhere else is it admitted
+//! ([`crate::Roster`]). An app or a bot someone added to a team is anyone else, even in the same shape.
 //!
 //! Passwords never go in this file. An account's MRI is written into it by [`record_account_mri`] after the account's
 //! first login, and an approved service participant's by [`record_service_mri`] once it is established; nothing else
@@ -118,6 +126,15 @@ pub struct ServiceParticipant {
 pub struct CallGuest {
     pub name: String,
     /// The account's MRI, `8:orgid:<lowercase guid>`.
+    pub mri: String,
+}
+
+/// One of Teams' own apps every new team holds as a member, not counted among a team's people ([`crate::Roster`]).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TeamApp {
+    pub name: String,
+    /// The app's MRI, `28:<lowercase guid>`.
     pub mri: String,
 }
 
@@ -433,6 +450,10 @@ pub enum ConfigError {
     EmptyGuestName,
     #[error("call guest {0} is listed more than once")]
     DuplicateGuest(String),
+    #[error("a team app without a name")]
+    EmptyTeamAppName,
+    #[error("team app {0} is listed more than once")]
+    DuplicateTeamApp(String),
     #[error("not a work account's MRI (8:orgid:<lowercase guid>): {0:?}")]
     NotAWorkAccountMri(String),
     #[error("data_dir must be absolute: {}", .0.display())]
@@ -461,6 +482,8 @@ struct RawConfig {
     service_participants: Vec<ServiceParticipant>,
     #[serde(default)]
     call_guests: Vec<CallGuest>,
+    #[serde(default)]
+    team_apps: Vec<TeamApp>,
 }
 
 /// A validated lab config.
@@ -470,6 +493,7 @@ pub struct LabConfig {
     tenant_domain: String,
     service_participants: Vec<ServiceParticipant>,
     call_guests: Vec<CallGuest>,
+    team_apps: Vec<TeamApp>,
     paths: LabPaths,
 }
 
@@ -494,7 +518,8 @@ impl LabConfig {
     /// # Errors
     /// On invalid TOML or unknown fields, a count other than 3 accounts, a duplicate alias or UPN, a malformed UPN, UPNs
     /// in more than one domain, an empty MRI or one given to two participants, a duplicate or empty service or call guest
-    /// name, a call guest's MRI that isn't a work account's, or a relative `data_dir`.
+    /// name, a call guest's MRI that isn't a work account's, a duplicate or empty team app name, a team app's MRI that isn't
+    /// a bot's, or a relative `data_dir`.
     pub fn parse(text: &str, default_data_dir: &Path) -> Result<Self, ConfigError> {
         let raw: RawConfig = toml::from_str(text)?;
         let data_dir = match raw.data_dir {
@@ -505,12 +530,14 @@ impl LabConfig {
         let (accounts, tenant_domain) = validate_accounts(raw.accounts)?;
         validate_services(&raw.service_participants)?;
         validate_guests(&raw.call_guests)?;
-        validate_unique_mris(&accounts, &raw.service_participants, &raw.call_guests)?;
+        validate_team_apps(&raw.team_apps)?;
+        validate_unique_mris(&accounts, &raw.service_participants, &raw.call_guests, &raw.team_apps)?;
         Ok(Self {
             accounts,
             tenant_domain,
             service_participants: raw.service_participants,
             call_guests: raw.call_guests,
+            team_apps: raw.team_apps,
             paths: LabPaths::new(data_dir),
         })
     }
@@ -547,6 +574,12 @@ impl LabConfig {
     #[must_use]
     pub fn call_guest(&self, name: &str) -> Option<&CallGuest> {
         self.call_guests.iter().find(|guest| guest.name == name)
+    }
+
+    /// Teams' own apps every new team holds as a member.
+    #[must_use]
+    pub fn team_apps(&self) -> &[TeamApp] {
+        &self.team_apps
     }
 
     #[must_use]
@@ -618,11 +651,28 @@ fn validate_guests(guests: &[CallGuest]) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// One MRI names one participant: an account, a service or a call guest, or two of any, can't share it.
+fn validate_team_apps(apps: &[TeamApp]) -> Result<(), ConfigError> {
+    let mut names = BTreeSet::new();
+    for app in apps {
+        if app.name.is_empty() {
+            return Err(ConfigError::EmptyTeamAppName);
+        }
+        if !names.insert(app.name.as_str()) {
+            return Err(ConfigError::DuplicateTeamApp(app.name.clone()));
+        }
+        if !is_bot_mri(&app.mri) {
+            return Err(ConfigError::NotABotMri(app.mri.clone()));
+        }
+    }
+    Ok(())
+}
+
+/// One MRI names one participant: an account, a service, a call guest or a team app, or two of any, can't share it.
 fn validate_unique_mris(
     accounts: &[Account],
     services: &[ServiceParticipant],
     guests: &[CallGuest],
+    apps: &[TeamApp],
 ) -> Result<(), ConfigError> {
     let owners = accounts
         .iter()
@@ -636,7 +686,8 @@ fn validate_unique_mris(
             guests
                 .iter()
                 .map(|guest| (Some(guest.mri.as_str()), guest.name.clone())),
-        );
+        )
+        .chain(apps.iter().map(|app| (Some(app.mri.as_str()), app.name.clone())));
     let mut seen = BTreeSet::new();
     for (mri, owner) in owners {
         if let Some(mri) = mri

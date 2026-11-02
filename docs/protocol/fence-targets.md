@@ -144,7 +144,7 @@ query key twice in any case, makes the request unreadable.
 | `DELETE v1/users/ME/conversations/<chat>/messages/<msg>` | `Write(Delete)` |
 | `PUT`/`DELETE …/messages/<msg>/properties?name=emotions` (the only query key) | `Write(Reaction)` |
 | `PUT v1/users/ME/conversations/<chat>/properties?name=consumptionhorizon` (the only query key), on a chat by its id | `None` (read receipt) |
-| `PUT v1/users/ME/conversations/<id>/properties?name=<n>`, `<n>` one of `OWN_VIEW_PROPERTIES` (`lastTimeFavorited`, `favorite`), the only query key, `<id>` a `19:` chat or channel id | `None` (the account's own view of a conversation) |
+| `PUT v1/users/ME/conversations/<id>/properties?name=<n>`, `<n>` one of `OWN_VIEW_PROPERTIES` (`lastTimeFavorited`, `favorite`, `isGeneralChannelFavorite`), the only query key, or `name=favorite&requirePermanentJoinedState=<boolean>` exactly (the web client on each channel it made), `<id>` a `19:` chat or channel id | `None` (the account's own view of a conversation) |
 | `PUT v1/users/ME/conversations/48:notifications` or `48:mentions` `/messages/<id>/properties?name=isread`, the only query key, the body exactly `{"isread": <string>}` | `None` (the account's own feed) |
 | `PUT v1/users/ME/properties?name=<n>`, the only query key | `None` (the account's own settings) |
 | `PUT`, `POST`, `DELETE` on `v1` or `v2` `users/ME/endpoints`, `…/endpoints/<id>`, `…/endpoints/<id>/active`, `…/endpoints/<id>/activeendpoint`, `users/ME/activeendpoint` | `None` (the account's own session) |
@@ -237,8 +237,8 @@ Rules that keep the mapping fail-closed:
 - A new chat's participants are exactly the body's `members`, a non-empty list of objects each with a string `id`; a
   body without them is unreadable. The fence judges a `New` target by those participants without a read.
 - Only chats map here: channels (`@thread.tacv2`, `@thread.skype`) and reply chains (`;messageid=`) are unreadable,
-  because a channel's members are a team's, which the fence can't read complete
-  (`docs/backlog/channel-writes-need-a-lab-only-team.md`). The account's own view of a channel
+  because no channel post, reply or reaction is mapped from a capture yet (a channel's members are its team's, which
+  the fence reads from the team's thread: [teams.md](teams.md#the-fence)). The account's own view of a channel
   (`lastTimeFavorited`) is a carve-out; its own member entry in a team channel (`PUT
   v1/threads/<channel>/members/<own MRI>?returnThreadMetadata`, `{"expiration": <n>}`, sent as the client lists the
   account's teams) and other channel properties stay unreadable: the writing scenarios' expected-deny list names
