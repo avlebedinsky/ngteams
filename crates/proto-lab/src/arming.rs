@@ -53,9 +53,13 @@
 //! held target contained (closed, or killed with the browser) before its resume ran nothing; one whose resume was
 //! sent, one that wasn't held when it attached (it was running already), or one that could be neither closed nor
 //! killed counts as a breach ([`crate::session::FenceReport::breached`]). The one exception is a session that is gone
-//! before its arming finishes (the browser answers "Session with given id not found"): its tab closed, or its worker
-//! ended. That session has nothing left to arm or resume, so it is dropped quietly; browser-level `Fetch` stays on
-//! regardless.
+//! before its arming finishes: the browser answers "Session with given id not found", or reports the session detached
+//! while a step waits on it (a command still with a target that goes away is never answered, [`crate::cdp`]): its tab
+//! closed, its worker ended, or its out-of-process frame was removed or went back into its parent's process (where the
+//! parent's arming covers it). That session has nothing left to arm or resume, so it is dropped quietly; browser-level
+//! `Fetch` stays on regardless. Before the detach was read that way, a hidden sign-in iframe going away just as its
+//! resume was sent waited out [`STEP_TIMEOUT`], its close was refused (it was gone) and the browser was killed, and
+//! the resume sent made each a breach (`ab-meeting-join`, 2026-11-02).
 //!
 //! A request therefore pauses on its target's session first and on the browser session after that, and each layer
 //! decides it on its own ([`crate::fence_http::HttpFence`]); a deny at either fails it. A WebSocket frame waits in the
@@ -333,16 +337,21 @@ pub enum ArmError {
 const SESSION_NOT_FOUND: i64 = -32001;
 
 impl ArmError {
-    /// Whether the step failed only because the target's session is gone (detached, or its target closed).
+    /// Whether the step failed only because the target's session is gone (detached, or its target closed): the browser
+    /// answered that it has no such session, or reported the session detached while the step waited on it.
     #[must_use]
     pub fn session_gone(&self) -> bool {
-        matches!(
-            self,
+        match self {
             Self::Step {
                 source: CdpError::Remote { error, .. },
                 ..
-            } if error.code == SESSION_NOT_FOUND
-        )
+            } => error.code == SESSION_NOT_FOUND,
+            Self::Step {
+                source: CdpError::Detached { .. },
+                ..
+            } => true,
+            _ => false,
+        }
     }
 
     /// Whether the target's resume was sent: the step that failed is [`Step::Resume`], so its code may be running.

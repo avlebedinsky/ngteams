@@ -14,6 +14,8 @@
 //! 3. a schedules the meeting ([`super::ab_meeting`]'s form).
 //! 4. a loads at the meeting's join link; its pre-join must show Join now, its subscription the fence let through.
 //! 5. a clicks Join now; every start with media is held back with a labelled deny, so nothing enters a call.
+//! 6. a cancels the meeting from its chat's details (`ab-meeting`'s step 5), whether or not the join went through, so
+//!    the run leaves no meeting behind.
 
 use std::time::Duration;
 
@@ -127,8 +129,29 @@ impl Steps<'_> {
             .push("enforcement: a's probe post was denied by the fence and failed in a's page".to_owned());
         let title = format!("lab meeting join {}", self.nonce);
         let body = ab_meeting::schedule(a, &mut drive, report, &title, self.upn_b, self.options).await?;
-        let link = created_join_link(body.as_deref())
-            .ok_or_else(|| setup("the event's creation named no join link".to_owned()))?;
+        let joined = self.join(a, body.as_deref(), report).await;
+        if joined.is_err()
+            && let Some(note) = save_screenshot_as(Alias::A, a, "join-failure.png").await
+        {
+            report.notes.push(note);
+        }
+        let mut drive = a.driver();
+        let cancelled = match ab_meeting::created_chat(body.as_deref()) {
+            Some(chat) => ab_meeting::cancel_scheduled(a, &mut drive, report, &chat, self.options).await,
+            None => Err(setup("the event's creation named no meeting chat".to_owned())),
+        };
+        joined.and(cancelled)
+    }
+
+    /// Steps 4 and 5 on the meeting whose creation's request body is `body`.
+    async fn join(
+        &self,
+        a: &mut LabSession,
+        body: Option<&str>,
+        report: &mut ScenarioReport,
+    ) -> Result<(), ScenarioError> {
+        let link =
+            created_join_link(body).ok_or_else(|| setup("the event's creation named no join link".to_owned()))?;
         load_at(Alias::A, a, &link, self.options.load_timeout).await?;
         let mut drive = a.driver();
         pre_join(a, &mut drive, report).await

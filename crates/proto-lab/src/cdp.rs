@@ -8,6 +8,13 @@
 //! That is why the client is our own: `chromiumoxide` resumes every target paused that way by itself, before its
 //! caller can arm it, and detaches service workers.
 //!
+//! A command waits for its answer for as long as it takes, with one exception: once the browser reports a session
+//! detached (`Target.detachedFromTarget`), every command still waiting on that session fails at once with
+//! [`CdpError::Detached`]. Chrome 155 never answers a command whose target goes away while the command is with it (an
+//! out-of-process iframe removed or swapped back into its parent's process just as its resume was sent, seen four times
+//! in one day of `ab-meeting-join` runs); the browser answers in order, so any answer it was going to give came before
+//! the detach. A command sent to a session already gone is answered with an error, as before.
+//!
 //! The connection lives as long as a [`Cdp`] or [`Session`] handle does: dropping the last one closes the websocket, so
 //! the browser sees the client detach (and releases whatever it held for it), and [`Events`] then ends.
 //!
@@ -83,6 +90,9 @@ pub enum CdpError {
     Closed,
     #[error("{method} failed: {error}")]
     Remote { method: String, error: RemoteError },
+    /// The session the command went to detached before the browser answered it: no answer will come.
+    #[error("{method} got no answer: its session detached")]
+    Detached { method: String },
     #[error("a malformed DevTools message: {0}")]
     Malformed(String),
 }
@@ -132,10 +142,20 @@ pub fn encode_command(id: u64, session: Option<&SessionId>, method: &str, params
     command.to_string()
 }
 
-type Reply = oneshot::Sender<Result<Value, RemoteError>>;
+/// How a waiting command ends: with the browser's answer, or with its session detached first.
+enum Answer {
+    Browser(Result<Value, RemoteError>),
+    Detached,
+}
+
+/// A command waiting for its answer, and the session it went to (`None`: the browser).
+struct Waiting {
+    session: Option<SessionId>,
+    reply: oneshot::Sender<Answer>,
+}
 
 struct Pending {
-    replies: HashMap<u64, Reply>,
+    replies: HashMap<u64, Waiting>,
     /// The connection is gone: no reply will ever come.
     closed: bool,
 }
@@ -151,9 +171,26 @@ impl Replies {
 
     /// Delivers a response; an id nobody waits for (a dropped caller) is ignored.
     fn resolve(&self, id: u64, outcome: Result<Value, RemoteError>) {
-        if let Some(reply) = self.pending().replies.remove(&id) {
+        if let Some(waiting) = self.pending().replies.remove(&id) {
             // the caller may have given up; nothing to do then
-            let _ = reply.send(outcome);
+            let _ = waiting.reply.send(Answer::Browser(outcome));
+        }
+    }
+
+    /// Fails every command still waiting on `session`, which the browser reported detached: an answer it was going to
+    /// give would have come before the detach.
+    fn detached(&self, session: &SessionId) {
+        let mut pending = self.pending();
+        let gone: Vec<u64> = pending
+            .replies
+            .iter()
+            .filter(|(_, waiting)| waiting.session.as_ref() == Some(session))
+            .map(|(&id, _)| id)
+            .collect();
+        for id in gone {
+            if let Some(waiting) = pending.replies.remove(&id) {
+                let _ = waiting.reply.send(Answer::Detached);
+            }
         }
     }
 
@@ -248,7 +285,8 @@ impl Cdp {
             if pending.closed {
                 return Err(CdpError::Closed);
             }
-            pending.replies.insert(id, reply);
+            let session = session.cloned();
+            pending.replies.insert(id, Waiting { session, reply });
         }
         if self
             .inner
@@ -260,10 +298,13 @@ impl Cdp {
             return Err(CdpError::Closed);
         }
         match response.await {
-            Ok(Ok(result)) => Ok(result),
-            Ok(Err(error)) => Err(CdpError::Remote {
+            Ok(Answer::Browser(Ok(result))) => Ok(result),
+            Ok(Answer::Browser(Err(error))) => Err(CdpError::Remote {
                 method: method.to_owned(),
                 error,
+            }),
+            Ok(Answer::Detached) => Err(CdpError::Detached {
+                method: method.to_owned(),
             }),
             Err(_) => Err(CdpError::Closed),
         }
@@ -292,6 +333,11 @@ fn dispatch(replies: &Replies, events: &mpsc::UnboundedSender<Event>, message: &
     match parse_incoming(text) {
         Ok(Incoming::Response { id, outcome }) => replies.resolve(id, outcome),
         Ok(Incoming::Event(event)) => {
+            if event.method == "Target.detachedFromTarget"
+                && let Some(session) = event.params["sessionId"].as_str()
+            {
+                replies.detached(&SessionId::new(session));
+            }
             // nobody listens any more; the responses still matter
             let _ = events.send(event);
         }

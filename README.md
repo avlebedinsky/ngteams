@@ -300,7 +300,7 @@ fails the run.
 - `ab-meeting-join`: account a alone, after the enforcement test: a schedules a Teams meeting with b, opens its join
   link and clicks the pre-join's Join now, only on that meeting; the pre-join's subscription is judged by the meeting's
   chat, read fresh, and everything that would enter a call is held back with a labelled forced deny
-  (`docs/protocol/calling.md`, "Joining a meeting").
+  (`docs/protocol/calling.md`, "Joining a meeting"); then a cancels the meeting, as `ab-meeting` does, joined or not.
 - `own-presence-activity`, `-endpoint`, `-both`, `-manual-held`, `-manual`: account a alone, as `ab-trouter`. Its
   own availability reaches nobody, so it passes; each run holds back with a labelled forced deny what it leaves out:
   `user.activity` alone, UPS's endpoint `PUT` alone, both, then a manual status (Busy, Do not disturb, Away,

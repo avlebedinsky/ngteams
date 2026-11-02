@@ -345,7 +345,15 @@ pub(super) async fn cancel_scheduled(
     chat: &str,
     options: RunOptions,
 ) -> Result<(), ScenarioError> {
-    open_details(a, drive, report, chat, options.load_timeout).await?;
+    // from the meeting's page the chat link's load can hang unanswered (seen once: its document request allowed, no
+    // response in 90 s); one more try from a blank page, so the meeting isn't left behind
+    if let Err(error) = open_details(a, drive, report, chat, options.load_timeout).await {
+        report.notes.push(format!(
+            "a: the meeting's details didn't open ({error}); trying again from a blank page"
+        ));
+        a.navigate("about:blank").await?;
+        open_details(a, drive, report, chat, options.load_timeout).await?;
+    }
     let mut drive = a.driver();
     let steps = Steps {
         mri_b: "",

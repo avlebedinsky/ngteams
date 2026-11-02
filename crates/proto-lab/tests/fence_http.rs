@@ -730,6 +730,12 @@ async fn serve_fake(
                 if command["method"] == "Target.closeTarget" && command["params"]["targetId"] == SILENT {
                     continue;
                 }
+                // a vanishing target goes away with its step, which is never answered
+                if let Some(session) = vanishes_with(&command) {
+                    let event = json!({"method": "Target.detachedFromTarget", "params": {"sessionId": session}});
+                    socket.send(Message::text(event.to_string())).await?;
+                    continue;
+                }
                 answer_fake(&mut socket, &command, refuse).await?;
             }
             event = pushed.recv() => {
@@ -742,6 +748,21 @@ async fn serve_fake(
 
 /// The session whose target detaches before its resume is answered: a short-lived worker, or a tab closed at once.
 const SHORT_LIVED: &str = "S-short";
+
+/// The sessions whose target goes away while one of its arming steps is with it, and the step: Chrome reports the
+/// session detached and never answers the step (a sign-in iframe removed as its resume was sent).
+const VANISHING: [(&str, &str); 2] = [
+    ("S-vanish-resume", "Runtime.runIfWaitingForDebugger"),
+    ("S-vanish-network", "Network.enable"),
+];
+
+/// The vanishing session `command` is the last step of, if it is one.
+fn vanishes_with(command: &Value) -> Option<&'static str> {
+    VANISHING
+        .iter()
+        .find(|(session, method)| command["sessionId"] == *session && command["method"] == *method)
+        .map(|(session, _)| *session)
+}
 
 /// The session whose WebSocket guard reports that it has no binding to ask through.
 const UNGUARDED: &str = "S-unguarded";
@@ -1546,6 +1567,62 @@ async fn a_target_that_detaches_while_it_is_armed_is_never_listed() {
         .collect();
     assert!(!sessions.iter().any(|session| session == SHORT_LIVED), "{sessions:?}");
     assert!(sessions.iter().any(|session| session == "S-long"), "{sessions:?}");
+    armed.verdict().unwrap();
+}
+
+#[tokio::test]
+async fn a_target_gone_with_a_step_unanswered_is_dropped_at_its_detach_without_closing_it() {
+    let fake = FakeBrowser::start(refuse_nothing).await.unwrap();
+    let (armed, _lab) = arm_fake(&fake, &[]).await.unwrap();
+
+    for (session, _) in VANISHING {
+        let target = session.replace("S-", "T-");
+        fake.event(
+            Some("S-page"),
+            "Target.attachedToTarget",
+            &attached(session, &target, "iframe"),
+        )
+        .unwrap();
+    }
+    fake.event(None, "Target.attachedToTarget", &attached("S-long", "T-long", "page"))
+        .unwrap();
+
+    // well within the step timeout: the detach ends the wait, not the timeout
+    armed_target(&armed, "S-long").await.unwrap();
+    let settled = tokio::time::timeout(Duration::from_secs(3), async {
+        while armed.decisions().undecided() > 0 {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(settled.is_ok(), "an arming still waits on a step of a detached session");
+    for (session, step) in VANISHING {
+        assert_eq!(
+            fake.methods_on(Some(session)).last().map(String::as_str),
+            Some(step),
+            "nothing after the step its target went away with"
+        );
+    }
+    let closes: Vec<Value> = fake
+        .commands()
+        .into_iter()
+        .filter(|command| {
+            command["method"] == "Target.closeTarget"
+                && command["params"]["targetId"]
+                    .as_str()
+                    .is_some_and(|target| target.starts_with("T-vanish"))
+        })
+        .collect();
+    assert_eq!(closes, Vec::<Value>::new(), "nothing to close: the targets are gone");
+    let sessions: Vec<String> = armed
+        .targets()
+        .iter()
+        .map(|target| target.session.to_string())
+        .collect();
+    assert!(
+        !sessions.iter().any(|session| session.starts_with("S-vanish")),
+        "{sessions:?}"
+    );
     armed.verdict().unwrap();
 }
 

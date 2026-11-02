@@ -1138,3 +1138,62 @@ async fn a_held_target_runs_only_once_its_parent_s_auto_attach_ends_or_its_conne
 
     outcome.expect("the held-target run took over 150 s").unwrap();
 }
+
+// --- a real browser: a command on a target that goes away ---
+
+/// A command still with a held out-of-process iframe when the iframe is removed: Chrome reports the session detached
+/// and never answers the command, so the client fails it with the detach. (The fence's arming waits on such a command:
+/// a resume sent just as the frame went away used to wait out its whole step timeout, `proto_lab::arming`.)
+async fn a_command_with_a_removed_frame(browser: &Browser, server: &MockServer) -> TestResult {
+    let (cdp, mut events) = Cdp::connect(&browser.endpoint().ws_url()).await?;
+    let url = format!("{}/outer/vanish.html", server.uri());
+    let held = load_held(&cdp, &mut events, url, "iframe").await?;
+    cdp.call(Some(&held.session), "Runtime.runIfWaitingForDebugger", Value::Null)
+        .await?;
+    // a promise that never settles keeps the command with the frame's renderer
+    let waiting = tokio::spawn({
+        let (cdp, session) = (cdp.clone(), held.session.clone());
+        let never = json!({"expression": "new Promise(() => {})", "awaitPromise": true});
+        async move { cdp.call(Some(&session), "Runtime.evaluate", never).await }
+    });
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!waiting.is_finished(), "answered while the frame was there");
+    page_value(&cdp, &held.page, "document.querySelector('iframe').remove()").await?;
+    next_event(&cdp, &mut events, "the frame's detach", |event| {
+        event.method == "Target.detachedFromTarget" && event.params["sessionId"] == held.session.as_str()
+    })
+    .await?;
+    let answer = tokio::time::timeout(Duration::from_secs(5), waiting)
+        .await
+        .map_err(|_| "the command still waits after its session detached")??;
+    assert!(
+        matches!(&answer, Err(CdpError::Detached { method }) if method == "Runtime.evaluate"),
+        "{answer:?}"
+    );
+    // closing is best effort: the connection may drop before the reply
+    let _ = cdp.call(None, "Browser.close", Value::Null).await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_command_waiting_on_a_frame_that_goes_away_fails_with_its_detach() {
+    let Some(chrome) = common::chrome_or_skip() else {
+        return;
+    };
+    let profile = tempfile::tempdir().unwrap();
+    let server = MockServer::start().await;
+    let (ws_port, _frames) = frame_server().await.unwrap();
+    serve_case(&server, ws_port, "vanish").await;
+    let browser = Browser::launch(&chrome, &LaunchOptions::new(profile.path().join("p")), STEP)
+        .await
+        .unwrap();
+
+    let outcome = tokio::time::timeout(
+        Duration::from_secs(60),
+        a_command_with_a_removed_frame(&browser, &server),
+    )
+    .await;
+    browser.wait_or_kill(Duration::from_secs(10)).await.unwrap();
+
+    outcome.expect("the run took over 60 s").unwrap();
+}
