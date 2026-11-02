@@ -10,13 +10,15 @@
 //!   change carries `emotions` (the whole set) and neither.
 //! - `ConversationUpdate`: the chat ([`ChatEvent::ConversationUpdate`]), or the account's own read horizon when its
 //!   `propertiesUpdated` names `consumptionhorizon` ([`ChatEvent::ReadHorizon`]).
+//! - `CustomUserProperties`: the account's own properties that changed; its mark-all-read horizon when they name one
+//!   ([`ChatEvent::AppReadHorizon`], `docs/protocol/chat.md`), else [`ChatEvent::Unknown`].
 //! - anything else is [`ChatEvent::Unknown`] with its `resourceType`, and logged by that kind only.
 //!
 //! A delivery is applied by conversation, message id and version: the service replays unanswered ones on connect
 //! (`stored`), so the same event can come more than once.
 
 use serde_json::Value;
-use teams_proto::chat::{ConsumptionHorizon, Conversation, Field, Message, MessageType};
+use teams_proto::chat::{AppConsumptionHorizon, ConsumptionHorizon, Conversation, Field, Message, MessageType};
 
 use crate::frames::RawDelivery;
 
@@ -55,6 +57,8 @@ pub enum ChatEvent {
         conversation: String,
         horizon: ConsumptionHorizon,
     },
+    /// The account marked everything read in Teams, or took that back.
+    AppReadHorizon(AppConsumptionHorizon),
     /// The chat changed (its last message, its thread properties, …).
     ConversationUpdate { conversation: Box<Conversation> },
     /// A delivery of another kind, or one whose body doesn't read: its `resourceType` (empty when there was none).
@@ -101,6 +105,7 @@ impl ChatEvent {
             "NewMessage" => new_message(resource),
             "MessageUpdate" => message_update(resource),
             "ConversationUpdate" => conversation_update(resource),
+            "CustomUserProperties" => AppConsumptionHorizon::from_properties(resource).map(ChatEvent::AppReadHorizon),
             _ => None,
         };
         event.unwrap_or_else(|| unknown(resource_type))

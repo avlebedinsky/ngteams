@@ -2399,6 +2399,51 @@ fn conversation_delivery(id: &str, horizon: Option<&str>) -> Value {
 }
 
 #[tokio::test]
+async fn marking_all_read_in_teams_reads_the_chats_from_the_catch_up_and_from_a_delivery() {
+    let lab = Lab::start().await;
+    let mut b = native(&lab, LAB_B, How::default());
+    b.ready().await;
+    lab.mock.post_as(LAB_A, AB_CHAT, "<p>unread</p>").unwrap();
+    b.handle.sync().await.unwrap();
+    assert!(b.handle.unread_count(AB_CHAT).await.unwrap() > 0);
+
+    lab.mock
+        .answer_next(
+            "GET",
+            "users/ME/properties",
+            200,
+            &json!({"appConsumptionHorizon": "{\"chat\":9999999999999,\"channel\":0}"}),
+        )
+        .await;
+    b.handle.sync().await.unwrap();
+    assert_eq!(
+        b.handle.unread_count(AB_CHAT).await.unwrap(),
+        0,
+        "read by the catch-up's read"
+    );
+
+    // the catch-up's own change events, so the wait below sees the delivery's
+    b.drain().await;
+    lab.trouter.deliver_chat(
+        LAB_B,
+        &json!({
+            "type": "EventMessage",
+            "resourceType": "CustomUserProperties",
+            "resource": {"appConsumptionHorizon": {"chat": 0, "channel": 0}},
+        }),
+    );
+    b.event(|event| {
+        matches!(event, Event::ConversationChanged { conversation } if conversation == AB_CHAT).then_some(())
+    })
+    .await;
+    assert!(
+        b.handle.unread_count(AB_CHAT).await.unwrap() > 0,
+        "taken back by a delivery"
+    );
+    b.shutdown();
+}
+
+#[tokio::test]
 async fn a_conversation_delivery_updates_known_chats_and_syncs_new_ones_without_answering_it() {
     let lab = Lab::start().await;
     let mut a = native(&lab, LAB_A, How::default());

@@ -41,8 +41,8 @@ pub use html::{
 };
 pub use links::{HYPERLINK_TYPE, LinkPreview, link_previews};
 pub use model::{
-    ConsumptionHorizon, Conversation, ConversationKind, ConversationList, Field, Forwarded, Malformed, MemberList,
-    Mention, MentionKind, Message, MessagePage, MessageType, QuotedMessage, Reaction, ReactionUser, Thread,
-    ThreadMember, Unshown, WEB_CLIENT, forwarded, unshown_parts, web_chat_link,
+    AppConsumptionHorizon, ConsumptionHorizon, Conversation, ConversationKind, ConversationList, Field, Forwarded,
+    Malformed, MemberList, Mention, MentionKind, Message, MessagePage, MessageType, QuotedMessage, Reaction,
+    ReactionUser, Thread, ThreadMember, Unshown, WEB_CLIENT, forwarded, unshown_parts, web_chat_link,
 };
 pub use read::{ChatReadError, ChatReads, MAX_PAGE_SIZE, link_endpoint};

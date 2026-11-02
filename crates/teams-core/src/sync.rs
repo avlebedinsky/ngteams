@@ -85,7 +85,8 @@ use teams_fence::Mri;
 use teams_proto::chat::{self, ChatReadError, ChatReads, Field, MAX_PAGE_SIZE, MessagePage};
 use teams_proto::{Client, Credentials, HttpError, HttpTransport, Transport};
 use teams_store::{
-    Applied, Conversation, ConversationKind, Member, Message, Reaction, ReadHorizon, Store, StoreError, SyncState,
+    AppReadHorizon, Applied, Conversation, ConversationKind, Member, Message, Reaction, ReadHorizon, Store, StoreError,
+    SyncState,
 };
 
 use crate::outbox::{Arrival, Clock, ConversationSync, Outbox, OutboxError, Received, SyncError, now_ms};
@@ -466,6 +467,7 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
     /// [`CatchUpError::Store`] when the store fails to keep its sync link. A conversation that can't be synced is in
     /// [`CatchUpReport::failed`] instead.
     pub async fn catch_up(&self, store: &mut Store) -> Result<CatchUpReport, CatchUpError> {
+        self.read_app_horizon(store).await?;
         let kept = store.conversation_list_sync_link()?;
         let first = kept.is_none();
         let (sync_link, conversations, mut report) = self.read_list(store, kept).await?;
@@ -476,6 +478,37 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         self.catch_up_notes(store, &conversations, &mut report).await?;
         log_report(&report, first);
         Ok(report)
+    }
+
+    /// The account's mark-all-read horizon. A read that fails keeps the one stored and stops no catch-up.
+    async fn read_app_horizon(&self, store: &mut Store) -> Result<(), CatchUpError> {
+        let reads = ChatReads::new(&self.client);
+        match self.waiting(store, reads.app_consumption_horizon()).await {
+            Ok(Some(horizon)) => self.receive_app_horizon(store, horizon)?,
+            Ok(None) => {}
+            Err(error) => log::debug!("sync: the account's own properties weren't read: {error}"),
+        }
+        Ok(())
+    }
+
+    /// Keeps the account's mark-all-read horizon, and tells of the conversations whose unread count it can change.
+    ///
+    /// # Errors
+    ///
+    /// [`CatchUpError::Store`] when the store fails.
+    pub fn receive_app_horizon(
+        &self,
+        store: &mut Store,
+        horizon: chat::AppConsumptionHorizon,
+    ) -> Result<(), CatchUpError> {
+        let changed = store.set_app_read_horizon(AppReadHorizon {
+            chat: horizon.chat,
+            channel: horizon.channel,
+        })?;
+        for conversation in &changed {
+            self.changed(|changes| changes.conversation(conversation));
+        }
+        Ok(())
     }
 
     /// The conversation list from `kept`, its sync link (the whole list without one), every page of it: the list's

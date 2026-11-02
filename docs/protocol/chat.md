@@ -138,6 +138,37 @@ own Teams, whose 20 rows are the personal store's 20 latest chats in the same or
 - **A chat opened outside the rows shown** is added to the loaded page (the query's `selectedIdHint`, the rail's
   "hoisting", `enableSimpleCollabRailSelectionHoisting`), which sorts it after them, and stays there until a refetch.
 
+## Which chats are unread
+
+Read from the web bundle `26260.1717.5229.7049` (its read-state helpers, the chat badge's publisher and the rail's
+folder activity), and checked against a personal account's stores and CSA answer of 2026-11-02, whose real rail shows
+no chat bold and whose See more isn't bold. Teams keeps one yes or no per chat, from the chat's last message; the native
+client counts messages, and calls a chat unread when the count isn't 0, by the same rules:
+
+- **The last message and the horizon.** A chat is read when its last message arrived no later than the horizon. CSA's
+  `lastMessage` isn't the newest thing in the chat: in 54 of the 265 chats it was an older message than the newest stored
+  row, an `Event/Call` or a member or topic event. All of them were `isRead`, some with that row past their horizon, so a
+  call or a thread event makes no chat unread. The native client counts `Text` and `RichText…`.
+- **A meeting's chat** (its id holds `meeting`) isn't unread for what the meeting left in it: the bundle's list is
+  `ThreadActivity/AddMember`, `Event/Call`, `RichText/Media_CallRecording`, `RichText/Media_LocalRecording` and
+  `RichText/Media_CallTranscript`, and thread events beside them. The chat counts as read up to its last content message
+  (`lastContentMessageTime`, which the client works out; no answer carries it). The personal account's 8 meeting chats
+  that the native client called unread held only recordings and transcripts past their horizon, one of them from 2022. In
+  any other chat a recording counts as a message.
+- **Your own last message** makes a chat read, whatever its horizon says: CSA's `isRead` is true on a meeting's chat
+  with `isLastMessageFromMe` and no `consumptionHorizon` at all.
+- **Mark all as read** is account-wide: the account's own property `appConsumptionHorizon`, `{"chat", "channel",
+  "engage_community"}` in ms, as an object or as its JSON text, read with the others (`GET v1/users/ME/properties`, 404
+  for an account that has none) and delivered on change (`CustomUserProperties`, the changed properties only). What
+  arrived up to the time for the chat's kind is read, unless a chat with no horizon of its own was joined after it. The
+  form is the bundle's: no capture shows one, since no lab account marked all read and the personal build hadn't read
+  the property. The native client doesn't apply the "joined after it" exception: such a chat's messages from before
+  that time count as read, and any newer one still counts.
+- **Mark as unread** isn't read by the native client. Teams keeps it in the conversation's `userConsumptionHorizon` (or
+  `consumptionHorizonBookmark`), and while its arrival time isn't 0 the chat is unread. The 8 chats that carry one in the
+  CSA answer above all have arrival time 0, so none is marked, and clearing one is a write no capture shows.
+- **Notifications** don't follow from any of this: only `Text`, `RichText/Html` and `RichText/Media_Card` notify.
+
 ## The account's own notes
 
 `48:notes` (`threadType` `streamofnotes`), the account's chat with itself, which Teams lists first under Favorites

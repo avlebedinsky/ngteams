@@ -4,9 +4,9 @@
 //!
 //! Ids, tokens and hosts here are the fixtures' made-up ones.
 
-use serde_json::Value;
+use serde_json::{Value, json};
 use teams_proto::DroppedIndicator;
-use teams_proto::chat::MessageType;
+use teams_proto::chat::{AppConsumptionHorizon, MessageType};
 use teams_trouter::frames::{Connected, DecodeError, Event, Incoming, decode, message_loss};
 use teams_trouter::socket::allowed;
 use teams_trouter::{Change, ChatEvent, Delivery};
@@ -239,6 +239,21 @@ fn the_captured_chat_updates_read_as_a_chat_update_and_the_read_horizon() {
     assert_eq!(conversation, &chat());
     assert_eq!(horizon.last_read_arrival, Some(1_700_000_001_000));
     assert_eq!(horizon.client_message_id.as_deref(), Some("1000000000000000001"));
+}
+
+#[test]
+fn the_accounts_own_properties_are_read_only_for_its_mark_all_read_horizon() {
+    let body = |resource: Value| json!({"resourceType": "CustomUserProperties", "resource": resource}).to_string();
+    assert_eq!(
+        ChatEvent::from_body(&body(json!({"appConsumptionHorizon": "{\"chat\":5,\"channel\":7}"}))),
+        ChatEvent::AppReadHorizon(AppConsumptionHorizon { chat: 5, channel: 7 })
+    );
+    assert_eq!(
+        ChatEvent::from_body(&body(json!({"recentReactions": "[]", "inQuarantine": false}))),
+        ChatEvent::Unknown {
+            resource_type: "CustomUserProperties".to_owned()
+        }
+    );
 }
 
 #[test]

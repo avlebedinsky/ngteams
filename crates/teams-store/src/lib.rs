@@ -4,7 +4,7 @@
 //! - [`conversations`]: conversations by thread version, their members by roster version, the list by last activity;
 //! - [`messages`]: messages by id and version (an edit or a soft delete is a newer version), reactions per user, pages
 //!   of a conversation, the unread count;
-//! - [`state`]: read horizons and where each conversation's sync stands;
+//! - [`state`]: read horizons, the account's mark-all-read one, and where each conversation's sync stands;
 //! - [`profiles`]: people's names and pictures as the account last read them (M2 Task 12);
 //! - [`outbox`]: writes waiting to go out, keyed by `clientmessageid`; a run sends only its own rows, and adopts only
 //!   rows of runs that have ended (each open run holds a lock of its own, `runs`); one engine per account holds the
@@ -42,13 +42,13 @@ use std::time::Duration;
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
 pub use conversations::{Conversation, ConversationKind, Member};
-pub use messages::{Message, MessagePage, PageCursor, Reaction, ReactionChange};
+pub use messages::{Message, MessagePage, PageCursor, Reaction, ReactionChange, counts_unread};
 pub use outbox::{AttemptOutcome, CheckFailed, NewOutboxEntry, OutboxEntry, OutboxKind, OutboxState};
 pub use pictures::PictureCache;
 pub use profiles::{NameSource, PictureState, Profile, StoredPicture};
 pub use schema::SCHEMA_VERSION;
 pub use search::{IndexCursor, IndexText, SearchHit};
-pub use state::{ReadHorizon, SyncState};
+pub use state::{AppReadHorizon, ReadHorizon, SyncState};
 pub use teams::{ChannelKind, Team, TeamChannel};
 
 /// How long a write waits for another connection's lock (a second process on the same account) before it fails.

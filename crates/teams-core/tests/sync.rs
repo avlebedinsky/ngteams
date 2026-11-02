@@ -380,8 +380,9 @@ async fn the_first_catch_up_fills_the_store() {
     let again = a.catch_up.catch_up(&mut a.store).await.unwrap();
     assert_eq!((again.conversations, again.messages.changed()), (0, 0));
     let reads = reads_since(&mock, before).await;
-    assert_eq!(reads.len(), 1, "{reads:?}");
-    assert!(reads[0].starts_with(&format!("GET users/{LAB_A}/conversations since mock-since-")));
+    assert_eq!(reads.len(), 2, "{reads:?}");
+    assert_eq!(reads[0], "GET users/ME/properties", "the mark-all-read horizon");
+    assert!(reads[1].starts_with(&format!("GET users/{LAB_A}/conversations since mock-since-")));
 }
 
 #[tokio::test]
@@ -447,9 +448,13 @@ async fn a_catch_up_after_a_gap_brings_what_was_missed_exactly_once() {
     assert_eq!(report.conversations, 2, "the two chats that changed");
     assert_eq!((report.messages.inserted, report.messages.updated), (3, 1));
     let reads = reads_since(&mock, before).await;
-    assert_eq!(reads.len(), 3, "the list and the two chats' sync links: {reads:?}");
+    assert_eq!(
+        reads.len(),
+        4,
+        "the properties, the list and the two chats' sync links: {reads:?}"
+    );
     assert!(
-        reads[1..]
+        reads[2..]
             .iter()
             .all(|read| read.contains("/messages since mock-since-")),
         "{reads:?}"
@@ -2289,6 +2294,7 @@ async fn a_catch_up_syncs_the_favourite_notes_the_list_never_brings() {
     assert_eq!(
         paths_read(&server).await,
         [
+            "GET users/ME/properties",
             "GET users/ME/conversations",
             "GET users/ME/conversations/48:notes/messages"
         ],
@@ -2309,7 +2315,10 @@ async fn notes_neither_favourite_nor_stored_are_not_read() {
     let report = a.catch_up.catch_up(&mut a.store).await.unwrap();
     assert!(report.failed.is_empty(), "{report:?}");
     assert!(a.store.conversation(NOTES).unwrap().is_none());
-    assert_eq!(paths_read(&server).await, ["GET users/ME/conversations"]);
+    assert_eq!(
+        paths_read(&server).await,
+        ["GET users/ME/properties", "GET users/ME/conversations"]
+    );
 }
 
 /// A plain service whose conversation list is empty, with a sync link, and whose notes answer `status`.

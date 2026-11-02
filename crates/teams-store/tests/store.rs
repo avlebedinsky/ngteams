@@ -5,8 +5,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 use teams_store::{
-    Applied, AttemptOutcome, CheckFailed, Conversation, ConversationKind, EngineLock, Member, Message, NewOutboxEntry,
-    OutboxKind, OutboxState, ReactionChange, ReadHorizon, SCHEMA_VERSION, Store, StoreError, SyncState,
+    AppReadHorizon, Applied, AttemptOutcome, CheckFailed, Conversation, ConversationKind, EngineLock, Member, Message,
+    NewOutboxEntry, OutboxKind, OutboxState, ReactionChange, ReadHorizon, SCHEMA_VERSION, Store, StoreError, SyncState,
+    counts_unread,
 };
 
 const ME: &str = "8:orgid:00000000-0000-4000-8000-00000000000a";
@@ -244,7 +245,7 @@ fn the_topics_migration_takes_the_chats_without_a_topic_again() -> Result<(), St
          ALTER TABLE teams DROP COLUMN group_id; ALTER TABLE teams DROP COLUMN mailbox;
          ALTER TABLE teams DROP COLUMN owner; ALTER TABLE teams DROP COLUMN can_add_channel;
          ALTER TABLE teams DROP COLUMN can_add_private_channel; ALTER TABLE team_channels DROP COLUMN kind;
-         PRAGMA user_version = 9;",
+         DROP TABLE app_read_horizon; PRAGMA user_version = 9;",
     )
     .expect("back to schema 9");
     drop(raw);
@@ -856,6 +857,123 @@ fn messages_with_the_same_arrival_time_are_paged_without_loss() {
         }
     }
     assert_eq!(seen, ["1002", "1001", "1000"]);
+}
+
+#[test]
+fn a_meetings_recordings_and_transcripts_never_make_it_unread_as_any_other_chats_do() {
+    const MEETING: &str = "19:meeting_synthetic@thread.v2";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = with_chat(&dir).expect("a store with the chat");
+    store
+        .upsert_conversation(&conversation(
+            MEETING,
+            ConversationKind::Other("thread_type:meeting".to_owned()),
+            1,
+        ))
+        .expect("the meeting's chat");
+    for (at, message_type) in [
+        (1000, "RichText/Media_CallRecording"),
+        (2000, "RichText/Media_LocalRecording"),
+        (3000, "RichText/Media_CallTranscript"),
+    ] {
+        for chat in [MEETING, CHAT] {
+            let mut artifact = message(&at.to_string(), at, "", at, PEER);
+            artifact.conversation_id = chat.to_owned();
+            artifact.message_type = message_type.to_owned();
+            store.upsert_message(&artifact, None).expect("artifact");
+        }
+    }
+    assert_eq!(store.unread_count(MEETING, ME).expect("meeting"), 0);
+    assert_eq!(store.unread_count(CHAT, ME).expect("another chat"), 3);
+
+    let mut written = message("4000", 4000, "thanks", 4000, PEER);
+    written.conversation_id = MEETING.to_owned();
+    store.upsert_message(&written, None).expect("a message");
+    assert_eq!(store.unread_count(MEETING, ME).expect("written"), 1);
+
+    for chat in [MEETING, CHAT] {
+        for (message_type, counts) in [
+            ("Text", true),
+            ("RichText/Html", true),
+            ("RichText/Media_Card", true),
+            ("Event/Call", false),
+            ("ThreadActivity/AddMember", false),
+        ] {
+            assert_eq!(counts_unread(chat, message_type), counts, "{chat} {message_type}");
+        }
+    }
+    assert!(!counts_unread(MEETING, "RichText/Media_CallRecording"));
+    assert!(counts_unread(CHAT, "RichText/Media_CallRecording"));
+}
+
+#[test]
+fn a_chat_whose_newest_message_is_ours_is_read_whatever_its_horizon_says() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = with_chat(&dir).expect("a store with the chat");
+    store
+        .upsert_message(&message("1000", 1000, "a", 1000, PEER), None)
+        .expect("theirs");
+    assert_eq!(store.unread_count(CHAT, ME).expect("theirs is newest"), 1);
+    store
+        .upsert_message(&message("2000", 2000, "mine", 2000, ME), None)
+        .expect("ours");
+    assert_eq!(store.unread_count(CHAT, ME).expect("ours is newest"), 0);
+    let mut event = message("2500", 2500, "", 2500, PEER);
+    event.message_type = "Event/Call".to_owned();
+    store.upsert_message(&event, None).expect("an event");
+    assert_eq!(store.unread_count(CHAT, ME).expect("an event doesn't count"), 0);
+    store
+        .upsert_message(&message("3000", 3000, "b", 3000, PEER), None)
+        .expect("theirs again");
+    assert_eq!(store.unread_count(CHAT, ME).expect("theirs is newest again"), 2);
+}
+
+#[test]
+fn marking_all_read_reads_what_arrived_by_then_and_tells_what_it_can_change() {
+    const CHANNEL: &str = "19:synthetic@thread.tacv2";
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = with_chat(&dir).expect("a store with the chat");
+    store
+        .upsert_conversation(&conversation(CHANNEL, ConversationKind::Channel, 1))
+        .expect("the channel");
+    for chat in [CHAT, CHANNEL] {
+        for at in [1000, 2000] {
+            let mut theirs = message(&at.to_string(), at, "x", at, PEER);
+            theirs.conversation_id = chat.to_owned();
+            store.upsert_message(&theirs, None).expect("theirs");
+        }
+    }
+    assert_eq!(store.app_read_horizon().expect("none yet"), AppReadHorizon::default());
+
+    let horizon = AppReadHorizon { chat: 1500, channel: 0 };
+    let mut changed = store.set_app_read_horizon(horizon).expect("set");
+    changed.sort();
+    assert_eq!(
+        changed,
+        [CHAT, CHANNEL],
+        "whatever is newer than the earlier of the two"
+    );
+    assert_eq!(store.app_read_horizon().expect("kept"), horizon);
+    assert_eq!(store.unread_count(CHAT, ME).expect("chat"), 1);
+    assert_eq!(store.unread_count(CHANNEL, ME).expect("each has its own"), 2);
+    assert!(
+        store.set_app_read_horizon(horizon).expect("again").is_empty(),
+        "nothing moved"
+    );
+
+    let changed = store
+        .set_app_read_horizon(AppReadHorizon {
+            chat: 2000,
+            channel: 2000,
+        })
+        .expect("later");
+    assert_eq!(changed.len(), 2);
+    assert_eq!(store.unread_count(CHAT, ME).expect("all read"), 0);
+    assert_eq!(store.unread_count(CHANNEL, ME).expect("all read"), 0);
+
+    // taken back, as Teams' "reset" does
+    store.set_app_read_horizon(AppReadHorizon::default()).expect("reset");
+    assert_eq!(store.unread_count(CHAT, ME).expect("unread again"), 2);
 }
 
 #[test]

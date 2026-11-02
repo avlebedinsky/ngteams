@@ -6,6 +6,24 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 
 use crate::{Applied, Store, StoreError, sql_limit};
 
+/// What a meeting's chat gets from the meeting itself rather than from anyone writing in it. Teams doesn't call a
+/// meeting's chat unread for one (the same list holds `Event/Call` and `ThreadActivity/AddMember`, which count nowhere
+/// here), while in any other chat a recording counts as a message does.
+const MEETING_ARTIFACTS: [&str; 3] = [
+    "RichText/Media_CallRecording",
+    "RichText/Media_LocalRecording",
+    "RichText/Media_CallTranscript",
+];
+
+/// Whether a message of `message_type` in `conversation_id` can make it unread, as [`Store::unread_count`] counts:
+/// `Text` and every `RichText…` type (a card too), but no [`MEETING_ARTIFACTS`] in a meeting's chat, told by its id as
+/// Teams tells it.
+#[must_use]
+pub fn counts_unread(conversation_id: &str, message_type: &str) -> bool {
+    (message_type == "Text" || message_type.starts_with("RichText"))
+        && !(conversation_id.contains("meeting") && MEETING_ARTIFACTS.contains(&message_type))
+}
+
 /// One message as the store keeps it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Message {
@@ -500,20 +518,33 @@ impl Store {
         Ok(MessagePage { messages, next })
     }
 
-    /// How many messages of a conversation `me` hasn't read: text messages from others, not deleted, that arrived
-    /// after `me`'s read horizon (all of them without one).
+    /// How many messages of a conversation `me` hasn't read: messages from others that [count](counts_unread), not
+    /// deleted, that arrived after `me`'s read horizon (all of them without one) and the account's mark-all-read one
+    /// ([`Store::app_read_horizon`]). None when the newest message that counts is `me`'s own, as Teams calls such a
+    /// chat read whatever its horizon says (`docs/protocol/chat.md`, "Which chats are unread").
     ///
     /// # Errors
     ///
     /// [`StoreError::Sqlite`] when the read fails.
     pub fn unread_count(&self, conversation_id: &str, me: &str) -> Result<u64, StoreError> {
         let count: i64 = self.conn.query_row(
-            "SELECT COUNT(*) FROM messages
-             WHERE conversation_id = ?1 AND delete_time IS NULL AND sender IS NOT ?2
-               AND (message_type = 'Text' OR message_type GLOB 'RichText*')
-               AND NOT EXISTS (SELECT 1 FROM read_horizons AS horizon
-                   WHERE horizon.conversation_id = ?1 AND horizon.user_mri = ?2
-                     AND horizon.last_read_arrival >= messages.arrival_time)",
+            "WITH counted AS (
+                 SELECT id, sender, arrival_time, delete_time FROM messages
+                 WHERE conversation_id = ?1 AND (message_type = 'Text' OR message_type GLOB 'RichText*')
+                   AND NOT (?1 GLOB '*meeting*' AND message_type IN
+                       ('RichText/Media_CallRecording', 'RichText/Media_LocalRecording',
+                        'RichText/Media_CallTranscript'))
+             )
+             SELECT CASE WHEN (SELECT sender FROM counted ORDER BY arrival_time DESC, id DESC LIMIT 1) IS ?2 THEN 0
+             ELSE (SELECT COUNT(*) FROM counted
+                   WHERE delete_time IS NULL AND sender IS NOT ?2
+                     AND arrival_time > COALESCE((SELECT CASE (SELECT kind FROM conversations WHERE id = ?1)
+                                                  WHEN 'channel' THEN channel ELSE chat END
+                                                  FROM app_read_horizon), 0)
+                     AND NOT EXISTS (SELECT 1 FROM read_horizons AS horizon
+                         WHERE horizon.conversation_id = ?1 AND horizon.user_mri = ?2
+                           AND horizon.last_read_arrival >= counted.arrival_time))
+             END",
             params![conversation_id, me],
             |row| row.get(0),
         )?;

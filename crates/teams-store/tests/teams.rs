@@ -191,7 +191,7 @@ fn the_migration_starts_the_channels_syncs_again_and_keeps_the_chats() -> Result
          ALTER TABLE conversation_sync DROP COLUMN gap_until;
          DROP TABLE reply_roots; DROP TABLE team_channels; DROP TABLE teams; DROP TABLE teams_read;
          DROP TABLE favorites; DROP TABLE favorites_read; ALTER TABLE conversations DROP COLUMN empty;
-         PRAGMA user_version = 8;",
+         DROP TABLE app_read_horizon; PRAGMA user_version = 8;",
     )
     .expect("back to schema 8");
     drop(raw);
@@ -266,7 +266,7 @@ fn the_favourites_migration_keeps_the_teams_but_has_them_read_again() -> Result<
          ALTER TABLE teams DROP COLUMN group_id; ALTER TABLE teams DROP COLUMN mailbox;
          ALTER TABLE teams DROP COLUMN owner; ALTER TABLE teams DROP COLUMN can_add_channel;
          ALTER TABLE teams DROP COLUMN can_add_private_channel; ALTER TABLE team_channels DROP COLUMN kind;
-         PRAGMA user_version = 10;",
+         DROP TABLE app_read_horizon; PRAGMA user_version = 10;",
     )
     .expect("back to schema 10");
     drop(raw);

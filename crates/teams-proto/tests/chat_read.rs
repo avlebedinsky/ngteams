@@ -17,13 +17,13 @@ use teams_auth::token::TokenError;
 use teams_fence::{Fence, FenceLog, Mri, Roster};
 use teams_mock::{AB_CHAT, ABC_CHAT, CHANNEL, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, NOTIFICATIONS, TENANT};
 use teams_proto::chat::{
-    ChatReadError, ChatReads, Code, CodeRun, Conversation, ConversationKind, ConversationList, Field, FileKind,
-    FilePreview, List, MAX_CONTENT, MAX_DEPTH, Marks, MemberList, MentionKind, Message, MessagePage, MessageType, Node,
-    Quote, RichText, SharedFile, SharedFiles, Thread, Token, Unshown, WEB_CLIENT, forwarded, link_endpoint, parse_html,
-    shared_files, unshown_parts, web_chat_link,
+    AppConsumptionHorizon, ChatReadError, ChatReads, Code, CodeRun, Conversation, ConversationKind, ConversationList,
+    Field, FileKind, FilePreview, List, MAX_CONTENT, MAX_DEPTH, Marks, MemberList, MentionKind, Message, MessagePage,
+    MessageType, Node, Quote, RichText, SharedFile, SharedFiles, Thread, Token, Unshown, WEB_CLIENT, forwarded,
+    link_endpoint, parse_html, shared_files, unshown_parts, web_chat_link,
 };
 use teams_proto::{Client, Credentials, HttpError, HttpTransport};
-use wiremock::matchers::method;
+use wiremock::matchers::{method, path_regex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
@@ -1310,6 +1310,73 @@ async fn a_404_with_a_location_is_a_region_hop_not_followed() -> TestResult {
         assert!(!shown.contains("emea") && !shown.contains("127.0.0.1"), "{shown}");
     }
     assert_eq!(server.received_requests().await.map(|requests| requests.len()), Some(1));
+    Ok(())
+}
+
+#[test]
+fn the_accounts_mark_all_read_horizon_reads_as_the_web_client_reads_it() {
+    let read = |properties: Value| AppConsumptionHorizon::from_properties(&properties);
+    let both = Some(AppConsumptionHorizon { chat: 5, channel: 7 });
+    assert_eq!(read(json!({"appConsumptionHorizon": {"chat": 5, "channel": 7}})), both);
+    assert_eq!(
+        read(json!({"appConsumptionHorizon": "{\"chat\":5,\"channel\":7,\"engage_community\":0}", "locale": "en"})),
+        both,
+        "as a property's JSON text"
+    );
+    assert_eq!(
+        read(json!({"appConsumptionHorizon": {"chat": 5}})),
+        Some(AppConsumptionHorizon { chat: 5, channel: 0 })
+    );
+    for not_one in [
+        json!({"recentReactions": "[]"}),
+        json!({"appConsumptionHorizon": {}}),
+        json!({"appConsumptionHorizon": {"engage_community": 5}}),
+        json!({"appConsumptionHorizon": {"chat": -1}}),
+        json!({"appConsumptionHorizon": {"chat": "5"}}),
+        json!({"appConsumptionHorizon": "not json"}),
+        json!({"appConsumptionHorizon": 5}),
+        json!([]),
+    ] {
+        assert_eq!(read(not_one.clone()), None, "{not_one}");
+    }
+}
+
+#[tokio::test]
+async fn the_accounts_properties_read_gives_its_horizon_and_none_is_no_error() -> TestResult {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path_regex("/v1/users/ME/properties$"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"appConsumptionHorizon": "{\"chat\":5}"})))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("not json"))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(404))
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(403))
+        .mount(&server)
+        .await;
+    let client = client_for(&server.uri(), "placeholder-token")?;
+    let reads = ChatReads::new(&client);
+    assert_eq!(
+        reads.app_consumption_horizon().await?,
+        Some(AppConsumptionHorizon { chat: 5, channel: 0 })
+    );
+    assert_eq!(reads.app_consumption_horizon().await?, None, "an answer it can't read");
+    assert_eq!(
+        reads.app_consumption_horizon().await?,
+        None,
+        "an account without properties"
+    );
+    assert!(reads.app_consumption_horizon().await.is_err(), "a refusal");
     Ok(())
 }
 

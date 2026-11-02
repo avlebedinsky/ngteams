@@ -293,6 +293,40 @@ impl ConsumptionHorizon {
     }
 }
 
+/// Where the account last marked everything read in Teams (milliseconds): the account's own property
+/// `appConsumptionHorizon`, `{"chat": <ms>, "channel": <ms>, "engage_community": <ms>}`, read as the web client reads
+/// it: as an object or as that object's JSON text, with `chat` or `channel` there and every value a number (`docs/
+/// protocol/chat.md`, "Which chats are unread"). The one it left out is 0.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AppConsumptionHorizon {
+    pub chat: i64,
+    pub channel: i64,
+}
+
+impl AppConsumptionHorizon {
+    /// The account's horizon among its `properties` (a read's whole answer, or a delivery's changed ones). `None` when
+    /// they don't name one, or it isn't the form above.
+    #[must_use]
+    pub fn from_properties(properties: &Value) -> Option<Self> {
+        let value = &properties["appConsumptionHorizon"];
+        let parsed;
+        let value = match value.as_str() {
+            Some(text) => {
+                parsed = serde_json::from_str::<Value>(text).ok()?;
+                &parsed
+            }
+            None => value,
+        };
+        let times = value.as_object()?;
+        let known = times.contains_key("chat") || times.contains_key("channel");
+        let numbers = times.values().all(|time| time.as_i64().is_some_and(|time| time >= 0));
+        (known && numbers).then(|| Self {
+            chat: times.get("chat").and_then(Value::as_i64).unwrap_or_default(),
+            channel: times.get("channel").and_then(Value::as_i64).unwrap_or_default(),
+        })
+    }
+}
+
 /// A page of messages: the first page, a sync read, a backward page or the read around a time.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct MessagePage {

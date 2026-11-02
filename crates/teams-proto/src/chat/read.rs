@@ -14,7 +14,7 @@ use std::iter;
 use teams_fence::chat_service_path;
 use url::Url;
 
-use crate::chat::model::{self, ConversationList, Malformed, MemberList, MessagePage, Thread};
+use crate::chat::model::{self, AppConsumptionHorizon, ConversationList, Malformed, MemberList, MessagePage, Thread};
 use crate::client::{Client, Response};
 use crate::endpoint::{Endpoint, Service};
 use crate::http::{Credentials, HttpError, HttpTransport};
@@ -67,6 +67,22 @@ impl<'c, C: Credentials> ChatReads<'c, C> {
             .with_query("startTime", "1")
             .with_query("targetType", "All");
         Ok(ConversationList::from_body(self.get(endpoint).await?.body())?)
+    }
+
+    /// The account's mark-all-read horizon, from its own properties (`GET v1/users/ME/properties`). `None` when it has
+    /// none, an account without any properties (the answer is 404) among them.
+    ///
+    /// # Errors
+    /// See [`ChatReadError`].
+    pub async fn app_consumption_horizon(&self) -> Result<Option<AppConsumptionHorizon>, ChatReadError> {
+        let endpoint = Endpoint::new(["v1", "users", "ME", "properties"]);
+        match self.get(endpoint).await {
+            Ok(answer) => Ok(serde_json::from_slice(answer.body())
+                .ok()
+                .and_then(|properties| AppConsumptionHorizon::from_properties(&properties))),
+            Err(ChatReadError::Http(HttpError::Status(answer))) if answer.status() == 404 => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     /// The conversation list from a link it handed out (its `syncState` or `forwardLink`).

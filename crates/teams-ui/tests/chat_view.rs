@@ -394,7 +394,7 @@ fn a_sender_s_messages_group_within_five_minutes_and_days_are_separated() {
         row("7", LAB_A, NOON + 31 * MINUTE),
         row("8", LAB_A, NOON + 24 * 60 * MINUTE),
     ];
-    let items = arrange(rows.clone(), History::Complete, None, &utc);
+    let items = arrange(AB, rows.clone(), History::Complete, None, &utc);
     assert_eq!(
         shape(&items),
         ["top", "day", "+1", "2", "3", "+4", "+5", "6", "+e", "+7", "day", "+8"],
@@ -405,7 +405,7 @@ fn a_sender_s_messages_group_within_five_minutes_and_days_are_separated() {
     assert_eq!(items[1], Item::Day(NaiveDate::from_ymd_opt(2026, 1, 1).unwrap()));
 
     // the divider before the first message from someone else after the horizon; it starts a group
-    let items = arrange(rows.clone(), History::More, Some(NOON + MINUTE), &utc);
+    let items = arrange(AB, rows.clone(), History::More, Some(NOON + MINUTE), &utc);
     assert_eq!(
         shape(&items),
         [
@@ -413,7 +413,7 @@ fn a_sender_s_messages_group_within_five_minutes_and_days_are_separated() {
         ]
     );
     // the account's own messages after it, or an event, never place it
-    let items = arrange(rows, History::More, Some(NOON + 3 * MINUTE + 2 * GROUP_MS), &utc);
+    let items = arrange(AB, rows, History::More, Some(NOON + 3 * MINUTE + 2 * GROUP_MS), &utc);
     assert!(!items.contains(&Item::NewMessages));
 
     let today = NaiveDate::from_ymd_opt(2026, 3, 4).unwrap();
@@ -512,17 +512,39 @@ fn the_divider_counts_what_the_store_counts_unread_a_card_too_never_a_deleted_on
     let mut gone = row("3", LAB_B, NOON + 2 * MINUTE);
     gone.body = Body::Deleted;
     let rows = vec![row("1", LAB_B, NOON), card, gone, row("4", LAB_B, NOON + 3 * MINUTE)];
-    let items = arrange(rows.clone(), History::More, Some(NOON), &utc);
+    let items = arrange(AB, rows.clone(), History::More, Some(NOON), &utc);
     assert_eq!(
         shape(&items),
         ["top", "day", "+1", "new", "+2", "3", "4"],
         "a card the view doesn't show counts unread"
     );
-    let items = arrange(rows, History::More, Some(NOON + MINUTE), &utc);
+    let items = arrange(AB, rows, History::More, Some(NOON + MINUTE), &utc);
     assert_eq!(
         shape(&items),
         ["top", "day", "+1", "2", "3", "new", "+4"],
         "a deleted message doesn't"
+    );
+}
+
+#[test]
+fn a_meetings_recording_or_transcript_places_no_divider_as_it_counts_nowhere_there() {
+    const MEETING: &str = "19:meeting_synthetic@thread.v2";
+    let utc = FixedOffset::east_opt(0).unwrap();
+    let mut recording = row("2", LAB_B, NOON + MINUTE);
+    recording.message_type = "RichText/Media_CallRecording".to_owned();
+    recording.body = Body::Unsupported("RichText/Media_CallRecording".to_owned());
+    let mut transcript = recording.clone();
+    transcript.id = "3".to_owned();
+    transcript.arrival_time = NOON + 2 * MINUTE;
+    transcript.message_type = "RichText/Media_CallTranscript".to_owned();
+    let rows = vec![row("1", LAB_B, NOON), recording.clone(), transcript.clone()];
+    let items = arrange(MEETING, rows.clone(), History::More, Some(NOON), &utc);
+    assert!(!shape(&items).contains(&"new".to_owned()), "{:?}", shape(&items));
+    let items = arrange(AB, rows, History::More, Some(NOON), &utc);
+    assert!(
+        shape(&items).contains(&"new".to_owned()),
+        "any other chat's recording counts as a message: {:?}",
+        shape(&items)
     );
 }
 

@@ -20,6 +20,14 @@ pub struct ReadHorizon {
     pub raw: Option<String>,
 }
 
+/// Where the account last marked everything read in Teams: whatever arrived up to these times (milliseconds) is read,
+/// whatever each conversation's own horizon says. Replaced whole, since marking all read can be taken back.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct AppReadHorizon {
+    pub chat: i64,
+    pub channel: i64,
+}
+
 /// Where a conversation's message sync stands. The links are the service's own (`syncState`, `backwardLink`), kept as
 /// given and followed only on the same chat base.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -85,6 +93,56 @@ impl Store {
         )?;
         tx.commit()?;
         Ok(applied)
+    }
+
+    /// Keeps the account's mark-all-read horizon. When it changed, the conversations whose unread count that can
+    /// change: their newest message arrived after the earlier of the two horizons.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] when the write or the read fails.
+    pub fn set_app_read_horizon(&mut self, horizon: AppReadHorizon) -> Result<Vec<String>, StoreError> {
+        let before = self.app_read_horizon()?;
+        if before == horizon {
+            return Ok(Vec::new());
+        }
+        let tx = self.conn.transaction()?;
+        tx.execute(
+            "INSERT INTO app_read_horizon (id, chat, channel) VALUES (1, ?1, ?2)
+             ON CONFLICT DO UPDATE SET chat = excluded.chat, channel = excluded.channel",
+            params![horizon.chat, horizon.channel],
+        )?;
+        let changed = {
+            let mut statement = tx.prepare(
+                "SELECT id FROM conversations
+                 WHERE last_activity > CASE kind WHEN 'channel' THEN ?2 ELSE ?1 END",
+            )?;
+            let rows = statement.query_map(
+                params![before.chat.min(horizon.chat), before.channel.min(horizon.channel)],
+                |row| row.get(0),
+            )?;
+            rows.collect::<Result<Vec<String>, _>>()?
+        };
+        tx.commit()?;
+        Ok(changed)
+    }
+
+    /// The account's mark-all-read horizon; both times 0 when it never marked all read.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] when the read fails.
+    pub fn app_read_horizon(&self) -> Result<AppReadHorizon, StoreError> {
+        Ok(self
+            .conn
+            .query_row("SELECT chat, channel FROM app_read_horizon", [], |row| {
+                Ok(AppReadHorizon {
+                    chat: row.get(0)?,
+                    channel: row.get(1)?,
+                })
+            })
+            .optional()?
+            .unwrap_or_default())
     }
 
     /// A member's read horizon in a conversation.

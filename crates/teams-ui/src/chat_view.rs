@@ -101,7 +101,7 @@ use teams_core::{Action, Command, EngineError, NOTES};
 use teams_proto::chat::{
     LinkPreview, MessageType, RichText, SharedFile, Unshown, parse_html, shared_files, unshown_parts, web_chat_link,
 };
-use teams_store::{Message, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction};
+use teams_store::{Message, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction, counts_unread};
 
 use crate::bridge::Core;
 use crate::clock::{self, HourCycle};
@@ -445,7 +445,8 @@ pub struct MessageItem {
     pub header: bool,
     pub arrival_time: i64,
     pub body: Body,
-    /// Its `messagetype`: whether the store counts it unread ([`counts_unread`]), whether or not this build shows it.
+    /// Its `messagetype`: whether the store counts it unread ([`teams_store::counts_unread`]), whether or not this build
+    /// shows it.
     pub message_type: String,
     pub edited: bool,
     pub reactions: Vec<ReactionCount>,
@@ -578,13 +579,6 @@ impl Naming for ViewNames<'_> {
     }
 }
 
-/// Whether a message of `message_type` counts unread, as [`teams_store::Store::unread_count`] counts it: `Text` and
-/// every `RichText…` type (a card too).
-#[must_use]
-pub fn counts_unread(message_type: &str) -> bool {
-    message_type == MessageType::Text.as_str() || message_type.starts_with("RichText")
-}
-
 impl MessageItem {
     /// The actions it offers: none on an event, a deleted message, one this build doesn't show or one in a chat that
     /// takes no write; edit and delete only on the account's own.
@@ -653,10 +647,17 @@ fn continues(before: &MessageItem, item: &MessageItem) -> bool {
         && (0..=GROUP_MS).contains(&(item.arrival_time - before.arrival_time))
 }
 
-/// The rows of `messages` (oldest first): the top, day separators, the "New messages" divider before the first
-/// message from someone else after `horizon`, and each message grouped with the one before when it continues it.
+/// The rows of `conversation`'s `messages` (oldest first): the top, day separators, the "New messages" divider before
+/// the first message from someone else after `horizon` that the store counts unread, and each message grouped with the
+/// one before when it continues it.
 #[must_use]
-pub fn arrange<Tz: TimeZone>(messages: Vec<MessageItem>, history: History, horizon: Option<i64>, tz: &Tz) -> Vec<Item> {
+pub fn arrange<Tz: TimeZone>(
+    conversation: &str,
+    messages: Vec<MessageItem>,
+    history: History,
+    horizon: Option<i64>,
+    tz: &Tz,
+) -> Vec<Item> {
     let mut items = vec![Item::Top(history)];
     let mut day = None;
     let mut placed = horizon.is_none();
@@ -668,10 +669,10 @@ pub fn arrange<Tz: TimeZone>(messages: Vec<MessageItem>, history: History, horiz
             day = today;
             items.extend(today.map(Item::Day));
         }
-        // what the store counts unread: someone else's text message of any `RichText…` type, not deleted, after the
-        // horizon; without a horizon the store counts every one, but nothing marks where reading stopped: no divider
+        // what the store counts unread: someone else's message, not deleted, after the horizon; without a horizon the
+        // store counts every one, but nothing marks where reading stopped: no divider
         let unread = !item.own
-            && counts_unread(&item.message_type)
+            && counts_unread(conversation, &item.message_type)
             && item.body != Body::Deleted
             && horizon.is_some_and(|at| item.arrival_time > at);
         let divider = !placed && unread;
@@ -2304,7 +2305,7 @@ impl ChatView {
             .filter_map(|message| self.item(message, &notes))
             .collect();
         self.messages = messages;
-        let mut items = arrange(rows, self.history, self.horizon, &Local);
+        let mut items = arrange(&self.conversation, rows, self.history, self.horizon, &Local);
         items.extend(self.pending(&known, now_ms).into_iter().map(Item::Pending));
         let anchor = Anchor::of(&self.list, &self.items);
         splice(&self.list, &self.items, &items);
@@ -2405,7 +2406,7 @@ impl ChatView {
         let me = self.core.me();
         let newest = self.messages.iter().rev().find(|message| {
             message.sender.as_deref().is_some_and(|sender| sender != me)
-                && counts_unread(&message.message_type)
+                && counts_unread(&self.conversation, &message.message_type)
                 && message.delete_time.is_none()
                 && message.client_message_id.is_some()
         })?;

@@ -19,7 +19,8 @@
 //!   be read back by its id ([`EngineRequests::outbox_entry`]).
 //! - **Events → store**: each delivery of the push channel ([`teams_trouter`]) goes through the catch-up's
 //!   [`CatchUp::receive_message`], the path a sync takes, so a message that comes both ways is stored once, at its
-//!   newest version; the account's own read horizon through [`CatchUp::receive_horizon`]. A delivery naming a
+//!   newest version; the account's own read horizon through [`CatchUp::receive_horizon`], its mark-all-read one through
+//!   [`CatchUp::receive_app_horizon`]. A delivery naming a
 //!   conversation the store doesn't know adds it first (a thread read), and the conversation is synced after. Typing
 //!   is only an event, never stored; a delivery is never answered (the push channel can't).
 //! - **Catch-up** ([`Gaps`]): after every connect of the push channel when one is due (on start, and after every
@@ -2178,6 +2179,10 @@ where
                 typing: false,
             }),
             ChatEvent::ReadHorizon { conversation, horizon } => self.on_horizon(conversation, &horizon),
+            ChatEvent::AppReadHorizon(horizon) => match self.catch_up.receive_app_horizon(&mut self.store, horizon) {
+                Ok(()) => self.brought(source),
+                Err(error) => self.missed("storing the account's mark-all-read horizon", error),
+            },
             ChatEvent::ConversationUpdate { conversation } => self.on_conversation(conversation.id.clone()).await,
             // logged by its kind where it was read
             ChatEvent::Unknown { .. } => {}

@@ -38,7 +38,7 @@
 //!   first so the top ones are the latest asked, then the selected chat's (its header's), again when the selection
 //!   changes; the list draws what the presence model holds, again on each change of it. A row below them shows
 //!   unknown unless another view asked about its person.
-//! - **Unread** is the store's count after the account's read horizon (`unread_count`).
+//! - **Unread** is the store's count (`unread_count`), by Teams' rules for what makes a chat unread.
 //!
 //! A row clicked is told as [`ChatListEvent::Opened`]; the shell shows it. The switcher tells the shell itself
 //! ([`crate::switcher::SwitcherEvent::Open`]), and the shell only highlights the row ([`ChatList::select`]). What
