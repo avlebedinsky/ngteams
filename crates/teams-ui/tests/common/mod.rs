@@ -114,6 +114,16 @@ pub struct FakeCore {
     pub service_searches: Mutex<Vec<(String, SearchScope)>>,
     /// The account's teams as the store has them; `None` before a read settled them.
     pub teams: Mutex<Option<Vec<Team>>>,
+    /// The channels Create asked for, in order.
+    pub channels_asked: Mutex<Vec<teams_core::ChannelDraft>>,
+    /// What a channel's creation answers; a problem without one.
+    pub channel_answer: Mutex<Option<Result<teams_core::ChannelMade, teams_core::ChannelProblem>>>,
+    /// The people a private channel was given: its team's group, its group and their MRIs.
+    pub channel_members_added: Mutex<Vec<(String, String, Vec<String>)>>,
+    /// What a private channel's thread answers.
+    pub channel_thread_answer: Mutex<Option<String>>,
+    /// Who a team's people search finds.
+    pub team_found: Mutex<Vec<teams_proto::TeamPerson>>,
     /// The favourite chats and the conversations the service calls empty, as `chat_listing` answers them.
     pub listing: Mutex<ChatListing>,
     /// Per channel, the post each stored message belongs to.
@@ -179,6 +189,11 @@ impl Default for FakeCore {
             service_answer: Mutex::default(),
             service_searches: Mutex::default(),
             teams: Mutex::default(),
+            channels_asked: Mutex::default(),
+            channel_answer: Mutex::default(),
+            channel_members_added: Mutex::default(),
+            channel_thread_answer: Mutex::default(),
+            team_found: Mutex::default(),
             listing: Mutex::default(),
             roots: Mutex::default(),
             synced: Mutex::default(),
@@ -304,6 +319,41 @@ impl Core for FakeCore {
 
     fn write_event(&self, write: teams_core::EventWrite) -> Reply<teams_core::EventWritten> {
         locked(&self.calendar).write(write)
+    }
+
+    fn create_channel(&self, draft: teams_core::ChannelDraft) -> Reply<teams_core::ChannelMade> {
+        locked(&self.channels_asked).push(draft);
+        Reply::ready(match locked(&self.channel_answer).clone() {
+            Some(Ok(made)) => Ok(made),
+            Some(Err(why)) => Err(EngineError::ChannelNotCreated { why }),
+            None => Err(EngineError::ChannelNotCreated {
+                why: teams_core::ChannelProblem::Other,
+            }),
+        })
+    }
+
+    fn add_channel_members(
+        &self,
+        team_group: String,
+        channel_group: String,
+        members: Vec<String>,
+    ) -> Reply<Vec<String>> {
+        locked(&self.channel_members_added).push((team_group, channel_group, members));
+        Reply::ready(Ok(Vec::new()))
+    }
+
+    fn channel_thread(
+        &self,
+        _team: String,
+        _team_group: String,
+        _channel_group: String,
+        _name: String,
+    ) -> Reply<Option<String>> {
+        Reply::ready(Ok(locked(&self.channel_thread_answer).clone()))
+    }
+
+    fn team_people(&self, _team: String, _keyword: String) -> Reply<Vec<teams_proto::TeamPerson>> {
+        Reply::ready(Ok(locked(&self.team_found).clone()))
     }
 
     fn invitable(&self, query: String) -> Reply<Vec<teams_core::Invitable>> {

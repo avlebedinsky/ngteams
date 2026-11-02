@@ -256,6 +256,27 @@ async fn org_wide_team_and_channel_are_denied_even_with_lab_only_members_listed(
 }
 
 #[tokio::test]
+async fn a_new_channel_and_its_people_are_denied_while_a_team_s_members_can_t_be_read() {
+    let lab = try_lab().unwrap();
+    let team = Scope::Team {
+        id: "19:team0001@thread.tacv2".to_owned(),
+    };
+    let channel = Scope::Channel {
+        team: "00000000-0000-4000-8000-0000000000aa".to_owned(),
+        channel: "OID:00000000-0000-4000-8000-0000000000bb@00000000-0000-4000-8000-0000000000cc".to_owned(),
+    };
+    for target in [
+        Target::new(WriteKind::ChannelChange, team),
+        Target::new(WriteKind::MemberChange, channel).with_added([Mri::new(LAB_B)]),
+    ] {
+        lab.fence
+            .check(target, &Fixed::new(Membership::Partial(PartialReason::Unsupported)))
+            .await
+            .unwrap_err();
+    }
+}
+
+#[tokio::test]
 async fn a_lab_only_channel_allows_a_post() {
     let lab = try_lab().unwrap();
     let channel = Scope::Channel {

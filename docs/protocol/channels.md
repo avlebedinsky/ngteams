@@ -1,4 +1,4 @@
-# Teams and channels (read-only)
+# Teams and channels
 
 Status: 2026-10-22, M2 Task 16. Written from `proto-lab probe teams a`, run live once as lab account a (its own
 `chatsvcagg` and `ic3` tokens, `GET`s only, under the live lock), which printed statuses, header names, content types,
@@ -91,7 +91,8 @@ A channel is a conversation of the chat service, read with the same reads as a c
   refuses any other CSA endpoint or query (the update read, the posts read, discover, pins, …) and anything but a
   `GET` before it asks for a token. Of the answer it reads only the teams: a team's and a channel's `id`,
   `displayName`, `isDeleted` (left out), `isArchived` (a team's) and `isGeneral` (or the channel whose id is the
-  team's); an entry without a string id and name is left out; the general channel first. The answer is taken when
+  team's), a channel's `channelType`, and what a new channel needs of a team (`teamSiteInformation.groupId`,
+  `smtpAddress`, `memberRoleString`, `teamSettings`, `teamGuestSettings`: [Creating a channel](#creating-a-channel)); an entry without a string id and name is left out; the general channel first. The answer is taken when
   `metadata.isPartialData` is `false`, as in every lab capture, or when it is `true` with `metadata.hasMoreChats`
   `true`: a personal build's account with a few hundred chats was answered so every time (12 teams, its `chats`
   264 of them, `conversationFolders` with `isPartialResponse` `false`), and the web bundle ties the flag to the chats
@@ -112,9 +113,95 @@ A channel is a conversation of the chat service, read with the same reads as a c
 - **Not used**: one post's chain read (the channel's page holds the replies), the thread's members (a channel is
   read-only: no member is stored for it), CSA's posts read and its update read.
 
-## No channel write
+## Creating a channel
 
-Nothing the native client sends can post, reply, react, mark read or type in a channel. What keeps it so is the fence,
+From `proto-lab run channel-create` (2026-11-02): account a in the web client's "Create a channel" dialog of a team of
+the tenant, every write that could make a channel held back by a forced deny, so nothing was ever made; the answers below
+are the web bundle's (`26260.1717.5229.7049`) reading of them, since no lab team can be written to
+(`docs/backlog/channel-writes-need-a-lab-only-team.md`). The native client's writes are
+`crates/teams-proto/src/write/channel.rs`, its reads `channel_read.rs`, the engine's part `teams-core`'s `channels`, the
+dialog `teams-ui`'s `channel_dialog`.
+
+**The team's "..." menu** offered a member of a team "Hide all channels", "Add channel", "Manage team", "Manage tags" and
+"Copy link"; "Add channel" isn't there for an archived team. The web client decides as `CsaTeams` reads it: an owner
+(`memberRoleString` `admin`) always, a member by `teamSettings.createTopic`, a guest by `teamGuestSettings.createTopic`;
+a private channel for an owner, or a member with `teamSettings.createTopic` and
+`teamSettings.isPrivateChannelCreationEnabled`. The channel types offered were Standard and Private
+(`isSharedChannelCreationEnabled` `false`, and shared channels aren't offered here).
+
+**The dialog's rules** (the bundle's, its words in `channel_dialog.rs`): a name of at most 50 characters, trimmed;
+refused when empty, starting with `_` or `.`, ending with `.`, holding any of `~ # % & * { } / \ : < > ? + | ' "` or
+`..`, one of the reserved words (`forms`, `.lock`, `con`, `prn`, `aux`, `nul`, `_vti_`, `desktop.ini`, `com1`-`com8`,
+`lpt1`-`lpt9`), `General` in any case, a name the team's channels have in any case, or a link. A description of at most
+1024 characters without a link. A problem shows once the name or the description was touched; Create is on when both
+read, a type is chosen and something was touched. Threads is chosen at first. An owner choosing Standard also gets
+"Automatically show this channel in everyone's channel list". The Layout cards name `chatModalityType`.
+
+**A standard channel** goes on the middle tier, its token and headers its own:
+
+```
+POST <middleTier>/beta/teams/<team thread>/channels
+{"displayName": …, "description": …, "groupId": <team group>, "channelType": "Standard",
+ "chatModalityType": "Conversational" | "PostReply"}
+```
+
+The bundle reads its answer as `{"value": {"objectId": <channel thread>}}`.
+
+**A private channel** goes on the teams' provisioning service, the GTM `teamsAndChannelsProvisioningService`
+(`https://<AFD host>/fabric/<region>/templates/api`), with a token for `https://templates.teams.microsoft.com` (the
+native client gets one, an opaque token) and `x-anchormailbox: <the team's smtpAddress>`:
+
+```
+POST <provisioning>/teams/<team group>/channels?forceSync=false
+{"spaceThreadId": <team thread>, "displayName": …, "description": …, "channelType": "Private",
+ "sharedWithParentTeam": true, "sessionKey": <uuid>, "chatModalityType": …}
+```
+
+Before it, as the type is picked, the web client sent `POST <provisioning>/teams/<team group>/channelsWarmup` with no body
+and the same key in `x-routingparameter-sessionkey`. The bundle attaches the key only behind a flag; the native client
+sends neither. The bundle reads the answer as `{"groupId": "OID:<channel group>@<tenant>", "threadId"?}`: the thread can
+come later, from `GET <provisioning>/teams/<team group>/channels/OID:<channel group>@<tenant>` (`threadId`), read every 4 s.
+
+**The step after a private channel** is the add-people dialog, in the create flow with Skip: "Add members to the
+<name> channel", "Start typing a name of a person you want to add to this private channel.", a box "Type a name or email"
+scoped to the team, and Add. People go in by the channel's group, before its thread exists:
+
+```
+POST <provisioning>/teams/<team group>/channels/OID:<channel group>@<tenant>/users?forceSync=false
+{"users": [{"id": "OID:<object id>@<tenant>", "role": 1}]}
+```
+
+Its answer's `multipleStatus` lists those that failed (`id`, `statusSubCode`, `message`). The box's search is a read sent as
+a `POST` on the user profile service (GTM `userProfileService`, `https://<AFD host>/api/userprofilesvc/<region>`, the
+middle tier's token): `api/v1.0/teams/<team thread>/users/profilesearch?top=15&includeDLs=false&includeBots=false&
+enableGuest=true` with `{"keyword": …}`, answered with a list of people (`mri`, `displayName`, `email`, `jobTitle`,
+`tenantId`, `objectId`, …): a mention in one of the team's channels asked it so in the capture, the bundle's add-people box
+scoping its search to the team the same way. Sent once from Rust as account a (2026-11-02): it answered 200 with the
+capture's `x-ms-client-type`, `x-ms-migration`, `x-ms-object-id`, `x-ms-test-user` and `x-client-ui-language`, and 400
+without them.
+
+**Shown to everyone**: `PUT <middleTier>/beta/teams/<channel thread>/setDefaultChannel`, no body (`DELETE` takes it back).
+
+**What goes wrong**: the middle tier names an error code (`errorCode`, or `errors[0].errorCode`); the bundle's dialog
+replaces the form with its words for each (`problem_words`): `ChannelNameAlreadyExist`,
+`MaxPrivateChannelLimitExceeded`, `MaxChannelLimitExceeded`, `UnableToFetchTeamOwner`, `NoPermissionToCreateChannel`,
+`UserNotAllowedToCreateChannel`, `CannotCreatePrivateChannelDueToUserPolicy`, `OperationNotAllowedOnArchivedTeam`,
+`InvalidUsersInCreateChannelRequest`, `ThreadDescriptionLimitExceeded`. Anything else says "We ran into a problem creating
+your channel" with "Try again" (the capture's forced deny showed it).
+
+**The list**: a channel made comes from CSA's next read, which may not name it yet; the native client stores it at once
+under its team, by name, and keeps it against reads that don't name it for ten minutes. A private channel's row carries
+a lock (`channelType` 1; 0 is standard, 2 shared).
+
+**The fence**: a new channel and its people reach the team, so the rows are writes on the team or the channel
+(`WriteKind::ChannelChange`, `MemberChange`; `teams_fence::contacting`'s `contacting/channel.rs`), and no source reads a
+team's members complete: the lab's fence denies them (the dialog then says "We ran into a problem creating your
+channel"). The personal build's logs and sends them. The provisioning service is a contacting service: everything mutating
+there but these rows is unreadable.
+
+## No other channel write
+
+Besides a new channel, nothing the native client sends can post, reply, react, mark read or type in a channel. What keeps it so is the fence,
 not a missing type: the engine takes a chat write (`Action::Send`, `Action::Read`, …) for any conversation id, a
 channel's too, as a sealed chat write (`PostMessage`, a read receipt) aimed at the channel, and the fence denies it,
 since its member read admits only a 1:1 chat and the lab's recorded group chat (a channel's members are never read

@@ -3,7 +3,9 @@
 
 use std::path::PathBuf;
 
-use teams_store::{Applied, Conversation, ConversationKind, IndexText, Message, Store, StoreError, Team, TeamChannel};
+use teams_store::{
+    Applied, ChannelKind, Conversation, ConversationKind, IndexText, Message, Store, StoreError, Team, TeamChannel,
+};
 
 const CHAT: &str = "19:synthetic-catalog@thread.v2";
 
@@ -55,10 +57,16 @@ fn team(name: &str) -> Team {
         id: "19:synthetic-team@thread.tacv2".to_owned(),
         name: name.to_owned(),
         archived: false,
+        group_id: None,
+        mailbox: None,
+        owner: false,
+        can_add_channel: false,
+        can_add_private_channel: false,
         channels: vec![TeamChannel {
             id: "19:synthetic-channel@thread.tacv2".to_owned(),
             name: name.to_owned(),
             general: true,
+            kind: ChannelKind::Standard,
         }],
     }
 }

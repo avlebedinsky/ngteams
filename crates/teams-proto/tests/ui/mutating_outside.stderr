@@ -14,11 +14,11 @@ help: the trait `teams_proto::write::sealed::Sealed` is not implemented for `Els
             AcceptCall
             AcknowledgeAcceptance
             AcknowledgeMediaAnswer
+            AddChannelMembers
             AddToCall
             AnswerMedia
             AttachCall
             CancelEvent
-            CreateChat
           and $N others
 note: required by a bound in `Mutating`
  --> src/write.rs

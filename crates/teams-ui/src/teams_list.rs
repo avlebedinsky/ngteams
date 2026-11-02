@@ -8,22 +8,26 @@
 //!   [`teams_core::READING_TEAMS`]), that the teams can't be read; the engine tries again when the list asks after
 //!   its retry wait (after a catch-up, or the section unfolded again).
 //! - **Read-only.** A channel clicked is told as [`TeamsListEvent::Opened`]; the shell shows its posts in a
-//!   [`crate::ChannelView`], which offers no composer.
+//!   [`crate::ChannelView`], which offers no composer. A private channel's row carries Teams' lock.
+//! - **A new channel.** A team's "Add channel" ([`crate::sidebar`]'s menu) is told as [`TeamsListEvent::AddChannel`]; the
+//!   shell shows the [`crate::channel_dialog`].
 //!
 //! What the list shows is traced (`teams-list shown`: the channels' ids in order, each `general` or `channel`, never a
 //! name).
 
 use std::sync::Arc;
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AsyncApp, Context, ElementId, EventEmitter, InteractiveElement as _, IntoElement,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity,
     div, px, rgb,
 };
 use teams_core::EngineError;
-use teams_store::Team;
+use teams_store::{ChannelKind, Team};
 
 use crate::bridge::Core;
+use crate::icons::Glyph;
 use crate::models::Models;
 use crate::theme::Palette;
 use crate::trace::{TraceLine, ViewTrace};
@@ -44,6 +48,8 @@ pub const UNREADABLE: &str = "Teams can't be read right now";
 pub enum TeamsListEvent {
     /// A channel was chosen.
     Opened(ChannelChosen),
+    /// A team's "Add channel" was chosen.
+    AddChannel(Team),
 }
 
 /// A channel chosen, with the names its header shows.
@@ -177,6 +183,13 @@ impl TeamsList {
         }
     }
 
+    /// Asks the shell for the team `id`'s "Create a channel" dialog.
+    pub fn add_channel(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(team) = self.teams.iter().flatten().find(|team| team.id == id) {
+            cx.emit(TeamsListEvent::AddChannel(team.clone()));
+        }
+    }
+
     /// Reads the teams from the store again (or once the running load ends); the engine reads them from the service
     /// when they are missing or old.
     pub fn reload(&mut self, cx: &mut Context<Self>) {
@@ -260,12 +273,21 @@ impl TeamsList {
             .pr_3()
             .flex()
             .items_center()
-            .truncate()
+            .gap_1()
             .text_sm()
             .bg(rgb(background))
             .hover(move |style| style.bg(rgb(if selected { palette.selected } else { palette.hover })))
             .on_click(cx.listener(move |this, _, _, cx| this.open(&opened, cx)))
-            .child(shown.name.clone())
+            .child(div().min_w_0().truncate().child(shown.name.clone()))
+            .when(shown.kind == ChannelKind::Private, |row| {
+                row.child(
+                    div()
+                        .debug_selector(move || format!("channel-private-{index}"))
+                        .flex_none()
+                        .text_color(rgb(palette.muted_foreground))
+                        .child(Glyph::LOCK.icon().size(px(12.0))),
+                )
+            })
             .into_any_element()
     }
 }

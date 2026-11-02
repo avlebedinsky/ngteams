@@ -10,7 +10,8 @@
 //!
 //! The contacting services are the ones whose purpose is reaching people ([`Service`], [`service_of`]): the chat
 //! service, calling, Microsoft Graph, Outlook and Substrate, `SharePoint` and `OneDrive`, AMS, the middle tier's team,
-//! meeting and invite paths (its Outlook calendar and mail proxy among them), and CSA. On a Teams origin a mutating
+//! meeting and invite paths (its Outlook calendar and mail proxy among them), CSA and the teams' provisioning service.
+//! On a Teams origin a mutating
 //! request whose service-naming segments can't be read (empty with more path after them, not UTF-8 once decoded, or
 //! holding `/ \ ; ? #` once decoded) is unreadable too. A request is mutating ([`Request::is_mutating`]) when its
 //! method isn't `GET`, `HEAD` or `OPTIONS`, when it carries a body anyway, or when a method-override header names
@@ -21,6 +22,7 @@
 
 mod calendar;
 pub(crate) mod call;
+mod channel;
 mod chat;
 pub(crate) mod json;
 
@@ -67,6 +69,9 @@ pub enum Service {
     MiddleTier,
     /// The chat service aggregator: an AFD host's `/api/csa/…`, `chatsvcagg.teams.microsoft.com`.
     Csa,
+    /// The teams' provisioning service: an AFD host's `/fabric/…`, `templates.teams.microsoft.com`. It makes teams and
+    /// channels and adds people to them.
+    Provisioning,
 }
 
 impl Service {
@@ -82,6 +87,7 @@ impl Service {
             Self::Ams => "ams",
             Self::MiddleTier => "middle_tier",
             Self::Csa => "csa",
+            Self::Provisioning => "provisioning",
         }
     }
 }
@@ -268,10 +274,11 @@ pub fn contacting(request: &Request<'_>, policy: &Policy) -> Contact {
         Service::Graph | Service::SharePoint => Contact::Unreadable,
         Service::Outlook => none_if(is_substrate_search(&parsed)),
         Service::Ams => none_if(is_token_exchange(&parsed)),
-        Service::MiddleTier => {
-            calendar::classify(&parsed).unwrap_or_else(|| none_if(!is_middle_tier_contacting(&parsed)))
-        }
+        Service::MiddleTier => calendar::classify(&parsed)
+            .or_else(|| channel::middle_tier(&parsed))
+            .unwrap_or_else(|| none_if(!is_middle_tier_contacting(&parsed))),
         Service::Csa => none_if(is_csa_read(&parsed)),
+        Service::Provisioning => channel::provisioning(&parsed).unwrap_or(Contact::Unreadable),
     }
 }
 
@@ -330,8 +337,9 @@ fn route(url: &Url) -> Route {
 
 /// A contacting service told by its host alone.
 fn service_by_host(host: &str) -> Option<Service> {
-    const BY_HOST: [(&str, Service); 19] = [
+    const BY_HOST: [(&str, Service); 20] = [
         ("msg.teams.microsoft.com", Service::ChatService),
+        ("templates.teams.microsoft.com", Service::Provisioning),
         ("chatsvcagg.teams.microsoft.com", Service::Csa),
         ("asyncgw.teams.microsoft.com", Service::Ams),
         ("asm.skype.com", Service::Ams),
@@ -380,6 +388,7 @@ fn service_by_path(url: &Url) -> Route {
         ["api", "mt" | "apps"] => Service::MiddleTier,
         ["api", "csa"] => Service::Csa,
         ["asm" | "ams", ..] => Service::Ams,
+        ["fabric", ..] => Service::Provisioning,
         _ => return Route::Other,
     };
     Route::Service(service)

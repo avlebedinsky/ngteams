@@ -41,7 +41,8 @@ use crate::session::{FenceReport, LabSession, SessionError, SessionState};
 pub const KEYRING_APPLICATION: &str = LabPaths::KEYRING_APPLICATION;
 
 /// The audiences `--audiences` asks a token for, besides `api.spaces.skype.com` (the auth notes' table).
-pub const OTHER_AUDIENCES: [&str; 7] = [
+pub const OTHER_AUDIENCES: [&str; 8] = [
+    "https://templates.teams.microsoft.com",
     "https://chatsvcagg.teams.microsoft.com",
     "https://presence.teams.microsoft.com",
     "https://ic3.teams.office.com",

@@ -8,6 +8,7 @@ use crate::endpoint::{Endpoint, Method, Service};
 mod availability;
 mod calendar;
 mod call;
+mod channel;
 mod chat;
 
 pub use availability::{ForceAvailability, ManualAvailability, SetEndpointAvailability};
@@ -25,6 +26,10 @@ pub use call::{
     UpdateParticipantProperties, VoiceConsent,
 };
 pub(crate) use call::{CallWire, Registry, on_calling_base};
+pub use channel::{
+    AddChannelMembers, ChannelCreated, ChannelLayout, CreateChannel, NewChannel, NewChannelKind, ShowChannelByDefault,
+    channel_error_code,
+};
 pub use chat::{
     Author, CreateChat, DeleteMessage, EditMessage, Original, ReadReceipt, RemoveReaction, SendMessage, SetReaction,
     Typing,

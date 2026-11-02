@@ -51,6 +51,7 @@
 
 mod ams;
 mod calendar;
+mod channel_read;
 pub mod chat;
 mod client;
 mod emoticon;
@@ -77,6 +78,7 @@ pub use calendar::{
     EventRead, EventTime, FloatingTime, FullEvent, MAX_CALENDAR_WINDOW_MS, Response as EventResponse, ShowAs,
     TimeZoneSettings, join_url_chat,
 };
+pub use channel_read::{ChannelCreationStatus, TeamPeopleSearch, TeamPerson};
 pub use client::{Client, PostReadError, Response, Transport, WriteError};
 pub use emoticon::{MAX_ANIMATION, ReactionAnimation};
 pub use endpoint::{Endpoint, Method, Service};
@@ -92,8 +94,8 @@ pub use giphy::{GiphyPicture, InlinePicture};
 pub use http::{
     AMS_HOST_SUFFIX, BuildError, CONNECT_TIMEOUT, CSA_AUDIENCE, Credentials, DEFAULT_RETRY_WAIT, EMOTICONS_HOST,
     Failure, FileBody, GIPHY_HOST, GRAPH_AUDIENCE, GRAPH_HOST, HttpError, HttpTransport, IC3_AUDIENCE, MAX_BODY,
-    MAX_PICTURE_BODY, MAX_RETRY_WAIT, MIDDLE_TIER_AUDIENCE, PRESENCE_AUDIENCE, RELAY_HOST, REQUEST_TIMEOUT, Refusal,
-    STREAM_TIMEOUT, TROUTER_HOST,
+    MAX_PICTURE_BODY, MAX_RETRY_WAIT, MIDDLE_TIER_AUDIENCE, PRESENCE_AUDIENCE, PROVISIONING_AUDIENCE, RELAY_HOST,
+    REQUEST_TIMEOUT, Refusal, STREAM_TIMEOUT, TROUTER_HOST,
 };
 #[cfg(feature = "test-support")]
 pub use own::ProbeOwnState;
@@ -109,8 +111,9 @@ pub use post_read::{
     PresenceSubscription, ShortProfile, ShortProfileLookup, SubscriptionStatus, UserPresence,
 };
 pub use read::{
-    CSA_TEAMS_PATH, CSA_TEAMS_QUERY, Channel, CsaAnswerError, CsaTeams, GRAPH_PICTURE_SIZE, GRAPH_USER_SELECT,
-    GraphAnswerError, GraphPicture, GraphUser, MAX_PICTURE, Picture, PictureFormat, Read, Team, TeamsAnswer, object_id,
+    CSA_TEAMS_PATH, CSA_TEAMS_QUERY, Channel, ChannelType, CsaAnswerError, CsaTeams, GRAPH_PICTURE_SIZE,
+    GRAPH_USER_SELECT, GraphAnswerError, GraphPicture, GraphUser, MAX_PICTURE, Picture, PictureFormat, Read, Team,
+    TeamsAnswer, object_id,
 };
 pub use recurrence::{Pattern as RecurrencePattern, Recurrence, WeekIndex, Weekday};
 pub use relay::{RelayAnswer, RelayAnswerError, RelayCredential, RelayTokens};
@@ -134,6 +137,10 @@ pub use write::{
     SendMessage, SetEndpointAvailability, SetReaction, StartCall, StartParts, TEAMS_ECHO_BOT_MRI, TEST_CALL_SCENARIO,
     TargetMismatch, Typing, UpdateEndpointMetadata, UpdateEndpointState, UpdateMediaDescriptions,
     UpdateParticipantProperties, VoiceConsent, Wire,
+};
+pub use write::{
+    AddChannelMembers, ChannelCreated, ChannelLayout, CreateChannel, NewChannel, NewChannelKind, ShowChannelByDefault,
+    channel_error_code,
 };
 pub use write::{
     CancelEvent, CreateEvent, CreateOnlineMeeting, DeleteEvent, EventAttendee, EventDraft, EventShowAs, Organizer,

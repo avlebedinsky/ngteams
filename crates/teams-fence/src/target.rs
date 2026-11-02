@@ -41,6 +41,9 @@ pub enum WriteKind {
     MemberChange,
     ChatCreate,
     ChannelPost,
+    /// A team's channel created, or a channel shown to the whole team by default ([`Scope::Team`]): everyone on the team
+    /// can see it.
+    ChannelChange,
     BotReply,
     /// The account's own availability (UPS's presence endpoint `PUT` and the manual status): seen across the tenant,
     /// but it carries nothing to anyone. The fence permits it without a member read, only on [`Scope::Account`] naming
@@ -49,7 +52,7 @@ pub enum WriteKind {
 }
 
 impl WriteKind {
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::Message,
         Self::Edit,
         Self::Delete,
@@ -66,6 +69,7 @@ impl WriteKind {
         Self::MemberChange,
         Self::ChatCreate,
         Self::ChannelPost,
+        Self::ChannelChange,
         Self::BotReply,
         Self::OwnAvailability,
     ];
@@ -90,6 +94,7 @@ impl WriteKind {
             Self::MemberChange => "member_change",
             Self::ChatCreate => "chat_create",
             Self::ChannelPost => "channel_post",
+            Self::ChannelChange => "channel_change",
             Self::BotReply => "bot_reply",
             Self::OwnAvailability => "own_availability",
         }

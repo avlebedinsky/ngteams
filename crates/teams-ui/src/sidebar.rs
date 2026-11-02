@@ -4,27 +4,30 @@
 //! the engine stopped or the account is signed out) holding its sections:
 //! "Favorites" (the [`ChatList`]'s favourites (chats and channels), only while it has any), "Chats" (the rows of its
 //! others it shows, then See more while any are left) and "Teams and channels" (the [`TeamsList`]'s teams, each with
-//! its channels). A section's header folds and unfolds it, and a team's line its channels; unfolding the teams asks for
-//! them again ([`TeamsList::reload`]: the engine reads them when they are old). The rows themselves are the lists': a
-//! chat clicked is the [`ChatList`]'s to tell, a channel the [`TeamsList`]'s. The chat that becomes selected is
-//! scrolled into view, wherever it was opened from.
+//! its channels). A section's header folds and unfolds it, and a team's line its channels; a team's "..." opens its menu
+//! ([`Sidebar::open_team_menu`]); unfolding the teams asks for them again ([`TeamsList::reload`]: the engine reads them
+//! when they are old). The rows themselves are the lists': a chat clicked is the [`ChatList`]'s to tell, a channel the
+//! [`TeamsList`]'s. The chat that becomes selected is scrolled into view, wherever it was opened from.
 //!
 //! Traced: `sidebar folded`/`unfolded` with the section (`favorites`, `chats` or `teams`), `team folded`/`unfolded` with the team.
 
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, Context, ElementId, Entity, InteractiveElement as _, IntoElement, ListAlignment, ListOffset,
-    ListState, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription, Window, div,
-    list, px, rgb,
+    AnyElement, App, Context, ElementId, Entity, FocusHandle, InteractiveElement as _, IntoElement, KeyDownEvent,
+    ListAlignment, ListOffset, ListState, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Window, div, list, px, rgb,
 };
+use gpui_component::Sizable as _;
 use gpui_component::tooltip::Tooltip;
 use teams_store::Team;
 
 use crate::chat_list::{ChatList, ROW_HEIGHT};
-use crate::icons::Glyph;
+use crate::icons::{Glyph, icon_button, selected_by};
 use crate::models::Models;
+use crate::shell::menu_row;
 use crate::teams_list::{CHANNEL_HEIGHT, LOADING, NO_TEAMS, TeamsList, UNREADABLE};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
@@ -162,6 +165,9 @@ pub struct Sidebar {
     folded: HashSet<String>,
     /// The selected chat last scrolled into view.
     revealed: Option<String>,
+    /// The team whose "..." menu is open.
+    team_menu: Option<String>,
+    menu_focus: FocusHandle,
     _observing: [Subscription; 2],
 }
 
@@ -189,6 +195,8 @@ impl Sidebar {
             teams_open: true,
             folded: HashSet::new(),
             revealed: None,
+            team_menu: None,
+            menu_focus: cx.focus_handle(),
             _observing: [chats, teamed],
         };
         sidebar.rebuild(cx);
@@ -474,7 +482,14 @@ impl Sidebar {
             .text_color(rgb(palette.on_brand))
             .child(initial);
         let toggled = id.to_owned();
+        let group = SharedString::from(format!("team-line-{index}"));
+        let more = if team.can_add_channel {
+            self.team_more(index, id, palette, &group, cx)
+        } else {
+            None
+        };
         div()
+            .group(group.clone())
             .id(ElementId::Name(format!("team-{id}").into()))
             .debug_selector(move || format!("team-{index}"))
             .w_full()
@@ -491,7 +506,121 @@ impl Sidebar {
             .child(chevron(self.team_open(id)))
             .child(badge)
             .child(div().flex_1().min_w_0().truncate().child(name))
+            .children(more)
             .into_any_element()
+    }
+
+    /// A team's "..." and its menu, Teams' entries the app has: "Add channel", for a team that lets the account add one.
+    /// Only for a team that lets the account add one (not an archived one); `None` in the read-only mode.
+    fn team_more(
+        &self,
+        index: usize,
+        id: &str,
+        palette: Palette,
+        group: &SharedString,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        if self.list.read(cx).read_only() {
+            return None;
+        }
+        let open = self.team_menu.as_deref() == Some(id);
+        let toggled = id.to_owned();
+        let button = selected_by(
+            format!("team-more-{index}"),
+            icon_button(format!("team-more-{id}"), Glyph::ELLIPSIS, "More options")
+                .xsmall()
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    if this.team_menu.as_deref() == Some(toggled.as_str()) {
+                        this.close_team_menu(cx);
+                    } else {
+                        this.open_team_menu(&toggled, window, cx);
+                    }
+                })),
+        );
+        let added = id.to_owned();
+        let menu = open.then(|| {
+            gpui::deferred(
+                gpui::anchored()
+                    .anchor(gpui::Anchor::TopLeft)
+                    .snap_to_window_with_margin(px(8.0))
+                    .child(
+                        div()
+                            .debug_selector(move || format!("team-menu-{index}"))
+                            .track_focus(&self.menu_focus)
+                            .occlude()
+                            .w(px(200.0))
+                            .mt_1()
+                            .p_1()
+                            .flex()
+                            .flex_col()
+                            .rounded_lg()
+                            .border_1()
+                            .border_color(rgb(palette.border))
+                            .bg(rgb(palette.surface))
+                            .shadow_lg()
+                            .text_color(rgb(palette.foreground))
+                            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_team_menu(cx)))
+                            .on_key_down(cx.listener({
+                                let added = added.clone();
+                                move |this, event: &KeyDownEvent, _, cx| match event.keystroke.key.as_str() {
+                                    "escape" => {
+                                        cx.stop_propagation();
+                                        this.close_team_menu(cx);
+                                    }
+                                    "enter" | "space" => {
+                                        cx.stop_propagation();
+                                        this.add_channel(&added, cx);
+                                    }
+                                    _ => {}
+                                }
+                            }))
+                            .child(
+                                menu_row(format!("team-add-channel-{index}"), palette)
+                                    .on_click(cx.listener(move |this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.add_channel(&added, cx);
+                                    }))
+                                    .child(Glyph::ADD_CHANNEL.icon().size(px(14.0)))
+                                    .child("Add channel"),
+                            ),
+                    ),
+            )
+            .with_priority(1)
+        });
+        Some(
+            div()
+                .id(ElementId::Name(format!("team-more-wrap-{id}").into()))
+                .flex_none()
+                // shown while the line is under the pointer, as Teams' "..." is, and while its menu is open; it takes its
+                // own clicks
+                .when(!open, |more| {
+                    more.invisible().group_hover(group.clone(), gpui::Styled::visible)
+                })
+                .on_click(|_, _, cx| cx.stop_propagation())
+                .child(button)
+                .children(menu)
+                .into_any_element(),
+        )
+    }
+
+    /// Opens the team `id`'s "..." menu.
+    pub fn open_team_menu(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.team_menu = Some(id.to_owned());
+        self.menu_focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Closes the team's "..." menu.
+    pub fn close_team_menu(&mut self, cx: &mut Context<Self>) {
+        self.team_menu = None;
+        cx.notify();
+    }
+
+    /// The menu's "Add channel": the team's dialog.
+    fn add_channel(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.close_team_menu(cx);
+        self.teams.update(cx, |teams, cx| teams.add_channel(id, cx));
     }
 }
 

@@ -39,6 +39,7 @@
 pub mod account;
 pub mod calendar;
 pub mod calling;
+pub mod channels;
 pub mod emoticons;
 pub mod engine;
 pub mod file_content;
@@ -59,6 +60,7 @@ pub use calling::{
     CallAction, CallActionError, CallMedia, CallParticipant, CallParts, CallStatus, CallVideo, CallView, GROUP_SLOTS,
     IncomingCall, Relay, VideoOutput,
 };
+pub use channels::{ChannelDraft, ChannelMade, ChannelProblem};
 pub use emoticons::Strip;
 pub use engine::{
     Action, Answer, Cause, EngineError, EngineHandle, EngineOptions, EngineRequests, Event, MessageChange, OwnStatus,

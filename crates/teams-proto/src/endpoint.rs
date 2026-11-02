@@ -31,6 +31,17 @@ pub enum Service {
     /// (`HttpTransport::with_csa`), with the account's token for `https://chatsvcagg.teams.microsoft.com`: the account's
     /// teams and their channels (`api/v3/teams/users/me` with the web client's query, [`crate::CsaTeams`]).
     Csa,
+    /// The teams' provisioning service at the account's base for it, the region's GTM
+    /// `teamsAndChannelsProvisioningService` (`https://<AFD host>/fabric/<region>/templates/api`), which a transport
+    /// reaches only once it was given one (`HttpTransport::with_provisioning`), with the account's token for
+    /// `https://templates.teams.microsoft.com`: a private channel made ([`crate::CreateChannel`]), its people added
+    /// ([`crate::AddChannelMembers`]) and its creation's status read ([`crate::ChannelCreationStatus`]).
+    Provisioning,
+    /// The user profile service at the account's base for it, the region's GTM `userProfileService`
+    /// (`https://<AFD host>/api/userprofilesvc/<region>`), which a transport reaches only once it was given one
+    /// (`HttpTransport::with_user_profile`), with the account's token for `https://api.spaces.skype.com`: the people on a
+    /// team a name finds ([`crate::TeamPeopleSearch`], a read sent as a `POST`).
+    UserProfile,
     /// UPS, the presence service, at the account's presence base, the region's GTM `presenceUPS`
     /// (`https://<AFD host>/ups/<geo>`, the geo lowercase letters: `noam`), which a transport reaches only once it was
     /// given one (`HttpTransport::with_presence`), with the account's token for

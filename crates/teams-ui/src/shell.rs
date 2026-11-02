@@ -62,6 +62,7 @@ use crate::bridge::Core;
 use crate::calendar_view::{CalendarView, CalendarViewEvent};
 use crate::call_view::CallBar;
 use crate::calls::{self, Ask};
+use crate::channel_dialog::{ChannelDialog, ChannelDialogEvent};
 use crate::channel_view::{ChannelView, ChannelViewEvent};
 use crate::chat_list::{ChatList, ChatListEvent};
 use crate::chat_view::{self, ChatView, ChatViewEvent};
@@ -238,6 +239,8 @@ pub struct Shell {
     /// The first run's screen, shown over everything while it waits ([`SettingsModel::awaiting_first_run`]).
     first_run: Entity<FirstRun>,
     switcher: Option<(Entity<Switcher>, Subscription)>,
+    /// A team's "Create a channel" dialog, while it is open.
+    channel_dialog: Option<(Entity<ChannelDialog>, Subscription)>,
     /// The title bar's search: its box, its suggestions and its results.
     search_box: Entity<GlobalSearch>,
     /// The places shown, for Back and Forward.
@@ -294,8 +297,7 @@ impl Shell {
             .settings()
             .selected_chat_of(core.me())
             .map(str::to_owned);
-        let list_trace = Arc::clone(&trace);
-        let (list_core, list_models) = (Arc::clone(&core), models.clone());
+        let (list_core, list_models, list_trace) = (Arc::clone(&core), models.clone(), Arc::clone(&trace));
         let list = cx.new(|cx| ChatList::new(list_core, list_models, list_trace, selected.clone(), cx));
         let opened = cx.subscribe_in(&list, window, |this: &mut Self, _, event, window, cx| match event {
             ChatListEvent::Opened(id) => this.open_chat(id.clone(), window, cx),
@@ -333,6 +335,7 @@ impl Shell {
             calendar,
             first_run,
             switcher: None,
+            channel_dialog: None,
             search_box,
             history: History::default(),
             list_shown: true,
@@ -421,6 +424,7 @@ impl Shell {
         let teams = cx.new(|cx| TeamsList::new(core, models, trace, cx));
         let channel_opened = cx.subscribe_in(&teams, window, |this: &mut Self, _, event, window, cx| match event {
             TeamsListEvent::Opened(chosen) => this.open_channel(chosen.clone(), window, cx),
+            TeamsListEvent::AddChannel(team) => this.open_channel_dialog(team.clone(), window, cx),
         });
         // a channel kept as the selected chat (by a build that opened one in a chat view) opens as a channel once the
         // list knows it
@@ -891,6 +895,47 @@ impl Shell {
             team: SharedString::default(),
         });
         self.open_channel(chosen, window, cx);
+    }
+
+    /// Opens the team's "Create a channel" dialog over everything; it tells when it closes, and on which channel.
+    pub fn open_channel_dialog(&mut self, team: teams_store::Team, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_switcher(window, cx);
+        let (core, trace) = (Arc::clone(&self.core), Arc::clone(&self.trace));
+        let dialog = cx.new(|cx| ChannelDialog::new(core, trace, team, window, cx));
+        let closes = cx.subscribe_in(&dialog, window, |this: &mut Self, _, event, window, cx| {
+            this.channel_dialog = None;
+            this.focus.focus(window, cx);
+            if let ChannelDialogEvent::Open(id) = event {
+                this.open_channel_id(id.clone(), window, cx);
+            }
+            cx.notify();
+        });
+        self.channel_dialog = Some((dialog, closes));
+        cx.notify();
+    }
+
+    /// The team's "Create a channel" dialog, while it is open.
+    #[must_use]
+    pub fn channel_dialog(&self) -> Option<&Entity<ChannelDialog>> {
+        self.channel_dialog.as_ref().map(|(dialog, _)| dialog)
+    }
+
+    /// The "Create a channel" dialog over everything, while it is open.
+    fn channel_dialog_view(&self) -> Option<gpui::Stateful<gpui::Div>> {
+        self.channel_dialog().cloned().map(|dialog| {
+            div()
+                .id("channel-dialog-backdrop")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .occlude()
+                .bg(gpui::rgba(0x0000_0080))
+                .child(dialog)
+        })
     }
 
     /// Opens a team's channel in the conversation pane, read-only; the chat it hides is kept (its draft stays) but
@@ -1709,7 +1754,7 @@ impl Shell {
 }
 
 /// A row of a popup menu, its test selector `id`: an icon or mark, its words, maybe a check.
-fn menu_row(id: impl Into<SharedString>, palette: Palette) -> gpui::Stateful<gpui::Div> {
+pub(crate) fn menu_row(id: impl Into<SharedString>, palette: Palette) -> gpui::Stateful<gpui::Div> {
     let id = id.into();
     let selector = id.to_string();
     div()
@@ -1806,6 +1851,7 @@ impl Render for Shell {
         };
         let switcher = self.switcher().map(|switcher| overlay(switcher.clone().into()));
         let status_menu = self.status_menu.then(|| self.status_menu_view(palette, cx));
+        let channel_dialog = self.channel_dialog_view();
         let first_run = self.settings.read(cx).awaiting_first_run().then(|| {
             div()
                 .absolute()
@@ -1865,6 +1911,7 @@ impl Render for Shell {
             .children(suggestions)
             .children(switcher)
             .children(status_menu)
+            .children(channel_dialog)
             .children(first_run)
     }
 }

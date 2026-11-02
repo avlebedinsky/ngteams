@@ -113,7 +113,7 @@ use teams_fence::Mri;
 use teams_proto::chat::{self, MessageText};
 use teams_proto::{
     CalendarEvent, Client, Credentials, EndpointRegistrar, EventAttendee, FileRange, FullEvent, HttpError,
-    HttpTransport, ManualAvailability, RegisteredEndpoint, Transport,
+    HttpTransport, ManualAvailability, RegisteredEndpoint, TeamPerson, Transport,
 };
 use teams_store::{
     Applied, Conversation, Member, Message, MessagePage, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction,
@@ -127,6 +127,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior};
 
 use crate::calendar::{Calendar, EventWrite, EventWritten, Invitable, MeetingAvailability};
+use crate::channels::{ChannelDraft, ChannelMade, ChannelProblem, Channels, Finished};
 use crate::service_search::{SearchAnswer, SearchScope, ServiceSearch};
 
 /// How many people the attendee picker suggests at most.
@@ -467,6 +468,9 @@ pub enum EngineError {
     /// happened (refused, the service's answer, no answer).
     #[error("the event's {kind} wasn't saved: {why}")]
     EventNotSaved { kind: &'static str, why: String },
+    /// A team's channel wasn't made ([`crate::channels`]): `why` is Teams' reason for it.
+    #[error("the channel wasn't made: {why:?}")]
+    ChannelNotCreated { why: ChannelProblem },
     /// The service's search couldn't be read, or its answer wasn't in a shape the app reads
     /// ([`crate::service_search`]).
     #[error("the search couldn't be read")]
@@ -501,6 +505,7 @@ impl EngineError {
             Self::FileUnread => "file unread",
             Self::CalendarUnread => "calendar unread",
             Self::EventNotSaved { .. } => "event not saved",
+            Self::ChannelNotCreated { .. } => "channel not created",
             Self::SearchFailed => "search failed",
             Self::Call(_) => "call",
         }
@@ -618,6 +623,29 @@ enum Request {
     Invitable {
         query: String,
         reply: Responder<Vec<Invitable>>,
+    },
+    CreateChannel {
+        // boxed: far larger than any other request
+        draft: Box<ChannelDraft>,
+        reply: Responder<ChannelMade>,
+    },
+    AddChannelMembers {
+        team_group: String,
+        channel_group: String,
+        members: Vec<String>,
+        reply: Responder<Vec<String>>,
+    },
+    ChannelThread {
+        team: String,
+        team_group: String,
+        channel_group: String,
+        name: String,
+        reply: Responder<Option<String>>,
+    },
+    TeamPeople {
+        team: String,
+        keyword: String,
+        reply: Responder<Vec<TeamPerson>>,
     },
     MeetingAvailability {
         attendees: Vec<EventAttendee>,
@@ -924,6 +952,60 @@ impl EngineRequests {
         })
     }
 
+    /// Makes a team's channel through the outbox, under the fence ([`crate::channels`]): stored once made (a private
+    /// channel without its thread, once [`Self::channel_thread`] has it); [`EngineError::ChannelNotCreated`] when it
+    /// wasn't made.
+    pub fn create_channel(&self, draft: ChannelDraft) -> Reply<ChannelMade> {
+        self.ask(|reply| Request::CreateChannel {
+            draft: Box::new(draft),
+            reply,
+        })
+    }
+
+    /// Adds `members` (MRIs) to a private channel, by its group and its team's: answered with those who weren't added
+    /// ([`crate::channels`]).
+    pub fn add_channel_members(
+        &self,
+        team_group: impl Into<String>,
+        channel_group: impl Into<String>,
+        members: Vec<String>,
+    ) -> Reply<Vec<String>> {
+        let (team_group, channel_group) = (team_group.into(), channel_group.into());
+        self.ask(|reply| Request::AddChannelMembers {
+            team_group,
+            channel_group,
+            members,
+            reply,
+        })
+    }
+
+    /// Waits for a private channel's thread: answered with it, once it is stored; `None` when it didn't come in time
+    /// ([`crate::channels`]).
+    pub fn channel_thread(
+        &self,
+        team: impl Into<String>,
+        team_group: impl Into<String>,
+        channel_group: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Reply<Option<String>> {
+        let (team, team_group, channel_group, name) =
+            (team.into(), team_group.into(), channel_group.into(), name.into());
+        self.ask(|reply| Request::ChannelThread {
+            team,
+            team_group,
+            channel_group,
+            name,
+            reply,
+        })
+    }
+
+    /// The people on the team `team` that `keyword` finds, read now: what a private channel's member step suggests
+    /// ([`crate::channels`]).
+    pub fn team_people(&self, team: impl Into<String>, keyword: impl Into<String>) -> Reply<Vec<TeamPerson>> {
+        let (team, keyword) = (team.into(), keyword.into());
+        self.ask(|reply| Request::TeamPeople { team, keyword, reply })
+    }
+
     /// Up to eight people the account knows whose name holds `query`, each with the address their profile gives
     /// (read now): what the scheduling form's attendee picker suggests ([`crate::calendar`]).
     pub fn invitable(&self, query: impl Into<String>) -> Reply<Vec<Invitable>> {
@@ -1205,6 +1287,7 @@ struct Core<C, T> {
     thumbnails: Thumbnails<C>,
     files: FileContents<C>,
     calendar: Calendar<C, T>,
+    channels: Channels<C, T>,
     service_search: ServiceSearch<C>,
     events: mpsc::UnboundedSender<Event>,
     options: EngineOptions,
@@ -1262,6 +1345,7 @@ where
         let thumbnails = Thumbnails::new(Arc::clone(&parts.client), disk);
         let files = FileContents::new(Arc::clone(&parts.client));
         let calendar = Calendar::new(Arc::clone(&parts.client), Arc::clone(&outbox));
+        let channels = Channels::new(Arc::clone(&parts.client), Arc::clone(&outbox));
         let service_search = ServiceSearch::new(Arc::clone(&parts.client));
         let calling = parts
             .calls
@@ -1281,6 +1365,7 @@ where
             thumbnails,
             files,
             calendar,
+            channels,
             service_search,
             events,
             options: parts.options,
@@ -1317,8 +1402,11 @@ where
                     None => push = None,
                 },
                 _ = tick.tick() => self.on_tick().await,
-                done = background(&mut self.profiles, &mut self.teams, &mut self.presences),
-                    if self.profiles.busy() || self.teams.busy() || self.presences.busy() => {
+                done = background(&mut self.profiles, &mut self.teams, &mut self.presences, &mut self.channels),
+                    if self.profiles.busy()
+                        || self.teams.busy()
+                        || self.presences.busy()
+                        || self.channels.busy() => {
                     self.on_background(done);
                 }
                 // ready once the runtime's other tasks had their turn (the push channel's, on this current-thread
@@ -1495,6 +1583,21 @@ where
             } => self.calendar.view(start_ms, end_ms, reply),
             Request::CalendarEvent { id, reply } => self.calendar.event(&id, reply),
             Request::WriteEvent { write, reply } => self.calendar.write(*write, reply),
+            Request::CreateChannel { draft, reply } => self.channels.create(*draft, reply),
+            Request::AddChannelMembers {
+                team_group,
+                channel_group,
+                members,
+                reply,
+            } => self.channels.add_members(team_group, channel_group, members, reply),
+            Request::ChannelThread {
+                team,
+                team_group,
+                channel_group,
+                name,
+                reply,
+            } => self.channels.thread(team, team_group, channel_group, name, reply),
+            Request::TeamPeople { team, keyword, reply } => self.channels.people(team, keyword, reply),
             Request::SearchService { query, scope, reply } => self.service_search.search(query, scope, reply),
             Request::MeetingAvailability {
                 attendees,
@@ -1565,7 +1668,24 @@ where
             Background::Looked(looked) => self.on_looked(looked),
             Background::Teams(read) => self.on_teams(read),
             Background::Presence(polled) => self.on_presence(polled),
+            Background::Channel(finished) => self.on_channel(finished),
         }
+    }
+
+    /// A channel's write or wait is over (`None`: its task was lost, the asker told by its reply's end): a channel made
+    /// is stored and told before the asker hears of it, so it can open the channel at once.
+    fn on_channel(&mut self, finished: Option<Finished>) {
+        let Some(Finished { created, reply }) = finished else {
+            return;
+        };
+        if let Some(created) = created {
+            match self.teams.note_created(&mut self.store, created) {
+                Ok(true) => self.emit(Event::Teams),
+                Ok(false) => {}
+                Err(error) => self.failed("storing the teams", error),
+            }
+        }
+        reply();
     }
 
     /// A presence read or subscription is over (`None`: none ran): each change it brought told.
@@ -2198,19 +2318,22 @@ enum Background {
     Looked(Option<crate::profiles::Looked>),
     Teams(Option<Result<TeamsRead, TeamsReadError>>),
     Presence(Option<PresenceDone>),
+    Channel(Option<Finished>),
 }
 
 /// The next read in the background to be over, a person's lookup, the teams' or the presence read; never while none
 /// runs.
-async fn background<C: Credentials + 'static>(
+async fn background<C: Credentials + 'static, T: Transport<Error = HttpError> + 'static>(
     profiles: &mut Profiles<C>,
     teams: &mut Teams<C>,
     presences: &mut Presences<C>,
+    channels: &mut Channels<C, T>,
 ) -> Background {
     tokio::select! {
         looked = profiles.next(), if profiles.busy() => Background::Looked(looked),
         read = teams.next(), if teams.busy() => Background::Teams(read),
         polled = presences.next(), if presences.busy() => Background::Presence(polled),
+        finished = channels.next(), if channels.busy() => Background::Channel(finished),
         else => pending().await,
     }
 }

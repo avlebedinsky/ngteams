@@ -44,6 +44,10 @@
 //! default/calendarView` with the web client's query) under [`MIDDLE_TIER_BASE`], taking the account's token alone: the
 //! same made-up working week for every account, repeated every week.
 //!
+//! **A new channel** (`channels.rs`): the middle tier's standard channel, the provisioning service's private one under
+//! [`PROVISIONING_BASE`] (its status, its people added), the user profile service's search of a team's people under
+//! [`USER_PROFILE_BASE`]; what was made is kept ([`ChatServiceMock::channel_writes`]) and listed by CSA's teams read.
+//!
 //! **UPS** (`ups.rs`, M2 Task 19): the account's own availability, its presence endpoint's `PUT` and its manual status
 //! (set, or cleared with no body), in the shapes the web client sent, under the presence base [`PRESENCE_BASE`],
 //! naming an endpoint the account registered with the registrar here; answered `201` and `200` with no body, as UPS
@@ -81,6 +85,7 @@
 
 mod calendar;
 mod calling;
+mod channels;
 mod chatsvc;
 mod csa;
 mod fixtures;
@@ -104,6 +109,7 @@ use wiremock::matchers::{any, method};
 use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
 
 pub use calling::{ANSWERED_ELSEWHERE, CallPhase, Leg, MockCall, TIMED_OUT};
+pub use channels::{ChannelWrite, NOT_ADDED};
 pub use fixtures::FixtureError;
 pub use trouter::{CALLING_APP, MESSAGING_APP, REGIONAL_NAME, Registration, SocketRecord, TrouterMock};
 pub use ups::{AvailabilityChange, OwnAvailability};
@@ -122,6 +128,14 @@ pub const CSA_BASE: &str = "https://teams.microsoft.com/api/csa/amer";
 /// The middle-tier base a client is given (`middleTier` as the region's GTMs give it); its calendar view
 /// (`calendar.rs`) is served at [`ChatServiceMock::origin`] with this base's path.
 pub const MIDDLE_TIER_BASE: &str = "https://teams.microsoft.com/api/mt/part/amer-03";
+
+/// The provisioning service's base a client is given (`teamsAndChannelsProvisioningService` as the region's GTMs give
+/// it); its requests go to [`ChatServiceMock::origin`] with this base's path (`channels.rs`).
+pub const PROVISIONING_BASE: &str = "https://teams.microsoft.com/fabric/amer/templates/api";
+
+/// The user profile service's base a client is given (`userProfileService` as the region's GTMs give it); its requests go
+/// to [`ChatServiceMock::origin`] with this base's path (`channels.rs`).
+pub const USER_PROFILE_BASE: &str = "https://teams.microsoft.com/api/userprofilesvc/amer";
 
 /// The AMS base a client is given (`amsV2` as the region's GTMs give it: the async gateway); its requests go to
 /// [`ChatServiceMock::origin`] with this base's path, where [`ChatServiceMock::serve_bytes`] answers them.
@@ -651,6 +665,12 @@ impl ChatServiceMock {
     #[must_use]
     pub fn close_peer(&self, id: &str, account: &str) -> Option<teams_media::session::SessionStats> {
         self.lock().peers.close(id, account)
+    }
+
+    /// The channel writes the mock took, in order (`channels.rs`).
+    #[must_use]
+    pub fn channel_writes(&self) -> Vec<ChannelWrite> {
+        self.lock().channels.writes.clone()
     }
 
     /// The own-availability writes UPS took, in order (see the crate docs).

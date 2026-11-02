@@ -172,6 +172,21 @@ The mapped writes, and the carve-outs that reach nobody.
 | `PUT` | `v1/threads/<chat>/properties` `?name`, `v1/threads/<chat>/members/ALL` | thread properties (topic) and a property of every member | yes: chat service | not used | [fence-targets.md](fence-targets.md#writes) · M0 T11 | bundle only |
 | various | `v1/threads/<chat>/livemessages`, `…/messages/forward`, `…/messages/move`, `rcmetadata`, `rc2s`, `v1/threads/<chat>/files`, `v1/users/ME/drafts`, `PUT`/`DELETE` on a conversation itself, any `48:` stream but the two feeds' read marks (`48:notes`, `48:sharedcalllogs`, …), an `8:…` or `28:…` conversation | live and targeted messages, forwarding and moving, reply-chain metadata, file references, drafts and scheduled sends, conversations with a person or a bot by MRI | yes: chat service | not used | [fence-targets.md](fence-targets.md#writes) · M0 T11 | bundle only |
 
+## A new channel
+
+The dialog's writes and reads ([channels.md](channels.md#creating-a-channel)). `Contacting?` and `Native` as above.
+
+| Method | Path | What | Contacting? | Native | Notes | Seen |
+|---|---|---|---|---|---|---|
+| `POST` | middle tier `beta/teams/<team>/channels` | a standard channel | mapped: `ChannelChange` → `Team(<team>)`; the lab's fence denies it (a team's members are never read complete) | `Authorized<Mutating>` (`CreateChannel`), sent by `teams-core`'s `channels` on the dialog's Create | [channels.md](channels.md#creating-a-channel) | seen, held back (`channel-create`) |
+| `PUT` | middle tier `beta/teams/<channel>/setDefaultChannel` | a channel shown in everyone's channel list | mapped: `ChannelChange` → `Team(<channel>)`; the lab's fence denies it | `Authorized<Mutating>` (`ShowChannelByDefault`), after an owner's Create | [channels.md](channels.md#creating-a-channel) | bundle only |
+| `POST` | provisioning `teams/<group>/channelsWarmup` | a private channel's warm-up, as its type is picked | no: it names nobody | not used | [channels.md](channels.md#creating-a-channel) | seen, held back (`channel-create`) |
+| `POST` | provisioning `teams/<group>/channels?forceSync=false` | a private channel | mapped: `ChannelChange` → `Team(<spaceThreadId>)`; the lab's fence denies it | `Authorized<Mutating>` (`CreateChannel`), on the provisioning service | [channels.md](channels.md#creating-a-channel) | seen, held back (`channel-create`) |
+| `GET` | provisioning `teams/<group>/channels/OID:<channel group>@<tenant>` | a private channel's creation status: its `threadId` | no | `Read` (`ChannelCreationStatus`), every 4 s while the dialog waits | [channels.md](channels.md#creating-a-channel) | bundle only |
+| `POST` | provisioning `teams/<group>/channels/OID:<channel group>@<tenant>/users?forceSync=false` | a private channel's people | mapped: `MemberChange` → `Channel(<group>, <channel group>)` adding each; the lab's fence denies it | `Authorized<Mutating>` (`AddChannelMembers`), on the dialog's Add | [channels.md](channels.md#creating-a-channel) | bundle only |
+| `POST` | any other mutating request under `/fabric/…`, `templates.teams.microsoft.com` | what the provisioning service does: teams, channels, members | yes: unreadable | not used | [fence-targets.md](fence-targets.md#the-contacting-services) | bundle only |
+| `POST` | user profile `api/v1.0/teams/<team>/users/profilesearch` `?top&includeDLs&includeBots&enableGuest` | the people on a team a keyword finds: a read sent as a `POST` | no | `Request` (`TeamPeopleSearch`), the dialog's member step | [channels.md](channels.md#creating-a-channel) | seen (`channel-create`'s mention) |
+
 ## CSA and the push service (`https://<teams origin>/api/csa/<region>/`, `…/api/tps/`)
 
 The CSA base is authz's `chatSvcAggAfd` GTM. CSA is a contacting service: a mutating request on it is denied but for

@@ -49,8 +49,22 @@ pub(crate) fn teams(state: &State, request: &Request) -> Option<ResponseTemplate
             .map(|(name, value)| (name.as_str(), value.as_str()))
             .eq(QUERY);
     Some(if the_read {
-        json(200, &state.fixtures.teams)
+        json(200, &with_made_channels(&state.fixtures.teams, state))
     } else {
         status(404)
     })
+}
+
+/// The fixture's answer with the channels made since (`channels.rs`) in their teams.
+fn with_made_channels(answer: &serde_json::Value, state: &State) -> serde_json::Value {
+    let mut answer = answer.clone();
+    if let Some(teams) = answer.get_mut("teams").and_then(serde_json::Value::as_array_mut) {
+        for made in &state.channels.made {
+            let team = teams.iter_mut().find(|team| team["id"] == made.team.as_str());
+            if let Some(channels) = team.and_then(|team| team["channels"].as_array_mut()) {
+                channels.push(made.entry.clone());
+            }
+        }
+    }
+    answer
 }

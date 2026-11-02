@@ -284,6 +284,10 @@ fails the run.
   form (the new-meeting deep link, b picked in its attendees), then opens it from the meeting's chat (Details),
   changes its title and sends the update, and cancels it; each write judged by the meeting's attendees, read fresh
   from the middle tier (`docs/protocol/calendar.md`, "Writing an event").
+- `channel-create`: account a alone, fail-closed as `load`, every write that could make a channel force-denied on any
+  host from before the page loads: a's team's "..." menu and its "Add channel", the "Create a channel" dialog and its types,
+  then the dialog filled and Create pressed for each channel type and layout, what it sends recorded and held back
+  (`docs/protocol/channels.md`, "Creating a channel"); nothing is made.
 - `own-presence-activity`, `-endpoint`, `-both`, `-manual-held`, `-manual`: account a alone, as `ab-trouter`. Its
   own availability reaches nobody, so it passes; each run holds back with a labelled forced deny what it leaves out:
   `user.activity` alone, UPS's endpoint `PUT` alone, both, then a manual status (Busy, Do not disturb, Away,
@@ -481,7 +485,7 @@ nobody answers) has the broker's socket shut down under it.
 
 The window is three panes: the rail (Chat, Settings), the sidebar (resizable, under "Chat" and the connection state
 while it isn't up: "Chats", the store's chats by last activity with names, previews, times and unread counts, then
-"Teams and channels", each team with its channels; a section's header or a team's line folds it) and the conversation
+"Teams and channels", each team with its channels, a private channel with a lock; a section's header or a team's line folds it, and a team's "..." offers "Add channel", the "Create a channel" dialog as Teams has it) and the conversation
 pane, which shows the chat opened in the chat view under its avatar and name: its messages from the store, the newest at the bottom (older pages load as the top
 comes near), grouped by sender within 5 minutes, with day separators, a "New messages" divider at the read horizon as
 the chat opened, edited and deleted markers, reactions, thread events, a "Jump to newest" pill once scrolled up, and

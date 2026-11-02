@@ -24,10 +24,12 @@ use futures_util::future::{Either, Shared, select};
 use gpui::{AppContext as _, AsyncApp, Context, SharedString, Task};
 use teams_core::sync::{CatchUpReport, Synced};
 use teams_core::{
-    Action, Availability, CalendarEvent, CallAction, CallId, ChatListing, EngineHandle, EngineRequests, Event,
-    EventAttendee, EventWrite, EventWritten, FileStream, FullEvent, Invitable, MeetingAvailability, OwnStatus, Person,
-    PictureBytes, Reply, SearchAnswer, SearchScope, Strip, Transient, TransientSent,
+    Action, Availability, CalendarEvent, CallAction, CallId, ChannelDraft, ChannelMade, ChatListing, EngineHandle,
+    EngineRequests, Event, EventAttendee, EventWrite, EventWritten, FileStream, FullEvent, Invitable,
+    MeetingAvailability, OwnStatus, Person, PictureBytes, Reply, SearchAnswer, SearchScope, Strip, Transient,
+    TransientSent,
 };
+use teams_proto::TeamPerson;
 use teams_store::{
     Conversation, Member, Message, MessagePage, OutboxEntry, PageCursor, Reaction, ReadHorizon, SearchHit, Team,
 };
@@ -147,6 +149,36 @@ pub trait Core: Send + Sync + 'static {
             why: "nothing saves here".to_owned(),
         }))
     }
+    /// Makes a team's channel (`teams_core::channels`); only the "Create a channel" dialog's Create asks for one. A fake
+    /// core makes none.
+    fn create_channel(&self, _draft: ChannelDraft) -> Reply<ChannelMade> {
+        Reply::ready(Err(teams_core::EngineError::ChannelNotCreated {
+            why: teams_core::ChannelProblem::Other,
+        }))
+    }
+    /// Adds people to a private channel by its group: answered with those who weren't added. A fake core adds nobody.
+    fn add_channel_members(
+        &self,
+        _team_group: String,
+        _channel_group: String,
+        members: Vec<String>,
+    ) -> Reply<Vec<String>> {
+        Reply::ready(Ok(members))
+    }
+    /// A private channel's thread, once it has one. A fake core has none.
+    fn channel_thread(
+        &self,
+        _team: String,
+        _team_group: String,
+        _channel_group: String,
+        _name: String,
+    ) -> Reply<Option<String>> {
+        Reply::ready(Ok(None))
+    }
+    /// The people on a team `keyword` finds: a private channel's member step. A fake core finds nobody.
+    fn team_people(&self, _team: String, _keyword: String) -> Reply<Vec<TeamPerson>> {
+        Reply::ready(Ok(Vec::new()))
+    }
     /// People the account knows whose name holds `query`, with their addresses: the attendee picker's suggestions. A
     /// fake core knows nobody.
     fn invitable(&self, query: String) -> Reply<Vec<Invitable>> {
@@ -188,6 +220,33 @@ impl Core for EngineRequests {
 
     fn write_event(&self, write: EventWrite) -> Reply<EventWritten> {
         EngineRequests::write_event(self, write)
+    }
+
+    fn create_channel(&self, draft: ChannelDraft) -> Reply<ChannelMade> {
+        EngineRequests::create_channel(self, draft)
+    }
+
+    fn add_channel_members(
+        &self,
+        team_group: String,
+        channel_group: String,
+        members: Vec<String>,
+    ) -> Reply<Vec<String>> {
+        EngineRequests::add_channel_members(self, team_group, channel_group, members)
+    }
+
+    fn channel_thread(
+        &self,
+        team: String,
+        team_group: String,
+        channel_group: String,
+        name: String,
+    ) -> Reply<Option<String>> {
+        EngineRequests::channel_thread(self, team, team_group, channel_group, name)
+    }
+
+    fn team_people(&self, team: String, keyword: String) -> Reply<Vec<TeamPerson>> {
+        EngineRequests::team_people(self, team, keyword)
     }
 
     fn invitable(&self, query: String) -> Reply<Vec<Invitable>> {

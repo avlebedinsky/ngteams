@@ -15,7 +15,7 @@ use std::sync::Arc;
 use common::{LAB_A, LAB_B, Rig, Written};
 use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext};
 use teams_core::{EngineError, Event, NameFrom, Person, READING_TEAMS};
-use teams_store::{Message, Team, TeamChannel};
+use teams_store::{ChannelKind, Message, Team, TeamChannel};
 use teams_ui::channel_view::{EARLIER_POST, READ_ONLY, arrange_threads};
 use teams_ui::settings::{Settings, SettingsModel};
 use teams_ui::shell::{Main, Shell, ShellParts};
@@ -35,12 +35,18 @@ fn teams() -> Vec<Team> {
         id: id.to_owned(),
         name: name.to_owned(),
         general,
+        kind: ChannelKind::Standard,
     };
     vec![
         Team {
             id: TEAM.to_owned(),
             name: "Made-up Team".to_owned(),
             archived: false,
+            group_id: None,
+            mailbox: None,
+            owner: false,
+            can_add_channel: false,
+            can_add_private_channel: false,
             channels: vec![
                 channel(TEAM, "General", true),
                 channel(CHANNEL, "Made-up Channel", false),
@@ -50,6 +56,11 @@ fn teams() -> Vec<Team> {
             id: ARCHIVED.to_owned(),
             name: "Old Team".to_owned(),
             archived: true,
+            group_id: None,
+            mailbox: None,
+            owner: false,
+            can_add_channel: false,
+            can_add_private_channel: false,
             channels: vec![channel(ARCHIVED, "General", true)],
         },
     ]

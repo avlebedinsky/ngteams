@@ -14,15 +14,17 @@
 //!   [`Event::Teams`](crate::Event::Teams) too. The chat list asks for them
 //!   ([`EngineRequests::chat_listing`](crate::EngineRequests::chat_listing)), which starts a read as asking for the
 //!   teams does.
-//! - **No write**: nothing here writes, and a chat write the engine takes for a channel's id (a post, a read receipt:
+//! - **Writes**: a new channel's are [`crate::channels`]'; nothing here writes, and a chat write the engine takes for a channel's id (a post, a read receipt:
 //!   sealed chat writes aimed at the channel) is denied by the fence, which never reads a channel's members complete.
 //!   No write is mapped to `WriteKind::ChannelPost`. The fence, not a missing write type, keeps channels unwritten.
 
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use teams_proto::{Client, Credentials, CsaAnswerError, CsaTeams, HttpError, HttpTransport};
-use teams_store::{Applied, Store, StoreError, Team, TeamChannel};
+use teams_proto::{ChannelType, Client, Credentials, CsaAnswerError, CsaTeams, HttpError, HttpTransport};
+use teams_store::{Applied, ChannelKind, Store, StoreError, Team, TeamChannel};
+
+use crate::channels::Created;
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
@@ -66,6 +68,9 @@ pub(crate) struct TeamsRead {
     pub(crate) favorites: Option<Vec<String>>,
 }
 
+/// How long a channel just made is kept in the list when a read doesn't name it yet.
+const CREATED_KEPT: Duration = Duration::from_mins(10);
+
 /// The background read of the teams.
 pub(crate) struct Teams<C> {
     client: Arc<Client<HttpTransport<C>>>,
@@ -73,6 +78,10 @@ pub(crate) struct Teams<C> {
     /// After a failed read: not before then.
     retry_at: Option<Instant>,
     retry: Duration,
+    /// The channels made here that no read has named yet, until when they are kept.
+    created: Vec<(Created, Instant)>,
+    /// A channel was made while a read ran: another read follows it, which may name it.
+    read_again: bool,
 }
 
 impl<C: Credentials + 'static> Teams<C> {
@@ -82,6 +91,30 @@ impl<C: Credentials + 'static> Teams<C> {
             running: JoinSet::new(),
             retry_at: None,
             retry,
+            created: Vec::new(),
+            read_again: false,
+        }
+    }
+
+    /// Stores a channel just made in its team's list, and reads the list again: the service's own list may not name it
+    /// yet, so it is kept against reads that don't ([`CREATED_KEPT`]). Whether the stored list changed.
+    pub(crate) fn note_created(&mut self, store: &mut Store, created: Created) -> Result<bool, StoreError> {
+        self.created.push((created, Instant::now() + CREATED_KEPT));
+        let mut teams = store.teams()?;
+        keep_created(&mut self.created, &mut teams);
+        let read_at = store.teams_read_at()?.unwrap_or_else(now_ms);
+        let applied = store.replace_teams(&teams, read_at)?;
+        self.read_now();
+        Ok(applied != Applied::Ignored)
+    }
+
+    /// Starts a read now, whatever the stored list's age, or one more after the running one.
+    fn read_now(&mut self) {
+        if self.running.is_empty() {
+            let client = Arc::clone(&self.client);
+            self.running.spawn(async move { read(&client).await });
+        } else {
+            self.read_again = true;
         }
     }
 
@@ -135,11 +168,16 @@ impl<C: Credentials + 'static> Teams<C> {
             Ok(read) => {
                 self.retry_at = None;
                 let now = now_ms();
-                let teams = store.replace_teams(&read.teams, now)?;
+                let mut listed = read.teams;
+                keep_created(&mut self.created, &mut listed);
+                let teams = store.replace_teams(&listed, now)?;
                 let favorites = match &read.favorites {
                     Some(favorites) => store.replace_favorites(favorites, now)?,
                     None => Applied::Ignored,
                 };
+                if std::mem::take(&mut self.read_again) {
+                    self.read_now();
+                }
                 Ok(Ok(teams != Applied::Ignored || favorites != Applied::Ignored))
             }
             Err(error) => {
@@ -148,6 +186,31 @@ impl<C: Credentials + 'static> Teams<C> {
             }
         }
     }
+}
+
+/// Puts into `teams` each channel just made that they don't name, in its team's list by name after the general one;
+/// one a read names now, or kept long enough, is let go.
+fn keep_created(created: &mut Vec<(Created, Instant)>, teams: &mut [Team]) {
+    let now = Instant::now();
+    created.retain(|(made, until)| {
+        let Some(team) = teams.iter_mut().find(|team| team.id == made.team) else {
+            return *until > now;
+        };
+        if team.channels.iter().any(|channel| channel.id == made.channel.id) {
+            return false;
+        }
+        if *until <= now {
+            return false;
+        }
+        let name = made.channel.name.to_lowercase();
+        let at = team
+            .channels
+            .iter()
+            .position(|channel| !channel.general && channel.name.to_lowercase() > name)
+            .unwrap_or(team.channels.len());
+        team.channels.insert(at, made.channel.clone());
+        true
+    });
 }
 
 /// The stored teams (`None` before the first read settled them); nothing is read.
@@ -177,6 +240,11 @@ async fn read<C: Credentials>(client: &Client<HttpTransport<C>>) -> Result<Teams
             id: team.id,
             name: team.name,
             archived: team.archived,
+            group_id: team.group_id,
+            mailbox: team.mailbox,
+            owner: team.owner,
+            can_add_channel: team.can_add_channel,
+            can_add_private_channel: team.can_add_private_channel,
             channels: team
                 .channels
                 .into_iter()
@@ -184,6 +252,11 @@ async fn read<C: Credentials>(client: &Client<HttpTransport<C>>) -> Result<Teams
                     id: channel.id,
                     name: channel.name,
                     general: channel.general,
+                    kind: match channel.kind {
+                        ChannelType::Private => ChannelKind::Private,
+                        ChannelType::Shared => ChannelKind::Shared,
+                        ChannelType::Standard | ChannelType::Unknown => ChannelKind::Standard,
+                    },
                 })
                 .collect(),
         })

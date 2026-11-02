@@ -158,7 +158,10 @@ fn no_chrome(name: ScenarioName, result: Result<ScenarioReport, ScenarioError>, 
 async fn missing_config(paths: &LabPaths) {
     for &name in ScenarioName::value_variants() {
         let result = invoke(name, paths).await;
-        if matches!(name, ScenarioName::Load | ScenarioName::Search) {
+        if matches!(
+            name,
+            ScenarioName::Load | ScenarioName::Search | ScenarioName::ChannelCreate
+        ) {
             no_chrome(name, result, paths);
         } else {
             let error = result.unwrap_err().to_string();

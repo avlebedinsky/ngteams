@@ -23,7 +23,7 @@ use gpui::{Entity, Modifiers, TestAppContext, VisualTestContext, point, px, size
 use teams_core::{Action, Event, SearchScope};
 use teams_proto::{Found, FoundChannel, FoundChat, FoundFile, FoundMessage, FoundPerson, SearchKind, highlighted};
 use teams_store::search::{MATCH_END, MATCH_START};
-use teams_store::{Conversation, ConversationKind, Member, Message, Team, TeamChannel};
+use teams_store::{ChannelKind, Conversation, ConversationKind, Member, Message, Team, TeamChannel};
 use teams_ui::ViewTrace;
 use teams_ui::chat_view::{ChatView, MessageAction, PAGE, READ_DEBOUNCE};
 use teams_ui::compose::Mode;
@@ -860,10 +860,16 @@ fn team_in_search(rig: &Rig) {
         id: CHANNEL.to_owned(),
         name: "Lab rocket".to_owned(),
         archived: false,
+        group_id: None,
+        mailbox: None,
+        owner: false,
+        can_add_channel: false,
+        can_add_private_channel: false,
         channels: vec![TeamChannel {
             id: CHANNEL.to_owned(),
             name: "Release notes".to_owned(),
             general: true,
+            kind: ChannelKind::Standard,
         }],
     }]);
 }

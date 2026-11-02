@@ -1,5 +1,5 @@
 {
-  "_synthetic": "Made up, in the shape of CSA's answer to `proto-lab probe teams a` (M2 Task 16, 2026-10-22: GET <chatSvcAggAfd>/api/v3/teams/users/me with the web client's query and the account's own chatsvcagg token, Accept: application/json and nothing else; it answered 200, application/json, about 32 KB). The probe printed statuses, header names, sizes, key paths with their JSON types and counts, never a value, and kept nothing: two teams of ten channels, each team's general channel the one whose id is the team's (isGeneral true), one archived team and channel, no deleted one. Its top level also had chats, users, privateFeeds, engageCommunities, conversationFolders and metadata, which the native client doesn't read and this fixture trims to empty or a few keys; a team's and a channel's many settings objects (teamSettings, teamGuestSettings, memberSettings, guestSettings, defaultFileSettings, extensionDefinition) are trimmed too. Here: a team with its general channel, a standard channel listed before it and a deleted one; an archived team with its general channel; a deleted team; and a Favorites folder holding the standard channel (conversationFolders as docs/protocol/chat.md, \"Favorites\", describes it). Ids, names and times are made up; <guid:tenant> is the tenant, tests fill it in. See docs/protocol/channels.md.",
+  "_synthetic": "Made up, in the shape of CSA's answer to `proto-lab probe teams a` (M2 Task 16, 2026-10-22: GET <chatSvcAggAfd>/api/v3/teams/users/me with the web client's query and the account's own chatsvcagg token, Accept: application/json and nothing else; it answered 200, application/json, about 32 KB). The probe printed statuses, header names, sizes, key paths with their JSON types and counts, never a value, and kept nothing: two teams of ten channels, each team's general channel the one whose id is the team's (isGeneral true), one archived team and channel, no deleted one. Its top level also had chats, users, privateFeeds, engageCommunities, conversationFolders and metadata, which the native client doesn't read and this fixture trims to empty or a few keys; a team's and a channel's many settings objects (teamSettings to the three flags a new channel needs, teamGuestSettings, memberSettings, guestSettings, defaultFileSettings, extensionDefinition) are trimmed too. Here: a team with its general channel, a standard channel listed before it and a deleted one; an archived team with its general channel; a deleted team; and a Favorites folder holding the standard channel (conversationFolders as docs/protocol/chat.md, \"Favorites\", describes it). Ids, names and times are made up; <guid:tenant> is the tenant, tests fill it in. See docs/protocol/channels.md.",
   "request": {
     "method": "GET",
     "path": "/api/csa/<region>/api/v3/teams/users/me",
@@ -31,7 +31,9 @@
             "isDeleted": false
           }
         ],
-        "conversationFolderOrder": ["made-up~Favorites"],
+        "conversationFolderOrder": [
+          "made-up~Favorites"
+        ],
         "migratedPinnedToFavorites": true,
         "isPartialResponse": false
       },
@@ -53,7 +55,13 @@
               "creator": "8:orgid:<guid:a>",
               "creationTime": "2026-01-01T00:00:00.000Z",
               "lastJoinAt": "2026-01-01T00:00:00.000Z",
-              "lastMessage": {"messageType": null, "content": null, "id": null, "sequenceId": 0, "version": 0},
+              "lastMessage": {
+                "messageType": null,
+                "content": null,
+                "id": null,
+                "sequenceId": 0,
+                "version": 0
+              },
               "lastL2MessageIdNFS": 0,
               "version": 1760000000300,
               "threadVersion": 1760000000300,
@@ -99,7 +107,13 @@
               "creator": "8:orgid:<guid:a>",
               "creationTime": "2026-01-01T00:00:00.000Z",
               "lastJoinAt": "2026-01-01T00:00:00.000Z",
-              "lastMessage": {"messageType": null, "content": null, "id": null, "sequenceId": 0, "version": 0},
+              "lastMessage": {
+                "messageType": null,
+                "content": null,
+                "id": null,
+                "sequenceId": 0,
+                "version": 0
+              },
               "lastL2MessageIdNFS": 0,
               "version": 1760000000200,
               "threadVersion": 1760000000200,
@@ -147,14 +161,14 @@
           "description": "",
           "creator": "8:orgid:<guid:a>",
           "tenantId": "<guid:tenant>",
-          "smtpAddress": "",
+          "smtpAddress": "made-up-team@lab.example.com",
           "pictureETag": "",
           "joiningenabled": "True",
           "spaceTypes": "standard",
           "teamType": 0,
           "accessType": 1,
           "memberRole": 2,
-          "memberRoleString": "User",
+          "memberRoleString": "user",
           "membershipVersion": 1760000000200,
           "membershipExpiry": 0,
           "rosterVersion": 1760000000100,
@@ -165,10 +179,28 @@
           "guestUsersCategory": null,
           "dynamicMembership": false,
           "maximumMemberLimitExceeded": false,
-          "membershipSummary": {"adminRoleCount": 1, "botCount": 0, "mutedMembersCount": 0, "totalMemberCount": 3, "userRoleCount": 2},
-          "teamSiteInformation": {"groupId": "<guid:group>", "isOneNoteProvisioned": false, "notebookId": "", "sharepointSiteUrl": ""},
-          "teamStatus": {"exchangeTeamCreationStatus": 0, "sharePointSiteCreationStatus": 0, "teamNotebookCreationStatus": 0},
-          "extensionDefinition": {"tabsEtag": null, "updatedTime": "2026-01-01T00:00:00.000Z"},
+          "membershipSummary": {
+            "adminRoleCount": 1,
+            "botCount": 0,
+            "mutedMembersCount": 0,
+            "totalMemberCount": 3,
+            "userRoleCount": 2
+          },
+          "teamSiteInformation": {
+            "groupId": "<guid:group>",
+            "isOneNoteProvisioned": false,
+            "notebookId": "",
+            "sharepointSiteUrl": ""
+          },
+          "teamStatus": {
+            "exchangeTeamCreationStatus": 0,
+            "sharePointSiteCreationStatus": 0,
+            "teamNotebookCreationStatus": 0
+          },
+          "extensionDefinition": {
+            "tabsEtag": null,
+            "updatedTime": "2026-01-01T00:00:00.000Z"
+          },
           "lastJoinAt": "2026-01-01T00:00:00.000Z",
           "interestCountMap": "",
           "archivalLevel": "none",
@@ -184,7 +216,12 @@
           "isTenantWide": false,
           "isUnlockMembershipSyncRequired": false,
           "isUserMuted": false,
-          "channelOnlyMember": false
+          "channelOnlyMember": false,
+          "teamSettings": {
+            "createTopic": true,
+            "isPrivateChannelCreationEnabled": true,
+            "isSharedChannelCreationEnabled": false
+          }
         },
         {
           "displayName": "A made-up archived team",
@@ -204,7 +241,13 @@
           ],
           "tenantId": "<guid:tenant>",
           "isArchived": true,
-          "isDeleted": false
+          "isDeleted": false,
+          "teamSettings": {
+            "createTopic": false,
+            "isPrivateChannelCreationEnabled": false,
+            "isSharedChannelCreationEnabled": false
+          },
+          "memberRoleString": "user"
         },
         {
           "displayName": "A made-up deleted team",
@@ -212,14 +255,26 @@
           "channels": [],
           "tenantId": "<guid:tenant>",
           "isArchived": false,
-          "isDeleted": true
+          "isDeleted": true,
+          "teamSettings": {
+            "createTopic": false,
+            "isPrivateChannelCreationEnabled": false,
+            "isSharedChannelCreationEnabled": false
+          },
+          "memberRoleString": "user"
         }
       ],
       "chats": [],
       "users": [],
       "privateFeeds": [],
       "engageCommunities": [],
-      "metadata": {"syncToken": "<token:1>", "forwardSyncToken": null, "isPartialData": false, "hasMoreChats": false, "coldBootTime": 0}
+      "metadata": {
+        "syncToken": "<token:1>",
+        "forwardSyncToken": null,
+        "isPartialData": false,
+        "hasMoreChats": false,
+        "coldBootTime": 0
+      }
     }
   }
 }

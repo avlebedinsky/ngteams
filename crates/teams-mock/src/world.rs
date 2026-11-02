@@ -84,6 +84,8 @@ pub(crate) struct State {
     pub(crate) registrations: Vec<crate::trouter::Registration>,
     /// The own-availability writes UPS took, in order (`ups.rs`).
     pub(crate) availability: Vec<crate::ups::OwnAvailability>,
+    /// The channels made and the writes taken (`channels.rs`).
+    pub(crate) channels: crate::channels::Channels,
     /// The calling service's calls and the deliveries waiting for calling endpoints (`calling.rs`).
     pub(crate) calling: crate::calling::Calling,
     /// The calling service's media, once a test turned it on (`peers.rs`).
@@ -120,6 +122,7 @@ impl State {
             events: BTreeMap::new(),
             registrations: Vec::new(),
             availability: Vec::new(),
+            channels: crate::channels::Channels::default(),
             calling: crate::calling::Calling::default(),
             #[cfg(feature = "media")]
             peers: crate::peers::Peers::default(),

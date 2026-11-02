@@ -214,6 +214,7 @@ pub fn start<S: SecretStore + 'static>(
         || HttpTransport::new(Arc::clone(&session), Arc::clone(&fence), &base).map(writable),
         session.service_base(MIDDLE_TIER_GTM).as_deref(),
     )?;
+    let writes = with_provisioning(writes, session.service_base(PROVISIONING_GTM).as_deref())?;
     let transport = Arc::new(with_presence(writes, presence.as_deref())?);
     let members = membership(&fence, transport.clone())?;
     let reads = with_middle_tier(
@@ -221,6 +222,7 @@ pub fn start<S: SecretStore + 'static>(
         session.service_base(MIDDLE_TIER_GTM).as_deref(),
     )?;
     let reads = with_csa(reads, session.service_base(CSA_GTM).as_deref())?;
+    let reads = with_channel_services(reads, |gtm| session.service_base(gtm))?;
     let reads = with_presence(reads, presence.as_deref())?;
     let reads = with_ams(reads, session.service_base(AMS_GTM).as_deref())?;
     let client = Arc::new(Client::new(reads));
@@ -302,6 +304,54 @@ fn with_csa<C: Credentials>(reads: HttpTransport<C>, csa: Option<&str>) -> Resul
         }
         None => Ok(reads),
     }
+}
+
+/// The GTM the teams' provisioning service's base comes from (a private channel's creation).
+pub const PROVISIONING_GTM: &str = "teamsAndChannelsProvisioningService";
+
+/// A transport with the provisioning service's base when the region has one the transport accepts. Without one, or
+/// with one of another form (logged, without its value), a private channel can't be made: it never stops the engine.
+fn with_provisioning<C: Credentials>(
+    transport: HttpTransport<C>,
+    base: Option<&str>,
+) -> Result<HttpTransport<C>, BuildError> {
+    match base {
+        Some(base) if HttpTransport::<C>::accepts_provisioning_base(base) => transport.with_provisioning(base),
+        Some(_) => {
+            log::warn!("the region's provisioning base isn't of the form the transport accepts: no private channels");
+            Ok(transport)
+        }
+        None => Ok(transport),
+    }
+}
+
+/// The GTM the user profile service's base comes from (the people picker's search in a team).
+pub const USER_PROFILE_GTM: &str = "userProfileService";
+
+/// The reads' transport with the user profile service's base when the region has one the transport accepts. Without
+/// one, or with one of another form (logged, without its value), a team's people search finds nobody: it never stops
+/// the engine.
+fn with_user_profile<C: Credentials>(
+    reads: HttpTransport<C>,
+    base: Option<&str>,
+) -> Result<HttpTransport<C>, BuildError> {
+    match base {
+        Some(base) if HttpTransport::<C>::accepts_user_profile_base(base) => reads.with_user_profile(base),
+        Some(_) => {
+            log::warn!("the region's user profile base isn't of the form the transport accepts: no team people search");
+            Ok(reads)
+        }
+        None => Ok(reads),
+    }
+}
+
+/// The reads' transport with what a new channel's reads need, each base by its GTM from `base`.
+fn with_channel_services<C: Credentials>(
+    reads: HttpTransport<C>,
+    base: impl Fn(&str) -> Option<String>,
+) -> Result<HttpTransport<C>, BuildError> {
+    let reads = with_provisioning(reads, base(PROVISIONING_GTM).as_deref())?;
+    with_user_profile(reads, base(USER_PROFILE_GTM).as_deref())
 }
 
 /// The GTM AMS's base comes from (the async gateway: a message's pictures' reads).

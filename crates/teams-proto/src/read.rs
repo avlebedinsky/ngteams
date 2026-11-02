@@ -383,12 +383,26 @@ fn flag_of(object: &serde_json::Map<String, Value>, key: &str) -> bool {
 
 /// A team the account is a member of. `Debug` leaves the names out.
 #[derive(Clone, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "what the service says of a team and of the account in it: each stands alone, no state machine"
+)]
 pub struct Team {
     /// Its id: its general channel's (`19:…@thread.tacv2`).
     pub id: String,
     pub name: String,
     /// Archived: read-only for everyone.
     pub archived: bool,
+    /// Its Microsoft 365 group (`teamSiteInformation.groupId`), when the answer names one.
+    pub group_id: Option<String>,
+    /// Its mail address (`smtpAddress`), when the answer names one.
+    pub mailbox: Option<String>,
+    /// Whether the account owns it (`memberRoleString` `admin`).
+    pub owner: bool,
+    /// Whether the account may add a channel ([`can_add_channel`]).
+    pub can_add_channel: bool,
+    /// Whether the account may add a private channel ([`can_add_private_channel`]).
+    pub can_add_private_channel: bool,
     /// Its channels, the general one first.
     pub channels: Vec<Channel>,
 }
@@ -410,6 +424,30 @@ pub struct Channel {
     pub name: String,
     /// The team's general channel.
     pub general: bool,
+    /// Who it is for (`channelType`: 0 standard, 1 private, 2 shared); `Unknown` for any other value.
+    pub kind: ChannelType,
+}
+
+/// A channel's `channelType` in CSA's answer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChannelType {
+    Standard,
+    Private,
+    Shared,
+    /// A value no capture showed (or none): kept unknown, not guessed.
+    Unknown,
+}
+
+impl ChannelType {
+    /// What an entry's `channelType` says.
+    fn of(entry: &Value) -> Self {
+        match entry.get("channelType").and_then(Value::as_u64) {
+            Some(0) => Self::Standard,
+            Some(1) => Self::Private,
+            Some(2) => Self::Shared,
+            _ => Self::Unknown,
+        }
+    }
 }
 
 impl fmt::Debug for Channel {
@@ -465,6 +503,7 @@ fn team(entry: &Value, id: &str, name: &str, skipped: &mut usize) -> Team {
                 id: channel_id.to_owned(),
                 name: channel_name.to_owned(),
                 general: flag(channel, "isGeneral") || channel_id == id,
+                kind: ChannelType::of(channel),
             }),
         }
     }
@@ -474,6 +513,58 @@ fn team(entry: &Value, id: &str, name: &str, skipped: &mut usize) -> Team {
         id: id.to_owned(),
         name: name.to_owned(),
         archived: flag(entry, "isArchived"),
+        group_id: entry
+            .pointer("/teamSiteInformation/groupId")
+            .and_then(Value::as_str)
+            .filter(|group| !group.is_empty())
+            .map(str::to_owned),
+        mailbox: entry
+            .get("smtpAddress")
+            .and_then(Value::as_str)
+            .filter(|mailbox| !mailbox.is_empty())
+            .map(str::to_owned),
+        owner: role(entry) == "admin",
+        can_add_channel: can_add_channel(entry),
+        can_add_private_channel: can_add_private_channel(entry),
         channels,
     }
+}
+
+/// The account's role in a team entry, in lower case (`memberRoleString`: `admin`, `user`, `guest`).
+fn role(entry: &Value) -> String {
+    entry
+        .get("memberRoleString")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+}
+
+/// Whether a team entry lets the account add a channel, as the web client decides: not in an archived team; an owner
+/// always, a member by `teamSettings.createTopic`, a guest by `teamGuestSettings.createTopic`.
+fn can_add_channel(entry: &Value) -> bool {
+    let setting = |settings: &str| {
+        entry
+            .get(settings)
+            .is_some_and(|settings| flag(settings, "createTopic"))
+    };
+    !flag(entry, "isArchived")
+        && match role(entry).as_str() {
+            "admin" => true,
+            "user" => setting("teamSettings"),
+            "guest" => setting("teamGuestSettings"),
+            _ => false,
+        }
+}
+
+/// Whether a team entry lets the account add a private channel, as the web client decides: not in an archived team;
+/// an owner always, a member when members may add channels and `teamSettings.isPrivateChannelCreationEnabled`.
+fn can_add_private_channel(entry: &Value) -> bool {
+    let settings = entry.get("teamSettings");
+    let setting = |key| settings.is_some_and(|settings| flag(settings, key));
+    !flag(entry, "isArchived")
+        && match role(entry).as_str() {
+            "admin" => true,
+            "user" => setting("createTopic") && setting("isPrivateChannelCreationEnabled"),
+            _ => false,
+        }
 }

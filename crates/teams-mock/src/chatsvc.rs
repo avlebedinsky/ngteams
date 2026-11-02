@@ -148,6 +148,9 @@ fn handle(state: &mut State, request: &Request) -> ResponseTemplate {
     if let Some(answer) = crate::csa::teams(state, request) {
         return answer;
     }
+    if let Some(answer) = crate::channels::serve(state, request) {
+        return answer;
+    }
     if let Some(answer) = crate::calendar::calendar_view(state, request) {
         return answer;
     }

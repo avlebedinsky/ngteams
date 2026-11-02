@@ -16,7 +16,7 @@ use std::sync::Arc;
 use common::{FakeCore, LAB_A, LAB_B, Rig, Written};
 use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext};
 use teams_core::{Availability, ChatListing, Event};
-use teams_store::{Conversation, ConversationKind, Member, Message, Team, TeamChannel};
+use teams_store::{ChannelKind, Conversation, ConversationKind, Member, Message, Team, TeamChannel};
 use teams_ui::ViewTrace;
 use teams_ui::chat_list::{BOT, ChatList, ChatRow, ECHO, NOTES, RowKind, UNKNOWN_USER, arrange, joined, unnamed};
 use teams_ui::chat_window::{ChatWindow, FIRST_PAGE, NEXT_PAGE, SeeMore};
@@ -233,26 +233,38 @@ fn the_favourites_come_first_in_their_order_and_not_again_under_chats() {
     }
 }
 
-#[test]
-fn a_favourite_channel_is_listed_by_its_name_and_team_and_opens_as_a_channel() {
-    let rig = seeded();
-    *rig.core.teams.lock().unwrap() = Some(vec![Team {
+/// The team the favourite channel below belongs to.
+fn ops_crew() -> Team {
+    Team {
         id: TEAM.to_owned(),
         name: "ops crew".to_owned(),
         archived: false,
+        group_id: None,
+        mailbox: None,
+        owner: false,
+        can_add_channel: false,
+        can_add_private_channel: false,
         channels: vec![
             TeamChannel {
                 id: TEAM.to_owned(),
                 name: "General".to_owned(),
                 general: true,
+                kind: ChannelKind::Standard,
             },
             TeamChannel {
                 id: CHANNEL.to_owned(),
                 name: "Prod alerts".to_owned(),
                 general: false,
+                kind: ChannelKind::Standard,
             },
         ],
-    }]);
+    }
+}
+
+#[test]
+fn a_favourite_channel_is_listed_by_its_name_and_team_and_opens_as_a_channel() {
+    let rig = seeded();
+    *rig.core.teams.lock().unwrap() = Some(vec![ops_crew()]);
     // the favourites as an account with channels among them has them: a channel between the notes and a chat, and one
     // of no stored team left out
     rig.core.listing.lock().unwrap().favorites = Some(vec![

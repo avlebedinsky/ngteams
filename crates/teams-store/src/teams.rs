@@ -10,11 +10,25 @@ use crate::{Applied, Store, StoreError};
 
 /// A team as last listed. `Debug` leaves the names out.
 #[derive(Clone, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "what the service says of a team and of the account in it: each stands alone, no state machine"
+)]
 pub struct Team {
     /// Its id: its general channel's.
     pub id: String,
     pub name: String,
     pub archived: bool,
+    /// Its Microsoft 365 group, when the read named one: a channel's creation names it.
+    pub group_id: Option<String>,
+    /// Its mail address, when the read named one: a private channel's request routes by it.
+    pub mailbox: Option<String>,
+    /// Whether the account owns it.
+    pub owner: bool,
+    /// Whether the account may add a channel to it.
+    pub can_add_channel: bool,
+    /// Whether the account may add a private channel to it.
+    pub can_add_private_channel: bool,
     /// Its channels in the order listed, the general one first.
     pub channels: Vec<TeamChannel>,
 }
@@ -35,6 +49,41 @@ pub struct TeamChannel {
     pub id: String,
     pub name: String,
     pub general: bool,
+    pub kind: ChannelKind,
+}
+
+/// Who a channel is for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum ChannelKind {
+    /// Everyone on the team.
+    #[default]
+    Standard,
+    /// Specific people on the team.
+    Private,
+    /// People or teams it was shared with.
+    Shared,
+}
+
+impl ChannelKind {
+    /// How the store keeps it.
+    #[must_use]
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Private => "private",
+            Self::Shared => "shared",
+        }
+    }
+
+    /// The kind a stored key names; a key nothing wrote reads as standard.
+    #[must_use]
+    pub fn of_key(key: &str) -> Self {
+        match key {
+            "private" => Self::Private,
+            "shared" => Self::Shared,
+            _ => Self::Standard,
+        }
+    }
 }
 
 impl fmt::Debug for TeamChannel {
@@ -66,15 +115,35 @@ impl Store {
         let tx = self.conn.transaction()?;
         if applied != Applied::Ignored {
             tx.execute("DELETE FROM teams", [])?;
-            let mut team_row =
-                tx.prepare_cached("INSERT INTO teams (id, name, archived, position) VALUES (?1, ?2, ?3, ?4)")?;
+            let mut team_row = tx.prepare_cached(
+                "INSERT INTO teams (id, name, archived, position, group_id, mailbox, owner, can_add_channel,
+                 can_add_private_channel) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            )?;
             let mut channel_row = tx.prepare_cached(
-                "INSERT INTO team_channels (id, team_id, name, general, position) VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO team_channels (id, team_id, name, general, position, kind)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             )?;
             for (position, team) in (0_i64..).zip(&teams) {
-                team_row.execute(params![team.id, team.name, team.archived, position])?;
+                team_row.execute(params![
+                    team.id,
+                    team.name,
+                    team.archived,
+                    position,
+                    team.group_id,
+                    team.mailbox,
+                    team.owner,
+                    team.can_add_channel,
+                    team.can_add_private_channel
+                ])?;
                 for (place, channel) in (0_i64..).zip(&team.channels) {
-                    channel_row.execute(params![channel.id, team.id, channel.name, channel.general, place])?;
+                    channel_row.execute(params![
+                        channel.id,
+                        team.id,
+                        channel.name,
+                        channel.general,
+                        place,
+                        channel.kind.key()
+                    ])?;
                 }
             }
         }
@@ -95,19 +164,27 @@ impl Store {
     pub fn teams(&self) -> Result<Vec<Team>, StoreError> {
         let mut teams: Vec<Team> = self
             .conn
-            .prepare_cached("SELECT id, name, archived FROM teams ORDER BY position")?
+            .prepare_cached(
+                "SELECT id, name, archived, group_id, mailbox, owner, can_add_channel, can_add_private_channel
+                 FROM teams ORDER BY position",
+            )?
             .query_map([], |row| {
                 Ok(Team {
                     id: row.get(0)?,
                     name: row.get(1)?,
                     archived: row.get(2)?,
+                    group_id: row.get(3)?,
+                    mailbox: row.get(4)?,
+                    owner: row.get(5)?,
+                    can_add_channel: row.get(6)?,
+                    can_add_private_channel: row.get(7)?,
                     channels: Vec::new(),
                 })
             })?
             .collect::<Result<_, _>>()?;
         let mut channels = self
             .conn
-            .prepare_cached("SELECT id, name, general FROM team_channels WHERE team_id = ?1 ORDER BY position")?;
+            .prepare_cached("SELECT id, name, general, kind FROM team_channels WHERE team_id = ?1 ORDER BY position")?;
         for team in &mut teams {
             team.channels = channels
                 .query_map([&team.id], |row| {
@@ -115,6 +192,7 @@ impl Store {
                         id: row.get(0)?,
                         name: row.get(1)?,
                         general: row.get(2)?,
+                        kind: ChannelKind::of_key(&row.get::<_, String>(3)?),
                     })
                 })?
                 .collect::<Result<_, _>>()?;

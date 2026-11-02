@@ -241,6 +241,9 @@ fn the_topics_migration_takes_the_chats_without_a_topic_again() -> Result<(), St
         "DROP TABLE unsynced_conversations; ALTER TABLE conversation_sync DROP COLUMN sync_until;
          ALTER TABLE conversation_sync DROP COLUMN gap_until;
          DROP TABLE favorites; DROP TABLE favorites_read; ALTER TABLE conversations DROP COLUMN empty;
+         ALTER TABLE teams DROP COLUMN group_id; ALTER TABLE teams DROP COLUMN mailbox;
+         ALTER TABLE teams DROP COLUMN owner; ALTER TABLE teams DROP COLUMN can_add_channel;
+         ALTER TABLE teams DROP COLUMN can_add_private_channel; ALTER TABLE team_channels DROP COLUMN kind;
          PRAGMA user_version = 9;",
     )
     .expect("back to schema 9");

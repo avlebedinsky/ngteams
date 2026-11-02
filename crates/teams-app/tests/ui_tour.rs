@@ -41,7 +41,8 @@ use teams_media::devices::catalog::{DeviceInfo, DeviceKind, DeviceList, FixedDir
 use teams_media::devices::pattern::TestPattern;
 use teams_mock::{
     AB_CHAT, ABC_CHAT, AC_CHAT, AMS_BASE, AX_CHAT, CHAT_BASE, CSA_BASE, ChatServiceMock, ECHO, LAB_A, LAB_B, LAB_C,
-    MIDDLE_TIER_BASE, OUTSIDER, PRESENCE_BASE, TEAM_CHANNEL, TrouterMock, lab_toml,
+    MIDDLE_TIER_BASE, OUTSIDER, PRESENCE_BASE, PROVISIONING_BASE, TEAM_CHANNEL, TrouterMock, USER_PROFILE_BASE,
+    lab_toml,
 };
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::Store;
@@ -61,6 +62,8 @@ use teams_ui::{event_form, picture_viewer};
 use tokio::sync::broadcast;
 use ui_sandbox::{NIRI_FULL_WINDOW, Running, Sandbox, SandboxOptions, SandboxResult, sandbox_or_skip};
 
+/// The mock's team.
+const TEAM: &str = "19:channel0001@thread.tacv2";
 /// Which mode the child runs in.
 const CHILD_ENV: &str = "TEAMS_APP_TOUR_TEST";
 /// The child's view trace descriptor.
@@ -80,7 +83,7 @@ const SETTLE: Duration = Duration::from_millis(1500);
 type Step = (&'static str, fn(&Entity<Shell>, &mut Window, &mut App));
 
 /// The tour.
-const STEPS: [Step; 70] = [
+const STEPS: [Step; 82] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -146,6 +149,48 @@ const STEPS: [Step; 70] = [
             chat.read(cx).text_selection().open_menu(at);
             window.refresh();
         }
+    }),
+    // a team's "..." menu, then the "Create a channel" dialog through its states (the mock's team lets a make channels;
+    // the lab's fence denies the creation, as it does every team's, which is the failure shown)
+    ("team-menu", |shell, window, cx| {
+        if let Some(chat) = shell.read(cx).chat() {
+            let _ = chat.read(cx).text_selection().clear();
+        }
+        let sidebar = shell.read(cx).sidebar().clone();
+        sidebar.update(cx, |sidebar, cx| sidebar.open_team_menu(TEAM, window, cx));
+    }),
+    ("channel-dialog", |shell, _, cx| open_channel_dialog(shell, cx)),
+    ("channel-dialog-types", |shell, window, cx| {
+        with_channel_dialog(shell, cx, |dialog, cx| dialog.show_types(window, cx));
+    }),
+    ("channel-dialog-filled", |shell, window, cx| {
+        with_channel_dialog(shell, cx, |dialog, cx| fill_channel_dialog(dialog, window, cx));
+    }),
+    ("channel-dialog-problem", |shell, window, cx| {
+        with_channel_dialog(shell, cx, |dialog, cx| {
+            dialog.set_name("Release #planning", window, cx);
+        });
+    }),
+    ("channel-failed", |shell, window, cx| {
+        with_channel_dialog(shell, cx, |dialog, cx| {
+            dialog.set_name("Release planning", window, cx);
+            dialog.create(cx);
+        });
+    }),
+    ("channel-people", |shell, _, cx| {
+        with_channel_dialog(shell, cx, |dialog, cx| {
+            dialog.people_step(
+                "OID:00000000-0000-4000-8000-0000000000bb@00000000-0000-4000-8000-0000000000cc".to_owned(),
+                None,
+                cx,
+            );
+        });
+    }),
+    ("channel-people-found", |shell, _, cx| {
+        with_channel_dialog(shell, cx, |dialog, cx| dialog.search_people("lab".to_owned(), cx));
+    }),
+    ("channel-closed", |shell, _, cx| {
+        with_channel_dialog(shell, cx, teams_ui::channel_dialog::ChannelDialog::close_now);
     }),
     // the title bar's search: its suggestions as "lab" is typed, its go-to mode, its results
     ("search-suggestions", |shell, window, cx| {
@@ -249,6 +294,16 @@ const STEPS: [Step; 70] = [
             );
         });
         show_page(shell, Page::Appearance, cx);
+    }),
+    ("channel-dialog-dark", |shell, window, cx| {
+        open_channel_dialog(shell, cx);
+        with_channel_dialog(shell, cx, |dialog, cx| fill_channel_dialog(dialog, window, cx));
+    }),
+    ("channel-dialog-dark-types", |shell, window, cx| {
+        with_channel_dialog(shell, cx, |dialog, cx| dialog.show_types(window, cx));
+    }),
+    ("channel-dialog-dark-closed", |shell, _, cx| {
+        with_channel_dialog(shell, cx, teams_ui::channel_dialog::ChannelDialog::close_now);
     }),
     ("chat-dark", |shell, window, cx| {
         shell.update(cx, |shell, cx| shell.show_chats(window, cx));
@@ -774,6 +829,41 @@ fn hover_last(shell: &Entity<Shell>, own: bool, cx: &mut App) {
     });
 }
 
+/// Opens the mock's team's "Create a channel" dialog.
+fn open_channel_dialog(shell: &Entity<Shell>, cx: &mut App) {
+    let sidebar = shell.read(cx).sidebar().clone();
+    sidebar.update(cx, teams_ui::sidebar::Sidebar::close_team_menu);
+    let teams = shell.read(cx).teams().clone();
+    teams.update(cx, |teams, cx| teams.add_channel(TEAM, cx));
+}
+
+/// Fills the dialog as a person would: a private channel, laid out as posts.
+fn fill_channel_dialog(
+    dialog: &mut teams_ui::channel_dialog::ChannelDialog,
+    window: &mut Window,
+    cx: &mut gpui::Context<teams_ui::channel_dialog::ChannelDialog>,
+) {
+    dialog.pick_kind(teams_proto::NewChannelKind::Private, cx);
+    dialog.close_types(window, cx);
+    dialog.pick_layout(teams_proto::ChannelLayout::Posts, cx);
+    dialog.set_name("Release planning", window, cx);
+    dialog.set_description("Dates and owners for the next release", window, cx);
+}
+
+/// `act` on the "Create a channel" dialog, while it is open.
+fn with_channel_dialog(
+    shell: &Entity<Shell>,
+    cx: &mut App,
+    act: impl FnOnce(
+        &mut teams_ui::channel_dialog::ChannelDialog,
+        &mut gpui::Context<teams_ui::channel_dialog::ChannelDialog>,
+    ),
+) {
+    if let Some(dialog) = shell.read(cx).channel_dialog().cloned() {
+        dialog.update(cx, act);
+    }
+}
+
 /// Scrolls the chat shown to its top: its first message (the a–x chat's mixed one, above the forwards).
 fn show_first_message(shell: &Entity<Shell>, cx: &mut App) {
     if let Some(chat) = shell.read(cx).chat().cloned() {
@@ -1030,6 +1120,8 @@ impl MockLab {
                     .with_ams(AMS_BASE)?
                     .with_presence(PRESENCE_BASE)?
                     .with_csa(CSA_BASE)?
+                    .with_user_profile(USER_PROFILE_BASE)?
+                    .with_provisioning(PROVISIONING_BASE)?
                     .with_middle_tier(MIDDLE_TIER_BASE)?,
             )),
             outbox: Outbox::new(transport, fence, Arc::new(membership), author),

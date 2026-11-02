@@ -502,3 +502,69 @@ fn favourites_are_read_only_in_their_captured_shape() {
     let bare = json!({"metadata": {"isPartialData": false}, "teams": []}).to_string();
     assert_eq!(CsaTeams::read_answer(bare.as_bytes()).unwrap().favorites, None);
 }
+
+/// One team entry of an answer, as `CsaTeams` reads it.
+fn read_team(team: &serde_json::Value) -> teams_proto::Team {
+    let answer = serde_json::json!({
+        "teams": [team],
+        "metadata": { "isPartialData": false },
+    });
+    let mut read = CsaTeams::read_answer(answer.to_string().as_bytes()).unwrap();
+    read.teams.remove(0)
+}
+
+#[test]
+fn who_may_add_a_channel_is_read_as_the_web_client_decides() {
+    let team = |role: &str, archived: bool, topic: bool, private: bool, guest_topic: bool| {
+        read_team(&serde_json::json!({
+            "id": "19:team@thread.tacv2",
+            "displayName": "A team",
+            "memberRoleString": role,
+            "isArchived": archived,
+            "teamSettings": { "createTopic": topic, "isPrivateChannelCreationEnabled": private },
+            "teamGuestSettings": { "createTopic": guest_topic },
+        }))
+    };
+    let may = |team: teams_proto::Team| (team.owner, team.can_add_channel, team.can_add_private_channel);
+    assert_eq!(may(team("admin", false, false, false, false)), (true, true, true));
+    assert_eq!(may(team("user", false, true, true, false)), (false, true, true));
+    assert_eq!(may(team("User", false, true, false, false)), (false, true, false));
+    assert_eq!(may(team("user", false, false, true, false)), (false, false, false));
+    assert_eq!(may(team("guest", false, false, false, true)), (false, true, false));
+    assert_eq!(
+        may(team("admin", true, true, true, true)),
+        (true, false, false),
+        "archived"
+    );
+    assert_eq!(may(team("unheard-of", false, true, true, true)), (false, false, false));
+}
+
+#[test]
+fn a_team_s_group_and_mail_and_a_channel_s_type_are_read() {
+    let team = read_team(&serde_json::json!({
+        "id": "19:team@thread.tacv2",
+        "displayName": "A team",
+        "smtpAddress": "team@example.invalid",
+        "teamSiteInformation": { "groupId": "made-up-group" },
+        "channels": [
+            { "id": "19:a@thread.tacv2", "displayName": "a", "channelType": 0 },
+            { "id": "19:b@thread.tacv2", "displayName": "b", "channelType": 1 },
+            { "id": "19:c@thread.tacv2", "displayName": "c", "channelType": 2 },
+            { "id": "19:d@thread.tacv2", "displayName": "d", "channelType": 9 },
+            { "id": "19:e@thread.tacv2", "displayName": "e" },
+        ],
+    }));
+    assert_eq!(team.group_id.as_deref(), Some("made-up-group"));
+    assert_eq!(team.mailbox.as_deref(), Some("team@example.invalid"));
+    let kinds: Vec<teams_proto::ChannelType> = team.channels.iter().map(|channel| channel.kind).collect();
+    assert_eq!(
+        kinds,
+        [
+            teams_proto::ChannelType::Standard,
+            teams_proto::ChannelType::Private,
+            teams_proto::ChannelType::Shared,
+            teams_proto::ChannelType::Unknown,
+            teams_proto::ChannelType::Unknown,
+        ]
+    );
+}

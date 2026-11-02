@@ -98,6 +98,13 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         tried
     }
 
+    /// One attempt at a new channel's write (`crate::channels`), as a calendar write's.
+    pub async fn try_channel<R: Mutating + Send>(&self, write: R) -> CallTried {
+        let tried = self.try_once(write).await;
+        log::info!("channel write: {}", tried.summary());
+        tried
+    }
+
     async fn try_once<R: Mutating + Send>(&self, write: R) -> CallTried {
         match self.deliver(write).await {
             Tried::Answered(answer) => CallTried::Answered(answer),

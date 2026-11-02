@@ -29,6 +29,8 @@ impl Glyph {
     pub const CALENDAR_RANGE: Self = Self(include_bytes!("../assets/icons/calendar-range.svg"));
     pub const CALENDAR_SEARCH: Self = Self(include_bytes!("../assets/icons/calendar-search.svg"));
     pub const CALENDAR_TODAY: Self = Self(include_bytes!("../assets/icons/calendar-1.svg"));
+    pub const ADD_CHANNEL: Self = Self(include_bytes!("../assets/icons/folder-plus.svg"));
+    pub const ELLIPSIS: Self = Self(include_bytes!("../assets/icons/ellipsis.svg"));
     pub const CHECK: Self = Self(include_bytes!("../assets/icons/check.svg"));
     pub const IMAGE: Self = Self(include_bytes!("../assets/icons/image.svg"));
     pub const IMAGE_PLUS: Self = Self(include_bytes!("../assets/icons/image-plus.svg"));

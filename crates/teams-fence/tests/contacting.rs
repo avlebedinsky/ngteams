@@ -974,6 +974,14 @@ const SERVICES_BY_URL: &[(&str, Option<Service>)] = &[
     ),
     ("https://teams.microsoft.com/api/csa/amer/api/v1/x", Some(Service::Csa)),
     ("https://chatsvcagg.teams.microsoft.com/api/v1/x", Some(Service::Csa)),
+    (
+        "https://teams.cloud.microsoft/fabric/amer/templates/api/teams/x/channels",
+        Some(Service::Provisioning),
+    ),
+    (
+        "https://templates.teams.microsoft.com/api/x",
+        Some(Service::Provisioning),
+    ),
     // reaching nobody: presence, the registrar, push, auth, telemetry, Trouter, the page
     ("https://teams.microsoft.com/ups/noam/v1/me/endpoints/", None),
     ("https://teams.microsoft.com/registrar/prod/V2/registrations", None),
@@ -1132,4 +1140,138 @@ fn a_keep_alive_is_an_empty_participant_update_to_a_call_leg_s_own_link_naming_n
         assert_eq!(verdict("POST", &elsewhere, &body), Contact::Unreadable);
     }
     Ok(())
+}
+
+/// A team's and a channel's made-up ids.
+const TEAM: &str = "19:team0001@thread.tacv2";
+const GROUP_ID: &str = "00000000-0000-4000-8000-0000000000aa";
+const CHANNEL_GROUP: &str = "OID:00000000-0000-4000-8000-0000000000bb@00000000-0000-4000-8000-0000000000cc";
+
+fn on_team(kind: WriteKind, id: &str) -> Contact {
+    Contact::Write(Target::new(kind, Scope::Team { id: id.to_owned() }))
+}
+
+#[test]
+fn a_standard_channel_as_the_dialog_sent_it_is_a_write_on_its_team() {
+    let url = format!("https://teams.cloud.microsoft/api/mt/part/amer-03/beta/teams/{TEAM}/channels");
+    for layout in ["Conversational", "PostReply"] {
+        let body = format!(
+            r#"{{"displayName":"a","description":"b","groupId":"{GROUP_ID}","channelType":"Standard","chatModalityType":"{layout}"}}"#
+        );
+        assert_eq!(
+            verdict("POST", &url, Some(body.as_bytes())),
+            on_team(WriteKind::ChannelChange, TEAM),
+            "{layout}"
+        );
+    }
+}
+
+#[test]
+fn a_channel_in_any_other_form_stays_unreadable() {
+    let url = format!("https://teams.cloud.microsoft/api/mt/part/amer-03/beta/teams/{TEAM}/channels");
+    for body in [
+        // a shared channel names people and teams beyond its own
+        r#"{"displayName":"a","groupId":"g","channelType":"Shared"}"#.to_owned(),
+        // a key no capture showed
+        r#"{"displayName":"a","groupId":"g","channelType":"Standard","users":["8:orgid:x"]}"#.to_owned(),
+        // a key the fence would miss in another case
+        r#"{"displayName":"a","groupId":"g","ChannelType":"Standard"}"#.to_owned(),
+        "not json".to_owned(),
+    ] {
+        assert_eq!(
+            verdict("POST", &url, Some(body.as_bytes())),
+            Contact::Unreadable,
+            "{body}"
+        );
+    }
+    assert_eq!(verdict("POST", &url, None), Contact::Unreadable);
+    assert_eq!(verdict("DELETE", &url, None), Contact::Unreadable);
+    let not_a_team = "https://teams.cloud.microsoft/api/mt/part/amer-03/beta/teams/19:x@thread.v2/channels";
+    let body = br#"{"displayName":"a","channelType":"Standard"}"#;
+    assert_eq!(verdict("POST", not_a_team, Some(body)), Contact::Unreadable);
+}
+
+#[test]
+fn a_channel_shown_to_everyone_is_a_write_on_that_channel() {
+    let url = format!("https://teams.cloud.microsoft/api/mt/part/amer-03/beta/teams/{TEAM}/setDefaultChannel");
+    assert_eq!(verdict("PUT", &url, None), on_team(WriteKind::ChannelChange, TEAM));
+    assert_eq!(verdict("PUT", &url, Some(b"{}")), Contact::Unreadable);
+}
+
+#[test]
+fn a_private_channel_as_the_dialog_sent_it_is_a_write_on_the_team_it_names() {
+    let url =
+        format!("https://teams.cloud.microsoft/fabric/amer/templates/api/teams/{GROUP_ID}/channels?forceSync=false");
+    let body = format!(
+        r#"{{"spaceThreadId":"{TEAM}","displayName":"a","description":"b","channelType":"Private","sharedWithParentTeam":true,"sessionKey":"k","chatModalityType":"Conversational"}}"#
+    );
+    assert_eq!(
+        verdict("POST", &url, Some(body.as_bytes())),
+        on_team(WriteKind::ChannelChange, TEAM)
+    );
+    let no_team = br#"{"displayName":"a","channelType":"Private"}"#;
+    assert_eq!(verdict("POST", &url, Some(no_team)), Contact::Unreadable);
+    let shared = format!(r#"{{"spaceThreadId":"{TEAM}","displayName":"a","channelType":"Shared"}}"#);
+    assert_eq!(verdict("POST", &url, Some(shared.as_bytes())), Contact::Unreadable);
+    let no_query = format!("https://teams.cloud.microsoft/fabric/amer/templates/api/teams/{GROUP_ID}/channels");
+    assert_eq!(verdict("POST", &no_query, Some(body.as_bytes())), Contact::Unreadable);
+}
+
+#[test]
+fn a_private_channel_s_people_are_added_to_it_by_their_accounts() {
+    let url = format!(
+        "https://teams.cloud.microsoft/fabric/amer/templates/api/teams/{GROUP_ID}/channels/{CHANNEL_GROUP}/users?forceSync=false"
+    );
+    let body = format!(r#"{{"users":[{{"id":"OID:{GUID_B}@00000000-0000-4000-8000-0000000000cc","role":1}}]}}"#);
+    assert_eq!(
+        verdict("POST", &url, Some(body.as_bytes())),
+        Contact::Write(
+            Target::new(
+                WriteKind::MemberChange,
+                Scope::Channel {
+                    team: GROUP_ID.to_owned(),
+                    channel: CHANNEL_GROUP.to_owned(),
+                }
+            )
+            .with_added([lab_mri(GUID_B)])
+        )
+    );
+    for body in [
+        r#"{"users":[]}"#.to_owned(),
+        r#"{"users":[{"id":"8:orgid:x","role":1}]}"#.to_owned(),
+        r#"{"users":[{"id":"OID:x@y"}]}"#.to_owned(),
+    ] {
+        assert_eq!(
+            verdict("POST", &url, Some(body.as_bytes())),
+            Contact::Unreadable,
+            "{body}"
+        );
+    }
+}
+
+#[test]
+fn the_provisioning_service_is_a_contacting_service() {
+    let base = "https://teams.cloud.microsoft/fabric/amer/templates/api";
+    // anything it doesn't know
+    assert_eq!(
+        verdict("POST", &format!("{base}/teams"), Some(b"{}")),
+        Contact::Unreadable,
+        "a team made"
+    );
+    assert_eq!(
+        verdict("POST", "https://templates.teams.microsoft.com/api/teams", Some(b"{}")),
+        Contact::Unreadable
+    );
+    // the group's warm-up names nobody, and a read reaches nobody
+    let warm = format!("{base}/teams/{GROUP_ID}/channelsWarmup");
+    assert_eq!(verdict("POST", &warm, None), Contact::None);
+    assert_eq!(verdict("POST", &warm, Some(b"{}")), Contact::Unreadable);
+    assert_eq!(
+        verdict(
+            "GET",
+            &format!("{base}/teams/{GROUP_ID}/channels/{CHANNEL_GROUP}"),
+            None
+        ),
+        Contact::None
+    );
 }

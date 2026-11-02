@@ -27,10 +27,14 @@ help: the trait `teams_proto::Request` is not implemented for `RawPost`
    | ^^^^^^^^^^^^^^
    = help: the following other types implement trait `teams_proto::Request`:
              CallingRegistration
+             CreateOnlineMeeting
              EndpointRegistration
+             MeetingTimes
              PresenceRead
              PresenceSubscription
+             Schedules
              ShortProfileLookup
+             TeamPeopleSearch
 note: required by a bound in `send`
   --> $WORKSPACE/crates/teams-proto/src/client.rs
    |

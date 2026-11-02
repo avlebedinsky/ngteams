@@ -6,7 +6,8 @@
 use std::path::PathBuf;
 
 use teams_store::{
-    Applied, Conversation, ConversationKind, Message, SCHEMA_VERSION, Store, StoreError, SyncState, Team, TeamChannel,
+    Applied, ChannelKind, Conversation, ConversationKind, Message, SCHEMA_VERSION, Store, StoreError, SyncState, Team,
+    TeamChannel,
 };
 
 const TEAM: &str = "19:team0001general@thread.tacv2";
@@ -24,6 +25,7 @@ fn channel(id: &str, name: &str, general: bool) -> TeamChannel {
         id: id.to_owned(),
         name: name.to_owned(),
         general,
+        kind: ChannelKind::Standard,
     }
 }
 
@@ -33,6 +35,11 @@ fn teams() -> Vec<Team> {
             id: TEAM.to_owned(),
             name: "A made-up team".to_owned(),
             archived: false,
+            group_id: None,
+            mailbox: None,
+            owner: false,
+            can_add_channel: false,
+            can_add_private_channel: false,
             channels: vec![
                 channel(TEAM, "General", true),
                 channel(CHANNEL, "A made-up channel", false),
@@ -42,6 +49,11 @@ fn teams() -> Vec<Team> {
             id: OTHER_TEAM.to_owned(),
             name: "A made-up archived team".to_owned(),
             archived: true,
+            group_id: None,
+            mailbox: None,
+            owner: false,
+            can_add_channel: false,
+            can_add_private_channel: false,
             channels: vec![channel(OTHER_TEAM, "General", true)],
         },
     ]
@@ -251,6 +263,9 @@ fn the_favourites_migration_keeps_the_teams_but_has_them_read_again() -> Result<
         "DROP TABLE unsynced_conversations; ALTER TABLE conversation_sync DROP COLUMN sync_until;
          ALTER TABLE conversation_sync DROP COLUMN gap_until;
          DROP TABLE favorites; DROP TABLE favorites_read; ALTER TABLE conversations DROP COLUMN empty;
+         ALTER TABLE teams DROP COLUMN group_id; ALTER TABLE teams DROP COLUMN mailbox;
+         ALTER TABLE teams DROP COLUMN owner; ALTER TABLE teams DROP COLUMN can_add_channel;
+         ALTER TABLE teams DROP COLUMN can_add_private_channel; ALTER TABLE team_channels DROP COLUMN kind;
          PRAGMA user_version = 10;",
     )
     .expect("back to schema 10");
@@ -263,4 +278,28 @@ fn the_favourites_migration_keeps_the_teams_but_has_them_read_again() -> Result<
     assert_eq!(store.favorites()?, None);
     assert_eq!(store.empty_conversations()?, Vec::<String>::new());
     Ok(())
+}
+
+#[test]
+fn a_team_keeps_what_its_new_channel_needs_and_a_channel_its_kind() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::open(&dir.path().join("a.sqlite")).unwrap();
+    let team = Team {
+        id: "19:team@thread.tacv2".to_owned(),
+        name: "A team".to_owned(),
+        archived: false,
+        group_id: Some("group".to_owned()),
+        mailbox: Some("team@example.invalid".to_owned()),
+        owner: true,
+        can_add_channel: true,
+        can_add_private_channel: true,
+        channels: vec![TeamChannel {
+            id: "19:hush@thread.tacv2".to_owned(),
+            name: "Hush".to_owned(),
+            general: false,
+            kind: ChannelKind::Private,
+        }],
+    };
+    store.replace_teams(std::slice::from_ref(&team), 5).unwrap();
+    assert_eq!(store.teams().unwrap(), vec![team]);
 }

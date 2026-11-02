@@ -235,7 +235,7 @@ fn forced_and_policy(name: ScenarioName, nonce: &str) -> Result<Option<(Vec<Forc
     let ab = one_to_one_id(MRI_A, MRI_B);
     let ab = ab.as_deref();
     Ok(Some(match name {
-        ScenarioName::Load | ScenarioName::Search => return Ok(None),
+        ScenarioName::Load | ScenarioName::Search | ScenarioName::ChannelCreate => return Ok(None),
         ScenarioName::AbChat | ScenarioName::AbChatFull => (probe_rules(Some(&probe))?, ab_chat::policy(ab)?),
         ScenarioName::AbMeeting => (probe_rules(Some(&probe))?, proto_lab::scenario::ab_meeting::policy(ab)?),
         ScenarioName::AbTrouter => (

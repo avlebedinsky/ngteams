@@ -44,6 +44,8 @@
 //!
 //! - [`ab_meeting`] (account a, as `ab-chat`): a schedules a Teams meeting with b from the scheduling form, changes its
 //!   title and cancels it; recorded.
+//! - [`channel_create`] (account a, fail-closed as `load`, every write that could make a channel force-denied): what the
+//!   "Create a channel" dialog offers and sends for each type and layout; recorded, nothing made.
 //! - [`search`] (account a, fail-closed as `load`): a searches from the title bar (the suggestions as it types, the
 //!   results and each of their tabs, a message found opened); recorded.
 //!
@@ -64,6 +66,7 @@ pub mod abc_call;
 pub mod abc_call_mixed;
 pub mod abc_chat;
 pub mod abc_everyone;
+pub mod channel_create;
 pub mod chat_shapes;
 pub mod dsl;
 pub mod echo_call;
@@ -140,6 +143,9 @@ pub enum ScenarioName {
     AbMeeting,
     /// Account a searches from the title bar: the suggestions, the results and their tabs; recorded.
     Search,
+    /// Account a fills the web client's "Create a channel" dialog for each channel type and layout, every write that
+    /// could make a channel held back; recorded.
+    ChannelCreate,
     /// Account a's availability reported by the `user.activity` frame alone (the presence endpoint denied); recorded.
     OwnPresenceActivity,
     /// Account a's availability reported by the presence endpoint alone (every `user.activity` held back); recorded.
@@ -175,6 +181,7 @@ impl ScenarioName {
             Self::AbCallApp => "ab-call-app",
             Self::AbMeeting => "ab-meeting",
             Self::Search => "search",
+            Self::ChannelCreate => "channel-create",
             Self::OwnPresenceActivity => "own-presence-activity",
             Self::OwnPresenceEndpoint => "own-presence-endpoint",
             Self::OwnPresenceBoth => "own-presence-both",
@@ -432,6 +439,7 @@ async fn run_other(
         ScenarioName::AbcEveryone => abc_everyone::run(paths, options).await,
         ScenarioName::AbMeeting => ab_meeting::run(paths, options).await,
         ScenarioName::Search => search::run(paths, options).await,
+        ScenarioName::ChannelCreate => channel_create::run(paths, options).await,
         // a call or own presence: `run` sends those to `run_call` and `own_presence`
         _ => Err(ScenarioError::Setup(format!(
             "{scenario:?} isn't a scenario of `run_other`"

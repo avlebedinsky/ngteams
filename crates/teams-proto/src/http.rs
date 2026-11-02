@@ -131,6 +131,9 @@ pub const GRAPH_AUDIENCE: &str = "https://graph.microsoft.com";
 /// The Entra audience of the token CSA takes.
 pub const CSA_AUDIENCE: &str = "https://chatsvcagg.teams.microsoft.com";
 
+/// The audience of the token for the teams' provisioning service ([`Service::Provisioning`]).
+pub const PROVISIONING_AUDIENCE: &str = "https://templates.teams.microsoft.com";
+
 /// The Entra audience of the token UPS (presence) takes: the presence origin with its slash, as the web client asks for
 /// it (`docs/protocol/auth.md`, question 4).
 pub const PRESENCE_AUDIENCE: &str = "https://presence.teams.microsoft.com/";
@@ -260,6 +263,12 @@ pub enum Refusal {
     /// A CSA request on a transport that wasn't given the account's CSA base.
     #[error("no CSA base")]
     NoCsa,
+    /// A provisioning request on a transport that wasn't given the account's base for it.
+    #[error("no provisioning base")]
+    NoProvisioning,
+    /// A user profile request on a transport that wasn't given the account's base for it.
+    #[error("no user profile base")]
+    NoUserProfile,
     /// A presence request on a transport that wasn't given the account's presence base.
     #[error("no presence base")]
     NoPresence,
@@ -335,6 +344,12 @@ pub enum BuildError {
     /// Not a CSA base the transport accepts (see [`HttpTransport::with_csa`]).
     #[error("not a CSA base the transport accepts")]
     CsaBase,
+    /// Not a provisioning base the transport accepts (see [`HttpTransport::with_provisioning`]).
+    #[error("not a provisioning base the transport accepts")]
+    ProvisioningBase,
+    /// Not a user profile base the transport accepts (see [`HttpTransport::with_user_profile`]).
+    #[error("not a user profile base the transport accepts")]
+    UserProfileBase,
     /// Not a presence base the transport accepts (see [`HttpTransport::with_presence`]).
     #[error("not a presence base the transport accepts")]
     PresenceBase,
@@ -362,6 +377,10 @@ pub struct HttpTransport<C> {
     middle_tier: Option<Url>,
     /// The CSA base (`https://<AFD host>/api/csa/<region>`, no trailing slash), once given.
     csa: Option<Url>,
+    /// The provisioning service's base (`https://<AFD host>/fabric/<region>/templates/api`), once given.
+    provisioning: Option<Url>,
+    /// The user profile service's base (`https://<AFD host>/api/userprofilesvc/<region>`), once given.
+    user_profile: Option<Url>,
     /// The presence base (`https://<AFD host>/ups/<geo>`, no trailing slash), once given.
     presence: Option<Url>,
     /// The AMS base (`https://<name>.asyncgw.teams.microsoft.com`, its path empty), once given.
@@ -477,6 +496,8 @@ impl<C: Credentials> HttpTransport<C> {
             registrar_host,
             middle_tier: None,
             csa: None,
+            provisioning: None,
+            user_profile: None,
             presence: None,
             ams: None,
             max_retry_wait: MAX_RETRY_WAIT,
@@ -578,6 +599,46 @@ impl<C: Credentials> HttpTransport<C> {
     #[must_use]
     pub fn has_csa(&self) -> bool {
         self.csa.is_some()
+    }
+
+    /// The transport with the account's provisioning base, the region's GTM `teamsAndChannelsProvisioningService`
+    /// (trimmed): `https`, an AFD host ([`teams_fence::AFD_HOSTS`]) with no port or user info, the path
+    /// `/fabric/<region>/templates/api` exactly, one trailing slash allowed, no query or fragment. Without it, every
+    /// provisioning request is refused ([`Refusal::NoProvisioning`]).
+    ///
+    /// # Errors
+    /// [`BuildError::ProvisioningBase`] for any other base.
+    pub fn with_provisioning(mut self, base: &str) -> Result<Self, BuildError> {
+        self.provisioning = Some(
+            parse_service_base(base, crate::channel_read::is_provisioning_path).ok_or(BuildError::ProvisioningBase)?,
+        );
+        Ok(self)
+    }
+
+    /// Whether [`Self::with_provisioning`] takes `base`.
+    #[must_use]
+    pub fn accepts_provisioning_base(base: &str) -> bool {
+        parse_service_base(base, crate::channel_read::is_provisioning_path).is_some()
+    }
+
+    /// The transport with the account's user profile base, the region's GTM `userProfileService` (trimmed): `https`, an
+    /// AFD host ([`teams_fence::AFD_HOSTS`]) with no port or user info, the path `/api/userprofilesvc/<region>` exactly,
+    /// one trailing slash allowed, no query or fragment. Without it, every user profile request is refused
+    /// ([`Refusal::NoUserProfile`]).
+    ///
+    /// # Errors
+    /// [`BuildError::UserProfileBase`] for any other base.
+    pub fn with_user_profile(mut self, base: &str) -> Result<Self, BuildError> {
+        self.user_profile = Some(
+            parse_service_base(base, crate::channel_read::is_user_profile_path).ok_or(BuildError::UserProfileBase)?,
+        );
+        Ok(self)
+    }
+
+    /// Whether [`Self::with_user_profile`] takes `base`.
+    #[must_use]
+    pub fn accepts_user_profile_base(base: &str) -> bool {
+        parse_service_base(base, crate::channel_read::is_user_profile_path).is_some()
     }
 
     /// The transport with the account's presence base, the region's GTM `presenceUPS` (trimmed): `https`, an AFD host
@@ -693,6 +754,8 @@ impl<C: Credentials> HttpTransport<C> {
             Service::Graph => fixed(format!("https://{GRAPH_HOST}/v1.0")),
             Service::MiddleTier => self.middle_tier.clone().ok_or(refused(Refusal::NoMiddleTier)),
             Service::Csa => self.csa.clone().ok_or(refused(Refusal::NoCsa)),
+            Service::Provisioning => self.provisioning.clone().ok_or(refused(Refusal::NoProvisioning)),
+            Service::UserProfile => self.user_profile.clone().ok_or(refused(Refusal::NoUserProfile)),
             Service::Presence => self.presence.clone().ok_or(refused(Refusal::NoPresence)),
             Service::Calling => Err(refused(Refusal::Calling)),
             Service::FileThumbnail => Err(refused(Refusal::FileThumbnail)),
@@ -1383,8 +1446,9 @@ impl<C: Credentials> Transport for HttpTransport<C> {
         let wire = write.wire().ok_or(HttpError::NoRoute)?;
         let service = wire.service();
         match service {
-            // the chat service's writes, UPS's (the account's own availability) and the middle tier's (its calendar)
-            Service::ChatService | Service::Presence | Service::MiddleTier => {}
+            // the chat service's writes, UPS's (the account's own availability), the middle tier's (its calendar, a
+            // standard channel) and the provisioning service's (a private channel)
+            Service::ChatService | Service::Presence | Service::MiddleTier | Service::Provisioning => {}
             _ => return Err(HttpError::NoRoute),
         }
         let url = self.url_for(service, wire.endpoint())?;
@@ -1489,7 +1553,8 @@ const GIF_ACCEPT: &str = "image/gif";
 fn audience(service: Service) -> Option<&'static str> {
     match service {
         Service::ChatService | Service::Registrar | Service::Relay | Service::Ams => Some(IC3_AUDIENCE),
-        Service::MiddleTier => Some(MIDDLE_TIER_AUDIENCE),
+        Service::MiddleTier | Service::UserProfile => Some(MIDDLE_TIER_AUDIENCE),
+        Service::Provisioning => Some(PROVISIONING_AUDIENCE),
         Service::Graph => Some(GRAPH_AUDIENCE),
         Service::Csa => Some(CSA_AUDIENCE),
         Service::Presence => Some(PRESENCE_AUDIENCE),
@@ -1507,8 +1572,9 @@ fn audience(service: Service) -> Option<&'static str> {
 /// `Content-Type` when it has one, and the service's own.
 fn plain_headers(service: Service, body: bool) -> Vec<(String, String)> {
     let content_type = match service {
-        Service::MiddleTier => "application/json;charset=UTF-8",
-        Service::ChatService
+        Service::MiddleTier | Service::UserProfile => "application/json;charset=UTF-8",
+        Service::Provisioning
+        | Service::ChatService
         | Service::Registrar
         | Service::Trouter
         | Service::Graph
@@ -1533,6 +1599,8 @@ fn plain_headers(service: Service, body: bool) -> Vec<(String, String)> {
         | Service::Registrar
         | Service::Trouter
         | Service::MiddleTier
+        | Service::Provisioning
+        | Service::UserProfile
         | Service::Graph
         | Service::Csa
         | Service::Presence
@@ -1565,6 +1633,14 @@ fn service_headers(service: Service) -> &'static [(&'static str, &'static str)] 
             ("x-ms-object-id", ""),
             ("x-ms-test-user", "False"),
         ],
+        // as the capture's search sent them: without them the service answered 400
+        Service::UserProfile => &[
+            ("x-client-ui-language", "en-us"),
+            ("x-ms-client-type", "cdlworker"),
+            ("x-ms-migration", "True"),
+            ("x-ms-object-id", ""),
+            ("x-ms-test-user", "False"),
+        ],
         // the values every captured presence read carried
         Service::Presence => &[
             ("behavioroverride", "redirectAs404"),
@@ -1579,6 +1655,7 @@ fn service_headers(service: Service) -> &'static [(&'static str, &'static str)] 
         Service::Trouter
         | Service::Graph
         | Service::Csa
+        | Service::Provisioning
         | Service::Calling
         | Service::Emoticons
         | Service::FileThumbnail
@@ -1611,6 +1688,8 @@ fn on_base(service: Service, base: &Url, url: &Url, endpoint: &Endpoint) -> bool
         | Service::Graph
         | Service::MiddleTier
         | Service::Csa
+        | Service::Provisioning
+        | Service::UserProfile
         | Service::Presence
         | Service::Relay
         | Service::Calling
@@ -1689,6 +1768,24 @@ fn parse_presence_base(base: &str) -> Option<Url> {
         [ups, geo] if ups == "ups" && !geo.is_empty() && geo.bytes().all(|byte| byte.is_ascii_lowercase())
     );
     (plain && geo).then_some(url)
+}
+
+/// The base `base` names when it is `https`, on an AFD host with no port or user info, its path as `path_is` wants, one
+/// trailing slash allowed, no query or fragment.
+fn parse_service_base(base: &str, path_is: fn(&[String]) -> bool) -> Option<Url> {
+    if base.contains(['?', '#']) || base.trim() != base {
+        return None;
+    }
+    let base = base.strip_suffix('/').unwrap_or(base);
+    let url = Url::parse(base).ok()?;
+    let plain = url.scheme() == "https"
+        && url.host_str().is_some_and(|host| AFD_HOSTS.contains(&host))
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+        // the base as it was given, not one the parser normalized
+        && url.as_str() == base;
+    (plain && path_is(&decoded_path(&url)?)).then_some(url)
 }
 
 /// The CSA base, if `base` is one [`HttpTransport::with_csa`] accepts.
