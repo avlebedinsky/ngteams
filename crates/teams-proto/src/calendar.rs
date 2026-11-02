@@ -10,6 +10,7 @@
 //! captured (the lab accounts' calendars hold nothing), so an event is read leniently: a field in a form it doesn't
 //! take is left out, an event without a readable id, start or end is skipped and counted, never guessed.
 
+use crate::write::MeetingInfo;
 use percent_encoding::percent_decode_str;
 use serde_json::Value;
 use time::format_description::well_known::Rfc3339;
@@ -197,6 +198,9 @@ pub struct CalendarEvent {
     pub join_url: Option<String>,
     /// The meeting's chat (`19:meeting_…@thread.v2`), from `skypeTeamsData`'s `cid` or the join link's path.
     pub meeting_chat: Option<String>,
+    /// The meeting's organizer and tenant, as its join link's `context` names them: with its chat, what joining it
+    /// takes, started or not.
+    pub meeting: Option<MeetingInfo>,
     pub location: Option<String>,
     pub organizer_name: Option<String>,
     pub organizer_address: Option<String>,
@@ -257,6 +261,7 @@ impl CalendarEvent {
             kind: event_kind(text("eventType").as_deref()),
             cancelled: flag("isCancelled"),
             online: flag("isOnlineMeeting") || join_url.is_some(),
+            meeting: join_url.as_deref().and_then(join_url_meeting),
             join_url,
             meeting_chat,
             location: text("location").or_else(|| location_name(entry.get("location"))),
@@ -417,6 +422,27 @@ pub fn join_url_chat(url: &str) -> Option<String> {
     let segment = rest.split(['/', '?', '#']).next()?;
     let thread = percent_decode_str(segment).decode_utf8().ok()?;
     is_meeting_thread(&thread).then(|| thread.into_owned())
+}
+
+/// The organizer and tenant a join link's `context` names: `…?context={"Tid":"<tenant>","Oid":"<object id>"}`,
+/// percent-encoded. `None` for a link without them (a short `/meet/<code>` one).
+#[must_use]
+pub fn join_url_meeting(url: &str) -> Option<MeetingInfo> {
+    let parsed = url::Url::parse(url).ok()?;
+    let (_, context) = parsed.query_pairs().find(|(key, _)| key == "context")?;
+    let context: Value = serde_json::from_str(&context).ok()?;
+    let id = |key: &str| {
+        context
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_ascii_lowercase)
+    };
+    Some(MeetingInfo {
+        organizer_id: id("Oid")?,
+        tenant_id: id("Tid")?,
+    })
 }
 
 /// A thread id a meeting's chat can have: `19:<id>@thread.<v2|skype|tacv2>`, no spaces or slashes.
@@ -621,6 +647,27 @@ mod tests {
         );
         assert_eq!(event_time("tomorrow"), None);
         assert_eq!(event_time("2026-13-26T14:30:00"), None);
+    }
+
+    #[test]
+    fn a_join_link_names_its_organizer_and_tenant() {
+        let url = "https://teams.microsoft.com/l/meetup-join/19%3ameeting_MadeUpId0001%40thread.v2/0?context=%7b%22Tid%22%3a%22AAAAAAAA-0000-4000-8000-0000000000f1%22%2c%22Oid%22%3a%2200000000-0000-4000-8000-00000000000b%22%7d";
+        assert_eq!(
+            join_url_meeting(url),
+            Some(MeetingInfo {
+                organizer_id: "00000000-0000-4000-8000-00000000000b".to_owned(),
+                tenant_id: "aaaaaaaa-0000-4000-8000-0000000000f1".to_owned(),
+            })
+        );
+        for without in [
+            "https://teams.microsoft.com/meet/1234567890?p=MadeUp",
+            "https://teams.microsoft.com/l/meetup-join/19%3ameeting_MadeUpId0001%40thread.v2/0",
+            "https://teams.microsoft.com/l/meetup-join/x/0?context=%7b%22Tid%22%3a%22t%22%7d",
+            "https://teams.microsoft.com/l/meetup-join/x/0?context=notjson",
+            "not a link",
+        ] {
+            assert_eq!(join_url_meeting(without), None, "{without}");
+        }
     }
 
     #[test]

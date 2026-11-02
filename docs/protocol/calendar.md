@@ -56,11 +56,15 @@ Other selected fields (`categories`, `cleanGlobalObjectId`, `iCalUid`, `eventTim
 
 - **The calendar view's read**: one read per window a view shows, when it changes, on Refresh and every five minutes
   while the calendar is shown; nothing is stored (the writes are under "What the native client does" below). A window wider than 62 days is never asked for.
-- **Joining**: a meeting's Join goes through the call machinery's join of a running call in its chat
-  (`docs/protocol/calling.md`, "Joining a running call"), offered only once an invitation named a running call in the
-  meeting's chat. Joining a meeting nobody's call has rung for yet (its conversation looked up by its link) was never
-  captured, nor was a meeting's lookup by meeting id and passcode ("Join with an ID"): the calendar says so instead of
-  sending them. Writing an event is below.
+- **Joining**: a meeting's Join is there at any time, started or not ([calling.md](calling.md#joining-a-meeting)): its
+  chat comes from `skypeTeamsData`'s `cid` or the join link's path, its organizer and tenant from the link's `context`
+  (`Oid`, `Tid`), a series' occurrences all naming the series' one chat. It opens the app's pre-join; only its Join now
+  goes out. An event with a link that doesn't name them (a short `/meet/<code>` one) opens that link in the browser. A
+  meeting's lookup by meeting id and passcode ("Join with an ID") isn't made: the calendar says so instead of sending
+  it. Writing an event is below.
+- **Join's menu**, as the calendar Teams embeds (Outlook's) has it: Join and Copy join link. Read from Outlook's public
+  scripts (`JoinMeetingSplitButton`'s two items), since the lab's calendar app doesn't start under the fence (its
+  `POST /owa/startupdata.ashx` is on a contacting service with no row). It copies the event's join link.
 
 ## Writing an event
 

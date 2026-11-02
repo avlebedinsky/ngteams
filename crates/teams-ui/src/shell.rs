@@ -61,7 +61,7 @@ use crate::accounts::{AccountTile, Accounts};
 use crate::bridge::Core;
 use crate::calendar_view::{CalendarView, CalendarViewEvent};
 use crate::call_view::CallBar;
-use crate::calls::{self, Ask};
+use crate::calls::{self, Ask, MeetingToJoin};
 use crate::channel_dialog::{ChannelDialog, ChannelDialogEvent};
 use crate::channel_view::{ChannelView, ChannelViewEvent};
 use crate::chat_list::{ChatList, ChatListEvent};
@@ -497,7 +497,7 @@ impl Shell {
         (call_bar, calling)
     }
 
-    /// The calendar, and what it tells the shell: a meeting's chat to open, or its running call to join.
+    /// The calendar, and what it tells the shell: a meeting's chat to open, or its pre-join to show.
     fn calendar(
         core: &Arc<dyn Core>,
         models: &Models,
@@ -509,10 +509,7 @@ impl Shell {
         let calendar = cx.new(|cx| CalendarView::new(core, calls, trace, cx));
         let events = cx.subscribe_in(&calendar, window, |this: &mut Self, _, event, window, cx| match event {
             CalendarViewEvent::OpenChat(chat) => this.open_chat(chat.clone(), window, cx),
-            CalendarViewEvent::Join(chat) => {
-                this.open_chat(chat.clone(), window, cx);
-                this.ask_call(Ask::Join { chat: chat.clone() }, cx);
-            }
+            CalendarViewEvent::Join(to_join) => this.open_prejoin(to_join.clone(), cx),
         });
         (calendar, events)
     }
@@ -628,6 +625,26 @@ impl Shell {
             return;
         }
         calls::ask(&self.models.calls, &self.core, &self.trace, ask, cx);
+    }
+
+    /// The calendar's Join: the meeting's pre-join, in its own window; while a call is up or rings, its refusal.
+    pub fn open_prejoin(&mut self, to_join: MeetingToJoin, cx: &mut Context<Self>) {
+        let busy = self.models.calls.read(cx).busy();
+        if busy || self.busy_elsewhere(cx) {
+            let ask = Ask::JoinMeeting {
+                chat: to_join.chat,
+                meeting: to_join.meeting,
+            };
+            let why = if busy { "busy" } else { "another-account" };
+            calls::refuse_here(&self.models.calls, &self.trace, &ask, why, cx);
+            return;
+        }
+        self.trace
+            .record(&TraceLine::new("call", "prejoin").conversation(&to_join.chat));
+        self.models
+            .calls
+            .update(cx, |calls, cx| calls.open_prejoin(to_join, cx));
+        crate::call_window::raise(cx);
     }
 
     /// The account's models the shell shows.

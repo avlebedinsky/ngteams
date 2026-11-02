@@ -13,8 +13,11 @@
 //!   an invitation
 //!   named a running call in (a join goes there: [`Calls::joinable`]); how the last call ended and the last ask that
 //!   went nowhere, until the next call.
-//! - **The asks** ([`Ask`]): a call from a chat, the test call (the echo service's MRI the app gave), a join, the
-//!   answer or the decline of the invitation that rings, a hang-up, mute or unmute, the camera on or off (off when a
+//! - **A meeting's pre-join** ([`Prejoin`]): the calendar's Join opens it, and nothing goes out until its Join now
+//!   ([`join_now`]); what its switches say is the user's, and turns into the call's mute and camera once the call can
+//!   take them ([`Calls::next_choice`]).
+//! - **The asks** ([`Ask`]): a call from a chat, the test call (the echo service's MRI the app gave), a join, a
+//!   meeting's join (started or not), the answer or the decline of the invitation that rings, a hang-up, mute or unmute, the camera on or off (off when a
 //!   call starts; a 1:1 call's video, M3 Task 18). Each is the user's: a button, a key, the switcher's command or the
 //!   incoming call's notification. Nothing here answers, declines or turns the camera on by itself.
 //! - **The video** a build shows ([`Calls::with_video`]: the lab app's or the personal build's, when its calls have
@@ -28,7 +31,7 @@ use std::time::{Duration, Instant};
 
 use gpui::{App, AsyncApp, Context, Entity};
 use teams_core::{
-    CallAction, CallActionError, CallId, CallStatus, CallView, End, EngineError, Event, IncomingCall,
+    CallAction, CallActionError, CallId, CallStatus, CallView, End, EngineError, Event, IncomingCall, MeetingInfo,
     RegistrationReport,
 };
 use teams_fence::Mri;
@@ -48,6 +51,8 @@ pub enum CallKind {
     Join,
     /// An invitation the account answered (or declined).
     Incoming,
+    /// A meeting's call the account went into from its pre-join, started or not.
+    Meeting,
 }
 
 impl CallKind {
@@ -59,6 +64,7 @@ impl CallKind {
             Self::TestCall => "test-call",
             Self::Join => "join",
             Self::Incoming => "incoming",
+            Self::Meeting => "meeting",
         }
     }
 }
@@ -83,6 +89,8 @@ pub struct ActiveCall {
     pub camera: bool,
     /// The callee's voicemail took it (declined, or not answered).
     pub voicemail: bool,
+    /// A meeting's title, as its pre-join named it.
+    pub title: Option<String>,
     /// Who is in it besides the account, as its roster tells it, whose video each line shows and who speaks
     /// ([`teams_core::Event::CallParticipants`]); empty until told.
     pub view: CallView,
@@ -378,6 +386,9 @@ pub enum Ask {
     TestCall,
     /// Join the running call of the group chat.
     Join { chat: String },
+    /// Go into the call of the meeting whose chat is `chat`: it starts the call when nobody has, and joins it when it
+    /// runs.
+    JoinMeeting { chat: String, meeting: MeetingInfo },
     /// Answer the invitation that rings.
     Answer,
     /// Decline the invitation that rings.
@@ -398,6 +409,7 @@ impl Ask {
             Self::Call { .. } => "call",
             Self::TestCall => "test-call",
             Self::Join { .. } => "join",
+            Self::JoinMeeting { .. } => "join-meeting",
             Self::Answer => "answer",
             Self::Decline => "decline",
             Self::HangUp => "hang-up",
@@ -408,7 +420,7 @@ impl Ask {
 
     fn chat(&self) -> Option<&str> {
         match self {
-            Self::Call { chat } | Self::Join { chat } => Some(chat),
+            Self::Call { chat } | Self::Join { chat } | Self::JoinMeeting { chat, .. } => Some(chat),
             _ => None,
         }
     }
@@ -419,9 +431,40 @@ impl Ask {
             Self::Call { chat } => Some((CallKind::Chat, Some(chat.clone()))),
             Self::TestCall => Some((CallKind::TestCall, None)),
             Self::Join { chat } => Some((CallKind::Join, Some(chat.clone()))),
+            Self::JoinMeeting { chat, .. } => Some((CallKind::Meeting, Some(chat.clone()))),
             _ => None,
         }
     }
+}
+
+/// A meeting a user can go into, as its calendar event names it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MeetingToJoin {
+    /// Its chat.
+    pub chat: String,
+    /// Its organizer and tenant.
+    pub meeting: MeetingInfo,
+    /// Its title.
+    pub title: String,
+}
+
+/// A meeting's pre-join while it shows: what it goes into, and what its switches say.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Prejoin {
+    pub to_join: MeetingToJoin,
+    /// The microphone's switch is off.
+    pub muted: bool,
+    /// The camera's switch is on.
+    pub camera: bool,
+    /// Join now was asked, and its call isn't told yet.
+    pub joining: bool,
+}
+
+/// What a pre-join's switches said at Join now, until the call took it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Choices {
+    muted: bool,
+    camera: bool,
 }
 
 /// An ask that went nowhere: which, why (a name for the trace) and what to tell the user.
@@ -447,6 +490,12 @@ pub struct Calls {
     ended: Option<Ended>,
     refused: Option<Refused>,
     video: Option<VideoFeed>,
+    /// The meeting's pre-join, while it shows.
+    prejoin: Option<Prejoin>,
+    /// The meeting last gone into: its call's title, and what a Rejoin goes into.
+    meeting: Option<MeetingToJoin>,
+    /// What the pre-join chose, until its call took it.
+    choices: Option<Choices>,
 }
 
 impl Calls {
@@ -543,6 +592,8 @@ impl Calls {
         self.registered = false;
         self.ringing = None;
         self.asked = None;
+        self.prejoin = None;
+        self.choices = None;
         if let Some(active) = self.call.take() {
             self.ended = Some(Ended::of(active, End::HungUp));
             self.refused = None;
@@ -554,6 +605,89 @@ impl Calls {
     #[must_use]
     pub fn joinable(&self, chat: &str) -> bool {
         self.running.contains(chat)
+    }
+
+    /// The meeting's pre-join, while it shows.
+    #[must_use]
+    pub fn prejoin(&self) -> Option<&Prejoin> {
+        self.prejoin.as_ref()
+    }
+
+    /// Shows the pre-join of `to_join`: its camera off, its microphone on, nothing sent.
+    pub fn open_prejoin(&mut self, to_join: MeetingToJoin, cx: &mut Context<Self>) {
+        if !self.shown {
+            return;
+        }
+        self.refused = None;
+        self.ended = None;
+        self.prejoin = Some(Prejoin {
+            to_join,
+            muted: false,
+            camera: false,
+            joining: false,
+        });
+        cx.notify();
+    }
+
+    /// The pre-join's microphone switch.
+    pub fn set_prejoin_muted(&mut self, muted: bool, cx: &mut Context<Self>) {
+        if let Some(prejoin) = &mut self.prejoin {
+            prejoin.muted = muted;
+            cx.notify();
+        }
+    }
+
+    /// The pre-join's camera switch.
+    pub fn set_prejoin_camera(&mut self, camera: bool, cx: &mut Context<Self>) {
+        if let Some(prejoin) = &mut self.prejoin {
+            prejoin.camera = camera;
+            cx.notify();
+        }
+    }
+
+    /// The pre-join is closed without joining: nothing went out, and nothing will.
+    pub fn cancel_prejoin(&mut self, cx: &mut Context<Self>) {
+        if self.prejoin.take().is_some() {
+            self.refused = None;
+            cx.notify();
+        }
+    }
+
+    /// What goes into the meeting a call that ended was in once more, as its Rejoin.
+    #[must_use]
+    pub fn rejoin_of(&self, ended: &Ended) -> Option<Ask> {
+        let to_join = self
+            .meeting
+            .as_ref()
+            .filter(|to_join| ended.chat.as_deref() == Some(to_join.chat.as_str()))?;
+        Some(Ask::JoinMeeting {
+            chat: to_join.chat.clone(),
+            meeting: to_join.meeting.clone(),
+        })
+    }
+
+    /// The next of the pre-join's choices its call can take now: the microphone muted once the call's media is set up,
+    /// the camera once the call is up. `None` when none is due, and each is asked once.
+    pub fn next_choice(&mut self, cx: &mut Context<Self>) -> Option<Ask> {
+        let choices = self.choices.as_mut()?;
+        let active = self.call.as_ref().filter(|active| active.kind == CallKind::Meeting)?;
+        let connected = active.status == CallStatus::Connected;
+        let ask = if choices.muted && active.status != CallStatus::Placing {
+            choices.muted = false;
+            Some(Ask::ToggleMute)
+        } else if choices.camera && connected {
+            choices.camera = false;
+            Some(Ask::ToggleCamera)
+        } else {
+            None
+        };
+        if *choices == Choices::default() {
+            self.choices = None;
+        }
+        if ask.is_some() {
+            cx.notify();
+        }
+        ask
     }
 
     /// Clears how the last call ended and the last refusal (the user dismissed them).
@@ -637,6 +771,15 @@ impl Calls {
             self.call = Some(self.adopt(call));
             self.ended = None;
             self.refused = None;
+            // a call took over from the pre-join; what it chose is for the meeting's own call only
+            self.prejoin = None;
+            if self
+                .call
+                .as_ref()
+                .is_some_and(|active| active.kind != CallKind::Meeting)
+            {
+                self.choices = None;
+            }
         }
         let Some(active) = self.call.as_mut() else { return };
         active.status = status.clone();
@@ -666,6 +809,11 @@ impl Calls {
             let (kind, chat) = self.asked.take().unwrap_or((CallKind::Chat, None));
             (kind, chat, None, None)
         };
+        let title = self
+            .meeting
+            .as_ref()
+            .filter(|_| kind == CallKind::Meeting)
+            .map(|to_join| to_join.title.clone());
         ActiveCall {
             id: call,
             kind,
@@ -677,6 +825,7 @@ impl Calls {
             muted: false,
             camera: false,
             voicemail: false,
+            title,
             view: CallView::default(),
             check: DeviceCheck::default(),
         }
@@ -689,7 +838,7 @@ impl Calls {
         }
         let busy = self.busy();
         match ask {
-            Ask::Call { .. } | Ask::TestCall | Ask::Join { .. } if busy => Err("busy"),
+            Ask::Call { .. } | Ask::TestCall | Ask::Join { .. } | Ask::JoinMeeting { .. } if busy => Err("busy"),
             Ask::Call { chat } => Ok(CallAction::Call { chat: chat.clone() }),
             Ask::TestCall => self
                 .echo
@@ -698,6 +847,10 @@ impl Calls {
                 .ok_or("no-echo"),
             Ask::Join { chat } if !self.joinable(chat) => Err("not-joinable"),
             Ask::Join { chat } => Ok(CallAction::Join { chat: chat.clone() }),
+            Ask::JoinMeeting { chat, meeting } => Ok(CallAction::JoinMeeting {
+                chat: chat.clone(),
+                meeting: meeting.clone(),
+            }),
             Ask::Answer | Ask::Decline => {
                 let call = self.ringing.as_ref().map(|ringing| ringing.call).ok_or("not-ringing")?;
                 Ok(if *ask == Ask::Answer {
@@ -734,6 +887,9 @@ impl Calls {
         }
         if let Some(chat) = ask.chat().filter(|_| why == "not-joinable") {
             self.running.remove(chat);
+        }
+        if let Some(prejoin) = &mut self.prejoin {
+            prejoin.joining = false;
         }
         self.refused = Some(Refused {
             ask: ask.name(),
@@ -868,6 +1024,31 @@ pub fn ask(calls: &Entity<Calls>, core: &Arc<dyn Core>, trace: &Arc<ViewTrace>, 
     .detach();
 }
 
+/// Join now of the pre-join that shows: its choices kept for its call, its join asked. Nothing while none shows or its
+/// join is under way.
+pub fn join_now(calls: &Entity<Calls>, core: &Arc<dyn Core>, trace: &Arc<ViewTrace>, cx: &mut App) {
+    let asked = calls.update(cx, |calls, cx| {
+        let prejoin = calls.prejoin.as_mut().filter(|prejoin| !prejoin.joining)?;
+        prejoin.joining = true;
+        let to_join = prejoin.to_join.clone();
+        let choices = Choices {
+            muted: prejoin.muted,
+            camera: prejoin.camera,
+        };
+        calls.refused = None;
+        calls.choices = Some(choices);
+        calls.meeting = Some(to_join.clone());
+        cx.notify();
+        Some(Ask::JoinMeeting {
+            chat: to_join.chat,
+            meeting: to_join.meeting,
+        })
+    });
+    if let Some(asked) = asked {
+        ask(calls, core, trace, asked, cx);
+    }
+}
+
 /// The user asks that something nothing stands for (no chat open to call or join): traced, and told; nothing in a
 /// build that shows no calls.
 pub fn refuse_here(calls: &Entity<Calls>, trace: &Arc<ViewTrace>, ask: &Ask, why: &'static str, cx: &mut App) {
@@ -918,6 +1099,7 @@ pub fn status_text(active: &ActiveCall) -> String {
         return "Declined or not answered: voicemail".to_owned();
     }
     match &active.status {
+        CallStatus::Placing if active.kind == CallKind::Meeting => "Joining…".to_owned(),
         CallStatus::Placing => "Calling…".to_owned(),
         CallStatus::Ringing => "Ringing…".to_owned(),
         CallStatus::Joining => "Joining…".to_owned(),

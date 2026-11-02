@@ -76,7 +76,7 @@ pub use ams::{MessagePicture, PastedFormat, PastedPicture};
 pub use calendar::{
     Attendee, CALENDAR_VIEW_PATH, CalendarAnswer, CalendarAnswerError, CalendarEvent, CalendarView, EventKind,
     EventRead, EventTime, FloatingTime, FullEvent, MAX_CALENDAR_WINDOW_MS, Response as EventResponse, ShowAs,
-    TimeZoneSettings, join_url_chat,
+    TimeZoneSettings, join_url_chat, join_url_meeting,
 };
 pub use channel_read::{ChannelCreationStatus, TeamPeopleSearch, TeamPerson};
 pub use client::{Client, PostReadError, Response, Transport, WriteError};

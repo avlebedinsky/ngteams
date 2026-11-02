@@ -9,8 +9,9 @@
 //! ([`CallWriteError::Unmapped`]), or maps as another write than the type stands for ([`CallWriteError::OtherWrite`]),
 //! isn't made. So a native call write's target is, by construction, what the browser fence decides for the same bytes:
 //!
-//! - [`StartCall`]: the test call's start (`WriteKind::Call` on `Scope::New`, the caller and the echo service) or a
-//!   chat's call start (`WriteKind::Call` on the chat it carries, the caller and every callee);
+//! - [`StartCall`]: the test call's start (`WriteKind::Call` on `Scope::New`, the caller and the echo service), a
+//!   chat's call start (`WriteKind::Call` on the chat it carries, the caller and every callee) or a meeting's
+//!   (`WriteKind::Call` on the meeting's chat, the sender alone);
 //! - every other write: `Scope::CallOperation` with its operation, its exact URL, the sender its body names, the
 //!   callbacks it hands out, the conversation an `attach` or a join subscribes to, and an `add`'s invitee, which the
 //!   fence's call registry resolves.
@@ -313,6 +314,34 @@ fn start_body(parts: &StartParts, scenario: Option<&str>, to: &[Value], group_ch
     Value::Object(body)
 }
 
+/// A meeting's start (`docs/protocol/calling.md`, "Joining a meeting"): a chat call's body, nobody named, the meeting's
+/// chat and its organizer in it.
+fn meeting_start_body(parts: &StartParts, chat: &str, meeting: &MeetingInfo) -> Value {
+    let mut body = start_body(
+        parts,
+        None,
+        &[],
+        json!({"threadId": chat, "messageId": MEETING_MESSAGE_ID}),
+    );
+    if let Some(suppress) = body.pointer_mut("/conversationRequest/suppressDialout") {
+        *suppress = json!(true);
+    }
+    if let Some(info) = body.get_mut("meetingInfo") {
+        *info = json!({
+            "tenantId": meeting.tenant_id,
+            "organizerId": meeting.organizer_id,
+            "meetingType": MEETING_TYPE_CHAT,
+        });
+    }
+    body
+}
+
+/// A meeting's `groupChat.messageId` when its chat is its own, as captured.
+const MEETING_MESSAGE_ID: &str = "0";
+/// A meeting's `meetingInfo.meetingType` when its chat is its own, scheduled or a series' (the web client's `Chat`; a
+/// channel's meeting is another), as captured.
+const MEETING_TYPE_CHAT: u64 = 1;
+
 /// Starts a call: `POST` [`CALL_START_URL`].
 ///
 /// - [`StartCall::echo_test`]: the test call, as the web client places it: a conversation of the caller alone (no
@@ -322,6 +351,9 @@ fn start_body(parts: &StartParts, scenario: Option<&str>, to: &[Value], group_ch
 /// - [`StartCall::in_chat`]: a call from a 1:1 or group chat: its callees in `participants.to`, the group chat in
 ///   `groupChat` (`null` for a 1:1 call); its target is `WriteKind::Call` on the chat it carries (the group chat, or the
 ///   1:1 chat of the caller and its one callee), the caller and every callee added, so the fence reads that chat fresh.
+/// - [`StartCall::in_meeting`]: a meeting's call from its pre-join, started or not: nobody named, nobody rings; the
+///   service answers with the meeting's one conversation. Its target is `WriteKind::Call` on the meeting's chat, the
+///   sender added, so the fence reads that chat fresh.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StartCall {
     caller: Mri,
@@ -355,6 +387,21 @@ impl StartCall {
         let to: Vec<Value> = callees.iter().map(Invitee::json).collect();
         let chat = group_chat.map_or(Value::Null, |id| json!({"threadId": id, "messageId": null}));
         let body = start_body(parts, None, &to, chat);
+        Self::start(context, parts, body, Expect::ChatStart, None)
+    }
+
+    /// The call of the meeting whose chat is `chat` (see the type's docs).
+    ///
+    /// # Errors
+    /// [`CallWriteError`] when the request isn't a meeting's start in its captured shape (the chat not a meeting's, the
+    /// sender or the organizer not a work account, the tenant not a GUID).
+    pub fn in_meeting(
+        context: &CallContext,
+        parts: &StartParts,
+        chat: &str,
+        meeting: &MeetingInfo,
+    ) -> Result<Self, CallWriteError> {
+        let body = meeting_start_body(parts, chat, meeting);
         Self::start(context, parts, body, Expect::ChatStart, None)
     }
 
@@ -550,8 +597,8 @@ call_write!(
     KeepAliveCall,
 );
 
-/// The meeting a group chat's call is, as a join names it (`meetingInfo`): its organizer's object id and tenant.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// The meeting a call is, as a join or a start names it (`meetingInfo`): its organizer's object id and tenant.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct MeetingInfo {
     pub organizer_id: String,
     pub tenant_id: String,

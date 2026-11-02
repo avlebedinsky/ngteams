@@ -240,6 +240,19 @@ pub(crate) fn roster(body: &[u8]) -> Option<Vec<RosterEntry>> {
     )
 }
 
+/// The roster a start's answer gives (its `roster`, as an update's): who is in a meeting's call already, which its later
+/// updates don't repeat; `None` without one.
+pub(crate) fn answered_roster(body: &[u8]) -> Option<Vec<RosterEntry>> {
+    let body: Value = serde_json::from_slice(body).ok()?;
+    let participants = body.pointer("/roster/participants")?.as_object()?;
+    Some(
+        participants
+            .iter()
+            .filter_map(|(mri, entry)| roster_entry(mri, entry))
+            .collect(),
+    )
+}
+
 fn roster_entry(mri: &str, entry: &Value) -> Option<RosterEntry> {
     let version = entry.get("version")?.as_u64()?;
     let endpoints = entry.get("endpoints").and_then(Value::as_object);

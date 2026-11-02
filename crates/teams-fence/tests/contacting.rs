@@ -503,6 +503,84 @@ fn start_verdict(body: &str, policy: &Policy) -> Contact {
     )
 }
 
+// --- a meeting's call start ---
+
+const MEETING_CHAT: &str = "19:meeting_MadeUpMeeting0001@thread.v2";
+const TENANT: &str = "00000000-0000-4000-8000-0000000000f1";
+
+/// A meeting's call start as the web client posts it from its pre-join (made-up ids and links, the SDP cut to a stub).
+fn meeting_start() -> String {
+    format!(
+        r#"{{"conversationRequest":{{"conversationType":null,"subject":null,"suppressDialout":true,"roster":{{"type":"Delta","rosterUpdate":"https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/x/callAgent/y/1/conversation/rosterUpdate/"}},"properties":{{"allowConversationWithoutHost":true}},"links":{{}}}},"contentSharing":null,"participants":{{"from":{{"id":"{CALLER}","displayName":"Lab A"}},"to":[]}},"capabilities":null,"endpointCapabilities":1,"clientEndpointCapabilities":1,"endpointMetadata":{{}},"groupContext":null,"groupChat":{{"threadId":"{MEETING_CHAT}","messageId":"0"}},"meetingInfo":{{"tenantId":"{TENANT}","organizerId":"00000000-0000-4000-8000-00000000000a","meetingType":1}},"meetingData":null,"endpointState":{{}},"callInvitation":{{"callModalities":["Audio","ScreenViewer"],"links":{{}},"mediaContent":{{"blob":"v=0\r\n","contentType":"application/sdp-ngc-1.0"}}}},"debugContent":{{}},"participantPropertyBag":{{}}}}"#
+    )
+}
+
+fn meeting_target() -> Target {
+    Target::new(
+        WriteKind::Call,
+        Scope::Conversation {
+            id: MEETING_CHAT.to_owned(),
+        },
+    )
+    .with_added([Mri::new(CALLER)])
+    .with_sender(Mri::new(CALLER))
+}
+
+#[test]
+fn a_meetings_start_is_a_call_in_its_chat_by_the_sender_alone() {
+    assert_eq!(
+        start_verdict(&meeting_start(), &Policy::new()),
+        Contact::Write(meeting_target())
+    );
+}
+
+#[test]
+fn a_meetings_subscription_from_its_pre_join_is_the_same_write() {
+    let start: serde_json::Value = serde_json::from_str(&meeting_start()).unwrap();
+    let mut subscription = start.clone();
+    let object = subscription.as_object_mut().unwrap();
+    object.remove("callInvitation");
+    object.remove("contentSharing");
+    object.remove("meetingData");
+    object["participants"].as_object_mut().unwrap().remove("to");
+    object["meetingInfo"].as_object_mut().unwrap().remove("meetingType");
+    assert_eq!(
+        start_verdict(&subscription.to_string(), &Policy::new()),
+        Contact::Write(meeting_target())
+    );
+}
+
+#[test]
+fn a_meetings_start_off_its_captured_shape_is_unreadable() {
+    let base = meeting_start();
+    let off = [
+        // someone named to ring, in a chat or a meeting
+        base.replace(
+            r#""to":[]"#,
+            r#""to":[{"id":"8:orgid:00000000-0000-4000-8000-00000000000b"}]"#,
+        ),
+        // a chat that isn't a meeting's
+        base.replace(MEETING_CHAT, "19:abcdef0123456789@thread.v2"),
+        base.replace(MEETING_CHAT, "19:abcdef0123456789@thread.tacv2"),
+        // a channel's message, an organizer or a tenant that doesn't read
+        base.replace(r#""messageId":"0""#, r#""messageId":"1700000000000""#),
+        base.replace(
+            r#""organizerId":"00000000-0000-4000-8000-00000000000a""#,
+            r#""organizerId":"nobody""#,
+        ),
+        base.replace(TENANT, "nowhere"),
+        // no meeting named at all
+        base.replace(r#""meetingInfo":{"#, r#""meeting":{"#),
+        // a sender that isn't a work account
+        base.replace(&format!(r#""id":"{CALLER}""#), r#""id":"28:bot""#),
+        // a key nobody reviewed
+        base.replace(r#""meetingData":null"#, r#""meetingData":{"meetingCode":"1"}"#),
+    ];
+    for body in &off {
+        assert_eq!(start_verdict(body, &Policy::new()), Contact::Unreadable, "{body}");
+    }
+}
+
 #[test]
 fn the_test_call_start_is_a_call_with_the_caller_and_the_echo_service() {
     let expected = Target::new(WriteKind::Call, Scope::New)

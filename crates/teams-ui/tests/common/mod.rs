@@ -657,7 +657,10 @@ impl Core for FakeCore {
             | CallAction::Mute { call, .. }
             | CallAction::Camera { call, .. }
             | CallAction::Renegotiate { call } => call,
-            CallAction::Call { .. } | CallAction::TestCall { .. } | CallAction::Join { .. } => CallId::for_tests(1),
+            CallAction::Call { .. }
+            | CallAction::TestCall { .. }
+            | CallAction::Join { .. }
+            | CallAction::JoinMeeting { .. } => CallId::for_tests(1),
         };
         Reply::ready(locked(&self.call_answers).pop_front().unwrap_or(Ok(named)))
     }

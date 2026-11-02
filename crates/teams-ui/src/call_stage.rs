@@ -284,6 +284,9 @@ impl CallStage {
             }
             self.end_seen(cx);
         }
+        if let Some(ask) = self.calls.update(cx, Calls::next_choice) {
+            self.ask(ask, cx);
+        }
         let connected = live
             .as_ref()
             .is_some_and(|active| active.status == CallStatus::Connected);
@@ -346,6 +349,11 @@ impl CallStage {
         let reason = ended.reason(self.core.me());
         if reason == EndReason::Own {
             return None;
+        }
+        if ended.kind == CallKind::Meeting {
+            // a meeting can be gone into at any time, whatever became of its call
+            let ask = self.calls.read(cx).rejoin_of(ended)?;
+            return Some(FollowUp { ask, rejoin: true });
         }
         if let Some(chat) = ended.group_chat() {
             let runs_on = matches!(
@@ -635,7 +643,13 @@ impl CallStage {
         let tiles = self.tiles_of(active);
         let call = active.id.get();
         let body = if tiles.is_empty() {
-            calling(title, &calls::status_text(active), palette)
+            let waiting = active.kind == CallKind::Meeting && active.status == CallStatus::Connected;
+            let state = if waiting {
+                "Waiting for others to join".to_owned()
+            } else {
+                calls::status_text(active)
+            };
+            calling(title, &state, palette)
         } else {
             let selector = if active.view.participants.is_empty() {
                 "call-people"
@@ -1168,7 +1182,12 @@ fn emit(stage: &WeakEntity<CallStage>, event: CallStageEvent, cx: &mut App) {
 
 /// The menu's rows of the devices of `kinds`: each kind's name, then its choices (a check on the one chosen), each
 /// row's test selector `call-<kind>-<key>`; a choice goes to the settings as their own pickers set it.
-fn device_items(mut menu: PopupMenu, kinds: &[DeviceKind], model: &Entity<SettingsModel>, cx: &App) -> PopupMenu {
+pub(crate) fn device_items(
+    mut menu: PopupMenu,
+    kinds: &[DeviceKind],
+    model: &Entity<SettingsModel>,
+    cx: &App,
+) -> PopupMenu {
     let settings = model.read(cx);
     let Some(list) = settings.devices() else {
         return menu;

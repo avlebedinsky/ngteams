@@ -288,6 +288,10 @@ fails the run.
   host from before the page loads: a's team's "..." menu and its "Add channel", the "Create a channel" dialog and its types,
   then the dialog filled and Create pressed for each channel type and layout, what it sends recorded and held back
   (`docs/protocol/channels.md`, "Creating a channel"); nothing is made.
+- `ab-meeting-join`: account a alone, after the enforcement test: a schedules a Teams meeting with b, opens its join
+  link and clicks the pre-join's Join now, only on that meeting; the pre-join's subscription is judged by the meeting's
+  chat, read fresh, and everything that would enter a call is held back with a labelled forced deny
+  (`docs/protocol/calling.md`, "Joining a meeting").
 - `own-presence-activity`, `-endpoint`, `-both`, `-manual-held`, `-manual`: account a alone, as `ab-trouter`. Its
   own availability reaches nobody, so it passes; each run holds back with a labelled forced deny what it leaves out:
   `user.activity` alone, UPS's endpoint `PUT` alone, both, then a manual status (Busy, Do not disturb, Away,
@@ -394,6 +398,8 @@ teams-headless a call echo|b|abc|<id> [--tone 1000] [--bursts] [--hear <hz>] [--
                                           # a call through the engine, its media on files; held, hung up, its tone looked for
 teams-headless c join abc [--ring-wait 180] [--tone …] [--seconds 45] [--wait 60] \
                                           # the group chat's running call joined late, once its invitation rang out here
+teams-headless a join-meeting <join link> [--tone …] [--seconds 45] [--wait 60]
+                                          # a meeting's call by its join link, as the calendar's Join: started when nobody has
 ```
 
 A chat is `a`, `b` or `c` (the 1:1 chat with that account, from the MRIs in `lab.toml`), `abc` (the group chat
@@ -520,8 +526,10 @@ between them) beside the page shown, each a set of titled boxes of rows. The rai
 to the chats) takes their place the same way, as Teams' calendar app: the month and "My calendars" in its own pane, the
 toolbar's Today, previous and next (Left, Right and T while it has the focus) and views (Day, Work week, Week, Month;
 Ctrl+Alt+1–4), the account's events read from the middle tier's calendar view, and an event's card (Chat with
-participants, Copy link, and Join once a call runs in the meeting's chat; for the account's own events Edit, and
-Cancel meeting, Delete or Remove from calendar, each confirmed). New event (its menu: an event or a Teams meeting), a
+participants and a split Join, there at any time, whose menu has Join and Copy join link; Join opens the meeting's
+pre-join in a window of its own (the camera's preview and switch, background filters, the microphone's switch and the
+devices, Cancel, Join now), and Join now starts the meeting's call when nobody has; for the account's own events Edit,
+and Cancel meeting, Delete or Remove from calendar, each confirmed). New event (its menu: an event or a Teams meeting), a
 double click on an empty half hour of the grid, and an event's Edit (or a double click on it) open the scheduling form
 in a window of its own ("New event - Calendar"): Event and Series (a series' repeat: Teams' presets, a custom
 recurrence, its end; an occurrence's change edits it or, by Series, the whole series), the title, required and optional

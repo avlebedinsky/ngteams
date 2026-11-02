@@ -254,7 +254,7 @@ fn event_json(event: &Planned, index: usize, day: i64) -> Value {
     let id = format!("AAMkMadeUpEvent{:04}{index:02}", day.div_euclid(DAY_MS) % 10_000);
     let thread = format!("19:meeting_MadeUpMeeting{index:02}@thread.v2");
     let link = format!(
-        "https://teams.microsoft.com/l/meetup-join/{}/0?context=%7b%7d",
+        "https://teams.microsoft.com/l/meetup-join/{}/0?context=%7b%22Tid%22%3a%2200000000-0000-4000-8000-0000000000f1%22%2c%22Oid%22%3a%2200000000-0000-4000-8000-00000000000b%22%7d",
         thread.replace(':', "%3a").replace('@', "%40")
     );
     let subject = if event.cancelled {

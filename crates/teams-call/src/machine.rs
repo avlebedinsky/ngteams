@@ -7,7 +7,7 @@ use base64::Engine as _;
 use teams_fence::{Delivery, Mri, Observed};
 use teams_proto::{
     AcceptanceAcknowledgement, CallContext, CallLink, CallParticipant, ChannelParameters, ClientInfo,
-    InvitationReceipt, MediaContent, MediaDescriptions,
+    InvitationReceipt, MediaContent, MediaDescriptions, MeetingInfo,
 };
 
 use crate::agent::{CallAgent, Kind, guid};
@@ -69,6 +69,9 @@ pub enum Placement {
         callees: Vec<Mri>,
         group_chat: Option<String>,
     },
+    /// The call of the meeting whose chat is `chat`, whether it runs yet or not: nobody rings, and the service answers
+    /// with the meeting's one conversation (`docs/protocol/calling.md`, "Joining a meeting").
+    Meeting { chat: String, meeting: MeetingInfo },
 }
 
 /// Where a call is, as the account is told.
@@ -468,11 +471,14 @@ impl Calls {
     /// # Errors
     /// [`CallError`]; nothing was sent.
     pub fn place(&mut self, placement: &Placement, offer: MediaContent, now: Instant) -> Result<CallId, CallError> {
-        let echo = match placement {
-            Placement::TestCall { echo } => Some(echo.clone()),
-            Placement::Chat { .. } => None,
+        let side = match placement {
+            Placement::TestCall { echo } => Side::Placed {
+                echo: Some(echo.clone()),
+            },
+            Placement::Chat { .. } => Side::Placed { echo: None },
+            Placement::Meeting { .. } => Side::Meeting,
         };
-        let mut call = self.new_call(Side::Placed { echo }, now)?;
+        let mut call = self.new_call(side, now)?;
         let write = build::start(&mut call, &self.identity, placement, offer)?;
         Ok(self.begin(call, Step::Start, write))
     }
@@ -1043,6 +1049,13 @@ impl Calls {
         };
         let Some(call) = self.call.as_mut() else { return };
         call.conversation = conversation;
+        // a meeting's call that runs already: who is in it comes only with this answer (its updates tell changes)
+        if let Some(update) = read::answered_roster(body)
+            && let Some(participants) = call.roster.apply(update, &self.identity.mri)
+        {
+            let id = call.id;
+            self.out.event(CallEvent::Participants { call: id, participants });
+        }
         match call.phase {
             Phase::Leaving { sent: false, end } => {
                 call.phase = Phase::Ringing;
@@ -1050,7 +1063,7 @@ impl Calls {
             }
             Phase::Placing => {
                 call.phase = match call.side {
-                    Side::Joined { .. } => Phase::Joining,
+                    Side::Joined { .. } | Side::Meeting => Phase::Joining,
                     Side::Placed { .. } | Side::Invited(_) => Phase::Ringing,
                 };
                 self.out.state(call);

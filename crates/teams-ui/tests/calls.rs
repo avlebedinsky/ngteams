@@ -2012,3 +2012,157 @@ fn a_dropped_group_call_offers_rejoin_and_a_one_to_one_invitation_call_back_by_t
     assert_eq!(told, [["dropped", "rejoin"], ["ended-by-other", "call-back"]]);
     no_name_in(&written);
 }
+
+// --- a meeting's pre-join ---
+
+const MEETING_CHAT: &str = "19:meeting_MadeUpMeeting0001@thread.v2";
+
+fn meeting_to_join() -> teams_ui::calls::MeetingToJoin {
+    teams_ui::calls::MeetingToJoin {
+        chat: MEETING_CHAT.to_owned(),
+        meeting: teams_core::MeetingInfo {
+            organizer_id: "00000000-0000-4000-8000-00000000000b".to_owned(),
+            tenant_id: "00000000-0000-4000-8000-0000000000f1".to_owned(),
+        },
+        title: "Synthetic meeting".to_owned(),
+    }
+}
+
+fn join_meeting_action() -> CallAction {
+    let to_join = meeting_to_join();
+    CallAction::JoinMeeting {
+        chat: to_join.chat,
+        meeting: to_join.meeting,
+    }
+}
+
+/// The pre-join's window `windows` have open, to draw and click in.
+fn prejoin_window(rig: &Rig, windows: &Entity<CallWindows>) -> &'static mut VisualTestContext {
+    rig.cx.run_until_parked();
+    let window = rig
+        .cx
+        .read(|cx| windows.read(cx).prejoin_window())
+        .expect("the pre-join's window is open");
+    let cx = Box::leak(Box::new(VisualTestContext::from_window(window.into(), &rig.cx)));
+    draw(cx);
+    cx
+}
+
+#[test]
+fn a_meetings_pre_join_sends_nothing_until_join_now_and_gives_way_to_its_call() {
+    let rig = calling();
+    let (trace, written) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.open_prejoin(meeting_to_join(), cx)));
+    let window = prejoin_window(&rig, &windows);
+    for shown in [
+        "prejoin",
+        "prejoin-title",
+        "prejoin-audio",
+        "prejoin-microphone",
+        "prejoin-cancel",
+        "prejoin-join",
+    ] {
+        assert!(drawn(window, shown), "{shown}");
+    }
+    assert!(actions(&rig).is_empty(), "nothing goes out while it shows");
+
+    click(window, "prejoin-join");
+    assert_eq!(actions(&rig), [join_meeting_action()]);
+    click(window, "prejoin-join");
+    assert_eq!(actions(&rig).len(), 1, "one join while it goes");
+
+    status(&rig, 1, CallStatus::Joining);
+    assert!(
+        rig.cx.read(|cx| windows.read(cx).prejoin_window().is_none()),
+        "the call's window takes over"
+    );
+    assert!(window_open(&rig, &windows));
+    let active = rig.cx.read(|cx| calls_of(&rig).read(cx).call().cloned()).unwrap();
+    assert_eq!(active.kind, CallKind::Meeting);
+    assert_eq!(active.chat.as_deref(), Some(MEETING_CHAT));
+    assert_eq!(active.title.as_deref(), Some("Synthetic meeting"));
+    assert!(teams_ui::calls::status_text(&active).contains("Joining"));
+    no_name_in(&written);
+}
+
+#[test]
+fn a_meetings_pre_join_is_cancelled_with_nothing_sent() {
+    let rig = calling();
+    let (trace, _) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.open_prejoin(meeting_to_join(), cx)));
+    let window = prejoin_window(&rig, &windows);
+    click(window, "prejoin-cancel");
+    rig.cx.run_until_parked();
+    assert!(rig.cx.read(|cx| windows.read(cx).prejoin_window().is_none()));
+    assert!(rig.cx.read(|cx| calls_of(&rig).read(cx).prejoin().is_none()));
+    assert!(actions(&rig).is_empty());
+}
+
+#[test]
+fn a_meetings_pre_join_keeps_its_choices_for_the_call_and_they_are_the_users_only() {
+    let rig = calling();
+    let (trace, _) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.open_prejoin(meeting_to_join(), cx)));
+    let window = prejoin_window(&rig, &windows);
+    rig.cx.update(|cx| {
+        calls_of(&rig).update(cx, |calls, cx| calls.set_prejoin_muted(true, cx));
+    });
+    click(window, "prejoin-join");
+    status(&rig, 1, CallStatus::Joining);
+    let _stage = stage(&rig, &windows);
+    rig.cx.run_until_parked();
+    assert!(
+        actions(&rig).contains(&CallAction::Mute {
+            call: call(1),
+            muted: true
+        }),
+        "the microphone muted as the switch said: {:?}",
+        actions(&rig)
+    );
+    status(&rig, 1, CallStatus::Connected);
+    rig.cx.run_until_parked();
+    assert!(
+        !actions(&rig)
+            .iter()
+            .any(|action| matches!(action, CallAction::Camera { .. })),
+        "the camera stays off: its switch was never turned on"
+    );
+    let asked = actions(&rig).len();
+    status(&rig, 1, CallStatus::Reconnecting);
+    status(&rig, 1, CallStatus::Connected);
+    rig.cx.run_until_parked();
+    assert_eq!(actions(&rig).len(), asked, "each choice is asked once");
+}
+
+#[test]
+fn a_meeting_is_not_offered_while_a_call_is_up_and_its_end_offers_rejoin() {
+    let rig = calling();
+    let (trace, _) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.open_prejoin(meeting_to_join(), cx)));
+    let window = prejoin_window(&rig, &windows);
+    click(window, "prejoin-join");
+    status(&rig, 1, CallStatus::Connected);
+    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.open_prejoin(meeting_to_join(), cx)));
+    rig.cx.run_until_parked();
+    assert!(
+        rig.cx.read(|cx| calls_of(&rig).read(cx).prejoin().is_none()),
+        "a call is up: it is refused, not shown"
+    );
+    let window = stage(&rig, &windows);
+    status(&rig, 1, CallStatus::Ended(End::Failed("media")));
+    assert!(drawn(window, "call-end-rejoin"), "a meeting can be gone into again");
+    click(window, "call-end-rejoin");
+    assert_eq!(actions(&rig).last(), Some(&join_meeting_action()));
+}

@@ -83,7 +83,7 @@ const SETTLE: Duration = Duration::from_millis(1500);
 type Step = (&'static str, fn(&Entity<Shell>, &mut Window, &mut App));
 
 /// The tour.
-const STEPS: [Step; 82] = [
+const STEPS: [Step; 84] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -428,8 +428,12 @@ const STEPS: [Step; 82] = [
     ("calendar", |shell, window, cx| {
         shell.update(cx, |shell, cx| shell.show_calendar(window, cx));
     }),
-    // a meeting's card, opened by a click on its block
+    // a meeting's card, opened by a click on its block: the split Join and Chat with participants
     ("calendar-card", |shell, _, cx| {
+        let models = shell.read(cx).models().clone();
+        models.calls.update(cx, |calls, _| {
+            *calls = teams_ui::Calls::shown(Some(Mri::new(ECHO)));
+        });
         let calendar = shell.read(cx).calendar_view().clone();
         let meeting = calendar.read(cx).events().and_then(|events| {
             events
@@ -443,7 +447,40 @@ const STEPS: [Step; 82] = [
             say("no meeting in the calendar");
         }
     }),
+    // Join clicked: the meeting's pre-join in its own window, its camera off, nothing sent
+    ("calendar-prejoin", |shell, _, cx| {
+        let calendar = shell.read(cx).calendar_view().clone();
+        let shown = calendar.read(cx).card().cloned();
+        let to_join = shown.and_then(|shown| {
+            Some(teams_ui::calls::MeetingToJoin {
+                chat: shown.event.meeting_chat.clone()?,
+                meeting: shown.event.meeting.clone()?,
+                title: shown.title(),
+            })
+        });
+        if let Some(to_join) = to_join {
+            calendar.update(cx, teams_ui::calendar_view::CalendarView::close_card);
+            shell.update(cx, |shell, cx| shell.open_prejoin(to_join, cx));
+        } else {
+            say("the meeting's card names no meeting to join");
+        }
+    }),
+    // and in Teams Dark, its microphone switched off
+    ("calendar-prejoin-dark", |shell, _, cx| {
+        let settings = shell.read(cx).settings().clone();
+        settings.update(cx, |model, cx| {
+            model.change(|settings| settings.appearance.theme = teams_ui::theme::DARK_KEY, cx);
+        });
+        let models = shell.read(cx).models().clone();
+        models.calls.update(cx, |calls, cx| calls.set_prejoin_muted(true, cx));
+    }),
     ("calendar-month", |shell, _, cx| {
+        let models = shell.read(cx).models().clone();
+        models.calls.update(cx, teams_ui::Calls::cancel_prejoin);
+        let settings = shell.read(cx).settings().clone();
+        settings.update(cx, |model, cx| {
+            model.change(|settings| settings.appearance.theme = teams_ui::theme::LIGHT_KEY, cx);
+        });
         let calendar = shell.read(cx).calendar_view().clone();
         calendar.update(cx, |calendar, cx| {
             calendar.close_card(cx);

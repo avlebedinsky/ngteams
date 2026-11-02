@@ -207,7 +207,8 @@ pub(crate) fn call_title(active: &ActiveCall, chat_name: impl Fn(&str) -> Shared
                 None => caller.into(),
             }
         }
-        CallKind::Chat | CallKind::Join => active
+        CallKind::Meeting if active.title.is_some() => active.title.clone().unwrap_or_default().into(),
+        CallKind::Chat | CallKind::Join | CallKind::Meeting => active
             .chat
             .as_deref()
             .map_or_else(|| SharedString::from("Call"), chat_name),

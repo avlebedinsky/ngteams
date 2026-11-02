@@ -350,6 +350,48 @@ last call ended, too (seen 2026-10-26, starts ~60 s after a cleanly left call; o
 `ab-call`, `abc-call`, `ab-call-native` or `abc-call-mixed` run hangs up every page that shows its call (each waiting
 up to 10 s for its `leave`) before it stops its native clients and closes, so it leaves none running.
 
+## Joining a meeting
+
+Written 2026-11-02 from `ab-meeting-join` (a's Teams meeting with b, made from the scheduling form; each of a's and
+b's web clients on its pre-join, neither in a call) and the native client's live runs. A meeting's Join works the same
+whether its call runs yet or not, and at any time: nobody rings, and the service keeps one conversation per meeting.
+
+The join link (`https://teams.microsoft.com/l/meetup-join/<thread, percent-encoded>/0?context={"Tid":<tenant>,
+"Oid":<organizer's object id>}`) opens the web client's pre-join: the meeting's title, the camera's preview and switch,
+background filters, computer audio (the microphone's switch and device, the speaker's device), phone, room or no audio,
+Cancel and Join now. While it shows, the page has already posted a **roster-only subscription** to `POST
+…/api/v2/epconv`: `conversationRequest` (`subject: null`, the roster and conversation callbacks, as placeholders on
+`http://broker.invalid/…` until its Trouter socket is up), `groupContext: null`, `groupChat: {threadId: <the meeting's
+chat>, messageId: "0"}`, `participants.from`, the endpoint's capabilities and state, `meetingInfo: {tenantId,
+organizerId}`, no `callInvitation`. It answers `201` with the meeting's conversation (`conversationController`, `state`:
+`isMultiParty`, `isHostless`, `conversationType: "scheduledMeeting"`, `isMeetingActivated`, `groupCallInitiator`; its
+`links`, `admit` and `admitAll` among them; `meetingInfo`; `roster` with its `participantCounts`), and that answer
+creates the conversation when nobody had: the first to subscribe is its `groupCallInitiator` and `originalGroupCallInitiator`.
+
+Then the page posts its real callbacks (`POST …/conv/<id>/notificationLinks`) and on Join now its entry at the
+conversation (`POST …/conv/<id>` with `callInvitation`: a join's shape, with `suppressDialout: true`, the subject `""`
+and `participants.to: []`). Neither is mapped: the fence denies them, and `ab-meeting-join` holds them back by name.
+
+With the subscription or the entry not going through, the client instead sends the whole of it as one **start with
+media**, `POST …/api/v2/epconv`: `conversationRequest` (`conversationType: null`, `subject: null`, `suppressDialout:
+true`, the callbacks), `contentSharing: null`, `participants: {from, to: []}`, the capabilities, `groupContext: null`,
+`groupChat: {threadId, messageId: "0"}`, `meetingInfo: {tenantId, organizerId, meetingType: 1}` (the client's `Chat`:
+a meeting with its own chat, once or a series'; a channel's meeting is its other value), `meetingData: null`,
+`endpointState`, `callInvitation` (`callModalities: ["Audio", "ScreenViewer"]`, a group call's offer with its
+`mediaDescriptions`), `debugContent`, `participantPropertyBag`. **That is the native client's**
+(`StartCall::in_meeting`, `CallAction::JoinMeeting`, `teams-headless <alias> join-meeting <link>`): the conversation's
+answer as any start's, an acceptance from the conference's mixer at its `acceptance` callback, then as a join's. Seen
+live 2026-11-02 (`teams-headless a` then `b join-meeting`, each of a single meeting and a series' occurrence): a started
+a call nobody had (`status` placing, joining, connecting, connected, about 5 s), b's same start 25 s later joined it,
+and each heard the other's tone; the fence read the meeting's chat fresh both times (the invitee is a member of it from
+the meeting's creation). The start's answer lists who is in the call already (`roster.participants`, as an update's);
+the updates after it tell only changes.
+
+A link with no thread or organizer (`https://teams.microsoft.com/meet/<code>?p=<passcode>`) resolves differently: the
+page read `GET …/api/mt/part/<partition>/beta/meetings/identifiers?meetingId=&passcode=&link=` (it answered
+`{"tenantId": ""}`) and subscribed and started by `meetingData: {meetingCode, passcode}`, with no chat named. The fence
+can't tie that to anyone, so no row maps it; the native client opens such a link in the browser.
+
 ## A call held past a dropped socket
 
 `dropped`: with the callee's page off the network (DevTools' emulation fails new requests; open sockets stay, so the run

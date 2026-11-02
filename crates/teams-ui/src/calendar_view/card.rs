@@ -1,5 +1,6 @@
 //! An event's card: its title, when, its series, where, the organizer and the account's answer, who is invited and
-//! its text; for a Teams meeting Join (once a call there is known), Chat with participants and Copy link.
+//! its text; for a Teams meeting the split Join (any time, started or not; its menu has Join and Copy join link, as in
+//! Teams) and Chat with participants.
 
 use std::fmt::Write as _;
 use std::rc::Rc;
@@ -9,10 +10,12 @@ use gpui::{
     Styled as _, div, px, relative, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::{Disableable as _, Sizable as _};
 use teams_core::{CalendarEvent, EventResponse};
 
 use super::{CalendarView, CalendarViewEvent, Removal, Shown, mix, time_text};
+use crate::calls::MeetingToJoin;
 use crate::clock::{self, HourCycle};
 use crate::icons::{Glyph, icon_button, selected_by};
 use crate::theme::{self, Palette};
@@ -23,17 +26,11 @@ impl CalendarView {
         let shown = self.card.clone()?;
         let event = Rc::clone(&shown.event);
         let cycle = clock::cycle(cx);
-        let read_only = self.core.read_only();
-        let calls = self.calls.read(cx);
-        let joinable = event
-            .meeting_chat
-            .as_deref()
-            .is_some_and(|chat| calls.shows() && !read_only && calls.joinable(chat));
         let row = |glyph: Glyph, text: String| card_row(glyph, text, palette);
         let when = when_text(&shown, cycle);
         let organizer = organizer_text(&event);
         let invited = invited_text(&event);
-        let actions = self.card_actions(&event, joinable, palette, cx);
+        let actions = self.card_actions(&shown, palette, cx);
         let manage = self.manage_actions(&event, palette, cx);
         let card = div()
             .debug_selector(|| "calendar-card".to_owned())
@@ -213,34 +210,111 @@ impl CalendarView {
             ))
     }
 
-    /// A meeting's card's actions: Join, Chat with participants, Copy link; and why Join isn't offered yet.
-    pub(super) fn card_actions(
-        &self,
-        event: &Rc<CalendarEvent>,
-        joinable: bool,
-        palette: Palette,
-        cx: &mut Context<Self>,
-    ) -> Option<gpui::Div> {
+    /// What the card's Join goes into: the meeting's call when its event names its chat and organizer, else its link,
+    /// opened in the browser (a short `/meet/` link names neither); nothing in a build or a mode that doesn't go into
+    /// calls.
+    fn join_target(&self, shown: &Shown, cx: &Context<Self>) -> Option<JoinTarget> {
+        let event = &shown.event;
+        if self.core.read_only() || !self.calls.read(cx).shows() {
+            return None;
+        }
+        match (&event.meeting_chat, &event.meeting) {
+            (Some(chat), Some(meeting)) => Some(JoinTarget::Call(MeetingToJoin {
+                chat: chat.clone(),
+                meeting: meeting.clone(),
+                title: shown.title(),
+            })),
+            _ => event.join_url.clone().map(JoinTarget::Link),
+        }
+    }
+
+    /// The split Join: the meeting's join, and its menu's Join and Copy join link, as in Teams.
+    fn join_button(target: JoinTarget, link: Option<String>, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
+        let view = cx.entity().downgrade();
+        let join = move |view: &gpui::WeakEntity<Self>, target: &JoinTarget, cx: &mut App| {
+            let target = target.clone();
+            let _ = view.update(cx, |this, cx| this.join(target, cx));
+        };
+        let (face_view, face_target) = (view.clone(), target.clone());
+        let face = div()
+            .debug_selector(|| "calendar-card-join".to_owned())
+            .id("calendar-card-join")
+            .h(px(32.0))
+            .px_3()
+            .flex()
+            .items_center()
+            .gap_2()
+            .rounded_l_md()
+            .bg(rgb(palette.brand))
+            .text_color(rgb(palette.on_brand))
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .cursor_pointer()
+            .hover(move |part| part.bg(rgb(palette.brand_hover)))
+            .tooltip(|window, cx| gpui_component::tooltip::Tooltip::new("Join Teams meeting").build(window, cx))
+            .child(Glyph::VIDEO.icon().size(px(16.0)))
+            .child("Join")
+            .on_click(move |_, _, cx: &mut App| join(&face_view, &face_target, cx));
+        let menu = selected_by(
+            "calendar-card-join-more",
+            Button::new("calendar-card-join-more")
+                .h(px(32.0))
+                .px_2()
+                .rounded_r_md()
+                .bg(rgb(palette.brand))
+                .text_color(rgb(palette.on_brand))
+                .tooltip("More join options")
+                .child(Glyph::CHEVRON_DOWN.icon().size(px(14.0)))
+                .dropdown_menu(move |menu, _, _| {
+                    let (view, target) = (view.clone(), target.clone());
+                    let menu = menu.min_w(px(200.0)).item(
+                        PopupMenuItem::element(|_, _| {
+                            menu_row("calendar-card-join-now", Glyph::VIDEO, "Join Teams meeting")
+                        })
+                        .on_click(move |_, _, cx: &mut App| join(&view, &target, cx)),
+                    );
+                    match link.clone() {
+                        Some(link) => menu.item(
+                            PopupMenuItem::element(|_, _| {
+                                menu_row("calendar-card-copy-link", Glyph::LINK, "Copy join link")
+                            })
+                            .on_click(move |_, _, cx: &mut App| {
+                                cx.write_to_clipboard(ClipboardItem::new_string(link.clone()));
+                            }),
+                        ),
+                        None => menu,
+                    }
+                }),
+        );
+        div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(px(1.0))
+            .child(face)
+            .child(menu)
+    }
+
+    /// Goes into the meeting: its pre-join, or its link in the browser.
+    fn join(&mut self, target: JoinTarget, cx: &mut Context<Self>) {
+        self.card = None;
+        match target {
+            JoinTarget::Call(to_join) => cx.emit(CalendarViewEvent::Join(to_join)),
+            JoinTarget::Link(link) => cx.open_url(&link),
+        }
+        cx.notify();
+    }
+
+    /// A meeting's card's actions: the split Join (Copy join link is in its menu, or beside Chat where no Join is
+    /// offered: the read-only mode) and Chat with participants.
+    pub(super) fn card_actions(&self, shown: &Shown, palette: Palette, cx: &mut Context<Self>) -> Option<gpui::Div> {
+        let event = &shown.event;
         if !event.online || event.cancelled {
             return None;
         }
         let chat = event.meeting_chat.clone();
-        // Teams' Join on every meeting: usable once a call runs in its chat
-        let join = chat.clone().map(|chat| {
-            selected_by(
-                "calendar-card-join",
-                Button::new("calendar-card-join")
-                    .icon(Glyph::VIDEO.icon())
-                    .label("Join")
-                    .primary()
-                    .disabled(!joinable)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.card = None;
-                        cx.emit(CalendarViewEvent::Join(chat.clone()));
-                        cx.notify();
-                    })),
-            )
-        });
+        let target = self.join_target(shown, cx);
+        let offers_join = target.is_some();
+        let join = target.map(|target| Self::join_button(target, event.join_url.clone(), palette, cx));
         let open_chat = chat.clone().map(|chat| {
             selected_by(
                 "calendar-card-chat",
@@ -255,43 +329,45 @@ impl CalendarView {
                     })),
             )
         });
-        let copy = event.join_url.clone().map(|link| {
+        let copy = event.join_url.clone().filter(|_| !offers_join).map(|link| {
             selected_by(
                 "calendar-card-copy-link",
-                icon_button("calendar-card-copy-link", Glyph::LINK, "Copy the meeting link")
+                icon_button("calendar-card-copy-link", Glyph::LINK, "Copy join link")
                     .on_click(move |_, _, cx: &mut App| cx.write_to_clipboard(ClipboardItem::new_string(link.clone()))),
             )
-        });
-        let waiting = (!joinable && chat.is_some()).then(|| {
-            div()
-                .debug_selector(|| "calendar-card-not-started".to_owned())
-                .text_sm()
-                .text_color(rgb(palette.muted_foreground))
-                .child(if self.core.read_only() {
-                    "Read-only: joining is off."
-                } else {
-                    "Join shows here and in the meeting's chat once its call has started."
-                })
         });
         Some(
             div()
                 .pt_2()
                 .flex()
-                .flex_col()
+                .items_center()
                 .gap_2()
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap_2()
-                        .children(join)
-                        .children(open_chat)
-                        .child(div().flex_1())
-                        .children(copy),
-                )
-                .children(waiting),
+                .children(join)
+                .children(open_chat)
+                .child(div().flex_1())
+                .children(copy),
         )
     }
+}
+
+/// What the card's Join goes into.
+#[derive(Clone)]
+enum JoinTarget {
+    /// The meeting's call, by its pre-join.
+    Call(MeetingToJoin),
+    /// Its link, opened in the browser: the event doesn't name what going into its call takes.
+    Link(String),
+}
+
+/// A row of Join's menu: its glyph and words.
+fn menu_row(selector: &'static str, glyph: Glyph, words: &'static str) -> gpui::Div {
+    div()
+        .debug_selector(move || selector.to_owned())
+        .flex()
+        .items_center()
+        .gap_2()
+        .child(glyph.icon().size(px(14.0)))
+        .child(words)
 }
 
 /// One of the card's lines: its glyph, then its text.

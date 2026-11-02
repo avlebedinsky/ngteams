@@ -270,6 +270,7 @@ pending one, acknowledgements and receipts denied on a live call):
 | Operation | Judged by |
 |---|---|
 | a start (`epconv`) | its callees and the chat it carries, read fresh ([above](#writes)), as before |
+| a meeting's start (`epconv`) or its pre-join's subscription | the sender and the meeting's chat it names, read fresh: it must list the sender, and only lab accounts and call guests ([calling.md](calling.md#joining-a-meeting)) |
 | a join (`POST …/conv/<id>`, roster-only or with a call invitation) | the group chat it names (`joins`), read fresh: complete, listing the joiner, only lab accounts and call guests; no invitation need bind the conversation to it |
 | an answer (`accept`) or a decline (`reject` 603) | an invitation this fence offered (below), tied to it by the call leg its link names (`…/cc/v1/incoming/<call>/…`, the call the invitation's `attach` link names: `CallRegistry::resolve_answer`), the answer from its callee, while it is open for the operation (ringing; the same `accept` again once answered, the same `reject` once declined), its group chat read fresh; no attach answer need have bound the link |
 | an `add` | its sender a lab account or an approved service, every invitee one or a call guest (the row maps it only naming the 1:1 chat of the sender and its one invitee, and the sender as organizer) |

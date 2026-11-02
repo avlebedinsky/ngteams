@@ -16,6 +16,7 @@ use teams_headless::lab::{self, VideoCounts};
 use teams_headless::print::{now_ms, visible};
 use teams_headless::{availability, call, chat, echo};
 use teams_proto::chat::MessageText;
+use teams_proto::{join_url_chat, join_url_meeting};
 use teams_store::OutboxState;
 use teams_trouter::Stop;
 #[cfg(not(test))]
@@ -120,9 +121,10 @@ async fn dispatch(lab: &Lab, command: Command, signals: &mut Signals, out: &mut 
             Ok(ExitCode::SUCCESS)
         }
         Command::Sync => sync(lab, signals, out).await,
-        command @ (Command::Watch { .. } | Command::Call { .. } | Command::Join { .. }) => {
-            calling_command(lab, command, signals, out).await
-        }
+        command @ (Command::Watch { .. }
+        | Command::Call { .. }
+        | Command::Join { .. }
+        | Command::JoinMeeting { .. }) => calling_command(lab, command, signals, out).await,
         Command::Presence { wait, mris } => presence(lab, &mris, Duration::from_secs(wait), signals, out).await,
         Command::Profile { mris, wait } => profile(lab, &mris, Duration::from_secs(wait), signals, out).await,
         Command::Search { query } => search(lab, &query, out).await,
@@ -202,6 +204,23 @@ async fn calling_command(lab: &Lab, command: Command, signals: &mut Signals, out
             let plan = call_plan(seconds, wait, ring_wait, audio.camera_after());
             let asked = CallAsked {
                 target: call::Target::Join(conversation(lab, &chat)?),
+                audio,
+                plan,
+            };
+            place_call(lab, asked, signals, out).await
+        }
+        Command::JoinMeeting {
+            link,
+            audio,
+            seconds,
+            wait,
+        } => {
+            let (Some(chat), Some(meeting)) = (join_url_chat(&link), join_url_meeting(&link)) else {
+                return Err("that isn't a meeting's join link naming its chat, organizer and tenant".into());
+            };
+            let plan = call_plan(seconds, wait, 0, audio.camera_after());
+            let asked = CallAsked {
+                target: call::Target::Meeting(chat, meeting),
                 audio,
                 plan,
             };
@@ -373,7 +392,8 @@ fn write_action(lab: &Lab, command: Command) -> Result<(Action, Duration), Box<d
         | Command::Series { .. }
         | Command::Availability { .. }
         | Command::Call { .. }
-        | Command::Join { .. } => {
+        | Command::Join { .. }
+        | Command::JoinMeeting { .. } => {
             return Err("not a write".into());
         }
     };
@@ -554,7 +574,7 @@ async fn watch_calls(
 /// asked and, for the echo, the keyed tone came back.
 async fn place_call(lab: &Lab, asked: CallAsked, signals: &mut Signals, out: &mut impl Write) -> Outcome {
     let CallAsked { target, audio, plan } = asked;
-    let what = if matches!(target, call::Target::Join(_)) {
+    let what = if matches!(target, call::Target::Join(_) | call::Target::Meeting(..)) {
         "join"
     } else {
         "call"

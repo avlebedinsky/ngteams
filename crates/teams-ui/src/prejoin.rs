@@ -1,0 +1,547 @@
+//! A meeting's pre-join ([`PrejoinView`]), as Teams shows one before it goes into a meeting: the meeting's title, the
+//! account's camera preview with its switch, its device and its background filters, the computer's audio with the
+//! microphone's switch and the microphone and the speaker to use, then Cancel and Join now. Nothing has gone out while
+//! it shows: Join now is what goes into the meeting's call ([`calls::join_now`]), starting it when nobody has.
+//!
+//! - **The camera** starts off, and only the switch (the user's click) turns it on, for the preview alone
+//!   ([`CameraPreview`]): nothing is sent. Whatever the pre-join's switches say at Join now, the call turns them into
+//!   the user's mute and camera once it can take them ([`calls::Calls::next_choice`]).
+//! - **The background filters** are the call window's video effects: the picker beside the preview, its own preview
+//!   taking over the camera while it is open.
+//! - **The keys**: the call's own (Ctrl+Shift+M, Ctrl+Shift+O), Enter for Join now and Escape for Cancel.
+//!
+//! The view's trace has `prejoin shown` (with the chat), `prejoin camera` and `prejoin microphone` (on, off), and
+//! `prejoin closed` (cancel) or the `call asked` of its join, never a name.
+
+use std::sync::Arc;
+
+use gpui::{
+    Anchor, AnyElement, App, AppContext as _, AsyncApp, Context, Entity, FocusHandle, InteractiveElement as _,
+    IntoElement, KeyDownEvent, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Task, Window, div, px, rgb,
+};
+use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::menu::{DropdownMenu as _, PopupMenu};
+use gpui_component::switch::Switch;
+use gpui_component::{Selectable as _, Sizable as _};
+use teams_media::devices::catalog::DeviceKind;
+
+use crate::bridge::Core;
+use crate::call_stage::device_items;
+use crate::calls::{self, Calls, Prejoin};
+use crate::effects::{EffectsPicker, PickerPlace, PreviewSession};
+use crate::icons::{Glyph, icon_button, selected_by};
+use crate::settings::SettingsModel;
+use crate::settings_view;
+use crate::shell::{ToggleCameraCall, ToggleMuteCall};
+use crate::theme::{self, Palette};
+use crate::trace::{TraceLine, ViewTrace};
+use crate::video::{Tile, Tiles, VideoFeed};
+
+/// The view's key context.
+pub const CONTEXT: &str = "Prejoin";
+
+/// The preview's height, px.
+const PREVIEW_HEIGHT: f32 = 300.0;
+/// The audio box's width, px.
+const AUDIO_WIDTH: f32 = 340.0;
+/// The video effects' pane's width, px.
+const EFFECTS_WIDTH: f32 = 280.0;
+
+/// What the view is made of: the account's engine (its request side), its calls, the app's settings and the view trace.
+pub struct PrejoinParts {
+    pub core: Arc<dyn Core>,
+    pub calls: Entity<Calls>,
+    pub settings: Entity<SettingsModel>,
+    pub trace: Arc<ViewTrace>,
+}
+
+/// The pre-join (see the module docs). A GPUI entity, the window's root view.
+pub struct PrejoinView {
+    core: Arc<dyn Core>,
+    calls: Entity<Calls>,
+    settings: Entity<SettingsModel>,
+    trace: Arc<ViewTrace>,
+    /// The tiles drawing the camera's preview, in a build with one.
+    tiles: Option<Tiles>,
+    /// The preview while the camera's switch is on and the filters' pane isn't taking the camera over.
+    session: Option<PreviewSession>,
+    /// The background filters' pane, while it is open.
+    effects: Option<Entity<EffectsPicker>>,
+    focus: FocusHandle,
+    _waking: Option<Task<()>>,
+    _observing: [Subscription; 2],
+}
+
+impl PrejoinView {
+    /// The pre-join over `parts`.
+    pub fn new(parts: PrejoinParts, cx: &mut Context<Self>) -> Self {
+        let PrejoinParts {
+            core,
+            calls,
+            settings,
+            trace,
+        } = parts;
+        let observing = [
+            cx.observe(&calls, |_, _, cx| cx.notify()),
+            cx.observe(&settings, |_, _, cx| cx.notify()),
+        ];
+        let feed = settings.read(cx).camera_preview().map(|preview| preview.feed().clone());
+        let waking = feed.as_ref().map(|feed| wake_on_frames(feed, cx));
+        let tiles = feed.map(|feed| Tiles::new(feed, Arc::new(ViewTrace::off())));
+        let mut shown = TraceLine::new("prejoin", "shown");
+        if let Some(prejoin) = calls.read(cx).prejoin() {
+            shown = shown.conversation(&prejoin.to_join.chat);
+        }
+        trace.record(&shown);
+        Self {
+            core,
+            calls,
+            settings,
+            trace,
+            tiles,
+            session: None,
+            effects: None,
+            focus: cx.focus_handle(),
+            _waking: waking,
+            _observing: observing,
+        }
+    }
+
+    /// What takes the window's keyboard.
+    #[must_use]
+    pub fn focus_handle(&self) -> FocusHandle {
+        self.focus.clone()
+    }
+
+    /// Whether the camera shows its preview here.
+    #[must_use]
+    pub fn previewing(&self) -> bool {
+        self.session.is_some()
+    }
+
+    /// The camera's switch: the preview follows it (the user's click, never by itself).
+    pub fn set_camera(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.trace
+            .record(&TraceLine::new("prejoin", "camera").kind(if on { "on" } else { "off" }));
+        self.calls.update(cx, |calls, cx| calls.set_prejoin_camera(on, cx));
+        self.follow_camera(cx);
+        cx.notify();
+    }
+
+    /// The preview runs while the switch is on, unless the filters' pane took the camera over.
+    fn follow_camera(&mut self, cx: &mut Context<Self>) {
+        let wanted = self.calls.read(cx).prejoin().is_some_and(|prejoin| prejoin.camera);
+        if wanted && self.effects.is_none() {
+            if self.session.is_none() {
+                self.session = self
+                    .settings
+                    .read(cx)
+                    .camera_preview()
+                    .map(crate::effects::CameraPreview::start);
+            }
+        } else {
+            self.session = None;
+        }
+    }
+
+    /// The microphone's switch.
+    pub fn set_microphone(&mut self, on: bool, cx: &mut Context<Self>) {
+        self.trace
+            .record(&TraceLine::new("prejoin", "microphone").kind(if on { "on" } else { "off" }));
+        self.calls.update(cx, |calls, cx| calls.set_prejoin_muted(!on, cx));
+    }
+
+    /// Background filters: the pane opens or closes.
+    pub fn show_effects(&mut self, open: bool, cx: &mut Context<Self>) {
+        self.effects = open.then(|| {
+            let (settings, trace) = (self.settings.clone(), Arc::clone(&self.trace));
+            cx.new(|cx| EffectsPicker::new(settings, trace, PickerPlace::CallPane, cx))
+        });
+        self.follow_camera(cx);
+        cx.notify();
+    }
+
+    /// Join now: the choices stay with the call, the camera's preview gives way to it.
+    pub fn join(&mut self, cx: &mut Context<Self>) {
+        self.session = None;
+        self.effects = None;
+        calls::join_now(&self.calls, &self.core, &self.trace, cx);
+    }
+
+    /// Cancel: nothing went out, and nothing will.
+    pub fn cancel(&mut self, cx: &mut Context<Self>) {
+        self.session = None;
+        self.trace.record(&TraceLine::new("prejoin", "closed"));
+        self.calls.update(cx, Calls::cancel_prejoin);
+    }
+
+    fn key_down(&mut self, event: &KeyDownEvent, cx: &mut Context<Self>) {
+        match event.keystroke.key.as_str() {
+            "enter" => self.join(cx),
+            "escape" => self.cancel(cx),
+            _ => {}
+        }
+    }
+
+    fn toggle_microphone(&mut self, cx: &mut Context<Self>) {
+        if let Some(muted) = self.calls.read(cx).prejoin().map(|prejoin| prejoin.muted) {
+            self.set_microphone(muted, cx);
+        }
+    }
+
+    fn toggle_camera(&mut self, cx: &mut Context<Self>) {
+        if self.tiles.is_some()
+            && let Some(camera) = self.calls.read(cx).prejoin().map(|prejoin| prejoin.camera)
+        {
+            self.set_camera(!camera, cx);
+        }
+    }
+
+    /// The camera's preview, or that the camera is off.
+    fn preview(&mut self, prejoin: &Prejoin, palette: Palette) -> AnyElement {
+        let drawn = self.session.as_ref().and_then(|session| {
+            session.seen();
+            self.tiles.as_mut()?.fill(Tile::Own, 0)
+        });
+        let stopped = self.session.as_ref().is_some_and(|session| !session.running());
+        let body = match drawn {
+            Some(video) if !stopped => div().size_full().child(video).into_any_element(),
+            _ => {
+                let (glyph, words) = if stopped {
+                    (Glyph::VIDEO_OFF, "Your camera isn't available")
+                } else if prejoin.camera && self.effects.is_some() {
+                    (Glyph::VIDEO, "Your camera is previewed in Video effects")
+                } else if prejoin.camera {
+                    (Glyph::VIDEO, "Starting your camera")
+                } else {
+                    (Glyph::VIDEO_OFF, "Your camera is turned off")
+                };
+                div()
+                    .debug_selector(|| "prejoin-camera-off".to_owned())
+                    .size_full()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap_2()
+                    .text_color(rgb(palette.muted_foreground))
+                    .child(glyph.icon().size(px(22.0)))
+                    .child(words)
+                    .into_any_element()
+            }
+        };
+        div()
+            .debug_selector(|| "prejoin-preview".to_owned())
+            .h(px(PREVIEW_HEIGHT))
+            .w_full()
+            .overflow_hidden()
+            .bg(rgb(palette.background))
+            .child(body)
+            .into_any_element()
+    }
+
+    /// Under the preview: the camera's switch and device, and the background filters.
+    fn camera_row(&self, prejoin: &Prejoin, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
+        let glyph = if prejoin.camera { Glyph::VIDEO } else { Glyph::VIDEO_OFF };
+        let weak = cx.entity().downgrade();
+        let switch =
+            Switch::new("prejoin-camera")
+                .checked(prejoin.camera)
+                .on_click(move |on: &bool, _, cx: &mut App| {
+                    let _ = weak.update(cx, |this, cx| this.set_camera(*on, cx));
+                });
+        let open = self.effects.is_some();
+        div()
+            .h(px(48.0))
+            .px_3()
+            .flex()
+            .items_center()
+            .gap_2()
+            .border_t_1()
+            .border_color(rgb(palette.border))
+            .child(glyph.icon().size(px(18.0)))
+            .children(self.devices_menu("prejoin-camera-devices", CAMERAS, "Choose camera", cx))
+            .child(selected_by("prejoin-camera", switch))
+            .child(div().w(px(1.0)).h(px(24.0)).mx_2().bg(rgb(palette.border)))
+            .child(selected_by(
+                "prejoin-effects",
+                Button::new("prejoin-effects")
+                    .ghost()
+                    .small()
+                    .icon(Glyph::SPARKLES.icon())
+                    .label("Background filters")
+                    .selected(open)
+                    .on_click(cx.listener(move |this, _, _, cx| this.show_effects(!open, cx))),
+            ))
+    }
+
+    /// The computer's audio: the microphone's device and switch, and the speaker's device.
+    fn audio(&self, prejoin: &Prejoin, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
+        let weak = cx.entity().downgrade();
+        let switch =
+            Switch::new("prejoin-microphone")
+                .checked(!prejoin.muted)
+                .on_click(move |on: &bool, _, cx: &mut App| {
+                    let _ = weak.update(cx, |this, cx| this.set_microphone(*on, cx));
+                });
+        let mic = if prejoin.muted { Glyph::MIC_OFF } else { Glyph::MIC };
+        let named = |kind: DeviceKind, cx: &App| -> SharedString {
+            let settings = self.settings.read(cx);
+            settings
+                .devices()
+                .and_then(|list| {
+                    settings_view::device_choices(kind, settings.settings(), list)
+                        .into_iter()
+                        .find(|choice| choice.chosen)
+                })
+                .map_or_else(|| SYSTEM_DEVICE.into(), |choice| choice.label)
+        };
+        let microphone = named(DeviceKind::Microphone, cx);
+        let speaker = named(DeviceKind::Speaker, cx);
+        div()
+            .debug_selector(|| "prejoin-audio".to_owned())
+            .w(px(AUDIO_WIDTH))
+            .flex_none()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(palette.border))
+            .bg(rgb(palette.surface))
+            .flex()
+            .flex_col()
+            .child(
+                div()
+                    .px_4()
+                    .py_3()
+                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                    .border_b_1()
+                    .border_color(rgb(palette.border))
+                    .child("Computer audio"),
+            )
+            .child(
+                div()
+                    .px_4()
+                    .py_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(mic.icon().size(px(18.0)))
+                    .child(div().flex_1().min_w_0().truncate().text_sm().child(microphone))
+                    .children(self.devices_menu("prejoin-microphone-devices", MICROPHONES, "Choose microphone", cx))
+                    .child(selected_by("prejoin-microphone", switch)),
+            )
+            .child(
+                div()
+                    .px_4()
+                    .pb_3()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .child(Glyph::VOLUME.icon().size(px(18.0)))
+                    .child(div().flex_1().min_w_0().truncate().text_sm().child(speaker))
+                    .children(self.devices_menu("prejoin-speaker-devices", SPEAKERS, "Choose speaker", cx)),
+            )
+    }
+
+    /// The menu of the devices of `kinds`, chosen as the settings choose them; none while the devices aren't listed.
+    fn devices_menu(
+        &self,
+        id: &'static str,
+        kinds: &'static [DeviceKind],
+        tip: &'static str,
+        cx: &Context<Self>,
+    ) -> Option<AnyElement> {
+        self.settings.read(cx).devices()?;
+        let model = self.settings.clone();
+        Some(
+            selected_by(
+                id,
+                Button::new(id)
+                    .ghost()
+                    .xsmall()
+                    .icon(Glyph::CHEVRON_DOWN.icon())
+                    .tooltip(tip)
+                    .dropdown_menu_with_anchor(Anchor::TopLeft, move |menu: PopupMenu, _, cx| {
+                        device_items(menu, kinds, &model, cx)
+                    }),
+            )
+            .into_any_element(),
+        )
+    }
+
+    /// Cancel and Join now; while the join goes, that it does.
+    fn actions(prejoin: &Prejoin, cx: &mut Context<Self>) -> gpui::Div {
+        div()
+            .flex()
+            .items_center()
+            .justify_end()
+            .gap_2()
+            .child(selected_by(
+                "prejoin-cancel",
+                Button::new("prejoin-cancel")
+                    .label("Cancel")
+                    .outline()
+                    .on_click(cx.listener(|this, _, _, cx| this.cancel(cx))),
+            ))
+            .child(selected_by(
+                "prejoin-join",
+                Button::new("prejoin-join")
+                    .label(if prejoin.joining { "Joining…" } else { "Join now" })
+                    .primary()
+                    .loading(prejoin.joining)
+                    .on_click(cx.listener(|this, _, _, cx| this.join(cx))),
+            ))
+    }
+
+    /// The background filters' pane, while it is open.
+    fn effects_pane(&self, palette: Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let picker = self.effects.clone()?;
+        Some(
+            div()
+                .debug_selector(|| "prejoin-effects-pane".to_owned())
+                .w(px(EFFECTS_WIDTH))
+                .flex_none()
+                .h_full()
+                .flex()
+                .flex_col()
+                .bg(rgb(palette.surface))
+                .border_l_1()
+                .border_color(rgb(palette.border))
+                .child(
+                    div()
+                        .h(px(48.0))
+                        .px_4()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .justify_between()
+                        .child(
+                            div()
+                                .text_lg()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .child("Video effects"),
+                        )
+                        .child(selected_by(
+                            "prejoin-effects-close",
+                            icon_button("prejoin-effects-close", Glyph::X, "Close video effects")
+                                .small()
+                                .on_click(cx.listener(|this, _, _, cx| this.show_effects(false, cx))),
+                        )),
+                )
+                .child(
+                    div()
+                        .id("prejoin-effects-scroll")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .px_3()
+                        .pb_3()
+                        .child(picker),
+                )
+                .into_any_element(),
+        )
+    }
+}
+
+impl Render for PrejoinView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let palette = theme::current(cx);
+        let Some(prejoin) = self.calls.read(cx).prejoin().cloned() else {
+            return div().id("prejoin").size_full().bg(rgb(palette.background));
+        };
+        window.set_window_title(&prejoin.to_join.title);
+        let refused = self.calls.read(cx).refused().map(|refused| {
+            div()
+                .debug_selector(|| "prejoin-refused".to_owned())
+                .px_3()
+                .py_2()
+                .rounded_md()
+                .bg(rgb(crate::calendar_view::mix(palette.surface, theme::DANGER, 100)))
+                .text_sm()
+                .child(SharedString::from(refused.text.clone()))
+        });
+        let video = self.tiles.is_some();
+        let camera = video.then(|| {
+            div()
+                .flex_1()
+                .min_w_0()
+                .rounded_lg()
+                .overflow_hidden()
+                .border_1()
+                .border_color(rgb(palette.border))
+                .bg(rgb(palette.surface))
+                .child(self.preview(&prejoin, palette))
+                .child(self.camera_row(&prejoin, palette, cx))
+        });
+        let actions = Self::actions(&prejoin, cx);
+        let audio = self.audio(&prejoin, palette, cx);
+        let effects = self.effects_pane(palette, cx);
+        div()
+            .debug_selector(|| "prejoin".to_owned())
+            .id("prejoin")
+            .key_context(CONTEXT)
+            .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &ToggleMuteCall, _, cx| this.toggle_microphone(cx)))
+            .on_action(cx.listener(|this, _: &ToggleCameraCall, _, cx| this.toggle_camera(cx)))
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, _, cx| this.key_down(event, cx)))
+            .size_full()
+            .flex()
+            .bg(rgb(palette.background))
+            .text_color(rgb(palette.foreground))
+            .child(
+                div()
+                    .id("prejoin-scroll")
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .overflow_y_scroll()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .p_6()
+                    .child(
+                        div()
+                            .w_full()
+                            .max_w(px(900.0))
+                            .flex()
+                            .flex_col()
+                            .gap_4()
+                            .child(
+                                div()
+                                    .debug_selector(|| "prejoin-title".to_owned())
+                                    .text_center()
+                                    .text_xl()
+                                    .font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .child(SharedString::from(prejoin.to_join.title.clone())),
+                            )
+                            .child(div().flex().items_start().gap_4().children(camera).child(audio))
+                            .children(refused)
+                            .child(actions),
+                    ),
+            )
+            .children(effects)
+    }
+}
+
+/// What names a device while the devices aren't listed.
+const SYSTEM_DEVICE: &str = "The system's default";
+
+/// The camera's menu.
+const CAMERAS: &[DeviceKind] = &[DeviceKind::Camera];
+/// The microphone's menu.
+const MICROPHONES: &[DeviceKind] = &[DeviceKind::Microphone];
+/// The speaker's menu.
+const SPEAKERS: &[DeviceKind] = &[DeviceKind::Speaker];
+
+/// A new frame wakes the view, which draws the newest one.
+fn wake_on_frames(feed: &VideoFeed, cx: &mut Context<PrejoinView>) -> Task<()> {
+    let woken = feed.woken();
+    cx.spawn(async move |this, cx: &mut AsyncApp| {
+        while woken.recv().await.is_ok() {
+            if this.update(cx, |_, cx| cx.notify()).is_err() {
+                return;
+            }
+        }
+    })
+}

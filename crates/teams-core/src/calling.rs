@@ -78,8 +78,8 @@ use teams_call::{
 };
 use teams_fence::Mri;
 use teams_proto::{
-    ChannelParameters, Client, Credentials, EndpointRegistrar, HttpError, HttpTransport, MediaContent, Mutating,
-    Transport,
+    ChannelParameters, Client, Credentials, EndpointRegistrar, HttpError, HttpTransport, MediaContent, MeetingInfo,
+    Mutating, Transport,
 };
 use teams_trouter::{CallResponder, CallResponse, Ignored, PushEvent, Trouter, TrouterCredentials, TrouterHandle};
 use tokio::sync::{mpsc, oneshot};
@@ -140,6 +140,9 @@ pub enum CallAction {
     TestCall { echo: Mri },
     /// A join of the running call in the group chat `chat`, one an invitation named.
     Join { chat: String },
+    /// The account goes into the call of the meeting whose chat is `chat`: it starts the call when nobody has yet, and
+    /// joins it when it runs.
+    JoinMeeting { chat: String, meeting: MeetingInfo },
     /// The answer of an invitation the engine offered ([`Event::IncomingCall`]).
     Answer { call: CallId },
     /// The decline of an invitation the engine offered.
@@ -1147,7 +1150,9 @@ where
             Act::Place(Placement::Chat { group_chat: None, .. } | Placement::TestCall { .. }) => {
                 (None, None, VideoKind::OneToOne)
             }
-            Act::Place(Placement::Chat { .. }) | Act::Join(_) => (None, None, VideoKind::Group),
+            Act::Place(Placement::Chat { .. } | Placement::Meeting { .. }) | Act::Join(_) => {
+                (None, None, VideoKind::Group)
+            }
             // only a start, a join or an answer sets its media up
             _ => return refuse(reply, CallError::NotNow.into()),
         };

@@ -51,12 +51,12 @@ pub(crate) fn start(
         Placement::Chat {
             group_chat: Some(_),
             ..
-        }
+        } | Placement::Meeting { .. }
     );
     match placement {
         Placement::TestCall { .. } => offer.required_features = None,
         Placement::Chat { group_chat: None, .. } => offer.required_features = Some(ONE_TO_ONE_FEATURES.to_owned()),
-        Placement::Chat { .. } => {}
+        Placement::Chat { .. } | Placement::Meeting { .. } => {}
     }
     call.modalities = modalities(group);
     let parts = StartParts {
@@ -75,6 +75,7 @@ pub(crate) fn start(
             let callees = callees.iter().map(invitee).collect::<Result<Vec<_>, _>>()?;
             StartCall::in_chat(&call.context, &parts, &callees, group_chat.as_deref())?
         }
+        Placement::Meeting { chat, meeting } => StartCall::in_meeting(&call.context, &parts, chat, meeting)?,
     };
     Ok(CallWrite::Start(start))
 }

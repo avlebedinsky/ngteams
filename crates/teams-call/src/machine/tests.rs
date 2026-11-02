@@ -645,6 +645,73 @@ fn failed() -> Outcome {
 }
 
 /// An invitation to `callee` from a in the group chat `chat`, its conversation `Conversation<n>`.
+#[test]
+fn a_meeting_goes_from_its_start_to_joining_rings_nobody_and_connects_on_its_acceptance() {
+    let meeting = teams_proto::MeetingInfo {
+        organizer_id: "00000000-0000-4000-8000-00000000000b".to_owned(),
+        tenant_id: "00000000-0000-4000-8000-0000000000f1".to_owned(),
+    };
+    let placement = Placement::Meeting {
+        chat: "19:meeting_MadeUpMeeting0001@thread.v2".to_owned(),
+        meeting,
+    };
+    let now = Instant::now();
+    let mut calls = Calls::new(identity(A));
+    calls.set_push_url(PUSH).unwrap();
+    let call = calls.place(&placement, media(), now).unwrap();
+    let placed = effects(&mut calls);
+    let [(start, "start")] = sent(&placed)[..] else {
+        panic!("{placed:#?}");
+    };
+    calls.on_outcome(start, &ok(&conversation_answer()), now);
+    assert_eq!(
+        events(&effects(&mut calls)),
+        [CallEvent::State {
+            call,
+            state: CallState::Joining
+        }],
+        "nobody rings"
+    );
+}
+
+#[test]
+fn a_meetings_running_call_tells_who_is_in_it_from_the_starts_answer() {
+    let meeting = teams_proto::MeetingInfo {
+        organizer_id: "00000000-0000-4000-8000-00000000000b".to_owned(),
+        tenant_id: "00000000-0000-4000-8000-0000000000f1".to_owned(),
+    };
+    let placement = Placement::Meeting {
+        chat: "19:meeting_MadeUpMeeting0001@thread.v2".to_owned(),
+        meeting,
+    };
+    let now = Instant::now();
+    let mut calls = Calls::new(identity(A));
+    calls.set_push_url(PUSH).unwrap();
+    let call = calls.place(&placement, media(), now).unwrap();
+    let placed = effects(&mut calls);
+    let [(start, "start")] = sent(&placed)[..] else {
+        panic!("{placed:#?}");
+    };
+    let mut answer = conversation_answer();
+    answer["roster"] = json!({"type": "Delta", "participants": {
+        A: {"version": 2, "state": "active", "endpoints": {"e": {"call": {}}}},
+        B: {"version": 7, "state": "active", "details": {"displayName": "Lab Bee"}, "endpoints": {"e": {"call": {}}}},
+    }});
+    calls.on_outcome(start, &ok(&answer), now);
+    let told = events(&effects(&mut calls));
+    let [
+        CallEvent::Participants { call: of, participants },
+        CallEvent::State { .. },
+    ] = &told[..]
+    else {
+        panic!("{told:#?}");
+    };
+    assert_eq!(*of, call);
+    assert_eq!(participants.len(), 1, "the account left out");
+    assert_eq!(participants[0].mri, Mri::new(B));
+    assert_eq!(participants[0].name.as_deref(), Some("Lab Bee"));
+}
+
 fn group_invitation(callee: &str, chat: &str, n: u8) -> Value {
     let gp = json!({
         "callNotification": {

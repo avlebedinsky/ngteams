@@ -12,10 +12,10 @@
 //!   days shown whenever they change, on Refresh and every few minutes while the calendar is shown; what a span read
 //!   last is shown at once while it is read again. A declined meeting isn't shown, as in Teams.
 //! - **An event clicked** opens its card: its title, when, the series it belongs to, where, the organizer and the
-//!   account's answer, who is invited, its text; for a Teams meeting Join (the call machinery's join of the meeting's
-//!   running call, offered only once a call there is known: [`crate::calls::Calls::joinable`]), "Chat with
-//!   participants" (the meeting's chat) and "Copy link". A build that shows no call, and the read-only mode, offer no
-//!   Join.
+//!   account's answer, who is invited, its text; for a Teams meeting the split Join (any time, started or not: its
+//!   pre-join, [`crate::prejoin`], which starts the meeting's call when nobody has), "Chat with
+//!   participants" (the meeting's chat); Join's menu has Join and "Copy join link". A build that shows no call, and the
+//!   read-only mode, offer no Join (and Copy join link beside Chat instead).
 //! - **New** (its menu: an event or a Teams meeting), a double click on an empty half hour of the grid, and an
 //!   event's Edit (its card's, or a double click on it) open the scheduling form in a window of its own
 //!   ([`crate::event_form`]); a save there reads the days shown again. The card of the account's own meeting offers
@@ -45,7 +45,7 @@ use teams_core::CalendarEvent;
 
 use crate::bridge::Core;
 use crate::calendar::{self, Mode, Shown, Span};
-use crate::calls::Calls;
+use crate::calls::{Calls, MeetingToJoin};
 use crate::clock::HourCycle;
 use crate::icons::{Glyph, selected_by};
 use crate::theme::{self, Palette};
@@ -76,7 +76,7 @@ pub enum CalendarViewEvent {
     /// Open the chat (a meeting's chat).
     OpenChat(String),
     /// Join the running call of the meeting whose chat this is.
-    Join(String),
+    Join(MeetingToJoin),
 }
 
 /// One of the calendar's switches.

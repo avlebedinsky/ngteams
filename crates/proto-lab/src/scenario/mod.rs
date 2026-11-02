@@ -46,6 +46,8 @@
 //!   title and cancels it; recorded.
 //! - [`channel_create`] (account a, fail-closed as `load`, every write that could make a channel force-denied): what the
 //!   "Create a channel" dialog offers and sends for each type and layout; recorded, nothing made.
+//! - [`ab_meeting_join`] (account a, as `ab-meeting`): a schedules a Teams meeting with b, opens its join link and clicks
+//!   the pre-join's Join now; what follows the subscription is held back; recorded.
 //! - [`search`] (account a, fail-closed as `load`): a searches from the title bar (the suggestions as it types, the
 //!   results and each of their tabs, a message found opened); recorded.
 //!
@@ -61,6 +63,7 @@ pub mod ab_chat_full;
 pub mod ab_file;
 pub mod ab_image;
 pub mod ab_meeting;
+pub mod ab_meeting_join;
 pub mod ab_trouter;
 pub mod abc_call;
 pub mod abc_call_mixed;
@@ -141,6 +144,9 @@ pub enum ScenarioName {
     /// Account a schedules a Teams meeting with b, changes its title and cancels it, after the same enforcement test;
     /// recorded.
     AbMeeting,
+    /// Account a goes into a meeting nobody started, from its pre-join, after the same enforcement test; what follows
+    /// the pre-join's subscription held back; recorded.
+    AbMeetingJoin,
     /// Account a searches from the title bar: the suggestions, the results and their tabs; recorded.
     Search,
     /// Account a fills the web client's "Create a channel" dialog for each channel type and layout, every write that
@@ -180,6 +186,7 @@ impl ScenarioName {
             Self::AbcCallMixed => "abc-call-mixed",
             Self::AbCallApp => "ab-call-app",
             Self::AbMeeting => "ab-meeting",
+            Self::AbMeetingJoin => "ab-meeting-join",
             Self::Search => "search",
             Self::ChannelCreate => "channel-create",
             Self::OwnPresenceActivity => "own-presence-activity",
@@ -438,6 +445,7 @@ async fn run_other(
         ScenarioName::ChatShapes => chat_shapes::run(paths, options).await,
         ScenarioName::AbcEveryone => abc_everyone::run(paths, options).await,
         ScenarioName::AbMeeting => ab_meeting::run(paths, options).await,
+        ScenarioName::AbMeetingJoin => ab_meeting_join::run(paths, options).await,
         ScenarioName::Search => search::run(paths, options).await,
         ScenarioName::ChannelCreate => channel_create::run(paths, options).await,
         // a call or own presence: `run` sends those to `run_call` and `own_presence`

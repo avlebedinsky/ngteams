@@ -14,6 +14,9 @@
 //!   window to the front.
 //! - **The lab app** opens it on the same display as its main window: inside the UI sandbox, where its main window is.
 //!
+//! - **A meeting's pre-join** ([`PrejoinView`]) has its own window of the same size, open while the pre-join shows and
+//!   no call is up: Join now's call takes over in the call window, and closing it is Cancel.
+//!
 //! What it does is traced on its account's trace: `call-window opened` (the call's number and kind), `call-window
 //! raised`, `call-window closed` (the call's number, and `left` when its closing left the call).
 
@@ -28,6 +31,7 @@ use teams_core::{CallId, CallStatus};
 
 use crate::call_stage::{CallStage, CallStageEvent, ChatNamer, StageParts};
 use crate::calls::{self, Ask, Calls};
+use crate::prejoin::{PrejoinParts, PrejoinView};
 use crate::shell::ShellParts;
 use crate::trace::TraceLine;
 use crate::window::KitRoot;
@@ -64,11 +68,18 @@ struct Open {
     _events: Subscription,
 }
 
+/// The pre-join's window open, for which account.
+struct OpenPrejoin {
+    key: String,
+    window: WindowHandle<KitRoot>,
+}
+
 /// The app's call window (see the module docs). A GPUI entity the desktop holds.
 pub struct CallWindows {
     app_id: String,
     accounts: Vec<Followed>,
     open: Option<Open>,
+    prejoin: Option<OpenPrejoin>,
     /// The call whose window the user closed: not opened again by itself.
     closed: Option<(String, CallId)>,
     namer: Option<AccountNamer>,
@@ -113,6 +124,7 @@ impl CallWindows {
             app_id: app_id.into(),
             accounts: Vec::new(),
             open: None,
+            prejoin: None,
             closed: None,
             namer: None,
             _closing: closing,
@@ -166,6 +178,63 @@ impl CallWindows {
             .map(|account| &account.parts.models.calls)
     }
 
+    /// The pre-join's window follows the calls: open while one shows and no call is up.
+    fn follow_prejoin(&mut self, call_up: bool, cx: &mut Context<Self>) {
+        let wanted = (!call_up)
+            .then(|| {
+                self.accounts
+                    .iter()
+                    .find(|account| account.parts.models.calls.read(cx).prejoin().is_some())
+                    .map(|account| account.key.clone())
+            })
+            .flatten();
+        if self.prejoin.as_ref().map(|open| open.key.as_str()) == wanted.as_deref() {
+            return;
+        }
+        if let Some(open) = self.prejoin.take() {
+            remove(open.window, cx);
+        }
+        if let Some(key) = wanted {
+            self.open_prejoin(&key, cx);
+        }
+    }
+
+    /// Opens the pre-join's window of account `key`, the keyboard on it.
+    fn open_prejoin(&mut self, key: &str, cx: &mut Context<Self>) {
+        let Some(account) = self.accounts.iter().find(|account| account.key == key) else {
+            return;
+        };
+        let parts = account.parts.clone();
+        let view_parts = PrejoinParts {
+            core: Arc::clone(&parts.core),
+            calls: parts.models.calls.clone(),
+            settings: parts.settings.clone(),
+            trace: Arc::clone(&parts.trace),
+        };
+        let options = self.options(cx);
+        let calls = parts.models.calls.clone();
+        let opened = cx.open_window(options, |window, cx| {
+            let view = cx.new(|cx| PrejoinView::new(view_parts, cx));
+            view.read(cx).focus_handle().focus(window, cx);
+            window.on_window_should_close(cx, move |_, cx| {
+                calls.update(cx, Calls::cancel_prejoin);
+                true
+            });
+            cx.new(|cx| KitRoot::new(view, window, cx))
+        });
+        let Ok(window) = opened else { return };
+        self.prejoin = Some(OpenPrejoin {
+            key: key.to_owned(),
+            window,
+        });
+    }
+
+    /// The pre-join's window that shows, for a test to read.
+    #[must_use]
+    pub fn prejoin_window(&self) -> Option<WindowHandle<KitRoot>> {
+        self.prejoin.as_ref().map(|open| open.window)
+    }
+
     /// The calls changed: the window opens for a call up (closing one of another call), and closes once its call
     /// ended by the user's hang-up (one that ended otherwise stays on its end, a test call's on its results).
     fn follow(&mut self, cx: &mut Context<Self>) {
@@ -174,6 +243,7 @@ impl CallWindows {
             let active = account.parts.models.calls.read(cx).call()?;
             (active.status != CallStatus::Declining).then(|| (account.key.clone(), active.id))
         });
+        self.follow_prejoin(up.is_some(), cx);
         let Some((key, call)) = up else {
             self.closed = None;
             let stays = self.open.as_ref().is_some_and(|open| {
@@ -328,6 +398,10 @@ impl CallWindows {
 
     /// "Return to call": the window to the front; opened again when its call is still up and the user closed it.
     fn raise(&mut self, cx: &mut Context<Self>) {
+        if let Some(open) = &self.prejoin {
+            let _ = open.window.update(cx, |_, window, _| window.activate_window());
+            return;
+        }
         if let Some(open) = &self.open {
             if let Some(account) = self.accounts.iter().find(|account| account.key == open.key) {
                 account

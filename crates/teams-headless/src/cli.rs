@@ -224,6 +224,21 @@ pub enum Command {
         #[arg(long, default_value_t = 180)]
         ring_wait: u64,
     },
+    /// Goes into a meeting's call by its join link, as the calendar's Join does (the same media, hold, hang-up and
+    /// output): it starts the call when nobody has, and joins it when it runs. A write others see, through the fence
+    /// (judged by the meeting's chat, read fresh).
+    JoinMeeting {
+        /// The meeting's join link (`https://teams.microsoft.com/l/meetup-join/…`).
+        link: String,
+        #[command(flatten)]
+        audio: CallAudio,
+        /// Seconds the call is held once its media connected.
+        #[arg(long, default_value_t = 45)]
+        seconds: u64,
+        /// Seconds the call may take to connect, from its placing.
+        #[arg(long, default_value_t = 60)]
+        wait: u64,
+    },
 }
 
 /// A call's audio on files: the microphone's tone and how it is keyed, the tone looked for in the far end's recording,

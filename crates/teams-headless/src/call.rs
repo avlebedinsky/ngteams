@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::Value;
-use teams_core::{CallAction, CallId, CallStatus, End, EngineHandle, Event, RegistrationReport};
+use teams_core::{CallAction, CallId, CallStatus, End, EngineHandle, Event, MeetingInfo, RegistrationReport};
 use teams_fence::Mri;
 use teams_media::devices::{SAMPLE_RATE, wav};
 use teams_media::tone::Tone;
@@ -38,6 +38,8 @@ pub enum Target {
     /// A join of the running call in this group chat, late: once an invitation to it rang here and its ring ended
     /// unanswered (the machine joins only a running call an invitation named).
     Join(String),
+    /// The call of the meeting whose chat this is, started or not, as the calendar's Join goes into it.
+    Meeting(String, MeetingInfo),
 }
 
 /// How long each part of a call may take or lasts.
@@ -147,6 +149,7 @@ pub async fn run(
             }
             CallAction::Join { chat }
         }
+        Target::Meeting(chat, meeting) => CallAction::JoinMeeting { chat, meeting },
     };
     let placed = tokio::time::Instant::now();
     writeln!(out, "{} call_placing", now_ms())?;

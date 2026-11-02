@@ -29,6 +29,7 @@ fn event(id: &str, start: EventTime, end: EventTime) -> Shown {
         cancelled: false,
         online: false,
         join_url: None,
+        meeting: None,
         meeting_chat: None,
         location: None,
         organizer_name: None,

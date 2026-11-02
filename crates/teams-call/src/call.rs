@@ -45,6 +45,8 @@ pub(crate) enum Side {
     Placed { echo: Option<Mri> },
     /// The account joined the running call at `conversation` in the group chat `chat`.
     Joined { chat: String, conversation: CallLink },
+    /// The account went into a meeting's call, started or not: nobody rings, the acceptance is awaited as a join's.
+    Meeting,
     /// The account was invited.
     Invited(Box<Invitation>),
 }
@@ -280,7 +282,7 @@ impl Call {
     ) -> Self {
         let phase = match side {
             Side::Invited(_) => Phase::Attaching,
-            Side::Placed { .. } | Side::Joined { .. } => Phase::Placing,
+            Side::Placed { .. } | Side::Joined { .. } | Side::Meeting => Phase::Placing,
         };
         Self {
             id,
@@ -396,7 +398,7 @@ impl Call {
     pub(crate) fn invitation(&self) -> Option<&Invitation> {
         match &self.side {
             Side::Invited(invitation) => Some(invitation),
-            Side::Placed { .. } | Side::Joined { .. } => None,
+            Side::Placed { .. } | Side::Joined { .. } | Side::Meeting => None,
         }
     }
 
@@ -408,7 +410,7 @@ impl Call {
                 .group_chat
                 .as_deref()
                 .map(|chat| (chat, &invitation.conversation)),
-            Side::Placed { .. } => None,
+            Side::Placed { .. } | Side::Meeting => None,
         }
     }
 

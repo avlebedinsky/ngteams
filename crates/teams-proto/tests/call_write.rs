@@ -39,6 +39,7 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 const LAB_A: &str = "8:orgid:00000000-0000-4000-8000-00000000000a";
+const MEETING: &str = "19:meeting_MadeUpMeeting0001@thread.v2";
 const LAB_B: &str = "8:orgid:00000000-0000-4000-8000-00000000000b";
 const LAB_C: &str = "8:orgid:00000000-0000-4000-8000-00000000000c";
 const OUTSIDER: &str = "8:orgid:00000000-0000-4000-8000-0000000000ff";
@@ -231,6 +232,9 @@ impl MembershipSource for LabChats {
             match scope {
                 Scope::Conversation { id } if id == GROUP => {
                     Membership::Complete(vec![Mri::new(LAB_A), Mri::new(LAB_B), Mri::new(LAB_C)])
+                }
+                Scope::Conversation { id } if id == MEETING => {
+                    Membership::Complete(vec![Mri::new(LAB_A), Mri::new(LAB_B)])
                 }
                 Scope::Conversation { id } if Some(id) == one_to_one_id(LAB_A, LAB_B).as_ref() => {
                     Membership::Complete(vec![Mri::new(LAB_A), Mri::new(LAB_B)])
@@ -440,6 +444,40 @@ async fn the_test_call_start_goes_to_the_flight_proxy_with_the_skypetoken_and_re
         "application/sdp-ngc-1.0"
     );
     assert_eq!(lab.decide(&metadata).await, Ok(()), "the answer registered the call");
+}
+
+#[tokio::test]
+async fn a_meetings_start_targets_its_chat_names_nobody_and_carries_its_organizer() {
+    let meeting = MeetingInfo {
+        organizer_id: "00000000-0000-4000-8000-00000000000b".into(),
+        tenant_id: "00000000-0000-4000-8000-0000000000f1".into(),
+    };
+    let parts = start_parts(PUSH_A, LAB_A, None);
+    let start = StartCall::in_meeting(&context(), &parts, MEETING, &meeting).unwrap();
+    let target = Target::new(WriteKind::Call, Scope::Conversation { id: MEETING.into() })
+        .with_added([Mri::new(LAB_A)])
+        .with_sender(Mri::new(LAB_A));
+    assert_eq!(start.target(), target);
+
+    let lab = lab(LAB_A).await;
+    lab.answers("POST", CALL_START_URL, conversation_answer("Synthetic1"))
+        .await;
+    let (_, request) = lab.send(start).await;
+    assert_eq!(
+        classified(&request, CALL_START_URL, &Policy::new()),
+        Contact::Write(target)
+    );
+    let sent: Value = serde_json::from_slice(&request.body).unwrap();
+    assert_eq!(sent["participants"]["to"], json!([]), "nobody rings");
+    assert_eq!(sent["conversationRequest"]["suppressDialout"], json!(true));
+    assert_eq!(sent["groupChat"], json!({"threadId": MEETING, "messageId": "0"}));
+    assert_eq!(
+        sent["meetingInfo"],
+        json!({"tenantId": meeting.tenant_id, "organizerId": meeting.organizer_id, "meetingType": 1})
+    );
+
+    let group = StartCall::in_meeting(&context(), &parts, GROUP, &meeting);
+    assert!(group.is_err(), "a group chat's isn't a meeting's start");
 }
 
 #[tokio::test]

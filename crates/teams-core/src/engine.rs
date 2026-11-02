@@ -1975,6 +1975,7 @@ where
             },
             CallAction::TestCall { echo } => Act::Place(Placement::TestCall { echo }),
             CallAction::Join { chat } => Act::Join(chat),
+            CallAction::JoinMeeting { chat, meeting } => Act::Place(Placement::Meeting { chat, meeting }),
             CallAction::Answer { call } => Act::Answer(call),
             CallAction::Decline { call } => Act::Decline(call),
             CallAction::HangUp { call } => Act::HangUp(call),

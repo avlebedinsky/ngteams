@@ -14,7 +14,7 @@ use gpui::{AppContext as _, Entity, Modifiers, TestAppContext, VisualTestContext
 use teams_core::{EngineError, EventResponse, EventWrite, EventWritten};
 use teams_ui::ViewTrace;
 use teams_ui::calendar::{Mode, Shown};
-use teams_ui::calendar_view::CalendarView;
+use teams_ui::calendar_view::{CalendarView, CalendarViewEvent};
 
 fn date(day: u32) -> NaiveDate {
     NaiveDate::from_ymd_opt(2026, 10, day).unwrap()
@@ -220,6 +220,94 @@ fn the_read_only_card_offers_no_edit_or_remove_and_escape_closes_it() {
     draw(cx);
     assert!(cx.update(|_, cx| view.read(cx).card().is_none()));
     assert!(rig.core.calendar.lock().unwrap().writes.is_empty());
+}
+
+/// A Teams meeting nobody started, of someone else's series, as the calendar view gives one.
+fn series_meeting(hour: u8) -> teams_core::CalendarEvent {
+    let mut meeting = event("series-occurrence", hour);
+    meeting.is_organizer = false;
+    meeting.online = true;
+    meeting.kind = teams_core::EventKind::Occurrence;
+    meeting.join_url = Some("https://teams.microsoft.com/l/meetup-join/made-up".to_owned());
+    meeting.meeting_chat = Some("19:meeting_MadeUpMeeting0001@thread.v2".to_owned());
+    meeting.meeting = Some(teams_core::MeetingInfo {
+        organizer_id: "00000000-0000-4000-8000-00000000000b".to_owned(),
+        tenant_id: "00000000-0000-4000-8000-0000000000f1".to_owned(),
+    });
+    meeting
+}
+
+fn calling_rig() -> Rig {
+    Rig::start_with(|cx| teams_ui::Models::with_calls(None, cx))
+}
+
+#[test]
+fn a_meetings_card_offers_join_any_time_and_join_goes_to_its_pre_join() {
+    let rig = calling_rig();
+    let (view, cx, _) = window(&rig);
+    let told = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let events = Arc::clone(&told);
+    cx.update(|_, cx| {
+        cx.subscribe(&view, move |_, event: &CalendarViewEvent, _| {
+            if let CalendarViewEvent::Join(to_join) = event {
+                events.lock().unwrap().push(to_join.clone());
+            }
+        })
+        .detach();
+    });
+    let shown = Shown::of(std::rc::Rc::new(series_meeting(9))).unwrap();
+    let title = shown.title();
+    cx.update(|_, cx| view.update(cx, |view, cx| view.open_card(shown, cx)));
+    draw(cx);
+    assert!(
+        cx.debug_bounds("calendar-card-join-more").is_some(),
+        "its menu's chevron"
+    );
+    assert!(cx.debug_bounds("calendar-card-chat").is_some());
+    assert!(
+        cx.debug_bounds("calendar-card-copy-link").is_none(),
+        "copying is in Join's menu, as in Teams"
+    );
+    assert!(
+        cx.debug_bounds("calendar-card-not-started").is_none(),
+        "no note of waiting"
+    );
+    click(cx, "calendar-card-join");
+    let told = told.lock().unwrap();
+    assert_eq!(told.len(), 1);
+    assert_eq!(told[0].chat, "19:meeting_MadeUpMeeting0001@thread.v2");
+    assert_eq!(told[0].title, title);
+    assert!(cx.update(|_, cx| view.read(cx).card().is_none()), "the card gives way");
+}
+
+#[test]
+fn joins_menu_offers_join_and_copy_join_link() {
+    let rig = calling_rig();
+    let (view, cx, _) = window(&rig);
+    let shown = Shown::of(std::rc::Rc::new(series_meeting(9))).unwrap();
+    cx.update(|_, cx| view.update(cx, |view, cx| view.open_card(shown, cx)));
+    click(cx, "calendar-card-join-more");
+    assert!(cx.debug_bounds("calendar-card-join-now").is_some());
+    click(cx, "calendar-card-copy-link");
+    assert_eq!(
+        cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+            .as_deref(),
+        Some("https://teams.microsoft.com/l/meetup-join/made-up")
+    );
+}
+
+#[test]
+fn the_read_only_card_offers_no_join_but_still_copies_its_link() {
+    let rig = calling_rig();
+    *rig.core.read_only.lock().unwrap() = true;
+    let (view, cx, _) = window(&rig);
+    let shown = Shown::of(std::rc::Rc::new(series_meeting(9))).unwrap();
+    cx.update(|_, cx| view.update(cx, |view, cx| view.open_card(shown, cx)));
+    draw(cx);
+    assert!(cx.debug_bounds("calendar-card-join").is_none());
+    assert!(cx.debug_bounds("calendar-card-not-started").is_none());
+    assert!(cx.debug_bounds("calendar-card-chat").is_some());
+    assert!(cx.debug_bounds("calendar-card-copy-link").is_some());
 }
 
 #[test]

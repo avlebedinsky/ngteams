@@ -1,6 +1,7 @@
 //! The calling family's rows (`docs/protocol/calling-echo.md`, `docs/protocol/calling.md`): the web client's test call
 //! start, a new call of the caller and the echo service; its call start from a 1:1 or group chat's header
-//! ([`chat_call_start`]), a call in the chat it carries; and the captured operations ([`follow_up`]) on a call that
+//! ([`chat_call_start`]), a call in the chat it carries; a meeting's from its pre-join ([`meeting_call_start`]), a call in
+//! the meeting's chat; and the captured operations ([`follow_up`]) on a call that
 //! exists (the endpoint's state and metadata, an `add`, the `leave`, the acceptance's acknowledgement, the participant's
 //! own properties, the media negotiation: a renegotiation, a negotiation's answer, a media answer's acknowledgement,
 //! media descriptions, a media line's channel parameters), on an incoming call's offered invitation (the callee's
@@ -14,7 +15,7 @@ use url::{Position, Url};
 
 use super::decoded_segments;
 use super::json::strict_json;
-use crate::membership::{ONE_TO_ONE_SUFFIX, is_group_chat_id, is_guid, one_to_one_id};
+use crate::membership::{ONE_TO_ONE_SUFFIX, is_group_chat_id, is_guid, is_meeting_chat_id, one_to_one_id};
 use crate::{CallOperation, Mri, Scope, Target, WriteKind};
 
 /// The flight proxy every call request goes through: the call start, and every link the call's services hand out.
@@ -316,6 +317,44 @@ const CHAT_MEDIA_CONTENT: &[Field] = &[
     field("mediaLegId", Shape::Text),
 ];
 
+/// A meeting's call start as the web client posts it from its pre-join (seen 2026-11-02, `ab-meeting-join`), whether a
+/// call runs there yet or not: a chat call's keys, its callees none (nobody rings: `to` is empty, or absent where it only
+/// subscribes), the meeting's chat in `groupChat` and its organizer and tenant in `meetingInfo`. Without a call invitation
+/// it is the pre-join's roster-only subscription, which enters no call.
+const MEETING_CALL_START: &[Field] = &[
+    required("conversationRequest", Shape::Object(CHAT_CONVERSATION_REQUEST)),
+    field("contentSharing", Shape::Null),
+    required(
+        "participants",
+        Shape::Object(&[required("from", Shape::Object(FROM)), field("to", Shape::Objects(&[]))]),
+    ),
+    field("capabilities", Shape::Null),
+    field("endpointCapabilities", Shape::Count),
+    field("clientEndpointCapabilities", Shape::Count),
+    field("endpointMetadata", Shape::Object(ENDPOINT_METADATA)),
+    field("groupContext", Shape::Null),
+    required(
+        "groupChat",
+        Shape::Object(&[required("threadId", Shape::Text), required("messageId", Shape::Text)]),
+    ),
+    required(
+        "meetingInfo",
+        Shape::Object(&[
+            required("tenantId", Shape::Text),
+            required("organizerId", Shape::Text),
+            field("meetingType", Shape::Count),
+        ]),
+    ),
+    field("meetingData", Shape::Null),
+    field("endpointState", Shape::Object(ENDPOINT_STATE)),
+    field("callInvitation", Shape::Object(CHAT_CALL_INVITATION)),
+    field(
+        "debugContent",
+        Shape::Object(&[field("ecsEtag", Shape::Text), field("causeId", Shape::Text)]),
+    ),
+    field("participantPropertyBag", Shape::Object(PROPERTY_BAG)),
+];
+
 /// Whether `value` has `shape`, all the way down.
 pub(crate) fn fits(value: &Value, shape: Shape) -> bool {
     match shape {
@@ -456,6 +495,45 @@ fn chat_start_target(start: &Value) -> Option<Target> {
     )
 }
 
+/// The write the web client's pre-join makes of a meeting: [`WriteKind::Call`] on the meeting's chat it names
+/// ([`Scope::Conversation`], whose members the fence reads fresh), the sender added, nobody else: whoever else is in the
+/// meeting's chat is read, not named. Started or not, the service answers it with the meeting's one conversation
+/// (`docs/protocol/calling.md`, "Joining a meeting").
+///
+/// Only the captured shape maps ([`MEETING_CALL_START`]): a meeting's chat ([`is_meeting_chat_id`]) with `messageId`
+/// `"0"`, its sender and organizer work accounts, its tenant a GUID. Anything else is `None` (unreadable).
+#[must_use]
+pub(crate) fn meeting_call_start(method: &str, url: &Url, body: Option<&[u8]>) -> Option<Target> {
+    if !is_start_request(method, url) {
+        return None;
+    }
+    meeting_start_target(&strict_json(body?)?)
+}
+
+/// The target of a meeting's call start already read ([`meeting_call_start`]).
+fn meeting_start_target(start: &Value) -> Option<Target> {
+    if !fits(start, Shape::Object(MEETING_CALL_START)) {
+        return None;
+    }
+    let chat = start.pointer("/groupChat/threadId")?.as_str()?;
+    let readable = is_meeting_chat_id(chat)
+        && start.pointer("/groupChat/messageId")?.as_str()? == "0"
+        && is_guid(start.pointer("/meetingInfo/tenantId")?.as_str()?)
+        && is_guid(start.pointer("/meetingInfo/organizerId")?.as_str()?);
+    if !readable {
+        return None;
+    }
+    let sender = start.pointer("/participants/from/id")?.as_str()?;
+    is_guid(sender.strip_prefix("8:orgid:")?).then_some(())?;
+    let caller = Mri::new(sender);
+    let scope = Scope::Conversation { id: chat.to_owned() };
+    Some(
+        Target::new(WriteKind::Call, scope)
+            .with_added([caller.clone()])
+            .with_sender(caller),
+    )
+}
+
 /// The target a call start's body gives, as the permit for it was given: the test call's row with the echo service
 /// for a new call ([`Scope::New`]: the start's one participant besides its caller), the chat's row for a call in a
 /// chat. `None` for a body that gives neither.
@@ -469,7 +547,9 @@ pub(crate) fn start_target(target: &Target, body: &[u8], caller: &Mri) -> Option
             };
             call_start("POST", &url, Some(body), Some(echo))
         }
-        Scope::Conversation { .. } => chat_call_start("POST", &url, Some(body)),
+        Scope::Conversation { .. } => {
+            chat_call_start("POST", &url, Some(body)).or_else(|| meeting_call_start("POST", &url, Some(body)))
+        }
         Scope::CallOperation {
             operation: CallOperation::Join,
             url,
@@ -489,13 +569,16 @@ pub(crate) struct StartEvidence {
     pub(crate) conversation_links: Map<String, Value>,
 }
 
-/// The evidence of a call start in a captured shape (the test call's, as [`call_start`] reads it, or a chat's, as
-/// [`chat_call_start`] does), or of a join with a call invitation ([`JOIN`]); `None` for anything else.
+/// The evidence of a call start in a captured shape (the test call's, as [`call_start`] reads it, a chat's, as
+/// [`chat_call_start`] does, or a meeting's with a call invitation, as [`meeting_call_start`] does), or of a join with a
+/// call invitation ([`JOIN`]); `None` for anything else.
 pub(crate) fn start_evidence(body: &[u8]) -> Option<StartEvidence> {
     let start = strict_json(body)?;
-    // a join enters a call only with a call invitation; one without subscribes to the roster and starts nothing
-    let join = fits(&start, Shape::Object(JOIN)) && start.get("callInvitation").is_some();
-    if !fits(&start, Shape::Object(CALL_START)) && !fits(&start, Shape::Object(CHAT_CALL_START)) && !join {
+    // a join or a meeting's start enters a call only with a call invitation; one without subscribes to the roster and
+    // starts nothing
+    let enters = (fits(&start, Shape::Object(JOIN)) || fits(&start, Shape::Object(MEETING_CALL_START)))
+        && start.get("callInvitation").is_some();
+    if !fits(&start, Shape::Object(CALL_START)) && !fits(&start, Shape::Object(CHAT_CALL_START)) && !enters {
         return None;
     }
     let links = |at: &str| {

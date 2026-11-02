@@ -197,6 +197,19 @@ impl Steps<'_> {
         report: &mut ScenarioReport,
         title: &str,
     ) -> Result<String, ScenarioError> {
+        let created = self.created(a, drive, report, title).await?;
+        meeting_chat(created.body.as_deref())
+            .ok_or_else(|| setup("the event's creation named no meeting chat".to_owned()))
+    }
+
+    /// The scheduling form saved: the creation, its body read.
+    async fn created(
+        &self,
+        a: &LabSession,
+        drive: &mut Driver,
+        report: &mut ScenarioReport,
+        title: &str,
+    ) -> Result<SeenRequest, ScenarioError> {
         let offset = drive
             .evaluate("the page's time zone", "-new Date().getTimezoneOffset()")
             .await?
@@ -221,12 +234,10 @@ impl Steps<'_> {
         shot(a, report, "meeting-sent.png").await;
         report.notes.push(answer_note("creation", &created));
         expect_success("the event's creation", &created)?;
-        let created = match created {
-            Ok(seen) => drive.read_body("the creation's body", &seen).await?,
-            Err(error) => return Err(error),
-        };
-        meeting_chat(created.body.as_deref())
-            .ok_or_else(|| setup("the event's creation named no meeting chat".to_owned()))
+        match created {
+            Ok(seen) => Ok(drive.read_body("the creation's body", &seen).await?),
+            Err(error) => Err(error),
+        }
     }
 
     /// Types b's address into the form's attendees and takes the suggestion the picker offers for it.
@@ -303,6 +314,35 @@ impl Steps<'_> {
         report.notes.push(answer_note("cancellation", &cancelled));
         expect_success("the event's cancellation", &cancelled)
     }
+}
+
+/// Schedules a meeting of a's with the account `upn`, as [`Steps::create`] does, for a run that goes on with it: the
+/// form's creation's request body once it was answered with a 2xx.
+pub(super) async fn schedule(
+    a: &LabSession,
+    drive: &mut Driver,
+    report: &mut ScenarioReport,
+    title: &str,
+    upn: &str,
+    options: RunOptions,
+) -> Result<Option<String>, ScenarioError> {
+    let steps = Steps {
+        mri_b: "",
+        upn_b: upn,
+        chat_id: None,
+        nonce: "",
+        options,
+        pauses: FormPauses::default(),
+    };
+    steps.created(a, drive, report, title).await.map(|seen| seen.body)
+}
+
+/// The join link a creation's request body names (`schedulingServiceEvent.links.join`).
+pub(super) fn created_join_link(body: Option<&str>) -> Option<String> {
+    let body: serde_json::Value = serde_json::from_str(body?).ok()?;
+    body.pointer("/schedulingServiceEvent/links/join")?
+        .as_str()
+        .map(str::to_owned)
 }
 
 /// The scheduling form's title box.
@@ -485,7 +525,12 @@ fn find_button(scope: &str, names: &[&str]) -> String {
 }
 
 /// Waits up to `timeout` for a button named one of `names` ([`find_button`]).
-async fn wait_for_button(drive: &mut Driver, step: &str, names: &[&str], timeout: Duration) -> Result<(), StepError> {
+pub(super) async fn wait_for_button(
+    drive: &mut Driver,
+    step: &str,
+    names: &[&str],
+    timeout: Duration,
+) -> Result<(), StepError> {
     let expression = format!("{} !== null", find_button("document", names));
     drive
         .wait_until_true(step, &expression, &format!("a button named one of {names:?}"), timeout)
@@ -493,7 +538,7 @@ async fn wait_for_button(drive: &mut Driver, step: &str, names: &[&str], timeout
 }
 
 /// Clicks the button named one of `names` ([`find_button`]) in the page.
-async fn click_button(drive: &mut Driver, step: &str, names: &[&str]) -> Result<(), ScenarioError> {
+pub(super) async fn click_button(drive: &mut Driver, step: &str, names: &[&str]) -> Result<(), ScenarioError> {
     click_found(drive, step, &find_button("document", names), names).await
 }
 
