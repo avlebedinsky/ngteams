@@ -262,6 +262,9 @@ pub struct Shell {
     join_team: Option<(Entity<JoinTeam>, Subscription)>,
     /// A dialog of the team pages, while one is open.
     team_dialog: Option<(gpui::AnyView, Subscription)>,
+    /// Where the keyboard was when a dialog opened (a team's line, its "..." menu's row, a page's row): it goes back
+    /// there when the dialog closes, as Teams gives it back.
+    dialog_return: crate::keyboard::Return,
     /// A toast, while one shows.
     toast: Option<(SharedString, Task<()>)>,
     /// The title bar's search: its box, its suggestions and its results.
@@ -327,8 +330,7 @@ impl Shell {
             ChatListEvent::Opened(id) => this.open_chat(id.clone(), window, cx),
         });
         let (teams, [channel_opened, kept_channel]) = Self::teams_list(&core, &models, &trace, window, cx);
-        let sidebar_parts = (list.clone(), teams.clone(), models.clone(), Arc::clone(&trace));
-        let sidebar = cx.new(|cx| Sidebar::new(sidebar_parts.0, sidebar_parts.1, sidebar_parts.2, sidebar_parts.3, cx));
+        let sidebar = cx.new(|cx| Sidebar::new(list.clone(), teams.clone(), models.clone(), Arc::clone(&trace), cx));
         let (settings_view, test_call_asked) = Self::make_settings_view(&core, &settings, cx);
         let first_run = cx.new(|cx| FirstRun::new(settings.clone(), cx));
         let (calendar, calendar_events) = Self::calendar(&core, &models, &trace, window, cx);
@@ -358,6 +360,7 @@ impl Shell {
             manage_team: None,
             join_team: None,
             team_dialog: None,
+            dialog_return: crate::keyboard::Return::default(),
             toast: None,
             search_box,
             history: History::default(),
@@ -970,6 +973,10 @@ impl Shell {
             self.teams_page = Some((page, events));
         }
         self.show_main(Main::TeamsPage, window, cx);
+        // the keyboard goes to the teams listed, as Teams opens the page on them
+        if let Some((page, _)) = &self.teams_page {
+            page.update(cx, |page, cx| page.focus_rows(window, cx));
+        }
     }
 
     /// "Your teams and channels", once it was opened.
@@ -1184,12 +1191,18 @@ impl Shell {
         D: Render + EventEmitter<TeamDialogEvent>,
     {
         self.close_switcher(window, cx);
+        if self.team_dialog.is_none() {
+            self.dialog_return.keep(window, cx);
+        }
         let events = cx.subscribe_in(
             dialog,
             window,
             |this: &mut Self, _, event: &TeamDialogEvent, window, cx| {
                 this.team_dialog = None;
                 this.focus.focus(window, cx);
+                if !matches!(event, TeamDialogEvent::Created(_)) {
+                    this.dialog_return.give_back(window, cx);
+                }
                 match event {
                     TeamDialogEvent::Closed => {}
                     TeamDialogEvent::Created(team) => {
@@ -1270,12 +1283,14 @@ impl Shell {
     pub fn open_channel_dialog(&mut self, team: teams_store::Team, window: &mut Window, cx: &mut Context<Self>) {
         self.close_switcher(window, cx);
         let (core, trace) = (Arc::clone(&self.core), Arc::clone(&self.trace));
+        self.dialog_return.keep(window, cx);
         let dialog = cx.new(|cx| ChannelDialog::new(core, trace, team, window, cx));
         let closes = cx.subscribe_in(&dialog, window, |this: &mut Self, _, event, window, cx| {
             this.channel_dialog = None;
             this.focus.focus(window, cx);
-            if let ChannelDialogEvent::Open(id) = event {
-                this.open_channel_id(id.clone(), window, cx);
+            match event {
+                ChannelDialogEvent::Open(id) => this.open_channel_id(id.clone(), window, cx),
+                ChannelDialogEvent::Closed => this.dialog_return.give_back(window, cx),
             }
             cx.notify();
         });
@@ -1598,6 +1613,14 @@ impl Shell {
     /// The rail's Chat (and Ctrl+2): leaves the settings, the calendar or the search results for what they hid (the
     /// chat or the channel shown before them, opened again), or nothing; elsewhere it does nothing.
     pub fn show_chats(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_chats_pane(window, cx);
+        // the keyboard goes to the list, as Teams' Ctrl+2 takes it there
+        if self.list_shown {
+            self.sidebar.update(cx, |sidebar, cx| sidebar.focus_list(window, cx));
+        }
+    }
+
+    fn show_chats_pane(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if !matches!(self.main, Main::Settings | Main::Calendar | Main::Search) {
             return;
         }
@@ -1671,6 +1694,19 @@ impl Shell {
             SwitcherEvent::Dismissed => this.close_switcher(window, cx),
             SwitcherEvent::CopyDiagnostics => this.copy_diagnostics(window, cx),
             SwitcherEvent::SeeAllTeams => this.open_teams_page(window, cx),
+            SwitcherEvent::CreateTeam => this.open_create_team(window, cx),
+            SwitcherEvent::JoinTeam => this.open_join_team(window, cx),
+            SwitcherEvent::Team(id, choice) => {
+                this.close_switcher(window, cx);
+                let team = this
+                    .teams
+                    .read(cx)
+                    .teams()
+                    .and_then(|teams| teams.iter().find(|team| team.id == *id).cloned());
+                if let Some(team) = team {
+                    this.team_chosen(team, *choice, window, cx);
+                }
+            }
             SwitcherEvent::SeeMoreChats => {
                 this.close_switcher(window, cx);
                 this.list.update(cx, ChatList::see_more);

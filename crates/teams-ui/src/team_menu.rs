@@ -138,7 +138,7 @@ pub fn entries(team: &Team, read_only: bool) -> Vec<TeamChoice> {
 /// What a key does to the menu ([`key`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MenuKey {
-    /// Escape: the menu is to close.
+    /// Escape or Tab: the menu is to close.
     Close,
     /// Enter or Space on an entry.
     Choose(TeamChoice),
@@ -150,7 +150,8 @@ pub enum MenuKey {
 pub fn key(event: &KeyDownEvent, shown: &[TeamChoice], highlight: &mut Option<usize>) -> MenuKey {
     let last = shown.len().saturating_sub(1);
     match event.keystroke.key.as_str() {
-        "escape" => return MenuKey::Close,
+        // Tab leaves a menu as Escape does, as Teams' menus take it
+        "escape" | "tab" => return MenuKey::Close,
         "down" => *highlight = Some(highlight.map_or(0, |at| if at >= last { 0 } else { at + 1 })),
         "up" => *highlight = Some(highlight.map_or(last, |at| if at == 0 { last } else { at - 1 })),
         "home" => *highlight = Some(0),

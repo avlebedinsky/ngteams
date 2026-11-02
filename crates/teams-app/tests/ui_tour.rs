@@ -83,7 +83,7 @@ const SETTLE: Duration = Duration::from_millis(1500);
 type Step = (&'static str, fn(&Entity<Shell>, &mut Window, &mut App));
 
 /// The tour.
-const STEPS: [Step; 4 + 110] = [
+const STEPS: [Step; 4 + 113] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -157,9 +157,15 @@ const STEPS: [Step; 4 + 110] = [
             let _ = chat.read(cx).text_selection().clear();
         }
         let sidebar = shell.read(cx).sidebar().clone();
-        sidebar.update(cx, |sidebar, cx| sidebar.open_team_menu(TEAM, window, cx));
+        sidebar.update(cx, |sidebar, cx| sidebar.open_team_menu(TEAM, false, window, cx));
     }),
-    ("channel-dialog", |shell, _, cx| open_channel_dialog(shell, cx)),
+    ("channel-dialog", |shell, window, cx| {
+        open_channel_dialog(shell, window, cx);
+    }),
+    // Tab from the name to the chosen layout: its card ringed
+    ("channel-dialog-keyboard", |_, window, cx| {
+        press(window, cx, "tab tab tab tab");
+    }),
     ("channel-dialog-types", |shell, window, cx| {
         with_channel_dialog(shell, cx, |dialog, cx| dialog.show_types(window, cx));
     }),
@@ -200,11 +206,18 @@ const STEPS: [Step; 4 + 110] = [
     ("sidebar-teams", |shell, _, cx| show_teams_section(shell, cx)),
     ("sidebar-team-menu", |shell, window, cx| {
         let sidebar = shell.read(cx).sidebar().clone();
-        sidebar.update(cx, |sidebar, cx| sidebar.open_team_menu(TEAM, window, cx));
+        sidebar.update(cx, |sidebar, cx| sidebar.open_team_menu(TEAM, false, window, cx));
     }),
-    ("sidebar-team-menu-closed", |shell, _, cx| {
+    // the same by keyboard: the team's line ringed, Shift+F10, the menu's first entry lit, Down to the next
+    ("sidebar-team-menu-keyboard", |shell, window, cx| {
         let sidebar = shell.read(cx).sidebar().clone();
-        sidebar.update(cx, Sidebar::close_team_menu);
+        sidebar.update(cx, |sidebar, cx| sidebar.close_team_menu(window, cx));
+        sidebar.update(cx, |sidebar, cx| sidebar.focus_team(TEAM, window, cx));
+        press(window, cx, "shift-f10 down");
+    }),
+    ("sidebar-team-menu-closed", |shell, window, cx| {
+        let sidebar = shell.read(cx).sidebar().clone();
+        sidebar.update(cx, |sidebar, cx| sidebar.close_team_menu(window, cx));
         show_chats_section(shell, cx);
     }),
     ("teams-page-create-menu", |shell, _, cx| {
@@ -213,12 +226,20 @@ const STEPS: [Step; 4 + 110] = [
     ("teams-page-row-menu", |shell, window, cx| {
         with_teams_page(shell, cx, |page, cx| {
             page.set_filter(teams_ui::teams_page::Filter::All, cx);
-            page.open_menu(TEAM, window, cx);
+            page.open_menu(TEAM, false, window, cx);
         });
     }),
-    ("teams-page-owned", |shell, _, cx| {
+    // the rows by keyboard: the row ringed, its "..." shown
+    ("teams-page-keyboard", |shell, window, cx| {
         with_teams_page(shell, cx, |page, cx| {
-            page.close_menu(cx);
+            page.close_menu(window, cx);
+            page.focus_rows(window, cx);
+        });
+        press(window, cx, "down");
+    }),
+    ("teams-page-owned", |shell, window, cx| {
+        with_teams_page(shell, cx, |page, cx| {
+            page.close_menu(window, cx);
             page.set_filter(teams_ui::teams_page::Filter::Owned, cx);
         });
     }),
@@ -428,7 +449,7 @@ const STEPS: [Step; 4 + 110] = [
         show_page(shell, Page::Appearance, cx);
     }),
     ("channel-dialog-dark", |shell, window, cx| {
-        open_channel_dialog(shell, cx);
+        open_channel_dialog(shell, window, cx);
         with_channel_dialog(shell, cx, |dialog, cx| fill_channel_dialog(dialog, window, cx));
     }),
     ("channel-dialog-dark-types", |shell, window, cx| {
@@ -441,10 +462,10 @@ const STEPS: [Step; 4 + 110] = [
         shell.update(cx, |shell, cx| shell.open_teams_page(window, cx));
     }),
     ("teams-page-dark-row-menu", |shell, window, cx| {
-        with_teams_page(shell, cx, |page, cx| page.open_menu(TEAM, window, cx));
+        with_teams_page(shell, cx, |page, cx| page.open_menu(TEAM, false, window, cx));
     }),
     ("manage-settings-dark", |shell, window, cx| {
-        with_teams_page(shell, cx, teams_ui::teams_page::TeamsPage::close_menu);
+        with_teams_page(shell, cx, |page, cx| page.close_menu(window, cx));
         shell.update(cx, |shell, cx| {
             shell.open_manage_team(TEAM.to_owned(), teams_ui::manage_team::ManageTab::Settings, window, cx);
         });
@@ -1084,9 +1105,9 @@ fn with_team_dialog<D: gpui::Render>(
 }
 
 /// Opens the mock's team's "Create a channel" dialog.
-fn open_channel_dialog(shell: &Entity<Shell>, cx: &mut App) {
+fn open_channel_dialog(shell: &Entity<Shell>, window: &mut Window, cx: &mut App) {
     let sidebar = shell.read(cx).sidebar().clone();
-    sidebar.update(cx, teams_ui::sidebar::Sidebar::close_team_menu);
+    sidebar.update(cx, |sidebar, cx| sidebar.close_team_menu(window, cx));
     let teams = shell.read(cx).teams().clone();
     teams.update(cx, |teams, cx| teams.add_channel(TEAM, cx));
 }
@@ -1235,6 +1256,18 @@ fn show_page(shell: &Entity<Shell>, page: Page, cx: &mut App) {
 fn reveal_see_more(shell: &Entity<Shell>, cx: &mut App) {
     let sidebar = shell.read(cx).sidebar().clone();
     sidebar.update(cx, Sidebar::reveal_see_more);
+}
+
+/// Presses `keys` in the window, as a person does: the keyboard's rings show from then on. Once the step's update is
+/// over, as the keys reach the kit's root, which the step holds.
+fn press(window: &mut Window, cx: &mut App, keys: &'static str) {
+    window.defer(cx, move |window, cx| {
+        for spec in keys.split(' ') {
+            if let Ok(keystroke) = gpui::Keystroke::parse(spec) {
+                window.dispatch_keystroke(keystroke, cx);
+            }
+        }
+    });
 }
 
 /// Walks [`STEPS`], each one's screenshot taken by the parent before the next.

@@ -495,7 +495,10 @@ nobody answers) has the broker's socket shut down under it.
 
 The window is three panes: the rail (Chat, Settings), the sidebar (resizable, under "Chat" and the connection state
 while it isn't up: "Chats", the store's chats by last activity with names, previews, times and unread counts, then
-"Teams and channels", each team with its channels, a private channel with a lock; a section's header or a team's line folds it, and a team's "..." offers "Add channel", the "Create a channel" dialog as Teams has it) and the conversation
+"Teams and channels", each team with its channels, a private channel with a lock; a section's header or a team's line folds it, and a team's "..." offers "Add channel", the "Create a channel" dialog as Teams has it;
+Ctrl+2 gives the list the keyboard: Up, Down, Home and End move, Enter opens or folds, Right and Left unfold and fold,
+Shift+F10 or the menu key opens a team's "..." menu, whose Up, Down, Enter and Escape give the keyboard back to the line;
+"Your teams and channels" opens with the keyboard on its rows, and every dialog keeps Tab inside it) and the conversation
 pane, which shows the chat opened in the chat view under its avatar and name: its messages from the store, the newest at the bottom (older pages load as the top
 comes near), grouped by sender within 5 minutes, with day separators, a "New messages" divider at the read horizon as
 the chat opened, edited and deleted markers, reactions, thread events, a "Jump to newest" pill once scrolled up, and
@@ -515,7 +518,8 @@ Ctrl+Alt+1–3 and Ctrl+Alt+P (headings, a paragraph), Ctrl+Z and Ctrl+Y; a past
 program or the box itself copied. Format (Ctrl+Shift+X) expands the box with Teams' format bar (the marks, the lists,
 highlight, font colour and size, quote, link, code, and More: paragraph styles, indent, a horizontal line, clear
 formatting, undo and redo; Discard empties the box); expanded, Enter starts a new paragraph and Ctrl+Enter sends. Ctrl+K opens the chat switcher (fuzzy over the chats' names; Enter opens,
-Escape closes). The title bar runs across the top as Teams': the launcher (the app's places), the list pane's toggle, Back
+Escape closes; "Create team", "Join team", and once something is typed "Add channel: <team>", "Add member: <team>" and
+"Manage team: <team>"). The title bar runs across the top as Teams': the launcher (the app's places), the list pane's toggle, Back
 and Forward (Alt+Left, Alt+Right), the search box, Settings and more (the settings, the zoom, Copy diagnostics) and the
 account's avatar with its presence (the account menu). Ctrl+E (or Ctrl+Shift+F, or a click) searches: suggestions as you
 type (people, chats, channels, files; Up, Down and Enter open one), Enter shows the results with Teams' tabs (All,

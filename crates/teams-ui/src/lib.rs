@@ -98,6 +98,7 @@ pub mod global_search;
 pub mod icons;
 pub mod inline;
 pub mod join_team;
+pub mod keyboard;
 pub mod link_preview;
 pub mod manage_team;
 pub mod models;

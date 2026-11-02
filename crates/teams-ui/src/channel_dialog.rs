@@ -28,13 +28,14 @@ use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::spinner::Spinner;
-use gpui_component::{Disableable as _, Sizable as _};
+use gpui_component::{Disableable as _, FocusTrapElement as _, Sizable as _};
 use teams_core::{ChannelDraft, ChannelMade, ChannelProblem, EngineError};
 use teams_proto::{ChannelLayout, NewChannel, NewChannelKind, TeamPerson};
 use teams_store::Team;
 
 use crate::bridge::Core;
 use crate::icons::{Glyph, icon_button, selected_by};
+use crate::keyboard::{self, Handles};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 
@@ -275,6 +276,8 @@ pub struct ChannelDialog {
     type_highlight: Option<NewChannelKind>,
     type_focus: FocusHandle,
     layout: ChannelLayout,
+    /// The layout cards' focus: one radio group, the chosen card its tab stop.
+    layouts: Handles,
     show_by_default: bool,
     /// The name or the description was touched: problems show.
     touched: bool,
@@ -287,6 +290,8 @@ pub struct ChannelDialog {
     suggested_for: String,
     suggesting: Option<Task<()>>,
     working: Option<Task<()>>,
+    /// The people found: Up and Down move through them.
+    found_focus: FocusHandle,
     focus: FocusHandle,
     inputs: Vec<Subscription>,
 }
@@ -347,6 +352,7 @@ impl ChannelDialog {
             type_highlight: None,
             type_focus: cx.focus_handle().tab_stop(true),
             layout: ChannelLayout::default(),
+            layouts: Handles::default(),
             show_by_default: false,
             touched: false,
             step: Step::Form,
@@ -356,9 +362,16 @@ impl ChannelDialog {
             suggested_for: String::new(),
             suggesting: None,
             working: None,
+            found_focus: cx.focus_handle(),
             focus: cx.focus_handle(),
             inputs: vec![touched_name, touched_description],
         }
+    }
+
+    /// The layout chosen.
+    #[must_use]
+    pub fn layout(&self) -> ChannelLayout {
+        self.layout
     }
 
     /// Where the dialog is.
@@ -658,23 +671,25 @@ impl ChannelDialog {
         }));
     }
 
-    /// The form's keys: Escape cancels; Tab and Shift+Tab move through the fields.
-    fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        match event.keystroke.key.as_str() {
-            "escape" => {
-                cx.stop_propagation();
-                self.cancel(cx);
-            }
-            "tab" if event.keystroke.modifiers.shift => {
-                cx.stop_propagation();
-                window.focus_prev(cx);
-            }
-            "tab" => {
-                cx.stop_propagation();
-                window.focus_next(cx);
-            }
-            _ => {}
+    /// The form's keys: Escape cancels. Tab and Shift+Tab go round the dialog's fields and buttons (the kit's root, the
+    /// dialog trapping them).
+    fn on_key(&mut self, event: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if event.keystroke.key == "escape" {
+            cx.stop_propagation();
+            self.cancel(cx);
         }
+    }
+
+    /// The layouts' keys, as a radio group's: the arrows choose the other card, the keyboard on it.
+    fn layout_key(&mut self, layout: ChannelLayout, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let at = LAYOUTS.iter().position(|shown| *shown == layout).unwrap_or(0);
+        let Some(to) = keyboard::step(event, LAYOUTS.len(), at) else {
+            return;
+        };
+        cx.stop_propagation();
+        let layout = LAYOUTS[to];
+        self.pick_layout(layout, cx);
+        self.layouts.get(layout_key(layout), cx).focus(window, cx);
     }
 }
 
@@ -797,6 +812,17 @@ fn layout_art(layout: ChannelLayout, palette: Palette) -> gpui::Div {
     }
 }
 
+/// The layouts, in the order their cards show.
+const LAYOUTS: [ChannelLayout; 2] = [ChannelLayout::Threads, ChannelLayout::Posts];
+
+/// A layout's key, in its card's selector.
+fn layout_key(layout: ChannelLayout) -> &'static str {
+    match layout {
+        ChannelLayout::Threads => "threads",
+        ChannelLayout::Posts => "posts",
+    }
+}
+
 /// A radio's mark.
 fn radio(chosen: bool, palette: Palette) -> gpui::Div {
     div()
@@ -897,7 +923,12 @@ impl ChannelDialog {
             .border_1()
             .border_color(rgb(if open { palette.brand } else { palette.border }))
             .cursor_pointer()
-            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.toggle_types(window, cx)))
+            // a mouse click; its keys (Enter, Space, Down) are `on_type_key`'s, on their press
+            .on_click(cx.listener(|this, event: &ClickEvent, window, cx| {
+                if !matches!(event, ClickEvent::Keyboard(_)) {
+                    this.toggle_types(window, cx);
+                }
+            }))
             .on_key_down(cx.listener(Self::on_type_key))
             .child(
                 div()
@@ -1057,13 +1088,8 @@ impl ChannelDialog {
         )
     }
 
-    /// One layout's card.
-    fn layout_card(
-        &self,
-        layout: ChannelLayout,
-        palette: Palette,
-        cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
+    /// One layout's card: a radio of the layouts' group, Tab stopping on the chosen one.
+    fn layout_card(&self, layout: ChannelLayout, palette: Palette, cx: &mut Context<Self>) -> keyboard::Stop {
         let chosen = self.layout == layout;
         let (key, title, description) = match layout {
             ChannelLayout::Threads => (
@@ -1078,7 +1104,7 @@ impl ChannelDialog {
             ),
         };
         let selector = format!("channel-layout-{key}");
-        div()
+        let card = div()
             .debug_selector(move || selector.clone())
             .id(SharedString::from(format!("channel-layout-{key}")))
             .w(px(198.0))
@@ -1096,6 +1122,9 @@ impl ChannelDialog {
             .cursor_pointer()
             .hover(move |card| card.bg(rgb(palette.hover)))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.pick_layout(layout, cx)))
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                this.layout_key(layout, event, window, cx);
+            }))
             .child(layout_art(layout, palette))
             .child(
                 div()
@@ -1122,7 +1151,11 @@ impl ChannelDialog {
                         palette.muted_foreground
                     }))
                     .child(description),
-            )
+            );
+        keyboard::stop(SharedString::from(format!("channel-layout-{key}")), card, palette)
+            .edge()
+            .handle(&self.layouts.get(layout_key(layout), cx))
+            .tab_stop(chosen)
     }
 
     /// The form: the fields, Cancel and Create.
@@ -1187,6 +1220,8 @@ impl ChannelDialog {
                             .primary()
                             .label("Create")
                             .disabled(!can_create)
+                            // Tab passes it while it is off, as Teams' does
+                            .tab_stop(can_create)
                             .on_click(cx.listener(|this, _, _, cx| this.create(cx))),
                     )),
             )
@@ -1317,6 +1352,8 @@ impl ChannelDialog {
             .child(
                 div()
                     .id("channel-people-found")
+                    .track_focus(&self.found_focus)
+                    .on_key_down(keyboard::list_keys(self.found_focus.clone()))
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
@@ -1338,14 +1375,9 @@ impl ChannelDialog {
     }
 
     /// Someone found, picked by a click.
-    fn person_row(
-        at: usize,
-        person: TeamPerson,
-        palette: Palette,
-        cx: &mut Context<Self>,
-    ) -> gpui::Stateful<gpui::Div> {
+    fn person_row(at: usize, person: TeamPerson, palette: Palette, cx: &mut Context<Self>) -> keyboard::Stop {
         let shown = person.clone();
-        div()
+        let row = div()
             .debug_selector(move || format!("channel-person-{at}"))
             .id(SharedString::from(format!("channel-person-{at}")))
             .px_2()
@@ -1363,7 +1395,8 @@ impl ChannelDialog {
                 shown
                     .email
                     .map(|email| div().text_xs().text_color(rgb(palette.muted_foreground)).child(email)),
-            )
+            );
+        keyboard::stop(SharedString::from(format!("channel-person-{at}")), row, palette)
     }
 
     /// Someone picked, with the button that takes them back.
@@ -1494,6 +1527,7 @@ impl Render for ChannelDialog {
             .on_click(|_, _, cx| cx.stop_propagation())
             .on_key_down(cx.listener(Self::on_key))
             .child(content)
+            .focus_trap("channel-dialog-trap", &self.focus)
     }
 }
 

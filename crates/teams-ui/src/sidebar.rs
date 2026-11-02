@@ -9,6 +9,10 @@
 //! when they are old). The rows themselves are the lists': a chat clicked is the [`ChatList`]'s to tell, a channel the
 //! [`TeamsList`]'s. The chat that becomes selected is scrolled into view, wherever it was opened from.
 //!
+//! The keyboard reaches every row as Teams' tree of chats, teams and channels does: Ctrl+2 gives the list the keyboard
+//! ([`Sidebar::focus_list`]), its row ringed; the keys are `on_key`'s; a team's "..." menu opened by Shift+F10 or the menu
+//! key starts on its first entry, and closing it gives the keyboard back to the team's line.
+//!
 //! Traced: `sidebar folded`/`unfolded` with the section (`favorites`, `chats` or `teams`), `team folded`/`unfolded` with the team.
 
 use std::collections::HashSet;
@@ -84,6 +88,9 @@ impl Section {
     }
 }
 
+/// A team's line's kind in [`Entry::key`].
+const TEAM_KEY: u8 = 3;
+
 /// One row of the sidebar's list.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Entry {
@@ -130,7 +137,7 @@ impl Entry {
             Self::Section(section) => (0, section.key()),
             Self::Chat { id, .. } => (1, id),
             Self::Note(text) => (2, text),
-            Self::Team { id, .. } => (3, id),
+            Self::Team { id, .. } => (TEAM_KEY, id),
             Self::Channel { id, .. } => (4, id),
             Self::Favorite { id, .. } => (5, id),
             Self::SeeMore => (6, SEE_MORE_SELECTOR),
@@ -180,6 +187,10 @@ pub struct Sidebar {
     /// The entry of the "..." menu the arrow keys are on.
     menu_highlight: Option<usize>,
     menu_focus: FocusHandle,
+    /// The list's keyboard focus: Up and Down move [`Self::cursor`] over its rows.
+    focus: FocusHandle,
+    /// The row the keyboard is on, by what it is ([`Entry::key`]), kept across a change of the rows.
+    cursor: Option<(u8, String)>,
     _observing: [Subscription; 2],
 }
 
@@ -210,6 +221,8 @@ impl Sidebar {
             team_menu: None,
             menu_highlight: None,
             menu_focus: cx.focus_handle(),
+            focus: cx.focus_handle().tab_stop(true),
+            cursor: None,
             _observing: [chats, teamed],
         };
         sidebar.rebuild(cx);
@@ -404,7 +417,30 @@ impl Sidebar {
         }
     }
 
-    fn render_entry(&mut self, at: usize, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    /// The row at `at`, ringed while the keyboard is on it.
+    fn render_entry(&mut self, at: usize, window: &Window, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let keyed = self.focus.is_focused(window) && self.cursor_at() == Some(at);
+        let row = self.entry_row(at, keyed, palette, cx);
+        if !keyed {
+            return row;
+        }
+        div()
+            .debug_selector(|| "sidebar-cursor".to_owned())
+            .relative()
+            .w_full()
+            .child(row)
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .rounded_md()
+                    .border_2()
+                    .border_color(rgb(palette.brand)),
+            )
+            .into_any_element()
+    }
+
+    fn entry_row(&mut self, at: usize, keyed: bool, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let Some(entry) = self.entries.get(at).cloned() else {
             return div().into_any_element();
         };
@@ -425,7 +461,7 @@ impl Sidebar {
                 .text_color(rgb(palette.muted_foreground))
                 .child(text)
                 .into_any_element(),
-            Entry::Team { index, id } => self.team_line(index, &id, palette, cx),
+            Entry::Team { index, id } => self.team_line(index, &id, keyed, palette, cx),
             Entry::Channel {
                 index, team, channel, ..
             } => self
@@ -531,7 +567,7 @@ impl Sidebar {
     }
 
     /// A team's line (its fold mark, its picture and its name), its test selector `team-<index>`.
-    fn team_line(&self, index: usize, id: &str, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn team_line(&self, index: usize, id: &str, keyed: bool, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let teams = self.teams.read(cx);
         let Some(team) = teams.teams().and_then(|listed| listed.get(index)) else {
             return div().into_any_element();
@@ -541,7 +577,8 @@ impl Sidebar {
         let toggled = id.to_owned();
         let group = team_line_group(index);
         let team = team.clone();
-        let more = self.team_more(index, id, &team, palette, cx);
+        let more = self.team_more(index, &team, keyed, palette, cx);
+        let pointed = id.to_owned();
         div()
             .group(group.clone())
             .id(ElementId::Name(format!("team-{id}").into()))
@@ -557,6 +594,14 @@ impl Sidebar {
             .cursor_pointer()
             .hover(move |style| style.bg(rgb(palette.hover)))
             .on_click(cx.listener(move |this, _, _, cx| this.toggle_team(&toggled, cx)))
+            // a right click opens its menu, as in Teams
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.open_team_menu(&pointed, false, window, cx);
+                }),
+            )
             .child(chevron(self.team_open(id)))
             .child(badge)
             .child(div().flex_1().min_w_0().truncate().child(name))
@@ -573,7 +618,15 @@ impl Sidebar {
     }
 
     /// A team's "..." and its menu ([`crate::team_menu`]), shown while the line is under the pointer or its menu is open.
-    fn team_more(&self, index: usize, id: &str, team: &Team, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn team_more(
+        &self,
+        index: usize,
+        team: &Team,
+        keyed: bool,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let id = team.id.as_str();
         let group = team_line_group(index);
         let read_only = self.list.read(cx).read_only();
         let open = self.team_menu.as_deref() == Some(id);
@@ -582,18 +635,20 @@ impl Sidebar {
             format!("team-more-{index}"),
             icon_button(format!("team-more-{id}"), Glyph::ELLIPSIS, "More options")
                 .xsmall()
+                // the list takes the keyboard, Shift+F10 opening this menu
+                .tab_stop(false)
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
                     if this.team_menu.as_deref() == Some(toggled.as_str()) {
-                        this.close_team_menu(cx);
+                        this.close_team_menu(window, cx);
                     } else {
-                        this.open_team_menu(&toggled, window, cx);
+                        this.open_team_menu(&toggled, false, window, cx);
                     }
                 })),
         );
         let menu = open.then(|| {
             let weak = cx.entity().downgrade();
-            let (chosen_from, closed, keyed) = (weak.clone(), weak.clone(), weak);
+            let (chosen_from, closed, keys) = (weak.clone(), weak.clone(), weak);
             let (chosen_team, keyed_team) = (id.to_owned(), id.to_owned());
             let shown = crate::team_menu::entries(team, read_only);
             crate::team_menu::Panel {
@@ -606,21 +661,18 @@ impl Sidebar {
                 anchor: gpui::Anchor::TopLeft,
             }
             .render(
-                move |choice, _, cx| {
-                    let _ = chosen_from.update(cx, |this, cx| this.choose(&chosen_team, choice, cx));
+                move |choice, window, cx| {
+                    let _ = chosen_from.update(cx, |this, cx| this.choose(&chosen_team, choice, window, cx));
                 },
                 move |_, _, cx| {
-                    let _ = closed.update(cx, Sidebar::close_team_menu);
-                },
-                move |event: &KeyDownEvent, _, cx| {
-                    let _ = keyed.update(cx, |this, cx| {
-                        cx.stop_propagation();
-                        match crate::team_menu::key(event, &shown, &mut this.menu_highlight) {
-                            crate::team_menu::MenuKey::Close => this.close_team_menu(cx),
-                            crate::team_menu::MenuKey::Choose(choice) => this.choose(&keyed_team, choice, cx),
-                            crate::team_menu::MenuKey::Stay => cx.notify(),
-                        }
+                    // a click elsewhere takes the focus where it clicked
+                    let _ = closed.update(cx, |this, cx| {
+                        this.team_menu = None;
+                        cx.notify();
                     });
+                },
+                move |event: &KeyDownEvent, window, cx| {
+                    let _ = keys.update(cx, |this, cx| this.menu_key(&keyed_team, &shown, event, window, cx));
                 },
             )
         });
@@ -629,7 +681,8 @@ impl Sidebar {
             .flex_none()
             // shown while the line is under the pointer, as Teams' "..." is, and while its menu is open; it takes its own
             // clicks
-            .when(!open, |more| {
+            // and while the keyboard is on the line
+            .when(!open && !keyed, |more| {
                 more.invisible().group_hover(group.clone(), gpui::Styled::visible)
             })
             .on_click(|_, _, cx| cx.stop_propagation())
@@ -638,24 +691,192 @@ impl Sidebar {
             .into_any_element()
     }
 
-    /// Opens the team `id`'s "..." menu.
-    pub fn open_team_menu(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// A key on the team `id`'s "..." menu, `shown` its entries.
+    fn menu_key(
+        &mut self,
+        id: &str,
+        shown: &[crate::team_menu::TeamChoice],
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.stop_propagation();
+        match crate::team_menu::key(event, shown, &mut self.menu_highlight) {
+            crate::team_menu::MenuKey::Close => self.close_team_menu(window, cx),
+            crate::team_menu::MenuKey::Choose(choice) => self.choose(id, choice, window, cx),
+            crate::team_menu::MenuKey::Stay => cx.notify(),
+        }
+    }
+
+    /// Opens the team `id`'s "..." menu, the keyboard on its first entry when `by_keyboard`, as Teams opens it; the
+    /// keyboard's row is the team's line, where the focus comes back to.
+    pub fn open_team_menu(&mut self, id: &str, by_keyboard: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.team_menu = Some(id.to_owned());
-        self.menu_highlight = None;
+        self.menu_highlight = by_keyboard.then_some(0);
+        self.cursor = Some((TEAM_KEY, id.to_owned()));
         self.menu_focus.focus(window, cx);
         cx.notify();
     }
 
-    /// Closes the team's "..." menu.
-    pub fn close_team_menu(&mut self, cx: &mut Context<Self>) {
+    /// Closes the team's "..." menu, the focus back on the list, on the team's line.
+    pub fn close_team_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.team_menu = None;
+        self.focus.focus(window, cx);
         cx.notify();
     }
 
-    /// An entry of the menu chosen: the shell acts on it.
-    fn choose(&mut self, id: &str, choice: crate::team_menu::TeamChoice, cx: &mut Context<Self>) {
-        self.close_team_menu(cx);
+    /// An entry of the menu chosen: the shell acts on it (the focus comes back to the team's line first, so a dialog
+    /// it opens gives it back there).
+    fn choose(&mut self, id: &str, choice: crate::team_menu::TeamChoice, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_team_menu(window, cx);
         self.teams.update(cx, |teams, cx| teams.choose(id, choice, cx));
+    }
+}
+
+/// The list's keys, as Teams' tree of chats, teams and channels takes them: Up, Down, Home and End move over the rows;
+/// Enter and Space open a chat or a channel, fold a section or a team, or follow a link; Right unfolds and Left folds, or
+/// goes up to the row's team or section; Shift+F10 or the menu key opens a team's "..." menu.
+impl Sidebar {
+    /// Gives the list the keyboard, on the selected row (or the first).
+    pub fn focus_list(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cursor_at().is_none() {
+            let selected = self.list.read(cx).selected().map(str::to_owned);
+            let at = selected
+                .and_then(|id| self.entries.iter().position(|entry| entry.chat() == Some(id.as_str())))
+                .or_else(|| self.rows().next());
+            if let Some(at) = at {
+                self.set_cursor(at);
+            }
+        }
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Gives the list the keyboard on the team `id`'s line.
+    pub fn focus_team(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(at) = self.entries.iter().position(|entry| entry.key() == (TEAM_KEY, id)) {
+            self.set_cursor(at);
+        }
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Whether the list has the keyboard.
+    #[must_use]
+    pub fn has_keyboard(&self, window: &Window) -> bool {
+        self.focus.is_focused(window)
+    }
+
+    /// The row the keyboard is on, where it is now.
+    fn cursor_at(&self) -> Option<usize> {
+        let (kind, id) = self.cursor.as_ref()?;
+        self.entries
+            .iter()
+            .position(|entry| entry.key() == (*kind, id.as_str()))
+    }
+
+    fn set_cursor(&mut self, at: usize) {
+        if let Some(entry) = self.entries.get(at) {
+            let (kind, id) = entry.key();
+            self.cursor = Some((kind, id.to_owned()));
+            self.reveal(at);
+        }
+    }
+
+    /// The rows the keyboard stops on: all but a section's note.
+    fn rows(&self) -> impl Iterator<Item = usize> + '_ {
+        self.entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| !matches!(entry, Entry::Note(_)))
+            .map(|(at, _)| at)
+    }
+
+    fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let rows: Vec<usize> = self.rows().collect();
+        let at = self.cursor_at();
+        let place = at.and_then(|at| rows.iter().position(|row| *row == at));
+        if let Some(to) = crate::keyboard::list_step(event, rows.len(), place) {
+            self.set_cursor(rows[to]);
+        } else if let Some(at) = at {
+            if !self.row_key(at, event, window, cx) {
+                return;
+            }
+        } else {
+            return;
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// A key on the row at `at`; `false` when it does nothing there.
+    fn row_key(&mut self, at: usize, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let Some(entry) = self.entries.get(at).cloned() else {
+            return false;
+        };
+        if crate::keyboard::opens_menu(event) {
+            let Entry::Team { id, .. } = entry else {
+                return false;
+            };
+            let offered = self
+                .teams
+                .read(cx)
+                .teams()
+                .is_some_and(|teams| teams.iter().any(|team| team.id == id));
+            if offered {
+                self.open_team_menu(&id, true, window, cx);
+            }
+            return offered;
+        }
+        if event.keystroke.modifiers.modified() {
+            return false;
+        }
+        match event.keystroke.key.as_str() {
+            "enter" | "space" => self.activate(entry, cx),
+            "right" => match entry {
+                Entry::Section(section) if !self.is_open(section) => self.toggle(section, cx),
+                Entry::Team { id, .. } if !self.team_open(&id) => self.toggle_team(&id, cx),
+                _ => {}
+            },
+            "left" => match entry {
+                Entry::Section(section) if self.is_open(section) => self.toggle(section, cx),
+                Entry::Team { id, .. } if self.team_open(&id) => self.toggle_team(&id, cx),
+                _ => {
+                    if let Some(parent) = self.parent(at) {
+                        self.set_cursor(parent);
+                    }
+                }
+            },
+            _ => return false,
+        }
+        true
+    }
+
+    /// What Enter does on a row: what a click on it does.
+    fn activate(&mut self, entry: Entry, cx: &mut Context<Self>) {
+        match entry {
+            Entry::Section(section) => self.toggle(section, cx),
+            Entry::Favorite { id, .. } | Entry::Chat { id, .. } => self.list.update(cx, |list, cx| list.open(id, cx)),
+            Entry::SeeMore => self.list.update(cx, ChatList::see_more),
+            Entry::Note(_) => {}
+            Entry::Team { id, .. } => self.toggle_team(&id, cx),
+            Entry::Channel { id, .. } => self.teams.update(cx, |teams, cx| teams.open(&id, cx)),
+            Entry::SeeAllChannels { id, .. } => self.teams.update(cx, |teams, cx| teams.see_all_channels(&id, cx)),
+            Entry::SeeAllTeams => self.teams.update(cx, TeamsList::see_all_teams),
+        }
+    }
+
+    /// The row a row belongs to: a channel's team, or a row's section.
+    fn parent(&self, at: usize) -> Option<usize> {
+        let in_team = matches!(
+            self.entries.get(at),
+            Some(Entry::Channel { .. } | Entry::SeeAllChannels { .. })
+        );
+        self.entries[..at].iter().rposition(|entry| match entry {
+            Entry::Team { .. } => in_team,
+            Entry::Section(_) => true,
+            _ => false,
+        })
     }
 }
 
@@ -758,10 +979,18 @@ impl Render for Sidebar {
             .children(connection);
         let rows = list(
             self.state.clone(),
-            cx.processor(move |this: &mut Self, at: usize, _window, cx| this.render_entry(at, palette, cx)),
+            cx.processor(move |this: &mut Self, at: usize, window, cx| this.render_entry(at, window, palette, cx)),
         )
-        .flex_1()
-        .w_full();
+        .size_full();
+        let rows = div()
+            .id("sidebar-list")
+            .debug_selector(|| "sidebar-list".to_owned())
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(Self::on_key))
+            .flex_1()
+            .min_h_0()
+            .w_full()
+            .child(rows);
         div()
             .debug_selector(|| "sidebar".to_owned())
             .size_full()

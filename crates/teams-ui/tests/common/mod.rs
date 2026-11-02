@@ -134,6 +134,8 @@ pub struct FakeCore {
     pub channel_thread_answer: Mutex<Option<String>>,
     /// Who a team's people search finds.
     pub team_found: Mutex<Vec<teams_proto::TeamPerson>>,
+    /// Who the organization's people box finds (Add member).
+    pub addable: Mutex<Vec<teams_proto::TeamPerson>>,
     /// The favourite chats and the conversations the service calls empty, as `chat_listing` answers them.
     pub listing: Mutex<ChatListing>,
     /// Per channel, the post each stored message belongs to.
@@ -209,6 +211,7 @@ impl Default for FakeCore {
             channel_members_added: Mutex::default(),
             channel_thread_answer: Mutex::default(),
             team_found: Mutex::default(),
+            addable: Mutex::default(),
             listing: Mutex::default(),
             roots: Mutex::default(),
             synced: Mutex::default(),
@@ -403,6 +406,10 @@ impl Core for FakeCore {
 
     fn team_people(&self, _team: String, _keyword: String) -> Reply<Vec<teams_proto::TeamPerson>> {
         Reply::ready(Ok(locked(&self.team_found).clone()))
+    }
+
+    fn addable_people(&self, _keyword: String) -> Reply<Vec<teams_proto::TeamPerson>> {
+        Reply::ready(Ok(locked(&self.addable).clone()))
     }
 
     fn invitable(&self, query: String) -> Reply<Vec<teams_core::Invitable>> {

@@ -19,8 +19,8 @@ use std::sync::Arc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AppContext as _, AsyncApp, ClickEvent, ClipboardItem, Context, Entity, EventEmitter,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Task, WeakEntity, Window, div, px, rgb,
+    InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, div, px, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::checkbox::Checkbox;
@@ -36,6 +36,7 @@ use teams_store::Team;
 
 use crate::bridge::Core;
 use crate::icons::{Glyph, icon_button, selected_by};
+use crate::keyboard::{self, Handles, PopupFocus};
 use crate::shell::menu_row;
 use crate::team_menu::TeamChoice;
 use crate::teams_list::TeamsList;
@@ -329,6 +330,10 @@ pub struct ManageTeam {
     tags: Option<TagsRead>,
     /// What went wrong with the last write, in Teams' words.
     problem: Option<&'static str>,
+    /// The tabs, Left and Right moving through them.
+    tabs: Handles,
+    /// The keyboard on the open popup ("N more", a role, the time period).
+    popup: PopupFocus,
     reading: Vec<Task<()>>,
     writing: Option<Task<()>>,
     observing_: Vec<Subscription>,
@@ -375,6 +380,8 @@ impl ManageTeam {
             period_open: false,
             tags: None,
             problem: None,
+            tabs: Handles::default(),
+            popup: PopupFocus::new(cx),
             reading: Vec::new(),
             writing: None,
             observing_: observing,
@@ -692,15 +699,27 @@ impl ManageTeam {
 
     fn header(&self, team: &Team, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
         let avatar = self.teams.read(cx).avatar(team, 32.0, false, palette);
-        let tabs = tabs_of(team).into_iter().map(|tab| {
-            tab_button(
-                format!("manage-tab-{}", tab.key()),
-                tab.label(),
-                self.tab == tab,
-                palette,
-            )
-            .on_click(cx.listener(move |this, _, _, cx| this.show_tab(tab, cx)))
-        });
+        let shown = tabs_of(team);
+        let tabs: Vec<keyboard::Stop> = shown
+            .iter()
+            .copied()
+            .map(|tab| {
+                let key = format!("manage-tab-{}", tab.key());
+                let chosen = self.tab == tab;
+                let order = shown.clone();
+                keyboard::stop(
+                    key.clone(),
+                    tab_button(key.clone(), tab.label(), chosen, palette)
+                        .on_click(cx.listener(move |this, _, _, cx| this.show_tab(tab, cx)))
+                        .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                            this.tab_key(&order, tab, event, window, cx);
+                        })),
+                    palette,
+                )
+                .handle(&self.tabs.get(&key, cx))
+                .tab_stop(chosen)
+            })
+            .collect();
         div()
             .h(px(60.0))
             .flex_none()
@@ -722,57 +741,132 @@ impl ManageTeam {
             .children(tabs)
     }
 
+    /// Left and Right on a tab: the one next to it is shown, the keyboard on it, as Teams' tabs take them.
+    fn tab_key(
+        &mut self,
+        order: &[ManageTab],
+        tab: ManageTab,
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let at = order.iter().position(|shown| *shown == tab).unwrap_or(0);
+        let Some(to) = keyboard::step(event, order.len(), at) else {
+            return;
+        };
+        cx.stop_propagation();
+        let tab = order[to];
+        self.show_tab(tab, cx);
+        self.tabs
+            .get(&format!("manage-tab-{}", tab.key()), cx)
+            .focus(window, cx);
+    }
+
+    /// Opens or closes a popup, the keyboard going to it or back to what opened it.
+    fn popup_toggled(&self, open: bool, window: &mut Window, cx: &mut App) {
+        if open {
+            self.popup.opened(window, cx);
+        } else {
+            self.popup.closed(window, cx);
+        }
+    }
+
+    /// Closes whichever popup is open, the keyboard back on what opened it.
+    fn close_popups(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.channel_more = false;
+        self.role_menu = None;
+        self.period_open = false;
+        self.popup.closed(window, cx);
+        cx.notify();
+    }
+
+    /// The open popup's keys.
+    fn popup_keys(&self, cx: &mut Context<Self>) -> impl Fn(&KeyDownEvent, &mut Window, &mut App) + 'static {
+        let weak = cx.entity().downgrade();
+        keyboard::menu_keys(self.popup.root().clone(), move |window, cx| {
+            let _ = weak.update(cx, |this, cx| this.close_popups(window, cx));
+        })
+    }
+
     /// The Channels tab's filter chips, the words of its "N more" and that one's menu.
     fn channel_chips(
         &self,
         palette: Palette,
         cx: &mut Context<Self>,
-    ) -> (
-        Vec<gpui::Stateful<gpui::Div>>,
-        String,
-        Option<crate::teams_page::PopupMenu>,
-    ) {
+    ) -> (Vec<keyboard::Stop>, String, Option<crate::teams_page::PopupMenu>) {
         let others = [ChannelFilter::Hidden, ChannelFilter::Private, ChannelFilter::Archived];
         let left: Vec<ChannelFilter> = others
             .into_iter()
             .filter(|filter| *filter != self.channel_filter)
             .collect();
         let chip = |filter: ChannelFilter, this: &Self, cx: &mut Context<Self>| {
-            chip_base(
-                format!("manage-channels-{}", filter.key()),
-                this.channel_filter == filter,
+            let key = format!("manage-channels-{}", filter.key());
+            keyboard::stop(
+                key.clone(),
+                chip_base(key, this.channel_filter == filter, palette)
+                    .child(filter.label())
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.channel_filter = filter;
+                        this.channel_more = false;
+                        cx.notify();
+                    })),
                 palette,
             )
-            .child(filter.label())
-            .on_click(cx.listener(move |this, _, _, cx| {
-                this.channel_filter = filter;
-                this.channel_more = false;
-                cx.notify();
-            }))
+            .edge()
         };
         let mut chips = vec![chip(ChannelFilter::All, self, cx), chip(ChannelFilter::Shown, self, cx)];
         if others.contains(&self.channel_filter) {
             chips.push(chip(self.channel_filter, self, cx));
         }
         let more_menu = self.channel_more.then(|| {
-            popup_menu(
+            let mut menu = popup_menu(
                 palette,
                 cx.listener(|this, _, _, cx| {
                     this.channel_more = false;
                     cx.notify();
                 }),
             )
-            .children(left.iter().copied().map(|filter| {
-                menu_row(format!("manage-channels-more-{}", filter.key()), palette)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.channel_filter = filter;
-                        this.channel_more = false;
-                        cx.notify();
-                    }))
-                    .child(filter.label())
-            }))
+            .keyed(self.popup.root(), self.popup_keys(cx));
+            for filter in left.iter().copied() {
+                let key = format!("manage-channels-more-{}", filter.key());
+                menu = menu.row(
+                    key.clone(),
+                    menu_row(key, palette)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.channel_filter = filter;
+                            this.close_popups(window, cx);
+                        }))
+                        .child(filter.label()),
+                    palette,
+                );
+            }
+            menu
         });
         (chips, format!("{} more", left.len()), more_menu)
+    }
+
+    /// The Channels tab's sort, A-Z or Z-A.
+    fn channel_sort(&self, palette: Palette, cx: &mut Context<Self>) -> keyboard::Stop {
+        keyboard::stop(
+            "manage-channels-sort",
+            div()
+                .id("manage-channels-sort")
+                .debug_selector(|| "manage-channels-sort".to_owned())
+                .px_2()
+                .py_1()
+                .flex()
+                .items_center()
+                .gap_1()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .cursor_pointer()
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.channel_z_to_a = !this.channel_z_to_a;
+                    cx.notify();
+                }))
+                .child(if self.channel_z_to_a { "Sort: Z-A" } else { "Sort: A-Z" })
+                .child(Glyph::CHEVRON_DOWN.icon().size(px(12.0))),
+            palette,
+        )
     }
 
     /// The Channels tab.
@@ -798,37 +892,26 @@ impl ManageTeam {
             .child(
                 div()
                     .child(
-                        chip_base("manage-channels-more".to_owned(), false, palette)
-                            .flex()
-                            .items_center()
-                            .gap_1()
-                            .child(more_words)
-                            .child(Glyph::CHEVRON_DOWN.icon().size(px(12.0)))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.channel_more = !this.channel_more;
-                                cx.notify();
-                            })),
+                        keyboard::stop(
+                            "manage-channels-more",
+                            chip_base("manage-channels-more".to_owned(), false, palette)
+                                .flex()
+                                .items_center()
+                                .gap_1()
+                                .child(more_words)
+                                .child(Glyph::CHEVRON_DOWN.icon().size(px(12.0)))
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.channel_more = !this.channel_more;
+                                    this.popup_toggled(this.channel_more, window, cx);
+                                    cx.notify();
+                                })),
+                            palette,
+                        )
+                        .edge(),
                     )
                     .children(more_menu),
             )
-            .child(
-                div()
-                    .id("manage-channels-sort")
-                    .debug_selector(|| "manage-channels-sort".to_owned())
-                    .px_2()
-                    .py_1()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.channel_z_to_a = !this.channel_z_to_a;
-                        cx.notify();
-                    }))
-                    .child(if self.channel_z_to_a { "Sort: Z-A" } else { "Sort: A-Z" })
-                    .child(Glyph::CHEVRON_DOWN.icon().size(px(12.0))),
-            )
+            .child(self.channel_sort(palette, cx))
             .child(div().flex_1())
             .when(!read_only && team.can_add_channel, |bar| {
                 let id = team.id.clone();
@@ -954,7 +1037,7 @@ impl ManageTeam {
                 if shown { button.ghost() } else { button.outline() },
             )
         });
-        div()
+        let line = div()
             .debug_selector(move || format!("manage-channel-{at}"))
             .id(SharedString::from(format!("manage-channel-{at}")))
             .h(px(60.0))
@@ -992,8 +1075,8 @@ impl ManageTeam {
                             .child(description),
                     ),
             )
-            .children(toggle)
-            .into_any_element()
+            .children(toggle);
+        keyboard::stop(SharedString::from(format!("manage-channel-{at}")), line, palette).into_any_element()
     }
 
     /// The Members tab's Add member and Search members.
@@ -1062,6 +1145,7 @@ impl ManageTeam {
             format!("Owners ({})", owners.len()),
             owners_open,
             true,
+            palette,
             cx,
         );
         let others_title = Self::fold_title(
@@ -1069,6 +1153,7 @@ impl ManageTeam {
             format!("Members and guests ({})", others.len()),
             others_open,
             false,
+            palette,
             cx,
         );
         let mut rows: Vec<AnyElement> = vec![owners_title];
@@ -1108,8 +1193,15 @@ impl ManageTeam {
             .into_any_element()
     }
 
-    fn fold_title(id: &'static str, words: String, open: bool, owners: bool, cx: &mut Context<Self>) -> AnyElement {
-        div()
+    fn fold_title(
+        id: &'static str,
+        words: String,
+        open: bool,
+        owners: bool,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let title = div()
             .id(id)
             .debug_selector(move || id.to_owned())
             .h(px(44.0))
@@ -1134,8 +1226,8 @@ impl ManageTeam {
                 .icon()
                 .size(px(16.0)),
             )
-            .child(words)
-            .into_any_element()
+            .child(words);
+        keyboard::stop(id, title, palette).into_any_element()
     }
 
     /// A member's Team role: a dropdown for an owner to change it.
@@ -1158,17 +1250,26 @@ impl ManageTeam {
                     cx.notify();
                 }),
             )
-            .child(
+            .keyed(self.popup.root(), self.popup_keys(cx))
+            .row(
+                "manage-role-owner",
                 menu_row("manage-role-owner", palette)
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.update_member(&promote, MemberUpdate::Promoted, cx)),
-                    )
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.update_member(&promote, MemberUpdate::Promoted, cx);
+                        this.popup.closed(window, cx);
+                    }))
                     .child("Owner"),
+                palette,
             )
-            .child(
+            .row(
+                "manage-role-member",
                 menu_row("manage-role-member", palette)
-                    .on_click(cx.listener(move |this, _, _, cx| this.update_member(&demote, MemberUpdate::Demoted, cx)))
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.update_member(&demote, MemberUpdate::Demoted, cx);
+                        this.popup.closed(window, cx);
+                    }))
                     .child("Member"),
+                palette,
             )
         });
         if can_change && !member.guest {
@@ -1180,12 +1281,13 @@ impl ManageTeam {
                         .small()
                         .label(role_words)
                         .dropdown_caret(true)
-                        .on_click(cx.listener(move |this, _, _, cx| {
+                        .on_click(cx.listener(move |this, _, window, cx| {
                             this.role_menu = if this.role_menu.as_deref() == Some(role_id.as_str()) {
                                 None
                             } else {
                                 Some(role_id.clone())
                             };
+                            this.popup_toggled(this.role_menu.is_some(), window, cx);
                             cx.notify();
                         })),
                 ))
@@ -1323,7 +1425,8 @@ impl ManageTeam {
             .flex_col()
             .border_b_1()
             .border_color(rgb(palette.border))
-            .child(
+            .child(keyboard::stop(
+                SharedString::from(selector.clone()),
                 div()
                     .id(SharedString::from(selector.clone()))
                     .debug_selector(move || selector.clone())
@@ -1355,7 +1458,8 @@ impl ManageTeam {
                             .child(heading),
                     )
                     .child(div().flex_1().text_sm().child(about)),
-            )
+                palette,
+            ))
             .when(open, |section| {
                 section.child(div().pl_6().pb_4().flex().flex_col().gap_2().child(content))
             })
@@ -1617,36 +1721,43 @@ impl ManageTeam {
             .into_any_element()
     }
 
+    /// The time period's menu.
+    fn period_menu(&self, palette: Palette, cx: &mut Context<Self>) -> crate::teams_page::PopupMenu {
+        let current = self.period;
+        let mut menu = popup_menu(
+            palette,
+            cx.listener(|this, _, _, cx| {
+                this.period_open = false;
+                cx.notify();
+            }),
+        )
+        .keyed(self.popup.root(), self.popup_keys(cx));
+        for period in [
+            AnalyticsPeriod::LastSevenDays,
+            AnalyticsPeriod::LastThirtyDays,
+            AnalyticsPeriod::LastNinetyDays,
+        ] {
+            let key = format!("manage-period-{}", period.wire());
+            menu = menu.row(
+                key.clone(),
+                menu_row(key, palette)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.period = period;
+                        this.close_popups(window, cx);
+                        this.read_analytics(cx);
+                    }))
+                    .child(div().flex_1().child(period.label()))
+                    .when(period == current, |row| row.child(Glyph::CHECK.icon().size(px(14.0)))),
+                palette,
+            );
+        }
+        menu
+    }
+
     /// The Analytics tab.
     fn analytics_tab(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let current = self.period;
-        let menu = self.period_open.then(|| {
-            popup_menu(
-                palette,
-                cx.listener(|this, _, _, cx| {
-                    this.period_open = false;
-                    cx.notify();
-                }),
-            )
-            .children(
-                [
-                    AnalyticsPeriod::LastSevenDays,
-                    AnalyticsPeriod::LastThirtyDays,
-                    AnalyticsPeriod::LastNinetyDays,
-                ]
-                .map(|period| {
-                    menu_row(format!("manage-period-{}", period.wire()), palette)
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            this.period = period;
-                            this.period_open = false;
-                            this.read_analytics(cx);
-                            cx.notify();
-                        }))
-                        .child(div().flex_1().child(period.label()))
-                        .when(period == current, |row| row.child(Glyph::CHECK.icon().size(px(14.0))))
-                }),
-            )
-        });
+        let menu = self.period_open.then(|| self.period_menu(palette, cx));
         let picker = div()
             .flex()
             .flex_col()
@@ -1655,25 +1766,31 @@ impl ManageTeam {
             .child(
                 div()
                     .child(
-                        div()
-                            .id("manage-period")
-                            .debug_selector(|| "manage-period".to_owned())
-                            .w(px(240.0))
-                            .px_3()
-                            .py_1p5()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .rounded_md()
-                            .border_1()
-                            .border_color(rgb(palette.border))
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.period_open = !this.period_open;
-                                cx.notify();
-                            }))
-                            .child(current.label())
-                            .child(Glyph::CHEVRON_DOWN.icon().size(px(14.0))),
+                        keyboard::stop(
+                            "manage-period",
+                            div()
+                                .id("manage-period")
+                                .debug_selector(|| "manage-period".to_owned())
+                                .w(px(240.0))
+                                .px_3()
+                                .py_1p5()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(rgb(palette.border))
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.period_open = !this.period_open;
+                                    this.popup_toggled(this.period_open, window, cx);
+                                    cx.notify();
+                                }))
+                                .child(current.label())
+                                .child(Glyph::CHEVRON_DOWN.icon().size(px(14.0))),
+                            palette,
+                        )
+                        .edge(),
                     )
                     .children(menu),
             );

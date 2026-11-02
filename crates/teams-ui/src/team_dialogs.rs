@@ -24,7 +24,7 @@ use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::checkbox::Checkbox;
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
 use gpui_component::spinner::Spinner;
-use gpui_component::{Disableable as _, Sizable as _};
+use gpui_component::{Disableable as _, FocusTrapElement as _, Sizable as _};
 use teams_core::{TeamChange, TeamWritten};
 use teams_fence::Mri;
 use teams_proto::{MemberUpdate, NewTeam, OwnTeamView, TeamPerson, TeamRole, TeamTag, TeamWrite};
@@ -33,6 +33,7 @@ use teams_store::{ChannelKind, Team, TeamAbout, TeamChannel};
 use crate::bridge::Core;
 use crate::channel_dialog::name_problem;
 use crate::icons::{Glyph, icon_button, selected_by};
+use crate::keyboard::{self, Handles, PopupFocus};
 use crate::shell::menu_row;
 use crate::teams_page::popup_menu;
 use crate::theme::{self, Palette};
@@ -206,6 +207,12 @@ pub struct CreateTeamDialog {
     public: bool,
     step: CreateStep,
     general_menu: bool,
+    /// The keyboard on the "..." of the first channel's name's menu.
+    general_popup: PopupFocus,
+    /// The kind cards' focus.
+    kinds: Handles,
+    /// The team type's button, where the keyboard goes back to from the kind step.
+    kind_focus: FocusHandle,
     working: Option<Task<()>>,
     focus: FocusHandle,
     _inputs: [Subscription; 3],
@@ -240,6 +247,9 @@ impl CreateTeamDialog {
             public: false,
             step: CreateStep::Form,
             general_menu: false,
+            general_popup: PopupFocus::new(cx),
+            kinds: Handles::default(),
+            kind_focus: cx.focus_handle(),
             working: None,
             focus: cx.focus_handle(),
             _inputs: touched,
@@ -398,15 +408,35 @@ impl CreateTeamDialog {
             .child(
                 div().flex().child(selected_by(
                     "create-team-kind",
-                    Button::new("create-team-kind")
-                        .outline()
-                        .icon(if self.public {
-                            Glyph::GLOBE.icon()
-                        } else {
-                            Glyph::LOCK.icon()
-                        })
-                        .label(if self.public { "Public" } else { "Private" })
-                        .on_click(cx.listener(|this, _, _, cx| this.show_kind(cx))),
+                    // an outline button of our own, its focus kept for the kind step to give back
+                    keyboard::stop(
+                        "create-team-kind",
+                        div()
+                            .id("create-team-kind")
+                            .h_8()
+                            .px_3()
+                            .flex()
+                            .items_center()
+                            .gap_2()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(palette.border))
+                            .cursor_pointer()
+                            .hover(move |button| button.bg(rgb(palette.hover)))
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.show_kind(cx);
+                                this.kinds.get(kind_key(this.public), cx).focus(window, cx);
+                            }))
+                            .child(
+                                if self.public { Glyph::GLOBE } else { Glyph::LOCK }
+                                    .icon()
+                                    .size(px(16.0)),
+                            )
+                            .child(if self.public { "Public" } else { "Private" }),
+                        palette,
+                    )
+                    .edge()
+                    .handle(&self.kind_focus),
                 )),
             )
             .child(label("First channel name", true, palette))
@@ -429,6 +459,7 @@ impl CreateTeamDialog {
                             .primary()
                             .label("Create")
                             .disabled(!can_create)
+                            .tab_stop(can_create)
                             .on_click(cx.listener(|this, _, _, cx| this.create(cx))),
                     )),
             )
@@ -437,6 +468,7 @@ impl CreateTeamDialog {
     /// "First channel name" with its "..." and that one's menu.
     fn first_channel_row(&self, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
         let general_menu = self.general_menu.then(|| {
+            let weak = cx.entity().downgrade();
             popup_menu(
                 palette,
                 cx.listener(|this, _, _, cx| {
@@ -444,15 +476,28 @@ impl CreateTeamDialog {
                     cx.notify();
                 }),
             )
-            .child(
+            .keyed(
+                self.general_popup.root(),
+                keyboard::menu_keys(self.general_popup.root().clone(), move |window, cx| {
+                    let _ = weak.update(cx, |this, cx| {
+                        this.general_menu = false;
+                        this.general_popup.closed(window, cx);
+                        cx.notify();
+                    });
+                }),
+            )
+            .row(
+                "create-team-general",
                 menu_row("create-team-general", palette)
                     .on_click(cx.listener(|this, _, window, cx| {
                         this.general_menu = false;
+                        this.general_popup.closed(window, cx);
                         this.first_channel
                             .update(cx, |input, cx| input.set_value("General".to_owned(), window, cx));
                         cx.notify();
                     }))
                     .child("Set name to General"),
+                palette,
             )
         });
         div()
@@ -468,8 +513,13 @@ impl CreateTeamDialog {
                     .child(selected_by(
                         "create-team-more-naming",
                         icon_button("create-team-more-naming", Glyph::ELLIPSIS, "More naming options").on_click(
-                            cx.listener(|this, _, _, cx| {
+                            cx.listener(|this, _, window, cx| {
                                 this.general_menu = !this.general_menu;
+                                if this.general_menu {
+                                    this.general_popup.opened(window, cx);
+                                } else {
+                                    this.general_popup.closed(window, cx);
+                                }
                                 cx.notify();
                             }),
                         ),
@@ -478,15 +528,15 @@ impl CreateTeamDialog {
             )
     }
 
-    /// "What kind of team will this be?"
-    fn kind_step(palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
+    /// "What kind of team will this be?": a card per kind, Up and Down moving between them, Enter picking one.
+    fn kind_step(&self, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
         let card = |id: &'static str,
                     glyph: Glyph,
                     name: &'static str,
                     about: &'static str,
                     public: bool,
                     cx: &mut Context<Self>| {
-            div()
+            let card = div()
                 .id(id)
                 .debug_selector(move || id.to_owned())
                 .p_3()
@@ -498,7 +548,16 @@ impl CreateTeamDialog {
                 .border_color(rgb(palette.border))
                 .cursor_pointer()
                 .hover(move |card| card.bg(rgb(palette.hover)))
-                .on_click(cx.listener(move |this, _, _, cx| this.pick_kind(public, cx)))
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    this.pick_kind(public, cx);
+                    this.kind_focus.focus(window, cx);
+                }))
+                .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                    if let Some(to) = keyboard::step(event, 2, usize::from(public)) {
+                        cx.stop_propagation();
+                        this.kinds.get(kind_key(to == 1), cx).focus(window, cx);
+                    }
+                }))
                 .child(glyph.icon().size(px(28.0)))
                 .child(
                     div()
@@ -506,7 +565,10 @@ impl CreateTeamDialog {
                         .flex_col()
                         .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(name))
                         .child(div().text_sm().child(about)),
-                )
+                );
+            keyboard::stop(id, card, palette)
+                .edge()
+                .handle(&self.kinds.get(kind_key(public), cx))
         };
         div()
             .flex()
@@ -537,8 +599,9 @@ impl CreateTeamDialog {
                         .ghost()
                         .icon(Glyph::CHEVRON_LEFT.icon())
                         .label("Back")
-                        .on_click(cx.listener(|this, _, _, cx| {
+                        .on_click(cx.listener(|this, _, window, cx| {
                             this.step = CreateStep::Form;
+                            this.kind_focus.focus(window, cx);
                             cx.notify();
                         })),
                 )),
@@ -594,7 +657,7 @@ impl Render for CreateTeamDialog {
         let palette = theme::current(cx);
         let content = match self.step {
             CreateStep::Form => self.form(palette, cx),
-            CreateStep::Kind => Self::kind_step(palette, cx),
+            CreateStep::Kind => self.kind_step(palette, cx),
             CreateStep::Creating => waiting("create-team-creating", "Creating the team...", palette),
             CreateStep::Failed => Self::failed(palette, cx),
         };
@@ -608,7 +671,13 @@ impl Render for CreateTeamDialog {
                 }
             }))
             .child(content)
+            .focus_trap("create-team-dialog-trap", &self.focus)
     }
+}
+
+/// A kind card's key.
+fn kind_key(public: bool) -> &'static str {
+    if public { "public" } else { "private" }
 }
 
 /// `element` with `selector` as its test selector, as wide as it can be.
@@ -649,6 +718,10 @@ pub struct AddMembersDialog {
     found: Vec<TeamPerson>,
     found_for: String,
     role_menu: Option<usize>,
+    /// The keyboard on a role's menu.
+    role_popup: PopupFocus,
+    /// The people found: Up and Down move through them.
+    found_focus: FocusHandle,
     step: AddStep,
     searching: Option<Task<()>>,
     working: Option<Task<()>>,
@@ -690,6 +763,8 @@ impl AddMembersDialog {
             found: Vec::new(),
             found_for: String::new(),
             role_menu: None,
+            role_popup: PopupFocus::new(cx),
+            found_focus: cx.focus_handle(),
             step: AddStep::Picking,
             searching: None,
             working: None,
@@ -838,29 +913,49 @@ impl AddMembersDialog {
         cx.emit(TeamDialogEvent::Changed { team, words });
     }
 
+    /// The role's menu of the person picked at `at`: Member, Owner.
+    fn role_menu_of(&self, at: usize, palette: Palette, cx: &mut Context<Self>) -> crate::teams_page::PopupMenu {
+        let weak = cx.entity().downgrade();
+        let mut menu = popup_menu(
+            palette,
+            cx.listener(|this, _, _, cx| {
+                this.role_menu = None;
+                cx.notify();
+            }),
+        )
+        .keyed(
+            self.role_popup.root(),
+            keyboard::menu_keys(self.role_popup.root().clone(), move |window, cx| {
+                let _ = weak.update(cx, |this, cx| {
+                    this.role_menu = None;
+                    this.role_popup.closed(window, cx);
+                    cx.notify();
+                });
+            }),
+        );
+        for (role, words, key) in [
+            (TeamRole::Member, "Member", "member"),
+            (TeamRole::Owner, "Owner", "owner"),
+        ] {
+            let key = format!("add-members-role-{at}-{key}");
+            menu = menu.row(
+                key.clone(),
+                menu_row(key, palette)
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        this.set_role(at, role, cx);
+                        this.role_popup.closed(window, cx);
+                    }))
+                    .child(words),
+                palette,
+            );
+        }
+        menu
+    }
+
     fn picked_row(&self, at: usize, picked: &Picked, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let mri = picked.person.mri.clone();
         let open = self.role_menu == Some(at);
-        let menu = open.then(|| {
-            popup_menu(
-                palette,
-                cx.listener(|this, _, _, cx| {
-                    this.role_menu = None;
-                    cx.notify();
-                }),
-            )
-            .children(
-                [
-                    (TeamRole::Member, "Member", "member"),
-                    (TeamRole::Owner, "Owner", "owner"),
-                ]
-                .map(|(role, words, key)| {
-                    menu_row(format!("add-members-role-{at}-{key}"), palette)
-                        .on_click(cx.listener(move |this, _, _, cx| this.set_role(at, role, cx)))
-                        .child(words)
-                }),
-            )
-        });
+        let menu = open.then(|| self.role_menu_of(at, palette, cx));
         let role_words = match picked.role {
             TeamRole::Member => "Member",
             TeamRole::Owner => "Owner",
@@ -874,8 +969,13 @@ impl AddMembersDialog {
                         .small()
                         .label(role_words)
                         .dropdown_caret(true)
-                        .on_click(cx.listener(move |this, _, _, cx| {
+                        .on_click(cx.listener(move |this, _, window, cx| {
                             this.role_menu = if this.role_menu == Some(at) { None } else { Some(at) };
+                            if this.role_menu.is_some() {
+                                this.role_popup.opened(window, cx);
+                            } else {
+                                this.role_popup.closed(window, cx);
+                            }
                             cx.notify();
                         })),
                 ))
@@ -915,9 +1015,9 @@ impl AddMembersDialog {
             .into_any_element()
     }
 
-    fn found_row(at: usize, person: TeamPerson, palette: Palette, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+    fn found_row(at: usize, person: TeamPerson, palette: Palette, cx: &mut Context<Self>) -> keyboard::Stop {
         let shown = person.clone();
-        div()
+        let row = div()
             .debug_selector(move || format!("add-members-found-{at}"))
             .id(SharedString::from(format!("add-members-found-{at}")))
             .px_2()
@@ -933,7 +1033,8 @@ impl AddMembersDialog {
                 shown
                     .email
                     .map(|email| div().text_xs().text_color(rgb(palette.muted_foreground)).child(email)),
-            )
+            );
+        keyboard::stop(SharedString::from(format!("add-members-found-{at}")), row, palette)
     }
 
     fn picking(&self, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
@@ -974,6 +1075,8 @@ impl AddMembersDialog {
             .child(
                 div()
                     .id("add-members-found")
+                    .track_focus(&self.found_focus)
+                    .on_key_down(keyboard::list_keys(self.found_focus.clone()))
                     .max_h(px(180.0))
                     .overflow_y_scroll()
                     .flex()
@@ -1005,6 +1108,7 @@ impl AddMembersDialog {
                             .primary()
                             .label(if self.sends_request() { "Send request" } else { "Add" })
                             .disabled(self.picked.is_empty())
+                            .tab_stop(!self.picked.is_empty())
                             .on_click(cx.listener(|this, _, _, cx| this.add(cx))),
                     )),
             )
@@ -1080,6 +1184,7 @@ impl Render for AddMembersDialog {
                 }
             }))
             .child(content)
+            .focus_trap("add-members-dialog-trap", &self.focus)
     }
 }
 
@@ -1095,6 +1200,8 @@ pub struct EditTeamDialog {
     description: Entity<TextareaState>,
     public: bool,
     privacy_open: bool,
+    /// The keyboard on the privacy's menu.
+    privacy_popup: PopupFocus,
     saving: bool,
     failed: bool,
     working: Option<Task<()>>,
@@ -1127,6 +1234,7 @@ impl EditTeamDialog {
             name,
             description,
             privacy_open: false,
+            privacy_popup: PopupFocus::new(cx),
             saving: false,
             failed: false,
             working: None,
@@ -1215,6 +1323,7 @@ impl EditTeamDialog {
         const PRIVATE: &str = "Private - Only team owners can add members";
         const PUBLIC: &str = "Public - Anyone in your organization can join";
         let menu = self.privacy_open.then(|| {
+            let weak = cx.entity().downgrade();
             popup_menu(
                 palette,
                 cx.listener(|this, _, _, cx| {
@@ -1222,37 +1331,67 @@ impl EditTeamDialog {
                     cx.notify();
                 }),
             )
-            .child(
-                menu_row("edit-team-private", palette)
-                    .on_click(cx.listener(|this, _, _, cx| this.set_public(false, cx)))
-                    .child(PRIVATE),
+            .keyed(
+                self.privacy_popup.root(),
+                keyboard::menu_keys(self.privacy_popup.root().clone(), move |window, cx| {
+                    let _ = weak.update(cx, |this, cx| {
+                        this.privacy_open = false;
+                        this.privacy_popup.closed(window, cx);
+                        cx.notify();
+                    });
+                }),
             )
-            .child(
+            .row(
+                "edit-team-private",
+                menu_row("edit-team-private", palette)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.set_public(false, cx);
+                        this.privacy_popup.closed(window, cx);
+                    }))
+                    .child(PRIVATE),
+                palette,
+            )
+            .row(
+                "edit-team-public",
                 menu_row("edit-team-public", palette)
-                    .on_click(cx.listener(|this, _, _, cx| this.set_public(true, cx)))
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        this.set_public(true, cx);
+                        this.privacy_popup.closed(window, cx);
+                    }))
                     .child(PUBLIC),
+                palette,
             )
         });
         div()
             .child(
-                div()
-                    .id("edit-team-privacy")
-                    .debug_selector(|| "edit-team-privacy".to_owned())
-                    .px_3()
-                    .py_1p5()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(rgb(palette.border))
-                    .cursor_pointer()
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.privacy_open = !this.privacy_open;
-                        cx.notify();
-                    }))
-                    .child(if self.public { PUBLIC } else { PRIVATE })
-                    .child(Glyph::CHEVRON_DOWN.icon().size(px(14.0))),
+                keyboard::stop(
+                    "edit-team-privacy",
+                    div()
+                        .id("edit-team-privacy")
+                        .debug_selector(|| "edit-team-privacy".to_owned())
+                        .px_3()
+                        .py_1p5()
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(rgb(palette.border))
+                        .cursor_pointer()
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.privacy_open = !this.privacy_open;
+                            if this.privacy_open {
+                                this.privacy_popup.opened(window, cx);
+                            } else {
+                                this.privacy_popup.closed(window, cx);
+                            }
+                            cx.notify();
+                        }))
+                        .child(if self.public { PUBLIC } else { PRIVATE })
+                        .child(Glyph::CHEVRON_DOWN.icon().size(px(14.0))),
+                    palette,
+                )
+                .edge(),
             )
             .children(menu)
             .into_any_element()
@@ -1312,9 +1451,11 @@ impl Render for EditTeamDialog {
                             .primary()
                             .label("Done")
                             .disabled(!can_save)
+                            .tab_stop(can_save)
                             .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
                     )),
             )
+            .focus_trap("edit-team-dialog-trap", &self.focus)
     }
 }
 
@@ -1579,10 +1720,12 @@ impl Render for ConfirmDialog {
                         let button = Button::new("team-confirm-ok")
                             .label(confirm)
                             .disabled(!self.can_confirm())
+                            .tab_stop(self.can_confirm())
                             .on_click(cx.listener(|this, _, _, cx| this.confirm(cx)));
                         if danger { button.danger() } else { button.primary() }
                     })),
             )
+            .focus_trap("team-confirm-dialog-trap", &self.focus)
     }
 }
 
@@ -1598,6 +1741,8 @@ pub struct TagDialog {
     name: Entity<InputState>,
     description: Entity<TextareaState>,
     member_box: Entity<InputState>,
+    /// The people found: Up and Down move through them.
+    found_focus: FocusHandle,
     saving: bool,
     failed: bool,
     _reading: Task<()>,
@@ -1656,6 +1801,7 @@ impl TagDialog {
             name,
             description,
             member_box,
+            found_focus: cx.focus_handle(),
             saving: false,
             failed: false,
             _reading: reading,
@@ -1749,7 +1895,7 @@ impl TagDialog {
                 .enumerate()
                 .map(|(at, (mri, name))| {
                     let (mri, name, shown) = (mri.clone(), name.clone(), name.clone());
-                    div()
+                    let row = div()
                         .id(SharedString::from(format!("tag-found-{at}")))
                         .debug_selector(move || format!("tag-found-{at}"))
                         .px_2()
@@ -1760,8 +1906,8 @@ impl TagDialog {
                         .on_click(cx.listener(move |this, _, window, cx| {
                             this.pick(mri.clone(), name.clone(), window, cx);
                         }))
-                        .child(shown)
-                        .into_any_element()
+                        .child(shown);
+                    keyboard::stop(SharedString::from(format!("tag-found-{at}")), row, palette).into_any_element()
                 })
                 .collect()
         };
@@ -1801,7 +1947,14 @@ impl TagDialog {
             .gap_2()
             .child(label("Enter name of a member", true, palette))
             .child(selected_by_full("tag-member-box", Input::new(&self.member_box)))
-            .child(div().flex().flex_col().children(found))
+            .child(
+                div()
+                    .track_focus(&self.found_focus)
+                    .on_key_down(keyboard::list_keys(self.found_focus.clone()))
+                    .flex()
+                    .flex_col()
+                    .children(found),
+            )
             .child(div().flex().flex_wrap().gap_1().children(picked))
     }
 }
@@ -1861,9 +2014,11 @@ impl Render for TagDialog {
                             .primary()
                             .label(if editing { "Save" } else { "Create" })
                             .disabled(!can_save)
+                            .tab_stop(can_save)
                             .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
                     )),
             )
+            .focus_trap("tag-dialog-trap", &self.focus)
     }
 }
 

@@ -3,6 +3,10 @@
 //! Join team); on Teams the filters All, Teams you own and the rest under "N more", Sort, Search teams and a row per team
 //! with its "..." menu ([`crate::team_menu`]). A row clicked opens Manage team.
 //!
+//! The keyboard: the page opens on its rows ([`TeamsPage::focus_rows`]: Up, Down, Home and End move, Enter opens Manage
+//! team, Shift+F10 or the menu key the row's menu); the tabs move by Left and Right; every chip, button and popup row is a
+//! tab stop, a popup's Up, Down, Enter and Escape giving the keyboard back to what opened it ([`crate::keyboard`]).
+//!
 //! The teams are the [`TeamsList`]'s, from the store; the invitations and the analytics are read when their tab opens
 //! ([`Core::pending_invites`], [`Core::all_teams_analytics`]). Nothing here sends anything but through [`Core`], and the
 //! menu's choices are the shell's to act on. Traced: `teams-page opened`, `tab` with its key; never a name.
@@ -11,9 +15,9 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext as _, AsyncApp, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _,
-    IntoElement, KeyDownEvent, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
-    Subscription, Task, WeakEntity, Window, div, px, rgb,
+    AnyElement, AppContext as _, AsyncApp, Context, ElementId, Entity, EventEmitter, FocusHandle,
+    InteractiveElement as _, IntoElement, KeyDownEvent, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, div, px, rgb,
 };
 use gpui_component::Sizable as _;
 use gpui_component::input::{Input, InputEvent, InputState};
@@ -22,6 +26,7 @@ use teams_store::Team;
 
 use crate::bridge::Core;
 use crate::icons::{Glyph, icon_button, selected_by};
+use crate::keyboard::{self, Handles, PopupFocus};
 use crate::shell::menu_row;
 use crate::team_menu::{self, TeamChoice};
 use crate::teams_list::TeamsList;
@@ -38,6 +43,9 @@ pub enum PageTab {
 }
 
 impl PageTab {
+    /// The tabs in order.
+    pub const ALL: [Self; 3] = [Self::Teams, Self::PendingInvites, Self::Analytics];
+
     /// Its test selector's and the trace's name.
     #[must_use]
     pub fn key(self) -> &'static str {
@@ -208,6 +216,14 @@ pub struct TeamsPage {
     menu: Option<String>,
     menu_highlight: Option<usize>,
     menu_focus: FocusHandle,
+    /// The keyboard's popup (Create team's, "N more", Sort, the time period).
+    popup_focus: PopupFocus,
+    /// The tabs, Left and Right moving through them.
+    tabs: Handles,
+    /// The rows' keyboard: Up and Down move [`Self::row_cursor`].
+    rows_focus: FocusHandle,
+    /// The row the keyboard is on, by the team's id.
+    row_cursor: Option<String>,
     invites: Option<Vec<PendingInvite>>,
     analytics: Option<Vec<TeamAnalytics>>,
     period: AnalyticsPeriod,
@@ -232,6 +248,10 @@ impl TeamsPage {
             menu: None,
             menu_highlight: None,
             menu_focus: cx.focus_handle(),
+            popup_focus: PopupFocus::new(cx),
+            tabs: Handles::default(),
+            rows_focus: cx.focus_handle().tab_stop(true),
+            row_cursor: None,
             invites: None,
             analytics: None,
             period: AnalyticsPeriod::default(),
@@ -285,22 +305,25 @@ impl TeamsPage {
         cx.notify();
     }
 
-    /// Opens the team `id`'s "..." menu.
-    pub fn open_menu(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+    /// Opens the team `id`'s "..." menu, the keyboard on its first entry when `by_keyboard`; the keyboard's row is the
+    /// team's, where the focus comes back to.
+    pub fn open_menu(&mut self, id: &str, by_keyboard: bool, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = Some(id.to_owned());
-        self.menu_highlight = None;
+        self.menu_highlight = by_keyboard.then_some(0);
+        self.row_cursor = Some(id.to_owned());
         self.menu_focus.focus(window, cx);
         cx.notify();
     }
 
-    /// Closes the "..." menu.
-    pub fn close_menu(&mut self, cx: &mut Context<Self>) {
+    /// Closes the "..." menu, the keyboard back on the team's row.
+    pub fn close_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.menu = None;
+        self.rows_focus.focus(window, cx);
         cx.notify();
     }
 
-    fn choose(&mut self, team: &str, choice: TeamChoice, cx: &mut Context<Self>) {
-        self.close_menu(cx);
+    fn choose(&mut self, team: &str, choice: TeamChoice, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_menu(window, cx);
         let found = self
             .teams
             .read(cx)
@@ -312,11 +335,18 @@ impl TeamsPage {
     }
 
     /// A key on the "..." menu of the team `id`.
-    fn menu_key(&mut self, id: &str, shown: &[TeamChoice], event: &KeyDownEvent, cx: &mut Context<Self>) {
+    fn menu_key(
+        &mut self,
+        id: &str,
+        shown: &[TeamChoice],
+        event: &KeyDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         cx.stop_propagation();
         match team_menu::key(event, shown, &mut self.menu_highlight) {
-            team_menu::MenuKey::Close => self.close_menu(cx),
-            team_menu::MenuKey::Choose(choice) => self.choose(id, choice, cx),
+            team_menu::MenuKey::Close => self.close_menu(window, cx),
+            team_menu::MenuKey::Choose(choice) => self.choose(id, choice, window, cx),
             team_menu::MenuKey::Stay => cx.notify(),
         }
     }
@@ -360,21 +390,53 @@ impl TeamsPage {
         search
     }
 
-    fn toggle_popup(&mut self, popup: Popup, cx: &mut Context<Self>) {
-        self.popup = if self.popup == Some(popup) { None } else { Some(popup) };
+    fn toggle_popup(&mut self, popup: Popup, window: &mut Window, cx: &mut Context<Self>) {
+        if self.popup == Some(popup) {
+            self.close_popup(window, cx);
+        } else {
+            self.popup = Some(popup);
+            self.popup_focus.opened(window, cx);
+            cx.notify();
+        }
+    }
+
+    /// Closes the popup, the keyboard back on what opened it.
+    fn close_popup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.popup = None;
+        self.popup_focus.closed(window, cx);
+        cx.notify();
+    }
+
+    /// The open popup's keys.
+    fn popup_keys(&self, cx: &mut Context<Self>) -> impl Fn(&KeyDownEvent, &mut Window, &mut gpui::App) + 'static {
+        let weak = cx.entity().downgrade();
+        keyboard::menu_keys(self.popup_focus.root().clone(), move |window, cx| {
+            let _ = weak.update(cx, |this, cx| this.close_popup(window, cx));
+        })
+    }
+
+    /// A click outside the popup: it closes, the focus where it clicked.
+    fn popup_clicked_out(&mut self, cx: &mut Context<Self>) {
+        self.popup = None;
         cx.notify();
     }
 
     /// The header: the title, the tabs and Create team with its dropdown.
     fn header(&self, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
-        let tabs = [PageTab::Teams, PageTab::PendingInvites, PageTab::Analytics].map(|tab| {
-            tab_button(
-                format!("teams-tab-{}", tab.key()),
-                tab.label(),
-                self.tab == tab,
+        let tabs = PageTab::ALL.map(|tab| {
+            let key = format!("teams-tab-{}", tab.key());
+            let chosen = self.tab == tab;
+            keyboard::stop(
+                key.clone(),
+                tab_button(key.clone(), tab.label(), chosen, palette)
+                    .on_click(cx.listener(move |this, _, _, cx| this.show_tab(tab, cx)))
+                    .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                        this.tab_key(tab, event, window, cx);
+                    })),
                 palette,
             )
-            .on_click(cx.listener(move |this, _, _, cx| this.show_tab(tab, cx)))
+            .handle(&self.tabs.get(&key, cx))
+            .tab_stop(chosen)
         });
         div()
             .h(px(60.0))
@@ -398,6 +460,18 @@ impl TeamsPage {
             .child(self.create_button(palette, cx))
     }
 
+    /// Left and Right on a tab: the one next to it is shown, the keyboard on it, as Teams' tabs take them.
+    fn tab_key(&mut self, tab: PageTab, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let at = PageTab::ALL.iter().position(|shown| *shown == tab).unwrap_or(0);
+        let Some(to) = keyboard::step(event, PageTab::ALL.len(), at) else {
+            return;
+        };
+        cx.stop_propagation();
+        let tab = PageTab::ALL[to];
+        self.show_tab(tab, cx);
+        self.tabs.get(&format!("teams-tab-{}", tab.key()), cx).focus(window, cx);
+    }
+
     /// Create team and its dropdown; the read-only mode offers neither.
     fn create_button(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         if self.core.read_only() {
@@ -405,37 +479,37 @@ impl TeamsPage {
         }
         let open = self.popup == Some(Popup::CreateMenu);
         let menu = open.then(|| {
-            popup_menu(
-                palette,
-                cx.listener(|this, _, _, cx| {
-                    this.popup = None;
-                    cx.notify();
-                }),
-            )
-            .child(
-                menu_row("teams-create-menu-create", palette)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.popup = None;
-                        cx.emit(TeamsPageEvent::CreateTeam);
-                    }))
-                    .child(Glyph::USERS.icon().size(px(16.0)))
-                    .child("Create team"),
-            )
-            .child(
-                menu_row("teams-create-menu-join", palette)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.popup = None;
-                        cx.emit(TeamsPageEvent::JoinTeam);
-                    }))
-                    .child(Glyph::USER_PLUS.icon().size(px(16.0)))
-                    .child("Join Team"),
-            )
+            popup_menu(palette, cx.listener(|this, _, _, cx| this.popup_clicked_out(cx)))
+                .keyed(self.popup_focus.root(), self.popup_keys(cx))
+                .row(
+                    "teams-create-menu-create",
+                    menu_row("teams-create-menu-create", palette)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.close_popup(window, cx);
+                            cx.emit(TeamsPageEvent::CreateTeam);
+                        }))
+                        .child(Glyph::USERS.icon().size(px(16.0)))
+                        .child("Create team"),
+                    palette,
+                )
+                .row(
+                    "teams-create-menu-join",
+                    menu_row("teams-create-menu-join", palette)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.close_popup(window, cx);
+                            cx.emit(TeamsPageEvent::JoinTeam);
+                        }))
+                        .child(Glyph::USER_PLUS.icon().size(px(16.0)))
+                        .child("Join Team"),
+                    palette,
+                )
         });
         div()
             .flex_none()
             .flex()
             .items_center()
-            .child(
+            .child(keyboard::stop(
+                "teams-create",
                 div()
                     .id("teams-create")
                     .debug_selector(|| "teams-create".to_owned())
@@ -451,14 +525,17 @@ impl TeamsPage {
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(TeamsPageEvent::CreateTeam)))
                     .child(Glyph::USERS.icon().size(px(18.0)))
                     .child("Create team"),
-            )
+                palette,
+            ))
             .child(
                 div()
                     .child(selected_by(
                         "teams-create-more",
                         icon_button("teams-create-more", Glyph::CHEVRON_DOWN, "More create team options")
                             .xsmall()
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_popup(Popup::CreateMenu, cx))),
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.toggle_popup(Popup::CreateMenu, window, cx);
+                            })),
                     ))
                     .children(menu),
             )
@@ -499,10 +576,16 @@ impl TeamsPage {
 
     fn chip(&self, filter: Filter, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let chosen = self.filter == filter;
-        chip_base(format!("teams-filter-{}", filter.key()), chosen, palette)
-            .child(filter.label())
-            .on_click(cx.listener(move |this, _, _, cx| this.set_filter(filter, cx)))
-            .into_any_element()
+        let key = format!("teams-filter-{}", filter.key());
+        keyboard::stop(
+            key.clone(),
+            chip_base(key, chosen, palette)
+                .child(filter.label())
+                .on_click(cx.listener(move |this, _, _, cx| this.set_filter(filter, cx))),
+            palette,
+        )
+        .edge()
+        .into_any_element()
     }
 
     /// "N more", whose menu holds what no chip shows.
@@ -510,28 +593,39 @@ impl TeamsPage {
         let open = self.popup == Some(Popup::MoreFilters);
         let left: Vec<Filter> = others.into_iter().filter(|filter| *filter != self.filter).collect();
         let menu = open.then(|| {
-            popup_menu(
-                palette,
-                cx.listener(|this, _, _, cx| {
-                    this.popup = None;
-                    cx.notify();
-                }),
-            )
-            .children(left.iter().copied().map(|filter| {
-                menu_row(format!("teams-more-{}", filter.key()), palette)
-                    .on_click(cx.listener(move |this, _, _, cx| this.set_filter(filter, cx)))
-                    .child(filter.label())
-            }))
+            let mut menu = popup_menu(palette, cx.listener(|this, _, _, cx| this.popup_clicked_out(cx)))
+                .keyed(self.popup_focus.root(), self.popup_keys(cx));
+            for filter in left.iter().copied() {
+                let key = format!("teams-more-{}", filter.key());
+                menu = menu.row(
+                    key.clone(),
+                    menu_row(key, palette)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.set_filter(filter, cx);
+                            this.popup_focus.closed(window, cx);
+                        }))
+                        .child(filter.label()),
+                    palette,
+                );
+            }
+            menu
         });
         div()
             .child(
-                chip_base("teams-filter-more".to_owned(), false, palette)
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .child(format!("{} more", left.len()))
-                    .child(Glyph::CHEVRON_DOWN.icon().size(px(12.0)))
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_popup(Popup::MoreFilters, cx))),
+                keyboard::stop(
+                    "teams-filter-more",
+                    chip_base("teams-filter-more".to_owned(), false, palette)
+                        .flex()
+                        .items_center()
+                        .gap_1()
+                        .child(format!("{} more", left.len()))
+                        .child(Glyph::CHEVRON_DOWN.icon().size(px(12.0)))
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            this.toggle_popup(Popup::MoreFilters, window, cx);
+                        })),
+                    palette,
+                )
+                .edge(),
             )
             .children(menu)
             .into_any_element()
@@ -541,22 +635,27 @@ impl TeamsPage {
         let open = self.popup == Some(Popup::Sort);
         let current = self.sort;
         let menu = open.then(|| {
-            popup_menu(
-                palette,
-                cx.listener(|this, _, _, cx| {
-                    this.popup = None;
-                    cx.notify();
-                }),
-            )
-            .children(Sort::ALL.map(|sort| {
-                menu_row(format!("teams-sort-{}", sort.key()), palette)
-                    .on_click(cx.listener(move |this, _, _, cx| this.set_sort(sort, cx)))
-                    .child(div().flex_1().child(sort.label()))
-                    .when(sort == current, |row| row.child(Glyph::CHECK.icon().size(px(14.0))))
-            }))
+            let mut menu = popup_menu(palette, cx.listener(|this, _, _, cx| this.popup_clicked_out(cx)))
+                .keyed(self.popup_focus.root(), self.popup_keys(cx));
+            for sort in Sort::ALL {
+                let key = format!("teams-sort-{}", sort.key());
+                menu = menu.row(
+                    key.clone(),
+                    menu_row(key, palette)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.set_sort(sort, cx);
+                            this.popup_focus.closed(window, cx);
+                        }))
+                        .child(div().flex_1().child(sort.label()))
+                        .when(sort == current, |row| row.child(Glyph::CHECK.icon().size(px(14.0)))),
+                    palette,
+                );
+            }
+            menu
         });
         div()
-            .child(
+            .child(keyboard::stop(
+                "teams-sort",
                 div()
                     .id("teams-sort")
                     .debug_selector(|| "teams-sort".to_owned())
@@ -569,16 +668,17 @@ impl TeamsPage {
                     .font_weight(gpui::FontWeight::SEMIBOLD)
                     .cursor_pointer()
                     .hover(move |button| button.bg(rgb(palette.hover)))
-                    .on_click(cx.listener(|this, _, _, cx| this.toggle_popup(Popup::Sort, cx)))
+                    .on_click(cx.listener(|this, _, window, cx| this.toggle_popup(Popup::Sort, window, cx)))
                     .child(format!("Sort: {}", current.label()))
                     .child(Glyph::CHEVRON_DOWN.icon().size(px(12.0))),
-            )
+                palette,
+            ))
             .children(menu)
             .into_any_element()
     }
 
     /// The Teams tab's rows.
-    fn rows(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn rows(&self, window: &Window, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let teams = self.teams.read(cx);
         let Some(all) = teams.teams() else {
             return centered("Loading teams…", palette);
@@ -590,14 +690,23 @@ impl TeamsPage {
         if shown.is_empty() {
             return centered("No teams to show", palette);
         }
+        let keyboard = self.rows_focus.is_focused(window);
         let rows: Vec<AnyElement> = shown
             .iter()
             .enumerate()
-            .map(|(index, team)| self.row(index, team, palette, cx))
+            .map(|(index, team)| {
+                let keyed = keyboard && self.row_cursor.as_deref() == Some(team.id.as_str());
+                self.row(index, team, keyed, palette, cx)
+            })
             .collect();
+        let ids: Vec<String> = shown.iter().map(|team| team.id.clone()).collect();
         div()
             .id("teams-rows")
             .debug_selector(|| "teams-rows".to_owned())
+            .track_focus(&self.rows_focus)
+            .on_key_down(cx.listener(move |this, event: &KeyDownEvent, window, cx| {
+                this.rows_key(&ids, event, window, cx);
+            }))
             .flex_1()
             .min_h_0()
             .px_6()
@@ -606,8 +715,58 @@ impl TeamsPage {
             .into_any_element()
     }
 
-    /// A team's row, its test selector `teams-row-<index>`.
-    fn row(&self, index: usize, team: &Team, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    /// The rows' keys: Up, Down, Home and End move over them; Enter opens Manage team; Shift+F10 or the menu key opens
+    /// the row's "..." menu.
+    fn rows_key(&mut self, ids: &[String], event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let at = self
+            .row_cursor
+            .as_ref()
+            .and_then(|cursor| ids.iter().position(|id| id == cursor));
+        if let Some(to) = keyboard::list_step(event, ids.len(), at) {
+            self.row_cursor = ids.get(to).cloned();
+        } else if let Some(id) = at.and_then(|at| ids.get(at)).cloned() {
+            if keyboard::opens_menu(event) {
+                self.open_menu(&id, true, window, cx);
+            } else if matches!(event.keystroke.key.as_str(), "enter" | "space") && !event.keystroke.modifiers.modified()
+            {
+                cx.emit(TeamsPageEvent::Manage(id));
+            } else {
+                return;
+            }
+        } else {
+            return;
+        }
+        cx.stop_propagation();
+        cx.notify();
+    }
+
+    /// Gives the rows the keyboard, on the first unless one is kept; `false` while the Teams tab lists none, the
+    /// keyboard left where it is.
+    pub fn focus_rows(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let ids: Vec<String> = self
+            .teams
+            .read(cx)
+            .teams()
+            .map(|all| {
+                listed(all, self.filter, self.sort, &self.query)
+                    .into_iter()
+                    .map(|team| team.id.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if self.tab != PageTab::Teams || ids.is_empty() {
+            return false;
+        }
+        if !self.row_cursor.as_ref().is_some_and(|cursor| ids.contains(cursor)) {
+            self.row_cursor = ids.first().cloned();
+        }
+        self.rows_focus.focus(window, cx);
+        cx.notify();
+        true
+    }
+
+    /// A team's row, its test selector `teams-row-<index>`, ringed while the keyboard is on it.
+    fn row(&self, index: usize, team: &Team, keyed: bool, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let id = team.id.clone();
         let group = row_group(index);
         let avatar = self.teams.read(cx).avatar(team, 36.0, true, palette);
@@ -628,7 +787,7 @@ impl TeamsPage {
                 .child(Glyph::ARCHIVE.icon().size(px(14.0)))
         });
         let opened = id.clone();
-        let more = self.row_more(index, team, palette, cx);
+        let more = self.row_more(index, team, keyed, palette, cx);
         div()
             .group(group)
             .id(SharedString::from(format!("teams-row-{index}")))
@@ -640,6 +799,18 @@ impl TeamsPage {
             .gap_3()
             .border_b_1()
             .border_color(rgb(palette.border))
+            // the keyboard's ring, over the row (its own test selector kept)
+            .when(keyed, |row| {
+                row.relative().child(
+                    div()
+                        .debug_selector(|| "teams-row-cursor".to_owned())
+                        .absolute()
+                        .inset_0()
+                        .rounded_md()
+                        .border_2()
+                        .border_color(rgb(palette.brand)),
+                )
+            })
             .cursor_pointer()
             .hover(move |row| row.bg(rgb(palette.hover)))
             .on_click(cx.listener(move |_, _, _, cx| cx.emit(TeamsPageEvent::Manage(opened.clone()))))
@@ -677,14 +848,14 @@ impl TeamsPage {
     }
 
     /// A team row's "..." and its menu ([`team_menu`]), shown while the row is under the pointer or its menu is open.
-    fn row_more(&self, index: usize, team: &Team, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn row_more(&self, index: usize, team: &Team, keyed: bool, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let id = team.id.clone();
         let group = row_group(index);
         let open = self.menu.as_deref() == Some(id.as_str());
         let menu = open.then(|| {
             let read_only = self.core.read_only();
             let weak = cx.entity().downgrade();
-            let (chosen_from, closed, keyed) = (weak.clone(), weak.clone(), weak);
+            let (chosen_from, closed, keys) = (weak.clone(), weak.clone(), weak);
             let chosen_team = id.clone();
             let shown = team_menu::entries(team, read_only);
             team_menu::Panel {
@@ -697,16 +868,20 @@ impl TeamsPage {
                 anchor: gpui::Anchor::TopRight,
             }
             .render(
-                move |choice, _, cx| {
-                    let _ = chosen_from.update(cx, |this, cx| this.choose(&chosen_team, choice, cx));
+                move |choice, window, cx| {
+                    let _ = chosen_from.update(cx, |this, cx| this.choose(&chosen_team, choice, window, cx));
                 },
                 move |_, _, cx| {
-                    let _ = closed.update(cx, TeamsPage::close_menu);
+                    // a click elsewhere takes the focus where it clicked
+                    let _ = closed.update(cx, |this, cx| {
+                        this.menu = None;
+                        cx.notify();
+                    });
                 },
                 {
                     let id = id.clone();
-                    move |event: &KeyDownEvent, _, cx| {
-                        let _ = keyed.update(cx, |this, cx| this.menu_key(&id, &shown, event, cx));
+                    move |event: &KeyDownEvent, window, cx| {
+                        let _ = keys.update(cx, |this, cx| this.menu_key(&id, &shown, event, window, cx));
                     }
                 },
             )
@@ -715,7 +890,8 @@ impl TeamsPage {
         div()
             .id(SharedString::from(format!("teams-row-more-wrap-{index}")))
             .flex_none()
-            .when(!open, |more| {
+            // and while the keyboard is on the row
+            .when(!open && !keyed, |more| {
                 more.invisible().group_hover(group.clone(), gpui::Styled::visible)
             })
             .on_click(|_, _, cx| cx.stop_propagation())
@@ -727,12 +903,14 @@ impl TeamsPage {
                     "More options",
                 )
                 .small()
+                // the rows take the keyboard, Shift+F10 opening this menu
+                .tab_stop(false)
                 .on_click(cx.listener(move |this, _, window, cx| {
                     cx.stop_propagation();
                     if this.menu.as_deref() == Some(toggled.as_str()) {
-                        this.close_menu(cx);
+                        this.close_menu(window, cx);
                     } else {
-                        this.open_menu(&toggled, window, cx);
+                        this.open_menu(&toggled, false, window, cx);
                     }
                 })),
             ))
@@ -828,31 +1006,28 @@ impl TeamsPage {
         let open = self.popup == Some(Popup::Period);
         let current = self.period;
         let menu = open.then(|| {
-            popup_menu(
-                palette,
-                cx.listener(|this, _, _, cx| {
-                    this.popup = None;
-                    cx.notify();
-                }),
-            )
-            .children(
-                [
-                    AnalyticsPeriod::LastSevenDays,
-                    AnalyticsPeriod::LastThirtyDays,
-                    AnalyticsPeriod::LastNinetyDays,
-                ]
-                .map(|period| {
-                    menu_row(format!("teams-period-{}", period.wire()), palette)
-                        .on_click(cx.listener(move |this, _, _, cx| {
+            let mut menu = popup_menu(palette, cx.listener(|this, _, _, cx| this.popup_clicked_out(cx)))
+                .keyed(self.popup_focus.root(), self.popup_keys(cx));
+            for period in [
+                AnalyticsPeriod::LastSevenDays,
+                AnalyticsPeriod::LastThirtyDays,
+                AnalyticsPeriod::LastNinetyDays,
+            ] {
+                let key = format!("teams-period-{}", period.wire());
+                menu = menu.row(
+                    key.clone(),
+                    menu_row(key, palette)
+                        .on_click(cx.listener(move |this, _, window, cx| {
                             this.period = period;
-                            this.popup = None;
+                            this.close_popup(window, cx);
                             this.read_analytics(cx);
-                            cx.notify();
                         }))
                         .child(div().flex_1().child(period.label()))
-                        .when(period == current, |row| row.child(Glyph::CHECK.icon().size(px(14.0))))
-                }),
-            )
+                        .when(period == current, |row| row.child(Glyph::CHECK.icon().size(px(14.0)))),
+                    palette,
+                );
+            }
+            menu
         });
         div()
             .flex()
@@ -862,22 +1037,29 @@ impl TeamsPage {
             .child(
                 div()
                     .child(
-                        div()
-                            .id("teams-period")
-                            .debug_selector(|| "teams-period".to_owned())
-                            .w(px(240.0))
-                            .px_3()
-                            .py_1p5()
-                            .flex()
-                            .items_center()
-                            .justify_between()
-                            .rounded_md()
-                            .border_1()
-                            .border_color(rgb(palette.border))
-                            .cursor_pointer()
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_popup(Popup::Period, cx)))
-                            .child(current.label())
-                            .child(Glyph::CHEVRON_DOWN.icon().size(px(14.0))),
+                        keyboard::stop(
+                            "teams-period",
+                            div()
+                                .id("teams-period")
+                                .debug_selector(|| "teams-period".to_owned())
+                                .w(px(240.0))
+                                .px_3()
+                                .py_1p5()
+                                .flex()
+                                .items_center()
+                                .justify_between()
+                                .rounded_md()
+                                .border_1()
+                                .border_color(rgb(palette.border))
+                                .cursor_pointer()
+                                .on_click(
+                                    cx.listener(|this, _, window, cx| this.toggle_popup(Popup::Period, window, cx)),
+                                )
+                                .child(current.label())
+                                .child(Glyph::CHEVRON_DOWN.icon().size(px(14.0))),
+                            palette,
+                        )
+                        .edge(),
                     )
                     .children(menu),
             )
@@ -927,12 +1109,18 @@ pub(crate) fn chip_base(id: String, chosen: bool, palette: Palette) -> gpui::Sta
 pub(crate) struct PopupMenu(gpui::Div);
 
 impl PopupMenu {
-    pub(crate) fn child(self, child: impl IntoElement) -> Self {
-        Self(self.0.child(child))
+    /// Takes the keyboard on `root` with `keys` ([`keyboard::menu_keys`]).
+    pub(crate) fn keyed(
+        self,
+        root: &FocusHandle,
+        keys: impl Fn(&KeyDownEvent, &mut Window, &mut gpui::App) + 'static,
+    ) -> Self {
+        Self(self.0.track_focus(root).on_key_down(keys))
     }
 
-    pub(crate) fn children(self, children: impl IntoIterator<Item = impl IntoElement>) -> Self {
-        Self(self.0.children(children))
+    /// A row the keyboard moves to, `key` unique in the menu.
+    pub(crate) fn row(self, key: impl Into<SharedString>, row: gpui::Stateful<gpui::Div>, palette: Palette) -> Self {
+        Self(self.0.child(keyboard::stop(ElementId::Name(key.into()), row, palette)))
     }
 }
 
@@ -1047,7 +1235,7 @@ impl Render for TeamsPage {
                 .flex()
                 .flex_col()
                 .child(self.toolbar(palette, window, cx))
-                .child(self.rows(palette, cx))
+                .child(self.rows(window, palette, cx))
                 .into_any_element(),
             PageTab::PendingInvites => self.invites_tab(palette),
             PageTab::Analytics => self.analytics_tab(palette, cx),

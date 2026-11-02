@@ -8,7 +8,9 @@
 //! opens read-only, as from the Teams list. Messages are found by the title bar's search ([`crate::global_search`]),
 //! the app's one search, not here. Last come the app's commands the query matches ([`COMMANDS`]: "See more chats", the
 //! "Chats" section's See more from the keyboard, "Copy diagnostics", and "Set status: …" for each status the account
-//! menu offers, so the account's status is set from the keyboard too), and in a build that shows calls the call commands that fit the moment ([`CallCommand`]: "Call" the
+//! menu offers, so the account's status is set from the keyboard too; "Create team" and "Join team", and for a typed query
+//! "Add channel: <team>", "Add member: <team>" and "Manage team: <team>" for each team whose "..." menu offers them,
+//! [`TeamCommand`]), and in a build that shows calls the call commands that fit the moment ([`CallCommand`]: "Call" the
 //! chat shown, "Make a test call", "Join call", "Answer call", "Decline call", "Leave call", "Mute or unmute", M3 Task 17;
 //! "Camera on or off", Task 18).
 
@@ -22,6 +24,7 @@ use gpui_component::command::{Command, CommandGroup, CommandItem, CommandState};
 use crate::calls::Calls;
 use crate::chat_list::{ChatList, RowKind};
 use crate::settings::ManualStatus;
+use crate::team_menu::{self, TeamChoice};
 use crate::teams_list::TeamsList;
 use crate::theme;
 
@@ -113,6 +116,44 @@ pub enum SwitcherEvent {
     /// Show more of the chats (the "See more chats" command, the "Chats" section's See more).
     SeeMoreChats,
     SeeAllTeams,
+    /// "Create team", as Create team on "Your teams and channels".
+    CreateTeam,
+    /// "Join team", as its dropdown's Join team.
+    JoinTeam,
+    /// An entry of the team's "..." menu (a [`TeamCommand`]), by the team's id.
+    Team(String, TeamChoice),
+}
+
+/// A command on one team, the entry of its "..." menu it stands for, offered when the menu offers it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TeamCommand {
+    pub team: String,
+    pub choice: TeamChoice,
+    /// What the palette calls it: "<entry>: <team>".
+    pub name: SharedString,
+}
+
+/// The menu's entries the palette offers on each team.
+const TEAM_CHOICES: [TeamChoice; 3] = [TeamChoice::AddChannel, TeamChoice::AddMember, TeamChoice::Manage];
+
+/// The team commands on `teams`: each of [`TEAM_CHOICES`] its "..." menu offers (as [`team_menu::entries`] decides in
+/// the read-only mode or not), in the teams' order.
+#[must_use]
+pub fn team_commands(teams: &[teams_store::Team], read_only: bool) -> Vec<TeamCommand> {
+    teams
+        .iter()
+        .flat_map(|team| {
+            let offered = team_menu::entries(team, read_only);
+            TEAM_CHOICES
+                .into_iter()
+                .filter(move |choice| offered.contains(choice))
+                .map(move |choice| TeamCommand {
+                    team: team.id.clone(),
+                    choice,
+                    name: format!("{}: {}", choice.label(), team.name).into(),
+                })
+        })
+        .collect()
 }
 
 /// A call command the palette offers (in a build that shows calls), when it fits the moment.
@@ -187,6 +228,8 @@ const COMMAND_SECTION: usize = 2;
 pub enum PaletteCommand {
     SeeMoreChats,
     SeeAllTeams,
+    CreateTeam,
+    JoinTeam,
     CopyDiagnostics,
     SetStatus(ManualStatus),
     Call(CallCommand),
@@ -199,6 +242,8 @@ impl PaletteCommand {
         match self {
             Self::SeeMoreChats => "See more chats",
             Self::SeeAllTeams => "See all your teams",
+            Self::CreateTeam => "Create team",
+            Self::JoinTeam => "Join team",
             Self::CopyDiagnostics => "Copy diagnostics",
             Self::SetStatus(ManualStatus::Automatic) => "Set status: Automatic",
             Self::SetStatus(ManualStatus::Available) => "Set status: Available",
@@ -213,6 +258,8 @@ impl PaletteCommand {
         match self {
             Self::SeeMoreChats => SwitcherEvent::SeeMoreChats,
             Self::SeeAllTeams => SwitcherEvent::SeeAllTeams,
+            Self::CreateTeam => SwitcherEvent::CreateTeam,
+            Self::JoinTeam => SwitcherEvent::JoinTeam,
             Self::CopyDiagnostics => SwitcherEvent::CopyDiagnostics,
             Self::SetStatus(status) => SwitcherEvent::SetStatus(status),
             Self::Call(command) => SwitcherEvent::Call(command),
@@ -221,9 +268,11 @@ impl PaletteCommand {
 }
 
 /// The commands the palette offers, in order, matched on their names as the chats are.
-pub const COMMANDS: [PaletteCommand; 8] = [
+pub const COMMANDS: [PaletteCommand; 10] = [
     PaletteCommand::SeeMoreChats,
     PaletteCommand::SeeAllTeams,
+    PaletteCommand::CreateTeam,
+    PaletteCommand::JoinTeam,
     PaletteCommand::CopyDiagnostics,
     PaletteCommand::SetStatus(ManualStatus::Automatic),
     PaletteCommand::SetStatus(ManualStatus::Available),
@@ -243,6 +292,10 @@ pub struct Switcher {
     channels: Vec<(String, SharedString)>,
     /// The call commands that fit the moment, first of the commands.
     call_commands: Vec<CallCommand>,
+    /// The team commands the query matches, the best first, after the app's.
+    team_commands: Vec<TeamCommand>,
+    /// The read-only mode: nothing that writes is offered.
+    read_only: bool,
     _observing: [Subscription; 3],
     /// Tracked on the dialog's root: the focus is in it while its query field or the palette's list has it.
     focus: FocusHandle,
@@ -293,6 +346,7 @@ impl Switcher {
                 cx.stop_propagation();
             }
         });
+        let read_only = list.read(cx).read_only();
         let mut switcher = Self {
             state,
             list,
@@ -301,6 +355,8 @@ impl Switcher {
             matches: Vec::new(),
             channels: Vec::new(),
             call_commands,
+            team_commands: Vec::new(),
+            read_only,
             _observing: observing,
             focus: cx.focus_handle(),
             _escape: escape,
@@ -339,18 +395,25 @@ impl Switcher {
         &self.channels
     }
 
-    /// The names of the commands the query matches ([`COMMANDS`]), listed last.
+    /// The names of the commands the query matches ([`COMMANDS`], then the team commands), listed last.
     #[must_use]
-    pub fn commands(&self) -> Vec<&'static str> {
-        self.matching_commands().into_iter().map(PaletteCommand::name).collect()
+    pub fn commands(&self) -> Vec<SharedString> {
+        self.matching_commands()
+            .into_iter()
+            .map(|command| SharedString::from(command.name()))
+            .chain(self.team_commands.iter().map(|command| command.name.clone()))
+            .collect()
     }
 
     fn matching_commands(&self) -> Vec<PaletteCommand> {
+        // the read-only mode creates and joins no team
+        let writes = !self.read_only;
         self.call_commands
             .iter()
             .copied()
             .map(PaletteCommand::Call)
             .chain(COMMANDS)
+            .filter(|command| writes || !matches!(command, PaletteCommand::CreateTeam | PaletteCommand::JoinTeam))
             .filter(|command| fuzzy_score(&self.query, command.name()).is_some())
             .collect()
     }
@@ -383,6 +446,21 @@ impl Switcher {
             })
             .collect();
         self.channels = matches(&self.query, &channels);
+        // a command per team and entry: offered once something is typed, so an empty query isn't all of them
+        self.team_commands = if self.query.trim().is_empty() {
+            Vec::new()
+        } else {
+            let all = team_commands(self.teams.read(cx).teams().unwrap_or_default(), self.read_only);
+            let named: Vec<(String, SharedString)> = all
+                .iter()
+                .enumerate()
+                .map(|(at, command)| (at.to_string(), command.name.clone()))
+                .collect();
+            matches(&self.query, &named)
+                .into_iter()
+                .filter_map(|(at, _)| at.parse::<usize>().ok().and_then(|at| all.get(at).cloned()))
+                .collect()
+        };
         cx.notify();
     }
 
@@ -396,7 +474,14 @@ impl Switcher {
                 .channels
                 .get(index.row)
                 .map(|(id, _)| SwitcherEvent::OpenChannel(id.clone())),
-            COMMAND_SECTION => self.matching_commands().get(index.row).map(|command| command.event()),
+            COMMAND_SECTION => {
+                let app = self.matching_commands();
+                app.get(index.row).map(|command| command.event()).or_else(|| {
+                    self.team_commands
+                        .get(index.row - app.len())
+                        .map(|command| SwitcherEvent::Team(command.team.clone(), command.choice))
+                })
+            }
             _ => None,
         };
         if let Some(event) = event {
