@@ -62,11 +62,13 @@ fn team(name: &str) -> Team {
         owner: false,
         can_add_channel: false,
         can_add_private_channel: false,
+        about: teams_store::TeamAbout::default(),
         channels: vec![TeamChannel {
             id: "19:synthetic-channel@thread.tacv2".to_owned(),
             name: name.to_owned(),
             general: true,
             kind: ChannelKind::Standard,
+            shown: true,
         }],
     }
 }

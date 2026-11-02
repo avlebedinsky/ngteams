@@ -1447,8 +1447,9 @@ impl<C: Credentials> Transport for HttpTransport<C> {
         let service = wire.service();
         match service {
             // the chat service's writes, UPS's (the account's own availability), the middle tier's (its calendar, a
-            // standard channel) and the provisioning service's (a private channel)
-            Service::ChatService | Service::Presence | Service::MiddleTier | Service::Provisioning => {}
+            // standard channel, a team's), the provisioning service's (a private channel, an archived team) and CSA's (a
+            // team's tags)
+            Service::ChatService | Service::Presence | Service::MiddleTier | Service::Provisioning | Service::Csa => {}
             _ => return Err(HttpError::NoRoute),
         }
         let url = self.url_for(service, wire.endpoint())?;

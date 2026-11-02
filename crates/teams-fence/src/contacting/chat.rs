@@ -12,7 +12,7 @@ use crate::{Mri, Scope, Target, WriteKind, chat_service_path, is_chat_id, is_gro
 /// The conversation properties that change only the account's own view of a conversation (a chat or a channel), set
 /// with `PUT v1/users/ME/conversations/<id>/properties?name=<n>`: when it was last made a favourite (seen on a
 /// channel) and the favourite flag itself.
-pub const OWN_VIEW_PROPERTIES: [&str; 2] = ["lastTimeFavorited", "favorite"];
+pub const OWN_VIEW_PROPERTIES: [&str; 3] = ["lastTimeFavorited", "favorite", "isGeneralChannelFavorite"];
 
 /// The keys a typing signal's body may have: what the web client sends, key for key (`chat-shapes`).
 const TYPING_KEYS: [&str; 3] = ["content", "contenttype", "messagetype"];

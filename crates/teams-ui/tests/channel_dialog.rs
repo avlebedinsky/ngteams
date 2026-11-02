@@ -38,18 +38,21 @@ fn team(can_add: bool, can_add_private: bool, owner: bool) -> Team {
         owner,
         can_add_channel: can_add,
         can_add_private_channel: can_add_private,
+        about: teams_store::TeamAbout::default(),
         channels: vec![
             TeamChannel {
                 id: TEAM.to_owned(),
                 name: "General".to_owned(),
                 general: true,
                 kind: ChannelKind::Standard,
+                shown: true,
             },
             TeamChannel {
                 id: "19:channel0002@thread.tacv2".to_owned(),
                 name: "Made-up Channel".to_owned(),
                 general: false,
                 kind: ChannelKind::Private,
+                shown: true,
             },
         ],
     }
@@ -367,6 +370,7 @@ fn a_new_channel_the_engine_stored_is_in_the_sidebar_when_it_opens() {
         name: "Brand new".to_owned(),
         general: false,
         kind: ChannelKind::Standard,
+        shown: true,
     });
     *rig.core.teams.lock().unwrap() = Some(vec![listed]);
     rig.send(Event::Teams);

@@ -471,6 +471,23 @@ impl Driver {
         self.call(step, "Input.dispatchMouseEvent", params).await.map(drop)
     }
 
+    /// Clicks the element `selector` finds as a pointer would: moved over its middle, pressed and let go.
+    ///
+    /// # Errors
+    /// When there is no such element, or the browser refuses the input.
+    pub async fn pointer_click(&mut self, step: &str, selector: Selector<'_>) -> Result<(), StepError> {
+        let (x, y) = self.centre(step, selector).await?;
+        for (kind, button, clicks) in [
+            ("mouseMoved", "none", 0),
+            ("mousePressed", "left", 1),
+            ("mouseReleased", "left", 1),
+        ] {
+            let params = json!({"type": kind, "x": x, "y": y, "button": button, "clickCount": clicks});
+            self.call(step, "Input.dispatchMouseEvent", params).await?;
+        }
+        Ok(())
+    }
+
     /// The middle of the element `selector` finds, in the viewport, once it is scrolled into view.
     async fn centre(&self, step: &str, selector: Selector<'_>) -> Result<(f64, f64), StepError> {
         let expression = format!(

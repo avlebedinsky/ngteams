@@ -66,7 +66,7 @@ fn tag_team(n: usize) -> String {
 
 /// Clicks the first visible element a `query` selects whose text or label reads `name` (a regular expression); whether
 /// one did.
-fn click_named(query: &str, name: &str) -> String {
+pub(super) fn click_named(query: &str, name: &str) -> String {
     format!(
         "(() => {{ const norm = e => ((e.innerText || '') + ' ' + (e.getAttribute('aria-label') || '')).replace(/\\s+/g, ' ').trim(); \
          const found = [...document.querySelectorAll({})].filter(e => e.getClientRects().length && new RegExp({}, 'i').test(norm(e)))[0]; \

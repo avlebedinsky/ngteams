@@ -244,8 +244,12 @@ fn the_topics_migration_takes_the_chats_without_a_topic_again() -> Result<(), St
          DROP TABLE favorites; DROP TABLE favorites_read; ALTER TABLE conversations DROP COLUMN empty;
          ALTER TABLE teams DROP COLUMN group_id; ALTER TABLE teams DROP COLUMN mailbox;
          ALTER TABLE teams DROP COLUMN owner; ALTER TABLE teams DROP COLUMN can_add_channel;
-         ALTER TABLE teams DROP COLUMN can_add_private_channel; ALTER TABLE team_channels DROP COLUMN kind;
-         DROP TABLE app_read_horizon; PRAGMA user_version = 9;",
+         ALTER TABLE teams DROP COLUMN can_add_private_channel; ALTER TABLE teams DROP COLUMN tenant; ALTER TABLE teams DROP COLUMN description; ALTER TABLE teams DROP COLUMN public;
+         ALTER TABLE teams DROP COLUMN people; ALTER TABLE teams DROP COLUMN guest; ALTER TABLE teams DROP COLUMN dynamic_membership;
+         ALTER TABLE teams DROP COLUMN tenant_wide; ALTER TABLE teams DROP COLUMN channel_only; ALTER TABLE teams DROP COLUMN hidden;
+         ALTER TABLE teams DROP COLUMN picture_etag; ALTER TABLE team_channels DROP COLUMN shown; ALTER TABLE team_channels DROP COLUMN kind;
+         DROP TABLE app_read_horizon;
+         PRAGMA user_version = 9;",
     )
     .expect("back to schema 9");
     drop(raw);

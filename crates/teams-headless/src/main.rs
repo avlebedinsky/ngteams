@@ -128,6 +128,7 @@ async fn dispatch(lab: &Lab, command: Command, signals: &mut Signals, out: &mut 
         Command::Presence { wait, mris } => presence(lab, &mris, Duration::from_secs(wait), signals, out).await,
         Command::Profile { mris, wait } => profile(lab, &mris, Duration::from_secs(wait), signals, out).await,
         Command::Search { query } => search(lab, &query, out).await,
+        Command::TeamReads { team, group } => team_reads(lab, &team, &group, out).await,
         Command::Series { keep, cleanup } => {
             let handle = lab.start_engine(false).await?;
             let probed = tokio::select! {
@@ -389,6 +390,7 @@ fn write_action(lab: &Lab, command: Command) -> Result<(Action, Duration), Box<d
         | Command::Presence { .. }
         | Command::Profile { .. }
         | Command::Search { .. }
+        | Command::TeamReads { .. }
         | Command::Series { .. }
         | Command::Availability { .. }
         | Command::Call { .. }
@@ -398,6 +400,13 @@ fn write_action(lab: &Lab, command: Command) -> Result<(Action, Duration), Box<d
         }
     };
     Ok((action, Duration::from_secs(wait)))
+}
+
+/// What the team pages read of a team, each once.
+async fn team_reads(lab: &Lab, team: &str, group: &str, out: &mut impl Write) -> Outcome {
+    let handle = lab.start_engine(false).await?;
+    let read = commands::team_reads(&handle, team, group, out).await;
+    finish(handle, Some(read.map(|()| ExitCode::SUCCESS)))
 }
 
 /// A write after a catch-up (its summary on stderr, the write's lines on stdout): the store has the latest state its

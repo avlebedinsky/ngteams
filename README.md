@@ -252,6 +252,9 @@ fails the run.
 
 - `load`: account a loads the web client, fail-closed (every write whose target's members have to be read is denied;
   a new chat naming only lab accounts can still pass); every deny is expected.
+- `team-manage`: one account's page (`PROTO_LAB_ACCOUNT`, a by default) driven step by step over a Unix socket
+  (`PROTO_LAB_STEPS_SOCKET`), to look at its team management (`docs/protocol/teams.md`): every write on a team held back by a
+  forced deny, or with `PROTO_LAB_TEAM_WRITES=1` only the lab rule's, after a forced-deny probe; recorded, every deny expected.
 - `search`: account a alone, fail-closed as `load`: the title bar's go-to mode (Ctrl+Alt+G), then a search (Ctrl+E):
   the suggestions as it types, the results and each of their tabs, a message found opened (`docs/protocol/search.md`;
   `PROTO_LAB_SEARCH_QUERY` picks the query, `lab` by default); recorded, every deny expected.
@@ -391,6 +394,7 @@ teams-headless a presence [--wait 30] [--mri <mri>]...  # b's and c's presence, 
 teams-headless a profile <mri>... [--wait 30]           # where the engine's name for each comes from (Graph, the middle tier's lookup)
 teams-headless a search <query>                         # the service's search (Substrate): counts of each kind found, the chats by id
 teams-headless a series [--keep|--cleanup]              # an appointment series of its own (nobody invited): created, read back, its free/busy read, deleted; --cleanup deletes what a run left
+teams-headless a team-reads <team thread> <team group>    # what the team pages read of a team, once each: how much each gave, never a name
 teams-headless a availability [--manual busy|do-not-disturb|away|available] [--manual-after 60] [--reset-after <s>] \
   [--hold 300]                            # a's own availability, from its push channel's endpoint
 teams-headless a call echo|b|abc|<id> [--tone 1000] [--bursts] [--hear <hz>] [--record <wav>] [--seconds 45] \

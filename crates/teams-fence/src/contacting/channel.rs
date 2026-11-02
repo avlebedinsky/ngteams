@@ -2,7 +2,8 @@
 //! "Create a channel" dialog sent them (`channel-create`, held back): a standard channel on the middle tier, a private
 //! one on the provisioning service, the people added to a private channel on the same service, and a channel shown to
 //! the whole team by default. Each reaches the team, so each is a write on its [`Scope::Team`] or its [`Scope::Channel`],
-//! whose members no source reads complete: the lab's fence denies them all, the personal build's lets them go, logged.
+//! among whose members are Teams' own apps (`docs/protocol/teams.md`, "The fence"): the lab's fence denies them all, the
+//! personal build's lets them go, logged.
 //! Anything else on these paths stays the service's general rule ([`Contact::Unreadable`]).
 
 use serde_json::Value;

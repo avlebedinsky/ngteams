@@ -510,6 +510,10 @@ struct RawProfile {
     object_id: Option<String>,
     #[serde(default)]
     user_type: Option<String>,
+    #[serde(default)]
+    job_title: Option<String>,
+    #[serde(default)]
+    office_location: Option<String>,
 }
 
 fn mri<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Mri, D::Error> {
@@ -529,6 +533,10 @@ pub struct ShortProfile {
     pub object_id: Option<String>,
     /// `Member`, or another directory user type as given.
     pub user_type: Option<String>,
+    /// Their job title (Manage team's Title).
+    pub job_title: Option<String>,
+    /// Their office (Manage team's Location).
+    pub office_location: Option<String>,
 }
 
 impl From<RawProfile> for ShortProfile {
@@ -542,6 +550,8 @@ impl From<RawProfile> for ShortProfile {
             user_principal_name: raw.user_principal_name,
             object_id: raw.object_id,
             user_type: raw.user_type,
+            job_title: raw.job_title,
+            office_location: raw.office_location,
         }
     }
 }

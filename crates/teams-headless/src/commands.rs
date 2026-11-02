@@ -377,3 +377,77 @@ async fn answer(
     out.flush()?;
     Ok(taken)
 }
+
+/// What the team pages read of a team and of the account, each once: how much each gave, never a name.
+///
+/// # Errors
+/// When the engine stops, or the output can't be written.
+pub async fn team_reads(
+    handle: &EngineHandle,
+    team: &str,
+    group: &str,
+    out: &mut impl Write,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let roster = handle.team_roster(team).await?;
+    writeln!(
+        out,
+        "team-reads roster people={} owners={} named={}",
+        roster.len(),
+        roster.iter().filter(|member| member.owner).count(),
+        roster.iter().filter(|member| member.mri != member.name).count()
+    )?;
+    let settings = handle.team_settings(team).await?;
+    writeln!(
+        out,
+        "team-reads settings bytes={}",
+        settings.map_or(0, |settings| settings.len())
+    )?;
+    let tags = handle.team_tags(team).await?;
+    writeln!(
+        out,
+        "team-reads tags count={} owners_only={}",
+        tags.tags.len(),
+        tags.owners_only
+    )?;
+    let code = handle.team_code(team).await?;
+    writeln!(out, "team-reads code present={}", code.is_some())?;
+    let channels = handle.team_channels(group).await?;
+    writeln!(out, "team-reads channels count={}", channels.len())?;
+    let invites = handle.pending_invites().await?;
+    writeln!(out, "team-reads invites count={}", invites.len())?;
+    let analytics = handle
+        .team_analytics(group, teams_proto::AnalyticsPeriod::LastSevenDays)
+        .await?;
+    writeln!(
+        out,
+        "team-reads analytics present={} days={}",
+        analytics.is_some(),
+        analytics.map_or(0, |analytics| analytics.active_users_by_day.len())
+    )?;
+    let all = handle
+        .all_teams_analytics(teams_proto::AnalyticsPeriod::LastSevenDays)
+        .await?;
+    writeln!(out, "team-reads all-analytics teams={}", all.len())?;
+    let joinable = handle.joinable_teams(None).await?;
+    writeln!(out, "team-reads joinable count={}", joinable.len())?;
+    let found = handle.joinable_teams(Some("a".to_owned())).await?;
+    writeln!(out, "team-reads joinable-found count={}", found.len())?;
+    let people = handle.addable_people("Lab").await?;
+    writeln!(out, "team-reads addable count={}", people.len())?;
+    let asking = handle.team_join_requests(group).await?;
+    writeln!(out, "team-reads join-requests count={}", asking.len())?;
+    let picture = handle
+        .team_picture(teams_proto::TeamPicture {
+            own: handle.me().strip_prefix("8:orgid:").unwrap_or_default().to_owned(),
+            group: group.to_owned(),
+            name: "lab".to_owned(),
+            etag: String::new(),
+        })
+        .await?;
+    writeln!(
+        out,
+        "team-reads picture bytes={}",
+        picture.map_or(0, |picture| picture.bytes.len())
+    )?;
+    Ok(())
+}

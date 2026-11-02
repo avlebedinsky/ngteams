@@ -6,7 +6,7 @@
 //!   `fence.log` line, no row, nothing sent again by a later run; one more attempt only after a 401 or a short throttle
 //!   ([`CallRetries`]), never after an unknown outcome (a channel made twice is worse than a failed save). A creation
 //!   that wasn't answered with a 2xx is [`EngineError::ChannelNotCreated`], saying which of Teams' problems it was
-//!   ([`ChannelProblem`]). The lab's fence denies them all: a team's members are never read complete.
+//!   ([`ChannelProblem`]). The lab's fence denies them all: every team's members hold Teams' own apps.
 //! - **The list** ([`Created`]): a channel made is stored at once, through the engine's loop, so the sidebar shows it and
 //!   the shell can open it before CSA's list names it; [`crate::teams::Teams`] keeps it for a while against a read that
 //!   doesn't name it yet, and reads the list again.
@@ -110,14 +110,18 @@ pub(crate) struct Created {
 /// A task's end: what to store, and the reply to send once it is stored.
 pub(crate) struct Finished {
     pub(crate) created: Option<Created>,
+    /// What a team's write changed in the list.
+    pub(crate) team: Option<Box<crate::team_admin::TeamChange>>,
+    /// Whether the list is to be read again.
+    pub(crate) reread: bool,
     pub(crate) reply: Box<dyn FnOnce() + Send>,
 }
 
 /// The channel writes and reads under way.
 pub(crate) struct Channels<C, T> {
-    client: Arc<Client<HttpTransport<C>>>,
-    outbox: Arc<Outbox<T>>,
-    running: JoinSet<Finished>,
+    pub(crate) client: Arc<Client<HttpTransport<C>>>,
+    pub(crate) outbox: Arc<Outbox<T>>,
+    pub(crate) running: JoinSet<Finished>,
 }
 
 impl<C, T> Channels<C, T>
@@ -160,6 +164,8 @@ where
             });
             Finished {
                 created,
+                team: None,
+                reread: false,
                 reply: Box::new(move || {
                     let _ = reply.send(made);
                 }),
@@ -187,6 +193,8 @@ where
             };
             Finished {
                 created: None,
+                team: None,
+                reread: false,
                 reply: Box::new(move || {
                     let _ = reply.send(answer);
                 }),
@@ -217,6 +225,8 @@ where
             });
             Finished {
                 created,
+                team: None,
+                reread: false,
                 reply: Box::new(move || {
                     let _ = reply.send(Ok(thread));
                 }),
@@ -255,6 +265,7 @@ fn row(id: String, name: String, kind: NewChannelKind) -> TeamChannel {
             NewChannelKind::Standard => ChannelKind::Standard,
             NewChannelKind::Private => ChannelKind::Private,
         },
+        shown: true,
     }
 }
 

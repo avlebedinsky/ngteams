@@ -221,6 +221,8 @@ pub(crate) fn thread_body(state: &State, conversation: &Conversation) -> Value {
     let thread_type = &conversation.entry["threadProperties"]["threadType"];
     if conversation.kind == Kind::ReadOnly && thread_type.is_string() {
         properties.insert("threadType".to_owned(), thread_type.clone());
+        // what Manage team's settings read of a team's thread
+        properties.insert("spaceAdminSettings".to_owned(), crate::team_pages::settings());
     }
     thread
 }

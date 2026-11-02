@@ -116,6 +116,14 @@ pub enum Command {
         #[arg(long = "mri", value_name = "MRI")]
         mris: Vec<String>,
     },
+    /// Reads what the team pages read of a team (`docs/protocol/teams.md`), each once; prints how much each gave, never a
+    /// name.
+    TeamReads {
+        /// The team's thread.
+        team: String,
+        /// The team's group.
+        group: String,
+    },
     /// Proves the scheduling form's series and Scheduler with an appointment series of the account's own, which invites
     /// nobody (`series.rs`): creates a weekly series from tomorrow, reads it back and prints its recurrence, reads the
     /// account's free and busy times, then deletes the series (unless `--keep`; `--cleanup` deletes what a run left).

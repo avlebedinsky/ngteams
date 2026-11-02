@@ -160,7 +160,7 @@ async fn missing_config(paths: &LabPaths) {
         let result = invoke(name, paths).await;
         if matches!(
             name,
-            ScenarioName::Load | ScenarioName::Search | ScenarioName::ChannelCreate
+            ScenarioName::Load | ScenarioName::Search | ScenarioName::ChannelCreate | ScenarioName::TeamManage
         ) {
             no_chrome(name, result, paths);
         } else {

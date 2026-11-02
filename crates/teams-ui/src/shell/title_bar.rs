@@ -119,6 +119,9 @@ fn kind(main: &Main) -> &'static str {
         Main::Settings => "settings",
         Main::Calendar => "calendar",
         Main::Search => "search",
+        Main::TeamsPage => "teams-page",
+        Main::ManageTeam(_) => "manage-team",
+        Main::JoinTeam => "join-team",
     }
 }
 
@@ -154,6 +157,11 @@ impl Shell {
             }
             Main::Calendar => self.show_calendar(window, cx),
             Main::Search => self.show_search_results(window, cx),
+            Main::TeamsPage => self.open_teams_page(window, cx),
+            Main::ManageTeam(team) => {
+                self.open_manage_team(team, crate::manage_team::ManageTab::default(), window, cx);
+            }
+            Main::JoinTeam => self.open_join_team(window, cx),
             Main::Nothing => {}
         }
         // what was shown is the history's place now, whatever the opening made of it

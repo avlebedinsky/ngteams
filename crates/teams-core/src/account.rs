@@ -214,7 +214,7 @@ pub fn start<S: SecretStore + 'static>(
         || HttpTransport::new(Arc::clone(&session), Arc::clone(&fence), &base).map(writable),
         session.service_base(MIDDLE_TIER_GTM).as_deref(),
     )?;
-    let writes = with_provisioning(writes, session.service_base(PROVISIONING_GTM).as_deref())?;
+    let writes = with_team_writes(writes, |gtm| session.service_base(gtm))?;
     let transport = Arc::new(with_presence(writes, presence.as_deref())?);
     let members = membership(&fence, transport.clone())?;
     let reads = with_middle_tier(
@@ -323,6 +323,16 @@ fn with_provisioning<C: Credentials>(
         }
         None => Ok(transport),
     }
+}
+
+/// The writes' transport with what a team's writes need: the provisioning service's base (a private channel, an archived
+/// team) and CSA's (its tags), each by its GTM from `base`.
+fn with_team_writes<C: Credentials>(
+    writes: HttpTransport<C>,
+    base: impl Fn(&str) -> Option<String>,
+) -> Result<HttpTransport<C>, BuildError> {
+    let writes = with_provisioning(writes, base(PROVISIONING_GTM).as_deref())?;
+    with_csa(writes, base(CSA_GTM).as_deref())
 }
 
 /// The GTM the user profile service's base comes from (the people picker's search in a team).

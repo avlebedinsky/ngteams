@@ -116,6 +116,16 @@ pub struct FakeCore {
     pub teams: Mutex<Option<Vec<Team>>>,
     /// The channels Create asked for, in order.
     pub channels_asked: Mutex<Vec<teams_core::ChannelDraft>>,
+    /// The writes on a team asked for, in order, with what they change.
+    pub team_writes: Mutex<Vec<(teams_proto::TeamWrite, Option<teams_core::TeamChange>)>>,
+    /// What a team's write answers; refused when `None`.
+    pub team_written: Mutex<Option<teams_core::TeamWritten>>,
+    /// The account's own views of a team asked for, in order.
+    pub team_views: Mutex<Vec<teams_proto::OwnTeamView>>,
+    /// A team's people, as its roster answers.
+    pub team_roster: Mutex<Vec<teams_core::TeamMember>>,
+    /// A team's settings, as the service keeps them.
+    pub team_settings: Mutex<Option<String>>,
     /// What a channel's creation answers; a problem without one.
     pub channel_answer: Mutex<Option<Result<teams_core::ChannelMade, teams_core::ChannelProblem>>>,
     /// The people a private channel was given: its team's group, its group and their MRIs.
@@ -190,6 +200,11 @@ impl Default for FakeCore {
             service_searches: Mutex::default(),
             teams: Mutex::default(),
             channels_asked: Mutex::default(),
+            team_writes: Mutex::default(),
+            team_written: Mutex::default(),
+            team_views: Mutex::default(),
+            team_roster: Mutex::default(),
+            team_settings: Mutex::default(),
             channel_answer: Mutex::default(),
             channel_members_added: Mutex::default(),
             channel_thread_answer: Mutex::default(),
@@ -330,6 +345,36 @@ impl Core for FakeCore {
                 why: teams_core::ChannelProblem::Other,
             }),
         })
+    }
+
+    fn team_write(
+        &self,
+        write: teams_proto::TeamWrite,
+        change: Option<teams_core::TeamChange>,
+    ) -> Reply<teams_core::TeamWritten> {
+        locked(&self.team_writes).push((write, change));
+        Reply::ready(
+            locked(&self.team_written)
+                .clone()
+                .ok_or(EngineError::TeamNotChanged { code: None }),
+        )
+    }
+
+    fn own_team_view(
+        &self,
+        requests: Vec<teams_proto::OwnTeamView>,
+        _change: Option<teams_core::TeamChange>,
+    ) -> Reply<()> {
+        locked(&self.team_views).extend(requests);
+        Reply::ready(Ok(()))
+    }
+
+    fn team_roster(&self, _team: String) -> Reply<Vec<teams_core::TeamMember>> {
+        Reply::ready(Ok(locked(&self.team_roster).clone()))
+    }
+
+    fn team_settings(&self, _team: String) -> Reply<Option<String>> {
+        Reply::ready(Ok(locked(&self.team_settings).clone()))
     }
 
     fn add_channel_members(

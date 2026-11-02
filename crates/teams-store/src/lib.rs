@@ -49,7 +49,7 @@ pub use profiles::{NameSource, PictureState, Profile, StoredPicture};
 pub use schema::SCHEMA_VERSION;
 pub use search::{IndexCursor, IndexText, SearchHit};
 pub use state::{AppReadHorizon, ReadHorizon, SyncState};
-pub use teams::{ChannelKind, Team, TeamChannel};
+pub use teams::{ChannelKind, Team, TeamAbout, TeamChannel};
 
 /// How long a write waits for another connection's lock (a second process on the same account) before it fails.
 /// Every transaction takes the write lock when it begins (`BEGIN IMMEDIATE`), so one that reads before it writes

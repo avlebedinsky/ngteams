@@ -33,3 +33,11 @@ What would settle it, in order:
    sealed native writes and a composer in the channel view.
 
 Until then the personal build stays read-only in channels too.
+
+## 2026-11-02: what stands in the way now
+
+A team of the lab's own exists (a private team account a made, `docs/protocol/teams.md`). Its thread's member list has a, as
+owner, and the three of Teams' own apps every new team gets (`28:<guid>`, role `User`), which aren't lab accounts or the echo
+service. Step 1 above is done. Step 2 needs the user's sign-off to change the fence's tests twice: the live member source reading
+a team's members from its thread (`Scope::Team` is `Unsupported` now, `tests/membership.rs`), and whether a team's own apps count
+as participants.

@@ -44,10 +44,10 @@ use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui::{
-    AnyElement, AnyView, App, AppContext as _, Context, Entity, FocusHandle, Global, InteractiveElement as _,
-    IntoElement, KeyBinding, MouseDownEvent, MouseMoveEvent, ParentElement as _, Render, ScrollWheelEvent,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Window, actions, div,
-    prelude::FluentBuilder as _, px, rgb,
+    AnyElement, AnyView, App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, FocusHandle, Global,
+    InteractiveElement as _, IntoElement, KeyBinding, MouseDownEvent, MouseMoveEvent, ParentElement as _, Render,
+    ScrollWheelEvent, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity,
+    Window, actions, div, prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::avatar::Avatar;
 use gpui_component::button::{Button, ButtonVariants as _};
@@ -70,6 +70,8 @@ use crate::first_run::FirstRun;
 use crate::forwarded::Original;
 use crate::global_search::{self, GlobalSearch, GlobalSearchEvent, Mode as SearchMode};
 use crate::icons::{Glyph, icon_button_with_key, selected_by};
+use crate::join_team::{JoinTeam, JoinTeamEvent};
+use crate::manage_team::{ManageTab, ManageTeam, ManageTeamEvent};
 use crate::models::{Account, Models};
 use crate::own_presence::{self, OwnPresence};
 use crate::people;
@@ -79,7 +81,12 @@ use crate::settings::{ManualStatus, SettingsModel};
 use crate::settings_view::{self, Page, SettingsView, SettingsViewEvent, TestCallOffer, TestCallState};
 use crate::sidebar::Sidebar;
 use crate::switcher::{CallCommand, Switcher, SwitcherEvent};
+use crate::team_dialogs::{
+    AddMembersDialog, Confirm, ConfirmDialog, CreateTeamDialog, EditTeamDialog, TagDialog, TeamDialogEvent,
+};
+use crate::team_menu::{TeamChoice, team_link};
 use crate::teams_list::{ChannelChosen, TeamsList, TeamsListEvent};
+use crate::teams_page::{TeamsPage, TeamsPageEvent};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 use crate::view::status_text;
@@ -201,6 +208,12 @@ pub enum Main {
     Calendar,
     /// The search's results, across both panes.
     Search,
+    /// "Your teams and channels", in the conversation pane.
+    TeamsPage,
+    /// A team's Manage team, in the conversation pane.
+    ManageTeam(String),
+    /// "Join a team", across both panes.
+    JoinTeam,
 }
 
 /// Where the account menu opens: over the rail's account, or under the title bar's avatar.
@@ -241,6 +254,16 @@ pub struct Shell {
     switcher: Option<(Entity<Switcher>, Subscription)>,
     /// A team's "Create a channel" dialog, while it is open.
     channel_dialog: Option<(Entity<ChannelDialog>, Subscription)>,
+    /// "Your teams and channels", once it was opened.
+    teams_page: Option<(Entity<TeamsPage>, Subscription)>,
+    /// Manage team, while it is shown.
+    manage_team: Option<(Entity<ManageTeam>, Subscription)>,
+    /// "Join a team", while it is shown.
+    join_team: Option<(Entity<JoinTeam>, Subscription)>,
+    /// A dialog of the team pages, while one is open.
+    team_dialog: Option<(gpui::AnyView, Subscription)>,
+    /// A toast, while one shows.
+    toast: Option<(SharedString, Task<()>)>,
     /// The title bar's search: its box, its suggestions and its results.
     search_box: Entity<GlobalSearch>,
     /// The places shown, for Back and Forward.
@@ -286,6 +309,7 @@ struct HeaderShown {
 impl Shell {
     /// The shell over `parts`, focused; the chat the settings kept is opened again.
     pub fn new(parts: ShellParts, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let chat_parts = parts.clone();
         let ShellParts {
             core,
             models,
@@ -313,12 +337,6 @@ impl Shell {
         let (call_bar, calling) = Self::calls(&core, &models, &list, &trace, cx);
         let focus = cx.focus_handle();
         focus.focus(window, cx);
-        let chat_parts = ShellParts {
-            core: Arc::clone(&core),
-            models: models.clone(),
-            settings: settings.clone(),
-            trace: Arc::clone(&trace),
-        };
         let (chat, chat_events) = Self::kept_chat(chat_parts, selected.clone(), window, cx).unzip();
         let (search_box, searched) = Self::search_box(&core, &list, &teams, &trace, window, cx);
         Self {
@@ -336,6 +354,11 @@ impl Shell {
             first_run,
             switcher: None,
             channel_dialog: None,
+            teams_page: None,
+            manage_team: None,
+            join_team: None,
+            team_dialog: None,
+            toast: None,
             search_box,
             history: History::default(),
             list_shown: true,
@@ -424,7 +447,7 @@ impl Shell {
         let teams = cx.new(|cx| TeamsList::new(core, models, trace, cx));
         let channel_opened = cx.subscribe_in(&teams, window, |this: &mut Self, _, event, window, cx| match event {
             TeamsListEvent::Opened(chosen) => this.open_channel(chosen.clone(), window, cx),
-            TeamsListEvent::AddChannel(team) => this.open_channel_dialog(team.clone(), window, cx),
+            other => this.team_list_event(other, window, cx),
         });
         // a channel kept as the selected chat (by a build that opened one in a chat view) opens as a channel once the
         // list knows it
@@ -914,6 +937,335 @@ impl Shell {
         self.open_channel(chosen, window, cx);
     }
 
+    /// What the Teams list tells besides a channel chosen.
+    fn team_list_event(&mut self, event: &TeamsListEvent, window: &mut Window, cx: &mut Context<Self>) {
+        match event {
+            TeamsListEvent::AddChannel(team) => self.open_channel_dialog(team.clone(), window, cx),
+            TeamsListEvent::Chosen(team, choice) => self.team_chosen(team.clone(), *choice, window, cx),
+            TeamsListEvent::SeeAllTeams => self.open_teams_page(window, cx),
+            TeamsListEvent::SeeAllChannels(team) => {
+                self.open_manage_team(team.clone(), ManageTab::Channels, window, cx);
+            }
+            TeamsListEvent::Opened(_) => {}
+        }
+    }
+
+    /// "See all your teams": "Your teams and channels" in the conversation pane.
+    pub fn open_teams_page(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.teams_page.is_none() {
+            let (core, teams, trace) = (Arc::clone(&self.core), self.teams.clone(), Arc::clone(&self.trace));
+            let page = cx.new(|cx| TeamsPage::new(core, teams, trace, cx));
+            let events = cx.subscribe_in(
+                &page,
+                window,
+                |this: &mut Self, _, event: &TeamsPageEvent, window, cx| match event {
+                    TeamsPageEvent::CreateTeam => this.open_create_team(window, cx),
+                    TeamsPageEvent::JoinTeam => this.open_join_team(window, cx),
+                    TeamsPageEvent::Manage(team) => {
+                        this.open_manage_team(team.clone(), ManageTab::Channels, window, cx);
+                    }
+                    TeamsPageEvent::Chosen(team, choice) => this.team_chosen(team.clone(), *choice, window, cx),
+                },
+            );
+            self.teams_page = Some((page, events));
+        }
+        self.show_main(Main::TeamsPage, window, cx);
+    }
+
+    /// "Your teams and channels", once it was opened.
+    #[must_use]
+    pub fn teams_page(&self) -> Option<&Entity<TeamsPage>> {
+        self.teams_page.as_ref().map(|(page, _)| page)
+    }
+
+    /// Manage team, while it is shown.
+    #[must_use]
+    pub fn manage_team(&self) -> Option<&Entity<ManageTeam>> {
+        self.manage_team.as_ref().map(|(page, _)| page)
+    }
+
+    /// "Join a team", while it is shown.
+    #[must_use]
+    pub fn join_team(&self) -> Option<&Entity<JoinTeam>> {
+        self.join_team.as_ref().map(|(page, _)| page)
+    }
+
+    /// The dialog of the team pages, while one is open.
+    #[must_use]
+    pub fn team_dialog(&self) -> Option<&gpui::AnyView> {
+        self.team_dialog.as_ref().map(|(dialog, _)| dialog)
+    }
+
+    /// Closes the dialog of the team pages, if one is open.
+    pub fn close_team_dialog(&mut self, cx: &mut Context<Self>) {
+        self.team_dialog = None;
+        cx.notify();
+    }
+
+    /// The toast showing.
+    #[must_use]
+    pub fn toast(&self) -> Option<&SharedString> {
+        self.toast.as_ref().map(|(words, _)| words)
+    }
+
+    /// Manage team on `team`, on `tab`, in the conversation pane.
+    pub fn open_manage_team(&mut self, team: String, tab: ManageTab, window: &mut Window, cx: &mut Context<Self>) {
+        let (core, teams, trace) = (Arc::clone(&self.core), self.teams.clone(), Arc::clone(&self.trace));
+        let shown = team.clone();
+        let page = cx.new(|cx| ManageTeam::new(core, trace, teams, team, tab, cx));
+        let events = cx.subscribe_in(
+            &page,
+            window,
+            |this: &mut Self, _, event: &ManageTeamEvent, window, cx| match event {
+                ManageTeamEvent::Chosen(team, choice) => this.team_chosen(team.clone(), *choice, window, cx),
+                ManageTeamEvent::EditDetails(team) => {
+                    let core = Arc::clone(&this.core);
+                    let team = team.clone();
+                    let dialog = cx.new(|cx| EditTeamDialog::new(core, team, window, cx));
+                    this.show_team_dialog(&dialog, window, cx);
+                }
+                ManageTeamEvent::EditTag(team, tag) => {
+                    let core = Arc::clone(&this.core);
+                    let (team, tag) = (team.clone(), tag.clone());
+                    let dialog = cx.new(|cx| TagDialog::new(core, team, tag, window, cx));
+                    this.show_team_dialog(&dialog, window, cx);
+                }
+                ManageTeamEvent::OpenChannel(channel) => this.open_channel_id(channel.clone(), window, cx),
+                ManageTeamEvent::Toast(words) => this.show_toast(words, cx),
+            },
+        );
+        self.manage_team = Some((page, events));
+        self.show_main(Main::ManageTeam(shown), window, cx);
+    }
+
+    /// "Join a team", across both panes.
+    pub fn open_join_team(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let core = Arc::clone(&self.core);
+        let page = cx.new(|cx| JoinTeam::new(core, window, cx));
+        let events = cx.subscribe_in(
+            &page,
+            window,
+            |this: &mut Self, _, event: &JoinTeamEvent, window, cx| match event {
+                JoinTeamEvent::Back => this.open_teams_page(window, cx),
+                JoinTeamEvent::CreateTeam => this.open_create_team(window, cx),
+                JoinTeamEvent::Joined(words) => {
+                    this.show_toast(words, cx);
+                    this.open_teams_page(window, cx);
+                }
+            },
+        );
+        self.join_team = Some((page, events));
+        self.show_main(Main::JoinTeam, window, cx);
+    }
+
+    /// Shows `main` in the conversation pane, the chat that was there put away.
+    fn show_main(&mut self, main: Main, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(chat) = &self.chat {
+            chat.update(cx, |chat, cx| chat.set_shown(false, cx));
+        }
+        self.teams.update(cx, |teams, cx| teams.select(None, cx));
+        self.list.update(cx, |list, cx| list.select(None, cx));
+        self.main = main;
+        self.hide_calendar(window, cx);
+        self.close_switcher(window, cx);
+        self.close_search(cx);
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// "Create a team".
+    pub fn open_create_team(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let (core, trace) = (Arc::clone(&self.core), Arc::clone(&self.trace));
+        let dialog = cx.new(|cx| CreateTeamDialog::new(core, trace, window, cx));
+        self.show_team_dialog(&dialog, window, cx);
+    }
+
+    /// An entry of a team's "..." menu, wherever it was chosen.
+    pub fn team_chosen(
+        &mut self,
+        team: teams_store::Team,
+        choice: TeamChoice,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let (core, trace) = (Arc::clone(&self.core), Arc::clone(&self.trace));
+        let confirm =
+            |kind: Confirm, this: &mut Self, team: teams_store::Team, window: &mut Window, cx: &mut Context<Self>| {
+                let dialog = cx.new(|cx| ConfirmDialog::new(core.clone(), trace.clone(), team, kind, window, cx));
+                this.show_team_dialog(&dialog, window, cx);
+            };
+        match choice {
+            TeamChoice::AddChannel => self.open_channel_dialog(team, window, cx),
+            TeamChoice::Manage => self.open_manage_team(team.id, ManageTab::Channels, window, cx),
+            TeamChoice::ManageTags => self.open_manage_team(team.id, ManageTab::Tags, window, cx),
+            TeamChoice::AddMember => {
+                let dialog = cx.new(|cx| AddMembersDialog::new(core.clone(), &trace, team, false, window, cx));
+                self.show_team_dialog(&dialog, window, cx);
+            }
+            TeamChoice::CopyLink => {
+                cx.write_to_clipboard(gpui::ClipboardItem::new_string(team_link(&team)));
+                self.show_toast("Link copied", cx);
+            }
+            TeamChoice::HideAll => confirm(Confirm::HideAll, self, team, window, cx),
+            TeamChoice::Archive => confirm(Confirm::Archive, self, team, window, cx),
+            TeamChoice::Leave => confirm(Confirm::Leave, self, team, window, cx),
+            TeamChoice::Delete => confirm(Confirm::Delete, self, team, window, cx),
+            TeamChoice::Show => self.show_team(&team, cx),
+            TeamChoice::Restore => self.restore_team(&team, cx),
+        }
+    }
+
+    /// A hidden team's Show: it comes back into the account's list.
+    fn show_team(&mut self, team: &teams_store::Team, cx: &mut Context<Self>) {
+        let reply = self.core.own_team_view(
+            vec![teams_proto::OwnTeamView::ShowAll { team: team.id.clone() }],
+            Some(teams_core::TeamChange::Hidden {
+                team: team.id.clone(),
+                hidden: false,
+            }),
+        );
+        Self::toast_after(reply, "We couldn't show the team.", None, cx);
+    }
+
+    /// An archived team's Restore.
+    fn restore_team(&mut self, team: &teams_store::Team, cx: &mut Context<Self>) {
+        let reply = self.core.team_write(
+            teams_proto::TeamWrite::Restore {
+                group: team.group_id.clone().unwrap_or_default(),
+            },
+            Some(teams_core::TeamChange::Archived {
+                team: team.id.clone(),
+                archived: false,
+            }),
+        );
+        Self::toast_after(
+            reply,
+            "We couldn't restore your team.",
+            Some("Successfully restored team"),
+            cx,
+        );
+    }
+
+    /// Waits for `reply`, then says what went wrong, or `done`.
+    fn toast_after<V: Send + 'static>(
+        reply: teams_core::Reply<V>,
+        failed: &'static str,
+        done: Option<&'static str>,
+        cx: &mut Context<Self>,
+    ) {
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let words = if reply.await.is_ok() { done } else { Some(failed) };
+            if let Some(words) = words {
+                let _ = this.update(cx, |this, cx| this.show_toast(words, cx));
+            }
+        })
+        .detach();
+    }
+
+    /// A word that shows for a few seconds at the bottom of the window.
+    pub fn show_toast(&mut self, words: &'static str, cx: &mut Context<Self>) {
+        if words.is_empty() {
+            return;
+        }
+        let task = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            cx.background_executor().timer(std::time::Duration::from_secs(4)).await;
+            let _ = this.update(cx, |this, cx| {
+                this.toast = None;
+                cx.notify();
+            });
+        });
+        self.toast = Some((words.into(), task));
+        cx.notify();
+    }
+
+    /// Shows `dialog` over everything; what it tells is acted on here.
+    fn show_team_dialog<D>(&mut self, dialog: &Entity<D>, window: &mut Window, cx: &mut Context<Self>)
+    where
+        D: Render + EventEmitter<TeamDialogEvent>,
+    {
+        self.close_switcher(window, cx);
+        let events = cx.subscribe_in(
+            dialog,
+            window,
+            |this: &mut Self, _, event: &TeamDialogEvent, window, cx| {
+                this.team_dialog = None;
+                this.focus.focus(window, cx);
+                match event {
+                    TeamDialogEvent::Closed => {}
+                    TeamDialogEvent::Created(team) => {
+                        let (core, trace) = (Arc::clone(&this.core), Arc::clone(&this.trace));
+                        let team = team.clone();
+                        let dialog = cx.new(|cx| AddMembersDialog::new(core, &trace, team, true, window, cx));
+                        this.show_team_dialog(&dialog, window, cx);
+                    }
+                    TeamDialogEvent::Changed { team, words } => {
+                        this.show_toast(words, cx);
+                        let team = team.clone();
+                        if let Some((page, _)) = &this.manage_team
+                            && page.read(cx).team_id() == team
+                        {
+                            page.update(cx, ManageTeam::refresh);
+                        }
+                    }
+                    TeamDialogEvent::Gone { team, words } => {
+                        this.show_toast(words, cx);
+                        if this.main == Main::ManageTeam(team.clone()) {
+                            this.manage_team = None;
+                            this.open_teams_page(window, cx);
+                        }
+                    }
+                }
+                cx.notify();
+            },
+        );
+        self.team_dialog = Some((dialog.clone().into(), events));
+        cx.notify();
+    }
+
+    /// A team page's dialog over everything, while one is open.
+    fn team_dialog_view(&self) -> Option<gpui::Stateful<gpui::Div>> {
+        self.team_dialog.as_ref().map(|(dialog, _)| {
+            div()
+                .id("team-dialog-backdrop")
+                .absolute()
+                .top_0()
+                .left_0()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .occlude()
+                .bg(gpui::rgba(0x0000_0080))
+                .child(dialog.clone())
+        })
+    }
+
+    /// The toast, at the bottom of the window.
+    fn toast_view(&self, palette: Palette) -> Option<gpui::Div> {
+        self.toast.as_ref().map(|(words, _)| {
+            div()
+                .absolute()
+                .bottom(px(24.0))
+                .left_0()
+                .right_0()
+                .flex()
+                .justify_center()
+                .child(
+                    div()
+                        .debug_selector(|| "toast".to_owned())
+                        .px_4()
+                        .py_2()
+                        .rounded_lg()
+                        .border_1()
+                        .border_color(rgb(palette.border))
+                        .bg(rgb(palette.surface))
+                        .text_color(rgb(palette.foreground))
+                        .shadow_lg()
+                        .child(words.clone()),
+                )
+        })
+    }
+
     /// Opens the team's "Create a channel" dialog over everything; it tells when it closes, and on which channel.
     pub fn open_channel_dialog(&mut self, team: teams_store::Team, window: &mut Window, cx: &mut Context<Self>) {
         self.close_switcher(window, cx);
@@ -1253,7 +1605,13 @@ impl Shell {
         match std::mem::replace(&mut self.before_settings, Main::Nothing) {
             Main::Chat(id) => self.open_chat(id, window, cx),
             Main::Channel(id) => self.open_channel_id(id, window, cx),
-            Main::Nothing | Main::Settings | Main::Calendar | Main::Search => {
+            Main::Nothing
+            | Main::Settings
+            | Main::Calendar
+            | Main::Search
+            | Main::TeamsPage
+            | Main::ManageTeam(_)
+            | Main::JoinTeam => {
                 self.main = Main::Nothing;
                 cx.notify();
             }
@@ -1312,6 +1670,7 @@ impl Shell {
             SwitcherEvent::OpenChannel(id) => this.open_channel_id(id.clone(), window, cx),
             SwitcherEvent::Dismissed => this.close_switcher(window, cx),
             SwitcherEvent::CopyDiagnostics => this.copy_diagnostics(window, cx),
+            SwitcherEvent::SeeAllTeams => this.open_teams_page(window, cx),
             SwitcherEvent::SeeMoreChats => {
                 this.close_switcher(window, cx);
                 this.list.update(cx, ChatList::see_more);
@@ -1762,8 +2121,17 @@ impl Shell {
                     .child(div().flex_1().min_h_0().children(shown.map(|(view, _)| view.clone())))
                     .into_any_element()
             }
-            // the settings, the calendar and the search's results are drawn across both panes (`body`), never here
-            Main::Nothing | Main::Settings | Main::Calendar | Main::Search => {
+            Main::TeamsPage => match self.teams_page() {
+                Some(shown) => pane.child(shown.clone()).into_any_element(),
+                None => pane.child(no_chat(palette)).into_any_element(),
+            },
+            Main::ManageTeam(_) => match self.manage_team() {
+                Some(shown) => pane.child(shown.clone()).into_any_element(),
+                None => pane.child(no_chat(palette)).into_any_element(),
+            },
+            // the settings, the calendar, the search's results and "Join a team" are drawn across both panes (`body`), never
+            // here
+            Main::Nothing | Main::Settings | Main::Calendar | Main::Search | Main::JoinTeam => {
                 pane.child(no_chat(palette)).into_any_element()
             }
         }
@@ -1869,6 +2237,8 @@ impl Render for Shell {
         let switcher = self.switcher().map(|switcher| overlay(switcher.clone().into()));
         let status_menu = self.status_menu.then(|| self.status_menu_view(palette, cx));
         let channel_dialog = self.channel_dialog_view();
+        let team_dialog = self.team_dialog_view();
+        let toast = self.toast_view(palette);
         let first_run = self.settings.read(cx).awaiting_first_run().then(|| {
             div()
                 .absolute()
@@ -1929,6 +2299,8 @@ impl Render for Shell {
             .children(switcher)
             .children(status_menu)
             .children(channel_dialog)
+            .children(team_dialog)
+            .children(toast)
             .children(first_run)
     }
 }
@@ -1979,6 +2351,11 @@ impl Shell {
         }
         if self.main == Main::Search {
             return global_search::results_page(&self.search_box, palette, cx);
+        }
+        if self.main == Main::JoinTeam
+            && let Some(page) = self.join_team()
+        {
+            return page.clone().into_any_element();
         }
         if !self.list_shown {
             return self.panes_or_signed_out(self.main_pane(palette, cx), palette, cx);

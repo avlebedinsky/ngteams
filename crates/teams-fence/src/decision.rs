@@ -994,8 +994,9 @@ impl Fence {
             return Verdict::Deny(DenyReason::NoMembers);
         }
         let participants: BTreeSet<&Mri> = current.iter().chain(target.added()).collect();
-        // a new calendar event inviting nobody reaches nobody: an appointment of the account's own
-        let appointment = !fetched && target.kind() == WriteKind::Meeting;
+        // a new calendar event inviting nobody reaches nobody: an appointment of the account's own; so does a new private
+        // team, which holds only the account until people are added, each such write judged on its own
+        let appointment = !fetched && matches!(target.kind(), WriteKind::Meeting | WriteKind::TeamCreate);
         if participants.is_empty() && !appointment {
             return Verdict::Deny(DenyReason::NoMembers);
         }

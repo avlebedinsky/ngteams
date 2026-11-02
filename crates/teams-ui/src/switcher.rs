@@ -112,6 +112,7 @@ pub enum SwitcherEvent {
     Call(CallCommand),
     /// Show more of the chats (the "See more chats" command, the "Chats" section's See more).
     SeeMoreChats,
+    SeeAllTeams,
 }
 
 /// A call command the palette offers (in a build that shows calls), when it fits the moment.
@@ -185,6 +186,7 @@ const COMMAND_SECTION: usize = 2;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaletteCommand {
     SeeMoreChats,
+    SeeAllTeams,
     CopyDiagnostics,
     SetStatus(ManualStatus),
     Call(CallCommand),
@@ -196,6 +198,7 @@ impl PaletteCommand {
     pub fn name(self) -> &'static str {
         match self {
             Self::SeeMoreChats => "See more chats",
+            Self::SeeAllTeams => "See all your teams",
             Self::CopyDiagnostics => "Copy diagnostics",
             Self::SetStatus(ManualStatus::Automatic) => "Set status: Automatic",
             Self::SetStatus(ManualStatus::Available) => "Set status: Available",
@@ -209,6 +212,7 @@ impl PaletteCommand {
     fn event(self) -> SwitcherEvent {
         match self {
             Self::SeeMoreChats => SwitcherEvent::SeeMoreChats,
+            Self::SeeAllTeams => SwitcherEvent::SeeAllTeams,
             Self::CopyDiagnostics => SwitcherEvent::CopyDiagnostics,
             Self::SetStatus(status) => SwitcherEvent::SetStatus(status),
             Self::Call(command) => SwitcherEvent::Call(command),
@@ -217,8 +221,9 @@ impl PaletteCommand {
 }
 
 /// The commands the palette offers, in order, matched on their names as the chats are.
-pub const COMMANDS: [PaletteCommand; 7] = [
+pub const COMMANDS: [PaletteCommand; 8] = [
     PaletteCommand::SeeMoreChats,
+    PaletteCommand::SeeAllTeams,
     PaletteCommand::CopyDiagnostics,
     PaletteCommand::SetStatus(ManualStatus::Automatic),
     PaletteCommand::SetStatus(ManualStatus::Available),

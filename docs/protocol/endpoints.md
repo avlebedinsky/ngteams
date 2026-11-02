@@ -172,6 +172,35 @@ The mapped writes, and the carve-outs that reach nobody.
 | `PUT` | `v1/threads/<chat>/properties` `?name`, `v1/threads/<chat>/members/ALL` | thread properties (topic) and a property of every member | yes: chat service | not used | [fence-targets.md](fence-targets.md#writes) · M0 T11 | bundle only |
 | various | `v1/threads/<chat>/livemessages`, `…/messages/forward`, `…/messages/move`, `rcmetadata`, `rc2s`, `v1/threads/<chat>/files`, `v1/users/ME/drafts`, `PUT`/`DELETE` on a conversation itself, any `48:` stream but the two feeds' read marks (`48:notes`, `48:sharedcalllogs`, …), an `8:…` or `28:…` conversation | live and targeted messages, forwarding and moving, reply-chain metadata, file references, drafts and scheduled sends, conversations with a person or a bot by MRI | yes: chat service | not used | [fence-targets.md](fence-targets.md#writes) · M0 T11 | bundle only |
 
+## Managing a team
+
+The team pages' writes and reads ([teams.md](teams.md)). `Contacting?` and `Native` as above. **Their answers are the bundle's
+unless the row says seen: the lab's fence denies every write on a team, its own team too.**
+
+| Method | Path | What | Contacting? | Native | Notes | Seen |
+|---|---|---|---|---|---|---|
+| `POST` | middle tier `beta/teams/create` | a new team | mapped: `TeamCreate` → `New` (private); `OpenTeamCreate` → `New` (public or org-wide), denied in the lab | `TeamWrite::Create` | names nobody; a team's three apps come with it | seen, 201 |
+| `PATCH` | middle tier `beta/teams/<team>` | a team's name, description, privacy | mapped: `TeamChange` → `Team(<team>)` | `TeamWrite::Edit` | | captured |
+| `PUT` | chat service `v1/threads/<team>/properties?name=spaceAdminSettings` | a team's settings, whole | mapped: `TeamChange` → `Team(<team>)` | `TeamWrite::Settings` | | captured |
+| `PUT`, `DELETE` | middle tier `beta/teams/<team>/joinCode` | a team's code made, reset, removed | mapped: `TeamChange` | `TeamWrite::ResetCode`, `RemoveCode` | | captured (`PUT`) |
+| `PUT` | middle tier `beta/teams/<team>/bulkUpdateRoledMembers?allowAsyncAddition=true` | people added | mapped: `MemberChange`, adding them | `TeamWrite::AddMembers` | | captured |
+| `PUT` | middle tier `beta/teams/<team>/members` | someone's role, removed, or the account leaving | mapped: `MemberChange` | `TeamWrite::UpdateMember` | | captured (`DemotedAndLeft`) |
+| `DELETE` | middle tier `beta/teams/<team>/delete` | a team deleted | mapped: `TeamChange` | `TeamWrite::Delete` | | captured |
+| `POST` | provisioning `groups/<group>/archive`, `unarchive` | a team archived, restored | mapped: `TeamChange` → `Team(<group>)` | `TeamWrite::Archive`, `Restore` | | captured (`archive`) |
+| `POST` | CSA `api/v1/teams/<team>/tags` | a new tag | mapped: `TeamChange`, adding its people | `TeamWrite::CreateTag` | | captured |
+| `PATCH`, `DELETE` | CSA `api/v1/teams/<team>/tags/<tag>` | a tag changed, deleted | mapped: `TeamChange` | `TeamWrite::EditTag`, `DeleteTag` | | bundle |
+| `PUT` | CSA `api/v1/teams/<team>/tagSettings` | who changes tags, automatic tags | mapped: `TeamChange` | `TeamWrite::TagSettings` | | captured |
+| `POST` | middle tier `beta/teams/joinRequest/<group>`, `joinByCode`, `sponsorJoinRequest/<group>`, `joinRequestAdminAction` | joining, by a code, a member's request, an owner's answer | mapped: `MemberChange` | `TeamWrite::Join`, `JoinByCode`, `RequestMembers`, `AnswerJoinRequest` | | bundle |
+| `PUT` | provisioning `team/<team>/hide` | a team's channels hidden for the account | no: its own view | plain (`OwnTeamView::HideAll`) | | seen, 202 |
+| `PUT` | provisioning `conversations/show`, `hide` | shown or hidden for the account | no: its own view | plain (`OwnTeamView::ShowAll`) | | bundle |
+| `PUT` | chat service `v1/threads/<channel>/members/<own>` with only `interest` | a channel shown or hidden for the account | no: its own view | plain (`OwnTeamView::ChannelInterest`) | | captured |
+| `PUT` | chat service `v1/users/ME/conversations/<channel>/properties?name=isGeneralChannelFavorite` | a channel in the account's list | no: its own view | plain (`OwnTeamView::ChannelFavorite`) | | captured |
+| `POST` | middle tier `beta/teams/findJoinRequests`, `beta/users/searchV2` | the people asking; the people a name finds | no: reads | plain (`TeamJoinRequests`, `AddablePeopleSearch`) | | seen |
+| `GET` | chat service `v1/threads/<team>/members?view&pageSize&selectMemberRoles`, `v1/threads/<team>?view` | a team's people, its settings | no | `Read` (`TeamRoster`, `TeamThread`) | | seen |
+| `GET` | CSA `api/v1/teams/<team>/tagCards?tagType=any` | a team's tags | no | `Read` (`TeamTags`) | | seen |
+| `GET` | middle tier `beta/teams/<team>/joinCode`, `beta/analytics/teams/<group>/summary-timeseries`, `beta/analytics/me/teams/summary-timeseries`, `beta/teams/suggested`, `beta/teams/find`, `beta/users/<own>/profilepicturev2/teams/<group>` | a team's code, analytics, the teams to join, a team's picture | no | `Read` (`TeamCode`, `TeamAnalyticsRead`, `AllTeamsAnalyticsRead`, `JoinableTeams`, `TeamPicture`) | | seen, but `suggested` and `find`, bundle |
+| `GET` | provisioning `groups/<group>/channels?mode=IncludeIncomingChannels`, `users/me/invitations` | a team's channels, invitations | no | `Read` (`TeamChannels`, `PendingInvites`) | | seen |
+
 ## A new channel
 
 The dialog's writes and reads ([channels.md](channels.md#creating-a-channel)). `Contacting?` and `Native` as above.

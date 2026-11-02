@@ -403,8 +403,39 @@ pub struct Team {
     pub can_add_channel: bool,
     /// Whether the account may add a private channel ([`can_add_private_channel`]).
     pub can_add_private_channel: bool,
+    /// What the team pages show of it.
+    pub about: TeamAbout,
     /// Its channels, the general one first.
     pub channels: Vec<Channel>,
+}
+
+/// What "Your teams and channels" and Manage team show of a team, as CSA's answer has it. `Debug` leaves it all out with
+/// the rest of the team's words.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "what the service says of a team and of the account in it: each stands alone, no state machine"
+)]
+pub struct TeamAbout {
+    /// The tenant it belongs to: a link to it names it.
+    pub tenant: String,
+    pub description: String,
+    /// Anyone in the organization can join it (`accessType` other than 1).
+    pub public: bool,
+    /// Its people, bots left out (`membershipSummary`).
+    pub people: u32,
+    /// The account is a guest on it (`memberRoleString` `guest`).
+    pub guest: bool,
+    /// Its people come from a rule, not from hands (`dynamicMembership`).
+    pub dynamic_membership: bool,
+    /// It holds everyone in the organization (`isTenantWide`).
+    pub tenant_wide: bool,
+    /// The account is only on some of its channels (`channelOnlyMember`).
+    pub channel_only: bool,
+    /// Its channels are hidden for the account (`isFavorite` `false`).
+    pub hidden: bool,
+    /// Its picture's version (`pictureETag`).
+    pub picture_etag: Option<String>,
 }
 
 impl fmt::Debug for Team {
@@ -426,6 +457,9 @@ pub struct Channel {
     pub general: bool,
     /// Who it is for (`channelType`: 0 standard, 1 private, 2 shared); `Unknown` for any other value.
     pub kind: ChannelType,
+    /// Whether it is in the account's channel list: a general channel by the team's `isGeneralChannelFavorite`, another
+    /// by its `isFavorite`; an answer that doesn't say shows it.
+    pub shown: bool,
 }
 
 /// A channel's `channelType` in CSA's answer.
@@ -504,6 +538,7 @@ fn team(entry: &Value, id: &str, name: &str, skipped: &mut usize) -> Team {
                 name: channel_name.to_owned(),
                 general: flag(channel, "isGeneral") || channel_id == id,
                 kind: ChannelType::of(channel),
+                shown: shown(entry, channel, flag(channel, "isGeneral") || channel_id == id),
             }),
         }
     }
@@ -526,8 +561,56 @@ fn team(entry: &Value, id: &str, name: &str, skipped: &mut usize) -> Team {
         owner: role(entry) == "admin",
         can_add_channel: can_add_channel(entry),
         can_add_private_channel: can_add_private_channel(entry),
+        about: about(entry),
         channels,
     }
+}
+
+/// What the team pages show of a team entry ([`TeamAbout`]).
+fn about(entry: &Value) -> TeamAbout {
+    let count = |key: &str| {
+        entry
+            .pointer(&format!("/membershipSummary/{key}"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    };
+    TeamAbout {
+        tenant: entry
+            .get("tenantId")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        description: entry
+            .get("description")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned(),
+        public: entry
+            .get("accessType")
+            .and_then(Value::as_u64)
+            .is_some_and(|access| access != 1),
+        people: u32::try_from(count("totalMemberCount").saturating_sub(count("botCount"))).unwrap_or(u32::MAX),
+        guest: role(entry) == "guest",
+        dynamic_membership: flag(entry, "dynamicMembership"),
+        tenant_wide: flag(entry, "isTenantWide"),
+        channel_only: flag(entry, "channelOnlyMember"),
+        hidden: entry.get("isFavorite").and_then(Value::as_bool) == Some(false),
+        picture_etag: entry
+            .get("pictureETag")
+            .and_then(Value::as_str)
+            .filter(|etag| !etag.is_empty())
+            .map(str::to_owned),
+    }
+}
+
+/// Whether a channel is in the account's channel list ([`Channel::shown`]).
+fn shown(team: &Value, channel: &Value, general: bool) -> bool {
+    let (holder, key) = if general {
+        (team, "isGeneralChannelFavorite")
+    } else {
+        (channel, "isFavorite")
+    };
+    holder.get(key).and_then(Value::as_bool) != Some(false)
 }
 
 /// The account's role in a team entry, in lower case (`memberRoleString`: `admin`, `user`, `guest`).

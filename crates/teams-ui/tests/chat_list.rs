@@ -244,18 +244,21 @@ fn ops_crew() -> Team {
         owner: false,
         can_add_channel: false,
         can_add_private_channel: false,
+        about: teams_store::TeamAbout::default(),
         channels: vec![
             TeamChannel {
                 id: TEAM.to_owned(),
                 name: "General".to_owned(),
                 general: true,
                 kind: ChannelKind::Standard,
+                shown: true,
             },
             TeamChannel {
                 id: CHANNEL.to_owned(),
                 name: "Prod alerts".to_owned(),
                 general: false,
                 kind: ChannelKind::Standard,
+                shown: true,
             },
         ],
     }

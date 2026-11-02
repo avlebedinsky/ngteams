@@ -26,10 +26,13 @@ use teams_core::sync::{CatchUpReport, Synced};
 use teams_core::{
     Action, Availability, CalendarEvent, CallAction, CallId, ChannelDraft, ChannelMade, ChatListing, EngineHandle,
     EngineRequests, Event, EventAttendee, EventWrite, EventWritten, FileStream, FullEvent, Invitable,
-    MeetingAvailability, OwnStatus, Person, PictureBytes, Reply, SearchAnswer, SearchScope, Strip, Transient,
-    TransientSent,
+    MeetingAvailability, OwnStatus, Person, PictureBytes, Reply, SearchAnswer, SearchScope, Strip, TeamChange,
+    TeamMember, TeamWritten, Transient, TransientSent,
 };
-use teams_proto::TeamPerson;
+use teams_proto::{
+    AnalyticsPeriod, JoinableTeam, ManagedChannel, OwnTeamView, PendingInvite, TagsRead, TeamAnalytics, TeamPerson,
+    TeamPicture, TeamWrite,
+};
 use teams_store::{
     Conversation, Member, Message, MessagePage, OutboxEntry, PageCursor, Reaction, ReadHorizon, SearchHit, Team,
 };
@@ -179,6 +182,63 @@ pub trait Core: Send + Sync + 'static {
     fn team_people(&self, _team: String, _keyword: String) -> Reply<Vec<TeamPerson>> {
         Reply::ready(Ok(Vec::new()))
     }
+    /// A write managing a team (`teams_core::team_admin`); only the team pages' own buttons ask for one. A fake core changes
+    /// nothing.
+    fn team_write(&self, _write: TeamWrite, _change: Option<TeamChange>) -> Reply<TeamWritten> {
+        Reply::ready(Err(teams_core::EngineError::TeamNotChanged { code: None }))
+    }
+    /// The account's own view of a team changed. A fake core changes nothing.
+    fn own_team_view(&self, _requests: Vec<OwnTeamView>, _change: Option<TeamChange>) -> Reply<()> {
+        Reply::ready(Err(teams_core::EngineError::TeamNotChanged { code: None }))
+    }
+    /// A team's people. A fake core knows nobody.
+    fn team_roster(&self, _team: String) -> Reply<Vec<TeamMember>> {
+        Reply::ready(Ok(Vec::new()))
+    }
+    /// A team's settings as the service keeps them. A fake core has none.
+    fn team_settings(&self, _team: String) -> Reply<Option<String>> {
+        Reply::ready(Ok(None))
+    }
+    /// A team's tags. A fake core has none.
+    fn team_tags(&self, _team: String) -> Reply<TagsRead> {
+        Reply::ready(Ok(TagsRead::default()))
+    }
+    /// A team's code. A fake core has none.
+    fn team_code(&self, _team: String) -> Reply<Option<String>> {
+        Reply::ready(Ok(None))
+    }
+    /// A team's channels as Manage team lists them. A fake core has none.
+    fn team_channels(&self, _group: String) -> Reply<Vec<ManagedChannel>> {
+        Reply::ready(Ok(Vec::new()))
+    }
+    /// The invitations waiting. A fake core has none.
+    fn pending_invites(&self) -> Reply<Vec<PendingInvite>> {
+        Reply::ready(Ok(Vec::new()))
+    }
+    /// How a team did. A fake core doesn't know.
+    fn team_analytics(&self, _group: String, _period: AnalyticsPeriod) -> Reply<Option<TeamAnalytics>> {
+        Reply::ready(Ok(None))
+    }
+    /// How the account's teams did. A fake core doesn't know.
+    fn all_teams_analytics(&self, _period: AnalyticsPeriod) -> Reply<Vec<TeamAnalytics>> {
+        Reply::ready(Ok(Vec::new()))
+    }
+    /// The teams one can join. A fake core has none.
+    fn joinable_teams(&self, _keywords: Option<String>) -> Reply<Vec<JoinableTeam>> {
+        Reply::ready(Ok(Vec::new()))
+    }
+    /// The people `keyword` finds, to add to a team. A fake core finds nobody.
+    fn addable_people(&self, _keyword: String) -> Reply<Vec<TeamPerson>> {
+        Reply::ready(Ok(Vec::new()))
+    }
+    /// The people asking to join a team. A fake core knows nobody.
+    fn team_join_requests(&self, _group: String) -> Reply<Vec<TeamMember>> {
+        Reply::ready(Ok(Vec::new()))
+    }
+    /// A team's picture. A fake core has none.
+    fn team_picture(&self, _team: TeamPicture) -> Reply<Option<PictureBytes>> {
+        Reply::ready(Ok(None))
+    }
     /// People the account knows whose name holds `query`, with their addresses: the attendee picker's suggestions. A
     /// fake core knows nobody.
     fn invitable(&self, query: String) -> Reply<Vec<Invitable>> {
@@ -247,6 +307,62 @@ impl Core for EngineRequests {
 
     fn team_people(&self, team: String, keyword: String) -> Reply<Vec<TeamPerson>> {
         EngineRequests::team_people(self, team, keyword)
+    }
+
+    fn team_write(&self, write: TeamWrite, change: Option<TeamChange>) -> Reply<TeamWritten> {
+        EngineRequests::team_write(self, write, change)
+    }
+
+    fn own_team_view(&self, requests: Vec<OwnTeamView>, change: Option<TeamChange>) -> Reply<()> {
+        EngineRequests::own_team_view(self, requests, change)
+    }
+
+    fn team_roster(&self, team: String) -> Reply<Vec<TeamMember>> {
+        EngineRequests::team_roster(self, team)
+    }
+
+    fn team_settings(&self, team: String) -> Reply<Option<String>> {
+        EngineRequests::team_settings(self, team)
+    }
+
+    fn team_tags(&self, team: String) -> Reply<TagsRead> {
+        EngineRequests::team_tags(self, team)
+    }
+
+    fn team_code(&self, team: String) -> Reply<Option<String>> {
+        EngineRequests::team_code(self, team)
+    }
+
+    fn team_channels(&self, group: String) -> Reply<Vec<ManagedChannel>> {
+        EngineRequests::team_channels(self, group)
+    }
+
+    fn pending_invites(&self) -> Reply<Vec<PendingInvite>> {
+        EngineRequests::pending_invites(self)
+    }
+
+    fn team_analytics(&self, group: String, period: AnalyticsPeriod) -> Reply<Option<TeamAnalytics>> {
+        EngineRequests::team_analytics(self, group, period)
+    }
+
+    fn all_teams_analytics(&self, period: AnalyticsPeriod) -> Reply<Vec<TeamAnalytics>> {
+        EngineRequests::all_teams_analytics(self, period)
+    }
+
+    fn joinable_teams(&self, keywords: Option<String>) -> Reply<Vec<JoinableTeam>> {
+        EngineRequests::joinable_teams(self, keywords)
+    }
+
+    fn addable_people(&self, keyword: String) -> Reply<Vec<TeamPerson>> {
+        EngineRequests::addable_people(self, keyword)
+    }
+
+    fn team_join_requests(&self, group: String) -> Reply<Vec<TeamMember>> {
+        EngineRequests::team_join_requests(self, group)
+    }
+
+    fn team_picture(&self, team: TeamPicture) -> Reply<Option<PictureBytes>> {
+        EngineRequests::team_picture(self, team)
     }
 
     fn invitable(&self, query: String) -> Reply<Vec<Invitable>> {

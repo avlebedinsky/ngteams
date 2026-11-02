@@ -83,7 +83,7 @@ const SETTLE: Duration = Duration::from_millis(1500);
 type Step = (&'static str, fn(&Entity<Shell>, &mut Window, &mut App));
 
 /// The tour.
-const STEPS: [Step; 84] = [
+const STEPS: [Step; 4 + 110] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -191,6 +191,138 @@ const STEPS: [Step; 84] = [
     }),
     ("channel-closed", |shell, _, cx| {
         with_channel_dialog(shell, cx, teams_ui::channel_dialog::ChannelDialog::close_now);
+    }),
+    // "Your teams and channels", its Create team dropdown, a row's "..." menu, the dialogs and Manage team's tabs (the mock's
+    // made-up team; the lab's fence denies its writes)
+    ("teams-page", |shell, window, cx| {
+        shell.update(cx, |shell, cx| shell.open_teams_page(window, cx));
+    }),
+    ("sidebar-teams", |shell, _, cx| show_teams_section(shell, cx)),
+    ("sidebar-team-menu", |shell, window, cx| {
+        let sidebar = shell.read(cx).sidebar().clone();
+        sidebar.update(cx, |sidebar, cx| sidebar.open_team_menu(TEAM, window, cx));
+    }),
+    ("sidebar-team-menu-closed", |shell, _, cx| {
+        let sidebar = shell.read(cx).sidebar().clone();
+        sidebar.update(cx, Sidebar::close_team_menu);
+        show_chats_section(shell, cx);
+    }),
+    ("teams-page-create-menu", |shell, _, cx| {
+        with_teams_page(shell, cx, teams_ui::teams_page::TeamsPage::open_create_menu);
+    }),
+    ("teams-page-row-menu", |shell, window, cx| {
+        with_teams_page(shell, cx, |page, cx| {
+            page.set_filter(teams_ui::teams_page::Filter::All, cx);
+            page.open_menu(TEAM, window, cx);
+        });
+    }),
+    ("teams-page-owned", |shell, _, cx| {
+        with_teams_page(shell, cx, |page, cx| {
+            page.close_menu(cx);
+            page.set_filter(teams_ui::teams_page::Filter::Owned, cx);
+        });
+    }),
+    ("teams-page-invites", |shell, _, cx| {
+        with_teams_page(shell, cx, |page, cx| {
+            page.set_filter(teams_ui::teams_page::Filter::All, cx);
+            page.show_tab(teams_ui::teams_page::PageTab::PendingInvites, cx);
+        });
+    }),
+    ("teams-page-analytics", |shell, _, cx| {
+        with_teams_page(shell, cx, |page, cx| {
+            page.show_tab(teams_ui::teams_page::PageTab::Analytics, cx);
+        });
+    }),
+    ("create-team", |shell, window, cx| {
+        with_teams_page(shell, cx, |page, cx| {
+            page.show_tab(teams_ui::teams_page::PageTab::Teams, cx);
+        });
+        shell.update(cx, |shell, cx| shell.open_create_team(window, cx));
+    }),
+    ("create-team-filled", |shell, window, cx| {
+        with_team_dialog::<teams_ui::team_dialogs::CreateTeamDialog>(shell, cx, |dialog, cx| {
+            dialog.fill(
+                "Release planning",
+                "Dates and owners for the next release",
+                "Planning",
+                window,
+                cx,
+            );
+        });
+    }),
+    ("create-team-kind", |shell, _, cx| {
+        with_team_dialog::<teams_ui::team_dialogs::CreateTeamDialog>(
+            shell,
+            cx,
+            teams_ui::team_dialogs::CreateTeamDialog::show_kind,
+        );
+    }),
+    ("create-team-failed", |shell, _, cx| {
+        with_team_dialog::<teams_ui::team_dialogs::CreateTeamDialog>(shell, cx, |dialog, cx| {
+            dialog.pick_kind(true, cx);
+            dialog.create(cx);
+        });
+    }),
+    ("add-members", |shell, window, cx| {
+        shell.update(cx, |shell, cx| {
+            let team = shell.teams().read(cx).teams().and_then(|teams| teams.first().cloned());
+            if let Some(team) = team {
+                shell.team_chosen(team, teams_ui::team_menu::TeamChoice::AddMember, window, cx);
+            }
+        });
+    }),
+    ("add-members-found", |shell, _, cx| {
+        with_team_dialog::<teams_ui::team_dialogs::AddMembersDialog>(shell, cx, |dialog, cx| {
+            dialog.search("lab".to_owned(), cx);
+        });
+    }),
+    ("confirm-delete", |shell, window, cx| {
+        shell.update(cx, |shell, cx| {
+            let team = shell.teams().read(cx).teams().and_then(|teams| teams.first().cloned());
+            if let Some(team) = team {
+                shell.team_chosen(team, teams_ui::team_menu::TeamChoice::Delete, window, cx);
+            }
+        });
+    }),
+    ("confirm-archive", |shell, window, cx| {
+        shell.update(cx, |shell, cx| {
+            let team = shell.teams().read(cx).teams().and_then(|teams| teams.first().cloned());
+            if let Some(team) = team {
+                shell.team_chosen(team, teams_ui::team_menu::TeamChoice::Archive, window, cx);
+            }
+        });
+    }),
+    ("manage-channels", |shell, window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.close_team_dialog(cx);
+            shell.open_manage_team(TEAM.to_owned(), teams_ui::manage_team::ManageTab::Channels, window, cx);
+        });
+    }),
+    ("manage-members", |shell, _, cx| {
+        with_manage_team(shell, cx, |page, cx| {
+            page.show_tab(teams_ui::manage_team::ManageTab::Members, cx);
+        });
+    }),
+    ("manage-settings", |shell, _, cx| {
+        with_manage_team(shell, cx, |page, cx| {
+            page.show_tab(teams_ui::manage_team::ManageTab::Settings, cx);
+        });
+    }),
+    ("manage-analytics", |shell, _, cx| {
+        with_manage_team(shell, cx, |page, cx| {
+            page.show_tab(teams_ui::manage_team::ManageTab::Analytics, cx);
+        });
+    }),
+    ("manage-tags", |shell, _, cx| {
+        with_manage_team(shell, cx, |page, cx| {
+            page.show_tab(teams_ui::manage_team::ManageTab::Tags, cx);
+        });
+    }),
+    ("join-team", |shell, window, cx| {
+        shell.update(cx, |shell, cx| shell.open_join_team(window, cx));
+    }),
+    ("teams-page-back", |shell, window, cx| {
+        shell.update(cx, |shell, cx| shell.open_teams_page(window, cx));
     }),
     // the title bar's search: its suggestions as "lab" is typed, its go-to mode, its results
     ("search-suggestions", |shell, window, cx| {
@@ -304,6 +436,29 @@ const STEPS: [Step; 84] = [
     }),
     ("channel-dialog-dark-closed", |shell, _, cx| {
         with_channel_dialog(shell, cx, teams_ui::channel_dialog::ChannelDialog::close_now);
+    }),
+    ("teams-page-dark", |shell, window, cx| {
+        shell.update(cx, |shell, cx| shell.open_teams_page(window, cx));
+    }),
+    ("teams-page-dark-row-menu", |shell, window, cx| {
+        with_teams_page(shell, cx, |page, cx| page.open_menu(TEAM, window, cx));
+    }),
+    ("manage-settings-dark", |shell, window, cx| {
+        with_teams_page(shell, cx, teams_ui::teams_page::TeamsPage::close_menu);
+        shell.update(cx, |shell, cx| {
+            shell.open_manage_team(TEAM.to_owned(), teams_ui::manage_team::ManageTab::Settings, window, cx);
+        });
+    }),
+    ("sidebar-teams-dark", |shell, _, cx| show_teams_section(shell, cx)),
+    ("create-team-dark", |shell, window, cx| {
+        shell.update(cx, |shell, cx| shell.open_create_team(window, cx));
+    }),
+    ("create-team-dark-closed", |shell, _, cx| {
+        with_team_dialog::<teams_ui::team_dialogs::CreateTeamDialog>(
+            shell,
+            cx,
+            teams_ui::team_dialogs::CreateTeamDialog::cancel,
+        );
     }),
     ("chat-dark", |shell, window, cx| {
         shell.update(cx, |shell, cx| shell.show_chats(window, cx));
@@ -864,6 +1019,68 @@ fn hover_last(shell: &Entity<Shell>, own: bool, cx: &mut App) {
         chat.select(None, cx);
         chat.hover(message, cx);
     });
+}
+
+/// Folds the favourites and the chats, so the teams' section shows.
+fn show_teams_section(shell: &Entity<Shell>, cx: &mut App) {
+    let sidebar = shell.read(cx).sidebar().clone();
+    sidebar.update(cx, |sidebar, cx| {
+        for section in [teams_ui::sidebar::Section::Favorites, teams_ui::sidebar::Section::Chats] {
+            if sidebar.is_open(section) {
+                sidebar.toggle(section, cx);
+            }
+        }
+    });
+}
+
+/// Unfolds them again.
+fn show_chats_section(shell: &Entity<Shell>, cx: &mut App) {
+    let sidebar = shell.read(cx).sidebar().clone();
+    sidebar.update(cx, |sidebar, cx| {
+        for section in [teams_ui::sidebar::Section::Favorites, teams_ui::sidebar::Section::Chats] {
+            if !sidebar.is_open(section) {
+                sidebar.toggle(section, cx);
+            }
+        }
+    });
+}
+
+/// `act` on "Your teams and channels", once it was opened.
+fn with_teams_page(
+    shell: &Entity<Shell>,
+    cx: &mut App,
+    act: impl FnOnce(&mut teams_ui::teams_page::TeamsPage, &mut gpui::Context<teams_ui::teams_page::TeamsPage>),
+) {
+    if let Some(page) = shell.read(cx).teams_page().cloned() {
+        page.update(cx, act);
+    }
+}
+
+/// `act` on Manage team, while it is shown.
+fn with_manage_team(
+    shell: &Entity<Shell>,
+    cx: &mut App,
+    act: impl FnOnce(&mut teams_ui::manage_team::ManageTeam, &mut gpui::Context<teams_ui::manage_team::ManageTeam>),
+) {
+    if let Some(page) = shell.read(cx).manage_team().cloned() {
+        page.update(cx, act);
+    }
+}
+
+/// `act` on the team page's dialog `D`, while it is the one open.
+fn with_team_dialog<D: gpui::Render>(
+    shell: &Entity<Shell>,
+    cx: &mut App,
+    act: impl FnOnce(&mut D, &mut gpui::Context<D>),
+) {
+    let dialog = shell
+        .read(cx)
+        .team_dialog()
+        .cloned()
+        .and_then(|dialog| dialog.downcast::<D>().ok());
+    if let Some(dialog) = dialog {
+        dialog.update(cx, act);
+    }
 }
 
 /// Opens the mock's team's "Create a channel" dialog.

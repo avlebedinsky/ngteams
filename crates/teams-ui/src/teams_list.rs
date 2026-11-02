@@ -15,20 +15,23 @@
 //! What the list shows is traced (`teams-list shown`: the channels' ids in order, each `general` or `channel`, never a
 //! name).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AsyncApp, Context, ElementId, EventEmitter, InteractiveElement as _, IntoElement,
-    ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity,
-    div, px, rgb,
+    AnyElement, App, AsyncApp, Context, ElementId, EventEmitter, Image, ImageFormat, InteractiveElement as _,
+    IntoElement, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
+    WeakEntity, div, px, rgb,
 };
 use teams_core::EngineError;
+use teams_proto::{PastedFormat, TeamPicture};
 use teams_store::{ChannelKind, Team};
 
 use crate::bridge::Core;
 use crate::icons::Glyph;
 use crate::models::Models;
+use crate::team_menu::TeamChoice;
 use crate::theme::Palette;
 use crate::trace::{TraceLine, ViewTrace};
 
@@ -50,6 +53,12 @@ pub enum TeamsListEvent {
     Opened(ChannelChosen),
     /// A team's "Add channel" was chosen.
     AddChannel(Team),
+    /// Another entry of a team's "..." menu was chosen.
+    Chosen(Team, TeamChoice),
+    /// "See all your teams".
+    SeeAllTeams,
+    /// A team's "See all channels".
+    SeeAllChannels(String),
 }
 
 /// A channel chosen, with the names its header shows.
@@ -79,6 +88,9 @@ pub struct TeamsList {
     traced: Option<Vec<(String, bool)>>,
     /// The models' catch-ups the list has asked again after.
     catch_ups: u64,
+    /// The teams' pictures as read, by team; a team asked for and not read has `None`.
+    pictures: HashMap<String, Option<Arc<Image>>>,
+    picture_reads: Vec<Task<()>>,
     _observing: [Subscription; 2],
 }
 
@@ -121,6 +133,8 @@ impl TeamsList {
             loads: 0,
             traced: None,
             catch_ups,
+            pictures: HashMap::new(),
+            picture_reads: Vec::new(),
             _observing: [observing, caught_up],
         };
         list.reload(cx);
@@ -190,6 +204,92 @@ impl TeamsList {
         }
     }
 
+    /// Tells the shell an entry of the team `id`'s "..." menu was chosen.
+    pub fn choose(&mut self, id: &str, choice: TeamChoice, cx: &mut Context<Self>) {
+        if choice == TeamChoice::AddChannel {
+            self.add_channel(id, cx);
+        } else if let Some(team) = self.teams.iter().flatten().find(|team| team.id == id) {
+            cx.emit(TeamsListEvent::Chosen(team.clone(), choice));
+        }
+    }
+
+    /// Tells the shell "See all your teams" was chosen.
+    pub fn see_all_teams(&mut self, cx: &mut Context<Self>) {
+        cx.emit(TeamsListEvent::SeeAllTeams);
+    }
+
+    /// Tells the shell a team's "See all channels" was chosen.
+    pub fn see_all_channels(&mut self, id: &str, cx: &mut Context<Self>) {
+        cx.emit(TeamsListEvent::SeeAllChannels(id.to_owned()));
+    }
+
+    /// A team's face: its picture once read, its initials on a colour of its own until then. `round` as on the teams page,
+    /// square as in the sidebar.
+    #[must_use]
+    pub fn avatar(&self, team: &Team, size: f32, round: bool, palette: Palette) -> AnyElement {
+        let face = div().size(px(size)).flex_none().overflow_hidden();
+        let face = if round { face.rounded_full() } else { face.rounded_sm() };
+        if let Some(Some(picture)) = self.pictures.get(&team.id) {
+            return face
+                .child(gpui::img(Arc::clone(picture)).size_full())
+                .into_any_element();
+        }
+        face.flex()
+            .items_center()
+            .justify_center()
+            .text_size(px(size * 0.36))
+            .bg(rgb(team_colour(&team.name)))
+            .text_color(rgb(palette.on_brand))
+            .child(initials(&team.name))
+            .into_any_element()
+    }
+
+    /// A team's picture came, when it did.
+    fn picture_read(&mut self, team: String, picture: Option<Arc<Image>>, cx: &mut Context<Self>) {
+        if picture.is_some() {
+            self.pictures.insert(team, picture);
+            cx.notify();
+        }
+    }
+
+    /// Reads the pictures of the teams it hasn't asked for yet.
+    fn read_pictures(&mut self, cx: &mut Context<Self>) {
+        let own = self.core.me().strip_prefix("8:orgid:").unwrap_or_default().to_owned();
+        if own.is_empty() {
+            return;
+        }
+        let wanted: Vec<Team> = self
+            .teams
+            .iter()
+            .flatten()
+            .filter(|team| team.group_id.is_some() && !self.pictures.contains_key(&team.id))
+            .cloned()
+            .collect();
+        for team in wanted {
+            self.pictures.insert(team.id.clone(), None);
+            let ask = TeamPicture {
+                own: own.clone(),
+                group: team.group_id.clone().unwrap_or_default(),
+                name: team.name.clone(),
+                etag: team.about.picture_etag.clone().unwrap_or_default(),
+            };
+            let reply = self.core.team_picture(ask);
+            let read = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                let picture = reply.await.ok().flatten().map(|picture| {
+                    let format = match picture.format {
+                        PastedFormat::Png => ImageFormat::Png,
+                        PastedFormat::Jpeg => ImageFormat::Jpeg,
+                        PastedFormat::Gif => ImageFormat::Gif,
+                        PastedFormat::Webp => ImageFormat::Webp,
+                    };
+                    Arc::new(Image::from_bytes(format, picture.bytes.clone()))
+                });
+                let _ = this.update(cx, |list, cx| list.picture_read(team.id, picture, cx));
+            });
+            self.picture_reads.push(read);
+        }
+    }
+
     /// Reads the teams from the store again (or once the running load ends); the engine reads them from the service
     /// when they are missing or old.
     pub fn reload(&mut self, cx: &mut Context<Self>) {
@@ -213,6 +313,7 @@ impl TeamsList {
         if let Ok(teams) = teams {
             self.teams = teams;
             self.trace_channels();
+            self.read_pictures(cx);
         }
         cx.notify();
         if self.dirty {
@@ -290,4 +391,30 @@ impl TeamsList {
             })
             .into_any_element()
     }
+}
+
+/// A team's initials as the service draws them: the first letters of its first two words, or its first letter.
+#[must_use]
+pub fn initials(name: &str) -> String {
+    name.split_whitespace()
+        .filter_map(|word| word.chars().find(|c| c.is_alphanumeric()))
+        .take(2)
+        .flat_map(char::to_uppercase)
+        .collect()
+}
+
+/// The colour of a team's initials: one of the service's by its name, the same for a name each time.
+fn team_colour(name: &str) -> u32 {
+    const COLOURS: [u32; 8] = [
+        0x0020_8c5c,
+        0x0014_8a8f,
+        0x0077_4dff,
+        0x00e6_1a3a,
+        0x0000_6fe6,
+        0x00d6_10a9,
+        0x0066_6666,
+        0x00c8_5a00,
+    ];
+    let sum: usize = name.bytes().map(usize::from).sum();
+    COLOURS[sum % COLOURS.len()]
 }

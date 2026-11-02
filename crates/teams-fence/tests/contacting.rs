@@ -1353,3 +1353,135 @@ fn the_provisioning_service_is_a_contacting_service() {
         Contact::None
     );
 }
+
+const MT: &str = "https://teams.cloud.microsoft/api/mt/part/amer-03/beta/teams";
+const FABRIC: &str = "https://teams.cloud.microsoft/fabric/amer/templates/api";
+const CHAT: &str = "https://teams.cloud.microsoft/api/chatsvc/amer/v1";
+const CSA: &str = "https://teams.cloud.microsoft/api/csa/amer/api/v1/teams";
+const LAB_MEMBER: &str = "8:orgid:00000000-0000-4000-8000-00000000000b";
+
+fn new_team_body(access: u64, tenant_wide: bool) -> String {
+    format!(
+        r#"{{"accessType":{access},"description":"","displayName":"a","displayNamePrefix":"","displayNameSuffix":"","isTenantWide":{tenant_wide},"sensitivityLabelId":null,"topicThreadTopic":"b","validationRequired":false}}"#
+    )
+}
+
+#[test]
+fn a_new_private_team_names_nobody_and_a_public_one_has_nobody_to_judge() {
+    let url = format!("{MT}/create");
+    assert_eq!(
+        verdict("POST", &url, Some(new_team_body(1, false).as_bytes())),
+        Contact::Write(Target::new(WriteKind::TeamCreate, Scope::New))
+    );
+    for body in [new_team_body(3, false), new_team_body(1, true)] {
+        assert_eq!(
+            verdict("POST", &url, Some(body.as_bytes())),
+            Contact::Write(Target::new(WriteKind::OpenTeamCreate, Scope::New))
+        );
+    }
+    assert_eq!(
+        verdict("POST", &url, Some(br#"{"displayName":"a","users":["x"]}"#)),
+        Contact::Unreadable
+    );
+    assert_eq!(verdict("POST", &url, None), Contact::Unreadable);
+}
+
+#[test]
+fn what_changes_a_team_is_a_write_on_it() {
+    let team_change = on_team(WriteKind::TeamChange, TEAM);
+    for (method, url) in [
+        ("PATCH", format!("{MT}/{TEAM}")),
+        ("DELETE", format!("{MT}/{TEAM}/delete")),
+        ("PUT", format!("{MT}/{TEAM}/joinCode")),
+        ("DELETE", format!("{MT}/{TEAM}/joinCode")),
+        ("PUT", format!("{CSA}/{TEAM}/tagSettings")),
+        ("PATCH", format!("{CSA}/{TEAM}/tags/tag1")),
+        ("DELETE", format!("{CSA}/{TEAM}/tags/tag1")),
+        (
+            "PUT",
+            format!("{CHAT}/threads/{TEAM}/properties?name=spaceAdminSettings"),
+        ),
+    ] {
+        assert_eq!(verdict(method, &url, Some(b"{}")), team_change, "{method} {url}");
+    }
+    for verb in ["archive", "unarchive"] {
+        assert_eq!(
+            verdict("POST", &format!("{FABRIC}/groups/{GROUP_ID}/{verb}"), None),
+            on_team(WriteKind::TeamChange, GROUP_ID)
+        );
+    }
+}
+
+#[test]
+fn people_added_to_a_team_are_named_on_the_write() {
+    let body = format!(r#"{{"users":[{{"mri":"{LAB_MEMBER}","role":0}}],"groupId":"{GROUP_ID}"}}"#);
+    let url = format!("{MT}/{TEAM}/bulkUpdateRoledMembers?allowAsyncAddition=true");
+    assert_eq!(
+        verdict("PUT", &url, Some(body.as_bytes())),
+        Contact::Write(
+            Target::new(WriteKind::MemberChange, Scope::Team { id: TEAM.to_owned() })
+                .with_added([Mri::new(LAB_MEMBER)])
+        )
+    );
+    assert_eq!(
+        verdict("PUT", &url, Some(br#"{"users":[{"mri":"x","email":"y"}]}"#)),
+        Contact::Unreadable
+    );
+    let tag = format!(r#"{{"tagName":"a","tagDescription":"b","memberIds":["{LAB_MEMBER}"]}}"#);
+    assert_eq!(
+        verdict("POST", &format!("{CSA}/{TEAM}/tags"), Some(tag.as_bytes())),
+        Contact::Write(
+            Target::new(WriteKind::TeamChange, Scope::Team { id: TEAM.to_owned() }).with_added([Mri::new(LAB_MEMBER)])
+        )
+    );
+}
+
+#[test]
+fn someone_on_a_team_changed_or_gone_is_a_member_change() {
+    let body = format!(r#"{{"userMri":"{LAB_MEMBER}","updateType":"Removed","groupId":"{GROUP_ID}"}}"#);
+    assert_eq!(
+        verdict("PUT", &format!("{MT}/{TEAM}/members"), Some(body.as_bytes())),
+        on_team(WriteKind::MemberChange, TEAM)
+    );
+    assert_eq!(
+        verdict("POST", &format!("{MT}/joinRequest/{GROUP_ID}"), None),
+        on_team(WriteKind::MemberChange, GROUP_ID)
+    );
+}
+
+#[test]
+fn the_accounts_own_view_of_a_team_reaches_nobody() {
+    for (method, url, body) in [
+        ("PUT", format!("{FABRIC}/team/{TEAM}/hide"), None),
+        (
+            "PUT",
+            format!("{FABRIC}/conversations/show"),
+            Some(format!(r#"{{"teamIds":["{TEAM}"],"channelIds":[]}}"#)),
+        ),
+        (
+            "PUT",
+            format!("{CHAT}/threads/{TEAM}/members/{LAB_MEMBER}"),
+            Some(r#"{"interest":"Interested"}"#.to_owned()),
+        ),
+        (
+            "PUT",
+            format!("{CHAT}/users/ME/conversations/{TEAM}/properties?name=isGeneralChannelFavorite"),
+            Some(r#"{"isGeneralChannelFavorite":"true"}"#.to_owned()),
+        ),
+    ] {
+        assert_eq!(
+            verdict(method, &url, body.as_deref().map(str::as_bytes)),
+            Contact::None,
+            "{url}"
+        );
+    }
+    // anything else on a channel's membership stays what it was: not the account's own view
+    assert_ne!(
+        verdict(
+            "PUT",
+            &format!("{CHAT}/threads/{TEAM}/members/{LAB_MEMBER}"),
+            Some(br#"{"interest":"Interested","role":"Admin"}"#)
+        ),
+        Contact::None
+    );
+}

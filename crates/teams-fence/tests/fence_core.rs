@@ -337,9 +337,56 @@ async fn a_new_chat_is_judged_by_its_proposed_members_without_a_fetch() {
 }
 
 #[tokio::test]
+async fn a_new_private_team_names_nobody_and_a_team_open_to_the_organization_is_denied() {
+    let lab = try_lab().unwrap();
+    let unused = Fixed::complete(&[LAB_A, LAB_B]);
+    let private = lab
+        .fence
+        .check(Target::new(WriteKind::TeamCreate, Scope::New), &unused)
+        .await;
+    assert!(private.is_ok(), "{private:?}");
+    let open = lab
+        .fence
+        .check(Target::new(WriteKind::OpenTeamCreate, Scope::New), &unused)
+        .await
+        .unwrap_err();
+    assert_eq!(open.reason(), &DenyReason::NotCreatable);
+    assert_eq!(unused.fetches(), 0, "a new team has nobody to read");
+}
+
+#[tokio::test]
+async fn a_team_with_anyone_but_lab_accounts_on_it_is_denied_every_write() {
+    let lab = try_lab().unwrap();
+    let team = Scope::Team {
+        id: "19:team0001@thread.tacv2".to_owned(),
+    };
+    // a team of lab accounts and one of Teams' own apps, as every new team has
+    let with_app = Fixed::complete(&[LAB_A, "28:00000000-0000-4000-8000-0000000000ee"]);
+    for kind in [WriteKind::TeamChange, WriteKind::MemberChange, WriteKind::ChannelChange] {
+        let denied = lab
+            .fence
+            .check(Target::new(kind, team.clone()), &with_app)
+            .await
+            .unwrap_err();
+        assert_eq!(denied.reason(), &DenyReason::Outsiders { count: 1 }, "{kind:?}");
+    }
+    let lab_only = Fixed::complete(&[LAB_A, LAB_B]);
+    let verdict = lab
+        .fence
+        .check(Target::new(WriteKind::TeamChange, team), &lab_only)
+        .await;
+    assert!(verdict.is_ok(), "{verdict:?}");
+}
+
+#[tokio::test]
 async fn only_a_kind_that_creates_a_target_may_name_a_new_one() {
     let lab = try_lab().unwrap();
-    let creating = [WriteKind::ChatCreate, WriteKind::Call, WriteKind::Meeting];
+    let creating = [
+        WriteKind::ChatCreate,
+        WriteKind::Call,
+        WriteKind::Meeting,
+        WriteKind::TeamCreate,
+    ];
     for kind in fenced_kinds() {
         let unused = Fixed::complete(&[LAB_A, LAB_B]);
         let target = Target::new(kind, Scope::New).with_added(mris(&[LAB_A, LAB_B]));

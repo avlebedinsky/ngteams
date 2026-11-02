@@ -153,7 +153,13 @@ fn chat_in_focus(window: WindowHandle<KitRoot>, key: &str, cx: &mut App) -> Opti
             }
             match shell.main() {
                 Main::Chat(id) | Main::Channel(id) => Some(id.clone()),
-                Main::Nothing | Main::Settings | Main::Calendar | Main::Search => None,
+                Main::Nothing
+                | Main::Settings
+                | Main::Calendar
+                | Main::Search
+                | Main::TeamsPage
+                | Main::ManageTeam(_)
+                | Main::JoinTeam => None,
             }
         })
         .ok()

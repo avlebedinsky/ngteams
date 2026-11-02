@@ -22,9 +22,10 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use teams_proto::{ChannelType, Client, Credentials, CsaAnswerError, CsaTeams, HttpError, HttpTransport};
-use teams_store::{Applied, ChannelKind, Store, StoreError, Team, TeamChannel};
+use teams_store::{Applied, ChannelKind, Store, StoreError, Team, TeamAbout, TeamChannel};
 
 use crate::channels::Created;
+use crate::team_admin::{TeamChange, keep_changes};
 use tokio::task::JoinSet;
 use tokio::time::Instant;
 
@@ -82,6 +83,8 @@ pub(crate) struct Teams<C> {
     created: Vec<(Created, Instant)>,
     /// A channel was made while a read ran: another read follows it, which may name it.
     read_again: bool,
+    /// What the team pages changed that no read has shown yet, until when it is kept ([`crate::team_admin`]).
+    changes: Vec<(TeamChange, Instant)>,
 }
 
 impl<C: Credentials + 'static> Teams<C> {
@@ -93,7 +96,24 @@ impl<C: Credentials + 'static> Teams<C> {
             retry,
             created: Vec::new(),
             read_again: false,
+            changes: Vec::new(),
         }
+    }
+
+    /// Puts what a team's write changed in the stored list, and reads the list again: the service's own list follows it
+    /// late, so the change is kept against reads that don't show it ([`CREATED_KEPT`]). Whether the stored list changed.
+    pub(crate) fn note_change(&mut self, store: &mut Store, change: Option<TeamChange>) -> Result<bool, StoreError> {
+        let Some(change) = change else {
+            self.read_now();
+            return Ok(false);
+        };
+        self.changes.push((change, Instant::now() + CREATED_KEPT));
+        let mut teams = store.teams()?;
+        keep_changes(&mut self.changes, &mut teams);
+        let read_at = store.teams_read_at()?.unwrap_or_else(now_ms);
+        let applied = store.replace_teams(&teams, read_at)?;
+        self.read_now();
+        Ok(applied != Applied::Ignored)
     }
 
     /// Stores a channel just made in its team's list, and reads the list again: the service's own list may not name it
@@ -170,6 +190,7 @@ impl<C: Credentials + 'static> Teams<C> {
                 let now = now_ms();
                 let mut listed = read.teams;
                 keep_created(&mut self.created, &mut listed);
+                keep_changes(&mut self.changes, &mut listed);
                 let teams = store.replace_teams(&listed, now)?;
                 let favorites = match &read.favorites {
                     Some(favorites) => store.replace_favorites(favorites, now)?,
@@ -245,6 +266,18 @@ async fn read<C: Credentials>(client: &Client<HttpTransport<C>>) -> Result<Teams
             owner: team.owner,
             can_add_channel: team.can_add_channel,
             can_add_private_channel: team.can_add_private_channel,
+            about: TeamAbout {
+                tenant: team.about.tenant,
+                description: team.about.description,
+                public: team.about.public,
+                people: team.about.people,
+                guest: team.about.guest,
+                dynamic_membership: team.about.dynamic_membership,
+                tenant_wide: team.about.tenant_wide,
+                channel_only: team.about.channel_only,
+                hidden: team.about.hidden,
+                picture_etag: team.about.picture_etag,
+            },
             channels: team
                 .channels
                 .into_iter()
@@ -257,6 +290,7 @@ async fn read<C: Credentials>(client: &Client<HttpTransport<C>>) -> Result<Teams
                         ChannelType::Shared => ChannelKind::Shared,
                         ChannelType::Standard | ChannelType::Unknown => ChannelKind::Standard,
                     },
+                    shown: channel.shown,
                 })
                 .collect(),
         })

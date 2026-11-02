@@ -113,8 +113,9 @@ use teams_call::{CallId, Placement, RemoteEnd};
 use teams_fence::Mri;
 use teams_proto::chat::{self, MessageText};
 use teams_proto::{
-    CalendarEvent, Client, Credentials, EndpointRegistrar, EventAttendee, FileRange, FullEvent, HttpError,
-    HttpTransport, ManualAvailability, RegisteredEndpoint, TeamPerson, Transport,
+    AnalyticsPeriod, CalendarEvent, Client, Credentials, EndpointRegistrar, EventAttendee, FileRange, FullEvent,
+    HttpError, HttpTransport, JoinableTeam, ManagedChannel, ManualAvailability, OwnTeamView, PendingInvite,
+    RegisteredEndpoint, TagsRead, TeamAnalytics, TeamPerson, TeamPicture, TeamWrite, Transport,
 };
 use teams_store::{
     Applied, Conversation, Member, Message, MessagePage, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction,
@@ -130,6 +131,7 @@ use tokio::time::{Instant, MissedTickBehavior};
 use crate::calendar::{Calendar, EventWrite, EventWritten, Invitable, MeetingAvailability};
 use crate::channels::{ChannelDraft, ChannelMade, ChannelProblem, Channels, Finished};
 use crate::service_search::{SearchAnswer, SearchScope, ServiceSearch};
+use crate::team_admin::{TeamAsk, TeamChange, TeamMember, TeamWritten};
 
 /// How many people the attendee picker suggests at most.
 const INVITABLE: usize = 8;
@@ -472,6 +474,9 @@ pub enum EngineError {
     /// A team's channel wasn't made ([`crate::channels`]): `why` is Teams' reason for it.
     #[error("the channel wasn't made: {why:?}")]
     ChannelNotCreated { why: ChannelProblem },
+    /// A team's write didn't go or was refused ([`crate::team_admin`]): `code` is what Teams called it, when it did.
+    #[error("the team wasn't changed: {code:?}")]
+    TeamNotChanged { code: Option<String> },
     /// The service's search couldn't be read, or its answer wasn't in a shape the app reads
     /// ([`crate::service_search`]).
     #[error("the search couldn't be read")]
@@ -507,6 +512,7 @@ impl EngineError {
             Self::CalendarUnread => "calendar unread",
             Self::EventNotSaved { .. } => "event not saved",
             Self::ChannelNotCreated { .. } => "channel not created",
+            Self::TeamNotChanged { .. } => "team not changed",
             Self::SearchFailed => "search failed",
             Self::Call(_) => "call",
         }
@@ -648,6 +654,8 @@ enum Request {
         keyword: String,
         reply: Responder<Vec<TeamPerson>>,
     },
+    /// What the team pages ask ([`crate::team_admin`]).
+    Team(Box<TeamAsk>),
     MeetingAvailability {
         attendees: Vec<EventAttendee>,
         start_ms: i64,
@@ -998,6 +1006,92 @@ impl EngineRequests {
             name,
             reply,
         })
+    }
+
+    /// Sends a write managing a team through the outbox, under the fence, and puts `change` in the stored teams once it
+    /// went ([`crate::team_admin`]); [`EngineError::TeamNotChanged`] when it didn't.
+    pub fn team_write(&self, write: TeamWrite, change: Option<TeamChange>) -> Reply<TeamWritten> {
+        self.ask(|reply| Request::Team(Box::new(TeamAsk::Write { write, change, reply })))
+    }
+
+    /// Changes the account's own view of a team (its channels hidden or shown), which reaches nobody, and puts `change`
+    /// in the stored teams once it did ([`crate::team_admin`]).
+    pub fn own_team_view(&self, requests: Vec<OwnTeamView>, change: Option<TeamChange>) -> Reply<()> {
+        self.ask(|reply| {
+            Request::Team(Box::new(TeamAsk::OwnView {
+                requests,
+                change,
+                reply,
+            }))
+        })
+    }
+
+    /// A team's people, owners first, read now.
+    pub fn team_roster(&self, team: impl Into<String>) -> Reply<Vec<TeamMember>> {
+        let team = team.into();
+        self.ask(|reply| Request::Team(Box::new(TeamAsk::Roster { team, reply })))
+    }
+
+    /// A team's settings as the service keeps them, read now.
+    pub fn team_settings(&self, team: impl Into<String>) -> Reply<Option<String>> {
+        let team = team.into();
+        self.ask(|reply| Request::Team(Box::new(TeamAsk::Settings { team, reply })))
+    }
+
+    /// A team's tags and who may change them, read now.
+    pub fn team_tags(&self, team: impl Into<String>) -> Reply<TagsRead> {
+        let team = team.into();
+        self.ask(|reply| Request::Team(Box::new(TeamAsk::Tags { team, reply })))
+    }
+
+    /// A team's code, when it has one, read now.
+    pub fn team_code(&self, team: impl Into<String>) -> Reply<Option<String>> {
+        let team = team.into();
+        self.ask(|reply| Request::Team(Box::new(TeamAsk::Code { team, reply })))
+    }
+
+    /// A team's channels as Manage team lists them, read now.
+    pub fn team_channels(&self, group: impl Into<String>) -> Reply<Vec<ManagedChannel>> {
+        let group = group.into();
+        self.ask(|reply| Request::Team(Box::new(TeamAsk::Channels { group, reply })))
+    }
+
+    /// The invitations waiting for the account, read now.
+    pub fn pending_invites(&self) -> Reply<Vec<PendingInvite>> {
+        self.ask(|reply| Request::Team(Box::new(TeamAsk::Invites { reply })))
+    }
+
+    /// How a team did over `period`, read now.
+    pub fn team_analytics(&self, group: impl Into<String>, period: AnalyticsPeriod) -> Reply<Option<TeamAnalytics>> {
+        let group = group.into();
+        self.ask(|reply| Request::Team(Box::new(TeamAsk::Analytics { group, period, reply })))
+    }
+
+    /// How the account's teams did over `period`, read now.
+    pub fn all_teams_analytics(&self, period: AnalyticsPeriod) -> Reply<Vec<TeamAnalytics>> {
+        self.ask(|reply| Request::Team(Box::new(TeamAsk::AllAnalytics { period, reply })))
+    }
+
+    /// The teams "Join a team" suggests, or finds for `keywords`, read now.
+    pub fn joinable_teams(&self, keywords: Option<String>) -> Reply<Vec<JoinableTeam>> {
+        self.ask(|reply| Request::Team(Box::new(TeamAsk::Joinable { keywords, reply })))
+    }
+
+    /// The people `keyword` finds in the organization, to add to a team, read now.
+    pub fn addable_people(&self, keyword: impl Into<String>) -> Reply<Vec<TeamPerson>> {
+        let keyword = keyword.into();
+        self.ask(|reply| Request::Team(Box::new(TeamAsk::Addable { keyword, reply })))
+    }
+
+    /// The people asking to join a team, read now.
+    pub fn team_join_requests(&self, group: impl Into<String>) -> Reply<Vec<TeamMember>> {
+        let group = group.into();
+        self.ask(|reply| Request::Team(Box::new(TeamAsk::JoinRequests { group, reply })))
+    }
+
+    /// A team's picture, read now: the service makes one for a team that set none.
+    pub fn team_picture(&self, team: TeamPicture) -> Reply<Option<PictureBytes>> {
+        self.ask(|reply| Request::Team(Box::new(TeamAsk::Picture { team, reply })))
     }
 
     /// The people on the team `team` that `keyword` finds, read now: what a private channel's member step suggests
@@ -1599,6 +1693,7 @@ where
                 reply,
             } => self.channels.thread(team, team_group, channel_group, name, reply),
             Request::TeamPeople { team, keyword, reply } => self.channels.people(team, keyword, reply),
+            Request::Team(ask) => self.channels.team_ask(*ask),
             Request::SearchService { query, scope, reply } => self.service_search.search(query, scope, reply),
             Request::MeetingAvailability {
                 attendees,
@@ -1676,9 +1771,22 @@ where
     /// A channel's write or wait is over (`None`: its task was lost, the asker told by its reply's end): a channel made
     /// is stored and told before the asker hears of it, so it can open the channel at once.
     fn on_channel(&mut self, finished: Option<Finished>) {
-        let Some(Finished { created, reply }) = finished else {
+        let Some(Finished {
+            created,
+            team,
+            reread,
+            reply,
+        }) = finished
+        else {
             return;
         };
+        if reread {
+            match self.teams.note_change(&mut self.store, team.map(|change| *change)) {
+                Ok(true) => self.emit(Event::Teams),
+                Ok(false) => {}
+                Err(error) => self.failed("storing the teams", error),
+            }
+        }
         if let Some(created) = created {
             match self.teams.note_created(&mut self.store, created) {
                 Ok(true) => self.emit(Event::Teams),

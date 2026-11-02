@@ -10,6 +10,7 @@ mod calendar;
 mod call;
 mod channel;
 mod chat;
+mod team;
 
 pub use availability::{ForceAvailability, ManualAvailability, SetEndpointAvailability};
 pub use calendar::{
@@ -34,6 +35,7 @@ pub use chat::{
     Author, CreateChat, DeleteMessage, EditMessage, Original, ReadReceipt, RemoveReaction, SendMessage, SetReaction,
     Typing,
 };
+pub use team::{MemberUpdate, NewTeam, TeamRole, TeamWrite, team_created, team_error_code};
 
 /// A request others could notice. It names the one [`Target`] it writes to, and it reaches a transport only inside an
 /// [`Authorized`], next to a [`WritePermit`] issued for exactly that target.

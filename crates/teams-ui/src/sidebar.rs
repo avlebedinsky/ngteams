@@ -27,7 +27,6 @@ use teams_store::Team;
 use crate::chat_list::{ChatList, ROW_HEIGHT};
 use crate::icons::{Glyph, icon_button, selected_by};
 use crate::models::Models;
-use crate::shell::menu_row;
 use crate::teams_list::{CHANNEL_HEIGHT, LOADING, NO_TEAMS, TeamsList, UNREADABLE};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
@@ -52,6 +51,8 @@ pub const SEE_MORE_HEIGHT: f32 = 40.0;
 pub const SEE_MORE: &str = "See more";
 /// Its test selector, and the group its chevron shows on hover in.
 const SEE_MORE_SELECTOR: &str = "chats-see-more";
+/// What the link under the teams says, and its test selector.
+pub const SEE_ALL_TEAMS: &str = "See all your teams";
 /// How far past the visible rows the list draws, px.
 const OVERDRAW: f32 = 400.0;
 
@@ -113,6 +114,13 @@ enum Entry {
         channel: usize,
         id: String,
     },
+    /// A team's "See all channels", while some are hidden.
+    SeeAllChannels {
+        index: usize,
+        id: String,
+    },
+    /// "See all your teams", under the teams.
+    SeeAllTeams,
 }
 
 impl Entry {
@@ -126,6 +134,8 @@ impl Entry {
             Self::Channel { id, .. } => (4, id),
             Self::Favorite { id, .. } => (5, id),
             Self::SeeMore => (6, SEE_MORE_SELECTOR),
+            Self::SeeAllChannels { id, .. } => (7, id),
+            Self::SeeAllTeams => (8, SEE_ALL_TEAMS),
         }
     }
 
@@ -135,7 +145,7 @@ impl Entry {
         match self {
             Self::Section(_) | Self::Note(_) => SECTION_HEIGHT,
             Self::Favorite { .. } | Self::Chat { .. } => ROW_HEIGHT,
-            Self::SeeMore => SEE_MORE_HEIGHT,
+            Self::SeeMore | Self::SeeAllChannels { .. } | Self::SeeAllTeams => SEE_MORE_HEIGHT,
             Self::Team { .. } => TEAM_HEIGHT,
             Self::Channel { .. } => CHANNEL_HEIGHT,
         }
@@ -167,6 +177,8 @@ pub struct Sidebar {
     revealed: Option<String>,
     /// The team whose "..." menu is open.
     team_menu: Option<String>,
+    /// The entry of the "..." menu the arrow keys are on.
+    menu_highlight: Option<usize>,
     menu_focus: FocusHandle,
     _observing: [Subscription; 2],
 }
@@ -196,6 +208,7 @@ impl Sidebar {
             folded: HashSet::new(),
             revealed: None,
             team_menu: None,
+            menu_highlight: None,
             menu_focus: cx.focus_handle(),
             _observing: [chats, teamed],
         };
@@ -341,24 +354,38 @@ impl Sidebar {
             match teams.teams() {
                 None if teams.unreadable(cx) => entries.push(Entry::Note(UNREADABLE)),
                 None => entries.push(Entry::Note(LOADING)),
-                Some([]) => entries.push(Entry::Note(NO_TEAMS)),
-                Some(shown) => self.team_entries(shown, &mut entries),
+                Some([]) => {
+                    entries.push(Entry::Note(NO_TEAMS));
+                    entries.push(Entry::SeeAllTeams);
+                }
+                Some(shown) => {
+                    self.team_entries(shown, teams.selected(), &mut entries);
+                    entries.push(Entry::SeeAllTeams);
+                }
             }
         }
         entries
     }
 
-    /// Each team's line, and its channels unless it is folded.
-    fn team_entries(&self, teams: &[Team], entries: &mut Vec<Entry>) {
+    /// Each team's line unless its channels are hidden, as Teams leaves them out, with the channels it shows unless it is
+    /// folded (the one open stays, shown or not) and "See all channels" while some are hidden.
+    fn team_entries(&self, teams: &[Team], selected: Option<&str>, entries: &mut Vec<Entry>) {
         let mut index = 0;
         for (team_index, team) in teams.iter().enumerate() {
-            entries.push(Entry::Team {
-                index: team_index,
-                id: team.id.clone(),
-            });
-            let open = self.team_open(&team.id);
+            let listed = !team.about.hidden
+                || team
+                    .channels
+                    .iter()
+                    .any(|channel| Some(channel.id.as_str()) == selected);
+            if listed {
+                entries.push(Entry::Team {
+                    index: team_index,
+                    id: team.id.clone(),
+                });
+            }
+            let open = listed && self.team_open(&team.id);
             for (channel, shown) in team.channels.iter().enumerate() {
-                if open {
+                if open && (shown.shown || selected == Some(shown.id.as_str())) {
                     entries.push(Entry::Channel {
                         index,
                         team: team_index,
@@ -367,6 +394,12 @@ impl Sidebar {
                     });
                 }
                 index += 1;
+            }
+            if open && team.hidden_channels() > 0 {
+                entries.push(Entry::SeeAllChannels {
+                    index: team_index,
+                    id: team.id.clone(),
+                });
             }
         }
     }
@@ -382,6 +415,8 @@ impl Sidebar {
                 .update(cx, |list, cx| list.render_favorite(index, palette, cx)),
             Entry::Chat { index, .. } => self.list.update(cx, |list, cx| list.render_row(index, palette, cx)),
             Entry::SeeMore => self.see_more_row(palette, cx),
+            Entry::SeeAllChannels { index, id } => Self::see_all_channels_row(index, id, palette, cx),
+            Entry::SeeAllTeams => Self::see_all_teams_row(palette, cx),
             Entry::Note(text) => div()
                 .debug_selector(|| "teams-note".to_owned())
                 .px_3()
@@ -454,40 +489,59 @@ impl Sidebar {
             .into_any_element()
     }
 
-    /// A team's line (its fold mark, its initial and its name), its test selector `team-<index>`.
-    fn team_line(&self, index: usize, id: &str, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let Some(team) = self.teams.read(cx).teams().and_then(|teams| teams.get(index)) else {
-            return div().into_any_element();
-        };
-        let name = if team.archived {
-            format!("{} (archived)", team.name)
-        } else {
-            team.name.clone()
-        };
-        let initial: String = team
-            .name
-            .chars()
-            .find(|c| c.is_alphanumeric())
-            .map(|c| c.to_uppercase().collect())
-            .unwrap_or_default();
-        let badge = div()
-            .size(px(20.0))
-            .flex_none()
+    /// A team's "See all channels", a link in the brand colour under its channels; its test selector
+    /// `see-all-channels-<index>`.
+    fn see_all_channels_row(index: usize, id: String, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id(ElementId::Name(format!("see-all-channels-{id}").into()))
+            .debug_selector(move || format!("see-all-channels-{index}"))
+            .w_full()
+            .h(px(SEE_MORE_HEIGHT))
+            .pl(px(crate::teams_list::CHANNEL_INDENT))
             .flex()
             .items_center()
-            .justify_center()
-            .rounded_sm()
-            .text_xs()
-            .bg(rgb(palette.brand))
-            .text_color(rgb(palette.on_brand))
-            .child(initial);
-        let toggled = id.to_owned();
-        let group = SharedString::from(format!("team-line-{index}"));
-        let more = if team.can_add_channel {
-            self.team_more(index, id, palette, &group, cx)
-        } else {
-            None
+            .text_sm()
+            .text_color(rgb(palette.brand))
+            .cursor_pointer()
+            .hover(move |style| style.bg(rgb(palette.hover)))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.teams.update(cx, |teams, cx| teams.see_all_channels(&id, cx));
+            }))
+            .child("See all channels")
+            .into_any_element()
+    }
+
+    /// "See all your teams", a link in the brand colour under the teams; its test selector `see-all-teams`.
+    fn see_all_teams_row(palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .id("see-all-teams")
+            .debug_selector(|| "see-all-teams".to_owned())
+            .w_full()
+            .h(px(SEE_MORE_HEIGHT))
+            .px_3()
+            .flex()
+            .items_center()
+            .text_sm()
+            .text_color(rgb(palette.brand))
+            .cursor_pointer()
+            .hover(move |style| style.bg(rgb(palette.hover)))
+            .on_click(cx.listener(|this, _, _, cx| this.teams.update(cx, TeamsList::see_all_teams)))
+            .child(SEE_ALL_TEAMS)
+            .into_any_element()
+    }
+
+    /// A team's line (its fold mark, its picture and its name), its test selector `team-<index>`.
+    fn team_line(&self, index: usize, id: &str, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let teams = self.teams.read(cx);
+        let Some(team) = teams.teams().and_then(|listed| listed.get(index)) else {
+            return div().into_any_element();
         };
+        let name = team.name.clone();
+        let badge = teams.avatar(team, 20.0, false, palette);
+        let toggled = id.to_owned();
+        let group = team_line_group(index);
+        let team = team.clone();
+        let more = self.team_more(index, id, &team, palette, cx);
         div()
             .group(group.clone())
             .id(ElementId::Name(format!("team-{id}").into()))
@@ -506,23 +560,22 @@ impl Sidebar {
             .child(chevron(self.team_open(id)))
             .child(badge)
             .child(div().flex_1().min_w_0().truncate().child(name))
-            .children(more)
+            .when(team.archived, |line| {
+                line.child(
+                    div()
+                        .flex_none()
+                        .text_color(rgb(palette.muted_foreground))
+                        .child(Glyph::ARCHIVE.icon().size(px(14.0))),
+                )
+            })
+            .child(more)
             .into_any_element()
     }
 
-    /// A team's "..." and its menu, Teams' entries the app has: "Add channel", for a team that lets the account add one.
-    /// Only for a team that lets the account add one (not an archived one); `None` in the read-only mode.
-    fn team_more(
-        &self,
-        index: usize,
-        id: &str,
-        palette: Palette,
-        group: &SharedString,
-        cx: &mut Context<Self>,
-    ) -> Option<AnyElement> {
-        if self.list.read(cx).read_only() {
-            return None;
-        }
+    /// A team's "..." and its menu ([`crate::team_menu`]), shown while the line is under the pointer or its menu is open.
+    fn team_more(&self, index: usize, id: &str, team: &Team, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let group = team_line_group(index);
+        let read_only = self.list.read(cx).read_only();
         let open = self.team_menu.as_deref() == Some(id);
         let toggled = id.to_owned();
         let button = selected_by(
@@ -538,75 +591,57 @@ impl Sidebar {
                     }
                 })),
         );
-        let added = id.to_owned();
         let menu = open.then(|| {
-            gpui::deferred(
-                gpui::anchored()
-                    .anchor(gpui::Anchor::TopLeft)
-                    .snap_to_window_with_margin(px(8.0))
-                    .child(
-                        div()
-                            .debug_selector(move || format!("team-menu-{index}"))
-                            .track_focus(&self.menu_focus)
-                            .occlude()
-                            .w(px(200.0))
-                            .mt_1()
-                            .p_1()
-                            .flex()
-                            .flex_col()
-                            .rounded_lg()
-                            .border_1()
-                            .border_color(rgb(palette.border))
-                            .bg(rgb(palette.surface))
-                            .shadow_lg()
-                            .text_color(rgb(palette.foreground))
-                            .on_mouse_down_out(cx.listener(|this, _, _, cx| this.close_team_menu(cx)))
-                            .on_key_down(cx.listener({
-                                let added = added.clone();
-                                move |this, event: &KeyDownEvent, _, cx| match event.keystroke.key.as_str() {
-                                    "escape" => {
-                                        cx.stop_propagation();
-                                        this.close_team_menu(cx);
-                                    }
-                                    "enter" | "space" => {
-                                        cx.stop_propagation();
-                                        this.add_channel(&added, cx);
-                                    }
-                                    _ => {}
-                                }
-                            }))
-                            .child(
-                                menu_row(format!("team-add-channel-{index}"), palette)
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        cx.stop_propagation();
-                                        this.add_channel(&added, cx);
-                                    }))
-                                    .child(Glyph::ADD_CHANNEL.icon().size(px(14.0)))
-                                    .child("Add channel"),
-                            ),
-                    ),
+            let weak = cx.entity().downgrade();
+            let (chosen_from, closed, keyed) = (weak.clone(), weak.clone(), weak);
+            let (chosen_team, keyed_team) = (id.to_owned(), id.to_owned());
+            let shown = crate::team_menu::entries(team, read_only);
+            crate::team_menu::Panel {
+                index,
+                team,
+                read_only,
+                highlight: self.menu_highlight,
+                focus: &self.menu_focus,
+                palette,
+                anchor: gpui::Anchor::TopLeft,
+            }
+            .render(
+                move |choice, _, cx| {
+                    let _ = chosen_from.update(cx, |this, cx| this.choose(&chosen_team, choice, cx));
+                },
+                move |_, _, cx| {
+                    let _ = closed.update(cx, Sidebar::close_team_menu);
+                },
+                move |event: &KeyDownEvent, _, cx| {
+                    let _ = keyed.update(cx, |this, cx| {
+                        cx.stop_propagation();
+                        match crate::team_menu::key(event, &shown, &mut this.menu_highlight) {
+                            crate::team_menu::MenuKey::Close => this.close_team_menu(cx),
+                            crate::team_menu::MenuKey::Choose(choice) => this.choose(&keyed_team, choice, cx),
+                            crate::team_menu::MenuKey::Stay => cx.notify(),
+                        }
+                    });
+                },
             )
-            .with_priority(1)
         });
-        Some(
-            div()
-                .id(ElementId::Name(format!("team-more-wrap-{id}").into()))
-                .flex_none()
-                // shown while the line is under the pointer, as Teams' "..." is, and while its menu is open; it takes its
-                // own clicks
-                .when(!open, |more| {
-                    more.invisible().group_hover(group.clone(), gpui::Styled::visible)
-                })
-                .on_click(|_, _, cx| cx.stop_propagation())
-                .child(button)
-                .children(menu)
-                .into_any_element(),
-        )
+        div()
+            .id(ElementId::Name(format!("team-more-wrap-{id}").into()))
+            .flex_none()
+            // shown while the line is under the pointer, as Teams' "..." is, and while its menu is open; it takes its own
+            // clicks
+            .when(!open, |more| {
+                more.invisible().group_hover(group.clone(), gpui::Styled::visible)
+            })
+            .on_click(|_, _, cx| cx.stop_propagation())
+            .child(button)
+            .children(menu)
+            .into_any_element()
     }
 
     /// Opens the team `id`'s "..." menu.
     pub fn open_team_menu(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.team_menu = Some(id.to_owned());
+        self.menu_highlight = None;
         self.menu_focus.focus(window, cx);
         cx.notify();
     }
@@ -617,10 +652,10 @@ impl Sidebar {
         cx.notify();
     }
 
-    /// The menu's "Add channel": the team's dialog.
-    fn add_channel(&mut self, id: &str, cx: &mut Context<Self>) {
+    /// An entry of the menu chosen: the shell acts on it.
+    fn choose(&mut self, id: &str, choice: crate::team_menu::TeamChoice, cx: &mut Context<Self>) {
         self.close_team_menu(cx);
-        self.teams.update(cx, |teams, cx| teams.add_channel(id, cx));
+        self.teams.update(cx, |teams, cx| teams.choose(id, choice, cx));
     }
 }
 
@@ -737,4 +772,9 @@ impl Render for Sidebar {
             .child(header)
             .child(rows)
     }
+}
+
+/// The hover group of a team's line, which shows its "...".
+fn team_line_group(index: usize) -> SharedString {
+    SharedString::from(format!("team-line-{index}"))
 }

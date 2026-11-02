@@ -44,6 +44,8 @@
 //! default/calendarView` with the web client's query) under [`MIDDLE_TIER_BASE`], taking the account's token alone: the
 //! same made-up working week for every account, repeated every week.
 //!
+//! **The team pages** (`team_pages.rs`): what Manage team and "Your teams and channels" read, made up.
+//!
 //! **A new channel** (`channels.rs`): the middle tier's standard channel, the provisioning service's private one under
 //! [`PROVISIONING_BASE`] (its status, its people added), the user profile service's search of a team's people under
 //! [`USER_PROFILE_BASE`]; what was made is kept ([`ChatServiceMock::channel_writes`]) and listed by CSA's teams read.
@@ -96,6 +98,7 @@ pub mod mixer;
 mod peers;
 mod reads;
 mod roster;
+mod team_pages;
 mod trouter;
 mod ups;
 mod world;

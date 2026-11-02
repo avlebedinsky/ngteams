@@ -68,6 +68,7 @@ mod relay;
 mod request;
 mod schedule;
 mod search;
+mod team_read;
 mod thumbnail;
 mod urlp;
 mod write;
@@ -113,7 +114,7 @@ pub use post_read::{
 pub use read::{
     CSA_TEAMS_PATH, CSA_TEAMS_QUERY, Channel, ChannelType, CsaAnswerError, CsaTeams, GRAPH_PICTURE_SIZE,
     GRAPH_USER_SELECT, GraphAnswerError, GraphPicture, GraphUser, MAX_PICTURE, Picture, PictureFormat, Read, Team,
-    TeamsAnswer, object_id,
+    TeamAbout, TeamsAnswer, object_id,
 };
 pub use recurrence::{Pattern as RecurrencePattern, Recurrence, WeekIndex, Weekday};
 pub use relay::{RelayAnswer, RelayAnswerError, RelayCredential, RelayTokens};
@@ -125,6 +126,11 @@ pub use search::{
     ALL_PAGE, Found, FoundChannel, FoundChat, FoundFile, FoundMessage, FoundPerson, PAGE, SUBSTRATE_AUDIENCE,
     SUBSTRATE_HOST, SearchAnswerError, SearchKind, SubstrateSearch, highlighted,
 };
+pub use team_read::{
+    AddablePeopleSearch, AllTeamsAnalyticsRead, AnalyticsPeriod, JoinableTeam, JoinableTeams, ManagedChannel,
+    OwnTeamView, PendingInvite, PendingInvites, RosterMember, TagsRead, TeamAnalytics, TeamAnalyticsRead, TeamChannels,
+    TeamCode, TeamJoinRequests, TeamPicture, TeamRoster, TeamTag, TeamTags, TeamThread,
+};
 pub use thumbnail::{FileThumbnails, THUMBNAIL_HOST_SUFFIX, ThumbnailLink, is_thumbnail_link};
 pub use urlp::LinkPreviewPicture;
 pub use write::{
@@ -133,10 +139,11 @@ pub use write::{
     CALLING_BASE, CALLING_HOST, CallContext, CallLink, CallParticipant, CallWriteError, ChannelParameters, ClientInfo,
     CreateChat, DeclineCall, DeleteMessage, EditMessage, ForceAvailability, Invitee, JoinCall, JoinMedia, JoinParts,
     KeepAliveCall, LeaveCall, LeaveReason, Links, ManualAvailability, MediaContent, MediaDescription,
-    MediaDescriptions, MeetingInfo, Mutating, Original, ReadReceipt, RemoveReaction, RenegotiateMedia, ReportRinging,
-    SendMessage, SetEndpointAvailability, SetReaction, StartCall, StartParts, TEAMS_ECHO_BOT_MRI, TEST_CALL_SCENARIO,
-    TargetMismatch, Typing, UpdateEndpointMetadata, UpdateEndpointState, UpdateMediaDescriptions,
-    UpdateParticipantProperties, VoiceConsent, Wire,
+    MediaDescriptions, MeetingInfo, MemberUpdate, Mutating, NewTeam, Original, ReadReceipt, RemoveReaction,
+    RenegotiateMedia, ReportRinging, SendMessage, SetEndpointAvailability, SetReaction, StartCall, StartParts,
+    TEAMS_ECHO_BOT_MRI, TEST_CALL_SCENARIO, TargetMismatch, TeamRole, TeamWrite, Typing, UpdateEndpointMetadata,
+    UpdateEndpointState, UpdateMediaDescriptions, UpdateParticipantProperties, VoiceConsent, Wire, team_created,
+    team_error_code,
 };
 pub use write::{
     AddChannelMembers, ChannelCreated, ChannelLayout, CreateChannel, NewChannel, NewChannelKind, ShowChannelByDefault,

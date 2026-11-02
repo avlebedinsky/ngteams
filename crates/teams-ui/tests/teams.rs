@@ -36,6 +36,7 @@ fn teams() -> Vec<Team> {
         name: name.to_owned(),
         general,
         kind: ChannelKind::Standard,
+        shown: true,
     };
     vec![
         Team {
@@ -47,6 +48,7 @@ fn teams() -> Vec<Team> {
             owner: false,
             can_add_channel: false,
             can_add_private_channel: false,
+            about: teams_store::TeamAbout::default(),
             channels: vec![
                 channel(TEAM, "General", true),
                 channel(CHANNEL, "Made-up Channel", false),
@@ -61,6 +63,7 @@ fn teams() -> Vec<Team> {
             owner: false,
             can_add_channel: false,
             can_add_private_channel: false,
+            about: teams_store::TeamAbout::default(),
             channels: vec![channel(ARCHIVED, "General", true)],
         },
     ]

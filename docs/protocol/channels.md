@@ -194,8 +194,8 @@ under its team, by name, and keeps it against reads that don't name it for ten m
 a lock (`channelType` 1; 0 is standard, 2 shared).
 
 **The fence**: a new channel and its people reach the team, so the rows are writes on the team or the channel
-(`WriteKind::ChannelChange`, `MemberChange`; `teams_fence::contacting`'s `contacting/channel.rs`), and no source reads a
-team's members complete: the lab's fence denies them (the dialog then says "We ran into a problem creating your
+(`WriteKind::ChannelChange`, `MemberChange`; `teams_fence::contacting`'s `contacting/channel.rs`), and every team's members
+hold Teams' own apps ([teams.md](teams.md#the-fence)): the lab's fence denies them (the dialog then says "We ran into a problem creating your
 channel"). The personal build's logs and sends them. The provisioning service is a contacting service: everything mutating
 there but these rows is unreadable.
 

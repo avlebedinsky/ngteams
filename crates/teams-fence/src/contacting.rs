@@ -25,6 +25,7 @@ pub(crate) mod call;
 mod channel;
 mod chat;
 pub(crate) mod json;
+mod team;
 
 use std::fmt;
 
@@ -266,7 +267,7 @@ pub fn contacting(request: &Request<'_>, policy: &Policy) -> Contact {
     };
     match service {
         Service::ChatService if parsed.has_duplicate_key() => Contact::Unreadable,
-        Service::ChatService => chat::classify(&parsed, policy),
+        Service::ChatService => team::chat_service(&parsed).unwrap_or_else(|| chat::classify(&parsed, policy)),
         Service::Calling => call::call_start(&parsed.method, &url, parsed.body, policy.echo_callee.as_ref())
             .or_else(|| call::chat_call_start(&parsed.method, &url, parsed.body))
             .or_else(|| call::meeting_call_start(&parsed.method, &url, parsed.body))
@@ -277,9 +278,12 @@ pub fn contacting(request: &Request<'_>, policy: &Policy) -> Contact {
         Service::Ams => none_if(is_token_exchange(&parsed)),
         Service::MiddleTier => calendar::classify(&parsed)
             .or_else(|| channel::middle_tier(&parsed))
+            .or_else(|| team::middle_tier(&parsed))
             .unwrap_or_else(|| none_if(!is_middle_tier_contacting(&parsed))),
-        Service::Csa => none_if(is_csa_read(&parsed)),
-        Service::Provisioning => channel::provisioning(&parsed).unwrap_or(Contact::Unreadable),
+        Service::Csa => team::csa(&parsed).unwrap_or_else(|| none_if(is_csa_read(&parsed))),
+        Service::Provisioning => channel::provisioning(&parsed)
+            .or_else(|| team::provisioning(&parsed))
+            .unwrap_or(Contact::Unreadable),
     }
 }
 

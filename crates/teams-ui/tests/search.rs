@@ -865,11 +865,13 @@ fn team_in_search(rig: &Rig) {
         owner: false,
         can_add_channel: false,
         can_add_private_channel: false,
+        about: teams_store::TeamAbout::default(),
         channels: vec![TeamChannel {
             id: CHANNEL.to_owned(),
             name: "Release notes".to_owned(),
             general: true,
             kind: ChannelKind::Standard,
+            shown: true,
         }],
     }]);
 }

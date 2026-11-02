@@ -48,6 +48,8 @@
 //!   "Create a channel" dialog offers and sends for each type and layout; recorded, nothing made.
 //! - [`ab_meeting_join`] (account a, as `ab-meeting`): a schedules a Teams meeting with b, opens its join link and clicks
 //!   the pre-join's Join now; what follows the subscription is held back; recorded.
+//! - [`team_manage`] (one account, driven step by step over a socket, every write on a team held back or judged by the
+//!   lab rule alone): a look at the web client's team management; recorded.
 //! - [`search`] (account a, fail-closed as `load`): a searches from the title bar (the suggestions as it types, the
 //!   results and each of their tabs, a message found opened); recorded.
 //!
@@ -77,6 +79,7 @@ pub mod expected;
 pub mod load;
 pub mod own_presence;
 pub mod search;
+pub mod team_manage;
 
 #[cfg(test)]
 #[path = "../../tests/support/scenario/test_page.rs"]
@@ -152,6 +155,9 @@ pub enum ScenarioName {
     /// Account a fills the web client's "Create a channel" dialog for each channel type and layout, every write that
     /// could make a channel held back; recorded.
     ChannelCreate,
+    /// One account's page driven step by step over a socket (`PROTO_LAB_STEPS_SOCKET`), to look at its team management:
+    /// every write on a team held back, or with `PROTO_LAB_TEAM_WRITES=1` only the lab rule's; recorded.
+    TeamManage,
     /// Account a's availability reported by the `user.activity` frame alone (the presence endpoint denied); recorded.
     OwnPresenceActivity,
     /// Account a's availability reported by the presence endpoint alone (every `user.activity` held back); recorded.
@@ -189,6 +195,7 @@ impl ScenarioName {
             Self::AbMeetingJoin => "ab-meeting-join",
             Self::Search => "search",
             Self::ChannelCreate => "channel-create",
+            Self::TeamManage => "team-manage",
             Self::OwnPresenceActivity => "own-presence-activity",
             Self::OwnPresenceEndpoint => "own-presence-endpoint",
             Self::OwnPresenceBoth => "own-presence-both",
@@ -423,6 +430,8 @@ pub async fn run(
         | ScenarioName::OwnPresenceBoth
         | ScenarioName::OwnPresenceManualHeld
         | ScenarioName::OwnPresenceManual => own_presence::run_named(paths, options, scenario).await,
+        ScenarioName::ChannelCreate => channel_create::run(paths, options).await,
+        ScenarioName::TeamManage => team_manage::run(paths, options).await,
         _ => run_other(scenario, paths, options).await,
     }
 }
@@ -447,7 +456,6 @@ async fn run_other(
         ScenarioName::AbMeeting => ab_meeting::run(paths, options).await,
         ScenarioName::AbMeetingJoin => ab_meeting_join::run(paths, options).await,
         ScenarioName::Search => search::run(paths, options).await,
-        ScenarioName::ChannelCreate => channel_create::run(paths, options).await,
         // a call or own presence: `run` sends those to `run_call` and `own_presence`
         _ => Err(ScenarioError::Setup(format!(
             "{scenario:?} isn't a scenario of `run_other`"

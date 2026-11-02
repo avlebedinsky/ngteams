@@ -26,6 +26,7 @@ fn channel(id: &str, name: &str, general: bool) -> TeamChannel {
         name: name.to_owned(),
         general,
         kind: ChannelKind::Standard,
+        shown: true,
     }
 }
 
@@ -40,6 +41,7 @@ fn teams() -> Vec<Team> {
             owner: false,
             can_add_channel: false,
             can_add_private_channel: false,
+            about: teams_store::TeamAbout::default(),
             channels: vec![
                 channel(TEAM, "General", true),
                 channel(CHANNEL, "A made-up channel", false),
@@ -54,6 +56,7 @@ fn teams() -> Vec<Team> {
             owner: false,
             can_add_channel: false,
             can_add_private_channel: false,
+            about: teams_store::TeamAbout::default(),
             channels: vec![channel(OTHER_TEAM, "General", true)],
         },
     ]
@@ -265,8 +268,12 @@ fn the_favourites_migration_keeps_the_teams_but_has_them_read_again() -> Result<
          DROP TABLE favorites; DROP TABLE favorites_read; ALTER TABLE conversations DROP COLUMN empty;
          ALTER TABLE teams DROP COLUMN group_id; ALTER TABLE teams DROP COLUMN mailbox;
          ALTER TABLE teams DROP COLUMN owner; ALTER TABLE teams DROP COLUMN can_add_channel;
-         ALTER TABLE teams DROP COLUMN can_add_private_channel; ALTER TABLE team_channels DROP COLUMN kind;
-         DROP TABLE app_read_horizon; PRAGMA user_version = 10;",
+         ALTER TABLE teams DROP COLUMN can_add_private_channel; ALTER TABLE teams DROP COLUMN tenant; ALTER TABLE teams DROP COLUMN description; ALTER TABLE teams DROP COLUMN public;
+         ALTER TABLE teams DROP COLUMN people; ALTER TABLE teams DROP COLUMN guest; ALTER TABLE teams DROP COLUMN dynamic_membership;
+         ALTER TABLE teams DROP COLUMN tenant_wide; ALTER TABLE teams DROP COLUMN channel_only; ALTER TABLE teams DROP COLUMN hidden;
+         ALTER TABLE teams DROP COLUMN picture_etag; ALTER TABLE team_channels DROP COLUMN shown; ALTER TABLE team_channels DROP COLUMN kind;
+         DROP TABLE app_read_horizon;
+         PRAGMA user_version = 10;",
     )
     .expect("back to schema 10");
     drop(raw);
@@ -293,11 +300,13 @@ fn a_team_keeps_what_its_new_channel_needs_and_a_channel_its_kind() {
         owner: true,
         can_add_channel: true,
         can_add_private_channel: true,
+        about: teams_store::TeamAbout::default(),
         channels: vec![TeamChannel {
             id: "19:hush@thread.tacv2".to_owned(),
             name: "Hush".to_owned(),
             general: false,
             kind: ChannelKind::Private,
+            shown: true,
         }],
     };
     store.replace_teams(std::slice::from_ref(&team), 5).unwrap();

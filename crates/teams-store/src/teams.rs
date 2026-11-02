@@ -9,7 +9,7 @@ use rusqlite::{OptionalExtension, params};
 use crate::{Applied, Store, StoreError};
 
 /// A team as last listed. `Debug` leaves the names out.
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, Default, PartialEq, Eq)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "what the service says of a team and of the account in it: each stands alone, no state machine"
@@ -29,8 +29,83 @@ pub struct Team {
     pub can_add_channel: bool,
     /// Whether the account may add a private channel to it.
     pub can_add_private_channel: bool,
+    /// What the team pages show of it.
+    pub about: TeamAbout,
     /// Its channels in the order listed, the general one first.
     pub channels: Vec<TeamChannel>,
+}
+
+/// What "Your teams and channels" and Manage team show of a team. `Debug` leaves the words out.
+#[derive(Clone, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "what the service says of a team and of the account in it: each stands alone, no state machine"
+)]
+pub struct TeamAbout {
+    /// The tenant it belongs to: a link to it names it.
+    pub tenant: String,
+    pub description: String,
+    /// Anyone in the organization can join it.
+    pub public: bool,
+    /// Its people, bots left out.
+    pub people: u32,
+    /// The account is a guest on it.
+    pub guest: bool,
+    /// Its people come from a rule, not from hands.
+    pub dynamic_membership: bool,
+    /// It holds everyone in the organization.
+    pub tenant_wide: bool,
+    /// The account is only on some of its channels.
+    pub channel_only: bool,
+    /// Its channels are hidden for the account.
+    pub hidden: bool,
+    /// Its picture's version.
+    pub picture_etag: Option<String>,
+}
+
+impl fmt::Debug for TeamAbout {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TeamAbout")
+            .field("public", &self.public)
+            .field("people", &self.people)
+            .field("hidden", &self.hidden)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Team {
+    /// Whether the account can add people or ask to, as Teams decides: an owner; on a public team that isn't everyone's
+    /// or a private one, a member (who sends a request on a private team). Never a guest, on a team of a rule's people or
+    /// on one the account is on only through channels, or on an archived one.
+    #[must_use]
+    pub fn can_add_member(&self) -> bool {
+        let about = &self.about;
+        !self.archived
+            && !about.dynamic_membership
+            && !about.guest
+            && !about.channel_only
+            && (self.owner || !about.tenant_wide)
+    }
+
+    /// Whether the account can leave, as Teams decides: not a team of a rule's people or one it is on only through
+    /// channels, and an org-wide team only as an owner.
+    #[must_use]
+    pub fn can_leave(&self) -> bool {
+        let about = &self.about;
+        !about.dynamic_membership && !about.channel_only && (self.owner || !about.tenant_wide)
+    }
+
+    /// Whether the account can archive, restore, delete and edit it: an owner of the whole team.
+    #[must_use]
+    pub fn can_administer(&self) -> bool {
+        self.owner && !self.about.channel_only
+    }
+
+    /// How many channels it has hidden for the account.
+    #[must_use]
+    pub fn hidden_channels(&self) -> usize {
+        self.channels.iter().filter(|channel| !channel.shown).count()
+    }
 }
 
 impl fmt::Debug for Team {
@@ -50,6 +125,8 @@ pub struct TeamChannel {
     pub name: String,
     pub general: bool,
     pub kind: ChannelKind,
+    /// Whether it is in the account's channel list.
+    pub shown: bool,
 }
 
 /// Who a channel is for.
@@ -117,11 +194,13 @@ impl Store {
             tx.execute("DELETE FROM teams", [])?;
             let mut team_row = tx.prepare_cached(
                 "INSERT INTO teams (id, name, archived, position, group_id, mailbox, owner, can_add_channel,
-                 can_add_private_channel) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                 can_add_private_channel, tenant, description, public, people, guest, dynamic_membership, tenant_wide,
+                 channel_only, hidden, picture_etag)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             )?;
             let mut channel_row = tx.prepare_cached(
-                "INSERT INTO team_channels (id, team_id, name, general, position, kind)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO team_channels (id, team_id, name, general, position, kind, shown)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
             )?;
             for (position, team) in (0_i64..).zip(&teams) {
                 team_row.execute(params![
@@ -133,7 +212,17 @@ impl Store {
                     team.mailbox,
                     team.owner,
                     team.can_add_channel,
-                    team.can_add_private_channel
+                    team.can_add_private_channel,
+                    team.about.tenant,
+                    team.about.description,
+                    team.about.public,
+                    team.about.people,
+                    team.about.guest,
+                    team.about.dynamic_membership,
+                    team.about.tenant_wide,
+                    team.about.channel_only,
+                    team.about.hidden,
+                    team.about.picture_etag
                 ])?;
                 for (place, channel) in (0_i64..).zip(&team.channels) {
                     channel_row.execute(params![
@@ -142,7 +231,8 @@ impl Store {
                         channel.name,
                         channel.general,
                         place,
-                        channel.kind.key()
+                        channel.kind.key(),
+                        channel.shown
                     ])?;
                 }
             }
@@ -165,7 +255,8 @@ impl Store {
         let mut teams: Vec<Team> = self
             .conn
             .prepare_cached(
-                "SELECT id, name, archived, group_id, mailbox, owner, can_add_channel, can_add_private_channel
+                "SELECT id, name, archived, group_id, mailbox, owner, can_add_channel, can_add_private_channel,
+                 tenant, description, public, people, guest, dynamic_membership, tenant_wide, channel_only, hidden, picture_etag
                  FROM teams ORDER BY position",
             )?
             .query_map([], |row| {
@@ -178,13 +269,25 @@ impl Store {
                     owner: row.get(5)?,
                     can_add_channel: row.get(6)?,
                     can_add_private_channel: row.get(7)?,
+                    about: TeamAbout {
+                        tenant: row.get(8)?,
+                        description: row.get(9)?,
+                        public: row.get(10)?,
+                        people: row.get(11)?,
+                        guest: row.get(12)?,
+                        dynamic_membership: row.get(13)?,
+                        tenant_wide: row.get(14)?,
+                        channel_only: row.get(15)?,
+                        hidden: row.get(16)?,
+                        picture_etag: row.get(17)?,
+                    },
                     channels: Vec::new(),
                 })
             })?
             .collect::<Result<_, _>>()?;
-        let mut channels = self
-            .conn
-            .prepare_cached("SELECT id, name, general, kind FROM team_channels WHERE team_id = ?1 ORDER BY position")?;
+        let mut channels = self.conn.prepare_cached(
+            "SELECT id, name, general, kind, shown FROM team_channels WHERE team_id = ?1 ORDER BY position",
+        )?;
         for team in &mut teams {
             team.channels = channels
                 .query_map([&team.id], |row| {
@@ -193,6 +296,7 @@ impl Store {
                         name: row.get(1)?,
                         general: row.get(2)?,
                         kind: ChannelKind::of_key(&row.get::<_, String>(3)?),
+                        shown: row.get(4)?,
                     })
                 })?
                 .collect::<Result<_, _>>()?;

@@ -52,6 +52,7 @@ pub mod profiles;
 pub mod search;
 pub mod service_search;
 pub mod sync;
+pub mod team_admin;
 pub mod teams;
 pub mod thumbnails;
 
@@ -85,6 +86,7 @@ pub use sync::{
     CLOCK_SKEW_MS, CatchUp, CatchUpError, CatchUpReport, Changes, ConversationFailed, DRAFTS, Gaps, MAX_PAGES, NOTES,
     StoredMessage, Synced,
 };
+pub use team_admin::{TeamChange, TeamMember, TeamWritten};
 pub use teams::{ChatListing, READING_TEAMS, TEAMS_MAX_AGE, TEAMS_RETRY, TeamsReadError};
 /// A call, how it ended and how its services ended it, as [`Event::Call`] and [`Event::RingEnded`] tell them.
 pub use teams_call::{CallError, CallId, End, Identity, RemoteEnd};

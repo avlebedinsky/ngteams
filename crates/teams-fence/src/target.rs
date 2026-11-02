@@ -44,6 +44,13 @@ pub enum WriteKind {
     /// A team's channel created, or a channel shown to the whole team by default ([`Scope::Team`]): everyone on the team
     /// can see it.
     ChannelChange,
+    /// A new private team ([`Scope::New`]): nobody but the account is in it until people are added.
+    TeamCreate,
+    /// A new team anyone in the organization can find and join, or that takes everyone in: it never names who it reaches,
+    /// so it has no target to judge and the lab's fence denies it.
+    OpenTeamCreate,
+    /// A team changed for everyone on it ([`Scope::Team`]): its name, its settings, its tags, archived or deleted.
+    TeamChange,
     BotReply,
     /// The account's own availability (UPS's presence endpoint `PUT` and the manual status): seen across the tenant,
     /// but it carries nothing to anyone. The fence permits it without a member read, only on [`Scope::Account`] naming
@@ -52,7 +59,7 @@ pub enum WriteKind {
 }
 
 impl WriteKind {
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 22] = [
         Self::Message,
         Self::Edit,
         Self::Delete,
@@ -70,6 +77,9 @@ impl WriteKind {
         Self::ChatCreate,
         Self::ChannelPost,
         Self::ChannelChange,
+        Self::TeamCreate,
+        Self::OpenTeamCreate,
+        Self::TeamChange,
         Self::BotReply,
         Self::OwnAvailability,
     ];
@@ -95,6 +105,9 @@ impl WriteKind {
             Self::ChatCreate => "chat_create",
             Self::ChannelPost => "channel_post",
             Self::ChannelChange => "channel_change",
+            Self::TeamCreate => "team_create",
+            Self::OpenTeamCreate => "open_team_create",
+            Self::TeamChange => "team_change",
             Self::BotReply => "bot_reply",
             Self::OwnAvailability => "own_availability",
         }
@@ -107,11 +120,12 @@ impl WriteKind {
         !matches!(self, Self::Typing | Self::ReadReceipt | Self::OwnAvailability)
     }
 
-    /// Whether this kind of write can create its own target ([`Scope::New`]): a new chat, a new call, a new meeting.
+    /// Whether this kind of write can create its own target ([`Scope::New`]): a new chat, a new call, a new meeting, a
+    /// new private team.
     /// Every other kind lands on something that already exists, whose members the fence has to fetch.
     #[must_use]
     pub fn creates_target(self) -> bool {
-        matches!(self, Self::ChatCreate | Self::Call | Self::Meeting)
+        matches!(self, Self::ChatCreate | Self::Call | Self::Meeting | Self::TeamCreate)
     }
 }
 
