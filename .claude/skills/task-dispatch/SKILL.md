@@ -1,6 +1,6 @@
 ---
 name: task-dispatch
-description: Session mode where the user sends tasks one after another and every task goes to a dedicated background agent of its own, as many at once as the user set (2 by default), the rest queued in order — each editing agent in its own git worktree, running only the quick checks its change needs, then committing and doing its own rebase, merge and push to main; once the board drains, one review pass covers everything landed since the last one, its review and checks sized to what landed, and fixes forward; nothing of a task left behind afterwards (worktree, target dir, branch, shells, temp files) — while this thread stays free to take the next task, answer questions and report results. Use it whenever the user says they'll send several tasks one by one, "start an agent for each task", "dispatch these", "run tasks in parallel", "up to N agents", "agent per task", "в этой сессии буду кидать задачи по одной", "запускай агента на каждую задачу", or otherwise wants this conversation to act as a dispatcher rather than do the work itself — and keep using it for every later task in that session, even when a later message doesn't mention agents.
+description: Session mode where the user sends tasks one after another and every task goes to a dedicated background agent of its own, as many at once as the user set (2 by default), the rest queued in order — each editing agent in its own git worktree, running only the quick checks its change needs, then committing and doing its own rebase, merge and push to main; once the board drains, one review pass covers everything landed since the last one, its review and checks sized to what landed, and fixes forward; nothing of a task left behind afterwards (worktree, target dir, branch, shells, temp files) — while this thread stays free to take the next task, answer questions and report results. The board is kept in a gitignored progress.json that the status page shows, so a run a dead session left behind can be picked up: use it too for "resume the dispatch", "continue the dispatch", "pick up where the agents left off", "продолжи диспатч". Use it whenever the user says they'll send several tasks one by one, "start an agent for each task", "dispatch these", "run tasks in parallel", "up to N agents", "agent per task", "в этой сессии буду кидать задачи по одной", "запускай агента на каждую задачу", or otherwise wants this conversation to act as a dispatcher rather than do the work itself — and keep using it for every later task in that session, even when a later message doesn't mention agents.
 ---
 
 # Task dispatch
@@ -15,7 +15,8 @@ needs, then commits and lands it. Once the board drains, one review pass looks a
 pass, with the review and checks that range needs (CLAUDE.md, "Checks"), and fixes forward.
 
 The mode lasts for the rest of the session once the user has asked for it. Every later message that is a task gets
-dispatched, whether or not it mentions agents.
+dispatched, whether or not it mentions agents. When the mode starts, look for a run to pick up first ("Resuming",
+below).
 
 ## What counts as a task
 
@@ -52,7 +53,7 @@ dispatched, whether or not it mentions agents.
   reading of it) cover the same thing in the same place. Otherwise the part falls between the two briefs and nobody
   fixes it. If the scopes overlap, queue the new task after the other or let it rebase. Don't cut its scope.
 
-Keep a small ledger, in this thread and in the ledger file (below), and show it when asked, or when it changes in a
+Keep a small ledger, in this thread and in the progress file (below), and show it when asked, or when it changes in a
 way the user should know about:
 
 | # | Task (a few words) | Agent | State |
@@ -64,29 +65,77 @@ way the user should know about:
 The states are queued, running, waiting on user, landed `<hash>`, and failed. A landed task stays unreviewed until a
 review pass covers its commit.
 
-## The ledger file
+## The progress file
 
-The ledger also lives in `<scratchpad>/dispatch-ledger.json`, `<scratchpad>` being the session's scratchpad dir from
-the system prompt, in every session (inside ngterm the status page reads it). Write it when dispatch mode starts, and
-again on every change (a dispatch, a state change, a landing, a note, a new slot count, a new review base), to a temp
-file renamed over it, so a read never catches half a file:
+The ledger lives in `<repo>/.dispatch/<run>/progress.json`, in the main checkout, in every session: the status page
+shows it, and a later session resumes from it, so it outlives this thread and the scratchpad. `.dispatch/` is
+gitignored. `<run>` is dispatch mode's start time as `YYYYMMDD-HHMM`, one per run, because two sessions can dispatch in
+one repo at once. Write it when the mode starts, and again on every change (a task received, a dispatch, a state
+change, a landing, a note, a new slot count, a new review base, a standing instruction), before the `Agent` call that
+starts a task, to a temp file renamed over it, so a read never catches half a file. It never holds a token or the
+content of a capture or debug log.
 
 ```json
-{"slots": 2, "review_base": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c", "tasks": [
+{"owner": 48213, "sessions": ["9e4220c1-8c0f-42d5-b7a4-60ea8d367676"], "slots": 2,
+ "review_base": "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c",
+ "standing": ["Corrections and preferences from the user that apply to later tasks too"],
+ "tasks": [
   {"num": 1, "title": "Escape closes search", "agent": "escape-search", "state": "landed a1b2c3d"},
-  {"num": 2, "title": "pinned chats", "agent": "", "state": "queued", "after": 1, "note": "needs #1's view"},
-  {"num": 3, "title": "Review 0f1e2d3..a1b2c3d", "agent": "review-1", "state": "running", "flow": "review"}
+  {"num": 2, "title": "pinned chats", "agent": "", "state": "queued", "after": 1, "note": "needs #1's view",
+   "text": "\"add pinned chats\" and what bears on it"},
+  {"num": 3, "title": "Review 0f1e2d3..a1b2c3d", "agent": "review-1", "state": "running", "flow": "review",
+   "text": "Review pass of 0f1e2d3..a1b2c3d"}
 ]}
 ```
 
+- `owner` is `$CLAUDE_PID`, the Claude Code process that runs the board.
+- `sessions` lists `$CLAUDE_CODE_SESSION_ID` of every session that ran the board. A session's agents' transcripts
+  (`~/.claude/projects/*/<session>/subagents/`) hold each brief, follow-up and step, and their metadata the worktree,
+  so this file doesn't repeat them.
+- `standing` is what the user said that holds for more than one task, which would otherwise die with this thread.
+- A task's `text` is what the agent can't be briefed without if the thread dies: the user's words, quoted, and what
+  you'd add to them, a screenshot in words (what it shows and asks for) with its path if it has one, because the image
+  doesn't outlive the thread. Every task has it until it lands, then it goes. A task the user dropped goes altogether.
 - `slots` is the user's number of agents at once (2 when they gave none).
-- `review_base` is the commit up to which everything landed has been reviewed: the next pass starts from it. Set it when dispatch mode starts to `git rev-parse origin/main` (after a `git fetch`), and move it only when a
+- `review_base` is the commit up to which everything landed has been reviewed: the next pass starts from it. Set it when dispatch mode starts to `git rev-parse origin/main` (after a `git fetch`; a resumed run keeps its own), and move it only when a
   pass returns (below). It is kept in the file so it survives this thread's context being compacted.
 - A task's `state` is the ledger's (`queued`, `running`, `waiting on user`, `landed <hash>`, `failed`). Optional:
   `note` (a line the user should see on the card), `after` (the task a queued one waits for), `transcript` (the
   agent's JSONL, only when its name doesn't find it: the server looks names up in this session's subagents dir) and
   `flow`: `review` for the review pass (always set it: it runs in a worktree, which would read as a task),
   otherwise `edit` or `scratch`, told by whether the agent has a worktree when left out.
+
+## Resuming
+
+Do this when the mode starts, and when the user asks to resume. After a compaction, only reread your own run's file.
+
+1. **Find what is left**: `<repo>/.dispatch/*/progress.json`. Skip a run whose owner is alive (`kill -0 <pid>`): another
+   session is on it. Delete a dead run with nothing left: every task landed and `review_base` past the last of them.
+   If the user didn't ask to resume, pick up a run updated in the last day and say so, and ask about an older one,
+   whose tasks may be obsolete, while new work goes in a new run. Several dead runs merge into the newest, keeping the
+   oldest review base.
+2. **Take it over**: set `owner` to your `$CLAUDE_PID`, add your `$CLAUDE_CODE_SESSION_ID` to `sessions`, and start the
+   status page on the file.
+3. **Check every task left `running` or `waiting on user`** against what is there, because the file can lag behind:
+   `<repo>/.claude/skills/task-dispatch/scripts/agent-state.sh <agent> <sessions...>` prints what it was told, what it
+   last said and its `work:` state.
+   - `landed <hash>`: mark it landed and run `cleanup.sh` on its worktree.
+   - `unlanded`: mark it queued with `"flow": "edit"` (or `review`), to continue below. A continuing agent has no
+     worktree of its own, so the page can't tell its flow without this.
+   - `none`, or no agent found: mark it queued, and run `cleanup.sh` on a worktree with nothing in it. It starts over
+     from what it was told, or from its `text`, in a new worktree. A read-only task always does this.
+   - A task waiting on the user stays so: put its question to the user again.
+4. **Carry on**, within the slots: tasks that continue and the review pass first, then those starting over, then the
+   rest of the queue. An agent still listed by `ListAgents` gets a `SendMessage`. Otherwise start a new agent of the
+   same name, with no `isolation` because the worktree exists, on what it was told and this:
+
+   > An earlier agent died on this task; its last words are below, its transcript at `<path>`. Continue in `<worktree>`:
+   > `cd` there and stay there. Check `git status` and `git log origin/main..HEAD` (a rebase may be half done), and
+   > believe them over its words. Stop anything of the old agent's still running in the worktree. Don't redo what is
+   > done.
+
+   An interrupted review pass continues the same way on the range in its title.
+5. **Tell the user** in one reply: the board, and which tasks landed unseen, which continue and which started over.
 
 ## The status page
 
@@ -96,11 +145,11 @@ transcripts (this skill's `dispatch-status/`). A task's phases are investigate, 
 pass's are review, gate (its checks), land. The user watches it instead of asking "what's running?". Set it up in the
 reply that starts dispatch mode:
 
-1. **Write the ledger file** (above) before the server starts.
+1. **Write the progress file** (above) before the server starts.
 2. **Start the server** with `run_in_background`, and keep its shell ID:
 
    ```sh
-   <repo>/.claude/skills/task-dispatch/scripts/status-page.sh --ledger <scratchpad>/dispatch-ledger.json
+   <repo>/.claude/skills/task-dispatch/scripts/status-page.sh --ledger <repo>/.dispatch/<run>/progress.json
    ```
 
    The script builds the server when it was never built or its sources changed (in its own target dir, so it never
