@@ -143,6 +143,96 @@ fn a_failed_read_retries_and_a_stopped_refresh_keeps_the_previous_events() {
     );
 }
 
+fn shown_ids(view: &Entity<CalendarView>, cx: &mut VisualTestContext) -> Vec<String> {
+    cx.update(|_, cx| {
+        view.read(cx)
+            .events()
+            .map(|events| events.iter().map(|shown| shown.event.id.clone()).collect())
+            .unwrap_or_default()
+    })
+}
+
+#[test]
+fn the_stored_events_show_at_once_and_the_read_applies_on_top() {
+    let rig = Rig::start();
+    let mut moved = event("moved", 9);
+    moved.subject = "Before the move".to_owned();
+    let mut occurrence = series_meeting(13);
+    occurrence.id = "occurrence".to_owned();
+    rig.core.calendar.lock().unwrap().stored = vec![event("gone", 11), moved.clone(), occurrence.clone()];
+    rig.core.calendar.lock().unwrap().hold = true;
+    let (view, cx, written) = window(&rig);
+    assert_eq!(
+        shown_ids(&view, cx),
+        ["moved", "gone", "occurrence"],
+        "before any answer"
+    );
+    assert!(cx.update(|_, cx| view.read(cx).showing_stored()));
+    {
+        let calendar = rig.core.calendar.lock().unwrap();
+        assert_eq!(
+            calendar.stored_reads[0], calendar.reads[0],
+            "the store asked for the same days the read is"
+        );
+    }
+    assert!(written.text().contains(r#""change":"stored""#));
+    draw(cx);
+    assert!(cx.debug_bounds("calendar-failed").is_none());
+
+    // the answer: one deleted, one moved and renamed, the occurrence cancelled, one added
+    let mut moved_now = event("moved", 15);
+    moved_now.subject = "After the move".to_owned();
+    let mut cancelled = occurrence;
+    cancelled.cancelled = true;
+    let answer = rig.core.calendar.lock().unwrap().held.remove(0);
+    answer.send(Ok(vec![moved_now, cancelled, event("added", 8)]));
+    draw(cx);
+    assert_eq!(shown_ids(&view, cx), ["added", "occurrence", "moved"]);
+    cx.update(|_, cx| {
+        let view = view.read(cx);
+        assert!(!view.showing_stored());
+        let events = view.events().unwrap();
+        assert_eq!(events[2].event.subject, "After the move");
+        assert!(events[1].event.cancelled);
+    });
+}
+
+#[test]
+fn a_failed_read_keeps_the_stored_events_and_a_read_span_doesnt_ask_the_store_again() {
+    let rig = Rig::start();
+    rig.core.calendar.lock().unwrap().stored = vec![event("kept", 9)];
+    // going to the day and showing the calendar read it twice
+    for _ in 0..2 {
+        rig.core
+            .calendar
+            .lock()
+            .unwrap()
+            .answers
+            .push_back(Err(EngineError::CalendarUnread));
+    }
+    let (view, cx, _) = window(&rig);
+    assert_eq!(shown_ids(&view, cx), ["kept"]);
+    assert!(
+        cx.debug_bounds("calendar-failed").is_none(),
+        "the kept events are shown instead"
+    );
+    rig.core.calendar.lock().unwrap().events = vec![event("fresh", 10)];
+    cx.update(|_, cx| view.update(cx, |view, cx| view.step(true, cx)));
+    draw(cx);
+    cx.update(|_, cx| view.update(cx, |view, cx| view.step(false, cx)));
+    draw(cx);
+    let stored_reads = rig.core.calendar.lock().unwrap().stored_reads.len();
+    // back on the first week: still the store's, so it is read again, and the read replaces them
+    assert_eq!(shown_ids(&view, cx), ["fresh"]);
+    cx.update(|_, cx| view.update(cx, |view, cx| view.step(true, cx)));
+    draw(cx);
+    assert_eq!(
+        rig.core.calendar.lock().unwrap().stored_reads.len(),
+        stored_reads,
+        "a span read in this run isn't drawn from the store again"
+    );
+}
+
 #[test]
 fn a_refresh_requested_during_a_read_runs_after_the_first_answer() {
     let rig = Rig::start();

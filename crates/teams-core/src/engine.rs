@@ -128,7 +128,7 @@ use teams_trouter::{
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::{Instant, MissedTickBehavior};
 
-use crate::calendar::{Calendar, EventWrite, EventWritten, Invitable, MeetingAvailability};
+use crate::calendar::{Calendar, EventWrite, EventWritten, Invitable, MeetingAvailability, WindowRead};
 use crate::channels::{ChannelDraft, ChannelMade, ChannelProblem, Channels, Finished};
 use crate::service_search::{SearchAnswer, SearchScope, ServiceSearch};
 use crate::team_admin::{TeamAsk, TeamChange, TeamMember, TeamWritten};
@@ -701,6 +701,12 @@ enum Query {
     OutboxUnsettled(String, Responder<Vec<OutboxEntry>>),
     LeftByEarlierRuns(Responder<Vec<OutboxEntry>>),
     ReplyRoots(String, Responder<Vec<(String, String)>>),
+    /// The stored calendar events between two instants (ms): [`crate::calendar::stored`].
+    CalendarEvents {
+        start_ms: i64,
+        end_ms: i64,
+        reply: Responder<Vec<CalendarEvent>>,
+    },
     Search {
         query: String,
         /// The conversations to look in; every one when `None`.
@@ -936,9 +942,20 @@ impl EngineRequests {
     }
 
     /// The account's calendar events between `start_ms` and `end_ms` (ms since the epoch), read from the middle tier
-    /// now ([`crate::calendar`]): [`EngineError::CalendarUnread`] when the read failed.
+    /// now and kept in the store ([`crate::calendar`]): [`EngineError::CalendarUnread`] when the read failed.
     pub fn calendar(&self, start_ms: i64, end_ms: i64) -> Reply<Vec<CalendarEvent>> {
         self.ask(|reply| Request::Calendar {
+            start_ms,
+            end_ms,
+            reply,
+        })
+    }
+
+    /// The account's calendar events between `start_ms` and `end_ms` (ms since the epoch) as the store kept them from
+    /// the last reads ([`crate::calendar`]), by start: what the calendar shows at once while [`Self::calendar`] reads
+    /// the window again. Answered meanwhile too, while a catch-up runs.
+    pub fn stored_calendar(&self, start_ms: i64, end_ms: i64) -> Reply<Vec<CalendarEvent>> {
+        self.query(|reply| Query::CalendarEvents {
             start_ms,
             end_ms,
             reply,
@@ -1497,11 +1514,18 @@ where
                     None => push = None,
                 },
                 _ = tick.tick() => self.on_tick().await,
-                done = background(&mut self.profiles, &mut self.teams, &mut self.presences, &mut self.channels),
+                done = background(
+                    &mut self.profiles,
+                    &mut self.teams,
+                    &mut self.presences,
+                    &mut self.channels,
+                    &mut self.calendar,
+                ),
                     if self.profiles.busy()
                         || self.teams.busy()
                         || self.presences.busy()
-                        || self.channels.busy() => {
+                        || self.channels.busy()
+                        || self.calendar.busy() => {
                     self.on_background(done);
                 }
                 // ready once the runtime's other tasks had their turn (the push channel's, on this current-thread
@@ -1765,6 +1789,18 @@ where
             Background::Teams(read) => self.on_teams(read),
             Background::Presence(polled) => self.on_presence(polled),
             Background::Channel(finished) => self.on_channel(finished),
+            Background::Calendar(read) => self.on_calendar(read),
+        }
+    }
+
+    /// A calendar window's read is over (`None`: it failed): kept in the store, its asker answered already.
+    fn on_calendar(&mut self, read: Option<WindowRead>) {
+        let Some(read) = read else { return };
+        if let Err(error) = self
+            .store
+            .replace_calendar_window(read.start_ms, read.end_ms, &read.events)
+        {
+            self.failed("storing the calendar", error);
         }
     }
 
@@ -2433,21 +2469,24 @@ enum Background {
     Teams(Option<Result<TeamsRead, TeamsReadError>>),
     Presence(Option<PresenceDone>),
     Channel(Option<Finished>),
+    Calendar(Option<WindowRead>),
 }
 
-/// The next read in the background to be over, a person's lookup, the teams' or the presence read; never while none
-/// runs.
-async fn background<C: Credentials + 'static, T: Transport<Error = HttpError> + 'static>(
+/// The next read in the background to be over, a person's lookup, the teams', the presence read or a calendar window's;
+/// never while none runs.
+async fn background<C: Credentials + 'static, T: Transport<Error = HttpError> + Send + 'static>(
     profiles: &mut Profiles<C>,
     teams: &mut Teams<C>,
     presences: &mut Presences<C>,
     channels: &mut Channels<C, T>,
+    calendar: &mut Calendar<C, T>,
 ) -> Background {
     tokio::select! {
         looked = profiles.next(), if profiles.busy() => Background::Looked(looked),
         read = teams.next(), if teams.busy() => Background::Teams(read),
         polled = presences.next(), if presences.busy() => Background::Presence(polled),
         finished = channels.next(), if channels.busy() => Background::Channel(finished),
+        read = calendar.next(), if calendar.busy() => Background::Calendar(read),
         else => pending().await,
     }
 }

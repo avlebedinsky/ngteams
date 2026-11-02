@@ -248,7 +248,7 @@ fn the_topics_migration_takes_the_chats_without_a_topic_again() -> Result<(), St
          ALTER TABLE teams DROP COLUMN people; ALTER TABLE teams DROP COLUMN guest; ALTER TABLE teams DROP COLUMN dynamic_membership;
          ALTER TABLE teams DROP COLUMN tenant_wide; ALTER TABLE teams DROP COLUMN channel_only; ALTER TABLE teams DROP COLUMN hidden;
          ALTER TABLE teams DROP COLUMN picture_etag; ALTER TABLE team_channels DROP COLUMN shown; ALTER TABLE team_channels DROP COLUMN kind;
-         DROP TABLE app_read_horizon;
+         DROP TABLE app_read_horizon; DROP TABLE calendar_events;
          PRAGMA user_version = 9;",
     )
     .expect("back to schema 9");

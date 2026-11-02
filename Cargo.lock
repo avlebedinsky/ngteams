@@ -7984,6 +7984,7 @@ dependencies = [
 name = "teams-core"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "getrandom 0.4.3",
  "log",
  "reqwest 0.13.5",

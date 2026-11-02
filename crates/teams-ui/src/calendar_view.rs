@@ -10,7 +10,10 @@
 //!
 //! - **Its events** come from the engine's read of the middle tier's calendar view ([`Core::calendar`]), asked for the
 //!   days shown whenever they change, on Refresh and every few minutes while the calendar is shown; what a span read
-//!   last is shown at once while it is read again. A declined meeting isn't shown, as in Teams.
+//!   last is shown at once while it is read again. A span not read in this run is first drawn from the events the
+//!   store kept from earlier reads, this run's or an earlier one's ([`Core::stored_calendar`]), and the read's answer
+//!   then replaces them: events added, changed, moved, cancelled or gone, occurrences of a series too. A declined
+//!   meeting isn't shown, as in Teams.
 //! - **An event clicked** opens its card: its title, when, the series it belongs to, where, the organizer and the
 //!   account's answer, who is invited, its text; for a Teams meeting the split Join (any time, started or not: its
 //!   pre-join, [`crate::prejoin`], which starts the meeting's call when nobody has), "Chat with
@@ -26,6 +29,7 @@
 //! - **Keys** while the calendar has the focus: Left and Right the previous and next days, T today, Ctrl+Alt+1–4 the
 //!   views, Escape closes a card or the month picker.
 //! - **Traced**: `calendar shown` with the view's key, `calendar read` with the view's key when its events came,
+//!   `calendar stored` when the store's were drawn first,
 //!   `calendar-event opened` (the event's kind), never a subject or a name.
 
 use std::collections::HashMap;
@@ -130,6 +134,8 @@ impl Toggles {
 #[derive(Clone)]
 enum Loaded {
     Events(Rc<Vec<Shown>>),
+    /// What the store kept of the span, shown until its read answers.
+    Stored(Rc<Vec<Shown>>),
     Failed,
 }
 
@@ -243,13 +249,19 @@ impl CalendarView {
         Span::of(self.anchor, self.mode)
     }
 
-    /// The events shown, once read.
+    /// The events shown, once read (or, until then, as the store kept them).
     #[must_use]
     pub fn events(&self) -> Option<Rc<Vec<Shown>>> {
         match self.loaded.get(&self.span()) {
-            Some(Loaded::Events(events)) => Some(Rc::clone(events)),
+            Some(Loaded::Events(events) | Loaded::Stored(events)) => Some(Rc::clone(events)),
             _ => None,
         }
+    }
+
+    /// Whether the events shown are the store's, their read not answered yet.
+    #[must_use]
+    pub fn showing_stored(&self) -> bool {
+        matches!(self.loaded.get(&self.span()), Some(Loaded::Stored(_)))
     }
 
     /// The event whose card is open.
@@ -416,12 +428,38 @@ impl CalendarView {
             return;
         }
         let (start, end) = span.window_ms();
+        if !matches!(self.loaded.get(&span), Some(Loaded::Events(_) | Loaded::Stored(_))) {
+            let stored = self.core.stored_calendar(start, end);
+            cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                let answer = stored.await;
+                let _ = this.update(cx, |view, cx| view.stored_over(span, answer, cx));
+            })
+            .detach();
+        }
         let reply = self.core.calendar(start, end);
         let task = cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let answer = reply.await;
             let _ = this.update(cx, |view, cx| view.read_over(span, answer, cx));
         });
         self.reading = Some((span, task));
+    }
+
+    /// What the store kept of `span` came: shown while its read hasn't answered (an answer that came first is kept, a
+    /// failed read gives way to it); nothing kept changes nothing.
+    fn stored_over(
+        &mut self,
+        span: Span,
+        answer: Result<Vec<CalendarEvent>, teams_core::EngineError>,
+        cx: &mut Context<Self>,
+    ) {
+        let Ok(events) = answer else { return };
+        if events.is_empty() || matches!(self.loaded.get(&span), Some(Loaded::Events(_) | Loaded::Stored(_))) {
+            return;
+        }
+        self.loaded.insert(span, Loaded::Stored(Rc::new(shown(events))));
+        self.trace
+            .record(&TraceLine::new("calendar", "stored").kind(self.mode.key()));
+        cx.notify();
     }
 
     fn read_over(
@@ -435,17 +473,12 @@ impl CalendarView {
         }
         match answer {
             Ok(events) => {
-                let mut shown: Vec<Shown> = events
-                    .into_iter()
-                    .filter(calendar::shows)
-                    .filter_map(|event| Shown::of(Rc::new(event)))
-                    .collect();
-                shown.sort_by_key(|shown| shown.start);
-                self.loaded.insert(span, Loaded::Events(Rc::new(shown)));
+                self.loaded.insert(span, Loaded::Events(Rc::new(shown(events))));
                 self.trace
                     .record(&TraceLine::new("calendar", "read").kind(self.mode.key()));
             }
-            // a stopped engine keeps what is shown; a failed read says so while nothing was read
+            // a stopped engine keeps what is shown; a failed read says so while nothing was read (what the store kept
+            // stays shown)
             Err(teams_core::EngineError::Stopped) => {}
             Err(_) => {
                 self.loaded.entry(span).or_insert(Loaded::Failed);
@@ -501,7 +534,9 @@ impl CalendarView {
                 // while the span is read, a span read before that holds its days
                 let span = self.span();
                 self.loaded.iter().find_map(|(read, loaded)| match loaded {
-                    Loaded::Events(events) if read.first <= span.first && read.end() >= span.end() => {
+                    Loaded::Events(events) | Loaded::Stored(events)
+                        if read.first <= span.first && read.end() >= span.end() =>
+                    {
                         Some(Rc::clone(events))
                     }
                     _ => None,
@@ -514,6 +549,17 @@ impl CalendarView {
         self.notice = Some(notice);
         cx.notify();
     }
+}
+
+/// The events a read gave as the calendar shows them: a declined meeting left out, by start.
+fn shown(events: Vec<CalendarEvent>) -> Vec<Shown> {
+    let mut shown: Vec<Shown> = events
+        .into_iter()
+        .filter(calendar::shows)
+        .filter_map(|event| Shown::of(Rc::new(event)))
+        .collect();
+    shown.sort_by_key(|shown| shown.start);
+    shown
 }
 
 /// What Edit says when the event can't be read.

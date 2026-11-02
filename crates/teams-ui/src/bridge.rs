@@ -137,6 +137,12 @@ pub trait Core: Send + Sync + 'static {
         let _ = (start_ms, end_ms);
         Reply::ready(Ok(Vec::new()))
     }
+    /// The account's calendar events between `start_ms` and `end_ms` as the store kept them from earlier reads
+    /// (`teams_core::calendar`): what the calendar draws at once while [`Core::calendar`] reads them. None by default.
+    fn stored_calendar(&self, start_ms: i64, end_ms: i64) -> Reply<Vec<CalendarEvent>> {
+        let _ = (start_ms, end_ms);
+        Reply::ready(Ok(Vec::new()))
+    }
     /// One event of the account's calendar, read whole now: what the scheduling form opens on to change it
     /// (`teams_core::calendar`). A fake core has none.
     fn calendar_event(&self, id: String) -> Reply<FullEvent> {
@@ -272,6 +278,10 @@ impl Core for EngineRequests {
 
     fn calendar(&self, start_ms: i64, end_ms: i64) -> Reply<Vec<CalendarEvent>> {
         EngineRequests::calendar(self, start_ms, end_ms)
+    }
+
+    fn stored_calendar(&self, start_ms: i64, end_ms: i64) -> Reply<Vec<CalendarEvent>> {
+        EngineRequests::stored_calendar(self, start_ms, end_ms)
     }
 
     fn calendar_event(&self, id: String) -> Reply<FullEvent> {
@@ -540,6 +550,10 @@ impl Core for StoppedCore {
     }
 
     fn calendar(&self, _: i64, _: i64) -> Reply<Vec<CalendarEvent>> {
+        stopped()
+    }
+
+    fn stored_calendar(&self, _: i64, _: i64) -> Reply<Vec<CalendarEvent>> {
         stopped()
     }
 

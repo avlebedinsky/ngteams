@@ -2,9 +2,12 @@
 //! when the scheduling form saves an event or its card cancels or deletes one (`docs/protocol/calendar.md`).
 //!
 //! - **Reads.** The middle tier's calendar view ([`CalendarView`]), one read per ask, answered with the window's
-//!   events; nothing is kept: the view asks again as it moves and refreshes. A window that is empty, reversed or wider
-//!   than [`teams_proto::MAX_CALENDAR_WINDOW_MS`] is answered with no events and nothing read. A read that failed, or an
-//!   answer that isn't in the shape the web client reads, is [`EngineError::CalendarUnread`]. One event is read whole
+//!   events as soon as they come; the engine then keeps them in the store, replacing what it held of that window
+//!   ([`Store::replace_calendar_window`]), so a later ask, in this run or a later one, is answered from the store at
+//!   once ([`stored`]) while the view reads the window again, as Teams' own client shows its cached calendar while
+//!   it syncs. A window that is empty, reversed or wider than [`teams_proto::MAX_CALENDAR_WINDOW_MS`] is answered with
+//!   no events and nothing read. A read that failed, or an answer that isn't in the shape the web client reads, is
+//!   [`EngineError::CalendarUnread`] and changes nothing stored. One event is read whole
 //!   ([`EventRead`]) before the form opens on it (a series' master too, when the form changes a whole series). The
 //!   form's Scheduler reads the attendees' busy times and the suggested times ([`MeetingAvailability`]): two reads sent as a
 //!   `PUT`, which reach nobody.
@@ -16,13 +19,17 @@
 
 use std::sync::{Arc, Mutex, PoisonError};
 
+use chrono::{Local, NaiveDate, TimeZone as _};
 use serde_json::{Map, Value};
 use teams_fence::Mri;
 use teams_proto::{
     Author, CalendarEvent, CalendarView, CancelEvent, Client, CreateEvent, CreateOnlineMeeting, Credentials,
-    DeleteEvent, EventAttendee, EventDraft, EventRead, FreeBusyAsk, FullEvent, HttpError, HttpTransport, MeetingTimes,
-    Mutating, Organizer, PersonSchedule, Schedules, ShortProfileLookup, TimeZoneSettings, Transport, UpdateEvent,
+    DeleteEvent, EventAttendee, EventDraft, EventRead, EventTime, FreeBusyAsk, FullEvent, HttpError, HttpTransport,
+    MeetingTimes, Mutating, Organizer, PersonSchedule, Schedules, ShortProfileLookup, TimeZoneSettings, Transport,
+    UpdateEvent,
 };
+use teams_store::{Store, StoreError, StoredEvent};
+use tokio::task::JoinSet;
 
 use crate::engine::{EngineError, Responder};
 use crate::outbox::{CallRetries, CallTried, Outbox};
@@ -86,9 +93,19 @@ pub struct EventWritten {
     pub created: Option<CalendarEvent>,
 }
 
+/// A window's read that came, for the engine to keep ([`Store::replace_calendar_window`]); its asker was answered
+/// already.
+pub(crate) struct WindowRead {
+    pub(crate) start_ms: i64,
+    pub(crate) end_ms: i64,
+    pub(crate) events: Vec<StoredEvent>,
+}
+
 pub(crate) struct Calendar<C, T> {
     client: Arc<Client<HttpTransport<C>>>,
     outbox: Arc<Outbox<T>>,
+    /// The window reads under way, each giving what to keep once it is over.
+    reads: JoinSet<Option<WindowRead>>,
     /// The account as an event's organizer, its address and its time zone's name once read ([`Whom`]).
     whom: Arc<Mutex<Option<Whom>>>,
 }
@@ -110,20 +127,47 @@ where
         Self {
             client,
             outbox,
+            reads: JoinSet::new(),
             whom: Arc::new(Mutex::new(None)),
         }
     }
 
-    /// Answers `reply` with the account's events between `start_ms` and `end_ms`, once the read is over.
-    pub(crate) fn view(&self, start_ms: i64, end_ms: i64, reply: Responder<Vec<CalendarEvent>>) {
+    /// Whether a window's read runs.
+    pub(crate) fn busy(&self) -> bool {
+        !self.reads.is_empty()
+    }
+
+    /// The next window read that is over (`None`: it failed, or its task was lost); never while none runs
+    /// ([`Self::busy`]).
+    pub(crate) async fn next(&mut self) -> Option<WindowRead> {
+        self.reads.join_next().await?.ok().flatten()
+    }
+
+    /// Answers `reply` with the account's events between `start_ms` and `end_ms` as soon as the read is over; what it
+    /// read comes from [`Self::next`] for the engine to keep.
+    pub(crate) fn view(&mut self, start_ms: i64, end_ms: i64, reply: Responder<Vec<CalendarEvent>>) {
         let Some(view) = CalendarView::between(start_ms, end_ms) else {
             let _ = reply.send(Ok(Vec::new()));
             return;
         };
         let client = Arc::clone(&self.client);
         // on the engine's `LocalSet`: the read waits on nothing of the engine's loop
-        tokio::task::spawn_local(async move {
-            let _ = reply.send(read(&client, &view).await);
+        self.reads.spawn_local(async move {
+            match read(&client, &view).await {
+                Ok(answer) => {
+                    let events = kept(&answer.events, answer.entries);
+                    let _ = reply.send(Ok(answer.events));
+                    Some(WindowRead {
+                        start_ms,
+                        end_ms,
+                        events,
+                    })
+                }
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                    None
+                }
+            }
         });
     }
 
@@ -416,7 +460,7 @@ fn not_saved(kind: &'static str, why: &str) -> EngineError {
 async fn read<C: Credentials + 'static>(
     client: &Client<HttpTransport<C>>,
     view: &CalendarView,
-) -> Result<Vec<CalendarEvent>, EngineError> {
+) -> Result<teams_proto::CalendarAnswer, EngineError> {
     let answer = client.read(view).await.map_err(|error| {
         log::info!("the calendar couldn't be read: {error}");
         EngineError::CalendarUnread
@@ -429,5 +473,63 @@ async fn read<C: Credentials + 'static>(
         log::info!("the calendar's answer had {} events that don't read", read.skipped);
     }
     log::debug!("the calendar read {} events", read.events.len());
-    Ok(read.events)
+    Ok(read)
+}
+
+/// The stored events between `start_ms` and `end_ms` (see the module docs), by start: what the calendar shows at once
+/// while it reads the window. An empty or reversed window has none; an entry that no longer reads is left out.
+///
+/// # Errors
+///
+/// [`StoreError`] when the store can't be read.
+pub(crate) fn stored(store: &Store, start_ms: i64, end_ms: i64) -> Result<Vec<CalendarEvent>, StoreError> {
+    if end_ms <= start_ms {
+        return Ok(Vec::new());
+    }
+    Ok(store
+        .calendar_events(start_ms, end_ms)?
+        .iter()
+        .filter_map(|stored| CalendarEvent::stored(&stored.entry))
+        .collect())
+}
+
+/// `events` as the store keeps them, each with its entry as the answer gave it (`entries`, in the same order).
+fn kept(events: &[CalendarEvent], entries: Vec<String>) -> Vec<StoredEvent> {
+    events
+        .iter()
+        .zip(entries)
+        .map(|(event, entry)| {
+            let start_ms = instant(event.start);
+            StoredEvent {
+                id: event.id.clone(),
+                start_ms,
+                end_ms: instant(event.end).max(start_ms),
+                entry,
+            }
+        })
+        .collect()
+}
+
+/// An event's start or end in ms since the epoch: a time without an offset is the desktop's local time, as the
+/// calendar places it (and the service, asked for a window by local midnights, gives it).
+fn instant(time: EventTime) -> i64 {
+    match time {
+        EventTime::Instant(ms) => ms,
+        EventTime::Floating(time) => {
+            let local =
+                NaiveDate::from_ymd_opt(time.year, u32::from(time.month), u32::from(time.day)).and_then(|date| {
+                    date.and_hms_opt(
+                        u32::from(time.hour),
+                        u32::from(time.minute),
+                        u32::from(time.second.min(59)),
+                    )
+                });
+            local.map_or(0, |local| {
+                Local
+                    .from_local_datetime(&local)
+                    .earliest()
+                    .map_or_else(|| local.and_utc().timestamp_millis(), |time| time.timestamp_millis())
+            })
+        }
+    }
 }

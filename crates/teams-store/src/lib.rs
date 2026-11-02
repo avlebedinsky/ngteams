@@ -14,6 +14,8 @@
 //!   (`<store>-cache/pictures.sqlite`), so a later run shows them without reading them again;
 //! - [`teams`]: the account's teams and their channels as CSA last listed them, and each stored channel message's
 //!   post (M2 Task 16);
+//! - [`calendar`]: the account's calendar events as the calendar view last read them, each window's read replacing
+//!   the events it overlaps (schema 16);
 //! - [`schema`]: the migrations, applied in order on open.
 //!
 //! Every versioned write is an upsert that never lets an older version overwrite a newer one, so a Trouter delivery
@@ -22,6 +24,7 @@
 //!
 //! M1 Task 11 (`docs/plans/20261020-native-teams-m1-headless-chat-core.md`).
 
+pub mod calendar;
 pub mod conversations;
 mod file;
 pub mod messages;
@@ -41,6 +44,7 @@ use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags, TransactionBehavior};
 
+pub use calendar::StoredEvent;
 pub use conversations::{Conversation, ConversationKind, Member};
 pub use messages::{Message, MessagePage, PageCursor, Reaction, ReactionChange, counts_unread};
 pub use outbox::{AttemptOutcome, CheckFailed, NewOutboxEntry, OutboxEntry, OutboxKind, OutboxState};

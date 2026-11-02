@@ -326,6 +326,10 @@ impl Core for FakeCore {
         locked(&self.calendar).read(start_ms, end_ms)
     }
 
+    fn stored_calendar(&self, start_ms: i64, end_ms: i64) -> Reply<Vec<teams_core::CalendarEvent>> {
+        locked(&self.calendar).stored(start_ms, end_ms)
+    }
+
     fn calendar_event(&self, id: String) -> Reply<teams_core::FullEvent> {
         let mut calendar = locked(&self.calendar);
         calendar.full_reads.push(id.clone());

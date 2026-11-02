@@ -50,8 +50,12 @@ struct Rig {
 }
 
 async fn running_engine(middle_tier: bool) -> Rig {
+    running_engine_on(middle_tier, tempfile::tempdir().unwrap()).await
+}
+
+/// An engine on the store in `dir` (`calendar.sqlite`, made when missing).
+async fn running_engine_on(middle_tier: bool, dir: tempfile::TempDir) -> Rig {
     let server = MockServer::start().await;
-    let dir = tempfile::tempdir().unwrap();
     let fence = Arc::new(Fence::new(
         Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), []).with_lab_mail([MAIL_A, MAIL_B]),
         FenceLog::from_writer(std::io::sink()),
@@ -480,5 +484,111 @@ async fn invalid_changes_and_uncertain_or_refused_writes_are_never_resent() {
     let sent = requests(&rig.server, "POST", EVENTS).await;
     assert_eq!(sent.len(), 4);
     assert_eq!(sent[2].body, sent[3].body, "a retry keeps the transaction id");
+    rig.handle.shutdown();
+}
+
+/// The ids the store answers for `START`'s day once the engine kept what it read (the read's answer comes first):
+/// asked until they are `expected`, for a bounded while.
+async fn stored_settles(rig: &Rig, expected: &[&str]) {
+    let mut ids = Vec::new();
+    for _ in 0..100 {
+        let stored = rig.handle.stored_calendar(START, START + 86_400_000).await.unwrap();
+        ids = stored.into_iter().map(|event| event.id).collect::<Vec<_>>();
+        if ids == expected {
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    panic!("stored {ids:?}, not {expected:?}");
+}
+
+#[tokio::test]
+async fn a_window_read_is_kept_and_the_next_read_replaces_it() {
+    let rig = running_engine(true).await;
+    let view = format!("{PREFIX}/v2.0/me/calendars/default/calendarView");
+    assert!(
+        rig.handle
+            .stored_calendar(START, START + 86_400_000)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let mut occurrence = event();
+    occurrence["objectId"] = json!("MadeUpOccurrence");
+    occurrence["eventType"] = json!("Occurrence");
+    occurrence["startTime"] = json!("2026-11-01T18:00:00Z");
+    occurrence["endTime"] = json!("2026-11-01T19:00:00Z");
+    let mut master = occurrence.clone();
+    master["objectId"] = json!("MadeUpMaster");
+    master["eventType"] = json!("RecurringMaster");
+    next_answer(
+        &rig.server,
+        "GET",
+        &view,
+        200,
+        json!({"value": [event(), occurrence, master]}),
+    )
+    .await;
+    assert_eq!(rig.handle.calendar(START, START + 86_400_000).await.unwrap().len(), 2);
+    stored_settles(&rig, &["MadeUpEvent", "MadeUpOccurrence"]).await;
+    let stored = rig.handle.stored_calendar(START, START + 86_400_000).await.unwrap();
+    assert_eq!(stored[0].subject, "Synthetic planning", "read back as it came");
+    assert!(
+        rig.handle
+            .stored_calendar(START + 86_400_000, START + 2 * 86_400_000)
+            .await
+            .unwrap()
+            .is_empty(),
+        "nothing on the next day"
+    );
+    assert!(
+        rig.handle.stored_calendar(START, START).await.unwrap().is_empty(),
+        "an empty window"
+    );
+
+    // a failed read changes nothing kept
+    next_answer(&rig.server, "GET", &view, 403, Value::Null).await;
+    assert!(rig.handle.calendar(START, START + 86_400_000).await.is_err());
+    stored_settles(&rig, &["MadeUpEvent", "MadeUpOccurrence"]).await;
+
+    // the next read: the event gone, the occurrence cancelled
+    let mut cancelled = event();
+    cancelled["objectId"] = json!("MadeUpOccurrence");
+    cancelled["eventType"] = json!("Occurrence");
+    cancelled["isCancelled"] = json!(true);
+    next_answer(&rig.server, "GET", &view, 200, json!({"value": [cancelled]})).await;
+    assert_eq!(rig.handle.calendar(START, START + 86_400_000).await.unwrap().len(), 1);
+    stored_settles(&rig, &["MadeUpOccurrence"]).await;
+    let stored = rig.handle.stored_calendar(START, START + 86_400_000).await.unwrap();
+    assert!(stored[0].cancelled);
+    rig.handle.shutdown();
+}
+
+#[tokio::test]
+async fn a_kept_window_is_answered_by_a_later_engine_on_the_same_store() {
+    // the store's own reopen is `teams-store`'s test; here the kept rows read back through a new engine's query
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("calendar.sqlite");
+    let entry = event().to_string();
+    {
+        let mut store = Store::open(&path).unwrap();
+        let start = START + 16 * 3_600_000;
+        store
+            .replace_calendar_window(
+                START,
+                START + 86_400_000,
+                &[teams_store::StoredEvent {
+                    id: "MadeUpEvent".to_owned(),
+                    start_ms: start,
+                    end_ms: start + 1_800_000,
+                    entry,
+                }],
+            )
+            .unwrap();
+    }
+    let rig = running_engine_on(true, dir).await;
+    let stored = rig.handle.stored_calendar(START, START + 86_400_000).await.unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(stored[0].id, "MadeUpEvent");
     rig.handle.shutdown();
 }

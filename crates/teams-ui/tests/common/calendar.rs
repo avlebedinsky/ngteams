@@ -10,6 +10,9 @@ use teams_core::{
 pub struct CalendarFake {
     pub events: Vec<CalendarEvent>,
     pub reads: Vec<(i64, i64)>,
+    /// What the store kept: the stored read's answer.
+    pub stored: Vec<CalendarEvent>,
+    pub stored_reads: Vec<(i64, i64)>,
     pub answers: VecDeque<Result<Vec<CalendarEvent>, EngineError>>,
     pub hold: bool,
     pub held: Vec<Answer<Vec<CalendarEvent>>>,
@@ -34,6 +37,11 @@ impl CalendarFake {
         } else {
             Reply::ready(self.answers.pop_front().unwrap_or_else(|| Ok(self.events.clone())))
         }
+    }
+
+    pub fn stored(&mut self, start_ms: i64, end_ms: i64) -> Reply<Vec<CalendarEvent>> {
+        self.stored_reads.push((start_ms, end_ms));
+        Reply::ready(Ok(self.stored.clone()))
     }
 
     pub fn write(&mut self, write: EventWrite) -> Reply<EventWritten> {

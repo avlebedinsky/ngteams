@@ -99,6 +99,20 @@ fn the_all_day_event_reads_its_local_day(all_day: &CalendarEvent) {
 }
 
 #[test]
+fn each_event_is_kept_as_it_came_and_reads_back_the_same() {
+    let answer = CalendarView::read_answer(FIXTURE.as_bytes()).unwrap();
+    assert_eq!(answer.entries.len(), answer.events.len());
+    for (entry, event) in answer.entries.iter().zip(&answer.events) {
+        assert_eq!(CalendarEvent::stored(entry).as_ref(), Some(event));
+    }
+    assert_eq!(CalendarEvent::stored("not json"), None);
+    assert_eq!(CalendarEvent::stored(r#"{"objectId": "x"}"#), None, "no times");
+    let master = r#"{"objectId": "m", "startTime": "2026-10-26T09:00:00Z", "endTime": "2026-10-26T10:00:00Z",
+        "eventType": "RecurringMaster"}"#;
+    assert_eq!(CalendarEvent::stored(master), None, "a series' master isn't shown");
+}
+
+#[test]
 fn an_answer_without_its_events_is_refused() {
     assert_eq!(
         CalendarView::read_answer(br#"{"type": "x"}"#),

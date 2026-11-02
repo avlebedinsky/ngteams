@@ -55,7 +55,15 @@ Other selected fields (`categories`, `cleanGlobalObjectId`, `iCalUid`, `eventTim
 ## What the native client does with it
 
 - **The calendar view's read**: one read per window a view shows, when it changes, on Refresh and every five minutes
-  while the calendar is shown; nothing is stored (the writes are under "What the native client does" below). A window wider than 62 days is never asked for.
+  while the calendar is shown (the writes are under "Writing an event" below). A window wider than 62 days is never
+  asked for.
+- **Kept between runs**: each answer replaces, in the account's store, the events it held that overlap the window
+  (each event kept as its entry came, read again by the same reader), so a window not read yet in this run is drawn
+  from the store at once and the answer then applies on top: events added, changed, moved, cancelled or gone. A
+  failed read keeps what was stored. The web client keeps a calendar cache of its own too: the lab profiles' local
+  storage holds its calendar sync state (a `CalendarScenario` and a `CalendarSyncScenario` with a version and a stale
+  flag, and an "up to date" marker), which the lab's empty calendars never filled with events, so its exact rules
+  (how much it keeps, when it marks it stale) weren't seen.
 - **Joining**: a meeting's Join is there at any time, started or not ([calling.md](calling.md#joining-a-meeting)): its
   chat comes from `skypeTeamsData`'s `cid` or the join link's path, its organizer and tenant from the link's `context`
   (`Oid`, `Tid`), a series' occurrences all naming the series' one chat. It opens the app's pre-join; only its Join now

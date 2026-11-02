@@ -128,6 +128,11 @@ impl Inbox {
             Query::OutboxUnsettled(conversation, reply) => give(reply, store.outbox_unsettled(&conversation)),
             Query::LeftByEarlierRuns(reply) => give(reply, store.outbox_left_by_earlier_runs()),
             Query::ReplyRoots(conversation, reply) => give(reply, store.reply_roots(&conversation)),
+            Query::CalendarEvents {
+                start_ms,
+                end_ms,
+                reply,
+            } => give(reply, crate::calendar::stored(store, start_ms, end_ms)),
             Query::Search {
                 query,
                 within,

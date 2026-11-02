@@ -63,7 +63,10 @@ impl CalendarView {
         for entry in entries {
             match CalendarEvent::of(entry) {
                 Some(event) if event.kind == EventKind::RecurringMaster => {}
-                Some(event) => read.events.push(event),
+                Some(event) => {
+                    read.events.push(event);
+                    read.entries.push(entry.to_string());
+                }
                 None => read.skipped += 1,
             }
         }
@@ -95,6 +98,9 @@ pub enum CalendarAnswerError {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CalendarAnswer {
     pub events: Vec<CalendarEvent>,
+    /// Each of `events` as the answer gave it (its JSON object, as text), in the same order: what the native client
+    /// keeps of an event between runs, read again with [`CalendarEvent::stored`].
+    pub entries: Vec<String>,
     /// Events left out: no string `objectId`, or a `startTime` or `endTime` that doesn't read.
     pub skipped: usize,
 }
@@ -230,6 +236,14 @@ impl CalendarEvent {
             _ => &answer,
         };
         Self::of(event)
+    }
+
+    /// The event a kept answer's entry gives ([`CalendarAnswer::entries`]), read as the answer was; `None` when it
+    /// doesn't read, or is a series' master.
+    #[must_use]
+    pub fn stored(entry: &str) -> Option<Self> {
+        let entry: Value = serde_json::from_str(entry).ok()?;
+        Self::of(&entry).filter(|event| event.kind != EventKind::RecurringMaster)
     }
 
     /// The event `entry` describes; `None` without a string `objectId` or a readable `startTime` and `endTime`.
