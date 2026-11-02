@@ -187,6 +187,7 @@ pub struct ForcedDeny {
     url: Regex,
     except: Option<Regex>,
     body_contains: Option<String>,
+    body_lacks: Option<String>,
     label: Option<String>,
 }
 
@@ -201,6 +202,7 @@ impl ForcedDeny {
             url: Regex::new(url_pattern)?,
             except: None,
             body_contains: None,
+            body_lacks: None,
             label: None,
         })
     }
@@ -236,6 +238,13 @@ impl ForcedDeny {
         self
     }
 
+    /// Only requests whose body doesn't hold `text` (a body Chrome didn't inline holds none).
+    #[must_use]
+    pub fn with_body_lacking(mut self, text: &str) -> Self {
+        self.body_lacks = Some(text.to_owned());
+        self
+    }
+
     /// Whether it denies `request`. A body Chrome didn't inline doesn't hold the text.
     #[must_use]
     pub fn matches(&self, request: &PausedRequest) -> bool {
@@ -245,11 +254,19 @@ impl ForcedDeny {
                 .as_deref()
                 .is_some_and(|body| String::from_utf8_lossy(body).contains(text.as_str()))
         });
+        let holds = |text: &str| {
+            request
+                .body
+                .as_deref()
+                .is_some_and(|body| String::from_utf8_lossy(body).contains(text))
+        };
+        let lacks = self.body_lacks.as_deref().is_none_or(|text| !holds(text));
         let excepted = self.except.as_ref().is_some_and(|except| except.is_match(&request.url));
         self.method.eq_ignore_ascii_case(&request.method)
             && self.url.is_match(&request.url)
             && !excepted
             && body_matches
+            && lacks
     }
 }
 

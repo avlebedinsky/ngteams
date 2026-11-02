@@ -337,6 +337,32 @@ pub(super) async fn schedule(
     steps.created(a, drive, report, title).await.map(|seen| seen.body)
 }
 
+/// Cancels a's meeting whose chat is `chat` from its details, as [`Steps::cancel`] does, for a run that made it.
+pub(super) async fn cancel_scheduled(
+    a: &mut LabSession,
+    drive: &mut Driver,
+    report: &mut ScenarioReport,
+    chat: &str,
+    options: RunOptions,
+) -> Result<(), ScenarioError> {
+    open_details(a, drive, report, chat, options.load_timeout).await?;
+    let mut drive = a.driver();
+    let steps = Steps {
+        mri_b: "",
+        upn_b: "",
+        chat_id: None,
+        nonce: "",
+        options,
+        pauses: FormPauses::default(),
+    };
+    steps.cancel(a, &mut drive, report).await
+}
+
+/// The meeting chat a creation's request body names, for a run that goes on with it.
+pub(super) fn created_chat(body: Option<&str>) -> Option<String> {
+    meeting_chat(body)
+}
+
 /// The join link a creation's request body names (`schedulingServiceEvent.links.join`).
 pub(super) fn created_join_link(body: Option<&str>) -> Option<String> {
     let body: serde_json::Value = serde_json::from_str(body?).ok()?;

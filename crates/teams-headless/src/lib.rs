@@ -27,5 +27,6 @@ pub mod commands;
 pub mod debug_log;
 pub mod echo;
 pub mod lab;
+pub mod meetings;
 pub mod print;
 pub mod series;

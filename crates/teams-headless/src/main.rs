@@ -109,6 +109,33 @@ async fn run(cli: Cli) -> Outcome {
 
 /// Runs the parsed command on the account already loaded above. Tests supply only a loopback account here; the
 /// runnable binary always gets its concrete lab from `run`, after the build's refusal checks in `main`.
+/// `series`: the scheduling form's series and Scheduler proved (`series.rs`).
+async fn series(lab: &Lab, keep: bool, cleanup: bool, signals: &mut Signals, out: &mut impl Write) -> Outcome {
+    let handle = lab.start_engine(false).await?;
+    let probed = tokio::select! {
+        probed = teams_headless::series::probe(&handle, now_ms(), keep, cleanup, out) => Some(probed),
+        () = signals.next() => None,
+    };
+    let code = |fine: bool| if fine { ExitCode::SUCCESS } else { ExitCode::FAILURE };
+    finish(handle, probed.map(|probed| probed.map(code)))
+}
+
+/// `meetings`: the account's meetings looked at (`meetings.rs`).
+async fn meetings(
+    lab: &Lab,
+    look: teams_headless::meetings::Look,
+    signals: &mut Signals,
+    out: &mut impl Write,
+) -> Outcome {
+    let handle = lab.start_engine(false).await?;
+    let looked = tokio::select! {
+        looked = teams_headless::meetings::meetings(&handle, now_ms(), &look, out) => Some(looked),
+        () = signals.next() => None,
+    };
+    let code = |fine: bool| if fine { ExitCode::SUCCESS } else { ExitCode::FAILURE };
+    finish(handle, looked.map(|looked| looked.map(code)))
+}
+
 async fn dispatch(lab: &Lab, command: Command, signals: &mut Signals, out: &mut impl Write) -> Outcome {
     match command {
         Command::List { limit } => {
@@ -129,15 +156,10 @@ async fn dispatch(lab: &Lab, command: Command, signals: &mut Signals, out: &mut 
         Command::Profile { mris, wait } => profile(lab, &mris, Duration::from_secs(wait), signals, out).await,
         Command::Search { query } => search(lab, &query, out).await,
         Command::TeamReads { team, group } => team_reads(lab, &team, &group, out).await,
-        Command::Series { keep, cleanup } => {
-            let handle = lab.start_engine(false).await?;
-            let probed = tokio::select! {
-                probed = teams_headless::series::probe(&handle, now_ms(), keep, cleanup, out) => Some(probed),
-                () = signals.next() => None,
-            };
-            let code = |fine: bool| if fine { ExitCode::SUCCESS } else { ExitCode::FAILURE };
-            finish(handle, probed.map(|probed| probed.map(code)))
+        Command::Meetings { read, cancel } => {
+            meetings(lab, teams_headless::meetings::Look { read, cancel }, signals, out).await
         }
+        Command::Series { keep, cleanup } => series(lab, keep, cleanup, signals, out).await,
         Command::Availability {
             manual,
             manual_after,
@@ -392,6 +414,7 @@ fn write_action(lab: &Lab, command: Command) -> Result<(Action, Duration), Box<d
         | Command::Search { .. }
         | Command::TeamReads { .. }
         | Command::Series { .. }
+        | Command::Meetings { .. }
         | Command::Availability { .. }
         | Command::Call { .. }
         | Command::Join { .. }

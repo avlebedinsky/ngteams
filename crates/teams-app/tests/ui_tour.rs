@@ -83,7 +83,7 @@ const SETTLE: Duration = Duration::from_millis(1500);
 type Step = (&'static str, fn(&Entity<Shell>, &mut Window, &mut App));
 
 /// The tour.
-const STEPS: [Step; 4 + 113] = [
+const STEPS: [Step; 4 + 115] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -650,6 +650,13 @@ const STEPS: [Step; 4 + 113] = [
         let models = shell.read(cx).models().clone();
         models.calls.update(cx, |calls, cx| calls.set_prejoin_muted(true, cx));
     }),
+    // Don't use audio picked: the computer's devices give way to its note
+    ("calendar-prejoin-no-audio", |shell, _, cx| {
+        let models = shell.read(cx).models().clone();
+        models
+            .calls
+            .update(cx, |calls, cx| calls.set_prejoin_no_audio(true, cx));
+    }),
     ("calendar-month", |shell, _, cx| {
         let models = shell.read(cx).models().clone();
         models.calls.update(cx, teams_ui::Calls::cancel_prejoin);
@@ -678,11 +685,17 @@ const STEPS: [Step; 4 + 113] = [
             model.change(|settings| settings.appearance.theme = teams_ui::theme::DARK_KEY, cx);
         });
     }),
+    // the toolbar's Join with an ID: its panel under the toolbar
+    ("calendar-join-id", |shell, window, cx| {
+        let calendar = shell.read(cx).calendar_view().clone();
+        calendar.update(cx, |calendar, cx| calendar.open_join_id(window, cx));
+    }),
     // the calendar's New: the scheduling form in a window of its own ("New event - Calendar"), at the next half hour,
     // the day beside it with the new event's block, in Teams Dark as the user's screenshot has it
     ("event-form-dark", |shell, _, cx| {
         let calendar = shell.read(cx).calendar_view().clone();
         calendar.update(cx, |calendar, cx| {
+            calendar.close_join_id(cx);
             let slot = calendar.next_slot();
             calendar.new_event(slot, false, cx);
         });

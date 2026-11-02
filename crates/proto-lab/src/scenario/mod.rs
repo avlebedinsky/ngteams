@@ -50,6 +50,9 @@
 //!   the pre-join's Join now; what follows the subscription is held back; recorded.
 //! - [`team_manage`] (one account, driven step by step over a socket, every write on a team held back or judged by the
 //!   lab rule alone): a look at the web client's team management; recorded.
+//! - [`meeting_steps`] (one account, driven step by step over a socket as `team-manage` is, after the enforcement test,
+//!   every write judged by the lab rule): a look at a meeting's pre-join, lobby, options and a channel's meeting;
+//!   recorded.
 //! - [`search`] (account a, fail-closed as `load`): a searches from the title bar (the suggestions as it types, the
 //!   results and each of their tabs, a message found opened); recorded.
 //!
@@ -77,6 +80,7 @@ pub mod dsl;
 pub mod echo_call;
 pub mod expected;
 pub mod load;
+pub mod meeting_steps;
 pub mod own_presence;
 pub mod search;
 pub mod team_manage;
@@ -158,6 +162,9 @@ pub enum ScenarioName {
     /// One account's page driven step by step over a socket (`PROTO_LAB_STEPS_SOCKET`), to look at its team management:
     /// every write on a team held back, or with `PROTO_LAB_TEAM_WRITES=1` only the lab rule's; recorded.
     TeamManage,
+    /// One account's page in a meeting, driven step by step over a socket (`PROTO_LAB_STEPS_SOCKET`), after the
+    /// enforcement test; every write judged by the lab rule; recorded.
+    MeetingSteps,
     /// Account a's availability reported by the `user.activity` frame alone (the presence endpoint denied); recorded.
     OwnPresenceActivity,
     /// Account a's availability reported by the presence endpoint alone (every `user.activity` held back); recorded.
@@ -196,6 +203,7 @@ impl ScenarioName {
             Self::Search => "search",
             Self::ChannelCreate => "channel-create",
             Self::TeamManage => "team-manage",
+            Self::MeetingSteps => "meeting-steps",
             Self::OwnPresenceActivity => "own-presence-activity",
             Self::OwnPresenceEndpoint => "own-presence-endpoint",
             Self::OwnPresenceBoth => "own-presence-both",
@@ -432,6 +440,7 @@ pub async fn run(
         | ScenarioName::OwnPresenceManual => own_presence::run_named(paths, options, scenario).await,
         ScenarioName::ChannelCreate => channel_create::run(paths, options).await,
         ScenarioName::TeamManage => team_manage::run(paths, options).await,
+        ScenarioName::MeetingSteps => meeting_steps::run(paths, options).await,
         _ => run_other(scenario, paths, options).await,
     }
 }

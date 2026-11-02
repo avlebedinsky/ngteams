@@ -224,6 +224,12 @@ impl CalendarView {
                 meeting: meeting.clone(),
                 title: shown.title(),
             })),
+            // a short `/meet/` link names no organizer: the meeting's chat does
+            (Some(chat), None) => Some(JoinTarget::Chat {
+                chat: chat.clone(),
+                title: shown.title(),
+                link: event.join_url.clone(),
+            }),
             _ => event.join_url.clone().map(JoinTarget::Link),
         }
     }
@@ -299,6 +305,7 @@ impl CalendarView {
         self.card = None;
         match target {
             JoinTarget::Call(to_join) => cx.emit(CalendarViewEvent::Join(to_join)),
+            JoinTarget::Chat { chat, title, link } => cx.emit(CalendarViewEvent::JoinChat { chat, title, link }),
             JoinTarget::Link(link) => cx.open_url(&link),
         }
         cx.notify();
@@ -355,6 +362,12 @@ impl CalendarView {
 enum JoinTarget {
     /// The meeting's call, by its pre-join.
     Call(MeetingToJoin),
+    /// The meeting's call by its pre-join, once its chat named its organizer; its link otherwise.
+    Chat {
+        chat: String,
+        title: String,
+        link: Option<String>,
+    },
     /// Its link, opened in the browser: the event doesn't name what going into its call takes.
     Link(String),
 }

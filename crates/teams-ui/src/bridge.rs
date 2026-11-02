@@ -26,8 +26,8 @@ use teams_core::sync::{CatchUpReport, Synced};
 use teams_core::{
     Action, Availability, CalendarEvent, CallAction, CallId, ChannelDraft, ChannelMade, ChatListing, EngineHandle,
     EngineRequests, Event, EventAttendee, EventWrite, EventWritten, FileStream, FullEvent, Invitable,
-    MeetingAvailability, OwnStatus, Person, PictureBytes, Reply, SearchAnswer, SearchScope, Strip, TeamChange,
-    TeamMember, TeamWritten, Transient, TransientSent,
+    MeetingAvailability, MeetingDetails, OwnStatus, Person, PictureBytes, Reply, SearchAnswer, SearchScope, Strip,
+    TeamChange, TeamMember, TeamWritten, Transient, TransientSent,
 };
 use teams_proto::{
     AnalyticsPeriod, JoinableTeam, ManagedChannel, OwnTeamView, PendingInvite, TagsRead, TeamAnalytics, TeamPerson,
@@ -197,6 +197,10 @@ pub trait Core: Send + Sync + 'static {
     fn own_team_view(&self, _requests: Vec<OwnTeamView>, _change: Option<TeamChange>) -> Reply<()> {
         Reply::ready(Err(teams_core::EngineError::TeamNotChanged { code: None }))
     }
+    /// The meeting whose chat is `chat`, as its chat's thread names it. A fake core knows none.
+    fn meeting(&self, _chat: String) -> Reply<Option<MeetingDetails>> {
+        Reply::ready(Ok(None))
+    }
     /// A team's people. A fake core knows nobody.
     fn team_roster(&self, _team: String) -> Reply<Vec<TeamMember>> {
         Reply::ready(Ok(Vec::new()))
@@ -329,6 +333,10 @@ impl Core for EngineRequests {
 
     fn team_roster(&self, team: String) -> Reply<Vec<TeamMember>> {
         EngineRequests::team_roster(self, team)
+    }
+
+    fn meeting(&self, chat: String) -> Reply<Option<MeetingDetails>> {
+        EngineRequests::meeting(self, chat)
     }
 
     fn team_settings(&self, team: String) -> Reply<Option<String>> {

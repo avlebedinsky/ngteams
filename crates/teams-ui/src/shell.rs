@@ -536,6 +536,14 @@ impl Shell {
         let events = cx.subscribe_in(&calendar, window, |this: &mut Self, _, event, window, cx| match event {
             CalendarViewEvent::OpenChat(chat) => this.open_chat(chat.clone(), window, cx),
             CalendarViewEvent::Join(to_join) => this.open_prejoin(to_join.clone(), cx),
+            CalendarViewEvent::JoinChat { chat, title, link } => {
+                this.join_meeting_chat(chat.clone(), Some(title.clone()), link.clone(), cx);
+            }
+            CalendarViewEvent::JoinCode(_) => {
+                let ask = Ask::Join { chat: String::new() };
+                let (calls, trace) = (this.models.calls.clone(), Arc::clone(&this.trace));
+                calls::refuse_here(&calls, &trace, &ask, "no-meeting-code", cx);
+            }
         });
         (calendar, events)
     }
@@ -606,8 +614,9 @@ impl Shell {
         &self.call_bar
     }
 
-    /// The call button the chat shown has: `call`, `join` (a running call there, from an invitation), or `none` (no
-    /// chat shown, calls not shown, the calling endpoint not registered, or a call up or ringing).
+    /// The call button the chat shown has: `call`, `join` (a running call there, from an invitation), `meeting` (a
+    /// meeting's chat: its Join, started or not, as Teams' header has it), or `none` (no chat shown, calls not shown,
+    /// the calling endpoint not registered, or a call up or ringing).
     #[must_use]
     pub fn call_button(&self, cx: &App) -> &'static str {
         let Main::Chat(id) = &self.main else {
@@ -616,6 +625,8 @@ impl Shell {
         let calls = self.models.calls.read(cx);
         if !calls.idle() || !calls.registered() || self.busy_elsewhere(cx) {
             "none"
+        } else if self.is_meeting_chat(id, cx) {
+            "meeting"
         } else if calls.joinable(id) {
             "join"
         } else {
@@ -671,6 +682,47 @@ impl Shell {
             .calls
             .update(cx, |calls, cx| calls.open_prejoin(to_join, cx));
         crate::call_window::raise(cx);
+    }
+
+    /// A meeting's Join where only its chat is known (the meeting chat's header, an event whose link names no
+    /// organizer): the meeting read from its chat ([`Core::meeting`]), then its pre-join, titled `title` or as the chat
+    /// names it. When the chat names no meeting, `link` opens in the browser, or the join is refused.
+    pub fn join_meeting_chat(
+        &mut self,
+        chat: String,
+        title: Option<String>,
+        link: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        self.trace
+            .record(&TraceLine::new("call", "meeting-read").conversation(&chat));
+        let reply = self.core.meeting(chat.clone());
+        cx.spawn(async move |this, cx| {
+            let read = reply.await;
+            let _ = this.update(cx, |this, cx| match read {
+                Ok(Some(details)) => {
+                    let title = title.or(details.title).unwrap_or_else(|| "Meeting".to_owned());
+                    this.open_prejoin(
+                        MeetingToJoin {
+                            chat,
+                            meeting: details.meeting,
+                            title,
+                        },
+                        cx,
+                    );
+                }
+                _ => {
+                    if let Some(link) = link {
+                        cx.open_url(&link);
+                    } else {
+                        let ask = Ask::Join { chat };
+                        let (calls, trace) = (this.models.calls.clone(), Arc::clone(&this.trace));
+                        calls::refuse_here(&calls, &trace, &ask, "no-meeting", cx);
+                    }
+                }
+            });
+        })
+        .detach();
     }
 
     /// The account's models the shell shows.
@@ -732,10 +784,31 @@ impl Shell {
         }
     }
 
-    /// Joins the running call of the chat shown.
+    /// Whether the chat `id` is a meeting's, as the list has it.
+    fn is_meeting_chat(&self, id: &str, cx: &App) -> bool {
+        self.list
+            .read(cx)
+            .row(id)
+            .is_some_and(|row| row.kind == crate::chat_list::RowKind::Meeting)
+    }
+
+    /// The chat `id`'s name, when the list names it.
+    fn chat_title(&self, id: &str, cx: &App) -> Option<String> {
+        let row = self.list.read(cx).row(id)?;
+        row.named.then(|| row.name.to_string())
+    }
+
+    /// Joins the running call of the chat shown; in a meeting's chat, goes into the meeting (its pre-join), started or
+    /// not.
     pub fn join_call(&mut self, cx: &mut Context<Self>) {
         if let Main::Chat(id) = &self.main {
             let chat = id.clone();
+            if self.is_meeting_chat(&chat, cx) {
+                let title = self.chat_title(&chat, cx);
+                // a call up or ringing refuses it as the pre-join opens
+                self.join_meeting_chat(chat, title, None, cx);
+                return;
+            }
             self.ask_call(Ask::Join { chat }, cx);
         } else {
             let ask = Ask::Join { chat: String::new() };
@@ -765,6 +838,13 @@ impl Shell {
                 "chat-call",
                 icon_button_with_key("chat-call", Glyph::PHONE, "Audio call", &CallChat),
                 Self::call_chat,
+            ),
+            "meeting" => (
+                "chat-join-meeting",
+                icon_button_with_key("chat-join-meeting", Glyph::VIDEO, "Join the meeting", &JoinCall)
+                    .label("Join")
+                    .primary(),
+                Self::join_call,
             ),
             "join" => (
                 "chat-join",

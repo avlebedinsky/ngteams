@@ -24,8 +24,9 @@
 //!   ([`crate::event_form`]); a save there reads the days shown again. The card of the account's own meeting offers
 //!   Cancel meeting, of its appointment Delete, and of a meeting cancelled by its organizer Remove from calendar, each
 //!   confirmed first.
-//! - **Join with an ID** needs a write no capture has shown (a meeting's lookup by its id and passcode): it says so
-//!   rather than send a guess. So does "Add calendar" (other people's and shared calendars).
+//! - **Join with an ID** (`join_id`): the meeting's ID and passcode, the meeting found in the calendar by them and
+//!   joined as its card's Join joins it. "Add calendar" (other people's and shared calendars) says it isn't
+//!   available yet.
 //! - **Keys** while the calendar has the focus: Left and Right the previous and next days, T today, Ctrl+Alt+1–4 the
 //!   views, Escape closes a card or the month picker.
 //! - **Traced**: `calendar shown` with the view's key, `calendar read` with the view's key when its events came,
@@ -57,7 +58,10 @@ use crate::trace::{TraceLine, ViewTrace};
 
 mod card;
 mod grid;
+mod join_id;
 mod pane;
+
+pub use join_id::ID_INVALID;
 
 /// One hour's height in the time grid, px.
 const HOUR_HEIGHT: f32 = 96.0;
@@ -81,6 +85,15 @@ pub enum CalendarViewEvent {
     OpenChat(String),
     /// Join the running call of the meeting whose chat this is.
     Join(MeetingToJoin),
+    /// Join the meeting whose chat this is, its organizer read from the chat (its event's link names none): its
+    /// title, and its link to open in the browser when the chat names no meeting.
+    JoinChat {
+        chat: String,
+        title: String,
+        link: Option<String>,
+    },
+    /// Join the meeting with this ID and passcode, which the calendar doesn't have.
+    JoinCode(teams_core::MeetingCode),
 }
 
 /// One of the calendar's switches.
@@ -166,6 +179,8 @@ pub struct CalendarView {
     removal: Removal,
     /// What a control that can't act yet says, until closed.
     notice: Option<&'static str>,
+    /// Join with an ID's panel, while it is open.
+    join_id: Option<join_id::JoinIdForm>,
     scroll: ScrollHandle,
     _ticker: Task<()>,
 }
@@ -207,6 +222,7 @@ impl CalendarView {
             card: None,
             removal: Removal::None,
             notice: None,
+            join_id: None,
             scroll: ScrollHandle::new(),
             _ticker: ticker,
         }
@@ -577,9 +593,6 @@ pub enum Removal {
     /// Confirmed: being sent.
     Sending,
 }
-/// What Join with an ID says: joining by a meeting's id and passcode was never captured.
-pub const JOIN_ID_UNAVAILABLE: &str =
-    "Joining by a meeting ID isn't available yet. Open the meeting from your calendar or its link instead.";
 /// What Add calendar says.
 pub const ADD_CALENDAR_UNAVAILABLE: &str = "Adding other calendars isn't available yet.";
 
@@ -654,6 +667,7 @@ impl Render for CalendarView {
         };
         let picker = self.picker_view(palette, cx);
         let card = self.card_view(palette, cx);
+        let join_id = self.join_id_view(palette, cx);
         let main = div()
             .relative()
             .flex_1()
@@ -667,7 +681,8 @@ impl Render for CalendarView {
             .children(notice)
             .child(grid)
             .children(picker)
-            .children(card);
+            .children(card)
+            .children(join_id);
         div()
             .debug_selector(|| "calendar".to_owned())
             .key_context("Calendar")

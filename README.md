@@ -291,6 +291,12 @@ fails the run.
   host from before the page loads: a's team's "..." menu and its "Add channel", the "Create a channel" dialog and its types,
   then the dialog filled and Create pressed for each channel type and layout, what it sends recorded and held back
   (`docs/protocol/channels.md`, "Creating a channel"); nothing is made.
+- `meeting-steps`: one account's page (`PROTO_LAB_ACCOUNT`, a by default) driven step by step over a Unix socket
+  (`PROTO_LAB_STEPS_SOCKET`) as `team-manage` is, plus `hold <method> <regex> [+text|-text]` (a forced deny from then
+  on), after the enforcement test (a probe to its 1:1 chat with `PROTO_LAB_PEER`); `PROTO_LAB_SCHEDULE=<title>`
+  schedules a meeting with the peer first (its chat and link in `meeting.txt` in the capture dir) and cancels it as the
+  run ends. Every write is judged by the lab rule; two runs at once (a and b) play organizer and invitee, to look at a
+  meeting's pre-join, options and lobby (`docs/protocol/calling.md`); recorded, every deny expected.
 - `ab-meeting-join`: account a alone, after the enforcement test: a schedules a Teams meeting with b, opens its join
   link and clicks the pre-join's Join now, only on that meeting; the pre-join's subscription is judged by the meeting's
   chat, read fresh, and everything that would enter a call is held back with a labelled forced deny
@@ -394,6 +400,7 @@ teams-headless a presence [--wait 30] [--mri <mri>]...  # b's and c's presence, 
 teams-headless a profile <mri>... [--wait 30]           # where the engine's name for each comes from (Graph, the middle tier's lookup)
 teams-headless a search <query>                         # the service's search (Substrate): counts of each kind found, the chats by id
 teams-headless a series [--keep|--cleanup]              # an appointment series of its own (nobody invited): created, read back, its free/busy read, deleted; --cleanup deletes what a run left
+teams-headless a meetings [--read] [--cancel <prefix>]     # the account's meetings: each one's chat and whether its link names its organizer; --read reads each chat's thread for the meeting; --cancel cancels its own whose subject starts with prefix
 teams-headless a team-reads <team thread> <team group>    # what the team pages read of a team, once each: how much each gave, never a name
 teams-headless a availability [--manual busy|do-not-disturb|away|available] [--manual-after 60] [--reset-after <s>] \
   [--hold 300]                            # a's own availability, from its push channel's endpoint
@@ -536,7 +543,9 @@ toolbar's Today, previous and next (Left, Right and T while it has the focus) an
 Ctrl+Alt+1–4), the account's events read from the middle tier's calendar view, and an event's card (Chat with
 participants and a split Join, there at any time, whose menu has Join and Copy join link; Join opens the meeting's
 pre-join in a window of its own (the camera's preview and switch, background filters, the microphone's switch and the
-devices, Cancel, Join now), and Join now starts the meeting's call when nobody has; for the account's own events Edit,
+devices, or Don't use audio, which joins muted; Phone audio greyed out, as Teams shows it to an account without dial-in;
+Cancel, Join now), and Join now starts the meeting's call when nobody has (an event whose short link names no organizer
+is joined by its chat, whose thread names it); for the account's own events Edit,
 and Cancel meeting, Delete or Remove from calendar, each confirmed). New event (its menu: an event or a Teams meeting), a
 double click on an empty half hour of the grid, and an event's Edit (or a double click on it) open the scheduling form
 in a window of its own ("New event - Calendar"): Event and Series (a series' repeat: Teams' presets, a custom
@@ -546,7 +555,7 @@ the suggested times and the Scheduler (everyone's busy times beside the form), t
 meeting switch, the text in the rich-text editor (Format, Emoji), Show as, the reminder, categories, private and Print
 (the event's page in the browser, which prints it), the day beside it with the event's block to drag; Save (Send, Send
 update; Ctrl+S) writes through the engine and the calendar reads its days again (`docs/protocol/calendar.md`, "Writing
-an event"). "Join with an ID" says it isn't available yet. The settings (the selected chat, typing, read
+an event"). "Join with an ID" asks for the meeting's ID and passcode and joins the calendar's meeting that has them. The settings (the selected chat, typing, read
 receipts, notifications, the idle time, the manual status, the log's level, the theme, the font and the
 time format, the system's clock or a 12-hour or 24-hour one) live in
 `<data_dir>/ui/<alias>.toml` (`0600`, its directory `0700`); a file that can't be read gives the defaults, a bad value keeps its default, and either is
@@ -595,7 +604,8 @@ the UI is looked at by.
 
 Calls (M3): the app's engine gets its calling on the UI sandbox's PipeWire (the only one a lab build may open; without
 it the app runs without calls). A chat's header has Call once the calling endpoint is registered (Join
-where an invitation named a running call in that group chat); an invitation the engine offered rings with a ringtone on
+where an invitation named a running call in that group chat; a meeting's chat has Join, which opens the meeting's
+pre-join whether its call runs or not); an invitation the engine offered rings with a ringtone on
 the default output, a banner (Answer, Decline) and a notification with Answer and Decline on the bus the app is given,
 the caller named as the invitation names them, all gone once its ring ends. A call opens a window of its own, as
 Teams' does, and the main window's chats stay usable beside it: its header names who the call is with, its state and

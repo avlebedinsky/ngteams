@@ -1,6 +1,8 @@
 //! The middle tier's calendar rows (`docs/protocol/calendar.md`, "Writing an event"): an event of the account's own
-//! calendar created, changed, cancelled or deleted, each a [`WriteKind::Meeting`] judged by the event's attendees, and
-//! the empty online meeting the web client makes before it creates a Teams meeting, which reaches nobody.
+//! calendar created, changed, cancelled or deleted, each a [`WriteKind::Meeting`] judged by the event's attendees, the
+//! empty online meeting the web client makes before it creates a Teams meeting, and a meeting's options saved by its
+//! organizer naming nobody (who bypasses the lobby, who presents: `docs/protocol/calling.md`, "The lobby"), which
+//! reach nobody.
 //!
 //! Every row reads the middle tier's path after its partition (`/api/mt/part/<partition>/…`), the query keys exactly
 //! and the body strictly ([`strict_json`]); anything else on the middle tier's calendar paths stays
@@ -64,11 +66,45 @@ pub(super) fn classify(request: &Parsed<'_>) -> Option<Contact> {
                 "create",
             ],
         ) => empty_online_meeting(request),
+        (
+            "POST",
+            [
+                "beta",
+                "meetings",
+                "v1",
+                "options",
+                tenant,
+                organizer,
+                thread,
+                message,
+                rest @ ..,
+            ],
+        ) if rest.iter().all(|segment| segment.is_empty()) => {
+            meeting_options(request, [tenant, organizer, thread, message])
+        }
         // the scheduling form's free/busy reads, sent as a `PUT` naming the people asked about: reads, whoever they name
         ("PUT" | "POST", ["v2.0", "me", "calendars", read]) if FREE_BUSY_READS.contains(read) => Some(Contact::None),
         _ => return None,
     };
     Some(contact.unwrap_or(Contact::Unreadable))
+}
+
+/// `POST beta/meetings/v1/options/<tenant>/<organizer>/<meeting chat>/<message>/?monarch=true` with `{options: [...]}`:
+/// the meeting options page's Save (seen 2026-11-02, `meeting-steps`), every option with its value. It reaches nobody
+/// while it picks nobody (co-organizers, presenters, producers: [`names_nobody`]); one that picks people, names another
+/// key, or names its meeting in any other form is unreadable.
+fn meeting_options(request: &Parsed<'_>, [tenant, organizer, thread, message]: [&str; 4]) -> Option<Contact> {
+    let query_is_monarch = request.only_query("monarch") == Some("true");
+    let guid = |id: &str| id.len() == 36 && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+    // the chat's id with its colon written as an underscore, as the page writes it
+    let meeting_chat = thread.starts_with("19_meeting_") && thread.ends_with("@thread.v2");
+    if !query_is_monarch || !guid(tenant) || !guid(organizer) || !meeting_chat || message != "0" {
+        return None;
+    }
+    let body = object_body(request)?;
+    only_keys(&body, &["options"])?;
+    let options = optional(&body, "options").ok()??;
+    (options.is_array() && names_nobody(Some(options))).then_some(Contact::None)
 }
 
 /// The segments after `api`, `mt`, `part` and the partition.

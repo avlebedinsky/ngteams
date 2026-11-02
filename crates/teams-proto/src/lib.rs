@@ -60,6 +60,7 @@ mod file_content;
 mod frame;
 mod giphy;
 mod http;
+mod meeting;
 mod own;
 mod post_read;
 mod read;
@@ -98,6 +99,7 @@ pub use http::{
     MAX_PICTURE_BODY, MAX_RETRY_WAIT, MIDDLE_TIER_AUDIENCE, PRESENCE_AUDIENCE, PROVISIONING_AUDIENCE, RELAY_HOST,
     REQUEST_TIMEOUT, Refusal, STREAM_TIMEOUT, TROUTER_HOST,
 };
+pub use meeting::{MeetingCode, MeetingDetails, MeetingThread};
 #[cfg(feature = "test-support")]
 pub use own::ProbeOwnState;
 pub use own::{

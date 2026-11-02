@@ -114,8 +114,8 @@ use teams_fence::Mri;
 use teams_proto::chat::{self, MessageText};
 use teams_proto::{
     AnalyticsPeriod, CalendarEvent, Client, Credentials, EndpointRegistrar, EventAttendee, FileRange, FullEvent,
-    HttpError, HttpTransport, JoinableTeam, ManagedChannel, ManualAvailability, OwnTeamView, PendingInvite,
-    RegisteredEndpoint, TagsRead, TeamAnalytics, TeamPerson, TeamPicture, TeamWrite, Transport,
+    HttpError, HttpTransport, JoinableTeam, ManagedChannel, ManualAvailability, MeetingDetails, OwnTeamView,
+    PendingInvite, RegisteredEndpoint, TagsRead, TeamAnalytics, TeamPerson, TeamPicture, TeamWrite, Transport,
 };
 use teams_store::{
     Applied, Conversation, Member, Message, MessagePage, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction,
@@ -467,6 +467,9 @@ pub enum EngineError {
     /// The calendar couldn't be read, or its answer wasn't in the shape the web client reads ([`crate::calendar`]).
     #[error("the calendar couldn't be read")]
     CalendarUnread,
+    /// A meeting's chat couldn't be read for the meeting it is ([`crate::calendar`]).
+    #[error("the meeting couldn't be read")]
+    MeetingUnread,
     /// An event's creation, change, cancellation or delete wasn't saved ([`crate::calendar`]): `why` says what
     /// happened (refused, the service's answer, no answer).
     #[error("the event's {kind} wasn't saved: {why}")]
@@ -510,6 +513,7 @@ impl EngineError {
             Self::FileUnavailable => "file unavailable",
             Self::FileUnread => "file unread",
             Self::CalendarUnread => "calendar unread",
+            Self::MeetingUnread => "meeting unread",
             Self::EventNotSaved { .. } => "event not saved",
             Self::ChannelNotCreated { .. } => "channel not created",
             Self::TeamNotChanged { .. } => "team not changed",
@@ -621,6 +625,10 @@ enum Request {
     CalendarEvent {
         id: String,
         reply: Responder<FullEvent>,
+    },
+    Meeting {
+        chat: String,
+        reply: Responder<Option<MeetingDetails>>,
     },
     WriteEvent {
         // boxed: an event's draft and the event as read are far larger than any other request
@@ -967,6 +975,14 @@ impl EngineRequests {
     pub fn calendar_event(&self, id: impl Into<String>) -> Reply<FullEvent> {
         let id = id.into();
         self.ask(|reply| Request::CalendarEvent { id, reply })
+    }
+
+    /// The meeting whose chat is `chat`, as its chat's thread names it (its organizer, tenant, title and join link),
+    /// read now ([`crate::calendar`]): what a meeting is joined by when its event's link names no organizer, or from its
+    /// chat. `None` when the thread names no meeting; [`EngineError::MeetingUnread`] when the read failed.
+    pub fn meeting(&self, chat: impl Into<String>) -> Reply<Option<MeetingDetails>> {
+        let chat = chat.into();
+        self.ask(|reply| Request::Meeting { chat, reply })
     }
 
     /// Creates, changes, cancels or deletes an event of the account's calendar through the outbox, under the fence
@@ -1701,6 +1717,7 @@ where
                 reply,
             } => self.calendar.view(start_ms, end_ms, reply),
             Request::CalendarEvent { id, reply } => self.calendar.event(&id, reply),
+            Request::Meeting { chat, reply } => self.calendar.meeting(chat, reply),
             Request::WriteEvent { write, reply } => self.calendar.write(*write, reply),
             Request::CreateChannel { draft, reply } => self.channels.create(*draft, reply),
             Request::AddChannelMembers {

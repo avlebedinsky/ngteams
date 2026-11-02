@@ -224,7 +224,7 @@ pub(crate) struct Parsed<'a> {
 
 impl Parsed<'_> {
     /// The value of `key` when it is the query's only key.
-    fn only_query(&self, key: &str) -> Option<&str> {
+    pub(super) fn only_query(&self, key: &str) -> Option<&str> {
         match self.query.as_slice() {
             [(name, value)] if name == key => Some(value),
             _ => None,

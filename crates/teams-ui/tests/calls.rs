@@ -2089,6 +2089,114 @@ fn a_meetings_pre_join_sends_nothing_until_join_now_and_gives_way_to_its_call() 
 }
 
 #[test]
+fn dont_use_audio_joins_the_meeting_muted_and_phone_audio_is_greyed_out() {
+    let rig = calling();
+    let (trace, _) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.open_prejoin(meeting_to_join(), cx)));
+    let window = prejoin_window(&rig, &windows);
+    for shown in [
+        "prejoin-audio-computer",
+        "prejoin-audio-phone",
+        "prejoin-audio-none",
+        "prejoin-microphone",
+    ] {
+        assert!(drawn(window, shown), "{shown}");
+    }
+    // Phone audio takes no click
+    click(window, "prejoin-audio-phone");
+    assert!(rig.cx.read(|cx| {
+        calls_of(&rig)
+            .read(cx)
+            .prejoin()
+            .is_some_and(|prejoin| prejoin.audio == teams_ui::calls::PrejoinAudio::Computer)
+    }));
+    click(window, "prejoin-audio-none");
+    assert!(rig.cx.read(|cx| {
+        calls_of(&rig)
+            .read(cx)
+            .prejoin()
+            .is_some_and(|prejoin| prejoin.audio == teams_ui::calls::PrejoinAudio::None)
+    }));
+    assert!(
+        !drawn(window, "prejoin-microphone"),
+        "no devices without the computer's audio"
+    );
+    assert!(actions(&rig).is_empty(), "nothing goes out while it shows");
+    click(window, "prejoin-join");
+    assert_eq!(actions(&rig), [join_meeting_action()]);
+    status(&rig, 1, CallStatus::Joining);
+    let _stage = stage(&rig, &windows);
+    rig.cx.run_until_parked();
+    assert!(
+        actions(&rig).contains(&CallAction::Mute {
+            call: call(1),
+            muted: true
+        }),
+        "joined muted: {:?}",
+        actions(&rig)
+    );
+}
+
+#[test]
+fn a_meeting_chats_header_joins_the_meeting_by_its_chat() {
+    let rig = calling();
+    let (trace, _) = trace();
+    rig.core
+        .meetings
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+            MEETING_CHAT.to_owned(),
+            teams_core::MeetingDetails {
+                meeting: meeting_to_join().meeting,
+                title: Some("Synthetic meeting".to_owned()),
+                join_url: None,
+            },
+        );
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    cx.update(|_, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.join_meeting_chat(MEETING_CHAT.to_owned(), None, None, cx)
+        });
+    });
+    let window = prejoin_window(&rig, &windows);
+    assert!(drawn(window, "prejoin-title"));
+    let prejoin = rig
+        .cx
+        .read(|cx| calls_of(&rig).read(cx).prejoin().cloned())
+        .expect("the pre-join opened");
+    assert_eq!(prejoin.to_join, meeting_to_join());
+    assert!(actions(&rig).is_empty(), "nothing goes out while it shows");
+}
+
+#[test]
+fn a_chat_naming_no_meeting_is_refused_rather_than_joined() {
+    let rig = calling();
+    let (trace, _) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    cx.update(|_, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.join_meeting_chat(MEETING_CHAT.to_owned(), None, None, cx)
+        });
+    });
+    rig.cx.run_until_parked();
+    assert!(rig.cx.read(|cx| windows.read(cx).prejoin_window().is_none()));
+    let refused = rig
+        .cx
+        .read(|cx| calls_of(&rig).read(cx).refused().cloned())
+        .expect("refused");
+    assert_eq!(refused.why, "no-meeting");
+    assert!(actions(&rig).is_empty());
+}
+
+#[test]
 fn a_meetings_pre_join_is_cancelled_with_nothing_sent() {
     let rig = calling();
     let (trace, _) = trace();

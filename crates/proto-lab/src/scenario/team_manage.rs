@@ -12,6 +12,8 @@
 //! - `point <css>`: clicks the element `css` selects as a pointer would;
 //! - `hover <css>`, `type <css> <text>`, `insert <text>`;
 //! - `seen`: the requests that aren't plain reads since the last `seen`, each with its status and its body read;
+//! - `hold <method> <regex> [+text|-text]`: from now on every request of `method` whose URL `regex` finds a match in
+//!   (and whose body holds, or lacks, `text`) is force-denied;
 //! - `quit`: ends the run.
 //!
 //! **What it may send.** By default it runs as `load` does, fail-closed, and every write on a team, a group or a channel
@@ -41,6 +43,9 @@ use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport}
 
 /// What a new team's name holds to be force-denied, as the enforcement probe of a run that writes.
 pub const PROBE: &str = "lab forced deny probe";
+
+/// The label of a forced deny a `hold` step added.
+pub const HELD_BY_A_STEP: &str = "held back by a step";
 
 /// The label of the forced deny of every write on a team, a group or a channel.
 pub const TEAM_WRITE: &str = "a team's write";
@@ -140,9 +145,24 @@ async fn steps(
 ) -> Result<(), ScenarioError> {
     load(alias, page, options.load_timeout).await?;
     size(page).await?;
+    serve(alias, page, drive, report, socket, &TEAM_SERVICES).await
+}
+
+/// Takes steps on `socket` until one says `quit`; `seen` looks at the requests to `services`.
+pub(crate) async fn serve(
+    alias: Alias,
+    page: &mut LabSession,
+    drive: &mut Driver,
+    report: &mut ScenarioReport,
+    socket: &std::path::Path,
+    services: &[&str],
+) -> Result<(), ScenarioError> {
     let _ = std::fs::remove_file(socket);
     let listener = UnixListener::bind(socket).map_err(|error| ScenarioError::Setup(error.to_string()))?;
-    let mut seen = drive.seen_so_far();
+    let mut seen = Seen {
+        at: drive.seen_so_far(),
+        services,
+    };
     loop {
         let (stream, _) = listener
             .accept()
@@ -154,6 +174,12 @@ async fn steps(
     }
 }
 
+/// Where `seen` is: the requests looked at so far, and the services it looks at.
+struct Seen<'a> {
+    at: usize,
+    services: &'a [&'a str],
+}
+
 /// One connection's steps; whether a `quit` ended the run.
 async fn connection(
     alias: Alias,
@@ -161,7 +187,7 @@ async fn connection(
     drive: &mut Driver,
     report: &mut ScenarioReport,
     stream: UnixStream,
-    seen: &mut usize,
+    seen: &mut Seen<'_>,
 ) -> bool {
     let (reading, mut writing) = stream.into_split();
     let mut lines = BufReader::new(reading).lines();
@@ -190,7 +216,7 @@ async fn step(
     drive: &mut Driver,
     report: &mut ScenarioReport,
     line: &str,
-    seen: &mut usize,
+    seen: &mut Seen<'_>,
 ) -> Result<String, ScenarioError> {
     let (verb, rest) = line.trim().split_once(' ').unwrap_or((line.trim(), ""));
     match verb {
@@ -233,20 +259,32 @@ async fn step(
             drive.insert_text("typing", rest).await?;
             Ok("inserted".to_owned())
         }
-        "seen" => Ok(writes_seen(drive, report, seen).await),
+        "seen" => Ok(writes_seen(drive, report, &mut seen.at, seen.services).await),
+        "hold" => {
+            let (method, rest) = rest.split_once(' ').unwrap_or(("POST", rest));
+            let (pattern, body) = rest.split_once(' ').unwrap_or((rest, ""));
+            let mut rule = ForcedDeny::new(method, pattern).map_err(|error| ScenarioError::Setup(error.to_string()))?;
+            if let Some(text) = body.strip_prefix('+') {
+                rule = rule.with_body_containing(text);
+            } else if let Some(text) = body.strip_prefix('-') {
+                rule = rule.with_body_lacking(text);
+            }
+            page.force_deny(rule.labelled(HELD_BY_A_STEP));
+            Ok("held".to_owned())
+        }
         other => Ok(format!("unknown step {other}")),
     }
 }
 
 /// The requests since `seen` on the services team management uses (never another host, whose bodies can carry a token),
 /// each as `<method> <url> -> <status>`, and the body of one that isn't a plain read unless it holds anything like a token.
-async fn writes_seen(drive: &mut Driver, report: &mut ScenarioReport, seen: &mut usize) -> String {
+async fn writes_seen(drive: &mut Driver, report: &mut ScenarioReport, seen: &mut usize, services: &[&str]) -> String {
     let now = drive.seen_so_far();
     let requests: Vec<_> = drive.requests().get(*seen..now).unwrap_or_default().to_vec();
     *seen = now;
     let mut lines = Vec::new();
     for request in requests {
-        let on_a_service = TEAM_SERVICES.iter().any(|service| request.url.contains(service));
+        let on_a_service = services.iter().any(|service| request.url.contains(service));
         if !on_a_service || matches!(request.method.as_str(), "OPTIONS" | "HEAD") {
             continue;
         }

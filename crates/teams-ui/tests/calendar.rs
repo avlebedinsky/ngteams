@@ -428,9 +428,13 @@ fn calendar_controls_toggle_visibility_choose_dates_and_explain_unavailable_acti
     click(cx, "calendar-add");
     assert!(cx.debug_bounds("calendar-notice").is_some());
     click(cx, "calendar-notice-close");
+    // Join with an ID: its panel, an ID that isn't one refused there, closed again
     click(cx, "calendar-join-id");
-    assert!(cx.debug_bounds("calendar-notice").is_some());
-    click(cx, "calendar-notice-close");
+    assert!(cx.debug_bounds("calendar-join-id-panel").is_some());
+    click(cx, "calendar-join-id-join");
+    assert!(cx.debug_bounds("calendar-join-id-problem").is_some());
+    click(cx, "calendar-join-id-close");
+    assert!(cx.debug_bounds("calendar-join-id-panel").is_none());
     click(cx, "calendar-mode");
     click(cx, "calendar-mode-day");
     assert_eq!(cx.update(|_, cx| view.read(cx).mode()), Mode::Day);

@@ -1,7 +1,9 @@
 //! A meeting's pre-join ([`PrejoinView`]), as Teams shows one before it goes into a meeting: the meeting's title, the
-//! account's camera preview with its switch, its device and its background filters, the computer's audio with the
-//! microphone's switch and the microphone and the speaker to use, then Cancel and Join now. Nothing has gone out while
-//! it shows: Join now is what goes into the meeting's call ([`calls::join_now`]), starting it when nobody has.
+//! account's camera preview with its switch, its device and its background filters, the audio to use (Teams' choices:
+//! Computer audio with the microphone's switch and the microphone and the speaker, Phone audio, which Teams offers
+//! greyed out to an account without dial-in, and Don't use audio, which joins muted), then Cancel and Join now.
+//! Nothing has gone out while it shows: Join now is what goes into the meeting's call ([`calls::join_now`]), starting
+//! it when nobody has.
 //!
 //! - **The camera** starts off, and only the switch (the user's click) turns it on, for the preview alone
 //!   ([`CameraPreview`]): nothing is sent. Whatever the pre-join's switches say at Join now, the call turns them into
@@ -10,7 +12,8 @@
 //!   taking over the camera while it is open.
 //! - **The keys**: the call's own (Ctrl+Shift+M, Ctrl+Shift+O), Enter for Join now and Escape for Cancel.
 //!
-//! The view's trace has `prejoin shown` (with the chat), `prejoin camera` and `prejoin microphone` (on, off), and
+//! The view's trace has `prejoin shown` (with the chat), `prejoin camera` and `prejoin microphone` (on, off),
+//! `prejoin audio` (computer, none), and
 //! `prejoin closed` (cancel) or the `call asked` of its join, never a name.
 
 use std::sync::Arc;
@@ -152,6 +155,14 @@ impl PrejoinView {
         self.calls.update(cx, |calls, cx| calls.set_prejoin_muted(!on, cx));
     }
 
+    /// The audio to use: the computer's, or none ("Don't use audio": the call is joined muted).
+    pub fn set_audio(&mut self, computer: bool, cx: &mut Context<Self>) {
+        self.trace
+            .record(&TraceLine::new("prejoin", "audio").kind(if computer { "computer" } else { "none" }));
+        self.calls
+            .update(cx, |calls, cx| calls.set_prejoin_no_audio(!computer, cx));
+    }
+
     /// Background filters: the pane opens or closes.
     pub fn show_effects(&mut self, open: bool, cx: &mut Context<Self>) {
         self.effects = open.then(|| {
@@ -276,8 +287,119 @@ impl PrejoinView {
             ))
     }
 
-    /// The computer's audio: the microphone's device and switch, and the speaker's device.
+    /// The audio's choices as Teams lists them: Computer audio (its devices while it is picked), Phone audio (greyed
+    /// out: this app joins by no phone), Don't use audio.
     fn audio(&self, prejoin: &Prejoin, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
+        let computer = prejoin.audio == calls::PrejoinAudio::Computer;
+        let devices = computer.then(|| self.computer_audio(prejoin, palette, cx));
+        let caption = (!computer).then(|| {
+            div()
+                .px_4()
+                .pb_3()
+                .text_sm()
+                .text_color(rgb(palette.muted_foreground))
+                .child("Join muted to avoid causing audio disruption.")
+        });
+        div()
+            .debug_selector(|| "prejoin-audio".to_owned())
+            .w(px(AUDIO_WIDTH))
+            .flex_none()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child(
+                Self::audio_box(palette)
+                    .child(Self::audio_choice(
+                        "prejoin-audio-computer",
+                        "Computer audio",
+                        computer,
+                        true,
+                        palette,
+                        cx,
+                    ))
+                    .children(devices),
+            )
+            .child(Self::audio_box(palette).child(Self::audio_choice(
+                "prejoin-audio-phone",
+                "Phone audio",
+                false,
+                false,
+                palette,
+                cx,
+            )))
+            .child(
+                Self::audio_box(palette)
+                    .child(Self::audio_choice(
+                        "prejoin-audio-none",
+                        "Don't use audio",
+                        !computer,
+                        true,
+                        palette,
+                        cx,
+                    ))
+                    .children(caption),
+            )
+    }
+
+    /// A box of the audio's choices.
+    fn audio_box(palette: Palette) -> gpui::Div {
+        div()
+            .rounded_lg()
+            .border_1()
+            .border_color(rgb(palette.border))
+            .bg(rgb(palette.surface))
+            .flex()
+            .flex_col()
+    }
+
+    /// One of the audio's choices: a radio mark and its name; a choice not `enabled` is drawn greyed out and takes no
+    /// click, as Teams draws Phone audio for an account without it.
+    fn audio_choice(
+        id: &'static str,
+        name: &'static str,
+        picked: bool,
+        enabled: bool,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let mark = div()
+            .size(px(16.0))
+            .flex_none()
+            .rounded_full()
+            .border_1()
+            .border_color(rgb(if picked {
+                palette.brand
+            } else {
+                palette.muted_foreground
+            }))
+            .flex()
+            .items_center()
+            .justify_center()
+            .children(picked.then(|| div().size(px(8.0)).rounded_full().bg(rgb(palette.brand))));
+        let row = div()
+            .debug_selector(move || id.to_owned())
+            .id(id)
+            .px_4()
+            .py_3()
+            .flex()
+            .items_center()
+            .gap_3()
+            .font_weight(gpui::FontWeight::SEMIBOLD)
+            .child(mark)
+            .child(name);
+        if !enabled {
+            return row.opacity(0.45).tooltip(|window, cx| {
+                gpui_component::tooltip::Tooltip::new("Phone audio isn't available for your account").build(window, cx)
+            });
+        }
+        let computer = id == "prejoin-audio-computer";
+        row.cursor_pointer()
+            .hover(|style| style.bg(rgb(palette.hover)))
+            .on_click(cx.listener(move |this, _, _, cx| this.set_audio(computer, cx)))
+    }
+
+    /// The computer's audio: the microphone's device and switch, and the speaker's device.
+    fn computer_audio(&self, prejoin: &Prejoin, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
         let weak = cx.entity().downgrade();
         let switch =
             Switch::new("prejoin-microphone")
@@ -300,24 +422,10 @@ impl PrejoinView {
         let microphone = named(DeviceKind::Microphone, cx);
         let speaker = named(DeviceKind::Speaker, cx);
         div()
-            .debug_selector(|| "prejoin-audio".to_owned())
-            .w(px(AUDIO_WIDTH))
-            .flex_none()
-            .rounded_lg()
-            .border_1()
-            .border_color(rgb(palette.border))
-            .bg(rgb(palette.surface))
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .px_4()
-                    .py_3()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .border_b_1()
-                    .border_color(rgb(palette.border))
-                    .child("Computer audio"),
-            )
+            .border_t_1()
+            .border_color(rgb(palette.border))
             .child(
                 div()
                     .px_4()

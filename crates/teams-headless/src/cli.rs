@@ -135,6 +135,17 @@ pub enum Command {
         #[arg(long)]
         cleanup: bool,
     },
+    /// The account's Teams meetings from yesterday on (`meetings.rs`): each one's chat and whether its join link names
+    /// its organizer; `--read` reads each one's chat's thread for the meeting it names; `--cancel <prefix>` cancels the
+    /// account's own meetings whose subject starts with `prefix` (what a lab run made). Prints ids and flags only.
+    Meetings {
+        /// Read each meeting's chat's thread.
+        #[arg(long)]
+        read: bool,
+        /// Cancel the account's own meetings whose subject starts with this.
+        #[arg(long)]
+        cancel: Option<String>,
+    },
     /// Asks the service's search (Substrate, `docs/protocol/search.md`) for `query`, as the title bar's search does:
     /// its suggestions, then its results of every kind; prints `search <scope> <kind> <count>` per kind found, and the
     /// ids of the chats its messages are in, never a name or a text. A read, whoever its answer lists.

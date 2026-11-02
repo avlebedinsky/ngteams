@@ -159,6 +159,8 @@ pub struct FakeCore {
     pub read_only: Mutex<bool>,
     /// The scheduling tests' calendar service; its defaults match Core's empty, unsaved calendar.
     pub calendar: Mutex<calendar::CalendarFake>,
+    /// The meetings their chats' threads name, by chat; any other chat names none.
+    pub meetings: Mutex<HashMap<String, teams_core::MeetingDetails>>,
 }
 
 impl Default for FakeCore {
@@ -223,6 +225,7 @@ impl Default for FakeCore {
             held_calls: Mutex::default(),
             read_only: Mutex::new(false),
             calendar: Mutex::default(),
+            meetings: Mutex::default(),
         }
     }
 }
@@ -325,6 +328,11 @@ impl FakeCore {
 }
 
 impl Core for FakeCore {
+    fn meeting(&self, chat: String) -> Reply<Option<teams_core::MeetingDetails>> {
+        let found = locked(&self.meetings).get(&chat).cloned();
+        self.answer("meeting", || found)
+    }
+
     fn calendar(&self, start_ms: i64, end_ms: i64) -> Reply<Vec<teams_core::CalendarEvent>> {
         locked(&self.calendar).read(start_ms, end_ms)
     }

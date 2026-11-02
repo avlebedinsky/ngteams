@@ -389,8 +389,45 @@ the updates after it tell only changes.
 
 A link with no thread or organizer (`https://teams.microsoft.com/meet/<code>?p=<passcode>`) resolves differently: the
 page read `GET …/api/mt/part/<partition>/beta/meetings/identifiers?meetingId=&passcode=&link=` (it answered
-`{"tenantId": ""}`) and subscribed and started by `meetingData: {meetingCode, passcode}`, with no chat named. The fence
-can't tie that to anyone, so no row maps it; the native client opens such a link in the browser.
+`{"tenantId": ""}`) and subscribed and started by `meetingData: {meetingCode, passcode, meetingUrl}` and
+`meetingPreferences: {shouldResurrect: "resurrect"}`, `groupChat` and `meetingInfo` both `null` (its start with media
+the same, with a `callInvitation`). The fence can't tie that to anyone, so no row maps it. The native client doesn't
+send it: a calendar event with such a link names its chat (`skypeTeamsData`'s `cid`), and the meeting's chat's thread
+names its organizer and tenant (`GET chatsvc v1/threads/<chat>?view=msnp24Equivalent`, `properties.meeting`: a JSON
+object as text with `organizerId`, `tenantId`, `subject`, `meetingJoinUrl`, `meetingType`, `startTime`; seen
+2026-11-02, `meeting-steps`, and in `ab-meeting-join`'s web client, which reads the same batch form), so it joins by
+the chat as above (`teams_proto::MeetingThread`). The meeting chat's header does the same for its Join, as Teams'
+header has it whether the meeting started or not. "Join with an ID" finds the meeting among the calendar's events by
+the ID and passcode their short link carries (`MeetingCode`) and joins it so; an ID the calendar doesn't have is
+refused there (joining by `meetingData` alone stays unmapped).
+
+**The pre-join's audio** (seen 2026-11-02, `meeting-steps`, a lab account): Computer audio (the microphone's switch
+and device, the speaker's device), Phone audio drawn greyed out (the account has no dial-in), Room audio (a "Search for
+a room" picker, read by `POST outlook.office.com/SchedulingB2/api/v1.0/me/findmeetinglocations`, which the lab tenant
+answers with no room: "Unable to find any rooms", Join now disabled until one is picked) and Don't use audio ("Join
+muted to avoid causing audio disruption."). Don't use audio changes nothing of the entry but its `endpointState`:
+`{"endpointStateSequenceNumber": 1, "state": {"isMuted": true}}`, the same `callModalities` (`Audio`, `ScreenViewer`)
+and offer. The web client also enters the meeting's conversation while its pre-join shows, before Join now
+("preheat": `endpointState.endpointProperties.preheatProperties: 1`, the entry carrying the meeting's `meetingData`
+code beside `groupChat` and `meetingInfo`); unmapped, the fence denies it. The native client offers Computer audio,
+Phone audio greyed out and Don't use audio (it joins muted, as its mute after the media is up); Room audio isn't
+offered: no room exists in the lab's tenant to find or join, and its search is on a service the native client has no
+token for.
+
+## The lobby
+
+Who waits in a meeting's lobby is the meeting's option `AutoAdmittedUsers` (`Everyone`,
+`EveryoneInSameAndFederatedCompany`, `EveryoneInCompany` (the lab tenant's default: every lab account bypasses it),
+`EveryoneInCompanyExcludingGuests`, `InvitedUsers`, `OrganizerOnly`), set from the meeting options page
+(`https://teams.microsoft.com/meetingOptions/?organizerId&tenantId&threadId=<chat, its colon an underscore>&messageId=0`):
+its Save posts every option to `POST …/api/mt/part/<partition>/beta/meetings/v1/options/<tenant>/<organizer>/<chat>/0/?monarch=true`
+(answered `200`; the fence lets it through while it picks nobody). `UsersCanAdmitFromLobby` says who admits. A meeting's
+conversation lists `admit` and `admitAll` among its `links`, `activeModalities.lobby` (`null` outside it) and the
+roster's `participantCounts.lobbyParticipants`. What a joiner held in the lobby is told, and what admitting or denying
+one sends, wasn't captured: in the 2026-11-02 run the web client's entry at the conversation (`POST …/conv/<id>` with
+its `callInvitation`, unmapped and denied) failed its join before the lobby ("Try joining again, or dial in"), and the
+native client, which starts by the mapped start with media, couldn't run (the lab's keyring was gone). Until a capture
+shows them the native client shows a joiner the call's `Joining` state and offers no Admit or Deny.
 
 ## A call held past a dropped socket
 

@@ -25,8 +25,8 @@ use teams_fence::Mri;
 use teams_proto::{
     Author, CalendarEvent, CalendarView, CancelEvent, Client, CreateEvent, CreateOnlineMeeting, Credentials,
     DeleteEvent, EventAttendee, EventDraft, EventRead, EventTime, FreeBusyAsk, FullEvent, HttpError, HttpTransport,
-    MeetingTimes, Mutating, Organizer, PersonSchedule, Schedules, ShortProfileLookup, TimeZoneSettings, Transport,
-    UpdateEvent,
+    MeetingDetails, MeetingThread, MeetingTimes, Mutating, Organizer, PersonSchedule, Schedules, ShortProfileLookup,
+    TimeZoneSettings, Transport, UpdateEvent,
 };
 use teams_store::{Store, StoreError, StoredEvent};
 use tokio::task::JoinSet;
@@ -187,6 +187,23 @@ where
                 Err(error) => {
                     log::info!("the event couldn't be read: {error}");
                     Err(EngineError::CalendarUnread)
+                }
+            };
+            let _ = reply.send(answer);
+        });
+    }
+
+    /// Answers `reply` with the meeting the chat `chat`'s thread names ([`MeetingThread`]): `None` when it names
+    /// none, [`EngineError::MeetingUnread`] when it couldn't be read.
+    pub(crate) fn meeting(&self, chat: String, reply: Responder<Option<MeetingDetails>>) {
+        let client = Arc::clone(&self.client);
+        tokio::task::spawn_local(async move {
+            let read = MeetingThread { chat };
+            let answer = match client.read(&read).await {
+                Ok(answer) => Ok(MeetingThread::read_answer(answer.body())),
+                Err(error) => {
+                    log::info!("the meeting's chat couldn't be read: {error}");
+                    Err(EngineError::MeetingUnread)
                 }
             };
             let _ = reply.send(answer);

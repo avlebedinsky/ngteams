@@ -10,7 +10,7 @@ use gpui_component::Sizable as _;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 
-use super::{ADD_CALENDAR_UNAVAILABLE, CalendarView, JOIN_ID_UNAVAILABLE, PANE_WIDTH, Toggle, separator};
+use super::{ADD_CALENDAR_UNAVAILABLE, CalendarView, PANE_WIDTH, Toggle, separator};
 use crate::calendar::{self, Mode};
 use crate::icons::{Glyph, icon_button, selected_by};
 use crate::theme::Palette;
@@ -424,7 +424,7 @@ impl CalendarView {
                     .icon(Glyph::HASH.icon())
                     .label("Join with an ID")
                     .ghost()
-                    .on_click(cx.listener(|this, _, _, cx| this.say(JOIN_ID_UNAVAILABLE, cx))),
+                    .on_click(cx.listener(|this, _, window, cx| this.open_join_id(window, cx))),
             ))
             .child(Self::new_button(palette, cx))
     }

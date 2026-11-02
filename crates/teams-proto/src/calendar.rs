@@ -10,6 +10,7 @@
 //! captured (the lab accounts' calendars hold nothing), so an event is read leniently: a field in a form it doesn't
 //! take is left out, an event without a readable id, start or end is skipped and counted, never guessed.
 
+use crate::meeting::MeetingCode;
 use crate::write::MeetingInfo;
 use percent_encoding::percent_decode_str;
 use serde_json::Value;
@@ -207,6 +208,9 @@ pub struct CalendarEvent {
     /// The meeting's organizer and tenant, as its join link's `context` names them: with its chat, what joining it
     /// takes, started or not.
     pub meeting: Option<MeetingInfo>,
+    /// The meeting's id and passcode, as a short join link carries them (`shortOnlineMeetingJoinUrl`, or the join link
+    /// itself): what "Join with an ID" finds the meeting by.
+    pub meeting_code: Option<MeetingCode>,
     pub location: Option<String>,
     pub organizer_name: Option<String>,
     pub organizer_address: Option<String>,
@@ -276,6 +280,13 @@ impl CalendarEvent {
             cancelled: flag("isCancelled"),
             online: flag("isOnlineMeeting") || join_url.is_some(),
             meeting: join_url.as_deref().and_then(join_url_meeting),
+            meeting_code: [
+                "shortOnlineMeetingJoinUrl",
+                "joinOnlineMeetingUrl",
+                "skypeTeamsMeetingUrl",
+            ]
+            .iter()
+            .find_map(|key| text(key).and_then(|url| MeetingCode::of_link(&url))),
             join_url,
             meeting_chat,
             location: text("location").or_else(|| location_name(entry.get("location"))),

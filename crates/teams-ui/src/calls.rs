@@ -456,8 +456,20 @@ pub struct Prejoin {
     pub muted: bool,
     /// The camera's switch is on.
     pub camera: bool,
+    /// The audio picked: the computer's, or "Don't use audio" (the call is joined muted, as Teams joins it).
+    pub audio: PrejoinAudio,
     /// Join now was asked, and its call isn't told yet.
     pub joining: bool,
+}
+
+/// The audio a pre-join picks, as Teams lists it (Phone audio is offered greyed out, Room audio not at all).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PrejoinAudio {
+    /// Computer audio: the microphone and the speaker.
+    #[default]
+    Computer,
+    /// Don't use audio: the call is joined muted.
+    None,
 }
 
 /// What a pre-join's switches said at Join now, until the call took it.
@@ -624,6 +636,7 @@ impl Calls {
             to_join,
             muted: false,
             camera: false,
+            audio: PrejoinAudio::Computer,
             joining: false,
         });
         cx.notify();
@@ -633,6 +646,18 @@ impl Calls {
     pub fn set_prejoin_muted(&mut self, muted: bool, cx: &mut Context<Self>) {
         if let Some(prejoin) = &mut self.prejoin {
             prejoin.muted = muted;
+            cx.notify();
+        }
+    }
+
+    /// The pre-join's audio: the computer's (`false`), or none ("Don't use audio").
+    pub fn set_prejoin_no_audio(&mut self, no_audio: bool, cx: &mut Context<Self>) {
+        if let Some(prejoin) = &mut self.prejoin {
+            prejoin.audio = if no_audio {
+                PrejoinAudio::None
+            } else {
+                PrejoinAudio::Computer
+            };
             cx.notify();
         }
     }
@@ -979,6 +1004,8 @@ fn local_refusal_text(why: &str) -> String {
         "no-call" => "no call is up".to_owned(),
         "no-chat" => "no chat is open".to_owned(),
         "another-account" => "another account is in a call".to_owned(),
+        "no-meeting" => "this meeting couldn't be found: try again in a moment".to_owned(),
+        "no-meeting-code" => "no meeting in your calendar has this ID: open the meeting's link to join it".to_owned(),
         "no-video" => "calls here carry no video".to_owned(),
         _ => "calls aren't available".to_owned(),
     }
@@ -1032,7 +1059,7 @@ pub fn join_now(calls: &Entity<Calls>, core: &Arc<dyn Core>, trace: &Arc<ViewTra
         prejoin.joining = true;
         let to_join = prejoin.to_join.clone();
         let choices = Choices {
-            muted: prejoin.muted,
+            muted: prejoin.muted || prejoin.audio == PrejoinAudio::None,
             camera: prejoin.camera,
         };
         calls.refused = None;
