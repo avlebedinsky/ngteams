@@ -92,7 +92,7 @@ file renamed over it, so a read never catches half a file:
 
 Inside ngterm (`NGTERM_ENABLED=1`), the ledger is also shown as a live page in the session's right pane, by default:
 one card per task with its phase, what its agent is doing now and an estimated finish, read from the agents'
-transcripts (`crates/dispatch-status`). A task's phases are investigate, implement, check, commit, land; the review
+transcripts (this skill's `dispatch-status/`). A task's phases are investigate, implement, check, commit, land; the review
 pass's are review, gate (its checks), land. The user watches it instead of asking "what's running?". Set it up in the
 reply that starts dispatch mode:
 
@@ -103,9 +103,8 @@ reply that starts dispatch mode:
    <repo>/.claude/skills/task-dispatch/scripts/status-page.sh --ledger <scratchpad>/dispatch-ledger.json
    ```
 
-   The script builds the server only when it was never built or its sources changed (in its own target dir, so it
-   never waits on another build's lock: a minute or two cold under load), and otherwise starts it at once. It
-   serves `http://127.0.0.1:47231/` and prints one ready line. A port in use (another session's page) gets `--port
+   The script builds the server when it was never built or its sources changed (in its own target dir, so it never
+   waits on another build's lock: well under a minute cold), and otherwise starts it at once. It serves `http://127.0.0.1:47231/` and prints one ready line. A port in use (another session's page) gets `--port
    <n>` and that port in the URL below.
 3. **Open it in the right pane.** The split must be shown: if `ngtermctl tree --json` gives this session
    (`$NGTERM_SESSION_ID`) `"split": false` or no `hasSplit`, run `ngtermctl session split on --axis vertical --target
@@ -122,6 +121,10 @@ reply that starts dispatch mode:
 
 Outside ngterm no server is started. Mention once that the page can be had at `http://127.0.0.1:47231/`, and start it
 as in step 2 if the user wants it.
+
+The server is a Rust crate of the skill, with its own workspace and lockfile: no part of the app, its builds or its
+coverage gate, and CI doesn't run it. A change to it runs its own checks there: `cargo test`, `cargo clippy
+--all-targets` and `cargo fmt --check` in `dispatch-status/`.
 
 ## Starting an agent
 

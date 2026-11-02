@@ -21,7 +21,6 @@ teams-call = { lines = 93, functions = 95, regions = 90 }
 teams-auth = { lines = 95, functions = 95, regions = 93 }
 teams-proto = { lines = 93, functions = 91, regions = 91 }
 teams-fence = { lines = 94, functions = 93, regions = 92 }
-dispatch-status = { lines = 95, functions = 94, regions = 93 }
 teams-signin-extension = { lines = 100, functions = 100, regions = 99 }
 teams-app = { lines = 93, functions = 92, regions = 92 }
 teams-wpe = { lines = 91, functions = 92, regions = 91 }

@@ -95,12 +95,13 @@ fn host(url: &str) -> &str {
     or(host, "the web")
 }
 
-/// The repository's root (this crate's manifest dir, two up), with a trailing `/`.
+/// The repository's root (this crate's manifest dir, four up: `.claude/skills/task-dispatch/dispatch-status`), with a
+/// trailing `/`.
 fn repo_root() -> &'static str {
     static ROOT: OnceLock<String> = OnceLock::new();
     ROOT.get_or_init(|| {
         let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
-        let root = manifest.parent().and_then(Path::parent).unwrap_or(manifest);
+        let root = manifest.ancestors().nth(4).unwrap_or(manifest);
         format!("{}/", root.display())
     })
 }
@@ -135,9 +136,16 @@ pub fn relative(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use serde_json::json;
 
-    use super::{relative, tool_words};
+    use super::{relative, repo_root, tool_words};
+
+    #[test]
+    fn the_repo_root_is_the_root_of_the_repo_holding_this_skill() {
+        assert!(Path::new(repo_root()).join("rust-toolchain.toml").is_file());
+    }
 
     #[test]
     fn says_what_a_tool_call_does() {

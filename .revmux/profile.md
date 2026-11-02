@@ -103,6 +103,6 @@ These are minor at most, and only worth reporting when the fix is small.
 
 - Rust for almost everything.
 - JavaScript only in `crates/proto-lab/assets/` (`ws_guard.js`, `rtc_hooks.js`, injected into lab pages),
-  `crates/dispatch-status/assets/index.html` (the task-dispatch status page's own script) and `tools/` (interim Node
-  tools). Never Microsoft JS.
+  `.claude/skills/task-dispatch/dispatch-status/assets/index.html` (the status page's own script) and `tools/`
+  (interim Node tools). Never Microsoft JS.
 - SQL migrations in `crates/teams-store/src/migrations/`, shell in `scripts/`, Markdown in `docs/`.

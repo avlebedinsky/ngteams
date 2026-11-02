@@ -2,7 +2,6 @@
 resolver = "3"
 # Explicit list: cargo refuses a glob that matches nothing. Every new crate is added here.
 members = [
-    "crates/dispatch-status",
     "crates/fence-seal",
     "crates/fixture-guard",
     "crates/proto-lab",
@@ -32,7 +31,6 @@ members = [
 # Every member but the personal build (`crates/ngteams`): a plain `cargo build`, `cargo build --release` or `cargo run`
 # at the root never builds it (docs/personal-build.md; crates/ngteams/tests/apart.rs checks this list).
 default-members = [
-    "crates/dispatch-status",
     "crates/fence-seal",
     "crates/fixture-guard",
     "crates/proto-lab",
