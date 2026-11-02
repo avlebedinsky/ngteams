@@ -113,6 +113,31 @@ What Teams v2's list shows above and in its "Chats" section, as the native clien
   with the same topic are two meetings (a recurring series' occurrences, or two meetings named alike), and Teams lists
   each with its calendar avatar.
 
+## The chat list's order and its See more
+
+Read from the web bundle `26260.1717.5229.7049` (its left rail, its resolver of the rail's folders and its production
+config defaults), the lab's service config and a personal account's CSA answer; compared with a screenshot of the user's
+own Teams, whose 20 rows are the personal store's 20 latest chats in the same order.
+
+- **The section is a folder of `conversationFolders`, `folderType` `RecentChats`**, `sortType` `MostRecent` in every
+  answer seen. The service config's `simpleCollab.conversationFolderSortTypes.recentChatsFolder.sortTypes` offers
+  `MostRecent` alone in the lab's tenant, and `MostRecent` and `UnreadOnly` by the bundle's default, so unread chats
+  aren't sorted first in either: the order is the last message's arrival, latest first, a chat that has none counted by
+  when it was joined or made. The bundle also has `UnreadThenMostRecent` (unread, then mentions, then time), which no
+  folder of `RecentChats` was seen with.
+- **A chat's unread message puts it on top only by being new.** An older unread chat stays in its place. Past the
+  rows shown it shows on the See more row, from the folder's `activityStatusOnRemainingPages`: `hasUnread` draws it as an
+  unread item is drawn (bold), and mentions, drafts and a badge count have fields of their own.
+- **The rows shown**: `recentChatsInitialFetchCountOverrideWithMeetingChatSectionEnabled` (20 by default) while the
+  meeting or muted chats' section is on or unset, else `recentChatsInitialFetchCountOverride` (25). See more shows
+  `recentChatsSeeMoreFetchCountOverride` more (25), is listed while the folder's `pageInfo.hasNextPage` holds, and has no
+  counterpart: `chatList_see_less_flyout_label` belongs to the flyout on the chat button. Its label is the shared
+  `seeMoreButtonLabel` in the brand colour, with a chevron shown only on hover.
+- **A new message** sorts the chat's edge into the rail's loaded page: the rows already loaded stay, so the page grows
+  by one (read from the rail's connection updates; not watched on a list long enough to show it).
+- **A chat opened outside the rows shown** is added to the loaded page (the query's `selectedIdHint`, the rail's
+  "hoisting", `enableSimpleCollabRailSelectionHoisting`), which sorts it after them, and stays there until a refetch.
+
 ## The account's own notes
 
 `48:notes` (`threadType` `streamofnotes`), the account's chat with itself, which Teams lists first under Favorites

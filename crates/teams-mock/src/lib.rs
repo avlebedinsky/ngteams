@@ -292,6 +292,20 @@ impl ChatServiceMock {
         world.changed();
     }
 
+    /// A new group chat of `members` (its creator first) called `topic`, with no messages yet, as the conversation list
+    /// then gives it; its id, or `None` when the fixtures have no empty chat to make its list entry from.
+    #[must_use = "None says no chat was made"]
+    pub fn add_group(&self, topic: &str, members: &[&str]) -> Option<String> {
+        let mut state = self.lock();
+        let empty = state.fixtures.entries.get(1).cloned()?;
+        let id = state.new_group_id();
+        let time = state.tick();
+        let mut conversation = world::created(&empty, &id, world::Kind::Group, members, time);
+        conversation.entry["threadProperties"]["topic"] = serde_json::json!(topic);
+        state.conversations.push(conversation);
+        Some(id)
+    }
+
     /// `from` posts `html` (a rich-text message) to `chat`, as one of its clients would: stored as a read gives it back
     /// and queued for the chat's other members, as any post. Its id, or `None` when `from` may not write there.
     #[must_use = "None says the post was refused"]

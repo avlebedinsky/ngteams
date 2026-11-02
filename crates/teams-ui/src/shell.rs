@@ -1250,6 +1250,10 @@ impl Shell {
             SwitcherEvent::OpenChannel(id) => this.open_channel_id(id.clone(), window, cx),
             SwitcherEvent::Dismissed => this.close_switcher(window, cx),
             SwitcherEvent::CopyDiagnostics => this.copy_diagnostics(window, cx),
+            SwitcherEvent::SeeMoreChats => {
+                this.close_switcher(window, cx);
+                this.list.update(cx, ChatList::see_more);
+            }
             SwitcherEvent::SetStatus(status) => {
                 this.choose_status(*status, cx);
                 this.close_switcher(window, cx);

@@ -9,8 +9,8 @@
 //! and the chat again in Teams Dark; a message with files, its cards and their thumbnails, in Teams Dark and Light,
 //! its first video played in its card and paused; a message of lines, small pictures and a block of code, in Teams
 //! Dark and Light; a picture opened in the picture viewer, fitted and zoomed; the 12-hour time format and a chat's
-//! times on it; a group chat's presence; a favourite channel
-//! opened from "Favorites"; forwarded messages; a call's own window, its participants' pane, beside the main window
+//! times on it; a group chat's presence; the "Chats" section's See more, what it brings and a chat opened from below
+//! the rows shown; a favourite channel opened from "Favorites"; forwarded messages; a call's own window, its participants' pane, beside the main window
 //! with its in-call strip, and in Teams Dark) and says
 //! `shot <name>` after each; the parent screenshots the window and lets it go on. The views are driven from inside
 //! the app, never by screen coordinates.
@@ -54,6 +54,7 @@ use teams_ui::global_search::{Mode as SearchMode, Tab};
 use teams_ui::settings::VideoEffect;
 use teams_ui::settings_view::Page;
 use teams_ui::shell::Shell;
+use teams_ui::sidebar::Sidebar;
 use teams_ui::view::Root;
 use teams_ui::window::KitRoot;
 use teams_ui::{event_form, picture_viewer};
@@ -79,7 +80,7 @@ const SETTLE: Duration = Duration::from_millis(1500);
 type Step = (&'static str, fn(&Entity<Shell>, &mut Window, &mut App));
 
 /// The tour.
-const STEPS: [Step; 65] = [
+const STEPS: [Step; 70] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -309,6 +310,8 @@ const STEPS: [Step; 65] = [
         shell.update(cx, |shell, cx| shell.open_chat(AX_CHAT.to_owned(), window, cx));
     }),
     ("chat-mixed-dark-read", |shell, _, cx| show_first_message(shell, cx)),
+    // See more in Teams Dark, as the Teams it is drawn after
+    ("chats-see-more-dark", |shell, _, cx| reveal_see_more(shell, cx)),
     // the 12-hour clock chosen, back in Teams Light: the setting, then the a–b chat's times
     ("settings-time-12-hour", |shell, _, cx| {
         let model = shell.read(cx).settings().clone();
@@ -342,6 +345,22 @@ const STEPS: [Step; 65] = [
     // mention of everyone (`seed_group`), the account's own
     ("chat-mention-everyone", |shell, window, cx| {
         type_in_compose(shell, "@", window, cx);
+    }),
+    // the "Chats" section's first rows and See more under them, bold for the unread chat below it (`seed_many_chats`)
+    ("chats-see-more", |shell, _, cx| reveal_see_more(shell, cx)),
+    // See more clicked: the next rows where it was, the list not scrolled
+    ("chats-seen-more", |shell, _, cx| {
+        let list = shell.read(cx).list().clone();
+        list.update(cx, teams_ui::ChatList::see_more);
+    }),
+    // See more again under them, no longer bold
+    ("chats-see-more-again", |shell, _, cx| reveal_see_more(shell, cx)),
+    // the oldest chat, opened from below the rows shown: listed after them, above See more, highlighted
+    ("chats-opened-from-below", |shell, window, cx| {
+        let oldest = shell.read(cx).list().read(cx).rows().last().map(|row| row.id.clone());
+        if let Some(oldest) = oldest {
+            shell.update(cx, |shell, cx| shell.open_chat(oldest, window, cx));
+        }
     }),
     // the team's channel the mock's CSA lists as a's favourite, under "Favorites" with its team's mark, clicked there:
     // opened read-only as a channel, its row highlighted
@@ -868,6 +887,12 @@ fn show_page(shell: &Entity<Shell>, page: Page, cx: &mut App) {
     view.update(cx, |view, cx| view.show_page(page, cx));
 }
 
+/// Scrolls the sidebar to the "Chats" section's See more.
+fn reveal_see_more(shell: &Entity<Shell>, cx: &mut App) {
+    let sidebar = shell.read(cx).sidebar().clone();
+    sidebar.update(cx, Sidebar::reveal_see_more);
+}
+
 /// Walks [`STEPS`], each one's screenshot taken by the parent before the next.
 fn walk(window: WindowHandle<KitRoot>, cx: &mut App) {
     let Some(dir) = std::env::var_os(ui_sandbox::SANDBOX_ENV) else {
@@ -965,6 +990,7 @@ impl MockLab {
             .build()?;
         let mock = runtime.block_on(ChatServiceMock::start())?;
         let trouter = mock.start_trouter()?;
+        seed_many_chats(&mock)?;
         seed_group(&mock, &runtime)?;
         seed_pictures(&mock, &runtime)?;
         seed_files(&mock, &runtime)?;
@@ -1045,6 +1071,22 @@ fn seed_group(mock: &ChatServiceMock, runtime: &tokio::runtime::Runtime) -> Sand
         message["properties"]["mentions"] = serde_json::json!(mentions);
     }) {
         return Err("b's post isn't in the mock".into());
+    }
+    Ok(())
+}
+
+/// More chats than the "Chats" section shows at first, older than every other chat, each with a's message but one with
+/// b's, unread: it is below the first rows and among the ones See more brings.
+fn seed_many_chats(mock: &ChatServiceMock) -> SandboxResult {
+    for number in (1..=50).rev() {
+        let topic = format!("Project {number}");
+        let chat = mock.add_group(&topic, &[LAB_A, LAB_B, LAB_C]).ok_or("no chat made")?;
+        let (from, text) = if number == 30 {
+            (LAB_B, "<p>Could you look at this one?</p>")
+        } else {
+            (LAB_A, "<p>Thanks, all done here</p>")
+        };
+        mock.post_as(from, &chat, text).ok_or("the post refused")?;
     }
     Ok(())
 }

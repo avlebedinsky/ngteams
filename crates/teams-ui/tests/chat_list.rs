@@ -3,7 +3,8 @@
 //! again under "Chats", the "Favorites" section folding like "Chats" and shown at the top when the favourites come
 //! after the list was first drawn (the first run); a chat the service calls empty left out while
 //! nothing of it is stored; a meeting's chat by its stored thread type; a bot never named or watched by its MRI; a
-//! group without a topic by its members' first names. Every id and name is made up.
+//! group without a topic by its members' first names; the section's first rows and See more, a chat that gets a message
+//! or is opened from below them. Every id and name is made up.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
@@ -18,9 +19,10 @@ use teams_core::{Availability, ChatListing, Event};
 use teams_store::{Conversation, ConversationKind, Member, Message, Team, TeamChannel};
 use teams_ui::ViewTrace;
 use teams_ui::chat_list::{BOT, ChatList, ChatRow, ECHO, NOTES, RowKind, UNKNOWN_USER, arrange, joined, unnamed};
+use teams_ui::chat_window::{ChatWindow, FIRST_PAGE, NEXT_PAGE, SeeMore};
 use teams_ui::settings::{Settings, SettingsModel};
 use teams_ui::shell::{Main, Shell, ShellParts};
-use teams_ui::sidebar::Section;
+use teams_ui::sidebar::{Section, Sidebar};
 
 const LAB_C: &str = "8:orgid:00000000-0000-4000-8000-00000000000c";
 const LAB_D: &str = "8:orgid:00000000-0000-4000-8000-00000000000d";
@@ -452,4 +454,302 @@ fn arranging_keeps_a_chat_called_empty_once_it_has_text_or_unread() {
     assert!(favorites.is_empty());
     let ids: Vec<&str> = rows.iter().map(|row| row.id.as_str()).collect();
     assert_eq!(ids, ["b", "c"]);
+}
+
+/// The id of the group chat numbered `number`, the first the latest.
+fn numbered(number: usize) -> String {
+    format!("19:{number:032x}@thread.v2")
+}
+
+/// A list of `count` group chats, each with a message from the account: nothing unread.
+fn many_chats(count: usize) -> Rig {
+    let rig = Rig::start();
+    rig.cx.update(teams_ui::window::init);
+    for number in 0..count {
+        let id = numbered(number);
+        let last = i64::try_from(1_000_000 - number).unwrap();
+        rig.core
+            .conversations
+            .lock()
+            .unwrap()
+            .push(chat(&id, ConversationKind::Group, Some("Project"), last));
+        rig.core
+            .messages
+            .lock()
+            .unwrap()
+            .insert(id.clone(), vec![message(&id, "1", LAB_A, "<p>done</p>", last)]);
+    }
+    rig
+}
+
+/// The chats the section shows, by their number.
+fn shown_numbers(list: &Entity<ChatList>, cx: &mut VisualTestContext) -> Vec<usize> {
+    cx.update(|_, cx| {
+        let list = list.read(cx);
+        list.shown_rows()
+            .into_iter()
+            .map(|at| {
+                let id = &list.rows()[at].id;
+                (0..1_000).find(|number| numbered(*number) == *id).unwrap()
+            })
+            .collect()
+    })
+}
+
+/// The chat numbered `number` gets a message: the latest of all, told as the engine tells it.
+fn new_message(rig: &Rig, number: usize, cx: &mut VisualTestContext) {
+    let id = numbered(number);
+    {
+        let mut conversations = rig.core.conversations.lock().unwrap();
+        let at = conversations.iter().position(|chat| chat.id == id).unwrap();
+        let mut moved = conversations.remove(at);
+        moved.last_activity = Some(2_000_000);
+        moved.version += 1;
+        conversations.insert(0, moved);
+    }
+    rig.send(Event::ConversationChanged { conversation: id });
+    cx.run_until_parked();
+}
+
+/// See more, clicked where it is drawn.
+fn click_see_more(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    let sidebar = cx.update(|_, cx| shell.read(cx).sidebar().clone());
+    cx.update(|_, cx| sidebar.update(cx, Sidebar::reveal_see_more));
+    assert!(drawn(cx, "chats-see-more"), "See more is listed");
+    let found = cx.debug_bounds("chats-see-more").unwrap();
+    cx.simulate_click(found.center(), Modifiers::none());
+    cx.run_until_parked();
+}
+
+#[test]
+fn the_section_shows_its_first_rows_and_see_more_brings_the_next_until_none_is_left() {
+    let total = FIRST_PAGE + NEXT_PAGE + 3;
+    let rig = many_chats(total);
+    let (shell, cx) = shell_window(&rig);
+    let list = list_of(&shell, cx);
+    assert_eq!(
+        cx.update(|_, cx| list.read(cx).rows().len()),
+        total,
+        "the list holds them all"
+    );
+    assert_eq!(shown_numbers(&list, cx), (0..FIRST_PAGE).collect::<Vec<_>>());
+    assert!(drawn(cx, "chat-row-0"));
+    assert_eq!(
+        cx.update(|_, cx| list.read(cx).see_more_offered()),
+        Some(SeeMore {
+            hidden: total - FIRST_PAGE,
+            unread: false
+        })
+    );
+
+    click_see_more(&shell, cx);
+    assert_eq!(
+        shown_numbers(&list, cx),
+        (0..FIRST_PAGE + NEXT_PAGE).collect::<Vec<_>>()
+    );
+
+    // what is left comes with the next one, and See more goes: there is no "See less"
+    click_see_more(&shell, cx);
+    assert_eq!(shown_numbers(&list, cx), (0..total).collect::<Vec<_>>());
+    assert_eq!(cx.update(|_, cx| list.read(cx).see_more_offered()), None);
+    assert!(!drawn(cx, "chats-see-more"));
+}
+
+#[test]
+fn folding_the_section_keeps_what_see_more_brought() {
+    let rig = many_chats(FIRST_PAGE + 2);
+    let (shell, cx) = shell_window(&rig);
+    let list = list_of(&shell, cx);
+    click_see_more(&shell, cx);
+    cx.update(|_, cx| {
+        let sidebar = shell.read(cx).sidebar().clone();
+        sidebar.update(cx, |sidebar, cx| {
+            sidebar.toggle(Section::Chats, cx);
+            sidebar.toggle(Section::Chats, cx);
+        });
+    });
+    assert_eq!(shown_numbers(&list, cx), (0..FIRST_PAGE + 2).collect::<Vec<_>>());
+}
+
+#[test]
+fn a_list_no_longer_than_the_first_rows_offers_no_see_more() {
+    let rig = many_chats(FIRST_PAGE);
+    let (shell, cx) = shell_window(&rig);
+    let list = list_of(&shell, cx);
+    assert_eq!(shown_numbers(&list, cx).len(), FIRST_PAGE);
+    assert_eq!(cx.update(|_, cx| list.read(cx).see_more_offered()), None);
+    assert!(!drawn(cx, "chats-see-more"));
+}
+
+#[test]
+fn a_chat_that_gets_a_message_below_the_rows_comes_in_on_top_and_none_drops_out() {
+    let rig = many_chats(FIRST_PAGE + 10);
+    let (shell, cx) = shell_window(&rig);
+    let list = list_of(&shell, cx);
+
+    new_message(&rig, FIRST_PAGE + 5, cx);
+    let mut expected = vec![FIRST_PAGE + 5];
+    expected.extend(0..FIRST_PAGE);
+    assert_eq!(shown_numbers(&list, cx), expected);
+
+    // a chat already shown only moves up
+    new_message(&rig, FIRST_PAGE - 1, cx);
+    let shown = shown_numbers(&list, cx);
+    assert_eq!(shown.len(), FIRST_PAGE + 1);
+    assert_eq!(shown[0], FIRST_PAGE - 1);
+}
+
+#[test]
+fn unread_chats_stay_in_their_place_and_see_more_says_when_one_is_below_it() {
+    let late = FIRST_PAGE + 2;
+    let rig = many_chats(FIRST_PAGE + 3);
+    rig.core.unread.lock().unwrap().insert(numbered(late), 2);
+    let (shell, cx) = shell_window(&rig);
+    let list = list_of(&shell, cx);
+    // the order is the latest message's, whatever is unread, as Teams' `MostRecent`
+    assert_eq!(shown_numbers(&list, cx), (0..FIRST_PAGE).collect::<Vec<_>>());
+    assert_eq!(
+        cx.update(|_, cx| list.read(cx).see_more_offered()),
+        Some(SeeMore {
+            hidden: 3,
+            unread: true
+        })
+    );
+    assert!(drawn(cx, "chat-row-0"));
+    let sidebar = cx.update(|_, cx| shell.read(cx).sidebar().clone());
+    cx.update(|_, cx| sidebar.update(cx, Sidebar::reveal_see_more));
+    assert!(drawn(cx, "chats-see-more"), "drawn bold");
+}
+
+#[test]
+fn a_chat_opened_from_below_the_rows_is_listed_after_them_and_see_more_keeps_going() {
+    let below = FIRST_PAGE + 8;
+    let rig = many_chats(FIRST_PAGE + NEXT_PAGE + 1);
+    let (shell, cx) = shell_window(&rig);
+    let list = list_of(&shell, cx);
+    let id = numbered(below);
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(id.clone(), window, cx)));
+    cx.run_until_parked();
+
+    let mut expected: Vec<usize> = (0..FIRST_PAGE).collect();
+    expected.push(below);
+    assert_eq!(shown_numbers(&list, cx), expected);
+    assert_eq!(
+        cx.update(|_, cx| list.read(cx).see_more_offered())
+            .map(|more| more.hidden),
+        Some(NEXT_PAGE),
+        "the chat opened isn't counted as left"
+    );
+    // scrolled to, and highlighted there; its selector is its place in the list
+    let selector: &'static str = Box::leak(format!("chat-row-{below}").into_boxed_str());
+    assert!(drawn(cx, selector), "it is on screen");
+
+    // it stays when another chat is opened, as Teams keeps the row it added
+    let first = numbered(0);
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(first.clone(), window, cx)));
+    cx.run_until_parked();
+    assert_eq!(shown_numbers(&list, cx), expected);
+
+    // See more reaches it in its own place
+    cx.update(|_, cx| list.update(cx, ChatList::see_more));
+    cx.run_until_parked();
+    assert_eq!(
+        shown_numbers(&list, cx),
+        (0..FIRST_PAGE + NEXT_PAGE).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn a_favourite_opened_is_not_listed_again_under_chats() {
+    let rig = many_chats(FIRST_PAGE + 5);
+    let favourite = numbered(FIRST_PAGE + 2);
+    rig.core.listing.lock().unwrap().favorites = Some(vec![favourite.clone()]);
+    let (shell, cx) = shell_window(&rig);
+    let list = list_of(&shell, cx);
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(favourite.clone(), window, cx)));
+    cx.run_until_parked();
+    assert_eq!(shown_numbers(&list, cx), (0..FIRST_PAGE).collect::<Vec<_>>());
+    assert!(drawn(cx, "favorite-row-0"));
+}
+
+#[test]
+fn the_palette_sees_more_chats_as_the_link_does() {
+    let rig = many_chats(FIRST_PAGE + 1);
+    let (shell, cx) = shell_window(&rig);
+    let list = list_of(&shell, cx);
+    cx.simulate_keystrokes("ctrl-k");
+    cx.simulate_input("see more");
+    cx.run_until_parked();
+    let switcher = cx.update(|_, cx| shell.read(cx).switcher().cloned()).expect("open");
+    assert_eq!(cx.update(|_, cx| switcher.read(cx).commands()), ["See more chats"]);
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(shown_numbers(&list, cx).len(), FIRST_PAGE + 1);
+    assert!(cx.update(|_, cx| shell.read(cx).switcher().is_none()), "closed");
+}
+
+/// A row of nothing but its id.
+fn plain_row(id: &str) -> ChatRow {
+    ChatRow {
+        id: id.to_owned(),
+        kind: RowKind::Group,
+        name: "Project".into(),
+        named: true,
+        picture: None,
+        partner: None,
+        faces: Vec::new(),
+        team: None,
+        preview: "done".into(),
+        last_activity: None,
+        unread: 0,
+    }
+}
+
+#[test]
+fn a_catch_up_adds_no_rows_for_what_it_moved_up() {
+    let rows: Vec<ChatRow> = (0..40).map(|number| plain_row(&numbered(number))).collect();
+    let mut window = ChatWindow::default();
+    window.settle(&rows, None);
+    assert_eq!(window.shown(&rows).len(), FIRST_PAGE);
+
+    // while running, what moved up adds to the rows shown
+    let mut moved = rows.clone();
+    moved.rotate_right(3);
+    window.settle(&moved, None);
+    assert_eq!(window.shown(&moved).len(), FIRST_PAGE + 3);
+
+    // a catch-up shows what was asked for, and See more counts from there
+    window.caught_up();
+    window.settle(&moved, None);
+    assert_eq!(window.shown(&moved).len(), FIRST_PAGE);
+    window.see_more(&moved, None);
+    assert_eq!(window.shown(&moved).len(), FIRST_PAGE + NEXT_PAGE.min(20));
+}
+
+#[test]
+fn a_shorter_list_shows_what_there_is_and_forgets_a_chat_gone() {
+    let rows: Vec<ChatRow> = (0..30).map(|number| plain_row(&numbered(number))).collect();
+    let mut window = ChatWindow::default();
+    window.settle(&rows, Some(&numbered(25)));
+    assert_eq!(window.shown(&rows).last(), Some(&25));
+    // the chat opened leaves the list: nothing listed for it, and it isn't asked for again
+    let shorter: Vec<ChatRow> = rows.iter().take(25).cloned().collect();
+    window.settle(&shorter, None);
+    assert_eq!(window.shown(&shorter).len(), FIRST_PAGE);
+    assert_eq!(window.see_more_offered(&shorter).map(|more| more.hidden), Some(5));
+    let few: Vec<ChatRow> = rows.iter().take(3).cloned().collect();
+    window.settle(&few, None);
+    assert_eq!(window.shown(&few), [0, 1, 2]);
+    assert_eq!(window.see_more_offered(&few), None);
+}
+
+#[test]
+fn a_long_list_is_held_whole() {
+    // past [`teams_ui::chat_list::LIST_LIMIT`]: the tray's and the notifications' limit, not the list's
+    let total = teams_ui::chat_list::LIST_LIMIT + 3;
+    let rig = many_chats(total);
+    let (shell, cx) = shell_window(&rig);
+    let list = list_of(&shell, cx);
+    assert_eq!(cx.update(|_, cx| list.read(cx).rows().len()), total);
+    assert_eq!(shown_numbers(&list, cx).len(), FIRST_PAGE);
 }

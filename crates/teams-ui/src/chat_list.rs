@@ -1,6 +1,11 @@
 //! The chat list: the account's chats by last activity, each row with its avatar, name, last message's first line,
-//! time and unread count, in the [`crate::sidebar`]'s "Chats" section, which draws its rows; the account's favourite
-//! chats above them, in the "Favorites" section, in the order Teams keeps them, and not again under "Chats".
+//! time and unread count, in the [`crate::sidebar`]'s "Chats" section, which draws the rows its [`ChatWindow`] shows
+//! and See more under them; the account's favourite chats above them, in the "Favorites" section, in the order Teams
+//! keeps them, and not again under "Chats".
+//!
+//! - **The order** is Teams' own for its recent chats, `MostRecent`: the latest message first. A chat with something
+//!   unread comes first because its message is new; one unread for long stays in its place, and past the rows shown
+//!   it makes See more bold, as in Teams (`docs/protocol/chat.md`, "The chat list's order and its See more").
 //!
 //! - **From the store only.** The list asks the engine's store ([`Core::conversations`], then per chat its members,
 //!   newest messages, unread count and people's names) when it opens and again each time the models say a chat
@@ -56,6 +61,7 @@ use teams_proto::chat::parse_html;
 use teams_store::{Conversation, ConversationKind, Member, Message, Team, TeamChannel};
 
 use crate::bridge::Core;
+use crate::chat_window::{ChatWindow, SeeMore};
 use crate::clock::{self, HourCycle};
 use crate::compose::PICKER_MAX;
 use crate::icons::Glyph;
@@ -67,8 +73,12 @@ use crate::system_message::{self, Preview};
 use crate::theme::Palette;
 use crate::trace::{TraceLine, ViewTrace};
 
-/// The most chats the list shows.
+/// The most chats the tray counts and the notifications look through.
 pub const LIST_LIMIT: usize = 500;
+/// The most chats the list holds: See more reaches them all, as do the switcher and the search.
+pub const ALL_CHATS: usize = 10_000;
+/// How many rows a first load builds before it shows them: the rest of a long list follows when it is built.
+const FIRST_ROWS: usize = 50;
 /// How many of a chat's newest messages are looked through for its preview line.
 pub const PREVIEW_PAGE: usize = 20;
 /// The longest preview line, in characters.
@@ -589,8 +599,10 @@ pub struct ChatList {
     trace: Arc<ViewTrace>,
     /// The "Favorites" section's rows, in Teams' order.
     favorites: Vec<ChatRow>,
-    /// The "Chats" section's rows.
+    /// The "Chats" section's rows, shown or not.
     rows: Vec<ChatRow>,
+    /// Which of them are shown.
+    window: ChatWindow,
     cache: HashMap<String, Cached>,
     /// Moves when the cache is dropped: a load that started before keeps none of its rows.
     generation: u64,
@@ -626,6 +638,7 @@ impl ChatList {
                 this.catch_ups = catch_ups;
                 this.cache.clear();
                 this.generation += 1;
+                this.window.caught_up();
                 this.reload(cx);
             }
             cx.notify();
@@ -637,6 +650,7 @@ impl ChatList {
             trace,
             favorites: Vec::new(),
             rows: Vec::new(),
+            window: ChatWindow::default(),
             cache: HashMap::new(),
             generation: 0,
             selected,
@@ -651,10 +665,29 @@ impl ChatList {
         list
     }
 
-    /// The "Chats" section's rows, the latest activity first.
+    /// The "Chats" section's rows, the latest activity first, shown or not.
     #[must_use]
     pub fn rows(&self) -> &[ChatRow] {
         &self.rows
+    }
+
+    /// The rows the section shows, as indices of [`Self::rows`], in their order.
+    #[must_use]
+    pub fn shown_rows(&self) -> Vec<usize> {
+        self.window.shown(&self.rows)
+    }
+
+    /// What See more would bring, when anything is left below the rows shown.
+    #[must_use]
+    pub fn see_more_offered(&self) -> Option<SeeMore> {
+        self.window.see_more_offered(&self.rows)
+    }
+
+    /// See more: more of the rows shown.
+    pub fn see_more(&mut self, cx: &mut Context<Self>) {
+        self.trace.record(&TraceLine::new("chat-list", "see more"));
+        self.window.see_more(&self.rows, self.selected.as_deref());
+        cx.notify();
     }
 
     /// Whether the engine sends nothing ([`Core::read_only`]): the app's read-only mode, which opens no push channel.
@@ -701,6 +734,7 @@ impl ChatList {
     pub fn select(&mut self, id: Option<String>, cx: &mut Context<Self>) {
         if self.selected != id {
             self.selected = id;
+            self.window.settle(&self.rows, self.selected.as_deref());
             self.watch_shown();
             cx.notify();
         }
@@ -796,16 +830,32 @@ impl ChatList {
             if generation == self.generation {
                 self.keep_built(&rows, built, at);
             }
-            self.cache.retain(|id, _| rows.iter().any(|row| &row.id == id));
+            let listed: HashSet<&str> = rows.iter().map(|row| row.id.as_str()).collect();
+            self.cache.retain(|id, _| listed.contains(id.as_str()));
             let (favorites, rows) = arrange(rows, &listing, notes);
-            self.favorites = favorites;
-            self.rows = rows;
+            self.show(favorites, rows);
             self.trace_rows();
             self.watch_shown();
         }
         cx.notify();
         if self.dirty {
             self.reload(cx);
+        }
+    }
+
+    /// The rows a load has, in their sections.
+    fn show(&mut self, favorites: Vec<ChatRow>, rows: Vec<ChatRow>) {
+        self.favorites = favorites;
+        self.rows = rows;
+        self.window.settle(&self.rows, self.selected.as_deref());
+    }
+
+    /// The first rows of a first load, shown before the rest are built; a load over rows already shown keeps them.
+    fn show_first(&mut self, rows: &[ChatRow], listing: &ChatListing, cx: &mut Context<Self>) {
+        if self.all_rows().next().is_none() {
+            let (favorites, rows) = arrange(rows.to_vec(), listing, None);
+            self.show(favorites, rows);
+            cx.notify();
         }
     }
 
@@ -1095,7 +1145,7 @@ struct Loaded {
 
 /// One load: the conversation list, then each row kept or built, then shown.
 async fn load(core: Arc<dyn Core>, generation: u64, this: WeakEntity<ChatList>, cx: &mut AsyncApp) {
-    let listed = core.conversations(LIST_LIMIT).await;
+    let listed = core.conversations(ALL_CHATS).await;
     // without it (an engine that stopped, a store that failed) every chat is listed under "Chats"
     let listing = core.chat_listing().await.unwrap_or_default();
     // the stored channels' activity, for the favourite ones' rows
@@ -1115,7 +1165,7 @@ async fn load(core: Arc<dyn Core>, generation: u64, this: WeakEntity<ChatList>, 
     let (planned, at) = planned;
     let rows = match planned {
         Ok(planned) => {
-            let (mut rows, built) = build_rows(&*core, planned).await;
+            let (mut rows, built) = build_rows(&*core, planned, &listing, &this, cx).await;
             let channels = channel_rows(&*core, &listing, &rows, &activity).await;
             // each one a favourite: moved to "Favorites" in its place
             rows.extend(channels);
@@ -1134,8 +1184,15 @@ async fn load(core: Arc<dyn Core>, generation: u64, this: WeakEntity<ChatList>, 
     let _ = this.update(cx, |list, cx| list.loaded(generation, at, rows, cx));
 }
 
-/// The rows of a load, in its order, and the conversations it built rows for.
-async fn build_rows(core: &dyn Core, planned: Vec<Planned>) -> (Vec<ChatRow>, Vec<Built>) {
+/// The rows of a load, in its order, and the conversations it built rows for; the first [`FIRST_ROWS`] are shown to a
+/// list that has none yet, as a long list takes a while to build.
+async fn build_rows(
+    core: &dyn Core,
+    planned: Vec<Planned>,
+    listing: &ChatListing,
+    this: &WeakEntity<ChatList>,
+    cx: &mut AsyncApp,
+) -> (Vec<ChatRow>, Vec<Built>) {
     let mut rows = Vec::with_capacity(planned.len());
     let mut built = Vec::new();
     for item in planned {
@@ -1146,6 +1203,9 @@ async fn build_rows(core: &dyn Core, planned: Vec<Planned>) -> (Vec<ChatRow>, Ve
                 rows.push(row);
                 built.push((conversation, people));
             }
+        }
+        if rows.len() == FIRST_ROWS {
+            let _ = this.update(cx, |list, cx| list.show_first(&rows, listing, cx));
         }
     }
     (rows, built)

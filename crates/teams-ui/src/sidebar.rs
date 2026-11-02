@@ -2,11 +2,12 @@
 //! isn't up: connecting, reconnecting, offline or signed out; nothing once connected; in the read-only mode, which
 //! opens no push channel and reads by polling, a quiet "Read-only" instead of a connection that never comes up, unless
 //! the engine stopped or the account is signed out) holding its sections:
-//! "Favorites" (the [`ChatList`]'s favourites (chats and channels), only while it has any), "Chats" (its other rows)
-//! and "Teams and channels" (the [`TeamsList`]'s teams, each with its channels). A section's header folds and unfolds
-//! it, and a team's line its channels; unfolding the teams asks for them again ([`TeamsList::reload`]: the engine reads
-//! them when they are old). The rows themselves are the lists': a chat clicked is the [`ChatList`]'s to tell, a channel
-//! the [`TeamsList`]'s.
+//! "Favorites" (the [`ChatList`]'s favourites (chats and channels), only while it has any), "Chats" (the rows of its
+//! others it shows, then See more while any are left) and "Teams and channels" (the [`TeamsList`]'s teams, each with
+//! its channels). A section's header folds and unfolds it, and a team's line its channels; unfolding the teams asks for
+//! them again ([`TeamsList::reload`]: the engine reads them when they are old). The rows themselves are the lists': a
+//! chat clicked is the [`ChatList`]'s to tell, a channel the [`TeamsList`]'s. The chat that becomes selected is
+//! scrolled into view, wherever it was opened from.
 //!
 //! Traced: `sidebar folded`/`unfolded` with the section (`favorites`, `chats` or `teams`), `team folded`/`unfolded` with the team.
 
@@ -21,10 +22,10 @@ use gpui::{
 use gpui_component::tooltip::Tooltip;
 use teams_store::Team;
 
-use crate::chat_list::ChatList;
+use crate::chat_list::{ChatList, ROW_HEIGHT};
 use crate::icons::Glyph;
 use crate::models::Models;
-use crate::teams_list::{LOADING, NO_TEAMS, TeamsList, UNREADABLE};
+use crate::teams_list::{CHANNEL_HEIGHT, LOADING, NO_TEAMS, TeamsList, UNREADABLE};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 use crate::view::{Shown, status_text};
@@ -42,6 +43,12 @@ const CONNECTING: u32 = 0x00c1_9c00;
 pub const SECTION_HEIGHT: f32 = 32.0;
 /// A team's line's height, px.
 pub const TEAM_HEIGHT: f32 = 32.0;
+/// See more's height, px.
+pub const SEE_MORE_HEIGHT: f32 = 40.0;
+/// What the link under the chats says.
+pub const SEE_MORE: &str = "See more";
+/// Its test selector, and the group its chevron shows on hover in.
+const SEE_MORE_SELECTOR: &str = "chats-see-more";
 /// How far past the visible rows the list draws, px.
 const OVERDRAW: f32 = 400.0;
 
@@ -87,6 +94,8 @@ enum Entry {
         index: usize,
         id: String,
     },
+    /// The link under the chats shown, while any are left.
+    SeeMore,
     /// What the teams section says instead of teams.
     Note(&'static str),
     /// The team at `index` of the Teams list.
@@ -113,6 +122,27 @@ impl Entry {
             Self::Team { id, .. } => (3, id),
             Self::Channel { id, .. } => (4, id),
             Self::Favorite { id, .. } => (5, id),
+            Self::SeeMore => (6, SEE_MORE_SELECTOR),
+        }
+    }
+
+    /// The row's height, px: each is drawn at a fixed one, but a note, which is about a section header's and comes
+    /// after every row the sidebar scrolls to.
+    fn height(&self) -> f32 {
+        match self {
+            Self::Section(_) | Self::Note(_) => SECTION_HEIGHT,
+            Self::Favorite { .. } | Self::Chat { .. } => ROW_HEIGHT,
+            Self::SeeMore => SEE_MORE_HEIGHT,
+            Self::Team { .. } => TEAM_HEIGHT,
+            Self::Channel { .. } => CHANNEL_HEIGHT,
+        }
+    }
+
+    /// The chat the row is (a favourite or a row of "Chats").
+    fn chat(&self) -> Option<&str> {
+        match self {
+            Self::Chat { id, .. } | Self::Favorite { id, .. } => Some(id),
+            _ => None,
         }
     }
 }
@@ -130,6 +160,8 @@ pub struct Sidebar {
     teams_open: bool,
     /// The teams whose channels are folded, by id.
     folded: HashSet<String>,
+    /// The selected chat last scrolled into view.
+    revealed: Option<String>,
     _observing: [Subscription; 2],
 }
 
@@ -156,6 +188,7 @@ impl Sidebar {
             chats_open: true,
             teams_open: true,
             folded: HashSet::new(),
+            revealed: None,
             _observing: [chats, teamed],
         };
         sidebar.rebuild(cx);
@@ -211,7 +244,64 @@ impl Sidebar {
         let entries = self.entries(cx);
         splice(&self.state, &self.entries, &entries);
         self.entries = entries;
+        self.reveal_selected(cx);
         cx.notify();
+    }
+
+    /// Scrolls to the selected chat once, when it became selected and has a row. A row opened from the list is on
+    /// screen already, and doesn't move.
+    fn reveal_selected(&mut self, cx: &App) {
+        let list = self.list.read(cx);
+        let Some(selected) = list.selected().filter(|id| self.revealed.as_deref() != Some(*id)) else {
+            return;
+        };
+        let at = self.entries.iter().position(|entry| entry.chat() == Some(selected));
+        if at.is_some_and(|at| self.reveal(at)) {
+            self.revealed = Some(selected.to_owned());
+        }
+    }
+
+    /// Scrolls to See more, when it is listed.
+    pub fn reveal_see_more(&mut self, cx: &mut Context<Self>) {
+        if let Some(at) = self.entries.iter().position(|entry| *entry == Entry::SeeMore) {
+            self.reveal(at);
+            cx.notify();
+        }
+    }
+
+    /// Scrolls the row at `at` just into view, unless it is in view; `false` before the list has a height to tell. By
+    /// the rows' own heights, as the list knows only the ones it has drawn, and none of the ones just listed.
+    fn reveal(&self, at: usize) -> bool {
+        let height = f32::from(self.state.viewport_bounds().size.height);
+        if height <= 0.0 {
+            return false;
+        }
+        let top_of = |row: usize| -> f32 { self.entries.iter().take(row).map(Entry::height).sum() };
+        let scrolled = self.state.logical_scroll_top();
+        let from = top_of(scrolled.item_ix) + f32::from(scrolled.offset_in_item);
+        let top = top_of(at);
+        let bottom = top_of(at + 1);
+        let goal = if top < from {
+            top
+        } else if bottom > from + height {
+            bottom - height
+        } else {
+            return true;
+        };
+        let mut item_ix = 0;
+        let mut item_top = 0.0;
+        for entry in &self.entries {
+            if item_top + entry.height() > goal {
+                break;
+            }
+            item_top += entry.height();
+            item_ix += 1;
+        }
+        self.state.scroll_to(ListOffset {
+            item_ix,
+            offset_in_item: px(goal - item_top),
+        });
+        true
     }
 
     fn entries(&self, cx: &App) -> Vec<Entry> {
@@ -228,11 +318,14 @@ impl Sidebar {
         }
         entries.push(Entry::Section(Section::Chats));
         if self.chats_open {
-            let rows = self.list.read(cx).rows().iter().enumerate();
-            entries.extend(rows.map(|(index, row)| Entry::Chat {
-                index,
-                id: row.id.clone(),
+            let list = self.list.read(cx);
+            entries.extend(list.shown_rows().into_iter().filter_map(|index| {
+                let id = list.rows().get(index)?.id.clone();
+                Some(Entry::Chat { index, id })
             }));
+            if list.see_more_offered().is_some() {
+                entries.push(Entry::SeeMore);
+            }
         }
         entries.push(Entry::Section(Section::Teams));
         if self.teams_open {
@@ -280,6 +373,7 @@ impl Sidebar {
                 .list
                 .update(cx, |list, cx| list.render_favorite(index, palette, cx)),
             Entry::Chat { index, .. } => self.list.update(cx, |list, cx| list.render_row(index, palette, cx)),
+            Entry::SeeMore => self.see_more_row(palette, cx),
             Entry::Note(text) => div()
                 .debug_selector(|| "teams-note".to_owned())
                 .px_3()
@@ -315,6 +409,40 @@ impl Sidebar {
             .on_click(cx.listener(move |this, _, _, cx| this.toggle(section, cx)))
             .child(chevron(self.is_open(section)))
             .child(section.title())
+            .into_any_element()
+    }
+
+    /// See more, as Teams draws it: a link in the brand colour, bold while a chat left below it has something unread,
+    /// its chevron shown on hover; its test selector [`SEE_MORE_SELECTOR`].
+    fn see_more_row(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let unread = self.list.read(cx).see_more_offered().is_some_and(|more| more.unread);
+        let label = div().child(SEE_MORE);
+        let label = if unread {
+            label.font_weight(gpui::FontWeight::BOLD)
+        } else {
+            label
+        };
+        let chevron = div()
+            .flex_none()
+            .opacity(0.0)
+            .group_hover(SEE_MORE_SELECTOR, |style| style.opacity(1.0))
+            .child(Glyph::CHEVRON_DOWN.icon().size(px(14.0)));
+        div()
+            .id(SEE_MORE_SELECTOR)
+            .debug_selector(|| SEE_MORE_SELECTOR.to_owned())
+            .group(SEE_MORE_SELECTOR)
+            .w_full()
+            .h(px(SEE_MORE_HEIGHT))
+            .px_3()
+            .flex()
+            .items_center()
+            .gap_1()
+            .text_color(rgb(palette.brand))
+            .cursor_pointer()
+            .hover(move |style| style.bg(rgb(palette.hover)))
+            .on_click(cx.listener(|this, _, _, cx| this.list.update(cx, ChatList::see_more)))
+            .child(label)
+            .child(chevron)
             .into_any_element()
     }
 

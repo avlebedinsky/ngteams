@@ -12,6 +12,7 @@
 //!   pane; Ctrl+K opens the [`switcher`] (the chat switcher, fuzzy over the chats' names). The list pane is the
 //!   [`sidebar`]: the chats and the teams with their channels, in sections of one list, each folded by its header.
 //! - [`chat_list`]: the chats by last activity, from the store, kept up to date by the models' changes.
+//! - [`chat_window`]: which of them the "Chats" section shows, and what See more adds.
 //! - [`people`]: people as the views show them, a name and a picture from the engine (M2 Task 12); [`presence`] their
 //!   presence, a dot in the chat list, the chat's header and the mention picker (M2 Task 17).
 //! - [`chat_view`]: a chat's messages, the newest at the bottom, paged from the store (and the service's older
@@ -81,6 +82,7 @@ pub mod calls;
 pub mod channel_view;
 pub mod chat_list;
 pub mod chat_view;
+pub mod chat_window;
 pub mod clock;
 pub mod code;
 pub mod compose;

@@ -6,9 +6,9 @@
 //! It reads the chat list's rows (one model for both), so a chat that changes while it is open shows changed. Under
 //! the chats come the teams' channels the Teams list shows ("<team> › <channel>", matched the same way): one chosen
 //! opens read-only, as from the Teams list. Messages are found by the title bar's search ([`crate::global_search`]),
-//! the app's one search, not here. Last come the app's commands the query matches ([`COMMANDS`]: "Copy
-//! diagnostics", and "Set status: …" for each status the account menu offers, so the account's status is set from the
-//! keyboard too), and in a build that shows calls the call commands that fit the moment ([`CallCommand`]: "Call" the
+//! the app's one search, not here. Last come the app's commands the query matches ([`COMMANDS`]: "See more chats", the
+//! "Chats" section's See more from the keyboard, "Copy diagnostics", and "Set status: …" for each status the account
+//! menu offers, so the account's status is set from the keyboard too), and in a build that shows calls the call commands that fit the moment ([`CallCommand`]: "Call" the
 //! chat shown, "Make a test call", "Join call", "Answer call", "Decline call", "Leave call", "Mute or unmute", M3 Task 17;
 //! "Camera on or off", Task 18).
 
@@ -110,6 +110,8 @@ pub enum SwitcherEvent {
     SetStatus(ManualStatus),
     /// A call command.
     Call(CallCommand),
+    /// Show more of the chats (the "See more chats" command, the "Chats" section's See more).
+    SeeMoreChats,
 }
 
 /// A call command the palette offers (in a build that shows calls), when it fits the moment.
@@ -182,6 +184,7 @@ const COMMAND_SECTION: usize = 2;
 /// One of the app's commands the palette offers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PaletteCommand {
+    SeeMoreChats,
     CopyDiagnostics,
     SetStatus(ManualStatus),
     Call(CallCommand),
@@ -192,6 +195,7 @@ impl PaletteCommand {
     #[must_use]
     pub fn name(self) -> &'static str {
         match self {
+            Self::SeeMoreChats => "See more chats",
             Self::CopyDiagnostics => "Copy diagnostics",
             Self::SetStatus(ManualStatus::Automatic) => "Set status: Automatic",
             Self::SetStatus(ManualStatus::Available) => "Set status: Available",
@@ -204,6 +208,7 @@ impl PaletteCommand {
 
     fn event(self) -> SwitcherEvent {
         match self {
+            Self::SeeMoreChats => SwitcherEvent::SeeMoreChats,
             Self::CopyDiagnostics => SwitcherEvent::CopyDiagnostics,
             Self::SetStatus(status) => SwitcherEvent::SetStatus(status),
             Self::Call(command) => SwitcherEvent::Call(command),
@@ -212,7 +217,8 @@ impl PaletteCommand {
 }
 
 /// The commands the palette offers, in order, matched on their names as the chats are.
-pub const COMMANDS: [PaletteCommand; 6] = [
+pub const COMMANDS: [PaletteCommand; 7] = [
+    PaletteCommand::SeeMoreChats,
     PaletteCommand::CopyDiagnostics,
     PaletteCommand::SetStatus(ManualStatus::Automatic),
     PaletteCommand::SetStatus(ManualStatus::Available),
