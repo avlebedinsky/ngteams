@@ -40,8 +40,13 @@ pub enum Target {
     Join(String),
     /// The call of the meeting whose chat this is, started or not, as the calendar's Join goes into it.
     Meeting(String, MeetingInfo),
-    /// A channel's meeting: a new one (its Meet now), or with `join` the one that runs there now.
-    Channel { channel: String, join: bool },
+    /// A channel's meeting: a new one (its Meet now, titled `subject` once posted when one is given), or with `join`
+    /// the one that runs there now.
+    Channel {
+        channel: String,
+        join: bool,
+        subject: Option<String>,
+    },
 }
 
 /// How long each part of a call may take or lasts.
@@ -136,6 +141,8 @@ pub async fn run(
             return Ok(report);
         }
     }
+    // a Meet now's title goes once the service posted its meeting, while the call runs
+    let mut titled = None;
     let action = match target {
         Target::Echo(echo) => CallAction::TestCall { echo },
         Target::Chat(chat) => CallAction::Call { chat },
@@ -154,8 +161,17 @@ pub async fn run(
             CallAction::Join { chat }
         }
         Target::Meeting(chat, meeting) => CallAction::JoinMeeting { chat, meeting },
-        Target::Channel { channel, join: false } => CallAction::MeetNow { channel },
-        Target::Channel { channel, join: true } => CallAction::JoinChannel { channel },
+        Target::Channel {
+            channel,
+            join: false,
+            subject,
+        } => {
+            titled = subject.map(|subject| (channel.clone(), subject));
+            CallAction::MeetNow { channel }
+        }
+        Target::Channel {
+            channel, join: true, ..
+        } => CallAction::JoinChannel { channel },
     };
     let placed = tokio::time::Instant::now();
     writeln!(out, "{} call_placing", now_ms())?;
@@ -174,6 +190,7 @@ pub async fn run(
         }
     };
     report.call = Some(call);
+    let titled = titled.map(|(channel, subject)| handle.requests().title_meet_now(channel, subject));
     let following = Following {
         handle,
         call,
@@ -187,6 +204,18 @@ pub async fn run(
         video_at: showing.video.map(|_| placed + VIDEO_EVERY),
     };
     following.run(stop, &mut report).await?;
+    if let Some(titled) = titled {
+        match titled.await {
+            Ok(()) => writeln!(out, "{} meeting_titled", now_ms())?,
+            Err(error) => writeln!(out, "{} meeting_not_titled {}", now_ms(), error.kind())?,
+        }
+    }
+    summary(call, &report, out)?;
+    Ok(report)
+}
+
+/// The call's summary line: `<ms> call_summary call=<id> setup_ms=<n> held=<bool> end="<how>"`.
+fn summary(call: CallId, report: &Report, out: &mut impl Write) -> std::io::Result<()> {
     let setup = report
         .setup
         .map_or_else(|| "-".to_owned(), |setup| setup.as_millis().to_string());
@@ -198,8 +227,7 @@ pub async fn run(
         call.get(),
         report.held,
         json_line(&Value::String(end))
-    )?;
-    Ok(report)
+    )
 }
 
 /// Waits for the calling socket's registration, printing the events until then.

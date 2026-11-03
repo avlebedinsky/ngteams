@@ -24,6 +24,7 @@ use gpui::{
     Subscription, Task, Window, div, px, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
+use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::menu::{DropdownMenu as _, PopupMenu};
 use gpui_component::switch::Switch;
 use gpui_component::{Selectable as _, Sizable as _};
@@ -72,6 +73,8 @@ pub struct PrejoinView {
     /// The background filters' pane, while it is open.
     effects: Option<Entity<EffectsPicker>>,
     focus: FocusHandle,
+    /// A Meet now's subject, editable as Teams' pre-join has it (made the first time the pre-join draws one).
+    subject: Option<(Entity<InputState>, Subscription)>,
     _waking: Option<Task<()>>,
     _observing: [Subscription; 2],
 }
@@ -106,6 +109,7 @@ impl PrejoinView {
             session: None,
             effects: None,
             focus: cx.focus_handle(),
+            subject: None,
             _waking: waking,
             _observing: observing,
         }
@@ -551,6 +555,56 @@ impl PrejoinView {
     }
 }
 
+impl PrejoinView {
+    /// The pre-join's title: the meeting's, or for a Meet now Teams' heading over the new meeting's subject, which the
+    /// user may change before Join now ([`Calls::set_prejoin_title`]).
+    fn title(&mut self, prejoin: &Prejoin, palette: Palette, window: &mut Window, cx: &mut Context<Self>) -> gpui::Div {
+        let heading = div()
+            .debug_selector(|| "prejoin-title".to_owned())
+            .text_center()
+            .text_xl()
+            .font_weight(gpui::FontWeight::SEMIBOLD);
+        if prejoin.entry != calls::PrejoinEntry::MeetNow {
+            return heading.child(SharedString::from(prejoin.to_join.title.clone()));
+        }
+        if self.subject.is_none() {
+            let title = prejoin.to_join.title.clone();
+            let input = cx.new(|cx| InputState::new(window, cx).default_value(title));
+            let calls = self.calls.clone();
+            let changed = cx.subscribe(&input, move |_, input, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let title = input.read(cx).value().to_string();
+                    calls.update(cx, |calls, cx| calls.set_prejoin_title(title, cx));
+                }
+            });
+            self.subject = Some((input, changed));
+        }
+        let Some((input, _)) = &self.subject else {
+            return heading.child(SharedString::from(prejoin.to_join.title.clone()));
+        };
+        let input = input.clone();
+        div()
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_2()
+            .child(heading.child(MEET_NOW_HEADING))
+            .child(
+                div()
+                    .debug_selector(|| "prejoin-subject".to_owned())
+                    .w(px(320.0))
+                    .rounded_md()
+                    .border_1()
+                    .border_color(rgb(palette.border))
+                    .bg(rgb(palette.surface))
+                    .child(Input::new(&input).appearance(false)),
+            )
+    }
+}
+
+/// What a Meet now's pre-join says over the new meeting's subject, as Teams' does.
+const MEET_NOW_HEADING: &str = "Microsoft Teams meeting";
+
 impl Render for PrejoinView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = theme::current(cx);
@@ -582,6 +636,7 @@ impl Render for PrejoinView {
                 .child(self.camera_row(&prejoin, palette, cx))
         });
         let actions = Self::actions(&prejoin, cx);
+        let title = self.title(&prejoin, palette, window, cx);
         let audio = self.audio(&prejoin, palette, cx);
         let effects = self.effects_pane(palette, cx);
         div()
@@ -615,14 +670,7 @@ impl Render for PrejoinView {
                             .flex()
                             .flex_col()
                             .gap_4()
-                            .child(
-                                div()
-                                    .debug_selector(|| "prejoin-title".to_owned())
-                                    .text_center()
-                                    .text_xl()
-                                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                                    .child(SharedString::from(prejoin.to_join.title.clone())),
-                            )
+                            .child(title)
                             .child(div().flex().items_start().gap_4().children(camera).child(audio))
                             .children(refused)
                             .child(actions),

@@ -295,6 +295,99 @@ fn canceling_an_organizers_meeting_requires_confirmation_and_refreshes_after_suc
     assert!(cx.update(|_, cx| view.read(cx).card().is_none()));
 }
 
+/// The account's teams: one holding the made-up channel, with its mailbox.
+fn channel_team() -> teams_store::Team {
+    teams_store::Team {
+        id: fixtures::CHANNEL.to_owned(),
+        name: "Lab team".to_owned(),
+        archived: false,
+        group_id: None,
+        mailbox: Some(fixtures::TEAM_MAILBOX.to_owned()),
+        owner: true,
+        can_add_channel: true,
+        can_add_private_channel: true,
+        about: teams_store::TeamAbout::default(),
+        channels: vec![teams_store::TeamChannel {
+            id: fixtures::CHANNEL.to_owned(),
+            name: "General".to_owned(),
+            general: true,
+            kind: teams_store::ChannelKind::Standard,
+            shown: true,
+        }],
+    }
+}
+
+/// The account's own channel meeting as its calendar holds it: an attendee's copy (`isOrganizer` `false`).
+fn own_channel_meeting() -> teams_core::CalendarEvent {
+    let mut event = fixtures::channel_full(common::LAB_A).event;
+    event.is_organizer = false;
+    event.response = EventResponse::Accepted;
+    event
+}
+
+#[test]
+fn the_card_of_a_channel_meeting_the_account_scheduled_edits_it_from_the_team_s_calendar() {
+    let rig = Rig::start();
+    *rig.core.teams.lock().unwrap() = Some(vec![channel_team()]);
+    rig.core.calendar.lock().unwrap().full.insert(
+        fixtures::CHANNEL_EVENT.to_owned(),
+        fixtures::channel_full(common::LAB_A),
+    );
+    let (view, cx, _) = window(&rig);
+    let shown = Shown::of(std::rc::Rc::new(own_channel_meeting())).unwrap();
+    cx.update(|_, cx| view.update(cx, |view, cx| view.open_card(shown, cx)));
+    draw(cx);
+    assert!(cx.debug_bounds("calendar-card-edit").is_some(), "its organizer's Edit");
+    assert!(cx.debug_bounds("calendar-card-remove").is_some(), "and Cancel meeting");
+    click(cx, "calendar-card-edit");
+    assert_eq!(
+        rig.core.calendar.lock().unwrap().full_reads,
+        [format!("{}/{}", fixtures::TEAM_MAILBOX, fixtures::CHANNEL_EVENT)]
+    );
+    let form = cx
+        .update(|_, cx| teams_ui::event_form::shown(cx))
+        .expect("the form opens");
+    cx.update(|_, cx| {
+        let form = form.read(cx);
+        assert!(form.changes());
+        assert_eq!(
+            form.place().map(|place| place.channel.mailbox.as_str()),
+            Some(fixtures::TEAM_MAILBOX)
+        );
+    });
+    cx.update(|_, cx| teams_ui::event_form::close(cx));
+    draw(cx);
+}
+
+#[test]
+fn the_card_of_a_channel_meeting_the_account_scheduled_cancels_it_on_the_team_s_calendar() {
+    let rig = Rig::start();
+    *rig.core.teams.lock().unwrap() = Some(vec![channel_team()]);
+    rig.core
+        .calendar
+        .lock()
+        .unwrap()
+        .write_answers
+        .push_back(Ok(EventWritten { created: None }));
+    let (view, cx, _) = window(&rig);
+    let shown = Shown::of(std::rc::Rc::new(own_channel_meeting())).unwrap();
+    cx.update(|_, cx| view.update(cx, |view, cx| view.open_card(shown, cx)));
+    click(cx, "calendar-card-remove");
+    click(cx, "calendar-card-remove-confirm");
+    let calendar = rig.core.calendar.lock().unwrap();
+    let [
+        EventWrite::CancelInChannel {
+            meeting, channel, post, ..
+        },
+    ] = calendar.writes.as_slice()
+    else {
+        panic!("one cancellation in the channel: {:?}", calendar.writes);
+    };
+    assert_eq!(meeting.ical_uid, fixtures::CHANNEL_EVENT);
+    assert_eq!(channel.mailbox, fixtures::TEAM_MAILBOX);
+    assert_eq!(post, "1793680050510");
+}
+
 #[test]
 fn the_read_only_card_offers_no_edit_or_remove_and_escape_closes_it() {
     let rig = Rig::start();

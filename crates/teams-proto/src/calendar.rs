@@ -226,6 +226,64 @@ pub struct CalendarEvent {
     /// The series an occurrence or exception belongs to (`seriesMasterId`): the event a change of the whole series
     /// reads and writes.
     pub series_master_id: Option<String>,
+    /// The channel's meeting it is, when it was scheduled in a channel (its `skypeTeamsData` names a team's thread).
+    pub channel_meeting: Option<ChannelEventRef>,
+}
+
+/// A channel's meeting as an event names it (`docs/protocol/calling.md`, "Schedule a meeting"): its `skypeTeamsData`'s
+/// `cid` the channel, `uid` who scheduled it and `mid` its post there, and its `iCalUID`, by which its team's calendar
+/// holds it. Its organizer's own calendar holds it as an attendee's copy (`isOrganizer` `false`, the team its
+/// organizer), so who scheduled it is `uid`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct ChannelEventRef {
+    /// The channel's thread.
+    pub channel: String,
+    /// Who scheduled it, by MRI.
+    pub organizer: Option<String>,
+    /// Its post in the channel.
+    pub post: Option<String>,
+    /// Its id on the team's calendar.
+    pub ical_uid: String,
+}
+
+impl ChannelEventRef {
+    /// The channel's meeting `entry` (an event as the calendar reads it) is, if it is one.
+    fn of(entry: &Value) -> Option<Self> {
+        let data: Value = serde_json::from_str(entry.get("skypeTeamsData")?.as_str()?).ok()?;
+        let channel = data
+            .get("cid")?
+            .as_str()
+            .filter(|cid| teams_fence::is_team_thread_id(cid))?;
+        let ical_uid = entry
+            .get("iCalUID")?
+            .as_str()
+            .filter(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_hexdigit()))?;
+        let post = match data.get("mid") {
+            Some(Value::Number(number)) => Some(number.to_string()),
+            Some(Value::String(text)) if !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) => {
+                Some(text.clone())
+            }
+            _ => None,
+        };
+        Some(Self {
+            channel: channel.to_owned(),
+            organizer: data
+                .get("uid")
+                .and_then(Value::as_str)
+                .filter(|uid| !uid.is_empty())
+                .map(str::to_owned),
+            post,
+            ical_uid: ical_uid.to_owned(),
+        })
+    }
+
+    /// Whether the account `mri` scheduled it.
+    #[must_use]
+    pub fn organized_by(&self, mri: &str) -> bool {
+        self.organizer
+            .as_deref()
+            .is_some_and(|organizer| organizer.eq_ignore_ascii_case(mri))
+    }
 }
 
 impl CalendarEvent {
@@ -300,6 +358,7 @@ impl CalendarEvent {
             conference_id: text("onlineMeetingConferenceId"),
             attendees: attendees(entry.get("attendees")),
             series_master_id: text("seriesMasterId"),
+            channel_meeting: ChannelEventRef::of(entry),
         })
     }
 }
@@ -505,51 +564,57 @@ impl EventRead {
             Some(Value::Object(inner)) => inner.clone(),
             _ => answer.as_object().cloned().ok_or(CalendarAnswerError::Malformed)?,
         };
-        let event = CalendarEvent::of(&Value::Object(raw.clone())).ok_or(CalendarAnswerError::Malformed)?;
-        if event.id != self.id {
+        let full = full_event(raw)?;
+        if full.event.id != self.id {
             return Err(CalendarAnswerError::Malformed);
         }
-        let body_html = raw
-            .get("bodyContent")
-            .or_else(|| raw.get("body").and_then(|body| body.get("content")))
-            .and_then(Value::as_str)
-            .map(str::to_owned);
-        let reminder_minutes = raw
-            .get("isReminderSet")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-            .then(|| raw.get("reminderMinutesBeforeStart").and_then(Value::as_u64))
-            .flatten()
-            .and_then(|minutes| u32::try_from(minutes).ok());
-        let categories = raw
-            .get("categories")
-            .and_then(Value::as_array)
-            .map(|names| names.iter().filter_map(Value::as_str).map(str::to_owned).collect())
-            .unwrap_or_default();
-        let optional = raw
-            .get("attendees")
-            .and_then(Value::as_array)
-            .map(|list| {
-                list.iter()
-                    .filter(|attendee| attendee.get("type").and_then(Value::as_str) == Some("Optional"))
-                    .filter_map(|attendee| {
-                        let inner = attendee.get("emailAddress").unwrap_or(attendee);
-                        inner.get("address").and_then(Value::as_str).map(str::to_lowercase)
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let recurrence = Recurrence::read(&raw);
-        Ok(FullEvent {
-            event,
-            raw,
-            body_html,
-            reminder_minutes,
-            categories,
-            optional,
-            recurrence,
-        })
+        Ok(full)
     }
+}
+
+/// An event's answer, read whole ([`FullEvent`]).
+fn full_event(raw: serde_json::Map<String, Value>) -> Result<FullEvent, CalendarAnswerError> {
+    let event = CalendarEvent::of(&Value::Object(raw.clone())).ok_or(CalendarAnswerError::Malformed)?;
+    let body_html = raw
+        .get("bodyContent")
+        .or_else(|| raw.get("body").and_then(|body| body.get("content")))
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let reminder_minutes = raw
+        .get("isReminderSet")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        .then(|| raw.get("reminderMinutesBeforeStart").and_then(Value::as_u64))
+        .flatten()
+        .and_then(|minutes| u32::try_from(minutes).ok());
+    let categories = raw
+        .get("categories")
+        .and_then(Value::as_array)
+        .map(|names| names.iter().filter_map(Value::as_str).map(str::to_owned).collect())
+        .unwrap_or_default();
+    let optional = raw
+        .get("attendees")
+        .and_then(Value::as_array)
+        .map(|list| {
+            list.iter()
+                .filter(|attendee| attendee.get("type").and_then(Value::as_str) == Some("Optional"))
+                .filter_map(|attendee| {
+                    let inner = attendee.get("emailAddress").unwrap_or(attendee);
+                    inner.get("address").and_then(Value::as_str).map(str::to_lowercase)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let recurrence = Recurrence::read(&raw);
+    Ok(FullEvent {
+        event,
+        raw,
+        body_html,
+        reminder_minutes,
+        categories,
+        optional,
+        recurrence,
+    })
 }
 
 impl Read for EventRead {
@@ -559,6 +624,73 @@ impl Read for EventRead {
 
     fn endpoint(&self) -> Endpoint {
         Endpoint::new(["v2.0", "me", "calendars", "events", self.id.as_str()]).with_query("shouldDecryptData", "true")
+    }
+}
+
+/// `GET v2.0/groups/smtp:<team mailbox>/calendars/events/iCalUId/<iCalUid>?eventStartDateTime=&shouldDecryptData=true`:
+/// a channel's meeting as its team's group calendar holds it, as the web client reads it before it opens the meeting's
+/// details (its card's Edit, seen 2026-11-03). Its answer is the event itself, `isOrganizer` `true` and `myResponseType`
+/// `Organizer` whoever reads it (the group organizes it; `skypeTeamsData`'s `uid` names who scheduled it), and what a
+/// change sends back with the form's fields over it ([`crate::UpdateChannelEvent`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelEventRead {
+    mailbox: String,
+    ical_uid: String,
+}
+
+impl ChannelEventRead {
+    /// The read of the event `ical_uid` (hex digits) on the group calendar of `mailbox` (one address); `None` for
+    /// either in another form.
+    #[must_use]
+    pub fn new(mailbox: &str, ical_uid: &str) -> Option<Self> {
+        let mailbox = mailbox.trim();
+        let address = mailbox
+            .split_once('@')
+            .is_some_and(|(local, domain)| !local.is_empty() && domain.contains('.') && !domain.contains('@'))
+            && !mailbox.contains(['/', '?', '#', ' ', ',', ';', '"', '<', '>', '\\', '%']);
+        let id = !ical_uid.is_empty() && ical_uid.chars().all(|c| c.is_ascii_hexdigit());
+        (address && id).then(|| Self {
+            mailbox: mailbox.to_owned(),
+            ical_uid: ical_uid.to_owned(),
+        })
+    }
+
+    /// The event the answer `body` is.
+    ///
+    /// # Errors
+    /// [`CalendarAnswerError::Malformed`] unless it is an event object whose `iCalUID` is the one read.
+    pub fn read_answer(&self, body: &[u8]) -> Result<FullEvent, CalendarAnswerError> {
+        let answer: Value = serde_json::from_slice(body).map_err(|_| CalendarAnswerError::Malformed)?;
+        let raw = match answer.get("value") {
+            Some(Value::Object(inner)) => inner.clone(),
+            _ => answer.as_object().cloned().ok_or(CalendarAnswerError::Malformed)?,
+        };
+        let named = raw.get("iCalUID").and_then(Value::as_str);
+        if !named.is_some_and(|named| named.eq_ignore_ascii_case(&self.ical_uid)) {
+            return Err(CalendarAnswerError::Malformed);
+        }
+        full_event(raw)
+    }
+}
+
+impl Read for ChannelEventRead {
+    fn service(&self) -> Service {
+        Service::MiddleTier
+    }
+
+    fn endpoint(&self) -> Endpoint {
+        let group = format!("smtp:{}", self.mailbox);
+        Endpoint::new([
+            "v2.0",
+            "groups",
+            group.as_str(),
+            "calendars",
+            "events",
+            "iCalUId",
+            self.ical_uid.as_str(),
+        ])
+        .with_query("eventStartDateTime", "")
+        .with_query("shouldDecryptData", "true")
     }
 }
 

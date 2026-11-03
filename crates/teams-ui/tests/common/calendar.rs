@@ -25,6 +25,8 @@ pub struct CalendarFake {
     pub people: Vec<Invitable>,
     pub people_queries: Vec<String>,
     pub availability: MeetingAvailability,
+    /// The Meet now titles asked, each with its channel.
+    pub titles: Vec<(String, String)>,
 }
 
 impl CalendarFake {

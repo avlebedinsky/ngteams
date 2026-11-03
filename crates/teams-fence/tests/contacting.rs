@@ -2251,3 +2251,178 @@ fn a_channel_s_meeting_cancelled_in_any_other_form_stays_unreadable() {
         );
     }
 }
+
+fn meeting_title_url(channel: &str, post: &str, query: &str) -> String {
+    let channel = channel.replace(':', "%3A").replace('@', "%40");
+    format!("{CHAT}/users/ME/conversations/{channel}/messages/{post}/properties{query}")
+}
+
+#[test]
+fn a_channel_meeting_s_title_is_an_edit_on_its_team() {
+    let url = meeting_title_url(TEAM, "1793684261870", "?name=meeting");
+    assert_eq!(
+        verdict("PUT", &url, Some(br#"{"meeting":{"meetingtitle":"lab subject"}}"#)),
+        on_team(WriteKind::Edit, TEAM)
+    );
+}
+
+#[test]
+fn a_channel_meeting_s_title_in_any_other_form_stays_unreadable() {
+    let title = br#"{"meeting":{"meetingtitle":"lab subject"}}"#.as_slice();
+    for (url, body) in [
+        // a chat's post, not a channel's
+        (
+            meeting_title_url("19:meeting_x@thread.v2", "1793684261870", "?name=meeting"),
+            title,
+        ),
+        (meeting_title_url(TEAM, "not-a-post", "?name=meeting"), title),
+        (meeting_title_url(TEAM, "1793684261870", "?name=meeting&x=1"), title),
+        (
+            meeting_title_url(TEAM, "1793684261870", "?name=meeting"),
+            br#"{"meeting":{"meetingtitle":"t","organizerId":"x"}}"#.as_slice(),
+        ),
+        (
+            meeting_title_url(TEAM, "1793684261870", "?name=meeting"),
+            br#"{"meeting":{"meetingtitle":1}}"#.as_slice(),
+        ),
+        (
+            meeting_title_url(TEAM, "1793684261870", "?name=meeting"),
+            br#"{"meeting":{"meetingtitle":"t"},"mentions":"[]"}"#.as_slice(),
+        ),
+        (
+            meeting_title_url(TEAM, "1793684261870", "?name=meeting"),
+            br#"{"meeting":"{\"meetingtitle\":\"t\"}"}"#.as_slice(),
+        ),
+    ] {
+        assert_eq!(verdict("PUT", &url, Some(body)), Contact::Unreadable, "{url}");
+    }
+}
+
+const TEAM_EVENT_ID: &str = "040000008200e00074c5b7101a82e008";
+
+fn team_update_url(group: &str, query: &str) -> String {
+    format!(
+        "https://teams.cloud.microsoft/api/mt/part/amer-03/v2.0/groups/{group}/calendars/events/{TEAM_EVENT_ID}{query}"
+    )
+}
+
+/// A channel meeting's change as its Send update sent it (2026-11-03, held back), every value made up: the event as
+/// read with the form's fields over it, the organizer and the team's mailbox its attendees.
+fn team_update() -> Value {
+    let mut event = team_event();
+    remove_key(&mut event, "emptyBodyPlaceholder");
+    event["iCalUID"] = TEAM_EVENT_ID.into();
+    event["cleanGlobalObjectId"] = TEAM_EVENT_ID.into();
+    event["objectId"] = "AQMkMadeUp".into();
+    event["inviteAllMembers"] = false.into();
+    event["subject"] = "lab channel meeting edited".into();
+    serde_json::json!({
+        "updateMessageFormat": "The meeting has been updated",
+        "updatedCalendarEvent": event,
+        "fetchEventContract": {"eventType": "Single", "startTime": "2026-11-03T04:00:00.000Z", "eventTimeZone": "UTC"},
+    })
+}
+
+#[test]
+fn a_channel_s_meeting_changed_is_a_meeting_on_its_team_s_group_calendar() {
+    for query in ["?isOnlineMeeting=true", "?isOnlineMeeting=false"] {
+        let url = team_update_url(&format!("smtp:{TEAM_MAILBOX}"), query);
+        assert_eq!(
+            verdict("PUT", &url, Some(team_update().to_string().as_bytes())),
+            on_team_calendar(&[ORGANIZER]),
+            "{query}"
+        );
+    }
+    let url = team_update_url(&format!("smtp:{TEAM_MAILBOX}"), "?isOnlineMeeting=true");
+    // anyone else it now invites is added
+    let mut invites = team_update();
+    if let Some(list) = invites["updatedCalendarEvent"]["attendees"].as_array_mut() {
+        list.push(serde_json::json!({"address": "bot-b@lab.example.com", "type": "Required"}));
+    }
+    assert_eq!(
+        verdict("PUT", &url, Some(invites.to_string().as_bytes())),
+        on_team_calendar(&[ORGANIZER, "bot-b@lab.example.com"])
+    );
+    // the event's id in another case is the same event
+    let mut upper = team_update();
+    upper["updatedCalendarEvent"]["iCalUID"] = TEAM_EVENT_ID.to_uppercase().into();
+    assert_eq!(
+        verdict("PUT", &url, Some(upper.to_string().as_bytes())),
+        on_team_calendar(&[ORGANIZER])
+    );
+}
+
+#[test]
+fn a_channel_s_meeting_changed_in_any_other_form_stays_unreadable() {
+    let url = team_update_url(&format!("smtp:{TEAM_MAILBOX}"), "?isOnlineMeeting=true");
+    let edits: Vec<(&str, BodyEdit)> = vec![
+        (
+            "another event's id",
+            Box::new(|body| body["updatedCalendarEvent"]["iCalUID"] = "0400ffff".into()),
+        ),
+        (
+            "another event's global id",
+            Box::new(|body| body["updatedCalendarEvent"]["cleanGlobalObjectId"] = "0400ffff".into()),
+        ),
+        (
+            "another mailbox named",
+            Box::new(|body| body["updatedCalendarEvent"]["mailboxAddress"] = "other@lab.example.com".into()),
+        ),
+        (
+            "no channel",
+            Box::new(|body| remove_key(&mut body["updatedCalendarEvent"], "skypeTeamsData")),
+        ),
+        (
+            "a chat for a channel",
+            Box::new(|body| {
+                body["updatedCalendarEvent"]["skypeTeamsData"] = r#"{"cid":"19:meeting_x@thread.v2","type":0}"#.into();
+            }),
+        ),
+        (
+            "everyone else's audience",
+            Box::new(|body| body["updatedCalendarEvent"]["parentConversationId"] = "19:meeting_x@thread.v2".into()),
+        ),
+        ("no event", Box::new(|body| remove_key(body, "updatedCalendarEvent"))),
+        (
+            "a key no capture showed",
+            Box::new(|body| body["attendees"] = serde_json::json!([])),
+        ),
+        (
+            "the line not as text",
+            Box::new(|body| body["updateMessageFormat"] = 1.into()),
+        ),
+        (
+            "more in how the event is found",
+            Box::new(|body| body["fetchEventContract"]["attendees"] = serde_json::json!([])),
+        ),
+        (
+            "the event as a personal calendar's",
+            Box::new(|body| {
+                let event = body["updatedCalendarEvent"].clone();
+                body["updatedCalendarEvent"] = serde_json::json!({ "calendarEvent": event });
+            }),
+        ),
+    ];
+    for (name, edit) in edits {
+        let mut body = team_update();
+        edit(&mut body);
+        assert_eq!(
+            verdict("PUT", &url, Some(body.to_string().as_bytes())),
+            Contact::Unreadable,
+            "{name}"
+        );
+    }
+    let body = team_update().to_string();
+    for url in [
+        team_update_url(GROUP_ID, "?isOnlineMeeting=true"),
+        team_update_url(&format!("smtp:{TEAM_MAILBOX}"), ""),
+        team_update_url(&format!("smtp:{TEAM_MAILBOX}"), "?isOnlineMeeting=true&notify=true"),
+        team_update_url(&format!("smtp:{TEAM_MAILBOX}"), "?isOnlineMeeting=yes"),
+    ] {
+        assert_eq!(
+            verdict("PUT", &url, Some(body.as_bytes())),
+            Contact::Unreadable,
+            "{url}"
+        );
+    }
+}

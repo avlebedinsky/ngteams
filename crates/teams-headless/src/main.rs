@@ -149,20 +149,29 @@ async fn teams(lab: &Lab, channel: Option<&str>, wait: u64, signals: &mut Signal
 }
 
 /// `channel-schedule`: a meeting scheduled in a channel (`channel_schedule.rs`).
+/// What `channel-schedule` does to a channel's meetings.
+enum Change {
+    Schedule,
+    Cancel,
+    /// Each one whose title starts with the subject renamed to this.
+    Rename(String),
+}
+
 async fn channel_schedule(
     lab: &Lab,
     channel: &str,
     subject: &str,
-    cancel: bool,
+    change: Change,
     signals: &mut Signals,
     out: &mut impl Write,
 ) -> Outcome {
+    use teams_headless::channel_schedule as schedule;
     let handle = lab.start_engine(false).await?;
     let asked = async {
-        if cancel {
-            teams_headless::channel_schedule::cancel(&handle, channel, subject, out).await
-        } else {
-            teams_headless::channel_schedule::schedule(&handle, channel, subject, now_ms(), out).await
+        match &change {
+            Change::Cancel => schedule::cancel(&handle, channel, subject, out).await,
+            Change::Rename(to) => schedule::rename(&handle, channel, subject, to, out).await,
+            Change::Schedule => schedule::schedule(&handle, channel, subject, now_ms(), out).await,
         }
     };
     let scheduled = tokio::select! {
@@ -203,7 +212,15 @@ async fn dispatch(lab: &Lab, command: Command, signals: &mut Signals, out: &mut 
             channel,
             subject,
             cancel,
-        } => channel_schedule(lab, &channel, &subject, cancel, signals, out).await,
+            rename,
+        } => {
+            let change = match (cancel, rename) {
+                (true, _) => Change::Cancel,
+                (false, Some(to)) => Change::Rename(to),
+                (false, None) => Change::Schedule,
+            };
+            channel_schedule(lab, &channel, &subject, change, signals, out).await
+        }
         Command::Availability {
             manual,
             manual_after,
@@ -311,6 +328,7 @@ async fn meeting_command(lab: &Lab, command: Command, signals: &mut Signals, out
             channel,
             audio,
             join,
+            subject,
             seconds,
             wait,
         } => {
@@ -318,7 +336,7 @@ async fn meeting_command(lab: &Lab, command: Command, signals: &mut Signals, out
                 return Err("that isn't a channel's thread id".into());
             }
             let asked = CallAsked {
-                target: call::Target::Channel { channel, join },
+                target: call::Target::Channel { channel, join, subject },
                 plan: call_plan(seconds, wait, 0, audio.camera_after()),
                 audio,
             };

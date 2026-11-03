@@ -82,8 +82,40 @@ const SETTLE: Duration = Duration::from_millis(1500);
 /// A step of the tour: its screenshot's name and what it does to the shell shown.
 type Step = (&'static str, fn(&Entity<Shell>, &mut Window, &mut App));
 
+/// Where the tour's made-up channel meeting is: the mock's team channel `channel`, a made-up mailbox.
+fn channel_meeting_place(channel: &str) -> Option<event_form::MeetingPlace> {
+    Some(event_form::MeetingPlace {
+        channel: teams_core::MeetingChannel {
+            channel: channel.to_owned(),
+            mailbox: "made-up-team@lab.example.test".to_owned(),
+        },
+        team: "Made-up Team".to_owned(),
+        name: "General".to_owned(),
+    })
+}
+
+/// A made-up channel meeting the account scheduled, as its team's calendar (`mailbox`) gives it.
+fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
+    let data = serde_json::json!({"cid": TEAM, "mid": 1_760_000_400_100_u64, "uid": "8:orgid:00000000-0000-4000-8000-00000000000a"});
+    let event = serde_json::json!({
+        "objectId": "AQMkMadeUp",
+        "iCalUID": "0c0d",
+        "subject": "Made-up planning",
+        "startTime": "2026-11-04T12:00:00+00:00",
+        "endTime": "2026-11-04T12:30:00+00:00",
+        "isOnlineMeeting": true,
+        "isOrganizer": true,
+        "location": "Microsoft Teams Meeting",
+        "bodyContent": "<p>Made-up agenda</p>",
+        "skypeTeamsData": data.to_string(),
+    });
+    teams_proto::ChannelEventRead::new(mailbox, "0c0d")?
+        .read_answer(&serde_json::to_vec(&event).ok()?)
+        .ok()
+}
+
 /// The tour.
-const STEPS: [Step; 4 + 133] = [
+const STEPS: [Step; 4 + 134] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -702,6 +734,19 @@ const STEPS: [Step; 4 + 133] = [
         let models = shell.read(cx).models().clone();
         models.calls.update(cx, teams_ui::Calls::cancel_prejoin);
         shell.update(cx, Shell::schedule_channel_meeting);
+    }),
+    // a channel meeting's card's Edit (its organizer's): the scheduling form on the meeting read from the team's
+    // calendar, the channel's row, Send update and Cancel meeting
+    ("channel-meeting-edit-form", |shell, _, cx| {
+        event_form::close(cx);
+        let Some(place) = channel_meeting_place(TEAM) else {
+            return say("no channel meeting to edit");
+        };
+        let calendar = shell.read(cx).calendar_view().clone();
+        match channel_meeting(&place.channel.mailbox) {
+            Some(full) => calendar.update(cx, |calendar, cx| calendar.edit_in_channel(full, place, cx)),
+            None => say("the made-up channel meeting doesn't read"),
+        }
     }),
     // the general channel, where the mock's CSA names a meeting running: its header's Join
     ("channel-join", |shell, window, cx| {

@@ -366,6 +366,17 @@ impl Core for FakeCore {
         locked(&self.calendar).write(write)
     }
 
+    fn channel_event(&self, mailbox: String, ical_uid: String) -> Reply<teams_core::FullEvent> {
+        let mut calendar = locked(&self.calendar);
+        calendar.full_reads.push(format!("{mailbox}/{ical_uid}"));
+        Reply::ready(calendar.full.get(&ical_uid).cloned().ok_or(EngineError::CalendarUnread))
+    }
+
+    fn title_meet_now(&self, channel: String, title: String) -> Reply<()> {
+        locked(&self.calendar).titles.push((channel, title));
+        Reply::ready(Ok(()))
+    }
+
     fn create_channel(&self, draft: teams_core::ChannelDraft) -> Reply<teams_core::ChannelMade> {
         locked(&self.channels_asked).push(draft);
         Reply::ready(match locked(&self.channel_answer).clone() {

@@ -368,8 +368,60 @@ impl CalendarView {
         );
     }
 
-    /// Opens the scheduling form on the event `id`, read whole first (its card's Edit, a double click on it).
+    /// Opens the scheduling form on a channel's meeting read whole from its team's calendar (its card's Edit in the
+    /// channel): Send update and Cancel meeting go to the team's calendar; once saved, the calendar reads its days again.
+    pub fn edit_in_channel(
+        &mut self,
+        full: teams_core::FullEvent,
+        place: crate::event_form::MeetingPlace,
+        cx: &mut Context<Self>,
+    ) {
+        let seed = crate::event_form::Seed::ChangeInChannel {
+            full: Box::new(full),
+            place,
+        };
+        crate::event_form::open(
+            Arc::clone(&self.core),
+            Arc::clone(&self.trace),
+            seed,
+            Self::saved(cx),
+            cx,
+        );
+    }
+
+    /// Opens the scheduling form on the channel's meeting `channel_meeting` (a calendar card's Edit, a double click on
+    /// it): the channel's team found among the account's teams, the meeting read whole from the team's calendar.
+    fn edit_channel_event(&mut self, channel_meeting: teams_core::ChannelEventRef, cx: &mut Context<Self>) {
+        let core = Arc::clone(&self.core);
+        self.card = None;
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let read = match place_of(&*core, &channel_meeting.channel).await {
+                Some(place) => core
+                    .channel_event(place.channel.mailbox.clone(), channel_meeting.ical_uid.clone())
+                    .await
+                    .map(|full| (full, place)),
+                None => Err(teams_core::EngineError::CalendarUnread),
+            };
+            let _ = this.update(cx, |view, cx| match read {
+                Ok((full, place)) => view.edit_in_channel(full, place, cx),
+                Err(teams_core::EngineError::Stopped) => {}
+                Err(_) => view.say(EVENT_UNREAD, cx),
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// Opens the scheduling form on the event `id`, read whole first (its card's Edit, a double click on it); a
+    /// channel's meeting the account scheduled is read from its team's calendar, as Teams opens it.
     pub fn edit_event(&mut self, id: String, cx: &mut Context<Self>) {
+        let channel_meeting = self
+            .shown_event(&id)
+            .and_then(|event| event.channel_meeting.clone())
+            .filter(|channel_meeting| channel_meeting.organized_by(self.core.me()));
+        if let Some(channel_meeting) = channel_meeting {
+            return self.edit_channel_event(channel_meeting, cx);
+        }
         let reply = self.core.calendar_event(id);
         self.card = None;
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
@@ -419,6 +471,9 @@ impl CalendarView {
     pub fn remove_carded(&mut self, cx: &mut Context<Self>) {
         let Some(shown) = &self.card else { return };
         let event = &shown.event;
+        if own_channel_meeting(event, self.core.me()) && !event.cancelled {
+            return self.cancel_channel_carded(cx);
+        }
         let write = if event.is_organizer && !event.attendees.is_empty() && !event.cancelled {
             teams_core::EventWrite::Cancel {
                 id: event.id.clone(),
@@ -436,6 +491,70 @@ impl CalendarView {
                 view.removal = Removal::None;
                 match answer {
                     Ok(_) => {
+                        view.card = None;
+                        view.read(true, cx);
+                    }
+                    Err(teams_core::EngineError::Stopped) => {}
+                    Err(_) => view.say(EVENT_NOT_REMOVED, cx),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// The event `id` as the calendar shows it: its card's, else the spans read.
+    fn shown_event(&self, id: &str) -> Option<Rc<CalendarEvent>> {
+        if let Some(shown) = self.card.as_ref().filter(|shown| shown.event.id == id) {
+            return Some(Rc::clone(&shown.event));
+        }
+        self.loaded.values().find_map(|loaded| match loaded {
+            Loaded::Events(shown) | Loaded::Stored(shown) => shown
+                .iter()
+                .find(|shown| shown.event.id == id)
+                .map(|shown| Rc::clone(&shown.event)),
+            Loaded::Failed => None,
+        })
+    }
+
+    /// The card's Cancel meeting of a channel's meeting the account scheduled: cancelled on its team's calendar, as its
+    /// details' Cancel meeting does (everyone on the team told, its channel's post marked).
+    fn cancel_channel_carded(&mut self, cx: &mut Context<Self>) {
+        let Some((meeting, post)) = self
+            .card
+            .as_ref()
+            .and_then(|shown| teams_core::ScheduledMeeting::of_event(&shown.event))
+        else {
+            return self.say(EVENT_NOT_REMOVED, cx);
+        };
+        let Some(channel) = self
+            .card
+            .as_ref()
+            .and_then(|shown| shown.event.channel_meeting.as_ref())
+            .map(|channel_meeting| channel_meeting.channel.clone())
+        else {
+            return;
+        };
+        self.removal = Removal::Sending;
+        let core = Arc::clone(&self.core);
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let answer = match place_of(&*core, &channel).await {
+                Some(place) => core
+                    .write_event(teams_core::EventWrite::CancelInChannel {
+                        meeting: Box::new(meeting),
+                        channel: place.channel,
+                        post,
+                        message: None,
+                    })
+                    .await
+                    .map(|_| ()),
+                None => Err(teams_core::EngineError::CalendarUnread),
+            };
+            let _ = this.update(cx, |view, cx| {
+                view.removal = Removal::None;
+                match answer {
+                    Ok(()) => {
                         view.card = None;
                         view.read(true, cx);
                     }
@@ -577,7 +696,7 @@ impl CalendarView {
             .unwrap_or_default()
     }
 
-    fn say(&mut self, notice: &'static str, cx: &mut Context<Self>) {
+    pub(crate) fn say(&mut self, notice: &'static str, cx: &mut Context<Self>) {
         self.notice = Some(notice);
         cx.notify();
     }
@@ -592,6 +711,34 @@ fn shown(events: Vec<CalendarEvent>) -> Vec<Shown> {
         .collect();
     shown.sort_by_key(|shown| shown.start);
     shown
+}
+
+/// Whether `event` is a channel's meeting the account `me` (its MRI) scheduled: its own calendar holds an attendee's
+/// copy (`isOrganizer` `false`), but it organizes it, as Teams' card offers it.
+#[must_use]
+pub fn own_channel_meeting(event: &CalendarEvent, me: &str) -> bool {
+    event
+        .channel_meeting
+        .as_ref()
+        .is_some_and(|channel_meeting| channel_meeting.organized_by(me))
+}
+
+/// Where the channel `channel` holds a meeting, as the account's teams name it: its team's mailbox and the names the
+/// form shows; `None` when no team of the account's (with a mailbox) holds it.
+async fn place_of(core: &dyn Core, channel: &str) -> Option<crate::event_form::MeetingPlace> {
+    let teams = core.teams().await.ok().flatten()?;
+    let team = teams
+        .iter()
+        .find(|team| team.channels.iter().any(|known| known.id == channel))?;
+    let known = team.channels.iter().find(|known| known.id == channel)?;
+    Some(crate::event_form::MeetingPlace {
+        channel: teams_core::MeetingChannel {
+            channel: channel.to_owned(),
+            mailbox: team.mailbox.clone()?,
+        },
+        team: team.name.clone(),
+        name: known.name.clone(),
+    })
 }
 
 /// What Edit says when the event can't be read.

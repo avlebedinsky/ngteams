@@ -205,6 +205,16 @@ pub trait Core: Send + Sync + 'static {
     fn channel_meetup(&self, _channel: String) -> Reply<Option<teams_core::ChannelMeetup>> {
         Reply::ready(Ok(None))
     }
+    /// A channel's meeting `ical_uid`, read whole from the group calendar of its team's `mailbox`: what its details open
+    /// on to change it. A fake core has none.
+    fn channel_event(&self, _mailbox: String, _ical_uid: String) -> Reply<FullEvent> {
+        Reply::ready(Err(teams_core::EngineError::CalendarUnread))
+    }
+    /// Titles the meeting the account's Meet now in the channel `channel` starts, once the service posted it. A fake core
+    /// titles nothing.
+    fn title_meet_now(&self, _channel: String, _title: String) -> Reply<()> {
+        Reply::ready(Ok(()))
+    }
     /// A team's people. A fake core knows nobody.
     fn team_roster(&self, _team: String) -> Reply<Vec<TeamMember>> {
         Reply::ready(Ok(Vec::new()))
@@ -378,6 +388,14 @@ impl Core for EngineRequests {
 
     fn channel_meetup(&self, channel: String) -> Reply<Option<teams_core::ChannelMeetup>> {
         EngineRequests::channel_meetup(self, channel)
+    }
+
+    fn channel_event(&self, mailbox: String, ical_uid: String) -> Reply<FullEvent> {
+        EngineRequests::channel_event(self, mailbox, ical_uid)
+    }
+
+    fn title_meet_now(&self, channel: String, title: String) -> Reply<()> {
+        EngineRequests::title_meet_now(self, channel, title)
     }
 
     fn team_settings(&self, team: String) -> Reply<Option<String>> {

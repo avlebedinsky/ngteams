@@ -453,7 +453,8 @@ fn block(slot: Slot, cycle: HourCycle, palette: Palette, cx: &mut Context<Calend
                 .children(mark.map(|mark| div().absolute().right(px(4.0)).bottom(px(3.0)).child(mark)))
                 .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
                     // a double click opens the account's own event to change, as Teams does
-                    if event.click_count() >= 2 && shown.event.is_organizer && !shown.event.cancelled {
+                    let own = shown.event.is_organizer || super::own_channel_meeting(&shown.event, this.core.me());
+                    if event.click_count() >= 2 && own && !shown.event.cancelled {
                         this.edit_event(shown.event.id.clone(), cx);
                     } else {
                         this.open_card(shown.clone(), cx);

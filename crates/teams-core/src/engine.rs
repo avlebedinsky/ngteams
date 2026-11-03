@@ -631,6 +631,16 @@ enum Request {
         id: String,
         reply: Responder<FullEvent>,
     },
+    ChannelEvent {
+        mailbox: String,
+        ical_uid: String,
+        reply: Responder<FullEvent>,
+    },
+    TitleMeetNow {
+        channel: String,
+        title: String,
+        reply: Responder<()>,
+    },
     Meeting {
         chat: String,
         reply: Responder<Option<MeetingDetails>>,
@@ -1002,6 +1012,24 @@ impl EngineRequests {
     pub fn channel_meetup(&self, channel: impl Into<String>) -> Reply<Option<ChannelMeetup>> {
         let channel = channel.into();
         self.ask(|reply| Request::ChannelMeetup { channel, reply })
+    }
+
+    /// A channel's meeting `ical_uid`, read whole now from the group calendar of its team's `mailbox`: what its details
+    /// open on to change it ([`crate::calendar`]); [`EngineError::CalendarUnread`] when the read failed.
+    pub fn channel_event(&self, mailbox: impl Into<String>, ical_uid: impl Into<String>) -> Reply<FullEvent> {
+        let (mailbox, ical_uid) = (mailbox.into(), ical_uid.into());
+        self.ask(|reply| Request::ChannelEvent {
+            mailbox,
+            ical_uid,
+            reply,
+        })
+    }
+
+    /// Titles the meeting the account's Meet now in the channel `channel` starts, as its pre-join's subject says, once
+    /// the service posted it ([`crate::calendar`]); [`EngineError::MeetingUnread`] when no post of it came.
+    pub fn title_meet_now(&self, channel: impl Into<String>, title: impl Into<String>) -> Reply<()> {
+        let (channel, title) = (channel.into(), title.into());
+        self.ask(|reply| Request::TitleMeetNow { channel, title, reply })
     }
 
     /// Creates, changes, cancels or deletes an event of the account's calendar through the outbox, under the fence
@@ -1797,6 +1825,19 @@ where
         }
     }
 
+    /// Someone's presence asked: answered with what the watch holds; someone the watch dropped to make room is told
+    /// unknown, as no read refreshes what a view was told of them.
+    fn presence_asked(&mut self, mri: &str, reply: Responder<Availability>) {
+        let (availability, dropped) = self.presences.presence(mri);
+        let _ = reply.send(Ok(availability));
+        if let Some(mri) = dropped {
+            self.emit(Event::Presence {
+                mri,
+                availability: Availability::Unknown,
+            });
+        }
+    }
+
     /// A request a part of the engine answers on its own (a picture, a file's bytes, the calendar, the search, a
     /// person): handed to that part (`on_request` takes the rest).
     fn on_lookup(&mut self, request: Request) {
@@ -1810,6 +1851,12 @@ where
                 reply,
             } => self.calendar.view(start_ms, end_ms, reply),
             Request::CalendarEvent { id, reply } => self.calendar.event(&id, reply),
+            Request::ChannelEvent {
+                mailbox,
+                ical_uid,
+                reply,
+            } => self.calendar.channel_event(&mailbox, &ical_uid, reply),
+            Request::TitleMeetNow { channel, title, reply } => self.calendar.title_meet_now(channel, title, reply),
             Request::Meeting { chat, reply } => self.calendar.meeting(chat, reply),
             Request::ChannelMeetup { channel, reply } => self.calendar.channel_meetup(channel, reply),
             Request::WriteEvent { write, reply } => self.calendar.write(*write, reply),
@@ -1860,17 +1907,7 @@ where
                 let person = self.profiles.person(&self.store, &mri);
                 let _ = reply.send(person.map_err(EngineError::from));
             }
-            Request::Presence(mri, reply) => {
-                let (availability, dropped) = self.presences.presence(&mri);
-                let _ = reply.send(Ok(availability));
-                // someone the watch dropped to make room: no read refreshes what a view was told of them
-                if let Some(mri) = dropped {
-                    self.emit(Event::Presence {
-                        mri,
-                        availability: Availability::Unknown,
-                    });
-                }
-            }
+            Request::Presence(mri, reply) => self.presence_asked(&mri, reply),
             Request::Teams(reply) => {
                 let teams = self.teams.teams(&self.store);
                 let _ = reply.send(teams.map_err(EngineError::from));

@@ -33,6 +33,7 @@ use gpui::{
     ParentElement as _, Render, ScrollHandle, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription,
     Task, WeakEntity, Window, div, rgb,
 };
+use gpui_component::Sizable as _;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Copy;
 use gpui_component::kbd::Kbd;
@@ -137,6 +138,10 @@ pub struct MeetingCard {
     pub cancelled: bool,
     /// The team's and the channel's names, when the view was given them ([`ChannelView::set_place`]).
     pub place: Option<(SharedString, SharedString)>,
+    /// Its id on the team's calendar: what its Edit reads.
+    pub ical_uid: String,
+    /// The account scheduled it and it still stands: its organizer's Edit shows (not in the read-only mode).
+    pub editable: bool,
 }
 
 /// What the channel view tells its owner.
@@ -145,6 +150,9 @@ pub enum ChannelViewEvent {
     /// A forwarded message's original time was clicked: the original is opened in the app when the account has its
     /// chat, else in Teams on the web (the shell's to decide, as for a chat's forward).
     OpenOriginal(Original),
+    /// A meeting card's Edit: the meeting's details, read from the team's calendar by its id (`ical_uid`), opened to
+    /// change or cancel it (the shell's to open, as it knows the channel's team).
+    EditMeeting { ical_uid: String },
 }
 
 /// A message as the view shows it.
@@ -215,6 +223,8 @@ pub struct ChannelView {
     focus: FocusHandle,
     /// The calendar ids of the meetings whose cancellation the last load read: their cards are drawn cancelled.
     cancelled: HashSet<String>,
+    /// The calls (`callId`) whose end the last load read: a channel meeting's post says it ended.
+    ended_calls: HashSet<String>,
     /// The team's and the channel's names, for a meeting card's line.
     place: Option<(SharedString, SharedString)>,
     _observing: Subscription,
@@ -264,6 +274,7 @@ impl ChannelView {
             text_selection: TextSelection::default(),
             focus: cx.focus_handle(),
             cancelled: HashSet::new(),
+            ended_calls: HashSet::new(),
             place: None,
             _observing: observing,
         };
@@ -414,6 +425,12 @@ impl ChannelView {
                 .filter(|meeting| meeting.cancelled)
                 .map(|meeting| meeting.ical_uid)
                 .collect();
+            self.ended_calls = read
+                .messages
+                .iter()
+                .filter(|message| message.content.contains("<callEventType>callEnded</callEventType>"))
+                .filter_map(|message| xml_text(&message.content, "callId"))
+                .collect();
             let threads = arrange_threads(read.messages, &read.roots);
             self.threads = threads
                 .into_iter()
@@ -511,6 +528,9 @@ impl ChannelView {
             MessageType::RichTextHtml | MessageType::Text => return Some(Body::Text(self.rendered(message))),
             _ => {}
         }
+        if let Some(line) = self.meeting_call_line(message) {
+            return Some(Body::Event(line.into()));
+        }
         let names = ChannelNames {
             people,
             me: self.core.me(),
@@ -534,18 +554,52 @@ impl ChannelView {
         })
     }
 
+    /// What a channel meeting's call post says, as Teams' card titles it: the meeting's title (the Meet now pre-join's
+    /// subject its post was given, else `Meeting in "<channel>"`), and "ended" once the call is over (the service turns
+    /// the post itself into the end); `None` for a post that isn't a meeting's call.
+    fn meeting_call_line(&self, message: &Message) -> Option<String> {
+        if message.message_type != "Event/Call" {
+            return None;
+        }
+        let properties: serde_json::Value = serde_json::from_str(message.properties.as_deref()?).ok()?;
+        let meeting: serde_json::Value = match properties.get("meeting")? {
+            serde_json::Value::String(text) => serde_json::from_str(text).ok()?,
+            object @ serde_json::Value::Object(_) => object.clone(),
+            _ => return None,
+        };
+        let titled = meeting
+            .get("meetingtitle")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map(str::to_owned);
+        let title = titled.or_else(|| {
+            self.place
+                .as_ref()
+                .map(|(_, channel)| format!("Meeting in \"{channel}\""))
+        })?;
+        let ended = message.content.contains("<callEventType>callEnded</callEventType>")
+            || xml_text(&message.content, "callId").is_some_and(|call| self.ended_calls.contains(&call));
+        Some(if ended { format!("{title} ended") } else { title })
+    }
+
     /// The meeting card a post of a meeting scheduled in the channel is drawn as; `None` for any other message (its
     /// cancellation's reply is drawn as its text).
     fn meeting_card(&self, message: &Message) -> Option<MeetingCard> {
         let meeting =
             ScheduledMeeting::of_properties(message.properties.as_deref()?).filter(|meeting| !meeting.cancelled)?;
+        let cancelled = self.cancelled.contains(&meeting.ical_uid);
+        let me = self.core.me().trim_start_matches("8:orgid:");
+        let editable = !cancelled && !self.core.read_only() && meeting.organized_by(me);
         Some(MeetingCard {
             title: meeting.title.into(),
             start_ms: meeting.start_ms,
             end_ms: meeting.end_ms,
             location: meeting.location.map(SharedString::from),
-            cancelled: self.cancelled.contains(&meeting.ical_uid),
+            cancelled,
             place: self.place.clone(),
+            ical_uid: meeting.ical_uid,
+            editable,
         })
     }
 
@@ -818,7 +872,7 @@ fn message_view(
         }
         Body::Deleted => muted(DELETED.into()),
         Body::Event(text) => muted(text.clone()),
-        Body::Meeting(card) => meeting_card(&item.id, card, palette, cycle),
+        Body::Meeting(card) => meeting_card(&item.id, card, palette, cycle, cx),
         Body::Unsupported => muted(UNSUPPORTED.into()),
     };
     let (files, links) = match &item.body {
@@ -852,7 +906,13 @@ fn message_view(
 /// A meeting scheduled in the channel, as Teams' card draws it: the day's tile (its date over its month), the title, the
 /// day of the week and the times with the location, and "<team> > <channel>"; once cancelled, no tile, the title struck
 /// through and the date in full.
-fn meeting_card(id: &str, card: &MeetingCard, palette: Palette, cycle: HourCycle) -> AnyElement {
+fn meeting_card(
+    id: &str,
+    card: &MeetingCard,
+    palette: Palette,
+    cycle: HourCycle,
+    cx: &mut Context<ChannelView>,
+) -> AnyElement {
     use chrono::TimeZone as _;
     let local = |ms: i64| Local.timestamp_millis_opt(ms).single();
     let (Some(start), Some(end)) = (local(card.start_ms), local(card.end_ms)) else {
@@ -891,6 +951,24 @@ fn meeting_card(id: &str, card: &MeetingCard, palette: Palette, cycle: HourCycle
         .place
         .as_ref()
         .map(|(team, channel)| place_line(team, channel, palette));
+    // its organizer's Edit, as Teams' card offers it: the meeting's details, to change or cancel it
+    let edit = card.editable.then(|| {
+        let ical_uid = card.ical_uid.clone();
+        let selector = format!("channel-meeting-edit-{id}");
+        crate::icons::selected_by(
+            &selector,
+            Button::new(SharedString::from(selector.clone()))
+                .icon(crate::icons::Glyph::PENCIL.icon())
+                .label("Edit")
+                .outline()
+                .small()
+                .on_click(cx.listener(move |_, _, _, cx| {
+                    cx.emit(ChannelViewEvent::EditMeeting {
+                        ical_uid: ical_uid.clone(),
+                    });
+                })),
+        )
+    });
     let id = id.to_owned();
     div()
         .debug_selector(move || format!("channel-meeting-card-{id}"))
@@ -913,7 +991,16 @@ fn meeting_card(id: &str, card: &MeetingCard, palette: Palette, cycle: HourCycle
                 .child(div().text_xs().child(when))
                 .children(place),
         )
+        .children(edit.map(|edit| div().flex_none().child(edit)))
         .into_any_element()
+}
+
+/// The text of the first `<tag>…</tag>` in a call post's `content`, trimmed; `None` when there is none or it is empty.
+fn xml_text(content: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let start = content.find(&open)? + open.len();
+    let end = start + content[start..].find(&format!("</{tag}>"))?;
+    Some(content[start..end].trim().to_owned()).filter(|text| !text.is_empty())
 }
 
 /// A meeting card's "<team> > <channel>": the team's tile, its name, a chevron and the channel's.

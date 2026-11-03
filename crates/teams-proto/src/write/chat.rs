@@ -394,6 +394,66 @@ impl Sealed for RemoveReaction {
     }
 }
 
+/// Titles a channel meeting's post: `PUT v1/users/ME/conversations/<channel>/messages/<post>/properties?name=meeting`
+/// with `{"meeting": {"meetingtitle": <title>}}`, what a channel's Meet now sends once the service posted its meeting
+/// (the pre-join's subject, edited or not, seen 2026-11-03: `docs/protocol/calling.md`, "A channel's meeting"). Its
+/// target is [`WriteKind::Edit`] on the channel's team ([`Scope::Team`]): everyone on it sees the post.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SetMeetingTitle {
+    channel: String,
+    post: String,
+    title: String,
+}
+
+impl SetMeetingTitle {
+    /// The title `title` on the post `post` (digits) of the channel `channel` (a team's thread); `None` for either in
+    /// another form, or a title of nothing but spaces.
+    #[must_use]
+    pub fn new(channel: &str, post: &str, title: &str) -> Option<Self> {
+        let post_reads = !post.is_empty() && post.bytes().all(|b| b.is_ascii_digit());
+        let title = title.trim();
+        (teams_fence::is_team_thread_id(channel) && post_reads && !title.is_empty()).then(|| Self {
+            channel: channel.to_owned(),
+            post: post.to_owned(),
+            title: title.to_owned(),
+        })
+    }
+}
+
+impl Mutating for SetMeetingTitle {
+    fn target(&self) -> Target {
+        Target::new(
+            WriteKind::Edit,
+            Scope::Team {
+                id: self.channel.clone(),
+            },
+        )
+    }
+}
+
+impl Sealed for SetMeetingTitle {
+    fn wire(&self) -> Option<Wire> {
+        Some(Wire {
+            raw: None,
+            service: Service::ChatService,
+            headers: Vec::new(),
+            method: Method::Put,
+            endpoint: Endpoint::new([
+                "v1",
+                "users",
+                "ME",
+                "conversations",
+                self.channel.as_str(),
+                "messages",
+                self.post.as_str(),
+                "properties",
+            ])
+            .with_query("name", "meeting"),
+            body: Some(json!({"meeting": {"meetingtitle": self.title}})),
+        })
+    }
+}
+
 /// Moves the account's read horizon in a chat (a read receipt others may see): `PUT
 /// v1/users/ME/conversations/<chat>/properties?name=consumptionhorizon` with `{"consumptionhorizon": "<message
 /// id>;<ms>;<clientmessageid>"}` (`docs/protocol/chat.md`). Its target is [`WriteKind::ReadReceipt`] on the chat.

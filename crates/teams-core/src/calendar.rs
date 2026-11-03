@@ -27,11 +27,11 @@ use serde_json::{Map, Value};
 use teams_fence::Mri;
 use teams_proto::chat::ChatReads;
 use teams_proto::{
-    Author, CalendarEvent, CalendarView, CancelChannelEvent, CancelEvent, ChannelMeetup, Client, CreateChannelEvent,
-    CreateEvent, CreateOnlineMeeting, Credentials, CsaTeams, DeleteEvent, EventAttendee, EventDraft, EventRead,
-    EventTime, FreeBusyAsk, FullEvent, HttpError, HttpTransport, MeetingChannel, MeetingDetails, MeetingThread,
-    MeetingTimes, Mutating, Organizer, PersonSchedule, ScheduledMeeting, Schedules, ShortProfileLookup,
-    TimeZoneSettings, Transport, UpdateEvent,
+    Author, CalendarEvent, CalendarView, CancelChannelEvent, CancelEvent, ChannelEventRead, ChannelMeetup, Client,
+    CreateChannelEvent, CreateEvent, CreateOnlineMeeting, Credentials, CsaTeams, DeleteEvent, EventAttendee,
+    EventDraft, EventRead, EventTime, FreeBusyAsk, FullEvent, HttpError, HttpTransport, MeetingChannel, MeetingDetails,
+    MeetingThread, MeetingTimes, Mutating, Organizer, PersonSchedule, ScheduledMeeting, Schedules, SetMeetingTitle,
+    ShortProfileLookup, TimeZoneSettings, Transport, UpdateChannelEvent, UpdateEvent,
 };
 use teams_store::{Store, StoreError, StoredEvent};
 use tokio::task::JoinSet;
@@ -59,6 +59,13 @@ pub enum EventWrite {
         event: Map<String, Value>,
         draft: EventDraft,
     },
+    /// A channel's meeting, read whole from its team's calendar as `event` ([`FullEvent::raw`]), changed to `draft` by
+    /// its organizer: its update goes to everyone on the team, and to the channel's post.
+    UpdateInChannel {
+        event: Map<String, Value>,
+        draft: EventDraft,
+        channel: MeetingChannel,
+    },
     /// The organizer's meeting `id` cancelled (its chat named when it has one), `message` sent with the cancellation.
     Cancel {
         id: String,
@@ -83,7 +90,7 @@ impl EventWrite {
     pub fn kind(&self) -> &'static str {
         match self {
             Self::Create(_) | Self::CreateInChannel { .. } => "creation",
-            Self::Update { .. } => "change",
+            Self::Update { .. } | Self::UpdateInChannel { .. } => "change",
             Self::Cancel { .. } | Self::CancelInChannel { .. } => "cancellation",
             Self::Delete { .. } => "delete",
         }
@@ -214,6 +221,75 @@ where
         });
     }
 
+    /// Answers `reply` with a channel's meeting `ical_uid`, read whole from the group calendar of its team's `mailbox`
+    /// ([`ChannelEventRead`]): what its details open on to change it.
+    pub(crate) fn channel_event(&self, mailbox: &str, ical_uid: &str, reply: Responder<FullEvent>) {
+        let Some(read) = ChannelEventRead::new(mailbox, ical_uid) else {
+            let _ = reply.send(Err(EngineError::CalendarUnread));
+            return;
+        };
+        let client = Arc::clone(&self.client);
+        let whom = Arc::clone(&self.whom);
+        let me = self.outbox.me().clone();
+        tokio::task::spawn_local(async move {
+            let answer = match client.read(&read).await {
+                Ok(answer) => read.read_answer(answer.body()).map_err(|error| {
+                    log::info!("the channel meeting's answer wasn't taken: {error}");
+                    EngineError::CalendarUnread
+                }),
+                Err(error) => {
+                    log::info!("the channel's meeting couldn't be read: {error}");
+                    Err(EngineError::CalendarUnread)
+                }
+            };
+            let answer = match answer {
+                Ok(full) => Ok(as_scheduler(full, &known(&client, &whom, &me).await, &me)),
+                Err(error) => Err(error),
+            };
+            let _ = reply.send(answer);
+        });
+    }
+
+    /// Titles the meeting the account's Meet now in `channel` starts ([`SetMeetingTitle`], as the web client titles it
+    /// once the service posted it): the channel's newest posts are looked at until one starts a meeting the account
+    /// organizes, posted no earlier than a minute before the ask, for up to [`TITLE_WAIT`]; `reply` is answered once it
+    /// was sent, [`EngineError::MeetingUnread`] when no such post came.
+    pub(crate) fn title_meet_now(&self, channel: String, title: String, reply: Responder<()>) {
+        let client = Arc::clone(&self.client);
+        let outbox = Arc::clone(&self.outbox);
+        tokio::task::spawn_local(async move {
+            let me = outbox
+                .me()
+                .mri()
+                .as_str()
+                .trim_start_matches("8:orgid:")
+                .to_ascii_lowercase();
+            let since = chrono::Utc::now().timestamp_millis() - 60_000;
+            let deadline = tokio::time::Instant::now() + TITLE_WAIT;
+            let answer = loop {
+                let posted = ChatReads::new(&client)
+                    .messages(&channel, POSTS_LOOKED_AT)
+                    .await
+                    .ok()
+                    .and_then(|page| ChannelMeetup::of_posts(&page.messages))
+                    .filter(|meetup| meetup.meeting.organizer_id.eq_ignore_ascii_case(&me))
+                    .filter(|meetup| meetup.message_id.parse::<i64>().is_ok_and(|id| id >= since));
+                if let Some(meetup) = posted {
+                    break match SetMeetingTitle::new(&channel, &meetup.message_id, &title) {
+                        Some(write) => send(&outbox, &write, "title").await.map(|_| ()),
+                        None => Err(not_saved("title", "the title or the post doesn't read")),
+                    };
+                }
+                if tokio::time::Instant::now() >= deadline {
+                    log::info!("no post of the channel's new meeting came to title");
+                    break Err(EngineError::MeetingUnread);
+                }
+                tokio::time::sleep(TITLE_POLL).await;
+            };
+            let _ = reply.send(answer);
+        });
+    }
+
     /// Answers `reply` with the meeting the chat `chat`'s thread names ([`MeetingThread`]): `None` when it names
     /// none, [`EngineError::MeetingUnread`] when it couldn't be read.
     pub(crate) fn meeting(&self, chat: String, reply: Responder<Option<MeetingDetails>>) {
@@ -336,25 +412,7 @@ where
         tokio::task::spawn_local(async move {
             let kind = write.kind();
             let creates = matches!(write, EventWrite::Create(_) | EventWrite::CreateInChannel { .. });
-            let me = outbox.me().clone();
-            let write = match write {
-                EventWrite::Create(draft) => EventWrite::Create(complete(&client, &whom, &me, draft).await),
-                EventWrite::CreateInChannel {
-                    draft,
-                    channel,
-                    personal_invites,
-                } => EventWrite::CreateInChannel {
-                    draft: complete(&client, &whom, &me, draft).await,
-                    channel,
-                    personal_invites,
-                },
-                EventWrite::Update { id, event, draft } => EventWrite::Update {
-                    id,
-                    event,
-                    draft: complete(&client, &whom, &me, draft).await,
-                },
-                other => other,
-            };
+            let write = completed(&client, &whom, outbox.me(), write).await;
             let answer = match write {
                 EventWrite::Create(draft) => {
                     let meeting = if draft.online {
@@ -381,6 +439,12 @@ where
                     Some(update) => send(&outbox, &update, kind).await,
                     None => Err(not_saved(kind, "the event read isn't the one changed")),
                 },
+                EventWrite::UpdateInChannel { event, draft, channel } => {
+                    match UpdateChannelEvent::new(channel, event, draft) {
+                        Some(update) => send(&outbox, &update, kind).await,
+                        None => Err(not_saved(kind, "the meeting read isn't the channel's")),
+                    }
+                }
                 EventWrite::Cancel { id, chat, message } => match CancelEvent::new(id, chat, message) {
                     Some(cancel) => send(&outbox, &cancel, kind).await,
                     None => Err(not_saved(kind, "no event")),
@@ -436,6 +500,10 @@ pub(crate) async fn find_channel_meetup<C: Credentials + 'static>(
 /// How many of a channel's newest posts are looked at for the meeting running in it.
 const POSTS_LOOKED_AT: u32 = 50;
 
+/// How long a Meet now's post is waited for to title it, and how often the channel's posts are looked at meanwhile.
+const TITLE_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+const TITLE_POLL: std::time::Duration = std::time::Duration::from_secs(3);
+
 /// `draft` with the account as its organizer and its time zone, as read ([`Whom`]).
 async fn complete<C: Credentials + 'static>(
     client: &Client<HttpTransport<C>>,
@@ -447,6 +515,38 @@ async fn complete<C: Credentials + 'static>(
     draft.organizer = organizer(me, &known);
     draft.time_zone = known.time_zone;
     draft
+}
+
+/// `write` with its draft, when it carries one, completed ([`complete`]).
+async fn completed<C: Credentials + 'static>(
+    client: &Client<HttpTransport<C>>,
+    whom: &Mutex<Option<Whom>>,
+    me: &Author,
+    write: EventWrite,
+) -> EventWrite {
+    match write {
+        EventWrite::Create(draft) => EventWrite::Create(complete(client, whom, me, draft).await),
+        EventWrite::CreateInChannel {
+            draft,
+            channel,
+            personal_invites,
+        } => EventWrite::CreateInChannel {
+            draft: complete(client, whom, me, draft).await,
+            channel,
+            personal_invites,
+        },
+        EventWrite::Update { id, event, draft } => EventWrite::Update {
+            id,
+            event,
+            draft: complete(client, whom, me, draft).await,
+        },
+        EventWrite::UpdateInChannel { event, draft, channel } => EventWrite::UpdateInChannel {
+            event,
+            draft: complete(client, whom, me, draft).await,
+            channel,
+        },
+        other => other,
+    }
 }
 
 /// What the account's events say of it ([`Whom`]): each part read the first time it is asked for, and again while it
@@ -472,6 +572,27 @@ async fn known<C: Credentials + 'static>(
     }
     *whom.lock().unwrap_or_else(PoisonError::into_inner) = Some(known.clone());
     known
+}
+
+/// A channel's meeting as its team's calendar gave it, seen by the account: the group's read says `isOrganizer` to
+/// whoever reads it (the team organizes it), so it organizes it when it scheduled it (its `skypeTeamsData`'s `uid`),
+/// and the account isn't among whom it invites (the service lists who scheduled it as an attendee who accepted).
+fn as_scheduler(mut full: FullEvent, known: &Whom, me: &Author) -> FullEvent {
+    let scheduled = full
+        .event
+        .channel_meeting
+        .as_ref()
+        .is_some_and(|channel| channel.organized_by(me.mri().as_str()));
+    full.event.is_organizer = scheduled;
+    if let Some(own) = known.address.as_deref() {
+        full.event.attendees.retain(|attendee| {
+            attendee
+                .address
+                .as_deref()
+                .is_none_or(|address| !address.eq_ignore_ascii_case(own))
+        });
+    }
+    full
 }
 
 /// The account as the organizer: its MRI, its address and its name.

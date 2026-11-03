@@ -679,6 +679,18 @@ impl Calls {
         }
     }
 
+    /// The subject a Meet now's pre-join gives its new meeting (Teams' `Meeting in "<channel>"` until edited): the
+    /// meeting's post is titled so once the service posted it.
+    pub fn set_prejoin_title(&mut self, title: String, cx: &mut Context<Self>) {
+        if let Some(prejoin) = &mut self.prejoin
+            && prejoin.entry == PrejoinEntry::MeetNow
+            && prejoin.to_join.title != title
+        {
+            prejoin.to_join.title = title;
+            cx.notify();
+        }
+    }
+
     /// The pre-join's microphone switch.
     pub fn set_prejoin_muted(&mut self, muted: bool, cx: &mut Context<Self>) {
         if let Some(prejoin) = &mut self.prejoin {
@@ -1141,9 +1153,19 @@ pub fn join_now(calls: &Entity<Calls>, core: &Arc<dyn Core>, trace: &Arc<ViewTra
                 meeting: to_join.meeting,
             }
         })
+        .map(|asked| (asked, starts.then_some(to_join.title)))
     });
-    if let Some(asked) = asked {
+    if let Some((asked, title)) = asked {
+        let titled = match (&asked, title) {
+            (Ask::MeetNow { channel }, Some(title)) if !title.trim().is_empty() => Some((channel.clone(), title)),
+            _ => None,
+        };
         ask(calls, core, trace, asked, cx);
+        // as Teams' pre-join does: its subject titles the new meeting's post once the service posted it (the engine
+        // looks for the post, and titles nothing when the meeting didn't start)
+        if let Some((channel, title)) = titled {
+            drop(core.title_meet_now(channel, title.trim().to_owned()));
+        }
     }
 }
 

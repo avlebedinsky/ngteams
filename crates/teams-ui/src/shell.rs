@@ -1011,6 +1011,27 @@ impl Shell {
             .update(cx, |calendar, cx| calendar.schedule_in_channel(place, cx));
     }
 
+    /// A meeting card's Edit in the channel shown: the meeting read whole from its team's calendar, then the scheduling
+    /// form opened on it with the channel's row (Send update, Cancel meeting), as Teams' details open.
+    pub fn edit_channel_meeting(&mut self, ical_uid: String, cx: &mut Context<Self>) {
+        let Some(place) = self.meeting_place(cx) else {
+            return;
+        };
+        self.trace
+            .record(&TraceLine::new("channel-meeting", "edit").conversation(&place.channel.channel));
+        let reply = self.core.channel_event(place.channel.mailbox.clone(), ical_uid);
+        let calendar = self.calendar.downgrade();
+        cx.spawn(async move |_, cx: &mut AsyncApp| {
+            let answer = reply.await;
+            let _ = calendar.update(cx, |calendar, cx| match answer {
+                Ok(full) => calendar.edit_in_channel(full, place, cx),
+                Err(teams_core::EngineError::Stopped) => {}
+                Err(_) => calendar.say(crate::calendar_view::EVENT_UNREAD, cx),
+            });
+        })
+        .detach();
+    }
+
     /// The channel header's Join: the meeting that runs in the channel shown, its pre-join first.
     pub fn join_channel_meeting(&mut self, cx: &mut Context<Self>) {
         let Some((channel, meetup)) = self.channel_meetup.clone() else {
@@ -1955,6 +1976,7 @@ impl Shell {
     fn follow_channel(channel: &Entity<ChannelView>, window: &mut Window, cx: &mut Context<Self>) -> Subscription {
         cx.subscribe_in(channel, window, |this: &mut Self, _, event, window, cx| match event {
             ChannelViewEvent::OpenOriginal(original) => this.open_original(original.clone(), window, cx),
+            ChannelViewEvent::EditMeeting { ical_uid } => this.edit_channel_meeting(ical_uid.clone(), cx),
         })
     }
 

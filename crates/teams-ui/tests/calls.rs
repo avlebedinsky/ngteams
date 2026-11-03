@@ -2141,6 +2141,43 @@ fn dont_use_audio_joins_the_meeting_muted_and_phone_audio_is_greyed_out() {
 }
 
 #[test]
+fn a_meet_nows_subject_is_edited_in_its_pre_join_and_titles_the_new_meeting() {
+    let rig = calling();
+    let (trace, written) = trace();
+    let (shell, _cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    let channel = "19:MadeUpChannel0001@thread.tacv2";
+    let to_join = teams_ui::calls::MeetingToJoin {
+        chat: channel.to_owned(),
+        meeting: meeting_to_join().meeting,
+        title: "Meeting in \"General\"".to_owned(),
+    };
+    rig.cx
+        .update(|cx| calls_of(&rig).update(cx, |calls, cx| calls.open_meet_now(to_join, cx)));
+    let window = prejoin_window(&rig, &windows);
+    assert!(drawn(window, "prejoin-title"), "Teams' heading");
+    assert!(drawn(window, "prejoin-subject"), "the subject's box");
+    click(window, "prejoin-subject");
+    window.simulate_input(" and more");
+    window.run_until_parked();
+    assert!(actions(&rig).is_empty(), "an edited subject sends nothing");
+    click(window, "prejoin-join");
+    assert_eq!(
+        actions(&rig),
+        [CallAction::MeetNow {
+            channel: channel.to_owned()
+        }]
+    );
+    let titles = rig.core.calendar.lock().unwrap().titles.clone();
+    assert_eq!(
+        titles,
+        [(channel.to_owned(), "Meeting in \"General\" and more".to_owned())]
+    );
+    no_name_in(&written);
+}
+
+#[test]
 fn a_meeting_chats_header_joins_the_meeting_by_its_chat() {
     let rig = calling();
     let (trace, _) = trace();

@@ -488,8 +488,22 @@ went in (the join judged by the channel's team, a in the call). What looked like
 b's stored teams list, read only when it is an hour old: the engine now reads the teams again when a team's thread it
 doesn't name comes, or a team's activity (`ThreadActivity/…`, a channel made: `SpaceThreadChannelAdded`) is delivered
 ([channels.md](channels.md#what-the-native-client-reads)).
-`teams-headless <alias> channel-meeting <channel> [--join]` does the same from the command line. The pre-join's subject
-is shown, not edited: what an edited subject sends wasn't captured.
+`teams-headless <alias> channel-meeting <channel> [--join] [--subject <text>]` does the same from the command line.
+
+**The Meet now's subject** (seen 2026-11-03, `meeting-steps`, a team of the lab's own with a alone, deleted after): the
+pre-join shows "Microsoft Teams meeting" over a text box holding `Meeting in "<channel>"`, which the user may change;
+changing it sends nothing. Once Join now went in and the service posted the meeting (its `Event/Call` `callStarted`
+post), the web client titles that post: `PUT …/chatsvc/<region>/v1/users/ME/conversations/<channel>/messages/<post>/properties?name=meeting`
+with `{"meeting": {"meetingtitle": <subject>}}`, edited or not (earlier runs' captures show it with the unedited
+`Meeting in "<channel>"`). Until then the post's `properties.meeting` names the meeting (`ScheduledMeetingCreated`, its
+`organizerId`, its join link) with `meetingtitle` `null`; the web client's card then reads "<subject>", and "<subject>
+ended" once a `callEnded` post of the same `callId` came. The fence maps it as an `Edit` on the channel's team
+(`Scope::Team`, `contacting/chat.rs`): everyone on the team sees the post. The native pre-join of a Meet now shows the
+same heading and box (`Calls::set_prejoin_title`), and once Join now asked the meeting, the engine looks at the
+channel's newest posts every 3 s for up to 2 minutes for a meeting the account organizes, posted since a minute before
+the ask, and titles it (`SetMeetingTitle`, `EngineRequests::title_meet_now`). Seen live 2026-11-03: the native title
+went through (the fence's `edit` on the team), and the web client showed the post as "<subject> ended" after the
+call. The channel view shows such a post's title the same way.
 
 **Schedule a meeting** (the caret's other item, seen 2026-11-03 with the event's creation held back): the scheduling form
 opens with the channel as a row of its own ("<team> > <channel>", and a "Send personal invites" switch); Send creates
@@ -516,23 +530,46 @@ Its **Cancel meeting** (the card's Edit, then the details' Cancel meeting and it
 {"eventType", "eventTimeZone": "UTC", "startTime": <start, UTC, ms>}, "cancellationMessage"?: <note>}`. The service then
 replies under the post: a `Text` "The meeting "<title>" is cancelled" whose `properties.meeting` is the same meeting as
 `ScheduledMeetingCancelled` (`scheduledmeetinginfo.isCancelled` `true`); the web client strikes the card's title
-through and drops its tile. Its **change** (Edit, a new title, Send update, held back): `PUT
-…/v2.0/groups/smtp:<team mailbox>/calendars/events/<iCalUid>?isOnlineMeeting=<bool>` with `{"updateMessageFormat": "The
-meeting has been updated", "updatedCalendarEvent": <the event as read, the form's fields over it>}`; how the form reads
-the group's event wasn't looked at, and the native client doesn't change one
-(`docs/backlog/channel-meeting-change.md`).
+through and drops its tile.
 
-The fence maps the creation and the cancellation as a `Meeting` on the team's calendar (`Scope::TeamCalendar`: the
-channel the body names and the mailbox the path names), judged by the channel's team read fresh, Teams' own apps not
+Its **details** (the card's Edit) read the event from the group's calendar: `GET
+…/v2.0/groups/smtp:<team mailbox>/calendars/events/iCalUId/<iCalUid>?eventStartDateTime=&shouldDecryptData=true`,
+answered with the event itself: `objectId`, `iCalUID`, `cleanGlobalObjectId`, the times and zone, `subject`,
+`location`, `attendees` (the team's mailbox as `Organizer`, who scheduled it as an attendee who accepted, anyone
+invited), `organizerAddress` and `organizerName` the team, `isOrganizer` `true` and `myResponseType` `Organizer` (the
+group's view, whoever reads it), the body (the join block), `skypeTeamsData` (`cid` the channel, `rid` and `mid` its
+post, `uid` who scheduled it), the join links, `schedulingServiceUpdateUrl`, `inviteAllMembers`. The organizer's own
+calendar holds an attendee's copy of it (`isOrganizer` `false`, `myResponseType` `Accepted`, the team its organizer,
+the same `skypeTeamsData` and `iCalUID`): who scheduled it is `skypeTeamsData`'s `uid`, and Teams offers that account
+the organizer's Edit and Cancel meeting from its calendar too. Its **change** (a new title, Send update, seen held back
+2026-11-03): `PUT …/v2.0/groups/smtp:<team mailbox>/calendars/events/<iCalUid>?isOnlineMeeting=true` with
+`{"updateMessageFormat": "The meeting has been updated", "updatedCalendarEvent": <the event as read, the form's fields
+over it: its read-only parts (`lastModifiedTime`, `bodyPreview`, `meetingLocations`, `conflictingMeetings`,
+`skypeTeamsDataObject`, …) left out, `attendees` the organizer (`Admin`, `Organizer`, with its MRI) and the team's
+mailbox (`Required`), `organizerAddress` and `organizerName` the organizer's, `mailboxAddress` the team's, a new
+`clientOptimisticEventId`>, "fetchEventContract": {"eventType", "startTime": <its start as read, UTC, ms>,
+"eventTimeZone": "UTC"}}`. Seen live natively the same day (`teams-headless … channel-schedule --rename`): answered
+2xx, and the service edits the channel's post in place (its `properties.meeting` gets the new `meetingtitle`, the post
+a new version); no reply is posted under it.
+
+The fence maps the creation, the change and the cancellation as a `Meeting` on the team's calendar
+(`Scope::TeamCalendar`: the channel the body names and the mailbox the path names; a change's event must name the
+`iCalUID` its path does), judged by the channel's team read fresh, Teams' own apps not
 counted, as any write on a team: the root thread the channel names must be the team's own (no `productThreadType`) and
 name the mailbox as its `teamSmtpAddress` (or `aadTeamSmtpAddress`), so a write naming a lab channel can't reach another
 group's calendar. Personal invites reach the channel's members, the same team. The native client: the channel header's
 Meet now menu offers **Schedule a meeting** for a standard channel of a team whose mailbox CSA named; it opens the
 scheduling form with the channel's row (and Send personal invites) in place of the Teams meeting switch, and its Send
 creates the meeting there (`EventWrite::CreateInChannel`, `CreateChannelEvent`). The channel view draws the post as the
-meeting card (cancelled once a cancellation's reply names it). Seen live 2026-11-03 (a team of the lab's own, a and b,
-a channel other than General, deleted after): the native creation answered `201`, the post came, a's calendar held it,
-and the native cancellation (`teams-headless a channel-schedule <channel> <title> --cancel`) went through.
+meeting card (cancelled once a cancellation's reply names it), with **Edit** for the account that scheduled it; the
+calendar's card of that meeting offers Edit and Cancel meeting too (a double click opens it), though its copy reads
+`isOrganizer` `false`. Edit reads the meeting from the team's calendar (`ChannelEventRead`,
+`EngineRequests::channel_event`) and opens the scheduling form on it with the channel's row: its Send update changes it
+there (`EventWrite::UpdateInChannel`, `UpdateChannelEvent`), its Cancel meeting cancels it with the note
+(`EventWrite::CancelInChannel`). Seen live 2026-11-03 (a team of the lab's own, a and b, a channel other than General,
+deleted after): the native creation answered `201`, the post came, a's calendar held it, and the native cancellation
+(`teams-headless a channel-schedule <channel> <title> --cancel`) went through; again the same day (a team with a alone,
+deleted after) with the change (`--rename`) between them, its post renamed in place.
 
 ## The lobby
 

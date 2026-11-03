@@ -221,6 +221,114 @@ pub async fn cancel(engine: &EngineRequests, channel: &str, prefix: &str, out: &
     Ok(fine)
 }
 
+/// `--rename <to>`: renames each meeting the channel's newest posts name whose title starts with `prefix` (and that
+/// isn't cancelled) to `to`, as its organizer's details' Send update does: the meeting read whole from its team's
+/// calendar, then changed there, each change judged by the fence; then reads back the channel's newest posts.
+/// `Ok(true)` when every one went through (none found is fine).
+///
+/// # Errors
+/// Only the output's.
+pub async fn rename(
+    engine: &EngineRequests,
+    channel: &str,
+    prefix: &str,
+    to: &str,
+    out: &mut impl Write,
+) -> io::Result<bool> {
+    let Some(place) = meeting_channel(engine, channel).await else {
+        writeln!(out, "rename channel unknown or its team has no mailbox")?;
+        return Ok(false);
+    };
+    let Some(meetings) = meetings_named(engine, channel, prefix, out).await? else {
+        return Ok(false);
+    };
+    let mut fine = true;
+    let mut start = now_ms();
+    for (post, meeting) in meetings {
+        start = meeting.start_ms;
+        let full = match engine
+            .channel_event(place.mailbox.clone(), meeting.ical_uid.clone())
+            .await
+        {
+            Ok(full) => full,
+            Err(error) => {
+                fine = false;
+                writeln!(out, "rename read failed post={post} {}", error.kind())?;
+                continue;
+            }
+        };
+        let mut draft = draft(to, 0);
+        let offset_minutes = draft.start.offset_minutes;
+        draft.start = ZonedTime {
+            ms: meeting.start_ms,
+            offset_minutes,
+        };
+        draft.end = ZonedTime {
+            ms: meeting.end_ms,
+            offset_minutes,
+        };
+        draft.body_html = full.body_html.clone().unwrap_or_default();
+        draft.location = full.event.location.clone().unwrap_or_default();
+        draft.reminder_minutes = full.reminder_minutes;
+        let write = EventWrite::UpdateInChannel {
+            event: full.raw,
+            draft,
+            channel: place.clone(),
+        };
+        match engine.write_event(write).await {
+            Ok(_) => writeln!(out, "renamed post={post}")?,
+            Err(error) => {
+                fine = false;
+                writeln!(out, "rename failed post={post} {}", error.kind())?;
+                writeln!(out, "rename why {error}")?;
+            }
+        }
+    }
+    shows(engine, channel, to, start, out).await?;
+    Ok(fine)
+}
+
+/// The meetings the channel's newest posts name whose title starts with `prefix` and that aren't cancelled, each with
+/// its post; `None` (said) when the channel couldn't be read.
+async fn meetings_named(
+    engine: &EngineRequests,
+    channel: &str,
+    prefix: &str,
+    out: &mut impl Write,
+) -> io::Result<Option<Vec<(String, teams_core::ScheduledMeeting)>>> {
+    if let Err(error) = engine.sync_conversation(channel).await {
+        writeln!(out, "channel sync failed {}", error.kind())?;
+        return Ok(None);
+    }
+    let page = match engine.messages(channel, None, 50).await {
+        Ok(page) => page,
+        Err(error) => {
+            writeln!(out, "channel read failed {}", error.kind())?;
+            return Ok(None);
+        }
+    };
+    let posts = page.messages.iter().filter_map(|message| {
+        let meeting = teams_core::ScheduledMeeting::of_properties(message.properties.as_deref()?)?;
+        Some((message.id.clone(), meeting))
+    });
+    let posts: Vec<_> = posts.collect();
+    let cancelled: Vec<String> = posts
+        .iter()
+        .filter(|(_, meeting)| meeting.cancelled)
+        .map(|(_, meeting)| meeting.ical_uid.clone())
+        .collect();
+    Ok(Some(
+        posts
+            .into_iter()
+            .filter(|(_, meeting)| !cancelled.contains(&meeting.ical_uid) && meeting.title.starts_with(prefix))
+            .collect(),
+    ))
+}
+
+fn now_ms() -> i64 {
+    chrono::Utc::now().timestamp_millis()
+}
+
 /// Where the meeting shows once made: the account's calendar around its start, and the channel's newest posts.
 async fn shows(
     engine: &EngineRequests,

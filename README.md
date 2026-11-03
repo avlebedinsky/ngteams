@@ -418,13 +418,15 @@ teams-headless c join abc [--ring-wait 180] [--tone …] [--seconds 45] [--wait 
 teams-headless a join-meeting <join link> [--tone …] [--seconds 45] [--wait 60] [--admit]
                                           # a meeting's call by its join link, as the calendar's Join: started when nobody has;
                                           # waiting in its lobby is printed (status lobby); --admit lets in whoever waits
-teams-headless a channel-meeting <channel thread> [--join] [--tone …] [--seconds 45] [--wait 60]
+teams-headless a channel-meeting <channel thread> [--join] [--subject <text>] [--tone …] [--seconds 45] [--wait 60]
                                           # a channel's meeting, as its header's Meet now (a new one) or Join (--join:
-                                          # the one CSA or the channel's posts name running there); judged by the channel's team
-teams-headless a channel-schedule <channel thread> <subject> [--cancel]
+                                          # the one CSA or the channel's posts name running there); judged by the channel's team;
+                                          # --subject titles the new meeting's post, as the pre-join's subject does
+teams-headless a channel-schedule <channel thread> <subject> [--cancel | --rename <new subject>]
                                           # Schedule a meeting in a channel (its team's calendar, the next full hour, half an
                                           # hour), then whether the calendar holds it and the channel's newest posts' kinds;
-                                          # --cancel cancels the channel's meetings whose title starts with <subject>
+                                          # --cancel cancels the channel's meetings whose title starts with <subject>,
+                                          # --rename changes their title (read from the team's calendar, Send update)
 teams-headless a teams [--channel <thread>] [--wait 20]   # the account's teams as the engine holds them: ids and counts
 ```
 

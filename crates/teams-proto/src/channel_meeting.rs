@@ -81,6 +81,42 @@ impl ScheduledMeeting {
         })
     }
 
+    /// The channel's meeting an event of a calendar is (its [`crate::ChannelEventRef`]), as its post would name it, with
+    /// its post's id: what its cancellation takes when its details or its calendar card cancel it. `None` for an event
+    /// that isn't a channel's meeting, names no post, or whose times have no instant.
+    #[must_use]
+    pub fn of_event(event: &crate::CalendarEvent) -> Option<(Self, String)> {
+        let reference = event.channel_meeting.as_ref()?;
+        let (crate::EventTime::Instant(start_ms), crate::EventTime::Instant(end_ms)) = (&event.start, &event.end)
+        else {
+            return None;
+        };
+        let event_type = match &event.kind {
+            crate::EventKind::Single => "Single".to_owned(),
+            crate::EventKind::Occurrence => "Occurrence".to_owned(),
+            crate::EventKind::Exception => "Exception".to_owned(),
+            crate::EventKind::RecurringMaster => "RecurringMaster".to_owned(),
+            crate::EventKind::Other(kind) if kind.is_empty() => "Single".to_owned(),
+            crate::EventKind::Other(kind) => kind.clone(),
+        };
+        let meeting = Self {
+            title: event.subject.clone(),
+            start_ms: *start_ms,
+            end_ms: *end_ms,
+            start_text: crate::calendar::iso_utc(*start_ms)?,
+            location: event.location.clone(),
+            ical_uid: reference.ical_uid.clone(),
+            event_type,
+            organizer_id: reference
+                .organizer
+                .as_deref()
+                .map(|mri| mri.trim_start_matches("8:orgid:").to_ascii_lowercase()),
+            join_url: event.join_url.clone(),
+            cancelled: event.cancelled,
+        };
+        Some((meeting, reference.post.clone()?))
+    }
+
     /// Whether `object_id` (an account's id without its `8:orgid:`) organizes it.
     #[must_use]
     pub fn organized_by(&self, object_id: &str) -> bool {

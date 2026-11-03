@@ -82,6 +82,9 @@ pub enum Seed {
     /// A new meeting in a channel, in `slot` (the channel header's Schedule a meeting): a Teams meeting on its team's
     /// calendar, posted to the channel.
     InChannel { slot: Slot, place: MeetingPlace },
+    /// A channel's meeting, read whole from its team's calendar, to change (its card's Edit, its calendar card's Edit):
+    /// Send update tells everyone on the team, Cancel meeting cancels it there.
+    ChangeInChannel { full: Box<FullEvent>, place: MeetingPlace },
 }
 
 /// What a Save that went through tells the calendar: read its days again.
@@ -130,10 +133,10 @@ pub fn open(core: Arc<dyn Core>, trace: Arc<ViewTrace>, seed: Seed, saved: Saved
         let title: SharedString = match &seed {
             Seed::New { .. } => "New event - Calendar".into(),
             Seed::InChannel { .. } => "New meeting - Calendar".into(),
-            Seed::Change(full) if !full.event.subject.trim().is_empty() => {
+            Seed::Change(full) | Seed::ChangeInChannel { full, .. } if !full.event.subject.trim().is_empty() => {
                 format!("{} - Calendar", full.event.subject.trim()).into()
             }
-            Seed::Change(_) => "Event - Calendar".into(),
+            Seed::Change(_) | Seed::ChangeInChannel { .. } => "Event - Calendar".into(),
         };
         let bounds = Bounds::centered(None, size(px(DEFAULT_SIZE.0), px(DEFAULT_SIZE.1)), cx);
         let options = WindowOptions {
@@ -488,6 +491,13 @@ impl EventForm {
                 self.online = true;
                 self.place = Some(place);
                 "channel"
+            }
+            Seed::ChangeInChannel { full, place } => {
+                self.personal_invites = full.raw.get("inviteAllMembers").and_then(Value::as_bool) == Some(true);
+                self.fill(*full, false, window, cx);
+                self.online = true;
+                self.place = Some(place);
+                "channel-change"
             }
             Seed::Change(full) => {
                 let event = &full.event;
@@ -844,20 +854,27 @@ impl EventForm {
             }
         }
         let draft = self.fields(cx).draft();
-        let write = match &self.editing {
-            Some(editing) => EventWrite::Update {
+        let write = match (&self.editing, &self.place) {
+            (Some(editing), Some(place)) => {
+                let mut event = editing.raw.clone();
+                event.insert("inviteAllMembers".to_owned(), Value::Bool(self.personal_invites));
+                EventWrite::UpdateInChannel {
+                    event,
+                    draft,
+                    channel: place.channel.clone(),
+                }
+            }
+            (Some(editing), None) => EventWrite::Update {
                 id: editing.id.clone(),
                 event: editing.raw.clone(),
                 draft,
             },
-            None => match &self.place {
-                Some(place) => EventWrite::CreateInChannel {
-                    draft,
-                    channel: place.channel.clone(),
-                    personal_invites: self.personal_invites,
-                },
-                None => EventWrite::Create(draft),
+            (None, Some(place)) => EventWrite::CreateInChannel {
+                draft,
+                channel: place.channel.clone(),
+                personal_invites: self.personal_invites,
             },
+            (None, None) => EventWrite::Create(draft),
         };
         self.send(write, cx);
     }
@@ -868,13 +885,24 @@ impl EventForm {
         if !self.may_write() {
             return;
         }
-        let write = match confirm {
-            Confirm::Cancel => EventWrite::Cancel {
+        let note = Some(self.cancel_note.read(cx).value().to_string()).filter(|note| !note.trim().is_empty());
+        let in_channel = self
+            .place
+            .as_ref()
+            .zip(teams_core::ScheduledMeeting::of_event(&editing.event));
+        let write = match (confirm, in_channel) {
+            (Confirm::Cancel, Some((place, (meeting, post)))) => EventWrite::CancelInChannel {
+                meeting: Box::new(meeting),
+                channel: place.channel.clone(),
+                post,
+                message: note,
+            },
+            (Confirm::Cancel, None) => EventWrite::Cancel {
                 id: editing.id.clone(),
                 chat: editing.event.meeting_chat.clone(),
-                message: Some(self.cancel_note.read(cx).value().to_string()).filter(|note| !note.trim().is_empty()),
+                message: note,
             },
-            Confirm::Delete => EventWrite::Delete { id: editing.id.clone() },
+            (Confirm::Delete, _) => EventWrite::Delete { id: editing.id.clone() },
         };
         self.confirm = None;
         self.send(write, cx);
@@ -931,6 +959,8 @@ impl EventForm {
     /// anyone, else Save.
     fn save_label(&self) -> &'static str {
         match (&self.editing, self.attendees.is_empty()) {
+            // a channel's meeting tells everyone on the team
+            (Some(_), _) if self.place.is_some() => "Send update",
             (Some(_), false) => "Send update",
             // a channel's meeting is posted to the channel: everyone on the team gets it
             (None, false) => "Send",
@@ -1394,7 +1424,8 @@ impl EventForm {
     /// Cancel meeting or Delete (of an occurrence, or of the series while the form changes it whole), on a change.
     fn removing(&self, writes: bool, cx: &mut Context<Self>) -> Option<AnyElement> {
         let editing = self.editing.as_ref().filter(|_| writes)?;
-        let meeting = editing.event.is_organizer && !editing.event.attendees.is_empty();
+        // a channel's meeting reaches the whole team, whomever else it invites
+        let meeting = editing.event.is_organizer && (self.place.is_some() || !editing.event.attendees.is_empty());
         let what = self.removal_noun();
         let (id, label, glyph, confirm) = match (meeting, what) {
             (true, "occurrence") => (

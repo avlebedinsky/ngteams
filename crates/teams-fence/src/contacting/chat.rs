@@ -164,6 +164,11 @@ fn mapped(request: &Parsed<'_>, path: &[&str]) -> Option<Target> {
         {
             on(WriteKind::Reaction, chat)
         }
+        ("PUT", ["users", "ME", "conversations", channel, "messages", post, "properties"])
+            if request.only_query("name") == Some("meeting") =>
+        {
+            meeting_title(body?, channel, post)
+        }
         ("POST", ["threads"]) => Some(Target::new(WriteKind::ChatCreate, Scope::New).with_added(body_members(body?)?)),
         ("PUT", ["threads", chat, "members"]) => {
             Some(on(WriteKind::MemberChange, chat)?.with_added(body_members(body?)?))
@@ -172,6 +177,26 @@ fn mapped(request: &Parsed<'_>, path: &[&str]) -> Option<Target> {
             Some(on(WriteKind::MemberChange, chat)?.with_added([Mri::new(*member)]))
         }
         ("DELETE", ["threads", chat, "members", member]) if is_member(member) => on(WriteKind::MemberChange, chat),
+        _ => None,
+    }
+}
+
+/// `PUT v1/users/ME/conversations/<channel>/messages/<post>/properties?name=meeting` with exactly `{"meeting":
+/// {"meetingtitle": <text>}}`: the title a channel's Meet now gives its meeting's post once the service posted it (the
+/// pre-join's subject, edited or not, seen 2026-11-03: `docs/protocol/calling.md`, "A channel's meeting"). Everyone on
+/// the team sees the post, so it is an [`WriteKind::Edit`] on the channel's [`Scope::Team`], judged by the team's
+/// members. A post id that isn't digits, a chat for a channel, or any other key is unreadable.
+fn meeting_title(body: &[u8], channel: &str, post: &str) -> Option<Target> {
+    if !crate::membership::is_team_thread_id(channel) || post.is_empty() || !post.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let body = strict_json(body)?;
+    let object = body.as_object()?;
+    let (1, Some(Value::Object(meeting))) = (object.len(), object.get("meeting")) else {
+        return None;
+    };
+    match (meeting.len(), meeting.get("meetingtitle")) {
+        (1, Some(Value::String(_))) => Some(Target::new(WriteKind::Edit, Scope::Team { id: channel.to_owned() })),
         _ => None,
     }
 }

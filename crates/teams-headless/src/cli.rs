@@ -283,6 +283,10 @@ pub enum Command {
         /// Cancels the meetings the channel's posts name whose title starts with the subject, instead of scheduling.
         #[arg(long)]
         cancel: bool,
+        /// Renames the meetings the channel's posts name whose title starts with the subject to this, as their
+        /// details' Send update does, instead of scheduling.
+        #[arg(long, conflicts_with = "cancel")]
+        rename: Option<String>,
     },
     /// Goes into a channel's meeting, as the channel header's Meet now and Join do (the same media, hold, hang-up and
     /// output): a new meeting in the channel, or with `--join` the one that runs there now, as CSA names it. A write
@@ -295,6 +299,10 @@ pub enum Command {
         /// Joins the meeting that runs in the channel instead of starting one.
         #[arg(long)]
         join: bool,
+        /// The new meeting's subject, as its pre-join's title says it (Teams' `Meeting in "<channel>"` unless edited):
+        /// the meeting's post is titled so once the service posted it.
+        #[arg(long, conflicts_with = "join")]
+        subject: Option<String>,
         /// Seconds the call is held once its media connected.
         #[arg(long, default_value_t = 45)]
         seconds: u64,

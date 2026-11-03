@@ -15,7 +15,7 @@ mod team;
 pub use availability::{ForceAvailability, ManualAvailability, SetEndpointAvailability};
 pub use calendar::{
     CancelChannelEvent, CancelEvent, CreateChannelEvent, CreateEvent, CreateOnlineMeeting, DeleteEvent, EventAttendee,
-    EventDraft, EventShowAs, MeetingChannel, Organizer, UpdateEvent, ZonedTime,
+    EventDraft, EventShowAs, MeetingChannel, Organizer, UpdateChannelEvent, UpdateEvent, ZonedTime,
 };
 pub use call::{
     AcceptCall, AcceptParts, AcknowledgeAcceptance, AcknowledgeMediaAnswer, AddParts, AddToCall, AnswerMedia,
@@ -32,8 +32,8 @@ pub use channel::{
     channel_error_code,
 };
 pub use chat::{
-    Author, CreateChat, DeleteMessage, EditMessage, Original, ReadReceipt, RemoveReaction, SendMessage, SetReaction,
-    Typing,
+    Author, CreateChat, DeleteMessage, EditMessage, Original, ReadReceipt, RemoveReaction, SendMessage,
+    SetMeetingTitle, SetReaction, Typing,
 };
 pub use team::{
     AppDefinition, MemberUpdate, NewTeam, TeamCopy, TeamRole, TeamWrite, TemplateTeam, team_created, team_error_code,

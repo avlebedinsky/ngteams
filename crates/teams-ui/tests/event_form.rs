@@ -606,3 +606,96 @@ fn a_channel_s_meeting_names_its_channel_and_is_sent_to_the_team_s_calendar() {
     }
     assert_eq!(saved.load(Ordering::SeqCst), 1);
 }
+
+fn channel_place() -> teams_ui::event_form::MeetingPlace {
+    teams_ui::event_form::MeetingPlace {
+        channel: teams_core::MeetingChannel {
+            channel: fixtures::CHANNEL.to_owned(),
+            mailbox: fixtures::TEAM_MAILBOX.to_owned(),
+        },
+        team: "Lab team".to_owned(),
+        name: "Planning".to_owned(),
+    }
+}
+
+#[test]
+fn a_channel_s_meeting_opened_to_change_sends_its_update_to_the_team_s_calendar() {
+    let rig = Rig::start();
+    rig.core
+        .calendar
+        .lock()
+        .unwrap()
+        .write_answers
+        .push_back(Ok(EventWritten { created: None }));
+    let full = fixtures::channel_full(common::LAB_A);
+    let (form, cx, saved, _) = window(
+        &rig,
+        Seed::ChangeInChannel {
+            full: Box::new(full),
+            place: channel_place(),
+        },
+    );
+    // the channel's row, its Send update and its organizer's Cancel meeting; no Teams meeting switch
+    assert!(cx.debug_bounds("event-channel").is_some());
+    assert!(cx.debug_bounds("event-online").is_none());
+    assert!(cx.debug_bounds("event-cancel-meeting").is_some());
+    assert!(cx.update(|_, cx| form.read(cx).changes() && form.read(cx).place().is_some()));
+    cx.update(|window, cx| {
+        form.update(cx, |form, cx| {
+            form.fill_in("Synthetic channel meeting renamed", &[], "", window, cx);
+        });
+    });
+    click(cx, "event-personal-invites");
+    click(cx, "event-save");
+    {
+        let calendar = rig.core.calendar.lock().unwrap();
+        let [EventWrite::UpdateInChannel { event, draft, channel }] = calendar.writes.as_slice() else {
+            panic!("one change in the channel: {:?}", calendar.writes);
+        };
+        assert_eq!(draft.subject, "Synthetic channel meeting renamed");
+        assert_eq!(*channel, channel_place().channel);
+        assert_eq!(event["iCalUID"], fixtures::CHANNEL_EVENT);
+        assert_eq!(event["inviteAllMembers"], true);
+        // the team isn't among whom it invites: the channel's row stands for it
+        assert!(
+            draft
+                .attendees
+                .iter()
+                .all(|attendee| attendee.address != fixtures::TEAM_MAILBOX)
+        );
+    }
+    assert_eq!(saved.load(Ordering::SeqCst), 1);
+}
+
+#[test]
+fn a_channel_s_meeting_cancelled_from_its_details_is_cancelled_on_the_team_s_calendar_with_its_note() {
+    let rig = Rig::start();
+    rig.core
+        .calendar
+        .lock()
+        .unwrap()
+        .write_answers
+        .push_back(Ok(EventWritten { created: None }));
+    let (_form, cx, _, _) = window(
+        &rig,
+        Seed::ChangeInChannel {
+            full: Box::new(fixtures::channel_full(common::LAB_A)),
+            place: channel_place(),
+        },
+    );
+    click(cx, "event-cancel-meeting");
+    assert!(cx.debug_bounds("event-confirm").is_some());
+    click(cx, "event-confirm-go");
+    let calendar = rig.core.calendar.lock().unwrap();
+    let [
+        EventWrite::CancelInChannel {
+            meeting, channel, post, ..
+        },
+    ] = calendar.writes.as_slice()
+    else {
+        panic!("one cancellation in the channel: {:?}", calendar.writes);
+    };
+    assert_eq!(meeting.ical_uid, fixtures::CHANNEL_EVENT);
+    assert_eq!(post, "1793680050510");
+    assert_eq!(*channel, channel_place().channel);
+}

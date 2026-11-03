@@ -78,9 +78,9 @@ mod write;
 
 pub use ams::{MessagePicture, PastedFormat, PastedPicture};
 pub use calendar::{
-    Attendee, CALENDAR_VIEW_PATH, CalendarAnswer, CalendarAnswerError, CalendarEvent, CalendarView, EventKind,
-    EventRead, EventTime, FloatingTime, FullEvent, MAX_CALENDAR_WINDOW_MS, Response as EventResponse, ShowAs,
-    TimeZoneSettings, join_url_chat, join_url_meeting,
+    Attendee, CALENDAR_VIEW_PATH, CalendarAnswer, CalendarAnswerError, CalendarEvent, CalendarView, ChannelEventRead,
+    ChannelEventRef, EventKind, EventRead, EventTime, FloatingTime, FullEvent, MAX_CALENDAR_WINDOW_MS,
+    Response as EventResponse, ShowAs, TimeZoneSettings, join_url_chat, join_url_meeting,
 };
 pub use channel_meeting::{CANCELLED_MEETING_TYPE, SCHEDULED_MEETING_TYPE, ScheduledMeeting};
 pub use channel_read::{ChannelCreationStatus, TeamPeopleSearch, TeamPerson};
@@ -150,10 +150,10 @@ pub use write::{
     ChannelParameters, ClientInfo, CreateChat, DecideLobby, DeclineCall, DeleteMessage, EditMessage, ForceAvailability,
     Invitee, JoinCall, JoinMedia, JoinParts, KeepAliveCall, LeaveCall, LeaveReason, Links, ManualAvailability,
     MediaContent, MediaDescription, MediaDescriptions, MeetingInfo, MemberUpdate, Mutating, NewTeam, Original, RawBody,
-    ReadReceipt, RemoveReaction, RenegotiateMedia, ReportRinging, SendMessage, SetEndpointAvailability, SetReaction,
-    StartCall, StartParts, TEAMS_ECHO_BOT_MRI, TEST_CALL_SCENARIO, TargetMismatch, TeamCopy, TeamRole, TeamWrite,
-    TemplateTeam, Typing, UpdateEndpointMetadata, UpdateEndpointState, UpdateMediaDescriptions,
-    UpdateParticipantProperties, VoiceConsent, Wire, team_created, team_error_code,
+    ReadReceipt, RemoveReaction, RenegotiateMedia, ReportRinging, SendMessage, SetEndpointAvailability,
+    SetMeetingTitle, SetReaction, StartCall, StartParts, TEAMS_ECHO_BOT_MRI, TEST_CALL_SCENARIO, TargetMismatch,
+    TeamCopy, TeamRole, TeamWrite, TemplateTeam, Typing, UpdateEndpointMetadata, UpdateEndpointState,
+    UpdateMediaDescriptions, UpdateParticipantProperties, VoiceConsent, Wire, team_created, team_error_code,
 };
 pub use write::{
     AddChannelMembers, ChannelCreated, ChannelLayout, CreateChannel, NewChannel, NewChannelKind, ShowChannelByDefault,
@@ -161,5 +161,5 @@ pub use write::{
 };
 pub use write::{
     CancelChannelEvent, CancelEvent, CreateChannelEvent, CreateEvent, CreateOnlineMeeting, DeleteEvent, EventAttendee,
-    EventDraft, EventShowAs, MeetingChannel, Organizer, UpdateEvent, ZonedTime,
+    EventDraft, EventShowAs, MeetingChannel, Organizer, UpdateChannelEvent, UpdateEvent, ZonedTime,
 };

@@ -105,8 +105,10 @@ impl CalendarView {
         if self.core.read_only() {
             return None;
         }
-        let own = event.is_organizer;
-        let meeting = own && !event.attendees.is_empty() && !event.cancelled;
+        // a channel's meeting the account scheduled is its own, though its calendar holds an attendee's copy of it
+        let in_channel = super::own_channel_meeting(event, self.core.me());
+        let own = event.is_organizer || in_channel;
+        let meeting = own && (in_channel || !event.attendees.is_empty()) && !event.cancelled;
         // an occurrence's card acts on that occurrence alone, as Teams' card says (its series is changed in the form)
         let occurrence = matches!(
             event.kind,

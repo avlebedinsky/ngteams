@@ -1001,3 +1001,62 @@ fn a_meeting_scheduled_in_the_channel_is_drawn_as_its_card_cancelled_once_its_re
     let reply = cx.update(|_, cx| view.read(cx).threads()[0].replies[0].body.clone());
     assert!(matches!(reply, teams_ui::channel_view::Body::Text(_)));
 }
+
+#[test]
+fn the_card_of_a_meeting_the_account_scheduled_opens_its_details_from_the_team_s_calendar() {
+    let rig = rig();
+    let mut teams = teams();
+    teams[0].mailbox = Some("made-up-team@lab.example.test".to_owned());
+    *rig.core.teams.lock().unwrap() = Some(teams);
+    // the account's meeting (its organizer is a), and a cancelled one: only the first offers Edit
+    let messages = vec![
+        meeting_post("1760000400200", "Planning", "0a0b", true),
+        meeting_post("1760000400100", "Review", "0c0d", false),
+        meeting_post(POST, "Planning", "0a0b", false),
+    ];
+    let roots = [
+        ("1760000400200", POST),
+        ("1760000400100", "1760000400100"),
+        (POST, POST),
+    ]
+    .map(|(message, root)| (message.to_owned(), root.to_owned()))
+    .to_vec();
+    rig.core.messages.lock().unwrap().insert(CHANNEL.to_owned(), messages);
+    rig.core.roots.lock().unwrap().insert(CHANNEL.to_owned(), roots);
+    let data = serde_json::json!({"cid": CHANNEL, "mid": 1_760_000_400_100_u64, "uid": "8:orgid:00000000-0000-4000-8000-00000000000a"});
+    let event = serde_json::json!({
+        "objectId": "AQMkMadeUp", "iCalUID": "0c0d", "subject": "Review",
+        "startTime": "2026-11-03T05:00:00+00:00", "endTime": "2026-11-03T05:30:00+00:00",
+        "isOnlineMeeting": true, "skypeTeamsData": data.to_string(),
+    });
+    let full = teams_proto::ChannelEventRead::new("made-up-team@lab.example.test", "0c0d")
+        .unwrap()
+        .read_answer(&serde_json::to_vec(&event).unwrap())
+        .unwrap();
+    rig.core.calendar.lock().unwrap().full.insert("0c0d".to_owned(), full);
+    let (_shell, cx) = shell_window(&rig, Arc::new(ViewTrace::new(Written::default())));
+    click(cx, "channel-row-1");
+    assert!(
+        bounds(cx, "channel-meeting-edit-1760000400100").is_some(),
+        "its organizer's Edit"
+    );
+    assert!(
+        bounds(cx, &format!("channel-meeting-edit-{POST}")).is_none(),
+        "none on a cancelled one"
+    );
+    click(cx, "channel-meeting-edit-1760000400100");
+    assert_eq!(
+        rig.core.calendar.lock().unwrap().full_reads,
+        ["made-up-team@lab.example.test/0c0d"]
+    );
+    let form = cx
+        .update(|_, cx| teams_ui::event_form::shown(cx))
+        .expect("the form opens");
+    cx.update(|_, cx| {
+        let form = form.read(cx);
+        assert!(form.changes());
+        assert_eq!(form.place().map(|place| place.name.as_str()), Some("Made-up Channel"));
+    });
+    cx.update(|_, cx| teams_ui::event_form::close(cx));
+    cx.run_until_parked();
+}
