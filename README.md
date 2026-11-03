@@ -143,7 +143,7 @@ outside the repo:
 | `…/status-<alias>.json` | `login`'s steps, and why it stopped |
 | `…/media/tone-440.wav` | the fake microphone's tone for `echo-call` |
 | Secret Service, application `teams-lab` | refresh tokens and skypetokens (each with its expiry, capped at its Entra token's), per account |
-| lab-automation's `lab-accounts.json` (mode `0600`) | the lab accounts' passwords, read only by `login` |
+| `~/.config/teams-lab/accounts.json` (mode `0600`) | the lab accounts' passwords (`{"accounts": [{"profile": "a", "email": <UPN>, "password": …}, …]}`), read only by `login` |
 
 ## Building
 
@@ -200,7 +200,7 @@ proto-lab service-mri echo <mri>          # record an approved service's MRI in 
 **`login`** loads the web client in the account's profile under the armed fence, fail-closed (every write whose
 target's members have to be read is denied and logged to `fence.log`, as expected; a new chat naming only lab accounts
 is judged by its participants alone and can still pass). When the session has expired it signs in on Microsoft's page
-by itself, with the password from `lab-accounts.json`; Entra's sign-in form reaches nobody, so the fence lets it
+by itself, with the password from `accounts.json`; Entra's sign-in form reaches nobody, so the fence lets it
 through. Any multi-factor prompt (a one-time code, a method to pick, an approval in an app, registering a method)
 stops it (`docs/backlog/one-time-code-sign-in-under-the-fence.md`). It records the account's MRI from its tokens'
 claims. Each step goes to `status-<alias>.json`.

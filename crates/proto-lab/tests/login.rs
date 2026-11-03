@@ -48,15 +48,15 @@ fn no_env(_: &str) -> Option<String> {
 fn accounts_json(password_field: &str) -> String {
     format!(
         r#"{{"accounts": [
-            {{"profile": "labbot", "email": "{UPN_A}", {password_field}}},
-            {{"profile": "claude-labbot2", "email": "bot-b@lab.example.com", "password": "other-b"}},
-            {{"profile": "labbot3", "email": "bot-c@lab.example.com", "password": "other-c"}}
+            {{"profile": "a", "email": "{UPN_A}", {password_field}}},
+            {{"profile": "b", "email": "bot-b@lab.example.com", "password": "other-b"}},
+            {{"profile": "c", "email": "bot-c@lab.example.com", "password": "other-c"}}
         ], "azureDevOps": {{"organization": "x"}}}}"#
     )
 }
 
 fn write_file(dir: &Path, text: &str, mode: u32) -> TestResult<std::path::PathBuf> {
-    let file = dir.join("lab-accounts.json");
+    let file = dir.join("accounts.json");
     std::fs::write(&file, text)?;
     std::fs::set_permissions(&file, std::fs::Permissions::from_mode(mode))?;
     Ok(file)
@@ -104,7 +104,7 @@ fn a_password_env_names_the_variable_holding_it() -> TestResult {
 
 #[test]
 fn a_bare_array_is_accepted_too() -> TestResult {
-    let text = format!(r#"[{{"profile": "labbot", "email": "{UPN_A}", "password": "{SECRET}"}}]"#);
+    let text = format!(r#"[{{"profile": "a", "email": "{UPN_A}", "password": "{SECRET}"}}]"#);
     let accounts = AccountsFile::parse(&text, no_env)?;
     assert_eq!(accounts.for_alias(Alias::A, UPN_A)?.email(), UPN_A);
     let missing = accounts
@@ -142,7 +142,7 @@ fn the_file_must_not_be_readable_by_group_or_others() -> TestResult {
             matches!(error, AccountsError::Mode { mode: found, .. } if found == mode),
             "{mode:o}"
         );
-        assert!(shown(&error).contains("lab-accounts.json"));
+        assert!(shown(&error).contains("accounts.json"));
         assert!(!shown(&error).contains(SECRET));
     }
     for mode in [0o600, 0o400] {
@@ -169,35 +169,35 @@ fn the_loaders_rules_refuse_a_bad_file() {
         ),
         (
             format!(
-                r#"[{{"profile": "labbot", "email": "{UPN_A}", "password": "{SECRET}"}},
-                    {{"profile": "claude-labbot", "email": "x@lab.example.com", "password": "{SECRET}"}}]"#
+                r#"[{{"profile": "a", "email": "{UPN_A}", "password": "{SECRET}"}},
+                    {{"profile": "a", "email": "x@lab.example.com", "password": "{SECRET}"}}]"#
             ),
             "a profile twice",
         ),
         (
-            format!(r#"[{{"profile": "labbot", "email": "not-an-email", "password": "{SECRET}"}}]"#),
+            format!(r#"[{{"profile": "a", "email": "not-an-email", "password": "{SECRET}"}}]"#),
             "an invalid email",
         ),
         (
-            format!(r#"[{{"profile": "labbot", "email": "{UPN_A}", "password": ""}}]"#),
+            format!(r#"[{{"profile": "a", "email": "{UPN_A}", "password": ""}}]"#),
             "an empty password",
         ),
         (
-            format!(r#"[{{"profile": "labbot", "email": "{UPN_A}"}}]"#),
+            format!(r#"[{{"profile": "a", "email": "{UPN_A}"}}]"#),
             "no password",
         ),
         // a password of the wrong type: serde would print the value in a type error
         (
-            format!(r#"[{{"profile": "labbot", "email": "{UPN_A}", "password": ["{SECRET}"]}}]"#),
+            format!(r#"[{{"profile": "a", "email": "{UPN_A}", "password": ["{SECRET}"]}}]"#),
             "a password that isn't a string",
         ),
         // broken JSON right after the password: a syntax error must not quote it
         (
-            format!(r#"[{{"profile": "labbot", "email": "{UPN_A}", "password": "{SECRET}" "#),
+            format!(r#"[{{"profile": "a", "email": "{UPN_A}", "password": "{SECRET}" "#),
             "broken JSON",
         ),
         (
-            format!(r#"[{{"profile": "labbot", "email": "{UPN_A}", "password": "{SECRET}"}}] x"#),
+            format!(r#"[{{"profile": "a", "email": "{UPN_A}", "password": "{SECRET}"}}] x"#),
             "trailing text",
         ),
     ];
@@ -811,6 +811,9 @@ fn the_email_and_then_the_password_are_typed_once_each() {
     progress.email_sent = true;
     // the same field again (the page hasn't moved on yet): wait, don't retype
     assert_eq!(next_action(&email, progress), Action::Wait);
+    // the email page's "Sign-in options" tile matches the method-choice selectors: still the email page, so wait
+    let with_options = probe_of(&json!({"email": EMAIL, "proofs": true, "next": true}));
+    assert_eq!(next_action(&with_options, progress), Action::Wait);
     let password = probe_of(&json!({"password": PASSWD, "email": EMAIL}));
     assert_eq!(
         next_action(&password, progress),
@@ -1041,7 +1044,7 @@ const SLOW_ANSWER: Duration = Duration::from_secs(3);
 /// 250 ms (faster than `login`'s, so a repeated click would show). Returns the last action, the page's record and the
 /// page's URL.
 async fn drive(run: &SignInRun, url: &str, password: &str) -> TestResult<(Action, Value, String)> {
-    let text = format!(r#"[{{"profile": "labbot", "email": "{UPN_A}", "password": "{password}"}}]"#);
+    let text = format!(r#"[{{"profile": "a", "email": "{UPN_A}", "password": "{password}"}}]"#);
     let accounts = AccountsFile::parse(&text, no_env)?;
     let credentials = accounts.for_alias(Alias::A, UPN_A)?;
     let cdp = run.armed.cdp();

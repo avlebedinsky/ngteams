@@ -1,15 +1,15 @@
-//! The lab accounts' sign-in credentials, from lab-automation's account file ([`ACCOUNTS_FILE`]), read with the rules
-//! of its `loadAccounts` (`scripts/claude-setup-token.mjs`):
+//! The lab accounts' sign-in credentials, from the lab's account file ([`accounts_file`], `accounts.json` beside
+//! `lab.toml`), read by these rules:
 //! - the file must not be readable or writable by group or others (mode `0600` or stricter);
 //! - it is a JSON array of accounts, or an object whose `accounts` is one, and the list isn't empty;
-//! - each account has a `profile` (`labbot`, `labbot2` or `labbot3`, a leading `claude-` dropped), each profile at
-//!   most once, an `email` of the form `user@domain.tld`, and a password: the environment variable `passwordEnv`
-//!   names, or else `password`; an unset or empty one is an error.
+//! - each account has a `profile` (`a`, `b` or `c`, the lab alias), each profile at most once, an `email` of the form
+//!   `user@domain.tld`, and a password: the environment variable `passwordEnv` names, or else `password`; an unset or
+//!   empty one is an error.
 //!
-//! The other fields the loader also checks don't concern the lab and are ignored.
+//! Other fields are ignored.
 //!
-//! The lab account of a profile is fixed (`labbot` is `a`, `labbot2` is `b`, `labbot3` is `c`), and its email has to be
-//! that account's UPN in `lab.toml`, so a password is only ever typed for the account it belongs to.
+//! The email of a profile has to be that account's UPN in `lab.toml`, so a password is only ever typed for the account
+//! it belongs to.
 //!
 //! A password is never printed, logged or put in an error: [`Password`] has a redacted `Debug` and is wiped from memory
 //! when dropped, no error carries a value from the file, and the JSON is read as plain values first, so a type error
@@ -26,13 +26,16 @@ use regex::Regex;
 use serde_json::{Map, Value};
 use zeroize::Zeroizing;
 
-use crate::config::Alias;
+use crate::config::{Alias, LabLocations};
 
-/// lab-automation's account file.
-pub const ACCOUNTS_FILE: &str = "/path/to/lab-automation/lab-accounts.json";
+/// The lab's account file: `accounts.json` in the directory of `lab.toml`.
+#[must_use]
+pub fn accounts_file(locations: &LabLocations) -> PathBuf {
+    locations.config_file.with_file_name("accounts.json")
+}
 
 /// The profile of each lab account, as the account file names it.
-const PROFILES: [(&str, Alias); 3] = [("labbot", Alias::A), ("labbot2", Alias::B), ("labbot3", Alias::C)];
+const PROFILES: [(&str, Alias); 3] = [("a", Alias::A), ("b", Alias::B), ("c", Alias::C)];
 
 /// The loader's email check.
 static EMAIL: LazyLock<Option<Regex>> =
@@ -203,7 +206,7 @@ fn profile_name(alias: Alias) -> &'static str {
         .map_or("?", |(name, _)| name)
 }
 
-/// One account of the file, by the loader's rules. `index` counts from 1, as the loader's messages do.
+/// One account of the file, by the rules above. `index` counts from 1, as the loader's messages do.
 fn read_account(index: usize, account: Value, env: &impl Fn(&str) -> Option<String>) -> Result<Entry, AccountsError> {
     let Value::Object(mut account) = account else {
         return Err(AccountsError::UnsupportedProfile { index });
@@ -212,7 +215,7 @@ fn read_account(index: usize, account: Value, env: &impl Fn(&str) -> Option<Stri
     let profile = profile.trim();
     let alias = PROFILES
         .iter()
-        .find(|(name, _)| *name == profile.strip_prefix("claude-").unwrap_or(profile))
+        .find(|(name, _)| *name == profile)
         .map(|(_, alias)| *alias)
         .ok_or(AccountsError::UnsupportedProfile { index })?;
     let email = text_of(account.get("email")).trim().to_owned();

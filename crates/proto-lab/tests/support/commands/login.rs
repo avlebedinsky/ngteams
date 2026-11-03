@@ -16,7 +16,7 @@ const OID: &str = "00000000-0000-4000-8000-00000000000a";
 
 fn accounts() -> AccountsFile {
     AccountsFile::parse(
-        &json!({"_synthetic":true,"accounts":[{"profile":"labbot","email":UPN,"password":PASSWORD}]}).to_string(),
+        &json!({"_synthetic":true,"accounts":[{"profile":"a","email":UPN,"password":PASSWORD}]}).to_string(),
         |_| None,
     )
     .unwrap()

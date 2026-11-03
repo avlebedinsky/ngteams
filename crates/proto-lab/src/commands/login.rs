@@ -35,7 +35,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
 
-use crate::accounts::{ACCOUNTS_FILE, AccountsError, AccountsFile, Credentials};
+use crate::accounts::{AccountsError, AccountsFile, Credentials, accounts_file};
 use crate::cdp::{Cdp, CdpError, SessionId};
 use crate::config::{Alias, ConfigError, LabConfig, LabLocations, MriRecord, record_account_mri};
 use crate::scenario::dsl::js_string;
@@ -201,7 +201,12 @@ pub fn next_action(probe: &SignInProbe, progress: Progress) -> Action {
         }
         return Action::Wait;
     }
-    if let Some(email) = probe.email.as_ref().filter(|_| !progress.email_sent) {
+    if let Some(email) = &probe.email {
+        // still the email page after the email went in: wait. Its "Sign-in options" tile is a `div.table` button, so
+        // reading on would take it for a verification-method choice.
+        if progress.email_sent {
+            return Action::Wait;
+        }
         return Action::TypeEmail(email.clone());
     }
     mfa_or_confirm(probe, progress)
@@ -502,7 +507,7 @@ pub async fn login(alias: Alias, options: LoginOptions) -> Result<LoginReport, L
     let status = StatusFile::new(paths.data_dir(), alias);
     let outcome = async {
         let upn = config.account(alias).upn.clone();
-        let accounts = AccountsFile::load(Path::new(ACCOUNTS_FILE), |name| std::env::var(name).ok())?;
+        let accounts = AccountsFile::load(&accounts_file(&locations), |name| std::env::var(name).ok())?;
         let credentials = accounts.for_alias(alias, &upn)?;
         status.write("starting", &json!({})).map_err(LoginError::Status)?;
         let session = LabSession::open_with(&paths, alias, session_options()).await?;
