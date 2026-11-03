@@ -2089,6 +2089,36 @@ fn a_meetings_pre_join_sends_nothing_until_join_now_and_gives_way_to_its_call() 
 }
 
 #[test]
+fn a_pre_join_cancelled_after_join_now_hangs_its_call_up_and_never_turns_the_camera_on() {
+    let rig = calling();
+    let (trace, _) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.open_prejoin(meeting_to_join(), cx)));
+    let _window = prejoin_window(&rig, &windows);
+    rig.cx
+        .update(|cx| calls_of(&rig).update(cx, |calls, cx| calls.set_prejoin_camera(true, cx)));
+    let core: Arc<dyn teams_ui::Core> = rig.core.clone();
+    rig.cx
+        .update(|cx| teams_ui::calls::join_now(&calls_of(&rig), &core, &trace, cx));
+    assert_eq!(actions(&rig), [join_meeting_action()]);
+    // the user cancels while the join's media is still being set up
+    rig.cx
+        .update(|cx| calls_of(&rig).update(cx, teams_ui::Calls::cancel_prejoin));
+    status(&rig, 1, CallStatus::Joining);
+    let _stage = stage(&rig, &windows);
+    status(&rig, 1, CallStatus::Connected);
+    rig.cx.run_until_parked();
+    let sent = actions(&rig);
+    assert!(sent.contains(&CallAction::HangUp { call: call(1) }), "{sent:?}");
+    assert!(
+        !sent.iter().any(|action| matches!(action, CallAction::Camera { .. })),
+        "{sent:?}"
+    );
+}
+
+#[test]
 fn dont_use_audio_joins_the_meeting_muted_and_phone_audio_is_greyed_out() {
     let rig = calling();
     let (trace, _) = trace();

@@ -535,6 +535,9 @@ pub struct Calls {
     meeting: Option<MeetingToJoin>,
     /// What the pre-join chose, until its call took it.
     choices: Option<Choices>,
+    /// The pre-join was cancelled after its Join now went: the meeting's call that comes of it is hung up as soon as
+    /// it is told ([`Self::next_choice`]), and none of its choices is applied.
+    taken_back: bool,
 }
 
 impl Calls {
@@ -633,6 +636,7 @@ impl Calls {
         self.asked = None;
         self.prejoin = None;
         self.choices = None;
+        self.taken_back = false;
         if let Some(active) = self.call.take() {
             self.ended = Some(Ended::of(active, End::HungUp));
             self.refused = None;
@@ -659,6 +663,7 @@ impl Calls {
         }
         self.refused = None;
         self.ended = None;
+        self.taken_back = false;
         self.prejoin = Some(Prejoin {
             to_join,
             muted: false,
@@ -719,9 +724,14 @@ impl Calls {
         }
     }
 
-    /// The pre-join is closed without joining: nothing went out, and nothing will.
+    /// The pre-join is closed without joining: before its Join now nothing went out, and nothing will; after it, the
+    /// call its Join now asked for is hung up once it is told, its choices (the camera) never applied.
     pub fn cancel_prejoin(&mut self, cx: &mut Context<Self>) {
-        if self.prejoin.take().is_some() {
+        if let Some(prejoin) = self.prejoin.take() {
+            if prejoin.joining {
+                self.choices = None;
+                self.taken_back = true;
+            }
             self.refused = None;
             cx.notify();
         }
@@ -743,6 +753,16 @@ impl Calls {
     /// The next of the pre-join's choices its call can take now: the microphone muted once the call's media is set up,
     /// the camera once the call is up. `None` when none is due, and each is asked once.
     pub fn next_choice(&mut self, cx: &mut Context<Self>) -> Option<Ask> {
+        if self.taken_back
+            && self.call.as_ref().is_some_and(|active| {
+                active.kind == CallKind::Meeting && !matches!(active.status, CallStatus::Ended(_))
+            })
+        {
+            // the pre-join's Cancel came after its Join now: the meeting's call goes as soon as it can be hung up
+            self.taken_back = false;
+            cx.notify();
+            return Some(Ask::HangUp);
+        }
         let choices = self.choices.as_mut()?;
         let active = self.call.as_ref().filter(|active| active.kind == CallKind::Meeting)?;
         let connected = active.status == CallStatus::Connected;
@@ -859,6 +879,7 @@ impl Calls {
                 .is_some_and(|active| active.kind != CallKind::Meeting)
             {
                 self.choices = None;
+                self.taken_back = false;
             }
         }
         let Some(active) = self.call.as_mut() else { return };
@@ -989,6 +1010,10 @@ impl Calls {
         }
         if let Some(prejoin) = &mut self.prejoin {
             prejoin.joining = false;
+        }
+        if matches!(ask, Ask::JoinMeeting { .. } | Ask::MeetNow { .. }) {
+            // the join a cancelled pre-join asked for was refused: there is no call to hang up
+            self.taken_back = false;
         }
         self.refused = Some(Refused {
             ask: ask.name(),
@@ -1162,8 +1187,10 @@ pub fn join_now(calls: &Entity<Calls>, core: &Arc<dyn Core>, trace: &Arc<ViewTra
         };
         ask(calls, core, trace, asked, cx);
         // as Teams' pre-join does: its subject titles the new meeting's post once the service posted it (the engine
-        // looks for the post, and titles nothing when the meeting didn't start)
-        if let Some((channel, title)) = titled {
+        // looks for the post, and titles nothing when the meeting didn't start); a Meet now refused here asks nothing,
+        // so no other meeting's post of the account's in that channel is titled
+        let went = calls.read(cx).prejoin().is_some_and(|prejoin| prejoin.joining);
+        if let Some((channel, title)) = titled.filter(|_| went) {
             drop(core.title_meet_now(channel, title.trim().to_owned()));
         }
     }

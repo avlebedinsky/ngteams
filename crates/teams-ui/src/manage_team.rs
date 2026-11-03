@@ -509,11 +509,12 @@ impl ManageTeam {
             .push(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
                 let settings = settings.await.ok().flatten();
                 let _ = this.update(cx, |this, cx| {
-                    this.settings = Some(
-                        settings
-                            .and_then(|settings| serde_json::from_str(&settings).ok())
-                            .unwrap_or(Value::Null),
-                    );
+                    let read = settings.and_then(|settings| serde_json::from_str::<Value>(&settings).ok());
+                    if !read.as_ref().is_some_and(Value::is_object) {
+                        // shown unchecked, and never written back as a snapshot of one box ([`Self::set_setting`])
+                        this.problem = Some("We couldn't load your team's settings. Please try again.");
+                    }
+                    this.settings = Some(read.unwrap_or(Value::Null));
                     cx.notify();
                 });
             }));
@@ -577,8 +578,13 @@ impl ManageTeam {
         }));
     }
 
-    /// A box of the team's settings: the whole of them goes out, as the web client sends them.
+    /// A box of the team's settings: the whole of them goes out, as the web client sends them. Since they replace the
+    /// team's settings whole, nothing goes while another write is under way (an older snapshot answered late would undo
+    /// a newer one) or when they couldn't be read (a snapshot of only this box would wipe the rest).
     pub fn set_setting(&mut self, guests: bool, keys: &'static [&'static str], on: bool, cx: &mut Context<Self>) {
+        if !self.settings_writable() {
+            return;
+        }
         let Some(settings) = self.settings.clone() else {
             return;
         };
@@ -674,6 +680,9 @@ impl ManageTeam {
     }
 
     fn answer_request(&mut self, mri: &str, accept: bool, cx: &mut Context<Self>) {
+        if self.core.read_only() {
+            return;
+        }
         let Some(group) = self.team_of(cx).and_then(|team| team.group_id) else {
             return;
         };
@@ -1427,6 +1436,7 @@ impl ManageTeam {
                             .primary()
                             .small()
                             .label("Accept")
+                            .disabled(self.core.read_only())
                             .on_click(cx.listener(move |this, _, _, cx| this.answer_request(&accepted, true, cx))),
                     ))
                     .child(selected_by(
@@ -1435,6 +1445,7 @@ impl ManageTeam {
                             .outline()
                             .small()
                             .label("Deny")
+                            .disabled(self.core.read_only())
                             .on_click(cx.listener(move |this, _, _, cx| this.answer_request(&denied, false, cx))),
                     ))
                     .into_any_element()
@@ -1506,8 +1517,14 @@ impl ManageTeam {
             .into_any_element()
     }
 
+    /// Whether a box of the team's settings may be changed now ([`Self::set_setting`]): the settings were read, and no
+    /// write is under way.
+    fn settings_writable(&self) -> bool {
+        !self.core.read_only() && self.writing.is_none() && self.settings.as_ref().is_some_and(Value::is_object)
+    }
+
     fn boxes(&self, boxes: &'static [SettingBox], settings: &Value, cx: &mut Context<Self>) -> AnyElement {
-        let can_write = !self.core.read_only();
+        let can_write = self.settings_writable();
         div()
             .flex()
             .flex_col()
