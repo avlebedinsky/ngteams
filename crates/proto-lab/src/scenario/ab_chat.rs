@@ -374,6 +374,9 @@ pub fn probe_rules(probe: Option<&str>) -> Result<Vec<ForcedDeny>, regex::Error>
 /// # Errors
 /// When the compose box isn't there, the page refuses the input, or the box still holds `text` after the last try.
 pub async fn send(driver: &mut Driver, who: &str, text: &str) -> Result<(), ScenarioError> {
+    driver
+        .preflight_selected_chat(&format!("{who}: verify lab compose recipients"))
+        .await?;
     driver.type_into(&format!("{who} types"), COMPOSE, text).await?;
     press_until_sent(driver, who, text).await
 }
@@ -391,6 +394,9 @@ pub(crate) async fn press_until_sent(driver: &mut Driver, who: &str, text: &str)
     );
     let step = format!("{who} sends");
     for _ in 0..SEND_TRIES {
+        driver
+            .preflight_selected_chat(&format!("{who}: verify lab message recipients"))
+            .await?;
         driver.press_enter(&format!("{who} presses Enter")).await?;
         match driver
             .wait_until_true(&step, &sent, "the compose box to let the text go", SEND_WAIT)

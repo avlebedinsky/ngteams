@@ -616,6 +616,7 @@ async fn edit(a: &LabSession, drive_a: &mut Driver, message: &str, edited: &str)
         .wait_until_true("a's message editor", &mark, "an editor holding the message", ACTION)
         .await?;
     drive_a.type_into("a types the edit", EDITOR_MARK, edited).await?;
+    drive_a.preflight_selected_chat("a: verify lab edit recipients").await?;
     drive_a.press_enter("a saves the edit").await?;
     drive_a.wait_for_request("a's edit goes out", &put, ACTION).await?;
     Ok(())
@@ -686,6 +687,7 @@ async fn react(
 /// Clicks the first visible element matching `css`, waiting up to `timeout` for one (as `ab-chat-full` does): a
 /// control the page keeps, hidden, in more than one place shows only where the mouse is.
 async fn click_visible(drive: &mut Driver, step: &str, css: &str, timeout: Duration) -> Result<(), StepError> {
+    drive.preflight_selected_chat("verify lab reaction recipients").await?;
     let expression = format!(
         "(() => {{ const e = [...document.querySelectorAll({})].find(e => {{ const r = e.getBoundingClientRect(); \
          return r.width > 0 && r.height > 0; }}); if (!e) return false; e.click(); return true; }})()",

@@ -354,6 +354,7 @@ pub fn mark_unsent_file(stem: &str) -> String {
 /// # Errors
 /// When the run can't start: no lab config, no Chrome, no fence, a browser that can't be armed.
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
+    super::require_lab_scenario(super::ScenarioName::AbFile)?;
     let config = LabConfig::load(&LabLocations::from_env()?)?;
     let session_options = SessionOptions {
         live_members: true,

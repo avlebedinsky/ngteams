@@ -115,6 +115,7 @@ fn texts(query: &str) -> String {
 /// # Errors
 /// When the run can't start: no Chrome, no fence, a browser that can't be armed.
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
+    super::require_lab_scenario(super::ScenarioName::ChannelCreate)?;
     let writing = writing()?;
     let session_options = SessionOptions {
         capture: Some(ScenarioName::ChannelCreate.as_str().to_owned()),

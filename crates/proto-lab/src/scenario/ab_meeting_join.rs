@@ -58,6 +58,7 @@ const AFTER_JOIN: Duration = Duration::from_secs(45);
 /// # Errors
 /// When the run can't start: no lab config, no Chrome, no fence, a browser that can't be armed.
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
+    super::require_lab_scenario(super::ScenarioName::AbMeetingJoin)?;
     let config = LabConfig::load(&LabLocations::from_env()?)?;
     let tone = write_burst_tone(paths).map_err(|error| setup(format!("can't write the tone: {error}")))?;
     let session_options = SessionOptions {

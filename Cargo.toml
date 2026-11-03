@@ -13,6 +13,7 @@ members = [
     "crates/teams-fence",
     "crates/teams-headless",
     "crates/teams-log",
+    "crates/teams-lab-targets",
     "crates/teams-media",
     "crates/teams-mock",
     "crates/teams-proto",
@@ -41,6 +42,7 @@ default-members = [
     "crates/teams-fence",
     "crates/teams-headless",
     "crates/teams-log",
+    "crates/teams-lab-targets",
     "crates/teams-media",
     "crates/teams-mock",
     "crates/teams-proto",
@@ -74,6 +76,7 @@ teams-auth = { path = "crates/teams-auth" }
 teams-call = { path = "crates/teams-call" }
 teams-core = { path = "crates/teams-core" }
 teams-fence = { path = "crates/teams-fence" }
+teams-lab-targets = { path = "crates/teams-lab-targets" }
 # the app's diagnostic log (M2 Task 24a): installed by the app crates only, through its `install`
 teams-log = { path = "crates/teams-log" }
 # a call's media: Teams' SDP dialect (sdp-ngc-1.0), the relayed libwebrtc peer and its session, the mixer's control

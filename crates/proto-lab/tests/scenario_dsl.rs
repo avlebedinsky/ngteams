@@ -271,13 +271,18 @@ async fn a_wait_runs_out_even_when_the_page_stops_answering() -> TestResult {
 }
 
 #[tokio::test]
-async fn ab_chat_sends_and_a_stalled_page_fails_its_steps_in_time() -> TestResult {
+async fn the_chat_helper_requires_lab_evidence_and_a_stalled_page_fails_its_steps_in_time() -> TestResult {
     with_page(async |run| {
         run.driver
             .wait_for_tid("the box", "box", Duration::from_secs(5))
             .await?;
-        // the page's box is a compose box: Enter sends and empties it
-        ab_chat::send(&mut run.driver, "a", "hello lab").await?;
+        // A generic local page has no lab identity/recipient evidence, so the contacting helper refuses it.
+        assert!(ab_chat::send(&mut run.driver, "a", "hello lab").await.is_err());
+        // Raw DSL input is tested only against this local synthetic compose box.
+        run.driver
+            .type_into("local compose", ab_chat::COMPOSE, "hello lab")
+            .await?;
+        run.driver.press_enter("local Enter").await?;
         run.driver
             .wait_for_text("the echo", "sent: hello lab", Duration::from_secs(5))
             .await?;
@@ -945,12 +950,34 @@ async fn ab_chat_full_finds_the_oldest_message_holding_a_text_and_its_actions() 
             .wait_for("marked", Selector::Css(&marked("first")), Duration::from_secs(1))
             .await?;
         // on the hover bar, which shows once the message is pointed at
-        ab_chat_full::message_action(drive, "a", "edit").await?;
+        assert!(ab_chat_full::message_action(drive, "a", "edit").await.is_err());
+        drive.hover("local message", ab_chat_full::MARKED).await?;
+        ab_chat_full::click_visible(
+            drive,
+            "local edit",
+            r#"[data-tid="message-hover-action-edit"] button"#,
+            Duration::from_secs(1),
+        )
+        .await?;
         drive
             .wait_for_text("edited", "did edit", Duration::from_secs(5))
             .await?;
         // not on the bar: from the more-options menu
-        ab_chat_full::message_action(drive, "a", "delete").await?;
+        assert!(ab_chat_full::message_action(drive, "a", "delete").await.is_err());
+        ab_chat_full::click_visible(
+            drive,
+            "local more",
+            r#"[data-tid="message-actions-more"]"#,
+            Duration::from_secs(1),
+        )
+        .await?;
+        ab_chat_full::click_visible(
+            drive,
+            "local delete",
+            r#"[data-tid="message-actions-delete"]"#,
+            Duration::from_secs(1),
+        )
+        .await?;
         drive
             .wait_for_text("deleted", "did delete", Duration::from_secs(5))
             .await?;

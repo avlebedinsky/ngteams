@@ -55,6 +55,7 @@ fn alias_of(name: &str, default: Alias) -> Alias {
 /// # Errors
 /// When the run can't start: no lab config, no Chrome, no fence, a browser that can't be armed, no socket named.
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
+    super::require_lab_scenario(super::ScenarioName::MeetingSteps)?;
     let config = LabConfig::load(&LabLocations::from_env()?)?;
     let alias = alias_of("PROTO_LAB_ACCOUNT", Alias::A);
     let peer = alias_of("PROTO_LAB_PEER", if alias == Alias::B { Alias::A } else { Alias::B });

@@ -517,6 +517,7 @@ pub fn call_starts(text: &str) -> (usize, usize) {
 /// # Errors
 /// When the run can't start: no lab config, no Chrome, no fence, a browser that can't be armed, no tone file.
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
+    super::require_lab_scenario(ScenarioName::EchoCall)?;
     let config = LabConfig::load(&LabLocations::from_env()?)?;
     let mut report = ScenarioReport::new(ScenarioName::EchoCall);
     let classifier = if let Some(echo) = echo_mri(&config) {

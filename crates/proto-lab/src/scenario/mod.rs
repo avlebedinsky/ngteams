@@ -426,6 +426,7 @@ pub async fn run(
     paths: &LabPaths,
     options: RunOptions,
 ) -> Result<ScenarioReport, ScenarioError> {
+    require_lab_scenario(scenario)?;
     match scenario {
         ScenarioName::EchoCall
         | ScenarioName::AbCall
@@ -443,6 +444,29 @@ pub async fn run(
         ScenarioName::MeetingSteps => meeting_steps::run(paths, options).await,
         _ => run_other(scenario, paths, options).await,
     }
+}
+
+/// Rejects scenarios whose free-form/service actions have no independent complete-recipient preflight yet.
+///
+/// # Errors
+/// The scenario may contact a service or targets that have not been independently verified as lab-only.
+pub fn require_lab_scenario(scenario: ScenarioName) -> Result<(), ScenarioError> {
+    if matches!(
+        scenario,
+        ScenarioName::EchoCall
+            | ScenarioName::AbFile
+            | ScenarioName::AbImage
+            | ScenarioName::TeamManage
+            | ScenarioName::MeetingSteps
+            | ScenarioName::AbMeeting
+            | ScenarioName::AbMeetingJoin
+            | ScenarioName::ChannelCreate
+    ) {
+        return Err(ScenarioError::Setup(format!(
+            "{scenario}: unavailable for implementation runs until every action verifies dedicated lab-only recipients independently of the fence"
+        )));
+    }
+    Ok(())
 }
 
 /// Runs one of the scenarios that are neither a call nor own presence ([`run`]).

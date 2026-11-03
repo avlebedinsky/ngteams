@@ -26,6 +26,7 @@ sha2.workspace = true
 # `proto-lab auth`: PKCE, the code exchange and refresh, the skypetoken, kept in the Secret Service
 teams-auth.workspace = true
 teams-fence.workspace = true
+teams-lab-targets.workspace = true
 # a token's expiry as an HTTP date in `proto-lab auth`'s report
 httpdate.workspace = true
 # `proto-lab auth`: each region save stages in a file of its own before the rename

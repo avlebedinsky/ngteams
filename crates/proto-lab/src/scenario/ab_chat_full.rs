@@ -363,6 +363,7 @@ impl Steps<'_> {
             cancel_edit(drive, &self.texts.first).await;
             return Err(error.into());
         }
+        drive.preflight_selected_chat("a: verify lab edit recipients").await?;
         drive.press_enter("a saves the edit").await?;
         let edit = self.writes.edit.clone().with_body_containing(&self.texts.edited);
         let seen = drive.wait_for_answer("a's edit is put", &edit, STEP).await?;
@@ -631,6 +632,7 @@ async fn react(drive: &mut Driver, reaction: &RequestPattern, who: &str, text: &
     find_message(drive, &format!("{who} finds the message to react to"), text).await?;
     drive.hover(&format!("{who} points at the message"), MARKED).await?;
     drive.skip_seen();
+    drive.preflight_selected_chat("verify lab reaction recipients").await?;
     click_visible(drive, &format!("{who} clicks like"), LIKE, STEP).await?;
     let seen = drive
         .wait_for_answer(&format!("{who}'s reaction"), reaction, STEP)
@@ -681,6 +683,9 @@ pub async fn find_message(drive: &mut Driver, step: &str, text: &str) -> Result<
 /// # Errors
 /// When there's no marked message, or the action is in neither place in time.
 pub async fn message_action(drive: &mut Driver, who: &str, action: &str) -> Result<(), StepError> {
+    drive
+        .preflight_selected_chat("verify lab message action recipients")
+        .await?;
     drive.hover(&format!("{who} points at the message"), MARKED).await?;
     let on_bar = format!(
         r#"[data-tid="message-hover-action-{action}"]:is(button, [role="menuitem"]), [data-tid="message-hover-action-{action}"] :is(button, [role="menuitem"])"#

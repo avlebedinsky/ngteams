@@ -2,6 +2,7 @@
 //! `proto-lab` binary is the CLI over this library.
 
 pub mod accounts;
+mod action_targets;
 pub mod arming;
 pub mod browser;
 pub mod bundles;

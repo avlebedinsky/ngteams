@@ -6038,6 +6038,7 @@ dependencies = [
  "sha2 0.11.1",
  "teams-auth",
  "teams-fence",
+ "teams-lab-targets",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -8049,6 +8050,14 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+]
+
+[[package]]
+name = "teams-lab-targets"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

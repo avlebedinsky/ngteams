@@ -3,6 +3,11 @@ use super::*;
 use serde_json::json;
 
 impl LabSession {
+    /// Installs explicit synthetic identity/membership evidence; never available in a live harness build.
+    pub(crate) fn set_action_targets(&mut self, targets: Arc<crate::action_targets::ActionTargets>) {
+        self.watch.action_targets = Some(targets);
+    }
+
     /// A session on an offline synthetic CDP peer, never a browser profile or a tenant account.
     #[cfg(test)]
     pub(crate) fn synthetic(armed: ArmedBrowser, page: SessionId, recorder: Option<Arc<Recorder>>) -> Self {

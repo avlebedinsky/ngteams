@@ -24,6 +24,7 @@
 //! step instead of hanging the run before its teardown.
 
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -31,6 +32,7 @@ use regex::Regex;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
+use crate::action_targets::ActionTargets;
 use crate::cdp::{Cdp, CdpError, Event, SessionId};
 use crate::fence_http::without_query;
 
@@ -307,6 +309,7 @@ pub struct Driver {
     closed: bool,
     /// How long one call to the page may go unanswered.
     call_timeout: Duration,
+    action_targets: Option<Arc<ActionTargets>>,
 }
 
 impl Driver {
@@ -321,7 +324,84 @@ impl Driver {
             cursor: 0,
             closed: false,
             call_timeout: CALL_TIMEOUT,
+            action_targets: None,
         }
+    }
+
+    pub(crate) fn with_action_targets(mut self, targets: Option<Arc<ActionTargets>>) -> Self {
+        self.action_targets = targets;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_action_targets(&mut self, targets: Arc<ActionTargets>) {
+        self.action_targets = Some(targets);
+    }
+
+    /// Reads full recipients fresh and verifies the own lab identity before an explicit call/message/share.
+    ///
+    /// # Errors
+    /// Fails closed on an unknown account, unavailable read, incomplete membership or any non-lab recipient.
+    pub async fn preflight_recipients(&mut self, step: &str, expected_chat: &str) -> Result<(), StepError> {
+        self.drain();
+        let targets = self.action_targets.as_ref().ok_or_else(|| StepError::Failed {
+            step: step.to_owned(),
+            reason: "no explicit lab action target context".to_owned(),
+        })?;
+        targets
+            .recipients(expected_chat)
+            .await
+            .map_err(|reason| StepError::Failed {
+                step: step.to_owned(),
+                reason,
+            })
+    }
+
+    /// Checks the exact selected conversation and fresh full membership immediately before an action.
+    /// The action itself must recheck the selected thread atomically with its click when applicable.
+    ///
+    /// # Errors
+    /// As [`Self::preflight_recipients`], or when selected chat evidence is missing/ambiguous/mismatched.
+    pub async fn preflight_chat(&mut self, step: &str, expected_chat: &str) -> Result<(), StepError> {
+        if self.selected_chat(step).await? != expected_chat {
+            return Err(StepError::Failed {
+                step: step.to_owned(),
+                reason: "selected conversation differs from the intended lab target".to_owned(),
+            });
+        }
+        self.preflight_recipients(step, expected_chat).await?;
+        if self.selected_chat(step).await? != expected_chat {
+            return Err(StepError::Failed {
+                step: step.to_owned(),
+                reason: "selected conversation changed during the recipient preflight".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    /// Preflights the currently selected chat; callers with a known plan use [`Self::preflight_chat`].
+    ///
+    /// # Errors
+    /// As [`Self::preflight_chat`].
+    pub async fn preflight_selected_chat(&mut self, step: &str) -> Result<(), StepError> {
+        let expected = self.selected_chat(step).await?;
+        self.preflight_chat(step, &expected).await
+    }
+
+    async fn selected_chat(&self, step: &str) -> Result<String, StepError> {
+        let selected = self.evaluate(step, r#"/* __labSelectedConversation */ (() => {
+            const buttons = [...document.querySelectorAll('[data-tid="sendMessageCommands-send"][data-track-thread-id]')]
+              .filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; });
+            return buttons.length === 1 ? buttons[0].getAttribute('data-track-thread-id') : null;
+        })()"#).await?;
+        selected
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| StepError::Failed {
+                step: step.to_owned(),
+                reason: "no unambiguous selected conversation identity".to_owned(),
+            })
     }
 
     /// Gives each call to the page `timeout` to answer from now on, instead of [`CALL_TIMEOUT`].
@@ -770,6 +850,9 @@ impl Driver {
     }
 
     fn observe(&mut self, event: &Event) {
+        if let Some(targets) = &self.action_targets {
+            targets.observe(event);
+        }
         let params = &event.params;
         let Some(id) = params["requestId"].as_str() else {
             return;

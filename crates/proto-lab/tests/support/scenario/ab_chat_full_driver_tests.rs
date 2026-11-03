@@ -217,7 +217,10 @@ pub(in crate::scenario) async fn page_with(
         missing_name,
     };
     let hooked = Arc::clone(&relay);
-    let page = Page::new(move |command| hook(command, &hooked).unwrap_or_else(|| chat.answer(command))).await;
+    let page = Page::new_lab_chat("19:synthetic-ab@thread.v2", move |command| {
+        hook(command, &hooked).unwrap_or_else(|| chat.answer(command))
+    })
+    .await;
     relay.lock().unwrap().replace((page.events.clone(), page.sender()));
     page
 }

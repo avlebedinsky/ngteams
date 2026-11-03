@@ -125,7 +125,7 @@ outside the repo:
 
 | where | what |
 |---|---|
-| `~/.config/teams-lab/lab.toml` | the 3 accounts (alias, UPN, MRI once recorded) and the approved service participants (`echo`, the Teams echo service, with its MRI); optionally the contacts (`[[contacts]]`, `name`, `mri` and optionally `upn`: the user's own account, which the lab may reach as it reaches a lab account, [lab-rules.md](docs/lab-rules.md)); optionally `data_dir`. Mode `0600`, never holds a password. `login` and `service-mri` fill in MRIs, nothing else writes it |
+| `~/.config/teams-lab/lab.toml` | the 3 dedicated accounts (alias, UPN, MRI once recorded), the only permitted lab recipients; optionally `data_dir`. Legacy `contacts` and `service_participants` metadata grants no permission ([lab-rules.md](docs/lab-rules.md)). Mode `0600`, never holds a password. `login` and `service-mri` fill in MRIs, nothing else writes it |
 | `~/.local/share/teams-lab/` (or `data_dir`) | the lab's data dir |
 | `…/chrome/<version>/` | the pinned Chrome for Testing (155.0.8059.84 linux64, checksum-verified) |
 | `…/profiles/{a,b,c}/` | each account's persistent Chrome profile, signed in to Microsoft |
@@ -313,7 +313,7 @@ fails the run.
   Available, reset) held back to capture it and let through.
   b's view is read outside the run: `scripts/own-presence-run.sh <scenario> <samples> <report file>`, under the live
   lock, samples `teams-headless b presence` beside the run (`docs/protocol/trouter.md`, "Own presence").
-- `echo-call`: account a places the web client's test call to the echo service, with a fake microphone playing a
+- `echo-call` is denied by the current lab-only policy. Its historical implementation: account a places the web client's test call to the echo service, with a fake microphone playing a
   440 Hz tone. The run's classifier knows the echo service's MRI (`Classifier::with_test_call_callee`): what sets up
   the account's own endpoint reaches nobody and passes, and the call start maps only in exactly its captured shape, a
   new call of a and the echo (`teams_fence::contacting`'s calling row, `docs/protocol/calling-echo.md`), which

@@ -93,7 +93,7 @@ fn fixture_config(locations: &LabLocations, mris: bool, echo: bool) {
         )
         .unwrap();
         if mris {
-            writeln!(text, "mri = \"8:orgid:synthetic-{}\"", alias.as_str()).unwrap();
+            writeln!(text, "mri = \"8:orgid:00000000-0000-4000-8000-00000000000{}\"", alias.as_str()).unwrap();
         }
     }
     if echo {
@@ -148,6 +148,13 @@ async fn invoke(name: ScenarioName, paths: &LabPaths) -> Result<ScenarioReport, 
 
 fn no_chrome(name: ScenarioName, result: Result<ScenarioReport, ScenarioError>, paths: &LabPaths) {
     let error = result.unwrap_err();
+    if scenario::require_lab_scenario(name).is_err() {
+        assert!(
+            error.to_string().contains("unavailable for implementation runs"),
+            "{name}: {error}"
+        );
+        return;
+    }
     let ScenarioError::Session(SessionError::NoChrome(executable)) = error else {
         panic!("{name}: {error}")
     };
@@ -158,6 +165,15 @@ fn no_chrome(name: ScenarioName, result: Result<ScenarioReport, ScenarioError>, 
 async fn missing_config(paths: &LabPaths) {
     for &name in ScenarioName::value_variants() {
         let result = invoke(name, paths).await;
+        if scenario::require_lab_scenario(name).is_err() {
+            assert!(
+                result
+                    .unwrap_err()
+                    .to_string()
+                    .contains("unavailable for implementation runs")
+            );
+            continue;
+        }
         if matches!(
             name,
             ScenarioName::Load | ScenarioName::Search | ScenarioName::ChannelCreate | ScenarioName::TeamManage
@@ -224,6 +240,10 @@ async fn obstructed_tone(paths: &LabPaths) {
         ScenarioName::AbCallApp,
     ] {
         let error = invoke(name, paths).await.unwrap_err().to_string();
+        if scenario::require_lab_scenario(name).is_err() {
+            assert!(error.contains("unavailable for implementation runs"));
+            continue;
+        }
         assert!(error.contains("can't write the tone"), "{name}: {error}");
     }
 }

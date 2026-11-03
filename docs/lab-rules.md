@@ -1,37 +1,51 @@
 # The lab's rules in full
 
-CLAUDE.md's hard rules carry the short form; this is the full text the lab fence implements
-(`crates/teams-fence`; how it reads a target: [protocol/fence-targets.md](protocol/fence-targets.md)). Widening whom a
-lab write may reach, or weakening a test of the rule below, needs the user's sign-off; anything else that passes the
-tests (a new request, frame or write kind included) goes ahead without asking.
+CLAUDE.md carries the short form. This rule applies to implementation actions independently of any network fence.
+Existing fence policy, old allowlists and historical captures never authorize an outside recipient.
 
-**The one rule: lab accounts talk and call only each other, the echo service and the user's own account, both ways.**
-It governs the lab browser and every lab binary (HTTP and Trouter frames alike). The personal build is under its own
-rules ([personal-build.md](personal-build.md)).
+**The one rule: lab accounts call, message and share only with each other, both ways.**
+It governs every implementation run, lab browser and lab binary (HTTP and Trouter frames alike).
+The personal build remains unrestricted for the user's normal use ([personal-build.md](personal-build.md)).
 
 ## Who the lab may reach
 
-- The 3 lab accounts (`lab.toml`'s `accounts`, by MRI or UPN);
-- the approved service participants (`service_participants`: the echo service, by MRI);
-- the contacts (`contacts`, by MRI, and by UPN when given): the user's own account. It is reached as a lab account is,
-  for everything: messages, reactions, chats created, members added, invites, meetings and calls either way.
+Only the three dedicated accounts in `lab.toml`'s `accounts`, by exact MRI or UPN. An account whose MRI is unknown
+matches nobody by MRI. The personal user, echo service, bots and external contacts are never lab recipients.
+Existing `contacts` and `service_participants` config entries are metadata only and cannot grant permission.
+A conversation containing even one participant outside the three accounts is denied, including a mixed conversation.
 
-Apps and bots (any `28:` MRI) aren't people: one on a chat or a team, Teams' own apps every new team holds or one
-someone added, a team made from a template that adds apps, or an app a write adds never makes a write contacting.
+## Before every implementation action
+
+Before a call, answer, join, message, edit, reaction or share, independently verify the acting account's exact lab
+MRI and UPN, the intended conversation and the selected thread, and a fresh full server recipient list including
+self. Reject missing, hidden, deleted, duplicate, paged or truncated membership and any personal, echo, bot or
+external participant. Recheck the selected thread immediately before the action; a call click checks it in the
+same page evaluation. An incoming call must additionally match the exact expected caller, callee and conversation.
+
+`teams-lab-targets` contains the shared identity/recipient checks. The browser's `ActionTargets` performs fresh,
+bounded reads using only its own profile's observed credential; it does not ask the network fence for permission.
+A cached conversation, display name, successful deep-link navigation or visible call button is insufficient.
+A share must also prove its effective audience is limited to those exact accounts; verifying the chat alone does
+not authorize an anonymous, organization-wide or inherited external grant. The native attachment flow checks this
+independently before sharing or posting. Never run a contacting scenario until these preflights are present.
+
+The harness refuses echo-call and legacy file/image, meeting, team and channel scenario entrypoints whose actions
+have not established independent audience checks. Update and offline-test their preflights before enabling them.
+Personal client behavior stays unrestricted for its user's normal use.
 
 ## What is denied
 
-- **A write that reaches a person outside the lab**: a message (post, reply, edit, delete, forward, channel post,
+- **A write that reaches a participant outside the lab**: a message (post, reply, edit, delete, forward, channel post,
   scheduled or drafted send), a reaction, a call (start, join, answer, decline, `add`, a lobby's admit or removal), a
   chat created, a member added or removed, an invite, a meeting, a mail, a share, a team or channel change. It is
-  denied when anyone on its target, read fresh and in full (no paging key), or anyone it adds, is a person not listed
+  denied when anyone on its target, read fresh and in full (no paging key), or anyone it adds, is not listed
   above. A team and its channels are read from the team's own thread.
 - **A write that may reach people and whose target can't be read**: the member read failed, was paged or cut short; an
   org-wide team; a mutating request on a people-reaching service (chat, calling, Graph, Outlook, SharePoint, AMS, the
   middle tier's team, meeting and invite paths, CSA, provisioning) that no row maps or carves out; a write the fence
   can't tie to a target (a `Scope::New` for a kind that creates none, a join naming no chat).
 - **An incoming call from outside**: the lab offers, answers or declines only an invitation addressed to the account
-  whose caller isn't a person outside the lab; every other one rings unanswered, nothing sent for it.
+  whose caller is a lab account; every other one rings unanswered, nothing sent for it.
 
 ## Everything else is allowed
 
@@ -40,24 +54,14 @@ Reads by any method (a `POST` search or people lookup too), the account's own se
 admin on teams of the lab's people, and what a call sends once its entry was let in (follow-ups, `leave`, ring-time
 sends, Trouter delivery responses), each still a sealed type in its captured shape and logged.
 
-## The fence and the transport
+## Transport and test execution
 
-These aren't the lab rule; they stay as they are.
+Transport authorization does not replace these operational checks. A neighboring change may remove the historical
+fence infrastructure; implementation workflows must remain lab-only with or without it.
 
-- **Nothing runs live against the tenant before the browser fence is armed**: HTTP interception on every host and
-  target, the WebSocket guard, the service worker neutralized.
-- **The fence logs every write**: the native client sends a contacting write only as `Authorized<_>` with a
-  `WritePermit` from `Fence::check` for its exact target, logged to `fence.log` (a query's key names, never its
-  values); only a sealed `Mutating` type in `teams-proto` builds one. A lab binary's transport refuses any request
-  `teams_fence::contacting` doesn't call `None` (the personal build sends it, logged).
-- The transport is `https` only, no proxy, no redirects, to its services' bases, each token only to its own service's
-  host, and never resends a write (the HTTP client's retries stay off). A mock origin exists only under
-  `test-support`, which a lab binary refuses.
-- **No write ever comes from a `cargo test` process**: a live test spawns a normally built lab binary
-  (`--target-dir target/lab`) and reads its output and `fence.log`. Both builds; only the fence policy differs.
-- **Lab binaries get a `WritePermit` only from the lab policy** (`Fence::open_lab`, `Fence::open_lab_account`: roster
-  from `lab.toml`, the lab's `fence.log`); `teams-fence`'s `test-support` is only a `[dev-dependencies]` feature.
-- **Lab and personal stay apart**: a lab binary refuses the personal build's data, keyring items and accounts; the
-  user's own account is only someone the lab may reach, never an account a lab binary signs in as.
-- **No token or credential goes to a third party** (a bot, an app's backend; a bot invoke stays denied). Sign-in and
-  renewal stay in `teams-auth`'s own clients and touch only the account's own credentials.
+- **No write to the tenant comes from a `cargo test` process**: offline tests use synthetic identities and local
+  mock services. Live runs use normally built lab binaries, the live lock and an outer timeout.
+- Read credentials stay in memory, are never printed, and go only to their original validated Teams service over
+  HTTPS, with redirects, proxies and retries disabled.
+- **Lab and personal stay apart**: a lab binary never signs in as the user or uses the personal build's data or
+  credentials. The personal account is never an implementation recipient.

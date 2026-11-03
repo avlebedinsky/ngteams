@@ -19,6 +19,7 @@ pub(crate) struct Page {
     commands: Arc<Mutex<Vec<Value>>>,
     peer: tokio::task::JoinHandle<()>,
     close_process: Arc<Mutex<Option<rustix::process::Pid>>>,
+    action_targets: Option<Arc<crate::action_targets::ActionTargets>>,
 }
 
 impl Page {
@@ -77,7 +78,51 @@ impl Page {
             commands,
             peer,
             close_process,
+            action_targets: None,
         }
+    }
+
+    /// An explicitly lab-only synthetic chat with full fixture membership, never a live source bypass.
+    pub(crate) async fn new_lab_chat(
+        expected: &str,
+        mut answer: impl FnMut(&Value) -> Result<Value, String> + Send + 'static,
+    ) -> Self {
+        use teams_lab_targets::{LabAccount, LabRoster};
+        let selected = expected.to_owned();
+        let mut page = Self::new(move |command| {
+            if command["method"] == "Runtime.evaluate"
+                && command["params"]["expression"]
+                    .as_str()
+                    .is_some_and(|expression| expression.contains("__labSelectedConversation"))
+            {
+                return Ok(evaluated(json!(selected)));
+            }
+            answer(command)
+        })
+        .await;
+        let accounts = ["a", "b", "c"].map(|id| LabAccount {
+            mri: format!("8:orgid:00000000-0000-0000-0000-00000000000{id}"),
+            upn: format!("bot-{id}@lab.example.com"),
+        });
+        let members = if expected.ends_with("@unq.gbl.spaces") {
+            &accounts[..2]
+        } else {
+            &accounts[..]
+        };
+        let reply = json!({"id":expected,"isDeleted":false,"totalMemberCount":members.len(),"members":members.iter().map(|account|json!({"id":account.mri})).collect::<Vec<_>>()});
+        let own = accounts[0].mri.clone();
+        let roster = LabRoster::new(accounts).unwrap();
+        let targets = Arc::new(
+            crate::action_targets::ActionTargets::synthetic(
+                &own,
+                roster,
+                [(expected.to_owned(), reply)].into_iter().collect(),
+            )
+            .unwrap(),
+        );
+        page.driver.set_action_targets(Arc::clone(&targets));
+        page.action_targets = Some(targets);
+        page
     }
 
     pub(crate) fn commands(&self) -> Vec<Value> {
@@ -147,7 +192,11 @@ impl Page {
             Some(browser) => ArmedBrowser::synthetic_managed(self.cdp.clone(), incoming, http, ws, capture, browser),
             None => ArmedBrowser::synthetic(self.cdp.clone(), incoming, http, ws, capture),
         };
-        crate::session::LabSession::synthetic(armed, SessionId::new("synthetic-page"), recorder)
+        let mut session = crate::session::LabSession::synthetic(armed, SessionId::new("synthetic-page"), recorder);
+        if let Some(targets) = &self.action_targets {
+            session.set_action_targets(Arc::clone(targets));
+        }
+        session
     }
 
     pub(crate) async fn loaded_session(&mut self, dir: &std::path::Path, record: bool) -> crate::session::LabSession {

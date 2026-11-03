@@ -37,6 +37,7 @@ use teams_fence::{FailClosed, Fence, LiveMembershipSource, LiveSourceError, Memb
 use tokio::sync::mpsc;
 use url::Url;
 
+use crate::action_targets::ActionTargets;
 use crate::arming::{ArmError, ArmOptions, ArmedBrowser, ArmingFailure, DECISION_GRACE, Decisions, TEAMS_ORIGINS};
 use crate::browser::{Browser, BrowserError, Display, LaunchOptions, Media};
 use crate::capture::{Capture, CaptureError, Recorder, RtcHooks};
@@ -167,6 +168,7 @@ pub struct SessionWatch {
     /// How many documents the main frame has committed.
     documents: u64,
     identities: Vec<Identity>,
+    action_targets: Option<Arc<ActionTargets>>,
 }
 
 impl SessionWatch {
@@ -186,11 +188,15 @@ impl SessionWatch {
             service_requests: HashSet::new(),
             documents: 0,
             identities: Vec::new(),
+            action_targets: None,
         }
     }
 
     /// Takes one event into account.
     pub fn observe(&mut self, event: &Event) {
+        if let Some(targets) = &self.action_targets {
+            targets.observe(event);
+        }
         match event.method.as_str() {
             "Page.frameNavigated" if self.on_page(event) => self.navigated(&event.params["frame"]),
             "Page.frameStoppedLoading" if self.on_page(event) => {
@@ -369,7 +375,7 @@ fn is_service_read(url: &str) -> bool {
 }
 
 /// The identity in a request's `Authorization: Bearer` token, if it is a JWT with the claims.
-fn identity_in(headers: &Value) -> Option<Identity> {
+pub(crate) fn identity_in(headers: &Value) -> Option<Identity> {
     let value = headers
         .as_object()?
         .iter()
@@ -507,6 +513,8 @@ impl FenceReport {
 pub enum SessionError {
     #[error("no Chrome for Testing at {} (run `proto-lab chrome install`)", .0.display())]
     NoChrome(std::path::PathBuf),
+    #[error("lab action preflight: {0}")]
+    ActionTargets(String),
     #[error("can't open the lab's fence: {0}")]
     Fence(#[from] OpenError),
     #[error("can't make the WebSocket guard: {0}")]
@@ -624,6 +632,16 @@ impl LabSession {
         options: SessionOptions,
         catch: Option<RedirectCatch>,
     ) -> Result<Self, SessionError> {
+        let action_targets = if options.live_members {
+            let config =
+                crate::config::LabConfig::load(&crate::config::LabLocations::from_env().map_err(OpenError::from)?)
+                    .map_err(OpenError::from)?;
+            Some(Arc::new(
+                ActionTargets::new(&config, alias).map_err(SessionError::ActionTargets)?,
+            ))
+        } else {
+            None
+        };
         let chrome = ChromeBuild::pinned().executable(&paths.chrome_dir());
         if !chrome.is_file() {
             return Err(SessionError::NoChrome(chrome));
@@ -671,11 +689,13 @@ impl LabSession {
         };
         let events = armed.watch();
         let page = armed.open_page(PAGE_TIMEOUT).await?.session;
+        let mut watch = SessionWatch::new(page.clone());
+        watch.action_targets = action_targets;
         Ok(Self {
-            watch: SessionWatch::new(page.clone()),
             armed,
             page,
             events,
+            watch,
             recorder,
         })
     }
@@ -684,6 +704,7 @@ impl LabSession {
     #[must_use]
     pub fn driver(&self) -> Driver {
         Driver::new(self.armed.cdp().clone(), self.page.clone(), self.armed.watch())
+            .with_action_targets(self.watch.action_targets.clone())
     }
 
     /// Where the run is recorded, if it is.

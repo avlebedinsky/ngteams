@@ -767,6 +767,9 @@ async fn react(
     drive.hover("a points at the message", MARKED).await?;
     let mark = drive.seen_so_far();
     let css = format!(r"[data-tid={}]", js_string(tid));
+    drive
+        .preflight_selected_chat("a: verify lab reaction recipients")
+        .await?;
     click_visible(drive, &format!("a clicks {tid}"), &css, STEP).await?;
     let step = format!("a's {method} of {tid}");
     let seen = drive

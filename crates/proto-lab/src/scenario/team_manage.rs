@@ -116,6 +116,7 @@ fn account() -> Alias {
 /// # Errors
 /// When the run can't start: no Chrome, no fence, a browser that can't be armed, no socket named.
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
+    super::require_lab_scenario(super::ScenarioName::TeamManage)?;
     let writes = std::env::var("PROTO_LAB_TEAM_WRITES").as_deref() == Ok("1");
     let session_options = SessionOptions {
         capture: Some(ScenarioName::TeamManage.as_str().to_owned()),

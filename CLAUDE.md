@@ -8,12 +8,12 @@ the reference. Two builds: the lab binaries, tested in a lab of three dedicated 
 
 These protect real people, the user's account and the user's data. They hold for every agent and every change.
 
-- **Lab accounts talk and call only each other, the echo service and the user's own account** (`lab.toml`'s
-  `contacts`), both ways. That is the only lab rule: from the lab browser or a lab binary, a write that reaches people
-  is denied only when someone else is on its target or added by it (read fresh), or when that can't be read. Apps and
-  bots aren't people. Everything else is allowed without asking.
-- The full lab rule, which the fence implements, is [docs/lab-rules.md](docs/lab-rules.md); read it before changing
-  fence, write or call code. Widening whom a lab write may reach, or weakening a test of that rule, needs the user's
+- **Lab accounts call, message and share only with each other** (`lab.toml`'s three `accounts`), both ways.
+  Personal accounts, echo services, bots, external contacts and mixed conversations are outside the lab.
+  Legacy `contacts` and `service_participants` entries grant no permission. A write is denied when any target
+  participant or added recipient is outside those accounts, or membership cannot be read fresh and in full.
+- The full operational lab rule is [docs/lab-rules.md](docs/lab-rules.md); read it before changing
+  write or call code. Verify recipients at each implementation action independently of any network fence. Widening whom a lab write may reach, or weakening a test of that rule, needs the user's
   sign-off; anything else that passes the tests goes ahead.
 - **Arm the browser fence before anything runs live against the tenant.**
 - **No write ever comes from a `cargo test` process**: a live test spawns a normally built lab binary.
