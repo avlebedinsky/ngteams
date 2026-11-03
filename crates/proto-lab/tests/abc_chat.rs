@@ -2,6 +2,7 @@
 //! forced-deny labels and how it judges denies. Every id here is made up.
 
 use clap::ValueEnum as _;
+use proto_lab::config::LabChats;
 use proto_lab::config::LabPaths;
 use proto_lab::fence_http::{Denial, DenyCause, ForcedDeny, PausedRequest};
 use proto_lab::scenario::ab_chat::{
@@ -15,7 +16,6 @@ use proto_lab::scenario::{DenyPolicy, ScenarioError, ScenarioName, ScenarioRepor
 use proto_lab::scenario::{ab_file, ab_image, ab_trouter, chat_shapes, echo_call};
 use regex::Regex;
 use teams_fence::LiveMembershipSource;
-use teams_fence::lab::LabChats;
 
 const GROUP: &str = "19:0123456789abcdef0123456789abcdef@thread.v2";
 const GROUP_ENCODED: &str = "19%3A0123456789abcdef0123456789abcdef%40thread.v2";

@@ -6,7 +6,7 @@
 //! ([`super::abc_chat::messaging_blocked`]): the fence judges the start by that read, so a chat it can't read would
 //! only deny it.
 
-use teams_fence::lab::LabChats;
+use crate::config::LabChats;
 
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
 

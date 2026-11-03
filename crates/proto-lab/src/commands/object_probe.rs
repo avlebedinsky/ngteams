@@ -174,7 +174,7 @@ pub async fn probe_object<S: SecretStore>(
     if !is_object_id(id) {
         return Err(ObjectProbeError::BadId);
     }
-    if matches!(origin, Origin::Mock(_)) && !teams_fence::test_support_enabled() {
+    if matches!(origin, Origin::Mock(_)) && !crate::test_support_enabled() {
         return Err(ProbeError::MockOrigin.into());
     }
     let account = &config.account(alias).upn;

@@ -16,3 +16,10 @@ pub mod sanitize;
 pub mod scenario;
 pub mod session;
 pub mod stop;
+
+/// Whether this build includes the harness's test-only mock origins.
+/// Normal binaries refuse such a build before reading credentials or opening browsers.
+#[must_use]
+pub const fn test_support_enabled() -> bool {
+    cfg!(feature = "test-support")
+}

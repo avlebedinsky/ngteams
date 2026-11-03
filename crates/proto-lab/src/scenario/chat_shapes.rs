@@ -344,7 +344,7 @@ fn now_ms() -> u64 {
 /// armed.
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
     let config = LabConfig::load(&LabLocations::from_env()?)?;
-    let chats = teams_fence::lab::LabChats::load(paths).map_err(|error| setup(error.to_string()))?;
+    let chats = crate::config::LabChats::load(paths).map_err(|error| setup(error.to_string()))?;
     // checked before any browser opens, as `abc-chat` does: a message the fence would deny is sent again on every
     // later load of a's profile
     let group = match chats.abc {

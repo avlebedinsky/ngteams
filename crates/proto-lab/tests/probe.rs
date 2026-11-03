@@ -16,13 +16,13 @@ use proto_lab::commands::probe::{
     probe_chat,
 };
 use proto_lab::commands::thread_probe::{ThreadProbe, ThreadReadKind, next_page, probe_thread};
+use proto_lab::config::record_abc_chat;
 use proto_lab::config::{Alias, LabConfig};
 use proto_lab::sanitize::Identities;
 use serde_json::{Value, json};
 use teams_auth::refresh::refresh_token_key;
 use teams_auth::secrets::{MemorySecretStore, Secret, SecretStore as _};
 use teams_auth::token::{EntraConfig, TokenClient, TokenError};
-use teams_fence::lab::record_abc_chat;
 use teams_fence::{LiveMembershipSource, Membership};
 use wiremock::matchers::{body_string_contains, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};

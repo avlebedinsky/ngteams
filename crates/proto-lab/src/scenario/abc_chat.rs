@@ -43,8 +43,8 @@
 //! Every wait for the web client to load takes the run's load timeout (`proto-lab run --timeout`); on a loaded machine
 //! the client can take minutes.
 
+use crate::config::{ChatRecord, LabChats, record_abc_chat};
 use regex::Regex;
-use teams_fence::lab::{ChatRecord, LabChats, record_abc_chat};
 use teams_fence::{Fence, LiveMembershipSource, Scope, is_group_chat_id};
 use url::Url;
 

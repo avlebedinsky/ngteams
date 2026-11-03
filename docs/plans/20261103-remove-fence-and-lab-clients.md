@@ -192,11 +192,17 @@ crates. All passed. The shared account assembler remains covered; the deleted la
   `teams-core` does)
 - Modify: `crates/proto-lab/src/{main.rs,commands/*probe.rs,...}`
 
-- [ ] move `lab.toml` parsing and the lab chat records into `proto-lab::config`; the roster checks that only fed the
+- [x] move `lab.toml` parsing and the lab chat records into `proto-lab::config`; the roster checks that only fed the
       fence go (accounts, UPNs, MRIs, `data_dir`, the echo MRI and contacts stay while scenarios read them)
-- [ ] proto-lab's test-support refusal (`main.rs`, the probes' mock origins) reads its own feature
-- [ ] move the config tests (parse, missing file, bad fields, chat records)
-- [ ] `cargo test -p proto-lab`, `ngteams`' `apart` and clippy pass
+- [x] proto-lab's test-support refusal (`main.rs`, the probes' mock origins) reads its own feature
+- [x] move the config tests (parse, missing file, bad fields, chat records)
+- [x] `cargo test -p proto-lab`, `ngteams`' `apart` and clippy pass
+
+Validation: `cargo test -p proto-lab` passed 664 tests (the existing workstation-config test remains ignored);
+`ngteams`' `apart` and `teams-ui`'s `reach` passed 23 tests. Final all-target proto-lab clippy and the focused
+config/library rerun passed. The local config retains structural parsing, atomic recording and personal-directory
+separation; cross-participant MRI uniqueness and person/bot roster policy are no longer config validation. The
+browser fence temporarily keeps its internal config until Task 3 removes that consumer.
 
 ### Task 3: proto-lab without the browser fence
 

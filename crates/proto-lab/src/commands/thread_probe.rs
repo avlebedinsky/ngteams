@@ -18,11 +18,11 @@ use std::collections::BTreeSet;
 use std::fmt::{self, Write as _};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::config::LabChats;
 use serde_json::{Map, Value, json};
 use teams_auth::claims::TokenSummary;
 use teams_auth::secrets::SecretStore;
 use teams_auth::token::{Scope, TokenClient};
-use teams_fence::lab::LabChats;
 use teams_fence::{
     ChatCredential, LiveMembershipSource, Membership, MembershipSource as _, Scope as FenceScope, chat_service_path,
 };
@@ -248,7 +248,7 @@ pub async fn probe_thread<S: SecretStore>(
     origin: &Origin,
     source: LiveMembershipSource,
 ) -> Result<ThreadProbe, ProbeError> {
-    if matches!(origin, Origin::Mock(_)) && !teams_fence::test_support_enabled() {
+    if matches!(origin, Origin::Mock(_)) && !crate::test_support_enabled() {
         return Err(ProbeError::MockOrigin);
     }
     let chat_id = LabChats::load(config.paths())

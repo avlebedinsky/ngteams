@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 
 use std::os::unix::fs::PermissionsExt as _;
 
-use teams_fence::lab::{
+use proto_lab::config::{
     Alias, ChatRecord, ChatsError, ConfigError, LabChats, LabConfig, LabLocations, LabPaths, MriRecord,
     record_abc_chat, record_account_mri, record_service_mri,
 };
@@ -208,24 +208,6 @@ fn an_empty_mri_is_refused() {
 }
 
 #[test]
-fn one_mri_on_two_participants_is_refused() {
-    let twice = format!(
-        "{}[[accounts]]\nalias = \"c\"\nupn = \"bot-c@lab.example.com\"\nmri = \"<mri:x>\"\n\n\
-         [[accounts]]\nalias = \"b\"\nupn = \"bot-b@lab.example.com\"\nmri = \"<mri:x>\"\n",
-        account("a", "bot-a@lab.example.com"),
-    );
-    assert!(matches!(parse(&twice).unwrap_err(), ConfigError::DuplicateMri(_)));
-
-    let service = format!(
-        "{}{}[[accounts]]\nalias = \"c\"\nupn = \"bot-c@lab.example.com\"\nmri = \"<mri:x>\"\n\n\
-         [[service_participants]]\nname = \"echo\"\nmri = \"<mri:x>\"\n",
-        account("a", "bot-a@lab.example.com"),
-        account("b", "bot-b@lab.example.com"),
-    );
-    assert!(matches!(parse(&service).unwrap_err(), ConfigError::DuplicateMri(_)));
-}
-
-#[test]
 fn a_duplicate_or_empty_service_name_is_refused() {
     let duplicate = format!(
         "{}[[service_participants]]\nname = \"echo\"\n\n[[service_participants]]\nname = \"echo\"\n",
@@ -271,29 +253,10 @@ fn a_contact_is_a_named_work_account_s_mri() {
         three()
     );
     assert!(matches!(parse(&bad_upn).unwrap_err(), ConfigError::InvalidUpn(_)));
-
-    let cases = [
-        (contact("me", "28:00000000-0000-4000-8000-0000000000f0"), "a bot's"),
-        (
-            contact("me", "8:orgid:00000000-0000-4000-8000-0000000000F0"),
-            "upper case",
-        ),
-        (contact("me", "8:orgid:"), "no guid"),
-        (contact("me", ""), "empty"),
-    ];
-    for (text, why) in cases {
-        assert!(
-            matches!(
-                parse(&format!("{}{text}", three())).unwrap_err(),
-                ConfigError::NotAWorkAccountMri(_)
-            ),
-            "{why}"
-        );
-    }
 }
 
 #[test]
-fn a_contact_without_an_mri_or_name_or_twice_or_a_lab_account_is_refused() {
+fn a_contact_without_an_mri_or_name_or_with_a_duplicate_name_is_refused() {
     let no_mri = format!("{}[[contacts]]\nname = \"me\"\n", three());
     assert!(matches!(parse(&no_mri).unwrap_err(), ConfigError::Parse(_)));
     let twice = format!(
@@ -305,17 +268,6 @@ fn a_contact_without_an_mri_or_name_or_twice_or_a_lab_account_is_refused() {
     assert!(matches!(parse(&twice).unwrap_err(), ConfigError::DuplicateContact(_)));
     let unnamed = format!("{}{}", three(), contact("", CONTACT_MRI));
     assert!(matches!(parse(&unnamed).unwrap_err(), ConfigError::EmptyContactName));
-    // a lab account is never a contact too
-    let lab_too = format!(
-        "{}[[accounts]]\nalias = \"c\"\nupn = \"bot-c@lab.example.com\"\nmri = \"{CONTACT_MRI}\"\n\n{}",
-        [
-            account("a", "bot-a@lab.example.com"),
-            account("b", "bot-b@lab.example.com")
-        ]
-        .concat(),
-        contact("me", CONTACT_MRI)
-    );
-    assert!(matches!(parse(&lab_too).unwrap_err(), ConfigError::DuplicateMri(_)));
     // the old shapes are gone: a calls-only guest and the team apps list
     let old_guest = format!("{}[[call_guests]]\nname = \"me\"\nmri = \"{CONTACT_MRI}\"\n", three());
     assert!(matches!(parse(&old_guest).unwrap_err(), ConfigError::Parse(_)));
@@ -492,15 +444,12 @@ fn recording_the_same_mri_again_changes_nothing() {
 }
 
 #[test]
-fn another_mri_already_recorded_or_taken_is_refused_and_nothing_is_written() {
+fn another_mri_already_recorded_is_refused_and_nothing_is_written() {
     let (dir, locations) = lab_file(COMMENTED).unwrap();
     let before = fs::read_to_string(&locations.config_file).unwrap();
 
     let conflict = record_account_mri(&locations, Alias::C, "<mri:other>").unwrap_err();
     assert!(matches!(conflict, ConfigError::MriConflict(Alias::C)), "{conflict:?}");
-    // the MRI of c can't become a's too
-    let taken = record_account_mri(&locations, Alias::A, "<mri:c>").unwrap_err();
-    assert!(matches!(taken, ConfigError::DuplicateMri(_)), "{taken:?}");
     let empty = record_account_mri(&locations, Alias::A, " ").unwrap_err();
     assert!(matches!(empty, ConfigError::EmptyMri(_)), "{empty:?}");
 
@@ -565,7 +514,7 @@ fn a_service_mri_is_recorded_for_the_named_service_keeping_the_rest_of_the_file(
 }
 
 #[test]
-fn a_service_mri_is_refused_for_an_unknown_service_another_mri_or_one_not_a_bot_s() {
+fn a_service_mri_is_refused_for_an_unknown_service_another_mri_or_an_empty_one() {
     let (dir, locations) = lab_file(COMMENTED).unwrap();
     let before = fs::read_to_string(&locations.config_file).unwrap();
 
@@ -575,20 +524,8 @@ fn a_service_mri_is_refused_for_an_unknown_service_another_mri_or_one_not_a_bot_
         matches!(unknown, ConfigError::UnknownService(ref name) if name == "other"),
         "{unknown:?}"
     );
-    // only a bot's MRI: `28:` and a lowercase GUID, nothing else
-    for mri in [
-        "8:orgid:00000000-0000-4000-8000-0000000000e0",
-        "28:",
-        "28:not-a-guid",
-        "28:00000000-0000-4000-8000-0000000000E0",
-        "28:00000000-0000-4000-8000-0000000000e0 ",
-        "28:00000000-0000-4000-8000-0000000000e0,28:00000000-0000-4000-8000-0000000000e1",
-        "28:cloud:00000000-0000-4000-8000-0000000000e0",
-        "",
-    ] {
-        let error = record_service_mri(&locations, "echo", mri).unwrap_err();
-        assert!(matches!(error, ConfigError::NotABotMri(_)), "{mri:?}: {error:?}");
-    }
+    let empty = record_service_mri(&locations, "echo", " ").unwrap_err();
+    assert!(matches!(empty, ConfigError::EmptyMri(_)), "{empty:?}");
     assert_eq!(fs::read_to_string(&locations.config_file).unwrap(), before);
 
     // once recorded, another MRI isn't put in its place
@@ -601,16 +538,6 @@ fn a_service_mri_is_refused_for_an_unknown_service_another_mri_or_one_not_a_bot_
     );
     assert_eq!(fs::read_to_string(&locations.config_file).unwrap(), recorded);
     assert_eq!(names_in(dir.path()).unwrap(), ["lab.toml"]);
-}
-
-#[test]
-fn a_service_mri_another_participant_has_is_refused() {
-    let text = COMMENTED.replace("mri = \"<mri:c>\"", &format!("mri = \"{BOT}\""));
-    let (_dir, locations) = lab_file(&text).unwrap();
-    let before = fs::read_to_string(&locations.config_file).unwrap();
-    let taken = record_service_mri(&locations, "echo", BOT).unwrap_err();
-    assert!(matches!(taken, ConfigError::DuplicateMri(_)), "{taken:?}");
-    assert_eq!(fs::read_to_string(&locations.config_file).unwrap(), before);
 }
 
 const GROUP: &str = "19:0123456789abcdef0123456789abcdef@thread.v2";
@@ -714,4 +641,21 @@ fn a_lab_data_dir_that_is_holds_or_lies_inside_the_personal_one_is_refused() {
         LabConfig::load(&locations),
         Err(ConfigError::PersonalDataDir { .. })
     ));
+}
+
+#[test]
+fn participant_records_are_data_not_a_fence_roster() {
+    let text = format!(
+        "{}{}[[service_participants]]\nname = \"echo\"\nmri = \"{CONTACT_MRI}\"\n",
+        three(),
+        contact("me", CONTACT_MRI)
+    );
+    let config = parse(&text).unwrap();
+    assert_eq!(config.contacts()[0].mri, CONTACT_MRI);
+    assert_eq!(config.service_participants()[0].mri.as_deref(), Some(CONTACT_MRI));
+}
+
+#[test]
+fn test_support_is_owned_by_the_harness() {
+    assert!(proto_lab::test_support_enabled());
 }

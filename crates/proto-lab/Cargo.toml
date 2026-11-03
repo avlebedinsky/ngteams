@@ -31,6 +31,8 @@ httpdate.workspace = true
 # `proto-lab auth`: each region save stages in a file of its own before the rename
 tempfile.workspace = true
 thiserror.workspace = true
+toml.workspace = true
+toml_edit.workspace = true
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "rt", "signal", "sync", "time"] }
 tokio-tungstenite.workspace = true
 url.workspace = true
@@ -38,6 +40,8 @@ zip.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+# The harness mock origins are enabled only for its tests; normal binaries refuse this build.
+proto-lab = { path = ".", features = ["test-support"] }
 # a local HTTPS server: Chrome uploads Reporting API reports only over a secure connection
 rcgen.workspace = true
 # the fence tests build fences over test rosters and fake membership sources; never a normal dependency, and the
@@ -49,6 +53,8 @@ tokio-rustls.workspace = true
 wiremock.workspace = true
 
 [features]
+# Test-only mock origins; the binary refuses a build with this feature.
+test-support = []
 # builds the live lab tests (`tests/auth_live.rs`); they still run only with PROTO_LAB_LIVE=1, so `--all-features`
 # stays offline
 live = []

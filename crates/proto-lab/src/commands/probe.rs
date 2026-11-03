@@ -381,7 +381,7 @@ pub async fn probe_chat<S: SecretStore>(
     request: ProbeRequest<'_>,
     source: LiveMembershipSource,
 ) -> Result<ChatProbe, ProbeError> {
-    if matches!(request.origin, Origin::Mock(_)) && !teams_fence::test_support_enabled() {
+    if matches!(request.origin, Origin::Mock(_)) && !crate::test_support_enabled() {
         return Err(ProbeError::MockOrigin);
     }
     let chat_id = chat_id(request.config, request.alias, request.partner)?;

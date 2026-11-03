@@ -177,7 +177,7 @@ pub async fn probe_teams<S: SecretStore>(
     alias: Alias,
     origin: &Origin,
 ) -> Result<TeamsProbe, ProbeError> {
-    if matches!(origin, Origin::Mock(_)) && !teams_fence::test_support_enabled() {
+    if matches!(origin, Origin::Mock(_)) && !crate::test_support_enabled() {
         return Err(ProbeError::MockOrigin);
     }
     let region = probe::read_region(config, alias)?;

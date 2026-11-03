@@ -98,7 +98,7 @@ pub fn sent_text(nonce: &str) -> String {
 /// When the run can't start: no lab config, an unreadable `chats.toml`, no Chrome, no fence, a browser that can't be
 /// armed.
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
-    let chats = teams_fence::lab::LabChats::load(paths).map_err(|error| setup(error.to_string()))?;
+    let chats = crate::config::LabChats::load(paths).map_err(|error| setup(error.to_string()))?;
     let mut report = ScenarioReport::new(ScenarioName::AbcEveryone);
     let Some(group) = chats.abc else {
         report

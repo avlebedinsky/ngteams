@@ -629,7 +629,11 @@ impl LabSession {
             return Err(SessionError::NoChrome(chrome));
         }
         // the account's own fence: an incoming call is offered only when it is addressed to this account
-        let fence = Arc::new(Fence::open_lab_account(alias)?);
+        let fence = Arc::new(Fence::open_lab_account(match alias {
+            Alias::A => teams_fence::lab::Alias::A,
+            Alias::B => teams_fence::lab::Alias::B,
+            Alias::C => teams_fence::lab::Alias::C,
+        })?);
         let (members, http): (Arc<dyn MembershipSource + Send>, _) = if options.live_members {
             let live = Arc::new(LiveMembershipSource::for_fence(&fence)?);
             let http =
