@@ -312,3 +312,146 @@ fn a_team_keeps_what_its_new_channel_needs_and_a_channel_its_kind() {
     store.replace_teams(std::slice::from_ref(&team), 5).unwrap();
     assert_eq!(store.teams().unwrap(), vec![team]);
 }
+
+#[test]
+fn a_count_out_of_range_reads_as_an_error_never_a_panic() -> Result<(), StoreError> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(&store_path(&dir))?;
+    store.replace_teams(&teams(), 1)?;
+    let raw = rusqlite::Connection::open(store_path(&dir)).expect("open directly");
+    raw.execute("UPDATE teams SET people = -1 WHERE id = ?1", [TEAM])
+        .expect("damage a team");
+    assert!(matches!(store.teams(), Err(StoreError::Sqlite(_))));
+    Ok(())
+}
+
+/// Whether `result` is SQLite's refusal.
+fn refused<T>(result: &Result<T, StoreError>) -> bool {
+    matches!(result, Err(StoreError::Sqlite(_)))
+}
+
+#[test]
+fn the_tables_gone_answer_an_error_never_a_panic() -> Result<(), StoreError> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(&store_path(&dir))?;
+    store.replace_teams(&teams(), 1)?;
+    store.replace_favorites(&[CHAT.to_owned()], 1)?;
+    drop(store);
+    let raw = rusqlite::Connection::open(store_path(&dir)).expect("open directly");
+    raw.execute_batch(
+        "DROP TABLE team_channels; DROP TABLE teams_read; DROP TABLE favorites_read; DROP TABLE reply_roots;",
+    )
+    .expect("drop the tables");
+    drop(raw);
+
+    // opened afresh, so nothing is read from a statement prepared before
+    let mut store = Store::open(&store_path(&dir))?;
+    assert!(refused(&store.teams()));
+    assert!(refused(&store.teams_read_at()));
+    assert!(refused(&store.replace_teams(&teams(), 2)));
+    assert!(refused(&store.favorites()));
+    assert!(refused(&store.replace_favorites(&[CHAT.to_owned()], 2)));
+    assert!(refused(&store.set_reply_root(CHANNEL, "1001", "1001")));
+    assert!(refused(&store.reply_roots(CHANNEL)));
+    Ok(())
+}
+
+fn about(edit: impl FnOnce(&mut teams_store::TeamAbout)) -> teams_store::TeamAbout {
+    let mut about = teams_store::TeamAbout::default();
+    edit(&mut about);
+    about
+}
+
+fn team_with(owner: bool, archived: bool, about: teams_store::TeamAbout) -> Team {
+    Team {
+        id: TEAM.to_owned(),
+        name: "A made-up team".to_owned(),
+        archived,
+        owner,
+        about,
+        ..Team::default()
+    }
+}
+
+#[test]
+fn who_may_add_leave_and_administer_follows_the_account_and_the_team() {
+    // a member of an ordinary team may add and leave, not administer
+    let member = team_with(false, false, teams_store::TeamAbout::default());
+    assert!(member.can_add_member() && member.can_leave() && !member.can_administer());
+    // an owner may do all three
+    let owner = team_with(true, false, teams_store::TeamAbout::default());
+    assert!(owner.can_add_member() && owner.can_leave() && owner.can_administer());
+
+    // an archived team takes no one, but may still be left
+    let archived = team_with(true, true, teams_store::TeamAbout::default());
+    assert!(!archived.can_add_member() && archived.can_leave());
+
+    // a rule's people: nobody adds by hand or leaves
+    let dynamic = team_with(true, false, about(|about| about.dynamic_membership = true));
+    assert!(!dynamic.can_add_member() && !dynamic.can_leave() && dynamic.can_administer());
+
+    // a guest adds nobody, but may leave
+    let guest = team_with(false, false, about(|about| about.guest = true));
+    assert!(!guest.can_add_member() && guest.can_leave());
+
+    // on it only through channels: nothing of the team's own
+    let channel_only = team_with(true, false, about(|about| about.channel_only = true));
+    assert!(!channel_only.can_add_member() && !channel_only.can_leave() && !channel_only.can_administer());
+
+    // an org-wide team: only an owner adds or leaves
+    let org_member = team_with(false, false, about(|about| about.tenant_wide = true));
+    assert!(!org_member.can_add_member() && !org_member.can_leave());
+    let org_owner = team_with(true, false, about(|about| about.tenant_wide = true));
+    assert!(org_owner.can_add_member() && org_owner.can_leave());
+}
+
+#[test]
+fn every_channel_kind_and_what_a_team_shows_survive_the_store() -> Result<(), StoreError> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = Store::open(&store_path(&dir))?;
+    let mut hidden = channel(CHANNEL, "A made-up hidden channel", false);
+    hidden.shown = false;
+    hidden.kind = ChannelKind::Shared;
+    let mut private = channel("19:team0001private@thread.tacv2", "A made-up private channel", false);
+    private.kind = ChannelKind::Private;
+    let team = Team {
+        channels: vec![channel(TEAM, "General", true), hidden, private],
+        ..team_with(
+            true,
+            false,
+            teams_store::TeamAbout {
+                tenant: "00000000-0000-4000-8000-0000000000ff".to_owned(),
+                description: "A made-up description".to_owned(),
+                public: true,
+                people: 7,
+                guest: false,
+                dynamic_membership: false,
+                tenant_wide: false,
+                channel_only: false,
+                hidden: true,
+                picture_etag: Some("made-up-etag".to_owned()),
+            },
+        )
+    };
+    assert_eq!(team.hidden_channels(), 1);
+    store.replace_teams(std::slice::from_ref(&team), 1)?;
+    let stored = store.teams()?;
+    assert_eq!(stored, vec![team]);
+    let kinds: Vec<_> = stored[0].channels.iter().map(|channel| channel.kind).collect();
+    assert_eq!(
+        kinds,
+        [ChannelKind::Standard, ChannelKind::Shared, ChannelKind::Private]
+    );
+
+    // the keys round-trip; one nothing wrote reads as standard
+    for kind in [ChannelKind::Standard, ChannelKind::Private, ChannelKind::Shared] {
+        assert_eq!(ChannelKind::of_key(kind.key()), kind);
+    }
+    assert_eq!(ChannelKind::of_key("unknown"), ChannelKind::Standard);
+
+    // `Debug` leaves the words out
+    let shown = format!("{:?}", stored[0].about);
+    assert!(shown.contains("people: 7") && shown.contains("hidden: true"), "{shown}");
+    assert!(!shown.contains("made-up") && !shown.contains("0000000000ff"), "{shown}");
+    Ok(())
+}
