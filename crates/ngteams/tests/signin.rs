@@ -27,7 +27,7 @@ use serde_json::{Value, json};
 use teams_auth::authz::{AuthzClient, skypetoken_expiry_key, skypetoken_key};
 use teams_auth::refresh::refresh_token_key;
 use teams_auth::secrets::{MemorySecretStore, Secret, SecretStore};
-use teams_auth::signin::{WindowAnswer, WindowRequest, WindowSignInError};
+use teams_auth::signin::{SignInAnswer, SignInRequest, WindowSignInError};
 use teams_auth::token::{EntraConfig, NATIVE_CLIENT_REDIRECT, TEAMS_NATIVE_CLIENT_ID, TokenClient, TokenError};
 use teams_fence::Fence;
 use teams_fence::lab::LabLocations;
@@ -151,14 +151,14 @@ async fn clients(server: &MockServer, upn: &str, oid: &str) -> SignInClients {
 /// Standing in for the sign-in window: it answers the redirect to the request, its `state` taken from the request's
 /// authorize URL.
 fn window() -> signin::Window {
-    Box::new(|request: WindowRequest| {
+    Box::new(|request: SignInRequest| {
         let state = request
             .authorize
             .split(['?', '&'])
             .find_map(|pair| pair.strip_prefix("state="))
             .unwrap_or_default()
             .to_owned();
-        WindowAnswer::Redirect(Secret::new(format!(
+        SignInAnswer::Redirect(Secret::new(format!(
             "{NATIVE_CLIENT_REDIRECT}?code=made-up-code&state={state}"
         )))
     })
@@ -247,7 +247,7 @@ async fn a_later_sign_in_that_lands_in_another_account_stores_nothing() {
     assert!(!setup.paths.data_dir().join("regions").exists());
     // a window closed before the redirect stores nothing either
     assert!(
-        signin::sign_in(&setup, &account, &clients, &store, answering(&WindowAnswer::Closed))
+        signin::sign_in(&setup, &account, &clients, &store, answering(&SignInAnswer::Closed))
             .await
             .is_err()
     );
@@ -358,9 +358,9 @@ async fn an_abandoned_account_goes_only_while_no_sign_in_named_it() {
 }
 
 /// Standing in for the sign-in window, answering `answer` to the request.
-fn answering(answer: &WindowAnswer) -> signin::Window {
-    let line = answer.to_line();
-    Box::new(move |_| WindowAnswer::parse(line.expose()).unwrap())
+fn answering(answer: &SignInAnswer) -> signin::Window {
+    let answer = answer.clone();
+    Box::new(move |_| answer)
 }
 
 /// `UPN`'s entry as the user writes it by hand into `accounts.toml`: its identity provider's host.
@@ -378,15 +378,15 @@ async fn a_failed_sign_in_keeps_a_hand_written_idp_hosts_and_the_retry_takes_it_
     let clients = clients(&server, UPN, OID).await;
     let store = MemorySecretStore::new();
     // an entry the sign-in wrote and nothing more goes when the window is closed (a typo leaves nothing behind)
-    let closed = signin::add(&setup, UPN, &clients, &store, |_| Ok(answering(&WindowAnswer::Closed))).await;
+    let closed = signin::add(&setup, UPN, &clients, &store, |_| Ok(answering(&SignInAnswer::Closed))).await;
     assert!(closed.unwrap_err().starts_with("the sign-in stored nothing: "));
     assert!(setup.accounts().unwrap().is_empty());
 
     // one the user wrote its identity provider's host into stays, closed or failed, pending: no account starts
     hand_written_idp_hosts(&setup);
     for answer in [
-        WindowAnswer::Closed,
-        WindowAnswer::Failed("the page wasn't armed in time".into()),
+        SignInAnswer::Closed,
+        SignInAnswer::Failed("the page wasn't armed in time".into()),
     ] {
         assert!(
             signin::add(&setup, UPN, &clients, &store, |_| Ok(answering(&answer)))
@@ -431,7 +431,7 @@ async fn a_host_the_window_refused_is_named_with_where_to_add_it_and_the_entry_s
     let clients = clients(&server, UPN, OID).await;
     let store = MemorySecretStore::new();
     // the window closed after it refused the organization's sign-in page: the host alone comes back
-    let refused = WindowAnswer::Refused("sso.example.test".into());
+    let refused = SignInAnswer::Refused("sso.example.test".into());
     let error = signin::add(&setup, UPN, &clients, &store, |_| Ok(answering(&refused)))
         .await
         .unwrap_err();

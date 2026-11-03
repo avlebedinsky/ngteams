@@ -13,12 +13,12 @@ async-channel.workspace = true
 gpui-pre.workspace = true
 gpui-pre-platform.workspace = true
 log.workspace = true
-# the answer channel: stdout duplicated close-on-exec, then pointed at stderr
-rustix = { workspace = true, features = ["stdio"] }
-# the request and answer lines, the redirect URI and the code as a secret
+# the in-process request/answer, the redirect URI and the code as a secret
 teams-auth.workspace = true
-# fence.log and the lab's directories
-teams-fence.workspace = true
+# diagnostic decision records, installed by the app
+teams-log.workspace = true
+serde_json.workspace = true
+percent-encoding.workspace = true
 # the guard's wire protocol; depending on it also builds the module WebKit loads into every web process
 teams-signin-extension.workspace = true
 # the page: WPE WebKit offscreen in a worker process, its frames drawn here and the window's input handed to it
@@ -27,37 +27,23 @@ teams-wpe.workspace = true
 tempfile.workspace = true
 # the personal window's host bound refusing a host
 thiserror.workspace = true
-# the check that a lab window opens only on the UI sandbox's compositor
-ui-sandbox.workspace = true
 url.workspace = true
 
 [dev-dependencies]
 gpui-pre = { workspace = true, features = ["test-support"] }
 serde_json.workspace = true
-# a fence.log that refuses every append (`FenceLog::from_writer`)
-teams-fence = { workspace = true, features = ["test-support"] }
-# the window test stands a local own-state rule in for Entra's (`Guard::with_own`); the binary refuses to run when a
-# test build unified it in
-teams-signin = { path = ".", features = ["test-support", "personal"] }
+ui-sandbox.workspace = true
+# the window test stands a local endpoint in for Entra; ngteams refuses test-support builds
+teams-signin = { path = ".", features = ["test-support"] }
 
 [features]
-# a guard with test rules (`Guard::with_own`, `SignInHosts::for_tests`): tests only; the binary refuses to run with it
+# offline test rules and loopback window; ngteams refuses a build with them
 test-support = []
-# the personal sign-in window (docs/personal-build.md, Choice C): the host bound (`hosts`), the host gate
-# (`egress::HostGate`) and the guard and navigation policy bound to it. Only crates/ngteams enables it (a manifest test
-# checks every workspace manifest), for its in-app window; the lab's `teams-signin` binary refuses to run when a build
-# unified it in
-personal = []
 
 [[test]]
 # the window in the UI sandbox, on a local fake sign-in page: its own `main` (GPUI runs on the main thread, and the
 # page's engine is this executable run again as its worker), which runs itself again inside the sandbox
 name = "window"
-harness = false
-
-[[test]]
-# the answer channel on its own: its own `main` (a test harness prints to stdout), which runs itself again as a child
-name = "answer_channel"
 harness = false
 
 [lints]

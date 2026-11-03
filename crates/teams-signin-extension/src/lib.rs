@@ -9,9 +9,8 @@
 //!
 //! What this can't see: a synchronous load's redirects and a kept-alive load's redirects after its page is gone are
 //! followed by the network process without a second `send-request`, and `WebSockets` never pass it
-//! (`docs/backlog/webkit-sign-in-guard-redirects.md`). So the window is not a complete fence; `teams-signin` keeps the
-//! features it can switch off off and holds the network session's way out: the lab's window reaches nothing off
-//! loopback but a proxy that refuses it, the personal window nothing but its sign-in hosts (`teams_signin::egress`).
+//! (`docs/backlog/webkit-sign-in-guard-redirects.md`). The window therefore disables unsupported features and
+//! routes its network session through the sign-in host gate (`teams_signin::egress`), which also handles redirects.
 //!
 //! The FFI is by hand: no Rust binding has `WebKit`'s web process extension API. Only the three `WebKit` functions
 //! below and two signals are used; they live in `libWPEWebKit-2.0`, which `build.rs` links.

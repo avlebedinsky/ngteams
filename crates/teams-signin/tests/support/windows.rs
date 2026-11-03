@@ -5,20 +5,18 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use gpui::TestAppContext;
-use teams_auth::signin::{WindowAnswer, WindowRequest};
-use teams_fence::FenceLog;
+use teams_auth::signin::{SignInAnswer, SignInRequest};
 
 use super::{Bound, WindowConfig, Windows};
 
 fn invalid_request() -> WindowConfig {
     WindowConfig {
-        request: WindowRequest {
+        request: SignInRequest {
             authorize: "http://127.0.0.1/synthetic".to_owned(),
             redirect_uri: "not-a-redirect-uri".to_owned(),
         },
         extension: PathBuf::from("/synthetic/no-extension"),
         bound: Bound::Loopback,
-        log: FenceLog::from_writer(std::io::sink()),
         setup: Box::new(|guard| guard),
     }
 }
@@ -30,7 +28,7 @@ fn a_service_that_has_ended_answers_failure_without_waiting() {
     let service = Windows { asks };
     assert!(matches!(
         service.ask(invalid_request()),
-        WindowAnswer::Failed(message) if message.contains("no window")
+        SignInAnswer::Failed(message) if message.contains("no window")
     ));
 }
 
@@ -45,7 +43,7 @@ fn an_abandoned_ask_is_reported_as_failure() {
     });
     assert!(matches!(
         service.ask(invalid_request()),
-        WindowAnswer::Failed(message) if message.contains("without an answer")
+        SignInAnswer::Failed(message) if message.contains("without an answer")
     ));
     peer.join().unwrap();
 }
@@ -67,7 +65,7 @@ fn the_running_service_returns_setup_failures_to_each_cloned_handle() {
         }
         assert!(matches!(
             answer.join().unwrap(),
-            WindowAnswer::Failed(message) if message.contains("redirect URI")
+            SignInAnswer::Failed(message) if message.contains("redirect URI")
         ));
     }
     cx.run_until_parked();

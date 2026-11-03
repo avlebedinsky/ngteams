@@ -21,7 +21,7 @@ use gpui::{
     MouseUpEvent, ParentElement as _, PixelFrame, PixelRect, PixelSurface, Pixels, Point, Render, ScrollWheelEvent,
     Styled as _, Window, canvas, div, rgb,
 };
-use teams_auth::signin::WindowAnswer;
+use teams_auth::signin::SignInAnswer;
 use teams_wpe::{
     Event, Frame, FrameContent, Geometry, Host, Input, Key, LoadErrorKind, LoadEvent, Modifiers, Pointer, PointerKind,
     PolicyKind, PolicyRequest, Scroll, ViewId,
@@ -68,7 +68,7 @@ impl SignInView {
                 }
             }
             let _ = view.update_in(cx, |view, window, cx| {
-                view.finish(WindowAnswer::Failed("the page's engine ended".into()), window, cx);
+                view.finish(SignInAnswer::Failed("the page's engine ended".into()), window, cx);
             });
         })
         .detach();
@@ -145,14 +145,14 @@ impl SignInView {
     }
 
     /// Ends the run with `answer` and closes the window.
-    fn finish(&mut self, answer: WindowAnswer, window: &mut Window, cx: &mut Context<Self>) {
+    fn finish(&mut self, answer: SignInAnswer, window: &mut Window, cx: &mut Context<Self>) {
         if self.answer(answer, cx) {
             window.remove_window();
         }
     }
 
     /// Gives `answer` once: the engine is shut down and the sign-in told. `false` when it was given already.
-    fn answer(&mut self, answer: WindowAnswer, cx: &mut Context<Self>) -> bool {
+    fn answer(&mut self, answer: SignInAnswer, cx: &mut Context<Self>) -> bool {
         let Some((page, done)) = self.run.take() else {
             return false;
         };
@@ -201,14 +201,14 @@ impl SignInView {
             }
             Event::WebProcessTerminated { reason, .. } => {
                 self.finish(
-                    WindowAnswer::Failed(format!("{WEB_PROCESS_ENDED} ({reason:?})")),
+                    SignInAnswer::Failed(format!("{WEB_PROCESS_ENDED} ({reason:?})")),
                     window,
                     cx,
                 );
             }
             Event::ViewFailed { message, .. } => {
                 self.finish(
-                    WindowAnswer::Failed(format!("the page can't be made: {message}")),
+                    SignInAnswer::Failed(format!("the page can't be made: {message}")),
                     window,
                     cx,
                 );

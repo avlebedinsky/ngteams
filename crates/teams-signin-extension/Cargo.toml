@@ -28,7 +28,7 @@ gpui-pre.workspace = true
 gpui-pre-platform.workspace = true
 serde_json.workspace = true
 teams-auth.workspace = true
-teams-fence.workspace = true
+teams-log.workspace = true
 teams-signin = { workspace = true, features = ["test-support"] }
 teams-wpe.workspace = true
 tempfile.workspace = true

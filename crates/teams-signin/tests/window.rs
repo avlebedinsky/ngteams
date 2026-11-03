@@ -4,19 +4,19 @@
 //! The parent runs a local HTTP server that records every request it gets, and a TCP listener for `WebSockets` that
 //! must never be connected to. It runs itself again inside the sandbox ([`Sandbox::spawn`]: the sandbox's compositor
 //! and bus, nothing of the desktop's, a private `HOME`), where the child opens the window ([`window::run`]) on the
-//! fake page with a `fence.log` of the test's own, and prints its answer. Scenarios:
+//! fake page with a `diagnostic log` of the test's own, and prints its answer. Scenarios:
 //!
 //! - `channels`: the page tries a `fetch` `POST`, a beacon, an image, a frame whose form posts, a worker whose
 //!   `fetch` posts, a `WebSocket` and `window.open`, reports what it saw by `GET`, then navigates to the `nativeclient`
 //!   redirect with a code and the request's `state`. The window must answer with that redirect; no `POST` and no popup
 //!   may reach the server, the `WebSocket` listener must stay unconnected, service workers, `WebSocket` and beacons
-//!   must be off, every request the server got must have its `fence.log` line, the code must not be in `fence.log`, and the
+//!   must be off, every request the server got must have its `diagnostic log` line, the code must not be in `diagnostic log`, and the
 //!   private `HOME` must hold no website data.
 //! - `service`: the same channel probes through the running app's `Windows` service.
 //! - `close`: the service's page is closed by the sandbox compositor and answers `Closed`.
 //! - `gaps`: pins what the guard can't see (the plan's Task 24; `docs/backlog/webkit-sign-in-guard-redirects.md`): a
 //!   synchronous `GET` redirected by a 302 and a synchronous `POST` the guard allows (a test-only local own-state rule)
-//!   redirected by a 307 reach their targets with no decision and no `fence.log` line; the same `POST` sent
+//!   redirected by a 307 reach their targets with no decision and no `diagnostic log` line; the same `POST` sent
 //!   asynchronously has its redirect decided and denied. A kept-alive `GET` redirected after its page is gone is
 //!   reported. If `WebKit` ever decides those redirects, this test fails and the backlog item can be revisited.
 //! - `remote`: the window stays on loopback for its whole run. The page names a "remote" host: this machine's own
@@ -25,7 +25,7 @@
 //!   302 goes there over HTTP and one whose 302 goes there over HTTPS (the gap), a `fetch` and an image there, a
 //!   kept-alive `GET` redirected there after its page is gone, a navigation there and one redirected there by a 302.
 //!   The listeners must accept no connection, the gap's two redirects must reach the window's refusing proxy (its
-//!   `GET http://…` and `CONNECT host:port` denied in `fence.log`), and the rest must be denied in `fence.log`. Without a
+//!   `GET http://…` and `CONNECT host:port` denied in `diagnostic log`), and the rest must be denied in `diagnostic log`. Without a
 //!   non-loopback address the listeners' check is skipped with a note (an error under `GPUI_SMOKE_REQUIRE=1`).
 //! - `crash`: once the page (a fake sign-in form) is up the window has its app id in niri's window list and is kept as
 //!   `target/ui-shots/teams-signin-window.png`; then the test kills the child's web processes, and the window must
@@ -45,9 +45,8 @@ use std::{fs, thread};
 
 use gpui::{App, AppContext as _, AsyncApp, WindowingModes};
 use serde_json::Value;
-use teams_auth::signin::{WindowAnswer, WindowRequest};
+use teams_auth::signin::{SignInAnswer, SignInRequest};
 use teams_auth::token::NATIVE_CLIENT_REDIRECT;
-use teams_fence::FenceLog;
 use teams_signin::classify::{OwnKind, OwnRule};
 use teams_signin::window::{self, WindowConfig};
 use ui_sandbox::{Running, Sandbox, SandboxOptions, SandboxResult, sandbox_or_skip, wait_until};
@@ -93,7 +92,11 @@ fn redirect_url() -> String {
 
 fn child(scenario: &str) -> SandboxResult {
     let port: u16 = std::env::var(PORT_ENV)?.parse()?;
-    let log = FenceLog::open(Path::new(&std::env::var(LOG_ENV)?))?;
+    let log_path = PathBuf::from(std::env::var(LOG_ENV)?);
+    teams_log::install(&teams_log::Config::from_env(
+        log_path.parent().ok_or("no log directory")?.to_path_buf(),
+        teams_log::Level::Info,
+    ))?;
     let extension = window::extension_beside(&std::env::current_exe()?).ok_or("no extension module beside the test")?;
     let origin = format!("http://127.0.0.1:{port}");
     let own: Vec<OwnRule> = ["/own-post", "/own-post-async"]
@@ -112,12 +115,11 @@ fn child(scenario: &str) -> SandboxResult {
     };
     let config = WindowConfig {
         bound: window::Bound::Loopback,
-        request: WindowRequest {
+        request: SignInRequest {
             authorize: format!("{origin}/authorize?scenario={page_scenario}&state={STATE}"),
             redirect_uri: NATIVE_CLIENT_REDIRECT.into(),
         },
         extension,
-        log,
         setup,
     };
     if matches!(scenario, "service" | "close") {
@@ -128,12 +130,15 @@ fn child(scenario: &str) -> SandboxResult {
     Ok(())
 }
 
-fn report_answer(answer: WindowAnswer) {
+fn report_answer(answer: SignInAnswer) {
+    if let Some(log) = teams_log::installed() {
+        assert!(log.flush_written());
+    }
     match answer {
-        WindowAnswer::Redirect(url) => say(&format!("answer redirect {}", url.expose())),
-        WindowAnswer::Closed => say("answer closed"),
-        WindowAnswer::Refused(host) => say(&format!("answer refused {host}")),
-        WindowAnswer::Failed(reason) => say(&format!("answer failed {reason}")),
+        SignInAnswer::Redirect(url) => say(&format!("answer redirect {}", url.expose())),
+        SignInAnswer::Closed => say("answer closed"),
+        SignInAnswer::Refused(host) => say(&format!("answer refused {host}")),
+        SignInAnswer::Failed(reason) => say(&format!("answer failed {reason}")),
     }
 }
 
@@ -221,7 +226,7 @@ impl Run {
         self.log
             .iter()
             .filter(|entry| {
-                // fence.log keeps a query's keys, never their values: the path is what names the request
+                // diagnostic log keeps a query's keys, never their values: the path is what names the request
                 entry["url"]
                     .as_str()
                     .is_some_and(|url| url.split('?').next().unwrap_or(url).ends_with(path))
@@ -250,7 +255,7 @@ fn run_scenario(sandbox: &Sandbox, scenario: &str, remote: &Remote, during: Duri
     })?;
     remote.reset();
     let dir = tempfile::tempdir()?;
-    let log_path = dir.path().join("fence.log");
+    let log_path = dir.path().join(teams_log::FILE_NAME);
     let home = dir.path().join("home");
     fs::create_dir(&home)?;
     let port = server.port.to_string();
@@ -286,6 +291,7 @@ fn run_scenario(sandbox: &Sandbox, scenario: &str, remote: &Remote, during: Duri
     let log_text = fs::read_to_string(&log_path).unwrap_or_default();
     let log = log_text
         .lines()
+        .filter_map(|line| line.split_once("teams_signin::guard: ").map(|(_, json)| json))
         .map(serde_json::from_str)
         .collect::<Result<Vec<Value>, _>>()?;
     Ok(Run {
@@ -325,7 +331,7 @@ fn check(condition: bool, what: &str, run: &Run) -> SandboxResult {
         Ok(())
     } else {
         Err(format!(
-            "{what}\n  answer: {}\n  requests: {:?}\n  fence.log:\n{}",
+            "{what}\n  answer: {}\n  requests: {:?}\n  diagnostic log:\n{}",
             run.answer, run.requests, run.log_text
         )
         .into())
@@ -361,13 +367,13 @@ fn check_channels(run: &Run) -> SandboxResult {
     check_channels_log(run)
 }
 
-/// The channels run's `fence.log`: every refused request denied, every one the server got allowed first.
+/// The channels run's `diagnostic log`: every refused request denied, every one the server got allowed first.
 fn check_channels_log(run: &Run) -> SandboxResult {
     for denied in ["/fetch-post", "/frame-post"] {
         let lines = run.logged(denied);
         check(
             !lines.is_empty() && lines.iter().all(|line| line["verdict"] == "deny"),
-            &format!("{denied} is denied in fence.log"),
+            &format!("{denied} is denied in diagnostic log"),
             run,
         )?;
     }
@@ -379,7 +385,7 @@ fn check_channels_log(run: &Run) -> SandboxResult {
     let lines = run.logged("/worker-post");
     check(
         !lines.is_empty() && lines.iter().all(|line| line["verdict"] == "deny"),
-        "the worker's POST is denied in fence.log",
+        "the worker's POST is denied in diagnostic log",
         run,
     )?;
     for (method, path) in &run.requests {
@@ -389,13 +395,13 @@ fn check_channels_log(run: &Run) -> SandboxResult {
             logged
                 .iter()
                 .any(|line| line["method"] == method.as_str() && line["verdict"] == "allow"),
-            &format!("{method} {path} reached the server with its allow in fence.log"),
+            &format!("{method} {path} reached the server with its allow in diagnostic log"),
             run,
         )?;
     }
     check(
         !run.log_text.contains(CODE) && !run.log_text.contains(STATE),
-        "no code or state in fence.log",
+        "no code or state in diagnostic log",
         run,
     )?;
     check(
@@ -504,7 +510,7 @@ fn check_remote(run: &Run, remote: &Remote) -> SandboxResult {
     for path in ["/fetch", "/img.png", "/nav", "/nav-target"] {
         check(
             denied("GET", &format!("http://{http}{path}")),
-            &format!("{path} off loopback is denied in fence.log"),
+            &format!("{path} off loopback is denied in diagnostic log"),
             run,
         )?;
     }

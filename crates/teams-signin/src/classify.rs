@@ -5,7 +5,7 @@
 //! - [`Classification::Read`]: `GET`, `HEAD` or `OPTIONS`, which change nothing anyone else sees;
 //! - [`Classification::Own`]: a mutating request on the own-state list, which changes only the signed-in account's own
 //!   session: the Entra token endpoint, Teams' authz exchange and Entra's sign-in form ([`Classifier::sign_in`]), and
-//!   in the personal sign-in window (`Classifier::personal`, `personal` feature) also Entra's multi-factor and
+//!   in the personal sign-in window (`Classifier::personal`) also Entra's multi-factor and
 //!   federation return paths and a `POST` to the identity provider's hosts the user named;
 //! - [`Classification::Unknown`]: everything else, denied.
 //!
@@ -28,7 +28,7 @@ pub enum OwnKind {
     Authz,
     /// Entra's sign-in form: the username lookup, the password and "Stay signed in?".
     EntraSignIn,
-    /// Entra's multi-factor and federation return paths (the personal sign-in window only, `personal`): no capture has
+    /// Entra's multi-factor and federation return paths (the sign-in window): no capture has
     /// shown them; they change only the account's own sign-in.
     EntraMultiFactor,
     /// A `POST` to the federated identity provider's hosts the user named (the personal sign-in window only).
@@ -36,7 +36,7 @@ pub enum OwnKind {
 }
 
 impl OwnKind {
-    /// The name used in `fence.log`.
+    /// The name used in diagnostic decision records.
     #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
@@ -255,7 +255,6 @@ const SIGN_IN: [&str; 4] = ["/*/GetCredentialType", "/*/login", "/kmsi", "/*/kms
 /// Entra's multi-factor sign-in (`SAS/*`: the method's start, its end and the answer's processing) and the federation
 /// return paths, on `login.microsoftonline.com` (`*` a tenant or `common`): the personal sign-in window's, which the
 /// lab never showed (`docs/personal-build.md`, "Its sign-in").
-#[cfg(feature = "personal")]
 const MULTI_FACTOR: [&str; 5] = [
     "/*/SAS/BeginAuth",
     "/*/SAS/EndAuth",
@@ -308,10 +307,9 @@ impl Classifier {
         classifier
     }
 
-    /// The personal sign-in window's rules (`personal`): [`Classifier::sign_in`], Entra's multi-factor and federation
+    /// The personal sign-in window's rules: [`Classifier::sign_in`], Entra's multi-factor and federation
     /// return paths ([`OwnKind::EntraMultiFactor`], any query: no capture showed them), and a `POST` to any path of the
     /// identity provider's hosts `hosts` names ([`OwnKind::IdentityProvider`]).
-    #[cfg(feature = "personal")]
     #[must_use]
     pub fn personal(hosts: &crate::hosts::SignInHosts) -> Self {
         let mut classifier = Self::sign_in();

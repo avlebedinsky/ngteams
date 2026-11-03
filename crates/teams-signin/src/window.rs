@@ -1,40 +1,11 @@
-//! The window: Microsoft's sign-in page (or, offline, a local fake of it) in a WPE `WebKit` view behind the guard,
-//! drawn in a GPUI window ([`crate::view`]).
+//! The sign-in page and its GPUI window. A production window is bound to [`Bound::Hosts`]: page requests go
+//! through the guard, all network connections through the host gate, and navigations stay on the same host bound.
+//! `WebKit` features that bypass the page guard are disabled. The registered redirect is caught before it loads,
+//! returning a [`SignInAnswer`] to the app; the engine and its web processes are then shut down.
 //!
-//! [`Page::start`] sets the page up before anything loads:
-//! - the web process extension (`teams-signin-extension`) copied alone into a private directory `WebKit` loads it from,
-//!   given the guard's socket; the guard ([`crate::guard`]) serving on that socket;
-//! - the engine ([`teams_wpe::Host::start_worker`]): this executable run again as a worker process of its own (so
-//!   the window opens again in the same process), rendering on the CPU into shared memory, every web process it starts
-//!   loading the extension;
-//! - an ephemeral network session (no website data kept), Intelligent Tracking Prevention off, downloads cancelled,
-//!   and its proxy set by the window's [`Bound`]: with [`Bound::Loopback`] it reaches numeric loopback addresses
-//!   directly and anything else only through [`crate::egress::BlackHole`], which refuses it; with `Bound::Hosts` (the
-//!   personal sign-in window, `personal` feature) nothing goes direct and every connection goes through
-//!   `crate::egress::HostGate`, which lets out only the sign-in hosts;
-//! - the guard in the bound's mode: loopback-only ([`Guard::local_only`]) or bound to the sign-in hosts
-//!   (`Guard::hosts_only`);
-//! - the `WebKit` features the guard can't see or that would send on their own switched off ([`FEATURES_OFF`]), WebRTC,
-//!   developer extras, the page cache and script-opened windows off (no new window is ever made: the engine leaves
-//!   `create` unanswered);
-//! - the policy questions ([`Page::navigation`], [`Page::response`]): no new window, no response `WebKit` can't show (a
-//!   download), no navigation before the page is armed, none off the bound (refused and logged: anything but a page on
-//!   a loopback address or `about:blank` for the loopback window, anything `SignInHosts::admits_url` doesn't take for
-//!   the personal one), and the redirect to the registered redirect URI caught before it loads.
-//!
-//! Then it loads `about:blank`, which makes `WebKit` create the page, and opens the authorize URL only once that page
-//! (by the id the engine reports for it) has told the guard it is armed. The redirect, from the policy or from the
-//! guard, whichever comes first, ends the run with [`WindowAnswer::Redirect`]; closing the window with
-//! [`WindowAnswer::Closed`], or with [`WindowAnswer::Refused`] naming the last host a refused navigation went to that
-//! the user could add to the account's `idp_hosts` (the personal window: `SignInHosts::idp_candidate`, the host alone);
-//! the page's web process ending (a crash: a process `WebKit` started again might not be armed) with
-//! [`WEB_PROCESS_ENDED`]. However the run ends, the engine is shut down (every web process ended, the worker reaped)
-//! and the window closed (the black hole, or the host gate, keeps deciding whatever might still reach it).
-//!
-//! Not a complete fence: a synchronous load's redirects and a kept-alive load's redirects after its page is gone never
-//! reach the guard (only the egress proxy gets them), and only the view's first arming is waited for: a later web
-//! process whose extension failed to load would be unguarded, and it is not detected
-//! (`docs/backlog/webkit-sign-in-guard-redirects.md`).
+//! An ephemeral session keeps no website data. The authorize page opens only once its page ID has armed the guard.
+//! A web-process crash ends the sign-in. Test-support builds also provide an offline numeric-loopback window with
+//! a refusing proxy, for the same rendering, guard, navigation and process-lifecycle tests.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
@@ -43,17 +14,16 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use async_channel::Receiver;
-use gpui::{App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, WindowingModes, px, size};
+use gpui::{App, AppContext as _, Bounds, TitlebarOptions, WindowBounds, WindowOptions, px, size};
 use teams_auth::redirect::RedirectUri;
 use teams_auth::secrets::Secret;
-use teams_auth::signin::{WindowAnswer, WindowRequest};
-use teams_fence::FenceLog;
+use teams_auth::signin::{SignInAnswer, SignInRequest};
 use teams_signin_extension::ENTRY_POINT;
 use teams_wpe::{
     Event, FrameMode, Geometry, Host, HostConfig, Load, SessionSpec, Settings, ViewId, ViewSpec, WebProcessExtensions,
 };
 
-use crate::cli::is_local_page;
+#[cfg(feature = "test-support")]
 use crate::egress::{BYPASS, BlackHole};
 use crate::guard::{Guard, GuardEvent, GuardServer};
 use crate::view::SignInView;
@@ -62,7 +32,7 @@ use crate::view::SignInView;
 #[path = "../tests/support/windows.rs"]
 mod service_tests;
 
-/// The lab window's Wayland app id (the personal build opens its window under the app's own).
+/// The offline test window's Wayland app id (the app uses its own).
 pub const APP_ID: &str = "com.nickalie.ngteams.signin";
 /// The window's title.
 pub const TITLE: &str = "Sign in to Microsoft Teams";
@@ -103,12 +73,11 @@ pub type GuardSetup = Box<dyn FnOnce(Guard) -> Guard + Send>;
 /// Where the window may go.
 #[derive(Clone, Debug)]
 pub enum Bound {
-    /// Loopback only (the lab's window while [`crate::cli::NOT_LIVE`] holds): the guard in loopback-only mode, the
-    /// network session's way out the black hole ([`BlackHole`]).
+    /// Offline tests only: numeric loopback with a refusing proxy for every other connection.
+    #[cfg(feature = "test-support")]
     Loopback,
-    /// The personal sign-in window's hosts (`personal`): the guard bound to them ([`Guard::hosts_only`]), the network
+    /// The sign-in hosts: the guard bound to them, the network
     /// session's only way out the host gate ([`crate::egress::HostGate`]).
-    #[cfg(feature = "personal")]
     Hosts(Arc<crate::hosts::SignInHosts>),
 }
 
@@ -116,8 +85,8 @@ impl Bound {
     /// Whether a navigation to `uri` stays on the bound once the page is armed.
     fn admits(&self, uri: &str) -> bool {
         match self {
+            #[cfg(feature = "test-support")]
             Self::Loopback => is_local_page(uri),
-            #[cfg(feature = "personal")]
             Self::Hosts(hosts) => hosts.admits_url(uri),
         }
     }
@@ -126,12 +95,12 @@ impl Bound {
     /// window's bound names one (`SignInHosts::idp_candidate`).
     fn idp_candidate(&self, uri: &str) -> Option<String> {
         match self {
+            #[cfg(feature = "test-support")]
             Self::Loopback => {
                 // the loopback window has no identity provider: a page off loopback is never one to name
                 let _ = uri;
                 None
             }
-            #[cfg(feature = "personal")]
             Self::Hosts(hosts) => hosts.idp_candidate(uri),
         }
     }
@@ -139,13 +108,11 @@ impl Bound {
 
 /// What the window needs.
 pub struct WindowConfig {
-    pub request: WindowRequest,
+    pub request: SignInRequest,
     /// Where it may go.
     pub bound: Bound,
     /// The extension module (`libteams_signin_extension.so`).
     pub extension: PathBuf,
-    /// Where the guard's decisions go (the lab's `fence.log`, or the personal build's for the personal window).
-    pub log: FenceLog,
     pub setup: GuardSetup,
 }
 
@@ -159,28 +126,28 @@ pub fn extension_beside(exe: &Path) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-/// Runs the window as an app of its own until the redirect is caught, the window is closed, or it fails: the lab's
-/// `teams-signin --lab` and the window test. Must run on the main thread, in a program that serves the engine's
+/// Runs the offline test window as an app of its own until it answers. Must run on the main thread, in a program that serves the engine's
 /// worker first thing in its `main` (`teams_wpe::worker::serve_if_asked`).
+#[cfg(feature = "test-support")]
 #[must_use]
-pub fn run(config: WindowConfig) -> WindowAnswer {
+pub fn run(config: WindowConfig) -> SignInAnswer {
     let answer = Arc::new(std::sync::Mutex::new(None));
     let kept = Arc::clone(&answer);
-    gpui_platform::linux(WindowingModes::WAYLAND).run(move |cx: &mut App| {
+    gpui_platform::linux(gpui::WindowingModes::WAYLAND).run(move |cx: &mut App| {
         open(config, APP_ID, cx, move |given, cx| {
             *kept.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(given);
             cx.quit();
         });
     });
     let taken = answer.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
-    taken.unwrap_or_else(|| WindowAnswer::Failed("the window ended without an answer".into()))
+    taken.unwrap_or_else(|| SignInAnswer::Failed("the window ended without an answer".into()))
 }
 
 /// What a sign-in is told once its window answered.
-pub type Done = Box<dyn FnOnce(WindowAnswer, &mut App)>;
+pub type Done = Box<dyn FnOnce(SignInAnswer, &mut App)>;
 
 /// [`open`], its answer sent to `reply` (a [`Windows`] ask's).
-fn open_answering(config: WindowConfig, app_id: &str, reply: mpsc::Sender<WindowAnswer>, cx: &mut App) {
+fn open_answering(config: WindowConfig, app_id: &str, reply: mpsc::Sender<SignInAnswer>, cx: &mut App) {
     open(config, app_id, cx, move |answer, _| {
         let _ = reply.send(answer);
     });
@@ -188,11 +155,11 @@ fn open_answering(config: WindowConfig, app_id: &str, reply: mpsc::Sender<Window
 
 /// Opens the sign-in window for `config` in the running app, under `app_id`; `done` gets its answer once (a page that
 /// can't be set up answers at once, with no window).
-pub fn open(config: WindowConfig, app_id: &str, cx: &mut App, done: impl FnOnce(WindowAnswer, &mut App) + 'static) {
+pub fn open(config: WindowConfig, app_id: &str, cx: &mut App, done: impl FnOnce(SignInAnswer, &mut App) + 'static) {
     let page = match Page::start(config) {
         Ok(page) => page,
         Err(reason) => {
-            done(WindowAnswer::Failed(reason), cx);
+            done(SignInAnswer::Failed(reason), cx);
             return;
         }
     };
@@ -217,7 +184,7 @@ pub fn open(config: WindowConfig, app_id: &str, cx: &mut App, done: impl FnOnce(
         // the view never took them: answer here
         if let Some((page, done)) = slot.borrow_mut().take() {
             page.shut_down(cx);
-            done(WindowAnswer::Failed(format!("the window can't be opened: {error}")), cx);
+            done(SignInAnswer::Failed(format!("the window can't be opened: {error}")), cx);
         }
     }
 }
@@ -226,14 +193,14 @@ pub fn open(config: WindowConfig, app_id: &str, cx: &mut App, done: impl FnOnce(
 /// runs on a background thread and blocks on the window's answer ([`Windows::ask`]).
 #[derive(Clone)]
 pub struct Windows {
-    asks: async_channel::Sender<(WindowConfig, mpsc::Sender<WindowAnswer>)>,
+    asks: async_channel::Sender<(WindowConfig, mpsc::Sender<SignInAnswer>)>,
 }
 
 impl Windows {
     /// Serves the asks in the running app, each a window under `app_id`, until every [`Windows`] is gone.
     #[must_use]
     pub fn serve(app_id: &str, cx: &mut App) -> Self {
-        let (asks, waiting) = async_channel::unbounded::<(WindowConfig, mpsc::Sender<WindowAnswer>)>();
+        let (asks, waiting) = async_channel::unbounded::<(WindowConfig, mpsc::Sender<SignInAnswer>)>();
         let app_id = app_id.to_owned();
         cx.spawn(async move |cx| {
             while let Ok((config, reply)) = waiting.recv().await {
@@ -246,14 +213,14 @@ impl Windows {
 
     /// Opens a window for `config` and waits for its answer (blocking: never call it on GPUI's foreground).
     #[must_use]
-    pub fn ask(&self, config: WindowConfig) -> WindowAnswer {
+    pub fn ask(&self, config: WindowConfig) -> SignInAnswer {
         let (reply, answer) = mpsc::channel();
         if self.asks.send_blocking((config, reply)).is_err() {
-            return WindowAnswer::Failed("the app has no window for the sign-in any more".into());
+            return SignInAnswer::Failed("the app has no window for the sign-in any more".into());
         }
         answer
             .recv()
-            .unwrap_or_else(|_| WindowAnswer::Failed("the sign-in window went without an answer".into()))
+            .unwrap_or_else(|_| SignInAnswer::Failed("the sign-in window went without an answer".into()))
     }
 }
 
@@ -295,7 +262,7 @@ pub(crate) enum Outcome {
     /// Nothing more.
     Continue,
     /// The run ends with this answer.
-    Finish(WindowAnswer),
+    Finish(SignInAnswer),
 }
 
 impl Page {
@@ -306,12 +273,12 @@ impl Page {
         let dir = private_dir()?;
         let extensions = install_extension(&config.extension, dir.path())?;
         let (sender, guard_events) = mpsc::channel();
-        let guard = Guard::new(config.log, redirect.clone(), sender);
-        let guard = Arc::new((config.setup)(match &config.bound {
-            Bound::Loopback => guard.local_only(),
-            #[cfg(feature = "personal")]
-            Bound::Hosts(hosts) => guard.hosts_only(Arc::clone(hosts)),
-        }));
+        let guard = match &config.bound {
+            #[cfg(feature = "test-support")]
+            Bound::Loopback => Guard::for_tests(redirect.clone(), sender).local_only(),
+            Bound::Hosts(hosts) => Guard::new(Arc::clone(hosts), redirect.clone(), sender),
+        };
+        let guard = Arc::new((config.setup)(guard));
         let socket = dir.path().join("guard.sock");
         let server = GuardServer::start(&socket, Arc::clone(&guard))
             .map_err(|error| format!("the guard's socket can't be bound: {error}"))?;
@@ -388,7 +355,7 @@ impl Page {
         match navigation(uri, self.stage, &self.redirect, &self.bound) {
             Navigation::Redirect => {
                 self.guard.caught_navigation(uri);
-                (false, Outcome::Finish(WindowAnswer::Redirect(Secret::new(uri))))
+                (false, Outcome::Finish(SignInAnswer::Redirect(Secret::new(uri))))
             }
             Navigation::Use => (true, Outcome::Continue),
             Navigation::Refuse => {
@@ -413,21 +380,21 @@ impl Page {
         while let Ok(event) = self.guard_events.try_recv() {
             match event {
                 GuardEvent::Armed { page } => self.armed.push(page),
-                GuardEvent::Redirect(url) => return Outcome::Finish(WindowAnswer::Redirect(url)),
+                GuardEvent::Redirect(url) => return Outcome::Finish(SignInAnswer::Redirect(url)),
             }
         }
         self.open_once_armed();
         if self.stage == Stage::Arming && Instant::now() > self.deadline {
-            return Outcome::Finish(WindowAnswer::Failed("the page wasn't armed in time".into()));
+            return Outcome::Finish(SignInAnswer::Failed("the page wasn't armed in time".into()));
         }
         Outcome::Continue
     }
 
     /// The answer when the window is closed before a redirect.
-    pub(crate) fn closed(&mut self) -> WindowAnswer {
+    pub(crate) fn closed(&mut self) -> SignInAnswer {
         match self.refused.take() {
-            Some(host) => WindowAnswer::Refused(host),
-            None => WindowAnswer::Closed,
+            Some(host) => SignInAnswer::Refused(host),
+            None => SignInAnswer::Closed,
         }
     }
 
@@ -442,12 +409,12 @@ impl Page {
 /// or the personal window's host gate with nothing bypassing it.
 fn egress(bound: &Bound, guard: &Arc<Guard>) -> Result<(String, Vec<String>), String> {
     match bound {
+        #[cfg(feature = "test-support")]
         Bound::Loopback => {
             let black_hole = BlackHole::start(Arc::clone(guard))
                 .map_err(|error| format!("the egress proxy can't be bound: {error}"))?;
             Ok((black_hole.uri(), BYPASS.iter().map(|host| (*host).to_owned()).collect()))
         }
-        #[cfg(feature = "personal")]
         Bound::Hosts(hosts) => {
             let gate = crate::egress::HostGate::start(Arc::clone(guard), Arc::clone(hosts))
                 .map_err(|error| format!("the egress gate can't be bound: {error}"))?;
@@ -514,6 +481,21 @@ fn navigation(uri: &str, stage: Stage, redirect: &RedirectUri, bound: &Bound) ->
     }
 }
 
+/// Whether the offline test page is HTTP(S) on a numeric loopback address. Names never bypass its refusing proxy.
+#[cfg(feature = "test-support")]
+#[must_use]
+pub fn is_local_page(text: &str) -> bool {
+    let Ok(url) = url::Url::parse(text) else {
+        return false;
+    };
+    matches!(url.scheme(), "http" | "https")
+        && match url.host() {
+            Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+            Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+            Some(url::Host::Domain(_)) | None => false,
+        }
+}
+
 #[cfg(test)]
 mod tests {
     use teams_auth::token::NATIVE_CLIENT_REDIRECT;
@@ -521,6 +503,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[cfg(feature = "test-support")]
     fn once_armed_only_loopback_pages_and_about_blank_are_navigated_to() -> Result<(), String> {
         let redirect = RedirectUri::parse(NATIVE_CLIENT_REDIRECT).map_err(|_| "the redirect URI")?;
         let caught = format!("{NATIVE_CLIENT_REDIRECT}?code=made-up&state=made-up");
@@ -553,7 +536,6 @@ mod tests {
         Ok(())
     }
 
-    #[cfg(feature = "personal")]
     #[test]
     fn the_personal_window_navigates_only_to_its_hosts() -> Result<(), String> {
         let redirect = RedirectUri::parse(NATIVE_CLIENT_REDIRECT).map_err(|_| "the redirect URI")?;

@@ -1,18 +1,6 @@
-//! The window's network bound while [`crate::cli::NOT_LIVE`] holds: the webview's network session reaches numeric
-//! loopback addresses directly and everything else only through [`BlackHole`], a proxy on loopback that refuses every
-//! connection it gets and logs a deny for it.
-//!
-//! This is what keeps the window off the tenant where the guard can't see: `WebKit`'s network process follows a
-//! synchronous load's redirects and a kept-alive load's redirects after its page is gone without asking the guard
-//! (`docs/backlog/webkit-sign-in-guard-redirects.md`), but it sends every HTTP(S) load through its soup session, whose
-//! proxy resolver ([`BYPASS`] direct, the proxy for the rest, no direct fallback) the session's custom proxy settings
-//! set. It isn't a proof that nothing else leaves: networking outside the soup session (the `WebKit` features
-//! switched off in [`crate::window::FEATURES_OFF`], WebRTC) and DNS lookups are outside it.
-//!
-//! The black hole never forwards and never opens a tunnel: it reads at most one request line (`CONNECT host:port`
-//! for HTTPS, `GET http://host/path` for HTTP) within [`READ_TIMEOUT`], logs it as denied (`fence.log` keeps no
-//! query), answers `403` and closes. It serves until the process exits, so a load still running after the window has
-//! ended is refused too.
+//! The sign-in window's network session goes only through its host gate. The gate opens HTTPS tunnels to the
+//! configured sign-in hosts and logs each connection without headers or bodies. Offline tests can instead use a
+//! refusing proxy with numeric loopback bypass; that mode is absent from production builds.
 
 use std::io::{self, BufRead as _, BufReader, Read as _, Write as _};
 use std::net::{Ipv4Addr, TcpListener, TcpStream};
@@ -24,6 +12,7 @@ use crate::guard::Guard;
 
 /// The hosts the network session reaches directly: numeric loopback only. A name (even `localhost`) goes to the
 /// black hole: GIO's ignore-hosts entries for a name match its subdomains too, and a name is resolved by DNS.
+#[cfg(feature = "test-support")]
 pub const BYPASS: [&str; 2] = ["127.0.0.0/8", "::1"];
 /// How long the black hole waits for a connection's request line.
 pub const READ_TIMEOUT: Duration = Duration::from_secs(5);
@@ -32,11 +21,13 @@ const LINE_LIMIT: u64 = 8 * 1024;
 const REFUSAL: &[u8] = b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
 /// The refusing proxy, on `127.0.0.1`.
+#[cfg(feature = "test-support")]
 #[derive(Debug)]
 pub struct BlackHole {
     port: u16,
 }
 
+#[cfg(feature = "test-support")]
 impl BlackHole {
     /// Binds a port on `127.0.0.1` and refuses every connection to it, each logged through `guard`, until the
     /// process exits.
@@ -65,6 +56,7 @@ impl BlackHole {
 }
 
 /// Logs what the connection asked for and refuses it; a line that can't be read is logged as `?`.
+#[cfg(feature = "test-support")]
 fn refuse(guard: &Guard, stream: &TcpStream) {
     let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
     let mut line = Vec::new();
@@ -83,29 +75,24 @@ fn request_line(line: &str) -> (&str, &str) {
     (fields.next().unwrap_or("?"), fields.next().unwrap_or("?"))
 }
 
-/// The personal sign-in window's network bound (`personal`, `docs/personal-build.md` Choice C): a proxy on loopback
+/// The personal sign-in window's network bound (`docs/personal-build.md` Choice C): a proxy on loopback
 /// that opens a `CONNECT` tunnel only to a host on the window's bound ([`crate::hosts::SignInHosts`]) on 443, logged
 /// before it opens ([`Guard::tunnel`]), and refuses and logs every other connection, a plain `http` request included.
 /// It is the network session's only way out (no direct hosts), so the requests the guard can't see (the redirects
 /// `WebKit` follows on its own, a web process that never armed) reach no other host either: a *host* bound, not a
 /// method or path bound. DNS lookups happen here, for the hosts on the bound only.
-#[cfg(feature = "personal")]
 #[derive(Debug)]
 pub struct HostGate {
     port: u16,
 }
 
 /// How many header lines the gate reads after a `CONNECT` line before it gives up.
-#[cfg(feature = "personal")]
 const HEADER_LIMIT: usize = 64;
 
-#[cfg(feature = "personal")]
 const ESTABLISHED: &[u8] = b"HTTP/1.1 200 Connection Established\r\n\r\n";
 
-#[cfg(feature = "personal")]
 const UNREACHABLE: &[u8] = b"HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
 
-#[cfg(feature = "personal")]
 impl HostGate {
     /// Binds a port on `127.0.0.1` and serves the gate over `hosts`, each decision logged through `guard`, until the
     /// process exits.
@@ -134,7 +121,6 @@ impl HostGate {
 }
 
 /// One connection to the gate: a `CONNECT` to a host on the bound gets its tunnel, anything else is refused.
-#[cfg(feature = "personal")]
 fn gate(guard: &Guard, hosts: &crate::hosts::SignInHosts, stream: &TcpStream) {
     let _ = stream.set_read_timeout(Some(READ_TIMEOUT));
     let Ok(reader_stream) = stream.try_clone() else {
@@ -161,11 +147,7 @@ fn gate(guard: &Guard, hosts: &crate::hosts::SignInHosts, stream: &TcpStream) {
             Ok(_) => {}
         }
     }
-    if !guard.tunnel(&host, port) {
-        let mut stream = stream;
-        let _ = stream.write_all(REFUSAL);
-        return;
-    }
+    guard.tunnel(&host, port);
     let Ok(upstream) = TcpStream::connect((host.as_str(), port)) else {
         let mut stream = stream;
         let _ = stream.write_all(UNREACHABLE);
@@ -183,7 +165,6 @@ fn gate(guard: &Guard, hosts: &crate::hosts::SignInHosts, stream: &TcpStream) {
 
 /// Copies both ways between the client and `upstream` until either side closes, `buffered` (what the client sent
 /// after its request) first.
-#[cfg(feature = "personal")]
 fn splice(client: TcpStream, buffered: &[u8], upstream: TcpStream) {
     let (Ok(mut client_out), Ok(mut upstream_in)) = (client.try_clone(), upstream.try_clone()) else {
         return;
@@ -205,7 +186,6 @@ fn splice(client: TcpStream, buffered: &[u8], upstream: TcpStream) {
 }
 
 /// A `CONNECT` target's host (lowercased) and port: `host:port`, a name (no brackets, no user info).
-#[cfg(feature = "personal")]
 fn authority(target: &str) -> Option<(String, u16)> {
     let (host, port) = target.rsplit_once(':')?;
     let port = port.parse().ok()?;

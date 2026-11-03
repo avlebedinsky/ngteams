@@ -92,10 +92,6 @@ reason = "module declarations and derived error type only; no authored executabl
 sha256 = "791b1a682ea3701df3d9862e4b8834f415976eb96f2ef9e4e188bc56f0adf7bd"
 reason = "module declarations, documentation and an integer constant only; no executable bodies"
 
-[unmapped_sources."crates/teams-signin/src/lib.rs"]
-sha256 = "5f9d9bd4143625b8c831ea36b2f96b374df717284d4574e1d4e01edcf30a6f92"
-reason = "module declarations and documentation only; no executable bodies"
-
 [unmapped_sources."crates/teams-ui/src/lib.rs"]
 sha256 = "6c7e68d4826dd26a48d516388f3ea85dd95ae3caca958c777021265c792f47be"
 reason = "module declarations, re-exports and documentation only; no executable bodies"

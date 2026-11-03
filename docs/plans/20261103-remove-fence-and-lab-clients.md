@@ -238,11 +238,18 @@ activity experiment is a selective frame capture hold, without the old classifie
 - Delete: the lab window binary, `teams-signin/tests/{binary.rs,answer_channel.rs}`, and
   `teams_auth::signin::sign_in_with_window` with `WindowRequest`/`WindowAnswer`
 
-- [ ] the guard logs its decisions to the diagnostic log in the old line's shape (no bodies); the host-gated window is
+- [x] the guard logs its decisions to the diagnostic log in the old line's shape (no bodies); the host-gated window is
       the only mode; the `personal` feature and `--lab` go
-- [ ] delete the lab window binary and its pipe protocol
-- [ ] adapt the guard and window tests to the log lines
-- [ ] tests of `teams-signin`, `teams-signin-extension`, `teams-auth` and `ngteams` (`signin`), and clippy, pass
+- [x] delete the lab window binary and its pipe protocol
+- [x] adapt the guard and window tests to the log lines
+- [x] tests of `teams-signin`, `teams-signin-extension`, `teams-auth` and `ngteams` (`signin`), and clippy, pass
+
+Validation: 201 tests across `teams-auth`, `teams-signin` and `teams-signin-extension`, both real WPE window
+sandbox runs with `GPUI_SMOKE_REQUIRE=1`, 11 ngteams sign-in tests, 9 separation tests, 2 private window-service tests
+and 14 UI dependency-audit tests passed. All-target Clippy for the four affected crates, the normal production-mode
+sign-in library check, formatting and coverage metadata checks passed. The in-process handoff remains typed and
+serialization-free (`SignInRequest`/`SignInAnswer`); the standalone binary and JSON pipe are gone. Offline loopback
+mode exists only in test-support builds, which ngteams still refuses.
 
 ### Task 5: teams-media's PipeWire reach decided at run time
 

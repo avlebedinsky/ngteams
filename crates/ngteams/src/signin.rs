@@ -36,9 +36,8 @@ use teams_auth::authz::{AuthzClient, AuthzError, AuthzKind, Region};
 use teams_auth::pkce::PkceError;
 use teams_auth::refresh::refresh_token_key;
 use teams_auth::secrets::{SecretError, SecretStore};
-use teams_auth::signin::{WindowAnswer, WindowError, WindowRequest, WindowSignInError, sign_in_with};
+use teams_auth::signin::{SignInAnswer, SignInRequest, WindowError, WindowSignInError, sign_in_with};
 use teams_auth::token::{Authorization, EntraConfig, Scope, TokenClient, TokenError};
-use teams_fence::FenceLog;
 use teams_fence::personal::{PersonalAccount, PersonalError};
 use teams_signin::hosts::{HostRefused, SignInHosts};
 use teams_signin::window::{self, Bound, WindowConfig, Windows};
@@ -48,7 +47,7 @@ use crate::setup::Setup;
 
 /// A sign-in window for one request: shows the request's page and gives its answer (blocking: it waits for the person
 /// signing in). The app's own is [`window_for`]'s; a test's answers by itself.
-pub type Window = Box<dyn FnOnce(WindowRequest) -> WindowAnswer + Send>;
+pub type Window = Box<dyn FnOnce(SignInRequest) -> SignInAnswer + Send>;
 
 /// The app's sign-in windows, opened on GPUI's foreground for the sign-ins running off it.
 struct SignInWindows(Windows);
@@ -112,8 +111,8 @@ impl SignInClients {
 }
 
 /// The sign-in window for `account`, opened through `windows`: bound to Entra's sign-in hosts and the identity
-/// provider's hosts its `accounts.toml` entry names ([`SignInHosts::entra_with`]), its decisions in the personal
-/// `fence.log`, its web process extension the one beside this binary. A request whose authorize URL isn't on that
+/// provider's hosts its `accounts.toml` entry names ([`SignInHosts::entra_with`]), its decisions in the app's
+/// diagnostic log, its web process extension the one beside this binary. A request whose authorize URL isn't on that
 /// bound opens no window.
 ///
 /// # Errors
@@ -134,22 +133,17 @@ pub fn window_for(setup: &Setup, account: &PersonalAccount, windows: &Windows) -
 fn bound_window(setup: &Setup, hosts: Arc<SignInHosts>, windows: &Windows, extension: PathBuf) -> Window {
     let paths = setup.paths.clone();
     let windows = windows.clone();
-    Box::new(move |request: WindowRequest| {
+    Box::new(move |request: SignInRequest| {
         if !hosts.admits_url(&request.authorize) {
-            return WindowAnswer::Failed("the authorize URL isn't on the sign-in window's hosts".into());
+            return SignInAnswer::Failed("the authorize URL isn't on the sign-in window's hosts".into());
         }
         if let Err(error) = paths.make_dirs() {
-            return WindowAnswer::Failed(format!("the personal data dir: {error}"));
+            return SignInAnswer::Failed(format!("the personal data dir: {error}"));
         }
-        let log = match FenceLog::open(&paths.fence_log()) {
-            Ok(log) => log,
-            Err(error) => return WindowAnswer::Failed(format!("fence.log can't be opened: {error}")),
-        };
         windows.ask(WindowConfig {
             request,
             bound: Bound::Hosts(hosts),
             extension,
-            log,
             setup: Box::new(|guard| guard),
         })
     })

@@ -78,8 +78,7 @@ teams-media = { path = "crates/teams-media" }
 # tests only: a crate takes it under [dev-dependencies], never [dependencies] (crates/teams-mock/tests/mock.rs checks)
 teams-mock = { path = "crates/teams-mock" }
 teams-proto = { path = "crates/teams-proto" }
-# the sign-in window; the personal build (`crates/ngteams`) takes its lib with the `personal` feature, for its
-# own window
+# the host-gated sign-in window library, used in-process by ngteams
 teams-signin = { path = "crates/teams-signin" }
 # the sign-in window's web process extension; `teams-signin` depends on it, so its build builds the module
 teams-signin-extension = { path = "crates/teams-signin-extension" }

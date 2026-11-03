@@ -37,7 +37,7 @@ teams-media = { workspace = true, features = ["personal"] }
 # the echo service's MRI the test call goes to (`TEAMS_ECHO_BOT_MRI`, from the web bundle)
 teams-proto.workspace = true
 # the personal sign-in window: only this crate enables `personal`
-teams-signin = { workspace = true, features = ["personal"] }
+teams-signin.workspace = true
 # the sign-in window's page engine: this binary serves it as its worker (`teams_wpe::worker::serve_if_asked`)
 teams-wpe.workspace = true
 # `ngteams --forget` takes the account's engine lock before it deletes anything

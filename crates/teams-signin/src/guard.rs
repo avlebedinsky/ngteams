@@ -1,19 +1,6 @@
-//! The request guard: decides each request a page of the sign-in window sends by the sign-in rules
-//! ([`crate::classify::Classifier::sign_in`]: `GET`, `HEAD` and `OPTIONS` reads; the own-state rules in their exact
-//! captured shapes, Entra's sign-in form among them; everything else denied, never by host alone), and appends the
-//! decision to `fence.log` before answering. A decision that can't be logged is a deny.
-//!
-//! On top of the classifier:
-//! - a page that hasn't told the guard it is armed gets every request denied;
-//! - in loopback-only mode ([`Guard::local_only`], which the window always turns on while [`crate::cli::NOT_LIVE`]
-//!   holds) every request that isn't to a page on a loopback address ([`crate::cli::is_local_page`]) is denied, so no
-//!   decision of the guard lets the window off this machine;
-//! - the redirect to the registered redirect URI (it carries the authorization code) is never let through: it is
-//!   logged without its query ([`RequestOutcome::SignInRedirect`]) and handed to the window ([`GuardEvent::Redirect`]),
-//!   which hands it to the parent.
-//!
-//! [`GuardServer`] serves the guard on a Unix socket, one thread per web process connection
-//! (`teams_signin_extension::protocol`).
+//! The sign-in request guard: each armed page is restricted to its sign-in hosts and captured own-state rules.
+//! Decisions go to the app's diagnostic log, without query values, bodies or headers. The registered redirect is
+//! caught and handed directly to the in-process window, never loaded. Diagnostic logging does not govern permission.
 
 use std::collections::BTreeSet;
 use std::io::{self, BufRead as _, BufReader, Read as _, Write as _};
@@ -22,13 +9,14 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, PoisonError, mpsc};
 use std::thread;
 
+use crate::diagnostics::{self, Outcome as RequestOutcome};
 use teams_auth::redirect::RedirectUri;
 use teams_auth::secrets::Secret;
-use teams_fence::{Channel, FenceLog, RequestOutcome, RequestRecord};
 use teams_signin_extension::protocol::{ALLOW, DENY, LINE_LIMIT, OK, Query};
 
 use crate::classify::{Classification, Classifier};
-use crate::cli::is_local_page;
+#[cfg(feature = "test-support")]
+use crate::window::is_local_page;
 
 /// What the guard tells the window.
 #[derive(Debug)]
@@ -50,12 +38,11 @@ pub enum Decision {
 /// The guard's decisions, shared by every connection.
 pub struct Guard {
     classifier: Classifier,
-    log: FenceLog,
     redirect: RedirectUri,
     /// Every request off a loopback address denied ([`Guard::local_only`]).
+    #[cfg(feature = "test-support")]
     local_only: bool,
-    /// Every request off the personal sign-in window's host bound denied ([`Guard::hosts_only`]).
-    #[cfg(feature = "personal")]
+    /// The sign-in host bound; absent only in offline test constructors.
     hosts: Option<Arc<crate::hosts::SignInHosts>>,
     /// Armed pages.
     armed: Mutex<BTreeSet<u64>>,
@@ -71,42 +58,44 @@ impl std::fmt::Debug for Guard {
 }
 
 impl Guard {
-    /// A guard with the sign-in rules ([`Classifier::sign_in`]), logging to `log`, catching the redirect to `redirect`, telling
-    /// its events on `events`.
+    /// A guard bound to `hosts`, catching `redirect` and telling its events on `events`.
     #[must_use]
-    pub fn new(log: FenceLog, redirect: RedirectUri, events: mpsc::Sender<GuardEvent>) -> Self {
+    pub fn new(hosts: Arc<crate::hosts::SignInHosts>, redirect: RedirectUri, events: mpsc::Sender<GuardEvent>) -> Self {
+        Self {
+            classifier: Classifier::personal(&hosts),
+            redirect,
+            #[cfg(feature = "test-support")]
+            local_only: false,
+            hosts: Some(hosts),
+            armed: Mutex::new(BTreeSet::new()),
+            events: Mutex::new(events),
+        }
+    }
+
+    /// An unrestricted host set for offline classifier/socket tests only. A production guard always takes hosts.
+    #[cfg(feature = "test-support")]
+    #[must_use]
+    pub fn for_tests(redirect: RedirectUri, events: mpsc::Sender<GuardEvent>) -> Self {
         Self {
             classifier: Classifier::sign_in(),
-            log,
             redirect,
             local_only: false,
-            #[cfg(feature = "personal")]
             hosts: None,
             armed: Mutex::new(BTreeSet::new()),
             events: Mutex::new(events),
         }
     }
 
-    /// The same guard denying every request that isn't to a page on a loopback address (after catching the redirect,
-    /// which is still caught and logged as such): the window's mode while [`crate::cli::NOT_LIVE`] holds.
+    /// Restricts the offline test window to numeric loopback.
+    #[cfg(feature = "test-support")]
     #[must_use]
     pub const fn local_only(mut self) -> Self {
         self.local_only = true;
         self
     }
 
-    /// The personal sign-in window's guard (`personal`): its rules ([`Classifier::personal`]), and every request that
-    /// isn't to a page on `hosts`' bound denied (after catching the redirect, which is still caught and logged as such).
-    #[cfg(feature = "personal")]
-    #[must_use]
-    pub fn hosts_only(mut self, hosts: Arc<crate::hosts::SignInHosts>) -> Self {
-        self.classifier = Classifier::personal(&hosts);
-        self.hosts = Some(hosts);
-        self
-    }
-
     /// The same guard with one more own-state rule: tests stand a local endpoint in for one of Entra's. Only in a
-    /// `test-support` build, which the `teams-signin` binary refuses to run.
+    /// `test-support` build, which production ngteams refuses to run.
     #[cfg(feature = "test-support")]
     #[must_use]
     pub fn with_own(mut self, rule: crate::classify::OwnRule) -> Self {
@@ -131,7 +120,7 @@ impl Guard {
         }
     }
 
-    /// Whether `page` may send `method` `url`; the decision is in `fence.log` before this returns.
+    /// Whether `page` may send `method` `url`; the decision is submitted to the diagnostic log before this returns.
     pub fn decide(&self, page: u64, method: &str, url: &str) -> Decision {
         let armed = self
             .armed
@@ -139,19 +128,19 @@ impl Guard {
             .unwrap_or_else(PoisonError::into_inner)
             .contains(&page);
         if !armed {
-            self.record(method, url, RequestOutcome::Unclassified);
+            diagnostics::record(method, url, RequestOutcome::Unclassified);
             return Decision::Deny;
         }
         if self.redirect.matches(url) {
-            self.record(method, url, RequestOutcome::SignInRedirect);
+            diagnostics::record(method, url, RequestOutcome::SignInRedirect);
             self.tell(GuardEvent::Redirect(Secret::new(url)));
             return Decision::Deny;
         }
+        #[cfg(feature = "test-support")]
         if self.local_only && !is_local_page(url) {
             self.refuse(method, url);
             return Decision::Deny;
         }
-        #[cfg(feature = "personal")]
         if self.hosts.as_ref().is_some_and(|hosts| !hosts.admits_url(url)) {
             self.refuse(method, url);
             return Decision::Deny;
@@ -162,41 +151,25 @@ impl Guard {
             Classification::Unknown => RequestOutcome::Unclassified,
         };
         let allow = matches!(outcome, RequestOutcome::Read | RequestOutcome::Own(_));
-        if self.record(method, url, outcome) && allow {
-            Decision::Allow
-        } else {
-            Decision::Deny
-        }
+        diagnostics::record(method, url, outcome);
+        if allow { Decision::Allow } else { Decision::Deny }
     }
 
     /// Logs the redirect caught by the window's navigation policy before it became a request (a page's own navigation
     /// to it); the window hands it on itself.
     pub fn caught_navigation(&self, url: &str) {
-        self.record("GET", url, RequestOutcome::SignInRedirect);
+        diagnostics::record("GET", url, RequestOutcome::SignInRedirect);
     }
 
     /// Logs a deny for `method` `url` that never became a decided request: a navigation the window's policy refused,
     /// or a connection the window's egress proxy refused ([`crate::egress`]).
     pub fn refuse(&self, method: &str, url: &str) {
-        self.record(method, url, RequestOutcome::Unclassified);
+        diagnostics::record(method, url, RequestOutcome::Unclassified);
     }
 
-    /// Logs a tunnel the personal window's host gate opened to `host` (`crate::egress::HostGate`); `false` when it
-    /// couldn't be (the gate then opens none).
-    #[cfg(feature = "personal")]
-    pub fn tunnel(&self, host: &str, port: u16) -> bool {
-        self.record("CONNECT", &format!("https://{host}:{port}/"), RequestOutcome::Tunnel)
-    }
-
-    /// Logs one decision; `false` when it couldn't be.
-    fn record(&self, method: &str, url: &str, outcome: RequestOutcome) -> bool {
-        let record = RequestRecord {
-            channel: Channel::Http,
-            method,
-            url,
-            outcome,
-        };
-        self.log.record_request(&record).is_ok()
+    /// Logs a tunnel the sign-in host gate opens. No request headers or body are included.
+    pub fn tunnel(&self, host: &str, port: u16) {
+        diagnostics::record("CONNECT", &format!("https://{host}:{port}/"), RequestOutcome::Tunnel);
     }
 
     fn tell(&self, event: GuardEvent) {

@@ -1,17 +1,13 @@
-//! The guard's decisions, offline: by the sign-in rules (`teams_signin::classify`) for an armed page, every one in `fence.log`
-//! before the answer, the redirect caught and never let through, an unarmed page or an unlogged decision denied; and
+//! The guard's decisions, offline: by the sign-in rules (`teams_signin::classify`) for an armed page, every one in the diagnostic log
+//! before the answer, the redirect caught and never let through, an unarmed page denied; and
 //! the guard's socket, as the extension talks to it.
 
-use std::fs;
 use std::io::{BufRead as _, BufReader, Write as _};
 use std::os::unix::net::UnixStream;
-use std::path::Path;
 use std::sync::{Arc, mpsc};
 
-use serde_json::Value;
 use teams_auth::redirect::RedirectUri;
 use teams_auth::token::NATIVE_CLIENT_REDIRECT;
-use teams_fence::FenceLog;
 use teams_signin::guard::{Decision, Guard, GuardEvent, GuardServer};
 use teams_signin_extension::client::GuardClient;
 use teams_signin_extension::protocol::{ALLOW, DENY, OK};
@@ -23,33 +19,24 @@ const CODE: &str = "made-up-code-0123456789";
 const TOKEN_URL: &str = "https://login.microsoftonline.com/organizations/oauth2/v2.0/token?client-request-id=\
      0f8b6a3e-1c2d-4e5f-8a9b-0c1d2e3f4a5b";
 
+#[path = "support/diagnostics.rs"]
+mod diagnostics;
+
 struct Lab {
-    _dir: tempfile::TempDir,
-    log_path: std::path::PathBuf,
+    _capture: std::sync::MutexGuard<'static, ()>,
     guard: Guard,
     events: mpsc::Receiver<GuardEvent>,
 }
 
 fn lab() -> TestResult<Lab> {
-    let dir = tempfile::tempdir()?;
-    let log_path = dir.path().join("fence.log");
+    let capture = diagnostics::capture();
     let (sender, events) = mpsc::channel();
-    let guard = Guard::new(
-        FenceLog::open(&log_path)?,
-        RedirectUri::parse(NATIVE_CLIENT_REDIRECT)?,
-        sender,
-    );
+    let guard = Guard::for_tests(RedirectUri::parse(NATIVE_CLIENT_REDIRECT)?, sender);
     Ok(Lab {
-        _dir: dir,
-        log_path,
+        _capture: capture,
         guard,
         events,
     })
-}
-
-fn entries(path: &Path) -> TestResult<Vec<Value>> {
-    let text = fs::read_to_string(path)?;
-    Ok(text.lines().map(serde_json::from_str).collect::<Result<_, _>>()?)
 }
 
 fn armed(lab: &Lab) {
@@ -98,7 +85,7 @@ fn an_armed_page_is_decided_as_the_sign_in_classifier_decides() -> TestResult {
     for (method, url, expected) in cases {
         assert_eq!(lab.guard.decide(PAGE, method, url), expected, "{method} {url}");
     }
-    let logged = entries(&lab.log_path)?;
+    let logged = diagnostics::entries();
     assert_eq!(logged.len(), cases.len(), "one line per decision: {logged:?}");
     for ((method, _, expected), entry) in cases.iter().zip(&logged) {
         assert_eq!(entry["method"], *method);
@@ -128,7 +115,7 @@ fn an_unarmed_page_gets_nothing() -> TestResult {
         Decision::Deny
     );
     assert_eq!(lab.guard.decide(PAGE, "GET", "https://example.test/"), Decision::Allow);
-    let logged = entries(&lab.log_path)?;
+    let logged = diagnostics::entries();
     assert_eq!(logged.len(), 3);
     assert_eq!(logged[0]["verdict"], "deny");
     assert_eq!(logged[1]["verdict"], "deny");
@@ -150,10 +137,53 @@ fn the_redirect_is_caught_logged_without_its_code_and_never_allowed() -> TestRes
         GuardEvent::Redirect(caught) => assert_eq!(caught.expose(), url),
         other @ GuardEvent::Armed { .. } => panic!("{other:?}"),
     }
-    let logged = entries(&lab.log_path)?;
+    let logged = diagnostics::entries();
     assert_eq!(logged[0]["reason"], "sign_in_redirect");
     assert_eq!(logged[0]["url"], format!("{NATIVE_CLIENT_REDIRECT}?code&state"));
-    assert!(!fs::read_to_string(&lab.log_path)?.contains(CODE));
+    assert!(!format!("{logged:?}").contains(CODE));
+    Ok(())
+}
+
+#[test]
+fn diagnostic_decisions_keep_endpoints_but_never_url_credentials() -> TestResult {
+    let lab = lab()?;
+    armed(&lab);
+    let opaque = "x".repeat(120);
+    for url in [
+        "https://user:made-up-password@example.test/path?unknown=made-up-query#made-up-fragment".to_owned(),
+        "https://example.test/token/made-up-path-token?code=made-up-code".to_owned(),
+        "https://example.test/skypetoken/made-up-skype-token?state=made-up-state".to_owned(),
+        format!("https://example.test/{opaque}?{opaque}=made-up-query"),
+        "https://example.test/key=made-up-path-key".to_owned(),
+    ] {
+        assert_eq!(lab.guard.decide(PAGE, "GET", &url), Decision::Allow);
+    }
+    let entries = diagnostics::entries();
+    assert_eq!(entries.len(), 5);
+    let text = format!("{entries:?}");
+    for secret in [
+        "made-up-password",
+        "made-up-query",
+        "made-up-fragment",
+        "made-up-path-token",
+        "made-up-code",
+        "made-up-skype-token",
+        "made-up-state",
+        "made-up-path-key",
+        &opaque,
+    ] {
+        assert!(
+            !text.contains(secret),
+            "credential reached the diagnostic record: {secret}"
+        );
+    }
+    assert_eq!(entries[0]["url"], "https://example.test/path?unknown");
+    assert_eq!(entries[1]["url"], "https://example.test/token/[redacted]?code");
+    assert!(
+        entries
+            .iter()
+            .all(|entry| entry["method"] == "GET" && entry["read"] == true)
+    );
     Ok(())
 }
 
@@ -186,7 +216,7 @@ fn a_loopback_only_guard_denies_everything_off_loopback() -> TestResult {
     assert_eq!(lab.guard.decide(PAGE, "GET", &url), Decision::Deny);
     assert!(matches!(lab.events.try_recv()?, GuardEvent::Redirect(_)));
     lab.guard.refuse("CONNECT", "192.0.2.1:443");
-    let logged = entries(&lab.log_path)?;
+    let logged = diagnostics::entries();
     assert_eq!(logged.len(), cases.len() + 2, "one line per decision: {logged:?}");
     for ((_, _, expected), entry) in cases.iter().zip(&logged) {
         let verdict = if *expected == Decision::Allow { "allow" } else { "deny" };
@@ -199,33 +229,6 @@ fn a_loopback_only_guard_denies_everything_off_loopback() -> TestResult {
         (&"CONNECT".into(), &"192.0.2.1:443".into())
     );
     assert_eq!(refused["verdict"], "deny");
-    Ok(())
-}
-
-/// A log that refuses every append.
-struct Refusing;
-
-impl std::io::Write for Refusing {
-    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
-        Err(std::io::Error::other("full"))
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-#[test]
-fn a_decision_that_can_t_be_logged_is_a_deny() -> TestResult {
-    let (sender, _events) = mpsc::channel();
-    let guard = Guard::new(
-        FenceLog::from_writer(Refusing),
-        RedirectUri::parse(NATIVE_CLIENT_REDIRECT)?,
-        sender,
-    );
-    assert_eq!(guard.answer(&format!("armed {PAGE} 1")), OK);
-    assert_eq!(guard.decide(PAGE, "GET", "https://example.test/"), Decision::Deny);
-    assert_eq!(guard.decide(PAGE, "POST", TOKEN_URL), Decision::Deny);
     Ok(())
 }
 
@@ -263,6 +266,6 @@ fn the_socket_answers_the_extension_line_by_line() -> TestResult {
     let events: Vec<GuardEvent> = lab.events.try_iter().collect();
     assert!(matches!(events.as_slice(), [GuardEvent::Armed { page: PAGE }]));
     // the four requests; a line that isn't one is answered, not logged
-    assert_eq!(entries(&lab.log_path)?.len(), 4);
+    assert_eq!(diagnostics::entries().len(), 4);
     Ok(())
 }

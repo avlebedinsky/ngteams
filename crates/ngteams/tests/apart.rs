@@ -1,5 +1,5 @@
 //! How the lab and the personal build are kept apart (`docs/personal-build.md`): only this crate enables the
-//! `personal` features of `teams-fence`, `teams-signin` and `teams-media` (every workspace manifest read; the last
+//! `personal` features of `teams-fence` and `teams-media` (every workspace manifest read; the last
 //! picks the desktop's PipeWire over the UI sandbox's), and building a lab binary alone resolves them without those
 //! features (`cargo tree`); the workspace's default members leave this crate out; only the install
 //! script sets the install marker, and the binary refuses to run without it and with `test-support`, before anything
@@ -67,7 +67,7 @@ fn only_this_crate_enables_the_personal_features() {
     for member in list(&workspace, "members") {
         let manifest = manifest(&root().join(&member).join("Cargo.toml"));
         for (kind, table) in dependency_tables(&manifest) {
-            for crate_name in ["teams-fence", "teams-signin", "teams-media"] {
+            for crate_name in ["teams-fence", "teams-media"] {
                 let personal = table
                     .get(crate_name)
                     .and_then(|entry| entry.get("features"))
@@ -94,13 +94,11 @@ fn only_this_crate_enables_the_personal_features() {
             // the two crates' own tests of their personal parts, which no binary links
             "crates/ngteams dependencies teams-fence",
             "crates/ngteams dependencies teams-media",
-            "crates/ngteams dependencies teams-signin",
             "crates/ngteams dev-dependencies teams-fence",
             "crates/ngteams dev-dependencies teams-media",
             "crates/teams-fence dev-dependencies teams-fence",
             // with `test-support` beside it, which wins: the build still opens only the sandbox's PipeWire
             "crates/teams-media dev-dependencies teams-media",
-            "crates/teams-signin dev-dependencies teams-signin",
         ]
     );
 }
@@ -131,17 +129,9 @@ fn features_of(package: &str) -> String {
 fn a_lab_binary_built_alone_has_neither_personal_feature() {
     assert!(!features_of("proto-lab").contains("teams-fence"));
     let tree = features_of("teams-signin");
-    assert!(tree.contains("teams-fence"), "teams-signin: {tree}");
-    for personal in [
-        r#"teams-fence feature "personal""#,
-        r#"teams-signin feature "personal""#,
-        r#"teams-media feature "personal""#,
-    ] {
-        assert!(!tree.contains(personal), "teams-signin resolves {personal}");
-    }
+    assert!(!tree.contains("teams-fence"), "teams-signin: {tree}");
     let tree = features_of("ngteams");
     assert!(tree.contains(r#"teams-fence feature "personal""#), "{tree}");
-    assert!(tree.contains(r#"teams-signin feature "personal""#), "{tree}");
     // its calls' devices: the desktop's PipeWire, and no test reach in a plain build of it
     assert!(tree.contains(r#"teams-media feature "personal""#), "{tree}");
     assert!(!tree.contains(r#"teams-fence feature "test-support""#), "{tree}");
