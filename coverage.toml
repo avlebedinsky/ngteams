@@ -80,14 +80,6 @@ reason = "module declarations and documentation only; no executable bodies"
 sha256 = "2eecebd31a3e9cbf23ddb16701b634f807043dbdd91aec1d52c77079bcc00d2f"
 reason = "module declarations and documentation only; no executable bodies"
 
-[unmapped_sources."crates/proto-lab/src/config.rs"]
-sha256 = "4bb2922b854fd2bb6ce02c35d580ce0ecf8adfbf615f5458ebc982a866769794"
-reason = "configuration type and constant re-exports only; no executable bodies"
-
-[unmapped_sources."crates/proto-lab/src/lib.rs"]
-sha256 = "d8d2041bdc82b46de0aba6e7ef19cbe737ed6fd96e38047704a37a66b9bf75a1"
-reason = "module declarations and documentation only; no executable bodies"
-
 [unmapped_sources."crates/teams-core/src/lib.rs"]
 sha256 = "f53a38fbe6c22694b3caffd7eb174c9421761214ebb2e289f0777c44807305cf"
 reason = "module declarations, re-exports and documentation only; no executable bodies"

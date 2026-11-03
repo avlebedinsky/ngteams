@@ -101,8 +101,7 @@ enum Command {
         strict: bool,
     },
     /// Record an approved service participant's MRI in lab.toml, once it is established (the echo service's: Task 18
-    /// of the M0 plan). Only for a participant lab.toml approves by name and records no MRI for yet, and only a bot's
-    /// MRI (`28:<guid>`).
+    /// of the M0 plan). Only for a participant lab.toml approves by name and records no MRI for yet.
     ServiceMri {
         /// The participant's name in lab.toml, such as `echo`.
         name: String,
