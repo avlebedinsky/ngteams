@@ -518,8 +518,7 @@ So:
   captured `Busy`/`InACall` is a call's) and `ForceAvailability` (`set` of `Busy`, `DoNotDisturb`, `Away` or
   `Available`; `reset` with no body), sealed `Mutating` writes in the captured shapes ([endpoints.md](endpoints.md)).
   Their target is `WriteKind::OwnAvailability` on `Scope::Account` (the account's MRI): `Fence::check` permits it
-  without a member read, and only for the fence's own account (`Fence::open_lab_account`, the MRI `lab.toml` gives the
-  account the binary runs as). The endpoint each names (the body's `id`, and `x-ms-endpoint-id` on both) is a
+  without a member read (it reaches nobody). The endpoint each names (the body's `id`, and `x-ms-endpoint-id` on both) is a
   `RegisteredEndpoint`, which only `teams_proto::register` gives, once a registration of this run that the account's
   native HTTP transport sent was answered with a success (a sealed `EndpointRegistrar`: no fake transport outside
   `test-support`), recorded for the transport's fence's own account, and no write of another account's availability

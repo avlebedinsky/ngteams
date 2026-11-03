@@ -36,7 +36,7 @@ someone added, a team made from a template that adds apps, or an app a write add
 ## Everything else is allowed
 
 Reads by any method (a `POST` search or people lookup too), the account's own session, tokens and settings, presence
-(any lab account's availability), a status note, typing and read receipts, a target nobody else is in, team and channel
+(the account's own availability), a status note, typing and read receipts, a target nobody else is in, team and channel
 admin on teams of the lab's people, and what a call sends once its entry was let in (follow-ups, `leave`, ring-time
 sends, Trouter delivery responses), each still a sealed type in its captured shape and logged.
 

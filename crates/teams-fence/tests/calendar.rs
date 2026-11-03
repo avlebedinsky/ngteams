@@ -2,6 +2,8 @@
 //! fence's judgement of a meeting by its attendees' addresses, and the read of an existing event's members. Every
 //! address, id and token here is made up.
 
+use std::fmt::Write as _;
+
 use serde_json::{Value, json};
 use teams_fence::{
     Contact, DenyReason, Fence, FenceLog, FetchFailure, LiveMembershipSource, Membership, MembershipFuture,
@@ -245,6 +247,40 @@ async fn a_meeting_passes_only_when_every_attendee_is_a_lab_account() {
     assert!(fence.check(target(on_event(), &[]), &outsider_event).await.is_err());
     let unread = Fixed(Membership::Partial(PartialReason::NoCredential));
     assert!(fence.check(target(on_event(), &[]), &unread).await.is_err());
+}
+
+/// A lab fence from `lab.toml` admits a meeting attendee by a contact's `upn` (in any case), as it does by a lab
+/// account's, and no one else by address.
+#[tokio::test]
+async fn a_lab_fence_from_lab_toml_admits_a_contact_by_its_upn() -> Result<(), Box<dyn std::error::Error>> {
+    const CONTACT: &str = "Me@Own.Example.com";
+    let dir = tempfile::tempdir()?;
+    let mut text = format!("data_dir = \"{}\"\n", dir.path().display());
+    for (alias, guid) in [("a", "a"), ("b", "b"), ("c", "c")] {
+        write!(
+            text,
+            "\n[[accounts]]\nalias = \"{alias}\"\nupn = \"bot-{alias}@lab.example.com\"\n\
+             mri = \"8:orgid:00000000-0000-4000-8000-00000000000{guid}\"\n"
+        )?;
+    }
+    write!(
+        text,
+        "\n[[contacts]]\nname = \"me\"\nmri = \"8:orgid:00000000-0000-4000-8000-0000000000e0\"\nupn = \"{CONTACT}\"\n"
+    )?;
+    let config = teams_fence::lab::LabConfig::parse(&text, dir.path())?;
+    let fence = Fence::open(&config)?;
+    let none = Fixed(Membership::Complete(Vec::new()));
+    for attendees in [&[CONTACT][..], &["me@own.example.com", LAB_A]] {
+        let permit = fence.check(target(Scope::New, attendees), &none).await;
+        assert!(permit.is_ok(), "{attendees:?}: {permit:?}");
+    }
+    let denied = fence
+        .check(target(Scope::New, &[CONTACT, "me@other.example.com"]), &none)
+        .await
+        .err()
+        .ok_or("allowed")?;
+    assert_eq!(denied.reason(), &DenyReason::Outsiders { count: 1 });
+    Ok(())
 }
 
 #[test]

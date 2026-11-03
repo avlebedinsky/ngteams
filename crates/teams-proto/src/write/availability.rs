@@ -7,7 +7,7 @@
 //! captured shapes, availability values only, every id a request names the account itself or its own registered
 //! endpoint. So each request here:
 //! - targets [`WriteKind::OwnAvailability`] on [`Scope::Account`] (the account by its MRI), which the fence permits
-//!   only for its own account and without a member read (`teams_fence::Fence::check`);
+//!   without a member read (`teams_fence::Fence::check`: it reaches nobody);
 //! - names the account only as UPS's `me` (the account is the token's) and the endpoint only as a
 //!   [`RegisteredEndpoint`], which only a registration this run made for the account gives ([`crate::register`]):
 //!   no other id can be put in one, and one registered for another account (or for none) makes no request of this

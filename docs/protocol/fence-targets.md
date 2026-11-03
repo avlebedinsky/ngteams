@@ -45,8 +45,8 @@ service acts on. A mutating request whose URL doesn't parse is unreadable.
 
 `Fence::check` also takes the three kinds that reach nobody but stay in the native outbox, which orders writes on a
 chat's read horizon and on presence: typing and read receipts, permitted on a chat by its id (1:1, group or meeting)
-without a member read, and the account's own availability on `Scope::Account`, permitted without a member read (any lab
-account's, unless it adds a person outside the lab). The browser never needs them: there, typing and read receipts
+without a member read, and the account's own availability on `Scope::Account`, permitted without a member read (it reaches
+nobody, unless it adds a person outside the lab). The browser never needs them: there, typing and read receipts
 are carve-outs and presence is no contacting service.
 
 ## The contacting services

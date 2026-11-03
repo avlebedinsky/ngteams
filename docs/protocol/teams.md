@@ -195,8 +195,8 @@ as a new appointment does; a public or org-wide one has nobody to judge: `OpenTe
 from a template is judged as a new team by its `visibility`. A copy of a team with its people (`includeRoster`) reaches
 everyone on the team it copies: `MemberChange` on that team's group; without them it is a new team. Anything else on a team is
 `TeamChange` or `MemberChange` on `Scope::Team`, the people it adds named on it: an app added names its bots (`bots[].id`,
-`inputExtensions[].botId`) as `28:` members, so an app with a bot is denied in the lab (a team app is never someone a write
-may add). The own-view writes above reach nobody. The personal build logs and sends them all.
+`inputExtensions[].botId`) as `28:` members, which are no people: on a team of the lab's people the lab may add it
+([lab-rules.md](../lab-rules.md)). The own-view writes above reach nobody. The personal build logs and sends them all.
 
 The lab's fence reads a team's members from its thread (`LiveMembershipSource`, the user's sign-off of 2026-11-03,
 [lab-rules.md](../lab-rules.md)): `GET v1/threads/<thread>?view=msnp24Equivalent` first, which must be that thread with

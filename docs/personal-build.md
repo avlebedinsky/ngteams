@@ -40,8 +40,8 @@ it chooses between options the direction leaves open, the choice is marked **Cho
 
 ## Why the personal build needs rules of its own
 
-The lab's fence answers one question: could anyone outside the 3 lab accounts notice this request? A write passes
-only when every participant of its target, read fresh, is a lab account or an approved service. The personal build
+The lab's fence answers one question: does this request reach a person other than the lab accounts, the echo service
+and the user's own account? A write passes only when no one else is on its target, read fresh, or added by it. The personal build
 is the user's own account talking to the user's own colleagues, so every write it is for fails that question by
 design. Its fence asks no question at all: it is the user's Teams, used by the user in the user's own window, so it
 may do whatever the Teams client lets its user do, and its fence is an audit log (every send logged before it goes)
@@ -225,10 +225,10 @@ What the app does, as Teams does:
 
 ### The lab accounts as test callees
 
-The user may call the lab accounts from the personal build. No lab permission changes: the lab never calls, answers,
-declines or sends a ring-time send to the user's account, no lab config names it, and the lab fence denies every
-contacting write in those chats. Such a call rings on the lab account and is ignored, unless the user answers it on a
-device of their own signed in as that account. The user places it when no lab live run holds the live lock.
+The user may call the lab accounts from the personal build. The user's account is a contact in `lab.toml`
+(`[[contacts]]`), so the lab may reach it as it reaches a lab account, calls both ways included
+([lab-rules.md](lab-rules.md)): a lab binary watching with `--answer-lab-calls` answers such a call; otherwise it
+rings on the lab account and is ignored. The user places it when no lab live run holds the live lock.
 
 ### What the lab can't show
 

@@ -265,7 +265,8 @@ pub enum Answering {
     #[default]
     Nothing,
     /// `--answer-lab-calls`: it answers each invitation the engine offers ([`Event::IncomingCall`]), which the lab
-    /// fence offers only from a lab caller naming only lab accounts, and nothing else. The answer goes out as the
+    /// fence offers only from a caller that isn't a person outside the lab (a lab account, the echo service, a contact),
+    /// and nothing else. The answer goes out as the
     /// engine's [`CallAction::Answer`], under the fence's own judgement again; every other invitation the engine ignored
     /// already (nothing is sent for it). The only sender of an answer but the user's own action, and it lives here alone.
     LabCalls,

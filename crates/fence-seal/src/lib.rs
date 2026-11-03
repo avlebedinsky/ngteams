@@ -7,7 +7,7 @@
 //! outside, no mock origin). The cases under `tests/pass/` must build and run:
 //! the sources `teams-fence` defines (`FailClosed`, and `LiveMembershipSource` with a credential parsed from a chat
 //! service request) are usable, so a lab binary can arm the browser fence; the live source's local-mock origin is not
-//! (`tests/ui/live_mock_origin.rs`). A fence's own account (whose own availability it permits) comes only from
+//! (`tests/ui/live_mock_origin.rs`). A fence's own account (whose incoming calls it offers) comes only from
 //! `lab.toml` (`Fence::open_lab_account`), and the account's own availability names only a `RegisteredEndpoint` that a
 //! registration over the native HTTP transport gave: none written out by hand, none from a transport of another
 //! crate's making, directly or through the push channel (`tests/ui/fence_own_account.rs`,

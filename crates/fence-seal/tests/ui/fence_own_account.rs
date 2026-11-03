@@ -1,4 +1,4 @@
-// A fence's own account (the one account whose own availability it permits, M2 Task 19) comes only from `lab.toml`,
+// A fence's own account (the one account whose incoming calls it offers) comes only from `lab.toml`,
 // through `Fence::open_lab_account`: `Fence::with_own_account`, which takes any MRI, exists only with `test-support`.
 use teams_fence::{Fence, Mri};
 

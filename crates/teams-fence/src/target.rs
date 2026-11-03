@@ -55,8 +55,8 @@ pub enum WriteKind {
     TeamChange,
     BotReply,
     /// The account's own availability (UPS's presence endpoint `PUT` and the manual status): seen across the tenant,
-    /// but it carries nothing to anyone. The fence permits it without a member read, only on [`Scope::Account`] naming
-    /// the fence's own account, with nobody added, so that a lab account never sets another's presence.
+    /// but it carries nothing to anyone. The fence permits it without a member read unless it adds a person outside the
+    /// lab; that it names the account's own endpoint is `teams-proto`'s `RegisteredEndpoint` to ensure.
     OwnAvailability,
 }
 
@@ -234,8 +234,8 @@ pub enum Scope {
     /// it; the fence denies any other kind on `New`.
     New,
     /// The account itself, by its MRI: where its own availability lands ([`WriteKind::OwnAvailability`]). It has no
-    /// members to fetch: the fence permits a write here only when it is the account's own availability and `mri` is
-    /// the fence's own account ([`crate::Fence::own_account`]); it denies any other kind here.
+    /// members to fetch: the fence permits only the account's own availability here (it reaches nobody) and denies
+    /// any other kind.
     Account { mri: String },
 }
 

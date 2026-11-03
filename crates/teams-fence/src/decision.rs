@@ -390,8 +390,8 @@ pub(crate) enum Rules {
 }
 
 impl Fence {
-    /// The lab's fence. Its roster is the MRIs `lab.toml` gives the lab accounts and the approved service participants,
-    /// and its decisions go to `<data_dir>/fence.log`; both files are found from the environment, as
+    /// The lab's fence. Its roster is the MRIs `lab.toml` gives the lab accounts, the approved service participants and
+    /// the contacts (with the accounts' and contacts' mail addresses), and its decisions go to `<data_dir>/fence.log`; both files are found from the environment, as
     /// [`LabLocations::from_env`] finds them.
     ///
     /// # Errors
@@ -401,8 +401,8 @@ impl Fence {
     }
 
     /// The fence of one lab account's native client: [`Fence::open_lab`]'s, whose own account is `alias`'s, by the MRI
-    /// `lab.toml` gives it. It permits that account's own availability ([`WriteKind::OwnAvailability`]) and no other
-    /// account's; an account whose MRI isn't known yet gets none.
+    /// `lab.toml` gives it. It offers the incoming calls addressed to that account ([`Fence::observe_delivery`]); an
+    /// account whose MRI isn't known yet is offered none.
     ///
     /// # Errors
     /// As [`Fence::open_lab`].
@@ -522,7 +522,7 @@ impl Fence {
         self
     }
 
-    /// The account whose own availability this fence permits: the account a [`Fence::open_lab_account`] was opened
+    /// The account whose incoming calls this fence offers: the account a [`Fence::open_lab_account`] was opened
     /// for, when `lab.toml` knows its MRI, or the signed-in account of a personal fence (`Fence::open_personal`, which
     /// opens only once its `accounts.toml` entry holds its object id); `None` otherwise.
     #[must_use]
