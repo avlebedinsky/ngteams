@@ -502,7 +502,15 @@ impl Calls {
     /// its organizer, with the offer it kept (as the web client's Join now does: the channel, no post yet, the account
     /// and its tenant as the meeting's organizer, the meeting posted to the channel). An answer naming no conversation
     /// fails the call.
+    ///
+    /// A call hung up (or failed) while its subscription was unanswered ends here instead: the account never entered
+    /// the new meeting, so there is nothing to leave, and entering it now would post the meeting to the channel the
+    /// user cancelled it in.
     fn subscribed(&mut self, body: &[u8], now: Instant) {
+        if let Some(Phase::Leaving { end, .. }) = self.call.as_ref().map(|call| call.phase) {
+            self.finish(end.end());
+            return;
+        }
         let entry = read::conversation_controller(body).zip(self.call.as_mut().and_then(|call| call.meet_now.take()));
         let Some((conversation, (channel, offer))) = entry else {
             self.fail(Step::Subscribe, now);

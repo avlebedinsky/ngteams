@@ -644,7 +644,6 @@ fn failed() -> Outcome {
     }
 }
 
-/// An invitation to `callee` from a in the group chat `chat`, its conversation `Conversation<n>`.
 #[test]
 fn a_meeting_goes_from_its_start_to_joining_rings_nobody_and_connects_on_its_acceptance() {
     let meeting = teams_proto::MeetingInfo {
@@ -749,6 +748,33 @@ fn meet_now_whose_subscription_names_no_conversation_ends() {
         events(&after)
             .iter()
             .any(|event| matches!(event, CallEvent::Ended { .. })),
+        "{after:#?}"
+    );
+}
+
+#[test]
+fn meet_now_hung_up_before_its_subscription_is_answered_never_enters_the_meeting() {
+    let placement = Placement::Channel {
+        channel: "19:MadeUpChannel0001@thread.tacv2".to_owned(),
+    };
+    let now = Instant::now();
+    let mut calls = Calls::new(identity(A));
+    calls.set_push_url(PUSH).unwrap();
+    let call = calls.place(&placement, media(), now).unwrap();
+    let placed = effects(&mut calls);
+    let [(subscription, "start")] = sent(&placed)[..] else {
+        panic!("{placed:#?}");
+    };
+    calls.hang_up(call, now).unwrap();
+    effects(&mut calls);
+    // the new meeting's conversation comes after the hang-up: no join (which would post the meeting to the channel)
+    calls.on_outcome(subscription, &ok(&conversation_answer()), now);
+    let after = effects(&mut calls);
+    assert!(sent(&after).is_empty(), "{after:#?}");
+    assert!(
+        events(&after)
+            .iter()
+            .any(|event| matches!(event, CallEvent::Ended { call: ended, .. } if *ended == call)),
         "{after:#?}"
     );
 }
@@ -896,6 +922,7 @@ fn a_meetings_running_call_tells_who_is_in_it_from_the_starts_answer() {
     assert_eq!(participants[0].name.as_deref(), Some("Lab Bee"));
 }
 
+/// An invitation to `callee` from a in the group chat `chat`, its conversation `Conversation<n>`.
 fn group_invitation(callee: &str, chat: &str, n: u8) -> Value {
     let gp = json!({
         "callNotification": {
