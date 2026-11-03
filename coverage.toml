@@ -22,10 +22,8 @@ teams-auth = { lines = 95, functions = 95, regions = 93 }
 teams-proto = { lines = 93, functions = 91, regions = 91 }
 teams-fence = { lines = 94, functions = 93, regions = 92 }
 teams-signin-extension = { lines = 100, functions = 100, regions = 99 }
-teams-app = { lines = 93, functions = 92, regions = 92 }
 teams-wpe = { lines = 91, functions = 92, regions = 91 }
 ngteams = { lines = 92, functions = 91, regions = 90 }
-teams-headless = { lines = 92, functions = 92, regions = 90 }
 teams-core = { lines = 91, functions = 92, regions = 89 }
 teams-media = { lines = 78, functions = 79, regions = 78 }
 teams-mock = { lines = 54, functions = 52, regions = 55 }
@@ -90,17 +88,9 @@ reason = "configuration type and constant re-exports only; no executable bodies"
 sha256 = "d8d2041bdc82b46de0aba6e7ef19cbe737ed6fd96e38047704a37a66b9bf75a1"
 reason = "module declarations and documentation only; no executable bodies"
 
-[unmapped_sources."crates/teams-app/src/lib.rs"]
-sha256 = "19ac3256c6b7e3e7ae142cb464ba5a55cb135f77623c7a4fff64402fc79e9f91"
-reason = "module declarations and documentation only; no executable bodies"
-
 [unmapped_sources."crates/teams-core/src/lib.rs"]
-sha256 = "3745bbbcbe495c80dbd88314dd5be97bbd0d736813e9be34119f8c02448f97ab"
+sha256 = "f53a38fbe6c22694b3caffd7eb174c9421761214ebb2e289f0777c44807305cf"
 reason = "module declarations, re-exports and documentation only; no executable bodies"
-
-[unmapped_sources."crates/teams-headless/src/lib.rs"]
-sha256 = "ec874726177e44e5539d4f62522e2f181785e65e3086756fbfced78df883c456"
-reason = "module declarations and documentation only; no executable bodies"
 
 [unmapped_sources."crates/teams-media/src/lib.rs"]
 sha256 = "a407cf664eff6d0427a49672c5affa5aaa33a84e95497dcdf4b1b2e139f6e770"

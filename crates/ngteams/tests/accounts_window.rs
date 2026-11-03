@@ -3,8 +3,8 @@
 //!
 //! The test runs itself again inside the sandbox ([`Sandbox::spawn_with_fds`], only the view trace's pipe passed
 //! through) as the app of lab accounts a and b, each one's engine on the mock chat service and its Trouter
-//! (`teams-mock`, through the `test-support` mock origins, a test roster and log), handed to the app as `teams-app`
-//! hands its own ([`teams_app::app::launch`]). The parent reads the view trace: both accounts on the rail, a shown and
+//! (`teams-mock`, through the `test-support` mock origins, a test roster and log), handed to the app as `ngteams`
+//! hands its own ([`ngteams::app::launch`]). The parent reads the view trace: both accounts on the rail, a shown and
 //! connected; screenshots the window (the rail's avatars above Settings; kept under `target/ui-shots/`); switches to b
 //! with the sandbox's virtual keyboard (Ctrl+Alt+Down) and screenshots it again; then c posts on the mock to a's chat
 //! with c while b is shown: a's notification reaches the sandbox's fake server naming a, and activating it shows a
@@ -22,14 +22,16 @@ use std::time::Duration;
 use std::{fs, future, io, thread};
 
 use gpui::{App, AsyncApp, Window, WindowingModes};
-use teams_app::app::{self, Launch, LaunchAccount};
-use teams_app::trace::adopt_trace;
+use ngteams::app::{self, Launch};
+#[path = "support/window.rs"]
+mod support;
+use ngteams::descriptors::adopt_trace;
+use support::display_name;
 use teams_auth::secrets::Secret;
 use teams_auth::session::{AccessToken, Renewal};
 use teams_auth::token::TokenError;
 use teams_core::Outbox;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Parts, Push};
-use teams_core::lab::display_name;
 use teams_fence::lab::{Alias, LabConfig, record_abc_chat};
 use teams_fence::{CallFloor, Fence, FenceLog, LiveMembershipSource, Mri, Roster};
 use teams_mock::{ABC_CHAT, AC_CHAT, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, TrouterMock, lab_toml};
@@ -42,9 +44,9 @@ use ui_sandbox::input::{Modifier, keys};
 use ui_sandbox::{NIRI_FULL_WINDOW, Running, Sandbox, SandboxOptions, SandboxResult, sandbox_or_skip};
 
 /// Which mode the child runs in.
-const CHILD_ENV: &str = "TEAMS_APP_ACCOUNTS_TEST";
+const CHILD_ENV: &str = "NGTEAMS_ACCOUNTS_TEST";
 /// The child's view trace descriptor.
-const TRACE_FD_ENV: &str = "TEAMS_APP_ACCOUNTS_TRACE_FD";
+const TRACE_FD_ENV: &str = "NGTEAMS_ACCOUNTS_TRACE_FD";
 /// From the child's start to its `ready` (the mock started, the window drawn).
 const STARTUP: Duration = Duration::from_secs(90);
 /// Anything else the parent waits for.
@@ -85,11 +87,11 @@ fn parent() -> SandboxResult {
         niri_extra: NIRI_FULL_WINDOW,
         ..SandboxOptions::default()
     };
-    let Some(sandbox) = sandbox_or_skip("teams-app accounts window", &options)? else {
+    let Some(sandbox) = sandbox_or_skip("ngteams accounts window", &options)? else {
         return Ok(());
     };
     two_accounts_in_one_window(&sandbox).map_err(|error| format!("{error}{}", sandbox.logs()))?;
-    say("teams-app accounts window: ok");
+    say("ngteams accounts window: ok");
     Ok(())
 }
 
@@ -192,17 +194,17 @@ fn two_accounts_in_one_window(sandbox: &Sandbox) -> SandboxResult {
             line["view"] == "chat-list" && line["change"] == "shown"
         })
         .map_err(|error| running.fail(&error.to_string()))?;
-    shot(sandbox, "teams-app-accounts-a.png")?;
+    shot(sandbox, "ngteams-accounts-a.png")?;
 
     let mut input = sandbox.input()?;
     input.key_with(&[Modifier::Ctrl, Modifier::Alt], keys::DOWN)?;
     trace
         .next_where("switched to b", |line| about(line, "account", "switched", LAB_B))
         .map_err(|error| running.fail(&error.to_string()))?;
-    shot(sandbox, "teams-app-accounts-b.png")?;
+    shot(sandbox, "ngteams-accounts-b.png")?;
 
     a_s_message_notifies_naming_a_and_shows_a(sandbox, &mut trace, &running)?;
-    shot(sandbox, "teams-app-accounts-notified.png")?;
+    shot(sandbox, "ngteams-accounts-notified.png")?;
     quit(sandbox, &mut trace, &running)?;
     running
         .line_where(WAIT, |line| line == "engines-released")
@@ -253,7 +255,7 @@ fn quit(sandbox: &Sandbox, trace: &mut TraceReader, running: &Running) -> Sandbo
     let host = sandbox.bus().connect()?;
     let item = zbus::blocking::Proxy::new(&host, name.as_str(), ITEM_PATH, "org.kde.StatusNotifierItem")?;
     let title: String = item.get_property("Title")?;
-    if !title.starts_with("ngteams (lab a, b)") {
+    if !title.starts_with(app::TITLE) {
         return Err(format!("the item's title: {title}").into());
     }
     let menu = zbus::blocking::Proxy::new(&host, name.as_str(), MENU_PATH, "com.canonical.dbusmenu")?;
@@ -319,7 +321,7 @@ impl Tokens {
     }
 }
 
-/// The mock with a's and b's engines on it, each as `teams_core::lab::start` builds one but for the mock origins, a
+/// The mock with a's and b's engines on it, each as `teams_core::account::start` builds one but for the mock origins, a
 /// test roster and log, both fences on one call floor; their push channels on the mock's Trouter.
 struct MockLab {
     _runtime: tokio::runtime::Runtime,
@@ -400,13 +402,14 @@ impl MockLab {
 }
 
 fn child_window() -> SandboxResult {
-    teams_app::guard::window_allowed_here()?;
+    ngteams::read_only::window_allowed_here()?;
     let fd: RawFd = std::env::var(TRACE_FD_ENV)?.parse()?;
     let trace = teams_ui::ViewTrace::new(adopt_trace(fd)?);
     let lab = MockLab::start()?;
-    let a = lab.engine(Alias::A, LAB_A, "bot-a@lab.example.test")?;
-    let b = lab.engine(Alias::B, LAB_B, "bot-b@lab.example.test")?;
+    let a = support::started(Alias::A, lab.engine(Alias::A, LAB_A, "bot-a@lab.example.test")?)?;
+    let b = support::started(Alias::B, lab.engine(Alias::B, LAB_B, "bot-b@lab.example.test")?)?;
     let settings = teams_ui::SettingsFile::new(lab.dir.path().join("ui").join("a.toml"));
+    let runner = support::runner(lab.dir.path())?;
     let failed = Arc::new(Mutex::new(None));
     let failed_in_app = Arc::clone(&failed);
     let mock = Arc::clone(&lab.mock);
@@ -414,14 +417,15 @@ fn child_window() -> SandboxResult {
         let launched = app::launch(
             cx,
             Launch {
-                first: LaunchAccount::bare(Alias::A, a),
-                others: vec![LaunchAccount::bare(Alias::B, b)],
-                trace,
-                settings,
+                first: a,
+                others: vec![b],
+                trace: Arc::new(trace),
+                settings: teams_ui::SettingsModel::load(settings),
                 // the sandbox's private bus, with its fake notification server and tray watcher
                 bus: teams_ui::bus::address_from_env(),
-                diagnostics: None,
-                playback: teams_media::player::PlayerSetup::default(),
+                sign_in_again: std::rc::Rc::new(|_| std::rc::Rc::new(|_| {})),
+                runner,
+                read_only: false,
             },
         );
         match launched {

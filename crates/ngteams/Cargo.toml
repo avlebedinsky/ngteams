@@ -51,6 +51,9 @@ tokio = { workspace = true, features = ["net", "rt", "sync"] }
 ui-sandbox.workspace = true
 
 [dev-dependencies]
+# The retained sandbox window tests read screenshots and serve mock tray items.
+image = { workspace = true, features = ["png", "gif"] }
+zbus.workspace = true
 # a call's id for the call events the personal app's models are shown (`CallId::for_tests`)
 teams-call = { workspace = true, features = ["test-support"] }
 # the calls on the mock relay through its loopback TURN server (`Relay::Fixed`)
@@ -73,6 +76,22 @@ tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time
 # the manifest tests read every workspace manifest
 toml.workspace = true
 wiremock.workspace = true
+
+[[test]]
+name = "window"
+harness = false
+
+[[test]]
+name = "accounts_window"
+harness = false
+
+[[test]]
+name = "call_window"
+harness = false
+
+[[test]]
+name = "ui_tour"
+harness = false
 
 [lints]
 workspace = true

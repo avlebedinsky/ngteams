@@ -274,27 +274,6 @@ fn forced_and_policy(name: ScenarioName, nonce: &str) -> Result<Option<(Vec<Forc
             assert!(CALLEE_FORCED.contains(&EARLIER_RUN_PROBE));
             (probe_rules(None)?, policy(caller_forced(step)))
         }
-        // b's page, under the earlier run's probe rules
-        ScenarioName::AbCallNative => {
-            use proto_lab::scenario::ab_call::policy;
-            use proto_lab::scenario::ab_call_native::FORCED;
-            assert!(FORCED.contains(&EARLIER_RUN_PROBE));
-            (probe_rules(None)?, policy(FORCED))
-        }
-        // b's and c's pages, under the earlier run's probe rules
-        ScenarioName::AbcCallMixed => {
-            use proto_lab::scenario::ab_call::policy;
-            use proto_lab::scenario::abc_call_mixed::{FORCED_B, FORCED_C};
-            assert!(FORCED_B.contains(&EARLIER_RUN_PROBE) && FORCED_C.contains(&EARLIER_RUN_PROBE));
-            (probe_rules(None)?, policy(FORCED_C))
-        }
-        // b's page beside a's app, under the earlier run's probe rules, in either step
-        ScenarioName::AbCallApp => {
-            use proto_lab::scenario::ab_call::policy;
-            use proto_lab::scenario::ab_call_app::{FORCED_ANSWER, FORCED_PLACE};
-            assert!(FORCED_ANSWER.contains(&EARLIER_RUN_PROBE) && FORCED_PLACE.contains(&EARLIER_RUN_PROBE));
-            (probe_rules(None)?, policy(FORCED_ANSWER))
-        }
         ScenarioName::OwnPresenceActivity
         | ScenarioName::OwnPresenceEndpoint
         | ScenarioName::OwnPresenceBoth

@@ -26,15 +26,17 @@ use std::time::Duration;
 use std::{fs, future, io, thread};
 
 use gpui::{App, AsyncApp, Context, Entity, ListOffset, Window, WindowHandle, WindowingModes, px};
-use teams_app::app::{self, Launch, LaunchAccount};
-use teams_app::trace::adopt_trace;
+use ngteams::app::{self, Launch};
+#[path = "support/window.rs"]
+mod support;
+use ngteams::descriptors::adopt_trace;
+use support::display_name;
 use teams_auth::secrets::Secret;
 use teams_auth::session::{AccessToken, Renewal};
 use teams_auth::token::TokenError;
 use teams_core::Outbox;
 use teams_core::VideoOutput;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Parts, Push};
-use teams_core::lab::display_name;
 use teams_fence::lab::{Alias, LabConfig, record_abc_chat};
 use teams_fence::{Fence, FenceLog, LiveMembershipSource, Mri, Roster};
 use teams_media::devices::catalog::{DeviceInfo, DeviceKind, DeviceList, FixedDirectory};
@@ -65,9 +67,9 @@ use ui_sandbox::{NIRI_FULL_WINDOW, Running, Sandbox, SandboxOptions, SandboxResu
 /// The mock's team.
 const TEAM: &str = "19:channel0001@thread.tacv2";
 /// Which mode the child runs in.
-const CHILD_ENV: &str = "TEAMS_APP_TOUR_TEST";
+const CHILD_ENV: &str = "NGTEAMS_TOUR_TEST";
 /// The child's view trace descriptor.
-const TRACE_FD_ENV: &str = "TEAMS_APP_TOUR_TRACE_FD";
+const TRACE_FD_ENV: &str = "NGTEAMS_TOUR_TRACE_FD";
 /// From the child's start to its `ready` (the mock started, the window drawn).
 const STARTUP: Duration = Duration::from_secs(90);
 /// Anything else the parent waits for.
@@ -1103,11 +1105,11 @@ fn parent() -> SandboxResult {
         niri_extra: NIRI_FULL_WINDOW,
         ..SandboxOptions::default()
     };
-    let Some(sandbox) = sandbox_or_skip("teams-app ui tour", &options)? else {
+    let Some(sandbox) = sandbox_or_skip("ngteams ui tour", &options)? else {
         return Ok(());
     };
     tour(&sandbox).map_err(|error| format!("{error}{}", sandbox.logs()))?;
-    say("teams-app ui tour: ok");
+    say("ngteams ui tour: ok");
     Ok(())
 }
 
@@ -1577,7 +1579,7 @@ impl Tokens {
     }
 }
 
-/// The mock and a's engine on it, as `teams_core::lab::start` builds one but for the mock origins, a test roster and
+/// The mock and a's engine on it, as `teams_core::account::start` builds one but for the mock origins, a test roster and
 /// a test log; its push channel on the Trouter mock.
 struct MockLab {
     _runtime: tokio::runtime::Runtime,
@@ -2180,26 +2182,28 @@ fn seed_mentions(mock: &ChatServiceMock) -> SandboxResult {
 }
 
 fn child_window() -> SandboxResult {
-    teams_app::guard::window_allowed_here()?;
+    ngteams::read_only::window_allowed_here()?;
     let fd: RawFd = std::env::var(TRACE_FD_ENV)?.parse()?;
     let trace = teams_ui::ViewTrace::new(adopt_trace(fd)?);
     let (lab, engine) = MockLab::start()?;
+    let first = support::started(Alias::A, engine)?;
     let settings = teams_ui::SettingsFile::new(lab.dir.path().join("ui").join("a.toml"));
+    let runner = support::runner(lab.dir.path())?;
     let failed = Arc::new(Mutex::new(None));
     let failed_in_app = Arc::clone(&failed);
     gpui_platform::linux(WindowingModes::WAYLAND).run(move |cx: &mut App| {
         let launched = app::launch(
             cx,
             Launch {
-                first: LaunchAccount::bare(Alias::A, engine),
+                first,
                 others: Vec::new(),
-                trace,
-                settings,
+                trace: Arc::new(trace),
+                settings: teams_ui::SettingsModel::load(settings),
                 // the sandbox's private bus, with its fake notification server and tray watcher
                 bus: teams_ui::bus::address_from_env(),
-                diagnostics: None,
-                // the made-up video plays silently
-                playback: teams_media::player::PlayerSetup::default(),
+                sign_in_again: std::rc::Rc::new(|_| std::rc::Rc::new(|_| {})),
+                runner,
+                read_only: false,
             },
         );
         match launched {

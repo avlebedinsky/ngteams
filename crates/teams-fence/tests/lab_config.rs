@@ -75,8 +75,6 @@ fn lab_directories_derive_from_the_data_dir() {
     assert_eq!(paths.fence_log(), data.join("fence.log"));
     assert_eq!(paths.region_file(Alias::B), data.join("auth/b.json"));
     assert_eq!(paths.store_file(Alias::A), data.join("store/a.sqlite"));
-    assert_eq!(paths.ui_settings_file(Alias::C), data.join("ui/c.toml"));
-    assert_eq!(paths.app_log_dir(Alias::B), data.join("logs/b"));
 }
 
 #[test]

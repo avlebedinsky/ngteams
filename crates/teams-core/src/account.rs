@@ -1,5 +1,4 @@
-//! One account's engine, assembled the one way every binary builds it: the lab's (`crate::lab`: `teams-headless`,
-//! `teams-app`) and the personal build's (`crates/ngteams`). The binary hands in the account (its UPN, MRI and name,
+//! One account's engine, assembled the one way every binary builds it: the client (`crates/ngteams`). The binary hands in the account (its UPN, MRI and name,
 //! its store's file, its region as authz gave it), the fence it opened, the secret store its session takes its tokens
 //! from, and how the fence reads a target's members ([`Membership`]: the lab's live member read, or the personal
 //! fence's own source); [`start`] builds the account's [`Session`], the writes' transport (the chat base from the

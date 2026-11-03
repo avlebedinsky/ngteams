@@ -1,4 +1,4 @@
-//! What the app crates (`teams-ui` and `teams-app`) can reach: every request goes through `teams-core`, so neither
+//! What the app crates (`teams-ui` and `ngteams`) can reach: every request goes through `teams-core`, so neither
 //! depends directly on an HTTP or WebSocket client (read from `cargo metadata`, resolved for the host); GPUI's HTTP
 //! client stays the null one, so nothing in their sources hands GPUI another; nothing in them reads a token's value
 //! out of its `Secret`; and the search is the store's, never the service's (no client crate names Substrate).
@@ -10,7 +10,7 @@
 //! HTTP or WebSocket client, and every package in it is under a licence an Apache-2.0/MIT project can take; the
 //! default features the kit turns on in `gpui-pre` give GPUI's Linux platform no X11 backend; and the app crates never
 //! start the kit's theme directory watcher nor install a `log` logger or a `tracing` subscriber of their own: the only
-//! logger is the diagnostic log's (`teams-log`, M2 Task 24a), installed by `teams-app` through its `install`, and it
+//! logger is the diagnostic log's (`teams-log`, M2 Task 24a), installed by `ngteams` through its `install`, and it
 //! takes only our crates' records, so the kit's log lines (and its `tracing` events, forwarded to `log`) go nowhere.
 
 // test code throughout (its helpers unwrap like the tests do)
@@ -23,7 +23,7 @@ use std::process::Command;
 use serde_json::Value;
 
 /// The crates that make the app.
-const APP_CRATES: [&str; 2] = ["teams-ui", "teams-app"];
+const APP_CRATES: [&str; 2] = ["teams-ui", "ngteams"];
 
 /// HTTP and WebSocket clients, by crate name.
 const NETWORK_CLIENTS: [&str; 16] = [
@@ -528,7 +528,7 @@ const LINKED_CRATES: [&str; 6] = [
 
 /// Only this logger (M2 Task 24a): `teams-log` is the one crate of the app that sets a logger, and only with `log`'s
 /// `set_logger` (no `tracing` subscriber, so the kit's `tracing` events reach `log` and its filter); no other crate the
-/// app is built from sets one; the app crates install it only through `teams_log::install`, which `teams-app` calls
+/// app is built from sets one; the app crates install it only through `teams_log::install`, which `ngteams` calls
 /// once and `teams-ui` never.
 #[test]
 fn the_only_logger_is_teams_log_s_installed_by_the_app() {
@@ -540,7 +540,7 @@ fn the_only_logger_is_teams_log_s_installed_by_the_app() {
                 assert!(!text.contains(setup), "{} names {setup}", path.display());
             }
             let installs = text.matches("teams_log::install(").count();
-            if path.ends_with("teams-app/src/app.rs") {
+            if path.ends_with("ngteams/src/app.rs") {
                 assert_eq!(installs, 1, "the app installs the log once");
             } else {
                 assert_eq!(installs, 0, "{} installs the log", path.display());

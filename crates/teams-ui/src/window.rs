@@ -11,9 +11,6 @@ use crate::shell::{Shell, ShellParts};
 use crate::view::Root;
 use crate::{clock, picture_viewer, shell, theme};
 
-/// The lab app's Wayland app id.
-pub const LAB_APP_ID: &str = "ngteams-lab";
-
 /// The personal build's Wayland app id (`crates/ngteams`), also the name of its desktop entry
 /// (`packaging/com.nickalie.ngteams.desktop`, its `StartupWMClass`).
 pub const PERSONAL_APP_ID: &str = "com.nickalie.ngteams";

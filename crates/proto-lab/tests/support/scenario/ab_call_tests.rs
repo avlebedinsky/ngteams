@@ -46,8 +46,6 @@ fn verdict(method: &str, url: &str, decision: &str) -> String {
 async fn invalid_call_plans_fail_before_opening_any_browser() {
     let dir = tempfile::tempdir().unwrap();
     let paths = LabPaths::new(dir.path().to_path_buf());
-    let error = run_plan(&paths, &plan(CallStep::Place)).await.unwrap_err();
-    assert!(error.to_string().contains("only ab-call-app does"));
     let plan = plan(CallStep::Answer);
     assert_eq!(plan.callee_mri(Alias::B), "8:orgid:synthetic-b");
     assert_eq!(plan.callee_mri(Alias::C), "");

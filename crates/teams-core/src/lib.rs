@@ -30,8 +30,7 @@
 //! - [`calling`]: the account's calls (M3 Task 14): the call session joining the signaling machine (`teams-call`), the
 //!   calling stack's socket, the outbox's call kind and the call's media (`teams-media`).
 //! - [`account`]: one account's engine, assembled the one way every binary builds it (its session over the secret
-//!   store the binary hands in, the fence and the member read it opened); [`lab`] gives it a lab account's parts, the
-//!   personal build (`crates/ngteams`) its own.
+//!   store the binary hands in, the fence and the member read it opened); `ngteams` gives it the account's parts.
 //!
 //! M1 Tasks 13, 17 and 18 (`docs/plans/20261020-native-teams-m1-headless-chat-core.md`); M2 Task 5
 //! (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
@@ -43,7 +42,6 @@ pub mod channels;
 pub mod emoticons;
 pub mod engine;
 pub mod file_content;
-pub mod lab;
 pub mod outbox;
 pub mod own_presence;
 pub mod pictures;

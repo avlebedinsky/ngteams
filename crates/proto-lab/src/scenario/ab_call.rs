@@ -101,8 +101,6 @@ pub enum CallStep {
     /// As `answer`, and the call is then held [`KEEP_ALIVE_HOLD`], past the call's keep-alive interval, to record its
     /// keep-alive, which the fence permits on the call's own `callLeg` link: every page must have sent one.
     KeepAlive,
-    /// `ab-call-app` only: b's page places the call to a, whose app answers it (`ab-call` and `abc-call` refuse it).
-    Place,
 }
 
 impl CallStep {
@@ -119,7 +117,6 @@ impl CallStep {
             Self::Dropped => "dropped",
             Self::Join => "join",
             Self::KeepAlive => "keep-alive",
-            Self::Place => "place",
         }
     }
 
@@ -136,7 +133,7 @@ impl CallStep {
                 button: DECLINE_CSS,
                 what: "decline",
             }),
-            Self::StartHeld | Self::Cancel | Self::Timeout | Self::Place => None,
+            Self::StartHeld | Self::Cancel | Self::Timeout => None,
         }
     }
 }
@@ -382,15 +379,8 @@ pub(crate) fn mri(config: &LabConfig, alias: Alias) -> Result<String, ScenarioEr
 /// Runs a call scenario's `plan` (see the module docs).
 ///
 /// # Errors
-/// When the run can't start: `--call place` (`ab-call-app`'s only), no tone file, no Chrome, no fence, a browser that
-/// can't be armed.
+/// When the run can't start: no tone file, no Chrome, no fence, or a browser that can't be armed.
 pub(crate) async fn run_plan(paths: &LabPaths, plan: &CallPlan) -> Result<ScenarioReport, ScenarioError> {
-    if plan.step == CallStep::Place {
-        return Err(setup(format!(
-            "{} doesn't take --call place: only ab-call-app does",
-            plan.scenario
-        )));
-    }
     let mut report = ScenarioReport::new(plan.scenario);
     report
         .notes
@@ -942,7 +932,7 @@ impl Modality {
     }
 }
 
-/// `alias` (a, but in `ab-call-native` b) places a call from the chat's header ([`Modality::control`]): its button when the header shows one, else its item
+/// `alias` places a call from the chat's header ([`Modality::control`]): its button when the header shows one, else its item
 /// in the call options; a group chat's confirmation, when it asks for one within [`CONFIRM_WAIT`], is confirmed.
 pub(crate) async fn place_call(
     (alias, caller): (Alias, &mut LabSession),
@@ -2139,7 +2129,7 @@ pub enum EarlierRings {
     Judged,
     /// Every one but the run's own call's invitations to the callee ([`Invitation::is_of`]) the capture timed before
     /// the call was placed: an earlier phase of the run rang the page with a call of the same caller
-    /// (`ab-call-native`). Any other invitation from before, an outsider's included, still refuses.
+    /// Any other invitation from before, an outsider's included, still refuses.
     OwnLeftOut,
 }
 

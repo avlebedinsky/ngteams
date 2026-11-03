@@ -1,5 +1,4 @@
-//! The app's settings, kept in a TOML file of the account's own: the lab build's at `<data_dir>/ui/<alias>.toml`
-//! (`teams_fence::lab::LabPaths::ui_settings_file`), the personal build's in its own data dir.
+//! The app's settings, kept in a TOML file in its own data directory.
 //!
 //! - **What**: the chat shown last ([`Settings::selected_chat`]), whether typing, read receipts and the account's own
 //!   availability are sent, which messages notify ([`Notifications`]), the idle time after which the account's

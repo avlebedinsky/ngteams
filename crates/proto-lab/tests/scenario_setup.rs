@@ -1,11 +1,10 @@
 //! Public scenario admission in environment-cleared subprocesses. Every path is synthetic and temporary;
-//! the pinned browser is absent and the native-path placeholder is deliberately not executable.
+//! the pinned browser is absent.
 
 #![cfg(test)]
 
 use std::fmt::Write as _;
 use std::fs;
-use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -33,8 +32,6 @@ fn public_scenario_entry_points_refuse_incomplete_setup_without_opening_personal
         "no-chrome",
         "no-echo",
         "tone-obstructed",
-        "native-unset",
-        "native-missing",
         "invalid-step",
     ] {
         let directory = tempfile::tempdir().unwrap();
@@ -55,9 +52,6 @@ fn public_scenario_entry_points_refuse_incomplete_setup_without_opening_personal
                 "DBUS_SESSION_BUS_ADDRESS",
                 format!("unix:path={}/absent-bus", root.display()),
             );
-        if case != "native-unset" {
-            child.env("TEAMS_HEADLESS_BIN", root.join("native.disabled"));
-        }
         for name in ["LD_LIBRARY_PATH", "LANG", "LLVM_PROFILE_FILE"] {
             if let Some(value) = std::env::var_os(name) {
                 child.env(name, value);
@@ -108,10 +102,7 @@ fn fixture(root: &Path, case: &str) -> (LabLocations, LabPaths) {
     assert!(locations.config_file.starts_with(root));
     assert!(paths.data_dir().starts_with(root));
     fs::create_dir_all(paths.data_dir()).unwrap();
-    if !matches!(
-        case,
-        "missing-config" | "native-unset" | "native-missing" | "invalid-step"
-    ) {
+    if !matches!(case, "missing-config" | "invalid-step") {
         fixture_config(
             &locations,
             !matches!(case, "missing-mris" | "create-missing-mri"),
@@ -121,10 +112,7 @@ fn fixture(root: &Path, case: &str) -> (LabLocations, LabPaths) {
     if case == "malformed-config" {
         fs::write(&locations.config_file, "[[accounts\nsynthetic malformed config").unwrap();
     }
-    if !matches!(
-        case,
-        "missing-chats" | "create-missing-mri" | "native-unset" | "native-missing" | "invalid-step"
-    ) {
+    if !matches!(case, "missing-chats" | "create-missing-mri" | "invalid-step") {
         fs::write(paths.chats_file(), format!("abc = {GROUP:?}\n")).unwrap();
     }
     if case == "malformed-chats" {
@@ -132,12 +120,6 @@ fn fixture(root: &Path, case: &str) -> (LabLocations, LabPaths) {
     }
     if case == "tone-obstructed" {
         fs::write(paths.data_dir().join("media"), "synthetic obstruction").unwrap();
-    }
-    if !matches!(case, "native-unset" | "native-missing") {
-        let disabled = root.join("native.disabled");
-        fs::write(&disabled, "synthetic non-executable native-path placeholder\n").unwrap();
-        fs::set_permissions(&disabled, fs::Permissions::from_mode(0o600)).unwrap();
-        assert_eq!(fs::metadata(disabled).unwrap().permissions().mode() & 0o111, 0);
     }
     (locations, paths)
 }
@@ -171,7 +153,7 @@ async fn missing_config(paths: &LabPaths) {
 }
 
 async fn missing_chats(paths: &LabPaths) {
-    for name in [ScenarioName::AbcCall, ScenarioName::AbcCallMixed] {
+    for name in [ScenarioName::AbcCall] {
         let error = invoke(name, paths).await.unwrap_err().to_string();
         assert!(error.contains("records no a-b-c chat"), "{name}: {error}");
     }
@@ -187,7 +169,6 @@ async fn malformed_chats(paths: &LabPaths) {
         ScenarioName::AbcChat,
         ScenarioName::AbcEveryone,
         ScenarioName::AbcCall,
-        ScenarioName::AbcCallMixed,
         ScenarioName::ChatShapes,
     ] {
         let error = invoke(name, paths).await.unwrap_err().to_string();
@@ -196,13 +177,7 @@ async fn malformed_chats(paths: &LabPaths) {
 }
 
 async fn missing_mris(paths: &LabPaths) {
-    for name in [
-        ScenarioName::AbCall,
-        ScenarioName::AbcCall,
-        ScenarioName::AbCallNative,
-        ScenarioName::AbcCallMixed,
-        ScenarioName::AbCallApp,
-    ] {
+    for name in [ScenarioName::AbCall, ScenarioName::AbcCall] {
         let error = invoke(name, paths).await.unwrap_err().to_string();
         assert!(error.contains("MRI"), "{name}: {error}");
     }
@@ -215,37 +190,14 @@ async fn no_browser(paths: &LabPaths) {
 }
 
 async fn obstructed_tone(paths: &LabPaths) {
-    for name in [
-        ScenarioName::EchoCall,
-        ScenarioName::AbCall,
-        ScenarioName::AbcCall,
-        ScenarioName::AbCallNative,
-        ScenarioName::AbcCallMixed,
-        ScenarioName::AbCallApp,
-    ] {
+    for name in [ScenarioName::EchoCall, ScenarioName::AbCall, ScenarioName::AbcCall] {
         let error = invoke(name, paths).await.unwrap_err().to_string();
         assert!(error.contains("can't write the tone"), "{name}: {error}");
     }
 }
 
-async fn absent_native(paths: &LabPaths, unset: bool) {
-    for name in [ScenarioName::AbCallNative, ScenarioName::AbcCallMixed] {
-        let error = invoke(name, paths).await.unwrap_err().to_string();
-        assert!(error.contains("TEAMS_HEADLESS_BIN"), "{name}: {error}");
-        assert!(
-            error.contains(if unset { "is unset" } else { "is not a file" }),
-            "{error}"
-        );
-    }
-}
-
 async fn invalid_step(paths: &LabPaths) {
-    let mut options = options();
-    options.call = CallStep::Decline;
-    let error = scenario::run(ScenarioName::AbCallApp, paths, options)
-        .await
-        .unwrap_err();
-    assert!(error.to_string().contains("takes --call answer or --call place"));
+    let options = options();
     let error = scenario::own_presence::run_named(paths, options, ScenarioName::Load)
         .await
         .unwrap_err();
@@ -308,15 +260,11 @@ async fn scenario_setup_child() {
             &paths,
         ),
         "tone-obstructed" => obstructed_tone(&paths).await,
-        "native-unset" | "native-missing" => absent_native(&paths, case == "native-unset").await,
         "invalid-step" => invalid_step(&paths).await,
         _ => panic!("unknown synthetic case {case}"),
     }
     assert_no_sessions_or_credentials(&paths, &root);
-    if matches!(
-        case.as_str(),
-        "missing-config" | "native-unset" | "native-missing" | "invalid-step"
-    ) {
+    if matches!(case.as_str(), "missing-config" | "invalid-step") {
         assert!(!locations.config_file.exists());
         assert!(!paths.fence_log().exists());
         assert!(!paths.data_dir().join("media").exists());

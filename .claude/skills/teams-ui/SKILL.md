@@ -120,12 +120,12 @@ notifications, the README and the tests for the old name. Errors say what happen
 A change to what the app shows is checked by looking at it. Pick the shots that cover the surfaces you touched; the
 rest of the checks follow CLAUDE.md's "Checks".
 
-1. `GPUI_SMOKE_REQUIRE=1 cargo test -p teams-app --test ui_tour` (run in the background; it builds and drives the app
+1. `GPUI_SMOKE_REQUIRE=1 cargo test -p ngteams --test ui_tour` (run in the background; it builds and drives the app
    on the mock in the UI sandbox) writes `target/ui-shots/tour-*.png`: no chat, a chat with a message's actions (shown
    by selecting it, so hover itself isn't checked: that is the view tests' job), a reply, the account menu, every
    settings page (Calls with made-up devices), appearance and chat in Teams Dark. A new surface gets a step in
-   `STEPS` in `crates/teams-app/tests/ui_tour.rs`.
-2. Calls: `cargo test -p teams-app --test call_window` writes `teams-app-call-*.png` (incoming, connected, video).
+   `STEPS` in `crates/ngteams/tests/ui_tour.rs`.
+2. Calls: `cargo test -p ngteams --test call_window` writes `ngteams-call-*.png` (incoming, connected, video).
 3. **Read the screenshots** (the Read tool shows images) and fix what looks off — alignment, clipped text, a control
    that looks disabled, a colour that vanished in dark mode. Say plainly what a still shot can't show (hover, open
    menus, animation) and that you haven't seen it.

@@ -4,7 +4,7 @@
 //! The parent runs the mock chat service with its calling service, its Trouter and its media (a loopback TURN server,
 //! `teams-mock`'s `media`), and two UI sandboxes, each with its private PipeWire playing a tone of its own into its
 //! microphone (a's 440 Hz, b's 660 Hz) and recording its speaker. In each it runs this test again as lab account a's
-//! or b's app (`teams_app::app::launch` over an engine on the mock with its calling: its calling socket on the mock's
+//! or b's app (`ngteams::app::launch` over an engine on the mock with its calling: its calling socket on the mock's
 //! Trouter, its calls' media on the sandbox's PipeWire relayed through the mock's TURN server, unprocessed so a steady
 //! tone crosses as it is; its fence on a test roster writing a `fence.log` of its own), with only the view trace's pipe
 //! passed through. Then, driven by each sandbox's keyboard and b's notification's actions and read by the traces, the
@@ -26,7 +26,7 @@
 //!   (its roster's entry), its camera turned on and the self view presented; a hangs up, and the test call's results
 //!   show every check passed, in its window;
 //! - each call has its own window (the call keys pressed in it), a's beside its main window (a's screen holds two
-//!   windows side by side), each screenshotted under `target/ui-shots/teams-app-call-*.png`;
+//!   windows side by side), each screenshotted under `target/ui-shots/ngteams-call-*.png`;
 //! - both quit; every write in either `fence.log` was permitted.
 //!
 //! Without weston 15, niri, `dbus-daemon`, PipeWire or WirePlumber it says so and passes, unless `GPUI_SMOKE_REQUIRE=1`.
@@ -41,14 +41,17 @@ use std::time::{Duration, Instant, SystemTime};
 use std::{fs, future, io, thread};
 
 use gpui::{App, AsyncApp, WindowingModes};
-use teams_app::app::{self, Launch, LaunchAccount};
-use teams_app::calling::AppCalls;
-use teams_app::trace::adopt_trace;
+use ngteams::app::{self, Launch};
+#[path = "support/window.rs"]
+mod support;
+use ngteams::calling::PersonalCalls;
+use ngteams::descriptors::adopt_trace;
+use support::display_name;
 use teams_auth::secrets::Secret;
 use teams_auth::session::{AccessToken, Renewal};
 use teams_auth::token::TokenError;
+use teams_core::account::web_client_info;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Parts, Push};
-use teams_core::lab::{display_name, web_client_info};
 use teams_core::{CallMedia, CallParts, Identity, Outbox, Relay};
 use teams_fence::lab::Alias;
 use teams_fence::{Fence, FenceLog, LiveMembershipSource, MembershipSource, Mri, Roster};
@@ -67,7 +70,7 @@ use teams_ui::ringtone::{DeviceRinger, RINGTONE};
 use teams_ui::settings::Settings;
 use teams_ui::settings_view::{Page, SettingsView};
 use teams_ui::view::Root;
-use teams_ui::{Bridge, Ringer, SettingsFile, VideoFeed};
+use teams_ui::{Ringer, SettingsFile, VideoFeed};
 use tokio::sync::broadcast;
 use ui_sandbox::input::{Modifier, VirtualInput};
 use ui_sandbox::pipewire::nodes::NodeSpec;
@@ -75,17 +78,17 @@ use ui_sandbox::pipewire::{DEVICE_PRIORITY, PipeWireOptions};
 use ui_sandbox::{NIRI_FULL_WINDOW, Running, Sandbox, SandboxOptions, SandboxResult, sandbox_or_skip, wait_until};
 
 /// Which account the child is (`a` or `b`); unset in the parent.
-const CHILD_ENV: &str = "TEAMS_APP_CALL_TEST";
-const TRACE_FD_ENV: &str = "TEAMS_APP_CALL_TRACE_FD";
+const CHILD_ENV: &str = "NGTEAMS_CALL_TEST";
+const TRACE_FD_ENV: &str = "NGTEAMS_CALL_TRACE_FD";
 /// The mock's origin, its Trouter's, and its TURN server's UDP address.
-const ORIGIN_ENV: &str = "TEAMS_APP_CALL_ORIGIN";
-const TROUTER_ENV: &str = "TEAMS_APP_CALL_TROUTER";
-const RELAY_ENV: &str = "TEAMS_APP_CALL_RELAY";
+const ORIGIN_ENV: &str = "NGTEAMS_CALL_ORIGIN";
+const TROUTER_ENV: &str = "NGTEAMS_CALL_TROUTER";
+const RELAY_ENV: &str = "NGTEAMS_CALL_RELAY";
 /// The account's mock tokens (the mock's made-up ones).
-const IC3_ENV: &str = "TEAMS_APP_CALL_IC3";
-const SKYPE_ENV: &str = "TEAMS_APP_CALL_SKYPE";
+const IC3_ENV: &str = "NGTEAMS_CALL_IC3";
+const SKYPE_ENV: &str = "NGTEAMS_CALL_SKYPE";
 /// The child's own directory: its store, settings and `fence.log`.
-const DIR_ENV: &str = "TEAMS_APP_CALL_DIR";
+const DIR_ENV: &str = "NGTEAMS_CALL_DIR";
 /// The file in the sandbox dir the parent writes to have the child quit.
 const QUIT_TRIGGER: &str = "quit";
 /// The file in the sandbox dir the parent writes to have the child's settings choose a microphone: the device's
@@ -183,10 +186,10 @@ fn side_by_side_options(tone: Tone) -> SandboxOptions {
 }
 
 fn parent() -> SandboxResult {
-    let Some(a_box) = sandbox_or_skip("teams-app calls", &side_by_side_options(A_TONE))? else {
+    let Some(a_box) = sandbox_or_skip("ngteams calls", &side_by_side_options(A_TONE))? else {
         return Ok(());
     };
-    let Some(b_box) = sandbox_or_skip("teams-app calls", &sandbox_options(B_TONE))? else {
+    let Some(b_box) = sandbox_or_skip("ngteams calls", &sandbox_options(B_TONE))? else {
         return Ok(());
     };
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -227,7 +230,7 @@ fn parent() -> SandboxResult {
     a.quit(&a_box, &["call", "call_follow_up"])?;
     b.quit(&b_box, &["call_answer", "call_decline", "call_ringing"])?;
     drop(trouter);
-    say("teams-app call window: ok");
+    say("ngteams call window: ok");
     Ok(())
 }
 
@@ -525,7 +528,7 @@ fn calls(a: &mut AppUnderTest, b: &mut AppUnderTest, a_box: &Sandbox, b_box: &Sa
     b.trace.wait_for("ringtone", "started")?;
     b.trace.wait_for("call-notification", "shown")?;
     let ringing = call_notification(b_box, 0)?;
-    shot(b_box, "teams-app-call-incoming.png")?;
+    shot(b_box, "ngteams-call-incoming.png")?;
     thread::sleep(RING);
     let ringtone = loudest(&recording(b_box)?, RINGTONE[0].hz, RING)?;
     say(&format!("b's ringtone at {ringtone:.3}"));
@@ -541,8 +544,8 @@ fn calls(a: &mut AppUnderTest, b: &mut AppUnderTest, a_box: &Sandbox, b_box: &Sa
     b.call_windows("opened", 1)?;
     a.in_call(&["chat", "connected"])?;
     // a's call in its own window, beside its main window's chats and in-call strip
-    shot(a_box, "teams-app-call-connected.png")?;
-    shot_of(a_box, "teams-app-call-side-by-side.png", false)?;
+    shot(a_box, "ngteams-call-connected.png")?;
+    shot_of(a_box, "ngteams-call-side-by-side.png", false)?;
     thread::sleep(TALK);
     let a_heard = loudest(&recording(a_box)?, B_TONE.hz, Duration::from_secs(2))?;
     let b_heard = loudest(&recording(b_box)?, A_TONE.hz, Duration::from_secs(2))?;
@@ -572,9 +575,9 @@ fn calls(a: &mut AppUnderTest, b: &mut AppUnderTest, a_box: &Sandbox, b_box: &Sa
         "b presented {} of a's frames, a {} of its own",
         remote["frames"], own["frames"]
     ));
-    shot(b_box, "teams-app-call-video.png")?;
-    shot(a_box, "teams-app-call-self-view.png")?;
-    shot_of(a_box, "teams-app-call-self-view-side-by-side.png", false)?;
+    shot(b_box, "ngteams-call-video.png")?;
+    shot(a_box, "ngteams-call-self-view.png")?;
+    shot_of(a_box, "ngteams-call-self-view-side-by-side.png", false)?;
 
     // a hangs up: b's call ends with it
     ctrl_shift(&mut a_keys, 'h')?;
@@ -586,7 +589,7 @@ fn calls(a: &mut AppUnderTest, b: &mut AppUnderTest, a_box: &Sandbox, b_box: &Sa
     if strings(&ended, "kinds") != ["ended-by-other", "call-back"] {
         return Err(format!("b's call window tells another end: {ended}").into());
     }
-    shot(b_box, "teams-app-call-ended.png")?;
+    shot(b_box, "ngteams-call-ended.png")?;
     b.call_windows("closed", 1)?;
 
     declined_call(a, b, &mut a_keys, (a_box, b_box))?;
@@ -620,7 +623,7 @@ fn declined_call(
     // a decline opens no window
     b.call_windows("opened", 1)?;
     a.in_call(&["voicemail"])?;
-    shot(a_box, "teams-app-call-declined.png")?;
+    shot(a_box, "ngteams-call-declined.png")?;
     ctrl_shift(a_keys, 'h')?;
     a.in_call(&["ended", "hung-up"])?;
     a.call_windows("closed", 2)
@@ -635,7 +638,7 @@ fn test_call(a: &mut AppUnderTest, keys: &mut VirtualInput, a_box: &Sandbox) -> 
     a.trace.next_where("a: settings opened", |line| {
         line["view"] == "settings" && line["change"] == "opened"
     })?;
-    shot(a_box, "teams-app-call-settings.png")?;
+    shot(a_box, "ngteams-call-settings.png")?;
     ask_settings(a_box, SETTINGS_TEST_CALL)?;
     a.in_call(&["test-call", "connected"])?;
     a.call_windows("opened", 3)?;
@@ -653,7 +656,7 @@ fn test_call(a: &mut AppUnderTest, keys: &mut VirtualInput, a_box: &Sandbox) -> 
     if !a.trace.catch_up().iter().any(echo) {
         a.trace.next_where("a: Echo's cell", echo)?;
     }
-    shot(a_box, "teams-app-call-test-call.png")?;
+    shot(a_box, "ngteams-call-test-call.png")?;
     ctrl_shift(keys, 'h')?;
     a.in_call(&["test-call", "ended", "hung-up"])?;
     let wanted = ["connected", "mic-heard", "speaker-played", "camera-on"];
@@ -669,7 +672,7 @@ fn test_call(a: &mut AppUnderTest, keys: &mut VirtualInput, a_box: &Sandbox) -> 
     thread::sleep(Duration::from_secs(2));
     // its window stays on its results, as Teams' test call's does
     a.call_windows("closed", 2)?;
-    shot(a_box, "teams-app-call-test-call-results.png")?;
+    shot(a_box, "ngteams-call-test-call-results.png")?;
     Ok(())
 }
 
@@ -816,7 +819,7 @@ fn env(name: &str) -> SandboxResult<String> {
     Ok(std::env::var(name).map_err(|_| format!("{name} isn't set"))?)
 }
 
-/// The account's engine on the mock, as `teams_core::lab::start` builds one but for the mock origins, a test roster
+/// The account's engine on the mock, as `teams_core::account::start` builds one but for the mock origins, a test roster
 /// and a `fence.log` of its own, with its calling: its calls' media on `devices`, relayed through the mock's TURN
 /// server, unprocessed.
 fn engine(
@@ -871,7 +874,7 @@ fn engine(
     };
     let media = CallMedia {
         devices,
-        video: Some(teams_core::lab::call_video(Arc::new(feed))),
+        video: Some(teams_core::account::call_video(Arc::new(feed))),
         relay: Relay::Fixed(vec![RelayServer::udp(env(RELAY_ENV)?.parse()?)]),
         session: SessionConfig {
             processing: ProcessingConfig::OFF,
@@ -891,13 +894,15 @@ fn engine(
 }
 
 fn child(alias: Alias) -> SandboxResult {
-    teams_app::guard::window_allowed_here()?;
+    ngteams::read_only::window_allowed_here()?;
     let trace = teams_ui::ViewTrace::new(adopt_trace(env(TRACE_FD_ENV)?.parse()?)?);
     let dir = PathBuf::from(env(DIR_ENV)?);
     let pipewire = Arc::new(PipeWireDevices::connect()?);
     let devices: Arc<dyn Devices + Send + Sync> = pipewire.clone();
     let feed = VideoFeed::new();
     let engine = engine(alias, Arc::clone(&devices), feed.clone(), &dir)?;
+    let first = support::started(alias, engine)?;
+    let runner = support::runner(&dir)?;
     let settings = SettingsFile::new(dir.join("settings.toml"));
     if alias == Alias::A {
         let opened = Settings {
@@ -913,29 +918,30 @@ fn child(alias: Alias) -> SandboxResult {
         let launched = app::launch(
             cx,
             Launch {
-                first: LaunchAccount {
-                    calls: Some(AppCalls {
+                first: ngteams::accounts::Started {
+                    calls: Some(PersonalCalls {
                         ringer: Some(ringer),
-                        echo: Some(Mri::new(ECHO)),
+                        echo: Mri::new(ECHO),
                         video: Some(feed),
                         camera: Some(pipewire.clone()),
                         devices: Some(pipewire),
                     }),
-                    ..LaunchAccount::bare(alias, engine)
+                    ..first
                 },
                 others: Vec::new(),
-                trace,
-                settings,
+                trace: Arc::new(trace),
+                settings: teams_ui::SettingsModel::load(settings),
                 bus: teams_ui::bus::address_from_env(),
-                diagnostics: None,
-                playback: teams_media::player::PlayerSetup::default(),
+                sign_in_again: std::rc::Rc::new(|_| std::rc::Rc::new(|_| {})),
+                runner,
+                read_only: false,
             },
         );
         match launched {
             Ok(launched) => {
                 choose_when_asked(launched.desktop.clone(), cx);
                 settings_when_asked(launched.desktop, cx);
-                quit_when_asked(launched.bridge, cx);
+                quit_when_asked(cx);
                 say("ready");
             }
             Err(failed) => {
@@ -1021,7 +1027,7 @@ fn settings_when_asked(desktop: gpui::Entity<Desktop>, cx: &mut App) {
 }
 
 /// Once the parent writes [`QUIT_TRIGGER`] in the sandbox dir: the engine shut down, then the app quits.
-fn quit_when_asked(bridge: gpui::Entity<Bridge>, cx: &mut App) {
+fn quit_when_asked(cx: &mut App) {
     let Some(dir) = std::env::var_os(ui_sandbox::SANDBOX_ENV) else {
         say("no sandbox dir");
         return;
@@ -1032,8 +1038,7 @@ fn quit_when_asked(bridge: gpui::Entity<Bridge>, cx: &mut App) {
             cx.background_executor().timer(Duration::from_millis(100)).await;
         }
         cx.update(|cx| {
-            let stopped = bridge.update(cx, Bridge::shutdown);
-            app::quit_after(stopped, cx);
+            app::quit(cx);
         });
     })
     .detach();

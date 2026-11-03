@@ -169,14 +169,19 @@
 - Modify: `crates/ngteams/tests/apart.rs`, `crates/teams-ui/tests/reach.rs`, `.claude/skills/teams-ui/SKILL.md`
 - Modify: `crates/teams-ui` (anything only the lab app used, e.g. `LabPaths::ui_settings_file`)
 
-- [ ] delete both crates, `teams-core::lab` and the lab-only scripts and scenarios, and remove them from the workspace
+- [x] delete both crates, `teams-core::lab` and the lab-only scripts and scenarios, and remove them from the workspace
       and the coverage floors
-- [ ] move the window and UI-tour tests into `ngteams`' tests, and point the teams-ui skill's screenshot workflow at
+- [x] move the window and UI-tour tests into `ngteams`' tests, and point the teams-ui skill's screenshot workflow at
       them
-- [ ] `apart.rs`: drop the lab-binary checks; `reach.rs`: `APP_CRATES` = `teams-ui`, `ngteams`, with the
+- [x] `apart.rs`: drop the lab-binary checks; `reach.rs`: `APP_CRATES` = `teams-ui`, `ngteams`, with the
       log-install check on `crates/ngteams/src/app.rs`
-- [ ] tests of `teams-core`, `teams-ui`, `proto-lab` and `ngteams` (`apart`, the moved window tests) pass; clippy
+- [x] tests of `teams-core`, `teams-ui`, `proto-lab` and `ngteams` (`apart`, the moved window tests) pass; clippy
       clean
+
+Validation was scoped per CLAUDE.md's Checks: all four moved sandbox tests and `apart`; the full offline
+`proto-lab` suite; `teams-core`'s `account_startup`; `teams-ui`'s `reach` and `kit`; `teams-fence`'s
+`lab_config` (the existing workstation-config test stays ignored); and all-targets clippy for the five touched
+crates. All passed. The shared account assembler remains covered; the deleted lab startup wrapper is gone.
 
 ### Task 2: proto-lab stands on its own (config, ids, test-support)
 

@@ -4843,6 +4843,7 @@ dependencies = [
  "clap",
  "gpui-pre",
  "gpui-pre-platform",
+ "image",
  "libc",
  "log",
  "rustix",
@@ -4866,6 +4867,7 @@ dependencies = [
  "toml 1.1.8+spec-1.1.0",
  "ui-sandbox",
  "wiremock",
+ "zbus",
 ]
 
 [[package]]
@@ -7915,36 +7917,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "teams-app"
-version = "0.1.0"
-dependencies = [
- "clap",
- "gpui-pre",
- "gpui-pre-platform",
- "image",
- "libc",
- "log",
- "rustix",
- "serde_json",
- "teams-auth",
- "teams-call",
- "teams-core",
- "teams-fence",
- "teams-log",
- "teams-media",
- "teams-mock",
- "teams-proto",
- "teams-store",
- "teams-trouter",
- "teams-ui",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "ui-sandbox",
- "zbus",
-]
-
-[[package]]
 name = "teams-auth"
 version = "0.1.0"
 dependencies = [
@@ -8027,28 +7999,6 @@ dependencies = [
  "url",
  "wiremock",
  "zeroize",
-]
-
-[[package]]
-name = "teams-headless"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "clap",
- "log",
- "serde_json",
- "teams-auth",
- "teams-core",
- "teams-fence",
- "teams-log",
- "teams-media",
- "teams-mock",
- "teams-proto",
- "teams-store",
- "teams-trouter",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
 ]
 
 [[package]]

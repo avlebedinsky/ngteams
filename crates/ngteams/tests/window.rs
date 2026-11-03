@@ -4,8 +4,8 @@
 //! opener, nothing of the desktop's, only the view trace's pipe passed through), in one of two modes:
 //!
 //! - `window`: lab account a's engine on the mock chat service and its Trouter (`teams-mock`, through the
-//!   `test-support` mock origins, a test roster and log), handed to the app as `teams-app` hands its own
-//!   ([`teams_app::app::launch`]), its settings in the test's own directory. The parent waits for the window, checks
+//!   `test-support` mock origins, a test roster and log), handed to the app as `ngteams` hands its own
+//!   ([`ngteams::app::launch`]), its settings in the test's own directory. The parent waits for the window, checks
 //!   its rem size is the theme's font size, reads the view trace (the window opened, the push channel connected, the
 //!   chat list filled from the store once the catch-up brought a's chats: the a–b chat, not the channel or the
 //!   notifications stream, nor the chats the mock calls empty, as Teams leaves them out), screenshots the window (the rail, the list and the conversation pane drawn; the shot is
@@ -39,14 +39,16 @@ use gpui::{
     App, AppContext as _, AsyncApp, Bounds, Context, IntoElement, ParentElement as _, Render, Styled as _, Window,
     WindowBounds, WindowOptions, WindowingModes, div, img, px, rgb, size,
 };
-use teams_app::app::{self, Launch, LaunchAccount};
-use teams_app::trace::adopt_trace;
+use ngteams::app::{self, Launch};
+#[path = "support/window.rs"]
+mod support;
+use ngteams::descriptors::adopt_trace;
+use support::display_name;
 use teams_auth::secrets::Secret;
 use teams_auth::session::{AccessToken, Renewal};
 use teams_auth::token::TokenError;
 use teams_core::Outbox;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Parts, Push};
-use teams_core::lab::display_name;
 use teams_fence::lab::{Alias, LabConfig, record_abc_chat};
 use teams_fence::{Fence, FenceLog, LiveMembershipSource, Mri, Roster};
 use teams_mock::{
@@ -65,9 +67,9 @@ use ui_sandbox::{
 };
 
 /// Which mode the child runs in.
-const CHILD_ENV: &str = "TEAMS_APP_WINDOW_TEST";
+const CHILD_ENV: &str = "NGTEAMS_WINDOW_TEST";
 /// The child's view trace descriptor.
-const TRACE_FD_ENV: &str = "TEAMS_APP_WINDOW_TRACE_FD";
+const TRACE_FD_ENV: &str = "NGTEAMS_WINDOW_TRACE_FD";
 /// From the child's start to its `ready` (the mock started, the window drawn).
 const STARTUP: Duration = Duration::from_secs(90);
 /// Anything else the parent waits for.
@@ -111,12 +113,12 @@ fn parent() -> SandboxResult {
         niri_extra: NIRI_FULL_WINDOW,
         ..SandboxOptions::default()
     };
-    let Some(sandbox) = sandbox_or_skip("teams-app window", &options)? else {
+    let Some(sandbox) = sandbox_or_skip("ngteams window", &options)? else {
         return Ok(());
     };
     an_empty_window_opens_on_the_mock(&sandbox).map_err(|error| format!("{error}{}", sandbox.logs()))?;
     gpui_s_http_client_is_the_null_one(&sandbox)?;
-    say("teams-app window: ok");
+    say("ngteams window: ok");
     Ok(())
 }
 
@@ -246,11 +248,11 @@ fn an_empty_window_opens_on_the_mock(sandbox: &Sandbox) -> SandboxResult {
     let listed = the_chat_list_shows_a_s_chats(&mut trace).map_err(|error| running.fail(&error))?;
 
     let windows = sandbox.niri_msg(&["windows"])?;
-    if !windows.contains(teams_ui::window::LAB_APP_ID) {
+    if !windows.contains(teams_ui::window::PERSONAL_APP_ID) {
         return Err(running.fail(&format!("no window with the app id: {windows}")));
     }
-    let png = sandbox.screenshot("teams-app-window.png", true)?;
-    fs::copy(&png, shots_dir()?.join("teams-app-window.png"))?;
+    let png = sandbox.screenshot("ngteams-window.png", true)?;
+    fs::copy(&png, shots_dir()?.join("ngteams-window.png"))?;
     let palette = teams_ui::theme::LIGHT_PALETTE;
     for (region, color, least) in [
         ("the rail", palette.rail, 0.02),
@@ -266,8 +268,8 @@ fn an_empty_window_opens_on_the_mock(sandbox: &Sandbox) -> SandboxResult {
     the_chat_view_shows_its_messages(&mut trace, &chat).map_err(|error| running.fail(&error))?;
     // the frames after the trace's line
     thread::sleep(Duration::from_secs(1));
-    let png = sandbox.screenshot("teams-app-chat.png", true)?;
-    fs::copy(&png, shots_dir()?.join("teams-app-chat.png"))?;
+    let png = sandbox.screenshot("ngteams-chat.png", true)?;
+    fs::copy(&png, shots_dir()?.join("ngteams-chat.png"))?;
 
     a_message_notifies_and_opens_its_chat(sandbox, &mut trace, &running, &chat)
         .map_err(|error| running.fail(&error))?;
@@ -407,7 +409,7 @@ fn a_message_notifies_and_opens_its_chat(
         .iter()
         .find(|notification| notification.body == C_SAYS)
         .ok_or_else(|| format!("no notification of c's message: {notifications:?}"))?;
-    if notification.app_name != app::title(Alias::A).as_ref()
+    if notification.app_name != app::TITLE
         || notification.actions != ["default", "Open"]
         || notification.summary.is_empty()
     {
@@ -447,7 +449,7 @@ fn the_tray_keeps_the_app_and_quits_it(sandbox: &Sandbox, trace: &mut TraceReade
     let host = sandbox.bus().connect()?;
     let item = zbus::blocking::Proxy::new(&host, name.as_str(), ITEM_PATH, "org.kde.StatusNotifierItem")?;
     let title: String = item.get_property("Title")?;
-    if !title.starts_with(app::title(Alias::A).as_ref()) {
+    if !title.starts_with(app::TITLE) {
         return Err(format!("the item's title: {title}").into());
     }
 
@@ -466,7 +468,7 @@ fn the_tray_keeps_the_app_and_quits_it(sandbox: &Sandbox, trace: &mut TraceReade
         sandbox
             .niri_msg(&["windows"])
             .ok()
-            .filter(|windows| windows.contains(teams_ui::window::LAB_APP_ID))
+            .filter(|windows| windows.contains(teams_ui::window::PERSONAL_APP_ID))
     })
     .ok_or("the window didn't come back")?;
     sandbox.niri_msg(&["action", "close-window"])?;
@@ -514,7 +516,7 @@ fn the_tray_follows_its_watcher(
         sandbox
             .niri_msg(&["windows"])
             .ok()
-            .filter(|windows| windows.contains(teams_ui::window::LAB_APP_ID))
+            .filter(|windows| windows.contains(teams_ui::window::PERSONAL_APP_ID))
     })
     .ok_or("the window didn't come back when the watcher left")?;
     sandbox.bus().start_watcher()?;
@@ -614,7 +616,7 @@ impl Tokens {
     }
 }
 
-/// The mock and a's engine on it, as `teams_core::lab::start` builds one but for the mock origins, a test roster and
+/// The mock and a's engine on it, as `teams_core::account::start` builds one but for the mock origins, a test roster and
 /// a test log; its push channel on the Trouter mock.
 struct MockLab {
     _runtime: tokio::runtime::Runtime,
@@ -687,10 +689,12 @@ fn passed_trace_fd() -> SandboxResult<RawFd> {
 }
 
 fn child_window() -> SandboxResult {
-    teams_app::guard::window_allowed_here()?;
+    ngteams::read_only::window_allowed_here()?;
     let trace = teams_ui::ViewTrace::new(adopt_trace(passed_trace_fd()?)?);
     let (lab, engine) = MockLab::start()?;
+    let first = support::started(Alias::A, engine)?;
     let settings = teams_ui::SettingsFile::new(lab.dir.path().join("ui").join("a.toml"));
+    let runner = support::runner(lab.dir.path())?;
     let failed = Arc::new(Mutex::new(None));
     let failed_in_app = Arc::clone(&failed);
     let mock = Arc::clone(&lab.mock);
@@ -698,14 +702,15 @@ fn child_window() -> SandboxResult {
         let launched = app::launch(
             cx,
             Launch {
-                first: LaunchAccount::bare(Alias::A, engine),
+                first,
                 others: Vec::new(),
-                trace,
-                settings,
+                trace: Arc::new(trace),
+                settings: teams_ui::SettingsModel::load(settings),
                 // the sandbox's private bus, with its fake notification server and tray watcher
                 bus: teams_ui::bus::address_from_env(),
-                diagnostics: None,
-                playback: teams_media::player::PlayerSetup::default(),
+                sign_in_again: std::rc::Rc::new(|_| std::rc::Rc::new(|_| {})),
+                runner,
+                read_only: false,
             },
         );
         match launched {
@@ -778,7 +783,7 @@ fn accepted(listener: &TcpListener) -> usize {
 }
 
 fn child_http() -> SandboxResult {
-    teams_app::guard::window_allowed_here()?;
+    ngteams::read_only::window_allowed_here()?;
     let listener = TcpListener::bind("127.0.0.1:0")?;
     listener.set_nonblocking(true)?;
     let url = format!("https://127.0.0.1:{}/picture.png", listener.local_addr()?.port());

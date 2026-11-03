@@ -129,7 +129,7 @@ fn features_of(package: &str) -> String {
 
 #[test]
 fn a_lab_binary_built_alone_has_neither_personal_feature() {
-    for lab in ["teams-app", "teams-headless", "proto-lab", "teams-signin"] {
+    for lab in ["proto-lab", "teams-signin"] {
         let tree = features_of(lab);
         assert!(tree.contains("teams-fence"), "{lab}: {tree}");
         for personal in [
@@ -278,42 +278,6 @@ fn only_this_crate_names_the_personal_keyring_and_opens_the_personal_fence_and_n
         ] {
             assert!(!text.contains(lab), "{} uses {lab}", path.display());
         }
-    }
-}
-
-#[test]
-fn every_lab_binary_opening_the_lab_fence_refuses_a_build_with_personal() {
-    let opener = ["Fence::open", "_lab"].concat();
-    let mut checked = Vec::new();
-    for parent in ["crates", "spikes"] {
-        for entry in fs::read_dir(root().join(parent)).unwrap().flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            let src = entry.path().join("src");
-            let binary = src.join("main.rs").is_file() || src.join("bin").is_dir();
-            if name == "ngteams" || !binary {
-                continue;
-            }
-            let dir = format!("{parent}/{name}/src");
-            if holding(&[&dir], &opener).is_empty() {
-                continue;
-            }
-            assert!(
-                !holding(&[&dir], "teams_fence::personal_enabled()").is_empty(),
-                "{dir} opens the lab fence but never refuses a build with `personal`"
-            );
-            checked.push(dir);
-        }
-    }
-    checked.sort();
-    for expected in [
-        "crates/proto-lab/src",
-        "crates/teams-app/src",
-        "crates/teams-headless/src",
-    ] {
-        assert!(
-            checked.iter().any(|dir| dir == expected),
-            "{expected} not checked: {checked:?}"
-        );
     }
 }
 

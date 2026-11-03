@@ -365,7 +365,7 @@ fn the_app_s_window_sets_the_kit_up_and_follows_its_appearance(cx: &mut TestAppC
     let window = cx
         .update(|cx| {
             let parts = parts(cx);
-            teams_ui::window::open(cx, teams_ui::window::LAB_APP_ID, "lab a".into(), parts)
+            teams_ui::window::open(cx, teams_ui::window::PERSONAL_APP_ID, "lab a".into(), parts)
         })
         .expect("the window opens");
     let root = cx
@@ -403,7 +403,7 @@ fn the_app_s_window_draws_at_the_theme_s_font_size(cx: &mut TestAppContext) {
     let window = cx
         .update(|cx| {
             let parts = parts(cx);
-            teams_ui::window::open(cx, teams_ui::window::LAB_APP_ID, "lab a".into(), parts)
+            teams_ui::window::open(cx, teams_ui::window::PERSONAL_APP_ID, "lab a".into(), parts)
         })
         .expect("the window opens");
     assert_eq!(rem_size(window, cx), px(f32::from(FONT_SIZE)));

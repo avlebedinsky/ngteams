@@ -31,16 +31,6 @@
 //! - [`ab_call`] and [`abc_call`] (accounts a and b, or a, b and c, as `echo-call`): a calls b from their 1:1 chat, or
 //!   the a–b–c group chat; the run's step (`--call`) holds back a's starts, or plays out the ring with every callee's
 //!   sends held back; recorded.
-//! - [`ab_call_native`] (account b's web client, as `ab-call`, and account a's native client, `teams-headless` spawned
-//!   from `TEAMS_HEADLESS_BIN`): a's native client calls b's page and b answers, b's page calls a's native client and
-//!   it answers (`watch --answer-lab-calls`), and a call answered on b's page while b's native client rings; each side
-//!   must hear the other's tone; recorded.
-//! - [`abc_call_mixed`] (b's and c's web clients, and a's native client as `ab-call-native`'s): a's native client calls
-//!   the a–b–c group chat with video and both pages answer, c's page leaves and joins late; audio and video among all
-//!   three; recorded.
-//! - [`ab_call_app`] (account b's web client, as `ab-call-native`'s page): the far end of a call with a's app, which the
-//!   app's live test runs and spawns this scenario beside: b's page answers a's call (`--call answer`) or calls a
-//!   (`--call place`), with audio and video, saying how far it got on stdout as it goes; recorded.
 //!
 //! - [`ab_meeting`] (account a, as `ab-chat`): a schedules a Teams meeting with b from the scheduling form, changes its
 //!   title and cancels it; recorded.
@@ -61,8 +51,6 @@
 //! judge by the reviewed expected-deny list ([`expected`]), which never changes what the fence denies.
 
 pub mod ab_call;
-pub mod ab_call_app;
-pub mod ab_call_native;
 pub mod ab_chat;
 pub mod ab_chat_full;
 pub mod ab_file;
@@ -71,7 +59,6 @@ pub mod ab_meeting;
 pub mod ab_meeting_join;
 pub mod ab_trouter;
 pub mod abc_call;
-pub mod abc_call_mixed;
 pub mod abc_chat;
 pub mod abc_everyone;
 pub mod channel_create;
@@ -139,15 +126,6 @@ pub enum ScenarioName {
     AbCall,
     /// Account a calls the a–b–c group chat, as the run's step (`--call`) says; recorded.
     AbcCall,
-    /// b's web client and a's native client (`teams-headless`, `TEAMS_HEADLESS_BIN`) call each other both ways, then a call
-    /// answered on b's page while b's native client rings; recorded.
-    AbCallNative,
-    /// a's native client (`teams-headless`, `TEAMS_HEADLESS_BIN`) calls the a–b–c group chat with video, b's and c's web
-    /// clients answer; c leaves and joins late; recorded.
-    AbcCallMixed,
-    /// b's web client, the far end of a call with a's app (run by the app's live test): b answers a's call (`--call
-    /// answer`) or calls a (`--call place`), with audio and video; recorded.
-    AbCallApp,
     /// Account a schedules a Teams meeting with b, changes its title and cancels it, after the same enforcement test;
     /// recorded.
     AbMeeting,
@@ -195,9 +173,6 @@ impl ScenarioName {
             Self::EchoCall => "echo-call",
             Self::AbCall => "ab-call",
             Self::AbcCall => "abc-call",
-            Self::AbCallNative => "ab-call-native",
-            Self::AbcCallMixed => "abc-call-mixed",
-            Self::AbCallApp => "ab-call-app",
             Self::AbMeeting => "ab-meeting",
             Self::AbMeetingJoin => "ab-meeting-join",
             Self::Search => "search",
@@ -225,7 +200,7 @@ pub struct RunOptions {
     pub display: Display,
     /// How long the web client gets to load, per account.
     pub load_timeout: Duration,
-    /// What a call scenario (`ab-call`, `abc-call`, `ab-call-app`) does; the others don't read it.
+    /// What a call scenario (`ab-call`, `abc-call`) does; the others don't read it.
     pub call: ab_call::CallStep,
 }
 
@@ -427,12 +402,9 @@ pub async fn run(
     options: RunOptions,
 ) -> Result<ScenarioReport, ScenarioError> {
     match scenario {
-        ScenarioName::EchoCall
-        | ScenarioName::AbCall
-        | ScenarioName::AbcCall
-        | ScenarioName::AbCallNative
-        | ScenarioName::AbcCallMixed
-        | ScenarioName::AbCallApp => run_call(scenario, paths, options).await,
+        ScenarioName::EchoCall | ScenarioName::AbCall | ScenarioName::AbcCall => {
+            run_call(scenario, paths, options).await
+        }
         ScenarioName::OwnPresenceActivity
         | ScenarioName::OwnPresenceEndpoint
         | ScenarioName::OwnPresenceBoth
@@ -482,8 +454,6 @@ async fn run_call(
         ScenarioName::EchoCall => echo_call::run(paths, options).await,
         ScenarioName::AbCall => ab_call::run(paths, options).await,
         ScenarioName::AbcCall => abc_call::run(paths, options).await,
-        ScenarioName::AbcCallMixed => abc_call_mixed::run(paths, options).await,
-        ScenarioName::AbCallApp => ab_call_app::run(paths, options).await,
-        _ => ab_call_native::run(paths, options).await,
+        _ => Err(ScenarioError::Setup(format!("{scenario:?} is not a call scenario"))),
     }
 }
