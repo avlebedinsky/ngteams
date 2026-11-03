@@ -10,13 +10,15 @@ publish.workspace = true
 base64.workspace = true
 getrandom.workspace = true
 httpdate.workspace = true
-# the session's renewals (audience, expiry, outcome) and its signing out, in the app's diagnostic log; never a token
+# session outcomes and credential-redacted HTTP exchanges in the app's diagnostic log
 log.workspace = true
 oo7.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
+# full token/authz HTTP exchanges at debug, with credential redaction owned by the logger
+teams-log.workspace = true
 # the session: one refresh per audience however many callers wait on it, and its renewal notifications; the broker:
 # its server reads and writes any async stream (`io-util`) and watches it close while a store call waits (`macros`),
 # its client's blocking socket runs on the blocking pool (`rt`)

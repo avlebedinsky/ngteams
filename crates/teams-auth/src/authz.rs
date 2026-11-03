@@ -8,7 +8,8 @@
 //! - The skypetoken's expiry is its JWT `exp` when it has one, as the web client schedules it, and the answer's
 //!   `expiresIn` only otherwise; the region falls back to the token's `rgn` claim.
 //! - A refusal keeps only the status and Teams' `errorCode` (`UserLicenseNotPresentTrialEligible` for an account
-//!   without a Teams license), never the body's message. Nothing here logs, and no error or `Debug` carries a token.
+//!   without a Teams license), never the body's message. At `debug` the wire logger records the full exchange with
+//!   credentials redacted; no error or `Debug` carries a token.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -317,7 +318,7 @@ impl AuthzClient {
         clock: &dyn Clock,
     ) -> Result<Skypetoken, AuthzError> {
         let correlation = correlation_id()?;
-        let response = self
+        let request = self
             .http
             .post(self.endpoint.clone())
             .header(AUTHORIZATION, format!("Bearer {}", spaces_token.expose()))
@@ -326,17 +327,14 @@ impl AuthzClient {
             .header("ms-teams-authz-type", kind.header())
             .header("clientRequestId", &correlation)
             .header("x-ms-request-id", &correlation)
-            .header(CONTENT_LENGTH, "0")
-            .send()
+            .header(CONTENT_LENGTH, "0");
+        let answer = crate::wire::exchange(&self.http, request, &[spaces_token.expose()])
             .await
             .map_err(http_error)?;
-        let status = response.status();
-        let headers = response.headers().clone();
-        let answer = response.bytes().await.map_err(http_error)?;
-        if status.is_success() {
-            parse_answer(&answer, clock.now())
+        if answer.status.is_success() {
+            parse_answer(&answer.body, clock.now())
         } else {
-            Err(refusal(status, &headers, &answer))
+            Err(refusal(answer.status, &answer.headers, &answer.body))
         }
     }
 

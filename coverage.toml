@@ -33,7 +33,7 @@ proto-lab = { lines = 94, functions = 93, regions = 90 }
 # Individually inspected sources LLVM does not map. Any content change invalidates the review.
 # These entries never suppress coverage counts when LLVM supplies a mapping for the file.
 [unmapped_sources."crates/teams-auth/src/lib.rs"]
-sha256 = "f977642661f3385c9e5b250e07d58b9feea88e143a126309624c16973309eed8"
+sha256 = "3ddd9f60071e796622a5fc4d5faa6bc432c207a89e014eac21b5d8b4aaa4ea1a"
 reason = "module declarations and documentation only; no executable items"
 
 [unmapped_sources."crates/teams-call/src/lib.rs"]

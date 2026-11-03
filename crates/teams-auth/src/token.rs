@@ -2,9 +2,10 @@
 //! the error answers they give. `docs/protocol/auth.md` has the flow.
 //!
 //! The refresh token is kept in a [`SecretStore`](crate::secrets::SecretStore) by the methods in
-//! [`refresh`](crate::refresh); this module only talks to the token endpoint. Nothing here logs, and no error or
-//! `Debug` output carries a token, a code or a verifier: Entra's error text is cut before its trace part and scrubbed
-//! of every secret the request sent.
+//! [`refresh`](crate::refresh); this module only talks to the token endpoint. At `debug` the wire logger records the
+//! full exchange with credentials redacted, including sent values echoed by an error. No error or `Debug` output
+//! carries a token, code or verifier: Entra's error text is cut before its trace part and scrubbed of every secret
+//! the request sent.
 
 use std::fmt;
 use std::time::{Duration, SystemTime};
@@ -462,17 +463,17 @@ impl TokenClient {
             .extend_pairs(form)
             .finish();
         let sent = clock.now();
-        let response = self
+        let request = self
             .http
             .post(self.config.token_endpoint())
             .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
-            .body(body)
-            .send()
+            .body(body);
+        let response = crate::wire::exchange(&self.http, request, secrets)
             .await
             .map_err(http_error)?;
-        let status = response.status();
-        let retry_after = retry_after(response.headers());
-        let answer = response.bytes().await.map_err(http_error)?;
+        let status = response.status;
+        let retry_after = retry_after(&response.headers);
+        let answer = response.body;
         if status.is_success() {
             parse_grant(&answer, status, sent)
         } else {

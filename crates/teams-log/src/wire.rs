@@ -12,6 +12,10 @@ use std::time::Duration;
 
 use crate::redact;
 
+mod known;
+
+pub use known::WithSecrets;
+
 /// The target the transport logs its [`Request`]s and [`Response`]s under, included in the app's debug log.
 pub const HTTP_TARGET: &str = "teams_wire::http";
 

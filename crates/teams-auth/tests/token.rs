@@ -29,6 +29,9 @@ use url::Url;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Match, Mock, MockServer, Request, ResponseTemplate};
 
+#[path = "support/token_wire.rs"]
+mod wire_logging;
+
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../tests/fixtures/auth");
 const ACCOUNT: &str = "a@lab.example.test";
 const TOKEN_SUFFIX: &str = "oauth2/v2.0/token";

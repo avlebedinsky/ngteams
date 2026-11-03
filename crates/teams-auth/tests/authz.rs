@@ -26,6 +26,9 @@ const SPACES_TOKEN: &str = "made-up-spaces-access-token";
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
+#[path = "support/authz_wire.rs"]
+mod wire_logging;
+
 /// One recorded authz exchange.
 struct Fixture {
     path: String,

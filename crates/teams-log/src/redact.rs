@@ -353,6 +353,11 @@ fn percent_decoded(name: &str) -> String {
 /// redirect, `{"redirect": "…?code=…"}`; [`url`]) and every credential's `<name>=` in any escaped form (a SAS link in
 /// a message's HTML; [`params`]).
 pub fn json(value: &mut Value) {
+    json_with(value, &str::to_owned);
+}
+
+/// Known exchange credentials are masked in decoded strings before structural redaction can split an echoed value.
+fn json_with(value: &mut Value, mask: &dyn Fn(&str) -> String) {
     let mut pending = vec![value];
     while let Some(value) = pending.pop() {
         match value {
@@ -370,7 +375,7 @@ pub fn json(value: &mut Value) {
                 }
             }
             Value::Array(items) => pending.extend(items.iter_mut()),
-            Value::String(text) => string(text),
+            Value::String(text) => string(text, mask),
             Value::Number(_) | Value::Bool(_) | Value::Null => {}
         }
     }
@@ -378,14 +383,15 @@ pub fn json(value: &mut Value) {
 
 /// A JSON string's text redacted in place ([`json`]): as JSON when it is a JSON object or array, otherwise as a URL
 /// ([`url`]: its query's and fragment's credential fields and every credential's `<name>=`).
-fn string(text: &mut String) {
-    if text.trim_start().starts_with(['{', '['])
-        && let Some(redacted) = json_text(text)
+fn string(text: &mut String, mask: &dyn Fn(&str) -> String) {
+    let masked = mask(text);
+    if masked.trim_start().starts_with(['{', '['])
+        && let Some(redacted) = json_text_with(&masked, mask)
     {
         *text = redacted;
         return;
     }
-    let redacted = url(text);
+    let redacted = url(&masked);
     if redacted != *text {
         *text = redacted;
     }
@@ -394,8 +400,12 @@ fn string(text: &mut String) {
 /// JSON text redacted ([`json`]); `None` when it isn't JSON.
 #[must_use]
 pub fn json_text(text: &str) -> Option<String> {
+    json_text_with(text, &str::to_owned)
+}
+
+fn json_text_with(text: &str, mask: &dyn Fn(&str) -> String) -> Option<String> {
     let mut value: Value = serde_json::from_str(text).ok()?;
-    json(&mut value);
+    json_with(&mut value, mask);
     Some(value.to_string())
 }
 
@@ -439,6 +449,11 @@ fn kind(content_type: Option<&str>) -> Kind {
 /// that is neither JSON nor text, is [`UNREADABLE`].
 #[must_use]
 pub fn body(content_type: Option<&str>, bytes: &[u8]) -> String {
+    body_with(content_type, bytes, &str::to_owned)
+}
+
+/// The wire record's exchange-scoped credentials, masked before ordinary credential-name redaction.
+pub(crate) fn body_with(content_type: Option<&str>, bytes: &[u8], mask: &dyn Fn(&str) -> String) -> String {
     let size = bytes.len();
     if bytes.is_empty() {
         return "(empty)".to_owned();
@@ -453,12 +468,16 @@ pub fn body(content_type: Option<&str>, bytes: &[u8]) -> String {
     };
     let unreadable = || format!("{UNREADABLE} ({size} bytes)");
     match kind {
-        Kind::Json => json_text(text).unwrap_or_else(unreadable),
-        Kind::Form => form(text.trim()),
-        Kind::Text => params(text),
-        Kind::Unknown | Kind::Binary => json_text(text).unwrap_or_else(|| {
+        Kind::Json => json_text_with(text, mask).unwrap_or_else(unreadable),
+        Kind::Form => form(&mask(text.trim())),
+        Kind::Text => params(&mask(text)),
+        Kind::Unknown | Kind::Binary => json_text_with(text, mask).unwrap_or_else(|| {
             let looks_like_form = !text.contains(char::is_whitespace) && text.contains('=');
-            if looks_like_form { form(text) } else { unreadable() }
+            if looks_like_form {
+                form(&mask(text))
+            } else {
+                unreadable()
+            }
         }),
     }
 }

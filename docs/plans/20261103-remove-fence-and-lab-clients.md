@@ -353,13 +353,20 @@ reran the retained behavior it moved or adapted. Both obsolete crate directories
 - Modify: `crates/teams-log/src/wire.rs` if the token endpoint's and authz's fields need redaction rules they lack
 - Modify: `crates/teams-auth/Cargo.toml`, tests in `crates/teams-auth/tests/{token.rs,authz.rs}`
 
-- [ ] the token exchange and refresh, authz (skypetoken) and any other API call outside the transport log their full
+- [x] the token exchange and refresh, authz (skypetoken) and any other API call outside the transport log their full
       request and response through `teams_log::wire` at `debug`, as the transport does
-- [ ] the logger redacts their credentials: `code`, `code_verifier`, `refresh_token`, `access_token`, `id_token`,
+- [x] the logger redacts their credentials: `code`, `code_verifier`, `refresh_token`, `access_token`, `id_token`,
       the skypetoken, `Authorization`, cookies
-- [ ] tests: at `debug` each call's request and response are in the log with every credential redacted; at `info`
+- [x] tests: at `debug` each call's request and response are in the log with every credential redacted; at `info`
       nothing of them is
-- [ ] tests of `teams-auth` and `teams-log`, and clippy, pass
+- [x] tests of `teams-auth` and `teams-log`, and clippy, pass
+
+Validation: all 211 tests in `teams-auth` and `teams-log` passed; the existing real Secret Service keyring
+test remains ignored. Both installed-logger endpoint regressions passed again after test-helper lint cleanup.
+Affected-crate all-target Clippy (warnings denied), formatting, lint-report, diff and coverage-source metadata
+checks passed. The API-client audit found only token/authz outside the already logged protocol transport.
+Known sent credentials are exchange-scoped logger context, masking raw/encoded error echoes before ordinary
+redaction without changing request or response bytes; noncredential descriptions and trace text remain visible.
 
 ### Task 9: ngteams lab mode and the lab build marker
 
