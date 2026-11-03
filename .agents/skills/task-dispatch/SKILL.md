@@ -1,6 +1,6 @@
 ---
 name: task-dispatch
-description: Run a session as a task dispatcher in Claude Code or Codex. Send each incoming task to its own background agent, queue beyond the user's concurrency limit, isolate edits in git worktrees, track a resumable board and status page, and review landed work when the queue drains. Use for "agent per task", "dispatch these", "run tasks in parallel", "up to N agents", "resume the dispatch", or "продолжи диспатч", and subsequent tasks while dispatch mode is active. Reading or editing this skill alone does not activate dispatch mode.
+description: Run a session as a task dispatcher in Claude Code or Codex. Send each incoming task to its own background agent, queue beyond the user's concurrency limit, isolate edits in git worktrees, track a resumable board and status page, and review landed work when the queue drains. Use for "agent per task", "dispatch these", "run tasks in parallel", "up to N agents", "resume the dispatch", or "continue dispatch", and subsequent tasks while dispatch mode is active. Reading or editing this skill alone does not activate dispatch mode.
 ---
 
 # Task dispatch

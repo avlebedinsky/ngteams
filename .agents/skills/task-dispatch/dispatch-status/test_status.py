@@ -174,10 +174,10 @@ class TranscriptTests(Files):
 
     def test_event_helper_writes_unicode_and_rejects_bad_phase(self):
         helper = ROOT / 'scripts/task-event.py'
-        subprocess.run([sys.executable, '-B', helper, self.events, 'check', 'Проверка'], check=True)
+        subprocess.run([sys.executable, '-B', helper, self.events, 'check', 'Check ✓'], check=True)
         log = Transcript(self.events)
         log.poll()
-        self.assertEqual(log.doing['text'], 'Проверка')
+        self.assertEqual(log.doing['text'], 'Check ✓')
         bad = subprocess.run([sys.executable, '-B', helper, self.events, 'typo', 'x'], capture_output=True, check=False)
         self.assertEqual(bad.returncode, 2)
 
