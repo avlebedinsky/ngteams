@@ -2424,12 +2424,12 @@ impl Shell {
     }
 
     /// The account menu's account: its name and what tells it apart above the statuses, and its "Sign out and remove"
-    /// below them in an app that adds and removes accounts; neither before the accounts were handed in.
+    /// below them in an app that permits removal; neither before the accounts were handed in.
     fn account_menu_parts(&self, palette: Palette, cx: &mut Context<Self>) -> (Option<gpui::Div>, Option<gpui::Div>) {
         let account = self.accounts.as_ref().and_then(|(accounts, _)| {
             let accounts = accounts.read(cx);
             let tile = accounts.tile(self.core.me())?;
-            Some((tile.name.clone(), tile.detail.clone(), accounts.can_add()))
+            Some((tile.name.clone(), tile.detail.clone(), accounts.can_remove()))
         });
         let header = account.as_ref().map(|(name, detail, _)| {
             div()

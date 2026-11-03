@@ -212,8 +212,8 @@ fn only_this_crate_names_the_personal_keyring() {
         assert!(file.starts_with("crates/ngteams/"), "{file} names the personal keyring");
     }
     assert_eq!(ngteams::KEYRING_APPLICATION, "ngteams");
-    let accounts = fs::read_to_string(root().join("crates/ngteams/src/accounts.rs")).unwrap();
-    assert!(accounts.contains("LazyKeyring::new(KEYRING_APPLICATION)"));
+    let secrets = fs::read_to_string(root().join("crates/ngteams/src/secrets.rs")).unwrap();
+    assert!(secrets.contains("LazyKeyring::new(KEYRING_APPLICATION)"));
 }
 
 #[test]

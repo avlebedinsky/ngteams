@@ -104,6 +104,32 @@ fn adding_focuses_one_prompt_then_selects_the_started_account_and_closes_it() {
 }
 
 #[test]
+fn a_lab_alias_keeps_sending_enabled_without_opening_an_add_account_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    let (setup, first) = setup(dir.path(), 1);
+    let (socket, peer) = std::os::unix::net::UnixStream::pair().unwrap();
+    let setup = setup.with_secrets(crate::secrets::AppSecrets::lab(socket).unwrap());
+    let cx = TestAppContext::single();
+    let running = open(&cx, &setup, first);
+    assert!(!cx.read(|cx| running.read(cx).read_only));
+    assert!(!cx.read(|cx| running.read(cx).can_add_account()));
+    let before = cx.update(|cx| cx.windows().len());
+    let desktop = cx.read(|cx| running.read(cx).desktop.clone());
+    cx.read(|cx| {
+        let rail = desktop.read(cx).accounts().read(cx);
+        assert!(!rail.can_add());
+        assert!(rail.can_remove(), "lab forget remains available");
+    });
+    cx.update(|cx| desktop.update(cx, |_, cx| cx.emit(DesktopEvent::AddAccount)));
+    cx.run_until_parked();
+    assert_eq!(cx.update(|cx| cx.windows().len()), before);
+    assert!(cx.read(|cx| running.read(cx).adding.is_none()));
+    cx.update(quit);
+    cx.run_until_parked();
+    drop((setup, peer));
+}
+
+#[test]
 fn removal_waits_for_shutdown_and_the_last_account_quits_even_when_forget_fails() {
     for broken in [false, true] {
         let dir = tempfile::tempdir().unwrap();

@@ -24,7 +24,7 @@ use std::sync::Arc;
 
 use crate::accounts_file::PersonalAccount;
 use gpui::{App, AppContext as _, AsyncApp, Entity, Global, QuitMode, SharedString, Task, WeakEntity, WindowHandle};
-use teams_auth::secrets::{LazyKeyring, SecretStore};
+use teams_auth::secrets::SecretStore;
 use teams_auth::session::SignedOut;
 use teams_core::EngineHandle;
 use teams_log::diagnostics::Source as DiagnosticsSource;
@@ -40,6 +40,7 @@ use tokio::sync::watch;
 use crate::accounts::{self, Runner, Started};
 use crate::calling::PersonalCalls;
 use crate::engine::display_name;
+use crate::secrets::AppSecrets;
 
 /// The window's title and the app's name on its notifications and tray item.
 pub const TITLE: &str = "ngteams";
@@ -57,9 +58,8 @@ pub type SignInAgain = Rc<dyn Fn(&mut App)>;
 /// What makes an account's [`SignInAgain`] ([`Launch::sign_in_again`]).
 pub type SignInAgainFor = Rc<dyn Fn(&PersonalAccount) -> SignInAgain>;
 
-/// What the app starts with: its engines over the desktop's Secret Service ([`LazyKeyring`]), a test's over its own
-/// store.
-pub struct Launch<S = LazyKeyring> {
+/// What the app starts with: engines over the selected desktop or lab broker credentials, or a test's own store.
+pub struct Launch<S = AppSecrets> {
     /// The first account's engine, started; the others follow it in [`Launch::others`].
     pub first: Started<S>,
     pub others: Vec<Started<S>>,
@@ -197,6 +197,7 @@ pub fn launch<S: SecretStore + 'static>(cx: &mut App, launch: Launch<S>) -> Resu
             cx,
         )
     });
+    limit_lab_accounts(&desktop, &runner, cx);
     let running = cx.new(|_| Running {
         desktop: desktop.clone(),
         bridges: vec![(key, first.account.upn.clone(), bridge)],
@@ -228,6 +229,14 @@ pub fn launch<S: SecretStore + 'static>(cx: &mut App, launch: Launch<S>) -> Resu
     follow_desktop(&desktop, running, cx);
     connect(&desktop, bus, cx);
     Ok(Launched { window, desktop })
+}
+
+/// A lab alias can forget its current account, but its single-account broker cannot add another one.
+fn limit_lab_accounts(desktop: &Entity<Desktop>, runner: &Runner, cx: &mut App) {
+    if runner.setup.secrets().application() == crate::lab::LAB_KEYRING_APPLICATION {
+        let rail = desktop.read(cx).accounts().clone();
+        rail.update(cx, teams_ui::accounts::Accounts::prevent_adding);
+    }
 }
 
 /// A video a message carries plays its sound on the calls' devices (silently without them).
@@ -290,6 +299,11 @@ fn follow_desktop(desktop: &Entity<Desktop>, running: Entity<Running>, cx: &mut 
 }
 
 impl Running {
+    /// Read-only views cannot add accounts, and each lab alias has its own single-account broker.
+    fn can_add_account(&self) -> bool {
+        !self.read_only && self.runner.setup.secrets().application() != crate::lab::LAB_KEYRING_APPLICATION
+    }
+
     /// An account started: its bridge, its sign-out watch, its calls' video following the settings, and its place in
     /// the window.
     fn add_started<S: SecretStore + 'static>(&mut self, started: Started<S>, cx: &mut gpui::Context<Self>) {
@@ -332,8 +346,8 @@ impl Running {
     /// prompt's events come to `Running` as it is being updated already (GPUI's subscriber is leased to its callback),
     /// so they are handled on the `running` handed in, never by updating `Running` again.
     fn ask_account(&mut self, cx: &mut gpui::Context<Self>) {
-        if self.read_only {
-            log::info!("read-only: no account is added");
+        if !self.can_add_account() {
+            log::info!("this mode adds no account");
             return;
         }
         if let Some(window) = self.adding
@@ -358,7 +372,7 @@ impl Running {
 
     /// Signs the account `upn` the prompt named in, then starts it (see [`Running::ask_account`]).
     fn sign_in_added(&mut self, upn: String, prompt: Entity<AccountPrompt>, cx: &mut gpui::Context<Self>) {
-        if self.read_only {
+        if !self.can_add_account() {
             return;
         }
         if self.bridges.iter().any(|(_, held, _)| held.eq_ignore_ascii_case(&upn)) {

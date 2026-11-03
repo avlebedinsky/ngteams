@@ -1,5 +1,5 @@
-//! `ngteams`: the personal build's app (see the library's docs). Its refusals come first, before anything else is read
-//! or opened, the window included.
+//! `ngteams`: desktop, read-only and lab startup. Build refusals come before anything is read or opened; application
+//! mode is checked after the internal sign-in page worker has had its chance to serve.
 
 use std::cell::Cell;
 use std::os::fd::RawFd;
@@ -18,11 +18,11 @@ use ngteams::accounts_file::{PersonalAccount, PersonalPaths};
 use ngteams::app;
 use ngteams::app::{Launch, SignInAgain};
 use ngteams::calling::CallDevices;
-use ngteams::cli::{Cli, Command as Subcommand, ReadOnlyMode};
+use ngteams::cli::{Cli, Command as Subcommand, LabMode, ReadOnlyMode};
 use ngteams::descriptors::{adopt_socket, adopt_trace};
 use ngteams::forget::Forgot;
 use ngteams::setup::Setup;
-use ngteams::{KEYRING_APPLICATION, read_only, snapshot};
+use ngteams::{KEYRING_APPLICATION, lab, read_only, secrets, snapshot};
 use teams_auth::secrets::LazyKeyring;
 use teams_core::CallFloor;
 use teams_media::devices::pipewire::Reach;
@@ -32,6 +32,9 @@ use teams_ui::account_prompt::{AccountPrompt, AccountPromptEvent};
 use teams_ui::window::PERSONAL_APP_ID;
 use teams_ui::{SettingsFile, ViewTrace};
 
+#[cfg(test)]
+#[path = "../tests/support/lab_startup.rs"]
+mod lab_startup_tests;
 #[cfg(test)]
 #[path = "../tests/support/startup.rs"]
 mod startup_tests;
@@ -50,6 +53,8 @@ enum Outcome {
     Quit,
     /// Signed in again after a sign-out: the process runs itself again, so a new engine starts.
     Restart,
+    /// Lab sign-in keeps the broker and trace available for this same process's next image.
+    LabRestart(ngteams::restart::RestartDescriptors),
 }
 
 fn main() -> ExitCode {
@@ -61,22 +66,38 @@ fn main() -> ExitCode {
     // SAFETY: before anything else but the refusal (which starts no thread), while the process has one thread.
     unsafe { teams_wpe::worker::serve_if_asked(|| {}) };
     let cli = Cli::parse();
+    if let Some(refusal) = ngteams::refusal::refusal_for(cli.lab_requested()) {
+        return failed("startup", &refusal);
+    }
     match &cli.command {
-        Some(Subcommand::Secrets { account, fd }) => return broker(account, *fd),
+        Some(Subcommand::Secrets { account, lab, fd }) => {
+            return match (account.as_deref(), lab.as_deref()) {
+                (Some(upn), None) => broker(upn, *fd),
+                (None, Some(alias)) => lab_broker(alias, *fd),
+                _ => failed("secrets", &"give exactly one of --account or --lab"),
+            };
+        }
         Some(Subcommand::Snapshot { to }) => return take_snapshot(to),
         None => {}
     }
     let outcome = match cli.read_only_mode(std::env::var_os(read_only::ENV).as_deref()) {
         Ok(Some(mode)) => run_read_only(&mode),
-        Ok(None) => run(&cli, Reach::Desktop),
+        Ok(None) => match cli.lab_mode() {
+            Ok(Some(mode)) => run_lab(&cli, &mode),
+            Ok(None) => run(&cli, Reach::Desktop),
+            Err(error) => Err(error),
+        },
         Err(error) => Err(error),
     };
     match outcome {
         Ok(Outcome::Quit) => ExitCode::SUCCESS,
-        Ok(Outcome::Restart) => {
-            let error = Command::new(std::env::current_exe().unwrap_or_else(|_| "ngteams".into()))
-                .args(std::env::args_os().skip(1))
-                .exec();
+        Ok(outcome @ (Outcome::Restart | Outcome::LabRestart(_))) => {
+            let mut command = Command::new(std::env::current_exe().unwrap_or_else(|_| "ngteams".into()));
+            command.args(std::env::args_os().skip(1));
+            let error = match outcome {
+                Outcome::LabRestart(descriptors) => descriptors.exec(&mut command),
+                _ => command.exec(),
+            };
             eprintln!("teams: signed in again, but it can't start again ({error}): start it again yourself");
             ExitCode::FAILURE
         }
@@ -89,6 +110,10 @@ fn main() -> ExitCode {
 
 fn run(cli: &Cli, reach: Reach) -> Result<Outcome, String> {
     let setup = Setup::from_env().map_err(|error| error.to_string())?;
+    run_setup(cli, reach, setup, ViewTrace::off())
+}
+
+fn run_setup(cli: &Cli, reach: Reach, setup: Setup, trace: ViewTrace) -> Result<Outcome, String> {
     if let Some(upn) = cli.forget.as_deref() {
         forget(&setup, upn)?;
         return Ok(Outcome::Quit);
@@ -102,6 +127,10 @@ fn run(cli: &Cli, reach: Reach) -> Result<Outcome, String> {
     }
     let (ready, unready) = ready_accounts(&setup)?;
     if ready.is_empty() {
+        if setup.secrets().application() == lab::LAB_KEYRING_APPLICATION {
+            let account = lab::account(&setup.paths)?;
+            return sign_in_first(setup, account.upn);
+        }
         return ask_account(setup, unready.first().map(|account| account.upn.clone()));
     }
     let file = SettingsFile::new(setup.paths.settings_file());
@@ -137,7 +166,7 @@ fn run(cli: &Cli, reach: Reach) -> Result<Outcome, String> {
             }),
             runner: window_runner(runner),
             read_only: false,
-            trace: Arc::new(ViewTrace::off()),
+            trace: Arc::new(trace),
         };
         if let Err(failure) = app::launch(cx, launch) {
             eprintln!("teams: the window can't be opened: {}", failure.error);
@@ -203,6 +232,63 @@ fn take_snapshot(to: &Path) -> ExitCode {
 fn failed(what: &str, error: &dyn std::fmt::Display) -> ExitCode {
     eprintln!("teams {what}: {error}");
     ExitCode::FAILURE
+}
+
+/// A lab alias uses only its isolated files and a writable, account-scoped broker. The inherited descriptors are
+/// adopted before logging, files or media can allocate a descriptor of their own.
+fn run_lab(cli: &Cli, mode: &LabMode) -> Result<Outcome, String> {
+    let socket = adopt_socket(mode.secrets_fd).map_err(|error| error.to_string())?;
+    let trace = mode
+        .trace_fd
+        .map(adopt_trace)
+        .transpose()
+        .map_err(|error| error.to_string())?;
+    let descriptors = ngteams::restart::RestartDescriptors::new(socket, trace);
+    let trace = descriptors
+        .trace()
+        .map_err(|error| error.to_string())?
+        .map_or_else(ViewTrace::off, ViewTrace::new);
+    lab::window_allowed_here()?;
+    let paths = lab::paths_from_env(&mode.alias)?;
+    let socket = descriptors.socket().map_err(|error| error.to_string())?;
+    let store = secrets::AppSecrets::lab(socket).map_err(|error| format!("the lab broker's socket: {error}"))?;
+    let setup = Setup::new(paths)
+        .map_err(|error| error.to_string())?
+        .with_secrets(store);
+    let account = lab::account(&setup.paths)?;
+    for requested in [cli.account.as_deref(), cli.forget.as_deref()].into_iter().flatten() {
+        if !requested.eq_ignore_ascii_case(&account.upn) {
+            return Err(format!("lab alias {} is configured for {}", mode.alias, account.upn));
+        }
+    }
+    match run_setup(cli, Reach::Sandbox, setup, trace)? {
+        Outcome::Restart => Ok(Outcome::LabRestart(descriptors)),
+        outcome => Ok(outcome),
+    }
+}
+
+/// The alias's one account in its lab namespace. It may still be pending: the broker must be available for its first
+/// sign-in as well as token refresh and forget.
+fn lab_broker(alias: &str, fd: RawFd) -> ExitCode {
+    let socket = match adopt_socket(fd) {
+        Ok(socket) => socket,
+        Err(error) => return failed("secrets", &error),
+    };
+    let account = lab::paths_from_env(alias).and_then(|paths| lab::account(&paths));
+    let account = match account {
+        Ok(account) => account,
+        Err(error) => return failed("secrets", &error),
+    };
+    let runtime = match ngteams::accounts::runtime() {
+        Ok(runtime) => runtime,
+        Err(error) => return failed("secrets", &error),
+    };
+    let store = LazyKeyring::new(lab::LAB_KEYRING_APPLICATION);
+    let scope = secrets::lab_broker_scope(&account.upn);
+    match runtime.block_on(read_only::serve_broker(socket, &scope, &store, &mut std::io::stderr())) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => failed("secrets", &format!("{error}; the socket is closed")),
+    }
 }
 
 /// The read-only mode (`ngteams::read_only`): its descriptors taken over first, then the sandbox check, the snapshot

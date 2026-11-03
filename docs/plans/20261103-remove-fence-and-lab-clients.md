@@ -374,23 +374,31 @@ redaction without changing request or response bytes; noncredential descriptions
 - Modify: `crates/ngteams/src/{cli.rs,main.rs,lib.rs,refusal.rs,accounts.rs,app.rs,read_only.rs}`
 - Create: `crates/ngteams/tests/lab_mode.rs`
 
-- [ ] `--lab <alias>`:
+- [x] `--lab <alias>`:
       - data and config under `~/.local/share/ngteams-lab/<alias>/`;
       - keyring namespace `ngteams-lab`, hardcoded;
       - sending mode, window only in the UI sandbox, sandbox PipeWire;
       - sign-in, refresh and forget through the broker store.
-- [ ] `ngteams secrets --lab <alias>` serves that account in `ngteams-lab` with `get`, `put` and `delete`, reading the
+- [x] `ngteams secrets --lab <alias>` serves that account in `ngteams-lab` with `get`, `put` and `delete`, reading the
       lab dir's accounts; the read-only broker keeps `get` only on `ngteams`
-- [ ] the lab build marker:
+- [x] the lab build marker:
       - `TEAMS_LAB_BUILD` (compile time) lets a binary run only with `--lab`;
       - lab dirs that overlap the user's own `ngteams` dirs are refused (`overlapping`);
       - the install marker still gates every other mode.
-- [ ] in-process tests, as `tests/read_only.rs` does:
+- [x] in-process tests, as `tests/read_only.rs` does:
       - the dirs and namespace;
       - the marker's refusals (lab marker without `--lab`; `--lab` in an install build is allowed);
       - the overlap refusal and the broker scope per mode;
       - a mock-backed send in lab mode.
-- [ ] tests of `ngteams` and clippy pass
+- [x] tests of `ngteams` and clippy pass
+
+Validation: 99 focused tests passed: ngteams library/startup/account/app/call/read-only/sign-in/separation
+checks and the new lab path/marker, broker lifecycle, mock-backed send and self-exec descriptor tests (77),
+plus UI account/reach tests (22). All-target Clippy for ngteams and teams-ui (warnings denied), formatting,
+lint-report, whitespace and all 14 coverage-source reviews passed. Lab account operations use the selected
+broker store; personal operations keep fresh lazy-keyring lifetimes. A lab alias selects its single configured
+account directly, remains writable and can forget it, but cannot add another account. Sign-in self-exec
+preserves broker/trace originals while ordinary child processes inherit neither. No live services were used.
 
 ### Task 10: scripts/run-lab.sh and lab tokens from proto-lab auth
 

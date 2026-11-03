@@ -8,6 +8,7 @@
 //! when the setup is made (`PersonalPaths::migrate_single_account`).
 
 use crate::accounts_file::{PersonalAccount, PersonalError, PersonalPaths};
+use crate::secrets::AppSecrets;
 
 /// Why the personal build can't run for an account here.
 #[derive(Debug, thiserror::Error)]
@@ -20,6 +21,7 @@ pub enum SetupError {
 #[derive(Clone, Debug)]
 pub struct Setup {
     pub paths: PersonalPaths,
+    secrets: AppSecrets,
 }
 
 impl Setup {
@@ -37,7 +39,23 @@ impl Setup {
     /// When the files cannot be read or moved.
     pub fn new(paths: PersonalPaths) -> Result<Self, SetupError> {
         paths.migrate_single_account()?;
-        Ok(Self { paths })
+        Ok(Self {
+            paths,
+            secrets: AppSecrets::personal(),
+        })
+    }
+
+    /// Uses the startup-selected credential backend for every account operation.
+    #[must_use]
+    pub fn with_secrets(mut self, secrets: AppSecrets) -> Self {
+        self.secrets = secrets;
+        self
+    }
+
+    /// A handle to the selected store, including token renewal and account removal.
+    #[must_use]
+    pub fn secrets(&self) -> AppSecrets {
+        self.secrets.clone()
     }
 
     /// Every account, in the order added, signed in or not.

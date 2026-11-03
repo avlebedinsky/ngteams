@@ -9,6 +9,8 @@
 //! in place of `--read-only`), the window over a snapshot in the UI sandbox only; `ngteams snapshot --to <dir>` (the
 //! snapshot of the user's files it runs on) and `ngteams secrets --account <UPN> --fd <n>` (its credential broker,
 //! `get` only, run outside the sandbox).
+//! Lab mode is `ngteams --lab <alias> --secrets-fd <n> [--trace-fd <n>]`, with writable lab credentials served by
+//! `ngteams secrets --lab <alias> --fd <n>` outside its UI sandbox.
 
 use std::os::fd::RawFd;
 use std::path::PathBuf;
@@ -24,6 +26,9 @@ use clap::{Args, Parser, Subcommand};
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
+    /// Run a lab alias in its UI sandbox, using the lab credential broker and isolated account files.
+    #[arg(long, value_name = "ALIAS", value_parser = crate::lab::alias, conflicts_with = "read_only")]
+    pub lab: Option<String>,
     /// A work account to sign in (its UPN) before the app starts, skipping the window that asks for it: one of the
     /// accounts already given, or a new one added after them. In the read-only mode: the account to show.
     #[arg(long, value_name = "UPN")]
@@ -43,14 +48,14 @@ pub struct ReadOnlyArgs {
     /// runs on a snapshot (`--data`) and only in the UI sandbox. `TEAMS_READ_ONLY=1` asks for it too.
     #[arg(long = "read-only")]
     pub read_only: bool,
-    /// The snapshot the read-only mode runs on (`ngteams snapshot --to <dir>`).
+    /// The snapshot the read-only mode runs on (`ngteams snapshot --to <dir>`); lab paths are fixed by its alias.
     #[arg(long, value_name = "DIR")]
     pub data: Option<PathBuf>,
     /// The credential broker's socket (`ngteams secrets`, the other end of a socket pair), handed to this process at
-    /// its start (3 or above): the read-only mode's only way to the account's tokens.
+    /// its start (3 or above): read-only and lab modes use it for the account's tokens.
     #[arg(long, value_name = "N")]
     pub secrets_fd: Option<RawFd>,
-    /// Where the view trace goes in the read-only mode: a descriptor open for writing, handed to this process at its
+    /// Where the view trace goes in read-only or lab mode: a descriptor open for writing, handed to this process at its
     /// start (3 or above).
     #[arg(long, value_name = "N")]
     pub trace_fd: Option<RawFd>,
@@ -65,13 +70,15 @@ pub enum Command {
         #[arg(long, value_name = "DIR")]
         to: PathBuf,
     },
-    /// The read-only mode's credential broker: serves `get` of the account's own `ngteams` Secret Service
-    /// items on descriptor `--fd` (one end of a socket pair), refuses `put`, `delete` and any other account or
-    /// application; exits when the socket closes. Run outside the UI sandbox; opens no window.
+    /// The credential broker, run outside the UI sandbox. Personal --account serves get only; --lab serves that
+    /// alias's ngteams-lab items with get, put and delete. Other accounts/applications are refused.
     Secrets {
         /// The account (its UPN).
-        #[arg(long, value_name = "UPN")]
-        account: String,
+        #[arg(long, value_name = "UPN", required_unless_present = "lab", conflicts_with = "lab")]
+        account: Option<String>,
+        /// The lab alias, whose account is read from its isolated accounts.toml.
+        #[arg(long, value_name = "ALIAS", value_parser = crate::lab::alias, required_unless_present = "account")]
+        lab: Option<String>,
         /// The socket's descriptor, handed to this process at its start (3 or above).
         #[arg(long, value_name = "N")]
         fd: RawFd,
@@ -87,7 +94,42 @@ pub struct ReadOnlyMode {
     pub trace_fd: Option<RawFd>,
 }
 
+/// A lab alias's sending-mode window over its fixed paths and writable credential broker.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LabMode {
+    pub alias: String,
+    pub secrets_fd: RawFd,
+    pub trace_fd: Option<RawFd>,
+}
+
 impl Cli {
+    /// Whether either the app or the credential-broker subcommand explicitly selects lab mode.
+    #[must_use]
+    pub fn lab_requested(&self) -> bool {
+        self.lab.is_some() || matches!(&self.command, Some(Command::Secrets { lab: Some(_), .. }))
+    }
+
+    /// The lab mode and its inherited descriptors; its paths cannot be overridden with --data.
+    ///
+    /// # Errors
+    /// Missing broker, conflicting snapshot/read-only arguments, or a descriptor given twice.
+    pub fn lab_mode(&self) -> Result<Option<LabMode>, String> {
+        let Some(alias) = &self.lab else {
+            return Ok(None);
+        };
+        let args = &self.read_only;
+        if args.read_only || args.data.is_some() {
+            return Err("--lab uses its own sending mode and fixed paths; do not give --read-only or --data".into());
+        }
+        let secrets_fd = args.secrets_fd.ok_or("the lab mode needs --secrets-fd <n>")?;
+        check_descriptors(secrets_fd, args.trace_fd)?;
+        Ok(Some(LabMode {
+            alias: alias.clone(),
+            secrets_fd,
+            trace_fd: args.trace_fd,
+        }))
+    }
+
     /// The read-only mode when `--read-only` or `env` ([`crate::read_only::ENV`]'s value) asks for it, with what it
     /// needs; `Ok(None)` when it isn't asked for (and none of its arguments is given).
     ///
@@ -95,6 +137,12 @@ impl Cli {
     /// What is missing or given twice, as the message to print.
     pub fn read_only_mode(&self, env: Option<&std::ffi::OsStr>) -> Result<Option<ReadOnlyMode>, String> {
         let args = &self.read_only;
+        if self.lab.is_some() {
+            if crate::read_only::asked(args.read_only, env) {
+                return Err("--lab cannot be combined with the read-only mode".into());
+            }
+            return Ok(None);
+        }
         if !crate::read_only::asked(args.read_only, env) {
             if args.data.is_some() || args.secrets_fd.is_some() || args.trace_fd.is_some() {
                 return Err("--data, --secrets-fd and --trace-fd are the read-only mode's: give --read-only".into());
@@ -108,11 +156,7 @@ impl Cli {
         let account = self.account.clone().ok_or_else(|| missing("--account <UPN>"))?;
         let data = args.data.clone().ok_or_else(|| missing("--data <snapshot>"))?;
         let secrets_fd = args.secrets_fd.ok_or_else(|| missing("--secrets-fd <n>"))?;
-        if args.trace_fd == Some(secrets_fd) {
-            return Err(format!(
-                "descriptor {secrets_fd} is named for both --secrets-fd and --trace-fd"
-            ));
-        }
+        check_descriptors(secrets_fd, args.trace_fd)?;
         Ok(Some(ReadOnlyMode {
             account,
             data,
@@ -120,4 +164,13 @@ impl Cli {
             trace_fd: args.trace_fd,
         }))
     }
+}
+
+fn check_descriptors(secrets_fd: RawFd, trace_fd: Option<RawFd>) -> Result<(), String> {
+    if trace_fd == Some(secrets_fd) {
+        return Err(format!(
+            "descriptor {secrets_fd} is named for both --secrets-fd and --trace-fd"
+        ));
+    }
+    Ok(())
 }

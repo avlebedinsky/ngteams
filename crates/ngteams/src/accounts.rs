@@ -2,20 +2,19 @@
 //! Each engine owns its account's store and sends writes through its outbox.
 
 use crate::accounts_file::PersonalAccount;
-use teams_auth::secrets::{LazyKeyring, SecretStore};
+use teams_auth::secrets::SecretStore;
 use teams_core::CallFloor;
 use teams_signin::window::Windows;
 
-use crate::KEYRING_APPLICATION;
 use crate::calling::{CallDevices, PersonalCalls};
 use crate::engine::{self, PersonalEngine};
 use crate::forget::{self, Forgot};
+use crate::secrets::AppSecrets;
 use crate::setup::Setup;
 use crate::signin::{self, SignInClients};
 
-/// An account's engine, started: over the desktop's Secret Service ([`LazyKeyring`]) in the app, over a test's store
-/// in its tests.
-pub struct Started<S = LazyKeyring> {
+/// An account's engine, started: over the selected desktop or lab store in the app, or a test's own store.
+pub struct Started<S = AppSecrets> {
     pub account: PersonalAccount,
     pub engine: PersonalEngine<S>,
     /// The window's calls of the account, when the app's devices could be opened.
@@ -46,7 +45,7 @@ impl Runner {
     /// # Errors
     /// Why it couldn't start, said for the user (another `ngteams` runs on the account, its region can't be read).
     pub fn start(&self, account: &PersonalAccount) -> Result<Started, String> {
-        self.start_on(account, LazyKeyring::new(KEYRING_APPLICATION))
+        self.start_on(account, self.setup.secrets())
     }
 
     fn start_on<S: SecretStore + 'static>(&self, account: &PersonalAccount, secrets: S) -> Result<Started<S>, String> {
@@ -86,9 +85,9 @@ pub fn runtime() -> Result<tokio::runtime::Runtime, String> {
 /// Whether `account` can start without a sign-in ([`signin::ready`]).
 ///
 /// # Errors
-/// When the Secret Service can't be read.
+/// When the selected credential store can't be read.
 pub fn ready(setup: &Setup, account: &PersonalAccount) -> Result<bool, String> {
-    let store = LazyKeyring::new(KEYRING_APPLICATION);
+    let store = setup.secrets();
     runtime()?
         .block_on(signin::ready(setup, account, &store))
         .map_err(|error| error.to_string())
@@ -100,7 +99,7 @@ pub fn ready(setup: &Setup, account: &PersonalAccount) -> Result<bool, String> {
 /// # Errors
 /// Why the sign-in stored nothing, as the user is told it ([`signin::failure`]).
 pub fn sign_in(setup: &Setup, account: &PersonalAccount, windows: &Windows) -> Result<PersonalAccount, String> {
-    let store = LazyKeyring::new(KEYRING_APPLICATION);
+    let store = setup.secrets();
     runtime()?.block_on(async {
         let clients = SignInClients::live().map_err(|error| error.to_string())?;
         let signed = match signin::window_for(setup, account, windows) {
@@ -120,7 +119,7 @@ pub fn sign_in(setup: &Setup, account: &PersonalAccount, windows: &Windows) -> R
 /// # Errors
 /// Why it wasn't added, as the user is told it ([`signin::failure`]).
 pub fn add(setup: &Setup, upn: &str, windows: &Windows) -> Result<PersonalAccount, String> {
-    let store = LazyKeyring::new(KEYRING_APPLICATION);
+    let store = setup.secrets();
     runtime()?.block_on(async {
         let clients = SignInClients::live().map_err(|error| error.to_string())?;
         let window = |account: &PersonalAccount| signin::window_for(setup, account, windows);
@@ -135,7 +134,7 @@ pub fn add(setup: &Setup, upn: &str, windows: &Windows) -> Result<PersonalAccoun
 /// # Errors
 /// Why it wasn't forgotten.
 pub fn forget(setup: &Setup, upn: &str) -> Result<Forgot, String> {
-    let store = LazyKeyring::new(KEYRING_APPLICATION);
+    let store = setup.secrets();
     runtime()?
         .block_on(forget::forget(setup, upn, &store))
         .map_err(|error| error.to_string())

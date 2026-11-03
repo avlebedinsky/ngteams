@@ -1,6 +1,5 @@
-//! The accounts of an app that runs several at once (the personal build with the user's accounts, the lab app with
-//! several lab accounts): each its own engine, models, notifications and own presence, all live at once, one of them
-//! shown in the window.
+//! An app's accounts: each with its own engine, models, notifications and own presence, all live at once, one of
+//! them shown in the window. The desktop can add accounts; a lab alias keeps its single broker account.
 //!
 //! [`Accounts`] is the GPUI entity every account's shell shares. Its rail shows each account's avatar above Settings
 //! (its picture, else its initials), the shown one marked and carrying the account's own presence dot, another one
@@ -9,7 +8,7 @@
 //! comes back as it was left), a click on the shown one opens its account menu (the shell's). The "+" under the
 //! avatars asks the app to add an account ([`AccountsEvent::AddAsked`], only in an app that can:
 //! [`Accounts::can_add`]), and the account menu's "Sign out and remove" asks to remove one
-//! ([`AccountsEvent::RemoveAsked`]). The app does what is asked (a sign-in, an engine started or stopped) and tells
+//! ([`AccountsEvent::RemoveAsked`], when [`Accounts::can_remove`]). The app does what is asked (a sign-in, an engine started or stopped) and tells
 //! the model ([`Accounts::add`], [`Accounts::remove`]).
 //!
 //! Calls are one at a time across the accounts (`teams_core::CallFloor` decides it for the writes): an account's
@@ -95,6 +94,7 @@ pub struct Accounts {
     tiles: Vec<AccountTile>,
     active: usize,
     can_add: bool,
+    can_remove: bool,
     trace: Arc<ViewTrace>,
     /// Each account's own presence observed, by the account's MRI.
     own_observed: Vec<(String, Subscription)>,
@@ -110,15 +110,28 @@ impl Accounts {
             tiles: Vec::new(),
             active: 0,
             can_add,
+            can_remove: can_add,
             trace,
             own_observed: Vec::new(),
         }
     }
 
-    /// Whether the app adds accounts (the rail shows its "+", the account menu its "Sign out and remove").
+    /// Whether the app adds accounts (the rail shows its "+").
     #[must_use]
     pub fn can_add(&self) -> bool {
         self.can_add
+    }
+
+    /// Whether an existing account may be signed out and removed.
+    #[must_use]
+    pub fn can_remove(&self) -> bool {
+        self.can_remove
+    }
+
+    /// A single-account session may forget its account but cannot add another one.
+    pub fn prevent_adding(&mut self, cx: &mut Context<Self>) {
+        self.can_add = false;
+        cx.notify();
     }
 
     #[must_use]
@@ -244,7 +257,7 @@ impl Accounts {
 
     /// The user asked to sign out of account `key` and remove it.
     pub fn ask_remove(&mut self, key: &str, cx: &mut Context<Self>) {
-        if self.can_add && self.tile(key).is_some() {
+        if self.can_remove && self.tile(key).is_some() {
             cx.emit(AccountsEvent::RemoveAsked(key.to_owned()));
         }
     }
