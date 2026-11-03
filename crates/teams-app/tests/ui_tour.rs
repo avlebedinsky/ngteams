@@ -83,15 +83,15 @@ const SETTLE: Duration = Duration::from_millis(1500);
 type Step = (&'static str, fn(&Entity<Shell>, &mut Window, &mut App));
 
 /// Where the tour's made-up channel meeting is: the mock's team channel `channel`, a made-up mailbox.
-fn channel_meeting_place(channel: &str) -> Option<event_form::MeetingPlace> {
-    Some(event_form::MeetingPlace {
+fn channel_meeting_place(channel: &str) -> event_form::MeetingPlace {
+    event_form::MeetingPlace {
         channel: teams_core::MeetingChannel {
             channel: channel.to_owned(),
             mailbox: "made-up-team@lab.example.test".to_owned(),
         },
         team: "Made-up Team".to_owned(),
         name: "General".to_owned(),
-    })
+    }
 }
 
 /// A made-up channel meeting the account scheduled, as its team's calendar (`mailbox`) gives it.
@@ -739,9 +739,7 @@ const STEPS: [Step; 4 + 134] = [
     // calendar, the channel's row, Send update and Cancel meeting
     ("channel-meeting-edit-form", |shell, _, cx| {
         event_form::close(cx);
-        let Some(place) = channel_meeting_place(TEAM) else {
-            return say("no channel meeting to edit");
-        };
+        let place = channel_meeting_place(TEAM);
         let calendar = shell.read(cx).calendar_view().clone();
         match channel_meeting(&place.channel.mailbox) {
             Some(full) => calendar.update(cx, |calendar, cx| calendar.edit_in_channel(full, place, cx)),
