@@ -9,6 +9,10 @@
   confirms they are only those.
 - The release build `ngteams` carries nothing of the lab or the fence: it doesn't read `lab.toml`, keeps no
   `fence.log` and makes no lab keep-apart checks. A stale `lab.toml` stopped it from starting on 2026-11-03.
+- The debug log stays complete: with the `debug` level on, every API call the app makes is logged with its full
+  request and response (headers and body, credentials redacted by the logger), and every Trouter frame both ways
+  (user decision of 2026-10-22, restated 2026-11-03). `info` stays payload-free. This lives in `teams-log::wire` and
+  the transport, not in the fence, and must survive the cut. Today `teams-auth`'s token and authz calls bypass it.
 - `proto-lab` stays for web-client captures, bundle search and scenarios, without its browser fence.
 - The user will provide new lab accounts once this is done. The current ones (labbot, labbot2, labbot3) may then be
   removed.
@@ -78,7 +82,9 @@
   - the id helpers, accounts.toml, the call tracking and the cross-account call floor;
   - the outbox's unknown-outcome rule;
   - the transport's https, no-proxy, no-redirect and one-token-per-service rules;
-  - the test-support refusal.
+  - the test-support refusal;
+  - the debug wire log (`teams-proto`'s `log_request`/`log_response`, `teams-trouter`'s frame logging), with its
+    redaction tests.
 - Don't add new guards in place of the fence (`.claude/planning-rules.md`: plan the feature, not guard layers).
 - Size checks to each task (CLAUDE.md "Checks"). Don't edit other files in `docs/plans/`.
 
@@ -122,6 +128,9 @@
   - Read-only mode keeps refusing writes in the transport, logged to the diagnostic log in the old line's shape
     (method, host, path shape).
   - `teams-log`'s diagnostics drop the `fence.log` section.
+  - Every send still goes through one of the transport's logged funnels, so at `debug` each call's full request and
+    response reach the diagnostic log, whatever kind of write or read it is. No path that used to be a permit write
+    may bypass it.
 - **Lab runs of `ngteams`:**
   - **The lab build marker** (decided in this plan, following from the user's "all testing with ngteams"):
     - `scripts/run-lab.sh` builds `ngteams` into `target/lab` with `TEAMS_LAB_BUILD=1`, which only that script sets.
@@ -269,6 +278,10 @@
         `teams-trouter/tests/session.rs:894`, `teams-core/tests/calls/failures.rs:288`) with log-line or send
         assertions;
       - delete tests of fence decisions alone.
+- [ ] the debug wire log: every send path left after the cut (plain request, former permit write, post read, own
+      state, call request, upload or ranged read) goes through `log_request`/`log_response`. A test sends one of each
+      kind against the mock at `debug` and finds its full request and response in the log, credentials redacted, and
+      nothing at `info`. The same holds for Trouter frames both ways.
 - [ ] `cargo check --workspace --all-targets`, clippy, and tests of `teams-proto`, `teams-call`, `teams-trouter`,
       `teams-core`, `teams-mock`, `teams-log`, `teams-ui` and `ngteams` pass
 
@@ -290,7 +303,23 @@
 - [ ] `cargo check --workspace --all-targets`, clippy, `cargo test --workspace` pass; `cargo tree -p ngteams` shows no
       `teams-fence` or `proto-lab`
 
-### Task 8: ngteams lab mode and the lab build marker
+### Task 8: Every API call in the debug log (teams-auth too)
+
+**Files:**
+- Modify: `crates/teams-auth/src/{token.rs,authz.rs}` (and any other `reqwest` client outside `teams-proto`'s
+  transport: `rg reqwest crates/*/src`, lab-only `proto-lab` aside)
+- Modify: `crates/teams-log/src/wire.rs` if the token endpoint's and authz's fields need redaction rules they lack
+- Modify: `crates/teams-auth/Cargo.toml`, tests in `crates/teams-auth/tests/{token.rs,authz.rs}`
+
+- [ ] the token exchange and refresh, authz (skypetoken) and any other API call outside the transport log their full
+      request and response through `teams_log::wire` at `debug`, as the transport does
+- [ ] the logger redacts their credentials: `code`, `code_verifier`, `refresh_token`, `access_token`, `id_token`,
+      the skypetoken, `Authorization`, cookies
+- [ ] tests: at `debug` each call's request and response are in the log with every credential redacted; at `info`
+      nothing of them is
+- [ ] tests of `teams-auth` and `teams-log`, and clippy, pass
+
+### Task 9: ngteams lab mode and the lab build marker
 
 **Files:**
 - Modify: `crates/ngteams/src/{cli.rs,main.rs,lib.rs,refusal.rs,accounts.rs,app.rs,read_only.rs}`
@@ -314,7 +343,7 @@
       - a mock-backed send in lab mode.
 - [ ] tests of `ngteams` and clippy pass
 
-### Task 9: scripts/run-lab.sh and lab tokens from proto-lab auth
+### Task 10: scripts/run-lab.sh and lab tokens from proto-lab auth
 
 **Files:**
 - Create: `scripts/run-lab.sh`
@@ -331,7 +360,7 @@
       - has the control verbs `--shot`, `--key`, `--type`, `--click`, `--windows`, `--status` and `--stop`.
 - [ ] tests for `auth`'s new target (mock); shellcheck clean on the script
 
-### Task 10: The lab rule as the agent's per-run check; docs
+### Task 11: The lab rule as the agent's per-run check; docs
 
 **Files:**
 - Modify: `CLAUDE.md`, `docs/lab-rules.md`, `docs/personal-build.md`, `README.md`, `docs/ci.md`
@@ -354,14 +383,16 @@
       and the CI doc match the code
 - [ ] `cargo test -p fixture-guard` passes
 
-### Task 11: Verify acceptance criteria
+### Task 12: Verify acceptance criteria
 - [ ] `cargo tree -p ngteams` has no `teams-fence` or `proto-lab`; `rg -i 'fence|lab\.toml' crates/ngteams` finds
       nothing stale
+- [ ] at `debug` the app's log has every API call's full request and response and every Trouter frame, credentials
+      redacted (the tests of Tasks 6 and 8 pass)
 - [ ] `cargo check -p ngteams --release` passes (only `run-lab.sh` and the install script build it)
 - [ ] `cargo clippy --workspace --all-targets`, `scripts/lint-report.sh` and `cargo test --workspace` pass
 - [ ] `scripts/coverage.sh --require-target` passes for every remaining runtime crate
 
-### Task 12: [Final] Update documentation
+### Task 13: [Final] Update documentation
 - [ ] README and CLAUDE.md re-read against the final code
 - [ ] move this plan to `docs/plans/completed/`
 
