@@ -10,10 +10,10 @@ fn plan(step: CallStep) -> CallPlan {
         scenario: ScenarioName::AbCall,
         chat_link: "https://teams.microsoft.com/l/chat/synthetic".to_owned(),
         call: RunCall {
-            caller: "8:orgid:synthetic-a".to_owned(),
+            caller: "8:orgid:00000000-0000-4000-8000-000000000001".to_owned(),
             group_chat: None,
         },
-        callees: vec![(Alias::B, "8:orgid:synthetic-b".to_owned())],
+        callees: vec![(Alias::B, "8:orgid:00000000-0000-4000-8000-000000000002".to_owned())],
         held_starts: &[Modality::Audio, Modality::Video],
         step,
         options: RunOptions {
@@ -49,7 +49,10 @@ async fn invalid_call_plans_fail_before_opening_any_browser() {
     let error = run_plan(&paths, &plan(CallStep::Place)).await.unwrap_err();
     assert!(error.to_string().contains("only ab-call-app does"));
     let plan = plan(CallStep::Answer);
-    assert_eq!(plan.callee_mri(Alias::B), "8:orgid:synthetic-b");
+    assert_eq!(
+        plan.callee_mri(Alias::B),
+        "8:orgid:00000000-0000-4000-8000-000000000002"
+    );
     assert_eq!(plan.callee_mri(Alias::C), "");
     let mut report = ScenarioReport::new(ScenarioName::AbCall);
     let error = plan.drive(&mut [], &mut None, &mut report).await.unwrap_err();
@@ -85,9 +88,16 @@ fn missing_account_mris_fail_with_the_account_name() {
     let config = LabConfig::parse(&text, dir.path()).unwrap();
     let error = mri(&config, Alias::B).unwrap_err();
     assert!(error.to_string().contains("no MRI for b"));
-    let text = text.replacen("alias = 'b'", "alias = 'b'\nmri = '8:orgid:synthetic-b'", 1);
+    let text = text.replacen(
+        "alias = 'b'",
+        "alias = 'b'\nmri = '8:orgid:00000000-0000-4000-8000-000000000002'",
+        1,
+    );
     let config = LabConfig::parse(&text, dir.path()).unwrap();
-    assert_eq!(mri(&config, Alias::B).unwrap(), "8:orgid:synthetic-b");
+    assert_eq!(
+        mri(&config, Alias::B).unwrap(),
+        "8:orgid:00000000-0000-4000-8000-000000000002"
+    );
 }
 
 #[test]
@@ -123,7 +133,11 @@ fn a_callee_report_requires_an_invitation_and_the_action_its_role_sent() {
     let call = plan(CallStep::Answer).call;
     let mut report = ScenarioReport::new(ScenarioName::AbCall);
     judge_callee(
-        (Alias::B, "8:orgid:synthetic-b", CalleeRole::Other),
+        (
+            Alias::B,
+            "8:orgid:00000000-0000-4000-8000-000000000002",
+            CalleeRole::Other,
+        ),
         &call,
         None,
         dir.path(),
@@ -146,7 +160,7 @@ fn a_callee_report_requires_an_invitation_and_the_action_its_role_sent() {
         std::fs::write(dir.path().join(EVENTS_FILE), text).unwrap();
         let mut report = ScenarioReport::new(ScenarioName::AbCall);
         judge_callee(
-            (Alias::B, "8:orgid:synthetic-b", role),
+            (Alias::B, "8:orgid:00000000-0000-4000-8000-000000000002", role),
             &call,
             Some(1),
             dir.path(),
@@ -261,9 +275,10 @@ async fn the_synthetic_session_uses_the_real_fail_closed_fence() {
 async fn placing_a_call_uses_the_shown_button_or_opens_its_options_before_confirmation() {
     for (shown, modality) in [(true, Modality::Audio), (false, Modality::Video)] {
         let values = if shown {
-            vec![json!(true); 4]
+            vec![json!(true); 5]
         } else {
             vec![
+                json!(true),
                 json!(false),
                 json!(true),
                 json!(true),
@@ -276,19 +291,25 @@ async fn placing_a_call_uses_the_shown_button_or_opens_its_options_before_confir
         let dir = tempfile::tempdir().unwrap();
         let mut session = page.session(dir.path(), false);
         let mut report = ScenarioReport::new(ScenarioName::AbCall);
-        place_call((Alias::A, &mut session), modality, &mut report)
-            .await
-            .unwrap();
+        place_call(
+            (Alias::A, &mut session),
+            "19:synthetic-target@thread.v2",
+            modality,
+            &mut report,
+        )
+        .await
+        .unwrap();
         let commands = page.commands();
         let expressions: Vec<_> = commands
             .iter()
             .map(|command| command["params"]["expression"].as_str().unwrap())
             .collect();
-        assert!(expressions[0].contains(&js_string(modality.control())));
+        assert!(expressions[0].contains("data-track-thread-id"));
+        assert!(expressions[1].contains(&js_string(modality.control())));
         if !shown {
-            assert!(expressions[1].contains("dropdown-calling-toggle-more-options-btn"));
-            assert!(expressions[1].contains("e.click()"));
-            assert!(expressions[2].contains(&js_string(modality.control())));
+            assert!(expressions[2].contains("dropdown-calling-toggle-more-options-btn"));
+            assert!(expressions[2].contains("e.click()"));
+            assert!(expressions[3].contains(&js_string(modality.control())));
         }
         assert!(expressions[expressions.len() - 3].contains(&js_string(modality.control())));
         assert!(expressions[expressions.len() - 3].contains("e.click()"));
@@ -302,6 +323,75 @@ async fn placing_a_call_uses_the_shown_button_or_opens_its_options_before_confir
         assert!(report.notes[0].contains(modality.what()));
         assert!(report.notes[1].contains("confirmed the group call"));
     }
+}
+
+#[tokio::test]
+async fn a_restored_unrelated_chat_is_refused_before_any_call_control_is_touched() {
+    let mut page = evaluation_page(vec![json!(false)]).await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = page.session(dir.path(), false);
+    let mut report = ScenarioReport::new(ScenarioName::AbCall);
+    let error = place_call(
+        (Alias::A, &mut session),
+        "19:synthetic-target@thread.v2",
+        Modality::Audio,
+        &mut report,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("does not show exactly the planned conversation")
+    );
+    assert!(report.notes.is_empty());
+    let commands = page.commands();
+    assert_eq!(commands.len(), 1);
+    let expression = commands[0]["params"]["expression"].as_str().unwrap();
+    assert!(expression.contains("19:synthetic-target@thread.v2"));
+    assert!(expression.contains("sends.length !== 1"));
+    assert!(!expression.contains("click()"));
+}
+
+#[tokio::test]
+async fn a_selection_changed_before_the_call_or_confirmation_is_refused_atomically() {
+    for values in [
+        vec![json!(true), json!(true), json!(false)],
+        vec![json!(true), json!(true), json!(true), json!(true), json!(false)],
+    ] {
+        let mut page = evaluation_page(values).await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = page.session(dir.path(), false);
+        let mut report = ScenarioReport::new(ScenarioName::AbCall);
+        let error = place_call(
+            (Alias::A, &mut session),
+            "19:synthetic-target@thread.v2",
+            Modality::Audio,
+            &mut report,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("conversation or its call control changed"));
+        let commands = page.commands();
+        let expression = commands.last().unwrap()["params"]["expression"].as_str().unwrap();
+        assert!(expression.contains("data-track-thread-id"));
+        assert!(expression.contains("19:synthetic-target@thread.v2"));
+        assert!(expression.find("return false").unwrap() < expression.find("e.click()").unwrap());
+    }
+}
+
+#[test]
+fn planned_conversations_are_derived_from_the_exact_identities_or_group_thread() {
+    let mut call = plan(CallStep::Answer);
+    assert_eq!(
+        call.expected_chat().unwrap(),
+        "19:00000000-0000-4000-8000-000000000001_00000000-0000-4000-8000-000000000002@unq.gbl.spaces"
+    );
+    call.callees.clear();
+    assert!(call.expected_chat().is_err());
+    call.call.group_chat = Some("19:synthetic-group@thread.v2".to_owned());
+    assert_eq!(call.expected_chat().unwrap(), "19:synthetic-group@thread.v2");
+    assert!(call_chat("unknown", "8:orgid:unknown").is_err());
 }
 
 #[tokio::test]
@@ -647,7 +737,7 @@ fn live_recording_pauses_keep_the_existing_scenario_durations() {
 #[tokio::test]
 async fn cancel_and_unanswered_steps_place_the_call_then_hang_up_and_record_controls() {
     for step in [CallStep::Cancel, CallStep::Timeout] {
-        let mut origin_peer = evaluation_page(vec![json!(true); 6]).await;
+        let mut origin_peer = evaluation_page(vec![json!(true); 7]).await;
         let mut answer_peer = evaluation_page(vec![json!("{synthetic:1}")]).await;
         let origin_dir = tempfile::tempdir().unwrap();
         let answer_dir = tempfile::tempdir().unwrap();
@@ -661,7 +751,7 @@ async fn cancel_and_unanswered_steps_place_the_call_then_hang_up_and_record_cont
             .unwrap();
         assert!(placed.is_some_and(|at| at > 0));
         assert!(report.failures.is_empty());
-        assert_eq!(origin_peer.commands().len(), 6);
+        assert_eq!(origin_peer.commands().len(), 7);
         assert_eq!(answer_peer.commands().len(), 1);
         assert!(report.notes.iter().any(|note| note.contains("hung up at")));
         assert!(
@@ -676,7 +766,7 @@ async fn cancel_and_unanswered_steps_place_the_call_then_hang_up_and_record_cont
 
 #[tokio::test]
 async fn declining_checks_the_bound_ring_before_clicking_then_waits_for_it_to_end() {
-    let mut origin_peer = evaluation_page(vec![json!(true); 6]).await;
+    let mut origin_peer = evaluation_page(vec![json!(true); 7]).await;
     let mut answer_peer = evaluation_page(vec![json!(true), json!(true), json!(true), json!(true), json!("{}")]).await;
     let origin_dir = tempfile::tempdir().unwrap();
     let answer_dir = tempfile::tempdir().unwrap();
@@ -729,6 +819,9 @@ async fn calling_page() -> Page {
             let expression = command["params"]["expression"].as_str().unwrap();
             if expression == "WebSocket.prototype" {
                 return Ok(json!({"result": {"objectId": "synthetic-prototype"}}));
+            }
+            if expression.contains("sends.length !== 1") {
+                return Ok(evaluated(json!(true)));
             }
             if expression.contains("const sends =") {
                 return Ok(evaluated(json!(json!({"sends": 1, "ours": 1, "joins": 1}).to_string())));

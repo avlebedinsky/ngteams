@@ -8,8 +8,8 @@ use crate::browser::Display;
 use crate::scenario::ab_chat_full::tests::{EventsOut, broadcast, page_with};
 use crate::scenario::test_page::{Page, evaluated};
 
-const A: &str = "8:orgid:synthetic-a";
-const B: &str = "8:orgid:synthetic-b";
+const A: &str = "8:orgid:00000000-0000-4000-8000-000000000001";
+const B: &str = "8:orgid:00000000-0000-4000-8000-000000000002";
 
 fn options(call: CallStep) -> RunOptions {
     RunOptions {

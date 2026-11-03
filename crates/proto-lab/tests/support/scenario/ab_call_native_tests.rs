@@ -26,11 +26,11 @@ fn run(binary: PathBuf, dir: &Path) -> Run {
         binary,
         dir: dir.to_path_buf(),
         call: RunCall {
-            caller: "8:orgid:synthetic-a".to_owned(),
+            caller: "8:orgid:00000000-0000-4000-8000-000000000001".to_owned(),
             group_chat: None,
         },
-        mri_a: "8:orgid:synthetic-a".to_owned(),
-        mri_b: "8:orgid:synthetic-b".to_owned(),
+        mri_a: "8:orgid:00000000-0000-4000-8000-000000000001".to_owned(),
+        mri_b: "8:orgid:00000000-0000-4000-8000-000000000002".to_owned(),
         options: RunOptions {
             display: Display::Headless,
             load_timeout: Duration::from_millis(10),
@@ -235,7 +235,7 @@ async fn video_success_reads_only_this_phases_capture_and_missing_capture_is_ref
 
 fn invitation() -> String {
     use base64::Engine as _;
-    let payload = json!({"callNotification": {"from": {"id": "8:orgid:synthetic-a"}, "to": {"id": "8:orgid:synthetic-b"}},
+    let payload = json!({"callNotification": {"from": {"id": "8:orgid:00000000-0000-4000-8000-000000000001"}, "to": {"id": "8:orgid:00000000-0000-4000-8000-000000000002"}},
         "conversationInvitation": {"conversationController": "https://synthetic.invalid/conv/call"}});
     let body =
         json!({"evt": 107, "gp": base64::engine::general_purpose::STANDARD.encode(payload.to_string())}).to_string();

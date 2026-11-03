@@ -287,7 +287,13 @@ impl Run {
         }
         back_to_chat(Alias::B, &mut session.driver(), report).await?;
         let from = capture_len(session);
-        place_call((Alias::B, session), Modality::Audio, report).await?;
+        place_call(
+            (Alias::B, session),
+            &super::ab_call::call_chat(&self.mri_b, &self.mri_a)?,
+            Modality::Audio,
+            report,
+        )
+        .await?;
         self.wait_output(CALLEE, session, "call_answer call=", RING_WAIT)
             .await?;
         self.wait_output(CALLEE, session, "status=\"connected\"", CONNECT_WAIT)

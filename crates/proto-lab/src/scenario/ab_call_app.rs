@@ -177,7 +177,7 @@ async fn drive(
     pauses: &Pauses,
 ) -> Option<u64> {
     let outcome = match options.call {
-        CallStep::Place => place(session, &call.caller, options, report, pauses)
+        CallStep::Place => place(session, (&call.caller, mri_b), options, report, pauses)
             .await
             .map(|()| None),
         _ => answer(session, (call, mri_b), options, report, pauses).await,
@@ -264,7 +264,7 @@ async fn answer(
 /// `place` (see the module docs).
 async fn place(
     session: &mut LabSession,
-    mri_a: &str,
+    (mri_a, mri_b): (&str, &str),
     options: RunOptions,
     report: &mut ScenarioReport,
     pauses: &Pauses,
@@ -272,7 +272,13 @@ async fn place(
     stand_up(session, mri_a, options, report, pauses).await?;
     back_to_chat(Alias::B, &mut session.driver(), report).await?;
     progress("ready");
-    place_call((Alias::B, session), Modality::Audio, report).await?;
+    place_call(
+        (Alias::B, session),
+        &super::ab_call::call_chat(mri_b, mri_a)?,
+        Modality::Audio,
+        report,
+    )
+    .await?;
     session
         .driver()
         .wait_for("b's call screen, a having answered", HANG_UP, pauses.answer)
