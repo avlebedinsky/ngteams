@@ -88,6 +88,8 @@ pub struct FakeCore {
     pub limits: Mutex<Vec<usize>>,
     /// Every write asked for, in order; each is answered with a pending row of its own.
     pub actions: Mutex<Vec<Action>>,
+    pub write_answers: Mutex<std::collections::VecDeque<OutboxEntry>>,
+    pub outbox_answers: Mutex<std::collections::VecDeque<OutboxEntry>>,
     /// Every transient asked for, in order; each is answered sent.
     pub transients: Mutex<Vec<Transient>>,
     /// Every own availability asked for, in order.
@@ -201,6 +203,8 @@ impl Default for FakeCore {
             catch_up_before_history_complete: Mutex::default(),
             limits: Mutex::default(),
             actions: Mutex::default(),
+            write_answers: Mutex::default(),
+            outbox_answers: Mutex::default(),
             transients: Mutex::default(),
             own_statuses: Mutex::default(),
             own_answers: Mutex::default(),
@@ -501,6 +505,9 @@ impl Core for FakeCore {
         let id = i64::try_from(actions.len()).unwrap();
         drop(actions);
         self.answer("write", || {
+            if let Some(row) = locked(&self.write_answers).pop_front() {
+                return row;
+            }
             let mut row = outbox_row(id, OutboxKind::Send, OutboxState::Pending);
             row.conversation_id = conversation_of(&action);
             row
@@ -674,7 +681,10 @@ impl Core for FakeCore {
     }
 
     fn outbox_entry(&self, _id: i64) -> Reply<Option<OutboxEntry>> {
-        self.ask("outbox_entry")
+        match locked(&self.outbox_answers).pop_front() {
+            Some(row) => self.answer("outbox_entry", || Some(row)),
+            None => self.ask("outbox_entry"),
+        }
     }
 
     fn outbox_unsettled(&self, conversation: String) -> Reply<Vec<OutboxEntry>> {

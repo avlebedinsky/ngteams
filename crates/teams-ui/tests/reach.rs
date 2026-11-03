@@ -668,14 +668,19 @@ const CREATES_A_CHAT: [&str; 5] = [
     "CreateChat {",
 ];
 
-/// Creating a chat is never offered (M2 Task 13): starting one needs the people search, whose results list other
-/// tenant users. No app crate's source asks the engine for one.
+/// Only an explicit people-search activation offers a new chat, through the engine's fenced outbox.
+/// Other views cannot create one incidentally.
 #[test]
-fn no_view_offers_creating_a_chat() {
+fn only_people_search_offers_creating_a_chat_through_the_engine() {
     let mut read = 0;
     for package in APP_CRATES {
         for (path, text) in sources(&workspace_root().join("crates").join(package).join("src")) {
             read += 1;
+            if path.ends_with("teams-ui/src/global_search.rs") {
+                assert_eq!(text.matches("self.core.write(Action::CreateChat").count(), 1);
+                assert!(text.contains("if self.core.read_only()"));
+                continue;
+            }
             for builds in CREATES_A_CHAT {
                 assert!(!text.contains(builds), "{} names {builds}", path.display());
             }

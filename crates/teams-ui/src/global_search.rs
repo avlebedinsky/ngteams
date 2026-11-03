@@ -12,8 +12,8 @@
 //!   none highlighted shows the results; the go-to mode highlights the first and has no results.
 //! - **The results** ([`GlobalSearch::results`]) take the place of the list and the conversation, as Teams' do, with
 //!   its tabs ([`Tab`]): All (a few of each kind), Messages (the service's and the store's, the newest first), People,
-//!   Files, Group chats, Teams and channels. A message opens its chat at the message; a person their 1:1 chat when the
-//!   list has one; a file in the browser (GPUI's `open_url`); a chat or a channel itself.
+//!   Files, Group chats, Teams and channels. A message opens its chat at the message; a person their 1:1 chat
+//!   (created through the outbox when needed); a file in the browser (GPUI's `open_url`); a chat or a channel itself.
 //! - **Escape** in the box closes the suggestions and gives the keyboard back; on the results it leaves them.
 //! - Nothing typed is ever sent anywhere but the account's own search service (a read: `teams_core::service_search`)
 //!   and its store. What the search shows is traced: `search opened` (its mode), `search suggested` (the chats,
@@ -35,8 +35,10 @@ use gpui::{
 use gpui_component::Size;
 use gpui_component::input::{Escape, Input, InputEvent, InputState, MoveDown, MoveUp};
 use gpui_component::kbd::Kbd;
-use teams_core::{SearchAnswer, SearchScope};
+use teams_core::{Action, SearchAnswer, SearchScope};
+use teams_fence::Mri;
 use teams_proto::{FoundFile, FoundMessage, FoundPerson, SearchKind};
+use teams_store::OutboxState;
 
 use crate::bridge::Core;
 use crate::chat_list::{ChatList, RowKind};
@@ -213,6 +215,8 @@ impl Suggestion {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum GlobalSearchEvent {
     OpenChat(String),
+    /// Feedback for a person whose chat could not be opened.
+    Toast(&'static str),
     /// A team's channel, read-only.
     OpenChannel(String),
     /// A chat at a message found.
@@ -277,6 +281,10 @@ pub struct GlobalSearch {
     /// The service's suggestions, and the query they are for.
     service: Option<(String, SearchAnswer)>,
     suggesting: Option<Task<()>>,
+    /// One chat creation at a time; repeated activation never sends a second write.
+    opening_person: Option<Task<()>>,
+    /// Navigation may finish after the user moved elsewhere; the write still settles without taking them back.
+    navigation: u64,
     results: Option<Results>,
     /// The results page's, where its Escape is heard.
     results_focus: FocusHandle,
@@ -317,6 +325,8 @@ impl GlobalSearch {
             highlighted: None,
             service: None,
             suggesting: None,
+            opening_person: None,
+            navigation: 0,
             results: None,
             results_focus: cx.focus_handle(),
             typed: String::new(),
@@ -392,6 +402,7 @@ impl GlobalSearch {
 
     /// Puts `query` in the box, as typed: the suggestions follow it.
     pub fn set_query(&mut self, query: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.navigation = self.navigation.wrapping_add(1);
         self.input
             .update(cx, |input, cx| input.set_value(query.to_owned(), window, cx));
         query.clone_into(&mut self.typed);
@@ -415,6 +426,7 @@ impl GlobalSearch {
 
     /// Closes the suggestions (the results stay).
     pub fn close_suggestions(&mut self, cx: &mut Context<Self>) {
+        self.navigation = self.navigation.wrapping_add(1);
         if self.open {
             self.open = false;
             self.suggesting = None;
@@ -432,6 +444,7 @@ impl GlobalSearch {
             // the same text again (the box told of a change that changed nothing) opens nothing
             InputEvent::Change if self.query(cx) == self.typed => {}
             InputEvent::Change => {
+                self.navigation = self.navigation.wrapping_add(1);
                 self.typed = self.query(cx);
                 self.open = true;
                 self.highlighted = None;
@@ -539,11 +552,8 @@ impl GlobalSearch {
             Suggestion::Chat { id, .. } => Some(GlobalSearchEvent::OpenChat(id)),
             Suggestion::Channel { id, .. } => Some(GlobalSearchEvent::OpenChannel(id)),
             Suggestion::Person { chat: Some(chat), .. } => Some(GlobalSearchEvent::OpenChat(chat)),
-            Suggestion::Person { name, .. } => {
-                // no chat with them yet: the people found by their name
-                self.input
-                    .update(cx, |input, cx| input.set_value(name.to_string(), window, cx));
-                self.show_results(Tab::People, cx);
+            Suggestion::Person { mri, .. } => {
+                self.open_person(mri.as_deref(), cx);
                 None
             }
             Suggestion::File { url, .. } => {
@@ -653,6 +663,7 @@ impl GlobalSearch {
 
     /// Leaves the results (Escape on them): forgotten, and the box emptied.
     pub fn clear_results(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.navigation = self.navigation.wrapping_add(1);
         if self.results.take().is_some() {
             self.trace.record(&TraceLine::new("search", "closed"));
             self.clear_box(window, cx);
@@ -794,17 +805,61 @@ impl GlobalSearch {
         channels
     }
 
-    /// Opens a person found: their 1:1 chat, when the list has one.
+    /// Opens a person's existing 1:1 chat, or creates it through the engine's fenced outbox.
     pub fn open_person(&mut self, mri: Option<&str>, cx: &mut Context<Self>) {
-        if let Some(chat) = mri.and_then(|mri| one_to_one_of(&self.list, mri, cx)) {
+        let Some(mri) = mri.filter(|mri| !mri.is_empty()) else {
+            cx.emit(GlobalSearchEvent::Toast("This account has no chat address."));
+            return;
+        };
+        if let Some(chat) = one_to_one_of(&self.list, mri, cx) {
             cx.emit(GlobalSearchEvent::OpenChat(chat));
+            return;
         }
-    }
-
-    /// Whether the list has a 1:1 chat with `mri`.
-    #[must_use]
-    pub fn has_chat_with(&self, mri: &str, cx: &App) -> bool {
-        one_to_one_of(&self.list, mri, cx).is_some()
+        if self.core.read_only() {
+            cx.emit(GlobalSearchEvent::Toast(
+                "A new chat can't be opened in read-only mode.",
+            ));
+            return;
+        }
+        if self.opening_person.is_some() {
+            cx.emit(GlobalSearchEvent::Toast("Opening a chat…"));
+            return;
+        }
+        let reply = self.core.write(Action::CreateChat {
+            others: vec![Mri::new(mri)],
+        });
+        let core = Arc::clone(&self.core);
+        let navigation = self.navigation;
+        cx.emit(GlobalSearchEvent::Toast("Opening a chat…"));
+        self.opening_person = Some(cx.spawn(async move |this, cx: &mut AsyncApp| {
+            let mut answer = reply.await.ok();
+            // A throttled or uncertain write already owns an outbox row. Watch it; never submit it again.
+            while let Some(row) = &answer {
+                if !matches!(row.state, OutboxState::Pending | OutboxState::Sending) {
+                    break;
+                }
+                let id = row.id;
+                cx.background_executor().timer(Duration::from_millis(500)).await;
+                if let Ok(Some(updated)) = core.outbox_entry(id).await {
+                    answer = Some(updated);
+                }
+            }
+            let chat = answer
+                .filter(|row| row.state == OutboxState::Sent)
+                .and_then(|row| row.message_id);
+            let _ = this.update(cx, |this, cx| {
+                this.opening_person = None;
+                if this.navigation != navigation {
+                    return;
+                }
+                match chat {
+                    Some(chat) => cx.emit(GlobalSearchEvent::OpenChat(chat)),
+                    None => cx.emit(GlobalSearchEvent::Toast(
+                        "We couldn't open the chat. Check your connection and try again.",
+                    )),
+                }
+            });
+        }));
     }
 
     /// The service failed the tab shown.
@@ -933,6 +988,19 @@ fn suggest(
                 .row(&chat.id)
                 .map_or_else(|| SharedString::from(chat.name.clone()), |row| row.name.clone());
             out.push(chat_suggestion(chat_list, chat.id.clone(), name));
+        }
+    }
+    let mut channels = channels;
+    for found in service.map(|answer| answer.channels.as_slice()).unwrap_or_default() {
+        if !channels
+            .iter()
+            .any(|known| matches!(known, Suggestion::Channel { id, .. } if *id == found.id))
+        {
+            channels.push(Suggestion::Channel {
+                id: found.id.clone(),
+                name: found.name.clone().into(),
+                team: found.team.clone().unwrap_or_default().into(),
+            });
         }
     }
     out.extend(channels.into_iter().take(SUGGESTED_CHANNELS));
@@ -1275,6 +1343,8 @@ pub fn dropdown(search: &Entity<GlobalSearch>, palette: Palette, window: &Window
             .border_color(rgb(palette.border))
             .rounded_lg()
             .shadow_lg()
+            // Underlying views must not take mouse-down focus before a suggestion receives its click.
+            .occlude()
             // a click in here keeps the box's keyboard: the suggestions stay until one is chosen
             .on_mouse_down(MouseButton::Left, |_, window, cx| {
                 window.prevent_default();
@@ -1377,7 +1447,7 @@ pub fn results_page(search: &Entity<GlobalSearch>, palette: Palette, cx: &App) -
             people
                 .iter()
                 .enumerate()
-                .map(|(at, person)| person_row(at, person, search, palette, cx)),
+                .map(|(at, person)| person_row(at, person, search, palette)),
         );
     }
     let files = this.files();
@@ -1584,34 +1654,16 @@ fn message_card(hit: &Hit, search: &Entity<GlobalSearch>, palette: Palette, cycl
     .into_any_element()
 }
 
-/// A person found: their name and job; a click opens their 1:1 chat when the list has one.
-fn person_row(
-    at: usize,
-    person: &FoundPerson,
-    search: &Entity<GlobalSearch>,
-    palette: Palette,
-    cx: &App,
-) -> AnyElement {
+/// A person found: their name and job; a click opens their 1:1 chat.
+fn person_row(at: usize, person: &FoundPerson, search: &Entity<GlobalSearch>, palette: Palette) -> AnyElement {
     let name: SharedString = person.name.clone().into();
-    let chat = person
-        .mri
-        .as_deref()
-        .is_some_and(|mri| search.read(cx).has_chat_with(mri, cx));
-    let mut detail = person_detail(person);
-    if !chat {
-        detail = if detail.is_empty() {
-            "No chat with them yet".into()
-        } else {
-            format!("{detail} · no chat with them yet").into()
-        };
-    }
+    let detail = person_detail(person);
     let mri = person.mri.clone();
     let search = search.clone();
     card(format!("search-person-{at}"), palette)
         .flex_row()
         .items_center()
         .gap_3()
-        .when(!chat, gpui::Styled::cursor_default)
         .on_click(move |_, _, cx| search.update(cx, |this, cx| this.open_person(mri.as_deref(), cx)))
         .child(people::avatar(Some(&name), None, Size::Medium))
         .child(two_lines(name, detail, palette))

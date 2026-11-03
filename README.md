@@ -547,7 +547,8 @@ Escape closes; "Create team", "Join team", and once something is typed "Add chan
 and Forward (Alt+Left, Alt+Right), the search box, Settings and more (the settings, the zoom, Copy diagnostics) and the
 account's avatar with its presence (the account menu). Ctrl+E (or Ctrl+Shift+F, or a click) searches: suggestions as you
 type (people, chats, channels, files; Up, Down and Enter open one), Enter shows the results with Teams' tabs (All,
-Messages, People, Files, Group chats, Teams and channels; a message opens its chat at it), Escape closes or leaves them;
+Messages, People, Files, Group chats, Teams and channels; a message opens its conversation at it, a person opens
+their 1:1 chat, creating it when needed), Escape closes or leaves them;
 Ctrl+Alt+G goes right to a chat or channel by its name. A click on a picture in a message opens it in a window of its own at its full size, fitted to the
 window and never enlarged past it, its sender and time over it: Zoom in and Zoom out (also Ctrl+= and Ctrl+-, Ctrl and
 the wheel), fit or its own size (Ctrl+0 fits), dragging or the wheel to pan a picture larger than the window, Previous

@@ -441,6 +441,7 @@ impl Shell {
         let search = cx.new(|cx| GlobalSearch::new(core, list, teams, trace, window, cx));
         let events = cx.subscribe_in(&search, window, |this: &mut Self, _, event, window, cx| match event {
             GlobalSearchEvent::OpenChat(id) => this.open_chat(id.clone(), window, cx),
+            GlobalSearchEvent::Toast(words) => this.show_toast(words, cx),
             GlobalSearchEvent::OpenChannel(id) => this.open_channel_id(id.clone(), window, cx),
             GlobalSearchEvent::OpenMessage(target) => this.open_message(target.clone(), window, cx),
             GlobalSearchEvent::ShowResults => this.show_search_results(window, cx),
@@ -1948,7 +1949,11 @@ impl Shell {
     /// Opens a message's chat ([`Shell::open_chat`]) at the message: the chat view reads back to it, shows it and
     /// selects it ([`ChatView::reveal`]); a channel's opens at the message's thread ([`ChannelView::reveal`]).
     pub fn open_message(&mut self, target: HitTarget, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_chat(target.conversation.clone(), window, cx);
+        if teams_fence::is_team_thread_id(&target.conversation) {
+            self.open_channel_id(target.conversation.clone(), window, cx);
+        } else {
+            self.open_chat(target.conversation.clone(), window, cx);
+        }
         if self.main == Main::Channel(target.conversation.clone()) {
             if let Some((channel, _)) = &self.channel {
                 let thread = target.thread.unwrap_or_else(|| target.message.clone());
