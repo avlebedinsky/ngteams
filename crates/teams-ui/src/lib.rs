@@ -81,6 +81,8 @@ pub mod call_view;
 pub mod call_window;
 pub mod calls;
 pub mod channel_dialog;
+pub mod channel_management;
+pub mod channel_menu;
 pub mod channel_view;
 pub mod chat_list;
 pub mod chat_view;

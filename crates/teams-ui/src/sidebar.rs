@@ -128,12 +128,17 @@ enum Entry {
     },
     /// "See all your teams", under the teams.
     SeeAllTeams,
+    CustomSection {
+        id: String,
+        name: String,
+    },
 }
 
 impl Entry {
     /// What the row is, wherever it stands: the list's rows are matched by it across a change.
     fn key(&self) -> (u8, &str) {
         match self {
+            Self::CustomSection { id, .. } => (9, id),
             Self::Section(section) => (0, section.key()),
             Self::Chat { id, .. } => (1, id),
             Self::Note(text) => (2, text),
@@ -150,7 +155,7 @@ impl Entry {
     /// after every row the sidebar scrolls to.
     fn height(&self) -> f32 {
         match self {
-            Self::Section(_) | Self::Note(_) => SECTION_HEIGHT,
+            Self::Section(_) | Self::Note(_) | Self::CustomSection { .. } => SECTION_HEIGHT,
             Self::Favorite { .. } | Self::Chat { .. } => ROW_HEIGHT,
             Self::SeeMore | Self::SeeAllChannels { .. } | Self::SeeAllTeams => SEE_MORE_HEIGHT,
             Self::Team { .. } => TEAM_HEIGHT,
@@ -243,6 +248,10 @@ impl Sidebar {
     #[must_use]
     pub fn team_open(&self, id: &str) -> bool {
         !self.folded.contains(id)
+    }
+
+    fn toggle_custom_section(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.teams.update(cx, |teams, cx| teams.toggle_section(id, cx));
     }
 
     /// Folds `section`, or unfolds it when it is folded; the teams unfolded are asked for again.
@@ -350,6 +359,26 @@ impl Sidebar {
                 }));
             }
         }
+        // Custom folders retain Teams' server order; their channel items retain that folder's order.
+        let teams = self.teams.read(cx);
+        for section in teams.sections().iter().filter(|section| !section.favorite) {
+            entries.push(Entry::CustomSection {
+                id: section.id.clone(),
+                name: section.name.clone(),
+            });
+            if section.expanded {
+                for id in &section.items {
+                    if let Some((index, team, channel)) = teams.channel_location(id) {
+                        entries.push(Entry::Channel {
+                            index,
+                            team,
+                            channel,
+                            id: id.clone(),
+                        });
+                    }
+                }
+            }
+        }
         entries.push(Entry::Section(Section::Chats));
         if self.chats_open {
             let list = self.list.read(cx);
@@ -372,7 +401,7 @@ impl Sidebar {
                     entries.push(Entry::SeeAllTeams);
                 }
                 Some(shown) => {
-                    self.team_entries(shown, teams.selected(), &mut entries);
+                    self.team_entries(shown, teams.selected(), teams.sections(), &mut entries);
                     entries.push(Entry::SeeAllTeams);
                 }
             }
@@ -382,7 +411,13 @@ impl Sidebar {
 
     /// Each team's line unless its channels are hidden, as Teams leaves them out, with the channels it shows unless it is
     /// folded (the one open stays, shown or not) and "See all channels" while some are hidden.
-    fn team_entries(&self, teams: &[Team], selected: Option<&str>, entries: &mut Vec<Entry>) {
+    fn team_entries(
+        &self,
+        teams: &[Team],
+        selected: Option<&str>,
+        sections: &[teams_proto::ChannelSection],
+        entries: &mut Vec<Entry>,
+    ) {
         let mut index = 0;
         for (team_index, team) in teams.iter().enumerate() {
             let listed = !team.about.hidden
@@ -398,7 +433,8 @@ impl Sidebar {
             }
             let open = listed && self.team_open(&team.id);
             for (channel, shown) in team.channels.iter().enumerate() {
-                if open && (shown.shown || selected == Some(shown.id.as_str())) {
+                let moved = sections.iter().any(|section| section.items.contains(&shown.id));
+                if open && !moved && (shown.shown || selected == Some(shown.id.as_str())) {
                     entries.push(Entry::Channel {
                         index,
                         team: team_index,
@@ -445,10 +481,44 @@ impl Sidebar {
             return div().into_any_element();
         };
         match entry {
+            Entry::CustomSection { id, name } => {
+                let open = self
+                    .teams
+                    .read(cx)
+                    .sections()
+                    .iter()
+                    .find(|section| section.id == id)
+                    .is_none_or(|section| section.expanded);
+                let selector = id.clone();
+                div()
+                    .id(SharedString::from(format!("channel-section-{id}")))
+                    .debug_selector(move || format!("channel-section-{selector}"))
+                    .w_full()
+                    .h(px(SECTION_HEIGHT))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .text_sm()
+                    .text_color(rgb(palette.muted_foreground))
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgb(palette.hover)))
+                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_custom_section(&id, cx)))
+                    .child(chevron(open))
+                    .child(name)
+                    .into_any_element()
+            }
             Entry::Section(section) => self.section_header(section, palette, cx),
-            Entry::Favorite { index, .. } => self
-                .list
-                .update(cx, |list, cx| list.render_favorite(index, palette, cx)),
+            Entry::Favorite { index, id } => {
+                let location = self.teams.read(cx).channel_location(&id);
+                if let Some((index, team, channel)) = location {
+                    self.teams
+                        .update(cx, |teams, cx| teams.channel_row(index, team, channel, palette, cx))
+                } else {
+                    self.list
+                        .update(cx, |list, cx| list.render_favorite(index, palette, cx))
+                }
+            }
             Entry::Chat { index, .. } => self.list.update(cx, |list, cx| list.render_row(index, palette, cx)),
             Entry::SeeMore => self.see_more_row(palette, cx),
             Entry::SeeAllChannels { index, id } => Self::see_all_channels_row(index, id, palette, cx),
@@ -815,6 +885,13 @@ impl Sidebar {
             return false;
         };
         if crate::keyboard::opens_menu(event) {
+            if let Entry::Channel { id, .. } | Entry::Favorite { id, .. } = &entry {
+                if self.teams.read(cx).channel_location(id).is_some() {
+                    self.teams
+                        .update(cx, |teams, cx| teams.open_channel_menu(id, window, cx));
+                    return true;
+                }
+            }
             let Entry::Team { id, .. } = entry else {
                 return false;
             };
@@ -855,6 +932,7 @@ impl Sidebar {
     /// What Enter does on a row: what a click on it does.
     fn activate(&mut self, entry: Entry, cx: &mut Context<Self>) {
         match entry {
+            Entry::CustomSection { id, .. } => self.toggle_custom_section(&id, cx),
             Entry::Section(section) => self.toggle(section, cx),
             Entry::Favorite { id, .. } | Entry::Chat { id, .. } => self.list.update(cx, |list, cx| list.open(id, cx)),
             Entry::SeeMore => self.list.update(cx, ChatList::see_more),
@@ -874,7 +952,7 @@ impl Sidebar {
         );
         self.entries[..at].iter().rposition(|entry| match entry {
             Entry::Team { .. } => in_team,
-            Entry::Section(_) => true,
+            Entry::Section(_) | Entry::CustomSection { .. } => true,
             _ => false,
         })
     }

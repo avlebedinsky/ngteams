@@ -363,6 +363,14 @@ async fn read<C: Credentials>(client: &Client<HttpTransport<C>>) -> Result<Teams
                         ChannelType::Shared => ChannelKind::Shared,
                         ChannelType::Standard | ChannelType::Unknown => ChannelKind::Standard,
                     },
+                    about: teams_store::ChannelAbout {
+                        description: channel.description,
+                        archived: channel.archived,
+                        owner: channel.owner,
+                        can_edit: channel.can_edit,
+                        can_delete: channel.can_delete,
+                        group: channel.group,
+                    },
                     shown: channel.shown,
                 })
                 .collect(),
@@ -403,6 +411,7 @@ mod tests {
             name: name.to_owned(),
             general,
             kind: ChannelKind::Standard,
+            about: teams_store::ChannelAbout::default(),
             shown: true,
         }
     }

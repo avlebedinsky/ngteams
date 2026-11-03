@@ -567,6 +567,10 @@ impl fmt::Debug for Team {
 
 /// A team's channel: a conversation of the chat service, read like a chat. `Debug` leaves the name out.
 #[derive(Clone, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent channel metadata and permissions supplied by CSA"
+)]
 pub struct Channel {
     pub id: String,
     pub name: String,
@@ -577,6 +581,12 @@ pub struct Channel {
     /// Whether it is in the account's channel list: a general channel by the team's `isGeneralChannelFavorite`, another
     /// by its `isFavorite`; an answer that doesn't say shows it.
     pub shown: bool,
+    pub description: String,
+    pub archived: bool,
+    pub owner: bool,
+    pub can_edit: bool,
+    pub can_delete: bool,
+    pub group: Option<String>,
 }
 
 /// A channel's `channelType` in CSA's answer.
@@ -656,6 +666,26 @@ fn team(entry: &Value, id: &str, name: &str, skipped: &mut usize) -> Team {
                 general: flag(channel, "isGeneral") || channel_id == id,
                 kind: ChannelType::of(channel),
                 shown: shown(entry, channel, flag(channel, "isGeneral") || channel_id == id),
+                description: channel
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                archived: flag(channel, "isArchived"),
+                owner: channel.get("memberRole").and_then(Value::as_u64) == Some(2)
+                    || channel
+                        .get("memberRole")
+                        .and_then(Value::as_str)
+                        .is_some_and(|role| matches!(role, "Admin" | "admin")),
+                can_edit: ChannelType::of(channel) == ChannelType::Standard
+                    && entry.pointer("/teamSettings/updateTopic").and_then(Value::as_bool) == Some(true),
+                can_delete: ChannelType::of(channel) == ChannelType::Standard
+                    && entry.pointer("/teamSettings/deleteTopic").and_then(Value::as_bool) == Some(true),
+                group: channel
+                    .get("substrateGroupId")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty())
+                    .map(str::to_owned),
             }),
         }
     }

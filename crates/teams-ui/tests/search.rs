@@ -871,6 +871,7 @@ fn team_in_search(rig: &Rig) {
             name: "Release notes".to_owned(),
             general: true,
             kind: ChannelKind::Standard,
+            about: teams_store::ChannelAbout::default(),
             shown: true,
         }],
     }]);

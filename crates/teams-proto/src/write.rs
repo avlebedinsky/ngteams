@@ -9,6 +9,8 @@ mod availability;
 mod calendar;
 mod call;
 mod channel;
+mod channel_admin;
+pub use channel_admin::{ChannelChange, ChannelData, ChannelRead, ChannelTarget, ChannelWrite};
 mod chat;
 mod team;
 

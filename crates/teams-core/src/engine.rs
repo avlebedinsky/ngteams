@@ -1116,6 +1116,16 @@ impl EngineRequests {
 
     /// Sends a write managing a team through the outbox, under the fence, and puts `change` in the stored teams once it
     /// went ([`crate::team_admin`]); [`EngineError::TeamNotChanged`] when it didn't.
+    /// Reads channel management data freshly from its own service.
+    /// Moves a channel or creates a section in the account's own Teams hierarchy.
+    pub fn channel_section(&self, action: teams_proto::ChannelSectionAction) -> Reply<()> {
+        self.ask(|reply| Request::Team(Box::new(TeamAsk::ChannelSection { action, reply })))
+    }
+
+    pub fn channel_data(&self, query: teams_proto::ChannelRead) -> Reply<teams_proto::ChannelData> {
+        self.ask(|reply| Request::Team(Box::new(TeamAsk::ChannelRead { query, reply })))
+    }
+
     pub fn team_write(&self, write: TeamWrite, change: Option<TeamChange>) -> Reply<TeamWritten> {
         self.ask(|reply| Request::Team(Box::new(TeamAsk::Write { write, change, reply })))
     }

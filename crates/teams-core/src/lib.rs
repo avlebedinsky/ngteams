@@ -40,6 +40,7 @@ pub mod account;
 mod attachments;
 pub mod calendar;
 pub mod calling;
+mod channel_admin;
 pub mod channels;
 pub mod emoticons;
 pub mod engine;

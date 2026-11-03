@@ -45,6 +45,7 @@ fn team(id: &str, name: &str, owner: bool) -> Team {
             name: "General".to_owned(),
             general: true,
             kind: ChannelKind::Standard,
+            about: teams_store::ChannelAbout::default(),
             shown: true,
         }],
         ..Team::default()

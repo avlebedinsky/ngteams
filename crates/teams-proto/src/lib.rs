@@ -55,6 +55,9 @@ mod calendar;
 pub mod captions;
 mod channel_meeting;
 mod channel_read;
+mod channel_sections;
+pub use channel_sections::{ChannelSection, ChannelSectionAction, ChannelSectionWrite, ChannelSections};
+pub use write::{ChannelChange, ChannelData, ChannelRead, ChannelTarget, ChannelWrite};
 pub mod chat;
 mod client;
 mod emoticon;
@@ -141,10 +144,10 @@ pub use team_apps::{
     TEMPLATE_LOCALE, TeamApps, TeamTemplateCard, TeamTemplateDetails, TeamTemplateRead, TeamTemplates, TemplateChannel,
 };
 pub use team_read::{
-    AddablePeopleSearch, AllTeamsAnalyticsRead, AnalyticsPeriod, ChannelAnalyticsRead, JoinableTeam, JoinableTeams,
-    ManagedChannel, OwnTeamView, PendingInvite, PendingInvites, RosterMember, TagsRead, TeamAnalytics,
-    TeamAnalyticsRead, TeamChannels, TeamCode, TeamJoinRequests, TeamPicture, TeamRoster, TeamTag, TeamTags,
-    TeamThread,
+    AddablePeopleSearch, AllTeamsAnalyticsRead, AnalyticsPeriod, ChannelAnalyticsRead, ChannelOwnProperty,
+    JoinableTeam, JoinableTeams, ManagedChannel, OwnTeamView, PendingInvite, PendingInvites, RosterMember, TagsRead,
+    TeamAnalytics, TeamAnalyticsRead, TeamChannels, TeamCode, TeamJoinRequests, TeamPicture, TeamRoster, TeamTag,
+    TeamTags, TeamThread,
 };
 pub use thumbnail::{FileThumbnails, THUMBNAIL_HOST_SUFFIX, ThumbnailLink, is_thumbnail_link};
 pub use urlp::LinkPreviewPicture;

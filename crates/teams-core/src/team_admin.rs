@@ -31,6 +31,22 @@ use crate::pictures::PictureBytes;
 /// What a write changed, for the stored teams.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TeamChange {
+    /// An existing channel renamed, archived, or deleted.
+    ChannelEdited {
+        team: String,
+        channel: String,
+        name: String,
+        description: String,
+    },
+    ChannelArchived {
+        team: String,
+        channel: String,
+        archived: bool,
+    },
+    ChannelGone {
+        team: String,
+        channel: String,
+    },
     /// A new team.
     Created(Team),
     /// A team deleted, or left.
@@ -43,11 +59,21 @@ pub enum TeamChange {
         public: Option<bool>,
     },
     /// A team archived, or restored.
-    Archived { team: String, archived: bool },
+    Archived {
+        team: String,
+        archived: bool,
+    },
     /// All a team's channels hidden, or the team shown again.
-    Hidden { team: String, hidden: bool },
+    Hidden {
+        team: String,
+        hidden: bool,
+    },
     /// One channel shown, or hidden.
-    ChannelShown { team: String, channel: String, shown: bool },
+    ChannelShown {
+        team: String,
+        channel: String,
+        shown: bool,
+    },
 }
 
 impl TeamChange {
@@ -55,6 +81,24 @@ impl TeamChange {
     fn shown_in(&self, teams: &[Team]) -> bool {
         let of = |id: &str| teams.iter().find(|team| team.id == id);
         match self {
+            Self::ChannelEdited {
+                team,
+                channel,
+                name,
+                description,
+            } => of(team)
+                .and_then(|team| team.channels.iter().find(|row| row.id == *channel))
+                .is_some_and(|row| row.name == *name && row.about.description == *description),
+            Self::ChannelArchived {
+                team,
+                channel,
+                archived,
+            } => of(team)
+                .and_then(|team| team.channels.iter().find(|row| row.id == *channel))
+                .is_some_and(|row| row.about.archived == *archived),
+            Self::ChannelGone { team, channel } => {
+                of(team).is_none_or(|team| !team.channels.iter().any(|row| row.id == *channel))
+            }
             Self::Created(team) => of(&team.id).is_some(),
             Self::Gone(team) => of(team).is_none(),
             Self::Edited {
@@ -75,9 +119,51 @@ impl TeamChange {
         }
     }
 
+    fn apply_channel(&self, teams: &mut [Team]) {
+        match self {
+            Self::ChannelEdited {
+                team,
+                channel,
+                name,
+                description,
+            } => {
+                if let Some(row) = teams
+                    .iter_mut()
+                    .find(|row| row.id == *team)
+                    .and_then(|team| team.channels.iter_mut().find(|row| row.id == *channel))
+                {
+                    row.name.clone_from(name);
+                    row.about.description.clone_from(description);
+                }
+            }
+            Self::ChannelArchived {
+                team,
+                channel,
+                archived,
+            } => {
+                if let Some(row) = teams
+                    .iter_mut()
+                    .find(|row| row.id == *team)
+                    .and_then(|team| team.channels.iter_mut().find(|row| row.id == *channel))
+                {
+                    row.about.archived = *archived;
+                }
+            }
+            Self::ChannelGone { team, channel } => {
+                if let Some(team) = teams.iter_mut().find(|row| row.id == *team) {
+                    team.channels.retain(|row| row.id != *channel);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Puts it into `teams`.
     pub(crate) fn apply(&self, teams: &mut Vec<Team>) {
         match self {
+            Self::ChannelEdited { .. } | Self::ChannelArchived { .. } | Self::ChannelGone { .. } => {
+                self.apply_channel(teams);
+            }
             Self::Created(team) => {
                 if !teams.iter().any(|listed| listed.id == team.id) {
                     teams.push(team.clone());
@@ -162,6 +248,7 @@ pub struct TeamMember {
     pub location: Option<String>,
     pub owner: bool,
     pub guest: bool,
+    pub moderator: bool,
 }
 
 impl std::fmt::Debug for TeamMember {
@@ -175,6 +262,14 @@ impl std::fmt::Debug for TeamMember {
 
 /// What the team pages ask (see the module docs).
 pub(crate) enum TeamAsk {
+    ChannelSection {
+        action: teams_proto::ChannelSectionAction,
+        reply: Responder<()>,
+    },
+    ChannelRead {
+        query: teams_proto::ChannelRead,
+        reply: Responder<teams_proto::ChannelData>,
+    },
     Write {
         write: TeamWrite,
         change: Option<TeamChange>,
@@ -243,6 +338,8 @@ where
     /// Answers `ask`.
     pub(crate) fn team_ask(&mut self, ask: TeamAsk) {
         match ask {
+            TeamAsk::ChannelSection { action, reply } => self.channel_section(action, reply),
+            TeamAsk::ChannelRead { query, reply } => self.channel_read(query, reply),
             TeamAsk::Write { write, change, reply } => self.team_write(write, change, reply),
             TeamAsk::OwnView {
                 requests,
@@ -325,11 +422,75 @@ where
         });
     }
 
+    fn channel_read(&self, query: teams_proto::ChannelRead, reply: Responder<teams_proto::ChannelData>) {
+        let client = Arc::clone(&self.client);
+        tokio::task::spawn_local(async move {
+            let answer = match client.read(&query).await {
+                Ok(answer) => query
+                    .read_answer(answer.body())
+                    .ok_or(EngineError::TeamNotChanged { code: None }),
+                Err(_) => Err(EngineError::TeamNotChanged { code: None }),
+            };
+            let _ = reply.send(answer);
+        });
+    }
+
+    /// A move or a new section uses a complete, fresh hierarchy and never retries a stale version.
+    fn channel_section(&mut self, action: teams_proto::ChannelSectionAction, reply: Responder<()>) {
+        let client = Arc::clone(&self.client);
+        self.running.spawn_local(async move {
+            let answer = async {
+                let read = client
+                    .read(&teams_proto::ChannelRead::Sections)
+                    .await
+                    .map_err(|_| EngineError::TeamNotChanged { code: None })?;
+                let data =
+                    teams_proto::ChannelData::read(read.body()).ok_or(EngineError::TeamNotChanged { code: None })?;
+                let sections =
+                    teams_proto::ChannelSections::read(&data.0).ok_or(EngineError::TeamNotChanged { code: None })?;
+                let write =
+                    teams_proto::ChannelSectionWrite::new(&action, &sections).ok_or(EngineError::TeamNotChanged {
+                        code: Some("SectionChanged".to_owned()),
+                    })?;
+                match client.transport().send(&write).await {
+                    Ok(answer) if (200..300).contains(&answer.status()) => Ok(()),
+                    _ => Err(EngineError::TeamNotChanged { code: None }),
+                }
+            }
+            .await;
+            Finished {
+                created: None,
+                team: None,
+                reread: answer.is_ok(),
+                reply: Box::new(move || {
+                    let _ = reply.send(answer);
+                }),
+            }
+        });
+    }
+
     fn team_write(&mut self, write: TeamWrite, change: Option<TeamChange>, reply: Responder<TeamWritten>) {
         let outbox = Arc::clone(&self.outbox);
+        let client = Arc::clone(&self.client);
         self.running.spawn_local(async move {
-            let sent = send(&outbox, &write).await;
-            let answer = sent.map(|body| written(&write, &body));
+            let sent = if let TeamWrite::Channel(channel) = &write {
+                match crate::channel_admin::context(&client, channel).await {
+                    Ok(crate::channel_admin::Decision::Send) => send(&outbox, &write).await,
+                    Ok(crate::channel_admin::Decision::AlreadyApplied) => Ok(Vec::new()),
+                    Err(error) => Err(error),
+                }
+            } else {
+                send(&outbox, &write).await
+            };
+            let answer = sent.and_then(|body| {
+                if matches!(write, TeamWrite::Channel(_)) && channel_partial_failure(&body) {
+                    Err(EngineError::TeamNotChanged {
+                        code: Some("MemberChangeRejected".to_owned()),
+                    })
+                } else {
+                    Ok(written(&write, &body))
+                }
+            });
             let change = change_of(answer.as_ref().ok(), change);
             Finished {
                 created: None,
@@ -406,6 +567,29 @@ fn written(write: &TeamWrite, body: &[u8]) -> TeamWritten {
         },
         _ => TeamWritten::default(),
     }
+}
+
+/// Provisioning uses a 2xx with per-person failures for membership and moderator operations.
+fn channel_partial_failure(body: &[u8]) -> bool {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return false;
+    };
+    ["multipleStatus", "failedMembers", "updatedMembersError"]
+        .iter()
+        .any(|key| {
+            value
+                .get(*key)
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|items| !items.is_empty())
+        })
+        || value
+            .get("results")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|items| {
+                items
+                    .iter()
+                    .any(|item| item.get("status").and_then(serde_json::Value::as_str) == Some("Failed"))
+            })
 }
 
 /// The people an answer adding them says weren't added: `value.failedMembers`, by the bundle's reading of it, or
@@ -509,14 +693,23 @@ async fn roster<C: Credentials + 'static>(client: &Client<HttpTransport<C>>, tea
             listed.extend(TeamRoster::read_answer(&body).into_iter().filter(|member| !member.bot));
         }
     }
-    named(
+    let moderators = listed
+        .iter()
+        .filter(|member| member.moderator)
+        .map(|member| member.mri.clone())
+        .collect::<Vec<_>>();
+    let mut members = named(
         client,
         listed
             .into_iter()
             .map(|member| (member.mri, member.owner, member.guest))
             .collect(),
     )
-    .await
+    .await;
+    for member in &mut members {
+        member.moderator = moderators.contains(&member.mri);
+    }
+    members
 }
 
 /// `people` (MRI, owner, guest) with their names, from their profiles read ([`ShortProfileLookup`], a read by `POST`).
@@ -548,6 +741,7 @@ async fn named<C: Credentials + 'static>(
                 mri,
                 owner,
                 guest,
+                moderator: false,
             }
         })
         .collect()
@@ -575,6 +769,7 @@ mod tests {
             name: id.to_owned(),
             general,
             kind: ChannelKind::Standard,
+            about: teams_store::ChannelAbout::default(),
             shown,
         }
     }
@@ -801,6 +996,7 @@ mod tests {
             location: None,
             owner: true,
             guest: false,
+            moderator: false,
         };
         let shown = format!("{member:?}");
         assert!(shown.contains("8:orgid:made-up") && shown.contains("owner"));

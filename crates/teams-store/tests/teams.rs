@@ -26,6 +26,7 @@ fn channel(id: &str, name: &str, general: bool) -> TeamChannel {
         name: name.to_owned(),
         general,
         kind: ChannelKind::Standard,
+        about: teams_store::ChannelAbout::default(),
         shown: true,
     }
 }
@@ -271,7 +272,7 @@ fn the_favourites_migration_keeps_the_teams_but_has_them_read_again() -> Result<
          ALTER TABLE teams DROP COLUMN can_add_private_channel; ALTER TABLE teams DROP COLUMN tenant; ALTER TABLE teams DROP COLUMN description; ALTER TABLE teams DROP COLUMN public;
          ALTER TABLE teams DROP COLUMN people; ALTER TABLE teams DROP COLUMN guest; ALTER TABLE teams DROP COLUMN dynamic_membership;
          ALTER TABLE teams DROP COLUMN tenant_wide; ALTER TABLE teams DROP COLUMN channel_only; ALTER TABLE teams DROP COLUMN hidden;
-         ALTER TABLE teams DROP COLUMN picture_etag; ALTER TABLE team_channels DROP COLUMN shown; ALTER TABLE team_channels DROP COLUMN kind;
+         ALTER TABLE teams DROP COLUMN picture_etag; ALTER TABLE team_channels DROP COLUMN shown; ALTER TABLE team_channels DROP COLUMN kind; ALTER TABLE team_channels DROP COLUMN description; ALTER TABLE team_channels DROP COLUMN archived; ALTER TABLE team_channels DROP COLUMN owner; ALTER TABLE team_channels DROP COLUMN can_edit; ALTER TABLE team_channels DROP COLUMN can_delete; ALTER TABLE team_channels DROP COLUMN channel_group;
          DROP TABLE app_read_horizon; DROP TABLE calendar_events;
          PRAGMA user_version = 10;",
     )
@@ -306,6 +307,7 @@ fn a_team_keeps_what_its_new_channel_needs_and_a_channel_its_kind() {
             name: "Hush".to_owned(),
             general: false,
             kind: ChannelKind::Private,
+            about: teams_store::ChannelAbout::default(),
             shown: true,
         }],
     };
@@ -453,5 +455,31 @@ fn every_channel_kind_and_what_a_team_shows_survive_the_store() -> Result<(), St
     let shown = format!("{:?}", stored[0].about);
     assert!(shown.contains("people: 7") && shown.contains("hidden: true"), "{shown}");
     assert!(!shown.contains("made-up") && !shown.contains("0000000000ff"), "{shown}");
+    Ok(())
+}
+
+#[test]
+fn channel_management_metadata_survives_refresh_and_reopen() -> Result<(), StoreError> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = store_path(&dir);
+    let mut store = Store::open(&path)?;
+    let mut listed = teams();
+    let channel = &mut listed[0].channels[1];
+    channel.kind = ChannelKind::Private;
+    channel.about = teams_store::ChannelAbout {
+        description: "Synthetic private channel".to_owned(),
+        archived: true,
+        owner: true,
+        can_edit: true,
+        can_delete: false,
+        group: Some("synthetic-group".to_owned()),
+    };
+    store.replace_teams(&listed, 10)?;
+    drop(store);
+    let mut store = Store::open(&path)?;
+    assert_eq!(store.teams()?, listed);
+    listed[0].channels[1].about.archived = false;
+    store.replace_teams(&listed, 11)?;
+    assert_eq!(store.teams()?, listed);
     Ok(())
 }

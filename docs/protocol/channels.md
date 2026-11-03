@@ -213,10 +213,11 @@ channel"). A private channel's people step names the team by its group, so it is
 the team's thread. The personal build's logs and sends them. The provisioning service is a contacting service: everything mutating
 there but these rows is unreadable.
 
-## No other channel write
+## Channel message writes
 
-Besides a new channel and a channel meeting's title (`SetMeetingTitle`, an edit of the post's `meeting` property),
-nothing the native client sends can post, reply, react, mark read or type in a channel. What keeps it so is the fence,
+Channel administration uses the routes below. A channel meeting's title (`SetMeetingTitle`, an edit of the post's
+`meeting` property) remains separate from message composition: the native client still offers no channel post, reply,
+reaction, read receipt or typing action. What keeps it so is the fence,
 not a missing type: the engine takes a chat write (`Action::Send`, `Action::Read`, …) for any conversation id, a
 channel's too, as a sealed chat write (`PostMessage`, a read receipt) aimed at the channel, and the fence denies it,
 since a chat write's member read never reads a channel's thread as a chat; `teams-core`'s
@@ -226,3 +227,51 @@ client's channel writes stay unmapped and denied in the browser fence ([endpoint
 the lab accounts only, which the fence can now judge by its members, is where they would be mapped and tested. The
 personal build's fence allows them (it denies nothing),
 but the app has no channel composer yet.
+
+
+## Managing an existing channel
+
+The channel ellipsis menu follows the supplied reference: notifications; a Move to section submenu (Favorites,
+custom sections and New section); Hide/Show; Edit; Manage; Copy link; Get email address; Workflows; Archive/Restore;
+and Delete. The same channel row is used in the team tree, Favorites and custom sections. Right click and
+Shift+F10 open the same keyboard-navigable, scrolling menu.
+
+A fresh CSA team/channel snapshot precedes a shared channel change. The owning team, Microsoft 365 group, channel
+privacy and current permissions must still agree with the chosen target. Already-applied name/description,
+archive-state or deletion changes reconcile without another request. General cannot be archived/deleted. Standard
+channel administration uses the team-owner role; private/shared administration uses the channel-owner role, and
+private membership never becomes team membership. Per-person provisioning failures carried inside a 2xx response
+remain errors. An uncertain write is not automatically resent.
+
+Standard edits/deletes use the middle tier's `beta/teams/<team>/channels/<channel>`. Private/shared edits/deletes
+use provisioning's `teams/<team group>/channels/OID:<channel group>@<tenant>`; membership operations append `users`
+and, for a removal, the person's `OID:<object ID>@<tenant>`. Member role is 1, owner role 2. Moderator changes use
+provisioning's `channels/<channel>/members` with work-account object IDs. The dialog keeps the last owner until
+another owner is present. Archive and restore use provisioning's owning-group/channel-thread routes.
+
+Manage channel separates members from settings. Standard channels inherit the team's people and let channel owners
+manage moderators and posting/reply/pinning/bot/connector permissions. General's posting policy lives in the
+team's `spaceAdminSettings.userSettings.generalChannelSetting`; other standard channels use their own
+`channelSettings` thread property. Both keep fields this build does not expose. Private/shared channels expose
+their own membership rather than standard-channel moderation controls.
+
+Granular notification settings are account conversation properties: `channelNotificationSettings` (JSON text
+with `allNewPosts`, `tag`, `channelTeam`, `dskNotif`), `alerts` and `followAllRc`. Unknown keys survive a save. The
+desktop notifier reads the current channel preferences and suppresses muted/desktop-off channels. The dialog's
+failure state prevents saving a default over unread settings.
+
+Channel email uses `beta/channels/<channel>/email`: a read returns `emailAddressDetails.emailId` and
+`allowedSenders` (`allowedSenderType`, `allowedDomains`). `NotFound` starts members-only address creation; other
+errors do not. Owners can change allowed senders/domains or remove the address; copy uses the desktop clipboard.
+
+Sections are the account's CSA `conversationFolders`, with `folderHierarchyVersion`, `conversationFolderOrder`
+and each folder's `conversationFolderItems`. Every operation reads a whole hierarchy first, rejects partial data
+and stale/missing destinations, and submits that version. Creating a folder uses `AddFolder`; moving an item uses
+`AddItem` and, when necessary, `RemoveItem`. Existing item order and section order stay server-owned. Expanded
+state uses `batchUpdateExpandedState`, with an optimistic view rollback if saving fails.
+
+Evidence: reference web-client bundles inspected outside the repository, synthetic protocol/context/store/UI tests,
+and a normally built native read of the owned disposable channel's preferences (200, exact matching id). The
+original reference team's full roster included people outside the lab and was never mutated. A new actor-only
+private team automatically acquired three bot members; independent full-roster checks refused shared admin writes
+on it. Those bot entries do not gain an exception from their being provisioned by Teams.

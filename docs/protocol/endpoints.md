@@ -173,6 +173,28 @@ The mapped writes, and the carve-outs that reach nobody.
 | `PUT` | `v1/threads/<chat>/properties` `?name`, `v1/threads/<chat>/members/ALL` | thread properties (topic) and a property of every member | yes: chat service | not used | [fence-targets.md](fence-targets.md#writes) · M0 T11 | bundle only |
 | various | `v1/threads/<chat>/livemessages`, `…/messages/forward`, `…/messages/move`, `rcmetadata`, `rc2s`, `v1/threads/<chat>/files`, `v1/users/ME/drafts`, `PUT`/`DELETE` on a conversation itself, any `48:` stream but the two feeds' read marks and the read horizon of the feeds and the call log (`48:notes`, `48:sharedcalllogs`, …), an `8:…` or `28:…` conversation | live and targeted messages, forwarding and moving, reply-chain metadata, file references, drafts and scheduled sends, conversations with a person or a bot by MRI | yes: chat service | not used | [fence-targets.md](fence-targets.md#writes) · M0 T11 | bundle only |
 
+## Managing a channel
+
+The channel menu's service paths ([channels.md](channels.md#managing-an-existing-channel)). The shapes below were
+read from the current reference client; shared changes are checked against a fresh CSA context and use the existing
+one-attempt engine write path. Account-owned preferences and folders reach nobody else. The old classifier does not
+authorize these new shared operations; implementation verification independently proves lab actors and recipients.
+
+| Method | Service and path | Purpose | Native request | Evidence |
+|---|---|---|---|---|
+| `PATCH`, `DELETE` | middle tier `beta/teams/<team>/channels/<channel>` | Standard channel name/description or deletion | `ChannelWrite` (`Edit`, `Delete`) | Reference bundle; synthetic protocol tests |
+| `PATCH`, `DELETE` | provisioning `teams/<group>/channels/<channel group>?forceSync` | Private/shared channel edits or deletion | `ChannelWrite` (`Edit`, `Delete`) | Reference bundle; synthetic routing tests |
+| `POST` | provisioning `teams/<group>/channels/<channel>/archive`, `unarchive` | Archive/restore; archive may request `setSpoSiteReadOnlyForMembers` | `ChannelWrite::Archive` | Reference bundle; synthetic protocol tests |
+| `PUT` | chat service `v1/threads/<channel>/properties?name=channelSettings` | Channel moderation; JSON encoded as the thread property's string value | `ChannelWrite::Settings` | Reference bundle; unknown fields preserved in synthetic tests |
+| `POST`, `PATCH`, `DELETE` | provisioning `teams/<group>/channels/<channel group>/users[/<user group>]?forceSync` | Add members, change owner/member role, remove members | `ChannelWrite` membership actions | Reference bundle; rejects malformed/non-work identities before constructing the wire request |
+| `PUT` | provisioning `channels/<channel>/members` | Grant/remove moderator roles using object IDs | `ChannelWrite::Moderator` | Reference bundle |
+| `GET` | middle tier `beta/channels/<channel>/email` | Email address and allowed senders | `ChannelRead::Email` | Reference bundle |
+| `POST`, `PUT`, `DELETE` | middle tier `beta/channels/<channel>/email` | Create an address, change allowed senders/domains, remove address | `ChannelWrite` email actions | Reference bundle; default creation uses members-only senders |
+| `GET` | chat service `v1/users/ME/conversations/<channel>?view` | Account's channel preferences | `ChannelRead::Preferences` | Native read verified with an exact channel-id response |
+| `PUT` | chat service `v1/users/ME/conversations/<channel>/properties?name=channelNotificationSettings`, `alerts`, `followAllRc` | Account's granular notifications and following | `OwnTeamView::ChannelProperty` | Reference bundle; synthetic round-trip tests preserve unknown preference fields |
+| `GET`, `POST` | CSA `api/v1/teams/users/me/conversationFolders?supportsAdditionalSystemGeneratedFolders&supportsSliceItems` | Read sections; create a section; move a channel with `AddItem` and `RemoveItem` | `ChannelRead::Sections`, `ChannelSectionWrite` | Reference bundle; fresh whole hierarchy/version required |
+| `PATCH` | CSA `api/v1/teams/users/me/conversationFolders/batchUpdateExpandedState` with the same support flags | Persist expanded/collapsed section state | `ChannelSectionWrite` | Reference bundle |
+
 ## Managing a team
 
 The team pages' writes and reads ([teams.md](teams.md)). `Contacting?` and `Native` as above. **Their answers are the bundle's

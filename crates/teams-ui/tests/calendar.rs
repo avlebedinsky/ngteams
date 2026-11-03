@@ -312,6 +312,7 @@ fn channel_team() -> teams_store::Team {
             name: "General".to_owned(),
             general: true,
             kind: teams_store::ChannelKind::Standard,
+            about: teams_store::ChannelAbout::default(),
             shown: true,
         }],
     }

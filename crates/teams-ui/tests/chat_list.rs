@@ -251,6 +251,7 @@ fn ops_crew() -> Team {
                 name: "General".to_owned(),
                 general: true,
                 kind: ChannelKind::Standard,
+                about: teams_store::ChannelAbout::default(),
                 shown: true,
             },
             TeamChannel {
@@ -258,6 +259,7 @@ fn ops_crew() -> Team {
                 name: "Prod alerts".to_owned(),
                 general: false,
                 kind: ChannelKind::Standard,
+                about: teams_store::ChannelAbout::default(),
                 shown: true,
             },
         ],

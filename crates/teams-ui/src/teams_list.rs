@@ -18,15 +18,17 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::icons::{icon_button, selected_by};
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, App, AsyncApp, Context, ElementId, EventEmitter, Image, ImageFormat, InteractiveElement as _,
-    IntoElement, ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
-    WeakEntity, div, px, rgb,
+    AnyElement, App, AsyncApp, Context, DismissEvent, ElementId, Entity, EventEmitter, Focusable as _, Image,
+    ImageFormat, InteractiveElement as _, IntoElement, ParentElement as _, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity, Window, div, px, rgb,
 };
+use gpui_component::{Sizable as _, menu::PopupMenu};
 use teams_core::EngineError;
 use teams_proto::{PastedFormat, TeamPicture};
-use teams_store::{ChannelKind, Team};
+use teams_store::{ChannelKind, Team, TeamChannel};
 
 use crate::bridge::Core;
 use crate::icons::Glyph;
@@ -55,8 +57,10 @@ pub enum TeamsListEvent {
     AddChannel(Team),
     /// Another entry of a team's "..." menu was chosen.
     Chosen(Team, TeamChoice),
+    ChannelChosen(Team, TeamChannel, crate::channel_menu::ChannelChoice),
     /// "See all your teams".
     SeeAllTeams,
+    SectionFailed,
     /// A team's "See all channels".
     SeeAllChannels(String),
 }
@@ -77,6 +81,11 @@ pub struct TeamsList {
     /// The teams as last read from the store; `None` before a read settled them.
     teams: Option<Vec<Team>>,
     selected: Option<String>,
+    sections: Vec<teams_proto::ChannelSection>,
+    section_read: Option<Task<()>>,
+    channel_menu: Option<(String, Entity<PopupMenu>)>,
+    menu_dismiss: Option<Subscription>,
+    section_pending: std::collections::HashSet<String>,
     /// The models' teams revision the last load started at.
     read_at: u64,
     /// The models' last failed teams read the list has shown.
@@ -126,6 +135,11 @@ impl TeamsList {
             models,
             teams: None,
             selected: None,
+            sections: Vec::new(),
+            section_read: None,
+            channel_menu: None,
+            menu_dismiss: None,
+            section_pending: std::collections::HashSet::new(),
             read_at: 0,
             failed_seen: 0,
             loading: None,
@@ -145,6 +159,134 @@ impl TeamsList {
     #[must_use]
     pub fn teams(&self) -> Option<&[Team]> {
         self.teams.as_deref()
+    }
+
+    /// A channel's location, retaining the stable selector index used in the team tree.
+    pub(crate) fn channel_location(&self, id: &str) -> Option<(usize, usize, usize)> {
+        let mut index = 0;
+        for (team_at, team) in self.teams.iter().flatten().enumerate() {
+            for (channel_at, channel) in team.channels.iter().enumerate() {
+                if channel.id == id {
+                    return Some((index, team_at, channel_at));
+                }
+                index += 1;
+            }
+        }
+        None
+    }
+
+    /// The account's custom sections in their stored Teams order.
+    pub fn sections(&self) -> &[teams_proto::ChannelSection] {
+        &self.sections
+    }
+
+    fn read_sections(&mut self, cx: &mut Context<Self>) {
+        let reply = self.core.channel_data(teams_proto::ChannelRead::Sections);
+        self.section_read = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            if let Ok(data) = reply.await
+                && let Some(sections) = teams_proto::ChannelSections::read(&data.0)
+            {
+                let _ = this.update(cx, |this, cx| {
+                    this.sections = sections.sections;
+                    cx.notify();
+                });
+            }
+        }));
+    }
+
+    /// Opens a channel's accessible menu from its ellipsis, a right click, or the sidebar keyboard.
+    pub fn open_channel_menu(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((index, team_at, channel_at)) = self.channel_location(id) else {
+            return;
+        };
+        let Some(team) = self.teams.as_ref().and_then(|teams| teams.get(team_at)).cloned() else {
+            return;
+        };
+        let channel = team.channels[channel_at].clone();
+        let weak = cx.entity().downgrade();
+        let folders = self.sections.clone();
+        let read_only = self.core.read_only();
+        let return_focus = window.focused(cx);
+        let palette = crate::theme::current(cx);
+        let menu = PopupMenu::build(window, cx, move |menu, window, cx| {
+            let chosen_team = team.clone();
+            let chosen_channel = channel.clone();
+            let menu = crate::channel_menu::build(
+                menu,
+                crate::channel_menu::MenuContext {
+                    team: &team,
+                    channel: &channel,
+                    read_only,
+                    folders: &folders,
+                    index,
+                    palette,
+                },
+                window,
+                cx,
+                move |choice, _, cx| {
+                    let _ = weak.update(cx, |this, cx| {
+                        this.channel_choice(chosen_team.clone(), chosen_channel.clone(), choice, cx)
+                    });
+                },
+            );
+            if let Some(focus) = return_focus {
+                menu.action_context(focus)
+            } else {
+                menu
+            }
+        });
+        self.menu_dismiss = Some(cx.subscribe(&menu, |this, _, _: &DismissEvent, cx| {
+            this.channel_menu = None;
+            cx.notify();
+        }));
+        menu.focus_handle(cx).focus(window, cx);
+        self.channel_menu = Some((id.to_owned(), menu));
+        cx.notify();
+    }
+
+    /// A section's fold is an account-owned Teams setting and survives a restart.
+    pub fn toggle_section(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.section_pending.contains(id) || self.core.read_only() {
+            return;
+        }
+        let Some(section) = self.sections.iter_mut().find(|section| section.id == id) else {
+            return;
+        };
+        let expanded = !section.expanded;
+        section.expanded = expanded;
+        let id = id.to_owned();
+        self.section_pending.insert(id.clone());
+        let reply = self.core.channel_section(teams_proto::ChannelSectionAction::Expanded {
+            section: id.clone(),
+            expanded,
+        });
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            let result = reply.await;
+            let _ = this.update(cx, |this, cx| {
+                this.section_pending.remove(&id);
+                if result.is_err() {
+                    if let Some(section) = this.sections.iter_mut().find(|section| section.id == id) {
+                        section.expanded = !expanded;
+                    }
+                    cx.emit(TeamsListEvent::SectionFailed);
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// A channel menu choice, routed to the shell without a request from the view.
+    pub fn channel_choice(
+        &mut self,
+        team: Team,
+        channel: TeamChannel,
+        choice: crate::channel_menu::ChannelChoice,
+        cx: &mut Context<Self>,
+    ) {
+        self.channel_menu = None;
+        cx.emit(TeamsListEvent::ChannelChosen(team, channel, choice));
     }
 
     /// Whether the list says the teams can't be read: none are stored, and the last read told failed.
@@ -304,6 +446,7 @@ impl TeamsList {
             return;
         }
         self.dirty = false;
+        self.read_sections(cx);
         self.read_at = self.models.chats.read(cx).teams_at();
         let core = Arc::clone(&self.core);
         self.loading = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
@@ -368,9 +511,11 @@ impl TeamsList {
         else {
             return div().into_any_element();
         };
+        let owner = self.teams.as_ref().and_then(|teams| teams.get(team)).cloned();
         let selected = self.selected.as_deref() == Some(shown.id.as_str());
         let background = if selected { palette.selected } else { palette.surface };
         let opened = shown.id.clone();
+        let pointed = shown.id.clone();
         div()
             .id(ElementId::Name(format!("channel-{}", shown.id).into()))
             .debug_selector(move || format!("channel-row-{index}"))
@@ -385,7 +530,14 @@ impl TeamsList {
             .bg(rgb(background))
             .hover(move |style| style.bg(rgb(if selected { palette.selected } else { palette.hover })))
             .on_click(cx.listener(move |this, _, _, cx| this.open(&opened, cx)))
-            .child(div().min_w_0().truncate().child(shown.name.clone()))
+            .on_mouse_down(
+                gpui::MouseButton::Right,
+                cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.open_channel_menu(&pointed, window, cx);
+                }),
+            )
+            .child(div().flex_1().min_w_0().truncate().child(shown.name.clone()))
             .when(shown.kind == ChannelKind::Private, |row| {
                 row.child(
                     div()
@@ -393,6 +545,41 @@ impl TeamsList {
                         .flex_none()
                         .text_color(rgb(palette.muted_foreground))
                         .child(Glyph::LOCK.icon().size(px(12.0))),
+                )
+            })
+            .when_some(owner, |row, _| {
+                let toggled = shown.id.clone();
+                let open = self
+                    .channel_menu
+                    .as_ref()
+                    .filter(|(id, _)| id == &shown.id)
+                    .map(|(_, menu)| menu.clone());
+                let button = icon_button(format!("channel-more-{index}"), Glyph::ELLIPSIS, "More channel options")
+                    .xsmall()
+                    .on_click(cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        if this.channel_menu.as_ref().is_some_and(|(id, _)| id == &toggled) {
+                            this.channel_menu = None;
+                            cx.notify();
+                        } else {
+                            this.open_channel_menu(&toggled, window, cx);
+                        }
+                    }));
+                row.child(
+                    div()
+                        .id(SharedString::from(format!("channel-more-wrap-{index}")))
+                        .flex_none()
+                        .on_click(|_, _, cx| cx.stop_propagation())
+                        .child(selected_by(format!("channel-more-{index}"), button))
+                        .children(open.map(|menu| {
+                            gpui::deferred(
+                                gpui::anchored()
+                                    .anchor(gpui::Anchor::TopLeft)
+                                    .snap_to_window_with_margin(px(8.0))
+                                    .child(menu),
+                            )
+                            .with_priority(1)
+                        })),
                 )
             })
             .into_any_element()

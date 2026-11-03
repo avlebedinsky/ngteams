@@ -29,12 +29,17 @@ const ROSTER_PAGE: &str = "100";
 
 /// Someone on a team's roster. `Debug` leaves out everything but the MRI.
 #[derive(Clone, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent member attributes supplied by the roster"
+)]
 pub struct RosterMember {
     pub mri: String,
     pub owner: bool,
     pub guest: bool,
     /// A bot, which the web client doesn't count as a person.
     pub bot: bool,
+    pub moderator: bool,
 }
 
 impl std::fmt::Debug for RosterMember {
@@ -64,6 +69,7 @@ impl TeamRoster {
                 let role = member.get("role").and_then(Value::as_str).unwrap_or("User");
                 Some(RosterMember {
                     bot: mri.starts_with("28:"),
+                    moderator: member.get("isModerator").and_then(Value::as_bool) == Some(true),
                     owner: role == "Admin",
                     guest: role == "Guest",
                     mri,
@@ -699,6 +705,12 @@ impl Request for TeamJoinRequests {
 /// plain request (`teams_fence::contacting`'s rows carve them out by name).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OwnTeamView {
+    /// The account's granular channel notification settings, alerts, and follow preference.
+    ChannelProperty {
+        channel: String,
+        property: ChannelOwnProperty,
+        value: String,
+    },
     /// All of a team's channels hidden for the account: `PUT team/<team>/hide` on the provisioning service.
     HideAll { team: String },
     /// A hidden team shown again: `PUT conversations/show` on the provisioning service.
@@ -714,11 +726,33 @@ pub enum OwnTeamView {
     },
 }
 
+/// The only account-owned channel properties editable by the notifications dialog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChannelOwnProperty {
+    Notifications,
+    Alerts,
+    FollowAll,
+    NotifyAll,
+}
+impl ChannelOwnProperty {
+    #[must_use]
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Notifications => "channelNotificationSettings",
+            Self::Alerts => "alerts",
+            Self::FollowAll => "followAllRc",
+            Self::NotifyAll => "notifyAllRc",
+        }
+    }
+}
+
 impl Request for OwnTeamView {
     fn service(&self) -> Service {
         match self {
             Self::HideAll { .. } | Self::ShowAll { .. } => Service::Provisioning,
-            Self::ChannelInterest { .. } | Self::ChannelFavorite { .. } => Service::ChatService,
+            Self::ChannelInterest { .. } | Self::ChannelFavorite { .. } | Self::ChannelProperty { .. } => {
+                Service::ChatService
+            }
         }
     }
 
@@ -728,6 +762,10 @@ impl Request for OwnTeamView {
 
     fn endpoint(&self) -> Endpoint {
         match self {
+            Self::ChannelProperty { channel, property, .. } => {
+                Endpoint::new(["v1", "users", "ME", "conversations", channel.as_str(), "properties"])
+                    .with_query("name", property.key())
+            }
             Self::HideAll { team } => Endpoint::new(["team", team.as_str(), "hide"]),
             Self::ShowAll { .. } => Endpoint::new(["conversations", "show"]),
             Self::ChannelInterest { channel, own, .. } => {
@@ -742,6 +780,7 @@ impl Request for OwnTeamView {
 
     fn body(&self) -> Option<Value> {
         match self {
+            Self::ChannelProperty { property, value, .. } => Some(json!({ property.key(): value })),
             Self::HideAll { .. } => None,
             Self::ShowAll { team } => Some(json!({ "teamIds": [team], "channelIds": [] })),
             Self::ChannelInterest { shown, .. } => Some(json!({

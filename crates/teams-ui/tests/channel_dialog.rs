@@ -45,6 +45,7 @@ fn team(can_add: bool, can_add_private: bool, owner: bool) -> Team {
                 name: "General".to_owned(),
                 general: true,
                 kind: ChannelKind::Standard,
+                about: teams_store::ChannelAbout::default(),
                 shown: true,
             },
             TeamChannel {
@@ -52,6 +53,7 @@ fn team(can_add: bool, can_add_private: bool, owner: bool) -> Team {
                 name: "Made-up Channel".to_owned(),
                 general: false,
                 kind: ChannelKind::Private,
+                about: teams_store::ChannelAbout::default(),
                 shown: true,
             },
         ],
@@ -370,6 +372,7 @@ fn a_new_channel_the_engine_stored_is_in_the_sidebar_when_it_opens() {
         name: "Brand new".to_owned(),
         general: false,
         kind: ChannelKind::Standard,
+        about: teams_store::ChannelAbout::default(),
         shown: true,
     });
     *rig.core.teams.lock().unwrap() = Some(vec![listed]);

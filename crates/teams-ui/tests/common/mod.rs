@@ -126,6 +126,10 @@ pub struct FakeCore {
     pub service_searches: Mutex<Vec<(String, SearchScope)>>,
     /// The account's teams as the store has them; `None` before a read settled them.
     pub teams: Mutex<Option<Vec<Team>>>,
+    /// Synthetic channel responses, keyed by sections/thread:<id>/preferences:<id>/email:<id>.
+    pub channel_data: Mutex<HashMap<String, teams_proto::ChannelData>>,
+    pub channel_data_errors: Mutex<HashSet<String>>,
+    pub section_actions: Mutex<Vec<teams_proto::ChannelSectionAction>>,
     /// The channels Create asked for, in order.
     pub channels_asked: Mutex<Vec<teams_core::ChannelDraft>>,
     /// The writes on a team asked for, in order, with what they change.
@@ -236,6 +240,9 @@ impl Default for FakeCore {
             service_answer: Mutex::default(),
             service_searches: Mutex::default(),
             teams: Mutex::default(),
+            channel_data: Mutex::default(),
+            channel_data_errors: Mutex::default(),
+            section_actions: Mutex::default(),
             channels_asked: Mutex::default(),
             team_writes: Mutex::default(),
             team_written: Mutex::default(),
@@ -436,6 +443,41 @@ impl Core for FakeCore {
                 why: teams_core::ChannelProblem::Other,
             }),
         })
+    }
+
+    fn channel_data(&self, query: teams_proto::ChannelRead) -> Reply<teams_proto::ChannelData> {
+        use serde_json::json;
+        let (key, fallback) = match query {
+            teams_proto::ChannelRead::Sections => (
+                "sections".to_owned(),
+                json!({"isPartialResponse":false,"folderHierarchyVersion":1,"conversationFolderOrder":["favorites"],"conversationFolders":[{"id":"favorites","name":"Favorites","folderType":"Favorites","conversationFolderItems":[]}]}),
+            ),
+            teams_proto::ChannelRead::Thread { channel } => (
+                format!("thread:{channel}"),
+                json!({"id":channel,"properties":{"channelSettings":json!({"postPermissions":0,"allowReplies":0,"allowPinPosts":0,"allowBotsPost":1,"allowConnectorsPost":1}).to_string(),"spaceAdminSettings":json!({"userSettings":{"generalChannelSetting":0}}).to_string()}}),
+            ),
+            teams_proto::ChannelRead::Preferences { channel } => {
+                (format!("preferences:{channel}"), json!({"id":channel,"properties":{}}))
+            }
+            teams_proto::ChannelRead::Email { channel } => (
+                format!("email:{channel}"),
+                json!({"emailAddressDetails":{"emailId":"synthetic-channel@example.invalid"},"allowedSenders":{"allowedSenderType":"members","allowedDomains":[]}}),
+            ),
+        };
+        if locked(&self.channel_data_errors).contains(&key) {
+            return Reply::ready(Err(EngineError::TeamNotChanged { code: None }));
+        }
+        self.answer("channel_data", || {
+            locked(&self.channel_data)
+                .get(&key)
+                .cloned()
+                .unwrap_or(teams_proto::ChannelData(fallback))
+        })
+    }
+
+    fn channel_section(&self, action: teams_proto::ChannelSectionAction) -> Reply<()> {
+        locked(&self.section_actions).push(action);
+        self.answer("channel_section", || ())
     }
 
     fn team_write(

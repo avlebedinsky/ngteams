@@ -242,6 +242,15 @@ pub trait Core: Send + Sync + 'static {
         Reply::ready(Ok(None))
     }
     /// A team's channels as Manage team lists them. A fake core has none.
+    /// Fresh data for a channel's management dialogs.
+    fn channel_section(&self, _action: teams_proto::ChannelSectionAction) -> Reply<()> {
+        Reply::ready(Err(teams_core::EngineError::TeamNotChanged { code: None }))
+    }
+
+    fn channel_data(&self, _query: teams_proto::ChannelRead) -> Reply<teams_proto::ChannelData> {
+        Reply::ready(Err(teams_core::EngineError::TeamNotChanged { code: None }))
+    }
+
     fn team_channels(&self, _group: String) -> Reply<Vec<ManagedChannel>> {
         Reply::ready(Ok(Vec::new()))
     }
@@ -425,6 +434,14 @@ impl Core for EngineRequests {
 
     fn team_code(&self, team: String) -> Reply<Option<String>> {
         EngineRequests::team_code(self, team)
+    }
+
+    fn channel_section(&self, action: teams_proto::ChannelSectionAction) -> Reply<()> {
+        EngineRequests::channel_section(self, action)
+    }
+
+    fn channel_data(&self, query: teams_proto::ChannelRead) -> Reply<teams_proto::ChannelData> {
+        EngineRequests::channel_data(self, query)
     }
 
     fn team_channels(&self, group: String) -> Reply<Vec<ManagedChannel>> {

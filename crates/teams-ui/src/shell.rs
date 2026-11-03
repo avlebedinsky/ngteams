@@ -94,6 +94,7 @@ use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 use crate::view::status_text;
 
+mod channel_management;
 mod title_bar;
 
 pub use title_bar::{FocusSearch, GoBack, GoForward, History, RIGHT_WIDTH, SEARCH_MAX, TITLE_HEIGHT, ToggleListPane};
@@ -1319,9 +1320,15 @@ impl Shell {
         match event {
             TeamsListEvent::AddChannel(team) => self.open_channel_dialog(team.clone(), window, cx),
             TeamsListEvent::Chosen(team, choice) => self.team_chosen(team.clone(), *choice, window, cx),
+            TeamsListEvent::ChannelChosen(team, channel, choice) => {
+                self.channel_chosen(team.clone(), channel.clone(), choice.clone(), window, cx)
+            }
             TeamsListEvent::SeeAllTeams => self.open_teams_page(window, cx),
             TeamsListEvent::SeeAllChannels(team) => {
                 self.open_manage_team(team.clone(), ManageTab::Channels, window, cx);
+            }
+            TeamsListEvent::SectionFailed => {
+                self.show_toast("Couldn't save the section's expanded state. Try again.", cx)
             }
             TeamsListEvent::Opened(_) => {}
         }
@@ -1643,6 +1650,7 @@ impl Shell {
                         this.show_team_dialog(&dialog, window, cx);
                     }
                     TeamDialogEvent::Changed { team, words } => {
+                        this.teams.update(cx, TeamsList::reload);
                         this.show_toast(words, cx);
                         let team = team.clone();
                         if let Some((page, _)) = &this.manage_team

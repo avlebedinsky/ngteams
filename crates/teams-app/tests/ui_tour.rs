@@ -115,7 +115,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 4 + 136] = [
+const STEPS: [Step; 4 + 137] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -202,7 +202,24 @@ const STEPS: [Step; 4 + 136] = [
     }),
     // a team's "..." menu, then the "Create a channel" dialog through its states (the mock's team lets a make channels;
     // the lab's fence denies the creation, as it does every team's, which is the failure shown)
+    ("channel-management-edit", |shell, window, cx| {
+        let team = shell
+            .read(cx)
+            .teams()
+            .read(cx)
+            .teams()
+            .and_then(|teams| teams.iter().find(|team| team.id == TEAM))
+            .cloned();
+        if let Some(team) = team
+            && let Some(channel) = team.channels.first().cloned()
+        {
+            shell.update(cx, |shell, cx| {
+                shell.channel_chosen(team, channel, teams_ui::channel_menu::ChannelChoice::Edit, window, cx)
+            });
+        }
+    }),
     ("team-menu", |shell, window, cx| {
+        shell.update(cx, Shell::close_team_dialog);
         if let Some(chat) = shell.read(cx).chat() {
             let _ = chat.read(cx).text_selection().clear();
         }
