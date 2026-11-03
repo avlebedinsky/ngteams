@@ -441,6 +441,7 @@ fn conversation(lab: &Lab, chat: &str) -> Result<String, chat::ChatError> {
 /// A write command's action, and how long to wait for it to settle.
 fn write_action(lab: &Lab, command: Command) -> Result<(Action, Duration), Box<dyn Error>> {
     let (action, wait) = match command {
+        Command::CreateChat { others, wait } => (create_chat_action(lab, &others)?, wait),
         Command::Send { chat, text, wait } => (
             Action::Send {
                 conversation: conversation(lab, &chat)?,
@@ -498,27 +499,24 @@ fn write_action(lab: &Lab, command: Command) -> Result<(Action, Duration), Box<d
             },
             wait,
         ),
-        Command::Sync
-        | Command::List { .. }
-        | Command::Show { .. }
-        | Command::Watch { .. }
-        | Command::Presence { .. }
-        | Command::Profile { .. }
-        | Command::Search { .. }
-        | Command::TeamReads { .. }
-        | Command::Series { .. }
-        | Command::Meetings { .. }
-        | Command::ChannelSchedule { .. }
-        | Command::Teams { .. }
-        | Command::Availability { .. }
-        | Command::Call { .. }
-        | Command::Join { .. }
-        | Command::JoinMeeting { .. }
-        | Command::ChannelMeeting { .. } => {
+        _ => {
             return Err("not a write".into());
         }
     };
     Ok((action, Duration::from_secs(wait)))
+}
+
+fn create_chat_action(lab: &Lab, aliases: &[teams_fence::lab::Alias]) -> Result<Action, chat::ChatError> {
+    let others = aliases
+        .iter()
+        .map(|alias| {
+            lab.names
+                .mri(*alias)
+                .map(teams_fence::Mri::new)
+                .ok_or(chat::ChatError::NoMri(*alias))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Action::CreateChat { others })
 }
 
 /// What the team pages read of a team, each once.

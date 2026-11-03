@@ -62,6 +62,7 @@ fn help_names_every_command() {
     let help = String::from_utf8(output.stdout).unwrap();
     for command in [
         "sync",
+        "create-chat",
         "list",
         "show",
         "send",
@@ -81,6 +82,19 @@ fn help_names_every_command() {
         );
     }
     assert!(help.contains("<ALIAS>"), "{help}");
+}
+
+#[test]
+fn chat_creation_accepts_only_explicit_lab_aliases() {
+    let parsed = Cli::try_parse_from(["teams-headless", "a", "create-chat", "b", "c"]).unwrap();
+    assert!(matches!(parsed.command,CliCommand::CreateChat {others,..} if others==[Alias::B,Alias::C]));
+    for target in [
+        "contact",
+        "outside@example.test",
+        "8:orgid:00000000-0000-4000-8000-00000000000d",
+    ] {
+        assert!(Cli::try_parse_from(["teams-headless", "a", "create-chat", target]).is_err());
+    }
 }
 
 #[test]

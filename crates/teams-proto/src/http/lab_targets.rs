@@ -176,21 +176,36 @@ impl<C: Credentials> HttpTransport<C> {
                     Ok(())
                 }
                 Scope::New if target.kind() == WriteKind::ChatCreate => {
-                    self.lab_identity().await?;
-                    let mut members: Vec<String> = target.added().iter().map(|mri| mri.as_str().to_owned()).collect();
-                    if !members.contains(&context.own) {
-                        members.push(context.own.clone());
-                    }
-                    context
-                        .roster
-                        .verify_recipients(&context.own, &members)
-                        .map_err(refused)
+                    self.preflight_lab_creation(target.added().iter().map(|mri| mri.as_str().to_owned()).collect())
+                        .await
                 }
                 Scope::Account { mri } if target.kind() == WriteKind::OwnAvailability && mri == &context.own => Ok(()),
                 // Unknown/new meeting, echo and call-operation audiences are not a lab preflight proof.
                 _ => Err(refused(TargetError::Recipients)),
             }
         }
+    }
+
+    async fn preflight_lab_creation(&self, mut members: Vec<String>) -> Result<(), HttpError> {
+        let Some(context) = &self.lab_targets else {
+            return Ok(());
+        };
+        self.lab_identity().await?;
+        if !members.contains(&context.own) {
+            members.push(context.own.clone());
+        }
+        context
+            .roster
+            .verify_recipients(&context.own, &members)
+            .map_err(refused)?;
+        for peer in members.iter().filter(|mri| **mri != context.own) {
+            let account = context
+                .roster
+                .account(peer)
+                .ok_or_else(|| refused(TargetError::Recipients))?;
+            self.lab_peer(peer, &account.upn).await?;
+        }
+        Ok(())
     }
 
     pub(super) async fn lab_peer(&self, mri: &str, upn: &str) -> Result<(), HttpError> {

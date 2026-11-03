@@ -21,6 +21,31 @@ const SITE: &str = "https://madeup-my.sharepoint.com/personal/lab_a/";
 const DRIVE: &str = "/personal/lab_a/_api/v2.0/drive";
 const GUID: &str = "00000000-0000-4000-8000-000000000001";
 
+#[tokio::test]
+async fn creating_a_lab_chat_checks_the_peers_fresh_identity_before_the_post() {
+    use crate::{Authorized, CreateChat, Mutating};
+    for wrong_upn in [false, true] {
+        let server = MockServer::start().await;
+        identity(&server, A).await;
+        get(&server,"/v1.0/users/00000000-0000-4000-8000-00000000000b", json!({"id":B.strip_prefix("8:orgid:").unwrap(),"userPrincipalName":if wrong_upn {"outside@example.test"} else {"b@lab.example.test"}})).await;
+        Mock::given(method("POST"))
+            .and(path("/api/chatsvc/amer/v1/threads"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({"id":"synthetic"})))
+            .mount(&server)
+            .await;
+        let transport = transport(&server, true);
+        let write = CreateChat::one_to_one(Mri::new(A), Mri::new(B)).unwrap();
+        let permit = transport
+            .fence
+            .check(write.target(), &teams_fence::FailClosed)
+            .await
+            .unwrap();
+        let result = transport.deliver(Authorized::new(write, permit).unwrap()).await;
+        assert_eq!(result.is_ok(), !wrong_upn);
+        assert_eq!(writes(&server).await.len(), usize::from(!wrong_upn));
+    }
+}
+
 struct Tokens;
 impl Credentials for Tokens {
     fn bearer(&self, _: &str) -> impl std::future::Future<Output = Result<Secret, TokenError>> + Send {

@@ -33,6 +33,13 @@ pub type ChatArg = String;
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Creates or opens a chat with the named lab accounts. Only the dedicated aliases a, b and c are accepted.
+    CreateChat {
+        #[arg(required = true, num_args = 1..)]
+        others: Vec<Alias>,
+        #[arg(long, default_value_t = DEFAULT_WAIT_SECS)]
+        wait: u64,
+    },
     /// Catch up: the conversation list and every changed conversation's messages, into the store. Reads only.
     Sync,
     /// The stored conversations, the latest activity first. Reads the store only; nothing goes out.
