@@ -10,7 +10,9 @@
 //!   [`teams::stored_listing`]), a person `looking` when their stored profile is due a lookup; the request is then
 //!   kept with its answer already given, so the loop starts that lookup or read once the catch-up's read is over, as
 //!   if it had been asked then.
-//! - **Kept**: everything else (a write, older history, a sync, presence, a call, the shutdown).
+//! - **Read receipts**: queued locally at once, advancing the shared read horizon for the messages seen; the
+//!   transport waits its turn with the other writes. Queries and read receipts also run while an outbox attempt waits.
+//! - **Kept**: everything else (another write, older history, a sync, presence, a call, the shutdown).
 //! - Such an answer comes before a request made earlier that is kept (a write's row isn't in it yet); what that request
 //!   changes is told by its events, as always.
 
@@ -18,10 +20,11 @@ use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
 
-use teams_store::{Store, StoreError};
+use teams_store::{Applied, OutboxEntry, ReadHorizon, Store, StoreError};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
-use super::{EngineError, Query, Request, Responder};
+use super::{Action, EngineError, Event, Query, Request, Responder};
+use crate::outbox::{Command, enqueue};
 use crate::sync::Meanwhile;
 use crate::{profiles, teams};
 
@@ -32,6 +35,8 @@ pub(super) struct Inbox {
     /// The names the binary knows ([`Parts::known_names`](super::Parts::known_names)), for a person answered meanwhile.
     known: HashMap<String, String>,
     requests: Mutex<Requests>,
+    events: mpsc::UnboundedSender<Event>,
+    read_only: bool,
 }
 
 /// The requests not taken yet: those kept while a read waited first, then the channel's.
@@ -41,10 +46,18 @@ struct Requests {
 }
 
 impl Inbox {
-    pub(super) fn new(me: String, known: HashMap<String, String>, received: mpsc::UnboundedReceiver<Request>) -> Self {
+    pub(super) fn new(
+        me: String,
+        known: HashMap<String, String>,
+        received: mpsc::UnboundedReceiver<Request>,
+        events: mpsc::UnboundedSender<Event>,
+        read_only: bool,
+    ) -> Self {
         Self {
             me,
             known,
+            events,
+            read_only,
             requests: Mutex::new(Requests {
                 received,
                 kept: VecDeque::new(),
@@ -63,8 +76,21 @@ impl Inbox {
     }
 
     /// Answers a request from the store alone when it can be (see the module docs); the request to keep, if any.
-    fn meanwhile(&self, store: &Store, request: Request) -> Option<Request> {
+    fn meanwhile(&self, store: &mut Store, request: Request) -> Option<Request> {
         match request {
+            Request::Write(
+                Action::Read {
+                    conversation,
+                    message_id,
+                },
+                reply,
+            ) => match self.queue_read(store, conversation, message_id) {
+                Ok(row) => Some(Request::SendQueued(row.id, reply)),
+                Err(error) => {
+                    let _ = reply.send(Err(error));
+                    None
+                }
+            },
             Request::Query(query) => {
                 self.answer(store, query);
                 None
@@ -86,6 +112,49 @@ impl Inbox {
             }
             other => Some(other),
         }
+    }
+
+    /// A receipt records what was actually seen, even if its transport later fails. The service's timestamp-ordered
+    /// horizon will reconcile it as usual; an older response cannot restore the badge, and messages arriving after
+    /// this exact target still count unread. Keep this in the inbox so a slow catch-up cannot hold the local update.
+    pub(super) fn queue_read(
+        &self,
+        store: &mut Store,
+        conversation: String,
+        message_id: String,
+    ) -> Result<OutboxEntry, EngineError> {
+        let command = read_command(store, conversation.clone(), message_id.clone())?;
+        let row = enqueue(store, &command)?;
+        let _ = self.events.send(Event::Queued(row.clone()));
+        if !self.read_only {
+            let message = store
+                .message(&conversation, &message_id)?
+                .ok_or_else(|| EngineError::UnknownMessage {
+                    conversation: conversation.clone(),
+                    message: message_id,
+                })?;
+            let before = store.read_horizon(&conversation, &self.me)?;
+            if before
+                .as_ref()
+                .is_none_or(|before| before.last_read_arrival < message.arrival_time)
+            {
+                // Two seen-message bursts can queue in the same millisecond. Local progress must still win the tie.
+                let updated = before.as_ref().map_or(row.created_at, |before| {
+                    row.created_at.max(before.updated.saturating_add(1))
+                });
+                let applied = store.set_read_horizon(&ReadHorizon {
+                    conversation_id: conversation.clone(),
+                    user: self.me.clone(),
+                    last_read_arrival: message.arrival_time,
+                    updated,
+                    raw: None,
+                })?;
+                if applied != Applied::Ignored {
+                    let _ = self.events.send(Event::ReadHorizon { conversation });
+                }
+            }
+        }
+        Ok(row)
     }
 
     /// Answers a query from the store.
@@ -170,4 +239,24 @@ impl Meanwhile for Inbox {
 /// The responder of a request whose answer was given already: the loop's answer to it goes nowhere.
 fn answered<T>() -> Responder<T> {
     oneshot::channel().0
+}
+
+/// Checks the exact stored target before either a local horizon or a receipt can be queued.
+pub(super) fn read_command(store: &Store, conversation: String, message_id: String) -> Result<Command, EngineError> {
+    let message = store
+        .message(&conversation, &message_id)?
+        .ok_or_else(|| EngineError::UnknownMessage {
+            conversation: conversation.clone(),
+            message: message_id.clone(),
+        })?;
+    let client_message_id = message.client_message_id.ok_or_else(|| EngineError::Unknown {
+        message: message_id.clone(),
+        missing: "clientmessageid",
+        action: "read up to",
+    })?;
+    Ok(Command::ReadReceipt {
+        conversation,
+        message_id,
+        client_message_id,
+    })
 }

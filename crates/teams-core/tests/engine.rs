@@ -159,6 +159,7 @@ struct Interposed {
     inner: Arc<HttpTransport<Tokens>>,
     next: Arc<AtomicU16>,
     lose: Arc<AtomicBool>,
+    held: Arc<watch::Sender<bool>>,
 }
 
 impl Transport for Interposed {
@@ -173,6 +174,8 @@ impl Transport for Interposed {
     }
 
     async fn deliver<R: Mutating + Send>(&self, write: Authorized<R>) -> Result<Response, HttpError> {
+        let mut held = self.held.subscribe();
+        let _ = held.wait_for(|held| !held).await;
         if self.lose.swap(false, Ordering::SeqCst) {
             self.inner.deliver(write).await?;
             return Ok(Response::new(500, Vec::new()));
@@ -308,6 +311,8 @@ struct Native {
     next_write: Arc<AtomicU16>,
     /// The next write reaches the service and its answer is lost ([`Interposed`]).
     lose_answer: Arc<AtomicBool>,
+    /// The receipt transport waits while set. Local reads must still complete.
+    writes_held: Arc<watch::Sender<bool>>,
     /// How far ahead of the wall clock the outbox's clock runs, in milliseconds (a row's backoff without waiting).
     ahead: Arc<AtomicI64>,
     /// An [`Event::Failed`] is taken like any other event instead of failing the test.
@@ -381,10 +386,12 @@ fn try_native_in(lab: &Lab, me: &'static str, how: How, dir: Arc<tempfile::TempD
     let store = Store::open(&dir.path().join("store").join("lab.sqlite")).unwrap();
     let next_write = Arc::new(AtomicU16::new(if how.throttle_first_write { 429 } else { 0 }));
     let lose_answer = Arc::new(AtomicBool::new(false));
+    let writes_held = Arc::new(watch::Sender::new(false));
     let interposed = Interposed {
         inner: transport,
         next: Arc::clone(&next_write),
         lose: Arc::clone(&lose_answer),
+        held: Arc::clone(&writes_held),
     };
     let ahead = Arc::new(AtomicI64::new(0));
     let outbox = Outbox::new(Arc::new(interposed), fence, membership, author).with_clock(clock_ahead(&ahead));
@@ -406,6 +413,7 @@ fn try_native_in(lab: &Lab, me: &'static str, how: How, dir: Arc<tempfile::TempD
         reads_held,
         next_write,
         lose_answer,
+        writes_held,
         ahead,
         failures_expected: false,
         _dir: dir,
@@ -760,6 +768,149 @@ async fn a_read_receipt_moves_b_s_horizon_as_the_service_sees_it() {
     assert!(horizon.ends_with(&format!(";{}", sent.client_message_id)), "{horizon}");
     assert_eq!(b.log.verdicts("read_receipt", AB_CHAT), ["allow"]);
     a.shutdown();
+    b.shutdown();
+}
+
+/// The server response is deliberately held. The badge's queries must see local progress before it arrives,
+/// while a later incoming message remains unread and stale deliveries cannot undo what was actually seen.
+#[tokio::test]
+async fn a_seen_message_clears_unread_before_the_receipt_server_answers_and_keeps_newer_messages_unread() {
+    let lab = Lab::start().await;
+    let mut b = native(&lab, LAB_B, How::default());
+    b.ready().await;
+    let first = lab.mock.post_as(LAB_A, ABC_CHAT, "<p>seen</p>").unwrap();
+    b.message_event(ABC_CHAT, &first).await;
+    assert!(b.handle.unread_count(ABC_CHAT).await.unwrap() > 0);
+    b.writes_held.send_replace(true);
+    let receipt = tokio::spawn(b.handle.write(Action::Read {
+        conversation: ABC_CHAT.to_owned(),
+        message_id: first.clone(),
+    }));
+    b.event(|event| matches!(event, Event::ReadHorizon { conversation } if conversation == ABC_CHAT).then_some(()))
+        .await;
+    let unread = tokio::time::timeout(Duration::from_secs(5), b.handle.unread_count(ABC_CHAT)).await;
+    assert_eq!(unread.expect("local count held by receipt transport").unwrap(), 0);
+    assert!(!receipt.is_finished(), "the server still has not answered");
+    let local = b.handle.read_horizon(ABC_CHAT).await.unwrap().unwrap();
+    assert_eq!(local.last_read_arrival, b.stored(ABC_CHAT, &first).await.arrival_time);
+    // This delivery waits in the push queue while the first receipt's transport is held.
+    let newer = lab.mock.post_as(LAB_A, ABC_CHAT, "<p>not yet seen</p>").unwrap();
+    b.writes_held.send_replace(false);
+    assert_eq!(receipt.await.unwrap().unwrap().state, OutboxState::Sent);
+    b.message_event(ABC_CHAT, &newer).await;
+    assert_eq!(b.handle.unread_count(ABC_CHAT).await.unwrap(), 1);
+    b.drain().await;
+    let stale = format!("0;{};synthetic", local.updated - 1);
+    lab.trouter
+        .deliver_chat(LAB_B, &conversation_delivery(ABC_CHAT, Some(&stale)));
+    b.event(|event| matches!(event, Event::ReadHorizon { conversation } if conversation == ABC_CHAT).then_some(()))
+        .await;
+    assert_eq!(
+        b.handle.unread_count(ABC_CHAT).await.unwrap(),
+        1,
+        "old unread horizon cannot restore a badge"
+    );
+    // An explicit mark-unread on another client later is authoritative, even when it moves backwards.
+    let marked_unread = format!("0;{};synthetic", local.updated + 10_000);
+    lab.trouter
+        .deliver_chat(LAB_B, &conversation_delivery(ABC_CHAT, Some(&marked_unread)));
+    b.event(|event| matches!(event, Event::ReadHorizon { conversation } if conversation == ABC_CHAT).then_some(()))
+        .await;
+    assert!(b.handle.unread_count(ABC_CHAT).await.unwrap() > 1);
+    b.shutdown();
+}
+
+#[tokio::test]
+async fn a_newer_local_read_can_advance_while_an_older_receipt_waits_on_the_server() {
+    let lab = Lab::start().await;
+    let b = native(&lab, LAB_B, QUIET);
+    let first = lab.mock.post_as(LAB_A, ABC_CHAT, "<p>first seen</p>").unwrap();
+    let second = lab.mock.post_as(LAB_A, ABC_CHAT, "<p>seen later</p>").unwrap();
+    b.handle.sync().await.unwrap();
+    b.writes_held.send_replace(true);
+    let earlier = tokio::spawn(b.handle.write(Action::Read {
+        conversation: ABC_CHAT.to_owned(),
+        message_id: first,
+    }));
+    let unread = tokio::time::timeout(Duration::from_secs(5), b.handle.unread_count(ABC_CHAT)).await;
+    assert_eq!(
+        unread.expect("partial count held by older receipt").unwrap(),
+        1,
+        "only the exact target was read"
+    );
+    let later = tokio::spawn(b.handle.write(Action::Read {
+        conversation: ABC_CHAT.to_owned(),
+        message_id: second.clone(),
+    }));
+    let unread = tokio::time::timeout(Duration::from_secs(5), b.handle.unread_count(ABC_CHAT)).await;
+    assert_eq!(unread.expect("newer local read held by older receipt").unwrap(), 0);
+    assert!(!earlier.is_finished() && !later.is_finished());
+    b.writes_held.send_replace(false);
+    let earlier = earlier.await.unwrap().unwrap();
+    let later = later.await.unwrap().unwrap();
+    assert_eq!(earlier.state, OutboxState::Sent);
+    assert_eq!(later.state, OutboxState::Sent);
+    assert_eq!(b.handle.unread_count(ABC_CHAT).await.unwrap(), 0);
+    assert_eq!(
+        b.handle
+            .read_horizon(ABC_CHAT)
+            .await
+            .unwrap()
+            .unwrap()
+            .last_read_arrival,
+        b.stored(ABC_CHAT, &second).await.arrival_time
+    );
+    let events = lab.mock.take_events(LAB_A);
+    let targets: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind == EventKind::ReadReceipt)
+        .map(|event| {
+            event.resource["consumptionhorizon"]
+                .as_str()
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap()
+        })
+        .collect();
+    assert_eq!(targets.len(), 2, "both receipts still sync in order");
+    assert_eq!(targets[1], second);
+    b.shutdown();
+}
+
+#[tokio::test]
+async fn seen_messages_update_locally_during_a_slow_catch_up_and_stay_read_when_the_receipt_fails() {
+    let lab = Lab::start().await;
+    let b = native(&lab, LAB_B, QUIET);
+    lab.mock
+        .post_as(LAB_A, ABC_CHAT, "<p>seen before navigating away</p>")
+        .unwrap();
+    b.handle.sync().await.unwrap();
+    let newest = b.handle.messages(ABC_CHAT, None, 1).await.unwrap().messages.remove(0);
+    b.reads_held.send_replace(true);
+    let sync = b.handle.sync();
+    b.next_write.store(403, Ordering::SeqCst);
+    let receipt = tokio::spawn(b.handle.write(Action::Read {
+        conversation: ABC_CHAT.to_owned(),
+        message_id: newest.id.clone(),
+    }));
+    let unread = tokio::time::timeout(Duration::from_secs(5), b.handle.unread_count(ABC_CHAT)).await;
+    assert_eq!(unread.expect("local receipt held by catch-up").unwrap(), 0);
+    assert!(!receipt.is_finished());
+    b.reads_held.send_replace(false);
+    sync.await.unwrap();
+    assert_eq!(receipt.await.unwrap().unwrap().state, OutboxState::Failed);
+    assert_eq!(
+        b.handle.unread_count(ABC_CHAT).await.unwrap(),
+        0,
+        "seen remains seen after server failure"
+    );
+    b.handle.sync().await.unwrap();
+    assert_eq!(
+        b.handle.unread_count(ABC_CHAT).await.unwrap(),
+        0,
+        "a stale catch-up cannot restore unread"
+    );
     b.shutdown();
 }
 

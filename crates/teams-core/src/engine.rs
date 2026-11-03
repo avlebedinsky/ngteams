@@ -43,7 +43,9 @@
 //!   they were made, but a query (and a person, the teams and the chat listing, from the store alone, their own
 //!   background read started afterwards) is answered also while a read of the catch-up waits on the service, from the
 //!   store as it stands (`inbox`): a catch-up that runs for minutes (hundreds of conversations, a page of 200 channel
-//!   posts taking seconds) doesn't hold up a view's reads, while every other request waits for it.
+//!   posts taking seconds) doesn't hold up a view's reads. Read receipts queue and advance the local horizon during
+//!   those waits too; local queries and receipts also proceed while an outbox attempt awaits transport. Other requests
+//!   wait their turn. The timestamp-ordered service horizon reconciles the local read without reviving stale badges.
 //! - **People** ([`EngineRequests::person`]): someone's name and picture as the views show them, from the store, and
 //!   read in the background when the store's are missing or old ([`crate::profiles`]: Graph, else the middle tier's
 //!   profile lookup, a read sent as a `POST`); each change stored is told as [`Event::Profile`].
@@ -602,6 +604,8 @@ impl<T> Answer<T> {
 enum Request {
     UploadFile(PathBuf, Responder<teams_proto::UploadedFile>),
     Write(Action, Responder<OutboxEntry>),
+    /// A read receipt already queued while the engine waited on the service.
+    SendQueued(i64, Responder<OutboxEntry>),
     Resend(i64, Responder<OutboxEntry>),
     Transient(Transient, Responder<TransientSent>),
     OwnAvailability(OwnStatus, Responder<TransientSent>),
@@ -802,6 +806,8 @@ impl EngineRequests {
     }
 
     /// Writes through the outbox (see the module docs); the reply is the row as its first send left it.
+    /// A read receipt advances the shared local horizon when queued, before the service answers; only the exact
+    /// stored target is read, and the service reconciles it by the horizon timestamp as usual.
     pub fn write(&self, action: Action) -> Reply<OutboxEntry> {
         self.ask(|reply| Request::Write(action, reply))
     }
@@ -1592,7 +1598,13 @@ where
         let calling = parts
             .calls
             .map(|calls| Calling::new(calls, Arc::clone(&outbox), Arc::clone(&parts.client), events.clone()));
-        let inbox = Arc::new(Inbox::new(me.as_str().to_owned(), known, requests));
+        let inbox = Arc::new(Inbox::new(
+            me.as_str().to_owned(),
+            known,
+            requests,
+            events.clone(),
+            outbox.is_read_only(),
+        ));
         let catch_up = CatchUp::new(parts.client, Arc::clone(&outbox), me).with_meanwhile(inbox.clone());
         Self {
             store: parts.store,
@@ -1799,6 +1811,9 @@ where
             Request::UploadFile(path, reply) => self.uploads.upload(path, reply),
             Request::Write(action, reply) => {
                 let _ = reply.send(self.logged_write(action).await);
+            }
+            Request::SendQueued(id, reply) => {
+                let _ = reply.send(self.send_row(id).await);
             }
             Request::Sync(reply) => {
                 log::info!("action: a catch-up asked for");
@@ -2067,6 +2082,14 @@ where
     }
 
     async fn write(&mut self, action: Action) -> Result<OutboxEntry, EngineError> {
+        if let Action::Read {
+            conversation,
+            message_id,
+        } = action
+        {
+            let row = self.inbox.queue_read(&mut self.store, conversation, message_id)?;
+            return self.send_row(row.id).await;
+        }
         let command = self.command(action)?;
         if let Command::Send { conversation, text } = &command {
             self.uploads.share(conversation, text.files()).await?;
@@ -2187,19 +2210,7 @@ where
             Action::Read {
                 conversation,
                 message_id,
-            } => {
-                let message = self.stored(&conversation, &message_id)?;
-                let client_message_id = message.client_message_id.ok_or_else(|| EngineError::Unknown {
-                    message: message_id.clone(),
-                    missing: "clientmessageid",
-                    action: "read up to",
-                })?;
-                Command::ReadReceipt {
-                    conversation,
-                    message_id,
-                    client_message_id,
-                }
-            }
+            } => inbox::read_command(&self.store, conversation, message_id)?,
             Action::CreateChat { others } => {
                 let others: Vec<String> = others.iter().map(|other| other.as_str().to_owned()).collect();
                 create_chat(self.outbox.me().mri(), &others).ok_or(EngineError::NotAChat)?;

@@ -63,6 +63,7 @@ pub use transient::{MAX_TRANSIENT_WAIT, Transient, TransientSent};
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::future::Future;
+use std::pin::{Pin, pin};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -235,6 +236,12 @@ pub type SyncError = Box<dyn Error + Send + Sync>;
 /// Syncs one conversation from the service, for the outbox's check after an attempt whose outcome is unknown. M1 Task
 /// 17's catch-up sync implements it.
 pub trait ConversationSync: Sync {
+    /// Serves local queries and seen-message updates while transport waits. The engine's catch-up delegates to its
+    /// inbox; a standalone outbox has nothing to serve and leaves this pending.
+    fn serve<'a>(&'a self, _store: &'a mut Store) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        Box::pin(std::future::pending())
+    }
+
     /// Reads `conversation`'s messages from the service now, never from the store alone, and stores what changed
     /// (through [`Outbox::receive`], or [`Store::upsert_message`]), so that a message we sent that reached the service
     /// is in `store` once it returns.
@@ -549,7 +556,12 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
                 return Ok(arrived);
             }
             let row = store.begin_attempt(id)?;
-            let tried = self.attempt(&row).await;
+            let mut attempt = pin!(self.attempt(&row));
+            let tried = tokio::select! {
+                biased;
+                tried = &mut attempt => tried,
+                () = sync.serve(store) => attempt.await,
+            };
             let summary = tried.summary();
             let (outcome, again) = self.settle(&row, tried);
             let row = store.finish_attempt(id, &outcome)?;

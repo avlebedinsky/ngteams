@@ -1115,6 +1115,13 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
 }
 
 impl<C: Credentials, T: Transport<Error = HttpError> + Send> ConversationSync for CatchUp<C, T> {
+    fn serve<'a>(&'a self, store: &'a mut Store) -> Pin<Box<dyn Future<Output = ()> + Send + 'a>> {
+        match &self.meanwhile {
+            Some(meanwhile) => meanwhile.serve(store),
+            None => Box::pin(std::future::pending()),
+        }
+    }
+
     async fn sync_conversation(&self, store: &mut Store, conversation: &str) -> Result<(), SyncError> {
         self.sync_messages(store, conversation)
             .await
