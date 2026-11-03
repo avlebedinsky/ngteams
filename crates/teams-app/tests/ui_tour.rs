@@ -83,7 +83,7 @@ const SETTLE: Duration = Duration::from_millis(1500);
 type Step = (&'static str, fn(&Entity<Shell>, &mut Window, &mut App));
 
 /// The tour.
-const STEPS: [Step; 4 + 132] = [
+const STEPS: [Step; 4 + 133] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -696,8 +696,16 @@ const STEPS: [Step; 4 + 132] = [
     ("channel-meet-now-prejoin", |shell, _, cx| {
         shell.update(cx, Shell::meet_now);
     }),
+    // the Meet now menu's Schedule a meeting: the scheduling form in its own window, the channel's row ("<team> >
+    // <channel>" and Send personal invites) in the Teams meeting switch's place
+    ("channel-schedule-form", |shell, _, cx| {
+        let models = shell.read(cx).models().clone();
+        models.calls.update(cx, teams_ui::Calls::cancel_prejoin);
+        shell.update(cx, Shell::schedule_channel_meeting);
+    }),
     // the general channel, where the mock's CSA names a meeting running: its header's Join
     ("channel-join", |shell, window, cx| {
+        event_form::close(cx);
         let models = shell.read(cx).models().clone();
         models.calls.update(cx, teams_ui::Calls::cancel_prejoin);
         shell.update(cx, |shell, cx| shell.open_channel_id(TEAM.to_owned(), window, cx));

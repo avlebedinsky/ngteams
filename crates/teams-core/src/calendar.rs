@@ -15,18 +15,23 @@
 //!   through the outbox's calendar kind ([`Outbox::try_calendar`]): every attempt under a fresh `Fence::check` with its
 //!   `fence.log` line, no row, nothing sent again by a later run; one more attempt only after a 401 or a short
 //!   throttle ([`CallRetries`]), never after an unknown outcome (an invitation sent twice is worse than a failed save).
-//!   A write that wasn't answered with a 2xx is [`EngineError::EventNotSaved`], saying why.
+//!   A write that wasn't answered with a 2xx is [`EngineError::EventNotSaved`], saying why. A channel's meeting is
+//!   created and cancelled on its team's group calendar ([`EventWrite::CreateInChannel`],
+//!   [`EventWrite::CancelInChannel`]: `docs/protocol/calling.md`, "A channel's meeting").
+//! - **A channel's running meeting** ([`find_channel_meetup`]): CSA's `activeMeetups`, else the channel's newest posts.
 
 use std::sync::{Arc, Mutex, PoisonError};
 
 use chrono::{Local, NaiveDate, TimeZone as _};
 use serde_json::{Map, Value};
 use teams_fence::Mri;
+use teams_proto::chat::ChatReads;
 use teams_proto::{
-    Author, CalendarEvent, CalendarView, CancelEvent, ChannelMeetup, Client, CreateEvent, CreateOnlineMeeting,
-    Credentials, CsaTeams, DeleteEvent, EventAttendee, EventDraft, EventRead, EventTime, FreeBusyAsk, FullEvent,
-    HttpError, HttpTransport, MeetingDetails, MeetingThread, MeetingTimes, Mutating, Organizer, PersonSchedule,
-    Schedules, ShortProfileLookup, TimeZoneSettings, Transport, UpdateEvent,
+    Author, CalendarEvent, CalendarView, CancelChannelEvent, CancelEvent, ChannelMeetup, Client, CreateChannelEvent,
+    CreateEvent, CreateOnlineMeeting, Credentials, CsaTeams, DeleteEvent, EventAttendee, EventDraft, EventRead,
+    EventTime, FreeBusyAsk, FullEvent, HttpError, HttpTransport, MeetingChannel, MeetingDetails, MeetingThread,
+    MeetingTimes, Mutating, Organizer, PersonSchedule, ScheduledMeeting, Schedules, ShortProfileLookup,
+    TimeZoneSettings, Transport, UpdateEvent,
 };
 use teams_store::{Store, StoreError, StoredEvent};
 use tokio::task::JoinSet;
@@ -39,6 +44,14 @@ use crate::outbox::{CallRetries, CallTried, Outbox};
 pub enum EventWrite {
     /// A new event: its invitation goes to every attendee.
     Create(EventDraft),
+    /// A new meeting in a channel (its header's Schedule a meeting): on the team's group calendar, posted to the
+    /// channel, reaching everyone on the team.
+    CreateInChannel {
+        draft: EventDraft,
+        channel: MeetingChannel,
+        /// "Send personal invites": in the personal calendars of the channel's members too.
+        personal_invites: bool,
+    },
     /// The event `id`, read whole as `event` ([`FullEvent::raw`]), changed to `draft`: its update goes to every
     /// attendee.
     Update {
@@ -54,6 +67,14 @@ pub enum EventWrite {
     },
     /// The event `id` deleted from the account's calendar.
     Delete { id: String },
+    /// A channel's meeting (`meeting`, as its post `post` in `channel` names it) cancelled by its organizer, `message`
+    /// sent with the cancellation: everyone on the team told.
+    CancelInChannel {
+        meeting: Box<ScheduledMeeting>,
+        channel: MeetingChannel,
+        post: String,
+        message: Option<String>,
+    },
 }
 
 impl EventWrite {
@@ -61,9 +82,9 @@ impl EventWrite {
     #[must_use]
     pub fn kind(&self) -> &'static str {
         match self {
-            Self::Create(_) => "creation",
+            Self::Create(_) | Self::CreateInChannel { .. } => "creation",
             Self::Update { .. } => "change",
-            Self::Cancel { .. } => "cancellation",
+            Self::Cancel { .. } | Self::CancelInChannel { .. } => "cancellation",
             Self::Delete { .. } => "delete",
         }
     }
@@ -210,19 +231,15 @@ where
         });
     }
 
-    /// Answers `reply` with the meeting that runs in the channel `channel` now, as CSA's teams read names it under the
-    /// channel's `activeMeetups` ([`CsaTeams::meetup_in`]): `None` when none runs (or the answer doesn't name the
-    /// channel), [`EngineError::MeetingUnread`] when it couldn't be read.
+    /// Answers `reply` with the meeting that runs in the channel `channel` now ([`find_channel_meetup`]): `None` when
+    /// none runs, [`EngineError::MeetingUnread`] when it couldn't be read.
     pub(crate) fn channel_meetup(&self, channel: String, reply: Responder<Option<ChannelMeetup>>) {
         let client = Arc::clone(&self.client);
         tokio::task::spawn_local(async move {
-            let answer = match client.read(&CsaTeams).await {
-                Ok(answer) => Ok(CsaTeams::meetup_in(answer.body(), &channel)),
-                Err(error) => {
-                    log::info!("the channel's meeting couldn't be read: {error}");
-                    Err(EngineError::MeetingUnread)
-                }
-            };
+            let answer = find_channel_meetup(&client, &channel).await.map_err(|error| {
+                log::info!("{error}");
+                EngineError::MeetingUnread
+            });
             let _ = reply.send(answer);
         });
     }
@@ -318,10 +335,19 @@ where
         let whom = Arc::clone(&self.whom);
         tokio::task::spawn_local(async move {
             let kind = write.kind();
-            let creates = matches!(write, EventWrite::Create(_));
+            let creates = matches!(write, EventWrite::Create(_) | EventWrite::CreateInChannel { .. });
             let me = outbox.me().clone();
             let write = match write {
                 EventWrite::Create(draft) => EventWrite::Create(complete(&client, &whom, &me, draft).await),
+                EventWrite::CreateInChannel {
+                    draft,
+                    channel,
+                    personal_invites,
+                } => EventWrite::CreateInChannel {
+                    draft: complete(&client, &whom, &me, draft).await,
+                    channel,
+                    personal_invites,
+                },
                 EventWrite::Update { id, event, draft } => EventWrite::Update {
                     id,
                     event,
@@ -342,6 +368,15 @@ where
                         send(&outbox, &CreateEvent::new(draft, meeting), kind).await
                     }
                 }
+                // the event's online meeting is the service's: the web client's creation carries none
+                EventWrite::CreateInChannel {
+                    draft,
+                    channel,
+                    personal_invites,
+                } => match CreateChannelEvent::new(draft, channel) {
+                    Some(create) => send(&outbox, &create.with_personal_invites(personal_invites), kind).await,
+                    None => Err(not_saved(kind, "the channel's team has no mailbox")),
+                },
                 EventWrite::Update { id, event, draft } => match UpdateEvent::new(id, event, draft) {
                     Some(update) => send(&outbox, &update, kind).await,
                     None => Err(not_saved(kind, "the event read isn't the one changed")),
@@ -349,6 +384,15 @@ where
                 EventWrite::Cancel { id, chat, message } => match CancelEvent::new(id, chat, message) {
                     Some(cancel) => send(&outbox, &cancel, kind).await,
                     None => Err(not_saved(kind, "no event")),
+                },
+                EventWrite::CancelInChannel {
+                    meeting,
+                    channel,
+                    post,
+                    message,
+                } => match CancelChannelEvent::new(&meeting, channel, post, message) {
+                    Some(cancel) => send(&outbox, &cancel, kind).await,
+                    None => Err(not_saved(kind, "the meeting's channel or post doesn't read")),
                 },
                 EventWrite::Delete { id } => match DeleteEvent::new(id) {
                     Some(delete) => send(&outbox, &delete, kind).await,
@@ -361,6 +405,36 @@ where
         });
     }
 }
+
+/// The meeting that runs in the channel `channel` now: as CSA's teams read names it under the channel's
+/// `activeMeetups` ([`CsaTeams::meetup_in`]), else as the channel's newest posts tell it ([`ChannelMeetup::of_posts`]:
+/// CSA names a channel's meeting only to some of the team, seen 2026-11-03, where the web client joins by the post's
+/// card). `Ok(None)` when neither names one; an error saying what couldn't be read when neither read.
+///
+/// # Errors
+/// As above.
+pub(crate) async fn find_channel_meetup<C: Credentials + 'static>(
+    client: &Client<HttpTransport<C>>,
+    channel: &str,
+) -> Result<Option<ChannelMeetup>, String> {
+    let csa = match client.read(&CsaTeams).await {
+        Ok(answer) => match CsaTeams::meetup_in(answer.body(), channel) {
+            Some(meetup) => return Ok(Some(meetup)),
+            None => Ok(()),
+        },
+        Err(error) => Err(format!("the channel's meeting couldn't be read: {error}")),
+    };
+    match ChatReads::new(client).messages(channel, POSTS_LOOKED_AT).await {
+        Ok(page) => Ok(ChannelMeetup::of_posts(&page.messages)),
+        Err(error) => {
+            log::info!("the channel's posts couldn't be read for its meeting: {error}");
+            csa.map(|()| None)
+        }
+    }
+}
+
+/// How many of a channel's newest posts are looked at for the meeting running in it.
+const POSTS_LOOKED_AT: u32 = 50;
 
 /// `draft` with the account as its organizer and its time zone, as read ([`Whom`]).
 async fn complete<C: Credentials + 'static>(

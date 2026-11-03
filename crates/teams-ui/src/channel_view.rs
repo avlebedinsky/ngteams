@@ -36,6 +36,7 @@ use gpui::{
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::Copy;
 use gpui_component::kbd::Kbd;
+use teams_proto::ScheduledMeeting;
 use teams_proto::chat::{LinkPreview, MessageType, RichText, SharedFile, parse_html};
 use teams_store::Message;
 
@@ -119,7 +120,23 @@ pub enum Body {
     /// A system message's line, in Teams' words ([`crate::system_message`]): a thread's event, a call's or a
     /// recording's state, or a card's title and detail.
     Event(SharedString),
+    /// A meeting scheduled in the channel, drawn as Teams' meeting card ([`meeting_card`]).
+    Meeting(MeetingCard),
     Unsupported,
+}
+
+/// A meeting scheduled in the channel, as its post names it (`teams_proto::ScheduledMeeting`) and the channel's card shows
+/// it: its day, its title (struck through once a reply under it says it is cancelled), its times and location, and
+/// where it is ("<team> > <channel>").
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MeetingCard {
+    pub title: SharedString,
+    pub start_ms: i64,
+    pub end_ms: i64,
+    pub location: Option<SharedString>,
+    pub cancelled: bool,
+    /// The team's and the channel's names, when the view was given them ([`ChannelView::set_place`]).
+    pub place: Option<(SharedString, SharedString)>,
 }
 
 /// What the channel view tells its owner.
@@ -196,6 +213,10 @@ pub struct ChannelView {
     text_selection: TextSelection,
     /// Takes the focus on a press in the posts, so Ctrl+C reaches the view.
     focus: FocusHandle,
+    /// The calendar ids of the meetings whose cancellation the last load read: their cards are drawn cancelled.
+    cancelled: HashSet<String>,
+    /// The team's and the channel's names, for a meeting card's line.
+    place: Option<(SharedString, SharedString)>,
     _observing: Subscription,
 }
 
@@ -242,11 +263,22 @@ impl ChannelView {
             traced: None,
             text_selection: TextSelection::default(),
             focus: cx.focus_handle(),
+            cancelled: HashSet::new(),
+            place: None,
             _observing: observing,
         };
         view.sync(cx);
         view.reload(cx);
         view
+    }
+
+    /// The team's and the channel's names, as a meeting card's line shows them; read again when they change.
+    pub fn set_place(&mut self, team: SharedString, channel: SharedString, cx: &mut Context<Self>) {
+        let place = Some((team, channel)).filter(|(team, channel)| !team.is_empty() && !channel.is_empty());
+        if self.place != place {
+            self.place = place;
+            self.reload(cx);
+        }
     }
 
     /// Asks the engine to sync the channel from the service, unless a sync it asked for still runs; the store is read
@@ -375,6 +407,13 @@ impl ChannelView {
             self.more_stored = read.more_stored;
             self.history_complete = read.history_complete;
             self.people = read.people.keys().cloned().collect();
+            self.cancelled = read
+                .messages
+                .iter()
+                .filter_map(|message| ScheduledMeeting::of_properties(message.properties.as_deref()?))
+                .filter(|meeting| meeting.cancelled)
+                .map(|meeting| meeting.ical_uid)
+                .collect();
             let threads = arrange_threads(read.messages, &read.roots);
             self.threads = threads
                 .into_iter()
@@ -465,6 +504,9 @@ impl ChannelView {
         if message.delete_time.is_some() {
             return Some(Body::Deleted);
         }
+        if let Some(card) = self.meeting_card(message) {
+            return Some(Body::Meeting(card));
+        }
         match MessageType::from(message.message_type.clone()) {
             MessageType::RichTextHtml | MessageType::Text => return Some(Body::Text(self.rendered(message))),
             _ => {}
@@ -489,6 +531,21 @@ impl ChannelView {
             ),
             Some(SystemShown::Nothing) => return None,
             None => Body::Unsupported,
+        })
+    }
+
+    /// The meeting card a post of a meeting scheduled in the channel is drawn as; `None` for any other message (its
+    /// cancellation's reply is drawn as its text).
+    fn meeting_card(&self, message: &Message) -> Option<MeetingCard> {
+        let meeting =
+            ScheduledMeeting::of_properties(message.properties.as_deref()?).filter(|meeting| !meeting.cancelled)?;
+        Some(MeetingCard {
+            title: meeting.title.into(),
+            start_ms: meeting.start_ms,
+            end_ms: meeting.end_ms,
+            location: meeting.location.map(SharedString::from),
+            cancelled: self.cancelled.contains(&meeting.ical_uid),
+            place: self.place.clone(),
         })
     }
 
@@ -761,6 +818,7 @@ fn message_view(
         }
         Body::Deleted => muted(DELETED.into()),
         Body::Event(text) => muted(text.clone()),
+        Body::Meeting(card) => meeting_card(&item.id, card, palette, cycle),
         Body::Unsupported => muted(UNSUPPORTED.into()),
     };
     let (files, links) = match &item.body {
@@ -789,6 +847,102 @@ fn message_view(
         .children(files)
         .children(unshown)
         .into_any_element()
+}
+
+/// A meeting scheduled in the channel, as Teams' card draws it: the day's tile (its date over its month), the title, the
+/// day of the week and the times with the location, and "<team> > <channel>"; once cancelled, no tile, the title struck
+/// through and the date in full.
+fn meeting_card(id: &str, card: &MeetingCard, palette: Palette, cycle: HourCycle) -> AnyElement {
+    use chrono::TimeZone as _;
+    let local = |ms: i64| Local.timestamp_millis_opt(ms).single();
+    let (Some(start), Some(end)) = (local(card.start_ms), local(card.end_ms)) else {
+        return div().child(card.title.clone()).into_any_element();
+    };
+    let clock_of = |at: chrono::DateTime<Local>| at.format(cycle.time_of_day()).to_string();
+    let day = if card.cancelled {
+        start.format("%A, %b %-d").to_string()
+    } else {
+        start.format("%A").to_string()
+    };
+    let mut when = format!("{day}, {} - {}", clock_of(start), clock_of(end));
+    if let Some(location) = &card.location {
+        when.push_str("  |  ");
+        when.push_str(location);
+    }
+    let day_tile = div()
+        .w(gpui::px(36.0))
+        .flex_none()
+        .py_1()
+        .flex()
+        .flex_col()
+        .items_center()
+        .rounded_md()
+        .border_1()
+        .border_color(rgb(palette.border))
+        .child(
+            div()
+                .font_weight(gpui::FontWeight::BOLD)
+                .child(start.format("%-d").to_string()),
+        )
+        .child(div().text_xs().child(start.format("%b").to_string().to_uppercase()));
+    let title = div().font_weight(gpui::FontWeight::BOLD).child(card.title.clone());
+    let title = if card.cancelled { title.line_through() } else { title };
+    let place = card
+        .place
+        .as_ref()
+        .map(|(team, channel)| place_line(team, channel, palette));
+    let id = id.to_owned();
+    div()
+        .debug_selector(move || format!("channel-meeting-card-{id}"))
+        .p_3()
+        .flex()
+        .gap_3()
+        .rounded_lg()
+        .border_1()
+        .border_color(rgb(palette.border))
+        .bg(rgb(palette.background))
+        .children((!card.cancelled).then_some(day_tile))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .child(title)
+                .child(div().text_xs().child(when))
+                .children(place),
+        )
+        .into_any_element()
+}
+
+/// A meeting card's "<team> > <channel>": the team's tile, its name, a chevron and the channel's.
+fn place_line(team: &SharedString, channel: &SharedString, palette: Palette) -> gpui::Div {
+    div()
+        .flex()
+        .items_center()
+        .gap_1()
+        .text_xs()
+        .child(
+            div()
+                .size(gpui::px(14.0))
+                .rounded_sm()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(gpui::px(6.0))
+                .bg(rgb(crate::teams_list::team_colour(team)))
+                .text_color(rgb(palette.on_brand))
+                .child(crate::teams_list::initials(team)),
+        )
+        .child(team.clone())
+        .child(
+            crate::icons::Glyph::CHEVRON_RIGHT
+                .icon()
+                .size(gpui::px(12.0))
+                .text_color(rgb(palette.muted_foreground)),
+        )
+        .child(channel.clone())
 }
 
 impl gpui::EventEmitter<ChannelViewEvent> for ChannelView {}

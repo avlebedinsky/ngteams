@@ -382,6 +382,237 @@ impl Sealed for CreateEvent {
     }
 }
 
+/// The channel a channel's meeting is posted to and the team it reaches: the channel's thread and the team's mailbox
+/// (CSA's `smtpAddress`), whose group calendar holds the event.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct MeetingChannel {
+    /// The channel's thread (`19:…@thread.tacv2`).
+    pub channel: String,
+    /// The team's mail address.
+    pub mailbox: String,
+}
+
+impl MeetingChannel {
+    /// The channel with its mailbox trimmed; `None` for a channel that isn't a team's thread or a mailbox that isn't
+    /// one address (nothing that would read as another path segment or recipient).
+    #[must_use]
+    pub fn checked(self) -> Option<Self> {
+        let address = self.mailbox.trim();
+        let mailbox_reads = address
+            .split_once('@')
+            .is_some_and(|(local, domain)| !local.is_empty() && domain.contains('.') && !domain.contains('@'))
+            && !address.contains(['/', '?', '#', ' ', ',', ';', '"', '<', '>', '\\', '%']);
+        (teams_fence::is_team_thread_id(&self.channel) && mailbox_reads).then(|| Self {
+            mailbox: address.to_owned(),
+            channel: self.channel,
+        })
+    }
+}
+
+/// What a channel's meeting says when it has no text of its own (`emptyBodyPlaceholder`), as the web client's says it.
+const EMPTY_BODY: &str = "Scheduled a meeting";
+
+/// `POST v2.0/groups/smtp:<team mailbox>/calendars/default/events?isOnlineMeeting=true&shouldDecryptData=true` with the
+/// event's keys at the top level: a channel's meeting (its header's Schedule a meeting, `docs/protocol/calling.md`), a
+/// Teams meeting on the team's group calendar, its attendees the organizer, the team's mailbox and whoever the form
+/// invites, `skypeTeamsData` naming the channel, and with "Send personal invites" `inviteAllMembers: true`, as the web
+/// client sent it (2026-11-03). The service posts it to the channel. A [`WriteKind::Meeting`] on [`Scope::TeamCalendar`], each attendee but the team by address. The service
+/// answers `201` with `{"value": [<event>]}`, as a creation in the account's own calendar.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CreateChannelEvent {
+    draft: EventDraft,
+    channel: MeetingChannel,
+    /// "Send personal invites": the meeting goes to the personal calendars of the channel's members too
+    /// (`inviteAllMembers`).
+    personal_invites: bool,
+    transaction: String,
+}
+
+impl CreateChannelEvent {
+    /// The creation of `draft` (a Teams meeting whatever its switch says) in `channel`; `None` for a channel that isn't
+    /// a team's thread or a mailbox that isn't an address.
+    #[must_use]
+    pub fn new(draft: EventDraft, channel: MeetingChannel) -> Option<Self> {
+        Some(Self {
+            draft,
+            channel: channel.checked()?,
+            personal_invites: false,
+            transaction: transaction_id(),
+        })
+    }
+
+    /// The same creation, its invitations sent to the personal calendars of the channel's members too ("Send personal
+    /// invites", `inviteAllMembers: true`) when `personal_invites`.
+    #[must_use]
+    pub fn with_personal_invites(mut self, personal_invites: bool) -> Self {
+        self.personal_invites = personal_invites;
+        self
+    }
+
+    #[must_use]
+    pub fn draft(&self) -> &EventDraft {
+        &self.draft
+    }
+
+    #[must_use]
+    pub fn channel(&self) -> &MeetingChannel {
+        &self.channel
+    }
+
+    /// The draft as sent: a Teams meeting, the team's mailbox not among the form's attendees (it is listed once, as the
+    /// team).
+    fn sent(&self) -> EventDraft {
+        let mut draft = self.draft.clone();
+        draft.online = true;
+        draft
+            .attendees
+            .retain(|attendee| !attendee.address.trim().eq_ignore_ascii_case(&self.channel.mailbox));
+        draft
+    }
+}
+
+impl Mutating for CreateChannelEvent {
+    fn target(&self) -> Target {
+        Target::new(
+            WriteKind::Meeting,
+            Scope::TeamCalendar {
+                channel: self.channel.channel.clone(),
+                mailbox: self.channel.mailbox.to_ascii_lowercase(),
+            },
+        )
+        .with_added(self.sent().invited())
+    }
+}
+
+impl Sealed for CreateChannelEvent {
+    fn wire(&self) -> Option<Wire> {
+        let draft = self.sent();
+        let mut event = draft.fields()?;
+        event.remove("isAppointment");
+        if let Some(Value::Array(attendees)) = event.get_mut("attendees") {
+            attendees.push(json!({"address": self.channel.mailbox, "role": "User", "type": "Required"}));
+        }
+        let data = json!({"cid": self.channel.channel, "uid": draft.organizer.mri, "type": 0});
+        event.insert("skypeTeamsData".to_owned(), json!(data.to_string()));
+        event.insert("mailboxAddress".to_owned(), json!(self.channel.mailbox));
+        event.insert("sensitivityLabelId".to_owned(), json!(""));
+        if !event.contains_key("bodyContent") {
+            event.insert("emptyBodyPlaceholder".to_owned(), json!(EMPTY_BODY));
+        }
+        if self.personal_invites {
+            event.insert("inviteAllMembers".to_owned(), json!(true));
+        }
+        event.insert("clientOptimisticEventId".to_owned(), json!(self.transaction));
+        let group = format!("smtp:{}", self.channel.mailbox);
+        Some(Wire {
+            raw: None,
+            service: Service::MiddleTier,
+            method: Method::Post,
+            endpoint: Endpoint::new(["v2.0", "groups", group.as_str(), "calendars", "default", "events"])
+                .with_query("isOnlineMeeting", "true")
+                .with_query("shouldDecryptData", "true"),
+            headers: Vec::new(),
+            body: Some(Value::Object(event)),
+        })
+    }
+}
+
+/// What a channel meeting's cancellation posts to the channel, `{0}` its title (`cancellationMessageFormat`), as the web
+/// client's says it.
+const CANCELLED_FORMAT: &str = "The meeting \"{0}\" is cancelled";
+
+/// `PUT v2.0/groups/smtp:<team mailbox>/calendars/events/<iCalUid>/cancel` with `{"conversationId": <channel>,
+/// "messageId": <post>, "rootMessageId": <post>, "cancellationMessageFormat", "fetchEventContract": {"eventType",
+/// "eventTimeZone": "UTC", "startTime"}, "cancellationMessage"?: <note>}`: a channel's meeting cancelled by its
+/// organizer, as the web client's Cancel meeting sent it (2026-11-03, held back): everyone on the team told, the
+/// channel's post marked. A [`WriteKind::Meeting`] on [`Scope::TeamCalendar`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CancelChannelEvent {
+    channel: MeetingChannel,
+    ical_uid: String,
+    post: String,
+    event_type: String,
+    start: String,
+    message: Option<String>,
+}
+
+impl CancelChannelEvent {
+    /// The cancellation of the meeting `meeting` posted as `post` in `channel`, `message` sent with it; `None` for a
+    /// channel or mailbox [`MeetingChannel::checked`] refuses, or a post id that isn't digits.
+    #[must_use]
+    pub fn new(
+        meeting: &crate::ScheduledMeeting,
+        channel: MeetingChannel,
+        post: String,
+        message: Option<String>,
+    ) -> Option<Self> {
+        let channel = channel.checked()?;
+        let start = OffsetDateTime::from_unix_timestamp_nanos(i128::from(meeting.start_ms) * 1_000_000).ok()?;
+        let start = format!(
+            "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.000Z",
+            start.year(),
+            u8::from(start.month()),
+            start.day(),
+            start.hour(),
+            start.minute(),
+            start.second()
+        );
+        let digits = !post.is_empty() && post.chars().all(|c| c.is_ascii_digit());
+        digits.then(|| Self {
+            channel,
+            ical_uid: meeting.ical_uid.clone(),
+            post,
+            event_type: meeting.event_type.clone(),
+            start,
+            message: message.filter(|message| !message.trim().is_empty()),
+        })
+    }
+}
+
+impl Mutating for CancelChannelEvent {
+    fn target(&self) -> Target {
+        Target::new(
+            WriteKind::Meeting,
+            Scope::TeamCalendar {
+                channel: self.channel.channel.clone(),
+                mailbox: self.channel.mailbox.to_ascii_lowercase(),
+            },
+        )
+    }
+}
+
+impl Sealed for CancelChannelEvent {
+    fn wire(&self) -> Option<Wire> {
+        let mut body = json!({
+            "conversationId": self.channel.channel,
+            "messageId": self.post,
+            "rootMessageId": self.post,
+            "cancellationMessageFormat": CANCELLED_FORMAT,
+            "fetchEventContract": {"eventType": self.event_type, "eventTimeZone": "UTC", "startTime": self.start},
+        });
+        if let Some(message) = &self.message {
+            body["cancellationMessage"] = json!(message);
+        }
+        let group = format!("smtp:{}", self.channel.mailbox);
+        Some(Wire {
+            raw: None,
+            service: Service::MiddleTier,
+            method: Method::Put,
+            endpoint: Endpoint::new([
+                "v2.0",
+                "groups",
+                group.as_str(),
+                "calendars",
+                "events",
+                self.ical_uid.as_str(),
+                "cancel",
+            ]),
+            headers: Vec::new(),
+            body: Some(body),
+        })
+    }
+}
+
 /// `PUT v2.0/me/calendars/events/<id>?isOnlineMeeting=<bool>` with `{"updatedCalendarEvent": <event>}`: the event
 /// changed, its update sent to every attendee. The event is the one read with the draft over it
 /// ([`EventDraft::over`]); the service answers `204`.
@@ -593,6 +824,136 @@ mod tests {
         assert_eq!(classified(&cancel), Contact::Write(cancel.target()));
         let delete = DeleteEvent::new("AAMkEvent".to_owned()).expect("a delete");
         assert_eq!(classified(&delete), Contact::Write(delete.target()));
+    }
+
+    fn channel() -> MeetingChannel {
+        MeetingChannel {
+            channel: "19:0123456789abcdef0123456789abcdef@thread.tacv2".to_owned(),
+            mailbox: "lab-team@lab.example.com".to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_channel_s_meeting_is_written_to_its_team_s_calendar_as_the_web_client_writes_it() {
+        let mut only_organizer = draft();
+        only_organizer.attendees.clear();
+        only_organizer.online = false;
+        let create = CreateChannelEvent::new(only_organizer, channel()).expect("a creation");
+        assert_eq!(classified(&create), Contact::Write(create.target()));
+        let wire = create.wire().expect("a wire form");
+        assert_eq!(
+            wire.endpoint().segments(),
+            [
+                "v2.0",
+                "groups",
+                "smtp:lab-team@lab.example.com",
+                "calendars",
+                "default",
+                "events"
+            ]
+        );
+        assert_eq!(
+            wire.endpoint().query()[0],
+            ("isOnlineMeeting".to_owned(), "true".to_owned())
+        );
+        let event = wire.body().expect("a body");
+        assert!(event.get("calendarEvent").is_none() && event.get("isAppointment").is_none());
+        assert_eq!(event["attendees"][0]["type"], "Organizer");
+        assert_eq!(
+            event["attendees"][1],
+            json!({"address": "lab-team@lab.example.com", "role": "User", "type": "Required"})
+        );
+        assert_eq!(event["mailboxAddress"], "lab-team@lab.example.com");
+        assert_eq!(event["emptyBodyPlaceholder"], "Scheduled a meeting");
+        assert_eq!(event["joinMeetingLabel"], JOIN_LABEL);
+        let data: Value = serde_json::from_str(event["skypeTeamsData"].as_str().expect("text")).expect("json");
+        assert_eq!(
+            data,
+            json!({"cid": channel().channel, "uid": "8:orgid:00000000-0000-4000-8000-00000000000a", "type": 0})
+        );
+    }
+
+    #[test]
+    fn a_channel_s_meeting_adds_whom_it_invites_and_its_personal_invites() {
+        // whoever else the form invites is added, the team's mailbox never twice
+        let mut more = draft();
+        more.attendees.push(EventAttendee {
+            address: "LAB-TEAM@lab.example.com".to_owned(),
+            name: None,
+            mri: None,
+            required: true,
+        });
+        let create = CreateChannelEvent::new(more, channel()).expect("a creation");
+        assert_eq!(classified(&create), Contact::Write(create.target()));
+        let body = create.wire().expect("a wire form").body().cloned().expect("a body");
+        assert_eq!(body["attendees"].as_array().map(Vec::len), Some(3));
+        assert!(create.target().added().contains(&Mri::mail("bot-b@lab.example.com")));
+        assert!(body.get("inviteAllMembers").is_none());
+        // Send personal invites
+        let personal = CreateChannelEvent::new(draft(), channel())
+            .expect("a creation")
+            .with_personal_invites(true);
+        assert_eq!(classified(&personal), Contact::Write(personal.target()));
+        assert_eq!(
+            personal.wire().expect("a wire form").body().expect("a body")["inviteAllMembers"],
+            true
+        );
+    }
+
+    #[test]
+    fn a_channel_s_meeting_needs_a_channel_and_a_mailbox() {
+        let mut chat = channel();
+        chat.channel = "19:meeting_x@thread.v2".to_owned();
+        assert!(CreateChannelEvent::new(draft(), chat).is_none());
+        for mailbox in ["", "team", "a/b@lab.example.com", "x@y"] {
+            let mut odd = channel();
+            odd.mailbox = mailbox.to_owned();
+            assert!(CreateChannelEvent::new(draft(), odd).is_none(), "{mailbox}");
+        }
+    }
+
+    #[test]
+    fn a_channel_s_meeting_is_cancelled_on_its_team_s_calendar_as_the_web_client_cancels_it() {
+        let post = json!({"meeting": json!({
+            "@type": crate::SCHEDULED_MEETING_TYPE,
+            "meetingtitle": "lab channel meeting",
+            "scheduledmeetinginfo": {"startTime": "2026-11-03T02:00:00+00:00", "endTime": "2026-11-03T02:30:00+00:00",
+                "iCalUid": "040000008200e00074c5b7101a82e008", "eventType": "Single"},
+        }).to_string()});
+        let meeting = crate::ScheduledMeeting::of_properties(&post.to_string()).expect("a meeting");
+        let cancel = CancelChannelEvent::new(&meeting, channel(), "1793680050510".to_owned(), Some("note".to_owned()))
+            .expect("a cancellation");
+        assert_eq!(classified(&cancel), Contact::Write(cancel.target()));
+        let wire = cancel.wire().expect("a wire form");
+        assert_eq!(
+            wire.endpoint().segments(),
+            [
+                "v2.0",
+                "groups",
+                "smtp:lab-team@lab.example.com",
+                "calendars",
+                "events",
+                "040000008200e00074c5b7101a82e008",
+                "cancel"
+            ]
+        );
+        let body = wire.body().expect("a body");
+        assert_eq!(body["messageId"], "1793680050510");
+        assert_eq!(body["rootMessageId"], "1793680050510");
+        assert_eq!(body["fetchEventContract"]["startTime"], "2026-11-03T02:00:00.000Z");
+        assert_eq!(body["cancellationMessage"], "note");
+        // a post that isn't one, or no note
+        assert!(CancelChannelEvent::new(&meeting, channel(), "x".to_owned(), None).is_none());
+        let quiet = CancelChannelEvent::new(&meeting, channel(), "1".to_owned(), Some(" ".to_owned())).expect("one");
+        assert!(
+            quiet
+                .wire()
+                .expect("a wire form")
+                .body()
+                .expect("a body")
+                .get("cancellationMessage")
+                .is_none()
+        );
     }
 
     #[test]

@@ -522,8 +522,9 @@ impl LiveMembershipSource {
     /// checked ([`parse_team_thread`]), then its member list ([`parse_members`]), all within this source's deadline. A
     /// standard channel's thread (`threadType` `topic`, [`parse_channel_thread`]) named as the team is read as the team
     /// it names: the root its `spaceId` names is read in turn and must be a team's root naming the same group, and its
-    /// members are the channel's. A team named by its group is never followed so.
-    async fn team(&self, team: &str) -> Membership {
+    /// members are the channel's. A team named by its group is never followed so. With `mailbox` (a team's group calendar,
+    /// [`Scope::TeamCalendar`]) the root must be the team's own and name that mailbox ([`names_team_mailbox`]).
+    async fn team(&self, team: &str, mailbox: Option<&str>) -> Membership {
         let (thread, group) = if is_team_thread_id(team) {
             (team.to_owned(), None)
         } else if is_guid(team) {
@@ -536,7 +537,9 @@ impl LiveMembershipSource {
         };
         let read = async {
             let root = match self.team_root(&thread, group).await {
-                Ok(root) => root,
+                Ok((root, _)) if mailbox.is_none() => root,
+                Ok((root, answer)) if mailbox.is_some_and(|mailbox| names_team_mailbox(&answer, mailbox)) => root,
+                Ok(_) => return Membership::Partial(PartialReason::Unsupported),
                 Err(reason) => return Membership::Partial(reason),
             };
             match self.read_renewing(&root, ThreadRead::Members).await {
@@ -553,13 +556,13 @@ impl LiveMembershipSource {
     /// The root thread whose members are `thread`'s team's, read fresh: `thread` itself when it is a team's root naming
     /// `group` (when one is expected), or, when `thread` is a standard channel's (and no group is expected), the root its
     /// `spaceId` names, read in turn, which must be a team's root naming the channel's group. Either root's group is
-    /// learned ([`Self::learned`]).
-    async fn team_root(&self, thread: &str, group: Option<String>) -> Result<String, PartialReason> {
+    /// learned ([`Self::learned`]). The root's thread as read comes with it.
+    async fn team_root(&self, thread: &str, group: Option<String>) -> Result<(String, Value), PartialReason> {
         let answer = self.thread_answer(thread).await?;
         let channel = match parse_team_thread(thread, &answer) {
             Ok(named) if group.as_ref().is_none_or(|group| *group == named) => {
                 self.learn(named, thread);
-                return Ok(thread.to_owned());
+                return Ok((thread.to_owned(), answer));
             }
             Ok(_) => return Err(MALFORMED),
             Err(PartialReason::Unsupported) if group.is_none() => parse_channel_thread(thread, &answer)?,
@@ -570,7 +573,7 @@ impl LiveMembershipSource {
         match parse_team_thread(&root, &answer) {
             Ok(named) if named == group => {
                 self.learn(named, &root);
-                Ok(root)
+                Ok((root, answer))
             }
             Ok(_) => Err(MALFORMED),
             Err(reason) => Err(reason),
@@ -700,6 +703,7 @@ impl LiveMembershipSource {
             Scope::Team { id: team } | Scope::Channel { team, .. } => {
                 is_team_thread_id(team) || (is_guid(team) && self.learned(team).is_some())
             }
+            Scope::TeamCalendar { channel, mailbox } => is_team_thread_id(channel) && !mailbox.is_empty(),
             _ => false,
         }
     }
@@ -715,7 +719,10 @@ impl MembershipSource for LiveMembershipSource {
                     None => Membership::Partial(PartialReason::Unsupported),
                 },
                 Scope::Event { id } if !id.is_empty() => self.event(id).await,
-                Scope::Team { id: team } | Scope::Channel { team, .. } => self.team(team).await,
+                Scope::Team { id: team } | Scope::Channel { team, .. } => self.team(team, None).await,
+                Scope::TeamCalendar { channel, mailbox } if is_team_thread_id(channel) => {
+                    self.team(channel, Some(mailbox)).await
+                }
                 _ => Membership::Partial(PartialReason::Unsupported),
             }
         })
@@ -846,6 +853,26 @@ pub fn parse_team_thread(id: &str, thread: &Value) -> Result<String, PartialReas
         .filter(|group| is_guid(group))
         .map(str::to_ascii_lowercase)
         .ok_or(MALFORMED)
+}
+
+/// Whether a team's root thread as read (`GET v1/threads/<id>?view=msnp24Equivalent`) is the team's own and names
+/// `mailbox` as the team's mail address: `properties.teamSmtpAddress` or `properties.aadTeamSmtpAddress` (seen on a lab
+/// team's root, 2026-11-02) equal to it in any case, and no `properties.productThreadType` (a private channel's thread
+/// is a `space` of its own, `TeamsPrivateChannel`, whose members are only some of the team's).
+#[must_use]
+pub fn names_team_mailbox(thread: &Value, mailbox: &str) -> bool {
+    let Some(properties) = thread.get("properties").and_then(Value::as_object) else {
+        return false;
+    };
+    let mailbox = mailbox.trim();
+    !mailbox.is_empty()
+        && !properties.contains_key("productThreadType")
+        && ["teamSmtpAddress", "aadTeamSmtpAddress"].iter().any(|key| {
+            properties
+                .get(*key)
+                .and_then(Value::as_str)
+                .is_some_and(|named| named.trim().eq_ignore_ascii_case(mailbox))
+        })
 }
 
 /// Reads a chat service thread (`GET v1/threads/<id>?view=msnp24Equivalent`) as a standard channel's: the team's root

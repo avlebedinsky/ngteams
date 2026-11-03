@@ -51,6 +51,7 @@
 
 mod ams;
 mod calendar;
+mod channel_meeting;
 mod channel_read;
 pub mod chat;
 mod client;
@@ -81,6 +82,7 @@ pub use calendar::{
     EventRead, EventTime, FloatingTime, FullEvent, MAX_CALENDAR_WINDOW_MS, Response as EventResponse, ShowAs,
     TimeZoneSettings, join_url_chat, join_url_meeting,
 };
+pub use channel_meeting::{CANCELLED_MEETING_TYPE, SCHEDULED_MEETING_TYPE, ScheduledMeeting};
 pub use channel_read::{ChannelCreationStatus, TeamPeopleSearch, TeamPerson};
 pub use client::{Client, PostReadError, Response, Transport, WriteError};
 pub use emoticon::{MAX_ANIMATION, ReactionAnimation};
@@ -158,6 +160,6 @@ pub use write::{
     channel_error_code,
 };
 pub use write::{
-    CancelEvent, CreateEvent, CreateOnlineMeeting, DeleteEvent, EventAttendee, EventDraft, EventShowAs, Organizer,
-    UpdateEvent, ZonedTime,
+    CancelChannelEvent, CancelEvent, CreateChannelEvent, CreateEvent, CreateOnlineMeeting, DeleteEvent, EventAttendee,
+    EventDraft, EventShowAs, MeetingChannel, Organizer, UpdateEvent, ZonedTime,
 };

@@ -349,6 +349,66 @@ impl ChannelMeetup {
             },
         })
     }
+
+    /// The meeting that runs in a channel as its posts tell it, newest first (`messages`, a page of the channel's own
+    /// messages): its newest call start (`Event/Call`, `<callEventType>callStarted`) whose call (`<callId>`) no newer
+    /// post ends, the post's id its message, its `<conversationUrl>` where the join goes, and its organizer and tenant
+    /// from the post's `properties.meeting` (seen 2026-11-03: a Meet now in a channel other than General, whose
+    /// `activeMeetups` CSA gave the meeting's organizer but not b, who had never opened the channel; b's web client
+    /// joins by the post's card). `None` when no such post reads.
+    #[must_use]
+    pub fn of_posts(messages: &[crate::chat::Message]) -> Option<Self> {
+        let mut ended: Vec<&str> = Vec::new();
+        for message in messages {
+            if message.message_type.as_str() != "Event/Call" {
+                continue;
+            }
+            let content = message.content.as_str();
+            let call = xml_text(content, "callId");
+            match xml_text(content, "callEventType") {
+                Some("callEnded") => ended.extend(call),
+                Some("callStarted") if call.is_none_or(|call| !ended.contains(&call)) => {
+                    return Self::of_post(message);
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    fn of_post(message: &crate::chat::Message) -> Option<Self> {
+        let link = xml_text(&message.content, "conversationUrl")?.replace("&amp;", "&");
+        let meeting = match message.properties.get("meeting")? {
+            Value::String(text) => serde_json::from_str::<Value>(text).ok()?,
+            object @ Value::Object(_) => object.clone(),
+            _ => return None,
+        };
+        let text = |key: &str| {
+            meeting
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+        };
+        (!message.id.is_empty()).then_some(())?;
+        Some(Self {
+            message_id: message.id.clone(),
+            conversation: crate::CallLink::parse(&link)?,
+            meeting: crate::MeetingInfo {
+                organizer_id: text("organizerId")?,
+                tenant_id: text("tenantId")?,
+            },
+        })
+    }
+}
+
+/// The text of the first `<tag>…</tag>` in `content`, trimmed; `None` when there is none or it is empty.
+fn xml_text<'c>(content: &'c str, tag: &str) -> Option<&'c str> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let start = content.find(&open)? + open.len();
+    let end = start + content[start..].find(&close)?;
+    Some(content[start..end].trim()).filter(|text| !text.is_empty())
 }
 
 impl Read for CsaTeams {

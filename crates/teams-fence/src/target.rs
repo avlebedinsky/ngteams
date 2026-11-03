@@ -218,6 +218,11 @@ pub enum Scope {
     /// A calendar event of the account's calendar, by its id (`objectId`): a meeting whose attendees and organizer,
     /// read fresh from the event, are its members (each by address, [`Mri::mail`]).
     Event { id: String },
+    /// A team's group calendar, by a channel of the team (`channel`, the channel the event is posted to) and the team's
+    /// mailbox (`mailbox`, the address the calendar is reached by): an event there reaches everyone on the team. Judged as
+    /// [`Scope::Team`] by the channel's team, read fresh from its thread, whose root must name `mailbox` as its own
+    /// (`teamSmtpAddress`), so the write can't name one team's channel and another group's mailbox.
+    TeamCalendar { channel: String, mailbox: String },
     /// Something the write creates: a new chat, call or meeting. It has no members to fetch yet: its participants are
     /// exactly the target's added participants. Only kinds that [create a target](WriteKind::creates_target) may use
     /// it; the fence denies any other kind on `New`.
@@ -236,6 +241,7 @@ impl fmt::Display for Scope {
             Self::Team { id } => write!(f, "team {id}"),
             Self::Call { id } => write!(f, "call {id}"),
             Self::Event { id } => write!(f, "event {id}"),
+            Self::TeamCalendar { channel, .. } => write!(f, "the group calendar of channel {channel}'s team"),
             Self::CallOperation { operation, url, .. } => write!(f, "{operation} on the call at {}", log_url(url)),
             Self::New => f.write_str("a new target"),
             Self::Account { mri } => write!(f, "account {mri}"),
@@ -253,6 +259,11 @@ impl fmt::Debug for Scope {
                 .field("channel", channel)
                 .finish(),
             Self::Team { id } => f.debug_struct("Team").field("id", id).finish(),
+            Self::TeamCalendar { channel, mailbox } => f
+                .debug_struct("TeamCalendar")
+                .field("channel", channel)
+                .field("mailbox", mailbox)
+                .finish(),
             Self::Call { id } => f.debug_struct("Call").field("id", id).finish(),
             Self::CallOperation {
                 operation,

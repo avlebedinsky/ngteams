@@ -929,3 +929,75 @@ fn the_switcher_lists_the_channels_under_the_chats_and_opens_one_read_only() {
     );
     assert!(!written.text().contains("Made-up"), "the trace holds a name");
 }
+
+/// A post of a meeting scheduled in the channel (or its cancellation's reply), synthetic in the shape seen 2026-11-03.
+fn meeting_post(id: &str, title: &str, uid: &str, cancelled: bool) -> Message {
+    let kind = if cancelled { "Cancelled" } else { "Created" };
+    let meeting = serde_json::json!({
+        "@type": format!("http://schema.skype.com/ScheduledMeeting{kind}"),
+        "meetingtitle": title,
+        "scheduledmeetinginfo": {"startTime": "2026-11-03T05:00:00+00:00", "endTime": "2026-11-03T05:30:00+00:00",
+            "location": "Microsoft Teams Meeting", "iCalUid": uid, "eventType": "Single", "isCancelled": cancelled},
+        "organizerId": "00000000-0000-4000-8000-00000000000a",
+    });
+    let mut message = message(
+        id,
+        LAB_B,
+        if cancelled {
+            "The meeting is cancelled"
+        } else {
+            "Scheduled a meeting"
+        },
+    );
+    message.properties = Some(serde_json::json!({ "meeting": meeting.to_string() }).to_string());
+    message
+}
+
+#[test]
+fn a_meeting_scheduled_in_the_channel_is_drawn_as_its_card_cancelled_once_its_reply_says_so() {
+    let rig = rig();
+    *rig.core.teams.lock().unwrap() = Some(teams());
+    let messages = vec![
+        meeting_post("1760000400200", "Planning", "0a0b", true),
+        meeting_post("1760000400100", "Review", "0c0d", false),
+        meeting_post(POST, "Planning", "0a0b", false),
+    ];
+    let roots = [
+        ("1760000400200", POST),
+        ("1760000400100", "1760000400100"),
+        (POST, POST),
+    ]
+    .map(|(message, root)| (message.to_owned(), root.to_owned()))
+    .to_vec();
+    rig.core.messages.lock().unwrap().insert(CHANNEL.to_owned(), messages);
+    rig.core.roots.lock().unwrap().insert(CHANNEL.to_owned(), roots);
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::new(Written::default())));
+    click(cx, "channel-row-1");
+    let view: Entity<ChannelView> = cx.update(|_, cx| shell.read(cx).channel().cloned().expect("a channel view"));
+    let cards: Vec<(String, bool, bool)> = cx.update(|_, cx| {
+        view.read(cx)
+            .threads()
+            .iter()
+            .filter_map(|thread| thread.post.as_ref())
+            .filter_map(|post| match &post.body {
+                teams_ui::channel_view::Body::Meeting(card) => {
+                    Some((card.title.to_string(), card.cancelled, card.place.is_some()))
+                }
+                _ => None,
+            })
+            .collect()
+    });
+    assert_eq!(
+        cards,
+        [("Planning".to_owned(), true, true), ("Review".to_owned(), false, true)]
+    );
+    for selector in [
+        format!("channel-meeting-card-{POST}"),
+        "channel-meeting-card-1760000400100".to_owned(),
+    ] {
+        assert!(bounds(cx, &selector).is_some(), "{selector} is drawn");
+    }
+    // the cancellation's reply is its text, never a card
+    let reply = cx.update(|_, cx| view.read(cx).threads()[0].replies[0].body.clone());
+    assert!(matches!(reply, teams_ui::channel_view::Body::Text(_)));
+}

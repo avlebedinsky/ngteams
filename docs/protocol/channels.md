@@ -103,7 +103,11 @@ A channel is a conversation of the chat service, read with the same reads as a c
   after the engine's retry wait. `chats`, `users` and the rest aren't read: the chat list stays the chat service's;
   of `conversationFolders` only the favourites are ([chat.md](chat.md#favorites-empty-chats-and-the-chat-list)).
   `teams-core` reads it in the background when a view asks and the stored list is missing or older than an hour
-  (`TEAMS_MAX_AGE`), keeps it in the store whole and tells a change as `Event::Teams`.
+  (`TEAMS_MAX_AGE`), keeps it in the store whole and tells a change as `Event::Teams`. It reads it again at once when
+  a read or a delivery brings a team's thread no stored team names (the account was added to a team; once per thread a
+  run), or a team's activity is delivered on its thread (`ThreadActivity/…`: a channel made comes to everyone on the
+  team as `SpaceThreadChannelAdded`, seen 2026-11-03): without it a team the account was just added to, or its new
+  channel, stayed missing for up to an hour.
 - **A channel's posts**: the chat service's message reads, as a chat's (`ChatReads::messages` and its links), on demand
   when the channel is opened (`EngineRequests::sync_conversation`), older pages on "Load older posts". A channel the
   store doesn't know is read as a thread first (`topic` and `space` are both a channel, read-only). Each stored

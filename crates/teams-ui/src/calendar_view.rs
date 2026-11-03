@@ -352,6 +352,22 @@ impl CalendarView {
         );
     }
 
+    /// Opens the scheduling form on a new meeting in a channel (its header's Schedule a meeting), at the next half hour:
+    /// a Teams meeting on its team's calendar, posted to the channel; once sent, the calendar reads its days again.
+    pub fn schedule_in_channel(&mut self, place: crate::event_form::MeetingPlace, cx: &mut Context<Self>) {
+        let seed = crate::event_form::Seed::InChannel {
+            slot: self.next_slot(),
+            place,
+        };
+        crate::event_form::open(
+            Arc::clone(&self.core),
+            Arc::clone(&self.trace),
+            seed,
+            Self::saved(cx),
+            cx,
+        );
+    }
+
     /// Opens the scheduling form on the event `id`, read whole first (its card's Edit, a double click on it).
     pub fn edit_event(&mut self, id: String, cx: &mut Context<Self>) {
         let reply = self.core.calendar_event(id);

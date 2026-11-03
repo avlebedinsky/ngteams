@@ -2,7 +2,9 @@
 //! calendar created, changed, cancelled or deleted, each a [`WriteKind::Meeting`] judged by the event's attendees, the
 //! empty online meeting the web client makes before it creates a Teams meeting, and a meeting's options saved by its
 //! organizer naming nobody (who bypasses the lobby, who presents: `docs/protocol/calling.md`, "The lobby"), which
-//! reach nobody.
+//! reach nobody. A channel's meeting, created on its team's group calendar or cancelled there
+//! (`docs/protocol/calling.md`, "Schedule a meeting"), reaches everyone on the team: a [`WriteKind::Meeting`] on
+//! [`Scope::TeamCalendar`], judged by the team's members.
 //!
 //! Every row reads the middle tier's path after its partition (`/api/mt/part/<partition>/…`), the query keys exactly
 //! and the body strictly ([`strict_json`]); anything else on the middle tier's calendar paths stays
@@ -52,6 +54,8 @@ pub(super) fn classify(request: &Parsed<'_>) -> Option<Contact> {
     let rest: Vec<&str> = rest.iter().map(String::as_str).collect();
     let contact = match (request.method.as_str(), rest.as_slice()) {
         ("POST", ["v2.0", "me", "calendars", "default", "events"]) => create(request),
+        ("POST", ["v2.0", "groups", group, "calendars", "default", "events"]) => team_event(request, group),
+        ("PUT", ["v2.0", "groups", group, "calendars", "events", id, "cancel"]) => team_cancel(request, group, id),
         ("PUT", ["v2.0", "me", "calendars", "events", id]) => update(request, id),
         ("PUT", ["v2.0", "me", "calendars", "events", id, "cancel"]) => cancel(request, id),
         ("DELETE", ["v2.0", "me", "calendars", "events", id]) => delete(request, id),
@@ -147,6 +151,118 @@ fn create(request: &Parsed<'_>) -> Option<Contact> {
     Some(Contact::Write(
         Target::new(WriteKind::Meeting, Scope::New).with_added(attendees),
     ))
+}
+
+/// `POST v2.0/groups/smtp:<team mailbox>/calendars/default/events?isOnlineMeeting=<bool>&shouldDecryptData=<bool>` with
+/// the event's keys at the top level: a channel's meeting, as the channel's Schedule a meeting sends it (seen 2026-11-03,
+/// `docs/protocol/calling.md`), posted to the team's group calendar, which reaches everyone on the team. A
+/// [`WriteKind::Meeting`] on [`Scope::TeamCalendar`]: the channel its `skypeTeamsData` names (`cid`, a team's or
+/// channel's thread) and the mailbox the path names, which `mailboxAddress` must name again; any attendee other than
+/// the organizer and the team's mailbox is added. Its "Send personal invites" (`inviteAllMembers`, a boolean) puts the
+/// meeting in the personal calendars of the channel's members too: the same people the team's calendar reaches, so the
+/// same target. One naming its group by anything but its mail address, a channel the fence can't read as a team's
+/// thread, or anyone else's audience ([`OTHER_AUDIENCES`]) is unreadable.
+fn team_event(request: &Parsed<'_>, group: &str) -> Option<Contact> {
+    let mailbox = group.strip_prefix("smtp:").filter(|address| is_address(address))?;
+    if !boolean_query(request, &["isOnlineMeeting", "shouldDecryptData"]) {
+        return None;
+    }
+    let mut event = object_body(request)?;
+    match optional(&event, "inviteAllMembers").ok()? {
+        None | Some(Value::Bool(_)) => {}
+        Some(_) => return None,
+    }
+    // the channel's members are the team's: no audience beyond the target's
+    event.remove("inviteAllMembers");
+    // the personal calendar's wrappers have no place here: the event's keys are the body's own
+    for wrapper in ["calendarEvent", "schedulingServiceEvent", "meetingOptions"] {
+        if event.contains_key(wrapper) {
+            return None;
+        }
+    }
+    match optional(&event, "mailboxAddress").ok()? {
+        Some(Value::String(named)) if named.eq_ignore_ascii_case(mailbox) => {}
+        _ => return None,
+    }
+    let channel = team_channel(&event)?;
+    let team = Mri::mail(mailbox);
+    let added: Vec<Mri> = attendees(&event)?.into_iter().filter(|mri| *mri != team).collect();
+    Some(Contact::Write(
+        Target::new(
+            WriteKind::Meeting,
+            Scope::TeamCalendar {
+                channel,
+                mailbox: mailbox.to_ascii_lowercase(),
+            },
+        )
+        .with_added(added),
+    ))
+}
+
+/// The keys of a channel meeting's cancellation (seen 2026-11-03, held back): its channel and post, the line the channel
+/// shows, how the event is found, and the note for everyone.
+const TEAM_CANCEL_KEYS: [&str; 6] = [
+    "conversationId",
+    "messageId",
+    "rootMessageId",
+    "cancellationMessageFormat",
+    "fetchEventContract",
+    "cancellationMessage",
+];
+
+/// `PUT v2.0/groups/smtp:<team mailbox>/calendars/events/<id>/cancel` with `{conversationId, messageId, rootMessageId,
+/// cancellationMessageFormat, fetchEventContract, cancellationMessage?}`: a channel's meeting cancelled by its organizer
+/// (its event on the team's calendar, told to everyone on the team, its channel's post marked). A
+/// [`WriteKind::Meeting`] on [`Scope::TeamCalendar`]: the channel `conversationId` names (a team's or channel's thread)
+/// and the mailbox the path names. Any other key, query or form is unreadable.
+fn team_cancel(request: &Parsed<'_>, group: &str, id: &str) -> Option<Contact> {
+    let mailbox = group.strip_prefix("smtp:").filter(|address| is_address(address))?;
+    if id.is_empty() || !request.query.is_empty() {
+        return None;
+    }
+    let body = object_body(request)?;
+    only_keys(&body, &TEAM_CANCEL_KEYS)?;
+    let channel = match optional(&body, "conversationId").ok()? {
+        Some(Value::String(channel)) if crate::membership::is_team_thread_id(channel) => channel.clone(),
+        _ => return None,
+    };
+    for key in [
+        "messageId",
+        "rootMessageId",
+        "cancellationMessageFormat",
+        "cancellationMessage",
+    ] {
+        match optional(&body, key).ok()? {
+            None | Some(Value::Null | Value::String(_)) => {}
+            Some(_) => return None,
+        }
+    }
+    match optional(&body, "fetchEventContract").ok()? {
+        None | Some(Value::Null) => {}
+        Some(Value::Object(contract)) => only_keys(contract, &["eventType", "eventTimeZone", "startTime"])?,
+        Some(_) => return None,
+    }
+    Some(Contact::Write(Target::new(
+        WriteKind::Meeting,
+        Scope::TeamCalendar {
+            channel,
+            mailbox: mailbox.to_ascii_lowercase(),
+        },
+    )))
+}
+
+/// The channel a team event's `skypeTeamsData` names: a JSON text whose `cid` is a team's or channel's thread id.
+fn team_channel(event: &Map<String, Value>) -> Option<String> {
+    let Some(Value::String(data)) = optional(event, "skypeTeamsData").ok()? else {
+        return None;
+    };
+    let Value::Object(data) = strict_json(data.as_bytes())? else {
+        return None;
+    };
+    match optional(&data, "cid").ok()? {
+        Some(Value::String(cid)) if crate::membership::is_team_thread_id(cid) => Some(cid.clone()),
+        _ => None,
+    }
 }
 
 /// `PUT v2.0/me/calendars/events/<id>?isOnlineMeeting=<bool>` with `{updatedCalendarEvent}`: the event changed, its

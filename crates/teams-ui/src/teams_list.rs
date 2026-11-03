@@ -410,7 +410,7 @@ pub fn initials(name: &str) -> String {
 }
 
 /// The colour of a team's initials: one of the service's by its name, the same for a name each time.
-fn team_colour(name: &str) -> u32 {
+pub(crate) fn team_colour(name: &str) -> u32 {
     const COLOURS: [u32; 8] = [
         0x0020_8c5c,
         0x0014_8a8f,

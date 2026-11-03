@@ -14,8 +14,8 @@ mod team;
 
 pub use availability::{ForceAvailability, ManualAvailability, SetEndpointAvailability};
 pub use calendar::{
-    CancelEvent, CreateEvent, CreateOnlineMeeting, DeleteEvent, EventAttendee, EventDraft, EventShowAs, Organizer,
-    UpdateEvent, ZonedTime,
+    CancelChannelEvent, CancelEvent, CreateChannelEvent, CreateEvent, CreateOnlineMeeting, DeleteEvent, EventAttendee,
+    EventDraft, EventShowAs, MeetingChannel, Organizer, UpdateEvent, ZonedTime,
 };
 pub use call::{
     AcceptCall, AcceptParts, AcknowledgeAcceptance, AcknowledgeMediaAnswer, AddParts, AddToCall, AnswerMedia,

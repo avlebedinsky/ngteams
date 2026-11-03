@@ -93,8 +93,8 @@ pub use teams::{ChatListing, READING_TEAMS, TEAMS_MAX_AGE, TEAMS_RETRY, TeamsRea
 pub use teams_call::{CallError, CallId, End, Identity, RemoteEnd};
 pub use teams_proto::{
     Attendee, CalendarEvent, ChannelMeetup, EventAttendee, EventDraft, EventKind, EventResponse, EventShowAs,
-    EventTime, FloatingTime, FullEvent, MeetingCode, MeetingDetails, MeetingInfo, Organizer, ShowAs, ZonedTime,
-    join_url_chat,
+    EventTime, FloatingTime, FullEvent, MeetingChannel, MeetingCode, MeetingDetails, MeetingInfo, Organizer,
+    ScheduledMeeting, ShowAs, ZonedTime, join_url_chat,
 };
 /// How a registration of the push channel's endpoint went, as [`Event::Registration`] tells it.
 pub use teams_trouter::RegistrationReport;

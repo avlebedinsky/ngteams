@@ -1999,3 +1999,255 @@ fn the_accounts_own_view_of_a_team_reaches_nobody() {
         Contact::None
     );
 }
+
+/// A team's made-up mailbox, and the URL its group calendar's events are created at.
+const TEAM_MAILBOX: &str = "lab-team@lab.example.com";
+/// The organizer, who is added as any attendee is.
+const ORGANIZER: &str = "bot-a@lab.example.com";
+
+fn team_event_url(group: &str) -> String {
+    format!(
+        "https://teams.cloud.microsoft/api/mt/part/amer-03/v2.0/groups/{group}/calendars/default/events?isOnlineMeeting=true&shouldDecryptData=true"
+    )
+}
+
+/// A channel's meeting as its Schedule a meeting sent it (2026-11-03, held back), every value made up: the event's keys
+/// at the top level, the organizer and the team's mailbox its attendees, the channel in `skypeTeamsData`.
+fn team_event() -> Value {
+    serde_json::json!({
+        "attendees": [
+            {"address": "bot-a@lab.example.com", "mri": format!("8:orgid:{GUID_A}"), "name": "Bot A",
+             "role": "Admin", "type": "Organizer"},
+            {"address": TEAM_MAILBOX, "role": "User", "type": "Required"},
+        ],
+        "clientOptimisticEventId": "1-2-3-4-5",
+        "doNotForward": false,
+        "emptyBodyPlaceholder": "Scheduled a meeting",
+        "endTime": "2026-11-03T07:30:00+03:00",
+        "eventTimeZone": "TurkeySt",
+        "eventType": "Single",
+        "isAllDayEvent": false,
+        "isOrganizer": true,
+        "isPrivate": false,
+        "isReminderSet": true,
+        "isResponseRequested": true,
+        "joinMeetingLabel": "Join Microsoft Teams Online Meeting",
+        "location": "",
+        "mailboxAddress": TEAM_MAILBOX,
+        "meetingTemplateId": "default",
+        "organizerAddress": "bot-a@lab.example.com",
+        "organizerName": "Bot A",
+        "primarySpokenLanguage": "en-us",
+        "reminderMinutesBeforeStart": 15,
+        "sensitivityLabelId": "",
+        "showAs": "Busy",
+        "skypeTeamsData": format!(r#"{{"cid":"{TEAM}","uid":"8:orgid:{GUID_A}","type":0}}"#),
+        "startTime": "2026-11-03T07:00:00+03:00",
+        "subject": "lab channel meeting",
+        "utcOffset": 180,
+    })
+}
+
+fn on_team_calendar(added: &[&str]) -> Contact {
+    Contact::Write(
+        Target::new(
+            WriteKind::Meeting,
+            Scope::TeamCalendar {
+                channel: TEAM.to_owned(),
+                mailbox: TEAM_MAILBOX.to_owned(),
+            },
+        )
+        .with_added(added.iter().map(|address| Mri::mail(address))),
+    )
+}
+
+#[test]
+fn a_channel_s_scheduled_meeting_is_a_meeting_on_its_team_s_group_calendar() {
+    let url = team_event_url(&format!("smtp:{TEAM_MAILBOX}"));
+    let body = team_event().to_string();
+    assert_eq!(
+        verdict("POST", &url, Some(body.as_bytes())),
+        on_team_calendar(&[ORGANIZER])
+    );
+    // the mailbox in another case is the same team's
+    let upper = team_event_url(&format!("smtp:{}", TEAM_MAILBOX.to_uppercase()));
+    assert_eq!(
+        verdict("POST", &upper, Some(body.as_bytes())),
+        on_team_calendar(&[ORGANIZER])
+    );
+    // Send personal invites puts it in the calendars of the channel's members: the team the target judges
+    for personal in [true, false] {
+        let mut body = team_event();
+        body["inviteAllMembers"] = personal.into();
+        assert_eq!(
+            verdict("POST", &url, Some(body.to_string().as_bytes())),
+            on_team_calendar(&[ORGANIZER]),
+            "{personal}"
+        );
+    }
+    // anyone else it invites is added
+    let mut invites = team_event();
+    if let Some(list) = invites["attendees"].as_array_mut() {
+        list.push(serde_json::json!({"address": "bot-b@lab.example.com", "type": "Required"}));
+    }
+    assert_eq!(
+        verdict("POST", &url, Some(invites.to_string().as_bytes())),
+        on_team_calendar(&[ORGANIZER, "bot-b@lab.example.com"])
+    );
+}
+
+fn remove_key(body: &mut Value, key: &str) {
+    if let Some(map) = body.as_object_mut() {
+        map.remove(key);
+    }
+}
+
+#[test]
+fn a_channel_s_scheduled_meeting_in_any_other_form_stays_unreadable() {
+    let url = team_event_url(&format!("smtp:{TEAM_MAILBOX}"));
+    let edits: Vec<(&str, BodyEdit)> = vec![
+        (
+            "another mailbox named",
+            Box::new(|body| body["mailboxAddress"] = "other@lab.example.com".into()),
+        ),
+        ("no mailbox named", Box::new(|body| remove_key(body, "mailboxAddress"))),
+        ("no channel", Box::new(|body| remove_key(body, "skypeTeamsData"))),
+        (
+            "a chat for a channel",
+            Box::new(|body| body["skypeTeamsData"] = r#"{"cid":"19:meeting_x@thread.v2","type":0}"#.into()),
+        ),
+        (
+            "the channel not as text",
+            Box::new(|body| body["skypeTeamsData"] = serde_json::json!({ "cid": TEAM })),
+        ),
+        (
+            "the personal calendar's wrapper",
+            Box::new(|body| *body = serde_json::json!({ "calendarEvent": body.clone() })),
+        ),
+        (
+            "everyone else's audience",
+            Box::new(|body| body["parentConversationId"] = "19:meeting_x@thread.v2".into()),
+        ),
+        (
+            "personal invites not as a switch",
+            Box::new(|body| body["inviteAllMembers"] = "yes".into()),
+        ),
+        (
+            "personal invites in another case",
+            Box::new(|body| body["InviteAllMembers"] = true.into()),
+        ),
+        (
+            "an attendee without an address",
+            Box::new(|body| {
+                if let Some(list) = body["attendees"].as_array_mut() {
+                    list.push(serde_json::json!({"type": "Required"}));
+                }
+            }),
+        ),
+    ];
+    for (name, edit) in edits {
+        let mut body = team_event();
+        edit(&mut body);
+        assert_eq!(
+            verdict("POST", &url, Some(body.to_string().as_bytes())),
+            Contact::Unreadable,
+            "{name}"
+        );
+    }
+    let body = team_event().to_string();
+    for url in [
+        // the group by its id, not its mail address
+        team_event_url(GROUP_ID),
+        team_event_url("smtp:not-an-address"),
+        format!(
+            "https://teams.cloud.microsoft/api/mt/part/amer-03/v2.0/groups/smtp:{TEAM_MAILBOX}/calendars/default/events?isOnlineMeeting=true"
+        ),
+    ] {
+        assert_eq!(
+            verdict("POST", &url, Some(body.as_bytes())),
+            Contact::Unreadable,
+            "{url}"
+        );
+    }
+}
+
+fn team_cancel_url(group: &str, tail: &str) -> String {
+    format!(
+        "https://teams.cloud.microsoft/api/mt/part/amer-03/v2.0/groups/{group}/calendars/events/040000008200e00074c5b7101a82e008/cancel{tail}"
+    )
+}
+
+/// A channel meeting's cancellation as its Cancel meeting sent it (2026-11-03, held back), every value made up.
+fn team_cancel() -> Value {
+    serde_json::json!({
+        "conversationId": TEAM,
+        "messageId": "1793680050510",
+        "rootMessageId": "1793680050510",
+        "cancellationMessageFormat": "The meeting \"{0}\" is cancelled",
+        "fetchEventContract": {"eventType": "Single", "eventTimeZone": "UTC", "startTime": "2026-11-03T02:00:00.000Z"},
+        "cancellationMessage": "lab note",
+    })
+}
+
+#[test]
+fn a_channel_s_meeting_cancelled_is_a_meeting_on_its_team_s_group_calendar() {
+    let url = team_cancel_url(&format!("smtp:{TEAM_MAILBOX}"), "");
+    let expected = Contact::Write(Target::new(
+        WriteKind::Meeting,
+        Scope::TeamCalendar {
+            channel: TEAM.to_owned(),
+            mailbox: TEAM_MAILBOX.to_owned(),
+        },
+    ));
+    assert_eq!(
+        verdict("PUT", &url, Some(team_cancel().to_string().as_bytes())),
+        expected
+    );
+    let mut no_note = team_cancel();
+    remove_key(&mut no_note, "cancellationMessage");
+    assert_eq!(verdict("PUT", &url, Some(no_note.to_string().as_bytes())), expected);
+}
+
+#[test]
+fn a_channel_s_meeting_cancelled_in_any_other_form_stays_unreadable() {
+    let url = team_cancel_url(&format!("smtp:{TEAM_MAILBOX}"), "");
+    let edits: Vec<(&str, BodyEdit)> = vec![
+        ("no channel", Box::new(|body| remove_key(body, "conversationId"))),
+        (
+            "a chat for a channel",
+            Box::new(|body| body["conversationId"] = "19:meeting_x@thread.v2".into()),
+        ),
+        (
+            "a key no capture showed",
+            Box::new(|body| body["attendees"] = serde_json::json!([])),
+        ),
+        (
+            "more in how the event is found",
+            Box::new(|body| body["fetchEventContract"]["attendees"] = serde_json::json!([])),
+        ),
+        (
+            "a note that isn't text",
+            Box::new(|body| body["cancellationMessage"] = 1.into()),
+        ),
+    ];
+    for (name, edit) in edits {
+        let mut body = team_cancel();
+        edit(&mut body);
+        assert_eq!(
+            verdict("PUT", &url, Some(body.to_string().as_bytes())),
+            Contact::Unreadable,
+            "{name}"
+        );
+    }
+    let body = team_cancel().to_string();
+    for url in [
+        team_cancel_url(GROUP_ID, ""),
+        team_cancel_url(&format!("smtp:{TEAM_MAILBOX}"), "?notify=true"),
+    ] {
+        assert_eq!(
+            verdict("PUT", &url, Some(body.as_bytes())),
+            Contact::Unreadable,
+            "{url}"
+        );
+    }
+}

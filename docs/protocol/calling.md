@@ -475,8 +475,19 @@ new `adHocMeeting` conversation, the entry connects, the service posts the meeti
 `callStarted`, its content naming the `conversationUrl`; the web client draws it as the card "Meeting in "<channel>"")
 and a's CSA read names it under the channel's `activeMeetups` within seconds, so the header shows Join once the account
 left while it still runs. The web client's start with media instead (what it sends when its subscription fails) made a
-`groupCall` conversation, which the native client no longer sends. b's native Join couldn't be seen in that run: b's CSA
-answer still listed teams deleted hours before and not the new one, so it named no meeting there.
+`groupCall` conversation, which the native client no longer sends.
+
+**b joining it** (seen live 2026-11-03, a team of the lab's own with a and b, a channel other than General made after b
+was added): b's own CSA read lists the channel but names no meeting under it (no `activeMeetups`) while a's Meet now
+runs, and keeps not naming it: CSA tells a channel's running meeting only to some of the team (b had never opened the
+channel). The channel's posts tell it to everyone: the call's `Event/Call` post (`<callEventType>callStarted`, its
+`<conversationUrl>` and `<callId>`, `properties.meeting` naming the organizer and tenant), which b's web client joins
+from by its card. So the native client looks at the channel's newest posts when CSA names none
+(`ChannelMeetup::of_posts`: the newest start no newer `callEnded` of the same `callId` follows), and b's native Join
+went in (the join judged by the channel's team, a in the call). What looked like a stale CSA answer in the first run was
+b's stored teams list, read only when it is an hour old: the engine now reads the teams again when a team's thread it
+doesn't name comes, or a team's activity (`ThreadActivity/…`, a channel made: `SpaceThreadChannelAdded`) is delivered
+([channels.md](channels.md#what-the-native-client-reads)).
 `teams-headless <alias> channel-meeting <channel> [--join]` does the same from the command line. The pre-join's subject
 is shown, not edited: what an edited subject sends wasn't captured.
 
@@ -486,9 +497,42 @@ the online meeting as any form does, then posts the event to the team's group ca
 …/api/mt/part/<partition>/v2.0/groups/smtp:<team mailbox>/calendars/default/events?isOnlineMeeting=true&shouldDecryptData=true`
 with the creation's event keys at the top level (no `calendarEvent` wrapper), `attendees` the organizer and the team's
 mailbox (`{"address": <team mailbox>, "role": "User", "type": "Required"}`), `mailboxAddress` the team's mailbox, and
-`skypeTeamsData` naming the channel (`{"cid": <channel>, "uid": <organizer MRI>, "type": 0}`). The fence maps no row for
-it (it reaches the whole team through its mailbox), and the native client doesn't send it: its menu offers Meet now only
-(`docs/backlog/channel-meeting-scheduling.md`).
+`skypeTeamsData` naming the channel (`{"cid": <channel>, "uid": <organizer MRI>, "type": 0}`), and with no text of its own
+`emptyBodyPlaceholder: "Scheduled a meeting"`; no `schedulingServiceEvent` (the online meeting the form made is left
+unused, the service makes the event's own). The row is a combobox ("Add channel") showing the team's tile, "<team> >
+<channel>"; its **Send personal invites** switch (off at first, its info "Meeting invitations will be added to the
+personal calendars of all channel members.") adds `inviteAllMembers: true` (seen held back 2026-11-03). Answered `201`
+with the event (its `skypeTeamsData.cid` the channel, its chat the channel itself); within seconds the service posts it
+to the channel: a `RichText/Html` "Scheduled a meeting" whose `properties.meeting` (JSON as text) is
+`{"@type": "http://schema.skype.com/ScheduledMeetingCreated", "meetingtitle", "scheduledmeetinginfo": {"startTime",
+"endTime", "location", "exchangeId", "iCalUid", "eventType", …}, "organizerId", "tenantId", "meetingJoinUrl"}`, which the
+web client draws as a card (the day's tile, the title, "<weekday>, <start> - <end> | <location>", "<team> > <channel>",
+Edit for the organizer); a Meet now's post carries the same `@type` with no title and no times. The organizer's own
+calendar holds the meeting a few seconds later (as an attendee's copy, `isOrganizer` `false`).
+
+Its **Cancel meeting** (the card's Edit, then the details' Cancel meeting and its note): `PUT
+…/v2.0/groups/smtp:<team mailbox>/calendars/events/<iCalUid>/cancel` with `{"conversationId": <channel>, "messageId":
+<post>, "rootMessageId": <post>, "cancellationMessageFormat": "The meeting \"{0}\" is cancelled", "fetchEventContract":
+{"eventType", "eventTimeZone": "UTC", "startTime": <start, UTC, ms>}, "cancellationMessage"?: <note>}`. The service then
+replies under the post: a `Text` "The meeting "<title>" is cancelled" whose `properties.meeting` is the same meeting as
+`ScheduledMeetingCancelled` (`scheduledmeetinginfo.isCancelled` `true`); the web client strikes the card's title
+through and drops its tile. Its **change** (Edit, a new title, Send update, held back): `PUT
+…/v2.0/groups/smtp:<team mailbox>/calendars/events/<iCalUid>?isOnlineMeeting=<bool>` with `{"updateMessageFormat": "The
+meeting has been updated", "updatedCalendarEvent": <the event as read, the form's fields over it>}`; how the form reads
+the group's event wasn't looked at, and the native client doesn't change one
+(`docs/backlog/channel-meeting-change.md`).
+
+The fence maps the creation and the cancellation as a `Meeting` on the team's calendar (`Scope::TeamCalendar`: the
+channel the body names and the mailbox the path names), judged by the channel's team read fresh, Teams' own apps not
+counted, as any write on a team: the root thread the channel names must be the team's own (no `productThreadType`) and
+name the mailbox as its `teamSmtpAddress` (or `aadTeamSmtpAddress`), so a write naming a lab channel can't reach another
+group's calendar. Personal invites reach the channel's members, the same team. The native client: the channel header's
+Meet now menu offers **Schedule a meeting** for a standard channel of a team whose mailbox CSA named; it opens the
+scheduling form with the channel's row (and Send personal invites) in place of the Teams meeting switch, and its Send
+creates the meeting there (`EventWrite::CreateInChannel`, `CreateChannelEvent`). The channel view draws the post as the
+meeting card (cancelled once a cancellation's reply names it). Seen live 2026-11-03 (a team of the lab's own, a and b,
+a channel other than General, deleted after): the native creation answered `201`, the post came, a's calendar held it,
+and the native cancellation (`teams-headless a channel-schedule <channel> <title> --cancel`) went through.
 
 ## The lobby
 

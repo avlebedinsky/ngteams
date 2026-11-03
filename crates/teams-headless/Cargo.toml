@@ -7,6 +7,8 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+# `channel-schedule`: the desktop's offset from UTC, which a meeting's times are written in
+chrono.workspace = true
 clap.workspace = true
 # `TEAMS_HEADLESS_LOG=debug`: our crates' debug lines on stderr (src/debug_log.rs); capped at `debug` at compile time,
 # as teams-trouter takes it

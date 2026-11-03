@@ -549,3 +549,60 @@ fn custom_recurrence_changes_are_saved_only_after_confirmation() {
         teams_proto::RecurrencePattern::Weekly { interval: 2, days }
             if days.contains(&teams_proto::Weekday::Tuesday) && days.contains(&teams_proto::Weekday::Wednesday)));
 }
+
+#[test]
+fn a_channel_s_meeting_names_its_channel_and_is_sent_to_the_team_s_calendar() {
+    let rig = Rig::start();
+    rig.core
+        .calendar
+        .lock()
+        .unwrap()
+        .write_answers
+        .push_back(Ok(EventWritten { created: None }));
+    let place = teams_ui::event_form::MeetingPlace {
+        channel: teams_core::MeetingChannel {
+            channel: "19:0123456789abcdef0123456789abcdef@thread.tacv2".to_owned(),
+            mailbox: "lab-team@lab.example.test".to_owned(),
+        },
+        team: "Lab team".to_owned(),
+        name: "Planning".to_owned(),
+    };
+    let (form, cx, saved, _) = window(
+        &rig,
+        Seed::InChannel {
+            slot: slot(),
+            place: place.clone(),
+        },
+    );
+    // the channel's row in place of the Teams meeting switch: a channel's meeting is always one
+    assert!(cx.debug_bounds("event-channel").is_some());
+    assert!(cx.debug_bounds("event-online").is_none());
+    assert!(cx.update(|_, cx| form.read(cx).online()));
+    click(cx, "event-personal-invites");
+    assert!(cx.update(|_, cx| form.read(cx).personal_invites()));
+    cx.update(|window, cx| {
+        form.update(cx, |form, cx| {
+            form.fill_in("Synthetic channel meeting", &[], "", window, cx);
+            form.save(window, cx);
+        });
+    });
+    draw(cx);
+    {
+        let calendar = rig.core.calendar.lock().unwrap();
+        let [
+            EventWrite::CreateInChannel {
+                draft,
+                channel,
+                personal_invites,
+            },
+        ] = calendar.writes.as_slice()
+        else {
+            panic!("one creation in the channel");
+        };
+        assert_eq!(draft.subject, "Synthetic channel meeting");
+        assert!(draft.online);
+        assert_eq!(*channel, place.channel);
+        assert!(*personal_invites);
+    }
+    assert_eq!(saved.load(Ordering::SeqCst), 1);
+}

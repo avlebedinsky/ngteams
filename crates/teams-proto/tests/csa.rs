@@ -604,3 +604,48 @@ fn a_channel_s_running_meeting_is_read_from_its_active_meetups() {
     assert_eq!(CsaTeams::meetup_in(&elsewhere, TEAM), None);
     assert_eq!(CsaTeams::meetup_in(b"not json", TEAM), None);
 }
+
+/// A channel's call post (`Event/Call`), synthetic in the shape a channel's Meet now posted (2026-11-03).
+fn call_post(id: &str, kind: &str, call: &str, conversation: &str) -> Message {
+    let meeting = json!({"@type": "http://schema.skype.com/ScheduledMeetingCreated", "meetingtitle": null,
+        "tenantId": "00000000-0000-4000-8000-0000000000d0",
+        "organizerId": "00000000-0000-4000-8000-00000000000a"})
+    .to_string();
+    serde_json::from_value(json!({
+        "id": id,
+        "messagetype": "Event/Call",
+        "content": format!("<partlist alt =\"\"></partlist><callEventType>{kind}</callEventType>\n<conversationUrl>{conversation}</conversationUrl>\n<callId>{call}</callId>\n"),
+        "properties": {"meeting": meeting},
+    }))
+    .unwrap()
+}
+
+#[test]
+fn a_channel_s_running_meeting_is_read_from_its_posts_when_csa_names_none() {
+    let conversation = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticMeetup2?i=10-0-0-1&amp;e=1";
+    let started = call_post("1700000000002", "callStarted", "call-2", conversation);
+    let found = teams_proto::ChannelMeetup::of_posts(std::slice::from_ref(&started)).unwrap();
+    assert_eq!(found.message_id, "1700000000002");
+    assert_eq!(found.conversation.as_str(), conversation.replace("&amp;", "&"));
+    assert_eq!(found.meeting.organizer_id, "00000000-0000-4000-8000-00000000000a");
+    // newest first: a call a newer post ended runs no more; an older one still running is found
+    let ended = call_post("1700000000003", "callEnded", "call-2", conversation);
+    assert_eq!(
+        teams_proto::ChannelMeetup::of_posts(&[ended.clone(), started.clone()]),
+        None
+    );
+    let older = call_post("1700000000001", "callStarted", "call-1", conversation);
+    let found = teams_proto::ChannelMeetup::of_posts(&[ended, started, older]).unwrap();
+    assert_eq!(found.message_id, "1700000000001");
+    // a link off the calling service, or no organizer, names none
+    let elsewhere = call_post(
+        "1700000000004",
+        "callStarted",
+        "call-4",
+        "https://example.invalid/conv/x",
+    );
+    assert_eq!(teams_proto::ChannelMeetup::of_posts(&[elsewhere]), None);
+    let mut nobody = call_post("1700000000005", "callStarted", "call-5", conversation);
+    nobody.properties.clear();
+    assert_eq!(teams_proto::ChannelMeetup::of_posts(&[nobody]), None);
+}

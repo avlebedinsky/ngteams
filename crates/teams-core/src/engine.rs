@@ -1501,6 +1501,9 @@ struct Core<C, T> {
     /// A read of the teams changed the favourites: the account's own notes may be due a sync
     /// ([`Core::sync_favourite_notes`]).
     notes_due: bool,
+    /// The conversations the reads and deliveries brought since the last tick: a team's thread the stored teams don't
+    /// name reads the teams again ([`Teams::note_conversation`](crate::teams)).
+    noticed: std::cell::RefCell<Vec<String>>,
     /// When the next poll's catch-up is due, while there is no push channel and the engine polls
     /// ([`EngineOptions::poll`]).
     poll_at: Option<Instant>,
@@ -1574,6 +1577,7 @@ where
             retry_at: None,
             poll_at: None,
             notes_due: false,
+            noticed: std::cell::RefCell::default(),
             losses: Vec::new(),
             backfill: Some(Backfill::new(parts.options.index_batch)),
             calling,
@@ -1703,7 +1707,26 @@ where
             });
         }
         for conversation in changes.conversations {
+            self.notice(&conversation);
             self.emit(Event::ConversationChanged { conversation });
+        }
+    }
+
+    /// Keeps `conversation` for the next tick's look at the teams ([`Self::note_noticed`]).
+    fn notice(&self, conversation: &str) {
+        if teams_fence::is_team_thread_id(conversation) {
+            self.noticed.borrow_mut().push(conversation.to_owned());
+        }
+    }
+
+    /// The team threads noticed since the last tick, each looked at against the stored teams: one they don't name
+    /// (the account was added to a team, or a channel was made in one) reads the teams again.
+    fn note_noticed(&mut self) {
+        let noticed = std::mem::take(&mut *self.noticed.borrow_mut());
+        for conversation in noticed {
+            if let Err(error) = self.teams.note_conversation(&self.store, &conversation) {
+                self.failed("reading the stored teams", error);
+            }
         }
     }
 
@@ -2283,6 +2306,8 @@ where
         self.poll_due().await;
         // the account's own notes, when a read of the teams just made them a favourite
         self.sync_favourite_notes().await;
+        // a team the stored list doesn't name yet, as a read or delivery brought its thread
+        self.note_noticed();
         // profile lookups that failed on the way, their wait over
         self.profiles.retry_due();
         // the watched people's presence, when a read is due
@@ -2438,6 +2463,12 @@ where
         message: &chat::Message,
         source: Source,
     ) {
+        self.notice(&conversation);
+        // a team's own activity (people added or gone, a channel made, renamed or deleted) changes what its list shows
+        if teams_fence::is_team_thread_id(&conversation) && message.message_type.as_str().starts_with("ThreadActivity/")
+        {
+            self.teams.note_activity();
+        }
         let added = match self.add_if_unknown(&conversation).await {
             Ok(added) => added,
             Err(error) => return self.missed("adding a delivery's conversation", error),
@@ -2497,6 +2528,7 @@ where
     /// A conversation changed: one the store doesn't know is added and synced (missed when it can't be, [`Core::missed`]),
     /// and told as the reads' change ([`Core::brought`]); the rest comes with the next catch-up.
     async fn on_conversation(&mut self, conversation: String) {
+        self.notice(&conversation);
         match self.add_if_unknown(&conversation).await {
             Ok(true) => {
                 if let Err(error) = self.catch_up.sync_messages(&mut self.store, &conversation).await {

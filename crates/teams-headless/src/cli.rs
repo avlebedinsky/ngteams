@@ -261,6 +261,29 @@ pub enum Command {
         #[arg(long)]
         admit: bool,
     },
+    /// The account's teams as the engine holds them (a read starts when the stored list is old, or a team's thread it
+    /// doesn't name comes), waiting up to `--wait` seconds for one holding `--channel`: each team's id and its channels'
+    /// count, never a name. Reads only.
+    Teams {
+        /// A channel to wait for.
+        #[arg(long)]
+        channel: Option<String>,
+        /// Seconds to wait.
+        #[arg(long, default_value_t = 20)]
+        wait: u64,
+    },
+    /// Schedules a Teams meeting in a channel, as its header's Schedule a meeting does (`channel_schedule.rs`): on the
+    /// channel's team's group calendar from the next full hour for half an hour, posted to the channel; then reads
+    /// back whether the account's calendar holds it and the channel's newest posts. Prints ids and kinds only.
+    ChannelSchedule {
+        /// The channel's thread id (`19:…@thread.tacv2`).
+        channel: String,
+        /// The meeting's subject (with `--cancel`, what the titles to cancel start with).
+        subject: String,
+        /// Cancels the meetings the channel's posts name whose title starts with the subject, instead of scheduling.
+        #[arg(long)]
+        cancel: bool,
+    },
     /// Goes into a channel's meeting, as the channel header's Meet now and Join do (the same media, hold, hang-up and
     /// output): a new meeting in the channel, or with `--join` the one that runs there now, as CSA names it. A write
     /// others see, through the fence (judged by the channel's team, its members read fresh).

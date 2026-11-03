@@ -8,6 +8,12 @@
 //!   than [`TEAMS_MAX_AGE`], unless one is under way or one failed less than the engine's
 //!   [`EngineOptions::teams_retry`](crate::EngineOptions::teams_retry) ago. Its result is stored whole; a list that
 //!   changed is told as [`Event::Teams`](crate::Event::Teams).
+//! - **Read again when a team appears**: a team's thread a read or a delivery brings that no stored team names (the
+//!   account was just added to a team: its first channel joins its conversations, and its posts come) reads the teams
+//!   at once, whatever the stored list's age ([`Teams::note_conversation`]), once per such thread a run, so a team the
+//!   account was added to shows in its list (and its channels' meetings are found) without waiting out
+//!   [`TEAMS_MAX_AGE`]. So does a team's activity delivered on its thread (`ThreadActivity/…`: people added or gone, a
+//!   channel made, renamed or deleted, [`Teams::note_activity`]), so a new channel shows too.
 //! - **And the favourites (chats and channels)**: the same answer's `Favorites` folder (the chats and channels Teams
 //!   lists under "Favorites" above its chats, in the user's order), stored with the teams when it could be read
 //!   ([`TeamsRead::favorites`]; a read that couldn't keeps the stored ones), a change told as
@@ -18,6 +24,7 @@
 //!   sealed chat writes aimed at the channel) is denied by the fence, which never reads a channel's members complete.
 //!   No write is mapped to `WriteKind::ChannelPost`. The fence, not a missing write type, keeps channels unwritten.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -85,6 +92,10 @@ pub(crate) struct Teams<C> {
     read_again: bool,
     /// What the team pages changed that no read has shown yet, until when it is kept ([`crate::team_admin`]).
     changes: Vec<(TeamChange, Instant)>,
+    /// The stored teams' channels, as last looked at ([`Self::note_conversation`]); `None` once a read stored others.
+    known: Option<HashSet<String>>,
+    /// The team threads the stored list didn't name that read the teams again: each reads them once a run.
+    asked: HashSet<String>,
 }
 
 impl<C: Credentials + 'static> Teams<C> {
@@ -97,7 +108,41 @@ impl<C: Credentials + 'static> Teams<C> {
             created: Vec::new(),
             read_again: false,
             changes: Vec::new(),
+            known: None,
+            asked: HashSet::new(),
         }
+    }
+
+    /// A team's activity was delivered (its thread's `ThreadActivity/…`: people added or gone, a channel made, renamed
+    /// or deleted): the teams are read again now, whatever the stored list's age.
+    pub(crate) fn note_activity(&mut self) {
+        log::info!("a team's activity came: reading the teams again");
+        self.read_now();
+    }
+
+    /// A conversation a read or delivery brought (see the module docs): a team's thread that no stored team names (the
+    /// account was just added to the team, or a channel was made in it) reads the teams now, whatever the stored list's
+    /// age, once per thread a run; the teams stored before the first read don't count (that read is due anyway).
+    pub(crate) fn note_conversation(&mut self, store: &Store, id: &str) -> Result<(), StoreError> {
+        if self.asked.contains(id) || store.teams_read_at()?.is_none() {
+            return Ok(());
+        }
+        let known = match &mut self.known {
+            Some(known) => known,
+            empty @ None => empty.insert(
+                store
+                    .teams()?
+                    .into_iter()
+                    .flat_map(|team| team.channels.into_iter().map(|channel| channel.id))
+                    .collect(),
+            ),
+        };
+        if !known.contains(id) {
+            log::info!("a team's thread the stored teams don't name: reading the teams again");
+            self.asked.insert(id.to_owned());
+            self.read_now();
+        }
+        Ok(())
     }
 
     /// Puts what a team's write changed in the stored list, and reads the list again: the service's own list follows it
@@ -192,6 +237,7 @@ impl<C: Credentials + 'static> Teams<C> {
                 keep_created(&mut self.created, &mut listed);
                 keep_changes(&mut self.changes, &mut listed);
                 let teams = store.replace_teams(&listed, now)?;
+                self.known = None;
                 let favorites = match &read.favorites {
                     Some(favorites) => store.replace_favorites(favorites, now)?,
                     None => Applied::Ignored,

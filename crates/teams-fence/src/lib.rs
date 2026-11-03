@@ -71,8 +71,8 @@ pub use log::{
 pub use membership::{
     AFD_HOSTS, ChatCredential, CredentialFuture, CredentialSource, FETCH_TIMEOUT, LiveMembershipSource,
     LiveSourceError, MAX_BODY, MiddleTierCredential, MiddleTierFuture, REGIONAL_SUFFIX, chat_service_path, is_chat_id,
-    is_group_chat_id, is_meeting_chat_id, is_team_thread_id, one_to_one_id, one_to_one_pair, parse_channel_thread,
-    parse_event, parse_members, parse_team_thread, parse_thread,
+    is_group_chat_id, is_meeting_chat_id, is_team_thread_id, names_team_mailbox, one_to_one_id, one_to_one_pair,
+    parse_channel_thread, parse_event, parse_members, parse_team_thread, parse_thread,
 };
 pub use post_read::{PostReadDenied, PostReadDenyReason, PostReadPermit};
 pub use target::{CallOperation, Mri, Scope, Target, WriteKind};

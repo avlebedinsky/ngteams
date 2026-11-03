@@ -1037,7 +1037,10 @@ impl Fence {
             Membership::OrgWide => return Verdict::Deny(DenyReason::OrgWide),
         };
         // Teams' own apps on a team aren't people it reaches; anyone else on it, an app someone added too, is judged
-        if matches!(target.scope(), Scope::Team { .. } | Scope::Channel { .. }) {
+        if matches!(
+            target.scope(),
+            Scope::Team { .. } | Scope::Channel { .. } | Scope::TeamCalendar { .. }
+        ) {
             current.retain(|mri| !self.roster.is_team_app(mri));
         }
         if fetched && current.is_empty() {

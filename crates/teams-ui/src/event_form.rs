@@ -23,6 +23,7 @@
 //! - **Traced**: `event-form opened` (`new` or `change`), `event-form saved` / `not-saved` with the write's kind.
 
 mod body;
+mod channel;
 mod day;
 pub(crate) mod model;
 mod people;
@@ -62,6 +63,7 @@ use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 use crate::window::KitRoot;
 
+pub use channel::MeetingPlace;
 pub use model::Slot;
 use model::{CATEGORIES, Fields, REMINDERS};
 use repeat::{Custom, Repeat};
@@ -77,6 +79,9 @@ pub enum Seed {
     New { slot: Slot, online: bool },
     /// An event of the account's, read whole, to change.
     Change(Box<FullEvent>),
+    /// A new meeting in a channel, in `slot` (the channel header's Schedule a meeting): a Teams meeting on its team's
+    /// calendar, posted to the channel.
+    InChannel { slot: Slot, place: MeetingPlace },
 }
 
 /// What a Save that went through tells the calendar: read its days again.
@@ -124,6 +129,7 @@ pub fn open(core: Arc<dyn Core>, trace: Arc<ViewTrace>, seed: Seed, saved: Saved
         }
         let title: SharedString = match &seed {
             Seed::New { .. } => "New event - Calendar".into(),
+            Seed::InChannel { .. } => "New meeting - Calendar".into(),
             Seed::Change(full) if !full.event.subject.trim().is_empty() => {
                 format!("{} - Calendar", full.event.subject.trim()).into()
             }
@@ -249,6 +255,9 @@ pub struct EventForm {
     trace: Arc<ViewTrace>,
     focus: FocusHandle,
     editing: Option<Editing>,
+    /// The channel a new meeting is scheduled in, and whether its people get invitations of their own too.
+    place: Option<MeetingPlace>,
+    personal_invites: bool,
     series: Series,
     /// How the event repeats, while it is a series.
     repeat: Option<Repeat>,
@@ -340,6 +349,8 @@ impl EventForm {
             trace,
             focus: cx.focus_handle(),
             editing: None,
+            place: None,
+            personal_invites: false,
             series: Series::New,
             repeat: None,
             custom: None,
@@ -472,6 +483,12 @@ impl EventForm {
                 self.online = online;
                 "new"
             }
+            Seed::InChannel { slot, place } => {
+                self.slot = slot;
+                self.online = true;
+                self.place = Some(place);
+                "channel"
+            }
             Seed::Change(full) => {
                 let event = &full.event;
                 self.series = match (&event.kind, &event.series_master_id) {
@@ -541,6 +558,18 @@ impl EventForm {
     #[must_use]
     pub fn online(&self) -> bool {
         self.online
+    }
+
+    /// The channel a new meeting is scheduled in, when it is.
+    #[must_use]
+    pub fn place(&self) -> Option<&MeetingPlace> {
+        self.place.as_ref()
+    }
+
+    /// Whether everyone on the channel's team gets an invitation of their own too.
+    #[must_use]
+    pub fn personal_invites(&self) -> bool {
+        self.personal_invites
     }
 
     /// Whom it invites.
@@ -821,7 +850,14 @@ impl EventForm {
                 event: editing.raw.clone(),
                 draft,
             },
-            None => EventWrite::Create(draft),
+            None => match &self.place {
+                Some(place) => EventWrite::CreateInChannel {
+                    draft,
+                    channel: place.channel.clone(),
+                    personal_invites: self.personal_invites,
+                },
+                None => EventWrite::Create(draft),
+            },
         };
         self.send(write, cx);
     }
@@ -896,7 +932,9 @@ impl EventForm {
     fn save_label(&self) -> &'static str {
         match (&self.editing, self.attendees.is_empty()) {
             (Some(_), false) => "Send update",
+            // a channel's meeting is posted to the channel: everyone on the team gets it
             (None, false) => "Send",
+            (None, true) if self.place.is_some() => "Send",
             _ => "Save",
         }
     }
@@ -1979,8 +2017,9 @@ impl Render for EventForm {
             )
             .child(self.when_row(palette, cx))
             .children(self.repeat_row(palette, cx))
+            .children(self.channel_row(palette, cx))
             .child(self.location_row(palette, window, cx))
-            .child(self.online_row(palette, cx));
+            .when(self.place.is_none(), |card| card.child(self.online_row(palette, cx)));
         let left = div()
             .flex_1()
             .min_w_0()

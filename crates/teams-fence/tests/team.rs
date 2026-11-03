@@ -673,3 +673,123 @@ fn lab_toml(data_dir: &Path) -> String {
     }
     text
 }
+
+/// A mailbox a team calendar names, and what changes the team's root before it is served.
+type MailboxCase = (Option<&'static str>, fn(&mut Value));
+
+/// The team's made-up mailbox, as its root thread names it (`teamSmtpAddress`, seen on a lab team's root 2026-11-02).
+const MAILBOX: &str = "lab-team@lab.example.com";
+
+fn team_calendar(mailbox: &str) -> Scope {
+    Scope::TeamCalendar {
+        channel: other_channel_id(),
+        mailbox: mailbox.to_owned(),
+    }
+}
+
+/// Serves a standard channel of the team as [`serve_channel`] does, the team's root naming `mailbox` (when given) and
+/// `change` applied to it.
+async fn serve_mailbox_team(
+    server: &MockServer,
+    mailbox: Option<&str>,
+    change: fn(&mut Value),
+    members: &Value,
+) -> TestResult {
+    let mut root = thread_body()?;
+    if let Some(mailbox) = mailbox {
+        root["properties"]["teamSmtpAddress"] = json!(mailbox);
+    }
+    change(&mut root);
+    serve_team(server, &team_id(), &root, members).await;
+    Mock::given(method("GET"))
+        .and(path(thread_path(&other_channel_id())))
+        .and(query_param("view", "msnp24Equivalent"))
+        .and(header("Authorization", format!("Bearer {TOKEN}").as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(channel_thread()?))
+        .mount(server)
+        .await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_channel_s_meeting_on_its_team_s_calendar_is_judged_by_the_team_naming_that_mailbox() -> TestResult {
+    let server = MockServer::start().await;
+    serve_mailbox_team(&server, Some(MAILBOX), |_| {}, &members_with(&[mri(GUID_B)])?).await?;
+    let source = source(&server)?;
+    let scope = team_calendar(MAILBOX);
+    assert!(source.reads_in_full(&scope));
+    let permit = fence(roster())
+        .check(Target::new(WriteKind::Meeting, scope.clone()), &source)
+        .await;
+    assert!(permit.is_ok(), "{permit:?}");
+    // the mailbox in another case is the same
+    let upper = team_calendar(&MAILBOX.to_uppercase());
+    let permit = fence(roster())
+        .check(Target::new(WriteKind::Meeting, upper), &source)
+        .await;
+    assert!(permit.is_ok(), "{permit:?}");
+    // someone it adds is judged too
+    let reason = denied(
+        &fence(roster()),
+        Target::new(WriteKind::Meeting, scope).with_added([Mri::mail("someone@elsewhere.example.com")]),
+        &source,
+    )
+    .await?;
+    assert_eq!(reason, DenyReason::Outsiders { count: 1 });
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_team_calendar_whose_team_has_someone_outside_the_lab_denies() -> TestResult {
+    let server = MockServer::start().await;
+    serve_mailbox_team(&server, Some(MAILBOX), |_| {}, &members_with(&[mri(GUID_X)])?).await?;
+    let source = source(&server)?;
+    let reason = denied(
+        &fence(roster()),
+        Target::new(WriteKind::Meeting, team_calendar(MAILBOX)),
+        &source,
+    )
+    .await?;
+    assert_eq!(reason, DenyReason::Outsiders { count: 1 });
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_mailbox_the_channel_s_team_doesn_t_name_is_never_judged_by_that_team() -> TestResult {
+    let unsupported = Membership::Partial(PartialReason::Unsupported);
+    let cases: [MailboxCase; 3] = [
+        // another team's mailbox
+        (Some("other-team@lab.example.com"), |_| {}),
+        // a root naming no mailbox
+        (None, |_| {}),
+        // a private channel's own thread, whose members are only some of the team's
+        (Some(MAILBOX), |root| {
+            root["properties"]["productThreadType"] = json!("TeamsPrivateChannel");
+        }),
+    ];
+    for (named, change) in cases {
+        let server = MockServer::start().await;
+        serve_mailbox_team(&server, named, change, &members_body()?).await?;
+        let source = source(&server)?;
+        assert_eq!(source.members(&team_calendar(MAILBOX)).await, unsupported, "{named:?}");
+        let members = format!("{}/members", thread_path(&team_id()));
+        assert!(
+            requests(&server)
+                .await
+                .iter()
+                .all(|request| request.url.path() != members),
+            "the members are never read"
+        );
+    }
+    // a channel that isn't a team's thread isn't read at all
+    let server = MockServer::start().await;
+    let source = source(&server)?;
+    let chat = Scope::TeamCalendar {
+        channel: "19:meeting_x@thread.v2".to_owned(),
+        mailbox: MAILBOX.to_owned(),
+    };
+    assert!(!source.reads_in_full(&chat));
+    assert_eq!(source.members(&chat).await, unsupported);
+    assert!(requests(&server).await.is_empty());
+    Ok(())
+}

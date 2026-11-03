@@ -136,6 +136,43 @@ async fn meetings(
     finish(handle, looked.map(|looked| looked.map(code)))
 }
 
+/// `teams`: the account's teams as the engine holds them (`channel_schedule.rs`).
+async fn teams(lab: &Lab, channel: Option<&str>, wait: u64, signals: &mut Signals, out: &mut impl Write) -> Outcome {
+    let handle = lab.start_engine(false).await?;
+    let wait = Duration::from_secs(wait);
+    let listed = tokio::select! {
+        listed = teams_headless::channel_schedule::teams(&handle, channel, wait, out) => Some(listed),
+        () = signals.next() => None,
+    };
+    let code = |fine: bool| if fine { ExitCode::SUCCESS } else { ExitCode::FAILURE };
+    finish(handle, listed.map(|listed| listed.map(code)))
+}
+
+/// `channel-schedule`: a meeting scheduled in a channel (`channel_schedule.rs`).
+async fn channel_schedule(
+    lab: &Lab,
+    channel: &str,
+    subject: &str,
+    cancel: bool,
+    signals: &mut Signals,
+    out: &mut impl Write,
+) -> Outcome {
+    let handle = lab.start_engine(false).await?;
+    let asked = async {
+        if cancel {
+            teams_headless::channel_schedule::cancel(&handle, channel, subject, out).await
+        } else {
+            teams_headless::channel_schedule::schedule(&handle, channel, subject, now_ms(), out).await
+        }
+    };
+    let scheduled = tokio::select! {
+        scheduled = asked => Some(scheduled),
+        () = signals.next() => None,
+    };
+    let code = |fine: bool| if fine { ExitCode::SUCCESS } else { ExitCode::FAILURE };
+    finish(handle, scheduled.map(|scheduled| scheduled.map(code)))
+}
+
 async fn dispatch(lab: &Lab, command: Command, signals: &mut Signals, out: &mut impl Write) -> Outcome {
     match command {
         Command::List { limit } => {
@@ -161,6 +198,12 @@ async fn dispatch(lab: &Lab, command: Command, signals: &mut Signals, out: &mut 
             meetings(lab, teams_headless::meetings::Look { read, cancel }, signals, out).await
         }
         Command::Series { keep, cleanup } => series(lab, keep, cleanup, signals, out).await,
+        Command::Teams { channel, wait } => teams(lab, channel.as_deref(), wait, signals, out).await,
+        Command::ChannelSchedule {
+            channel,
+            subject,
+            cancel,
+        } => channel_schedule(lab, &channel, &subject, cancel, signals, out).await,
         Command::Availability {
             manual,
             manual_after,
@@ -447,6 +490,8 @@ fn write_action(lab: &Lab, command: Command) -> Result<(Action, Duration), Box<d
         | Command::TeamReads { .. }
         | Command::Series { .. }
         | Command::Meetings { .. }
+        | Command::ChannelSchedule { .. }
+        | Command::Teams { .. }
         | Command::Availability { .. }
         | Command::Call { .. }
         | Command::Join { .. }

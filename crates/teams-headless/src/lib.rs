@@ -21,6 +21,7 @@
 
 pub mod availability;
 pub mod call;
+pub mod channel_schedule;
 pub mod chat;
 pub mod cli;
 pub mod commands;

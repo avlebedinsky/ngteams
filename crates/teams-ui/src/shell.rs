@@ -976,6 +976,41 @@ impl Shell {
         crate::call_window::raise(cx);
     }
 
+    /// Where the channel shown would hold a scheduled meeting: a standard channel of a team whose mailbox the teams read
+    /// named (a private channel has no meeting of the team's calendar, as in Teams).
+    fn meeting_place(&self, cx: &App) -> Option<crate::event_form::MeetingPlace> {
+        let Main::Channel(channel) = &self.main else {
+            return None;
+        };
+        let teams = self.teams.read(cx).teams()?;
+        let team = teams
+            .iter()
+            .find(|team| team.channels.iter().any(|known| known.id == *channel))?;
+        let known = team.channels.iter().find(|known| known.id == *channel)?;
+        if known.kind != teams_store::ChannelKind::Standard {
+            return None;
+        }
+        Some(crate::event_form::MeetingPlace {
+            channel: teams_core::MeetingChannel {
+                channel: channel.clone(),
+                mailbox: team.mailbox.clone()?,
+            },
+            team: team.name.clone(),
+            name: known.name.clone(),
+        })
+    }
+
+    /// The Meet now menu's Schedule a meeting: the scheduling form on a new meeting in the channel shown.
+    pub fn schedule_channel_meeting(&mut self, cx: &mut Context<Self>) {
+        let Some(place) = self.meeting_place(cx) else {
+            return;
+        };
+        self.trace
+            .record(&TraceLine::new("channel-meeting", "schedule").conversation(&place.channel.channel));
+        self.calendar
+            .update(cx, |calendar, cx| calendar.schedule_in_channel(place, cx));
+    }
+
     /// The channel header's Join: the meeting that runs in the channel shown, its pre-join first.
     pub fn join_channel_meeting(&mut self, cx: &mut Context<Self>) {
         let Some((channel, meetup)) = self.channel_meetup.clone() else {
@@ -1003,7 +1038,8 @@ impl Shell {
         }
         let runs = self.channel_meetup.as_ref().is_some_and(|(shown, _)| shown == id);
         if !runs {
-            return Some(Self::meet_now_button(cx));
+            let schedules = self.meeting_place(cx).is_some();
+            return Some(Self::meet_now_button(schedules, cx));
         }
         let button = icon_button("channel-join-meeting", Glyph::VIDEO, "Join the channel's meeting")
             .label("Join")
@@ -1012,18 +1048,28 @@ impl Shell {
         Some(selected_by("channel-join-meeting", button).into_any_element())
     }
 
-    /// Teams' Meet now: the button starts a meeting in the channel, and its caret opens the menu of ways to meet.
-    fn meet_now_button(cx: &mut Context<Self>) -> AnyElement {
+    /// Teams' Meet now: the button starts a meeting in the channel, and its caret opens the menu of ways to meet (Meet
+    /// now, and Schedule a meeting where the channel can hold one: `schedules`).
+    fn meet_now_button(schedules: bool, cx: &mut Context<Self>) -> AnyElement {
         let meet = icon_button("channel-meet-now", Glyph::VIDEO, "Start a meeting in this channel now")
             .label("Meet now")
             .on_click(cx.listener(|this, _, _, cx| this.meet_now(cx)));
         let shell = cx.entity().downgrade();
         let caret = icon_button("channel-meet-menu", Glyph::CHEVRON_DOWN, "More ways to meet").dropdown_menu(
             move |menu, _, _| {
-                let shell = shell.clone();
-                menu.item(
+                let now = shell.clone();
+                let menu = menu.item(
                     meet_menu_row("now", Glyph::VIDEO, "Meet now").on_click(move |_, _, cx| {
-                        let _ = shell.update(cx, Self::meet_now);
+                        let _ = now.update(cx, Self::meet_now);
+                    }),
+                );
+                if !schedules {
+                    return menu;
+                }
+                let later = shell.clone();
+                menu.item(
+                    meet_menu_row("schedule", Glyph::CALENDAR_ADD, "Schedule a meeting").on_click(move |_, _, cx| {
+                        let _ = later.update(cx, Self::schedule_channel_meeting);
                     }),
                 )
             },
@@ -1703,6 +1749,11 @@ impl Shell {
             let view = cx.new(|cx| ChannelView::new(core, models, trace, id, cx));
             self.channel_events = Some(Self::follow_channel(&view, window, cx));
             self.channel = Some((view, chosen.clone()));
+        }
+        // a meeting card names where it is
+        if let Some((view, kept)) = &self.channel {
+            let (team, name) = (kept.team.clone(), kept.name.clone());
+            view.update(cx, |view, cx| view.set_place(team, name, cx));
         }
         self.read_channel_meetup(chosen.id.clone(), cx);
         self.teams

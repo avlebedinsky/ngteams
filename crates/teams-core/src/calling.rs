@@ -78,8 +78,8 @@ use teams_call::{
 };
 use teams_fence::Mri;
 use teams_proto::{
-    ChannelMeetup, ChannelParameters, Client, Credentials, CsaTeams, EndpointRegistrar, HttpError, HttpTransport,
-    MediaContent, MeetingInfo, Mutating, Transport,
+    ChannelMeetup, ChannelParameters, Client, Credentials, EndpointRegistrar, HttpError, HttpTransport, MediaContent,
+    MeetingInfo, Mutating, Transport,
 };
 use teams_trouter::{CallResponder, CallResponse, Ignored, PushEvent, Trouter, TrouterCredentials, TrouterHandle};
 use tokio::sync::{mpsc, oneshot};
@@ -1332,11 +1332,8 @@ where
             Act::JoinChannel(channel, meetup) => {
                 let (client, channel, meetup) = (Arc::clone(&self.client), channel.clone(), Arc::clone(meetup));
                 Box::pin(async move {
-                    let answer = client
-                        .read(&CsaTeams)
-                        .await
-                        .map_err(|error| format!("the channel's meeting couldn't be read: {error}"))?;
-                    let found = CsaTeams::meetup_in(answer.body(), &channel)
+                    let found = crate::calendar::find_channel_meetup(&client, &channel)
+                        .await?
                         .ok_or_else(|| "no meeting runs in the channel".to_owned())?;
                     *meetup.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(found);
                     prepare.await
