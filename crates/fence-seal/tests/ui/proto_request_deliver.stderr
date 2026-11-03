@@ -35,7 +35,7 @@ help: the trait `Mutating` is not implemented for `PostAsRequest`
              AddToCall
              AnswerMedia
              AttachCall
-             CancelEvent
+             CancelChannelEvent
            and $N others
 note: required by a bound in `Authorized::<R>::new`
   --> $WORKSPACE/crates/teams-proto/src/write.rs
