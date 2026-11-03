@@ -4,6 +4,7 @@ mod connections;
 mod editor;
 mod form;
 mod model;
+mod run_inputs;
 mod runs;
 mod service;
 mod view;
@@ -30,6 +31,7 @@ use crate::theme::{self, Palette};
 use connections::Binding;
 use form::{ConfigField, EditorMode};
 use model::Card;
+use run_inputs::RunField;
 
 #[derive(Clone, Copy)]
 enum BuildKind {
@@ -59,6 +61,11 @@ enum Screen {
         card: Card,
         run: Value,
         actions: Vec<Value>,
+    },
+    RunInputs {
+        card: Card,
+        trigger: String,
+        schema: Value,
     },
     Delete(Card),
 }
@@ -92,6 +99,7 @@ pub struct WorkflowDialog {
     environments: Vec<(String, String)>,
     environment: Option<String>,
     workflows: Vec<Card>,
+    run_fields: Vec<RunField>,
     history: Vec<Value>,
     history_next: Option<String>,
     loading: Loading,
@@ -152,6 +160,7 @@ impl WorkflowDialog {
             environments: Vec::new(),
             environment: None,
             workflows: Vec::new(),
+            run_fields: Vec::new(),
             history: Vec::new(),
             history_next: None,
             loading: Loading::default(),
@@ -176,6 +185,13 @@ impl WorkflowDialog {
     pub fn select_template(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(card) = self.catalog.iter().find(|card| card.id == id).cloned() {
             self.configure_template(card, window, cx);
+        }
+    }
+
+    /// Configures a run of a workflow already loaded for this account and environment.
+    pub fn prepare_workflow_run(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(card) = self.workflows.iter().find(|card| card.id == id).cloned() {
+            self.prepare_run(&card, window, cx);
         }
     }
 

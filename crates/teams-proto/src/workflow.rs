@@ -2,12 +2,17 @@
 //!
 //! Paths are grounded in the current Teams reference and Microsoft's Power Automate client source; see
 //! `docs/protocol/workflows.md`. A request cannot choose an origin or a credential audience.
+mod inputs;
+pub use inputs::valid_trigger_inputs;
+
 use serde_json::Value;
 
 use crate::{Endpoint, Service};
 
 /// The audience requested by the Teams Workflows host, including its trailing slash.
 pub const WORKFLOW_AUDIENCE: &str = "https://service.flow.microsoft.com/";
+/// The first-party Logic Flows runtime audience.
+pub const RUNTIME_AUDIENCE: &str = "https://apihub.azure.com";
 /// The separately authenticated connection service audience.
 pub const CONNECTION_AUDIENCE: &str = "https://service.powerapps.com/";
 const API_VERSION: &str = "2016-11-01";
@@ -23,6 +28,15 @@ pub enum WorkflowRequest {
     Environments,
     /// A gallery template with its actual definition and connector metadata.
     Template { id: String },
+    /// Microsoft’s Logic Flows connector metadata in the chosen environment.
+    LogicFlowsMetadata { environment: String },
+    /// A run whose payload must reach the trigger body through the authenticated connector runtime.
+    RunWithInputs {
+        environment: String,
+        flow: String,
+        trigger: String,
+        inputs: Value,
+    },
     /// Connections in the chosen environment, never tenant-wide connection discovery.
     Connections { environment: String },
     /// Creates a Microsoft connector connection without accepting user credentials in this app.
@@ -99,6 +113,7 @@ impl WorkflowRequest {
                 | Self::Environments
                 | Self::Template { .. }
                 | Self::Connections { .. }
+                | Self::LogicFlowsMetadata { .. }
                 | Self::Page { .. }
                 | Self::List { .. }
                 | Self::Get { .. }
@@ -117,6 +132,7 @@ impl WorkflowRequest {
             | Self::Create { .. }
             | Self::SetEnabled { .. }
             | Self::Run { .. }
+            | Self::RunWithInputs { .. }
             | Self::ConnectionConsent { .. }
             | Self::WebhookAddress { .. } => "POST",
             Self::CreateConnection { .. } => "PUT",
@@ -131,6 +147,8 @@ impl WorkflowRequest {
     pub fn service(&self) -> Service {
         match self {
             Self::CopilotEligibility => Service::MiddleTier,
+            Self::RunWithInputs { .. } => Service::WorkflowRuntime,
+            Self::LogicFlowsMetadata { .. } => Service::WorkflowConnections,
             Self::Connections { .. } | Self::CreateConnection { .. } | Self::ConnectionConsent { .. } => {
                 Service::WorkflowConnections
             }
@@ -195,6 +213,7 @@ impl WorkflowRequest {
         let mut path = vec!["providers".to_owned(), "Microsoft.PowerApps".to_owned()];
         match self {
             Self::Connections { .. } => path.push("connections".to_owned()),
+            Self::LogicFlowsMetadata { .. } => path.extend(["apis", "shared_logicflows"].map(str::to_owned)),
             Self::CreateConnection {
                 connector, connection, ..
             }
@@ -274,7 +293,9 @@ impl WorkflowRequest {
     pub fn environment(&self) -> Option<&str> {
         match self {
             Self::Catalog | Self::CopilotEligibility | Self::Environments | Self::Template { .. } => None,
-            Self::RunActions { environment, .. }
+            Self::LogicFlowsMetadata { environment }
+            | Self::RunWithInputs { environment, .. }
+            | Self::RunActions { environment, .. }
             | Self::WebhookAddress { environment, .. }
             | Self::Page { environment, .. }
             | Self::Connections { environment }
@@ -331,6 +352,8 @@ pub enum WorkflowFailure {
     Changed,
     /// Read-only application mode.
     ReadOnly,
+    /// The supplied trigger inputs do not satisfy the freshly read schema.
+    InvalidInput,
     /// The response did not have the required shape.
     InvalidResponse,
     /// The connection failed; a write's outcome may be unknown and must be refreshed before retrying.

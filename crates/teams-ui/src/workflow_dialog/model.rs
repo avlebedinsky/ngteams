@@ -216,6 +216,7 @@ pub fn problem(error: &WorkflowFailure) -> &'static str {
             "This workflow changed after you opened it. Refresh and review the current definition before saving."
         }
         WorkflowFailure::ReadOnly => "This app is read-only. Workflow changes and runs are unavailable.",
+        WorkflowFailure::InvalidInput => "Check the required trigger inputs and their types, then try again.",
         WorkflowFailure::InvalidResponse => {
             "Power Automate returned data this app could not read. Refresh to try again."
         }

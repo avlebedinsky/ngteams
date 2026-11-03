@@ -101,6 +101,29 @@ blocker. Opening the Teams modal would install an automation bot, which was bloc
 The service’s actual read catalogs, environments and connections were verified with the normal native auth client.
 Creation, connector consent, edits, start/stop, deletion and running were exercised against synthetic local services
 only. A schedule’s later recipients cannot be bounded to the lab humans, so no real automation was created or run.
-Required-input triggers cannot currently be supplied inputs through the captured empty management-run operation.
 The advanced definition view preserves unsupported action types; a visual action graph and separate Copilot Actions
 session are not implemented.
+
+## Runs with inputs
+
+Microsoft’s current client distinguishes empty management runs from payload-bearing manual runs. For Button,
+PowerApp, PowerAppV2, Skills and PowerPages triggers, the Logic Flows connector delivers `triggerBody()` with an
+API Hub credential. The native form uses the trigger’s declared fields and validates required values, types,
+allowed values and simple nested constraints. The transport reads the full flow again and validates the payload
+against its fresh schema before starting a run. Unresolved references and unsupported compound input schemas are
+refused rather than silently accepted.
+
+A read-only native probe independently verified the actor and both new token audiences. The environment-scoped
+Power Platform `/powerautomate/apis/shared_logicflows?api-version=1` returned401 with the native client’s token.
+The supported classic Power Apps metadata route
+`/providers/Microsoft.PowerApps/apis/shared_logicflows?api-version=2016-11-01&$filter=environment eq '<environment>'`
+returned200 and its actual `properties.primaryRuntimeUrl`. No runtime was invoked by that probe.
+
+The typed input run discovers this metadata freshly using only the Power Apps audience. It requires the exact
+Microsoft `shared_logicflows` name/id, HTTPS, no userinfo/port/query/fragment, the selected environment’s host prefix
+under `.azure-apihub.net`, and the exact `/apim/logicflows` path. Only then does it obtain an
+`https://apihub.azure.com` token and POST the JSON body once to
+`<primaryRuntimeUrl>/<flow>/triggers/<trigger>/run?api-version=2016-11-01`. Generic requests cannot choose this
+runtime or use its credential. Metadata rejection occurs before API Hub credential lookup. Local synthetic tests
+prove payload delivery, distinct credential audiences, fresh validation, no replay and external/cross-environment
+URL refusal. Lab input runs remain refused before any discovery or token lookup.

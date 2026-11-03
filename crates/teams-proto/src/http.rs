@@ -773,6 +773,7 @@ impl<C: Credentials> HttpTransport<C> {
             Service::Graph => fixed(format!("https://{GRAPH_HOST}/v1.0")),
             Service::Workflows => fixed("https://api.flow.microsoft.com/".to_owned()),
             Service::WorkflowConnections => fixed("https://api.powerapps.com/".to_owned()),
+            Service::WorkflowRuntime => Err(refused(Refusal::NotAllowed)),
             Service::MiddleTier => self.middle_tier.clone().ok_or(refused(Refusal::NoMiddleTier)),
             Service::Csa => self.csa.clone().ok_or(refused(Refusal::NoCsa)),
             Service::Provisioning => self.provisioning.clone().ok_or(refused(Refusal::NoProvisioning)),
@@ -831,7 +832,10 @@ impl<C: Credentials> HttpTransport<C> {
             return Err(HttpError::Refused(Refusal::Substrate));
         }
         // Cloud operations must use the typed route's independent lab/read-only checks and one-attempt policy.
-        if matches!(service, Service::Workflows | Service::WorkflowConnections) {
+        if matches!(
+            service,
+            Service::Workflows | Service::WorkflowConnections | Service::WorkflowRuntime
+        ) {
             return Err(HttpError::Refused(Refusal::NotAllowed));
         }
         let url = self.url_for(service, endpoint)?;
@@ -1636,6 +1640,7 @@ fn audience(service: Service) -> Option<&'static str> {
         Service::Substrate => Some(SUBSTRATE_AUDIENCE),
         Service::Workflows => Some(crate::workflow::WORKFLOW_AUDIENCE),
         Service::WorkflowConnections => Some(crate::workflow::CONNECTION_AUDIENCE),
+        Service::WorkflowRuntime => Some(crate::workflow::RUNTIME_AUDIENCE),
         Service::Trouter
         | Service::Calling
         | Service::Emoticons
@@ -1653,6 +1658,7 @@ fn plain_headers(service: Service, body: bool) -> Vec<(String, String)> {
         Service::Provisioning
         | Service::Workflows
         | Service::WorkflowConnections
+        | Service::WorkflowRuntime
         | Service::ChatService
         | Service::Registrar
         | Service::Trouter
@@ -1681,6 +1687,7 @@ fn plain_headers(service: Service, body: bool) -> Vec<(String, String)> {
         | Service::Provisioning
         | Service::Workflows
         | Service::WorkflowConnections
+        | Service::WorkflowRuntime
         | Service::UserProfile
         | Service::Graph
         | Service::Csa
@@ -1739,6 +1746,7 @@ fn service_headers(service: Service) -> &'static [(&'static str, &'static str)] 
         | Service::Provisioning
         | Service::Workflows
         | Service::WorkflowConnections
+        | Service::WorkflowRuntime
         | Service::Calling
         | Service::Emoticons
         | Service::FileThumbnail
@@ -1774,6 +1782,7 @@ fn on_base(service: Service, base: &Url, url: &Url, endpoint: &Endpoint) -> bool
         | Service::Provisioning
         | Service::Workflows
         | Service::WorkflowConnections
+        | Service::WorkflowRuntime
         | Service::UserProfile
         | Service::Presence
         | Service::Relay

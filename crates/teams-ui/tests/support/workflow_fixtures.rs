@@ -34,3 +34,11 @@ pub fn answer(request: &WorkflowRequest) -> WorkflowResponse {
 pub fn flow() -> Value {
     json!({"name":"synthetic-flow","properties":{"displayName":"Weekly channel reminder","description":"A synthetic workflow","state":"Started","definition":{"parameters":{"message":{"type":"String","defaultValue":"Weekly reminder"},"teams.group":{"type":"String","defaultValue":"synthetic-group"},"teams.channel":{"type":"String","defaultValue":"synthetic-channel"}},"triggers":{"manual":{"type":"Request","kind":"Button"}},"actions":{"post":{"type":"OpenApiConnection","inputs":{"host":{"apiId":"/providers/Microsoft.PowerApps/apis/shared_teams","connectionName":"shared_teams","operationId":"PostMessageToConversation"},"parameters":{"location":"Channel","body/recipient/groupId":"@parameters('teams.group')","body/recipient/channelId":"@parameters('teams.channel')","body/messageBody":"<p>Weekly reminder</p>"}}}}},"connectionReferences":{}}})
 }
+
+pub fn input_answer(request: &WorkflowRequest) -> WorkflowResponse {
+    let mut value = answer(request)?;
+    if matches!(request, WorkflowRequest::Get { .. }) {
+        value["properties"]["definition"]["triggers"]["manual"]["inputs"] = json!({"schema":{"type":"object","required":["text"],"properties":{"text":{"type":"string","title":"Reminder text","description":"Message to post when this workflow runs","minLength":1},"count":{"type":"integer","title":"Repeat count","default":1,"minimum":1}}}});
+    }
+    Ok(value)
+}

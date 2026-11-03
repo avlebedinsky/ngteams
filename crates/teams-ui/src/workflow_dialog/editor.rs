@@ -187,7 +187,7 @@ impl WorkflowDialog {
         self.mutate(request, "Workflow saved", cx);
     }
 
-    fn mutate(&mut self, request: WorkflowRequest, notice: &'static str, cx: &mut Context<Self>) {
+    pub(super) fn mutate(&mut self, request: WorkflowRequest, notice: &'static str, cx: &mut Context<Self>) {
         if self.busy || self.core.read_only() || self.uncertain.is_some() {
             return;
         }
@@ -435,7 +435,7 @@ impl WorkflowDialog {
                     .label("Run")
                     .icon(Glyph::PLAY.icon())
                     .disabled(self.busy || self.uncertain.is_some())
-                    .on_click(cx.listener(move |this, _, _, cx| this.run(&running, cx))),
+                    .on_click(cx.listener(move |this, _, window, cx| this.prepare_run(&running, window, cx))),
             ))
             .child(selected_by(
                 "workflow-delete",
@@ -464,41 +464,6 @@ impl WorkflowDialog {
             "Workflow updated",
             cx,
         );
-    }
-
-    fn run(&mut self, card: &Card, cx: &mut Context<Self>) {
-        let Some(environment) = self.environment.clone() else {
-            return;
-        };
-        let triggers = card
-            .properties
-            .pointer("/definition/triggers")
-            .and_then(Value::as_object);
-        let trigger = triggers
-            .filter(|triggers| {
-                triggers.len() == 1
-                    && !triggers.values().any(|trigger| {
-                        trigger
-                            .pointer("/inputs/schema/required")
-                            .and_then(Value::as_array)
-                            .is_some_and(|required| !required.is_empty())
-                    })
-            })
-            .and_then(|triggers| triggers.keys().next().cloned());
-        if let Some(trigger) = trigger {
-            self.mutate(
-                WorkflowRequest::Run {
-                    environment,
-                    flow: card.id.clone(),
-                    trigger,
-                },
-                "Workflow run requested",
-                cx,
-            );
-        } else {
-            self.error = Some("This workflow needs trigger inputs or a different trigger. Required-input runs are not supported by the available management operation.".to_owned());
-            cx.notify();
-        }
     }
 
     pub(super) fn history_view(&self, card: &Card, palette: Palette, cx: &Context<Self>) -> AnyElement {

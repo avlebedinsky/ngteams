@@ -16,7 +16,13 @@ struct Tokens(Mutex<Vec<String>>);
 impl Credentials for Tokens {
     fn bearer(&self, audience: &str) -> impl Future<Output = Result<Secret, TokenError>> + Send {
         self.0.lock().unwrap().push(audience.to_owned());
-        std::future::ready(Ok(Secret::new("synthetic-flow-token")))
+        std::future::ready(Ok(Secret::new(if audience == "https://apihub.azure.com" {
+            "synthetic-runtime-token"
+        } else if audience == "https://service.powerapps.com/" {
+            "synthetic-connections-token"
+        } else {
+            "synthetic-flow-token"
+        })))
     }
     async fn bearer_rejected(&self, audience: &str, _: &Secret) -> Result<Secret, TokenError> {
         self.bearer(audience).await
@@ -91,6 +97,12 @@ async fn every_cloud_mutation_is_refused_for_labs_before_credentials_or_network(
         WorkflowRequest::Delete {
             environment: environment.clone(),
             flow: flow.clone(),
+        },
+        WorkflowRequest::RunWithInputs {
+            environment: environment.clone(),
+            flow: flow.clone(),
+            trigger: "manual".into(),
+            inputs: json!({"text":"Synthetic"}),
         },
         WorkflowRequest::Run {
             environment,
@@ -334,4 +346,143 @@ fn history_pages_cannot_cross_flow_or_environment() {
             .checked_endpoint()
             .is_err()
     );
+}
+
+fn input_flow() -> serde_json::Value {
+    json!({"name":"synthetic","properties":{"definition":{"triggers":{"manual":{"type":"Request","kind":"Button","inputs":{"schema":{"type":"object","required":["text"],"additionalProperties":false,"properties":{"text":{"type":"string","minLength":1}}}}}}}}})
+}
+fn logic_metadata(runtime: &str) -> serde_json::Value {
+    json!({"name":"shared_logicflows","id":"/providers/Microsoft.PowerApps/apis/shared_logicflows","properties":{"primaryRuntimeUrl":runtime}})
+}
+async fn mount_input_reads(server: &MockServer, runtime: &str) {
+    Mock::given(method("GET"))
+        .and(path(
+            "/providers/Microsoft.ProcessSimple/environments/Default-synthetic/flows/synthetic",
+        ))
+        .and(header("authorization", "Bearer synthetic-flow-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(input_flow()))
+        .expect(1)
+        .mount(server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/providers/Microsoft.PowerApps/apis/shared_logicflows"))
+        .and(query_param("$filter", "environment eq 'Default-synthetic'"))
+        .and(header("authorization", "Bearer synthetic-connections-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(logic_metadata(runtime)))
+        .expect(1)
+        .mount(server)
+        .await;
+}
+fn input_request() -> WorkflowRequest {
+    WorkflowRequest::RunWithInputs {
+        environment: "Default-synthetic".into(),
+        flow: "synthetic".into(),
+        trigger: "manual".into(),
+        inputs: json!({"text":"Synthetic input"}),
+    }
+}
+#[tokio::test]
+async fn trigger_inputs_reach_only_the_discovered_own_logicflows_runtime_once() {
+    let server = MockServer::start().await;
+    mount_input_reads(
+        &server,
+        "https://default-synthetic.00.common.synthetic.azure-apihub.net/apim/logicflows",
+    )
+    .await;
+    Mock::given(method("POST"))
+        .and(path("/apim/logicflows/synthetic/triggers/manual/run"))
+        .and(header("authorization", "Bearer synthetic-runtime-token"))
+        .and(wiremock::matchers::body_json(json!({"text":"Synthetic input"})))
+        .respond_with(ResponseTemplate::new(202).set_body_string("Accepted"))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let tokens = Arc::new(Tokens::default());
+    assert_eq!(
+        transport(&server, tokens.clone())
+            .with_workflow_mutations(true)
+            .workflow(&input_request())
+            .await,
+        Ok(serde_json::Value::Null)
+    );
+    assert_eq!(
+        *tokens.0.lock().unwrap(),
+        [
+            "https://service.flow.microsoft.com/",
+            "https://service.powerapps.com/",
+            "https://apihub.azure.com"
+        ]
+    );
+}
+#[tokio::test]
+async fn a_runtime_failure_is_never_automatically_replayed() {
+    let server = MockServer::start().await;
+    mount_input_reads(
+        &server,
+        "https://default-synthetic.00.common.synthetic.azure-apihub.net/apim/logicflows",
+    )
+    .await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(503))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert_eq!(
+        transport(&server, Arc::default())
+            .with_workflow_mutations(true)
+            .workflow(&input_request())
+            .await,
+        Err(WorkflowFailure::Service(503))
+    );
+}
+#[tokio::test]
+async fn metadata_cannot_send_a_runtime_credential_to_an_external_or_different_environment() {
+    for runtime in [
+        "https://outside.example.test/apim/logicflows",
+        "https://another-environment.00.common.synthetic.azure-apihub.net/apim/logicflows",
+        "https://default-synthetic.00.common.synthetic.azure-apihub.net/apim/custom",
+        "https://default-synthetic.00.common.synthetic.azure-apihub.net.evil.test/apim/logicflows",
+        "https://user@default-synthetic.00.common.synthetic.azure-apihub.net/apim/logicflows",
+    ] {
+        let server = MockServer::start().await;
+        mount_input_reads(&server, runtime).await;
+        let tokens = Arc::new(Tokens::default());
+        assert_eq!(
+            transport(&server, tokens.clone())
+                .with_workflow_mutations(true)
+                .workflow(&input_request())
+                .await,
+            Err(WorkflowFailure::InvalidResponse)
+        );
+        assert!(
+            !tokens
+                .0
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|aud| aud == "https://apihub.azure.com")
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    }
+}
+#[tokio::test]
+async fn fresh_trigger_validation_prevents_running_invalid_or_stale_input() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(input_flow()))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let mut request = input_request();
+    if let WorkflowRequest::RunWithInputs { inputs, .. } = &mut request {
+        *inputs = json!({"text":false});
+    }
+    assert_eq!(
+        transport(&server, Arc::default())
+            .with_workflow_mutations(true)
+            .workflow(&request)
+            .await,
+        Err(WorkflowFailure::InvalidInput)
+    );
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }

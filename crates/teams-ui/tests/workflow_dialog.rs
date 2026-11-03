@@ -198,3 +198,25 @@ fn existing_edits_preserve_original_destinations_and_unknown_definition_nodes() 
         true
     );
 }
+
+#[test]
+fn required_trigger_inputs_are_native_and_missing_inputs_never_start_a_run() {
+    let (rig, _view, cx) = window();
+    *rig.core.workflow_handler.lock().unwrap() = Some(fixtures::input_answer);
+    click(cx, "workflow-open-synthetic-flow");
+    click(cx, "workflow-run");
+    assert!(bounds(cx, "workflow-run-input-text").is_some());
+    click(cx, "workflow-run-submit");
+    assert!(
+        !rig.core
+            .workflow_requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(WorkflowRequest::writes)
+    );
+    click(cx, "workflow-run-input-text");
+    cx.simulate_input("Synthetic reminder");
+    click(cx, "workflow-run-submit");
+    assert!(rig.core.workflow_requests.lock().unwrap().iter().any(|request|matches!(request,WorkflowRequest::RunWithInputs {environment,flow,trigger,inputs} if environment=="Default-synthetic" && flow=="synthetic-flow" && trigger=="manual" && inputs["text"]=="Synthetic reminder")));
+}

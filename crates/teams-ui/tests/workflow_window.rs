@@ -61,7 +61,7 @@ fn parent() -> SandboxResult {
         return Ok(());
     };
     for (theme, label) in [(LIGHT_KEY, "light"), (DARK_KEY, "dark")] {
-        for page in ["browse", "configure"] {
+        for page in ["browse", "configure", "run-inputs"] {
             shot(&sandbox, theme, label, page)?;
         }
     }
@@ -102,6 +102,7 @@ fn child(mode: &str) -> SandboxResult {
     let (theme, page) = mode.split_once('|').unwrap_or((LIGHT_KEY, "browse"));
     let theme = if theme == DARK_KEY { DARK_KEY } else { LIGHT_KEY };
     let configure = page == "configure";
+    let run_inputs = page == "run-inputs";
     gpui_platform::linux(WindowingModes::WAYLAND).run(move |cx: &mut App| {
         teams_ui::window::init(cx);
         theme::set_appearance(
@@ -122,7 +123,11 @@ fn child(mode: &str) -> SandboxResult {
         *core
             .workflow_handler
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(fixtures::answer);
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(if run_inputs {
+            fixtures::input_answer
+        } else {
+            fixtures::answer
+        });
         let core: Arc<dyn Core> = core;
         let team = Team {
             id: "synthetic-team".into(),
@@ -149,6 +154,9 @@ fn child(mode: &str) -> SandboxResult {
             after(window, 15, move |window, cx| {
                 if configure {
                     dialog.update(cx, |view, cx| view.select_template("synthetic-template", window, cx));
+                }
+                if run_inputs {
+                    dialog.update(cx, |view, cx| view.prepare_workflow_run("synthetic-flow", window, cx));
                 }
                 after(window, 15, |_, _| say("ready"));
             });

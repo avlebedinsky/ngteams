@@ -1,6 +1,8 @@
 //! A bounded first-party Flow route. Cloud mutations are never executed by the lab: a server-side scheduled flow
 //! cannot revalidate the lab's full human membership before each later notification. This check is independent of
 //! the historical fence classifier. Personal application use remains unrestricted, subject to read-only mode.
+mod inputs;
+
 use crate::workflow::{WorkflowFailure, WorkflowRequest, WorkflowResponse};
 use crate::{Credentials, HttpError, HttpTransport};
 
@@ -17,6 +19,15 @@ impl<C: Credentials> HttpTransport<C> {
         }
         if request.writes() && (!self.workflow_mutations || self.lab_targets.is_some()) {
             return Err(WorkflowFailure::LabCloudMutation);
+        }
+        if let WorkflowRequest::RunWithInputs {
+            environment,
+            flow,
+            trigger,
+            inputs,
+        } = request
+        {
+            return self.workflow_run_inputs(environment, flow, trigger, inputs).await;
         }
         self.check_workflow_version(request).await?;
         self.workflow_http(request).await

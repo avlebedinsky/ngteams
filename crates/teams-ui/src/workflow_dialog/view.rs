@@ -356,6 +356,7 @@ impl WorkflowDialog {
             Screen::Detail(card) => self.detail(card, palette, cx),
             Screen::History(card) => self.history_view(card, palette, cx),
             Screen::RunDetails { card, run, actions } => Self::run_view(card, run, actions, palette),
+            Screen::RunInputs { card, .. } => self.run_inputs_view(card, palette, cx),
             Screen::Delete(card) => self.delete_view(card, cx),
         }
     }

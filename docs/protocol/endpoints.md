@@ -515,5 +515,7 @@ reaches it as `Service::Giphy` (`https://media.giphy.com/`, no token) and sends 
 | `GET` | Flow `…/flows/<flow>/runs`, `runs/<run>/actions` | Run history and action status | validated same-flow pagination; signed content links never fetched | Microsoft client source |
 | `POST` | Flow `…/flows/<flow>/triggers/<trigger>/listCallbackUrl` | Copy a webhook address | read only, address never invoked | Microsoft client source |
 | `POST` | middle tier `beta/users/useraggregatesettings` | Own Copilot eligibility | captured settings selectors; unknown remains error | native Teams reference, actual lab not eligible |
+| `GET` | Power Apps `providers/Microsoft.PowerApps/apis/shared_logicflows` | Discover input-run runtime | own environment filter, exact Microsoft connector and runtime scope validation | native200 |
+| `POST` | discovered API Hub `apim/logicflows/<flow>/triggers/<trigger>/run` | Deliver manual trigger inputs | separate API Hub token, fresh schema validation, one attempt; lab denied | Microsoft client source; native metadata200; synthetic run only |
 | `GET` | Power Apps `providers/Microsoft.PowerApps/connections` | Environment's connections | separate Power Apps audience and exact environment filter | native 200, empty list |
 | `PUT`, `POST` | Power Apps `…/apis/<connector>/connections/<name>`, `…/getConsentLink` | Connect an account | user-initiated creation and Microsoft-hosted consent; no tokens to returned URLs | Microsoft portal route map and client source; synthetic only |
