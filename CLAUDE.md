@@ -8,16 +8,13 @@ the reference. Two builds: the lab binaries, tested in a lab of three dedicated 
 
 These protect real people, the user's account and the user's data. They hold for every agent and every change.
 
-- **Lab accounts contact only each other.** From the lab browser or a lab binary, a write that reaches people (a
-  message, reaction, call, chat created, member added or removed, invite, meeting, mail, share) goes only to a target
-  whose members, read fresh and in full, are lab accounts or the echo service. When unsure whether a request reaches
-  people, treat it as contacting. Everything else is allowed without asking: reads, the account's own session and
-  settings, presence, status, typing, read receipts.
-- **Calls go only to the lab, both ways**: lab accounts, the echo service, and the user's own accounts named as call
-  guests in `lab.toml` (calls only, never a message or invite). Call writes are mapped only from captures.
+- **Lab accounts talk and call only each other, the echo service and the user's own account** (`lab.toml`'s
+  `contacts`), both ways. That is the only lab rule: from the lab browser or a lab binary, a write that reaches people
+  is denied only when someone else is on its target or added by it (read fresh), or when that can't be read. Apps and
+  bots aren't people. Everything else is allowed without asking.
 - The full lab rule, which the fence implements, is [docs/lab-rules.md](docs/lab-rules.md); read it before changing
-  fence, write or call code. A new request kind that passes its test goes ahead; changing a test, or widening whom a
-  lab request may reach, needs the user's sign-off.
+  fence, write or call code. Widening whom a lab write may reach, or weakening a test of that rule, needs the user's
+  sign-off; anything else that passes the tests goes ahead.
 - **Arm the browser fence before anything runs live against the tenant.**
 - **No write ever comes from a `cargo test` process**: a live test spawns a normally built lab binary.
 - **Captures, tokens, debug logs and `fence.log` never enter the repo**, not even sanitized. Committed fixtures are

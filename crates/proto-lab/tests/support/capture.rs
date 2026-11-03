@@ -214,7 +214,7 @@ fn denied_request_bodies_are_optional_and_each_deny_cause_is_preserved() {
         DenyCause::Malformed,
         DenyCause::ForeignSocket,
         DenyCause::Forced,
-        DenyCause::Fenced(teams_fence::DenyReason::NoMembers),
+        DenyCause::Fenced(teams_fence::DenyReason::OrgWide),
     ] {
         capture.http_verdict(&paused, Verdict::Deny(cause));
     }

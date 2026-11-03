@@ -248,10 +248,8 @@ fn a_personal_read_by_post_names_anyone_and_a_lab_one_keeps_its_rule() {
     assert_eq!(log.entries().len(), 5);
     let lab = Fence::new(Roster::new([mri(GUID_A)], []), FenceLog::from_writer(std::io::sink()));
     assert!(!lab.is_personal());
-    assert_eq!(
-        lab.check_post_read("profile", &[mri(GUID_X)]).unwrap_err().reason(),
-        PostReadDenyReason::Outsiders { count: 1 }
-    );
+    // a read reaches nobody: a lab fence lets it through too
+    assert!(lab.check_post_read("profile", &[mri(GUID_X)]).is_ok());
 }
 
 /// The paths of a personal build under `dir`.

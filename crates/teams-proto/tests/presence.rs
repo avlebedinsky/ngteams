@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
-use teams_fence::{Fence, FenceLog, Mri, PostReadDenyReason, Roster};
+use teams_fence::{Fence, FenceLog, Mri, Roster};
 use teams_proto::{
     AnswerError, BuildError, Client, Credentials, Endpoint, HttpError, HttpTransport, Method, PRESENCE_AUDIENCE,
     PostRead, PostReadError, PresenceRead, ProbePostRead, Read, Request as _, Service, ShortProfileLookup, Transport,
@@ -354,21 +354,16 @@ async fn anything_the_presence_entry_doesnt_name_is_unknown_and_nothing_goes_out
 }
 
 #[tokio::test]
-async fn a_non_lab_mri_an_approved_service_or_a_duplicate_gets_no_permit() {
+async fn a_read_naming_anyone_gets_a_permit_since_it_reaches_nobody() {
     let setup = setup(Some(PRESENCE_BASE)).await;
-    let cases: [(&[&str], PostReadDenyReason); 4] = [
-        (&[LAB_B, COWORKER], PostReadDenyReason::Outsiders { count: 1 }),
-        (&[ECHO], PostReadDenyReason::Outsiders { count: 1 }),
-        (&[COWORKER, ECHO], PostReadDenyReason::Outsiders { count: 2 }),
-        (&[LAB_B, LAB_B], PostReadDenyReason::Duplicate),
-    ];
-    for (names, reason) in cases {
+    let cases: [&[&str]; 3] = [&[LAB_B, COWORKER], &[ECHO], &[COWORKER, ECHO]];
+    for names in cases {
         let request = read_of(names);
-        let denied = setup
+        let permit = setup
             .fence
             .check_post_read(PresenceRead::KIND, request.names())
-            .unwrap_err();
-        assert_eq!(denied.reason(), reason, "{names:?}");
+            .unwrap();
+        assert_eq!(permit.names(), request.names(), "{names:?}");
     }
     assert!(PresenceRead::new(Vec::new()).is_none(), "a read names someone");
     assert!(setup.log.sent().is_empty());

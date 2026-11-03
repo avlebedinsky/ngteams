@@ -600,7 +600,7 @@ or it was turned away) its entry goes `inactive` with no endpoints.
 - **Deny**: `POST …/conv/<id>/removeParticipant` (its `removeParticipant` link) with `{"participants": {"from", "to":
   [{"id"}]}, "links": {"removeParticipantSuccess", "removeParticipantFailure"}}`; the card goes from the page at once.
 
-Both are mapped as an `add` is judged: the sender and everyone named lab accounts, approved services or call guests
+Both are mapped as an `add` is judged: the sender and everyone named the lab's people ([lab-rules.md](../lab-rules.md))
 (`CallOperation::Admit`, a `WriteKind::Invite`, and `CallOperation::RemoveParticipant`). The native client: the roster's
 lobby is read apart from who is in the call (`teams-call`'s `CallEvent::Lobby` for whoever waits,
 `CallEvent::InLobby` for the account itself); the call shows `CallStatus::Lobby` ("Someone in the meeting should let you
@@ -824,6 +824,7 @@ jitter buffer (NetEq), which recovers or conceals what was lost.
 ## Seen beside the call
 
 - The caller's own call log's read horizon: `PUT …/v1/users/ME/conversations/48:calllogs/properties?name=consumptionhorizon`
-  when a call ends; it reaches nobody, but no row carves it out, so it is denied and on the expected-deny list.
+  when a call ends; it reaches nobody, and the chat service's carve-outs let it through (the horizon of the account's
+  own `48:` streams).
 - Deliveries at an endpoint's root with `evt` 115 and 116 and a gzip'd `cp`: 115 when a participant joins a call of the
   account's (`conversationController`, `userJoinTime`, `participants`), 116 when one leaves. Read by nothing.

@@ -3,17 +3,13 @@
 //! sends its reads by `POST` as plain requests (they reach nobody); the personal build sends them under a permit, so
 //! each is logged by its entry's kind (`docs/personal-build.md`).
 //!
-//! A personal fence (`Fence::open_personal`) permits every one, whoever it names. Through a lab fence the sealed
-//! list keeps its limit: the fence denies a list that is empty, that names an MRI twice, or that names anyone but the
-//! lab accounts of its roster, an approved service participant included ([`Fence::lab_accounts_only`]). It fetches
-//! nothing.
+//! A read reaches nobody, so every fence, a lab one too, permits every one, whoever it names. It fetches nothing.
 //!
 //! Every decision is appended to `fence.log` (the entry's kind, how many MRIs it names, the verdict and the reason;
 //! never the MRIs), and an allow that can't be logged is denied. What the request looks like on the wire (its
 //! service, path, query, headers and body) is `teams-proto`'s to check against the entry's captured shape: this
 //! crate knows MRIs, not HTTP.
 
-use std::collections::BTreeSet;
 use std::fmt;
 
 use serde::Serialize;
@@ -48,12 +44,6 @@ impl PostReadPermit {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PostReadDenyReason {
-    /// It names nobody.
-    NoNames,
-    /// It names an MRI more than once.
-    Duplicate,
-    /// It names MRIs that aren't lab accounts (an approved service participant isn't one).
-    Outsiders { count: usize },
     /// It would be allowed, but its decision couldn't be written to `fence.log`.
     LogUnavailable,
 }
@@ -61,9 +51,6 @@ pub enum PostReadDenyReason {
 impl fmt::Display for PostReadDenyReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NoNames => f.write_str("it names nobody"),
-            Self::Duplicate => f.write_str("it names an MRI more than once"),
-            Self::Outsiders { count } => write!(f, "{count} MRI(s) that aren't lab accounts"),
             Self::LogUnavailable => f.write_str("fence.log can't be written"),
         }
     }
@@ -91,62 +78,23 @@ impl PostReadDenied {
 }
 
 impl Fence {
-    /// Decides one read by `POST` of the entry `kind` naming `names`, in that order: a permit for exactly them when
-    /// they are at least one MRI, none twice, and every one a lab account of the roster
-    /// ([`Fence::lab_accounts_only`]); otherwise denied. A personal fence permits every one. The decision is appended to
-    /// `fence.log` before the permit is made; an allow that can't be logged is denied.
+    /// Decides one read by `POST` of the entry `kind` naming `names`, in that order: a read reaches nobody, so it is a
+    /// permit for exactly them, from a lab fence and a personal one alike. The decision is appended to `fence.log`
+    /// before the permit is made; an allow that can't be logged is denied.
     ///
     /// # Errors
-    /// [`PostReadDenied`] for an allow that can't be logged; through a lab fence also for an empty list, a duplicate
-    /// MRI or any MRI that isn't a lab account.
+    /// [`PostReadDenied`] for an allow that can't be logged.
     pub fn check_post_read(&self, kind: &'static str, names: &[Mri]) -> Result<PostReadPermit, PostReadDenied> {
-        let verdict = if self.is_personal() {
-            None
-        } else {
-            self.judge_post_read(names)
-        };
-        self.post_read_decided(kind, names, verdict)
-    }
-
-    /// Logs `verdict` (`None` allows) on the read by `POST` `kind` naming `names`, and gives the permit when it allows
-    /// and was logged.
-    fn post_read_decided(
-        &self,
-        kind: &'static str,
-        names: &[Mri],
-        verdict: Option<PostReadDenyReason>,
-    ) -> Result<PostReadPermit, PostReadDenied> {
-        let logged = self.log().record_post_read(kind, names.len(), verdict);
-        let deny = |reason| PostReadDenied {
-            kind,
-            names: names.len(),
-            reason,
-        };
-        match (verdict, logged) {
-            (None, Ok(())) => Ok(PostReadPermit {
+        match self.log().record_post_read(kind, names.len(), None) {
+            Ok(()) => Ok(PostReadPermit {
                 kind,
                 names: names.to_vec(),
             }),
-            (None, Err(_)) => Err(deny(PostReadDenyReason::LogUnavailable)),
-            (Some(reason), _) => Err(deny(reason)),
+            Err(_) => Err(PostReadDenied {
+                kind,
+                names: names.len(),
+                reason: PostReadDenyReason::LogUnavailable,
+            }),
         }
-    }
-
-    /// `None` to allow, or why not.
-    fn judge_post_read(&self, names: &[Mri]) -> Option<PostReadDenyReason> {
-        if names.is_empty() {
-            return Some(PostReadDenyReason::NoNames);
-        }
-        if names.iter().collect::<BTreeSet<_>>().len() != names.len() {
-            return Some(PostReadDenyReason::Duplicate);
-        }
-        if self.lab_accounts_only(names) {
-            return None;
-        }
-        let count = names
-            .iter()
-            .filter(|mri| !self.lab_accounts_only(std::slice::from_ref(mri)))
-            .count();
-        Some(PostReadDenyReason::Outsiders { count })
     }
 }

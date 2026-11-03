@@ -1,7 +1,7 @@
 //! Teams and their channels (`docs/protocol/teams.md`, "The fence"): the live source reads a team's members from its
-//! root thread, fresh, and the fence lets a write on the team or one of its channels through only when everyone on it is
-//! a lab account or an approved service, Teams' own team apps (`lab.toml`'s `team_apps`) not counted. Any other app or
-//! bot on the team is someone the write reaches.
+//! root thread, fresh, and the fence lets a write on the team or one of its channels through unless a person outside the
+//! lab (neither a lab account, an approved service nor a contact) is on it. Apps and bots, Teams' own or added, are no
+//! people.
 //!
 //! The answers are the synthetic fixtures `tests/fixtures/chatsvc/thread-team.json` and `thread-team-members.json`, with
 //! made-up GUIDs filled in. No real MRI or token appears here.
@@ -24,12 +24,14 @@ const GUID_A: &str = "00000000-0000-4000-8000-00000000000a";
 const GUID_B: &str = "00000000-0000-4000-8000-00000000000b";
 const GUID_C: &str = "00000000-0000-4000-8000-00000000000c";
 const GUID_X: &str = "00000000-0000-4000-8000-0000000000ff";
+/// The user's own account, a contact.
+const GUID_OWN: &str = "00000000-0000-4000-8000-0000000000e0";
 const APPS: [&str; 3] = [
     "00000000-0000-4000-8000-0000000000a1",
     "00000000-0000-4000-8000-0000000000a2",
     "00000000-0000-4000-8000-0000000000a3",
 ];
-/// An app someone added to the team: in the same shape as Teams' own, but not one of them.
+/// An app someone added to the team: in the same shape as Teams' own.
 const ADDED_APP: &str = "00000000-0000-4000-8000-0000000000b0";
 const TEAM: &str = "lAbTeAm0123-_x";
 const GROUP: &str = "00000000-0000-4000-8000-0000000000d0";
@@ -144,7 +146,7 @@ async fn requests(server: &MockServer) -> Vec<Request> {
 }
 
 fn roster() -> Roster {
-    Roster::new([mri(GUID_A), mri(GUID_B), mri(GUID_C)], []).with_team_apps(apps())
+    Roster::new([mri(GUID_A), mri(GUID_B), mri(GUID_C)], [])
 }
 
 fn fence(roster: Roster) -> Fence {
@@ -199,48 +201,42 @@ async fn a_write_on_a_team_of_the_lab_and_its_own_apps_is_allowed() -> TestResul
 }
 
 #[tokio::test]
-async fn without_team_apps_in_the_roster_the_apps_are_outsiders() -> TestResult {
-    let server = MockServer::start().await;
-    serve(&server, &members_body()?).await?;
-    let source = source(&server)?;
-    let fence = fence(Roster::new([mri(GUID_A), mri(GUID_B), mri(GUID_C)], []));
-    let reason = denied(&fence, Target::new(WriteKind::TeamChange, team()), &source).await?;
-    assert_eq!(reason, DenyReason::Outsiders { count: 3 });
-    Ok(())
-}
-
-#[tokio::test]
-async fn an_app_someone_added_or_a_person_outside_the_lab_on_the_team_denies() -> TestResult {
+async fn an_app_or_a_bot_on_the_team_is_no_person_and_only_a_person_outside_the_lab_denies() -> TestResult {
     for (who, outsiders) in [
-        (vec![app(ADDED_APP)], 1),
-        (vec![mri(GUID_X)], 1),
-        (vec![app(ADDED_APP), mri(GUID_X)], 2),
+        (vec![app(ADDED_APP)], None),
+        (vec![mri(GUID_X)], Some(1)),
+        (vec![app(ADDED_APP), mri(GUID_X)], Some(1)),
     ] {
         let server = MockServer::start().await;
         serve(&server, &members_with(&who)?).await?;
         let source = source(&server)?;
-        let reason = denied(&fence(roster()), Target::new(WriteKind::TeamChange, team()), &source).await?;
-        assert_eq!(reason, DenyReason::Outsiders { count: outsiders }, "{who:?}");
+        let verdict = fence(roster())
+            .check(Target::new(WriteKind::TeamChange, team()), &source)
+            .await;
+        match outsiders {
+            None => assert!(verdict.is_ok(), "{who:?}: {verdict:?}"),
+            Some(count) => assert_eq!(
+                verdict.err().map(|denied| *denied.reason()),
+                Some(DenyReason::Outsiders { count }),
+                "{who:?}"
+            ),
+        }
     }
     Ok(())
 }
 
 #[tokio::test]
-async fn a_team_app_is_never_someone_a_write_may_add() -> TestResult {
+async fn adding_an_app_reaches_no_person() -> TestResult {
     let server = MockServer::start().await;
     serve(&server, &members_body()?).await?;
     let source = source(&server)?;
     let added = Target::new(WriteKind::MemberChange, team()).with_added([app(APPS[0])]);
-    assert_eq!(
-        denied(&fence(roster()), added, &source).await?,
-        DenyReason::Outsiders { count: 1 }
-    );
+    assert!(fence(roster()).check(added, &source).await.is_ok());
     Ok(())
 }
 
 #[tokio::test]
-async fn a_team_app_counts_only_on_a_team_never_in_a_chat() -> TestResult {
-    // a group chat holding one of the apps is a chat with a bot in it
+async fn a_chat_holding_apps_is_no_chat_with_outsiders() -> TestResult {
     let server = MockServer::start().await;
     let chat = "19:0123456789abcdef0123456789abcdef@thread.v2";
     Mock::given(method("GET"))
@@ -250,23 +246,22 @@ async fn a_team_app_counts_only_on_a_team_never_in_a_chat() -> TestResult {
         .await;
     let source = source(&server)?;
     let target = Target::new(WriteKind::Message, Scope::Conversation { id: chat.to_owned() });
-    assert_eq!(
-        denied(&fence(roster()), target, &source).await?,
-        DenyReason::Outsiders { count: 3 }
-    );
+    assert!(fence(roster()).check(target, &source).await.is_ok());
     Ok(())
 }
 
 #[tokio::test]
-async fn a_team_of_its_apps_alone_has_nobody_to_judge() -> TestResult {
+async fn a_team_of_its_apps_alone_reaches_nobody() -> TestResult {
     let server = MockServer::start().await;
     let mut members = members_body()?;
     members["members"].as_array_mut().ok_or("no members")?.remove(0);
     members["totalMemberCount"] = json!(3);
     serve(&server, &members).await?;
     let source = source(&server)?;
-    let reason = denied(&fence(roster()), Target::new(WriteKind::TeamChange, team()), &source).await?;
-    assert_eq!(reason, DenyReason::NoMembers);
+    for kind in [WriteKind::TeamChange, WriteKind::ChannelChange] {
+        let verdict = fence(roster()).check(Target::new(kind, team()), &source).await;
+        assert!(verdict.is_ok(), "{kind:?}: {verdict:?}");
+    }
     Ok(())
 }
 
@@ -650,30 +645,32 @@ fn a_team_thread_id_is_19_an_id_and_thread_tacv2_or_thread_skype() {
     assert!(!is_team_thread_id(&format!("19:{}@thread.tacv2", "a".repeat(129))));
 }
 
-#[test]
-fn every_lab_fence_s_team_apps_come_from_lab_toml() -> TestResult {
-    let dir = tempfile::tempdir()?;
-    let config = LabConfig::parse(&lab_toml(dir.path()), dir.path())?;
-    let names: Vec<&str> = config.team_apps().iter().map(|app| app.name.as_str()).collect();
-    assert_eq!(names, ["app 1", "app 2", "app 3"]);
-    assert!(Fence::open(&config).is_ok());
-    Ok(())
-}
-
 #[tokio::test]
 async fn a_lab_fence_from_lab_toml_lets_a_lab_team_through() -> TestResult {
     let dir = tempfile::tempdir()?;
     let config = LabConfig::parse(&lab_toml(dir.path()), dir.path())?;
     let fence = Fence::open(&config)?;
+    for who in [vec![], vec![mri(GUID_OWN)]] {
+        let server = MockServer::start().await;
+        serve(&server, &members_with(&who)?).await?;
+        let source = source(&server)?;
+        let permit = fence.check(Target::new(WriteKind::TeamChange, team()), &source).await;
+        assert!(permit.is_ok(), "{who:?}: {permit:?}");
+    }
+    // the user's account is a contact, someone else is outside the lab
     let server = MockServer::start().await;
-    serve(&server, &members_body()?).await?;
+    serve(&server, &members_with(&[mri(GUID_OWN), mri(GUID_X)])?).await?;
     let source = source(&server)?;
-    let permit = fence.check(Target::new(WriteKind::TeamChange, team()), &source).await;
-    assert!(permit.is_ok(), "{permit:?}");
+    let denied = fence
+        .check(Target::new(WriteKind::TeamChange, team()), &source)
+        .await
+        .err()
+        .ok_or("allowed")?;
+    assert_eq!(denied.reason(), &DenyReason::Outsiders { count: 1 });
     Ok(())
 }
 
-/// A `lab.toml` with accounts a, b, c and the three team apps.
+/// A `lab.toml` with accounts a, b, c and a contact, the user's own account (`GUID_OWN`).
 fn lab_toml(data_dir: &Path) -> String {
     let mut text = format!("data_dir = \"{}\"\n", data_dir.display());
     for (alias, guid) in [("a", GUID_A), ("b", GUID_B), ("c", GUID_C)] {
@@ -682,13 +679,7 @@ fn lab_toml(data_dir: &Path) -> String {
             "\n[[accounts]]\nalias = \"{alias}\"\nupn = \"bot-{alias}@lab.example.com\"\nmri = \"8:orgid:{guid}\"\n"
         );
     }
-    for (at, guid) in APPS.iter().enumerate() {
-        let _ = write!(
-            text,
-            "\n[[team_apps]]\nname = \"app {}\"\nmri = \"28:{guid}\"\n",
-            at + 1
-        );
-    }
+    let _ = write!(text, "\n[[contacts]]\nname = \"me\"\nmri = \"8:orgid:{GUID_OWN}\"\n");
     text
 }
 

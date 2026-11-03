@@ -14,7 +14,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
-use teams_fence::{Fence, FenceLog, Mri, PostReadDenyReason, PostReadPermit, Roster};
+use teams_fence::{Fence, FenceLog, Mri, PostReadPermit, Roster};
 use teams_proto::{
     AnswerError, AuthorizedPostRead, BuildError, Client, Credentials, Endpoint, HttpError, HttpTransport,
     MIDDLE_TIER_AUDIENCE, PostRead, PostReadError, ProbePostRead, Read, Refusal, Service, ShortProfile,
@@ -391,21 +391,16 @@ async fn a_permit_for_other_mris_another_order_or_another_entry_sends_nothing() 
 }
 
 #[tokio::test]
-async fn a_non_lab_mri_an_approved_service_or_a_duplicate_gets_no_permit() {
+async fn a_read_naming_anyone_gets_a_permit_since_it_reaches_nobody() {
     let setup = setup().await;
-    let cases: [(&[&str], PostReadDenyReason); 4] = [
-        (&[LAB_A, COWORKER], PostReadDenyReason::Outsiders { count: 1 }),
-        (&[ECHO], PostReadDenyReason::Outsiders { count: 1 }),
-        (&[LAB_A, ECHO, COWORKER], PostReadDenyReason::Outsiders { count: 2 }),
-        (&[LAB_B, LAB_B], PostReadDenyReason::Duplicate),
-    ];
-    for (names, reason) in cases {
+    let cases: [&[&str]; 4] = [&[LAB_A, COWORKER], &[ECHO], &[LAB_A, ECHO, COWORKER], &[LAB_B, LAB_B]];
+    for names in cases {
         let request = lookup(names);
-        let denied = setup
+        let permit = setup
             .fence
             .check_post_read(ShortProfileLookup::KIND, request.names())
-            .unwrap_err();
-        assert_eq!(denied.reason(), reason, "{names:?}");
+            .unwrap();
+        assert_eq!(permit.names(), request.names(), "{names:?}");
     }
     assert!(ShortProfileLookup::new(Vec::new()).is_none(), "a lookup names someone");
     assert!(setup.log.sent().is_empty());

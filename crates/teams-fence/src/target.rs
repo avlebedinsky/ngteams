@@ -149,8 +149,8 @@ impl Mri {
     }
 
     /// A participant known by a mail address alone: a calendar event's attendee or organizer, whom Exchange reaches by
-    /// address. Kept as `smtp:<address in lower case>`, a form no Teams MRI takes, so it matches only the roster's lab
-    /// addresses ([`crate::Roster::admits`]), never an MRI.
+    /// address. Kept as `smtp:<address in lower case>`, a form no Teams MRI takes, so it matches only the roster's
+    /// addresses of the lab accounts and contacts ([`crate::Roster::admits`]), never an MRI.
     #[must_use]
     pub fn mail(address: &str) -> Self {
         Self(format!("{MAIL_PREFIX}{}", address.trim().to_lowercase()))
@@ -165,6 +165,12 @@ impl Mri {
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// Whether this is an app's or a bot's MRI (`28:…`): no person, so no write that reaches it contacts anyone.
+    #[must_use]
+    pub fn is_bot(&self) -> bool {
+        self.0.starts_with("28:")
     }
 }
 
@@ -548,8 +554,8 @@ impl Target {
         }
     }
 
-    /// Names who sends the write (a call start's caller, also among [`Target::added`]): the fence admits only a lab
-    /// account or an approved service as a sender, never a call guest.
+    /// Names who sends the write (a call start's caller, also among [`Target::added`]): the fence admits only a sender
+    /// the roster admits ([`crate::Roster::admits`]).
     #[must_use]
     pub fn with_sender(mut self, sender: Mri) -> Self {
         self.sender = Some(sender);

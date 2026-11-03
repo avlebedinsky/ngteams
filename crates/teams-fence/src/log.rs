@@ -168,8 +168,7 @@ pub enum RequestOutcome {
     /// of the personal build's sealed `OwnState` list: let through.
     Own(&'static str),
     /// A read sent as a `POST`, an entry of the personal build's sealed `PostRead` list (its kind's name), sent under
-    /// its [`crate::PostReadPermit`] (in a lab build, naming only lab accounts: [`crate::Fence::lab_accounts_only`]):
-    /// let through. Not own-state and not a write.
+    /// its [`crate::PostReadPermit`]: let through. Not own-state and not a write.
     PostRead(&'static str),
     /// Nothing classifies it: denied.
     Unclassified,

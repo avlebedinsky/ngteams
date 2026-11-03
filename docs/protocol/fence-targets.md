@@ -1,7 +1,8 @@
 # Fence targets: what reaches people, and whose members the fence reads
 
-Status: 2026-10-23, the lab rule: **lab accounts contact only each other; everything else is allowed**. Rewritten for
-it by Task 7 of `docs/plans/20261023-lab-fence-contacting-writes-only.md`. First written 2026-10-20 (M0 Task 11) from
+Status: 2026-11-03, the lab rule: **lab accounts talk and call only each other, the echo service and the user's own
+account (`lab.toml`'s `contacts`); apps and bots aren't people; everything else is allowed** ([lab-rules.md](../lab-rules.md)).
+Rewritten for the earlier lab-only rule by Task 7 of `docs/plans/20261023-lab-fence-contacting-writes-only.md`. First written 2026-10-20 (M0 Task 11) from
 static analysis of the web bundle `26260.1717.5229.7049` (imported with `proto-lab bundles import`, searched with
 `proto-lab bundles search` and read in the chat service's request builders) and [auth.md](auth.md), then checked the
 same day against live traffic, once the lab accounts had a Teams license: `proto-lab run load` (account a) and
@@ -29,8 +30,9 @@ and the chat service's in `tests/fixtures/chatsvc/`. The lab browser's fence ask
   to `fence.log` as `allowed`, by its method, host and path shape (ids replaced by their kind: `<chat>`, `<message>`,
   `<mri>`, `<guid>`, `<id>`), never a query value, a header or a body; one that can't be logged isn't let through.
 - **`Contact::Write(Target)`**: a mapped write, let through only with a permit from `Fence::check` for that target:
-  an existing chat after a fresh, complete member read whose every member is a lab account (`lab.toml`'s MRIs) or an
-  approved service participant (the echo service), a new target (`Scope::New`: a chat's creation, the test call's
+  an existing chat after a fresh, complete member read whose every member is a lab account (`lab.toml`'s MRIs), an
+  approved service participant (the echo service), a contact (the user's own account) or an app or a bot (`28:`, no
+  person), a new target (`Scope::New`: a chat's creation, the test call's
   start) by the participants it proposes, and any participant it adds (a mention, a member added) judged the same
   way. The decision is logged by `Fence::check`.
 - **`Contact::Unreadable`**: a mutating request on a contacting service that no row maps or carves out: denied, and
@@ -43,8 +45,8 @@ service acts on. A mutating request whose URL doesn't parse is unreadable.
 
 `Fence::check` also takes the three kinds that reach nobody but stay in the native outbox, which orders writes on a
 chat's read horizon and on presence: typing and read receipts, permitted on a chat by its id (1:1, group or meeting)
-without a member read, and the account's own availability on `Scope::Account`, permitted without a member read only
-for the fence's own account (`Fence::open_lab_account`). The browser never needs them: there, typing and read receipts
+without a member read, and the account's own availability on `Scope::Account`, permitted without a member read (any lab
+account's, unless it adds a person outside the lab). The browser never needs them: there, typing and read receipts
 are carve-outs and presence is no contacting service.
 
 ## The contacting services
@@ -57,8 +59,8 @@ lower case on a dot boundary (the host or any host under it), a trailing dot dro
 | Chat service | a Teams origin's `/api/chatsvc/…`; `*.msg.teams.microsoft.com` | [its rows](#the-chat-services-rows) |
 | Calling | `*.flightproxy.teams.microsoft.com` (whose `ep/<host>/…` forms reach the hosts behind it), `api.fl.teams.microsoft.com`, every `*.skype.com` host but AMS's (`*.conv.skype.com`, `*.cc.skype.com`, `*.broker.skype.com` and any other: a Skype host whose purpose is unknown counts as contacting) | the web client's test call start in its captured shape (`CALL_START_URL`, no query), `Write(Call)` to `New` with the caller and the echo service, only when the policy names the echo callee (`Policy::with_echo_callee`; the browser's `Classifier::with_test_call_callee`): [calling-echo.md](calling-echo.md); a chat header's call start in its captured shape, `Write(Call)` to the chat it carries (`Conversation`) with the caller and every callee: [calling.md](calling.md#the-start); the captured operations on a call (`updateEndpointMetadata`, `add`, `leave`, `acknowledge`, `applyChannelParameters`), each in its captured method, path and body, a write on `Scope::CallOperation` that [the call registry](#the-call-registry) resolves |
 | Graph | `*.graph.microsoft.com`, every version, `$batch` included | nothing |
-| Outlook, OWA and Substrate | `*.outlook.office.com`, `*.outlook.office365.com`, `*.outlook.cloud.microsoft`, `*.outlook.live.com`, `*.substrate.office.com` | `POST /search/api/<version>/suggestions` and `…/query`, and `POST /searchservice/api/<version>/query` on Substrate: search reads ([search.md](search.md)); `POST /search/api/<version>/events` (with or without its trailing slash), the search's own telemetry |
-| SharePoint and OneDrive | `*.sharepoint.com`, `*.sharepoint-df.com`, `*.microsoftpersonalcontent.com`, `*.onedrive.com`, `onedrive.live.com`, the media hosts `*.svc.ms` | nothing |
+| Outlook, OWA and Substrate | `*.outlook.office.com`, `*.outlook.office365.com`, `*.outlook.cloud.microsoft`, `*.outlook.live.com`, `*.substrate.office.com` | `POST /search/api/<version>/suggestions` and `…/query`, and `POST /searchservice/api/<version>/query` on Substrate: search reads ([search.md](search.md)); `POST /search/api/<version>/events` (with or without its trailing slash), the search's own telemetry; `POST /owa/startupdata.ashx` on `outlook.office.com`, the embedded calendar app's startup read |
+| SharePoint and OneDrive | `*.sharepoint.com`, `*.sharepoint-df.com`, `*.microsoftpersonalcontent.com`, `*.onedrive.com`, `onedrive.live.com`, the media hosts `*.svc.ms` | the file browser's prewarm, `POST /personal/<user>/_layouts/15/filebrowser.aspx` on a host one label under `sharepoint.com` (the account's own token to its own personal site) |
 | AMS and the async gateway | `*.asyncgw.teams.microsoft.com`, `*.asm.skype.com`, a Teams origin's `/asm/…` and `/ams/…` | the token exchanges `POST …/v1/skypetokenauth` and `POST …/v1/<id>/aadtokenauth`, which trade the account's own token for the media service's cookie. An object's creation, its content upload and its `forward` stay unreadable: the fence can't tell whom an object reaches ([chat.md](chat.md#the-object-created-once-ab-image-object)) |
 | Middle tier and apps | a Teams origin's `/api/mt/…` and `/api/apps/…` | a new standard channel and a channel shown to everyone, writes on the team (`contacting/channel.rs`, [channels.md](channels.md#creating-a-channel)); a team managed, writes on the team (`contacting/team.rs`, [teams.md](teams.md)); everything but a request with a segment (in any case) `team(s)`, `chat(s)`, `channel(s)`, `conversation(s)`, `thread(s)`, `group(s)`, a segment of its Outlook REST proxy (`v2.0`, `event(s)`, `message(s)`), or a segment holding `meeting`, `invite`, `calendar` or `mail`; of those, `POST …/beta/teams/apps/aggregatedEntitlements` (the app catalogue of the account's teams, a read) is carved out. Out-of-office with its automatic replies (`…/automaticRepliesSetting`) is the account's own settings. The calendar's rows (`contacting/calendar.rs`, [calendar.md](calendar.md#what-the-fence-makes-of-them)): an event created (`Write(Meeting)` on `New`, the organizer and invitees by address), changed, cancelled or deleted (`Write(Meeting)` on `Event`, whose organizer and attendees the fence reads fresh from the middle tier, by address, against `lab.toml`'s UPNs); a channel's meeting created, changed or cancelled on its team's group calendar (`v2.0/groups/smtp:<team mailbox>/…`), `Write(Meeting)` on `TeamCalendar`, judged by the channel's team whose root thread names that mailbox ([calling.md](calling.md#a-channels-meeting)); a Teams meeting's online meeting made without a chat, and the scheduling assistant's free/busy reads, reach nobody |
 | CSA | a Teams origin's `/api/csa/…`, `*.chatsvcagg.teams.microsoft.com` | `POST …/api/<version>/teams/users/me/chatsAndChannelsByIds`, a read |
@@ -145,6 +147,7 @@ query key twice in any case, makes the request unreadable.
 | `PUT`/`DELETE …/messages/<msg>/properties?name=emotions` (the only query key) | `Write(Reaction)` |
 | `PUT v1/users/ME/conversations/<channel>/messages/<post>/properties?name=meeting` (the only query key), `<channel>` a team's thread, `<post>` digits, the body exactly `{"meeting": {"meetingtitle": <string>}}` (a channel's Meet now titled) | `Write(Edit)` on `Team(<channel>)` |
 | `PUT v1/users/ME/conversations/<chat>/properties?name=consumptionhorizon` (the only query key), on a chat by its id | `None` (read receipt) |
+| the same on the account's own streams, `48:notifications`, `48:mentions` and `48:calllogs` (the call log's horizon moves when a call ends) | `None` |
 | `PUT v1/users/ME/conversations/<id>/properties?name=<n>`, `<n>` one of `OWN_VIEW_PROPERTIES` (`lastTimeFavorited`, `favorite`, `isGeneralChannelFavorite`), the only query key, or `name=favorite&requirePermanentJoinedState=<boolean>` exactly (the web client on each channel it made), `<id>` a `19:` chat or channel id | `None` (the account's own view of a conversation) |
 | `PUT v1/users/ME/conversations/48:notifications` or `48:mentions` `/messages/<id>/properties?name=isread`, the only query key, the body exactly `{"isread": <string>}` | `None` (the account's own feed) |
 | `PUT v1/users/ME/properties?name=<n>`, the only query key | `None` (the account's own settings) |
@@ -265,25 +268,25 @@ Rules that keep the mapping fail-closed:
 ## The lab's call rule
 
 Every lab fence (`Fence::open_lab`, `Fence::open_lab_account`, `Fence::new` in tests) judges a call by its entry
-(`crates/teams-fence/src/decision.rs`, `CallRule::Entry`; CLAUDE.md, "Calls go only to the lab, both ways"), the
+(`crates/teams-fence/src/decision.rs`, `CallRule::Entry`; [lab-rules.md](../lab-rules.md)), the
 user's decision after the registry's link binding kept failing the lab's own calls (a retried start shadowed by a stale
 pending one, acknowledgements and receipts denied on a live call):
 
 | Operation | Judged by |
 |---|---|
 | a start (`epconv`) | its callees and the chat it carries, read fresh ([above](#writes)), as before |
-| a meeting's start (`epconv`) or its pre-join's subscription | the sender and the meeting's chat it names, read fresh: it must list the sender, and only lab accounts and call guests ([calling.md](calling.md#joining-a-meeting)) |
-| a channel's Meet now (`epconv`, its subscription or its start with media) | the sender and the channel's team, read fresh from the team's thread (the team's first channel's thread is the team's own; another standard channel's thread, `threadType` `topic`, names its team's root in `spaceId`, which is read in turn and must be a team's root naming the channel's `groupId`), Teams' own apps not counted ([calling.md](calling.md#a-channels-meeting)) |
-| a join (`POST …/conv/<id>`, roster-only or with a call invitation) | the group chat it names (`joins`), read fresh: complete, listing the joiner, only lab accounts and call guests; no invitation need bind the conversation to it. A meeting's entry from its pre-join (its preheat too) is a join of the meeting's chat, judged the same ([calling.md](calling.md#joining-a-meeting)); a channel's meeting's entry is a join of the channel, judged by its team's members as its Meet now is ([calling.md](calling.md#a-channels-meeting)) |
+| a meeting's start (`epconv`) or its pre-join's subscription | the sender and the meeting's chat it names, read fresh: it must list the sender, and only the lab's people (lab accounts, the echo service, the contact; apps and bots aren't people) ([calling.md](calling.md#joining-a-meeting)) |
+| a channel's Meet now (`epconv`, its subscription or its start with media) | the sender and the channel's team, read fresh from the team's thread (the team's first channel's thread is the team's own; another standard channel's thread, `threadType` `topic`, names its team's root in `spaceId`, which is read in turn and must be a team's root naming the channel's `groupId`), apps and bots not counted ([calling.md](calling.md#a-channels-meeting)) |
+| a join (`POST …/conv/<id>`, roster-only or with a call invitation) | the group chat it names (`joins`), read fresh: complete, listing the joiner, only the lab's people (lab accounts, the echo service, the contact; apps and bots aren't people); no invitation need bind the conversation to it. A meeting's entry from its pre-join (its preheat too) is a join of the meeting's chat, judged the same ([calling.md](calling.md#joining-a-meeting)); a channel's meeting's entry is a join of the channel, judged by its team's members as its Meet now is ([calling.md](calling.md#a-channels-meeting)) |
 | an answer (`accept`) or a decline (`reject` 603) | an invitation this fence offered (below), tied to it by the call leg its link names (`…/cc/v1/incoming/<call>/…`, the call the invitation's `attach` link names: `CallRegistry::resolve_answer`), the answer from its callee, while it is open for the operation (ringing; the same `accept` again once answered, the same `reject` once declined), its group chat read fresh; no attach answer need have bound the link |
-| an `add` | its sender a lab account or an approved service, every invitee one or a call guest (the row maps it only naming the 1:1 chat of the sender and its one invitee, and the sender as organizer) |
-| a meeting lobby's admit (`…/conv/<id>/admit`) or Deny (`…/removeParticipant`) | as an `add`: its sender a lab account or an approved service, everyone it names one or a call guest ([calling.md](calling.md#the-lobby)) |
+| an `add` | its sender and every invitee the lab's people (the row maps it only naming the 1:1 chat of the sender and its one invitee, and the sender as organizer) |
+| a meeting lobby's admit (`…/conv/<id>/admit`) or Deny (`…/removeParticipant`) | as an `add`: its sender and everyone it names the lab's people ([calling.md](calling.md#the-lobby)) |
 | every other operation: the follow-ups (endpoint metadata and state, participant properties, a conversation's notification links, the acceptance's acknowledgement, channel parameters, renegotiation, media answers and acknowledgements, media descriptions, the keep-alive), the callee's `attach` and `progress`, `leave` | permitted with no member read and no lookup, logged (`call_follow_up`, `call_ringing`) |
 | a Trouter delivery response | the browser's frame rule lets every `3:::` through on a Trouter socket, logged `allowed`; the native client's typed responses are permitted by `Fence::check_delivery_response` when they name a delivery id, logged (`delivery_response`, by the kind the registry knows them as, else `call_delivery_response`) |
 
 The browser fence reads no call answer at the response stage and registers or binds nothing. The registry still reads
 every delivery the account's calling socket receives (`Fence::observe_delivery`): it offers the account's own
-invitations from lab callers and call guests (only an offered one is answered or declined), ends an invitation's ring at the callbacks
+invitations whose caller isn't a person outside the lab (only an offered one is answered or declined), ends an invitation's ring at the callbacks
 its `attach` handed out, and, for the native client, registers its own starts from their answers and binds their
 acceptances, which is how its call machine reads its deliveries (`Observed::Acceptance`, `Observed::Renegotiation`).
 None of that decides a lab write. The native transport refuses a call write the registry won't pend only on a fence
@@ -299,7 +302,7 @@ any invitation addressed to the account (one at a time) and keeps the registry's
 keeps one call at a time across the app's accounts. What follows is the registry's rule as it was designed: a call's follow-ups reach its participants, and no source reads a call's members (the conversation's
 `getAllParticipants` answered an empty list for a call that had its caller in it:
 [calling-echo.md](calling-echo.md#open)).
-So the fence trusts only the calls it permitted itself (CLAUDE.md, "Calls go only to the lab, both ways"): each fence
+So the fence trusts only the calls it permitted itself ([lab-rules.md](../lab-rules.md)): each fence
 holds a call registry (`crates/teams-fence/src/calls.rs`), and a follow-up passes only as a captured operation sent to
 exactly a link the call's own services handed out for that operation. Decided with Codex (M3 Task 3, transcript under
 `~/.local/state/plan-exec-revmux/20261024-native-teams-m3-calls/discussions/task-3-call-registry/`).
@@ -310,8 +313,8 @@ Task 5, [calling.md](calling.md#the-start)), `WriteKind::Call` on the `Scope::Co
 by what it carries, the caller and every callee it names added. The chat is the group chat `groupChat.threadId` names
 (a group chat's id), or, for a start whose `groupChat` is `null` and that names one callee, the 1:1 chat of the caller
 and that callee by `one_to_one_id`; never one taken from the client's context. So `Fence::check` reads that chat's
-members fresh and permits the start only when they and every callee are lab accounts or call guests (`lab.toml`'s
-`call_guests`, the user's own accounts, for calls only) and its caller a lab account (a lab-only chat with one more
+members fresh and permits the start only when they and every callee are the lab's people (lab accounts, the echo service, the
+contact) and so is its caller (a lab-only chat with one more
 lab member than the start calls passes; a callee outside the lab is denied, however lab-only the chat). The callees
 must be work accounts (`8:orgid:<guid>`), at least one, none twice, none the caller, and `groupChat` must be there.
 Decided with Codex (M3 Task 5, transcript under
@@ -337,7 +340,7 @@ never by a member read: a live call holding that URL for that operation, its sen
 operation's body names one) the call's caller, invitees only on an `add`, and every callback link the body hands the
 call's services (an acknowledgement's `callAcceptanceAcknowledgement.links`, an `add`'s `links`) on the start's own
 endpoint and call agent, as the acceptance's delivery response must be (below; a call whose start named no call agent
-takes none); the call's participants and any invitee must all be lab accounts, approved services or call guests.
+takes none); the call's participants and any invitee must all be the lab's people.
 Otherwise
 `Partial(UnregisteredCall)` (a call this fence didn't permit, whose answer or acceptance wasn't read, or another
 run's), `Partial(CallEnded)` or `CallMismatch`. An `add` maps only naming its sender's own chat and meeting: a
@@ -372,7 +375,7 @@ context, and the call's kind in a captured shape: a 1:1 call's (107) naming no g
 group call's (109) naming its group chat by a group chat's id, `isMultiParty` true (its chat is the only field naming
 its other participants, so a group call naming none is no invitation). `Fence::observe_delivery` offers it only when it is addressed
 to the fence's own account (the browser fence is now each account's own, `Fence::open_lab_account`), a lab account,
-and its caller is a lab account, the echo service or a call guest; any other invitation is ignored and nothing passes for it, as
+and its caller isn't a person outside the lab; any other invitation is ignored and nothing passes for it, as
 is a delivery at the root that may be an invitation but doesn't read (`Observed::Ignored`: an `evt` 107 or 109, or a
 `callNotification` at its top or in a `gp` that decodes, or a body that isn't a strictly read JSON object with a
 numeric `evt`; the root's `evt` 115 and 116 aren't). A
@@ -477,15 +480,14 @@ pageSize=100`, with the token and the web client's `X-MS-Migration: True` and `B
 - nobody is listed twice, case folded.
 
 Any other shape is malformed, and a timeout or a failed read is `Partial` too: each denies the write. The fence then
-judges every listed member, and every participant the write adds, against the roster: a write passes only when all
-are lab accounts or the echo service. Whether a chat is in the lab's `chats.toml` plays no part: that file is the
+judges every listed member, and every participant the write adds, against the roster: a write passes unless one is a
+person outside the lab (not a lab account, the echo service or the contact; an app or a bot is no person). Whether a chat is in the lab's `chats.toml` plays no part: that file is the
 scenarios' record of the lab's own group chat, not the fence's.
 
 **What the rule accepts.** One fresh read can't prove that the service shows every participant to a member: the
 member list and its count could leave out one the service shows to nobody, and the members can change between the
 read and the write. [A group chat's reads](#a-group-chats-reads) records why that was once enough to deny every group
-chat; the lab rule (the user's, 2026-10-23) takes a complete, unpaged read whose members are all lab accounts as the
-chat's participants, for group and meeting chats as for 1:1 chats.
+chat; the lab rule takes a complete, unpaged read whose members are all the lab's people as the chat's participants, for group and meeting chats as for 1:1 chats.
 
 ### A group chat's reads
 
@@ -626,13 +628,13 @@ naming exactly the permit's MRIs), logs it by its kind and sends it once. A lab 
   `PausedRequest` keeps every header's name, and the value only of the method overrides `contacting` reads
   (`teams_fence::OVERRIDE_HEADERS`), never a token or a cookie. The event itself, headers included, has already been
   handed to the run's event watchers (`ArmedBrowser::watch`) and offered to the capture recorder. A write to the a–b
-  1:1 chat passes only when the read confirms its two members are lab accounts.
+  1:1 chat passes only when the read confirms its two members are the lab's people.
 - The native client sends each chat write as a sealed request whose target is the table's: the chat for every write
   on it, a message's and an edit's mentioned MRIs added, a new chat `New` with its members. Its live member read takes
   the client's own credential from the native transport on every read (`CredentialSource`: the account's `ic3` token
   as its session has it now, and the region's chat base, as `ChatCredential::bearer`); with no token the read is
   `Partial(NoCredential)` and the write denied. Its source is `LiveMembershipSource::for_fence`, so it writes to any
-  chat whose members are all lab accounts, a group chat it created included.
+  chat whose members are all the lab's people, a group chat it created included.
 - `ab-chat` opens the chat by b's MRI (`l/chat/0/0?users=<mri>`): by UPN the client first resolves the user with the
   middle tier's `fetchShortProfile` by address (`isMailAddress=true`), which was denied when `ab-chat` was written; by
   the chat's id a page that loaded before the chat existed says the user isn't in it.

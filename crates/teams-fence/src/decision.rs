@@ -1,9 +1,8 @@
-//! The decision: [`Fence::check`] fetches the target's members fresh and issues a [`WritePermit`] only when every
-//! participant is a lab account or an approved service (or, for a call write alone, a call guest; on a team or one of its
-//! channels, Teams' own team apps aren't counted: [`Roster`]). A write that reaches nobody ([`WriteKind::is_contacting`] false) is judged without a member read: typing and read receipts
-//! on a chat (1:1, group or meeting), and the account's own availability ([`WriteKind::OwnAvailability`] on
-//! [`Scope::Account`]), which the fence permits only for its own account ([`Fence::own_account`]), so that a lab
-//! account never sets another's presence.
+//! The decision: [`Fence::check`] fetches the target's members fresh and issues a [`WritePermit`] unless it reaches a
+//! person the lab may not contact: every participant must be a lab account, an approved service, a contact (the
+//! user's own account) or an app or a bot, which is no person ([`Roster`]). A write that reaches nobody
+//! ([`WriteKind::is_contacting`] false) is judged without a member read: typing and read receipts on a chat (1:1, group
+//! or meeting), and the account's own availability ([`WriteKind::OwnAvailability`]).
 //!
 //! A personal fence (`Fence::open_personal`, only with the `personal` feature) decides nothing: it logs every write and
 //! permits it (`decision/audit.rs`), keeping only the call floor's one call at a time across the app's accounts.
@@ -34,16 +33,10 @@ use crate::target::{CallOperation, Mri, Scope, Target, WriteKind};
 #[cfg(feature = "personal")]
 mod audit;
 
-/// Who may take part in a write: the lab accounts and the approved service participants, by exact MRI. A lab account
-/// or service whose MRI isn't known yet is simply left out, so it matches nobody. The call guests (`lab.toml`'s
-/// `call_guests`, the user's own accounts) may take part in a call write alone ([`Roster::admits_on_call`]): a start,
-/// a join, an answer or a decline, an `add` and what a call sends once it was let in; never a message, a reaction, a
-/// chat created, a member added or an invite, even in a chat that holds one.
-///
-/// Teams' own team apps (`lab.toml`'s `team_apps`: the apps Teams makes a member of every new team, by exact MRI) aren't
-/// people a write reaches: a team's or a channel's current member that is one is left out of the participants
-/// ([`Roster::is_team_app`]). They are admitted nowhere else, and never as someone a write adds: a write that adds one,
-/// or a member read of any other scope that lists one, is judged as for anyone outside the lab.
+/// Who a write may reach: the lab accounts, the approved service participants and the contacts (`lab.toml`'s
+/// `contacts`, the user's own accounts), by exact MRI, or by mail address ([`Mri::mail`]) for a lab account or a
+/// contact whose UPN is known. A lab account, service or contact whose MRI isn't known yet is simply left out, so it
+/// matches nobody. Apps and bots aren't people: any `28:` MRI is admitted wherever it appears ([`Roster::admits`]).
 ///
 /// A lab binary's roster comes only from `lab.toml`, through [`Fence::open_lab`]. [`Roster::new`], which takes any
 /// MRIs, exists only with the `test-support` feature.
@@ -51,12 +44,10 @@ mod audit;
 pub struct Roster {
     lab: BTreeSet<Mri>,
     services: BTreeSet<Mri>,
-    call_guests: BTreeSet<Mri>,
-    /// Teams' own team apps ([`Roster::is_team_app`]).
-    team_apps: BTreeSet<Mri>,
-    /// The lab accounts' mail addresses (their UPNs), in lower case: a calendar event's attendees are judged by them
-    /// ([`Mri::mail`]).
-    lab_mail: BTreeSet<String>,
+    contacts: BTreeSet<Mri>,
+    /// The lab accounts' and the contacts' mail addresses (their UPNs), in lower case: a calendar event's attendees are
+    /// judged by them ([`Mri::mail`]).
+    mail: BTreeSet<String>,
 }
 
 impl Roster {
@@ -71,41 +62,32 @@ impl Roster {
         Self {
             lab: lab.into_iter().collect(),
             services: services.into_iter().collect(),
-            call_guests: BTreeSet::new(),
-            team_apps: BTreeSet::new(),
-            lab_mail: BTreeSet::new(),
+            contacts: BTreeSet::new(),
+            mail: BTreeSet::new(),
         }
     }
 
-    /// This roster with `addresses` as the lab accounts' mail addresses. Tests only (`test-support`).
+    /// This roster with `addresses` as the lab accounts' and contacts' mail addresses. Tests only (`test-support`).
     #[cfg(feature = "test-support")]
     #[must_use]
     pub fn with_lab_mail<'a>(mut self, addresses: impl IntoIterator<Item = &'a str>) -> Self {
-        self.lab_mail = addresses
+        self.mail = addresses
             .into_iter()
             .map(|address| address.trim().to_lowercase())
             .collect();
         self
     }
 
-    /// This roster with `guests` as its call guests. Tests only (`test-support`).
+    /// This roster with `contacts` as its contacts. Tests only (`test-support`).
     #[cfg(feature = "test-support")]
     #[must_use]
-    pub fn with_call_guests(mut self, guests: impl IntoIterator<Item = Mri>) -> Self {
-        self.call_guests = guests.into_iter().collect();
+    pub fn with_contacts(mut self, contacts: impl IntoIterator<Item = Mri>) -> Self {
+        self.contacts = contacts.into_iter().collect();
         self
     }
 
-    /// This roster with `apps` as Teams' own team apps. Tests only (`test-support`).
-    #[cfg(feature = "test-support")]
-    #[must_use]
-    pub fn with_team_apps(mut self, apps: impl IntoIterator<Item = Mri>) -> Self {
-        self.team_apps = apps.into_iter().collect();
-        self
-    }
-
-    /// The MRIs `lab.toml` gives its accounts, approved service participants, call guests and team apps; one without an
-    /// MRI is left out.
+    /// The MRIs `lab.toml` gives its accounts, approved service participants and contacts; one without an MRI is left
+    /// out.
     fn from_lab(config: &LabConfig) -> Self {
         let roster = Self::of(
             config
@@ -119,43 +101,31 @@ impl Roster {
                 .filter_map(|service| service.mri.as_deref())
                 .map(Mri::new),
         );
+        let lab_mail = config.accounts().iter().map(|account| account.upn.as_str());
+        let contact_mail = config.contacts().iter().filter_map(|contact| contact.upn.as_deref());
         Self {
-            call_guests: config.call_guests().iter().map(|guest| Mri::new(&guest.mri)).collect(),
-            team_apps: config.team_apps().iter().map(|app| Mri::new(&app.mri)).collect(),
-            lab_mail: config
-                .accounts()
-                .iter()
-                .map(|account| account.upn.trim().to_lowercase())
+            contacts: config.contacts().iter().map(|contact| Mri::new(&contact.mri)).collect(),
+            mail: lab_mail
+                .chain(contact_mail)
+                .map(|upn| upn.trim().to_lowercase())
                 .collect(),
             ..roster
         }
     }
 
-    /// Whether `mri` is a lab account or an approved service, by exact MRI, or a participant known by address
-    /// ([`Mri::mail`]) whose address is a lab account's.
+    /// Whether a write may reach `mri`: a lab account, an approved service or a contact, by exact MRI; a participant
+    /// known by address ([`Mri::mail`]) whose address is a lab account's or a contact's; or an app or a bot (a `28:`
+    /// MRI), which is no person.
     #[must_use]
     pub fn admits(&self, mri: &Mri) -> bool {
         self.lab.contains(mri)
             || self.services.contains(mri)
-            || mri
-                .mail_address()
-                .is_some_and(|address| self.lab_mail.contains(address))
+            || self.contacts.contains(mri)
+            || mri.is_bot()
+            || mri.mail_address().is_some_and(|address| self.mail.contains(address))
     }
 
-    /// Whether `mri` may take part in a call write: [`Self::admits`] it, or it is a call guest.
-    #[must_use]
-    pub fn admits_on_call(&self, mri: &Mri) -> bool {
-        self.admits(mri) || self.call_guests.contains(mri)
-    }
-
-    /// Whether `mri` is one of Teams' own team apps, by exact MRI: a team's or a channel's member the fence doesn't count
-    /// among the people a write on it reaches. Nothing else admits it.
-    #[must_use]
-    pub fn is_team_app(&self, mri: &Mri) -> bool {
-        self.team_apps.contains(mri)
-    }
-
-    /// Whether `mri` is one of the lab accounts, by exact MRI (an approved service isn't).
+    /// Whether `mri` is one of the lab accounts, by exact MRI (an approved service or a contact isn't).
     #[must_use]
     pub fn is_lab_account(&self, mri: &Mri) -> bool {
         self.lab.contains(mri)
@@ -289,19 +259,13 @@ impl WritePermit {
 pub enum DenyReason {
     /// The membership isn't known in full.
     Partial(PartialReason),
-    /// The fetched membership, or a new target's proposed one, is empty.
-    NoMembers,
     /// An org-wide team or channel.
     OrgWide,
-    /// Participants that are neither lab accounts nor approved services.
+    /// Participants that are people outside the lab: neither lab accounts, approved services nor contacts.
     Outsiders { count: usize },
     /// A [`Scope::New`] target for a kind that doesn't create one: the write lands on something that already exists,
     /// whose members have to be fetched.
     NotCreatable,
-    /// The account's own availability ([`WriteKind::OwnAvailability`]) for anyone but the fence's own account: on
-    /// another account, on any scope but [`Scope::Account`], with participants added, or from a fence that has no own
-    /// account ([`Fence::open_lab`]).
-    NotOwnAccount,
     /// A write other than the account's own availability on [`Scope::Account`]: nothing else lands on the account
     /// itself.
     AccountScope,
@@ -319,11 +283,9 @@ impl fmt::Display for DenyReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Partial(reason) => write!(f, "membership not known in full: {reason}"),
-            Self::NoMembers => f.write_str("no members"),
             Self::OrgWide => f.write_str("an org-wide team or channel"),
             Self::Outsiders { count } => write!(f, "{count} participant(s) outside the lab"),
             Self::NotCreatable => f.write_str("this kind of write doesn't create a new target"),
-            Self::NotOwnAccount => f.write_str("not the fence's own account's availability"),
             Self::AccountScope => f.write_str("only the account's own availability lands on the account itself"),
             Self::LogUnavailable => f.write_str("fence.log can't be written"),
             Self::CallMismatch => f.write_str("the write doesn't fit the registered call"),
@@ -378,9 +340,9 @@ pub struct Fence {
     roster: Roster,
     log: FenceLog,
     /// The account this fence is a client's of ([`Fence::open_lab_account`], or the personal build's signed-in account
-    /// through `Fence::open_personal`): the one account whose own availability a lab fence permits, and whose incoming
-    /// calls it offers. `None` for a fence of no account ([`Fence::open_lab`], the browser fence's) or of an account
-    /// whose MRI `lab.toml` doesn't know yet: it permits no own availability.
+    /// through `Fence::open_personal`): the one account whose incoming calls it offers. `None` for a fence of no account
+    /// ([`Fence::open_lab`], the browser fence's) or of an account whose MRI `lab.toml` doesn't know yet: it offers no
+    /// call.
     own: Option<Mri>,
     /// This fence's run-unique id, which its permits carry.
     id: u64,
@@ -400,10 +362,9 @@ pub struct Fence {
 /// (`decision/audit.rs`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum CallRule {
-    /// The lab's: only a call's entry is judged. A join by the chat it joins (read fresh, complete, lab accounts and
-    /// call guests only), an answer or a decline only of an offered invitation (a lab caller's or a call guest's, to the
-    /// fence's own account, its group chat
-    /// read fresh), an `add` by its invitees; everything else a call sends once it was let in (its follow-ups, its
+    /// The lab's: only a call's entry is judged, by who takes part ([`Roster::admits`]). A join by the chat it joins
+    /// (read fresh and complete), an answer or a decline only of an offered invitation (to the fence's own account, its
+    /// group chat read fresh), an `add` by its invitees; everything else a call sends once it was let in (its follow-ups, its
     /// ring-time sends, its `leave`, its delivery responses) is permitted and logged with no registry lookup. The
     /// registry still reads what passes (its deliveries, its answers), so the native client's call machine sees the
     /// same deliveries.
@@ -575,33 +536,22 @@ impl Fence {
         &self.log
     }
 
-    /// Whether `names` names someone and only the lab accounts, each by its exact MRI: no approved service, nobody
-    /// else. [`Fence::check_post_read`] permits an entry of the personal build's sealed `PostRead` list only then in a
-    /// lab build (`docs/personal-build.md`); the lab's own reads by `POST` go out as plain requests, whoever they name.
-    /// It mints no permit and logs nothing.
-    #[must_use]
-    pub fn lab_accounts_only(&self, names: &[Mri]) -> bool {
-        !names.is_empty() && names.iter().all(|mri| self.roster.is_lab_account(mri))
-    }
-
     /// Fetches the target scope's members from `source` (never from a cache) and allows the write only when every
-    /// participant, current or added, is in the roster. Every write is fetched so but four:
+    /// participant, current or added, is one the lab may reach ([`Roster::admits`]). Every write is fetched so but four:
     /// - a [`Scope::New`] target, judged by its added participants alone, and only for a kind that
     ///   [creates a target](crate::WriteKind::creates_target);
     /// - typing and a read receipt on a chat by its id ([`is_chat_id`]: a 1:1, group or meeting chat), allowed with
-    ///   only lab accounts or approved services added (if any); off a chat (a channel, a chat id in another form) they
+    ///   only participants the roster admits added (if any); off a chat (a channel, a chat id in another form) they
     ///   are fetched and judged like any write;
-    /// - the account's own availability, allowed only on [`Scope::Account`] naming the fence's
-    ///   [own account](Fence::own_account), a lab account, with nobody added;
+    /// - the account's own availability, allowed with nobody added but participants the roster admits;
     /// - an operation on a call ([`Scope::CallOperation`]), by the fence's call rule. A lab fence judges a call's entry
     ///   only: a join by the group chat it names, read fresh, complete and listing the joiner; an answer or a decline
     ///   only of an invitation it offered (by the call leg its link names), the invitation's group chat read fresh; an
     ///   `add` by its sender and invitees; and it permits every other operation (what a call sends once it was let in)
     ///   with no member read and no registry lookup, logged. Under the registry's rule ([`Fence::tracks_calls`]) the
     ///   call registry ([`crate::calls`]) resolves it to a live call this fence permitted and registered, with no
-    ///   member read. Either way the participants (with any invitee and the chat's members) must all be lab accounts,
-    ///   approved services or call guests ([`Roster::admits_on_call`]), and a start, a join or an `add` is sent by
-    ///   neither a call guest nor anyone else outside the lab ([`Target::sender`] for a start).
+    ///   member read. Either way the participants (with any invitee and the chat's members) and the sender of a start,
+    ///   a join or an `add` ([`Target::sender`] for a start) must all be ones the roster admits.
     ///
     /// Nothing else lands on [`Scope::Account`]. Every decision is appended to `fence.log`; an allow that can't be
     /// logged is denied.
@@ -612,9 +562,9 @@ impl Fence {
     /// call floor's: a start, a join or an answer while another account of the app is in a call.
     ///
     /// # Errors
-    /// [`Denied`] when the membership is partial, empty or org-wide, when any participant is outside the roster, when
-    /// a kind that doesn't create a target names [`Scope::New`], when an own availability isn't the fence's own
-    /// account's or another write names [`Scope::Account`], or when an allow can't be logged. A lab fence denies an
+    /// [`Denied`] when the membership is partial or org-wide, when any participant is a person outside the roster, when
+    /// a kind that doesn't create a target names [`Scope::New`], when a write other than an own availability names
+    /// [`Scope::Account`], or when an allow can't be logged. A lab fence denies an
     /// answer or a decline of no offered invitation as [`PartialReason::UnregisteredCall`], one of an invitation no
     /// longer open for it as [`PartialReason::CallEnded`], and a join naming no chat or an `add` naming nobody as
     /// [`DenyReason::CallMismatch`]. Under the registry's rule a call operation is denied as
@@ -680,8 +630,8 @@ impl Fence {
     /// open for the operation (ringing, answered, leaving or declined), or, for a join, the group chat an offered
     /// invitation bound the conversation to ([`crate::calls`]); the participants (the call's; the invitation's caller and
     /// callee, or the joiner, with every member of the group chat, read fresh and complete) together with any invitee
-    /// must all be lab accounts, approved services or call guests, and an invitation must still be open for the operation once the
-    /// chat was read. A permitted `leave` moves its call (or its answered invitation) to leaving, a permitted `attach`
+    /// must all be ones the roster admits, and an invitation must still be open for the operation once the chat was
+    /// read. A permitted `leave` moves its call (or its answered invitation) to leaving, a permitted `attach`
     /// binds its invitation's call agent and the callbacks its ring ends at, a permitted `accept` answers its invitation
     /// and a permitted `reject` declines it.
     async fn check_call_operation(&self, target: Target, source: &dyn MembershipSource) -> Result<WritePermit, Denied> {
@@ -695,13 +645,11 @@ impl Fence {
     /// The lab's decision on an operation on a call ([`CallRule::Entry`]): only a call's entry is judged, by who takes
     /// part in it.
     /// - a join (a `POST` to a conversation): the group chat it names (`joins`), read fresh, complete and listing the
-    ///   joiner, every member a lab account, an approved service or a call guest and the joiner a lab account or an
-    ///   approved service;
-    /// - an answer (`accept`) or a decline (`reject`): only of an invitation this fence offered (a lab caller's or a
-    ///   call guest's, to its own account), by the call leg its link names, still open for it; the invitation's parties
-    ///   and its group chat, read fresh, all lab accounts, approved services or call guests;
-    /// - an `add`, a meeting lobby's admit or a removal (its Deny): its sender a lab account or an approved service,
-    ///   every person it names one or a call guest;
+    ///   joiner, every member and the joiner admitted ([`Roster::admits`]);
+    /// - an answer (`accept`) or a decline (`reject`): only of an invitation this fence offered (to its own account), by
+    ///   the call leg its link names, still open for it; the invitation's parties and its group chat, read fresh, all
+    ///   admitted;
+    /// - an `add`, a meeting lobby's admit or a removal (its Deny): its sender and every person it names admitted;
     /// - anything else (a follow-up of a call let in, a ring-time send, a `leave`): permitted and logged, with no member
     ///   read and no registry lookup. The registry still reads it (a `leave` ends its call there, an `attach` binds the
     ///   callbacks its ring ends at), but decides nothing.
@@ -713,7 +661,6 @@ impl Fence {
             return self.decided(target, Verdict::Deny(DenyReason::CallMismatch));
         };
         let sender: BTreeSet<Mri> = from.iter().cloned().collect();
-        // a call guest takes part in the lab's calls, but no join or `add` is sent as one
         if matches!(
             operation,
             CallOperation::Join | CallOperation::Add | CallOperation::Admit | CallOperation::RemoveParticipant
@@ -773,11 +720,7 @@ impl Fence {
             .chain(&chat)
             .chain(target.added())
             .collect();
-        let verdict = if participants.is_empty() {
-            Verdict::Deny(DenyReason::NoMembers)
-        } else {
-            self.admits_all(participants.into_iter(), true)
-        };
+        let verdict = self.admits_all(participants.into_iter());
         let permit = self.decided(target, verdict)?;
         self.calls.permitted(&resolved);
         Ok(permit)
@@ -794,23 +737,14 @@ impl Fence {
         let Some(chat) = chat else {
             return Ok(Vec::new());
         };
-        // a channel's call is joined by its team: read from the team's thread, Teams' own apps not counted
-        let team = is_team_thread_id(chat);
-        let scope = if team {
+        // a channel's call is joined by its team: read from the team's thread
+        let scope = if is_team_thread_id(chat) {
             Scope::Team { id: chat.to_owned() }
         } else {
             Scope::Conversation { id: chat.to_owned() }
         };
-        let members = match source.members(&scope).await {
-            Membership::Complete(mut members) if team => {
-                members.retain(|mri| !self.roster.is_team_app(mri));
-                Membership::Complete(members)
-            }
-            other => other,
-        };
-        match members {
+        match source.members(&scope).await {
             Membership::Complete(members) if parties.iter().all(|party| members.contains(party)) => Ok(members),
-            Membership::Complete(members) if members.is_empty() => Err(DenyReason::NoMembers),
             // a group call's invitation whose chat doesn't list its own caller and callee isn't bound to that chat
             Membership::Complete(_) => Err(DenyReason::CallMismatch),
             Membership::Partial(reason) => Err(DenyReason::Partial(reason)),
@@ -901,10 +835,9 @@ impl Fence {
     /// Reads a Trouter delivery the account's socket received ([`crate::calls`]): a pending or registered call's
     /// acceptance binds its call controller's links, and the end of a call ends it; an incoming call's invitation is
     /// offered when it is addressed to this fence's [own account](Fence::own_account), a lab account, and its caller
-    /// is a lab account, an approved service or a call guest (a fence of no account offers none; a personal fence offers any one
+    /// is one the roster admits ([`Roster::admits`]; a fence of no account offers none; a personal fence offers any one
     /// addressed to its account whose caller isn't the account, one at a time, as a Teams client rings for one call at
-    /// a time), and a delivery at an offered
-    /// invitation's end callback ends its ring. A delivery at an endpoint's root that may be an invitation but doesn't
+    /// a time), and a delivery at an offered invitation's end callback ends its ring. A delivery at an endpoint's root that may be an invitation but doesn't
     /// read is [`Observed::Ignored`] too. It sends nothing and permits nothing by itself.
     pub fn observe_delivery(&self, delivery: &Delivery) -> Observed {
         let Some(invitation) = read_invitation(delivery) else {
@@ -915,7 +848,7 @@ impl Fence {
         };
         // the personal build's: any readable invitation addressed to the account, whoever it is from, one at a time
         let admitted = self.is_personal()
-            || (self.roster.is_lab_account(&invitation.callee) && self.roster.admits_on_call(&invitation.caller));
+            || (self.roster.is_lab_account(&invitation.callee) && self.roster.admits(&invitation.caller));
         let offered =
             self.own.as_ref() == Some(&invitation.callee) && admitted && invitation.caller != invitation.callee;
         if !offered {
@@ -945,9 +878,8 @@ impl Fence {
     /// acceptance delivery of a live call on that connection, as the captured receipt (an empty body) of a renegotiation
     /// or its answer delivered on that connection at a live call's or an answered invitation's own callback, or as the
     /// captured response to an offered invitation's delivery on that connection while it rings, its caller and callee
-    /// lab accounts, approved services or call guests and the group chat it names, if any, of them only by a fresh,
-    /// complete read from `source` (listing both). A decision is
-    /// logged; a response to no pending delivery is [`DeliveryDecision::NotPending`], neither decided nor logged.
+    /// admitted ([`Roster::admits`]) and the group chat it names, if any, of them only by a fresh, complete read from
+    /// `source` (listing both). A decision is logged; a response to no pending delivery is [`DeliveryDecision::NotPending`], neither decided nor logged.
     pub async fn check_delivery_response(
         &self,
         connection: &str,
@@ -975,7 +907,7 @@ impl Fence {
                     }
                     Ok(members) => {
                         let all = participants.iter().chain(&members);
-                        match self.admits_all(all, true) {
+                        match self.admits_all(all) {
                             Verdict::Allow => Ok(delivery),
                             Verdict::Deny(_) => Err(crate::calls::DeliveryDenyReason::Parties),
                         }
@@ -1018,85 +950,51 @@ impl Fence {
         if target.kind() == WriteKind::OwnAvailability || matches!(target.scope(), Scope::Account { .. }) {
             return self.judge_own(target);
         }
-        // a call guest takes part in the lab's calls, but no start is sent as one
         if let Some(sender) = target.sender()
             && !self.roster.admits(sender)
         {
             return Verdict::Deny(DenyReason::Outsiders { count: 1 });
         }
-        let fetched = !matches!(target.scope(), Scope::New);
-        if !fetched && !target.kind().creates_target() {
+        if matches!(target.scope(), Scope::New) && !target.kind().creates_target() {
             return Verdict::Deny(DenyReason::NotCreatable);
         }
         if is_signal_on_a_chat(target) {
             return self.judge_added(target);
         }
-        let mut current = match membership {
+        // apps and bots on a team or a chat aren't people (`Roster::admits`), and a target nobody but the account is
+        // in reaches nobody: only a person outside the lab, current or added, denies it
+        let current = match membership {
             Membership::Complete(members) => members,
             Membership::Partial(reason) => return Verdict::Deny(DenyReason::Partial(reason)),
             Membership::OrgWide => return Verdict::Deny(DenyReason::OrgWide),
         };
-        // Teams' own apps on a team aren't people it reaches; anyone else on it, an app someone added too, is judged
-        if matches!(
-            target.scope(),
-            Scope::Team { .. } | Scope::Channel { .. } | Scope::TeamCalendar { .. }
-        ) {
-            current.retain(|mri| !self.roster.is_team_app(mri));
-        }
-        if fetched && current.is_empty() {
-            return Verdict::Deny(DenyReason::NoMembers);
-        }
-        let participants: BTreeSet<&Mri> = current.iter().chain(target.added()).collect();
-        // a new calendar event inviting nobody reaches nobody: an appointment of the account's own; so does a new private
-        // team, which holds only the account until people are added, each such write judged on its own
-        let appointment = !fetched && matches!(target.kind(), WriteKind::Meeting | WriteKind::TeamCreate);
-        if participants.is_empty() && !appointment {
-            return Verdict::Deny(DenyReason::NoMembers);
-        }
-        self.admits_all(participants.into_iter(), is_call_write(target))
+        self.admits_all(current.iter().chain(target.added()))
     }
 
     /// The decision on typing or a read receipt on a chat: it reaches nobody, so the chat's members aren't read and
     /// only the participants it names itself, if any, are judged.
     fn judge_added(&self, target: &Target) -> Verdict {
-        self.admits_all(target.added().iter(), false)
+        self.admits_all(target.added().iter())
     }
 
-    /// Allow when the roster admits every one of `participants`: for a call write (`on_call`) a call guest too
-    /// ([`Roster::admits_on_call`]).
-    fn admits_all<'a>(&self, participants: impl Iterator<Item = &'a Mri>, on_call: bool) -> Verdict {
-        let admits = |mri: &Mri| {
-            if on_call {
-                self.roster.admits_on_call(mri)
-            } else {
-                self.roster.admits(mri)
-            }
-        };
-        let count = participants.filter(|mri| !admits(mri)).count();
-        if count > 0 {
-            Verdict::Deny(DenyReason::Outsiders { count })
-        } else {
+    /// Allow when the roster admits every one of `participants` ([`Roster::admits`]).
+    fn admits_all<'a>(&self, participants: impl Iterator<Item = &'a Mri>) -> Verdict {
+        let outsiders: BTreeSet<&Mri> = participants.filter(|mri| !self.roster.admits(mri)).collect();
+        if outsiders.is_empty() {
             Verdict::Allow
+        } else {
+            Verdict::Deny(DenyReason::Outsiders { count: outsiders.len() })
         }
     }
 
-    /// The decision on a write that is the account's own availability or lands on [`Scope::Account`]: allowed only
-    /// when it is the own availability of the fence's own account, a lab account of the roster, with nobody added.
+    /// The decision on a write that is the account's own availability or lands on [`Scope::Account`]: the account's
+    /// own availability reaches nobody, so it is allowed unless it names a person outside the lab; nothing else lands
+    /// on the account itself.
     fn judge_own(&self, target: &Target) -> Verdict {
-        if target.kind() != WriteKind::OwnAvailability {
-            return Verdict::Deny(DenyReason::AccountScope);
-        }
-        let own = match target.scope() {
-            Scope::Account { mri } => self
-                .own
-                .as_ref()
-                .is_some_and(|own| own.as_str() == mri && self.roster.is_lab_account(own)),
-            _ => false,
-        };
-        if own && target.added().is_empty() {
-            Verdict::Allow
+        if target.kind() == WriteKind::OwnAvailability {
+            self.admits_all(target.added().iter())
         } else {
-            Verdict::Deny(DenyReason::NotOwnAccount)
+            Verdict::Deny(DenyReason::AccountScope)
         }
     }
 }
@@ -1107,20 +1005,6 @@ const ACKNOWLEDGEMENT: &str = "call_acceptance_acknowledgement";
 const RECEIPT: &str = "call_invitation_receipt";
 const NEGOTIATION_RECEIPT: &str = "call_negotiation_receipt";
 const DELIVERY_RESPONSE: &str = "call_delivery_response";
-
-/// Whether `target` is a call write, which a call guest may take part in ([`Roster::admits_on_call`]): a start (on a
-/// chat, or a new one), an answer, a decline, what a callee's client sends while it rings, a call's follow-ups, and
-/// any operation on a call (an `add` included). An invite or a member change off a call is not.
-fn is_call_write(target: &Target) -> bool {
-    matches!(
-        target.kind(),
-        WriteKind::Call
-            | WriteKind::CallAnswer
-            | WriteKind::CallDecline
-            | WriteKind::CallRinging
-            | WriteKind::CallFollowUp
-    ) || matches!(target.scope(), Scope::CallOperation { .. })
-}
 
 /// Whether `target` is typing or a read receipt on a chat by its id ([`is_chat_id`]: a 1:1, group or meeting chat, the
 /// same rule [`crate::contacting`] carves them out by), which the fence permits without a member read. On anything else

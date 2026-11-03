@@ -1,8 +1,8 @@
 //! The reviewed expected-deny list of the writing scenarios (`proto_lab::scenario::expected`): it changes only how a
 //! run is judged, never a verdict; it holds only contacting-service classes the fence denies under the lab rule (bot
-//! invokes, the account's own channel entry and channel properties, its call log's read horizon, the file browser's
-//! prewarm, Trouter delivery responses); and whatever it says, a deny on the scenario's mapped target, a deny that isn't `Unclassified`, a deny
-//! of what the lab rule lets through and any class off the list stay unexpected, the scenario's own labelled forced
+//! invokes, the account's own channel entry and channel properties, the scheduling form's dropped meeting); and
+//! whatever it says, a deny on the scenario's mapped target, a deny that isn't `Unclassified`, a deny of what the lab
+//! rule lets through and any class off the list stay unexpected, the scenario's own labelled forced
 //! denies the only exception. All URLs and ids here are made up.
 
 use std::path::{Path, PathBuf};
@@ -46,14 +46,7 @@ fn listed_classes() -> Vec<(&'static str, String)> {
                 format!("{chat_service}/users/ME/conversations/{channel}/properties"),
             ));
         }
-        for call_log in ["48:calllogs", "48%3Acalllogs"] {
-            classes.push((
-                "PUT",
-                format!("{chat_service}/users/ME/conversations/{call_log}/properties"),
-            ));
-        }
     }
-    classes.push(("POST", FILE_BROWSER.to_owned()));
     classes
 }
 
@@ -355,6 +348,14 @@ fn a_deny_of_what_the_lab_rule_lets_through_is_unexpected() -> TestResult {
             "https://eu-prod.asyncgw.teams.microsoft.com/v1/skypetokenauth".to_owned(),
         ),
         ("POST", "https://augloop.office.com/".to_owned()),
+        (
+            "PUT",
+            format!(
+                "{teams}/api/chatsvc/emea/v1/users/ME/conversations/48%3Acalllogs/properties?name=consumptionhorizon"
+            ),
+        ),
+        ("POST", "https://outlook.office.com/owa/startupdata.ashx".to_owned()),
+        ("POST", format!("{FILE_BROWSER}?preWarmFB=1")),
     ] {
         assert_ne!(
             Classifier::new().classify(method, &url, &[], Some(br#"{"isread":"true"}"#)),

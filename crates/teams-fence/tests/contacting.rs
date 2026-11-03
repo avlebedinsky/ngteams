@@ -330,6 +330,65 @@ fn typing_and_read_receipts_reach_nobody_only_on_a_chat_id_the_fence_takes() {
 }
 
 #[test]
+fn the_read_horizon_of_the_account_s_own_streams_reaches_nobody() {
+    let base = "https://teams.microsoft.com/api/chatsvc/emea/v1/users/ME/conversations";
+    let horizon = br#"{"consumptionhorizon":"1;2;3"}"#;
+    for stream in ["48:calllogs", "48%3Acalllogs", "48:notifications", "48:mentions"] {
+        let url = format!("{base}/{stream}/properties?name=consumptionhorizon");
+        assert_eq!(verdict("PUT", &url, Some(horizon)), Contact::None, "{stream}");
+    }
+    // another stream, another property, or a write on the stream itself stay unreadable
+    for (method, url) in [
+        (
+            "PUT",
+            format!("{base}/48:sharedcalllogs/properties?name=consumptionhorizon"),
+        ),
+        ("PUT", format!("{base}/48:notes/properties?name=consumptionhorizon")),
+        ("PUT", format!("{base}/48:calllogs/properties?name=topic")),
+        ("POST", format!("{base}/48:calllogs/messages")),
+    ] {
+        assert_eq!(
+            verdict(method, &url, Some(horizon)),
+            Contact::Unreadable,
+            "{method} {url}"
+        );
+    }
+}
+
+#[test]
+fn the_outlook_calendar_s_startup_and_the_file_browser_s_prewarm_reach_nobody() {
+    let startup = "https://outlook.office.com/owa/startupdata.ashx?app=Calendar";
+    assert_eq!(verdict("POST", startup, Some(b"{}")), Contact::None);
+    assert_eq!(
+        verdict("POST", "https://outlook.office.com/OWA/StartupData.ashx", None),
+        Contact::None
+    );
+    let prewarm =
+        "https://made-up-my.sharepoint.com/personal/made_up_example_com/_layouts/15/filebrowser.aspx?preWarmFB=1";
+    assert_eq!(verdict("POST", prewarm, Some(b"access_token=x")), Contact::None);
+    for (method, url) in [
+        ("PUT", startup.to_owned()),
+        (
+            "POST",
+            "https://outlook.office.com/owa/service.svc?action=CreateItem".to_owned(),
+        ),
+        ("POST", "https://outlook.office.com/owa/x/startupdata.ashx".to_owned()),
+        ("PUT", prewarm.to_owned()),
+        ("POST", prewarm.replace("filebrowser.aspx", "upload.aspx")),
+        ("POST", prewarm.replace("/personal/", "/sites/")),
+        ("POST", prewarm.replace("/personal/made_up_example_com", "/personal")),
+        ("POST", prewarm.replace("made-up-my.sharepoint.com", "sharepoint.com")),
+        ("POST", prewarm.replace("made-up-my.", "deeper.made-up-my.")),
+    ] {
+        assert_eq!(
+            verdict(method, &url, Some(b"{}")),
+            Contact::Unreadable,
+            "{method} {url}"
+        );
+    }
+}
+
+#[test]
 fn every_own_view_property_is_carved_out_on_a_chat() {
     for name in OWN_VIEW_PROPERTIES {
         let url = format!(

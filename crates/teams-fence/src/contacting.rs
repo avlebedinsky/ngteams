@@ -274,8 +274,9 @@ pub fn contacting(request: &Request<'_>, policy: &Policy) -> Contact {
             .or_else(|| call::channel_call_start(&parsed.method, &url, parsed.body))
             .or_else(|| call::follow_up(&parsed.method, &url, parsed.body))
             .map_or(Contact::Unreadable, Contact::Write),
-        Service::Graph | Service::SharePoint => Contact::Unreadable,
-        Service::Outlook => none_if(is_substrate_search(&parsed)),
+        Service::Graph => Contact::Unreadable,
+        Service::SharePoint => none_if(is_file_browser_prewarm(&parsed)),
+        Service::Outlook => none_if(is_substrate_search(&parsed) || is_owa_startup(&parsed)),
         Service::Ams => none_if(is_token_exchange(&parsed)),
         Service::MiddleTier => calendar::classify(&parsed)
             .or_else(|| channel::middle_tier(&parsed))
@@ -454,6 +455,42 @@ fn is_substrate_search(request: &Parsed<'_>) -> bool {
                 ["searchservice", "api", version, "query"] => is_version(version),
                 _ => false,
             }
+        })
+}
+
+/// The embedded Outlook calendar app's startup read, sent as a `POST`: `…/owa/startupdata.ashx` on
+/// `outlook.office.com` (`docs/protocol/calendar.md`). It reads the account's own startup data and reaches nobody.
+fn is_owa_startup(request: &Parsed<'_>) -> bool {
+    request.method == "POST"
+        && request
+            .url
+            .host_str()
+            .is_some_and(|host| host.trim_end_matches('.').eq_ignore_ascii_case("outlook.office.com"))
+        && decoded_segments(request.url).is_some_and(|segments| {
+            matches!(segments.as_slice(), [owa, page]
+                if owa.eq_ignore_ascii_case("owa") && page.eq_ignore_ascii_case("startupdata.ashx"))
+        })
+}
+
+/// The OneDrive file browser's frame as the client prewarms it: a document loaded by a form `POST` of the account's
+/// own SharePoint token to its own personal site, `https://<tenant>-my.sharepoint.com/personal/<user>/_layouts/15/
+/// filebrowser.aspx` (a host one label under `sharepoint.com`). It reaches nobody.
+fn is_file_browser_prewarm(request: &Parsed<'_>) -> bool {
+    let one_label_under = request.url.host_str().is_some_and(|host| {
+        host.trim_end_matches('.')
+            .to_ascii_lowercase()
+            .strip_suffix(".sharepoint.com")
+            .is_some_and(|label| !label.is_empty() && !label.contains('.'))
+    });
+    request.method == "POST"
+        && one_label_under
+        && decoded_segments(request.url).is_some_and(|segments| {
+            matches!(segments.as_slice(), [personal, user, layouts, version, page]
+                if personal.eq_ignore_ascii_case("personal")
+                    && !user.is_empty()
+                    && layouts.eq_ignore_ascii_case("_layouts")
+                    && version == "15"
+                    && page.eq_ignore_ascii_case("filebrowser.aspx"))
         })
 }
 

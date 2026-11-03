@@ -1,8 +1,6 @@
-//! The account's own availability: a write the fence permits without a member read (it reaches nobody), but only as
-//! the account's own. It is `WriteKind::OwnAvailability` on `Scope::Account`, allowed only for the fence's own account
-//! (a fence opened for a lab account, `Fence::open_lab_account`), a lab account of the roster, with nobody added;
-//! denied for every other account, scope or fence, and nothing else lands on `Scope::Account`. No decision here asks
-//! the membership source.
+//! The account's own availability: a write the fence permits without a member read, since it reaches nobody. It is
+//! `WriteKind::OwnAvailability`, allowed on any account or scope unless it adds a person outside the lab; nothing else
+//! lands on `Scope::Account`. No decision here asks the membership source.
 //!
 //! MRIs here are placeholders, never real ones.
 
@@ -102,57 +100,42 @@ async fn the_fences_own_account_may_set_its_availability_without_a_member_read()
 }
 
 #[tokio::test]
-async fn every_other_account_scope_or_fence_is_denied_as_not_its_own() {
+async fn an_availability_reaches_nobody_and_is_denied_only_when_it_adds_an_outsider() {
     let dir = tempfile::tempdir().unwrap();
     let fence_a = fence(dir.path(), Some(LAB_A));
     let source = Counted::default();
     let chat = Scope::Conversation {
         id: "19:lab-chat@thread.v2".to_owned(),
     };
-    let denied = [
+    let allowed = [
         ("another lab account", own(LAB_B)),
         ("an approved service", own(ECHO)),
-        ("someone outside the lab", own(COWORKER)),
         ("a lookalike of its own", own("8:orgid:LAB-A")),
-        ("with someone added", own(LAB_A).with_added([Mri::new(LAB_B)])),
-        ("with itself added", own(LAB_A).with_added([Mri::new(LAB_A)])),
+        ("with a lab account added", own(LAB_A).with_added([Mri::new(LAB_B)])),
         ("on a chat", Target::new(WriteKind::OwnAvailability, chat)),
         ("on a new target", Target::new(WriteKind::OwnAvailability, Scope::New)),
-        (
-            "on a call",
-            Target::new(WriteKind::OwnAvailability, Scope::Call { id: "call".to_owned() }),
-        ),
     ];
-    for (case, target) in denied {
-        let refused = fence_a.check(target.clone(), &source).await.unwrap_err();
-        assert_eq!(refused.reason(), &DenyReason::NotOwnAccount, "{case}");
-        assert_eq!(refused.target(), &target, "{case}");
+    for (case, target) in allowed {
+        assert!(fence_a.check(target, &source).await.is_ok(), "{case}");
     }
+    let refused = fence_a
+        .check(own(LAB_A).with_added([Mri::new(COWORKER)]), &source)
+        .await
+        .unwrap_err();
+    assert_eq!(refused.reason(), &DenyReason::Outsiders { count: 1 });
     assert_eq!(
         source.asked(),
         0,
         "no own-availability decision asks the membership source"
     );
-    assert!(
-        entries(dir.path())
-            .iter()
-            .all(|entry| entry["verdict"] == "deny" && entry["reason"] == "not_own_account")
-    );
 
-    // a fence of no account (the browser fence's, `Fence::open_lab`) permits nobody's
+    // a fence of no account (the browser fence's, `Fence::open_lab`) lets it through too
     let other = tempfile::tempdir().unwrap();
     let no_account = fence(other.path(), None);
     assert_eq!(no_account.own_account(), None);
     for mri in [LAB_A, LAB_B, LAB_C] {
-        let refused = no_account.check(own(mri), &source).await.unwrap_err();
-        assert_eq!(refused.reason(), &DenyReason::NotOwnAccount, "{mri}");
+        assert!(no_account.check(own(mri), &source).await.is_ok(), "{mri}");
     }
-
-    // a fence whose own account isn't a lab account of its roster permits nothing either
-    let third = tempfile::tempdir().unwrap();
-    let outsider = fence(third.path(), Some(COWORKER));
-    let refused = outsider.check(own(COWORKER), &source).await.unwrap_err();
-    assert_eq!(refused.reason(), &DenyReason::NotOwnAccount);
     assert_eq!(source.asked(), 0);
 }
 
@@ -179,10 +162,6 @@ async fn nothing_but_the_own_availability_lands_on_the_account() {
 
 #[tokio::test]
 async fn the_reasons_read_as_the_rule_says() {
-    assert_eq!(
-        DenyReason::NotOwnAccount.to_string(),
-        "not the fence's own account's availability"
-    );
     assert_eq!(
         DenyReason::AccountScope.to_string(),
         "only the account's own availability lands on the account itself"
@@ -216,14 +195,10 @@ async fn a_lab_accounts_fence_owns_that_account_only() {
     let fence_b = Fence::open_account(&config, Alias::B).unwrap();
     assert_eq!(fence_b.own_account(), Some(&Mri::new(LAB_B)));
     assert!(fence_b.check(own(LAB_B), &source).await.is_ok());
-    let refused = fence_b.check(own(LAB_A), &source).await.unwrap_err();
-    assert_eq!(refused.reason(), &DenyReason::NotOwnAccount);
 
-    // c's MRI isn't in lab.toml yet: its fence owns no account, so it permits no availability at all
+    // c's MRI isn't in lab.toml yet: its fence owns no account
     let fence_c = Fence::open_account(&config, Alias::C).unwrap();
     assert_eq!(fence_c.own_account(), None);
-    let refused = fence_c.check(own(LAB_C), &source).await.unwrap_err();
-    assert_eq!(refused.reason(), &DenyReason::NotOwnAccount);
 
     // the fence of no account (the browser fence's) owns none
     assert_eq!(Fence::open(&config).unwrap().own_account(), None);

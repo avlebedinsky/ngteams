@@ -1,13 +1,13 @@
-//! The write fence: a write is allowed only when every participant of its target, fetched fresh, is one of the 3 lab
-//! accounts or an approved service participant.
+//! The write fence: the lab's one rule is that its accounts contact only each other, the echo service and the user's
+//! own account (a contact). A write is denied only when a person outside those takes part in its target, fetched
+//! fresh, or when that can't be told; apps and bots aren't people.
 //!
 //! [`Fence::check`] takes a [`Target`] (a [`WriteKind`] and a [`Scope`], plus any participants the write adds) and a
 //! [`MembershipSource`], fetches the scope's members on every call, and returns a [`WritePermit`] or [`Denied`].
-//! Anything unknown is denied: a failed, empty, paginated or truncated membership, an org-wide team or channel, an
-//! outside participant, a [`Scope::New`] target for a kind that doesn't create one. A write that reaches nobody
+//! What can't be told is denied: a failed, paginated or truncated membership, an org-wide team or channel, an outside
+//! participant, a [`Scope::New`] target for a kind that doesn't create one. A write that reaches nobody
 //! ([`WriteKind::is_contacting`] false) is judged without a member read: typing and read receipts on a chat, and the account's
-//! own availability ([`WriteKind::OwnAvailability`] on [`Scope::Account`]), only the fence's own account's
-//! ([`Fence::open_lab_account`], [`Fence::own_account`]). An operation on a call ([`Scope::CallOperation`]) goes by the
+//! own availability ([`WriteKind::OwnAvailability`] on [`Scope::Account`]). An operation on a call ([`Scope::CallOperation`]) goes by the
 //! fence's call rule: a lab fence judges a call's entry (a join by the chat it names, an answer or a decline of the
 //! account's own offered invitation, an `add` by its invitees) and permits what the call sends once it was let in; the
 //! call registry's own rule ([`Fence::tracks_calls`], tests only) resolves every one to a call it registered.
@@ -21,8 +21,7 @@
 //! ([`Contact::Write`]) and from a mutating request on a contacting service that no row reads ([`Contact::Unreadable`]).
 //!
 //! A native read by `POST` of the sealed list (`teams-proto`'s `PostRead`) is decided by [`Fence::check_post_read`]: a
-//! [`PostReadPermit`] for its exact list of MRIs when every one is a lab account, none twice (through a personal fence,
-//! any), the decision logged. The lab's native client sends its reads by `POST` as plain requests instead.
+//! [`PostReadPermit`] for its exact list of MRIs, whoever it names (a read reaches nobody), the decision logged. The lab's native client sends its reads by `POST` as plain requests instead.
 //!
 //! The personal build's fence (`docs/personal-build.md`), which logs every send and denies none, is the `personal`
 //! module and `decision/audit.rs`, behind the `personal` feature only `crates/ngteams` enables:

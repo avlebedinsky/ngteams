@@ -242,28 +242,46 @@ fn a_duplicate_or_empty_service_name_is_refused() {
     assert!(matches!(parse(&empty).unwrap_err(), ConfigError::EmptyServiceName));
 }
 
-const GUEST_MRI: &str = "8:orgid:00000000-0000-4000-8000-0000000000f0";
+const CONTACT_MRI: &str = "8:orgid:00000000-0000-4000-8000-0000000000f0";
 
-fn guest(name: &str, mri: &str) -> String {
-    format!("[[call_guests]]\nname = \"{name}\"\nmri = \"{mri}\"\n\n")
+fn contact(name: &str, mri: &str) -> String {
+    format!("[[contacts]]\nname = \"{name}\"\nmri = \"{mri}\"\n\n")
 }
 
 #[test]
-fn a_call_guest_is_a_named_work_account_s_mri() {
-    let config = parse(&format!("{}{}", three(), guest("me", GUEST_MRI))).unwrap();
-    assert_eq!(config.call_guests().len(), 1);
-    assert_eq!(config.call_guest("me").map(|guest| guest.mri.as_str()), Some(GUEST_MRI));
-    assert!(config.call_guest("you").is_none());
-    assert!(parse(&three()).unwrap().call_guests().is_empty(), "none by default");
+fn a_contact_is_a_named_work_account_s_mri() {
+    let config = parse(&format!("{}{}", three(), contact("me", CONTACT_MRI))).unwrap();
+    assert_eq!(config.contacts().len(), 1);
+    assert_eq!(
+        config.contact("me").map(|contact| contact.mri.as_str()),
+        Some(CONTACT_MRI)
+    );
+    assert_eq!(config.contact("me").and_then(|contact| contact.upn.as_deref()), None);
+    assert!(config.contact("you").is_none());
+    assert!(parse(&three()).unwrap().contacts().is_empty(), "none by default");
+    let with_upn = format!(
+        "{}[[contacts]]\nname = \"me\"\nmri = \"{CONTACT_MRI}\"\nupn = \"me@lab.example.com\"\n",
+        three()
+    );
+    let config = parse(&with_upn).unwrap();
+    assert_eq!(
+        config.contact("me").and_then(|contact| contact.upn.as_deref()),
+        Some("me@lab.example.com")
+    );
+    let bad_upn = format!(
+        "{}[[contacts]]\nname = \"me\"\nmri = \"{CONTACT_MRI}\"\nupn = \"not an address\"\n",
+        three()
+    );
+    assert!(matches!(parse(&bad_upn).unwrap_err(), ConfigError::InvalidUpn(_)));
 
     let cases = [
-        (guest("me", "28:00000000-0000-4000-8000-0000000000f0"), "a bot's"),
+        (contact("me", "28:00000000-0000-4000-8000-0000000000f0"), "a bot's"),
         (
-            guest("me", "8:orgid:00000000-0000-4000-8000-0000000000F0"),
+            contact("me", "8:orgid:00000000-0000-4000-8000-0000000000F0"),
             "upper case",
         ),
-        (guest("me", "8:orgid:"), "no guid"),
-        (guest("me", ""), "empty"),
+        (contact("me", "8:orgid:"), "no guid"),
+        (contact("me", ""), "empty"),
     ];
     for (text, why) in cases {
         assert!(
@@ -277,24 +295,37 @@ fn a_call_guest_is_a_named_work_account_s_mri() {
 }
 
 #[test]
-fn a_call_guest_without_an_mri_or_name_or_twice_or_a_lab_account_is_refused() {
-    let no_mri = format!("{}[[call_guests]]\nname = \"me\"\n", three());
+fn a_contact_without_an_mri_or_name_or_twice_or_a_lab_account_is_refused() {
+    let no_mri = format!("{}[[contacts]]\nname = \"me\"\n", three());
     assert!(matches!(parse(&no_mri).unwrap_err(), ConfigError::Parse(_)));
-    let twice = format!("{}{}{}", three(), guest("me", GUEST_MRI), guest("me", GUEST_MRI));
-    assert!(matches!(parse(&twice).unwrap_err(), ConfigError::DuplicateGuest(_)));
-    let unnamed = format!("{}{}", three(), guest("", GUEST_MRI));
-    assert!(matches!(parse(&unnamed).unwrap_err(), ConfigError::EmptyGuestName));
-    // a lab account is never a guest too
+    let twice = format!(
+        "{}{}{}",
+        three(),
+        contact("me", CONTACT_MRI),
+        contact("me", CONTACT_MRI)
+    );
+    assert!(matches!(parse(&twice).unwrap_err(), ConfigError::DuplicateContact(_)));
+    let unnamed = format!("{}{}", three(), contact("", CONTACT_MRI));
+    assert!(matches!(parse(&unnamed).unwrap_err(), ConfigError::EmptyContactName));
+    // a lab account is never a contact too
     let lab_too = format!(
-        "{}[[accounts]]\nalias = \"c\"\nupn = \"bot-c@lab.example.com\"\nmri = \"{GUEST_MRI}\"\n\n{}",
+        "{}[[accounts]]\nalias = \"c\"\nupn = \"bot-c@lab.example.com\"\nmri = \"{CONTACT_MRI}\"\n\n{}",
         [
             account("a", "bot-a@lab.example.com"),
             account("b", "bot-b@lab.example.com")
         ]
         .concat(),
-        guest("me", GUEST_MRI)
+        contact("me", CONTACT_MRI)
     );
     assert!(matches!(parse(&lab_too).unwrap_err(), ConfigError::DuplicateMri(_)));
+    // the old shapes are gone: a calls-only guest and the team apps list
+    let old_guest = format!("{}[[call_guests]]\nname = \"me\"\nmri = \"{CONTACT_MRI}\"\n", three());
+    assert!(matches!(parse(&old_guest).unwrap_err(), ConfigError::Parse(_)));
+    let old_apps = format!(
+        "{}[[team_apps]]\nname = \"app\"\nmri = \"28:00000000-0000-4000-8000-0000000000a1\"\n",
+        three()
+    );
+    assert!(matches!(parse(&old_apps).unwrap_err(), ConfigError::Parse(_)));
 }
 
 #[test]
@@ -685,62 +716,4 @@ fn a_lab_data_dir_that_is_holds_or_lies_inside_the_personal_one_is_refused() {
         LabConfig::load(&locations),
         Err(ConfigError::PersonalDataDir { .. })
     ));
-}
-
-const APP_MRI: &str = "28:00000000-0000-4000-8000-0000000000a1";
-
-fn team_app(name: &str, mri: &str) -> String {
-    format!("[[team_apps]]\nname = \"{name}\"\nmri = \"{mri}\"\n\n")
-}
-
-#[test]
-fn a_team_app_is_a_named_bot_s_mri() {
-    let config = parse(&format!("{}{}", three(), team_app("app 1", APP_MRI))).unwrap();
-    assert_eq!(config.team_apps().len(), 1);
-    assert_eq!(config.team_apps()[0].mri, APP_MRI);
-    assert!(parse(&three()).unwrap().team_apps().is_empty(), "none by default");
-
-    for mri in [
-        "8:orgid:00000000-0000-4000-8000-0000000000a1",
-        "28:00000000-0000-4000-8000-0000000000A1",
-        "28:not-a-guid",
-        "",
-    ] {
-        let refused = parse(&format!("{}{}", three(), team_app("app 1", mri))).unwrap_err();
-        assert!(matches!(refused, ConfigError::NotABotMri(_)), "{mri}: {refused}");
-    }
-}
-
-#[test]
-fn team_apps_are_named_once_each_and_share_no_mri() {
-    let duplicate = format!(
-        "{}{}{}",
-        three(),
-        team_app("app 1", APP_MRI),
-        team_app("app 1", GUEST_MRI)
-    );
-    assert!(matches!(
-        parse(&duplicate).unwrap_err(),
-        ConfigError::DuplicateTeamApp(_)
-    ));
-    let empty = format!("{}{}", three(), team_app("", APP_MRI));
-    assert!(matches!(parse(&empty).unwrap_err(), ConfigError::EmptyTeamAppName));
-    let twice = format!(
-        "{}{}{}",
-        three(),
-        team_app("app 1", APP_MRI),
-        team_app("app 2", APP_MRI)
-    );
-    assert!(matches!(parse(&twice).unwrap_err(), ConfigError::DuplicateMri(_)));
-    let service = format!(
-        "{}{}[[service_participants]]\nname = \"echo\"\nmri = \"{APP_MRI}\"\n",
-        three(),
-        team_app("app 1", APP_MRI)
-    );
-    assert!(matches!(parse(&service).unwrap_err(), ConfigError::DuplicateMri(_)));
-    let typo = format!(
-        "{}[[team_apps]]\nname = \"app 1\"\nmri = \"{APP_MRI}\"\nkind = \"x\"\n",
-        three()
-    );
-    assert!(parse(&typo).is_err());
 }

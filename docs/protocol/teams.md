@@ -206,6 +206,5 @@ as the team is read as the team its `spaceId` names, whose root thread is read i
 own members); then `GET v1/threads/<thread>/members?view=msnp24Equivalent&pageSize=100`, complete as a group chat's is.
 A write that names the team by its group (archive, the provisioning service's channel paths) is read only once a read of the
 thread in the same run named that group; before, it is denied. Teams' own apps every new team holds (`28:<guid>`, role
-`User`, no `tenantId`; the same three on the lab's team and on a tenant team of 87 members) are `lab.toml`'s `team_apps` and
-aren't counted. An app someone adds to a team shows in the same shape, so nothing but its MRI tells them apart: any other
-`28:` member is someone the write reaches, and denies.
+`User`, no `tenantId`; the same three on the lab's team and on a tenant team of 87 members), like any other app or bot a
+team holds, aren't people and aren't counted.

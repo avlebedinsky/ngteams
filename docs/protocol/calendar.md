@@ -73,8 +73,8 @@ Other selected fields (`categories`, `cleanGlobalObjectId`, `iCalUid`, `eventTim
   the join link) carries, among the events kept from the last two months and the next two, and joins it as its card
   does. Writing an event is below.
 - **Join's menu**, as the calendar Teams embeds (Outlook's) has it: Join and Copy join link. Read from Outlook's public
-  scripts (`JoinMeetingSplitButton`'s two items), since the lab's calendar app doesn't start under the fence (its
-  `POST /owa/startupdata.ashx` is on a contacting service with no row). It copies the event's join link.
+  scripts (`JoinMeetingSplitButton`'s two items), since the lab's calendar app didn't start under the fence (its
+  `POST /owa/startupdata.ashx` was on a contacting service with no row; a carve-out since 2026-11-03). It copies the event's join link.
 
 ## Writing an event
 

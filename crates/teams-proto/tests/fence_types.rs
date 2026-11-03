@@ -252,12 +252,12 @@ async fn a_test_call_with_an_approved_echo_is_permitted() {
 }
 
 #[tokio::test]
-async fn a_test_call_with_an_echo_the_roster_does_not_approve_is_denied() {
-    let denied = fence()
+async fn a_test_call_with_any_bot_is_no_call_to_a_person() {
+    // the echo service is a bot: no person, approved or not
+    fence()
         .check(call_target(LAB_A, ECHO), &LabOnly)
         .await
-        .expect_err("the echo service isn't approved in this roster");
-    assert_eq!(denied.reason(), &teams_fence::DenyReason::Outsiders { count: 1 });
+        .expect("a bot is no person");
 }
 
 #[tokio::test]

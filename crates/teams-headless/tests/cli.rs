@@ -192,29 +192,29 @@ fn abc_is_the_recorded_group_chat_and_an_id_is_taken_as_it_is() {
 }
 
 #[test]
-fn a_call_guest_s_name_names_its_one_to_one_chat() {
-    const GUEST: &str = "8:orgid:00000000-0000-4000-8000-0000000000f0";
-    let guest_chat = one_to_one_id(LAB_A, GUEST).unwrap();
-    let one = names().with_guest("me", GUEST);
-    assert_eq!(resolve("me", Alias::A, &one, None).unwrap(), guest_chat);
+fn a_contact_s_name_names_its_one_to_one_chat() {
+    const CONTACT: &str = "8:orgid:00000000-0000-4000-8000-0000000000f0";
+    let contact_chat = one_to_one_id(LAB_A, CONTACT).unwrap();
+    let one = names().with_contact("me", CONTACT);
+    assert_eq!(resolve("me", Alias::A, &one, None).unwrap(), contact_chat);
     assert_eq!(
-        resolve("guest", Alias::A, &one, None).unwrap(),
-        guest_chat,
-        "the one guest"
+        resolve("contact", Alias::A, &one, None).unwrap(),
+        contact_chat,
+        "the one contact"
     );
-    // with two guests, only by name
-    let two = one.with_guest("other", "8:orgid:00000000-0000-4000-8000-0000000000f1");
+    // with two contacts, only by name
+    let two = one.with_contact("other", "8:orgid:00000000-0000-4000-8000-0000000000f1");
     assert_eq!(
-        resolve("guest", Alias::A, &two, None),
-        Err(ChatError::NotAChat("guest".to_owned()))
+        resolve("contact", Alias::A, &two, None),
+        Err(ChatError::NotAChat("contact".to_owned()))
     );
-    assert_eq!(resolve("me", Alias::A, &two, None).unwrap(), guest_chat);
+    assert_eq!(resolve("me", Alias::A, &two, None).unwrap(), contact_chat);
     assert_eq!(
-        resolve("guest", Alias::A, &names(), None),
-        Err(ChatError::NotAChat("guest".to_owned())),
-        "no guest"
+        resolve("contact", Alias::A, &names(), None),
+        Err(ChatError::NotAChat("contact".to_owned())),
+        "no contact"
     );
-    let unknown_a = LabNames::new([None, Some(LAB_B), Some(LAB_C)]).with_guest("me", GUEST);
+    let unknown_a = LabNames::new([None, Some(LAB_B), Some(LAB_C)]).with_contact("me", CONTACT);
     assert_eq!(
         resolve("me", Alias::A, &unknown_a, None),
         Err(ChatError::NoMri(Alias::A))

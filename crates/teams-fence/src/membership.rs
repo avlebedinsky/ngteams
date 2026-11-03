@@ -31,9 +31,8 @@
 //! Then the root's member list, judged as a group chat's ([`parse_members`]). A team named by its group alone (the provisioning service's paths) is read only once a read of
 //! its thread in this source has named that group ([`LiveMembershipSource::learned`]): the group is never mapped from
 //! anything but the chat service's own answer, and its thread's `groupId` must name the group again. The members
-//! include Teams' own team apps (`28:<guid>`); which of them the fence doesn't count is the roster's to say
-//! ([`crate::Roster::is_team_app`]). Calls are [`PartialReason::Unsupported`] until evidence shows how their full
-//! membership can be confirmed.
+//! include Teams' own team apps (`28:<guid>`), which the fence doesn't count as people ([`crate::Roster::admits`]).
+//! Calls are [`PartialReason::Unsupported`] until evidence shows how their full membership can be confirmed.
 //!
 //! Anything less than a clean answer is [`Membership::Partial`]: no credential yet, a failed or slow request, a
 //! non-success status, a body over [`MAX_BODY`] (truncated), a pagination marker, a member count above the listed

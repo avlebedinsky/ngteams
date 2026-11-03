@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
-use teams_fence::{DenyReason, FailClosed, Fence, FenceLog, Mri, Roster, Scope, Target, WriteKind};
+use teams_fence::{FailClosed, Fence, FenceLog, Mri, Roster, Scope, Target, WriteKind};
 use teams_proto::{
     Client, Credentials, EndpointRegistration, ForceAvailability, HttpError, HttpTransport, ManualAvailability,
     Mutating, PRESENCE_AUDIENCE, Read, Refusal, RegisteredEndpoint, Request as ProtoRequest, Response,
@@ -438,14 +438,13 @@ async fn an_endpoint_registered_for_one_account_names_no_other_accounts_availabi
 }
 
 #[tokio::test]
-async fn another_accounts_availability_is_denied_and_nothing_goes_out() {
+async fn another_accounts_availability_reaches_nobody_but_a_permit_covers_only_its_own_target() {
     let setup = setup(true).await;
-    // b's write, from the endpoint b's own transport registered
+    // b's write, from the endpoint b's own transport registered: it reaches nobody, so a's fence lets it through
     let b = setup_owning(true, Some(LAB_B)).await;
     let b_endpoint = registered(&b).await;
     for target in own_writes(LAB_B, &b_endpoint) {
-        let denied = setup.fence.check(target.unwrap(), &FailClosed).await.unwrap_err();
-        assert_eq!(denied.reason(), &DenyReason::NotOwnAccount);
+        setup.fence.check(target.unwrap(), &FailClosed).await.unwrap();
     }
     // a permit for a's availability doesn't cover b's
     let permit = setup.fence.check(own_target(LAB_A), &FailClosed).await.unwrap();

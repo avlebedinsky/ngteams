@@ -20,6 +20,10 @@ const TYPING_KEYS: [&str; 3] = ["content", "contenttype", "messagetype"];
 /// The account's own streams whose items it may mark read.
 const OWN_FEEDS: [&str; 2] = ["48:notifications", "48:mentions"];
 
+/// The account's own streams whose read horizon it may move: its feeds and its call log, which the client moves when a
+/// call ends (`docs/protocol/calling.md`). Nobody else reads them.
+const OWN_STREAMS: [&str; 3] = ["48:notifications", "48:mentions", "48:calllogs"];
+
 /// The `mentionType` of a mention of everyone in a group chat (`docs/protocol/chat.md`, "A mention of everyone").
 const EVERYONE: &str = "everyone";
 
@@ -110,12 +114,13 @@ fn typing(request: &Parsed<'_>, chat: &str) -> Option<Contact> {
 }
 
 /// A conversation property that reaches nobody, set with exactly one query key: the read horizon on a chat by its id
-/// ([`is_chat_id`], the rule `Fence::check` permits a read receipt by; a read receipt, which others may see), or one
+/// ([`is_chat_id`], the rule `Fence::check` permits a read receipt by; a read receipt, which others may see) or on one of
+/// the account's own streams ([`OWN_STREAMS`]), or one
 /// of [`OWN_VIEW_PROPERTIES`] on a chat or a channel; or the favourite flag as the web client sets it on a channel it
 /// just made ([`is_favorite_joined`]).
 fn own_property(request: &Parsed<'_>, id: &str) -> bool {
     match request.only_query("name") {
-        Some("consumptionhorizon") => is_chat_id(id),
+        Some("consumptionhorizon") => is_chat_id(id) || OWN_STREAMS.contains(&id),
         Some(name) => OWN_VIEW_PROPERTIES.contains(&name) && is_conversation(id),
         None => is_favorite_joined(request) && is_conversation(id),
     }

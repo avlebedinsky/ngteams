@@ -6,8 +6,8 @@
 //!   `fence.log` line, no row, nothing sent again by a later run; one more attempt only after a 401 or a short throttle
 //!   ([`CallRetries`]), never after an unknown outcome (a channel made twice is worse than a failed save). A creation
 //!   that wasn't answered with a 2xx is [`EngineError::ChannelNotCreated`], saying which of Teams' problems it was
-//!   ([`ChannelProblem`]). The lab's fence judges them by the team's members, Teams' own apps every new team holds
-//!   (`lab.toml`'s `team_apps`) left out: a team of lab accounts only lets them through.
+//!   ([`ChannelProblem`]). The lab's fence judges them by the team's members, apps and bots left out: a team of
+//!   the lab's people only lets them through.
 //! - **The list** ([`Created`]): a channel made is stored at once, through the engine's loop, so the sidebar shows it and
 //!   the shell can open it before CSA's list names it; [`crate::teams::Teams`] keeps it for a while against a read that
 //!   doesn't name it yet, and reads the list again.

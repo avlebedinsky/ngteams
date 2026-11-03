@@ -1,6 +1,6 @@
-//! The fence's decision on a native read by `POST` (M2 Task 11): a permit for the exact, ordered list of MRIs when
-//! every one is a lab account, none twice; a deny otherwise; every decision in `fence.log` (without the MRIs), and no
-//! permit when the decision can't be logged.
+//! The fence's decision on a native read by `POST`: a read reaches nobody, so a permit for the exact, ordered list of
+//! MRIs, whoever it names; every decision in `fence.log` (without the MRIs), and no permit when the decision can't be
+//! logged.
 //!
 //! MRIs here are placeholders, never real ones.
 
@@ -99,51 +99,25 @@ fn a_list_of_lab_accounts_gets_a_permit_for_exactly_that_list() {
 }
 
 #[test]
-fn anyone_but_the_lab_accounts_or_a_duplicate_is_denied() {
-    let cases: [(&str, &[&str], PostReadDenyReason); 7] = [
-        ("nobody", &[], PostReadDenyReason::NoNames),
-        ("an outsider", &[COWORKER], PostReadDenyReason::Outsiders { count: 1 }),
-        (
-            "an outsider among lab accounts",
-            &[LAB_A, COWORKER, LAB_B],
-            PostReadDenyReason::Outsiders { count: 1 },
-        ),
-        (
-            "an approved service participant",
-            &[ECHO],
-            PostReadDenyReason::Outsiders { count: 1 },
-        ),
-        (
-            "a service and an outsider",
-            &[ECHO, LAB_A, COWORKER],
-            PostReadDenyReason::Outsiders { count: 2 },
-        ),
-        (
-            "a lab account in another case",
-            &["8:orgid:LAB-A"],
-            PostReadDenyReason::Outsiders { count: 1 },
-        ),
-        (
-            "a lab account twice",
-            &[LAB_A, LAB_B, LAB_A],
-            PostReadDenyReason::Duplicate,
-        ),
+fn a_read_naming_anyone_is_let_through() {
+    let cases: [(&str, &[&str]); 5] = [
+        ("nobody", &[]),
+        ("an outsider", &[COWORKER]),
+        ("an outsider among lab accounts", &[LAB_A, COWORKER, LAB_B]),
+        ("an approved service participant", &[ECHO]),
+        ("a lab account twice", &[LAB_A, LAB_B, LAB_A]),
     ];
-    for (name, names, reason) in cases {
+    for (name, names) in cases {
         let log = SharedLog::default();
         let fence = fence(log.clone());
 
-        let denied = fence.check_post_read(KIND, &mris(names)).unwrap_err();
+        let permit = fence.check_post_read(KIND, &mris(names)).unwrap();
 
-        assert_eq!(denied.reason(), reason, "{name}");
-        assert_eq!(denied.kind(), KIND, "{name}");
+        assert_eq!(permit.names(), mris(names), "{name}");
         let lines = log.lines();
         assert_eq!(lines.len(), 1, "{name}: every decision is logged");
-        assert_eq!(lines[0]["verdict"], "deny", "{name}");
-        assert_eq!(lines[0]["event"], "post_read_decision", "{name}");
-        assert_eq!(lines[0]["post_read"], KIND, "{name}");
+        assert_eq!(lines[0]["verdict"], "allow", "{name}");
         assert_eq!(lines[0]["names"], names.len(), "{name}");
-        assert_eq!(lines[0]["reason"], serde_json::to_value(reason).unwrap(), "{name}");
         assert!(!log.text().contains("coworker"), "{name}: the log never holds the MRIs");
     }
 }
@@ -159,7 +133,7 @@ fn an_allow_that_cant_be_logged_is_denied() {
 
 #[test]
 fn a_denial_shows_no_mri() {
-    let fence = fence(SharedLog::default());
+    let fence = fence(BrokenLog);
 
     let denied = fence.check_post_read(KIND, &mris(&[COWORKER, LAB_A])).unwrap_err();
 

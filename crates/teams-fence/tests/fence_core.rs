@@ -24,6 +24,8 @@ const LAB_C: &str = "8:orgid:lab-c";
 const ECHO: &str = "28:echo-service";
 const COWORKER: &str = "8:orgid:coworker";
 const OTHER_BOT: &str = "28:other-bot";
+/// The user's own account: a contact the lab may reach as it reaches a lab account.
+const OWN: &str = "8:orgid:the-users-own";
 /// A credential the membership source holds; it must never reach the log or an error.
 const PLANTED_TOKEN: &str = "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJwbGFudGVkLXN1YmplY3QifQ.c2lnbmF0dXJlLXZhbHVlLXBsYW50ZWQ";
 
@@ -36,7 +38,7 @@ fn mris(texts: &[&str]) -> Vec<Mri> {
 }
 
 fn roster() -> Roster {
-    Roster::new(mris(&[LAB_A, LAB_B, LAB_C]), mris(&[ECHO]))
+    Roster::new(mris(&[LAB_A, LAB_B, LAB_C]), mris(&[ECHO])).with_contacts([mri(OWN)])
 }
 
 fn chat() -> Scope {
@@ -138,16 +140,32 @@ fn membership_cases() -> Vec<(&'static str, Membership, Expected)> {
             Some(DenyReason::Outsiders { count: 1 }),
         ),
         (
-            "lab + unapproved service",
+            "lab + the user's own account",
+            Membership::Complete(mris(&[LAB_A, OWN])),
+            None,
+        ),
+        ("only the user's own account", Membership::Complete(mris(&[OWN])), None),
+        (
+            "lab + an app or a bot (no person)",
             Membership::Complete(mris(&[LAB_A, OTHER_BOT])),
+            None,
+        ),
+        (
+            "an outsider and a bot",
+            Membership::Complete(mris(&[COWORKER, OTHER_BOT])),
             Some(DenyReason::Outsiders { count: 1 }),
         ),
         (
-            "only outsiders",
-            Membership::Complete(mris(&[COWORKER, OTHER_BOT])),
+            "two outsiders",
+            Membership::Complete(mris(&[COWORKER, "8:orgid:another-coworker"])),
             Some(DenyReason::Outsiders { count: 2 }),
         ),
-        ("empty", Membership::Complete(Vec::new()), Some(DenyReason::NoMembers)),
+        (
+            "an outsider in another case of the user's account",
+            Membership::Complete(mris(&[LAB_A, &OWN.to_uppercase()])),
+            Some(DenyReason::Outsiders { count: 1 }),
+        ),
+        ("empty: it reaches nobody", Membership::Complete(Vec::new()), None),
         (
             "fetch failed (network)",
             Membership::Partial(PartialReason::FetchFailed(FetchFailure::Network)),
@@ -329,10 +347,10 @@ async fn a_new_chat_is_judged_by_its_proposed_members_without_a_fetch() {
 
     assert!(lab.fence.check(create(&[LAB_A, LAB_B]), &unused).await.is_ok());
     assert!(lab.fence.check(create(&[LAB_A, ECHO]), &unused).await.is_ok());
+    assert!(lab.fence.check(create(&[LAB_A, OWN]), &unused).await.is_ok());
     let outsider = lab.fence.check(create(&[LAB_A, COWORKER]), &unused).await.unwrap_err();
     assert_eq!(outsider.reason(), &DenyReason::Outsiders { count: 1 });
-    let empty = lab.fence.check(create(&[]), &unused).await.unwrap_err();
-    assert_eq!(empty.reason(), &DenyReason::NoMembers);
+    assert!(lab.fence.check(create(&[]), &unused).await.is_ok(), "it reaches nobody");
     assert_eq!(unused.fetches(), 0, "a new target has nothing to fetch");
 }
 
@@ -355,17 +373,20 @@ async fn a_new_private_team_names_nobody_and_a_team_open_to_the_organization_is_
 }
 
 #[tokio::test]
-async fn a_team_with_anyone_but_lab_accounts_on_it_is_denied_every_write() {
+async fn a_team_with_a_person_outside_the_lab_on_it_is_denied_every_write() {
     let lab = try_lab().unwrap();
     let team = Scope::Team {
         id: "19:team0001@thread.tacv2".to_owned(),
     };
-    // a team of lab accounts and one of Teams' own apps, as every new team has
+    // a team of lab accounts and one of Teams' own apps, as every new team has: an app is no person
     let with_app = Fixed::complete(&[LAB_A, "28:00000000-0000-4000-8000-0000000000ee"]);
+    let with_outsider = Fixed::complete(&[LAB_A, "28:00000000-0000-4000-8000-0000000000ee", COWORKER]);
     for kind in [WriteKind::TeamChange, WriteKind::MemberChange, WriteKind::ChannelChange] {
+        let verdict = lab.fence.check(Target::new(kind, team.clone()), &with_app).await;
+        assert!(verdict.is_ok(), "{kind:?}: {verdict:?}");
         let denied = lab
             .fence
-            .check(Target::new(kind, team.clone()), &with_app)
+            .check(Target::new(kind, team.clone()), &with_outsider)
             .await
             .unwrap_err();
         assert_eq!(denied.reason(), &DenyReason::Outsiders { count: 1 }, "{kind:?}");
@@ -563,17 +584,20 @@ async fn an_invite_counts_the_invitees_and_the_current_members() {
 }
 
 #[tokio::test]
-async fn an_empty_fetch_is_denied_even_when_lab_members_are_added() {
+async fn an_empty_fetch_is_judged_by_whom_the_write_adds() {
     let lab = try_lab().unwrap();
-    let target = Target::new(WriteKind::MemberChange, chat()).with_added(mris(&[LAB_B]));
-    let denied = lab.fence.check(target, &Fixed::complete(&[])).await.unwrap_err();
-    assert_eq!(denied.reason(), &DenyReason::NoMembers);
+    let add = |who: &str| Target::new(WriteKind::MemberChange, chat()).with_added(mris(&[who]));
+    assert!(lab.fence.check(add(LAB_B), &Fixed::complete(&[])).await.is_ok());
+    assert!(lab.fence.check(add(OWN), &Fixed::complete(&[])).await.is_ok());
+    let denied = lab.fence.check(add(COWORKER), &Fixed::complete(&[])).await.unwrap_err();
+    assert_eq!(denied.reason(), &DenyReason::Outsiders { count: 1 });
 }
 
 #[tokio::test]
-async fn a_lab_account_or_service_without_an_mri_matches_nobody() {
+async fn a_lab_account_without_an_mri_matches_nobody_and_a_bot_is_no_person() {
     let dir = tempfile::tempdir().unwrap();
-    // Account c and the echo service have no MRI yet, so nothing in the roster stands for them.
+    // Account c and the echo service have no MRI yet, so nothing in the roster stands for them; the echo service is a
+    // bot, no person, so a call with it still goes.
     let fence = Fence::new(
         Roster::new(mris(&[LAB_A, LAB_B]), Vec::new()),
         FenceLog::open(&dir.path().join("fence.log")).unwrap(),
@@ -588,9 +612,8 @@ async fn a_lab_account_or_service_without_an_mri_matches_nobody() {
     assert_eq!(with_c.reason(), &DenyReason::Outsiders { count: 1 });
     let with_echo = fence
         .check(Target::new(WriteKind::Call, chat()), &Fixed::complete(&[LAB_A, ECHO]))
-        .await
-        .unwrap_err();
-    assert_eq!(with_echo.reason(), &DenyReason::Outsiders { count: 1 });
+        .await;
+    assert!(with_echo.is_ok(), "{with_echo:?}");
 }
 
 #[tokio::test]
@@ -676,7 +699,6 @@ async fn deny_reasons_are_logged_by_name() {
     let lab = try_lab().unwrap();
     let cases = [
         (Membership::Complete(mris(&[COWORKER])), r#"{"outsiders":{"count":1}}"#),
-        (Membership::Complete(Vec::new()), r#""no_members""#),
         (Membership::OrgWide, r#""org_wide""#),
         (
             Membership::Partial(PartialReason::Paginated),
@@ -870,23 +892,6 @@ async fn reopening_terminates_a_half_written_last_line() {
         before,
         "a well-formed log is left as it is"
     );
-}
-
-// --- reads that name people: the lab accounts alone ---
-
-#[test]
-fn only_a_list_of_lab_accounts_names_nobody_outside_the_lab() {
-    let fence = try_lab().unwrap().fence;
-    assert!(fence.lab_accounts_only(&mris(&[LAB_A])));
-    assert!(fence.lab_accounts_only(&mris(&[LAB_B, LAB_A, LAB_C])));
-    assert!(fence.lab_accounts_only(&mris(&[LAB_A, LAB_A])));
-    // nobody named, an approved service, an outsider, a bot, or an account's MRI in another case
-    assert!(!fence.lab_accounts_only(&[]));
-    assert!(!fence.lab_accounts_only(&mris(&[ECHO])));
-    assert!(!fence.lab_accounts_only(&mris(&[LAB_A, ECHO])));
-    assert!(!fence.lab_accounts_only(&mris(&[LAB_A, COWORKER])));
-    assert!(!fence.lab_accounts_only(&mris(&[OTHER_BOT])));
-    assert!(!fence.lab_accounts_only(&mris(&[&LAB_A.to_uppercase()])));
 }
 
 // --- mutating requests let through because they reach nobody ---

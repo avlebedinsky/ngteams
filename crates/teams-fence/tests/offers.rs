@@ -1554,23 +1554,23 @@ async fn under_the_lab_rule_a_lobby_s_admit_and_deny_reach_only_lab_accounts() -
     Ok(())
 }
 
-// --- a call guest (`lab.toml`'s `call_guests`): its calls are offered, answered and joined like a lab account's ---
+// --- a contact (`lab.toml`'s `contacts`): its calls are offered, answered and joined like a lab account's ---
 
 const GUEST: &str = "8:orgid:00000000-0000-4000-8000-0000000000f0";
 
-/// [`lab_rule_b`] with [`GUEST`] as the lab's call guest.
-fn lab_rule_b_with_guest() -> TestResult<Lab> {
+/// [`lab_rule_b`] with [`GUEST`] (the user's own account) as the lab's contact.
+fn lab_rule_b_with_contact() -> TestResult<Lab> {
     let dir = tempfile::tempdir()?;
     let log = dir.path().join("fence.log");
     let roster = Roster::new([Mri::new(LAB_A), Mri::new(LAB_B), Mri::new(LAB_C)], [Mri::new(ECHO)])
-        .with_call_guests([Mri::new(GUEST)]);
+        .with_contacts([Mri::new(GUEST)]);
     let fence = Fence::new(roster, FenceLog::open(&log)?).with_own_account(Mri::new(LAB_B));
     Ok(Lab { _dir: dir, log, fence })
 }
 
 #[tokio::test]
-async fn a_call_guest_s_invitation_is_offered_and_answered_and_an_outsider_s_still_isn_t() -> TestResult {
-    let lab = lab_rule_b_with_guest()?;
+async fn the_contact_s_invitation_is_offered_and_answered_and_an_outsider_s_still_isn_t() -> TestResult {
+    let lab = lab_rule_b_with_contact()?;
     let (delivery, gp) = invitation(0, 71)?;
     let from = |mri: &str| {
         let mut other = gp.clone();
@@ -1585,7 +1585,7 @@ async fn a_call_guest_s_invitation_is_offered_and_answered_and_an_outsider_s_sti
     assert_eq!(lab.fence.observe_delivery(&from(GUEST)), Observed::Offered);
     let permit = lab.fence.check(case_write(ACCEPT, |_| ())?, &FailClosed).await?;
     assert_eq!(permit.target().kind(), WriteKind::CallAnswer);
-    // a guest never answers as the lab: an invitation to the guest isn't the lab's to offer
+    // an invitation to the contact isn't the lab's to offer: the lab answers only its own calls
     let to_guest = {
         let mut other = gp.clone();
         other["callNotification"]["to"]["id"] = json!(GUEST);
@@ -1596,11 +1596,11 @@ async fn a_call_guest_s_invitation_is_offered_and_answered_and_an_outsider_s_sti
 }
 
 #[tokio::test]
-async fn a_group_call_with_a_call_guest_is_answered_and_joined_but_never_with_an_outsider() -> TestResult {
+async fn a_group_call_with_the_contact_is_answered_and_joined_but_never_with_an_outsider() -> TestResult {
     let with_guest = Members::of(&[LAB_A, LAB_B, LAB_C, GUEST]);
     let with_outsider = Members::of(&[LAB_A, LAB_B, GUEST, COWORKER]);
-    let lab = lab_rule_b_with_guest()?;
-    // the join of a running call in a chat of lab accounts plus the guest
+    let lab = lab_rule_b_with_contact()?;
+    // the join of a running call in a chat of lab accounts plus the contact
     lab.fence.check(case_write(ROSTER_JOIN, |_| ())?, &with_guest).await?;
     lab.fence.check(case_write(MEDIA_JOIN, |_| ())?, &with_guest).await?;
     let denied = lab.fence.check(case_write(ROSTER_JOIN, |_| ())?, &with_outsider).await;
@@ -1608,14 +1608,14 @@ async fn a_group_call_with_a_call_guest_is_answered_and_joined_but_never_with_an
         denied.err().map(|denied| *denied.reason()),
         Some(DenyReason::Outsiders { count: 1 })
     );
-    // no join is sent as the guest
-    let as_guest = case_write(ROSTER_JOIN, |body| body["participants"]["from"]["id"] = json!(GUEST))?;
-    let denied = lab.fence.check(as_guest, &with_guest).await;
+    // a join sent as an outsider is denied
+    let as_outsider = case_write(ROSTER_JOIN, |body| body["participants"]["from"]["id"] = json!(COWORKER))?;
+    let denied = lab.fence.check(as_outsider, &with_guest).await;
     assert_eq!(
         denied.err().map(|denied| *denied.reason()),
         Some(DenyReason::Outsiders { count: 1 })
     );
-    // the guest's group call, answered while its chat reads lab accounts plus the guest
+    // the contact's group call, answered while its chat reads lab accounts plus the contact
     let (delivery, mut gp) = invitation(1, 73)?;
     gp["callNotification"]["from"]["id"] = json!(GUEST);
     let delivery = invitation_delivery(&delivery.path, 73, &gp);

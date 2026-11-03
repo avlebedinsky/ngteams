@@ -174,16 +174,6 @@ pub const REQUESTS: &[ExpectedRequest] = &[
                  own view of it (which passes): the scenario uses no channel",
     },
     ExpectedRequest {
-        class: "own call log's read horizon",
-        hosts: TEAMS,
-        method: "PUT",
-        path: "/api/chatsvc/*/v1/users/ME/conversations/*:calllogs/properties",
-        reason: "the read horizon (`?name=consumptionhorizon`) of the account's own call log stream (`48:calllogs`), \
-                 which the client moves when a call it placed or received ends: it reaches nobody, but the chat \
-                 service's rows carve a read receipt out only on a chat, and none carves out the horizon of the \
-                 account's own streams; the call scenarios read no call log",
-    },
-    ExpectedRequest {
         class: "scheduling form's online meeting dropped",
         hosts: TEAMS,
         method: "PUT",
@@ -192,25 +182,6 @@ pub const REQUESTS: &[ExpectedRequest] = &[
                  meeting's `update` link alone), even one its saved event already uses: the fence can't tie the \
                  meeting to its event's attendees, so it stays denied, and `ab-meeting` keeps its meeting with its \
                  event",
-    },
-    ExpectedRequest {
-        class: "Outlook calendar startup",
-        hosts: Hosts::Exact(&["outlook.office.com"]),
-        method: "POST",
-        path: "/owa/startupdata.ashx",
-        reason: "the calendar app is Outlook's, embedded: it starts by posting for its startup data, which no row of \
-                 Outlook's reads, so it stays denied and the app shows an error; `ab-meeting` changes and cancels its \
-                 meeting from the meeting's chat, never the calendar app",
-    },
-    ExpectedRequest {
-        class: "file browser prewarm",
-        hosts: Hosts::OneLabelUnder("sharepoint.com"),
-        method: "POST",
-        path: "/personal/*/_layouts/15/filebrowser.aspx",
-        reason: "the OneDrive file browser's frame, which the client prewarms (`preWarmFB`) as a document loaded by a \
-                 form `POST` of the account's own SharePoint token to its personal site: it reaches nobody, but on \
-                 SharePoint every write is contacting unless a row carves it out, and none does; the scenario \
-                 sends no file",
     },
 ];
 
