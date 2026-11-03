@@ -107,8 +107,6 @@ async fn run(cli: Cli) -> Outcome {
     dispatch(&lab, cli.command, &mut signals, &mut out).await
 }
 
-/// Runs the parsed command on the account already loaded above. Tests supply only a loopback account here; the
-/// runnable binary always gets its concrete lab from `run`, after the build's refusal checks in `main`.
 /// `series`: the scheduling form's series and Scheduler proved (`series.rs`).
 async fn series(lab: &Lab, keep: bool, cleanup: bool, signals: &mut Signals, out: &mut impl Write) -> Outcome {
     let handle = lab.start_engine(false).await?;
@@ -148,7 +146,6 @@ async fn teams(lab: &Lab, channel: Option<&str>, wait: u64, signals: &mut Signal
     finish(handle, listed.map(|listed| listed.map(code)))
 }
 
-/// `channel-schedule`: a meeting scheduled in a channel (`channel_schedule.rs`).
 /// What `channel-schedule` does to a channel's meetings.
 enum Change {
     Schedule,
@@ -157,6 +154,7 @@ enum Change {
     Rename(String),
 }
 
+/// `channel-schedule`: a meeting scheduled in a channel (`channel_schedule.rs`).
 async fn channel_schedule(
     lab: &Lab,
     channel: &str,
@@ -182,6 +180,8 @@ async fn channel_schedule(
     finish(handle, scheduled.map(|scheduled| scheduled.map(code)))
 }
 
+/// Runs the parsed command on the account already loaded above. Tests supply only a loopback account here; the
+/// runnable binary always gets its concrete lab from `run`, after the build's refusal checks in `main`.
 async fn dispatch(lab: &Lab, command: Command, signals: &mut Signals, out: &mut impl Write) -> Outcome {
     match command {
         Command::List { limit } => {

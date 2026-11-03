@@ -70,8 +70,8 @@ mod sealed {
     }
 }
 
-/// A mutating request as the transport sends it: the service it goes to (the chat service, or UPS for the account's
-/// own availability), its method, its endpoint under that service's base, the headers it adds to the service's own
+/// A mutating request as the transport sends it: the service it goes to (the chat service, UPS for the account's own
+/// availability, the middle tier, provisioning or CSA), its method, its endpoint under that service's base, the headers it adds to the service's own
 /// (the presence writes' `x-ms-endpoint-id`) and its JSON body, or its raw bytes (a team's picture). Sealed: only this
 /// crate's requests make one, from the same fields their [`Mutating::target`] comes from, and only this crate reads one,
 /// so a permit for one target can't carry another request's wire form.

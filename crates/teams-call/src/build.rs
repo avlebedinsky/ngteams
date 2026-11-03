@@ -275,7 +275,6 @@ pub(crate) fn answer_media(call: &mut Call, link: &CallLink, answer: MediaConten
     Ok(CallWrite::AnswerMedia(AnswerMedia::new(&call.context, link, &parts)?))
 }
 
-/// The call's keep-alive, at the call leg's own link (the acceptance's or the `accept`'s answer's `callLeg`).
 /// A meeting lobby's Admit (`admit` true, at the conversation's `admit` link) or Deny (at its `removeParticipant`
 /// link) of `waiting`, with new callbacks for how it went (named as the web client's are: its admit's
 /// `admitParticipantSuccess` and `admitParticipantFailure`, its removal's `removeParticipantSuccess` and
@@ -302,6 +301,7 @@ pub(crate) fn lobby(call: &mut Call, link: &CallLink, waiting: &Mri, admit: bool
     Ok(CallWrite::Lobby(write))
 }
 
+/// The call's keep-alive, at the call leg's own link (the acceptance's or the `accept`'s answer's `callLeg`).
 pub(crate) fn keep_alive(call: &Call, link: &CallLink) -> Result<CallWrite, CallError> {
     Ok(CallWrite::KeepAlive(KeepAliveCall::new(&call.context, link)?))
 }

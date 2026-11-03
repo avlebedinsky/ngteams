@@ -20,8 +20,8 @@
 //! - **How a call ended**, when the user didn't end it (the far end hung up, it dropped, never connected, went to
 //!   voicemail): who it was with (their avatar and name), why it ended in plain words ([`calls::Ended::reason`]: "Lab
 //!   Bee ended the call", "No one else joined the call", never a code the service sent), how long it lasted, and
-//!   Call back (a 1:1 or a group chat's call, Ctrl+Shift+C) or Rejoin (a group call that runs on without the account,
-//!   Ctrl+Shift+J), each a new start or join the user asks for, and Close. Left alone it closes by itself
+//!   Call back (a 1:1 or a group chat's call, Ctrl+Shift+C) or Rejoin (a meeting's call, or a group call that runs on
+//!   without the account, Ctrl+Shift+J), each a new start or join the user asks for, and Close. Left alone it closes by itself
 //!   ([`AUTO_CLOSE`]) unless Call back or Rejoin was asked.
 //! - **A test call's results** once it ended, as Teams shows them in its call window: the microphone, the speaker and
 //!   the camera (each naming the device the call used) and the network, each checked by what the call showed
@@ -339,9 +339,10 @@ impl CallStage {
             .filter(|ended| ended.check.is_none() && ended.stays_in_window())
     }
 
-    /// What the end offers: Rejoin for a group call that runs on without the account (it dropped, never got in, or
-    /// the chat's call was running already) and that an invitation named; else Call back to its chat, or for a 1:1
-    /// invitation to the caller's chat; nothing in the read-only mode or for a test call.
+    /// What the end offers: Rejoin for a meeting's call, whatever ended it (a meeting never offers Call back), and for
+    /// a group call that runs on without the account (it dropped, never got in, or the chat's call was running already)
+    /// and that an invitation named; else Call back to its chat, or for a 1:1 invitation to the caller's chat; nothing
+    /// in the read-only mode or for a test call.
     fn follow_up(&self, ended: &Ended, cx: &App) -> Option<FollowUp> {
         if self.core.read_only() || ended.kind == CallKind::TestCall {
             return None;

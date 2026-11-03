@@ -702,12 +702,12 @@ impl ChatList {
         &self.favorites
     }
 
-    /// Every row shown: the favourites, then the other chats.
+    /// Every row, shown or kept below See more: the favourites, then the other chats.
     pub fn all_rows(&self) -> impl Iterator<Item = &ChatRow> {
         self.favorites.iter().chain(&self.rows)
     }
 
-    /// A shown row, by its chat's id.
+    /// A row, shown or kept below See more, by its chat's id.
     #[must_use]
     pub fn row(&self, id: &str) -> Option<&ChatRow> {
         self.all_rows().find(|row| row.id == id)

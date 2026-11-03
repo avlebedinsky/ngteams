@@ -324,12 +324,12 @@ struct HeaderShown {
 }
 
 impl Shell {
-    /// The shell over `parts`, focused; the chat the settings kept is opened again.
     /// The chat the settings kept as chosen for the account `me`.
     fn selected_chat(settings: &Entity<SettingsModel>, me: &str, cx: &App) -> Option<String> {
         settings.read(cx).settings().selected_chat_of(me).map(str::to_owned)
     }
 
+    /// The shell over `parts`, focused; the chat the settings kept is opened again.
     pub fn new(parts: ShellParts, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let chat_parts = parts.clone();
         let ShellParts {
@@ -738,7 +738,7 @@ impl Shell {
     }
 
     /// Join with an ID for a meeting the calendar doesn't have: the meeting is looked for among the account's meeting
-    /// chats (the newest [`MEETING_CHATS_LOOKED_THROUGH`] the list shows), each one's thread read for its join link, and
+    /// chats (the newest [`MEETING_CHATS_LOOKED_THROUGH`] the list holds, shown or not), each one's thread read for its join link, and
     /// the one whose short link carries `code` is joined by its chat, as its chat's Join joins it. A meeting whose chat
     /// the account isn't in is refused: no read ties an ID to the people in its meeting, so nothing would let the join
     /// be judged by them (`docs/protocol/calling.md`, "Joining a meeting").

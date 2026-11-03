@@ -121,8 +121,9 @@ A channel is a conversation of the chat service, read with the same reads as a c
 
 From `proto-lab run channel-create` (2026-11-02): account a in the web client's "Create a channel" dialog of a team of
 the tenant, every write that could make a channel held back by a forced deny, so nothing was ever made; the answers below
-are the web bundle's (`26260.1717.5229.7049`) reading of them, since no lab team can be written to
-(`docs/backlog/channel-writes-need-a-lab-only-team.md`). The native client's writes are
+are the web bundle's (`26260.1717.5229.7049`) reading of them, since at the time no lab team could be written to.
+The lab's fence now reads a team's members ([teams.md](teams.md#the-fence)), and `channel-create`'s writing mode
+(`PROTO_LAB_CHANNEL_WRITES=1`) makes channels on the lab's own team. The native client's writes are
 `crates/teams-proto/src/write/channel.rs`, its reads `channel_read.rs`, the engine's part `teams-core`'s `channels`, the
 dialog `teams-ui`'s `channel_dialog`.
 
@@ -214,13 +215,14 @@ there but these rows is unreadable.
 
 ## No other channel write
 
-Besides a new channel, nothing the native client sends can post, reply, react, mark read or type in a channel. What keeps it so is the fence,
+Besides a new channel and a channel meeting's title (`SetMeetingTitle`, an edit of the post's `meeting` property),
+nothing the native client sends can post, reply, react, mark read or type in a channel. What keeps it so is the fence,
 not a missing type: the engine takes a chat write (`Action::Send`, `Action::Read`, …) for any conversation id, a
 channel's too, as a sealed chat write (`PostMessage`, a read receipt) aimed at the channel, and the fence denies it,
-since its member read admits only a 1:1 chat and the lab's recorded group chat (a channel's members are never read
-complete, and its thread read listed one member); `teams-core`'s `nothing_is_written_to_a_channel` holds it. No write
+since a chat write's member read never reads a channel's thread as a chat; `teams-core`'s
+`nothing_is_written_to_a_channel` holds it. No write
 is mapped to `WriteKind::ChannelPost`, and the views offer no composer or message action in a channel. The web
-client's channel writes stay unmapped and denied in the browser fence ([endpoints.md](endpoints.md#writes)). They need
-a team of the lab accounts only before they can be mapped and tested
-(`docs/backlog/channel-writes-need-a-lab-only-team.md`). The personal build's fence allows them (it denies nothing),
+client's channel writes stay unmapped and denied in the browser fence ([endpoints.md](endpoints.md#writes)); a team of
+the lab accounts only, which the fence can now judge by its members, is where they would be mapped and tested. The
+personal build's fence allows them (it denies nothing),
 but the app has no channel composer yet.
