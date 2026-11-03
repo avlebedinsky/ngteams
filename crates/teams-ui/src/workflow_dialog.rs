@@ -4,6 +4,7 @@ mod connections;
 mod editor;
 mod form;
 mod model;
+mod runs;
 mod service;
 mod view;
 
@@ -49,9 +50,16 @@ enum Screen {
     Browse,
     Home,
     Build,
-    Edit { flow: Option<Card> },
+    Edit {
+        flow: Option<Card>,
+    },
     Detail(Card),
     History(Card),
+    RunDetails {
+        card: Card,
+        run: Value,
+        actions: Vec<Value>,
+    },
     Delete(Card),
 }
 
@@ -76,6 +84,7 @@ pub struct WorkflowDialog {
     bindings: Vec<Binding>,
     connections: Vec<Value>,
     connection_error: Option<WorkflowFailure>,
+    copilot_eligibility: Option<Result<bool, WorkflowFailure>>,
     _subscriptions: Vec<Subscription>,
     tasks: Vec<Task<()>>,
     generation: u64,
@@ -84,9 +93,11 @@ pub struct WorkflowDialog {
     environment: Option<String>,
     workflows: Vec<Card>,
     history: Vec<Value>,
+    history_next: Option<String>,
     loading: Loading,
     busy: bool,
     uncertain: Option<WorkflowFailure>,
+    reconciling: bool,
     catalog_error: Option<WorkflowFailure>,
     workflows_error: Option<WorkflowFailure>,
     error: Option<String>,
@@ -133,6 +144,7 @@ impl WorkflowDialog {
             bindings: Vec::new(),
             connections: Vec::new(),
             connection_error: None,
+            copilot_eligibility: None,
             _subscriptions: subscriptions,
             tasks: Vec::new(),
             generation: 0,
@@ -141,9 +153,11 @@ impl WorkflowDialog {
             environment: None,
             workflows: Vec::new(),
             history: Vec::new(),
+            history_next: None,
             loading: Loading::default(),
             busy: false,
             uncertain: None,
+            reconciling: false,
             catalog_error: None,
             workflows_error: None,
             error: None,
@@ -170,6 +184,7 @@ impl WorkflowDialog {
         if self.busy {
             return;
         }
+        self.reconciling = self.uncertain.is_some();
         self.generation += 1;
         let generation = self.generation;
         self.loading.catalog = true;
@@ -178,6 +193,7 @@ impl WorkflowDialog {
         self.workflows_error = None;
         self.error = None;
         self.tasks.clear();
+        self.load_copilot_access(cx);
         let catalog = self.core.workflow_request(WorkflowRequest::Catalog);
         self.tasks
             .push(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
@@ -187,14 +203,7 @@ impl WorkflowDialog {
                         return;
                     }
                     this.loading.catalog = false;
-                    match answer.and_then(|value| {
-                        model::rows(&value).and_then(|rows| {
-                            rows.iter()
-                                .map(Card::from_template)
-                                .collect::<Option<Vec<_>>>()
-                                .ok_or(WorkflowFailure::InvalidResponse)
-                        })
-                    }) {
+                    match answer.and_then(|value| model::templates(&value)) {
                         Ok(cards) => this.catalog = cards,
                         Err(error) => this.catalog_error = Some(error),
                     }
@@ -250,6 +259,25 @@ impl WorkflowDialog {
         cx.notify();
     }
 
+    fn load_copilot_access(&mut self, cx: &mut Context<Self>) {
+        self.copilot_eligibility = None;
+        let generation = self.generation;
+        let reply = self.core.workflow_request(WorkflowRequest::CopilotEligibility);
+        self.tasks
+            .push(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                let answer = reply
+                    .await
+                    .unwrap_or(Err(WorkflowFailure::Connection))
+                    .and_then(|value| model::copilot_access(&value));
+                let _ = this.update(cx, |this, cx| {
+                    if this.generation == generation {
+                        this.copilot_eligibility = Some(answer);
+                        cx.notify();
+                    }
+                });
+            }));
+    }
+
     fn load_workflows(&mut self, cx: &mut Context<Self>) {
         self.read_workflows(None, cx);
     }
@@ -279,6 +307,13 @@ impl WorkflowDialog {
     fn workflows_read(&mut self, answer: Result<service::WorkflowPage, WorkflowFailure>, append: bool) {
         match answer {
             Ok(page) => {
+                if self.reconciling {
+                    self.reconciling = false;
+                    self.uncertain = None;
+                    self.notice = Some(
+                        "Latest workflows loaded. Review status and history before retrying an action.".to_owned(),
+                    );
+                }
                 if !append {
                     self.workflows.clear();
                 }

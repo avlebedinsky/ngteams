@@ -401,6 +401,7 @@ pub struct HttpTransport<C> {
     /// Read-only ([`HttpTransport::read_only`]): only reads (a `GET`, a read by `POST` of the sealed list, a search) go
     /// out.
     read_only: bool,
+    workflow_mutations: bool,
     lab_targets: Option<lab_targets::LabContext>,
 }
 
@@ -511,6 +512,7 @@ impl<C: Credentials> HttpTransport<C> {
             policy,
             mock_origin: None,
             read_only: false,
+            workflow_mutations: false,
             lab_targets: None,
         })
     }
@@ -523,6 +525,14 @@ impl<C: Credentials> HttpTransport<C> {
     #[must_use]
     pub fn read_only(mut self) -> Self {
         self.read_only = true;
+        self
+    }
+
+    /// Explicit account-mode capability for cloud workflow mutations. Unknown and implementation transports leave
+    /// it off. An operational lab context always overrides it; read-only mode also remains authoritative.
+    #[must_use]
+    pub fn with_workflow_mutations(mut self, allowed: bool) -> Self {
+        self.workflow_mutations = allowed && self.lab_targets.is_none();
         self
     }
 

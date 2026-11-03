@@ -162,7 +162,7 @@ fn child(mode: &str) -> SandboxResult {
 fn after(window: &mut Window, frames: usize, done: impl FnOnce(&mut Window, &mut App) + 'static) {
     window.on_next_frame(move |window, cx| {
         if frames == 0 {
-            done(window, cx)
+            done(window, cx);
         } else {
             after(window, frames - 1, done);
             window.refresh();

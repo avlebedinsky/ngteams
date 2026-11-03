@@ -69,7 +69,6 @@ impl WorkflowDialog {
             return;
         }
         self.error = None;
-        self.uncertain = None;
         let mut properties = serde_json::json!({"displayName": card.name, "definition": card.properties.get("definition"), "connectionReferences": card.properties.get("connectionReferences"), "state": card.properties.get("state").cloned().unwrap_or(Value::String("Stopped".to_owned()))});
         if !existing {
             form::apply_channel(
@@ -204,36 +203,53 @@ impl WorkflowDialog {
                         return;
                     }
                     this.busy = false;
-                    match answer {
-                        Ok(_) => {
-                            this.notice = Some(notice.to_owned());
-                            this.screen = Screen::Browse;
-                            this.load_workflows(cx);
-                        }
-                        Err(error) => {
-                            if matches!(error, WorkflowFailure::Connection | WorkflowFailure::Service(500..=599)) {
-                                this.uncertain = Some(error.clone());
-                            }
-                            this.error = Some(model::problem(&error).to_owned());
-                        }
-                    }
+                    this.mutation_read(answer, notice, cx);
                     cx.notify();
                 });
             }));
         cx.notify();
     }
 
+    fn mutation_read(&mut self, answer: WorkflowResponse, notice: &str, cx: &mut Context<Self>) {
+        match answer {
+            Ok(_) => {
+                self.notice = Some(notice.to_owned());
+                self.screen = Screen::Browse;
+                self.load_workflows(cx);
+            }
+            Err(error) => {
+                if matches!(error, WorkflowFailure::Connection | WorkflowFailure::Service(500..=599)) {
+                    self.uncertain = Some(error.clone());
+                }
+                self.error = Some(model::problem(&error).to_owned());
+            }
+        }
+    }
+
     fn history(&mut self, card: Card, cx: &mut Context<Self>) {
+        self.history_read(card, None, cx);
+    }
+
+    fn history_read(&mut self, card: Card, next: Option<String>, cx: &mut Context<Self>) {
         let Some(environment) = self.environment.clone() else {
             return;
         };
         self.busy = true;
         self.error = None;
         let generation = self.generation;
-        let reply = self.core.workflow_request(WorkflowRequest::History {
-            environment,
-            flow: card.id.clone(),
-        });
+        let append = next.is_some();
+        let request = next.map_or_else(
+            || WorkflowRequest::History {
+                environment: environment.clone(),
+                flow: card.id.clone(),
+            },
+            |next| WorkflowRequest::HistoryPage {
+                environment: environment.clone(),
+                flow: card.id.clone(),
+                next,
+            },
+        );
+        let reply = self.core.workflow_request(request);
         self.tasks
             .push(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
                 let answer = reply.await.unwrap_or(Err(WorkflowFailure::Connection));
@@ -242,17 +258,25 @@ impl WorkflowDialog {
                         return;
                     }
                     this.busy = false;
-                    match answer.and_then(|value| model::rows(&value).map(<[Value]>::to_vec)) {
-                        Ok(history) => {
-                            this.history = history;
-                            this.screen = Screen::History(card);
-                        }
-                        Err(error) => this.error = Some(model::problem(&error).to_owned()),
-                    }
+                    this.history_received(answer, card, append);
                     cx.notify();
                 });
             }));
         cx.notify();
+    }
+
+    fn history_received(&mut self, answer: WorkflowResponse, card: Card, append: bool) {
+        match answer.and_then(|value| model::rows(&value).map(|rows| (rows.to_vec(), model::next(&value)))) {
+            Ok((history, next)) => {
+                if !append {
+                    self.history.clear();
+                }
+                self.history.extend(history);
+                self.history_next = next;
+                self.screen = Screen::History(card);
+            }
+            Err(error) => self.error = Some(model::problem(&error).to_owned()),
+        }
     }
 
     pub(super) fn editor(&self, palette: Palette, cx: &Context<Self>) -> AnyElement {
@@ -379,6 +403,7 @@ impl WorkflowDialog {
                     .disabled(self.busy)
                     .on_click(cx.listener(move |this, _, _, cx| this.history(history.clone(), cx))),
             ))
+            .children(self.webhook_copy(card, cx))
             .when(!self.core.read_only(), |view| {
                 view.child(self.detail_controls(card, cx))
             })
@@ -394,14 +419,14 @@ impl WorkflowDialog {
                 "workflow-edit",
                 Button::new("workflow-edit")
                     .label("Edit")
-                    .disabled(self.busy)
+                    .disabled(self.busy || self.uncertain.is_some())
                     .on_click(cx.listener(move |this, _, window, cx| this.edit(editing.clone(), true, window, cx))),
             ))
             .child(selected_by(
                 "workflow-toggle",
                 Button::new("workflow-toggle")
                     .label(if card.enabled() { "Turn off" } else { "Turn on" })
-                    .disabled(self.busy)
+                    .disabled(self.busy || self.uncertain.is_some())
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle(&changing, cx))),
             ))
             .child(selected_by(
@@ -409,7 +434,7 @@ impl WorkflowDialog {
                 Button::new("workflow-run")
                     .label("Run")
                     .icon(Glyph::PLAY.icon())
-                    .disabled(self.busy)
+                    .disabled(self.busy || self.uncertain.is_some())
                     .on_click(cx.listener(move |this, _, _, cx| this.run(&running, cx))),
             ))
             .child(selected_by(
@@ -417,7 +442,7 @@ impl WorkflowDialog {
                 Button::new("workflow-delete")
                     .danger()
                     .label("Delete")
-                    .disabled(self.busy)
+                    .disabled(self.busy || self.uncertain.is_some())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.screen = Screen::Delete(deleting.clone());
                         cx.notify();
@@ -450,7 +475,15 @@ impl WorkflowDialog {
             .pointer("/definition/triggers")
             .and_then(Value::as_object);
         let trigger = triggers
-            .filter(|triggers| triggers.len() == 1)
+            .filter(|triggers| {
+                triggers.len() == 1
+                    && !triggers.values().any(|trigger| {
+                        trigger
+                            .pointer("/inputs/schema/required")
+                            .and_then(Value::as_array)
+                            .is_some_and(|required| !required.is_empty())
+                    })
+            })
             .and_then(|triggers| triggers.keys().next().cloned());
         if let Some(trigger) = trigger {
             self.mutate(
@@ -463,12 +496,12 @@ impl WorkflowDialog {
                 cx,
             );
         } else {
-            self.error = Some("Choose a workflow with one runnable trigger.".to_owned());
+            self.error = Some("This workflow needs trigger inputs or a different trigger. Required-input runs are not supported by the available management operation.".to_owned());
             cx.notify();
         }
     }
 
-    pub(super) fn history_view(&self, card: &Card, palette: Palette) -> AnyElement {
+    pub(super) fn history_view(&self, card: &Card, palette: Palette, cx: &Context<Self>) -> AnyElement {
         let mut view = div().flex().flex_col().gap_3().child(
             div()
                 .text_lg()
@@ -495,14 +528,32 @@ impl WorkflowDialog {
                 .pointer("/properties/endTime")
                 .and_then(Value::as_str)
                 .unwrap_or("Running");
-            view = view.child(
-                div()
-                    .p_3()
-                    .rounded_md()
-                    .border_1()
-                    .border_color(rgb(palette.border))
-                    .child(format!("{status} · {started} · {ended}")),
-            );
+            let (card, run) = (card.clone(), run.clone());
+            view = view.child(selected_by(
+                format!(
+                    "workflow-run-{}",
+                    run.get("name").and_then(Value::as_str).unwrap_or_default()
+                ),
+                Button::new(format!(
+                    "workflow-history-{}",
+                    run.get("name").and_then(Value::as_str).unwrap_or_default()
+                ))
+                .outline()
+                .label(format!("{status} · {started} · {ended}"))
+                .on_click(cx.listener(move |this, _, _, cx| this.run_details(card.clone(), run.clone(), cx))),
+            ));
+        }
+        if let Some(next) = &self.history_next {
+            let (card, next) = (card.clone(), next.clone());
+            view = view.child(selected_by(
+                "workflow-more-history",
+                Button::new("workflow-more-history")
+                    .label("Load more runs")
+                    .disabled(self.busy)
+                    .on_click(
+                        cx.listener(move |this, _, _, cx| this.history_read(card.clone(), Some(next.clone()), cx)),
+                    ),
+            ));
         }
         view.into_any_element()
     }

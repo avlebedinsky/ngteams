@@ -54,7 +54,22 @@ impl WorkflowDialog {
                                 .min_w_0()
                                 .gap_3()
                                 .items_start()
-                                .child(Glyph::BELL.icon().size(px(24.0)))
+                                .child(
+                                    div()
+                                        .p_2()
+                                        .rounded_md()
+                                        .bg(rgb(palette.selected))
+                                        .text_color(rgb(palette.brand))
+                                        .child(
+                                            if card.name.to_lowercase().contains("weekly") {
+                                                Glyph::REPEAT
+                                            } else {
+                                                Glyph::BELL
+                                            }
+                                            .icon()
+                                            .size(px(22.0)),
+                                        ),
+                                )
                                 .child(
                                     div()
                                         .flex_1()
@@ -66,11 +81,13 @@ impl WorkflowDialog {
                         )
                         .child(
                             div()
+                                .flex_1()
                                 .whitespace_normal()
                                 .text_sm()
                                 .text_color(rgb(palette.muted_foreground))
                                 .child(card.description.clone()),
-                        ),
+                        )
+                        .child(Self::template_apps(card, palette)),
                 )
                 .on_click(
                     cx.listener(move |this, _, window, cx| this.configure_template(selected.clone(), window, cx)),
@@ -80,6 +97,23 @@ impl WorkflowDialog {
         .min_w_0()
         .overflow_hidden()
         .into_any_element()
+    }
+
+    fn template_apps(card: &Card, palette: Palette) -> gpui::Div {
+        div()
+            .flex()
+            .w_full()
+            .justify_end()
+            .gap_2()
+            .children(card.connectors().into_iter().map(|app| {
+                div()
+                    .px_2()
+                    .py_1()
+                    .rounded_md()
+                    .text_xs()
+                    .bg(rgb(palette.selected))
+                    .child(app)
+            }))
     }
 
     fn search_row(&self, cx: &Context<Self>) -> AnyElement {
@@ -239,13 +273,12 @@ impl WorkflowDialog {
                 .into_any_element();
         }
         if self.tab == Tab::Ai {
-            return list
-                .child(state(
-                    "AI workflows could not be read",
-                    "The Microsoft Workflows app session required for this list is not connected.",
-                    palette,
-                ))
-                .into_any_element();
+            if let Some(message) = self.ai_access_state(palette) {
+                return list.child(message).into_any_element();
+            }
+            list = list.child(div().text_sm().text_color(rgb(palette.muted_foreground)).child(
+                "Cloud AI workflows are shown here. Copilot actions could not be loaded from the AI workflow service.",
+            ));
         }
         let cards: Vec<_> = self
             .workflows
@@ -254,8 +287,8 @@ impl WorkflowDialog {
                 Tab::Channel => {
                     card.in_channel(self.team.group_id.as_deref().unwrap_or(&self.team.id), &self.channel.id)
                 }
-                Tab::Workflows => true,
-                Tab::Ai => false,
+                Tab::Workflows => !card.is_ai(),
+                Tab::Ai => card.is_ai(),
             })
             .collect();
         if cards.is_empty() {
@@ -291,6 +324,23 @@ impl WorkflowDialog {
         list.into_any_element()
     }
 
+    fn ai_access_state(&self, palette: Palette) -> Option<gpui::Div> {
+        match &self.copilot_eligibility {
+            None => Some(state("Checking AI workflow access…", "", palette)),
+            Some(Err(error)) => Some(state(
+                "AI workflow access could not be checked",
+                model::problem(error),
+                palette,
+            )),
+            Some(Ok(false)) => Some(state(
+                "AI workflows require Copilot access",
+                "Microsoft 365 Copilot access is not enabled for this account. Ask your administrator to check its license and policy.",
+                palette,
+            )),
+            Some(Ok(true)) => None,
+        }
+    }
+
     fn body(&self, palette: Palette, cx: &Context<Self>) -> AnyElement {
         match &self.screen {
             Screen::Home => self.home(palette, cx),
@@ -304,7 +354,8 @@ impl WorkflowDialog {
                 .into_any_element(),
             Screen::Edit { .. } => self.editor(palette, cx),
             Screen::Detail(card) => self.detail(card, palette, cx),
-            Screen::History(card) => self.history_view(card, palette),
+            Screen::History(card) => self.history_view(card, palette, cx),
+            Screen::RunDetails { card, run, actions } => Self::run_view(card, run, actions, palette),
             Screen::Delete(card) => self.delete_view(card, cx),
         }
     }
@@ -424,7 +475,21 @@ impl WorkflowDialog {
         self.continuation = None;
         self.load_workflows(cx);
         self.load_connections(cx);
+        self.load_copilot_access(cx);
         cx.notify();
+    }
+
+    fn reconcile_button(cx: &Context<Self>) -> AnyElement {
+        selected_by(
+            "workflow-reconcile",
+            Button::new("workflow-reconcile")
+                .label("Check current status")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.screen = Screen::Browse;
+                    this.refresh(cx);
+                })),
+        )
+        .into_any_element()
     }
 
     fn footer(&self, palette: Palette, cx: &Context<Self>) -> AnyElement {
@@ -519,6 +584,7 @@ impl Render for WorkflowDialog {
                                 .child(error.clone()),
                         )
                     })
+                    .when(self.uncertain.is_some(), |view| view.child(Self::reconcile_button(cx)))
                     .when_some(self.notice.as_ref(), |view, notice| {
                         view.child(div().p_3().child(notice.clone()))
                     }),

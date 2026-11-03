@@ -47,7 +47,8 @@ native client uses the fixed classic Microsoft origin, without speculative regio
 All environment routes use `api-version=2016-11-01`. Under
 `/providers/Microsoft.ProcessSimple/environments`, discovery is a GET. Under `<environment>/flows`, listing and a
 single flow read are GETs, creation is POST, updates are PATCH and deletion is DELETE. A flow's `start`, `stop` and
-`triggers/<trigger>/run` operations are POSTs. Its `runs` collection is read with GET. Create and update carry a
+`triggers/<trigger>/run` operations are POSTs. Its `runs` collection and `runs/<run>/actions` are read with GET. A webhook trigger’s
+`listCallbackUrl` POST reads its address for copying; the native app never invokes that returned address. Create and update carry a
 `properties` object containing the definition and its connection references.
 
 List continuations can read only the same environment's exact flow-list route on `api.flow.microsoft.com`, without
@@ -76,6 +77,30 @@ refused independently of the old request classifier: a server-side schedule cann
 human audience before each future notification. Offline synthetic services exercise mutations; no Planner,
 SharePoint, email, webhook or Teams notification was executed in the tenant during implementation.
 
-The AI Workflows service is separate from these verified cloud-flow routes. Its authenticated reference is still
-blocked by the automatic Workflows bot install in the permitted lab session; the native cloud-flow API alone is not
-proof of AI workflow access. That surface remains a task blocker, not an empty-list or licensing conclusion.
+## AI workflows
+
+The public Microsoft Workflows host at `https://automations.teams.cloud.microsoft/home` provides independently
+readable client code without installing its Teams app. That client classifies flows using the
+`shared_m365copilotv2` and `shared_agentnode` API ids as cloud AI workflows. The native tabs use those exact ids.
+
+The same reference gates AI workflows on the account’s Copilot entitlement. A captured own-account
+`POST beta/users/useraggregatesettings` on the discovered Teams middle tier requests `userCopilotSettings` alongside
+the other settings selectors. This is a read operation. The native client uses the captured request and requires
+both `userCopilotSettings.value.isCopilotAllowedByAdmin` and
+`userCopilotSettings.value.eligibility.isCopilotEligible`; missing settings remain unknown/error. The lab account’s
+actual response allows Copilot by policy but reports `isCopilotEligible=false`. The UI shows that access state.
+
+The reference additionally combines Copilot Actions from a separately authenticated Augloop session with cloud AI
+flows. That session’s list and lifecycle exchange could not be verified with the ineligible permitted lab account.
+For eligible accounts the tab shows verified cloud AI flows and explicitly reports the unavailable Copilot Actions
+source, rather than claiming a complete or empty AI list. Copilot Actions management remains an implementation
+blocker. Opening the Teams modal would install an automation bot, which was blocked; no such install was sent.
+
+## Validation limits
+
+The service’s actual read catalogs, environments and connections were verified with the normal native auth client.
+Creation, connector consent, edits, start/stop, deletion and running were exercised against synthetic local services
+only. A schedule’s later recipients cannot be bounded to the lab humans, so no real automation was created or run.
+Required-input triggers cannot currently be supplied inputs through the captured empty management-run operation.
+The advanced definition view preserves unsupported action types; a visual action graph and separate Copilot Actions
+session are not implemented.

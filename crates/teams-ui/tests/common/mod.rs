@@ -47,6 +47,8 @@ pub type WorkflowHandler = fn(&teams_proto::WorkflowRequest) -> teams_proto::Wor
 pub struct FakeCore {
     pub workflow_handler: Mutex<Option<WorkflowHandler>>,
     pub workflow_requests: Mutex<Vec<teams_proto::WorkflowRequest>>,
+    pub hold_workflow_catalog: Mutex<bool>,
+    pub held_workflow_catalog: Mutex<Vec<Answer<teams_proto::WorkflowResponse>>>,
     pub uploads: Mutex<Vec<std::path::PathBuf>>,
     pub hold_uploads: Mutex<bool>,
     pub held_uploads: Mutex<Vec<Answer<teams_proto::UploadedFile>>>,
@@ -189,6 +191,8 @@ impl Default for FakeCore {
         Self {
             workflow_handler: Mutex::new(None),
             workflow_requests: Mutex::default(),
+            hold_workflow_catalog: Mutex::default(),
+            held_workflow_catalog: Mutex::default(),
             uploads: Mutex::default(),
             hold_uploads: Mutex::default(),
             held_uploads: Mutex::default(),
@@ -363,6 +367,11 @@ impl FakeCore {
 impl Core for FakeCore {
     fn workflow_request(&self, request: teams_proto::WorkflowRequest) -> Reply<teams_proto::WorkflowResponse> {
         locked(&self.workflow_requests).push(request.clone());
+        if matches!(request, teams_proto::WorkflowRequest::Catalog) && *locked(&self.hold_workflow_catalog) {
+            let (answer, reply) = Reply::later();
+            locked(&self.held_workflow_catalog).push(answer);
+            return reply;
+        }
         let answer = locked(&self.workflow_handler).map_or_else(
             || Err(teams_proto::WorkflowFailure::Connection),
             |handler| handler(&request),

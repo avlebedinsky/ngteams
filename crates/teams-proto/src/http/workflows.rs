@@ -15,7 +15,7 @@ impl<C: Credentials> HttpTransport<C> {
         if request.writes() && self.is_read_only() {
             return Err(WorkflowFailure::ReadOnly);
         }
-        if request.writes() && !self.is_personal() {
+        if request.writes() && (!self.workflow_mutations || self.lab_targets.is_some()) {
             return Err(WorkflowFailure::LabCloudMutation);
         }
         self.check_workflow_version(request).await?;

@@ -201,6 +201,7 @@ pub fn start<S: SecretStore + 'static>(
     let own_upn = upn.clone();
     let (push, calls) = listening(read_only, push, calls);
     let writable = |transport: HttpTransport<Session<S>>| {
+        let transport = transport.with_workflow_mutations(lab_targets.is_none());
         if read_only { transport.read_only() } else { transport }
     };
     let store = Store::open(&store_file)?;

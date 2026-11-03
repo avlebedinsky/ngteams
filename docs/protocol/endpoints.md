@@ -490,6 +490,8 @@ reaches it as `Service::Giphy` (`https://media.giphy.com/`, no token) and sends 
 | `GET`, `POST` | Flow `…/environments/<environment>/flows` | List, create cloud workflows | reads use Flow token; mutations through outbox, one attempt, lab refused | Microsoft client source; synthetic mutation tests |
 | `GET`, `PATCH`, `DELETE` | Flow `…/flows/<flow>` | Read, edit, delete a workflow | native lifecycle; lab mutations refused independently | Microsoft client source |
 | `POST` | Flow `…/flows/<flow>/start`, `stop`, `triggers/<trigger>/run` | Enable, disable, run | one attempt; read-only and lab denied before credentials | Microsoft client source |
-| `GET` | Flow `…/flows/<flow>/runs` | Run history | native history with service errors | Microsoft client source |
+| `GET` | Flow `…/flows/<flow>/runs`, `runs/<run>/actions` | Run history and action status | validated same-flow pagination; signed content links never fetched | Microsoft client source |
+| `POST` | Flow `…/flows/<flow>/triggers/<trigger>/listCallbackUrl` | Copy a webhook address | read only, address never invoked | Microsoft client source |
+| `POST` | middle tier `beta/users/useraggregatesettings` | Own Copilot eligibility | captured settings selectors; unknown remains error | native Teams reference, actual lab not eligible |
 | `GET` | Power Apps `providers/Microsoft.PowerApps/connections` | Environment's connections | separate Power Apps audience and exact environment filter | native 200, empty list |
 | `PUT`, `POST` | Power Apps `…/apis/<connector>/connections/<name>`, `…/getConsentLink` | Connect an account | user-initiated creation and Microsoft-hosted consent; no tokens to returned URLs | Microsoft portal route map and client source; synthetic only |

@@ -17,6 +17,8 @@ const API_VERSION: &str = "2016-11-01";
 pub enum WorkflowRequest {
     /// Teams' channel template catalog.
     Catalog,
+    /// Own Teams Copilot access settings, a captured read by POST.
+    CopilotEligibility,
     /// Environments accessible to the signed-in actor.
     Environments,
     /// A gallery template with its actual definition and connector metadata.
@@ -43,6 +45,24 @@ pub enum WorkflowRequest {
     Get { environment: String, flow: String },
     /// Recent runs; continuation is reported, never silently treated as complete.
     History { environment: String, flow: String },
+    /// The next page of the same flow’s run history.
+    HistoryPage {
+        environment: String,
+        flow: String,
+        next: String,
+    },
+    /// Per-action status of one run, without automatically reading any signed input/output content links.
+    RunActions {
+        environment: String,
+        flow: String,
+        run: String,
+    },
+    /// Reads a webhook trigger's service-issued callback address. It never invokes that address.
+    WebhookAddress {
+        environment: String,
+        flow: String,
+        trigger: String,
+    },
     /// Create a workflow from a reviewed definition and connection references.
     Create { environment: String, properties: Value },
     /// Update the whole editable properties, preserving fields from the last read.
@@ -75,6 +95,7 @@ impl WorkflowRequest {
         !matches!(
             self,
             Self::Catalog
+                | Self::CopilotEligibility
                 | Self::Environments
                 | Self::Template { .. }
                 | Self::Connections { .. }
@@ -82,6 +103,9 @@ impl WorkflowRequest {
                 | Self::List { .. }
                 | Self::Get { .. }
                 | Self::History { .. }
+                | Self::HistoryPage { .. }
+                | Self::RunActions { .. }
+                | Self::WebhookAddress { .. }
         )
     }
 
@@ -89,7 +113,12 @@ impl WorkflowRequest {
     #[must_use]
     pub fn method(&self) -> &'static str {
         match self {
-            Self::Create { .. } | Self::SetEnabled { .. } | Self::Run { .. } | Self::ConnectionConsent { .. } => "POST",
+            Self::CopilotEligibility
+            | Self::Create { .. }
+            | Self::SetEnabled { .. }
+            | Self::Run { .. }
+            | Self::ConnectionConsent { .. }
+            | Self::WebhookAddress { .. } => "POST",
             Self::CreateConnection { .. } => "PUT",
             Self::Update { .. } => "PATCH",
             Self::Delete { .. } => "DELETE",
@@ -101,6 +130,7 @@ impl WorkflowRequest {
     #[must_use]
     pub fn service(&self) -> Service {
         match self {
+            Self::CopilotEligibility => Service::MiddleTier,
             Self::Connections { .. } | Self::CreateConnection { .. } | Self::ConnectionConsent { .. } => {
                 Service::WorkflowConnections
             }
@@ -111,6 +141,9 @@ impl WorkflowRequest {
     /// The exact path, built from individually encoded segments; no arbitrary URLs or continuations enter here.
     #[must_use]
     pub fn endpoint(&self) -> Endpoint {
+        if matches!(self, Self::CopilotEligibility) {
+            return Endpoint::new(["beta", "users", "useraggregatesettings"]);
+        }
         if self.service() == Service::WorkflowConnections {
             return self.connection_endpoint();
         }
@@ -138,6 +171,15 @@ impl WorkflowRequest {
         match self {
             Self::Get { flow, .. } | Self::Update { flow, .. } | Self::Delete { flow, .. } => path.push(flow.clone()),
             Self::History { flow, .. } => path.extend([flow.clone(), "runs".to_owned()]),
+            Self::RunActions { flow, run, .. } => {
+                path.extend([flow.clone(), "runs".to_owned(), run.clone(), "actions".to_owned()]);
+            }
+            Self::WebhookAddress { flow, trigger, .. } => path.extend([
+                flow.clone(),
+                "triggers".to_owned(),
+                trigger.clone(),
+                "listCallbackUrl".to_owned(),
+            ]),
             Self::SetEnabled { flow, enabled, .. } => {
                 path.extend([flow.clone(), if *enabled { "start" } else { "stop" }.to_owned()]);
             }
@@ -185,14 +227,29 @@ impl WorkflowRequest {
     /// # Errors
     /// An off-origin, credential-bearing, fragmented or differently scoped continuation is refused.
     pub fn checked_endpoint(&self) -> Result<Endpoint, WorkflowFailure> {
-        let Self::Page { environment, next } = self else {
-            return Ok(self.endpoint());
+        let (next, baseline) = match self {
+            Self::Page { environment, next } => (
+                next,
+                Self::List {
+                    environment: environment.clone(),
+                }
+                .endpoint(),
+            ),
+            Self::HistoryPage {
+                environment,
+                flow,
+                next,
+            } => (
+                next,
+                Self::History {
+                    environment: environment.clone(),
+                    flow: flow.clone(),
+                }
+                .endpoint(),
+            ),
+            _ => return Ok(self.endpoint()),
         };
         let url = url::Url::parse(next).map_err(|_| WorkflowFailure::InvalidResponse)?;
-        let baseline = Self::List {
-            environment: environment.clone(),
-        }
-        .endpoint();
         let expected: Vec<_> = baseline.segments().iter().map(String::as_str).collect();
         let segments: Vec<_> = url.path_segments().ok_or(WorkflowFailure::InvalidResponse)?.collect();
         if url.scheme() != "https"
@@ -216,14 +273,17 @@ impl WorkflowRequest {
     #[must_use]
     pub fn environment(&self) -> Option<&str> {
         match self {
-            Self::Catalog | Self::Environments | Self::Template { .. } => None,
-            Self::Page { environment, .. }
+            Self::Catalog | Self::CopilotEligibility | Self::Environments | Self::Template { .. } => None,
+            Self::RunActions { environment, .. }
+            | Self::WebhookAddress { environment, .. }
+            | Self::Page { environment, .. }
             | Self::Connections { environment }
             | Self::CreateConnection { environment, .. }
             | Self::ConnectionConsent { environment, .. }
             | Self::List { environment }
             | Self::Get { environment, .. }
             | Self::History { environment, .. }
+            | Self::HistoryPage { environment, .. }
             | Self::Create { environment, .. }
             | Self::Update { environment, .. }
             | Self::SetEnabled { environment, .. }
@@ -236,6 +296,9 @@ impl WorkflowRequest {
     #[must_use]
     pub fn body(&self) -> Option<Value> {
         match self {
+            Self::CopilotEligibility => Some(
+                serde_json::json!({"userPropertiesSettings":true,"voiceAdminSettings":true,"adminSettings":true,"teamsUserPhoneNumbers":true,"tenantSettingsV2":true,"tenantVoiceSettings":true,"userResourcesSettings":true,"teamsOfficeCloudPolicy":true,"clientSettings":true,"userCopilotSettings":true,"teamsMessagingConfiguration":true,"teamsLinkPolicy":true,"educationSettings":true,"userLanguageAccountSettings":true,"teamsAcsFederationConfiguration":true,"smbTenantSettings":true,"tenantSiteUrlAndDomains":true,"deviceStoreMetadata":true}),
+            ),
             Self::Create { properties, .. } | Self::Update { properties, .. } => {
                 Some(serde_json::json!({"properties": properties}))
             }

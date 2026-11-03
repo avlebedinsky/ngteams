@@ -8,19 +8,23 @@ use teams_proto::{WorkflowRequest, WorkflowResponse};
 pub fn answer(request: &WorkflowRequest) -> WorkflowResponse {
     Ok(match request {
         WorkflowRequest::Catalog => json!({"value": [
-            {"id":"synthetic-template","name":"Automate weekly reminders and updates in a conversation","description":"Get weekly reminders and status updates automatically so nothing gets missed"},
-            {"id":"synthetic-planner","name":"Notify a channel when Planner tasks are completed","description":"Celebrate progress by notifying a channel when a Planner task is marked as done"},
-            {"id":"synthetic-sharepoint","name":"Notify a channel when SharePoint file or items change","description":"Let everyone in the channel know whenever a SharePoint file or list item changes"},
-            {"id":"synthetic-email","name":"Forward your emails to a channel","description":"Automatically forward important emails to a channel to keep everyone in the loop"},
-            {"id":"synthetic-files","name":"Notify a channel when new SharePoint files are added","description":"Keep everyone informed so they never miss a file update"},
-            {"id":"synthetic-webhook","name":"Send webhook alerts to a channel","description":"Get updates in Teams from tools compatible with incoming webhooks"}
+            {"id":"synthetic-template","icons":["https://static.powerapps.com/synthetic/teams/icon.png"],"name":"Automate weekly reminders and updates in a conversation","description":"Get weekly reminders and status updates automatically so nothing gets missed"},
+            {"id":"synthetic-planner","icons":["https://static.powerapps.com/synthetic/teams/icon.png","https://static.powerapps.com/synthetic/planner/icon.png"],"name":"Notify a channel when Planner tasks are completed","description":"Celebrate progress by notifying a channel when a Planner task is marked as done"},
+            {"id":"synthetic-sharepoint","icons":["https://static.powerapps.com/synthetic/teams/icon.png","https://static.powerapps.com/synthetic/sharepointonline/icon.png"],"name":"Notify a channel when SharePoint file or items change","description":"Let everyone in the channel know whenever a SharePoint file or list item changes"},
+            {"id":"synthetic-email","icons":["https://static.powerapps.com/synthetic/teams/icon.png","https://static.powerapps.com/synthetic/office365/icon.png"],"name":"Forward your emails to a channel","description":"Automatically forward important emails to a channel to keep everyone in the loop"},
+            {"id":"synthetic-files","icons":["https://static.powerapps.com/synthetic/teams/icon.png","https://static.powerapps.com/synthetic/sharepointonline/icon.png"],"name":"Notify a channel when new SharePoint files are added","description":"Keep everyone informed so they never miss a file update"},
+            {"id":"synthetic-webhook","icons":["https://static.powerapps.com/synthetic/teams/icon.png"],"name":"Send webhook alerts to a channel","description":"Get updates in Teams from tools compatible with incoming webhooks"}
         ]}),
+        WorkflowRequest::CopilotEligibility => {
+            json!({"userCopilotSettings":{"value":{"isCopilotAllowedByAdmin":true,"eligibility":{"isCopilotEligible":false}}}})
+        }
         WorkflowRequest::Environments => {
             json!({"value": [{"name":"Default-synthetic", "properties":{"displayName":"Synthetic environment"}}]})
         }
         WorkflowRequest::Connections { .. } => json!({"value": []}),
         WorkflowRequest::List { .. } => json!({"value": [{"name":"synthetic-flow"}]}),
         WorkflowRequest::Get { .. } | WorkflowRequest::Template { .. } => flow(),
+        WorkflowRequest::RunActions { .. } => json!({"value":[{"name":"post","properties":{"status":"Succeeded"}}]}),
         WorkflowRequest::History { .. } => {
             json!({"value": [{"name":"synthetic-run", "properties":{"status":"Succeeded","startTime":"2026-01-01T09:00:00Z","endTime":"2026-01-01T09:00:01Z"}}]})
         }
@@ -28,5 +32,5 @@ pub fn answer(request: &WorkflowRequest) -> WorkflowResponse {
     })
 }
 pub fn flow() -> Value {
-    json!({"name":"synthetic-flow","properties":{"displayName":"Weekly channel reminder","description":"A synthetic workflow","state":"Started","definition":{"parameters":{"message":{"type":"String","defaultValue":"Weekly reminder"}},"triggers":{"manual":{"type":"Request","kind":"Button"}},"actions":{"compose":{"type":"Compose","inputs":"Synthetic value","team":"synthetic-group","channel":"synthetic-channel"}}},"connectionReferences":{}}})
+    json!({"name":"synthetic-flow","properties":{"displayName":"Weekly channel reminder","description":"A synthetic workflow","state":"Started","definition":{"parameters":{"message":{"type":"String","defaultValue":"Weekly reminder"},"teams.group":{"type":"String","defaultValue":"synthetic-group"},"teams.channel":{"type":"String","defaultValue":"synthetic-channel"}},"triggers":{"manual":{"type":"Request","kind":"Button"}},"actions":{"post":{"type":"OpenApiConnection","inputs":{"host":{"apiId":"/providers/Microsoft.PowerApps/apis/shared_teams","connectionName":"shared_teams","operationId":"PostMessageToConversation"},"parameters":{"location":"Channel","body/recipient/groupId":"@parameters('teams.group')","body/recipient/channelId":"@parameters('teams.channel')","body/messageBody":"<p>Weekly reminder</p>"}}}}},"connectionReferences":{}}})
 }
