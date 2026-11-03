@@ -1,19 +1,11 @@
-//! One personal account's engine, assembled as every binary builds one (`teams_core::account::start`) from the personal
-//! build's parts: the fence the binary opened for it (`Fence::open_personal`, the account from `accounts.toml`, which
-//! logs every send and denies none, so it reads no members: its membership source is `FailClosed`, never asked), the
-//! account's own store at `~/.local/share/ngteams/store/<oid>.sqlite` (never another account's: a store
-//! kept after `ngteams --forget` stays its account's), the region its sign-in saved (`regions/<oid>.json`), the push
-//! channel, and the calling (`crate::calling`: the calling stack's socket under the same fence, the calls' media on the
-//! desktop's devices) when the devices could be opened. An app of several accounts starts one per account.
-//! Nothing is sent while it is built: the session asks its store for a token only when a request needs one.
-
-use std::sync::Arc;
+//! An account's engine assembled from its store, region, credentials, push channel and optional calling devices.
+//! Accounts share `CallFloor` so only one call or ringing invitation is active across the app.
 
 use teams_auth::authz::{Region, RegionFileError};
 use teams_auth::secrets::SecretStore;
-use teams_core::account::{self, Account, AccountCalls, AccountEngine, AccountError, Membership};
+use teams_core::CallFloor;
+use teams_core::account::{self, Account, AccountCalls, AccountEngine, AccountError};
 use teams_fence::personal::{PersonalAccount, PersonalPaths};
-use teams_fence::{FailClosed, Fence};
 
 /// Why the engine couldn't be built or started.
 #[derive(Debug, thiserror::Error)]
@@ -29,7 +21,7 @@ pub enum StartError {
 /// The account's running engine and its session (the app watches it for a sign-out).
 pub type PersonalEngine<S> = AccountEngine<S>;
 
-/// Builds and starts `account`'s engine over `fence` (the personal fence the binary opened) and `secrets`, with its
+/// Builds and starts `account`'s engine with `secrets` and the app's shared call floor, with its
 /// push channel when `push` and its calling when `calls` is given (`crate::calling`; see the module docs).
 ///
 /// # Errors
@@ -37,16 +29,16 @@ pub type PersonalEngine<S> = AccountEngine<S>;
 pub fn start<S: SecretStore + 'static>(
     paths: &PersonalPaths,
     account: &PersonalAccount,
-    fence: Arc<Fence>,
+    floor: CallFloor,
     secrets: S,
     push: bool,
     calls: Option<AccountCalls>,
 ) -> Result<PersonalEngine<S>, StartError> {
-    start_with(paths, account, fence, secrets, (push, calls), false)
+    start_with(paths, account, floor, secrets, (push, calls), false)
 }
 
 /// `account`'s engine in the read-only mode (`ngteams --read-only`, `crate::read_only`): its transports send reads only
-/// (every write refused below the views, logged to `fence.log` as `refused_read_only`), no push channel and no calling
+/// (every write refused below the views, logged to the diagnostic log as `refused_read_only`), no push channel and no calling
 /// (no endpoint registered, no second Trouter connection on the account), a catch-up by reads every
 /// `teams_core::account::READ_ONLY_POLL`. `paths` are the snapshot's, never the user's own.
 ///
@@ -55,16 +47,16 @@ pub fn start<S: SecretStore + 'static>(
 pub fn start_read_only<S: SecretStore + 'static>(
     paths: &PersonalPaths,
     account: &PersonalAccount,
-    fence: Arc<Fence>,
+    floor: CallFloor,
     secrets: S,
 ) -> Result<PersonalEngine<S>, StartError> {
-    start_with(paths, account, fence, secrets, (false, None), true)
+    start_with(paths, account, floor, secrets, (false, None), true)
 }
 
 fn start_with<S: SecretStore + 'static>(
     paths: &PersonalPaths,
     account: &PersonalAccount,
-    fence: Arc<Fence>,
+    floor: CallFloor,
     secrets: S,
     (push, calls): (bool, Option<AccountCalls>),
     read_only: bool,
@@ -84,9 +76,7 @@ fn start_with<S: SecretStore + 'static>(
         calls,
         read_only,
     };
-    // the personal fence decides nothing, so it reads no members
-    let membership: Membership<'_> = Box::new(|_fence, _credential| Ok(Arc::new(FailClosed)));
-    Ok(account::start(parts, fence, membership)?)
+    Ok(account::start(parts, floor)?)
 }
 
 /// The name the account's posts carry (`imdisplayname`): the display name the sign-in's ID token gave (its

@@ -81,7 +81,6 @@ async fn the_info_log_has_what_happened_and_no_text_name_or_token() {
     for kept in [
         "INFO  teams_core::engine: action: send to 19:",
         "INFO  teams_core::engine: action: edit of ",
-        "INFO  teams_core::outbox: fence allowed message on ",
         "INFO  teams_core::outbox: outbox row ",
         "INFO  teams_proto::http: POST ",
         " -> HTTP 201 in ",

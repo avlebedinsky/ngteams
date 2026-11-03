@@ -470,13 +470,12 @@ mod tests {
     }
 
     fn teams_without_csa() -> super::Teams<NoTokens> {
-        let fence = std::sync::Arc::new(teams_fence::Fence::new(
+        let _fence = std::sync::Arc::new(teams_fence::Fence::new(
             teams_fence::Roster::new([], []),
             teams_fence::FenceLog::from_writer(std::io::sink()),
         ));
         let transport = teams_proto::HttpTransport::with_mock_origin(
             std::sync::Arc::new(NoTokens),
-            fence,
             "https://teams.microsoft.com/api/chatsvc/amer",
             "http://127.0.0.1:9",
         )

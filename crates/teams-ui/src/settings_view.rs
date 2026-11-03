@@ -979,7 +979,7 @@ impl SettingsView {
         log.extend(overridden);
         let mut report = vec![row(
             "Copy diagnostics",
-            Some("The app's log and its fence log, to paste into a bug report."),
+            Some("The app's diagnostic log, to paste into a bug report."),
             self.copy_button(),
             palette,
         )];

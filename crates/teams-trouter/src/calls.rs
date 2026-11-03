@@ -1,22 +1,4 @@
-//! The calling stack's socket's side of a call (`docs/protocol/calling.md`): what it hands on and the only way it
-//! answers a delivery.
-//!
-//! - **What it hands on**: every delivery at the calling endpoint (its root, where an incoming call's invitation comes,
-//!   and its call agent's callbacks, `/v4/f/<endpoint>/callAgent/…`) is first read by the fence
-//!   ([`teams_fence::Fence::observe_delivery`], under the connection's key, the one its responses are decided under): an
-//!   acceptance binds its call's links, an end ends it, an invitation to the account from a lab caller is offered. An
-//!   invitation the fence doesn't offer (or can't read) is [`crate::PushEvent::Ignored`] (never handed on, nothing sent
-//!   for it); every other delivery is a [`CallDelivery`] for the call's consumer, with what the fence made of it. The call
-//!   controller's deliveries come gzip'd in base64 (`X-Microsoft-Skype-Content-Encoding: gzip`): the fence reads the
-//!   body decoded, as the browser fence does, and one that doesn't decode within [`MAX_DELIVERY`] is
-//!   [`crate::Ignored::Undecodable`].
-//! - **The only answer**: a typed delivery response ([`CallResponse`]: an acceptance's acknowledgement or an offered
-//!   invitation's receipt), handed back through the delivery's own [`CallResponder`] to the connection it came on and
-//!   sent there by `teams_proto::FrameSink::send_permitted` once the fence permitted exactly its JSON for that
-//!   connection (`teams_proto::ResponseDecider::decide`, `teams_fence::Fence::check_delivery_response`). The fence
-//!   decides while the socket reads on (a group call's receipt reads its chat fresh), so a cancellation that comes in
-//!   the while is observed before its last look at the ring. A response to a delivery of a connection that has gone down isn't
-//!   sent on another ([`RespondFailure::Gone`]), and every other delivery stays unanswered.
+//! Calling deliveries decoded for the call tracker and answered by typed replies on their originating socket.
 
 use std::fmt;
 use std::io::Read as _;
@@ -24,7 +6,7 @@ use std::sync::Arc;
 
 use base64::Engine as _;
 
-use teams_fence::{Delivery, DeliveryDenyReason, Fence, MembershipSource, Observed};
+use teams_call::{Delivery, Observed, Tracker};
 use teams_proto::{AcceptanceAcknowledgement, InvitationReceipt};
 use tokio::sync::{mpsc, oneshot};
 
@@ -33,9 +15,6 @@ use crate::frames::RawDelivery;
 /// The most a call delivery's body may hold once decoded (the socket reads no larger frame either).
 pub const MAX_DELIVERY: u64 = crate::socket::MAX_INCOMING as u64;
 
-/// A delivery on the calling stack's connection `connection` as the fence reads it: its id, path, the headers its
-/// response echoes and its body, decoded from base64 and gzip when `X-Microsoft-Skype-Content-Encoding` (any case) is
-/// `gzip`. `None` when such a body doesn't decode within [`MAX_DELIVERY`].
 pub(crate) fn read_delivery(connection: &str, raw: &RawDelivery) -> Option<Delivery> {
     let gzip = raw
         .header("X-Microsoft-Skype-Content-Encoding")
@@ -68,19 +47,26 @@ fn gunzip(body: &str) -> Option<Vec<u8>> {
     (decoded.len() as u64 <= MAX_DELIVERY).then_some(decoded)
 }
 
-/// What the calling stack's socket decides with ([`crate::Trouter::for_calls`]): the fence that reads its deliveries
-/// and decides its responses (the account's transport's own, whose call registry its call writes feed), and the source
-/// that fence reads an offered group call's chat from.
 #[derive(Clone)]
 pub struct CallStack {
-    pub(crate) fence: Arc<Fence>,
-    pub(crate) source: Arc<dyn MembershipSource + Send>,
+    observe: Arc<dyn Fn(&Delivery) -> Observed + Send + Sync>,
 }
 
 impl CallStack {
     #[must_use]
-    pub fn new(fence: Arc<Fence>, source: Arc<dyn MembershipSource + Send>) -> Self {
-        Self { fence, source }
+    pub fn new(tracker: Arc<Tracker>) -> Self {
+        Self {
+            observe: Arc::new(move |delivery| tracker.observe_delivery(delivery)),
+        }
+    }
+    /// Installs the app's cross-account invitation coordinator.
+    #[must_use]
+    pub fn observing(mut self, observe: impl Fn(&Delivery) -> Observed + Send + Sync + 'static) -> Self {
+        self.observe = Arc::new(observe);
+        self
+    }
+    pub(crate) fn observed(&self, delivery: &Delivery) -> Observed {
+        (self.observe)(delivery)
     }
 }
 
@@ -90,13 +76,9 @@ impl fmt::Debug for CallStack {
     }
 }
 
-/// A delivery at the calling endpoint, read by the fence first (see the module docs). `Debug` shows no body.
 #[derive(Debug)]
 pub struct CallDelivery {
-    /// The delivery as the fence read it: the connection it came on, its id, path, request, chain and message ids
-    /// and its body (a response is built from it: [`AcceptanceAcknowledgement::new`], [`InvitationReceipt::new`]).
     pub delivery: Delivery,
-    /// What the fence made of it.
     pub observed: Observed,
     responder: CallResponder,
 }
@@ -152,15 +134,12 @@ pub enum RespondFailure {
     /// The connection the delivery came on is down (or the client stopped): nothing is sent on another.
     #[error("the delivery's connection is gone")]
     Gone,
-    /// No delivery of the connection waits for this response (one no fence observed as answerable, answered already,
-    /// another connection's).
     #[error("no delivery of the connection waits for the response")]
     NotPending,
-    /// The fence denied it (logged).
-    #[error("the fence denied the delivery response: {0}")]
-    Denied(DeliveryDenyReason),
-    /// It couldn't be logged or written; the connection ends.
-    #[error("the response couldn't be logged or written")]
+    #[error("the delivery belongs to another connection")]
+    OtherConnection,
+    /// The socket couldn't write it; the connection ends.
+    #[error("the response couldn't be written")]
     Failed,
 }
 
@@ -190,12 +169,10 @@ impl CallResponder {
         (Self(sender), receiver)
     }
 
-    /// Sends `response` on this responder's connection, once the fence permitted exactly its JSON for that connection
-    /// (`teams_proto::ResponseDecider::decide`, then `teams_proto::FrameSink::send_permitted`), and waits for the
-    /// outcome.
+    /// Sends the typed response on this responder's connection.
     ///
     /// # Errors
-    /// [`RespondFailure`]; nothing is sent but on success.
+    /// Returns Gone when disconnected, or a connection/write failure.
     pub async fn respond(&self, response: impl Into<CallResponse>) -> Result<(), RespondFailure> {
         let (done, outcome) = oneshot::channel();
         let request = ResponseRequest {

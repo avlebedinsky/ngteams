@@ -1,29 +1,25 @@
-//! A native calling client on the mock, as the engine will run one (Task 14): one account's fence and `fence.log`, its
+//! A native calling client on the mock, as the engine runs one: one account's tracker, its
 //! HTTP transport and calling socket through the `test-support` mock origins, and a [`Calls`] machine fed with the
-//! socket's call deliveries, its writes checked by the fence and sent in order, its responses sent through each
+//! socket's call deliveries, its writes tracked and sent in order, its responses sent through each
 //! delivery's own responder, its events handed to the test.
 //!
 //! Every id, token and MRI here is the mocks' made-up one.
 
 use std::collections::HashMap;
 use std::future::{self, Future};
-use std::io::{self, Write};
 use std::pin::Pin;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
-use serde_json::Value;
 use teams_auth::secrets::Secret;
 use teams_auth::session::{AccessToken, Renewal};
 use teams_auth::token::TokenError;
 use teams_call::{
     CallEvent, CallId, Calls, DeliveryKey, DeliveryReply, Effect, Identity, Outcome, Placement, WriteId, WriteSink,
 };
-use teams_fence::{
-    Fence, FenceLog, Membership, MembershipFuture, MembershipSource, Mri, PartialReason, Roster, Scope, one_to_one_id,
-};
-use teams_mock::{ABC_CHAT, CHAT_BASE, ChatServiceMock, ECHO, LAB_A, LAB_B, LAB_C, OUTSIDER, TENANT};
-use teams_proto::{Authorized, ClientInfo, Credentials, HttpTransport, MediaContent, Mutating, Transport};
+use teams_fence::Mri;
+use teams_mock::{CHAT_BASE, ChatServiceMock, TENANT};
+use teams_proto::{ClientInfo, Credentials, HttpTransport, MediaContent, Transport};
 use teams_trouter::{CallResponder, CallResponse, CallStack, Options, PushEvent, RegistrationReport, Trouter};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -89,60 +85,6 @@ impl Credentials for Tokens {
     }
 }
 
-/// A `fence.log` the test reads back.
-#[derive(Clone, Default)]
-pub struct SharedLog(Arc<Mutex<Vec<u8>>>);
-
-impl SharedLog {
-    pub fn lines(&self) -> Vec<Value> {
-        let bytes = self.0.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        String::from_utf8(bytes)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect()
-    }
-}
-
-impl Write for SharedLog {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-/// The mock's chats, read in full: the 1:1 chats of the lab and the outsider, and the a–b–c group chat.
-pub struct LabChats;
-
-impl MembershipSource for LabChats {
-    fn members<'a>(&'a self, scope: &'a Scope) -> MembershipFuture<'a> {
-        Box::pin(async move {
-            let Scope::Conversation { id } = scope else {
-                return Membership::Partial(PartialReason::NoSource);
-            };
-            if id == ABC_CHAT {
-                return Membership::Complete(vec![Mri::new(LAB_A), Mri::new(LAB_B), Mri::new(LAB_C)]);
-            }
-            let people = [LAB_A, LAB_B, LAB_C, OUTSIDER];
-            let pair = people
-                .iter()
-                .flat_map(|one| people.iter().map(move |other| (*one, *other)))
-                .find(|(one, other)| one < other && one_to_one_id(one, other).as_deref() == Some(id.as_str()));
-            if let Some((one, other)) = pair {
-                return Membership::Complete(vec![Mri::new(one), Mri::new(other)]);
-            }
-            Membership::Partial(PartialReason::NoSource)
-        })
-    }
-}
-
 /// What the test asks a client to do.
 enum Command {
     Place(Placement),
@@ -156,7 +98,6 @@ enum Command {
 /// One native client of the account `mri`, on the mock.
 pub struct Client {
     pub mri: &'static str,
-    pub log: SharedLog,
     commands: mpsc::UnboundedSender<Command>,
     events: mpsc::UnboundedReceiver<CallEvent>,
     refusals: mpsc::UnboundedReceiver<String>,
@@ -171,30 +112,28 @@ impl Drop for Client {
 
 type Sending = Pin<Box<dyn Future<Output = Outcome> + Send>>;
 
-/// The engine's sink: each write checked by the fence and sent through the transport, in order.
+/// The engine's sink: each write tracked and sent through the transport, in order.
 struct Sink {
-    fence: Arc<Fence>,
+    tracker: Arc<teams_call::Tracker>,
     transport: Arc<HttpTransport<Tokens>>,
     queued: Vec<(WriteId, Sending)>,
 }
 
 impl WriteSink for Sink {
-    fn submit<R: Mutating + Clone + Send + 'static>(&mut self, id: WriteId, write: R) {
-        let (fence, transport) = (Arc::clone(&self.fence), Arc::clone(&self.transport));
+    fn submit<R: teams_proto::Request + Clone + Send + 'static>(&mut self, id: WriteId, write: R) {
+        let (tracker, transport) = (Arc::clone(&self.tracker), Arc::clone(&self.transport));
         self.queued.push((
             id,
             Box::pin(async move {
-                let Ok(permit) = fence.check(write.target(), &LabChats).await else {
-                    return Outcome::Failed;
-                };
-                let Ok(authorized) = Authorized::new(write, permit) else {
-                    return Outcome::Failed;
-                };
-                match transport.deliver(authorized).await {
-                    Ok(answer) => Outcome::Answered {
-                        status: answer.status(),
-                        body: answer.body().to_vec(),
-                    },
+                let attempt = tracker.before(&write);
+                match transport.deliver(write).await {
+                    Ok(answer) => {
+                        tracker.answered(attempt, &answer);
+                        Outcome::Answered {
+                            status: answer.status(),
+                            body: answer.body().to_vec(),
+                        }
+                    }
                     Err(_) => Outcome::Failed,
                 }
             }),
@@ -220,27 +159,18 @@ fn options() -> Options {
 impl Client {
     /// `mri`'s client, its calling socket up and registered.
     pub async fn start(mock: &ChatServiceMock, trouter_origin: &str, mri: &'static str) -> Self {
-        let log = SharedLog::default();
-        let fence = Arc::new(
-            Fence::new(
-                Roster::new([Mri::new(LAB_A), Mri::new(LAB_B), Mri::new(LAB_C)], [Mri::new(ECHO)]),
-                FenceLog::from_writer(log.clone()),
-            )
-            .with_own_account(Mri::new(mri)),
-        );
+        let tracker = Arc::new(teams_call::Tracker::new(Mri::new(mri)));
         let tokens = Arc::new(Tokens {
             ic3: mock.token(mri).unwrap(),
             skypetoken: mock.skypetoken(mri).unwrap(),
             renewals: broadcast::channel(4).0,
         });
-        let transport = Arc::new(
-            HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &mock.origin())
-                .unwrap(),
-        );
+        let transport =
+            Arc::new(HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &mock.origin()).unwrap());
         let trouter = Trouter::with_mock_origin(Arc::clone(&transport), Arc::clone(&tokens), trouter_origin)
             .unwrap()
             .with_options(options())
-            .for_calls(CallStack::new(Arc::clone(&fence), Arc::new(LabChats)));
+            .for_calls(CallStack::new(Arc::clone(&tracker)));
         let identity = Identity {
             mri: Mri::new(mri),
             display_name: Some(format!(
@@ -265,7 +195,7 @@ impl Client {
         let driver = Driver {
             calls: Calls::new(identity),
             sink: Sink {
-                fence,
+                tracker,
                 transport,
                 queued: Vec::new(),
             },
@@ -280,7 +210,6 @@ impl Client {
             .expect("the client stopped");
         Self {
             mri,
-            log,
             commands,
             events,
             refusals,
@@ -447,7 +376,7 @@ impl Driver {
                 Effect::Event(event) => {
                     let _ = self.told.send(event);
                 }
-                Effect::LetGo { attach } => self.sink.fence.let_go(attach.as_str()),
+                Effect::LetGo { attach } => self.sink.tracker.let_go(attach.as_str()),
             }
         }
     }

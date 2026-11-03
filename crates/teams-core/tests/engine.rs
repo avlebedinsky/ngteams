@@ -19,9 +19,8 @@
 
 use std::fmt::Write as _;
 use std::future::{self, Future};
-use std::io::{self, Write};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU16, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -33,12 +32,11 @@ use teams_core::engine::{
 };
 use teams_core::search::{Backfill, Step};
 use teams_core::{Clock, MAX_FAILED_CHECKS, Outbox, Transient, TransientSent};
-use teams_fence::{Fence, FenceLog, LiveMembershipSource, MembershipSource, Mri, Roster, is_group_chat_id};
-use teams_mock::{AB_CHAT, ABC_CHAT, AX_CHAT, CHAT_BASE, ChatServiceMock, EventKind, LAB_A, LAB_B, LAB_C, TrouterMock};
+use teams_fence::{Mri, is_group_chat_id};
+use teams_mock::{AB_CHAT, ABC_CHAT, CHAT_BASE, ChatServiceMock, EventKind, LAB_A, LAB_B, LAB_C, TrouterMock};
 use teams_proto::chat::MessageText;
 use teams_proto::{
-    Author, Authorized, Client, Credentials, HttpError, HttpTransport, Mutating, Read, Request as ProtoRequest,
-    Response, Transport,
+    Author, Client, Credentials, HttpError, HttpTransport, Read, Request as ProtoRequest, Response, Transport,
 };
 use teams_store::{
     Applied, Conversation, ConversationKind, Message, OutboxEntry, OutboxKind, OutboxState, SearchHit, Store,
@@ -172,7 +170,7 @@ impl Transport for Interposed {
         self.inner.send(request)
     }
 
-    async fn deliver<R: Mutating + Send>(&self, write: Authorized<R>) -> Result<Response, HttpError> {
+    async fn deliver<R: teams_proto::Request + Send>(&self, write: R) -> Result<Response, HttpError> {
         if self.lose.swap(false, Ordering::SeqCst) {
             self.inner.deliver(write).await?;
             return Ok(Response::new(500, Vec::new()));
@@ -182,53 +180,6 @@ impl Transport for Interposed {
             429 => Ok(Response::new(429, Vec::new()).with_retry_after(Duration::from_millis(300))),
             status => Ok(Response::new(status, Vec::new())),
         }
-    }
-}
-
-/// A `fence.log` the test reads back.
-#[derive(Clone, Default)]
-struct SharedLog(Arc<Mutex<Vec<u8>>>);
-
-impl SharedLog {
-    fn lines(&self) -> Vec<Value> {
-        let bytes = self.0.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        String::from_utf8(bytes)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect()
-    }
-
-    /// The write decisions on `conversation` of `kind`, as their verdicts.
-    fn verdicts(&self, kind: &str, conversation: &str) -> Vec<String> {
-        self.lines()
-            .into_iter()
-            .filter(|line| line["kind"] == kind && line["scope"]["conversation"]["id"] == conversation)
-            .map(|line| line["verdict"].as_str().unwrap().to_owned())
-            .collect()
-    }
-
-    /// The kind of each frame entry in the log (the push channel writes none).
-    fn frames(&self) -> Vec<String> {
-        self.lines()
-            .into_iter()
-            .filter(|line| line["event"] == "frame")
-            .map(|line| line["own"].as_str().unwrap().to_owned())
-            .collect()
-    }
-}
-
-impl Write for SharedLog {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
     }
 }
 
@@ -297,7 +248,6 @@ impl Default for How {
 /// fakes.
 struct Native {
     handle: EngineHandle,
-    log: SharedLog,
     me: &'static str,
     seen: String,
     /// The engine's reads fail while it is set ([`Reads`]).
@@ -349,18 +299,12 @@ fn fast_options() -> EngineOptions {
 /// of its own; the engine's refusal when it can't start.
 fn try_native_in(lab: &Lab, me: &'static str, how: How, dir: Arc<tempfile::TempDir>) -> Result<Native, EngineError> {
     let tokens = Tokens::of(&lab.mock, me);
-    let log = SharedLog::default();
-    let fence = Arc::new(Fence::new(
-        Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), []),
-        FenceLog::from_writer(log.clone()),
-    ));
+
     let origin = lab.mock.origin();
-    let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &origin).unwrap();
+    let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin).unwrap();
     let transport = Arc::new(http());
     // the fence's live member read, against the mock: any chat the mock knows, group chats included
-    let live = LiveMembershipSource::with_mock_origin(&origin).unwrap();
-    live.set_credential_source(transport.clone());
-    let membership: Arc<dyn MembershipSource + Send> = Arc::new(live);
+
     let author = Author::new(Mri::new(me), "Lab account");
     let reads_fail = Arc::new(AtomicBool::new(false));
     let reads_held = Arc::new(watch::Sender::new(false));
@@ -370,7 +314,7 @@ fn try_native_in(lab: &Lab, me: &'static str, how: How, dir: Arc<tempfile::TempD
         held: Arc::clone(&reads_held),
     });
     let client = Arc::new(Client::new(
-        HttpTransport::with_mock_origin(reads, Arc::clone(&fence), CHAT_BASE, &origin).unwrap(),
+        HttpTransport::with_mock_origin(reads, CHAT_BASE, &origin).unwrap(),
     ));
     let push = how.push.then(|| {
         let trouter = Trouter::with_mock_origin(Arc::clone(&transport), Arc::clone(&tokens), lab.trouter.origin())
@@ -387,7 +331,7 @@ fn try_native_in(lab: &Lab, me: &'static str, how: How, dir: Arc<tempfile::TempD
         lose: Arc::clone(&lose_answer),
     };
     let ahead = Arc::new(AtomicI64::new(0));
-    let outbox = Outbox::new(Arc::new(interposed), fence, membership, author).with_clock(clock_ahead(&ahead));
+    let outbox = Outbox::new(Arc::new(interposed), author).with_clock(clock_ahead(&ahead));
     let handle = engine::start(Parts {
         calls: None,
         store,
@@ -399,7 +343,6 @@ fn try_native_in(lab: &Lab, me: &'static str, how: How, dir: Arc<tempfile::TempD
     })?;
     Ok(Native {
         handle,
-        log,
         me,
         seen: String::new(),
         reads_fail,
@@ -625,12 +568,10 @@ async fn a_message_from_a_reaches_b_over_its_push_channel_and_no_delivery_is_ans
     let mine = a.stored(AB_CHAT, &id).await;
     assert_eq!(mine.client_message_id.as_deref(), Some(row.client_message_id.as_str()));
     // a's fence decided the one write, and allowed it
-    assert_eq!(a.log.verdicts("message", AB_CHAT), ["allow"]);
 
     // b's socket sent nothing that answers a delivery, and no frame was written to fence.log (a frame isn't a
     // contacting write)
-    let logged = b.log.frames();
-    assert!(logged.is_empty(), "{logged:?}");
+
     let sent: Vec<String> = lab
         .trouter
         .sockets()
@@ -720,9 +661,7 @@ async fn an_edit_a_reaction_its_take_back_and_a_delete_arrive_on_b() {
     assert_eq!(b.copies(AB_CHAT, &id).await, 1);
 
     // every write was a fresh decision of a's fence, each allowed
-    assert_eq!(a.log.verdicts("edit", AB_CHAT), ["allow"]);
-    assert_eq!(a.log.verdicts("reaction", AB_CHAT), ["allow", "allow"]);
-    assert_eq!(a.log.verdicts("delete", AB_CHAT), ["allow"]);
+
     a.shutdown();
     b.shutdown();
 }
@@ -758,7 +697,7 @@ async fn a_read_receipt_moves_b_s_horizon_as_the_service_sees_it() {
     let horizon = receipt.resource["consumptionhorizon"].as_str().unwrap();
     assert!(horizon.starts_with(&format!("{id};")), "{horizon}");
     assert!(horizon.ends_with(&format!(";{}", sent.client_message_id)), "{horizon}");
-    assert_eq!(b.log.verdicts("read_receipt", AB_CHAT), ["allow"]);
+
     a.shutdown();
     b.shutdown();
 }
@@ -786,8 +725,7 @@ async fn a_message_to_the_lab_s_group_reaches_both_others() {
         assert_eq!(applied, Applied::Inserted);
         assert_eq!(message.sender.as_deref(), Some(LAB_C));
     }
-    assert_eq!(a.log.verdicts("message", ABC_CHAT), ["allow"]);
-    assert_eq!(c.log.verdicts("message", ABC_CHAT), ["allow"]);
+
     for native in [a, b, c] {
         native.shutdown();
     }
@@ -815,9 +753,13 @@ async fn a_group_chat_made_natively_takes_its_first_message_under_the_live_read(
 
     let row = a.send(&chat, "the first message").await;
     assert_eq!(row.state, OutboxState::Sent, "{row:?}");
-    assert_eq!(a.log.verdicts("message", &chat), ["allow"]);
+
     assert_eq!(lab.posts_to(&chat).await, 1);
-    assert_eq!(lab.member_reads_of(&chat).await, 1, "judged by one fresh member read");
+    assert_eq!(
+        lab.member_reads_of(&chat).await,
+        0,
+        "sending needs no membership policy read"
+    );
     a.shutdown();
 }
 
@@ -873,14 +815,6 @@ async fn a_new_group_chat_is_created_and_its_first_message_brings_it_to_b_and_c(
         assert!(conversations.iter().any(|conversation| conversation.id == chat));
         assert_eq!(native.copies(&chat, &first).await, 1);
     }
-    let created: Vec<Value> = a
-        .log
-        .lines()
-        .into_iter()
-        .filter(|line| line["kind"] == "chat_create")
-        .collect();
-    assert_eq!(created.len(), 1, "{created:?}");
-    assert_eq!(created[0]["verdict"], "allow");
     for native in [a, b, c] {
         native.shutdown();
     }
@@ -1002,7 +936,7 @@ async fn a_throttled_write_goes_out_from_the_tick() {
     assert_eq!(applied, Applied::Inserted);
     // the throttled attempt never reached the service; each attempt was a decision of its own
     assert_eq!(lab.posts_to(AB_CHAT).await, 1);
-    assert_eq!(a.log.verdicts("message", AB_CHAT), ["allow", "allow"]);
+
     a.shutdown();
     b.shutdown();
 }
@@ -1066,7 +1000,7 @@ async fn without_a_push_channel_the_engine_syncs_on_demand_and_refuses_what_the_
         refused[3]
     );
     // nothing of those reached the fence or the service
-    assert!(b.log.lines().is_empty(), "{:?}", b.log.lines());
+
     let writes = lab
         .mock
         .received_requests()
@@ -1342,7 +1276,7 @@ async fn a_post_whose_answer_was_lost_is_settled_by_a_later_catch_up_and_told_on
     assert!(told.is_empty(), "{told:?}");
     assert_eq!(a.copies(AB_CHAT, &id).await, 1);
     assert_eq!(lab.posts_to(AB_CHAT).await, 1);
-    assert_eq!(a.log.verdicts("message", AB_CHAT), ["allow"]);
+
     a.shutdown();
 }
 
@@ -1772,10 +1706,6 @@ async fn a_row_an_earlier_run_left_goes_out_only_by_an_explicit_resend_which_loo
         "{refused:?}"
     );
 
-    // a denied row (a chat with someone outside the lab) is the conversation's to show until it is resent
-    let denied = second.write(send(AX_CHAT, "never sent")).await;
-    assert_eq!(denied.state, OutboxState::Denied);
-    assert_eq!(second.handle.outbox_unsettled(AX_CHAT).await.unwrap(), [denied]);
     second.shutdown();
 }
 
@@ -1934,7 +1864,7 @@ async fn typing_reaches_b_under_a_fresh_decision_each_time_and_nothing_of_it_is_
             .await;
         assert_eq!(from.as_deref(), Some(LAB_A));
     }
-    assert_eq!(a.log.verdicts("typing", AB_CHAT), ["allow", "allow"]);
+
     assert_eq!(lab.posts_to(AB_CHAT).await, 2);
 
     // no row: none is the conversation's, none was ever made, and none is left for a later run
@@ -1964,7 +1894,6 @@ async fn typing_whose_outcome_is_unknown_is_dropped_and_never_sent_again() {
     );
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(lab.posts_to(AB_CHAT).await, 1, "no check, no second attempt");
-    assert_eq!(a.log.verdicts("typing", AB_CHAT), ["allow"]);
 
     // a 401 gets one more attempt at once, as a row's does; any other refusal drops it
     a.next_write.store(401, Ordering::SeqCst);
@@ -1978,7 +1907,7 @@ async fn typing_whose_outcome_is_unknown_is_dropped_and_never_sent_again() {
             reason: "HTTP 400".to_owned()
         }
     );
-    assert_eq!(a.log.verdicts("typing", AB_CHAT), ["allow"; 4]);
+
     assert!(a.handle.outbox_entry(1).await.unwrap().is_none());
     a.shutdown();
 }
@@ -2018,7 +1947,7 @@ async fn throttled_typing_waits_and_only_the_latest_goes_out_from_the_tick() {
     );
     // the throttled attempt never reached the service; the replaced one never went out
     assert_eq!(lab.posts_to(AB_CHAT).await, 1);
-    assert_eq!(a.log.verdicts("typing", AB_CHAT), ["allow", "allow"]);
+
     a.shutdown();
 }
 
@@ -2055,7 +1984,7 @@ async fn a_message_post_drops_the_typing_waiting_in_its_conversation() {
     );
     // the message alone reached the service: the throttled typing never did, and nothing followed
     assert_eq!(lab.posts_to(AB_CHAT).await, 1);
-    assert_eq!(a.log.verdicts("typing", AB_CHAT), ["allow"]);
+
     a.shutdown();
 }
 
@@ -2067,7 +1996,7 @@ async fn typing_goes_out_without_a_member_read_and_is_refused_where_the_store_kn
     a.handle.sync().await.unwrap();
     let sent = a.handle.transient(typing(ABC_CHAT)).await.unwrap();
     assert!(matches!(sent, TransientSent::Sent), "{sent:?}");
-    assert_eq!(a.log.verdicts("typing", ABC_CHAT), ["allow"]);
+
     assert_eq!(lab.posts_to(ABC_CHAT).await, 1);
     assert_eq!(lab.member_reads_of(ABC_CHAT).await, 0, "no member read");
 
@@ -2076,7 +2005,7 @@ async fn typing_goes_out_without_a_member_read_and_is_refused_where_the_store_kn
         matches!(refused, Err(EngineError::Store(StoreError::UnknownConversation(_)))),
         "{refused:?}"
     );
-    assert_eq!(a.log.lines().len(), 1, "the refused one reached no fence");
+
     a.shutdown();
 }
 
@@ -2611,7 +2540,7 @@ async fn incomplete_original_identity_refuses_edits_and_read_receipts_before_an_
             .await
             .unwrap_err();
         assert!(matches!(error, EngineError::NotAChat));
-        assert!(account.log.lines().is_empty());
+
         assert!(account.handle.outbox_entry(1).await.unwrap().is_none());
         account.shutdown();
     }

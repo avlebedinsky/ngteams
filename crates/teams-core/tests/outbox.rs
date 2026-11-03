@@ -10,7 +10,6 @@
 
 use std::collections::VecDeque;
 use std::future::{self, Future};
-use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -23,11 +22,11 @@ use teams_core::{
     CHECK_RETRY_WAIT, Clock, Command, ConversationSync, MAX_ATTEMPTS, MAX_FAILED_CHECKS, MAX_TRANSIENT_WAIT, Outbox,
     OutboxError, Sent, SyncError, Transient, TransientSent, create_chat, enqueue, new_client_message_id,
 };
-use teams_fence::{Fence, FenceLog, Membership, MembershipFuture, MembershipSource, Mri, Roster, Scope};
-use teams_proto::chat::{MessageText, Node, RichText};
+use teams_fence::Mri;
+use teams_proto::chat::MessageText;
 use teams_proto::{
-    Author, Authorized, Credentials, DEFAULT_RETRY_WAIT, Failure, HttpError, HttpTransport, Mutating, Read,
-    Request as ProtoRequest, Response, Transport,
+    Author, Credentials, DEFAULT_RETRY_WAIT, Failure, HttpError, HttpTransport, Read, Request as ProtoRequest,
+    Response, Transport,
 };
 use teams_store::{
     Applied, AttemptOutcome, Conversation, ConversationKind, Message, OutboxEntry, OutboxKind, OutboxState, Store,
@@ -79,68 +78,6 @@ impl Credentials for FakeTokens {
     }
 }
 
-/// A `fence.log` the test can read back.
-#[derive(Clone, Default)]
-struct SharedLog(Arc<Mutex<Vec<u8>>>);
-
-impl SharedLog {
-    fn verdicts(&self) -> Vec<String> {
-        let bytes = self.0.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        String::from_utf8(bytes)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str::<Value>(line).unwrap())
-            .filter_map(|line| line["verdict"].as_str().map(str::to_owned))
-            .collect()
-    }
-}
-
-impl Write for SharedLog {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-/// The chat's members as the fence reads them, counting each read.
-struct Members {
-    members: Mutex<Vec<Mri>>,
-    reads: AtomicUsize,
-}
-
-impl Members {
-    fn lab() -> Arc<Self> {
-        Arc::new(Self {
-            members: Mutex::new(vec![Mri::new(ME), Mri::new(PEER)]),
-            reads: AtomicUsize::new(0),
-        })
-    }
-
-    fn reads(&self) -> usize {
-        self.reads.load(Ordering::SeqCst)
-    }
-
-    fn set(&self, members: &[&str]) {
-        *self.members.lock().unwrap_or_else(PoisonError::into_inner) =
-            members.iter().map(|mri| Mri::new(*mri)).collect();
-    }
-}
-
-impl MembershipSource for Members {
-    fn members<'a>(&'a self, _scope: &'a Scope) -> MembershipFuture<'a> {
-        self.reads.fetch_add(1, Ordering::SeqCst);
-        let members = self.members.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        Box::pin(future::ready(Membership::Complete(members)))
-    }
-}
-
 /// What the next write's delivery does instead of an ordinary one.
 #[derive(Clone, Copy, Debug)]
 enum Fault {
@@ -167,7 +104,7 @@ impl Transport for Flaky {
         self.inner.send(request)
     }
 
-    async fn deliver<R: Mutating + Send>(&self, write: Authorized<R>) -> Result<Response, HttpError> {
+    async fn deliver<R: teams_proto::Request + Send>(&self, write: R) -> Result<Response, HttpError> {
         let fault = self.faults.lock().unwrap_or_else(PoisonError::into_inner).pop_front();
         match fault {
             None => self.inner.deliver(write).await,
@@ -269,8 +206,6 @@ struct Setup {
     outbox: Outbox<Flaky>,
     sync: ServiceSync,
     tokens: Arc<FakeTokens>,
-    log: SharedLog,
-    members: Arc<Members>,
     faults: Arc<Mutex<VecDeque<Fault>>>,
     clock: Arc<AtomicI64>,
 }
@@ -350,29 +285,18 @@ async fn setup() -> Setup {
     let dir = tempfile::tempdir().unwrap();
     let store_path = dir.path().join("store").join("a.sqlite");
     let tokens = Arc::new(FakeTokens::default());
-    let log = SharedLog::default();
-    let fence = Arc::new(Fence::new(
-        Roster::new([Mri::new(ME), Mri::new(PEER)], []),
-        FenceLog::from_writer(log.clone()),
-    ));
+
     let faults = Arc::new(Mutex::new(VecDeque::new()));
     let transport = Flaky {
-        inner: HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &server.uri())
-            .unwrap(),
+        inner: HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &server.uri()).unwrap(),
         faults: Arc::clone(&faults),
     };
-    let members = Members::lab();
+
     let clock = Arc::new(AtomicI64::new(START));
     let read_clock = Arc::clone(&clock);
     let clock_fn: Clock = Arc::new(move || read_clock.load(Ordering::SeqCst));
-    let membership: Arc<dyn MembershipSource + Send> = members.clone();
-    let outbox = Outbox::new(
-        Arc::new(transport),
-        fence,
-        membership,
-        Author::new(Mri::new(ME), "Lab A"),
-    )
-    .with_clock(clock_fn);
+
+    let outbox = Outbox::new(Arc::new(transport), Author::new(Mri::new(ME), "Lab A")).with_clock(clock_fn);
     let sync = ServiceSync {
         server: Arc::clone(&server),
         finds: AtomicBool::new(false),
@@ -387,8 +311,6 @@ async fn setup() -> Setup {
         outbox,
         sync,
         tokens,
-        log,
-        members,
         faults,
         clock,
     }
@@ -567,7 +489,6 @@ async fn an_edit_sends_the_message_again_as_it_was_sent_and_keeps_its_id() {
         json!(row.created_at),
         "edited when it was asked for"
     );
-    assert_eq!(setup.log.verdicts(), ["allow"]);
 }
 
 #[tokio::test]
@@ -605,8 +526,7 @@ async fn a_permitted_send_posts_the_rows_client_message_id_and_takes_the_message
     assert_eq!(sent.message_id.as_deref(), Some("1001"), "from Location");
     assert_eq!(sent.attempts, 1);
     assert_eq!(setup.posted().await, std::slice::from_ref(&row.client_message_id));
-    assert_eq!(setup.members.reads(), 1, "the members were read for the attempt");
-    assert_eq!(setup.log.verdicts(), ["allow"]);
+
     assert!(setup.sync.calls().is_empty(), "a first attempt needs no check");
 }
 
@@ -627,7 +547,7 @@ async fn without_a_location_the_message_id_is_the_arrival_time() {
 }
 
 #[tokio::test]
-async fn each_attempt_asks_the_fence_again_with_a_fresh_membership_read() {
+async fn an_explicit_401_response_is_retried_with_the_same_row() {
     let setup = setup().await;
     setup.answer_once(401, None).await;
     setup.created().await;
@@ -638,31 +558,6 @@ async fn each_attempt_asks_the_fence_again_with_a_fresh_membership_read() {
 
     assert_eq!(sent.state, OutboxState::Sent);
     assert_eq!(sent.attempts, 2);
-    assert_eq!(setup.members.reads(), 2, "one fresh read per attempt");
-    assert_eq!(setup.log.verdicts(), ["allow", "allow"], "one decision per attempt");
-}
-
-#[tokio::test]
-async fn a_denied_attempt_marks_the_row_denied_and_sends_nothing() {
-    let setup = setup().await;
-    setup.created().await;
-    setup.members.set(&[ME, OUTSIDER]);
-    let mut store = setup.open_store();
-    let row = enqueue(&mut store, &hello()).unwrap();
-
-    let denied = send(&setup, &mut store, &row).await;
-
-    assert_eq!(denied.state, OutboxState::Denied);
-    assert!(
-        denied.last_error.as_deref().unwrap().contains("outside the lab"),
-        "{denied:?}"
-    );
-    assert!(setup.posted().await.is_empty(), "nothing was sent");
-    assert_eq!(setup.log.verdicts(), ["deny"]);
-    assert!(
-        store.outbox_due(i64::MAX).unwrap().is_empty(),
-        "a denied row isn't retried"
-    );
 }
 
 #[tokio::test]
@@ -687,57 +582,6 @@ async fn a_message_goes_out_from_the_account_with_its_text_composed_when_it_was_
         "the row's time, not the attempt's"
     );
     assert_eq!(body["clientmessageid"], json!(row.client_message_id));
-}
-
-#[tokio::test]
-async fn a_message_mentioning_an_outsider_is_denied_though_the_chat_is_the_labs() {
-    let setup = setup().await;
-    setup.created().await;
-    let mut store = setup.open_store();
-    let mentioned = MessageText::new(
-        RichText {
-            nodes: vec![Node::Mention {
-                item_id: "0".to_owned(),
-                text: "Someone".to_owned(),
-            }],
-            truncated: false,
-        },
-        [("0".to_owned(), Mri::new("8:orgid:00000000-0000-4000-8000-0000000000ff"))],
-    )
-    .unwrap();
-    let command = Command::Send {
-        conversation: CHAT.to_owned(),
-        text: mentioned,
-    };
-    let row = enqueue(&mut store, &command).unwrap();
-
-    let denied = send(&setup, &mut store, &row).await;
-
-    assert_eq!(denied.state, OutboxState::Denied);
-    assert!(setup.posted().await.is_empty(), "nothing was sent");
-    assert_eq!(setup.log.verdicts(), ["deny"]);
-}
-
-#[tokio::test]
-async fn a_later_attempt_is_denied_when_the_membership_changed_since_the_first() {
-    let setup = setup().await;
-    setup.answer_once(429, Some("1")).await;
-    setup.created().await;
-    let mut store = setup.open_store();
-    let row = enqueue(&mut store, &hello()).unwrap();
-    assert_eq!(send(&setup, &mut store, &row).await.state, OutboxState::Pending);
-
-    setup.members.set(&[ME, PEER, OUTSIDER]);
-    setup.advance(Duration::from_secs(1));
-    let denied = send(&setup, &mut store, &row).await;
-
-    assert_eq!(denied.state, OutboxState::Denied);
-    assert_eq!(
-        setup.posted().await.len(),
-        1,
-        "only the throttled first attempt went out"
-    );
-    assert_eq!(setup.log.verdicts(), ["allow", "deny"]);
 }
 
 // --- the retry table ---
@@ -1001,7 +845,6 @@ async fn a_timeout_whose_message_didnt_arrive_is_sent_again_with_the_same_client
         "the sync came first, before anything reached the service"
     );
     assert_eq!(setup.posted().await, std::slice::from_ref(&row.client_message_id));
-    assert_eq!(setup.members.reads(), 2, "the new attempt asked the fence again");
 }
 
 #[tokio::test]
@@ -1457,7 +1300,7 @@ async fn rows_an_earlier_run_left_pending_are_not_sent_on_start_and_go_out_only_
         "{error:?}"
     );
     assert!(setup.posted().await.is_empty());
-    assert_eq!(setup.members.reads(), 0, "not even the fence was asked");
+
     let left = store.outbox_left_by_earlier_runs().unwrap();
     assert_eq!(left.len(), 1);
     assert_eq!(left[0].id, row.id);
@@ -1574,7 +1417,6 @@ async fn another_runs_pending_row_is_refused_even_while_it_waits_for_its_retry_a
         matches!(error, OutboxError::OtherRun { id, .. } if id == row.id),
         "{error:?}"
     );
-    assert_eq!(setup.members.reads(), 0);
 }
 
 // --- transient writes wait once, and briefly ---
@@ -1633,7 +1475,6 @@ async fn a_typing_throttled_again_after_its_wait_is_dropped_not_kept_waiting() {
     setup.advance(Duration::from_secs(5));
     assert!(setup.outbox.send_due_transients().await.is_empty(), "nothing waits");
     assert_eq!(setup.posted().await.len(), 2);
-    assert_eq!(setup.log.verdicts(), ["allow", "allow"]);
 }
 
 #[tokio::test]

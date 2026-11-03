@@ -3,8 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::time::{Duration, Instant};
 
+use crate::{Delivery, Observed};
 use base64::Engine as _;
-use teams_fence::{Delivery, Mri, Observed};
+use teams_fence::Mri;
 use teams_proto::{
     AcceptanceAcknowledgement, CallContext, CallLink, CallParticipant, ChannelMeetup, ChannelParameters, ClientInfo,
     InvitationReceipt, MediaContent, MediaDescriptions, MeetingInfo,

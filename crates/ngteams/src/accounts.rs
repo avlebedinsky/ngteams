@@ -5,11 +5,9 @@
 //!
 //! Nothing is sent here: each engine's writes go through its own outbox under its own fence.
 
-use std::sync::Arc;
-
 use teams_auth::secrets::{LazyKeyring, SecretStore};
+use teams_core::CallFloor;
 use teams_fence::personal::PersonalAccount;
-use teams_fence::{CallFloor, Fence};
 use teams_signin::window::Windows;
 
 use crate::KEYRING_APPLICATION;
@@ -52,25 +50,24 @@ impl Runner {
     /// # Errors
     /// Why it couldn't start, said for the user (another `ngteams` runs on the account, its region can't be read).
     pub fn start(&self, account: &PersonalAccount) -> Result<Started, String> {
-        let fence = Fence::open_personal(&self.setup.paths, &account.upn)
-            .map_err(|error| format!("{}: {error}", account.upn))?
-            .sharing_calls(&self.floor);
-        self.start_on(account, fence, LazyKeyring::new(KEYRING_APPLICATION))
+        self.start_on(account, LazyKeyring::new(KEYRING_APPLICATION))
     }
 
-    fn start_on<S: SecretStore + 'static>(
-        &self,
-        account: &PersonalAccount,
-        fence: Fence,
-        secrets: S,
-    ) -> Result<Started<S>, String> {
+    fn start_on<S: SecretStore + 'static>(&self, account: &PersonalAccount, secrets: S) -> Result<Started<S>, String> {
         let (engine_calls, calls) = self
             .devices
             .as_ref()
             .map(CallDevices::for_account)
             .map_or((None, None), |(engine, window)| (Some(engine), Some(window)));
-        let engine = engine::start(&self.setup.paths, account, Arc::new(fence), secrets, true, engine_calls)
-            .map_err(|error| format!("{}: {error}", account.upn))?;
+        let engine = engine::start(
+            &self.setup.paths,
+            account,
+            self.floor.clone(),
+            secrets,
+            true,
+            engine_calls,
+        )
+        .map_err(|error| format!("{}: {error}", account.upn))?;
         Ok(Started {
             account: account.clone(),
             engine,

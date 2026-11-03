@@ -1007,7 +1007,6 @@ fn diagnostics_in(dir: &tempfile::TempDir, log: &str) -> DiagnosticsSource {
         app: "teams-app 0.1.0".to_owned(),
         log_file: Some(log_file),
         log_problem: None,
-        fence_log: Some(fence_log),
     }
 }
 
@@ -1157,7 +1156,6 @@ fn a_log_that_couldn_t_be_opened_is_shown_with_the_settings_problems() {
         app: "teams-app 0.1.0".to_owned(),
         log_file: None,
         log_problem: Some("the diagnostic log can't be opened".to_owned()),
-        fence_log: None,
     });
     assert_eq!(
         model.problems(),

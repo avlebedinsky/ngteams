@@ -13,7 +13,7 @@
 //! let mock = ChatServiceMock::start().await?;
 //! let trouter = mock.start_trouter()?; // its push channel, at trouter.origin() (M1 Task 16)
 //! let token = mock.token(LAB_A).ok_or("no account")?; // a's `ic3` token, for the client's credentials
-//! let transport = HttpTransport::with_mock_origin(credentials, fence, CHAT_BASE, &mock.origin())?;
+//! let transport = HttpTransport::with_mock_origin(credentials, CHAT_BASE, &mock.origin())?;
 //! // … a sends to AB_CHAT through the fence …
 //! let events = mock.take_events(LAB_B); // what b would be told, while no socket of b's takes it
 //! ```

@@ -94,7 +94,7 @@ pub fn settings(file: SettingsFile, diagnostics: Option<DiagnosticsSource>) -> S
 /// engine starts. It is the user's data, like the store: agents never read it. A log that can't be opened is said once
 /// on stderr and in the settings view, and the app runs without it.
 #[must_use]
-pub fn install_log(dir: PathBuf, setting: LogLevel, fence_log: PathBuf) -> DiagnosticsSource {
+pub fn install_log(dir: PathBuf, setting: LogLevel) -> DiagnosticsSource {
     let config = teams_log::Config::from_env(dir, setting);
     let (log_file, log_problem) = match teams_log::install(&config) {
         Ok(log) => (Some(log.path().to_owned()), None),
@@ -108,7 +108,6 @@ pub fn install_log(dir: PathBuf, setting: LogLevel, fence_log: PathBuf) -> Diagn
         app: format!("teams {}", env!("CARGO_PKG_VERSION")),
         log_file,
         log_problem,
-        fence_log: Some(fence_log),
     }
 }
 

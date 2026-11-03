@@ -21,7 +21,7 @@ use std::time::Duration;
 use teams_fence::Mri;
 use teams_proto::{
     AddChannelMembers, ChannelCreated, ChannelCreationStatus, Client, CreateChannel, Credentials, HttpError,
-    HttpTransport, Mutating, NewChannel, NewChannelKind, ShowChannelByDefault, TeamPeopleSearch, TeamPerson, Transport,
+    HttpTransport, NewChannel, NewChannelKind, Request, ShowChannelByDefault, TeamPeopleSearch, TeamPerson, Transport,
     channel_error_code,
 };
 use teams_store::{ChannelKind, TeamChannel};
@@ -297,7 +297,7 @@ where
 async fn send<T, R>(outbox: &Outbox<T>, write: &R) -> Result<Vec<u8>, EngineError>
 where
     T: Transport<Error = HttpError>,
-    R: Mutating + Clone + Send,
+    R: Request + Clone + Send,
 {
     let mut retries = CallRetries::default();
     loop {

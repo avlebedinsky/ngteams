@@ -50,10 +50,9 @@ use teams_auth::token::TokenError;
 use teams_core::Outbox;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Parts, Push};
 use teams_fence::lab::{Alias, LabConfig, record_abc_chat};
-use teams_fence::{Fence, FenceLog, LiveMembershipSource, Mri, Roster};
+use teams_fence::{LiveMembershipSource, Mri};
 use teams_mock::{
-    AB_CHAT, ABC_CHAT, AC_CHAT, CHANNEL, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, NOTIFICATIONS, TrouterMock,
-    lab_toml,
+    AB_CHAT, ABC_CHAT, AC_CHAT, CHANNEL, CHAT_BASE, ChatServiceMock, LAB_A, LAB_C, NOTIFICATIONS, TrouterMock, lab_toml,
 };
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::Store;
@@ -640,15 +639,12 @@ impl MockLab {
             token: mock.token(LAB_A).ok_or("the mock's token for a")?,
             renewals: broadcast::channel(4).0,
         });
-        let fence = Arc::new(Fence::new(
-            Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), []),
-            FenceLog::from_writer(io::sink()),
-        ));
+
         let origin = mock.origin();
-        let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &origin);
+        let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin);
         let transport = Arc::new(http()?);
-        let membership = LiveMembershipSource::with_mock_origin(&origin)?;
-        membership.set_credential_source(transport.clone());
+        let _membership = LiveMembershipSource::with_mock_origin(&origin)?;
+
         let trouter_client = Trouter::with_mock_origin(Arc::clone(&transport), Arc::clone(&tokens), trouter.origin())?
             .with_options(Options {
                 backoff_base: Duration::from_millis(50),
@@ -661,7 +657,7 @@ impl MockLab {
             calls: None,
             store: Store::open(&config.paths().store_file(Alias::A))?,
             client: Arc::new(Client::new(http()?)),
-            outbox: Outbox::new(transport, fence, Arc::new(membership), author),
+            outbox: Outbox::new(transport, author),
             push: Some(Push::new(trouter_client)),
             options: EngineOptions::default(),
             known_names: Vec::new(),

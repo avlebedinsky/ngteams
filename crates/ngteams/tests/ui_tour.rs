@@ -38,7 +38,7 @@ use teams_core::Outbox;
 use teams_core::VideoOutput;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Parts, Push};
 use teams_fence::lab::{Alias, LabConfig, record_abc_chat};
-use teams_fence::{Fence, FenceLog, LiveMembershipSource, Mri, Roster};
+use teams_fence::{LiveMembershipSource, Mri};
 use teams_media::devices::catalog::{DeviceInfo, DeviceKind, DeviceList, FixedDirectory};
 use teams_media::devices::pattern::TestPattern;
 use teams_mock::{
@@ -1611,15 +1611,12 @@ impl MockLab {
             token: mock.token(LAB_A).ok_or("the mock's token for a")?,
             renewals: broadcast::channel(4).0,
         });
-        let fence = Arc::new(Fence::new(
-            Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), []),
-            FenceLog::from_writer(io::sink()),
-        ));
+
         let origin = mock.origin();
-        let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &origin);
+        let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin);
         let transport = Arc::new(http()?);
-        let membership = LiveMembershipSource::with_mock_origin(&origin)?;
-        membership.set_credential_source(transport.clone());
+        let _membership = LiveMembershipSource::with_mock_origin(&origin)?;
+
         let trouter_client = Trouter::with_mock_origin(Arc::clone(&transport), Arc::clone(&tokens), trouter.origin())?
             .with_options(Options {
                 backoff_base: Duration::from_millis(50),
@@ -1640,7 +1637,7 @@ impl MockLab {
                     .with_provisioning(PROVISIONING_BASE)?
                     .with_middle_tier(MIDDLE_TIER_BASE)?,
             )),
-            outbox: Outbox::new(transport, fence, Arc::new(membership), author),
+            outbox: Outbox::new(transport, author),
             push: Some(Push::new(trouter_client)),
             options: EngineOptions::default(),
             known_names: Vec::new(),

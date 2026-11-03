@@ -1,21 +1,10 @@
-//! The calendar writes (`docs/protocol/calendar.md`, "Writing an event"): an event of the account's own calendar
-//! created ([`CreateEvent`]), changed ([`UpdateEvent`]), cancelled ([`CancelEvent`]) or deleted ([`DeleteEvent`]), each a
-//! sealed [`Mutating`] request on the middle tier in the shape the web client sent it (`ab-meeting`). Each is a
-//! [`WriteKind::Meeting`]: a new event on [`Scope::New`] inviting its attendees, every other on [`Scope::Event`] of the
-//! event it names, adding the attendees a change names; each attendee by address ([`Mri::mail`]), as
-//! `teams_fence::contacting` reads the same bytes.
-//!
-//! An event's fields come from an [`EventDraft`] (what the scheduling form edits); a change sends the event as it was
-//! read with the draft's fields over it ([`EventDraft::over`]), so a field the form doesn't edit goes back as it came.
-//! A Teams meeting's event carries the online meeting [`CreateOnlineMeeting`] made just before (its
-//! `schedulingServiceEvent`), as the web client's does.
+//! Typed calendar event and online-meeting writes in the captured middle-tier protocol shapes.
 
 use serde_json::{Map, Value, json};
-use teams_fence::{Mri, Scope, Target, WriteKind};
 use time::{OffsetDateTime, UtcOffset};
 
-use super::sealed::Sealed;
-use super::{Mutating, Wire};
+use super::Prepared;
+use super::Wire;
 use crate::endpoint::{Endpoint, Method, Service};
 use crate::recurrence::Recurrence;
 use crate::request::Request;
@@ -252,15 +241,6 @@ impl EventDraft {
         merged.extend(fields);
         Some(merged)
     }
-
-    /// The participants it invites, by address.
-    fn invited(&self) -> impl Iterator<Item = Mri> + '_ {
-        self.organizer
-            .address
-            .iter()
-            .map(|address| Mri::mail(address))
-            .chain(self.attendees.iter().map(|attendee| Mri::mail(&attendee.address)))
-    }
 }
 
 /// The middle tier's path to the account's events.
@@ -351,13 +331,7 @@ fn transaction_id() -> String {
     parts.join("-")
 }
 
-impl Mutating for CreateEvent {
-    fn target(&self) -> Target {
-        Target::new(WriteKind::Meeting, Scope::New).with_added(self.draft.invited())
-    }
-}
-
-impl Sealed for CreateEvent {
+impl Prepared for CreateEvent {
     fn wire(&self) -> Option<Wire> {
         let mut event = self.draft.fields()?;
         event.insert("clientOptimisticEventId".to_owned(), json!(self.transaction));
@@ -471,20 +445,7 @@ impl CreateChannelEvent {
     }
 }
 
-impl Mutating for CreateChannelEvent {
-    fn target(&self) -> Target {
-        Target::new(
-            WriteKind::Meeting,
-            Scope::TeamCalendar {
-                channel: self.channel.channel.clone(),
-                mailbox: self.channel.mailbox.to_ascii_lowercase(),
-            },
-        )
-        .with_added(self.sent().invited())
-    }
-}
-
-impl Sealed for CreateChannelEvent {
+impl Prepared for CreateChannelEvent {
     fn wire(&self) -> Option<Wire> {
         let draft = self.sent();
         let mut event = draft.fields()?;
@@ -569,19 +530,7 @@ impl CancelChannelEvent {
     }
 }
 
-impl Mutating for CancelChannelEvent {
-    fn target(&self) -> Target {
-        Target::new(
-            WriteKind::Meeting,
-            Scope::TeamCalendar {
-                channel: self.channel.channel.clone(),
-                mailbox: self.channel.mailbox.to_ascii_lowercase(),
-            },
-        )
-    }
-}
-
-impl Sealed for CancelChannelEvent {
+impl Prepared for CancelChannelEvent {
     fn wire(&self) -> Option<Wire> {
         let mut body = json!({
             "conversationId": self.channel.channel,
@@ -713,20 +662,7 @@ impl UpdateChannelEvent {
     }
 }
 
-impl Mutating for UpdateChannelEvent {
-    fn target(&self) -> Target {
-        Target::new(
-            WriteKind::Meeting,
-            Scope::TeamCalendar {
-                channel: self.channel.channel.clone(),
-                mailbox: self.channel.mailbox.to_ascii_lowercase(),
-            },
-        )
-        .with_added(self.sent().invited())
-    }
-}
-
-impl Sealed for UpdateChannelEvent {
+impl Prepared for UpdateChannelEvent {
     fn wire(&self) -> Option<Wire> {
         let kept: Map<String, Value> = self
             .event
@@ -799,13 +735,7 @@ impl UpdateEvent {
     }
 }
 
-impl Mutating for UpdateEvent {
-    fn target(&self) -> Target {
-        Target::new(WriteKind::Meeting, Scope::Event { id: self.id.clone() }).with_added(self.draft.invited())
-    }
-}
-
-impl Sealed for UpdateEvent {
+impl Prepared for UpdateEvent {
     fn wire(&self) -> Option<Wire> {
         let event = self.draft.over(&self.event)?;
         Some(Wire {
@@ -837,13 +767,7 @@ impl CancelEvent {
     }
 }
 
-impl Mutating for CancelEvent {
-    fn target(&self) -> Target {
-        Target::new(WriteKind::Meeting, Scope::Event { id: self.id.clone() })
-    }
-}
-
-impl Sealed for CancelEvent {
+impl Prepared for CancelEvent {
     fn wire(&self) -> Option<Wire> {
         let mut body = Map::new();
         if let Some(chat) = &self.chat {
@@ -877,13 +801,7 @@ impl DeleteEvent {
     }
 }
 
-impl Mutating for DeleteEvent {
-    fn target(&self) -> Target {
-        Target::new(WriteKind::Meeting, Scope::Event { id: self.id.clone() })
-    }
-}
-
-impl Sealed for DeleteEvent {
+impl Prepared for DeleteEvent {
     fn wire(&self) -> Option<Wire> {
         Some(Wire {
             raw: None,
@@ -902,11 +820,8 @@ fn bool_text(value: bool) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use teams_fence::{Contact, Policy, Request as FenceRequest, contacting};
 
     use super::*;
-
-    const BASE: &str = "https://teams.microsoft.com/api/mt/part/emea-02";
 
     fn draft() -> EventDraft {
         EventDraft {
@@ -943,46 +858,25 @@ mod tests {
         }
     }
 
-    /// What the fence makes of the bytes `request` sends, on a made-up middle-tier base.
-    fn classified<R: Mutating>(request: &R) -> Contact {
-        classified_on(BASE, request)
-    }
-
-    /// What the fence makes of the bytes `request` sends, on the service base `base`.
-    fn classified_on<R: Mutating>(base: &str, request: &R) -> Contact {
-        let wire = request.wire().expect("a wire form");
-        let mut url = url::Url::parse(&format!("{base}/")).expect("the base");
-        url.path_segments_mut()
-            .expect("a base")
-            .pop_if_empty()
-            .extend(wire.endpoint().segments());
-        if !wire.endpoint().query().is_empty() {
-            url.query_pairs_mut().extend_pairs(wire.endpoint().query());
-        }
-        let body = wire.body().map(|body| body.to_string().into_bytes());
-        contacting(
-            &FenceRequest::new(wire.method().as_str(), url.as_str()).with_body(body.as_deref()),
-            &Policy::new(),
-        )
-    }
-
     fn object(value: &Value) -> Map<String, Value> {
         value.as_object().cloned().unwrap_or_default()
     }
 
     #[test]
-    fn each_write_s_target_is_what_the_fence_reads_from_its_bytes() {
+    fn each_event_constructor_builds_a_request() {
         let meeting = json!({"links": {"join": "https://teams.microsoft.com/l/meetup-join/x"}});
         let create = CreateEvent::new(draft(), Some(meeting));
-        assert_eq!(classified(&create), Contact::Write(create.target()));
+
         let event = object(&json!({"objectId": "AAMkEvent", "subject": "Old", "iCalUId": "kept"}));
         let update = UpdateEvent::new("AAMkEvent".to_owned(), event, draft()).expect("an update");
-        assert_eq!(classified(&update), Contact::Write(update.target()));
+
         let cancel = CancelEvent::new("AAMkEvent".to_owned(), Some("19:meeting_x@thread.v2".to_owned()), None)
             .expect("a cancellation");
-        assert_eq!(classified(&cancel), Contact::Write(cancel.target()));
+
         let delete = DeleteEvent::new("AAMkEvent".to_owned()).expect("a delete");
-        assert_eq!(classified(&delete), Contact::Write(delete.target()));
+        assert!(
+            create.wire().is_some() && update.wire().is_some() && cancel.wire().is_some() && delete.wire().is_some()
+        );
     }
 
     fn channel() -> MeetingChannel {
@@ -998,7 +892,7 @@ mod tests {
         only_organizer.attendees.clear();
         only_organizer.online = false;
         let create = CreateChannelEvent::new(only_organizer, channel()).expect("a creation");
-        assert_eq!(classified(&create), Contact::Write(create.target()));
+
         let wire = create.wire().expect("a wire form");
         assert_eq!(
             wire.endpoint().segments(),
@@ -1043,16 +937,16 @@ mod tests {
             required: true,
         });
         let create = CreateChannelEvent::new(more, channel()).expect("a creation");
-        assert_eq!(classified(&create), Contact::Write(create.target()));
+
         let body = create.wire().expect("a wire form").body().cloned().expect("a body");
         assert_eq!(body["attendees"].as_array().map(Vec::len), Some(3));
-        assert!(create.target().added().contains(&Mri::mail("bot-b@lab.example.com")));
+        assert!(create.wire().expect("wire").body().expect("body")["attendees"].is_array());
         assert!(body.get("inviteAllMembers").is_none());
         // Send personal invites
         let personal = CreateChannelEvent::new(draft(), channel())
             .expect("a creation")
             .with_personal_invites(true);
-        assert_eq!(classified(&personal), Contact::Write(personal.target()));
+
         assert_eq!(
             personal.wire().expect("a wire form").body().expect("a body")["inviteAllMembers"],
             true
@@ -1082,7 +976,7 @@ mod tests {
         let meeting = crate::ScheduledMeeting::of_properties(&post.to_string()).expect("a meeting");
         let cancel = CancelChannelEvent::new(&meeting, channel(), "1793680050510".to_owned(), Some("note".to_owned()))
             .expect("a cancellation");
-        assert_eq!(classified(&cancel), Contact::Write(cancel.target()));
+
         let wire = cancel.wire().expect("a wire form");
         assert_eq!(
             wire.endpoint().segments(),
@@ -1159,7 +1053,7 @@ mod tests {
         });
         changed.subject = "lab channel meeting edited".to_owned();
         let update = UpdateChannelEvent::new(channel(), channel_event(), changed).expect("a change");
-        assert_eq!(classified(&update), Contact::Write(update.target()));
+
         let wire = update.wire().expect("a wire form");
         assert_eq!(
             wire.endpoint().segments(),
@@ -1224,8 +1118,7 @@ mod tests {
     fn a_meet_now_s_post_is_titled_as_the_web_client_titles_it() {
         let title = crate::SetMeetingTitle::new(&channel().channel, "1793684261870", " lab subject ").expect("a title");
         // a chat service write: on a regional chat service host
-        let chat_service = "https://emea.ng.msg.teams.microsoft.com";
-        assert_eq!(classified_on(chat_service, &title), Contact::Write(title.target()));
+
         let wire = title.wire().expect("a wire form");
         assert_eq!(wire.endpoint().query(), [("name".to_owned(), "meeting".to_owned())]);
         assert_eq!(wire.body(), Some(&json!({"meeting": {"meetingtitle": "lab subject"}})));
@@ -1305,7 +1198,7 @@ mod tests {
         assert_eq!(event["eventType"], "RecurringMaster");
         assert_eq!(event["eventRecurrencePattern"]["patternType"], 2);
         assert_eq!(event["eventRecurrenceRange"]["startDate"], "2026-10-30T00:00:00+03:00");
-        assert_eq!(classified(&create), Contact::Write(create.target()));
+
         // a change of one occurrence keeps its kind and the series' recurrence as read
         let occurrence = object(&json!({"objectId": "AAMkOne", "eventType": "Occurrence",
             "eventRecurrencePattern": {"patternType": 1, "daily": {"interval": 1}}}));

@@ -1,10 +1,4 @@
-//! The Trouter frames: a [`FrameSink`] sends only the typed frames `teams-proto` builds, in the shapes the messaging
-//! stack sent in M1 Task 14's captures (the synthetic `tests/fixtures/trouter/session.json`), numbers the events that
-//! ask for an acknowledgement itself, and writes nothing to `fence.log` (it takes no fence), but the personal build's
-//! sink (`FrameSink::logging`) logs each frame by its kind first and sends none it couldn't log; no frame answers a
-//! delivery.
-//!
-//! Tokens and endpoint ids here are placeholders, never real ones.
+//! Typed socket frames, validated delivery responses and their exact synthetic wire representations.
 
 use std::future::{self, Future};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -213,9 +207,7 @@ async fn the_sink_numbers_acknowledged_events_itself_and_plain_ones_carry_no_id(
 }
 
 #[tokio::test]
-async fn the_sink_sends_every_frame_with_no_fence_and_the_token_only_on_the_socket() {
-    // the sink takes no fence: `FrameSink::new` is given the socket's write half and nothing else, so no frame is
-    // written to `fence.log` (a frame isn't a contacting write)
+async fn the_sink_sends_every_typed_frame_and_the_token_only_on_the_socket() {
     let mut setup = setup();
     let token = Secret::new(PLANTED_TOKEN);
     let frame = Authenticate::new(&token, Some(fixture_params()));
@@ -359,80 +351,6 @@ async fn no_frame_answers_a_delivery() {
             "trouter_message_loss_ack",
             "trouter_disconnect"
         ],
-        "each frame's kind, the name the personal build's fence.log records it by"
+        "each typed frame's diagnostic kind"
     );
-}
-
-/// A fence log that holds its lines, or refuses every append.
-#[derive(Clone, Default)]
-struct Lines {
-    bytes: Arc<Mutex<Vec<u8>>>,
-    refuse: bool,
-}
-
-impl std::io::Write for Lines {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        if self.refuse {
-            return Err(std::io::Error::other("refused"));
-        }
-        self.bytes
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-fn fence_over(lines: &Lines) -> Arc<teams_fence::Fence> {
-    Arc::new(teams_fence::Fence::new(
-        teams_fence::Roster::new([], []),
-        teams_fence::FenceLog::from_writer(lines.clone()),
-    ))
-}
-
-#[tokio::test]
-async fn the_personal_build_s_sink_logs_each_frame_by_its_kind_before_it_goes_and_never_its_text() {
-    let lines = Lines::default();
-    let socket = Socket::default();
-    let writer = Writer {
-        socket: socket.clone(),
-        fail: false,
-    };
-    let url = "wss://pub-ent-euwe-01-t.trouter.teams.microsoft.com/v4/c?tc=made-up-tc&epid=made-up-epid";
-    let mut sink = FrameSink::logging(writer, fence_over(&lines), url);
-    sink.send(&Authenticate::new(&Secret::new(PLANTED_TOKEN), None))
-        .await
-        .unwrap();
-    sink.send(&Ping::new()).await.unwrap();
-    assert_eq!(socket.texts().len(), 2);
-    let text = String::from_utf8(lines.bytes.lock().unwrap().clone()).unwrap();
-    let entries: Vec<Value> = text.lines().map(|line| serde_json::from_str(line).unwrap()).collect();
-    assert_eq!(entries.len(), 2);
-    assert_eq!(entries[0]["own"], Authenticate::KIND);
-    assert_eq!(entries[1]["own"], Ping::KIND);
-    assert!(!text.contains(PLANTED_TOKEN), "{text}");
-    // the socket's URL as `teams_fence::log_url` writes it: the query's key names, never a value
-    assert!(
-        text.contains("/v4/c?tc&epid") && !text.contains("made-up-tc") && !text.contains("made-up-epid"),
-        "{text}"
-    );
-
-    // a log that can't be written: nothing goes out
-    let refusing = Lines {
-        refuse: true,
-        ..Lines::default()
-    };
-    let socket = Socket::default();
-    let writer = Writer {
-        socket: socket.clone(),
-        fail: false,
-    };
-    let mut sink = FrameSink::logging(writer, fence_over(&refusing), url);
-    let refused = sink.send(&Ping::new()).await;
-    assert!(matches!(refused, Err(FrameError::LogUnavailable(_))), "{refused:?}");
-    assert!(socket.texts().is_empty());
 }

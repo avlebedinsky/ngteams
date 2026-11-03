@@ -1,5 +1,0 @@
-error[E0599]: no method named `clone` found for struct `WritePermit` in the current scope
- --> tests/ui/permit_clone.rs:5:13
-  |
-5 |     (permit.clone(), permit)
-  |             ^^^^^ method not found in `WritePermit`

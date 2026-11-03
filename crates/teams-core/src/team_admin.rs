@@ -16,10 +16,10 @@ use std::sync::Arc;
 use teams_fence::Mri;
 use teams_proto::{
     AddablePeopleSearch, AllTeamsAnalyticsRead, AnalyticsPeriod, Client, Credentials, HttpError, HttpTransport,
-    JoinableTeam, JoinableTeams, ManagedChannel, Mutating, OwnTeamView, PastedFormat, PastedPicture, PendingInvite,
-    PendingInvites, RosterMember, ShortProfileLookup, TagsRead, TeamAnalytics, TeamAnalyticsRead, TeamChannels,
-    TeamCode, TeamJoinRequests, TeamPerson, TeamPicture, TeamRoster, TeamTags, TeamThread, TeamWrite, Transport,
-    team_created, team_error_code,
+    JoinableTeam, JoinableTeams, ManagedChannel, OwnTeamView, PastedFormat, PastedPicture, PendingInvite,
+    PendingInvites, Request, RosterMember, ShortProfileLookup, TagsRead, TeamAnalytics, TeamAnalyticsRead,
+    TeamChannels, TeamCode, TeamJoinRequests, TeamPerson, TeamPicture, TeamRoster, TeamTags, TeamThread, TeamWrite,
+    Transport, team_created, team_error_code,
 };
 use teams_store::{Team, TeamChannel};
 
@@ -434,7 +434,7 @@ fn not_added(body: &[u8]) -> Vec<String> {
 async fn send<T, R>(outbox: &Outbox<T>, write: &R) -> Result<Vec<u8>, EngineError>
 where
     T: Transport<Error = HttpError>,
-    R: Mutating + Clone + Send,
+    R: Request + Clone + Send,
 {
     let mut retries = CallRetries::default();
     loop {

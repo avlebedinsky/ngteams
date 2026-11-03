@@ -5,12 +5,12 @@
 //! disconnects, a regional host given up, token renewal (a fake clock, the real session over a mock Entra, before the
 //! service's `1::`), a session signed out before the service's `1::`, a throttled token service, the stop (also while
 //! a socket opens), no token in any log record, and that every frame the socket sent is one of the session's own
-//! frames, none written to `fence.log` (a broken `fence.log` doesn't keep a frame from going out).
+//! frames.
 //!
 //! Every id and token here is the mocks' made-up one.
 
 use std::future::{self, Future};
-use std::io::{self, Write};
+use std::io;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
@@ -22,7 +22,7 @@ use teams_auth::refresh::refresh_token_key;
 use teams_auth::secrets::{MemorySecretStore, Secret, SecretStore as _};
 use teams_auth::session::{AccessToken, Clock, Renewal, Session};
 use teams_auth::token::{EntraConfig, TokenClient, TokenError};
-use teams_fence::{Fence, FenceLog, Mri, Roster};
+use teams_fence::Mri;
 use teams_mock::{AB_CHAT, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, REGIONAL_NAME, SocketRecord, TrouterMock};
 use teams_proto::{Credentials, HttpTransport, IC3_AUDIENCE, TROUTER_HOST};
 use teams_trouter::{
@@ -54,58 +54,6 @@ impl FakeClock {
 impl Clock for FakeClock {
     fn now(&self) -> SystemTime {
         *self.0.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-}
-
-/// A `fence.log` the test reads back.
-#[derive(Clone, Default)]
-struct SharedLog(Arc<Mutex<Vec<u8>>>);
-
-#[cfg(test)]
-impl SharedLog {
-    fn lines(&self) -> Vec<Value> {
-        let bytes = self.0.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        String::from_utf8(bytes)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect()
-    }
-
-    fn frames(&self) -> Vec<Value> {
-        self.lines()
-            .into_iter()
-            .filter(|line| line["event"] == "frame")
-            .collect()
-    }
-}
-
-#[cfg(test)]
-impl Write for SharedLog {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-/// A `fence.log` that can't be written.
-struct BrokenLog;
-
-#[cfg(test)]
-impl Write for BrokenLog {
-    fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-        Err(io::Error::other("disk full"))
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Err(io::Error::other("disk full"))
     }
 }
 
@@ -245,18 +193,9 @@ fn options() -> Options {
     }
 }
 
-#[cfg(test)]
-fn fence(log: impl Write + Send + 'static) -> Arc<Fence> {
-    Arc::new(Fence::new(
-        Roster::new([Mri::new(LAB_A), Mri::new(LAB_B)], []),
-        FenceLog::from_writer(log),
-    ))
-}
-
 struct Lab {
     mock: ChatServiceMock,
     trouter: TrouterMock,
-    log: SharedLog,
     clock: Arc<FakeClock>,
     tokens: Arc<FakeTokens>,
     http: reqwest::Client,
@@ -272,22 +211,16 @@ impl Lab {
         Self {
             mock,
             trouter,
-            log: SharedLog::default(),
             clock,
             tokens,
             http: reqwest::Client::builder().no_proxy().build().unwrap(),
         }
     }
 
-    /// b's push channel, its transport's fence logging to the lab's log.
+    /// b's messaging push channel on the mock transport.
     fn client(&self) -> Trouter<HttpTransport<FakeTokens>, FakeTokens> {
-        self.client_with_fence(fence(self.log.clone()))
-    }
-
-    /// b's push channel over a transport checked by `fence` (the registration is logged `allowed` to its log).
-    fn client_with_fence(&self, fence: Arc<Fence>) -> Trouter<HttpTransport<FakeTokens>, FakeTokens> {
         let transport =
-            HttpTransport::with_mock_origin(Arc::clone(&self.tokens), fence, CHAT_BASE, &self.mock.origin()).unwrap();
+            HttpTransport::with_mock_origin(Arc::clone(&self.tokens), CHAT_BASE, &self.mock.origin()).unwrap();
         Trouter::with_mock_origin(Arc::new(transport), Arc::clone(&self.tokens), self.trouter.origin())
             .unwrap()
             .with_clock(self.clock.clone())
@@ -436,7 +369,7 @@ fn own_kind(frame: &str) -> Option<&'static str> {
 }
 
 /// Once every socket has closed: every frame every socket sent is one of the session's own frames, none answers a
-/// delivery, and none was written to `fence.log` (a frame isn't a contacting write).
+/// delivery.
 #[cfg(test)]
 async fn sent_only_own_frames(lab: &Lab) {
     let sockets = sockets_until(&lab.trouter, |sockets| sockets.iter().all(|socket| !socket.open)).await;
@@ -446,8 +379,6 @@ async fn sent_only_own_frames(lab: &Lab) {
         assert!(!frame.starts_with("3:"), "a delivery was answered: {frame}");
         assert!(own_kind(frame).is_some(), "not an own frame: {frame}");
     }
-    let logged = lab.log.frames();
-    assert!(logged.is_empty(), "frames written to fence.log: {logged:#?}");
 }
 
 #[tokio::test]
@@ -498,17 +429,11 @@ async fn a_client_authenticates_first_registers_and_gets_a_delivery_it_never_ans
         (Some("TeamsCDL"), Some(teams_proto::CLIENT_BUILD))
     );
     assert_eq!((query[1].1.as_str(), query[2].1.as_str()), ("40", epid.as_str()));
-    // the registration: the messaging stack's, the endpoint's push URL, logged as allowed before it was sent
+    // The registration names the messaging stack and the endpoint's push URL.
     let registrations = lab.trouter.registrations();
     assert_eq!(registrations.len(), 1);
     assert_eq!(registrations[0].registration_id, epid);
     assert!(registrations[0].path.ends_with(&format!("/v4/f/{endpoint}/")));
-    assert!(
-        lab.log
-            .lines()
-            .iter()
-            .any(|line| line["event"] == "allowed" && line["path"] == "/registrar/prod/V2/registrations")
-    );
 
     push.stop().await;
     let sockets = sockets_until(&lab.trouter, |sockets| sockets.iter().all(|socket| !socket.open)).await;
@@ -891,51 +816,13 @@ async fn a_token_near_its_expiry_by_the_clock_means_a_reconnect_with_a_new_one_b
 }
 
 #[tokio::test]
-async fn a_fence_log_that_cant_be_written_stops_no_frame_but_the_registration_isnt_sent() {
-    let lab = Lab::start().await;
-    let mut push = lab.client_with_fence(fence(BrokenLog)).spawn();
-    // frames aren't logged, so the socket authenticates and connects as ever
-    connected(&mut push).await;
-    // the registration is a plain request, logged `allowed` before it goes: with no log, it doesn't go
-    let failed = next(&mut push, |event| match event {
-        PushEvent::Registration(RegistrationReport::Failed(why)) => Some(why),
-        PushEvent::Registration(RegistrationReport::Registered) => panic!("registered without a log"),
-        _ => None,
-    })
-    .await;
-    assert!(!failed.is_empty());
-    push.stop().await;
-    let sockets = sockets_until(&lab.trouter, |sockets| sockets.iter().all(|socket| !socket.open)).await;
-    assert_eq!(own_kind(&sockets[0].frames[0]), Some("trouter_authenticate"));
-    assert_eq!(
-        sockets[0].frames.last().map(String::as_str),
-        Some("0::"),
-        "the stop's disconnect went out"
-    );
-    assert!(
-        sockets
-            .iter()
-            .flat_map(|socket| &socket.frames)
-            .all(|frame| own_kind(frame).is_some())
-    );
-    assert!(lab.trouter.registrations().is_empty());
-}
-
-#[tokio::test]
 async fn a_refused_connect_is_tried_again_after_a_growing_backoff() {
     let lab = Lab::start().await;
     // a port nothing listens on
     let unused = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let origin = format!("ws://{}", unused.local_addr().unwrap());
     drop(unused);
-    let fence = fence(lab.log.clone());
-    let transport = HttpTransport::with_mock_origin(
-        Arc::clone(&lab.tokens),
-        Arc::clone(&fence),
-        CHAT_BASE,
-        &lab.mock.origin(),
-    )
-    .unwrap();
+    let transport = HttpTransport::with_mock_origin(Arc::clone(&lab.tokens), CHAT_BASE, &lab.mock.origin()).unwrap();
     let mut push = Trouter::with_mock_origin(Arc::new(transport), Arc::clone(&lab.tokens), &origin)
         .unwrap()
         .with_options(options())
@@ -953,12 +840,9 @@ async fn a_refused_connect_is_tried_again_after_a_growing_backoff() {
 
 #[test]
 fn only_a_loopback_ws_origin_is_a_mock_origin() {
-    let fence = fence(SharedLog::default());
     let tokens = FakeTokens::new("mock-token", FakeClock::new());
-    let transport = Arc::new(
-        HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, "http://127.0.0.1:9")
-            .unwrap(),
-    );
+    let transport =
+        Arc::new(HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, "http://127.0.0.1:9").unwrap());
     for origin in [
         "http://127.0.0.1:9",
         "wss://127.0.0.1:9",
@@ -1041,10 +925,7 @@ async fn session(clock: Arc<FakeClock>) -> (MockServer, Arc<Session<MemorySecret
 
 #[cfg(test)]
 fn session_client(lab: &Lab, session: &Arc<Session<MemorySecretStore>>) -> TrouterHandle {
-    let fence = fence(lab.log.clone());
-    let transport =
-        HttpTransport::with_mock_origin(Arc::clone(session), Arc::clone(&fence), CHAT_BASE, &lab.mock.origin())
-            .unwrap();
+    let transport = HttpTransport::with_mock_origin(Arc::clone(session), CHAT_BASE, &lab.mock.origin()).unwrap();
     Trouter::with_mock_origin(Arc::new(transport), Arc::clone(session), lab.trouter.origin())
         .unwrap()
         .with_clock(lab.clock.clone())
@@ -1134,9 +1015,9 @@ impl teams_proto::Transport for FlakyRegistrar {
         future::ready(Ok(teams_proto::Response::new(status, Vec::new())))
     }
 
-    fn deliver<R: teams_proto::Mutating + Send>(
+    fn deliver<R: teams_proto::Request + Send>(
         &self,
-        _write: teams_proto::Authorized<R>,
+        _write: R,
     ) -> impl Future<Output = Result<teams_proto::Response, io::Error>> + Send {
         future::ready(Err(io::Error::other("the push channel writes nothing")))
     }
@@ -1320,14 +1201,7 @@ async fn a_stop_while_the_socket_opens_ends_the_client_at_once() {
     // a port that takes the TCP connection and never answers the WebSocket handshake
     let silent = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let origin = format!("ws://{}", silent.local_addr().unwrap());
-    let fence = fence(lab.log.clone());
-    let transport = HttpTransport::with_mock_origin(
-        Arc::clone(&lab.tokens),
-        Arc::clone(&fence),
-        CHAT_BASE,
-        &lab.mock.origin(),
-    )
-    .unwrap();
+    let transport = HttpTransport::with_mock_origin(Arc::clone(&lab.tokens), CHAT_BASE, &lab.mock.origin()).unwrap();
     let push = Trouter::with_mock_origin(Arc::new(transport), Arc::clone(&lab.tokens), &origin)
         .unwrap()
         .with_options(Options {

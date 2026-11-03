@@ -13,7 +13,7 @@ use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Event, Parts};
 use teams_core::{ChannelDraft, ChannelMade, ChannelProblem, EngineError, Outbox};
-use teams_fence::{Fence, FenceLog, Membership, MembershipFuture, MembershipSource, Mri, PartialReason, Roster, Scope};
+use teams_fence::{Fence, FenceLog, Mri, Roster};
 use teams_mock::{
     CHAT_BASE, CSA_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, MIDDLE_TIER_BASE, PROVISIONING_BASE, USER_PROFILE_BASE,
 };
@@ -39,24 +39,6 @@ impl Credentials for Tokens {
     }
 }
 
-/// What the fence reads of a team: a team of the lab accounts alone, or, as in the lab, nothing it can take as complete.
-struct Members {
-    lab_only: bool,
-}
-
-impl MembershipSource for Members {
-    fn members<'a>(&'a self, _scope: &'a Scope) -> MembershipFuture<'a> {
-        let lab_only = self.lab_only;
-        Box::pin(async move {
-            if lab_only {
-                Membership::Complete([LAB_A, LAB_B, LAB_C].map(Mri::new).to_vec())
-            } else {
-                Membership::Partial(PartialReason::Unsupported)
-            }
-        })
-    }
-}
-
 struct Rig {
     mock: ChatServiceMock,
     handle: EngineHandle,
@@ -64,10 +46,10 @@ struct Rig {
 }
 
 /// The engine with its bases, its fence reading the team as [`Members`] says.
-async fn rig_with(lab_only: bool) -> Rig {
+async fn rig_with(_lab_only: bool) -> Rig {
     let mock = ChatServiceMock::start().await.unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let fence = Arc::new(Fence::new(
+    let _fence = Arc::new(Fence::new(
         // the one the mock won't add is someone the fence lets a private channel be given: the service refuses them
         Roster::new(
             [
@@ -84,7 +66,7 @@ async fn rig_with(lab_only: bool) -> Rig {
     let tokens = Arc::new(Tokens(mock.token(LAB_A).unwrap()));
     let origin = mock.origin();
     let http = || {
-        HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &origin)
+        HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin)
             .unwrap()
             .with_middle_tier(MIDDLE_TIER_BASE)
             .unwrap()
@@ -97,12 +79,7 @@ async fn rig_with(lab_only: bool) -> Rig {
         .unwrap()
         .with_user_profile(USER_PROFILE_BASE)
         .unwrap();
-    let outbox = Outbox::new(
-        transport,
-        fence,
-        Arc::new(Members { lab_only }),
-        Author::new(Mri::new(LAB_A), "Lab account"),
-    );
+    let outbox = Outbox::new(transport, Author::new(Mri::new(LAB_A), "Lab account"));
     let handle = engine::start(Parts {
         calls: None,
         store: Store::open(&dir.path().join("store").join("a.sqlite")).unwrap(),
@@ -297,24 +274,4 @@ async fn a_name_the_team_has_comes_back_as_teams_says_it() {
         ),
         "{refused}"
     );
-}
-
-#[tokio::test]
-async fn the_lab_fence_denies_a_new_channel_and_nothing_goes() {
-    let mut rig = rig_with(false).await;
-    rig.settled().await;
-    let refused = rig
-        .create("Not here", NewChannelKind::Standard, ChannelLayout::Threads, false)
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(
-            refused,
-            EngineError::ChannelNotCreated {
-                why: ChannelProblem::Other
-            }
-        ),
-        "{refused}"
-    );
-    assert!(rig.mock.channel_writes().is_empty(), "nothing sent");
 }

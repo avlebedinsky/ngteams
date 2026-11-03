@@ -8,9 +8,7 @@ use std::fmt::Write as _;
 use std::fs;
 
 use teams_log::Level;
-use teams_log::diagnostics::{
-    LevelState, MAX_FENCE_LINES, MAX_LOG_BYTES, MAX_LOG_LINES, Source, WARNING, build_profile, is_debug,
-};
+use teams_log::diagnostics::{LevelState, MAX_LOG_BYTES, MAX_LOG_LINES, Source, WARNING, build_profile, is_debug};
 
 fn source(dir: &tempfile::TempDir, log: &str, fence: &str) -> Source {
     let log_file = dir.path().join("teams-app.log");
@@ -21,7 +19,6 @@ fn source(dir: &tempfile::TempDir, log: &str, fence: &str) -> Source {
         app: "teams-app 0.1.0".to_owned(),
         log_file: Some(log_file),
         log_problem: None,
-        fence_log: Some(fence_log),
     }
 }
 
@@ -71,11 +68,8 @@ fn the_text_holds_the_version_the_level_and_the_last_lines_capped() {
         text.contains("row 299") && text.contains("row 100") && !text.contains("row 99\n"),
         "{text}"
     );
-    assert!(text.contains(&format!("== fence.log: the last {MAX_FENCE_LINES} line(s) ==")));
-    assert!(
-        text.contains(r#""ts_ms":59,"#) && !text.contains(r#""ts_ms":19,"#),
-        "{text}"
-    );
+    assert!(!report.text.contains("fence.log"));
+    assert!(!report.text.contains("fence.log"));
 }
 
 #[test]
@@ -157,12 +151,11 @@ fn a_newest_line_longer_than_the_cap_is_kept_cut_from_its_start() {
 
 #[test]
 fn a_log_not_written_is_said_and_a_missing_file_has_no_lines() {
-    let dir = tempfile::tempdir().unwrap();
+    let _dir = tempfile::tempdir().unwrap();
     let source = Source {
         app: "teams-app 0.1.0".to_owned(),
         log_file: None,
         log_problem: Some("the diagnostic log can't be opened".to_owned()),
-        fence_log: Some(dir.path().join("missing.log")),
     };
     let report = source.collect_with(LevelState {
         level: Level::Info,
@@ -173,7 +166,7 @@ fn a_log_not_written_is_said_and_a_missing_file_has_no_lines() {
             .text
             .contains("log: not written (the diagnostic log can't be opened)")
     );
-    assert!(report.text.contains("== fence.log: the last 0 line(s) =="));
+    assert!(!report.text.contains("fence.log"));
 }
 
 #[test]
@@ -190,10 +183,6 @@ fn an_unreadable_log_is_reported_without_losing_the_other_section() {
 
     assert!(!report.has_debug);
     assert!(report.text.contains("== the log: can't be read ("), "{}", report.text);
-    assert!(
-        report.text.contains("== fence.log: the last 1 line(s) =="),
-        "{}",
-        report.text
-    );
-    assert!(report.text.contains(r#""ts_ms":0,"#), "{}", report.text);
+    assert!(!report.text.contains("fence.log"));
+    assert!(!report.text.contains("fence.log"));
 }

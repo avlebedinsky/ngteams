@@ -62,7 +62,6 @@ async fn the_camera_goes_on_by_the_account_s_action_and_both_ways_carry_video() 
         2,
         "on, then off: {sent:?}"
     );
-    assert!(b.log.denials().is_empty(), "{:#?}", b.log.denials());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -105,7 +104,6 @@ async fn the_test_call_s_camera_goes_on_as_a_one_to_one_call_s_and_shows_the_sel
         ],
         "the test call's writes, its camera's renegotiation among them"
     );
-    assert!(a.log.denials().is_empty(), "{:#?}", a.log.denials());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -138,7 +136,6 @@ async fn the_far_end_s_video_is_shown_while_the_camera_stays_off() {
 
     requests.call(CallAction::HangUp { call }).await.unwrap();
     assert_eq!(b.ended(call).await, End::HungUp);
-    assert!(b.log.denials().is_empty(), "{:#?}", b.log.denials());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -190,6 +187,4 @@ async fn native_ends_turn_their_cameras_on_and_each_shows_the_other_s() {
             "{who}: {sent:?}"
         );
     }
-    assert!(a.log.denials().is_empty(), "{:#?}", a.log.denials());
-    assert!(b.log.denials().is_empty(), "{:#?}", b.log.denials());
 }

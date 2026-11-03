@@ -1,6 +1,5 @@
-//! Calendar operations through a running engine, with synthetic middle-tier answers on loopback. Writes pass the
-//! real lab fence and its fresh event membership read; the first creation deliberately names an outsider and is
-//! denied before any invitation can reach the mock. No tenant, real account, token or capture is involved.
+//! Calendar operations through a running engine, with synthetic middle-tier answers on loopback. Writes preserve
+//! event fields and organizer identity; failed or uncertain outcomes are never blindly resent.
 
 #![cfg(test)]
 
@@ -12,7 +11,7 @@ use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Parts};
 use teams_core::{EngineError, EventDraft, EventShowAs, EventWrite, Organizer, Outbox, ZonedTime};
-use teams_fence::{Fence, FenceLog, LiveMembershipSource, Mri, Roster};
+use teams_fence::Mri;
 use teams_mock::{CHAT_BASE, LAB_A, LAB_B, LAB_C, MIDDLE_TIER_BASE};
 use teams_proto::{Author, Client, Credentials, EventAttendee, HttpTransport};
 use teams_store::{NameSource, PictureState, Profile, Store};
@@ -56,14 +55,9 @@ async fn running_engine(middle_tier: bool) -> Rig {
 /// An engine on the store in `dir` (`calendar.sqlite`, made when missing).
 async fn running_engine_on(middle_tier: bool, dir: tempfile::TempDir) -> Rig {
     let server = MockServer::start().await;
-    let fence = Arc::new(Fence::new(
-        Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), []).with_lab_mail([MAIL_A, MAIL_B]),
-        FenceLog::from_writer(std::io::sink()),
-    ));
     let tokens = Arc::new(Tokens);
     let transport = || {
-        let transport =
-            HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &server.uri()).unwrap();
+        let transport = HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &server.uri()).unwrap();
         if middle_tier {
             transport.with_middle_tier(MIDDLE_TIER_BASE).unwrap()
         } else {
@@ -71,14 +65,8 @@ async fn running_engine_on(middle_tier: bool, dir: tempfile::TempDir) -> Rig {
         }
     };
     let writes = Arc::new(transport());
-    let members = LiveMembershipSource::with_mock_origin(&server.uri()).unwrap();
-    members.set_credential_source(writes.clone());
-    let outbox = Outbox::new(
-        writes,
-        Arc::clone(&fence),
-        Arc::new(members),
-        Author::new(Mri::new(LAB_A), "Lab A"),
-    );
+
+    let outbox = Outbox::new(writes, Author::new(Mri::new(LAB_A), "Lab A"));
     let mut store = Store::open(&dir.path().join("calendar.sqlite")).unwrap();
     for (mri, name) in [(LAB_B, "Lab B"), (LAB_C, "Lab C")] {
         store
@@ -229,25 +217,11 @@ async fn editable_calendar(server: &MockServer) {
         .await;
 }
 
-async fn denied_creation(rig: &Rig) {
-    let mut denied = draft();
-    denied.attendees = vec![attendee("outside@outsider.example")];
-    assert!(matches!(
-        rig.handle.write_event(EventWrite::Create(denied)).await,
-        Err(EngineError::EventNotSaved { kind: "creation", .. })
-    ));
-    assert!(
-        requests(&rig.server, "POST", EVENTS).await.is_empty(),
-        "forced denial sends no invitation"
-    );
-}
-
 #[tokio::test]
-async fn calendar_writes_check_membership_and_keep_the_organizer_and_fields_read_before_an_edit() {
+async fn calendar_writes_keep_the_organizer_and_fields_read_before_an_edit() {
     let rig = running_engine(true).await;
     identity(&rig.server).await;
     editable_calendar(&rig.server).await;
-    denied_creation(&rig).await;
     let created = rig.handle.write_event(EventWrite::Create(draft())).await.unwrap();
     assert_eq!(created.created.unwrap().id, "MadeUpEvent");
     let full = rig.handle.calendar_event("MadeUpEvent").await.unwrap();
@@ -300,8 +274,8 @@ async fn calendar_writes_check_membership_and_keep_the_organizer_and_fields_read
     );
     assert_eq!(
         requests(&rig.server, "GET", EVENT).await.len(),
-        4,
-        "one full read and a fresh member read per existing-event write"
+        1,
+        "the explicitly requested full event read"
     );
     rig.handle.shutdown();
 }
@@ -414,7 +388,6 @@ async fn invalid_or_unreadable_calendar_answers_fail_without_guessing_an_event()
 async fn an_online_event_carries_its_meeting_and_a_failed_meeting_prevents_the_invitation() {
     let rig = running_engine(true).await;
     identity(&rig.server).await;
-    denied_creation(&rig).await;
     let meeting = json!({
         "groupContext": {"threadId": "19:meeting_MadeUp@thread.v2"},
         "links": {"join": "https://teams.microsoft.com/l/meetup-join/19%3ameeting_MadeUp%40thread.v2/0"},
@@ -446,7 +419,6 @@ async fn an_online_event_carries_its_meeting_and_a_failed_meeting_prevents_the_i
 async fn invalid_changes_and_uncertain_or_refused_writes_are_never_resent() {
     let rig = running_engine(true).await;
     identity(&rig.server).await;
-    denied_creation(&rig).await;
     for write in [
         EventWrite::Update {
             id: "other".to_owned(),

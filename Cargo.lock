@@ -7944,6 +7944,8 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "getrandom 0.4.3",
+ "log",
+ "serde",
  "serde_json",
  "teams-auth",
  "teams-fence",
@@ -7952,6 +7954,7 @@ dependencies = [
  "teams-trouter",
  "thiserror 2.0.21",
  "tokio",
+ "url",
 ]
 
 [[package]]
@@ -8077,6 +8080,7 @@ dependencies = [
  "serde",
  "serde_json",
  "teams-auth",
+ "teams-call",
  "teams-fence",
  "teams-log",
  "teams-mock",
@@ -8154,11 +8158,13 @@ dependencies = [
  "rustls-platform-verifier",
  "serde_json",
  "teams-auth",
+ "teams-call",
  "teams-fence",
  "teams-log",
  "teams-mock",
  "teams-proto",
  "teams-trouter",
+ "tempfile",
  "thiserror 2.0.21",
  "tokio",
  "tokio-rustls",

@@ -1,13 +1,6 @@
-//! The native HTTP transport on wiremock, reached through the `test-support` mock origin: reads, a permitted write and
-//! the answer it returns, plain requests (sent when the fence's classifier says they reach nobody, any method, whoever
-//! their body names, each logged `allowed` first; refused, before anything is sent, when it calls them a write or
-//! can't read them), an own-state request and its `fence.log` record, the transport's part of the retry table, and
-//! what is refused.
-//!
-//! Tokens, MRIs and conversation ids here are placeholders, never real ones.
+//! The native HTTP transport against synthetic mocks: plain typed writes, reads, own state, status handling, credential renewal and no automatic write retry.
 
 use std::future::{self, Future};
-use std::io::{self, Write};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
@@ -16,19 +9,17 @@ use serde_json::{Value, json};
 use teams_auth::secrets::{MemorySecretStore, Secret};
 use teams_auth::session::Session;
 use teams_auth::token::TokenError;
-use teams_fence::{Fence, FenceLog, Membership, MembershipFuture, MembershipSource, Mri, Roster, Scope};
+use teams_fence::Mri;
 use teams_proto::chat::MessageText;
 use teams_proto::{
     Author, Client, Credentials, DEFAULT_RETRY_WAIT, Endpoint, HttpError, HttpTransport, MAX_BODY, Method,
-    Mutating as _, ProbeOwnState, Read, Refusal, Request as PlainRequest, SendMessage, Service, ShortProfileLookup,
-    Transport,
+    ProbeOwnState, Read, Request as PlainRequest, SendMessage, Service, ShortProfileLookup, Transport,
 };
 use wiremock::matchers::{body_json, body_partial_json, header, method, path, query_param};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 const LAB_A: &str = "8:orgid:lab-a";
 const LAB_B: &str = "8:orgid:lab-b";
-const ECHO: &str = "28:echo-service";
 const CHAT: &str = "19:lab-chat@thread.v2";
 const CHAT_BASE: &str = "https://teams.microsoft.com/api/chatsvc/amer";
 const MESSAGES: &str = "/api/chatsvc/amer/v1/users/ME/conversations/19:lab-chat@thread.v2/messages";
@@ -120,69 +111,9 @@ impl Credentials for FakeTokens {
     }
 }
 
-/// A `fence.log` the test can read back.
-#[derive(Clone, Default)]
-struct SharedLog(Arc<Mutex<Vec<u8>>>);
-
-impl SharedLog {
-    #[cfg(test)]
-    fn lines(&self) -> Vec<Value> {
-        let bytes = self.0.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        String::from_utf8(bytes)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect()
-    }
-}
-
-impl Write for SharedLog {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-/// A `fence.log` that can't be written.
-struct BrokenLog;
-
-impl Write for BrokenLog {
-    fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
-        Err(io::Error::other("disk full"))
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Err(io::Error::other("disk full"))
-    }
-}
-
-/// Answers every fetch with lab accounts only.
-struct LabOnly;
-
-impl MembershipSource for LabOnly {
-    fn members<'a>(&'a self, _scope: &'a Scope) -> MembershipFuture<'a> {
-        Box::pin(async { Membership::Complete(vec![Mri::new(LAB_A), Mri::new(LAB_B)]) })
-    }
-}
-
-fn fence(log: impl Write + Send + 'static) -> Arc<Fence> {
-    Arc::new(Fence::new(
-        Roster::new([Mri::new(LAB_A), Mri::new(LAB_B)], [Mri::new(ECHO)]),
-        FenceLog::from_writer(log),
-    ))
-}
-
 struct Setup {
     server: MockServer,
     tokens: Arc<FakeTokens>,
-    log: SharedLog,
     transport: HttpTransport<FakeTokens>,
 }
 
@@ -194,14 +125,13 @@ async fn setup() -> Setup {
 async fn setup_with(tokens: FakeTokens) -> Setup {
     let server = MockServer::start().await;
     let tokens = Arc::new(tokens);
-    let log = SharedLog::default();
-    let transport = HttpTransport::with_mock_origin(Arc::clone(&tokens), fence(log.clone()), CHAT_BASE, &server.uri())
+
+    let transport = HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &server.uri())
         .unwrap()
         .with_max_retry_wait(Duration::from_millis(50));
     Setup {
         server,
         tokens,
-        log,
         transport,
     }
 }
@@ -253,7 +183,6 @@ async fn a_read_is_a_get_on_the_chat_base_with_the_chat_services_headers() {
         json!({"conversations": []})
     );
     assert_eq!(setup.tokens.audiences(), ["https://ic3.teams.office.com"]);
-    assert!(setup.log.lines().is_empty(), "a read isn't an own-state request");
 }
 
 #[tokio::test]
@@ -289,7 +218,7 @@ async fn the_registrar_gets_the_token_and_the_migration_flag_and_trouter_no_cred
 }
 
 #[tokio::test]
-async fn a_permitted_write_is_posted_in_its_wire_form_and_its_answer_comes_back() {
+async fn a_typed_write_is_posted_in_its_wire_form_and_its_answer_comes_back() {
     let setup = setup().await;
     Mock::given(method("POST"))
         .and(path(MESSAGES))
@@ -314,9 +243,8 @@ async fn a_permitted_write_is_posted_in_its_wire_form_and_its_answer_comes_back(
         .mount(&setup.server)
         .await;
     let request = hello();
-    let permit = setup.transport_fence().check(request.target(), &LabOnly).await.unwrap();
 
-    let answer = Client::new(setup.transport).write(request, permit).await.unwrap();
+    let answer = Client::new(setup.transport).write(request).await.unwrap();
 
     assert_eq!(answer.status(), 201);
     assert_eq!(
@@ -327,9 +255,6 @@ async fn a_permitted_write_is_posted_in_its_wire_form_and_its_answer_comes_back(
         serde_json::from_slice::<Value>(answer.body()).unwrap(),
         json!({"OriginalArrivalTime": 1_760_000_000_000_u64})
     );
-    let lines = setup.log.lines();
-    assert_eq!(lines.len(), 1, "only the fence's decision: {lines:?}");
-    assert_eq!(lines[0]["verdict"], "allow");
 }
 
 #[tokio::test]
@@ -349,10 +274,8 @@ async fn a_message_with_a_client_message_id_is_posted_with_it_and_the_same_targe
         .await;
     let request = hello().with_client_message_id("1234567890123456789");
     assert_eq!(request.client_message_id(), Some("1234567890123456789"));
-    assert_eq!(request.target(), text(CHAT, "other").target());
-    let permit = setup.transport_fence().check(request.target(), &LabOnly).await.unwrap();
 
-    let answer = Client::new(setup.transport).write(request, permit).await.unwrap();
+    let answer = Client::new(setup.transport).write(request).await.unwrap();
 
     assert_eq!(answer.status(), 201);
 }
@@ -367,13 +290,8 @@ async fn a_write_refused_with_401_comes_back_unsent_again_and_the_token_is_refre
         .mount(&setup.server)
         .await;
     let request = hello();
-    let permit = setup.transport_fence().check(request.target(), &LabOnly).await.unwrap();
 
-    let answer = setup
-        .transport
-        .deliver(teams_proto::Authorized::new(request, permit).unwrap())
-        .await
-        .unwrap();
+    let answer = setup.transport.deliver(request).await.unwrap();
 
     assert_eq!(answer.status(), 401, "the outbox decides what to do about it");
     assert_eq!(
@@ -392,9 +310,8 @@ async fn a_throttled_write_comes_back_without_a_retry() {
         .mount(&setup.server)
         .await;
     let request = hello();
-    let permit = setup.transport_fence().check(request.target(), &LabOnly).await.unwrap();
 
-    let answer = Client::new(setup.transport).write(request, permit).await.unwrap();
+    let answer = Client::new(setup.transport).write(request).await.unwrap();
 
     assert_eq!(answer.status(), 429);
     assert_eq!(answer.retry_after(), Some(Duration::from_secs(7)));
@@ -435,7 +352,7 @@ fn plain(service: Service, method: Method, segments: &[&str], body: Option<Value
     }
 }
 
-/// The account's own setting, a `PUT` the classifier carves out: it reaches nobody.
+/// A synthetic plain `PUT` of the account's own setting.
 fn probe() -> Plain {
     Plain {
         endpoint: Endpoint::new(["v1", "users", "ME", "properties"]).with_query("name", "probe"),
@@ -444,19 +361,15 @@ fn probe() -> Plain {
 }
 
 #[tokio::test]
-async fn a_plain_request_is_logged_as_allowed_before_it_is_sent() {
+async fn a_plain_request_is_sent_once() {
     let setup = setup().await;
-    let log = setup.log.clone();
-    // the answer is a success only if the request's record was already in fence.log when it arrived
+
     Mock::given(method("PUT"))
         .and(path("/api/chatsvc/amer/v1/users/ME/properties"))
         .and(query_param("name", "probe"))
         .and(header("authorization", bearer(0).as_str()))
         .and(body_json(json!({"probe": true})))
-        .respond_with(move |_: &Request| {
-            let logged = log.lines().iter().any(|line| line["event"] == "allowed");
-            ResponseTemplate::new(if logged { 200 } else { 500 })
-        })
+        .respond_with(move |_: &Request| ResponseTemplate::new(200))
         .expect(1)
         .mount(&setup.server)
         .await;
@@ -464,18 +377,6 @@ async fn a_plain_request_is_logged_as_allowed_before_it_is_sent() {
     let answer = Client::new(setup.transport).send(&probe()).await.unwrap();
 
     assert_eq!(answer.status(), 200);
-    assert_eq!(
-        setup.log.lines(),
-        [json!({
-            "ts_ms": setup.log.lines()[0]["ts_ms"],
-            "verdict": "allow",
-            "event": "allowed",
-            "method": "PUT",
-            "host": "teams.microsoft.com",
-            "path": "/api/chatsvc/amer/v1/users/ME/properties",
-        })],
-        "the URL as built and checked (not the mock's): its host and path shape, never its query"
-    );
 }
 
 #[tokio::test]
@@ -545,96 +446,10 @@ async fn a_plain_request_that_reaches_nobody_goes_in_any_method_whoever_its_body
         serde_json::to_vec(&json!([outsider])).unwrap(),
         "the profile lookup names the outsider"
     );
-    let logged: Vec<Value> = setup.log.lines();
-    assert_eq!(logged.len(), 5, "one allowed record per request: {logged:?}");
-    assert!(logged.iter().all(|line| line["event"] == "allowed"), "{logged:?}");
 }
 
 #[tokio::test]
-async fn a_plain_write_or_unreadable_request_is_refused_before_anything_is_sent() {
-    let setup = setup().await;
-    Mock::given(wiremock::matchers::any())
-        .respond_with(ResponseTemplate::new(200))
-        .expect(0)
-        .mount(&setup.server)
-        .await;
-    let message = json!({"content": "hello", "messagetype": "Text", "contenttype": "text"});
-    let writes = [
-        // a message post, a reaction, a new chat: mapped writes go out only under their permit
-        plain(
-            Service::ChatService,
-            Method::Post,
-            &["v1", "users", "ME", "conversations", CHAT, "messages"],
-            Some(message.clone()),
-        ),
-        Plain {
-            endpoint: Endpoint::new([
-                "v1",
-                "users",
-                "ME",
-                "conversations",
-                CHAT,
-                "messages",
-                "1",
-                "properties",
-            ])
-            .with_query("name", "emotions"),
-            ..plain(
-                Service::ChatService,
-                Method::Put,
-                &[],
-                Some(json!({"emotions": {"key": "like"}})),
-            )
-        },
-        plain(
-            Service::ChatService,
-            Method::Post,
-            &["v1", "threads"],
-            Some(json!({"members": [{"id": LAB_B, "role": "Admin"}]})),
-        ),
-    ];
-    for request in &writes {
-        let error = setup.transport.send(request).await.unwrap_err();
-        assert!(
-            matches!(error, HttpError::Refused(Refusal::Write)),
-            "{:?}: {error:?}",
-            request.endpoint
-        );
-    }
-    let unreadable = [
-        // a chat service path no row reads, Graph, a conversation deleted
-        plain(
-            Service::ChatService,
-            Method::Post,
-            &["v1", "users", "ME", "conversations", "48:notes", "messages"],
-            Some(message),
-        ),
-        plain(Service::Graph, Method::Post, &["me", "sendMail"], Some(json!({}))),
-        plain(
-            Service::ChatService,
-            Method::Delete,
-            &["v1", "users", "ME", "conversations", CHAT],
-            None,
-        ),
-    ];
-    for request in &unreadable {
-        let error = setup.transport.send(request).await.unwrap_err();
-        assert!(
-            matches!(error, HttpError::Refused(Refusal::Unreadable)),
-            "{:?}: {error:?}",
-            request.endpoint
-        );
-    }
-    assert!(setup.server.received_requests().await.unwrap().is_empty());
-    assert!(
-        setup.tokens.audiences().is_empty(),
-        "no token is asked for a refused request"
-    );
-    assert!(setup.log.lines().is_empty(), "nothing is logged allowed");
-}
-
-#[tokio::test]
-async fn an_own_state_request_is_logged_by_its_kind_before_it_is_sent() {
+async fn an_own_state_request_is_sent_once() {
     let setup = setup().await;
     Mock::given(method("POST"))
         .and(path("/registrar/prod/V2/registrations"))
@@ -649,29 +464,6 @@ async fn an_own_state_request_is_logged_by_its_kind_before_it_is_sent() {
     );
 
     setup.transport.own_state(&own).await.unwrap();
-
-    let lines = setup.log.lines();
-    assert_eq!(lines.len(), 1, "{lines:?}");
-    assert_eq!(lines[0]["own"], "test_probe");
-    assert_eq!(
-        lines[0]["url"],
-        "https://teams.microsoft.com/registrar/prod/V2/registrations"
-    );
-}
-
-#[tokio::test]
-async fn an_own_state_request_the_classifier_cant_read_is_refused() {
-    let setup = setup().await;
-    let own = ProbeOwnState::new(
-        Service::ChatService,
-        Endpoint::new(["v1", "users", "ME", "properties"]).with_query("name", "probe"),
-        Some(json!({"probe": true})),
-    );
-
-    let error = setup.transport.own_state(&own).await.unwrap_err();
-
-    assert!(matches!(error, HttpError::Refused(Refusal::Unreadable)), "{error:?}");
-    assert!(setup.server.received_requests().await.unwrap().is_empty());
 }
 
 const REGISTRATIONS: &str = include_str!("../../../tests/fixtures/trouter/registration.json");
@@ -679,23 +471,20 @@ const EPID: &str = "00000000-0000-4000-8000-0000000000e1";
 const PUSH_URL: &str = "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000A/";
 
 #[tokio::test]
-async fn the_messaging_registration_is_posted_in_its_captured_shape_and_logged_first() {
+async fn the_messaging_registration_is_posted_in_its_captured_shape() {
     let setup = setup().await;
     let fixture: Value = serde_json::from_str(REGISTRATIONS).unwrap();
     let mut want = fixture["cases"][0]["body"].clone();
     want["registrationId"] = json!(EPID);
     want["clientDescription"]["platformUIVersion"] = json!(teams_proto::CLIENT_BUILD);
-    let log = setup.log.clone();
+
     Mock::given(method("POST"))
         .and(path("/registrar/prod/V2/registrations"))
         .and(header("authorization", bearer(0).as_str()))
         .and(header("x-ms-migration", "True"))
         .and(header("x-ms-test-user", "False"))
         .and(body_json(&want))
-        .respond_with(move |_: &Request| {
-            let logged = log.lines().iter().any(|line| line["own"] == "endpoint_registration");
-            ResponseTemplate::new(if logged { 202 } else { 500 })
-        })
+        .respond_with(move |_: &Request| ResponseTemplate::new(202))
         .expect(1)
         .mount(&setup.server)
         .await;
@@ -704,11 +493,7 @@ async fn the_messaging_registration_is_posted_in_its_captured_shape_and_logged_f
     let answer = Client::new(setup.transport).own_state(&registration).await.unwrap();
 
     assert_eq!(answer.status(), 202);
-    assert_eq!(setup.log.lines().len(), 1);
-    assert_eq!(
-        setup.log.lines()[0]["url"],
-        "https://teams.microsoft.com/registrar/prod/V2/registrations"
-    );
+
     assert_eq!(
         fixture["cases"][0]["body"]["clientDescription"]["appId"],
         teams_proto::MESSAGING_APP_ID
@@ -738,15 +523,13 @@ async fn the_calling_registration_is_posted_in_its_captured_shape_and_registers_
     assert!(teams_proto::CallingRegistration::new("not-a-guid", &push).is_none());
     assert!(teams_proto::CallingRegistration::new(EPID, "https://evil.example.test/v4/f/x/").is_none());
 
-    // a lab transport sends it as a plain request, logged `allowed` before it goes (the registrar reaches nobody)
+    // The registration is also a plain typed request.
     let answer = teams_proto::register_calling(&setup.transport, &registration)
         .await
         .unwrap();
 
     assert_eq!(answer.status(), 202);
-    let lines = setup.log.lines();
-    assert_eq!(lines.len(), 1, "{lines:?}");
-    assert_eq!(lines[0]["event"], "allowed");
+
     assert_eq!(
         (
             case["body"]["clientDescription"]["appId"].as_str(),
@@ -804,50 +587,6 @@ fn a_registration_names_only_a_guid_endpoint_and_a_trouter_push_url() {
     ] {
         assert!(EndpointRegistration::messaging(EPID, url).is_none(), "{url}");
     }
-}
-
-#[tokio::test]
-async fn a_plain_request_that_cant_be_logged_isnt_sent() {
-    let server = MockServer::start().await;
-    Mock::given(method("PUT"))
-        .respond_with(ResponseTemplate::new(200))
-        .expect(0)
-        .mount(&server)
-        .await;
-    let transport = HttpTransport::with_mock_origin(
-        Arc::new(FakeTokens::default()),
-        fence(BrokenLog),
-        CHAT_BASE,
-        &server.uri(),
-    )
-    .unwrap();
-
-    let error = transport.send(&probe()).await.unwrap_err();
-
-    assert!(matches!(error, HttpError::LogUnavailable(_)), "{error:?}");
-    assert!(server.received_requests().await.unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn a_plain_retry_is_logged_again() {
-    let setup = setup().await;
-    Mock::given(method("PUT"))
-        .and(header("authorization", bearer(0).as_str()))
-        .respond_with(ResponseTemplate::new(401))
-        .expect(1)
-        .mount(&setup.server)
-        .await;
-    Mock::given(method("PUT"))
-        .and(header("authorization", bearer(1).as_str()))
-        .respond_with(ResponseTemplate::new(204))
-        .expect(1)
-        .mount(&setup.server)
-        .await;
-
-    let answer = setup.transport.send(&probe()).await.unwrap();
-
-    assert_eq!(answer.status(), 204);
-    assert_eq!(setup.log.lines().len(), 2, "one record per send");
 }
 
 #[tokio::test]
@@ -954,7 +693,10 @@ async fn a_session_signed_out_during_the_throttling_wait_sends_nothing_more() {
         let own = probe_setup.transport.send(&probe()).await.unwrap_err();
 
         assert!(matches!(read, HttpError::Credentials(_)), "after {status}: {read:?}");
-        assert!(matches!(own, HttpError::Credentials(_)), "after {status}: {own:?}");
+        assert!(
+            matches!(own, HttpError::Status(_)),
+            "a plain write is sent once: {own:?}"
+        );
         assert_eq!(
             setup.server.received_requests().await.unwrap().len(),
             1,
@@ -964,11 +706,6 @@ async fn a_session_signed_out_during_the_throttling_wait_sends_nothing_more() {
             probe_setup.server.received_requests().await.unwrap().len(),
             1,
             "after {status}"
-        );
-        assert_eq!(
-            probe_setup.log.lines().len(),
-            1,
-            "the retry isn't logged either, after {status}"
         );
     }
 }
@@ -1118,18 +855,14 @@ async fn a_body_over_the_cap_is_refused() {
 async fn without_a_token_nothing_is_sent() {
     let setup = setup_with(FakeTokens::signed_out()).await;
     let request = hello();
-    let permit = setup.transport_fence().check(request.target(), &LabOnly).await.unwrap();
 
     let read = setup.transport.read(&conversations()).await.unwrap_err();
     let own = setup.transport.send(&probe()).await.unwrap_err();
-    let write = Client::new(setup.transport).write(request, permit).await.unwrap_err();
+    let write = Client::new(setup.transport).write(request).await.unwrap_err();
 
     assert!(matches!(read, HttpError::Credentials(_)), "{read:?}");
     assert!(matches!(own, HttpError::Credentials(_)), "{own:?}");
-    assert!(
-        matches!(write, teams_proto::WriteError::Transport(HttpError::Credentials(_))),
-        "{write:?}"
-    );
+    assert!(matches!(write, HttpError::Credentials(_)), "{write:?}");
     assert!(setup.server.received_requests().await.unwrap().is_empty());
 }
 
@@ -1147,10 +880,18 @@ fn a_responses_debug_shows_the_bodys_length_only() {
     assert!(text.contains("body_len: 17"), "{text}");
 }
 
-impl Setup {
-    /// A fence over the same roster as the transport's, for permits. It shares the transport's log, so its decisions
-    /// show up next to any records of requests let through.
-    fn transport_fence(&self) -> Arc<Fence> {
-        fence(self.log.clone())
-    }
+#[tokio::test]
+async fn a_plain_mutation_is_sent_without_a_permit_and_never_retried() {
+    let setup = setup().await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(401))
+        .expect(1)
+        .mount(&setup.server)
+        .await;
+    assert!(matches!(
+        setup.transport.send(&probe()).await,
+        Err(HttpError::Status(_))
+    ));
+    assert_eq!(setup.server.received_requests().await.unwrap().len(), 1);
+    assert_eq!(setup.tokens.rejected().len(), 1, "renewed only for a later request");
 }

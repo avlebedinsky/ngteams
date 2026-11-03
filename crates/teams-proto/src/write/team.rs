@@ -1,15 +1,10 @@
-//! A team managed (`docs/protocol/teams.md`), as the web client's team pages send it (`proto-lab run team-manage`): a
-//! new team on the middle tier, its name and description, its settings on the chat service's thread, its tags on CSA,
-//! its code, its people, archived and restored on the provisioning service, deleted, joined and left. Each is a sealed
-//! [`Mutating`] request whose target is the team: `teams_fence::contacting` reads the same bytes to the same target.
-//! What changes only the account's own view of a team (its channels hidden or shown) reaches nobody and is a plain
-//! [`crate::Request`] (`team_read`).
+//! Typed team creation and management requests, with raw uploads carried separately from JSON bodies.
 
 use serde_json::{Value, json};
-use teams_fence::{Mri, Scope, Target, WriteKind};
+use teams_fence::Mri;
 
-use super::sealed::Sealed;
-use super::{Mutating, RawBody, Wire};
+use super::Prepared;
+use super::{RawBody, Wire};
 use crate::endpoint::{Endpoint, Method, Service};
 
 /// A new team, as the "Create a team" dialog makes it.
@@ -260,65 +255,6 @@ pub struct TeamCopy {
 }
 
 impl TeamWrite {
-    fn thread(team: &str) -> Scope {
-        Scope::Team { id: team.to_owned() }
-    }
-}
-
-impl Mutating for TeamWrite {
-    fn target(&self) -> Target {
-        match self {
-            Self::Create(team) if team.public => Target::new(WriteKind::OpenTeamCreate, Scope::New),
-            Self::Create(_) => Target::new(WriteKind::TeamCreate, Scope::New),
-            Self::Edit { team, .. }
-            | Self::Settings { team, .. }
-            | Self::TagSettings { team, .. }
-            | Self::EditTag { team, .. }
-            | Self::DeleteTag { team, .. }
-            | Self::Delete { team }
-            | Self::ResetCode { team }
-            | Self::RemoveCode { team }
-            | Self::RemoveApp { team, .. } => Target::new(WriteKind::TeamChange, Self::thread(team)),
-            Self::CreateTag { team, members, .. } => {
-                Target::new(WriteKind::TeamChange, Self::thread(team)).with_added(members.iter().cloned())
-            }
-            Self::Archive { group, .. } | Self::Restore { group } | Self::SetPicture { group, .. } => {
-                Target::new(WriteKind::TeamChange, Self::thread(group))
-            }
-            Self::AddMembers { team, members, .. } => Target::new(WriteKind::MemberChange, Self::thread(team))
-                .with_added(members.iter().map(|(member, _)| member.clone())),
-            Self::RequestMembers { group, members } => {
-                Target::new(WriteKind::MemberChange, Self::thread(group)).with_added(members.iter().cloned())
-            }
-            Self::UpdateMember { team, .. } => Target::new(WriteKind::MemberChange, Self::thread(team)),
-            Self::Join { group } => Target::new(WriteKind::MemberChange, Self::thread(group)),
-            Self::JoinByCode { code } => Target::new(WriteKind::MemberChange, Self::thread(code)),
-            Self::AnswerJoinRequest { group, member, .. } => {
-                Target::new(WriteKind::MemberChange, Self::thread(group)).with_added([member.clone()])
-            }
-            Self::AddApp { team, app } => Target::new(WriteKind::TeamChange, Self::thread(team)).with_added(app.bots()),
-            Self::FromTemplate(team) => new_team_target(team.public),
-            // with its people, a private copy reaches everyone on the team it copies; an open one is open whoever it
-            // brings
-            Self::Copy(copy) if copy.roster && !copy.public => {
-                Target::new(WriteKind::MemberChange, Self::thread(&copy.group))
-            }
-            Self::Copy(copy) => new_team_target(copy.public),
-        }
-    }
-}
-
-/// A new team naming nobody: open to the organization, or private.
-fn new_team_target(public: bool) -> Target {
-    let kind = if public {
-        WriteKind::OpenTeamCreate
-    } else {
-        WriteKind::TeamCreate
-    };
-    Target::new(kind, Scope::New)
-}
-
-impl TeamWrite {
     /// The wire of a write on the team itself.
     fn details_wire(&self) -> Option<Wire> {
         Some(match self {
@@ -529,7 +465,7 @@ impl TeamWrite {
     }
 }
 
-impl Sealed for TeamWrite {
+impl Prepared for TeamWrite {
     fn wire(&self) -> Option<Wire> {
         self.details_wire()
             .or_else(|| self.tags_wire())
@@ -661,36 +597,11 @@ pub fn team_error_code(body: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use teams_fence::{Contact, Policy, Request as FenceRequest, contacting};
 
     use super::*;
 
     const TEAM: &str = "19:team0001@thread.tacv2";
     const GROUP: &str = "00000000-0000-4000-8000-0000000000aa";
-
-    /// What the fence makes of the bytes `write` sends, on made-up bases.
-    fn classified(write: &TeamWrite) -> Contact {
-        let wire = write.wire().expect("a wire form");
-        let base = match wire.service() {
-            Service::Provisioning => "https://teams.cloud.microsoft/fabric/amer/templates/api",
-            Service::ChatService => "https://teams.cloud.microsoft/api/chatsvc/amer",
-            Service::Csa => "https://teams.cloud.microsoft/api/csa/amer",
-            _ => "https://teams.cloud.microsoft/api/mt/part/amer-03",
-        };
-        let mut url = url::Url::parse(&format!("{base}/")).expect("the base");
-        url.path_segments_mut()
-            .expect("a base")
-            .pop_if_empty()
-            .extend(wire.endpoint().segments());
-        if !wire.endpoint().query().is_empty() {
-            url.query_pairs_mut().extend_pairs(wire.endpoint().query());
-        }
-        let body = wire.body_bytes();
-        contacting(
-            &FenceRequest::new(wire.method().as_str(), url.as_str()).with_body(body.as_deref()),
-            &Policy::new(),
-        )
-    }
 
     fn definition(value: &Value) -> AppDefinition {
         AppDefinition::new(value.as_object().cloned().expect("an object")).expect("a definition")
@@ -712,7 +623,7 @@ mod tests {
     }
 
     #[test]
-    fn each_new_writes_target_is_what_the_fence_reads_from_its_bytes() {
+    fn each_new_request_has_a_wire_form() {
         let template = TeamWrite::FromTemplate(TemplateTeam {
             template: "com.microsoft.teams.template.ManageAProject".to_owned(),
             name: "Project".to_owned(),
@@ -746,7 +657,7 @@ mod tests {
             copy(false, true),
         ];
         for write in writes {
-            assert_eq!(classified(&write), Contact::Write(write.target()), "{write:?}");
+            assert!(write.wire().is_some());
         }
     }
 
@@ -897,9 +808,9 @@ mod tests {
     }
 
     #[test]
-    fn each_managing_writes_target_is_what_the_fence_reads_from_its_bytes() {
+    fn each_managing_request_has_a_wire_form() {
         for write in managing_writes() {
-            assert_eq!(classified(&write), Contact::Write(write.target()), "{write:?}");
+            assert!(write.wire().is_some());
         }
     }
 

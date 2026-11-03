@@ -1,22 +1,13 @@
-//! The chat writes (M1 Task 12): a message post, an edit, a soft delete, a reaction and taking it back, a read
-//! receipt, typing and a new chat, each a sealed [`Mutating`] request with the target `docs/protocol/fence-targets.md`
-//! gives it and the wire form the web client sent in the captures (`docs/protocol/chat.md`, the fixtures in
-//! `tests/fixtures/chatsvc/`), key for key.
-//!
-//! Every chat write lands on [`Scope::Conversation`] of its chat; a message and an edit add whoever their text names
-//! ([`MessageText::participants`]: the mentioned MRIs), and a new chat is [`Scope::New`] with every member of its body
-//! added. A message's text is a [`MessageText`]: raw HTML can't be passed. A mention of everyone adds nobody: it is
-//! sent only in the chat it names ([`MessageText::mentions_everyone_only_in`]; a post or an edit with one of another
-//! chat has no wire form, so the transport sends nothing).
+//! Typed message, edit, reaction, receipt, typing and chat-creation requests. `MessageText` keeps the composed wire form.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value, json};
-use teams_fence::{Mri, Scope, Target, WriteKind};
+use teams_fence::Mri;
 use time::OffsetDateTime;
 
-use super::sealed::Sealed;
-use super::{Mutating, Wire};
+use super::Prepared;
+use super::Wire;
 use crate::chat::MessageText;
 use crate::endpoint::{Endpoint, Method, Service};
 
@@ -118,15 +109,9 @@ impl SendMessage {
     }
 }
 
-impl Mutating for SendMessage {
-    fn target(&self) -> Target {
-        conversation_target(WriteKind::Message, &self.conversation).with_added(self.text.participants().iter().cloned())
-    }
-}
-
 /// The message as the web client posts it (`mention.json`, `reply.json`): `id` `-1`, `version` `0`, the
 /// `conversationLink` it sends (`blah/<chat>`), and `clientmessageid` when the request has one.
-impl Sealed for SendMessage {
+impl Prepared for SendMessage {
     fn wire(&self) -> Option<Wire> {
         // a mention of everyone in another chat would reach beyond the target: no route for it
         if !self.text.mentions_everyone_only_in(&self.conversation) {
@@ -224,16 +209,10 @@ impl EditMessage {
     }
 }
 
-impl Mutating for EditMessage {
-    fn target(&self) -> Target {
-        conversation_target(WriteKind::Edit, &self.conversation).with_added(self.text.participants().iter().cloned())
-    }
-}
-
 /// The whole message again (`edit.json`): its own `id` and `clientmessageid`, `from` `worker/<MRI>`, the
 /// `conversationLink` `conversation/<chat>;messageid=<id>`, its times as sent, `version` the edit's time and
 /// `properties.edittime` the same time in milliseconds.
-impl Sealed for EditMessage {
+impl Prepared for EditMessage {
     fn wire(&self) -> Option<Wire> {
         if !self.text.mentions_everyone_only_in(&self.conversation) {
             return None;
@@ -286,13 +265,7 @@ impl DeleteMessage {
     }
 }
 
-impl Mutating for DeleteMessage {
-    fn target(&self) -> Target {
-        conversation_target(WriteKind::Delete, &self.conversation)
-    }
-}
-
-impl Sealed for DeleteMessage {
+impl Prepared for DeleteMessage {
     fn wire(&self) -> Option<Wire> {
         Some(Wire {
             raw: None,
@@ -336,13 +309,7 @@ impl SetReaction {
     }
 }
 
-impl Mutating for SetReaction {
-    fn target(&self) -> Target {
-        conversation_target(WriteKind::Reaction, &self.conversation)
-    }
-}
-
-impl Sealed for SetReaction {
+impl Prepared for SetReaction {
     fn wire(&self) -> Option<Wire> {
         Some(Wire {
             raw: None,
@@ -375,13 +342,7 @@ impl RemoveReaction {
     }
 }
 
-impl Mutating for RemoveReaction {
-    fn target(&self) -> Target {
-        conversation_target(WriteKind::Reaction, &self.conversation)
-    }
-}
-
-impl Sealed for RemoveReaction {
+impl Prepared for RemoveReaction {
     fn wire(&self) -> Option<Wire> {
         Some(Wire {
             raw: None,
@@ -420,18 +381,7 @@ impl SetMeetingTitle {
     }
 }
 
-impl Mutating for SetMeetingTitle {
-    fn target(&self) -> Target {
-        Target::new(
-            WriteKind::Edit,
-            Scope::Team {
-                id: self.channel.clone(),
-            },
-        )
-    }
-}
-
-impl Sealed for SetMeetingTitle {
+impl Prepared for SetMeetingTitle {
     fn wire(&self) -> Option<Wire> {
         Some(Wire {
             raw: None,
@@ -495,13 +445,7 @@ impl ReadReceipt {
     }
 }
 
-impl Mutating for ReadReceipt {
-    fn target(&self) -> Target {
-        conversation_target(WriteKind::ReadReceipt, &self.conversation)
-    }
-}
-
-impl Sealed for ReadReceipt {
+impl Prepared for ReadReceipt {
     fn wire(&self) -> Option<Wire> {
         let endpoint = Endpoint::new(["v1", "users", "ME", "conversations", &self.conversation, "properties"])
             .with_query("name", "consumptionhorizon");
@@ -533,13 +477,7 @@ impl Typing {
     }
 }
 
-impl Mutating for Typing {
-    fn target(&self) -> Target {
-        conversation_target(WriteKind::Typing, &self.conversation)
-    }
-}
-
-impl Sealed for Typing {
+impl Prepared for Typing {
     fn wire(&self) -> Option<Wire> {
         Some(Wire {
             raw: None,
@@ -598,13 +536,7 @@ impl CreateChat {
     }
 }
 
-impl Mutating for CreateChat {
-    fn target(&self) -> Target {
-        Target::new(WriteKind::ChatCreate, Scope::New).with_added(self.members.iter().cloned())
-    }
-}
-
-impl Sealed for CreateChat {
+impl Prepared for CreateChat {
     fn wire(&self) -> Option<Wire> {
         let members: Vec<Value> = self
             .members
@@ -625,15 +557,6 @@ impl Sealed for CreateChat {
             body: Some(json!({"members": members, "properties": properties})),
         })
     }
-}
-
-fn conversation_target(kind: WriteKind, conversation: &str) -> Target {
-    Target::new(
-        kind,
-        Scope::Conversation {
-            id: conversation.to_owned(),
-        },
-    )
 }
 
 /// `v1/users/ME/conversations/<chat>/messages`.

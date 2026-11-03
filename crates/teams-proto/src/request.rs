@@ -1,14 +1,4 @@
-//! Plain requests: anything the native client sends that isn't a read (`GET`) or a contacting write, in any method,
-//! with any body. The trait is open: any crate may add one, with no capture or review, because the transport decides
-//! whether it may go out by what it is, not by who made it.
-//!
-//! [`Transport::send`](crate::Transport::send) builds the request's URL from its [`Service`]'s base and asks
-//! [`teams_fence::contacting`], the lab rule's one classifier: a request that reaches nobody
-//! ([`teams_fence::Contact::None`]: the account's own session, settings and endpoints, a read sent as a `POST`, a
-//! profile lookup or a presence read whoever it names) is sent, and logged to `fence.log` as `allowed` before it goes
-//! when it is mutating; a write ([`teams_fence::Contact::Write`]) or a mutating request on a contacting service that no
-//! row reads ([`teams_fence::Contact::Unreadable`]) is refused before anything is sent. A contacting write goes out
-//! only as a sealed [`Mutating`](crate::Mutating) type under its permit ([`crate::Client::write`]).
+//! Typed requests: service, method, endpoint and body, sent through the logged transport.
 
 use serde_json::Value;
 
@@ -21,4 +11,24 @@ pub trait Request {
     fn endpoint(&self) -> Endpoint;
     /// The JSON body, if it has one.
     fn body(&self) -> Option<Value>;
+    /// Additional request headers; credentials are provided by the transport.
+    fn headers(&self) -> Vec<(String, String)> {
+        Vec::new()
+    }
+    /// A byte body, when the request sends an image instead of JSON.
+    fn raw_body(&self) -> Option<crate::RawBody> {
+        None
+    }
+    /// A calling-service link, checked against that service's base by the transport.
+    fn call_url(&self) -> Option<&url::Url> {
+        None
+    }
+    /// Whether this typed request has a wire representation.
+    fn routable(&self) -> bool {
+        true
+    }
+    /// A write gets one send and returns the service's status to its caller.
+    fn is_write(&self) -> bool {
+        false
+    }
 }

@@ -14,7 +14,6 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
-use teams_fence::{Fence, FenceLog, Mri, Roster};
 use teams_proto::{
     Client, Credentials, HttpError, HttpTransport, IC3_AUDIENCE, MAX_BODY, MessagePicture, PastedFormat, Read as _,
     Refusal, Service,
@@ -22,7 +21,6 @@ use teams_proto::{
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-const LAB_A: &str = "8:orgid:0000000a-0000-4000-8000-00000000000a";
 const CHAT_BASE: &str = "https://teams.microsoft.com/api/chatsvc/amer";
 const AMS_BASE: &str = "https://us-prod.asyncgw.teams.microsoft.com";
 const OBJECT: &str = "0-eus-d9-00000000000000000000000000000abc";
@@ -52,11 +50,7 @@ impl Credentials for FakeTokens {
 }
 
 fn transport(server: &MockServer, tokens: &Arc<FakeTokens>) -> HttpTransport<FakeTokens> {
-    let fence = Arc::new(Fence::new(
-        Roster::new([Mri::new(LAB_A)], []),
-        FenceLog::from_writer(std::io::sink()),
-    ));
-    HttpTransport::with_mock_origin(Arc::clone(tokens), fence, CHAT_BASE, &server.uri()).unwrap()
+    HttpTransport::with_mock_origin(Arc::clone(tokens), CHAT_BASE, &server.uri()).unwrap()
 }
 
 #[test]

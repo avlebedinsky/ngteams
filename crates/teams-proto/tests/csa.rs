@@ -1,12 +1,4 @@
-//! CSA's read of the account's teams and channels (M2 Task 16) on wiremock, through the `test-support` mock origin: a
-//! `GET` of `api/v3/teams/users/me` with the web client's query on the CSA base the transport was given, with the
-//! account's `chatsvcagg` token and nothing else, in the shape `proto-lab probe teams` read live (the synthetic
-//! fixture `tests/fixtures/csa/teams.json`); any other CSA read goes to the same base; a CSA read on a transport without
-//! a CSA base, and a plain request to CSA that changes anything (CSA is a contacting service), are refused before
-//! anything is sent, but for the one read sent as a `POST` the fence's classifier carves out. And what a channel's
-//! posts are read with: a channel's thread type and a message's reply chain.
-//!
-//! Tokens and ids here are placeholders, never real ones.
+//! CSA reads against synthetic mocks: captured team responses, configured service bases, queries and channel message reads.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
@@ -17,11 +9,10 @@ use std::sync::{Arc, Mutex, PoisonError};
 use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
-use teams_fence::{Fence, FenceLog, Mri, Roster};
 use teams_proto::chat::{ConversationKind, Message};
 use teams_proto::{
-    BuildError, CSA_AUDIENCE, Client, Credentials, CsaAnswerError, CsaTeams, Endpoint, HttpError, HttpTransport,
-    Method, Read, Refusal, Request, Service,
+    BuildError, CSA_AUDIENCE, Client, Credentials, CsaAnswerError, CsaTeams, Endpoint, HttpError, HttpTransport, Read,
+    Refusal, Service,
 };
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -79,11 +70,7 @@ impl Credentials for FakeTokens {
 async fn setup(csa: bool) -> (MockServer, Arc<FakeTokens>, Client<HttpTransport<FakeTokens>>) {
     let server = MockServer::start().await;
     let tokens = Arc::new(FakeTokens::default());
-    let fence = Arc::new(Fence::new(
-        Roster::new([Mri::new("8:orgid:0000000a-0000-4000-8000-00000000000a")], []),
-        FenceLog::from_writer(std::io::sink()),
-    ));
-    let mut transport = HttpTransport::with_mock_origin(Arc::clone(&tokens), fence, CHAT_BASE, &server.uri()).unwrap();
+    let mut transport = HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &server.uri()).unwrap();
     if csa {
         transport = transport.with_csa(CSA_BASE).unwrap();
     }
@@ -257,27 +244,6 @@ impl Read for OtherCsaRead {
     }
 }
 
-/// A plain `POST` to CSA: any type may implement `Request`, so the fence's classifier is what decides it.
-struct CsaPost(Endpoint);
-
-impl Request for CsaPost {
-    fn service(&self) -> Service {
-        Service::Csa
-    }
-
-    fn method(&self) -> Method {
-        Method::Post
-    }
-
-    fn endpoint(&self) -> Endpoint {
-        self.0.clone()
-    }
-
-    fn body(&self) -> Option<Value> {
-        Some(json!({}))
-    }
-}
-
 #[tokio::test]
 async fn any_other_csa_read_goes_to_the_csa_base_with_its_query() {
     let (server, _tokens, client) = setup(true).await;
@@ -309,43 +275,6 @@ async fn any_other_csa_read_goes_to_the_csa_base_with_its_query() {
     assert!(requests.iter().all(|request| request.method.as_str() == "GET"));
 }
 
-#[tokio::test]
-async fn a_csa_post_is_refused_unless_the_classifier_carves_it_out() {
-    let (server, tokens, client) = setup(true).await;
-    // a path segment `..` is refused before anything else
-    match client
-        .read(&OtherCsaRead(Endpoint::new([
-            "api", "v3", "teams", "users", "..", "me",
-        ])))
-        .await
-    {
-        Err(HttpError::Refused(Refusal::Segment)) => {}
-        other => panic!("{other:?}"),
-    }
-    for endpoint in [
-        CsaTeams.endpoint(),
-        Endpoint::new(["api", "v1", "containers", CHANNEL, "posts"]),
-        Endpoint::new(["api", "v1", "teams", TEAM, "channels"]),
-    ] {
-        let shown = format!("{endpoint:?}");
-        match client.send(&CsaPost(endpoint)).await {
-            Err(HttpError::Refused(Refusal::Unreadable)) => {}
-            other => panic!("{shown}: {other:?}"),
-        }
-    }
-    assert!(server.received_requests().await.unwrap().is_empty());
-    assert!(tokens.audiences().is_empty(), "no token is asked for a refused request");
-
-    // the read sent as a `POST` the classifier carves out goes
-    Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(200).set_body_raw("{}", "application/json"))
-        .expect(1)
-        .mount(&server)
-        .await;
-    let by_ids = Endpoint::new(["api", "v2", "teams", "users", "me", "chatsAndChannelsByIds"]);
-    client.send(&CsaPost(by_ids)).await.unwrap();
-}
-
 #[test]
 fn only_a_csa_base_of_the_gtm_form_is_taken() {
     assert!(HttpTransport::<FakeTokens>::accepts_csa_base(CSA_BASE));
@@ -365,8 +294,7 @@ fn only_a_csa_base_of_the_gtm_form_is_taken() {
     ] {
         assert!(!HttpTransport::<FakeTokens>::accepts_csa_base(base), "{base}");
     }
-    let fence = Arc::new(Fence::new(Roster::new([], []), FenceLog::from_writer(std::io::sink())));
-    let transport = HttpTransport::new(Arc::new(FakeTokens::default()), fence, CHAT_BASE).unwrap();
+    let transport = HttpTransport::new(Arc::new(FakeTokens::default()), CHAT_BASE).unwrap();
     assert!(matches!(
         transport.with_csa("https://elsewhere.example/api/csa/amer"),
         Err(BuildError::CsaBase)

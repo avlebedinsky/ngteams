@@ -7,8 +7,7 @@
 #![cfg(test)]
 
 use std::future::{self, Future};
-use std::io::Write;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -16,7 +15,7 @@ use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Event, Parts};
 use teams_core::{Availability, Outbox};
-use teams_fence::{FailClosed, Fence, FenceLog, Mri};
+use teams_fence::Mri;
 use teams_mock::{LAB_A, LAB_B, LAB_C, OUTSIDER};
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::{Conversation, ConversationKind, Member, Store};
@@ -44,35 +43,6 @@ impl Credentials for Tokens {
     }
 }
 
-/// A fence log whose lines can be read back.
-#[derive(Clone, Default)]
-struct Lines(Arc<Mutex<Vec<u8>>>);
-
-impl Write for Lines {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl Lines {
-    fn entries(&self) -> Vec<Value> {
-        let bytes = self.0.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        String::from_utf8_lossy(&bytes)
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect()
-    }
-}
-
-/// UPS's answer: everyone the read asked about as Available.
 fn available(request: &Request) -> ResponseTemplate {
     let items: Vec<Value> = asked(request)
         .into_iter()
@@ -116,18 +86,11 @@ fn store(dir: &tempfile::TempDir) -> Store {
 }
 
 /// a's engine through its personal fence (logging to `log`), its reads on `server` as UPS, holding [`store`]'s chat.
-fn start(server: &MockServer, dir: &tempfile::TempDir, log: &Lines) -> EngineHandle {
-    let fence = Arc::new(Fence::personal(Mri::new(LAB_A), FenceLog::from_writer(log.clone())));
-    let transport = || HttpTransport::with_mock_origin(Arc::new(Tokens), Arc::clone(&fence), CHAT_BASE, &server.uri());
+fn start(server: &MockServer, dir: &tempfile::TempDir) -> EngineHandle {
+    let transport = || HttpTransport::with_mock_origin(Arc::new(Tokens), CHAT_BASE, &server.uri());
     let reads = transport().unwrap().with_presence(PRESENCE_BASE).unwrap();
-    assert!(reads.is_personal());
     let author = Author::new(Mri::new(LAB_A), "a");
-    let outbox = Outbox::new(
-        Arc::new(transport().unwrap()),
-        Arc::clone(&fence),
-        Arc::new(FailClosed),
-        author,
-    );
+    let outbox = Outbox::new(Arc::new(transport().unwrap()), author);
     engine::start(Parts {
         calls: None,
         store: store(dir),
@@ -153,8 +116,7 @@ async fn a_read_leaves_out_a_bot_and_names_everyone_else_the_views_asked_about()
         .mount(&server)
         .await;
     let dir = tempfile::tempdir().unwrap();
-    let log = Lines::default();
-    let mut handle = start(&server, &dir, &log);
+    let mut handle = start(&server, &dir);
 
     // the group chat's senders as its view asks about them: a bot, b, someone of none of the account's chats (c, who
     // left it), the outsider
@@ -204,16 +166,6 @@ async fn a_read_leaves_out_a_bot_and_names_everyone_else_the_views_asked_about()
     let mut last = asked(reads.last().unwrap());
     last.sort();
     assert_eq!(last, [LAB_B, LAB_C, OUTSIDER]);
-    let entries = log.entries();
-    let decisions: Vec<&Value> = entries
-        .iter()
-        .filter(|entry| entry["event"] == "post_read_decision")
-        .collect();
-    assert_eq!(decisions.len(), reads.len(), "{entries:?}");
-    assert!(
-        decisions.iter().all(|decision| decision["verdict"] == "allow"),
-        "{entries:?}"
-    );
     // the bot stays unknown; c, of none of the account's chats, is read like anyone
     assert_eq!(handle.presence(BOT.to_owned()).await.unwrap(), Availability::Unknown);
     assert_eq!(

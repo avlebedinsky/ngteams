@@ -13,7 +13,6 @@
 
 use std::collections::VecDeque;
 use std::future::{self, Future};
-use std::io;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -24,15 +23,14 @@ use teams_core::{
     CLOCK_SKEW_MS, CatchUp, CatchUpError, Clock, Command, DRAFTS, Gaps, MAX_FAILED_CHECKS, MAX_PAGES, NOTES, Outbox,
     OutboxError, StoredMessage, UnreadableSeen, enqueue, outbox::ConversationSync,
 };
-use teams_fence::{Fence, FenceLog, Membership, MembershipFuture, MembershipSource, Mri, Roster, Scope};
+use teams_fence::Mri;
 use teams_mock::{
     AB_CHAT, ABC_CHAT, AC_CHAT, AX_CHAT, CHANNEL, ChatEvent, ChatServiceMock, EventKind, LAB_A, LAB_B, LAB_C,
     NOTIFICATIONS,
 };
 use teams_proto::chat::{self, MessageText};
 use teams_proto::{
-    Author, Authorized, Client, Credentials, Failure, HttpError, HttpTransport, Mutating, Read,
-    Request as ProtoRequest, Response, Transport,
+    Author, Client, Credentials, Failure, HttpError, HttpTransport, Read, Request as ProtoRequest, Response, Transport,
 };
 use teams_store::{
     Applied, AttemptOutcome, Conversation, ConversationKind, Member, Message, OutboxEntry, OutboxState, Store,
@@ -62,18 +60,6 @@ impl Credentials for MockToken {
     }
 }
 
-/// Every chat's members as the fence reads them: the lab accounts a and b (the outbox writes only to the a–b chat).
-struct LabMembers;
-
-impl MembershipSource for LabMembers {
-    fn members<'a>(&'a self, _scope: &'a Scope) -> MembershipFuture<'a> {
-        Box::pin(future::ready(Membership::Complete(vec![
-            Mri::new(LAB_A),
-            Mri::new(LAB_B),
-        ])))
-    }
-}
-
 /// What the next write's delivery does instead of an ordinary one.
 #[derive(Clone, Copy, Debug)]
 enum Fault {
@@ -100,7 +86,7 @@ impl Transport for Flaky {
         self.inner.send(request)
     }
 
-    async fn deliver<R: Mutating + Send>(&self, write: Authorized<R>) -> Result<Response, HttpError> {
+    async fn deliver<R: teams_proto::Request + Send>(&self, write: R) -> Result<Response, HttpError> {
         let fault = self.faults.lock().unwrap_or_else(PoisonError::into_inner).pop_front();
         match fault {
             None => self.inner.deliver(write).await,
@@ -115,25 +101,13 @@ impl Transport for Flaky {
 
 // --- setup ---
 
-fn lab_fence() -> Arc<Fence> {
-    Arc::new(Fence::new(
-        Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), []),
-        FenceLog::from_writer(io::sink()),
-    ))
-}
-
 fn transport(origin: &str, token: &str) -> HttpTransport<MockToken> {
-    HttpTransport::with_mock_origin(Arc::new(MockToken(token.to_owned())), lab_fence(), CHAT_BASE, origin).unwrap()
+    HttpTransport::with_mock_origin(Arc::new(MockToken(token.to_owned())), CHAT_BASE, origin).unwrap()
 }
 
 /// The outbox of the account `me` (the one place that builds one).
 fn outbox(transport: Flaky, me: &str) -> Outbox<Flaky> {
-    Outbox::new(
-        Arc::new(transport),
-        lab_fence(),
-        Arc::new(LabMembers),
-        Author::new(Mri::new(me), "Lab account"),
-    )
+    Outbox::new(Arc::new(transport), Author::new(Mri::new(me), "Lab account"))
 }
 
 /// A message post as a command (the one place that builds one).

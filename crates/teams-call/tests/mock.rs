@@ -1,10 +1,10 @@
-//! `teams-call` on the mock (M3 Task 13): native clients of the lab accounts, each with its own fence, `fence.log`,
+//! `teams-call` on the mock: native clients of the synthetic accounts, each with its own tracker,
 //! transport and calling socket, driven as the engine will drive them (`support`), against `teams-mock`'s calling
 //! service and Trouter: the test call through start → acceptance → acknowledgement → connected → leave; a 1:1 call
 //! answered and declined only by an action; an outsider's invitation ignored with nothing sent for it; an offered
 //! invitation that nobody acts on left unanswered; the ring's ends (cancelled, answered elsewhere, timed out); an
 //! invitation during a call not offered; a running group call joined; the keep-alive sent to the call leg's own link
-//! every 90 % of its interval, through the fence, until the call ends.
+//! every 90 % of its interval until the call ends.
 //!
 //! Every id, token and MRI here is the mocks' made-up one.
 
@@ -20,8 +20,7 @@ use support::{Client, answer};
 use teams_call::{CallEvent, CallId, CallState, End, Incoming, Placement};
 use teams_fence::Mri;
 use teams_mock::{
-    ABC_CHAT, ANSWERED_ELSEWHERE, CallPhase, ChatServiceMock, ECHO, LAB_A, LAB_B, LAB_C, OUTSIDER, TIMED_OUT,
-    TrouterMock,
+    ABC_CHAT, ANSWERED_ELSEWHERE, CallPhase, ChatServiceMock, ECHO, LAB_A, LAB_B, LAB_C, TIMED_OUT, TrouterMock,
 };
 
 struct Lab {
@@ -140,24 +139,6 @@ async fn ring_ended(client: &mut Client) -> teams_call::RemoteEnd {
         .await
 }
 
-/// Every line of `log` is a permit (no deny of a write, a delivery response or anything else), and it holds a write.
-fn every_write_permitted(log: &[Value]) {
-    assert!(
-        log.iter()
-            .any(|line| line["kind"].is_string() && line["event"].is_null()),
-        "no write logged: {log:#?}"
-    );
-    for line in log {
-        assert_eq!(line["verdict"], "allow", "the fence didn't permit: {line}");
-    }
-}
-
-/// Whether `log` holds a write's decision or a delivery response's.
-fn decided_anything(log: &[Value]) -> bool {
-    log.iter()
-        .any(|line| (line["kind"].is_string() && line["event"].is_null()) || line["event"] == "delivery_response")
-}
-
 /// The mock's one call.
 fn only_call(lab: &Lab) -> teams_mock::MockCall {
     let calls = lab.mock.calls();
@@ -205,7 +186,6 @@ async fn the_test_call_starts_is_accepted_acknowledged_and_left() {
         !sent.iter().any(|request| request.ends_with("/acknowledge")),
         "no acknowledgement by request: {sent:#?}"
     );
-    every_write_permitted(&a.log.lines());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -270,8 +250,6 @@ async fn a_call_is_answered_only_by_the_callees_action_and_both_ends_connect() {
             "leave"
         ]
     );
-    every_write_permitted(&a.log.lines());
-    every_write_permitted(&b.log.lines());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -301,24 +279,6 @@ async fn a_call_is_declined_only_by_the_callees_action() {
             .any(|request| request.starts_with("DELETE") && request.ends_with("/reject"))
     );
     assert!(!sent.iter().any(|request| request.ends_with("/accept")));
-    every_write_permitted(&b.log.lines());
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn an_outsiders_invitation_is_ignored_and_nothing_is_sent_for_it() {
-    let lab = Lab::start().await;
-    let mut b = lab.client(LAB_B).await;
-    let _ = lab.mock.ring(OUTSIDER, LAB_B);
-    let seen = b.events_within(Duration::from_secs(2)).await;
-    assert!(seen.is_empty(), "nothing is offered: {seen:#?}");
-    assert_eq!(lab.calling_requests_of(LAB_B).await, Vec::<String>::new(), "no request");
-    assert_eq!(lab.responses_of(LAB_B), Vec::<Value>::new(), "no delivery response");
-    assert!(only_call(&lab).legs[0].attached.is_empty());
-    assert!(
-        !decided_anything(&b.log.lines()),
-        "no write or response was even asked for: {:#?}",
-        b.log.lines()
-    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -429,12 +389,10 @@ async fn a_running_group_call_is_joined_from_its_chat() {
         .map(|(op, _)| op)
         .collect();
     assert_eq!(ops, ["attach", "progress", "join", "updateEndpointMetadata", "leave"]);
-    every_write_permitted(&b.log.lines());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_keep_alive_goes_to_the_call_leg_every_90_percent_of_its_interval_through_the_fence_and_stops_with_the_call()
- {
+async fn the_keep_alive_goes_to_the_call_leg_every_90_percent_of_its_interval_and_stops_with_the_call() {
     let lab = Lab::start().await;
     let mut b = lab.client(LAB_B).await;
     let _ = lab.mock.ring(LAB_A, LAB_B);
@@ -462,15 +420,8 @@ async fn the_keep_alive_goes_to_the_call_leg_every_90_percent_of_its_interval_th
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
     }
-    let log = b.log.lines();
-    assert!(
-        log.iter()
-            .filter(|line| line["verdict"] == "allow" && line.to_string().contains("keep_alive"))
-            .count()
-            >= 2,
-        "{log:#?}"
-    );
-    every_write_permitted(&log);
+    assert_eq!(keep_alives(&lab, LAB_B), 2);
+
     b.hang_up(rings.call);
     let _ = ended(&mut b).await;
     b.tick(Instant::now() + Duration::from_secs(10_000));

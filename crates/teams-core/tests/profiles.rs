@@ -13,8 +13,7 @@
 #![cfg(test)]
 
 use std::future::{self, Future};
-use std::io::{self, Write};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Value, json};
@@ -22,7 +21,7 @@ use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Event, Parts};
 use teams_core::{NameFrom, Outbox, PROFILE_MAX_AGE, PROFILE_RETRY};
-use teams_fence::{FailClosed, Fence, FenceLog, Mri, Roster};
+use teams_fence::Mri;
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::{Conversation, ConversationKind, Message, NameSource, PictureState, Profile, Store, StoredPicture};
 use wiremock::matchers::{method, path};
@@ -93,39 +92,9 @@ impl Credentials for FakeTokens {
     }
 }
 
-/// A `fence.log` the test reads back.
-#[derive(Clone, Default)]
-struct SharedLog(Arc<Mutex<Vec<u8>>>);
-
-impl SharedLog {
-    fn lines(&self) -> Vec<Value> {
-        let bytes = self.0.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        String::from_utf8(bytes)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect()
-    }
-}
-
-impl Write for SharedLog {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
 struct Rig {
     server: MockServer,
     handle: EngineHandle,
-    log: SharedLog,
     store_file: std::path::PathBuf,
     _dir: tempfile::TempDir,
 }
@@ -146,26 +115,22 @@ fn rig_with(
     retry: Duration,
 ) -> Rig {
     let dir = tempfile::tempdir().unwrap();
-    let log = SharedLog::default();
-    let fence = Arc::new(Fence::new(
-        Roster::new([mri(GUID_A), mri(GUID_B)].map(Mri::new), []),
-        FenceLog::from_writer(log.clone()),
-    ));
+
     let tokens = Arc::new(FakeTokens);
-    let transport = |fence: &Arc<Fence>| {
-        HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(fence), CHAT_BASE, &server.uri())
+    let transport = || {
+        HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &server.uri())
             .unwrap()
             .with_middle_tier(MIDDLE_TIER)
             .unwrap()
     };
     let reads = if middle_tier {
-        transport(&fence)
+        transport()
     } else {
-        HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &server.uri()).unwrap()
+        HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &server.uri()).unwrap()
     };
     let client = Arc::new(Client::new(reads));
     let author = Author::new(Mri::new(mri(GUID_A)), "lab-a");
-    let outbox = Outbox::new(Arc::new(transport(&fence)), fence, Arc::new(FailClosed), author);
+    let outbox = Outbox::new(Arc::new(transport()), author);
     let store_file = dir.path().join("store").join("a.sqlite");
     let mut store = Store::open(&store_file).unwrap();
     fill(&mut store);
@@ -187,7 +152,6 @@ fn rig_with(
     Rig {
         server,
         handle,
-        log,
         store_file,
         _dir: dir,
     }
@@ -306,13 +270,7 @@ async fn a_name_graph_doesnt_give_comes_from_the_profile_lookup_logged_as_allowe
     let body: Value = serde_json::from_slice(&lookups[0].body).unwrap();
     assert_eq!(body, json!([mri(GUID_B)]));
     // the request, logged before it went
-    let lines = rig.log.lines();
-    assert_eq!(lines.len(), 1, "{lines:?}");
-    assert_eq!(
-        (&lines[0]["event"], &lines[0]["method"], &lines[0]["path"]),
-        (&json!("allowed"), &json!("POST"), &json!(SHORT_PROFILE)),
-        "{lines:?}"
-    );
+
     rig.handle.shutdown();
 }
 
@@ -376,10 +334,6 @@ async fn someone_outside_the_lab_is_looked_up_like_anyone_and_named_from_their_m
     assert_eq!(lookups.len(), 1, "the lookup went");
     let body: Value = serde_json::from_slice(&lookups[0].body).unwrap();
     assert_eq!(body, json!([mri(GUID_OUT)]));
-    let lines: Vec<Value> = rig.log.lines();
-    assert_eq!(lines.len(), 1, "{lines:?}");
-    assert_eq!(lines[0]["event"], "allowed");
-    assert!(!lines[0].to_string().contains(GUID_OUT), "the log names no MRI");
 
     // a lab account the lookup fails for (500) is named by the name the binary knows, and tried again later
     let _ = rig.handle.person(mri(GUID_B)).await.unwrap();
@@ -408,10 +362,7 @@ async fn without_the_middle_tier_s_base_no_lookup_goes() {
     rig.profile_of(&mri(GUID_B)).await;
     let b = rig.handle.person(mri(GUID_B)).await.unwrap();
     assert_eq!((b.name.as_deref(), b.from), (Some("lab-b"), Some(NameFrom::Known)));
-    assert!(
-        rig.log.lines().is_empty(),
-        "nothing logged for a lookup that can't go out"
-    );
+
     assert!(rig.requests_to(SHORT_PROFILE).await.is_empty());
     rig.handle.shutdown();
 }

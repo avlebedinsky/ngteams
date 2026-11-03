@@ -7,7 +7,6 @@
 //! Every id and token here is the mock's made-up one, never a real one.
 
 use std::future::{self, Future};
-use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -15,10 +14,7 @@ use reqwest::Method;
 use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
-use teams_fence::{
-    ChatCredential, DenyReason, Fence, FenceLog, LiveMembershipSource, Membership, MembershipSource, Mri, Roster,
-    Scope, Target, WriteKind,
-};
+use teams_fence::{ChatCredential, LiveMembershipSource, Membership, MembershipSource, Mri, Scope};
 use teams_mock::{
     AB_CHAT, ABC_CHAT, AC_CHAT, AX_CHAT, CHANNEL, CHAT_BASE, ChatEvent, ChatServiceMock, EventKind, LAB_A, LAB_B,
     LAB_C, NOTIFICATIONS, OUTSIDER, REGIONAL_HOST, TEAM_CHANNEL, TENANT,
@@ -482,22 +478,18 @@ impl Credentials for MockToken {
     }
 }
 
-/// A fence over the lab roster whose live membership read goes to the mock with `who`'s token.
-fn lab_fence(lab: &Lab, who: &str) -> TestResult<(Arc<Fence>, LiveMembershipSource)> {
-    let fence = Fence::new(
-        Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), []),
-        FenceLog::from_writer(io::sink()),
-    );
+/// A live membership reader using the mock account's token.
+fn membership(lab: &Lab, who: &str) -> TestResult<LiveMembershipSource> {
     let source = LiveMembershipSource::with_mock_origin(&lab.mock.origin())?;
     let token = lab.mock.token(who).ok_or("no such account")?;
     source.set_credential(ChatCredential::bearer(CHAT_BASE, &token).ok_or("not a credential")?);
-    Ok((Arc::new(fence), source))
+    Ok(source)
 }
 
 #[tokio::test]
-async fn the_fences_membership_read_finds_the_mocks_one_to_one_chats_complete() -> TestResult {
+async fn the_membership_read_finds_the_mocks_one_to_one_chats_complete() -> TestResult {
     let lab = Lab::start().await?;
-    let (fence, source) = lab_fence(&lab, LAB_A)?;
+    let source = membership(&lab, LAB_A)?;
     let chat = |id: &str| Scope::Conversation { id: id.to_owned() };
     assert_eq!(
         source.members(&chat(AB_CHAT)).await,
@@ -506,19 +498,6 @@ async fn the_fences_membership_read_finds_the_mocks_one_to_one_chats_complete() 
     assert_eq!(
         source.members(&chat(AX_CHAT)).await,
         Membership::Complete(vec![Mri::new(LAB_A), Mri::new(OUTSIDER)])
-    );
-    // so a message to the chat with the outsider is denied, and one to the lab chat allowed
-    let denied = fence
-        .check(Target::new(WriteKind::Message, chat(AX_CHAT)), &source)
-        .await
-        .err()
-        .ok_or("a write to the outsider's chat was allowed")?;
-    assert_eq!(*denied.reason(), DenyReason::Outsiders { count: 1 });
-    assert!(
-        fence
-            .check(Target::new(WriteKind::Message, chat(AB_CHAT)), &source)
-            .await
-            .is_ok()
     );
     Ok(())
 }
@@ -537,11 +516,10 @@ impl Read for Get {
 }
 
 #[tokio::test]
-async fn a_permitted_message_through_the_native_transport_reaches_the_other_member() -> TestResult {
+async fn a_typed_message_through_the_native_transport_reaches_the_other_member() -> TestResult {
     let lab = Lab::start().await?;
-    let (fence, source) = lab_fence(&lab, LAB_A)?;
     let token = Arc::new(MockToken(lab.mock.token(LAB_A).ok_or("no a")?));
-    let transport = HttpTransport::with_mock_origin(token, Arc::clone(&fence), CHAT_BASE, &lab.mock.origin())?;
+    let transport = HttpTransport::with_mock_origin(token, CHAT_BASE, &lab.mock.origin())?;
     let client = Client::new(transport);
 
     let list = Get(Endpoint::new(["v1", "users", "ME", "conversations"])
@@ -550,21 +528,12 @@ async fn a_permitted_message_through_the_native_transport_reaches_the_other_memb
     let read = client.read(&list).await?;
     assert_eq!(ids(&serde_json::from_slice(read.body())?).len(), 6);
 
-    let permit = fence
-        .check(
-            Target::new(WriteKind::Message, Scope::Conversation { id: AB_CHAT.to_owned() }),
-            &source,
-        )
-        .await?;
     let answer = client
-        .write(
-            SendMessage::new(
-                AB_CHAT,
-                Author::new(Mri::new(LAB_A), "Lab A"),
-                MessageText::plain("hello b")?,
-            ),
-            permit,
-        )
+        .write(SendMessage::new(
+            AB_CHAT,
+            Author::new(Mri::new(LAB_A), "Lab A"),
+            MessageText::plain("hello b")?,
+        ))
         .await?;
     assert_eq!(answer.status(), 201);
     let arrival = serde_json::from_slice::<Value>(answer.body())?["OriginalArrivalTime"].to_string();

@@ -4,7 +4,8 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::time::{Duration, Instant};
 
-use teams_fence::{Delivery, Mri, Observed};
+use crate::{Delivery, Observed};
+use teams_fence::Mri;
 use teams_proto::{CallContext, CallLink, CallParticipant, Links, MediaContent};
 
 use crate::agent::{CallAgent, Callback, Kind};

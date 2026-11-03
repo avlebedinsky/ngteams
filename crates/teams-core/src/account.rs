@@ -1,25 +1,17 @@
-//! One account's engine, assembled for the client (`crates/ngteams`). The binary hands in the account (its UPN, MRI
-//! and name, its store's file, its region as authz gave it), the fence it opened, the secret store its session takes
-//! its tokens from, and how the fence reads a target's members ([`Membership`]: the personal fence's own source);
-//! [`start`] builds the account's [`Session`], the writes' transport (the chat base from the
-//! region's GTMs, UPS's base for the account's own availability), the member read with that transport's credential, the
-//! reads' transport (the middle tier's base from the GTM `middleTier`, the profile lookup's; CSA's from
-//! `chatSvcAggAfd`, the teams read's; UPS's from `presenceUPS`, the presence read's; AMS's from `amsV2`, the messages'
-//! pictures'), the push channel ([`Trouter`]) when asked for, the calling ([`AccountCalls`]: the calling stack's socket
-//! over the writes' transport, the account in its calls, their media) when asked for, and starts the engine.
-//!
-//! Nothing here reads or prints a token, and nothing is sent while the engine is built: the session asks its store for
-//! a token only when a request needs one.
+//! Builds an account's session, validated service transports, optional push/calling stacks and engine.
+//! The app supplies the shared call floor; credentials are requested only when a transport sends a request.
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use crate::CallFloor;
 use teams_auth::authz::{AuthzClient, AuthzError, CHAT_BASE_GTM, Region};
 use teams_auth::secrets::SecretStore;
 use teams_auth::session::Session;
 use teams_auth::token::{EntraConfig, TokenClient, TokenError};
 use teams_call::Identity;
-use teams_fence::{CredentialSource, Fence, LiveSourceError, MembershipSource, Mri};
+use teams_call::Tracker;
+use teams_fence::Mri;
 use teams_media::video::codec::EncoderSettings;
 use teams_media::video::convert::MaxSize;
 use teams_proto::{Author, BuildError, Client, ClientInfo, Credentials, HttpTransport};
@@ -92,8 +84,6 @@ pub enum AccountError {
     Transport(#[from] BuildError),
     #[error("the push channel can't be built: {0}")]
     Push(#[from] teams_trouter::BuildError),
-    #[error("the member read can't be built: {0}")]
-    Membership(#[from] LiveSourceError),
     #[error(transparent)]
     Token(#[from] TokenError),
     #[error(transparent)]
@@ -150,12 +140,6 @@ pub struct AccountCalls {
     pub language_id: Option<String>,
 }
 
-/// How the fence reads a target's members, built from the fence and the credential the writes' transport gives (the
-/// account's own `ic3` token and chat base, renewed as its session renews it).
-pub type Membership<'a> = Box<
-    dyn FnOnce(&Fence, Arc<dyn CredentialSource>) -> Result<Arc<dyn MembershipSource + Send>, LiveSourceError> + 'a,
->;
-
 /// An account's running engine and the session its requests take their tokens from (the app watches it for a
 /// sign-out, [`Session::watch_signed_out`]).
 #[derive(Debug)]
@@ -177,8 +161,7 @@ pub struct AccountEngine<S> {
 /// account.
 pub fn start<S: SecretStore + 'static>(
     account: Account<S>,
-    fence: Arc<Fence>,
-    membership: Membership<'_>,
+    floor: CallFloor,
 ) -> Result<AccountEngine<S>, AccountError> {
     let Account {
         upn,
@@ -193,31 +176,31 @@ pub fn start<S: SecretStore + 'static>(
         read_only,
     } = account;
     let (push, calls) = listening(read_only, push, calls);
+    let tracker = Arc::new(Tracker::new(Mri::new(&mri)));
     let writable = |transport: HttpTransport<Session<S>>| {
         if read_only { transport.read_only() } else { transport }
     };
     let store = Store::open(&store_file)?;
-    let session = Arc::new(Session::new(
-        upn,
-        secrets,
-        TokenClient::new(EntraConfig::teams_native())?,
-        AuthzClient::new()?,
-        region,
-    ));
+    let session = Arc::new(new_session(upn, secrets, region)?);
     let base = session.service_base(CHAT_BASE_GTM).ok_or(AccountError::NoChatBase)?;
     let presence = session.service_base(PRESENCE_GTM);
     // the writes' transport (the outbox's, the push channel's registration): UPS's base too, for the account's own
     // availability (M2 Task 19), and the middle tier's, for the calendar's writes (the scheduling form's events and
-    // its event member read), each of which goes out only as an authorized write under the fence's permit
+    // its event reads).
     let writes = with_middle_tier(
-        || HttpTransport::new(Arc::clone(&session), Arc::clone(&fence), &base).map(writable),
+        || {
+            HttpTransport::new(Arc::clone(&session), &base)
+                .map(|transport| writable(transport.for_account(Mri::new(&mri))))
+        },
         session.service_base(MIDDLE_TIER_GTM).as_deref(),
     )?;
     let writes = with_team_writes(writes, |gtm| session.service_base(gtm))?;
     let transport = Arc::new(with_presence(writes, presence.as_deref())?);
-    let members = membership(&fence, transport.clone())?;
     let reads = with_middle_tier(
-        || HttpTransport::new(Arc::clone(&session), Arc::clone(&fence), &base).map(writable),
+        || {
+            HttpTransport::new(Arc::clone(&session), &base)
+                .map(|transport| writable(transport.for_account(Mri::new(&mri))))
+        },
         session.service_base(MIDDLE_TIER_GTM).as_deref(),
     )?;
     let reads = with_csa(reads, session.service_base(CSA_GTM).as_deref())?;
@@ -242,14 +225,14 @@ pub fn start<S: SecretStore + 'static>(
                 region: session.region().name,
                 partition: session.region().partition,
             };
-            let socket = Trouter::new(Arc::clone(&transport), Arc::clone(&session))?
-                .for_calls(CallStack::new(Arc::clone(&fence), Arc::clone(&members)));
+            let socket =
+                Trouter::new(Arc::clone(&transport), Arc::clone(&session))?.for_calls(call_stack(&tracker, &floor));
             Some(CallParts::new(socket, identity, calls.media))
         }
         None => None,
     };
     let author = Author::new(Mri::new(&mri), display_name);
-    let outbox = Outbox::new(transport, fence, members, author);
+    let outbox = Outbox::new(transport, author).with_calls(tracker, floor);
     let handle = engine::start(Parts {
         calls,
         store,
@@ -263,6 +246,22 @@ pub fn start<S: SecretStore + 'static>(
         known_names,
     })?;
     Ok(AccountEngine { handle, session })
+}
+
+fn new_session<S: SecretStore>(upn: String, secrets: S, region: Region) -> Result<Session<S>, AccountError> {
+    Ok(Session::new(
+        upn,
+        secrets,
+        TokenClient::new(EntraConfig::teams_native())?,
+        AuthzClient::new()?,
+        region,
+    ))
+}
+
+fn call_stack(tracker: &Arc<Tracker>, floor: &CallFloor) -> CallStack {
+    let observed = Arc::clone(tracker);
+    let floor = floor.clone();
+    CallStack::new(Arc::clone(tracker)).observing(move |delivery| floor.observe(&observed, delivery))
 }
 
 /// The reads' transport `build` makes, given the middle tier's base (the profile lookup's) when the region has one
@@ -407,7 +406,6 @@ mod tests {
 
     use teams_auth::secrets::Secret;
     use teams_auth::token::TokenError;
-    use teams_fence::{FenceLog, Roster};
 
     use super::*;
 
@@ -429,16 +427,9 @@ mod tests {
     }
 
     fn reads(middle_tier: Option<&str>) -> Result<HttpTransport<NoTokens>, BuildError> {
-        let fence = Arc::new(Fence::new(Roster::new([], []), FenceLog::from_writer(std::io::sink())));
         let tokens = Arc::new(NoTokens);
         with_middle_tier(
-            || {
-                HttpTransport::new(
-                    Arc::clone(&tokens),
-                    Arc::clone(&fence),
-                    "https://teams.microsoft.com/api/chatsvc/amer",
-                )
-            },
+            || HttpTransport::new(Arc::clone(&tokens), "https://teams.microsoft.com/api/chatsvc/amer"),
             middle_tier,
         )
     }

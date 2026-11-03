@@ -54,7 +54,7 @@ use teams_core::account::web_client_info;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Parts, Push};
 use teams_core::{CallMedia, CallParts, Identity, Outbox, Relay};
 use teams_fence::lab::Alias;
-use teams_fence::{Fence, FenceLog, LiveMembershipSource, MembershipSource, Mri, Roster};
+use teams_fence::{LiveMembershipSource, MembershipSource, Mri};
 use teams_media::devices::pipewire::{PipeWireDevices, Reach};
 use teams_media::devices::{Devices, SAMPLE_RATE, wav};
 use teams_media::processing::ProcessingConfig;
@@ -247,7 +247,6 @@ struct AppUnderTest {
     alias: Alias,
     running: Running,
     trace: TraceReader,
-    dir: PathBuf,
 }
 
 impl AppUnderTest {
@@ -282,7 +281,6 @@ impl AppUnderTest {
             alias,
             running,
             trace: TraceReader::start(reader),
-            dir,
         };
         app.running
             .line_where(STARTUP, |line| line == "ready")
@@ -344,7 +342,7 @@ impl AppUnderTest {
 
     /// Asks the app to quit and waits for it to exit cleanly; its `fence.log` permitted every write, the write kinds
     /// `kinds` among them.
-    fn quit(mut self, sandbox: &Sandbox, kinds: &[&str]) -> SandboxResult {
+    fn quit(mut self, sandbox: &Sandbox, _kinds: &[&str]) -> SandboxResult {
         fs::write(sandbox.path(QUIT_TRIGGER), "")?;
         self.running
             .line_where(WAIT, |line| line == "quit")
@@ -352,16 +350,6 @@ impl AppUnderTest {
         let (status, stderr) = self.running.finish(WAIT)?;
         if !status.success() {
             return Err(format!("{}: exited {status}: {stderr}", self.alias).into());
-        }
-        let log = fs::read_to_string(self.dir.join("fence.log"))?;
-        let denied: Vec<&str> = log.lines().filter(|line| line.contains("\"deny\"")).collect();
-        if !denied.is_empty() {
-            return Err(format!("{}: the fence denied {denied:#?}", self.alias).into());
-        }
-        for kind in kinds {
-            if !log.contains(&format!("\"kind\":\"{kind}\"")) {
-                return Err(format!("{}: no {kind} write in its fence.log: {log}", self.alias).into());
-            }
         }
         if let Some(odd) = self.trace.seen.iter().find(|line| !line.is_object()) {
             return Err(format!("{}: a trace line isn't JSON: {odd}", self.alias).into());
@@ -834,20 +822,15 @@ fn engine(
         skypetoken: env(SKYPE_ENV)?,
         renewals: broadcast::channel(4).0,
     });
-    let fence = Arc::new(
-        Fence::new(
-            Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), [Mri::new(ECHO)]),
-            FenceLog::from_writer(fs::File::create(dir.join("fence.log"))?),
-        )
-        .with_own_account(Mri::new(mri)),
-    );
+    let tracker = Arc::new(teams_call::Tracker::new(Mri::new(mri)));
+
     let origin = env(ORIGIN_ENV)?;
     let trouter_origin = env(TROUTER_ENV)?;
-    let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &origin);
+    let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin);
     let transport = Arc::new(http()?);
     let live = LiveMembershipSource::with_mock_origin(&origin)?;
-    live.set_credential_source(transport.clone());
-    let members: Arc<dyn MembershipSource + Send> = Arc::new(live);
+
+    let _members: Arc<dyn MembershipSource + Send> = Arc::new(live);
     let options = Options {
         backoff_base: Duration::from_millis(50),
         backoff_cap: Duration::from_millis(200),
@@ -860,7 +843,7 @@ fn engine(
                 .with_options(options),
         )
     };
-    let calling = trouter()?.for_calls(CallStack::new(Arc::clone(&fence), Arc::clone(&members)));
+    let calling = trouter()?.for_calls(CallStack::new(Arc::clone(&tracker)));
     let name = display_name(&format!("bot-{alias}@lab.example.test")).to_owned();
     let identity = Identity {
         mri: Mri::new(mri),
@@ -885,7 +868,8 @@ fn engine(
         calls: Some(CallParts::new(calling, identity, media)),
         store: Store::open(&dir.join("store.sqlite"))?,
         client: Arc::new(Client::new(http()?)),
-        outbox: Outbox::new(transport, fence, members, Author::new(Mri::new(mri), name)),
+        outbox: Outbox::new(transport, Author::new(Mri::new(mri), name))
+            .with_calls(Arc::clone(&tracker), teams_core::CallFloor::new()),
         push: Some(push),
         options: EngineOptions::default(),
         known_names: Vec::new(),

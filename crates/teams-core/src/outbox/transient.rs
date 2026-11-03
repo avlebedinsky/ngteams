@@ -226,9 +226,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
                 Tried::Answered(answer) if answer.status() == 401 && !refreshed => refreshed = true,
                 Tried::Answered(answer) => return self.answered(transient, &answer, waited),
                 Tried::Denied(denied) => {
-                    return TransientSent::Denied {
-                        reason: denied.to_string(),
-                    };
+                    return TransientSent::Denied { reason: denied.clone() };
                 }
                 Tried::NotSent(reason) => return TransientSent::Dropped { reason },
                 Tried::Throttled { wait, .. } => return self.wait_transient(transient, wait, waited),

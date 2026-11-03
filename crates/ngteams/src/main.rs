@@ -23,9 +23,9 @@ use ngteams::forget::Forgot;
 use ngteams::setup::Setup;
 use ngteams::{KEYRING_APPLICATION, read_only, snapshot};
 use teams_auth::secrets::LazyKeyring;
+use teams_core::CallFloor;
 use teams_fence::lab::LabLocations;
 use teams_fence::personal::{PersonalAccount, PersonalPaths};
-use teams_fence::{CallFloor, Fence};
 use teams_media::devices::pipewire::Reach;
 #[cfg(not(test))]
 use teams_ui::account_prompt;
@@ -106,11 +106,7 @@ fn run(cli: &Cli, reach: Reach) -> Result<Outcome, String> {
         return ask_account(setup, unready.first().map(|account| account.upn.clone()));
     }
     let file = SettingsFile::new(setup.paths.settings_file());
-    let diagnostics = app::install_log(
-        setup.paths.log_dir(),
-        file.load().settings.log_level,
-        setup.paths.fence_log(),
-    );
+    let diagnostics = app::install_log(setup.paths.log_dir(), file.load().settings.log_level);
     // the selected PipeWire, shared by every account; without it the app runs without calls
     let devices = match CallDevices::open(reach) {
         Ok(devices) => Some(devices),
@@ -236,14 +232,9 @@ fn run_read_only(mode: &ReadOnlyMode) -> Result<Outcome, String> {
         .ok_or_else(|| format!("read-only: {} isn't a signed-in account of the snapshot", mode.account))?;
     let secrets = read_only::secrets(socket).map_err(|error| format!("the broker's socket: {error}"))?;
     let file = SettingsFile::new(setup.paths.settings_file());
-    let diagnostics = app::install_log(
-        setup.paths.log_dir(),
-        file.load().settings.log_level,
-        setup.paths.fence_log(),
-    );
+    let diagnostics = app::install_log(setup.paths.log_dir(), file.load().settings.log_level);
     log::info!("read-only mode: nothing that writes is sent");
-    let fence = Fence::open_personal(&setup.paths, &account.upn).map_err(|error| error.to_string())?;
-    let engine = ngteams::engine::start_read_only(&setup.paths, &account, Arc::new(fence), secrets)
+    let engine = ngteams::engine::start_read_only(&setup.paths, &account, CallFloor::new(), secrets)
         .map_err(|error| format!("{}: {error}", account.upn))?;
     let first = ngteams::accounts::Started {
         account,

@@ -22,19 +22,18 @@
 #![cfg(test)]
 
 use std::future::{self, Future};
-use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
-use serde_json::{Value, json};
+use serde_json::json;
 use teams_auth::secrets::Secret;
 use teams_auth::session::{AccessToken, Renewal};
 use teams_auth::token::TokenError;
 use teams_core::engine::{self, EngineError, EngineHandle, EngineOptions, Event, Parts, Push};
 use teams_core::{CallAction, CallId, CallMedia, CallParts, CallStatus, End, Identity, IncomingCall, Outbox, Relay};
-use teams_fence::{FailClosed, Fence, FenceLog, MembershipSource, Mri, Scope, Target, WriteKind};
+use teams_fence::Mri;
 use teams_media::devices::file::{AudioInput, FileDevices, Pacing, PatternCamera};
 use teams_media::devices::{AudioSink, AudioSource, DeviceError, Devices, VideoSource, wav};
 use teams_media::processing::ProcessingConfig;
@@ -42,8 +41,7 @@ use teams_media::relay::RelayServer;
 use teams_media::session::SessionConfig;
 use teams_media::tone::{Tone, level_at};
 use teams_mock::{
-    AB_CHAT, ABC_CHAT, AX_CHAT, CALLING_APP, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, OUTSIDER, TENANT, TIMED_OUT,
-    TrouterMock,
+    AB_CHAT, ABC_CHAT, CALLING_APP, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, OUTSIDER, TENANT, TIMED_OUT, TrouterMock,
 };
 use teams_proto::{Author, Client, ClientInfo, Credentials, HttpTransport, RelayTokens, Transport};
 use teams_store::Store;
@@ -114,64 +112,6 @@ impl TrouterCredentials for Tokens {
 
     fn renewals(&self) -> broadcast::Receiver<Renewal> {
         self.renewals.subscribe()
-    }
-}
-
-/// A `fence.log` the test reads back.
-#[derive(Clone, Default)]
-struct SharedLog(Arc<Mutex<Vec<u8>>>);
-
-impl SharedLog {
-    fn lines(&self) -> Vec<Value> {
-        let bytes = self.0.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        String::from_utf8(bytes)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect()
-    }
-
-    /// Every write decision it denied.
-    fn denials(&self) -> Vec<Value> {
-        self.lines()
-            .into_iter()
-            .filter(|line| line["verdict"] == "deny")
-            .collect()
-    }
-
-    /// The writes it permitted, each line as text (its kind, scope and call operation).
-    fn permitted(&self) -> Vec<String> {
-        self.lines()
-            .into_iter()
-            .filter(|line| line["verdict"] == "allow" && line["kind"].is_string() && line["event"].is_null())
-            .map(|line| line.to_string())
-            .collect()
-    }
-
-    fn permitted_any(&self, what: &str) -> bool {
-        self.permitted().iter().any(|line| line.contains(what))
-    }
-
-    /// The `event` values of its lines that have one (`frame`, `own_state`, `delivery_response`, `allowed`, …).
-    fn events(&self) -> Vec<String> {
-        self.lines()
-            .into_iter()
-            .filter_map(|line| line["event"].as_str().map(str::to_owned))
-            .collect()
-    }
-}
-
-impl Write for SharedLog {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
     }
 }
 
@@ -278,7 +218,6 @@ impl Devices for Counted {
 struct Account {
     mri: &'static str,
     handle: EngineHandle,
-    log: SharedLog,
     recording: PathBuf,
     opened: Opened,
     /// Fails its next skypetoken, once.
@@ -288,8 +227,8 @@ struct Account {
 
 impl Account {
     fn start(lab: &Lab, mri: &'static str, tone: Tone) -> Self {
-        let log = SharedLog::default();
-        let fence = Arc::new(Fence::personal(Mri::new(mri), FenceLog::from_writer(log.clone())));
+        let tracker = Arc::new(teams_call::Tracker::new(Mri::new(mri)));
+
         let failing = Arc::new(AtomicBool::new(false));
         let tokens = Arc::new(Tokens {
             ic3: lab.mock.token(mri).unwrap(),
@@ -298,17 +237,14 @@ impl Account {
             failing: Arc::clone(&failing),
         });
         let origin = lab.mock.origin();
-        let http =
-            || HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &origin).unwrap();
+        let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin).unwrap();
         let transport = Arc::new(http());
-        // the personal fence reads no members
-        let members: Arc<dyn MembershipSource + Send> = Arc::new(FailClosed);
         let trouter = || {
             Trouter::with_mock_origin(Arc::clone(&transport), Arc::clone(&tokens), lab.trouter.origin())
                 .unwrap()
                 .with_options(options())
         };
-        let calling = trouter().for_calls(CallStack::new(Arc::clone(&fence), Arc::clone(&members)));
+        let calling = trouter().for_calls(CallStack::new(Arc::clone(&tracker)));
         let store = tempfile::tempdir().unwrap();
         let recording = lab.dir.path().join(format!("{}.wav", mri.rsplit(':').next().unwrap()));
         let opened = Opened::default();
@@ -316,7 +252,8 @@ impl Account {
         let calls = CallParts::new(calling, identity(mri), media);
         let push = Push::new(trouter());
         let client = Arc::new(Client::new(http()));
-        let outbox = Outbox::new(transport, fence, members, Author::new(Mri::new(mri), "Someone"));
+        let outbox = Outbox::new(transport, Author::new(Mri::new(mri), "Someone"))
+            .with_calls(Arc::clone(&tracker), teams_core::CallFloor::new());
         let handle = engine::start(Parts {
             calls: Some(calls),
             store: Store::open(&store.path().join("store.sqlite")).unwrap(),
@@ -333,7 +270,6 @@ impl Account {
         Self {
             mri,
             handle,
-            log,
             recording,
             opened,
             failing,
@@ -488,7 +424,7 @@ fn echo() -> Mri {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_test_call_goes_to_the_echo_service_every_write_logged_and_no_plain_request_sent() {
+async fn the_test_call_goes_to_the_echo_service_and_sends_the_complete_call_sequence() {
     let lab = Lab::start().await;
     let mut a = lab.account(LAB_A, A_TONE).await;
     // the calling registration went as its own-state entry, the calling socket's frames logged
@@ -499,13 +435,6 @@ async fn the_test_call_goes_to_the_echo_service_every_write_logged_and_no_plain_
             .any(|registration| registration.app_id == CALLING_APP && registration.account == LAB_A),
         "{registrations:?}"
     );
-    let own: Vec<Value> = a
-        .log
-        .lines()
-        .into_iter()
-        .filter_map(|line| line.get("own").cloned())
-        .collect();
-    assert!(own.contains(&json!("calling_endpoint_registration")), "{own:?}");
     assert_eq!(a.opened.microphones(), 0, "no microphone before a call");
 
     let call = a.act(CallAction::TestCall { echo: echo() }).await.unwrap();
@@ -516,23 +445,7 @@ async fn the_test_call_goes_to_the_echo_service_every_write_logged_and_no_plain_
     assert_eq!(a.ended(call).await, End::HungUp);
 
     assert_eq!(lab.sent_by(LAB_A), ["start", "updateEndpointMetadata", "add", "leave"]);
-    assert!(a.log.denials().is_empty(), "{:#?}", a.log.denials());
-    for what in ["\"call\"", "update_endpoint_metadata", "\"add\"", "\"leave\""] {
-        assert!(a.log.permitted_any(what), "{what}: {:#?}", a.log.permitted());
-    }
-    let events = a.log.events();
-    assert!(
-        events.iter().any(|event| event == "frame"),
-        "the frames logged: {events:?}"
-    );
-    assert!(
-        events.iter().any(|event| event == "delivery_response"),
-        "the acceptance's acknowledgement decided and logged: {events:?}"
-    );
-    assert!(
-        !events.iter().any(|event| event == "allowed"),
-        "no plain request went out: {events:?}"
-    );
+
     assert_eq!(
         a.opened.cameras(),
         0,
@@ -572,10 +485,7 @@ async fn a_call_in_a_chat_listing_the_account_rings_and_the_callee_answers_only_
     a.act(CallAction::HangUp { call }).await.unwrap();
     assert_eq!(a.ended(call).await, End::HungUp);
     assert!(matches!(b.ended(incoming.call).await, End::Remote(_)));
-    assert!(a.log.denials().is_empty(), "{:#?}", a.log.denials());
-    assert!(b.log.denials().is_empty(), "{:#?}", b.log.denials());
-    assert!(a.log.permitted_any("\"call\""));
-    assert!(b.log.permitted_any("call_answer"), "{:#?}", b.log.permitted());
+
     assert_eq!(
         a.opened.cameras() + b.opened.cameras(),
         0,
@@ -585,40 +495,6 @@ async fn a_call_in_a_chat_listing_the_account_rings_and_the_callee_answers_only_
     assert!(heard(&a.recording, B_TONE, TALK) > HEARD && heard(&b.recording, A_TONE, TALK) > HEARD);
     a.shut_down().await;
     b.shut_down().await;
-}
-
-/// A call start from `caller` to `callees` on the chat `id`, as the start's row maps it.
-fn call_start(id: &str, caller: &str, callees: &[&str]) -> Target {
-    Target::new(WriteKind::Call, Scope::Conversation { id: id.to_owned() })
-        .with_added(std::iter::once(caller).chain(callees.iter().copied()).map(Mri::new))
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn every_start_passes_the_personal_fence_unread_and_logged() {
-    let mock = ChatServiceMock::start().await.unwrap();
-    let decide = |own: &'static str, target: Target| async move {
-        let log = SharedLog::default();
-        let fence = Fence::personal(Mri::new(own), FenceLog::from_writer(log.clone()));
-        let decided = fence.check(target, &FailClosed).await;
-        (decided, log)
-    };
-    let another_echo = Target::new(WriteKind::Call, Scope::New).with_added([
-        Mri::new(LAB_A),
-        Mri::new(teams_mock::ECHO),
-        Mri::new(OUTSIDER),
-    ]);
-    for (own, target) in [
-        // a callee the chat doesn't list, a chat that doesn't list the account, a test call with another bot and more
-        (LAB_A, call_start(ABC_CHAT, LAB_A, &[LAB_B, OUTSIDER])),
-        (OUTSIDER, call_start(ABC_CHAT, OUTSIDER, &[LAB_B])),
-        (LAB_A, call_start(AX_CHAT, LAB_A, &[OUTSIDER])),
-        (LAB_A, another_echo),
-    ] {
-        let (decided, log) = decide(own, target.clone()).await;
-        assert!(decided.is_ok(), "{target}");
-        assert!(log.denials().is_empty() && log.permitted_any("\"call\""), "{target}");
-    }
-    assert!(mock.received_requests().await.is_empty(), "no chat read");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -659,8 +535,7 @@ async fn an_outsider_s_invitation_rings_by_its_name_and_is_answered_or_declined_
     assert_eq!(a.ended(incoming.call).await, End::Declined);
     let sent = lab.sent_by(LAB_A);
     assert!(!sent.contains(&"accept".to_owned()), "{sent:?}");
-    assert!(a.log.permitted_any("call_decline"), "{:#?}", a.log.permitted());
-    assert!(a.log.denials().is_empty(), "{:#?}", a.log.denials());
+
     assert_eq!(a.opened.microphones(), 1, "no microphone for a declined call");
     a.shut_down().await;
 }
@@ -676,14 +551,15 @@ async fn an_attach_refused_with_a_401_goes_again_and_the_invitation_rings_and_is
     a.status(incoming.call, &CallStatus::Connected).await;
     a.act(CallAction::HangUp { call: incoming.call }).await.unwrap();
     assert_eq!(a.ended(incoming.call).await, End::HungUp);
-    assert!(a.log.denials().is_empty(), "{:#?}", a.log.denials());
-    let attaches = a.log.permitted().iter().filter(|line| line.contains("/attach")).count();
-    assert_eq!(
-        attaches,
-        2,
-        "the refused attach and the one sent again: {:#?}",
-        a.log.permitted()
-    );
+
+    let attaches = lab
+        .mock
+        .received_requests()
+        .await
+        .iter()
+        .filter(|r| r.url.path().ends_with("/attach"))
+        .count();
+    assert_eq!(attaches, 2, "refused and repeated attach attempts");
     let _ = lab.mock.close_peer(&id, LAB_A);
     a.shut_down().await;
 }
@@ -711,7 +587,7 @@ async fn an_invitation_whose_attach_failed_for_good_is_let_go_and_the_next_one_r
         let incoming = a.incoming().await;
         a.act(CallAction::Decline { call: incoming.call }).await.unwrap();
         assert_eq!(a.ended(incoming.call).await, End::Declined);
-        assert!(a.log.denials().is_empty(), "{:#?}", a.log.denials());
+
         a.shut_down().await;
     }
 }
@@ -731,7 +607,7 @@ async fn an_invitation_during_a_call_is_not_offered_and_nothing_is_sent_for_it()
     assert!(lab.sent_by(LAB_A).is_empty(), "nothing for the second invitation");
     a.act(CallAction::HangUp { call }).await.unwrap();
     assert_eq!(a.ended(call).await, End::HungUp);
-    assert!(a.log.denials().is_empty(), "{:#?}", a.log.denials());
+
     a.shut_down().await;
 }
 
@@ -753,7 +629,7 @@ async fn a_running_group_call_is_joined_in_a_chat_listing_the_account() {
     a.act(CallAction::HangUp { call }).await.unwrap();
     assert_eq!(a.ended(call).await, End::HungUp);
     assert!(lab.sent_by(LAB_A).contains(&"join".to_owned()));
-    assert!(a.log.denials().is_empty(), "{:#?}", a.log.denials());
+
     let _ = lab.mock.close_peer(&id, LAB_A);
     assert!(heard(&a.recording, PEER_TONE, TALK) > HEARD);
     a.shut_down().await;
@@ -765,15 +641,14 @@ async fn the_plain_requests_a_lab_call_sends_each_have_a_personal_route() {
     // line in the lab's fence.log), the TURN credentials (a `GET`). Through the personal fence the first is its
     // own-state entry (`calling_endpoint_registration`, the test above) and the second goes as the read it is.
     let mock = ChatServiceMock::start().await.unwrap();
-    let log = SharedLog::default();
-    let fence = Arc::new(Fence::personal(Mri::new(LAB_A), FenceLog::from_writer(log.clone())));
+
     let tokens = Arc::new(Tokens {
         ic3: mock.token(LAB_A).unwrap(),
         skypetoken: String::new(),
         renewals: broadcast::channel(4).0,
         failing: Arc::default(),
     });
-    let transport = HttpTransport::with_mock_origin(tokens, Arc::clone(&fence), CHAT_BASE, &mock.origin()).unwrap();
+    let transport = HttpTransport::with_mock_origin(tokens, CHAT_BASE, &mock.origin()).unwrap();
     mock.answer_next(
         "GET",
         "/tokens",
@@ -787,8 +662,4 @@ async fn the_plain_requests_a_lab_call_sends_each_have_a_personal_route() {
     let answer = transport.read(&RelayTokens).await.unwrap();
     let relay = RelayTokens::read_answer(answer.body()).unwrap();
     assert_eq!(relay.credentials.len(), 1);
-    assert!(
-        log.events().iter().all(|event| event != "allowed"),
-        "a read, no plain request"
-    );
 }

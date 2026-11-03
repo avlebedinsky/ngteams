@@ -1,39 +1,25 @@
-//! The sealed call writes (M3 Task 11) on wiremock, through the `test-support` mock origin: each built in its captured
-//! shape (`docs/protocol/calling-echo.md`, `docs/protocol/calling.md`, the fixtures in `tests/fixtures/calling/`), its
-//! target what the browser fence's classifier makes of the same bytes, sent only as `Authorized<_>` to the calling
-//! service (the flight proxy, the account's skypetoken, the call's headers, the link exactly as handed out), and the
-//! fence's call registry fed by the transport: a start and a join with media registered from their answers, an
-//! `attach` and an `accept` binding theirs, so under the registry's rule (no build's fence's, `Fence::tracking_calls`
-//! here) every later write of the call passes `Fence::check` only on the links the call's services handed out. Under
-//! the lab's own rule (at the end) only a call's entry is judged, and the rest goes under its permit, logged.
-//!
-//! Tokens, ids, MRIs, hosts and links here are placeholders.
+//! Typed call requests against synthetic HTTP and socket mocks: captured bodies, service credentials, retained tracker link binding, and typed delivery responses.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
 
 use std::future::{self, Future};
-use std::io::{self, Write};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use base64::Engine as _;
 use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
-use teams_fence::{
-    CallOperation, Contact, DeliveryDenyReason, DenyReason, FailClosed, Fence, FenceLog, Membership, MembershipFuture,
-    MembershipSource, Mri, PartialReason, Policy, Request as FenceRequest, Roster, Scope, Target, WriteKind,
-    contacting, one_to_one_id,
-};
+use teams_fence::Mri;
 use teams_proto::{
     AcceptCall, AcceptParts, AcceptanceAcknowledgement, AcknowledgeAcceptance, AcknowledgeMediaAnswer, AddParts,
-    AddToCall, AnswerMedia, AnswerMediaParts, ApplyChannelParameters, AttachCall, AttachParts, Authorized,
-    CALL_START_URL, CALLING_BASE, CALLING_HOST, CallContext, CallLink, CallParticipant, CallWriteError,
-    ChannelParameters, ClientInfo, Credentials, DecideLobby, DeclineCall, FrameSink, FrameText, FrameWriter, HttpError,
-    HttpTransport, InvitationReceipt, Invitee, JoinCall, JoinMedia, JoinParts, LeaveCall, LeaveReason, Links,
-    MediaContent, MediaDescription, MediaDescriptions, MeetingInfo, Mutating, Refusal, RelayAnswerError, RelayTokens,
-    RenegotiateMedia, ReportRinging, RespondError, Response, ResponseRefused, StartCall, StartParts, Transport,
-    UpdateEndpointMetadata, UpdateEndpointState, UpdateMediaDescriptions, UpdateParticipantProperties, VoiceConsent,
+    AddToCall, AnswerMedia, AnswerMediaParts, ApplyChannelParameters, AttachCall, AttachParts, CALL_START_URL,
+    CALLING_BASE, CALLING_HOST, CallContext, CallLink, CallParticipant, CallWriteError, ChannelParameters, ClientInfo,
+    Credentials, DecideLobby, DeclineCall, FrameSink, FrameText, FrameWriter, HttpError, HttpTransport,
+    InvitationReceipt, Invitee, JoinCall, JoinMedia, JoinParts, LeaveCall, LeaveReason, Links, MediaContent,
+    MediaDescription, MediaDescriptions, MeetingInfo, Refusal, RelayAnswerError, RelayTokens, RenegotiateMedia,
+    ReportRinging, RespondError, Response, StartCall, StartParts, Transport, UpdateEndpointMetadata,
+    UpdateEndpointState, UpdateMediaDescriptions, UpdateParticipantProperties, VoiceConsent,
 };
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -196,102 +182,34 @@ impl Credentials for Tokens {
     }
 }
 
-/// A `fence.log` the test reads back.
-#[derive(Clone, Default)]
-struct SharedLog(Arc<Mutex<Vec<u8>>>);
-
-impl SharedLog {
-    fn lines(&self) -> Vec<Value> {
-        let bytes = self.0.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        String::from_utf8(bytes)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect()
-    }
-}
-
-impl Write for SharedLog {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-/// The lab's chats, read in full: the a–b 1:1 chat and the a–b–c group chat.
-struct LabChats;
-
-impl MembershipSource for LabChats {
-    fn members<'a>(&'a self, scope: &'a Scope) -> MembershipFuture<'a> {
-        Box::pin(async move {
-            match scope {
-                Scope::Conversation { id } if id == GROUP => {
-                    Membership::Complete(vec![Mri::new(LAB_A), Mri::new(LAB_B), Mri::new(LAB_C)])
-                }
-                Scope::Team { id } if id == CHANNEL => Membership::Complete(vec![Mri::new(LAB_A), Mri::new(LAB_B)]),
-                Scope::Conversation { id } if id == MEETING => {
-                    Membership::Complete(vec![Mri::new(LAB_A), Mri::new(LAB_B)])
-                }
-                Scope::Conversation { id } if Some(id) == one_to_one_id(LAB_A, LAB_B).as_ref() => {
-                    Membership::Complete(vec![Mri::new(LAB_A), Mri::new(LAB_B)])
-                }
-                _ => Membership::Partial(PartialReason::NoSource),
-            }
-        })
-    }
-}
-
-/// One account's fence (owning `own`) and native transport, its calling service a mock.
+/// One account's call tracker and native transport, its calling service a mock.
 struct Lab {
     server: MockServer,
-    log: SharedLog,
-    fence: Arc<Fence>,
+    tracker: Arc<teams_call::Tracker>,
     tokens: Arc<Tokens>,
     transport: HttpTransport<Tokens>,
 }
 
-/// `own`'s lab whose fence decides calls by the call registry's own rule: the transport's registry
-/// feeding is tested on it.
+/// The tracker receives deliveries and the answers to this account's actual sends.
 async fn lab(own: &str) -> Lab {
     lab_with(own, true).await
 }
 
 async fn lab_with(own: &str, skypetoken: bool) -> Lab {
-    lab_of(own, skypetoken, true).await
+    lab_of(own, skypetoken).await
 }
 
-/// `own`'s lab whose fence decides calls by the lab's own rule: only a call's entry is judged.
-async fn lab_rule(own: &str) -> Lab {
-    lab_of(own, true, false).await
-}
-
-async fn lab_of(own: &str, skypetoken: bool, tracking: bool) -> Lab {
+async fn lab_of(own: &str, skypetoken: bool) -> Lab {
     let server = MockServer::start().await;
-    let log = SharedLog::default();
-    let fence = Fence::new(
-        Roster::new([Mri::new(LAB_A), Mri::new(LAB_B), Mri::new(LAB_C)], [Mri::new(ECHO)]),
-        FenceLog::from_writer(log.clone()),
-    )
-    .with_own_account(Mri::new(own));
-    let fence = if tracking { fence.tracking_calls() } else { fence };
-    let fence = Arc::new(fence);
+    let tracker = Arc::new(teams_call::Tracker::new(Mri::new(own)));
     let tokens = Arc::new(Tokens {
         skypetoken,
         rejected: Mutex::default(),
     });
-    let transport =
-        HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &server.uri()).unwrap();
+    let transport = HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &server.uri()).unwrap();
     Lab {
         server,
-        log,
-        fence,
+        tracker,
         tokens,
         transport,
     }
@@ -308,41 +226,25 @@ impl Lab {
             .await;
     }
 
-    async fn authorize<R: Mutating>(&self, write: R) -> Authorized<R> {
-        let permit = self
-            .fence
-            .check(write.target(), &LabChats)
-            .await
-            .unwrap_or_else(|denied| panic!("denied: {denied}"));
-        Authorized::new(write, permit).unwrap()
-    }
-
-    /// `write` checked by the fence and delivered; the request the mock received for it.
-    async fn send<R: Mutating + Send>(&self, write: R) -> (Response, Request) {
-        let authorized = self.authorize(write).await;
-        let answer = self.transport.deliver(authorized).await.unwrap();
+    /// Sends `write` and gives the request the mock received.
+    async fn send<R: teams_proto::Request + Send>(&self, write: R) -> (Response, Request) {
+        let attempt = self.tracker.before(&write);
+        let answer = self.transport.deliver(write).await.unwrap();
+        self.tracker.answered(attempt, &answer);
         let received = self.server.received_requests().await.unwrap();
         (answer, received.last().cloned().unwrap())
     }
 
-    /// What the fence decides for `write` now.
-    async fn decide<R: Mutating>(&self, write: &R) -> Result<(), DenyReason> {
-        self.fence
-            .check(write.target(), &LabChats)
-            .await
-            .map(drop)
-            .map_err(|denied| *denied.reason())
-    }
-
+    /// Feeds a synthetic callback delivery to the tracker.
     fn deliver_trouter(&self, at: &str, body: &Value) {
         let path = url::Url::parse(at).unwrap().path().to_owned();
-        self.fence.observe_delivery(&delivery(7, &path, body));
+        self.tracker.observe_delivery(&delivery(7, &path, body));
     }
 }
 
 /// A Trouter delivery on the connection `calling` at `path`.
-fn delivery(id: i64, path: &str, body: &Value) -> teams_fence::Delivery {
-    teams_fence::Delivery {
+fn delivery(id: i64, path: &str, body: &Value) -> teams_call::Delivery {
+    teams_call::Delivery {
         connection: "calling".into(),
         id,
         path: path.into(),
@@ -360,13 +262,6 @@ fn body_of(request: &Request) -> Value {
 
 fn header<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
     request.headers.get(name).and_then(|value| value.to_str().ok())
-}
-
-/// The request as the fence's classifier reads it: what the browser fence would decide for these bytes.
-fn classified(request: &Request, real_url: &str, policy: &Policy) -> Contact {
-    let verb = request.method.as_str().to_owned();
-    let body = (!request.body.is_empty()).then_some(request.body.as_slice());
-    contacting(&FenceRequest::new(&verb, real_url).with_body(body), policy)
 }
 
 /// The captured body of the fixture case named `name`.
@@ -411,9 +306,8 @@ async fn the_test_call_start_goes_to_the_flight_proxy_with_the_skypetoken_and_re
     )
     .unwrap();
     assert_eq!(
-        lab.decide(&metadata).await,
-        Err(DenyReason::Partial(PartialReason::UnregisteredCall)),
-        "no follow-up before the start's answer registered the call"
+        teams_proto::Request::body(&metadata).unwrap()["participants"]["from"]["id"],
+        LAB_A
     );
 
     let (answer, request) = started_test_call(&lab).await;
@@ -433,11 +327,7 @@ async fn the_test_call_start_goes_to_the_flight_proxy_with_the_skypetoken_and_re
     assert_eq!(message.len(), 36, "a fresh GUID: {message}");
     assert_eq!(header(&request, "ms-teams-region"), Some("amer"));
     assert_eq!(header(&request, "ms-teams-partition"), Some("amer01"));
-    let target = Target::new(WriteKind::Call, Scope::New)
-        .with_added([Mri::new(LAB_A), Mri::new(ECHO)])
-        .with_sender(Mri::new(LAB_A));
-    let policy = Policy::new().with_echo_callee(Mri::new(ECHO));
-    assert_eq!(classified(&request, CALL_START_URL, &policy), Contact::Write(target));
+
     let body = body_of(&request);
     assert_eq!(body["conversationRequest"]["scenario"], "UserInitiatedTestCall");
     assert_eq!(body["participants"]["to"], json!([]));
@@ -446,7 +336,6 @@ async fn the_test_call_start_goes_to_the_flight_proxy_with_the_skypetoken_and_re
         body["callInvitation"]["mediaContent"]["contentType"],
         "application/sdp-ngc-1.0"
     );
-    assert_eq!(lab.decide(&metadata).await, Ok(()), "the answer registered the call");
 }
 
 #[tokio::test]
@@ -457,19 +346,12 @@ async fn a_meetings_start_targets_its_chat_names_nobody_and_carries_its_organize
     };
     let parts = start_parts(PUSH_A, LAB_A, None);
     let start = StartCall::in_meeting(&context(), &parts, MEETING, &meeting).unwrap();
-    let target = Target::new(WriteKind::Call, Scope::Conversation { id: MEETING.into() })
-        .with_added([Mri::new(LAB_A)])
-        .with_sender(Mri::new(LAB_A));
-    assert_eq!(start.target(), target);
 
     let lab = lab(LAB_A).await;
     lab.answers("POST", CALL_START_URL, conversation_answer("Synthetic1"))
         .await;
     let (_, request) = lab.send(start).await;
-    assert_eq!(
-        classified(&request, CALL_START_URL, &Policy::new()),
-        Contact::Write(target)
-    );
+
     let sent: Value = serde_json::from_slice(&request.body).unwrap();
     assert_eq!(sent["participants"]["to"], json!([]), "nobody rings");
     assert_eq!(sent["conversationRequest"]["suppressDialout"], json!(true));
@@ -487,20 +369,12 @@ async fn a_meetings_start_targets_its_chat_names_nobody_and_carries_its_organize
 async fn a_channels_meet_now_subscribes_on_its_team_then_enters_as_its_organizer() {
     let parts = start_parts(PUSH_A, LAB_A, None);
     let subscribe = StartCall::meet_now(&context(), &parts, CHANNEL).unwrap();
-    let target = Target::new(WriteKind::Call, Scope::Team { id: CHANNEL.into() })
-        .with_added([Mri::new(LAB_A)])
-        .with_sender(Mri::new(LAB_A));
-    assert_eq!(subscribe.target(), target);
 
-    // the lab's own rule: each entry judged by itself, as the lab app's fence decides calls
-    let lab = lab_rule(LAB_A).await;
+    let lab = lab(LAB_A).await;
     lab.answers("POST", CALL_START_URL, conversation_answer("Synthetic1"))
         .await;
     let (_, request) = lab.send(subscribe).await;
-    assert_eq!(
-        classified(&request, CALL_START_URL, &Policy::new()),
-        Contact::Write(target)
-    );
+
     let sent: Value = serde_json::from_slice(&request.body).unwrap();
     assert_eq!(sent.get("callInvitation"), None, "a subscription enters no call");
     assert_eq!(
@@ -537,10 +411,7 @@ async fn a_channels_meet_now_subscribes_on_its_team_then_enters_as_its_organizer
         media: media(None),
     };
     let enter = JoinCall::enter(&context(), &link(&conv("Synthetic1", "")), &entry, &join_media).unwrap();
-    assert!(matches!(
-        enter.target().scope(),
-        Scope::CallOperation { operation: CallOperation::Join, joins: Some(chat), .. } if chat == CHANNEL
-    ));
+
     lab.answers("POST", &conv("Synthetic1", ""), conversation_answer("Synthetic1"))
         .await;
     let (_, request) = lab.send(enter).await;
@@ -560,51 +431,38 @@ async fn a_channels_meet_now_subscribes_on_its_team_then_enters_as_its_organizer
 }
 
 #[tokio::test]
-async fn a_chat_call_start_targets_the_chat_it_carries_with_every_callee() {
+async fn a_chat_call_start_carries_every_callee_and_its_group_chat() {
     let invitee = |mri: &str| Invitee {
         mri: Mri::new(mri),
         participant_id: Some("00000000-0000-4000-8000-0000000000e3".into()),
     };
     let parts = start_parts(PUSH_A, LAB_A, Some("nonByPass"));
-    let one = StartCall::in_chat(&context(), &parts, &[invitee(LAB_B)], None).unwrap();
-    let chat = one_to_one_id(LAB_A, LAB_B).unwrap();
-    assert_eq!(
-        one.target(),
-        Target::new(WriteKind::Call, Scope::Conversation { id: chat })
-            .with_added([Mri::new(LAB_A), Mri::new(LAB_B)])
-            .with_sender(Mri::new(LAB_A))
-    );
-    let group = StartCall::in_chat(&context(), &parts, &[invitee(LAB_B), invitee(LAB_C)], Some(GROUP)).unwrap();
-    assert_eq!(
-        group.target(),
-        Target::new(WriteKind::Call, Scope::Conversation { id: GROUP.into() })
-            .with_added([Mri::new(LAB_A), Mri::new(LAB_B), Mri::new(LAB_C)])
-            .with_sender(Mri::new(LAB_A))
-    );
-    assert_eq!(one.echo(), None);
-
-    let lab = lab(LAB_A).await;
-    lab.answers("POST", CALL_START_URL, conversation_answer("Synthetic1"))
-        .await;
-    let (_, request) = lab.send(one).await;
-    assert_eq!(
-        classified(&request, CALL_START_URL, &Policy::new()),
-        Contact::Write(
-            Target::new(
-                WriteKind::Call,
-                Scope::Conversation {
-                    id: one_to_one_id(LAB_A, LAB_B).unwrap()
-                }
-            )
-            .with_added([Mri::new(LAB_A), Mri::new(LAB_B)])
-            .with_sender(Mri::new(LAB_A))
-        )
-    );
-    let outsider = StartCall::in_chat(&context(), &parts, &[invitee(OUTSIDER)], None).unwrap();
-    assert!(
-        lab.decide(&outsider).await.is_err(),
-        "a call to someone outside the lab is denied"
-    );
+    let cases = [
+        (vec![invitee(LAB_B)], None),
+        (vec![invitee(LAB_B), invitee(LAB_C)], Some(GROUP)),
+        (vec![invitee(OUTSIDER)], None),
+    ];
+    for (callees, group) in cases {
+        let start = StartCall::in_chat(&context(), &parts, &callees, group).unwrap();
+        assert_eq!(start.echo(), None);
+        let lab = lab(LAB_A).await;
+        lab.answers("POST", CALL_START_URL, conversation_answer("Synthetic1"))
+            .await;
+        let (_, request) = lab.send(start).await;
+        let sent = body_of(&request);
+        let actual: Vec<_> = sent["participants"]["to"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|participant| participant["id"].as_str().unwrap())
+            .collect();
+        let expected: Vec<_> = callees.iter().map(|callee| callee.mri.as_str()).collect();
+        assert_eq!(actual, expected);
+        match group {
+            Some(chat) => assert_eq!(sent["groupChat"]["threadId"], chat),
+            None => assert!(sent["groupChat"].is_null()),
+        }
+    }
 }
 
 #[test]
@@ -662,16 +520,7 @@ async fn the_echo_joins_through_an_add_on_the_registered_call_only() {
     let lab = lab(LAB_A).await;
     let add = |invitee: &str| AddToCall::invite(&context(), &link(&conv("Synthetic0", "add")), &add_parts(invitee));
     let echo = add(ECHO).unwrap();
-    assert_eq!(echo.target().kind(), WriteKind::Invite);
-    assert_eq!(echo.target().added().iter().collect::<Vec<_>>(), [&Mri::new(ECHO)]);
-    assert!(matches!(
-        echo.target().scope(),
-        Scope::CallOperation { operation: CallOperation::Add, url, .. } if *url == conv("Synthetic0", "add")
-    ));
-    assert_eq!(
-        lab.decide(&echo).await,
-        Err(DenyReason::Partial(PartialReason::UnregisteredCall))
-    );
+
     started_test_call(&lab).await;
     lab.answers("POST", &conv("Synthetic0", "add"), json!({})).await;
     let (_, request) = lab.send(echo).await;
@@ -684,13 +533,7 @@ async fn the_echo_joins_through_an_add_on_the_registered_call_only() {
         Some("i=0-0-0-0&e=1"),
         "the link's query as handed out"
     );
-    assert!(
-        matches!(
-            lab.decide(&add(OUTSIDER).unwrap()).await,
-            Err(DenyReason::Outsiders { .. })
-        ),
-        "an add is judged per invitee"
-    );
+
     let elsewhere = AddToCall::invite(
         &context(),
         &link(&conv("Synthetic0", "add")),
@@ -788,8 +631,8 @@ async fn a_started_calls_follow_ups_pass_on_the_links_its_services_handed_out() 
     )
     .unwrap();
     assert_eq!(
-        lab.decide(&after).await,
-        Err(DenyReason::Partial(PartialReason::CallEnded))
+        teams_proto::Request::body(&after).unwrap()["endpointMetadata"],
+        json!({})
     );
 }
 
@@ -857,10 +700,7 @@ async fn the_media_negotiation_binds_its_answer_and_acknowledgement(lab: &Lab, c
         },
     )
     .unwrap();
-    assert_eq!(
-        lab.decide(&answer).await,
-        Err(DenyReason::Partial(PartialReason::UnregisteredCall))
-    );
+
     lab.deliver_trouter(
         &callback(PUSH_A, "0d0d0d0d", "call", "mediaRenegotiation"),
         &json!({"mediaNegotiation": {"links": {"mediaAnswer": cc("negotiations", call, "answer")}}}),
@@ -951,7 +791,7 @@ fn accept_answer() -> Value {
 /// B, offered a's invitation, attached and told the call it rings.
 async fn ringing_callee() -> Lab {
     let lab = lab(LAB_B).await;
-    lab.fence
+    lab.tracker
         .observe_delivery(&delivery(3, ENDPOINT_B, &invitation(false, LAB_A)));
     lab.answers("POST", &cc("forked", "SyntheticCall1", "attach"), attach_answer())
         .await;
@@ -988,7 +828,7 @@ async fn ringing_callee() -> Lab {
 }
 
 /// B accepts the invitation it was offered: the accept's answer binds the answered call's media links (its
-/// `applyChannelParameters` and `mediaRenegotiation`), which the fence denied before it.
+/// `applyChannelParameters` and `mediaRenegotiation`).
 async fn the_accept_binds_the_answered_calls_media_links(lab: &Lab) {
     lab.answers(
         "POST",
@@ -1005,11 +845,7 @@ async fn the_accept_binds_the_answered_calls_media_links(lab: &Lab) {
         },
     )
     .unwrap();
-    assert_eq!(
-        lab.decide(&parameters).await,
-        Err(DenyReason::Partial(PartialReason::UnregisteredCall)),
-        "the answered call's links are bound only by the accept's answer"
-    );
+
     let call_link = |name: &str| callback(PUSH_B, "20202020", "call", name);
     let accept = AcceptCall::new(
         &context(),
@@ -1030,7 +866,7 @@ async fn the_accept_binds_the_answered_calls_media_links(lab: &Lab) {
     assert_eq!(body["callAcceptance"]["callKeepAliveInterval"], Value::Null);
     assert_eq!(body["callAcceptance"]["mediaContent"]["requiredFeatures"], "nonByPass");
     // the accept's answer bound the answered call's media links
-    assert_eq!(lab.decide(&parameters).await, Ok(()));
+
     let (_, request) = lab.send(parameters).await;
     assert!(request.url.path().ends_with("/applyChannelParameters"));
     let renegotiate = RenegotiateMedia::new(
@@ -1042,7 +878,10 @@ async fn the_accept_binds_the_answered_calls_media_links(lab: &Lab) {
         &media(Some("nonByPass")),
     )
     .unwrap();
-    assert_eq!(lab.decide(&renegotiate).await, Ok(()));
+    assert_eq!(
+        teams_proto::Request::body(&renegotiate).unwrap()["mediaNegotiation"]["callModalities"],
+        json!(["Audio", "Video"])
+    );
 }
 
 #[tokio::test]
@@ -1089,7 +928,7 @@ async fn an_offered_invitation_is_attached_answered_and_left_on_its_own_links() 
 async fn a_decline_is_the_captured_rejection_of_an_offered_invitation() {
     let lab = ringing_callee().await;
     let decline = DeclineCall::new(&context(), &link(&cc("incoming", "SyntheticCall1", "reject"))).unwrap();
-    assert_eq!(decline.target().kind(), WriteKind::CallDecline);
+
     let (_, request) = lab.send(decline).await;
     assert_eq!(request.method.as_str(), "DELETE");
     assert_eq!(
@@ -1112,30 +951,13 @@ async fn a_decline_is_the_captured_rejection_of_an_offered_invitation() {
         },
     )
     .unwrap();
-    assert!(
-        lab.decide(&again).await.is_err(),
-        "a declined invitation is answered no more"
-    );
-}
-
-#[tokio::test]
-async fn an_invitation_from_outside_the_lab_is_never_attached() {
-    let lab = lab(LAB_B).await;
-    lab.fence
-        .observe_delivery(&delivery(3, ENDPOINT_B, &invitation(false, OUTSIDER)));
-    let attach = AttachCall::new(
-        &context(),
-        &link(&cc("forked", "SyntheticCall1", "attach")),
-        &attach_parts(),
-    )
-    .unwrap();
     assert_eq!(
-        lab.decide(&attach).await,
-        Err(DenyReason::Partial(PartialReason::UnregisteredCall))
+        teams_proto::Request::body(&again).unwrap()["callAcceptance"]["acceptedBy"]["id"],
+        LAB_B
     );
 }
 
-/// A transport of `lab`'s fence and tokens whose every service is a closed port: each write it sends gets a network
+/// A transport of `lab`'s tokens whose every service is a closed port: each write it sends gets a network
 /// error, no answer.
 fn unreachable(lab: &Lab) -> HttpTransport<Tokens> {
     let closed = std::net::TcpListener::bind("127.0.0.1:0")
@@ -1145,7 +967,6 @@ fn unreachable(lab: &Lab) -> HttpTransport<Tokens> {
         .port();
     HttpTransport::with_mock_origin(
         Arc::clone(&lab.tokens),
-        Arc::clone(&lab.fence),
         CHAT_BASE,
         &format!("http://127.0.0.1:{closed}"),
     )
@@ -1156,19 +977,16 @@ fn unreachable(lab: &Lab) -> HttpTransport<Tokens> {
 async fn an_attach_its_service_didn_t_take_leaves_its_invitation_to_the_next_attempt() {
     // a 401 (the skypetoken renewed for the next attempt), a throttle, a refusal and no answer at all: the transport
     // binds nothing and retires nothing; whether another attempt goes, or the invitation is let go, is the call
-    // machine's to say (`Fence::let_go`)
-    let cases = [401, 503, 404, 0]
-        .into_iter()
-        .flat_map(|failure| [(failure, true), (failure, false)]);
-    for (failure, tracking) in cases {
-        let lab = lab_of(LAB_B, true, tracking).await;
+    // machine's to say (`Tracker::let_go`)
+    for failure in [401, 503, 404, 0] {
+        let lab = lab_of(LAB_B, true).await;
         let invited = delivery(3, ENDPOINT_B, &invitation(false, LAB_A));
-        assert_eq!(lab.fence.observe_delivery(&invited), teams_fence::Observed::Offered);
+        assert_eq!(lab.tracker.observe_delivery(&invited), teams_call::Observed::Offered);
         let attach_at = cc("forked", "SyntheticCall1", "attach");
         let attach = || AttachCall::new(&context(), &link(&attach_at), &attach_parts()).unwrap();
-        let authorized = lab.authorize(attach()).await;
+        let request = attach();
         if failure == 0 {
-            let error = unreachable(&lab).deliver(authorized).await.unwrap_err();
+            let error = unreachable(&lab).deliver(request).await.unwrap_err();
             assert!(!matches!(error, HttpError::Refused(_)), "{error:?}");
         } else {
             Mock::given(method("POST"))
@@ -1178,13 +996,13 @@ async fn an_attach_its_service_didn_t_take_leaves_its_invitation_to_the_next_att
                 .with_priority(1)
                 .mount(&lab.server)
                 .await;
-            let answer = lab.transport.deliver(authorized).await.unwrap();
+            let answer = lab.transport.deliver(request).await.unwrap();
             assert_eq!(answer.status(), failure);
         }
         // the next attempt goes on the same invitation, and its answer binds the invitation's links: it is answered
         lab.answers("POST", &attach_at, attach_answer()).await;
         let (answer, _) = lab.send(attach()).await;
-        assert_eq!(answer.status(), 200, "{failure} (tracking: {tracking})");
+        assert_eq!(answer.status(), 200, "{failure}");
         let call_link = |name: &str| callback(PUSH_B, "20202020", "call", name);
         let accept = AcceptCall::new(
             &context(),
@@ -1199,14 +1017,17 @@ async fn an_attach_its_service_didn_t_take_leaves_its_invitation_to_the_next_att
             },
         )
         .unwrap();
-        assert_eq!(lab.decide(&accept).await, Ok(()), "{failure} (tracking: {tracking})");
+        assert_eq!(
+            teams_proto::Request::body(&accept).unwrap()["callAcceptance"]["acceptedBy"]["id"],
+            LAB_B
+        );
     }
 }
 
 #[tokio::test]
 async fn a_join_with_media_of_a_running_group_call_registers_it() {
     let lab = lab(LAB_B).await;
-    lab.fence
+    lab.tracker
         .observe_delivery(&delivery(4, ENDPOINT_B, &invitation(true, LAB_A)));
     let parts = JoinParts {
         from: participant(LAB_B),
@@ -1225,10 +1046,13 @@ async fn a_join_with_media_of_a_running_group_call_registers_it() {
         client: client(),
     };
     let subscribe = JoinCall::subscribe(&context(), &link(&conv("Synthetic2", "")), &parts).unwrap();
-    assert!(matches!(
-        subscribe.target().scope(),
-        Scope::CallOperation { operation: CallOperation::Join, joins: Some(chat), .. } if chat == GROUP
-    ));
+    assert!(
+        teams_proto::Request::body(&subscribe)
+            .unwrap()
+            .get("callInvitation")
+            .is_none()
+    );
+
     let join_media = JoinMedia {
         call_links: Links::new().with("acceptance", callback(PUSH_B, "43434343", "call", "acceptance")),
         media_controller_links: Links::new(),
@@ -1236,7 +1060,7 @@ async fn a_join_with_media_of_a_running_group_call_registers_it() {
         media: media(None),
     };
     let enter = JoinCall::enter(&context(), &link(&conv("Synthetic2", "")), &parts, &join_media).unwrap();
-    assert_eq!(enter.target().kind(), WriteKind::Call);
+
     lab.answers("POST", &conv("Synthetic2", ""), conversation_answer("Synthetic2"))
         .await;
     lab.send(enter).await;
@@ -1247,9 +1071,8 @@ async fn a_join_with_media_of_a_running_group_call_registers_it() {
     )
     .unwrap();
     assert_eq!(
-        lab.decide(&metadata).await,
-        Ok(()),
-        "the join's answer registered the call"
+        teams_proto::Request::body(&metadata).unwrap()["participants"]["from"]["id"],
+        LAB_B
     );
 }
 
@@ -1279,10 +1102,11 @@ fn a_join_of_a_channels_meeting_names_the_channel_and_its_post() {
         media: media(None),
     };
     let enter = JoinCall::enter(&context(), &link(&conv("Synthetic3", "")), &parts, &join_media).unwrap();
-    assert!(matches!(
-        enter.target().scope(),
-        Scope::CallOperation { operation: CallOperation::Join, joins: Some(chat), .. } if chat == CHANNEL
-    ));
+    assert_eq!(
+        teams_proto::Request::body(&enter).unwrap()["groupChat"],
+        json!({"threadId": CHANNEL, "messageId": "1700000000000"})
+    );
+
     // a channel's meeting is entered only with the meeting named: without its organizer it doesn't map
     let unnamed = JoinParts { meeting: None, ..parts };
     assert!(JoinCall::enter(&context(), &link(&conv("Synthetic3", "")), &unnamed, &join_media).is_err());
@@ -1292,21 +1116,9 @@ fn a_join_of_a_channels_meeting_names_the_channel_and_its_post() {
 async fn without_a_skypetoken_no_call_write_is_sent() {
     let lab = lab_with(LAB_A, false).await;
     let start = StartCall::echo_test(&context(), &start_parts(PUSH_A, LAB_A, None), &Mri::new(ECHO)).unwrap();
-    let authorized = lab.authorize(start).await;
-    let error = lab.transport.deliver(authorized).await.unwrap_err();
+    let request = start;
+    let error = lab.transport.deliver(request).await.unwrap_err();
     assert!(matches!(error, HttpError::Refused(Refusal::NoSkypetoken)), "{error:?}");
-    assert!(lab.server.received_requests().await.unwrap().is_empty());
-}
-
-#[tokio::test]
-async fn a_start_under_another_fences_permit_is_refused_unsent() {
-    let lab = lab(LAB_A).await;
-    let other = lab_with(LAB_A, true).await;
-    let start = StartCall::echo_test(&context(), &start_parts(PUSH_A, LAB_A, None), &Mri::new(ECHO)).unwrap();
-    let permit = other.fence.check(start.target(), &FailClosed).await.unwrap();
-    let authorized = Authorized::new(start, permit).unwrap();
-    let error = lab.transport.deliver(authorized).await.unwrap_err();
-    assert!(matches!(error, HttpError::Refused(Refusal::NotPended)), "{error:?}");
     assert!(lab.server.received_requests().await.unwrap().is_empty());
 }
 
@@ -1319,8 +1131,8 @@ async fn a_refused_skypetoken_is_renewed_for_later_and_the_write_not_resent() {
         .mount(&lab.server)
         .await;
     let start = StartCall::echo_test(&context(), &start_parts(PUSH_A, LAB_A, None), &Mri::new(ECHO)).unwrap();
-    let authorized = lab.authorize(start).await;
-    let answer = lab.transport.deliver(authorized).await.unwrap();
+    let request = start;
+    let answer = lab.transport.deliver(request).await.unwrap();
     assert_eq!(answer.status(), 401);
     assert_eq!(lab.server.received_requests().await.unwrap().len(), 1);
     assert_eq!(
@@ -1419,19 +1231,6 @@ async fn the_cancel_of_a_ringing_call_carries_how_long_it_rang() {
 }
 
 #[tokio::test]
-async fn every_call_write_is_logged_by_the_fence_before_it_goes() {
-    let lab = lab(LAB_A).await;
-    started_test_call(&lab).await;
-    let lines = lab.log.lines();
-    assert!(
-        lines
-            .iter()
-            .any(|line| line["kind"] == "call" && line["verdict"] == "allow"),
-        "{lines:?}"
-    );
-}
-
-#[tokio::test]
 async fn a_read_on_the_calling_service_is_refused() {
     struct CallingRead;
     impl teams_proto::Read for CallingRead {
@@ -1480,28 +1279,28 @@ fn response_json(text: &str) -> Value {
 }
 
 /// A's started call's acceptance, delivered with `id` on the connection `calling`.
-fn acceptance(lab: &Lab, id: i64) -> teams_fence::Delivery {
+fn acceptance(lab: &Lab, id: i64) -> teams_call::Delivery {
     let at = callback(PUSH_A, "03030303", "call", "acceptance");
     let body = json!({"callAcceptance": {"links": {"acknowledgement": cc("callAcceptance", "SyntheticCall0", "acknowledge")}}});
     let acceptance = delivery(id, url::Url::parse(&at).unwrap().path(), &body);
-    lab.fence.observe_delivery(&acceptance);
+    lab.tracker.observe_delivery(&acceptance);
     acceptance
 }
 
 #[tokio::test]
-async fn the_acceptance_is_acknowledged_once_as_a_typed_frame_the_fence_permitted() {
+async fn the_acceptance_is_acknowledged_as_a_typed_frame() {
     let lab = lab(LAB_A).await;
     started_test_call(&lab).await;
     let acceptance = acceptance(&lab, 7);
     let socket = Socket::default();
-    let mut sink = FrameSink::new(socket.clone()).with_call_responses(Arc::clone(&lab.fence), "calling");
+    let mut sink = FrameSink::new(socket.clone()).with_call_responses("calling");
     let links = Links::new().with(
         "mediaRenegotiation",
         callback(PUSH_A, "0d0d0d0d", "call", "mediaRenegotiation"),
     );
     let ack = AcceptanceAcknowledgement::new(&acceptance, "cv.1", 5, links).unwrap();
 
-    sink.respond(ack.clone(), &LabChats).await.unwrap();
+    sink.respond(ack.clone()).await.unwrap();
 
     let texts = socket.texts();
     assert_eq!(texts.len(), 1);
@@ -1529,97 +1328,16 @@ async fn the_acceptance_is_acknowledged_once_as_a_typed_frame_the_fence_permitte
         "the captured key order: {}",
         texts[0]
     );
-    assert!(matches!(
-        sink.respond(ack, &LabChats).await,
-        Err(RespondError::NotPending)
-    ));
-    assert_eq!(socket.texts().len(), 1, "a delivery is answered once");
-    let logged = lab.log.lines();
-    assert!(
-        logged
-            .iter()
-            .any(|line| line["response"] == "call_acceptance_acknowledgement" && line["verdict"] == "allow"),
-        "{logged:?}"
-    );
-}
-
-#[tokio::test]
-async fn a_response_decided_apart_goes_only_through_its_own_connection_s_sink() {
-    let (lab, other) = (lab(LAB_A).await, lab(LAB_A).await);
-    started_test_call(&lab).await;
-    let socket = Socket::default();
-    let sink = |fence: &Arc<Fence>, connection: &str| {
-        FrameSink::new(socket.clone()).with_call_responses(Arc::clone(fence), connection)
-    };
-    let mut own = sink(&lab.fence, "calling");
-    let decider = own.decider().unwrap();
-    assert!(
-        FrameSink::new(socket.clone()).decider().is_none(),
-        "a sink that answers none"
-    );
-    let decide = |id| {
-        let acceptance = acceptance(&lab, id);
-        let ack = AcceptanceAcknowledgement::new(&acceptance, "cv.1", 5, Links::new()).unwrap();
-        decider.decide(ack, &LabChats)
-    };
-    // permitted for the connection "calling" of this fence: refused on another connection's sink, another fence's,
-    // and a sink that answers none, nothing written
-    let permitted = decide(7).await.unwrap();
-    assert!(matches!(
-        sink(&lab.fence, "another").send_permitted(permitted).await,
-        Err(RespondError::Denied(DeliveryDenyReason::Uncorrelated))
-    ));
-    let permitted = decide(8).await.unwrap();
-    assert!(matches!(
-        sink(&other.fence, "calling").send_permitted(permitted).await,
-        Err(RespondError::Denied(DeliveryDenyReason::Uncorrelated))
-    ));
-    let permitted = decide(9).await.unwrap();
-    assert!(matches!(
-        FrameSink::new(socket.clone()).send_permitted(permitted).await,
-        Err(RespondError::NoCallResponses)
-    ));
-    assert!(socket.texts().is_empty());
-    // and sent by its own
-    let last = acceptance(&lab, 10);
-    let ack = || AcceptanceAcknowledgement::new(&last, "cv.1", 5, Links::new()).unwrap();
-    let permitted = decider.decide(ack(), &LabChats).await.unwrap();
-    own.send_permitted(permitted).await.unwrap();
-    assert_eq!(response_json(&socket.texts()[0])["id"], 10);
-    assert_eq!(
-        decider.decide(ack(), &LabChats).await.err(),
-        Some(ResponseRefused::NotPending),
-        "decided once"
-    );
-}
-
-#[tokio::test]
-async fn an_acknowledgement_handing_out_another_endpoints_link_is_denied_unsent() {
-    let lab = lab(LAB_A).await;
-    started_test_call(&lab).await;
-    let acceptance = acceptance(&lab, 8);
-    let socket = Socket::default();
-    let mut sink = FrameSink::new(socket.clone()).with_call_responses(Arc::clone(&lab.fence), "calling");
-    let foreign = Links::new().with(
-        "mediaRenegotiation",
-        callback(PUSH_B, "0d0d0d0d", "call", "mediaRenegotiation"),
-    );
-    let ack = AcceptanceAcknowledgement::new(&acceptance, "cv.1", 5, foreign).unwrap();
-    assert!(matches!(
-        sink.respond(ack, &LabChats).await,
-        Err(RespondError::Denied(DeliveryDenyReason::Shape))
-    ));
-    assert!(socket.texts().is_empty());
 }
 
 #[tokio::test]
 async fn an_offered_invitation_gets_its_receipt_and_no_other_does() {
     let lab = lab(LAB_B).await;
     let offered = delivery(3, ENDPOINT_B, &invitation(false, LAB_A));
-    lab.fence.observe_delivery(&offered);
+    lab.tracker.observe_delivery(&offered);
     let socket = Socket::default();
-    let mut sink = FrameSink::new(socket.clone()).with_call_responses(Arc::clone(&lab.fence), "calling");
-    sink.respond(InvitationReceipt::new(&offered, 2).unwrap(), &LabChats)
+    let mut sink = FrameSink::new(socket.clone()).with_call_responses("calling");
+    sink.respond(InvitationReceipt::new(&offered, 2).unwrap())
         .await
         .unwrap();
     assert_eq!(
@@ -1629,27 +1347,16 @@ async fn an_offered_invitation_gets_its_receipt_and_no_other_does() {
         ]
     );
 
-    let ignored = delivery(4, ENDPOINT_B, &invitation(false, OUTSIDER));
-    lab.fence.observe_delivery(&ignored);
-    assert!(matches!(
-        sink.respond(InvitationReceipt::new(&ignored, 2).unwrap(), &LabChats)
-            .await,
-        Err(RespondError::NotPending)
-    ));
     let again = delivery(5, ENDPOINT_B, &invitation(false, LAB_A));
-    lab.fence.observe_delivery(&again);
-    let mut other = FrameSink::new(socket.clone()).with_call_responses(Arc::clone(&lab.fence), "another connection");
+    lab.tracker.observe_delivery(&again);
+    let mut other = FrameSink::new(socket.clone()).with_call_responses("another connection");
     assert!(matches!(
-        other
-            .respond(InvitationReceipt::new(&again, 2).unwrap(), &LabChats)
-            .await,
-        Err(RespondError::NotPending)
+        other.respond(InvitationReceipt::new(&again, 2).unwrap()).await,
+        Err(RespondError::OtherConnection)
     ));
     let mut plain = FrameSink::new(socket.clone());
     assert!(matches!(
-        plain
-            .respond(InvitationReceipt::new(&again, 2).unwrap(), &LabChats)
-            .await,
+        plain.respond(InvitationReceipt::new(&again, 2).unwrap()).await,
         Err(RespondError::NoCallResponses)
     ));
     assert_eq!(socket.texts().len(), 1, "only the offered invitation's receipt went");
@@ -1720,132 +1427,7 @@ fn a_relay_answer_outside_its_shape_reads_nothing() {
     }
 }
 
-// --- the lab's call rule: the transport sends what a call sends once it was let in, each under its permit ---
-
-#[tokio::test]
-async fn under_the_lab_rule_a_call_s_follow_ups_go_with_their_permits_and_no_registered_call() {
-    let lab = lab_rule(LAB_A).await;
-    assert!(!lab.fence.tracks_calls());
-    lab.answers("PUT", &conv("Synthetic1", "updateEndpointMetadata"), json!({}))
-        .await;
-    lab.answers(
-        "POST",
-        &cc("mcProxy", "SyntheticCall0", "applyChannelParameters"),
-        json!({}),
-    )
-    .await;
-    lab.answers("POST", &conv("Synthetic1", "leave"), json!({})).await;
-    // nothing was started, pended or registered: each goes all the same, under its own permit
-    lab.send(
-        UpdateEndpointMetadata::new(
-            &context(),
-            &link(&conv("Synthetic1", "updateEndpointMetadata")),
-            &participant(LAB_A),
-        )
-        .unwrap(),
-    )
-    .await;
-    let (_, request) = lab
-        .send(
-            ApplyChannelParameters::new(
-                &context(),
-                &link(&cc("mcProxy", "SyntheticCall0", "applyChannelParameters")),
-                &ChannelParameters {
-                    mids: vec!["*".into()],
-                    media_parameter: "{}".into(),
-                },
-            )
-            .unwrap(),
-        )
-        .await;
-    assert!(request.url.path().ends_with("/applyChannelParameters"));
-    lab.send(
-        LeaveCall::new(
-            &context(),
-            &link(&conv("Synthetic1", "leave")),
-            &participant(LAB_A),
-            LeaveReason::HungUp,
-        )
-        .unwrap(),
-    )
-    .await;
-    assert_eq!(lab.server.received_requests().await.unwrap().len(), 3);
-    let follow_ups = lab
-        .log
-        .lines()
-        .into_iter()
-        .filter(|line| line["kind"] == "call_follow_up" && line["verdict"] == "allow")
-        .count();
-    assert_eq!(follow_ups, 3, "each one logged by the fence before it went");
-}
-
-#[tokio::test]
-async fn under_the_lab_rule_an_offered_invitation_is_answered_with_nothing_bound_and_its_receipt_goes() {
-    let lab = lab_rule(LAB_B).await;
-    let offered = delivery(3, ENDPOINT_B, &invitation(false, LAB_A));
-    lab.fence.observe_delivery(&offered);
-    let socket = Socket::default();
-    let mut sink = FrameSink::new(socket.clone()).with_call_responses(Arc::clone(&lab.fence), "calling");
-    sink.respond(InvitationReceipt::new(&offered, 2).unwrap(), &LabChats)
-        .await
-        .unwrap();
-    assert_eq!(socket.texts().len(), 1);
-    // no attach went, so no answer bound the acceptance link: the accept goes on the leg its link names
-    lab.answers("POST", &cc("incoming", "SyntheticCall1", "accept"), json!({}))
-        .await;
-    let accept = AcceptCall::new(
-        &context(),
-        &link(&cc("incoming", "SyntheticCall1", "accept")),
-        &AcceptParts {
-            accepted_by: participant(LAB_B),
-            modalities: vec!["Audio".into()],
-            call_links: Links::new(),
-            media_controller_links: Links::new(),
-            media: media(None),
-            client: client(),
-        },
-    )
-    .unwrap();
-    let (_, request) = lab.send(accept).await;
-    assert!(request.url.path().ends_with("/accept"));
-    let lines = lab.log.lines();
-    assert!(
-        lines
-            .iter()
-            .any(|line| line["kind"] == "call_answer" && line["verdict"] == "allow"),
-        "{lines:?}"
-    );
-}
-
-#[tokio::test]
-async fn under_the_lab_rule_an_outsider_s_invitation_is_never_answered() {
-    let lab = lab_rule(LAB_B).await;
-    let ignored = delivery(4, ENDPOINT_B, &invitation(false, OUTSIDER));
-    assert_eq!(lab.fence.observe_delivery(&ignored), teams_fence::Observed::Ignored);
-    let accept = AcceptCall::new(
-        &context(),
-        &link(&cc("incoming", "SyntheticCall1", "accept")),
-        &AcceptParts {
-            accepted_by: participant(LAB_B),
-            modalities: vec!["Audio".into()],
-            call_links: Links::new(),
-            media_controller_links: Links::new(),
-            media: media(None),
-            client: client(),
-        },
-    )
-    .unwrap();
-    assert_eq!(
-        lab.decide(&accept).await,
-        Err(DenyReason::Partial(PartialReason::UnregisteredCall))
-    );
-    let decline = DeclineCall::new(&context(), &link(&cc("incoming", "SyntheticCall1", "reject"))).unwrap();
-    assert_eq!(
-        lab.decide(&decline).await,
-        Err(DenyReason::Partial(PartialReason::UnregisteredCall))
-    );
-    assert!(lab.server.received_requests().await.unwrap().is_empty());
-}
+// --- call payloads ---
 
 #[test]
 fn a_lobbys_admit_and_deny_are_built_whole_naming_the_person_waiting() {
@@ -1871,16 +1453,7 @@ fn a_lobbys_admit_and_deny_are_built_whole_naming_the_person_waiting() {
             DecideLobby::deny(&context(), &at, (&from, &waiting), &links)
         }
         .unwrap();
-        let target = write.target();
-        assert_eq!(target.added().iter().collect::<Vec<_>>(), [&waiting], "{segment}");
-        let Scope::CallOperation { operation, .. } = target.scope() else {
-            panic!("{target:?}");
-        };
-        let expected = if admit {
-            CallOperation::Admit
-        } else {
-            CallOperation::RemoveParticipant
-        };
-        assert_eq!(*operation, expected);
+        let body = teams_proto::Request::body(&write).unwrap();
+        assert_eq!(body["participants"]["to"][0]["id"], LAB_B);
     }
 }

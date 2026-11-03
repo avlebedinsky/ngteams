@@ -19,7 +19,7 @@ use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_core::Outbox;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Parts};
-use teams_fence::{FailClosed, Fence, FenceLog, Mri, Roster};
+use teams_fence::{Fence, FenceLog, Mri, Roster};
 use teams_proto::{Author, Client, Credentials, FileThumbnails, HttpTransport, PastedFormat};
 use teams_store::{PictureCache, Store};
 use wiremock::matchers::{method, path};
@@ -57,16 +57,15 @@ impl Credentials for FakeTokens {
 
 /// An engine of lab account a on the store at `store_file`, its reads on `server`.
 fn engine(server: &MockServer, store_file: &Path) -> EngineHandle {
-    let fence = Arc::new(Fence::new(
+    let _fence = Arc::new(Fence::new(
         Roster::new([Mri::new(LAB_A)], []),
         FenceLog::from_writer(std::io::sink()),
     ));
     let tokens = Arc::new(FakeTokens);
-    let transport =
-        || HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &server.uri()).unwrap();
+    let transport = || HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &server.uri()).unwrap();
     let client = Arc::new(Client::new(transport().with_ams(AMS_BASE).unwrap()));
     let author = Author::new(Mri::new(LAB_A), "lab-a");
-    let outbox = Outbox::new(Arc::new(transport()), Arc::clone(&fence), Arc::new(FailClosed), author);
+    let outbox = Outbox::new(Arc::new(transport()), author);
     engine::start(Parts {
         calls: None,
         store: Store::open(store_file).unwrap(),

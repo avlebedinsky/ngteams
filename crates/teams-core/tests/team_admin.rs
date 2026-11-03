@@ -1,7 +1,7 @@
 //! The team pages through the engine, on the mock (`teams_core::team_admin`, `teams_core::team_apps`): each read goes
 //! where the web client's page sends it and comes back as the page shows it, a failed one as nothing; a write managing
-//! a team goes through the outbox under the fence, its answer read, Teams' refusal told by its code and a write the
-//! fence denies never sent; the account's own view of a team changes the stored teams at once.
+//! a team goes through the outbox, its answer read and Teams' refusal told by its code; the account's own view of a
+//! team changes the stored teams at once.
 //!
 //! Every id, name and token here is the mock's made-up one.
 
@@ -16,7 +16,7 @@ use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Event, Parts};
 use teams_core::{EngineError, Outbox, TeamChange};
-use teams_fence::{Fence, FenceLog, Membership, MembershipFuture, MembershipSource, Mri, PartialReason, Roster, Scope};
+use teams_fence::Mri;
 use teams_mock::{
     CHAT_BASE, CSA_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, MIDDLE_TIER_BASE, PROVISIONING_BASE, USER_PROFILE_BASE,
 };
@@ -46,41 +46,19 @@ impl Credentials for Tokens {
     }
 }
 
-/// What the fence reads of a team: the lab accounts alone, or, as in the lab, nothing it can take as complete.
-struct Members {
-    lab_only: bool,
-}
-
-impl MembershipSource for Members {
-    fn members<'a>(&'a self, _scope: &'a Scope) -> MembershipFuture<'a> {
-        let lab_only = self.lab_only;
-        Box::pin(async move {
-            if lab_only {
-                Membership::Complete([LAB_A, LAB_B, LAB_C].map(Mri::new).to_vec())
-            } else {
-                Membership::Partial(PartialReason::Unsupported)
-            }
-        })
-    }
-}
-
 struct Rig {
     mock: ChatServiceMock,
     handle: EngineHandle,
     _dir: tempfile::TempDir,
 }
 
-async fn rig_with(lab_only: bool) -> Rig {
+async fn setup() -> Rig {
     let mock = ChatServiceMock::start().await.unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let fence = Arc::new(Fence::new(
-        Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), []),
-        FenceLog::from_writer(std::io::sink()),
-    ));
     let tokens = Arc::new(Tokens(mock.token(LAB_A).unwrap()));
     let origin = mock.origin();
     let http = || {
-        HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &origin)
+        HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin)
             .unwrap()
             .with_middle_tier(MIDDLE_TIER_BASE)
             .unwrap()
@@ -93,12 +71,7 @@ async fn rig_with(lab_only: bool) -> Rig {
         .unwrap()
         .with_user_profile(USER_PROFILE_BASE)
         .unwrap();
-    let outbox = Outbox::new(
-        transport,
-        fence,
-        Arc::new(Members { lab_only }),
-        Author::new(Mri::new(LAB_A), "Lab account"),
-    );
+    let outbox = Outbox::new(transport, Author::new(Mri::new(LAB_A), "Lab account"));
     let handle = engine::start(Parts {
         calls: None,
         store: Store::open(&dir.path().join("store").join("a.sqlite")).unwrap(),
@@ -161,7 +134,7 @@ impl Rig {
 
 #[tokio::test]
 async fn a_team_s_people_come_owners_first_named_bots_left_out() {
-    let rig = rig_with(true).await;
+    let rig = setup().await;
     // the mock keeps no profiles: the lookup is answered here, c's left out
     rig.mock
         .answer_next(
@@ -198,7 +171,7 @@ async fn a_team_s_people_come_owners_first_named_bots_left_out() {
 
 #[tokio::test]
 async fn a_team_s_settings_tags_code_and_channels_are_read_as_the_pages_show_them() {
-    let rig = rig_with(true).await;
+    let rig = setup().await;
     let requests = rig.handle.requests();
     rig.mock
         .answer_next(
@@ -263,7 +236,7 @@ async fn a_team_s_settings_tags_code_and_channels_are_read_as_the_pages_show_the
 
 #[tokio::test]
 async fn a_read_the_service_refuses_comes_back_as_nothing() {
-    let rig = rig_with(true).await;
+    let rig = setup().await;
     let requests = rig.handle.requests();
     rig.mock.refuse_next("GET", "tagCards", 403).await;
     assert_eq!(
@@ -316,7 +289,7 @@ async fn a_read_the_service_refuses_comes_back_as_nothing() {
 
 #[tokio::test]
 async fn analytics_of_a_team_a_channel_and_all_teams_are_read_for_the_period() {
-    let rig = rig_with(true).await;
+    let rig = setup().await;
     let requests = rig.handle.requests();
     let team = requests
         .team_analytics(GROUP, AnalyticsPeriod::LastThirtyDays)
@@ -361,7 +334,7 @@ async fn analytics_of_a_team_a_channel_and_all_teams_are_read_for_the_period() {
 
 #[tokio::test]
 async fn the_teams_to_join_and_the_people_to_add_are_found() {
-    let rig = rig_with(true).await;
+    let rig = setup().await;
     let requests = rig.handle.requests();
     let suggested = requests.joinable_teams(None).await.unwrap();
     let names: Vec<_> = suggested.iter().map(|team| team.name.as_str()).collect();
@@ -388,7 +361,7 @@ async fn the_teams_to_join_and_the_people_to_add_are_found() {
 
 #[tokio::test]
 async fn the_people_asking_to_join_are_named() {
-    let rig = rig_with(true).await;
+    let rig = setup().await;
     let requests = rig.handle.requests();
     assert!(requests.team_join_requests(GROUP).await.unwrap().is_empty());
     rig.mock
@@ -423,7 +396,7 @@ async fn the_people_asking_to_join_are_named() {
 
 #[tokio::test]
 async fn a_team_s_picture_is_read_when_it_is_a_picture() {
-    let rig = rig_with(true).await;
+    let rig = setup().await;
     let requests = rig.handle.requests();
     let picture = TeamPicture {
         own: "00000000-0000-4000-8000-0000000000a1".to_owned(),
@@ -475,7 +448,7 @@ async fn a_team_s_picture_is_read_when_it_is_a_picture() {
 
 #[tokio::test]
 async fn a_team_s_apps_the_store_and_templates_are_read() {
-    let rig = rig_with(true).await;
+    let rig = setup().await;
     let requests = rig.handle.requests();
     let apps = requests.team_apps(TEAM).await.unwrap();
     assert_eq!(apps.len(), 2, "the app Teams keeps for itself isn't listed");
@@ -489,8 +462,8 @@ async fn a_team_s_apps_the_store_and_templates_are_read() {
 }
 
 #[tokio::test]
-async fn a_team_write_goes_under_the_fence_and_its_change_is_listed_at_once() {
-    let mut rig = rig_with(true).await;
+async fn a_team_write_is_sent_and_its_change_is_listed_at_once() {
+    let mut rig = setup().await;
     rig.settled().await;
     let requests = rig.handle.requests();
     rig.mock.answer_next("PATCH", "", 200, &json!({})).await;
@@ -519,7 +492,7 @@ async fn a_team_write_goes_under_the_fence_and_its_change_is_listed_at_once() {
 
 #[tokio::test]
 async fn a_new_team_is_listed_with_the_thread_its_answer_names() {
-    let mut rig = rig_with(true).await;
+    let mut rig = setup().await;
     rig.settled().await;
     let requests = rig.handle.requests();
     rig.mock
@@ -564,7 +537,7 @@ async fn a_new_team_is_listed_with_the_thread_its_answer_names() {
 
 #[tokio::test]
 async fn people_added_that_the_answer_leaves_out_are_told() {
-    let rig = rig_with(true).await;
+    let rig = setup().await;
     rig.mock
         .answer_next("PUT", "", 200, &json!({"value": {"failedMembers": [LAB_C]}}))
         .await;
@@ -589,7 +562,7 @@ async fn people_added_that_the_answer_leaves_out_are_told() {
 
 #[tokio::test]
 async fn teams_refusal_comes_back_with_its_code_and_nothing_changes() {
-    let mut rig = rig_with(true).await;
+    let mut rig = setup().await;
     rig.settled().await;
     let requests = rig.handle.requests();
     for verb in ["PUT", "POST", "DELETE"] {
@@ -617,44 +590,8 @@ async fn teams_refusal_comes_back_with_its_code_and_nothing_changes() {
 }
 
 #[tokio::test]
-async fn a_team_write_the_lab_fence_denies_is_never_sent() {
-    let mut rig = rig_with(false).await;
-    rig.settled().await;
-    let before = rig.mock.received_requests().await.len();
-    let refused = rig
-        .handle
-        .requests()
-        .team_write(
-            TeamWrite::Edit {
-                team: TEAM.to_owned(),
-                name: Some("Not here".to_owned()),
-                description: String::new(),
-                public: None,
-            },
-            Some(TeamChange::Edited {
-                team: TEAM.to_owned(),
-                name: Some("Not here".to_owned()),
-                description: String::new(),
-                public: None,
-            }),
-        )
-        .await
-        .unwrap_err();
-    assert!(
-        matches!(refused, EngineError::TeamNotChanged { code: None }),
-        "{refused:?}"
-    );
-    let sent = rig.mock.received_requests().await;
-    assert!(
-        sent[before..].iter().all(|request| request.method.as_str() == "GET"),
-        "no write went"
-    );
-    assert_ne!(rig.stored_team().await.name, "Not here");
-}
-
-#[tokio::test]
 async fn hiding_a_team_for_the_account_reaches_nobody_and_lists_it_hidden() {
-    let mut rig = rig_with(true).await;
+    let mut rig = setup().await;
     rig.settled().await;
     let requests = rig.handle.requests();
     rig.mock.answer_next("PUT", "hide", 200, &json!({})).await;
@@ -696,7 +633,7 @@ async fn hiding_a_team_for_the_account_reaches_nobody_and_lists_it_hidden() {
 
 #[tokio::test]
 async fn a_team_write_turned_away_for_its_token_goes_once_more() {
-    let rig = rig_with(true).await;
+    let rig = setup().await;
     rig.mock.answer_next("PATCH", "", 401, &json!({})).await;
     rig.mock.answer_next("PATCH", "", 200, &json!({})).await;
     rig.handle
@@ -721,7 +658,7 @@ async fn a_team_write_turned_away_for_its_token_goes_once_more() {
 async fn people_a_channel_can_t_be_given_come_back_as_not_added() {
     let requests_of = |rig: &Rig| rig.handle.requests();
     // a channel's group in no form the service takes: nothing sent, nobody added
-    let rig = rig_with(true).await;
+    let rig = setup().await;
     let not_added = requests_of(&rig)
         .add_channel_members(GROUP, "not-a-channel-group", vec![LAB_B.to_owned()])
         .await
@@ -730,9 +667,10 @@ async fn people_a_channel_can_t_be_given_come_back_as_not_added() {
     // a people search the service refuses finds nobody
     rig.mock.refuse_next("POST", "users/profilesearch", 403).await;
     assert!(requests_of(&rig).team_people(TEAM, "lab").await.unwrap().is_empty());
-    // the lab fence denies it: nothing sent, nobody added
-    let denied = rig_with(false).await;
-    let not_added = requests_of(&denied)
+    // An explicit service rejection reports everyone as not added and is not retried.
+    let refused = setup().await;
+    refused.mock.refuse_next("POST", "/users", 403).await;
+    let not_added = requests_of(&refused)
         .add_channel_members(
             GROUP,
             "OID:00000000-0000-4000-8000-0000000000cc@00000000-0000-4000-8000-0000000000d0",
@@ -741,13 +679,15 @@ async fn people_a_channel_can_t_be_given_come_back_as_not_added() {
         .await
         .unwrap();
     assert_eq!(not_added, [LAB_B]);
-    assert!(
-        denied
+    assert_eq!(
+        refused
             .mock
             .received_requests()
             .await
             .iter()
-            .all(|request| !request.url.path().ends_with("/users")),
-        "nothing sent"
+            .filter(|request| request.url.path().ends_with("/users"))
+            .count(),
+        1,
+        "one rejected attempt"
     );
 }

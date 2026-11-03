@@ -20,7 +20,7 @@ use teams_auth::session::{AccessToken, Renewal};
 use teams_auth::token::TokenError;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Event, Parts, Push};
 use teams_core::{Availability, Outbox};
-use teams_fence::{FailClosed, Fence, FenceLog, Mri, Roster};
+use teams_fence::{Fence, FenceLog, Mri, Roster};
 use teams_mock::{CHAT_BASE, ChatServiceMock, ECHO, LAB_A, LAB_B, LAB_C, OUTSIDER, PRESENCE_BASE, TrouterMock};
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::Store;
@@ -85,13 +85,13 @@ async fn rig(poll: Duration, subscribed: Duration, polling_only: &[&str]) -> Rig
         token: mock.token(LAB_A).unwrap(),
         renewals: broadcast::channel(4).0,
     });
-    let fence = Arc::new(Fence::new(
+    let _fence = Arc::new(Fence::new(
         Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), [Mri::new(ECHO)]),
         FenceLog::from_writer(std::io::sink()),
     ));
     let origin = mock.origin();
     let http = || {
-        HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &origin)
+        HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin)
             .unwrap()
             .with_presence(PRESENCE_BASE)
             .unwrap()
@@ -105,12 +105,7 @@ async fn rig(poll: Duration, subscribed: Duration, polling_only: &[&str]) -> Rig
             backoff_jitter_percent: 0,
             ..Options::default()
         });
-    let outbox = Outbox::new(
-        transport,
-        Arc::clone(&fence),
-        Arc::new(FailClosed),
-        Author::new(Mri::new(LAB_A), "Lab A"),
-    );
+    let outbox = Outbox::new(transport, Author::new(Mri::new(LAB_A), "Lab A"));
     let handle = engine::start(Parts {
         calls: None,
         store: Store::open(&dir.path().join("store.sqlite")).unwrap(),

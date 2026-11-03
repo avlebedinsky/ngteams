@@ -15,7 +15,6 @@
 use std::ffi::OsString;
 use std::fs;
 use std::os::unix::fs::PermissionsExt as _;
-use std::sync::Arc;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -29,7 +28,6 @@ use teams_auth::refresh::refresh_token_key;
 use teams_auth::secrets::{MemorySecretStore, Secret, SecretStore};
 use teams_auth::signin::{SignInAnswer, SignInRequest, WindowSignInError};
 use teams_auth::token::{EntraConfig, NATIVE_CLIENT_REDIRECT, TEAMS_NATIVE_CLIENT_ID, TokenClient, TokenError};
-use teams_fence::Fence;
 use teams_fence::lab::LabLocations;
 use teams_fence::personal::{PersonalAccount, PersonalError, PersonalPaths};
 use teams_mock::CHAT_BASE;
@@ -95,8 +93,15 @@ async fn signed_in(setup: &Setup, upn: &str, oid: &str, store: &MemorySecretStor
 
 /// `account`'s engine under its own personal fence, its secrets a store of its own (nothing is sent).
 fn start_engine(setup: &Setup, account: &PersonalAccount) -> ngteams::engine::PersonalEngine<MemorySecretStore> {
-    let fence = Arc::new(Fence::open_personal_with(&setup.paths, &account.upn, &setup.lab).unwrap());
-    ngteams::engine::start(&setup.paths, account, fence, MemorySecretStore::new(), false, None).unwrap()
+    ngteams::engine::start(
+        &setup.paths,
+        account,
+        teams_core::CallFloor::new(),
+        MemorySecretStore::new(),
+        false,
+        None,
+    )
+    .unwrap()
 }
 
 /// An unsigned ID token naming `upn`, `oid`, the tenant, for the native client.

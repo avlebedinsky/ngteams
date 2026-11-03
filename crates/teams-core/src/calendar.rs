@@ -30,7 +30,7 @@ use teams_proto::{
     Author, CalendarEvent, CalendarView, CancelChannelEvent, CancelEvent, ChannelEventRead, ChannelMeetup, Client,
     CreateChannelEvent, CreateEvent, CreateOnlineMeeting, Credentials, CsaTeams, DeleteEvent, EventAttendee,
     EventDraft, EventRead, EventTime, FreeBusyAsk, FullEvent, HttpError, HttpTransport, MeetingChannel, MeetingDetails,
-    MeetingThread, MeetingTimes, Mutating, Organizer, PersonSchedule, ScheduledMeeting, Schedules, SetMeetingTitle,
+    MeetingThread, MeetingTimes, Organizer, PersonSchedule, Request, ScheduledMeeting, Schedules, SetMeetingTitle,
     ShortProfileLookup, TimeZoneSettings, Transport, UpdateChannelEvent, UpdateEvent,
 };
 use teams_store::{Store, StoreError, StoredEvent};
@@ -659,7 +659,7 @@ async fn online_meeting<C: Credentials + 'static>(client: &Client<HttpTransport<
 async fn send<T, R>(outbox: &Outbox<T>, write: &R, kind: &'static str) -> Result<Vec<u8>, EngineError>
 where
     T: Transport<Error = HttpError>,
-    R: Mutating + Clone + Send,
+    R: Request + Clone + Send,
 {
     let mut retries = CallRetries::default();
     loop {

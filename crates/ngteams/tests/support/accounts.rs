@@ -12,20 +12,17 @@ fn the_runner_holds_one_engine_per_account_and_releases_it_on_shutdown() {
         floor: CallFloor::new(),
         devices: Some(crate::calling::CallDevices::open(teams_media::devices::pipewire::Reach::Sandbox).unwrap()),
     };
-    let fence = || Fence::open_personal_with(&runner.setup.paths, &account.upn, &runner.setup.lab).unwrap();
-    let started = runner.start_on(&account, fence(), MemorySecretStore::new()).unwrap();
+    let started = runner.start_on(&account, MemorySecretStore::new()).unwrap();
     assert!(format!("{started:?}").contains(&account.upn));
     assert!(started.calls.as_ref().unwrap().video.is_some());
-    let error = runner
-        .start_on(&account, fence(), MemorySecretStore::new())
-        .unwrap_err();
+    let error = runner.start_on(&account, MemorySecretStore::new()).unwrap_err();
     assert!(
         error.contains(&account.upn) && error.contains("another engine runs"),
         "{error}"
     );
     started.engine.handle.shutdown();
     runner
-        .start_on(&account, fence(), MemorySecretStore::new())
+        .start_on(&account, MemorySecretStore::new())
         .unwrap()
         .engine
         .handle

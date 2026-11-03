@@ -262,9 +262,6 @@ async fn a_group_call_shows_each_participant_on_a_line_of_its_own() {
     // the call runs on for a and b
     hang_up(&mut a, call_a).await;
     hang_up(&mut b, call_b).await;
-    for account in [&a, &b, &c] {
-        assert!(account.log.denials().is_empty(), "{:#?}", account.log.denials());
-    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -313,9 +310,6 @@ async fn a_late_joiner_is_shown_and_sees_everyone() {
 
     for (account, call) in [(&mut a, call_a), (&mut b, call_b), (&mut c, call_c)] {
         hang_up(account, call).await;
-    }
-    for account in [&a, &b, &c] {
-        assert!(account.log.denials().is_empty(), "{:#?}", account.log.denials());
     }
 }
 
@@ -369,7 +363,4 @@ async fn a_group_call_without_video_shows_nobody_on_a_line_and_nobody_speaking()
     tokio::time::sleep(Duration::from_millis(300)).await;
     let mix = heard(&a.recording, PEER_TONE, TALK);
     assert!(mix > 0.25, "a heard its mixer's tone at {mix:.3}");
-    for account in [&a, &b, &c] {
-        assert!(account.log.denials().is_empty(), "{:#?}", account.log.denials());
-    }
 }

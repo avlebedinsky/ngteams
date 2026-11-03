@@ -1,11 +1,4 @@
-//! Microsoft Graph's two reads (M2 Task 12) on wiremock, through the `test-support` mock origin: a user's name
-//! (`users/<object id>?$select=id,displayName`) and their 96×96 picture, each a `GET` with the account's Graph token
-//! and nothing else, in the shape `proto-lab probe profile` read live (the synthetic fixture
-//! `tests/fixtures/graph/profile.json`); any other Graph read goes to the same base; a plain request to Graph that
-//! changes anything is refused before anything is sent (Graph is a contacting service the fence's classifier reads no
-//! write of).
-//!
-//! Tokens and ids here are placeholders, never real ones.
+//! Graph reads against synthetic mocks: selected user fields, typed pictures, service boundaries and credential renewal.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
@@ -19,11 +12,10 @@ use base64::engine::general_purpose::STANDARD;
 use serde_json::Value;
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
-use teams_fence::{Fence, FenceLog, Mri, Roster};
 use teams_proto::{
     Client, Credentials, Endpoint, FileDownload, FileRange, FileThumbnails, GRAPH_AUDIENCE, GraphAnswerError,
-    GraphPicture, GraphUser, HttpError, HttpTransport, MAX_PICTURE, Method, PictureFormat, Read, Refusal, Request,
-    Response, Service, is_thumbnail_link, object_id,
+    GraphPicture, GraphUser, HttpError, HttpTransport, MAX_PICTURE, PictureFormat, Read, Refusal, Response, Service,
+    is_thumbnail_link, object_id,
 };
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -82,11 +74,7 @@ impl Credentials for FakeTokens {
 async fn setup() -> (MockServer, Arc<FakeTokens>, Client<HttpTransport<FakeTokens>>) {
     let server = MockServer::start().await;
     let tokens = Arc::new(FakeTokens::default());
-    let fence = Arc::new(Fence::new(
-        Roster::new([Mri::new(lab_a())], []),
-        FenceLog::from_writer(std::io::sink()),
-    ));
-    let transport = HttpTransport::with_mock_origin(Arc::clone(&tokens), fence, CHAT_BASE, &server.uri()).unwrap();
+    let transport = HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &server.uri()).unwrap();
     (server, tokens, Client::new(transport))
 }
 
@@ -303,55 +291,6 @@ async fn any_other_graph_read_goes_to_graph_with_its_query() {
             "/v1.0/me?".to_owned(),
         ]
     );
-}
-
-/// A plain request to Graph of the test's choosing.
-struct GraphWrite(Method, Endpoint);
-
-impl Request for GraphWrite {
-    fn service(&self) -> Service {
-        Service::Graph
-    }
-
-    fn method(&self) -> Method {
-        self.0
-    }
-
-    fn endpoint(&self) -> Endpoint {
-        self.1.clone()
-    }
-
-    fn body(&self) -> Option<Value> {
-        Some(serde_json::json!({}))
-    }
-}
-
-#[tokio::test]
-async fn a_graph_write_is_refused_before_anything_is_sent() {
-    let (server, tokens, client) = setup().await;
-    let writes = [
-        GraphWrite(Method::Post, Endpoint::new(["$batch"])),
-        GraphWrite(Method::Post, Endpoint::new(["me", "sendMail"])),
-        GraphWrite(Method::Post, Endpoint::new(["chats", "19:chat@thread.v2", "messages"])),
-        GraphWrite(Method::Patch, Endpoint::new(["users", GUID_A])),
-        GraphWrite(Method::Delete, Endpoint::new(["me", "events", "event-id"])),
-    ];
-    for write in writes {
-        let shown = format!("{:?} {:?}", write.0, write.1);
-        match client.send(&write).await {
-            Err(HttpError::Refused(Refusal::Unreadable)) => {}
-            other => panic!("{shown}: {other:?}"),
-        }
-    }
-    match client
-        .read(&OtherGraphRead(Endpoint::new(["users", GUID_A, "..", "x"])))
-        .await
-    {
-        Err(HttpError::Refused(Refusal::Segment)) => {}
-        other => panic!("{other:?}"),
-    }
-    assert!(server.received_requests().await.unwrap().is_empty());
-    assert!(tokens.audiences().is_empty(), "no token is asked for a refused request");
 }
 
 #[tokio::test]

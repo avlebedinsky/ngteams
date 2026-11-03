@@ -12,7 +12,7 @@ use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Parts};
 use teams_core::{EngineError, FileStream, Outbox};
-use teams_fence::{FailClosed, Fence, FenceLog, Mri, Roster};
+use teams_fence::{Fence, FenceLog, Mri, Roster};
 use teams_mock::{CHAT_BASE, LAB_A};
 use teams_proto::{Author, Client, Credentials, FileDownload, HttpTransport, MAX_RANGE, MAX_STREAM};
 use teams_store::Store;
@@ -52,22 +52,16 @@ async fn running_engine() -> Rig {
     let dir = tempfile::tempdir().unwrap();
     let failing = Arc::new(AtomicBool::new(false));
     let tokens = Arc::new(Tokens(Arc::clone(&failing)));
-    let fence = Arc::new(Fence::new(
+    let _fence = Arc::new(Fence::new(
         Roster::new([Mri::new(LAB_A)], []),
         FenceLog::from_writer(std::io::sink()),
     ));
-    let http =
-        || HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &server.uri()).unwrap();
+    let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &server.uri()).unwrap();
     let handle = engine::start(Parts {
         calls: None,
         store: Store::open(&dir.path().join("file.sqlite")).unwrap(),
         client: Arc::new(Client::new(http())),
-        outbox: Outbox::new(
-            Arc::new(http()),
-            Arc::clone(&fence),
-            Arc::new(FailClosed),
-            Author::new(Mri::new(LAB_A), "Lab A"),
-        ),
+        outbox: Outbox::new(Arc::new(http()), Author::new(Mri::new(LAB_A), "Lab A")),
         push: None,
         options: EngineOptions::default(),
         known_names: Vec::new(),

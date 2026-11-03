@@ -181,15 +181,15 @@ fn engine(lab: &Lab, me: &str) -> (EngineHandle, SharedLog, tempfile::TempDir) {
         renewals: broadcast::channel(4).0,
     });
     let log = SharedLog::default();
-    let fence = Arc::new(Fence::new(
+    let _fence = Arc::new(Fence::new(
         Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), []),
         FenceLog::from_writer(log.clone()),
     ));
     let origin = lab.mock.origin();
-    let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &origin).unwrap();
+    let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin).unwrap();
     let transport = Arc::new(http());
-    let membership = LiveMembershipSource::with_mock_origin(&origin).unwrap();
-    membership.set_credential_source(transport.clone());
+    let _membership = LiveMembershipSource::with_mock_origin(&origin).unwrap();
+
     let trouter = Trouter::with_mock_origin(Arc::clone(&transport), Arc::clone(&tokens), lab.trouter.origin())
         .unwrap()
         .with_options(Options {
@@ -203,12 +203,7 @@ fn engine(lab: &Lab, me: &str) -> (EngineHandle, SharedLog, tempfile::TempDir) {
         calls: None,
         store: Store::open(&dir.path().join("store").join("lab.sqlite")).unwrap(),
         client: Arc::new(Client::new(http())),
-        outbox: Outbox::new(
-            transport,
-            fence,
-            Arc::new(membership),
-            Author::new(Mri::new(me), "Lab account"),
-        ),
+        outbox: Outbox::new(transport, Author::new(Mri::new(me), "Lab account")),
         push: Some(Push::new(trouter)),
         options: EngineOptions {
             tick: Duration::from_millis(50),

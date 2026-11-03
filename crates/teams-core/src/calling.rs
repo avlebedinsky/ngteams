@@ -79,7 +79,7 @@ use teams_call::{
 use teams_fence::Mri;
 use teams_proto::{
     ChannelMeetup, ChannelParameters, Client, Credentials, EndpointRegistrar, HttpError, HttpTransport, MediaContent,
-    MeetingInfo, Mutating, Transport,
+    MeetingInfo, Request, Transport,
 };
 use teams_trouter::{CallResponder, CallResponse, Ignored, PushEvent, Trouter, TrouterCredentials, TrouterHandle};
 use tokio::sync::{mpsc, oneshot};
@@ -386,7 +386,7 @@ struct Sink<T> {
 }
 
 impl<T: Transport<Error = HttpError> + 'static> WriteSink for Sink<T> {
-    fn submit<R: Mutating + Clone + Send + 'static>(&mut self, _id: WriteId, write: R) {
+    fn submit<R: Request + Clone + Send + 'static>(&mut self, _id: WriteId, write: R) {
         let outbox = Arc::clone(&self.outbox);
         let mut again: Again = Box::new(move || {
             let (outbox, write) = (Arc::clone(&outbox), write.clone());
@@ -571,7 +571,7 @@ where
                 Some(Effect::Event(event)) => self.told(event, now),
                 // an invitation dropped before it rang: its attach failed for good (no further attempt goes), its
                 // answer didn't read, its media failed; the fence ends its offer, which then holds no call open
-                Some(Effect::LetGo { attach }) => self.outbox.fence().let_go(attach.as_str()),
+                Some(Effect::LetGo { attach }) => self.outbox.tracker().let_go(attach.as_str()),
             }
         }
     }

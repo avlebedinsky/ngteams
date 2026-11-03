@@ -11,7 +11,7 @@ publish.workspace = true
 # the service hosts) and `ProbeOwnState` (an own-state request for the transport's tests; the reviewed list itself is
 # empty). It turns on `teams-fence/test-support`, so `teams_fence::test_support_enabled()` reports it and a lab binary
 # built with it refuses to run.
-test-support = ["teams-fence/test-support"]
+test-support = []
 
 [dependencies]
 # Graph's sharing token of a file's sharing link (base64url), for its thumbnails
@@ -45,6 +45,7 @@ tokio = { workspace = true, features = ["time"] }
 url.workspace = true
 
 [dev-dependencies]
+teams-call.workspace = true
 # a picture's bytes in the Graph fixture
 base64.workspace = true
 # the tests mint permits from a fence over a test roster and a fake membership source; the trybuild cases here see it

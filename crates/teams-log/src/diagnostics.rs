@@ -17,8 +17,6 @@ pub const WARNING: &str = "contains full requests and responses: not safe to pas
 pub const MAX_LOG_LINES: usize = 200;
 /// The most bytes of the log's lines the text holds (the latest lines kept).
 pub const MAX_LOG_BYTES: usize = 128 * 1024;
-/// The most `fence.log` lines the text holds.
-pub const MAX_FENCE_LINES: usize = 40;
 /// The most bytes read from the end of a file.
 const TAIL_BYTES: u64 = 1024 * 1024;
 
@@ -37,8 +35,6 @@ pub struct Source {
     pub log_file: Option<PathBuf>,
     /// Why the log isn't written, when it isn't.
     pub log_problem: Option<String>,
-    /// The account's `fence.log`.
-    pub fence_log: Option<PathBuf>,
 }
 
 /// The text, and whether it holds a `debug` line.
@@ -83,7 +79,6 @@ impl Source {
             .log_file
             .as_deref()
             .map(|path| capped(last_lines(path, MAX_LOG_LINES), MAX_LOG_BYTES));
-        let fence_lines = self.fence_log.as_deref().map(|path| last_lines(path, MAX_FENCE_LINES));
         let has_debug = log_lines
             .as_ref()
             .and_then(|lines| lines.as_ref().ok())
@@ -109,7 +104,6 @@ impl Source {
             (None, None) => writeln!(text, "log: not written"),
         };
         section(&mut text, "the log", log_lines);
-        section(&mut text, "fence.log", fence_lines);
         Report { text, has_debug }
     }
 }

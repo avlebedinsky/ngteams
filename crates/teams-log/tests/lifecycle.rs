@@ -13,7 +13,6 @@ fn source(log_file: Option<std::path::PathBuf>) -> Source {
         app: "teams-app 0.1.0".to_owned(),
         log_file,
         log_problem: None,
-        fence_log: None,
     }
 }
 

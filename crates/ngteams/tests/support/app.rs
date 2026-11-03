@@ -5,9 +5,9 @@ use std::time::{Duration, Instant};
 
 use gpui::TestAppContext;
 use teams_auth::secrets::MemorySecretStore;
+use teams_core::CallFloor;
 use teams_fence::lab::LabLocations;
 use teams_fence::personal::PersonalPaths;
-use teams_fence::{CallFloor, Fence};
 
 use super::*;
 use crate::setup::Setup;
@@ -41,11 +41,10 @@ pub(crate) fn setup(root: &Path, suffix: u8) -> (Setup, PersonalAccount) {
 }
 
 fn started(setup: &Setup, account: PersonalAccount) -> Started<MemorySecretStore> {
-    let fence = Fence::open_personal_with(&setup.paths, &account.upn, &setup.lab).unwrap();
     let engine = crate::engine::start(
         &setup.paths,
         &account,
-        Arc::new(fence),
+        teams_core::CallFloor::new(),
         MemorySecretStore::new(),
         false,
         None,

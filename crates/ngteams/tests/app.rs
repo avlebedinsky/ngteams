@@ -22,10 +22,10 @@ use ngteams::app::{self, Launch, SIGNED_OUT_HINT, SignInAgain};
 use ngteams::calling::PersonalCalls;
 use ngteams::setup::Setup;
 use teams_auth::secrets::MemorySecretStore;
+use teams_core::CallFloor;
 use teams_core::{CallAction, CallActionError, CallId, EngineError, Event, IncomingCall, RegistrationReport};
 use teams_fence::lab::LabLocations;
 use teams_fence::personal::{PersonalAccount, PersonalPaths};
-use teams_fence::{CallFloor, Fence};
 use teams_media::devices::file::{AudioInput, FileDevices, Pacing, PatternCamera};
 use teams_mock::CHAT_BASE;
 use teams_ui::bus::BusError;
@@ -78,8 +78,16 @@ fn settle(cx: &TestAppContext, mut done: impl FnMut(&TestAppContext) -> bool) {
 fn signed_out_shows_it_stops_the_engine_and_opens_the_sign_in_window_again() {
     let dir = tempfile::tempdir().unwrap();
     let (setup, account) = signed_in_setup(&dir);
-    let fence = Arc::new(Fence::open_personal_with(&setup.paths, &account.upn, &setup.lab).unwrap());
-    let engine = ngteams::engine::start(&setup.paths, &account, fence, MemorySecretStore::new(), false, None).unwrap();
+
+    let engine = ngteams::engine::start(
+        &setup.paths,
+        &account,
+        teams_core::CallFloor::new(),
+        MemorySecretStore::new(),
+        false,
+        None,
+    )
+    .unwrap();
     let core = engine.handle.requests();
     let cx = TestAppContext::single();
     let (models, bridge) = cx.update(|cx| app::bridge(engine.handle, None, cx));
@@ -116,9 +124,17 @@ fn signed_out_shows_it_stops_the_engine_and_opens_the_sign_in_window_again() {
 fn shown_after_a_ring(calls: Option<&PersonalCalls>) -> (bool, bool, bool, bool, bool) {
     let dir = tempfile::tempdir().unwrap();
     let (setup, account) = signed_in_setup(&dir);
-    let fence = Arc::new(Fence::open_personal_with(&setup.paths, &account.upn, &setup.lab).unwrap());
+
     // the engine without calling: the models' side alone is under test here (tests/calls.rs runs the calls)
-    let engine = ngteams::engine::start(&setup.paths, &account, fence, MemorySecretStore::new(), false, None).unwrap();
+    let engine = ngteams::engine::start(
+        &setup.paths,
+        &account,
+        teams_core::CallFloor::new(),
+        MemorySecretStore::new(),
+        false,
+        None,
+    )
+    .unwrap();
     let cx = TestAppContext::single();
     let (models, _bridge) = cx.update(|cx| app::bridge(engine.handle, calls, cx));
     cx.update(|cx| {
@@ -187,8 +203,16 @@ fn sandbox_devices_are_refused_outside_the_sandbox_and_the_engine_without_them_p
         ngteams::calling::open(teams_media::devices::pipewire::Reach::Sandbox).is_err()
             || std::env::var_os("UI_SANDBOX_DIR").is_some()
     );
-    let fence = Arc::new(Fence::open_personal_with(&setup.paths, &account.upn, &setup.lab).unwrap());
-    let engine = ngteams::engine::start(&setup.paths, &account, fence, MemorySecretStore::new(), false, None).unwrap();
+
+    let engine = ngteams::engine::start(
+        &setup.paths,
+        &account,
+        teams_core::CallFloor::new(),
+        MemorySecretStore::new(),
+        false,
+        None,
+    )
+    .unwrap();
     let refused = engine
         .handle
         .requests()
@@ -231,8 +255,16 @@ fn the_prompt(cx: &TestAppContext, main: WindowHandle<KitRoot>) -> gpui::Entity<
 fn the_rail_s_plus_asks_for_an_account_and_says_one_the_app_runs_already() {
     let dir = tempfile::tempdir().unwrap();
     let (setup, account) = signed_in_setup(&dir);
-    let fence = Arc::new(Fence::open_personal_with(&setup.paths, &account.upn, &setup.lab).unwrap());
-    let engine = ngteams::engine::start(&setup.paths, &account, fence, MemorySecretStore::new(), false, None).unwrap();
+
+    let engine = ngteams::engine::start(
+        &setup.paths,
+        &account,
+        teams_core::CallFloor::new(),
+        MemorySecretStore::new(),
+        false,
+        None,
+    )
+    .unwrap();
     let cx = TestAppContext::single();
     let launch = Launch {
         first: Started {
@@ -287,8 +319,14 @@ fn the_rail_s_plus_asks_for_an_account_and_says_one_the_app_runs_already() {
 fn the_read_only_mode_adds_removes_and_signs_in_no_account_and_says_signed_out_only() {
     let dir = tempfile::tempdir().unwrap();
     let (setup, account) = signed_in_setup(&dir);
-    let fence = Arc::new(Fence::open_personal_with(&setup.paths, &account.upn, &setup.lab).unwrap());
-    let engine = ngteams::engine::start_read_only(&setup.paths, &account, fence, MemorySecretStore::new()).unwrap();
+
+    let engine = ngteams::engine::start_read_only(
+        &setup.paths,
+        &account,
+        teams_core::CallFloor::new(),
+        MemorySecretStore::new(),
+    )
+    .unwrap();
     let core = engine.handle.requests();
     assert!(core.read_only(), "the views see the read-only mode");
     let signed_out = engine.session.watch_signed_out();

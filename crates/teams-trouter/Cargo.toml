@@ -34,6 +34,7 @@ teams-auth.workspace = true
 # the calling socket's deliveries read by the fence (its call registry, offered invitations) and its typed responses
 # decided by it
 teams-fence.workspace = true
+teams-call.workspace = true
 # the frame sink and the typed own frames, the registrar registration (a plain request), the message model
 teams-proto.workspace = true
 # at `debug`, every frame both ways as the diagnostic log's typed record, which redacts `user.authenticate`
@@ -46,6 +47,7 @@ tokio-tungstenite.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+tempfile.workspace = true
 # a's writes, sent to the chat service mock as the web client sends them
 reqwest.workspace = true
 # the tests' fence runs over a test roster and a test log

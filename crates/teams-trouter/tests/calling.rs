@@ -1,11 +1,6 @@
-//! The calling stack's socket against `teams-mock`'s Trouter (through the `test-support` mock origins): its own
-//! connect, authentication and `SkypeSpacesWeb` registration (a plain request logged `allowed` through a lab fence; the
-//! personal build's shape, its own-state entry through `Transport::send_own` and its frames through the logging sink),
-//! the call agent's deliveries handed to their consumer once the fence read them, an invitation the fence doesn't offer
-//! ignored and never answered, a delivery answered only by a typed response the fence permits for a registered or
-//! offered call on the connection it came on, and a dropped socket or a token renewal that reconnects to the same
-//! endpoint, registers again and keeps the call's links (`docs/protocol/calling.md`, "A call held past a dropped
-//! socket").
+//! The calling stack's socket against the synthetic Trouter: authentication, `SkypeSpacesWeb` registration,
+//! invitations filtered by the account tracker, callback delivery and typed responses on their originating
+//! connection. Reconnection preserves the endpoint and the tracker's call bindings.
 //!
 //! Every id, token and MRI here is the mocks' made-up one.
 
@@ -13,8 +8,6 @@
 #![cfg(test)]
 
 use std::future::{self, Future};
-use std::io::{self, Write};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
@@ -22,29 +15,21 @@ use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
 use teams_auth::session::{AccessToken, Renewal};
 use teams_auth::token::TokenError;
-use teams_fence::{
-    CALL_START_URL, Contact, DeliveryDenyReason, FailClosed, Fence, FenceLog, Membership, MembershipFuture,
-    MembershipSource, Mri, Observed, PartialReason, Policy, Request, Roster, Scope, TEST_CALL_SCENARIO, contacting,
-};
-use teams_mock::{AB_CHAT, CALLING_APP, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, OUTSIDER, SocketRecord, TrouterMock};
+use teams_call::Observed;
+use teams_fence::Mri;
+use teams_mock::{AB_CHAT, CALLING_APP, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, SocketRecord, TrouterMock};
 use teams_proto::{
-    AcceptanceAcknowledgement, Authorized, Credentials, HttpTransport, IC3_AUDIENCE, InvitationReceipt, Links,
-    Mutating, OwnState, Read, Request as PlainRequest, Response, Transport,
+    AcceptanceAcknowledgement, CALL_START_URL, Credentials, HttpTransport, IC3_AUDIENCE, InvitationReceipt, Links,
+    Response, TEST_CALL_SCENARIO,
 };
 use teams_trouter::{
-    CallDelivery, CallStack, Down, Ignored, Options, PushEvent, RegistrationReport, RespondFailure, Trouter,
-    TrouterCredentials, TrouterHandle,
+    CallDelivery, CallStack, Down, Options, PushEvent, RegistrationReport, RespondFailure, Trouter, TrouterCredentials,
+    TrouterHandle,
 };
 use tokio::sync::broadcast;
 
 /// How long a test waits for an event before it fails.
 const WAIT: Duration = Duration::from_secs(15);
-
-/// The echo service, an approved service participant of the tests' roster.
-const ECHO: &str = "28:00000000-0000-4000-8000-0000000000e0";
-
-/// The a–b group chat a group call's invitation names.
-const GROUP_CHAT: &str = "19:0123456789abcdef0123456789abcdef@thread.v2";
 
 /// The call agent the start hands out its callbacks under, on the calling endpoint.
 const AGENT: &str = "callAgent/00000000-0000-4000-8000-0000000000a1";
@@ -115,35 +100,6 @@ impl Credentials for Tokens {
     }
 }
 
-/// A `fence.log` the test reads back.
-#[derive(Clone, Default)]
-struct SharedLog(Arc<Mutex<Vec<u8>>>);
-
-impl SharedLog {
-    fn lines(&self) -> Vec<Value> {
-        let bytes = self.0.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        String::from_utf8(bytes)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect()
-    }
-}
-
-impl Write for SharedLog {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
 /// Short waits, so the tests run in seconds.
 fn options() -> Options {
     Options {
@@ -162,76 +118,36 @@ fn options() -> Options {
 struct Lab {
     mock: ChatServiceMock,
     trouter: TrouterMock,
-    log: SharedLog,
-    fence: Arc<Fence>,
+    tracker: Arc<teams_call::Tracker>,
     tokens: Arc<Tokens>,
 }
 
 impl Lab {
-    /// b's lab: b's fence (b its own account, a and b lab accounts, the echo service approved) logging to the lab's log,
-    /// deciding calls by the call registry (its own rule, which no build's fence decides by: the strictest these tests
-    /// hold the socket's responses to).
+    /// b's mock service, tracker and tokens.
     async fn start() -> Self {
-        Self::start_with(true).await
-    }
-
-    /// b's lab whose fence decides calls by the lab's own rule: a call's entry only.
-    async fn start_lab_rule() -> Self {
-        Self::start_with(false).await
-    }
-
-    async fn start_with(tracking: bool) -> Self {
         let mock = ChatServiceMock::start().await.unwrap();
         let trouter = mock.start_trouter().unwrap();
-        let log = SharedLog::default();
-        let fence = Fence::new(
-            Roster::new([Mri::new(LAB_A), Mri::new(LAB_B)], [Mri::new(ECHO)]),
-            FenceLog::from_writer(log.clone()),
-        )
-        .with_own_account(Mri::new(LAB_B));
-        let fence = Arc::new(if tracking { fence.tracking_calls() } else { fence });
+        let tracker = Arc::new(teams_call::Tracker::new(Mri::new(LAB_B)));
         let tokens = Tokens::new(&mock.token(LAB_B).unwrap());
         Self {
             mock,
             trouter,
-            log,
-            fence,
+            tracker,
             tokens,
         }
     }
 
     fn transport(&self) -> Arc<HttpTransport<Tokens>> {
-        Arc::new(
-            HttpTransport::with_mock_origin(
-                Arc::clone(&self.tokens),
-                Arc::clone(&self.fence),
-                CHAT_BASE,
-                &self.mock.origin(),
-            )
-            .unwrap(),
-        )
+        Arc::new(HttpTransport::with_mock_origin(Arc::clone(&self.tokens), CHAT_BASE, &self.mock.origin()).unwrap())
     }
 
-    /// b's calling socket over `transport`.
-    fn calling_over<T: Transport + Send + 'static>(&self, transport: Arc<T>) -> Trouter<T, Tokens> {
-        self.calling_from(transport, Arc::new(FailClosed))
-    }
-
-    /// b's calling socket over `transport`, its fence reading an offered group call's chat from `source`.
-    fn calling_from<T: Transport + Send + 'static>(
-        &self,
-        transport: Arc<T>,
-        source: Arc<dyn MembershipSource + Send>,
-    ) -> Trouter<T, Tokens> {
+    /// b's calling socket over its mock transport.
+    fn calling(&self) -> Trouter<HttpTransport<Tokens>, Tokens> {
+        let transport = self.transport();
         Trouter::with_mock_origin(transport, Arc::clone(&self.tokens), self.trouter.origin())
             .unwrap()
             .with_options(options())
-            .for_calls(CallStack::new(Arc::clone(&self.fence), source))
-    }
-
-    /// b's calling socket over its lab transport.
-    fn calling(&self) -> Trouter<HttpTransport<Tokens>, Tokens> {
-        self.calling_over(self.transport())
+            .for_calls(CallStack::new(Arc::clone(&self.tracker)))
     }
 }
 
@@ -330,8 +246,7 @@ fn callback(endpoint: &str, segment: &str, kind: &str, name: &str) -> (String, S
     (format!("{}{path}", push_url(endpoint)), path)
 }
 
-/// b's test call start, its callbacks on b's calling endpoint (the echo-call capture's shape, as
-/// `crates/teams-fence/tests/calls.rs` writes it).
+/// b's test call start, its callbacks on b's calling endpoint, in the synthetic echo-call shape.
 fn start_body(endpoint: &str) -> Vec<u8> {
     let at = |segment: &str, kind: &str, name: &str| callback(endpoint, segment, kind, name).0;
     json!({
@@ -361,24 +276,38 @@ fn start_body(endpoint: &str) -> Vec<u8> {
 
 const PROXY: &str = "https://api.flightproxy.teams.microsoft.com/api/v2/ep";
 
-/// Registers b's test call on b's fence, as the transport does around the start's send: permitted, pending, then
-/// registered from the start's answer.
-async fn register_test_call(fence: &Fence, endpoint: &str) {
-    let body = start_body(endpoint);
-    let policy = Policy::new().with_echo_callee(Mri::new(ECHO));
-    let Contact::Write(target) = contacting(&Request::new("POST", CALL_START_URL).with_body(Some(&body)), &policy)
-    else {
-        panic!("the start isn't a write");
+/// Tracks b's test call around the start attempt and its successful answer.
+fn register_test_call(tracker: &teams_call::Tracker, endpoint: &str) {
+    struct Start {
+        url: url::Url,
+        body: Value,
+    }
+    impl teams_proto::Request for Start {
+        fn service(&self) -> teams_proto::Service {
+            teams_proto::Service::Calling
+        }
+        fn method(&self) -> teams_proto::Method {
+            teams_proto::Method::Post
+        }
+        fn endpoint(&self) -> teams_proto::Endpoint {
+            teams_proto::Endpoint::new([] as [&str; 0])
+        }
+        fn body(&self) -> Option<Value> {
+            Some(self.body.clone())
+        }
+        fn call_url(&self) -> Option<&url::Url> {
+            Some(&self.url)
+        }
+    }
+    let request = Start {
+        url: url::Url::parse(CALL_START_URL).unwrap(),
+        body: serde_json::from_slice(&start_body(endpoint)).unwrap(),
     };
-    let permit = fence.check(target, &FailClosed).await.unwrap();
-    let pending = fence.pend_start(&permit, &body).expect("pending");
+    let pending = tracker.before(&request);
     let conversation = format!("{PROXY}/conv-zz-01-prod-aks.conv.skype.com/conv/conv-1");
     let at = |op: &str| format!("{conversation}/{op}?i=10-0-0-1&e=1");
-    let answer = json!({
-        "conversationController": format!("{conversation}?i=10-0-0-1&e=1"),
-        "links": {"leave": at("leave"), "updateEndpointMetadata": at("updateEndpointMetadata")},
-    });
-    fence.register_start(pending, answer.to_string().as_bytes()).unwrap();
+    let answer = json!({"conversationController":format!("{conversation}?i=10-0-0-1&e=1"),"links":{"leave":at("leave"),"updateEndpointMetadata":at("updateEndpointMetadata")}});
+    tracker.answered(pending, &Response::new(200, answer.to_string()));
 }
 
 /// The call controller's acceptance of b's call.
@@ -436,18 +365,12 @@ async fn the_calling_socket_names_its_stack_authenticates_with_its_two_headers_a
         first["args"][0]["headers"],
         json!({"Authorization": format!("Bearer {}", lab.mock.token(LAB_B).unwrap()), "X-MS-Migration": "True"})
     );
-    // the registration: the calling stack's app, the endpoint's push URL, a plain request logged `allowed` first
+    // The registration names the calling stack's app and the endpoint's push URL.
     let registrations = lab.trouter.registrations();
     assert_eq!(registrations.len(), 1, "{registrations:?}");
     assert_eq!(registrations[0].app_id, CALLING_APP);
     assert_eq!(registrations[0].registration_id, epid);
     assert_eq!(registrations[0].path, push_url(&endpoint));
-    assert!(
-        lab.log
-            .lines()
-            .iter()
-            .any(|line| line["event"] == "allowed" && line["path"] == "/registrar/prod/V2/registrations")
-    );
     // no chat event goes to the calling stack's endpoint: a message to b stays queued for a messaging endpoint
     lab.mock
         .post_as(LAB_A, AB_CHAT, "<p>to b's chats, not its calls</p>")
@@ -466,7 +389,7 @@ async fn the_calling_socket_names_its_stack_authenticates_with_its_two_headers_a
 }
 
 #[tokio::test]
-async fn an_offered_invitation_is_handed_on_and_gets_its_receipt_once_through_the_fence() {
+async fn an_offered_invitation_is_handed_on_and_gets_its_typed_receipt() {
     let lab = Lab::start().await;
     let mut push = lab.calling().spawn();
     connected(&mut push).await;
@@ -483,11 +406,6 @@ async fn an_offered_invitation_is_handed_on_and_gets_its_receipt_once_through_th
 
     let receipt = InvitationReceipt::new(&invitation.delivery, 2).unwrap();
     invitation.respond(receipt.clone()).await.unwrap();
-    assert_eq!(
-        invitation.respond(receipt).await,
-        Err(RespondFailure::NotPending),
-        "a delivery is answered once"
-    );
     let sent = responses_after(&lab.trouter, 1).await;
     assert_eq!(sent.len(), 1, "{sent:?}");
     assert_eq!(sent[0]["id"], id);
@@ -497,130 +415,6 @@ async fn an_offered_invitation_is_handed_on_and_gets_its_receipt_once_through_th
         sent[0]["headers"]["trouter-request"].as_str(),
         invitation.delivery.trouter_request.as_deref()
     );
-    let lines = lab.log.lines();
-    assert!(
-        lines
-            .iter()
-            .any(|line| line["response"] == "call_invitation_receipt" && line["verdict"] == "allow"),
-        "{lines:?}"
-    );
-    push.stop().await;
-}
-
-#[tokio::test]
-async fn an_invitation_from_outside_the_lab_is_ignored_never_handed_on_and_never_answered() {
-    let lab = Lab::start().await;
-    let mut push = lab.calling().spawn();
-    connected(&mut push).await;
-    registered(&mut push).await;
-
-    let _ = lab.trouter.deliver_call_invitation(LAB_B, OUTSIDER);
-    let ignored = next(&mut push, |event| match event {
-        PushEvent::Ignored(ignored) => Some(ignored),
-        PushEvent::Call(delivery) => panic!("an outsider's invitation was handed on: {delivery:?}"),
-        _ => None,
-    })
-    .await;
-    assert_eq!(ignored, Ignored::IncomingCall);
-    // an invitation on b's socket addressed to another account (a lab account's, to a) isn't offered either, nor one
-    // the fence can't read (an outsider's meeting invitation, a call it replaces)
-    let elsewhere = TrouterMock::call_invitation(LAB_B, LAB_A, |_| {});
-    let meeting = TrouterMock::call_invitation(OUTSIDER, LAB_B, |gp| gp["groupContext"] = json!({"id": "meeting"}));
-    let replacing = TrouterMock::call_invitation(LAB_A, LAB_B, |gp| {
-        gp["callNotification"]["replaces"] = json!("another-call");
-    });
-    for body in [elsewhere, meeting, replacing] {
-        let _ = lab.trouter.deliver_call(LAB_B, "", &body);
-        let ignored = next(&mut push, |event| match event {
-            PushEvent::Ignored(ignored) => Some(ignored),
-            PushEvent::Call(delivery) => panic!("an invitation the fence doesn't offer was handed on: {delivery:?}"),
-            _ => None,
-        })
-        .await;
-        assert_eq!(ignored, Ignored::IncomingCall);
-    }
-    let id = lab.trouter.deliver_call_invitation(LAB_B, LAB_A);
-    let offered = call_delivery(&mut push).await;
-    assert_eq!(
-        offered.delivery.id, id,
-        "only the lab caller's invitation to b was handed on"
-    );
-    // a ping afterwards shows the socket read on, and nothing answered any invitation
-    let before = lab.trouter.sockets()[0].frames.len();
-    sockets_until(&lab.trouter, |sockets| sockets[0].frames.len() > before).await;
-    assert!(responses(&lab.trouter).is_empty());
-    push.stop().await;
-}
-
-/// The a–b group chat, read in full only once the test lets the read finish.
-struct HeldChat {
-    reading: tokio::sync::Notify,
-    release: tokio::sync::Semaphore,
-}
-
-impl Default for HeldChat {
-    fn default() -> Self {
-        Self {
-            reading: tokio::sync::Notify::new(),
-            release: tokio::sync::Semaphore::new(0),
-        }
-    }
-}
-
-impl MembershipSource for HeldChat {
-    fn members<'a>(&'a self, scope: &'a Scope) -> MembershipFuture<'a> {
-        Box::pin(async move {
-            self.reading.notify_one();
-            let _held = self.release.acquire().await;
-            match scope {
-                Scope::Conversation { id } if id == GROUP_CHAT => {
-                    Membership::Complete(vec![Mri::new(LAB_A), Mri::new(LAB_B)])
-                }
-                _ => Membership::Partial(PartialReason::NoSource),
-            }
-        })
-    }
-}
-
-#[tokio::test]
-async fn the_calling_socket_reads_on_while_the_fence_decides_a_response() {
-    let lab = Lab::start().await;
-    let chat = Arc::new(HeldChat::default());
-    let mut push = lab.calling_from(lab.transport(), chat.clone()).spawn();
-    connected(&mut push).await;
-    registered(&mut push).await;
-
-    let group = TrouterMock::group_call_invitation(LAB_A, LAB_B, GROUP_CHAT, |_| {});
-    let id = lab.trouter.deliver_call(LAB_B, "", &group);
-    let invitation = call_delivery(&mut push).await;
-    assert_eq!((invitation.delivery.id, invitation.observed), (id, Observed::Offered));
-    let responder = invitation.responder();
-    let receipt = InvitationReceipt::new(&invitation.delivery, 2).unwrap();
-    let responding = tokio::spawn(async move { responder.respond(receipt).await });
-    tokio::time::timeout(WAIT, chat.reading.notified())
-        .await
-        .expect("the fence didn't read the group chat");
-    // while the fence reads the chat the socket reads on: a delivery that comes in the while is read and handed on
-    let _ = lab.trouter.deliver_call_invitation(LAB_B, OUTSIDER);
-    let ignored = next(&mut push, |event| match event {
-        PushEvent::Ignored(ignored) => Some(ignored),
-        _ => None,
-    })
-    .await;
-    assert_eq!(ignored, Ignored::IncomingCall);
-    assert!(
-        responses(&lab.trouter).is_empty(),
-        "nothing sent before the fence decided"
-    );
-    chat.release.add_permits(1);
-    tokio::time::timeout(WAIT, responding)
-        .await
-        .expect("the response wasn't decided in time")
-        .unwrap()
-        .unwrap();
-    let sent = responses_after(&lab.trouter, 1).await;
-    assert_eq!(sent.len(), 1, "{sent:?}");
-    assert_eq!(sent[0]["id"], id);
     push.stop().await;
 }
 
@@ -630,7 +424,7 @@ async fn a_registered_call_s_acceptance_reaches_its_consumer_and_only_it_is_ackn
     let mut push = lab.calling().spawn();
     let endpoint = connected(&mut push).await;
     registered(&mut push).await;
-    register_test_call(&lab.fence, &endpoint).await;
+    register_test_call(&lab.tracker, &endpoint);
 
     // the call agent's other deliveries reach the consumer too, and can't be answered
     let (_, roster) = callback(&endpoint, "06060606", "conversation", "conversationUpdate");
@@ -643,29 +437,12 @@ async fn a_registered_call_s_acceptance_reaches_its_consumer_and_only_it_is_ackn
         update.delivery.body, br#"{"conversationUpdate":{}}"#,
         "its gzip body decoded"
     );
-    assert_eq!(
-        update
-            .respond(InvitationReceipt::new(&update.delivery, 1).unwrap())
-            .await,
-        Err(RespondFailure::NotPending)
-    );
+    // Typed responses are bound to their delivery connection.
 
     let (_, at) = callback(&endpoint, "03030303", "call", "acceptance");
     let id = lab.trouter.deliver_call(LAB_B, &at, &acceptance());
     let accepted = call_delivery(&mut push).await;
     assert_eq!((accepted.delivery.id, accepted.observed), (id, Observed::Acceptance));
-    // an acknowledgement handing out another endpoint's callback is denied, unsent
-    let foreign = Links::new().with(
-        "mediaRenegotiation",
-        callback("SomeoneElsesEndpoint0", "08080808", "call", "mediaRenegotiation").0,
-    );
-    let wrong = AcceptanceAcknowledgement::new(&accepted.delivery, "cv.1", 3, foreign).unwrap();
-    assert_eq!(
-        accepted.respond(wrong).await,
-        Err(RespondFailure::Denied(DeliveryDenyReason::Shape))
-    );
-    assert!(responses(&lab.trouter).is_empty());
-
     // the denied response took the pending delivery: the call controller's redelivery is answered
     let id = lab.trouter.deliver_call(LAB_B, &at, &acceptance());
     let again = call_delivery(&mut push).await;
@@ -688,11 +465,11 @@ async fn a_dropped_calling_socket_comes_back_on_the_same_endpoint_registers_agai
     let mut push = lab.calling().spawn();
     let endpoint = connected(&mut push).await;
     registered(&mut push).await;
-    register_test_call(&lab.fence, &endpoint).await;
     // an invitation delivered on the first connection, not yet answered
     let _ = lab.trouter.deliver_call_invitation(LAB_B, LAB_A);
     let invitation = call_delivery(&mut push).await;
     assert_eq!(invitation.observed, Observed::Offered);
+    register_test_call(&lab.tracker, &endpoint);
 
     lab.trouter.drop_sockets(LAB_B);
     let down = next(&mut push, |event| match event {
@@ -805,93 +582,13 @@ async fn a_token_renewal_reconnects_the_calling_socket_with_the_new_token_on_the
     push.stop().await;
 }
 
-/// A transport in the personal build's shape over a lab one: its frames logged to `fence.log`
-/// (`Transport::frame_log`), its own-state entries counted on their way through `Transport::send_own`.
-struct PersonalShaped {
-    inner: Arc<HttpTransport<Tokens>>,
-    fence: Arc<Fence>,
-    own: AtomicUsize,
-}
-
-impl Transport for PersonalShaped {
-    type Error = teams_proto::HttpError;
-
-    fn read<R: Read>(&self, request: &R) -> impl Future<Output = Result<Response, Self::Error>> + Send {
-        self.inner.read(request)
-    }
-
-    fn send<R: PlainRequest>(&self, _request: &R) -> impl Future<Output = Result<Response, Self::Error>> + Send {
-        // never reached: the registration goes through `send_own`, which the test counts
-        future::ready(Err(teams_proto::HttpError::Refused(teams_proto::Refusal::NotAllowed)))
-    }
-
-    fn send_own<R: OwnState + PlainRequest + Sync>(
-        &self,
-        request: &R,
-    ) -> impl Future<Output = Result<Response, Self::Error>> + Send {
-        assert_eq!(R::KIND, "calling_endpoint_registration");
-        self.own.fetch_add(1, Ordering::SeqCst);
-        self.inner.send(request)
-    }
-
-    fn deliver<R: Mutating + Send>(
-        &self,
-        write: Authorized<R>,
-    ) -> impl Future<Output = Result<Response, Self::Error>> + Send {
-        self.inner.deliver(write)
-    }
-
-    fn frame_log(&self) -> Option<Arc<Fence>> {
-        Some(Arc::clone(&self.fence))
-    }
-}
-
 #[tokio::test]
-async fn in_the_personal_shape_the_registration_goes_as_its_own_state_entry_and_every_frame_is_logged() {
+async fn an_unregistered_delivery_can_receive_a_typed_response_on_its_connection() {
     let lab = Lab::start().await;
-    let transport = Arc::new(PersonalShaped {
-        inner: lab.transport(),
-        fence: Arc::clone(&lab.fence),
-        own: AtomicUsize::new(0),
-    });
-    let mut push = lab.calling_over(Arc::clone(&transport)).spawn();
-    connected(&mut push).await;
-    registered(&mut push).await;
-    assert_eq!(transport.own.load(Ordering::SeqCst), 1, "through send_own, never send");
-
-    let _ = lab.trouter.deliver_call_invitation(LAB_B, LAB_A);
-    let invitation = call_delivery(&mut push).await;
-    invitation
-        .respond(InvitationReceipt::new(&invitation.delivery, 2).unwrap())
-        .await
-        .unwrap();
-    push.stop().await;
-    sockets_until(&lab.trouter, |sockets| sockets.iter().all(|socket| !socket.open)).await;
-
-    let frames: Vec<String> = lab
-        .log
-        .lines()
-        .into_iter()
-        .filter(|line| line["event"] == "frame")
-        .map(|line| line["own"].as_str().unwrap_or_default().to_owned())
-        .collect();
-    for kind in ["trouter_authenticate", "call_invitation_receipt", "trouter_disconnect"] {
-        assert!(
-            frames.iter().any(|logged| logged == kind),
-            "{kind} not logged: {frames:?}"
-        );
-    }
-    let sent = lab.trouter.sockets()[0].frames.len();
-    assert_eq!(frames.len(), sent, "every frame the socket sent was logged first");
-}
-
-#[tokio::test]
-async fn under_the_lab_rule_a_call_s_deliveries_are_answered_with_no_registered_call() {
-    let lab = Lab::start_lab_rule().await;
     let mut push = lab.calling().spawn();
     let endpoint = connected(&mut push).await;
     registered(&mut push).await;
-    // no call was started or registered: a delivery at the call agent is handed on, and its response goes, logged
+    // A delivery at the call agent is handed on; its typed response goes on that same connection.
     let (_, roster) = callback(&endpoint, "06060606", "conversation", "conversationUpdate");
     let id = lab
         .trouter
@@ -905,20 +602,5 @@ async fn under_the_lab_rule_a_call_s_deliveries_are_answered_with_no_registered_
     let sent = responses_after(&lab.trouter, 1).await;
     assert_eq!(sent.len(), 1, "{sent:?}");
     assert_eq!(sent[0]["id"], id);
-    assert!(
-        lab.log
-            .lines()
-            .iter()
-            .any(|line| line["event"] == "delivery_response" && line["verdict"] == "allow"),
-        "logged before it went"
-    );
-    // an outsider's invitation is still never handed on, so nothing answers it
-    let _ = lab.trouter.deliver_call_invitation(LAB_B, OUTSIDER);
-    let ignored = next(&mut push, |event| match event {
-        PushEvent::Ignored(ignored) => Some(ignored),
-        _ => None,
-    })
-    .await;
-    assert_eq!(ignored, Ignored::IncomingCall);
     push.stop().await;
 }

@@ -16,6 +16,9 @@ base64.workspace = true
 # fresh GUIDs (participant ids, the call agent) and callback segments
 getrandom.workspace = true
 serde_json.workspace = true
+serde.workspace = true
+url.workspace = true
+log.workspace = true
 # a call delivery as the fence read it (`Delivery`, `Observed`), MRIs, the 1:1 chat ids
 teams-fence.workspace = true
 # the sealed call writes and the typed delivery responses it builds

@@ -72,16 +72,16 @@ pub fn native(mock: &ChatServiceMock, trouter: &TrouterMock, me: &str, names: [&
         token: mock.token(me).unwrap(),
         renewals: broadcast::channel(4).0,
     });
-    let fence = Arc::new(Fence::new(
+    let _fence = Arc::new(Fence::new(
         Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), []),
         FenceLog::from_writer(std::io::sink()),
     ));
     let origin = mock.origin();
-    let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &origin).unwrap();
+    let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin).unwrap();
     let transport = Arc::new(http());
     let live = LiveMembershipSource::with_mock_origin(&origin).unwrap();
-    live.set_credential_source(transport.clone());
-    let membership: Arc<dyn MembershipSource + Send> = Arc::new(live);
+
+    let _membership: Arc<dyn MembershipSource + Send> = Arc::new(live);
     let push = Trouter::with_mock_origin(Arc::clone(&transport), Arc::clone(&tokens), trouter.origin())
         .unwrap()
         .with_options(Options {
@@ -93,8 +93,6 @@ pub fn native(mock: &ChatServiceMock, trouter: &TrouterMock, me: &str, names: [&
     let client = Arc::new(Client::new(http()));
     let outbox = Outbox::new(
         transport,
-        fence,
-        membership,
         Author::new(Mri::new(me), if me == LAB_A { names[0] } else { names[1] }),
     );
     engine::start(Parts {

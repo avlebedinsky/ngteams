@@ -1,15 +1,8 @@
-//! The chat writes as fenced requests (M1 Task 12): each write's target as `docs/protocol/fence-targets.md` maps it, a
-//! permit for one chat never covering a write to another, a message's `content` and `properties.mentions` built from
-//! one typed rich-text value, the bodies sent key for key as the synthetic fixtures of the captures hold them, and the
-//! writes through the fence and the native transport to the mock chat service (`teams-mock`, through the
-//! `test-support` mock origins), the fence's live member read taking the native client's own credential.
-//!
-//! Every id and token here is made up (the mock's, or a placeholder), never a real one.
+//! Typed chat requests against synthetic mocks: rich-text serialization, captured wire bodies, input validation and one send per write.
 #![cfg(test)]
 
 use std::collections::BTreeSet;
 use std::future::{self, Future};
-use std::io::{self, Write};
 use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError};
 
@@ -17,20 +10,15 @@ use percent_encoding::percent_decode_str;
 use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
-use teams_fence::{
-    Denied, DenyReason, Fence, FenceLog, FetchFailure, LiveMembershipSource, Membership, MembershipFuture,
-    MembershipSource, Mri, PartialReason, Roster, Scope, Target, WriteKind, WritePermit,
-};
-use teams_mock::{
-    AB_CHAT, ABC_CHAT, AC_CHAT, AX_CHAT, CHAT_BASE, ChatServiceMock, EventKind, LAB_A, LAB_B, LAB_C, OUTSIDER,
-};
+use teams_fence::Mri;
+use teams_mock::{AB_CHAT, ABC_CHAT, AC_CHAT, CHAT_BASE, ChatServiceMock, EventKind, LAB_A, LAB_B, LAB_C, OUTSIDER};
 use teams_proto::chat::{
     Code, CodeRun, ComposeError, Image, List, MAX_CONTENT, MAX_DEPTH, Marks, MessageText, Node, Quote, RichText,
     parse_html,
 };
 use teams_proto::{
-    Author, Authorized, CreateChat, Credentials, DeleteMessage, EditMessage, HttpTransport, Mutating, Original,
-    ReadReceipt, RemoveReaction, Response, SendMessage, SetReaction, TargetMismatch, Transport, Typing,
+    Author, CreateChat, Credentials, DeleteMessage, EditMessage, HttpTransport, Original, ReadReceipt, RemoveReaction,
+    Response, SendMessage, SetReaction, Transport, Typing,
 };
 use wiremock::matchers::any;
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -146,14 +134,6 @@ fn reply() -> MessageText {
     .unwrap()
 }
 
-fn chat(id: &str) -> Scope {
-    Scope::Conversation { id: id.to_owned() }
-}
-
-fn on(kind: WriteKind, id: &str) -> Target {
-    Target::new(kind, chat(id))
-}
-
 /// One chat write of any kind.
 enum ChatWrite {
     Send(SendMessage),
@@ -167,44 +147,17 @@ enum ChatWrite {
 }
 
 impl ChatWrite {
-    fn target(&self) -> Target {
+    /// Sends the typed request through the transport.
+    async fn deliver<T: Transport>(self, transport: &T) -> Result<Response, T::Error> {
         match self {
-            Self::Send(request) => request.target(),
-            Self::Edit(request) => request.target(),
-            Self::Delete(request) => request.target(),
-            Self::React(request) => request.target(),
-            Self::Unreact(request) => request.target(),
-            Self::Receipt(request) => request.target(),
-            Self::Typing(request) => request.target(),
-            Self::Create(request) => request.target(),
-        }
-    }
-
-    /// Pairs the request with `permit` ([`Authorized::new`]) and drops the pair.
-    fn authorize(self, permit: WritePermit) -> Result<(), TargetMismatch> {
-        match self {
-            Self::Send(request) => Authorized::new(request, permit).map(drop),
-            Self::Edit(request) => Authorized::new(request, permit).map(drop),
-            Self::Delete(request) => Authorized::new(request, permit).map(drop),
-            Self::React(request) => Authorized::new(request, permit).map(drop),
-            Self::Unreact(request) => Authorized::new(request, permit).map(drop),
-            Self::Receipt(request) => Authorized::new(request, permit).map(drop),
-            Self::Typing(request) => Authorized::new(request, permit).map(drop),
-            Self::Create(request) => Authorized::new(request, permit).map(drop),
-        }
-    }
-
-    /// Delivers the request under `permit`, which must be its target's.
-    async fn deliver<T: Transport>(self, transport: &T, permit: WritePermit) -> Result<Response, T::Error> {
-        match self {
-            Self::Send(request) => transport.deliver(Authorized::new(request, permit).unwrap()).await,
-            Self::Edit(request) => transport.deliver(Authorized::new(request, permit).unwrap()).await,
-            Self::Delete(request) => transport.deliver(Authorized::new(request, permit).unwrap()).await,
-            Self::React(request) => transport.deliver(Authorized::new(request, permit).unwrap()).await,
-            Self::Unreact(request) => transport.deliver(Authorized::new(request, permit).unwrap()).await,
-            Self::Receipt(request) => transport.deliver(Authorized::new(request, permit).unwrap()).await,
-            Self::Typing(request) => transport.deliver(Authorized::new(request, permit).unwrap()).await,
-            Self::Create(request) => transport.deliver(Authorized::new(request, permit).unwrap()).await,
+            Self::Send(request) => transport.deliver(request).await,
+            Self::Edit(request) => transport.deliver(request).await,
+            Self::Delete(request) => transport.deliver(request).await,
+            Self::React(request) => transport.deliver(request).await,
+            Self::Unreact(request) => transport.deliver(request).await,
+            Self::Receipt(request) => transport.deliver(request).await,
+            Self::Typing(request) => transport.deliver(request).await,
+            Self::Create(request) => transport.deliver(request).await,
         }
     }
 }
@@ -217,137 +170,17 @@ fn original() -> Original {
     }
 }
 
-/// One write of each kind on chat `id` (message `message` for those on a message), each with the target the fence
-/// mapping gives it: the message and the edit mention b.
-fn every_write(id: &str, message: &str) -> Vec<(Target, ChatWrite)> {
+/// One write of each kind on chat `id`; the message and edit mention b.
+fn every_write(id: &str, message: &str) -> Vec<ChatWrite> {
     vec![
-        (
-            on(WriteKind::Message, id).with_added([mri(LAB_B)]),
-            ChatWrite::Send(SendMessage::new(id, lab_a(), mentioning_b())),
-        ),
-        (on(WriteKind::Typing, id), ChatWrite::Typing(Typing::new(id))),
-        (
-            on(WriteKind::Edit, id).with_added([mri(LAB_B)]),
-            ChatWrite::Edit(EditMessage::new(id, message, lab_a(), mentioning_b(), original())),
-        ),
-        (
-            on(WriteKind::Reaction, id),
-            ChatWrite::React(SetReaction::new(id, message, "like")),
-        ),
-        (
-            on(WriteKind::Reaction, id),
-            ChatWrite::Unreact(RemoveReaction::new(id, message, "like")),
-        ),
-        (
-            on(WriteKind::ReadReceipt, id),
-            ChatWrite::Receipt(ReadReceipt::new(id, message, "1111111111111111111")),
-        ),
-        (
-            on(WriteKind::Delete, id),
-            ChatWrite::Delete(DeleteMessage::new(id, message)),
-        ),
+        ChatWrite::Send(SendMessage::new(id, lab_a(), mentioning_b())),
+        ChatWrite::Typing(Typing::new(id)),
+        ChatWrite::Edit(EditMessage::new(id, message, lab_a(), mentioning_b(), original())),
+        ChatWrite::React(SetReaction::new(id, message, "like")),
+        ChatWrite::Unreact(RemoveReaction::new(id, message, "like")),
+        ChatWrite::Receipt(ReadReceipt::new(id, message, "1111111111111111111")),
+        ChatWrite::Delete(DeleteMessage::new(id, message)),
     ]
-}
-
-// --- targets ---
-
-#[test]
-fn each_chat_write_targets_its_chat_as_the_fence_maps_it() {
-    for (expected, write) in every_write(AB_CHAT, "1760000010000") {
-        assert_eq!(write.target(), expected);
-    }
-    assert_eq!(
-        SendMessage::new(AB_CHAT, lab_a(), plain("hello")).target(),
-        on(WriteKind::Message, AB_CHAT),
-        "a message without a mention adds nobody"
-    );
-    assert_eq!(
-        SendMessage::new(AB_CHAT, lab_a(), reply()).target(),
-        on(WriteKind::Message, AB_CHAT),
-        "a quote adds nobody, as the mapping of a quoted reply"
-    );
-}
-
-#[test]
-fn a_new_chat_targets_a_new_scope_with_every_member() {
-    let one_to_one = CreateChat::one_to_one(mri(LAB_A), mri(LAB_B)).unwrap();
-    assert_eq!(
-        one_to_one.target(),
-        Target::new(WriteKind::ChatCreate, Scope::New).with_added([mri(LAB_A), mri(LAB_B)])
-    );
-    let group = CreateChat::group(mri(LAB_A), [mri(LAB_B), mri(LAB_C)]).unwrap();
-    assert_eq!(
-        group.target(),
-        Target::new(WriteKind::ChatCreate, Scope::New).with_added([mri(LAB_A), mri(LAB_B), mri(LAB_C)])
-    );
-    assert_eq!(group.members(), [mri(LAB_A), mri(LAB_B), mri(LAB_C)]);
-
-    assert!(CreateChat::one_to_one(mri(LAB_A), mri(LAB_A)).is_none());
-    assert!(
-        CreateChat::group(mri(LAB_A), [mri(LAB_B)]).is_none(),
-        "a group has three"
-    );
-    assert!(CreateChat::group(mri(LAB_A), [mri(LAB_B), mri(LAB_A)]).is_none());
-    assert!(CreateChat::group(mri(LAB_A), [mri(LAB_B), mri(LAB_B), mri(LAB_C)]).is_none());
-}
-
-/// Answers every fetch with lab accounts only, so every check on an existing scope passes.
-struct LabOnly;
-
-impl MembershipSource for LabOnly {
-    fn members<'a>(&'a self, _scope: &'a Scope) -> MembershipFuture<'a> {
-        Box::pin(async { Membership::Complete(vec![mri(LAB_A), mri(LAB_B)]) })
-    }
-}
-
-fn lab_fence(log: impl Write + Send + 'static) -> Arc<Fence> {
-    Arc::new(Fence::new(
-        Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), []),
-        FenceLog::from_writer(log),
-    ))
-}
-
-#[tokio::test]
-async fn a_permit_for_one_chat_never_covers_a_write_to_another() {
-    let fence = lab_fence(io::sink());
-    let elsewhere = every_write(AC_CHAT, "1760000010000");
-    for ((target, _), (_, other)) in every_write(AB_CHAT, "1760000010000").into_iter().zip(elsewhere) {
-        let permit = fence.check(target.clone(), &LabOnly).await.unwrap();
-        let mismatch = other.authorize(permit).unwrap_err();
-        assert_eq!(mismatch.permitted(), &target);
-        assert_eq!(mismatch.requested().scope(), &chat(AC_CHAT));
-    }
-    let one_to_one = CreateChat::one_to_one(mri(LAB_A), mri(LAB_B)).unwrap();
-    let permit = fence.check(one_to_one.target(), &LabOnly).await.unwrap();
-    let group = CreateChat::group(mri(LAB_A), [mri(LAB_B), mri(LAB_C)]).unwrap();
-    assert!(
-        ChatWrite::Create(group).authorize(permit).is_err(),
-        "other members, another target"
-    );
-}
-
-#[tokio::test]
-async fn a_permit_for_one_kind_or_mention_never_covers_another() {
-    let fence = lab_fence(io::sink());
-    let typing = fence.check(on(WriteKind::Typing, AB_CHAT), &LabOnly).await.unwrap();
-    assert!(
-        ChatWrite::Send(SendMessage::new(AB_CHAT, lab_a(), plain("hi")))
-            .authorize(typing)
-            .is_err()
-    );
-
-    let plain_message = fence.check(on(WriteKind::Message, AB_CHAT), &LabOnly).await.unwrap();
-    let error = ChatWrite::Send(SendMessage::new(AB_CHAT, lab_a(), mentioning_b()))
-        .authorize(plain_message)
-        .unwrap_err();
-    assert_eq!(error.requested().added(), &BTreeSet::from([mri(LAB_B)]));
-
-    let mentioning_c = fence
-        .check(on(WriteKind::Edit, AB_CHAT).with_added([mri(LAB_C)]), &LabOnly)
-        .await
-        .unwrap();
-    let edit = EditMessage::new(AB_CHAT, "1", lab_a(), mentioning_b(), original());
-    assert!(ChatWrite::Edit(edit).authorize(mentioning_c).is_err());
 }
 
 // --- one rich-text value ---
@@ -648,35 +481,17 @@ fn a_stored_text_is_checked_again_when_read() {
 
 // --- the bodies sent, as captured ---
 
-/// The token the tests hand the transport, renewed when they say so; `None` is signed out. A refused token is
-/// renewed to the one set with [`Token::renew_when_refused`], if any (else the same token comes back), and the
-/// refusals it was told of are counted.
+/// The synthetic token given to the transport; `None` represents a signed-out account.
 #[derive(Default)]
 struct Token {
     current: Mutex<Option<String>>,
-    when_refused: Mutex<Option<String>>,
-    refused: Mutex<Vec<String>>,
 }
 
 impl Token {
     fn new(token: Option<String>) -> Self {
         Self {
             current: Mutex::new(token),
-            ..Self::default()
         }
-    }
-
-    fn renew(&self, token: &str) {
-        *self.current.lock().unwrap_or_else(PoisonError::into_inner) = Some(token.to_owned());
-    }
-
-    fn renew_when_refused(&self, token: &str) {
-        *self.when_refused.lock().unwrap_or_else(PoisonError::into_inner) = Some(token.to_owned());
-    }
-
-    /// The tokens it was told were refused, in order.
-    fn refused(&self) -> Vec<String> {
-        self.refused.lock().unwrap_or_else(PoisonError::into_inner).clone()
     }
 }
 
@@ -691,15 +506,8 @@ impl Credentials for Token {
     fn bearer_rejected(
         &self,
         audience: &str,
-        rejected: &Secret,
+        _rejected: &Secret,
     ) -> impl Future<Output = Result<Secret, TokenError>> + Send {
-        self.refused
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(rejected.expose().to_owned());
-        if let Some(renewed) = self.when_refused.lock().unwrap_or_else(PoisonError::into_inner).take() {
-            self.renew(&renewed);
-        }
         self.bearer(audience)
     }
 }
@@ -713,7 +521,7 @@ struct Sent {
     body: Option<Value>,
 }
 
-/// Sends `write` through the native transport under a permit from a fence over the lab, to a server that answers
+/// Sends `write` through the native transport to a server that answers
 /// everything with 200, and returns what reached it.
 async fn sent(write: ChatWrite) -> TestResult<Sent> {
     let server = MockServer::start().await;
@@ -721,11 +529,10 @@ async fn sent(write: ChatWrite) -> TestResult<Sent> {
         .respond_with(ResponseTemplate::new(200))
         .mount(&server)
         .await;
-    let fence = lab_fence(io::sink());
     let token = Arc::new(Token::new(Some("a-made-up-token-for-the-transport".to_owned())));
-    let transport = HttpTransport::with_mock_origin(token, Arc::clone(&fence), CHAT_BASE, &server.uri())?;
-    let permit = fence.check(write.target(), &LabOnly).await?;
-    write.deliver(&transport, permit).await?;
+    let transport = HttpTransport::with_mock_origin(token, CHAT_BASE, &server.uri())?;
+
+    write.deliver(&transport).await?;
     let requests = server.received_requests().await.unwrap_or_default();
     let [request] = requests.as_slice() else {
         return Err(format!("{} requests", requests.len()).into());
@@ -802,11 +609,6 @@ async fn a_mention_of_everyone_is_sent_as_the_everyone_fixture() -> TestResult {
     let request = SendMessage::new(ABC_CHAT, lab_a(), mentioning_everyone())
         .composed_at(NEW_YEAR_MS + 180_000)
         .with_client_message_id("7777777777777777777");
-    assert_eq!(
-        request.target(),
-        on(WriteKind::Message, ABC_CHAT),
-        "it adds nobody: the chat's members are its reach"
-    );
 
     let sent = read_listed(sent(ChatWrite::Send(request)).await?)?;
 
@@ -824,7 +626,7 @@ async fn a_mention_of_everyone_goes_only_to_the_chat_it_names() -> TestResult {
     assert_eq!(text.everyone(), &BTreeSet::from([ABC_CHAT.to_owned()]));
     assert!(text.mentions_everyone_only_in(ABC_CHAT));
     assert!(!text.mentions_everyone_only_in(AC_CHAT));
-    // posted or edited anywhere else, it has no wire form: permitted, the transport still sends nothing
+    // Posted or edited anywhere else, it has no wire form and the transport sends nothing.
     for write in [
         ChatWrite::Send(SendMessage::new(AC_CHAT, lab_a(), text.clone())),
         ChatWrite::Edit(EditMessage::new(AC_CHAT, "1", lab_a(), text.clone(), original())),
@@ -834,11 +636,10 @@ async fn a_mention_of_everyone_goes_only_to_the_chat_it_names() -> TestResult {
             .respond_with(ResponseTemplate::new(200))
             .mount(&server)
             .await;
-        let fence = lab_fence(io::sink());
         let token = Arc::new(Token::new(Some("a-made-up-token-for-the-transport".to_owned())));
-        let transport = HttpTransport::with_mock_origin(token, Arc::clone(&fence), CHAT_BASE, &server.uri())?;
-        let permit = fence.check(write.target(), &LabOnly).await?;
-        assert!(write.deliver(&transport, permit).await.is_err());
+        let transport = HttpTransport::with_mock_origin(token, CHAT_BASE, &server.uri())?;
+
+        assert!(write.deliver(&transport).await.is_err());
         assert!(server.received_requests().await.unwrap_or_default().is_empty());
     }
     Ok(())
@@ -954,87 +755,36 @@ async fn a_new_group_chat_is_sent_as_the_web_client_created_one() -> TestResult 
     Ok(())
 }
 
-// --- on the mock chat service, through the fence ---
+// --- on the mock chat service ---
 
-/// A shared `fence.log`, its lines read back.
-#[derive(Clone, Default)]
-struct SharedLog(Arc<Mutex<Vec<u8>>>);
-
-impl SharedLog {
-    fn lines(&self) -> Vec<Value> {
-        let bytes = self.0.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        String::from_utf8(bytes)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect()
-    }
-
-    fn verdicts(&self) -> Vec<String> {
-        self.lines()
-            .iter()
-            .map(|line| line["verdict"].as_str().unwrap_or_default().to_owned())
-            .collect()
-    }
-}
-
-impl Write for SharedLog {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-/// The mock chat service, a's native transport to it, and a fence over the lab whose live member read takes a's
-/// credential from that transport.
+/// The mock chat service and a's native transport.
 struct Lab {
     mock: ChatServiceMock,
-    fence: Arc<Fence>,
-    log: SharedLog,
-    source: LiveMembershipSource,
-    token: Arc<Token>,
     transport: Arc<HttpTransport<Token>>,
 }
 
 impl Lab {
-    /// The lab with a's token, the member read asking the transport for its credential.
+    /// The mock transport with a's synthetic token.
     async fn start() -> TestResult<Self> {
         let mock = ChatServiceMock::start().await?;
         let token = mock.token(LAB_A).ok_or("no a")?;
         let lab = Self::without_credential(mock, Some(token))?;
-        lab.source.set_credential_source(lab.transport.clone());
         Ok(lab)
     }
 
-    /// A lab whose member read has no credential yet, and whose transport has `token`.
+    /// A mock transport with `token`, or a signed-out credential source.
     fn without_credential(mock: ChatServiceMock, token: Option<String>) -> TestResult<Self> {
-        let log = SharedLog::default();
-        let fence = lab_fence(log.clone());
         let token = Arc::new(Token::new(token));
-        let transport =
-            HttpTransport::with_mock_origin(Arc::clone(&token), Arc::clone(&fence), CHAT_BASE, &mock.origin())?;
-        let source = LiveMembershipSource::with_mock_origin(&mock.origin())?;
+        let transport = HttpTransport::with_mock_origin(Arc::clone(&token), CHAT_BASE, &mock.origin())?;
         Ok(Self {
             mock,
-            fence,
-            log,
-            source,
-            token,
             transport: Arc::new(transport),
         })
     }
 
-    /// The fence's decision on `write`, with a fresh member read, and the answer to it if it was allowed.
-    async fn write(&self, write: ChatWrite) -> Result<Response, Denied> {
-        let permit = self.fence.check(write.target(), &self.source).await?;
-        Ok(write.deliver(&*self.transport, permit).await.unwrap())
+    /// Sends one typed write and returns its answer.
+    async fn write(&self, write: ChatWrite) -> Result<Response, teams_proto::HttpError> {
+        Ok(write.deliver(&*self.transport).await.unwrap())
     }
 
     /// How many member reads (`GET`s) reached the mock.
@@ -1073,7 +823,7 @@ async fn each_write_to_a_lab_chat_is_allowed_and_sent_once() -> TestResult {
     let id = arrival(&posted)?;
 
     let mut sent = 1;
-    for (_, write) in every_write(AB_CHAT, &id).into_iter().skip(1) {
+    for write in every_write(AB_CHAT, &id).into_iter().skip(1) {
         let answer = lab.write(write).await?;
         sent += 1;
         assert!(answer.is_success(), "{answer:?}");
@@ -1083,7 +833,6 @@ async fn each_write_to_a_lab_chat_is_allowed_and_sent_once() -> TestResult {
     assert_eq!(lab.write(ChatWrite::Create(create)).await?.status(), 201);
     assert_eq!(lab.writes_received().await, sent + 1);
 
-    assert_eq!(lab.log.verdicts(), vec!["allow"; sent + 1], "every decision logged");
     let told: Vec<EventKind> = lab.mock.take_events(LAB_B).iter().map(|event| event.kind).collect();
     assert_eq!(
         told,
@@ -1101,58 +850,6 @@ async fn each_write_to_a_lab_chat_is_allowed_and_sent_once() -> TestResult {
     Ok(())
 }
 
-fn outsiders(denied: &Denied) -> bool {
-    matches!(denied.reason(), DenyReason::Outsiders { .. })
-}
-
-#[tokio::test]
-async fn a_write_to_a_chat_with_an_outsider_is_denied_logged_and_never_sent() -> TestResult {
-    let lab = Lab::start().await?;
-    let mut denials = 0;
-    let mut signals = 0;
-    for (target, write) in every_write(AX_CHAT, "1760000010000") {
-        if target.kind().is_contacting() {
-            let denied = lab.write(write).await.unwrap_err();
-            assert!(outsiders(&denied), "{denied:?}");
-            denials += 1;
-        } else {
-            // typing and a read receipt reach nobody: they go out without a member read
-            let answer = lab.write(write).await?;
-            assert!(answer.is_success(), "{target:?}: {answer:?}");
-            signals += 1;
-        }
-    }
-    assert_eq!(signals, 2);
-    assert_eq!(
-        lab.reads_received().await,
-        denials,
-        "a member read for each contacting write alone"
-    );
-    let to_outsider = SendMessage::new(AB_CHAT, lab_a(), mentioning(OUTSIDER, "Someone"));
-    let denied = lab.write(ChatWrite::Send(to_outsider)).await.unwrap_err();
-    assert!(outsiders(&denied), "a mention of an outsider: {denied:?}");
-    let create = CreateChat::one_to_one(mri(LAB_A), mri(OUTSIDER)).ok_or("one chat")?;
-    let denied = lab.write(ChatWrite::Create(create)).await.unwrap_err();
-    assert!(outsiders(&denied), "{denied:?}");
-    denials += 2;
-
-    assert_eq!(lab.writes_received().await, signals, "no contacting write was sent");
-    let lines = lab.log.lines();
-    assert_eq!(lines.len(), denials + signals);
-    let denied: Vec<_> = lines.iter().filter(|line| line["verdict"] == "deny").collect();
-    assert_eq!(denied.len(), denials);
-    for line in denied {
-        assert!(line["reason"].get("outsiders").is_some(), "{line}");
-    }
-    let told: Vec<EventKind> = lab.mock.take_events(OUTSIDER).iter().map(|event| event.kind).collect();
-    assert!(
-        told.iter()
-            .all(|kind| matches!(kind, EventKind::Typing | EventKind::ReadReceipt)),
-        "nothing but typing and a read receipt reached the outsider: {told:?}"
-    );
-    Ok(())
-}
-
 #[tokio::test]
 async fn a_lab_only_group_chat_is_written_to_a_new_one_included() -> TestResult {
     let lab = Lab::start().await?;
@@ -1163,7 +860,7 @@ async fn a_lab_only_group_chat_is_written_to_a_new_one_included() -> TestResult 
         assert_eq!(lab.write(write).await?.status(), 201);
     }
     assert_eq!(lab.writes_received().await, 2);
-    assert_eq!(lab.reads_received().await, 1, "the message's member read alone");
+    assert_eq!(lab.reads_received().await, 0, "writes need no membership reads");
 
     // a new group of lab accounts is judged by its members alone …
     let create = CreateChat::group(mri(LAB_A), [mri(LAB_B), mri(LAB_C)]).ok_or("a group")?;
@@ -1179,92 +876,6 @@ async fn a_lab_only_group_chat_is_written_to_a_new_one_included() -> TestResult 
         .await?;
     assert_eq!(posted.status(), 201);
     assert_eq!(lab.writes_received().await, 4);
-    assert_eq!(lab.log.verdicts(), ["allow"; 4]);
-    Ok(())
-}
 
-#[tokio::test]
-async fn without_the_native_clients_credential_every_contacting_write_is_partial() -> TestResult {
-    let lab = Lab::without_credential(ChatServiceMock::start().await?, None)?;
-    for (target, write) in every_write(AB_CHAT, "1760000010000") {
-        let verdict = lab.fence.check(write.target(), &lab.source).await;
-        if target.kind().is_contacting() {
-            let denied = verdict.unwrap_err();
-            assert_eq!(denied.reason(), &DenyReason::Partial(PartialReason::NoCredential));
-        } else {
-            // typing and a read receipt need no member read, so no credential either
-            assert!(verdict.is_ok(), "{target:?}: {verdict:?}");
-        }
-    }
-
-    // a source that has no token (signed out) gives no credential either
-    lab.source.set_credential_source(lab.transport.clone());
-    let denied = lab
-        .write(ChatWrite::Send(SendMessage::new(AB_CHAT, lab_a(), plain("hello"))))
-        .await
-        .unwrap_err();
-    assert_eq!(denied.reason(), &DenyReason::Partial(PartialReason::NoCredential));
-
-    assert!(lab.mock.received_requests().await.is_empty(), "not even a member read");
-    Ok(())
-}
-
-#[tokio::test]
-async fn the_member_read_takes_the_transports_token_as_it_is_now() -> TestResult {
-    let lab = Lab::start().await?;
-    let post = || ChatWrite::Send(SendMessage::new(AB_CHAT, lab_a(), plain("hello")));
-    assert_eq!(lab.write(post()).await?.status(), 201);
-
-    // the service takes only a new token from now on: the transport still has the old one, and its session gives the
-    // same one again, so the read is refused twice and the write denied …
-    let renewed = "a-renewed-made-up-token-for-lab-a";
-    assert!(lab.mock.set_token(LAB_A, renewed));
-    let denied = lab.write(post()).await.unwrap_err();
-    assert_eq!(
-        denied.reason(),
-        &DenyReason::Partial(PartialReason::FetchFailed(FetchFailure::Status(401)))
-    );
-    // … until the session renews it: the next read asks the transport again and takes the new one
-    lab.token.renew(renewed);
-    assert_eq!(lab.write(post()).await?.status(), 201);
-
-    assert_eq!(lab.writes_received().await, 2);
-    assert_eq!(lab.log.verdicts(), ["allow", "deny", "allow"]);
-    Ok(())
-}
-
-#[tokio::test]
-async fn a_refused_member_read_renews_the_token_and_reads_once_more() -> TestResult {
-    let lab = Lab::start().await?;
-    let first = lab.mock.token(LAB_A).ok_or("no a")?;
-    let post = || ChatWrite::Send(SendMessage::new(AB_CHAT, lab_a(), plain("hello")));
-
-    // the service refuses a's token before it expires (revoked): the read tells the session, which renews it, and the
-    // read sent once more with the new token lets the write through
-    let renewed = "a-renewed-made-up-token-for-lab-a";
-    assert!(lab.mock.set_token(LAB_A, renewed));
-    lab.token.renew_when_refused(renewed);
-    assert_eq!(lab.write(post()).await?.status(), 201);
-    assert_eq!(
-        lab.token.refused(),
-        std::slice::from_ref(&first),
-        "the refused token, told once"
-    );
-    assert_eq!(lab.reads_received().await, 2, "the refused read and one more");
-
-    // refused again, and the renewal is refused too: no third read, the write denied and never sent
-    let revoked = "a-revoked-made-up-token-for-lab-a";
-    lab.token.renew_when_refused(revoked);
-    assert!(lab.mock.set_token(LAB_A, "a-later-made-up-token-for-lab-a"));
-    let denied = lab.write(post()).await.unwrap_err();
-    assert_eq!(
-        denied.reason(),
-        &DenyReason::Partial(PartialReason::FetchFailed(FetchFailure::Status(401)))
-    );
-    assert_eq!(lab.token.refused(), [first, renewed.to_owned()]);
-    assert_eq!(lab.reads_received().await, 4, "two reads for the denied check, no more");
-
-    assert_eq!(lab.writes_received().await, 1);
-    assert_eq!(lab.log.verdicts(), ["allow", "deny"]);
     Ok(())
 }

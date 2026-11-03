@@ -11,7 +11,7 @@ use ngteams::accounts::{self, Runner};
 use ngteams::forget::Forgot;
 use ngteams::setup::Setup;
 use ngteams::signin;
-use teams_fence::CallFloor;
+use teams_core::CallFloor;
 use teams_fence::lab::LabLocations;
 use teams_fence::personal::{PersonalAccount, PersonalPaths};
 use teams_store::EngineLock;

@@ -1208,7 +1208,6 @@ impl SettingsModel {
             app: format!("teams {}", env!("CARGO_PKG_VERSION")),
             log_file: None,
             log_problem: None,
-            fence_log: None,
         });
         (source, self.settings.log_level)
     }

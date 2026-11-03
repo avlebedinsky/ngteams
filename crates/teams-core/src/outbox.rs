@@ -2,9 +2,7 @@
 //!
 //! - **A command becomes a row** ([`enqueue`]): a [`Command`] is stored as the row's payload under a fresh
 //!   `clientmessageid` ([`new_client_message_id`]), which the row keeps across every attempt.
-//! - **Each attempt asks the fence again** ([`Outbox::send`]): the request is built from the row, and
-//!   [`Fence::check`] reads the target's members fresh from the membership source and logs its decision before
-//!   anything goes out. A denied attempt marks the row denied and sends nothing; a permit covers that one attempt.
+//! - **Each attempt sends its typed request** ([`Outbox::send`]); transport failures and HTTP statuses remain distinct.
 //! - **The outbox's part of the retry table** (the plan's Technical Details): a 2xx is sent; a 401 is tried once more
 //!   at once (the transport has had the session refresh the refused token), once in the row's budget: a later 401
 //!   fails the row, whatever came between; a 429 or 503 waits its `Retry-After`
@@ -40,12 +38,11 @@
 //!   budget over. An adopted row that had an attempt (in any run) begins with the sync check above, so a message an
 //!   earlier attempt got through isn't sent twice.
 //!
-//! - **Transient writes** ([`Transient`], [`Outbox::send_transient`]): typing goes out from here too, each send under a
-//!   fresh `Fence::check`, but never as a row: nothing of it is stored, checked for, retried after an unknown outcome or
+//! - **Transient writes** ([`Transient`], [`Outbox::send_transient`]): typing goes out from here too, never as a row: nothing of it is stored, checked for, retried after an unknown outcome or
 //!   sent by a later run; a throttled one waits in memory, once and briefly ([`MAX_TRANSIENT_WAIT`]), the newest of
 //!   the same takes its place, and a message post to its conversation drops it ([`Outbox::drop_waiting`]).
 //! - **Call writes** ([`Outbox::try_call`], M3 Task 14): a call's writes go out from here as a kind of their own, no
-//!   row and no transient: each attempt a fresh `Fence::check`, its answer (any status, with its body) back to the call
+//!   row and no transient: each attempt tracked around the actual send, its answer (any status, with its body) back to the call
 //!   machine, another attempt only after a 401 or a short throttle ([`CallRetries`]), never after an unknown outcome.
 //!
 //! The commands are the chat writes of `teams-proto` (M1 Task 12): a message post, an edit, a soft delete, a reaction
@@ -66,14 +63,16 @@ use std::future::Future;
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
+use crate::CallFloor;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use teams_auth::token::TokenError;
-use teams_fence::{Denied, Fence, MembershipSource, Mri};
+use teams_call::Tracker;
+use teams_fence::Mri;
 use teams_proto::chat::MessageText;
 use teams_proto::{
-    Author, Authorized, CreateChat, DEFAULT_RETRY_WAIT, DeleteMessage, EditMessage, HttpError, Mutating, Original,
-    ReadReceipt, RemoveReaction, Response, SendMessage, SetReaction, Transport,
+    Author, CreateChat, DEFAULT_RETRY_WAIT, DeleteMessage, EditMessage, HttpError, Original, ReadReceipt,
+    RemoveReaction, Request, Response, SendMessage, SetReaction, Transport,
 };
 use teams_store::{
     Applied, AttemptOutcome, CheckFailed, Message, NewOutboxEntry, OutboxEntry, OutboxKind, OutboxState, Reaction,
@@ -377,7 +376,7 @@ pub fn enqueue(store: &mut Store, command: &Command) -> Result<OutboxEntry, Outb
 enum Tried {
     /// The service answered.
     Answered(Response),
-    Denied(Denied),
+    Denied(String),
     /// Nothing went out, and nothing will: the row is failed.
     NotSent(String),
     /// Nothing went out yet: try again after `wait`.
@@ -390,11 +389,10 @@ enum Tried {
 }
 
 impl Tried {
-    /// What the attempt came to, for the log: the fence's decision and the service's status, never a body.
     fn summary(&self) -> String {
         match self {
-            Self::Answered(answer) => format!("fence allowed, HTTP {}", answer.status()),
-            Self::Denied(denied) => format!("fence denied: {}", denied.reason()),
+            Self::Answered(answer) => format!("admitted, HTTP {}", answer.status()),
+            Self::Denied(denied) => format!("call admission refused: {denied}"),
             Self::NotSent(why) => format!("not sent: {why}"),
             Self::Throttled { wait, .. } => format!("throttled for {} ms", wait.as_millis()),
             Self::Uncertain(why) => format!("outcome unknown: {why}"),
@@ -405,8 +403,8 @@ impl Tried {
 /// Sends the outbox's rows over a transport, each attempt under a fresh permit (see the module docs).
 pub struct Outbox<T> {
     transport: Arc<T>,
-    fence: Arc<Fence>,
-    membership: Arc<dyn MembershipSource + Send>,
+    tracker: Arc<Tracker>,
+    floor: CallFloor,
     /// The account: its messages go out as its, and only its messages are matched to outbox rows.
     me: Author,
     clock: Clock,
@@ -425,14 +423,12 @@ pub struct Outbox<T> {
 }
 
 impl<T: Transport<Error = HttpError>> Outbox<T> {
-    /// An outbox for the account `me`, sending over `transport` under `fence`'s permits, with `membership` as the
-    /// source the fence reads each target's members from on every attempt.
     #[must_use]
-    pub fn new(transport: Arc<T>, fence: Arc<Fence>, membership: Arc<dyn MembershipSource + Send>, me: Author) -> Self {
+    pub fn new(transport: Arc<T>, me: Author) -> Self {
         Self {
             transport,
-            fence,
-            membership,
+            tracker: Arc::new(Tracker::new(me.mri().clone())),
+            floor: CallFloor::new(),
             me,
             clock: Arc::new(now_ms),
             arrived: Mutex::new(Vec::new()),
@@ -454,18 +450,23 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         &self.me
     }
 
-    /// Whether the outbox sends nothing (its transport is read-only: the personal build's `ngteams --read-only`): every
-    /// write it is asked for, a row's, a transient's or a call's, is refused before the fence is asked and logged to
-    /// `fence.log` as `refused_read_only`; a row is failed, a transient dropped, a call write not sent.
     #[must_use]
     pub fn is_read_only(&self) -> bool {
         self.transport.is_read_only()
     }
 
-    /// The fence every attempt asks.
     #[must_use]
-    pub fn fence(&self) -> &Arc<Fence> {
-        &self.fence
+    pub fn tracker(&self) -> &Arc<Tracker> {
+        &self.tracker
+    }
+
+    /// Shares this account's tracking and cross-account call floor with its calling socket.
+    #[must_use]
+    pub fn with_calls(mut self, tracker: Arc<Tracker>, floor: CallFloor) -> Self {
+        floor.join(&tracker);
+        self.tracker = tracker;
+        self.floor = floor;
+        self
     }
 
     /// The rows a read changed since the last call, oldest first, each as the outbox last left it: a row that became
@@ -553,7 +554,6 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
             let summary = tried.summary();
             let (outcome, again) = self.settle(&row, tried);
             let row = store.finish_attempt(id, &outcome)?;
-            // the fence's decision is the `fence.log` line written just before, for the same target
             log::info!(
                 "outbox row {} ({:?}, clientmessageid {}) attempt {}: {summary}; now {:?}",
                 row.id,
@@ -763,7 +763,6 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         }
     }
 
-    /// One attempt: the row's request, a fresh permit for its target, and the transport.
     async fn attempt(&self, row: &OutboxEntry) -> Tried {
         let command = match serde_json::from_str::<Command>(&row.payload) {
             Ok(command) => command,
@@ -826,28 +825,22 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         }
     }
 
-    async fn deliver<R: Mutating + Send>(&self, request: R) -> Tried {
-        // read-only (the personal build's `ngteams --read-only`): refused before the fence is asked, logged by the
+    async fn deliver<R: Request + Send>(&self, request: R) -> Tried {
+        // read-only (the personal build's `ngteams --read-only`): refused before sending, logged by the
         // transport as `refused_read_only`; nothing is sent, and nothing tries it again
         if let Some(refused) = self.transport.read_only_refusal(&request) {
-            log::info!("read-only: {} refused", request.target().kind());
+            log::info!("read-only: write refused");
             return Tried::NotSent(refused.to_string());
         }
-        let permit = match self.fence.check(request.target(), &*self.membership).await {
-            Ok(permit) => {
-                log::info!("fence allowed {}", request.target());
-                permit
-            }
-            Err(denied) => {
-                log::info!("{denied}");
-                return Tried::Denied(denied);
-            }
-        };
-        let write = match Authorized::new(request, permit) {
-            Ok(write) => write,
-            Err(mismatch) => return Tried::NotSent(mismatch.to_string()),
-        };
-        match self.transport.deliver(write).await {
+        if !self.floor.allows(&self.tracker, &request) {
+            return Tried::Denied("another account is in a call".to_owned());
+        }
+        let attempt = self.tracker.before(&request);
+        let result = self.transport.deliver(request).await;
+        if let Ok(answer) = &result {
+            self.tracker.answered(attempt, answer);
+        }
+        match result {
             Ok(answer) => Tried::Answered(answer),
             Err(error) => from_transport(error),
         }
@@ -873,12 +866,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
     fn settle_tried(&self, row: &OutboxEntry, tried: Tried, refreshed: bool) -> (AttemptOutcome, bool) {
         match tried {
             Tried::Answered(answer) => self.settle_answer(row, &answer, refreshed),
-            Tried::Denied(denied) => (
-                AttemptOutcome::Denied {
-                    reason: denied.to_string(),
-                },
-                false,
-            ),
+            Tried::Denied(denied) => (AttemptOutcome::Denied { reason: denied.clone() }, false),
             Tried::NotSent(error) => (AttemptOutcome::Failed { error }, false),
             Tried::Throttled { wait, error } => (self.retry(row, wait, error), false),
             Tried::Uncertain(error) => self.again_if_findable(row, &error),

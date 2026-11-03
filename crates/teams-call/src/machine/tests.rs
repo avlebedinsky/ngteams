@@ -6,9 +6,10 @@ mod decline_ordering;
 
 use std::time::{Duration, Instant};
 
+use crate::{Delivery, Observed};
 use base64::Engine as _;
 use serde_json::{Value, json};
-use teams_fence::{Delivery, Mri, Observed};
+use teams_fence::Mri;
 use teams_proto::{ClientInfo, MediaContent};
 
 use super::{
@@ -673,12 +674,11 @@ fn a_meeting_goes_from_its_start_to_joining_rings_nobody_and_connects_on_its_acc
     );
 }
 
-/// What a start or a join is to the fence.
-fn target_of(write: &crate::CallWrite) -> teams_fence::Target {
-    use teams_proto::Mutating as _;
+fn body_of(write: &crate::CallWrite) -> serde_json::Value {
+    use teams_proto::Request as _;
     match write {
-        crate::CallWrite::Start(start) => start.target(),
-        crate::CallWrite::Join(join) => join.target(),
+        crate::CallWrite::Start(start) => start.body().unwrap(),
+        crate::CallWrite::Join(join) => join.body().unwrap(),
         other => panic!("{}", other.name()),
     }
 }
@@ -700,10 +700,7 @@ fn meet_now_subscribes_to_a_new_meeting_then_enters_it_as_its_organizer() {
     let Some(Effect::Send { write, .. }) = placed.iter().find(|effect| matches!(effect, Effect::Send { .. })) else {
         panic!("{placed:#?}");
     };
-    assert!(matches!(
-        target_of(write).scope(),
-        teams_fence::Scope::Team { id } if id == CHANNEL
-    ));
+    assert_eq!(body_of(write)["groupChat"]["threadId"], CHANNEL);
     // the new meeting's conversation: entered at once, the offer kept for it
     calls.on_outcome(subscription, &ok(&conversation_answer()), now);
     let entered = effects(&mut calls);
@@ -713,10 +710,7 @@ fn meet_now_subscribes_to_a_new_meeting_then_enters_it_as_its_organizer() {
     let Some(Effect::Send { write, .. }) = entered.iter().find(|effect| matches!(effect, Effect::Send { .. })) else {
         panic!("{entered:#?}");
     };
-    assert!(matches!(
-        target_of(write).scope(),
-        teams_fence::Scope::CallOperation { joins: Some(chat), url, .. } if chat == CHANNEL && *url == conv("")
-    ));
+    assert_eq!(body_of(write)["groupChat"]["threadId"], CHANNEL);
     calls.on_outcome(entry, &ok(&conversation_answer()), now);
     assert_eq!(
         events(&effects(&mut calls)),
@@ -774,10 +768,7 @@ fn a_channel_s_running_meeting_is_joined_at_its_conversation_by_its_post() {
     let Some(Effect::Send { write, .. }) = placed.iter().find(|effect| matches!(effect, Effect::Send { .. })) else {
         panic!("{placed:#?}");
     };
-    assert!(matches!(
-        target_of(write).scope(),
-        teams_fence::Scope::CallOperation { joins: Some(chat), .. } if chat == CHANNEL
-    ));
+    assert_eq!(body_of(write)["groupChat"]["threadId"], CHANNEL);
     assert!(
         matches!(
             calls.join_channel_meeting(CHANNEL, &meetup, media(), now),

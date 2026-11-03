@@ -285,36 +285,36 @@ startup still opens no devices. Task 9 will pass sandbox reach from the lab-mode
 - Move: `crates/teams-fence/tests/{calls.rs,offers.rs}` (kept cases) → `crates/teams-call/tests/` and
   `crates/teams-core/tests/calls/`
 
-- [ ] `teams-proto`:
+- [x] `teams-proto`:
       - writes are plain typed requests: `Authorized<_>`, `WritePermit`, `Mutating` sealing, `contacting`
         classification, `check_post_read` and `fence.log` writes are removed;
       - `test_support_enabled()` lives here, and `teams-core`'s `test-support` chains to it;
       - the transport rules stay, with their tests.
-- [ ] `teams-call`: the call tracking moves here: offer filter, redelivery dedupe, ignore after ring end, acceptance
+- [x] `teams-call`: the call tracking moves here: offer filter, redelivery dedupe, ignore after ring end, acceptance
       and renegotiation link binding, one call per account. The machine and `teams-trouter` use it instead of
       `Fence::observe_delivery`. Only the lab roster check (`roster.admits`) is dropped.
-- [ ] `teams-core`:
+- [x] `teams-core`:
       - the outbox sends without `Fence::check` and keeps its unknown-outcome and no-resend rules;
       - `CallFloor` keeps one call or ring across accounts for invitations and for start, join and answer;
       - `let_go` maps to the tracker's release.
-- [ ] `ngteams`, `teams-mock`, `teams-log` and `teams-ui`:
+- [x] `ngteams`, `teams-mock`, `teams-log` and `teams-ui`:
       - no personal fence;
       - the refusal reads `teams_proto::test_support_enabled()`;
       - read-only refusals go to the diagnostic log;
       - the diagnostics lose the `fence.log` section;
       - `run-personal-read-only.sh` points at the log instead.
-- [ ] tests:
+- [x] tests:
       - move the call-tracking cases;
       - turn `ngteams/tests/fence.rs` into a plain-send test, or delete it;
       - replace the `fence.log` assertions (`ngteams/tests/support/*`, `read_only.rs`,
         `teams-trouter/tests/session.rs:894`, `teams-core/tests/calls/failures.rs:288`) with log-line or send
         assertions;
       - delete tests of fence decisions alone.
-- [ ] the debug wire log: every send path left after the cut (plain request, former permit write, post read, own
+- [x] the debug wire log: every send path left after the cut (plain request, former permit write, post read, own
       state, call request, upload or ranged read) goes through `log_request`/`log_response`. A test sends one of each
       kind against the mock at `debug` and finds its full request and response in the log, credentials redacted, and
       nothing at `info`. The same holds for Trouter frames both ways.
-- [ ] `cargo check --workspace --all-targets`, clippy, and tests of `teams-proto`, `teams-call`, `teams-trouter`,
+- [x] `cargo check --workspace --all-targets`, clippy, and tests of `teams-proto`, `teams-call`, `teams-trouter`,
       `teams-core`, `teams-mock`, `teams-log`, `teams-ui` and `ngteams` pass
 
 ### Task 7: Move the remaining general code; delete teams-fence and fence-seal

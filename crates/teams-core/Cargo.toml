@@ -10,7 +10,7 @@ publish.workspace = true
 # Tests only, through dev-dependencies: a call's media relayed through given servers (a test's loopback TURN server,
 # `Relay::Fixed`) instead of Teams' relay. It turns on teams-fence's own, so a lab binary built with it refuses to run
 # (`teams_fence::test_support_enabled`).
-test-support = ["teams-fence/test-support"]
+test-support = ["teams-proto/test-support"]
 
 [dependencies]
 # a calendar event's time without an offset placed in the desktop's time zone, as the calendar view places it

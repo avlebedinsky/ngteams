@@ -1,13 +1,9 @@
-//! How the machine hands a write on: a [`CallWrite`] (one sealed `teams-proto` call write, kept as its own type) with
-//! the [`WriteId`] its outcome comes back under. The machine never sends: the engine's [`WriteSink`] takes each write
-//! ([`CallWrite::submit_to`] does the one exhaustive match), asks the fence for it (`Fence::check`, then
-//! `Authorized::new`) and sends it through its outbox, and reports how it went with [`crate::Calls::on_outcome`].
+//! Typed call writes and their outcome IDs. The engine sends them through its outbox and returns each attempt's outcome.
 
 use teams_proto::{
     AcceptCall, AcknowledgeAcceptance, AcknowledgeMediaAnswer, AddToCall, AnswerMedia, ApplyChannelParameters,
-    AttachCall, DecideLobby, DeclineCall, JoinCall, KeepAliveCall, LeaveCall, Mutating, RenegotiateMedia,
-    ReportRinging, StartCall, UpdateEndpointMetadata, UpdateEndpointState, UpdateMediaDescriptions,
-    UpdateParticipantProperties,
+    AttachCall, DecideLobby, DeclineCall, JoinCall, KeepAliveCall, LeaveCall, RenegotiateMedia, ReportRinging, Request,
+    StartCall, UpdateEndpointMetadata, UpdateEndpointState, UpdateMediaDescriptions, UpdateParticipantProperties,
 };
 
 /// The id a write's outcome comes back under ([`crate::Calls::on_outcome`]). Unique for the machine's life.
@@ -28,7 +24,7 @@ impl WriteId {
 /// may go again (a fresh check, a fresh permit) while the machine still wants it ([`crate::Calls::may_send_again`]).
 pub trait WriteSink {
     /// Takes `write`, to be sent and its outcome reported under `id`.
-    fn submit<R: Mutating + Clone + Send + 'static>(&mut self, id: WriteId, write: R);
+    fn submit<R: Request + Clone + Send + 'static>(&mut self, id: WriteId, write: R);
 }
 
 /// One call write, as the machine built it: each a sealed `teams-proto` type, built whole and classified when made.

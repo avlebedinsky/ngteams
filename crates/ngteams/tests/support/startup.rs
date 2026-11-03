@@ -2,13 +2,13 @@
 //! Each case owns HOME/XDG in a subprocess; no user's files, keyring, display or service is reached.
 
 use std::process::Command;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Mutex, OnceLock};
 
 use clap::Parser as _;
 use ngteams::setup::Setup;
 use teams_auth::secrets::MemorySecretStore;
+use teams_core::CallFloor;
 use teams_fence::personal::PersonalAccount;
-use teams_fence::{CallFloor, Fence};
 
 use super::{Outcome, run};
 
@@ -50,13 +50,11 @@ pub(super) mod accounts {
     impl Runner {
         pub fn start(&self, account: &PersonalAccount) -> Result<Started, String> {
             record("start", &account.upn);
-            let fence = Fence::open_personal_with(&self.setup.paths, &account.upn, &self.setup.lab)
-                .map_err(|error| error.to_string())?
-                .sharing_calls(&self.floor);
+
             let engine = ngteams::engine::start(
                 &self.setup.paths,
                 account,
-                Arc::new(fence),
+                teams_core::CallFloor::new(),
                 MemorySecretStore::new(),
                 false,
                 None,
@@ -251,7 +249,6 @@ fn startup_controllers_use_only_the_fixture_backend_and_close_their_engines() {
     for case in [
         "command-invalid-env",
         "command-read-setup-error",
-        "command-read-fence-error",
         "command-invalid-account",
         "command-error-files",
         "command-no-ready",

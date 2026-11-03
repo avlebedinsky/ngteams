@@ -11,18 +11,10 @@ use teams_auth::secrets::MemorySecretStore;
 use teams_auth::token::TokenError;
 use teams_core::account::{self, Account, AccountCalls, AccountEngine, AccountError};
 use teams_core::{EngineError, Relay};
-use teams_fence::{FailClosed, Fence, FenceLog, Mri, Roster};
 use teams_media::devices::file::{AudioInput, FileDevices, Pacing, PatternCamera};
 use teams_proto::{BuildError, IC3_AUDIENCE};
 
 const MRI: &str = "8:orgid:00000000-0000-0000-0000-00000000000a";
-
-fn fence() -> Arc<Fence> {
-    Arc::new(
-        Fence::new(Roster::new([Mri::new(MRI)], []), FenceLog::from_writer(std::io::sink()))
-            .with_own_account(Mri::new(MRI)),
-    )
-}
 
 fn region() -> Region {
     Region {
@@ -64,7 +56,7 @@ fn account(path: &Path) -> Account<MemorySecretStore> {
 }
 
 fn start(account: Account<MemorySecretStore>) -> Result<AccountEngine<MemorySecretStore>, AccountError> {
-    account::start(account, fence(), Box::new(|_, _| Ok(Arc::new(FailClosed))))
+    account::start(account, teams_core::CallFloor::new())
 }
 
 #[test]

@@ -50,11 +50,11 @@ use serde_json::Value;
 use teams_auth::secrets::Secret;
 use teams_auth::session::{AccessToken, Clock, REFRESH_MARGIN, Renewal, SystemClock};
 use teams_auth::token::TokenError;
-use teams_fence::Observed;
+use teams_call::Observed;
 use teams_proto::{
-    AcceptanceAcknowledgement, Authenticate, CallingRegistration, ConnectParams, Disconnect, DroppedIndicator,
-    EndpointRegistrar, EndpointRegistration, FrameError, FrameSink, IC3_AUDIENCE, InvitationReceipt, MessageLossAck,
-    OwnFrame, PRESENCE_PUSH_PATH, PermittedResponse, Ping, RegisteredEndpoint, RespondError, ResponseRefused, Sent,
+    Authenticate, CallingRegistration, ConnectParams, Disconnect, DroppedIndicator, EndpointRegistrar,
+    EndpointRegistration, FrameError, FrameSink, IC3_AUDIENCE, MessageLossAck, OwnFrame, PRESENCE_PUSH_PATH, Ping,
+    RegisteredEndpoint, RespondError, Sent,
 };
 use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::task::JoinHandle;
@@ -141,8 +141,6 @@ pub enum PushEvent {
     /// Others' presence, delivered at the endpoint's `unifiedPresenceService` path once it subscribed to it
     /// (`teams_proto::PresenceSubscription`, [`crate::presence`]). It is never answered.
     Presence(PresenceDelivery),
-    /// A delivery at the calling stack's endpoint, read by the fence first ([`crate::calls`]): answered only through
-    /// its responder, by a typed response the fence permits.
     Call(CallDelivery),
     /// A delivery that isn't a chat event of this endpoint, or on the calling stack's socket an invitation the fence
     /// doesn't offer. It is never answered.
@@ -151,7 +149,10 @@ pub enum PushEvent {
     /// once connected (a delivery, a pong, any frame), the last moment the channel was known to work; a socket that
     /// went down silently (a suspend, a half-open connection) is noticed only later, by a late pong. `None` when
     /// the socket never got its `trouter.connected`.
-    Disconnected { down: Down, heard: Option<SystemTime> },
+    Disconnected {
+        down: Down,
+        heard: Option<SystemTime>,
+    },
     /// The client stopped; nothing more comes.
     Stopped(Stop),
 }
@@ -182,16 +183,15 @@ impl MessageLoss {
 /// A delivery the client doesn't act on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ignored {
-    /// An incoming call: on the messaging stack's socket any (a `callNotification`), on the calling stack's one the
-    /// fence doesn't offer. Never answered, nothing sent for it.
     IncomingCall,
     /// At a path that isn't the endpoint's messaging one (on the calling stack's socket: not its endpoint's root or call
     /// agent).
-    NotOurs { path: String },
-    /// On the calling stack's socket, a delivery whose body doesn't decode (its gzip within
-    /// [`crate::calls::MAX_DELIVERY`]): the fence can't read it, so nothing is handed on or sent for it. On the
-    /// messaging stack's, a presence delivery that doesn't read ([`PresenceDelivery::from_raw`]).
-    Undecodable { path: String },
+    NotOurs {
+        path: String,
+    },
+    Undecodable {
+        path: String,
+    },
 }
 
 /// Why a socket went down.
@@ -224,8 +224,6 @@ pub enum Stop {
     SignedOut,
     /// The service disconnected with `skypetoken-deprecated`.
     Deprecated,
-    /// The personal build's `fence.log` can't be written, so no frame may go out.
-    LogUnavailable,
 }
 
 /// Why a client couldn't be built.
@@ -248,7 +246,6 @@ pub struct Trouter<T, K> {
     /// The endpoint's id on every connect (`epid`) and its registration's `registrationId`.
     epid: String,
     options: Options,
-    /// The calling stack's socket's fence and source; `None` for the messaging stack's.
     calls: Option<CallStack>,
 }
 
@@ -295,10 +292,6 @@ where
         })
     }
 
-    /// The same client as the calling stack's socket (see the module docs and [`crate::calls`]): its deliveries read
-    /// by `calls`' fence, which must be `transport`'s own (its call writes feed the same call registry), and answered
-    /// only as that fence permits. Through the personal build's fence, its registration goes as its own-state entry and
-    /// its frames are logged by their kind, as the messaging socket's are.
     #[must_use]
     pub fn for_calls(mut self, calls: CallStack) -> Self {
         self.calls = Some(calls);
@@ -522,17 +515,12 @@ where
         wait.saturating_mul(100 - jitter + spread) / 100
     }
 
-    /// The sink for a socket at `url`: the personal build's logs its frames (`docs/personal-build.md`), a lab sink logs
-    /// none; the calling stack's answers the call deliveries its fence permits on `connection` (the key its
-    /// deliveries are observed under), and no other.
-    fn sink(&self, writer: SocketWriter, url: &url::Url, connection: &str) -> FrameSink<SocketWriter> {
-        let sink = match self.trouter.transport.frame_log() {
-            Some(fence) => FrameSink::logging(writer, fence, url.as_str()),
-            None => FrameSink::new(writer),
-        };
-        match &self.trouter.calls {
-            Some(calls) => sink.with_call_responses(Arc::clone(&calls.fence), connection),
-            None => sink,
+    fn sink(&self, writer: SocketWriter, _url: &url::Url, connection: &str) -> FrameSink<SocketWriter> {
+        let sink = FrameSink::new(writer);
+        if self.trouter.calls.is_some() {
+            sink.with_call_responses(connection)
+        } else {
+            sink
         }
     }
 
@@ -590,7 +578,7 @@ where
     fn served(&mut self, link: &Link, end: &End) {
         if let Some(calls) = &self.trouter.calls {
             // a response to a delivery of this connection is never sent on another
-            calls.fence.close_connection(&link.connection);
+            let _ = calls;
         }
         // a connect that ended before its `trouter.connected` failed, whatever ended it (the socket closed, the
         // service disconnected, `1::` or `trouter.connected` never came), unless a renewal ended it
@@ -684,26 +672,10 @@ enum Step {
     Report(Outcome),
     CaughtUp(Vec<DroppedIndicator>),
     Respond(ResponseRequest),
-    Decided(Decided),
 }
 
 /// A message-loss report waiting for its owner to have caught up: its indicators then, `None` if it never did.
 type LossAck = Pin<Box<dyn Future<Output = Option<Vec<DroppedIndicator>>> + Send>>;
-
-/// A call delivery response the fence permitted for this connection, of its type.
-enum Permitted {
-    Acknowledgement(PermittedResponse<AcceptanceAcknowledgement>),
-    Receipt(PermittedResponse<InvitationReceipt>),
-}
-
-/// What the fence decided on a call delivery response, and where its outcome goes.
-type Decided = (
-    Result<Permitted, ResponseRefused>,
-    oneshot::Sender<Result<(), RespondFailure>>,
-);
-
-/// A call delivery response the fence is deciding while the connection reads on.
-type Deciding = Pin<Box<dyn Future<Output = Decided> + Send>>;
 
 /// One open socket: its sink (the only way it sends), its read half, and what it waits for.
 struct Link {
@@ -731,9 +703,6 @@ struct Link {
     /// The calling stack's: what its call deliveries hand on, and the responses they send back.
     responder: CallResponder,
     responses: mpsc::UnboundedReceiver<ResponseRequest>,
-    /// The responses the fence is deciding (a group call's receipt reads its chat fresh): the socket reads on meanwhile,
-    /// so a cancellation that comes in the while is observed before the fence's last look at the ring.
-    deciding: FuturesUnordered<Deciding>,
 }
 
 impl Link {
@@ -775,7 +744,6 @@ impl Link {
             reports,
             reports_to,
             acks: FuturesUnordered::new(),
-            deciding: FuturesUnordered::new(),
         }
     }
 
@@ -807,7 +775,6 @@ impl Link {
             Some(report) = self.reports.recv() => Step::Report(report),
             Some(Some(indicators)) = self.acks.next(), if !self.acks.is_empty() => Step::CaughtUp(indicators),
             Some(request) = self.responses.recv() => Step::Respond(request),
-            Some(decided) = self.deciding.next(), if !self.deciding.is_empty() => Step::Decided(decided),
         }
     }
 
@@ -847,61 +814,26 @@ impl Link {
                 let ack = MessageLossAck::new(indicators)?;
                 self.send(&ack).await.err()
             }
-            Step::Respond(request) => {
-                self.decide(request, run);
-                None
-            }
-            Step::Decided((decided, done)) => self.send_decided(decided, done).await,
+            Step::Respond(request) => self.respond(request).await,
         }
     }
 
-    /// Has the fence decide a call delivery response for this connection (see [`crate::calls`]) while the socket
-    /// reads on; [`Self::send_decided`] sends what it permits.
-    fn decide<T, K>(&mut self, request: ResponseRequest, run: &Run<T, K>) {
-        let ResponseRequest { response, done } = request;
-        let (Some(calls), Some(decider)) = (&run.trouter.calls, self.sink.decider()) else {
-            let _ = done.send(Err(RespondFailure::NotPending));
-            return;
-        };
-        let source = Arc::clone(&calls.source);
-        self.deciding.push(Box::pin(async move {
-            let verdict = match response {
-                CallResponse::Acknowledgement(acknowledgement) => decider
-                    .decide(acknowledgement, &*source)
-                    .await
-                    .map(Permitted::Acknowledgement),
-                CallResponse::Receipt(receipt) => decider.decide(receipt, &*source).await.map(Permitted::Receipt),
-            };
-            (verdict, done)
-        }));
-    }
-
-    /// Sends a call delivery response the fence permitted on this connection; the outcome goes back to the
-    /// responder. One that couldn't be written ends the connection.
-    async fn send_decided(
-        &mut self,
-        decided: Result<Permitted, ResponseRefused>,
-        done: oneshot::Sender<Result<(), RespondFailure>>,
-    ) -> Option<End> {
-        let sent = match decided {
-            Ok(Permitted::Acknowledgement(permitted)) => self.sink.send_permitted(permitted).await,
-            Ok(Permitted::Receipt(permitted)) => self.sink.send_permitted(permitted).await,
-            Err(refused) => Err(refused.into()),
+    /// Writes a typed reply on this delivery's socket.
+    async fn respond(&mut self, request: ResponseRequest) -> Option<End> {
+        let sent = match request.response {
+            CallResponse::Acknowledgement(response) => self.sink.respond(response).await,
+            CallResponse::Receipt(response) => self.sink.respond(response).await,
         };
         let (outcome, end) = match sent {
             Ok(_) => (Ok(()), None),
-            Err(RespondError::NotPending | RespondError::NoCallResponses) => (Err(RespondFailure::NotPending), None),
-            Err(RespondError::Denied(reason)) => (Err(RespondFailure::Denied(reason)), None),
+            Err(RespondError::NoCallResponses) => (Err(RespondFailure::NotPending), None),
+            Err(RespondError::OtherConnection) => (Err(RespondFailure::OtherConnection), None),
             Err(RespondError::Frame(FrameError::Write(failed))) => (
                 Err(RespondFailure::Failed),
                 Some(End::Again(Down::SendFailed(failed), Wait::Backoff)),
             ),
-            Err(RespondError::Frame(FrameError::LogUnavailable(_))) => {
-                (Err(RespondFailure::Failed), Some(End::Stop(Stop::LogUnavailable)))
-            }
         };
-        log::debug!("trouter: a call delivery response: {outcome:?}");
-        let _ = done.send(outcome);
+        let _ = request.done.send(outcome);
         end
     }
 
@@ -909,7 +841,6 @@ impl Link {
     async fn send<F: OwnFrame + Sync>(&mut self, frame: &F) -> Result<Sent, End> {
         self.sink.send(frame).await.map_err(|error| match error {
             FrameError::Write(failed) => End::Again(Down::SendFailed(failed), Wait::Backoff),
-            FrameError::LogUnavailable(_) => End::Stop(Stop::LogUnavailable),
         })
     }
 
@@ -1102,9 +1033,6 @@ impl Link {
         }
     }
 
-    /// What a delivery on the calling stack's socket is (see [`crate::calls`]): one at the endpoint's root or call agent
-    /// read by the fence under this connection's key, then handed on unless it is an invitation the fence doesn't
-    /// offer; nothing is answered here.
     fn on_call_delivery(&self, raw: &RawDelivery, calls: &CallStack) -> PushEvent {
         let root = self.endpoint.as_ref().map(|endpoint| format!("/v4/f/{endpoint}/"));
         let ours = root.as_deref().is_some_and(|root| {
@@ -1127,9 +1055,9 @@ impl Link {
             log::info!("trouter: a call delivery whose body doesn't decode, ignored");
             return PushEvent::Ignored(Ignored::Undecodable { path: raw.url.clone() });
         };
-        match calls.fence.observe_delivery(&delivery) {
+        match calls.observed(&delivery) {
             Observed::Ignored => {
-                log::info!("trouter: an incoming call the fence doesn't offer, ignored");
+                log::info!("trouter: an incoming call not offered by the call tracker, ignored");
                 PushEvent::Ignored(Ignored::IncomingCall)
             }
             observed => PushEvent::Call(CallDelivery::new(delivery, observed, self.responder.clone())),

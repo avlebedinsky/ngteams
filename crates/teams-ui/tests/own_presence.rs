@@ -26,8 +26,8 @@ use teams_core::{
     TransientSent,
 };
 use teams_proto::{
-    Authorized, EndpointRegistration, HttpError, ManualAvailability, Mutating, Read, RegisteredEndpoint,
-    Request as ProtoRequest, Response, Transport, register,
+    EndpointRegistration, HttpError, ManualAvailability, Read, RegisteredEndpoint, Request as ProtoRequest, Response,
+    Transport, register,
 };
 use teams_trouter::Stop;
 use teams_ui::own_presence::{self, OwnPresence, POLICY_TICK};
@@ -698,9 +698,9 @@ impl Transport for Accepting {
         future::ready(Ok(Response::new(202, Vec::new())))
     }
 
-    fn deliver<R: Mutating + Send>(
+    fn deliver<R: teams_proto::Request + Send>(
         &self,
-        _: Authorized<R>,
+        _: R,
     ) -> impl Future<Output = Result<Response, HttpError>> + Send {
         future::ready(Err(HttpError::NoRoute))
     }

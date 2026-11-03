@@ -218,7 +218,6 @@ fn instant(text: &str) -> Option<i64> {
 
 #[cfg(test)]
 mod tests {
-    use teams_fence::{Contact, Policy, Request as FenceRequest, contacting};
 
     use super::*;
 
@@ -253,22 +252,6 @@ mod tests {
         let body = Schedules(ask()).body().expect("a body");
         assert_eq!(body["requestType"], "AttendeeAvailabilityOnly");
         assert_eq!(body["endTime"], "2026-10-31T21:00:00.000Z");
-    }
-
-    #[test]
-    fn the_fence_reads_them_as_reaching_nobody() {
-        for (method, path, body) in [
-            ("PUT", "findMeetingTimes", MeetingTimes(ask()).body()),
-            ("PUT", "schedules", Schedules(ask()).body()),
-        ] {
-            let url = format!("https://teams.microsoft.com/api/mt/part/emea-02/v2.0/me/calendars/{path}");
-            let body = body.map(|body| body.to_string().into_bytes());
-            let contact = contacting(
-                &FenceRequest::new(method, &url).with_body(body.as_deref()),
-                &Policy::new(),
-            );
-            assert_eq!(contact, Contact::None, "{path}");
-        }
     }
 
     #[test]

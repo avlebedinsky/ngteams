@@ -11,24 +11,22 @@
 #![cfg(test)]
 
 use std::future::{self, Future};
-use std::io::{self, Write};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
-use serde_json::Value;
 use teams_auth::secrets::Secret;
 use teams_auth::session::{AccessToken, Renewal};
 use teams_auth::token::TokenError;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Event, Parts, Push};
 use teams_core::{EngineError, Outbox, OwnStatus, Transient, TransientSent};
-use teams_fence::{FailClosed, Fence, FenceLog, LiveMembershipSource, MembershipSource, Mri, Roster};
+use teams_fence::Mri;
 use teams_mock::{
-    AvailabilityChange, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, OwnAvailability, PRESENCE_BASE, TrouterMock,
+    AvailabilityChange, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, OwnAvailability, PRESENCE_BASE, TrouterMock,
 };
 use teams_proto::{
-    Author, Authorized, Client, Credentials, EndpointRegistration, HttpError, HttpTransport, ManualAvailability,
-    Mutating, Read, Request as ProtoRequest, Response, Transport, register,
+    Author, Client, Credentials, EndpointRegistration, HttpError, HttpTransport, ManualAvailability, Read,
+    Request as ProtoRequest, Response, Transport, register,
 };
 use teams_store::Store;
 use teams_trouter::{Options, RegistrationReport, Stop, Trouter, TrouterCredentials};
@@ -71,40 +69,8 @@ impl TrouterCredentials for Tokens {
     }
 }
 
-/// A `fence.log` the test reads back.
-#[derive(Clone, Default)]
-struct SharedLog(Arc<Mutex<Vec<u8>>>);
-
-impl SharedLog {
-    /// The fence's decisions on writes (not the requests it logged).
-    fn decisions(&self) -> Vec<Value> {
-        let bytes = self.0.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        String::from_utf8(bytes)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str::<Value>(line).unwrap())
-            .filter(|line| line.get("kind").is_some())
-            .collect()
-    }
-}
-
-impl Write for SharedLog {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
 struct Rig {
     handle: EngineHandle,
-    log: SharedLog,
     _dir: tempfile::TempDir,
 }
 
@@ -123,30 +89,25 @@ fn rig_with(
     throttle_first: Option<Duration>,
 ) -> Rig {
     let dir = tempfile::tempdir().unwrap();
-    let log = SharedLog::default();
+
     let tokens = Arc::new(Tokens {
         token: mock.token(LAB_A).unwrap(),
         renewals: broadcast::channel(4).0,
     });
-    let fence = Fence::new(
-        Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), []),
-        FenceLog::from_writer(log.clone()),
-    );
-    let fence = Arc::new(match own {
-        Some(mri) => fence.with_own_account(Mri::new(mri)),
-        None => fence,
-    });
+
     let origin = mock.origin();
     let http = || {
-        HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &origin)
+        let transport = HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin)
             .unwrap()
             .with_presence(PRESENCE_BASE)
-            .unwrap()
+            .unwrap();
+        match own {
+            Some(account) => transport.for_account(Mri::new(account)),
+            None => transport,
+        }
     };
     let transport = Arc::new(http());
-    let live = LiveMembershipSource::with_mock_origin(&origin).unwrap();
-    live.set_credential_source(transport.clone());
-    let membership: Arc<dyn MembershipSource + Send> = Arc::new(live);
+
     let channel = push.then(|| {
         let trouter = Trouter::with_mock_origin(Arc::clone(&transport), Arc::clone(&tokens), trouter.origin())
             .unwrap()
@@ -168,21 +129,11 @@ fn rig_with(
                 wait,
                 throttled: AtomicBool::new(false),
             });
-            start(
-                store,
-                client,
-                Outbox::new(throttled, fence, membership, author),
-                channel,
-            )
+            start(store, client, Outbox::new(throttled, author), channel)
         }
-        None => start(
-            store,
-            client,
-            Outbox::new(transport, fence, membership, author),
-            channel,
-        ),
+        None => start(store, client, Outbox::new(transport, author), channel),
     };
-    Rig { handle, log, _dir: dir }
+    Rig { handle, _dir: dir }
 }
 
 fn start<T: Transport<Error = HttpError> + Send + 'static>(
@@ -224,7 +175,7 @@ impl Transport for ThrottledOnce {
         self.inner.send(request)
     }
 
-    async fn deliver<R: Mutating + Send>(&self, write: Authorized<R>) -> Result<Response, HttpError> {
+    async fn deliver<R: teams_proto::Request + Send>(&self, write: R) -> Result<Response, HttpError> {
         if !self.throttled.swap(true, Ordering::SeqCst) {
             return Ok(Response::new(429, Vec::new()).with_retry_after(self.wait));
         }
@@ -298,14 +249,6 @@ async fn the_account_sets_its_own_availability_from_its_registered_endpoint() {
             change(AvailabilityChange::Reset),
         ]
     );
-    // each under the fence's permit for its own account, logged
-    let decisions = rig.log.decisions();
-    assert_eq!(decisions.len(), steps.len());
-    for decision in &decisions {
-        assert_eq!(decision["kind"], "own_availability", "{decision}");
-        assert_eq!(decision["verdict"], "allow", "{decision}");
-        assert_eq!(decision["scope"], serde_json::json!({"account": {"mri": LAB_A}}));
-    }
     rig.handle.shutdown();
 }
 
@@ -326,12 +269,12 @@ async fn nothing_goes_out_without_an_endpoint_registered_in_this_run() {
         assert_eq!(error.kind(), "no endpoint");
     }
     assert!(mock.own_availability().is_empty());
-    assert!(rig.log.decisions().is_empty(), "nothing was even asked of the fence");
+
     rig.handle.shutdown();
 }
 
 #[tokio::test]
-async fn a_fence_that_isnt_the_accounts_own_registers_no_endpoint_of_its_and_nothing_goes_out() {
+async fn an_endpoint_registered_for_another_account_never_changes_our_availability() {
     let mock = ChatServiceMock::start().await.unwrap();
     let trouter = mock.start_trouter().unwrap();
     // a's engine whose fence owns no account, or b: its push channel registers an endpoint for that fence's account
@@ -351,10 +294,7 @@ async fn a_fence_that_isnt_the_accounts_own_registers_no_endpoint_of_its_and_not
                 "{own:?} {status:?}: {sent:?}"
             );
         }
-        assert!(
-            rig.log.decisions().is_empty(),
-            "{own:?}: nothing was even asked of the fence"
-        );
+
         rig.handle.shutdown();
     }
     assert!(mock.own_availability().is_empty(), "UPS was told nothing");
@@ -362,31 +302,25 @@ async fn a_fence_that_isnt_the_accounts_own_registers_no_endpoint_of_its_and_not
 
 /// `account`'s HTTP transport against the mock, given the presence base, its fence owning `account` and logging to
 /// `log`; with that fence.
-fn owning_transport(mock: &ChatServiceMock, account: &str, log: SharedLog) -> (HttpTransport<Tokens>, Arc<Fence>) {
+fn owning_transport(mock: &ChatServiceMock, account: &str) -> HttpTransport<Tokens> {
     let tokens = Arc::new(Tokens {
         token: mock.token(account).unwrap(),
         renewals: broadcast::channel(4).0,
     });
-    let fence = Arc::new(
-        Fence::new(
-            Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), []),
-            FenceLog::from_writer(log),
-        )
-        .with_own_account(Mri::new(account)),
-    );
-    let transport = HttpTransport::with_mock_origin(tokens, Arc::clone(&fence), CHAT_BASE, &mock.origin())
+
+    HttpTransport::with_mock_origin(tokens, CHAT_BASE, &mock.origin())
         .unwrap()
+        .for_account(Mri::new(account))
         .with_presence(PRESENCE_BASE)
-        .unwrap();
-    (transport, fence)
+        .unwrap()
 }
 
 #[tokio::test]
 async fn an_outbox_sends_no_availability_from_an_endpoint_registered_for_another_account() {
     let mock = ChatServiceMock::start().await.unwrap();
-    let log = SharedLog::default();
-    let (a_transport, a_fence) = owning_transport(&mock, LAB_A, log.clone());
-    let (b_transport, _) = owning_transport(&mock, LAB_B, SharedLog::default());
+
+    let a_transport = owning_transport(&mock, LAB_A);
+    let b_transport = owning_transport(&mock, LAB_B);
     let registration = |epid: &str| {
         EndpointRegistration::messaging(
             epid,
@@ -407,13 +341,8 @@ async fn an_outbox_sends_no_availability_from_an_endpoint_registered_for_another
     assert_eq!(b_endpoint.account(), Some(&Mri::new(LAB_B)));
 
     // a's outbox, under a's fence and over a's transport, handed b's endpoint
-    let membership: Arc<dyn MembershipSource + Send> = Arc::new(FailClosed);
-    let outbox = Outbox::new(
-        Arc::new(a_transport),
-        a_fence,
-        membership,
-        Author::new(Mri::new(LAB_A), "Lab A"),
-    );
+
+    let outbox = Outbox::new(Arc::new(a_transport), Author::new(Mri::new(LAB_A), "Lab A"));
     for transient in [
         Transient::EndpointAvailable {
             endpoint: b_endpoint.clone(),
@@ -434,7 +363,6 @@ async fn an_outbox_sends_no_availability_from_an_endpoint_registered_for_another
         );
     }
     assert!(mock.own_availability().is_empty(), "UPS was told nothing");
-    assert!(log.decisions().is_empty(), "nothing was even asked of a's fence");
 
     // a's own endpoint goes out, under a's fence's permit
     let sent = outbox
@@ -445,7 +373,6 @@ async fn an_outbox_sends_no_availability_from_an_endpoint_registered_for_another
     assert_eq!(told.len(), 1);
     assert_eq!(told[0].account, LAB_A);
     assert_eq!(told[0].endpoint, "00000000-0000-4000-8000-0000000000e1");
-    assert_eq!(log.decisions().len(), 1);
 }
 
 #[tokio::test]
@@ -455,14 +382,8 @@ async fn an_availability_writes_to_no_chat_and_only_the_newer_of_its_kind_replac
         token: mock.token(LAB_A).unwrap(),
         renewals: broadcast::channel(4).0,
     });
-    let fence = Arc::new(
-        Fence::new(
-            Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), []),
-            FenceLog::from_writer(io::sink()),
-        )
-        .with_own_account(Mri::new(LAB_A)),
-    );
-    let transport = HttpTransport::with_mock_origin(tokens, fence, CHAT_BASE, &mock.origin()).unwrap();
+
+    let transport = HttpTransport::with_mock_origin(tokens, CHAT_BASE, &mock.origin()).unwrap();
     let registration = EndpointRegistration::messaging(
         "00000000-0000-4000-8000-0000000000e1",
         "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000A/",
@@ -546,11 +467,7 @@ async fn once_the_push_channel_stopped_a_waiting_availability_is_dropped_and_no_
     // and the throttled `PUT` never goes out from the tick, its `Retry-After` long over
     tokio::time::sleep(Duration::from_millis(2_500)).await;
     assert!(mock.own_availability().is_empty(), "UPS was told nothing");
-    assert_eq!(
-        rig.log.decisions().len(),
-        1,
-        "only the first, throttled attempt was asked of the fence"
-    );
+
     rig.handle.shutdown();
 }
 
@@ -565,14 +482,8 @@ async fn a_transient_availability_names_only_the_endpoint_the_engine_keeps() {
         token: mock.token(LAB_A).unwrap(),
         renewals: broadcast::channel(4).0,
     });
-    let fence = Arc::new(
-        Fence::new(
-            Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), []),
-            FenceLog::from_writer(io::sink()),
-        )
-        .with_own_account(Mri::new(LAB_A)),
-    );
-    let transport = HttpTransport::with_mock_origin(tokens, fence, CHAT_BASE, &mock.origin()).unwrap();
+
+    let transport = HttpTransport::with_mock_origin(tokens, CHAT_BASE, &mock.origin()).unwrap();
     let registration = EndpointRegistration::messaging(
         "00000000-0000-4000-8000-0000000000e2",
         "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000B/",
@@ -595,6 +506,6 @@ async fn a_transient_availability_names_only_the_endpoint_the_engine_keeps() {
         assert!(matches!(error, EngineError::NoEndpoint), "{transient:?}: {error:?}");
     }
     assert!(mock.own_availability().is_empty());
-    assert!(rig.log.decisions().is_empty(), "nothing was even asked of the fence");
+
     rig.handle.shutdown();
 }

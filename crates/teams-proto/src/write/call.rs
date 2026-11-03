@@ -1,31 +1,12 @@
-//! The call writes (M3 Task 11): each request a call makes, a sealed [`Mutating`] type built in the shape the web
-//! client's captures show (`docs/protocol/calling-echo.md`, `docs/protocol/calling.md`), sent only as
-//! [`Authorized<_>`](super::Authorized) through the calling service ([`Service::Calling`](crate::Service::Calling)).
-//!
-//! **The target comes from the bytes.** A call write is built whole when it is made: its method, its exact URL (the
-//! call start's [`CALL_START_URL`], or a [`CallLink`] the call's services handed out, kept byte for byte), its headers
-//! ([`CallContext`]) and its JSON body. The constructor then asks [`teams_fence::contacting`], the lab rule's one
-//! classifier, what that request is, and keeps the [`Target`] it gives; a request the classifier doesn't map
-//! ([`CallWriteError::Unmapped`]), or maps as another write than the type stands for ([`CallWriteError::OtherWrite`]),
-//! isn't made. So a native call write's target is, by construction, what the browser fence decides for the same bytes:
-//!
-//! - [`StartCall`]: the test call's start (`WriteKind::Call` on `Scope::New`, the caller and the echo service), a
-//!   chat's call start (`WriteKind::Call` on the chat it carries, the caller and every callee) or a meeting's
-//!   (`WriteKind::Call` on the meeting's chat, the sender alone);
-//! - every other write: `Scope::CallOperation` with its operation, its exact URL, the sender its body names, the
-//!   callbacks it hands out, the conversation an `attach` or a join subscribes to, and an `add`'s invitee, which the
-//!   fence's call registry resolves.
-//!
-//! The transport sends exactly what was classified, never resent. A start and a join with media make their call
-//! pending in the fence's registry before they go and register it from their answer; an `attach` and an `accept` bind
-//! the links their answer hands out (`HttpTransport::deliver`).
+//! Typed call-control requests with validated operation links and protocol-shaped bodies.
 
 mod parts;
 
 use std::fmt;
 
+use crate::CallOperation;
 use serde_json::{Map, Value, json};
-use teams_fence::{CallOperation, Contact, Mri, Policy, Request as FenceRequest, Scope, Target, WriteKind, contacting};
+use teams_fence::Mri;
 use url::Url;
 
 pub(crate) use self::parts::on_calling_base;
@@ -34,34 +15,19 @@ pub use self::parts::{
     Invitee, Links, MediaContent, MediaDescription, MediaDescriptions,
 };
 
-use super::sealed::Sealed;
-use super::{Mutating, Wire};
+use super::Prepared;
+use super::Wire;
 use crate::endpoint::Method;
 
 /// Why a call write wasn't made. Nothing was sent.
 #[derive(Debug, thiserror::Error)]
 pub enum CallWriteError {
-    /// The fence's classifier doesn't map the request built from these parts: a value outside its captured shape (a
-    /// callback name nobody reviewed, a callee that isn't a work account, a test call naming a chat, a link of another
-    /// operation, …).
-    #[error("the request isn't in a captured shape the fence maps")]
+    /// A protocol value, callback or operation link is outside the supported wire shape.
+    #[error("the request isn't in a supported protocol shape")]
     Unmapped,
-    /// The classifier reads the request as another write than the type stands for.
-    #[error("the fence reads the request as another write")]
-    OtherWrite,
     /// The request's message id couldn't be made.
     #[error("the system's random source failed: {0}")]
     Random(getrandom::Error),
-}
-
-/// What the transport does with the fence's call registry around the send.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Registry {
-    Nothing,
-    /// A call start (or a join with media): pended before it goes, registered from its answer.
-    Start,
-    /// An `attach` or an `accept`: its answer's links bound.
-    Answer,
 }
 
 /// A call write as the transport sends it: method, exact URL, headers (by lower-cased name, none of them a
@@ -72,7 +38,6 @@ pub struct CallWire {
     url: Url,
     headers: Vec<(&'static str, String)>,
     body: Option<Value>,
-    registry: Registry,
 }
 
 impl CallWire {
@@ -93,8 +58,8 @@ impl CallWire {
         self.body.as_ref().map(body_bytes)
     }
 
-    pub(crate) fn registry(&self) -> Registry {
-        self.registry
+    pub(crate) fn body(&self) -> Option<&Value> {
+        self.body.as_ref()
     }
 }
 
@@ -120,7 +85,6 @@ fn body_bytes(body: &Value) -> Vec<u8> {
 /// A built call write: its target, as classified, and its wire.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Built {
-    target: Target,
     wire: CallWire,
 }
 
@@ -137,20 +101,6 @@ enum Expect {
     Operation(CallOperation),
 }
 
-impl Expect {
-    fn fits(self, target: &Target) -> bool {
-        match (self, target.scope()) {
-            (Self::TestStart, Scope::New)
-            | (Self::ChatStart, Scope::Conversation { .. })
-            | (Self::ChannelStart, Scope::Team { .. }) => target.kind() == WriteKind::Call,
-            (Self::Operation(expected), Scope::CallOperation { operation, .. }) => {
-                *operation == expected && target.kind() == expected.kind()
-            }
-            _ => false,
-        }
-    }
-}
-
 /// One request to build: what is sent, and what it must classify as.
 struct Plan<'a> {
     context: &'a CallContext,
@@ -158,33 +108,30 @@ struct Plan<'a> {
     url: &'a Url,
     body: Option<Value>,
     expect: Expect,
-    registry: Registry,
-    /// The echo service, for the test call's start.
-    echo: Option<&'a Mri>,
 }
 
 /// Builds `plan`'s request and classifies it (see the module docs).
 fn build(plan: Plan<'_>) -> Result<Built, CallWriteError> {
-    let bytes = plan.body.as_ref().map(body_bytes);
-    let request = FenceRequest::new(plan.method.as_str(), plan.url.as_str()).with_body(bytes.as_deref());
-    let policy = plan
-        .echo
-        .map_or_else(Policy::new, |echo| Policy::new().with_echo_callee(echo.clone()));
-    let Contact::Write(target) = contacting(&request, &policy) else {
+    if !on_calling_base(plan.url) {
         return Err(CallWriteError::Unmapped);
-    };
-    if !plan.expect.fits(&target) {
-        return Err(CallWriteError::OtherWrite);
+    }
+    if let Expect::Operation(operation) = plan.expect {
+        let last = plan
+            .url
+            .path_segments()
+            .and_then(|mut parts| parts.rfind(|part| !part.is_empty()))
+            .unwrap_or_default();
+        if !operation.segment().is_empty() && last != operation.segment() {
+            return Err(CallWriteError::Unmapped);
+        }
     }
     let headers = plan.context.headers().map_err(CallWriteError::Random)?;
     Ok(Built {
-        target,
         wire: CallWire {
             method: plan.method,
             url: plan.url.clone(),
             headers,
             body: plan.body,
-            registry: plan.registry,
         },
     })
 }
@@ -207,8 +154,6 @@ fn operation(
         url: link.url(),
         body,
         expect: Expect::Operation(operation),
-        registry: Registry::Nothing,
-        echo: None,
     })
 }
 
@@ -394,7 +339,6 @@ const MEETING_TYPE_CHAT: u64 = 1;
 pub struct StartCall {
     caller: Mri,
     echo: Option<Mri>,
-    target: Target,
     built: Built,
 }
 
@@ -404,6 +348,14 @@ impl StartCall {
     /// # Errors
     /// [`CallWriteError`] when the request isn't the test call's start in its captured shape.
     pub fn echo_test(context: &CallContext, parts: &StartParts, echo: &Mri) -> Result<Self, CallWriteError> {
+        if parts.media.required_features.is_some()
+            || parts
+                .call_links
+                .iter()
+                .any(|(name, _)| !["progress", "mediaAnswer", "acceptance", "redirection", "end"].contains(&name))
+        {
+            return Err(CallWriteError::Unmapped);
+        }
         let body = start_body(parts, Some(TEST_CALL_SCENARIO), &[], Value::Null);
         Self::start(context, parts, body, Expect::TestStart, Some(echo))
     }
@@ -420,6 +372,18 @@ impl StartCall {
         callees: &[Invitee],
         group_chat: Option<&str>,
     ) -> Result<Self, CallWriteError> {
+        let valid_chat = group_chat.map_or(callees.len() == 1, teams_fence::is_group_chat_id);
+        let mut people = std::collections::BTreeSet::new();
+        if !valid_chat
+            || callees.is_empty()
+            || callees.iter().any(|callee| {
+                !callee.mri.as_str().starts_with("8:orgid:")
+                    || callee.mri == parts.from.mri
+                    || !people.insert(&callee.mri)
+            })
+        {
+            return Err(CallWriteError::Unmapped);
+        }
         let to: Vec<Value> = callees.iter().map(Invitee::json).collect();
         let chat = group_chat.map_or(Value::Null, |id| json!({"threadId": id, "messageId": null}));
         let body = start_body(parts, None, &to, chat);
@@ -437,6 +401,9 @@ impl StartCall {
         chat: &str,
         meeting: &MeetingInfo,
     ) -> Result<Self, CallWriteError> {
+        if !teams_fence::is_meeting_chat_id(chat) {
+            return Err(CallWriteError::Unmapped);
+        }
         let body = meeting_start_body(parts, chat, meeting);
         Self::start(context, parts, body, Expect::ChatStart, None)
     }
@@ -449,8 +416,11 @@ impl StartCall {
     /// [`CallWriteError`] when the request isn't a channel meeting's subscription in its captured shape (the channel
     /// not a team's thread, the sender not a work account).
     pub fn meet_now(context: &CallContext, parts: &StartParts, channel: &str) -> Result<Self, CallWriteError> {
+        if !teams_fence::is_team_thread_id(channel) {
+            return Err(CallWriteError::Unmapped);
+        }
         let body = meet_now_body(parts, channel);
-        Self::start_as(context, parts, body, (Expect::ChannelStart, Registry::Nothing), None)
+        Self::start_as(context, parts, body, Expect::ChannelStart, None)
     }
 
     fn start(
@@ -460,14 +430,14 @@ impl StartCall {
         expect: Expect,
         echo: Option<&Mri>,
     ) -> Result<Self, CallWriteError> {
-        Self::start_as(context, parts, body, (expect, Registry::Start), echo)
+        Self::start_as(context, parts, body, expect, echo)
     }
 
     fn start_as(
         context: &CallContext,
         parts: &StartParts,
         body: Value,
-        (expect, registry): (Expect, Registry),
+        expect: Expect,
         echo: Option<&Mri>,
     ) -> Result<Self, CallWriteError> {
         let url = Url::parse(CALL_START_URL).map_err(|_| CallWriteError::Unmapped)?;
@@ -477,13 +447,10 @@ impl StartCall {
             url: &url,
             body: Some(body),
             expect,
-            registry,
-            echo,
         })?;
         Ok(Self {
             caller: parts.from.mri.clone(),
             echo: echo.cloned(),
-            target: built.target.clone(),
             built,
         })
     }
@@ -502,13 +469,7 @@ impl StartCall {
     }
 }
 
-impl Mutating for StartCall {
-    fn target(&self) -> Target {
-        self.target.clone()
-    }
-}
-
-impl Sealed for StartCall {
+impl Prepared for StartCall {
     fn wire(&self) -> Option<Wire> {
         None
     }
@@ -537,7 +498,6 @@ pub use teams_fence::TEAMS_ECHO_BOT_MRI;
 pub struct AddToCall {
     invitee: Mri,
     url: Url,
-    target: Target,
     built: Built,
 }
 
@@ -560,6 +520,23 @@ impl AddToCall {
     /// [`CallWriteError`] when the request isn't an `add` in its captured shape: the caller's MRI not
     /// `8:orgid:<object id>`, a chat other than the 1:1 chat of the caller and the invitee, a link of another operation.
     pub fn invite(context: &CallContext, link: &CallLink, parts: &AddParts) -> Result<Self, CallWriteError> {
+        let chat = parts
+            .invitee
+            .mri
+            .as_str()
+            .strip_prefix("28:")
+            .and_then(|bot| {
+                parts
+                    .from
+                    .mri
+                    .as_str()
+                    .strip_prefix("8:orgid:")
+                    .map(|caller| format!("19:{caller}_{bot}@unq.gbl.spaces"))
+            })
+            .or_else(|| teams_fence::one_to_one_id(parts.from.mri.as_str(), parts.invitee.mri.as_str()));
+        if chat.as_deref() != Some(parts.chat_thread.as_str()) {
+            return Err(CallWriteError::Unmapped);
+        }
         let organizer = parts
             .from
             .mri
@@ -581,7 +558,6 @@ impl AddToCall {
         Ok(Self {
             invitee: parts.invitee.mri.clone(),
             url: link.url().clone(),
-            target: built.target.clone(),
             built,
         })
     }
@@ -599,13 +575,7 @@ impl AddToCall {
     }
 }
 
-impl Mutating for AddToCall {
-    fn target(&self) -> Target {
-        self.target.clone()
-    }
-}
-
-impl Sealed for AddToCall {
+impl Prepared for AddToCall {
     fn wire(&self) -> Option<Wire> {
         None
     }
@@ -618,13 +588,9 @@ impl Sealed for AddToCall {
 /// The call writes that are only ever built whole: a newtype over [`Built`], its target and wire from it.
 macro_rules! call_write {
     ($($name:ident),* $(,)?) => {$(
-        impl Mutating for $name {
-            fn target(&self) -> Target {
-                self.0.target.clone()
-            }
-        }
 
-        impl Sealed for $name {
+
+        impl Prepared for $name {
             fn wire(&self) -> Option<Wire> {
                 None
             }
@@ -714,6 +680,9 @@ impl JoinCall {
         parts: &JoinParts,
         media: &JoinMedia,
     ) -> Result<Self, CallWriteError> {
+        if teams_fence::is_team_thread_id(&parts.group_chat) && parts.meeting.is_none() && !parts.posts_meetup {
+            return Err(CallWriteError::Unmapped);
+        }
         let mut body = join_body(parts, &json!(""));
         let invitation = call_invitation(
             &media.modalities,
@@ -723,7 +692,7 @@ impl JoinCall {
             &parts.client,
         );
         body.insert("callInvitation".to_owned(), invitation);
-        Self::join(context, conversation, body, Registry::Start)
+        Self::join(context, conversation, body)
     }
 
     /// The roster-only join of the conversation at `conversation`.
@@ -735,23 +704,16 @@ impl JoinCall {
         conversation: &CallLink,
         parts: &JoinParts,
     ) -> Result<Self, CallWriteError> {
-        Self::join(context, conversation, join_body(parts, &Value::Null), Registry::Nothing)
+        Self::join(context, conversation, join_body(parts, &Value::Null))
     }
 
-    fn join(
-        context: &CallContext,
-        conversation: &CallLink,
-        body: Map<String, Value>,
-        registry: Registry,
-    ) -> Result<Self, CallWriteError> {
+    fn join(context: &CallContext, conversation: &CallLink, body: Map<String, Value>) -> Result<Self, CallWriteError> {
         let built = build(Plan {
             context,
             method: Method::Post,
             url: conversation.url(),
             body: Some(Value::Object(body)),
             expect: Expect::Operation(CallOperation::Join),
-            registry,
-            echo: None,
         })?;
         Ok(Self(built))
     }
@@ -849,8 +811,7 @@ impl AttachCall {
                 "input": Value::Object(input),
             }]),
         );
-        let mut built = operation(context, CallOperation::Attach, link, Some(Value::Object(body)))?;
-        built.wire.registry = Registry::Answer;
+        let built = operation(context, CallOperation::Attach, link, Some(Value::Object(body)))?;
         Ok(Self(built))
     }
 }
@@ -944,8 +905,7 @@ impl AcceptCall {
         }
         acceptance.insert("callKeepAliveInterval".to_owned(), Value::Null);
         let body = json!({"callAcceptance": Value::Object(acceptance)});
-        let mut built = operation(context, CallOperation::Accept, link, Some(body))?;
-        built.wire.registry = Registry::Answer;
+        let built = operation(context, CallOperation::Accept, link, Some(body))?;
         Ok(Self(built))
     }
 }

@@ -33,7 +33,7 @@ use teams_auth::token::TokenError;
 use teams_core::Outbox;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Parts, Push};
 use teams_fence::lab::{Alias, LabConfig, record_abc_chat};
-use teams_fence::{CallFloor, Fence, FenceLog, LiveMembershipSource, Mri, Roster};
+use teams_fence::{LiveMembershipSource, Mri};
 use teams_mock::{ABC_CHAT, AC_CHAT, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, TrouterMock, lab_toml};
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::Store;
@@ -328,7 +328,6 @@ struct MockLab {
     mock: Arc<ChatServiceMock>,
     trouter: TrouterMock,
     dir: tempfile::TempDir,
-    floor: CallFloor,
 }
 
 impl MockLab {
@@ -347,7 +346,6 @@ impl MockLab {
             mock: Arc::new(mock),
             trouter,
             dir,
-            floor: CallFloor::new(),
         })
     }
 
@@ -358,18 +356,12 @@ impl MockLab {
             token: self.mock.token(mri).ok_or("the mock's token")?,
             renewals: broadcast::channel(4).0,
         });
-        let fence = Arc::new(
-            Fence::new(
-                Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), []),
-                FenceLog::from_writer(io::sink()),
-            )
-            .sharing_calls(&self.floor),
-        );
+
         let origin = self.mock.origin();
-        let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &origin);
+        let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin);
         let transport = Arc::new(http()?);
-        let membership = LiveMembershipSource::with_mock_origin(&origin)?;
-        membership.set_credential_source(transport.clone());
+        let _membership = LiveMembershipSource::with_mock_origin(&origin)?;
+
         let trouter = Trouter::with_mock_origin(Arc::clone(&transport), Arc::clone(&tokens), self.trouter.origin())?
             .with_options(Options {
                 backoff_base: Duration::from_millis(50),
@@ -382,7 +374,7 @@ impl MockLab {
             calls: None,
             store: Store::open(&config.paths().store_file(alias))?,
             client: Arc::new(Client::new(http()?)),
-            outbox: Outbox::new(transport, fence, Arc::new(membership), author),
+            outbox: Outbox::new(transport, author),
             push: Some(Push::new(trouter)),
             options: EngineOptions::default(),
             known_names: Vec::new(),

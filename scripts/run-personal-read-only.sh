@@ -7,7 +7,7 @@
 # - a UI sandbox of its own (`ui-sandbox-run serve`: a nested niri on a headless weston, a private bus), with
 #   `ngteams secrets` outside it (the account's `ngteams` items, `get` only) and `ngteams --read-only` inside
 #   it, on the snapshot, which sends nothing that anyone sees or that changes the account, opens no push channel and no
-#   calls, and logs every refusal to the snapshot's `fence.log`.
+#   calls, and logs every refusal to the snapshot's diagnostic log.
 #
 # The agent never sees a token: the broker hands them to the app over a socket pair.
 #
@@ -48,7 +48,7 @@ where() {
 run:          $run
 screenshots:  $run/shots/            ($0 --shot <name>)
 view trace:   $run/trace.jsonl
-fence.log:    $run/snapshot/data/fence.log   (every refused send: "refused_read_only")
+log:          $run/snapshot/data/log/        (every refused send: "refused_read_only")
 app log:      $run/snapshot/data/logs/  and  $run/app.log
 broker log:   $run/broker.log
 snapshot:     $run/snapshot/             (a copy of your chats: --stop deletes it)

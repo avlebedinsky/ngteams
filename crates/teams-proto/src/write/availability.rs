@@ -1,35 +1,10 @@
-//! The account's own availability (M2 Task 19): UPS's presence endpoint `PUT` and the manual status, each a sealed
-//! [`Mutating`] request in the shape the web client sent (M2 Task 18, `docs/protocol/trouter.md`, "Own presence"; the
-//! synthetic fixtures `tests/fixtures/ups/endpoint-requests.json` and `manual-status-requests.json`).
-//!
-//! A lab account's own availability is seen across the tenant, so no participant check can pass for it; the user
-//! approved a narrow exception on 2026-10-21 (CLAUDE.md, "A lab account may set its own availability"): in the
-//! captured shapes, availability values only, every id a request names the account itself or its own registered
-//! endpoint. So each request here:
-//! - targets [`WriteKind::OwnAvailability`] on [`Scope::Account`] (the account by its MRI), which the fence permits
-//!   without a member read (`teams_fence::Fence::check`: it reaches nobody);
-//! - names the account only as UPS's `me` (the account is the token's) and the endpoint only as a
-//!   [`RegisteredEndpoint`], which only a registration this run made for the account gives ([`crate::register`]):
-//!   no other id can be put in one, and one registered for another account (or for none) makes no request of this
-//!   account's: each constructor gives `None` then;
-//! - sets only the values a capture showed: the endpoint `Available`/`Available` ([`SetEndpointAvailability`]; the
-//!   captured `Busy`/`InACall` is a call's, and the native client has none), a manual status of `Busy`,
-//!   `DoNotDisturb`, `Away` or `Available` ([`ManualAvailability`]), or the manual status's reset
-//!   ([`ForceAvailability::reset`]). Never a status note, out-of-office, a work location, "Be right back",
-//!   "Appear offline", a duration or anything else of presence.
-//!
-//! On the wire: `PUT <presence base>/v1/me/endpoints/` or `…/v1/me/forceavailability/` (the trailing slash, no query),
-//! with the presence token, the header values every captured presence request carried (the transport's, as for the
-//! presence read: `behavioroverride`, `x-ms-client-type`, `x-ms-client-user-agent`, an empty `x-ms-object-id`),
-//! `Content-Type: application/json` (the reset too, as captured), and `x-ms-endpoint-id`, the registered endpoint, as
-//! every captured one carried it. Nothing that names the client's components (`x-ms-client-caller`) or the session,
-//! as for the presence read, and no cookie.
+//! Typed requests for the account's availability and manual status, tied to an endpoint registered for that account.
 
 use serde_json::json;
-use teams_fence::{Mri, Scope, Target, WriteKind};
+use teams_fence::Mri;
 
-use super::sealed::Sealed;
-use super::{Mutating, Wire};
+use super::Prepared;
+use super::Wire;
 use crate::endpoint::{Endpoint, Method, Service};
 use crate::own::RegisteredEndpoint;
 
@@ -39,16 +14,6 @@ const ENDPOINT_HEADER: &str = "x-ms-endpoint-id";
 /// How the endpoint reports its activity (`activityReporting`) and what it is (`deviceType`), as every capture had them.
 const ACTIVITY_REPORTING: &str = "Transport";
 const DEVICE_TYPE: &str = "Web";
-
-/// The target of every own-availability write: the account itself.
-fn own_target(account: &Mri) -> Target {
-    Target::new(
-        WriteKind::OwnAvailability,
-        Scope::Account {
-            mri: account.as_str().to_owned(),
-        },
-    )
-}
 
 /// `PUT v1/me/<name>/` on UPS (the transport adds the trailing slash), naming `endpoint` in its header.
 fn wire(name: &str, endpoint: &RegisteredEndpoint, body: Option<serde_json::Value>) -> Wire {
@@ -94,13 +59,7 @@ impl SetEndpointAvailability {
     }
 }
 
-impl Mutating for SetEndpointAvailability {
-    fn target(&self) -> Target {
-        own_target(&self.account)
-    }
-}
-
-impl Sealed for SetEndpointAvailability {
+impl Prepared for SetEndpointAvailability {
     fn wire(&self) -> Option<Wire> {
         let body = json!({
             "id": self.endpoint.id(),
@@ -191,13 +150,7 @@ impl ForceAvailability {
     }
 }
 
-impl Mutating for ForceAvailability {
-    fn target(&self) -> Target {
-        own_target(&self.account)
-    }
-}
-
-impl Sealed for ForceAvailability {
+impl Prepared for ForceAvailability {
     fn wire(&self) -> Option<Wire> {
         let body = self.status.map(|status| json!({"availability": status.as_str()}));
         Some(wire("forceavailability", &self.endpoint, body))

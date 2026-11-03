@@ -13,10 +13,9 @@ use std::collections::BTreeMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::future::{self, Future};
-use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser as _;
@@ -31,8 +30,8 @@ use teams_auth::token::TokenError;
 use teams_core::engine::{self, Action, EngineHandle, EngineOptions, Event, Parts};
 use teams_core::{CallAction, CallActionError, EngineError, OwnStatus, Transient, TransientSent};
 use teams_core::{Outbox, account};
+use teams_fence::Mri;
 use teams_fence::personal::PersonalPaths;
-use teams_fence::{FailClosed, Fence, FenceLog, MembershipSource, Mri};
 use teams_media::devices::file::{AudioInput, FileDevices, Pacing, PatternCamera};
 use teams_mock::{AX_CHAT, CHAT_BASE, ChatServiceMock, LAB_A, OUTSIDER};
 use teams_proto::chat::MessageText;
@@ -56,53 +55,10 @@ impl Credentials for Tokens {
     }
 }
 
-/// A fence log whose lines can be read back.
-#[derive(Clone, Default)]
-struct Lines(Arc<Mutex<Vec<u8>>>);
-
-impl Write for Lines {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> std::io::Result<()> {
-        Ok(())
-    }
-}
-
-impl Lines {
-    fn entries(&self) -> Vec<Value> {
-        let bytes = self.0.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        String::from_utf8_lossy(&bytes)
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect()
-    }
-
-    fn refused(&self) -> Vec<Value> {
-        self.entries()
-            .into_iter()
-            .filter(|entry| entry["event"] == "refused_read_only")
-            .collect()
-    }
-}
-
-fn personal(own: &str) -> (Arc<Fence>, Lines) {
-    let lines = Lines::default();
-    (
-        Arc::new(Fence::personal(Mri::new(own), FenceLog::from_writer(lines.clone()))),
-        lines,
-    )
-}
-
 /// `who`'s read-only transport to the mock under `fence`.
-fn read_only_http(mock: &ChatServiceMock, who: &str, fence: &Arc<Fence>) -> HttpTransport<Tokens> {
+fn read_only_http(mock: &ChatServiceMock, who: &str) -> HttpTransport<Tokens> {
     let tokens = Arc::new(Tokens(mock.token(who).unwrap()));
-    HttpTransport::with_mock_origin(tokens, Arc::clone(fence), CHAT_BASE, &mock.origin())
+    HttpTransport::with_mock_origin(tokens, CHAT_BASE, &mock.origin())
         .unwrap()
         .read_only()
 }
@@ -117,25 +73,14 @@ async fn not_reads(mock: &ChatServiceMock) -> Vec<String> {
         .collect()
 }
 
-/// A refused line holds the method, host and path shape, and nothing else of the request.
-fn only_the_shape(entry: &Value) {
-    let mut keys: Vec<&String> = entry.as_object().unwrap().keys().collect();
-    keys.sort();
-    assert_eq!(keys, ["event", "host", "method", "path", "ts_ms", "verdict"], "{entry}");
-    assert_eq!(entry["verdict"], "deny");
-    let text = entry.to_string();
-    assert!(!text.contains("00000000-0000-4000-8000"), "no id: {text}");
-}
-
 /// `LAB_A`'s engine on the mock, its transports read-only, with no push channel and no calling, and its fence's log.
-fn read_only_engine(mock: &ChatServiceMock, dir: &tempfile::TempDir) -> (EngineHandle, Lines) {
-    let (fence, log) = personal(LAB_A);
-    let transport = Arc::new(read_only_http(mock, LAB_A, &fence));
-    let membership: Arc<dyn MembershipSource + Send> = Arc::new(FailClosed);
-    let client = Arc::new(Client::new(read_only_http(mock, LAB_A, &fence)));
-    let outbox = Outbox::new(transport, fence, membership, Author::new(Mri::new(LAB_A), "a"));
+fn read_only_engine(mock: &ChatServiceMock, dir: &tempfile::TempDir) -> EngineHandle {
+    let transport = Arc::new(read_only_http(mock, LAB_A));
+
+    let client = Arc::new(Client::new(read_only_http(mock, LAB_A)));
+    let outbox = Outbox::new(transport, Author::new(Mri::new(LAB_A), "a"));
     assert!(outbox.is_read_only());
-    let handle = engine::start(Parts {
+    engine::start(Parts {
         calls: None,
         store: Store::open(&dir.path().join("store.sqlite")).unwrap(),
         client,
@@ -147,8 +92,7 @@ fn read_only_engine(mock: &ChatServiceMock, dir: &tempfile::TempDir) -> (EngineH
         },
         known_names: Vec::new(),
     })
-    .unwrap();
-    (handle, log)
+    .unwrap()
 }
 
 /// Every chat write the views can ask for, on the account's own message `mine` and someone else's `theirs`.
@@ -190,14 +134,14 @@ fn every_write(mine: &str, theirs: &str) -> Vec<Action> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn every_write_the_engine_is_asked_for_is_refused_logged_and_never_sent_while_reads_go_through() {
+async fn every_write_the_engine_is_asked_for_is_refused_and_never_sent_while_reads_go_through() {
     let mock = ChatServiceMock::start().await.unwrap();
     let mine = mock.post_as(LAB_A, AX_CHAT, "<p>mine</p>").unwrap();
     let theirs = mock.post_as(OUTSIDER, AX_CHAT, "<p>theirs</p>").unwrap();
     // what the posts above told the chat's members: from here on, nothing more is told
     let _ = (mock.take_events(OUTSIDER), mock.take_events(LAB_A));
     let dir = tempfile::tempdir().unwrap();
-    let (mut handle, log) = read_only_engine(&mock, &dir);
+    let mut handle = read_only_engine(&mock, &dir);
     let core = handle.requests();
     assert!(core.read_only(), "the views are told");
 
@@ -210,7 +154,7 @@ async fn every_write_the_engine_is_asked_for_is_refused_logged_and_never_sent_wh
 
     let conversation = || AX_CHAT.to_owned();
     let writes = every_write(&mine, &theirs);
-    let count = writes.len();
+    let _count = writes.len();
     for action in writes {
         let row = core.write(action.clone()).await.unwrap();
         assert_eq!(row.state, OutboxState::Failed, "{action:?}: {row:?}");
@@ -249,21 +193,6 @@ async fn every_write_the_engine_is_asked_for_is_refused_logged_and_never_sent_wh
     // nothing but reads reached the service, and nobody heard of anything
     assert_eq!(not_reads(&mock).await, Vec::<String>::new());
     assert!(mock.take_events(OUTSIDER).is_empty());
-    // each write logged once as refused, by its shape; none was permitted
-    let refused = log.refused();
-    assert_eq!(refused.len(), count + 1, "{refused:?}");
-    refused.iter().for_each(only_the_shape);
-    assert!(
-        refused
-            .iter()
-            .all(|entry| ["POST", "PUT", "DELETE"].contains(&entry["method"].as_str().unwrap())),
-        "{refused:?}"
-    );
-    assert!(
-        log.entries().iter().all(|entry| entry["verdict"] != "allow"),
-        "the fence was never asked: {:?}",
-        log.entries()
-    );
     // no row is ever tried again
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(not_reads(&mock).await, Vec::<String>::new());
@@ -307,8 +236,7 @@ fn participant() -> CallParticipant {
 #[tokio::test]
 async fn the_transport_refuses_a_write_a_call_write_a_registration_and_a_mutating_plain_request_on_its_own() {
     let mock = ChatServiceMock::start().await.unwrap();
-    let (fence, log) = personal(LAB_A);
-    let transport = read_only_http(&mock, LAB_A, &fence);
+    let transport = read_only_http(&mock, LAB_A);
     assert!(Transport::is_read_only(&transport));
 
     // a permitted write (the personal fence permits anything), handed to the transport anyway
@@ -317,11 +245,8 @@ async fn the_transport_refuses_a_write_a_call_write_a_registration_and_a_mutatin
         Author::new(Mri::new(LAB_A), "a"),
         MessageText::plain("x").unwrap(),
     );
-    let permit = fence
-        .check(teams_proto::Mutating::target(&post), &FailClosed)
-        .await
-        .unwrap();
-    let write = teams_proto::Authorized::new(post, permit).unwrap();
+
+    let write = post;
     let refused = transport.deliver(write).await;
     assert!(
         matches!(refused, Err(HttpError::Refused(Refusal::ReadOnly))),
@@ -350,16 +275,10 @@ async fn the_transport_refuses_a_write_a_call_write_a_registration_and_a_mutatin
         "{registered:?}"
     );
     // a write's shape as a plain request
-    let plain = Client::new(read_only_http(&mock, LAB_A, &fence)).send(&ChatPost).await;
+    let plain = Client::new(read_only_http(&mock, LAB_A)).send(&ChatPost).await;
     assert!(matches!(plain, Err(HttpError::Refused(Refusal::ReadOnly))), "{plain:?}");
 
     assert_eq!(not_reads(&mock).await, Vec::<String>::new());
-    let refused = log.refused();
-    assert_eq!(refused.len(), 4, "{refused:?}");
-    refused.iter().for_each(only_the_shape);
-    let hosts: Vec<&str> = refused.iter().map(|entry| entry["host"].as_str().unwrap()).collect();
-    assert!(hosts.contains(&"api.flightproxy.teams.microsoft.com"), "{hosts:?}");
-    assert!(hosts.contains(&"teams.microsoft.com"), "{hosts:?}");
 }
 
 #[test]

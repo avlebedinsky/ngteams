@@ -1,28 +1,18 @@
-//! UPS's presence read on wiremock, through the `test-support` mock origin: as a plain request it goes out whoever it
-//! names (a read reaches nobody), logged to `fence.log` as `allowed` first; as an entry of the personal build's sealed
-//! `PostRead` list it goes out only with the permit the fence gave for its exact MRIs, in its captured shape (the
-//! trailing slash, no query, the captured header values, a list of `{"mri": …}`), to the presence base the transport
-//! was given, with the presence token, logged to `fence.log` first and sent once; any read of UPS goes to its base with
-//! the trailing slash; its answer is read only when it names nobody but the accounts asked for.
-//!
-//! Tokens and MRIs here are placeholders; the answers follow the synthetic fixture
-//! `tests/fixtures/ups/getpresence-answer.json`.
+//! Presence reads against synthetic mocks: typed plain and `PostRead` requests, captured headers and bodies, presence service bases and answers limited to the accounts asked for.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
 
 use std::future::{self, Future};
-use std::io::{self, Write};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
-use teams_fence::{Fence, FenceLog, Mri, Roster};
+use teams_fence::Mri;
 use teams_proto::{
     AnswerError, BuildError, Client, Credentials, Endpoint, HttpError, HttpTransport, Method, PRESENCE_AUDIENCE,
-    PostRead, PostReadError, PresenceRead, ProbePostRead, Read, Request as _, Service, ShortProfileLookup, Transport,
-    UserPresence,
+    PresenceRead, ProbePostRead, Read, Request as _, Service, Transport, UserPresence,
 };
 use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
@@ -84,98 +74,42 @@ impl Credentials for FakeTokens {
     }
 }
 
-/// A `fence.log` the test reads back.
-#[derive(Clone, Default)]
-struct SharedLog(Arc<Mutex<Vec<u8>>>);
-
-impl SharedLog {
-    fn lines(&self) -> Vec<Value> {
-        let bytes = self.0.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        String::from_utf8(bytes)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect()
-    }
-
-    /// The requests the transport logged as sent (not the fence's decisions).
-    fn sent(&self) -> Vec<Value> {
-        self.lines()
-            .into_iter()
-            .filter(|line| line.get("channel").is_some())
-            .collect()
-    }
-}
-
-impl Write for SharedLog {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
 struct Setup {
     server: MockServer,
     tokens: Arc<FakeTokens>,
-    log: SharedLog,
-    fence: Arc<Fence>,
     transport: HttpTransport<FakeTokens>,
 }
 
 async fn setup(presence: Option<&str>) -> Setup {
     let server = MockServer::start().await;
     let tokens = Arc::new(FakeTokens::default());
-    let log = SharedLog::default();
-    let fence = Arc::new(Fence::new(
-        Roster::new(mris(&[LAB_A, LAB_B, LAB_C]), mris(&[ECHO])),
-        FenceLog::from_writer(log.clone()),
-    ));
-    let mut transport =
-        HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &server.uri()).unwrap();
+
+    let mut transport = HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &server.uri()).unwrap();
     if let Some(base) = presence {
         transport = transport.with_presence(base).unwrap();
     }
     Setup {
         server,
         tokens,
-        log,
-        fence,
         transport,
     }
 }
 
 impl Setup {
     async fn send(self, request: PresenceRead) -> (Result<Vec<UserPresence>, String>, Self) {
-        let permit = self.fence.check_post_read(PresenceRead::KIND, request.names()).unwrap();
         let client = Client::new(self.transport);
-        let answer = client.post_read(request.clone(), permit).await;
+        let answer = client.post_read(request.clone()).await;
         let read = match answer {
             Ok(answer) => request.read_answer(answer.body()).map_err(|error| error.to_string()),
             Err(error) => Err(format!("{error:?}")),
         };
-        let Self {
-            server,
-            tokens,
-            log,
-            fence,
-            ..
-        } = self;
-        let transport =
-            HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &server.uri()).unwrap();
+        let Self { server, tokens, .. } = self;
+        let transport = HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &server.uri()).unwrap();
         (
             read,
             Self {
                 server,
                 tokens,
-                log,
-                fence,
                 transport,
             },
         )
@@ -187,7 +121,7 @@ fn header_of<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
 }
 
 #[tokio::test]
-async fn a_presence_read_goes_out_in_its_captured_shape_logged_first_and_its_answer_is_read() {
+async fn a_presence_read_goes_out_in_its_captured_shape_and_its_answer_is_read() {
     let fixture = fixture();
     for case in fixture["cases"].as_array().unwrap() {
         let name = case["name"].as_str().unwrap();
@@ -200,7 +134,7 @@ async fn a_presence_read_goes_out_in_its_captured_shape_logged_first_and_its_ans
             .collect();
         let body: Vec<Value> = asked.iter().map(|mri| json!({"mri": mri})).collect();
         let setup = setup(Some(PRESENCE_BASE)).await;
-        let log = setup.log.clone();
+
         let answer = serde_json::to_vec(&case["answer"]).unwrap();
         let content_type = fixture["content_type"].as_str().unwrap().to_owned();
         Mock::given(method("POST"))
@@ -213,11 +147,7 @@ async fn a_presence_read_goes_out_in_its_captured_shape_logged_first_and_its_ans
             .and(header("x-ms-client-user-agent", "Teams-V2-Web"))
             .and(header("x-ms-object-id", ""))
             .and(body_json(Value::Array(body)))
-            .respond_with(move |_: &Request| {
-                // the answer is the capture's only if the request's record was already in fence.log when it arrived
-                let logged = log.sent().iter().any(|line| line["post_read"] == "presence");
-                ResponseTemplate::new(if logged { 200 } else { 500 }).set_body_raw(answer.clone(), &content_type)
-            })
+            .respond_with(move |_: &Request| ResponseTemplate::new(200).set_body_raw(answer.clone(), &content_type))
             .expect(1)
             .mount(&setup.server)
             .await;
@@ -233,28 +163,6 @@ async fn a_presence_read_goes_out_in_its_captured_shape_logged_first_and_its_ans
         }
         assert_eq!(setup.tokens.audiences(), [PRESENCE_AUDIENCE], "{name}");
         assert_eq!(PRESENCE_AUDIENCE, "https://presence.teams.microsoft.com/");
-        let lines = setup.log.lines();
-        assert_eq!(
-            lines,
-            [
-                json!({
-                    "ts_ms": lines[0]["ts_ms"],
-                    "verdict": "allow",
-                    "event": "post_read_decision",
-                    "post_read": "presence",
-                    "names": asked.len(),
-                }),
-                json!({
-                    "ts_ms": lines[1]["ts_ms"],
-                    "verdict": "allow",
-                    "channel": "http",
-                    "method": "POST",
-                    "url": format!("{PRESENCE_BASE}/v1/presence/getpresence/"),
-                    "post_read": "presence",
-                }),
-            ],
-            "{name}: the decision, then the request as built and checked (not the mock's)"
-        );
     }
 }
 
@@ -319,26 +227,24 @@ async fn anything_the_presence_entry_doesnt_name_is_unknown_and_nothing_goes_out
         ("the key in another case", probe().with_body(json!([{"MRI": LAB_B}]))),
         ("a lookup's body", probe().with_body(json!([LAB_B]))),
         ("an empty list", probe().with_body(json!([]))),
-        ("other MRIs than the permit", probe().with_body(json!([{"mri": LAB_C}]))),
         (
-            "more MRIs than the permit",
+            "other MRIs than the typed request",
+            probe().with_body(json!([{"mri": LAB_C}])),
+        ),
+        (
+            "more MRIs than the typed request",
             probe().with_body(json!([{"mri": LAB_B}, {"mri": LAB_C}])),
         ),
     ];
     for (name, probe) in probes {
         let setup = setup(Some(PRESENCE_BASE)).await;
-        let permit = setup.fence.check_post_read(ProbePostRead::KIND, probe.names()).unwrap();
 
-        let error = Client::new(setup.transport).post_read(probe, permit).await.unwrap_err();
+        let error = Client::new(setup.transport).post_read(probe).await.unwrap_err();
 
         // anything off the captured shape is refused when it is read back
-        assert!(
-            matches!(error, PostReadError::Transport(HttpError::Unknown)),
-            "{name}: {error:?}"
-        );
+        assert!(matches!(error, HttpError::Unknown), "{name}: {error:?}");
         assert!(setup.server.received_requests().await.unwrap().is_empty(), "{name}");
         assert!(setup.tokens.audiences().is_empty(), "{name}: no token asked for");
-        assert!(setup.log.sent().is_empty(), "{name}: no request logged");
     }
     // and with nothing added, it goes out
     let setup = setup(Some(PRESENCE_BASE)).await;
@@ -349,65 +255,17 @@ async fn anything_the_presence_entry_doesnt_name_is_unknown_and_nothing_goes_out
         .mount(&setup.server)
         .await;
     let probe = probe();
-    let permit = setup.fence.check_post_read(ProbePostRead::KIND, probe.names()).unwrap();
-    Client::new(setup.transport).post_read(probe, permit).await.unwrap();
+
+    Client::new(setup.transport).post_read(probe).await.unwrap();
 }
 
-#[tokio::test]
-async fn a_read_naming_anyone_gets_a_permit_since_it_reaches_nobody() {
-    let setup = setup(Some(PRESENCE_BASE)).await;
+#[test]
+fn a_presence_read_accepts_any_nonempty_account_list() {
     let cases: [&[&str]; 3] = [&[LAB_B, COWORKER], &[ECHO], &[COWORKER, ECHO]];
     for names in cases {
-        let request = read_of(names);
-        let permit = setup
-            .fence
-            .check_post_read(PresenceRead::KIND, request.names())
-            .unwrap();
-        assert_eq!(permit.names(), request.names(), "{names:?}");
+        assert!(PresenceRead::new(mris(names)).is_some());
     }
     assert!(PresenceRead::new(Vec::new()).is_none(), "a read names someone");
-    assert!(setup.log.sent().is_empty());
-}
-
-#[tokio::test]
-async fn a_permit_for_another_entry_or_other_mris_sends_nothing() {
-    let setup = setup(Some(PRESENCE_BASE)).await;
-    let lookup = ShortProfileLookup::new(mris(&[LAB_B])).unwrap();
-    let cases = [
-        (
-            "a profile lookup's permit",
-            setup
-                .fence
-                .check_post_read(ShortProfileLookup::KIND, lookup.names())
-                .unwrap(),
-        ),
-        (
-            "other MRIs",
-            setup
-                .fence
-                .check_post_read(PresenceRead::KIND, &mris(&[LAB_C]))
-                .unwrap(),
-        ),
-        (
-            "another order",
-            setup
-                .fence
-                .check_post_read(PresenceRead::KIND, &mris(&[LAB_C, LAB_B]))
-                .unwrap(),
-        ),
-    ];
-    let client = Client::new(setup.transport);
-    for (name, permit) in cases {
-        let request = if name == "another order" {
-            read_of(&[LAB_B, LAB_C])
-        } else {
-            read_of(&[LAB_B])
-        };
-        let error = client.post_read(request, permit).await.unwrap_err();
-        assert!(matches!(error, PostReadError::Mismatch(_)), "{name}: {error:?}");
-    }
-    assert!(setup.server.received_requests().await.unwrap().is_empty());
-    assert!(setup.tokens.audiences().is_empty());
 }
 
 #[tokio::test]
@@ -418,7 +276,6 @@ async fn without_a_presence_base_nothing_goes_to_ups() {
     let error = read.unwrap_err();
     assert!(error.contains("NoPresence"), "{error}");
     assert!(setup.server.received_requests().await.unwrap().is_empty());
-    assert!(setup.log.sent().is_empty());
 }
 
 #[tokio::test]
@@ -435,7 +292,7 @@ async fn a_refused_or_throttled_read_isnt_sent_again() {
 
         let error = read.unwrap_err();
         assert!(error.contains("Status"), "{status}: {error}");
-        assert_eq!(setup.log.sent().len(), 1, "{status}: sent once, under its one permit");
+
         let refreshed = *setup.tokens.rejected.lock().unwrap_or_else(PoisonError::into_inner);
         assert_eq!(refreshed, usize::from(status == 401), "{status}");
     }
@@ -444,9 +301,9 @@ async fn a_refused_or_throttled_read_isnt_sent_again() {
 #[test]
 fn the_presence_base_is_an_afd_host_and_a_geo_only() {
     let tokens = Arc::new(FakeTokens::default());
-    let fence = Arc::new(Fence::new(Roster::new([], []), FenceLog::from_writer(io::sink())));
+
     let build = |base: &str| {
-        HttpTransport::new(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE)
+        HttpTransport::new(Arc::clone(&tokens), CHAT_BASE)
             .unwrap()
             .with_presence(base)
     };
@@ -478,7 +335,7 @@ fn the_presence_base_is_an_afd_host_and_a_geo_only() {
     ] {
         assert!(build(base).unwrap().has_presence(), "{base}");
     }
-    assert!(!HttpTransport::new(tokens, fence, CHAT_BASE).unwrap().has_presence());
+    assert!(!HttpTransport::new(tokens, CHAT_BASE).unwrap().has_presence());
 }
 
 #[tokio::test]
@@ -491,13 +348,9 @@ async fn a_read_goes_to_the_base_it_was_given() {
         .mount(&setup.server)
         .await;
 
-    let (read, setup) = setup.send(read_of(&[LAB_B])).await;
+    let (read, _setup) = setup.send(read_of(&[LAB_B])).await;
 
     read.unwrap();
-    assert_eq!(
-        setup.log.sent()[0]["url"],
-        "https://teams.cloud.microsoft/ups/emea/v1/presence/getpresence/"
-    );
 }
 
 /// A read of the test's choosing.
@@ -539,11 +392,10 @@ async fn a_read_of_ups_goes_to_its_base_with_the_trailing_slash() {
         paths,
         ["/ups/noam/v1/me/endpoints/", "/ups/noam/v1/pubsub/subscriptions/"]
     );
-    assert!(setup.log.lines().is_empty(), "a read isn't logged");
 }
 
 #[tokio::test]
-async fn the_presence_read_as_a_plain_request_goes_whoever_it_names_logged_as_allowed() {
+async fn the_presence_read_as_a_plain_request_goes_for_every_account_it_names() {
     let setup = setup(Some(PRESENCE_BASE)).await;
     Mock::given(method("POST"))
         .and(path(GET_PRESENCE))
@@ -558,12 +410,6 @@ async fn the_presence_read_as_a_plain_request_goes_whoever_it_names_logged_as_al
 
     setup.transport.send(&read).await.unwrap();
 
-    let lines = setup.log.lines();
-    assert_eq!(lines.len(), 1, "{lines:?}");
-    assert_eq!(lines[0]["event"], "allowed");
-    assert_eq!(lines[0]["method"], "POST");
-    assert_eq!(lines[0]["host"], "teams.microsoft.com");
-    assert_eq!(lines[0]["path"], "/ups/noam/v1/presence/getpresence/");
     assert_eq!(setup.tokens.audiences(), [PRESENCE_AUDIENCE]);
 }
 

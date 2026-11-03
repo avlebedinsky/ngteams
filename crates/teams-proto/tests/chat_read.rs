@@ -7,14 +7,12 @@
 //! Every id and token here is made up (the mock's, or a placeholder), never a real one.
 
 use std::future::{self, Future};
-use std::io;
 use std::path::Path;
 use std::sync::Arc;
 
 use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
-use teams_fence::{Fence, FenceLog, Mri, Roster};
 use teams_mock::{AB_CHAT, ABC_CHAT, CHANNEL, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, NOTIFICATIONS, TENANT};
 use teams_proto::chat::{
     AppConsumptionHorizon, ChatReadError, ChatReads, Code, CodeRun, Conversation, ConversationKind, ConversationList,
@@ -1122,16 +1120,7 @@ impl Credentials for MockToken {
 }
 
 fn client_for(origin: &str, token: &str) -> TestResult<Client<HttpTransport<MockToken>>> {
-    let fence = Fence::new(
-        Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), []),
-        FenceLog::from_writer(io::sink()),
-    );
-    let transport = HttpTransport::with_mock_origin(
-        Arc::new(MockToken(token.to_owned())),
-        Arc::new(fence),
-        CHAT_BASE,
-        origin,
-    )?;
+    let transport = HttpTransport::with_mock_origin(Arc::new(MockToken(token.to_owned())), CHAT_BASE, origin)?;
     Ok(Client::new(transport))
 }
 

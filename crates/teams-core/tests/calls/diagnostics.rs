@@ -1,4 +1,4 @@
-//! Call lifecycle logs and actual device failures through the fenced loopback engine.
+//! Call lifecycle logs and actual device failures through the loopback engine.
 
 use std::sync::{Arc, Mutex, Once};
 
@@ -6,7 +6,7 @@ use teams_core::{CallAction, CallStatus, End};
 use teams_fence::Mri;
 use teams_media::devices::file::{AudioInput, FileDevices, Pacing, PatternCamera};
 use teams_media::devices::{AudioSink, AudioSource, DeviceError, Devices, VideoSource};
-use teams_mock::{AX_CHAT, ECHO, LAB_A};
+use teams_mock::{AB_CHAT, ECHO, LAB_A};
 
 use super::support::{A_TONE, Lab};
 
@@ -48,11 +48,12 @@ async fn call_diagnostics_keep_lifecycle_but_omit_credentials_names_and_sdp() {
     let lab = Lab::start().await;
     let mut account = lab.account(LAB_A, A_TONE).await;
     let requests = account.handle.requests();
-    let denied = requests.call(CallAction::Call { chat: AX_CHAT.into() }).await.unwrap();
-    assert_eq!(account.ended(denied).await, End::Failed("start"));
-    assert_eq!(account.log.denials().len(), 1);
     let call = requests.call(test_call()).await.unwrap();
     account.status(call, &CallStatus::Connected).await;
+    assert!(matches!(
+        requests.call(CallAction::Call { chat: AB_CHAT.into() }).await,
+        Err(teams_core::EngineError::Call(teams_core::CallActionError::Busy))
+    ));
     requests.call(CallAction::HangUp { call }).await.unwrap();
     assert_eq!(account.ended(call).await, End::HungUp);
     let text = LOG.0.lock().unwrap().join("\n");
@@ -101,7 +102,7 @@ impl Devices for FailingDevices {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_device_open_failure_after_fence_admission_ends_the_call_and_sends_leave() {
+async fn a_device_open_failure_after_signaling_ends_the_call_and_sends_leave() {
     for microphone_fails in [true, false] {
         let lab = Lab::start().await;
         let mut account = lab
@@ -117,7 +118,6 @@ async fn a_device_open_failure_after_fence_admission_ends_the_call_and_sends_lea
             .await;
         let call = account.handle.requests().call(test_call()).await.unwrap();
         assert_eq!(account.ended(call).await, End::Failed("media"));
-        assert!(account.log.denials().is_empty());
         super::support::wait_until(|| lab.sent_by(LAB_A).last().is_some_and(|op| op == "leave")).await;
         assert_eq!(lab.sent_by(LAB_A).iter().filter(|op| op.as_str() == "start").count(), 1);
         assert!(
@@ -223,6 +223,5 @@ async fn an_audio_stream_disappearing_after_it_opened_is_reported_once_and_keeps
             .await
             .unwrap();
         assert_eq!(account.ended(call).await, End::HungUp);
-        assert!(account.log.denials().is_empty());
     }
 }

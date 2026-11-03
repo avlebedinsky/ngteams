@@ -1,38 +1,10 @@
-//! Reads by `POST`: requests the web client sends as a `POST` although they change nothing. Each entry is a plain
-//! [`Request`], which the transport sends when the fence's classifier says it reaches nobody (a read reaches nobody,
-//! whoever it names). The personal build also keeps them as a sealed list (`docs/personal-build.md`), described below.
-//!
-//! The list is the set of types implementing [`PostRead`], and the trait is sealed, so only this crate adds to it.
-//! Each entry is added only after a review, in its exact captured shape: its [`Service`] (and so its host), the
-//! method (`POST`), the path, every query parameter and its value, the headers that change what it does, and the
-//! body schema (a non-empty JSON list naming MRIs). It names the MRIs it asks about ([`PostRead::names`]), and it goes
-//! out only inside an [`AuthorizedPostRead`], next to the [`PostReadPermit`] `Fence::check_post_read` gave for exactly
-//! that entry and that ordered list (through a lab fence: every one a lab account, none twice; through the personal
-//! build's, whoever it names).
-//!
-//! The transport then reads the request it is about to send back against the entry's captured shape (the URL's
-//! path and query, every header but the token, the body as bytes) and sends nothing that differs in any way, nor one
-//! whose body names other MRIs than the permit's: [`HttpError::Unknown`](crate::HttpError::Unknown). It logs the
-//! request to `fence.log` before it sends it, sends nothing it couldn't log, and sends each one once: a read by `POST`
-//! is never retried under its permit.
-//!
-//! An entry goes on the list only when its captured answer names nobody but the accounts asked for, it hands no token
-//! to a third party, and it is never a search or a suggestion list.
-//!
-//! The entries:
-//! - [`ShortProfileLookup`]: the middle tier's `users/fetchShortProfile` by MRI, in the query the web client always
-//!   sent (`isMailAddress=false&…`).
-//! - [`PresenceRead`]: UPS's `v1/presence/getpresence/` by MRI: its answers in the first run that let it through each
-//!   named only the accounts asked for.
-//! - [`PresenceSubscription`]: UPS's `v1/pubsub/subscriptions/<endpoint>`, the account's own Trouter endpoint
-//!   subscribed to the presence of the MRIs it names (or no longer): it reaches nobody, its answer names only the MRIs
-//!   asked for, and the changes then come to the account's own socket.
+//! Typed POST reads. The transport validates each captured request shape and sends it once.
 
 use std::fmt;
 
 use serde::Deserialize;
 use serde_json::Value;
-use teams_fence::{Mri, PostReadPermit};
+use teams_fence::Mri;
 
 use crate::endpoint::{Endpoint, Method, Service};
 use crate::own::{RegisteredEndpoint, is_guid, is_push_url};
@@ -47,7 +19,7 @@ pub trait PostRead: sealed::Sealed {
     fn names(&self) -> &[Mri];
 }
 
-mod sealed {
+pub(crate) mod sealed {
     use super::{PostReadWire, Shape};
 
     /// The seal on [`PostRead`](super::PostRead): a public trait no other crate can name, implemented for this crate's
@@ -296,63 +268,6 @@ fn same_pairs(pairs: &[(String, String)], wanted: &[(&str, &str)]) -> bool {
     pairs == wanted
 }
 
-/// A read by `POST` together with the permit for it. The only way to make one is [`AuthorizedPostRead::new`], which
-/// checks that the permit was given for this entry and exactly its MRIs, and consumes the permit: one permit covers
-/// one request.
-#[derive(Debug)]
-pub struct AuthorizedPostRead<R> {
-    request: R,
-    permit: PostReadPermit,
-}
-
-impl<R: PostRead> AuthorizedPostRead<R> {
-    /// Pairs `request` with `permit`.
-    ///
-    /// # Errors
-    /// [`PostReadMismatch`] when the permit was given for another entry or for any other list of MRIs (other MRIs,
-    /// more or fewer, another order). The permit is dropped with it.
-    pub fn new(request: R, permit: PostReadPermit) -> Result<Self, PostReadMismatch> {
-        if permit.kind() == R::KIND && permit.names() == request.names() {
-            Ok(Self { request, permit })
-        } else {
-            Err(PostReadMismatch {
-                permitted: (permit.kind(), permit.names().len()),
-                requested: (R::KIND, request.names().len()),
-            })
-        }
-    }
-
-    #[must_use]
-    pub fn request(&self) -> &R {
-        &self.request
-    }
-
-    #[must_use]
-    pub fn permit(&self) -> &PostReadPermit {
-        &self.permit
-    }
-
-    pub(crate) fn shape(&self) -> &'static Shape {
-        sealed::Sealed::shape(&self.request)
-    }
-
-    pub(crate) fn wire(&self) -> PostReadWire {
-        sealed::Sealed::wire(&self.request)
-    }
-}
-
-/// A permit used for a read by `POST` it wasn't given for. Shows both entries' kinds and how many MRIs each names,
-/// never the MRIs.
-#[derive(Debug, thiserror::Error)]
-#[error(
-    "the permit for {} naming {} MRI(s) doesn't cover {} naming {} MRI(s), or not the same ones",
-    permitted.0, permitted.1, requested.0, requested.1
-)]
-pub struct PostReadMismatch {
-    permitted: (&'static str, usize),
-    requested: (&'static str, usize),
-}
-
 /// The query every captured profile lookup sent (ab-chat-full, ab-chat and load captures of 2026-10-20), in the
 /// order it was sent. `isMailAddress=true` (a lookup by address) isn't on it.
 const LOOKUP_QUERY: &[(&str, &str)] = &[
@@ -428,8 +343,7 @@ pub struct ShortProfileLookup {
 }
 
 impl ShortProfileLookup {
-    /// The lookup of `names`, in that order; `None` when it names nobody. Whether it may go out is the fence's
-    /// decision ([`teams_fence::Fence::check_post_read`] with [`PostRead::KIND`] and [`PostRead::names`]).
+    /// The lookup of `names`, in that order; `None` when it names nobody.
     #[must_use]
     pub fn new(names: impl IntoIterator<Item = Mri>) -> Option<Self> {
         let names: Vec<Mri> = names.into_iter().collect();
@@ -586,8 +500,7 @@ pub struct PresenceRead {
 }
 
 impl PresenceRead {
-    /// The read of `names`' presence, in that order; `None` when it names nobody. Whether it may go out is the fence's
-    /// decision ([`teams_fence::Fence::check_post_read`] with [`PostRead::KIND`] and [`PostRead::names`]).
+    /// The read of `names`' presence, in that order; `None` when it names nobody.
     #[must_use]
     pub fn new(names: impl IntoIterator<Item = Mri>) -> Option<Self> {
         let names: Vec<Mri> = names.into_iter().collect();

@@ -4,7 +4,6 @@ use std::io::Write as _;
 use std::os::fd::IntoRawFd as _;
 use std::os::unix::net::UnixStream;
 use std::process::ExitCode;
-use std::sync::Arc;
 
 use ngteams::cli::ReadOnlyMode;
 use ngteams::setup::Setup;
@@ -34,8 +33,7 @@ pub(super) fn run(case: &str, setup: &Setup) {
         "command-read-engine-error"
         | "command-read-bad-accounts"
         | "command-read-window-error"
-        | "command-read-setup-error"
-        | "command-read-fence-error" => {
+        | "command-read-setup-error" => {
             read_errors(case, setup);
         }
         "command-snapshot" => snapshot_boundaries(setup),
@@ -163,14 +161,14 @@ fn read_window(setup: &Setup) {
         .unwrap()
         .unwrap();
     assert!(paths.store_file(&account).unwrap().is_file());
-    assert!(paths.fence_log().is_file());
+    assert!(!paths.fence_log().exists());
     assert_eq!(
         std::fs::read(setup.paths.accounts_file()).unwrap(),
         std::fs::read(paths.accounts_file()).unwrap()
     );
     // Starting again proves the window quit joined and released its engine.
-    let fence = teams_fence::Fence::open_personal_with(&paths, &account.upn, &setup.lab).unwrap();
-    ngteams::engine::start_read_only(&paths, &account, Arc::new(fence), MemorySecretStore::new())
+
+    ngteams::engine::start_read_only(&paths, &account, teams_core::CallFloor::new(), MemorySecretStore::new())
         .unwrap()
         .handle
         .shutdown();
@@ -179,7 +177,7 @@ fn read_window(setup: &Setup) {
 fn corrupt_files(setup: &Setup) {
     let runner = super::accounts::Runner {
         setup: setup.clone(),
-        floor: teams_fence::CallFloor::new(),
+        floor: teams_core::CallFloor::new(),
         devices: None,
     };
     assert!(
@@ -207,9 +205,7 @@ fn read_errors(case: &str, setup: &Setup) {
         root.path().to_owned()
     };
     let paths = ngteams::snapshot::snapshot(&setup.paths, &dest).unwrap();
-    if case == "command-read-fence-error" {
-        std::fs::create_dir(paths.fence_log()).unwrap();
-    } else if case == "command-read-bad-accounts" {
+    if case == "command-read-bad-accounts" {
         std::fs::write(paths.accounts_file(), b"invalid accounts").unwrap();
     } else if case == "command-read-engine-error" {
         std::fs::write(paths.region_file(&account).unwrap(), b"invalid region").unwrap();
@@ -222,8 +218,6 @@ fn read_errors(case: &str, setup: &Setup) {
     let error = run_read_only(&request).err().unwrap();
     let expected = if case.ends_with("setup-error") {
         "overlaps"
-    } else if case.ends_with("fence-error") {
-        "fence.log"
     } else if case.ends_with("window-error") {
         "window couldn't be opened"
     } else if case.ends_with("engine-error") {

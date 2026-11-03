@@ -1,15 +1,10 @@
-//! A team's new channel (`docs/protocol/channels.md`, "Creating a channel"), as the web client's "Create a channel"
-//! dialog sends it (`proto-lab run channel-create`, held back): a standard channel on the middle tier
-//! ([`Service::MiddleTier`]) and a private one on the teams' provisioning service ([`Service::Provisioning`]), the people
-//! a private channel starts with ([`AddChannelMembers`]), and a standard channel shown to the whole team
-//! ([`ShowChannelByDefault`]). Each is a sealed [`Mutating`] request whose target is the team or the channel:
-//! `teams_fence::contacting` reads the same bytes to the same target.
+//! Typed channel creation, membership and visibility requests.
 
 use serde_json::{Value, json};
-use teams_fence::{Mri, Scope, Target, WriteKind};
+use teams_fence::Mri;
 
-use super::sealed::Sealed;
-use super::{Mutating, Wire};
+use super::Prepared;
+use super::Wire;
 use crate::endpoint::{Endpoint, Method, Service};
 
 /// Who a new channel is for.
@@ -110,18 +105,7 @@ impl CreateChannel {
     }
 }
 
-impl Mutating for CreateChannel {
-    fn target(&self) -> Target {
-        Target::new(
-            WriteKind::ChannelChange,
-            Scope::Team {
-                id: self.channel.team.clone(),
-            },
-        )
-    }
-}
-
-impl Sealed for CreateChannel {
+impl Prepared for CreateChannel {
     fn wire(&self) -> Option<Wire> {
         let channel = &self.channel;
         Some(match channel.kind {
@@ -220,28 +204,7 @@ impl AddChannelMembers {
     }
 }
 
-impl Mutating for AddChannelMembers {
-    fn target(&self) -> Target {
-        let added: Vec<Mri> = self
-            .members
-            .iter()
-            .filter_map(|(_, named)| {
-                let (oid, _) = named.strip_prefix("OID:")?.split_once('@')?;
-                Some(Mri::new(format!("8:orgid:{oid}")))
-            })
-            .collect();
-        Target::new(
-            WriteKind::MemberChange,
-            Scope::Channel {
-                team: self.team_group.clone(),
-                channel: self.channel_group.clone(),
-            },
-        )
-        .with_added(added)
-    }
-}
-
-impl Sealed for AddChannelMembers {
+impl Prepared for AddChannelMembers {
     fn wire(&self) -> Option<Wire> {
         let users: Vec<Value> = self
             .members
@@ -279,18 +242,7 @@ impl ShowChannelByDefault {
     }
 }
 
-impl Mutating for ShowChannelByDefault {
-    fn target(&self) -> Target {
-        Target::new(
-            WriteKind::ChannelChange,
-            Scope::Team {
-                id: self.channel.clone(),
-            },
-        )
-    }
-}
-
-impl Sealed for ShowChannelByDefault {
+impl Prepared for ShowChannelByDefault {
     fn wire(&self) -> Option<Wire> {
         Some(Wire {
             raw: None,
@@ -324,34 +276,11 @@ pub fn channel_error_code(body: &[u8]) -> Option<String> {
 mod tests {
     //! The ids, names and answers here are synthetic: the dialog's shapes with made-up values.
 
-    use teams_fence::{Contact, Policy, Request as FenceRequest, contacting};
-
     use super::*;
 
     const TEAM: &str = "19:team0001@thread.tacv2";
     const GROUP: &str = "00000000-0000-4000-8000-0000000000aa";
     const CHANNEL_GROUP: &str = "OID:00000000-0000-4000-8000-0000000000cc@00000000-0000-4000-8000-0000000000ee";
-
-    /// What the fence makes of the bytes `wire` sends, on made-up bases.
-    fn classified(wire: &Wire) -> Contact {
-        let base = match wire.service() {
-            Service::Provisioning => "https://teams.cloud.microsoft/fabric/amer/templates/api",
-            _ => "https://teams.cloud.microsoft/api/mt/part/amer-03",
-        };
-        let mut url = url::Url::parse(&format!("{base}/")).expect("the base");
-        url.path_segments_mut()
-            .expect("a base")
-            .pop_if_empty()
-            .extend(wire.endpoint().segments());
-        if !wire.endpoint().query().is_empty() {
-            url.query_pairs_mut().extend_pairs(wire.endpoint().query());
-        }
-        let body = wire.body_bytes();
-        contacting(
-            &FenceRequest::new(wire.method().as_str(), url.as_str()).with_body(body.as_deref()),
-            &Policy::new(),
-        )
-    }
 
     fn new_channel(kind: NewChannelKind, layout: ChannelLayout, mailbox: Option<&str>) -> NewChannel {
         NewChannel {
@@ -392,11 +321,6 @@ mod tests {
                 "chatModalityType": "PostReply",
             }))
         );
-        assert_eq!(
-            create.target(),
-            Target::new(WriteKind::ChannelChange, Scope::Team { id: TEAM.to_owned() })
-        );
-        assert_eq!(classified(&wire), Contact::Write(create.target()));
     }
 
     #[test]
@@ -423,7 +347,7 @@ mod tests {
                 "chatModalityType": "Conversational",
             }))
         );
-        assert_eq!(classified(&wire), Contact::Write(create.target()));
+
         let unrouted = CreateChannel::new(new_channel(NewChannelKind::Private, ChannelLayout::Threads, None));
         assert!(unrouted.wire().expect("a wire form").headers().is_empty());
     }
@@ -479,18 +403,6 @@ mod tests {
                 {"id": format!("OID:bbbb@{tenant}"), "role": 1},
             ]}))
         );
-        assert_eq!(
-            add.target(),
-            Target::new(
-                WriteKind::MemberChange,
-                Scope::Channel {
-                    team: GROUP.to_owned(),
-                    channel: CHANNEL_GROUP.to_owned(),
-                },
-            )
-            .with_added(members.clone())
-        );
-        assert_eq!(classified(&wire), Contact::Write(add.target()));
     }
 
     #[test]
@@ -542,16 +454,6 @@ mod tests {
             ["beta", "teams", "19:channel@thread.tacv2", "setDefaultChannel"]
         );
         assert_eq!(wire.body(), None);
-        assert_eq!(
-            show.target(),
-            Target::new(
-                WriteKind::ChannelChange,
-                Scope::Team {
-                    id: "19:channel@thread.tacv2".to_owned()
-                }
-            )
-        );
-        assert_eq!(classified(&wire), Contact::Write(show.target()));
     }
 
     #[test]

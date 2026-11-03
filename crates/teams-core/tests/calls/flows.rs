@@ -15,7 +15,7 @@ const HEARD: f32 = 0.25;
 const SILENT: f32 = 0.03;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn the_test_call_connects_its_tone_crosses_both_ways_and_every_write_is_permitted() {
+async fn the_test_call_connects_its_tone_crosses_both_ways_and_its_operations_are_ordered() {
     let lab = Lab::start().await;
     let mut a = lab.account(LAB_A, A_TONE).await;
     let requests = a.handle.requests();
@@ -45,10 +45,6 @@ async fn the_test_call_connects_its_tone_crosses_both_ways_and_every_write_is_pe
         1,
         "the acceptance's acknowledgement, as its delivery response"
     );
-    assert!(a.log.denials().is_empty(), "{:#?}", a.log.denials());
-    for what in ["\"call\"", "update_endpoint_metadata", "\"add\"", "\"leave\""] {
-        assert!(a.log.permitted_any(what), "{what}: {:#?}", a.log.permitted());
-    }
     // the media crossed both ways: the peer's tone in a's recording, a's in the peer's
     tokio::time::sleep(Duration::from_millis(300)).await;
     let peer = lab.mock.close_peer(&id, LAB_A).expect("the media controller's peer");
@@ -115,7 +111,6 @@ async fn a_calls_b_b_answers_by_its_action_and_each_hears_the_other() {
             "updateEndpointMetadata"
         ]
     );
-    assert!(a.log.denials().is_empty() && b.log.denials().is_empty());
     tokio::time::sleep(Duration::from_millis(300)).await;
     let (a_heard, b_heard) = (heard(&a.recording, B_TONE, TALK), heard(&b.recording, A_TONE, TALK));
     eprintln!("a heard b at {a_heard:.3}, b heard a at {b_heard:.3}");
@@ -154,7 +149,6 @@ async fn a_call_b_declines_goes_to_b_s_voicemail_and_a_is_told_so() {
     );
     requests.call(CallAction::HangUp { call }).await.unwrap();
     assert_eq!(a.ended(call).await, End::HungUp);
-    assert!(a.log.denials().is_empty() && b.log.denials().is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -199,7 +193,6 @@ async fn an_invitation_s_offer_is_answered_and_a_renegotiation_goes_either_way()
             "leave"
         ]
     );
-    assert!(b.log.denials().is_empty(), "{:#?}", b.log.denials());
     let _ = lab.mock.close_peer(&id, LAB_B);
     let peer_heard = heard(&lab.mock.peer_recording(&id, LAB_B).unwrap(), B_TONE, TALK);
     let b_heard = heard(&b.recording, PEER_TONE, TALK);
@@ -223,7 +216,6 @@ async fn a_running_group_call_is_joined_with_media_and_carries_it() {
     tokio::time::sleep(TALK).await;
     requests.call(CallAction::HangUp { call }).await.unwrap();
     assert_eq!(b.ended(call).await, End::HungUp);
-    assert!(b.log.denials().is_empty(), "{:#?}", b.log.denials());
     assert!(lab.sent_by(LAB_B).contains(&"join".to_owned()));
     let _ = lab.mock.close_peer(&id, LAB_B);
     let peer_heard = heard(&lab.mock.peer_recording(&id, LAB_B).unwrap(), B_TONE, TALK);
@@ -302,7 +294,6 @@ async fn a_call_outlives_its_calling_socket_s_reconnect_and_keeps_its_media() {
         ["start", "updateEndpointMetadata", "add", "leave"],
         "the leave on the links the call had before"
     );
-    assert!(a.log.denials().is_empty(), "{:#?}", a.log.denials());
     let _ = lab.mock.close_peer(&id, LAB_A);
     assert!(heard(&a.recording, PEER_TONE, TALK) > HEARD);
 }

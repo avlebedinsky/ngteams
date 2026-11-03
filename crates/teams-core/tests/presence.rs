@@ -11,9 +11,8 @@
 #![cfg(test)]
 
 use std::future::{self, Future};
-use std::io::{self, Write};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use serde_json::{Value, json};
@@ -21,7 +20,7 @@ use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Event, Parts};
 use teams_core::{Availability, Outbox};
-use teams_fence::{FailClosed, Fence, FenceLog, Mri, Roster};
+use teams_fence::Mri;
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::Store;
 use wiremock::matchers::{method, path};
@@ -93,39 +92,9 @@ impl Credentials for FakeTokens {
     }
 }
 
-/// A `fence.log` the test reads back.
-#[derive(Clone, Default)]
-struct SharedLog(Arc<Mutex<Vec<u8>>>);
-
-impl SharedLog {
-    fn lines(&self) -> Vec<Value> {
-        let bytes = self.0.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        String::from_utf8(bytes)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect()
-    }
-}
-
-impl Write for SharedLog {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
 struct Rig {
     server: MockServer,
     handle: EngineHandle,
-    log: SharedLog,
     _dir: tempfile::TempDir,
 }
 
@@ -136,14 +105,12 @@ fn rig(server: MockServer, poll: Duration, presence: bool) -> Rig {
 }
 
 /// [`rig`], the lab a and `others`.
-fn rig_of(server: MockServer, poll: Duration, presence: bool, others: Vec<String>) -> Rig {
+fn rig_of(server: MockServer, poll: Duration, presence: bool, _others: Vec<String>) -> Rig {
     let dir = tempfile::tempdir().unwrap();
-    let log = SharedLog::default();
-    let lab = std::iter::once(mri(GUID_A)).chain(others).map(Mri::new);
-    let fence = Arc::new(Fence::new(Roster::new(lab, []), FenceLog::from_writer(log.clone())));
+
     let tokens = Arc::new(FakeTokens);
     let transport = || {
-        HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &server.uri())
+        HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &server.uri())
             .unwrap()
             .with_max_retry_wait(RETRY_WAIT)
     };
@@ -153,7 +120,7 @@ fn rig_of(server: MockServer, poll: Duration, presence: bool, others: Vec<String
         transport()
     };
     let author = Author::new(Mri::new(mri(GUID_A)), "lab-a");
-    let outbox = Outbox::new(Arc::new(transport()), Arc::clone(&fence), Arc::new(FailClosed), author);
+    let outbox = Outbox::new(Arc::new(transport()), author);
     let store = Store::open(&dir.path().join("store").join("a.sqlite")).unwrap();
     let handle = engine::start(Parts {
         calls: None,
@@ -172,7 +139,6 @@ fn rig_of(server: MockServer, poll: Duration, presence: bool, others: Vec<String
     Rig {
         server,
         handle,
-        log,
         _dir: dir,
     }
 }
@@ -235,12 +201,7 @@ async fn a_persons_presence_is_read_at_once_and_told_logged_as_allowed() {
     let reads = rig.reads().await;
     assert_eq!(reads.len(), 1, "read once: the poll is an hour");
     assert_eq!(asked(&reads[0]), [mri(GUID_B)]);
-    let lines = rig.log.lines();
-    assert_eq!(lines.len(), 1, "{lines:?}");
-    assert_eq!(lines[0]["event"], "allowed");
-    assert_eq!(lines[0]["method"], "POST");
-    assert_eq!(lines[0]["host"], "teams.microsoft.com");
-    assert_eq!(lines[0]["path"], GET_PRESENCE);
+
     rig.handle.shutdown();
 }
 
@@ -325,11 +286,7 @@ async fn someone_outside_the_lab_is_read_like_anyone() {
     let reads = rig.reads().await;
     assert_eq!(reads.len(), 1);
     assert_eq!(asked(&reads[0]), [mri(GUID_OUT)]);
-    let lines = rig.log.lines();
-    assert!(
-        lines.iter().all(|line| line["event"] == "allowed"),
-        "only the read, let through: {lines:?}"
-    );
+
     rig.handle.shutdown();
 }
 
@@ -408,15 +365,15 @@ async fn a_throttled_read_waits_its_retry_after() {
     let mut rig = rig(server, Duration::from_millis(100), true);
 
     rig.handle.presence(mri(GUID_B)).await.unwrap();
-    // the first read is sent at once, and once more by the transport after its (capped) wait; within the next second
+    // the first read is sent at once, and not retried inside the transport; within the next second
     // (ten polls) no other goes out
     let deadline = tokio::time::Instant::now() + WAIT;
-    while rig.reads().await.len() < 2 {
+    while rig.reads().await.is_empty() {
         assert!(tokio::time::Instant::now() < deadline, "no read in time");
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
     assert_eq!(rig.presences_within(Duration::from_secs(1)).await, Vec::new());
-    assert_eq!(rig.reads().await.len(), 2);
+    assert_eq!(rig.reads().await.len(), 1);
     rig.handle.shutdown();
 }
 
@@ -441,15 +398,15 @@ async fn someone_new_asked_about_while_throttled_brings_no_read_before_the_retry
 
     rig.handle.presence(mri(GUID_B)).await.unwrap();
     assert_eq!(rig.next_presence().await, (mri(GUID_B), Availability::Available));
-    // the throttled read (and the transport's one retry of it): b unknown again, its Retry-After kept
+    // the throttled read is not retried inside the transport: b unknown again, its Retry-After kept
     assert_eq!(rig.next_presence().await, (mri(GUID_B), Availability::Unknown));
-    assert_eq!(rig.reads().await.len(), 3);
+    assert_eq!(rig.reads().await.len(), 2);
 
     // someone new inside the wait (a lab account, and someone outside the lab): no read goes out
     rig.handle.presence(mri(GUID_C)).await.unwrap();
     rig.handle.presence(mri(GUID_OUT)).await.unwrap();
     assert_eq!(rig.presences_within(Duration::from_secs(1)).await, Vec::new());
-    assert_eq!(rig.reads().await.len(), 3, "no read inside the Retry-After");
+    assert_eq!(rig.reads().await.len(), 2, "no read inside the Retry-After");
     rig.handle.shutdown();
 }
 
@@ -507,7 +464,7 @@ async fn without_the_presence_base_nothing_is_read_or_logged() {
     assert_eq!(rig.presences_within(Duration::from_millis(500)).await, Vec::new());
 
     assert!(rig.server.received_requests().await.unwrap().is_empty());
-    assert!(rig.log.lines().is_empty());
+
     rig.handle.shutdown();
 }
 

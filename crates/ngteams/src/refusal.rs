@@ -14,7 +14,7 @@ pub const INSTALLED: Option<&str> = option_env!("TEAMS_PERSONAL_INSTALL");
 /// Why a binary of this build may not run, or `None` when it may.
 #[must_use]
 pub fn refusal() -> Option<&'static str> {
-    if teams_fence::test_support_enabled() || teams_signin::test_support_enabled() {
+    if teams_proto::test_support_enabled() || teams_signin::test_support_enabled() {
         return Some(
             "built with test-support (cargo test, --all-targets or --all-features unify it in): the personal build \
              runs only as scripts/install-personal.sh builds it",

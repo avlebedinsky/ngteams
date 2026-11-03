@@ -1,19 +1,17 @@
 //! What the call session's tests share: the mock chat service with its calling service, its Trouter and its media
 //! (a loopback TURN server and a loopback peer behind each party it plays), and an engine per lab account with its
-//! own store, fence and `fence.log`, its messaging socket and its calling socket, its calls' media on the file
+//! own store, its messaging socket and its calling socket, its calls' media on the file
 //! backend (a tone in, a recording out, nothing processed, each opening of the microphone counted), relayed through
 //! the mock's TURN server.
 //!
 //! Every id, token and MRI here is the mocks' made-up one.
 
 use std::future::{self, Future};
-use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, SystemTime};
 
-use serde_json::Value;
 use teams_auth::secrets::Secret;
 use teams_auth::session::{AccessToken, Renewal};
 use teams_auth::token::TokenError;
@@ -22,7 +20,7 @@ use teams_core::{
     CallId, CallMedia, CallParts, CallStatus, CallVideo, CallView, End, Identity, IncomingCall, Outbox, Relay,
     VideoOutput,
 };
-use teams_fence::{Fence, FenceLog, LiveMembershipSource, MembershipSource, Mri, Roster};
+use teams_fence::Mri;
 use teams_media::devices::file::{AudioInput, FileDevices, FrameCounter, Pacing, PatternCamera};
 use teams_media::devices::{AudioSink, AudioSource, DeviceError, Devices, VideoSink, VideoSource, wav};
 use teams_media::processing::ProcessingConfig;
@@ -31,7 +29,7 @@ use teams_media::session::SessionConfig;
 use teams_media::tone::{Tone, level_at};
 use teams_media::video::codec::EncoderSettings;
 use teams_media::video::convert::MaxSize;
-use teams_mock::{CHAT_BASE, ChatServiceMock, ECHO, LAB_A, LAB_B, LAB_C, TENANT, TrouterMock};
+use teams_mock::{CHAT_BASE, ChatServiceMock, LAB_A, TENANT, TrouterMock};
 use teams_proto::{Author, Client, ClientInfo, Credentials, HttpTransport};
 use teams_store::Store;
 use teams_trouter::{CallStack, Options, RegistrationReport, Trouter, TrouterCredentials};
@@ -101,57 +99,6 @@ impl TrouterCredentials for Tokens {
 
     fn renewals(&self) -> broadcast::Receiver<Renewal> {
         self.renewals.subscribe()
-    }
-}
-
-/// A `fence.log` the test reads back.
-#[derive(Clone, Default)]
-pub struct SharedLog(Arc<Mutex<Vec<u8>>>);
-
-impl SharedLog {
-    pub fn lines(&self) -> Vec<Value> {
-        let bytes = self.0.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        String::from_utf8(bytes)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str(line).unwrap())
-            .collect()
-    }
-
-    /// Every line it denied.
-    pub fn denials(&self) -> Vec<Value> {
-        self.lines()
-            .into_iter()
-            .filter(|line| line["verdict"] == "deny")
-            .collect()
-    }
-
-    /// The writes it permitted, each line as text (its kind, scope and call operation).
-    pub fn permitted(&self) -> Vec<String> {
-        self.lines()
-            .into_iter()
-            .filter(|line| line["verdict"] == "allow" && line["kind"].is_string() && line["event"].is_null())
-            .map(|line| line.to_string())
-            .collect()
-    }
-
-    /// Whether it permitted a write whose line names `what` (a kind, a call operation).
-    pub fn permitted_any(&self, what: &str) -> bool {
-        self.permitted().iter().any(|line| line.contains(what))
-    }
-}
-
-impl Write for SharedLog {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
     }
 }
 
@@ -238,6 +185,27 @@ impl Lab {
             .collect()
     }
 
+    /// Every HTTP attempt to this call operation, including attempts the mock rejected.
+    pub async fn attempts(&self, suffix: &str) -> usize {
+        self.mock
+            .received_requests()
+            .await
+            .iter()
+            .filter(|request| request.url.path().ends_with(suffix))
+            .count()
+    }
+
+    pub async fn wait_attempts(&self, suffix: &str, count: usize) {
+        let deadline = tokio::time::Instant::now() + WAIT;
+        while self.attempts(suffix).await < count {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the {suffix} attempt never arrived"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    }
+
     /// Every delivery response (`3:::`) on `mri`'s sockets.
     pub fn responses_of(&self, mri: &str) -> usize {
         self.trouter
@@ -268,7 +236,6 @@ fn options() -> Options {
 pub struct Account {
     pub mri: &'static str,
     pub handle: EngineHandle,
-    pub log: SharedLog,
     pub recording: PathBuf,
     /// How often its calls opened the microphone.
     microphones: Arc<AtomicUsize>,
@@ -325,28 +292,18 @@ impl Account {
         (tenant, video_on): (&str, bool),
         devices: Option<Arc<dyn Devices + Send + Sync>>,
     ) -> Self {
-        let log = SharedLog::default();
-        let fence = Arc::new(
-            Fence::new(
-                Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), [Mri::new(ECHO)]),
-                FenceLog::from_writer(log.clone()),
-            )
-            .with_own_account(Mri::new(mri)),
-        );
+        let tracker = Arc::new(teams_call::Tracker::new(Mri::new(mri)));
+
         let tokens = Arc::new(tokens(lab, mri));
         let origin = lab.mock.origin();
-        let http =
-            || HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &origin).unwrap();
+        let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin).unwrap();
         let transport = Arc::new(http());
-        let live = LiveMembershipSource::with_mock_origin(&origin).unwrap();
-        live.set_credential_source(transport.clone());
-        let members: Arc<dyn MembershipSource + Send> = Arc::new(live);
         let trouter = || {
             Trouter::with_mock_origin(Arc::clone(&transport), Arc::clone(&tokens), lab.trouter.origin())
                 .unwrap()
                 .with_options(options())
         };
-        let calling = trouter().for_calls(CallStack::new(Arc::clone(&fence), Arc::clone(&members)));
+        let calling = trouter().for_calls(CallStack::new(Arc::clone(&tracker)));
         let store = tempfile::tempdir().unwrap();
         let recording = lab.dir.path().join(format!("{}.wav", mri.rsplit(':').next().unwrap()));
         let microphones = Arc::new(AtomicUsize::new(0));
@@ -368,7 +325,8 @@ impl Account {
         assert!(!description.contains(&tokens.skypetoken));
         let push = Push::new(trouter());
         let client = Arc::new(Client::new(http()));
-        let outbox = Outbox::new(transport, fence, members, Author::new(Mri::new(mri), "Lab"));
+        let outbox = Outbox::new(transport, Author::new(Mri::new(mri), "Lab"))
+            .with_calls(Arc::clone(&tracker), teams_core::CallFloor::new());
         let handle = engine::start(Parts {
             calls: Some(calls),
             store: Store::open(&store.path().join("store.sqlite")).unwrap(),
@@ -385,7 +343,6 @@ impl Account {
         Self {
             mri,
             handle,
-            log,
             recording,
             microphones,
             video,
@@ -399,11 +356,11 @@ impl Account {
         self.microphones.load(Ordering::SeqCst)
     }
 
-    /// Stops its engine (which hangs its call up first), off the test's runtime: its fence's log, once it stopped.
-    pub async fn shut_down(self) -> SharedLog {
-        let Self { handle, log, .. } = self;
-        tokio::task::spawn_blocking(move || handle.shutdown()).await.unwrap();
-        log
+    /// Stops its engine, which hangs up its call first, off the test's runtime.
+    pub async fn shut_down(self) {
+        tokio::task::spawn_blocking(move || self.handle.shutdown())
+            .await
+            .unwrap();
     }
 
     /// Waits until both its sockets are registered.

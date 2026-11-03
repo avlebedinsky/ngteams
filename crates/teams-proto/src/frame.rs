@@ -1,48 +1,11 @@
-//! The Trouter frames the native client sends on its push channel's socket.
-//!
-//! A socket's write half is handed to a [`FrameSink`], and the sink sends only an [`OwnFrame`]: a typed frame of this
-//! crate's, built by its constructor in the shape the messaging stack sent (`docs/protocol/trouter.md`, M1 Task 14's
-//! captures):
-//!
-//! - [`Authenticate`], the first frame on every socket: `5:::{"name":"user.authenticate","args":[{"headers":{…},
-//!   "connectparams":{…}}]}`, the headers exactly `X-Ms-Test-User: False`, `Authorization: Bearer <ic3>` and
-//!   `X-MS-Migration: True` (the calling stack's socket without `X-Ms-Test-User`: [`Authenticate::calling`]), and the
-//!   reconnect parameters an earlier `trouter.connected` handed over, when there are some, sent back as they came;
-//! - [`Ping`], the keep-alive: `5:<n>+::{"name":"ping"}`;
-//! - [`MessageLossAck`], the acknowledgement of the service's message-loss report:
-//!   `5:<n>+::{"name":"trouter.processed_message_loss","args":[{"droppedIndicators":[{"tag":…,"etag":…},…]}]}`;
-//! - [`Disconnect`], the client's disconnect: `0::`.
-//!
-//! [`OwnFrame`] is sealed only to keep frame text out of other crates' hands: no constructor takes frame text, and no
-//! other crate makes a frame. Which frames exist isn't a reviewed list: the session's own frames reach nobody, so adding
-//! one here (`user.activity`, say) is an ordinary change. The only answer to a delivery (`3:::`) is a typed call
-//! delivery response ([`DeliveryResponse`]: [`AcceptanceAcknowledgement`], [`InvitationReceipt`]), which is no frame by
-//! itself: only [`FrameSink::respond`] sends one, once `Fence::check_delivery_response` permitted exactly its JSON for
-//! the connection the sink was given ([`FrameSink::with_call_responses`]) (`CLAUDE.md`, "Calls go only to the lab"), or
-//! the same in two halves, so the socket reads on while the fence decides: [`ResponseDecider::decide`], then that
-//! connection's [`FrameSink::send_permitted`].
-//! Every other delivery stays unanswered.
-//!
-//! The sink numbers the events that ask for an acknowledgement itself (`<n>` above, from 1 per socket). A lab sink
-//! writes nothing to `fence.log`: a frame isn't a contacting write. The personal build's sink ([`FrameSink::logging`],
-//! for a transport whose fence is the personal one, [`Transport::frame_log`](crate::Transport::frame_log)) logs each
-//! frame by its [`OwnFrame::KIND`] before it goes ([`FrameRecord`](teams_fence::FrameRecord):
-//! `docs/personal-build.md`), and sends none it couldn't log.
-//!
-//! The frames' JSON is written by this module's own writer ([`Object`]) with its keys in the order the messaging stack
-//! sent them, byte for byte: `serde_json`'s `Map` keeps insertion order only with its `preserve_order` feature, which
-//! another crate in a build may or may not turn on, so the bytes on the socket would change with what else is compiled.
+//! Typed Trouter session frames and connection-bound call replies.
 
 use std::error::Error;
 use std::fmt;
 use std::future::Future;
-use std::io;
-use std::marker::PhantomData;
-use std::sync::Arc;
 
 use serde_json::Value;
 use teams_auth::secrets::Secret;
-use teams_fence::{Delivery, DeliveryDecision, DeliveryDenyReason, Fence, FrameRecord, MembershipSource};
 
 use crate::write::Links;
 
@@ -51,8 +14,7 @@ use self::sealed::Event;
 /// A frame of the Trouter session (see the module docs). Sealed: no other crate can implement it, so no frame text is
 /// made outside this crate.
 pub trait OwnFrame: sealed::Sealed {
-    /// The frame's kind, the name a `fence.log` record of it carries ([`FrameRecord`](teams_fence::FrameRecord)): the
-    /// personal build logs its frames (`docs/personal-build.md`); the lab's sink logs none.
+    /// The protocol frame kind.
     const KIND: &'static str;
 }
 
@@ -68,6 +30,7 @@ mod sealed {
     pub trait Response {
         /// The id of the delivery it answers.
         fn delivery(&self) -> i64;
+        fn connection(&self) -> &str;
 
         /// The socket.io message's JSON (after `3:::`), keys in the captured order.
         fn envelope(&self) -> String;
@@ -82,7 +45,7 @@ mod sealed {
         Acknowledged(String),
         /// `0::`.
         Disconnect,
-        /// `3:::<json>`: a response to a delivery, the JSON already checked by the fence.
+        /// `3:::<json>`: a response to a delivery, the JSON built by a typed response.
         Response(String),
     }
 }
@@ -191,6 +154,7 @@ impl sealed::Sealed for Authenticate {
 }
 
 impl OwnFrame for Authenticate {
+    /// The protocol frame kind.
     const KIND: &'static str = "trouter_authenticate";
 }
 
@@ -214,6 +178,7 @@ impl sealed::Sealed for Ping {
 }
 
 impl OwnFrame for Ping {
+    /// The protocol frame kind.
     const KIND: &'static str = "trouter_ping";
 }
 
@@ -258,6 +223,7 @@ impl sealed::Sealed for MessageLossAck {
 }
 
 impl OwnFrame for MessageLossAck {
+    /// The protocol frame kind.
     const KIND: &'static str = "trouter_message_loss_ack";
 }
 
@@ -281,6 +247,7 @@ impl sealed::Sealed for Disconnect {
 }
 
 impl OwnFrame for Disconnect {
+    /// The protocol frame kind.
     const KIND: &'static str = "trouter_disconnect";
 }
 
@@ -380,16 +347,12 @@ pub enum FrameError<E: Error + 'static> {
     /// The socket failed to send it: the writer's error, reached only by matching the variant.
     #[error("the socket failed to send the frame")]
     Write(E),
-    /// The personal build's sink couldn't log the frame to `fence.log`: it wasn't sent.
-    #[error("fence.log can't be written, so the frame wasn't sent: {0}")]
-    LogUnavailable(io::Error),
 }
 
 impl<E: Error + 'static> fmt::Debug for FrameError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Write(_) => f.write_str("Write(<the writer's error, not shown: it may hold the frame>)"),
-            Self::LogUnavailable(error) => f.debug_tuple("LogUnavailable").field(error).finish(),
         }
     }
 }
@@ -409,17 +372,10 @@ impl Sent {
     }
 }
 
-/// The one way the native client sends on a Trouter socket: only an [`OwnFrame`]. It has no method that takes text,
-/// and it doesn't give its writer back. A lab sink writes nothing to `fence.log`; the personal build's logs each frame
-/// first ([`FrameSink::logging`]).
 pub struct FrameSink<W> {
     writer: W,
     last_ack: u64,
-    /// The personal build's: the fence whose log each frame goes to first, and the socket's URL.
-    log: Option<(Arc<Fence>, String)>,
-    /// The calling socket's: the fence that decides its delivery responses, and the connection's key, the one its
-    /// deliveries were observed under (`Fence::observe_delivery`).
-    calls: Option<(Arc<Fence>, String)>,
+    connection: Option<String>,
 }
 
 impl<W> fmt::Debug for FrameSink<W> {
@@ -431,100 +387,45 @@ impl<W> fmt::Debug for FrameSink<W> {
 }
 
 impl<W: FrameWriter> FrameSink<W> {
-    /// The sink for a socket's write half, `writer`.
+    /// A sink for the socket's write half.
     #[must_use]
     pub fn new(writer: W) -> Self {
         Self {
             writer,
             last_ack: 0,
-            log: None,
-            calls: None,
+            connection: None,
         }
     }
 
-    /// The same sink answering call deliveries ([`Self::respond`]): each response decided by `fence` for the
-    /// connection `connection`, the key this socket's deliveries are observed under. A sink without it answers none.
+    /// Allows typed call replies on this delivery connection.
     #[must_use]
-    pub fn with_call_responses(mut self, fence: Arc<Fence>, connection: impl Into<String>) -> Self {
-        self.calls = Some((fence, connection.into()));
+    pub fn with_call_responses(mut self, connection: impl Into<String>) -> Self {
+        self.connection = Some(connection.into());
         self
     }
 
-    /// Answers a call delivery with `response`, once: its JSON made once, decided by the fence for this sink's
-    /// connection (`Fence::check_delivery_response`, `source` reading an offered group call's chat fresh), and only
-    /// when permitted sent as `3:::` and exactly that JSON, as a typed frame (logged by its kind on a logging sink). A
-    /// socket that reads on while the fence decides takes the two apart: [`Self::decider`], then
-    /// [`Self::send_permitted`].
+    /// Sends a typed reply only on the connection its delivery arrived on.
     ///
     /// # Errors
-    /// [`RespondError::NoCallResponses`] for a sink that answers none; [`RespondError::NotPending`] when no delivery
-    /// of this connection waits for it; [`RespondError::Denied`] when the fence denied it; [`RespondError::Frame`] when
-    /// it couldn't be logged or sent. Nothing is sent but on success.
-    pub async fn respond<R: DeliveryResponse + Send>(
-        &mut self,
-        response: R,
-        source: &dyn MembershipSource,
-    ) -> Result<Sent, RespondError<W::Error>> {
-        let decider = self.decider().ok_or(RespondError::NoCallResponses)?;
-        let permitted = decider.decide(response, source).await?;
-        self.send_permitted(permitted).await
-    }
-
-    /// What decides this sink's call delivery responses apart from the sink ([`ResponseDecider`]), so the socket's
-    /// reader goes on while the fence decides one; `None` for a sink that answers none.
-    #[must_use]
-    pub fn decider(&self) -> Option<ResponseDecider> {
-        self.calls.as_ref().map(|(fence, connection)| ResponseDecider {
-            fence: Arc::clone(fence),
-            connection: connection.clone(),
-        })
-    }
-
-    /// Sends a response the fence permitted for this sink's connection ([`ResponseDecider::decide`]) as `3:::` and
-    /// exactly its JSON, as a typed frame (logged by its kind on a logging sink).
-    ///
-    /// # Errors
-    /// [`RespondError::NoCallResponses`] for a sink that answers none; [`RespondError::Denied`]
-    /// ([`DeliveryDenyReason::Uncorrelated`]) for one permitted for another connection or by another fence;
-    /// [`RespondError::Frame`] when it couldn't be logged or sent. Nothing is sent but on success.
-    pub async fn send_permitted<R: DeliveryResponse>(
-        &mut self,
-        permitted: PermittedResponse<R>,
-    ) -> Result<Sent, RespondError<W::Error>> {
-        let (fence, connection) = self.calls.as_ref().ok_or(RespondError::NoCallResponses)?;
-        if !Arc::ptr_eq(fence, &permitted.fence) || *connection != permitted.connection {
-            return Err(RespondError::Denied(DeliveryDenyReason::Uncorrelated));
+    /// No reply connection, a different connection, or a socket write failure.
+    pub async fn respond<R: DeliveryResponse + Send>(&mut self, response: R) -> Result<Sent, RespondError<W::Error>> {
+        let connection = self.connection.as_deref().ok_or(RespondError::NoCallResponses)?;
+        if connection != response.connection() {
+            return Err(RespondError::OtherConnection);
         }
-        let frame = Checked::<R> {
-            json: permitted.json,
-            kind: PhantomData,
-        };
-        self.send(&frame).await.map_err(RespondError::Frame)
+        let text = format!("3:::{}", response.envelope());
+        self.writer
+            .write(FrameText(text))
+            .await
+            .map_err(|error| RespondError::Frame(FrameError::Write(error)))?;
+        Ok(Sent { ack: None })
     }
 
-    /// The personal build's sink for a socket's write half at `url`: each frame logged to `fence`'s log by its kind
-    /// (the URL without its query) before it goes, none sent that couldn't be logged.
-    #[must_use]
-    pub fn logging(writer: W, fence: Arc<Fence>, url: &str) -> Self {
-        Self {
-            log: Some((fence, url.to_owned())),
-            ..Self::new(writer)
-        }
-    }
-
-    /// Sends `frame`. An event that asks for an acknowledgement takes the socket's next id, sent or not, so an id is
-    /// never used twice.
+    /// Sends one typed session frame, numbering acknowledgement requests monotonically.
     ///
     /// # Errors
-    /// [`FrameError::Write`] when the socket failed; [`FrameError::LogUnavailable`] when a logging sink couldn't log it
-    /// (nothing sent).
+    /// A socket write failure.
     pub async fn send<F: OwnFrame + Sync>(&mut self, frame: &F) -> Result<Sent, FrameError<W::Error>> {
-        if let Some((fence, url)) = &self.log {
-            fence
-                .log()
-                .record_frame(&FrameRecord { url, kind: F::KIND })
-                .map_err(FrameError::LogUnavailable)?;
-        }
         let (text, ack) = match frame.event() {
             Event::Plain(event) => (format!("5:::{event}"), None),
             Event::Acknowledged(event) => {
@@ -539,157 +440,47 @@ impl<W: FrameWriter> FrameSink<W> {
     }
 }
 
-/// A typed response to a call delivery: the acceptance's acknowledgement ([`AcceptanceAcknowledgement`]) or a
-/// delivery's receipt ([`InvitationReceipt`]: an offered invitation's, a live call's negotiation's), each built from the delivery it answers in the shape the captures show
-/// (`docs/protocol/calling-echo.md`, `docs/protocol/calling.md`). Not a frame by itself: only [`FrameSink::respond`]
-/// (or [`FrameSink::send_permitted`])
-/// sends one, after the fence permitted exactly its JSON for the sink's connection. Sealed: no other crate makes
-/// response text.
 pub trait DeliveryResponse: sealed::Response {
     /// The frame's kind, as a personal sink logs it.
+    /// The protocol frame kind.
     const KIND: &'static str;
 }
 
-/// Why [`FrameSink::respond`] sent nothing.
-#[derive(thiserror::Error)]
+/// Why a typed reply could not be sent.
+#[derive(Debug, thiserror::Error)]
 pub enum RespondError<E: Error + 'static> {
-    /// The sink answers no call delivery (no [`FrameSink::with_call_responses`]).
     #[error("this socket answers no call delivery")]
     NoCallResponses,
-    /// No delivery of this connection waits for the response (another connection's, one answered already, an id no
-    /// delivery had): nothing decided.
-    #[error("no delivery of this connection waits for the response")]
-    NotPending,
-    /// The fence denied it (logged).
-    #[error("the fence denied the delivery response: {0}")]
-    Denied(DeliveryDenyReason),
-    /// It couldn't be logged or sent.
+    #[error("the delivery belongs to another connection")]
+    OtherConnection,
     #[error(transparent)]
     Frame(FrameError<E>),
 }
 
-impl<E: Error + 'static> fmt::Debug for RespondError<E> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::NoCallResponses => f.write_str("NoCallResponses"),
-            Self::NotPending => f.write_str("NotPending"),
-            Self::Denied(reason) => f.debug_tuple("Denied").field(reason).finish(),
-            Self::Frame(error) => f.debug_tuple("Frame").field(error).finish(),
-        }
-    }
-}
-
-/// Decides a calling socket's delivery responses for its connection apart from its sink ([`FrameSink::decider`]), so
-/// the socket reads on while the fence decides one (an offered group call's receipt reads its chat fresh, and a
-/// cancellation read meanwhile ends the ring before the fence's last look). What it permits goes out only through that
-/// sink ([`FrameSink::send_permitted`]).
-#[derive(Clone)]
-pub struct ResponseDecider {
-    fence: Arc<Fence>,
-    connection: String,
-}
-
-impl fmt::Debug for ResponseDecider {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ResponseDecider").finish_non_exhaustive()
-    }
-}
-
-impl ResponseDecider {
-    /// Decides `response`, once: its JSON made once, decided by the fence for this decider's connection
-    /// (`Fence::check_delivery_response`, `source` reading an offered group call's chat fresh). Sends nothing.
-    ///
-    /// # Errors
-    /// [`ResponseRefused::NotPending`] when no delivery of the connection waits for it; [`ResponseRefused::Denied`]
-    /// when the fence denied it.
-    pub async fn decide<R: DeliveryResponse + Send>(
-        &self,
-        response: R,
-        source: &dyn MembershipSource,
-    ) -> Result<PermittedResponse<R>, ResponseRefused> {
-        let json = response.envelope();
-        let decision = self
-            .fence
-            .check_delivery_response(&self.connection, json.as_bytes(), source)
-            .await;
-        match decision {
-            DeliveryDecision::Permitted(permit) if permit.delivery() == response.delivery() => Ok(PermittedResponse {
-                json,
-                fence: Arc::clone(&self.fence),
-                connection: self.connection.clone(),
-                kind: PhantomData,
-            }),
-            DeliveryDecision::Permitted(_) => Err(ResponseRefused::Denied(DeliveryDenyReason::Uncorrelated)),
-            DeliveryDecision::NotPending => Err(ResponseRefused::NotPending),
-            DeliveryDecision::Denied(reason) => Err(ResponseRefused::Denied(reason)),
-        }
-    }
-}
-
-/// A call delivery response the fence permitted for one connection, waiting for that connection's sink
-/// ([`FrameSink::send_permitted`]). Only [`ResponseDecider::decide`] makes one, and it is sent once (not `Clone`).
-#[must_use = "a permitted response goes out only through its sink"]
-pub struct PermittedResponse<R> {
-    json: String,
-    fence: Arc<Fence>,
-    connection: String,
-    kind: PhantomData<fn() -> R>,
-}
-
-impl<R> fmt::Debug for PermittedResponse<R> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PermittedResponse").finish_non_exhaustive()
-    }
-}
-
-/// Why [`ResponseDecider::decide`] permitted nothing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
-pub enum ResponseRefused {
-    /// No delivery of the connection waits for the response: nothing decided.
-    #[error("no delivery of this connection waits for the response")]
-    NotPending,
-    /// The fence denied it (logged).
-    #[error("the fence denied the delivery response: {0}")]
-    Denied(DeliveryDenyReason),
-}
-
-impl<E: Error + 'static> From<ResponseRefused> for RespondError<E> {
-    fn from(refused: ResponseRefused) -> Self {
-        match refused {
-            ResponseRefused::NotPending => Self::NotPending,
-            ResponseRefused::Denied(reason) => Self::Denied(reason),
-        }
-    }
-}
-
-/// A delivery response the fence permitted, as the sink sends it: never outside [`FrameSink::send_permitted`].
-struct Checked<R> {
-    json: String,
-    kind: PhantomData<fn() -> R>,
-}
-
-impl<R> sealed::Sealed for Checked<R> {
-    fn event(&self) -> Event {
-        Event::Response(self.json.clone())
-    }
-}
-
-impl<R: DeliveryResponse> OwnFrame for Checked<R> {
-    const KIND: &'static str = R::KIND;
+/// The minimal delivery context required to encode a typed call response.
+/// Full call deliveries and tracking belong to teams-call.
+pub trait ResponseDelivery {
+    fn connection(&self) -> &str;
+    fn id(&self) -> i64;
+    fn trouter_request(&self) -> Option<&str>;
+    fn chain_id(&self) -> Option<&str>;
+    fn message_id(&self) -> Option<&str>;
 }
 
 /// What a call delivery response echoes of its delivery: its id and its `trouter-request`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Answered {
+    connection: String,
     id: i64,
     trouter_request: String,
 }
 
 impl Answered {
-    fn of(delivery: &Delivery) -> Option<Self> {
+    fn of(delivery: &impl ResponseDelivery) -> Option<Self> {
         Some(Self {
-            id: delivery.id,
-            trouter_request: delivery.trouter_request.clone()?,
+            connection: delivery.connection().to_owned(),
+            id: delivery.id(),
+            trouter_request: delivery.trouter_request()?.to_owned(),
         })
     }
 }
@@ -721,11 +512,16 @@ impl AcceptanceAcknowledgement {
     /// client's delay `client_delay` (`trouter-client`'s `cd`) and the callbacks `links`; `None` when the delivery
     /// carries no `trouter-request`, chain id or message id (its response can't echo them).
     #[must_use]
-    pub fn new(delivery: &Delivery, correlation: impl Into<String>, client_delay: u64, links: Links) -> Option<Self> {
+    pub fn new(
+        delivery: &impl ResponseDelivery,
+        correlation: impl Into<String>,
+        client_delay: u64,
+        links: Links,
+    ) -> Option<Self> {
         Some(Self {
             answered: Answered::of(delivery)?,
-            chain_id: delivery.chain_id.clone()?,
-            message_id: delivery.message_id.clone()?,
+            chain_id: delivery.chain_id()?.to_owned(),
+            message_id: delivery.message_id()?.to_owned(),
             correlation: correlation.into(),
             client_delay,
             links,
@@ -744,6 +540,9 @@ impl fmt::Debug for AcceptanceAcknowledgement {
 impl sealed::Response for AcceptanceAcknowledgement {
     fn delivery(&self) -> i64 {
         self.answered.id
+    }
+    fn connection(&self) -> &str {
+        &self.answered.connection
     }
 
     fn envelope(&self) -> String {
@@ -775,6 +574,7 @@ impl sealed::Response for AcceptanceAcknowledgement {
 }
 
 impl DeliveryResponse for AcceptanceAcknowledgement {
+    /// The protocol frame kind.
     const KIND: &'static str = "call_acceptance_acknowledgement";
 }
 
@@ -793,7 +593,7 @@ impl InvitationReceipt {
     /// The receipt of the invitation `delivery`, with the client's delay `client_delay`; `None` when the delivery
     /// carries no `trouter-request`.
     #[must_use]
-    pub fn new(delivery: &Delivery, client_delay: u64) -> Option<Self> {
+    pub fn new(delivery: &impl ResponseDelivery, client_delay: u64) -> Option<Self> {
         Some(Self {
             answered: Answered::of(delivery)?,
             client_delay,
@@ -813,6 +613,9 @@ impl sealed::Response for InvitationReceipt {
     fn delivery(&self) -> i64 {
         self.answered.id
     }
+    fn connection(&self) -> &str {
+        &self.answered.connection
+    }
 
     fn envelope(&self) -> String {
         let headers = Object::new()
@@ -829,5 +632,6 @@ impl sealed::Response for InvitationReceipt {
 }
 
 impl DeliveryResponse for InvitationReceipt {
+    /// The protocol frame kind.
     const KIND: &'static str = "call_invitation_receipt";
 }

@@ -16,7 +16,7 @@ use teams_auth::token::TokenError;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Parts};
 use teams_core::file_content::STALLED;
 use teams_core::{EngineError, Outbox};
-use teams_fence::{FailClosed, Fence, FenceLog, Mri, Roster};
+use teams_fence::{Fence, FenceLog, Mri, Roster};
 use teams_mock::{CHAT_BASE, LAB_A};
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::Store;
@@ -99,22 +99,17 @@ fn send_body(stream: &mut TcpStream, body: Body) -> usize {
 }
 
 fn engine(origin: &str, dir: &tempfile::TempDir) -> EngineHandle {
-    let fence = Arc::new(Fence::new(
+    let _fence = Arc::new(Fence::new(
         Roster::new([Mri::new(LAB_A)], []),
         FenceLog::from_writer(std::io::sink()),
     ));
     let tokens = Arc::new(Tokens);
-    let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, origin).unwrap();
+    let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, origin).unwrap();
     engine::start(Parts {
         calls: None,
         store: Store::open(&dir.path().join("stream.sqlite")).unwrap(),
         client: Arc::new(Client::new(http())),
-        outbox: Outbox::new(
-            Arc::new(http()),
-            Arc::clone(&fence),
-            Arc::new(FailClosed),
-            Author::new(Mri::new(LAB_A), "Synthetic A"),
-        ),
+        outbox: Outbox::new(Arc::new(http()), Author::new(Mri::new(LAB_A), "Synthetic A")),
         push: None,
         options: EngineOptions::default(),
         known_names: Vec::new(),

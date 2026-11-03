@@ -1,8 +1,7 @@
 //! Teams and channels through a running engine (M2 Task 16), read-only, on the chat service mock (which serves CSA's
 //! teams read too): the teams read from CSA in the background, stored and told as `Event::Teams`, not read again while
 //! fresh, a failed read told and not tried again before its wait; a channel no conversation list names synced on
-//! demand, its posts and replies stored with the post each belongs to; and nothing written there: a post or a read
-//! receipt to a channel is denied by the fence and never reaches the service.
+//! demand, its posts and replies stored with the post each belongs to.
 //!
 //! Every id and token here is the mock's made-up one.
 
@@ -10,19 +9,17 @@
 #![cfg(test)]
 
 use std::future::{self, Future};
-use std::io::{self, Write};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::Duration;
 
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
-use teams_core::engine::{self, Action, EngineHandle, EngineOptions, Event, Parts};
+use teams_core::engine::{self, EngineHandle, EngineOptions, Event, Parts};
 use teams_core::{NOTES, Outbox, Source};
-use teams_fence::{Fence, FenceLog, LiveMembershipSource, Mri, Roster};
-use teams_mock::{CHANNEL, CHAT_BASE, CSA_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, TEAM_CHANNEL};
-use teams_proto::chat::MessageText;
+use teams_fence::Mri;
+use teams_mock::{CHANNEL, CHAT_BASE, CSA_BASE, ChatServiceMock, LAB_A, TEAM_CHANNEL};
 use teams_proto::{Author, Client, Credentials, HttpTransport};
-use teams_store::{ConversationKind, OutboxState, Store};
+use teams_store::{ConversationKind, Store};
 
 /// How long a test waits for an event before it fails.
 const WAIT: Duration = Duration::from_secs(30);
@@ -44,34 +41,9 @@ impl Credentials for Tokens {
     }
 }
 
-/// A `fence.log` the test reads back.
-#[derive(Clone, Default)]
-struct SharedLog(Arc<Mutex<Vec<u8>>>);
-
-impl SharedLog {
-    fn text(&self) -> String {
-        String::from_utf8(self.0.lock().unwrap_or_else(PoisonError::into_inner).clone()).unwrap()
-    }
-}
-
-impl Write for SharedLog {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
 struct Rig {
     mock: ChatServiceMock,
     handle: EngineHandle,
-    log: SharedLog,
     _dir: tempfile::TempDir,
 }
 
@@ -85,28 +57,17 @@ async fn rig(csa: bool, teams_retry: Duration) -> Rig {
 async fn rig_polling(csa: bool, teams_retry: Duration, poll: Option<Duration>) -> Rig {
     let mock = ChatServiceMock::start().await.unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let log = SharedLog::default();
-    let fence = Arc::new(Fence::new(
-        Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), []),
-        FenceLog::from_writer(log.clone()),
-    ));
     let tokens = Arc::new(Tokens(mock.token(LAB_A).unwrap()));
     let origin = mock.origin();
-    let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), Arc::clone(&fence), CHAT_BASE, &origin).unwrap();
+    let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin).unwrap();
     let transport = Arc::new(http());
-    let live = LiveMembershipSource::with_mock_origin(&origin).unwrap();
-    live.set_credential_source(transport.clone());
+
     let reads = if csa {
         http().with_csa(CSA_BASE).unwrap()
     } else {
         http()
     };
-    let outbox = Outbox::new(
-        transport,
-        fence,
-        Arc::new(live),
-        Author::new(Mri::new(LAB_A), "Lab account"),
-    );
+    let outbox = Outbox::new(transport, Author::new(Mri::new(LAB_A), "Lab account"));
     let handle = engine::start(Parts {
         calls: None,
         store: Store::open(&dir.path().join("store").join("a.sqlite")).unwrap(),
@@ -126,7 +87,6 @@ async fn rig_polling(csa: bool, teams_retry: Duration, poll: Option<Duration>) -
     Rig {
         mock,
         handle,
-        log,
         _dir: dir,
     }
 }
@@ -266,38 +226,6 @@ async fn a_channel_no_list_names_is_synced_on_demand_with_the_post_of_each_messa
     assert_eq!(roots, expected);
     let page = requests.messages(TEAM_CHANNEL, None, 50).await.unwrap();
     assert_eq!(page.messages.len(), 6);
-}
-
-#[tokio::test]
-async fn nothing_is_written_to_a_channel() {
-    let rig = rig(true, Duration::from_mins(5)).await;
-    let requests = rig.handle.requests();
-    requests.sync_conversation(TEAM_CHANNEL).await.unwrap();
-    let post = requests
-        .write(Action::Send {
-            conversation: TEAM_CHANNEL.to_owned(),
-            text: MessageText::plain("not to a channel").unwrap(),
-        })
-        .await
-        .unwrap();
-    assert_eq!(post.state, OutboxState::Denied, "{post:?}");
-    let receipt = requests
-        .write(Action::Read {
-            conversation: TEAM_CHANNEL.to_owned(),
-            message_id: "1760000400100".to_owned(),
-        })
-        .await
-        .unwrap();
-    assert_eq!(receipt.state, OutboxState::Denied, "{receipt:?}");
-    let written = rig
-        .mock
-        .received_requests()
-        .await
-        .into_iter()
-        .filter(|request| request.method.as_str() != "GET")
-        .count();
-    assert_eq!(written, 0, "nothing but reads reached the service");
-    assert!(rig.log.text().contains("\"verdict\":\"deny\""), "{}", rig.log.text());
 }
 
 /// CSA's answer with no teams and the account's own notes as its one favourite, in the captured shape

@@ -1,11 +1,11 @@
 //! The call session in the engine (M3 Task 14), on the mock and its loopback media peer: each lab account's engine
-//! with its own fence, `fence.log`, messaging and calling sockets, its calls' media on the file backend through the
+//! with its own tracker, messaging and calling sockets, its calls' media on the file backend through the
 //! mock's loopback TURN server (`support`).
 //!
 //! - `flows`: a call connects and a tone crosses both ways (the test call, a → b native on both ends, the invitation
 //!   of a caller the mock plays, a running group call joined); a renegotiation goes either way; mute; a call outlives
 //!   its calling socket's reconnect.
-//! - `failures`: the native signaling feeds the fence's call registry; what a failure does (Task 14's decision with
+//! - `failures`: the native signaling feeds the call tracker; what a failure does (Task 14's decision with
 //!   Codex); the engine stopping hangs up.
 //!
 //! Every id, token and MRI here is the mocks' made-up one.
