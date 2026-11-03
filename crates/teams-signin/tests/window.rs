@@ -220,7 +220,12 @@ impl Run {
     fn logged(&self, path: &str) -> Vec<&Value> {
         self.log
             .iter()
-            .filter(|entry| entry["url"].as_str().is_some_and(|url| url.ends_with(path)))
+            .filter(|entry| {
+                // fence.log keeps a query's keys, never their values: the path is what names the request
+                entry["url"]
+                    .as_str()
+                    .is_some_and(|url| url.split('?').next().unwrap_or(url).ends_with(path))
+            })
             .collect()
     }
 

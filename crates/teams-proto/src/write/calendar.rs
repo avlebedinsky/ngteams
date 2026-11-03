@@ -945,8 +945,13 @@ mod tests {
 
     /// What the fence makes of the bytes `request` sends, on a made-up middle-tier base.
     fn classified<R: Mutating>(request: &R) -> Contact {
+        classified_on(BASE, request)
+    }
+
+    /// What the fence makes of the bytes `request` sends, on the service base `base`.
+    fn classified_on<R: Mutating>(base: &str, request: &R) -> Contact {
         let wire = request.wire().expect("a wire form");
-        let mut url = url::Url::parse(&format!("{BASE}/")).expect("the base");
+        let mut url = url::Url::parse(&format!("{base}/")).expect("the base");
         url.path_segments_mut()
             .expect("a base")
             .pop_if_empty()
@@ -1218,7 +1223,9 @@ mod tests {
     #[test]
     fn a_meet_now_s_post_is_titled_as_the_web_client_titles_it() {
         let title = crate::SetMeetingTitle::new(&channel().channel, "1793684261870", " lab subject ").expect("a title");
-        assert_eq!(classified(&title), Contact::Write(title.target()));
+        // a chat service write: on a regional chat service host
+        let chat_service = "https://emea.ng.msg.teams.microsoft.com";
+        assert_eq!(classified_on(chat_service, &title), Contact::Write(title.target()));
         let wire = title.wire().expect("a wire form");
         assert_eq!(wire.endpoint().query(), [("name".to_owned(), "meeting".to_owned())]);
         assert_eq!(wire.body(), Some(&json!({"meeting": {"meetingtitle": "lab subject"}})));
