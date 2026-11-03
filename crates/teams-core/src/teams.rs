@@ -427,7 +427,7 @@ mod tests {
         let mut listed = stale;
         keep_changes(&mut changes, &mut listed);
         assert!(listed[0].about.hidden && listed[1].archived);
-        assert!(listed == stored);
+        assert_eq!(listed, stored);
     }
 
     #[test]
@@ -446,6 +446,6 @@ mod tests {
         let mut listed = stale;
         keep_created(&mut created, &mut listed);
         assert_eq!(listed[0].channels.len(), 3);
-        assert!(listed == stored);
+        assert_eq!(listed, stored);
     }
 }

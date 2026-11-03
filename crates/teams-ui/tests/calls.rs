@@ -2106,6 +2106,10 @@ fn a_pre_join_cancelled_after_join_now_hangs_its_call_up_and_never_turns_the_cam
     // the user cancels while the join's media is still being set up
     rig.cx
         .update(|cx| calls_of(&rig).update(cx, teams_ui::Calls::cancel_prejoin));
+    // another meeting's Join meanwhile is refused as busy, and takes nothing back from the cancel
+    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.open_prejoin(meeting_to_join(), cx)));
+    rig.cx.run_until_parked();
+    assert_eq!(actions(&rig), [join_meeting_action()]);
     status(&rig, 1, CallStatus::Joining);
     let _stage = stage(&rig, &windows);
     status(&rig, 1, CallStatus::Connected);

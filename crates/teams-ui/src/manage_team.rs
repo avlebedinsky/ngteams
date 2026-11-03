@@ -333,6 +333,8 @@ pub struct ManageTeam {
     requests: Option<Vec<TeamMember>>,
     // Settings
     settings: Option<Value>,
+    /// A read of the settings is under way: none is changed until it answered ([`Self::set_setting`]).
+    settings_reading: bool,
     open_sections: HashSet<&'static str>,
     code: Option<String>,
     code_read: bool,
@@ -396,6 +398,7 @@ impl ManageTeam {
             role_menu: None,
             requests: None,
             settings: None,
+            settings_reading: false,
             open_sections: HashSet::from(["details"]),
             code: None,
             code_read: false,
@@ -505,10 +508,12 @@ impl ManageTeam {
 
     fn read_settings(&mut self, cx: &mut Context<Self>) {
         let settings = self.core.team_settings(self.team.clone());
+        self.settings_reading = true;
         self.reading
             .push(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
                 let settings = settings.await.ok().flatten();
                 let _ = this.update(cx, |this, cx| {
+                    this.settings_reading = false;
                     let read = settings.and_then(|settings| serde_json::from_str::<Value>(&settings).ok());
                     if !read.as_ref().is_some_and(Value::is_object) {
                         // shown unchecked, and never written back as a snapshot of one box ([`Self::set_setting`])
@@ -579,8 +584,9 @@ impl ManageTeam {
     }
 
     /// A box of the team's settings: the whole of them goes out, as the web client sends them. Since they replace the
-    /// team's settings whole, nothing goes while another write is under way (an older snapshot answered late would undo
-    /// a newer one) or when they couldn't be read (a snapshot of only this box would wipe the rest).
+    /// team's settings whole, nothing goes while another write or a read of them is under way (an older snapshot
+    /// answered late would undo a newer one) or when they couldn't be read (a snapshot of only this box would wipe the
+    /// rest).
     pub fn set_setting(&mut self, guests: bool, keys: &'static [&'static str], on: bool, cx: &mut Context<Self>) {
         if !self.settings_writable() {
             return;
@@ -1517,10 +1523,14 @@ impl ManageTeam {
             .into_any_element()
     }
 
-    /// Whether a box of the team's settings may be changed now ([`Self::set_setting`]): the settings were read, and no
-    /// write is under way.
+    /// Whether a box of the team's settings may be changed now ([`Self::set_setting`]): the settings were read, and
+    /// neither a write nor a read of them is under way (a read answered after a change would put back what it replaced,
+    /// and the next change would send that).
     fn settings_writable(&self) -> bool {
-        !self.core.read_only() && self.writing.is_none() && self.settings.as_ref().is_some_and(Value::is_object)
+        !self.core.read_only()
+            && self.writing.is_none()
+            && !self.settings_reading
+            && self.settings.as_ref().is_some_and(Value::is_object)
     }
 
     fn boxes(&self, boxes: &'static [SettingBox], settings: &Value, cx: &mut Context<Self>) -> AnyElement {

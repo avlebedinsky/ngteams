@@ -1011,8 +1011,9 @@ impl Calls {
         if let Some(prejoin) = &mut self.prejoin {
             prejoin.joining = false;
         }
-        if matches!(ask, Ask::JoinMeeting { .. } | Ask::MeetNow { .. }) {
-            // the join a cancelled pre-join asked for was refused: there is no call to hang up
+        if self.asked.is_none() {
+            // no start or join is pending any more (the one a cancelled pre-join asked for was refused): there is no
+            // call to hang up; a later ask refused as busy leaves the pending one to be hung up
             self.taken_back = false;
         }
         self.refused = Some(Refused {
