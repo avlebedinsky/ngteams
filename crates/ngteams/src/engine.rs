@@ -73,6 +73,7 @@ fn start_with<S: SecretStore + 'static>(
     let store_file = paths.store_file(account).ok_or(StartError::NotSignedIn)?;
     let region = Region::load(&paths.region_file(account).ok_or(StartError::NotSignedIn)?)?;
     let parts = Account {
+        lab_targets: None,
         upn: account.upn.clone(),
         mri: mri.as_str().to_owned(),
         display_name: display_name(account).to_owned(),

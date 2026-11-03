@@ -115,7 +115,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 4 + 134] = [
+const STEPS: [Step; 4 + 136] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -149,6 +149,24 @@ const STEPS: [Step; 4 + 134] = [
     }),
     // the box with the focus and text in it: its accent line, Send in the brand colour
     ("chat-compose", |shell, window, cx| {
+        type_in_compose(shell, "Lunch at noon?", window, cx);
+    }),
+    ("chat-attachment-error", |shell, window, cx| {
+        let path = std::env::temp_dir().join(format!("tour-attachment-{}.txt", std::process::id()));
+        if let Err(error) = fs::write(&path, "A made-up local file for the attachment error view.") {
+            eprintln!("tour attachment: {error}");
+            cx.quit();
+            return;
+        }
+        with_compose(shell, cx, |compose, cx| compose.attach_files(&[path], window, cx));
+    }),
+    ("chat-attachment-discarded", |shell, window, cx| {
+        with_compose(shell, cx, |compose, cx| compose.discard(window, cx));
+        let path = std::env::temp_dir().join(format!("tour-attachment-{}.txt", std::process::id()));
+        if let Err(error) = fs::remove_file(path) {
+            eprintln!("tour attachment cleanup: {error}");
+            cx.quit();
+        }
         type_in_compose(shell, "Lunch at noon?", window, cx);
     }),
     // the box expanded with its format bar (Ctrl+Shift+X), holding formatted text: a heading, bold, a colour and a

@@ -37,6 +37,7 @@
 //! (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
 
 pub mod account;
+mod attachments;
 pub mod calendar;
 pub mod calling;
 pub mod channels;

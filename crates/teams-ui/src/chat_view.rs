@@ -541,6 +541,7 @@ pub struct PendingItem {
     pub created_at: i64,
     /// Its text as the row carries it; `None` when the row can't be read back.
     pub body: Option<RenderedText>,
+    pub files: Vec<SharedFile>,
 }
 
 /// Whether a message of `message_type` is a text message the view lays out: `Text` or `RichText/Html`.
@@ -840,6 +841,8 @@ pub struct ChatView {
     typing_traced: bool,
     settings: Entity<SettingsModel>,
     compose: Entity<Compose>,
+    /// A supported operating-system file drag hovering this conversation.
+    file_drop: FileDrop,
     /// The message the quick reactions are open on.
     reacting: Option<String>,
     /// "More reactions", open on the message the quick reactions are open on.
@@ -890,12 +893,28 @@ pub struct ChatView {
     _subscriptions: [Subscription; 4],
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FileDrop {
+    Idle,
+    Hovering,
+}
+
 impl EventEmitter<ChatViewEvent> for ChatView {}
 
 impl ChatView {
     /// The view of `conversation` with its compose box, loading from the store at once.
     pub fn new(parts: ShellParts, conversation: String, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let compose = Self::compose_box(&parts, &conversation, window, cx);
+        Self::with_compose(parts, conversation, None, window, cx)
+    }
+
+    pub(crate) fn with_compose(
+        parts: ShellParts,
+        conversation: String,
+        compose: Option<Entity<Compose>>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let compose = compose.unwrap_or_else(|| Self::compose_box(&parts, &conversation, window, cx));
         let ShellParts {
             core,
             models,
@@ -941,6 +960,7 @@ impl ChatView {
             typing_traced: false,
             settings,
             compose,
+            file_drop: FileDrop::Idle,
             reacting: None,
             more: None,
             quick_bar: Rc::default(),
@@ -970,6 +990,35 @@ impl ChatView {
         view.typing_changed(cx);
         view.sync_notes(cx);
         view
+    }
+
+    fn file_drop_target(cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        div()
+            .debug_selector(|| "chat-view".to_owned())
+            .id("chat-file-drop")
+            .relative()
+            .on_drag_move(
+                cx.listener(|this, event: &gpui::DragMoveEvent<gpui::ExternalPaths>, _, cx| {
+                    let hovered = event.bounds.contains(&event.event.position)
+                        && this.compose.read(cx).accepts_files()
+                        && compose::attachments::supported(event.drag(cx));
+                    let state = if hovered { FileDrop::Hovering } else { FileDrop::Idle };
+                    if this.file_drop != state {
+                        this.file_drop = state;
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_file_drop_exit(cx.listener(|this, _, _, cx| {
+                this.file_drop = FileDrop::Idle;
+                cx.notify();
+            }))
+            .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, window, cx| {
+                this.file_drop = FileDrop::Idle;
+                this.compose
+                    .update(cx, |compose, cx| compose.attach_files(paths.paths(), window, cx));
+                cx.notify();
+            }))
     }
 
     /// The compose box of `conversation`, on the shell's parts.
@@ -1059,6 +1108,12 @@ impl ChatView {
     #[must_use]
     pub fn compose(&self) -> &Entity<Compose> {
         &self.compose
+    }
+
+    /// Whether the operating-system file drop target is currently highlighted.
+    #[must_use]
+    pub fn file_drop_active(&self) -> bool {
+        self.file_drop == FileDrop::Hovering
     }
 
     /// The message the quick reactions are open on.
@@ -2277,6 +2332,12 @@ impl ChatView {
                 note: Note::of(row, self.earlier.contains(&row.id), now_ms),
                 created_at: row.created_at,
                 body: self.pending_body(row),
+                files: match sending::command_of(row) {
+                    Some(Command::Send { text, .. }) => {
+                        shared_files(Some(&serde_json::json!(text.files_property()))).files
+                    }
+                    _ => Vec::new(),
+                },
             })
             .collect()
     }
@@ -3125,6 +3186,12 @@ fn pending_row(
                 .bg(rgb(palette.selected))
                 .child(content),
         )
+        .children(files::file_cards(
+            &format!("pending-{row}"),
+            &pending.files,
+            None,
+            palette,
+        ))
         .child(note_line(&pending.note, palette, cx))
         .into_any_element()
 }
@@ -4010,8 +4077,7 @@ impl Render for ChatView {
             .min_h_0()
             .child(rows)
             .children(pill);
-        div()
-            .debug_selector(|| "chat-view".to_owned())
+        Self::file_drop_target(cx)
             // Escape the compose box handed on (nothing to cancel there): the list takes the focus
             .on_action(cx.listener(|this, _: &ComposeEscape, window, cx| this.focus_messages(window, cx)))
             // a press anywhere in the view lets the selected text go (a press on text then starts a new selection;
@@ -4045,5 +4111,34 @@ impl Render for ChatView {
             .children(more)
             .children(options)
             .children(selection_menu)
+            .children((self.file_drop == FileDrop::Hovering).then(|| file_drop_overlay(palette)))
     }
+}
+
+/// Teams covers the conversation while a local file hovers it, leaving a clear drop target.
+fn file_drop_overlay(palette: Palette) -> impl IntoElement {
+    div()
+        .debug_selector(|| "chat-file-drop-highlight".to_owned())
+        .absolute()
+        .inset_0()
+        .p_1()
+        .bg(rgb(palette.background).opacity(0.94))
+        .child(
+            div()
+                .size_full()
+                .border_2()
+                .border_color(rgb(palette.brand).opacity(0.4))
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .text_color(rgb(palette.foreground))
+                .child(
+                    div()
+                        .text_xl()
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .child("Share in this chat"),
+                ),
+        )
 }

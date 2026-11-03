@@ -419,6 +419,10 @@ pub enum Event {
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
     #[error(transparent)]
+    ImplementationTarget(#[from] teams_lab_targets::TargetError),
+    #[error("{why}")]
+    Attachment { why: String },
+    #[error(transparent)]
     Store(#[from] StoreError),
     #[error(transparent)]
     Outbox(#[from] OutboxError),
@@ -499,6 +503,8 @@ impl EngineError {
     #[must_use]
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::ImplementationTarget(_) => "implementation target",
+            Self::Attachment { .. } => "attachment",
             Self::Store(_) => "store",
             Self::Outbox(_) => "outbox",
             Self::CatchUp(_) => "catch-up",
@@ -594,6 +600,7 @@ impl<T> Answer<T> {
 
 /// A request to the engine's thread, with where its answer goes.
 enum Request {
+    UploadFile(PathBuf, Responder<teams_proto::UploadedFile>),
     Write(Action, Responder<OutboxEntry>),
     Resend(i64, Responder<OutboxEntry>),
     Transient(Transient, Responder<TransientSent>),
@@ -770,6 +777,10 @@ pub struct EngineRequests {
 }
 
 impl EngineRequests {
+    /// Uploads a local file privately. Sharing waits for the message's Send action.
+    pub fn upload_file(&self, path: PathBuf) -> Reply<teams_proto::UploadedFile> {
+        self.ask(|reply| Request::UploadFile(path, reply))
+    }
     /// The account's MRI: who the engine writes as, and whose read horizon and unread counts it answers with.
     #[must_use]
     pub fn me(&self) -> &str {
@@ -1512,6 +1523,7 @@ struct Core<C, T> {
     pictures: Pictures<C>,
     thumbnails: Thumbnails<C>,
     files: FileContents<C>,
+    uploads: crate::attachments::Uploads<C, T>,
     calendar: Calendar<C, T>,
     channels: Channels<C, T>,
     service_search: ServiceSearch<C>,
@@ -1573,6 +1585,7 @@ where
         let pictures = Pictures::new(Arc::clone(&parts.client), disk.clone());
         let thumbnails = Thumbnails::new(Arc::clone(&parts.client), disk);
         let files = FileContents::new(Arc::clone(&parts.client));
+        let uploads = crate::attachments::Uploads::new(Arc::clone(&parts.client), Arc::clone(&outbox));
         let calendar = Calendar::new(Arc::clone(&parts.client), Arc::clone(&outbox));
         let channels = Channels::new(Arc::clone(&parts.client), Arc::clone(&outbox));
         let service_search = ServiceSearch::new(Arc::clone(&parts.client));
@@ -1593,6 +1606,7 @@ where
             pictures,
             thumbnails,
             files,
+            uploads,
             calendar,
             channels,
             service_search,
@@ -1782,6 +1796,7 @@ where
 
     async fn on_request(&mut self, request: Request) {
         match request {
+            Request::UploadFile(path, reply) => self.uploads.upload(path, reply),
             Request::Write(action, reply) => {
                 let _ = reply.send(self.logged_write(action).await);
             }
@@ -2053,6 +2068,9 @@ where
 
     async fn write(&mut self, action: Action) -> Result<OutboxEntry, EngineError> {
         let command = self.command(action)?;
+        if let Command::Send { conversation, text } = &command {
+            self.uploads.share(conversation, text.files()).await?;
+        }
         if let Command::Send { conversation, .. } = &command {
             // the message a waiting typing announced goes now: the typing must not follow it
             for (transient, dropped) in self.outbox.drop_waiting(conversation) {
@@ -2258,6 +2276,10 @@ where
 
     /// A call action ([`EngineRequests::call`]): a chat's call resolved into whom it calls, then handed to the calling.
     fn call(&mut self, action: CallAction, reply: Responder<CallId>) {
+        if self.uploads.lab_roster().is_some() && matches!(action, CallAction::TestCall { .. }) {
+            let _ = reply.send(Err(teams_lab_targets::TargetError::Recipients.into()));
+            return;
+        }
         log::info!("action: {}", described::call(&action));
         let act = match action {
             CallAction::Call { chat } => match self.placement(&chat) {

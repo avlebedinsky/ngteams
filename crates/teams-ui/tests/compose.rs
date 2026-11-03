@@ -56,6 +56,213 @@ const OUTSIDER: &str = "8:orgid:00000000-0000-4000-8000-0000000000ff";
 const NOON: i64 = 1_767_268_800_000;
 const MINUTE: i64 = 60_000;
 
+#[test]
+fn dropped_files_preserve_the_draft_deduplicate_and_send_with_it() {
+    let rig = rig_with(vec![message(NOON, LAB_B, "<p>hello</p>")]);
+    let (view, cx, _) = chat_window(&rig, Settings::default());
+    let compose = compose(&view, cx);
+    let dir = tempfile::tempdir().unwrap();
+    let paths = [dir.path().join("one.txt"), dir.path().join("two.pdf")];
+    for path in &paths {
+        std::fs::write(path, b"synthetic file").unwrap();
+    }
+    type_text(cx, "Keep this draft");
+    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.attach_files(&paths, window, cx)));
+    draw(cx);
+    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.attach_files(&paths, window, cx)));
+    draw(cx);
+    assert_eq!(typed(&view, cx), "Keep this draft");
+    assert_eq!(rig.core.uploads.lock().unwrap().len(), 2);
+    assert_eq!(cx.update(|_, cx| compose.read(cx).attachments().len()), 2);
+    click(cx, "compose-attachment-remove-0");
+    assert_eq!(typed(&view, cx), "Keep this draft");
+    keys(cx, "enter");
+    let actions = actions(&rig);
+    let Action::Send { text, .. } = &actions[0] else {
+        panic!("file message")
+    };
+    assert_eq!(text.html(), "<p>Keep this draft</p>");
+    assert_eq!(text.files().len(), 1);
+    assert_eq!(text.files()[0].name(), "two.pdf");
+    assert!(cx.update(|_, cx| compose.read(cx).attachments().is_empty()));
+}
+
+#[test]
+fn switching_chats_preserves_text_files_and_upload_completion() {
+    let rig = rig_with(Vec::new());
+    *rig.core.hold_uploads.lock().unwrap() = true;
+    let settings = Settings {
+        selected_chat: Some(AB.to_owned()),
+        ..Settings::default()
+    };
+    let parts = parts::parts(&rig, settings, Arc::new(ViewTrace::off()));
+    let app: &'static mut TestAppContext = Box::leak(Box::new(rig.cx.clone()));
+    let (shell, cx) = app.add_window_view(|window, cx| Shell::new(parts, window, cx));
+    draw(cx);
+    let first = cx.update(|_, cx| shell.read(cx).chat().unwrap().read(cx).compose().clone());
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("draft.txt");
+    std::fs::write(&file, b"test").unwrap();
+    type_text(cx, "Draft with a file");
+    cx.update(|window, cx| first.update(cx, |compose, cx| compose.attach_files(&[file], window, cx)));
+    draw(cx);
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(GROUP.to_owned(), window, cx)));
+    draw(cx);
+    rig.core
+        .held_uploads
+        .lock()
+        .unwrap()
+        .remove(0)
+        .send(Ok(common::uploaded_file("renamed draft.txt")));
+    draw(cx);
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(AB.to_owned(), window, cx)));
+    draw(cx);
+    let restored = cx.update(|_, cx| shell.read(cx).chat().unwrap().read(cx).compose().clone());
+    assert_eq!(first, restored);
+    assert_eq!(
+        cx.update(|_, cx| restored.read(cx).attachments()[0].name.clone()),
+        "renamed draft.txt"
+    );
+    keys(cx, "enter");
+    let sent = actions(&rig);
+    let Action::Send { text, conversation } = &sent[0] else {
+        panic!("message")
+    };
+    assert_eq!(conversation, AB);
+    assert_eq!(text.html(), "<p>Draft with a file</p>");
+    assert_eq!(text.files()[0].name(), "renamed draft.txt");
+}
+
+#[test]
+fn a_file_only_message_is_sendable_after_upload_and_never_while_uploading() {
+    let rig = rig_with(Vec::new());
+    *rig.core.hold_uploads.lock().unwrap() = true;
+    let (view, cx, _) = chat_window(&rig, Settings::default());
+    let compose = compose(&view, cx);
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("only.txt");
+    std::fs::write(&file, b"test").unwrap();
+    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.attach_files(&[file], window, cx)));
+    draw(cx);
+    keys(cx, "enter");
+    assert!(actions(&rig).is_empty());
+    rig.core
+        .held_uploads
+        .lock()
+        .unwrap()
+        .remove(0)
+        .send(Ok(common::uploaded_file("only.txt")));
+    draw(cx);
+    keys(cx, "enter");
+    let actions = actions(&rig);
+    let Action::Send { text, .. } = &actions[0] else {
+        panic!("file message")
+    };
+    assert!(text.html().is_empty());
+    assert_eq!(text.files().len(), 1);
+}
+
+#[test]
+fn removing_an_upload_and_reattaching_ignores_the_old_completion() {
+    let rig = rig_with(Vec::new());
+    *rig.core.hold_uploads.lock().unwrap() = true;
+    let (view, cx, _) = chat_window(&rig, Settings::default());
+    let compose = compose(&view, cx);
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("again.txt");
+    std::fs::write(&file, b"test").unwrap();
+    cx.update(|window, cx| {
+        compose.update(cx, |compose, cx| {
+            compose.attach_files(std::slice::from_ref(&file), window, cx);
+        });
+    });
+    draw(cx);
+    click(cx, "compose-attachment-remove-0");
+    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.attach_files(&[file], window, cx)));
+    draw(cx);
+    rig.core
+        .held_uploads
+        .lock()
+        .unwrap()
+        .remove(0)
+        .send(Ok(common::uploaded_file("old.txt")));
+    draw(cx);
+    assert!(cx.update(|_, cx| matches!(
+        compose.read(cx).attachments()[0].state,
+        teams_ui::compose::attachments::AttachmentState::Uploading
+    )));
+    rig.core
+        .held_uploads
+        .lock()
+        .unwrap()
+        .remove(0)
+        .send(Ok(common::uploaded_file("again.txt")));
+    draw(cx);
+    assert!(cx.update(|_, cx| matches!(
+        compose.read(cx).attachments()[0].state,
+        teams_ui::compose::attachments::AttachmentState::Ready(_)
+    )));
+}
+
+#[test]
+fn failed_uploads_can_be_retried_and_a_refused_send_restores_files_and_text() {
+    let rig = rig_with(Vec::new());
+    rig.core
+        .upload_answers
+        .lock()
+        .unwrap()
+        .push_back(Err(teams_core::EngineError::FileUnavailable));
+    let (view, cx, _) = chat_window(&rig, Settings::default());
+    let compose = compose(&view, cx);
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("retry.txt");
+    std::fs::write(&file, b"test").unwrap();
+    type_text(cx, "preserve me");
+    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.attach_files(&[file], window, cx)));
+    draw(cx);
+    assert!(cx.update(|_, cx| matches!(
+        compose.read(cx).attachments()[0].state,
+        teams_ui::compose::attachments::AttachmentState::Failed(_)
+    )));
+    click(cx, "compose-attachment-retry-0");
+    assert_eq!(rig.core.uploads.lock().unwrap().len(), 2);
+    *rig.core.stopped.lock().unwrap() = true;
+    keys(cx, "enter");
+    assert_eq!(typed(&view, cx), "preserve me");
+    assert_eq!(cx.update(|_, cx| compose.read(cx).attachments().len()), 1);
+}
+
+#[test]
+fn folders_and_read_only_chats_never_upload_and_discard_clears_files() {
+    let rig = rig_with(Vec::new());
+    let (view, cx, _) = chat_window(&rig, Settings::default());
+    let compose = compose(&view, cx);
+    let dir = tempfile::tempdir().unwrap();
+    cx.update(|window, cx| {
+        compose.update(cx, |compose, cx| {
+            compose.attach_files(&[dir.path().to_owned()], window, cx);
+        });
+    });
+    draw(cx);
+    assert!(rig.core.uploads.lock().unwrap().is_empty());
+    let file = dir.path().join("discard.txt");
+    std::fs::write(&file, b"test").unwrap();
+    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.attach_files(&[file], window, cx)));
+    draw(cx);
+    cx.update(|window, cx| compose.update(cx, |compose, cx| compose.discard(window, cx)));
+    draw(cx);
+    assert!(cx.update(|_, cx| compose.read(cx).attachments().is_empty()));
+    let read_only = rig_with(Vec::new());
+    *read_only.core.read_only.lock().unwrap() = true;
+    let (view, cx, _) = chat_window(&read_only, Settings::default());
+    let editor = cx.update(|_, cx| view.read(cx).compose().clone());
+    let file = dir.path().join("read-only.txt");
+    std::fs::write(&file, b"test").unwrap();
+    cx.update(|window, cx| editor.update(cx, |editor, cx| editor.attach_files(&[file], window, cx)));
+    draw(cx);
+    assert!(read_only.core.uploads.lock().unwrap().is_empty());
+}
+
 // --- the text typed as a message's text ---
 
 /// A mention in typed text: where its name stands (bytes) and whom it names.

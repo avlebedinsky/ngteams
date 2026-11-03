@@ -81,6 +81,7 @@ pub enum ComposeError {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "Stored", into = "Stored")]
 pub struct MessageText {
+    files: Vec<crate::UploadedFile>,
     text: RichText,
     mentioned: BTreeMap<String, Mri>,
     html: String,
@@ -127,6 +128,7 @@ impl MessageText {
             ..
         } = render;
         Ok(Self {
+            files: Vec::new(),
             text,
             mentioned: table,
             html,
@@ -147,6 +149,23 @@ impl MessageText {
             truncated: false,
         };
         Self::new(paragraph, [])
+    }
+
+    /// Private uploads staged by the composer; the engine grants this chat's readers access before queuing the post.
+    #[must_use]
+    pub fn with_files(mut self, files: Vec<crate::UploadedFile>) -> Self {
+        self.files = files;
+        self
+    }
+
+    #[must_use]
+    pub fn files(&self) -> &[crate::UploadedFile] {
+        &self.files
+    }
+
+    #[must_use]
+    pub fn files_property(&self) -> String {
+        Value::Array(self.files.iter().map(crate::UploadedFile::entry).collect()).to_string()
     }
 
     /// The text as given.
@@ -202,6 +221,8 @@ impl MessageText {
 /// How a [`MessageText`] is stored (the outbox's payload): the text and its mention table, checked again when read.
 #[derive(Serialize, Deserialize)]
 struct Stored {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    files: Vec<crate::UploadedFile>,
     text: RichText,
     mentioned: BTreeMap<String, String>,
 }
@@ -217,12 +238,14 @@ impl TryFrom<Stored> for MessageText {
                 .into_iter()
                 .map(|(item_id, mri)| (item_id, Mri::new(mri))),
         )
+        .map(|text| text.with_files(stored.files))
     }
 }
 
 impl From<MessageText> for Stored {
     fn from(text: MessageText) -> Self {
         Self {
+            files: text.files,
             text: text.text,
             mentioned: text
                 .mentioned

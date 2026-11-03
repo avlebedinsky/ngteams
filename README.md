@@ -532,14 +532,18 @@ its text), Delete (the account's own) and Escape (clear the selection) act on it
 Teams' hover bar over its bubble's top right: the quick reactions (the account's most used on its stored messages
 first, then Teams' 👍 ❤️ 😆 😮 😢 😡), React, Edit on the account's own, Reply and "More options" (Copy text, Delete),
 each named by its tooltip with its key. The compose box is drawn as Teams' (a rounded box with its accent line along
-the foot while it has the focus) with Format, Emoji, Attach, Loop and Actions and apps (the last three disabled: not in
+the foot while it has the focus) with Format, Emoji, Attach, Loop and Actions and apps (the last two disabled: not in
 this app yet) and, behind a divider, Send inside it on the right: Emoji (also Ctrl+. or Ctrl+;) opens every emoji Teams
 offers, searchable, and puts the one picked at the cursor; Send does what Enter does. It is a rich-text editor, its
 formats shown as they will look and sent as Teams' own editor sends them: Ctrl+B, Ctrl+I, Ctrl+U, Ctrl+Alt+X
 (strikethrough), Ctrl+Shift+C (inline code), Ctrl+Shift+B (a block of code), Ctrl+Shift+7 and Ctrl+Shift+8 (numbered
 and bulleted lists; Enter goes on to the next item, Shift+Enter breaks the line, Tab nests), Ctrl+Alt+4 (a quote),
 Ctrl+Alt+1–3 and Ctrl+Alt+P (headings, a paragraph), Ctrl+Z and Ctrl+Y; a paste keeps the formats of what another
-program or the box itself copied. Format (Ctrl+Shift+X) expands the box with Teams' format bar (the marks, the lists,
+program or the box itself copied. Drag files onto a chat to see its drop highlight and add them to the draft, or use Attach (Ctrl+Shift+U) to choose
+multiple files. Each file uploads privately, shows its status, and offers Remove or Retry. Send shares with the chat's
+current members and posts the files with the text; files can also be sent without text. Drafts and ongoing uploads
+stay in their chat while you navigate. Files up to 250 MB are supported; folders and larger files show a clear error.
+Format (Ctrl+Shift+X) expands the box with Teams' format bar (the marks, the lists,
 highlight, font colour and size, quote, link, code, and More: paragraph styles, indent, a horizontal line, clear
 formatting, undo and redo; Discard empties the box); expanded, Enter starts a new paragraph and Ctrl+Enter sends. Ctrl+K opens the chat switcher (fuzzy over the chats' names; Enter opens,
 Escape closes; "Create team", "Join team", and once something is typed "Add channel: <team>", "Add member: <team>" and

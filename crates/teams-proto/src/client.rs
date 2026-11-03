@@ -24,6 +24,16 @@ use crate::write::{Authorized, Mutating, TargetMismatch};
 pub trait Transport: Sync {
     type Error: Error + Send + Sync + 'static;
 
+    /// A typed own-drive attachment operation, issued only by the outbox after its operational preflight.
+    /// A transport without this route answers `None` and sends nothing.
+    fn deliver_attachment(
+        &self,
+        write: crate::DriveWrite,
+    ) -> impl Future<Output = Option<Result<Response, Self::Error>>> + Send {
+        let _ = write;
+        async { None }
+    }
+
     /// Sends a read as a `GET`.
     fn read<R: Read>(&self, request: &R) -> impl Future<Output = Result<Response, Self::Error>> + Send;
 

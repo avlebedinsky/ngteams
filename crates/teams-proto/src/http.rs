@@ -118,6 +118,8 @@ use crate::request::Request;
 use crate::search::{SUBSTRATE_AUDIENCE, SUBSTRATE_HOST, SubstrateSearch};
 use crate::thumbnail::{ThumbnailLink, is_thumbnail_link};
 use crate::write::{Authorized, CallWire, Mutating, Registry, on_calling_base};
+mod drive;
+mod lab_targets;
 
 /// The Entra audience of the token the chat service and the registrar take.
 pub const IC3_AUDIENCE: &str = "https://ic3.teams.office.com";
@@ -251,6 +253,8 @@ pub enum HttpError {
 /// Why a request was refused before sending.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Refusal {
+    #[error("implementation target preflight failed: {0}")]
+    LabTarget(teams_lab_targets::TargetError),
     /// An endpoint with an empty, `.` or `..` segment.
     #[error("an empty, `.` or `..` path segment")]
     Segment,
@@ -395,6 +399,7 @@ pub struct HttpTransport<C> {
     /// Read-only ([`HttpTransport::read_only`]): only reads (a `GET`, a read by `POST` of the sealed list, a search) go
     /// out.
     read_only: bool,
+    lab_targets: Option<lab_targets::LabContext>,
 }
 
 impl<C> fmt::Debug for HttpTransport<C> {
@@ -504,6 +509,7 @@ impl<C: Credentials> HttpTransport<C> {
             policy,
             mock_origin: None,
             read_only: false,
+            lab_targets: None,
         })
     }
 
@@ -942,7 +948,7 @@ impl<C: Credentials> HttpTransport<C> {
     ) -> Result<Response, HttpError> {
         let map = header_map(headers, auth)?;
         let full = log_request(&method, url, &map, body.as_deref());
-        let shown = format!("{method} {}{}", url.host_str().unwrap_or_default(), url.path());
+        let shown = format!("{method} {}{}", url.host_str().unwrap_or_default(), request_path(url));
         let started = Instant::now();
         let mut request = self.client.request(method.clone(), self.destination(url)).headers(map);
         if let Some(body) = body {
@@ -1384,6 +1390,18 @@ impl Drop for FileBody {
 impl<C: Credentials> Transport for HttpTransport<C> {
     type Error = HttpError;
 
+    async fn deliver_attachment(&self, write: crate::DriveWrite) -> Option<Result<Response, HttpError>> {
+        if self.read_only {
+            return Some(Err(
+                self.refused_read_only(write.method().as_str(), write.url().as_str())
+            ));
+        }
+        if let Err(error) = self.preflight_attachment(&write).await {
+            return Some(Err(error));
+        }
+        Some(self.deliver_drive(&write).await)
+    }
+
     fn read<R: Read>(&self, request: &R) -> impl Future<Output = Result<Response, HttpError>> + Send {
         let service = request.service();
         let endpoint = request.endpoint();
@@ -1440,6 +1458,7 @@ impl<C: Credentials> Transport for HttpTransport<C> {
         if self.read_only {
             return Err(self.refused_write(write.request()));
         }
+        self.preflight_lab_write(write.request()).await?;
         if let Some(call) = write.call() {
             return self.deliver_call(write.permit(), call).await;
         }
@@ -1889,6 +1908,14 @@ fn max_body(url: &Url) -> usize {
     }
 }
 
+fn request_path(url: &Url) -> String {
+    const FOLDER: &str = "/root:/Microsoft%20Teams%20Chat%20Files/";
+    url.path().split_once(FOLDER).map_or_else(
+        || url.path().to_owned(),
+        |(prefix, _)| format!("{prefix}{FOLDER}<file>:/content"),
+    )
+}
+
 /// A request's description in the log at `info`: its method, host and path, never its query.
 fn shown(outgoing: &Outgoing<'_>) -> String {
     format!(
@@ -2022,3 +2049,7 @@ fn failure(error: &reqwest::Error) -> HttpError {
         Failure::Network
     })
 }
+
+#[cfg(test)]
+#[path = "http/attachment_tests.rs"]
+mod attachment_tests;

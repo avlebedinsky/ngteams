@@ -43,6 +43,10 @@ impl EventSource for FakeEvents {
 /// The engine's request side: records each request by name, answers the store's reads from its own state (as account
 /// a) and everything else `Stopped`; with `stopped` set, every request answers `Stopped`.
 pub struct FakeCore {
+    pub uploads: Mutex<Vec<std::path::PathBuf>>,
+    pub hold_uploads: Mutex<bool>,
+    pub held_uploads: Mutex<Vec<Answer<teams_proto::UploadedFile>>>,
+    pub upload_answers: Mutex<VecDeque<Result<teams_proto::UploadedFile, EngineError>>>,
     pub me: String,
     pub stopped: Mutex<bool>,
     pub asked: Mutex<Vec<&'static str>>,
@@ -179,6 +183,10 @@ pub struct FakeCore {
 impl Default for FakeCore {
     fn default() -> Self {
         Self {
+            uploads: Mutex::default(),
+            hold_uploads: Mutex::default(),
+            held_uploads: Mutex::default(),
+            upload_answers: Mutex::default(),
             me: LAB_A.to_owned(),
             stopped: Mutex::new(false),
             asked: Mutex::default(),
@@ -347,6 +355,20 @@ impl FakeCore {
 }
 
 impl Core for FakeCore {
+    fn upload_file(&self, path: std::path::PathBuf) -> Reply<teams_proto::UploadedFile> {
+        locked(&self.uploads).push(path.clone());
+        if *locked(&self.hold_uploads) {
+            let (answer, reply) = Reply::later();
+            locked(&self.held_uploads).push(answer);
+            return reply;
+        }
+        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("made-up.txt");
+        Reply::ready(
+            locked(&self.upload_answers)
+                .pop_front()
+                .unwrap_or_else(|| Ok(uploaded_file(name))),
+        )
+    }
     fn meeting(&self, chat: String) -> Reply<Option<teams_core::MeetingDetails>> {
         let found = locked(&self.meetings).get(&chat).cloned();
         self.answer("meeting", || found)
@@ -793,6 +815,22 @@ impl Core for FakeCore {
         };
         Reply::ready(locked(&self.call_answers).pop_front().unwrap_or(Ok(named)))
     }
+}
+
+/// Synthetic upload metadata for view tests; this never contacts a service.
+///
+/// # Panics
+/// If the synthetic fixture no longer matches the supported upload answer.
+#[must_use]
+pub fn uploaded_file(name: &str) -> teams_proto::UploadedFile {
+    let site =
+        teams_proto::DriveSite::from_web_url("https://madeup-my.sharepoint.com/personal/a_example_test/Documents")
+            .expect("synthetic site");
+    let body = serde_json::json!({"id":"MadeUpItem","name":name,"size":54,
+        "webUrl":format!("{}Documents/Microsoft%20Teams%20Chat%20Files/{name}",site.base()),
+        "parentReference":{"driveId":"made-up-drive"},
+        "sharepointIds":{"listItemUniqueId":"00000000-0000-4000-8000-00000000000f"}});
+    teams_proto::UploadedFile::from_upload(&site, body.to_string().as_bytes()).expect("synthetic upload")
 }
 
 /// Whether `count` was above zero, taking one off it.

@@ -50,6 +50,7 @@ fn calls() -> AccountCalls {
 
 fn account(path: &Path) -> Account<MemorySecretStore> {
     Account {
+        lab_targets: None,
         upn: "synthetic-unsigned@example.test".into(),
         mri: MRI.into(),
         display_name: "Synthetic Person".into(),

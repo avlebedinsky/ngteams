@@ -87,6 +87,8 @@ pub fn account_calls(
 /// Why an account's engine couldn't be built or started.
 #[derive(Debug, thiserror::Error)]
 pub enum AccountError {
+    #[error(transparent)]
+    LabTargets(#[from] teams_lab_targets::TargetError),
     #[error("the region has neither a chatServiceAfd nor a chatService GTM")]
     NoChatBase,
     #[error("the chat transport can't be built: {0}")]
@@ -108,6 +110,8 @@ pub enum AccountError {
 /// The account an engine is for, as the binary knows it.
 #[derive(Debug)]
 pub struct Account<S> {
+    /// Operational implementation targets, independent of authorization; absent for the personal client.
+    pub lab_targets: Option<Arc<teams_lab_targets::LabRoster>>,
     /// Its UPN: what its tokens are stored under.
     pub upn: String,
     /// Its MRI (`8:orgid:<oid>`).
@@ -182,6 +186,7 @@ pub fn start<S: SecretStore + 'static>(
     membership: Membership<'_>,
 ) -> Result<AccountEngine<S>, AccountError> {
     let Account {
+        lab_targets,
         upn,
         mri,
         display_name,
@@ -193,6 +198,7 @@ pub fn start<S: SecretStore + 'static>(
         calls,
         read_only,
     } = account;
+    let own_upn = upn.clone();
     let (push, calls) = listening(read_only, push, calls);
     let writable = |transport: HttpTransport<Session<S>>| {
         if read_only { transport.read_only() } else { transport }
@@ -215,7 +221,12 @@ pub fn start<S: SecretStore + 'static>(
         session.service_base(MIDDLE_TIER_GTM).as_deref(),
     )?;
     let writes = with_team_writes(writes, |gtm| session.service_base(gtm))?;
-    let transport = Arc::new(with_presence(writes, presence.as_deref())?);
+    let writes = with_presence(writes, presence.as_deref())?;
+    let writes = match &lab_targets {
+        Some(roster) => writes.with_lab_targets(mri.clone(), own_upn.clone(), Arc::clone(roster))?,
+        None => writes,
+    };
+    let transport = Arc::new(writes);
     let members = membership(&fence, transport.clone())?;
     let reads = with_middle_tier(
         || HttpTransport::new(Arc::clone(&session), Arc::clone(&fence), &base).map(writable),
@@ -225,30 +236,17 @@ pub fn start<S: SecretStore + 'static>(
     let reads = with_channel_services(reads, |gtm| session.service_base(gtm))?;
     let reads = with_presence(reads, presence.as_deref())?;
     let reads = with_ams(reads, session.service_base(AMS_GTM).as_deref())?;
+    let reads = match &lab_targets {
+        Some(roster) => reads.with_lab_targets(mri.clone(), own_upn, Arc::clone(roster))?,
+        None => reads,
+    };
     let client = Arc::new(Client::new(reads));
     let push = if push {
         Some(Push::new(Trouter::new(Arc::clone(&transport), Arc::clone(&session))?))
     } else {
         None
     };
-    let calls = match calls {
-        Some(calls) => {
-            let identity = Identity {
-                mri: Mri::new(&mri),
-                display_name: Some(display_name.clone()),
-                endpoint_id: String::new(),
-                language_id: calls.language_id,
-                tenant_id: String::new(),
-                client: calls.client,
-                region: session.region().name,
-                partition: session.region().partition,
-            };
-            let socket = Trouter::new(Arc::clone(&transport), Arc::clone(&session))?
-                .for_calls(CallStack::new(Arc::clone(&fence), Arc::clone(&members)));
-            Some(CallParts::new(socket, identity, calls.media))
-        }
-        None => None,
-    };
+    let calls = calling(calls, (&mri, &display_name), &session, &transport, &fence, &members)?;
     let author = Author::new(Mri::new(&mri), display_name);
     let outbox = Outbox::new(transport, fence, members, author);
     let handle = engine::start(Parts {
@@ -264,6 +262,36 @@ pub fn start<S: SecretStore + 'static>(
         known_names,
     })?;
     Ok(AccountEngine { handle, session })
+}
+
+fn calling<S: SecretStore + 'static>(
+    calls: Option<AccountCalls>,
+    person: (&str, &str),
+    session: &Arc<Session<S>>,
+    transport: &Arc<HttpTransport<Session<S>>>,
+    fence: &Arc<Fence>,
+    members: &Arc<dyn MembershipSource + Send>,
+) -> Result<Option<CallParts>, AccountError> {
+    let (mri, display_name) = person;
+    let parts = match calls {
+        Some(calls) => {
+            let identity = Identity {
+                mri: Mri::new(mri),
+                display_name: Some(display_name.to_owned()),
+                endpoint_id: String::new(),
+                language_id: calls.language_id,
+                tenant_id: String::new(),
+                client: calls.client,
+                region: session.region().name,
+                partition: session.region().partition,
+            };
+            let socket = Trouter::new(Arc::clone(transport), Arc::clone(session))?
+                .for_calls(CallStack::new(Arc::clone(fence), Arc::clone(members)));
+            Some(CallParts::new(socket, identity, calls.media))
+        }
+        None => None,
+    };
+    Ok(parts)
 }
 
 /// The reads' transport `build` makes, given the middle tier's base (the profile lookup's) when the region has one

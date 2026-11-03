@@ -76,6 +76,11 @@ name = "kit_window"
 harness = false
 
 [[test]]
+# A real Wayland text/uri-list drag from another process into the composer, in the private sandbox.
+name = "attachment_window"
+harness = false
+
+[[test]]
 # the chat list drawn on the real platform in the UI sandbox over the fake engine, screenshotted in each theme under
 # `target/ui-shots/chat-list-*.png`: its own `main` (GPUI runs on the main thread), which runs itself again inside the
 # sandbox

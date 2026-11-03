@@ -387,6 +387,26 @@ impl VirtualInput {
         self.pointer.frame();
         self.sync()
     }
+
+    /// Holds a pointer button for a real compositor drag between applications.
+    ///
+    /// # Errors
+    /// Returns an error if the compositor cannot accept the pointer event.
+    pub fn button_down(&mut self, button: u32) -> SandboxResult {
+        self.pointer.button(self.time(), button, ButtonState::Pressed);
+        self.pointer.frame();
+        self.sync()
+    }
+
+    /// Releases a pointer button, submitting or cancelling a compositor drag.
+    ///
+    /// # Errors
+    /// Returns an error if the compositor cannot accept the pointer event.
+    pub fn button_up(&mut self, button: u32) -> SandboxResult {
+        self.pointer.button(self.time(), button, ButtonState::Released);
+        self.pointer.frame();
+        self.sync()
+    }
 }
 
 impl Drop for VirtualInput {

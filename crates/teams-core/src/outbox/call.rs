@@ -82,6 +82,22 @@ impl CallRetries {
 }
 
 impl<T: Transport<Error = HttpError>> Outbox<T> {
+    /// A private upload or direct file grant. Each attempt rechecks operational targets; unknown outcomes are not retried.
+    pub async fn try_attachment(&self, write: teams_proto::DriveWrite) -> CallTried {
+        let tried = match self.transport.deliver_attachment(write).await {
+            None => CallTried::NotSent("This transport has no attachment route.".to_owned()),
+            Some(Ok(answer)) => CallTried::Answered(answer),
+            Some(Err(error)) => match super::from_transport(error) {
+                Tried::Answered(answer) => CallTried::Answered(answer),
+                Tried::Denied(reason) => CallTried::Denied(reason.to_string()),
+                Tried::NotSent(reason) => CallTried::NotSent(reason),
+                Tried::Uncertain(reason) => CallTried::Uncertain(reason),
+                Tried::Throttled { wait, .. } => CallTried::Throttled(wait),
+            },
+        };
+        log::info!("attachment write: {}", tried.summary());
+        tried
+    }
     /// One attempt at a call write: a fresh `Fence::check` (its `fence.log` line), then the transport, which sends it
     /// once (see the module docs).
     pub async fn try_call<R: Mutating + Send>(&self, write: R) -> CallTried {

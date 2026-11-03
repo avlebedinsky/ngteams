@@ -65,6 +65,16 @@ pub fn start<S: SecretStore + 'static>(
     let paths = config.paths();
     let region = Region::load(&paths.region_file(alias)).map_err(|source| LabError::Region { alias, source })?;
     let lab_account = Account {
+        lab_targets: Some(Arc::new(
+            teams_lab_targets::LabRoster::new(std::array::from_fn(|index| {
+                let account = &config.accounts()[index];
+                teams_lab_targets::LabAccount {
+                    mri: account.mri.clone().unwrap_or_default(),
+                    upn: account.upn.clone(),
+                }
+            }))
+            .map_err(AccountError::from)?,
+        )),
         upn: account.upn.clone(),
         mri,
         display_name: display_name(&account.upn).to_owned(),

@@ -23,6 +23,7 @@ getrandom.workspace = true
 # the session's tokens (`Credentials`), `TokenError`, and `Retry-After` read as Entra's and authz's answers are
 teams-auth.workspace = true
 teams-fence.workspace = true
+teams-lab-targets.workspace = true
 # at `debug`, each request and its answer in full as the diagnostic log's typed records, which redact the credentials
 teams-log.workspace = true
 # the requests in the app's diagnostic log: by method, host, path, status and latency at `info`; capped at `debug` at

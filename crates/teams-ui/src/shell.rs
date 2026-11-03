@@ -255,6 +255,8 @@ pub struct Shell {
     sidebar: Entity<Sidebar>,
     /// The chat opened in the conversation pane.
     chat: Option<Entity<ChatView>>,
+    /// Unsaved composers keep their text, reply and in-flight uploads when another chat is opened.
+    drafts: std::collections::HashMap<String, Entity<crate::compose::Compose>>,
     /// The channel opened in the conversation pane, with the names its header shows.
     channel: Option<(Entity<ChannelView>, ChannelChosen)>,
     /// The meeting that runs in the channel shown, as last read ([`Self::read_channel_meetup`]): its header's Join.
@@ -364,6 +366,7 @@ impl Shell {
             teams,
             sidebar,
             chat,
+            drafts: std::collections::HashMap::new(),
             channel: None,
             channel_meetup: None,
             settings_view,
@@ -1919,9 +1922,11 @@ impl Shell {
         self.hide_calendar(window, cx);
         let shown = self.chat.as_ref().map(|chat| chat.read(cx).conversation() == id);
         if shown != Some(true) {
+            self.keep_draft(cx);
             let parts = self.parts();
             let conversation = id.clone();
-            let chat = cx.new(|cx| ChatView::new(parts, conversation, window, cx));
+            let compose = self.drafts.remove(&id);
+            let chat = cx.new(|cx| ChatView::with_compose(parts, conversation, compose, window, cx));
             self.chat_events = Some(Self::follow_chat(&chat, window, cx));
             self.chat = Some(chat);
         }
@@ -1944,6 +1949,18 @@ impl Shell {
             compose.update(cx, |compose, cx| compose.focus(window, cx));
         }
         cx.notify();
+    }
+
+    fn keep_draft(&mut self, cx: &App) {
+        if let Some(chat) = &self.chat {
+            let chat = chat.read(cx);
+            let compose = chat.compose();
+            if compose.read(cx).has_draft(cx) {
+                self.drafts.insert(chat.conversation().to_owned(), compose.clone());
+            } else {
+                self.drafts.remove(chat.conversation());
+            }
+        }
     }
 
     /// Opens a message's chat ([`Shell::open_chat`]) at the message: the chat view reads back to it, shows it and

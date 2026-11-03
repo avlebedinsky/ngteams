@@ -50,6 +50,7 @@
 //! the account's `ic3` token and the transport's chat base.
 
 mod ams;
+mod attachment;
 mod calendar;
 mod channel_meeting;
 mod channel_read;
@@ -73,6 +74,7 @@ mod search;
 mod team_apps;
 mod team_read;
 mod thumbnail;
+pub use attachment::{DriveSite, DriveWrite, MAX_ATTACHMENT_SIZE, OwnDrive, UploadedFile, direct_file_grants};
 mod urlp;
 mod write;
 

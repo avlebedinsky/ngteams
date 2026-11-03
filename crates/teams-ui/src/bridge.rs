@@ -43,6 +43,11 @@ use crate::models::Models;
 /// The engine's request side, as the views see it: writes and queries, each answered by a [`Reply`]. No view builds a
 /// request of its own; every write goes out through the engine's outbox, under the fence.
 pub trait Core: Send + Sync + 'static {
+    /// A local file uploaded privately; access is granted only on Send through `write`.
+    fn upload_file(&self, path: std::path::PathBuf) -> Reply<teams_proto::UploadedFile> {
+        let _ = path;
+        Reply::ready(Err(teams_core::EngineError::FileUnavailable))
+    }
     /// The account's MRI: who the engine writes as.
     fn me(&self) -> &str;
     /// A write through the outbox; the reply is the row as its first send left it.
@@ -323,6 +328,9 @@ pub trait Core: Send + Sync + 'static {
 }
 
 impl Core for EngineRequests {
+    fn upload_file(&self, path: std::path::PathBuf) -> Reply<teams_proto::UploadedFile> {
+        EngineRequests::upload_file(self, path)
+    }
     fn me(&self) -> &str {
         EngineRequests::me(self)
     }

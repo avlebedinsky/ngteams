@@ -30,7 +30,7 @@
 //!
 //! - **The box** is drawn as Teams' compose box: the editor on a raised, rounded surface with a hairline border
 //!   ([`BOX_HEIGHT`] at least), Teams' accent line in the brand colour along its foot while it has the focus, and its
-//!   controls inside it on the right: Format, Emoji, Attach, Loop and Actions and apps (the last three shown disabled,
+//!   controls inside it on the right: Format, Emoji, Attach, Loop and Actions and apps (the last two shown disabled,
 //!   saying the app doesn't have them yet), a thin divider, then Send. Expanded, the format bar
 //!   ([`crate::editor::toolbar::FormatBar`]) runs along its top, the editor is taller, and the controls sit along its
 //!   foot; Discard on the bar empties the box (and ends a reply or an edit).
@@ -46,6 +46,8 @@
 //! What the box does is traced (`compose opened` when the box is made, `sent`, `replying`, `editing`, `cancelled`, and
 //! `changed` each time what it holds changes), never its text.
 
+pub mod attachments;
+
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::hash::BuildHasher;
@@ -56,8 +58,9 @@ use std::time::{Duration, Instant};
 
 use gpui::{
     AnyElement, App, AppContext as _, AsyncApp, Bounds, Context, Entity, EventEmitter, Global, InteractiveElement as _,
-    IntoElement, KeyBinding, ParentElement as _, Pixels, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Task, Window, actions, anchored, deferred, div, prelude::FluentBuilder as _, px, rgb,
+    IntoElement, KeyBinding, ParentElement as _, PathPromptOptions, Pixels, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, actions, anchored, deferred, div,
+    prelude::FluentBuilder as _, px, rgb,
 };
 use gpui_component::Disableable as _;
 use gpui_component::{Selectable as _, Sizable as _, Size};
@@ -102,7 +105,9 @@ actions!(
     compose,
     [
         /// Opens or closes the emoji picker.
-        ToggleEmoji
+        ToggleEmoji,
+        /// Chooses local files to attach to the message.
+        AttachFiles
     ]
 );
 
@@ -128,6 +133,7 @@ pub fn init(cx: &mut App) {
             KeyBinding::new("ctrl-.", ToggleEmoji, Some(context)),
         ]
     }));
+    cx.bind_keys([KeyBinding::new("ctrl-shift-u", AttachFiles, Some(CONTEXT))]);
 }
 
 /// The shortest gap between two typing signals: the web client's throttle (`typingIndicator.notificationFrequency`,
@@ -411,9 +417,6 @@ pub struct Picker {
 /// What a read-only box says in place of its text area: the account's own notes take no write from this app.
 pub const READ_ONLY_NOTES: &str = "Notes can't be written from this app yet";
 
-/// What Attach says: sending a file isn't in this app yet (`docs/protocol/chat.md`, "Files: sending, denied").
-pub const NO_ATTACH: &str = "Attaching files isn't available in this app yet";
-
 /// What Loop says: Loop components aren't in this app.
 pub const NO_LOOP: &str = "Loop components aren't available in this app";
 
@@ -430,10 +433,21 @@ pub enum ComposeEvent {
     EditLast,
 }
 
+fn empty_file_text() -> Result<MessageText, ComposeError> {
+    MessageText::new(
+        RichText {
+            nodes: Vec::new(),
+            truncated: false,
+        },
+        [],
+    )
+}
+
 /// What a send took from the box: given back when the engine refuses the write.
 struct Draft {
     doc: Doc,
     mode: Mode,
+    attachments: Vec<attachments::Attachment>,
 }
 
 /// What a compose box is made of.
@@ -458,6 +472,8 @@ pub struct Compose {
     /// The box expanded with its format bar (Ctrl+Shift+X, the Format button).
     expanded: bool,
     mode: Mode,
+    attachments: Vec<attachments::Attachment>,
+    next_attachment: u64,
     picker: Option<Picker>,
     /// The chat's members the picker offers, once read.
     candidates: Option<Vec<Candidate>>,
@@ -559,6 +575,8 @@ impl Compose {
             format_bar,
             expanded: false,
             mode: Mode::New,
+            attachments: Vec::new(),
+            next_attachment: 0,
             picker: None,
             candidates: None,
             reading: None,
@@ -570,6 +588,11 @@ impl Compose {
             _bar_events: bar_events,
             _presence: presence,
         }
+    }
+
+    /// A chat keeps its editor alive while a local draft or upload remains, including across chat navigation.
+    pub(crate) fn has_draft(&self, cx: &App) -> bool {
+        !self.editor.read(cx).is_empty() || self.mode != Mode::New || !self.attachments.is_empty()
     }
 
     /// The rich-text editor the box writes with.
@@ -620,11 +643,32 @@ impl Compose {
 
     /// Discard: empties the box and ends a reply or an edit.
     pub fn discard(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.attachments.clear();
         self.editor.update(cx, super::editor::Editor::clear);
         if self.mode != Mode::New {
             self.cancel(window, cx);
         }
         self.focus(window, cx);
+        cx.notify();
+    }
+
+    /// The Attach button and its keyboard shortcut use the same staging path as an external drop.
+    pub fn choose_files(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.accepts_files() {
+            return;
+        }
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Attach".into()),
+        });
+        cx.spawn_in(window, async move |this, cx| {
+            if let Ok(Ok(Some(paths))) = picked.await {
+                let _ = this.update_in(cx, |this, window, cx| this.attach_files(&paths, window, cx));
+            }
+        })
+        .detach();
     }
 
     #[must_use]
@@ -711,6 +755,9 @@ impl Compose {
         if self.read_only.is_some() {
             return;
         }
+        if !self.attachments.is_empty() {
+            return self.show_problem("Send or remove your attachments before editing a message.", cx);
+        }
         self.trace.record(
             &TraceLine::new("compose", "editing")
                 .conversation(&self.conversation)
@@ -768,6 +815,9 @@ impl Compose {
         if self.read_only.is_some() {
             return;
         }
+        if !self.files_ready() {
+            return self.show_problem("Wait for your files to upload, or retry or remove a failed file.", cx);
+        }
         let doc = self.editor.read(cx).doc().clone();
         let quotes = match &self.mode {
             Mode::New => Vec::new(),
@@ -776,9 +826,22 @@ impl Compose {
         };
         let built = match message_of(&doc, &quotes) {
             Ok(Some(built)) => built,
+            Ok(None) if !self.attachments.is_empty() => match empty_file_text() {
+                Ok(text) => text,
+                Err(error) => return self.show_problem(format!("This message can't be sent: {error}"), cx),
+            },
             Ok(None) => return,
             Err(error) => return self.show_problem(format!("This message can't be sent: {error}"), cx),
         };
+        let built = built.with_files(
+            self.attachments
+                .iter()
+                .filter_map(|file| match &file.state {
+                    attachments::AttachmentState::Ready(uploaded) => Some(uploaded.clone()),
+                    _ => None,
+                })
+                .collect(),
+        );
         let conversation = self.conversation.clone();
         let (action, kind) = match &self.mode {
             Mode::Edit { message_id, .. } => (
@@ -807,6 +870,7 @@ impl Compose {
         let draft = Draft {
             doc,
             mode: self.mode.clone(),
+            attachments: self.attachments.clone(),
         };
         let reply = self.core.write(action);
         self.trace.record(
@@ -828,11 +892,18 @@ impl Compose {
 
     /// Puts a refused send's draft back in the box, unless the box holds something new or writes something else now.
     fn give_back(&mut self, draft: Draft, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.editor.read(cx).is_empty() || self.mode != Mode::New {
+        if !self.editor.read(cx).is_empty() || self.mode != Mode::New || !self.attachments.is_empty() {
+            for file in draft.attachments {
+                if !self.attachments.iter().any(|current| current.path == file.path) {
+                    self.attachments.push(file);
+                }
+            }
+            cx.notify();
             return;
         }
         self.editor.update(cx, |editor, cx| editor.set_doc(draft.doc, cx));
         self.mode = draft.mode;
+        self.attachments = draft.attachments;
         cx.notify();
     }
 
@@ -840,6 +911,7 @@ impl Compose {
     fn clear(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         self.editor.update(cx, |editor, cx| editor.set_doc(Doc::default(), cx));
         self.mode = Mode::New;
+        self.attachments.clear();
         self.picker = None;
         self.problem = None;
         if self.expanded {
@@ -1041,7 +1113,7 @@ impl Compose {
         if self.picker.is_some() {
             self.step_picker(-1, cx);
             cx.stop_propagation();
-        } else if self.mode == Mode::New && self.editor.read(cx).is_empty() {
+        } else if self.mode == Mode::New && self.editor.read(cx).is_empty() && self.attachments.is_empty() {
             cx.emit(ComposeEvent::EditLast);
             cx.stop_propagation();
         }
@@ -1125,7 +1197,7 @@ impl Compose {
     /// Send (Enter does the same; Ctrl+Enter expanded), as Teams draws it: a quiet icon, in the brand colour once the
     /// box holds something to send and greyed while it holds nothing.
     fn send_button(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
-        let empty = self.editor.read(cx).is_blank();
+        let empty = (self.editor.read(cx).is_blank() && self.attachments.is_empty()) || !self.files_ready();
         let tip = match (matches!(self.mode, Mode::Edit { .. }), self.expanded) {
             (true, false) => "Save (Enter)",
             (true, true) => "Save (Ctrl+Enter)",
@@ -1178,7 +1250,7 @@ impl Compose {
     }
 
     /// The box's controls, inside it on the right as Teams has them: Format, Emoji, Attach, Loop and Actions and
-    /// apps (the last three not in this app yet: shown disabled, saying so), a thin divider, then Send.
+    /// apps (the last two not in this app yet: shown disabled, saying so), a thin divider, then Send.
     fn toolbar(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         div()
             .debug_selector(|| "compose-toolbar".to_owned())
@@ -1190,7 +1262,13 @@ impl Compose {
             .h(px(BOX_HEIGHT - 2.0 * BOX_PADDING - 2.0))
             .child(self.format_button(palette, cx))
             .child(self.emoji_button(cx))
-            .child(unavailable("compose-attach", Glyph::PAPERCLIP, NO_ATTACH))
+            .child(selected_by(
+                "compose-attach",
+                icon_button_with_key("compose-attach", Glyph::PAPERCLIP, "Attach files", &AttachFiles)
+                    .with_size(Size::Size(px(TOOL)))
+                    .disabled(!self.accepts_files())
+                    .on_click(cx.listener(|this, _, window, cx| this.choose_files(window, cx))),
+            ))
             .child(unavailable("compose-loop", Glyph::REPEAT, NO_LOOP))
             .child(unavailable("compose-apps", Glyph::PLUS, NO_APPS))
             .child(div().w(px(1.0)).h(px(20.0)).mx_1().bg(rgb(palette.border)))
@@ -1246,7 +1324,7 @@ impl Compose {
             .border_color(rgb(palette.border))
             .bg(rgb(palette.surface))
             .text_color(rgb(palette.foreground));
-        if self.expanded {
+        if self.expanded || !self.attachments.is_empty() {
             return surface
                 .flex()
                 .flex_col()
@@ -1254,8 +1332,9 @@ impl Compose {
                 .px_3()
                 .pt_2()
                 .pb(px(BOX_PADDING))
-                .child(self.format_bar.clone())
+                .children(self.expanded.then(|| self.format_bar.clone()))
                 .child(div().px_1().pt_1().child(self.editor.clone()))
+                .children(self.attachment_cards(palette, cx))
                 .child(div().flex().justify_end().child(self.toolbar(palette, cx)))
                 .children(accent)
                 .into_any_element();
@@ -1434,6 +1513,7 @@ impl Render for Compose {
             .on_action(cx.listener(Self::on_escape))
             .on_action(cx.listener(|this, _: &editor::ToggleExpanded, window, cx| this.toggle_expanded(window, cx)))
             .on_action(cx.listener(|this, _: &ToggleEmoji, window, cx| this.toggle_emoji(window, cx)))
+            .on_action(cx.listener(|this, _: &AttachFiles, window, cx| this.choose_files(window, cx)))
             .flex()
             .flex_col()
             .gap_1()
