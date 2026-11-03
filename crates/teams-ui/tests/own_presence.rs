@@ -423,7 +423,7 @@ fn a_fence_denial_ends_the_reports_for_the_run() {
     assert_eq!(asked(&rig), [OwnStatus::Available]);
     assert_eq!(reporting_of(&rig, &own), Reporting::Halted);
     let failure = rig.cx.read(|cx| own.read(cx).failure().cloned()).expect("shown");
-    assert!(failure.why.contains("the fence denied it"), "{failure:?}");
+    assert!(failure.why.contains("refused before sending"), "{failure:?}");
     wait(&rig, AVAILABLE_REFRESH * 3);
     choose(&rig, &settings, ManualStatus::Busy);
     registered(&rig);

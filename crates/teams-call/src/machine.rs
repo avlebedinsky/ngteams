@@ -170,7 +170,7 @@ pub enum CallEvent {
     InLobby { call: CallId, waiting: bool },
 }
 
-/// The Trouter delivery a response answers: its connection (the fence's key for it) and its id.
+/// The Trouter delivery a response answers: its connection and its id.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct DeliveryKey {
     pub connection: String,
@@ -219,7 +219,7 @@ pub enum Effect {
 pub enum Outcome {
     /// The service answered with `status` and `body`.
     Answered { status: u16, body: Vec<u8> },
-    /// It wasn't sent (the fence denied it, the transport refused it) or its outcome isn't known (a timeout, a broken
+    /// It wasn't sent (call admission or the transport refused it) or its outcome isn't known (a timeout, a broken
     /// connection). It is never sent again.
     Failed,
 }
@@ -252,7 +252,7 @@ pub enum CallError {
     /// No running call is known in that chat.
     #[error("no running call is known in that chat")]
     NotJoinable,
-    /// The write isn't one the fence maps.
+    /// The request doesn't match a supported captured call shape.
     #[error(transparent)]
     Write(#[from] teams_proto::CallWriteError),
     /// The system's random source failed.
@@ -893,7 +893,7 @@ impl Calls {
                     self.leave(Ending::HungUp, now);
                 } else {
                     // the `accept` never went (held for the endpoint state's answer, or not taken yet): the account
-                    // isn't in the call and the fence still holds the invitation as ringing, so a decline ends it
+                    // isn't in the call and the tracker still holds the invitation as ringing, so a decline ends it
                     self.out.send(current, Step::Decline, decline);
                     current.phase = Phase::Declining;
                     self.out.state(current);
@@ -956,8 +956,8 @@ impl Calls {
         Some(call)
     }
 
-    /// The invitation being attached ([`Phase::Attaching`]) goes away here unseen, and the engine tells the fence to let
-    /// it go ([`Effect::LetGo`]).
+    /// The invitation being attached ([`Phase::Attaching`]) goes away here unseen, and the engine tells the tracker
+    /// to let it go ([`Effect::LetGo`]).
     fn let_go(&mut self) {
         if let Some(call) = self.end_call()
             && let Some(invitation) = call.invitation()
@@ -1201,7 +1201,7 @@ impl Calls {
 
 /// Deliveries, responses and time.
 impl Calls {
-    /// A call delivery as the fence read it (`teams_trouter::CallDelivery`'s `delivery` and `observed`).
+    /// A call delivery as the tracker read it (`teams_trouter::CallDelivery`'s `delivery` and `observed`).
     pub fn on_delivery(&mut self, delivery: &Delivery, observed: Observed, now: Instant) {
         if observed == Observed::Offered && !delivery.path.contains("/callAgent/") {
             self.invited(delivery, now);
@@ -1238,7 +1238,7 @@ impl Calls {
     }
 
     /// A renegotiation of the call's media delivered to the account: told, to be answered ([`Self::answer_media`]).
-    /// One the fence didn't read (it binds no link for the answer) or that doesn't read, or one while the call isn't
+    /// One the tracker didn't read (it binds no link for the answer) or that doesn't read, or one while the call isn't
     /// up or the account answers another, fails the call: no capture shows how one is refused.
     ///
     /// One while the account's renegotiation is being made or waits for its answer (both ends turned their cameras on
@@ -1285,8 +1285,8 @@ impl Calls {
     /// The acknowledgement of the account's media answer, read only for a retarget ([`read::retarget`]): a meeting's
     /// call moved to another call id once the account was let in from its lobby, and the call's own links (its
     /// renegotiation's, its keep-alive's call leg, a group call's media links) follow it. The renegotiations after it
-    /// name the new call's answer links, which the fence bound from the same delivery. Anything else, or one the fence
-    /// didn't read, changes nothing.
+    /// name the new call's answer links, which the tracker bound from the same delivery. Anything else, or one the
+    /// tracker didn't read, changes nothing.
     fn retargeted(&mut self, delivery: &Delivery, observed: Observed) {
         if observed != Observed::Renegotiation {
             return;
@@ -1403,7 +1403,7 @@ impl Calls {
         }
     }
 
-    /// An invitation the fence offered (see the crate docs).
+    /// An invitation the tracker offered (see the crate docs).
     fn invited(&mut self, delivery: &Delivery, now: Instant) {
         let Some(invitation) = read::invitation(&delivery.body) else {
             return;

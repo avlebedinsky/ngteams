@@ -1,5 +1,5 @@
 //! The lab harness's config, `~/.config/teams-lab/lab.toml`: accounts, service participants, contacts and paths.
-//! The harness owns its parsing and chat records independently of the browser fence.
+//! The harness owns its parsing, account metadata and recorded chats.
 //!
 //! ```toml
 //! # data_dir = "/absolute/path"   # optional; defaults to $XDG_DATA_HOME/teams-lab
@@ -416,7 +416,7 @@ pub enum ConfigError {
     UnknownAlias(String),
     #[error("HOME is unset or relative, so the lab directories can't be found")]
     NoHome,
-    /// The lab's data dir is, contains or lies inside the personal build's: no lab binary writes there.
+    /// The capture data dir overlaps the personal client's files: proto-lab never writes there.
     #[error(
         "the lab's data dir {} overlaps the personal build's {}: a lab binary never uses the personal build's data",
         lab.display(),

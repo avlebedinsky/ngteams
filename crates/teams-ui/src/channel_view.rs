@@ -1,6 +1,6 @@
 //! A team channel's posts and their reply chains (M2 Task 16), read-only: no composer, no message action, no read
-//! receipt. Nothing in this view writes; a chat write aimed at a channel is denied by the fence (a channel's members
-//! are never read complete), and no write is mapped to `WriteKind::ChannelPost`.
+//! receipt. Nothing in this view writes; channel management uses its own engine actions, and channel posts have
+//! no composer or message actions here.
 //!
 //! - **From the store only.** The view asks the engine to sync the channel each time it is opened
 //!   ([`Core::sync_conversation`], [`ChannelView::sync`]: a channel other than a team's general one is in no

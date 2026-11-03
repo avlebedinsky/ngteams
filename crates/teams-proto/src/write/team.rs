@@ -159,13 +159,13 @@ pub enum TeamWrite {
 
 /// An app's definition as the app catalogue gives it (`beta/users/apps/batchedDefinitions`), sent whole to add the app
 /// to a team. Its bots (`bots[].id`, `inputExtensions[].botId`) join the team, so they are named on the write as
-/// `28:<bot id>`, as the fence reads them from the same bytes. `Debug` shows its id alone.
+/// `28:<bot id>`, as decoded from the captured fields. `Debug` shows its id alone.
 #[derive(Clone, PartialEq, Eq)]
 pub struct AppDefinition(serde_json::Map<String, Value>);
 
 impl AppDefinition {
     /// A definition with an app id (`id`), as the catalogue answered it; `None` when it has none, or names a bot in a
-    /// shape the fence wouldn't read (`bots` or `inputExtensions` not a list of objects, a bot id not text).
+    /// unsupported shape (`bots` or `inputExtensions` not a list of objects, a bot id not text).
     #[must_use]
     pub fn new(definition: serde_json::Map<String, Value>) -> Option<Self> {
         definition

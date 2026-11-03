@@ -36,7 +36,7 @@ const NOT_WALKED: [&str; 2] = ["target", "node_modules"];
 /// them. The fixture guard's scan still covers them. A directory is listed here only when nothing in it comes from, or
 /// imitates, a capture.
 pub const TEST_INPUTS: &[&str] = &[
-    // the pages and workers proto-lab's browser-fence tests load
+    // the pages and workers proto-lab's capture tests load
     "crates/proto-lab/tests/fixtures/pages",
     // the miniature desktop bundle proto-lab's bundle import tests unpack
     "crates/proto-lab/tests/fixtures/mini-bundle",

@@ -1,6 +1,6 @@
 //! The call's writes, built from what the call knows: its callbacks (made here, on the call's agent), the links its
-//! services handed out, and the account. Each is a sealed `teams-proto` type, classified by the fence's classifier
-//! when built; one the classifier doesn't map isn't made ([`teams_proto::CallWriteError`]).
+//! services handed out, and the account. Each is a typed `teams-proto` request validated against its captured shape
+//! when built; an unsupported shape returns [`teams_proto::CallWriteError`].
 
 use std::time::Instant;
 

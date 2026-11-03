@@ -1,5 +1,5 @@
 //! The compose box under a chat's messages (M2 Task 13): what the user types becomes a message's text, and every
-//! write goes out through the engine ([`Core::write`]), its outbox and the fence; the box builds no request.
+//! write goes out through the engine ([`Core::write`]), its outbox; the box builds no request.
 //!
 //! - **Text**: the box is our own rich-text editor ([`Editor`], WYSIWYG), and what it holds is sent as Teams' editor
 //!   sends a message (`docs/protocol/chat.md`, "Formatted text": `RichText/Html`, its paragraphs, marks, colours,

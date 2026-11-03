@@ -1,11 +1,18 @@
 # Continuous integration
 
 The [Coverage workflow](../.github/workflows/coverage.yml) runs on pull requests, pushes to `main`, merge queues and
-manual dispatch. Its `Coverage ≥90%` job runs `scripts/coverage.sh --require-target` over every runtime crate. A crate
+manual dispatch. Its `Coverage ≥90%` job runs `scripts/coverage.sh --require-target` over all 17 runtime crates
+selected by `coverage-report.py list`. A crate
 below 90% in **any** of LLVM's lines, functions or regions fails the job, even if the workspace average or that
 crate's saved standalone baseline is higher or lower. Exactly 90% passes. Failed tests, missing dependencies and
 missing source mappings also fail; the workflow does not skip packages or tolerate a failed coverage step.
 The hardware DMA subcase is excluded in GitHub Actions, as described below; its runtime source still counts.
+
+The workspace has one client, `ngteams`; its UI tests run against synthetic services in `ui-sandbox`.
+`proto-lab` tests browser capture/hold behavior against local pages. Typed-construction compile contracts live in
+`teams-proto`; production-only mock-origin/registrar contracts live in `teams-trouter`. No tenant account or native
+lab session is part of coverage. The lab runner is checked separately by `scripts/test_run_lab.py` using synthetic
+commands, locks and holders.
 
 The hosted `Coverage gate tests` job checks the reporter and the wrapper's failure propagation, including 89.99%
 in each metric and a second crate whose coverage is lower than the first one's. This fast job does not replace the
@@ -48,7 +55,8 @@ Tool installation uses the network; test traffic stays synthetic and offline fro
 or secret is required. The workflow frees unused hosted SDKs to make space for the instrumented native binaries.
 The one-shot build disables incremental caches and DWARF debug information while retaining LLVM coverage maps and
 debug assertions. It also removes the temporary Chrome-installer build before compiling instrumented tests.
-A fresh instrumented build with these settings measured about 23 GiB locally, before temporary test outputs.
+A historical instrumented build with these settings measured about 23 GiB locally, before temporary test outputs;
+actual size depends on the selected sources and dependencies.
 
 To block merges on coverage failures, make `Coverage ≥90%` a required status check in branch rules; the hosted
 reporter tests alone are not a coverage measurement.

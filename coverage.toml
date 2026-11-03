@@ -37,13 +37,13 @@ sha256 = "3ddd9f60071e796622a5fc4d5faa6bc432c207a89e014eac21b5d8b4aaa4ea1a"
 reason = "module declarations and documentation only; no executable items"
 
 [unmapped_sources."crates/teams-call/src/lib.rs"]
-sha256 = "25c3307b0f8003770c6dc5005ff4f3d2cd489172e3db7487565846472be31316"
+sha256 = "4a134f96edff58035d54f463692f4a3df8a5aca0edfced394cb9ce595cdfa3bf"
 reason = "module declarations, re-exports and documentation only; no executable items"
 
 [unmapped_sources."crates/teams-call/src/machine/tests.rs"]
-sha256 = "cd94a63b6fe8c27cf66eb936255791232c3130db9b7b0108030dbeb18f2e525c"
+sha256 = "3b7ee8d92c59113585845da29b433e70f1eeb3a7328f4a4c2103beeba09d7d6f"
 reason = "unit-test module included only by machine.rs cfg(test); omitted by cargo-llvm-cov's test-file filter"
-context = { "crates/teams-call/src/machine.rs" = "34a50a04f4a201eca0aa892a89651e3ec7c4f8ea9f537a56e6aecffb6b0d8c71" }
+context = { "crates/teams-call/src/machine.rs" = "1419609c9eb7907fc795a50237b7026821fabc0ac64f2765f48f1a0f87c6a3a0" }
 
 [unmapped_sources."crates/teams-media/src/video/effects/tests.rs"]
 sha256 = "f67bd56fdf5683e1b7bd150f306db4e7b7714039d13ce592a602b755d24a4ffb"
@@ -73,7 +73,7 @@ sha256 = "2eecebd31a3e9cbf23ddb16701b634f807043dbdd91aec1d52c77079bcc00d2f"
 reason = "module declarations and documentation only; no executable bodies"
 
 [unmapped_sources."crates/teams-core/src/lib.rs"]
-sha256 = "93208df6181519587aa053d3d3331b3c987ea4706af3086ccc9f2bc49a1f2e8d"
+sha256 = "18cad942c1638a9abb14d70cb3fdb4a606a340ea5c637d83f2c4f5632e410932"
 reason = "module declarations, re-exports and documentation only; no executable bodies"
 
 [unmapped_sources."crates/teams-media/src/lib.rs"]

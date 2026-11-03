@@ -321,20 +321,14 @@ const MEETING_TYPE_CHAT: u64 = 1;
 /// Starts a call: `POST` [`CALL_START_URL`].
 ///
 /// - [`StartCall::echo_test`]: the test call, as the web client places it: a conversation of the caller alone (no
-///   callee, the scenario [`TEST_CALL_SCENARIO`]), into which the caller then adds the echo service ([`AddToCall`]);
-///   its target counts the echo in (`WriteKind::Call` on `Scope::New`, the caller and the echo), so the fence lets it
-///   through only for a call it would let the echo join.
+///   callee, the scenario [`TEST_CALL_SCENARIO`]), into which the caller then adds the echo service ([`AddToCall`]).
 /// - [`StartCall::in_chat`]: a call from a 1:1 or group chat: its callees in `participants.to`, the group chat in
-///   `groupChat` (`null` for a 1:1 call); its target is `WriteKind::Call` on the chat it carries (the group chat, or the
-///   1:1 chat of the caller and its one callee), the caller and every callee added, so the fence reads that chat fresh.
+///   `groupChat` (`null` for a 1:1 call).
 /// - [`StartCall::in_meeting`]: a meeting's call from its pre-join, started or not: nobody named, nobody rings; the
-///   service answers with the meeting's one conversation. Its target is `WriteKind::Call` on the meeting's chat, the
-///   sender added, so the fence reads that chat fresh.
+///   service answers with the meeting's one conversation.
 /// - [`StartCall::meet_now`]: a channel's Meet now, its first step: the subscription to a new meeting in the channel,
 ///   nobody named and no call invitation (it enters no call); the service answers with the meeting's conversation
-///   (`adHocMeeting`), which the account then enters as its organizer ([`JoinCall::enter`]). Its target is
-///   `WriteKind::Call` on the channel's team (`Scope::Team`, the channel's thread), the sender added, so the fence
-///   reads the team fresh.
+///   (`adHocMeeting`), which the account then enters as its organizer ([`JoinCall::enter`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StartCall {
     caller: Mri,
@@ -768,7 +762,7 @@ pub struct AttachParts {
 /// The callee's endpoint attached to its ringing call leg: `POST` to the invitation's `attach` link, with the
 /// roster-only subscription to the call's conversation (it joins no call, answers nothing). Sent by the client by
 /// itself while an offered invitation rings; its answer hands out the leg's `progress`, `acceptance` and `callLeg`
-/// links, which the transport binds in the fence's registry.
+/// links, which the call tracker binds.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AttachCall(Built);
 
@@ -876,8 +870,7 @@ pub struct AcceptParts {
 }
 
 /// The callee answers an offered invitation: `POST` to the `acceptance` link its `attach`'s answer handed out. Its
-/// answer (an inline acknowledgement) hands out the answered call's links, which the transport binds in the fence's
-/// registry. Only on an explicit answer of an invitation the engine offered.
+/// answer (an inline acknowledgement) hands out the answered call's links, which the call tracker binds. Only on an explicit answer of an invitation the engine offered.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AcceptCall(Built);
 

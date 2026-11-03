@@ -1,53 +1,54 @@
 # ngteams
 
 A native Microsoft Teams client for Linux in Rust + GPUI, written against Teams' internal APIs with the web client as
-the reference. Two builds: the lab binaries, tested in a lab of three dedicated accounts, and the personal build
-(`ngteams`), the user's own Teams. Layout, commands, each binary and the tests: [README.md](README.md).
+the reference. `ngteams` is the only client. Agents test it with dedicated lab accounts; the installed build runs the
+user's own account. `proto-lab` captures the web client and explores its protocol. Layout, commands and tests:
+[README.md](README.md).
 
 ## Hard rules
 
 These protect real people, the user's account and the user's data. They hold for every agent and every change.
 
-- **Lab accounts talk and call only each other, the echo service and the user's own account** (`lab.toml`'s
-  `contacts`), both ways. That is the only lab rule: from the lab browser or a lab binary, a write that reaches people
-  is denied only when someone else is on its target or added by it (read fresh), or when that can't be read. Apps and
-  bots aren't people. Everything else is allowed without asking.
-- The full lab rule, which the fence implements, is [docs/lab-rules.md](docs/lab-rules.md); read it before changing
-  fence, write or call code. Widening whom a lab write may reach, or weakening a test of that rule, needs the user's
-  sign-off; anything else that passes the tests goes ahead.
-- **Arm the browser fence before anything runs live against the tenant.**
-- **No write ever comes from a `cargo test` process**: a live test spawns a normally built lab binary.
-- **Captures, tokens, debug logs and `fence.log` never enter the repo**, not even sanitized. Committed fixtures are
-  synthetic and marked ([README](README.md#captures-and-fixtures)). Tokens never reach logs or stdout: print only aud,
-  exp, scopes and tenant.
+- **Lab accounts talk and call only each other, the echo service and the user's own account**, both ways.
+  Before every live run, list the chats, calls and people it reaches and confirm that all are in that set
+  ([docs/lab-rules.md](docs/lab-rules.md)). Check the people on each target and anyone the run adds; if that cannot be
+  established, do not run it. Apps and bots aren't people. This is the agent's check, not an application policy.
+- **Agents build `ngteams` only through `scripts/run-lab.sh`**, including its `--build-only` mode. Drive lab accounts
+  freely in that runner's UI sandbox, within the lab-contact rule. The personal installer is used only on an explicit
+  user request, as below.
+- **No live write ever comes from a `cargo test` process**: live tests spawn the normally built lab client.
+- **Captures, tokens and debug logs never enter the repo**, not even sanitized. Committed fixtures are synthetic and
+  marked ([README](README.md#captures-and-fixtures)). Credentials never reach logs or stdout; print only aud, exp,
+  scopes and tenant. At `debug`, every API request and response and every Trouter frame is logged in full, with
+  credentials redacted by the logger; `info` stays payload-free.
 - **No token or credential goes to a third party** (a bot, an app's backend).
-- **Agents run the personal build only read-only, and install it only when the user asks**
+- **Agents run the user's own account only read-only, and install it only when the user asks**
   ([details](docs/personal-build.md#what-agents-may-do-with-the-personal-build)):
   - start it only through `scripts/run-personal-read-only.sh`; its data dirs (`~/.local/share/ngteams/`,
     `~/.config/ngteams/`) are readable any time;
-  - run `scripts/install-personal.sh` only on the user's explicit request, each time, never `cargo build -p ngteams`;
-    afterwards start the installed `ngteams` detached if asked, and leave it alone;
+  - run `scripts/install-personal.sh` only on the user's explicit request, each time; afterwards start the installed
+    `ngteams` detached if asked, and leave it alone;
   - never sign it in, drive, test or capture with it in sending mode, touch its keyring items or receive the user's
     tokens.
 - **Every lab or test GUI runs in `crates/ui-sandbox`**, never on the user's display, bus or PipeWire.
 - **Protocol notes are written in our own words** in `docs/protocol/`; Microsoft JS never enters the repo.
 
-## The personal build
+## The client builds
 
-- **The personal build (`ngteams`) is the user's Teams** ([docs/personal-build.md](docs/personal-build.md)): it may do
-  whatever the Teams client lets its user do, to any target. Its fence logs every send before it goes and denies none.
-  Design its features as any desktop Teams client would; the lab rules aren't a design question there.
-- Lab and personal stay apart: each refuses the other's data, keyring items and accounts, and a lab binary refuses to
-  run with the `personal` or `test-support` feature built in.
+- **The installed `ngteams` is the user's Teams** ([docs/personal-build.md](docs/personal-build.md)): it may do whatever
+  the Teams client lets its user do, to any target. Design its features as any desktop Teams client would; the lab
+  rule is the agent's responsibility during lab runs.
+- The lab marker selects lab mode only: isolated alias directories, the `ngteams-lab` credential namespace and a UI
+  sandbox. The install marker gates other modes. A `test-support` build refuses to run.
 - Mention a lab constraint only when the change touches lab code, in one sentence.
 
 ## Checks
 
 CI requires 90% coverage per runtime crate ([CPU runner and hardware-test exception](docs/ci.md)). Choose additional
-checks, waits and review each change needs from what it can break, and stop once they cover that. A small change
-gets a small, fast check (the test that exercises it, or `cargo check` of
-its crate), not every suite of every crate it touched; a change to shared API, the fence, the write path or calls
-earns more. Rerun only what failed. Say what you ran and what you left out. Commands: [README.md](README.md#tests).
+checks, waits and review from what a change can break, and stop once they cover that. A small change gets a small,
+fast check (the test that exercises it, or `cargo check` of its crate), not every suite of every crate it touched; a
+shared API, write-path or calling change earns more. Rerun only what failed. Say what you ran and what you left out.
+Commands: [README.md](README.md#tests).
 
 What the tooling enforces when it runs:
 
@@ -60,15 +61,17 @@ What the tooling enforces when it runs:
 
 ### Live runs
 
-Live runs reach the real tenant, so these stay firm. Commands are in each binary's README section.
+Live runs reach the real tenant, so these stay firm. Commands are in README's lab section.
 
-- Build the binary normally into `target/lab`, hold the live lock and an outer timeout.
-- Live tests build only with `--features live` and run only with `PROTO_LAB_LIVE=1`. Lab browsers run headless and
-  muted, one per lab profile at a time, none left running.
+- State the lab-contact check before each live run. Do not widen whom the lab may reach without the user's sign-off.
+- Use `scripts/run-lab.sh` for `ngteams`; it builds normally into `target/lab`, holds the live and alias locks and
+  applies an outer timeout. Several aliases may run together. Stop each one when its run ends.
+- Live tests build only with `--features live` and run only with `PROTO_LAB_LIVE=1`. Web captures use normally built
+  `proto-lab` under the exclusive live lock and an outer timeout. Lab browsers run headless and muted, one per lab
+  profile at a time, none left running.
 - A scenario clicks answer, decline or join only when made for it (`ab-call`, `abc-call`), only on its own call.
-- **A fence breach is never a flake**: keep the run's output, check it and `fence.log` for anything sent unguarded,
-  report it as breached, and report a later clean run beside it, not in its place. Don't raise a timeout or skip an
-  arming step to make a run pass.
+- If a run reaches someone outside the allowed set, stop and retain its output. Report what happened and any later
+  clean run separately. Do not raise a timeout or omit a reach check to make a run pass.
 
 ## Conventions
 
@@ -80,20 +83,15 @@ Live runs reach the real tenant, so these stay firm. Commands are in each binary
 - Keep a value in a form no capture showed as unknown rather than guessing it (`teams_proto::chat::Field::Unknown`);
   a fixture covers a field's whole captured range.
 - A new or changed endpoint updates its row in `docs/protocol/endpoints.md`.
-- A new mapped contacting request gets a row in `crates/teams-fence/src/contacting*` and a case in
-  `crates/teams-fence/tests/contacting.rs`. A writing scenario proves enforcement with a forced-deny probe first; a
-  new deny class goes in `crates/proto-lab/src/scenario/expected.rs` with its reason.
 - Check a new dependency that logs at `debug` or below against the compile-time log cap (`crates/teams-log`).
 
 ## Design invariants
 
 Undoing one needs a new reason, not a cleanup; the why is in each path's module docs.
 
-- Browser arming order and close-or-kill of an unarmable target: `crates/proto-lab/src/arming.rs`; the CDP client
-  stays our own (`cdp.rs`).
-- A contacting write goes only as `Authorized<_>` with a `WritePermit` from `Fence::check` for one exact target;
-  `MembershipSource` and `Mutating` are sealed (`crates/fence-seal`). The transport is `https` only, no proxy or
-  redirects, each token only to its own service, never resending a write (`docs/lab-rules.md`).
+- The CDP client stays our own (`crates/proto-lab/src/cdp.rs`); capture holds keep their matching requests unsent.
+- The transport is `https` only, no proxy or redirects, each token only to its own service. Typed writes are single
+  attempts; the outbox owns the permitted retries (`crates/teams-proto/src/http.rs`).
 - The outbox is the only write path; an unknown outcome is checked, never blindly resent; nothing is resent across
   runs without `Store::resend` (`crates/teams-core/src/outbox.rs`).
 - One engine per account (`crates/teams-core/src/engine.rs`); nothing else in the process opens the store file.
@@ -110,9 +108,9 @@ Undoing one needs a new reason, not a cleanup; the why is in each path's module 
 
 ## Where things live
 
-- [README.md](README.md): layout, building, each binary's commands, the lab's files, captures, fixtures and tests.
-- `docs/protocol/`: how each Teams service works, `endpoints.md`, `fence-targets.md`. `docs/lab-rules.md`: the lab
-  rule in full. `docs/personal-build.md`: the personal build. `docs/backlog/`: deferred work. `docs/plans/`: plans as
-  decided then, not the current design.
+- [README.md](README.md): layout, building, each tool's commands, the lab's files, captures, fixtures and tests.
+- `docs/protocol/`: how each Teams service works, `endpoints.md`, `chat-service.md`. `docs/lab-rules.md`: the lab rule
+  and per-run check. `docs/personal-build.md`: the installed client. `docs/backlog/`: deferred work. `docs/plans/`:
+  plans as decided then, not the current design.
 - Keep this file to rules and pointers: no dates, incidents or mechanism detail. A fix's why goes in a comment at the
   code, how a service works in `docs/protocol/`.

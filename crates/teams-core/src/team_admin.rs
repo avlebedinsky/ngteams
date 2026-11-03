@@ -1,8 +1,7 @@
 //! A team managed (`docs/protocol/teams.md`): what the team pages ask of the engine, each as the web client's pages do it.
 //!
 //! - **Writes** ([`TeamWrite`]): sealed `teams-proto` writes through the outbox's one-attempt kind
-//!   ([`crate::outbox::Outbox::try_channel`]), as a new channel's: a fresh `Fence::check` with its `fence.log` line for
-//!   every attempt, no row, nothing sent again by a later run, one more attempt only after a 401 or a short throttle. An
+//!   ([`crate::outbox::Outbox::try_channel`]), as a new channel's: no row, nothing sent again by a later run, one more attempt only after a 401 or a short throttle. An
 //!   answer that isn't a 2xx is [`EngineError::TeamNotChanged`] with Teams' code.
 //! - **The account's own view** ([`OwnTeamView`]): its channels hidden or shown, which reaches nobody, sent as plain
 //!   requests.

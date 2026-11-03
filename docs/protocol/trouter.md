@@ -1,16 +1,21 @@
 # Trouter: the push channel for messaging
 
 Status: 2026-10-20, M1 Task 14; the native client's part (below) 2026-10-21, M1 Task 16; others' and own presence 2026-10-23, M2 Tasks 17–18. Written from live runs of `proto-lab run ab-trouter --headless` (accounts a and b,
-Chrome for Testing 155 headless, the fence armed with what was then its **messaging set**, below), from M0's `echo-call` runs
+Chrome for Testing 155 headless, under the capture policy of that period), from M0's `echo-call` runs
 (`calling-echo.md`), and from the web bundle `26260.1717.5229.7049` (read locally, notes in our own words). The
 captures stay outside the repository; the fixtures in `tests/fixtures/trouter/` are synthetic, shaped like them
 (`session.json`: one socket's frames both ways; `registration.json`: both stacks' registrations; `deliveries.json`:
 the chat deliveries and the web client's answers). Ids, tokens, host numbers and addresses below are placeholders.
 
-The code: the scenario is `crates/proto-lab/src/scenario/ab_trouter.rs` (`ab-trouter`, and `ab-trouter-quiet`, which
-also holds back `user.activity` with a labelled forced frame deny, `ForcedFrameDeny`); what the fence lets through is
-the lab rule's: `teams_fence::contacting` for requests ([fence-targets.md](fence-targets.md#the-contacting-services))
-and the frame rule for frames (`crates/proto-lab/src/fence_ws.rs`, `classify_frame`), [below](#what-the-fence-lets-out).
+Current code: the web capture scenarios are `proto-lab/src/scenario/ab_trouter.rs`; the quiet experiment holds
+`user.activity` with a selective capture wrapper. The native socket is `teams-trouter`, with typed frames and
+connection-bound call responses from `teams-proto`. There is no browser policy/classifier. Dated denials and old
+logs below describe capture-era restrictions only; they are not current behavior.
+
+Current native live tests run `scripts/run-lab.sh <alias>` (with `--pipewire` for media) and drive the sandboxed
+`ngteams` UI. Before each run the agent lists its chats, calls and people and verifies the [lab rule](../lab-rules.md).
+The runner owns shared live-lock and per-alias lifetime locks, supports concurrent aliases and defaults to an 1800 s
+TERM deadline. `--status` and `--stop` address that alias's sandbox only.
 
 ## Outcome
 
@@ -19,38 +24,28 @@ and the frame rule for frames (`crates/proto-lab/src/fence_ws.rs`, `classify_fra
   open chat 3.5–4 s after a's compose box let it go (typing and the client's own rendering included; the delivery
   itself came 200–250 ms after the message's `originalarrivaltime`), an edit 1.2–1.6 s after a sent it, and a
   reaction's delivery reached b's socket 0.9 s after a's reaction request went out (0.13 s after its `200`).
-- **Unanswered deliveries cost a bounded replay on every reconnect, nothing more**: deliveries stay unanswered, and
-  the native client builds no response path ([Answering deliveries](#answering-deliveries)).
+- **Unanswered messaging deliveries cost a bounded replay on every reconnect, nothing more**: ordinary chat deliveries stay unanswered; the messaging socket builds no response path ([Answering deliveries](#answering-deliveries)).
 - **`user.activity` is not needed** for deliveries; the native client doesn't send it in M1
   ([`user.activity` and presence](#useractivity-and-presence)).
 - The web client never re-authenticates an open socket; a renewed token takes a reconnect
   ([Token renewal](#token-renewal-on-a-live-socket)).
 
-## What the fence lets out
+## Capture setup
 
-A run that chats over the push channel runs under the lab rule, like every run:
+`proto-lab` captures network and WebRTC traffic, enables target hooks and bypasses page service workers so page
+network IDs match held requests. A scenario may hold a matching HTTP request or selected `user.activity` frames to
+measure their role without sending them. Those holds are explicit experiment controls, not participant checks.
+Historical held-marker messages remain held on later loads to prevent the browser retrying them then.
 
-- the chat writes as in `ab-chat` (mapped by `teams_fence::contacting`, members read live);
-- both stacks' registrar registrations: the registrar is no contacting service. The messaging stack's (`appId`
-  `TeamsCDLWebWorker`, `templateKey` `TeamsCDLWebWorker_<digits and dots>`, `2.6` and `2.7` seen) is what the
-  scenario waits for, each one's body read to tell it apart; the calling stack's (`SkypeSpacesWeb`) makes the account
-  reachable for calls, which is allowed: an incoming call is never answered;
-- every frame of socket.io type `0` (disconnect), `1` (connect), `2` (heartbeat), `3` (message: the answer to a
-  delivery, which goes back to the service that delivered it, a call's receipts and acknowledgements among them) and
-  `5` (event) on a Trouter socket (any host under `trouter.teams.microsoft.com`): `user.authenticate`, `ping`, the
-  client's own `user.activity`, `trouter.processed_message_loss`, `0::`, a delivery's answer; each logged to
-  `fence.log` as `allowed` (`SEND`, the socket's host and path shape), never with its content;
-- and nothing else on a Trouter socket: a `4`, a `6`, a binary frame and anything that doesn't parse are denied.
-
-Until 2026-10-23 a run that chatted over the push channel used a reviewed **messaging set** instead: the messaging
-stack's registration in its captured shape and the session's frames above, everything else denied.
+Both the messaging registration (`TeamsCDLWebWorker`) and calling registration (`SkypeSpacesWeb`) make the account's
+own endpoints reachable. A capture scenario only answers or joins its own run's invitation when designed to do so.
 
 ## What the native client sends
 
 M1 Task 15. The native client's socket sends only `teams_proto::OwnFrame`s, through `teams_proto::FrameSink`: typed
 frames of `teams-proto`, each built by its constructor in the messaging stack's shape. The trait is sealed only to keep
 frame text out of other crates' hands (no constructor takes frame text); which frames exist isn't a reviewed list, and
-adding one is an ordinary change. The sink writes nothing to `fence.log`: a frame isn't a contacting write. The frames:
+adding one is an ordinary change. Both frame directions are logged in full at debug with credentials redacted; info has no payload. The frames:
 
 | kind | frame |
 |---|---|
@@ -62,7 +57,7 @@ adding one is an ordinary change. The sink writes nothing to `fence.log`: a fram
 The sink numbers the acknowledged events itself (`<n>`, from 1 per socket). No `user.activity` (nothing needs it) and
 no answer to a chat delivery: neither has a type, so neither can be sent. A call's deliveries are answered only on the
 calling socket, as typed responses (`AcceptanceAcknowledgement`, `InvitationReceipt`) through `FrameSink::respond`,
-each decided by `Fence::check_delivery_response` ([the calling socket](#the-calling-stacks-socket-m3-task-12)).
+bound to the delivery's connection ([the calling socket](#the-calling-stacks-socket-m3-task-12)).
 
 ## The native client (M1 Task 16)
 
@@ -77,15 +72,14 @@ answers as the fixtures here do and delivers the chat mock's queued events once 
   percent-encoded, `:`, `,` and `/` left), `timeout=40`, `epid` (one GUID per client run), `cor_id` (a GUID per
   connect), `con_num` (`<ms>_<n>`); the handshake carries the web client's `Origin: https://teams.microsoft.com` and
   no credential. TLS is checked by the system's verifier, as the HTTP transport's. The host allowlist and the TLS
-  are lifted only by the `test-support` mock origin (`ws` on loopback), which a `fence-seal` case keeps out of a normal
-  build.
+  are lifted only by the `test-support` mock origin (`ws` on loopback), which the production compile-contract tests keep out of a normal build.
 - **Frames**: `user.authenticate` at once after `1::` (never before it: a stop before then sends nothing at all),
   pings every 40 s and a reconnect when a pong is 5 s late, the message-loss acknowledgement once the owner has caught
-  up, and `0::` on a stop or a renewal (once authenticated). Each goes through `teams_proto::FrameSink`, unlogged;
+  up, and `0::` on a stop or a renewal (once authenticated). Each goes through `teams_proto::FrameSink`, with debug wire logging;
   the socket's write half goes only to the sink. No `user.activity`, no answer to any delivery, an incoming
   call's (a `callNotification`, whatever its path) included.
 - **Registration**: the messaging stack's, as `teams_proto::EndpointRegistration` (a plain request through
-  `Transport::send`: the registrar is no contacting service, so it goes out logged `allowed`): the body above with `templateKey` `TeamsCDLWebWorker_2.6` and `platformUIVersion` the `tc`'s `v`, on every
+  the transport's typed own-state registration path): the body above with `templateKey` `TeamsCDLWebWorker_2.6` and `platformUIVersion` the `tc`'s `v`, on every
   `trouter.connected`, again 30 s before its hour ends, after a failure again 123 s later. The transport sends the
   registrar `X-MS-Migration: True` and `X-Ms-Test-User: False` with the token. The push URL's endpoint id is
   base64url; until M1 Task 21 the registration refused one with a `-` or `_` (11 of the 28 ids in the captures), so such an
@@ -101,36 +95,25 @@ answers as the fixtures here do and delivers the chat mock's queued events once 
 
 ### The calling stack's socket (M3 Task 12)
 
-`Trouter::for_calls` makes the same client the calling stack's own socket, with an endpoint of its own; nothing opens
-one yet (the call session in the engine does, M3 Task 14). Tested against `TrouterMock` in
-`crates/teams-trouter/tests/calling.rs`:
+`Trouter::for_calls` gives the account a calling socket and endpoint separate from its messaging socket. The
+engine's call stack owns it, tested against `TrouterMock` in `teams-trouter/tests/calling.rs`.
 
-- **Connect and authentication**: `tc` names `"ua":"SkypeSpaces"` and the query adds `dom=teams.microsoft.com`
-  after `epid`; `user.authenticate` carries only `Authorization` and `X-MS-Migration` (`Authenticate::calling`).
-  Reconnects, the regional move, backoff and renewal are the messaging socket's.
-- **Registration**: `teams_proto::CallingRegistration` (`SkypeSpacesWeb`, `SkypeSpacesWeb_2.6`, the messaging body's
-  shape otherwise) on every `trouter.connected`, a reconnect's included, through `Transport::send_own` (a plain
-  request logged `allowed` in the lab, an `OwnState` entry `calling_endpoint_registration` through a personal fence).
-  It registers no `RegisteredEndpoint`: the account's own availability names its messaging endpoint only.
-- **Deliveries**: one at the endpoint's root or under its `callAgent/` is read by the fence first
-  (`Fence::observe_delivery`, under a key of its connection), its body decoded from base64 and gzip when
-  `X-Microsoft-Skype-Content-Encoding` says `gzip` (one that doesn't decode is ignored). An invitation the fence
-  doesn't offer is ignored: never handed on, nothing sent for it; so is a delivery at the root that may be one but
-  doesn't read (a `callNotification` or an `evt` 107 or 109 the fence can't read, a meeting's or a replacing call's
-  invitation, a body that isn't strictly JSON), while the root's other events (`evt` 115, 116) go on. Every other
-  one goes to its consumer as `PushEvent::Call`, with what the fence made of it. A delivery at any other path (`messaging` included) is ignored.
-- **The only answer**: a typed `AcceptanceAcknowledgement` or `InvitationReceipt` handed back through the delivery's
-  own responder to the connection it came on, sent by `FrameSink::send_permitted` once the fence permitted exactly its
-  JSON for that connection, once. The fence decides it while the socket reads on (`ResponseDecider`: a group call's
-  receipt reads its chat fresh), so a cancellation that comes in the while ends the ring before its last look. A response to a delivery of a connection that went down isn't sent on another. A
-  message-loss report is acknowledged at once (nothing to catch up).
-- **A dropped socket or a renewal** reconnects with the cached `connectparams`, so the endpoint and every call link
-  under its push URL stay the same, and registers again; nothing is sent to the call (as the web client did,
-  `calling.md`, "A call held past a dropped socket").
-- **The personal build** opens one when its devices opened (M3 Task 22): its registration goes as its own-state entry
-  (`calling_endpoint_registration`) and its frames are logged by kind (`FrameSink::logging`), as its messaging
-  socket's; the personal fence offers any readable invitation addressed to the account, one at a time
-  (`docs/personal-build.md`, "Calls").
+- **Connect/authenticate:** `tc` names `"ua":"SkypeSpaces"`, the query adds `dom=teams.microsoft.com`, and
+  `Authenticate::calling` carries `Authorization` and `X-MS-Migration`. Regional movement, backoff and renewal follow
+  the messaging socket's rules.
+- **Registration:** `CallingRegistration` (`SkypeSpacesWeb`, `SkypeSpacesWeb_2.6`) uses the typed own-state path on
+  every `trouter.connected`, including reconnects. This does not create the `RegisteredEndpoint` used by presence;
+  own availability uses the messaging registration.
+- **Deliveries:** the endpoint root and `callAgent/` callbacks are decoded (base64/gzip as declared) and observed by
+  `teams-call::track`. A malformed or unoffered invitation becomes `PushEvent::Ignored`; accepted observations reach
+  the consumer as `PushEvent::Call`. Other paths, including `messaging`, are ignored on this socket.
+- **Replies:** only typed `AcceptanceAcknowledgement` or `InvitationReceipt` values go through the delivery's
+  `CallResponder` and `FrameSink::respond`. A reply for a closed connection cannot be moved to another connection.
+  Message-loss reports need no chat catch-up here and are acknowledged directly.
+- **Dropped socket/renewal:** cached `connectparams` preserve the push endpoint and callback URLs; the new socket
+  registers again. Nothing is sent to the call merely because the socket reconnects.
+- **Tracking/floor:** readable invitations must address the account and are deduplicated; ended rings stay ended.
+  The core floor coordinates one call or ring across accounts. Only user actions answer, decline or join.
 
 ## Connect and the regional move
 
@@ -161,7 +144,7 @@ name>","se":"<ms>","st":"<ms>"}}]}`
   `X-MS-Migration`.
 - `connectparams` is what an earlier `trouter.connected` handed over, sent back as it came; a first connect has none.
 - The service takes **our** non-CAE `ic3` token on Trouter, as on the chat service (`auth.md` question 8): Task 16
-  built the native client against the mock, and its first live socket, M1 Task 19's `teams-headless watch`
+  built the native client against the mock, and its first live socket, in M1 Task 19's retired native probe
   (2026-10-21), authenticated, registered and got the delivery; so did every socket of Task 21's acceptance runs.
 
 ## `trouter.connected`: the endpoint
@@ -356,12 +339,10 @@ v1/presence/getpresence/`, a read the web client sends as a `POST`.
   for another; `calendarData.isOutOfOffice`; `capabilities`, empty; `availability`; `activity`; `lastActiveTime`; and
   `source` when asked with it), `etagMatch`, `etag` and the item's `status`, `20000`. Every lab account was
   `Offline`/`Offline` then (nothing sets their presence yet), `lastActiveTime` `0001-01-01T00:00:00Z`.
-- **The browser fence** lets it through whoever it names: UPS is no contacting service
-  ([fence-targets.md](fence-targets.md#the-presence-read)). Until 2026-10-23 it passed only in that shape, without
-  `x-ms-endpoint-id`, and only when every MRI was a lab account.
-- **The native client** sends it as `PresenceRead`, a plain request through `Transport::send` (logged `allowed`), by
+- **Capture scope:** the early experiments restricted requests to lab MRIs. Current reads use the typed UPS entry with no participant-policy classifier ([chat-service.md](chat-service.md#the-presence-read)).
+- **The native client** sends it as `PresenceRead`, a typed `PostRead` through the protocol transport (debug wire logged), by
   MRI alone (`[{"mri": …}]`, never `source`), with the captured header values and its own non-CAE presence token,
-  which UPS took (`teams-headless a presence`, 2026-10-23: two reads, `Offline` for b and c;
+  which UPS took (the retired native probe, 2026-10-23: two reads, `Offline` for b and c;
   [auth.md](auth.md#open-questions) question 4). The engine polls it every minute for the people the views asked
   about, a colleague outside the lab included (`teams-core` `presence.rs`): at most 20 watched, the one asked about longest ago dropped (and told
   unknown), at most 8 named per read (the most any of the web client's captured reads named; more watched are read 8
@@ -416,8 +397,7 @@ The native client (`teams-core` `presence/subscription.rs`, `teams_proto::Presen
   (a connect's, a reconnect's with its new `surl`, the hourly renewal's), every 55 minutes, and once someone no longer
   watched has stayed subscribed for 6 minutes (left out rather than named in a removal: it sends no removal); anyone
   newly watched is added at once. One subscription at a time, at least 10 s apart; one that failed is tried again
-  after a minute (or its `Retry-After`). It goes as the presence read does: a plain request logged `allowed` in the
-  lab, the sealed `PostRead` entry `presence_subscription` through the personal fence, with the presence read's header
+  after a minute (or its `Retry-After`). It uses the typed `PostRead` entry `presence_subscription`, with the presence read's header
   values only (no `x-ms-endpoint-id`, caller, session ids or cookie: whether UPS takes it without `x-ms-endpoint-id`
   is for a lab live run to show).
 - A delivery at the endpoint's `unifiedPresenceService` path becomes `PushEvent::Presence`, never answered; the engine
@@ -432,16 +412,14 @@ The native client (`teams-core` `presence/subscription.rs`, `teams_proto::Presen
 
 What makes a lab account show online to another, and what a manual status sends, measured under the user's
 exception of 2026-10-21 to the fence of the time (a lab account could set its own availability, in its captured
-shapes, availability values only, every id it names the account itself or its own registered endpoint). Under the lab
-rule presence reaches nobody, and all of it passes. The scenarios are
+shapes, availability values only, every id it named the account itself or its own registered endpoint). Those were
+capture-era restrictions. The retained experiment scenarios are
 `crates/proto-lab/src/scenario/own_presence.rs` (`own-presence-activity`, `-endpoint`, `-both`, `-manual-held`,
-`-manual`): only a's browser runs, as in `ab-trouter` ([above](#what-the-fence-lets-out)), and opens the a–b chat
-(the probe force-denied first, as `ab-chat`). b's view is b's native client reading a's presence, `teams-headless b
-presence` (the read of [Others' presence](#others-presence), under b's own fence), about every
-16 s, from before a's browser starts until minutes after it closed (`scripts/own-presence-run.sh`, under the live
-lock). Each run holds back on purpose, with a labelled forced deny, what it goes without: `-activity` the endpoint
-`PUT`, `-endpoint` every `user.activity` (`ForcedFrameDeny`), `-manual-held` the manual status; the runs below used
-the fence of the time instead ([The browser fence's mapping](#the-browser-fences-mapping)).
+`-manual`): only a's browser runs, as in `ab-trouter` ([above](#capture-setup)), and opens the a–b chat
+(the historical capture used a held probe first). b's view came from a retired native presence probe ([Others' presence](#others-presence)) about every 16 s, from before a's browser starts until minutes after it closed (the retired presence sampling script, under the live
+lock). Each experiment holds back the component it measures without: `-activity` the endpoint
+`PUT`, `-endpoint` every `user.activity` (a selective frame hold), `-manual-held` the manual status; the runs below used
+the fence of the time instead ([Capture holds for availability](#capture-holds-for-availability)).
 
 ### What the web client sends
 
@@ -516,23 +494,18 @@ So:
 
 - **The writes**: `teams_proto::SetEndpointAvailability` (the endpoint `PUT`, `Available`/`Available` only: the
   captured `Busy`/`InACall` is a call's) and `ForceAvailability` (`set` of `Busy`, `DoNotDisturb`, `Away` or
-  `Available`; `reset` with no body), sealed `Mutating` writes in the captured shapes ([endpoints.md](endpoints.md)).
-  Their target is `WriteKind::OwnAvailability` on `Scope::Account` (the account's MRI): `Fence::check` permits it
-  without a member read (it reaches nobody). The endpoint each names (the body's `id`, and `x-ms-endpoint-id` on both) is a
+  `Available`; `reset` with no body), typed writes in the captured shapes ([endpoints.md](endpoints.md)).
+  The endpoint each names (the body's `id`, and `x-ms-endpoint-id` on both) is a
   `RegisteredEndpoint`, which only `teams_proto::register` gives, once a registration of this run that the account's
   native HTTP transport sent was answered with a success (a sealed `EndpointRegistrar`: no fake transport outside
-  `test-support`), recorded for the transport's fence's own account, and no write of another account's availability
-  can name it: the push channel hands it on (`PushEvent::Registered`) and the engine keeps it while the channel
+  `test-support`), recorded for the registering account: the push channel hands it on (`PushEvent::Registered`) and the engine keeps it while the channel
   runs; once the channel stopped, an availability still waiting out a `Retry-After` is dropped and no other is sent.
   They go out as transient writes of the outbox (`EngineRequests::own_availability`), under the presence token and
   the presence read's header values, without the web client's caller, session ids or cookies, which UPS took. No `user.activity` (above: not needed to show online).
-- **Live** (`scripts/own-availability-native-run.sh busy 120 240 360 12
-  ~/.local/share/teams-lab/runs/own-availability-native-2.txt`, 2026-10-23 07:26–07:35 UTC, under the live lock, from
-  a normal lab build; a's `teams-headless a availability --manual busy --manual-after 120 --reset-after 240
-  --hold 360`, b's `teams-headless b presence` about every 16 s). The first attempt (run 1, 07:15) sent nothing: the
+- **Live** (the retired availability sampling script, 2026-10-23 07:26–07:35 UTC, under the live lock, from
+  a normal retired lab build; a's availability probe and b's presence sampler at roughly 16 s intervals). The first attempt (run 1, 07:15) sent nothing: the
   fence permitted each of its three steps, but the outbox's transport hadn't been given UPS's base, so the transport
-  refused them before sending (`no presence base`); b read `Offline` throughout. Fixed in `teams-core`'s `lab.rs`
-  (the writes' transport gets the base too), then run 2:
+  refused them before sending (`no presence base`); b read `Offline` throughout. Fixed then by giving the writes' transport the same UPS base, then run 2:
 
   | after the `PUT` | a sent (each answered with a success) | b read a as |
   |---|---|---|
@@ -578,20 +551,13 @@ captured requests are used; settled with Codex (2026-10-23, `discussions/task-20
 - **A failed report** is shown in the account menu and never sent again on its own (the transient kind's own rules
   are the only retries); a failed `PUT` doesn't bring the refresh forward. A manual status or reset that failed is
   shown as not set (what the account shows isn't known: a failed reset may leave it in its manual status), and the
-  user choosing it again in the menu sends it again, a new write of the user's through the engine's fenced path. A
-  fence denial stops the reports for the run.
+  user choosing it again in the menu sends it again, a new write through the engine/outbox. A definitive admission refusal stops reporting for that run.
 
-### The browser fence's mapping
+### Capture holds for availability
 
-Under the lab rule there is none: UPS is no contacting service, so the endpoint `PUT`, the manual status and
-everything else on UPS pass, logged `allowed`. The runs above used the fence of the time, which let these requests
-out only in their captured shapes, behind a classifier of the run's (`Classifier::with_own_availability`: both
-requests, `own-presence-manual`; `Classifier::with_own_endpoint_put`: the endpoint `PUT` alone, `-endpoint`, `-both`,
-`-manual-held`), every other run denying them. That mapping (`availability.rs`, since removed, designed with Codex on
-2026-10-23) took exactly the shapes above, every pinned header required and the callers pinned, a reset only with its
-body positively absent in Chrome's event, and only on an endpoint this browser's fence had let the account register in
-that run (a messaging-stack registration whose verdict was `Allow`); anything else ("Be right back", "Appear offline",
-a duration, a status note, a work location, out-of-office, the presence subscriptions) stayed denied.
+The `own-presence-*` experiments use selective holds to compare the endpoint PUT, manual availability and
+`user.activity`. Historical capture tables above retain their observed statuses and restrictions. Current native
+availability writes use the typed outbox path; no browser mapping or member policy runs on UPS.
 
 ## Reconnect parameters and backoff (from the bundle)
 
@@ -641,7 +607,7 @@ Runs 1–4 were made by an earlier agent on this task before it was cut off; the
 didn't exit 0: each failed on a step of the web client's UI (a's compose box under load, the reaction control) or on
 an arming timeout, never on an unexpected deny after run 5. Run 13, after the reaction step moved to the hover bar's
 like, was the first to exit 0. The three breached runs count as breaches (the CLAUDE.md
-rule: a resume sent, or a target not held, is a breach); the later clean runs are reported next to them, not in their
+rule of that capture period: a resume sent, or a target not held, was a breach); the later clean runs are reported next to them, not in their
 place.
 
 ## Open
@@ -652,8 +618,7 @@ place.
   nothing.
 - What the service does when a token expires on an open socket.
 - The v3 registrar (`registrarUrl`) the service hands over; the web client doesn't use it.
-- Accepted delivery answers might reduce the reconnect replay; not tested under the current policy (every answer is
-  denied). Revisit only if the replay measurably impairs the native client.
+- Whether answering ordinary messaging deliveries would reduce reconnect replay remains unmeasured. The native messaging socket deliberately sends no delivery response; calling replies are typed and connection-bound.
 - Whether a long-lived native session without `user.activity` is treated differently (the sockets that never sent
   one here lived seconds to minutes).
 - ~~What makes an account show online ([presence](#useractivity-and-presence)).~~ **Answered (live, M2 Task 18,

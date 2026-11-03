@@ -28,7 +28,7 @@
 //! - **A failed report** is never sent again on its own: a manual status (or reset) that failed waits for the user to
 //!   choose it again, which sends it again as a new choice ([`Reporting::NotSet`] meanwhile: what the account shows
 //!   is not known), and a failed `PUT` doesn't bring the refresh forward (the refresh is a schedule, not a retry). A
-//!   fence denial stops every report for the run. A report the engine had no endpoint for (its push channel stopped
+//!   refusal before sending stops every report for the run. A report the engine had no endpoint for (its push channel stopped
 //!   for good) ends the reports until a registration, and the choice it carried, if it still stands, goes out with it.
 
 use std::time::{Duration, Instant};
@@ -65,7 +65,7 @@ pub enum Reporting {
     NotSet(Choice),
     /// Idle: nothing is reported, and the endpoint lapses on its own.
     Inactive,
-    /// The fence denied a report: nothing more is reported in this run.
+    /// A report was refused before sending: nothing more is reported in this run.
     Halted,
     /// The app is quitting, or the engine stopped: nothing more is reported.
     Quit,
@@ -199,7 +199,7 @@ impl OwnPresencePolicy {
     }
 
     /// How a report went (the engine's reply, or its later [`Event::Transient`](crate::Event::Transient)). Nothing is
-    /// ever sent again for it: a fence denial ends the reports for the run, a stopped engine ends them too, and a report
+    /// ever sent again for it: a refusal before sending ends the reports for the run, a stopped engine ends them too, and a report
     /// the engine had no endpoint for (its push channel stopped for good) ends them until a registration, the manual
     /// status it carried kept for that one if it is still the choice. A manual status (or reset) of the choice that
     /// failed otherwise makes it [`Reporting::NotSet`] until the user chooses again; one that went through clears that.

@@ -20,8 +20,8 @@
 //! - **A failed report is shown** ([`OwnPresence::failure`], in the account menu) and never sent again on its own: the
 //!   engine's transient rules are the only retries (one more attempt after a 401, one short `Retry-After` wait), and a
 //!   later [`FeedEvent::OwnReport`] tells how a waiting one went. A manual status (or reset) that failed is shown as not
-//!   set ([`Reporting::NotSet`]) and goes out again only when the user chooses it again in the account menu. A fence
-//!   denial stops the reports for the run.
+//!   set ([`Reporting::NotSet`]) and goes out again only when the user chooses it again in the account menu. A
+//!   refusal before sending stops the reports for the run.
 //!
 //! Traced as `own-presence` `sent`, `failed` or `denied`, with the report's kind (`available`, `busy`,
 //! `do-not-disturb`, `away`, `manual-available`, `reset`).
@@ -154,7 +154,7 @@ impl OwnPresence {
     }
 
     /// The user chose `choice` in the account menu: sent as the policy says, the choice already made sent again only
-    /// when its report failed (the user chose it again: a new write of the user's, through the engine's fenced path).
+    /// when its report failed (the user chose it again: a new write of the user's, through the engine's outbox).
     /// The menu keeps it in the settings too; that change, if any, finds the policy already holding it.
     pub fn choose(&mut self, choice: Choice, cx: &mut Context<Self>) {
         let now = cx.background_executor().now();
@@ -269,7 +269,7 @@ impl OwnPresence {
             Ok(TransientSent::Sent) => ("sent", None),
             // it goes out from the engine's tick; its outcome comes as `FeedEvent::OwnReport`
             Ok(TransientSent::Waiting { .. }) | Err(EngineError::NoEndpoint | EngineError::Stopped) => return,
-            Ok(TransientSent::Denied { reason }) => ("denied", Some(format!("the fence denied it: {reason}"))),
+            Ok(TransientSent::Denied { reason }) => ("denied", Some(format!("refused before sending: {reason}"))),
             Ok(TransientSent::Dropped { reason }) => ("failed", Some(reason.clone())),
             Err(error) => ("failed", Some(error.to_string())),
         };

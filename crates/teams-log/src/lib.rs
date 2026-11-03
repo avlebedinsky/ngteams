@@ -1,8 +1,8 @@
 //! `teams-log`: the app's diagnostic log (M2 Task 24a, `docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
 //!
 //! One logger of our own on the `log` facade (no `tracing` subscriber), installed once by the app ([`install`])
-//! before its engine starts: a file under the account's data dir (the lab's
-//! `<data_dir>/logs/<alias>/teams-app.log`), private and rotated by size, written from a thread of its own ([`file`]).
+//! before its engine starts: `<data_dir>/logs/teams-app.log` (the retained file name), private and rotated by size,
+//! written from a thread of its own ([`file`]).
 //!
 //! - **Only our crates**: a record reaches the file only when its target is one of our crates' (`teams_…`, [`ours`]);
 //!   a third-party crate's `log` line, and the UI kit's `tracing` events (which `tracing` forwards to `log` when no
@@ -10,14 +10,14 @@
 //!   crate's `trace!` (tungstenite's frames, the authentication's token with them) exists in the binary.
 //! - **Levels** ([`Level`]): `info` by default, the settings file's `log_level`, changed live ([`apply_setting`]),
 //!   [`ENV`] (`TEAMS_APP_LOG`) overriding it; `trace` is taken as `debug`. At `info` the log carries no payload: no
-//!   body, query, header value, message text or display name; at `debug` our transport and socket add every request
-//!   and answer in full and every Trouter frame both ways, as typed records ([`wire`]).
+//!   body, query, header value, message text or display name; at `debug` our transport and auth clients add every
+//!   request and answer in full, and the socket adds every Trouter frame both ways, as typed records ([`wire`]).
 //! - **Redaction is the logger's** ([`redact`]): the records' formatting redacts credentials by name, and every line,
-//!   any record's, passes a last pattern pass, so no call site can let a token through. A panic is written the same
-//!   way ([`install`]'s hook): redacted, with its location, its thread and a backtrace, flushed before the previous
-//!   hook runs.
-//! - **"Copy diagnostics"** ([`diagnostics`]): the version, the level, the log's last lines and the account's recent
-//!   `fence.log` lines, said plainly to be unsafe to paste when a `debug` line is among them.
+//!   any record's, passes a last pattern pass. Auth exchanges also mask their known credential values. A panic is
+//!   written the same way ([`install`]'s hook): redacted, with its location, thread and a backtrace, flushed before
+//!   the previous hook runs.
+//! - **"Copy diagnostics"** ([`diagnostics`]): the version, the level and the log's last lines, said plainly to be
+//!   unsafe to paste when a `debug` line is among them.
 
 pub mod diagnostics;
 pub mod file;

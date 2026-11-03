@@ -435,19 +435,28 @@ retain diagnostics. Actual tenant/keyring/browser sessions and a normal lab buil
   `teams-headless` commands)
 - Modify: `.claude/skills/task-dispatch/SKILL.md` (no fence breach), module docs that described the fence
 
-- [ ] `docs/lab-rules.md`: who lab accounts may reach (unchanged), and the agent's check before each live run. The
+- [x] `docs/lab-rules.md`: who lab accounts may reach (unchanged), and the agent's check before each live run. The
       agent lists the chats, calls and people the run reaches, and runs it only if all are lab accounts, the echo
       service or the user's own account.
-- [ ] `CLAUDE.md`:
+- [x] `CLAUDE.md`:
       - hard rules: drop the browser-fence arming, `fence.log` and forced-deny items;
       - agents build `ngteams` only through `run-lab.sh` and drive it freely with lab accounts in the sandbox; they
         run the user's own account only read-only;
       - design invariants: drop the permit, sealing and arming items; keep the outbox, transport, delivery-response,
         views-through-`Core`, `RichText`, libwebrtc and WPE sign-in items;
       - conventions: drop the contacting-row and forced-deny items.
-- [ ] README (layout, the lab section with `lab.toml`'s shape and the `ngteams-lab` paths), the personal-build doc
+- [x] README (layout, the lab section with `lab.toml`'s shape and the `ngteams-lab` paths), the personal-build doc
       and the CI doc match the code
-- [ ] `cargo test -p fixture-guard` passes
+- [x] `cargo test -p fixture-guard` passes
+
+Validation: fixture guard passed 17 tests after the docs changes; the existing UI compose and own-presence
+targets passed 67 tests for corrected diagnostic labels. Formatting, lint-report, diff whitespace, all 14
+coverage-source reviews and 399 local Markdown file/anchor checks passed. Endpoint method/path cells are
+unchanged across all 270 inventory table rows. The old fence-targets path is a short historical redirect to
+chat-service.md, preserving archived links without current policy instructions. Only source comments, two
+test names and three diagnostic labels changed outside documentation; request/state behavior is unchanged.
+Full workspace runtime and coverage validation remain Task 12. The user-owned planning-rules file and all
+other plan files were left untouched.
 
 ### Task 12: Verify acceptance criteria
 - [ ] `cargo tree -p ngteams` has no `teams-fence` or `proto-lab`; `rg -i 'fence|lab\.toml' crates/ngteams` finds

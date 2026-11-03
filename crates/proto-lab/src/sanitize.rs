@@ -896,7 +896,7 @@ fn is_body_key(key: &str) -> bool {
 }
 
 /// Whether the string under `key` is binary content: a CDP frame's `payloadData` with opcode 2, the data of a frame
-/// the recorder marked `"kind": "binary"` (a fence verdict on a binary WebSocket frame), or any `bytes`.
+/// a legacy recorder marked `"kind": "binary"`, or any `bytes`.
 fn is_binary(map: &Map<String, Value>, key: &str) -> bool {
     match key {
         "payloadData" => map.get("opcode").and_then(Value::as_u64) == Some(2),

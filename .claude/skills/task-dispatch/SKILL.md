@@ -259,8 +259,9 @@ pass covers it.
    the crates it touched, such as clippy, `scripts/lint-report.sh` and the tests its changes can affect
    (`fixture-guard` when it touched `docs/` or a `tests/fixtures/`). Rerun only what failed after a fix. A test that
    fails is run again alone: one that then passes is a load flake (README, "Known flakes under load"); one that
-   fails or passes by turns alone is a real flake, fixed when its cause is found and otherwise reported. A fence
-   breach is never a flake. Commit fixes as they go, conventional messages, no AI attribution.
+   fails or passes by turns alone is a real flake, fixed when its cause is found and otherwise reported. A run
+   reaching someone outside the allowed lab set is never a flake. Commit fixes as they go, conventional messages,
+   no AI attribution.
 3. Land the fixes with `land.sh`, as a task does. A rebase conflict with a task that landed meanwhile is resolved by
    the pass. A pass that found nothing to fix has nothing to land.
 4. The report: the range, what was reviewed and checked and what was left out, what each round fixed, every test

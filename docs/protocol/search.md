@@ -4,11 +4,10 @@ What Teams' title-bar search asks of the service, as the lab's `search` scenario
 (`proto-lab run search`: account a focuses the box, types, enters the query, opens each results tab and a message
 found; `PROTO_LAB_SEARCH_QUERY` picks the query). All of it goes to Substrate's search on `substrate.office.com`, with
 the account's token for `https://outlook.office.com/search` (its `aud` an application id, [auth.md](auth.md)). Every
-request here is a read: it reaches nobody, whoever its answer lists, so the lab rule lets it through
-(`teams_fence::contacting` carves the search paths out of Substrate's, [fence-targets.md](fence-targets.md)).
+request here is a search read, independent of any participant-policy classification.
 
 The native client's side is `teams_proto::SubstrateSearch` (the two requests, built whole), sent only by
-`HttpTransport::search` (logged `allowed`, sent in the personal build's read-only mode too, since it writes nothing),
+`HttpTransport::search` (debug wire logged, available in read-only mode too, since it writes nothing),
 read by `teams_core::service_search` and shown by `teams_ui::global_search`.
 
 ## The box's two modes

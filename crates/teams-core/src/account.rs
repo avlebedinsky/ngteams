@@ -148,8 +148,8 @@ pub struct AccountEngine<S> {
     pub session: Arc<Session<S>>,
 }
 
-/// Builds `account`'s engine as the module docs say, over `fence`, with the member read `membership` makes, and starts
-/// it ([`engine::start`]: refused while another engine runs on the account).
+/// Builds `account`'s engine as the module docs say, with the app's shared call floor, and starts it
+/// ([`engine::start`]: refused while another engine runs on the account).
 ///
 /// A read-only account ([`Account::read_only`]) gets transports that send reads only
 /// (`teams_proto::HttpTransport::read_only`: every write refused below the views and logged as `refused_read_only`),

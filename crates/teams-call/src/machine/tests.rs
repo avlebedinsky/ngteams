@@ -332,7 +332,7 @@ fn call_leg() -> String {
 }
 
 #[test]
-fn an_acceptance_the_fence_bound_nothing_of_ends_the_call_with_a_cancel() {
+fn an_acceptance_the_tracker_bound_nothing_of_ends_the_call_with_a_cancel() {
     let now = Instant::now();
     let (mut calls, call) = ringing_call(now);
     let path = acceptance_path(&calls);
@@ -1774,7 +1774,7 @@ fn negotiation() -> Value {
 }
 
 #[test]
-fn a_renegotiation_and_its_answer_get_their_receipts_and_a_delivery_the_fence_bound_nothing_of_none() {
+fn a_renegotiation_and_its_answer_get_their_receipts_and_a_delivery_the_tracker_bound_nothing_of_none() {
     let now = Instant::now();
     let (mut calls, call) = connected_call(now);
     // the far end's renegotiation: its receipt at once, beside its telling
@@ -1790,7 +1790,7 @@ fn a_renegotiation_and_its_answer_get_their_receipts_and_a_delivery_the_fence_bo
     let answer = media_answer("v=1\r\n");
     calls.on_delivery(&delivery(&answer_at, &answer), Observed::Renegotiation, now);
     assert_eq!(receipts(&effects(&mut calls)).len(), 1);
-    // a delivery the fence bound nothing of gets none
+    // a delivery the tracker bound nothing of gets none
     calls.on_delivery(&delivery(&at, &negotiation()), Observed::Nothing, now);
     assert!(receipts(&effects(&mut calls)).is_empty());
 }
@@ -1834,7 +1834,7 @@ fn a_renegotiation_delivered_is_told_and_answered_only_by_the_account() {
         "answered once"
     );
 
-    // one the fence bound nothing of (no link its answer may go to) fails the call
+    // one the tracker bound nothing of (no link its answer may go to) fails the call
     calls.on_delivery(&delivery(&at, &negotiation()), Observed::Nothing, now);
     let failed = effects(&mut calls);
     assert_eq!(names(&failed), ["leave"]);
@@ -2187,7 +2187,7 @@ fn a_retarget_acknowledged_moves_the_call_s_own_links_to_the_new_call() {
         "links": {"callLeg": retargeted_link(""), "mediaRenegotiation": retargeted_link("/renegotiate")},
     });
     let before = own_links(&calls);
-    // one the fence didn't read moves nothing
+    // one the tracker didn't read moves nothing
     calls.on_delivery(&delivery(&acknowledged, &retarget), Observed::Nothing, now);
     assert_eq!(own_links(&calls), before);
     // nor does a plain acknowledgement, naming no call leg

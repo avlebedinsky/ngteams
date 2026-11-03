@@ -12,8 +12,7 @@
 //!   form's Scheduler reads the attendees' busy times and the suggested times ([`MeetingAvailability`]): two reads sent as a
 //!   `PUT`, which reach nobody.
 //! - **Writes** ([`EventWrite`]): an event created, changed, cancelled or deleted, each a sealed `teams-proto` write
-//!   through the outbox's calendar kind ([`Outbox::try_calendar`]): every attempt under a fresh `Fence::check` with its
-//!   `fence.log` line, no row, nothing sent again by a later run; one more attempt only after a 401 or a short
+//!   through the outbox's calendar kind ([`Outbox::try_calendar`]): no row, nothing sent again by a later run; one more attempt only after a 401 or a short
 //!   throttle ([`CallRetries`]), never after an unknown outcome (an invitation sent twice is worse than a failed save).
 //!   A write that wasn't answered with a 2xx is [`EngineError::EventNotSaved`], saying why. A channel's meeting is
 //!   created and cancelled on its team's group calendar ([`EventWrite::CreateInChannel`],

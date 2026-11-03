@@ -38,7 +38,7 @@
 //!   later a `leave`.
 //! - **Joined**: a running group call an invitation named ([`Calls::joinable`]: forgotten once its conversation's end
 //!   is delivered or a join to it fails), its conversation joined with the account's offer; then as placed.
-//! - **Invited**: an invitation the fence offered (`Observed::Offered`) gets its receipt and the `attach` at once,
+//! - **Invited**: an invitation the tracker offered (`Observed::Offered`) gets its receipt and the `attach` at once,
 //!   with no action of the account's; once the `attach` is answered it rings here (`progress`,
 //!   [`CallEvent::Incoming`]). Nothing answers it but [`Calls::answer`] (endpoint state, then, once that was taken,
 //!   `accept`) and nothing declines it but [`Calls::decline`], or [`Calls::hang_up`] while it is being answered and
@@ -74,8 +74,8 @@
 //! - **Not sent**: the account's own participant properties (its AI voice consent), which the web client posts once it
 //!   answered: nothing of the call waits for them.
 //!
-//! The fence's call registry stays the authority on what may be sent: this crate keeps only what it needs to build
-//! the next request.
+//! The tracker keeps callback links, offer filtering and call lifetimes; the core's shared floor admits one call or
+//! ring across accounts. The signaling machine builds and sequences the next typed request.
 
 mod agent;
 mod build;

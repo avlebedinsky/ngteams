@@ -17,8 +17,7 @@
 //!   `mentionType` `everyone` (`mention-everyone.json`, captured in `abc-everyone` on 2026-10-29);
 //! - an image is refused: sending one is an attachment (M1 Task 20 decides), not a message's text.
 //!
-//! Every mentioned MRI is a participant of the message ([`MessageText::participants`]), so the fence judges them
-//! together with the chat's members, exactly as `docs/protocol/fence-targets.md` maps a message: a quote adds nobody
+//! Every mentioned MRI is exposed by [`MessageText::participants`]; a quote adds nobody
 //! (the quoted message is the chat's own), nor does a mention of everyone in a group chat, named by the chat's id
 //! ([`MessageText::everyone`]: it reaches the chat's members, and a write sends it only to that chat).
 

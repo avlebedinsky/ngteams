@@ -9,9 +9,9 @@ key names with their JSON types, never a value, and kept nothing. The native cli
 ## Graph is our own reach, not the web client's
 
 The web client never asks Graph for a person. It names people through the middle tier's profile lookups
-(`beta/users/fetchShortProfile` and `beta/users/fetch`, reads sent as `POST`, [fence-targets.md](fence-targets.md#reads-by-post))
+(`beta/users/fetchShortProfile` and `beta/users/fetch`, reads sent as `POST`, [chat-service.md](chat-service.md#reads-by-post))
 and draws their pictures from the middle tier's `profilepicturev2`, authenticated by a cookie it first gets from
-`beta/users/<oid>/cookiev2` (a `POST` the browser fence denies). The only Graph request in the lab's captures is the
+`beta/users/<oid>/cookiev2` (its answer was not captured in those early runs). The only Graph request in the lab's captures is the
 tenant's domain list (`v1.0/domains`, [endpoints.md](endpoints.md#microsoft-365-around-teams)).
 
 So no capture shows the reads below. They are reads (`GET`, no body) of our own choosing, and the probe's answers are
@@ -117,9 +117,8 @@ reach, and a file the account can't read says so in its card and offers the brow
 ## Where a name comes from
 
 `teams-core`'s engine (`profiles.rs`) asks, first that answers: Graph's name; the middle tier's profile lookup
-(`users/fetchShortProfile`, a `PostRead` sent only with the fence's permit: in a lab build every MRI a lab account,
-so someone outside the lab is never looked up by `POST`); the name the person's newest stored message carried
-(`imdisplayname`); a lab account's name as `lab.toml` has it (its UPN's local part). The picture is Graph's alone.
+(`users/fetchShortProfile`, a typed `PostRead`); the name the person's newest stored message carried
+(`imdisplayname`); a name supplied by the account startup, when available. The picture is Graph's alone.
 What a read found is kept in the store and read again after a day; a read that failed on the way (the network, a 5xx,
 a refused or throttled token) keeps the last one and is tried again after five minutes; one person is looked up once
 at a time. The bytes of a picture reach a view only from the engine.

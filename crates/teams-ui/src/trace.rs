@@ -26,7 +26,7 @@ const MAX_ID: usize = 512;
 /// outbox row's id (an `i64`).
 const MAX_DIGITS: usize = 20;
 
-/// What follows `19:<thread>@` in a conversation id (`docs/protocol/fence-targets.md`, "Ids"): a 1:1 chat, a group or
+/// What follows `19:<thread>@` in a conversation id (`docs/protocol/chat-service.md`, "Ids"): a 1:1 chat, a group or
 /// meeting chat, a team's channel.
 const THREAD_DOMAINS: [&str; 4] = ["unq.gbl.spaces", "thread.v2", "thread.tacv2", "thread.skype"];
 
@@ -37,7 +37,7 @@ const CHANNEL_DOMAINS: [&str; 2] = ["thread.tacv2", "thread.skype"];
 const OWN_STREAMS: [&str; 4] = ["notes", "notifications", "mentions", "calllogs"];
 
 /// A service id the trace may hold (see the module docs), in one of the shapes the captures showed
-/// (`docs/protocol/fence-targets.md`, "Ids"), at most 512 bytes:
+/// (`docs/protocol/chat-service.md`, "Ids"), at most 512 bytes:
 ///
 /// - a number of 1 to 20 digits: a message's, a `clientmessageid`, an outbox row's;
 /// - a conversation: `19:<thread>@<domain>`, the thread letters, digits, `_` and `-`, the domain one of

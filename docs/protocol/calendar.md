@@ -83,7 +83,7 @@ of that day (method, path, query, header names, body keys and value forms, statu
 runs captured a's Teams meeting with b made from the scheduling form, and what the form sends around it; the change
 and the cancellation the scenario goes on to make (from the meeting's chat, "Details") weren't reached in the runs of
 that day (the web client stopped answering on a loaded machine), so their shapes below are the bundle's. The lab's calendar
-app is Outlook's, embedded (its writes go to Outlook's own service, which the lab fence doesn't let through); the
+app is Outlook's, embedded (its writes go to Outlook's own service and were held in those captures); the
 scheduling form the web client opens on its new-meeting deep link (`/l/meeting/new?subject&attendees&startTime&endTime`)
 and on a meeting's chat ("Details") is Teams' own, and writes through the middle tier. The native client writes as
 that form does.
@@ -110,11 +110,10 @@ operation, `x-ms-client-type: cdlworker`, `x-ms-migration: True`, `x-client-ui-l
 the form opens on a Teams meeting. It answered `201` with `{"value": {"expiryTime", "groupContext": {"threadId":
 "19:meeting_…@thread.v2"}, "etag", "meetingUrl", "links": {"join", "update", "shortJoinUrl"}, "views": {"html": <the
 invitation's join block as a data URL>}, "onlineMeetingConfLink", "onlineMeetingConferenceId", …}}`. It reaches nobody
-(no attendee is named; a body naming a chat, `threadId`, stays unreadable).
+(no attendee is named).
 
 On closing, the form deleted the online meeting it had made, even the one its saved event had just taken: `PUT
-beta/me/calendarEvents/schedulingService/delete` with `{"links": {"update": <its update link>}}`. The fence can't tie
-it to the meeting's attendees, so it stays denied; the native client never sends it.
+beta/me/calendarEvents/schedulingService/delete` with `{"links": {"update": <its update link>}}`. That delete is not implemented by the native client.
 
 ### Creating
 
@@ -155,7 +154,7 @@ webinar's; none was captured, and the native client sends none.
 ### A series
 
 Written from the bundle (its scheduling form, its recurrence model and the other callers that build an event), and
-checked live on 2026-10-31 by the native client (`teams-headless a series`: an appointment series of lab account a's
+checked live on 2026-10-31 by the native client (a retired native series probe: an appointment series of lab account a's
 own, weekly, three weeks): the creation in the form below was answered with a 2xx and the master (`eventType`
 `RecurringMaster`); the calendar view then gave its four occurrences (`Occurrence`, each with `seriesMasterId`); the
 master read whole gave the recurrence back by names (`{"patternType": "Weekly", "weekly": {"daysOfTheWeek":
@@ -186,8 +185,7 @@ start's day and never ends.
 The calendar view gives a series as its occurrences (`eventType` `Occurrence`, or `Exception` for one changed on its
 own), each naming its series by `seriesMasterId`. A change, a cancellation or a delete of the occurrence's own id acts
 on that occurrence; of the master's id, on the whole series (the master read whole first, `GET
-v2.0/me/calendars/events/<master id>`, which carries the recurrence). The fence judges each by the event the path
-names, as any change.
+v2.0/me/calendars/events/<master id>`, which carries the recurrence). The update addresses the event or series master named by its path.
 
 ### The Scheduler
 
@@ -207,26 +205,18 @@ length in minutes.
   "Busy"|"Tentative"|…, "startTime", "endTime", "details": {"subject"?, "location"?, "isPrivate"?}}]}]`, one entry
   per person asked about; the details (and the time zone) only for the account's own calendar.
 
-### What the fence makes of them
+### Write path and lab reach
 
-Each write is a `WriteKind::Meeting` (`crates/teams-fence/src/contacting/calendar.rs`), judged by whom it reaches,
-each attendee by its address (`Mri::mail`, matched against `lab.toml`'s UPNs):
-
-- a creation is on `Scope::New`, adding the organizer and every invitee the body names; one that names a team's or a
-  chat's members (`inviteAllMembers`, `parentConversationId`, `originalGroupChatThreadId`, `broadcastSettings`,
-  `conflictingMeetings`) or picks people in its meeting options is unreadable, and so is an attendee with no address
-  but the organizer's own entry. An appointment inviting nobody reaches nobody and is permitted.
-- a change, a cancellation and a delete are on `Scope::Event` of the event the path names; the fence reads that event
-  fresh (`GET v2.0/me/calendars/events/<id>`, with the page's or the native client's own middle-tier token,
-  `MiddleTierCredential`) and judges its organizer and attendees, with any attendee a change adds. A change whose body
-  names another event is unreadable.
-- the online meeting's creation (without a chat) and the free/busy reads reach nobody and pass, logged.
+Calendar changes use the typed event requests and the outbox; there is no membership classifier or permit. Updates
+retain the event identity and preserve fields the form did not edit. For a lab run, the agent includes the organizer,
+all attendees and any team/channel invitees in its reach check before acting. Free/busy and online-meeting setup use
+their typed protocol requests with the service's own credential.
 
 ### What the native client does
 
 - **New, Edit, Cancel meeting, Delete** (`crates/teams-ui/src/event_form.rs`, the calendar's card): each a sealed
   write (`teams-proto` `CreateEvent`, `UpdateEvent`, `CancelEvent`, `DeleteEvent`) through the outbox's calendar kind
-  (`Outbox::try_calendar`): one attempt under a fresh `Fence::check`, one more only after a 401 or a short throttle,
+  (`Outbox::try_calendar`): one attempt, with another only after a 401 or a short throttle,
   never after an unknown outcome. A Teams meeting's creation first makes its online meeting (`CreateOnlineMeeting`, a
   plain request) and carries it. The engine fills in the organizer (the account's MRI, its profile's address, its
   name) and the time zone (`TimeZoneSettings`, from `TZ` or `/etc/localtime`), each kept once read (one that didn't

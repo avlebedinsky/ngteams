@@ -10,16 +10,15 @@
 //!   ([`CallMedia`]: the relay's credentials read, an allocation on the relay, the session started without its devices,
 //!   our offer or our answer in Teams' dialect); a setup that fails refuses the action and sends nothing (an invitation
 //!   keeps ringing, still answerable or declinable). The microphone and the speaker open only once the start, the join
-//!   or the answer passed the fence and was taken: when the machine tells the call ringing at its callees, joining, or
+//!   or the answer was admitted and taken: when the machine tells the call ringing at its callees, joining, or
 //!   connected. Devices that can't be opened then fail the call (`End::Failed("media")`).
 //! - **The writes** go out through the outbox's call kind (`Outbox::try_call`), one in flight at a time: beside it the
 //!   machine's events and delivery responses go at once, its next writes wait in its own queue (so a call that ends
 //!   drops them); a write refused without being acted on goes again only within `CallRetries`' allowance and only if
 //!   the machine still wants it once its wait is over (`Calls::may_send_again`, asked again then: a hang-up during the
-//!   wait fails it unsent); its answer (any status, with its body) goes back to the machine. Each attempt is a fresh
-//!   `Fence::check` with its `fence.log` line; the transport and the calling socket feed the fence's call registry (a
-//!   start's answer registers its call, one that isn't a success ends it unregistered, an acceptance binds its links),
-//!   so a follow-up on a call the fence didn't register is refused before it is sent.
+//!   wait fails it unsent); its answer (any status, with its body) goes back to the machine. The outbox and calling
+//!   socket feed the call tracker: a start's answer records its call, a definite failure retires its pending attempt,
+//!   and an acceptance binds its links. The core's shared floor admits one call or ring across the app's accounts.
 //! - **A renegotiation of the account's** begins in the machine (`Calls::begin_renegotiation`) before the media session
 //!   makes its offer, since a new offer replaces the one the session waits on: a second one, or one while the call
 //!   isn't up or the far end's waits for our answer, is refused with the session untouched. The camera (a 1:1 call's
@@ -38,8 +37,8 @@
 //!   roster (`CallEvent::Participants`); whose video each receiving line shows is the gallery's to say
 //!   ([`gallery`]), sent to the mixer as source requests once its control plane is up; told as
 //!   [`Event::CallParticipants`] with who speaks.
-//! - **The calling socket's deliveries** go to the machine as the fence read them; a delivery response goes only
-//!   through the delivery's own responder, decided by the fence; an invitation the fence doesn't offer never gets here.
+//! - **The calling socket's deliveries** go to the machine as the call tracker read them; a typed delivery response
+//!   goes only through that delivery's connection-bound responder. An invitation the tracker ignores never gets here.
 //! - **What the account is told**: [`Event::IncomingCall`], [`Event::RingEnded`] and [`Event::Call`] with the call's
 //!   [`CallStatus`]: *connecting* once the signaling says the call is up until the media connected, *reconnecting*
 //!   while the media is lost, *ended* once, with how.
@@ -544,7 +543,7 @@ where
                 self.responders.remove(&key);
             }
             PushEvent::Ignored(Ignored::IncomingCall) => {
-                log::info!("an incoming call the fence doesn't offer: ignored");
+                log::info!("an incoming call the tracker doesn't offer: ignored");
             }
             PushEvent::MessageLoss(loss) => loss.caught_up(),
             PushEvent::Disconnected { down, .. } => log::info!("calling socket down: {down:?}"),
@@ -570,7 +569,7 @@ where
                 Some(Effect::Respond { delivery, reply }) => self.respond(delivery, reply),
                 Some(Effect::Event(event)) => self.told(event, now),
                 // an invitation dropped before it rang: its attach failed for good (no further attempt goes), its
-                // answer didn't read, its media failed; the fence ends its offer, which then holds no call open
+                // answer didn't read, its media failed; the tracker ends its offer, which then holds no call open
                 Some(Effect::LetGo { attach }) => self.outbox.tracker().let_go(attach.as_str()),
             }
         }
@@ -838,7 +837,7 @@ where
         self.emit(Event::Call { call, status });
     }
 
-    /// The start, the join or the answer of `call` passed the fence and was taken: its media's microphone and speaker
+    /// The start, the join or the answer of `call` was admitted and taken: its media's microphone and speaker
     /// open now, once, off the engine's thread.
     fn open_devices(&mut self, call: CallId) {
         let Some(live) = self

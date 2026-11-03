@@ -332,7 +332,7 @@ impl TrouterMock {
 
     /// The fixture's 1:1 invitation from `from` to `to` (work accounts' MRIs) as a delivery's body, its decoded `gp`
     /// changed by `edit` before it is encoded (base64 JSON, as on the wire): for [`TrouterMock::deliver_call`] to any
-    /// account's calling sockets, an invitation addressed to someone else or in a shape the fence doesn't read.
+    /// account's calling sockets, an invitation addressed to someone else or in a shape the tracker doesn't read.
     #[must_use]
     pub fn call_invitation(from: &str, to: &str, edit: impl FnOnce(&mut Value)) -> Value {
         invitation(0, from, to, edit)

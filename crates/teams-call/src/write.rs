@@ -18,7 +18,7 @@ impl WriteId {
     }
 }
 
-/// Where the engine takes a call's writes: each one checked by the fence and sent in the order submitted, its outcome
+/// Where the engine takes a call's writes: each tracked and sent in the order submitted, its outcome
 /// reported back under its id. Every submission must get its outcome (a denial, a refusal or a stop included), or the
 /// call waits on it. A write comes as its own sealed type, cloneable: one the service refused without acting on it
 /// may go again (a fresh check, a fresh permit) while the machine still wants it ([`crate::Calls::may_send_again`]).

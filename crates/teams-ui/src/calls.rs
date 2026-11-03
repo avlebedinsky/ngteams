@@ -1,7 +1,7 @@
 //! The account's calls as the views show them (M3 Task 17): a model the bridge's drain keeps up to date
 //! ([`Calls::apply`], from the engine's call events), and the user's asks ([`ask`]), each one call action through the
-//! engine ([`Core::call`]), which judges it again (one call at a time, an invitation it offered) and sends it under the
-//! fence.
+//! engine ([`Core::call`]), which checks it again (one call at a time, an invitation it offered) and sends its
+//! requests through the outbox.
 //!
 //! - **Shown or not**: a build shows calls only when its models were made with them ([`crate::Models::with_calls`]:
 //!   the lab app, and the personal build once its calling opened); models made without (`Models::new`: a run whose

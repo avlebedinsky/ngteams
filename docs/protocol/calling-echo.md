@@ -9,18 +9,17 @@ and from the web bundle `26260.1717.5229.7049`. The captures stay outside the re
 `tests/fixtures/calling/echo/` are synthetic, shaped like them. Ids, tokens, hosts' numbers and addresses below are
 placeholders.
 
-The code: the scenario is `crates/proto-lab/src/scenario/echo_call.rs`; the call start is a row of the calling family
-in `teams_fence::contacting` (`crates/teams-fence/src/contacting/call.rs`, `CALL_START_URL`), mapped only with the
-echo service's MRI (`Classifier::with_test_call_callee`); the follow-ups below are rows there too, each a write the
-lab's call rule lets through once the call's start was let in, the `add` judged by its invitee
-([fence-targets.md](fence-targets.md#the-labs-call-rule)); every other mutating request on a calling host is denied
-([fence-targets.md](fence-targets.md#the-contacting-services)). Audio worklets are armed by `TargetKind::Worklet`
-(`crates/proto-lab/src/arming.rs`).
+Current code: `proto-lab/src/scenario/echo_call.rs` records the web flow, and the native client builds typed
+requests in `teams-proto/src/write/call.rs`, tracked by `teams-call::track`. Audio worklets use the capture target
+setup in `proto-lab/src/arming.rs`. No browser or native write fence remains.
+
+For current native tests, run `scripts/run-lab.sh a --pipewire`, choose Make a test call in `ngteams`' sandbox UI,
+and hang up before `scripts/run-lab.sh a --stop`. The agent must verify that the run reaches only the lab account
+and the echo service under the [lab rule](../lab-rules.md). Dated old probe commands below are historical evidence.
 
 ## Outcome
 
-Since M3 Task 4 the call completes: the fence permits the start, registers the call, and lets its follow-ups through
-on it; the echo joins, records and plays the tone back, and the page's audio tap reads it
+Since M3 Task 4 the recorded flow completes: the echo joins, records and plays the tone back, and the page's audio tap reads it
 ([What the M3 run added](#what-the-m3-run-added)). The M0 state:
 
 - The fence allowed the call start: a new call of a and the echo service, both in `lab.toml`.
@@ -45,7 +44,7 @@ any call was placed:
    MRI.
 
 It was then recorded in `lab.toml` with `proto-lab service-mri echo <mri>` (only for a service the file approves by
-name, only a bot's `28:<guid>`).
+name).
 
 ## What has to be up before a call
 
@@ -76,15 +75,14 @@ fence of the time, which allowed each as the account's own state in its captured
   then unknown and denied: a response goes back to whoever sent the delivery, and which deliveries an empty success
   only acknowledges (and which it might answer: an incoming call's) wasn't established (Codex and Claude, 2026-10-20).
   The service redelivered; the calls still reached the media controller without them. **Under the lab's call rule
-  every one of them now passes the frame rule** ([fence-targets.md](fence-targets.md#the-labs-call-rule)). The
+  every one of them now passes the frame rule** ([chat-service.md](chat-service.md#current-call-tracking)). The
   acceptance's acknowledgement also
   echoes the delivery's `X-Microsoft-Skype-Chain-ID` and `X-Microsoft-Skype-Message-ID` (five headers in all).
 - **Endpoint registration.** `POST <teams>/registrar/prod/V2/registrations` with `clientDescription` (`appId`,
   `templateKey`, …), a `registrationId` and `transports.TROUTER: [{"context":"","path":"<push url>","ttl":3600}]`;
   `202`. The messaging stack registers as `TeamsCDLWebWorker`; the calling stack opens a second Trouter socket and
   registers it as `SkypeSpacesWeb`. This makes the account reachable: an incoming call would be delivered to the page.
-  **Incoming calls aren't answered here**: the scenario never clicks an answer, and the fence lets an answer through
-  only on the account's own offered invitation from a lab caller ([calling.md](calling.md#the-answer)).
+  **Incoming calls are not answered by this scenario**: it never clicks an answer. The native tracker offers invitations addressed to the account; answering is a user action ([calling.md](calling.md#the-answer)).
 
 Nothing else of the client's unmapped traffic (presence, the middle tier's other lookups, the async media gateway's
 cookie exchanges, telemetry) was needed; it was denied then, and passes under the lab rule.
@@ -107,7 +105,7 @@ request) and `MS-Teams-Region` / `-Partition`. Services behind the proxy are add
 each URL handed out by the service before it is used.
 
 1. **Chat with the bot.** `POST <teams>/api/chatsvc/amer/v1/threads` with members a and the bot (see above): a chat
-   create, `Scope::New`, judged by its members.
+   creation naming the caller and the bot.
 2. **Peer connection and offer.** `RTCPeerConnection` with `bundlePolicy: max-bundle`, `rtcpMuxPolicy: require`, the
    TURN server above, `iceTransportPolicy: all`; `createOffer` → `setLocalDescription`; host, server-reflexive and relay
    candidates trickle (UDP and TCP, IPv4 and IPv6).
@@ -128,13 +126,11 @@ each URL handed out by the service before it is used.
    The answer is the conversation: `conversationController` (its URL on the conversation service), `links` (`leave`,
    `addParticipant`, `removeParticipant`, `updateEndpointMetadata`, `getAllParticipants`, `searchParticipants`,
    `subscribe`, `brokerPublish`, …), `state`, `scenario`, `tenantId`, `region`, `conversationStartTime`.
-   **The fence maps it** (`teams_fence::contacting`'s calling row, `contacting/call.rs`), and only this shape:
-   `WriteKind::Call` on `Scope::New`, its participants `from` and the echo service of `lab.toml`, which the start
-   doesn't name and is counted in, so the call passes only if the fence would admit the echo. The scenario must be
-   `UserInitiatedTestCall`, `to` empty or exactly the echo service, and every key at every level one the capture had,
-   its value of the captured type (`null` where it was `null`: `replaces`, `transferor`, `clientTransferContext`, the
-   group, chat, meeting and content sharing). Any other call (a named callee, another scenario, an unreviewed key
-   anywhere) or a body that doesn't read strictly is unreadable, and denied.
+   `StartCall::echo_test` builds the test-call shape with `UserInitiatedTestCall`, the account's sender and callbacks.
+   The echo participant is added through the answer's `addParticipantAndModality` link below. The native tracker binds
+   the start, acceptance and media links; it does not classify lab participants.
+
+
 4. **Events.** `GET …/ep/broker-…/api/v1/subscribe/<id>/<n>` long-polls (reads): each answer has `message` (gzip,
    base64: a delivered HTTP request) and `nextSubscribeUrl`. The same callbacks also come over Trouter.
 5. **Acceptance.** The call controller calls back `…/call/acceptance/` with `callAcceptance.links`: the call leg
@@ -146,7 +142,7 @@ each URL handed out by the service before it is used.
    connects (the remote candidates are the media controller's, `typ relay` on port 3478, UDP and TCP passive, IPv4
    and IPv6).
 6. **Follow-ups the client sends next** (denied in M0; each passes once the call's start was let in, the `add` judged
-   by its invitee: [fence-targets.md](fence-targets.md#the-labs-call-rule)):
+   by its invitee: [chat-service.md](chat-service.md#current-call-tracking)):
    - `PUT …/conv/<conversation id>/updateEndpointMetadata` (the caller's `participants.from` and `endpointMetadata`);
    - `POST …/cc/v1/mcProxy/<call id>/…/applyChannelParameters` (send capabilities of a media line);
    - `POST …/cc/v1/callAcceptance/<call id>/…/acknowledge` (`callAcceptanceAcknowledgement.links`: more callbacks:
@@ -190,7 +186,7 @@ line, is in [calling.md](calling.md#the-sdp-dialect).
 
 From live runs of 2026-10-24 (M3 Task 4: `proto-lab run echo-call --headless`, account a, Chrome for Testing 155
 muted with its fake audio manager, the call registry of
-[fence-targets.md](fence-targets.md#the-call-registry)); the shapes are in
+[chat-service.md](chat-service.md#current-call-tracking)); the shapes are in
 `tests/fixtures/calling/echo/deliveries.json`, synthetic.
 
 - **The client's noise suppression removes the tone.** With it on (the default) the sent track's level stayed at about
@@ -227,7 +223,7 @@ muted with its fake audio manager, the call registry of
 
 ## The native echo call
 
-From live runs of 2026-10-25 (M3 Task 15: `teams-headless a call echo --seconds 45`, the release lab build, account
+From live runs of 2026-10-25 (M3 Task 15: the retired native probe, the release lab build, account
 a, the lab fence). Its media is files: the microphone plays a 1 kHz tone keyed on and off in 200 ms slots of a fixed
 pseudo-random pattern, the speaker is recorded, and the recording is searched for the pattern afterwards
 (`teams_headless::echo`). The recordings stay under the lab's data dir. It answers the open questions of the M0 spike
@@ -269,15 +265,14 @@ pseudo-random pattern, the speaker is recorded, and the recording is searched fo
   ends before the echo plays anything back.
 - **The end.** In one run the call controller delivered `call/end` (`CallEndReasonLocalUserInitiated`) for our `leave`
   before the `leave`'s own `204`; the native client ends a call it is leaving as hung up whichever comes first.
-- **The echo leaves by itself** (one live run of 2026-10-29: `teams-headless a call echo --seconds 150`, the lab build,
+- **The echo leaves by itself** (one live run of 2026-10-29: the retired native probe, the lab build,
   account a). Its roster entry came about 2 s after the media connected and went (the participants empty) about 50 s
   after, once it had played the recording back and spoken again; nothing else came: no `call/end`, no
   `conversationEnd`, and the call stayed up with the account alone in it until our `leave` at 150 s. The web client
   leaves the test call once the echo has left (the M0 runs saw it leave by itself after the echo left a silent
   recording), and so does the native client now: the echo's entry gone from a connected test call's roster sends the
   `leave`, and the call ends as the far end's.
-- **Its camera, as a 1:1 call's** (one live run of 2026-10-28: `teams-headless a call echo --video --camera-after 3
-  --seconds 45`, the lab build, account a). The start offers a 1:1 call's main video line, receiving; the acceptance
+- **Its camera, as a 1:1 call's** (one live run of 2026-10-28: the retired native probe, the lab build, account a). The start offers a 1:1 call's main video line, receiving; the acceptance
   hands out `mediaRenegotiation` but no `updateMediaDescriptions`, so the camera goes on as in a 1:1 call: a
   `renegotiate` with the line `sendrecv`, which the media controller answered at the renegotiation's `mediaAnswer`
   callback, then the answer's receipt and `acknowledge`. The camera's frames went out (628 sent), the echo sent no
@@ -295,25 +290,13 @@ recorded, from going into the microphone to coming out of the speaker, on one cl
 
 ## Open
 
-1. **Fencing a call's follow-ups.** Settled by judging a call's entry, not by a membership read
-   ([fence-targets.md](fence-targets.md#the-labs-call-rule)): a follow-up passes once its call's start, join or answer
-   was let in (the call registry of M3 Task 3, which bound each to a link the call's services handed out, is kept as
-   every fence's bookkeeping; its own rule decides no build's calls). The `add` posts to the answer's
-   `addParticipantAndModality` link (`…/add`), not `addParticipant`. What follows is the M0 state.
-   `updateEndpointMetadata`, `applyChannelParameters`, `acknowledge`, `add` and `leave` land on a call that exists. The fence requires its members read fresh and complete; neither the chat
-   service read nor anything else gives that for a call yet. Candidates: the conversation's `getAllParticipants` link
-   (method and answer not captured), or protocol evidence that a test call's membership can only change through the
-   caller's own fenced `add` (Codex and Claude, 2026-10-20: the evidence so far doesn't establish it). Backlog:
-   `docs/backlog/fence-call-follow-ups.md`.
+1. **Reading call participants.** The 2026-10-20 native/browser probe of `getAllParticipants` sent
+   `{"from": <caller participant>, "scope": "call" | "lobby", "scenario": 0}` to the conversation's link. It answered
+   `200` with `{"participants":[]}` even while the caller was present. It therefore does not establish complete call
+   membership. The web client uses this result for its large-meeting lobby panel. Current call tracking binds links
+   and state; it does not derive a lab participant policy from this read.
 
-   `getAllParticipants`, tried on 2026-10-20 (one live run, account a, fence armed, writes still denied). The web
-   bundle's client sends it as a `POST` to the conversation's link with `{"from": <the caller's own participant>,
-   "scope": "call" | "lobby", "scenario": 0}`, keeps only `participants` from the answer, and uses it for the large
-   meeting lobby panel. Sent from inside the fence for the test call's `call` scope, it answered `200` and
-   `{"participants":[]}` at every follow-up, although a was in the call. So in this call it doesn't list the
-   caller, and it can't serve as the call's membership. The fence denied the follow-ups as partial. Also seen: the
-   call controller's call id (`callAcceptance/<id>`, `mcProxy/<id>`) is tied to the conversation only in a delivered
-   `conversationUpdate` (`activeModalities.call.links.participants`, `…/cc/v1/callHub/<same id>/…/participantLegs`).
+
 2. **Whether the echo answers.** Settled in M3 Task 4: with `add` allowed it joins, records and plays back
    ([What the M3 run added](#what-the-m3-run-added)), once the client's noise suppression is off.
 3. **Headless Chrome.** The runs set a normal Chrome `User-Agent`; whether `HeadlessChrome` alone would keep the

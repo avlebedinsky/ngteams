@@ -5,8 +5,11 @@ reaction, typing, lines and links, a group mention) 2026-10-21, M2 Task 10; an i
 2026-10-22, M2 Task 21; files (sending, denied) and received attachments 2026-10-22, M2 Task 23; a mention of everyone
 in a group chat (as sent) 2026-10-29. Written from what the
 lab saw, in our own words, plus the web bundle where nothing was captured (marked so). The chat service's base,
-credential, ids, member reads and the fence's mapping of writes are in [fence-targets.md](fence-targets.md); its token
+credential, IDs, member reads and typed native write path are in [chat-service.md](chat-service.md); its token
 in [auth.md](auth.md).
+
+Dated restrictions and denials below describe the capture setup used then. The current native client has no write
+fence; explicit browser holds retain shape-only experiments without changing what those old captures proved.
 
 Sources (all outside the repository, under the lab's data dir; fixtures are written from them by hand, synthetic):
 
@@ -19,7 +22,7 @@ Sources (all outside the repository, under the lab's data dir; fixtures are writ
   reaction back, replied with a quote, reacted to the reply, sent and deleted a message; b opened the chat (reading
   its history) and reacted.
 - **mention**: `proto-lab run ab-chat-full` of 2026-10-21, once the fence let the mention picker's profile lookups of
-  lab accounts through (fence-targets.md, "Reads by POST"): a mentioned b, picked from the picker (captures
+  lab accounts through (chat-service.md, "Reads by POST"): a mentioned b, picked from the picker (captures
   `captures/ab-chat-full/20261020T223250Z` for a and `…223251Z` for b, reference copies
   `reference/chat/ab-chat-full-mention-a.jsonl`, `…-b.jsonl`).
 - **ab-image**: `proto-lab run ab-image` of 2026-10-21 (M1 Task 20; accounts a and b, the a–b chat, captures
@@ -56,7 +59,7 @@ percent-encoded as one segment.
 
 `GET v1/users/ME/conversations?view=msnp24Equivalent&pageSize=200&startTime=1&targetType=All` answers 200 with
 `{"conversations": [...], "_metadata": {...}}`. The web client never sent it: it reads its chat list from CSA
-(`chatsAndChannelsByIds`, a `POST` the fence denies). Fixture: `tests/fixtures/chatsvc/conversations.json`.
+(`chatsAndChannelsByIds`, a POST whose answer was not captured in those early runs). Fixture: `tests/fixtures/chatsvc/conversations.json`.
 
 - `_metadata`: `totalCount` (5 for a lab account), `forwardLink` (empty: one page held everything) and `syncState`, a
   full URL for the next incremental read: `v1/users/<the account's MRI>/conversations?view=msnp24Equivalent&syncState=
@@ -359,7 +362,7 @@ reads them, `teams_ui::system_message` words them). A kind or a shape not listed
 
 ## A message as sent (ab-chat-full, a)
 
-`POST v1/users/ME/conversations/<chat>/messages` as in fence-targets.md: the message's fields with `id` `-1`,
+`POST v1/users/ME/conversations/<chat>/messages` as in chat-service.md: the message's fields with `id` `-1`,
 `version` `"0"`, `clientmessageid` a random numeric string (18 and 19 digits seen), `properties` with the empty JSON-string lists and
 `formatVariant`. It answers 201 with `{"OriginalArrivalTime": <ms>}`, and the new message's `id` is that time. Typing is
 the same post with `messagetype` `Control/Typing`, also answered with an arrival time.
@@ -392,19 +395,17 @@ it showed the image inline) and pressed Enter.
   `…/status`. The creation's `permissions` may carry further keys (`@:composer`), and its `type` is `sharing/file` or
   `sharing/videototranscode` for other media.
 
-Why sending stays out of M1 (decided with Codex, `docs/backlog/ams-image-sending.md`): the creation's target can be read
-from its body, but the upload names only the object, so the fence could bind it to a conversation only through a
-registry of what it permitted (which the fence must not stand in) or an authoritative read of the object's current
-readers, which no capture has shown, and which `forward` could change between the read and the upload. Every answer past
-the creation is uncaptured too. The fence maps none of it: AMS objects are `Unknown` and denied
-([fence-targets.md](fence-targets.md)).
+The original M1 image-sending scope was limited to captured shapes (see `docs/backlog/ams-image-sending.md`).
+Creation identifies the conversation in `permissions`; the content upload identifies only the object, and `forward`
+can change its readers. The original capture did not establish the later upload/forward responses. Current image
+sending remains unimplemented; this is a protocol/feature gap, not an active write-fence denial.
 
 ### The object created once (ab-image-object)
 
 M2 Task 21 took the backlog item's first step: the creation mapped in exactly its captured shape (the async gateway,
 the captured headers with `x-ams-post-sharing-mode: Inline`, `X-MS-Migration: True`, `x-ms-test-user: False`,
 `content-type: application/json` pinned, the body above with one `permissions` key, the a–b chat, `["read"]`) to a
-write on that chat judged by `Fence::check` (its members read live: a and b), let out once per run by a forced deny
+write on that chat admitted by the capture-era policy (members a and b), let out once per run by a selective hold
 that spared the first creation sent after the image was in the compose box; the upload, a forward, every later
 creation and every other media write stayed force-denied. The mapping was the experiment's only (`ab-image-object`)
 and was taken out again in the same task once the read below was in: the code is in the task's first commit, the
@@ -630,10 +631,10 @@ the compose box of the a–b chat a made-up text file.
   string of a list; an entry has `fileName`, `fileInfo` with `fileUrl` and `shareUrl`, `@type`
   `http://schema.skype.com/File`, `objectUrl`, `itemid`, `title`, `version`).
 
-Why sending stays out, and what would settle it, in order (`docs/backlog/file-sending.md`): the storage check as a
-reviewed read by `POST` of the account's own state, then the upload into the account's own drive, then the share,
-which names its readers and so could be judged by `Fence::check` (every recipient a lab account, a "specific people"
-link only), then the post. The fence maps none of it.
+File sending remains a separate implementation task (`docs/backlog/file-sending.md`): storage availability,
+upload into the account's drive, sharing with the intended recipients, then posting the file reference. Those wire
+shapes and error paths need implementation and tests. Before any lab experiment the agent must include the share's
+recipients and the destination chat in its reach check; there is no participant permit in the transport.
 
 ## Files: received
 
@@ -709,12 +710,9 @@ The bundle names more `mentionType`s than `person` (`bot` with an `appId`, `ever
 `community`, `nearby`, `share-contact`) and a reader that accepts `mentions` as a string or a list; of those only
 `everyone` was seen ([A mention of everyone](#a-mention-of-everyone-abc-everyone)).
 
-The fence's mapping takes the `mri` of each entry as an added participant of the message's (or edit's) target, so a
-mention of anyone outside the lab is denied like adding them to the chat. An entry of `mentionType` `everyone` whose
-`mri` is the group chat the message is posted to adds nobody: it reaches that chat's members, whom the fence reads
-fresh for the write anyway. Any other form of `mentions`, an entry without a string `mri` (a `tag` mention among
-them), an `everyone` entry naming another chat or posted to a 1:1 or meeting chat, or a key in another case, is
-unknown. The captured forms are the ones it reads.
+Mention wire entries name an MRI. A person mention reaches that person; an `everyone` entry naming the destination
+group chat reaches its members. The native composer only builds captured mention forms, and the agent's lab check
+must include these recipients. There is no membership classifier on the outgoing request.
 
 ## A mention of everyone (abc-everyone)
 

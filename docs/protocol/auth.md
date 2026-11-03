@@ -17,7 +17,7 @@ account A (one from before the license, with two authz 403s) and 26 `ab-chat` ru
 stay under the lab's data dir; they were read locally, the auth exchanges through `proto-lab export` reference copies.
 What they showed is marked **Capture** below. In the `load` runs the fence was fail-closed and denied every write. In
 the `ab-chat` runs it allowed the mapped writes inside the a–b lab chat (chat creation, messages, typing, read
-receipts; their answers are in `fence-targets.md`) and denied every other write and every unmapped POST. For the
+receipts; their answers are in `chat-service.md`) and denied every other write and every unmapped POST. For the
 requests it denied, the capture shows what the client sent, never what the service answered.
 Everything else that isn't from the CA probe is what the client code says it does; the
 [To confirm by capture](#to-confirm-by-capture) list says what the capture settled and what is still open.
@@ -78,9 +78,34 @@ Where each redirect comes from:
   taken from the 302 `Location` at the `Fetch` response stage, and the navigation failed. Task 14 implements this
   path in any case, because it's the same code.
 
+## Current native lab provisioning and logging
+
+`proto-lab auth <alias>` uses that alias's signed-in browser profile and the native PKCE flow below. It validates the
+ID-token identity, stores native refresh/skype tokens in the **`ngteams-lab`** Secret Service namespace, and writes the
+verified account to `${XDG_DATA_HOME:-$HOME/.local/share}/ngteams-lab/<alias>/accounts.toml`. Authz's region is saved
+as `regions/<object-id>.json` under that same alias root. Config and data share that root for `ngteams --lab <alias>`.
+The configured UPN spelling and existing same-account manual name/identity-provider hosts are preserved where
+applicable. Writes are private and atomic; provisioning refuses overlap with personal data/config.
+
+Token storage precedes native account-file completion, so a file-write error can leave tokens stored even though
+provisioning returns an error. Resolving/validating the native target happens before browser sign-in. These commands
+never provision the personal `ngteams` namespace. `proto-lab` keeps its separate browser profiles/captures and its
+own region metadata under the configured harness data directory for native HTTP probes.
+
+Launch the provisioned account with `scripts/run-lab.sh <alias> [--pipewire]`, which normally builds into `target/lab`
+with `TEAMS_LAB_BUILD=1`. `--build-only` opens no account, broker or window. The runner starts the lab account's
+scoped get/put/delete broker outside its UI sandbox and the app inside it; see [README](../../README.md) for controls.
+Each live run requires the agent's [lab reach check](../lab-rules.md). Actual new-account setup and smoke testing
+remain separate from the offline implementation tests.
+
+All native token exchange/refresh and authz request/response headers and bodies now pass through
+`teams-log::wire` at debug. Canonical field redaction and exchange-scoped known credentials hide raw or encoded
+credential echoes in errors before formatting, without changing HTTP bytes or parsed tokens. Info logs carry no
+payload. Debug logs remain private capture material and never enter the repository.
+
 ## Flow
 
-1. **Authorize** (browser, lab profile, fence armed): PKCE (S256) at
+1. **Authorize** (browser, lab profile): PKCE (S256) at
    `https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize` with `client_id` = the native client,
    `response_type=code`, the `nativeclient` redirect, `login_hint` = the account's UPN, and
    `scope=https://api.spaces.skype.com/.default openid profile offline_access`. The profile's SSO cookie signs the user
@@ -142,7 +167,7 @@ asks for `https://outlook.office.com//.default` (two slashes) and Entra grants s
 What is not known: whether Conditional Access treats the other audiences (Outlook, Graph, SharePoint) as strictly as
 `api.spaces.skype.com`, which passed. A CA block shows up as `AADSTS53003` on that one refresh grant, and the other
 audiences keep working. Task 14 checks this with a refresh grant per audience (the Entra token endpoint was already on
-the fence's own-state list then; under the lab rule Entra is no contacting service). (Answered since, see [Open questions](#open-questions) 1.)
+the early capture setup's allow list then). (Answered since, see [Open questions](#open-questions) 1.)
 
 **Capture:** the web client warms tokens the same way. Right after the code redemption it chains refresh grants, each
 with the newest refresh token, for `api.spaces.skype.com` (again, now asking for CAE), `chatsvcagg`,
@@ -190,8 +215,7 @@ environment; prod doesn't set it.
   longer needs the skypetoken (see the [service table](#audience--service-table)); the few calls that still do are
   listed there.
 - **Never call `…/authz/signuptrial`** (or `…/authzcore/signuptrial`). It's the "start a Teams trial" variant of the
-  same POST, a write that changes the account's licensing. The lab browser's fence lets it through (it reaches nobody
-  else), so nothing but our own code keeps it from being sent: `teams-auth` sends only to a URL ending in `/authz`,
+  same POST, a write that changes the account's licensing: `teams-auth` sends only to a URL ending in `/authz`,
   and the sign-in window's rules match `authz` and `authzcore` as whole paths; keep it that way.
 
 ### Request
@@ -335,7 +359,7 @@ prefix of that `Location`.
 **Capture:** every chat request went to `chatServiceAfd` (`<AFD host>/api/chatsvc/amer`), none to `chatService`
 (`amer.ng.msg…`). That host showed up only in answers: as the `chatService` GTM, and in the `Location` header of the
 201s to chat creation and message posts, which name the new resource as
-`https://amer.ng.msg.teams.microsoft.com/v1/…` (`fence-targets.md`). Every chat and presence request carried
+`https://amer.ng.msg.teams.microsoft.com/v1/…` (`chat-service.md`). Every chat and presence request carried
 `BehaviorOverride: redirectAs404`. No region hop happened: no 404 came with a `Location`. The 404s seen were ordinary
 misses (`users/ME/properties`, and the call-log conversation `48:calllogs`, which answered 404 in some runs and 200 in
 others), with a diagnostic code in the `ContextId` answer header and no `Location`. How a hop looks is still unseen;
@@ -427,10 +451,9 @@ token). No answer carried a migration header and no 401 named a protocol, so the
 middle-tier calls keep `x-skypetoken` is in the table above; whether a migrated endpoint would also accept the
 both-headers form is still unknown, since no request sent both.
 
-For us this means: chat goes with the `ic3` Entra token and STM, as the web client does. The fence's live membership
-read (Task 11) is not that form: it sends back the page's `ic3` bearer token with only an `Accept` header, no
-`X-MS-Migration` and no `BehaviorOverride` (`fence-targets.md`). Its `GET v1/threads/<id>` succeeded that way in the
-`ab-chat` runs, so the chat service took the web client's CAE `ic3` token without STM on at least that read.
+For us this means: chat uses the `ic3` Entra token and STM, as the web client does. A historical direct member probe
+(Task 11) also succeeded with the page's `ic3` token and `Accept` alone, without `X-MS-Migration` or
+`BehaviorOverride`; this was evidence for that read only, not a current member-check path.
 
 **Live (M1 Task 3, 2026-10-20, `proto-lab probe chat a` and `b`):** the chat service takes **our** `ic3` token too
 (the native client's, from the stored refresh token, no `xms_cc`, a ~2 h lifetime) and does not care about the extra
@@ -438,7 +461,7 @@ headers on reads: one page of the conversation list
 (`GET v1/users/ME/conversations?view=msnp24Equivalent&pageSize=200&startTime=1&targetType=All`, the bundle's
 `myconversations` request) answered 200 in all four forms, the token with
 both `X-MS-Migration: True` and `BehaviorOverride: redirectAs404`, with either one alone, and with neither; and the
-fence's own read (`GET v1/threads/<the a–b chat>?view=msnp24Equivalent`, token and `Accept` only) was complete with
+direct thread probe (`GET v1/threads/<the a–b chat>?view=msnp24Equivalent`, token and `Accept` only) was complete with
 both members, for a and for b. No 401, no `WWW-Authenticate`, no migration header in any answer; the answer headers
 were `cache-control`, `content-length`, `content-type`, `contextid`, `date`, `ms-cv`, `pragma`, `x-cache`,
 `x-ms-latency`, `x-msedge-ref`. The page's body is `{conversations, _metadata: {totalCount, syncState,
@@ -467,8 +490,7 @@ sign-in. Whether chat still accepts the skypetoken form is unknown and not neede
    **Answered (M2 Task 17, capture and live):** the presence origin with its slash,
    `https://presence.teams.microsoft.com/`. The web client's `getpresence` reads, let through by the browser fence for
    the first time (`ab-chat` of 2026-10-22, 14 reads), all carried a CAE token (`xms_cc`) of that audience and were
-   answered 200. Ours, non-CAE, from the native client's own refresh grant, was taken too: `teams-headless a
-   presence` (2026-10-23, under the live lock) sent two reads (b, then b and c), each a `post_read` `presence` line in
+   answered 200. Ours, non-CAE, from the native client's own refresh grant, was taken too: the retired native presence probe (2026-10-23, under the live lock) sent two reads (b, then b and c), each a `post_read` `presence` line in
    `fence.log` (the fence of the time), and read both accounts' availability (`Offline`) from 200 answers; no 401, no claims challenge.
 5. Is the `RegistrationToken` (from the chat service's `Set-RegistrationToken` response header after registering an
    endpoint) needed for reads, or only for the event channel? **Capture:** the web client registered no chat

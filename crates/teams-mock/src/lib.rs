@@ -1,9 +1,9 @@
 //! A local Teams chat service for tests (M1 Task 9), built from the synthetic chat fixtures in
 //! `tests/fixtures/chatsvc/`, so the whole native client can be tested offline. Its answers have the shapes those
-//! fixtures recorded (`docs/protocol/chat.md`, `docs/protocol/fence-targets.md`); no capture or reference copy is
+//! fixtures recorded (`docs/protocol/chat.md`, `docs/protocol/chat-service.md`); no capture or reference copy is
 //! read, here or by a test.
 //!
-//! **Reach and use.** A dev-dependency only, never a lab binary's dependency (a test in this crate checks every
+//! **Reach and use.** A dev-dependency only, never a production client's dependency (a test in this crate checks every
 //! workspace manifest). Clients reach it only through the `test-support` mock origins:
 //! `teams_proto::HttpTransport::with_mock_origin`,
 //! given [`ChatServiceMock::origin`] with [`CHAT_BASE`] as the chat base, so every URL is built and checked as it would
@@ -148,7 +148,7 @@ pub const AMS_BASE: &str = "https://us-prod.asyncgw.teams.microsoft.com";
 /// [`ChatServiceMock::origin`] with this base's path.
 pub const PRESENCE_BASE: &str = "https://teams.microsoft.com/ups/noam";
 
-/// The regional host the service names new resources on in a 201's `Location` (`docs/protocol/fence-targets.md`).
+/// The regional host the service names new resources on in a 201's `Location` (`docs/protocol/chat-service.md`).
 pub const REGIONAL_HOST: &str = "https://amer.ng.msg.teams.microsoft.com";
 
 /// The made-up tenant every account and chat belongs to.

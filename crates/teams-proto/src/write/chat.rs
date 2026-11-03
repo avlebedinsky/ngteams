@@ -492,8 +492,7 @@ impl Prepared for Typing {
 
 /// Creates a chat: `POST v1/threads` with `{"members": [{"id", "role": "Admin"}, …], "properties": {"threadType":
 /// "chat", …}}`, as the web client created the a–b 1:1 chat and the a–b–c group chat
-/// (`docs/protocol/fence-targets.md`). Its target is [`WriteKind::ChatCreate`] on [`Scope::New`] with every member
-/// added, the creator among them.
+/// (`docs/protocol/chat-service.md`). The members include the creator.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CreateChat {
     /// The creator first, then the others in the order given.

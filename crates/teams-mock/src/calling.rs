@@ -452,7 +452,7 @@ fn invitation_of(state: &State, call: &MockCall, leg: u64, callee: &str) -> Valu
 /// The media controller (the test call) or the call's mixer (a group call, a join) accepts the leg whose acceptance
 /// callback is `acceptance` (`answers.json`'s acceptance, the controller's answer; `answer` in its place when a peer
 /// answered). Its acknowledgement link names another call than its other links when a test asked for that
-/// ([`Calling::unbind_next_acceptance`]): an acceptance the fence binds nothing of.
+/// ([`Calling::unbind_next_acceptance`]): an acceptance the tracker binds nothing of.
 fn accept_by_controller(state: &mut State, index: usize, acceptance: Option<&str>, answer: Option<Value>) {
     let call = &mut state.calling.calls[index];
     call.phase = CallPhase::Connected;

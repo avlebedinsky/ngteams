@@ -1,63 +1,67 @@
 # The lab's rules in full
 
-CLAUDE.md's hard rules carry the short form; this is the full text the lab fence implements
-(`crates/teams-fence`; how it reads a target: [protocol/fence-targets.md](protocol/fence-targets.md)). Widening whom a
-lab write may reach, or weakening a test of the rule below, needs the user's sign-off; anything else that passes the
-tests (a new request, frame or write kind included) goes ahead without asking.
+[CLAUDE.md](../CLAUDE.md) carries the short form. The agent checks this rule before every live run of `ngteams` or
+`proto-lab`; the application does not enforce a lab roster or inspect `lab.toml`.
 
-**The one rule: lab accounts talk and call only each other, the echo service and the user's own account, both ways.**
-It governs the lab browser and every lab binary (HTTP and Trouter frames alike). The personal build is under its own
-rules ([personal-build.md](personal-build.md)).
+**Lab accounts talk and call only each other, the echo service and the user's own account, both ways.** The rule is
+unchanged. It covers messages, reactions, chat membership, invitations, meetings, calls and team/channel changes.
+The user's own client follows its [personal-build rules](personal-build.md).
 
 ## Who the lab may reach
 
-- The 3 lab accounts (`lab.toml`'s `accounts`, by MRI or UPN);
-- the approved service participants (`service_participants`: the echo service, by MRI);
-- the contacts (`contacts`, by MRI, and by UPN when given): the user's own account. It is reached as a lab account is,
-  for everything: messages, reactions, chats created, members added, invites, meetings and calls either way.
+- The dedicated lab accounts in `lab.toml`'s `accounts`, identified by MRI or UPN.
+- The approved echo service in `service_participants`, identified by MRI.
+- The user's own account in `contacts`, identified by MRI and by UPN when given. It may be reached as a lab account
+  is, for messages, chats, membership changes, invitations, meetings and calls either way.
 
-Apps and bots (any `28:` MRI) aren't people: one on a chat or a team, Teams' own apps every new team holds or one
-someone added, a team made from a template that adds apps, or an app a write adds never makes a write contacting.
+Apps and bots aren't people. Their presence in a target does not expand the set of people the lab may reach. No
+account token or credential is sent to a bot, an app's backend or any other third party.
 
-## What is denied
+## Before each live run
 
-- **A write that reaches a person outside the lab**: a message (post, reply, edit, delete, forward, channel post,
-  scheduled or drafted send), a reaction, a call (start, join, answer, decline, `add`, a lobby's admit or removal), a
-  chat created, a member added or removed, an invite, a meeting, a mail, a share, a team or channel change. It is
-  denied when anyone on its target, read fresh and in full (no paging key), or anyone it adds, is a person not listed
-  above. A team and its channels are read from the team's own thread.
-- **A write that may reach people and whose target can't be read**: the member read failed, was paged or cut short; an
-  org-wide team; a mutating request on a people-reaching service (chat, calling, Graph, Outlook, SharePoint, AMS, the
-  middle tier's team, meeting and invite paths, CSA, provisioning) that no row maps or carves out; a write the fence
-  can't tie to a target (a `Scope::New` for a kind that creates none, a join naming no chat).
-- **An incoming call from outside**: the lab offers, answers or declines only an invitation addressed to the account
-  whose caller isn't a person outside the lab; every other one rings unanswered, nothing sent for it.
+The agent states the following in its run notice:
 
-## Everything else is allowed
+1. Which lab accounts it will run and which chats, calls, teams, channels or meetings it will use.
+2. Every person those operations reach: everyone on each target and anyone the run adds or invites.
+3. That every person is a lab account or the user's own account, and any explicit service test call uses the
+   approved echo service.
 
-Reads by any method (a `POST` search or people lookup too), the account's own session, tokens and settings, presence
-(the account's own availability), a status note, typing and read receipts, a target nobody else is in, team and channel
-admin on teams of the lab's people, and what a call sends once its entry was let in (follow-ups, `leave`, ring-time
-sends, Trouter delivery responses), each still a sealed type in its captured shape and logged.
+Check the target's actual participants using the available UI, account configuration or protocol reads; do not infer
+that an arbitrary chat or team is a lab target just because a lab account can see it. If the people reached cannot be
+established, do not run that operation. Widening the allowed set needs the user's sign-off. A call scenario answers,
+declines or joins only its own call.
 
-## The fence and the transport
+For example, a two-account smoke run names a and b, their 1:1 chat and a call in it, and confirms that only those two
+lab accounts are reached. The check is made again before a later live run, including a web capture.
 
-These aren't the lab rule; they stay as they are.
+If a run reaches someone outside the allowed set, stop and retain its output. Report what happened and any later
+clean run separately.
 
-- **Nothing runs live against the tenant before the browser fence is armed**: HTTP interception on every host and
-  target, the WebSocket guard, the service worker neutralized.
-- **The fence logs every write**: the native client sends a contacting write only as `Authorized<_>` with a
-  `WritePermit` from `Fence::check` for its exact target, logged to `fence.log` (a query's key names, never its
-  values); only a sealed `Mutating` type in `teams-proto` builds one. A lab binary's transport refuses any request
-  `teams_fence::contacting` doesn't call `None` (the personal build sends it, logged).
-- The transport is `https` only, no proxy, no redirects, to its services' bases, each token only to its own service's
-  host, and never resends a write (the HTTP client's retries stay off). A mock origin exists only under
-  `test-support`, which a lab binary refuses.
-- **No write ever comes from a `cargo test` process**: a live test spawns a normally built lab binary
-  (`--target-dir target/lab`) and reads its output and `fence.log`. Both builds; only the fence policy differs.
-- **Lab binaries get a `WritePermit` only from the lab policy** (`Fence::open_lab`, `Fence::open_lab_account`: roster
-  from `lab.toml`, the lab's `fence.log`); `teams-fence`'s `test-support` is only a `[dev-dependencies]` feature.
-- **Lab and personal stay apart**: a lab binary refuses the personal build's data, keyring items and accounts; the
-  user's own account is only someone the lab may reach, never an account a lab binary signs in as.
-- **No token or credential goes to a third party** (a bot, an app's backend; a bot invoke stays denied). Sign-in and
-  renewal stay in `teams-auth`'s own clients and touch only the account's own credentials.
+## Running the lab client
+
+Use `scripts/run-lab.sh <alias>` for `ngteams`, with `--pipewire` when the test needs media. It builds a normal client
+in `target/lab` with the lab marker, starts its credential broker outside the UI sandbox and opens its window inside
+it. Each alias has its own data/config under the XDG data home's `ngteams-lab/<alias>/` and uses only the
+`ngteams-lab` credential namespace. Several aliases can run together; each holds an exclusive alias lock and a shared
+live lock for its lifetime. The runner applies an outer shutdown deadline and keeps diagnostics after stop.
+
+The user's account is only someone the lab may reach; it is never the identity an agent signs into the lab client.
+Agents run that account only through `scripts/run-personal-read-only.sh`, and install its client only on an explicit
+user request. Every lab or test GUI uses the UI sandbox's display, bus and PipeWire, never the user's own session.
+
+`proto-lab` remains the web-capture and scenario tool. Use its normal build, headless muted browser, exclusive live
+lock and an outer timeout. Explicit capture holds keep selected writes unsent while recording their shape; they are
+capture tools, not a policy that decides whom the lab may reach.
+
+## Transport and records
+
+- Typed requests go through the transport: `https` only, no proxy or redirects, one token per service's host. Writes
+  are single attempts; the outbox owns retries and never blindly resends an unknown outcome or resends across runs
+  without `Store::resend`.
+- The call tracker retains offer filtering, delivery deduplication and callback links; the core's call floor keeps
+  one call or ring across the app's accounts. Responses use the delivery's own connection-bound typed responder.
+- At `debug`, every API call has its full request and response and every Trouter frame is logged, credentials
+  redacted by the logger. At `info`, logs are payload-free. Captures, tokens and debug logs never enter the repo, even
+  sanitized; committed fixtures are synthetic and marked.
+- Live tests never send from a `cargo test` process: they spawn the normal lab client. A `test-support` binary
+  refuses to run. Offline tests use synthetic mocks and isolated sandboxes.

@@ -3,7 +3,7 @@
 //! the call's participants are the ones whose latest entry is active and in the call, in the order they were first
 //! seen. The account's own entry is left out. A meeting's roster also lists who waits in its lobby (an endpoint with a
 //! `lobby` rather than a `call`): told apart, the account's own wait too. Nothing is sent for it: the roster is read only to show who is in the
-//! call, whose video goes where, and who speaks (the fence reads no roster).
+//! call, whose video goes where, and who speaks (independent of call admission).
 
 use teams_proto::Mri;
 

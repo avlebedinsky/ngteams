@@ -122,8 +122,7 @@ A channel is a conversation of the chat service, read with the same reads as a c
 From `proto-lab run channel-create` (2026-11-02): account a in the web client's "Create a channel" dialog of a team of
 the tenant, every write that could make a channel held back by a forced deny, so nothing was ever made; the answers below
 are the web bundle's (`26260.1717.5229.7049`) reading of them, since at the time no lab team could be written to.
-The lab's fence now reads a team's members ([teams.md](teams.md#the-fence)), and `channel-create`'s writing mode
-(`PROTO_LAB_CHANNEL_WRITES=1`) makes channels on the lab's own team. The native client's writes are
+`channel-create`'s writing mode (`PROTO_LAB_CHANNEL_WRITES=1`) makes channels on a lab team after the agent's reach check. The native client's writes are
 `crates/teams-proto/src/write/channel.rs`, its reads `channel_read.rs`, the engine's part `teams-core`'s `channels`, the
 dialog `teams-ui`'s `channel_dialog`.
 
@@ -182,8 +181,7 @@ POST <provisioning>/teams/<team group>/channels/OID:<channel group>@<tenant>/use
 **Seen live** adding b: 200 with `{"multipleStatus": [], "asyncOperations": []}`; the bundle reads `multipleStatus` as those
 that failed (`id`, `statusSubCode`, `message`). No error code was seen live: every write here succeeded. After each creation
 the web client sets the new channel a favourite of the account's (`PUT v1/users/ME/conversations/<channel>/properties?name=favorite&requirePermanentJoinedState=true`,
-`{"favorite": "true"}`, its own list alone) and marks it read (`consumptionhorizon`, which the lab's fence leaves denied on a
-channel). The box's search is a read sent as
+`{"favorite": "true"}`, its own list alone) and marks it read (`consumptionhorizon`). The box's search is a read sent as
 a `POST` on the user profile service (GTM `userProfileService`, `https://<AFD host>/api/userprofilesvc/<region>`, the
 middle tier's token): `api/v1.0/teams/<team thread>/users/profilesearch?top=15&includeDLs=false&includeBots=false&
 enableGuest=true` with `{"keyword": …}`, answered with a list of people (`mri`, `displayName`, `email`, `jobTitle`,
@@ -205,24 +203,14 @@ your channel" with "Try again" (the capture's forced deny showed it).
 under its team, by name, and keeps it against reads that don't name it for ten minutes. A private channel's row carries
 a lock (`channelType` 1; 0 is standard, 2 shared).
 
-**The fence**: a new channel and its people reach the team, so the rows are writes on the team or the channel
-(`WriteKind::ChannelChange`, `MemberChange`; `teams_fence::contacting`'s `contacting/channel.rs`), judged by the team's
-members read from its thread, Teams' own apps not counted ([teams.md](teams.md#the-fence)): the lab's fence lets them through
-on a team of the lab's own and denies them on any other (the dialog then says "We ran into a problem creating your
-channel"). A private channel's people step names the team by its group, so it is judged once the channel's creation read
-the team's thread. The personal build's logs and sends them. The provisioning service is a contacting service: everything mutating
-there but these rows is unreadable.
+A channel's creation and membership changes reach the team/channel's people. For lab tests the agent must include
+them in its reach check. Native typed channel requests use the outbox; a browser capture hold can record the matching
+request without creating a channel. Neither path has a participant-policy classifier.
 
-## No other channel write
+## Channel reading and posting UI
 
-Besides a new channel and a channel meeting's title (`SetMeetingTitle`, an edit of the post's `meeting` property),
-nothing the native client sends can post, reply, react, mark read or type in a channel. What keeps it so is the fence,
-not a missing type: the engine takes a chat write (`Action::Send`, `Action::Read`, …) for any conversation id, a
-channel's too, as a sealed chat write (`PostMessage`, a read receipt) aimed at the channel, and the fence denies it,
-since a chat write's member read never reads a channel's thread as a chat; `teams-core`'s
-`nothing_is_written_to_a_channel` holds it. No write
-is mapped to `WriteKind::ChannelPost`, and the views offer no composer or message action in a channel. The web
-client's channel writes stay unmapped and denied in the browser fence ([endpoints.md](endpoints.md#writes)); a team of
-the lab accounts only, which the fence can now judge by its members, is where they would be mapped and tested. The
-personal build's fence allows them (it denies nothing),
-but the app has no channel composer yet.
+The channel view has no composer or message actions, so the current UI does not offer ordinary channel posts,
+replies or reactions. It reads channel posts and reply roots as described above, and supports channel creation and
+meeting-specific operations such as `SetMeetingTitle`. This is the UI's current feature set, not a transport denial:
+generic typed chat requests no longer carry a fence permit. Any future channel-composer work must implement its UI
+and protocol behavior explicitly.

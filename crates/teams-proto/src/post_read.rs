@@ -12,7 +12,7 @@ use crate::request::Request;
 
 /// A reviewed read by `POST` (see the module docs). Sealed: no other crate can implement it.
 pub trait PostRead: sealed::Sealed {
-    /// The entry's name: what the fence's decision and `fence.log` call it.
+    /// The entry's name for request validation and diagnostics.
     const KIND: &'static str;
 
     /// The MRIs it asks about, in the order its body lists them.
@@ -281,8 +281,7 @@ const LOOKUP_QUERY: &[(&str, &str)] = &[
 
 /// The headers a profile lookup goes out with besides its token: the captured values of those that could change what
 /// it does or name someone, each pinned to the one value every captured lookup carried (5869 lookups in the captures
-/// of 2026-10-20), and `Accept` (the answer's format, free in the browser fence's review; the transport asks every
-/// service for JSON). `x-ms-object-id` is sent empty, as it always was: it would name an account by its object id.
+/// of 2026-10-20), and `Accept` (the transport asks every service for JSON). `x-ms-object-id` is sent empty, as it always was: it would name an account by its object id.
 /// Nothing that names the client's components or the session (`x-ms-client-caller`, `x-ms-request-id`,
 /// `x-ms-session-id`) and no cookie.
 const LOOKUP_HEADERS: &[(&str, &str)] = &[
@@ -334,8 +333,8 @@ static PRESENCE: Shape = Shape {
 
 /// `POST <middle tier>/beta/users/fetchShortProfile?isMailAddress=false&enableGuest=true&skypeTeamsInfo=true&
 /// canBeSmtpAddress=false&includeIBBarredUsers=true&includeDisabledAccounts=true` with a JSON list of MRIs: the short
-/// profiles (names, addresses, object ids) of exactly those accounts. Reviewed from the web client's lookups the
-/// browser fence let through for lab accounts (ab-chat-full of 2026-10-20: each answer named only the accounts asked
+/// profiles (names, addresses, object ids) of exactly those accounts. Reviewed from the web client's lab-account
+/// lookups (ab-chat-full of 2026-10-20: each answer named only the accounts asked
 /// for). Its answer is read with [`ShortProfileLookup::read_answer`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ShortProfileLookup {
@@ -491,7 +490,7 @@ pub enum AnswerError {
 }
 
 /// `POST <presence base>/v1/presence/getpresence/` with a JSON list of `{"mri": …}`: the presence of exactly those
-/// accounts. Reviewed from the web client's reads the browser fence let through for lab accounts (ab-chat of
+/// accounts. Reviewed from the web client's lab-account reads (ab-chat of
 /// 2026-10-22, M2 Task 17: 14 reads of a, b and c, each answered 200 with the presence of the accounts asked for and
 /// nobody else). Its answer is read with [`PresenceRead::read_answer`].
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -641,8 +640,7 @@ impl PresenceSubscription {
     /// The subscription of `endpoint` (a registration of this run) at `push_url` (its socket's push URL, as the
     /// registration takes one: `https://<name>.trouter.teams.microsoft.com[:port]/v4/f/<id>/`), adding `add` and
     /// removing `remove`, its earlier subscriptions dropped first when `purge`. `None` when the push URL isn't one, when
-    /// it names nobody or someone twice, or names a `28:` or `48:` id (no presence to subscribe to). Whether it may go
-    /// out is the fence's decision, as for every entry.
+    /// it names nobody or someone twice, or names a `28:` or `48:` id (no presence to subscribe to).
     #[must_use]
     pub fn new(
         endpoint: &RegisteredEndpoint,
@@ -796,7 +794,7 @@ pub struct SubscriptionStatus {
 
 /// A profile lookup or a presence read with something added that its entry doesn't name (a query pair, a header,
 /// another body): the transport's tests need one to show it sends no request off its entry's captured shape. Tests
-/// only (`test-support`), which a lab binary refuses to run with.
+/// only (`test-support`), which ngteams refuses to run with.
 #[cfg(feature = "test-support")]
 #[derive(Clone, Debug)]
 pub struct ProbePostRead {

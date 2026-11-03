@@ -1,29 +1,29 @@
 # Calling: lab-to-lab calls in the web client
 
-Status: 2026-10-24, M3 Tasks 5 and 6; [The SDP dialect](#the-sdp-dialect) 2026-10-25, M3 Task 7. Written from live runs of `proto-lab run ab-call` (a calls b from their 1:1 chat) and
-`proto-lab run abc-call` (a calls the lab's a–b–c group chat), each step of `--call` (below), Chrome for Testing 155
-headless, muted, with fake devices, the fence armed with the lab rule. The captures stay outside the repository; the
-fixtures in `tests/fixtures/calling/chat/` are synthetic, shaped like them. Ids, hosts' numbers, tokens and addresses
-below are placeholders. The echo test call is in [calling-echo.md](calling-echo.md); the fence's side of a call is in
-[fence-targets.md](fence-targets.md#the-labs-call-rule): a call is judged by its entry (its start, a join, an answer
-or a decline, an `add`), and what it sends once it was let in passes.
+Protocol observations from dated web-client and native runs (2026-10-24–2026-11-03), with synthetic fixtures in
+`tests/fixtures/calling/chat/`. Capture-era holds and denials below describe those experiments, not a current
+permission mechanism. Captures remain outside the repository; IDs, tokens, addresses and host numbers are placeholders.
 
-The code: the scenarios are `crates/proto-lab/src/scenario/ab_call.rs` and `abc_call.rs`; the start's row is
-`chat_call_start`, the callee's and the call's operations `follow_up`, in `crates/teams-fence/src/contacting/call.rs`;
-offered invitations are `crates/teams-fence/src/calls/offer.rs`. The native client's call requests are
-`crates/teams-proto/src/write/call.rs` (each built in the shape below and classified by the same rows), its typed
-delivery responses `crates/teams-proto/src/frame.rs`.
+Current code: typed call requests in `crates/teams-proto/src/write/call.rs`, tracking in `teams-call::track`, the
+cross-account floor in `teams-core::CallFloor`, and connection-bound delivery responses in `teams-proto/src/frame.rs`.
+Web scenarios remain in `proto-lab` for protocol capture with explicit holds. The echo flow is in
+[calling-echo.md](calling-echo.md).
+
+Current native live testing uses `scripts/run-lab.sh a --pipewire` and a separate alias runner for each other account.
+Drive calls through the sandbox UI and stop each run with `scripts/run-lab.sh <alias> --stop`. Before a live run, the
+agent lists the chats, calls and people it reaches and verifies the [lab rule](../lab-rules.md). There are no separate
+native call-command binaries.
 
 ## The runs
 
-| `--call` | Browsers | What is held back (labelled forced denies) | What happens |
+| `--call` | Browsers | What is held back (explicit capture holds) | What happens |
 |---|---|---|---|
 | `start-held` | a | every `POST epconv` (`the call start, held back`) | a clicks the call button(s); nothing rings |
-| `answer` | a, each callee | nothing: the fence judges the answer, and the rest of the call passes | each callee answers by the run's click (only on the run's own lab-only invitation), the call connects, every page turns its noise suppression off and its microphone over, the audio is judged both ways by the WebRTC statistics (the tone noted when heard), then each callee hangs up |
-| `decline` | a, each callee | as `answer` | each callee declines by the run's click, its rejection let through by the fence; a hangs up when its call is still up |
+| `answer` | a, each callee | nothing | each callee answers by the run's click (only on the run's own lab-only invitation), the call connects, every page turns its noise suppression off and its microphone over, the audio is judged both ways by the WebRTC statistics (the tone noted when heard), then each callee hangs up |
+| `decline` | a, each callee | as `answer` | each callee declines by the run's click, its rejection sent; a hangs up when its call is still up |
 | `video` | a, each callee | as `answer` | as `answer`, and once the audio was judged every page turns its camera on; each must decode video |
 | `dropped` | a, each callee | as `answer` | as `answer`, and the last callee's page goes off the network for 10 s with its calling socket closed by the run (it must close; none closed fails the run), then comes back; 25 s later every page must still show the call |
-| `join` | a, b and c (`abc-call`) | as `answer` | b answers; once c's ring ended c opens the chat and, only on the run's own call with the run's chat shown and one join, clicks the header's join of the running call, which the fence judges by the chat it names; c must then show the call screen, and its capture the join let through |
+| `join` | a, b and c (`abc-call`) | as `answer` | b answers; once c's ring ended c opens the chat and, only on the run's own call with the run's chat shown and one join, clicks the header's join of the running call, for that chat; c must then show the call screen, and its capture the join let through |
 | `cancel` | a, each callee | as `answer` | a hangs up 8 s after it placed the call |
 | `timeout` | a, each callee | as `cancel` | nobody acts for 50 s, then a hangs up if its call is still up |
 
@@ -71,11 +71,9 @@ application sharing line) and a data line; its `mediaDescriptions` lists the `re
 **A failed start** (held back by the forced deny) is tried twice more by the client, about a second apart, with the
 same body; then it shows a retry screen (`calling-retry-screen`, `calling-retry-cancelbutton`).
 
-**The fence** maps it as a call in the chat it carries (`WriteKind::Call` on `Scope::Conversation`, the caller and
-every callee added): the group chat `groupChat.threadId` names, or for a 1:1 start the 1:1 chat of the caller and its
-one callee as the chat service names it. Only the captured shape maps; anything else on that URL is unreadable
-([fence-targets.md](fence-targets.md#the-labs-call-rule)). The start's answer is the conversation, as for the test
-call.
+`StartCall::in_chat` builds this captured shape. The tracker registers attempts and binds the answer and later
+callbacks; the core call floor coordinates starts, joins and answers across accounts. No member-read policy or permit
+runs before the write. The start's answer is the conversation, as for the test call.
 
 ## The invitation
 
@@ -154,7 +152,7 @@ participant properties (`updateParticipantProperties`: `{"from", "to": [<itself,
 {"updateParticipantPropertiesStatus"}, "operationId"}`), both to the conversation subscription's links. When it hangs
 up it posts the conversation's `leave`, in the caller's `leave` shape. With the accept held back, the page tried it
 three times, 4 s apart, then gave the leg up with `DELETE …/reject` and `callEnd` code `490`
-`CallEndReasonFetchCorsOrNetwork` (not a decline: the fence maps only the user's).
+`CallEndReasonFetchCorsOrNetwork` (distinct from a user decline).
 
 **How the media goes** (for Task 7): in a 1:1 call the invitation carries the caller's offer (`sdp-ngc-1.0`,
 `requiredFeatures: "nonByPass"`) and the callee's `accept` carries its answer (`mediaContent`: `blob`, `contentType`
@@ -213,8 +211,7 @@ the mixer's control plane, the media descriptions and the bandwidth seed) and th
   playout every 10 ms); the session hands it the microphone's frames after libwebrtc's own audio processing module
   (AEC3, noise suppression, AGC2) and plays its audio on the device seam's speaker, each played frame handed to the
   module as the far end.
-- **The video switch**: the settings' "Video in calls" (on by default; off, a call starts no video), and
-  `teams-headless` takes video with `--video`.
+- **The video switch**: the settings' "Video in calls" (on by default; off, a call starts no video).
 
 ### Native video
 
@@ -242,8 +239,7 @@ A 1:1 call's video in the native client (M3 Task 18), as the web client's camera
   answer's acknowledgement (delivered at its `mediaAcknowledgement` callback) each with an empty `200` delivery
   response, as it answers an invitation. Native runs without them showed the call controller holding the call: the
   acknowledgement came about 22 s after the answer, and a renegotiation in that window was rejected; with the receipts
-  it came in under a second. So the native client sends each receipt (`InvitationReceipt`, decided by
-  `Fence::check_delivery_response` like its other delivery responses: permitted and logged under the lab's call rule).
+  it came in under a second. The native client sends each typed `InvitationReceipt` through the delivery's own connection-bound responder.
 - **A renegotiation rejected with `491`** ("Negotiation is in progress": both ends turned their cameras on at once,
   or the far end's previous negotiation isn't acknowledged yet) goes again with the same offer 3 s later, at most 5
   times, and no other renegotiation of ours begins meanwhile (the camera's button is refused: the offer waiting to
@@ -323,7 +319,7 @@ that made it work, and `abc-call-mixed`'s captures, where the lab browser's data
   `attach`'s (the web joiner's captures), so the native joiner starts from the roster its invitation's `attach` was
   told and takes the updates at both. The native
   client reads it only to show the call (who is in it, whose video is on which line, who speaks); it sends nothing
-  for it, and the fence reads no roster.
+  for it; the call tracker does not impose a participant policy.
 
 ## Joining a running call
 
@@ -343,12 +339,12 @@ its call ended has the same shape. A start in a group chat whose call still runs
 ends at once with `conversationEnd` `409`, `subCode` `5704`, "Conversation cannot be created due to a failure to
 resolve ownership", naming the running conversation (`conversationUrl`) and the chat (`threadId`); the captures show no
 join of that one: the client posts a roster-only join to its own new conversation four times and sends no `leave`
-(seen 2026-10-26). A native start ended so ends its call at once (`End::Remote`, printed by `teams-headless` as
+(seen 2026-10-26). A native start ended so ends its call at once (`End::Remote`, printed by the retired native probe as
 `remote 409 chat has a running call <conversation>`). The service refused a chat's call for about a minute after its
-last call ended, too (seen 2026-10-26, starts ~60 s after a cleanly left call; ones 78 s and later went):
-`scripts/native-call-run.sh` leaves 90 s between calls in a chat (keyed by the chat, however it is named). A failed
-`ab-call`, `abc-call`, `ab-call-native` or `abc-call-mixed` run hangs up every page that shows its call (each waiting
-up to 10 s for its `leave`) before it stops its native clients and closes, so it leaves none running.
+last call ended, too (seen 2026-10-26, starts ~60 s after a cleanly left call; ones 78 s and later went).
+
+Allow for that service settling time when arranging consecutive lab calls. A failed web scenario hangs up its own
+call before it closes; current native runs must likewise hang up in the sandbox UI before stopping the runner.
 
 ## Joining a meeting
 
@@ -370,7 +366,7 @@ creates the conversation when nobody had: the first to subscribe is its `groupCa
 
 Then the page posts its real callbacks (`POST …/conv/<id>/notificationLinks`) and on Join now its entry at the
 conversation (`POST …/conv/<id>` with `callInvitation`: a join's shape, with `suppressDialout: true`, the subject `""`
-and `participants.to: []`). Both are mapped since 2026-11-03 (`meeting-steps`, a's web client into its own meeting):
+and `participants.to: []`). Both shapes were captured on 2026-11-03 (`meeting-steps`, a's web client into its own meeting):
 the entry is a join of the meeting's chat, judged by that chat read fresh as a group chat's join is (only in its captured
 shape: `messageId` `"0"`, the organizer and tenant GUIDs, nobody to ring), and the callbacks
 (`CallOperation::NotificationLinks`: the sender and its callbacks by their captured names, `admitParticipantSuccess`,
@@ -378,7 +374,7 @@ shape: `messageId` `"0"`, the organizer and tenant GUIDs, nobody to ring), and t
 while its pre-join still shows (a **preheat**: the same entry with `endpointState.endpointProperties.preheatProperties:
 1`, its media lines receive-only, and `meetingData: {meetingCode, passcode}` beside `groupChat` and `meetingInfo`); Join
 now then ends the preheat with `POST …/conv/<id>/updateEndpointState` (`endpointProperties.preheatProperties: 0`), and
-the client is in the meeting. Both are mapped the same way. `ab-meeting-join` still holds them back by name.
+the client is in the meeting. `ab-meeting-join` retains explicit holds for both shapes.
 
 With the subscription or the entry not going through, the client instead sends the whole of it as one **start with
 media**, `POST …/api/v2/epconv`: `conversationRequest` (`conversationType: null`, `subject: null`, `suppressDialout:
@@ -387,20 +383,18 @@ true`, the callbacks), `contentSharing: null`, `participants: {from, to: []}`, t
 a meeting with its own chat, once or a series'; a channel's meeting is its other value), `meetingData: null`,
 `endpointState`, `callInvitation` (`callModalities: ["Audio", "ScreenViewer"]`, a group call's offer with its
 `mediaDescriptions`), `debugContent`, `participantPropertyBag`. **That is the native client's**
-(`StartCall::in_meeting`, `CallAction::JoinMeeting`, `teams-headless <alias> join-meeting <link>`): the conversation's
+(`StartCall::in_meeting`, `CallAction::JoinMeeting`, the retired native probe): the conversation's
 answer as any start's, an acceptance from the conference's mixer at its `acceptance` callback, then as a join's. Seen
-live 2026-11-02 (`teams-headless a` then `b join-meeting`, each of a single meeting and a series' occurrence): a started
+live 2026-11-02 (the retired native probe then `b join-meeting`, each of a single meeting and a series' occurrence): a started
 a call nobody had (`status` placing, joining, connecting, connected, about 5 s), b's same start 25 s later joined it,
-and each heard the other's tone; the fence read the meeting's chat fresh both times (the invitee is a member of it from
-the meeting's creation). The start's answer lists who is in the call already (`roster.participants`, as an update's);
+and each heard the other's tone. The start's answer lists who is in the call already (`roster.participants`, as an update's);
 the updates after it tell only changes.
 
 A link with no thread or organizer (`https://teams.microsoft.com/meet/<code>?p=<passcode>`) resolves differently: the
 page read `GET …/api/mt/part/<partition>/beta/meetings/identifiers?meetingId=&passcode=&link=` (it answered
 `{"tenantId": ""}`) and subscribed and started by `meetingData: {meetingCode, passcode, meetingUrl}` and
 `meetingPreferences: {shouldResurrect: "resurrect"}`, `groupChat` and `meetingInfo` both `null` (its start with media
-the same, with a `callInvitation`). The fence can't tie that to anyone, so no row maps it. The native client doesn't
-send it: a calendar event with such a link names its chat (`skypeTeamsData`'s `cid`), and the meeting's chat's thread
+the same, with a `callInvitation`). The native client does not implement that direct short-link start: a calendar event with such a link names its chat (`skypeTeamsData`'s `cid`), and the meeting's chat's thread
 names its organizer and tenant (`GET chatsvc v1/threads/<chat>?view=msnp24Equivalent`, `properties.meeting`: a JSON
 object as text with `organizerId`, `tenantId`, `subject`, `meetingJoinUrl`, `meetingType`, `startTime`; seen
 2026-11-02, `meeting-steps`, and in `ab-meeting-join`'s web client, which reads the same batch form), so it joins by
@@ -408,14 +402,10 @@ the chat as above (`teams_proto::MeetingThread`). The meeting chat's header does
 header has it whether the meeting started or not. "Join with an ID" finds the meeting among the calendar's events by
 the ID and passcode their short link carries (`MeetingCode`) and joins it so; an ID the calendar doesn't have is looked
 for among the account's meeting chats (the newest 40 the chat list holds), each one's thread read for its join link
-(`MeetingThread`'s `meetingJoinUrl`), and the meeting whose link carries the ID is joined by its chat as above, judged by
-that chat read fresh. Joining by `meetingData` alone stays unmapped, because nothing the lab can read ties an ID to the
-people in its meeting before a write: the identifiers read (`GET …/beta/meetings/identifiers?meetingId&passcode&link`)
-answers only `{"tenantId": ""}` for a valid ID, the meeting's chat (its members) can be read only by its members, and the
-meeting's conversation, which names its chat, comes only in the answer to a subscription or a start, both writes. So a
-meeting whose chat the account isn't in (an ID someone passed on) is refused. Seen 2026-11-03 (`teams-headless a meetings
---read`): the threads of meetings made from the scheduling form name their long `meetup-join` link, not the short one,
-so only a meeting whose thread names a short link is found by its ID this way.
+(`MeetingThread`'s `meetingJoinUrl`), then joined by its chat as above. Direct joining by `meetingData` alone is not
+implemented. A meeting that cannot be resolved through a calendar event or an account-visible meeting chat is not
+joined by this flow. The 2026-11-03 native probe found that scheduling-form meetings' threads name the long
+`meetup-join` link; only a thread naming a short link can be found by its numeric ID this way.
 
 **A channel's meeting**: see [A channel's meeting](#a-channels-meeting).
 
@@ -427,7 +417,7 @@ muted to avoid causing audio disruption."). Don't use audio changes nothing of t
 `{"endpointStateSequenceNumber": 1, "state": {"isMuted": true}}`, the same `callModalities` (`Audio`, `ScreenViewer`)
 and offer. The web client also enters the meeting's conversation while its pre-join shows, before Join now
 ("preheat": `endpointState.endpointProperties.preheatProperties: 1`, the entry carrying the meeting's `meetingData`
-code beside `groupChat` and `meetingInfo`); mapped since 2026-11-03 as the entry is (above). The native client offers
+code beside `groupChat` and `meetingInfo`), captured on 2026-11-03. The native client offers
 Computer audio, Phone audio greyed out and Don't use audio (it joins muted, as its mute after the media is up); Room
 audio isn't offered. Three things block it: the lab's tenant has no room, so neither a search's answer with one nor
 what joining a room's audio sends (the room device is told to join, a write to it no capture shows) can be seen; the
@@ -452,16 +442,11 @@ entry with its call invitation, `groupChat` the channel and the post's id, `meet
 `meetingType` `-1` on the roster-only one), `meetingData` the meeting's code and passcode. When everyone left, the post
 reads "Meeting in "General" ended".
 
-The fence maps the Meet now (its subscription and its start with media) as a call on the channel's team
-(`Scope::Team`, `contacting::call::channel_call_start`) and every entry naming a channel as a join of that channel
-(`CHANNEL_JOIN`), each judged by the team's members read fresh from the team's thread, Teams' own apps not counted, as
-any write on a team is (`docs/lab-rules.md`, "A team and its channels"). The team's first channel's thread is the team's
-root; another standard channel's thread read (`GET v1/threads/<channel>?view=msnp24Equivalent`, seen 2026-11-02 in
-`channel-create`) has `threadType` `topic`, `spaceId` (the team's root thread) and the team's `groupId`, so the fence reads
-the channel's thread, then the root it names, which must be a team's root naming the same group, then the root's members
-(`teams_fence::parse_channel_thread`). A private channel's thread is a `space` of its own (`productThreadType`
-`TeamsPrivateChannel`, its own `groupId` the team's), read with its own members. The native client joins a running channel meeting:
-the channel's header shows **Join** while CSA names a meeting running in it (read when the channel opens and every 30 s
+A standard channel's thread read (`GET v1/threads/<channel>?view=msnp24Equivalent`, seen 2026-11-02) names
+`threadType: topic`, `spaceId` (the team's root) and `groupId`. A private channel's thread is a `space` of its own
+(`productThreadType: TeamsPrivateChannel`). These are service identity shapes, not a write-permission check.
+
+The native client joins a running channel meeting: the channel's header shows **Join** while CSA names a meeting running in it (read when the channel opens and every 30 s
 while it shows, `Core::channel_meetup`), which opens the pre-join, and Join now reads the meeting again and enters it at
 its conversation in the web client's entry shape (`Calls::join_channel_meeting`). While none runs, the header has
 **Meet now** with its caret's menu, as Teams' has: it opens the pre-join titled `Meeting in "<channel>"`, and Join now
@@ -488,7 +473,7 @@ went in (the join judged by the channel's team, a in the call). What looked like
 b's stored teams list, read only when it is an hour old: the engine now reads the teams again when a team's thread it
 doesn't name comes, or a team's activity (`ThreadActivity/…`, a channel made: `SpaceThreadChannelAdded`) is delivered
 ([channels.md](channels.md#what-the-native-client-reads)).
-`teams-headless <alias> channel-meeting <channel> [--join] [--subject <text>]` does the same from the command line.
+Use the sandboxed `ngteams` channel header and pre-join for this native flow.
 
 **The Meet now's subject** (seen 2026-11-03, `meeting-steps`, a team of the lab's own with a alone, deleted after): the
 pre-join shows "Microsoft Teams meeting" over a text box holding `Meeting in "<channel>"`, which the user may change;
@@ -497,12 +482,11 @@ post), the web client titles that post: `PUT …/chatsvc/<region>/v1/users/ME/co
 with `{"meeting": {"meetingtitle": <subject>}}`, edited or not (earlier runs' captures show it with the unedited
 `Meeting in "<channel>"`). Until then the post's `properties.meeting` names the meeting (`ScheduledMeetingCreated`, its
 `organizerId`, its join link) with `meetingtitle` `null`; the web client's card then reads "<subject>", and "<subject>
-ended" once a `callEnded` post of the same `callId` came. The fence maps it as an `Edit` on the channel's team
-(`Scope::Team`, `contacting/chat.rs`): everyone on the team sees the post. The native pre-join of a Meet now shows the
+ended" once a `callEnded` post of the same `callId` came. The post is visible to the channel's members. The native pre-join of a Meet now shows the
 same heading and box (`Calls::set_prejoin_title`), and once Join now asked the meeting, the engine looks at the
 channel's newest posts every 3 s for up to 2 minutes for a meeting the account organizes, posted since a minute before
 the ask, and titles it (`SetMeetingTitle`, `EngineRequests::title_meet_now`). Seen live 2026-11-03: the native title
-went through (the fence's `edit` on the team), and the web client showed the post as "<subject> ended" after the
+succeeded, and the web client showed the post as "<subject> ended" after the
 call. The channel view shows such a post's title the same way.
 
 **Schedule a meeting** (the caret's other item, seen 2026-11-03 with the event's creation held back): the scheduling form
@@ -548,16 +532,15 @@ over it: its read-only parts (`lastModifiedTime`, `bodyPreview`, `meetingLocatio
 `skypeTeamsDataObject`, …) left out, `attendees` the organizer (`Admin`, `Organizer`, with its MRI) and the team's
 mailbox (`Required`), `organizerAddress` and `organizerName` the organizer's, `mailboxAddress` the team's, a new
 `clientOptimisticEventId`>, "fetchEventContract": {"eventType", "startTime": <its start as read, UTC, ms>,
-"eventTimeZone": "UTC"}}`. Seen live natively the same day (`teams-headless … channel-schedule --rename`): answered
+"eventTimeZone": "UTC"}}`. Seen live natively the same day (the retired native probe): answered
 2xx, and the service edits the channel's post in place (its `properties.meeting` gets the new `meetingtitle`, the post
 a new version); no reply is posted under it.
 
-The fence maps the creation, the change and the cancellation as a `Meeting` on the team's calendar
-(`Scope::TeamCalendar`: the channel the body names and the mailbox the path names; a change's event must name the
-`iCalUID` its path does), judged by the channel's team read fresh, Teams' own apps not
-counted, as any write on a team: the root thread the channel names must be the team's own (no `productThreadType`) and
-name the mailbox as its `teamSmtpAddress` (or `aadTeamSmtpAddress`), so a write naming a lab channel can't reach another
-group's calendar. Personal invites reach the channel's members, the same team. The native client: the channel header's
+The group's calendar is addressed by its team mailbox; the update and cancellation identify the event by `iCalUID`.
+The scheduling form carries the channel identity and the service's mailbox data in its typed request. The agent's lab
+reach check must include the channel/team membership and any personal invitations.
+
+The native client: the channel header's
 Meet now menu offers **Schedule a meeting** for a standard channel of a team whose mailbox CSA named; it opens the
 scheduling form with the channel's row (and Send personal invites) in place of the Teams meeting switch, and its Send
 creates the meeting there (`EventWrite::CreateInChannel`, `CreateChannelEvent`). The channel view draws the post as the
@@ -568,7 +551,7 @@ calendar's card of that meeting offers Edit and Cancel meeting too (a double cli
 there (`EventWrite::UpdateInChannel`, `UpdateChannelEvent`), its Cancel meeting cancels it with the note
 (`EventWrite::CancelInChannel`). Seen live 2026-11-03 (a team of the lab's own, a and b, a channel other than General,
 deleted after): the native creation answered `201`, the post came, a's calendar held it, and the native cancellation
-(`teams-headless a channel-schedule <channel> <title> --cancel`) went through; again the same day (a team with a alone,
+(the retired native probe) went through; again the same day (a team with a alone,
 deleted after) with the change (`--rename`) between them, its post renamed in place.
 
 ## The lobby
@@ -578,12 +561,12 @@ Who waits in a meeting's lobby is the meeting's option `AutoAdmittedUsers` (`Eve
 `EveryoneInCompanyExcludingGuests`, `InvitedUsers`, `OrganizerOnly`), set from the meeting options page
 (`https://teams.microsoft.com/meetingOptions/?organizerId&tenantId&threadId=<chat, its colon an underscore>&messageId=0`):
 its Save posts every option to `POST …/api/mt/part/<partition>/beta/meetings/v1/options/<tenant>/<organizer>/<chat>/0/?monarch=true`
-(answered `200`; the fence lets it through while it picks nobody). `UsersCanAdmitFromLobby` says who admits. A meeting's
+(answered `200`). `UsersCanAdmitFromLobby` says who admits. A meeting's
 conversation lists `admit` and `admitAll` among its `links`, `activeModalities.lobby` (`null` outside it) and the
 roster's `participantCounts.lobbyParticipants`. What a joiner held in the lobby is told, and what admitting or denying
 one sends, wasn't captured: in the 2026-11-02 run the web client's entry at the conversation (`POST …/conv/<id>` with
 its `callInvitation`, unmapped and denied) failed its join before the lobby ("Try joining again, or dial in"), and the
-native client, which starts by the mapped start with media, couldn't run (the lab's keyring was gone).
+native client, which starts by the typed start with media, couldn't run (the lab's keyring was gone).
 
 Seen 2026-11-03 (`meeting-steps` with a's web client in its own meeting, its options saved with `OrganizerOnly`, and b's
 native client joining by the link): b's start with media is answered as any (`200`/`201`, the conversation and its
@@ -600,13 +583,12 @@ or it was turned away) its entry goes `inactive` with no endpoints.
 - **Deny**: `POST …/conv/<id>/removeParticipant` (its `removeParticipant` link) with `{"participants": {"from", "to":
   [{"id"}]}, "links": {"removeParticipantSuccess", "removeParticipantFailure"}}`; the card goes from the page at once.
 
-Both are mapped as an `add` is judged: the sender and everyone named the lab's people ([lab-rules.md](../lab-rules.md))
-(`CallOperation::Admit`, a `WriteKind::Invite`, and `CallOperation::RemoveParticipant`). The native client: the roster's
+Both actions name the affected people. The agent includes them in its [lab reach check](../lab-rules.md); the native requests are typed `DecideLobby` actions. The native client: the roster's
 lobby is read apart from who is in the call (`teams-call`'s `CallEvent::Lobby` for whoever waits,
 `CallEvent::InLobby` for the account itself); the call shows `CallStatus::Lobby` ("Someone in the meeting should let you
 in soon") while the account waits, and the call window shows whoever may admit Teams' "Waiting in the lobby" card with
 Deny and Admit (`CallAction::Lobby`, `DecideLobby` with the web client's callbacks). Seen live 2026-11-03
-(`teams-headless a join-meeting --admit` and `b join-meeting`): b told `lobby`, a told b waiting, a's admit answered
+(the retired native probe and `b join-meeting`): b told `lobby`, a told b waiting, a's admit answered
 `202`, a told nobody waiting and b saw a in its call.
 
 **What the admitted joiner gets** (seen 2026-11-03, `meeting-steps`: b's web client let into a's meeting, every one of
@@ -624,7 +606,7 @@ renegotiates the new session (`newOffer: false`, `sdp-ngc-1.0`), its answer link
 acknowledgement hands out no call leg. The web client posts nothing to `retargetCompletion`. The native client does the
 same: its media set up again for the mixer's first offer (`Calling::rebuild`, the roster's participants kept), the
 retarget's acknowledgement followed (the call registry moves the call to the new call id and binds its links as an
-acceptance's, `teams-fence`'s `Call::follow_retarget`; the call machine takes the new `mediaRenegotiation` and call
+acceptance's, in `teams-call::track`; the call machine takes the new `mediaRenegotiation` and call
 leg, `Calls::retargeted`), and the renegotiations after it answered on the media set up for the mixer (a call's offers
 after its rebuild are its own renegotiations, not another session). Seen live 2026-11-03: b's native client let in by
 a's web client stayed in the meeting 40 and 60 s and hung up itself, every write permitted, its audio frames sent and
@@ -635,7 +617,7 @@ received.
 `dropped`: with the callee's page off the network (DevTools' emulation fails new requests; open sockets stay, so the run
 closes the calling socket itself) its calling socket closed; while offline nothing reconnects. Back online the page
 allocates a new Trouter connection (`POST …trouter…/v4/a`), registers its endpoint again (`POST …/registrar/prod/V2/
-registrations`, a plain request the fence lets through), and its new connection ran over socket.io XHR polling
+registrations`), and its new connection ran over socket.io XHR polling
 (`POST …/socket.io/1/xhr-polling/<id>`). It sent nothing to the call: no `notificationLinks`, no link of the call
 changed in the 25 s after; the call's media went on, the call stayed up on both pages, and the callee's `leave`
 afterwards passed on the same links.
@@ -650,25 +632,23 @@ Two keep-alives came, from each page:
   {}}` to its call leg's own `callLeg` link: the caller's from its acceptance (`…/cc/v1/active/<call>/<n>/<leg>/<n>
   ?i&e`), the callee's from its accept's answer (the same form, a leg of its own). Denied (the caller's as unreadable,
   the callee's held back), each page tried it again twice, 4 s apart, then waited for the next interval. Its answer
-  isn't captured. Mapped since: `CallOperation::KeepAlive` to the call leg's own link, exactly that body, passing once
-  the call was let in ([endpoints.md](endpoints.md#calling-teamsmicrosoftcomtrap-apiflightproxyteamsmicrosoftcomapiv2));
+  wasn't captured in that run. The typed `KeepAliveCall` sends exactly that body to the call leg's own link ([endpoints.md](endpoints.md#calling-teamsmicrosoftcomtrap-apiflightproxyteamsmicrosoftcomapiv2));
   the native client sends it the same way (`teams-call`, every 90 % of the interval while the call is up, a keep-alive
   not taken ending nothing). Live, a native a → b call held 42 minutes: both ends sent it 2430 s into the call, each
   answered `202`, every write of the call permitted.
 - **The conversation's** (`sendConversationKeepAlive`, its period from the client's configuration): about 2200 s into
   the call each page posted its conversation subscription again (`participants.from`, `roster`, the conversation's
-  callbacks) to the conversation's `notificationLinks` link, tried twice more 4 s apart. Not mapped: no native
-  request is made for it.
+  callbacks) to the conversation's `notificationLinks` link, tried twice more 4 s apart. No native request is implemented for it.
 
 With both denied throughout, the call stayed up on both pages past 2820 s, its media going on, until b hung up: neither
 keep-alive missing ended it within the run.
 
-## Native lab calls
+## Historical native call measurements
 
-M3 Task 16, release lab builds of `teams-headless` (`scripts/native-call-run.sh`, `proto-lab run ab-call-native`), each
-writing through its own fence. Setup is from the caller's placing to its media connected, the callee's answer by
-`watch --answer-lab-calls` in it; latency is a keyed tone's onset at the sender's microphone to its onset in the far
-end's recording, the two processes' files lined up by when their devices opened (one clock, one machine):
+These M3 Task 16 measurements used retired native probe binaries and synthetic media. They remain protocol/performance
+evidence, not runnable commands. Current native call testing uses the sandboxed `ngteams` UI through `run-lab.sh`.
+Setup is caller placement to media connection. Latency is a keyed microphone tone to the far-end recording, aligned
+by device-open time on one machine.
 
 | Call | Runs | Setup | Latency p50 (per direction and run) |
 |---|---|---|---|
@@ -687,7 +667,7 @@ call; a native callee whose call ended while its endpoint metadata was on its wa
 
 - **The caller cancels** (`cancel`): a's `leave` on the conversation, its `callTransactionEnd` with `code 487`,
   `phrase: "CallEndReasonLocalUserInitiated"` and `callQualityDiagnosticsInformation: {cancelationDuration: <s>}`
-  (mapped as the call's `leave`); a receives its call's `conversationEnd` and call `end` deliveries. A callee whose
+  (the typed `LeaveCall` shape); a receives its call's `conversationEnd` and call `end` deliveries. A callee whose
   `attach` went receives the call's end at its attach's `call/end` callback (which ends its offered invitation); one
   whose `attach` never went receives nothing of the call after it: a missed call appears in its activity feed
   (`48:notifications`, `activityType: call`, `activitySubtype: missedCall`) and its call log (`48:calllogs`).
@@ -702,13 +682,13 @@ call; a native callee whose call ended while its endpoint metadata was on its wa
   then the call's `end` and `conversationEnd`; the group call ends without voicemail.
 - **The caller's join after it left** (group calls): after its call ended or it hung up, a's page posts a roster-only
   join to the conversation controller itself ([Joining a running call](#joining-a-running-call)), and retries it twice,
-  4 s apart. The fence judges it by the group chat it names, lab-only, and lets it through.
+  4 s apart. The request names the group chat.
 - **Answered, declined**: [The answer](#the-answer), [The decline](#the-decline).
 - **Answered elsewhere** (`ab-call-native`'s third phase: b's web client and b's native client up together, a's call
   answered on b's page): b's native client's ring ends 1.2–1.6 s after the page's click with a delivery at its
   attach's `call/end` callback, `code 487`, `phrase: "Call cancelled as it was accepted by another fork."`; it sends
   nothing for it.
-- **A group callee's ring that runs out** (`teams-headless c join abc`, nobody acting on c's endpoint): about 55 s
+- **A group callee's ring that runs out** (the retired native probe, nobody acting on c's endpoint): about 55 s
   after the invitation, `code 487`, `phrase: "Call cancelled on timeout."`, at the attach's `call/end` callback; the
   call runs on, and the invitation's conversation stays joinable.
 

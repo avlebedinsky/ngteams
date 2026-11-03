@@ -17,7 +17,7 @@
 //! - **Its day**: the date's hours beside the form, the new event's block in green over the day's events, moved by a
 //!   drag (its top and bottom handles change its start and end) or a click on an empty half hour. The Scheduler
 //!   ([`scheduler`]) takes its place: everyone's busy times in a column each, and the times all of them are free.
-//! - **Save** goes through the engine (`teams_core::calendar`): one write, under the fence; the window closes once it
+//! - **Save** goes through the engine (`teams_core::calendar`): one typed write through the outbox; the window closes once it
 //!   went through and the calendar reads its days again, and stays open saying why when it didn't.
 //! - **Read-only** (`Core::read_only`): the form shows the event and offers no Save, Cancel or Delete.
 //! - **Traced**: `event-form opened` (`new` or `change`), `event-form saved` / `not-saved` with the write's kind.

@@ -246,8 +246,8 @@ impl Invitee {
 
 /// The endpoint's callback links a request hands the call's services, by name (`acceptance`, `end`,
 /// `conversationEnd`, `mediaRenegotiation`, …): each the endpoint's Trouter push URL, its call agent and a segment of
-/// its own. Which names a request may carry is the fence's shapes' to say (a name none of them reviewed makes the
-/// request unmapped), and the call registry holds every link to the endpoint's own call agent.
+/// its own. Each typed request constructor validates the names it accepts, and the call tracker holds every link
+/// to the endpoint's own call agent.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Links(BTreeMap<String, String>);
 

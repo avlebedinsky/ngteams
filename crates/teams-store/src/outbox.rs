@@ -50,7 +50,7 @@ pub enum OutboxState {
     Sending,
     /// The service took it, or our message came back.
     Sent,
-    /// The fence denied it: nothing was sent.
+    /// Refused before sending: nothing was sent.
     Denied,
     /// The service refused it for good.
     Failed,

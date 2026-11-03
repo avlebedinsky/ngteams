@@ -204,7 +204,7 @@ pub(crate) fn read_horizon(state: &mut State, call: &Call<'_>, chat: &str) -> Re
     status(200)
 }
 
-/// `POST v1/threads` (`docs/protocol/fence-targets.md`): `{members: [{id, role}], properties: {threadType: "chat"}}`
+/// `POST v1/threads` (`docs/protocol/chat-service.md`): `{members: [{id, role}], properties: {threadType: "chat"}}`
 /// with the caller among the members. With `uniquerosterthread` and two members it is their 1:1 chat (the one there
 /// is, if any), otherwise a new group chat. Answered 201 with `{"threadResource": <the thread read>}` and a
 /// `Location`.
@@ -320,7 +320,7 @@ fn is_deleted(message: &Value) -> bool {
     message["properties"].get("deletetime").is_some()
 }
 
-/// A message `messagetype`, as the fence maps it (`Text`, `RichText`, `RichText/…`).
+/// A message `messagetype` in the captured forms (`Text`, `RichText`, `RichText/…`).
 fn is_message(messagetype: &str) -> bool {
     messagetype == "Text" || messagetype == "RichText" || messagetype.starts_with("RichText/")
 }

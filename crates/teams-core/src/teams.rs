@@ -20,9 +20,8 @@
 //!   [`Event::Teams`](crate::Event::Teams) too. The chat list asks for them
 //!   ([`EngineRequests::chat_listing`](crate::EngineRequests::chat_listing)), which starts a read as asking for the
 //!   teams does.
-//! - **Writes**: a new channel's are [`crate::channels`]'; nothing here writes, and a chat write the engine takes for a channel's id (a post, a read receipt:
-//!   sealed chat writes aimed at the channel) is denied by the fence, which never reads a channel's members complete.
-//!   No write is mapped to `WriteKind::ChannelPost`. The fence, not a missing write type, keeps channels unwritten.
+//! - **Writes**: creating and managing channels uses [`crate::channels`]. This module only reads and stores teams
+//!   and channel posts; the channel view offers no composer or message actions.
 
 use std::collections::HashSet;
 use std::sync::Arc;

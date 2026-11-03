@@ -2,12 +2,10 @@
 //! asks, the people a private channel starts with added, its thread waited for, and the people on a team a name finds.
 //!
 //! - **Writes** ([`Channels::create`], [`Channels::add_members`]): sealed `teams-proto` writes through the outbox's
-//!   one-attempt kind ([`Outbox::try_channel`]), as the calendar's: every attempt under a fresh `Fence::check` with its
-//!   `fence.log` line, no row, nothing sent again by a later run; one more attempt only after a 401 or a short throttle
+//!   one-attempt kind ([`Outbox::try_channel`]), as the calendar's: no row, nothing sent again by a later run; one more attempt only after a 401 or a short throttle
 //!   ([`CallRetries`]), never after an unknown outcome (a channel made twice is worse than a failed save). A creation
 //!   that wasn't answered with a 2xx is [`EngineError::ChannelNotCreated`], saying which of Teams' problems it was
-//!   ([`ChannelProblem`]). The lab's fence judges them by the team's members, apps and bots left out: a team of
-//!   the lab's people only lets them through.
+//!   ([`ChannelProblem`]).
 //! - **The list** ([`Created`]): a channel made is stored at once, through the engine's loop, so the sidebar shows it and
 //!   the shell can open it before CSA's list names it; [`crate::teams::Teams`] keeps it for a while against a read that
 //!   doesn't name it yet, and reads the list again.

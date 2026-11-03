@@ -5,7 +5,7 @@
 //!   [`GraphUser`]); the middle tier's profile lookup (`users/fetchShortProfile`, a read sent as a `POST`,
 //!   [`ShortProfileLookup`], sent by [`Client::lookup`], whoever it names), for a name Graph doesn't give; the name
 //!   the person's newest stored message carried (`imdisplayname`);
-//!   a name the binary knows already ([`Parts::known_names`](crate::Parts::known_names): a lab binary's lab accounts,
+//!   a name the binary knows already ([`Parts::known_names`](crate::Parts::known_names): provisioned lab accounts,
 //!   from `lab.toml`). Else none, and a view shows the MRI. A **picture** is Graph's 96×96 one ([`GraphPicture`]);
 //!   without one a view draws initials.
 //! - **Kept in the store** ([`teams_store::Profile`]) and read again once older than [`PROFILE_MAX_AGE`]. A read that
@@ -47,7 +47,7 @@ pub enum NameFrom {
     ShortProfile,
     /// The person's newest stored message (`imdisplayname`).
     Message,
-    /// A name the binary knew already (a lab binary's lab accounts).
+    /// A name the binary knew already (provisioned lab accounts).
     Known,
 }
 

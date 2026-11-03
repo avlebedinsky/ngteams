@@ -1,10 +1,8 @@
-//! The native client's core: what the user asks for goes out through the [`outbox`], every attempt under a fresh
-//! decision of the fence; what comes back is matched to the outbox by its `clientmessageid` and kept in the account's
-//! `teams-store`.
+//! The native client's core: what the user asks for goes out through the [`outbox`] as typed requests; what comes
+//! back is matched to the outbox by its `clientmessageid` and kept in the account's `teams-store`.
 //!
-//! - [`outbox`]: commands as outbox rows with a `clientmessageid` of their own, each attempt a fresh `Fence::check`,
-//!   the outbox's part of the plan's retry table, our own messages matched to their rows when they come back, and no
-//!   resend across runs.
+//! - [`outbox`]: commands as outbox rows with a `clientmessageid` of their own, bounded retries, our own messages
+//!   matched to their rows when they come back, and no resend across runs without explicit `Store::resend`.
 //! - [`sync`]: the catch-up sync, on start and after every reconnect of the push channel: the conversation list and
 //!   each changed conversation's messages read through the service's own sync links and stored once, through the
 //!   outbox's [`Outbox::receive`]; it fills the outbox's [`ConversationSync`] seam.
@@ -29,8 +27,8 @@
 //!   read-only, as a channel's posts are.
 //! - [`calling`]: the account's calls (M3 Task 14): the call session joining the signaling machine (`teams-call`), the
 //!   calling stack's socket, the outbox's call kind and the call's media (`teams-media`).
-//! - [`account`]: one account's engine, assembled the one way every binary builds it (its session over the secret
-//!   store the binary hands in, the fence and the member read it opened); `ngteams` gives it the account's parts.
+//! - [`account`]: one account's engine, assembled with its session over the selected secret store, transports and
+//!   shared call floor; `ngteams` gives it the account's parts.
 //!
 //! M1 Tasks 13, 17 and 18 (`docs/plans/20261020-native-teams-m1-headless-chat-core.md`); M2 Task 5
 //! (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).

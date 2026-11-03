@@ -1,6 +1,6 @@
 //! A call's media in the engine: set up before the account's start, join or answer goes ([`prepare`]: the relay's
 //! credentials read, the session started without its devices (libwebrtc allocating on the relay), our offer or our answer
-//! written in Teams' dialect), its devices opened once that start, join or answer passed the fence and was taken
+//! written in Teams' dialect), its devices opened once that start, join or answer was admitted and taken
 //! ([`open_devices`]), the far end's SDP applied and renegotiations answered or offered while it runs ([`apply`],
 //! [`answer`], [`reoffer`]), the camera turned on or off with the renegotiation it takes ([`camera`]; offered again
 //! once a renegotiation of ours gave way to the far end's, [`offer_camera`]), and what the session reports turned into
@@ -71,7 +71,7 @@ impl Relay {
 }
 
 /// What a call's media is made of: the devices it opens (the microphone and the speaker, only once the account's
-/// start, join or answer passed the fence and was taken; the camera only on the account's action), the relay it goes
+/// start, join or answer was admitted and taken; the camera only on the account's action), the relay it goes
 /// through, how the session runs, and its video (`None`: calls without video).
 #[derive(Clone)]
 pub struct CallMedia {
@@ -225,7 +225,7 @@ fn set_up(
         servers: media.relay.servers(),
         credentials: credentials.clone(),
     };
-    // no device opens before the call's start, join or answer passed the fence (`open_devices`)
+    // no device opens before the call's start, join or answer was admitted (`open_devices`)
     let session = MediaSession::start_without_devices(&relay, media.session).map_err(|error| text(&error))?;
     let mut dialect = NgcSession::new();
     let video = start_video(&session, media.video.as_ref(), kind);

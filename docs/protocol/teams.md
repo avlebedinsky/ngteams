@@ -4,11 +4,11 @@ Status: 2026-11-02. From `proto-lab run team-manage`: lab account a in the web c
 team pages under the armed fence, driven step by step. What the fence let through is marked **seen live**: a private team
 made by a (the lab's only team of its own) and its channels hidden. Everything else went only as far as the fence: the page
 sent it, the capture holds its method, path and body, the fence denied it, so its shape is captured and **its answer is the
-web bundle's reading (`26260.1717.5229.7049`) until a write gets through**. See [The fence](#the-fence) for why. The native
+web bundle's reading (`26260.1717.5229.7049`) until a write gets through**. Those limits describe the dated capture, not the current native write path. The native
 client's writes are `crates/teams-proto/src/write/team.rs`, its reads `team_read.rs`, the engine's part `teams-core`'s
 `team_admin`, the pages `teams-ui`'s `teams_page`, `manage_team`, `join_team`, `team_dialogs` and `team_menu`.
 
-**2026-11-03**: with the lab's fence reading a team's members ([The fence](#the-fence)), `team-manage` with
+**2026-11-03**: `team-manage` with
 `PROTO_LAB_TEAM_WRITES=1` wrote on the lab's own team, each write permitted and answered: Team details' Edit (`PATCH`, 200),
 Add member b (`bulkUpdateRoledMembers`, 200), b promoted (`PUT …/members`, `Promoted`, 200), the team code made and taken away
 (`PUT` 200, `DELETE` 200), a member-permissions box and back (`spaceAdminSettings`, 200), the tags' box (`tagSettings`, 200), a
@@ -19,8 +19,7 @@ tag made with b and deleted (`POST …/tags` 200, `DELETE …/tags/<tag>` 204), 
 after: the Apps tab, Change picture, the Giphy rating, a channel's analytics and "More create team options" (below). Seen
 live: the Giphy rating (`spaceAdminSettings`, 200), the picture set and taken back (`profilepicture`, 200 each), an app removed
 (200) and a tab app added (201), a team copied from it (`clone`, 200) and that copy deleted (200). A team from a template went
-only as far as the fence, by choice: its apps (Workflows, Approvals) would put bots on the team, and the lab's fence then
-denies every write on it, its deletion too.
+only as far as the fence, by choice: its apps (Workflows, Approvals) would put bots on the team, and the capture setup then held further writes, including deletion. This is a historical limitation, not a current rule.
 
 ## What a team's entry holds
 
@@ -188,23 +187,14 @@ Create team's dropdown leads there: `GET beta/teams/suggested?accessType=Public&
 to join; `POST beta/teams/joinByCode?restrictJoinToPublicTeam=false` with the code as a JSON string. All from the bundle: the
 page showed live and nothing was joined.
 
-## The fence
+## Team membership and native writes
 
-`teams_fence::contacting`'s `contacting/team.rs`. A new private team names nobody: `TeamCreate` on `Scope::New`, which passes,
-as a new appointment does; a public or org-wide one has nobody to judge: `OpenTeamCreate`, which the lab's fence denies. A team
-from a template is judged as a new team by its `visibility`. A copy of a team with its people (`includeRoster`) reaches
-everyone on the team it copies: `MemberChange` on that team's group; without them it is a new team. Anything else on a team is
-`TeamChange` or `MemberChange` on `Scope::Team`, the people it adds named on it: an app added names its bots (`bots[].id`,
-`inputExtensions[].botId`) as `28:` members, which are no people: on a team of the lab's people the lab may add it
-([lab-rules.md](../lab-rules.md)). The own-view writes above reach nobody. The personal build logs and sends them all.
+Typed team writes live in `teams-proto/src/write/team.rs` and use the core outbox. No participant classifier, live
+member-read gate or permit remains. Before a lab team change, the agent checks the team's people and anyone the
+change adds under [lab-rules.md](../lab-rules.md).
 
-The lab's fence reads a team's members from its thread (`LiveMembershipSource`, the user's sign-off of 2026-11-03,
-[lab-rules.md](../lab-rules.md)): `GET v1/threads/<thread>?view=msnp24Equivalent` first, which must be that thread with
-`properties.threadType` `space` (a team's root) and a `properties.groupId`; a standard channel's thread (`topic`) named
-as the team is read as the team its `spaceId` names, whose root thread is read in turn and must name the channel's
-`groupId` (a private channel's thread is a `space` of its own, `productThreadType` `TeamsPrivateChannel`, read with its
-own members); then `GET v1/threads/<thread>/members?view=msnp24Equivalent&pageSize=100`, complete as a group chat's is.
-A write that names the team by its group (archive, the provisioning service's channel paths) is read only once a read of the
-thread in the same run named that group; before, it is denied. Teams' own apps every new team holds (`28:<guid>`, role
-`User`, no `tenantId`; the same three on the lab's team and on a tenant team of 87 members), like any other app or bot a
-team holds, aren't people and aren't counted.
+The recorded thread shapes remain useful protocol evidence: a team's root thread has `threadType: space` and
+`properties.groupId`; another standard channel has `threadType: topic` and a `spaceId` naming that root. A private
+channel has its own `space`, with `productThreadType: TeamsPrivateChannel`. The member-list endpoint is
+`GET v1/threads/<thread>/members?view=msnp24Equivalent&pageSize=100`. A new team's built-in apps appeared as
+`28:<guid>` members with role `User`; the UI's people count leaves bots out.

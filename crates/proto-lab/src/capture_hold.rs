@@ -1,5 +1,5 @@
 //! Selective capture holds: fail only requests a scenario explicitly matches; continue every other request.
-//! This module neither classifies writes nor reads memberships or creates a fence log.
+//! Explicit shape-capture holds only; this module applies no participant policy.
 use crate::cdp::{Cdp, CdpError, Event};
 use crate::redirect_catch::{RedirectCatch, at_response_stage, redirect_target};
 use regex::Regex;

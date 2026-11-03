@@ -1,6 +1,6 @@
 //! What the team pages read (`docs/protocol/teams.md`), made up: a team's people, settings, tags, code, channels and
-//! analytics, the invitations waiting, the people to add and the teams to join. Every write on a team is the lab fence's to
-//! deny before it gets here.
+//! analytics, the invitations waiting, the people to add and the teams to join. Requests not implemented by these
+//! fixtures remain unmatched.
 
 use percent_encoding::percent_decode_str;
 use serde_json::json;

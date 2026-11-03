@@ -2,13 +2,13 @@
 //! the engine told or the store holds, and whether "send again" is offered.
 //!
 //! - **States** ([`RowState`]): sending (waiting for its attempt, or one under way), waiting (a `Retry-After`), sent,
-//!   denied by the fence, failed, may have arrived (a read met an entry it couldn't read carrying the row's
+//!   refused before sending, failed, may have arrived (a read met an entry it couldn't read carrying the row's
 //!   `clientmessageid`: [`OutboxEntry::may_have_arrived`]), and left by an earlier session (pending or in flight when
 //!   that run ended).
 //! - **Send again** ([`Again`]) is offered on a failed row and on an earlier session's row, and only ever goes out by
 //!   the engine's explicit `resend`; for a row that may have arrived the view warns first, and for an edit, a delete
 //!   or a reaction too (a later change to the message may have gone out since, in a session whose rows the view
-//!   doesn't know). A denied row isn't offered it: the fence would decide the same.
+//!   doesn't know). A row recorded as denied is not offered resend.
 //! - **Out of date** ([`superseded`]): a write on a message that a newer one on the same thing follows (an edit or a
 //!   delete after an edit, anything before a delete, the same reaction set or taken back again) isn't shown, so it is
 //!   never sent again over the newer one.
@@ -28,7 +28,7 @@ pub enum RowState {
     /// Waiting out a `Retry-After` (or a check's backoff) before its next attempt.
     Waiting,
     Sent,
-    /// The fence denied it: nothing was sent.
+    /// Refused before sending: nothing was sent.
     Denied,
     Failed,
     /// It isn't known sent, but a read met its message in a form it couldn't read.
@@ -61,7 +61,7 @@ impl RowState {
             Self::Sending => "Sending…",
             Self::Waiting => "Waiting to send",
             Self::Sent => "Sent",
-            Self::Denied => "Denied by the fence: not sent",
+            Self::Denied => "Refused: not sent",
             Self::Failed => "Failed: not sent",
             Self::MayHaveArrived => "May have arrived",
             Self::EarlierSession => "Not sent (left by an earlier session)",

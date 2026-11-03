@@ -1,5 +1,5 @@
 //! "Copy diagnostics": the text the settings view and the command palette put on the clipboard: the app's version
-//! and build profile, the log's level, the current log's last lines (capped) and the recent `fence.log` lines. When
+//! and build profile, the log's level and the current log's last lines (capped). When
 //! any `debug` line is among them it says so first, plainly ([`WARNING`]), and [`Report::has_debug`] tells the view to
 //! say it too.
 
@@ -29,7 +29,7 @@ pub fn build_profile() -> &'static str {
 /// Where the text comes from.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Source {
-    /// The app's name and version (`teams-app 0.1.0`).
+    /// The app's name and version (`ngteams 0.1.0`).
     pub app: String,
     /// The current log file; `None` when the log isn't written.
     pub log_file: Option<PathBuf>,

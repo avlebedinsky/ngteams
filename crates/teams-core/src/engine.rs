@@ -5,9 +5,9 @@
 //! - **Commands** ([`EngineRequests::write`]): an [`Action`] (send, edit, delete, react, take a reaction back, read,
 //!   create a chat) is checked against the store first: an edit or a delete only of the account's own message that
 //!   isn't deleted, a reaction only on a message that isn't, a read receipt only up to a stored message. It becomes an
-//!   outbox row ([`enqueue`]) and is sent at once ([`Outbox::send`]): every attempt under a fresh `Fence::check`,
-//!   then the transport. The reply is the row as that send left it, an error only when no row was made (or it can't
-//!   be read back): a row that waits (a `Retry-After`, a check that couldn't sync, an older row on its
+//!   outbox row ([`enqueue`]) and is sent at once ([`Outbox::send`]) through the transport. The reply is the row as
+//!   that send left it, an error only when no row was made (or it can't be read back): a row that waits (a
+//!   `Retry-After`, a check that couldn't sync, an older row on its
 //!   [`Lane`](crate::Lane)) is in the reply as it waits, and goes out from the engine's tick ([`Outbox::send_due`]);
 //!   every row that settles comes as [`Event::Outbox`] too, and so does every row our own message coming back
 //!   settles, by whichever read brought it (a catch-up, a delivery, a sync after a write, the check of another row),
@@ -61,7 +61,7 @@
 //!   old ([`crate::teams`]), each change of the list told as [`Event::Teams`]; a channel's posts and replies synced
 //!   on demand like any conversation's ([`EngineRequests::sync_conversation`]: a channel other than a team's general
 //!   one is in no conversation list, so no catch-up reaches it), and the post each stored channel message belongs to
-//!   ([`EngineRequests::reply_roots`]). Nothing is written there: a channel has no write type. A read whose
+//!   ([`EngineRequests::reply_roots`]). The channel view has no composer or message actions. A read whose
 //!   favourites name the account's own notes ([`NOTES`]) while the store has none syncs them on the next tick: the
 //!   catch-up that runs before the first read of the teams (the first run, the first after the store kept favourites)
 //!   can't know them yet, and without a push channel's drop no other catch-up may come for a long time.
@@ -72,15 +72,14 @@
 //! - **The account's own availability** (M2 Task 19, [`EngineRequests::own_availability`]): its endpoint's `PUT`
 //!   (available) and its manual status (set or cleared), transient writes naming the endpoint the push channel
 //!   registered in this run ([`PushEvent::Registered`]); refused before a registration went through and after the push
-//!   channel stopped, when one still waiting out a `Retry-After` is dropped too (told as [`Event::Transient`]). The
-//!   fence permits it for its own account only, without a member read. When to send what is the app's policy (Task
-//!   20, [`crate::own_presence`]), not the engine's.
+//!   channel stopped, when one still waiting out a `Retry-After` is dropped too (told as [`Event::Transient`]). When
+//!   to send what is the app's policy ([`crate::own_presence`]), not the engine's.
 //! - **Its handles**: [`EngineRequests`], the request side (writes and queries, each a [`Reply`]), is cloneable, for a
 //!   UI's views to share; [`EngineHandle`] owns the engine: its events, its thread and its shutdown.
 //! - **Calls** (M3 Task 14, [`EngineRequests::call`], [`crate::calling`]): with [`Parts::calls`] the engine opens the
 //!   calling stack's socket too and runs the account's calls: a call from a chat or the test call, a join, the answer
 //!   or the decline of an invitation it offered ([`Event::IncomingCall`]), a hang-up, mute, a renegotiation; each
-//!   write through the outbox's call kind under a fresh `Fence::check`, the call's media on threads of its own. The
+//!   write through the outbox's call kind and shared call floor, the call's media on threads of its own. The
 //!   calling runs as a task of its own on the engine's thread (a `LocalSet`'s), so a call's write in flight, its
 //!   deliveries and their responses go on while the engine awaits a chat's work. It tells [`Event::IncomingCall`],
 //!   [`Event::RingEnded`] and [`Event::Call`]. One call at a time; nothing is answered or declined but by its action.
@@ -91,7 +90,7 @@
 //!
 //! The engine sends nothing of its own: every write goes out through the outbox, every read through the catch-up's
 //! client, and the push channel sends only its own typed frames. Without a push channel ([`Parts::push`] `None`:
-//! a one-shot command of the lab binary) nothing is caught up but on [`EngineRequests::sync`]. The store stays open
+//! an offline or polling client) nothing is caught up but on [`EngineRequests::sync`]. The store stays open
 //! until the engine stops, after every attempt it began has finished.
 //!
 //! M1 Task 18 (`docs/plans/20261020-native-teams-m1-headless-chat-core.md`); M2 Task 5
@@ -222,23 +221,23 @@ impl fmt::Debug for Push {
     }
 }
 
-/// What an engine is made of: the account's store, the client its reads go through, its outbox (with the fence, the
-/// membership source and the account it writes as) and, for a client that listens, its push channel.
+/// What an engine is made of: the account's store, the client its reads go through, its outbox and, for a client
+/// that listens, its push channel.
 pub struct Parts<C, T> {
     pub store: Store,
     pub client: Arc<Client<HttpTransport<C>>>,
     pub outbox: Outbox<T>,
     pub push: Option<Push>,
     pub options: EngineOptions,
-    /// Names the binary knows already, by MRI (a lab binary: the lab accounts' from `lab.toml`): the last a person's
-    /// name comes from, after their profile and their messages ([`crate::profiles`]).
+    /// Names the client knows already, by MRI: the last source for a person's name, after their profile and
+    /// their messages ([`crate::profiles`]).
     pub known_names: Vec<(String, String)>,
     /// The account's calling ([`crate::calling`]): its calling socket, who it is in its calls and their media; `None`
     /// for an engine that makes no calls (every call action is refused, `CallActionError::NoCalling`).
     pub calls: Option<CallParts>,
 }
 
-/// What the user asks the engine to write. Every one goes out through the outbox, under the fence.
+/// What the user asks the engine to write. Every one goes out through the outbox.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Action {
     /// A message to an existing chat.
@@ -389,7 +388,7 @@ pub enum Event {
     /// How a registration of the calling stack's endpoint went ([`crate::calling`]): invitations come only to a
     /// registered one, and a call is placed only once it is up.
     CallingRegistration(RegistrationReport),
-    /// An invitation rings here (the fence offered it): answer it or decline it ([`CallAction::Answer`],
+    /// An invitation rings here (the call tracker offered it): answer it or decline it ([`CallAction::Answer`],
     /// [`CallAction::Decline`]); nothing does otherwise. One call at a time: none rings while a call is up.
     IncomingCall(IncomingCall),
     /// An offered invitation's ring ended before the account answered or declined it (as delivered: the caller
@@ -777,7 +776,7 @@ impl EngineRequests {
     }
 
     /// Whether the engine sends nothing (its outbox is read-only: the personal build's `ngteams --read-only`): every
-    /// write it is asked for is refused below the views, before the fence is asked, and logged to `fence.log` as
+    /// write it is asked for is refused below the views and logged to the diagnostic log as
     /// `refused_read_only` ([`Outbox::is_read_only`]). Fixed when the engine starts.
     #[must_use]
     pub fn read_only(&self) -> bool {
@@ -816,7 +815,7 @@ impl EngineRequests {
 
     /// Sets the account's own availability (M2 Task 19): a transient write through the outbox ([`Transient`]:
     /// [`Transient::EndpointAvailable`] or [`Transient::ManualStatus`]), naming the endpoint the push channel
-    /// registered in this run, under the fence's permit for its own account; the reply is how its send went.
+    /// registered in this run; the reply is how its send went.
     /// [`EngineError::NoEndpoint`] before a registration of this run went through, or once the push channel stopped.
     pub fn own_availability(&self, status: OwnStatus) -> Reply<TransientSent> {
         self.ask(|reply| Request::OwnAvailability(status, reply))
@@ -1032,7 +1031,7 @@ impl EngineRequests {
         self.ask(|reply| Request::TitleMeetNow { channel, title, reply })
     }
 
-    /// Creates, changes, cancels or deletes an event of the account's calendar through the outbox, under the fence
+    /// Creates, changes, cancels or deletes an event of the account's calendar through the outbox
     /// ([`crate::calendar`]); [`EngineError::EventNotSaved`] when it wasn't saved.
     pub fn write_event(&self, write: EventWrite) -> Reply<EventWritten> {
         self.ask(|reply| Request::WriteEvent {
@@ -1041,7 +1040,7 @@ impl EngineRequests {
         })
     }
 
-    /// Makes a team's channel through the outbox, under the fence ([`crate::channels`]): stored once made (a private
+    /// Makes a team's channel through the outbox ([`crate::channels`]): stored once made (a private
     /// channel without its thread, once [`Self::channel_thread`] has it); [`EngineError::ChannelNotCreated`] when it
     /// wasn't made.
     pub fn create_channel(&self, draft: ChannelDraft) -> Reply<ChannelMade> {
@@ -1088,7 +1087,7 @@ impl EngineRequests {
         })
     }
 
-    /// Sends a write managing a team through the outbox, under the fence, and puts `change` in the stored teams once it
+    /// Sends a write managing a team through the outbox, and puts `change` in the stored teams once it
     /// went ([`crate::team_admin`]); [`EngineError::TeamNotChanged`] when it didn't.
     pub fn team_write(&self, write: TeamWrite, change: Option<TeamChange>) -> Reply<TeamWritten> {
         self.ask(|reply| Request::Team(Box::new(TeamAsk::Write { write, change, reply })))
@@ -2293,7 +2292,7 @@ where
     }
 
     /// Whom a call from `chat` calls: a 1:1 chat's other member (from its id), or a group chat's other members as
-    /// the store holds them. The fence reads the chat fresh before the start goes.
+    /// the store holds them.
     fn placement(&self, chat: &str) -> Result<Placement, CallActionError> {
         let me = self.me();
         if let Some(other) = one_to_one_other(chat, me) {

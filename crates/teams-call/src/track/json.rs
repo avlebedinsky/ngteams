@@ -6,12 +6,12 @@ use std::fmt;
 use serde::de::{self, DeserializeSeed, Deserializer, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Value};
 
-/// A request body as one JSON value, read so that the fence and the service can't read it differently: `None` for
+/// A calling body as one unambiguous JSON value for tracking and service bindings: `None` for
 /// anything but a single JSON value, and for a body in which any object has two keys a case-insensitive reader could
 /// take for one (an exact duplicate, `members` beside `Members`, `id` beside `ID`). A .NET service may bind keys in any
 /// case and keep either duplicate, so such a body is ambiguous and stays unreadable. With every key unique in any case,
-/// an exact lookup ([`Value::get`]) finds the one key the service binds, or nothing: a key the fence would miss only
-/// because of its case (`Members` alone) reads as missing, which a row then refuses ([`optional`]).
+/// an exact lookup ([`Value::get`]) finds the one key the service binds, or nothing. An unsupported key spelling
+/// (`Members` alone) remains unrecognized by the tracker.
 pub(crate) fn strict_json(body: &[u8]) -> Option<Value> {
     let mut reader = serde_json::Deserializer::from_slice(body);
     let value = Strict.deserialize(&mut reader).ok()?;

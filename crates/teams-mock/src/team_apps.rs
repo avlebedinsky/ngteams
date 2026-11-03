@@ -1,6 +1,6 @@
 //! What Manage team's Apps tab and "More create team options" read (`docs/protocol/teams.md`), made up: a team's
 //! installed apps, the store's apps and their definitions, Teams' templates and one template's channels and apps, and no
-//! Microsoft 365 group to make a team of. Every write on a team is the lab fence's to deny before it gets here.
+//! Microsoft 365 group to make a team of. Requests not implemented by these fixtures remain unmatched.
 
 use serde_json::{Value, json};
 use wiremock::ResponseTemplate;

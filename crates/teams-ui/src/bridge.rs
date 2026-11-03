@@ -41,7 +41,7 @@ use tokio::sync::oneshot;
 use crate::models::Models;
 
 /// The engine's request side, as the views see it: writes and queries, each answered by a [`Reply`]. No view builds a
-/// request of its own; every write goes out through the engine's outbox, under the fence.
+/// request of its own; every write goes out through the engine's outbox.
 pub trait Core: Send + Sync + 'static {
     /// The account's MRI: who the engine writes as.
     fn me(&self) -> &str;
@@ -127,7 +127,7 @@ pub trait Core: Send + Sync + 'static {
     fn call(&self, action: CallAction) -> Reply<CallId>;
     /// Whether the engine sends nothing (the personal build's read-only mode, `ngteams --read-only`): the views offer
     /// no write (the boxes, a message's actions, the calls, the status say "Read-only"), and one asked anyway is
-    /// refused below them, logged to `fence.log`. `false` by default.
+    /// refused below them, recorded in the diagnostic log. `false` by default.
     fn read_only(&self) -> bool {
         false
     }
@@ -149,7 +149,7 @@ pub trait Core: Send + Sync + 'static {
         let _ = id;
         Reply::ready(Err(teams_core::EngineError::CalendarUnread))
     }
-    /// Creates, changes, cancels or deletes an event of the account's calendar, through the outbox under the fence
+    /// Creates, changes, cancels or deletes an event of the account's calendar, through the outbox
     /// (`teams_core::calendar`); only the user's Save, Cancel meeting or Delete asks for one. A fake core saves
     /// nothing.
     fn write_event(&self, write: EventWrite) -> Reply<EventWritten> {
