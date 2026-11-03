@@ -8,6 +8,7 @@ use serde_json::json;
 use super::*;
 use crate::browser::Display;
 use crate::scenario::ab_call::CallStep;
+use crate::scenario::ab_call::test_targets;
 use crate::scenario::test_page::{Page, evaluated};
 
 fn script(dir: &Path, body: &str) -> PathBuf {
@@ -84,7 +85,7 @@ async fn a_synthetic_native_receives_its_alias_and_arguments_and_its_output_is_s
         "printf 'args %s %s\\n' \"$1\" \"$2\"\nprintf 'call_summary synthetic\\n'\nprintf 'synthetic stderr\\n' >&2",
     );
     let mut page = Page::new(|_| Err("no CDP action is needed to reap this child".to_owned())).await;
-    let mut session = page.session(dir.path(), false);
+    let mut session = test_targets::allow(page.session(dir.path(), false), test_targets::A);
     let mut native = spawn_native((&binary, dir.path()), Alias::B, "synthetic", &["watch".to_owned()]).unwrap();
     let status = native.wait(&mut session, Duration::from_secs(2)).await;
     assert!(status.is_some_and(|status| status.success()));
@@ -104,7 +105,7 @@ async fn a_native_that_exceeds_its_deadline_is_killed_and_a_running_one_can_be_i
     let dir = tempfile::tempdir().unwrap();
     let binary = script(dir.path(), "exec /bin/sleep 60");
     let mut page = Page::new(|_| Err("no CDP action is needed to stop this child".to_owned())).await;
-    let mut session = page.session(dir.path(), false);
+    let mut session = test_targets::allow(page.session(dir.path(), false), test_targets::A);
     let mut native = spawn_native((&binary, dir.path()), Alias::A, "deadline", &[]).unwrap();
     assert!(native.wait(&mut session, Duration::ZERO).await.is_none());
     assert!(native.child.id().is_none());
@@ -124,7 +125,7 @@ async fn run_tracking_reports_missing_children_waits_for_output_and_removes_reap
     assert!(run.take("missing").is_err());
     run.spawn(Alias::A, "first", &[]).unwrap();
     let mut page = Page::new(|_| Err("no CDP command is needed for synthetic output".to_owned())).await;
-    let mut session = page.session(dir.path(), false);
+    let mut session = test_targets::allow(page.session(dir.path(), false), test_targets::A);
     run.wait_output("first", &mut session, "registered=true", Duration::from_secs(2))
         .await
         .unwrap();
@@ -216,7 +217,7 @@ async fn video_success_reads_only_this_phases_capture_and_missing_capture_is_ref
         })
         .await;
         let dir = tempfile::tempdir().unwrap();
-        let mut session = page.session(dir.path(), record);
+        let mut session = test_targets::allow(page.session(dir.path(), record), test_targets::A);
         let mut report = ScenarioReport::new(ScenarioName::AbCallNative);
         if let Some(capture) = session.capture_dir() {
             let stats = json!({"type": "rtc", "payload": {"event": "stats", "data": [{"type": "inbound-rtp", "kind": "video", "framesDecoded": PAGE_FRAMES}]}});
@@ -268,6 +269,9 @@ async fn media_page() -> (Page, CaptureTarget) {
     let page = Page::new(move |command| {
         assert_eq!(command["method"], "Runtime.evaluate");
         let expression = command["params"]["expression"].as_str().unwrap();
+        if expression.contains("return buttons.length === 1") {
+            return Ok(evaluated(json!(test_targets::chat())));
+        }
         if expression.contains("background-suppression-switch") {
             let target = target.lock().unwrap();
             let mut file = fs::OpenOptions::new()
@@ -291,7 +295,7 @@ async fn the_native_to_page_phase_binds_the_answer_and_requires_both_sides_media
     );
     let mut run = run(binary, dir.path());
     let (mut page, capture) = media_page().await;
-    let mut session = page.session(dir.path(), true);
+    let mut session = test_targets::allow(page.session(dir.path(), true), test_targets::A);
     let file = session.capture_dir().unwrap().join(EVENTS_FILE);
     fs::write(&file, format!("{}\n", invitation())).unwrap();
     capture.lock().unwrap().replace(file);
@@ -346,7 +350,7 @@ async fn the_answered_elsewhere_phase_preserves_the_callers_hold_and_the_observe
     );
     let mut run = run(binary, dir.path());
     let (mut page, _) = media_page().await;
-    let mut session = page.session(dir.path(), true);
+    let mut session = test_targets::allow(page.session(dir.path(), true), test_targets::A);
     fs::write(
         session.capture_dir().unwrap().join(EVENTS_FILE),
         format!("{}\n", invitation()),
@@ -369,7 +373,7 @@ async fn the_page_to_native_phase_waits_for_registration_answer_media_and_the_re
     );
     let mut run = run(binary, dir.path());
     let (mut page, capture) = media_page().await;
-    let mut session = page.session(dir.path(), true);
+    let mut session = test_targets::allow(page.session(dir.path(), true), test_targets::A);
     capture
         .lock()
         .unwrap()
@@ -412,7 +416,7 @@ async fn a_driver_failure_stops_every_native_then_closes_and_judges_the_armed_pa
     let dir = tempfile::tempdir().unwrap();
     let binary = script(dir.path(), "exec /bin/sleep 60");
     let mut page = Page::new(|_| Err("synthetic browser disappeared".to_owned())).await;
-    let session = page.session(dir.path(), true);
+    let session = test_targets::allow(page.session(dir.path(), true), test_targets::A);
     let mut run = run(binary, dir.path());
     run.spawn(Alias::A, "synthetic-caller", &[]).unwrap();
     run.spawn(Alias::B, "synthetic-observer", &[]).unwrap();
@@ -481,7 +485,7 @@ async fn the_driver_loads_registers_and_observes_the_socket_before_refusing_a_fo
         })
     })
     .await;
-    let mut session = page.loaded_session(dir.path(), true).await;
+    let mut session = test_targets::allow(page.loaded_session(dir.path(), true).await, test_targets::A);
     let file = session.capture_dir().unwrap().join(EVENTS_FILE);
     fs::write(&file, format!("{}\n{}\n", calling_socket_capture(), invitation())).unwrap();
     let mut run = run(binary, dir.path());
@@ -522,7 +526,7 @@ async fn the_driver_loads_registers_and_observes_the_socket_before_refusing_a_fo
 async fn a_native_running_call_conflict_ends_the_ring_wait_before_any_answer_is_clicked() {
     let dir = tempfile::tempdir().unwrap();
     let mut page = Page::new(|_| Err("synthetic ring is absent".to_owned())).await;
-    let mut session = page.session(dir.path(), true);
+    let mut session = test_targets::allow(page.session(dir.path(), true), test_targets::A);
     let mut run = run(PathBuf::from("/bin/true"), dir.path());
     run.spawn(Alias::A, "synthetic-conflict", &[]).unwrap();
     run.natives[0].wait(&mut session, Duration::from_secs(2)).await.unwrap();
@@ -558,7 +562,7 @@ exit 1"#,
     );
     let mut run = run(binary, dir.path());
     let (mut page, _) = media_page().await;
-    let mut session = page.session(dir.path(), true);
+    let mut session = test_targets::allow(page.session(dir.path(), true), test_targets::A);
     fs::write(
         session.capture_dir().unwrap().join(EVENTS_FILE),
         format!("{}\n", invitation()),
@@ -600,6 +604,7 @@ async fn native_setup_keeps_its_pinned_page_media_and_settles_the_page_when_init
         })
         .await;
         let (session, pid) = peer.managed_session(page_dir.path(), record);
+        let session = test_targets::allow(session, test_targets::A);
         let options = run(PathBuf::from("/bin/true"), root.path()).options;
         let report = run_with(
             "/bin/true".into(),

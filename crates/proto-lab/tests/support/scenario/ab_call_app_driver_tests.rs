@@ -5,6 +5,7 @@ use serde_json::{Value, json};
 
 use super::*;
 use crate::browser::Display;
+use crate::scenario::ab_call::test_targets;
 use crate::scenario::ab_chat_full::tests::{EventsOut, broadcast, page_with};
 use crate::scenario::test_page::{Page, evaluated};
 
@@ -101,6 +102,9 @@ impl WebCall {
             return None;
         }
         let expression = command["params"]["expression"].as_str().unwrap();
+        if expression.contains("return buttons.length === 1") {
+            return Some(Ok(evaluated(json!(test_targets::chat()))));
+        }
         if expression.contains("notification-wrapper") && self.rings_sent == 0 {
             broadcast(
                 relay,
@@ -203,7 +207,7 @@ fn app_call_live_waits_remain_pinned() {
 async fn answer_binds_the_invitation_before_clicking_and_requires_captured_duplex_audio_video_and_microphone() {
     let mut page = page(Ending::Remote, Fault::None, true).await;
     let dir = tempfile::tempdir().unwrap();
-    let mut session = page.session(dir.path(), true);
+    let mut session = test_targets::allow(page.session(dir.path(), true), test_targets::A);
     socket(&page);
     let call = RunCall {
         caller: A.to_owned(),
@@ -252,7 +256,7 @@ async fn answer_binds_the_invitation_before_clicking_and_requires_captured_duple
 async fn placing_waits_for_the_stack_and_media_then_hangs_up_the_page_call() {
     let mut page = page(Ending::Local, Fault::None, true).await;
     let dir = tempfile::tempdir().unwrap();
-    let mut session = page.session(dir.path(), true);
+    let mut session = test_targets::allow(page.session(dir.path(), true), test_targets::A);
     socket(&page);
     let call = RunCall {
         caller: A.to_owned(),
@@ -293,7 +297,7 @@ async fn unrelated_or_multiple_incoming_calls_are_never_answered_and_failed_init
     for fault in [Fault::ForeignRing, Fault::MultipleRings, Fault::Start] {
         let mut page = page(Ending::Absent, fault, false).await;
         let dir = tempfile::tempdir().unwrap();
-        let mut session = page.session(dir.path(), true);
+        let mut session = test_targets::allow(page.session(dir.path(), true), test_targets::A);
         socket(&page);
         let call = RunCall {
             caller: A.to_owned(),
@@ -339,7 +343,7 @@ async fn silent_microphones_and_missing_or_stuck_call_screens_are_reported_witho
     ] {
         let mut page = page(ending, Fault::None, false).await;
         let dir = tempfile::tempdir().unwrap();
-        let mut session = page.session(dir.path(), true);
+        let mut session = test_targets::allow(page.session(dir.path(), true), test_targets::A);
         socket(&page);
         let call = RunCall {
             caller: A.to_owned(),
@@ -375,7 +379,7 @@ async fn silent_microphones_and_missing_or_stuck_call_screens_are_reported_witho
 async fn microphone_and_call_setup_without_capture_refuse_instead_of_inventing_evidence() {
     let mut page = page(Ending::Stuck, Fault::None, false).await;
     let dir = tempfile::tempdir().unwrap();
-    let mut session = page.session(dir.path(), false);
+    let mut session = test_targets::allow(page.session(dir.path(), false), test_targets::A);
     let mut report = ScenarioReport::new(ScenarioName::AbCallApp);
     let error = sound_microphone(&mut session, (0, CallStep::Answer), &mut report, Duration::ZERO)
         .await
@@ -406,7 +410,7 @@ async fn microphone_and_call_setup_without_capture_refuse_instead_of_inventing_e
 async fn stale_loud_statistics_and_fresh_quiet_samples_require_all_microphone_retries() {
     let mut page = page(Ending::Local, Fault::None, false).await;
     let dir = tempfile::tempdir().unwrap();
-    let mut session = page.session(dir.path(), true);
+    let mut session = test_targets::allow(page.session(dir.path(), true), test_targets::A);
     std::fs::write(
         session.capture_dir().unwrap().join(EVENTS_FILE),
         format!("{}\n", json!({"type":"rtc","payload":stats(true)})),

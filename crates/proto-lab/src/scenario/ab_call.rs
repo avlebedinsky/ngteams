@@ -804,6 +804,14 @@ pub(crate) async fn check_ring(
             }
         }
     }
+    let expected = call
+        .group_chat
+        .clone()
+        .map_or_else(|| call_chat(&call.caller, callee), Ok)?;
+    session
+        .driver()
+        .preflight_recipients("verify the incoming call recipients", &expected)
+        .await?;
     let shown = session
         .driver()
         .evaluate(
@@ -956,7 +964,7 @@ impl Modality {
 
 /// The expected 1:1 conversation, derived from both configured lab identities.
 pub(crate) fn call_chat(origin: &str, recipient: &str) -> Result<String, ScenarioError> {
-    teams_fence::one_to_one_id(origin, recipient)
+    teams_lab_targets::one_to_one_id(origin, recipient)
         .ok_or_else(|| setup("the planned call needs two distinct work-account identities".to_owned()))
 }
 
@@ -976,6 +984,7 @@ async fn verify_call_chat(driver: &mut Driver, chat: &str) -> Result<(), Scenari
 
 /// The target check and the click share one JavaScript turn, so a changed selection cannot slip between them.
 async fn click_call_in_chat(driver: &mut Driver, chat: &str, selector: &str) -> Result<(), ScenarioError> {
+    driver.preflight_chat("verify the call recipients", chat).await?;
     let clicked = driver
         .evaluate(
             "call only the planned conversation",
@@ -1273,9 +1282,7 @@ impl CallPlan {
         open_join(alias, joiner, report).await?;
         self.check_join(alias, joiner, placed, report).await?;
         let mut driver = joiner.driver();
-        driver
-            .click(&format!("{alias} joins the running call"), CHAT_JOIN)
-            .await?;
+        click_call_in_chat(&mut driver, &self.expected_chat()?, CHAT_JOIN_CSS).await?;
         report.notes.push(format!("{alias}: clicked join at {}", unix_ms()));
         driver
             .wait_for(&format!("{alias}'s call screen after the join"), HANG_UP, CONNECT_WAIT)
@@ -2306,3 +2313,7 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 #[path = "../../tests/support/scenario/ab_call_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../tests/support/scenario/call_targets.rs"]
+pub(crate) mod test_targets;
