@@ -505,8 +505,14 @@ Acceptance evidence (2026-11-04, offline, sandbox tools required):
 | ui-sandbox | 94.493 | 92.040 | 90.437 |
 
 ### Task 13: [Final] Update documentation
-- [ ] README and CLAUDE.md re-read against the final code
-- [ ] move this plan to `docs/plans/completed/`
+- [x] README and CLAUDE.md re-read against the final code
+- [x] move this plan to `docs/plans/completed/` (the harness performs the move after finalization and stats)
+
+Final reread: README and CLAUDE match the implemented client/protocol CLIs, lab runner controls and lifetime
+locks, native provisioning paths, credential-store scopes, build markers, diagnostics, read-only behavior and
+coverage rules. No further documentation correction was needed. All 18 local Markdown file/anchor links in
+those two files resolve, and the runner's read-only `--help` matches its documented controls. No runtime build,
+live run or repeated acceptance test was needed for this final documentation check.
 
 ## Post-Completion
 *Needs the user or the live tenant; no checkboxes*
