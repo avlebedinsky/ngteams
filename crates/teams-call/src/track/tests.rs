@@ -470,6 +470,49 @@ fn an_unknown_start_outcome_keeps_its_callbacks_until_the_end() {
 }
 
 #[test]
+fn a_start_that_never_went_out_cannot_bind_late_callbacks_or_be_revived() {
+    let tracker = Tracker::new(Mri::new(LAB_A));
+    let pending = starting(&tracker);
+    tracker.not_sent(pending);
+    tracker.answered(pending, &Response::new(200, answer("late")));
+    assert!(!tracker.holds_floor());
+    assert_eq!(
+        tracker.observe_delivery(&delivery(1, ACCEPTANCE_PATH, acceptance("one"))),
+        Observed::Nothing
+    );
+    assert_eq!(
+        tracker.observe_delivery(&delivery(2, END_PATH, b"{}".to_vec())),
+        Observed::Nothing
+    );
+}
+
+#[test]
+fn a_not_sent_notice_cannot_end_a_live_call_or_another_kind_of_attempt() {
+    let tracker = Tracker::new(Mri::new(LAB_A));
+    let pending = starting(&tracker);
+    tracker.answered(pending, &Response::new(200, answer("conversation-1")));
+    for attempt in [
+        pending,
+        Attempt::Nothing,
+        Attempt::Answer {
+            offer: 0,
+            operation: CallOperation::Attach,
+        },
+    ] {
+        tracker.not_sent(attempt);
+        assert!(tracker.holds_floor());
+    }
+    assert_eq!(
+        tracker.observe_delivery(&delivery(1, ACCEPTANCE_PATH, acceptance("one"))),
+        Observed::Acceptance
+    );
+    assert_eq!(
+        tracker.observe_delivery(&media_delivery("one")),
+        Observed::Renegotiation
+    );
+}
+
+#[test]
 fn echo_updates_keep_the_call_live_and_its_end_after_leave_retires_it() {
     let tracker = registered();
     let fixture = include_str!("../../../../tests/fixtures/calling/echo/deliveries.json")

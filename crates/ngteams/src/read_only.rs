@@ -5,8 +5,8 @@
 //!
 //! - **Nothing that writes goes out**, refused below the views: the engine's transports are read-only
 //!   (`teams_proto::HttpTransport::read_only`), so a message, an edit, a delete, a reaction, typing, a read receipt, a
-//!   chat created, an availability or a status, a registration and any call write is refused before the fence is
-//!   asked, and logged to the snapshot's `fence.log` as `refused_read_only` (method, host and path shape). Reads of
+//!   chat created, an availability or a status, a registration and any call write is refused before sending and
+//!   logged to the snapshot's diagnostic log as `refused_read_only` (method, host and path shape). Reads of
 //!   every kind go (reads by `POST` too), and the session's own token renewal. The views offer no write
 //!   (`teams_ui::Core::read_only`), the settings send no typing, read receipt or presence
 //!   (`teams_ui::SettingsModel::read_only`), the rail adds and removes no account.
@@ -17,7 +17,7 @@
 //!   notifications go to the bus it is given (the sandbox's).
 //! - **On a snapshot** ([`crate::snapshot`]): its files are a copy (`--data <dir>`, laid out as
 //!   [`crate::snapshot::layout`]), refused when they overlap the user's own ([`check_apart`]), so it never opens the
-//!   user's store, never takes its engine lock and writes its own `fence.log`, settings and logs.
+//!   user's store, never takes its engine lock and writes only the snapshot's settings and diagnostic logs.
 //! - **Its credentials through a broker** started outside the sandbox (`ngteams secrets --account <UPN> --fd <n>`,
 //!   [`broker_scope`]: `get` only, a `put` or a `delete` refused), the app's end (`--secrets-fd`) used through an
 //!   [`OverlaySecretStore`]: a token renewed while it runs (a rotated refresh token included) lives in its memory only,
@@ -50,7 +50,7 @@ pub fn asked(flag: bool, env: Option<&OsStr>) -> bool {
 }
 
 /// Whether the read-only mode may open its window with this `WAYLAND_DISPLAY`, sandbox opt-in (`UI_SANDBOX_DIR`) and
-/// `DISPLAY`: only on the UI sandbox's compositor ([`ui_sandbox::in_sandbox`], the check the lab app makes), with
+/// `DISPLAY`: only on the UI sandbox's compositor ([`ui_sandbox::in_sandbox`]), with
 /// `DISPLAY` unset.
 ///
 /// # Errors

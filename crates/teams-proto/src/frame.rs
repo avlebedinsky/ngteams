@@ -441,7 +441,6 @@ impl<W: FrameWriter> FrameSink<W> {
 }
 
 pub trait DeliveryResponse: sealed::Response {
-    /// The frame's kind, as a personal sink logs it.
     /// The protocol frame kind.
     const KIND: &'static str;
 }

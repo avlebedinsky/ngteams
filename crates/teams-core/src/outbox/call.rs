@@ -1,6 +1,6 @@
-//! The outbox's call kind (M3 Task 14): a call's writes (the sealed `teams-proto` call writes the `teams-call` machine
-//! builds) go out from here too, each attempt under a fresh [`Fence::check`](teams_fence::Fence::check) with its
-//! `fence.log` line and the transport's rules, but neither as a row nor as a transient: nothing of a call write is
+//! The outbox's call kind (M3 Task 14): the typed call writes the `teams-call` machine builds go out from here too,
+//! each attempt checked against the cross-account call floor, tracked and sent under the transport's rules,
+//! but neither as a row nor as a transient: nothing of a call write is
 //! stored, checked for, offered to send again or sent by a later run, and none waits in the outbox, is replaced by a
 //! newer one or dropped by a message post. Its answer, whatever its status, goes back to the machine with its body
 //! (the conversation a start opened, an `attach`'s or an `accept`'s answer), and the machine decides what a failed step
@@ -25,9 +25,9 @@ use super::{MAX_TRANSIENT_WAIT, Outbox, Tried};
 pub enum CallTried {
     /// The service answered (any status).
     Answered(Response),
-    /// The fence denied it: nothing went out.
+    /// Call admission refused it: another account holds the call floor, and nothing went out.
     Denied(String),
-    /// Nothing went out, and nothing will (the transport refused it, its credential failed, its permit didn't fit).
+    /// Nothing went out, and nothing will (the transport refused it or its credential failed).
     NotSent(String),
     /// Nothing went out: the token service is throttling for this long.
     Throttled(Duration),
@@ -36,12 +36,12 @@ pub enum CallTried {
 }
 
 impl CallTried {
-    /// What the attempt came to, for the log: the fence's decision and the service's status, never a body.
+    /// What the attempt came to, for the log: call admission and the service's status, never a body.
     #[must_use]
     pub fn summary(&self) -> String {
         match self {
-            Self::Answered(answer) => format!("fence allowed, HTTP {}", answer.status()),
-            Self::Denied(reason) => format!("fence denied: {reason}"),
+            Self::Answered(answer) => format!("admitted, HTTP {}", answer.status()),
+            Self::Denied(reason) => format!("call admission refused: {reason}"),
             Self::NotSent(why) => format!("not sent: {why}"),
             Self::Throttled(wait) => format!("throttled for {} ms", wait.as_millis()),
             Self::Uncertain(why) => format!("outcome unknown: {why}"),
@@ -82,8 +82,8 @@ impl CallRetries {
 }
 
 impl<T: Transport<Error = HttpError>> Outbox<T> {
-    /// One attempt at a call write: a fresh `Fence::check` (its `fence.log` line), then the transport, which sends it
-    /// once (see the module docs).
+    /// One attempt at a call write: call-floor admission and tracking, then the transport, which sends it once
+    /// (see the module docs).
     pub async fn try_call<R: Request + Send>(&self, write: R) -> CallTried {
         let tried = self.try_once(write).await;
         log::info!("call write: {}", tried.summary());

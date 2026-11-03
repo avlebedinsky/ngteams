@@ -1,13 +1,12 @@
 //! The registrar registration of the endpoint's push URL and its renewal: the messaging stack's
 //! ([`EndpointRegistration`], `TeamsCDLWebWorker`) or the calling stack's ([`CallingRegistration`], `SkypeSpacesWeb`),
-//! each sent through the account's transport ([`teams_proto::Transport::send_own`]: a plain request, which the transport
-//! has the fence's classifier let through and logs to `fence.log` as `allowed` first, or through the personal build's
-//! fence its own-state entry, logged by its kind), the `ic3` token from the session.
+//! each sent through the account's transport ([`teams_proto::Transport::send_own`]) with the session's `ic3` token.
+//! The transport's diagnostic wire logger records each request and response at `debug`, with credentials redacted.
 //!
 //! As the web client's stacks do it (`docs/protocol/trouter.md`): a registration on every `trouter.connected` (the
 //! calling stack's after a dropped socket too, `docs/protocol/calling.md`), again [`RegistrationTimes::renew_before`]
 //! before its TTL ends, and after a failure again once [`RegistrationTimes::retry_after`] has passed. The calling
-//! stack's registration makes the account reachable for calls: what is sent for a call is the fence's to decide.
+//! stack's registration makes the account reachable for calls; the call controller decides each typed response.
 //!
 //! The messaging registration goes out through `teams_proto::register`, which gives the endpoint it registered once the
 //! registrar took it (a `teams_proto::RegisteredEndpoint`): the one id the account's own availability may name (M2 Task

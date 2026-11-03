@@ -376,6 +376,18 @@ impl Tracker {
         }
         Attempt::Nothing
     }
+    /// Retires a start that the transport definitely did not send. Unknown outcomes keep their callbacks instead.
+    pub fn not_sent(&self, attempt: Attempt) {
+        if let Attempt::Start(index) = attempt
+            && let Some(call) = self
+                .lock()
+                .calls
+                .get_mut(index)
+                .filter(|call| call.state == State::Pending)
+        {
+            call.state = State::Ended;
+        }
+    }
     /// Binds an explicit answer. Unknown transport outcomes leave pending callbacks intact.
     pub fn answered(&self, attempt: Attempt, response: &Response) {
         let mut inner = self.lock();

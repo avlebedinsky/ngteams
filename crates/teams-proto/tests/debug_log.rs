@@ -105,6 +105,16 @@ fn call() -> StartCall {
 
 async fn server() -> MockServer {
     let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .and(path("/api/chatsvc/amer/v1/wire-plain"))
+        .respond_with(
+            ResponseTemplate::new(429)
+                .insert_header("Retry-After", "0")
+                .set_body_json(json!({"note": "wire-visible-answer-retry"})),
+        )
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
     Mock::given(wiremock::matchers::any())
         .respond_with(|request: &wiremock::Request| {
             ResponseTemplate::new(200)
@@ -137,7 +147,11 @@ async fn send_each(token: &str) {
     assert_eq!(transport.send(&Plain).await.unwrap().status(), 200);
     send_control(&transport).await;
     send_files(&transport).await;
-    assert_eq!(server.received_requests().await.unwrap().len(), 8);
+    assert_eq!(
+        server.received_requests().await.unwrap().len(),
+        9,
+        "eight kinds and the plain request's retry"
+    );
 }
 
 async fn send_control(transport: &HttpTransport<OneToken>) {
@@ -239,6 +253,16 @@ fn assert_refusals(info: &str) {
 }
 
 fn assert_exchanges(text: &str) {
+    for direction in ["request", "response"] {
+        assert_eq!(
+            text.lines()
+                .filter(|line| line.contains(&format!("{direction} PUT https://"))
+                    && line.contains("/api/chatsvc/amer/v1/wire-plain"))
+                .count(),
+            2,
+            "the first plain request and its retry both log their {direction}: {text}"
+        );
+    }
     for (method, route, body) in [
         (
             "GET",

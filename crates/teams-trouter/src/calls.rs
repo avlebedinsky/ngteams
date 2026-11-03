@@ -47,12 +47,14 @@ fn gunzip(body: &str) -> Option<Vec<u8>> {
     (decoded.len() as u64 <= MAX_DELIVERY).then_some(decoded)
 }
 
+/// The calling socket's tracker, optionally coordinated with the app's other accounts.
 #[derive(Clone)]
 pub struct CallStack {
     observe: Arc<dyn Fn(&Delivery) -> Observed + Send + Sync>,
 }
 
 impl CallStack {
+    /// Observes deliveries through this account's call tracker.
     #[must_use]
     pub fn new(tracker: Arc<Tracker>) -> Self {
         Self {
@@ -76,9 +78,12 @@ impl fmt::Debug for CallStack {
     }
 }
 
+/// A decoded calling delivery with its tracker result and a responder for its originating socket.
 #[derive(Debug)]
 pub struct CallDelivery {
+    /// The decoded body and correlation fields from the originating connection.
     pub delivery: Delivery,
+    /// What the call tracker learned or offered from this delivery.
     pub observed: Observed,
     responder: CallResponder,
 }

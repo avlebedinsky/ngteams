@@ -127,7 +127,6 @@ impl std::fmt::Debug for RawBody {
 impl Wire {
     /// The bytes it sends: its raw body, or its JSON body as text.
     #[cfg(test)]
-    #[cfg(test)]
     pub(crate) fn body_bytes(&self) -> Option<Vec<u8>> {
         self.raw
             .as_ref()
@@ -136,24 +135,20 @@ impl Wire {
     }
 
     #[cfg(test)]
-    #[cfg(test)]
     pub(crate) fn service(&self) -> Service {
         self.service
     }
 
-    #[cfg(test)]
     #[cfg(test)]
     pub(crate) fn headers(&self) -> &[(&'static str, String)] {
         &self.headers
     }
 
     #[cfg(test)]
-    #[cfg(test)]
     pub(crate) fn method(&self) -> Method {
         self.method
     }
 
-    #[cfg(test)]
     #[cfg(test)]
     pub(crate) fn endpoint(&self) -> &Endpoint {
         &self.endpoint

@@ -1,6 +1,6 @@
 [package]
 name = "teams-proto"
-description = "Teams internal API requests and the native HTTP transport; every contacting write takes a WritePermit from teams-fence"
+description = "Typed Teams internal API requests and the logged native HTTP transport"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,8 +9,7 @@ publish.workspace = true
 [features]
 # Tests only, through dev-dependencies: `HttpTransport::with_mock_origin` (plain `http` to a loopback mock instead of
 # the service hosts) and `ProbeOwnState` (an own-state request for the transport's tests; the reviewed list itself is
-# empty). It turns on `teams-fence/test-support`, so `teams_fence::test_support_enabled()` reports it and a lab binary
-# built with it refuses to run.
+# empty). `teams_proto::test_support_enabled()` reports it so ngteams refuses to run a test-support build.
 test-support = []
 
 [dependencies]
@@ -48,8 +47,7 @@ url.workspace = true
 teams-call.workspace = true
 # a picture's bytes in the Graph fixture
 base64.workspace = true
-# the tests mint permits from a fence over a test roster and a fake membership source; the trybuild cases here see it
-# too, so the cases that need it off live in crates/fence-seal
+# Synthetic account/ID helpers used by the protocol fixtures until their shared-code move.
 teams-fence = { workspace = true, features = ["test-support"] }
 # the transport's tests reach wiremock through the mock origin
 teams-proto = { workspace = true, features = ["test-support"] }

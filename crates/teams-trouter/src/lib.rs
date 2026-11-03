@@ -16,27 +16,26 @@
 //!
 //! **What it sends.** The socket sends only `teams_proto`'s typed frames ([`teams_proto::OwnFrame`]:
 //! `user.authenticate`, the keep-alive ping, the message-loss acknowledgement, the disconnect), each through the
-//! connection's [`teams_proto::FrameSink`], never raw text; a lab sink writes none to `fence.log` (a frame isn't a
-//! contacting write; the personal build's logs each by its kind). The socket's write half goes to that sink when the
+//! connection's [`teams_proto::FrameSink`], never raw text. The socket's write half goes to that sink when the
 //! socket opens, and nothing else holds it ([`socket`]): there is no other way to send on it. No `user.activity`
 //! (deliveries come without it), and **no answer to any delivery** but a call's typed response on the calling stack's
 //! socket ([`calls`]): the messaging socket's deliveries stay unanswered, an incoming call's included.
 //!
 //! **Two stacks, two sockets.** A [`Trouter`] is the messaging stack's socket (chat deliveries); built
 //! [`Trouter::for_calls`], it is the calling stack's own (`SkypeSpaces`, its own endpoint): its deliveries read by the
-//! fence and handed on as [`PushEvent::Call`], an invitation the fence doesn't offer ignored, a delivery answered only
-//! by a typed response the fence permits for that call on that connection ([`calls`]). The personal build's calling
-//! socket registers as its own-state entry and logs its frames, as its messaging socket does.
+//! call tracker and handed on as [`PushEvent::Call`], an invitation the tracker doesn't offer ignored, a delivery
+//! answered only by a typed response on its originating connection ([`calls`]). Both stacks register the account's
+//! endpoint and log their frames through the diagnostic wire logger.
 //!
 //! **What it requests over HTTP.** The registrar registration of the endpoint for its stack and its renewal
 //! ([`registration`]): `teams_proto::EndpointRegistration` (`TeamsCDLWebWorker`) or
 //! `teams_proto::CallingRegistration` (`SkypeSpacesWeb`), the account's own state (it reaches nobody), sent through
-//! the account's transport by `Transport::send_own` (a plain request logged to `fence.log` as `allowed` first, or the
-//! personal build's own-state entry logged by its kind; the `ic3` token from the session).
+//! the account's transport by `Transport::send_own`, with the `ic3` token from the session. Requests and responses
+//! reach the credential-redacting diagnostic wire logger at `debug`.
 //!
 //! **Where it connects.** `wss://go.trouter.teams.microsoft.com/v4/c`, then the regional `<name>-t` host a
 //! `trouter.connected` names: a fixed allowlist ([`socket::allowed`]), the server certificate checked by the system's
-//! verifier. Only the `test-support` feature (tests, never a lab binary) points it at a loopback mock
+//! verifier. Only the `test-support` feature (tests only) points it at a loopback mock
 //! ([`Trouter::with_mock_origin`]), the URL built and checked as above first.
 //!
 //! **What it hands on** ([`PushEvent`]): connects (catch up after each), registrations (and the endpoint each one

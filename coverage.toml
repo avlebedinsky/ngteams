@@ -59,7 +59,7 @@ reason = "module declarations, re-exports and documentation only; no executable 
 
 
 [unmapped_sources."crates/teams-trouter/src/lib.rs"]
-sha256 = "7c105a6c32de4761bd5e86bf6002b2781aabd9902d858a49f0910f09ea25dfff"
+sha256 = "7bdd5ebbbf07a8daf3659fc52c93eb5866aa515311ff1a0b1b3e31fe7d38b9ee"
 reason = "module declarations, re-exports and documentation only; no executable items"
 
 [unmapped_sources."crates/ngteams/src/lib.rs"]

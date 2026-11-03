@@ -400,7 +400,7 @@ impl Tried {
     }
 }
 
-/// Sends the outbox's rows over a transport, each attempt under a fresh permit (see the module docs).
+/// Sends the outbox's rows over a transport, tracking each actual attempt (see the module docs).
 pub struct Outbox<T> {
     transport: Arc<T>,
     tracker: Arc<Tracker>,
@@ -840,10 +840,14 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         if let Ok(answer) = &result {
             self.tracker.answered(attempt, answer);
         }
-        match result {
+        let tried = match result {
             Ok(answer) => Tried::Answered(answer),
             Err(error) => from_transport(error),
+        };
+        if matches!(tried, Tried::NotSent(_) | Tried::Throttled { .. }) {
+            self.tracker.not_sent(attempt);
         }
+        tried
     }
 
     /// What an attempt makes of the row, and whether another attempt follows at once.

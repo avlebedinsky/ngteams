@@ -28,15 +28,15 @@
 //!   at a path not the endpoint's messaging or presence one are [`PushEvent::Ignored`] and never answered either. A message-loss report becomes
 //!   [`PushEvent::MessageLoss`]: catch up, then [`MessageLoss::caught_up`] acknowledges it.
 //! - **The calling stack's socket** ([`Trouter::for_calls`]): its own connect (`tc` naming `SkypeSpaces`, `dom`), its
-//!   own authentication's headers, the `SkypeSpacesWeb` registration; every delivery at its endpoint read by the fence
-//!   and handed on as [`PushEvent::Call`] (an invitation the fence doesn't offer [`PushEvent::Ignored`]), answered only
-//!   by a typed response the fence permits ([`crate::calls`]); a message-loss report acknowledged at once (nothing to
-//!   catch up). A reconnect sends back the cached parameters, so the endpoint and every call link under its push URL
-//!   stay as they were, and registers again; nothing is sent to a call (`docs/protocol/calling.md`, "A call held past
-//!   a dropped socket").
+//!   own authentication's headers, the `SkypeSpacesWeb` registration; every delivery at its endpoint read by the call
+//!   tracker and handed on as [`PushEvent::Call`] (an invitation the tracker doesn't offer is [`PushEvent::Ignored`]),
+//!   answered only by a typed response on its originating connection ([`crate::calls`]); a message-loss report
+//!   acknowledged at once (nothing to catch up). A reconnect sends back the cached parameters, so the endpoint and
+//!   every call link under its push URL stay as they were, and registers again; nothing is sent to a call
+//!   (`docs/protocol/calling.md`, "A call held past a dropped socket").
 //!
-//! Every frame goes out through the connection's [`FrameSink`]; none is written to `fence.log` by a lab sink (a frame
-//! isn't a contacting write).
+//! Every frame goes out through the connection's [`FrameSink`]. The socket logs incoming and outgoing frames through
+//! the credential-redacting diagnostic wire logger at `debug`.
 
 use std::fmt::Write as _;
 use std::future::Future;
@@ -141,18 +141,16 @@ pub enum PushEvent {
     /// Others' presence, delivered at the endpoint's `unifiedPresenceService` path once it subscribed to it
     /// (`teams_proto::PresenceSubscription`, [`crate::presence`]). It is never answered.
     Presence(PresenceDelivery),
+    /// A calling delivery and the tracker's observation, with typed replies bound to its connection.
     Call(CallDelivery),
-    /// A delivery that isn't a chat event of this endpoint, or on the calling stack's socket an invitation the fence
+    /// A delivery that isn't a chat event of this endpoint, or on the calling stack's socket an invitation the tracker
     /// doesn't offer. It is never answered.
     Ignored(Ignored),
     /// The socket is down; the client reconnects. `heard`: when (by the client's clock) the socket last read a frame
     /// once connected (a delivery, a pong, any frame), the last moment the channel was known to work; a socket that
     /// went down silently (a suspend, a half-open connection) is noticed only later, by a late pong. `None` when
     /// the socket never got its `trouter.connected`.
-    Disconnected {
-        down: Down,
-        heard: Option<SystemTime>,
-    },
+    Disconnected { down: Down, heard: Option<SystemTime> },
     /// The client stopped; nothing more comes.
     Stopped(Stop),
 }
@@ -183,15 +181,13 @@ impl MessageLoss {
 /// A delivery the client doesn't act on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ignored {
+    /// An incoming call on the messaging socket, or an invitation the call tracker doesn't offer.
     IncomingCall,
     /// At a path that isn't the endpoint's messaging one (on the calling stack's socket: not its endpoint's root or call
     /// agent).
-    NotOurs {
-        path: String,
-    },
-    Undecodable {
-        path: String,
-    },
+    NotOurs { path: String },
+    /// A presence or calling delivery whose body could not be decoded.
+    Undecodable { path: String },
 }
 
 /// Why a socket went down.
@@ -292,6 +288,7 @@ where
         })
     }
 
+    /// Uses the calling stack's socket, registration and delivery tracking instead of the messaging stack.
     #[must_use]
     pub fn for_calls(mut self, calls: CallStack) -> Self {
         self.calls = Some(calls);
@@ -515,9 +512,10 @@ where
         wait.saturating_mul(100 - jitter + spread) / 100
     }
 
-    fn sink(&self, writer: SocketWriter, _url: &url::Url, connection: &str) -> FrameSink<SocketWriter> {
+    fn sink(&self, writer: SocketWriter, connection: &str) -> FrameSink<SocketWriter> {
         let sink = FrameSink::new(writer);
         if self.trouter.calls.is_some() {
+            // Typed replies stay bound to this socket's delivery connection.
             sink.with_call_responses(connection)
         } else {
             sink
@@ -566,7 +564,7 @@ where
         let (writer, read) = socket::split(socket);
         // the connection's key: one per socket, the same for its deliveries and its responses
         let connection = format!("{}/{}", self.trouter.epid, self.connects);
-        let sink = self.sink(writer, &url, &connection);
+        let sink = self.sink(writer, &connection);
         let mut link = Link::new(sink, read, token, params, &options, self.trouter.clock.now());
         link.connection = connection;
         let end = link.serve(self).await;
@@ -576,10 +574,6 @@ where
 
     /// What a connection that ended as `end` leaves behind.
     fn served(&mut self, link: &Link, end: &End) {
-        if let Some(calls) = &self.trouter.calls {
-            // a response to a delivery of this connection is never sent on another
-            let _ = calls;
-        }
         // a connect that ended before its `trouter.connected` failed, whatever ended it (the socket closed, the
         // service disconnected, `1::` or `trouter.connected` never came), unless a renewal ended it
         let failed = matches!(end, End::Again(down, _) if !matches!(down, Down::Renewal));

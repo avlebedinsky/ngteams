@@ -341,6 +341,10 @@ impl PlainRequest for Plain {
     fn body(&self) -> Option<Value> {
         self.body.clone()
     }
+
+    fn headers(&self) -> Vec<(String, String)> {
+        vec![("x-plain-read".into(), "kept-on-retry".into())]
+    }
 }
 
 fn plain(service: Service, method: Method, segments: &[&str], body: Option<Value>) -> Plain {
@@ -694,8 +698,8 @@ async fn a_session_signed_out_during_the_throttling_wait_sends_nothing_more() {
 
         assert!(matches!(read, HttpError::Credentials(_)), "after {status}: {read:?}");
         assert!(
-            matches!(own, HttpError::Status(_)),
-            "a plain write is sent once: {own:?}"
+            matches!(own, HttpError::Credentials(_)),
+            "the plain request rechecks the signed-out session: {own:?}"
         );
         assert_eq!(
             setup.server.received_requests().await.unwrap().len(),
@@ -881,17 +885,97 @@ fn a_responses_debug_shows_the_bodys_length_only() {
 }
 
 #[tokio::test]
-async fn a_plain_mutation_is_sent_without_a_permit_and_never_retried() {
+async fn a_plain_request_retries_401_with_the_renewed_token_and_original_wire_fields() {
     let setup = setup().await;
     Mock::given(method("PUT"))
+        .and(path("/api/chatsvc/amer/v1/users/ME/properties"))
+        .and(query_param("name", "probe"))
+        .and(header("authorization", bearer(0).as_str()))
+        .and(header("x-plain-read", "kept-on-retry"))
+        .and(body_json(json!({"probe": true})))
         .respond_with(ResponseTemplate::new(401))
         .expect(1)
         .mount(&setup.server)
         .await;
-    assert!(matches!(
-        setup.transport.send(&probe()).await,
-        Err(HttpError::Status(_))
-    ));
-    assert_eq!(setup.server.received_requests().await.unwrap().len(), 1);
-    assert_eq!(setup.tokens.rejected().len(), 1, "renewed only for a later request");
+    Mock::given(method("PUT"))
+        .and(path("/api/chatsvc/amer/v1/users/ME/properties"))
+        .and(query_param("name", "probe"))
+        .and(header("authorization", bearer(1).as_str()))
+        .and(header("x-plain-read", "kept-on-retry"))
+        .and(body_json(json!({"probe": true})))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&setup.server)
+        .await;
+
+    assert_eq!(setup.transport.send(&probe()).await.unwrap().status(), 200);
+    assert_eq!(setup.server.received_requests().await.unwrap().len(), 2);
+    assert_eq!(setup.tokens.rejected(), [token(0)]);
+}
+
+#[tokio::test]
+async fn plain_requests_wait_a_capped_retry_after_and_recheck_the_token() {
+    for status in [429, 503] {
+        let setup = setup().await;
+        Mock::given(method("PUT"))
+            .and(header("x-plain-read", "kept-on-retry"))
+            .and(body_json(json!({"probe": true})))
+            .respond_with(ResponseTemplate::new(status).insert_header("Retry-After", "3600"))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&setup.server)
+            .await;
+        Mock::given(method("PUT"))
+            .and(header("x-plain-read", "kept-on-retry"))
+            .and(body_json(json!({"probe": true})))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(1)
+            .mount(&setup.server)
+            .await;
+
+        let started = Instant::now();
+        assert_eq!(setup.transport.send(&probe()).await.unwrap().status(), 200);
+        let waited = started.elapsed();
+        assert!(waited >= Duration::from_millis(50), "after {status}: {waited:?}");
+        assert!(waited < Duration::from_secs(10), "after {status}: {waited:?}");
+        assert_eq!(setup.tokens.audiences().len(), 2, "after {status}");
+        assert!(setup.tokens.rejected().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn plain_requests_never_retry_more_than_once() {
+    for status in [401, 429, 503] {
+        let setup = setup().await;
+        Mock::given(method("PUT"))
+            .respond_with(ResponseTemplate::new(status).insert_header("Retry-After", "0"))
+            .expect(2)
+            .mount(&setup.server)
+            .await;
+
+        let error = setup.transport.send(&probe()).await.unwrap_err();
+        let HttpError::Status(answer) = error else {
+            panic!("after {status}: {error:?}");
+        };
+        assert_eq!(answer.status(), status);
+        assert_eq!(setup.server.received_requests().await.unwrap().len(), 2);
+        assert_eq!(setup.tokens.rejected().len(), usize::from(status == 401));
+    }
+}
+
+#[tokio::test]
+async fn a_typed_write_sent_through_send_still_never_retries() {
+    for status in [401, 429, 503] {
+        let setup = setup().await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(status).insert_header("Retry-After", "0"))
+            .expect(1)
+            .mount(&setup.server)
+            .await;
+
+        let answer = setup.transport.send(&hello()).await.unwrap();
+        assert_eq!(answer.status(), status);
+        assert_eq!(setup.server.received_requests().await.unwrap().len(), 1);
+        assert_eq!(setup.tokens.rejected().len(), usize::from(status == 401));
+    }
 }

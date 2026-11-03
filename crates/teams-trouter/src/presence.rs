@@ -5,7 +5,7 @@
 //! "activity", …}, …}, …]}`, `"isSnapshot": true` beside the list on a snapshot.
 //!
 //! A presence delivery is never answered, as no delivery but a call's is: the lab's captures show UPS's deliveries
-//! going on for the whole of a run whose answers the fence held back (up to 49 minutes), and the ones left unanswered
+//! going on for the whole of a run without answers (up to 49 minutes), and the ones left unanswered
 //! replayed on a later connect (`"mstore":true`, [`PresenceDelivery::stored`]), as chat deliveries are.
 
 use serde_json::Value;

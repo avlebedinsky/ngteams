@@ -134,7 +134,7 @@ pub enum HttpError {
     /// The write has no wire form the native transport has a route for (a call); nothing was sent.
     #[error("the native transport has no route for this write")]
     NoRoute,
-    /// A read by `POST` whose request isn't exactly its entry's captured shape, or names other MRIs than its permit;
+    /// A read by `POST` whose request isn't exactly its entry's captured shape, or names other MRIs than the read;
     /// nothing was sent, logged or asked of the session.
     #[error("the read by POST isn't its entry's captured shape; nothing was sent")]
     Unknown,
@@ -187,8 +187,8 @@ pub enum Refusal {
     /// A token that can't be sent as a header value.
     #[error("a token that can't be sent in a header")]
     Token,
-    /// A read or a plain request to the calling service: only authorized call writes go there.
-    #[error("only authorized call writes go to the calling service")]
+    /// A request without a checked calling link: only typed call writes go to the calling service.
+    #[error("only typed call writes go to the calling service")]
     Calling,
     /// A read or a plain request to a file thumbnail's host: only a link Graph handed out is read there
     /// ([`HttpTransport::file_thumbnail`]).
@@ -346,6 +346,20 @@ impl<C: Credentials> HttpTransport<C> {
         let body = request
             .body
             .or_else(|| (request.service == Service::Calling && request.method == crate::Method::Post).then(Vec::new));
+        if !request.write && request.service != Service::Calling {
+            if request.service == Service::Substrate {
+                return Err(HttpError::Refused(Refusal::Substrate));
+            }
+            let outgoing = Outgoing {
+                method: request.method.to_reqwest(),
+                url: &url,
+                service: request.service,
+                body: body.as_deref(),
+                headers: &request.headers,
+                range: None,
+            };
+            return self.exchange(outgoing).await;
+        }
         let mut headers = plain_headers(request.service, body.is_some() || request.service == Service::Presence);
         headers.extend(request.headers);
         if request.service == Service::Calling && body.as_ref().is_some_and(Vec::is_empty) {
@@ -399,6 +413,8 @@ struct Outgoing<'a> {
     url: &'a Url,
     service: Service,
     body: Option<&'a [u8]>,
+    /// The request's extra non-credential headers, kept for each attempt.
+    headers: &'a [(String, String)],
     /// A ranged read's first and last byte (`Range: bytes=<first>-<last>`).
     range: Option<(u64, u64)>,
 }
@@ -724,6 +740,7 @@ impl<C: Credentials> HttpTransport<C> {
             url: &url,
             service,
             body: body.as_deref(),
+            headers: &[],
             range: None,
         };
         self.exchange(outgoing).await
@@ -754,7 +771,7 @@ impl<C: Credentials> HttpTransport<C> {
         }
     }
 
-    /// Sends a read, plain or own-state request (`record`: what is logged before every send), with the one retry a 401,
+    /// Sends a read, plain or own-state request, with the one retry a 401,
     /// 429 or 503 allows; any answer but a success is [`HttpError::Status`].
     async fn exchange(&self, outgoing: Outgoing<'_>) -> Result<Response, HttpError> {
         let mut token = self.token(outgoing.service).await?;
@@ -793,9 +810,10 @@ impl<C: Credentials> HttpTransport<C> {
         }
     }
 
-    /// One send; a plain or own-state request is logged first, and not sent when it can't be.
+    /// One logged attempt of a read, plain or own-state request.
     async fn attempt(&self, outgoing: &Outgoing<'_>, token: Option<&Secret>) -> Result<Response, HttpError> {
         let mut headers = plain_headers(outgoing.service, outgoing.body.is_some());
+        headers.extend_from_slice(outgoing.headers);
         if let Some((first, last)) = outgoing.range {
             headers.push((RANGE.as_str().to_owned(), format!("bytes={first}-{last}")));
         }
@@ -883,8 +901,7 @@ impl<C: Credentials> HttpTransport<C> {
     }
 }
 
-/// The personal build's sealed lists (see the module docs): a lab binary's requests of their entries go through
-/// [`Transport::send`] instead.
+/// Requests from the sealed own-state and read lists, plus file-content reads.
 impl<C: Credentials> HttpTransport<C> {
     ///
     /// # Errors
@@ -910,6 +927,7 @@ impl<C: Credentials> HttpTransport<C> {
             url: &url,
             service,
             body: Some(&body),
+            headers: &[],
             range: None,
         };
         self.exchange(outgoing).await
@@ -941,6 +959,7 @@ impl<C: Credentials> HttpTransport<C> {
             url,
             service: Service::FileThumbnail,
             body: None,
+            headers: &[],
             range: None,
         };
         self.exchange(outgoing).await
@@ -972,6 +991,7 @@ impl<C: Credentials> HttpTransport<C> {
             url,
             service: Service::FileContent,
             body: None,
+            headers: &[],
             range: Some((offset, last)),
         };
         self.exchange(outgoing).await
@@ -1133,6 +1153,7 @@ impl<C: Credentials> Transport for HttpTransport<C> {
                 url: &url,
                 service,
                 body: None,
+                headers: &[],
                 range: None,
             };
             self.exchange(outgoing).await

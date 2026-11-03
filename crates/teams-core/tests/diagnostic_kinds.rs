@@ -103,11 +103,11 @@ fn a_call_write_summary_distinguishes_the_outcome_and_never_contains_an_answer_b
     for (tried, summary) in [
         (
             CallTried::Answered(Response::new(403, PRIVATE.as_bytes())),
-            "fence allowed, HTTP 403",
+            "admitted, HTTP 403",
         ),
         (
-            CallTried::Denied("membership unread".to_owned()),
-            "fence denied: membership unread",
+            CallTried::Denied("another account is in a call".to_owned()),
+            "call admission refused: another account is in a call",
         ),
         (
             CallTried::NotSent("credential unavailable".to_owned()),

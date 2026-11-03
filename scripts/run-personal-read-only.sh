@@ -48,8 +48,7 @@ where() {
 run:          $run
 screenshots:  $run/shots/            ($0 --shot <name>)
 view trace:   $run/trace.jsonl
-log:          $run/snapshot/data/log/        (every refused send: "refused_read_only")
-app log:      $run/snapshot/data/logs/  and  $run/app.log
+app log:      $run/snapshot/data/logs/  and  $run/app.log  (refused sends: "refused_read_only")
 broker log:   $run/broker.log
 snapshot:     $run/snapshot/             (a copy of your chats: --stop deletes it)
 EOF
