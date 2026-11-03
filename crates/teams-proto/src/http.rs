@@ -1459,14 +1459,15 @@ impl<C: Credentials> Transport for HttpTransport<C> {
             .bearer(audience)
             .await
             .map_err(HttpError::Credentials)?;
-        // an own-availability write sends its `Content-Type` even without a body (the reset), as captured
-        let mut headers = plain_headers(service, wire.body().is_some() || service == Service::Presence);
+        // an own-availability write sends its `Content-Type` even without a body (the reset), as captured; a team's
+        // picture goes as its bytes under the JSON `Content-Type` the web client sends it with
+        let body = wire.body_bytes();
+        let mut headers = plain_headers(service, body.is_some() || service == Service::Presence);
         headers.extend(
             wire.headers()
                 .iter()
                 .map(|(name, value)| ((*name).to_owned(), value.clone())),
         );
-        let body = wire.body().map(|body| body.to_string().into_bytes());
         let answer = self
             .send_as(wire.method().to_reqwest(), &url, &headers, Auth::Bearer(&token), body)
             .await?;

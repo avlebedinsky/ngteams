@@ -456,6 +456,49 @@ impl Read for TeamAnalyticsRead {
     }
 }
 
+/// One channel's analytics, Analytics' "Select a channel":
+/// `GET beta/analytics/teams/<group>/channels/<channel>/summary-timeseries` on the middle tier, answered as a team's is
+/// under `channels`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelAnalyticsRead {
+    pub group: String,
+    pub channel: String,
+    pub period: AnalyticsPeriod,
+}
+
+/// The day by day series a channel's analytics asks for, as the web client's page does.
+const CHANNEL_SERIES: &str = "activeUsers,postMessages,replyMessages,reactions,mentions,meetingsOrganized";
+
+impl ChannelAnalyticsRead {
+    /// What its answer `body` says.
+    #[must_use]
+    pub fn read_answer(body: &[u8]) -> Option<TeamAnalytics> {
+        let answer: Value = serde_json::from_slice(body).ok()?;
+        analytics_of(answer.get("channels")?)
+    }
+}
+
+impl Read for ChannelAnalyticsRead {
+    fn service(&self) -> Service {
+        Service::MiddleTier
+    }
+
+    fn endpoint(&self) -> Endpoint {
+        Endpoint::new([
+            "beta",
+            "analytics",
+            "teams",
+            self.group.as_str(),
+            "channels",
+            self.channel.as_str(),
+            "summary-timeseries",
+        ])
+        .with_query("metric", "all")
+        .with_query("timeperiod", self.period.wire())
+        .with_query("includeTimeseries", CHANNEL_SERIES)
+    }
+}
+
 /// The analytics of the account's teams: `GET beta/analytics/me/teams/summary-timeseries` on the middle tier.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct AllTeamsAnalyticsRead {

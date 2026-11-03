@@ -159,7 +159,8 @@ fn chat_in_focus(window: WindowHandle<KitRoot>, key: &str, cx: &mut App) -> Opti
                 | Main::Search
                 | Main::TeamsPage
                 | Main::ManageTeam(_)
-                | Main::JoinTeam => None,
+                | Main::JoinTeam
+                | Main::CreateTeamMore => None,
             }
         })
         .ok()

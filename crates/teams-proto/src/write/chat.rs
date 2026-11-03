@@ -149,6 +149,7 @@ impl Sealed for SendMessage {
             fields.insert("properties".to_owned(), Value::Object(properties(&self.text)));
         }
         Some(Wire {
+            raw: None,
             service: Service::ChatService,
             headers: Vec::new(),
             method: Method::Post,
@@ -257,6 +258,7 @@ impl Sealed for EditMessage {
             fields.insert("properties".to_owned(), Value::Object(properties));
         }
         Some(Wire {
+            raw: None,
             service: Service::ChatService,
             headers: Vec::new(),
             method: Method::Put,
@@ -293,6 +295,7 @@ impl Mutating for DeleteMessage {
 impl Sealed for DeleteMessage {
     fn wire(&self) -> Option<Wire> {
         Some(Wire {
+            raw: None,
             service: Service::ChatService,
             headers: Vec::new(),
             method: Method::Delete,
@@ -342,6 +345,7 @@ impl Mutating for SetReaction {
 impl Sealed for SetReaction {
     fn wire(&self) -> Option<Wire> {
         Some(Wire {
+            raw: None,
             service: Service::ChatService,
             headers: Vec::new(),
             method: Method::Put,
@@ -380,6 +384,7 @@ impl Mutating for RemoveReaction {
 impl Sealed for RemoveReaction {
     fn wire(&self) -> Option<Wire> {
         Some(Wire {
+            raw: None,
             service: Service::ChatService,
             headers: Vec::new(),
             method: Method::Delete,
@@ -441,6 +446,7 @@ impl Sealed for ReadReceipt {
         let endpoint = Endpoint::new(["v1", "users", "ME", "conversations", &self.conversation, "properties"])
             .with_query("name", "consumptionhorizon");
         Some(Wire {
+            raw: None,
             service: Service::ChatService,
             headers: Vec::new(),
             method: Method::Put,
@@ -476,6 +482,7 @@ impl Mutating for Typing {
 impl Sealed for Typing {
     fn wire(&self) -> Option<Wire> {
         Some(Wire {
+            raw: None,
             service: Service::ChatService,
             headers: Vec::new(),
             method: Method::Post,
@@ -550,6 +557,7 @@ impl Sealed for CreateChat {
             json!({"threadType": "chat"})
         };
         Some(Wire {
+            raw: None,
             service: Service::ChatService,
             headers: Vec::new(),
             method: Method::Post,

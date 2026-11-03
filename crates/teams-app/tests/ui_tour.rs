@@ -83,7 +83,7 @@ const SETTLE: Duration = Duration::from_millis(1500);
 type Step = (&'static str, fn(&Entity<Shell>, &mut Window, &mut App));
 
 /// The tour.
-const STEPS: [Step; 4 + 118] = [
+const STEPS: [Step; 4 + 129] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -337,6 +337,87 @@ const STEPS: [Step; 4 + 118] = [
     ("manage-tags", |shell, _, cx| {
         with_manage_team(shell, cx, |page, cx| {
             page.show_tab(teams_ui::manage_team::ManageTab::Tags, cx);
+        });
+    }),
+    // Analytics' "Select a channel", the Apps tab and an app's Remove asking, Get more apps, the Giphy rating, Change
+    // picture (the mock's made-up apps; the lab's fence denies their writes)
+    ("manage-analytics-channel", |shell, window, cx| {
+        with_manage_team(shell, cx, |page, cx| {
+            page.show_tab(teams_ui::manage_team::ManageTab::Analytics, cx);
+            page.toggle_channel_menu(window, cx);
+        });
+    }),
+    ("manage-apps", |shell, window, cx| {
+        with_manage_team(shell, cx, |page, cx| {
+            page.toggle_channel_menu(window, cx);
+            page.show_tab(teams_ui::manage_team::ManageTab::Apps, cx);
+        });
+    }),
+    ("manage-apps-remove", |shell, _, cx| {
+        with_manage_team(shell, cx, |page, cx| {
+            if let Some(app) = page.apps_shown().into_iter().next() {
+                page.ask_remove_app(app, cx);
+            }
+        });
+    }),
+    ("add-app", |shell, window, cx| {
+        with_manage_team(shell, cx, teams_ui::manage_team::ManageTeam::keep_app);
+        shell.update(cx, |shell, cx| {
+            let team = shell.teams().read(cx).teams().and_then(|teams| teams.first().cloned());
+            if let Some(team) = team {
+                shell.open_add_app(team, window, cx);
+            }
+        });
+    }),
+    ("manage-settings-fun", |shell, window, cx| {
+        shell.update(cx, Shell::close_team_dialog);
+        with_manage_team(shell, cx, |page, cx| {
+            page.show_tab(teams_ui::manage_team::ManageTab::Settings, cx);
+            page.open_section("fun", cx);
+            page.toggle_giphy_menu(window, cx);
+        });
+    }),
+    ("team-picture", |shell, window, cx| {
+        with_manage_team(shell, cx, |page, cx| page.toggle_giphy_menu(window, cx));
+        shell.update(cx, |shell, cx| {
+            let team = shell.teams().read(cx).teams().and_then(|teams| teams.first().cloned());
+            if let Some(team) = team {
+                shell.open_team_picture(team, window, cx);
+            }
+        });
+    }),
+    // "More create team options": the templates, one's details and its form, a copy of the team, no group
+    ("create-more", |shell, window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.close_team_dialog(cx);
+            shell.open_create_team_more(window, cx);
+        });
+    }),
+    ("create-more-template", |shell, _, cx| {
+        with_create_more(shell, cx, |page, cx| {
+            if let Some(card) = page.templates().first().cloned() {
+                page.pick_template(card, cx);
+            }
+        });
+    }),
+    ("create-more-template-form", |shell, window, cx| {
+        with_create_more(shell, cx, |page, cx| {
+            page.use_template(window, cx);
+            page.fill("Release planning", "", window, cx);
+        });
+    }),
+    ("create-more-copy", |shell, window, cx| {
+        with_create_more(shell, cx, |page, cx| {
+            page.show(teams_ui::create_team_more::MoreSource::AnotherTeam, cx);
+            let team = page.owned().first().cloned();
+            if let Some(team) = team {
+                page.pick_team(team, window, cx);
+            }
+        });
+    }),
+    ("create-more-group", |shell, _, cx| {
+        with_create_more(shell, cx, |page, cx| {
+            page.show(teams_ui::create_team_more::MoreSource::Group, cx);
         });
     }),
     ("join-team", |shell, window, cx| {
@@ -1143,6 +1224,20 @@ fn with_manage_team(
     act: impl FnOnce(&mut teams_ui::manage_team::ManageTeam, &mut gpui::Context<teams_ui::manage_team::ManageTeam>),
 ) {
     if let Some(page) = shell.read(cx).manage_team().cloned() {
+        page.update(cx, act);
+    }
+}
+
+/// `act` on "More create team options", while it is shown.
+fn with_create_more(
+    shell: &Entity<Shell>,
+    cx: &mut App,
+    act: impl FnOnce(
+        &mut teams_ui::create_team_more::CreateTeamMore,
+        &mut gpui::Context<teams_ui::create_team_more::CreateTeamMore>,
+    ),
+) {
+    if let Some(page) = shell.read(cx).create_team_more().cloned() {
         page.update(cx, act);
     }
 }

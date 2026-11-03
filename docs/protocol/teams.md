@@ -15,6 +15,13 @@ Add member b (`bulkUpdateRoledMembers`, 200), b promoted (`PUT …/members`, `Pr
 tag made with b and deleted (`POST …/tags` 200, `DELETE …/tags/<tag>` 204), archived and restored (`archive` and `unarchive`,
 202 each), and the hidden team's General channel shown again (200). These are **seen live** now.
 
+**2026-11-03, later**: three more `team-manage` runs with `PROTO_LAB_TEAM_WRITES=1`, on a lab team made for them and deleted
+after: the Apps tab, Change picture, the Giphy rating, a channel's analytics and "More create team options" (below). Seen
+live: the Giphy rating (`spaceAdminSettings`, 200), the picture set and taken back (`profilepicture`, 200 each), an app removed
+(200) and a tab app added (201), a team copied from it (`clone`, 200) and that copy deleted (200). A team from a template went
+only as far as the fence, by choice: its apps (Workflows, Approvals) would put bots on the team, and the lab's fence then
+denies every write on it, its deletion too.
+
 ## What a team's entry holds
 
 CSA's teams read ([channels.md](channels.md#what-the-native-client-reads)) has it all for the page:
@@ -49,7 +56,9 @@ with channels shown, Archived Teams. Sort: A-Z, Z-A, Membership Type, Team type,
 team. Create team's dropdown holds Create team and Join Team.
 
 - `GET` provisioning `users/me/invitations`: `{"invitations": [...]}`, read for the Pending invites tab; empty for the lab, so
-  an invitation's keys are the bundle's and untested. Nothing answers one here.
+  an invitation's keys are the bundle's and untested. Nothing answers one here: an invitation is a shared channel shared with a
+  team the account owns, and the lab's tenant offers no shared channel ("Create a channel" lists Standard and Private only,
+  `isSharedChannelCreationEnabled` `false`), so none can reach a lab account to capture what answering sends.
 - `GET` middle tier `beta/analytics/me/teams/summary-timeseries?metric=all&timeperiod=last-seven-days&includeTimeseries=activeUsers&pagesize=40&nextCursor=`:
   `{"teams": [{"id", "displayName", "privacy", "metrics": {"activeUsers": {"value", "timeSeries": [{"date", "value"}]},
   "guests", "postMessages", "replyMessages", "meetingsOrganized", "reactions", "mentions", ...}}]}`, seen live.
@@ -58,8 +67,33 @@ team. Create team's dropdown holds Create team and Join Team.
 
 "Create a team": Team name (at most 256, required), Description (at most 1024), Team type (a step of its own, "What kind of
 team will this be?", Private or Public), First channel name (at most 50, required, its "..." sets it to General). Create is off
-until both required fields read. "More create team options" (from a group or another team) leads to other requests,
-`PUT beta/teams/migrateGroup/<group>` and `POST beta/teams/<team>/clone`, which aren't captured or built.
+until both required fields read.
+
+"More create team options" is a page across both panes: Back, "Create team", and From template, From another team, From
+group.
+
+- **From template**: "Create a team from a template", a "From scratch" card (the dialog above) and a card per template,
+  `GET` provisioning `teamtemplates/v1.0/en-us`: `{"value": [{"id", "name", "shortDescription", "description", "iconUri",
+  "channelCount", "appCount", "categories", "locale", "scope", "visibility"}]}`. A card shows the template's channels and
+  apps, `GET teamtemplates/v1.0/<id>/Public/en-US`: `{"value": {"templateId", "teamDefinition": {"channels": [{"id",
+  "displayName", "description", "isFavoriteByDefault", "tabs"}], "apps": [{"id"}], "memberSettings", "funSettings", …}}}`;
+  "Use this template" opens a form of name, description, team type and "Customize channels". Create sends
+  `POST` provisioning `team` with `{"apps": [{"id"}], "channels": [{"displayName", "id"}], "description", "displayName",
+  "isTenantWide": false, "locale": "en-US", "sensitivityLabelId": null, "templateId", "visibility": "Private" | "Public"}`
+  (captured; its answer unseen). The native page leaves the channels' names as the template has them.
+- **From another team**: "Which team do you want to use?", a card per team the account owns (none: "You need to own a team
+  to create another team from it."). One picked: "You are using "<name>" as a template for a new team", the name filled as
+  `<name> [copy]` and the description from it, Privacy, and "Choose what you'd like to include from the original team":
+  Channels and Apps ticked and fixed, Tabs and Team settings ticked, Members (N people) not. Create sends `POST` provisioning
+  `groups/<group>/clone` with `{"displayName", "description", "ownerObjectId", "teamGroupId", "visibility", "sensitivityLabelId":
+  "", "includeRoster", "includeChannels", "includeAppEntitlements", "includeSettings", "includeTabs"}`, **seen live**: 200 with
+  `{"groupId", "threadId", "workflowId"}`; the page then polls `GET` provisioning `workflow/status/<workflowId>`
+  (`{"status": "InProgress" | "Completed", "details"}`) behind "Creating the team...". The native page lets the teams' reread
+  bring the copy.
+- **From group**: "Which Microsoft 365 group do you want to use?", `GET beta/teams/usergroups?teamType=undefined` (the literal
+  `undefined` as sent), seen only as `[]`: "You need to own a group with fewer than 10000 people to create a team from that
+  group. Please create a group first." A group's entry and making a team of it (`migrateGroupToTeam` in the bundle) aren't
+  captured: the lab's accounts own no group.
 
 ```
 POST <middleTier>/beta/teams/create
@@ -86,8 +120,24 @@ What goes wrong says "N of M members were added" with Try again. A member of a p
 
 ## Manage team
 
-Tabs Channels, Members, Pending requests and Settings (an owner's), Analytics, Apps, Tags. The Apps tab isn't built: the web
-client's list of a team's apps came from no read this capture could name.
+Tabs Channels, Members, Pending requests and Settings (an owner's), Analytics, Apps, Tags.
+
+- **Apps**: "Get more apps", "Upload an app", Sort, "Find by name", and a row per app: its icon, name and maker, and a "..."
+  of Copy link and Remove. The list is `POST beta/teams/apps/aggregatedEntitlements?appbarview=userpinned` with `[<team>]`, a
+  read: `{"value": {"teamsEntitlements": {<team>: [{"id", "state", "isNewGlobalPreInstalledApp"?}]}, "definitions": {<app
+  id>: {"name", "developerName", "shortDescription", "accentColor", "smallImageUrl", "largeImageUrl", "bots", "staticTabs",
+  …}}, "teamEntitlementsHash", "teamsAsyncOperationInProgress"}}`; the tab lists the entitlements `Installed` (a new team's:
+  Forms, Lists, OneNote, Planner, Power BI, Praise, SharePoint, SharePoint Pages, Updates), the rest being Teams' built-in
+  ones (`InstalledAndPermanent`, `InstalledAndDeprecated`) and ones offered (`NotInstalled`, `PreConsented`). A new team's
+  three member apps are these apps' bots (Updates' is one). Remove asks "Remove <app>" / "Are you sure you want to remove
+  <app>?", then `DELETE beta/teams/<team>/apps/entitlements/<app id>`, no body, **seen live**, 200. "Get more apps" opens the
+  whole app store: `POST beta/users/apps/store` (each category's apps by id, a hundred at most, with ratings), names from
+  `POST beta/users/apps/batchedDefinitions?includeblockedapps=true` with the ids (a list of definitions); an app's Add
+  first adds it for the account (`POST beta/users/apps/entitlements` with its definition, 201, the account's own), then
+  "Choose a place to use the app" with the team's channel picked, and Go sends `POST beta/teams/<team>/apps/entitlements`
+  with the app's definition as the body: **seen live** for SharePoint Pages (no bot), 201 with `{"value": {"id", "state":
+  "Installed", "installedVersion", "installedBy", …}}`; a tab's own setup follows, which the native client leaves out. The
+  native "Get more apps" is a dialog of the store's popular and Microsoft's apps, searched by name, Add on each.
 
 - **Channels**: `GET` provisioning `groups/<group>/channels?mode=IncludeIncomingChannels`: `{"channels": [{"threadId",
   "displayName", "description", "channelType", "channelState", "archiveState", "lastActivity", ...}]}`, seen live.
@@ -108,9 +158,18 @@ client's list of a team's apps came from no read this capture could name.
   `userSettings` and `guestSettings`, read from `GET v1/threads/<thread>?view=msnp24Equivalent` (`properties.spaceAdminSettings`).
   The tags' boxes are `PUT <CSA>/api/v1/teams/<thread>/tagSettings` with `{"onlyOwnersCanUpdate", "disallowedSources",
   "enableAutomaticTags"}`. Team code: `GET`, `PUT` (make or reset), `DELETE` `beta/teams/<thread>/joinCode`; the read is 204 while
-  there is none. Change picture isn't built (`POST beta/teams/<group>/profilepicture?threadId=<thread>` with the image).
+  there is none. Fun stuff's Giphy box, while on, has "Filter out inappropriate content using one of the settings below:"
+  with G, PG or PG-13 "(based on the GIPHY Content Rating)": `userSettings.giphyRating` 0, 1 or 2 (a new team's is 1), written
+  as every box, **seen live**. Change picture opens "Change team picture": the picture, Upload (`.png,.jpg,.jpeg`), Remove,
+  Close and Save. Save sends `POST beta/teams/<group>/profilepicture?threadId=<team>` with the image's bytes as the body (under
+  `Content-Type: application/json`, as sent), **seen live**, 200, answered with the picture. Remove shows the picture Teams
+  makes from the name, `GET beta/teams/defaultProfilePicture?displayName=<name>&highResolution=true` (a JPEG), and Save then
+  sends those bytes the same way, seen live.
 - **Analytics**: `GET beta/analytics/teams/<group>/summary-timeseries?metric=all&timeperiod=…&includeTimeseries=…`, the same
-  metrics as above in `{"teams": {...}}`, seen live. Its "Select a channel" isn't built.
+  metrics as above in `{"teams": {...}}`, seen live. "Select a channel" (All Channels, then each channel) reads
+  `GET beta/analytics/teams/<group>/channels/<channel>/summary-timeseries?metric=all&timeperiod=…&includeTimeseries=activeUsers,postMessages,replyMessages,reactions,mentions,meetingsOrganized`,
+  answered as a team's under `channels`, seen live (empty for a new team: `"metrics": {}, "errorCode": 2`). The web client
+  opens the channel's own page (Settings, Analytics) for it; the native tab shows the channel's numbers in place.
 - **Tags**: `GET <CSA>/api/v1/teams/<thread>/tagCards?tagType=any`: `{"tagCards": [...], "teamTagSettings": {...}}`, seen live
   and empty, so a card's keys are the bundle's. `POST <CSA>/api/v1/teams/<thread>/tags` with `{"tagName", "tagDescription",
   "memberIds"}` (captured); `PATCH` `…/tags/<tag>` with `if-match: <version>` and `DELETE` `…/tags/<tag>` (the bundle's).
@@ -132,9 +191,12 @@ page showed live and nothing was joined.
 ## The fence
 
 `teams_fence::contacting`'s `contacting/team.rs`. A new private team names nobody: `TeamCreate` on `Scope::New`, which passes,
-as a new appointment does; a public or org-wide one has nobody to judge: `OpenTeamCreate`, which the lab's fence denies. Anything
-else on a team is `TeamChange` or `MemberChange` on `Scope::Team`, the people it adds named on it. The own-view writes above reach
-nobody. The personal build logs and sends them all.
+as a new appointment does; a public or org-wide one has nobody to judge: `OpenTeamCreate`, which the lab's fence denies. A team
+from a template is judged as a new team by its `visibility`. A copy of a team with its people (`includeRoster`) reaches
+everyone on the team it copies: `MemberChange` on that team's group; without them it is a new team. Anything else on a team is
+`TeamChange` or `MemberChange` on `Scope::Team`, the people it adds named on it: an app added names its bots (`bots[].id`,
+`inputExtensions[].botId`) as `28:` members, so an app with a bot is denied in the lab (a team app is never someone a write
+may add). The own-view writes above reach nobody. The personal build logs and sends them all.
 
 The lab's fence reads a team's members from its thread (`LiveMembershipSource`, the user's sign-off of 2026-11-03,
 [lab-rules.md](../lab-rules.md)): `GET v1/threads/<thread>?view=msnp24Equivalent` first, which must be that thread with

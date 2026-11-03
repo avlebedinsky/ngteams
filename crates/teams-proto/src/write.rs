@@ -35,7 +35,9 @@ pub use chat::{
     Author, CreateChat, DeleteMessage, EditMessage, Original, ReadReceipt, RemoveReaction, SendMessage, SetReaction,
     Typing,
 };
-pub use team::{MemberUpdate, NewTeam, TeamRole, TeamWrite, team_created, team_error_code};
+pub use team::{
+    AppDefinition, MemberUpdate, NewTeam, TeamCopy, TeamRole, TeamWrite, TemplateTeam, team_created, team_error_code,
+};
 
 /// A request others could notice. It names the one [`Target`] it writes to, and it reaches a transport only inside an
 /// [`Authorized`], next to a [`WritePermit`] issued for exactly that target.
@@ -70,9 +72,9 @@ mod sealed {
 
 /// A mutating request as the transport sends it: the service it goes to (the chat service, or UPS for the account's
 /// own availability), its method, its endpoint under that service's base, the headers it adds to the service's own
-/// (the presence writes' `x-ms-endpoint-id`) and its JSON body. Sealed: only this crate's requests make one, from the
-/// same fields their [`Mutating::target`] comes from, and only this crate reads one, so a permit for one target can't
-/// carry another request's wire form.
+/// (the presence writes' `x-ms-endpoint-id`) and its JSON body, or its raw bytes (a team's picture). Sealed: only this
+/// crate's requests make one, from the same fields their [`Mutating::target`] comes from, and only this crate reads one,
+/// so a permit for one target can't carry another request's wire form.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Wire {
     service: Service,
@@ -81,9 +83,43 @@ pub struct Wire {
     /// By lower-cased name, none of them a credential.
     headers: Vec<(&'static str, String)>,
     body: Option<Value>,
+    /// A body of bytes sent as they are, in place of `body`: an image. The target never comes from it.
+    raw: Option<RawBody>,
+}
+
+/// A write's body of bytes (a picture). `Debug` shows only its length.
+#[derive(Clone, PartialEq, Eq)]
+pub struct RawBody(std::sync::Arc<[u8]>);
+
+impl RawBody {
+    /// The bytes.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl From<Vec<u8>> for RawBody {
+    fn from(bytes: Vec<u8>) -> Self {
+        Self(bytes.into())
+    }
+}
+
+impl std::fmt::Debug for RawBody {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "RawBody({} bytes)", self.0.len())
+    }
 }
 
 impl Wire {
+    /// The bytes it sends: its raw body, or its JSON body as text.
+    pub(crate) fn body_bytes(&self) -> Option<Vec<u8>> {
+        self.raw
+            .as_ref()
+            .map(|raw| raw.bytes().to_vec())
+            .or_else(|| self.body.as_ref().map(|body| body.to_string().into_bytes()))
+    }
+
     pub(crate) fn service(&self) -> Service {
         self.service
     }
@@ -100,6 +136,7 @@ impl Wire {
         &self.endpoint
     }
 
+    #[cfg(test)]
     pub(crate) fn body(&self) -> Option<&Value> {
         self.body.as_ref()
     }

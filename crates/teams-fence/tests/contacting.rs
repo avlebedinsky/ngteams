@@ -1678,6 +1678,121 @@ fn what_changes_a_team_is_a_write_on_it() {
 }
 
 #[test]
+fn a_teams_picture_and_its_apps_are_changes_on_it() {
+    let picture = format!("{MT}/{GROUP_ID}/profilepicture?threadId={TEAM}");
+    assert_eq!(
+        verdict("POST", &picture, Some(b"\x89PNG\r\n")),
+        on_team(WriteKind::TeamChange, GROUP_ID)
+    );
+    // no image, another query or no team named: unreadable
+    assert_eq!(verdict("POST", &picture, None), Contact::Unreadable);
+    for url in [
+        format!("{MT}/{GROUP_ID}/profilepicture"),
+        format!("{MT}/{GROUP_ID}/profilepicture?threadId=x"),
+        format!("{MT}/{GROUP_ID}/profilepicture?threadId={TEAM}&other=1"),
+    ] {
+        assert_eq!(verdict("POST", &url, Some(b"\x89PNG")), Contact::Unreadable, "{url}");
+    }
+    let app = format!("{MT}/{TEAM}/apps/entitlements/99e46335-5250-4a68-8499-3e4f55e6f3f6");
+    assert_eq!(verdict("DELETE", &app, None), on_team(WriteKind::TeamChange, TEAM));
+    assert_eq!(verdict("DELETE", &app, Some(b"{}")), Contact::Unreadable);
+    assert_eq!(verdict("DELETE", &format!("{app}?x=1"), None), Contact::Unreadable);
+}
+
+#[test]
+fn an_app_added_to_a_team_names_its_bots() {
+    let url = format!("{MT}/{TEAM}/apps/entitlements");
+    let with_bots = br#"{"id":"app1","name":"Updates","bots":[{"id":"e9a6ecda-991e-45a5-890d-c68b5a6d7461","scopes":["Team"]}],"inputExtensions":[{"botId":"05614650-0d94-4601-bd2f-c200a0a7c57c"},{"type":"apiBased"}]}"#;
+    assert_eq!(
+        verdict("POST", &url, Some(with_bots)),
+        Contact::Write(
+            Target::new(WriteKind::TeamChange, Scope::Team { id: TEAM.to_owned() }).with_added([
+                Mri::new("28:e9a6ecda-991e-45a5-890d-c68b5a6d7461"),
+                Mri::new("28:05614650-0d94-4601-bd2f-c200a0a7c57c"),
+            ])
+        )
+    );
+    assert_eq!(
+        verdict(
+            "POST",
+            &url,
+            Some(br#"{"id":"tab-only","name":"Pages","staticTabs":[]}"#)
+        ),
+        on_team(WriteKind::TeamChange, TEAM)
+    );
+    // no app id, a bot in an unreadable shape, a key in another case, or a query: unreadable
+    for body in [
+        &br#"{"name":"x"}"#[..],
+        br#"{"id":"a","bots":[{"id":1}]}"#,
+        br#"{"id":"a","bots":{"id":"b"}}"#,
+        br#"{"id":"a","Bots":[{"id":"b"}]}"#,
+        br#"{"id":"a","bots":[{"ID":"b"}]}"#,
+    ] {
+        assert_eq!(
+            verdict("POST", &url, Some(body)),
+            Contact::Unreadable,
+            "{}",
+            String::from_utf8_lossy(body)
+        );
+    }
+    assert_eq!(
+        verdict("POST", &format!("{url}?x=1"), Some(br#"{"id":"a"}"#)),
+        Contact::Unreadable
+    );
+}
+
+fn template_body(visibility: &str, tenant_wide: bool) -> String {
+    format!(
+        r#"{{"apps":[{{"id":"com.microsoft.teamspace.tab.planner"}}],"channels":[{{"displayName":"General","id":"General"}}],"description":"","displayName":"a","isTenantWide":{tenant_wide},"locale":"en-US","sensitivityLabelId":null,"templateId":"com.microsoft.teams.template.ManageAProject","visibility":"{visibility}"}}"#
+    )
+}
+
+fn clone_body(group: &str, roster: bool, visibility: &str) -> String {
+    format!(
+        r#"{{"displayName":"a","description":"","ownerObjectId":"x","teamGroupId":"{group}","visibility":"{visibility}","sensitivityLabelId":"","includeRoster":{roster},"includeChannels":true,"includeAppEntitlements":true,"includeSettings":true,"includeTabs":true}}"#
+    )
+}
+
+#[test]
+fn a_team_from_a_template_or_another_team_is_judged_by_whom_it_brings() {
+    let template = format!("{FABRIC}/team");
+    assert_eq!(
+        verdict("POST", &template, Some(template_body("Private", false).as_bytes())),
+        Contact::Write(Target::new(WriteKind::TeamCreate, Scope::New))
+    );
+    for body in [template_body("Public", false), template_body("Private", true)] {
+        assert_eq!(
+            verdict("POST", &template, Some(body.as_bytes())),
+            Contact::Write(Target::new(WriteKind::OpenTeamCreate, Scope::New))
+        );
+    }
+    assert_eq!(
+        verdict("POST", &template, Some(br#"{"displayName":"a","members":["x"]}"#)),
+        Contact::Unreadable
+    );
+    let clone = format!("{FABRIC}/groups/{GROUP_ID}/clone");
+    // with its roster, a copy reaches everyone on the team it copies
+    assert_eq!(
+        verdict("POST", &clone, Some(clone_body(GROUP_ID, true, "Private").as_bytes())),
+        on_team(WriteKind::MemberChange, GROUP_ID)
+    );
+    assert_eq!(
+        verdict("POST", &clone, Some(clone_body(GROUP_ID, false, "Private").as_bytes())),
+        Contact::Write(Target::new(WriteKind::TeamCreate, Scope::New))
+    );
+    assert_eq!(
+        verdict("POST", &clone, Some(clone_body(GROUP_ID, false, "Public").as_bytes())),
+        Contact::Write(Target::new(WriteKind::OpenTeamCreate, Scope::New))
+    );
+    // a body naming another team than its path is unreadable
+    assert_eq!(
+        verdict("POST", &clone, Some(clone_body("another", true, "Private").as_bytes())),
+        Contact::Unreadable
+    );
+    assert_eq!(verdict("POST", &clone, None), Contact::Unreadable);
+}
+
+#[test]
 fn people_added_to_a_team_are_named_on_the_write() {
     let body = format!(r#"{{"users":[{{"mri":"{LAB_MEMBER}","role":0}}],"groupId":"{GROUP_ID}"}}"#);
     let url = format!("{MT}/{TEAM}/bulkUpdateRoledMembers?allowAsyncAddition=true");

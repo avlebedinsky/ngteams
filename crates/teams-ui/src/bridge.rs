@@ -30,8 +30,8 @@ use teams_core::{
     TeamChange, TeamMember, TeamWritten, Transient, TransientSent,
 };
 use teams_proto::{
-    AnalyticsPeriod, JoinableTeam, ManagedChannel, OwnTeamView, PendingInvite, TagsRead, TeamAnalytics, TeamPerson,
-    TeamPicture, TeamWrite,
+    AnalyticsPeriod, InstalledApp, JoinableTeam, ManagedChannel, OwnTeamView, PendingInvite, StoreApp, TagsRead,
+    TeamAnalytics, TeamPerson, TeamPicture, TeamTemplateCard, TeamTemplateDetails, TeamWrite,
 };
 use teams_store::{
     Conversation, Member, Message, MessagePage, OutboxEntry, PageCursor, Reaction, ReadHorizon, SearchHit, Team,
@@ -249,6 +249,39 @@ pub trait Core: Send + Sync + 'static {
     fn team_picture(&self, _team: TeamPicture) -> Reply<Option<PictureBytes>> {
         Reply::ready(Ok(None))
     }
+    /// The apps installed on a team. A fake core has none.
+    fn team_apps(&self, _team: String) -> Reply<Vec<InstalledApp>> {
+        Reply::ready(Ok(Vec::new()))
+    }
+    /// The apps the store offers to add to a team. A fake core offers none.
+    fn app_store(&self) -> Reply<Vec<StoreApp>> {
+        Reply::ready(Ok(Vec::new()))
+    }
+    /// How a team's channel did. A fake core doesn't know.
+    fn channel_analytics(
+        &self,
+        _group: String,
+        _channel: String,
+        _period: AnalyticsPeriod,
+    ) -> Reply<Option<TeamAnalytics>> {
+        Reply::ready(Ok(None))
+    }
+    /// Teams' team templates. A fake core has none.
+    fn team_templates(&self) -> Reply<Vec<TeamTemplateCard>> {
+        Reply::ready(Ok(Vec::new()))
+    }
+    /// One template's channels and apps. A fake core knows none.
+    fn team_template(&self, _id: String) -> Reply<Option<TeamTemplateDetails>> {
+        Reply::ready(Ok(None))
+    }
+    /// How many Microsoft 365 groups the account could make a team of. A fake core knows none.
+    fn owned_groups(&self) -> Reply<Option<usize>> {
+        Reply::ready(Ok(Some(0)))
+    }
+    /// The picture Teams makes for a team from its name. A fake core has none.
+    fn default_team_picture(&self, _name: String) -> Reply<Option<Vec<u8>>> {
+        Reply::ready(Ok(None))
+    }
     /// People the account knows whose name holds `query`, with their addresses: the attendee picker's suggestions. A
     /// fake core knows nobody.
     fn invitable(&self, query: String) -> Reply<Vec<Invitable>> {
@@ -381,6 +414,39 @@ impl Core for EngineRequests {
 
     fn team_picture(&self, team: TeamPicture) -> Reply<Option<PictureBytes>> {
         EngineRequests::team_picture(self, team)
+    }
+
+    fn team_apps(&self, team: String) -> Reply<Vec<InstalledApp>> {
+        EngineRequests::team_apps(self, team)
+    }
+
+    fn app_store(&self) -> Reply<Vec<StoreApp>> {
+        EngineRequests::app_store(self)
+    }
+
+    fn channel_analytics(
+        &self,
+        group: String,
+        channel: String,
+        period: AnalyticsPeriod,
+    ) -> Reply<Option<TeamAnalytics>> {
+        EngineRequests::channel_analytics(self, group, channel, period)
+    }
+
+    fn team_templates(&self) -> Reply<Vec<TeamTemplateCard>> {
+        EngineRequests::team_templates(self)
+    }
+
+    fn team_template(&self, id: String) -> Reply<Option<TeamTemplateDetails>> {
+        EngineRequests::team_template(self, id)
+    }
+
+    fn owned_groups(&self) -> Reply<Option<usize>> {
+        EngineRequests::owned_groups(self)
+    }
+
+    fn default_team_picture(&self, name: String) -> Reply<Option<Vec<u8>>> {
+        EngineRequests::default_team_picture(self, name)
     }
 
     fn invitable(&self, query: String) -> Reply<Vec<Invitable>> {

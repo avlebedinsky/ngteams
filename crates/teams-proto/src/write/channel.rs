@@ -126,6 +126,7 @@ impl Sealed for CreateChannel {
         let channel = &self.channel;
         Some(match channel.kind {
             NewChannelKind::Standard => Wire {
+                raw: None,
                 service: Service::MiddleTier,
                 method: Method::Post,
                 endpoint: Endpoint::new(["beta", "teams", channel.team.as_str(), "channels"]),
@@ -139,6 +140,7 @@ impl Sealed for CreateChannel {
                 })),
             },
             NewChannelKind::Private => Wire {
+                raw: None,
                 service: Service::Provisioning,
                 method: Method::Post,
                 endpoint: Endpoint::new(["teams", channel.group.as_str(), "channels"]).with_query("forceSync", "false"),
@@ -247,6 +249,7 @@ impl Sealed for AddChannelMembers {
             .map(|(_, named)| json!({ "id": named, "role": MEMBER_ROLE }))
             .collect();
         Some(Wire {
+            raw: None,
             service: Service::Provisioning,
             method: Method::Post,
             endpoint: Endpoint::new([
@@ -290,6 +293,7 @@ impl Mutating for ShowChannelByDefault {
 impl Sealed for ShowChannelByDefault {
     fn wire(&self) -> Option<Wire> {
         Some(Wire {
+            raw: None,
             service: Service::MiddleTier,
             method: Method::Put,
             endpoint: Endpoint::new(["beta", "teams", self.channel.as_str(), "setDefaultChannel"]),

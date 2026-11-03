@@ -114,8 +114,9 @@ use teams_fence::Mri;
 use teams_proto::chat::{self, MessageText};
 use teams_proto::{
     AnalyticsPeriod, CalendarEvent, Client, Credentials, EndpointRegistrar, EventAttendee, FileRange, FullEvent,
-    HttpError, HttpTransport, JoinableTeam, ManagedChannel, ManualAvailability, MeetingDetails, OwnTeamView,
-    PendingInvite, RegisteredEndpoint, TagsRead, TeamAnalytics, TeamPerson, TeamPicture, TeamWrite, Transport,
+    HttpError, HttpTransport, InstalledApp, JoinableTeam, ManagedChannel, ManualAvailability, MeetingDetails,
+    OwnTeamView, PendingInvite, RegisteredEndpoint, StoreApp, TagsRead, TeamAnalytics, TeamPerson, TeamPicture,
+    TeamTemplateCard, TeamTemplateDetails, TeamWrite, Transport,
 };
 use teams_store::{
     Applied, Conversation, Member, Message, MessagePage, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction,
@@ -132,6 +133,7 @@ use crate::calendar::{Calendar, EventWrite, EventWritten, Invitable, MeetingAvai
 use crate::channels::{ChannelDraft, ChannelMade, ChannelProblem, Channels, Finished};
 use crate::service_search::{SearchAnswer, SearchScope, ServiceSearch};
 use crate::team_admin::{TeamAsk, TeamChange, TeamMember, TeamWritten};
+use crate::team_apps::TeamAppsAsk;
 
 /// How many people the attendee picker suggests at most.
 const INVITABLE: usize = 8;
@@ -667,6 +669,8 @@ enum Request {
     },
     /// What the team pages ask ([`crate::team_admin`]).
     Team(Box<TeamAsk>),
+    /// What the Apps tab, Change picture, a channel's analytics and "More create team options" ask ([`crate::team_apps`]).
+    TeamApps(Box<TeamAppsAsk>),
     MeetingAvailability {
         attendees: Vec<EventAttendee>,
         start_ms: i64,
@@ -1128,6 +1132,57 @@ impl EngineRequests {
     /// A team's picture, read now: the service makes one for a team that set none.
     pub fn team_picture(&self, team: TeamPicture) -> Reply<Option<PictureBytes>> {
         self.ask(|reply| Request::Team(Box::new(TeamAsk::Picture { team, reply })))
+    }
+
+    /// The apps installed on a team, by name, read now ([`crate::team_apps`]).
+    pub fn team_apps(&self, team: impl Into<String>) -> Reply<Vec<InstalledApp>> {
+        let team = team.into();
+        self.ask(|reply| Request::TeamApps(Box::new(TeamAppsAsk::Apps { team, reply })))
+    }
+
+    /// The apps the store offers to add to a team, with their definitions, read now.
+    pub fn app_store(&self) -> Reply<Vec<StoreApp>> {
+        self.ask(|reply| Request::TeamApps(Box::new(TeamAppsAsk::Store { reply })))
+    }
+
+    /// How a team's channel did over `period`, read now.
+    pub fn channel_analytics(
+        &self,
+        group: impl Into<String>,
+        channel: impl Into<String>,
+        period: AnalyticsPeriod,
+    ) -> Reply<Option<TeamAnalytics>> {
+        let (group, channel) = (group.into(), channel.into());
+        self.ask(|reply| {
+            Request::TeamApps(Box::new(TeamAppsAsk::ChannelAnalytics {
+                group,
+                channel,
+                period,
+                reply,
+            }))
+        })
+    }
+
+    /// Teams' team templates, read now.
+    pub fn team_templates(&self) -> Reply<Vec<TeamTemplateCard>> {
+        self.ask(|reply| Request::TeamApps(Box::new(TeamAppsAsk::Templates { reply })))
+    }
+
+    /// One template's channels and apps, read now.
+    pub fn team_template(&self, id: impl Into<String>) -> Reply<Option<TeamTemplateDetails>> {
+        let id = id.into();
+        self.ask(|reply| Request::TeamApps(Box::new(TeamAppsAsk::Template { id, reply })))
+    }
+
+    /// How many Microsoft 365 groups the account owns that a team could be made of, read now.
+    pub fn owned_groups(&self) -> Reply<Option<usize>> {
+        self.ask(|reply| Request::TeamApps(Box::new(TeamAppsAsk::OwnedGroups { reply })))
+    }
+
+    /// The picture Teams makes for a team named `name`, read now: what Change picture's Remove saves.
+    pub fn default_team_picture(&self, name: impl Into<String>) -> Reply<Option<Vec<u8>>> {
+        let name = name.into();
+        self.ask(|reply| Request::TeamApps(Box::new(TeamAppsAsk::DefaultPicture { name, reply })))
     }
 
     /// The people on the team `team` that `keyword` finds, read now: what a private channel's member step suggests
@@ -1738,6 +1793,7 @@ where
             } => self.channels.thread(team, team_group, channel_group, name, reply),
             Request::TeamPeople { team, keyword, reply } => self.channels.people(team, keyword, reply),
             Request::Team(ask) => self.channels.team_ask(*ask),
+            Request::TeamApps(ask) => self.channels.team_apps_ask(*ask),
             Request::SearchService { query, scope, reply } => self.service_search.search(query, scope, reply),
             Request::MeetingAvailability {
                 attendees,

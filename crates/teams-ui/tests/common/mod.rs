@@ -126,6 +126,17 @@ pub struct FakeCore {
     pub team_roster: Mutex<Vec<teams_core::TeamMember>>,
     /// A team's settings, as the service keeps them.
     pub team_settings: Mutex<Option<String>>,
+    /// A team's installed apps.
+    pub team_apps: Mutex<Vec<teams_proto::InstalledApp>>,
+    /// The apps the store offers.
+    pub store_apps: Mutex<Vec<teams_proto::StoreApp>>,
+    /// Teams' templates, and what one makes.
+    pub templates: Mutex<(
+        Vec<teams_proto::TeamTemplateCard>,
+        Option<teams_proto::TeamTemplateDetails>,
+    )>,
+    /// The channels whose analytics were asked for, in order.
+    pub channel_analytics_asked: Mutex<Vec<String>>,
     /// What a channel's creation answers; a problem without one.
     pub channel_answer: Mutex<Option<Result<teams_core::ChannelMade, teams_core::ChannelProblem>>>,
     /// The people a private channel was given: its team's group, its group and their MRIs.
@@ -209,6 +220,10 @@ impl Default for FakeCore {
             team_views: Mutex::default(),
             team_roster: Mutex::default(),
             team_settings: Mutex::default(),
+            team_apps: Mutex::default(),
+            store_apps: Mutex::default(),
+            templates: Mutex::default(),
+            channel_analytics_asked: Mutex::default(),
             channel_answer: Mutex::default(),
             channel_members_added: Mutex::default(),
             channel_thread_answer: Mutex::default(),
@@ -390,6 +405,32 @@ impl Core for FakeCore {
 
     fn team_settings(&self, _team: String) -> Reply<Option<String>> {
         Reply::ready(Ok(locked(&self.team_settings).clone()))
+    }
+
+    fn team_apps(&self, _team: String) -> Reply<Vec<teams_proto::InstalledApp>> {
+        Reply::ready(Ok(locked(&self.team_apps).clone()))
+    }
+
+    fn app_store(&self) -> Reply<Vec<teams_proto::StoreApp>> {
+        Reply::ready(Ok(locked(&self.store_apps).clone()))
+    }
+
+    fn team_templates(&self) -> Reply<Vec<teams_proto::TeamTemplateCard>> {
+        Reply::ready(Ok(locked(&self.templates).0.clone()))
+    }
+
+    fn team_template(&self, _id: String) -> Reply<Option<teams_proto::TeamTemplateDetails>> {
+        Reply::ready(Ok(locked(&self.templates).1.clone()))
+    }
+
+    fn channel_analytics(
+        &self,
+        _group: String,
+        channel: String,
+        _period: teams_proto::AnalyticsPeriod,
+    ) -> Reply<Option<teams_proto::TeamAnalytics>> {
+        locked(&self.channel_analytics_asked).push(channel);
+        Reply::ready(Ok(None))
     }
 
     fn add_channel_members(

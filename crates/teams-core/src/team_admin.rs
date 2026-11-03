@@ -313,7 +313,7 @@ where
     }
 
     /// Runs `read` beside the engine's loop and answers `reply` with what it found.
-    fn spawn_read<V, F>(&self, reply: Responder<V>, read: F)
+    pub(crate) fn spawn_read<V, F>(&self, reply: Responder<V>, read: F)
     where
         V: Send + 'static,
         F: AsyncFnOnce(&Client<HttpTransport<C>>) -> V + 'static,
@@ -467,7 +467,7 @@ where
     }
 }
 
-async fn read_body<C: Credentials + 'static>(
+pub(crate) async fn read_body<C: Credentials + 'static>(
     client: &Client<HttpTransport<C>>,
     read: &(impl teams_proto::Read + Sync),
 ) -> Option<Vec<u8>> {
@@ -480,7 +480,7 @@ async fn read_body<C: Credentials + 'static>(
     }
 }
 
-async fn send_body<C: Credentials + 'static>(
+pub(crate) async fn send_body<C: Credentials + 'static>(
     client: &Client<HttpTransport<C>>,
     request: &(impl teams_proto::Request + Sync),
 ) -> Option<Vec<u8>> {

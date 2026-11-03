@@ -35,7 +35,10 @@ pub(crate) fn serve(request: &Request) -> Option<ResponseTemplate> {
         ("POST", [.., "teams", "findJoinRequests"]) => Some(json(200, &json!({ "joinRequestsPerTeam": {} }))),
         ("POST", [.., "users", "searchV2"]) => Some(json(200, &people())),
         ("GET", [.., "teams", "suggested"]) => Some(json(200, &joinable())),
-        _ => None,
+        ("GET", [.., "analytics", "teams", _, "channels", _, "summary-timeseries"]) => {
+            Some(json(200, &json!({ "channels": analytics() })))
+        }
+        _ => crate::team_apps::serve(method, &segments),
     }
 }
 

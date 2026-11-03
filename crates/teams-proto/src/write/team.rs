@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use teams_fence::{Mri, Scope, Target, WriteKind};
 
 use super::sealed::Sealed;
-use super::{Mutating, Wire};
+use super::{Mutating, RawBody, Wire};
 use crate::endpoint::{Endpoint, Method, Service};
 
 /// A new team, as the "Create a team" dialog makes it.
@@ -146,6 +146,117 @@ pub enum TeamWrite {
     JoinByCode { code: String },
     /// Someone's request to join let in or turned away.
     AnswerJoinRequest { group: String, member: Mri, accept: bool },
+    /// A team's picture changed to an image (PNG or JPEG bytes).
+    SetPicture {
+        team: String,
+        group: String,
+        picture: RawBody,
+    },
+    /// An app taken off a team, by its app id.
+    RemoveApp { team: String, app: String },
+    /// An app added to a team: its definition as the app catalogue gave it.
+    AddApp { team: String, app: AppDefinition },
+    /// A new team from one of Teams' templates.
+    FromTemplate(TemplateTeam),
+    /// A new team copied from another.
+    Copy(TeamCopy),
+}
+
+/// An app's definition as the app catalogue gives it (`beta/users/apps/batchedDefinitions`), sent whole to add the app
+/// to a team. Its bots (`bots[].id`, `inputExtensions[].botId`) join the team, so they are named on the write as
+/// `28:<bot id>`, as the fence reads them from the same bytes. `Debug` shows its id alone.
+#[derive(Clone, PartialEq, Eq)]
+pub struct AppDefinition(serde_json::Map<String, Value>);
+
+impl AppDefinition {
+    /// A definition with an app id (`id`), as the catalogue answered it; `None` when it has none, or names a bot in a
+    /// shape the fence wouldn't read (`bots` or `inputExtensions` not a list of objects, a bot id not text).
+    #[must_use]
+    pub fn new(definition: serde_json::Map<String, Value>) -> Option<Self> {
+        definition
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.is_empty())?;
+        for (list, key) in [("bots", "id"), ("inputExtensions", "botId")] {
+            let Some(entries) = definition.get(list) else {
+                continue;
+            };
+            for entry in entries.as_array()? {
+                if let Some(bot) = entry.as_object()?.get(key) {
+                    bot.as_str()?;
+                }
+            }
+        }
+        Some(Self(definition))
+    }
+
+    /// Its app id.
+    #[must_use]
+    pub fn id(&self) -> &str {
+        self.0.get("id").and_then(Value::as_str).unwrap_or_default()
+    }
+
+    /// The bots it brings onto a team, as MRIs.
+    #[must_use]
+    pub fn bots(&self) -> Vec<Mri> {
+        let ids = |list: &str, key: &str| -> Vec<Mri> {
+            self.0
+                .get(list)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| entry.get(key)?.as_str())
+                .map(|bot| Mri::new(format!("28:{bot}")))
+                .collect()
+        };
+        let mut bots = ids("bots", "id");
+        bots.extend(ids("inputExtensions", "botId"));
+        bots
+    }
+}
+
+impl std::fmt::Debug for AppDefinition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("AppDefinition").field(&self.id()).finish()
+    }
+}
+
+/// A new team from one of Teams' templates, as "Create a team from a template" makes it: the template's channels (each
+/// by its id and the name it was given) and apps.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TemplateTeam {
+    /// The template's id (`com.microsoft.teams.template.ManageAProject`).
+    pub template: String,
+    pub name: String,
+    pub description: String,
+    pub public: bool,
+    /// The template's locale (`en-US`).
+    pub locale: String,
+    /// Each channel's id in the template and its name.
+    pub channels: Vec<(String, String)>,
+    /// The template's apps, by id.
+    pub apps: Vec<String>,
+}
+
+/// A new team copied from the team of `group`, as "From another team" makes it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "what the copy takes along, each ticked on its own in the dialog, as the body sends them"
+)]
+pub struct TeamCopy {
+    pub group: String,
+    pub name: String,
+    pub description: String,
+    pub public: bool,
+    /// The account's own object id: the new team's owner.
+    pub owner: String,
+    /// Its people come along (`includeRoster`).
+    pub roster: bool,
+    pub channels: bool,
+    pub apps: bool,
+    pub settings: bool,
+    pub tabs: bool,
 }
 
 impl TeamWrite {
@@ -166,11 +277,12 @@ impl Mutating for TeamWrite {
             | Self::DeleteTag { team, .. }
             | Self::Delete { team }
             | Self::ResetCode { team }
-            | Self::RemoveCode { team } => Target::new(WriteKind::TeamChange, Self::thread(team)),
+            | Self::RemoveCode { team }
+            | Self::RemoveApp { team, .. } => Target::new(WriteKind::TeamChange, Self::thread(team)),
             Self::CreateTag { team, members, .. } => {
                 Target::new(WriteKind::TeamChange, Self::thread(team)).with_added(members.iter().cloned())
             }
-            Self::Archive { group, .. } | Self::Restore { group } => {
+            Self::Archive { group, .. } | Self::Restore { group } | Self::SetPicture { group, .. } => {
                 Target::new(WriteKind::TeamChange, Self::thread(group))
             }
             Self::AddMembers { team, members, .. } => Target::new(WriteKind::MemberChange, Self::thread(team))
@@ -184,8 +296,23 @@ impl Mutating for TeamWrite {
             Self::AnswerJoinRequest { group, member, .. } => {
                 Target::new(WriteKind::MemberChange, Self::thread(group)).with_added([member.clone()])
             }
+            Self::AddApp { team, app } => Target::new(WriteKind::TeamChange, Self::thread(team)).with_added(app.bots()),
+            Self::FromTemplate(team) => new_team_target(team.public),
+            // with its people, a copy reaches everyone on the team it copies
+            Self::Copy(copy) if copy.roster => Target::new(WriteKind::MemberChange, Self::thread(&copy.group)),
+            Self::Copy(copy) => new_team_target(copy.public),
         }
     }
+}
+
+/// A new team naming nobody: open to the organization, or private.
+fn new_team_target(public: bool) -> Target {
+    let kind = if public {
+        WriteKind::OpenTeamCreate
+    } else {
+        WriteKind::TeamCreate
+    };
+    Target::new(kind, Scope::New)
 }
 
 impl TeamWrite {
@@ -214,6 +341,7 @@ impl TeamWrite {
                 middle_tier(Method::Patch, ["beta", "teams", team.as_str()], Some(body))
             }
             Self::Settings { team, settings } => Wire {
+                raw: None,
                 service: Service::ChatService,
                 method: Method::Put,
                 endpoint: Endpoint::new(["v1", "threads", team.as_str(), "properties"])
@@ -236,6 +364,49 @@ impl TeamWrite {
             Self::RemoveCode { team } => {
                 middle_tier(Method::Delete, ["beta", "teams", team.as_str(), "joinCode"], None)
             }
+            _ => return None,
+        })
+    }
+
+    /// The wire of a team's picture and apps, and of a team made from a template or another team.
+    fn more_wire(&self) -> Option<Wire> {
+        Some(match self {
+            Self::SetPicture { team, group, picture } => Wire {
+                raw: Some(picture.clone()),
+                service: Service::MiddleTier,
+                method: Method::Post,
+                endpoint: Endpoint::new(["beta", "teams", group.as_str(), "profilepicture"])
+                    .with_query("threadId", team),
+                headers: Vec::new(),
+                body: None,
+            },
+            Self::RemoveApp { team, app } => middle_tier(
+                Method::Delete,
+                ["beta", "teams", team.as_str(), "apps", "entitlements", app.as_str()],
+                None,
+            ),
+            Self::AddApp { team, app } => middle_tier(
+                Method::Post,
+                ["beta", "teams", team.as_str(), "apps", "entitlements"],
+                Some(Value::Object(app.0.clone())),
+            ),
+            Self::FromTemplate(team) => provisioning_with(Endpoint::new(["team"]), template_body(team)),
+            Self::Copy(copy) => provisioning_with(
+                Endpoint::new(["groups", copy.group.as_str(), "clone"]),
+                json!({
+                    "displayName": copy.name,
+                    "description": copy.description,
+                    "ownerObjectId": copy.owner,
+                    "teamGroupId": copy.group,
+                    "visibility": visibility(copy.public),
+                    "sensitivityLabelId": "",
+                    "includeRoster": copy.roster,
+                    "includeChannels": copy.channels,
+                    "includeAppEntitlements": copy.apps,
+                    "includeSettings": copy.settings,
+                    "includeTabs": copy.tabs,
+                }),
+            ),
             _ => return None,
         })
     }
@@ -303,6 +474,7 @@ impl TeamWrite {
                     .map(|(member, role)| json!({ "mri": member.as_str(), "role": role.wire() }))
                     .collect();
                 Wire {
+                    raw: None,
                     service: Service::MiddleTier,
                     method: Method::Put,
                     endpoint: Endpoint::new(["beta", "teams", team.as_str(), "bulkUpdateRoledMembers"])
@@ -328,6 +500,7 @@ impl TeamWrite {
             ),
             Self::Join { group } => middle_tier(Method::Post, ["beta", "teams", "joinRequest", group.as_str()], None),
             Self::JoinByCode { code } => Wire {
+                raw: None,
                 service: Service::MiddleTier,
                 method: Method::Post,
                 endpoint: Endpoint::new(["beta", "teams", "joinByCode"])
@@ -336,6 +509,7 @@ impl TeamWrite {
                 body: Some(json!(code)),
             },
             Self::AnswerJoinRequest { group, member, accept } => Wire {
+                raw: None,
                 service: Service::MiddleTier,
                 method: Method::Post,
                 endpoint: Endpoint::new(["beta", "teams", "joinRequestAdminAction"])
@@ -357,6 +531,39 @@ impl Sealed for TeamWrite {
         self.details_wire()
             .or_else(|| self.tags_wire())
             .or_else(|| self.people_wire())
+            .or_else(|| self.more_wire())
+    }
+}
+
+/// `visibility` of a team made from a template or another team.
+fn visibility(public: bool) -> &'static str {
+    if public { "Public" } else { "Private" }
+}
+
+/// A team from a template, as the web client sends it.
+fn template_body(team: &TemplateTeam) -> Value {
+    json!({
+        "apps": team.apps.iter().map(|app| json!({ "id": app })).collect::<Vec<_>>(),
+        "channels": team
+            .channels
+            .iter()
+            .map(|(id, name)| json!({ "displayName": name, "id": id }))
+            .collect::<Vec<_>>(),
+        "description": team.description,
+        "displayName": team.name,
+        "isTenantWide": false,
+        "locale": team.locale,
+        "sensitivityLabelId": null,
+        "templateId": team.template,
+        "visibility": visibility(team.public),
+    })
+}
+
+/// A `POST` on the provisioning service with a JSON body.
+fn provisioning_with(endpoint: Endpoint, body: Value) -> Wire {
+    Wire {
+        body: Some(body),
+        ..provisioning(endpoint)
     }
 }
 
@@ -366,6 +573,7 @@ fn access_type(public: bool) -> u64 {
 
 fn create_wire(team: &NewTeam) -> Wire {
     Wire {
+        raw: None,
         service: Service::MiddleTier,
         method: Method::Post,
         endpoint: Endpoint::new(["beta", "teams", "create"]),
@@ -386,6 +594,7 @@ fn create_wire(team: &NewTeam) -> Wire {
 
 fn middle_tier<const N: usize>(method: Method, path: [&str; N], body: Option<Value>) -> Wire {
     Wire {
+        raw: None,
         service: Service::MiddleTier,
         method,
         endpoint: Endpoint::new(path),
@@ -396,6 +605,7 @@ fn middle_tier<const N: usize>(method: Method, path: [&str; N], body: Option<Val
 
 fn provisioning(endpoint: Endpoint) -> Wire {
     Wire {
+        raw: None,
         service: Service::Provisioning,
         method: Method::Post,
         endpoint,
@@ -409,6 +619,7 @@ fn csa(method: Method, path: Vec<&str>, body: Option<Value>, version: Option<u64
     let mut segments = vec!["api", "v1", "teams"];
     segments.extend(path);
     Wire {
+        raw: None,
         service: Service::Csa,
         method,
         endpoint: Endpoint::new(segments),
@@ -443,4 +654,124 @@ pub fn team_created(body: &[u8]) -> Option<(String, Option<String>)> {
 #[must_use]
 pub fn team_error_code(body: &[u8]) -> Option<String> {
     super::channel::channel_error_code(body)
+}
+
+#[cfg(test)]
+mod tests {
+    use teams_fence::{Contact, Policy, Request as FenceRequest, contacting};
+
+    use super::*;
+
+    const TEAM: &str = "19:team0001@thread.tacv2";
+    const GROUP: &str = "00000000-0000-4000-8000-0000000000aa";
+
+    /// What the fence makes of the bytes `write` sends, on made-up bases.
+    fn classified(write: &TeamWrite) -> Contact {
+        let wire = write.wire().expect("a wire form");
+        let base = match wire.service() {
+            Service::Provisioning => "https://teams.cloud.microsoft/fabric/amer/templates/api",
+            _ => "https://teams.cloud.microsoft/api/mt/part/amer-03",
+        };
+        let mut url = url::Url::parse(&format!("{base}/")).expect("the base");
+        url.path_segments_mut()
+            .expect("a base")
+            .pop_if_empty()
+            .extend(wire.endpoint().segments());
+        if !wire.endpoint().query().is_empty() {
+            url.query_pairs_mut().extend_pairs(wire.endpoint().query());
+        }
+        let body = wire.body_bytes();
+        contacting(
+            &FenceRequest::new(wire.method().as_str(), url.as_str()).with_body(body.as_deref()),
+            &Policy::new(),
+        )
+    }
+
+    fn definition(value: &Value) -> AppDefinition {
+        AppDefinition::new(value.as_object().cloned().expect("an object")).expect("a definition")
+    }
+
+    fn copy(roster: bool, public: bool) -> TeamWrite {
+        TeamWrite::Copy(TeamCopy {
+            group: GROUP.to_owned(),
+            name: "Copy".to_owned(),
+            description: String::new(),
+            public,
+            owner: "00000000-0000-4000-8000-00000000000a".to_owned(),
+            roster,
+            channels: true,
+            apps: true,
+            settings: true,
+            tabs: false,
+        })
+    }
+
+    #[test]
+    fn each_new_writes_target_is_what_the_fence_reads_from_its_bytes() {
+        let template = TeamWrite::FromTemplate(TemplateTeam {
+            template: "com.microsoft.teams.template.ManageAProject".to_owned(),
+            name: "Project".to_owned(),
+            description: String::new(),
+            public: false,
+            locale: "en-US".to_owned(),
+            channels: vec![("General".to_owned(), "General".to_owned())],
+            apps: vec!["com.microsoft.teamspace.tab.planner".to_owned()],
+        });
+        let writes = [
+            TeamWrite::SetPicture {
+                team: TEAM.to_owned(),
+                group: GROUP.to_owned(),
+                picture: RawBody::from(b"\x89PNG\r\n".to_vec()),
+            },
+            TeamWrite::RemoveApp {
+                team: TEAM.to_owned(),
+                app: "99e46335-5250-4a68-8499-3e4f55e6f3f6".to_owned(),
+            },
+            TeamWrite::AddApp {
+                team: TEAM.to_owned(),
+                app: definition(&json!({"id": "a", "bots": [{"id": "b1"}], "inputExtensions": [{"botId": "b2"}]})),
+            },
+            TeamWrite::AddApp {
+                team: TEAM.to_owned(),
+                app: definition(&json!({"id": "tab-only"})),
+            },
+            template,
+            copy(true, false),
+            copy(false, false),
+            copy(false, true),
+        ];
+        for write in writes {
+            assert_eq!(classified(&write), Contact::Write(write.target()), "{write:?}");
+        }
+    }
+
+    #[test]
+    fn an_apps_definition_names_its_bots_and_shows_only_its_id() {
+        let app = definition(&json!({"id": "a", "name": "Secret name", "bots": [{"id": "b1"}]}));
+        assert_eq!(app.id(), "a");
+        assert_eq!(app.bots(), [Mri::new("28:b1")]);
+        assert!(!format!("{app:?}").contains("Secret"));
+        for unreadable in [
+            json!({"name": "no id"}),
+            json!({"id": "a", "bots": {"id": "b"}}),
+            json!({"id": "a", "bots": [{"id": 1}]}),
+            json!({"id": "a", "inputExtensions": ["x"]}),
+        ] {
+            assert!(AppDefinition::new(unreadable.as_object().cloned().unwrap_or_default()).is_none());
+        }
+    }
+
+    #[test]
+    fn a_picture_goes_as_its_bytes_and_shows_only_its_length() {
+        let picture = RawBody::from(vec![1, 2, 3]);
+        assert_eq!(format!("{picture:?}"), "RawBody(3 bytes)");
+        let write = TeamWrite::SetPicture {
+            team: TEAM.to_owned(),
+            group: GROUP.to_owned(),
+            picture,
+        };
+        let wire = write.wire().expect("a wire form");
+        assert_eq!(wire.body_bytes(), Some(vec![1, 2, 3]));
+        assert_eq!(wire.endpoint().query(), [("threadId".to_owned(), TEAM.to_owned())]);
+    }
 }

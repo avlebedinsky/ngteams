@@ -66,6 +66,7 @@ use crate::channel_dialog::{ChannelDialog, ChannelDialogEvent};
 use crate::channel_view::{ChannelView, ChannelViewEvent};
 use crate::chat_list::{ChatList, ChatListEvent};
 use crate::chat_view::{self, ChatView, ChatViewEvent};
+use crate::create_team_more::{CreateTeamMore, CreateTeamMoreEvent};
 use crate::first_run::FirstRun;
 use crate::forwarded::Original;
 use crate::global_search::{self, GlobalSearch, GlobalSearchEvent, Mode as SearchMode};
@@ -81,6 +82,7 @@ use crate::settings::{ManualStatus, SettingsModel};
 use crate::settings_view::{self, Page, SettingsView, SettingsViewEvent, TestCallOffer, TestCallState};
 use crate::sidebar::Sidebar;
 use crate::switcher::{CallCommand, Switcher, SwitcherEvent};
+use crate::team_app_dialogs::{AddAppDialog, TeamPictureDialog};
 use crate::team_dialogs::{
     AddMembersDialog, Confirm, ConfirmDialog, CreateTeamDialog, EditTeamDialog, TagDialog, TeamDialogEvent,
 };
@@ -217,6 +219,8 @@ pub enum Main {
     ManageTeam(String),
     /// "Join a team", across both panes.
     JoinTeam,
+    /// "More create team options", across both panes.
+    CreateTeamMore,
 }
 
 /// Where the account menu opens: over the rail's account, or under the title bar's avatar.
@@ -263,6 +267,7 @@ pub struct Shell {
     manage_team: Option<(Entity<ManageTeam>, Subscription)>,
     /// "Join a team", while it is shown.
     join_team: Option<(Entity<JoinTeam>, Subscription)>,
+    create_team_more: Option<(Entity<CreateTeamMore>, Subscription)>,
     /// A dialog of the team pages, while one is open.
     team_dialog: Option<(gpui::AnyView, Subscription)>,
     /// Where the keyboard was when a dialog opened (a team's line, its "..." menu's row, a page's row): it goes back
@@ -314,6 +319,11 @@ struct HeaderShown {
 
 impl Shell {
     /// The shell over `parts`, focused; the chat the settings kept is opened again.
+    /// The chat the settings kept as chosen for the account `me`.
+    fn selected_chat(settings: &Entity<SettingsModel>, me: &str, cx: &App) -> Option<String> {
+        settings.read(cx).settings().selected_chat_of(me).map(str::to_owned)
+    }
+
     pub fn new(parts: ShellParts, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let chat_parts = parts.clone();
         let ShellParts {
@@ -322,11 +332,7 @@ impl Shell {
             settings,
             trace,
         } = parts;
-        let selected = settings
-            .read(cx)
-            .settings()
-            .selected_chat_of(core.me())
-            .map(str::to_owned);
+        let selected = Self::selected_chat(&settings, core.me(), cx);
         let (list_core, list_models, list_trace) = (Arc::clone(&core), models.clone(), Arc::clone(&trace));
         let list = cx.new(|cx| ChatList::new(list_core, list_models, list_trace, selected.clone(), cx));
         let opened = cx.subscribe_in(&list, window, |this: &mut Self, _, event, window, cx| match event {
@@ -362,6 +368,7 @@ impl Shell {
             teams_page: None,
             manage_team: None,
             join_team: None,
+            create_team_more: None,
             team_dialog: None,
             dialog_return: crate::keyboard::Return::default(),
             toast: None,
@@ -1171,6 +1178,8 @@ impl Shell {
                 }
                 ManageTeamEvent::OpenChannel(channel) => this.open_channel_id(channel.clone(), window, cx),
                 ManageTeamEvent::Toast(words) => this.show_toast(words, cx),
+                ManageTeamEvent::ChangePicture(team) => this.open_team_picture(team.clone(), window, cx),
+                ManageTeamEvent::AddApp(team) => this.open_add_app(team.clone(), window, cx),
             },
         );
         self.manage_team = Some((page, events));
@@ -1195,6 +1204,60 @@ impl Shell {
         );
         self.join_team = Some((page, events));
         self.show_main(Main::JoinTeam, window, cx);
+    }
+
+    /// "More create team options", across both panes.
+    pub fn open_create_team_more(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let core = Arc::clone(&self.core);
+        let owned: Vec<teams_store::Team> = self
+            .teams
+            .read(cx)
+            .teams()
+            .unwrap_or_default()
+            .iter()
+            .filter(|team| team.owner && !team.archived && team.group_id.is_some())
+            .cloned()
+            .collect();
+        let page = cx.new(|cx| CreateTeamMore::new(core, owned, window, cx));
+        let events = cx.subscribe_in(
+            &page,
+            window,
+            |this: &mut Self, _, event: &CreateTeamMoreEvent, window, cx| match event {
+                CreateTeamMoreEvent::Back => this.open_teams_page(window, cx),
+                CreateTeamMoreEvent::FromScratch => this.open_create_team(window, cx),
+                CreateTeamMoreEvent::Created(words) => {
+                    this.show_toast(words, cx);
+                    this.open_teams_page(window, cx);
+                }
+            },
+        );
+        self.create_team_more = Some((page, events));
+        self.show_main(Main::CreateTeamMore, window, cx);
+    }
+
+    /// "Change team picture" on `team`.
+    pub fn open_team_picture(&mut self, team: teams_store::Team, window: &mut Window, cx: &mut Context<Self>) {
+        let (core, teams) = (Arc::clone(&self.core), self.teams.clone());
+        let dialog = cx.new(|cx| TeamPictureDialog::new(core, teams, team, window, cx));
+        self.show_team_dialog(&dialog, window, cx);
+    }
+
+    /// "Get more apps" on `team`: the apps Manage team lists count as on it.
+    pub fn open_add_app(&mut self, team: teams_store::Team, window: &mut Window, cx: &mut Context<Self>) {
+        let installed: Vec<String> = self
+            .manage_team
+            .as_ref()
+            .map(|(page, _)| page.read(cx).installed_apps())
+            .unwrap_or_default();
+        let core = Arc::clone(&self.core);
+        let dialog = cx.new(|cx| AddAppDialog::new(core, team, installed, window, cx));
+        self.show_team_dialog(&dialog, window, cx);
+    }
+
+    /// "More create team options", while it is shown.
+    #[must_use]
+    pub fn create_team_more(&self) -> Option<&Entity<CreateTeamMore>> {
+        self.create_team_more.as_ref().map(|(page, _)| page)
     }
 
     /// Shows `main` in the conversation pane, the chat that was there put away.
@@ -1337,6 +1400,7 @@ impl Shell {
                 }
                 match event {
                     TeamDialogEvent::Closed => {}
+                    TeamDialogEvent::MoreOptions => this.open_create_team_more(window, cx),
                     TeamDialogEvent::Created(team) => {
                         let (core, trace) = (Arc::clone(&this.core), Arc::clone(&this.trace));
                         let team = team.clone();
@@ -1766,7 +1830,8 @@ impl Shell {
             | Main::Search
             | Main::TeamsPage
             | Main::ManageTeam(_)
-            | Main::JoinTeam => {
+            | Main::JoinTeam
+            | Main::CreateTeamMore => {
                 self.main = Main::Nothing;
                 cx.notify();
             }
@@ -2299,7 +2364,7 @@ impl Shell {
             },
             // the settings, the calendar, the search's results and "Join a team" are drawn across both panes (`body`), never
             // here
-            Main::Nothing | Main::Settings | Main::Calendar | Main::Search | Main::JoinTeam => {
+            Main::Nothing | Main::Settings | Main::Calendar | Main::Search | Main::JoinTeam | Main::CreateTeamMore => {
                 pane.child(no_chat(palette)).into_any_element()
             }
         }
@@ -2522,6 +2587,11 @@ impl Shell {
         }
         if self.main == Main::JoinTeam
             && let Some(page) = self.join_team()
+        {
+            return page.clone().into_any_element();
+        }
+        if self.main == Main::CreateTeamMore
+            && let Some(page) = self.create_team_more()
         {
             return page.clone().into_any_element();
         }

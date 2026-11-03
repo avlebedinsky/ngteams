@@ -122,6 +122,7 @@ fn kind(main: &Main) -> &'static str {
         Main::TeamsPage => "teams-page",
         Main::ManageTeam(_) => "manage-team",
         Main::JoinTeam => "join-team",
+        Main::CreateTeamMore => "create-team-more",
     }
 }
 
@@ -162,6 +163,7 @@ impl Shell {
                 self.open_manage_team(team, crate::manage_team::ManageTab::default(), window, cx);
             }
             Main::JoinTeam => self.open_join_team(window, cx),
+            Main::CreateTeamMore => self.open_create_team_more(window, cx),
             Main::Nothing => {}
         }
         // what was shown is the history's place now, whatever the opening made of it

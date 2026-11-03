@@ -1,13 +1,15 @@
 //! Manage team, as Teams has it (`docs/protocol/teams.md`): a team's header with its tabs Channels, Members, Pending
-//! requests and Settings (an owner's), Analytics and Tags.
+//! requests and Settings (an owner's), Analytics, Apps and Tags.
 //!
 //! - **Channels**: each with Show or Hide (the account's own list), the filters, the sort, Search channels and Add channel.
 //! - **Members**: Owners and Members and guests, folding; Add member and Search members; an owner changes roles and removes
 //!   people.
 //! - **Pending requests**: who asks to join, Accept and Deny.
 //! - **Settings**: Team details with Edit and its picture; Member permissions, Guest permissions, @mentions, Team code, Fun
-//!   stuff and Tags, folding as Teams folds them, each box writing the whole of the team's settings as the web client does.
-//! - **Analytics**: the time period's summary, engagement and active users by day.
+//!   stuff (with its Giphy rating) and Tags, folding as Teams folds them, each box writing the whole of the team's
+//!   settings as the web client does; Change picture.
+//! - **Analytics**: a channel or all of them, the time period's summary, engagement and active users by day.
+//! - **Apps**: the team's apps, Find by name, Get more apps and Remove (`apps`).
 //! - **Tags**: its tags, Create tag, Edit and Delete.
 //!
 //! What a tab shows is read when it opens, through [`Core`]; nothing here sends anything but through it, on the user's own
@@ -30,7 +32,8 @@ use serde_json::Value;
 use teams_core::{TeamChange, TeamMember};
 use teams_fence::Mri;
 use teams_proto::{
-    AnalyticsPeriod, ManagedChannel, MemberUpdate, OwnTeamView, TagsRead, TeamAnalytics, TeamTag, TeamWrite,
+    AnalyticsPeriod, InstalledApp, ManagedChannel, MemberUpdate, OwnTeamView, TagsRead, TeamAnalytics, TeamTag,
+    TeamWrite,
 };
 use teams_store::Team;
 
@@ -44,6 +47,11 @@ use crate::teams_page::{centered, chip_base, popup_menu, tab_button};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 
+mod apps;
+
+pub(crate) use apps::app_tile;
+pub use apps::{GIPHY_RATINGS, giphy_rating, with_giphy_rating};
+
 /// The page's tabs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum ManageTab {
@@ -53,6 +61,7 @@ pub enum ManageTab {
     PendingRequests,
     Settings,
     Analytics,
+    Apps,
     Tags,
 }
 
@@ -66,6 +75,7 @@ impl ManageTab {
             Self::PendingRequests => "pending-requests",
             Self::Settings => "settings",
             Self::Analytics => "analytics",
+            Self::Apps => "apps",
             Self::Tags => "tags",
         }
     }
@@ -77,6 +87,7 @@ impl ManageTab {
             Self::PendingRequests => "Pending requests",
             Self::Settings => "Settings",
             Self::Analytics => "Analytics",
+            Self::Apps => "Apps",
             Self::Tags => "Tags",
         }
     }
@@ -89,7 +100,7 @@ pub fn tabs_of(team: &Team) -> Vec<ManageTab> {
     if team.owner {
         tabs.extend([ManageTab::PendingRequests, ManageTab::Settings]);
     }
-    tabs.extend([ManageTab::Analytics, ManageTab::Tags]);
+    tabs.extend([ManageTab::Analytics, ManageTab::Apps, ManageTab::Tags]);
     tabs
 }
 
@@ -106,6 +117,10 @@ pub enum ManageTeamEvent {
     OpenChannel(String),
     /// A toast.
     Toast(&'static str),
+    /// Team details' Change picture.
+    ChangePicture(Team),
+    /// The Apps tab's "Get more apps".
+    AddApp(Team),
 }
 
 impl EventEmitter<ManageTeamEvent> for ManageTeam {}
@@ -326,6 +341,16 @@ pub struct ManageTeam {
     analytics_read: bool,
     period: AnalyticsPeriod,
     period_open: bool,
+    // Apps
+    apps: Option<Vec<InstalledApp>>,
+    app_find: Option<Entity<InputState>>,
+    app_query: String,
+    app_menu: Option<String>,
+    removing_app: Option<InstalledApp>,
+    // Analytics of one channel
+    analytics_channel: Option<(String, String)>,
+    channel_menu_open: bool,
+    giphy_open: bool,
     // Tags
     tags: Option<TagsRead>,
     /// What went wrong with the last write, in Teams' words.
@@ -378,6 +403,14 @@ impl ManageTeam {
             analytics_read: false,
             period: AnalyticsPeriod::default(),
             period_open: false,
+            apps: None,
+            app_find: None,
+            app_query: String::new(),
+            app_menu: None,
+            removing_app: None,
+            analytics_channel: None,
+            channel_menu_open: false,
+            giphy_open: false,
             tags: None,
             problem: None,
             tabs: Handles::default(),
@@ -465,6 +498,7 @@ impl ManageTeam {
             }
             ManageTab::Settings => self.read_settings(cx),
             ManageTab::Analytics => self.read_analytics(cx),
+            ManageTab::Apps => self.read_apps(cx),
             ManageTab::Tags => self.read_tags(cx),
         }
     }
@@ -499,7 +533,10 @@ impl ManageTeam {
     fn read_analytics(&mut self, cx: &mut Context<Self>) {
         let group = self.team_of(cx).and_then(|team| team.group_id).unwrap_or_default();
         self.analytics_read = false;
-        let reply = self.core.team_analytics(group, self.period);
+        let reply = match self.analytics_channel.clone() {
+            Some((channel, _)) => self.core.channel_analytics(group, channel, self.period),
+            None => self.core.team_analytics(group, self.period),
+        };
         self.reading
             .push(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
                 let analytics = reply.await.ok().flatten();
@@ -776,6 +813,9 @@ impl ManageTeam {
         self.channel_more = false;
         self.role_menu = None;
         self.period_open = false;
+        self.app_menu = None;
+        self.channel_menu_open = false;
+        self.giphy_open = false;
         self.popup.closed(window, cx);
         cx.notify();
     }
@@ -1559,7 +1599,7 @@ impl ManageTeam {
         let guests = self.boxes(&GUEST_BOXES, &settings, cx);
         let mentions = self.mention_boxes(&settings, owners_only, automatic, can_write, cx);
         let code = self.code_section(can_write, palette, cx);
-        let fun = self.boxes(&FUN_BOXES, &settings, cx);
+        let fun = self.fun_boxes(&settings, palette, cx);
         let tag_toggle = selected_by(
             "tag-settings-source-toggle",
             Checkbox::new("tag-settings-source-toggle")
@@ -1652,6 +1692,21 @@ impl ManageTeam {
                     .child("Team picture"),
             )
             .child(avatar)
+            .when(can_write && team.owner && team.group_id.is_some(), |details| {
+                let pictured = team.clone();
+                details.child(
+                    div().flex().child(selected_by(
+                        "manage-change-picture",
+                        Button::new("manage-change-picture")
+                            .ghost()
+                            .icon(Glyph::UPLOAD.icon())
+                            .label("Change picture")
+                            .on_click(cx.listener(move |_, _, _, cx| {
+                                cx.emit(ManageTeamEvent::ChangePicture(pictured.clone()));
+                            })),
+                    )),
+                )
+            })
             .into_any_element()
     }
 
@@ -1758,7 +1813,8 @@ impl ManageTeam {
     fn analytics_tab(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let current = self.period;
         let menu = self.period_open.then(|| self.period_menu(palette, cx));
-        let picker = div()
+        let channels = self.channel_picker(palette, cx);
+        let period = div()
             .flex()
             .flex_col()
             .gap_1()
@@ -1794,6 +1850,7 @@ impl ManageTeam {
                     )
                     .children(menu),
             );
+        let picker = div().flex().gap_3().child(channels).child(period);
         let content: AnyElement = match &self.analytics {
             _ if !self.analytics_read => centered("Loading…", palette),
             None => centered("There's nothing to show for this time period yet.", palette),
@@ -2102,6 +2159,7 @@ impl Render for ManageTeam {
             ManageTab::PendingRequests => self.requests_tab(palette, cx),
             ManageTab::Settings => self.settings_tab(&team, palette, cx),
             ManageTab::Analytics => self.analytics_tab(palette, cx),
+            ManageTab::Apps => self.apps_tab(&team, palette, window, cx),
             ManageTab::Tags => self.tags_tab(&team, palette, cx),
         };
         let problem = self.problem.map(|words| {
@@ -2167,6 +2225,7 @@ mod tests {
                 ManageTab::Channels,
                 ManageTab::Members,
                 ManageTab::Analytics,
+                ManageTab::Apps,
                 ManageTab::Tags
             ]
         );

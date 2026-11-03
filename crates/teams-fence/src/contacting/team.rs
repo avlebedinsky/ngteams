@@ -7,7 +7,7 @@
 
 use serde_json::Value;
 
-use super::json::strict_json;
+use super::json::{optional, strict_json};
 use super::{Contact, Parsed, decoded_segments};
 use crate::{Mri, Scope, Target, WriteKind};
 
@@ -51,8 +51,54 @@ pub(super) fn middle_tier(request: &Parsed<'_>) -> Option<Contact> {
         ("POST", ["beta", "teams", "joinRequestAdminAction"]) => join_answer(request),
         ("POST", ["beta", "teams", "sponsorJoinRequest", group]) => members_requested(request, group),
         ("PUT", ["beta", "teams", team, "members"]) => Some(on_team(WriteKind::MemberChange, team)),
+        _ => team_apps_or_picture(request, &rest),
+    }
+}
+
+/// A team's picture changed (`POST beta/teams/<group>/profilepicture?threadId=<thread>`, the image's bytes as the body)
+/// or an app taken off a team (`DELETE beta/teams/<thread>/apps/entitlements/<app>`, no body): a change for everyone on
+/// the team. The picture names the team by its group, as an archive does.
+fn team_apps_or_picture(request: &Parsed<'_>, rest: &[&str]) -> Option<Contact> {
+    match (request.method.as_str(), rest) {
+        ("POST", ["beta", "teams", group, "profilepicture"])
+            if request.only_query("threadId").is_some_and(is_team_id)
+                && request.body.is_some_and(|body| !body.is_empty()) =>
+        {
+            Some(on_team(WriteKind::TeamChange, group))
+        }
+        ("DELETE", ["beta", "teams", team, "apps", "entitlements", _])
+            if is_team_id(team) && request.query.is_empty() && request.body.is_none_or(<[u8]>::is_empty) =>
+        {
+            Some(on_team(WriteKind::TeamChange, team))
+        }
+        ("POST", ["beta", "teams", team, "apps", "entitlements"]) if is_team_id(team) && request.query.is_empty() => {
+            app_added(request, team)
+        }
         _ => None,
     }
+}
+
+/// An app added to a team: its definition as the catalogue has it, `{"id", "bots": [{"id"}], "inputExtensions":
+/// [{"botId"}], …}`. Its bots join the team (`28:<bot id>`), so each is named on the write and judged too; an app
+/// without one is a change for everyone on the team alone.
+fn app_added(request: &Parsed<'_>, team: &str) -> Option<Contact> {
+    let body = strict_json(request.body?)?;
+    let object = body.as_object()?;
+    object.get("id")?.as_str().filter(|id| !id.is_empty())?;
+    let mut bots = Vec::new();
+    for (list, key) in [("bots", "id"), ("inputExtensions", "botId")] {
+        let Some(entries) = optional(object, list).ok()? else {
+            continue;
+        };
+        for entry in entries.as_array()? {
+            if let Some(bot) = optional(entry.as_object()?, key).ok()? {
+                bots.push(Mri::new(format!("28:{}", bot.as_str()?)));
+            }
+        }
+    }
+    Some(Contact::Write(
+        Target::new(WriteKind::TeamChange, Scope::Team { id: team.to_owned() }).with_added(bots),
+    ))
 }
 
 /// The team a middle tier write changes for everyone on it: its name and description, deleted, its code.
@@ -84,6 +130,8 @@ pub(super) fn provisioning(request: &Parsed<'_>) -> Option<Contact> {
         }
         ("PUT", ["conversations", "show" | "hide"]) => Some(Contact::None),
         ("POST", ["groups", group, "archive" | "unarchive"]) => Some(on_team(WriteKind::TeamChange, group)),
+        ("POST", ["team"]) if request.query.is_empty() => from_template(request),
+        ("POST", ["groups", group, "clone"]) if request.query.is_empty() => cloned(request, group),
         _ => None,
     }
 }
@@ -188,6 +236,73 @@ fn create(request: &Parsed<'_>) -> Option<Contact> {
         WriteKind::OpenTeamCreate
     };
     Some(Contact::Write(Target::new(kind, Scope::New)))
+}
+
+/// The keys of a team made from a template (`POST` provisioning `team`).
+const TEMPLATE_KEYS: [&str; 9] = [
+    "apps",
+    "channels",
+    "description",
+    "displayName",
+    "isTenantWide",
+    "locale",
+    "sensitivityLabelId",
+    "templateId",
+    "visibility",
+];
+
+/// The keys of a team made from another (`POST` provisioning `groups/<group>/clone`).
+const CLONE_KEYS: [&str; 11] = [
+    "displayName",
+    "description",
+    "ownerObjectId",
+    "teamGroupId",
+    "visibility",
+    "sensitivityLabelId",
+    "includeRoster",
+    "includeChannels",
+    "includeAppEntitlements",
+    "includeSettings",
+    "includeTabs",
+];
+
+/// A body's object when it holds no key but `keys`.
+fn object_of(request: &Parsed<'_>, keys: &[&str]) -> Option<serde_json::Map<String, Value>> {
+    let body = strict_json(request.body?)?;
+    let Value::Object(object) = body else {
+        return None;
+    };
+    object.keys().all(|key| keys.contains(&key.as_str())).then_some(object)
+}
+
+/// A new team naming nobody: [`WriteKind::TeamCreate`] when private (`visibility` `Private` and not org-wide), else
+/// [`WriteKind::OpenTeamCreate`].
+fn new_team(object: &serde_json::Map<String, Value>) -> Contact {
+    let private = object.get("visibility").and_then(Value::as_str) == Some("Private")
+        && object.get("isTenantWide").and_then(Value::as_bool) != Some(true);
+    let kind = if private {
+        WriteKind::TeamCreate
+    } else {
+        WriteKind::OpenTeamCreate
+    };
+    Contact::Write(Target::new(kind, Scope::New))
+}
+
+/// A new team from one of Teams' templates: its channels and apps come from the template, and it names nobody.
+fn from_template(request: &Parsed<'_>) -> Option<Contact> {
+    Some(new_team(&object_of(request, &TEMPLATE_KEYS)?))
+}
+
+/// A new team from the team of `group`: with its roster (`includeRoster`) it reaches everyone on that team, a write on
+/// it; without, it names nobody, as a new team does. The body's `teamGroupId` must be the path's group.
+fn cloned(request: &Parsed<'_>, group: &str) -> Option<Contact> {
+    let object = object_of(request, &CLONE_KEYS)?;
+    (object.get("teamGroupId").and_then(Value::as_str) == Some(group)).then_some(())?;
+    match object.get("includeRoster")? {
+        Value::Bool(true) => Some(on_team(WriteKind::MemberChange, group)),
+        Value::Bool(false) => Some(new_team(&object)),
+        _ => None,
+    }
 }
 
 /// A write on the team `team`.

@@ -367,6 +367,7 @@ impl Sealed for CreateEvent {
             body["schedulingServiceEvent"] = meeting.clone();
         }
         Some(Wire {
+            raw: None,
             service: Service::MiddleTier,
             method: Method::Post,
             endpoint: Endpoint::new(["v2.0", "me", "calendars", "default", "events"])
@@ -423,6 +424,7 @@ impl Sealed for UpdateEvent {
     fn wire(&self) -> Option<Wire> {
         let event = self.draft.over(&self.event)?;
         Some(Wire {
+            raw: None,
             service: Service::MiddleTier,
             method: Method::Put,
             endpoint: Endpoint::new(EVENTS.into_iter().chain([self.id.as_str()]))
@@ -466,6 +468,7 @@ impl Sealed for CancelEvent {
             body.insert("cancellationMessage".to_owned(), Value::String(message.clone()));
         }
         Some(Wire {
+            raw: None,
             service: Service::MiddleTier,
             method: Method::Put,
             endpoint: Endpoint::new(EVENTS.into_iter().chain([self.id.as_str(), "cancel"])),
@@ -498,6 +501,7 @@ impl Mutating for DeleteEvent {
 impl Sealed for DeleteEvent {
     fn wire(&self) -> Option<Wire> {
         Some(Wire {
+            raw: None,
             service: Service::MiddleTier,
             method: Method::Delete,
             endpoint: Endpoint::new(EVENTS.into_iter().chain([self.id.as_str()])),

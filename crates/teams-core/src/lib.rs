@@ -53,6 +53,7 @@ pub mod search;
 pub mod service_search;
 pub mod sync;
 pub mod team_admin;
+mod team_apps;
 pub mod teams;
 pub mod thumbnails;
 

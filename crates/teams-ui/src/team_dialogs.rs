@@ -61,6 +61,8 @@ pub enum TeamDialogEvent {
     Changed { team: String, words: &'static str },
     /// The team is gone for the account: a page on it closes.
     Gone { team: String, words: &'static str },
+    /// "More create team options": a team from a template, another team or a group.
+    MoreOptions,
 }
 
 /// Whether `text` holds a link, as the bundle tells it for a team's name and description.
@@ -97,7 +99,7 @@ pub fn team_description_problem(description: &str) -> Option<&'static str> {
 }
 
 /// A dialog's surface.
-fn surface(id: &'static str, palette: Palette, window: &Window) -> gpui::Stateful<gpui::Div> {
+pub(crate) fn surface(id: &'static str, palette: Palette, window: &Window) -> gpui::Stateful<gpui::Div> {
     div()
         .debug_selector(move || id.to_owned())
         .id(id)
@@ -118,7 +120,7 @@ fn surface(id: &'static str, palette: Palette, window: &Window) -> gpui::Statefu
         .on_click(|_, _, cx: &mut App| cx.stop_propagation())
 }
 
-fn title(words: impl Into<SharedString>) -> gpui::Div {
+pub(crate) fn title(words: impl Into<SharedString>) -> gpui::Div {
     div().text_xl().font_weight(gpui::FontWeight::BOLD).child(words.into())
 }
 
@@ -134,7 +136,7 @@ fn label(words: &'static str, required: bool, palette: Palette) -> gpui::Div {
         .text_color(rgb(palette.foreground))
 }
 
-fn problem(selector: &'static str, words: impl Into<SharedString>) -> gpui::Div {
+pub(crate) fn problem(selector: &'static str, words: impl Into<SharedString>) -> gpui::Div {
     div()
         .debug_selector(move || selector.to_owned())
         .text_xs()
@@ -142,7 +144,7 @@ fn problem(selector: &'static str, words: impl Into<SharedString>) -> gpui::Div 
         .child(words.into())
 }
 
-fn waiting(selector: &'static str, words: &'static str, palette: Palette) -> gpui::Div {
+pub(crate) fn waiting(selector: &'static str, words: &'static str, palette: Palette) -> gpui::Div {
     div()
         .debug_selector(move || selector.to_owned())
         .h(px(320.0))
@@ -156,7 +158,7 @@ fn waiting(selector: &'static str, words: &'static str, palette: Palette) -> gpu
         .child(words)
 }
 
-fn buttons() -> gpui::Div {
+pub(crate) fn buttons() -> gpui::Div {
     div().flex().justify_end().gap_2().pt_2()
 }
 
@@ -384,6 +386,28 @@ impl CreateTeamDialog {
     }
 
     /// The form.
+    /// "You're creating a team from scratch." and its link to the other ways.
+    fn scratch_line(palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
+        div()
+            .flex()
+            .flex_wrap()
+            .gap_1()
+            .text_sm()
+            .child("You're creating a team from scratch.")
+            .child(keyboard::stop(
+                "create-team-more",
+                div()
+                    .id("create-team-more")
+                    .debug_selector(|| "create-team-more".to_owned())
+                    .text_color(rgb(palette.brand))
+                    .underline()
+                    .cursor_pointer()
+                    .on_click(cx.listener(|_, _, _, cx| cx.emit(TeamDialogEvent::MoreOptions)))
+                    .child("More create team options"),
+                palette,
+            ))
+    }
+
     fn form(&self, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
         let (name, description, first_channel) = self.values(cx);
         let can_create = self.can_create(cx);
@@ -392,7 +416,7 @@ impl CreateTeamDialog {
             .flex_col()
             .gap_2()
             .child(title("Create a team"))
-            .child(div().text_sm().child("You're creating a team from scratch."))
+            .child(Self::scratch_line(palette, cx))
             .child(label("Team name", true, palette))
             .child(selected_by_full("create-team-name", Input::new(&self.name)))
             .children(team_name_problem(&name).map(|words| problem("create-team-name-problem", words)))

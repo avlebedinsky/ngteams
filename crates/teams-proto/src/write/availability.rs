@@ -53,6 +53,7 @@ fn own_target(account: &Mri) -> Target {
 /// `PUT v1/me/<name>/` on UPS (the transport adds the trailing slash), naming `endpoint` in its header.
 fn wire(name: &str, endpoint: &RegisteredEndpoint, body: Option<serde_json::Value>) -> Wire {
     Wire {
+        raw: None,
         service: Service::Presence,
         method: Method::Put,
         endpoint: Endpoint::new(["v1", "me", name]),

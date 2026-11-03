@@ -98,6 +98,7 @@ pub mod mixer;
 mod peers;
 mod reads;
 mod roster;
+mod team_apps;
 mod team_pages;
 mod trouter;
 mod ups;

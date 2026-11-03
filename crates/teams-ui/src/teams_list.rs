@@ -244,6 +244,12 @@ impl TeamsList {
             .into_any_element()
     }
 
+    /// A team's picture changed on the user's Save: it shows at once.
+    pub fn picture_changed(&mut self, team: String, picture: Arc<Image>, cx: &mut Context<Self>) {
+        self.pictures.insert(team, Some(picture));
+        cx.notify();
+    }
+
     /// A team's picture came, when it did.
     fn picture_read(&mut self, team: String, picture: Option<Arc<Image>>, cx: &mut Context<Self>) {
         if picture.is_some() {

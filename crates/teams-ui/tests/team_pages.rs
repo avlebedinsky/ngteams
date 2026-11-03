@@ -21,6 +21,7 @@ use teams_ui::ViewTrace;
 use teams_ui::manage_team::ManageTab;
 use teams_ui::settings::{Settings, SettingsModel};
 use teams_ui::shell::{Main, Shell, ShellParts};
+use teams_ui::team_app_dialogs::TeamPictureDialog;
 use teams_ui::team_dialogs::{AddMembersDialog, ConfirmDialog, CreateTeamDialog};
 
 const OWNED: &str = "19:team0001@thread.tacv2";
@@ -222,4 +223,169 @@ fn a_settings_box_writes_the_whole_of_the_teams_settings() {
     assert_eq!(written["userSettings"]["createTopic"], false);
     assert_eq!(written["userSettings"]["updateTopic"], false);
     assert_eq!(written["userSettings"]["other"], 7);
+}
+
+fn installed(id: &str, name: &str) -> teams_proto::InstalledApp {
+    teams_proto::InstalledApp {
+        id: id.to_owned(),
+        name: name.to_owned(),
+        developer: "Made-up Maker".to_owned(),
+        description: String::new(),
+        accent: Some(0x0062_64a7),
+    }
+}
+
+fn manage(shell: &Entity<Shell>, tab: ManageTab, cx: &mut VisualTestContext) {
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.open_manage_team(OWNED.to_owned(), tab, window, cx);
+        });
+    });
+    cx.run_until_parked();
+}
+
+#[test]
+fn the_apps_tab_lists_the_teams_apps_and_remove_asks_first() {
+    let rig = Rig::start();
+    *rig.core.team_apps.lock().unwrap() = vec![installed("a1", "Made-up Planner"), installed("a2", "Made-up Updates")];
+    *rig.core.team_written.lock().unwrap() = Some(TeamWritten::default());
+    let (shell, cx) = shell_window(&rig, vec![team(OWNED, "Alpha", true)]);
+    manage(&shell, ManageTab::Apps, cx);
+    assert!(bounds(cx, "manage-app-0").is_some());
+    assert!(bounds(cx, "manage-app-1").is_some());
+    click(cx, "manage-app-more-1");
+    click(cx, "manage-app-remove");
+    assert!(rig.core.team_writes.lock().unwrap().is_empty(), "it asks first");
+    assert!(bounds(cx, "manage-app-remove-question").is_some());
+    // what the tab reads again once the app is gone
+    *rig.core.team_apps.lock().unwrap() = vec![installed("a1", "Made-up Planner")];
+    click(cx, "manage-app-remove-confirm");
+    let writes = rig.core.team_writes.lock().unwrap();
+    assert!(
+        matches!(writes.as_slice(), [(TeamWrite::RemoveApp { team, app }, None)] if team == OWNED && app == "a2"),
+        "{writes:?}"
+    );
+    drop(writes);
+    assert!(bounds(cx, "manage-app-1").is_none(), "gone from the list");
+}
+
+#[test]
+fn get_more_apps_adds_one_to_the_team_with_its_definition() {
+    let rig = Rig::start();
+    let definition = serde_json::json!({"id": "a3", "name": "Made-up Pages", "developerName": "Made-up Maker"});
+    *rig.core.store_apps.lock().unwrap() =
+        teams_proto::AppDefinitions::read_answer(serde_json::json!([definition]).to_string().as_bytes());
+    *rig.core.team_written.lock().unwrap() = Some(TeamWritten::default());
+    let (shell, cx) = shell_window(&rig, vec![team(OWNED, "Alpha", true)]);
+    manage(&shell, ManageTab::Apps, cx);
+    click(cx, "manage-get-apps");
+    assert!(bounds(cx, "add-app-dialog").is_some());
+    click(cx, "add-app-add-0");
+    let writes = rig.core.team_writes.lock().unwrap();
+    assert!(
+        matches!(writes.as_slice(), [(TeamWrite::AddApp { team, app }, None)] if team == OWNED && app.id() == "a3"),
+        "{writes:?}"
+    );
+}
+
+#[test]
+fn the_giphy_rating_writes_the_whole_of_the_settings() {
+    let rig = Rig::start();
+    *rig.core.team_settings.lock().unwrap() =
+        Some(r#"{"userSettings":{"giphyEnabled":true,"giphyRating":1,"other":7}}"#.to_owned());
+    let (shell, cx) = shell_window(&rig, vec![team(OWNED, "Alpha", true)]);
+    manage(&shell, ManageTab::Settings, cx);
+    click(cx, "manage-section-fun");
+    click(cx, "giphy-rating");
+    click(cx, "giphy-rating-2");
+    let writes = rig.core.team_writes.lock().unwrap();
+    let [(TeamWrite::Settings { settings, .. }, _)] = writes.as_slice() else {
+        panic!("one settings write: {writes:?}");
+    };
+    let written: serde_json::Value = serde_json::from_str(settings).expect("JSON");
+    assert_eq!(written["userSettings"]["giphyRating"], 2);
+    assert_eq!(written["userSettings"]["other"], 7);
+}
+
+#[test]
+fn analytics_reads_the_channel_picked() {
+    let rig = Rig::start();
+    let (shell, cx) = shell_window(&rig, vec![team(OWNED, "Alpha", true)]);
+    manage(&shell, ManageTab::Analytics, cx);
+    click(cx, "manage-analytics-channel");
+    click(cx, "manage-analytics-channel-1");
+    assert_eq!(*rig.core.channel_analytics_asked.lock().unwrap(), [OWNED.to_owned()]);
+}
+
+#[test]
+fn change_picture_opens_its_dialog_and_save_waits_for_a_picture() {
+    let rig = Rig::start();
+    *rig.core.team_settings.lock().unwrap() = Some("{}".to_owned());
+    *rig.core.team_written.lock().unwrap() = Some(TeamWritten::default());
+    let (shell, cx) = shell_window(&rig, vec![team(OWNED, "Alpha", true)]);
+    manage(&shell, ManageTab::Settings, cx);
+    click(cx, "manage-change-picture");
+    let dialog = cx
+        .update(|_, cx| shell.read(cx).team_dialog().cloned())
+        .and_then(|dialog| dialog.downcast::<TeamPictureDialog>().ok())
+        .expect("the dialog");
+    click(cx, "team-picture-save");
+    assert!(rig.core.team_writes.lock().unwrap().is_empty(), "nothing chosen yet");
+    cx.update(|_, cx| dialog.update(cx, |dialog, cx| dialog.choose(b"GIF89a".to_vec(), cx)));
+    assert!(bounds(cx, "team-picture-problem").is_some());
+    cx.update(|_, cx| dialog.update(cx, |dialog, cx| dialog.choose(b"\x89PNG\r\n\x1a\n".to_vec(), cx)));
+    click(cx, "team-picture-save");
+    let writes = rig.core.team_writes.lock().unwrap();
+    assert!(
+        matches!(writes.as_slice(), [(TeamWrite::SetPicture { team, group, picture }, None)]
+            if team == OWNED && group == GROUP && picture.bytes().starts_with(b"\x89PNG")),
+        "{writes:?}"
+    );
+}
+
+#[test]
+fn more_create_team_options_makes_a_team_from_a_template_or_another_team() {
+    let rig = Rig::start();
+    let card = teams_proto::TeamTemplates::read_answer(
+        br#"{"value":[{"id":"made.up.template","name":"Manage a Made-up Project","shortDescription":"s","categories":["General"]}]}"#,
+    );
+    let details = teams_proto::TeamTemplateRead::read_answer(
+        br#"{"value":{"teamDefinition":{"channels":[{"id":"General","displayName":"General"}],"apps":[{"id":"x"}]}}}"#,
+    );
+    *rig.core.templates.lock().unwrap() = (card, details);
+    *rig.core.team_written.lock().unwrap() = Some(TeamWritten::default());
+    let (shell, cx) = shell_window(&rig, vec![team(OWNED, "Alpha", true)]);
+    open_page(&shell, cx);
+    click(cx, "teams-create");
+    click(cx, "create-team-more");
+    assert_eq!(cx.update(|_, cx| shell.read(cx).main().clone()), Main::CreateTeamMore);
+    click(cx, "create-more-template-0");
+    click(cx, "create-more-use-template");
+    let page = cx
+        .update(|_, cx| shell.read(cx).create_team_more().cloned())
+        .expect("the page");
+    cx.update(|window, cx| page.update(cx, |page, cx| page.fill("From a template", "", window, cx)));
+    click(cx, "create-more-create");
+    {
+        let writes = rig.core.team_writes.lock().unwrap();
+        let [(TeamWrite::FromTemplate(made), None)] = writes.as_slice() else {
+            panic!("one team from a template: {writes:?}");
+        };
+        assert_eq!(made.template, "made.up.template");
+        assert_eq!(made.channels, [("General".to_owned(), "General".to_owned())]);
+    }
+    assert_eq!(cx.update(|_, cx| shell.read(cx).main().clone()), Main::TeamsPage);
+    click(cx, "teams-create");
+    click(cx, "create-team-more");
+    click(cx, "create-more-another-team");
+    click(cx, "create-more-team-0");
+    click(cx, "create-more-copy-people");
+    click(cx, "create-more-create");
+    let writes = rig.core.team_writes.lock().unwrap();
+    let [_, (TeamWrite::Copy(copy), None)] = writes.as_slice() else {
+        panic!("a copy: {writes:?}");
+    };
+    assert_eq!(copy.group, GROUP);
+    assert_eq!(copy.name, "Alpha [copy]");
+    assert!(copy.roster);
 }
