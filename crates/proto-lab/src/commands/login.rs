@@ -496,9 +496,8 @@ struct BrowserOutcome {
 /// Signs `alias` in and records its MRI (see the module docs).
 ///
 /// # Errors
-/// When the lab config or the account file is refused, the browser can't be run under the browser, the sign-in stops,
-/// the web client doesn't load in time, the identity isn't shown, the MRI can't be recorded, or the browser was
-/// breached. The status file says `failed` then.
+/// When the lab config or account file is refused, the browser cannot launch, sign-in stops,
+/// the web client does not load in time, the identity is not shown, the MRI cannot be recorded, or capture setup fails. The status file says `failed` then.
 pub async fn login(alias: Alias, options: LoginOptions) -> Result<LoginReport, LoginError> {
     let locations = LabLocations::from_env()?;
     let config = LabConfig::load(&locations)?;
@@ -615,7 +614,7 @@ impl Run<'_> {
     }
 
     /// Signs in where asked until the web client loads (`None`) or Teams refuses the account (its authz status),
-    /// a refusal counting once it has stood for [`crate::session::REFUSAL_GRACE`] ([`Settling`]). A lost connection is a breach.
+    /// a refusal counting once it has stood for [`crate::session::REFUSAL_GRACE`] ([`Settling`]). A lost capture connection fails the run.
     async fn until_loaded(&self, session: &mut LabSession, sign_in: &mut SignIn) -> Result<Option<u16>, LoginError> {
         let deadline = tokio::time::Instant::now() + self.options.timeout;
         let mut settling = Settling::default();

@@ -45,7 +45,7 @@ pub enum CallStep {
     /// running call from the chat's header.
     Join,
     /// As `answer`, and the call is then held [`KEEP_ALIVE_HOLD`], past the call's keep-alive interval, to record its
-    /// keep-alive, which the fence permits on the call's own `callLeg` link: every page must have sent one.
+    /// keep-alive on the call's own `callLeg` link: every page must have sent one.
     KeepAlive,
 }
 
@@ -365,7 +365,7 @@ fn capture_text(session: &LabSession) -> Option<String> {
 }
 
 /// A failed run's last step before its browsers close: every page that shows its call's hang-up control hangs up, in
-/// order (a's first), and the run waits up to [`HANG_UP_WAIT`] for that page's fence to let a `leave` through
+/// order (a's first), and the run waits up to [`HANG_UP_WAIT`] for that page to send a `leave`
 /// ([`leaves`]), so no call of the run is left running in its chat (the service would refuse the chat's next call:
 /// [`running_call_conflict`]). What each page did goes into the notes; nothing here fails the run further.
 pub(crate) async fn hang_up_all(sessions: &mut [(Alias, LabSession)], report: &mut ScenarioReport) {
@@ -375,7 +375,7 @@ pub(crate) async fn hang_up_all(sessions: &mut [(Alias, LabSession)], report: &m
 }
 
 /// One page of a failed run hangs up, if it shows the call's hang-up control, and the run waits up to
-/// [`HANG_UP_WAIT`] for its fence to let a `leave` through ([`hang_up_all`]'s step for one page, also the native
+/// [`HANG_UP_WAIT`] for it to send a `leave` ([`hang_up_all`]'s step for one page, also the native
 /// scenarios' for their pages).
 pub(crate) async fn hang_up_after_failure(alias: Alias, session: &mut LabSession, report: &mut ScenarioReport) {
     let before = capture_text(session).map_or(0, |text| leaves(&text));
@@ -897,7 +897,7 @@ async fn give_up_retry(caller: &mut LabSession, report: &mut ScenarioReport) -> 
     Ok(())
 }
 
-/// Waits up to [`CALL_START`] until `caller`'s fence has held back `count` call starts.
+/// Waits up to [`CALL_START`] until `caller`'s capture hold has stopped `count` call starts.
 async fn wait_held(caller: &mut LabSession, count: usize) -> Result<(), ScenarioError> {
     let deadline = tokio::time::Instant::now() + CALL_START;
     loop {
@@ -1295,7 +1295,7 @@ pub const KEEP_ALIVE_HOLD: Duration = Duration::from_mins(47);
 const HOLD_CHECK: Duration = Duration::from_secs(60);
 
 /// `keep-alive`: holds the answered call [`KEEP_ALIVE_HOLD`] ([`hold_long`]); a call that ended before fails the run,
-/// and so does a page whose fence let no keep-alive through ([`keep_alives`]).
+/// and so does a page that sent no keep-alive ([`keep_alives`]).
 async fn keep_alive(
     caller: &mut LabSession,
     callees: &mut [(Alias, LabSession)],
@@ -1316,9 +1316,7 @@ async fn keep_alive(
             .and_then(|dir| std::fs::read_to_string(dir.join(EVENTS_FILE)).ok())
             .unwrap_or_default();
         match keep_alives(&text) {
-            0 => report
-                .failures
-                .push(format!("{alias}'s fence let no keep-alive of the call through")),
+            0 => report.failures.push(format!("{alias} sent no keep-alive for the call")),
             sent => report
                 .notes
                 .push(format!("{alias}: the capture recorded {sent} keep-alive(s) through")),
@@ -1817,7 +1815,7 @@ pub(crate) fn judge_callee(
             if own > 0 && sends.attaches == 0 {
                 report
                     .failures
-                    .push(format!("{alias}'s fence let no attach of the run's call through"));
+                    .push(format!("{alias} sent no attach for the run's call"));
             }
             match judge_step_sends(role, &text) {
                 Ok(Some(note)) => report.notes.push(format!("{alias}: {note}")),
@@ -1887,7 +1885,7 @@ pub fn sent_requests(text: &str, method: &str, pattern: &str) -> usize {
         .count()
 }
 
-/// What a callee's fence let through while it rang ([`ring_sends`]).
+/// What a callee sent while it rang ([`ring_sends`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RingSends {
     /// `attach` requests allowed (each `Network` request once).

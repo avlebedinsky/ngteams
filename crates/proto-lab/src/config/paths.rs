@@ -36,20 +36,6 @@ fn resolved(path: &Path) -> PathBuf {
     out
 }
 
-/// A non-meeting group conversation id stored in chats.toml.
-pub(super) fn is_group_chat_id(id: &str) -> bool {
-    let Some(inner) = id.strip_prefix("19:").and_then(|id| id.strip_suffix("@thread.v2")) else {
-        return false;
-    };
-    (1..=128).contains(&inner.len())
-        && !inner
-            .get(..8)
-            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("meeting_"))
-        && inner
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-}
-
 #[cfg(test)]
 mod tests {
     use super::overlapping;

@@ -296,8 +296,6 @@ fn now_ms() -> u64 {
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
     let config = LabConfig::load(&LabLocations::from_env()?)?;
     let chats = crate::config::LabChats::load(paths).map_err(|error| setup(error.to_string()))?;
-    // checked before any browser opens, as `abc-chat` does: a message the fence would deny is sent again on every
-    // later load of a's profile
     let group = match chats.abc {
         None => Err("no group chat recorded in chats.toml: run abc-chat first".to_owned()),
         Some(chat_id) => Ok(chat_id),
@@ -428,7 +426,7 @@ impl Shapes {
         let chat_id = ab_chat_id
             .ok_or_else(|| setup("lab.toml has no MRI for a or b: run `proto-lab login` for them".to_owned()))?;
         let drive_b = self.open_b(b, chat_id, report).await?;
-        let drive_a = self.open_a(a, chat_id, report).await?;
+        let drive_a = self.open_a(a, report).await?;
         let writes = Writes::on(chat_id).map_err(|error| setup(error.to_string()))?;
         let mut pages = Pages {
             a,
@@ -506,13 +504,8 @@ impl Shapes {
         Ok(drive_b)
     }
 
-    /// Step 3: a loads, opens the chat with b and proves enforcement live.
-    async fn open_a(
-        &self,
-        a: &mut LabSession,
-        _chat_id: &str,
-        report: &mut ScenarioReport,
-    ) -> Result<Driver, ScenarioError> {
+    /// Step 3: a loads and opens the chat with b.
+    async fn open_a(&self, a: &mut LabSession, report: &mut ScenarioReport) -> Result<Driver, ScenarioError> {
         let mut drive_a = a.driver();
         drive_a.set_call_timeout(PAGE_CALL);
         load(Alias::A, a, self.options.load_timeout).await?;

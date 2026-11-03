@@ -53,7 +53,7 @@ const ARROW_DOWN: Key = Key {
     modifiers: 0,
 };
 
-/// The held mention's text after the mention: the probe marker first, so every run's capture hold stops it.
+/// The held mention's text after the mention: the capture marker first, so later sessions keep its retries unsent.
 #[must_use]
 pub fn held_text(nonce: &str) -> String {
     format!("{HELD_MARKER}{nonce} everyone held")
@@ -318,8 +318,7 @@ fn mention_entries(body: &str) -> Option<Vec<Value>> {
     mentions.as_array().cloned()
 }
 
-/// Whether the held post (`url`, `body`) is a mention of everyone the lab rule lets through: one entry of
-/// `mentionType` `everyone`, and the classifier's verdict a message to the group chat `group` adding nobody.
+/// Whether the held post (`url`, `body`) has one `everyone` mention referencing the group chat `group`.
 ///
 /// # Errors
 /// What it is instead.

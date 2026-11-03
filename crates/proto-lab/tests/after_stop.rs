@@ -24,7 +24,7 @@ fn a_stop_ends_the_runtime_without_waiting_for_a_blocking_task() -> Result<(), B
     assert_eq!(stopped, Stopped::Terminate);
 
     let started = Instant::now();
-    let code = after_stop(runtime, stopped, Duration::from_secs(1));
+    let code = after_stop(runtime, stopped);
 
     assert_eq!(code, 143);
     assert!(

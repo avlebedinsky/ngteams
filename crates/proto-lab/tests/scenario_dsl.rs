@@ -9,7 +9,7 @@ mod page;
 use std::time::Duration;
 
 use futures_util::StreamExt as _;
-use proto_lab::arming::{ArmOptions, ArmedBrowser};
+use proto_lab::arming::ArmedBrowser;
 use proto_lab::browser::{Browser, LaunchOptions};
 use proto_lab::capture_hold::CaptureHold;
 use proto_lab::cdp::{Cdp, CdpError, Event, RemoteError, SessionId};
@@ -118,8 +118,7 @@ where
 
     let http = CaptureHold::new();
 
-    let options = ArmOptions::default();
-    let armed = ArmedBrowser::arm(browser, http, &options).await?;
+    let armed = ArmedBrowser::arm(browser, http).await?;
     let page = armed.open_page(Duration::from_secs(15)).await?.session;
     let driver = Driver::new(armed.cdp().clone(), page.clone(), armed.watch());
     let mut run = Run {

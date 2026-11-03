@@ -3,13 +3,13 @@
 //!
 //! A [`Driver`] drives one tab over the armed connection and reads a copy of the connection's events
 //! ([`crate::arming::ArmedBrowser::watch`]): every request any target of the browser sends (`Network.requestWillBeSent`)
-//! and how it ended. It only drives and observes; the fence decides every request as always.
+//! and how it ended. It drives and observes; capture holds selectively stop matching requests.
 //!
 //! - [`Driver::wait_for`]: an element is in the page, found by its `data-tid` (the attribute the Teams web client marks
 //!   its controls with, [`Selector::Tid`]) or a CSS selector ([`Selector::Css`]);
 //! - [`Driver::wait_for_request`]: a request matching a [`RequestPattern`] was sent, since the driver began or since
 //!   the request the last wait matched (so a request sent just before the wait isn't missed, and none is matched twice);
-//! - [`Driver::wait_for_failure`]: that request failed, and how (a fenced one with `net::ERR_BLOCKED_BY_CLIENT`);
+//! - [`Driver::wait_for_failure`]: that request failed, and how (a held one with `net::ERR_BLOCKED_BY_CLIENT`);
 //! - [`Driver::wait_for_text`]: the page shows a text;
 //! - [`Driver::wait_for_answer`]: a request matching a pattern was answered (or failed), and how;
 //! - [`Driver::navigate`], [`Driver::click`], [`Driver::type_into`], [`Driver::insert_text`] (into the focused
@@ -55,7 +55,7 @@ pub enum NavigateError {
 /// Navigates the tab `page` to `url`, within `timeout` in all.
 ///
 /// A page that asks before it is left (a `beforeunload` handler, which the web client sets while a message of the
-/// compose box is still being sent, such as an image whose upload the fence denies) holds `Page.navigate` unanswered
+/// compose box is still being sent, such as an image whose upload a capture hold stops) holds `Page.navigate` unanswered
 /// until its dialog is answered, and a headless browser shows that dialog to nobody: live, 2026-10-21, an `ab-image`
 /// run hung there for two hours. So when the navigation isn't answered within [`DIALOG_WAIT`], the dialog is accepted
 /// (`Page.handleJavaScriptDialog`, the page is left, as the step asked; an error there means no dialog is showing) and
@@ -596,8 +596,7 @@ impl Driver {
         }
     }
 
-    /// Waits up to `timeout` for `request` to fail, and says why (`net::ERR_BLOCKED_BY_CLIENT` for one the fence
-    /// denied).
+    /// Waits up to `timeout` for `request` to fail, and says why (`net::ERR_BLOCKED_BY_CLIENT` for a held request).
     ///
     /// # Errors
     /// [`StepError::Timeout`] when it hasn't failed in time, [`StepError::Failed`] when it got a response instead

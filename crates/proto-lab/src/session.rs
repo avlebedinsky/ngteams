@@ -10,7 +10,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use url::Url;
 
-use crate::arming::{ArmError, ArmOptions, ArmedBrowser, CaptureStatus};
+use crate::arming::{ArmError, ArmedBrowser, CaptureStatus};
 use crate::browser::{Browser, BrowserError, Display, LaunchOptions, Media};
 use crate::capture::{Capture, CaptureError, Recorder, RtcHooks};
 use crate::capture_hold::{CaptureHold, HeldRequest, Hold};
@@ -496,8 +496,8 @@ impl LabSession {
             return Err(SessionError::NoChrome(chrome));
         }
         let http = match catch {
-            Some(catch) => CaptureHold::new().with_redirect_catch(catch),
-            None => CaptureHold::new(),
+            Some(catch) => CaptureHold::new().with_pending_messages().with_redirect_catch(catch),
+            None => CaptureHold::new().with_pending_messages(),
         };
         let recorder = match &options.capture {
             Some(scenario) => Some(Arc::new(Recorder::create(&paths.captures_dir(), scenario)?)),
@@ -518,9 +518,9 @@ impl LabSession {
                 } else {
                     capture.without_request_bodies()
                 };
-                ArmedBrowser::arm_capturing(browser, http, &ArmOptions::default(), capture).await?
+                ArmedBrowser::arm_capturing(browser, http, capture).await?
             }
-            None => ArmedBrowser::arm(browser, http, &ArmOptions::default()).await?,
+            None => ArmedBrowser::arm(browser, http).await?,
         };
         let events = armed.watch();
         let page = armed.open_page(PAGE_TIMEOUT).await?.session;

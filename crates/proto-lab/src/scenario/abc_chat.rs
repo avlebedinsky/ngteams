@@ -17,8 +17,8 @@ use super::ab_chat::{
 };
 use super::{RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
-/// What the group chat's first message carries: [`super::ab_chat::HELD_MARKER`] and more, so every scenario that
-/// force-denies an earlier run's probe denies it too.
+/// What the group chat's first message carries: [`super::ab_chat::HELD_MARKER`] and more,
+/// so every session keeps its queued retries unsent.
 pub const FIRST_MESSAGE_MARKER: &str = "lab held capture abc-chat first message ";
 
 /// The label of the capture hold of this run's first message ([`first_message_text`] of the run's nonce).
@@ -279,14 +279,12 @@ impl MessageSteps<'_> {
         send(&mut drive_a, "a (the message)", &message).await?;
         for (alias, session) in readers.iter_mut() {
             self.receive(*alias, session, &message).await?;
-            report
-                .notes
-                .push(format!("{alias} shows a's message and not the probe"));
+            report.notes.push(format!("{alias} shows a's message"));
         }
         Ok(())
     }
 
-    /// `alias` opens the group chat, reads it from the service, and must show `message` and not `probe`.
+    /// `alias` opens the group chat, reads it from the service, and must show `message`.
     async fn receive(&self, alias: Alias, session: &mut LabSession, message: &str) -> Result<(), ScenarioError> {
         let opened = chat_requests(self.chat_id).map_err(|error| setup(error.to_string()))?;
         // Each reader loads its own view of the recorded chat's history from the service.

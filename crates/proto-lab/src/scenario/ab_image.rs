@@ -236,10 +236,8 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
 async fn finish(mut a: LabSession, mut b: LabSession, chat_id: Option<&str>, image: &Image) -> ScenarioReport {
     let mut report = ScenarioReport::new(ScenarioName::AbImage);
     // Arm the rules before either client loads or retries an earlier attachment.
-    for denied in [hold_media_writes(&a)] {
-        if let Err(error) = denied {
-            report.failures.push(error.to_string());
-        }
+    if let Err(error) = hold_media_writes(&a) {
+        report.failures.push(error.to_string());
     }
 
     if let Err(error) = image.run(chat_id, &mut a, &mut b, &mut report).await {
@@ -270,7 +268,7 @@ struct Image {
 }
 
 impl Image {
-    /// Loading, the enforcement test, a's plain message and image, a's reload, then b's read.
+    /// Loading, a's plain message and image, a's reload, then b's read.
     async fn run(
         &self,
         chat_id: Option<&str>,

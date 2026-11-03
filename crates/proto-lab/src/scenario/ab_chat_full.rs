@@ -152,7 +152,7 @@ async fn run_with(
     Ok(run_sessions(&full, chat_id.as_deref(), options, a, b).await)
 }
 
-/// Runs and settles both already-armed pages with the same forced probes and report policy.
+/// Runs and settles both pages with capture setup already installed.
 async fn run_sessions(
     full: &Full,
     chat_id: Option<&str>,
@@ -161,8 +161,6 @@ async fn run_sessions(
     mut b: LabSession,
 ) -> ScenarioReport {
     let mut report = ScenarioReport::new(ScenarioName::AbChatFull);
-    // before a's page loads: the client sends an earlier run's unsent probe again as soon as it can
-
     if let Err(error) = full.run(chat_id, &mut a, &mut b, &mut report, options).await {
         report.failures.push(error.to_string());
         for (alias, session) in [(Alias::A, &a), (Alias::B, &b)] {
@@ -187,7 +185,7 @@ struct Full {
 }
 
 impl Full {
-    /// Loading, the enforcement test, then a's and b's steps.
+    /// Loading, then a's and b's steps.
     async fn run(
         &self,
         chat_id: Option<&str>,
@@ -225,7 +223,7 @@ impl Full {
     }
 }
 
-/// The steps after the enforcement test, each reported on its own ([`Steps::settle`]).
+/// The chat steps, each reported on its own ([`Steps::settle`]).
 struct Steps<'a> {
     writes: &'a Writes,
     texts: &'a Texts,
@@ -361,9 +359,8 @@ impl Steps<'_> {
         answered("a's delete", &seen)
     }
 
-    /// b opens the chat with a and, once it shows a's first message (as sent or as edited: the edit holds its text),
-    /// the other half of the enforcement test: b's copy of the chat, read from the service, must not have the probe
-    /// ([`not_received`]). Then it shows a's edited message and goes to its compose box. Whether b then sends a read
+    /// b opens the chat with a, reads it from the service, shows a's first, edited and mention messages,
+    /// and goes to its compose box. Whether b then sends a read
     /// receipt within [`STEP`] is noted, not required: in the headless run of 2026-10-20 b's page sent none while a's
     /// did, after a typed in it. A receipt that is sent and refused fails the step.
     async fn b_reads(&mut self, drive: &mut Driver, mri_a: &str, opened: &RequestPattern) -> Result<(), ScenarioError> {

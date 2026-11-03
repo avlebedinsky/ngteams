@@ -56,9 +56,10 @@ async fn startup_matrix() {
     let locations = crate::config::LabLocations::from_env().unwrap();
     let paths = locations.lab_paths().unwrap();
     assert!(paths.data_dir().starts_with(std::env::var_os("XDG_DATA_HOME").unwrap()));
-    let session = LabSession::open(&paths, Alias::A).await.unwrap();
+    let mut session = LabSession::open(&paths, Alias::A).await.unwrap();
     assert_eq!(session.watch().state(), SessionState::Loading);
     assert!(session.capture_dir().is_none());
+    queued_capture_messages_stay_local(&mut session).await;
     let (report, _) = close_after_arming(session, &paths).await;
     assert_clean(&report);
     for request_bodies in [false, true] {
@@ -132,18 +133,19 @@ async fn blank_capture(paths: &LabPaths, request_bodies: bool) {
         user_agent: Some("synthetic-test-agent".into()),
         ..SessionOptions::default()
     };
-    let session = LabSession::open_with(paths, Alias::B, options).await.unwrap();
+    let mut session = LabSession::open_with(paths, Alias::B, options).await.unwrap();
     let directory = session.capture_dir().unwrap().to_path_buf();
     assert!(directory.starts_with(paths.captures_dir()));
     assert_eq!(session.watch().state(), SessionState::Loading);
-    let (fence, capture) = close_after_arming(session, paths).await;
+    queued_capture_messages_stay_local(&mut session).await;
+    let (report, capture) = close_after_arming(session, paths).await;
     assert_eq!(capture, Some(directory.clone()));
-    assert_clean(&fence);
+    assert_clean(&report);
     assert!(directory.join(crate::capture::EVENTS_FILE).is_file());
 }
 
 fn assert_clean(report: &SessionReport) {
-    assert!(!report.failed(), "blank startup fence: {report:?}");
+    assert!(!report.failed(), "session capture setup: {report:?}");
 }
 
 async fn close_after_arming(session: LabSession, paths: &LabPaths) -> (SessionReport, Option<PathBuf>) {
@@ -174,4 +176,43 @@ async fn close_after_arming(session: LabSession, paths: &LabPaths) -> (SessionRe
     recorder.finish().unwrap();
     ready.unwrap();
     session.close_recorded().await.unwrap()
+}
+
+async fn queued_capture_messages_stay_local(session: &mut LabSession) {
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("synthetic blank page"))
+        .mount(&server)
+        .await;
+    session.navigate(&server.uri()).await.unwrap();
+    for marker in [crate::capture_hold::HELD_MARKER, "lab fence probe "] {
+        let expression = format!(
+            "fetch('/messages', {{method:'POST', body:{}}}).then(() => 'sent', () => 'held')",
+            serde_json::to_string(&format!("{marker}earlier-run")).unwrap()
+        );
+        let answer = session
+            .cdp()
+            .call(
+                Some(session.page()),
+                "Runtime.evaluate",
+                serde_json::json!({
+                    "expression":expression,"returnByValue":true,"awaitPromise":true
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(answer["result"]["value"], "held", "{answer}");
+    }
+    assert_eq!(session.status().held_requests().len(), 2);
+    assert!(
+        server
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| request.method == "GET")
+    );
 }

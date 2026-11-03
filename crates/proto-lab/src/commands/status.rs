@@ -50,10 +50,10 @@ pub fn account_status(state: &SessionState, timeout: Duration, last_authz: Optio
     }
 }
 
-/// Opens Teams in `alias`'s profile under the browser and tells what became of the session, with what the browser did.
+/// Opens Teams in `alias`'s profile and reports the session state and capture setup status.
 ///
 /// # Errors
-/// When the browser can't be run under the browser, or had to be killed on closing.
+/// When the browser cannot launch, capture setup fails, or closing is unconfirmed.
 pub async fn check(
     paths: &LabPaths,
     alias: Alias,

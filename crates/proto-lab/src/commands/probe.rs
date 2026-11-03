@@ -372,13 +372,9 @@ pub async fn probe_chat<S: SecretStore>(
         conversations.push(ListRead { form, outcome });
     }
 
-    let mut thread_url = Url::parse(&format!("{base}/")).map_err(|_| ProbeError::NotAChatBase(base.clone()))?;
-    thread_url
-        .path_segments_mut()
-        .map_err(|()| ProbeError::NotAChatBase(base.clone()))?
-        .pop_if_empty()
-        .extend(["v1", "threads", chat_id.as_str()]);
-    thread_url.set_query(Some("view=msnp24Equivalent"));
+    let thread_url = super::thread_probe::ThreadReadKind::Thread
+        .url(&base, &chat_id)
+        .ok_or_else(|| ProbeError::NotAChatBase(base.clone()))?;
     let target =
         at_origin(thread_url.as_str(), &request.origin).ok_or_else(|| ProbeError::NotAChatBase(base.clone()))?;
     let thread = read(&client, target, token, HeaderForm::ALL[0]).await;

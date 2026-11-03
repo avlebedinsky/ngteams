@@ -6,6 +6,10 @@ use regex::Regex;
 use serde_json::{Value, json};
 use std::sync::{Mutex, PoisonError};
 
+/// Text marking a deliberately unsent message, retained across browser-profile reloads.
+pub const HELD_MARKER: &str = "lab held capture ";
+const LEGACY_HELD_MARKER: &str = "lab fence probe ";
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PausedRequest {
     pub request_id: String,
@@ -36,8 +40,7 @@ pub struct HeldRequest {
 }
 impl HeldRequest {
     #[must_use]
-    /// # Errors
-    /// When the URL pattern is not a valid regular expression.
+    /// Records the URL without its query or fragment.
     pub fn new(method: &str, url: &str) -> Self {
         Self {
             method: method.into(),
@@ -135,11 +138,19 @@ pub struct CaptureHold {
     rules: Mutex<Vec<Hold>>,
     held: Mutex<Vec<HeldRequest>>,
     catch: Option<RedirectCatch>,
+    pending_messages: bool,
 }
 impl CaptureHold {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+    /// Keeps deliberately held messages unsent if the web client retries them on a later run.
+    /// These capture markers survive clearing the current scenario's holds.
+    #[must_use]
+    pub(crate) fn with_pending_messages(mut self) -> Self {
+        self.pending_messages = true;
+        self
     }
     #[must_use]
     pub fn with_redirect_catch(mut self, catch: RedirectCatch) -> Self {
@@ -188,7 +199,11 @@ impl CaptureHold {
                     .unwrap_or_else(PoisonError::into_inner)
                     .iter()
                     .find(|rule| rule.matches(&request))
-                    .map(|rule| (rule.clone(), request))
+                    .map(|rule| (rule.label.clone(), request.clone()))
+                    .or_else(|| {
+                        (self.pending_messages && pending_message(&request))
+                            .then(|| (Some("an earlier run's held capture".into()), request))
+                    })
             })
         };
         let method = if caught || rule.is_some() {
@@ -203,14 +218,14 @@ impl CaptureHold {
             answer["errorReason"] = json!("BlockedByClient");
         }
         cdp.call(event.session_id.as_ref(), method, answer).await?;
-        if let Some((rule, request)) = rule {
+        if let Some((label, request)) = rule {
             self.held
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .push(HeldRequest {
                     method: request.method,
                     url: without_query(&request.url).into(),
-                    label: rule.label,
+                    label,
                     network_id: request.network_id,
                 });
             Ok(Handled::Held)
@@ -222,6 +237,15 @@ impl CaptureHold {
             Ok(Handled::Continued)
         }
     }
+}
+fn pending_message(request: &PausedRequest) -> bool {
+    matches!(request.method.to_ascii_uppercase().as_str(), "POST" | "PUT")
+        && request.body.as_deref().is_some_and(|body| {
+            let body = String::from_utf8_lossy(body);
+            [HELD_MARKER, LEGACY_HELD_MARKER]
+                .iter()
+                .any(|marker| body.contains(marker))
+        })
 }
 #[must_use]
 pub fn without_query(url: &str) -> &str {

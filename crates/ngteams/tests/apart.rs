@@ -130,16 +130,14 @@ fn features_of(package: &str) -> String {
 #[test]
 fn a_lab_binary_built_alone_has_neither_personal_feature() {
     assert!(!features_of("proto-lab").contains("teams-fence"));
-    for lab in ["teams-signin"] {
-        let tree = features_of(lab);
-        assert!(tree.contains("teams-fence"), "{lab}: {tree}");
-        for personal in [
-            r#"teams-fence feature "personal""#,
-            r#"teams-signin feature "personal""#,
-            r#"teams-media feature "personal""#,
-        ] {
-            assert!(!tree.contains(personal), "{lab} resolves {personal}");
-        }
+    let tree = features_of("teams-signin");
+    assert!(tree.contains("teams-fence"), "teams-signin: {tree}");
+    for personal in [
+        r#"teams-fence feature "personal""#,
+        r#"teams-signin feature "personal""#,
+        r#"teams-media feature "personal""#,
+    ] {
+        assert!(!tree.contains(personal), "teams-signin resolves {personal}");
     }
     let tree = features_of("ngteams");
     assert!(tree.contains(r#"teams-fence feature "personal""#), "{tree}");

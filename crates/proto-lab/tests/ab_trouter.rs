@@ -6,7 +6,7 @@ mod common;
 
 use std::time::Duration;
 
-use proto_lab::arming::{ArmOptions, ArmedBrowser};
+use proto_lab::arming::ArmedBrowser;
 use proto_lab::browser::{Browser, LaunchOptions};
 use proto_lab::capture_hold::{CaptureHold, Hold};
 use proto_lab::cdp::SessionId;
@@ -199,8 +199,7 @@ async fn a_registration_wait_meets_only_a_success_from_its_document_on() -> Test
 
     let http = CaptureHold::new();
 
-    let options = ArmOptions::default();
-    let armed = ArmedBrowser::arm(browser, http, &options).await?;
+    let armed = ArmedBrowser::arm(browser, http).await?;
     let outcome = tokio::time::timeout(Duration::from_secs(60), registration_run(&armed, &server)).await;
     armed.close(Duration::from_secs(10)).await?;
     outcome.map_err(|_| "the run took over 60 s")?

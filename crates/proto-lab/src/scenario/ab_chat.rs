@@ -22,8 +22,8 @@ pub const COMPOSE_CSS: &str = r#"[contenteditable="true"][role="textbox"]"#;
 /// The message compose box.
 pub const COMPOSE: Selector<'static> = Selector::Css(COMPOSE_CSS);
 
-/// What every probe text starts with ([`probe_text`]); `deny_probes` denies any write that carries it.
-pub const HELD_MARKER: &str = "lab held capture ";
+/// Text marking held message captures; every session keeps marked retries unsent.
+pub use crate::capture_hold::HELD_MARKER;
 
 /// How long the failure's diagnosis (the compose box's state, a screenshot) may wait for a page.
 const DIAGNOSIS_WAIT: Duration = Duration::from_secs(10);
@@ -38,18 +38,17 @@ pub const MESSAGE_POST: &str = r"/v1/users/ME/conversations/[^/?]+/messages(\?|$
 
 /// How long the chat gets to open.
 pub const CHAT_OPEN: Duration = Duration::from_secs(60);
-/// How long a's probe post gets to fail.
+/// How long a deliberately held message post gets to fail.
 pub const HOLD_FAILURE_WAIT: Duration = Duration::from_secs(30);
-/// How long this run's probe post gets to be denied once sent. The web client posts a new message to a chat only after
-/// the unsent ones it still holds (an earlier run's probes, sent again on every load) went through their retries, each
+/// How long this run's capture post gets to be held once sent. The web client posts a new message to a chat only after
+/// the unsent ones it still holds (earlier held captures, retried on every load) went through their retries, each
 /// about 15 s (seen 2026-11-03: b's page with two of them posted nothing of this run's within 30 s).
 pub const HOLD_WAIT: Duration = Duration::from_secs(90);
 /// How long the real message gets to reach b.
 pub const DELIVERY: Duration = Duration::from_secs(60);
 
 /// The web client's deep link that starts, or opens, the 1:1 chat with the account `mri`. By MRI, not by UPN: the
-/// client resolves a UPN with a profile lookup posted to the middle tier, which a fail-closed run once denied,
-/// and the chat never opens. Nor by the chat's id (`l/chat/<id>/0`): a page that loaded before the chat existed says
+/// client resolves a UPN with an additional profile lookup posted to the middle tier. Nor by the chat's id (`l/chat/<id>/0`): a page that loaded before the chat existed says
 /// it is a chat the user isn't in.
 #[must_use]
 pub fn chat_link(mri: &str) -> String {
@@ -129,11 +128,9 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
     Ok(run_sessions(&steps, a, b).await)
 }
 
-/// Drives and settles the opened pair without changing the normal setup or admission policy.
+/// Drives and settles the opened pair with their capture setup already installed.
 async fn run_sessions(steps: &Steps<'_>, mut a: LabSession, mut b: LabSession) -> ScenarioReport {
     let mut report = ScenarioReport::new(ScenarioName::AbChat);
-    // before a's page loads: the client sends an earlier run's unsent probe again as soon as it can
-
     let outcome = steps.run(&mut a, &mut b, &mut report).await;
     if let Err(error) = outcome {
         report.failures.push(error.to_string());
@@ -275,7 +272,7 @@ pub(crate) async fn press_until_sent(driver: &mut Driver, who: &str, text: &str)
 }
 
 /// A capture hold, under one label ([`HeldRequest::label`]), of a message post ([`MESSAGE_POST`]) whose URL names one chat:
-/// what a live enforcement test waits for.
+/// what a held-message capture waits for.
 pub struct HeldPost<'a> {
     label: &'a str,
     /// Finds the chat in a URL.
@@ -319,7 +316,7 @@ impl<'a> HeldPost<'a> {
     }
 }
 
-/// Checks that the request the fence denied as `denial`, found by its `Network` id, failed in `driver`'s page as
+/// Checks that the held request `denial`, found by its `Network` id, failed in `driver`'s page as
 /// blocked by the capture hold (`net::ERR_BLOCKED_BY_CLIENT`) within [`HOLD_FAILURE_WAIT`]. `what` names the request in the errors.
 ///
 /// # Errors

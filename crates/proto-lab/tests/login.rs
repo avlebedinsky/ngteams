@@ -14,7 +14,7 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use proto_lab::accounts::{AccountsError, AccountsFile};
-use proto_lab::arming::{ArmOptions, ArmedBrowser};
+use proto_lab::arming::ArmedBrowser;
 use proto_lab::browser::{Browser, Display, LaunchOptions};
 use proto_lab::capture_hold::CaptureHold;
 use proto_lab::cdp::{Event, SessionId};
@@ -980,8 +980,7 @@ async fn sign_in_run(chrome: &Path, _server: &MockServer) -> TestResult<SignInRu
 
     let http = CaptureHold::new();
 
-    let options = ArmOptions::default();
-    let armed = ArmedBrowser::arm(browser, http, &options).await?;
+    let armed = ArmedBrowser::arm(browser, http).await?;
     let page = armed.open_page(Duration::from_secs(15)).await?.session;
     Ok(SignInRun { armed, page, _dir: dir })
 }

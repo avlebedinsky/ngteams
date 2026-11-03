@@ -1,7 +1,6 @@
 //! Stops a command on SIGINT or SIGTERM. Dropping its owned browser stops the browser process group before the runtime shuts down.
 
 use std::future::Future;
-use std::time::Duration;
 
 use rustix::process::Signal;
 use tokio::signal::unix::{SignalKind, signal};
@@ -50,7 +49,7 @@ pub async fn until_stopped<T>(command: impl Future<Output = T>) -> Result<T, Sto
 }
 
 /// Ends the runtime after a stopped command has dropped its browser owners, without waiting for blocking work.
-pub fn after_stop(runtime: tokio::runtime::Runtime, stopped: Stopped, _grace: Duration) -> u8 {
+pub fn after_stop(runtime: tokio::runtime::Runtime, stopped: Stopped) -> u8 {
     eprintln!("proto-lab: {stopped}; any lab browser it ran was killed");
     runtime.shutdown_background();
     stopped.exit_code()

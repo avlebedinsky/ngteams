@@ -43,6 +43,7 @@ impl TargetKind {
         match self {
             Self::Page | Self::Iframe => &[
                 Step::Network,
+                Step::BypassServiceWorker,
                 Step::Runtime,
                 Step::Page,
                 Step::CaptureBinding,
@@ -67,6 +68,7 @@ impl TargetKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Step {
     Network,
+    BypassServiceWorker,
     Runtime,
     Page,
     CaptureBinding,
@@ -81,6 +83,7 @@ impl Step {
     pub fn method(self) -> &'static str {
         match self {
             Self::Network => "Network.enable",
+            Self::BypassServiceWorker => "Network.setBypassServiceWorker",
             Self::Runtime => "Runtime.enable",
             Self::Page => "Page.enable",
             Self::CaptureBinding | Self::FrameBinding => "Runtime.addBinding",
@@ -123,8 +126,6 @@ impl ArmError {
             )
     }
 }
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct ArmOptions {}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ArmedTarget {
     pub target_id: String,
@@ -226,17 +227,12 @@ impl ArmedBrowser {
     /// Takes ownership of the browser and attaches its targets for observation.
     /// # Errors
     /// If CDP setup fails; the owned browser is stopped on failure.
-    pub async fn arm(browser: Browser, http: CaptureHold, _options: &ArmOptions) -> Result<Self, ArmError> {
+    pub async fn arm(browser: Browser, http: CaptureHold) -> Result<Self, ArmError> {
         Self::arm_inner(browser, http, None).await
     }
     /// # Errors
     /// As [`Self::arm`].
-    pub async fn arm_capturing(
-        browser: Browser,
-        http: CaptureHold,
-        _options: &ArmOptions,
-        capture: Capture,
-    ) -> Result<Self, ArmError> {
+    pub async fn arm_capturing(browser: Browser, http: CaptureHold, capture: Capture) -> Result<Self, ArmError> {
         Self::arm_inner(browser, http, Some(capture)).await
     }
     async fn arm_inner(browser: Browser, http: CaptureHold, capture: Option<Capture>) -> Result<Self, ArmError> {
@@ -515,6 +511,7 @@ async fn setup_target(cdp: &Cdp, shared: &Shared, target: &ArmedTarget) -> Resul
                 json!({"source":frames,"runImmediately":true}),
             ),
             Step::FrameHooks => (step.method(), json!({"expression":frames})),
+            Step::BypassServiceWorker => (step.method(), json!({"bypass":true})),
             Step::AutoAttach => (step.method(), attach(true)),
             _ => (step.method(), Value::Null),
         };

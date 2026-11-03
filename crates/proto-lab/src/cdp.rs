@@ -4,7 +4,7 @@
 //! iframes, dedicated, shared and service workers). Responses are matched to their commands by id; events (with the
 //! session they came from) go out in arrival order through [`Events`]. Nothing here acts on an event by itself: a
 //! target that auto-attaches with `waitForDebuggerOnStart` stays paused until the caller resumes it with
-//! `Runtime.runIfWaitingForDebugger`, which is what the browser fence needs to arm a target before its code runs.
+//! `Runtime.runIfWaitingForDebugger`, which is how capture setup is installed before a target's code runs.
 //! That is why the client is our own: `chromiumoxide` resumes every target paused that way by itself, before its
 //! caller can arm it, and detaches service workers.
 //!

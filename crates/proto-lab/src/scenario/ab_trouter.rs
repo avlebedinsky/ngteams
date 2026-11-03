@@ -39,7 +39,7 @@ pub const TROUTER_SOCKET: &str = r"^wss://[a-z0-9-]+\.trouter\.teams\.microsoft\
 pub const ACTIVITY_EVENT: &str = r#""name":"user.activity""#;
 
 /// The rule that holds back every `user.activity` on the Trouter sockets, labelled [`HELD_ACTIVITY`]: what
-/// `ab-trouter-quiet` and `own-presence-endpoint` force on each account's fence before its page loads.
+/// `ab-trouter-quiet` and `own-presence-endpoint` install as a selective frame hold before each page loads.
 ///
 /// # Errors
 /// Never: the pattern is fixed.

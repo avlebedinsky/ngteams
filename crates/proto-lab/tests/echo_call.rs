@@ -1,13 +1,9 @@
-//! The `echo-call` scenario's offline parts: the tone the fake microphone plays, the echo service's MRI from the lab
-//! config, and what a capture's WebRTC statistics say about the call's audio (synthetic `rtc` entries shaped like the
-//! WebRTC hooks' reports).
+//! The `echo-call` scenario's offline parts: the fake microphone's tone and the call's captured WebRTC audio statistics.
 
-use std::path::Path;
 use std::time::{Duration, Instant};
 
-use proto_lab::config::LabConfig;
 use proto_lab::scenario::echo_call::{
-    AudioSummary, AudioTally, CallFollowUps, ECHO_WAIT, REQUIRED_FOLLOW_UPS, ToneWait, call_starts, echo_mri, tone_wav,
+    AudioSummary, AudioTally, CallFollowUps, ECHO_WAIT, REQUIRED_FOLLOW_UPS, ToneWait, call_starts, tone_wav,
     wait_for_tone_in,
 };
 use serde_json::json;
@@ -45,30 +41,6 @@ fn the_tone_is_a_mono_16_bit_wav_of_the_asked_frequency() {
     // 440 Hz: 880 sign changes in one second
     let crossings = samples.windows(2).filter(|pair| (pair[0] < 0) != (pair[1] < 0)).count();
     assert!((878..=882).contains(&crossings), "{crossings} zero crossings");
-}
-
-// --- the echo service's MRI ---
-
-const ACCOUNTS: &str = "[[accounts]]\nalias = \"a\"\nupn = \"bot-a@lab.example.com\"\n\n\
-[[accounts]]\nalias = \"b\"\nupn = \"bot-b@lab.example.com\"\n\n\
-[[accounts]]\nalias = \"c\"\nupn = \"bot-c@lab.example.com\"\n\n";
-
-#[test]
-fn the_echo_mri_comes_only_from_the_echo_service_s_entry() {
-    let parse = |services: &str| LabConfig::parse(&format!("{ACCOUNTS}{services}"), Path::new("/lab")).unwrap();
-
-    let none = parse("[[service_participants]]\nname = \"echo\"\n");
-    assert_eq!(echo_mri(&none), None);
-
-    let other =
-        parse("[[service_participants]]\nname = \"other\"\nmri = \"28:00000000-0000-4000-8000-0000000000e1\"\n");
-    assert_eq!(echo_mri(&other), None);
-
-    let echo = parse(
-        "[[service_participants]]\nname = \"other\"\nmri = \"28:00000000-0000-4000-8000-0000000000e1\"\n\n\
-         [[service_participants]]\nname = \"echo\"\nmri = \"28:00000000-0000-4000-8000-0000000000e0\"\n",
-    );
-    assert_eq!(echo_mri(&echo), Some("28:00000000-0000-4000-8000-0000000000e0"));
 }
 
 // --- the audio, from the capture's WebRTC statistics ---

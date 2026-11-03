@@ -1,5 +1,5 @@
 //! The bundle index: URL templates, hosts, HTTP methods and route constants found in an unpacked bundle, with the
-//! file, line and column of every place they occur. It helps classify requests for the fence and find the code to
+//! file, line and column of every place they occur. It helps identify captured requests and find the code to
 //! read for the protocol notes; deeper analysis is rea's job (`analyze_javascript_application`,
 //! `trace_javascript_semantics`).
 //!

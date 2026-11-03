@@ -74,7 +74,8 @@ struct Steps<'a> {
 
 impl Steps<'_> {
     async fn run(&self, a: &mut LabSession, me: &str, report: &mut ScenarioReport) -> Result<(), ScenarioError> {
-        let _chat_id = one_to_one_id(me, self.mri_b)
+        // Require the account and peer MRIs before opening their chat.
+        one_to_one_id(me, self.mri_b)
             .ok_or_else(|| setup("lab.toml has no MRI for a or b: run `proto-lab login` for them".to_owned()))?;
         let mut drive = a.driver();
         load(Alias::A, a, self.options.load_timeout).await?;

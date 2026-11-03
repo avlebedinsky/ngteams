@@ -6,7 +6,7 @@ use crate::browser::Media;
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
 use crate::session::{LabSession, SessionOptions};
 
-use super::ab_chat::{CHAT_OPEN, COMPOSE, chat_link, load, nonce, one_to_one_id, setup};
+use super::ab_chat::{CHAT_OPEN, COMPOSE, chat_link, load, one_to_one_id, setup};
 use super::ab_meeting::{cancel_scheduled, created_chat, created_join_link, schedule};
 use super::ab_trouter::size;
 use super::echo_call::{USER_AGENT, write_burst_tone};
@@ -58,14 +58,13 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         .map(PathBuf::from)
         .ok_or_else(|| ScenarioError::Setup("PROTO_LAB_STEPS_SOCKET names no socket".to_owned()))?;
     let mut report = ScenarioReport::new(ScenarioName::MeetingSteps);
-    let nonce = nonce();
     let who = Who {
         alias,
         me: &me,
         them: &them,
         peer_upn: &peer_upn,
     };
-    let result = steps(&who, &mut page, &mut report, &nonce, &socket, options).await;
+    let result = steps(&who, &mut page, &mut report, &socket, options).await;
     if let Err(error) = result {
         report.failures.push(error.to_string());
     }
@@ -82,14 +81,8 @@ struct Who<'a> {
     peer_upn: &'a str,
 }
 
-/// Opens the account's chat with `them` for the probe: an earlier run's unsent probe at the head of the chat's queue
-/// would hold this run's back for good, so any is forgotten first and the chat opened again.
-async fn open_chat(
-    drive: &mut super::dsl::Driver,
-    _report: &mut ScenarioReport,
-    them: &str,
-    options: RunOptions,
-) -> Result<(), ScenarioError> {
+/// Opens the account's chat with `them` and waits for its compose box.
+async fn open_chat(drive: &mut super::dsl::Driver, them: &str, options: RunOptions) -> Result<(), ScenarioError> {
     drive
         .navigate("the account opens its chat with its peer", &chat_link(them))
         .await?;
@@ -103,17 +96,17 @@ async fn steps(
     who: &Who<'_>,
     page: &mut LabSession,
     report: &mut ScenarioReport,
-    _nonce: &str,
     socket: &std::path::Path,
     options: RunOptions,
 ) -> Result<(), ScenarioError> {
     let (alias, me, them) = (who.alias, who.me, who.them);
-    let _chat = one_to_one_id(me, them)
+    // Both MRIs are required to open the account's 1:1 chat.
+    one_to_one_id(me, them)
         .ok_or_else(|| setup("lab.toml has no MRI for the account or its peer: run `proto-lab login`".to_owned()))?;
     load(alias, page, options.load_timeout).await?;
     size(page).await?;
     let mut drive = page.driver();
-    open_chat(&mut drive, report, them, options).await?;
+    open_chat(&mut drive, them, options).await?;
 
     let made = match std::env::var("PROTO_LAB_SCHEDULE") {
         Ok(title) if !title.is_empty() => {
@@ -121,7 +114,7 @@ async fn steps(
         }
         _ => None,
     };
-    // what the probe sent is behind us: `seen` starts after it
+    // `seen` starts after the initial chat and optional meeting setup
     let mut drive = page.driver();
     let served = serve(alias, page, &mut drive, report, socket, &MEETING_SERVICES).await;
     let to_cancel = made.or_else(|| std::env::var("PROTO_LAB_CANCEL").ok().filter(|chat| !chat.is_empty()));

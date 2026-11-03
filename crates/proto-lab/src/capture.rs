@@ -4,8 +4,8 @@
 //! from which an agent writes a synthetic fixture with made-up values.
 //!
 //! A run records when it is armed with a [`Capture`] ([`crate::arming::ArmedBrowser::arm_capturing`]). The arming then
-//! also installs the WebRTC hooks ([`RtcHooks`], `assets/rtc_hooks.js`) in every page and iframe target, the same way
-//! and at the same point as the WebSocket guard: through a binding of their own ([`RTC_BINDING`]) and
+//! also installs the WebRTC hooks ([`RtcHooks`], `assets/rtc_hooks.js`) in every page and iframe target
+//! through their own binding ([`RTC_BINDING`]) and
 //! `Page.addScriptToEvaluateOnNewDocument`, before the target's code runs.
 //!
 //! **The format.** `events.jsonl`, one JSON object per line, in the order recorded; every entry has `seq` (from 1),
@@ -33,7 +33,7 @@
 //!   [`TAP_TONE_HZ`], then `audio:ended`, or `audio:error`), `ts` and `data`; `context` is the execution context.
 //!
 //! A capture made [`Capture::without_request_bodies`] (`proto-lab login`'s) has no request body anywhere: no
-//! `request_body` entries, and no `postData` or `postDataEntries` in a request event or a denied request's verdict.
+//! `request_body` entries, and no `postData` or `postDataEntries` in a request event or a held-request event.
 //!
 //! The directory is made `0700` and the file `0600`.
 
@@ -324,7 +324,7 @@ impl Capture {
     }
 
     /// The same capture, recording no request body: a request's `postData` and `postDataEntries` are taken out of its
-    /// `Network.requestWillBeSent` and of a denied request's verdict, and no `request_body` is fetched. `proto-lab
+    /// `Network.requestWillBeSent` and of a held-request event, and no `request_body` is fetched. `proto-lab
     /// login` records this way: its sign-in form's posts carry the account's password.
     #[must_use]
     pub fn without_request_bodies(mut self) -> Self {

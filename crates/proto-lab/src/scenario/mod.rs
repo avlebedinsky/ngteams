@@ -41,31 +41,25 @@ use self::dsl::StepError;
 /// The scenarios `proto-lab run` knows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 pub enum ScenarioName {
-    /// Account a opens the web client under the fail-closed fence; the traffic is recorded.
+    /// Account a opens the web client and records its traffic.
     Load,
-    /// Account a sends a message in the a–b chat and b receives it, after a live enforcement test.
+    /// Account a sends a message in the a–b chat and b receives it; recorded.
     AbChat,
-    /// Accounts a and b in the a–b chat beyond a plain message (an edit, reactions, a quoted reply, a delete, b's read
-    /// and reaction), after the same enforcement test; recorded.
+    /// Accounts a and b edit, react, quote, delete and read in the a–b chat; recorded.
     AbChatFull,
-    /// Account a sends a made-up image in the a–b chat with every write to the media service denied, after the same
-    /// enforcement test; recorded.
+    /// Account a attempts an image send with its media writes held for capture; recorded.
     AbImage,
-    /// Account a sends a made-up file in the a–b chat with every write of it denied, after the same enforcement test;
-    /// recorded.
+    /// Account a attempts a file send with its upload writes held for capture; recorded.
     AbFile,
-    /// Account a creates the a–b–c group chat (once); later runs: a messages it, b and c show it, after the same
-    /// enforcement test.
+    /// Account a creates the group chat with its first message held; later runs message it and check both readers.
     AbcChat,
     /// b's push channel while a sends, edits and reacts in the a–b chat; recorded.
     AbTrouter,
-    /// As `ab-trouter`, with every `user.activity` of the client held back.
+    /// As `ab-trouter`, with every `user.activity` frame of the client held back.
     AbTrouterQuiet,
-    /// Accounts a and b, as `ab-trouter`: every quick reaction, typing and its indicator, a message with line breaks
-    /// and a link, and a mention of b in the group chat; recorded.
+    /// Quick reactions, typing, multiline messages, links and a group-chat mention; recorded.
     ChatShapes,
-    /// Accounts a and b in the a–b–c group chat: a mentions everyone, first held back by a capture hold and read, then
-    /// sent once the lab rule reads it as a message to the chat adding nobody; b shows it; recorded.
+    /// An everyone mention in the group chat: capture its held shape, then send a real message and check b's view.
     AbcEveryone,
     /// Account a places the test call to the echo service with a fake microphone playing a tone; recorded.
     EchoCall,
@@ -73,10 +67,9 @@ pub enum ScenarioName {
     AbCall,
     /// Account a calls the a–b–c group chat, as the run's step (`--call`) says; recorded.
     AbcCall,
-    /// Account a schedules a Teams meeting with b, changes its title and cancels it, after the same enforcement test;
-    /// recorded.
+    /// Account a schedules a Teams meeting with b, changes its title and cancels it, recorded.
     AbMeeting,
-    /// Account a goes into a meeting nobody started, from its pre-join, after the same enforcement test; what follows
+    /// Account a goes into a meeting nobody started, from its pre-join, what follows
     /// the pre-join's subscription held back; recorded.
     AbMeetingJoin,
     /// Account a searches from the title bar: the suggestions, the results and their tabs; recorded.
@@ -85,10 +78,10 @@ pub enum ScenarioName {
     /// could make a channel held back; recorded.
     ChannelCreate,
     /// One account's page driven step by step over a socket (`PROTO_LAB_STEPS_SOCKET`), to look at its team management:
-    /// every write on a team held back, or with `PROTO_LAB_TEAM_WRITES=1` only the lab rule's; recorded.
+    /// team writes held back unless `PROTO_LAB_TEAM_WRITES=1` enables sending; recorded.
     TeamManage,
     /// One account's page in a meeting, driven step by step over a socket (`PROTO_LAB_STEPS_SOCKET`), after the
-    /// enforcement test; every write judged by the lab rule; recorded.
+    /// capture setup; recorded.
     MeetingSteps,
     /// Account a's availability reported by the `user.activity` frame alone (the presence endpoint denied); recorded.
     OwnPresenceActivity,
@@ -167,7 +160,7 @@ pub struct ScenarioReport {
     pub accounts: Vec<AccountRun>,
     /// Lines for the operator: what happened, step by step.
     pub notes: Vec<String>,
-    /// Why the run failed (its goal not reached, a breach, an unexpected deny), if it did.
+    /// Why the run failed (its goal not reached or capture setup failed), if it did.
     pub failures: Vec<String>,
 }
 

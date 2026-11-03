@@ -40,7 +40,8 @@ use serde::Deserialize;
 
 mod paths;
 
-use paths::{PERSONAL_DIR, is_group_chat_id, overlapping};
+use crate::protocol::is_group_chat_id;
+use paths::{PERSONAL_DIR, overlapping};
 
 /// The number of lab accounts, fixed by the lab's design.
 pub const ACCOUNT_COUNT: usize = 3;

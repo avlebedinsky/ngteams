@@ -92,7 +92,7 @@ pub fn is_group_chat_id(id: &str) -> bool {
 #[must_use]
 pub fn log_url(url: &str) -> String {
     if url.starts_with(['?', '#']) {
-        // nothing before the query or fragment: no URL to name (the browser fence's unknown socket, `?`)
+        // nothing before the query or fragment: no URL to name (an old capture's unknown socket, `?`)
         return String::new();
     }
     if url.is_empty() || authority_form(url) {

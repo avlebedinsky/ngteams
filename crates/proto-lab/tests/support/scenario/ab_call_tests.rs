@@ -551,7 +551,7 @@ fn a_callee_with_its_invitation_still_requires_an_allowed_attach() {
         dir.path(),
         &mut report,
     );
-    assert!(report.failures[0].contains("let no attach"));
+    assert!(report.failures[0].contains("sent no attach"));
     std::fs::write(
         &file,
         format!(
@@ -928,7 +928,7 @@ async fn absent_audio_video_and_keepalive_proof_fail_each_pages_result() {
         report
             .failures
             .iter()
-            .all(|failure| failure.contains("let no keep-alive"))
+            .all(|failure| failure.contains("sent no keep-alive"))
     );
 }
 
@@ -1047,7 +1047,7 @@ async fn a_call_ending_during_a_hold_fails_the_hold_and_requires_keepalive_proof
     keep_alive(&mut session, &mut [], &mut report, pauses).await;
     assert_eq!(report.failures.len(), 2);
     assert!(report.failures[0].contains("call ended before it was held"));
-    assert!(report.failures[1].contains("let no keep-alive"));
+    assert!(report.failures[1].contains("sent no keep-alive"));
     assert_eq!(page.commands().len(), 1);
 }
 

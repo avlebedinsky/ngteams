@@ -108,7 +108,7 @@ pub struct AudienceOutcome {
 /// What a sign-in got. Holds no token.
 #[derive(Debug)]
 pub struct AuthReport {
-    /// What the browser did while the browser ran.
+    /// The browser session and capture setup status.
     pub browser: SessionReport,
     /// The code exchange's access token for `api.spaces.skype.com`.
     pub signed_in: Option<TokenSummary>,
@@ -140,7 +140,7 @@ impl From<&Skypetoken> for SkypetokenSummary {
 /// skypetoken in `store`.
 ///
 /// # Errors
-/// [`AuthError`] when no token came of it: the browser couldn't run under the browser or capture setup failed, Entra
+/// [`AuthError`] when no token came of it: the browser could not launch or capture setup failed, Entra
 /// didn't redirect, the redirect isn't this request's or carries Entra's refusal, or the code exchange or the first
 /// refresh failed. A refused audience or skypetoken is in the report instead.
 pub async fn authorize<S: SecretStore>(
@@ -246,9 +246,9 @@ async fn skypetoken_with<S: SecretStore>(
     Ok(SkypetokenSummary::from(&skypetoken))
 }
 
-/// Opens the authorize URL in `alias`'s profile under the armed browser and waits for the redirect the browser catches,
-/// the two together bounded by `timeout` ([`within`]). The browser is closed whatever happened, and a breach outranks
-/// any other outcome. The browser report comes back with the redirect only; on an error the report adds nothing to it.
+/// Opens the authorize URL in `alias`'s browser profile and waits for the redirect the browser catches,
+/// the two together bounded by `timeout` ([`within`]). The browser is closed whatever happened; a capture setup failure
+/// is reported even if a redirect arrived. The browser report comes back with the redirect only; on an error the report adds nothing to it.
 async fn redirect_through_profile(
     paths: &LabPaths,
     alias: Alias,

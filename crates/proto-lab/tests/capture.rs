@@ -1,6 +1,6 @@
 //! The capture recorder: where captures go and how entries are written (offline), the WebRTC hooks' place in the
-//! arming, and, with Chrome installed, a recorded run under the armed fence on local pages and a local echo server (its
-//! `Network` events, response bodies, frames and the fence's verdicts), and the WebRTC hooks on a loopback call between
+//! setup, and, with Chrome installed, a recorded run on local pages and a local echo server (its
+//! `Network` events, response bodies, frames and capture holds), and the WebRTC hooks on a loopback call between
 //! two `RTCPeerConnection`s in one page, their audio tap reading the tones such a call receives.
 //!
 //! The Chrome tests run headless on throwaway user-data-dirs against local servers; see `common` for how Chrome is
@@ -17,7 +17,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures_util::{SinkExt as _, StreamExt as _};
 use page::evaluate;
-use proto_lab::arming::{ArmOptions, ArmedBrowser, ArmedTarget, Step, TargetKind};
+use proto_lab::arming::{ArmedBrowser, ArmedTarget, Step, TargetKind};
 use proto_lab::browser::{Browser, LaunchOptions, Media};
 use proto_lab::capture::{
     Capture, CaptureError, EVENTS_FILE, RTC_BINDING, Recorder, RtcHooks, TAP_INTERVAL, TAP_TONE_HZ, TAP_WINDOW,
@@ -134,6 +134,8 @@ fn pages_and_iframes_get_the_hooks_before_they_run() {
     for kind in [TargetKind::Page, TargetKind::Iframe] {
         let steps = kind.steps();
         let position = |wanted| steps.iter().position(|step| *step == wanted).unwrap();
+        assert_eq!(position(Step::BypassServiceWorker), position(Step::Network) + 1);
+        assert!(position(Step::BypassServiceWorker) < position(Step::Resume));
         assert!(position(Step::CaptureBinding) < position(Step::CaptureHooks));
         assert!(position(Step::CaptureHooks) < position(Step::Resume));
         assert!(
@@ -287,8 +289,7 @@ async fn start_run(pages: &MockServer, echo: Option<&str>, recording: Recording)
     } else {
         capture.without_request_bodies()
     };
-    let options = ArmOptions::default();
-    let armed = ArmedBrowser::arm_capturing(browser, http, &options, capture).await?;
+    let armed = ArmedBrowser::arm_capturing(browser, http, capture).await?;
     let page = armed.open_page(STEP).await?;
     if let Some(origin) = echo {
         armed
@@ -348,7 +349,7 @@ fn has_body(entries: &[Value], path: &str) -> bool {
 }
 
 #[tokio::test]
-async fn a_recorded_run_holds_the_network_the_frames_the_bodies_and_every_verdict() {
+async fn a_recorded_run_keeps_network_frames_bodies_and_selective_holds() {
     let pages = serve_pages().await;
     let (echo, received) = echo_server().await.unwrap();
     with_run(
@@ -364,7 +365,7 @@ async fn a_recorded_run_holds_the_network_the_frames_the_bodies_and_every_verdic
             assert_eq!(results["get"], "lab");
             assert_eq!(
                 results["post"], "error TypeError",
-                "the page sees the deny as a network error"
+                "the page sees the hold as a network error"
             );
             assert_eq!(results["echo"], json!(["allow:1", "allow:2"]));
             let file = run.recorder.events_file();
@@ -384,12 +385,12 @@ async fn a_recorded_run_holds_the_network_the_frames_the_bodies_and_every_verdic
     let posted = pages.received_requests().await.unwrap_or_default();
     assert!(
         posted.iter().all(|request| request.method.as_str() == "GET"),
-        "a denied POST got out"
+        "a held POST got out"
     );
 }
 
 /// Posts from the page: a string and a `Blob` to `/own`, which reaches nobody (Chrome leaves a `Blob` out of its
-/// request event, so the capture would fetch it), and a short one to `/sink`, which the fence denies.
+/// request event, so the capture would fetch it), and a short one to `/sink`, which the capture holds.
 const POSTS: &str = r"(async () => {
   const post = (path, body) => fetch(path, { method: 'POST', body }).then((r) => r.status, (e) => 'error ' + e.name);
   return {
@@ -774,4 +775,42 @@ async fn a_call_scenario_s_fake_microphone_sends_its_tone_file() {
     })
     .await
     .unwrap();
+}
+
+#[tokio::test]
+async fn page_fetches_bypass_an_active_service_worker_and_keep_their_network_ids() {
+    let pages = serve_pages().await;
+    let worker = r"self.addEventListener('install', () => self.skipWaiting());
+self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
+self.addEventListener('fetch', (event) => {
+  if (new URL(event.request.url).pathname.endsWith('/data.json')) {
+    event.respondWith(new Response('intercepted by worker'));
+  }
+});";
+    Mock::given(method("GET"))
+        .and(path("/pages/sw.js"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(worker, "text/javascript"))
+        .mount(&pages)
+        .await;
+    with_run(&pages, None, Recording::with_bodies(Duration::from_secs(1)), async |run| {
+        let cdp = run.armed.cdp();
+        navigate(cdp, &run.page, &format!("{}/pages/blank.html", pages.uri())).await?;
+        let controlled = r"(async () => {
+            await navigator.serviceWorker.register('/pages/sw.js');
+            await navigator.serviceWorker.ready;
+            if (!navigator.serviceWorker.controller) {
+                await new Promise((resolve) => navigator.serviceWorker.addEventListener('controllerchange', resolve, { once: true }));
+            }
+            return !!navigator.serviceWorker.controller;
+        })()";
+        assert_eq!(tokio::time::timeout(STEP, evaluate(cdp, &run.page.session, controlled)).await??, true);
+        assert_eq!(evaluate(cdp, &run.page.session, "fetch('/pages/data.json').then(r => r.json()).then(r => r.hello)").await?, "lab");
+        let entries = entries_until(&run.recorder.events_file(), |entries| has_body(entries, "/pages/data.json")).await?;
+        let id = request_id(&entries, "/pages/data.json").ok_or("page fetch has no Network id")?;
+        assert!(cdp_events(&entries, "Network.responseReceived").iter().any(|entry| entry["params"]["requestId"] == id && entry["params"]["response"]["fromServiceWorker"] == false));
+        // The same active worker intercepts this request when bypass is disabled.
+        cdp.call(Some(&run.page.session), "Network.setBypassServiceWorker", json!({"bypass":false})).await?;
+        assert_eq!(evaluate(cdp, &run.page.session, "fetch('/pages/data.json').then(r => r.text())").await?, "intercepted by worker");
+        Ok(())
+    }).await.unwrap();
 }

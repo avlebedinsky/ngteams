@@ -144,8 +144,8 @@ async fn messaging_enforces_its_probe_before_both_other_accounts_read_the_servic
         .await
         .unwrap()
         .unwrap();
-    assert!(report.notes.contains(&"b shows a's message and not the probe".into()));
-    assert!(report.notes.contains(&"c shows a's message and not the probe".into()));
+    assert!(report.notes.contains(&"b shows a's message".into()));
+    assert!(report.notes.contains(&"c shows a's message".into()));
 
     assert!(report.failures.is_empty());
     assert!(
@@ -235,7 +235,7 @@ async fn messaging_cleanup_runs_after_success_or_a_reader_failure_and_judges_eve
                 .count(),
             3
         );
-        assert!(report.notes.contains(&"b shows a's message and not the probe".into()));
+        assert!(report.notes.contains(&"b shows a's message".into()));
         assert!(peers.iter().all(|peer| {
             peer.commands()
                 .iter()

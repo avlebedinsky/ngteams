@@ -20,8 +20,8 @@ use crate::config::{Alias, LabPaths};
 /// `--password-store=basic` (Playwright's default), and that keeps Chrome away from the user's keyring.
 ///
 /// The Reporting API and Network Error Logging are off: the network service uploads their reports (CSP `report-to`,
-/// deprecations, interventions, NEL) itself, and those POSTs never pause in `Fetch`, so the fence can't see them
-/// (checked on Chrome 155: an armed browser delivered a CSP report to a local server with no deny). This is the only
+/// deprecations, interventions, NEL) itself, and those POSTs never pause in `Fetch`, so capture holds cannot stop them
+/// (checked on Chrome 155 with a CSP report sent to a local server). This is the only
 /// `--disable-features`; Chrome keeps just the last one, so another must be merged into it.
 ///
 /// Nothing a lab browser does is played aloud or reaches the desktop's audio server: its output is muted
@@ -88,7 +88,7 @@ impl LaunchOptions {
         }
     }
 
-    /// The persistent profile of one lab account. It is signed in to Microsoft: open it only under the armed fence.
+    /// The persistent profile of one lab account. It is signed in to Microsoft: open it with capture setup installed before navigation.
     #[must_use]
     pub fn for_profile(paths: &LabPaths, alias: Alias) -> Self {
         Self::new(paths.profile_dir(alias))

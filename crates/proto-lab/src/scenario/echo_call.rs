@@ -10,7 +10,7 @@ use serde_json::Value;
 
 use crate::browser::Media;
 use crate::capture::{EVENTS_FILE, TAP_TONE_HZ};
-use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
+use crate::config::{Alias, LabPaths};
 use crate::session::{LabSession, SessionOptions};
 
 use super::ab_chat::{load, save_screenshot};
@@ -19,9 +19,6 @@ use super::{RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
 /// The account that places the call.
 pub const ACCOUNT: Alias = Alias::A;
-
-/// The name of the echo service in `lab.toml`'s `[[service_participants]]`.
-pub const ECHO_SERVICE: &str = "echo";
 
 /// The Calls app's button in the app bar (its `data-tid` is the Calls app's id).
 pub const CALLS_APP: Selector<'static> = Selector::Tid("20c3440d-c67e-4420-9f80-0e50c39693df");
@@ -147,16 +144,6 @@ pub fn burst_tone_wav(frequency: u32, seconds: u32, rate: u32, on_ms: u32, off_m
         *frame = scaled.to_le_bytes();
     }
     wav
-}
-
-/// The echo service's MRI in `config`, if `lab.toml` records one.
-#[must_use]
-pub fn echo_mri(config: &LabConfig) -> Option<&str> {
-    config
-        .service_participants()
-        .iter()
-        .find(|service| service.name == ECHO_SERVICE)
-        .and_then(|service| service.mri.as_deref())
 }
 
 /// Writes the tone ([`tone_wav`]) as `media/tone-<Hz>.wav` (mode `0600`, its dir `0700`) under the lab's data dir, for
@@ -339,22 +326,22 @@ impl AudioTally {
     }
 }
 
-/// The call's follow-ups in a capture's `events.jsonl` text: the capture's `http` verdicts on writes to the calling
+/// The call's follow-ups in a capture's `events.jsonl` text: HTTP requests to the calling
 /// services' links (`…/api/v2/ep/<service host>/…`, by the link's last segment: `add`, `acknowledge`, `leave`, …; a
 /// read such as the broker's long poll isn't one), one per request, and the Trouter delivery responses (`3:::`) it let
 /// through.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct CallFollowUps {
-    /// The requests the fence allowed, by operation.
+    /// The requests sent, by operation.
     pub allowed: std::collections::BTreeMap<String, usize>,
-    /// The requests the fence denied, by operation.
+    /// The requests held for capture, by operation.
     pub denied: std::collections::BTreeMap<String, usize>,
     /// The delivery responses the capture recorded through.
     pub delivery_responses: usize,
 }
 
 impl CallFollowUps {
-    /// Reads the verdicts of a capture's `events.jsonl` text. Lines that aren't JSON or aren't verdicts are skipped.
+    /// Reads HTTP requests from a capture's `events.jsonl` text, including historical verdict records.
     #[must_use]
     pub fn from_events(text: &str) -> Self {
         let mut follow_ups = Self {
@@ -388,7 +375,7 @@ impl CallFollowUps {
         self.delivery_responses > 0 || self.allowed.contains_key("acknowledge")
     }
 
-    /// The operations of [`REQUIRED_FOLLOW_UPS`] the fence allowed none of.
+    /// The operations of [`REQUIRED_FOLLOW_UPS`] the capture recorded none of.
     #[must_use]
     pub fn missing(&self) -> Vec<&'static str> {
         REQUIRED_FOLLOW_UPS
@@ -410,7 +397,7 @@ fn call_operation(url: &str) -> Option<&str> {
     (!operation.is_empty()).then_some(operation)
 }
 
-/// How many call starts the fence allowed and denied in a capture's `events.jsonl` text: its `http` verdicts on `POST`
+/// How many call starts were sent and held in a capture's `events.jsonl` text: requests on `POST`
 /// [`CALL_START_URL`], one per request (a request pauses on its target's session and the browser's, and both are
 /// recorded; they share the `Network` id).
 #[must_use]
@@ -431,9 +418,8 @@ pub fn call_starts(text: &str) -> (usize, usize) {
 /// Runs `echo-call` (see the module docs).
 ///
 /// # Errors
-/// When the run can't start: no lab config, no Chrome, a browser whose capture setup fails, no tone file.
+/// When the run cannot start: no Chrome, capture setup fails, or the tone file cannot be written.
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
-    let _config = LabConfig::load(&LabLocations::from_env()?)?;
     let report = ScenarioReport::new(ScenarioName::EchoCall);
     let tone =
         write_burst_tone(paths).map_err(|error| ScenarioError::Setup(format!("can't write the tone: {error}")))?;
@@ -688,9 +674,9 @@ fn judge_capture(capture: &Path, report: &mut ScenarioReport) {
         }
     };
     let (allowed, denied) = call_starts(&text);
-    report.notes.push(format!(
-        "call start: {allowed} allowed and {denied} denied in the capture"
-    ));
+    report
+        .notes
+        .push(format!("call start: {allowed} sent and {denied} held in the capture"));
     if allowed == 0 {
         report.failures.push("the capture contains no call start".to_owned());
     }
@@ -702,14 +688,14 @@ fn judge_capture(capture: &Path, report: &mut ScenarioReport) {
 /// ([`CallFollowUps::acknowledged`]), must have passed.
 fn judge_follow_ups(follow_ups: &CallFollowUps, report: &mut ScenarioReport) {
     report.notes.push(format!(
-        "follow-ups: allowed {:?}, denied {:?}, {} delivery response(s) let through",
+        "follow-ups: sent {:?}, held {:?}, {} delivery response(s) sent",
         follow_ups.allowed, follow_ups.denied, follow_ups.delivery_responses
     ));
     let missing = follow_ups.missing();
     if !missing.is_empty() {
         report
             .failures
-            .push(format!("the fence allowed none of the call's {missing:?}"));
+            .push(format!("the capture recorded none of the call's {missing:?}"));
     }
     if !follow_ups.acknowledged() {
         report

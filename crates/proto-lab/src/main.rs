@@ -8,7 +8,6 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
-use proto_lab::arming::DECISION_GRACE;
 use proto_lab::browser::Display;
 use proto_lab::bundles::import::{self, Imported};
 use proto_lab::bundles::index::{self, Kind};
@@ -47,7 +46,7 @@ enum Command {
         #[command(subcommand)]
         command: BundlesCommand,
     },
-    /// Sign a lab account into the Teams web client in its profile, headless, under the armed browser, and record its MRI
+    /// Sign a lab account into the Teams web client in its profile, headless, in its recorded browser, and record its MRI
     /// in lab.toml. The run is captured under captures/login/, without request bodies.
     Login {
         /// The lab account: a, b or c.
@@ -56,7 +55,7 @@ enum Command {
         #[arg(long, default_value_t = 300)]
         timeout: u64,
     },
-    /// Sign a lab account in natively: authorize in its profile under the armed browser (no human), redeem the code,
+    /// Sign a lab account in natively: authorize in its profile in its recorded browser (no human), redeem the code,
     /// refresh, and exchange for a skypetoken. Prints only aud, exp, scopes, tenant, the skypetoken's expiry and region.
     Auth {
         /// The lab account: a, b or c.
@@ -108,8 +107,7 @@ enum Command {
         /// Its MRI.
         mri: String,
     },
-    /// Run a scenario in the lab profiles under the armed browser; exits non-zero when its goal isn't reached, the browser
-    /// was breached, or the browser denied anything the scenario doesn't expect.
+    /// Run a recorded scenario in the lab profiles; exits non-zero when its goal is not reached or capture setup fails.
     Run {
         /// The scenario.
         #[arg(value_enum)]
@@ -138,7 +136,7 @@ enum ChromeCommand {
 enum ProbeCommand {
     /// Whether the chat service takes the account's own `ic3` token: refreshes it from the stored refresh token, reads
     /// one page of the conversation list in each header form (with and without `X-MS-Migration` and `BehaviorOverride`)
-    /// and the 1:1 chat's thread the way the browser reads it. GETs only.
+    /// and the 1:1 chat's thread with a plain GET.
     Chat {
         /// The lab account: a, b or c.
         alias: Alias,
@@ -152,7 +150,7 @@ enum ProbeCommand {
     },
     /// How the chat service answers the member reads of the a-b-c group chat (its id from the lab's chats.toml) as
     /// the account sees them: the thread, the batch read, the member list in one page and paged, the filtered view and
-    /// the account's own view, then the browser's own read. Prints statuses, key names and counts only. GETs only.
+    /// the account's own view. Prints statuses, key names and counts only. GETs only.
     Thread {
         /// The lab account: a, b or c.
         alias: Alias,
@@ -230,7 +228,7 @@ fn main() -> ExitCode {
     // a signal drops the command, and with it every lab browser it owns, before the process exits
     match runtime.block_on(until_stopped(run(cli))) {
         Ok(Ok(())) => ExitCode::SUCCESS,
-        Err(stopped) => ExitCode::from(after_stop(runtime, stopped, DECISION_GRACE)),
+        Err(stopped) => ExitCode::from(after_stop(runtime, stopped)),
         Ok(Err(error)) => {
             eprintln!("proto-lab: {error}");
             ExitCode::FAILURE

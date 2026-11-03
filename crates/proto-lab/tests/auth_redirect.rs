@@ -10,7 +10,7 @@ mod common;
 use std::path::Path;
 use std::time::Duration;
 
-use proto_lab::arming::{ArmOptions, ArmedBrowser, ArmedTarget};
+use proto_lab::arming::{ArmedBrowser, ArmedTarget};
 use proto_lab::browser::{Browser, LaunchOptions};
 use proto_lab::capture_hold::CaptureHold;
 use proto_lab::redirect_catch::{CatchError, RedirectCatch};
@@ -203,8 +203,7 @@ async fn start(
     let (redirect_catch, caught) = RedirectCatch::new(&authorize, redirect_uri)?;
     let http = fence(&lab, catch.then_some(redirect_catch));
 
-    let options = ArmOptions::default();
-    let armed = ArmedBrowser::arm(browser, http, &options).await?;
+    let armed = ArmedBrowser::arm(browser, http).await?;
     let page = armed.open_page(STEP).await?;
     let run = Run {
         armed,

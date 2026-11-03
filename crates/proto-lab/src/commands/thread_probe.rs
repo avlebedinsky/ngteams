@@ -69,7 +69,7 @@ impl ThreadReadKind {
     }
 
     /// The read's URL under `base` for the chat `id` (one encoded path segment).
-    fn url(self, base: &str, id: &str) -> Option<Url> {
+    pub(crate) fn url(self, base: &str, id: &str) -> Option<Url> {
         let mut url = Url::parse(&format!("{base}/")).ok()?;
         let segments: Vec<&str> = match self {
             Self::Thread => vec!["v1", "threads", id],
@@ -216,7 +216,7 @@ impl fmt::Debug for ThreadProbe {
     }
 }
 
-/// Probes the a–b–c chat's member reads as `alias` (see the module docs), the browser's own read through `source`.
+/// Probes the a–b–c chat's member reads as `alias` with plain GETs (see the module docs).
 ///
 /// # Errors
 /// [`ProbeError`] when nothing could be read: no a–b–c chat in `chats.toml` ([`ProbeError::NoGroupChat`]), no usable

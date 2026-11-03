@@ -133,3 +133,62 @@ async fn a_refused_hold_surfaces_the_cdp_error() {
     );
     assert!(capture.held_requests().is_empty());
 }
+
+#[tokio::test]
+async fn queued_current_and_legacy_capture_messages_stay_held_across_sessions_and_clears() {
+    let mut peer = Page::new(|_| Ok(json!({}))).await;
+    let dir = tempfile::tempdir().unwrap();
+    let session = peer.session(dir.path(), false);
+    for _run in 0..2 {
+        let capture = CaptureHold::new().with_pending_messages();
+        for marker in [HELD_MARKER, LEGACY_HELD_MARKER] {
+            for method in ["POST", "PUT"] {
+                let queued = event(
+                    method,
+                    "https://synthetic.example/messages",
+                    Some(&format!("{marker}old-run")),
+                );
+                assert_eq!(capture.handle(session.cdp(), &queued).await.unwrap(), Handled::Held);
+                capture.clear();
+                assert_eq!(capture.handle(session.cdp(), &queued).await.unwrap(), Handled::Held);
+            }
+        }
+        for (method, body) in [
+            ("POST", Some("ordinary message")),
+            ("PUT", None),
+            ("GET", Some(HELD_MARKER)),
+            ("DELETE", Some(LEGACY_HELD_MARKER)),
+        ] {
+            assert_eq!(
+                capture
+                    .handle(
+                        session.cdp(),
+                        &event(method, "https://synthetic.example/messages", body)
+                    )
+                    .await
+                    .unwrap(),
+                Handled::Continued
+            );
+        }
+        capture.hold(
+            Hold::new("POST", "/messages")
+                .unwrap()
+                .with_body_containing(HELD_MARKER)
+                .labelled("this run"),
+        );
+        assert_eq!(
+            capture
+                .handle(
+                    session.cdp(),
+                    &event("POST", "https://synthetic.example/messages", Some(HELD_MARKER))
+                )
+                .await
+                .unwrap(),
+            Handled::Held
+        );
+        assert_eq!(
+            capture.held_requests().last().unwrap().label.as_deref(),
+            Some("this run")
+        );
+    }
+}
