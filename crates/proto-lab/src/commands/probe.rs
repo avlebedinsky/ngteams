@@ -1,41 +1,15 @@
-//! `proto-lab probe chat <alias> [--with <alias>] [--save <name>]`: does the chat service take **our** `ic3` token
-//! (the native client's, without CAE), and in which header form? Read-only (M1 Task 3).
-//!
-//! 1. The account's `ic3` access token is refreshed from its stored refresh token ([`TokenClient::refresh`], audience
-//!    [`IC3_RESOURCE`]); nothing else is asked of Entra.
-//! 2. The chat base is the account's `chatServiceAfd` GTM (else `chatService`), trimmed, from the region record
-//!    `proto-lab auth` saved ([`region_file`]); it must be a base the fence's write mapping recognizes as the chat
-//!    service ([`teams_fence::chat_service_path`]), checked before any request is sent.
-//! 3. Only `GET`s go to that base: the chat service's own conversation list, one page as the web client asks for it
-//!    ([`CONVERSATIONS_PATH`] with [`CONVERSATIONS_QUERY`], from the bundle's `myconversations` request), once in each
-//!    [`HeaderForm`] (with and without `X-MS-Migration: True`, with and without `BehaviorOverride: redirectAs404`);
-//!    then the fence's own 1:1 thread read of the account's chat with `--with` (a with b, b and c with a by default),
-//!    through [`LiveMembershipSource`] with a [`ChatCredential::bearer`] made of that token and base.
-//! 4. The report ([`ChatProbe::lines`]) shows statuses, header names, a challenge's scheme and parameter names (and its
-//!    `error` value), a `Location`'s host, the thread read's verdict, and the token's claims (aud, exp, scopes,
-//!    tenant): never a token, a header value otherwise, or a body. Redirects aren't followed.
-//!
-//! `--save <name>` hands the conversation-list answers ([`ChatProbe::reference_events`]) to
-//! [`export::export_events`](crate::commands::export::export_events): sanitized as one capture, written as a local
-//! reference copy under the lab's `reference/` dir, refused inside any git work tree, as `export` does. The name and
-//! the destination are checked ([`export::check_destination`](crate::commands::export::check_destination)) before
-//! any request goes out.
-//!
-//! A test reaches a local mock instead of the chat service only through [`Origin::Mock`], which a build without
-//! `teams-fence`'s `test-support` feature refuses (and the `proto-lab` binary refuses to run in such a build).
+//! Probes the native chat token with plain GETs: the conversation list in each header form and the selected 1:1 thread. Reports show only status/header names, member counts and token claims.
 
 use std::fmt::{self, Write as _};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::protocol::chat_service_path;
 use reqwest::header::{HeaderMap, LOCATION, WWW_AUTHENTICATE};
 use serde_json::{Map, Value, json};
 use teams_auth::authz::{Region, RegionFileError};
 use teams_auth::claims::TokenSummary;
 use teams_auth::secrets::SecretStore;
 use teams_auth::token::{Scope, TokenClient, TokenError};
-use teams_fence::{
-    ChatCredential, LiveMembershipSource, Membership, MembershipSource as _, Scope as FenceScope, chat_service_path,
-};
 use url::Url;
 
 use crate::commands::auth::{region_file, summary_line};
@@ -121,7 +95,7 @@ pub enum Origin {
     /// The service itself (the chat service at the base the GTMs give, or Graph for `probe profile`), over `https`.
     ChatService,
     /// A local mock (`http://127.0.0.1:<port>`) in place of the base's origin, with the base's path. Tests only:
-    /// refused unless the build has `teams-fence`'s `test-support` feature.
+    /// refused unless the build has `proto-lab`'s `test-support` feature.
     Mock(String),
 }
 
@@ -131,7 +105,7 @@ pub struct ProbeRequest<'a> {
     pub config: &'a LabConfig,
     /// The account whose token is probed.
     pub alias: Alias,
-    /// The other account of the 1:1 chat whose thread the fence reads.
+    /// The other account of the 1:1 chat whose thread the browser reads.
     pub partner: Alias,
     pub origin: Origin,
 }
@@ -155,12 +129,10 @@ pub enum ProbeError {
     NoCsaBase,
     #[error("the chatSvcAggAfd GTM isn't a CSA base (https://<AFD host>/api/csa/<region>): {0:?}")]
     NotACsaBase(String),
-    #[error("a mock origin is for tests only (a build with teams-fence's test-support feature)")]
+    #[error("a mock origin is for tests only (a build with proto-lab's test-support feature)")]
     MockOrigin,
     #[error("the ic3 token: {0}")]
     Token(#[from] TokenError),
-    #[error("the refreshed ic3 token isn't token-shaped, so it can't be a chat service credential")]
-    BadToken,
     #[error("can't build the HTTPS client: {0}")]
     Client(#[source] reqwest::Error),
 }
@@ -351,8 +323,8 @@ pub struct ChatProbe {
     pub base: String,
     /// One read per [`HeaderForm::ALL`], in that order.
     pub conversations: Vec<ListRead>,
-    /// The fence's live read of the 1:1 chat's thread.
-    pub thread: Membership,
+    /// The browser's live read of the 1:1 chat's thread.
+    pub thread: Result<Answer, ReadFailure>,
 }
 
 impl fmt::Debug for ChatProbe {
@@ -363,7 +335,7 @@ impl fmt::Debug for ChatProbe {
             .field("token", &self.token)
             .field("base", &self.base)
             .field("conversations", &self.conversations)
-            .field("thread", &membership_line(&self.thread))
+            .field("thread", &member_read_line(&self.thread))
             .finish()
     }
 }
@@ -379,7 +351,6 @@ pub async fn probe_chat<S: SecretStore>(
     store: &S,
     tokens: &TokenClient,
     request: ProbeRequest<'_>,
-    source: LiveMembershipSource,
 ) -> Result<ChatProbe, ProbeError> {
     if matches!(request.origin, Origin::Mock(_)) && !crate::test_support_enabled() {
         return Err(ProbeError::MockOrigin);
@@ -391,7 +362,6 @@ pub async fn probe_chat<S: SecretStore>(
         .refresh(store, account, &Scope::for_resource(IC3_RESOURCE))
         .await?;
     let token = ic3.access_token.expose();
-    let credential = ChatCredential::bearer(&base, token).ok_or(ProbeError::BadToken)?;
 
     let client = client(&request.origin)?;
     let list_url = format!("{base}/{CONVERSATIONS_PATH}?{CONVERSATIONS_QUERY}");
@@ -402,8 +372,16 @@ pub async fn probe_chat<S: SecretStore>(
         conversations.push(ListRead { form, outcome });
     }
 
-    source.set_credential(credential);
-    let thread = source.members(&FenceScope::Conversation { id: chat_id }).await;
+    let mut thread_url = Url::parse(&format!("{base}/")).map_err(|_| ProbeError::NotAChatBase(base.clone()))?;
+    thread_url
+        .path_segments_mut()
+        .map_err(|()| ProbeError::NotAChatBase(base.clone()))?
+        .pop_if_empty()
+        .extend(["v1", "threads", chat_id.as_str()]);
+    thread_url.set_query(Some("view=msnp24Equivalent"));
+    let target =
+        at_origin(thread_url.as_str(), &request.origin).ok_or_else(|| ProbeError::NotAChatBase(base.clone()))?;
+    let thread = read(&client, target, token, HeaderForm::ALL[0]).await;
     Ok(ChatProbe {
         alias: request.alias,
         partner: request.partner,
@@ -547,9 +525,9 @@ impl ChatProbe {
             ));
         }
         lines.push(format!(
-            "{alias}: GET v1/threads/<the {alias}-{} 1:1 chat> (the fence's live read, token only): {}",
+            "{alias}: GET v1/threads/<the {alias}-{} 1:1 chat> (plain GET with chat headers): {}",
             self.partner,
-            membership_line(&self.thread)
+            member_read_line(&self.thread)
         ));
         lines
     }
@@ -627,12 +605,14 @@ pub(crate) fn outcome_line(outcome: &Result<Answer, ReadFailure>) -> String {
     line
 }
 
-pub(crate) fn membership_line(membership: &Membership) -> String {
-    match membership {
-        Membership::Complete(members) => {
-            format!("complete: the {} members the chat id names", members.len())
-        }
-        Membership::Partial(reason) => format!("partial: {reason}"),
-        Membership::OrgWide => "org-wide".to_owned(),
+fn member_read_line(outcome: &Result<Answer, ReadFailure>) -> String {
+    let mut line = outcome_line(outcome);
+    if let Ok(answer) = outcome
+        && let Some(count) = serde_json::from_slice::<Value>(answer.body())
+            .ok()
+            .and_then(|body| body.get("members").and_then(Value::as_array).map(Vec::len))
+    {
+        let _ = write!(line, "; {count} member(s)");
     }
+    line
 }

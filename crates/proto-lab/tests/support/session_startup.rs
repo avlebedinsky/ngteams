@@ -74,7 +74,7 @@ async fn startup_matrix() {
     assert_clean(&report);
     let options = SessionOptions {
         capture: Some("INVALID".into()),
-        ..SessionOptions::fail_closed()
+        ..SessionOptions::default()
     };
     assert!(matches!(
         LabSession::open_with(&paths, Alias::C, options).await,
@@ -126,12 +126,11 @@ async fn session_startup_arms_only_fresh_blank_profiles_and_closes_every_owned_b
 
 async fn blank_capture(paths: &LabPaths, request_bodies: bool) {
     let options = SessionOptions {
-        live_members: true,
         capture: Some("synthetic-startup".into()),
         capture_request_bodies: request_bodies,
         media: Media::Fake { audio: None },
         user_agent: Some("synthetic-test-agent".into()),
-        ..SessionOptions::fail_closed()
+        ..SessionOptions::default()
     };
     let session = LabSession::open_with(paths, Alias::B, options).await.unwrap();
     let directory = session.capture_dir().unwrap().to_path_buf();
@@ -143,11 +142,11 @@ async fn blank_capture(paths: &LabPaths, request_bodies: bool) {
     assert!(directory.join(crate::capture::EVENTS_FILE).is_file());
 }
 
-fn assert_clean(report: &FenceReport) {
-    assert!(!report.breached(), "blank startup fence: {report:?}");
+fn assert_clean(report: &SessionReport) {
+    assert!(!report.failed(), "blank startup fence: {report:?}");
 }
 
-async fn close_after_arming(session: LabSession, paths: &LabPaths) -> (FenceReport, Option<PathBuf>) {
+async fn close_after_arming(session: LabSession, paths: &LabPaths) -> (SessionReport, Option<PathBuf>) {
     let recorder = Recorder::create(&paths.captures_dir(), "startup-diagnostic").unwrap();
     let ready = tokio::time::timeout(Duration::from_secs(25), async {
         loop {
@@ -156,7 +155,7 @@ async fn close_after_arming(session: LabSession, paths: &LabPaths) -> (FenceRepo
                 .call(None, "Target.getTargets", serde_json::json!({}))
                 .await
                 .unwrap();
-            recorder.record(serde_json::json!({"targets":targets,"undecided":session.decisions().undecided()}));
+            recorder.record(serde_json::json!({"targets":targets,"undecided":session.status().pending()}));
             let armed = session.armed.targets();
             let all_armed = targets["targetInfos"]
                 .as_array()
@@ -165,7 +164,7 @@ async fn close_after_arming(session: LabSession, paths: &LabPaths) -> (FenceRepo
                 .filter(|target| target["attached"] == true)
                 .all(|target| armed.iter().any(|known| target["targetId"] == known.target_id));
             assert_clean(&session.report());
-            if all_armed && session.decisions().undecided() == 0 {
+            if all_armed && session.status().pending() == 0 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;

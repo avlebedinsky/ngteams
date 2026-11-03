@@ -72,7 +72,7 @@ fn lab_directories_derive_from_the_data_dir() {
     assert_eq!(paths.profile_dir(Alias::C), data.join("profiles/c"));
     assert_eq!(paths.captures_dir(), data.join("captures"));
     assert_eq!(paths.bundles_dir(), data.join("bundles"));
-    assert_eq!(paths.fence_log(), data.join("fence.log"));
+    assert_eq!(paths.data_dir().join("fence.log"), data.join("fence.log"));
     assert_eq!(paths.region_file(Alias::B), data.join("auth/b.json"));
     assert_eq!(paths.store_file(Alias::A), data.join("store/a.sqlite"));
 }

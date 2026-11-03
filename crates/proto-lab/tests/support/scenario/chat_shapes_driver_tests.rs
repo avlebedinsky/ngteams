@@ -15,7 +15,7 @@ fn shapes() -> Shapes {
         mri_a: "8:orgid:synthetic-a".into(),
         mri_b: B.into(),
         texts: Texts::new("synthetic-shapes"),
-        probe: probe_text("synthetic-shapes"),
+
         options: RunOptions {
             display: Display::Headless,
             load_timeout: Duration::from_secs(1),
@@ -174,9 +174,7 @@ async fn the_complete_shapes_flow_proves_enforcement_and_continues_to_each_indep
         let mut b_session = b.session(b_dir.path(), true);
         let mut run = shapes();
         run.texts.lines[0] = "line".into();
-        for rule in abc_chat::forced_denies("synthetic-shapes") {
-            a_session.force_deny(rule);
-        }
+
         let mut report = ScenarioReport::new(ScenarioName::ChatShapes);
         let group_available = group.is_ok();
         tokio::time::timeout(
@@ -196,13 +194,8 @@ async fn the_complete_shapes_flow_proves_enforcement_and_continues_to_each_indep
         } else {
             assert!(report.failures[0].contains("no readable synthetic group"));
         }
-        assert_eq!(a_session.denials().len(), 1);
-        assert!(
-            report
-                .notes
-                .iter()
-                .any(|note| note.contains("probe post was denied by the fence and failed"))
-        );
+        assert!(a_session.held_requests().is_empty());
+
         assert!(a_session.close().await.is_err());
         assert!(b_session.close().await.is_err());
     }
@@ -224,7 +217,7 @@ async fn admitted_shape_runs_keep_partial_evidence_and_finalize_both_accounts_ev
         let group_available = group.is_ok();
         let mut scenario = shapes();
         scenario.texts.lines[0] = "line".to_owned();
-        let report = finish(sender, receiver, chat, group, "synthetic-shapes", &scenario).await;
+        let report = finish(sender, receiver, chat, group, &scenario).await;
         assert_eq!(report.accounts.len(), 2, "{report:?}");
         assert_eq!(report.accounts[0].alias, Alias::A);
         assert_eq!(report.accounts[1].alias, Alias::B);
@@ -242,12 +235,6 @@ async fn admitted_shape_runs_keep_partial_evidence_and_finalize_both_accounts_ev
         }
         if chat.is_some() {
             assert!(report.notes.iter().any(|note| note == "reactions: done"));
-            assert!(
-                report.accounts[0]
-                    .denials
-                    .iter()
-                    .any(|denial| denial.label.as_deref() == Some(super::super::ab_chat::THIS_RUN_PROBE))
-            );
         }
     }
 }
@@ -267,15 +254,7 @@ async fn a_typing_failure_is_diagnosed_but_does_not_abandon_later_shapes_or_the_
     let (receiver, _) = b.managed_session(b_dir.path(), true);
     let mut scenario = shapes();
     scenario.texts.lines[0] = "line".to_owned();
-    let report = finish(
-        sender,
-        receiver,
-        Some(CHAT),
-        Ok(CHAT.to_owned()),
-        "synthetic-shapes",
-        &scenario,
-    )
-    .await;
+    let report = finish(sender, receiver, Some(CHAT), Ok(CHAT.to_owned()), &scenario).await;
     assert_eq!(report.failures.len(), 1, "{report:?}");
     assert!(report.failures[0].contains("typing control detached"));
     for step in ["lines and a link", "reactions", "group mention"] {
@@ -316,7 +295,7 @@ async fn opening_shape_sessions_preserves_fail_closed_options_and_closes_both_wh
         Err("synthetic no group".into()),
         async |alias, options| {
             opened.push(alias);
-            assert!(options.live_members && options.capture_request_bodies);
+            assert!(options.capture_request_bodies);
             assert_eq!(options.capture.as_deref(), Some("chat-shapes"));
             assert!(matches!(options.media, Media::System));
             assert_eq!(options.display, Display::Headless);

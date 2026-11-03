@@ -1,15 +1,10 @@
-//! `proto-lab status`: whether each lab account's session still works, without signing anything in.
-//!
-//! For each account its persistent profile opens Teams, headless, under the armed fence (the lab rule, its membership
-//! source fail-closed); nothing is typed, so nothing signs in. The web client loading means `ok`; Microsoft's sign-in page
-//! standing in its place means `login needed`. A signed-in account Teams refuses (its authz exchange refused: no
-//! Teams license) is reported as such, and anything else (another host, no answer in time) as it is.
+//! Checks whether lab browser sessions load, need sign-in, or are refused by Teams; capture setup failures are reported separately.
 
 use std::fmt;
 use std::time::Duration;
 
 use crate::config::{Alias, LabPaths};
-use crate::session::{FenceReport, LabSession, SessionError, SessionState, TEAMS_URL};
+use crate::session::{LabSession, SessionError, SessionReport, SessionState, TEAMS_URL};
 
 /// One account's session.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -55,15 +50,15 @@ pub fn account_status(state: &SessionState, timeout: Duration, last_authz: Optio
     }
 }
 
-/// Opens Teams in `alias`'s profile under the fence and tells what became of the session, with what the fence did.
+/// Opens Teams in `alias`'s profile under the browser and tells what became of the session, with what the browser did.
 ///
 /// # Errors
-/// When the browser can't be run under the fence, or had to be killed on closing.
+/// When the browser can't be run under the browser, or had to be killed on closing.
 pub async fn check(
     paths: &LabPaths,
     alias: Alias,
     timeout: Duration,
-) -> Result<(AccountStatus, FenceReport), SessionError> {
+) -> Result<(AccountStatus, SessionReport), SessionError> {
     let mut session = LabSession::open(paths, alias).await?;
     let state = match session.navigate(TEAMS_URL).await {
         Ok(()) => Ok(session.settle(timeout).await),
@@ -71,6 +66,6 @@ pub async fn check(
     };
     let last_authz = session.watch().last_authz_status();
     // the browser goes down whatever happened
-    let fence = session.close().await?;
-    Ok((account_status(&state?, timeout, last_authz), fence))
+    let browser = session.close().await?;
+    Ok((account_status(&state?, timeout, last_authz), browser))
 }

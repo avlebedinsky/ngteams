@@ -5,16 +5,15 @@
 //! ids, hosts and bodies here are made up.
 
 use base64::Engine as _;
-use proto_lab::fence_http::{Denial, DenyCause, PausedRequest};
+use proto_lab::capture_hold::{HeldRequest, PausedRequest};
+use proto_lab::protocol::CALL_START_URL;
 use proto_lab::scenario::ab_call::{
-    ACCEPT_AUDIO_CSS, CALLEE_FORCED, CallStep, CalleeAction, CalleeRole, DECLINE_CSS, DECLINE_SENDS, INVITATION_EVENTS,
-    Modality, RingCheck, RingSends, RunCall, START_HELD, allowed_requests, caller_forced, calling_socket_up,
-    chat_shown, held_back, invitations, judge_step_sends, keep_alives, leaves, own_invitations, ring_check, ring_sends,
-    running_call_conflict, start_held_rule, video_frames,
+    ACCEPT_AUDIO_CSS, CallStep, CalleeAction, CalleeRole, DECLINE_CSS, DECLINE_SENDS, INVITATION_EVENTS, Modality,
+    RingCheck, RingSends, RunCall, START_HELD, calling_socket_up, chat_shown, held_back, invitations, judge_step_sends,
+    keep_alives, leaves, own_invitations, ring_check, ring_sends, running_call_conflict, sent_requests,
+    start_held_rule, video_frames,
 };
-use proto_lab::scenario::ab_chat::EARLIER_RUN_PROBE;
 use serde_json::json;
-use teams_fence::CALL_START_URL;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
@@ -23,9 +22,7 @@ fn request(method: &str, url: &str) -> PausedRequest {
         request_id: "1".to_owned(),
         method: method.to_owned(),
         url: url.to_owned(),
-        headers: Vec::new(),
         body: Some(b"{}".to_vec()),
-        body_unread: false,
         network_id: None,
     }
 }
@@ -74,20 +71,7 @@ fn a_callee_s_capture_counts_the_ring_time_sends_its_fence_let_through() {
 }
 
 #[test]
-fn each_account_expects_only_its_step_s_own_forced_denies() {
-    assert_eq!(caller_forced(CallStep::StartHeld), [EARLIER_RUN_PROBE, START_HELD]);
-    for step in [
-        CallStep::Answer,
-        CallStep::Decline,
-        CallStep::Cancel,
-        CallStep::Timeout,
-        CallStep::KeepAlive,
-        CallStep::Join,
-    ] {
-        assert_eq!(caller_forced(step), [EARLIER_RUN_PROBE], "{step:?}");
-    }
-    // nothing a callee's page sends for the call is held back: the fence judges its answer, decline or join
-    assert_eq!(CALLEE_FORCED, [EARLIER_RUN_PROBE]);
+fn each_account_expects_only_its_step_s_own_first_message_holds() {
     assert_eq!(CallStep::KeepAlive.as_str(), "keep-alive");
     assert_eq!(CallStep::KeepAlive.callee_action(), CallStep::Answer.callee_action());
     assert_eq!(CallStep::default(), CallStep::Answer);
@@ -127,10 +111,10 @@ fn a_callee_clicks_its_step_s_button() {
 
 #[test]
 fn held_back_requests_count_once_per_network_request_under_their_label() {
-    let forced = |label: &str, id: Option<&str>| Denial {
+    let forced = |label: &str, id: Option<&str>| HeldRequest {
         label: Some(label.to_owned()),
         network_id: id.map(str::to_owned),
-        ..Denial::new("POST", CALL_START_URL, DenyCause::Forced)
+        ..HeldRequest::new("POST", CALL_START_URL)
     };
     let denials = [
         // a request pauses on its target's session and the browser's: one request
@@ -138,11 +122,11 @@ fn held_back_requests_count_once_per_network_request_under_their_label() {
         forced(START_HELD, Some("1.1")),
         forced(START_HELD, Some("1.2")),
         forced(START_HELD, None),
-        forced(EARLIER_RUN_PROBE, Some("1.3")),
-        Denial::new("POST", CALL_START_URL, DenyCause::Unclassified),
+        forced("another capture", Some("1.3")),
+        HeldRequest::new("POST", CALL_START_URL),
     ];
     assert_eq!(held_back(&denials, START_HELD), 3);
-    assert_eq!(held_back(&denials, EARLIER_RUN_PROBE), 1);
+    assert_eq!(held_back(&denials, "another capture"), 1);
     assert_eq!(held_back(&denials, "another label"), 0);
 }
 
@@ -636,10 +620,10 @@ fn a_decline_passes_only_with_its_rejection_let_through() {
         verdict("DELETE", REJECT, "1.4", "allow"),
     ]
     .join("\n");
-    assert_eq!(allowed_requests(&sent, "DELETE", DECLINE_SENDS), 1);
+    assert_eq!(sent_requests(&sent, "DELETE", DECLINE_SENDS), 1);
     assert_eq!(
         judge_step_sends(CalleeRole::Declines, &sent),
-        Ok(Some("the fence let 1 rejection(s) through".to_owned()))
+        Ok(Some("the capture recorded 1 rejection(s) through".to_owned()))
     );
     // nobody else's sends are judged here
     assert_eq!(judge_step_sends(CalleeRole::Other, ""), Ok(None));
@@ -684,7 +668,9 @@ fn a_join_passes_only_once_its_fence_let_it_through() {
     .join("\n");
     assert_eq!(
         judge_step_sends(CalleeRole::Joins, &joined),
-        Ok(Some("the fence let 1 join(s) of the running call through".to_owned()))
+        Ok(Some(
+            "the capture recorded 1 join(s) of the running call through".to_owned()
+        ))
     );
 }
 

@@ -354,11 +354,7 @@ async fn an_admitted_meeting_session_always_records_its_capture_and_close_failur
         let capture = report.accounts[0].capture.as_ref().unwrap();
         let events = std::fs::read_to_string(capture.join(crate::capture::EVENTS_FILE)).unwrap();
         assert!(events.contains("/calendars/default/events"));
-        assert_eq!(
-            report.accounts[0].denials.len(),
-            1,
-            "the probe remains explicitly denied: {report:?}"
-        );
+        assert!(report.accounts[0].held_requests.is_empty());
         assert!(report.notes.iter().any(|note| note.starts_with("a: calendar writes:")));
         if status == 201 {
             assert_eq!(
@@ -396,15 +392,15 @@ async fn meeting_cleanup_judges_a_mapped_calendar_deny_even_when_identity_failur
     let mut page = complete_form_page(201).await;
     let dir = tempfile::tempdir().unwrap();
     let mut session = page.session(dir.path(), true);
-    session.force_deny(
-        crate::fence_http::ForcedDeny::new("POST", CALENDAR_WRITES)
+    session.hold(
+        crate::capture_hold::Hold::new("POST", CALENDAR_WRITES)
             .unwrap()
             .labelled("synthetic calendar denial"),
     );
     page.send("Fetch.requestPaused", json!({"requestId":"paused-extra","networkId":"synthetic-extra","resourceType":"XHR",
         "request":{"method":"POST","url":"https://teams.microsoft.com/api/mt/part/synthetic/v2.0/me/calendars/default/events?synthetic=1","postData":"synthetic","headers":{}}}));
     let until = tokio::time::Instant::now() + Duration::from_secs(1);
-    while session.denials().is_empty() {
+    while session.held_requests().is_empty() {
         assert!(tokio::time::Instant::now() < until);
         session.pump(Duration::from_millis(10)).await;
     }
@@ -413,11 +409,10 @@ async fn meeting_cleanup_judges_a_mapped_calendar_deny_even_when_identity_failur
     let report = finish(session, &steps).await;
     assert_eq!(report.accounts.len(), 1);
     assert!(report.failures.iter().any(|failure| failure.contains("has no MRI")));
-    assert!(
-        report
-            .failures
-            .iter()
-            .any(|failure| failure.contains("unexpected deny of POST") && failure.contains("/calendars/"))
+    assert_eq!(report.accounts[0].held_requests.len(), 1);
+    assert_eq!(
+        report.accounts[0].held_requests[0].label.as_deref(),
+        Some("synthetic calendar denial")
     );
     assert!(
         report
@@ -426,7 +421,7 @@ async fn meeting_cleanup_judges_a_mapped_calendar_deny_even_when_identity_failur
             .any(|failure| failure.contains("didn't confirm closing"))
     );
     assert_eq!(
-        report.accounts[0].denials[0].label.as_deref(),
+        report.accounts[0].held_requests[0].label.as_deref(),
         Some("synthetic calendar denial")
     );
 }
@@ -500,12 +495,6 @@ async fn cleanly_closed_meetings_still_fail_for_a_partial_form_and_keep_the_reco
         let capture = report.accounts[0].capture.as_ref().unwrap();
         assert!(capture.join("meeting-sent.png").is_file());
         assert_eq!(capture.join("failure.png").is_file(), status == 500);
-        assert!(
-            report.accounts[0]
-                .denials
-                .iter()
-                .any(|deny| deny.label.as_deref() == Some(crate::scenario::ab_chat::THIS_RUN_PROBE))
-        );
     }
 }
 

@@ -60,41 +60,6 @@ fn occupied_capture_paths_and_exhausted_names_never_overwrite_existing_files() {
 }
 
 #[test]
-fn websocket_payload_kinds_and_malformed_requests_remain_distinct_in_the_capture() {
-    let root = tempfile::tempdir().unwrap();
-    let recorder = Arc::new(Recorder::create(root.path(), "synthetic").unwrap());
-    let capture = Capture::new(Arc::clone(&recorder), RtcHooks::default());
-    let script = GuardScript::with_token("abcd").unwrap();
-    for (index, kind) in ["text", "binary", "unreadable", "foreign"].into_iter().enumerate() {
-        let payload = json!({"token":"abcd", "socket": 3, "seq":index+1, "url":"wss://synthetic.example/socket", "kind":kind,"data":"synthetic"}).to_string();
-        capture.ws_verdict(
-            &event("Runtime.bindingCalled", json!({"payload":payload})),
-            &script,
-            Verdict::Allow,
-        );
-    }
-    capture.ws_verdict(
-        &event("Runtime.bindingCalled", json!({"payload":"{"})),
-        &script,
-        Verdict::Deny(DenyCause::Malformed),
-    );
-    let rows = entries(&recorder);
-    for (row, kind) in rows.iter().zip(["text", "binary", "unreadable", "foreign"]) {
-        assert_eq!(row["frame"]["kind"], kind);
-        assert_eq!(
-            row["frame"]["data"],
-            if matches!(kind, "text" | "binary") {
-                "synthetic"
-            } else {
-                ""
-            }
-        );
-    }
-    assert_eq!(rows[4]["malformed"], true);
-    assert_eq!(rows[4]["cause"], "malformed");
-}
-
-#[test]
 fn paused_response_diagnostics_keep_stage_status_and_failure_but_no_request_body() {
     let root = tempfile::tempdir().unwrap();
     let recorder = Arc::new(Recorder::create(root.path(), "synthetic").unwrap());
@@ -199,41 +164,6 @@ async fn body_capture_records_cdp_errors_and_nonobject_answers_and_skips_code_an
     assert!(rows.iter().any(|row| row["payload"]["pc"] == 1));
 }
 
-#[test]
-fn denied_request_bodies_are_optional_and_each_deny_cause_is_preserved() {
-    let root = tempfile::tempdir().unwrap();
-    let recorder = Arc::new(Recorder::create(root.path(), "synthetic").unwrap());
-    let capture = Capture::new(Arc::clone(&recorder), RtcHooks::default()).without_request_bodies();
-    let paused = event(
-        "Fetch.requestPaused",
-        json!({"request":{"method":"POST","url":"https://synthetic.example","postData":"synthetic form","postDataEntries":[{"bytes":"c3ludGhldGlj"}]}}),
-    );
-    for cause in [
-        DenyCause::Unclassified,
-        DenyCause::LogUnavailable,
-        DenyCause::Malformed,
-        DenyCause::ForeignSocket,
-        DenyCause::Forced,
-        DenyCause::Fenced(teams_fence::DenyReason::OrgWide),
-    ] {
-        capture.http_verdict(&paused, Verdict::Deny(cause));
-    }
-    capture.http_verdict(&paused, Verdict::Allow);
-    let mut not_object = json!(17);
-    strip_body(&mut not_object);
-    assert_eq!(not_object, 17);
-    let rows = entries(&recorder);
-    for row in &rows[..6] {
-        assert_eq!(row["verdict"], "deny");
-        assert!(row["request"].get("postData").is_none());
-        assert!(row["request"].get("postDataEntries").is_none());
-    }
-    assert!(rows[5]["cause"].get("fenced").is_some());
-    assert_eq!(rows[6]["verdict"], "allow");
-    assert!(rows[6].get("request").is_none());
-    assert_eq!(unix_ms(UNIX_EPOCH + Duration::from_secs(u64::MAX / 1000 + 1)), u64::MAX);
-}
-
 fn response_events(capture: &Capture, cdp: &Cdp) {
     for (id, kind, length) in [
         ("error", "XHR", 1.0),
@@ -252,5 +182,24 @@ fn response_events(capture: &Capture, cdp: &Cdp) {
                 json!({"requestId":id,"encodedDataLength":length}),
             ),
         );
+    }
+}
+
+#[test]
+fn captured_holds_respect_request_body_privacy() {
+    for keep in [true, false] {
+        let dir = tempfile::tempdir().unwrap();
+        let recorder = Arc::new(Recorder::create(dir.path(), "synthetic").unwrap());
+        let capture = Capture::new(Arc::clone(&recorder), RtcHooks::default());
+        let capture = if keep {
+            capture
+        } else {
+            capture.without_request_bodies()
+        };
+        capture.held(&event("Fetch.requestPaused",json!({"requestId":"held","networkId":"network-held","request":{"method":"POST","url":"https://synthetic.example/shape","postData":"synthetic-body","postDataEntries":[{"bytes":"c3ludGhldGljLWJvZHk="}]}})));
+        let rows = entries(&recorder);
+        assert_eq!(rows[0]["type"], "held_request");
+        assert_eq!(rows[0]["request"].get("postData").is_some(), keep);
+        assert_eq!(rows[0]["request"].get("postDataEntries").is_some(), keep);
     }
 }

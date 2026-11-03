@@ -142,7 +142,11 @@ async fn missing_config(paths: &LabPaths) {
         let result = invoke(name, paths).await;
         if matches!(
             name,
-            ScenarioName::Load | ScenarioName::Search | ScenarioName::ChannelCreate | ScenarioName::TeamManage
+            ScenarioName::Load
+                | ScenarioName::Search
+                | ScenarioName::ChannelCreate
+                | ScenarioName::TeamManage
+                | ScenarioName::AbcEveryone
         ) {
             no_chrome(name, result, paths);
         } else {
@@ -220,9 +224,9 @@ fn assert_no_sessions_or_credentials(paths: &LabPaths, root: &Path) {
     for alias in Alias::ALL {
         assert!(!paths.store_file(alias).exists());
     }
-    if paths.fence_log().exists() {
+    if paths.data_dir().join("fence.log").exists() {
         assert_eq!(
-            fs::metadata(paths.fence_log()).unwrap().len(),
+            fs::metadata(paths.data_dir().join("fence.log")).unwrap().len(),
             0,
             "no fence decision was requested"
         );
@@ -266,7 +270,7 @@ async fn scenario_setup_child() {
     assert_no_sessions_or_credentials(&paths, &root);
     if matches!(case.as_str(), "missing-config" | "invalid-step") {
         assert!(!locations.config_file.exists());
-        assert!(!paths.fence_log().exists());
+        assert!(!paths.data_dir().join("fence.log").exists());
         assert!(!paths.data_dir().join("media").exists());
     }
 }

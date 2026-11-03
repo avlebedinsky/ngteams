@@ -1,35 +1,4 @@
-//! The `ab-image` scenario: what the web client sends when account a sends an image in the a–b chat, with every write
-//! to the media service (AMS: the object's creation and its upload) denied, recorded for the protocol notes
-//! (`docs/protocol/chat.md`, M1 Task 20). It runs under `ab-chat`'s fence: the lab rule (`crate::classify`),
-//! members read live, `ab-chat`'s forced-deny probes and the reviewed expected-deny list.
-//!
-//! An AMS object is created with a list of the conversations that may read it, and its content is put afterwards under
-//! the object's id alone; the fence has no mapping for either, so both would be denied as unknown anyway. The scenario
-//! denies them on purpose ([`deny_media_writes`], labelled [`MEDIA_WRITE`]) from before a's page loads to the end of the
-//! run, so the run expects them by name and the capture holds each one whole (headers and body) as data for deciding
-//! how such a write's target could be read.
-//!
-//! 1. a's probes and media writes are force-denied from before its page loads; a and b load the web client.
-//! 2. a opens the chat with b, and the live enforcement test comes first: this run's probe must be denied by the fence
-//!    and fail in a's page (`ab_chat::enforce`).
-//! 3. a sends a plain message ([`Texts::plain`]), which b will show.
-//! 4. a types a caption ([`Texts::caption`]) and pastes a made-up test image ([`test_png`], generated here: a pattern of
-//!    two colours, no photo or screenshot of anything) into the compose box, as a clipboard paste the page's editor
-//!    handles; if the editor takes no image from a paste, the same file is dropped on it. a presses Enter. The client
-//!    must try to create the image's AMS object within [`MEDIA_WAIT`], denied under [`MEDIA_WRITE`]; the run then
-//!    watches [`SETTLE`] more and notes every media write denied and whether a message post with the caption went out.
-//! 5. a's web client is loaded again, and for [`SETTLE`] the run notes whether it tries the image again: the client
-//!    sends a failed message again on a later load (M0), so an image left unsent here would be retried in later runs.
-//!    The navigation accepts the dialog the client puts up before its page is left while the image is unsent
-//!    ([`super::dsl::navigate_tab`]). Then a opens the chat again and, if it shows this run's image unsent (a message
-//!    with an image and this run's caption, [`mark_unsent_image`]), deletes it from its actions; any other message is
-//!    left alone. What it found and did is noted.
-//! 6. b opens the chat (it reads the chat's history), shows a's plain message (jumping to the newest,
-//!    `ab_chat::wait_for_newest`), and the enforcement test's other half:
-//!    b's copy must not have the probe (`ab_chat::not_received`). Whether b shows the caption is noted.
-//!
-//! Nothing the media service would hold is sent: every write to it is denied. The run fails (as any run) on a breach
-//! or a deny it doesn't expect, and when the client never tries to create the object.
+//! Captures image attachment request shapes between two lab accounts. Explicit media holds retain upload shapes without sending uploads; normal chat messages still exercise delivery.
 
 use std::io::Write as _;
 use std::time::Duration;
@@ -38,24 +7,20 @@ use flate2::Compression;
 use flate2::write::ZlibEncoder;
 
 use crate::browser::Media;
+use crate::capture_hold::{HeldRequest, Hold};
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
-use crate::fence_http::{Denial, DenyCause, ForcedDeny};
 use crate::session::{LabSession, SessionOptions};
 
 use super::ab_chat::{
-    COMPOSE, COMPOSE_CSS, DELIVERY, EARLIER_RUN_PROBE, THIS_RUN_PROBE, chat_link, chat_requests, chat_url, deny_probes,
-    enforce, load, nonce, not_received, one_to_one_id, probe_text, save_screenshot_as, send, setup, wait_for_newest,
+    COMPOSE, COMPOSE_CSS, DELIVERY, chat_link, chat_requests, load, nonce, one_to_one_id, save_screenshot_as, send,
+    setup, wait_for_newest,
 };
 use super::ab_chat_full::{CHAT_OPEN, PAGE_CALL, message_action};
 use super::dsl::{Driver, RequestPattern, StepError, js_string};
-use super::expected::Review;
-use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport};
+use super::{RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
-/// The label of the forced deny of every write to the media service ([`deny_media_writes`]).
+/// The label of the capture hold of every write to the media service ([`hold_media_writes`]).
 pub const MEDIA_WRITE: &str = "a media service write";
-
-/// The forced denies a run of this scenario expects: `ab-chat`'s two probe rules and the media writes.
-pub const EXPECTED_FORCED: [&str; 3] = [THIS_RUN_PROBE, EARLIER_RUN_PROBE, MEDIA_WRITE];
 
 /// A write to an AMS object, on any host (the media service's own, `*.asm.skype.com`, or the web client's origin, which
 /// the bundle routes `/asm/<region>/v1/objects` and `/ams/v1/objects` through): its creation (`POST …/v1/objects/`),
@@ -63,7 +28,7 @@ pub const EXPECTED_FORCED: [&str; 3] = [THIS_RUN_PROBE, EARLIER_RUN_PROBE, MEDIA
 /// method on an object.
 pub const MEDIA_OBJECT: &str = r"(?i)/v[0-9]+/objects(/|\?|$)";
 
-/// The methods [`deny_media_writes`] denies on [`MEDIA_OBJECT`]: every one but a read.
+/// The methods [`hold_media_writes`] denies on [`MEDIA_OBJECT`]: every one but a read.
 pub const MEDIA_METHODS: [&str; 4] = ["POST", "PUT", "PATCH", "DELETE"];
 
 /// How long the client gets to try to create the image's object once the image is in the compose box or sent.
@@ -141,46 +106,33 @@ impl Texts {
     }
 }
 
-/// Forces a deny ([`ForcedDeny`], labelled [`MEDIA_WRITE`]) on every [`MEDIA_METHODS`] request of `session` whose URL
+/// Forces a deny ([`Hold`], labelled [`MEDIA_WRITE`]) on every [`MEDIA_METHODS`] request of `session` whose URL
 /// names an AMS object ([`MEDIA_OBJECT`]), whatever its host and body.
 ///
 /// # Errors
 /// Never: the pattern is fixed.
-pub fn deny_media_writes(session: &LabSession) -> Result<(), ScenarioError> {
+pub fn hold_media_writes(session: &LabSession) -> Result<(), ScenarioError> {
     for rule in media_rules().map_err(|error| setup(error.to_string()))? {
-        session.force_deny(rule);
+        session.hold(rule);
     }
     Ok(())
 }
 
-/// The rules [`deny_media_writes`] forces.
+/// The rules [`hold_media_writes`] forces.
 ///
 /// # Errors
 /// Never: the pattern is fixed.
-pub fn media_rules() -> Result<Vec<ForcedDeny>, regex::Error> {
+pub fn media_rules() -> Result<Vec<Hold>, regex::Error> {
     MEDIA_METHODS
         .iter()
-        .map(|method| Ok(ForcedDeny::new(method, MEDIA_OBJECT)?.labelled(MEDIA_WRITE)))
+        .map(|method| Ok(Hold::new(method, MEDIA_OBJECT)?.labelled(MEDIA_WRITE)))
         .collect()
-}
-
-/// The denies a run of this scenario expects: [`EXPECTED_FORCED`] and the reviewed list; with the a–b chat's id, any
-/// other deny of a URL naming that chat is unexpected.
-///
-/// # Errors
-/// Never for an id from [`one_to_one_id`]; when the chat's pattern doesn't compile.
-pub fn policy(chat_id: Option<&str>) -> Result<DenyPolicy, regex::Error> {
-    let mut review = Review::new().expecting_forced(&EXPECTED_FORCED);
-    if let Some(chat_id) = chat_id {
-        review = review.with_mapped_target(chat_url(chat_id)?);
-    }
-    Ok(DenyPolicy::Reviewed(review))
 }
 
 /// Whether `denial` is a media write the run forced ([`MEDIA_WRITE`]).
 #[must_use]
-pub fn is_media_write(denial: &Denial) -> bool {
-    denial.cause == DenyCause::Forced && denial.label.as_deref() == Some(MEDIA_WRITE)
+pub fn is_media_write(denial: &HeldRequest) -> bool {
+    denial.label.as_deref() == Some(MEDIA_WRITE)
 }
 
 /// A made-up PNG, `SIDE` pixels square, of two colours in a pattern of 8-pixel squares, a little different for each
@@ -247,17 +199,15 @@ pub fn compose_has_image() -> String {
 /// Runs `ab-image` (see the module docs).
 ///
 /// # Errors
-/// When the run can't start: no lab config, no Chrome, no fence, a browser that can't be armed.
+/// When the run can't start: no lab config, no Chrome, a browser whose capture setup fails.
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
     let config = LabConfig::load(&LabLocations::from_env()?)?;
     let session_options = SessionOptions {
-        live_members: true,
         capture: Some(ScenarioName::AbImage.as_str().to_owned()),
         capture_request_bodies: true,
         display: options.display,
         media: Media::System,
         user_agent: None,
-        ..SessionOptions::fail_closed()
     };
     let a = LabSession::open_with(paths, Alias::A, session_options.clone()).await?;
     let b = match LabSession::open_with(paths, Alias::B, session_options).await {
@@ -275,7 +225,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         mri_a: mri(Alias::A),
         mri_b: mri(Alias::B),
         texts: Texts::new(&nonce),
-        probe: probe_text(&nonce),
+
         options,
         waits: AttachmentWaits::default(),
     };
@@ -286,17 +236,12 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
 async fn finish(mut a: LabSession, mut b: LabSession, chat_id: Option<&str>, image: &Image) -> ScenarioReport {
     let mut report = ScenarioReport::new(ScenarioName::AbImage);
     // Arm the rules before either client loads or retries an earlier attachment.
-    for denied in [deny_probes(&a, Some(&image.probe)), deny_media_writes(&a)] {
+    for denied in [hold_media_writes(&a)] {
         if let Err(error) = denied {
             report.failures.push(error.to_string());
         }
     }
-    let policy = policy(chat_id).unwrap_or_else(|error| {
-        report
-            .failures
-            .push(format!("can't tell the a–b chat in a URL: {error}"));
-        DenyPolicy::Reviewed(Review::new().expecting_forced(&EXPECTED_FORCED))
-    });
+
     if let Err(error) = image.run(chat_id, &mut a, &mut b, &mut report).await {
         report.failures.push(error.to_string());
         for (alias, session) in [(Alias::A, &a), (Alias::B, &b)] {
@@ -305,11 +250,11 @@ async fn finish(mut a: LabSession, mut b: LabSession, chat_id: Option<&str>, ima
             }
         }
     }
-    let media = a.denials().iter().filter(|denial| is_media_write(denial)).count();
+    let media = a.held_requests().iter().filter(|denial| is_media_write(denial)).count();
     report.notes.push(format!("a: {media} media write(s) denied in all"));
     // both browsers go down and both captures are finished, whatever happened to either
     for (alias, session) in [(Alias::A, a), (Alias::B, b)] {
-        report.close_account(alias, session, &policy).await;
+        report.close_account(alias, session).await;
     }
     report
 }
@@ -319,7 +264,7 @@ struct Image {
     mri_a: String,
     mri_b: String,
     texts: Texts,
-    probe: String,
+
     options: RunOptions,
     waits: AttachmentWaits,
 }
@@ -339,7 +284,7 @@ impl Image {
         }
         let chat_id = chat_id
             .ok_or_else(|| setup("lab.toml has no MRI for a or b: run `proto-lab login` for them".to_owned()))?;
-        let names_chat = chat_url(chat_id).map_err(|error| setup(error.to_string()))?;
+
         let opened = chat_requests(chat_id).map_err(|error| setup(error.to_string()))?;
         let mut drive_a = a.driver();
         drive_a.set_call_timeout(PAGE_CALL);
@@ -347,10 +292,7 @@ impl Image {
             .navigate("a opens the chat with b", &chat_link(&self.mri_b))
             .await?;
         drive_a.wait_for("a's compose box", COMPOSE, CHAT_OPEN).await?;
-        enforce(a, &mut drive_a, &self.probe, &names_chat).await?;
-        report
-            .notes
-            .push("enforcement: a's probe post was denied by the fence and failed in a's page".to_owned());
+
         send(&mut drive_a, "a (the plain message)", &self.texts.plain).await?;
         report.notes.push("a: plain message sent".to_owned());
         let outcome = self.send_image(a, &mut drive_a, report).await;
@@ -492,10 +434,7 @@ impl Image {
             .wait_for_request("b reads the a–b chat", opened, CHAT_OPEN)
             .await?;
         wait_for_newest(&mut drive, "b shows a's plain message", &self.texts.plain, DELIVERY).await?;
-        not_received(&mut drive, &self.probe).await?;
-        report
-            .notes
-            .push("enforcement: b's copy of the chat has a's message and not the probe".to_owned());
+
         let caption = drive.shows_text("b shows the caption", &self.texts.caption).await?;
         report.notes.push(format!("b: shows the caption: {caption}"));
         Ok(())
@@ -536,12 +475,12 @@ async fn put_image(
 }
 
 /// `session`'s media writes denied so far, in order.
-fn media_writes(session: &LabSession) -> Vec<Denial> {
-    session.denials().into_iter().filter(is_media_write).collect()
+fn media_writes(session: &LabSession) -> Vec<HeldRequest> {
+    session.held_requests().into_iter().filter(is_media_write).collect()
 }
 
 /// Waits up to `timeout` for a media write denied after the first `before`; the first such one.
-async fn wait_media_write(session: &LabSession, before: usize, timeout: Duration) -> Option<Denial> {
+async fn wait_media_write(session: &LabSession, before: usize, timeout: Duration) -> Option<HeldRequest> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         if let Some(denial) = media_writes(session).into_iter().nth(before) {

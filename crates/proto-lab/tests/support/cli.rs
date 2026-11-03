@@ -5,7 +5,7 @@ use std::io::Write as _;
 use std::process::Command as Process;
 use std::time::SystemTime;
 
-use proto_lab::session::FenceReport;
+use proto_lab::session::SessionReport;
 use serde_json::{Value, json};
 use zip::write::SimpleFileOptions;
 
@@ -73,7 +73,7 @@ fn report_statuses_control_success_and_preserve_saved_region() {
             signed_in,
             refused,
             mri,
-            fence: FenceReport::default(),
+            browser: SessionReport::default(),
             capture: Some("/synthetic/capture".into()),
         };
         assert_eq!(show_login(Alias::A, &report).is_err(), refused.is_some());
@@ -95,7 +95,7 @@ fn report_statuses_control_success_and_preserve_saved_region() {
     ] {
         let failed = token.as_ref().is_some_and(Result::is_err);
         let report = auth::AuthReport {
-            fence: FenceReport::default(),
+            browser: SessionReport::default(),
             signed_in: None,
             refreshed: None,
             audiences: Vec::new(),
@@ -328,7 +328,7 @@ fn report_references_are_lazy_private_and_refuse_repository_destinations() {
 
 #[tokio::test]
 async fn status_checks_default_accounts_and_propagates_refusals_breaches_and_errors() {
-    use proto_lab::session::{FenceReport, SessionError};
+    use proto_lab::session::{SessionError, SessionReport};
     let root = tempfile::tempdir().unwrap();
     let config = report_config(root.path());
     let mut seen = Vec::new();
@@ -336,14 +336,14 @@ async fn status_checks_default_accounts_and_propagates_refusals_breaches_and_err
         assert_eq!(paths.data_dir(), config.paths().data_dir());
         assert_eq!(timeout, Duration::from_secs(7));
         seen.push(alias);
-        Ok((AccountStatus::Ok, FenceReport::default()))
+        Ok((AccountStatus::Ok, SessionReport::default()))
     })
     .await
     .unwrap();
     assert_eq!(seen, Alias::ALL);
     let error = check_status(&config, vec![Alias::B], 1, async |_: &LabPaths, alias, _| {
         assert_eq!(alias, Alias::B);
-        Ok((AccountStatus::LoginNeeded, FenceReport::default()))
+        Ok((AccountStatus::LoginNeeded, SessionReport::default()))
     })
     .await
     .unwrap_err();
@@ -353,15 +353,14 @@ async fn status_checks_default_accounts_and_propagates_refusals_breaches_and_err
         seen.push(alias);
         Ok((
             AccountStatus::Ok,
-            FenceReport {
-                unsanctioned_frames: 1,
-                ..FenceReport::default()
+            SessionReport {
+                failures: vec!["synthetic capture setup failure".into()],
             },
         ))
     })
     .await
     .unwrap_err();
-    assert!(error.to_string().contains("fence was breached"));
+    assert!(error.to_string().contains("capture setup failed"));
     assert_eq!(seen, [Alias::A], "a breach stops before another account is opened");
     let error = check_status(&config, vec![Alias::C], 1, async |_: &LabPaths, _, _| {
         Err(SessionError::NoChrome("/synthetic/no-chrome".into()))

@@ -1,9 +1,8 @@
 //! `proto-lab auth <a|b|c>`: the native sign-in of one lab account, with no human (M0 spike 1).
 //!
-//! 1. **Authorize** in the account's persistent profile, headless, under the armed fence (the lab rule, its membership
-//!    source fail-closed). The authorize URL ([`Authorization`]: the native Teams client, the
+//! 1. **Authorize** in the account's persistent profile, headless, with a redirect catcher. The authorize URL ([`Authorization`]: the native Teams client, the
 //!    `nativeclient` redirect, PKCE, `login_hint`) is opened in the profile, whose Microsoft session signs it in
-//!    silently. The fence catches Entra's redirect to the registered redirect URI and fails it
+//!    silently. The browser catches Entra's redirect to the registered redirect URI and fails it
 //!    ([`RedirectCatch`]); the code comes from that URL once its `state` is the request's. If Entra shows a page
 //!    instead (the session has expired, or it wants an interaction), the run stops: nothing is ever typed here.
 //! 2. **Code → tokens** in Rust ([`TokenClient::exchange_code`]): the refresh token is stored only once the ID token
@@ -34,8 +33,8 @@ use teams_auth::token::{Authorization, EntraConfig, Scope, TokenClient, TokenErr
 use tokio::sync::mpsc;
 
 use crate::config::{Alias, LabConfig, LabPaths};
-use crate::fence_http::{CatchError, RedirectCatch};
-use crate::session::{FenceReport, LabSession, SessionError, SessionState};
+use crate::redirect_catch::{CatchError, RedirectCatch};
+use crate::session::{LabSession, SessionError, SessionReport, SessionState};
 
 /// The `application` attribute of the lab's items in the Secret Service ([`LabPaths::KEYRING_APPLICATION`]).
 pub const KEYRING_APPLICATION: &str = LabPaths::KEYRING_APPLICATION;
@@ -91,10 +90,10 @@ pub enum AuthError {
     Elsewhere(String),
     #[error("no redirect within {0:?}")]
     Timeout(Duration),
-    #[error("the fence lost its connection to the browser")]
+    #[error("the capture connection closed to the browser")]
     ConnectionLost,
-    #[error("the fence was breached during the sign-in: {0}")]
-    Breached(String),
+    #[error("capture setup failed during the sign-in: {0}")]
+    CaptureFailed(String),
     #[error("the account's MRI in lab.toml isn't 8:orgid:<object id>")]
     BadMri,
 }
@@ -109,8 +108,8 @@ pub struct AudienceOutcome {
 /// What a sign-in got. Holds no token.
 #[derive(Debug)]
 pub struct AuthReport {
-    /// What the fence did while the browser ran.
-    pub fence: FenceReport,
+    /// What the browser did while the browser ran.
+    pub browser: SessionReport,
     /// The code exchange's access token for `api.spaces.skype.com`.
     pub signed_in: Option<TokenSummary>,
     /// The access token from refreshing it.
@@ -141,7 +140,7 @@ impl From<&Skypetoken> for SkypetokenSummary {
 /// skypetoken in `store`.
 ///
 /// # Errors
-/// [`AuthError`] when no token came of it: the browser couldn't run under the fence or the fence was breached, Entra
+/// [`AuthError`] when no token came of it: the browser couldn't run under the browser or capture setup failed, Entra
 /// didn't redirect, the redirect isn't this request's or carries Entra's refusal, or the code exchange or the first
 /// refresh failed. A refused audience or skypetoken is in the report instead.
 pub async fn authorize<S: SecretStore>(
@@ -179,7 +178,7 @@ async fn authorize_with<S: SecretStore>(
     options: &AuthOptions,
     entra: EntraConfig,
     steps: AuthSteps<
-        impl AsyncFnOnce(&Authorization) -> Result<(Secret, FenceReport), AuthError>,
+        impl AsyncFnOnce(&Authorization) -> Result<(Secret, SessionReport), AuthError>,
         impl AsyncFnOnce(&Tokens) -> Result<SkypetokenSummary, AuthzError>,
     >,
 ) -> Result<AuthReport, AuthError> {
@@ -189,7 +188,7 @@ async fn authorize_with<S: SecretStore>(
         let object_id = mri.strip_prefix("8:orgid:").ok_or(AuthError::BadMri)?;
         authorization = authorization.expect_object_id(object_id);
     }
-    let (redirect, fence) = (steps.redirect)(&authorization).await?;
+    let (redirect, browser) = (steps.redirect)(&authorization).await?;
     let code = authorization.code_from_redirect(redirect.expose())?;
 
     let client = TokenClient::new(entra)?;
@@ -213,7 +212,7 @@ async fn authorize_with<S: SecretStore>(
         None
     };
     Ok(AuthReport {
-        fence,
+        browser,
         signed_in: TokenSummary::read(&sign_in.tokens.access_token),
         refreshed: TokenSummary::read(&refreshed.access_token),
         audiences,
@@ -247,16 +246,16 @@ async fn skypetoken_with<S: SecretStore>(
     Ok(SkypetokenSummary::from(&skypetoken))
 }
 
-/// Opens the authorize URL in `alias`'s profile under the armed fence and waits for the redirect the fence catches,
+/// Opens the authorize URL in `alias`'s profile under the armed browser and waits for the redirect the browser catches,
 /// the two together bounded by `timeout` ([`within`]). The browser is closed whatever happened, and a breach outranks
-/// any other outcome. The fence report comes back with the redirect only; on an error the report adds nothing to it.
+/// any other outcome. The browser report comes back with the redirect only; on an error the report adds nothing to it.
 async fn redirect_through_profile(
     paths: &LabPaths,
     alias: Alias,
     entra: &EntraConfig,
     authorization: &Authorization,
     timeout: Duration,
-) -> Result<(Secret, FenceReport), AuthError> {
+) -> Result<(Secret, SessionReport), AuthError> {
     let (catch, mut caught) = RedirectCatch::new(&entra.authorize_endpoint(), entra.redirect_uri())?;
     let session = LabSession::open_catching(paths, alias, catch).await?;
     redirect_from_session(session, authorization, &mut caught, timeout).await
@@ -267,17 +266,17 @@ async fn redirect_from_session(
     authorization: &Authorization,
     caught: &mut mpsc::UnboundedReceiver<Secret>,
     timeout: Duration,
-) -> Result<(Secret, FenceReport), AuthError> {
+) -> Result<(Secret, SessionReport), AuthError> {
     let redirect = within(timeout, async {
         session.navigate(authorization.url()).await?;
         wait_for_redirect(&mut session, caught).await
     })
     .await;
-    let fence = session.close().await?;
-    if fence.breached() {
-        return Err(AuthError::Breached(fence.summary()));
+    let browser = session.close().await?;
+    if browser.failed() {
+        return Err(AuthError::CaptureFailed(browser.summary()));
     }
-    Ok((redirect?, fence))
+    Ok((redirect?, browser))
 }
 
 /// `step`, given up as [`AuthError::Timeout`] once `timeout` has passed, wherever it is waiting: the browser's
@@ -291,7 +290,7 @@ pub async fn within<T>(timeout: Duration, step: impl Future<Output = Result<T, A
         .unwrap_or(Err(AuthError::Timeout(timeout)))
 }
 
-/// Pumps the session's events until the fence catches the redirect. A sign-in page that stands for
+/// Pumps the session's events until the browser catches the redirect. A sign-in page that stands for
 /// [`SIGN_IN_GRACE`], a page on another host or a lost connection end the wait; the caller bounds it in time.
 async fn wait_for_redirect(
     session: &mut LabSession,
@@ -356,7 +355,7 @@ impl AuthReport {
     /// The report as lines for the operator, as of `now`: claims and expiries only, never a token.
     #[must_use]
     pub fn lines(&self, now: SystemTime) -> Vec<String> {
-        let mut lines = vec![format!("{} (fail-closed: expected)", self.fence.summary())];
+        let mut lines = vec![self.browser.summary()];
         lines.push(format!("signed in: {}", summary_line(self.signed_in.as_ref(), now)));
         lines.push(format!("refreshed: {}", summary_line(self.refreshed.as_ref(), now)));
         for audience in &self.audiences {

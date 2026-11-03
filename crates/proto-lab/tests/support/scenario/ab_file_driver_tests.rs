@@ -14,7 +14,7 @@ fn file() -> File {
         mri_b: "8:orgid:00000000-0000-0000-0000-00000000000b".to_owned(),
         texts: Texts::new("synthetic-file"),
         content: test_file("synthetic-file"),
-        probe: probe_text("synthetic-file"),
+
         options: RunOptions {
             display: Display::Headless,
             load_timeout: Duration::from_secs(1),
@@ -46,8 +46,8 @@ async fn file_runs_try_each_editor_fallback_and_prove_the_upload_and_caption_den
         let mut sender = a.session(a_dir.path(), true);
         let mut recipient = b.session(b_dir.path(), false);
         let scenario = file();
-        deny_probes(&sender, Some(&scenario.probe)).unwrap();
-        deny_file_writes(&sender).unwrap();
+
+        hold_file_writes(&sender).unwrap();
         let mut report = ScenarioReport::new(ScenarioName::AbFile);
         scenario
             .run(
@@ -72,19 +72,14 @@ async fn file_runs_try_each_editor_fallback_and_prove_the_upload_and_caption_den
                 .any(|note| note.contains("unsent file: deleted from its actions")),
             "{report:?}"
         );
-        assert!(
-            report
-                .notes
-                .iter()
-                .any(|note| note.contains("message and not the probe"))
-        );
+
         assert!(
             report
                 .notes
                 .iter()
                 .any(|note| note == "b: shows the file's name: false")
         );
-        let denials = sender.denials();
+        let denials = sender.held_requests();
         assert!(denials.iter().any(|denial| denial.label.as_deref() == Some(FILE_WRITE)));
         assert!(
             denials
@@ -96,7 +91,7 @@ async fn file_runs_try_each_editor_fallback_and_prove_the_upload_and_caption_den
                 .iter()
                 .any(|command| command["method"] == "Fetch.failRequest")
         );
-        assert!(recipient.denials().is_empty());
+        assert!(recipient.held_requests().is_empty());
     }
 }
 
@@ -148,7 +143,7 @@ async fn an_attachment_without_a_real_forced_deny_times_out_and_editor_errors_ar
             "gone" => "compose box went away",
             _ => "synthetic attachment editor failure",
         }));
-        assert!(session.denials().is_empty());
+        assert!(session.held_requests().is_empty());
     }
 }
 
@@ -197,7 +192,7 @@ async fn admitted_file_runs_finalize_both_accounts_and_captures_after_success_or
         if chat.is_some() && taken == "drop" {
             assert!(report.failures.is_empty(), "{report:?}");
             assert!(report.notes.iter().any(|note| note.ends_with("denied in all")));
-            assert!(!report.accounts[0].denials.is_empty());
+            assert!(!report.accounts[0].held_requests.is_empty());
             assert!(
                 !report.accounts[0]
                     .capture
@@ -284,7 +279,7 @@ async fn upload_observation_ignores_earlier_denials_and_waits_for_a_new_real_for
     let mut page = peer::page(Kind::File, "none", Upload::Missing, Unsent::Absent).await;
     let dir = tempfile::tempdir().unwrap();
     let session = page.session(dir.path(), false);
-    deny_file_writes(&session).unwrap();
+    hold_file_writes(&session).unwrap();
     for (id, delay) in [("earlier", Duration::ZERO), ("later", Duration::from_millis(20))] {
         let wire = page.sender();
         let send = tokio::spawn(async move {

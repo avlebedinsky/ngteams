@@ -69,7 +69,7 @@ async fn every_lab_account_signs_in_natively_and_refreshes() {
             store.get(&refresh_token_key(upn)).await.unwrap().is_some(),
             "{alias}: the refresh token is kept"
         );
-        assert!(!report.fence.breached(), "{alias}: {}", report.fence.summary());
+        assert!(!report.browser.failed(), "{alias}: {}", report.browser.summary());
     }
 }
 

@@ -24,7 +24,7 @@ use crate::session::{LabSession, SessionOptions};
 use super::ab_chat::{load, save_screenshot_as};
 use super::ab_trouter::size;
 use super::dsl::{Driver, Key, RequestPattern, StepError, js_string};
-use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport};
+use super::{RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
 /// The account that searches.
 pub const ACCOUNT: Alias = Alias::A;
@@ -106,13 +106,13 @@ const CTRL_ALT_G: Key = Key {
 /// Runs `search` (see the module docs).
 ///
 /// # Errors
-/// When the run can't start: no Chrome, no fence, a browser that can't be armed.
+/// When the run can't start: no Chrome, a browser whose capture setup fails.
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
     let session_options = SessionOptions {
         capture: Some(ScenarioName::Search.as_str().to_owned()),
         capture_request_bodies: true,
         display: options.display,
-        ..SessionOptions::fail_closed()
+        ..SessionOptions::default()
     };
     let a = LabSession::open_with(paths, ACCOUNT, session_options).await?;
     Ok(finish(a, options, SearchWaits::default()).await)
@@ -136,7 +136,7 @@ async fn finish(mut a: LabSession, options: RunOptions, waits: SearchWaits) -> S
             report.notes.push(tally);
         }
     }
-    report.close_account(ACCOUNT, a, &DenyPolicy::AllExpected).await;
+    report.close_account(ACCOUNT, a).await;
     report
 }
 
@@ -309,7 +309,7 @@ async fn open_first_message(a: &LabSession, drive: &mut Driver, report: &mut Sce
                 .requests()
                 .iter()
                 .skip(since)
-                .map(|seen| format!("{} {}", seen.method, crate::fence_http::without_query(&seen.url)))
+                .map(|seen| format!("{} {}", seen.method, crate::capture_hold::without_query(&seen.url)))
                 .filter(|line| line.contains("/messages") || line.contains("/conversations"))
                 .take(12)
                 .collect();
@@ -361,7 +361,7 @@ fn note(what: &str, outcome: &Result<super::dsl::SeenRequest, ScenarioError>) ->
         Ok(seen) => format!(
             "a: {what}: {} {} answered {:?}, failed {:?}",
             seen.method,
-            crate::fence_http::without_query(&seen.url),
+            crate::capture_hold::without_query(&seen.url),
             seen.status,
             seen.failed
         ),

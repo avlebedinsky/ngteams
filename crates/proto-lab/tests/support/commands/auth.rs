@@ -56,7 +56,7 @@ async fn tokens(upn: &str) -> MockServer {
     server
 }
 
-fn redirect(authorization: &Authorization) -> (Secret, FenceReport) {
+fn redirect(authorization: &Authorization) -> (Secret, SessionReport) {
     let url = url::Url::parse(authorization.url()).unwrap();
     let state = url
         .query_pairs()
@@ -69,7 +69,7 @@ fn redirect(authorization: &Authorization) -> (Secret, FenceReport) {
         .query_pairs_mut()
         .append_pair("code", "made-up-code")
         .append_pair("state", &state);
-    (Secret::new(redirect.to_string()), FenceReport::default())
+    (Secret::new(redirect.to_string()), SessionReport::default())
 }
 
 #[tokio::test]
@@ -258,9 +258,9 @@ async fn a_caught_redirect_closes_the_session_and_close_failure_is_not_hidden() 
         send.send(Secret::new(expected.expose())).unwrap();
         let result = redirect_from_session(session, &authorization, &mut caught, Duration::from_secs(1)).await;
         if managed {
-            let (actual, fence) = result.unwrap();
+            let (actual, browser) = result.unwrap();
             assert_eq!(actual.expose(), expected.expose());
-            assert!(!fence.breached());
+            assert!(!browser.failed());
         } else {
             assert!(
                 matches!(result, Err(AuthError::Session(_))),

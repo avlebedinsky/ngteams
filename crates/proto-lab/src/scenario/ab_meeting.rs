@@ -1,39 +1,18 @@
-//! The `ab-meeting` scenario (`docs/protocol/calendar.md`, "Writing an event"): account a schedules a Teams meeting
-//! with b from the web client's scheduling form, changes its title, then cancels it; what each step sends is
-//! recorded. Only a's browser runs: b gets the invitation, the update and the cancellation in its mailbox.
-//!
-//! Each write goes through the lab rule as any write does: the event's creation is judged by the attendees it invites
-//! (a and b's addresses, the lab's), its change and its cancellation by the event's organizer and attendees, read
-//! fresh from the middle tier, and by any attendee the change adds.
-//!
-//! The steps:
-//! 1. Before anything loads, a's fence force-denies every write carrying the probe marker, as in `ab-chat`.
-//! 2. a opens the web client, opens the chat with b and proves enforcement live with this run's probe (`ab-chat`'s
-//!    step 4).
-//! 3. a opens the scheduling form by the web client's new-meeting deep link (title, b as attendee, a half hour later
-//!    today), saves it, and the event's creation must be answered with a 2xx.
-//! 4. a opens the calendar, opens the meeting, changes its title and sends the update, which must be answered with a
-//!    2xx.
-//! 5. a cancels the meeting, which must be answered with a 2xx.
-//!
-//! Every step saves a screenshot in the capture dir, and a step that can't find a control notes the controls the page
-//! shows (their names, no page text but the form's labels). Judged as `ab-chat` is, every calendar write mapped.
+//! Records meeting creation, editing and cancellation for the configured lab accounts. Each step retains its screenshots and network evidence.
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::browser::Media;
+use crate::capture_hold::without_query;
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
-use crate::fence_http::without_query;
 use crate::session::{LabSession, SessionOptions};
 
 use super::ab_chat::{
-    CHAT_OPEN, COMPOSE, EXPECTED_FORCED, chat_link, chat_url, deny_probes, enforce, load, nonce, one_to_one_id,
-    probe_text, save_screenshot, save_screenshot_as, setup,
+    CHAT_OPEN, COMPOSE, chat_link, load, nonce, one_to_one_id, save_screenshot, save_screenshot_as, setup,
 };
 use super::ab_trouter::size;
 use super::dsl::{Driver, Key, RequestPattern, SeenRequest, StepError, js_string};
-use super::expected::Review;
-use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport};
+use super::{RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
 /// The event's creation on the middle tier.
 pub const CREATE: &str = r"/api/mt/part/[^/]+/v2\.0/me/calendars/default/events\?";
@@ -62,17 +41,15 @@ const LENGTH: Duration = Duration::from_mins(30);
 /// Runs `ab-meeting` (see the module docs).
 ///
 /// # Errors
-/// When the run can't start: no lab config, no Chrome, no fence, a browser that can't be armed.
+/// When the run can't start: no lab config, no Chrome, a browser whose capture setup fails.
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
     let config = LabConfig::load(&LabLocations::from_env()?)?;
     let session_options = SessionOptions {
-        live_members: true,
         capture: Some(ScenarioName::AbMeeting.as_str().to_owned()),
         capture_request_bodies: true,
         display: options.display,
         media: Media::System,
         user_agent: None,
-        ..SessionOptions::fail_closed()
     };
     let a = LabSession::open_with(paths, Alias::A, session_options).await?;
     let nonce = nonce();
@@ -92,15 +69,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
 /// Runs and settles an already admitted session; every failed step is diagnosed before the browser closes.
 async fn finish(mut a: LabSession, steps: &Steps<'_>) -> ScenarioReport {
     let mut report = ScenarioReport::new(ScenarioName::AbMeeting);
-    if let Err(error) = deny_probes(&a, Some(&probe_text(steps.nonce))) {
-        report.failures.push(error.to_string());
-    }
-    let policy = policy(steps.chat_id).unwrap_or_else(|error| {
-        report
-            .failures
-            .push(format!("can't tell the a–b chat or a calendar write in a URL: {error}"));
-        DenyPolicy::Reviewed(Review::new().expecting_forced(&EXPECTED_FORCED))
-    });
+
     if let Err(error) = steps.run(&mut a, &mut report).await {
         report.failures.push(error.to_string());
         let mut drive = a.driver();
@@ -118,22 +87,8 @@ async fn finish(mut a: LabSession, steps: &Steps<'_>) -> ScenarioReport {
             drive.requests(),
         ));
     }
-    report.close_account(Alias::A, a, &policy).await;
+    report.close_account(Alias::A, a).await;
     report
-}
-
-/// How a run judges its denies: `ab-chat`'s forced denies and mapped chat, and every write of the account's events
-/// mapped too (a deny of one fails the run, the expected-deny list notwithstanding).
-///
-/// # Errors
-/// Never for an id from [`one_to_one_id`]; when a pattern doesn't compile.
-pub fn policy(chat_id: Option<&str>) -> Result<DenyPolicy, regex::Error> {
-    let mut review = Review::new().expecting_forced(&EXPECTED_FORCED);
-    if let Some(chat_id) = chat_id {
-        review = review.with_mapped_target(chat_url(chat_id)?);
-    }
-    review = review.with_mapped_target(regex::Regex::new(CALENDAR_WRITES)?);
-    Ok(DenyPolicy::Reviewed(review))
 }
 
 /// Original pauses while the attendee picker and cancellation form settle.
@@ -165,7 +120,7 @@ struct Steps<'a> {
 
 impl Steps<'_> {
     async fn run(&self, a: &mut LabSession, report: &mut ScenarioReport) -> Result<(), ScenarioError> {
-        let chat_id = self
+        let _chat_id = self
             .chat_id
             .ok_or_else(|| setup("lab.toml has no MRI for a or b: run `proto-lab login` for them".to_owned()))?;
         let mut drive = a.driver();
@@ -177,11 +132,7 @@ impl Steps<'_> {
         drive
             .wait_for("a's compose box", COMPOSE, self.options.load_timeout.max(CHAT_OPEN))
             .await?;
-        let names_chat = chat_url(chat_id).map_err(|error| setup(error.to_string()))?;
-        enforce(a, &mut drive, &probe_text(self.nonce), &names_chat).await?;
-        report
-            .notes
-            .push("enforcement: a's probe post was denied by the fence and failed in a's page".to_owned());
+
         let title = format!("lab meeting {}", self.nonce);
         let chat = self.create(a, &mut drive, report, &title).await?;
         let changed = format!("{title} (moved)");

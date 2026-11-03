@@ -8,20 +8,17 @@
 mod common;
 
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
 use proto_lab::arming::{ArmOptions, ArmedBrowser, ArmedTarget};
 use proto_lab::browser::{Browser, LaunchOptions};
-use proto_lab::classify::Classifier;
-use proto_lab::fence_http::{CatchError, HttpFence, RedirectCatch};
-use proto_lab::fence_ws::{GuardScript, WsFence};
+use proto_lab::capture_hold::CaptureHold;
+use proto_lab::redirect_catch::{CatchError, RedirectCatch};
 use serde_json::{Value, json};
 use teams_auth::pkce::Pkce;
 use teams_auth::redirect::RedirectError;
 use teams_auth::secrets::Secret;
 use teams_auth::token::{Authorization, EntraConfig, NATIVE_CLIENT_REDIRECT, Scope};
-use teams_fence::{FailClosed, Fence, FenceLog, Roster};
 use tokio::sync::mpsc;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -35,8 +32,8 @@ const NATIVE_PATH: &str = "/common/oauth2/nativeclient";
 
 // --- the fence's patterns ---
 
-fn fence(lab: &Lab, catch: Option<RedirectCatch>) -> HttpFence {
-    let http = HttpFence::new(Classifier::new(), Arc::clone(&lab.fence), Arc::new(FailClosed));
+fn fence(_lab: &Lab, catch: Option<RedirectCatch>) -> CaptureHold {
+    let http = CaptureHold::new();
     match catch {
         Some(catch) => http.with_redirect_catch(catch),
         None => http,
@@ -87,16 +84,12 @@ fn a_catch_needs_a_bare_redirect_uri_and_a_web_authorize_endpoint() {
 
 struct Lab {
     _dir: tempfile::TempDir,
-    fence: Arc<Fence>,
 }
 
 fn lab() -> TestResult<Lab> {
-    let dir = tempfile::tempdir()?;
-    let fence = Arc::new(Fence::new(
-        Roster::new([], []),
-        FenceLog::open(&dir.path().join("fence.log"))?,
-    ));
-    Ok(Lab { _dir: dir, fence })
+    Ok(Lab {
+        _dir: tempfile::tempdir()?,
+    })
 }
 
 /// The stand-in for Entra's authorize endpoint: a 302 to `redirect` with the code and the request's own state, as
@@ -209,11 +202,9 @@ async fn start(
     let authorize = format!("{}/organizations/oauth2/v2.0/authorize", server.uri());
     let (redirect_catch, caught) = RedirectCatch::new(&authorize, redirect_uri)?;
     let http = fence(&lab, catch.then_some(redirect_catch));
-    let ws = WsFence::new(Arc::clone(&lab.fence), Arc::new(FailClosed), GuardScript::generate()?);
-    let options = ArmOptions {
-        service_worker_origins: vec![server.uri()],
-    };
-    let armed = ArmedBrowser::arm(browser, http, ws, &options).await?;
+
+    let options = ArmOptions::default();
+    let armed = ArmedBrowser::arm(browser, http, &options).await?;
     let page = armed.open_page(STEP).await?;
     let run = Run {
         armed,
@@ -246,9 +237,9 @@ impl Run {
     }
 
     async fn finish(self) -> TestResult {
-        let verdict = self.armed.verdict();
+        let status = self.armed.status();
         self.armed.close(Duration::from_secs(10)).await?;
-        verdict.map_err(|failed| format!("the run failed: {failed:?}"))?;
+        assert!(status.failures().is_empty(), "{:?}", status.failures());
         Ok(())
     }
 }
@@ -288,7 +279,7 @@ async fn caught_from(redirect_uri: &str, location: &str) -> TestResult {
                 "caught at the response stage, before the browser asked for the redirect"
             );
         }
-        assert!(run.armed.denials().is_empty(), "{:?}", run.armed.denials());
+        assert!(run.armed.held_requests().is_empty(), "{:?}", run.armed.held_requests());
         Ok::<_, Box<dyn std::error::Error>>(())
     }
     .await;

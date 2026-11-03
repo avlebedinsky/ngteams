@@ -19,12 +19,8 @@
 //! - `response_body`: `request_id`, `body`, `base64Encoded`, fetched once the response has loaded, for every response
 //!   but scripts, stylesheets, images, media, fonts and manifests, and none over [`MAX_BODY`]; or `error` when the
 //!   browser no longer had it.
-//! - `verdict`: one of the fence's decisions, `verdict` `allow` or `deny`, with its `cause` on a deny. On `channel`
-//!   `http`: `request_id` (the `Fetch` id, on that session), `network_id` (the `Network` request id), `method`, `url`,
-//!   and on a deny the whole paused `request` (headers and body: a denied write never reaches the network events'
-//!   responses, and it is what mapping writes needs). A request pauses on its target's session and the browser's, so
-//!   each gets two. On `channel` `web_socket`: the socket's `url`, `socket` and `frame_seq` (the guard's numbers), and
-//!   the `frame` (`kind` `text`, `binary` in base64, `unreadable` or `foreign`, and `data`).
+//! - `held_request`: a request deliberately held by the scenario, including its paused shape.
+//! - `held_frame`: a selective WebSocket capture hold.
 //! - `rtc`: what the WebRTC hooks reported, `payload` as the page sent it: `pc` (the connection's number in its
 //!   context), `event` (`create` with the configuration, `createOffer`, `createAnswer`, `setLocalDescription`,
 //!   `setRemoteDescription` with the description, `addIceCandidate` and `icecandidate` with the candidate, the state
@@ -35,9 +31,6 @@
 //!   received audio track, `audio` every [`TAP_INTERVAL`] with the `track` id, the tap's context `state`, its sample
 //!   `rate`, the `rms` level of the newest [`TAP_WINDOW`] samples and `tone`, the share of their power at
 //!   [`TAP_TONE_HZ`], then `audio:ended`, or `audio:error`), `ts` and `data`; `context` is the execution context.
-//! - `arming_failure`: a target the fence couldn't arm, as `fence.log` records it (`target_type`, `step`, `cause`,
-//!   `resume_sent`, `held`, `close`, `containment` and `verdict` `breach` or `contained`), plus its `session`,
-//!   `target_id` and `error`.
 //!
 //! A capture made [`Capture::without_request_bodies`] (`proto-lab login`'s) has no request body anywhere: no
 //! `request_body` entries, and no `postData` or `postDataEntries` in a request event or a denied request's verdict.
@@ -54,10 +47,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{Map, Value, json};
 
-use crate::arming::ArmingFailure;
 use crate::cdp::{Cdp, Event, SessionId};
-use crate::fence_http::{DenyCause, Verdict};
-use crate::fence_ws::{GuardRequest, GuardScript, Payload};
 
 /// The capture's file in its directory.
 pub const EVENTS_FILE: &str = "events.jsonl";
@@ -365,6 +355,14 @@ impl Capture {
             self.follow_network(cdp, event);
         } else if matches!(method, "Target.attachedToTarget" | "Target.detachedFromTarget") {
             self.record_cdp(event);
+        } else if method == "Runtime.bindingCalled" && event.params["name"] == crate::frame_hold::BINDING {
+            if let Some(payload) = event.params["payload"]
+                .as_str()
+                .and_then(|text| serde_json::from_str::<Value>(text).ok())
+            {
+                self.recorder
+                    .record(json!({"type":"held_frame","session":session(event),"payload":payload}));
+            }
         } else if method == "Runtime.bindingCalled" && event.params["name"] == RTC_BINDING {
             let payload = &event.params["payload"];
             let parsed = payload
@@ -449,30 +447,16 @@ impl Capture {
         });
     }
 
-    /// Records the fence's decision on one paused request.
-    pub(crate) fn http_verdict(&self, event: &Event, verdict: Verdict) {
-        let params = &event.params;
-        let request = &params["request"];
-        let mut entry = json!({
-            "type": "verdict",
-            "channel": "http",
-            "session": session(event),
-            "request_id": params["requestId"],
-            "network_id": params["networkId"],
-            "method": request["method"],
-            "url": request["url"],
-        });
-        set_verdict(&mut entry, verdict);
-        if matches!(verdict, Verdict::Deny(_)) {
-            entry["request"] = request.clone();
-            if !self.request_bodies {
-                strip_body(&mut entry["request"]);
-            }
+    /// Records the exact request held for a capture experiment, respecting the request-body setting.
+    pub(crate) fn held(&self, event: &Event) {
+        let mut entry = paused_entry("held_request", event);
+        entry["request"] = event.params["request"].clone();
+        if !self.request_bodies {
+            strip_body(&mut entry["request"]);
         }
         self.recorder.record(entry);
     }
-
-    /// Records a paused request or response the fence couldn't answer (the browser refused the answer): its stage,
+    /// Records a paused request or response the capture connection couldn't answer (the browser refused the answer): its stage,
     /// method, URL, the response's status or error, and the browser's error. Such a request stays paused until the page
     /// gives it up; nothing of it was sent past the pause.
     pub(crate) fn unanswered(&self, event: &Event, error: &str) {
@@ -481,54 +465,10 @@ impl Capture {
         self.recorder.record(entry);
     }
 
-    /// Records a response the fence paused at the response stage and continued (the login origin's): its method, URL
+    /// Records a response the capture interceptor paused at the response stage and continued (the login origin's): its method, URL
     /// and status or error.
     pub(crate) fn continued(&self, event: &Event) {
         self.recorder.record(paused_entry("response_continued", event));
-    }
-
-    /// Records a target the fence couldn't arm, as `fence.log` does, plus its session, target id and error.
-    pub(crate) fn arming_failure(&self, session: Option<&SessionId>, failure: &ArmingFailure) {
-        let record = failure.record();
-        self.recorder.record(json!({
-            "type": "arming_failure",
-            "session": session.map(SessionId::as_str),
-            "target_id": failure.target_id,
-            "target_type": record.target_type,
-            "step": record.step,
-            "cause": record.cause,
-            "resume_sent": record.resume_sent,
-            "held": record.held,
-            "close": record.close,
-            "containment": record.containment,
-            "verdict": if record.breach() { "breach" } else { "contained" },
-            "error": failure.error,
-        }));
-    }
-
-    /// Records the fence's decision on one WebSocket frame the guard asked about.
-    pub(crate) fn ws_verdict(&self, event: &Event, script: &GuardScript, verdict: Verdict) {
-        let request = event.params["payload"]
-            .as_str()
-            .and_then(|payload| GuardRequest::from_payload(payload, script).ok());
-        let mut entry = json!({"type": "verdict", "channel": "web_socket", "session": session(event)});
-        match request {
-            Some(request) => {
-                let (kind, data) = match &request.frame.payload {
-                    Payload::Text(text) => ("text", text.as_str()),
-                    Payload::Binary(base64) => ("binary", base64.as_str()),
-                    Payload::Unreadable => ("unreadable", ""),
-                    Payload::Foreign => ("foreign", ""),
-                };
-                entry["url"] = json!(request.frame.url);
-                entry["socket"] = json!(request.socket);
-                entry["frame_seq"] = json!(request.seq);
-                entry["frame"] = json!({"kind": kind, "data": data});
-            }
-            None => entry["malformed"] = json!(true),
-        }
-        set_verdict(&mut entry, verdict);
-        self.recorder.record(entry);
     }
 }
 
@@ -569,28 +509,6 @@ fn session(event: &Event) -> Value {
         .session_id
         .as_ref()
         .map_or(Value::Null, |session| json!(session.as_str()))
-}
-
-fn set_verdict(entry: &mut Value, verdict: Verdict) {
-    match verdict {
-        Verdict::Allow => entry["verdict"] = json!("allow"),
-        Verdict::Deny(cause) => {
-            entry["verdict"] = json!("deny");
-            entry["cause"] = cause_value(cause);
-        }
-    }
-}
-
-/// A deny's cause as the capture names it.
-fn cause_value(cause: DenyCause) -> Value {
-    match cause {
-        DenyCause::Unclassified => json!("unclassified"),
-        DenyCause::LogUnavailable => json!("log_unavailable"),
-        DenyCause::Malformed => json!("malformed"),
-        DenyCause::ForeignSocket => json!("foreign_socket"),
-        DenyCause::Forced => json!("forced"),
-        DenyCause::Fenced(reason) => json!({"fenced": serde_json::to_value(reason).unwrap_or(Value::Null)}),
-    }
 }
 
 #[cfg(test)]

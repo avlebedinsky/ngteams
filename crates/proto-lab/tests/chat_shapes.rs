@@ -1,12 +1,9 @@
 //! `chat-shapes`' helpers (M2 Task 10): its texts, the denies it expects, and how it reads typing posts, b's typing
 //! indicator and reaction bodies into its notes. The page scripts are tested on a page in `scenario_dsl.rs`.
 
-use proto_lab::fence_http::{Denial, DenyCause};
-use proto_lab::scenario::ab_chat::{PROBE_MARKER, THIS_RUN_PROBE, chat_in_url, one_to_one_id};
-use proto_lab::scenario::abc_chat::{EXPECTED_FORCED, FIRST_MESSAGE_MARKER};
-use proto_lab::scenario::chat_shapes::{
-    Texts, TypingRun, control_type, indicator_changes, policy, reaction_key, typing_posts,
-};
+use proto_lab::scenario::ab_chat::{HELD_MARKER, chat_in_url, one_to_one_id};
+use proto_lab::scenario::abc_chat::FIRST_MESSAGE_MARKER;
+use proto_lab::scenario::chat_shapes::{Texts, TypingRun, control_type, indicator_changes, reaction_key, typing_posts};
 use proto_lab::scenario::dsl::{RequestPattern, SeenRequest};
 use serde_json::json;
 
@@ -31,7 +28,7 @@ fn every_text_holds_the_run_s_nonce_and_none_is_a_probe_or_a_first_message() {
     assert!(!two.contains("n1"));
     for text in [&texts.first, one, two, three, &texts.group_mention] {
         assert!(
-            !text.contains(PROBE_MARKER) && !text.contains(FIRST_MESSAGE_MARKER),
+            !text.contains(HELD_MARKER) && !text.contains(FIRST_MESSAGE_MARKER),
             "{text}"
         );
     }
@@ -43,47 +40,6 @@ fn every_text_holds_the_run_s_nonce_and_none_is_a_probe_or_a_first_message() {
         }
     }
     assert_ne!(Texts::new("n2"), texts);
-}
-
-#[test]
-fn only_the_forced_denies_and_the_list_are_expected_and_nothing_on_either_chat() -> Result<(), regex::Error> {
-    let ab = ab();
-    let policy = policy(Some(&ab), Some(GROUP))?;
-    let forced = |label: &str, url: &str| Denial {
-        label: Some(label.to_owned()),
-        ..Denial::new("POST", url, DenyCause::Forced)
-    };
-    for chat in [&ab, GROUP] {
-        let post = format!(
-            "{BASE}/users/ME/conversations/{}/messages",
-            chat.replace(':', "%3A").replace('@', "%40")
-        );
-        for label in EXPECTED_FORCED {
-            assert!(policy.expects(&forced(label, &post)), "{label}");
-        }
-        assert!(!policy.expects(&forced("some other rule", &post)));
-        // a write on either chat the fence refused: never expected
-        assert!(!policy.expects(&Denial::new("POST", &post, DenyCause::Unclassified)));
-        let reaction = format!("{BASE}/users/ME/conversations/{chat}/messages/1/properties?name=emotions");
-        assert!(!policy.expects(&Denial::new("PUT", &reaction, DenyCause::Unclassified)));
-    }
-    assert!(policy.expects(&forced(
-        THIS_RUN_PROBE,
-        &format!("{BASE}/users/ME/conversations/x/messages")
-    )));
-    // the reviewed list
-    let invoke = "https://teams.microsoft.com/api/chatsvc/emea/v1/agents/28:made-up-bot/invoke";
-    assert!(policy.expects(&Denial::new("POST", invoke, DenyCause::Unclassified)));
-    // what the lab rule lets through (telemetry, either stack's registration): a deny of it is unexpected
-    let telemetry = "https://eu-mobile.events.data.microsoft.com/OneCollector/1.0/";
-    assert!(!policy.expects(&Denial::new("POST", telemetry, DenyCause::Unclassified)));
-    let calling = "https://teams.microsoft.com/registrar/prod/V2/registrations";
-    assert!(!policy.expects(&Denial::new("POST", calling, DenyCause::Unclassified)));
-    // without the group chat (not recorded) the a–b chat is still guarded
-    let without_group = proto_lab::scenario::chat_shapes::policy(Some(&ab), None)?;
-    let post = format!("{BASE}/users/ME/conversations/{ab}/messages");
-    assert!(!without_group.expects(&Denial::new("POST", &post, DenyCause::Unclassified)));
-    Ok(())
 }
 
 #[test]

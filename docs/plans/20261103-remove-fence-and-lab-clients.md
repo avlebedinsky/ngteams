@@ -215,12 +215,19 @@ browser fence temporarily keeps its internal config until Task 3 removes that co
   and the scenarios
 - Modify: `crates/proto-lab/Cargo.toml` (no `teams-fence`)
 
-- [ ] remove the browser fence: membership checks, `fence.log`, expected-deny classes and forced-deny probes; keep the
+- [x] remove the browser fence: membership checks, `fence.log`, expected-deny classes and forced-deny probes; keep the
       CDP setup captures need
-- [ ] hold-back scenarios use the capture hold to keep a write from being sent while its shape is recorded
-- [ ] `probe` and `thread-probe` read members with a plain GET instead of `LiveMembershipSource`
-- [ ] adapt tests: the hold, `RedirectCatch`, a capture with no fence
-- [ ] `cargo test -p proto-lab`, `ngteams`' `apart` and clippy pass; `proto-lab` no longer depends on `teams-fence`
+- [x] hold-back scenarios use the capture hold to keep a write from being sent while its shape is recorded
+- [x] `probe` and `thread-probe` read members with a plain GET instead of `LiveMembershipSource`
+- [x] adapt tests: the hold, `RedirectCatch`, a capture with no fence
+- [x] `cargo test -p proto-lab`, `ngteams`' `apart` and clippy pass; `proto-lab` no longer depends on `teams-fence`
+
+Validation: 532 offline proto-lab tests passed across the full run and focused reruns; the existing workstation-only
+config test remains ignored. Chrome capture, redirect, login, WebRTC and DSL tests ran with
+`PROTO_LAB_REQUIRE_CHROME=1`. `ngteams`' `apart` (9), `teams-ui`'s `reach` (14), all-target Clippy for proto-lab and
+ngteams, formatting, coverage-source metadata and the dependency-tree audit passed. The browser now records Network
+and explicit hold events rather than policy verdicts; older capture files remain readable. The quiet/presence
+activity experiment is a selective frame capture hold, without the old classifier, permission queue or audit.
 
 ### Task 4: teams-signin off the fence; the lab sign-in window goes
 

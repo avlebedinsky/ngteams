@@ -325,7 +325,7 @@ fn final_status_reports_done_refused_or_the_original_error_without_masking_faile
             signed_in: false,
             refused,
             mri: MriRecord::Recorded,
-            fence: FenceReport::default(),
+            browser: SessionReport::default(),
             capture: None,
         };
         assert!(finish_status(&status, Ok(report)).is_ok());
@@ -356,7 +356,7 @@ fn final_status_reports_done_refused_or_the_original_error_without_masking_faile
         signed_in: false,
         refused: None,
         mri: MriRecord::Recorded,
-        fence: FenceReport::default(),
+        browser: SessionReport::default(),
         capture: None,
     };
     assert!(matches!(finish_status(&status, Ok(report)), Err(LoginError::Status(_))));

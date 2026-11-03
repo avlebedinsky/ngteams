@@ -174,12 +174,6 @@ impl LabPaths {
         self.data_dir.join("bundles")
     }
 
-    /// The fence's JSONL log of decisions.
-    #[must_use]
-    pub fn fence_log(&self) -> PathBuf {
-        self.data_dir.join("fence.log")
-    }
-
     /// Where `proto-lab auth` keeps an account's region (`regionGtms` and all) and its skypetoken's expiry, never the
     /// token: `<data_dir>/auth/<alias>.json`.
     #[must_use]

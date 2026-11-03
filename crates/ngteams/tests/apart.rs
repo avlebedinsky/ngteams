@@ -129,7 +129,8 @@ fn features_of(package: &str) -> String {
 
 #[test]
 fn a_lab_binary_built_alone_has_neither_personal_feature() {
-    for lab in ["proto-lab", "teams-signin"] {
+    assert!(!features_of("proto-lab").contains("teams-fence"));
+    for lab in ["teams-signin"] {
         let tree = features_of(lab);
         assert!(tree.contains("teams-fence"), "{lab}: {tree}");
         for personal in [

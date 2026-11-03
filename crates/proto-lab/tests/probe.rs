@@ -23,7 +23,6 @@ use serde_json::{Value, json};
 use teams_auth::refresh::refresh_token_key;
 use teams_auth::secrets::{MemorySecretStore, Secret, SecretStore as _};
 use teams_auth::token::{EntraConfig, TokenClient, TokenError};
-use teams_fence::{LiveMembershipSource, Membership};
 use wiremock::matchers::{body_string_contains, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -175,8 +174,7 @@ fn request<'a>(config: &'a LabConfig, chat: &MockServer) -> ProbeRequest<'a> {
 }
 
 async fn run(config: &LabConfig, entra: &MockServer, chat: &MockServer) -> TestResult<ChatProbe> {
-    let source = LiveMembershipSource::with_mock_origin(&chat.uri())?;
-    Ok(probe_chat(&store().await?, &tokens(entra)?, request(config, chat), source).await?)
+    Ok(probe_chat(&store().await?, &tokens(entra)?, request(config, chat)).await?)
 }
 
 fn shown(probe: &ChatProbe) -> String {
@@ -218,9 +216,9 @@ async fn the_probe_reads_with_our_own_ic3_token_in_every_header_form_and_sends_o
     }
     let thread_read = &requests[HeaderForm::ALL.len()];
     assert_eq!(thread_read.url.path(), format!("{CHAT_PREFIX}/v1/threads/{AB_CHAT}"));
-    assert!(!thread_read.headers.contains_key("x-ms-migration"));
+    assert!(thread_read.headers.contains_key("x-ms-migration"));
 
-    assert!(matches!(probe.thread, Membership::Complete(_)), "{:?}", probe.thread);
+    assert!(probe.thread.is_ok(), "{:?}", probe.thread);
     assert_eq!(probe.conversations.len(), HeaderForm::ALL.len());
     let text = shown(&probe);
     assert!(!text.contains(&token), "{text}");
@@ -233,7 +231,7 @@ async fn the_probe_reads_with_our_own_ic3_token_in_every_header_form_and_sends_o
     assert!(text.contains("200"), "{text}");
     assert!(text.contains("contextid"), "{text}");
     assert!(!text.contains("tcid=0"), "header values aren't shown: {text}");
-    assert!(text.contains("complete"), "{text}");
+    assert!(text.contains("2 member(s)"), "{text}");
     Ok(())
 }
 
@@ -377,7 +375,7 @@ async fn a_gtm_value_with_stray_whitespace_is_trimmed() -> TestResult {
     let entra = entra(&ic3_token()).await;
     let chat = chat_service(ResponseTemplate::new(200).set_body_json(conversations())).await;
     let probe = run(&config, &entra, &chat).await?;
-    assert!(matches!(probe.thread, Membership::Complete(_)), "{:?}", probe.thread);
+    assert!(probe.thread.is_ok(), "{:?}", probe.thread);
     assert_eq!(probe.base, "https://teams.microsoft.com/api/chatsvc/amer");
     Ok(())
 }
@@ -415,16 +413,11 @@ async fn without_a_stored_refresh_token_nothing_reaches_the_chat_service() -> Te
     let config = lab(dir.path(), Some("https://teams.microsoft.com/api/chatsvc/amer"))?;
     let entra = entra(&ic3_token()).await;
     let chat = chat_service(ResponseTemplate::new(200).set_body_json(conversations())).await;
-    let source = LiveMembershipSource::with_mock_origin(&chat.uri())?;
-    let error = probe_chat(
-        &MemorySecretStore::new(),
-        &tokens(&entra)?,
-        request(&config, &chat),
-        source,
-    )
-    .await
-    .err()
-    .ok_or("probed")?;
+
+    let error = probe_chat(&MemorySecretStore::new(), &tokens(&entra)?, request(&config, &chat))
+        .await
+        .err()
+        .ok_or("probed")?;
     assert!(
         matches!(error, ProbeError::Token(TokenError::NotSignedIn { .. })),
         "{error}"
@@ -440,13 +433,12 @@ async fn an_account_without_an_mri_or_the_same_account_twice_is_refused() -> Tes
     let entra = entra(&ic3_token()).await;
     let chat = chat_service(ResponseTemplate::new(200).set_body_json(conversations())).await;
     for (alias, partner) in [(Alias::A, Alias::C), (Alias::A, Alias::A)] {
-        let source = LiveMembershipSource::with_mock_origin(&chat.uri())?;
         let probe = ProbeRequest {
             alias,
             partner,
             ..request(&config, &chat)
         };
-        let error = probe_chat(&store().await?, &tokens(&entra)?, probe, source)
+        let error = probe_chat(&store().await?, &tokens(&entra)?, probe)
             .await
             .err()
             .ok_or("probed")?;
@@ -587,9 +579,8 @@ async fn group_service(server: &MockServer) {
 }
 
 async fn run_thread(config: &LabConfig, entra: &MockServer, chat: &MockServer) -> TestResult<ThreadProbe> {
-    let source = LiveMembershipSource::with_mock_origin(&chat.uri())?;
     let origin = Origin::Mock(chat.uri());
-    Ok(probe_thread(&store().await?, &tokens(entra)?, config, Alias::A, &origin, source).await?)
+    Ok(probe_thread(&store().await?, &tokens(entra)?, config, Alias::A, &origin).await?)
 }
 
 /// The thread probe of a lab whose `chats.toml` records the group chat, against [`group_service`]: the lab, the

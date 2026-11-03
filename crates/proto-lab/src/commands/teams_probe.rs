@@ -21,18 +21,18 @@
 //!    name, a text or an id: a key that might be one is shown as `?`.
 //!
 //! A test reaches a local mock instead of the services only through [`Origin::Mock`], which a build without
-//! `teams-fence`'s `test-support` feature refuses (and the `proto-lab` binary refuses to run in such a build).
+//! `proto-lab`'s `test-support` feature refuses (and the `proto-lab` binary refuses to run in such a build).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 use std::time::SystemTime;
 
+use crate::protocol::AFD_HOSTS;
 use serde_json::Value;
 use teams_auth::authz::Region;
 use teams_auth::claims::TokenSummary;
 use teams_auth::secrets::SecretStore;
 use teams_auth::token::{Scope, TokenClient};
-use teams_fence::AFD_HOSTS;
 use url::Url;
 
 use super::auth::summary_line;

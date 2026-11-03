@@ -9,7 +9,6 @@ mod common;
 
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -17,19 +16,16 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use proto_lab::accounts::{AccountsError, AccountsFile};
 use proto_lab::arming::{ArmOptions, ArmedBrowser};
 use proto_lab::browser::{Browser, Display, LaunchOptions};
+use proto_lab::capture_hold::CaptureHold;
 use proto_lab::cdp::{Event, SessionId};
-use proto_lab::classify::{Classification, Classifier, classify};
 use proto_lab::commands::login::{
     Action, Clicks, LOGIN_CAPTURE, Progress, SignInProbe, SignInStop, StatusFile, next_action, perform, probe,
     session_options,
 };
 use proto_lab::commands::status::{AccountStatus, account_status};
 use proto_lab::config::Alias;
-use proto_lab::fence_http::HttpFence;
-use proto_lab::fence_ws::{GuardScript, WsFence};
 use proto_lab::session::{Identity, REFUSAL_GRACE, SessionState, SessionWatch, Settling};
 use serde_json::{Value, json};
-use teams_fence::{FailClosed, Fence, FenceLog, Roster};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -182,10 +178,7 @@ fn the_loaders_rules_refuse_a_bad_file() {
             format!(r#"[{{"profile": "a", "email": "{UPN_A}", "password": ""}}]"#),
             "an empty password",
         ),
-        (
-            format!(r#"[{{"profile": "a", "email": "{UPN_A}"}}]"#),
-            "no password",
-        ),
+        (format!(r#"[{{"profile": "a", "email": "{UPN_A}"}}]"#), "no password"),
         // a password of the wrong type: serde would print the value in a type error
         (
             format!(r#"[{{"profile": "a", "email": "{UPN_A}", "password": ["{SECRET}"]}}]"#),
@@ -773,25 +766,7 @@ fn login_records_its_run_fail_closed_and_without_request_bodies() {
         !options.capture_request_bodies,
         "the sign-in form's posts carry the password"
     );
-    assert!(!options.live_members, "fail-closed");
-    assert_eq!(options.classifier, Classifier::new());
     assert_eq!(options.display, Display::Headless);
-}
-
-#[test]
-fn entras_sign_in_form_reaches_nobody_under_the_lab_rule() {
-    for url in [
-        "https://login.microsoftonline.com/common/GetCredentialType?mkt=en-US",
-        "https://login.microsoftonline.com/common/login",
-        "https://login.microsoftonline.com/kmsi",
-        "https://login.microsoftonline.com/common/oauth2/v2.0/token?client-request-id=0a1b2c3d-4e5f-4061-8293-a4b5c6d7e8f9",
-        "https://login.microsoftonline.com/common/instrumentation/reportpageload",
-        // the account's own multi-factor sign-in: `login` never drives it, and stops at its prompt instead
-        "https://login.microsoftonline.com/common/SAS/BeginAuth",
-    ] {
-        assert_eq!(classify("POST", url, Some(b"{}")), Classification::Allow, "{url}");
-        assert_eq!(classify("GET", url, None), Classification::Read, "{url}");
-    }
 }
 
 // --- the sign-in steps ---
@@ -994,7 +969,7 @@ struct SignInRun {
     _dir: tempfile::TempDir,
 }
 
-async fn sign_in_run(chrome: &Path, server: &MockServer) -> TestResult<SignInRun> {
+async fn sign_in_run(chrome: &Path, _server: &MockServer) -> TestResult<SignInRun> {
     let dir = tempfile::tempdir()?;
     let browser = Browser::launch(
         chrome,
@@ -1002,17 +977,11 @@ async fn sign_in_run(chrome: &Path, server: &MockServer) -> TestResult<SignInRun
         Duration::from_secs(30),
     )
     .await?;
-    let fence = Arc::new(Fence::new(
-        Roster::default(),
-        FenceLog::open(&dir.path().join("fence.log"))?,
-    ));
-    let members = Arc::new(FailClosed);
-    let http = HttpFence::new(Classifier::new(), Arc::clone(&fence), members.clone());
-    let ws = WsFence::new(fence, members, GuardScript::generate()?);
-    let options = ArmOptions {
-        service_worker_origins: vec![server.uri()],
-    };
-    let armed = ArmedBrowser::arm(browser, http, ws, &options).await?;
+
+    let http = CaptureHold::new();
+
+    let options = ArmOptions::default();
+    let armed = ArmedBrowser::arm(browser, http, &options).await?;
     let page = armed.open_page(Duration::from_secs(15)).await?.session;
     Ok(SignInRun { armed, page, _dir: dir })
 }
@@ -1116,7 +1085,7 @@ async fn the_driver_signs_in_through_email_password_and_stay_signed_in() -> Test
         assert!(url.ends_with("/done?kmsi=true"), "{url} after {last:?}");
         assert_eq!(record, Value::Null, "the done page has no record");
         // the run never saw a deny of its own: typing and clicking are not requests
-        assert!(run.armed.denials().is_empty(), "{:?}", run.armed.denials());
+        assert!(run.armed.held_requests().is_empty(), "{:?}", run.armed.held_requests());
         Ok(())
     })
     .await

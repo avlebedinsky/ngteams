@@ -2,13 +2,12 @@
 
 use std::time::Duration;
 
-use serde_json::{Value, json};
+use serde_json::json;
 
 use super::*;
 use crate::browser::Display;
 use crate::scenario::ab_call::CallStep;
 use crate::scenario::ab_chat_full::tests::{broadcast, page, page_with};
-use crate::scenario::test_page::evaluated;
 
 const CHAT: &str = "19:synthetic-ab@thread.v2";
 const NONCE: &str = "synthetic-group-run";
@@ -28,7 +27,7 @@ async fn creation_records_only_the_group_named_by_this_runs_first_post_deny() {
     std::fs::create_dir(paths.data_dir()).unwrap();
     let mut peer = page(false, false).await;
     let mut session = peer.session(dir.path(), true);
-    deny_markers(&session, NONCE);
+    hold_first_message(&session, NONCE);
     let mut report = ScenarioReport::new(ScenarioName::AbcChat);
     let mut created = None;
     tokio::time::timeout(
@@ -46,15 +45,18 @@ async fn creation_records_only_the_group_named_by_this_runs_first_post_deny() {
     .unwrap()
     .unwrap();
     assert_eq!(created.as_deref(), Some(CHAT));
-    assert_eq!(session.denials().len(), 1);
-    assert_eq!(session.denials()[0].label.as_deref(), Some(THIS_RUN_FIRST_MESSAGE));
+    assert_eq!(session.held_requests().len(), 1);
+    assert_eq!(
+        session.held_requests()[0].label.as_deref(),
+        Some(THIS_RUN_FIRST_MESSAGE)
+    );
     record_creation(&paths, created, Ok(()), &mut report);
     assert_eq!(LabChats::load(&paths).unwrap().abc.as_deref(), Some(CHAT));
     assert!(
         report
             .notes
             .iter()
-            .any(|note| note.contains("first message was denied by the fence and failed"))
+            .any(|note| note.contains("first message was denied in the capture and failed"))
     );
     assert!(!report.failed(), "{report:?}");
 }
@@ -82,7 +84,7 @@ async fn the_group_is_recorded_even_when_the_denied_post_fails_with_the_wrong_pa
     })
     .await;
     let mut session = peer.session(dir.path(), true);
-    deny_markers(&session, NONCE);
+    hold_first_message(&session, NONCE);
     let mut report = ScenarioReport::new(ScenarioName::AbcChat);
     let mut created = None;
     let outcome = tokio::time::timeout(
@@ -122,11 +124,10 @@ async fn messaging_enforces_its_probe_before_both_other_accounts_read_the_servic
         peers.push(peer);
         dirs.push(dir);
     }
-    deny_markers(&sessions[0].1, NONCE);
-    let names = chat_url(CHAT).unwrap();
+    hold_first_message(&sessions[0].1, NONCE);
     let steps = MessageSteps {
         chat_id: CHAT,
-        names_chat: &names,
+
         nonce: NONCE,
         options: options(),
     };
@@ -145,7 +146,7 @@ async fn messaging_enforces_its_probe_before_both_other_accounts_read_the_servic
         .unwrap();
     assert!(report.notes.contains(&"b shows a's message and not the probe".into()));
     assert!(report.notes.contains(&"c shows a's message and not the probe".into()));
-    assert_eq!(sessions[0].1.denials()[0].label.as_deref(), Some(THIS_RUN_PROBE));
+
     assert!(report.failures.is_empty());
     assert!(
         peers[1]
@@ -153,38 +154,6 @@ async fn messaging_enforces_its_probe_before_both_other_accounts_read_the_servic
             .iter()
             .any(|command| command["method"] == "Page.navigate")
     );
-}
-
-#[tokio::test]
-async fn a_probe_visible_in_a_readers_copy_fails_that_reader_instead_of_claiming_enforcement() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut peer = page_with(false, false, |command, _| {
-        let expression = command["params"]["expression"].as_str().unwrap_or_default();
-        (command["method"] == "Runtime.evaluate" && expression.starts_with("(document.body?.innerText"))
-            .then(|| Ok(evaluated(Value::Bool(true))))
-    })
-    .await;
-    let mut session = peer.session(dir.path(), false);
-    let names = chat_url(CHAT).unwrap();
-    let steps = MessageSteps {
-        chat_id: CHAT,
-        names_chat: &names,
-        nonce: NONCE,
-        options: options(),
-    };
-    let error = tokio::time::timeout(
-        Duration::from_secs(5),
-        steps.receive(
-            Alias::C,
-            &mut session,
-            "synthetic ordinary message",
-            "synthetic denied probe",
-        ),
-    )
-    .await
-    .unwrap()
-    .unwrap_err();
-    assert!(error.to_string().contains("c received the probe the fence denied"));
 }
 
 #[tokio::test]

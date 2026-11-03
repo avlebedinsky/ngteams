@@ -1,71 +1,29 @@
-//! The `ab-file` scenario: what the web client sends when account a sends a file in the a–b chat, with every write of
-//! it denied, recorded for the protocol notes (`docs/protocol/chat.md`, M2 Task 23), as `ab-image` did for an image.
-//! It runs under `ab-chat`'s fence: the lab rule (`crate::classify`), members read live, `ab-chat`'s forced-deny probes
-//! and the reviewed expected-deny list.
-//!
-//! A file sent in a chat lives in the sender's `OneDrive` (`SharePoint`) and is shared with the chat's members; the
-//! message carries a reference to it. Those are contacting services no row maps, so the fence would deny it anyway; the
-//! scenario denies it on purpose, from before a's page loads to the end of the run, so the run expects it by name and
-//! the capture holds each request whole (headers and body) as data for deciding whether the file's sharing could be
-//! fenced:
-//!
-//! - every write to the file services ([`deny_file_writes`], labelled [`FILE_WRITE`]): `SharePoint` and `OneDrive` hosts,
-//!   their media hosts, and Graph ([`FILE_SERVICE`]), whatever the path;
-//! - every write to an AMS object (`ab-image`'s rules, labelled [`MEDIA_WRITE`]), should the client take a file there;
-//! - every `POST` or `PUT` whose body names a file of a run of this scenario ([`FILE_MARKER`], labelled
-//!   [`FILE_MESSAGE`]), whatever its URL: the message that would carry the file, and its caption with it. This run's
-//!   file name and caption both hold the marker, so the post is denied whether it names the file, the caption or both,
-//!   and an earlier run's file message, sent again on a later load, is denied too. A denied post's body is the
-//!   message's file shape.
-//!
-//! 1. a's probes and the file rules are force-denied from before its page loads; a and b load the web client.
-//! 2. a opens the chat with b, and the live enforcement test comes first (`ab_chat::enforce`).
-//! 3. a sends a plain message ([`Texts::plain`]), which b will show.
-//! 4. a types a caption ([`Texts::caption`]) and drops a made-up text file ([`test_file`]) on the compose box; if the
-//!    box shows no file, the same file is pasted; if it still shows none, the page's file pickers are made to hand the
-//!    file over without a dialog ([`hand_file_to_pickers`]) and the box's attach button is clicked, with its upload
-//!    item. A box that shows no file fails the run before anything is sent, with the caption taken out of it again
-//!    and what the page said noted (live, 2026-10-22, it took none: "you need `OneDrive` to share files", once the
-//!    account's own file storage check was denied). Else a presses Enter. The client must try a write of the file
-//!    within [`FILE_WAIT`], denied under one of the file labels; the run then watches [`SETTLE`] more and notes every
-//!    deny after the file was handed over (method and URL without its query, labelled or not).
-//! 5. a's web client is loaded again; for [`SETTLE`] the run notes whether it tries the file again. Then a opens the
-//!    chat again and, if it shows this run's file unsent ([`mark_unsent_file`]), deletes it from its actions.
-//! 6. b opens the chat, shows a's plain message and must not have the probe (`ab_chat::not_received`); whether b
-//!    shows the file's name is noted.
-//!
-//! Nothing a file service would hold is sent: every write of the file is denied. The run fails (as any run) on a
-//! breach or a deny it doesn't expect, and when the client never tries a write of the file.
+//! Captures file attachment request shapes. Explicit file/media holds retain writes for inspection, while the plain chat message exercises delivery.
 
 use std::time::Duration;
 
 use crate::browser::Media;
+use crate::capture_hold::{HeldRequest, Hold};
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
-use crate::fence_http::{Denial, DenyCause, ForcedDeny};
 use crate::session::{LabSession, SessionOptions};
 
 use super::ab_chat::{
-    COMPOSE, COMPOSE_CSS, DELIVERY, EARLIER_RUN_PROBE, THIS_RUN_PROBE, chat_link, chat_requests, chat_url, deny_probes,
-    enforce, load, nonce, not_received, one_to_one_id, probe_text, save_screenshot_as, send, setup, wait_for_newest,
+    COMPOSE, COMPOSE_CSS, DELIVERY, chat_link, chat_requests, load, nonce, one_to_one_id, save_screenshot_as, send,
+    setup, wait_for_newest,
 };
 use super::ab_chat_full::{CHAT_OPEN, PAGE_CALL, clear_compose, message_action};
 use super::ab_image::{AttachmentWaits, MEDIA_WRITE, SETTLE, media_rules};
 use super::dsl::{Driver, Key, RequestPattern, StepError, js_string};
-use super::expected::Review;
-use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport};
+use super::{RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
-/// The label of the forced deny of every write to the file services ([`FILE_SERVICE`]).
+/// The label of the capture hold of every write to the file services ([`FILE_SERVICE`]).
 pub const FILE_WRITE: &str = "a file service write";
 
-/// The label of the forced deny of every `POST` or `PUT` whose body names a file of this scenario ([`FILE_MARKER`]).
+/// The label of the capture hold of every `POST` or `PUT` whose body names a file of this scenario ([`FILE_MARKER`]).
 pub const FILE_MESSAGE: &str = "a write naming a lab file";
 
 /// What every file name and caption of this scenario holds ([`Texts`]); a write whose body holds it is denied.
 pub const FILE_MARKER: &str = "lab-file-";
-
-/// The forced denies a run of this scenario expects: `ab-chat`'s two probe rules, the file service writes, the media
-/// writes and the writes naming a lab file.
-pub const EXPECTED_FORCED: [&str; 5] = [THIS_RUN_PROBE, EARLIER_RUN_PROBE, FILE_WRITE, MEDIA_WRITE, FILE_MESSAGE];
 
 /// The labels of a write of the file: what [`is_file_write`] counts.
 pub const FILE_LABELS: [&str; 3] = [FILE_WRITE, MEDIA_WRITE, FILE_MESSAGE];
@@ -75,7 +33,7 @@ pub const FILE_LABELS: [&str; 3] = [FILE_WRITE, MEDIA_WRITE, FILE_MESSAGE];
 /// same files).
 pub const FILE_SERVICE: &str = r"(?i)^https?://([^/?#]*\.)?(sharepoint\.com|sharepoint-df\.com|microsoftpersonalcontent\.com|onedrive\.com|onedrive\.live\.com|svc\.ms|graph\.microsoft\.com)(:[0-9]+)?(/|\?|#|$)";
 
-/// The methods [`deny_file_writes`] denies on [`FILE_SERVICE`]: every one but a read (and a preflight, which Chrome
+/// The methods [`hold_file_writes`] denies on [`FILE_SERVICE`]: every one but a read (and a preflight, which Chrome
 /// answers without the page).
 pub const FILE_METHODS: [&str; 5] = ["POST", "PUT", "PATCH", "DELETE", "MERGE"];
 
@@ -120,21 +78,21 @@ pub fn test_file(nonce: &str) -> Vec<u8> {
     format!("A made-up text file of the lab's ab-file scenario, run {nonce}.\nIt holds nothing else.\n").into_bytes()
 }
 
-/// The rules [`deny_file_writes`] forces, in order (a deny names the first rule that matched it): the file services'
+/// The rules [`hold_file_writes`] forces, in order (a deny names the first rule that matched it): the file services'
 /// writes ([`FILE_WRITE`]), the AMS objects' (`ab-image`'s [`MEDIA_WRITE`]), then any `POST` or `PUT` naming a lab file
 /// ([`FILE_MESSAGE`]).
 ///
 /// # Errors
 /// Never: the patterns are fixed.
-pub fn file_rules() -> Result<Vec<ForcedDeny>, regex::Error> {
+pub fn file_rules() -> Result<Vec<Hold>, regex::Error> {
     let mut rules = Vec::new();
     for method in FILE_METHODS {
-        rules.push(ForcedDeny::new(method, FILE_SERVICE)?.labelled(FILE_WRITE));
+        rules.push(Hold::new(method, FILE_SERVICE)?.labelled(FILE_WRITE));
     }
     rules.extend(media_rules()?);
     for method in ["POST", "PUT"] {
         rules.push(
-            ForcedDeny::new(method, ".")?
+            Hold::new(method, ".")?
                 .with_body_containing(FILE_MARKER)
                 .labelled(FILE_MESSAGE),
         );
@@ -146,34 +104,20 @@ pub fn file_rules() -> Result<Vec<ForcedDeny>, regex::Error> {
 ///
 /// # Errors
 /// Never: the patterns are fixed.
-pub fn deny_file_writes(session: &LabSession) -> Result<(), ScenarioError> {
+pub fn hold_file_writes(session: &LabSession) -> Result<(), ScenarioError> {
     for rule in file_rules().map_err(|error| setup(error.to_string()))? {
-        session.force_deny(rule);
+        session.hold(rule);
     }
     Ok(())
 }
 
-/// The denies a run of this scenario expects: [`EXPECTED_FORCED`] and the reviewed list; with the a–b chat's id, any
-/// other deny of a URL naming that chat is unexpected.
-///
-/// # Errors
-/// Never for an id from [`one_to_one_id`]; when the chat's pattern doesn't compile.
-pub fn policy(chat_id: Option<&str>) -> Result<DenyPolicy, regex::Error> {
-    let mut review = Review::new().expecting_forced(&EXPECTED_FORCED);
-    if let Some(chat_id) = chat_id {
-        review = review.with_mapped_target(chat_url(chat_id)?);
-    }
-    Ok(DenyPolicy::Reviewed(review))
-}
-
 /// Whether `denial` is a write of the file the run forced ([`FILE_LABELS`]).
 #[must_use]
-pub fn is_file_write(denial: &Denial) -> bool {
-    denial.cause == DenyCause::Forced
-        && denial
-            .label
-            .as_deref()
-            .is_some_and(|label| FILE_LABELS.contains(&label))
+pub fn is_file_write(denial: &HeldRequest) -> bool {
+    denial
+        .label
+        .as_deref()
+        .is_some_and(|label| FILE_LABELS.contains(&label))
 }
 
 /// The page expression that hands the compose box ([`COMPOSE_CSS`]) `content` as a file named `file_name` of type
@@ -352,17 +296,15 @@ pub fn mark_unsent_file(stem: &str) -> String {
 /// Runs `ab-file` (see the module docs).
 ///
 /// # Errors
-/// When the run can't start: no lab config, no Chrome, no fence, a browser that can't be armed.
+/// When the run can't start: no lab config, no Chrome, a browser whose capture setup fails.
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
     let config = LabConfig::load(&LabLocations::from_env()?)?;
     let session_options = SessionOptions {
-        live_members: true,
         capture: Some(ScenarioName::AbFile.as_str().to_owned()),
         capture_request_bodies: true,
         display: options.display,
         media: Media::System,
         user_agent: None,
-        ..SessionOptions::fail_closed()
     };
     let a = LabSession::open_with(paths, Alias::A, session_options.clone()).await?;
     let b = match LabSession::open_with(paths, Alias::B, session_options).await {
@@ -381,7 +323,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         mri_b: mri(Alias::B),
         texts: Texts::new(&nonce),
         content: test_file(&nonce),
-        probe: probe_text(&nonce),
+
         options,
         waits: AttachmentWaits {
             attach: ATTACH_WAIT,
@@ -396,17 +338,12 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
 async fn finish(mut a: LabSession, mut b: LabSession, chat_id: Option<&str>, file: &File) -> ScenarioReport {
     let mut report = ScenarioReport::new(ScenarioName::AbFile);
     // Arm the rules before either client loads or retries an earlier attachment.
-    for denied in [deny_probes(&a, Some(&file.probe)), deny_file_writes(&a)] {
+    for denied in [hold_file_writes(&a)] {
         if let Err(error) = denied {
             report.failures.push(error.to_string());
         }
     }
-    let policy = policy(chat_id).unwrap_or_else(|error| {
-        report
-            .failures
-            .push(format!("can't tell the a–b chat in a URL: {error}"));
-        DenyPolicy::Reviewed(Review::new().expecting_forced(&EXPECTED_FORCED))
-    });
+
     if let Err(error) = file.run(chat_id, &mut a, &mut b, &mut report).await {
         report.failures.push(error.to_string());
         for (alias, session) in [(Alias::A, &a), (Alias::B, &b)] {
@@ -415,13 +352,13 @@ async fn finish(mut a: LabSession, mut b: LabSession, chat_id: Option<&str>, fil
             }
         }
     }
-    let writes = a.denials().iter().filter(|denial| is_file_write(denial)).count();
+    let writes = a.held_requests().iter().filter(|denial| is_file_write(denial)).count();
     report
         .notes
         .push(format!("a: {writes} write(s) of the file denied in all"));
     // both browsers go down and both captures are finished, whatever happened to either
     for (alias, session) in [(Alias::A, a), (Alias::B, b)] {
-        report.close_account(alias, session, &policy).await;
+        report.close_account(alias, session).await;
     }
     report
 }
@@ -432,7 +369,7 @@ struct File {
     mri_b: String,
     texts: Texts,
     content: Vec<u8>,
-    probe: String,
+
     options: RunOptions,
     waits: AttachmentWaits,
 }
@@ -452,7 +389,7 @@ impl File {
         }
         let chat_id = chat_id
             .ok_or_else(|| setup("lab.toml has no MRI for a or b: run `proto-lab login` for them".to_owned()))?;
-        let names_chat = chat_url(chat_id).map_err(|error| setup(error.to_string()))?;
+
         let opened = chat_requests(chat_id).map_err(|error| setup(error.to_string()))?;
         let mut drive_a = a.driver();
         drive_a.set_call_timeout(PAGE_CALL);
@@ -460,10 +397,7 @@ impl File {
             .navigate("a opens the chat with b", &chat_link(&self.mri_b))
             .await?;
         drive_a.wait_for("a's compose box", COMPOSE, CHAT_OPEN).await?;
-        enforce(a, &mut drive_a, &self.probe, &names_chat).await?;
-        report
-            .notes
-            .push("enforcement: a's probe post was denied by the fence and failed in a's page".to_owned());
+
         send(&mut drive_a, "a (the plain message)", &self.texts.plain).await?;
         report.notes.push("a: plain message sent".to_owned());
         let outcome = self.send_file(a, &mut drive_a, report).await;
@@ -485,7 +419,7 @@ impl File {
         drive: &mut Driver,
         report: &mut ScenarioReport,
     ) -> Result<(), ScenarioError> {
-        let before = a.denials().len();
+        let before = a.held_requests().len();
         let before_file = file_writes(a).len();
         drive.skip_seen();
         drive
@@ -699,10 +633,7 @@ impl File {
             .wait_for_request("b reads the a–b chat", opened, CHAT_OPEN)
             .await?;
         wait_for_newest(&mut drive, "b shows a's plain message", &self.texts.plain, DELIVERY).await?;
-        not_received(&mut drive, &self.probe).await?;
-        report
-            .notes
-            .push("enforcement: b's copy of the chat has a's message and not the probe".to_owned());
+
         let named = drive
             .shows_text("b shows the file's name", self.texts.file_stem())
             .await?;
@@ -713,8 +644,8 @@ impl File {
 
 /// Notes every deny of `session` after the first `before`: method, URL (without its query) and label or cause.
 fn note_denials(session: &LabSession, before: usize, report: &mut ScenarioReport) {
-    for denial in session.denials().iter().skip(before) {
-        let why = denial.label.clone().unwrap_or_else(|| format!("{:?}", denial.cause));
+    for denial in session.held_requests().iter().skip(before) {
+        let why = denial.label.clone().unwrap_or_else(|| "capture hold".to_owned());
         report
             .notes
             .push(format!("a: denied: {} {} ({why})", denial.method, denial.url));
@@ -722,12 +653,12 @@ fn note_denials(session: &LabSession, before: usize, report: &mut ScenarioReport
 }
 
 /// `session`'s writes of the file denied so far, in order.
-fn file_writes(session: &LabSession) -> Vec<Denial> {
-    session.denials().into_iter().filter(is_file_write).collect()
+fn file_writes(session: &LabSession) -> Vec<HeldRequest> {
+    session.held_requests().into_iter().filter(is_file_write).collect()
 }
 
 /// Waits up to `timeout` for a write of the file denied after the first `before`; the first such one.
-async fn wait_file_write(session: &LabSession, before: usize, timeout: Duration) -> Option<Denial> {
+async fn wait_file_write(session: &LabSession, before: usize, timeout: Duration) -> Option<HeldRequest> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         if let Some(denial) = file_writes(session).into_iter().nth(before) {

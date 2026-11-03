@@ -1,49 +1,17 @@
-//! The `own-presence-*` scenarios (`docs/protocol/trouter.md`, "Own presence"): what makes account a show online as b
-//! sees it, and what a manual status sends. Presence reaches nobody (CLAUDE.md), so under the lab rule it all passes;
-//! each run holds back on purpose, with a labelled forced deny, what it leaves out.
-//!
-//! Only account a's browser runs; the scenario does not sample b's view. It notes the Unix time of each step so
-//! separately collected presence observations can be lined up with it.
-//!
-//! Each runs as `ab-trouter` does (the lab rule, members read live), and differs in what reports a's availability
-//! ([`Report`], [`Report::hold`]):
-//! - `own-presence-activity`: the Trouter `user.activity` frame alone; UPS's presence endpoint `PUT` held back.
-//! - `own-presence-endpoint`: the endpoint `PUT` alone; every `user.activity` held back (as in `ab-trouter-quiet`).
-//! - `own-presence-both`: both.
-//! - `own-presence-manual-held`: both, and a sets its status by hand (Busy, Do not disturb, Away, Available, then a
-//!   reset) with the request each sends held back, to capture it.
-//! - `own-presence-manual`: as `own-presence-manual-held`, the manual status let through.
-//!
-//! The steps:
-//! 1. Before anything loads, a's fence force-denies every write carrying the probe marker, as in `ab-chat`.
-//! 2. a opens the web client and must register its messaging endpoint, then opens the chat with b and proves
-//!    enforcement live with this run's probe (`ab-chat`'s step 4).
-//! 3. What reported a's availability is noted: with the endpoint `PUT` allowed, one must be answered with a 2xx within
-//!    [`REPORT`] (in the manual runs none is only noted: the web client didn't send one in every run); with it denied,
-//!    a denied one is noted (none is no failure).
-//! 4. The manual runs set each status of [`STATUSES`] and then reset it, from the account menu, each held for
-//!    [`STATUS_HOLD`]; the others hold the page open, nothing driven, for [`OBSERVE`].
-//! 5. The notes count the endpoint `PUT`s and the manual status requests, answered and denied. Judged as `ab-trouter`
-//!    ([`super::ab_trouter::trouter_policy`]), with the run's own held-back requests or frames ([`policy`]).
-//!
-//! Nothing in the run answers a call, sets a status note, out-of-office or a work location.
+//! Records the account's own presence reports. Each variant selectively holds its chosen HTTP request or activity frame; all other traffic passes normally.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::browser::Media;
+use crate::capture_hold::{Hold as RequestHold, without_query};
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
-use crate::fence_http::{ForcedDeny, without_query};
 use crate::session::{LabSession, SessionOptions};
 
-use super::ab_chat::{
-    CHAT_OPEN, COMPOSE, EARLIER_RUN_PROBE, EXPECTED_FORCED, THIS_RUN_PROBE, chat_link, chat_url, deny_probes, enforce,
-    load, nonce, one_to_one_id, probe_text, save_screenshot, setup,
-};
-use super::ab_trouter::{HELD_ACTIVITY, hold_activity, size, wait_registered};
+use super::ab_chat::{CHAT_OPEN, COMPOSE, chat_link, load, one_to_one_id, save_screenshot, setup};
+use super::ab_trouter::{hold_activity, size, wait_registered};
 use super::dsl::{Driver, RequestPattern, SeenRequest, Selector};
-use super::expected::Review;
-use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport};
+use super::{RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
 /// What reports a's availability in a run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -87,7 +55,7 @@ impl Report {
         .find(|report| report.scenario() == name)
     }
 
-    /// What the run holds back on purpose (a forced deny labelled as [`Hold::label`] says), if anything: the endpoint
+    /// What the run holds back on purpose (a capture hold labelled as [`Hold::label`] says), if anything: the endpoint
     /// `PUT` for [`Report::Activity`], every `user.activity` for [`Report::Endpoint`], the manual status for
     /// [`Report::ManualHeld`].
     #[must_use]
@@ -97,17 +65,6 @@ impl Report {
             Self::Endpoint => Some(Hold::Activity),
             Self::ManualHeld => Some(Hold::ManualStatus),
             Self::Both | Self::Manual => None,
-        }
-    }
-
-    /// The forced denies a run with this report expects: `ab-chat`'s two probe rules', and its hold's.
-    #[must_use]
-    pub fn expected_forced(self) -> &'static [&'static str] {
-        match self.hold() {
-            None => &EXPECTED_FORCED,
-            Some(Hold::EndpointPut) => &[THIS_RUN_PROBE, EARLIER_RUN_PROBE, HELD_ENDPOINT_PUT],
-            Some(Hold::Activity) => &[THIS_RUN_PROBE, EARLIER_RUN_PROBE, HELD_ACTIVITY],
-            Some(Hold::ManualStatus) => &[THIS_RUN_PROBE, EARLIER_RUN_PROBE, HELD_MANUAL_STATUS],
         }
     }
 
@@ -166,21 +123,32 @@ pub enum Hold {
     ManualStatus,
 }
 
-/// The label of the forced deny that holds the endpoint `PUT` back.
+/// The label of the capture hold that holds the endpoint `PUT` back.
 pub const HELD_ENDPOINT_PUT: &str = "held-back endpoint PUT";
 
-/// The label of the forced deny that holds the manual status back.
+/// The label of the capture hold that holds the manual status back.
 pub const HELD_MANUAL_STATUS: &str = "held-back manual status";
 
-/// Forces `hold` on `session`'s fence: from before its page loads to the end of the run.
+/// Forces `hold` on `session`'s capture holds: from before its page loads to the end of the run.
 ///
 /// # Errors
 /// Never: the patterns are fixed.
-pub fn force_hold(session: &LabSession, hold: Hold) -> Result<(), regex::Error> {
+pub async fn force_hold(session: &LabSession, hold: Hold) -> Result<(), ScenarioError> {
     match hold {
-        Hold::EndpointPut => session.force_deny(ForcedDeny::new("PUT", ENDPOINT_PUT)?.labelled(HELD_ENDPOINT_PUT)),
-        Hold::Activity => session.force_deny_frames(hold_activity()?),
-        Hold::ManualStatus => session.force_deny(ForcedDeny::new("PUT", MANUAL_STATUS)?.labelled(HELD_MANUAL_STATUS)),
+        Hold::EndpointPut => session.hold(
+            RequestHold::new("PUT", ENDPOINT_PUT)
+                .map_err(|error| setup(error.to_string()))?
+                .labelled(HELD_ENDPOINT_PUT),
+        ),
+        Hold::Activity => session
+            .hold_frames(hold_activity().map_err(|error| setup(error.to_string()))?)
+            .await
+            .map_err(|error| setup(error.to_string()))?,
+        Hold::ManualStatus => session.hold(
+            RequestHold::new("PUT", MANUAL_STATUS)
+                .map_err(|error| setup(error.to_string()))?
+                .labelled(HELD_MANUAL_STATUS),
+        ),
     }
     Ok(())
 }
@@ -195,19 +163,6 @@ pub const MANUAL_STATUS: &str = r"/ups/[a-z]+/v1/me/forceavailability/?$";
 const ACCOUNT_MENU: Selector<'static> = Selector::Tid("me-control-avatar-trigger");
 const STATUS_MENU: Selector<'static> = Selector::Tid("set-presence-status-menu-item");
 const RESET_STATUS: Selector<'static> = Selector::Tid("set-availability-reset-status");
-
-/// How a run with `report` judges its denies: `ab-trouter`'s forced denies and mapped target, with the forced deny of
-/// what the run holds back ([`Report::expected_forced`]).
-///
-/// # Errors
-/// Never for an id from [`one_to_one_id`]; when the chat's pattern doesn't compile.
-pub fn policy(report: Report, chat_id: Option<&str>) -> Result<DenyPolicy, regex::Error> {
-    let mut review = Review::new().expecting_forced(report.expected_forced());
-    if let Some(chat_id) = chat_id {
-        review = review.with_mapped_target(chat_url(chat_id)?);
-    }
-    Ok(DenyPolicy::Reviewed(review))
-}
 
 /// The seconds since the Unix epoch now, for the notes: what b's reads are lined up with.
 fn unix_now() -> u64 {
@@ -264,18 +219,16 @@ pub async fn run_named(
 /// Runs one of the `own-presence-*` scenarios (see the module docs).
 ///
 /// # Errors
-/// When the run can't start: no lab config, no Chrome, no fence, a browser that can't be armed.
+/// When the run can't start: no lab config, no Chrome, a browser whose capture setup fails.
 pub async fn run(paths: &LabPaths, options: RunOptions, report_with: Report) -> Result<ScenarioReport, ScenarioError> {
     let config = LabConfig::load(&LabLocations::from_env()?)?;
     let name = report_with.scenario();
     let session_options = SessionOptions {
-        live_members: true,
         capture: Some(name.as_str().to_owned()),
         capture_request_bodies: true,
         display: options.display,
         media: Media::System,
         user_agent: None,
-        ..SessionOptions::fail_closed()
     };
     let a = LabSession::open_with(paths, Alias::A, session_options).await?;
     Ok(finish(a, &config, options, report_with, PresenceWaits::default()).await)
@@ -289,27 +242,19 @@ async fn finish(
     waits: PresenceWaits,
 ) -> ScenarioReport {
     let mut report = ScenarioReport::new(report_with.scenario());
-    let nonce = nonce();
-    if let Err(error) = deny_probes(&a, Some(&probe_text(&nonce))) {
-        report.failures.push(error.to_string());
-    }
+
     if let Some(hold) = report_with.hold()
-        && let Err(error) = force_hold(&a, hold)
+        && let Err(error) = force_hold(&a, hold).await
     {
         report.failures.push(format!("can't hold {hold:?} back: {error}"));
     }
     let mri = |alias| config.account(alias).mri.as_deref().unwrap_or_default();
     let chat_id = one_to_one_id(mri(Alias::A), mri(Alias::B));
-    let policy = policy(report_with, chat_id.as_deref()).unwrap_or_else(|error| {
-        report
-            .failures
-            .push(format!("can't tell the a–b chat in a URL: {error}"));
-        DenyPolicy::Reviewed(Review::new().expecting_forced(report_with.expected_forced()))
-    });
+
     let steps = Steps {
         mri_b: mri(Alias::B),
         chat_id: chat_id.as_deref(),
-        nonce: &nonce,
+
         options,
         report_with,
         waits,
@@ -321,7 +266,7 @@ async fn finish(
         }
     }
     report.notes.push(format!("a: the page closes at unix {}", unix_now()));
-    report.close_account(Alias::A, a, &policy).await;
+    report.close_account(Alias::A, a).await;
     report
         .notes
         .push(format!("a: the browser closed at unix {}", unix_now()));
@@ -331,7 +276,7 @@ async fn finish(
 struct Steps<'a> {
     mri_b: &'a str,
     chat_id: Option<&'a str>,
-    nonce: &'a str,
+
     options: RunOptions,
     report_with: Report,
     waits: PresenceWaits,
@@ -362,7 +307,7 @@ impl Default for PresenceWaits {
 
 impl Steps<'_> {
     async fn run(&self, a: &mut LabSession, report: &mut ScenarioReport) -> Result<(), ScenarioError> {
-        let chat_id = self
+        let _chat_id = self
             .chat_id
             .ok_or_else(|| setup("lab.toml has no MRI for a or b: run `proto-lab login` for them".to_owned()))?;
         let mut drive = a.driver();
@@ -378,12 +323,7 @@ impl Steps<'_> {
         drive
             .wait_for("a's compose box", COMPOSE, self.options.load_timeout.max(CHAT_OPEN))
             .await?;
-        let names_chat = chat_url(chat_id).map_err(|error| setup(error.to_string()))?;
-        enforce(a, &mut drive, &probe_text(self.nonce), &names_chat).await?;
-        report.notes.push(format!(
-            "enforcement: a's probe post was denied by the fence and failed in a's page (unix {})",
-            unix_now()
-        ));
+
         self.reported(&mut drive, report).await?;
         if self.report_with.manual() {
             self.set_statuses(&mut drive, report).await?;
@@ -404,9 +344,7 @@ impl Steps<'_> {
         report
             .notes
             .push(tally("a: manual status requests", &manual, drive.requests()));
-        report
-            .notes
-            .push(format!("a: {} WebSocket frame(s) denied", a.frame_denials().len()));
+
         Ok(())
     }
 

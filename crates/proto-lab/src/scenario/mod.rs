@@ -1,54 +1,4 @@
-//! Scenarios: scripted runs of the Teams web client in lab profiles under the armed fence (`proto-lab run`).
-//!
-//! - [`load`] (account a, membership source fail-closed): opens the web client, waits for it to load and records the
-//!   traffic. Every request the fence denies is expected and goes into the capture as data for mapping writes.
-//! - [`ab_chat`] (accounts a and b, writes mapped, members read live): a sends a message in the a–b chat and b
-//!   receives it; before that, a forced deny on one a–b message checks live that a denied write never leaves the
-//!   browser.
-//! - [`ab_chat_full`] (accounts a and b, as `ab-chat`): the a–b chat beyond a plain message, recorded: a sends, edits,
-//!   reacts and takes the reaction back, mentions b (picked from the mention picker only once it is b), replies with a
-//!   quote and reacts to it, and deletes; b reads (the mention among it) and reacts.
-//! - [`ab_image`] (accounts a and b, as `ab-chat`, every media service write force-denied): what the web client sends
-//!   when a sends an image in the a–b chat; recorded.
-//! - [`ab_file`] (accounts a and b, as `ab-chat`, every write of the file force-denied): what the web client sends
-//!   when a sends a file in the a–b chat; recorded.
-//! - [`abc_chat`] (accounts a, b and c, writes mapped, members read live): the group chat of a, b and c, created once
-//!   (its id kept in the lab's `chats.toml`), then messaged (a sends, b and c receive, after a live enforcement
-//!   test), each write judged by the group chat's member list, read fresh.
-//! - [`ab_trouter`] (accounts a and b, writes mapped, members read live): b's Trouter session while a sends, edits and
-//!   reacts in the a–b chat, recorded; `ab-trouter-quiet` holds back the client's own `user.activity` with a forced
-//!   deny.
-//! - [`chat_shapes`] (accounts a and b, as `ab-trouter`, plus the lab's group chat): the chat shapes the native UI
-//!   still needs, recorded: each quick reaction set and taken back, typing as a types, pauses and empties its box
-//!   (and how long b's open chat shows it), a message with line breaks and a link, a mention of b in the group chat.
-//! - [`abc_everyone`] (accounts a and b, as `abc-chat`): a mention of everyone in the lab's group chat, held back and read
-//!   first, then sent and shown on b's page; recorded.
-//! - [`own_presence`] (account a, as `ab-trouter`): what makes a show online as b reads it (`own-presence-activity`,
-//!   `-endpoint`, `-both`, each holding the other report back with a forced deny) and what a manual status sends
-//!   (`own-presence-manual-held`, `own-presence-manual`); recorded.
-//! - [`echo_call`] (account a, writes mapped, members read live, fake microphone): a places the web client's test call
-//!   to the echo service, the one approved participant outside the lab, stays in it a while and hangs up; recorded.
-//! - [`ab_call`] and [`abc_call`] (accounts a and b, or a, b and c, as `echo-call`): a calls b from their 1:1 chat, or
-//!   the a–b–c group chat; the run's step (`--call`) holds back a's starts, or plays out the ring with every callee's
-//!   sends held back; recorded.
-//!
-//! - [`ab_meeting`] (account a, as `ab-chat`): a schedules a Teams meeting with b from the scheduling form, changes its
-//!   title and cancels it; recorded.
-//! - [`channel_create`] (account a, fail-closed as `load`, every write that could make a channel force-denied): what the
-//!   "Create a channel" dialog offers and sends for each type and layout; recorded, nothing made.
-//! - [`ab_meeting_join`] (account a, as `ab-meeting`): a schedules a Teams meeting with b, opens its join link and clicks
-//!   the pre-join's Join now; what follows the subscription is held back; recorded.
-//! - [`team_manage`] (one account, driven step by step over a socket, every write on a team held back or judged by the
-//!   lab rule alone): a look at the web client's team management; recorded.
-//! - [`meeting_steps`] (one account, driven step by step over a socket as `team-manage` is, after the enforcement test,
-//!   every write judged by the lab rule): a look at a meeting's pre-join, lobby, options and a channel's meeting;
-//!   recorded.
-//! - [`search`] (account a, fail-closed as `load`): a searches from the title bar (the suggestions as it types, the
-//!   results and each of their tabs, a message found opened); recorded.
-//!
-//! The steps are in [`dsl`]. A run fails (`proto-lab run` exits non-zero) when its goal isn't reached, when the fence
-//! was breached, and on any **unexpected** deny: what a scenario expects is its [`DenyPolicy`]. The writing scenarios
-//! judge by the reviewed expected-deny list ([`expected`]), which never changes what the fence denies.
+//! Browser capture scenarios and their reports. A run records setup/shutdown failures and failures of its actual steps; explicit capture holds are observations rather than authorization denials.
 
 pub mod ab_call;
 pub mod ab_chat;
@@ -65,7 +15,6 @@ pub mod channel_create;
 pub mod chat_shapes;
 pub mod dsl;
 pub mod echo_call;
-pub mod expected;
 pub mod load;
 pub mod meeting_steps;
 pub mod own_presence;
@@ -83,13 +32,11 @@ use std::time::Duration;
 use clap::ValueEnum;
 
 use crate::browser::Display;
+use crate::capture_hold::HeldRequest;
 use crate::config::{Alias, LabPaths};
-use crate::fence_http::Denial;
-use crate::fence_ws::FrameDenial;
-use crate::session::{FenceReport, LabSession, SessionError};
+use crate::session::{LabSession, SessionError, SessionReport};
 
 use self::dsl::StepError;
-use self::expected::Review;
 
 /// The scenarios `proto-lab run` knows.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -117,7 +64,7 @@ pub enum ScenarioName {
     /// Accounts a and b, as `ab-trouter`: every quick reaction, typing and its indicator, a message with line breaks
     /// and a link, and a mention of b in the group chat; recorded.
     ChatShapes,
-    /// Accounts a and b in the a–b–c group chat: a mentions everyone, first held back by a forced deny and read, then
+    /// Accounts a and b in the a–b–c group chat: a mentions everyone, first held back by a capture hold and read, then
     /// sent once the lab rule reads it as a message to the chat adding nobody; b shows it; recorded.
     AbcEveryone,
     /// Account a places the test call to the echo service with a fake microphone playing a tone; recorded.
@@ -204,58 +151,12 @@ pub struct RunOptions {
     pub call: ab_call::CallStep,
 }
 
-/// Which denies a scenario expects; any other one fails the run.
-#[derive(Clone, Debug)]
-pub enum DenyPolicy {
-    /// Every deny is expected: a fail-closed run that records what the client tries (`load`).
-    AllExpected,
-    /// The reviewed expected-deny list ([`expected`]), with the forced denies and the mapped targets of the scenario.
-    Reviewed(Review),
-}
-
-impl DenyPolicy {
-    /// Whether this policy expects `denial`.
-    #[must_use]
-    pub fn expects(&self, denial: &Denial) -> bool {
-        match self {
-            Self::AllExpected => true,
-            Self::Reviewed(review) => review.expects(denial),
-        }
-    }
-
-    /// The denies of `denials` this policy doesn't expect.
-    #[must_use]
-    pub fn unexpected(&self, denials: &[Denial]) -> Vec<Denial> {
-        denials.iter().filter(|denial| !self.expects(denial)).cloned().collect()
-    }
-
-    /// Whether this policy expects the WebSocket frame deny `denial`.
-    #[must_use]
-    pub fn expects_frame(&self, denial: &FrameDenial) -> bool {
-        match self {
-            Self::AllExpected => true,
-            Self::Reviewed(review) => review.expects_frame(denial),
-        }
-    }
-
-    /// Whether this policy expects frame denies it can't see (counted, but not listed): only
-    /// [`DenyPolicy::AllExpected`] does.
-    #[must_use]
-    pub fn expects_unseen_frames(&self) -> bool {
-        matches!(self, Self::AllExpected)
-    }
-}
-
-/// What became of one account's browser in a run.
+/// One account's capture in a scenario.
 #[derive(Debug)]
 pub struct AccountRun {
     pub alias: Alias,
-    pub fence: FenceReport,
-    /// Every request the fence denied.
-    pub denials: Vec<Denial>,
-    /// Every WebSocket frame the fence denied.
-    pub frame_denials: Vec<FrameDenial>,
-    /// Where the run was recorded, if it was.
+    pub browser: SessionReport,
+    pub held_requests: Vec<HeldRequest>,
     pub capture: Option<PathBuf>,
 }
 
@@ -287,94 +188,26 @@ impl ScenarioReport {
         !self.failures.is_empty()
     }
 
-    /// Adds an account's run, judged by `policy`: a breach or an unexpected deny, of a request or a WebSocket frame,
-    /// fails the scenario. A target contained before it ran ([`FenceReport::contained_unarmed`]) is a warning in the
-    /// notes: the scenario fails on it only through a step that needed it, or because the browser was killed to
-    /// contain it.
-    pub fn add_account(&mut self, run: AccountRun, policy: &DenyPolicy) {
-        let alias = run.alias;
-        if run.fence.breached() {
-            self.failures
-                .push(format!("{alias}: the fence was breached ({})", run.fence.summary()));
-        }
-        // no breach: nothing of them ran; a step that needed one of them has failed the run already
-        let contained = run.fence.contained_unarmed().count();
-        if contained > 0 {
-            self.notes.push(format!(
-                "{alias}: warning: {contained} target(s) not armed in time were contained before they ran (no breach)"
-            ));
-        }
-        if run.fence.browser_killed() {
-            self.failures.push(format!(
-                "{alias}: the browser was killed to contain a target not armed in time ({})",
-                run.fence.summary()
-            ));
-        }
-        for denial in policy.unexpected(&run.denials) {
-            self.failures.push(format!(
-                "{alias}: unexpected deny of {} {} ({:?}; {})",
-                denial.method,
-                denial.url,
-                denial.cause,
-                service_class(&denial.url)
-            ));
-        }
-        for denial in run.frame_denials.iter().filter(|denial| !policy.expects_frame(denial)) {
-            self.failures.push(format!(
-                "{alias}: unexpected deny of a WebSocket frame to {} ({:?}; {})",
-                denial.url,
-                denial.cause,
-                service_class(&denial.url)
-            ));
-        }
-        // the report's count, taken at another moment, may hold frames the list doesn't: nothing says what they were
-        let unlisted = run.fence.denied_frames.saturating_sub(run.frame_denials.len());
-        if unlisted > 0 && !policy.expects_unseen_frames() {
-            self.failures.push(format!(
-                "{alias}: unexpected deny of {unlisted} more WebSocket frame(s)"
-            ));
+    /// Records capture setup failures alongside the scenario's own steps.
+    pub fn add_account(&mut self, run: AccountRun) {
+        for failure in &run.browser.failures {
+            self.failures.push(format!("{}: {failure}", run.alias));
         }
         self.accounts.push(run);
     }
-
-    /// Closes `session` and adds its run ([`Self::add_account`]), judged by `policy`. A close that fails (the browser
-    /// had to be killed, the capture lost events) fails the run but doesn't end it: the report so far and the other
-    /// accounts' runs are kept. The run is judged on what the fence decided once the close has waited for the decisions
-    /// still running, so a deny that lands while the browser goes down counts too (and one still undecided when that
-    /// wait ends fails the run through the close).
-    pub async fn close_account(&mut self, alias: Alias, session: LabSession, policy: &DenyPolicy) {
-        let decisions = session.decisions();
+    /// Closes a session and preserves its capture even when a scenario step failed.
+    pub async fn close_account(&mut self, alias: Alias, session: LabSession) {
+        let status = session.status();
         let capture = session.capture_dir().map(Path::to_path_buf);
         if let Err(error) = session.close().await {
             self.failures.push(format!("{alias}: {error}"));
         }
-        let fence = FenceReport::of(&decisions);
-        self.notes.push(format!("{alias}: {}", fence.summary()));
-        self.add_account(
-            AccountRun {
-                alias,
-                fence,
-                denials: decisions.denials(),
-                frame_denials: decisions.frame_denials(),
-                capture,
-            },
-            policy,
-        );
-    }
-}
-
-/// The class an unexpected deny is named by in a run's failures: the contacting service its URL goes to
-/// (`teams_fence::service_of`: `chat_service`, `calling`, …), `unreadable teams path` for a Teams origin path whose
-/// service can't be read, `no contacting service` for any other URL, `unparsable url` for one that doesn't parse.
-#[must_use]
-pub fn service_class(url: &str) -> &'static str {
-    let Ok(url) = url::Url::parse(url) else {
-        return "unparsable url";
-    };
-    match teams_fence::service_of(&url) {
-        Some(service) => service.as_str(),
-        None if teams_fence::on_contacting_service(&url) => "unreadable teams path",
-        None => "no contacting service",
+        self.add_account(AccountRun {
+            alias,
+            browser: SessionReport::of(&status),
+            held_requests: status.held_requests(),
+            capture,
+        });
     }
 }
 
@@ -394,7 +227,7 @@ pub enum ScenarioError {
 /// Runs one scenario.
 ///
 /// # Errors
-/// When the scenario can't run at all (no Chrome, no fence, a browser that can't be armed); a run that ran but failed
+/// When the scenario can't run at all (no Chrome, a browser whose capture setup fails); a run that ran but failed
 /// is a report with failures.
 pub async fn run(
     scenario: ScenarioName,

@@ -4,35 +4,24 @@
 
 mod common;
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use proto_lab::arming::{ArmOptions, ArmedBrowser};
 use proto_lab::browser::{Browser, LaunchOptions};
+use proto_lab::capture_hold::{CaptureHold, Hold};
 use proto_lab::cdp::SessionId;
-use proto_lab::classify::{Classification, Classifier};
-use proto_lab::fence_http::{Denial, DenyCause, ForcedDeny, HttpFence};
-use proto_lab::fence_ws::{Frame, FrameDenial, GuardScript, Payload, WsFence, classify_frame};
 use proto_lab::scenario::ab_trouter::{self, Activity};
 use proto_lab::scenario::dsl::{Driver, SeenRequest, StepError};
 use proto_lab::scenario::{ScenarioName, ab_chat};
 use serde_json::{Value, json};
-use teams_fence::{FailClosed, Fence, FenceLog, MembershipSource, Roster};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 
-/// The a–b chat of two made-up lab accounts.
-const AB_CHAT: &str = "19:0000000a-0000-4000-8000-00000000000a_0000000b-0000-4000-8000-00000000000b@unq.gbl.spaces";
-
 const REGIONAL: &str = "wss://pub-ent-zz-01-t.trouter.teams.microsoft.com/v4/c?tc=%7B%7D";
 
 const ACTIVITY: &str = r#"5:4+::{"name":"user.activity","args":[{"state":"active","cv":"SyntheticCorrelation0.0.1"}]}"#;
-
-fn denial(method: &str, url: &str) -> Denial {
-    Denial::new(method, url, DenyCause::Unclassified)
-}
 
 #[test]
 fn the_two_variants_have_their_own_names() {
@@ -40,79 +29,6 @@ fn the_two_variants_have_their_own_names() {
     assert_eq!(ScenarioName::AbTrouterQuiet.to_string(), "ab-trouter-quiet");
     assert_eq!(ab_trouter::scenario(Activity::Reported), ScenarioName::AbTrouter);
     assert_eq!(ab_trouter::scenario(Activity::HeldBack), ScenarioName::AbTrouterQuiet);
-}
-
-#[test]
-fn only_the_quiet_variant_holds_back_the_activity() -> TestResult {
-    let frame = Frame {
-        url: REGIONAL.to_owned(),
-        payload: Payload::Text(ACTIVITY.to_owned()),
-    };
-    // the frame rule lets the client's own activity through; the quiet run force-denies it
-    assert_eq!(classify_frame(&frame), Classification::Allow);
-    assert!(ab_trouter::hold_activity()?.matches(&frame));
-    let ping = Frame {
-        url: REGIONAL.to_owned(),
-        payload: Payload::Text(r#"5:5+::{"name":"ping"}"#.to_owned()),
-    };
-    assert!(!ab_trouter::hold_activity()?.matches(&ping));
-    let held = FrameDenial {
-        label: Some(ab_trouter::HELD_ACTIVITY.to_owned()),
-        ..FrameDenial::new(REGIONAL, DenyCause::Forced)
-    };
-    assert!(ab_trouter::trouter_policy(Activity::HeldBack, Some(AB_CHAT))?.expects_frame(&held));
-    assert!(!ab_trouter::trouter_policy(Activity::Reported, Some(AB_CHAT))?.expects_frame(&held));
-    assert_eq!(
-        ab_trouter::expected_forced(Activity::Reported),
-        ab_chat::EXPECTED_FORCED
-    );
-    assert_eq!(
-        ab_trouter::expected_forced(Activity::HeldBack),
-        [
-            ab_chat::THIS_RUN_PROBE,
-            ab_chat::EARLIER_RUN_PROBE,
-            ab_trouter::HELD_ACTIVITY
-        ]
-    );
-    Ok(())
-}
-
-/// What comes up only once the push channel is (the endpoints' registrations, presence, the account's own feed) reaches
-/// nobody: the lab rule lets it through, so a deny of it is no class the run expects.
-#[test]
-fn what_the_push_channel_brings_up_passes_and_its_deny_is_unexpected() -> TestResult {
-    let teams = "https://teams.microsoft.com";
-    for activity in [Activity::Reported, Activity::HeldBack] {
-        let policy = ab_trouter::trouter_policy(activity, Some(AB_CHAT))?;
-        for (method, url) in [
-            ("POST", format!("{teams}/registrar/prod/V2/registrations")),
-            (
-                "POST",
-                "https://teams.cloud.microsoft/registrar/prod/V2/registrations".to_owned(),
-            ),
-            ("PUT", format!("{teams}/ups/noam/v1/me/endpoints/")),
-            ("POST", format!("{teams}/ups/noam/v1/pubsub/subscriptions/x")),
-            ("POST", format!("{teams}/ups/noam/v1/presence/getpresence/")),
-        ] {
-            assert_eq!(
-                Classifier::new().classify(method, &url, &[], Some(b"{}")),
-                Classification::Allow,
-                "{method} {url}"
-            );
-            assert!(!policy.expects(&denial(method, &url)), "{method} {url}");
-        }
-        // the list's classes hold
-        let invoke =
-            "https://teams.cloud.microsoft/api/chatsvc/amer/v1/agents/28:00000000-0000-4000-8000-0000000000aa/invoke";
-        assert!(policy.expects(&denial("POST", invoke)));
-        // a write on the a–b chat stays unexpected
-        let chat = format!(
-            "https://teams.microsoft.com/api/chatsvc/amer/v1/users/ME/conversations/{}/messages",
-            AB_CHAT.replace(':', "%3A").replace('@', "%40")
-        );
-        assert!(!policy.expects(&denial("POST", &chat)));
-    }
-    Ok(())
 }
 
 #[test]
@@ -126,24 +42,6 @@ fn the_edit_adds_no_space_and_the_reported_run_outlasts_a_delivery_s_lifetime() 
     // a chat delivery carries `ttl=900` (seconds)
     assert!(ab_trouter::observation(Activity::Reported).as_secs() > 900);
     assert!(ab_trouter::observation(Activity::HeldBack) < ab_trouter::observation(Activity::Reported));
-}
-
-#[test]
-fn delivery_responses_pass_and_no_denied_trouter_frame_is_expected() -> TestResult {
-    for activity in [Activity::Reported, Activity::HeldBack] {
-        let policy = ab_trouter::trouter_policy(activity, Some(AB_CHAT))?;
-        let denied = FrameDenial::new(
-            "wss://pub-ent-zz-01-t.trouter.teams.microsoft.com/v4/c",
-            DenyCause::Unclassified,
-        );
-        assert!(!policy.expects_frame(&denied));
-        let answer = Frame {
-            url: REGIONAL.to_owned(),
-            payload: Payload::Text(r#"3:::{"id":"-1","status":200}"#.to_owned()),
-        };
-        assert_eq!(classify_frame(&answer), Classification::Allow);
-    }
-    Ok(())
 }
 
 fn seen(method: &str, url: &str, status: Option<u16>, failed: Option<&str>) -> SeenRequest {
@@ -272,7 +170,7 @@ async fn post_registration(armed: &ArmedBrowser, page: &SessionId, body: &str, s
 }
 
 /// b's registration waits on a local page: an earlier document's messaging registration answered `202`, then a retry
-/// denied by the fence, then the calling stack's answered `202`, then the new document's messaging registration
+/// denied in the capture, then the calling stack's answered `202`, then the new document's messaging registration
 /// answered `202`, its body left out of the event. A wait from the new document's start passes over the first three
 /// and meets only the fourth; while only the denied and the calling stack's are there, it runs out.
 #[tokio::test]
@@ -298,17 +196,11 @@ async fn a_registration_wait_meets_only_a_success_from_its_document_on() -> Test
         Duration::from_secs(30),
     )
     .await?;
-    let fence = Arc::new(Fence::new(
-        Roster::default(),
-        FenceLog::open(&dir.path().join("fence.log"))?,
-    ));
-    let members: Arc<dyn MembershipSource + Send> = Arc::new(FailClosed);
-    let http = HttpFence::new(Classifier::new(), Arc::clone(&fence), Arc::clone(&members));
-    let ws = WsFence::new(fence, members, GuardScript::generate()?);
-    let options = ArmOptions {
-        service_worker_origins: vec![server.uri()],
-    };
-    let armed = ArmedBrowser::arm(browser, http, ws, &options).await?;
+
+    let http = CaptureHold::new();
+
+    let options = ArmOptions::default();
+    let armed = ArmedBrowser::arm(browser, http, &options).await?;
     let outcome = tokio::time::timeout(Duration::from_secs(60), registration_run(&armed, &server)).await;
     armed.close(Duration::from_secs(10)).await?;
     outcome.map_err(|_| "the run took over 60 s")?
@@ -317,7 +209,7 @@ async fn a_registration_wait_meets_only_a_success_from_its_document_on() -> Test
 async fn registration_run(armed: &ArmedBrowser, server: &MockServer) -> TestResult {
     let page = armed.open_page(Duration::from_secs(15)).await?.session;
     let mut driver = Driver::new(armed.cdp().clone(), page.clone(), armed.watch());
-    armed.force_deny(ForcedDeny::new("POST", "/registrar/")?.with_body_containing(r#""note":"denied""#));
+    armed.hold(Hold::new("POST", "/registrar/")?.with_body_containing(r#""note":"denied""#));
     driver
         .navigate("open the page", &format!("{}/page", server.uri()))
         .await?;
@@ -450,5 +342,14 @@ async fn no_success_yet(driver: &mut Driver, since: usize) -> TestResult {
         .err()
         .ok_or("a denied registration, the calling stack's or an earlier document's met the wait")?;
     assert!(matches!(error, StepError::Timeout { .. }), "{error}");
+    Ok(())
+}
+
+#[test]
+fn quiet_capture_selects_only_activity_frames() -> TestResult {
+    let hold = ab_trouter::hold_activity()?;
+    assert!(hold.matches(REGIONAL, ACTIVITY));
+    assert!(!hold.matches(REGIONAL, r#"5:4+::{"name":"ping"}"#));
+    assert!(!hold.matches("wss://synthetic.example", ACTIVITY));
     Ok(())
 }

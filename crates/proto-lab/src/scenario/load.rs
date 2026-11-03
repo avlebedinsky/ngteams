@@ -1,10 +1,4 @@
-//! The `load` scenario: account a opens the Teams web client under the lab rule with a **fail-closed** membership source
-//! (every write whose target has to be fetched is denied), waits for it to load, keeps recording a while, and closes.
-//! The run is recorded (`captures/load/<ts>/`); every request the fence denies is expected and is in the capture as
-//! data for mapping writes (`docs/protocol/fence-targets.md`).
-//!
-//! It fails when the web client doesn't load (Teams refusing the account, a sign-in page, no answer in time) and when
-//! the fence is breached. Denies don't fail it ([`DenyPolicy::AllExpected`]).
+//! Records the web client loading and settling. Session readiness, capture setup and browser shutdown determine the result.
 
 use std::time::Duration;
 
@@ -12,7 +6,7 @@ use crate::commands::status::account_status;
 use crate::config::{Alias, LabPaths};
 use crate::session::{LabSession, SessionOptions, SessionState, TEAMS_URL};
 
-use super::{AccountRun, DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport};
+use super::{AccountRun, RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
 /// How long the run keeps recording after the web client has loaded: its first syncs, the event channel coming up.
 pub const LINGER: Duration = Duration::from_secs(20);
@@ -23,12 +17,12 @@ pub const ACCOUNT: Alias = Alias::A;
 /// Runs `load` (see the module docs).
 ///
 /// # Errors
-/// When the run can't start: no Chrome, no fence, no capture, a browser that can't be armed.
+/// When the run can't start: no Chrome, no capture, a browser that can't be armed.
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
     let session_options = SessionOptions {
         capture: Some(ScenarioName::Load.as_str().to_owned()),
         display: options.display,
-        ..SessionOptions::fail_closed()
+        ..SessionOptions::default()
     };
     let session = LabSession::open_with(paths, ACCOUNT, session_options).await?;
     finish(session, options, LINGER).await
@@ -50,10 +44,9 @@ async fn finish(
         Err(error) => Err(error),
     };
     let last_authz = session.watch().last_authz_status();
-    let denials = session.denials();
-    let frame_denials = session.frame_denials();
+    let held_requests = session.held_requests();
     // the browser goes down, and the capture is finished, whatever happened
-    let (fence, capture) = session.close_recorded().await?;
+    let (browser, capture) = session.close_recorded().await?;
     let state = state?;
     Ok(report(
         &state,
@@ -61,9 +54,8 @@ async fn finish(
         last_authz,
         AccountRun {
             alias: ACCOUNT,
-            fence,
-            denials,
-            frame_denials,
+            browser,
+            held_requests,
             capture,
         },
     ))
@@ -73,9 +65,7 @@ fn report(state: &SessionState, options: RunOptions, last_authz: Option<u16>, ru
     let mut report = ScenarioReport::new(ScenarioName::Load);
     let status = account_status(state, options.load_timeout, last_authz);
     report.notes.push(format!("{ACCOUNT}: {status}"));
-    report
-        .notes
-        .push(format!("{ACCOUNT}: {} (fail-closed: expected)", run.fence.summary()));
+    report.notes.push(format!("{ACCOUNT}: {}", run.browser.summary()));
     if let Some(dir) = &run.capture {
         report.notes.push(format!("recorded into {}", dir.display()));
     }
@@ -84,7 +74,7 @@ fn report(state: &SessionState, options: RunOptions, last_authz: Option<u16>, ru
             .failures
             .push(format!("{ACCOUNT}: the web client didn't load: {status}"));
     }
-    report.add_account(run, &DenyPolicy::AllExpected);
+    report.add_account(run);
     report
 }
 

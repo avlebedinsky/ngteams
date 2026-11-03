@@ -1,56 +1,4 @@
-//! The `ab-call` scenario: account a calls account b from their 1:1 chat in the web client, and the machinery
-//! `abc-call` ([`super::abc_call`]) shares, where a calls the lab's a–b–c group chat. Each run is recorded
-//! (`captures/<scenario>/<ts>/`, one capture per account): the call's HTTP and WebSocket signaling on every side, the
-//! fence's verdicts and the WebRTC hooks' reports are the material of `docs/protocol/calling.md`.
-//!
-//! Every account runs under the lab rule with members read live, Chrome's fake camera and a microphone playing a tone,
-//! muted ([`crate::browser::BASE_ARGS`]). The fence judges a call by its entry: a's start, a callee's answer, decline
-//! or join; what a call sends once it was let in (its follow-ups, the callee's ring-time sends, the delivery
-//! responses) passes. What a run does is its step ([`CallStep`], `proto-lab run ab-call --call <step>`):
-//! - `start-held`: only a's browser runs. a clicks the chat's audio call button, then its video call button; each call
-//!   start is held back by a forced deny labelled [`START_HELD`], so nobody is invited and nothing rings. The capture
-//!   keeps the starts' bodies: what a start to a lab callee names (its `participants.to`) and what it names of its
-//!   chat.
-//! - `answer`, `decline`, `cancel`, `timeout`, `video`, `dropped`, `join`, `keep-alive`: a's browser and each callee's.
-//!   Each callee opens the Calls app (the client starts its calling stack only then) and waits for its calling Trouter
-//!   socket. a's audio call start goes to the fence, which permits it only as a start to lab callees in a lab-only chat;
-//!   each callee must show the incoming call within [`RING_WAIT`] (a's call ended by the service as one in a chat whose
-//!   call still runs fails the step at once: [`running_call_conflict`]). Then:
-//!   - `answer`: each callee clicks answer ([`ACCEPT_AUDIO`]), which the fence permits only on its own offered
-//!     invitation; the call must connect with audio both ways on every page (getStats; whether each page heard the
-//!     other side's tone is only noted), and then every participant hangs up;
-//!   - `decline`: each callee clicks decline ([`DECLINE`]); its rejection must have been let through; a hangs up after
-//!     [`AFTER_ACTION`];
-//!   - `cancel`: a hangs up after [`RING_BEFORE_CANCEL`] while the callees ring: the caller's cancel as they receive it;
-//!   - `timeout`: nobody acts for [`UNANSWERED`] (an unanswered call goes to the callee's voicemail, a service of
-//!     the callee's own account, which accepts it for a); then a hangs up;
-//!   - `video`: as `answer`, and once the call is up every page turns its camera on and must receive video frames;
-//!   - `dropped`: as `answer`, and once the call is up the last callee's page goes offline (new requests fail) and the
-//!     run closes its calling Trouter socket itself, which must close; once the page is back every page must still
-//!     show the call;
-//!   - `join` (`abc-call` only): every callee but the last answers; once the last one's ring ended it loads the chat
-//!     and clicks the header's join of the running call, which the fence judges by the chat it names; it must then show
-//!     the call screen, and its capture the join let through.
-//!   - `keep-alive`: as `answer`, and the call is then held [`KEEP_ALIVE_HOLD`], past its keep-alive interval, every
-//!     page's requests recorded: the run that captures the call's keep-alive. A call that ends before the hold is over,
-//!     or a page whose fence let no keep-alive through ([`KEEP_ALIVE_SENDS`]), fails the run.
-//!
-//!   The run records [`AFTER_RING`] more and notes when each callee's incoming call went.
-//!
-//! Before anything loads, every page force-denies an earlier chat scenario's unsent probe ([`probe_rules`]), as
-//! `echo-call` does. A callee clicks answer, decline or join only on the run's own call, naming only lab accounts
-//! ([`ring_check`]): every invitation its page received is a's call placed in this run (from a, to this callee, in the
-//! run's chat, nobody else named), all of one call; for an answer or a decline the page shows one incoming call, for a
-//! join the page shows the run's chat ([`chat_shown`]) with one join. Anything else and the step fails without a
-//! click. Whatever a click sends, the fence decides it again on its own: an answer or a decline passes only on the
-//! account's own offered invitation from a lab caller, a join only in a lab-only chat.
-//!
-//! Judged by [`policy`] per account: no deny but the reviewed expected-deny list's and the run's own forced ones; a's
-//! start allowed, each callee's page receiving the run's own call's invitation ([`own_invitations`]) and its attach let
-//! through, and what its step sends ([`judge_step_sends`]: a decline's rejection let through, a join let through). A
-//! failed run hangs up every page that shows its call, a's first, and waits up to [`HANG_UP_WAIT`] for each one's
-//! `leave` ([`hang_up_all`]), so no call is left running in the chat; it leaves each page's screenshot as
-//! `failure.png` in its capture.
+//! Records calls between lab accounts, including cancellation, timeout, answer, decline, join and media/device steps. start-held selectively captures call starts without sending them.
 
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -61,20 +9,18 @@ use serde_json::{Value, json};
 
 use crate::browser::Media;
 use crate::capture::EVENTS_FILE;
-use crate::classify::Classifier;
+use crate::capture_hold::{HeldRequest, Hold, without_query};
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
-use crate::fence_http::{Denial, DenyCause, ForcedDeny, without_query};
-use crate::fence_ws::delivery_of;
+use crate::protocol::delivery_of;
 use crate::session::{LabSession, SessionError, SessionOptions, TEAMS_URL};
 
-use super::ab_chat::{EARLIER_RUN_PROBE, chat_link, load_at, probe_rules, save_screenshot, save_screenshot_as, setup};
+use super::ab_chat::{chat_link, load_at, save_screenshot, save_screenshot_as, setup};
 use super::dsl::{Driver, Selector, js_string};
 use super::echo_call::{
     AudioSummary, CALL_START, CALL_START_URL, CALLS_APP, CALLS_APP_WARM, CONTROL_WAIT, HANG_UP, PAGE_OPEN, PAGE_STEADY,
     ToneWait, USER_AGENT, call_starts, linger, size_page, turn_off_noise_suppression, wait_for_tone, write_burst_tone,
 };
-use super::expected::Review;
-use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport};
+use super::{RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
 /// What a run of `ab-call` or `abc-call` does (see the module docs).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum)]
@@ -189,7 +135,7 @@ pub(crate) const INCOMING_SCREEN_CSS: &str = INCOMING_CALL_CSS;
 /// How long a callee's capture gets to show the run's call's invitation once the page shows the incoming call.
 pub const INVITATION_WAIT: Duration = Duration::from_secs(5);
 
-/// The label of the forced deny of a's call starts in `start-held`.
+/// The label of the capture hold of a's call starts in `start-held`.
 pub const START_HELD: &str = "the call start, held back";
 
 /// A Trouter socket's URL as a pattern.
@@ -220,12 +166,12 @@ pub const HELD_SETTLE: Duration = Duration::from_secs(6);
 /// How long a failed run waits for each page it hung up to send its `leave` ([`hang_up_all`]).
 pub const HANG_UP_WAIT: Duration = Duration::from_secs(10);
 
-/// The forced deny of every call start ([`CALL_START_URL`]), labelled [`START_HELD`].
+/// The capture hold of every call start ([`CALL_START_URL`]), labelled [`START_HELD`].
 ///
 /// # Errors
 /// Never: the pattern is fixed.
-pub fn start_held_rule() -> Result<ForcedDeny, regex::Error> {
-    Ok(ForcedDeny::new("POST", &format!("^{}(\\?|$)", regex::escape(CALL_START_URL)))?.labelled(START_HELD))
+pub fn start_held_rule() -> Result<Hold, regex::Error> {
+    Ok(Hold::new("POST", &format!("^{}(\\?|$)", regex::escape(CALL_START_URL)))?.labelled(START_HELD))
 }
 
 /// The call's keep-alive, as a URL pattern (`POST`): to the call leg's own link (`callLeg`,
@@ -235,11 +181,11 @@ pub const KEEP_ALIVE_SENDS: &str = concat!(
     r"cc/v1/active/[^/?]+/[^/?]+/[^/?]+/[^/?]+(\?|$)"
 );
 
-/// The keep-alives a capture's `events.jsonl` text shows its fence letting through ([`KEEP_ALIVE_SENDS`], each
+/// The keep-alives a capture's `events.jsonl` text shows its requests being sent ([`KEEP_ALIVE_SENDS`], each
 /// `Network` request once).
 #[must_use]
 pub fn keep_alives(text: &str) -> usize {
-    allowed_requests(text, "POST", KEEP_ALIVE_SENDS)
+    sent_requests(text, "POST", KEEP_ALIVE_SENDS)
 }
 
 /// A callee's decline, as a URL pattern (`DELETE`): the rejection of its call leg.
@@ -254,33 +200,14 @@ pub const ATTACH: &str =
 pub const CONVERSATION_JOIN: &str =
     r"^https://api\.flightproxy\.teams\.microsoft\.com/api/v2/ep/[^/?]+/conv/[^/?]+(\?|$)";
 
-/// The forced denies of `step` the caller's run expects: an earlier run's probe, and in `start-held` its starts.
-#[must_use]
-pub fn caller_forced(step: CallStep) -> &'static [&'static str] {
-    match step {
-        CallStep::StartHeld => &[EARLIER_RUN_PROBE, START_HELD],
-        _ => &[EARLIER_RUN_PROBE],
-    }
-}
-
-/// The forced denies a callee's run expects: an earlier run's probe. Nothing the callee's page sends for the call is
-/// held back: the fence judges its answer, decline or join, and lets the rest of the call through.
-pub const CALLEE_FORCED: &[&str] = &[EARLIER_RUN_PROBE];
-
-/// The denies a run expects of an account with these forced `labels`: the reviewed list ([`super::expected`]) and them.
-#[must_use]
-pub fn policy(labels: &'static [&'static str]) -> DenyPolicy {
-    DenyPolicy::Reviewed(Review::new().expecting_forced(labels))
-}
-
-/// The forced denies of `denials` labelled `label` (requests, by `Network` id when they have one: a request pauses on
+/// The capture holds of `denials` labelled `label` (requests, by `Network` id when they have one: a request pauses on
 /// its target's session and the browser's).
 #[must_use]
-pub fn held_back(denials: &[Denial], label: &str) -> usize {
+pub fn held_back(denials: &[HeldRequest], label: &str) -> usize {
     let mut seen = std::collections::BTreeSet::new();
     denials
         .iter()
-        .filter(|denial| denial.cause == DenyCause::Forced && denial.label.as_deref() == Some(label))
+        .filter(|denial| denial.label.as_deref() == Some(label))
         .filter(|denial| match &denial.network_id {
             Some(id) => seen.insert(id.clone()),
             None => true,
@@ -344,7 +271,7 @@ impl Default for CallPauses {
 /// Runs `ab-call` (see the module docs).
 ///
 /// # Errors
-/// When the run can't start: no lab config, no MRI for a or b, no Chrome, no fence, a browser that can't be armed.
+/// When the run can't start: no lab config, no MRI for a or b, no Chrome, a browser whose capture setup fails.
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
     let config = LabConfig::load(&LabLocations::from_env()?)?;
     let mri_b = mri(&config, Alias::B)?;
@@ -379,7 +306,7 @@ pub(crate) fn mri(config: &LabConfig, alias: Alias) -> Result<String, ScenarioEr
 /// Runs a call scenario's `plan` (see the module docs).
 ///
 /// # Errors
-/// When the run can't start: no tone file, no Chrome, no fence, or a browser that can't be armed.
+/// When the run can't start: no tone file, no Chrome, or a browser that can't be armed.
 pub(crate) async fn run_plan(paths: &LabPaths, plan: &CallPlan) -> Result<ScenarioReport, ScenarioError> {
     let mut report = ScenarioReport::new(plan.scenario);
     report
@@ -387,8 +314,6 @@ pub(crate) async fn run_plan(paths: &LabPaths, plan: &CallPlan) -> Result<Scenar
         .push(format!("{}: step {}", plan.scenario, plan.step.as_str()));
     let tone = write_burst_tone(paths).map_err(|error| setup(format!("can't write the tone: {error}")))?;
     let options = SessionOptions {
-        classifier: Classifier::new(),
-        live_members: true,
         capture: Some(plan.scenario.as_str().to_owned()),
         capture_request_bodies: true,
         display: plan.options.display,
@@ -412,13 +337,6 @@ async fn run_sessions(
     mut sessions: Vec<(Alias, LabSession)>,
     mut report: ScenarioReport,
 ) -> ScenarioReport {
-    for (_, session) in &sessions {
-        // before the page loads: the client sends an earlier run's unsent probe again as soon as it can
-        match probe_rules(None) {
-            Ok(rules) => rules.into_iter().for_each(|rule| session.force_deny(rule)),
-            Err(error) => report.failures.push(format!("can't force the probe denies: {error}")),
-        }
-    }
     let mut placed = None;
     if let Err(error) = plan.drive(&mut sessions, &mut placed, &mut report).await {
         report.failures.push(error.to_string());
@@ -434,11 +352,11 @@ async fn run_sessions(
 pub const LEAVE_SENDS: &str =
     r"^https://api\.flightproxy\.teams\.microsoft\.com/api/v2/ep/[^/?]+/conv/[^/?]+/leave(\?|$)";
 
-/// The `leave`s a capture's `events.jsonl` text shows its fence letting through ([`LEAVE_SENDS`], each `Network`
+/// The `leave`s a capture's `events.jsonl` text shows its requests being sent ([`LEAVE_SENDS`], each `Network`
 /// request once).
 #[must_use]
 pub fn leaves(text: &str) -> usize {
-    allowed_requests(text, "POST", LEAVE_SENDS)
+    sent_requests(text, "POST", LEAVE_SENDS)
 }
 
 /// The text of `session`'s capture so far (its `events.jsonl`); `None` without one.
@@ -525,7 +443,7 @@ async fn diagnose(sessions: &[(Alias, LabSession)], report: &mut ScenarioReport)
 }
 
 /// Closes every browser and finishes every capture, whatever happened to any, each account judged by its step's
-/// forced denies and its capture (a callee's by the invitations of the call a placed at `placed`, Unix ms, and by what
+/// capture holds and its capture (a callee's by the invitations of the call a placed at `placed`, Unix ms, and by what
 /// its role in the step sends).
 async fn close_all(
     sessions: Vec<(Alias, LabSession)>,
@@ -536,12 +454,8 @@ async fn close_all(
     let step = plan.step;
     for (alias, session) in sessions {
         let capture = session.capture_dir().map(Path::to_path_buf);
-        let labels = if alias == CALLER {
-            caller_forced(step)
-        } else {
-            CALLEE_FORCED
-        };
-        report.close_account(alias, session, &policy(labels)).await;
+
+        report.close_account(alias, session).await;
         if let Some(dir) = capture {
             if alias == CALLER {
                 judge_caller(&dir, step, report);
@@ -855,16 +769,16 @@ async fn start_held(
     modalities: &[Modality],
     report: &mut ScenarioReport,
 ) -> Result<(), ScenarioError> {
-    caller.force_deny(start_held_rule().map_err(|error| setup(error.to_string()))?);
+    caller.hold(start_held_rule().map_err(|error| setup(error.to_string()))?);
     for &modality in modalities {
-        let before = held_back(&caller.denials(), START_HELD);
+        let before = held_back(&caller.held_requests(), START_HELD);
         place_call((CALLER, caller), modality, report).await?;
         wait_held(caller, before + 1).await?;
         report
             .notes
             .push(format!("{CALLER}: the start of {} was held back", modality.what()));
         linger(caller, HELD_SETTLE).await;
-        let starts = held_back(&caller.denials(), START_HELD) - before;
+        let starts = held_back(&caller.held_requests(), START_HELD) - before;
         report.notes.push(format!(
             "{CALLER}: {starts} start(s) of {} held back (the client tries again by itself)",
             modality.what()
@@ -987,12 +901,12 @@ async fn give_up_retry(caller: &mut LabSession, report: &mut ScenarioReport) -> 
 async fn wait_held(caller: &mut LabSession, count: usize) -> Result<(), ScenarioError> {
     let deadline = tokio::time::Instant::now() + CALL_START;
     loop {
-        if held_back(&caller.denials(), START_HELD) >= count {
+        if held_back(&caller.held_requests(), START_HELD) >= count {
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
             return Err(setup(format!(
-                "a's fence held back no call start number {count} within {CALL_START:?}"
+                "a's capture held back no call start number {count} within {CALL_START:?}"
             )));
         }
         linger(caller, Duration::from_millis(500)).await;
@@ -1407,7 +1321,7 @@ async fn keep_alive(
                 .push(format!("{alias}'s fence let no keep-alive of the call through")),
             sent => report
                 .notes
-                .push(format!("{alias}: the fence let {sent} keep-alive(s) through")),
+                .push(format!("{alias}: the capture recorded {sent} keep-alive(s) through")),
         }
     }
 }
@@ -1849,7 +1763,7 @@ async fn call_controls(alias: Alias, session: &LabSession) -> Option<String> {
     ))
 }
 
-/// The caller's capture: in `start-held` no start may have been let through; otherwise exactly the fence's permit of
+/// The caller's capture: in `start-held` no start may have been let through; otherwise exactly the capture's permit of
 /// the audio call's start.
 fn judge_caller(capture: &Path, step: CallStep, report: &mut ScenarioReport) {
     let text = match std::fs::read_to_string(capture.join(EVENTS_FILE)) {
@@ -1861,14 +1775,14 @@ fn judge_caller(capture: &Path, step: CallStep, report: &mut ScenarioReport) {
     };
     let (allowed, denied) = call_starts(&text);
     report.notes.push(format!(
-        "call start: {allowed} allowed and {denied} denied by the fence"
+        "call start: {allowed} allowed and {denied} denied in the capture"
     ));
     match step {
-        CallStep::StartHeld if allowed > 0 => report
-            .failures
-            .push(format!("the fence let {allowed} call start(s) through in start-held")),
+        CallStep::StartHeld if allowed > 0 => report.failures.push(format!(
+            "the capture recorded {allowed} call start(s) through in start-held"
+        )),
         CallStep::StartHeld => {}
-        _ if allowed == 0 => report.failures.push("the fence allowed no call start".to_owned()),
+        _ if allowed == 0 => report.failures.push("the capture contains no call start".to_owned()),
         _ => {}
     }
 }
@@ -1897,7 +1811,7 @@ pub(crate) fn judge_callee(
             }
             let sends = ring_sends(&text);
             report.notes.push(format!(
-                "{alias}: the fence let {} attach(es) and {} invitation receipt(s) through",
+                "{alias}: the capture recorded {} attach(es) and {} invitation receipt(s) through",
                 sends.attaches, sends.receipts
             ));
             if own > 0 && sends.attaches == 0 {
@@ -1939,41 +1853,38 @@ impl CalleeRole {
 }
 
 /// What a callee's capture (`text`, its `events.jsonl`) must show it sent in its `role`: one that declines, its
-/// rejection let through by the fence ([`DECLINE_SENDS`], [`allowed_requests`]); one that joins, its join of the running
+/// rejection let through in the capture ([`DECLINE_SENDS`], [`sent_requests`]); one that joins, its join of the running
 /// call let through ([`CONVERSATION_JOIN`]). A note of what it shows, or the failure.
 ///
 /// # Errors
 /// The failure, when the capture doesn't show it.
 pub fn judge_step_sends(role: CalleeRole, text: &str) -> Result<Option<String>, String> {
     match role {
-        CalleeRole::Declines => match allowed_requests(text, "DELETE", DECLINE_SENDS) {
-            0 => Err("the fence let no rejection of the call through".to_owned()),
-            rejects => Ok(Some(format!("the fence let {rejects} rejection(s) through"))),
+        CalleeRole::Declines => match sent_requests(text, "DELETE", DECLINE_SENDS) {
+            0 => Err("the capture recorded no rejection of the call through".to_owned()),
+            rejects => Ok(Some(format!("the capture recorded {rejects} rejection(s) through"))),
         },
-        CalleeRole::Joins => match allowed_requests(text, "POST", CONVERSATION_JOIN) {
-            0 => Err("the fence let no join of the running call through".to_owned()),
+        CalleeRole::Joins => match sent_requests(text, "POST", CONVERSATION_JOIN) {
+            0 => Err("the capture recorded no join of the running call through".to_owned()),
             joins => Ok(Some(format!(
-                "the fence let {joins} join(s) of the running call through"
+                "the capture recorded {joins} join(s) of the running call through"
             ))),
         },
         CalleeRole::Other => Ok(None),
     }
 }
 
-/// The requests a capture's `events.jsonl` text shows its fence letting through: each `method` request whose URL
+/// The requests a capture's `events.jsonl` text shows its requests being sent: each `method` request whose URL
 /// matches `pattern`, allowed, once per `Network` request (the browser decides a request on two layers).
 #[must_use]
-pub fn allowed_requests(text: &str, method: &str, pattern: &str) -> usize {
+pub fn sent_requests(text: &str, method: &str, pattern: &str) -> usize {
     let Ok(pattern) = regex::Regex::new(pattern) else {
         return 0;
     };
-    text.lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|entry| entry["type"] == "verdict" && entry["verdict"] == "allow" && entry["channel"] == "http")
-        .filter(|entry| entry["method"] == method && pattern.is_match(entry["url"].as_str().unwrap_or_default()))
-        .map(|entry| entry["network_id"].to_string())
-        .collect::<std::collections::BTreeSet<_>>()
-        .len()
+    crate::protocol::http_requests(text)
+        .iter()
+        .filter(|request| !request.held && request.method == method && pattern.is_match(&request.url))
+        .count()
 }
 
 /// What a callee's fence let through while it rang ([`ring_sends`]).
@@ -1985,25 +1896,19 @@ pub struct RingSends {
     pub receipts: usize,
 }
 
-/// The ring-time sends a capture's `events.jsonl` text shows its fence letting through: each `POST` to an `attach`
+/// The ring-time sends a capture's `events.jsonl` text shows its requests being sent: each `POST` to an `attach`
 /// link ([`ATTACH`]) allowed, and each delivery response allowed on a Trouter socket.
 #[must_use]
 pub fn ring_sends(text: &str) -> RingSends {
     let trouter = regex::Regex::new(TROUTER_SOCKETS).ok();
-    let receipts = text
-        .lines()
-        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-        .filter(|entry| entry["type"] == "verdict" && entry["verdict"] == "allow" && entry["channel"] == "web_socket")
-        .filter(|entry| {
-            let response = entry["frame"]["data"]
-                .as_str()
-                .is_some_and(|data| data.starts_with(DELIVERY_RESPONSE));
-            let url = entry["url"].as_str().unwrap_or_default();
-            response && trouter.as_ref().is_some_and(|socket| socket.is_match(url))
+    let receipts = crate::protocol::sent_frames(text)
+        .iter()
+        .filter(|(url, data)| {
+            data.starts_with(DELIVERY_RESPONSE) && trouter.as_ref().is_some_and(|socket| socket.is_match(url))
         })
         .count();
     RingSends {
-        attaches: allowed_requests(text, "POST", ATTACH),
+        attaches: sent_requests(text, "POST", ATTACH),
         receipts,
     }
 }
@@ -2149,12 +2054,12 @@ pub const INVITATION_EVENTS: [u64; 2] = [107, 109];
 fn judge_held(step: CallStep, report: &mut ScenarioReport) {
     let mut notes = Vec::new();
     for run in &report.accounts {
-        let requests = held_back(&run.denials, START_HELD);
+        let requests = held_back(&run.held_requests, START_HELD);
         if requests > 0 {
             notes.push(format!("{}: {START_HELD}: {requests} request(s)", run.alias));
         }
-        if step == CallStep::StartHeld && run.alias == CALLER && held_back(&run.denials, START_HELD) == 0 {
-            report.failures.push("a's fence held back no call start".to_owned());
+        if step == CallStep::StartHeld && run.alias == CALLER && held_back(&run.held_requests, START_HELD) == 0 {
+            report.failures.push("a's capture held back no call start".to_owned());
         }
     }
     report.notes.extend(notes);

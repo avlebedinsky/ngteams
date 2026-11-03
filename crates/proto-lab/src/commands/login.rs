@@ -1,5 +1,5 @@
 //! `proto-lab login <a|b|c>`: signs a lab account into the Teams web client in its persistent profile, headless, under
-//! the armed fence (fail-closed), and records the account's MRI in `lab.toml`.
+//! an observed browser session, and records the account's MRI in `lab.toml`.
 //!
 //! The browser opens Teams. A profile that is still signed in to Microsoft is passed straight through, and the web
 //! client loads. If Microsoft shows its sign-in page instead, the sign-in is automatic, following the proven
@@ -14,8 +14,7 @@
 //! - a request to register an MFA method stops the run, and so does any other multi-factor prompt: one to pick a
 //!   method, to approve in an app, or to enter a one-time code.
 //!
-//! The fence runs the lab rule as in every run: Entra's sign-in form reaches nobody, so it goes through, and any deny
-//! is expected (the web client loads in a reduced state). The run is recorded like a scenario's, under
+//! The run is recorded like a scenario's, under
 //! `captures/login/<ts>/` ([`LOGIN_CAPTURE`]), so the sign-in form's queries can be read for the sign-in window's own
 //! rules (`teams-signin`), but without any request body ([`crate::capture::Capture::without_request_bodies`]): the
 //! form's posts carry the account's password. Multi-factor sign-in (Entra's `SAS/*` requests) is never driven: no such
@@ -40,7 +39,7 @@ use crate::cdp::{Cdp, CdpError, SessionId};
 use crate::config::{Alias, ConfigError, LabConfig, LabLocations, MriRecord, record_account_mri};
 use crate::scenario::dsl::js_string;
 use crate::session::{
-    FenceReport, LabSession, NotAGuid, SessionError, SessionOptions, SessionState, Settling, TEAMS_URL,
+    LabSession, NotAGuid, SessionError, SessionOptions, SessionReport, SessionState, Settling, TEAMS_URL,
 };
 
 /// What a sign-in page shows, as [`probe`] finds it. A field is the selector of the one element of its kind a person
@@ -308,8 +307,8 @@ pub enum LoginError {
     BadIdentity(#[from] NotAGuid),
     #[error("can't write the status file: {0}")]
     Status(#[source] std::io::Error),
-    #[error("the fence was breached: {0}")]
-    Breach(String),
+    #[error("capture setup failed: {0}")]
+    CaptureFailed(String),
 }
 
 /// Reads the page: what a person would see to act on.
@@ -462,14 +461,14 @@ pub struct LoginOptions {
 /// The scenario name `login` records its runs under (`captures/login/<ts>/` in the lab's data dir).
 pub const LOGIN_CAPTURE: &str = "login";
 
-/// How `login` runs its browser: the lab rule, its membership source fail-closed, headless, recorded under
+/// How `login` runs its browser: headless, recorded under
 /// [`LOGIN_CAPTURE`] with no request body.
 #[must_use]
 pub fn session_options() -> SessionOptions {
     SessionOptions {
         capture: Some(LOGIN_CAPTURE.to_owned()),
         capture_request_bodies: false,
-        ..SessionOptions::fail_closed()
+        ..SessionOptions::default()
     }
 }
 
@@ -482,7 +481,7 @@ pub struct LoginReport {
     /// but Teams won't serve it (no Teams license). Its MRI is recorded either way.
     pub refused: Option<u16>,
     pub mri: MriRecord,
-    pub fence: FenceReport,
+    pub browser: SessionReport,
     /// The run's capture.
     pub capture: Option<PathBuf>,
 }
@@ -497,8 +496,8 @@ struct BrowserOutcome {
 /// Signs `alias` in and records its MRI (see the module docs).
 ///
 /// # Errors
-/// When the lab config or the account file is refused, the browser can't be run under the fence, the sign-in stops,
-/// the web client doesn't load in time, the identity isn't shown, the MRI can't be recorded, or the fence was
+/// When the lab config or the account file is refused, the browser can't be run under the browser, the sign-in stops,
+/// the web client doesn't load in time, the identity isn't shown, the MRI can't be recorded, or the browser was
 /// breached. The status file says `failed` then.
 pub async fn login(alias: Alias, options: LoginOptions) -> Result<LoginReport, LoginError> {
     let locations = LabLocations::from_env()?;
@@ -526,10 +525,10 @@ pub async fn login(alias: Alias, options: LoginOptions) -> Result<LoginReport, L
 fn finish_status(status: &StatusFile, outcome: Result<LoginReport, LoginError>) -> Result<LoginReport, LoginError> {
     let written = match &outcome {
         Ok(report) => match report.refused {
-            None => status.write("done", &json!({"fence": report.fence.summary()})),
+            None => status.write("done", &json!({"browser": report.browser.summary()})),
             Some(code) => status.write(
                 "teams-refused",
-                &json!({"authz_status": code, "fence": report.fence.summary()}),
+                &json!({"authz_status": code, "browser": report.browser.summary()}),
             ),
         },
         Err(error) => status.write("failed", &json!({"error": error.to_string()})),
@@ -572,16 +571,16 @@ impl Run<'_> {
         // the browser goes down whatever happened, before anything else is reported
         let closed = session.close_recorded().await;
         let signed = signed?;
-        let (fence, capture) = closed?;
-        if fence.breached() {
-            return Err(LoginError::Breach(fence.summary()));
+        let (browser, capture) = closed?;
+        if browser.failed() {
+            return Err(LoginError::CaptureFailed(browser.summary()));
         }
         let mri = record_account_mri(locations, alias, &signed.mri)?;
         Ok(LoginReport {
             signed_in: signed.signed_in,
             refused: signed.refused,
             mri,
-            fence,
+            browser,
             capture,
         })
     }
@@ -604,7 +603,7 @@ impl Run<'_> {
         let identity_deadline = tokio::time::Instant::now() + IDENTITY_WAIT;
         while session.watch().identity_for(self.upn).is_none() && tokio::time::Instant::now() < identity_deadline {
             if !session.pump(TICK).await {
-                return Err(LoginError::Breach(session.report().summary()));
+                return Err(LoginError::CaptureFailed(session.report().summary()));
             }
         }
         let identity = session.watch().identity_for(self.upn).ok_or(LoginError::NoIdentity)?;
@@ -628,7 +627,7 @@ impl Run<'_> {
                 });
             }
             if !session.pump(TICK).await {
-                return Err(LoginError::Breach(session.report().summary()));
+                return Err(LoginError::CaptureFailed(session.report().summary()));
             }
             match settling.judge(session.watch().state(), tokio::time::Instant::now()) {
                 SessionState::Loaded => return Ok(None),

@@ -6,7 +6,7 @@ use tokio::sync::mpsc;
 
 use super::*;
 use crate::scenario::test_page::Page;
-use crate::session::FenceReport;
+use crate::session::SessionReport;
 
 type Wire = Arc<Mutex<Option<mpsc::UnboundedSender<Value>>>>;
 
@@ -78,12 +78,14 @@ fn report_assembly_keeps_load_status_capture_and_fence_failures_independent() {
         for breached in [false, true] {
             let run = AccountRun {
                 alias: ACCOUNT,
-                fence: FenceReport {
-                    connection_lost: breached,
-                    ..FenceReport::default()
+                browser: SessionReport {
+                    failures: if breached {
+                        vec!["synthetic capture connection lost".into()]
+                    } else {
+                        Vec::new()
+                    },
                 },
-                denials: vec![],
-                frame_denials: vec![],
+                held_requests: vec![],
                 capture: breached.then(|| std::path::PathBuf::from("/synthetic/capture")),
             };
             let loaded = state == SessionState::Loaded;
@@ -98,7 +100,7 @@ fn report_assembly_keeps_load_status_capture_and_fence_failures_independent() {
                     .any(|line| line.contains("recorded into /synthetic/capture")),
                 breached
             );
-            assert!(report.notes.iter().any(|line| line.contains("fail-closed: expected")));
+
             if state == SessionState::Loading {
                 assert!(report.failures.iter().any(|line| line.contains("authz answered 401")));
             }

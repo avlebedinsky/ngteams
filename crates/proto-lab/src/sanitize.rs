@@ -13,7 +13,7 @@
 //!   Each becomes `<token:N>`; a scheme is kept (`Bearer <token:1>`, `skypetoken=<token:2>`), and so is a cookie's
 //!   name. A long value under a generic key (`code`, `key`, `state`) is a secret too, as is any long high-entropy run
 //!   of letters and digits nothing else recognized. Raw header text (`headersText`) is dropped, and binary content
-//!   (base64 bodies that aren't UTF-8 text, binary WebSocket frames in CDP events and in the fence's verdicts, `bytes`)
+//!   (base64 bodies that aren't UTF-8 text, binary WebSocket frames in CDP events and in the capture's verdicts, `bytes`)
 //!   becomes `<binary:LEN>`.
 //! - **Teams meetings** (`sanitize/meeting.rs`): a join link's passcode (`/meet/<code>?p=…`) and any passcode under its
 //!   key or an invitation's label become `<token:N>`, of letters only too; the meeting's code (its numeric id, in the

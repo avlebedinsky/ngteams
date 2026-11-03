@@ -1,54 +1,21 @@
-//! The `ab-chat-full` scenario: the a–b 1:1 chat beyond a plain message, recorded for the protocol notes
-//! (`docs/protocol/chat.md`). It runs under `ab-chat`'s fence: the lab rule (`crate::classify`), members read
-//! live, `ab-chat`'s forced-deny probes and its deny policy ([`ab_chat::policy`]: the reviewed expected-deny list, and
-//! nothing denied on the a–b chat but the probes).
-//!
-//! 1. a's probes are force-denied from before its page loads (`ab_chat::deny_probes`); a and b load the web client.
-//! 2. a opens the chat with b, and the live enforcement test comes first: this run's probe must be denied by the fence
-//!    and fail in a's page (`ab_chat::enforce`).
-//! 3. a, each step a write on the a–b chat whose answer the step waits for ([`Writes`]): sends a message, edits it,
-//!    reacts to it and takes the reaction back, mentions b ([`Steps::mention`]), replies to the first message with a
-//!    quote, reacts to the reply and leaves the reaction there (so b's read of the chat shows a reaction with its user),
-//!    and sends a last message and deletes it ([`Texts`]).
-//! 4. b opens the chat (it reads the chat's history: message pages and their sync state) and, once it shows a's first
-//!    message (jumping to the newest: a chat with unread messages opens at its "last read" mark,
-//!    `ab_chat::wait_for_newest`), the enforcement test's other half: b's copy of the chat must not have the probe
-//!    (`ab_chat::not_received`). b then shows a's edited message, goes to its compose box (whether the client then
-//!    sends a read receipt is noted, not required), shows a's mention, and reacts to a's first message.
-//! 5. The run is judged as `ab-chat` is: a probe in b's copy fails it like any failed step.
-//!
-//! The mention needs the web client's mention picker to offer b, which it can only once it can read b's profile: the
-//! middle tier's profile lookups are `POST`s, reads that reach nobody, so the fence lets them through. Without them b
-//! shows as "Unknown User" and the picker offers nobody. The step picks b only once the picker's highlighted suggestion is b by its
-//! id, never whatever came first, and checks that the post's `properties.mentions` names b.
-//!
-//! A step that fails after the enforcement test (the web client's controls moved, a write denied) is reported, with a
-//! screenshot named after it in the capture dir and the page's visible `data-tid`s in the notes, and the run goes on
-//! with the next step: each step is a capture of its own. Loading and the enforcement test end the run when they fail.
-//!
-//! The web client's controls, by their `data-tid` (from the web bundle, checked live): a message is
-//! `chat-pane-message`; pointing at it shows its hover bar, with the quick reactions (`message-actions-like`, …), some
-//! actions (`message-hover-action-edit`, `message-hover-action-quoted-reply`) and the more-options menu
-//! (`message-actions-more`) holding the rest (`message-actions-edit`, `message-actions-delete`,
-//! `message-actions-quoted-reply`).
+//! Records message send, edit, mention, reply, reaction and deletion steps between two lab accounts. Independent steps retain their evidence when another step fails.
 
 use std::time::Duration;
 
 use serde_json::Value;
 
 use crate::browser::Media;
+use crate::capture_hold::without_query;
 use crate::classify::strict_json;
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
-use crate::fence_http::without_query;
 use crate::session::{LabSession, SessionError, SessionOptions};
 
 use super::ab_chat::{
-    self, COMPOSE, DELIVERY, EXPECTED_FORCED, chat_in_url, chat_link, chat_requests, chat_url, deny_probes, enforce,
-    load, nonce, not_received, one_to_one_id, probe_text, save_screenshot_as, setup, wait_for_newest,
+    self, COMPOSE, DELIVERY, chat_in_url, chat_link, chat_requests, load, nonce, one_to_one_id, save_screenshot_as,
+    setup, wait_for_newest,
 };
 use super::dsl::{Driver, Key, RequestPattern, SeenRequest, Selector, StepError, js_string};
-use super::expected::Review;
-use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport};
+use super::{RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
 /// How long a step waits for a control to show, or for its write to be answered.
 pub const STEP: Duration = Duration::from_secs(30);
@@ -143,7 +110,7 @@ impl Writes {
 /// Runs `ab-chat-full` (see the module docs).
 ///
 /// # Errors
-/// When the run can't start: no lab config, no Chrome, no fence, a browser that can't be armed.
+/// When the run can't start: no lab config, no Chrome, a browser whose capture setup fails.
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
     let config = LabConfig::load(&LabLocations::from_env()?)?;
     run_with(&config, options, async |alias, options| {
@@ -158,13 +125,11 @@ async fn run_with(
     mut open: impl AsyncFnMut(Alias, SessionOptions) -> Result<LabSession, SessionError>,
 ) -> Result<ScenarioReport, ScenarioError> {
     let session_options = SessionOptions {
-        live_members: true,
         capture: Some(ScenarioName::AbChatFull.as_str().to_owned()),
         capture_request_bodies: true,
         display: options.display,
         media: Media::System,
         user_agent: None,
-        ..SessionOptions::fail_closed()
     };
     let a = open(Alias::A, session_options.clone()).await?;
     let b = match open(Alias::B, session_options).await {
@@ -181,7 +146,7 @@ async fn run_with(
     let full = Full {
         mri_a: mri(Alias::A),
         mri_b: mri(Alias::B),
-        nonce: nonce.clone(),
+
         texts: Texts::new(&nonce),
     };
     Ok(run_sessions(&full, chat_id.as_deref(), options, a, b).await)
@@ -197,15 +162,7 @@ async fn run_sessions(
 ) -> ScenarioReport {
     let mut report = ScenarioReport::new(ScenarioName::AbChatFull);
     // before a's page loads: the client sends an earlier run's unsent probe again as soon as it can
-    if let Err(error) = deny_probes(&a, Some(&probe_text(&full.nonce))) {
-        report.failures.push(error.to_string());
-    }
-    let policy = ab_chat::policy(chat_id).unwrap_or_else(|error| {
-        report
-            .failures
-            .push(format!("can't tell the a–b chat in a URL: {error}"));
-        DenyPolicy::Reviewed(Review::new().expecting_forced(&EXPECTED_FORCED))
-    });
+
     if let Err(error) = full.run(chat_id, &mut a, &mut b, &mut report, options).await {
         report.failures.push(error.to_string());
         for (alias, session) in [(Alias::A, &a), (Alias::B, &b)] {
@@ -216,7 +173,7 @@ async fn run_sessions(
     }
     // both browsers go down and both captures are finished, whatever happened to either
     for (alias, session) in [(Alias::A, a), (Alias::B, b)] {
-        report.close_account(alias, session, &policy).await;
+        report.close_account(alias, session).await;
     }
     report
 }
@@ -225,7 +182,7 @@ async fn run_sessions(
 struct Full {
     mri_a: String,
     mri_b: String,
-    nonce: String,
+
     texts: Texts,
 }
 
@@ -246,22 +203,18 @@ impl Full {
         let chat_id = chat_id
             .ok_or_else(|| setup("lab.toml has no MRI for a or b: run `proto-lab login` for them".to_owned()))?;
         let writes = Writes::on(chat_id).map_err(|error| setup(error.to_string()))?;
-        let names_chat = chat_url(chat_id).map_err(|error| setup(error.to_string()))?;
+
         let mut drive_a = a.driver();
         drive_a.set_call_timeout(PAGE_CALL);
         drive_a
             .navigate("a opens the chat with b", &chat_link(&self.mri_b))
             .await?;
         drive_a.wait_for("a's compose box", COMPOSE, CHAT_OPEN).await?;
-        let probe = probe_text(&self.nonce);
-        enforce(a, &mut drive_a, &probe, &names_chat).await?;
-        report
-            .notes
-            .push("enforcement: a's probe post was denied by the fence and failed in a's page".to_owned());
+
         let mut steps = Steps {
             writes: &writes,
             texts: &self.texts,
-            probe: &probe,
+
             mri_b: &self.mri_b,
             report,
         };
@@ -277,7 +230,7 @@ struct Steps<'a> {
     writes: &'a Writes,
     texts: &'a Texts,
     /// This run's probe, which b's copy of the chat must not have ([`not_received`]).
-    probe: &'a str,
+
     /// The account a mentions.
     mri_b: &'a str,
     report: &'a mut ScenarioReport,
@@ -419,10 +372,7 @@ impl Steps<'_> {
             .wait_for_request("b reads the a–b chat", opened, CHAT_OPEN)
             .await?;
         wait_for_newest(drive, "b shows a's first message", &self.texts.first, DELIVERY).await?;
-        not_received(drive, self.probe).await?;
-        self.report
-            .notes
-            .push("enforcement: b's copy of the chat has a's message and not the probe".to_owned());
+
         wait_for_newest(drive, "b shows a's edited message", &self.texts.edited, DELIVERY).await?;
         wait_for_newest(drive, "b shows a's mention", &self.texts.mention, DELIVERY).await?;
         drive.type_into("b goes to its compose box", COMPOSE, "").await?;
@@ -638,7 +588,7 @@ async fn react(drive: &mut Driver, reaction: &RequestPattern, who: &str, text: &
     answered(&format!("{who}'s reaction ({})", seen.method), &seen)
 }
 
-/// Whether a write's answer says it went through: a 2xx; a failure in the page (a fenced write fails as
+/// Whether a write's answer says it went through: a 2xx; a failure in the page (a held request fails as
 /// `net::ERR_BLOCKED_BY_CLIENT`) or any other status is an error naming the request (without its query).
 ///
 /// # Errors

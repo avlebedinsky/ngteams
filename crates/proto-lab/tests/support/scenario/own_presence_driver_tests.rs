@@ -111,7 +111,7 @@ impl Presence {
             }
             "Input.dispatchKeyEvent" => {
                 if command["params"]["key"] == "Enter" && command["params"]["type"] == "keyDown" {
-                    assert!(self.text.starts_with(super::super::ab_chat::PROBE_MARKER));
+                    assert!(self.text.starts_with(super::super::ab_chat::HELD_MARKER));
                     self.request(
                         "POST",
                         &format!("{BASE}/messages"),
@@ -153,7 +153,7 @@ fn steps(report_with: Report) -> Steps<'static> {
     Steps {
         mri_b: "8:orgid:00000000-0000-0000-0000-00000000000b",
         chat_id: Some(CHAT),
-        nonce: "synthetic-presence",
+
         report_with,
         options: RunOptions {
             display: crate::browser::Display::Headless,
@@ -199,33 +199,21 @@ async fn every_presence_mode_enforces_its_probe_and_only_its_selected_reports_ar
         let dir = tempfile::tempdir().unwrap();
         let mut session = page.session(dir.path(), false);
         let steps = steps(mode);
-        deny_probes(&session, Some(&probe_text(steps.nonce))).unwrap();
+
         if let Some(hold) = mode.hold() {
-            force_hold(&session, hold).unwrap();
+            force_hold(&session, hold).await.unwrap();
         }
         let mut report = ScenarioReport::new(mode.scenario());
         steps.run(&mut session, &mut report).await.unwrap();
         assert!(report.failures.is_empty(), "{mode:?}: {:?}", report.failures);
-        assert!(
-            report
-                .notes
-                .iter()
-                .any(|note| note.contains("probe post was denied by the fence"))
-        );
+
         assert!(
             report
                 .notes
                 .iter()
                 .any(|note| note.starts_with("a: presence endpoint PUTs:"))
         );
-        let denials = session.denials();
-        assert_eq!(
-            denials
-                .iter()
-                .filter(|denial| denial.label.as_deref() == Some(THIS_RUN_PROBE))
-                .count(),
-            1
-        );
+        let denials = session.held_requests();
         let held_statuses = denials
             .iter()
             .filter(|denial| denial.label.as_deref() == Some(HELD_MANUAL_STATUS))
@@ -302,11 +290,11 @@ async fn finishing_presence_preserves_forced_denials_and_reports_the_real_close_
     assert_eq!(report.accounts.len(), 1);
     assert_eq!(report.accounts[0].capture.as_ref(), Some(&capture));
     assert!(capture.join(crate::capture::EVENTS_FILE).is_file());
-    assert!(report.notes.iter().any(|line| line.contains("enforcement: a's probe")));
+
     assert!(report.notes.iter().any(|line| line.contains("a: reset chosen")));
     assert_eq!(
         report.accounts[0]
-            .denials
+            .held_requests
             .iter()
             .filter(|denial| denial.label.as_deref() == Some(HELD_MANUAL_STATUS))
             .count(),
@@ -374,8 +362,7 @@ async fn confirmed_presence_shutdown_yields_a_clean_report_with_its_captured_dec
             .iter()
             .any(|line| line.contains("a presence endpoint PUT was answered"))
     );
-    assert_eq!(report.accounts[0].denials.len(), 1);
-    assert_eq!(report.accounts[0].denials[0].label.as_deref(), Some(THIS_RUN_PROBE));
+    assert!(report.accounts[0].held_requests.is_empty());
     assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
 }
 

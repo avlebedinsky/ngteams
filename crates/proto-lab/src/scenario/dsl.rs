@@ -31,8 +31,8 @@ use regex::Regex;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
+use crate::capture_hold::without_query;
 use crate::cdp::{Cdp, CdpError, Event, SessionId};
-use crate::fence_http::without_query;
 
 /// How often a wait on the page looks again.
 pub const POLL: Duration = Duration::from_millis(200);
@@ -608,7 +608,7 @@ impl Driver {
         request: &SeenRequest,
         timeout: Duration,
     ) -> Result<String, StepError> {
-        let waiting_for = format!("{} {} to fail", request.method, teams_fence::log_url(&request.url));
+        let waiting_for = format!("{} {} to fail", request.method, crate::protocol::log_url(&request.url));
         let this = |seen: &SeenRequest| seen.session == request.session && seen.request_id == request.request_id;
         self.wait_failed(step, &waiting_for, timeout, this)
             .await
@@ -653,7 +653,7 @@ impl Driver {
                         reason: format!(
                             "{} {} got a response ({status}) instead of failing",
                             seen.method,
-                            teams_fence::log_url(&seen.url)
+                            crate::protocol::log_url(&seen.url)
                         ),
                     });
                 }

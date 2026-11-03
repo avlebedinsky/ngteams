@@ -1,46 +1,19 @@
-//! The `abc-everyone` scenario: a mention of everyone in the lab's a–b–c group chat, recorded for
-//! `docs/protocol/chat.md` ("A mention of everyone"). No capture had shown how the web client sends one: the bundle
-//! names a `mentionType` `everyone` and keys the picker's suggestion by the chat's id, nothing more.
-//!
-//! Both accounts run under the lab rule with members read live, as `abc-chat`'s messaging run does; it starts only when
-//! the lab's group chat is recorded and its members read in full ([`super::abc_chat::messaging_blocked`]), before any
-//! browser opens.
-//!
-//! 1. a's fence force-denies this run's probe, the group chat's first messages and any earlier run's probe
-//!    ([`super::abc_chat::forced_denies`]) from before the page loads.
-//! 2. b loads the web client at the group chat; a loads it there too and proves enforcement live with this run's probe
-//!    (`abc-chat`'s step 3).
-//! 3. **Held**: a types `@`, waits for the mention picker to offer [`EVERYONE`] (the web client's English label),
-//!    notes what the picker shows, moves its highlight there with the arrow keys, picks it with Enter and sends
-//!    [`held_text`] after it. The text begins with the probe marker, so a's fence force-denies the post (under the
-//!    earlier run's probe label) and every later run's denies it again when the client resends it. The post's body, as
-//!    the browser held it, is read: its `properties.mentions` must have one entry of `mentionType` `everyone`, and
-//!    the lab rule must read the post as a message to the group chat adding nobody ([`judged_as_the_chat`]).
-//!    Otherwise the run stops here, nothing sent: a real one would be denied and resent on every later load.
-//! 4. **Sent**: a mentions everyone again the same way and sends [`sent_text`]; the post must be answered with a 2xx.
-//!    b must show the message ([`super::ab_chat::wait_for_newest`]); a screenshot of b's page goes into its capture
-//!    dir, for how the web client draws a mention of everyone received.
-//!
-//! A screenshot of a's open picker goes into a's capture dir too. Judged as `abc-chat` is ([`super::abc_chat::policy`]):
-//! the forced denies and the reviewed expected-deny list, nothing else denied on the group chat. Nothing answers a
-//! call.
+//! Captures an everyone mention in the recorded group chat. One labelled shape capture is deliberately held, then the real message is sent and must appear on the other account.
 
 use std::time::Duration;
 
 use serde_json::Value;
-use teams_fence::{Scope, Target, WriteKind};
 
 use crate::browser::Media;
-use crate::classify::{Classification, classify, strict_json};
+use crate::classify::strict_json;
 use crate::config::{Alias, LabPaths};
 use crate::session::{LabSession, SessionOptions};
 
 use super::ab_chat::{
-    CHAT_OPEN, COMPOSE, DELIVERY, PROBE_MARKER, chat_url, enforce, load_at, nonce, probe_text, save_screenshot_as,
-    setup, wait_for_newest,
+    CHAT_OPEN, COMPOSE, DELIVERY, HELD_MARKER, load_at, nonce, save_screenshot_as, setup, wait_for_newest,
 };
 use super::ab_chat_full::{Writes, answered, clear_compose};
-use super::abc_chat::{self, chat_link_by_id, lab_source, messaging_blocked};
+use super::abc_chat::chat_link_by_id;
 use super::dsl::{Driver, Key, js_string};
 use super::{RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
@@ -80,10 +53,10 @@ const ARROW_DOWN: Key = Key {
     modifiers: 0,
 };
 
-/// The held mention's text after the mention: the probe marker first, so every run's forced deny stops it.
+/// The held mention's text after the mention: the probe marker first, so every run's capture hold stops it.
 #[must_use]
 pub fn held_text(nonce: &str) -> String {
-    format!("{PROBE_MARKER}{nonce} everyone held")
+    format!("{HELD_MARKER}{nonce} everyone held")
 }
 
 /// The sent mention's text after the mention.
@@ -95,7 +68,7 @@ pub fn sent_text(nonce: &str) -> String {
 /// Runs `abc-everyone` (see the module docs).
 ///
 /// # Errors
-/// When the run can't start: no lab config, an unreadable `chats.toml`, no Chrome, no fence, a browser that can't be
+/// When the run can't start: no lab config, an unreadable `chats.toml`, no Chrome, a browser that can't be
 /// armed.
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
     let chats = crate::config::LabChats::load(paths).map_err(|error| setup(error.to_string()))?;
@@ -106,19 +79,12 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
             .push("no group chat recorded in chats.toml: run abc-chat first".to_owned());
         return Ok(report);
     };
-    // checked before any browser opens: a message the fence would deny is sent again on every later load
-    if let Some(reason) = messaging_blocked(&lab_source()?, &group) {
-        report.failures.push(reason);
-        return Ok(report);
-    }
     let session_options = SessionOptions {
-        live_members: true,
         capture: Some(ScenarioName::AbcEveryone.as_str().to_owned()),
         capture_request_bodies: true,
         display: options.display,
         media: Media::System,
         user_agent: None,
-        ..SessionOptions::fail_closed()
     };
     let a = LabSession::open_with(paths, Alias::A, session_options.clone()).await?;
     let b = match LabSession::open_with(paths, Alias::B, session_options).await {
@@ -135,15 +101,14 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
 /// Runs and closes the already-open armed sessions; startup above remains responsible for eligibility and opening.
 async fn drive(group: &str, nonce: &str, options: RunOptions, mut a: LabSession, mut b: LabSession) -> ScenarioReport {
     let mut report = ScenarioReport::new(ScenarioName::AbcEveryone);
-    for rule in abc_chat::forced_denies(nonce) {
-        a.force_deny(rule);
+    match crate::capture_hold::Hold::new("POST", super::ab_chat::MESSAGE_POST) {
+        Ok(rule) => a.hold(
+            rule.with_body_containing(&held_text(nonce))
+                .labelled("held everyone mention"),
+        ),
+        Err(error) => report.failures.push(error.to_string()),
     }
-    let policy = abc_chat::policy(Some(group)).unwrap_or_else(|error| {
-        report
-            .failures
-            .push(format!("can't tell the a-b-c chat in a URL: {error}"));
-        super::DenyPolicy::Reviewed(super::expected::Review::new().expecting_forced(&abc_chat::EXPECTED_FORCED))
-    });
+
     let steps = Steps { group, nonce, options };
     if let Err(error) = steps.run(&mut a, &mut b, &mut report).await {
         report.failures.push(error.to_string());
@@ -154,7 +119,7 @@ async fn drive(group: &str, nonce: &str, options: RunOptions, mut a: LabSession,
         }
     }
     for (alias, session) in [(Alias::A, a), (Alias::B, b)] {
-        report.close_account(alias, session, &policy).await;
+        report.close_account(alias, session).await;
     }
     report
 }
@@ -186,11 +151,6 @@ impl Steps<'_> {
         drive_a.set_call_timeout(PAGE_CALL);
         load_at(Alias::A, a, &link, self.options.load_timeout).await?;
         drive_a.wait_for("a's compose box", COMPOSE, wait).await?;
-        let names_chat = chat_url(self.group).map_err(|error| setup(error.to_string()))?;
-        enforce(a, &mut drive_a, &probe_text(self.nonce), &names_chat).await?;
-        report
-            .notes
-            .push("enforcement: a's probe post was denied by the fence and failed in a's page".to_owned());
 
         let post = Writes::on(self.group).map_err(|error| setup(error.to_string()))?.post;
         let held = held_text(self.nonce);
@@ -213,7 +173,7 @@ impl Steps<'_> {
         }
         report
             .notes
-            .push("held: the lab rule reads it as a message to the a-b-c chat adding nobody".to_owned());
+            .push("held: the captured Everyone mention refers to the selected group chat".to_owned());
 
         let sent = sent_text(self.nonce);
         self.mention_everyone(&mut drive_a, a, &sent, false, report).await?;
@@ -372,10 +332,18 @@ pub fn judged_as_the_chat(url: &str, body: &str, group: &str) -> Result<(), Stri
     if everyone != 1 {
         return Err(format!("{everyone} mention(s) of everyone in it, not one"));
     }
-    let want = Target::new(WriteKind::Message, Scope::Conversation { id: group.to_owned() });
-    match classify("POST", url, Some(body.as_bytes())) {
-        Classification::Write(target) if target == want => Ok(()),
-        other => Err(format!("the lab rule reads it as {other:?}")),
+    if entries.iter().any(|entry| {
+        entry.get("mentionType").and_then(Value::as_str) == Some("everyone")
+            && entry.get("mri").and_then(Value::as_str) != Some(group)
+    }) {
+        return Err("the Everyone mention does not refer to the selected group chat".into());
+    }
+    let pattern = super::ab_chat::chat_url(group).map_err(|error| error.to_string())?;
+    let message = regex::Regex::new(super::ab_chat::MESSAGE_POST).map_err(|error| error.to_string())?;
+    if pattern.is_match(url) && message.is_match(url) {
+        Ok(())
+    } else {
+        Err("the post URL doesn't name the selected group chat".into())
     }
 }
 

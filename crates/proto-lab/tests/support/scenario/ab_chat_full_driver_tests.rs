@@ -42,7 +42,7 @@ fn emit(events: &EventsOut, id: usize, method: &str, path: &str, text: &str) {
         "Network.requestWillBeSent",
         json!({"requestId":format!("synthetic-{id}"),"wallTime":1_700_000_000.0,"request":request}),
     );
-    if text.starts_with(crate::scenario::ab_chat::PROBE_MARKER) {
+    if text.starts_with(crate::scenario::ab_chat::HELD_MARKER) {
         broadcast(
             events,
             "Fetch.requestPaused",
@@ -234,7 +234,7 @@ async fn a_runs_all_post_enforcement_steps_and_reports_only_the_failed_edit_befo
         let mut steps = Steps {
             writes: &writes,
             texts: &texts,
-            probe: "synthetic-denied-probe",
+
             mri_b: B,
             report: &mut report,
         };
@@ -277,7 +277,7 @@ async fn b_reads_messages_without_the_denied_probe_and_reports_its_read_receipt(
     let mut steps = Steps {
         writes: &writes,
         texts: &texts,
-        probe: "synthetic-denied-probe",
+
         mri_b: B,
         report: &mut report,
     };
@@ -285,7 +285,7 @@ async fn b_reads_messages_without_the_denied_probe_and_reports_its_read_receipt(
         .b_reads(&mut page.driver, "8:orgid:synthetic-a", &chat_requests(CHAT).unwrap())
         .await
         .unwrap();
-    assert!(report.notes.iter().any(|note| note.contains("not the probe")));
+
     assert!(
         report
             .notes
@@ -305,7 +305,7 @@ async fn b_reports_navigation_and_reaction_failures_individually_and_does_not_st
     let mut steps = Steps {
         writes: &writes,
         texts: &texts,
-        probe: "synthetic-denied-probe",
+
         mri_b: B,
         report: &mut report,
     };
@@ -387,10 +387,10 @@ async fn the_complete_full_chat_flow_proves_the_forced_deny_before_its_independe
     let full = Full {
         mri_a: "8:orgid:synthetic-a".into(),
         mri_b: B.into(),
-        nonce: "synthetic-complete".into(),
+
         texts: Texts::new("synthetic-complete"),
     };
-    deny_probes(&a_session, Some(&probe_text(&full.nonce))).unwrap();
+
     let mut report = ScenarioReport::new(ScenarioName::AbChatFull);
     let options = RunOptions {
         display: crate::browser::Display::Headless,
@@ -405,18 +405,10 @@ async fn the_complete_full_chat_flow_proves_the_forced_deny_before_its_independe
     .unwrap()
     .unwrap();
     assert!(report.failures.is_empty(), "{report:?}");
-    assert!(
-        report
-            .notes
-            .iter()
-            .any(|note| note.contains("probe post was denied by the fence and failed"))
-    );
+
     assert!(report.notes.iter().any(|note| note == "b: react: done"));
-    assert_eq!(a_session.denials().len(), 1);
-    assert_eq!(
-        a_session.denials()[0].label.as_deref(),
-        Some(super::super::ab_chat::THIS_RUN_PROBE)
-    );
+    assert!(a_session.held_requests().is_empty());
+
     assert!(
         a_session.close().await.is_err(),
         "an unowned synthetic browser cannot confirm its exit"
@@ -454,7 +446,7 @@ async fn setup_preserves_page_options_and_refuses_missing_identity_then_closes_b
     let mut opened = Vec::new();
     let report = run_with(&unsigned_config(root.path()), run_options(), async |alias, options| {
         opened.push(alias);
-        assert!(options.live_members && options.capture_request_bodies);
+        assert!(options.capture_request_bodies);
         assert_eq!(options.capture.as_deref(), Some("ab-chat-full"));
         assert!(matches!(options.media, Media::System));
         assert_eq!(options.display, crate::browser::Display::Headless);
@@ -521,7 +513,7 @@ async fn full_chat_reports_keep_independent_steps_and_close_every_real_process_a
         let full = Full {
             mri_a: "8:orgid:synthetic-a".into(),
             mri_b: B.into(),
-            nonce: "synthetic-finalized-full".into(),
+
             texts: Texts::new("synthetic-finalized-full"),
         };
         let report = run_sessions(&full, Some(CHAT), run_options(), sender, recipient).await;

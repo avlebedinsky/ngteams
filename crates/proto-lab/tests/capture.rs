@@ -23,13 +23,11 @@ use proto_lab::capture::{
     Capture, CaptureError, EVENTS_FILE, RTC_BINDING, Recorder, RtcHooks, TAP_INTERVAL, TAP_TONE_HZ, TAP_WINDOW,
     capture_dir_name,
 };
+use proto_lab::capture_hold::{CaptureHold, Hold};
 use proto_lab::cdp::{Cdp, SessionId};
-use proto_lab::classify::Classifier;
-use proto_lab::fence_http::{ForcedDeny, HttpFence};
-use proto_lab::fence_ws::{ForcedFrameDeny, GuardScript, WsFence};
+use proto_lab::frame_hold::FrameHold;
 use proto_lab::scenario::echo_call::tone_wav;
 use serde_json::{Value, json};
-use teams_fence::{FailClosed, Fence, FenceLog, Roster};
 use tokio_tungstenite::tungstenite::Message;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -132,11 +130,10 @@ fn the_hooks_render_with_their_binding_and_interval() {
 }
 
 #[test]
-fn pages_and_iframes_get_the_hooks_after_the_guard_and_before_they_run() {
+fn pages_and_iframes_get_the_hooks_before_they_run() {
     for kind in [TargetKind::Page, TargetKind::Iframe] {
         let steps = kind.steps();
         let position = |wanted| steps.iter().position(|step| *step == wanted).unwrap();
-        assert!(position(Step::GuardNewDocuments) < position(Step::CaptureBinding));
         assert!(position(Step::CaptureBinding) < position(Step::CaptureHooks));
         assert!(position(Step::CaptureHooks) < position(Step::Resume));
         assert!(
@@ -279,19 +276,10 @@ async fn start_run(pages: &MockServer, echo: Option<&str>, recording: Recording)
     let mut launch = LaunchOptions::new(dirs.path().join("profile"));
     launch.media = recording.media.clone();
     let browser = Browser::launch(&chrome, &launch, STEP).await?;
-    let fence = Arc::new(Fence::new(
-        Roster::new([], []),
-        FenceLog::open(&dirs.path().join("fence.log"))?,
-    ));
-    let http = HttpFence::new(Classifier::new(), Arc::clone(&fence), Arc::new(FailClosed));
-    http.force_deny(ForcedDeny::new(
-        "POST",
-        &format!("^{}/sink$", regex::escape(&pages.uri())),
-    )?);
-    let ws = WsFence::new(fence, Arc::new(FailClosed), GuardScript::generate()?);
-    if let Some(origin) = echo {
-        ws.force_deny(ForcedFrameDeny::new(&format!("^{}/", regex::escape(origin)))?.with_text_containing("deny:"));
-    }
+
+    let http = CaptureHold::new();
+    http.hold(Hold::new("POST", &format!("^{}/sink$", regex::escape(&pages.uri())))?);
+
     let recorder = Arc::new(Recorder::create(&dirs.path().join("captures"), "test")?);
     let capture = Capture::new(Arc::clone(&recorder), RtcHooks::new(recording.stats));
     let capture = if recording.request_bodies {
@@ -299,11 +287,14 @@ async fn start_run(pages: &MockServer, echo: Option<&str>, recording: Recording)
     } else {
         capture.without_request_bodies()
     };
-    let options = ArmOptions {
-        service_worker_origins: vec![pages.uri()],
-    };
-    let armed = ArmedBrowser::arm_capturing(browser, http, ws, &options, capture).await?;
+    let options = ArmOptions::default();
+    let armed = ArmedBrowser::arm_capturing(browser, http, &options, capture).await?;
     let page = armed.open_page(STEP).await?;
+    if let Some(origin) = echo {
+        armed
+            .hold_frames(FrameHold::new(&format!("^{}/", regex::escape(origin)))?.with_text_containing("deny:"))
+            .await?;
+    }
     Ok(Some(Run {
         armed,
         recorder,
@@ -383,9 +374,8 @@ async fn a_recorded_run_holds_the_network_the_frames_the_bodies_and_every_verdic
                 *received.lock().unwrap_or_else(PoisonError::into_inner),
                 ["allow:1", "allow:2"]
             );
-            // the run fails on the denied request and frame, as any run with a deny does
-            let failed = run.armed.verdict().unwrap_err();
-            assert_eq!((failed.denials.len(), failed.frame_denials.len()), (1, 1), "{failed:?}");
+            assert_eq!(run.armed.held_requests().len(), 1);
+            assert!(run.armed.status().failures().is_empty());
             Ok(())
         },
     )
@@ -431,7 +421,7 @@ async fn a_capture_without_request_bodies_keeps_the_requests_and_none_of_their_b
                 .iter()
                 .filter(|id| answered.iter().any(|entry| entry["params"]["requestId"] == id.as_str()))
                 .count();
-            answered == 2 && of_type(entries, "verdict").any(|entry| entry["verdict"] == "deny")
+            answered == 2 && of_type(entries, "held_request").next().is_some()
         })
         .await?;
         let posts: Vec<&Value> = cdp_events(&entries, "Network.requestWillBeSent")
@@ -445,9 +435,7 @@ async fn a_capture_without_request_bodies_keeps_the_requests_and_none_of_their_b
                 .all(|entry| entry["params"]["request"]["hasPostData"] == true),
             "and says it had a body"
         );
-        let denied: Vec<&Value> = of_type(&entries, "verdict")
-            .filter(|entry| entry["verdict"] == "deny")
-            .collect();
+        let denied: Vec<&Value> = of_type(&entries, "held_request").collect();
         assert_eq!(denied.len(), 1, "{denied:?}");
         assert_eq!(denied[0]["request"]["method"], "POST");
         assert_eq!(of_type(&entries, "request_body").count(), 0);
@@ -491,67 +479,27 @@ fn check_recorded_run(entries: &[Value]) -> TestResult {
             .iter()
             .any(|entry| entry["params"]["requestId"] == get.as_str())
     );
-    let verdicts: Vec<&Value> = of_type(entries, "verdict").collect();
-    check_http_verdicts(entries, &verdicts, &get);
-    check_recorded_frames(entries, &verdicts);
+    check_http_holds(entries);
+    check_recorded_frames(entries);
     Ok(())
 }
 
-fn check_http_verdicts(entries: &[Value], verdicts: &[&Value], get: &str) {
-    let on = |path: &str, verdict: &str| -> Vec<&Value> {
-        verdicts
-            .iter()
-            .copied()
-            .filter(|entry| entry["url"].as_str().is_some_and(|url| url.ends_with(path)) && entry["verdict"] == verdict)
-            .collect()
-    };
-    // allowed by the page's layer, then by the browser's
-    let allowed = on("/pages/data.json", "allow");
-    assert_eq!(allowed.len(), 2, "{allowed:?}");
+fn check_http_holds(entries: &[Value]) {
+    let held: Vec<_> = of_type(entries, "held_request").collect();
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0]["method"], "POST");
+    assert!(held[0]["url"].as_str().is_some_and(|url| url.ends_with("/sink")));
+    assert_eq!(held[0]["request"]["postData"], "lab-post");
     assert!(
-        allowed
-            .iter()
-            .all(|entry| entry["network_id"] == get && entry["method"] == "GET")
-    );
-    let layers = allowed.iter().filter(|entry| entry["session"].is_null()).count();
-    assert_eq!(
-        layers, 1,
-        "one allow on the page's session, one on the browser's: {allowed:?}"
-    );
-    // the POST: denied by the page's layer (so the browser's never sees it), with the whole request kept for mapping
-    let denied = on("/sink", "deny");
-    assert_eq!(denied.len(), 1, "{denied:?}");
-    assert_eq!(denied[0]["channel"], "http");
-    assert_eq!(denied[0]["method"], "POST");
-    assert_eq!(denied[0]["cause"], "forced");
-    assert_eq!(denied[0]["request"]["postData"], "lab-post");
-    assert!(denied[0]["session"].is_string());
-    assert!(
-        cdp_events(entries, "Network.requestWillBeSent")
-            .iter()
-            .any(|entry| entry["params"]["request"]["url"]
-                .as_str()
-                .is_some_and(|url| url.ends_with("/sink"))),
-        "the denied request's own network event is there too"
+        of_type(entries, "verdict").next().is_none(),
+        "capture has no authorization verdicts"
     );
 }
-
-fn check_recorded_frames(entries: &[Value], verdicts: &[&Value]) {
-    let frames: Vec<(String, String)> = verdicts
-        .iter()
-        .filter(|entry| entry["channel"] == "web_socket")
-        .map(|entry| {
-            let data = entry["frame"]["data"].as_str().unwrap_or_default().to_owned();
-            (data, entry["verdict"].as_str().unwrap_or_default().to_owned())
-        })
-        .collect();
-    let expected = [("allow:1", "allow"), ("deny:1", "deny"), ("allow:2", "allow")];
-    let expected: Vec<(String, String)> = expected
-        .iter()
-        .map(|(a, b)| ((*a).to_owned(), (*b).to_owned()))
-        .collect();
-    assert_eq!(frames, expected);
-    let sent: Vec<&str> = cdp_events(entries, "Network.webSocketFrameSent")
+fn check_recorded_frames(entries: &[Value]) {
+    let held: Vec<_> = of_type(entries, "held_frame").collect();
+    assert_eq!(held.len(), 1);
+    assert_eq!(held[0]["payload"]["data"], "deny:1");
+    let sent: Vec<_> = cdp_events(entries, "Network.webSocketFrameSent")
         .iter()
         .filter_map(|entry| entry["params"]["response"]["payloadData"].as_str())
         .collect();

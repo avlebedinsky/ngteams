@@ -3,7 +3,7 @@
 use super::*;
 use crate::browser::Display;
 use crate::scenario::test_page::{Page, evaluated};
-use crate::session::FenceReport;
+use crate::session::SessionReport;
 
 fn plan(step: CallStep) -> CallPlan {
     CallPlan {
@@ -53,7 +53,7 @@ async fn invalid_call_plans_fail_before_opening_any_browser() {
     let error = plan.drive(&mut [], &mut None, &mut report).await.unwrap_err();
     assert!(error.to_string().contains("no caller's browser"));
     assert!(
-        open_all(&paths, &[], &SessionOptions::fail_closed())
+        open_all(&paths, &[], &SessionOptions::default())
             .await
             .unwrap()
             .is_empty()
@@ -95,7 +95,7 @@ fn caller_judgment_requires_a_start_and_rejects_permitted_starts_in_held_mode() 
     judge_caller(dir.path(), CallStep::Answer, &mut report);
     assert!(report.failures[0].contains("can't read a's capture"));
     for (step, text, failure) in [
-        (CallStep::Answer, String::new(), Some("allowed no call start")),
+        (CallStep::Answer, String::new(), Some("no call start")),
         (CallStep::StartHeld, String::new(), None),
         (CallStep::Answer, verdict("POST", CALL_START_URL, "allow"), None),
         (
@@ -161,18 +161,16 @@ fn held_mode_requires_the_callers_forced_deny_and_reports_each_accounts_held_sta
     let mut report = ScenarioReport::new(ScenarioName::AbCall);
     report.accounts.push(super::super::AccountRun {
         alias: Alias::A,
-        fence: FenceReport::default(),
-        denials: Vec::new(),
-        frame_denials: Vec::new(),
+        browser: SessionReport::default(),
+        held_requests: Vec::new(),
         capture: None,
     });
     judge_held(CallStep::StartHeld, &mut report);
-    assert_eq!(report.failures, ["a's fence held back no call start"]);
+    assert_eq!(report.failures, ["a's capture held back no call start"]);
     report.failures.clear();
-    report.accounts[0].denials.push(Denial {
+    report.accounts[0].held_requests.push(HeldRequest {
         method: "POST".to_owned(),
         url: CALL_START_URL.to_owned(),
-        cause: DenyCause::Forced,
         label: Some(START_HELD.to_owned()),
         network_id: None,
     });
@@ -223,36 +221,6 @@ async fn evaluation_page(values: Vec<Value>) -> Page {
         ))
     })
     .await
-}
-
-#[tokio::test]
-async fn the_synthetic_session_uses_the_real_fail_closed_fence() {
-    let dir = tempfile::tempdir().unwrap();
-    let mut page = Page::new(|command| {
-        assert_eq!(command["method"], "Fetch.failRequest");
-        assert_eq!(command["params"]["requestId"], "synthetic-write");
-        assert_eq!(command["params"]["errorReason"], "BlockedByClient");
-        Ok(json!({}))
-    })
-    .await;
-    let mut session = page.session(dir.path(), true);
-    page.send(
-        "Fetch.requestPaused",
-        json!({
-            "requestId": "synthetic-write", "networkId": "synthetic-network", "resourceType": "XHR",
-            "request": {"method": "POST", "url": "https://graph.microsoft.com/v1.0/me/sendMail",
-                        "headers": {}, "postData": "{}"},
-        }),
-    );
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    while session.denials().is_empty() || page.commands().is_empty() {
-        assert!(tokio::time::Instant::now() < deadline);
-        session.pump(Duration::from_millis(10)).await;
-    }
-    assert_eq!(session.denials().len(), 1);
-    assert_eq!(session.report().denied_requests.get("graph.microsoft.com"), Some(&1));
-    assert_eq!(page.commands().len(), 1);
-    assert!(session.capture_dir().unwrap().join(EVENTS_FILE).is_file());
 }
 
 #[tokio::test]
@@ -819,7 +787,7 @@ async fn a_decline_drive_loads_both_pages_and_unconfirmed_closes_preserve_both_r
         report
             .failures
             .iter()
-            .all(|failure| failure.contains("the fence had lost its connection"))
+            .all(|failure| failure.contains("the capture browser is already gone"))
     );
     assert_eq!(report.accounts.len(), 2);
     for commands in [origin_peer.commands(), answer_peer.commands()] {
@@ -904,7 +872,7 @@ async fn answered_video_and_keepalive_phases_require_audio_and_media_on_both_pag
                     report
                         .notes
                         .iter()
-                        .any(|note| note == &format!("{alias}: the fence let 1 keep-alive(s) through"))
+                        .any(|note| note == &format!("{alias}: the capture recorded 1 keep-alive(s) through"))
                 );
             }
         }
@@ -1120,12 +1088,7 @@ async fn failure_in_the_first_page_still_diagnoses_hangs_up_closes_and_judges_ev
         );
         assert!(commands.iter().any(|command| command["method"] == "Browser.close"));
     }
-    assert!(
-        report
-            .failures
-            .iter()
-            .any(|failure| failure.contains("allowed no call start"))
-    );
+    assert!(report.failures.iter().any(|failure| failure.contains("no call start")));
 }
 
 async fn held_page() -> Page {
@@ -1245,7 +1208,7 @@ async fn failure_opening_a_callee_closes_the_caller_and_does_not_open_later_acco
     let mut aliases = Vec::new();
     let error = open_all_with(
         &[Alias::A, Alias::B, Alias::C],
-        &SessionOptions::fail_closed(),
+        &SessionOptions::default(),
         async |alias, _| {
             aliases.push(alias);
             session

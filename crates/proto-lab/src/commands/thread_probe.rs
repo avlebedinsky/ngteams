@@ -1,36 +1,20 @@
-//! `proto-lab probe thread <alias> [--save <name>]`: how the chat service answers the member reads of the a–b–c group
-//! chat (its id from the lab's `chats.toml`), as one account sees them. Read-only (M1 Task 8).
-//!
-//! With the account's own `ic3` token (refreshed as [`super::probe`] does) and its chat base, only `GET`s, each in the
-//! web client's header form ([`HeaderForm::ALL`]'s first), relative to the base ([`ThreadReadKind`]):
-//! the thread (`v1/threads/<id>`), the batch form the web client uses (`v1/threads?threadIds=<id>`), the member list
-//! in one page of [`ONE_PAGE`] and paged [`PAGED`] at a time (each next page followed only while it is the same
-//! member list on the chat base, at most [`MAX_PAGES`]), the filtered view (`v1/threads/<id>/filtered`) and the
-//! account's own view of the conversation (`v1/users/ME/conversations/<id>`); then the fence's own read of the chat
-//! through [`LiveMembershipSource`]. All with `view=msnp24Equivalent`.
-//!
-//! The report ([`ThreadProbe::lines`]) shows per read its status, its keys (the top level, `_metadata`, `properties`),
-//! how many members it lists, whether it lists the same members and roster version as the thread read, and which
-//! keys look like paging; never a value, a member id, a token or a body. `--save` writes the answers as a sanitized
-//! local reference copy, as `probe chat` does.
+//! Probes the recorded group chat with plain GETs: thread, batch thread, members, filtered thread and own-conversation views. Reports show keys/counts and optional sanitized reference events.
 
 use std::collections::BTreeSet;
 use std::fmt::{self, Write as _};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::config::LabChats;
+use crate::protocol::chat_service_path;
 use serde_json::{Map, Value, json};
 use teams_auth::claims::TokenSummary;
 use teams_auth::secrets::SecretStore;
 use teams_auth::token::{Scope, TokenClient};
-use teams_fence::{
-    ChatCredential, LiveMembershipSource, Membership, MembershipSource as _, Scope as FenceScope, chat_service_path,
-};
 use url::Url;
 
 use super::probe::{
     Answer, HeaderForm, IC3_RESOURCE, Origin, ProbeError, ReadFailure, at_origin, body_value, chat_base, client,
-    membership_line, outcome_line, read, read_region, response_headers,
+    outcome_line, read, read_region, response_headers,
 };
 use crate::config::{Alias, LabConfig};
 
@@ -46,7 +30,7 @@ pub const MAX_PAGES: usize = 5;
 /// Which read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ThreadReadKind {
-    /// `v1/threads/<id>`: the fence's read.
+    /// `v1/threads/<id>`: the browser's read.
     Thread,
     /// `v1/threads?threadIds=<id>`: the web client's batch read.
     Threads,
@@ -219,8 +203,6 @@ pub struct ThreadProbe {
     pub base: String,
     chat_id: String,
     pub reads: Vec<ThreadRead>,
-    /// The fence's live read of the chat.
-    pub verdict: Membership,
 }
 
 impl fmt::Debug for ThreadProbe {
@@ -230,12 +212,11 @@ impl fmt::Debug for ThreadProbe {
             .field("token", &self.token)
             .field("base", &self.base)
             .field("reads", &self.reads)
-            .field("verdict", &membership_line(&self.verdict))
             .finish_non_exhaustive()
     }
 }
 
-/// Probes the a–b–c chat's member reads as `alias` (see the module docs), the fence's own read through `source`.
+/// Probes the a–b–c chat's member reads as `alias` (see the module docs), the browser's own read through `source`.
 ///
 /// # Errors
 /// [`ProbeError`] when nothing could be read: no a–b–c chat in `chats.toml` ([`ProbeError::NoGroupChat`]), no usable
@@ -246,7 +227,6 @@ pub async fn probe_thread<S: SecretStore>(
     config: &LabConfig,
     alias: Alias,
     origin: &Origin,
-    source: LiveMembershipSource,
 ) -> Result<ThreadProbe, ProbeError> {
     if matches!(origin, Origin::Mock(_)) && !crate::test_support_enabled() {
         return Err(ProbeError::MockOrigin);
@@ -261,7 +241,6 @@ pub async fn probe_thread<S: SecretStore>(
         .refresh(store, account, &Scope::for_resource(IC3_RESOURCE))
         .await?;
     let token = ic3.access_token.expose();
-    let credential = ChatCredential::bearer(&base, token).ok_or(ProbeError::BadToken)?;
     let reader = Reader {
         client: client(origin)?,
         origin,
@@ -279,15 +258,12 @@ pub async fn probe_thread<S: SecretStore>(
         };
         reads.extend(reader.pages(kind, url, pages).await);
     }
-    source.set_credential(credential);
-    let verdict = source.members(&FenceScope::Conversation { id: chat_id.clone() }).await;
     Ok(ThreadProbe {
         alias,
         token: TokenSummary::read(&ic3.access_token),
         base,
         chat_id,
         reads,
-        verdict,
     })
 }
 
@@ -379,10 +355,6 @@ impl ThreadProbe {
                 lines.push(format!("{alias}:   {}", shape_line(&shape, reference.as_ref())));
             }
         }
-        lines.push(format!(
-            "{alias}: the fence's read of the a-b-c chat: {}",
-            membership_line(&self.verdict)
-        ));
         lines
     }
 

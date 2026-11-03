@@ -1,6 +1,6 @@
 [package]
 name = "proto-lab"
-description = "Protocol lab harness: lab browser profiles, the armed browser fence, captures and scenarios"
+description = "Protocol lab harness: lab browser profiles, captures and scenarios"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -14,7 +14,7 @@ clap.workspace = true
 fixture-guard.workspace = true
 flate2.workspace = true
 futures-util.workspace = true
-# the expected-deny list reads a path segment percent-decoded (`*@thread.tacv2`)
+# recorded request paths are decoded as protocol segments
 percent-encoding.workspace = true
 psl.workspace = true
 regex.workspace = true
@@ -25,7 +25,6 @@ serde_json.workspace = true
 sha2.workspace = true
 # `proto-lab auth`: PKCE, the code exchange and refresh, the skypetoken, kept in the Secret Service
 teams-auth.workspace = true
-teams-fence.workspace = true
 # a token's expiry as an HTTP date in `proto-lab auth`'s report
 httpdate.workspace = true
 # `proto-lab auth`: each region save stages in a file of its own before the rename
@@ -44,9 +43,6 @@ zeroize.workspace = true
 proto-lab = { path = ".", features = ["test-support"] }
 # a local HTTPS server: Chrome uploads Reporting API reports only over a secure connection
 rcgen.workspace = true
-# the fence tests build fences over test rosters and fake membership sources; never a normal dependency, and the
-# binary refuses to run when a test build unified it in
-teams-fence = { workspace = true, features = ["test-support"] }
 # a local websocket server for the CDP client tests
 tokio = { workspace = true, features = ["net"] }
 tokio-rustls.workspace = true

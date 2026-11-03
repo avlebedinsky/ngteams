@@ -1,40 +1,4 @@
-//! The `echo-call` scenario: account a places the web client's test call to Microsoft's echo service with Chrome's fake
-//! microphone playing a tone, waits for the echo to play the tone back, and hangs up. The run is recorded
-//! (`captures/echo-call/<ts>/`): the call's HTTP and WebSocket signaling, the fence's verdicts and the WebRTC hooks'
-//! reports (SDP, ICE, `getStats`, the audio tap's readings of the received audio) are the material of
-//! `docs/protocol/calling-echo.md`.
-//!
-//! The echo service is the one participant outside the lab the user approved (2026-10-19), by its MRI in `lab.toml`
-//! (`[[service_participants]] name = "echo"`). The run uses the lab rule, under which what sets up the account's own
-//! endpoint reaches nobody and passes, with the echo service's MRI ([`Classifier::with_test_call_callee`]): the call
-//! start is a write the fence judges as a new call of a and the echo service. With no echo MRI in `lab.toml` the call
-//! start is unknown and denied. The echo's `add` is judged by its invitee (the echo service); the call's other
-//! follow-ups (the endpoint metadata, the channel parameters, the acceptance's acknowledgement over Trouter, `leave`)
-//! pass once the start was let in.
-//!
-//! The browser plays nothing aloud: it is muted with no audio device ([`crate::browser::BASE_ARGS`]), and the received
-//! audio is read in the page by the hooks' audio tap (`assets/rtc_hooks.js`).
-//!
-//! The steps:
-//! 1. before the page loads, a's fence force-denies every write carrying `ab-chat`'s probe marker
-//!    ([`forced_rules`]): the web client keeps a send that failed and sends it again on every later load, an earlier
-//!    `ab-chat` run's probe or `abc-chat`'s first message among them, and the members' live read (on here for the call)
-//!    would let the resend out to b, or b and c. a opens the web client and must load;
-//! 2. a opens the Calls app, which starts the client's calling stack (the client defers it until then), then Settings →
-//!    Devices from the account menu, in the same document ([`stand_up_calling`]);
-//! 3. a clicks "Make a test call" ([`TEST_CALL_BUTTON`]); the call screen must show its hang-up button ([`HANG_UP`])
-//!    within [`CALL_START`];
-//! 4. a turns the call's noise suppression off ([`turn_off_noise_suppression`]): the client takes the steady tone for
-//!    noise and would send silence;
-//! 5. the run waits until the audio tap has read the tone coming back ([`AudioSummary::tone_back`]), for up to
-//!    [`ECHO_WAIT`] or until the browser connection goes ([`wait_for_tone_in`]), stays [`AFTER_TONE`] more, hangs up
-//!    (if the call is still up) and records [`AFTER_HANG_UP`] more;
-//! 6. after the run, the fence must have allowed the call start ([`call_starts`]), the `add` and the `leave` and
-//!    acknowledged the acceptance ([`CallFollowUps`]), the WebRTC statistics must show audio both ways and the tap the
-//!    tone back ([`AudioSummary`]), and no deny but the reviewed expected-deny list's and step 1's ([`policy`]).
-//!
-//! The scenario never answers a call: nothing in it accepts one, and the fence keeps an answer unmapped (unknown,
-//! denied). A failed run leaves the page's screenshot as `failure.png` in its capture.
+//! Records a test call to the echo service, including HTTP/WebSocket traffic and WebRTC audio statistics. The captured call start and follow-up requests are checked after shutdown.
 
 use std::fs;
 use std::io::Write as _;
@@ -43,19 +7,15 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::Value;
-use teams_fence::Mri;
 
 use crate::browser::Media;
 use crate::capture::{EVENTS_FILE, TAP_TONE_HZ};
-use crate::classify::Classifier;
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
-use crate::fence_http::ForcedDeny;
 use crate::session::{LabSession, SessionOptions};
 
-use super::ab_chat::{EARLIER_RUN_PROBE, load, probe_rules, save_screenshot};
+use super::ab_chat::{load, save_screenshot};
 use super::dsl::{Driver, Selector, StepError, js_string};
-use super::expected::Review;
-use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport};
+use super::{RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
 /// The account that places the call.
 pub const ACCOUNT: Alias = Alias::A;
@@ -85,8 +45,8 @@ pub const AUDIO_OPTIONS: Selector<'static> = Selector::Css("#audio-button-config
 pub const NOISE_SUPPRESSION: Selector<'static> = Selector::Css(NOISE_SUPPRESSION_CSS);
 const NOISE_SUPPRESSION_CSS: &str = r#"[data-tid="background-suppression-switch"]"#;
 
-/// The call start's URL, as the fence's verdicts name it: the one `teams_fence::contacting` maps.
-pub use teams_fence::CALL_START_URL;
+/// The call start URL used by the web client.
+pub use crate::protocol::CALL_START_URL;
 
 /// How long the app bar, and later the Devices page, get to show up.
 pub const PAGE_OPEN: Duration = Duration::from_secs(75);
@@ -133,28 +93,6 @@ pub const REQUIRED_FOLLOW_UPS: [&str; 2] = ["add", "leave"];
 /// the deferred start of step 2, and whether `HeadlessChrome` alone stops calls wasn't isolated.)
 pub const USER_AGENT: &str =
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36";
-
-/// The forced denies a run of this scenario expects ([`forced_rules`]): it has no probe of its own, so only an earlier
-/// run's probe, `abc-chat`'s first message among them.
-pub const EXPECTED_FORCED: [&str; 1] = [EARLIER_RUN_PROBE];
-
-/// The rules a run forces on a's fence before its page loads: `ab-chat`'s rules for an earlier run's probe
-/// ([`probe_rules`] without a probe of this run's), which deny `abc-chat`'s first message too, labelled
-/// [`EARLIER_RUN_PROBE`].
-///
-/// # Errors
-/// Never: the patterns are fixed.
-pub fn forced_rules() -> Result<Vec<ForcedDeny>, regex::Error> {
-    probe_rules(None)
-}
-
-/// The denies a run of this scenario expects: the reviewed list ([`super::expected`]) and the forced denies of
-/// [`EXPECTED_FORCED`]. A deny on the call (its follow-ups, the echo service's `add`, `leave`) is unexpected: the call
-/// needs them, and they pass once its start was let in.
-#[must_use]
-pub fn policy() -> DenyPolicy {
-    DenyPolicy::Reviewed(Review::new().expecting_forced(&EXPECTED_FORCED))
-}
 
 /// A mono 16-bit PCM WAV file of a sine tone at `frequency` Hz, `seconds` long at `rate` samples per second, at half
 /// of full scale.
@@ -401,7 +339,7 @@ impl AudioTally {
     }
 }
 
-/// The call's follow-ups in a capture's `events.jsonl` text: the fence's `http` verdicts on writes to the calling
+/// The call's follow-ups in a capture's `events.jsonl` text: the capture's `http` verdicts on writes to the calling
 /// services' links (`…/api/v2/ep/<service host>/…`, by the link's last segment: `add`, `acknowledge`, `leave`, …; a
 /// read such as the broker's long poll isn't one), one per request, and the Trouter delivery responses (`3:::`) it let
 /// through.
@@ -411,7 +349,7 @@ pub struct CallFollowUps {
     pub allowed: std::collections::BTreeMap<String, usize>,
     /// The requests the fence denied, by operation.
     pub denied: std::collections::BTreeMap<String, usize>,
-    /// The delivery responses the fence let through.
+    /// The delivery responses the capture recorded through.
     pub delivery_responses: usize,
 }
 
@@ -419,36 +357,24 @@ impl CallFollowUps {
     /// Reads the verdicts of a capture's `events.jsonl` text. Lines that aren't JSON or aren't verdicts are skipped.
     #[must_use]
     pub fn from_events(text: &str) -> Self {
-        let mut seen = std::collections::BTreeSet::new();
-        let mut follow_ups = Self::default();
-        for line in text.lines() {
-            let Ok(entry) = serde_json::from_str::<Value>(line) else {
-                continue;
-            };
-            if entry["type"] != "verdict" {
-                continue;
-            }
-            let allowed = entry["verdict"] == "allow";
-            if entry["channel"] == "web_socket" {
-                let data = entry["frame"]["data"].as_str().unwrap_or_default();
-                if allowed && entry["frame"]["kind"] == "text" && data.starts_with("3:::") {
-                    follow_ups.delivery_responses += 1;
-                }
-                continue;
-            }
-            let Some(operation) = entry["url"].as_str().and_then(call_operation) else {
-                continue;
-            };
-            let read = ["GET", "HEAD", "OPTIONS"]
+        let mut follow_ups = Self {
+            delivery_responses: crate::protocol::sent_frames(text)
                 .iter()
-                .any(|method| entry["method"] == *method);
-            if entry["channel"] != "http" || read || !seen.insert(entry["network_id"].to_string()) {
+                .filter(|(_, data)| data.starts_with("3:::"))
+                .count(),
+            ..Self::default()
+        };
+        for request in crate::protocol::http_requests(text) {
+            let Some(operation) = call_operation(&request.url) else {
+                continue;
+            };
+            if ["GET", "HEAD", "OPTIONS"].contains(&request.method.as_str()) {
                 continue;
             }
-            let tally = if allowed {
-                &mut follow_ups.allowed
-            } else {
+            let tally = if request.held {
                 &mut follow_ups.denied
+            } else {
+                &mut follow_ups.allowed
             };
             *tally.entry(operation.to_owned()).or_default() += 1;
         }
@@ -489,49 +415,29 @@ fn call_operation(url: &str) -> Option<&str> {
 /// recorded; they share the `Network` id).
 #[must_use]
 pub fn call_starts(text: &str) -> (usize, usize) {
-    let mut allowed = std::collections::BTreeSet::new();
-    let mut denied = std::collections::BTreeSet::new();
-    for line in text.lines() {
-        let Ok(entry) = serde_json::from_str::<Value>(line) else {
-            continue;
-        };
-        if entry["type"] != "verdict"
-            || entry["channel"] != "http"
-            || entry["method"] != "POST"
-            || entry["url"] != CALL_START_URL
-        {
-            continue;
+    let requests = crate::protocol::http_requests(text);
+    let starts = requests
+        .iter()
+        .filter(|request| request.method == "POST" && request.url == CALL_START_URL);
+    starts.fold((0, 0), |(sent, held), request| {
+        if request.held {
+            (sent, held + 1)
+        } else {
+            (sent + 1, held)
         }
-        let id = entry["network_id"].to_string();
-        match entry["verdict"].as_str() {
-            Some("allow") => allowed.insert(id),
-            Some("deny") => denied.insert(id),
-            _ => false,
-        };
-    }
-    (allowed.len(), denied.len())
+    })
 }
 
 /// Runs `echo-call` (see the module docs).
 ///
 /// # Errors
-/// When the run can't start: no lab config, no Chrome, no fence, a browser that can't be armed, no tone file.
+/// When the run can't start: no lab config, no Chrome, a browser whose capture setup fails, no tone file.
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
-    let config = LabConfig::load(&LabLocations::from_env()?)?;
-    let mut report = ScenarioReport::new(ScenarioName::EchoCall);
-    let classifier = if let Some(echo) = echo_mri(&config) {
-        Classifier::new().with_test_call_callee(Mri::new(echo))
-    } else {
-        report.notes.push(format!(
-            "lab.toml has no MRI for the service participant {ECHO_SERVICE:?}: the fence will deny the call"
-        ));
-        Classifier::new()
-    };
+    let _config = LabConfig::load(&LabLocations::from_env()?)?;
+    let report = ScenarioReport::new(ScenarioName::EchoCall);
     let tone =
         write_burst_tone(paths).map_err(|error| ScenarioError::Setup(format!("can't write the tone: {error}")))?;
     let session_options = SessionOptions {
-        classifier,
-        live_members: true,
         capture: Some(ScenarioName::EchoCall.as_str().to_owned()),
         capture_request_bodies: true,
         display: options.display,
@@ -548,11 +454,6 @@ async fn drive(
     mut report: ScenarioReport,
     pauses: Pauses,
 ) -> ScenarioReport {
-    // before the page loads: the client sends an earlier run's unsent probe again as soon as it can
-    match forced_rules() {
-        Ok(rules) => rules.into_iter().for_each(|rule| session.force_deny(rule)),
-        Err(error) => report.failures.push(format!("can't force the probe denies: {error}")),
-    }
     if let Err(error) = call(&mut session, options, &mut report, pauses).await {
         report.failures.push(error.to_string());
         if let Some(note) = save_screenshot(ACCOUNT, &session).await {
@@ -561,7 +462,7 @@ async fn drive(
     }
     let capture = session.capture_dir().map(Path::to_path_buf);
     // the browser goes down and the capture is finished, whatever happened
-    report.close_account(ACCOUNT, session, &policy()).await;
+    report.close_account(ACCOUNT, session).await;
     if let Some(dir) = capture {
         judge_capture(&dir, &mut report);
         report.notes.push(format!("recorded into {}", dir.display()));
@@ -776,7 +677,7 @@ async fn click_text(driver: &mut Driver, step: &str, text: &str) -> Result<(), S
     }
 }
 
-/// Steps 3 and 5 from the capture: the fence must have allowed a call start and the call's follow-ups on it, the
+/// Steps 3 and 5 from the capture: the capture must show a call start and the call's follow-ups on it, the
 /// WebRTC statistics must show audio both ways, and the audio tap must have read the tone coming back.
 fn judge_capture(capture: &Path, report: &mut ScenarioReport) {
     let text = match fs::read_to_string(capture.join(EVENTS_FILE)) {
@@ -788,10 +689,10 @@ fn judge_capture(capture: &Path, report: &mut ScenarioReport) {
     };
     let (allowed, denied) = call_starts(&text);
     report.notes.push(format!(
-        "call start: {allowed} allowed and {denied} denied by the fence"
+        "call start: {allowed} allowed and {denied} denied in the capture"
     ));
     if allowed == 0 {
-        report.failures.push("the fence allowed no call start".to_owned());
+        report.failures.push("the capture contains no call start".to_owned());
     }
     judge_follow_ups(&CallFollowUps::from_events(&text), report);
     judge_audio(&AudioSummary::from_events(&text), report);

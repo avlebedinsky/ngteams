@@ -2,26 +2,19 @@
 //! any path, and every write naming a lab file, and no read; its deny policy expects those and the probes only; its
 //! texts and file are its own.
 
-use proto_lab::fence_http::{Denial, DenyCause, PausedRequest};
+use proto_lab::capture_hold::{HeldRequest, PausedRequest};
 use proto_lab::scenario::ScenarioName;
-use proto_lab::scenario::ab_chat::{EARLIER_RUN_PROBE, THIS_RUN_PROBE};
-use proto_lab::scenario::ab_file::{
-    self, FILE_MARKER, FILE_MESSAGE, FILE_WRITE, Texts, file_rules, is_file_write, test_file,
-};
+use proto_lab::scenario::ab_file::{self, FILE_MARKER, FILE_MESSAGE, FILE_WRITE, Texts, file_rules, test_file};
 use proto_lab::scenario::ab_image::MEDIA_WRITE;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
-
-const CHAT: &str = "19:0000000a-0000-4000-8000-000000000001_0000000b-0000-4000-8000-000000000002@unq.gbl.spaces";
 
 fn request(method: &str, url: &str, body: &str) -> PausedRequest {
     PausedRequest {
         request_id: "1".to_owned(),
         method: method.to_owned(),
         url: url.to_owned(),
-        headers: Vec::new(),
         body: Some(body.as_bytes().to_vec()),
-        body_unread: false,
         network_id: None,
     }
 }
@@ -125,43 +118,6 @@ fn a_write_to_an_ams_object_is_the_media_rule_s_and_a_write_naming_a_lab_file_is
 }
 
 #[test]
-fn the_run_expects_its_file_writes_and_probes_and_nothing_on_the_chat_off_the_list() -> TestResult {
-    let policy = ab_file::policy(Some(CHAT))?;
-    let forced = |url: &str, label: Option<&str>| Denial {
-        label: label.map(str::to_owned),
-        ..Denial::new("POST", url, DenyCause::Forced)
-    };
-    for label in [FILE_WRITE, MEDIA_WRITE, FILE_MESSAGE] {
-        let denial = forced("https://contoso-my.sharepoint.com/_api/x", Some(label));
-        assert!(is_file_write(&denial), "{label}");
-        assert!(policy.expects(&denial), "{label}");
-    }
-    for label in [THIS_RUN_PROBE, EARLIER_RUN_PROBE] {
-        let denial = forced("https://teams.microsoft.com/api/chatsvc/amer/v1/x", Some(label));
-        assert!(policy.expects(&denial), "{label}");
-        assert!(!is_file_write(&denial), "{label}");
-    }
-    assert!(!policy.expects(&forced("https://contoso-my.sharepoint.com/_api/x", None)));
-    assert!(!policy.expects(&forced("https://x/", Some("some other rule"))));
-    // an unclassified deny of a file write isn't the run's own: the forced rule should have taken it
-    let unclassified = Denial::new(
-        "POST",
-        "https://contoso-my.sharepoint.com/_api/x",
-        DenyCause::Unclassified,
-    );
-    assert!(!is_file_write(&unclassified));
-    assert!(!policy.expects(&unclassified));
-    // a deny naming the chat is unexpected, the list notwithstanding
-    let on_chat = Denial::new(
-        "PUT",
-        "https://teams.microsoft.com/api/chatsvc/amer/v1/users/ME/conversations/19%3A0000000a-0000-4000-8000-000000000001_0000000b-0000-4000-8000-000000000002%40unq.gbl.spaces/properties",
-        DenyCause::Unclassified,
-    );
-    assert!(!policy.expects(&on_chat));
-    Ok(())
-}
-
-#[test]
 fn the_texts_and_file_are_this_runs_and_only_the_file_s_carry_the_marker() {
     let texts = Texts::new("n1");
     assert!(texts.plain.contains("n1") && texts.caption.contains("n1") && texts.file_name.contains("n1"));
@@ -177,4 +133,12 @@ fn the_texts_and_file_are_this_runs_and_only_the_file_s_carry_the_marker() {
     );
     assert_ne!(test_file("n2"), test_file("n1"));
     assert_eq!(ScenarioName::AbFile.as_str(), "ab-file");
+}
+
+#[test]
+fn file_hold_records_are_identified_by_their_label() {
+    let mut request = HeldRequest::new("POST", "https://synthetic.sharepoint.com/file");
+    assert!(!ab_file::is_file_write(&request));
+    request.label = Some(FILE_WRITE.into());
+    assert!(ab_file::is_file_write(&request));
 }

@@ -18,7 +18,7 @@
 //!    when it is plain (`ImageNotFound`); the Graph token's claims (aud, exp, scopes, tenant). Never a token, a value
 //!    of the answer, an object id or a picture.
 //!
-//! A test reaches a local mock instead of Graph only through [`Origin::Mock`], which a build without `teams-fence`'s
+//! A test reaches a local mock instead of Graph only through [`Origin::Mock`], which a build without `proto-lab`'s
 //! `test-support` feature refuses (and the `proto-lab` binary refuses to run in such a build).
 
 use std::fmt::{self, Write as _};

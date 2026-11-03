@@ -47,7 +47,7 @@ enum Command {
         #[command(subcommand)]
         command: BundlesCommand,
     },
-    /// Sign a lab account into the Teams web client in its profile, headless, under the armed fence, and record its MRI
+    /// Sign a lab account into the Teams web client in its profile, headless, under the armed browser, and record its MRI
     /// in lab.toml. The run is captured under captures/login/, without request bodies.
     Login {
         /// The lab account: a, b or c.
@@ -56,7 +56,7 @@ enum Command {
         #[arg(long, default_value_t = 300)]
         timeout: u64,
     },
-    /// Sign a lab account in natively: authorize in its profile under the armed fence (no human), redeem the code,
+    /// Sign a lab account in natively: authorize in its profile under the armed browser (no human), redeem the code,
     /// refresh, and exchange for a skypetoken. Prints only aud, exp, scopes, tenant, the skypetoken's expiry and region.
     Auth {
         /// The lab account: a, b or c.
@@ -108,8 +108,8 @@ enum Command {
         /// Its MRI.
         mri: String,
     },
-    /// Run a scenario in the lab profiles under the armed fence; exits non-zero when its goal isn't reached, the fence
-    /// was breached, or the fence denied anything the scenario doesn't expect.
+    /// Run a scenario in the lab profiles under the armed browser; exits non-zero when its goal isn't reached, the browser
+    /// was breached, or the browser denied anything the scenario doesn't expect.
     Run {
         /// The scenario.
         #[arg(value_enum)]
@@ -138,7 +138,7 @@ enum ChromeCommand {
 enum ProbeCommand {
     /// Whether the chat service takes the account's own `ic3` token: refreshes it from the stored refresh token, reads
     /// one page of the conversation list in each header form (with and without `X-MS-Migration` and `BehaviorOverride`)
-    /// and the 1:1 chat's thread the way the fence reads it. GETs only.
+    /// and the 1:1 chat's thread the way the browser reads it. GETs only.
     Chat {
         /// The lab account: a, b or c.
         alias: Alias,
@@ -152,7 +152,7 @@ enum ProbeCommand {
     },
     /// How the chat service answers the member reads of the a-b-c group chat (its id from the lab's chats.toml) as
     /// the account sees them: the thread, the batch read, the member list in one page and paged, the filtered view and
-    /// the account's own view, then the fence's own read. Prints statuses, key names and counts only. GETs only.
+    /// the account's own view, then the browser's own read. Prints statuses, key names and counts only. GETs only.
     Thread {
         /// The lab account: a, b or c.
         alias: Alias,
@@ -218,15 +218,6 @@ fn main() -> ExitCode {
         // cargo unified a dev-dependency's feature into this build (`cargo test`, `--all-targets`, `--all-features`):
         // its probe origins can reach a mock, so this binary is for the test harness only
         eprintln!("proto-lab: built with proto-lab's test-support feature; rebuild with `cargo build -p proto-lab`");
-        return ExitCode::FAILURE;
-    }
-    if teams_fence::personal_enabled() {
-        // the personal build's fence came in with `ngteams` built in the same cargo invocation: a lab binary never
-        // has it
-        eprintln!(
-            "proto-lab: built with teams-fence's personal feature (a build with `ngteams`); rebuild with \
-             `cargo build -p proto-lab`"
-        );
         return ExitCode::FAILURE;
     }
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
@@ -330,7 +321,7 @@ fn show_login(alias: Alias, report: &login::LoginReport) -> Result<(), Box<dyn s
         Some(status) => format!("but Teams refused the account (authz answered {status}; no Teams license?)"),
     };
     println!("{alias}: {how}, {teams}; {mri}");
-    eprintln!("{alias}: {} (fail-closed: expected)", report.fence.summary());
+    eprintln!("{alias}: {}", report.browser.summary());
     if let Some(capture) = &report.capture {
         eprintln!("{alias}: captured to {}", capture.display());
     }
@@ -382,7 +373,7 @@ async fn run_probe_chat(
         partner,
         origin: probe::Origin::ChatService,
     };
-    let report = probe::probe_chat(&store, &tokens, request, teams_fence::LiveMembershipSource::new()?).await?;
+    let report = probe::probe_chat(&store, &tokens, request).await?;
     show_reads(&config, alias, report.lines(std::time::SystemTime::now()), save, || {
         report.reference_events()
     })
@@ -397,16 +388,7 @@ async fn run_probe_thread(alias: Alias, save: Option<&str>) -> Result<(), Box<dy
     }
     let store = teams_auth::secrets::KeyringSecretStore::new(KEYRING_APPLICATION).await?;
     let tokens = teams_auth::token::TokenClient::new(teams_auth::token::EntraConfig::teams_native())?;
-    let report = thread_probe::probe_thread(
-        &store,
-        &tokens,
-        &config,
-        alias,
-        &probe::Origin::ChatService,
-        // the read a lab fence makes (the fence itself decides nothing here)
-        teams_fence::LiveMembershipSource::for_fence(&teams_fence::Fence::open_lab()?)?,
-    )
-    .await?;
+    let report = thread_probe::probe_thread(&store, &tokens, &config, alias, &probe::Origin::ChatService).await?;
     show_reads(&config, alias, report.lines(std::time::SystemTime::now()), save, || {
         report.reference_events()
     })
@@ -500,8 +482,10 @@ async fn check_status(
         &LabPaths,
         Alias,
         Duration,
-    )
-        -> Result<(AccountStatus, proto_lab::session::FenceReport), proto_lab::session::SessionError>,
+    ) -> Result<
+        (AccountStatus, proto_lab::session::SessionReport),
+        proto_lab::session::SessionError,
+    >,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let aliases = if aliases.is_empty() {
         Alias::ALL.to_vec()
@@ -511,11 +495,11 @@ async fn check_status(
     let timeout = Duration::from_secs(timeout);
     let mut all_ok = true;
     for alias in aliases {
-        let (state, fence) = check(config.paths(), alias, timeout).await?;
+        let (state, browser) = check(config.paths(), alias, timeout).await?;
         println!("{alias}: {state}");
-        eprintln!("{alias}: {} (fail-closed: expected)", fence.summary());
-        if fence.breached() {
-            return Err(format!("{alias}: the fence was breached").into());
+        eprintln!("{alias}: {}", browser.summary());
+        if browser.failed() {
+            return Err(format!("{alias}: capture setup failed").into());
         }
         all_ok &= state == AccountStatus::Ok;
     }

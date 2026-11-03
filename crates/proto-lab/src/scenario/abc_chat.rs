@@ -1,99 +1,34 @@
-//! The `abc-chat` scenario: the group chat of accounts a, b and c (M1 Task 8).
-//!
-//! Every account runs under the lab rule (`crate::classify`) with members read live (`LiveMembershipSource`), as in
-//! [`super::ab_chat`]. The group chat's id isn't derived from MRIs as a 1:1 chat's is: the scenario creates the
-//! chat once and keeps its id in the lab's `chats.toml` ([`LabChats`]), never in the repo. What a run does depends on
-//! whether that id is there yet.
-//!
-//! **Creation** (no id yet, account a only). a opens the web client straight at a new chat with b and c
-//! ([`new_chat_link`]: a deep link reloads the whole client, so the run loads it there rather than loading it twice).
-//! The web client creates a group chat when its first message is sent: a `POST v1/threads` naming a, b and c (each
-//! `Admin`, `threadType` `chat`), which the fence judges as a [`teams_fence::WriteKind::ChatCreate`] by the members in
-//! its body, then the message post. That first message ([`first_message_text`] of this run's nonce) carries
-//! [`FIRST_MESSAGE_MARKER`] and is force-denied under a label of this run's own, [`THIS_RUN_FIRST_MESSAGE`]; any
-//! other first message is denied under [`FIRST_MESSAGE`]: the web client keeps a send that failed and sends it again
-//! on every later load, so the marker's forced deny stays in every later run of this scenario, and an earlier chat's
-//! first message sent again can't pass for this run's. The marker begins with
-//! [`PROBE_MARKER`](super::ab_chat::PROBE_MARKER), so `ab-chat`'s forced deny of an earlier run's probe covers it too
-//! when the web client resends it there. The run's goal: this run's first message post to a group chat was denied
-//! under [`THIS_RUN_FIRST_MESSAGE`] and failed in a's page, and the chat's id (from that post's URL) is recorded in
-//! `chats.toml`. The id is recorded as soon as that deny names it, whatever happens after ([`record_creation`]): the
-//! chat exists from then on, and a later run without its id would create another one.
-//!
-//! **Messaging** (the id recorded; accounts a, b and c). It starts only when the lab's live source reads the recorded
-//! chat's members ([`messaging_blocked`]: a group chat id); otherwise a message would be denied and resent on every
-//! later load, so the run fails before it opens anything. The fence admits a write to the group chat when its member
-//! list, read fresh, is complete and every member is a lab account or an approved service
-//! (`docs/protocol/fence-targets.md`).
-//! 1. a's fence force-denies this run's probe ([`THIS_RUN_PROBE`]), any first message ([`FIRST_MESSAGE`]) and any
-//!    earlier run's probe ([`EARLIER_RUN_PROBE`]), in that order (a deny names the first rule that matched it), from
-//!    before the page loads ([`forced_denies`]).
-//! 2. a opens the web client straight at the group chat ([`chat_link_by_id`]).
-//! 3. **Live enforcement test**: a sends this run's probe; the fence must force-deny, under [`THIS_RUN_PROBE`], a
-//!    message post to the group chat, and that very post must fail in a's page with `net::ERR_BLOCKED_BY_CLIENT`.
-//! 4. a sends the real message; then b and c, one after the other, open the web client at the group chat, so each
-//!    reads its history from the service, and must show the message within
-//!    [`DELIVERY`](super::ab_chat::DELIVERY) and not the probe. A chat with unread messages opens at its "last
-//!    read" mark, the newest ones not rendered: each jumps to the newest ([`wait_for_newest`]).
-//! 5. Judged by [`policy`]: no deny but the three forced ones and the reviewed expected-deny list
-//!    ([`super::expected`]), and nothing denied on the group chat but those forced ones. The message passes only when
-//!    the fence's live read finds the group chat's membership complete and all lab accounts; the members' typing and
-//!    read receipts reach nobody and pass without a member read (`docs/protocol/fence-targets.md`).
-//!
-//! Every wait for the web client to load takes the run's load timeout (`proto-lab run --timeout`); on a loaded machine
-//! the client can take minutes.
+//! Creates or messages the lab group chat. Creation holds only this run's first message to discover and persist the newly created chat id; messaging sends directly and checks both readers.
 
 use crate::config::{ChatRecord, LabChats, record_abc_chat};
+use crate::protocol::is_group_chat_id;
 use regex::Regex;
-use teams_fence::{Fence, LiveMembershipSource, Scope, is_group_chat_id};
 use url::Url;
 
 use crate::browser::Media;
-use crate::classify::chat_service_path;
+use crate::capture_hold::Hold;
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
-use crate::fence_http::{DenyCause, ForcedDeny};
+use crate::protocol::chat_service_path;
 use crate::session::{LabSession, SessionOptions};
 
 use super::ab_chat::{
-    CHAT_OPEN, DELIVERY, EARLIER_RUN_PROBE, ForcedPost, PROBE_DENY_WAIT, PROBE_MARKER, THIS_RUN_PROBE, chat_requests,
-    chat_url, failed_in_page, load_at, message_text, nonce, probe_text, save_screenshot, send, wait_for_newest,
+    CHAT_OPEN, DELIVERY, HOLD_WAIT, HeldPost, chat_requests, failed_in_page, load_at, message_text, nonce,
+    save_screenshot, send, wait_for_newest,
 };
-use super::expected::Review;
-use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport};
+use super::{RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
-/// What the group chat's first message carries: [`super::ab_chat::PROBE_MARKER`] and more, so every scenario that
+/// What the group chat's first message carries: [`super::ab_chat::HELD_MARKER`] and more, so every scenario that
 /// force-denies an earlier run's probe denies it too.
-pub const FIRST_MESSAGE_MARKER: &str = "lab fence probe abc-chat first message ";
+pub const FIRST_MESSAGE_MARKER: &str = "lab held capture abc-chat first message ";
 
-/// The label of the forced deny of this run's first message ([`first_message_text`] of the run's nonce).
+/// The label of the capture hold of this run's first message ([`first_message_text`] of the run's nonce).
 pub const THIS_RUN_FIRST_MESSAGE: &str = "this run's first message of the a-b-c chat";
-
-/// The label of the forced deny of any other first message ([`FIRST_MESSAGE_MARKER`]): an earlier creation run's, which
-/// the web client still holds as unsent and sends again once it loads.
-pub const FIRST_MESSAGE: &str = "an earlier run's first message of the a-b-c chat";
-
-/// The forced denies a run of this scenario expects, in the order its rules are set ([`forced_denies`]).
-pub const EXPECTED_FORCED: [&str; 4] = [THIS_RUN_PROBE, THIS_RUN_FIRST_MESSAGE, FIRST_MESSAGE, EARLIER_RUN_PROBE];
 
 /// A URL naming any group chat (`19:<id>@thread.v2`, plain or percent-encoded): where the first message may go.
 pub const ANY_GROUP_CHAT: &str = r"(?i)19(:|%3A)[A-Za-z0-9_-]+(@|%40)thread\.v2";
 
-/// The denies a run of this scenario expects: the reviewed list ([`super::expected`]) and the forced denies of
-/// [`EXPECTED_FORCED`]; with the group chat's id, any other deny of a URL naming it ([`chat_url`]) is unexpected, the
-/// list notwithstanding.
-///
-/// # Errors
-/// When the chat's pattern doesn't compile (never for a group chat id).
-pub fn policy(chat_id: Option<&str>) -> Result<DenyPolicy, regex::Error> {
-    let mut review = Review::new().expecting_forced(&EXPECTED_FORCED);
-    if let Some(chat_id) = chat_id {
-        review = review.with_mapped_target(chat_url(chat_id)?);
-    }
-    Ok(DenyPolicy::Reviewed(review))
-}
-
 /// The web client's deep link that starts a new chat with the accounts `mris`: a group chat for two or more. By MRI,
-/// as [`super::ab_chat::chat_link`]: a UPN needs a profile lookup the fence denies.
+/// as [`super::ab_chat::chat_link`]: a UPN would require a profile lookup.
 #[must_use]
 pub fn new_chat_link(mris: &[&str]) -> String {
     let users: Vec<String> = mris
@@ -136,56 +71,24 @@ pub fn group_chat_of_message_post(url: &str) -> Option<String> {
 /// run after.
 ///
 /// # Errors
-/// When the run can't start: no lab config, an unreadable `chats.toml`, no Chrome, no fence, a browser that can't be
+/// When the run can't start: no lab config, an unreadable `chats.toml`, no Chrome, a browser that can't be
 /// armed.
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
     let config = LabConfig::load(&LabLocations::from_env()?)?;
     let chats = LabChats::load(paths).map_err(|error| setup(error.to_string()))?;
     match chats.abc {
         None => create(paths, &config, options).await,
-        Some(chat_id) => match messaging_blocked(&lab_source()?, &chat_id) {
-            Some(reason) => {
-                let mut report = ScenarioReport::new(ScenarioName::AbcChat);
-                report.failures.push(reason);
-                Ok(report)
-            }
-            None => message(paths, &chat_id, options).await,
-        },
+        Some(chat_id) => message(paths, &chat_id, options).await,
     }
-}
-
-/// The live source a session of this lab reads members with ([`LiveMembershipSource::for_fence`] of the lab's fence),
-/// for [`messaging_blocked`].
-pub(crate) fn lab_source() -> Result<LiveMembershipSource, ScenarioError> {
-    let fence = Fence::open_lab().map_err(|error| setup(error.to_string()))?;
-    LiveMembershipSource::for_fence(&fence).map_err(|error| setup(error.to_string()))
-}
-
-/// Why the messaging run must not start, if it mustn't: `source` (the lab's, as every session reads with it) won't
-/// read `chat_id`'s members at all ([`LiveMembershipSource::reads_in_full`]: it isn't a 1:1, group or meeting chat), so
-/// its message would be denied, and the web client would send it again on every later load of a's profile, where
-/// every scenario would see it denied. Checked before any browser opens. Eligibility only: the read itself, on every
-/// write, decides.
-#[must_use]
-pub fn messaging_blocked(source: &LiveMembershipSource, chat_id: &str) -> Option<String> {
-    let scope = Scope::Conversation { id: chat_id.to_owned() };
-    (!source.reads_in_full(&scope)).then(|| {
-        "the fence won't read the a-b-c chat's members (it reads 1:1, group and meeting chats: \
-         docs/protocol/fence-targets.md), so a message to it would be denied and then sent again on every later load \
-         of a's profile; nothing was opened"
-            .to_owned()
-    })
 }
 
 fn session_options(options: RunOptions) -> SessionOptions {
     SessionOptions {
-        live_members: true,
         capture: Some(ScenarioName::AbcChat.as_str().to_owned()),
         capture_request_bodies: true,
         display: options.display,
         media: Media::System,
         user_agent: None,
-        ..SessionOptions::fail_closed()
     }
 }
 
@@ -214,7 +117,7 @@ async fn create_session(
     options: RunOptions,
 ) -> ScenarioReport {
     let mut report = ScenarioReport::new(ScenarioName::AbcChat);
-    deny_markers(&a, nonce);
+    hold_first_message(&a, nonce);
     let mut created = None;
     let outcome = create_steps(&mut a, others, nonce, options, &mut report, &mut created).await;
     if outcome.is_err()
@@ -222,9 +125,9 @@ async fn create_session(
     {
         report.notes.push(note);
     }
-    let chat_id = record_creation(paths, created, outcome, &mut report);
-    let policy = scenario_policy(chat_id.as_deref(), &mut report);
-    report.close_account(Alias::A, a, &policy).await;
+    record_creation(paths, created, outcome, &mut report);
+
+    report.close_account(Alias::A, a).await;
     report
 }
 
@@ -249,16 +152,16 @@ pub fn record_creation(
         )),
         Ok(ChatRecord::AlreadyRecorded) => report.notes.push("the a-b-c chat's id was recorded already".to_owned()),
         Err(error) => report.failures.push(format!(
-            "can't record the a-b-c chat: {error}; its id is in the URL of the forced deny {THIS_RUN_FIRST_MESSAGE:?} \
+            "can't record the a-b-c chat: {error}; its id is in the URL of the capture hold {THIS_RUN_FIRST_MESSAGE:?} \
              in {}: record it as `abc` in {} before abc-chat runs again, or the run creates another chat",
-            paths.fence_log().display(),
+            paths.captures_dir().display(),
             paths.chats_file().display()
         )),
     }
     Some(chat_id)
 }
 
-/// a loads, starts a chat with b and c, and sends this run's first message, which the fence must force-deny under
+/// a loads, starts a chat with b and c, and sends this run's first message, which the explicit capture hold fails under
 /// [`THIS_RUN_FIRST_MESSAGE`] as a post to a group chat and which must fail in a's page. The chat's id, from that post,
 /// goes into `created` as soon as the deny is seen, before the checks in the page: the chat exists by then.
 async fn create_steps(
@@ -278,7 +181,7 @@ async fn create_steps(
         .wait_for("a's compose box", super::ab_chat::COMPOSE, options.load_timeout)
         .await?;
     let any_group = Regex::new(ANY_GROUP_CHAT).map_err(|error| setup(error.to_string()))?;
-    let this_run = ForcedPost::new(THIS_RUN_FIRST_MESSAGE, &any_group).map_err(|error| setup(error.to_string()))?;
+    let this_run = HeldPost::new(THIS_RUN_FIRST_MESSAGE, &any_group).map_err(|error| setup(error.to_string()))?;
     send(&mut drive_a, "a (the first message)", &first_message_text(nonce)).await?;
     let Some(denial) = this_run.wait(a).await else {
         return Err(no_deny(a, THIS_RUN_FIRST_MESSAGE));
@@ -288,7 +191,7 @@ async fn create_steps(
     *created = Some(chat_id);
     failed_in_page(&mut drive_a, &denial, "a's first message post").await?;
     report.notes.push(
-        "a created a group chat with b and c; its first message was denied by the fence and failed in a's page"
+        "a created a group chat with b and c; its first message was denied in the capture and failed in a's page"
             .to_owned(),
     );
     Ok(())
@@ -309,13 +212,10 @@ async fn message_sessions(
     mut sessions: Vec<(Alias, LabSession)>,
 ) -> Result<ScenarioReport, ScenarioError> {
     let mut report = ScenarioReport::new(ScenarioName::AbcChat);
-    if let Some((_, a)) = sessions.first() {
-        deny_markers(a, nonce);
-    }
-    let names_chat = chat_url(chat_id).map_err(|error| setup(error.to_string()))?;
+
     let steps = MessageSteps {
         chat_id,
-        names_chat: &names_chat,
+
         nonce,
         options,
     };
@@ -327,22 +227,11 @@ async fn message_sessions(
             }
         }
     }
-    let policy = scenario_policy(Some(chat_id), &mut report);
+
     for (alias, session) in sessions {
-        report.close_account(alias, session, &policy).await;
+        report.close_account(alias, session).await;
     }
     Ok(report)
-}
-
-/// [`policy`], or, when the chat's pattern doesn't compile, a failure and the list alone (the denies are still
-/// listed).
-fn scenario_policy(chat_id: Option<&str>, report: &mut ScenarioReport) -> DenyPolicy {
-    policy(chat_id).unwrap_or_else(|error| {
-        report
-            .failures
-            .push(format!("can't tell the a-b-c chat in a URL: {error}"));
-        DenyPolicy::Reviewed(Review::new().expecting_forced(&EXPECTED_FORCED))
-    })
 }
 
 /// Opens a's, b's and c's sessions, in that order; if one can't be opened, the ones already open go down.
@@ -365,7 +254,6 @@ async fn open_all(paths: &LabPaths, options: RunOptions) -> Result<Vec<(Alias, L
 struct MessageSteps<'a> {
     chat_id: &'a str,
     /// Finds the group chat's id in a URL ([`chat_url`]).
-    names_chat: &'a Regex,
     nonce: &'a str,
     options: RunOptions,
 }
@@ -387,20 +275,10 @@ impl MessageSteps<'_> {
         drive_a
             .wait_for("a's compose box", super::ab_chat::COMPOSE, self.options.load_timeout)
             .await?;
-        let probe = probe_text(self.nonce);
-        let this_run = ForcedPost::new(THIS_RUN_PROBE, self.names_chat).map_err(|error| setup(error.to_string()))?;
-        send(&mut drive_a, "a (the probe)", &probe).await?;
-        let Some(denial) = this_run.wait(a).await else {
-            return Err(no_deny(a, THIS_RUN_PROBE));
-        };
-        failed_in_page(&mut drive_a, &denial, "a's probe post").await?;
-        report
-            .notes
-            .push("enforcement: a's probe post was denied by the fence and failed in a's page".to_owned());
         let message = message_text(self.nonce);
         send(&mut drive_a, "a (the message)", &message).await?;
         for (alias, session) in readers.iter_mut() {
-            self.receive(*alias, session, &message, &probe).await?;
+            self.receive(*alias, session, &message).await?;
             report
                 .notes
                 .push(format!("{alias} shows a's message and not the probe"));
@@ -409,16 +287,9 @@ impl MessageSteps<'_> {
     }
 
     /// `alias` opens the group chat, reads it from the service, and must show `message` and not `probe`.
-    async fn receive(
-        &self,
-        alias: Alias,
-        session: &mut LabSession,
-        message: &str,
-        probe: &str,
-    ) -> Result<(), ScenarioError> {
+    async fn receive(&self, alias: Alias, session: &mut LabSession, message: &str) -> Result<(), ScenarioError> {
         let opened = chat_requests(self.chat_id).map_err(|error| setup(error.to_string()))?;
-        // b and c load only now, so each reads the chat's history from the service (the fence denies the push
-        // channel's frames): the message there without the probe is the evidence the probe never got there
+        // Each reader loads its own view of the recorded chat's history from the service.
         let mut driver = session.driver();
         load_at(
             alias,
@@ -433,60 +304,37 @@ impl MessageSteps<'_> {
         // a chat with unread messages (each native run leaves some in the group chat) opens at its "last read" mark,
         // the newest not rendered
         wait_for_newest(&mut driver, &format!("{alias} receives the message"), message, DELIVERY).await?;
-        if driver
-            .shows_text(&format!("{alias} must not have the probe"), probe)
-            .await?
-        {
-            return Err(setup(format!("{alias} received the probe the fence denied")));
-        }
+
         Ok(())
     }
 }
 
-/// The forced denies of a run with `nonce`, for every `POST` or `PUT` whose body holds, in this order: this run's probe
-/// ([`probe_text`], [`THIS_RUN_PROBE`]), this run's first message ([`first_message_text`], [`THIS_RUN_FIRST_MESSAGE`]),
-/// any first message ([`FIRST_MESSAGE_MARKER`], [`FIRST_MESSAGE`]), any earlier run's probe ([`PROBE_MARKER`],
-/// [`EARLIER_RUN_PROBE`]). A deny names the first rule that matched it, so only this run's texts are denied under this
-/// run's labels.
+/// Holds this run's first message while discovering the newly created group chat.
 #[must_use]
-pub fn forced_denies(nonce: &str) -> Vec<ForcedDeny> {
-    let probe = probe_text(nonce);
-    let first_message = first_message_text(nonce);
-    let markers = [
-        (probe.as_str(), THIS_RUN_PROBE),
-        (first_message.as_str(), THIS_RUN_FIRST_MESSAGE),
-        (FIRST_MESSAGE_MARKER, FIRST_MESSAGE),
-        (PROBE_MARKER, EARLIER_RUN_PROBE),
-    ];
-    markers
+pub fn first_message_holds(nonce: &str) -> Vec<Hold> {
+    let message = first_message_text(nonce);
+    ["POST", "PUT"]
         .into_iter()
-        .flat_map(|(marker, label)| {
-            // "." always compiles
-            ["POST", "PUT"].into_iter().filter_map(move |method| {
-                ForcedDeny::new(method, ".")
-                    .ok()
-                    .map(|rule| rule.with_body_containing(marker).labelled(label))
-            })
+        .filter_map(|method| {
+            Hold::new(method, ".")
+                .ok()
+                .map(|rule| rule.with_body_containing(&message).labelled(THIS_RUN_FIRST_MESSAGE))
         })
         .collect()
 }
 
-/// Forces [`forced_denies`] of `nonce` on `session`, in their order.
-fn deny_markers(session: &LabSession, nonce: &str) {
-    for rule in forced_denies(nonce) {
-        session.force_deny(rule);
+/// Forces [`first_message_holds`] of `nonce` on `session`, in their order.
+fn hold_first_message(session: &LabSession, nonce: &str) {
+    for rule in first_message_holds(nonce) {
+        session.hold(rule);
     }
 }
 
-/// The error of a run whose message post wasn't force-denied under `label` within [`PROBE_DENY_WAIT`].
+/// The error of a run whose message post wasn't held for capture under `label` within [`HOLD_WAIT`].
 fn no_deny(session: &LabSession, label: &str) -> ScenarioError {
-    let forced = session
-        .denials()
-        .iter()
-        .filter(|denial| denial.cause == DenyCause::Forced)
-        .count();
+    let forced = session.held_requests().len();
     setup(format!(
-        "no message post denied as {label:?} within {PROBE_DENY_WAIT:?} ({forced} other forced deny(s))"
+        "no message post denied as {label:?} within {HOLD_WAIT:?} ({forced} other capture hold(s))"
     ))
 }
 

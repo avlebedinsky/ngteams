@@ -3,14 +3,11 @@
 
 use std::io::Read as _;
 
-use proto_lab::fence_http::{Denial, DenyCause, PausedRequest};
+use proto_lab::capture_hold::{HeldRequest, PausedRequest};
 use proto_lab::scenario::ScenarioName;
-use proto_lab::scenario::ab_chat::{EARLIER_RUN_PROBE, THIS_RUN_PROBE};
 use proto_lab::scenario::ab_image::{self, MEDIA_WRITE, Texts, media_rules, test_png};
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
-
-const CHAT: &str = "19:0000000a-0000-4000-8000-000000000001_0000000b-0000-4000-8000-000000000002@unq.gbl.spaces";
 
 /// The chunks of `png` after its signature, each CRC checked: (kind, data).
 fn chunks(png: &[u8]) -> TestResult<Vec<(String, Vec<u8>)>> {
@@ -58,9 +55,7 @@ fn request(method: &str, url: &str) -> PausedRequest {
         request_id: "1".to_owned(),
         method: method.to_owned(),
         url: url.to_owned(),
-        headers: Vec::new(),
         body: Some(br#"{"type":"pish/image","permissions":{"19:x@unq.gbl.spaces":["read"]}}"#.to_vec()),
-        body_unread: false,
         network_id: None,
     }
 }
@@ -108,46 +103,18 @@ fn every_write_to_an_ams_object_is_forced_denied_on_any_host_and_no_read() -> Te
 }
 
 #[test]
-fn the_run_expects_its_media_writes_and_probes_and_nothing_on_the_chat_off_the_list() -> TestResult {
-    let policy = ab_image::policy(Some(CHAT))?;
-    let forced = |url: &str, label: Option<&str>| Denial {
-        label: label.map(str::to_owned),
-        ..Denial::new("POST", url, DenyCause::Forced)
-    };
-    let media = forced("https://us-api.asm.skype.com/v1/objects/", Some(MEDIA_WRITE));
-    assert!(ab_image::is_media_write(&media));
-    assert!(policy.expects(&media));
-    for label in [THIS_RUN_PROBE, EARLIER_RUN_PROBE] {
-        assert!(policy.expects(&forced(
-            "https://teams.microsoft.com/api/chatsvc/amer/v1/x",
-            Some(label)
-        )));
-    }
-    assert!(!policy.expects(&forced("https://us-api.asm.skype.com/v1/objects/", None)));
-    assert!(!ab_image::is_media_write(&forced("https://x/", Some(THIS_RUN_PROBE))));
-    // an unclassified deny of a media write isn't the run's own: the forced rule should have taken it
-    let unclassified = Denial::new(
-        "POST",
-        "https://us-api.asm.skype.com/v1/objects/",
-        DenyCause::Unclassified,
-    );
-    assert!(!ab_image::is_media_write(&unclassified));
-    assert!(!policy.expects(&unclassified));
-    // a deny naming the chat is unexpected, the list notwithstanding
-    let on_chat = Denial::new(
-        "PUT",
-        "https://teams.microsoft.com/api/chatsvc/amer/v1/users/ME/conversations/19%3A0000000a-0000-4000-8000-000000000001_0000000b-0000-4000-8000-000000000002%40unq.gbl.spaces/properties",
-        DenyCause::Unclassified,
-    );
-    assert!(!policy.expects(&on_chat));
-    Ok(())
-}
-
-#[test]
 fn the_texts_are_this_runs_and_apart() {
     let texts = Texts::new("n1");
     assert!(texts.plain.contains("n1") && texts.caption.contains("n1") && texts.file_name.contains("n1"));
     assert!(!texts.caption.contains(&texts.plain) && !texts.plain.contains(&texts.caption));
     assert_eq!(std::path::Path::new(&texts.file_name).extension(), Some("png".as_ref()));
     assert_eq!(ScenarioName::AbImage.as_str(), "ab-image");
+}
+
+#[test]
+fn media_hold_records_are_identified_by_their_label() {
+    let mut request = HeldRequest::new("POST", "https://us-api.asm.skype.com/v1/objects/");
+    assert!(!ab_image::is_media_write(&request));
+    request.label = Some(MEDIA_WRITE.into());
+    assert!(ab_image::is_media_write(&request));
 }

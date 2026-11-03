@@ -10,7 +10,7 @@ use proto_lab::commands::auth::{
     AudienceOutcome, AuthError, AuthReport, SkypetokenSummary, region_file, save_region, within,
 };
 use proto_lab::config::{Alias, LabPaths};
-use proto_lab::session::FenceReport;
+use proto_lab::session::SessionReport;
 use serde_json::Value;
 use teams_auth::authz::{AuthzError, Region};
 use teams_auth::claims::TokenSummary;
@@ -60,7 +60,7 @@ fn blocked() -> TokenError {
 
 fn report(skypetoken: Option<Result<SkypetokenSummary, AuthzError>>) -> AuthReport {
     AuthReport {
-        fence: FenceReport::default(),
+        browser: SessionReport::default(),
         signed_in: Some(spaces_summary()),
         refreshed: Some(spaces_summary()),
         audiences: vec![
@@ -96,7 +96,7 @@ fn the_report_shows_claims_expiries_and_refusals() {
     assert_eq!(
         lines,
         [
-            "fence denied 0 request(s) [] and 0 frame(s) (fail-closed: expected)",
+            "capture setup complete",
             "signed in: aud https://api.spaces.skype.com, exp Wed, 18 May 2033 05:43:20 GMT (in 130 min), scopes \
              Authorization.ReadWrite user_impersonation, tenant 00000000-0000-4000-8000-0000000000ff",
             "refreshed: aud https://api.spaces.skype.com, exp Wed, 18 May 2033 05:43:20 GMT (in 130 min), scopes \

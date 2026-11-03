@@ -20,7 +20,7 @@
 //! [`export::export_events`](crate::commands::export::export_events), sanitized as one capture, as `probe chat` does.
 //!
 //! A test reaches a local mock instead of the gateway only through [`Origin::Mock`], which a build without
-//! `teams-fence`'s `test-support` feature refuses (and the `proto-lab` binary refuses to run in such a build).
+//! `proto-lab`'s `test-support` feature refuses (and the `proto-lab` binary refuses to run in such a build).
 
 use std::fmt;
 use std::time::{SystemTime, UNIX_EPOCH};

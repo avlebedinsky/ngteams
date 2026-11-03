@@ -13,7 +13,7 @@ fn image() -> Image {
         mri_a: "8:orgid:synthetic-a".to_owned(),
         mri_b: "8:orgid:00000000-0000-0000-0000-00000000000b".to_owned(),
         texts: Texts::new("synthetic-image"),
-        probe: probe_text("synthetic-image"),
+
         options: RunOptions {
             display: Display::Headless,
             load_timeout: Duration::from_secs(1),
@@ -49,8 +49,8 @@ async fn image_runs_use_paste_or_drop_and_observe_the_real_denied_media_before_r
         let mut sender = a.session(a_dir.path(), true);
         let mut recipient = b.session(b_dir.path(), false);
         let scenario = image();
-        deny_probes(&sender, Some(&scenario.probe)).unwrap();
-        deny_media_writes(&sender).unwrap();
+
+        hold_media_writes(&sender).unwrap();
         let mut report = ScenarioReport::new(ScenarioName::AbImage);
         scenario
             .run(
@@ -75,20 +75,15 @@ async fn image_runs_use_paste_or_drop_and_observe_the_real_denied_media_before_r
                 .any(|note| note.contains("unsent image: deleted from its actions")),
             "{report:?}"
         );
-        assert!(
-            report
-                .notes
-                .iter()
-                .any(|note| note.contains("message and not the probe"))
-        );
+
         assert!(report.notes.iter().any(|note| note == "b: shows the caption: false"));
-        assert!(sender.denials().iter().any(is_media_write));
+        assert!(sender.held_requests().iter().any(is_media_write));
         assert!(
             a.commands()
                 .iter()
                 .any(|command| command["method"] == "Fetch.failRequest")
         );
-        assert!(recipient.denials().is_empty());
+        assert!(recipient.held_requests().is_empty());
     }
 }
 
@@ -110,7 +105,7 @@ async fn paste_and_drop_rejection_do_not_fabricate_an_upload_and_missing_editors
             "gone" => "compose box went away",
             _ => "synthetic attachment editor failure",
         }));
-        assert!(session.denials().is_empty());
+        assert!(session.held_requests().is_empty());
         if take == "none" {
             assert!(report.notes.iter().any(|note| note.contains("showed no image")));
         }
@@ -162,7 +157,7 @@ async fn admitted_image_runs_finalize_both_accounts_and_captures_after_success_o
         if chat.is_some() && taken == "paste" {
             assert!(report.failures.is_empty(), "{report:?}");
             assert!(report.notes.iter().any(|note| note.ends_with("denied in all")));
-            assert!(!report.accounts[0].denials.is_empty());
+            assert!(!report.accounts[0].held_requests.is_empty());
             assert!(
                 !report.accounts[0]
                     .capture
@@ -236,13 +231,13 @@ async fn an_observed_caption_post_is_reported_separately_from_the_denied_media_u
     }).await;
     let dir = tempfile::tempdir().unwrap();
     let session = page.session(dir.path(), true);
-    deny_media_writes(&session).unwrap();
+    hold_media_writes(&session).unwrap();
     let mut report = ScenarioReport::new(ScenarioName::AbImage);
     scenario
         .send_image(&session, &mut page.driver, &mut report)
         .await
         .unwrap();
-    assert!(session.denials().iter().any(is_media_write));
+    assert!(session.held_requests().iter().any(is_media_write));
     assert!(
         report
             .notes
@@ -257,7 +252,7 @@ async fn upload_observation_ignores_earlier_denials_and_waits_for_a_new_real_for
     let mut page = peer::page(Kind::Image, "none", Upload::Missing, Unsent::Absent).await;
     let dir = tempfile::tempdir().unwrap();
     let session = page.session(dir.path(), false);
-    deny_media_writes(&session).unwrap();
+    hold_media_writes(&session).unwrap();
     for (id, delay) in [("earlier", Duration::ZERO), ("later", Duration::from_millis(20))] {
         let wire = page.sender();
         let send = tokio::spawn(async move {

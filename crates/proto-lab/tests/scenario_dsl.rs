@@ -6,26 +6,20 @@ mod common;
 #[path = "common/page.rs"]
 mod page;
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::StreamExt as _;
 use proto_lab::arming::{ArmOptions, ArmedBrowser};
 use proto_lab::browser::{Browser, LaunchOptions};
+use proto_lab::capture_hold::CaptureHold;
 use proto_lab::cdp::{Cdp, CdpError, Event, RemoteError, SessionId};
-use proto_lab::classify::Classifier;
-use proto_lab::config::Alias;
-use proto_lab::fence_http::{Denial, DenyCause, HttpFence};
-use proto_lab::fence_ws::{FrameDenial, GuardScript, WsFence};
+use proto_lab::scenario::ScenarioName;
 use proto_lab::scenario::ab_chat::{
-    self, MESSAGE_POST, PROBE_MARKER, chat_link, chat_requests, chat_url, message_text, one_to_one_id, probe_text,
+    self, HELD_MARKER, MESSAGE_POST, chat_link, chat_requests, chat_url, message_text, one_to_one_id,
 };
 use proto_lab::scenario::ab_chat_full::{self, Texts, Writes};
 use proto_lab::scenario::dsl::{self, Driver, Key, RequestPattern, SeenRequest, Selector, StepError};
-use proto_lab::scenario::{AccountRun, DenyPolicy, ScenarioName, ScenarioReport, echo_call};
-use proto_lab::session::FenceReport;
 use serde_json::{Value, json};
-use teams_fence::{FailClosed, Fence, FenceLog, MembershipSource, Roster};
 use url::Url;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -121,17 +115,11 @@ where
         Duration::from_secs(30),
     )
     .await?;
-    let fence = Arc::new(Fence::new(
-        Roster::default(),
-        FenceLog::open(&dir.path().join("fence.log"))?,
-    ));
-    let members: Arc<dyn MembershipSource + Send> = Arc::new(FailClosed);
-    let http = HttpFence::new(Classifier::new(), Arc::clone(&fence), Arc::clone(&members));
-    let ws = WsFence::new(fence, members, GuardScript::generate()?);
-    let options = ArmOptions {
-        service_worker_origins: vec![server.uri()],
-    };
-    let armed = ArmedBrowser::arm(browser, http, ws, &options).await?;
+
+    let http = CaptureHold::new();
+
+    let options = ArmOptions::default();
+    let armed = ArmedBrowser::arm(browser, http, &options).await?;
     let page = armed.open_page(Duration::from_secs(15)).await?.session;
     let driver = Driver::new(armed.cdp().clone(), page.clone(), armed.watch());
     let mut run = Run {
@@ -682,69 +670,6 @@ fn a_request_pattern_matches_method_and_url() -> TestResult {
     Ok(())
 }
 
-fn denial(url: &str, cause: DenyCause) -> Denial {
-    Denial::new("POST", url, cause)
-}
-
-fn forced(url: &str, label: Option<&str>) -> Denial {
-    Denial {
-        label: label.map(str::to_owned),
-        ..denial(url, DenyCause::Forced)
-    }
-}
-
-#[test]
-fn a_writing_scenario_expects_only_its_probes_and_the_reviewed_list() -> TestResult {
-    let policy = ab_chat::policy(Some(CHAT))?;
-    let expected = [
-        denial(
-            "https://teams.microsoft.com/api/chatsvc/emea/v1/agents/28:made-up-bot/invoke",
-            DenyCause::Unclassified,
-        ),
-        denial(
-            "https://teams.cloud.microsoft/api/chatsvc/emea/v1/agents/28:made-up-bot/invoke",
-            DenyCause::Unclassified,
-        ),
-        forced(
-            "https://teams.microsoft.com/api/chatsvc/emea/v1/x",
-            Some(ab_chat::THIS_RUN_PROBE),
-        ),
-        forced(
-            "https://teams.microsoft.com/api/chatsvc/emea/v1/x",
-            Some(ab_chat::EARLIER_RUN_PROBE),
-        ),
-    ];
-    let unexpected = [
-        forced("https://teams.microsoft.com/api/chatsvc/emea/v1/x", None),
-        denial(
-            "https://teams.microsoft.com/api/chatsvc/emea/v2/users/ME/endpoints/x",
-            DenyCause::Unclassified,
-        ),
-        // telemetry reaches nobody and passes: a deny of it means something is off
-        denial(
-            "https://browser.events.data.microsoft.com/OneCollector/1.0/",
-            DenyCause::Unclassified,
-        ),
-        denial(
-            "https://teams.microsoft.com.example.com/api/chatsvc/emea/v1/agents/28:made-up-bot/invoke",
-            DenyCause::Unclassified,
-        ),
-        denial("not a url", DenyCause::Malformed),
-    ];
-    for denial in &expected {
-        assert!(policy.expects(denial), "{denial:?}");
-    }
-    for denial in &unexpected {
-        assert!(!policy.expects(denial), "{denial:?}");
-    }
-    let all: Vec<Denial> = expected.iter().chain(&unexpected).cloned().collect();
-    assert_eq!(policy.unexpected(&all), unexpected.to_vec());
-    assert!(DenyPolicy::AllExpected.unexpected(&all).is_empty());
-    // echo-call forces no deny: not even a probe's is expected
-    assert!(!echo_call::policy().expects(&expected[2]));
-    Ok(())
-}
-
 const LOW: &str = "8:orgid:0000000a-0000-4000-8000-000000000001";
 const HIGH: &str = "8:orgid:0000000B-0000-4000-8000-000000000002";
 const CHAT: &str = "19:0000000a-0000-4000-8000-000000000001_0000000b-0000-4000-8000-000000000002@unq.gbl.spaces";
@@ -787,130 +712,9 @@ fn ab_chat_knows_the_chat_in_a_url() -> TestResult {
 fn scenario_names_and_ab_chat_texts() {
     assert_eq!(ScenarioName::Load.as_str(), "load");
     assert_eq!(ScenarioName::AbChat.to_string(), "ab-chat");
-    let (probe, message) = (probe_text("n1"), message_text("n1"));
-    assert!(probe.contains("n1") && message.contains("n1"));
-    assert!(!message.contains(&probe) && !probe.contains(&message));
-    assert!(probe.starts_with(PROBE_MARKER));
-    assert!(!message.contains(PROBE_MARKER.trim()));
-}
-
-fn account(denials: Vec<Denial>, fence: FenceReport) -> AccountRun {
-    AccountRun {
-        alias: Alias::A,
-        fence,
-        denials,
-        frame_denials: Vec::new(),
-        capture: None,
-    }
-}
-
-#[test]
-fn a_writing_run_fails_on_a_denied_frame_off_the_list() -> TestResult {
-    let policy = ab_chat::policy(Some(CHAT))?;
-    let frame = FrameDenial::new("wss://teams.microsoft.com/api/socket", DenyCause::Unclassified);
-    // no class of denied frames is on the list: a frame held back under a label the scenario names is the one expected
-    let listed = FrameDenial {
-        label: Some(ab_chat::EARLIER_RUN_PROBE.to_owned()),
-        ..FrameDenial::new("wss://go.trouter.teams.microsoft.com/v4/c", DenyCause::Forced)
-    };
-    let fence = FenceReport {
-        denied_frames: 2,
-        ..FenceReport::default()
-    };
-    let run = AccountRun {
-        frame_denials: vec![frame.clone(), listed.clone()],
-        ..account(Vec::new(), fence.clone())
-    };
-    let mut report = ScenarioReport::new(ScenarioName::AbChat);
-    report.add_account(run, &policy);
-    assert_eq!(report.failures.len(), 1, "{:?}", report.failures);
-    assert!(
-        report.failures[0].contains("WebSocket frame") && report.failures[0].contains("/api/socket"),
-        "{:?}",
-        report.failures
-    );
-
-    // the expected frame alone passes
-    let mut clean = ScenarioReport::new(ScenarioName::AbChat);
-    let run = AccountRun {
-        frame_denials: vec![listed],
-        ..account(
-            Vec::new(),
-            FenceReport {
-                denied_frames: 1,
-                ..FenceReport::default()
-            },
-        )
-    };
-    clean.add_account(run, &policy);
-    assert!(!clean.failed(), "{:?}", clean.failures);
-
-    // a deny the report counts but the list missed fails it too: nothing says what it was
-    let mut counted = ScenarioReport::new(ScenarioName::AbChat);
-    counted.add_account(account(Vec::new(), fence.clone()), &policy);
-    assert!(counted.failed());
-    assert!(
-        counted.failures[0].contains("2 more WebSocket frame"),
-        "{:?}",
-        counted.failures
-    );
-
-    // the fail-closed load expects frame denies like any other
-    let mut load = ScenarioReport::new(ScenarioName::Load);
-    let run = AccountRun {
-        frame_denials: vec![frame],
-        ..account(Vec::new(), fence)
-    };
-    load.add_account(run, &DenyPolicy::AllExpected);
-    assert!(!load.failed(), "{:?}", load.failures);
-    Ok(())
-}
-
-#[test]
-fn a_run_fails_on_an_unexpected_deny_or_a_breach_only() {
-    let telemetry = denial(
-        "https://teams.microsoft.com/api/chatsvc/emea/v1/agents/28:made-up-bot/invoke",
-        DenyCause::Unclassified,
-    );
-    let endpoint = denial(
-        "https://teams.microsoft.com/api/chatsvc/emea/v2/users/ME/endpoints/x",
-        DenyCause::Unclassified,
-    );
-    let policy = echo_call::policy();
-
-    let mut clean = ScenarioReport::new(ScenarioName::EchoCall);
-    clean.add_account(account(vec![telemetry.clone()], FenceReport::default()), &policy);
-    assert!(!clean.failed(), "{:?}", clean.failures);
-
-    let mut denied = ScenarioReport::new(ScenarioName::EchoCall);
-    denied.add_account(
-        account(vec![telemetry, endpoint.clone()], FenceReport::default()),
-        &policy,
-    );
-    assert!(denied.failed());
-    assert_eq!(denied.failures.len(), 1);
-    assert!(
-        denied.failures[0].contains("unexpected deny") && denied.failures[0].contains("/endpoints/"),
-        "{:?}",
-        denied.failures
-    );
-    // the failure names the deny's class: the contacting service its URL goes to
-    assert!(denied.failures[0].contains("chat_service"), "{:?}", denied.failures);
-
-    // the fail-closed load expects every deny, but not a breach
-    let mut load = ScenarioReport::new(ScenarioName::Load);
-    load.add_account(
-        account(vec![endpoint], FenceReport::default()),
-        &DenyPolicy::AllExpected,
-    );
-    assert!(!load.failed());
-    let breached = FenceReport {
-        unsanctioned_frames: 1,
-        ..FenceReport::default()
-    };
-    load.add_account(account(Vec::new(), breached), &DenyPolicy::AllExpected);
-    assert!(load.failed());
-    assert!(load.failures[0].contains("breached"), "{:?}", load.failures);
+    let message = message_text("n1");
+    assert!(message.contains("n1"));
+    assert!(!message.contains(HELD_MARKER.trim()));
 }
 
 /// A page shaped like the web client's chat where `ab-chat-full` acts: two messages (the second quoting the first), a
@@ -1121,7 +925,7 @@ fn ab_chat_full_texts_are_this_runs_and_apart() {
     let texts = Texts::new("n1");
     let all = [&texts.first, &texts.edited, &texts.reply, &texts.doomed];
     for (index, text) in all.iter().enumerate() {
-        assert!(text.contains("n1") && !text.contains(PROBE_MARKER.trim()), "{text}");
+        assert!(text.contains("n1") && !text.contains(HELD_MARKER.trim()), "{text}");
         for (other_index, other) in all.iter().enumerate() {
             // only the edit holds another text: the message it edits
             let holds = index != other_index && text.contains(other.as_str());
@@ -1129,40 +933,6 @@ fn ab_chat_full_texts_are_this_runs_and_apart() {
         }
     }
     assert_eq!(ScenarioName::AbChatFull.as_str(), "ab-chat-full");
-}
-
-/// b's copy of the chat, as the web client shows it once it has read the history: a's message, and no probe.
-const B_CHAT_PAGE: &str = r#"<!doctype html><html><body>
-<div data-tid="chat-pane-message"><p>lab full n1 first, edited</p></div>
-</body></html>"#;
-
-#[tokio::test]
-async fn the_enforcement_test_fails_when_bs_copy_of_the_chat_has_the_probe() -> TestResult {
-    with_html(B_CHAT_PAGE, async |run| {
-        let drive = &mut run.driver;
-        let probe = probe_text("n1");
-        // ab-chat-full checks once b shows a's first message, as sent or as edited
-        drive
-            .wait_for_text("a's message", &Texts::new("n1").first, Duration::from_secs(5))
-            .await?;
-        ab_chat::not_received(drive, &probe).await?;
-        let arrives = format!(
-            "(document.body.insertAdjacentHTML('beforeend', '<div data-tid=\"chat-pane-message\"><p>{probe}</p></div>'), \
-             true)"
-        );
-        drive
-            .wait_until_true("the probe arrives", &arrives, "the probe added", Duration::from_secs(1))
-            .await?;
-        let received = ab_chat::not_received(drive, &probe).await;
-        assert!(
-            received
-                .as_ref()
-                .is_err_and(|error| error.to_string().contains("b received the probe")),
-            "{received:?}"
-        );
-        Ok(())
-    })
-    .await
 }
 
 /// A compose box that, like the web client's editor, takes an image file handed to it (by a paste, or by a drop when

@@ -1,35 +1,4 @@
-//! The `ab-trouter` scenario (M1 Task 14, `docs/protocol/trouter.md`): account b's push channel (Trouter) while a
-//! sends, edits and reacts in the a–b chat, recorded for the native client's Trouter notes.
-//!
-//! Both accounts run under the lab rule with members read live, as `ab-chat`: the Trouter session's own frames
-//! (authenticate, keep-alives, the client's own `user.activity`, the loss acknowledgement), the responses to what the
-//! service delivers (`crate::fence_ws::classify_frame`) and the endpoints' registrations reach nobody and pass.
-//! `ab-trouter-quiet` ([`Activity::HeldBack`]) also holds back every `user.activity` ([`hold_activity`]), to see
-//! whether the service treats an endpoint that never reports its activity differently.
-//!
-//! The steps:
-//! 1. Before anything loads, a's fence force-denies every write carrying the probe marker, as in `ab-chat`
-//!    ([`super::ab_chat`]).
-//! 2. b opens the web client and must register its endpoint, then opens the chat with a (a new document, which
-//!    registers again) and must read it: b now shows the a–b chat, with its push channel up. Each document must get a
-//!    messaging-stack registration answered with a 2xx ([`wait_registered`]): the earlier document's never counts.
-//! 3. a opens the web client and the chat with b, and proves enforcement live with this run's probe (`ab-chat`'s
-//!    step 4).
-//! 4. a sends the message; b, already showing the chat, must show it within [`DELIVERY`] (it can only come by push or
-//!    by a read b makes by itself) and never the probe. A chat with unread messages opens at its "last read" mark,
-//!    the newest ones not rendered, so b jumps to the newest while it waits ([`wait_for_newest`]): a jump that reads
-//!    the chat shows in the capture. The time from a's Enter to b showing it is noted.
-//! 5. a edits the message and reacts to it with a like ([`edit`], [`react`]); b must show the edit, and the reaction
-//!    must be answered with a 2xx. These steps failing fails the run but doesn't end it: the observation still runs.
-//! 6. Both pages stay open, nothing driven, for [`observation`] (when the activity is reported, longer than the
-//!    lifetime a chat delivery carries): the capture shows what the service delivers to an idle endpoint and whether
-//!    it closes the socket (the runs made while the delivery responses were denied showed it delivering again what
-//!    went unanswered).
-//! 7. The notes count each account's endpoint registrations, answered and denied ([`registrations_note`]). Judged as
-//!    `ab-chat` ([`trouter_policy`]): no deny but the probes' forced ones (and, quiet, the held-back activity) and the
-//!    reviewed expected-deny list (it holds no Trouter frame); nothing denied on the a–b chat.
-//!
-//! Nothing in the run answers a call.
+//! Records push delivery, endpoint registration, edits and reactions between two lab accounts. The quiet variant selectively holds user.activity frames as a capture experiment.
 
 use std::collections::BTreeMap;
 use std::time::Duration;
@@ -38,35 +7,30 @@ use serde_json::json;
 use tokio::time::Instant;
 
 use crate::browser::Media;
+use crate::capture_hold::without_query;
 use crate::cdp::SessionId;
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
-use crate::fence_http::without_query;
-use crate::fence_ws::ForcedFrameDeny;
+use crate::frame_hold::FrameHold;
 use crate::session::{LabSession, SessionOptions};
 
 use super::ab_chat::{
-    CHAT_OPEN, COMPOSE, DELIVERY, EARLIER_RUN_PROBE, EXPECTED_FORCED, THIS_RUN_PROBE, chat_link, chat_requests,
-    chat_url, deny_probes, enforce, load, message_text, nonce, one_to_one_id, probe_text, save_screenshot, send,
-    wait_for_newest,
+    CHAT_OPEN, COMPOSE, DELIVERY, chat_link, chat_requests, load, message_text, nonce, one_to_one_id, save_screenshot,
+    send, wait_for_newest,
 };
 use super::dsl::{Driver, RequestPattern, SeenRequest, Selector, StepError, js_string};
-use super::expected::Review;
-use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport};
+use super::{RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
 /// Whether the client's own `user.activity` goes out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Activity {
     /// It goes out: it reaches nobody (`ab-trouter`).
     Reported,
-    /// Every `user.activity` is force-denied ([`hold_activity`], `ab-trouter-quiet`).
+    /// Every `user.activity` is held for capture ([`hold_activity`], `ab-trouter-quiet`).
     HeldBack,
 }
 
-/// The label of the forced deny that holds back the client's own `user.activity` ([`hold_activity`]).
+/// The label of the capture hold that holds back the client's own `user.activity` ([`hold_activity`]).
 pub const HELD_ACTIVITY: &str = "held-back activity";
-
-/// The forced denies a quiet run expects: `ab-chat`'s two probe rules' and the held-back activity.
-pub const QUIET_FORCED: [&str; 3] = [THIS_RUN_PROBE, EARLIER_RUN_PROBE, HELD_ACTIVITY];
 
 /// A socket of the Trouter service, by its URL.
 pub const TROUTER_SOCKET: &str = r"^wss://[a-z0-9-]+\.trouter\.teams\.microsoft\.com/";
@@ -79,19 +43,10 @@ pub const ACTIVITY_EVENT: &str = r#""name":"user.activity""#;
 ///
 /// # Errors
 /// Never: the pattern is fixed.
-pub fn hold_activity() -> Result<ForcedFrameDeny, regex::Error> {
-    Ok(ForcedFrameDeny::new(TROUTER_SOCKET)?
+pub fn hold_activity() -> Result<FrameHold, regex::Error> {
+    Ok(FrameHold::new(TROUTER_SOCKET)?
         .with_text_containing(ACTIVITY_EVENT)
         .labelled(HELD_ACTIVITY))
-}
-
-/// The forced denies a run with `activity` expects.
-#[must_use]
-pub fn expected_forced(activity: Activity) -> &'static [&'static str] {
-    match activity {
-        Activity::Reported => &EXPECTED_FORCED,
-        Activity::HeldBack => &QUIET_FORCED,
-    }
 }
 
 /// The registration of an endpoint with the registrar (either stack's; under the lab rule both pass).
@@ -143,19 +98,6 @@ const EDITOR_MARK: Selector<'static> = Selector::Css(r#"[data-lab-editor="1"]"#)
 
 /// The page's size: the client lays out a message's actions in full.
 const VIEWPORT: (u32, u32) = (1440, 900);
-
-/// How a run with `activity` judges its denies: `ab-chat`'s policy ([`super::ab_chat::policy`]), with the held-back
-/// activity's forced deny for a quiet run ([`expected_forced`]).
-///
-/// # Errors
-/// Never for an id from [`one_to_one_id`]; when the chat's pattern doesn't compile.
-pub fn trouter_policy(activity: Activity, chat_id: Option<&str>) -> Result<DenyPolicy, regex::Error> {
-    let mut review = Review::new().expecting_forced(expected_forced(activity));
-    if let Some(chat_id) = chat_id {
-        review = review.with_mapped_target(chat_url(chat_id)?);
-    }
-    Ok(DenyPolicy::Reviewed(review))
-}
 
 /// The pattern of the messaging stack's endpoint registration: a [`REGISTRATION`] whose body holds
 /// [`MESSAGING_REGISTRATION`]. Its URL alone ([`RequestPattern::matches`]) takes either stack's.
@@ -302,18 +244,16 @@ pub fn scenario(activity: Activity) -> ScenarioName {
 /// Runs `ab-trouter` or `ab-trouter-quiet` (see the module docs).
 ///
 /// # Errors
-/// When the run can't start: no lab config, no Chrome, no fence, a browser that can't be armed.
+/// When the run can't start: no lab config, no Chrome, a browser whose capture setup fails.
 pub async fn run(paths: &LabPaths, options: RunOptions, activity: Activity) -> Result<ScenarioReport, ScenarioError> {
     let config = LabConfig::load(&LabLocations::from_env()?)?;
     let name = scenario(activity);
     let session_options = SessionOptions {
-        live_members: true,
         capture: Some(name.as_str().to_owned()),
         capture_request_bodies: true,
         display: options.display,
         media: Media::System,
         user_agent: None,
-        ..SessionOptions::fail_closed()
     };
     let a = LabSession::open_with(paths, Alias::A, session_options.clone()).await?;
     let b = match LabSession::open_with(paths, Alias::B, session_options).await {
@@ -342,24 +282,21 @@ pub async fn run(paths: &LabPaths, options: RunOptions, activity: Activity) -> R
 /// Drives both admitted accounts and closes both even when a step, a screenshot or the first close fails.
 async fn finish(mut a: LabSession, mut b: LabSession, activity: Activity, steps: &Steps<'_>) -> ScenarioReport {
     let mut report = ScenarioReport::new(scenario(activity));
-    if let Err(error) = deny_probes(&a, Some(&probe_text(steps.nonce))) {
-        report.failures.push(error.to_string());
-    }
+
     if activity == Activity::HeldBack {
         match hold_activity() {
             Ok(rule) => {
-                a.force_deny_frames(rule.clone());
-                b.force_deny_frames(rule);
+                if let Err(error) = a.hold_frames(rule.clone()).await {
+                    report.failures.push(error.to_string());
+                }
+                if let Err(error) = b.hold_frames(rule).await {
+                    report.failures.push(error.to_string());
+                }
             }
             Err(error) => report.failures.push(format!("can't hold the activity back: {error}")),
         }
     }
-    let policy = trouter_policy(activity, steps.chat_id).unwrap_or_else(|error| {
-        report
-            .failures
-            .push(format!("can't tell the a–b chat in a URL: {error}"));
-        DenyPolicy::Reviewed(Review::new().expecting_forced(expected_forced(activity)))
-    });
+
     if let Err(error) = steps.run(&mut a, &mut b, &mut report).await {
         report.failures.push(error.to_string());
         for (alias, session) in [(Alias::A, &a), (Alias::B, &b)] {
@@ -369,7 +306,7 @@ async fn finish(mut a: LabSession, mut b: LabSession, activity: Activity, steps:
         }
     }
     for (alias, session) in [(Alias::A, a), (Alias::B, b)] {
-        report.close_account(alias, session, &policy).await;
+        report.close_account(alias, session).await;
     }
     report
 }
@@ -423,12 +360,6 @@ impl Steps<'_> {
         drive_a
             .wait_for("a's compose box", COMPOSE, self.options.load_timeout.max(CHAT_OPEN))
             .await?;
-        let names_chat = chat_url(chat_id).map_err(|error| setup(error.to_string()))?;
-        let probe = probe_text(self.nonce);
-        enforce(a, &mut drive_a, &probe, &names_chat).await?;
-        report
-            .notes
-            .push("enforcement: a's probe post was denied by the fence and failed in a's page".to_owned());
 
         let message = message_text(self.nonce);
         send(&mut drive_a, "a (the message)", &message).await?;
@@ -444,18 +375,13 @@ impl Steps<'_> {
             "a's message showed in b's open chat {} ms after a's Enter",
             sent.elapsed().as_millis()
         ));
-        if drive_b.shows_text("b must not have the probe", &probe).await? {
-            return Err(setup("b received the probe the fence denied".to_owned()));
-        }
+
         self.edit_and_react(a, &mut drive_a, &mut drive_b, report).await;
         report
             .notes
             .push(format!("observing for {:?}, nothing driven", self.observe));
         tokio::time::sleep(self.observe).await;
-        report.notes.push(format!(
-            "b: {} WebSocket frame(s) denied so far",
-            b.frame_denials().len()
-        ));
+
         for (who, driver) in [("a", &mut drive_a), ("b", &mut drive_b)] {
             driver.seen_so_far();
             report.notes.push(registrations_note(who, driver.requests()));

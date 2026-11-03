@@ -126,26 +126,15 @@ impl Page {
     ) -> crate::session::LabSession {
         use crate::arming::ArmedBrowser;
         use crate::capture::{Capture, Recorder, RtcHooks};
-        use crate::classify::Classifier;
-        use crate::fence_http::HttpFence;
-        use crate::fence_ws::{GuardScript, WsFence};
-        use teams_fence::{FailClosed, Fence, FenceLog, MembershipSource, Roster};
-
-        let fence = Arc::new(Fence::new(
-            Roster::default(),
-            FenceLog::open(&dir.join("fence.log")).unwrap(),
-        ));
-        let members: Arc<dyn MembershipSource + Send> = Arc::new(FailClosed);
-        let http = HttpFence::new(Classifier::new(), Arc::clone(&fence), Arc::clone(&members));
-        let ws = WsFence::new(fence, members, GuardScript::generate().unwrap());
+        let http = crate::capture_hold::CaptureHold::new();
         let recorder = record.then(|| Arc::new(Recorder::create(dir, "synthetic-offline").unwrap()));
         let capture = recorder
             .as_ref()
             .map(|recorder| Capture::new(Arc::clone(recorder), RtcHooks::default()));
         let incoming = self.incoming.take().unwrap();
         let armed = match browser {
-            Some(browser) => ArmedBrowser::synthetic_managed(self.cdp.clone(), incoming, http, ws, capture, browser),
-            None => ArmedBrowser::synthetic(self.cdp.clone(), incoming, http, ws, capture),
+            Some(browser) => ArmedBrowser::synthetic_managed(self.cdp.clone(), incoming, http, capture, browser),
+            None => ArmedBrowser::synthetic(self.cdp.clone(), incoming, http, capture),
         };
         crate::session::LabSession::synthetic(armed, SessionId::new("synthetic-page"), recorder)
     }

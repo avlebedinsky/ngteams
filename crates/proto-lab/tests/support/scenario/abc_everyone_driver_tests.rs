@@ -67,7 +67,7 @@ impl EveryonePeer {
             "Network.requestWillBeSent",
             json!({"requestId":id,"request":request}),
         );
-        if self.text.trim_start().starts_with(PROBE_MARKER) {
+        if self.text.trim_start().starts_with(HELD_MARKER) {
             broadcast(
                 events,
                 "Fetch.requestPaused",
@@ -153,9 +153,11 @@ async fn everyone_is_held_and_classified_before_a_real_mention_is_sent_or_the_ru
         let b_dir = tempfile::tempdir().unwrap();
         let mut a_session = a.session(a_dir.path(), true);
         let mut b_session = b.session(b_dir.path(), true);
-        for rule in abc_chat::forced_denies(NONCE) {
-            a_session.force_deny(rule);
-        }
+        a_session.hold(
+            crate::capture_hold::Hold::new("POST", super::super::ab_chat::MESSAGE_POST)
+                .unwrap()
+                .with_body_containing(&held_text(NONCE)),
+        );
         let steps = Steps {
             group: CHAT,
             nonce: NONCE,
@@ -169,7 +171,7 @@ async fn everyone_is_held_and_classified_before_a_real_mention_is_sent_or_the_ru
         .await
         .unwrap();
         assert_eq!(outcome.is_ok(), admissible, "{outcome:?}; {report:?}");
-        assert_eq!(a_session.denials().len(), 2);
+        assert_eq!(a_session.held_requests().len(), 1);
         assert!(
             report
                 .notes
@@ -261,7 +263,7 @@ async fn the_opened_session_driver_collects_failures_and_closes_both_accounts_af
         );
         assert!(a.commands().iter().any(|command| command["method"] == "Browser.close"));
         assert!(b.commands().iter().any(|command| command["method"] == "Browser.close"));
-        assert_eq!(report.accounts[0].denials.len(), 2);
+        assert_eq!(report.accounts[0].held_requests.len(), 1);
         if admissible {
             assert_eq!(report.failures.len(), 2, "{report:?}");
         } else {

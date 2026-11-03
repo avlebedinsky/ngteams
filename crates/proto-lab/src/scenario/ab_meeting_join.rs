@@ -1,45 +1,20 @@
-//! The `ab-meeting-join` scenario (`docs/protocol/calling.md`, "Joining a meeting"): what the web client sends when it
-//! goes into a meeting nobody started. Account a schedules a Teams meeting with b from the scheduling form, opens its
-//! join link, and clicks the pre-join's Join now, only on the meeting the run made.
-//!
-//! The start's row is the fence's `meeting_call_start`: a's pre-join subscription goes through it, judged by the meeting's
-//! chat, read fresh. What the client sends next (its callback links and its entry at the conversation) is held back by
-//! labelled forced denies, as `ab-call --call start-held` holds a start: the run records it, and the client then tries
-//! its one start with media, which goes through the row too, unless the run holds that back as well.
-//!
-//! The steps:
-//! 1. Before anything loads, a's fence force-denies every write carrying the probe marker, as in `ab-chat`, and the
-//!    conversation's own writes.
-//! 2. a opens the web client, opens the chat with b and proves enforcement live with this run's probe.
-//! 3. a schedules the meeting ([`super::ab_meeting`]'s form).
-//! 4. a loads at the meeting's join link; its pre-join must show Join now, its subscription the fence let through.
-//! 5. a clicks Join now; every start with media is held back with a labelled deny, so nothing enters a call.
-//! 6. a cancels the meeting from its chat's details (`ab-meeting`'s step 5), whether or not the join went through, so
-//!    the run leaves no meeting behind.
+//! Records meeting pre-join UI and request shapes. Explicit entry/start holds keep the capture phase from entering a meeting until the scenario releases its holds.
 
 use std::time::Duration;
 
 use crate::browser::Media;
-use crate::classify::Classifier;
+use crate::capture_hold::Hold;
 use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
-use crate::fence_http::ForcedDeny;
 use crate::session::{LabSession, SessionOptions};
 
-use super::ab_chat::{
-    CHAT_OPEN, COMPOSE, EXPECTED_FORCED, chat_link, chat_url, deny_probes, enforce, load, load_at, nonce,
-    one_to_one_id, probe_text, save_screenshot_as, setup,
-};
+use super::ab_chat::{CHAT_OPEN, COMPOSE, chat_link, load, load_at, nonce, one_to_one_id, save_screenshot_as, setup};
 use super::ab_meeting::{self, created_join_link};
 use super::dsl::{Driver, RequestPattern};
 use super::echo_call::{USER_AGENT, size_page, write_burst_tone};
-use super::expected::Review;
-use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport};
+use super::{RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
-/// The label of the forced denies of what follows the pre-join's subscription.
+/// The label of the capture holds of what follows the pre-join's subscription.
 pub const ENTRY_HELD: &str = "the meeting's entry, held back";
-
-/// The denies the run expects: `ab-chat`'s, and its own.
-const FORCED: [&str; 3] = [EXPECTED_FORCED[0], EXPECTED_FORCED[1], ENTRY_HELD];
 
 /// The conversation's entry and its callback links: `POST …/conv/<id>` and `…/conv/<id>/notificationLinks`.
 const CONVERSATION_ENTRY: &str = r"\.conv\.skype\.com/conv/[^/?]+(/notificationLinks)?(\?|$)";
@@ -56,13 +31,11 @@ const AFTER_JOIN: Duration = Duration::from_secs(45);
 /// Runs `ab-meeting-join` (see the module docs).
 ///
 /// # Errors
-/// When the run can't start: no lab config, no Chrome, no fence, a browser that can't be armed.
+/// When the run can't start: no lab config, no Chrome, a browser whose capture setup fails.
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
     let config = LabConfig::load(&LabLocations::from_env()?)?;
     let tone = write_burst_tone(paths).map_err(|error| setup(format!("can't write the tone: {error}")))?;
     let session_options = SessionOptions {
-        classifier: Classifier::new(),
-        live_members: true,
         capture: Some(ScenarioName::AbMeetingJoin.as_str().to_owned()),
         capture_request_bodies: true,
         display: options.display,
@@ -79,7 +52,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         nonce: &nonce,
         options,
     };
-    if let Err(error) = steps.prepare(&a).and(hold_entry(&a)) {
+    if let Err(error) = hold_entry(&a) {
         report.failures.push(error.to_string());
     }
     if let Err(error) = steps.run(&mut a, mri(Alias::A), &mut report).await {
@@ -88,14 +61,8 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
             report.notes.push(note);
         }
     }
-    report.close_account(Alias::A, a, &policy()).await;
+    report.close_account(Alias::A, a).await;
     Ok(report)
-}
-
-/// How a run judges its denies: its own forced ones, every other by the reviewed list.
-#[must_use]
-pub fn policy() -> DenyPolicy {
-    DenyPolicy::Reviewed(Review::new().expecting_forced(&FORCED))
 }
 
 struct Steps<'a> {
@@ -106,12 +73,8 @@ struct Steps<'a> {
 }
 
 impl Steps<'_> {
-    fn prepare(&self, a: &LabSession) -> Result<(), ScenarioError> {
-        deny_probes(a, Some(&probe_text(self.nonce)))
-    }
-
     async fn run(&self, a: &mut LabSession, me: &str, report: &mut ScenarioReport) -> Result<(), ScenarioError> {
-        let chat_id = one_to_one_id(me, self.mri_b)
+        let _chat_id = one_to_one_id(me, self.mri_b)
             .ok_or_else(|| setup("lab.toml has no MRI for a or b: run `proto-lab login` for them".to_owned()))?;
         let mut drive = a.driver();
         load(Alias::A, a, self.options.load_timeout).await?;
@@ -122,11 +85,7 @@ impl Steps<'_> {
         drive
             .wait_for("a's compose box", COMPOSE, self.options.load_timeout.max(CHAT_OPEN))
             .await?;
-        let names_chat = chat_url(&chat_id).map_err(|error| setup(error.to_string()))?;
-        enforce(a, &mut drive, &probe_text(self.nonce), &names_chat).await?;
-        report
-            .notes
-            .push("enforcement: a's probe post was denied by the fence and failed in a's page".to_owned());
+
         let title = format!("lab meeting join {}", self.nonce);
         let body = ab_meeting::schedule(a, &mut drive, report, &title, self.upn_b, self.options).await?;
         let joined = self.join(a, body.as_deref(), report).await;
@@ -160,8 +119,8 @@ impl Steps<'_> {
 
 /// Holds back what follows the pre-join's subscription: the conversation's entry and its callback links.
 fn hold_entry(a: &LabSession) -> Result<(), ScenarioError> {
-    let rule = ForcedDeny::new("POST", CONVERSATION_ENTRY).map_err(|error| setup(error.to_string()))?;
-    a.force_deny(rule.labelled(ENTRY_HELD));
+    let rule = Hold::new("POST", CONVERSATION_ENTRY).map_err(|error| setup(error.to_string()))?;
+    a.hold(rule.labelled(ENTRY_HELD));
     Ok(())
 }
 
@@ -171,10 +130,10 @@ async fn pre_join(a: &mut LabSession, drive: &mut Driver, report: &mut ScenarioR
     if let Some(note) = save_screenshot_as(Alias::A, a, "prejoin.png").await {
         report.notes.push(note);
     }
-    let rule = ForcedDeny::new("POST", STARTS)
+    let rule = Hold::new("POST", STARTS)
         .map_err(|error| setup(error.to_string()))?
         .with_body_containing("callInvitation");
-    a.force_deny(rule.labelled(ENTRY_HELD));
+    a.hold(rule.labelled(ENTRY_HELD));
     ab_meeting::click_button(drive, "a clicks Join now on the run's own meeting", &["Join now"]).await?;
     tokio::time::sleep(AFTER_JOIN).await;
     if let Some(note) = save_screenshot_as(Alias::A, a, "after-join.png").await {

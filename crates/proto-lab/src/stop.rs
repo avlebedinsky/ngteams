@@ -1,24 +1,10 @@
-//! Stopping `proto-lab` by a signal without leaving its browsers behind.
-//!
-//! A lab browser runs in a process group of its own, so a signal meant for `proto-lab` doesn't reach it, and it goes
-//! down when its owner ([`crate::browser::Browser`], inside [`crate::arming::ArmedBrowser`]) is dropped. A process
-//! that a signal ends by its default action drops nothing: live, 2026-10-21, a hung `ab-image` run stopped with SIGINT
-//! left both lab browsers running. So the CLI runs each command [`until_stopped`]: on SIGINT or SIGTERM the command's
-//! future is dropped, and with it every browser it owns, before the process exits.
-//!
-//! Dropping an armed browser kills it at once, but the decisions its fence was making (a mapped write waits on a live
-//! membership read) and its targets' armings run in tasks of their own and outlive it: the browser they would answer
-//! is gone, so nothing they decide goes out, and the CLI then waits for them ([`crate::arming::settle_every_fence`],
-//! bounded, and cut short by another signal) so that `fence.log` holds them, as [`crate::arming::ArmedBrowser::close`]
-//! does.
+//! Stops a command on SIGINT or SIGTERM. Dropping its owned browser stops the browser process group before the runtime shuts down.
 
 use std::future::Future;
 use std::time::Duration;
 
 use rustix::process::Signal;
 use tokio::signal::unix::{SignalKind, signal};
-
-use crate::arming;
 
 /// The signal that stopped a command.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -63,28 +49,9 @@ pub async fn until_stopped<T>(command: impl Future<Output = T>) -> Result<T, Sto
     }
 }
 
-/// What follows a stop, once the command is dropped on `runtime` (any lab browser it ran killed with it): waits up to
-/// `grace` for the decisions and armings its fences were still running, as closing a fence does, so that `fence.log`
-/// holds them (another signal cuts the wait short). Then the runtime is shut down without waiting for its blocking
-/// tasks: one (an unzip, a checksum) would hold a dropped runtime until it ended, with every later signal caught by the
-/// handlers [`until_stopped`] left in place. Gives the exit status to end the process with ([`Stopped::exit_code`]).
-/// What it does is told on stderr.
-pub fn after_stop(runtime: tokio::runtime::Runtime, stopped: Stopped, grace: Duration) -> u8 {
+/// Ends the runtime after a stopped command has dropped its browser owners, without waiting for blocking work.
+pub fn after_stop(runtime: tokio::runtime::Runtime, stopped: Stopped, _grace: Duration) -> u8 {
     eprintln!("proto-lab: {stopped}; any lab browser it ran was killed");
-    let running = arming::running_anywhere();
-    if running > 0 {
-        eprintln!(
-            "proto-lab: waiting up to {}s for {running} fence decision(s) still running, so that fence.log holds them \
-             (another signal skips the wait)",
-            grace.as_secs()
-        );
-        let left = runtime
-            .block_on(until_stopped(arming::settle_every_fence(grace)))
-            .unwrap_or_else(|_| arming::running_anywhere());
-        if left > 0 {
-            eprintln!("proto-lab: {left} fence decision(s) given up on: fence.log may lack them");
-        }
-    }
     runtime.shutdown_background();
     stopped.exit_code()
 }

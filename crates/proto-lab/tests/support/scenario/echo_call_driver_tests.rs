@@ -196,12 +196,7 @@ async fn echo_finishes_the_capture_and_preserves_close_and_media_failures_after_
             .iter()
             .any(|failure| failure.contains("close") || failure.contains("disappear"))
     );
-    assert!(
-        report
-            .failures
-            .iter()
-            .any(|failure| failure.contains("allowed no call start"))
-    );
+    assert!(report.failures.iter().any(|failure| failure.contains("no call start")));
     assert!(
         report
             .failures

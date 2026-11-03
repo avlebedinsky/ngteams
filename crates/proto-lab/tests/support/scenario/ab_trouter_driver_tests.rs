@@ -55,10 +55,10 @@ async fn both_activity_modes_register_both_documents_before_live_chat_edit_and_r
         let mut sender = a.session(a_dir.path(), false);
         let mut receiver = b.session(b_dir.path(), false);
         let steps = steps(Some(CHAT));
-        deny_probes(&sender, Some(&probe_text(steps.nonce))).unwrap();
+
         if activity == Activity::HeldBack {
-            sender.force_deny_frames(hold_activity().unwrap());
-            receiver.force_deny_frames(hold_activity().unwrap());
+            sender.hold_frames(hold_activity().unwrap()).await.unwrap();
+            receiver.hold_frames(hold_activity().unwrap()).await.unwrap();
         }
         let mut report = ScenarioReport::new(scenario(activity));
         steps.run(&mut sender, &mut receiver, &mut report).await.unwrap();
@@ -75,14 +75,7 @@ async fn both_activity_modes_register_both_documents_before_live_chat_edit_and_r
                 report.notes
             );
         }
-        assert_eq!(
-            sender
-                .denials()
-                .iter()
-                .filter(|denial| denial.label.as_deref() == Some(THIS_RUN_PROBE))
-                .count(),
-            1
-        );
+
         let commands = b.commands();
         assert_eq!(
             commands
@@ -280,9 +273,9 @@ async fn recorded_trouter_runs_close_and_report_both_accounts_in_order_in_both_a
                 .iter()
                 .all(|failure| failure.contains("didn't confirm closing"))
         );
-        assert_eq!(report.accounts[0].denials.len(), 1);
-        assert_eq!(report.accounts[0].denials[0].label.as_deref(), Some(THIS_RUN_PROBE));
-        assert!(report.accounts[1].denials.is_empty());
+        assert!(report.accounts[0].held_requests.is_empty());
+
+        assert!(report.accounts[1].held_requests.is_empty());
         for (account, page) in report.accounts.iter().zip([&a, &b]) {
             assert!(
                 account

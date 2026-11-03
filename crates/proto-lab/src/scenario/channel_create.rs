@@ -1,52 +1,22 @@
-//! The `channel-create` scenario: what the web client's "Create a channel" dialog offers and what it sends for each
-//! channel type and layout, recorded for the protocol notes (`docs/protocol/channels.md`, "Creating a channel"), with
-//! nothing ever sent: the lab's teams hold people outside the lab, so every write that could make a channel is denied
-//! by a forced deny ([`CHANNEL_WRITE`]) from before the page loads, on any host, and the capture holds each one whole
-//! (its URL, headers and body).
-//!
-//! 1. a opens the web client under the fail-closed fence and waits for its teams to show.
-//! 2. a hovers each team's line in turn and opens its "..." menu ([`open_team_menu`]) until one offers "Add channel"
-//!    (an archived team's menu doesn't), naming the menu's entries in the notes.
-//! 3. a opens the dialog, shows it, opens the channel type's dropdown and names its options; then for each of
-//!    [`ATTEMPTS`] it fills the dialog and presses Create: the write must be denied under [`CHANNEL_WRITE`], and the
-//!    dialog's error is shown and left.
-//!
-//! 4. a opens a channel of the team and starts a mention: the people search the add-people step's box asks of a team, read
-//!    only; the compose box is emptied again.
-//!
-//! Every step saves a screenshot in the capture dir. The run fails when no team offers the dialog or when Create sends
-//! nothing it could deny; every deny is expected.
-//!
-//! **Writing** (`PROTO_LAB_CHANNEL_WRITES=1`, on a team of the lab's own named by `PROTO_LAB_TEAM`): nothing is forced
-//! but the enforcement probe, and the team's members are read live, so a channel is made only when the lab rule lets it
-//! through ([`teams_fence::Fence::check`]: everyone on the team a lab account, Teams' own apps not counted). A first
-//! channel named with [`PROBE`] is force-denied and must fail in the page; then each of [`ATTEMPTS`] is made for real,
-//! and the private one's add-people step adds b ([`MEMBER`]). The run fails when a creation or the add isn't answered
-//! with a success. It deletes nothing: the team is deleted after the run (`team-manage`).
+//! Records channel creation request shapes. The default capture holds channel writes; an explicit writing run sends the requested attempts directly.
 
 use std::time::Duration;
 
+use crate::capture_hold::Hold;
 use crate::config::{Alias, LabPaths};
-use crate::fence_http::ForcedDeny;
 use crate::session::{LabSession, SessionOptions};
 
 use super::ab_chat::{COMPOSE, load, save_screenshot_as};
 use super::ab_chat_full::clear_compose;
 use super::ab_trouter::size;
 use super::dsl::{Driver, Key, RequestPattern, Selector, js_string};
-use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport};
+use super::{RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
 /// The account that drives the dialog.
 pub const ACCOUNT: Alias = Alias::A;
 
 /// The account a writing run adds to the private channel it makes.
 pub const MEMBER: Alias = Alias::B;
-
-/// What a writing run's first channel name holds, force-denied: the enforcement probe.
-pub const PROBE: &str = "lab channel probe";
-
-/// The label of the probe's forced deny.
-pub const PROBE_LABEL: &str = "the channel probe";
 
 /// What a writing run's private channel's add-people step sends.
 const MEMBERS_URL: &str = r"(?i)/channels/[^/]+/users([?]|$)";
@@ -57,7 +27,7 @@ struct Writing {
     member: String,
 }
 
-/// The label of the forced deny of every write that could make a channel.
+/// The label of the capture hold of every write that could make a channel.
 pub const CHANNEL_WRITE: &str = "a channel's creation";
 
 /// What makes a write one that could make a channel, on any host: the middle tier's and the provisioning service's
@@ -113,36 +83,22 @@ fn texts(query: &str) -> String {
 /// Runs `channel-create` (see the module docs).
 ///
 /// # Errors
-/// When the run can't start: no Chrome, no fence, a browser that can't be armed.
+/// When the run can't start: no Chrome, a browser whose capture setup fails.
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
     let writing = writing()?;
     let session_options = SessionOptions {
         capture: Some(ScenarioName::ChannelCreate.as_str().to_owned()),
         capture_request_bodies: true,
         display: options.display,
-        live_members: writing.is_some(),
-        ..SessionOptions::fail_closed()
+
+        ..SessionOptions::default()
     };
     let mut a = LabSession::open_with(paths, ACCOUNT, session_options).await?;
     let mut report = ScenarioReport::new(ScenarioName::ChannelCreate);
     let mut drive = a.driver();
-    let forced = if writing.is_some() {
-        probe_rule().and_then(|rule| {
-            // an earlier chat scenario's unsent probe, sent again once the page loads, stays held back too
-            let mut rules = vec![rule];
-            rules.extend(super::ab_chat::probe_rules(None)?);
-            Ok(rules)
-        })
-    } else {
-        channel_rules()
-    }
-    .map_err(|error| ScenarioError::Setup(error.to_string()));
-    match forced {
-        Ok(rules) => rules.into_iter().for_each(|rule| a.force_deny(rule)),
-        Err(error) => {
-            report.failures.push(error.to_string());
-            report.close_account(ACCOUNT, a, &DenyPolicy::AllExpected).await;
-            return Ok(report);
+    if writing.is_none() {
+        for rule in channel_rules().map_err(|error| ScenarioError::Setup(error.to_string()))? {
+            a.hold(rule);
         }
     }
     let ran = match &writing {
@@ -153,7 +109,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         report.failures.push(error.to_string());
         shot(&a, &mut report, "channel-failure.png").await;
     }
-    report.close_account(ACCOUNT, a, &DenyPolicy::AllExpected).await;
+    report.close_account(ACCOUNT, a).await;
     Ok(report)
 }
 
@@ -181,16 +137,6 @@ fn setup(error: impl std::fmt::Display) -> ScenarioError {
     ScenarioError::Setup(error.to_string())
 }
 
-/// A writing run's forced deny: a channel named with [`PROBE`].
-///
-/// # Errors
-/// Never: the pattern is fixed.
-pub fn probe_rule() -> Result<ForcedDeny, regex::Error> {
-    Ok(ForcedDeny::new("POST", CHANNEL_URL)?
-        .with_body_containing(PROBE)
-        .labelled(PROBE_LABEL))
-}
-
 /// A writing run (see the module docs).
 async fn write_steps(
     a: &mut LabSession,
@@ -204,19 +150,7 @@ async fn write_steps(
     tokio::time::sleep(Duration::from_secs(10)).await;
     shot(a, report, "channel-loaded.png").await;
     open_managed_dialog(a, drive, report, &writing.team).await?;
-    let nonce = super::ab_chat::nonce();
-    // the probe: held back, the page must fail it
-    fill_named(drive, report, 9, &format!("{PROBE} {nonce}"), ("Standard", "Threads")).await?;
-    let probe = created(drive, report, 9, CHANNEL_URL).await?;
-    if probe.status.is_some_and(|status| (200..300).contains(&status)) {
-        report
-            .failures
-            .push(format!("the probe went through: {:?}", probe.status));
-        return Ok(());
-    }
-    tokio::time::sleep(Duration::from_secs(8)).await;
-    shot(a, report, "channel-probe.png").await;
-    leave_error(drive, report, 9).await?;
+
     for (at, attempted) in ATTEMPTS.into_iter().enumerate() {
         make_channel(a, drive, report, at, attempted, writing).await?;
     }
@@ -344,7 +278,7 @@ async fn created(
     report.notes.push(format!(
         "a: attempt {at}: {} {} -> {:?} {:?}",
         write.method,
-        teams_fence::log_url(&write.url),
+        crate::protocol::log_url(&write.url),
         write.status,
         write.failed
     ));
@@ -408,7 +342,7 @@ async fn add_member(
             report.notes.push(format!(
                 "a: attempt {at}: {} {} -> {:?} {:?}",
                 write.method,
-                teams_fence::log_url(&write.url),
+                crate::protocol::log_url(&write.url),
                 write.status,
                 write.failed
             ));
@@ -429,10 +363,10 @@ async fn add_member(
 ///
 /// # Errors
 /// Never: the patterns are fixed.
-pub fn channel_rules() -> Result<Vec<ForcedDeny>, regex::Error> {
+pub fn channel_rules() -> Result<Vec<Hold>, regex::Error> {
     WRITE_METHODS
         .iter()
-        .map(|method| Ok(ForcedDeny::new(method, CHANNEL_URL)?.labelled(CHANNEL_WRITE)))
+        .map(|method| Ok(Hold::new(method, CHANNEL_URL)?.labelled(CHANNEL_WRITE)))
         .collect()
 }
 
@@ -706,7 +640,7 @@ async fn fill_form_named(
     Ok(())
 }
 
-/// Create pressed: the write it sends must come, held back by the forced deny.
+/// Create pressed: the write it sends must come, held back by the capture hold.
 async fn press_create(drive: &mut Driver, report: &mut ScenarioReport, at: usize) -> Result<(), ScenarioError> {
     let since = drive.seen_so_far();
     let created = drive
@@ -726,7 +660,7 @@ async fn press_create(drive: &mut Driver, report: &mut ScenarioReport, at: usize
         Ok(write) => report.notes.push(format!(
             "a: attempt {at}: {} {}",
             write.method,
-            teams_fence::log_url(&write.url)
+            crate::protocol::log_url(&write.url)
         )),
         Err(error) => report.failures.push(format!("attempt {at}: {error}")),
     }

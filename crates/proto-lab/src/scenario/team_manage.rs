@@ -1,31 +1,4 @@
-//! The `team-manage` scenario: a look at the web client's team management (`docs/protocol/teams.md`), one account's page
-//! under the armed fence, driven step by step from outside over a Unix socket, so someone reading the page can decide the
-//! next step from what the last one showed. Its reports and screenshots go to the capture dir; nothing of them enters the
-//! repo.
-//!
-//! `PROTO_LAB_STEPS_SOCKET` names the socket. A connection sends lines and half-closes; each line is one step, and
-//! what it found is answered before the connection ends:
-//!
-//! - `wait <seconds>`, `shot <name>` (a screenshot in the capture dir), `press <escape|enter|backspace|space>`;
-//! - `go <url>`: loads `url` in the page, a `beforeunload` dialog holding it accepted (a page a script's navigation
-//!   can't leave while that dialog shows);
-//! - `js <code>`: evaluates `code` in the page, answering its value;
-//! - `click <css> <regex>`: clicks the first visible element `css` selects whose text or label matches `regex`;
-//! - `point <css>`: clicks the element `css` selects as a pointer would;
-//! - `hover <css>`, `type <css> <text>`, `insert <text>`;
-//! - `seen`: the requests that aren't plain reads since the last `seen`, each with its status and its body read;
-//! - `hold <method> <regex> [+text|-text]`: from now on every request of `method` whose URL `regex` finds a match in
-//!   (and whose body holds, or lacks, `text`) is force-denied;
-//! - `quit`: ends the run.
-//!
-//! **What it may send.** By default it runs as `load` does, fail-closed, and every write on a team, a group or a channel
-//! is held back by a forced deny from before the page loads ([`TEAM_WRITE`]): pressing a button shows what it would send
-//! and sends nothing. With `PROTO_LAB_TEAM_WRITES=1` nothing is forced and members are read live, so a write on a team
-//! passes only by the lab rule: a new private team, which names nobody, or a team whose members, read fresh and in full,
-//! are all lab accounts; a new team named with [`PROBE`] proves the fence first by a forced deny. Every deny is expected
-//! either way: a denied write only shows what the page tried.
-//!
-//! `PROTO_LAB_ACCOUNT` picks the account (`a`, `b` or `c`; `a` when unset).
+//! Drives team-management UI through a control socket and captures its requests. The default capture holds team writes; explicitly enabled writes go through directly.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -33,23 +6,20 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader};
 use tokio::net::{UnixListener, UnixStream};
 
+use crate::capture_hold::Hold;
 use crate::config::{Alias, LabPaths};
-use crate::fence_http::ForcedDeny;
 use crate::session::{LabSession, SessionOptions};
 
 use super::ab_chat::{load, save_screenshot_as};
 use super::ab_trouter::size;
 use super::channel_create::click_named;
 use super::dsl::{Driver, Key, Selector};
-use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport};
+use super::{RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
-/// What a new team's name holds to be force-denied, as the enforcement probe of a run that writes.
-pub const PROBE: &str = "lab forced deny probe";
-
-/// The label of a forced deny a `hold` step added.
+/// The label of a capture hold a `hold` step added.
 pub const HELD_BY_A_STEP: &str = "held back by a step";
 
-/// The label of the forced deny of every write on a team, a group or a channel.
+/// The label of the capture hold of every write on a team, a group or a channel.
 pub const TEAM_WRITE: &str = "a team's write";
 
 /// What makes a write one on a team, a group or a channel, on any host.
@@ -73,34 +43,11 @@ const TOKEN_WORDS: [&str; 3] = ["token", "bearer", "eyj"];
 ///
 /// # Errors
 /// Never: the patterns are fixed.
-pub fn team_rules() -> Result<Vec<ForcedDeny>, regex::Error> {
+pub fn team_rules() -> Result<Vec<Hold>, regex::Error> {
     WRITE_METHODS
         .iter()
-        .map(|method| Ok(ForcedDeny::new(method, TEAM_URL)?.labelled(TEAM_WRITE)))
+        .map(|method| Ok(Hold::new(method, TEAM_URL)?.labelled(TEAM_WRITE)))
         .collect()
-}
-
-/// With writes let through, what proves the fence holds first: a new team named with [`PROBE`] is force-denied, and must
-/// fail in the page.
-///
-/// # Errors
-/// Never: the pattern is fixed.
-pub fn probe_rule() -> Result<ForcedDeny, regex::Error> {
-    Ok(ForcedDeny::new("POST", r"/beta/teams/create")?
-        .with_body_containing(PROBE)
-        .labelled(PROBE))
-}
-
-/// With writes let through, the forced denies: this run's probe ([`probe_rule`]), and any earlier chat scenario's probe
-/// the web client still holds unsent and sends again once it loads ([`super::ab_chat::probe_rules`]): with members read
-/// live it would otherwise go through to its lab chat (seen 2026-11-02: a's probe posted to the a–b chat by a writing run).
-///
-/// # Errors
-/// Never: the patterns are fixed.
-pub fn written_rules() -> Result<Vec<ForcedDeny>, regex::Error> {
-    let mut rules = vec![probe_rule()?];
-    rules.extend(super::ab_chat::probe_rules(None)?);
-    Ok(rules)
 }
 
 fn account() -> Alias {
@@ -114,15 +61,15 @@ fn account() -> Alias {
 /// Runs `team-manage` (see the module docs).
 ///
 /// # Errors
-/// When the run can't start: no Chrome, no fence, a browser that can't be armed, no socket named.
+/// When the run can't start: no Chrome, a browser whose capture setup fails, no socket named.
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
     let writes = std::env::var("PROTO_LAB_TEAM_WRITES").as_deref() == Ok("1");
     let session_options = SessionOptions {
         capture: Some(ScenarioName::TeamManage.as_str().to_owned()),
         capture_request_bodies: true,
         display: options.display,
-        live_members: writes,
-        ..SessionOptions::fail_closed()
+
+        ..SessionOptions::default()
     };
     let alias = account();
     let mut page = LabSession::open_with(paths, alias, session_options).await?;
@@ -131,8 +78,8 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         .ok_or_else(|| ScenarioError::Setup("PROTO_LAB_STEPS_SOCKET names no socket".to_owned()))?;
     let mut report = ScenarioReport::new(ScenarioName::TeamManage);
     let mut drive = page.driver();
-    match if writes { written_rules() } else { team_rules() } {
-        Ok(rules) => rules.into_iter().for_each(|rule| page.force_deny(rule)),
+    match if writes { Ok(Vec::new()) } else { team_rules() } {
+        Ok(rules) => rules.into_iter().for_each(|rule| page.hold(rule)),
         Err(error) => report.failures.push(error.to_string()),
     }
     if report.failures.is_empty()
@@ -140,7 +87,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
     {
         report.failures.push(error.to_string());
     }
-    report.close_account(alias, page, &DenyPolicy::AllExpected).await;
+    report.close_account(alias, page).await;
     let _ = std::fs::remove_file(&socket);
     Ok(report)
 }
@@ -280,17 +227,17 @@ async fn step(
 }
 
 /// A `hold` step: from now on every request of its method whose URL its pattern finds a match in (and whose body holds,
-/// or lacks, its text) is force-denied.
+/// or lacks, its text) is held for capture.
 fn hold(page: &LabSession, rest: &str) -> Result<String, ScenarioError> {
     let (method, rest) = rest.split_once(' ').unwrap_or(("POST", rest));
     let (pattern, body) = rest.split_once(' ').unwrap_or((rest, ""));
-    let mut rule = ForcedDeny::new(method, pattern).map_err(|error| ScenarioError::Setup(error.to_string()))?;
+    let mut rule = Hold::new(method, pattern).map_err(|error| ScenarioError::Setup(error.to_string()))?;
     if let Some(text) = body.strip_prefix('+') {
         rule = rule.with_body_containing(text);
     } else if let Some(text) = body.strip_prefix('-') {
         rule = rule.with_body_lacking(text);
     }
-    page.force_deny(rule.labelled(HELD_BY_A_STEP));
+    page.hold(rule.labelled(HELD_BY_A_STEP));
     Ok("held".to_owned())
 }
 
@@ -309,7 +256,7 @@ async fn writes_seen(drive: &mut Driver, report: &mut ScenarioReport, seen: &mut
         if request.method == "GET" {
             lines.push(format!(
                 "GET {} -> {:?}",
-                teams_fence::log_url(&request.url),
+                crate::protocol::log_url(&request.url),
                 request.status
             ));
             continue;
@@ -321,7 +268,7 @@ async fn writes_seen(drive: &mut Driver, report: &mut ScenarioReport, seen: &mut
         } else {
             body
         };
-        let url = teams_fence::log_url(&read.url);
+        let url = crate::protocol::log_url(&read.url);
         report.notes.push(format!("seen: {} {url}", read.method));
         lines.push(format!("{} {url} -> {:?} {body}", read.method, read.status));
     }

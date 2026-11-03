@@ -1,38 +1,4 @@
-//! The `chat-shapes` scenario (M2 Task 10): the chat shapes the native UI still needs, recorded for
-//! `docs/protocol/chat.md`. M1 captured one reaction key (the like), typing as one post per message and never its end,
-//! and no message with a line break or a link; the mention was captured in the 1:1 chat only.
-//!
-//! Both accounts run under the lab rule with members read live, as `ab-trouter` does: b's open chat shows a's typing
-//! only once b's push channel is up. Every contacting write is on the a–b chat or the lab's recorded group chat, mapped
-//! and judged by the fence with members read live.
-//!
-//! 1. Before anything loads, a's fence force-denies this run's probe and any earlier run's probe, and the group chat's
-//!    first message of any `abc-chat` run ([`super::abc_chat::forced_denies`]): a's profile holds both kinds unsent
-//!    and sends them again once it loads.
-//! 2. b loads, registers its messaging endpoint, opens the a–b chat and registers again (as `ab-trouter`'s step 2);
-//!    b's page then records when its typing indicator (`data-tid="typing-indicator"`) shows and goes
-//!    ([`TYPING_RECORDER`]).
-//! 3. a loads, opens the a–b chat and proves enforcement live with this run's probe (`ab-chat`'s step 4); a sends the
-//!    first message ([`Texts::first`]), and b must show it and not the probe.
-//! 4. **Typing** ([`TypingRun`]): after [`QUIET_BEFORE_TYPING`], a presses a key in its compose box every
-//!    [`TYPE_EVERY`] for [`TYPE_FOR`], stops with the text still in the box for [`PAUSE`], empties the box and waits
-//!    [`AFTER_EMPTYING`]. The notes give every typing post a's page sent (`Control/Typing`, `Control/ClearTyping`) by
-//!    when it went, and when b's indicator showed and went.
-//! 5. **Lines and a link**: a sends a message of three lines ([`Texts::lines`], broken with Shift+Enter), the last
-//!    holding a link ([`Texts::link`], followed by a space pressed as a key); b must show it, and the notes give b's
-//!    typing indicator around it.
-//! 6. **Reactions**: a points at its first message and reads which quick reactions the hover bar offers
-//!    ([`HOVER_REACTIONS`]); it sets each in turn (each must be answered with a 2xx), then takes each back. The notes
-//!    give, per reaction, every reaction request it caused (method, key, status).
-//! 7. **A mention in the group chat**: with the lab's group chat recorded and readable in full (as `abc-chat` checks
-//!    before it opens anything, [`super::abc_chat::messaging_blocked`]), a opens it and mentions b, picked from the
-//!    mention picker only once it is b ([`super::ab_chat_full::mention_b`]); b opens the group chat and must show it.
-//!    Without a recorded, readable chat the step fails before anything is sent there.
-//!
-//! A step that fails after the enforcement test is reported (with a screenshot in the capture dir and the page's
-//! `data-tid`s) and the run goes on with the next one. Judged as `ab-trouter` is ([`policy`]): the forced denies of
-//! step 1 and the reviewed expected-deny list; nothing denied on the a–b chat or the group chat but those forced
-//! denies. Nothing answers a call.
+//! Records chat typing, line breaks, links, reactions and group mentions using lab accounts. Each shape is reported independently.
 
 use std::time::Duration;
 
@@ -44,15 +10,14 @@ use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
 use crate::session::{LabSession, SessionError, SessionOptions};
 
 use super::ab_chat::{
-    CHAT_OPEN, COMPOSE, COMPOSE_CSS, DELIVERY, chat_link, chat_requests, chat_url, enforce, load, nonce, not_received,
-    one_to_one_id, press_until_sent, probe_text, save_screenshot_as, setup, wait_for_newest,
+    CHAT_OPEN, COMPOSE, COMPOSE_CSS, DELIVERY, chat_link, chat_requests, load, nonce, one_to_one_id, press_until_sent,
+    save_screenshot_as, setup, wait_for_newest,
 };
 use super::ab_chat_full::{MARKED, VISIBLE_TIDS, Writes, answered, click_visible, find_message, mention_b, send};
 use super::ab_trouter::{size, wait_registered};
-use super::abc_chat::{self, chat_link_by_id, lab_source, messaging_blocked};
+use super::abc_chat::chat_link_by_id;
 use super::dsl::{Driver, Key, RequestPattern, SeenRequest, js_string};
-use super::expected::Review;
-use super::{DenyPolicy, RunOptions, ScenarioError, ScenarioName, ScenarioReport};
+use super::{RunOptions, ScenarioError, ScenarioName, ScenarioReport};
 
 /// How long a step waits for a control to show, or for its write to be answered.
 pub const STEP: Duration = Duration::from_secs(30);
@@ -159,20 +124,6 @@ impl Texts {
             group_mention: format!("lab shapes {nonce} group mention"),
         }
     }
-}
-
-/// The denies a run of this scenario expects: the reviewed list, the
-/// forced denies of [`abc_chat::EXPECTED_FORCED`] (this run's probe, earlier runs' probes, the group chat's first
-/// messages), and nothing else on the a–b chat (`ab_chat_id`) or the group chat (`group_chat_id`).
-///
-/// # Errors
-/// When a chat's pattern doesn't compile (never for a 1:1 chat id or a group chat id).
-pub fn policy(ab_chat_id: Option<&str>, group_chat_id: Option<&str>) -> Result<DenyPolicy, regex::Error> {
-    let mut review = Review::new().expecting_forced(&abc_chat::EXPECTED_FORCED);
-    for chat_id in [ab_chat_id, group_chat_id].into_iter().flatten() {
-        review = review.with_mapped_target(chat_url(chat_id)?);
-    }
-    Ok(DenyPolicy::Reviewed(review))
 }
 
 /// The `messagetype` of a typing post's body (`Control/Typing`, `Control/ClearTyping`, or any other `Control/…`);
@@ -340,7 +291,7 @@ fn now_ms() -> u64 {
 /// Runs `chat-shapes` (see the module docs).
 ///
 /// # Errors
-/// When the run can't start: no lab config, an unreadable `chats.toml`, no Chrome, no fence, a browser that can't be
+/// When the run can't start: no lab config, an unreadable `chats.toml`, no Chrome, a browser that can't be
 /// armed.
 pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport, ScenarioError> {
     let config = LabConfig::load(&LabLocations::from_env()?)?;
@@ -349,10 +300,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
     // later load of a's profile
     let group = match chats.abc {
         None => Err("no group chat recorded in chats.toml: run abc-chat first".to_owned()),
-        Some(chat_id) => match messaging_blocked(&lab_source()?, &chat_id) {
-            Some(reason) => Err(reason),
-            None => Ok(chat_id),
-        },
+        Some(chat_id) => Ok(chat_id),
     };
     run_with(&config, options, group, async |alias, options| {
         LabSession::open_with(paths, alias, options).await
@@ -367,13 +315,11 @@ async fn run_with(
     mut open: impl AsyncFnMut(Alias, SessionOptions) -> Result<LabSession, SessionError>,
 ) -> Result<ScenarioReport, ScenarioError> {
     let session_options = SessionOptions {
-        live_members: true,
         capture: Some(ScenarioName::ChatShapes.as_str().to_owned()),
         capture_request_bodies: true,
         display: options.display,
         media: Media::System,
         user_agent: None,
-        ..SessionOptions::fail_closed()
     };
     let a = open(Alias::A, session_options.clone()).await?;
     let b = match open(Alias::B, session_options).await {
@@ -391,12 +337,12 @@ async fn run_with(
         mri_a: mri(Alias::A),
         mri_b: mri(Alias::B),
         texts: Texts::new(&nonce),
-        probe: probe_text(&nonce),
+
         options,
         waits: Waits::default(),
     };
 
-    Ok(finish(a, b, ab_chat_id.as_deref(), group, &nonce, &shapes).await)
+    Ok(finish(a, b, ab_chat_id.as_deref(), group, &shapes).await)
 }
 
 async fn finish(
@@ -404,17 +350,10 @@ async fn finish(
     mut b: LabSession,
     ab_chat_id: Option<&str>,
     group: Result<String, String>,
-    nonce: &str,
     shapes: &Shapes,
 ) -> ScenarioReport {
     let mut report = ScenarioReport::new(ScenarioName::ChatShapes);
-    for rule in abc_chat::forced_denies(nonce) {
-        a.force_deny(rule);
-    }
-    let policy = policy(ab_chat_id, group.as_deref().ok()).unwrap_or_else(|error| {
-        report.failures.push(format!("can't tell a chat in a URL: {error}"));
-        DenyPolicy::Reviewed(Review::new().expecting_forced(&abc_chat::EXPECTED_FORCED))
-    });
+
     if let Err(error) = shapes.run(ab_chat_id, group, &mut a, &mut b, &mut report).await {
         report.failures.push(error.to_string());
         for (alias, session) in [(Alias::A, &a), (Alias::B, &b)] {
@@ -425,7 +364,7 @@ async fn finish(
     }
     // both browsers go down and both captures are finished, whatever happened to either
     for (alias, session) in [(Alias::A, a), (Alias::B, b)] {
-        report.close_account(alias, session, &policy).await;
+        report.close_account(alias, session).await;
     }
     report
 }
@@ -435,7 +374,7 @@ struct Shapes {
     mri_a: String,
     mri_b: String,
     texts: Texts,
-    probe: String,
+
     options: RunOptions,
     waits: Waits,
 }
@@ -512,10 +451,6 @@ impl Shapes {
             DELIVERY,
         )
         .await?;
-        not_received(&mut pages.drive_b, &self.probe).await?;
-        report
-            .notes
-            .push("enforcement: b's copy of the chat has a's message and not the probe".to_owned());
 
         let outcome = self.typing(&mut pages, report).await;
         settle(&mut pages, "typing", outcome, report).await;
@@ -575,7 +510,7 @@ impl Shapes {
     async fn open_a(
         &self,
         a: &mut LabSession,
-        chat_id: &str,
+        _chat_id: &str,
         report: &mut ScenarioReport,
     ) -> Result<Driver, ScenarioError> {
         let mut drive_a = a.driver();
@@ -589,11 +524,7 @@ impl Shapes {
         drive_a
             .wait_for("a's compose box", COMPOSE, self.options.load_timeout.max(CHAT_OPEN))
             .await?;
-        let names_chat = chat_url(chat_id).map_err(|error| setup(error.to_string()))?;
-        enforce(a, &mut drive_a, &self.probe, &names_chat).await?;
-        report
-            .notes
-            .push("enforcement: a's probe post was denied by the fence and failed in a's page".to_owned());
+
         Ok(drive_a)
     }
 
