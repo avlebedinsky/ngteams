@@ -72,10 +72,10 @@ fn native_account_and_region_are_private_atomic_and_keep_manual_same_account_set
                 object_id: "../../escape".into(),
                 ..identity
             },
-            None,
+            Some(&region()),
         )
         .unwrap_err();
-    assert!(!dir.path().join("escape.json").exists());
+    assert!(!target.root().parent().unwrap().join("escape.json").exists());
 }
 
 #[test]

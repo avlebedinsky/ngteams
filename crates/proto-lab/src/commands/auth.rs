@@ -10,7 +10,7 @@
 //! 3. **Refresh** for `api.spaces.skype.com`, proving the stored refresh token works; with `--audiences`, one refresh
 //!    grant per other audience of the auth notes' table, to see what Conditional Access allows.
 //! 4. **Skypetoken** through authz ([`AuthzClient`]), stored next to the refresh token; the account's region is
-//!    persisted to `<data dir>/auth/<alias>.json` ([`save_region`]) for browser probes and to the native client's
+//!    persisted to `<data dir>/auth/<alias>.json` ([`save_region`]) for native HTTP probes and to the native client's
 //!    `ngteams-lab/<alias>/regions/<oid>.json`. Its verified identity is provisioned in that alias's `accounts.toml`.
 //!
 //! The CLI keeps the secrets in the Secret Service under the lab's own application attribute ([`KEYRING_APPLICATION`]);
@@ -73,7 +73,7 @@ pub struct AuthOptions {
     pub other_audiences: bool,
 }
 
-/// Why the sign-in didn't get as far as a token.
+/// Why native sign-in or account provisioning failed; tokens may already be stored.
 #[derive(Debug, thiserror::Error)]
 pub enum AuthError {
     #[error(transparent)]
@@ -144,12 +144,14 @@ impl From<&Skypetoken> for SkypetokenSummary {
 }
 
 /// Signs `alias` in natively through its lab profile (see the module docs), keeping the refresh token and the
-/// skypetoken in `store`.
+/// skypetoken in `store`. Provisions the alias's native `ngteams-lab/<alias>/accounts.toml` and, when authz
+/// succeeds, `regions/<oid>.json`.
 ///
 /// # Errors
-/// [`AuthError`] when no token came of it: the browser could not launch or capture setup failed, Entra
-/// didn't redirect, the redirect isn't this request's or carries Entra's refusal, or the code exchange or the first
-/// refresh failed. A refused audience or skypetoken is in the report instead.
+/// [`AuthError`] if the native target cannot be resolved or overlaps personal files (before sign-in), the browser
+/// could not launch or capture setup failed, Entra didn't redirect, the redirect isn't this request's or carries
+/// Entra's refusal, or the code exchange or first refresh failed. Native file writes can fail after tokens are
+/// already stored. A refused audience or skypetoken is in the report instead.
 pub async fn authorize<S: SecretStore>(
     config: &LabConfig,
     alias: Alias,

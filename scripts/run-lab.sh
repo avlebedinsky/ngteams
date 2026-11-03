@@ -60,6 +60,9 @@ alive() {
 
 running() {
     local pid
+    [[ -S "$run/control.sock" && -f "$state/.locks/$alias.lock" ]] || return 1
+    # A retained PID can belong to an unrelated process after PID reuse. Only a holder owning this alias is live.
+    if flock -xn "$state/.locks/$alias.lock" true; then return 1; fi
     pid="$(holder_pid)" && alive "$pid"
 }
 
@@ -105,10 +108,11 @@ interrupt_start() {
 
 stop() {
     local pid
-    if ! pid="$(holder_pid)" || ! alive "$pid"; then
+    if ! running; then
         echo "not running"
         return
     fi
+    pid="$(holder_pid)"
     timeout 45 "$runner" stop --dir "$run" >/dev/null ||
         die "could not ask the holder to stop; retained state: $run"
     wait_stopped "$pid" || die "holder $pid did not finish cleanup; retained state: $run"
@@ -120,14 +124,14 @@ start() {
     install -d -m 0700 "$state" "$state/.locks"
     exec 8>"$state/.locks/$alias.lock"
     flock -xn 8 || die "already running or starting: $alias"
-    running && die "already running: $alias"
+    # The exclusive lock proves no holder remains; discard its stale PID before build/status can inspect it.
+    rm -f -- "$run/holder.pid"
     build
     install -d -m 0700 "$(dirname "$live_lock")"
     exec 9>"$live_lock"
     flock -sn 9 || die "the lab live lock is held exclusively; finish that run first"
     # Keep files: XDG state and data homes may coincide, including this alias's accounts and stores.
     install -d -m 0700 "$run"
-    rm -f -- "$run/holder.pid"
     local media=()
     [[ "$pipewire" != yes ]] || media+=(--pipewire)
     # timeout signals only serve, whose pass_only boundary closes lock FDs in broker/app; cleanup retains locks.

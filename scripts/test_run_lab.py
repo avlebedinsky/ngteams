@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shutil
 import signal
+import socket
 import subprocess
 import tempfile
 import threading
@@ -192,6 +193,32 @@ class Launcher(unittest.TestCase):
         self.start("a")
         self.invoke("a", "--stop")
         self.assertTrue(self.exclusive_available())
+
+    def test_reused_holder_pid_does_not_control_or_block_an_unrelated_process(self):
+        self.start("a")
+        self.invoke("a", "--stop")
+        with subprocess.Popen(["sleep", "30"]) as unrelated:
+            try:
+                directory = self.run_dir("a")
+                (directory / "holder.pid").write_text(str(unrelated.pid) + "\n")
+                # Even a stale socket cannot make an unlocked alias's reused PID a live sandbox.
+                endpoint = directory / "control.sock"
+                with socket.socket(socket.AF_UNIX) as stale:
+                    stale.bind(str(endpoint))
+                self.assertIn("not running", self.invoke("a", "--status").stdout)
+                self.assertIn("not running", self.invoke("a", "--stop").stdout)
+                control = self.invoke("a", "--windows", check=False)
+                self.assertNotEqual(control.returncode, 0)
+                self.assertIn("not running", control.stderr)
+                self.assertIsNone(unrelated.poll())
+                endpoint.unlink()
+                self.start("a")
+                self.assertNotEqual(int((directory / "holder.pid").read_text()), unrelated.pid)
+                self.invoke("a", "--stop")
+                self.assertIsNone(unrelated.poll(), "runner must never signal the unrelated process")
+            finally:
+                unrelated.terminate()
+                unrelated.wait(timeout=3)
 
     def test_an_exclusive_legacy_run_blocks_live_start_without_starting_a_holder(self):
         directory = self.root / "home/.local/share/teams-lab"
