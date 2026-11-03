@@ -173,6 +173,10 @@ impl ChannelWrite {
 }
 
 impl Sealed for ChannelWrite {
+    fn lab_channel(&self) -> Option<&ChannelTarget> {
+        Some(&self.target)
+    }
+
     fn wire(&self) -> Option<Wire> {
         let target = &self.target;
         let mut service = Service::MiddleTier;

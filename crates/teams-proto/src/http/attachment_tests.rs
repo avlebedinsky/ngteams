@@ -339,3 +339,94 @@ async fn a_refused_or_uncertain_upload_is_not_replayed_by_the_transport() {
         assert_eq!(writes(&server).await.len(), 1);
     }
 }
+
+const TEAM: &str = "19:synthetic-team@thread.tacv2";
+const CHANNEL: &str = "19:synthetic-channel@thread.tacv2";
+async fn channel_context(server: &MockServer, members: &[&str], count: usize, selected: &str) {
+    identity(server, A).await;
+    get(server, "/api/csa/amer/api/v3/teams/users/me", json!({"metadata":{"isPartialData":false},"teams":[{"id":TEAM,"displayName":"Synthetic lab","teamSiteInformation":{"groupId":"group"},"channels":[{"id":selected,"displayName":"Synthetic channel","channelType":0}]}]})).await;
+    get(
+        server,
+        &format!("/api/chatsvc/amer/v1/threads/{TEAM}"),
+        json!({"id":TEAM,"members":[{"id":A}]}),
+    )
+    .await;
+    get(
+        server,
+        &format!("/api/chatsvc/amer/v1/threads/{TEAM}/members"),
+        json!({"isDeleted":false,"totalMemberCount":count,"members":members.iter().map(|id|json!({"id":id})).collect::<Vec<_>>()}),
+    )
+    .await;
+}
+fn channel_write() -> crate::TeamWrite {
+    crate::TeamWrite::Channel(crate::ChannelWrite {
+        target: crate::ChannelTarget {
+            team: TEAM.into(),
+            team_group: "group".into(),
+            channel: CHANNEL.into(),
+            channel_group: None,
+            mailbox: None,
+        },
+        action: crate::ChannelChange::Delete,
+    })
+}
+#[tokio::test]
+async fn channel_admin_requires_fresh_whole_roster_and_exact_selected_channel() {
+    for (members, count, selected, allowed) in [
+        (vec![A, B], 2, CHANNEL, true),
+        (vec![A, X], 2, CHANNEL, false),
+        (vec![A, "28:synthetic-bot"], 2, CHANNEL, false),
+        (vec![A], 2, CHANNEL, false),
+        (vec![A, B], 2, "19:other@thread.tacv2", false),
+    ] {
+        let server = MockServer::start().await;
+        channel_context(&server, &members, count, selected).await;
+        let transport = transport(&server, true)
+            .with_csa("https://teams.microsoft.com/api/csa/amer")
+            .unwrap();
+        assert_eq!(transport.preflight_lab_write(&channel_write()).await.is_ok(), allowed);
+        assert!(writes(&server).await.is_empty());
+    }
+}
+#[tokio::test]
+async fn channel_admin_checks_added_member_without_a_personal_restriction() {
+    let server = MockServer::start().await;
+    channel_context(&server, &[A, B], 2, CHANNEL).await;
+    let transport = transport(&server, true)
+        .with_csa("https://teams.microsoft.com/api/csa/amer")
+        .unwrap();
+    let mut write = channel_write();
+    if let crate::TeamWrite::Channel(channel) = &mut write {
+        channel.action = crate::ChannelChange::AddMember {
+            mri: X.into(),
+            owner: false,
+        };
+    }
+    assert!(transport.preflight_lab_write(&write).await.is_err());
+    assert!(
+        super::attachment_tests::transport(&server, false)
+            .preflight_lab_write(&write)
+            .await
+            .is_ok()
+    );
+    assert!(writes(&server).await.is_empty());
+}
+
+#[tokio::test]
+async fn channel_admin_refuses_a_changed_actor_even_with_an_exact_lab_roster() {
+    let server = MockServer::start().await;
+    channel_context(&server, &[A, B], 2, CHANNEL).await;
+    Mock::given(method("GET"))
+        .and(path("/v1.0/me"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"id":X.strip_prefix("8:orgid:").unwrap(),"userPrincipalName":"outside@example.test"}),
+        ))
+        .with_priority(1)
+        .mount(&server)
+        .await;
+    let transport = transport(&server, true)
+        .with_csa("https://teams.microsoft.com/api/csa/amer")
+        .unwrap();
+    assert!(transport.preflight_lab_write(&channel_write()).await.is_err());
+    assert!(writes(&server).await.is_empty());
+}

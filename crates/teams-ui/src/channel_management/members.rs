@@ -64,23 +64,25 @@ impl ChannelManagement {
         let reply = self.core.team_people(self.team.id.clone(), term);
         self.members.search_task = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let result = reply.await;
-            let _ = this.update(cx, |this, cx| {
-                this.members.searching = false;
-                if this.members.search.read(cx).value().trim() == query {
-                    this.members.found = result
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter(|person| {
-                            teams_proto::object_id(&person.mri).is_some()
-                                && !this.members.listed.iter().any(|member| member.mri == person.mri)
-                        })
-                        .collect();
-                }
-                cx.notify();
-            });
+            let _ = this.update(cx, |this, cx| this.members_found(&query, result, cx));
         }));
         cx.notify();
     }
+    fn members_found(&mut self, query: &str, result: Result<Vec<TeamPerson>, EngineError>, cx: &mut Context<Self>) {
+        self.members.searching = false;
+        if self.members.search.read(cx).value().trim() == query {
+            self.members.found = result
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|person| {
+                    teams_proto::object_id(&person.mri).is_some()
+                        && !self.members.listed.iter().any(|member| member.mri == person.mri)
+                })
+                .collect();
+        }
+        cx.notify();
+    }
+
     fn change_member(&mut self, action: ChannelChange, cx: &mut Context<Self>) {
         if self.core.read_only()
             || self.working.is_some()
@@ -91,19 +93,18 @@ impl ChannelManagement {
         {
             return;
         }
-        if let ChannelChange::RemoveMember { mri } | ChannelChange::UpdateMember { mri, owner: false } = &action {
-            if self
+        if let ChannelChange::RemoveMember { mri } | ChannelChange::UpdateMember { mri, owner: false } = &action
+            && self
                 .members
                 .listed
                 .iter()
                 .find(|member| member.mri == *mri)
                 .is_some_and(|member| member.owner)
-                && self.members.listed.iter().filter(|member| member.owner).count() <= 1
-            {
-                self.error = Some("Add another channel owner before removing or demoting the last owner.".into());
-                cx.notify();
-                return;
-            }
+            && self.members.listed.iter().filter(|member| member.owner).count() <= 1
+        {
+            self.error = Some("Add another channel owner before removing or demoting the last owner.".into());
+            cx.notify();
+            return;
         }
         if self.channel.kind != ChannelKind::Standard && self.target().channel_group.is_none() {
             self.error = Some("Refresh the team before changing this channel's members.".into());
@@ -189,7 +190,7 @@ impl ChannelManagement {
                                         owner: false,
                                     },
                                     cx,
-                                )
+                                );
                             })),
                         )),
                 );
@@ -201,19 +202,16 @@ impl ChannelManagement {
             ));
         }
         for (index, member) in self.members.listed.iter().enumerate() {
-            form = form.child(self.member_row(index, member, manage, private, palette, cx));
+            form = form.child(self.member_row(index, member, palette, cx));
         }
         form
     }
-    fn member_row(
-        &self,
-        index: usize,
-        member: &TeamMember,
-        manage: bool,
-        private: bool,
-        palette: Palette,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
+    fn member_row(&self, index: usize, member: &TeamMember, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let manage = channel_menu::can_manage(&self.team, &self.channel)
+            && !self.core.read_only()
+            && !self.team.archived
+            && !self.channel.about.archived;
+        let private = self.channel.kind != ChannelKind::Standard;
         let label = if member.owner {
             "Owner"
         } else if member.guest {
@@ -244,7 +242,7 @@ impl ChannelManagement {
                                 owner,
                             },
                             cx,
-                        )
+                        );
                     })),
             ));
         } else {
@@ -282,10 +280,13 @@ impl ChannelManagement {
                                 moderator,
                             },
                             cx,
-                        )
+                        );
                     })),
             ));
         }
+        self.member_confirmation(row, member, cx).into_any_element()
+    }
+    fn member_confirmation(&self, row: gpui::Div, member: &TeamMember, cx: &mut Context<Self>) -> gpui::Div {
         let mut line = div().flex().flex_col().child(row);
         if self.members.remove.as_deref() == Some(&member.mri) {
             let mri = member.mri.clone();
@@ -311,11 +312,11 @@ impl ChannelManagement {
                             .label("Remove")
                             .danger()
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                this.change_member(ChannelChange::RemoveMember { mri: mri.clone() }, cx)
+                                this.change_member(ChannelChange::RemoveMember { mri: mri.clone() }, cx);
                             })),
                     )),
             );
         }
-        line.into_any_element()
+        line
     }
 }

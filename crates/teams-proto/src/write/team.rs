@@ -533,6 +533,13 @@ impl TeamWrite {
 }
 
 impl Sealed for TeamWrite {
+    fn lab_channel(&self) -> Option<&crate::ChannelTarget> {
+        match self {
+            Self::Channel(write) => Some(&write.target),
+            _ => None,
+        }
+    }
+
     fn wire(&self) -> Option<Wire> {
         if let Self::Channel(write) = self {
             return write.wire();

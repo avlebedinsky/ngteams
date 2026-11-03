@@ -88,9 +88,7 @@ pub fn can_manage(team: &Team, channel: &TeamChannel) -> bool {
 
 #[must_use]
 pub fn can_edit(team: &Team, channel: &TeamChannel) -> bool {
-    !team.archived
-        && !channel.about.archived
-        && (can_manage(team, channel) || channel.about.can_edit && !team.about.guest)
+    !team.archived && !channel.about.archived && (can_manage(team, channel) || channel.about.can_edit)
 }
 
 /// Teams omits actions a role or channel type cannot use. General cannot be archived or deleted.
@@ -135,8 +133,7 @@ pub fn sections(team: &Team, channel: &TeamChannel, read_only: bool) -> Vec<Vec<
     if !read_only
         && !team.archived
         && !channel.general
-        && (can_manage(team, channel)
-            || channel.about.can_delete && channel.kind == ChannelKind::Standard && !team.about.guest)
+        && (can_manage(team, channel) || channel.about.can_delete && channel.kind == ChannelKind::Standard)
     {
         destructive.push(ChannelChoice::Delete);
     }
@@ -147,6 +144,7 @@ pub fn sections(team: &Team, channel: &TeamChannel, read_only: bool) -> Vec<Vec<
 }
 
 /// A scrollable menu; the kit owns arrow navigation, Escape, focus return, and the nested submenu.
+#[derive(Clone, Copy)]
 pub struct MenuContext<'a> {
     pub team: &'a Team,
     pub channel: &'a TeamChannel,
@@ -180,40 +178,8 @@ pub fn build(
                 let folders = folders.to_vec();
                 let chosen = choose.clone();
                 let id = channel.id.clone();
-                menu = menu.submenu("Move to section", window, cx, move |mut submenu, window, _| {
-                    for (at, folder) in folders.iter().enumerate() {
-                        let chosen = chosen.clone();
-                        let section = folder.id.clone();
-                        let current = folder.items.contains(&id);
-                        submenu = submenu.item(
-                            item(
-                                format!("channel-section-{index}-{at}"),
-                                &folder.name,
-                                Glyph::STAR,
-                                palette,
-                            )
-                            .checked(folder.items.contains(&id))
-                            .on_click(move |_, window, cx| {
-                                if !current {
-                                    chosen(ChannelChoice::Move(section.clone()), window, cx);
-                                }
-                            }),
-                        );
-                    }
-                    let chosen = chosen.clone();
-                    submenu
-                        .separator()
-                        .item(
-                            item(
-                                format!("channel-new-section-{index}"),
-                                "New section",
-                                Glyph::PLUS,
-                                palette,
-                            )
-                            .on_click(move |_, window, cx| chosen(ChannelChoice::NewSection, window, cx)),
-                        )
-                        .scrollable(true)
-                        .max_h(window.viewport_size().height - px(16.0))
+                menu = menu.submenu("Move to section", window, cx, move |submenu, window, _| {
+                    move_menu(submenu, &folders, &id, (index, palette), window, chosen.clone())
                 });
             } else {
                 let chosen = choose.clone();
@@ -227,6 +193,50 @@ pub fn build(
         }
     }
     menu.scrollable(true).max_h(window.viewport_size().height - px(16.0))
+}
+
+fn move_menu(
+    mut submenu: PopupMenu,
+    folders: &[ChannelSection],
+    id: &str,
+    appearance: (usize, Palette),
+    window: &mut Window,
+    chosen: impl Fn(ChannelChoice, &mut Window, &mut App) + Clone + 'static,
+) -> PopupMenu {
+    let (index, palette) = appearance;
+    for (at, folder) in folders.iter().enumerate() {
+        let chosen = chosen.clone();
+        let section = folder.id.clone();
+        let current = folder.items.iter().any(|item| item == id);
+        submenu = submenu.item(
+            item(
+                format!("channel-section-{index}-{at}"),
+                &folder.name,
+                Glyph::STAR,
+                palette,
+            )
+            .checked(folder.items.iter().any(|item| item == id))
+            .on_click(move |_, window, cx| {
+                if !current {
+                    chosen(ChannelChoice::Move(section.clone()), window, cx);
+                }
+            }),
+        );
+    }
+    let chosen = chosen.clone();
+    submenu
+        .separator()
+        .item(
+            item(
+                format!("channel-new-section-{index}"),
+                "New section",
+                Glyph::PLUS,
+                palette,
+            )
+            .on_click(move |_, window, cx| chosen(ChannelChoice::NewSection, window, cx)),
+        )
+        .scrollable(true)
+        .max_h(window.viewport_size().height - px(16.0))
 }
 
 fn item(id: String, label: &str, glyph: Glyph, palette: Palette) -> PopupMenuItem {

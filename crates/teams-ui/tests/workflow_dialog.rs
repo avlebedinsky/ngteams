@@ -29,6 +29,7 @@ fn window() -> (common::Rig, Entity<WorkflowDialog>, &'static mut VisualTestCont
         general: false,
         kind: teams_store::ChannelKind::Standard,
         shown: true,
+        about: teams_store::ChannelAbout::default(),
     };
     let (view, cx) = app.add_window_view(|window, cx| WorkflowDialog::new(core, team, channel, window, cx));
     cx.run_until_parked();

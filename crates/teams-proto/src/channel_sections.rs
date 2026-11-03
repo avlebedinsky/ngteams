@@ -40,8 +40,19 @@ impl ChannelSections {
         let version = value.get("folderHierarchyVersion")?.as_u64()?;
         let folders = value.get("conversationFolders")?.as_array()?;
         let order = value.get("conversationFolderOrder")?.as_array()?;
+        let ids = order.iter().map(Value::as_str).collect::<Option<Vec<_>>>()?;
+        if ids.iter().collect::<std::collections::BTreeSet<_>>().len() != ids.len()
+            || folders
+                .iter()
+                .filter_map(|folder| folder.get("id").and_then(Value::as_str))
+                .collect::<std::collections::BTreeSet<_>>()
+                .len()
+                != folders.len()
+        {
+            return None;
+        }
         let mut sections = Vec::new();
-        for id in order.iter().filter_map(Value::as_str) {
+        for id in ids {
             let folder = folders
                 .iter()
                 .find(|folder| folder.get("id").and_then(Value::as_str) == Some(id))?;
@@ -71,6 +82,7 @@ impl ChannelSections {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChannelSectionAction {
+    Remove { channel: String },
     Expanded { section: String, expanded: bool },
     Create { channel: String, name: String },
     Move { channel: String, section: String },
@@ -96,7 +108,9 @@ impl ChannelSectionWrite {
             });
         }
         let channel = match action {
-            ChannelSectionAction::Create { channel, .. } | ChannelSectionAction::Move { channel, .. } => channel,
+            ChannelSectionAction::Create { channel, .. }
+            | ChannelSectionAction::Move { channel, .. }
+            | ChannelSectionAction::Remove { channel } => channel,
             ChannelSectionAction::Expanded { .. } => return None,
         };
         if channel.is_empty() {
@@ -109,6 +123,11 @@ impl ChannelSectionWrite {
         });
         let mut actions = match action {
             ChannelSectionAction::Expanded { .. } => return None,
+            ChannelSectionAction::Remove { .. } => {
+                let from = from?;
+                body["actions"] = json!([{ "action":"RemoveItem", "folderId":from.id,"itemId":channel }]);
+                return Some(Self { body, expanded: false });
+            }
             ChannelSectionAction::Create { name, .. } => {
                 let name = name.trim();
                 if name.is_empty() || name.chars().count() > 80 {

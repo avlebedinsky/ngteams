@@ -136,6 +136,7 @@ fn child(mode: &str) -> SandboxResult {
             general: false,
             kind: teams_store::ChannelKind::Standard,
             shown: true,
+            about: teams_store::ChannelAbout::default(),
         };
         let options = WindowOptions {
             app_id: Some("ngteams-workflow-test".to_owned()),

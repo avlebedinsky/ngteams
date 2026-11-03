@@ -186,7 +186,7 @@ impl ChannelManagement {
         let name = cx.new(|cx| {
             InputState::new(window, cx)
                 .default_value(if mode == Mode::NewSection {
-                    "".to_owned()
+                    String::new()
                 } else {
                     channel.name.clone()
                 })
@@ -201,7 +201,10 @@ impl ChannelManagement {
         let domains = cx.new(|cx| InputState::new(window, cx).placeholder("example.com, another.example"));
         let member_search = cx.new(|cx| InputState::new(window, cx).placeholder("Type a name or email"));
         let inputs = [
-            cx.subscribe(&member_search, |_, _, _: &InputEvent, cx| cx.notify()),
+            cx.subscribe(&member_search, |this, _, _: &InputEvent, cx| {
+                this.members.found.clear();
+                cx.notify();
+            }),
             cx.subscribe(&name, |_, _, _: &InputEvent, cx| cx.notify()),
             cx.subscribe(&description, |_, _, _: &InputEvent, cx| cx.notify()),
             cx.subscribe(&domains, |_, _, _: &InputEvent, cx| cx.notify()),
@@ -339,7 +342,7 @@ impl ChannelManagement {
                             .or_else(|| data.0.get("allowedSenderType"))
                             .and_then(Value::as_str)
                         {
-                            self.email_allowed = allowed.to_owned();
+                            allowed.clone_into(&mut self.email_allowed);
                         }
                     }
                     _ => {}
@@ -435,12 +438,15 @@ impl ChannelManagement {
             self.working = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
                 let result = reply.await;
                 let _ = this.update(cx, |this, cx| {
-                    this.written(result.map(|_| ()), "Channel settings saved", cx)
+                    this.written(result.map(|_| ()), "Channel settings saved", cx);
                 });
             }));
             cx.notify();
             return;
         }
+        self.apply_channel(cx);
+    }
+    fn apply_channel(&mut self, cx: &mut Context<Self>) {
         let (action, change, words) = match self.mode {
             Mode::Edit => {
                 if !channel_menu::can_edit(&self.team, &self.channel) {
@@ -588,21 +594,21 @@ impl ChannelManagement {
             Mode::Manage => self.manage_form(palette, cx),
             Mode::Email => self.email_form(palette, cx),
             Mode::Archive => div().flex().flex_col().gap_4().child("Archiving freezes channel activity. People can still read and search its conversations and files. You can restore it later.")
-                .child(self.switch("channel-archive-site-read-only", "Make the SharePoint site read-only for channel members", self.site_read_only, |this, value| this.site_read_only = value, palette, cx)),
+                .child(self.switch(("channel-archive-site-read-only", "Make the SharePoint site read-only for channel members"), self.site_read_only, |this, value| this.site_read_only = value, palette, cx)),
             Mode::Restore => div().child("Restore this channel so members can post and collaborate again?"),
             Mode::Delete => div().flex().flex_col().gap_4().child("This channel's conversations will be deleted. Files remain in SharePoint. Team owners can restore a deleted channel for 30 days.")
-                .child(self.switch("channel-delete-confirm", "I understand that this channel will be deleted", self.confirmed, |this, value| this.confirmed = value, palette, cx)),
+                .child(self.switch(("channel-delete-confirm", "I understand that this channel will be deleted"), self.confirmed, |this, value| this.confirmed = value, palette, cx)),
         }
     }
     fn switch(
         &self,
-        id: &'static str,
-        label: &'static str,
+        text: (&'static str, &'static str),
         checked: bool,
         set: fn(&mut Self, bool),
         palette: Palette,
         cx: &mut Context<Self>,
     ) -> gpui::Div {
+        let (id, label) = text;
         let control = Switch::new(id)
             .checked(checked)
             .disabled(self.core.read_only() || self.working.is_some())
@@ -651,32 +657,28 @@ impl ChannelManagement {
             .child(div().text_sm().child("Notify me about"))
             .child(div().flex().flex_wrap().gap_2().children(presets))
             .child(self.switch(
-                "channel-notification-follow",
-                "Include replies to all threads",
+                ("channel-notification-follow", "Include replies to all threads"),
                 self.notices.follow_threads,
                 |this, v| this.notices.follow_threads = v,
                 palette,
                 cx,
             ))
             .child(self.switch(
-                "channel-notification-mentions",
-                "Channel and team mentions",
+                ("channel-notification-mentions", "Channel and team mentions"),
                 self.notices.channel_mentions,
                 |this, v| this.notices.channel_mentions = v,
                 palette,
                 cx,
             ))
             .child(self.switch(
-                "channel-notification-tags",
-                "Tag mentions",
+                ("channel-notification-tags", "Tag mentions"),
                 self.notices.tag_mentions,
                 |this, v| this.notices.tag_mentions = v,
                 palette,
                 cx,
             ))
             .child(self.switch(
-                "channel-notification-desktop",
-                "Show desktop notifications",
+                ("channel-notification-desktop", "Show desktop notifications"),
                 self.notices.desktop.unwrap_or(true),
                 |this, v| this.notices.desktop = Some(v),
                 palette,
@@ -750,40 +752,41 @@ impl ChannelManagement {
             );
         }
         form.child(self.switch(
-            "channel-moderation-on",
-            "Only moderators can start new posts",
+            ("channel-moderation-on", "Only moderators can start new posts"),
             self.moderation.get("postPermissions").and_then(Value::as_u64) == Some(1),
             |this, v| this.moderation["postPermissions"] = json!(u8::from(v)),
             palette,
             cx,
         ))
         .child(self.switch(
-            "channel-moderation-replies",
-            "Allow members to reply to channel messages",
+            (
+                "channel-moderation-replies",
+                "Allow members to reply to channel messages",
+            ),
             self.moderation.get("allowReplies").and_then(Value::as_u64) != Some(1),
             |this, v| this.moderation["allowReplies"] = json!(u8::from(!v)),
             palette,
             cx,
         ))
         .child(self.switch(
-            "channel-moderation-pins",
-            "Allow members to pin posts",
+            ("channel-moderation-pins", "Allow members to pin posts"),
             self.moderation.get("allowPinPosts").and_then(Value::as_u64) != Some(1),
             |this, v| this.moderation["allowPinPosts"] = json!(u8::from(!v)),
             palette,
             cx,
         ))
         .child(self.switch(
-            "channel-moderation-bots",
-            "Allow bots to submit channel messages",
+            ("channel-moderation-bots", "Allow bots to submit channel messages"),
             self.moderation.get("allowBotsPost").and_then(Value::as_u64) != Some(0),
             |this, v| this.moderation["allowBotsPost"] = json!(u8::from(v)),
             palette,
             cx,
         ))
         .child(self.switch(
-            "channel-moderation-connectors",
-            "Allow connectors to submit channel messages",
+            (
+                "channel-moderation-connectors",
+                "Allow connectors to submit channel messages",
+            ),
             self.moderation.get("allowConnectorsPost").and_then(Value::as_u64) != Some(0),
             |this, v| this.moderation["allowConnectorsPost"] = json!(u8::from(v)),
             palette,
@@ -851,7 +854,7 @@ impl ChannelManagement {
                         .label(label)
                         .selected(self.email_allowed == key)
                         .on_click(cx.listener(move |this, _, _, cx| {
-                            this.email_allowed = key.to_owned();
+                            key.clone_into(&mut this.email_allowed);
                             cx.notify();
                         })),
                 ));
@@ -929,7 +932,14 @@ impl ChannelManagement {
                 } else {
                     self.mode.confirm()
                 })
-                .primary()
+                .when(
+                    self.mode == Mode::Delete,
+                    gpui_component::button::ButtonVariants::danger,
+                )
+                .when(
+                    self.mode != Mode::Delete,
+                    gpui_component::button::ButtonVariants::primary,
+                )
                 .disabled(!enabled)
                 .on_click(cx.listener(|this, _, _, cx| this.apply(cx))),
         ))

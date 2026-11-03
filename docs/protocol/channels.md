@@ -274,4 +274,13 @@ Evidence: reference web-client bundles inspected outside the repository, synthet
 and a normally built native read of the owned disposable channel's preferences (200, exact matching id). The
 original reference team's full roster included people outside the lab and was never mutated. A new actor-only
 private team automatically acquired three bot members; independent full-roster checks refused shared admin writes
-on it. Those bot entries do not gain an exception from their being provisioned by Teams.
+on it. A second private team made through the native provisioning template route with explicit `apps: []`
+also returned 201 and acquired the same three bots (fresh full roster read 200). No shared administration or
+cleanup request was sent to either resource. Those bot entries do not gain an exception from their being
+provisioned by Teams. This prevents live shared-write verification under the current lab participant rule.
+
+The independent native transport preflight now checks channel administration separately from the historical
+fence: a fresh whole CSA response must bind the exact team/group/channel/type, then fresh actor identity and full
+owning-team membership must pass `teams-lab-targets`. Private/shared changes additionally prove that channel's
+full membership. Added people must remain within the exact lab roster; bots, outside humans, partial rosters,
+changed identities and stale selected channels fail before a mutation. Personal transports carry no lab context.

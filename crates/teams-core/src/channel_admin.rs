@@ -69,7 +69,7 @@ fn validate(teams: &[teams_proto::Team], write: &ChannelWrite) -> Result<Decisio
             if channel.name == *name && channel.description == *description {
                 return Ok(Decision::AlreadyApplied);
             }
-            active && (manager || channel.can_edit && !team.about.guest)
+            active && (manager || channel.can_edit)
         }
         ChannelChange::Settings(_) => active && manager && channel.kind == ChannelType::Standard && !channel.general,
         ChannelChange::Archive { archived, .. } => {
@@ -78,9 +78,7 @@ fn validate(teams: &[teams_proto::Team], write: &ChannelWrite) -> Result<Decisio
             }
             !team.archived && manager && !channel.general
         }
-        ChannelChange::Delete => {
-            !team.archived && !channel.general && (manager || channel.can_delete && !team.about.guest)
-        }
+        ChannelChange::Delete => !team.archived && !channel.general && (manager || channel.can_delete),
         ChannelChange::CreateEmail => active && channel.kind == ChannelType::Standard && !team.about.guest,
         ChannelChange::UpdateEmail { .. } | ChannelChange::RemoveEmail => {
             active && manager && channel.kind == ChannelType::Standard

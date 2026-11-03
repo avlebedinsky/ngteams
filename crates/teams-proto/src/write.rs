@@ -69,6 +69,11 @@ mod sealed {
         fn call(&self) -> Option<&CallWire> {
             None
         }
+
+        /// Typed channel administration context for an independent lab audience proof.
+        fn lab_channel(&self) -> Option<&crate::ChannelTarget> {
+            None
+        }
     }
 }
 

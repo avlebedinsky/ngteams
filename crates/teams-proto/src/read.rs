@@ -652,6 +652,19 @@ fn flag(entry: &Value, key: &str) -> bool {
     entry.get(key).and_then(Value::as_bool) == Some(true)
 }
 
+fn channel_permission(entry: &Value, key: &str) -> bool {
+    let settings = match entry.get("memberRoleString").and_then(Value::as_str) {
+        Some("admin" | "user" | "member") => "teamSettings",
+        Some("guest") => "teamGuestSettings",
+        _ => return false,
+    };
+    entry
+        .get(settings)
+        .and_then(|value| value.get(key))
+        .and_then(Value::as_bool)
+        == Some(true)
+}
+
 /// A team entry read, its unreadable channels counted in `skipped`.
 fn team(entry: &Value, id: &str, name: &str, skipped: &mut usize) -> Team {
     let mut channels = Vec::new();
@@ -678,9 +691,11 @@ fn team(entry: &Value, id: &str, name: &str, skipped: &mut usize) -> Team {
                         .and_then(Value::as_str)
                         .is_some_and(|role| matches!(role, "Admin" | "admin")),
                 can_edit: ChannelType::of(channel) == ChannelType::Standard
-                    && entry.pointer("/teamSettings/updateTopic").and_then(Value::as_bool) == Some(true),
+                    && channel_id != id
+                    && !flag(channel, "isGeneral")
+                    && channel_permission(entry, "updateTopic"),
                 can_delete: ChannelType::of(channel) == ChannelType::Standard
-                    && entry.pointer("/teamSettings/deleteTopic").and_then(Value::as_bool) == Some(true),
+                    && channel_permission(entry, "deleteTopic"),
                 group: channel
                     .get("substrateGroupId")
                     .and_then(Value::as_str)

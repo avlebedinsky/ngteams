@@ -21,7 +21,6 @@ impl Glyph {
     pub const BAN: Self = Self(include_bytes!("../assets/icons/ban.svg"));
     pub const STAR: Self = Self(include_bytes!("../assets/icons/star.svg"));
     pub const MAIL: Self = Self(include_bytes!("../assets/icons/mail.svg"));
-    pub const WORKFLOW: Self = Self(include_bytes!("../assets/icons/workflow.svg"));
     pub const BELL: Self = Self(include_bytes!("../assets/icons/bell.svg"));
     pub const BOT: Self = Self(include_bytes!("../assets/icons/bot.svg"));
     pub const BUG: Self = Self(include_bytes!("../assets/icons/bug.svg"));

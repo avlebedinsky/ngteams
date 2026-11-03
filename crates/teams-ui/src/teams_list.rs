@@ -176,6 +176,7 @@ impl TeamsList {
     }
 
     /// The account's custom sections in their stored Teams order.
+    #[must_use]
     pub fn sections(&self) -> &[teams_proto::ChannelSection] {
         &self.sections
     }
@@ -225,7 +226,7 @@ impl TeamsList {
                 cx,
                 move |choice, _, cx| {
                     let _ = weak.update(cx, |this, cx| {
-                        this.channel_choice(chosen_team.clone(), chosen_channel.clone(), choice, cx)
+                        this.channel_choice(chosen_team.clone(), chosen_channel.clone(), choice, cx);
                     });
                 },
             );
@@ -246,7 +247,7 @@ impl TeamsList {
 
     /// A section's fold is an account-owned Teams setting and survives a restart.
     pub fn toggle_section(&mut self, id: &str, cx: &mut Context<Self>) {
-        if self.section_pending.contains(id) || self.core.read_only() {
+        if self.section_pending.contains(id) {
             return;
         }
         let Some(section) = self.sections.iter_mut().find(|section| section.id == id) else {
@@ -254,6 +255,10 @@ impl TeamsList {
         };
         let expanded = !section.expanded;
         section.expanded = expanded;
+        if self.core.read_only() {
+            cx.notify();
+            return;
+        }
         let id = id.to_owned();
         self.section_pending.insert(id.clone());
         let reply = self.core.channel_section(teams_proto::ChannelSectionAction::Expanded {
@@ -262,18 +267,20 @@ impl TeamsList {
         });
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let result = reply.await;
-            let _ = this.update(cx, |this, cx| {
-                this.section_pending.remove(&id);
-                if result.is_err() {
-                    if let Some(section) = this.sections.iter_mut().find(|section| section.id == id) {
-                        section.expanded = !expanded;
-                    }
-                    cx.emit(TeamsListEvent::SectionFailed);
-                }
-                cx.notify();
-            });
+            let _ = this.update(cx, |this, cx| this.section_toggled(&id, expanded, result.is_ok(), cx));
         })
         .detach();
+        cx.notify();
+    }
+
+    fn section_toggled(&mut self, id: &str, expanded: bool, went: bool, cx: &mut Context<Self>) {
+        self.section_pending.remove(id);
+        if !went {
+            if let Some(section) = self.sections.iter_mut().find(|section| section.id == id) {
+                section.expanded = !expanded;
+            }
+            cx.emit(TeamsListEvent::SectionFailed);
+        }
         cx.notify();
     }
 

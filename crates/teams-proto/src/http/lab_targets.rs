@@ -134,6 +134,7 @@ impl<C: Credentials> HttpTransport<C> {
         write: &R,
     ) -> impl std::future::Future<Output = Result<(), HttpError>> + Send + 'a {
         let target = write.target();
+        let channel = write.lab_channel().cloned();
         let files = if self.lab_targets.is_some() {
             write_wire_files(write)
         } else {
@@ -157,6 +158,9 @@ impl<C: Credentials> HttpTransport<C> {
             ) {
                 return Err(refused(TargetError::Recipients));
             }
+            if let Some(channel) = channel {
+                return self.preflight_lab_channel(&channel, target.added()).await;
+            }
             match target.scope() {
                 Scope::Conversation { id } => {
                     let members = self
@@ -174,6 +178,21 @@ impl<C: Credentials> HttpTransport<C> {
                         self.preflight_lab_file(&file, &members).await?;
                     }
                     Ok(())
+                }
+                Scope::Team { id } => {
+                    // A team thread must prove its whole audience just as a conversation does. Group IDs or
+                    // arbitrary strings cannot stand in for a selected thread; their exact read will fail.
+                    let mut members = self
+                        .preflight_lab_chat(id)
+                        .await?
+                        .ok_or_else(|| refused(TargetError::Membership))?;
+                    members.extend(target.added().iter().map(|mri| mri.as_str().to_owned()));
+                    members.sort();
+                    members.dedup();
+                    context
+                        .roster
+                        .verify_recipients(&context.own, &members)
+                        .map_err(refused)
                 }
                 Scope::New if target.kind() == WriteKind::ChatCreate => {
                     self.preflight_lab_creation(target.added().iter().map(|mri| mri.as_str().to_owned()).collect())
@@ -206,6 +225,64 @@ impl<C: Credentials> HttpTransport<C> {
             self.lab_peer(peer, &account.upn).await?;
         }
         Ok(())
+    }
+
+    async fn preflight_lab_channel(
+        &self,
+        target: &crate::ChannelTarget,
+        added: &std::collections::BTreeSet<teams_fence::Mri>,
+    ) -> Result<(), HttpError> {
+        let context = self
+            .lab_targets
+            .as_ref()
+            .ok_or_else(|| refused(TargetError::Identity))?;
+        // CSA proves the selected channel still belongs to this exact team and substrate group. A display name,
+        // sparse embedded roster, or unrelated team membership is never an audience proof.
+        let answer = self.read(&crate::CsaTeams).await?;
+        let listed = crate::CsaTeams::read_answer(answer.body()).map_err(|_| refused(TargetError::Conversation))?;
+        let team = listed
+            .teams
+            .iter()
+            .find(|team| team.id == target.team && team.group_id.as_deref() == Some(target.team_group.as_str()))
+            .ok_or_else(|| refused(TargetError::Conversation))?;
+        let channel = team
+            .channels
+            .iter()
+            .find(|channel| channel.id == target.channel)
+            .ok_or_else(|| refused(TargetError::Conversation))?;
+        let standard = channel.kind == crate::ChannelType::Standard;
+        let group = channel.group.as_ref().map(|group| {
+            if group.starts_with("OID:") {
+                group.clone()
+            } else {
+                format!("OID:{group}@{}", team.about.tenant)
+            }
+        });
+        if channel.kind == crate::ChannelType::Unknown
+            || if standard {
+                target.channel_group.is_some()
+            } else {
+                group.is_none() || group != target.channel_group
+            }
+        {
+            return Err(refused(TargetError::Conversation));
+        }
+        let team_members = self.preflight_lab_chat(&target.team).await?;
+        let members = if standard {
+            // Standard channels inherit the owning team's complete membership.
+            team_members
+        } else {
+            self.preflight_lab_chat(&target.channel).await?
+        }
+        .ok_or_else(|| refused(TargetError::Membership))?;
+        let mut recipients = members;
+        recipients.extend(added.iter().map(|mri| mri.as_str().to_owned()));
+        recipients.sort();
+        recipients.dedup();
+        context
+            .roster
+            .verify_recipients(&context.own, &recipients)
+            .map_err(refused)
     }
 
     pub(super) async fn lab_peer(&self, mri: &str, upn: &str) -> Result<(), HttpError> {

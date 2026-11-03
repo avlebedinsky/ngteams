@@ -42,6 +42,13 @@ pub(crate) fn teams(state: &State, request: &Request) -> Option<ResponseTemplate
         return Some(status(401));
     }
     let query: Vec<(String, String)> = request.url.query_pairs().into_owned().collect();
+    if request.method.as_str() == "GET" && rest == ["api", "v1", "teams", "users", "me", "conversationFolders"] {
+        // Synthetic empty whole account hierarchy, used by own-visibility and section reads.
+        return Some(json(
+            200,
+            &serde_json::json!({"isPartialResponse":false,"folderHierarchyVersion":1,"conversationFolderOrder":[],"conversationFolders":[]}),
+        ));
+    }
     let the_read = request.method.as_str() == "GET"
         && rest == ["api", "v3", "teams", "users", "me"]
         && query

@@ -478,9 +478,12 @@ impl Shell {
         // a channel kept as the selected chat (by a build that opened one in a chat view) opens as a channel once the
         // list knows it
         let kept_channel = cx.observe_in(&teams, window, |this: &mut Self, teams, window, cx| {
-            let Main::Chat(id) = &this.main else { return };
-            if let Some(chosen) = teams.read(cx).chosen(id) {
-                this.open_channel(chosen, window, cx);
+            if let Main::Chat(id) = &this.main {
+                if let Some(chosen) = teams.read(cx).chosen(id) {
+                    this.open_channel(chosen, window, cx);
+                }
+            } else {
+                this.channels_changed(&teams, cx);
             }
         });
         (teams, [channel_opened, kept_channel])
@@ -955,6 +958,9 @@ impl Shell {
         let Main::Channel(channel) = self.main.clone() else {
             return;
         };
+        if self.channel_archived(&channel, cx) {
+            return;
+        }
         let busy = self.models.calls.read(cx).busy();
         if busy || self.busy_elsewhere(cx) {
             let ask = Ask::MeetNow { channel };
@@ -994,7 +1000,7 @@ impl Shell {
             .iter()
             .find(|team| team.channels.iter().any(|known| known.id == *channel))?;
         let known = team.channels.iter().find(|known| known.id == *channel)?;
-        if known.kind != teams_store::ChannelKind::Standard {
+        if known.kind != teams_store::ChannelKind::Standard || team.archived || known.about.archived {
             return None;
         }
         Some(crate::event_form::MeetingPlace {
@@ -1066,6 +1072,9 @@ impl Shell {
         }
         let runs = self.channel_meetup.as_ref().is_some_and(|(shown, _)| shown == id);
         if !runs {
+            if self.channel_archived(id, cx) {
+                return None;
+            }
             let schedules = self.meeting_place(cx).is_some();
             return Some(Self::meet_now_button(schedules, cx));
         }
@@ -1321,14 +1330,14 @@ impl Shell {
             TeamsListEvent::AddChannel(team) => self.open_channel_dialog(team.clone(), window, cx),
             TeamsListEvent::Chosen(team, choice) => self.team_chosen(team.clone(), *choice, window, cx),
             TeamsListEvent::ChannelChosen(team, channel, choice) => {
-                self.channel_chosen(team.clone(), channel.clone(), choice.clone(), window, cx)
+                self.channel_chosen(team, channel, choice.clone(), window, cx);
             }
             TeamsListEvent::SeeAllTeams => self.open_teams_page(window, cx),
             TeamsListEvent::SeeAllChannels(team) => {
                 self.open_manage_team(team.clone(), ManageTab::Channels, window, cx);
             }
             TeamsListEvent::SectionFailed => {
-                self.show_toast("Couldn't save the section's expanded state. Try again.", cx)
+                self.show_toast("Couldn't save the section's expanded state. Try again.", cx);
             }
             TeamsListEvent::Opened(_) => {}
         }

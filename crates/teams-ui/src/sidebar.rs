@@ -250,6 +250,15 @@ impl Sidebar {
         !self.folded.contains(id)
     }
 
+    fn custom_section_open(&self, id: &str, cx: &App) -> bool {
+        self.teams
+            .read(cx)
+            .sections()
+            .iter()
+            .find(|section| section.id == id)
+            .is_none_or(|section| section.expanded)
+    }
+
     fn toggle_custom_section(&mut self, id: &str, cx: &mut Context<Self>) {
         self.teams.update(cx, |teams, cx| teams.toggle_section(id, cx));
     }
@@ -359,26 +368,7 @@ impl Sidebar {
                 }));
             }
         }
-        // Custom folders retain Teams' server order; their channel items retain that folder's order.
-        let teams = self.teams.read(cx);
-        for section in teams.sections().iter().filter(|section| !section.favorite) {
-            entries.push(Entry::CustomSection {
-                id: section.id.clone(),
-                name: section.name.clone(),
-            });
-            if section.expanded {
-                for id in &section.items {
-                    if let Some((index, team, channel)) = teams.channel_location(id) {
-                        entries.push(Entry::Channel {
-                            index,
-                            team,
-                            channel,
-                            id: id.clone(),
-                        });
-                    }
-                }
-            }
-        }
+        entries.extend(self.custom_entries(cx));
         entries.push(Entry::Section(Section::Chats));
         if self.chats_open {
             let list = self.list.read(cx);
@@ -405,6 +395,31 @@ impl Sidebar {
                     entries.push(Entry::SeeAllTeams);
                 }
             }
+        }
+        entries
+    }
+
+    fn custom_entries(&self, cx: &App) -> Vec<Entry> {
+        let mut entries = Vec::new();
+        // Custom folders retain Teams' server order; their channel items retain that folder's order.
+        let teams = self.teams.read(cx);
+        for section in teams.sections().iter().filter(|section| !section.favorite) {
+            entries.push(Entry::CustomSection {
+                id: section.id.clone(),
+                name: section.name.clone(),
+            });
+            if !section.expanded {
+                continue;
+            }
+            entries.extend(section.items.iter().filter_map(|id| {
+                let (index, team, channel) = teams.channel_location(id)?;
+                Some(Entry::Channel {
+                    index,
+                    team,
+                    channel,
+                    id: id.clone(),
+                })
+            }));
         }
         entries
     }
@@ -885,12 +900,12 @@ impl Sidebar {
             return false;
         };
         if crate::keyboard::opens_menu(event) {
-            if let Entry::Channel { id, .. } | Entry::Favorite { id, .. } = &entry {
-                if self.teams.read(cx).channel_location(id).is_some() {
-                    self.teams
-                        .update(cx, |teams, cx| teams.open_channel_menu(id, window, cx));
-                    return true;
-                }
+            if let Entry::Channel { id, .. } | Entry::Favorite { id, .. } = &entry
+                && self.teams.read(cx).channel_location(id).is_some()
+            {
+                self.teams
+                    .update(cx, |teams, cx| teams.open_channel_menu(id, window, cx));
+                return true;
             }
             let Entry::Team { id, .. } = entry else {
                 return false;
@@ -912,11 +927,17 @@ impl Sidebar {
             "enter" | "space" => self.activate(entry, cx),
             "right" => match entry {
                 Entry::Section(section) if !self.is_open(section) => self.toggle(section, cx),
+                Entry::CustomSection { id, .. } if !self.custom_section_open(&id, cx) => {
+                    self.toggle_custom_section(&id, cx);
+                }
                 Entry::Team { id, .. } if !self.team_open(&id) => self.toggle_team(&id, cx),
                 _ => {}
             },
             "left" => match entry {
                 Entry::Section(section) if self.is_open(section) => self.toggle(section, cx),
+                Entry::CustomSection { id, .. } if self.custom_section_open(&id, cx) => {
+                    self.toggle_custom_section(&id, cx);
+                }
                 Entry::Team { id, .. } if self.team_open(&id) => self.toggle_team(&id, cx),
                 _ => {
                     if let Some(parent) = self.parent(at) {

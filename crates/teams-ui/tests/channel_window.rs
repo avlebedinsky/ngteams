@@ -106,9 +106,9 @@ fn shot(sandbox: &Sandbox, theme: &str, name: &str, surface: &str) -> SandboxRes
 fn after_frames(window: &Window, n: usize, done: impl FnOnce(&mut Window, &mut App) + 'static) {
     window.on_next_frame(move |window, cx| {
         if n <= 1 {
-            done(window, cx)
+            done(window, cx);
         } else {
-            after_frames(window, n - 1, done)
+            after_frames(window, n - 1, done);
         }
     });
 }
@@ -174,8 +174,9 @@ fn child(value: &str) -> SandboxResult {
 fn open(theme: &'static str, surface: String, cx: &mut App) -> gpui::Result<()> {
     let core = Arc::new(FakeCore::default());
     let team = team(surface == "members");
-    *core.teams.lock().unwrap() = Some(vec![team.clone()]);
-    *core.team_roster.lock().unwrap() = vec![member(LAB_A, "Alex Morgan", true), member(LAB_B, "Sam Rivera", false)];
+    *core.teams.lock().expect("channel window operation") = Some(vec![team.clone()]);
+    *core.team_roster.lock().expect("channel window operation") =
+        vec![member(LAB_A, "Alex Morgan", true), member(LAB_B, "Sam Rivera", false)];
     let (events, received) = mpsc::unbounded_channel();
     let models = Models::new(cx);
     let source = FakeEvents {
@@ -222,10 +223,12 @@ fn open(theme: &'static str, surface: String, cx: &mut App) -> gpui::Result<()> 
                     _ => ChannelChoice::NewSection,
                 };
                 let channel = team.channels[1].clone();
-                shell.update(cx, |shell, cx| shell.channel_chosen(team, channel, choice, window, cx));
+                shell.update(cx, |shell, cx| {
+                    shell.channel_chosen(&team, &channel, choice, window, cx)
+                });
             }
             after_frames(window, 30, |_, _| say("ready"));
-        })
+        });
     })?;
     std::mem::forget((bridge, events));
     Ok(())

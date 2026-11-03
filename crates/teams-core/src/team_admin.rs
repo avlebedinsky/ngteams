@@ -439,25 +439,7 @@ where
     fn channel_section(&mut self, action: teams_proto::ChannelSectionAction, reply: Responder<()>) {
         let client = Arc::clone(&self.client);
         self.running.spawn_local(async move {
-            let answer = async {
-                let read = client
-                    .read(&teams_proto::ChannelRead::Sections)
-                    .await
-                    .map_err(|_| EngineError::TeamNotChanged { code: None })?;
-                let data =
-                    teams_proto::ChannelData::read(read.body()).ok_or(EngineError::TeamNotChanged { code: None })?;
-                let sections =
-                    teams_proto::ChannelSections::read(&data.0).ok_or(EngineError::TeamNotChanged { code: None })?;
-                let write =
-                    teams_proto::ChannelSectionWrite::new(&action, &sections).ok_or(EngineError::TeamNotChanged {
-                        code: Some("SectionChanged".to_owned()),
-                    })?;
-                match client.transport().send(&write).await {
-                    Ok(answer) if (200..300).contains(&answer.status()) => Ok(()),
-                    _ => Err(EngineError::TeamNotChanged { code: None }),
-                }
-            }
-            .await;
+            let answer = section_change(&client, &action).await;
             Finished {
                 created: None,
                 team: None,
@@ -514,6 +496,18 @@ where
                     Err(error) => failed = Some(error.to_string()),
                 }
             }
+            if failed.is_none()
+                && let Some(TeamChange::ChannelShown {
+                    channel, shown: false, ..
+                }) = &change
+            {
+                let action = teams_proto::ChannelSectionAction::Remove {
+                    channel: channel.clone(),
+                };
+                if section_change(&client, &action).await.is_err() {
+                    failed = Some("section membership wasn't changed".to_owned());
+                }
+            }
             let answer = match failed {
                 Some(why) => {
                     log::info!("the account's view of a team wasn't changed: {why}");
@@ -524,12 +518,36 @@ where
             Finished {
                 created: None,
                 team: answer.is_ok().then_some(change).flatten().map(Box::new),
-                reread: answer.is_ok(),
+                reread: true,
                 reply: Box::new(move || {
                     let _ = reply.send(answer);
                 }),
             }
         });
+    }
+}
+
+async fn section_change<C: Credentials + 'static>(
+    client: &Client<HttpTransport<C>>,
+    action: &teams_proto::ChannelSectionAction,
+) -> Result<(), EngineError> {
+    let read = client
+        .read(&teams_proto::ChannelRead::Sections)
+        .await
+        .map_err(|_| EngineError::TeamNotChanged { code: None })?;
+    let data = teams_proto::ChannelData::read(read.body()).ok_or(EngineError::TeamNotChanged { code: None })?;
+    let sections = teams_proto::ChannelSections::read(&data.0).ok_or(EngineError::TeamNotChanged { code: None })?;
+    if let teams_proto::ChannelSectionAction::Remove { channel } = action
+        && !sections.sections.iter().any(|section| section.items.contains(channel))
+    {
+        return Ok(());
+    }
+    let write = teams_proto::ChannelSectionWrite::new(action, &sections).ok_or(EngineError::TeamNotChanged {
+        code: Some("SectionChanged".to_owned()),
+    })?;
+    match client.transport().send(&write).await {
+        Ok(answer) if (200..300).contains(&answer.status()) => Ok(()),
+        _ => Err(EngineError::TeamNotChanged { code: None }),
     }
 }
 
