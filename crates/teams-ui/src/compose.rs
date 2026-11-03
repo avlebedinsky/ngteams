@@ -474,6 +474,8 @@ pub struct Compose {
     mode: Mode,
     attachments: Vec<attachments::Attachment>,
     next_attachment: u64,
+    /// Kept across navigation until the engine has queued or refused the file send.
+    sending_files: usize,
     picker: Option<Picker>,
     /// The chat's members the picker offers, once read.
     candidates: Option<Vec<Candidate>>,
@@ -577,6 +579,7 @@ impl Compose {
             mode: Mode::New,
             attachments: Vec::new(),
             next_attachment: 0,
+            sending_files: 0,
             picker: None,
             candidates: None,
             reading: None,
@@ -592,7 +595,10 @@ impl Compose {
 
     /// A chat keeps its editor alive while a local draft or upload remains, including across chat navigation.
     pub(crate) fn has_draft(&self, cx: &App) -> bool {
-        !self.editor.read(cx).is_empty() || self.mode != Mode::New || !self.attachments.is_empty()
+        !self.editor.read(cx).is_empty()
+            || self.mode != Mode::New
+            || !self.attachments.is_empty()
+            || self.sending_files > 0
     }
 
     /// The rich-text editor the box writes with.
@@ -736,6 +742,9 @@ impl Compose {
 
     /// Starts a reply quoting `quoted`; the text typed stays.
     pub fn reply_to(&mut self, quoted: Quoted, window: &mut Window, cx: &mut Context<Self>) {
+        if self.sending_files > 0 {
+            return self.show_problem("Wait for your files to finish sending before starting a reply.", cx);
+        }
         if self.read_only.is_some() {
             return;
         }
@@ -754,6 +763,9 @@ impl Compose {
     pub fn edit(&mut self, message_id: String, loaded: Loaded, window: &mut Window, cx: &mut Context<Self>) {
         if self.read_only.is_some() {
             return;
+        }
+        if self.sending_files > 0 {
+            return self.show_problem("Wait for your files to finish sending before editing a message.", cx);
         }
         if !self.attachments.is_empty() {
             return self.show_problem("Send or remove your attachments before editing a message.", cx);
@@ -879,31 +891,50 @@ impl Compose {
                 .kind(kind),
         );
         self.clear(window, cx);
+        self.await_send(reply, draft, window, cx);
+    }
+
+    fn await_send(
+        &mut self,
+        reply: teams_core::Reply<teams_store::OutboxEntry>,
+        draft: Draft,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let files = !draft.attachments.is_empty();
+        self.sending_files += usize::from(files);
         cx.spawn_in(window, async move |this, cx| {
-            if let Err(error) = reply.await {
-                let _ = this.update_in(cx, |this, window, cx| {
+            let answer = reply.await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.sending_files = this.sending_files.saturating_sub(usize::from(files));
+                if let Err(error) = answer {
                     this.give_back(draft, window, cx);
                     this.show_problem(format!("Not sent: {error}"), cx);
-                });
-            }
+                }
+                cx.notify();
+            });
         })
         .detach();
     }
 
-    /// Puts a refused send's draft back in the box, unless the box holds something new or writes something else now.
-    fn give_back(&mut self, draft: Draft, _: &mut Window, cx: &mut Context<Self>) {
-        if !self.editor.read(cx).is_empty() || self.mode != Mode::New || !self.attachments.is_empty() {
-            for file in draft.attachments {
-                if !self.attachments.iter().any(|current| current.path == file.path) {
-                    self.attachments.push(file);
-                }
-            }
-            cx.notify();
+    /// Restores a refused file send, retaining any newer text typed while its share was pending.
+    fn give_back(&mut self, mut draft: Draft, _: &mut Window, cx: &mut Context<Self>) {
+        if draft.attachments.is_empty()
+            && (!self.editor.read(cx).is_empty() || self.mode != Mode::New || !self.attachments.is_empty())
+        {
             return;
+        }
+        if !self.editor.read(cx).is_empty() {
+            draft.doc.blocks.push(crate::editor::doc::Block::default());
+            draft.doc.blocks.extend(self.editor.read(cx).doc().blocks.clone());
         }
         self.editor.update(cx, |editor, cx| editor.set_doc(draft.doc, cx));
         self.mode = draft.mode;
-        self.attachments = draft.attachments;
+        for file in draft.attachments {
+            if !self.attachments.iter().any(|current| current.path == file.path) {
+                self.attachments.push(file);
+            }
+        }
         cx.notify();
     }
 

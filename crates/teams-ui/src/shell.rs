@@ -1952,6 +1952,7 @@ impl Shell {
     }
 
     fn keep_draft(&mut self, cx: &App) {
+        self.drafts.retain(|_, compose| compose.read(cx).has_draft(cx));
         if let Some(chat) = &self.chat {
             let chat = chat.read(cx);
             let compose = chat.compose();

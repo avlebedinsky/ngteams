@@ -134,6 +134,47 @@ fn switching_chats_preserves_text_files_and_upload_completion() {
 }
 
 #[test]
+fn a_refused_file_send_survives_navigation_and_keeps_newer_text() {
+    for newer in ["", "Newer draft"] {
+        let rig = rig_with(Vec::new());
+        let settings = Settings {
+            selected_chat: Some(AB.to_owned()),
+            ..Settings::default()
+        };
+        let parts = parts::parts(&rig, settings, Arc::new(ViewTrace::off()));
+        let app: &'static mut TestAppContext = Box::leak(Box::new(rig.cx.clone()));
+        let (shell, cx) = app.add_window_view(|window, cx| Shell::new(parts, window, cx));
+        draw(cx);
+        let compose = cx.update(|_, cx| shell.read(cx).chat().unwrap().read(cx).compose().clone());
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("draft.txt");
+        std::fs::write(&file, b"test").unwrap();
+        type_text(cx, "Unsent draft");
+        cx.update(|window, cx| compose.update(cx, |compose, cx| compose.attach_files(&[file], window, cx)));
+        draw(cx);
+        *rig.core.stopped.lock().unwrap() = true;
+        cx.update(|window, cx| {
+            compose.update(cx, |compose, cx| {
+                compose.send(window, cx);
+                compose
+                    .editor()
+                    .update(cx, |editor, cx| editor.set_doc(typed_doc(newer, &[]), cx));
+            });
+            shell.update(cx, |shell, cx| shell.open_chat(GROUP.to_owned(), window, cx));
+        });
+        draw(cx);
+        cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(AB.to_owned(), window, cx)));
+        draw(cx);
+        let restored = cx.update(|_, cx| shell.read(cx).chat().unwrap().read(cx).compose().clone());
+        assert_eq!(restored, compose);
+        let value = cx.update(|_, cx| restored.read(cx).value(cx).to_string());
+        assert!(value.contains("Unsent draft"), "{value}");
+        assert!(value.contains(newer), "{value}");
+        assert_eq!(cx.update(|_, cx| restored.read(cx).attachments().len()), 1);
+    }
+}
+
+#[test]
 fn a_file_only_message_is_sendable_after_upload_and_never_while_uploading() {
     let rig = rig_with(Vec::new());
     *rig.core.hold_uploads.lock().unwrap() = true;
