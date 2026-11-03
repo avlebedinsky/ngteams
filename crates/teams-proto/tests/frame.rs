@@ -402,7 +402,7 @@ async fn the_personal_build_s_sink_logs_each_frame_by_its_kind_before_it_goes_an
         socket: socket.clone(),
         fail: false,
     };
-    let url = "wss://pub-ent-euwe-01-t.trouter.teams.microsoft.com/v4/c?tc=made-up&epid=made-up";
+    let url = "wss://pub-ent-euwe-01-t.trouter.teams.microsoft.com/v4/c?tc=made-up-tc&epid=made-up-epid";
     let mut sink = FrameSink::logging(writer, fence_over(&lines), url);
     sink.send(&Authenticate::new(&Secret::new(PLANTED_TOKEN), None))
         .await
@@ -414,7 +414,12 @@ async fn the_personal_build_s_sink_logs_each_frame_by_its_kind_before_it_goes_an
     assert_eq!(entries.len(), 2);
     assert_eq!(entries[0]["own"], Authenticate::KIND);
     assert_eq!(entries[1]["own"], Ping::KIND);
-    assert!(!text.contains(PLANTED_TOKEN) && !text.contains("epid"), "{text}");
+    assert!(!text.contains(PLANTED_TOKEN), "{text}");
+    // the socket's URL as `teams_fence::log_url` writes it: the query's key names, never a value
+    assert!(
+        text.contains("/v4/c?tc&epid") && !text.contains("made-up-tc") && !text.contains("made-up-epid"),
+        "{text}"
+    );
 
     // a log that can't be written: nothing goes out
     let refusing = Lines {

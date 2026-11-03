@@ -215,6 +215,12 @@ fn with_lookup_query(mut mock: wiremock::MockBuilder) -> wiremock::MockBuilder {
     mock
 }
 
+/// The lookup's query as `fence.log` writes it (`teams_fence::log_url`): its key names, never a value.
+fn logged_lookup_query() -> String {
+    let keys: Vec<&str> = LOOKUP_QUERY.iter().map(|(name, _)| *name).collect();
+    format!("?{}", keys.join("&"))
+}
+
 /// `profile` is what `want` (a profile of the fixture's answers) says.
 #[cfg(test)]
 fn assert_profile(name: &str, profile: &ShortProfile, want: &Value) {
@@ -296,11 +302,11 @@ async fn a_short_profile_lookup_goes_out_in_its_captured_shape_logged_first_and_
                     "verdict": "allow",
                     "channel": "http",
                     "method": "POST",
-                    "url": format!("{MIDDLE_TIER}/beta/users/fetchShortProfile"),
+                    "url": format!("{MIDDLE_TIER}/beta/users/fetchShortProfile{}", logged_lookup_query()),
                     "post_read": "short_profile",
                 }),
             ],
-            "{name}: the decision, then the request as built and checked (not the mock's), without its query"
+            "{name}: the decision, then the request as built and checked (not the mock's), its query by key names only"
         );
     }
 }
@@ -625,7 +631,10 @@ async fn a_lookup_goes_to_the_base_it_was_given() {
 
     assert_eq!(
         setup.log.sent()[0]["url"],
-        "https://teams.cloud.microsoft/api/mt/part/emea-01/beta/users/fetchShortProfile"
+        format!(
+            "https://teams.cloud.microsoft/api/mt/part/emea-01/beta/users/fetchShortProfile{}",
+            logged_lookup_query()
+        )
     );
 }
 
