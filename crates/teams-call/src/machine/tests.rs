@@ -2234,3 +2234,72 @@ fn a_retarget_acknowledged_moves_the_call_s_own_links_to_the_new_call() {
     );
     assert_eq!(calls.current().map(|(id, _)| id), Some(call));
 }
+
+#[test]
+fn caption_invite_failure_does_not_end_voice_and_only_own_roster_binds_service() {
+    let now = Instant::now();
+    let (mut calls, call) = connected_call(now);
+    calls.call.as_mut().unwrap().conversation.caption_add = teams_proto::CallLink::parse(&conv("/addParticipant"));
+    assert!(calls.caption_invite(CallId(call.get() + 1)).is_err());
+    let write = calls.caption_invite(call).unwrap();
+    assert!(!format!("{write:?}").contains("Lab"));
+    let failed = calls
+        .call
+        .as_ref()
+        .unwrap()
+        .latest_path_of(Kind::Conversation, "addParticipantFailure")
+        .unwrap()
+        .to_owned();
+    calls.on_delivery(&delivery(&failed, &json!({"code":403})), Observed::Nothing, now);
+    let failed = effects(&mut calls);
+    assert!(events(&failed).contains(&CallEvent::CaptionFailed { call }));
+    assert_eq!(calls.current(), Some((call, Some(CallState::Connected))));
+    assert!(sent(&failed).is_empty());
+    let command = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/aks-prod-zz-api.callrecorder.teams.cloud.microsoft:21606/v2/oncommand/00000000-0000-4000-8000-000000000001";
+    let body = json!({"participants":{teams_proto::captions::CAPTION_SERVICE_MRI:{"state":"active","version":1,"endpoints":{"synthetic":{"endpointMetadata":{"commandUrl":command,"spokenLanguage":"en-us","processingModes":{"closedCaptions":{"state":"Active"}}}}}}}});
+    calls.on_delivery(&delivery("/unknown/rosterUpdate/", &body), Observed::Nothing, now);
+    assert!(calls.caption_service(call).is_none());
+    let roster = calls
+        .call
+        .as_ref()
+        .unwrap()
+        .path_of(Kind::Conversation, "rosterUpdate")
+        .unwrap()
+        .to_owned();
+    calls.on_delivery(&delivery(&roster, &body), Observed::Nothing, now);
+    assert_eq!(calls.caption_service(call).unwrap().state, "Active");
+    assert!(calls.caption_command(call, None).is_ok());
+    assert!(calls.caption_command(call, Some("en-gb")).is_ok());
+    assert!(calls.caption_command(call, Some("invented-language")).is_err());
+    assert!(
+        calls
+            .call
+            .as_ref()
+            .unwrap()
+            .roster
+            .participants()
+            .iter()
+            .all(|person| person.mri.as_str() != teams_proto::captions::CAPTION_SERVICE_MRI)
+    );
+    // Unchanged metadata fields can be omitted in the next roster delta.
+    let delta = json!({"participants":{teams_proto::captions::CAPTION_SERVICE_MRI:{"state":"active","version":2,"endpoints":{"synthetic":{"endpointMetadata":{"spokenLanguage":"en-gb"}}}}}});
+    calls.on_delivery(&delivery(&roster, &delta), Observed::Nothing, now);
+    assert_eq!(calls.caption_service(call).unwrap().spoken_language, "en-gb");
+    let stale = json!({"participants":{teams_proto::captions::CAPTION_SERVICE_MRI:{"state":"inactive","version":1}}});
+    calls.on_delivery(&delivery(&roster, &stale), Observed::Nothing, now);
+    assert_eq!(calls.caption_service(call).unwrap().spoken_language, "en-gb");
+    calls.hang_up(call, now).unwrap();
+    assert!(calls.caption_command(call, None).is_err());
+}
+
+#[test]
+fn mixer_explicitly_marks_only_the_initial_caption_media_fork_as_a_new_session() {
+    let mut content =
+        json!({"blob":"v=0\r\n","contentType":"application/sdp-ngc-0.5","newOffer":true,"fromMixer":true});
+    assert!(crate::read::media(&content).unwrap().new_mixer_session);
+    content["newOffer"] = json!(false);
+    assert!(!crate::read::media(&content).unwrap().new_mixer_session);
+    content["newOffer"] = json!(true);
+    content["fromMixer"] = json!(false);
+    assert!(!crate::read::media(&content).unwrap().new_mixer_session);
+}

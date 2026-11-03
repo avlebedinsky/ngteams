@@ -26,6 +26,28 @@ impl<C: Credentials> HttpTransport<C> {
         };
         let refused = |error| HttpError::Refused(Refusal::LabTarget(error));
         let plan = context.calls.plan(wire).map_err(refused)?;
+        self.prove_call_plan(plan).await
+    }
+
+    pub(super) async fn preflight_caption_call(
+        &self,
+        write: &crate::captions::CaptionWrite,
+    ) -> Result<Option<CallAttempt>, HttpError> {
+        let Some(context) = &self.lab_targets else {
+            return Ok(None);
+        };
+        let plan = context
+            .calls
+            .plan_caption(write)
+            .map_err(|error| HttpError::Refused(Refusal::LabTarget(error)))?;
+        self.prove_call_plan(plan).await
+    }
+
+    async fn prove_call_plan(&self, plan: CallPlan) -> Result<Option<CallAttempt>, HttpError> {
+        let Some(context) = &self.lab_targets else {
+            return Ok(None);
+        };
+        let refused = |error| HttpError::Refused(Refusal::LabTarget(error));
         let members = if plan.cleanup {
             None
         } else {

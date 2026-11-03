@@ -383,17 +383,31 @@ impl EndReason {
 /// What the user asks of the calls.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Ask {
+    /// Show or hide ephemeral live captions for this viewer.
+    ToggleCaptions,
+    Captions(bool),
+    /// Shared meeting spoken language, confirmed in the caption settings.
+    CaptionLanguage(String),
     /// Call the chat: its other member, or a group chat's members.
-    Call { chat: String },
+    Call {
+        chat: String,
+    },
     /// The test call of the echo service.
     TestCall,
     /// Join the running call of the group chat.
-    Join { chat: String },
+    Join {
+        chat: String,
+    },
     /// Go into the call of the meeting whose chat is `chat`: it starts the call when nobody has, and joins it when it
     /// runs.
-    JoinMeeting { chat: String, meeting: MeetingInfo },
+    JoinMeeting {
+        chat: String,
+        meeting: MeetingInfo,
+    },
     /// Start a new meeting in the channel `channel` (its header's Meet now): the account organizes it.
-    MeetNow { channel: String },
+    MeetNow {
+        channel: String,
+    },
     /// Answer the invitation that rings.
     Answer,
     /// Decline the invitation that rings.
@@ -405,7 +419,10 @@ pub enum Ask {
     /// Turn the camera on, or off.
     ToggleCamera,
     /// Let someone waiting in the meeting's lobby in (`admit`), or turn them away.
-    Lobby { waiting: Mri, admit: bool },
+    Lobby {
+        waiting: Mri,
+        admit: bool,
+    },
 }
 
 impl Ask {
@@ -413,6 +430,8 @@ impl Ask {
     #[must_use]
     pub fn name(&self) -> &'static str {
         match self {
+            Self::ToggleCaptions | Self::Captions(_) => "captions",
+            Self::CaptionLanguage(_) => "caption-language",
             Self::Call { .. } => "call",
             Self::TestCall => "test-call",
             Self::Join { .. } => "join",
@@ -518,6 +537,7 @@ pub struct Refused {
 #[derive(Debug, Default)]
 pub struct Calls {
     shown: bool,
+    captions: teams_core::CallCaptions,
     echo: Option<Mri>,
     registered: bool,
     ringing: Option<IncomingCall>,
@@ -562,6 +582,12 @@ impl Calls {
     #[must_use]
     pub fn video(&self) -> Option<&VideoFeed> {
         self.video.as_ref().filter(|_| self.shown)
+    }
+
+    /// Current viewer's ephemeral captions (always empty once the call ends).
+    #[must_use]
+    pub fn captions(&self) -> &teams_core::CallCaptions {
+        &self.captions
     }
 
     /// Whether this build shows calls at all.
@@ -803,6 +829,7 @@ impl Calls {
                     | Event::Voicemail { .. }
                     | Event::CameraOff { .. }
                     | Event::AudioClosed { .. }
+                    | Event::CallCaptions { .. }
                     | Event::CallParticipants { .. }
                     | Event::Lobby { .. }
             );
@@ -820,6 +847,11 @@ impl Calls {
             Event::RingEnded { call, .. } => {
                 if self.ringing.as_ref().is_some_and(|ringing| ringing.call == *call) {
                     self.ringing = None;
+                }
+            }
+            Event::CallCaptions { call, captions } => {
+                if self.call.as_ref().is_some_and(|active| active.id == *call) {
+                    self.captions = captions.clone();
                 }
             }
             Event::Call { call, status } => self.status(*call, status),
@@ -868,6 +900,7 @@ impl Calls {
     /// A call of the account's moved on.
     fn status(&mut self, call: CallId, status: &CallStatus) {
         if self.call.as_ref().is_none_or(|active| active.id != call) {
+            self.captions = teams_core::CallCaptions::default();
             self.call = Some(self.adopt(call));
             self.ended = None;
             self.refused = None;
@@ -889,6 +922,7 @@ impl Calls {
             active.check.connected = true;
         }
         if let CallStatus::Ended(end) = status {
+            self.captions = teams_core::CallCaptions::default();
             active.check.failed = matches!(end, End::Failed(_));
             // a refusal during the call was shown in its bar: how it ended is what is told now
             self.refused = None;
@@ -934,12 +968,38 @@ impl Calls {
     }
 
     /// The call action `ask` stands for now, or why there is none.
+    fn caption_action(&self, ask: &Ask) -> Result<CallAction, &'static str> {
+        let hiding = matches!(ask, Ask::Captions(false))
+            || (matches!(ask, Ask::ToggleCaptions) && self.captions.phase != teams_core::CaptionPhase::Off);
+        let call = self
+            .call
+            .as_ref()
+            .filter(|call| hiding || (call.status == CallStatus::Connected && call.kind != CallKind::TestCall))
+            .ok_or("no-call")?;
+        Ok(match ask {
+            Ask::ToggleCaptions => CallAction::Captions {
+                call: call.id,
+                enabled: self.captions.phase == teams_core::CaptionPhase::Off,
+            },
+            Ask::Captions(enabled) => CallAction::Captions {
+                call: call.id,
+                enabled: *enabled,
+            },
+            Ask::CaptionLanguage(language) => CallAction::CaptionLanguage {
+                call: call.id,
+                language: language.clone(),
+            },
+            _ => unreachable!(),
+        })
+    }
+
     fn action_for(&self, ask: &Ask) -> Result<CallAction, &'static str> {
         if !self.shown {
             return Err("no-calls");
         }
         let busy = self.busy();
         match ask {
+            Ask::ToggleCaptions | Ask::Captions(_) | Ask::CaptionLanguage(_) => self.caption_action(ask),
             Ask::Call { .. } | Ask::TestCall | Ask::Join { .. } | Ask::JoinMeeting { .. } | Ask::MeetNow { .. }
                 if busy =>
             {

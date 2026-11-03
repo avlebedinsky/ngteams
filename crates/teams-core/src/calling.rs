@@ -60,6 +60,8 @@
 //! A call survives the calling socket's reconnect: its links stay as they were (the capture shows a dropped socket
 //! changes none), the socket registers again on the same endpoint, and the media runs on its own threads throughout.
 
+mod captions;
+pub use captions::{CallCaptions, Caption, CaptionPhase};
 mod gallery;
 mod media;
 
@@ -133,6 +135,10 @@ impl std::fmt::Debug for CallParts {
 /// What the account asks of its calls (`EngineRequests::call`); each answered with the call it acted on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CallAction {
+    /// Show or hide this viewer's live captions.
+    Captions { call: CallId, enabled: bool },
+    /// Change shared spoken language after the user confirms everyone is speaking it.
+    CaptionLanguage { call: CallId, language: String },
     /// A call from the chat `chat`: a 1:1 chat's other member, or a group chat's other members as the store holds
     /// them.
     Call { chat: String },
@@ -249,6 +255,8 @@ pub(crate) type Waiting = oneshot::Sender<Result<CallId, EngineError>>;
 
 /// An action the engine resolved (a chat's call into its placement).
 pub(crate) enum Act {
+    Captions(CallId, bool),
+    CaptionLanguage(CallId, String),
     Place(Placement),
     Join(String),
     /// The meeting that runs in a channel joined: the channel, and the meeting as CSA names it, read as the media is
@@ -307,6 +315,7 @@ type Rebuilding = (CallId, Pin<Box<dyn Future<Output = Result<Prepared, String>>
 enum CallStep {
     Push(Option<PushEvent>),
     Written(CallTried),
+    CaptionWritten(captions::Operation, CallTried),
     Due,
     Prepared(Box<Result<Prepared, String>>),
     /// A call's media set up again once it was let in from its meeting's lobby ([`Calling::rebuild`]).
@@ -345,6 +354,7 @@ impl CallingTask {
 /// The engine's calling (see the module docs).
 pub(crate) struct Calling<C, T> {
     calls: Calls,
+    captions: captions::Captions,
     outbox: Arc<Outbox<T>>,
     client: Arc<Client<HttpTransport<C>>>,
     media: CallMedia,
@@ -409,6 +419,7 @@ where
     ) -> Self {
         Self {
             calls: Calls::new(parts.identity),
+            captions: captions::Captions::default(),
             outbox,
             client,
             media: parts.media,
@@ -471,6 +482,7 @@ where
     async fn next(&mut self) -> CallStep {
         let looking = self.live.is_some();
         tokio::select! {
+            (operation, tried) = captions::next(self.captions.writing.as_mut()) => CallStep::CaptionWritten(operation, tried),
             event = next_push(self.push.as_mut()) => CallStep::Push(event),
             landed = land(self.writing.as_mut()) => match landed {
                 Landed::Tried(tried) => CallStep::Written(tried),
@@ -495,6 +507,7 @@ where
         let now = Instant::now();
         match step {
             CallStep::Push(event) => self.pushed(event, now),
+            CallStep::CaptionWritten(operation, tried) => self.caption_written(operation, &tried),
             CallStep::Written(tried) => self.written(tried, now),
             CallStep::Due => self.due(now),
             CallStep::Prepared(prepared) => self.prepared(*prepared, now),
@@ -674,6 +687,12 @@ where
     /// What the machine tells: to the account, and to the media.
     fn told(&mut self, event: CallEvent, now: Instant) {
         match event {
+            CallEvent::CaptionService { call, .. } => self.caption_service_changed(call),
+            CallEvent::CaptionFailed { call } => {
+                if self.up == Some(call) {
+                    self.caption_fail("Live captions could not join this call. Try again.");
+                }
+            }
             CallEvent::Incoming(incoming) => {
                 let group = incoming.group_chat.is_some();
                 self.offers.insert(incoming.call, (incoming.offer, group));
@@ -695,6 +714,14 @@ where
             // that session's own renegotiations (seen 2026-11-03)
             CallEvent::MediaOffer { call, offer }
                 if (self.lobby == Some(call) || self.admitted == Some(call)) && self.replaced != Some(call) =>
+            {
+                self.rebuild(call, offer);
+            }
+            CallEvent::MediaOffer { call, offer }
+                if self
+                    .live
+                    .as_ref()
+                    .is_some_and(|live| live.call == call && offer.new_mixer_session) =>
             {
                 self.rebuild(call, offer);
             }
@@ -771,7 +798,10 @@ where
     fn rebuild(&mut self, call: CallId, offer: MediaContent) {
         self.admitted = None;
         self.replaced = Some(call);
-        log::info!("call {}: let in from the lobby, its media set up again", call.get());
+        log::info!(
+            "call {}: service replaced its media lines, setting up a fresh session",
+            call.get()
+        );
         let setup = media::prepare(
             Arc::clone(&self.client),
             self.media.clone(),
@@ -797,6 +827,7 @@ where
         };
         let sdp = prepared.sdp.clone();
         let muted = self.live.as_ref().is_some_and(|live| live.session.is_muted());
+        let camera_on = self.live.as_ref().is_some_and(|live| live.camera == Some(true));
         // who is in the call stays as the roster told it: the roster tells only changes from here
         let participants = self
             .live
@@ -812,11 +843,19 @@ where
         } else {
             media::content(&sdp)
         };
-        self.live = Some(live);
+        if let Some(old) = self.live.replace(live) {
+            let session = old.session;
+            tokio::task::spawn_blocking(move || close(call, session));
+        }
         self.open_devices(call);
         if let Err(error) = self.calls.answer_media(call, content) {
             self.media_failed(call, &error.to_string(), now);
             return;
+        }
+        if camera_on && let Some(live) = self.live.as_ref() {
+            let (reply, _) = oneshot::channel();
+            self.media_steps
+                .spawn_blocking(media::group_camera(live, Arc::clone(&self.media.devices), true, reply));
         }
         self.show_participants(now);
     }
@@ -900,6 +939,7 @@ where
     }
 
     fn ended(&mut self, call: CallId, end: End) {
+        self.caption_ended(call);
         if self.up == Some(call) {
             self.up = None;
         }
@@ -1166,8 +1206,16 @@ where
     }
 
     fn look_at_media(&mut self, now: Instant) {
+        self.caption_check(now);
         let Some(live) = self.live.as_mut() else { return };
         let call = live.call;
+        if self
+            .rebuilding
+            .as_ref()
+            .is_some_and(|(replacing, _)| *replacing == call)
+        {
+            return;
+        }
         let levels = live.session.levels();
         live.gallery.levels(levels, now);
         for change in live.poll(now) {
@@ -1180,6 +1228,7 @@ where
                     self.emit(Event::CameraOff { call });
                 }
                 MediaChange::AudioClosed { microphone } => self.emit(Event::AudioClosed { call, microphone }),
+                MediaChange::Captions(lines) => self.caption_received(call, lines),
                 MediaChange::Speakers(speakers) => {
                     if let Some(live) = self.live.as_mut() {
                         live.gallery.speakers(&speakers);
@@ -1219,6 +1268,8 @@ where
     fn act(&mut self, act: Act, reply: Waiting) {
         let now = Instant::now();
         let answer = match act {
+            Act::Captions(call, enabled) => self.caption_toggle(call, enabled),
+            Act::CaptionLanguage(call, language) => self.caption_language(call, &language),
             Act::Place(_) | Act::Join(_) | Act::JoinChannel(..) | Act::Answer(_) => return self.set_up(act, reply),
             Act::Decline(call) => self.calls.decline(call).map(|()| call).map_err(CallActionError::from),
             Act::HangUp(call) => self.hang_up(call, now),

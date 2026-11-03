@@ -475,6 +475,7 @@ pub(super) enum MediaChange {
     },
     /// Who spoke last in a group call: the dominant speakers' audio source ids, as its mixer told them.
     Speakers(Vec<i64>),
+    Captions(Vec<teams_media::captions::Caption>),
 }
 
 impl LiveMedia {
@@ -507,6 +508,7 @@ impl LiveMedia {
         let mut changes = Vec::new();
         while let Some(event) = self.session.next_event(Duration::ZERO) {
             match event {
+                SessionEvent::Captions(lines) => changes.push(MediaChange::Captions(lines)),
                 SessionEvent::Connected => {
                     self.connected = true;
                     self.lost = None;

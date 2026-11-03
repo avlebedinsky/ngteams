@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use serde_json::Value;
 use teams_lab_targets::{LabRoster, TargetError};
 
+mod captions;
 mod delivery;
 mod wire;
 
@@ -65,6 +66,8 @@ struct Call {
     ended: bool,
     controller: Option<String>,
     inviter: Option<String>,
+    actor: Option<(String, String)>,
+    caption_version: Option<u64>,
 }
 
 struct PendingResponse {
@@ -202,6 +205,7 @@ fn bind_links(state: &mut State, key: u64, links: &Value) -> Result<(), TargetEr
             "updateEndpointState"
                 | "updateEndpointMetadata"
                 | "addParticipantAndModality"
+                | "addParticipant"
                 | "admit"
                 | "removeParticipant"
                 | "attach"

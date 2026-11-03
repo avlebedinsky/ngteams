@@ -61,8 +61,8 @@ mod workflows;
 
 pub use calendar::{EventWrite, EventWritten, Invitable, MeetingAvailability};
 pub use calling::{
-    CallAction, CallActionError, CallMedia, CallParticipant, CallParts, CallStatus, CallVideo, CallView, GROUP_SLOTS,
-    IncomingCall, LobbyPerson, Relay, VideoOutput,
+    CallAction, CallActionError, CallCaptions, CallMedia, CallParticipant, CallParts, CallStatus, CallVideo, CallView,
+    Caption, CaptionPhase, GROUP_SLOTS, IncomingCall, LobbyPerson, Relay, VideoOutput,
 };
 pub use channels::{ChannelDraft, ChannelMade, ChannelProblem};
 pub use emoticons::Strip;

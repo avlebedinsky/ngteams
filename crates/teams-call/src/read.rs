@@ -58,6 +58,8 @@ pub(crate) fn media(content: &Value) -> Option<MediaContent> {
     let blob = content.get("blob")?.as_str()?;
     let content_type = content.get("contentType")?.as_str()?;
     let mut media = MediaContent::new(blob, content_type);
+    media.new_mixer_session = content.get("newOffer").and_then(Value::as_bool) == Some(true)
+        && content.get("fromMixer").and_then(Value::as_bool) == Some(true);
     media.media_leg_id = content.get("mediaLegId").and_then(Value::as_str).map(str::to_owned);
     Some(media)
 }
@@ -66,6 +68,7 @@ pub(crate) fn media(content: &Value) -> Option<MediaContent> {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Conversation {
     pub(crate) leave: Option<CallLink>,
+    pub(crate) caption_add: Option<CallLink>,
     pub(crate) endpoint_metadata: Option<CallLink>,
     pub(crate) endpoint_state: Option<CallLink>,
     /// `addParticipantAndModality`: the `…/add` an `add` posts to.
@@ -80,6 +83,7 @@ impl Conversation {
         let at = |name: &str| links.get(name).and_then(Value::as_str).and_then(CallLink::parse);
         Self {
             leave: at("leave"),
+            caption_add: at("addParticipant"),
             endpoint_metadata: at("updateEndpointMetadata"),
             endpoint_state: at("updateEndpointState"),
             add: at("addParticipantAndModality"),
@@ -300,6 +304,10 @@ pub(crate) fn answered_roster(body: &[u8]) -> Option<Vec<RosterEntry>> {
 }
 
 fn roster_entry(mri: &str, entry: &Value) -> Option<RosterEntry> {
+    // The built-in caption service is hidden in Teams and is never a person in the gallery.
+    if mri == teams_proto::captions::CAPTION_SERVICE_MRI {
+        return None;
+    }
     let version = entry.get("version")?.as_u64()?;
     let endpoints = entry.get("endpoints").and_then(Value::as_object);
     let in_call = endpoints.is_some_and(|endpoints| {

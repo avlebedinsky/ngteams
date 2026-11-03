@@ -29,6 +29,9 @@ Status:
   (`ngteams`) makes and answers the user's own calls under the rules the user approved (`docs/personal-build.md`,
   "Calls"), tested on the mock; the user's own real-call run, the checklist in `docs/m3-acceptance.md`, is still to
   come. Plan `docs/plans/completed/20261024-native-teams-m3-calls.md`, outcome `docs/m3-acceptance.md`.
+- **Live captions**: calls and meetings use Microsoft Teams' built-in caption service, with Show/Hide live captions
+  (Alt+Shift+C), speaker names, live interim/final text, and confirmed meeting spoken-language changes. Captions stay
+  in memory and clear on hide or call end. Protocol and lab verification: [live captions](docs/protocol/live-captions.md).
 - **Next: M4**, meetings and the calendar (`docs/plans/20261026-native-teams-m4-meetings.md`).
 
 Hard rules for contributors and agents are in [CLAUDE.md](CLAUDE.md).

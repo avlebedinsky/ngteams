@@ -179,3 +179,79 @@ fn wrong_actor_followups_unbound_joins_and_arbitrary_service_links_are_refused()
     let leave = CallWire::synthetic(Method::Post, &format!("{CONV}/leave"), None);
     assert!(calls.plan(&leave).unwrap().cleanup);
 }
+
+#[test]
+fn captions_are_bound_to_own_leg_and_exact_service_and_never_accept_other_bots() {
+    use crate::captions::{CAPTION_SERVICE_MRI, CaptionCommandLink, CaptionWrite};
+    let calls = bindings(A);
+    let mut wire = start(A, B);
+    let mut body = wire.body().unwrap().clone();
+    body["participants"]["from"]["endpointId"] = json!("00000000-0000-4000-8000-0000000000e1");
+    body["participants"]["from"]["participantId"] = json!("00000000-0000-4000-8000-0000000000e2");
+    wire = CallWire::synthetic(Method::Post, START, Some(body));
+    let plan = calls.plan(&wire).unwrap();
+    let key = calls.begin(&plan, Some(vec![A.into(), B.into()])).unwrap();
+    calls.answered(key, &plan, 201, &serde_json::to_vec(&json!({"conversationController":CONV,"links":{"addParticipant":format!("{CONV}/addParticipant"),"leave":format!("{CONV}/leave")}})).unwrap());
+    let actor = crate::CallParticipant {
+        mri: teams_fence::Mri::new(A),
+        display_name: None,
+        endpoint_id: "00000000-0000-4000-8000-0000000000e1".into(),
+        participant_id: Some("00000000-0000-4000-8000-0000000000e2".into()),
+        language_id: None,
+    };
+    let context = crate::CallContext::new("00000000-0000-4000-8000-0000000000c1");
+    let chat = one_to_one_id(A, B).unwrap();
+    let invite = CaptionWrite::invite(
+        &context,
+        &crate::CallLink::parse(&format!("{CONV}/addParticipant")).unwrap(),
+        &actor,
+        &chat,
+        (
+            &callback("segment/conversation/addParticipantSuccess"),
+            &callback("segment/conversation/addParticipantFailure"),
+        ),
+    )
+    .unwrap();
+    let invite_plan = calls.plan_caption(&invite).unwrap();
+    calls.begin(&invite_plan, Some(vec![A.into(), B.into()])).unwrap();
+    let command = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/aks-prod-zz-api.callrecorder.teams.cloud.microsoft:21606/v2/oncommand/00000000-0000-4000-8000-000000000001";
+    let command_link = CaptionCommandLink::parse(command).unwrap();
+    let write = CaptionWrite::start(&context, &command_link, &actor, &chat).unwrap();
+    assert!(calls.plan_caption(&write).is_err());
+    let service = json!({"participants":{CAPTION_SERVICE_MRI:{"state":"active","endpoints":{"synthetic":{"endpointMetadata":{"commandUrl":command,"spokenLanguage":"en-us","processingModes":{"closedCaptions":{"state":"Inactive"}}}}}}}});
+    assert!(matches!(
+        calls.record_delivery(&packet("rosterUpdate", 20, &service)).unwrap(),
+        delivery::DeliveryPlan::Known(CallObservation::Allowed)
+    ));
+    assert!(calls.plan_caption(&write).is_ok());
+    assert_eq!(calls.state().calls[&key].members, BTreeSet::from([A.into(), B.into()]));
+    let mut wrong_actor = actor.clone();
+    wrong_actor.participant_id = Some("00000000-0000-4000-8000-000000000099".into());
+    let wrong = CaptionWrite::start(&context, &command_link, &wrong_actor, &chat).unwrap();
+    assert!(calls.plan_caption(&wrong).is_err());
+    // The service's AddSuccess array is an operation result, never an outsider roster.
+    let success_path = url::Url::parse(&callback("segment/conversation/addParticipantSuccess"))
+        .unwrap()
+        .path()
+        .to_owned();
+    let mut success = packet(
+        "rosterUpdate",
+        21,
+        &json!({"participants":[{"id":CAPTION_SERVICE_MRI}]}),
+    );
+    success.path = success_path;
+    assert!(matches!(
+        calls.record_delivery(&success).unwrap(),
+        delivery::DeliveryPlan::Known(CallObservation::Allowed)
+    ));
+    let outsider = packet(
+        "rosterUpdate",
+        22,
+        &json!({"participants":{"28:00000000-0000-4000-8000-000000000099":{"state":"active"}}}),
+    );
+    assert!(matches!(
+        calls.record_delivery(&outsider).unwrap(),
+        delivery::DeliveryPlan::Known(CallObservation::TargetChanged)
+    ));
+    assert!(calls.plan_caption(&write).is_err());
+}

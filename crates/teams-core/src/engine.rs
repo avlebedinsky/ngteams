@@ -412,6 +412,11 @@ pub enum Event {
     /// Who is in the account's call besides it, whose video each line shows, and who is speaking ([`CallView`]):
     /// told whenever that changed.
     CallParticipants { call: CallId, view: CallView },
+    /// Ephemeral live captions for this viewer. Recognized speech is redacted in debug output.
+    CallCaptions {
+        call: CallId,
+        captions: crate::CallCaptions,
+    },
     /// Who waits in the lobby of the account's meeting now (empty once nobody does): each let in or turned away with
     /// [`CallAction::Lobby`]. Told whenever that changed.
     Lobby { call: CallId, waiting: Vec<LobbyPerson> },
@@ -2306,6 +2311,8 @@ where
         }
         log::info!("action: {}", described::call(&action));
         let act = match action {
+            CallAction::Captions { call, enabled } => Act::Captions(call, enabled),
+            CallAction::CaptionLanguage { call, language } => Act::CaptionLanguage(call, language),
             CallAction::Call { chat } => match self.placement(&chat) {
                 Ok(placement) => Act::Place(placement),
                 Err(error) => {

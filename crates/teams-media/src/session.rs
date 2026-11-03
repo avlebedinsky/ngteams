@@ -118,6 +118,8 @@ pub enum SessionEvent {
     ControlTimedOut,
     /// Who spoke last in a group call, as its mixer tells it: the dominant speakers' audio source ids.
     DominantSpeakers(Vec<i64>),
+    /// Ephemeral service captions, with debug output redacting recognized speech.
+    Captions(Vec<crate::captions::Caption>),
 }
 
 /// How loud the call is on each side now: the RMS level (0 to 1) of the last 10 ms the microphone heard (after its
@@ -321,6 +323,7 @@ impl MediaSession {
             peer: Arc::clone(&peer),
             inputs: input_rx,
             control: None,
+            captions: crate::captions::Receiver::default(),
             decoding: Arc::new(Mutex::new(HashSet::new())),
         };
         let handle = thread::Builder::new()
@@ -598,6 +601,7 @@ struct Network {
     peer: Arc<Peer>,
     inputs: Receiver<Input>,
     control: Option<Control>,
+    captions: crate::captions::Receiver,
     /// The video lines a decoding thread runs for now, by mid (a thread takes its line out when it ends).
     decoding: Arc<Mutex<HashSet<String>>>,
 }
@@ -672,6 +676,10 @@ impl Network {
                 }
             }
             PeerEvent::ChannelMessage(data) => {
+                let captions = self.captions.receive(&data);
+                if !captions.is_empty() {
+                    self.shared.report(SessionEvent::Captions(captions));
+                }
                 if let Some(control) = self.control.as_mut() {
                     control.receive(&data, &self.peer, &self.shared);
                 }

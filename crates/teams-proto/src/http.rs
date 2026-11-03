@@ -118,6 +118,7 @@ use crate::request::Request;
 use crate::search::{SUBSTRATE_AUDIENCE, SUBSTRATE_HOST, SubstrateSearch};
 use crate::thumbnail::{ThumbnailLink, is_thumbnail_link};
 use crate::write::{Authorized, CallWire, Mutating, Registry, on_calling_base};
+mod captions;
 mod drive;
 mod lab_targets;
 mod native_calls;
@@ -1061,13 +1062,14 @@ impl<C: Credentials> HttpTransport<C> {
         if !on_calling_base(url) {
             return Err(HttpError::Refused(Refusal::NotAllowed));
         }
-        let lab_attempt = self.preflight_native_call(call).await?;
         let token = self
             .credentials
             .skypetoken()
             .await
             .map_err(HttpError::Credentials)?
             .ok_or(HttpError::Refused(Refusal::NoSkypetoken))?;
+        // Renew credentials before the final independent actor/recipient proof.
+        let lab_attempt = self.preflight_native_call(call).await?;
         let body = call.body_bytes();
         let pending = match call.registry() {
             Registry::Nothing => Pending::Nothing,
@@ -1410,6 +1412,10 @@ impl Drop for FileBody {
 impl<C: Credentials> Transport for HttpTransport<C> {
     type Error = HttpError;
 
+    async fn deliver_caption(&self, write: crate::captions::CaptionWrite) -> Option<Result<Response, HttpError>> {
+        Some(self.deliver_caption_write(&write).await)
+    }
+
     async fn deliver_attachment(&self, write: crate::DriveWrite) -> Option<Result<Response, HttpError>> {
         if self.read_only {
             return Some(Err(
@@ -1561,6 +1567,7 @@ enum Auth<'a> {
     None,
     Bearer(&'a Secret),
     Skypetoken(&'a Secret),
+    Recorder { bearer: &'a Secret, skype: &'a Secret },
 }
 
 impl<'a> Auth<'a> {
@@ -1972,6 +1979,12 @@ fn header_map(headers: &[(String, String)], auth: Auth<'_>) -> Result<HeaderMap,
         Auth::None => None,
         Auth::Bearer(token) => Some((AUTHORIZATION, format!("Bearer {}", token.expose()))),
         Auth::Skypetoken(token) => Some((HeaderName::from_static(SKYPETOKEN_HEADER), token.expose().to_owned())),
+        Auth::Recorder { bearer, skype } => {
+            let mut value = HeaderValue::from_str(skype.expose()).map_err(|_| HttpError::Refused(Refusal::Token))?;
+            value.set_sensitive(true);
+            map.insert(HeaderName::from_static(SKYPETOKEN_HEADER), value);
+            Some((AUTHORIZATION, format!("Bearer {}", bearer.expose())))
+        }
     };
     if let Some((name, value)) = credential {
         let mut value = HeaderValue::from_str(&value).map_err(|_| HttpError::Refused(Refusal::Token))?;

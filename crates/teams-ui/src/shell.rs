@@ -110,6 +110,7 @@ actions!(
         DeclineCall,
         HangUpCall,
         ToggleMuteCall,
+        ToggleCaptionsCall,
         ToggleCameraCall
     ]
 );
@@ -196,6 +197,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-shift-d", DeclineCall, None),
         KeyBinding::new("ctrl-shift-h", HangUpCall, None),
         KeyBinding::new("ctrl-shift-m", ToggleMuteCall, None),
+        KeyBinding::new("alt-shift-c", ToggleCaptionsCall, None),
         // Teams' own key for the camera
         KeyBinding::new("ctrl-shift-o", ToggleCameraCall, None),
     ]);
@@ -1118,6 +1120,7 @@ impl Shell {
             CallCommand::HangUp => self.ask_call(Ask::HangUp, cx),
             CallCommand::ToggleMute => self.ask_call(Ask::ToggleMute, cx),
             CallCommand::ToggleCamera => self.ask_call(Ask::ToggleCamera, cx),
+            CallCommand::ToggleCaptions => self.ask_call(Ask::ToggleCaptions, cx),
         }
     }
 
@@ -2728,6 +2731,22 @@ fn pane_header(face: Option<Avatar>, title: impl Into<SharedString>, palette: Pa
         )
 }
 
+impl Shell {
+    fn call_keys(shell: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
+        shell
+            .on_action(cx.listener(|this, _: &CallChat, _, cx| this.call_chat(cx)))
+            .on_action(cx.listener(|this, _: &JoinCall, _, cx| this.join_call(cx)))
+            .on_action(cx.listener(|this, _: &AnswerCall, _, cx| this.ask_call(Ask::Answer, cx)))
+            .on_action(cx.listener(|this, _: &DeclineCall, _, cx| this.ask_call(Ask::Decline, cx)))
+            .on_action(cx.listener(|this, _: &HangUpCall, _, cx| this.ask_call(Ask::HangUp, cx)))
+            .on_action(cx.listener(|this, _: &ToggleMuteCall, _, cx| this.ask_call(Ask::ToggleMute, cx)))
+            .on_action(cx.listener(|this, _: &ToggleCaptionsCall, _, cx| this.ask_call(Ask::ToggleCaptions, cx)))
+            .on_action(cx.listener(|this, _: &ToggleCameraCall, _, cx| {
+                this.ask_call(Ask::ToggleCamera, cx);
+            }))
+    }
+}
+
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = theme::current(cx);
@@ -2769,18 +2788,7 @@ impl Render for Shell {
             .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, _, cx| this.used(cx)))
             .map(|shell| Self::shell_keys(shell, cx))
             // the call keys only in a build that shows calls: elsewhere they reach whatever else takes them
-            .when(self.models.calls.read(cx).shows(), |shell| {
-                shell
-                    .on_action(cx.listener(|this, _: &CallChat, _, cx| this.call_chat(cx)))
-                    .on_action(cx.listener(|this, _: &JoinCall, _, cx| this.join_call(cx)))
-                    .on_action(cx.listener(|this, _: &AnswerCall, _, cx| this.ask_call(Ask::Answer, cx)))
-                    .on_action(cx.listener(|this, _: &DeclineCall, _, cx| this.ask_call(Ask::Decline, cx)))
-                    .on_action(cx.listener(|this, _: &HangUpCall, _, cx| this.ask_call(Ask::HangUp, cx)))
-                    .on_action(cx.listener(|this, _: &ToggleMuteCall, _, cx| this.ask_call(Ask::ToggleMute, cx)))
-                    .on_action(cx.listener(|this, _: &ToggleCameraCall, _, cx| {
-                        this.ask_call(Ask::ToggleCamera, cx);
-                    }))
-            })
+            .when(self.models.calls.read(cx).shows(), |shell| Self::call_keys(shell, cx))
             .relative()
             .size_full()
             .flex()

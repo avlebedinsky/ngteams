@@ -128,6 +128,13 @@ pub struct Incoming {
 /// What the account is told.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CallEvent {
+    /// Built-in caption service metadata for this call (independent of local caption visibility).
+    CaptionService {
+        call: CallId,
+        service: Option<teams_proto::captions::CaptionService>,
+    },
+    /// The caption service invitation failed; the voice call continues.
+    CaptionFailed { call: CallId },
     /// An invitation rings here: answer it ([`Calls::answer`]) or decline it ([`Calls::decline`]); nothing answers it
     /// otherwise.
     Incoming(Incoming),
@@ -501,6 +508,18 @@ impl Calls {
             Placement::Meeting { .. } | Placement::Channel { .. } => Side::Meeting,
         };
         let mut call = self.new_call(side, now)?;
+        call.caption_thread = match placement {
+            Placement::Chat {
+                group_chat: Some(chat), ..
+            }
+            | Placement::Meeting { chat, .. } => Some(chat.clone()),
+            Placement::Chat {
+                callees,
+                group_chat: None,
+            } if callees.len() == 1 => teams_proto::one_to_one_id(self.identity.mri.as_str(), callees[0].as_str()),
+            Placement::Channel { channel } => Some(channel.clone()),
+            _ => None,
+        };
         if let Placement::Channel { channel } = placement {
             call.meet_now = Some((channel.clone(), offer.clone()));
             let write = build::start(&mut call, &self.identity, placement, offer)?;
@@ -565,6 +584,7 @@ impl Calls {
             conversation: conversation.clone(),
         };
         let mut call = self.new_call(side, now)?;
+        call.caption_thread = Some(chat.to_owned());
         if let Some(followed) = self
             .followed
             .get(chat)
@@ -600,6 +620,7 @@ impl Calls {
             conversation: meetup.conversation.clone(),
         };
         let mut call = self.new_call(side, now)?;
+        call.caption_thread = Some(channel.to_owned());
         let into = build::JoinInto {
             chat: channel,
             message_id: Some(&meetup.message_id),
@@ -1243,7 +1264,13 @@ impl Calls {
                 self.roster_updated(delivery);
                 self.echo_present(now);
             }
-            // progress and conversation updates, an add's outcome: read by nothing yet
+            (Kind::Conversation, "addParticipantFailure") => {
+                if let Some(call) = self.call.as_mut().filter(|call| call.caption_inviting) {
+                    call.caption_inviting = false;
+                    self.out.event(CallEvent::CaptionFailed { call: call.id });
+                }
+            }
+            // progress and conversation updates
             _ => {}
         }
     }
@@ -1443,6 +1470,10 @@ impl Calls {
         let agent = self.agent.clone().ok_or(CallError::NoEndpoint)?;
         let context = CallContext::fresh()?.with_region(self.identity.region.clone(), self.identity.partition.clone());
         let me = self.participant()?;
+        let caption_thread = invitation
+            .group_chat
+            .clone()
+            .or_else(|| teams_proto::one_to_one_id(self.identity.mri.as_str(), invitation.caller.as_str()));
         let mut call = Call::new(
             CallId(self.next_call + 1),
             Side::Invited(Box::new(invitation)),
@@ -1451,6 +1482,7 @@ impl Calls {
             agent,
             now,
         );
+        call.caption_thread = caption_thread;
         let write = build::attach(&mut call, &self.identity)?;
         self.next_call += 1;
         self.receipt(delivery);
@@ -1495,6 +1527,7 @@ impl Calls {
 
     /// A roster update at the call's own callback: the participants told when they changed.
     fn roster_updated(&mut self, delivery: &Delivery) {
+        self.caption_roster(&delivery.body);
         let Some(update) = read::roster(&delivery.body) else {
             return;
         };
@@ -1763,3 +1796,6 @@ fn lobby_told(call: &mut Call, out: &mut Out, me: &Mri) {
         out.event(CallEvent::InLobby { call: call.id, waiting });
     }
 }
+
+#[path = "captions.rs"]
+mod captions;

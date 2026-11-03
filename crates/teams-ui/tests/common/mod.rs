@@ -823,7 +823,9 @@ impl Core for FakeCore {
             return reply;
         }
         let named = match action {
-            CallAction::Answer { call }
+            CallAction::Captions { call, .. }
+            | CallAction::CaptionLanguage { call, .. }
+            | CallAction::Answer { call }
             | CallAction::Decline { call }
             | CallAction::HangUp { call }
             | CallAction::Mute { call, .. }

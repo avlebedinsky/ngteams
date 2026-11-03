@@ -982,7 +982,12 @@ fn the_camera_is_off_when_a_call_starts_and_goes_on_and_off_by_its_key_its_butto
         .read(|cx| CallCommand::fitting(calls_of(&rig).read(cx), Some(AB)));
     assert_eq!(
         offered,
-        [CallCommand::HangUp, CallCommand::ToggleMute, CallCommand::ToggleCamera]
+        [
+            CallCommand::HangUp,
+            CallCommand::ToggleMute,
+            CallCommand::ToggleCaptions,
+            CallCommand::ToggleCamera
+        ]
     );
 
     // a camera that went off by itself (its device gone, its encoder failed) is shown off
@@ -1274,7 +1279,14 @@ fn a_build_without_video_has_no_camera_and_its_key_asks_nothing() {
     let offered = rig
         .cx
         .read(|cx| CallCommand::fitting(calls_of(&rig).read(cx), Some(AB)));
-    assert_eq!(offered, [CallCommand::HangUp, CallCommand::ToggleMute]);
+    assert_eq!(
+        offered,
+        [
+            CallCommand::HangUp,
+            CallCommand::ToggleMute,
+            CallCommand::ToggleCaptions
+        ]
+    );
 }
 
 #[test]
@@ -2486,4 +2498,76 @@ fn a_meeting_is_not_offered_while_a_call_is_up_and_its_end_offers_rejoin() {
     assert!(drawn(window, "call-end-rejoin"), "a meeting can be gone into again");
     click(window, "call-end-rejoin");
     assert_eq!(actions(&rig).last(), Some(&join_meeting_action()));
+}
+
+#[test]
+fn caption_shortcut_pane_hide_and_call_end_keep_speech_ephemeral() {
+    let rig = calling();
+    let (trace, written) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    click(cx, "chat-call");
+    status(&rig, 1, CallStatus::Connected);
+    let window = stage(&rig, &windows);
+    window.simulate_keystrokes("alt-shift-c");
+    window.run_until_parked();
+    assert!(
+        rig.core
+            .call_actions
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|action| matches!(action, CallAction::Captions { call: id, enabled:true } if *id == call(1)))
+    );
+    let captions = teams_core::CallCaptions {
+        phase: teams_core::CaptionPhase::On,
+        spoken_language: "en-us".into(),
+        error: None,
+        lines: vec![teams_core::Caption {
+            id: "synthetic/1".into(),
+            speaker: Some(LAB_A.into()),
+            display_name: Some("Lab Speaker".into()),
+            text: "Private synthetic caption words.".into(),
+            final_result: true,
+            spoken_language: "en-us".into(),
+            track_language: "en-us".into(),
+            audio_timestamp: 123,
+            duration: 10,
+        }],
+    };
+    rig.send(Event::CallCaptions {
+        call: call(1),
+        captions,
+    });
+    assert!(drawn(window, "call-captions"));
+    assert!(drawn(window, "call-caption-text"));
+    // A stale other call cannot replace these lines.
+    rig.send(Event::CallCaptions {
+        call: call(99),
+        captions: teams_core::CallCaptions::default(),
+    });
+    assert!(drawn(window, "call-captions"));
+    window.simulate_keystrokes("alt-shift-c");
+    window.run_until_parked();
+    assert!(
+        rig.core
+            .call_actions
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|action| matches!(action, CallAction::Captions { call: id, enabled:false } if *id == call(1)))
+    );
+    rig.send(Event::CallCaptions {
+        call: call(1),
+        captions: teams_core::CallCaptions::default(),
+    });
+    assert!(!drawn(window, "call-captions"));
+    status(&rig, 1, CallStatus::Ended(End::HungUp));
+    assert!(rig.cx.read(|cx| rig.models.calls.read(cx).captions().lines.is_empty()));
+    assert!(
+        !String::from_utf8(written.0.lock().unwrap().clone())
+            .unwrap()
+            .contains("Private synthetic caption words")
+    );
 }

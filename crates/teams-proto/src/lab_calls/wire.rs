@@ -10,9 +10,9 @@ pub(crate) struct CallPlan {
     pub(crate) cleanup: bool,
     pub(crate) added: BTreeSet<String>,
     pub(crate) peers: BTreeSet<String>,
-    entry: bool,
-    operation: String,
-    body: Value,
+    pub(super) entry: bool,
+    pub(super) operation: String,
+    pub(super) body: Value,
 }
 
 impl LabCallBindings {
@@ -193,6 +193,8 @@ impl LabCallBindings {
                     ended: false,
                     controller: None,
                     inviter: None,
+                    actor: None,
+                    caption_version: None,
                 },
             );
             key
@@ -203,6 +205,12 @@ impl LabCallBindings {
         }
         add_callbacks(&mut state, key, found)?;
         let call = state.calls.get_mut(&key).ok_or(TargetError::Conversation)?;
+        if let Some(actor) = actor_in(&plan.body) {
+            if call.actor.as_ref().is_some_and(|known| known != &actor) {
+                return Err(TargetError::Identity);
+            }
+            call.actor = Some(actor);
+        }
         if !plan.cleanup && (call.unsafe_target || call.ended) {
             return Err(TargetError::Recipients);
         }
@@ -241,6 +249,24 @@ impl LabCallBindings {
             call.unsafe_target = true;
         }
     }
+}
+
+fn actor_in(body: &Value) -> Option<(String, String)> {
+    [
+        "/participants/from",
+        "/from",
+        "/callProgress/sender",
+        "/callAcceptance/acceptedBy",
+        "/additionalActions/0/input/participants/from",
+    ]
+    .into_iter()
+    .find_map(|pointer| {
+        let actor = body.pointer(pointer)?;
+        Some((
+            actor.get("endpointId")?.as_str()?.to_owned(),
+            actor.get("participantId")?.as_str()?.to_owned(),
+        ))
+    })
 }
 
 fn method_matches(operation: &str, method: &str) -> bool {

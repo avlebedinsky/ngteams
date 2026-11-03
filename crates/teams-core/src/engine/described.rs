@@ -41,6 +41,8 @@ pub(super) fn action(action: &Action) -> String {
 /// A call action by its kind and ids.
 pub(super) fn call(action: &CallAction) -> String {
     match action {
+        CallAction::Captions { call, enabled } => format!("call {} captions {enabled}", call.get()),
+        CallAction::CaptionLanguage { call, .. } => format!("call {} caption spoken language", call.get()),
         CallAction::Call { chat } => format!("a call from {chat}"),
         CallAction::TestCall { echo } => format!("the test call of {echo}"),
         CallAction::Join { chat } => format!("a join of the call in {chat}"),
@@ -150,6 +152,12 @@ fn plain(event: &Event) -> String {
             end.phrase,
             end.by.as_ref().map_or("nobody", |by| by.as_str()),
             end.categories
+        ),
+        Event::CallCaptions { call, captions } => format!(
+            "call {}: captions {:?}, {} utterances",
+            call.get(),
+            captions.phase,
+            captions.lines.len()
         ),
         Event::Call { call, status } => format!("call {}: {status:?}", call.get()),
         Event::Voicemail { call } => format!("call {}: taken by the callee's voicemail", call.get()),

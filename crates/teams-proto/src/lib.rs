@@ -52,6 +52,7 @@
 mod ams;
 mod attachment;
 mod calendar;
+pub mod captions;
 mod channel_meeting;
 mod channel_read;
 pub mod chat;
@@ -169,3 +170,6 @@ pub use write::{
 };
 
 pub use workflow::{WorkflowFailure, WorkflowRequest, WorkflowResponse};
+
+/// Deterministic work-account one-to-one conversation identity.
+pub use teams_lab_targets::one_to_one_id;

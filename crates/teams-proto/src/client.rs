@@ -24,6 +24,15 @@ use crate::write::{Authorized, Mutating, TargetMismatch};
 pub trait Transport: Sync {
     type Error: Error + Send + Sync + 'static;
 
+    /// A typed call-scoped operation on Microsoft's built-in caption service.
+    fn deliver_caption(
+        &self,
+        write: crate::captions::CaptionWrite,
+    ) -> impl Future<Output = Option<Result<Response, Self::Error>>> + Send {
+        let _ = write;
+        async { None }
+    }
+
     /// A typed own-drive attachment operation, issued only by the outbox after its operational preflight.
     /// A transport without this route answers `None` and sends nothing.
     fn deliver_attachment(

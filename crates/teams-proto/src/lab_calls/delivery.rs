@@ -42,7 +42,8 @@ impl LabCallBindings {
             state.responses.retain(|_, response| response.key != key);
             return Ok(DeliveryPlan::Known(CallObservation::Allowed));
         }
-        if !self.delivered_people(&body) {
+        let roster_update = delivery.path.ends_with("/rosterUpdate/");
+        if !self.delivered_people(&body, roster_update) {
             if let Some(call) = state.calls.get_mut(&key) {
                 call.unsafe_target = true;
             }
@@ -51,13 +52,20 @@ impl LabCallBindings {
         if call.unsafe_target {
             return Err(TargetError::Recipients);
         }
-        let roster = body
-            .get("participants")
-            .or_else(|| body.pointer("/roster/participants"));
+        let roster = roster_update
+            .then(|| {
+                body.get("participants")
+                    .or_else(|| body.pointer("/roster/participants"))
+            })
+            .flatten();
         if let Some(roster) = roster.and_then(Value::as_object)
             && let Some(call) = state.calls.get_mut(&key)
         {
-            call.members.extend(roster.keys().cloned());
+            call.members
+                .extend(roster.keys().filter(|mri| self.roster.account(mri).is_some()).cloned());
+        }
+        if roster_update {
+            super::captions::bind_service(&mut state, key, &delivery.body)?;
         }
         super::wire::bind_answer(&mut state, key, &body)?;
         if [
@@ -131,6 +139,8 @@ impl LabCallBindings {
                     ended: false,
                     controller: Some(controller.clone()),
                     inviter: Some(caller.to_owned()),
+                    actor: None,
+                    caption_version: None,
                 },
             );
             key
@@ -146,7 +156,7 @@ impl LabCallBindings {
         Ok(DeliveryPlan::Incoming { key, chat })
     }
 
-    fn delivered_people(&self, body: &Value) -> bool {
+    fn delivered_people(&self, body: &Value, roster_update: bool) -> bool {
         for at in [
             "/callAcceptance/acceptedBy/id",
             "/callProgress/sender/id",
@@ -159,15 +169,18 @@ impl LabCallBindings {
                 return false;
             }
         }
+        if !roster_update {
+            return true;
+        }
         for at in ["/participants", "/roster/participants"] {
             if let Some(value) = body.pointer(at) {
                 let Some(participants) = value.as_object() else {
                     return false;
                 };
-                if participants
-                    .iter()
-                    .any(|(mri, entry)| self.roster.account(mri).is_none() || !entry.is_object())
-                {
+                if participants.iter().any(|(mri, entry)| {
+                    (self.roster.account(mri).is_none() && mri != crate::captions::CAPTION_SERVICE_MRI)
+                        || !entry.is_object()
+                }) {
                     return false;
                 }
             }
