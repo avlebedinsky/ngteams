@@ -126,6 +126,12 @@ pub struct FakeCore {
     pub team_roster: Mutex<Vec<teams_core::TeamMember>>,
     /// A team's settings, as the service keeps them.
     pub team_settings: Mutex<Option<String>>,
+    /// Tags, code, pending membership and analytics returned by the fake service.
+    pub team_tags: Mutex<teams_proto::TagsRead>,
+    pub team_code: Mutex<Option<String>>,
+    pub team_requests: Mutex<Vec<teams_core::TeamMember>>,
+    pub team_numbers: Mutex<Option<teams_proto::TeamAnalytics>>,
+    pub team_analytics_asked: Mutex<Vec<(String, teams_proto::AnalyticsPeriod)>>,
     /// A team's installed apps.
     pub team_apps: Mutex<Vec<teams_proto::InstalledApp>>,
     /// The apps the store offers.
@@ -220,6 +226,11 @@ impl Default for FakeCore {
             team_views: Mutex::default(),
             team_roster: Mutex::default(),
             team_settings: Mutex::default(),
+            team_tags: Mutex::default(),
+            team_code: Mutex::default(),
+            team_requests: Mutex::default(),
+            team_numbers: Mutex::default(),
+            team_analytics_asked: Mutex::default(),
             team_apps: Mutex::default(),
             store_apps: Mutex::default(),
             templates: Mutex::default(),
@@ -418,6 +429,27 @@ impl Core for FakeCore {
         Reply::ready(Ok(locked(&self.team_settings).clone()))
     }
 
+    fn team_tags(&self, _team: String) -> Reply<teams_proto::TagsRead> {
+        Reply::ready(Ok(locked(&self.team_tags).clone()))
+    }
+
+    fn team_code(&self, _team: String) -> Reply<Option<String>> {
+        Reply::ready(Ok(locked(&self.team_code).clone()))
+    }
+
+    fn team_join_requests(&self, _group: String) -> Reply<Vec<teams_core::TeamMember>> {
+        Reply::ready(Ok(locked(&self.team_requests).clone()))
+    }
+
+    fn team_analytics(
+        &self,
+        group: String,
+        period: teams_proto::AnalyticsPeriod,
+    ) -> Reply<Option<teams_proto::TeamAnalytics>> {
+        locked(&self.team_analytics_asked).push((group, period));
+        Reply::ready(Ok(locked(&self.team_numbers).clone()))
+    }
+
     fn team_apps(&self, _team: String) -> Reply<Vec<teams_proto::InstalledApp>> {
         Reply::ready(Ok(locked(&self.team_apps).clone()))
     }
@@ -441,7 +473,7 @@ impl Core for FakeCore {
         _period: teams_proto::AnalyticsPeriod,
     ) -> Reply<Option<teams_proto::TeamAnalytics>> {
         locked(&self.channel_analytics_asked).push(channel);
-        Reply::ready(Ok(None))
+        Reply::ready(Ok(locked(&self.team_numbers).clone()))
     }
 
     fn add_channel_members(

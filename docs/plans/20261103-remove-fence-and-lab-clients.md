@@ -459,13 +459,50 @@ Full workspace runtime and coverage validation remain Task 12. The user-owned pl
 other plan files were left untouched.
 
 ### Task 12: Verify acceptance criteria
-- [ ] `cargo tree -p ngteams` has no `teams-fence` or `proto-lab`; `rg -i 'fence|lab\.toml' crates/ngteams` finds
+- [x] `cargo tree -p ngteams` has no `teams-fence` or `proto-lab`; `rg -i 'fence|lab\.toml' crates/ngteams` finds
       nothing stale
-- [ ] at `debug` the app's log has every API call's full request and response and every Trouter frame, credentials
+- [x] at `debug` the app's log has every API call's full request and response and every Trouter frame, credentials
       redacted (the tests of Tasks 6 and 8 pass)
-- [ ] `cargo check -p ngteams --release` passes (only `run-lab.sh` and the install script build it)
-- [ ] `cargo clippy --workspace --all-targets`, `scripts/lint-report.sh` and `cargo test --workspace` pass
-- [ ] `scripts/coverage.sh --require-target` passes for every remaining runtime crate
+- [x] `cargo check -p ngteams --release` passes (only `run-lab.sh` and the install script build it)
+- [x] `cargo clippy --workspace --all-targets`, `scripts/lint-report.sh` and `cargo test --workspace` pass
+- [x] `scripts/coverage.sh --require-target` passes for every remaining runtime crate
+
+Acceptance evidence (2026-11-04, offline, sandbox tools required):
+- `cargo tree -p ngteams --prefix none` contains no removed fence crates or `proto-lab`; the final stale-reference
+  audit of `crates/ngteams` is empty. Dedicated HTTP, token/authz and bidirectional Trouter wire tests passed.
+- `cargo check -p ngteams --release --locked`, final workspace all-target Clippy with `-D warnings`, lint-report,
+  runner tests, formatting and whitespace checks passed.
+- The actual full `cargo test --workspace --locked --no-fail-fast -- --test-threads 1` run found four stale
+  assertion targets after the earlier removals. All four corrected targets passed their reruns (52 tests), and
+  the serialized full workspace doctest rerun passed. A subsequent complete instrumented runtime run passed
+  every test. The original ordinary-run exit 101 is retained in `target/task12-workspace-tests.status`.
+- The first strict all-crate coverage export passed every runtime test and exposed five coverage gaps. Added
+  behavioral scenario, team-dialog, account-path, call-floor and sandbox-control tests; strict coverage of those
+  five crates then passed with no runtime failures. The other twelve crates passed against the original complete
+  export, with all 189 source-file hashes unchanged. No target, baseline or runtime-source exclusion was lowered.
+  The added tracker mapping review covers only a verified `cfg(test)` module absent from LLVM's test-file export.
+- Exact counts and unrounded percentages are retained in `target/task12-final-coverage.json`; original exports are
+  in `target/coverage/continuous/all/` and `target/coverage/continuous/ngteams+proto-lab+teams-core+teams-ui+ui-sandbox/`.
+
+| Runtime crate | Lines % | Functions % | Regions % |
+| --- | ---: | ---: | ---: |
+| fixture-guard | 95.883 | 91.603 | 92.181 |
+| ngteams | 92.819 | 90.909 | 90.060 |
+| proto-lab | 93.870 | 92.743 | 90.179 |
+| teams-auth | 97.235 | 97.097 | 94.882 |
+| teams-call | 95.523 | 97.052 | 92.473 |
+| teams-core | 91.883 | 94.488 | 90.001 |
+| teams-log | 95.854 | 96.023 | 94.693 |
+| teams-media | 92.147 | 91.789 | 91.293 |
+| teams-mock | 94.475 | 94.017 | 93.498 |
+| teams-proto | 96.562 | 95.534 | 94.880 |
+| teams-signin | 92.385 | 93.548 | 91.856 |
+| teams-signin-extension | 100.000 | 100.000 | 99.029 |
+| teams-store | 97.912 | 100.000 | 90.085 |
+| teams-trouter | 93.111 | 96.000 | 92.095 |
+| teams-ui | 92.522 | 90.141 | 91.910 |
+| teams-wpe | 93.200 | 93.681 | 93.310 |
+| ui-sandbox | 94.493 | 92.040 | 90.437 |
 
 ### Task 13: [Final] Update documentation
 - [ ] README and CLAUDE.md re-read against the final code

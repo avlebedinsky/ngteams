@@ -307,6 +307,9 @@ pub struct Driver {
     closed: bool,
     /// How long one call to the page may go unanswered.
     call_timeout: Duration,
+    /// Synthetic peers can omit observation pauses while retaining all request deadlines.
+    #[cfg(test)]
+    pause_override: Option<Duration>,
 }
 
 impl Driver {
@@ -321,12 +324,26 @@ impl Driver {
             cursor: 0,
             closed: false,
             call_timeout: CALL_TIMEOUT,
+            #[cfg(test)]
+            pause_override: None,
         }
     }
 
     /// Gives each call to the page `timeout` to answer from now on, instead of [`CALL_TIMEOUT`].
     pub fn set_call_timeout(&mut self, timeout: Duration) {
         self.call_timeout = timeout;
+    }
+
+    /// Lets a changed page settle for the scenario's observation interval.
+    pub(crate) async fn pause(&self, duration: Duration) {
+        #[cfg(test)]
+        let duration = self.pause_override.unwrap_or(duration);
+        tokio::time::sleep(duration).await;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn omit_observation_pauses(&mut self) {
+        self.pause_override = Some(Duration::ZERO);
     }
 
     /// Every request seen so far.

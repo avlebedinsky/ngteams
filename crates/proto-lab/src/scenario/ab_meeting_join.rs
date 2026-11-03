@@ -51,6 +51,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         upn_b: &config.account(Alias::B).upn,
         nonce: &nonce,
         options,
+        after_join: AFTER_JOIN,
     };
     if let Err(error) = hold_entry(&a) {
         report.failures.push(error.to_string());
@@ -70,6 +71,7 @@ struct Steps<'a> {
     upn_b: &'a str,
     nonce: &'a str,
     options: RunOptions,
+    after_join: Duration,
 }
 
 impl Steps<'_> {
@@ -114,7 +116,7 @@ impl Steps<'_> {
             created_join_link(body).ok_or_else(|| setup("the event's creation named no join link".to_owned()))?;
         load_at(Alias::A, a, &link, self.options.load_timeout).await?;
         let mut drive = a.driver();
-        pre_join(a, &mut drive, report).await
+        pre_join(a, &mut drive, report, self.after_join).await
     }
 }
 
@@ -126,7 +128,12 @@ fn hold_entry(a: &LabSession) -> Result<(), ScenarioError> {
 }
 
 /// Steps 4 and 5: the pre-join, then Join now, its every start with media held back.
-async fn pre_join(a: &mut LabSession, drive: &mut Driver, report: &mut ScenarioReport) -> Result<(), ScenarioError> {
+async fn pre_join(
+    a: &mut LabSession,
+    drive: &mut Driver,
+    report: &mut ScenarioReport,
+    after_join: Duration,
+) -> Result<(), ScenarioError> {
     ab_meeting::wait_for_button(drive, "the pre-join's Join now", &["Join now"], PREJOIN).await?;
     if let Some(note) = save_screenshot_as(Alias::A, a, "prejoin.png").await {
         report.notes.push(note);
@@ -136,7 +143,7 @@ async fn pre_join(a: &mut LabSession, drive: &mut Driver, report: &mut ScenarioR
         .with_body_containing("callInvitation");
     a.hold(rule.labelled(ENTRY_HELD));
     ab_meeting::click_button(drive, "a clicks Join now on the run's own meeting", &["Join now"]).await?;
-    tokio::time::sleep(AFTER_JOIN).await;
+    drive.pause(after_join).await;
     if let Some(note) = save_screenshot_as(Alias::A, a, "after-join.png").await {
         report.notes.push(note);
     }
@@ -157,3 +164,7 @@ async fn pre_join(a: &mut LabSession, drive: &mut Driver, report: &mut ScenarioR
         "the pre-join's subscription was never answered with a 2xx".to_owned(),
     ))
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/scenario/ab_meeting_join_driver_tests.rs"]
+mod driver_tests;

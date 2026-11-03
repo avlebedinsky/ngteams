@@ -93,15 +93,25 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
 
         ..SessionOptions::default()
     };
-    let mut a = LabSession::open_with(paths, ACCOUNT, session_options).await?;
+    let a = LabSession::open_with(paths, ACCOUNT, session_options).await?;
+    let drive = a.driver();
+    finish(a, drive, writing.as_ref(), options).await
+}
+
+/// Records the admitted session's steps and always closes its browser.
+async fn finish(
+    mut a: LabSession,
+    mut drive: Driver,
+    writing: Option<&Writing>,
+    options: RunOptions,
+) -> Result<ScenarioReport, ScenarioError> {
     let mut report = ScenarioReport::new(ScenarioName::ChannelCreate);
-    let mut drive = a.driver();
     if writing.is_none() {
         for rule in channel_rules().map_err(|error| ScenarioError::Setup(error.to_string()))? {
             a.hold(rule);
         }
     }
-    let ran = match &writing {
+    let ran = match writing {
         Some(writing) => write_steps(&mut a, &mut drive, &mut report, options, writing).await,
         None => steps(&mut a, &mut drive, &mut report, options).await,
     };
@@ -147,7 +157,7 @@ async fn write_steps(
 ) -> Result<(), ScenarioError> {
     load(ACCOUNT, a, options.load_timeout).await?;
     size(a).await?;
-    tokio::time::sleep(Duration::from_secs(10)).await;
+    drive.pause(Duration::from_secs(10)).await;
     shot(a, report, "channel-loaded.png").await;
     open_managed_dialog(a, drive, report, &writing.team).await?;
 
@@ -176,7 +186,7 @@ async fn make_channel(
             made.url, made.status
         ));
     }
-    tokio::time::sleep(Duration::from_secs(8)).await;
+    drive.pause(Duration::from_secs(8)).await;
     shot(a, report, &format!("channel-made-{at}.png")).await;
     if kind == "Private" {
         add_member(a, drive, report, at, &writing.member).await?;
@@ -199,14 +209,14 @@ async fn open_managed_dialog(
             &click_named("button,[role=\"button\"]", "^More list options$"),
         )
         .await?;
-    tokio::time::sleep(SETTLE).await;
+    drive.pause(SETTLE).await;
     let teams = drive
         .evaluate(
             "a opens its teams",
             &click_named("[role=\"menuitem\"]", "^Your teams and channels"),
         )
         .await?;
-    tokio::time::sleep(Duration::from_secs(8)).await;
+    drive.pause(Duration::from_secs(8)).await;
     let row = drive
         .evaluate("a opens the team", &click_named("[role=\"row\"]", name))
         .await?;
@@ -216,14 +226,14 @@ async fn open_managed_dialog(
     if row.as_bool() != Some(true) {
         return Err(ScenarioError::Setup(format!("no team named {name}")));
     }
-    tokio::time::sleep(Duration::from_secs(8)).await;
+    drive.pause(Duration::from_secs(8)).await;
     drive
         .pointer_click(
             "a opens the team's menu",
             Selector::Css("[data-tid^=\"team-context-menu-more-button\"]"),
         )
         .await?;
-    tokio::time::sleep(SETTLE).await;
+    drive.pause(SETTLE).await;
     shot(a, report, &format!("channel-team-menu-{}.png", super::ab_chat::nonce())).await;
     let added = drive
         .evaluate(
@@ -237,7 +247,7 @@ async fn open_managed_dialog(
     drive
         .wait_for_tid("the dialog opens", "channel-name-input", Duration::from_secs(30))
         .await?;
-    tokio::time::sleep(SETTLE).await;
+    drive.pause(SETTLE).await;
     Ok(())
 }
 
@@ -316,13 +326,13 @@ async fn add_member(
     drive
         .type_into("a types the member", Selector::Css("[data-lab-people]"), local)
         .await?;
-    tokio::time::sleep(Duration::from_secs(6)).await;
+    drive.pause(Duration::from_secs(6)).await;
     shot(a, report, &format!("channel-people-{at}.png")).await;
     let picked = drive
         .evaluate("a picks the member", &click_named("[role=\"option\"]", local))
         .await?;
     report.notes.push(format!("a: attempt {at}: picked {local}: {picked}"));
-    tokio::time::sleep(SETTLE).await;
+    drive.pause(SETTLE).await;
     let since = drive.seen_so_far();
     let added = drive
         .evaluate(
@@ -354,7 +364,7 @@ async fn add_member(
         }
         Err(error) => report.failures.push(format!("attempt {at}: {error}")),
     }
-    tokio::time::sleep(Duration::from_secs(8)).await;
+    drive.pause(Duration::from_secs(8)).await;
     shot(a, report, &format!("channel-added-{at}.png")).await;
     Ok(())
 }
@@ -378,7 +388,7 @@ async fn steps(
 ) -> Result<(), ScenarioError> {
     load(ACCOUNT, a, options.load_timeout).await?;
     size(a).await?;
-    tokio::time::sleep(Duration::from_secs(10)).await;
+    drive.pause(Duration::from_secs(10)).await;
     shot(a, report, "channel-loaded.png").await;
     let team = find_team(a, drive, report).await?;
     open_dialog(a, drive, report, team).await?;
@@ -399,10 +409,10 @@ async fn people_search(a: &LabSession, drive: &mut Driver, report: &mut Scenario
         )
         .await?;
     report.notes.push(format!("a: the team's channel opened: {opened}"));
-    tokio::time::sleep(Duration::from_secs(10)).await;
+    drive.pause(Duration::from_secs(10)).await;
     let since = drive.seen_so_far();
     drive.type_into("a starts a mention", COMPOSE, "@").await?;
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    drive.pause(Duration::from_secs(1)).await;
     drive.insert_text("a types a name", "ca").await?;
     let wanted = RequestPattern::new(Some("POST"), r"(?i)/users/profilesearch|/members/search")
         .map_err(|error| ScenarioError::Setup(error.to_string()))?;
@@ -430,7 +440,7 @@ async fn find_team(a: &LabSession, drive: &mut Driver, report: &mut ScenarioRepo
         if open_team_menu(drive, team).await?.is_none() {
             break;
         }
-        tokio::time::sleep(SETTLE).await;
+        drive.pause(SETTLE).await;
         shot(a, report, &format!("channel-team-{team}-menu.png")).await;
         let menu = drive
             .evaluate("the menu's entries", &texts("[role=\"menuitem\"]"))
@@ -438,7 +448,7 @@ async fn find_team(a: &LabSession, drive: &mut Driver, report: &mut ScenarioRepo
         let menu = menu.as_str().unwrap_or("?").to_owned();
         report.notes.push(format!("a: team {team}'s menu: {menu}"));
         drive.press("a closes the menu", Key::ESCAPE).await?;
-        tokio::time::sleep(SETTLE).await;
+        drive.pause(SETTLE).await;
         if menu.contains("Add channel") {
             return Ok(team);
         }
@@ -452,11 +462,11 @@ async fn open_team_menu(drive: &mut Driver, team: usize) -> Result<Option<()>, S
     if count.is_null() {
         return Ok(None);
     }
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    drive.pause(Duration::from_secs(1)).await;
     drive
         .hover("a hovers the team", Selector::Css("[data-lab-team]"))
         .await?;
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    drive.pause(Duration::from_secs(1)).await;
     let clicked = drive
         .evaluate(
             "a clicks the team's more options",
@@ -480,7 +490,7 @@ async fn open_dialog(
     let mut clicked = false;
     for _ in 0..4 {
         open_team_menu(drive, team).await?;
-        tokio::time::sleep(SETTLE).await;
+        drive.pause(SETTLE).await;
         let found = drive
             .evaluate(
                 "a clicks Add channel",
@@ -492,7 +502,7 @@ async fn open_dialog(
             break;
         }
         drive.press("a closes what opened", Key::ESCAPE).await?;
-        tokio::time::sleep(SETTLE).await;
+        drive.pause(SETTLE).await;
     }
     if !clicked {
         return Err(ScenarioError::Setup("the menu's Add channel is gone".to_owned()));
@@ -500,7 +510,7 @@ async fn open_dialog(
     drive
         .wait_for_tid("the dialog opens", "channel-name-input", Duration::from_secs(30))
         .await?;
-    tokio::time::sleep(SETTLE).await;
+    drive.pause(SETTLE).await;
     shot(a, report, &format!("channel-dialog-{}.png", super::ab_chat::nonce())).await;
     Ok(())
 }
@@ -516,7 +526,7 @@ async fn show_dropdown(a: &LabSession, drive: &mut Driver, report: &mut Scenario
     report
         .notes
         .push(format!("a: the channel type's dropdown opened: {opened}"));
-    tokio::time::sleep(SETTLE).await;
+    drive.pause(SETTLE).await;
     shot(a, report, "channel-types.png").await;
     let options = drive.evaluate("the types", &texts("[role=\"option\"]")).await?;
     report
@@ -540,7 +550,7 @@ async fn show_dropdown(a: &LabSession, drive: &mut Driver, report: &mut Scenario
     report
         .notes
         .push(format!("a: the channel type's dropdown closed: {closed}"));
-    tokio::time::sleep(SETTLE).await;
+    drive.pause(SETTLE).await;
     Ok(())
 }
 
@@ -566,7 +576,7 @@ async fn attempt(
     fill_form(drive, report, at, kind, layout).await?;
     shot(a, report, &format!("channel-filled-{at}.png")).await;
     press_create(drive, report, at).await?;
-    tokio::time::sleep(Duration::from_secs(8)).await;
+    drive.pause(Duration::from_secs(8)).await;
     shot(a, report, &format!("channel-error-{at}.png")).await;
     leave_error(drive, report, at).await
 }
@@ -610,7 +620,7 @@ async fn fill_form_named(
     report
         .notes
         .push(format!("a: attempt {at}: the type's dropdown opened: {opened}"));
-    tokio::time::sleep(SETTLE).await;
+    drive.pause(SETTLE).await;
     let picked = drive
         .evaluate(
             "a picks the channel type",
@@ -618,7 +628,7 @@ async fn fill_form_named(
         )
         .await?;
     report.notes.push(format!("a: attempt {at}: picked {kind}: {picked}"));
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    drive.pause(Duration::from_secs(1)).await;
     let radio = if layout == "Posts" {
         "post_reply_modality_radio"
     } else {
@@ -636,7 +646,7 @@ async fn fill_form_named(
     report
         .notes
         .push(format!("a: attempt {at}: picked {layout}: {layout_picked}"));
-    tokio::time::sleep(Duration::from_secs(1)).await;
+    drive.pause(Duration::from_secs(1)).await;
     Ok(())
 }
 
@@ -685,7 +695,7 @@ async fn leave_error(drive: &mut Driver, report: &mut ScenarioReport, at: usize)
         )
         .await?;
     report.notes.push(format!("a: attempt {at}: closed: {closed}"));
-    tokio::time::sleep(SETTLE).await;
+    drive.pause(SETTLE).await;
     Ok(())
 }
 
@@ -694,3 +704,7 @@ async fn shot(a: &LabSession, report: &mut ScenarioReport, name: &str) {
         report.notes.push(note);
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/scenario/channel_create_driver_tests.rs"]
+mod driver_tests;

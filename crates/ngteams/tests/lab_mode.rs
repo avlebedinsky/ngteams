@@ -43,6 +43,25 @@ fn aliases_cannot_escape_the_alias_directory() {
 }
 
 #[test]
+fn an_unreadable_lab_account_file_is_reported_without_replacing_its_contents() {
+    let dir = tempfile::tempdir().unwrap();
+    let paths = PersonalPaths::new(dir.path().to_owned(), dir.path().to_owned());
+    let invalid = "[[accounts\nsynthetic invalid account file";
+    std::fs::write(paths.accounts_file(), invalid).unwrap();
+    assert!(lab::account(&paths).is_err());
+    assert_eq!(std::fs::read_to_string(paths.accounts_file()).unwrap(), invalid);
+}
+
+#[test]
+fn lab_paths_require_a_resolvable_data_home_parent() {
+    let mine = PersonalLocations {
+        config_dir: "/synthetic/config/ngteams".into(),
+        data_dir: "/".into(),
+    };
+    assert!(lab::paths_for("a", &mine).unwrap_err().contains("XDG data home"));
+}
+
+#[test]
 fn lab_refuses_overlapping_personal_config_or_data_even_through_symlinks() {
     let dir = tempfile::tempdir().unwrap();
     let mine = PersonalPaths::new(dir.path().join("config/ngteams"), dir.path().join("data/ngteams"));

@@ -45,6 +45,11 @@ sha256 = "3b7ee8d92c59113585845da29b433e70f1eeb3a7328f4a4c2103beeba09d7d6f"
 reason = "unit-test module included only by machine.rs cfg(test); omitted by cargo-llvm-cov's test-file filter"
 context = { "crates/teams-call/src/machine.rs" = "1419609c9eb7907fc795a50237b7026821fabc0ac64f2765f48f1a0f87c6a3a0" }
 
+[unmapped_sources."crates/teams-call/src/track/tests.rs"]
+sha256 = "189f2212a9e6d6278eded2dca6321c627822acf3f712211826ba65684ac95b60"
+reason = "unit-test module included only by track.rs cfg(test); omitted by cargo-llvm-cov's test-file filter"
+context = { "crates/teams-call/src/track.rs" = "3dd32240b16f4806fa7525af42a16bd541d82bed129719bfb06af9c8305e6648" }
+
 [unmapped_sources."crates/teams-media/src/video/effects/tests.rs"]
 sha256 = "f67bd56fdf5683e1b7bd150f306db4e7b7714039d13ce592a602b755d24a4ffb"
 reason = "unit-test module included only by effects.rs cfg(test); omitted by cargo-llvm-cov's test-file filter"

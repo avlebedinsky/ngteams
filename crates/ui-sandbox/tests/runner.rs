@@ -121,6 +121,10 @@ mod tests {
             vec!["key", "ctrl+shift+Tab"],
             vec!["type", "synthetic text"],
             vec!["click", "10", "20"],
+            vec!["scroll", "10", "20", "2"],
+            vec!["scroll", "10", "20", "-2"],
+            vec!["scroll", "10", "20", "0"],
+            vec!["screen", "Synthetic-2"],
         ] {
             okay(&ask(dir.path(), &command));
         }
@@ -131,6 +135,12 @@ mod tests {
             vec!["key", "invalid-key"],
             vec!["click", "bad", "20"],
             vec!["click", "1", "2", "3"],
+            vec!["scroll", "bad", "20", "1"],
+            vec!["scroll", "10", "bad", "1"],
+            vec!["scroll", "10", "20", "bad"],
+            vec!["scroll", "10", "20"],
+            vec!["scroll", "10", "20", "1", "extra"],
+            vec!["type", "💻"],
             vec!["unknown"],
         ] {
             let output = ask(dir.path(), &command);
@@ -177,6 +187,36 @@ mod tests {
         let output = ask(dir.path(), &["windows"]);
         assert!(!output.status.success());
         assert!(String::from_utf8_lossy(&output.stderr).contains("no ui-sandbox-run serve"));
+    }
+
+    #[test]
+    fn an_unstartable_broker_or_app_reports_failure_without_claiming_readiness() {
+        if !tools_available() {
+            return;
+        }
+        for missing_broker in [true, false] {
+            let dir = tempfile::tempdir().unwrap();
+            let missing = dir.path().join("synthetic-missing-peer");
+            let cat = Path::new("/bin/cat");
+            let (broker, app) = if missing_broker {
+                (missing.as_path(), cat)
+            } else {
+                (cat, missing.as_path())
+            };
+            let output = Command::new(RUNNER)
+                .arg("serve")
+                .arg("--dir")
+                .arg(dir.path())
+                .arg("--broker")
+                .arg(broker)
+                .arg("--app")
+                .arg(app)
+                .output()
+                .unwrap();
+            assert!(!output.status.success(), "{missing_broker}: {output:?}");
+            assert!(!String::from_utf8_lossy(&output.stdout).contains("ready sandbox="));
+            assert!(String::from_utf8_lossy(&output.stderr).contains("No such file"));
+        }
     }
 
     #[test]

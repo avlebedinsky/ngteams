@@ -189,11 +189,7 @@ async fn read_only_keeps_get_and_search_reads_and_hides_credentials_in_debug() {
     );
     assert_eq!(
         tokens.asked(),
-        [
-            teams_proto::GRAPH_AUDIENCE,
-            teams_proto::SUBSTRATE_AUDIENCE,
-            teams_proto::GRAPH_AUDIENCE
-        ]
+        [teams_proto::GRAPH_AUDIENCE, teams_proto::SUBSTRATE_AUDIENCE]
     );
 }
 

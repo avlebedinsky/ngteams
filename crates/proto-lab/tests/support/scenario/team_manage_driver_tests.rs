@@ -1,0 +1,343 @@
+//! Real command dispatch and Unix socket framing against an offline CDP peer.
+
+use serde_json::json;
+use tokio::io::AsyncReadExt as _;
+
+use super::*;
+use crate::scenario::ab_chat_full::tests::page_with;
+
+#[tokio::test]
+async fn commands_dispatch_keys_typing_navigation_and_observation() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut page = page_with(false, false, |command, _| {
+        (command["params"]["expression"] == "synthetic failure").then(|| Err("synthetic evaluation failed".into()))
+    })
+    .await;
+    let session = page.session(temp.path(), true);
+    let mut drive = session.driver();
+    let mut report = ScenarioReport::new(ScenarioName::TeamManage);
+    let mut seen = Seen {
+        at: 0,
+        services: &TEAM_SERVICES,
+    };
+    for (command, expected) in [
+        ("wait 0", "waited"),
+        ("wait invalid", "waited"),
+        ("press enter", "pressed"),
+        ("press backspace", "pressed"),
+        ("press space", "pressed"),
+        ("press other", "pressed"),
+        ("go https://synthetic.invalid/", "loaded"),
+        ("js true", "true"),
+        ("click button Synthetic", "true"),
+        ("click button", "true"),
+        ("point #synthetic", "clicked"),
+        ("hover #synthetic", "hovered"),
+        ("type #synthetic text with spaces", "typed"),
+        ("type #synthetic", "typed"),
+        ("insert text with spaces", "inserted"),
+        ("what", "unknown step what"),
+    ] {
+        assert_eq!(
+            step(Alias::A, &session, &mut drive, &mut report, command, &mut seen)
+                .await
+                .unwrap(),
+            expected
+        );
+    }
+    let shot = step(
+        Alias::A,
+        &session,
+        &mut drive,
+        &mut report,
+        "shot synthetic.png",
+        &mut seen,
+    )
+    .await
+    .unwrap();
+    assert!(shot.contains("synthetic.png"));
+    assert!(session.capture_dir().unwrap().join("synthetic.png").exists());
+    assert!(
+        step(
+            Alias::A,
+            &session,
+            &mut drive,
+            &mut report,
+            "js synthetic failure",
+            &mut seen
+        )
+        .await
+        .is_err()
+    );
+    let commands = page.commands();
+    for key in ["Enter", "Backspace", " ", "Escape"] {
+        assert!(commands.iter().any(|command| command["params"]["key"] == key));
+    }
+    assert!(
+        commands
+            .iter()
+            .any(|command| command["params"]["text"] == "text with spaces")
+    );
+}
+
+#[tokio::test]
+async fn socket_accepts_multiple_connections_reports_errors_and_quits_cleanly() {
+    let temp = tempfile::tempdir().unwrap();
+    let socket = temp.path().join("steps.sock");
+    std::fs::write(&socket, "stale socket").unwrap();
+    let mut page = page_with(false, false, |command, _| {
+        (command["params"]["expression"] == "fail").then(|| Err("synthetic failure".into()))
+    })
+    .await;
+    let mut session = page.session(temp.path(), false);
+    let mut drive = session.driver();
+    let mut report = ScenarioReport::new(ScenarioName::TeamManage);
+    let client = async {
+        loop {
+            match UnixStream::connect(&socket).await {
+                Ok(mut stream) => {
+                    stream.write_all(b"js fail\nunknown\n").await.unwrap();
+                    stream.shutdown().await.unwrap();
+                    let mut answer = String::new();
+                    stream.read_to_string(&mut answer).await.unwrap();
+                    assert!(answer.starts_with("failed:"));
+                    assert!(answer.contains("unknown step unknown"));
+                    break;
+                }
+                Err(_) => tokio::task::yield_now().await,
+            }
+        }
+        let mut stream = UnixStream::connect(&socket).await.unwrap();
+        stream.write_all(b"shot absent.png\nquit\n").await.unwrap();
+        stream.shutdown().await.unwrap();
+        let mut answer = String::new();
+        stream.read_to_string(&mut answer).await.unwrap();
+        assert_eq!(answer, "no screenshot\nbye\n");
+    };
+    let options = RunOptions {
+        load_timeout: Duration::from_secs(2),
+        display: crate::browser::Display::Headless,
+        call: crate::scenario::ab_call::CallStep::Answer,
+    };
+    let (server, ()) = tokio::join!(
+        steps(Alias::A, &mut session, &mut drive, &mut report, &socket, options),
+        client
+    );
+    server.unwrap();
+    let error = serve(
+        Alias::A,
+        &mut session,
+        &mut drive,
+        &mut report,
+        &temp.path().join("absent/steps.sock"),
+        &TEAM_SERVICES,
+    )
+    .await;
+    assert!(error.is_err());
+}
+
+#[tokio::test]
+async fn step_holds_apply_body_conditions_and_keep_unmatched_requests_running() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut page = page_with(false, false, |_, _| None).await;
+    let session = page.session(temp.path(), false);
+    for rule in [
+        "POST /positive +needle",
+        "PUT /negative -needle",
+        "/default",
+        "PATCH /plain",
+    ] {
+        assert_eq!(hold(&session, rule).unwrap(), "held");
+    }
+    assert!(hold(&session, "POST [").is_err());
+    for (id, method, path, body) in [
+        (1, "POST", "positive", "needle"),
+        (2, "POST", "positive", "other"),
+        (3, "PUT", "negative", "other"),
+        (4, "PUT", "negative", "needle"),
+        (5, "POST", "default", ""),
+        (6, "PATCH", "plain", ""),
+    ] {
+        page.send("Fetch.requestPaused", json!({"requestId":format!("paused-{id}"),"networkId":format!("synthetic-{id}"),"resourceType":"XHR","request":{"method":method,"url":format!("https://synthetic.invalid/{path}"),"postData":body}}));
+    }
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while session.held_requests().len() < 4
+            || page
+                .commands()
+                .iter()
+                .filter(|command| {
+                    matches!(
+                        command["method"].as_str(),
+                        Some("Fetch.failRequest" | "Fetch.continueRequest")
+                    )
+                })
+                .count()
+                < 6
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(session.held_requests().len(), 4);
+    assert!(
+        session
+            .held_requests()
+            .iter()
+            .all(|request| request.label.as_deref() == Some(HELD_BY_A_STEP))
+    );
+}
+
+fn emit(page: &crate::scenario::test_page::Page, id: usize, method: &str, host: &str, body: Option<&str>) {
+    let mut request = json!({"method":method,"url":format!("https://{host}/api/mt/teams/synthetic?private=hidden")});
+    if let Some(body) = body {
+        request["postData"] = json!(body);
+    }
+    page.events
+        .send(crate::cdp::Event {
+            session_id: None,
+            method: "Network.requestWillBeSent".into(),
+            params: json!({"requestId":format!("seen-{id}"),"request":request}),
+        })
+        .unwrap();
+    page.events
+        .send(crate::cdp::Event {
+            session_id: None,
+            method: "Network.responseReceived".into(),
+            params: json!({"requestId":format!("seen-{id}"),"response":{"status":200}}),
+        })
+        .unwrap();
+}
+
+#[tokio::test]
+async fn seen_filters_services_and_tokens_advances_its_cursor_and_reads_missing_bodies() {
+    let mut page = page_with(false, false, |command, _| {
+        (command["method"] == "Network.getRequestPostData").then(|| Ok(json!({"postData":"recovered body"})))
+    })
+    .await;
+    for (id, method, host, body) in [
+        (1, "GET", "teams.cloud.microsoft", Some("never show read bodies")),
+        (2, "OPTIONS", "teams.cloud.microsoft", None),
+        (3, "HEAD", "teams.cloud.microsoft", None),
+        (4, "POST", "other.invalid", Some("foreign private body")),
+        (5, "POST", "teams.cloud.microsoft", Some("ordinary body")),
+        (6, "PUT", "teams.cloud.microsoft", Some("ACCESS_TOKEN synthetic secret")),
+        (7, "PATCH", "teams.cloud.microsoft", Some("Bearer synthetic secret")),
+        (8, "DELETE", "teams.cloud.microsoft", Some("eyJ synthetic secret")),
+        (9, "POST", "teams.cloud.microsoft", None),
+    ] {
+        emit(&page, id, method, host, body);
+    }
+    let mut seen = 0;
+    let mut report = ScenarioReport::new(ScenarioName::TeamManage);
+    let answer = writes_seen(&mut page.driver, &mut report, &mut seen, &TEAM_SERVICES).await;
+    assert_eq!(answer.lines().count(), 6);
+    assert!(answer.contains("ordinary body"));
+    assert!(answer.contains("recovered body"));
+    assert_eq!(answer.matches("left out").count(), 3);
+    for hidden in ["synthetic secret", "private=hidden", "foreign private", "never show"] {
+        assert!(!answer.contains(hidden));
+    }
+    assert_eq!(report.notes.len(), 5);
+    assert!(
+        writes_seen(&mut page.driver, &mut report, &mut seen, &TEAM_SERVICES)
+            .await
+            .is_empty()
+    );
+    seen = usize::MAX;
+    assert!(
+        writes_seen(&mut page.driver, &mut report, &mut seen, &TEAM_SERVICES)
+            .await
+            .is_empty()
+    );
+}
+
+#[test]
+fn account_selection_uses_only_the_child_environment() {
+    for (value, expected) in [
+        (None, "a"),
+        (Some("a"), "a"),
+        (Some("b"), "b"),
+        (Some("c"), "c"),
+        (Some("unknown"), "a"),
+    ] {
+        let mut command = std::process::Command::new(std::env::current_exe().unwrap());
+        command
+            .arg("--exact")
+            .arg("scenario::team_manage::driver_tests::account_selection_child")
+            .env_clear()
+            .env("TEAM_EXPECTED_ALIAS", expected);
+        if let Some(value) = value {
+            command.env("PROTO_LAB_ACCOUNT", value);
+        }
+        if let Some(profile) = std::env::var_os("LLVM_PROFILE_FILE") {
+            command.env("LLVM_PROFILE_FILE", profile);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+}
+
+#[test]
+fn account_selection_child() {
+    let Ok(expected) = std::env::var("TEAM_EXPECTED_ALIAS") else {
+        return;
+    };
+    assert_eq!(account().to_string(), expected);
+}
+
+#[tokio::test]
+async fn disconnected_socket_writer_and_missing_post_body_do_not_break_other_observations() {
+    let temp = tempfile::tempdir().unwrap();
+    let mut page = page_with(false, false, |command, _| {
+        (command["method"] == "Network.getRequestPostData").then(|| Err("body no longer available".into()))
+    })
+    .await;
+    let session = page.session(temp.path(), false);
+    let mut drive = session.driver();
+    let mut report = ScenarioReport::new(ScenarioName::TeamManage);
+    let mut seen = Seen {
+        at: 0,
+        services: &TEAM_SERVICES,
+    };
+    assert_eq!(
+        step(
+            Alias::A,
+            &session,
+            &mut drive,
+            &mut report,
+            "hold POST /shape +synthetic",
+            &mut seen
+        )
+        .await
+        .unwrap(),
+        "held"
+    );
+    assert_eq!(
+        step(Alias::A, &session, &mut drive, &mut report, "seen", &mut seen)
+            .await
+            .unwrap(),
+        ""
+    );
+    let (server, mut client) = UnixStream::pair().unwrap();
+    client.write_all(b"js true\n").await.unwrap();
+    drop(client);
+    assert!(!connection(Alias::A, &session, &mut drive, &mut report, server, &mut seen).await);
+    emit(&page, 1, "POST", "teams.cloud.microsoft", None);
+    let mut at = 0;
+    let answer = writes_seen(&mut page.driver, &mut report, &mut at, &TEAM_SERVICES).await;
+    assert!(answer.contains("POST"));
+    assert!(!answer.contains("unavailable"));
+    emit(&page, 2, "POST", "teams.cloud.microsoft", None);
+    page.driver.set_call_timeout(Duration::ZERO);
+    assert!(
+        writes_seen(&mut page.driver, &mut report, &mut at, &TEAM_SERVICES)
+            .await
+            .contains("POST")
+    );
+}

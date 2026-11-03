@@ -147,6 +147,7 @@ async fn missing_config(paths: &LabPaths) {
                 | ScenarioName::ChannelCreate
                 | ScenarioName::TeamManage
                 | ScenarioName::AbcEveryone
+                | ScenarioName::EchoCall
         ) {
             no_chrome(name, result, paths);
         } else {
@@ -224,13 +225,6 @@ fn assert_no_sessions_or_credentials(paths: &LabPaths, root: &Path) {
     for alias in Alias::ALL {
         assert!(!paths.store_file(alias).exists());
     }
-    if paths.data_dir().join("fence.log").exists() {
-        assert_eq!(
-            fs::metadata(paths.data_dir().join("fence.log")).unwrap().len(),
-            0,
-            "no fence decision was requested"
-        );
-    }
 }
 
 #[tokio::test]
@@ -270,7 +264,21 @@ async fn scenario_setup_child() {
     assert_no_sessions_or_credentials(&paths, &root);
     if matches!(case.as_str(), "missing-config" | "invalid-step") {
         assert!(!locations.config_file.exists());
-        assert!(!paths.data_dir().join("fence.log").exists());
+    }
+    if case == "missing-config" {
+        // Echo-call no longer reads the lab config, but still prepares its synthetic microphone before
+        // discovering that Chrome is absent. No other scenario gets beyond its missing setup.
+        let media = paths.data_dir().join("media");
+        let entries: Vec<_> = fs::read_dir(&media)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .collect();
+        assert_eq!(
+            entries,
+            [media.join(format!("tone-{}-bursts.wav", scenario::echo_call::TONE_HZ))]
+        );
+    }
+    if case == "invalid-step" {
         assert!(!paths.data_dir().join("media").exists());
     }
 }

@@ -274,3 +274,7 @@ async fn writes_seen(drive: &mut Driver, report: &mut ScenarioReport, seen: &mut
     }
     lines.join("\n")
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/scenario/team_manage_driver_tests.rs"]
+mod driver_tests;

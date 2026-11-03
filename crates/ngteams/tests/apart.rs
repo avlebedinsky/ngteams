@@ -163,10 +163,19 @@ fn holding(dirs: &[&str], needle: &str) -> Vec<String> {
 #[test]
 fn only_the_install_script_sets_the_install_marker_and_only_this_crate_reads_it() {
     let marker = ["TEAMS_PERSONAL", "_INSTALL"].concat();
-    assert_eq!(
-        holding(&["crates", "scripts"], &marker),
-        ["crates/ngteams/src/refusal.rs", "scripts/install-personal.sh"]
+    let runner = fs::read_to_string(root().join("scripts/run-lab.sh")).unwrap();
+    let unset = format!("env -u {marker} ");
+    assert!(
+        runner.contains(&unset),
+        "the lab runner clears an inherited install marker"
     );
+    assert!(
+        !runner.replace(&unset, "").contains(&marker),
+        "the lab runner only clears the marker"
+    );
+    let mut uses = holding(&["crates", "scripts"], &marker);
+    uses.retain(|file| file != "scripts/run-lab.sh");
+    assert_eq!(uses, ["crates/ngteams/src/refusal.rs", "scripts/install-personal.sh"]);
     let refusal = fs::read_to_string(root().join("crates/ngteams/src/refusal.rs")).unwrap();
     assert!(refusal.contains(&format!("option_env!(\"{marker}\")")));
     let script = fs::read_to_string(root().join("scripts/install-personal.sh")).unwrap();

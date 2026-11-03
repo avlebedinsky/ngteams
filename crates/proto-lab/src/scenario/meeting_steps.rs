@@ -150,3 +150,7 @@ async fn made_meeting(
     report.notes.push(format!("scheduled the meeting {chat}"));
     Ok(chat)
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/scenario/meeting_steps_driver_tests.rs"]
+mod driver_tests;

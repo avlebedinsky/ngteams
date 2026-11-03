@@ -13,6 +13,8 @@ use crate::config::{Alias, overlapping};
 
 use super::KEYRING_APPLICATION;
 
+const PERSONAL_DIR: &str = "ngteams";
+
 /// The isolated account/config/data directory consumed by `ngteams --lab <alias>`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativeTarget {
@@ -54,7 +56,7 @@ impl NativeTarget {
         let data = base(data_home, ".local/share")?;
         let config = base(config_home, ".config")?;
         let root = data.join(KEYRING_APPLICATION).join(alias.as_str());
-        if [data.join("ngteams"), config.join("ngteams")]
+        if [data.join(PERSONAL_DIR), config.join(PERSONAL_DIR)]
             .iter()
             .any(|personal| overlapping(&root, personal))
         {

@@ -283,3 +283,7 @@ async fn run_call(
         _ => Err(ScenarioError::Setup(format!("{scenario:?} is not a call scenario"))),
     }
 }
+
+#[cfg(test)]
+#[path = "../../tests/support/scenario/meeting_page.rs"]
+mod meeting_page;

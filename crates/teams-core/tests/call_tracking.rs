@@ -10,8 +10,8 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
-use teams_call::{Delivery, Observed};
-use teams_core::{CallRetries, CallTried, Outbox};
+use teams_call::{Delivery, Observed, Tracker};
+use teams_core::{CallFloor, CallRetries, CallTried, Outbox};
 use teams_proto::Mri;
 use teams_proto::{
     Author, Credentials, Endpoint, Failure, HttpError, HttpTransport, Method, Read, Refusal, Request, Response,
@@ -208,4 +208,39 @@ async fn definite_failures_retire_pending_callbacks_while_uncertain_outcomes_kee
             "{shown}"
         );
     }
+}
+
+#[test]
+fn rejoining_an_account_after_another_engine_leaves_keeps_the_floor_available() {
+    let floor = CallFloor::new();
+    let a = Arc::new(Tracker::new(Mri::new(teams_mock::LAB_A)));
+    let b = Arc::new(Tracker::new(Mri::new(teams_mock::LAB_B)));
+    floor.join(&a);
+    floor.join(&b);
+    let invitation = |from, to| Delivery {
+        connection: format!("{to}/synthetic"),
+        id: 1,
+        path: "/v4/f/SyntheticEndpoint/".into(),
+        trouter_request: None,
+        chain_id: None,
+        message_id: None,
+        body: teams_mock::TrouterMock::call_invitation(from, to, |_| {})
+            .to_string()
+            .into_bytes(),
+    };
+    assert_eq!(
+        floor.observe(&a, &invitation(teams_mock::LAB_B, teams_mock::LAB_A)),
+        Observed::Offered
+    );
+    assert!(floor.others_busy(&b));
+    drop(a);
+    // Reconnecting the remaining account can join again without retaining the departed engine's ring.
+    floor.join(&b);
+    floor.join(&b);
+    assert!(!floor.others_busy(&b));
+    assert_eq!(
+        floor.observe(&b, &invitation(teams_mock::LAB_A, teams_mock::LAB_B)),
+        Observed::Offered
+    );
+    assert!(b.holds_floor());
 }

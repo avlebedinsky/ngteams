@@ -997,14 +997,12 @@ fn the_settings_view_lists_the_devices_and_moves_the_calls_to_the_one_chosen() {
     );
 }
 
-/// Where "copy diagnostics" reads from: a log under `dir` holding `log`, and a `fence.log`.
+/// Where "copy diagnostics" reads from: the diagnostic log under `dir` holding `log`.
 fn diagnostics_in(dir: &tempfile::TempDir, log: &str) -> DiagnosticsSource {
     let log_file = dir.path().join("teams-app.log");
-    let fence_log = dir.path().join("fence.log");
     std::fs::write(&log_file, log).unwrap();
-    std::fs::write(&fence_log, "{\"ts_ms\":1,\"verdict\":\"allow\"}\n").unwrap();
     DiagnosticsSource {
-        app: "teams-app 0.1.0".to_owned(),
+        app: "ngteams 0.1.0".to_owned(),
         log_file: Some(log_file),
         log_problem: None,
     }
@@ -1031,8 +1029,8 @@ fn the_settings_view_copies_the_diagnostics_and_says_when_they_aren_t_safe_to_pa
     assert!(bounds(cx, "diagnostics-copied").is_none(), "nothing copied yet");
     click(cx, "copy-diagnostics");
     let copied = clipboard(cx);
-    assert!(copied.starts_with("teams-app 0.1.0 ("), "{copied}");
-    assert!(copied.contains("action: send to a chat") && copied.contains("\"verdict\":\"allow\""));
+    assert!(copied.starts_with("ngteams 0.1.0 ("), "{copied}");
+    assert!(copied.contains("action: send to a chat"));
     assert!(!copied.contains(WARNING));
     assert!(bounds(cx, "diagnostics-copied").is_some());
     assert_eq!(
