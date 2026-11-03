@@ -122,14 +122,14 @@ fn run_setup(cli: &Cli, reach: Reach, setup: Setup, trace: ViewTrace) -> Result<
         // the shortcut: that account, through the sign-in window at once when it isn't signed in
         let account = setup.ask_for(asked).map_err(|error| error.to_string())?;
         if !(account.is_signed_in() && accounts::ready(&setup, &account)?) {
-            return sign_in_first(setup, asked.to_owned());
+            return sign_in_first(setup, account);
         }
     }
     let (ready, unready) = ready_accounts(&setup)?;
     if ready.is_empty() {
         if setup.secrets().application() == lab::LAB_KEYRING_APPLICATION {
             let account = lab::account(&setup.paths)?;
-            return sign_in_first(setup, account.upn);
+            return sign_in_first(setup, account);
         }
         return ask_account(setup, unready.first().map(|account| account.upn.clone()));
     }
@@ -445,11 +445,10 @@ fn sign_in_from_prompt(
     .detach();
 }
 
-/// The account `upn` (`--account`) that isn't signed in yet (no object id, region or refresh token): added when it is
-/// new, then its sign-in window, alone; one that goes through starts the app afresh (`main`: the process runs itself
-/// again, the account now ready), one that doesn't leaves its entry as the rail's "+" does ([`accounts::add`]) and
-/// ends the app.
-fn sign_in_first(setup: Setup, upn: String) -> Result<Outcome, String> {
+/// The selected account's sign-in window, alone. A successful sign-in restarts the app; a failed personal add
+/// abandons its bare entry as the rail's "+" does ([`accounts::add`]). The lab identity was provisioned beforehand:
+/// sign it in as an existing account so closing or failing its first window leaves it available for another try.
+fn sign_in_first(setup: Setup, account: PersonalAccount) -> Result<Outcome, String> {
     let restart = Rc::new(Cell::new(false));
     let failure = Rc::new(std::cell::RefCell::new(None));
     let (restart_in_app, failure_in_app) = (Rc::clone(&restart), Rc::clone(&failure));
@@ -457,7 +456,13 @@ fn sign_in_first(setup: Setup, upn: String) -> Result<Outcome, String> {
         // the sign-in window is the only one: closing it mustn't quit before the sign-in is done
         cx.set_quit_mode(gpui::QuitMode::Explicit);
         let windows = ngteams::signin::windows(cx);
-        let signing = cx.background_spawn(async move { accounts::add(&setup, &upn, &windows) });
+        let signing = cx.background_spawn(async move {
+            if setup.secrets().application() == lab::LAB_KEYRING_APPLICATION {
+                accounts::sign_in(&setup, &account, &windows)
+            } else {
+                accounts::add(&setup, &account.upn, &windows)
+            }
+        });
         cx.spawn(async move |cx: &mut AsyncApp| {
             match signing.await {
                 Ok(signed) => {

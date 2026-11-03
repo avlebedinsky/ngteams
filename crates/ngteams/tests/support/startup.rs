@@ -78,14 +78,21 @@ pub(super) mod accounts {
 
     pub fn add(setup: &Setup, upn: &str, _: &Windows) -> Result<PersonalAccount, String> {
         record("add", upn);
+        if std::env::var(CASE).unwrap().starts_with("first-lab-") {
+            let account = setup.ask_for(upn).unwrap();
+            return crate::lab_startup_tests::failed_sign_in(setup, &account, true);
+        }
         if std::env::var(CASE).unwrap().ends_with("error") {
             return Err("synthetic sign-in failure".to_owned());
         }
         setup.ask_for(upn).map_err(|error| error.to_string())
     }
 
-    pub fn sign_in(_: &Setup, account: &PersonalAccount, _: &Windows) -> Result<PersonalAccount, String> {
+    pub fn sign_in(setup: &Setup, account: &PersonalAccount, _: &Windows) -> Result<PersonalAccount, String> {
         record("sign-in", &account.upn);
+        if std::env::var(CASE).unwrap().starts_with("first-lab-") {
+            return crate::lab_startup_tests::failed_sign_in(setup, account, false);
+        }
         if std::env::var(CASE).unwrap().ends_with("success") {
             Ok(account.clone())
         } else {

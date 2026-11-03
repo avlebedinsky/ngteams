@@ -17,7 +17,17 @@ const TID: &str = "00000000-0000-4000-8000-000000000001";
 
 #[test]
 fn lab_startup_and_broker_use_alias_files_and_preserve_restart_descriptors() {
-    for case in ["ready", "pending", "wrong-account", "no-sandbox", "broker"] {
+    for case in [
+        "ready",
+        "pending",
+        "pending-closed",
+        "pending-failed",
+        "pending-shortcut-closed",
+        "pending-shortcut-failed",
+        "wrong-account",
+        "no-sandbox",
+        "broker",
+    ] {
         let root = tempfile::tempdir().unwrap();
         let output = Command::new(std::env::current_exe().unwrap())
             .args([
@@ -31,10 +41,11 @@ fn lab_startup_and_broker_use_alias_files_and_preserve_restart_descriptors() {
             .env(CASE, case)
             .env(
                 "NGTEAMS_STARTUP_TEST_CASE",
-                if case == "pending" {
-                    "first-success"
-                } else {
-                    "lab-ready"
+                match case {
+                    "pending" => "first-success",
+                    "pending-closed" | "pending-shortcut-closed" => "first-lab-closed-error",
+                    "pending-failed" | "pending-shortcut-failed" => "first-lab-failed-error",
+                    _ => "lab-ready",
                 },
             )
             .env("HOME", root.path().join("home"))
@@ -72,7 +83,7 @@ fn lab_child() {
     fs::create_dir_all(std::env::var_os("XDG_RUNTIME_DIR").unwrap()).unwrap();
     let paths = ngteams::lab::paths_from_env("a").unwrap();
     let pending = PersonalAccount::pending("pending@example.test").unwrap();
-    let account = if case == "pending" {
+    let account = if case.starts_with("pending") {
         pending.clone()
     } else {
         PersonalAccount::new("ready@example.test", OID, TID).unwrap()
@@ -91,6 +102,10 @@ fn lab_child() {
     }
     if case == "broker" {
         broker_cases(&paths, &pending);
+        return;
+    }
+    if case.starts_with("pending-") {
+        pending_failure(&case, &paths, &account);
         return;
     }
     let (peer, socket) = UnixStream::pair().unwrap();
@@ -119,6 +134,79 @@ fn lab_child() {
         _ => panic!("{case}: unexpected startup outcome"),
     }
     drop(peer);
+}
+
+/// Exercise the actual add/sign-in failure distinction, not merely a fake backend returning an error. Neither
+/// answer gives an authorization code, so the loopback-only clients make no HTTP calls and the broker is unused.
+pub(super) fn failed_sign_in(
+    setup: &ngteams::setup::Setup,
+    account: &PersonalAccount,
+    adding: bool,
+) -> Result<PersonalAccount, String> {
+    use ngteams::signin::{self, SignInClients};
+    use teams_auth::authz::AuthzClient;
+    use teams_auth::signin::SignInAnswer;
+    use teams_auth::token::{EntraConfig, TokenClient};
+
+    let entra = EntraConfig::teams_native().with_authority("http://127.0.0.1:1/organizations/");
+    let clients = SignInClients {
+        token: TokenClient::new(entra.clone()).unwrap(),
+        authz: AuthzClient::with_endpoint("http://127.0.0.1:1/api/authsvc/v1.0/authz").unwrap(),
+        entra,
+    };
+    let window = || -> signin::Window {
+        Box::new(|_| {
+            if std::env::var(CASE).unwrap().ends_with("closed") {
+                SignInAnswer::Closed
+            } else {
+                SignInAnswer::Failed("synthetic sign-in window failure".into())
+            }
+        })
+    };
+    let store = setup.secrets();
+    ngteams::accounts::runtime().unwrap().block_on(async {
+        if adding {
+            signin::add(setup, &account.upn, &clients, &store, |_| Ok(window())).await
+        } else {
+            signin::sign_in(setup, account, &clients, &store, window())
+                .await
+                .map_err(|error| signin::failure(setup, account, &error))
+        }
+    })
+}
+
+fn pending_failure(case: &str, paths: &ngteams::accounts_file::PersonalPaths, account: &PersonalAccount) {
+    let before = fs::read(paths.accounts_file()).unwrap();
+    for _ in 0..2 {
+        let (peer, socket) = UnixStream::pair().unwrap();
+        let mut args = vec![
+            "ngteams".to_owned(),
+            "--lab".into(),
+            "a".into(),
+            "--secrets-fd".into(),
+            socket.into_raw_fd().to_string(),
+        ];
+        if case.contains("shortcut") {
+            args.extend(["--account".into(), account.upn.clone()]);
+        }
+        let cli = Cli::try_parse_from(args).unwrap();
+        let mode = cli.lab_mode().unwrap().unwrap();
+        let error = run_lab(&cli, &mode).err().expect("synthetic sign-in must fail");
+        assert!(
+            error.contains(if case.ends_with("closed") {
+                "closed before the sign-in finished"
+            } else {
+                "synthetic sign-in window failure"
+            }),
+            "retry must reach sign-in, not reject the alias: {error}"
+        );
+        assert_eq!(fs::read(paths.accounts_file()).unwrap(), before);
+        assert_eq!(ngteams::lab::account(paths).unwrap(), *account);
+        drop(peer);
+        let (peer, socket) = UnixStream::pair().unwrap();
+        drop(peer);
+        assert_eq!(lab_broker("a", socket.into_raw_fd()), ExitCode::SUCCESS);
+    }
 }
 
 fn broker_cases(paths: &ngteams::accounts_file::PersonalPaths, pending: &PersonalAccount) {
