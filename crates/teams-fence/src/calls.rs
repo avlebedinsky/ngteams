@@ -753,10 +753,19 @@ impl CallRegistry {
         } else {
             from.is_none()
         };
-        let added_fits = (*operation == CallOperation::Add) != target.added().is_empty();
+        let names_people = matches!(
+            operation,
+            CallOperation::Add | CallOperation::Admit | CallOperation::RemoveParticipant
+        );
+        let added_fits = names_people != target.added().is_empty();
         let hands_callbacks = matches!(
             operation,
-            CallOperation::Acknowledge | CallOperation::Add | CallOperation::Renegotiate | CallOperation::MediaAnswer
+            CallOperation::Acknowledge
+                | CallOperation::Add
+                | CallOperation::Admit
+                | CallOperation::RemoveParticipant
+                | CallOperation::Renegotiate
+                | CallOperation::MediaAnswer
         );
         let callbacks_fit = (hands_callbacks || callbacks.is_empty())
             && callbacks
@@ -1121,10 +1130,12 @@ fn proxy_link(link: &Value) -> Option<Url> {
 /// The conversation links of a start's answer (see the module docs); `None` unless the answer is a JSON object with a
 /// `conversationController` on the flight proxy at `/api/v2/ep/<host>/conv/<id>`.
 fn answer_links(answer: &[u8]) -> Option<Vec<Link>> {
-    const NAMES: [(CallOperation, &str); 3] = [
+    const NAMES: [(CallOperation, &str); 5] = [
         (CallOperation::UpdateEndpointMetadata, "updateEndpointMetadata"),
         (CallOperation::Add, "addParticipantAndModality"),
         (CallOperation::Leave, "leave"),
+        (CallOperation::Admit, "admit"),
+        (CallOperation::RemoveParticipant, "removeParticipant"),
     ];
     let answer = strict_json(answer)?;
     let controller = proxy_link(answer.get("conversationController")?)?;

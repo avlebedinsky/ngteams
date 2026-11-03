@@ -70,6 +70,9 @@ pub(crate) struct Conversation {
     pub(crate) endpoint_state: Option<CallLink>,
     /// `addParticipantAndModality`: the `…/add` an `add` posts to.
     pub(crate) add: Option<CallLink>,
+    /// A meeting's `admit` and `removeParticipant`: where its lobby's Admit and Deny go.
+    pub(crate) admit: Option<CallLink>,
+    pub(crate) remove: Option<CallLink>,
 }
 
 impl Conversation {
@@ -80,6 +83,8 @@ impl Conversation {
             endpoint_metadata: at("updateEndpointMetadata"),
             endpoint_state: at("updateEndpointState"),
             add: at("addParticipantAndModality"),
+            admit: at("admit"),
+            remove: at("removeParticipant"),
         }
     }
 }
@@ -220,6 +225,9 @@ pub(crate) struct RosterEntry {
     /// `active` with an endpoint in the call (one with a `call`, its media streams listed or not); `inactive` once
     /// gone (its endpoints empty).
     pub(crate) active: bool,
+    /// `active` with an endpoint waiting in a meeting's lobby (one with a `lobby` and none with a `call`, its
+    /// `modalityJoined` `Lobby`: seen 2026-11-03, `meeting-steps`, at the organizer's roster).
+    pub(crate) in_lobby: bool,
     pub(crate) name: Option<String>,
     /// The main audio's and the main video's source ids, and whether the main video goes out (`sendrecv` or
     /// `sendonly`): of the first endpoint in the call that lists its media.
@@ -272,10 +280,17 @@ fn roster_entry(mri: &str, entry: &Value) -> Option<RosterEntry> {
             .find(|stream| stream.get("label").and_then(Value::as_str) == Some(label))
     };
     let video = stream("main-video");
+    let state_active = entry.get("state").and_then(Value::as_str) == Some("active");
+    let waiting = endpoints.is_some_and(|endpoints| {
+        endpoints
+            .values()
+            .any(|endpoint| endpoint.get("lobby").is_some_and(Value::is_object))
+    });
     Some(RosterEntry {
         mri: Mri::new(mri),
         version,
-        active: entry.get("state").and_then(Value::as_str) == Some("active") && in_call,
+        active: state_active && in_call,
+        in_lobby: state_active && waiting && !in_call,
         // the echo service's entry names nobody: an empty name is none
         name: entry
             .pointer("/details/displayName")

@@ -370,7 +370,15 @@ creates the conversation when nobody had: the first to subscribe is its `groupCa
 
 Then the page posts its real callbacks (`POST …/conv/<id>/notificationLinks`) and on Join now its entry at the
 conversation (`POST …/conv/<id>` with `callInvitation`: a join's shape, with `suppressDialout: true`, the subject `""`
-and `participants.to: []`). Neither is mapped: the fence denies them, and `ab-meeting-join` holds them back by name.
+and `participants.to: []`). Both are mapped since 2026-11-03 (`meeting-steps`, a's web client into its own meeting):
+the entry is a join of the meeting's chat, judged by that chat read fresh as a group chat's join is (only in its captured
+shape: `messageId` `"0"`, the organizer and tenant GUIDs, nobody to ring), and the callbacks
+(`CallOperation::NotificationLinks`: the sender and its callbacks by their captured names, `admitParticipantSuccess`,
+`removeParticipantFailure`, `disablePreheatAsyncStatus` and the rest) pass as a follow-up. The web client may also enter
+while its pre-join still shows (a **preheat**: the same entry with `endpointState.endpointProperties.preheatProperties:
+1`, its media lines receive-only, and `meetingData: {meetingCode, passcode}` beside `groupChat` and `meetingInfo`); Join
+now then ends the preheat with `POST …/conv/<id>/updateEndpointState` (`endpointProperties.preheatProperties: 0`), and
+the client is in the meeting. Both are mapped the same way. `ab-meeting-join` still holds them back by name.
 
 With the subscription or the entry not going through, the client instead sends the whole of it as one **start with
 media**, `POST …/api/v2/epconv`: `conversationRequest` (`conversationType: null`, `subject: null`, `suppressDialout:
@@ -398,8 +406,21 @@ object as text with `organizerId`, `tenantId`, `subject`, `meetingJoinUrl`, `mee
 2026-11-02, `meeting-steps`, and in `ab-meeting-join`'s web client, which reads the same batch form), so it joins by
 the chat as above (`teams_proto::MeetingThread`). The meeting chat's header does the same for its Join, as Teams'
 header has it whether the meeting started or not. "Join with an ID" finds the meeting among the calendar's events by
-the ID and passcode their short link carries (`MeetingCode`) and joins it so; an ID the calendar doesn't have is
-refused there (joining by `meetingData` alone stays unmapped).
+the ID and passcode their short link carries (`MeetingCode`) and joins it so; an ID the calendar doesn't have is looked
+for among the account's meeting chats (the newest 40 the chat list holds), each one's thread read for its join link
+(`MeetingThread`'s `meetingJoinUrl`), and the meeting whose link carries the ID is joined by its chat as above, judged by
+that chat read fresh. Joining by `meetingData` alone stays unmapped, because nothing the lab can read ties an ID to the
+people in its meeting before a write: the identifiers read (`GET …/beta/meetings/identifiers?meetingId&passcode&link`)
+answers only `{"tenantId": ""}` for a valid ID, the meeting's chat (its members) can be read only by its members, and the
+meeting's conversation, which names its chat, comes only in the answer to a subscription or a start, both writes. So a
+meeting whose chat the account isn't in (an ID someone passed on) is refused. Seen 2026-11-03 (`teams-headless a meetings
+--read`): the threads of meetings made from the scheduling form name their long `meetup-join` link, not the short one,
+so only a meeting whose thread names a short link is found by its ID this way.
+
+**A channel's meeting** (Meet in a channel, or a meeting posted to one: its `meetingInfo.meetingType` the other value,
+`groupChat` the channel and its post) has no capture yet: the lab had no team of its own to hold one in, and a team made
+for it couldn't be deleted again until the fence read lab-only teams (`c71eb8b`, landed while the lobby was captured).
+Its start stays unmapped, and the native client joins no channel's meeting.
 
 **The pre-join's audio** (seen 2026-11-02, `meeting-steps`, a lab account): Computer audio (the microphone's switch
 and device, the speaker's device), Phone audio drawn greyed out (the account has no dial-in), Room audio (a "Search for
@@ -409,10 +430,13 @@ muted to avoid causing audio disruption."). Don't use audio changes nothing of t
 `{"endpointStateSequenceNumber": 1, "state": {"isMuted": true}}`, the same `callModalities` (`Audio`, `ScreenViewer`)
 and offer. The web client also enters the meeting's conversation while its pre-join shows, before Join now
 ("preheat": `endpointState.endpointProperties.preheatProperties: 1`, the entry carrying the meeting's `meetingData`
-code beside `groupChat` and `meetingInfo`); unmapped, the fence denies it. The native client offers Computer audio,
-Phone audio greyed out and Don't use audio (it joins muted, as its mute after the media is up); Room audio isn't
-offered: no room exists in the lab's tenant to find or join, and its search is on a service the native client has no
-token for.
+code beside `groupChat` and `meetingInfo`); mapped since 2026-11-03 as the entry is (above). The native client offers
+Computer audio, Phone audio greyed out and Don't use audio (it joins muted, as its mute after the media is up); Room
+audio isn't offered. Three things block it: the lab's tenant has no room, so neither a search's answer with one nor
+what joining a room's audio sends (the room device is told to join, a write to it no capture shows) can be seen; the
+search is Outlook's (`outlook.office.com/SchedulingB2`), for which the native client has no token (its sign-in asks for
+Teams' audiences only); and a write to a room reaches the room's device, which the lab rule can't judge without a room
+of the lab's own.
 
 ## The lobby
 
@@ -426,8 +450,35 @@ conversation lists `admit` and `admitAll` among its `links`, `activeModalities.l
 roster's `participantCounts.lobbyParticipants`. What a joiner held in the lobby is told, and what admitting or denying
 one sends, wasn't captured: in the 2026-11-02 run the web client's entry at the conversation (`POST …/conv/<id>` with
 its `callInvitation`, unmapped and denied) failed its join before the lobby ("Try joining again, or dial in"), and the
-native client, which starts by the mapped start with media, couldn't run (the lab's keyring was gone). Until a capture
-shows them the native client shows a joiner the call's `Joining` state and offers no Admit or Deny.
+native client, which starts by the mapped start with media, couldn't run (the lab's keyring was gone).
+
+Seen 2026-11-03 (`meeting-steps` with a's web client in its own meeting, its options saved with `OrganizerOnly`, and b's
+native client joining by the link): b's start with media is answered as any (`200`/`201`, the conversation and its
+acceptance), but b waits in the lobby. The organizer's roster tells it: b's entry has an endpoint with a `lobby` object
+(`{"mediaStreams": [{"type": "audio", "label": "main-audio", "direction": "sendrecv", "serverMuted": true}]}`) where a
+participant in the call has a `call` one, its `modalityJoined` `"Lobby"`, and `participantCounts.lobbyParticipants`
+counts it. The page shows "Waiting in the lobby", the person, Deny and Admit (and a message to the lobby). The person's
+own roster (b's callbacks) lists b the same way: that is how a joiner knows it waits. Once it leaves the lobby (it left,
+or it was turned away) its entry goes `inactive` with no endpoints.
+
+- **Admit**: `POST …/conv/<id>/admit` (the conversation's `admit` link) with `{"participants": {"from", "to": [{"id":
+  <MRI>}]}, "links": {"admitSuccess", "admitFailure"}, "debugContent": {"causeId"}}`, answered `202`; the web client
+  tried it three times, 4 s apart, while it was denied. The admitted person's entry moves from `lobby` to `call`.
+- **Deny**: `POST …/conv/<id>/removeParticipant` (its `removeParticipant` link) with `{"participants": {"from", "to":
+  [{"id"}]}, "links": {"removeParticipantSuccess", "removeParticipantFailure"}}`; the card goes from the page at once.
+
+Both are mapped as an `add` is judged: the sender and everyone named lab accounts, approved services or call guests
+(`CallOperation::Admit`, a `WriteKind::Invite`, and `CallOperation::RemoveParticipant`). The native client: the roster's
+lobby is read apart from who is in the call (`teams-call`'s `CallEvent::Lobby` for whoever waits,
+`CallEvent::InLobby` for the account itself); the call shows `CallStatus::Lobby` ("Someone in the meeting should let you
+in soon") while the account waits, and the call window shows whoever may admit Teams' "Waiting in the lobby" card with
+Deny and Admit (`CallAction::Lobby`, `DecideLobby` with the web client's callbacks). Seen live 2026-11-03
+(`teams-headless a join-meeting --admit` and `b join-meeting`): b told `lobby`, a told b waiting, a's admit answered
+`202`, a told nobody waiting and b saw a in its call. What follows on the joiner's side isn't handled yet: the mixer's first offer to
+the admitted joiner is a session of its own (every line numbered anew from `1`, its RTP header extensions too), which the
+lobby's media can't take, so the native client sets its media up again and answers it (`202`); a second later a further
+renegotiation names `IsRetargetNegotiationPending` (the call moved to another call controller), which the call registry
+binds to no call, and the joiner's call fails there (`docs/backlog/meeting-lobby-admitted-joiner-retarget.md`).
 
 ## A call held past a dropped socket
 

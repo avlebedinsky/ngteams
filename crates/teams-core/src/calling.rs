@@ -159,6 +159,9 @@ pub enum CallAction {
     /// call's video line offered again going that way (a renegotiation); a group call's lines described again
     /// (`updateMediaDescriptions`) with no SDP change, only once the call is up.
     Camera { call: CallId, on: bool },
+    /// Someone waiting in the lobby of the account's meeting ([`Event::Lobby`]) let in (`admit`) or turned away, as
+    /// Teams' Admit and Deny.
+    Lobby { call: CallId, waiting: Mri, admit: bool },
 }
 
 /// Where a call is, as the account is told ([`Event::Call`]).
@@ -180,10 +183,21 @@ pub enum CallStatus {
     Connected,
     /// The media was lost and may come back ([`RECOVER_WITHIN`]).
     Reconnecting,
+    /// The account waits in the meeting's lobby until someone in the meeting lets it in (the call goes on as it was
+    /// then) or turns it away (its end follows).
+    Lobby,
     /// The account leaves.
     Leaving,
     /// The call is over, as `End` says.
     Ended(End),
+}
+
+/// Someone waiting in the lobby of the account's meeting ([`Event::Lobby`]), as the roster names them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LobbyPerson {
+    pub mri: Mri,
+    /// As the roster gives it.
+    pub name: Option<String>,
 }
 
 /// An invitation that rings here: answer it or decline it ([`CallAction::Answer`], [`CallAction::Decline`]); nothing
@@ -238,6 +252,7 @@ pub(crate) enum Act {
     Mute(CallId, bool),
     Renegotiate(CallId),
     Camera(CallId, bool),
+    Lobby(CallId, Mri, bool),
 }
 
 type Attempt = Pin<Box<dyn Future<Output = CallTried>>>;
@@ -277,12 +292,17 @@ struct Preparing {
     setup: Pin<Box<dyn Future<Output = Result<Prepared, String>>>>,
 }
 
+/// A call's media being set up again once it was let in from its meeting's lobby ([`Calling::rebuild`]).
+type Rebuilding = (CallId, Pin<Box<dyn Future<Output = Result<Prepared, String>>>>);
+
 /// What [`Calling::next`] found to do.
 enum CallStep {
     Push(Option<PushEvent>),
     Written(CallTried),
     Due,
     Prepared(Box<Result<Prepared, String>>),
+    /// A call's media set up again once it was let in from its meeting's lobby ([`Calling::rebuild`]).
+    Rebuilt(Box<(CallId, Result<Prepared, String>)>),
     Media(MediaDone),
     /// A media step ended without its outcome (it panicked).
     MediaLost,
@@ -337,6 +357,16 @@ pub(crate) struct Calling<C, T> {
     offers: HashMap<CallId, (Option<MediaContent>, bool)>,
     /// The call the signaling says is up: told *connecting* until its media connected.
     up: Option<CallId>,
+    /// The call whose meeting's lobby the account waits in.
+    lobby: Option<CallId>,
+    /// The call the account was just let in from its meeting's lobby: the mixer's next offer is a session of its own
+    /// (every line numbered anew, its RTP header extensions too: seen 2026-11-03), so the call's media is set up again
+    /// for it ([`Self::rebuild`]).
+    admitted: Option<CallId>,
+    /// The call's media set up again for the mixer's offer once let in from the lobby, while it is.
+    rebuilding: Option<Rebuilding>,
+    /// The call whose media was set up again so: the roster telling it let in afterwards asks for nothing more.
+    replaced: Option<CallId>,
     look: Option<tokio::time::Interval>,
     events: mpsc::UnboundedSender<Event>,
 }
@@ -386,6 +416,10 @@ where
             live: None,
             offers: HashMap::new(),
             up: None,
+            lobby: None,
+            admitted: None,
+            rebuilding: None,
+            replaced: None,
             look: None,
             events,
         }
@@ -435,6 +469,7 @@ where
                 Landed::Due => CallStep::Due,
             },
             prepared = prepared(self.preparing.as_mut()) => CallStep::Prepared(Box::new(prepared)),
+            rebuilt = rebuilt(self.rebuilding.as_mut()) => CallStep::Rebuilt(Box::new(rebuilt)),
             Some(done) = self.media_steps.join_next(), if !self.media_steps.is_empty() => match done {
                 Ok(done) => CallStep::Media(done),
                 Err(_) => CallStep::MediaLost,
@@ -455,6 +490,10 @@ where
             CallStep::Written(tried) => self.written(tried, now),
             CallStep::Due => self.due(now),
             CallStep::Prepared(prepared) => self.prepared(*prepared, now),
+            CallStep::Rebuilt(rebuilt) => {
+                let (call, result) = *rebuilt;
+                self.rebuilt(call, result, now);
+            }
             CallStep::Media(done) => self.media_done(done, now),
             CallStep::MediaLost => {
                 self.sdp_running = false;
@@ -636,6 +675,10 @@ where
             }
             CallEvent::State { call, state } => self.state(call, state),
             CallEvent::RemoteMedia { call, media } => self.on_media(call, |live| media::apply(live, media), now),
+            // the mixer's offer once let in may come before the roster tells it: either way it is a session of its own
+            CallEvent::MediaOffer { call, offer } if self.lobby == Some(call) || self.admitted == Some(call) => {
+                self.rebuild(call, offer);
+            }
             CallEvent::MediaOffer { call, offer } => self.on_media(call, |live| media::answer(live, offer), now),
             CallEvent::RenegotiationGaveWay { call } => {
                 if let Some(live) = self.live.as_mut().filter(|live| live.call == call) {
@@ -646,6 +689,17 @@ where
             CallEvent::Ended { call, end } => self.ended(call, end),
             CallEvent::Voicemail { call } => self.emit(Event::Voicemail { call }),
             CallEvent::Participants { call, participants } => self.participants(call, participants, now),
+            CallEvent::Lobby { call, waiting } => self.emit(Event::Lobby {
+                call,
+                waiting: waiting
+                    .into_iter()
+                    .map(|person| LobbyPerson {
+                        mri: person.mri,
+                        name: person.name,
+                    })
+                    .collect(),
+            }),
+            CallEvent::InLobby { call, waiting } => self.in_lobby(call, waiting),
             CallEvent::KeepAliveDue { call, sent } => {
                 log::info!("call {}: its keep-alive fell due (sent: {sent})", call.get());
             }
@@ -677,6 +731,88 @@ where
                     CallStatus::Connecting
                 }
             }
+        };
+        self.emit_status(call, status);
+    }
+
+    /// `call`'s status told, as waiting in its meeting's lobby while it does: its media or its signaling moving on
+    /// there doesn't let it in.
+    fn emit_status(&self, call: CallId, status: CallStatus) {
+        let waits = self.lobby == Some(call)
+            && matches!(
+                status,
+                CallStatus::Joining | CallStatus::Connecting | CallStatus::Connected | CallStatus::Reconnecting
+            );
+        let status = if waits { CallStatus::Lobby } else { status };
+        self.emit(Event::Call { call, status });
+    }
+
+    /// The mixer's first offer to a call let in from its meeting's lobby: the call's media is set up again to answer
+    /// it, as an invitation's offer is answered, the lobby's media let go once the new one is in place.
+    fn rebuild(&mut self, call: CallId, offer: MediaContent) {
+        self.admitted = None;
+        self.replaced = Some(call);
+        log::info!("call {}: let in from the lobby, its media set up again", call.get());
+        let setup = media::prepare(
+            Arc::clone(&self.client),
+            self.media.clone(),
+            Setup {
+                offer: Some(offer),
+                tenant: false,
+                video: VideoKind::Group,
+            },
+        );
+        self.rebuilding = Some((call, Box::pin(setup)));
+    }
+
+    /// The media set up again for `call` (or not): it replaces the lobby's, its devices open, and its answer goes to
+    /// the mixer.
+    fn rebuilt(&mut self, call: CallId, result: Result<Prepared, String>, now: Instant) {
+        self.rebuilding = None;
+        if self.live.as_ref().is_none_or(|live| live.call != call) {
+            return;
+        }
+        let prepared = match result {
+            Ok(prepared) => prepared,
+            Err(why) => return self.media_failed(call, &why, now),
+        };
+        let sdp = prepared.sdp.clone();
+        let muted = self.live.as_ref().is_some_and(|live| live.session.is_muted());
+        let mut live = LiveMedia::new(call, prepared);
+        live.session.set_muted(muted);
+        live.applied(now);
+        let content = if live.is_group() {
+            live.answer_content(&sdp)
+        } else {
+            media::content(&sdp)
+        };
+        self.live = Some(live);
+        self.open_devices(call);
+        if let Err(error) = self.calls.answer_media(call, content) {
+            self.media_failed(call, &error.to_string(), now);
+        }
+    }
+
+    /// The account waits in its meeting's lobby, or no longer does: told as its status, the call's own once let in.
+    fn in_lobby(&mut self, call: CallId, waiting: bool) {
+        if waiting {
+            self.lobby = Some(call);
+            self.emit(Event::Call {
+                call,
+                status: CallStatus::Lobby,
+            });
+            return;
+        }
+        if self.lobby.take() != Some(call) || self.up != Some(call) {
+            return;
+        }
+        if self.replaced != Some(call) {
+            self.admitted = Some(call);
+        }
+        let status = if self.media_connected(call) {
+            CallStatus::Connected
+        } else {
+            CallStatus::Connecting
         };
         self.emit(Event::Call { call, status });
     }
@@ -1008,14 +1144,8 @@ where
         live.gallery.levels(levels, now);
         for change in live.poll(now) {
             match change {
-                MediaChange::Connected if self.up == Some(call) => self.emit(Event::Call {
-                    call,
-                    status: CallStatus::Connected,
-                }),
-                MediaChange::Lost if self.up == Some(call) => self.emit(Event::Call {
-                    call,
-                    status: CallStatus::Reconnecting,
-                }),
+                MediaChange::Connected if self.up == Some(call) => self.emit_status(call, CallStatus::Connected),
+                MediaChange::Lost if self.up == Some(call) => self.emit_status(call, CallStatus::Reconnecting),
                 MediaChange::Connected | MediaChange::Lost => {}
                 MediaChange::CameraOff => {
                     log::warn!("call {}: its camera went off", call.get());
@@ -1065,6 +1195,11 @@ where
             Act::Decline(call) => self.calls.decline(call).map(|()| call).map_err(CallActionError::from),
             Act::HangUp(call) => self.hang_up(call, now),
             Act::Mute(call, muted) => self.mute(call, muted),
+            Act::Lobby(call, waiting, admit) => self
+                .calls
+                .decide_lobby(call, &waiting, admit)
+                .map(|()| call)
+                .map_err(CallActionError::from),
             Act::Renegotiate(call) => match self.live.as_ref().filter(|live| live.call == call) {
                 // the machine first: the session's new offer would replace the one it waits on
                 Some(live) => match self.calls.begin_renegotiation(call) {
@@ -1323,6 +1458,14 @@ async fn land(writing: Option<&mut Writing>) -> Landed {
 }
 
 /// The media set up for an action; never, while none is.
+/// The media set up again for a call let in from its lobby, once it is; never, while none is.
+async fn rebuilt(rebuilding: Option<&mut Rebuilding>) -> (CallId, Result<Prepared, String>) {
+    match rebuilding {
+        Some((call, setup)) => (*call, setup.await),
+        None => pending().await,
+    }
+}
+
 async fn prepared(preparing: Option<&mut Preparing>) -> Result<Prepared, String> {
     match preparing {
         Some(preparing) => (&mut preparing.setup).await,

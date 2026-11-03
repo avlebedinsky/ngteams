@@ -136,7 +136,7 @@ use crate::team_admin::{TeamAsk, TeamChange, TeamMember, TeamWritten};
 /// How many people the attendee picker suggests at most.
 const INVITABLE: usize = 8;
 use crate::calling::{
-    Act, CallAction, CallActionError, CallParts, CallStatus, CallView, Calling, CallingTask, IncomingCall,
+    Act, CallAction, CallActionError, CallParts, CallStatus, CallView, Calling, CallingTask, IncomingCall, LobbyPerson,
 };
 use crate::emoticons::{Animations, Strip};
 use crate::file_content::{FileContents, FileStream};
@@ -408,6 +408,9 @@ pub enum Event {
     /// Who is in the account's call besides it, whose video each line shows, and who is speaking ([`CallView`]):
     /// told whenever that changed.
     CallParticipants { call: CallId, view: CallView },
+    /// Who waits in the lobby of the account's meeting now (empty once nobody does): each let in or turned away with
+    /// [`CallAction::Lobby`]. Told whenever that changed.
+    Lobby { call: CallId, waiting: Vec<LobbyPerson> },
 }
 
 /// What the engine's requests can fail with.
@@ -2144,6 +2147,7 @@ where
             CallAction::Mute { call, muted } => Act::Mute(call, muted),
             CallAction::Renegotiate { call } => Act::Renegotiate(call),
             CallAction::Camera { call, on } => Act::Camera(call, on),
+            CallAction::Lobby { call, waiting, admit } => Act::Lobby(call, waiting, admit),
         };
         match self.calls.as_ref() {
             Some(calls) => calls.act(act, reply),

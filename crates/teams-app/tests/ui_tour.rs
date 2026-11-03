@@ -83,7 +83,7 @@ const SETTLE: Duration = Duration::from_millis(1500);
 type Step = (&'static str, fn(&Entity<Shell>, &mut Window, &mut App));
 
 /// The tour.
-const STEPS: [Step; 4 + 115] = [
+const STEPS: [Step; 4 + 118] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -788,7 +788,53 @@ const STEPS: [Step; 4 + 115] = [
     ("call-window-effects-dark", |_, _, cx| {
         with_stage(cx, |stage, cx| stage.show_effects(true, cx));
     }),
+    // someone waiting in a meeting's lobby, as whoever may admit sees them: "Waiting in the lobby", Deny and Admit
+    ("call-lobby-dark", |shell, _, cx| {
+        with_stage(cx, |stage, cx| stage.show_effects(false, cx));
+        lobby(
+            shell,
+            vec![("8:orgid:00000000-0000-4000-8000-00000000000c", "Lab Sea")],
+            cx,
+        );
+    }),
+    // the same in Teams Light
+    ("call-lobby", |shell, _, cx| {
+        let model = shell.read(cx).settings().clone();
+        model.update(cx, |model, cx| {
+            model.change(|settings| settings.appearance.theme = teams_ui::theme::LIGHT_KEY, cx);
+        });
+    }),
+    // the account itself waiting in a meeting's lobby: only that someone should let it in
+    ("call-in-lobby", |shell, _, cx| {
+        lobby(shell, Vec::new(), cx);
+        let models = shell.read(cx).models().clone();
+        models.apply(
+            teams_core::Event::Call {
+                call: teams_core::CallId::for_tests(FAKE_CALL),
+                status: teams_core::CallStatus::Lobby,
+            },
+            cx,
+        );
+    }),
 ];
+
+/// Who waits in the made-up call's lobby, told to a's models as the engine would tell it.
+fn lobby(shell: &Entity<Shell>, waiting: Vec<(&str, &str)>, cx: &mut App) {
+    let models = shell.read(cx).models().clone();
+    models.apply(
+        teams_core::Event::Lobby {
+            call: teams_core::CallId::for_tests(FAKE_CALL),
+            waiting: waiting
+                .into_iter()
+                .map(|(mri, name)| teams_core::LobbyPerson {
+                    mri: Mri::new(mri),
+                    name: Some(name.to_owned()),
+                })
+                .collect(),
+        },
+        cx,
+    );
+}
 
 /// The made-up call's number.
 const FAKE_CALL: u64 = 1;

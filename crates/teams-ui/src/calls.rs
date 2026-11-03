@@ -31,8 +31,8 @@ use std::time::{Duration, Instant};
 
 use gpui::{App, AsyncApp, Context, Entity};
 use teams_core::{
-    CallAction, CallActionError, CallId, CallStatus, CallView, End, EngineError, Event, IncomingCall, MeetingInfo,
-    RegistrationReport,
+    CallAction, CallActionError, CallId, CallStatus, CallView, End, EngineError, Event, IncomingCall, LobbyPerson,
+    MeetingInfo, RegistrationReport,
 };
 use teams_fence::Mri;
 
@@ -96,6 +96,9 @@ pub struct ActiveCall {
     pub view: CallView,
     /// What the call showed of the devices so far: a test call's results once it ended.
     pub check: DeviceCheck,
+    /// Who waits in the meeting's lobby, as its roster tells it ([`teams_core::Event::Lobby`]): Teams' "Waiting in
+    /// the lobby" with Admit and Deny for each.
+    pub lobby: Vec<LobbyPerson>,
 }
 
 impl ActiveCall {
@@ -399,6 +402,8 @@ pub enum Ask {
     ToggleMute,
     /// Turn the camera on, or off.
     ToggleCamera,
+    /// Let someone waiting in the meeting's lobby in (`admit`), or turn them away.
+    Lobby { waiting: Mri, admit: bool },
 }
 
 impl Ask {
@@ -415,6 +420,8 @@ impl Ask {
             Self::HangUp => "hang-up",
             Self::ToggleMute => "mute",
             Self::ToggleCamera => "camera",
+            Self::Lobby { admit: true, .. } => "admit",
+            Self::Lobby { admit: false, .. } => "deny",
         }
     }
 
@@ -735,6 +742,7 @@ impl Calls {
                     | Event::CameraOff { .. }
                     | Event::AudioClosed { .. }
                     | Event::CallParticipants { .. }
+                    | Event::Lobby { .. }
             );
         }
         match event {
@@ -771,6 +779,11 @@ impl Calls {
                 if let Some(active) = self.call.as_mut().filter(|active| active.id == *call) {
                     active.check.saw(view);
                     active.view = view.clone();
+                }
+            }
+            Event::Lobby { call, waiting } => {
+                if let Some(active) = self.call.as_mut().filter(|active| active.id == *call) {
+                    active.lobby.clone_from(waiting);
                 }
             }
             _ => return false,
@@ -853,6 +866,7 @@ impl Calls {
             title,
             view: CallView::default(),
             check: DeviceCheck::default(),
+            lobby: Vec::new(),
         }
     }
 
@@ -893,6 +907,17 @@ impl Calls {
                 Ok(CallAction::Mute {
                     call: call.id,
                     muted: !call.muted,
+                })
+            }
+            Ask::Lobby { waiting, admit } => {
+                let call = self.call.as_ref().ok_or("no-call")?;
+                if !call.lobby.iter().any(|person| &person.mri == waiting) {
+                    return Err("not-waiting");
+                }
+                Ok(CallAction::Lobby {
+                    call: call.id,
+                    waiting: waiting.clone(),
+                    admit: *admit,
                 })
             }
             Ask::ToggleCamera if self.video.is_none() => Err("no-video"),
@@ -1005,8 +1030,11 @@ fn local_refusal_text(why: &str) -> String {
         "no-chat" => "no chat is open".to_owned(),
         "another-account" => "another account is in a call".to_owned(),
         "no-meeting" => "this meeting couldn't be found: try again in a moment".to_owned(),
-        "no-meeting-code" => "no meeting in your calendar has this ID: open the meeting's link to join it".to_owned(),
+        "no-meeting-code" => {
+            "no meeting you were invited to has this ID: open the meeting's link to join it".to_owned()
+        }
         "no-video" => "calls here carry no video".to_owned(),
+        "not-waiting" => "they aren't waiting in the lobby any more".to_owned(),
         _ => "calls aren't available".to_owned(),
     }
 }
@@ -1091,6 +1119,9 @@ fn refused(trace: &ViewTrace, ask: &Ask, why: &'static str) {
     trace.record(&TraceLine::new("call", "refused").kind(ask.name()).kind(why));
 }
 
+/// What a call waiting in its meeting's lobby says, as Teams' lobby screen does.
+pub const LOBBY_WAIT: &str = "Someone in the meeting should let you in soon";
+
 /// The trace's name for a call's status.
 #[must_use]
 pub fn status_name(status: &CallStatus) -> &'static str {
@@ -1103,6 +1134,7 @@ pub fn status_name(status: &CallStatus) -> &'static str {
         CallStatus::Connecting => "connecting",
         CallStatus::Connected => "connected",
         CallStatus::Reconnecting => "reconnecting",
+        CallStatus::Lobby => "lobby",
         CallStatus::Leaving => "leaving",
         CallStatus::Ended(_) => "ended",
     }
@@ -1135,6 +1167,7 @@ pub fn status_text(active: &ActiveCall) -> String {
         CallStatus::Connecting => "Connecting…".to_owned(),
         CallStatus::Connected => "Connected".to_owned(),
         CallStatus::Reconnecting => "Reconnecting…".to_owned(),
+        CallStatus::Lobby => LOBBY_WAIT.to_owned(),
         CallStatus::Leaving => "Leaving…".to_owned(),
         CallStatus::Ended(end) => end_text(end, false),
     }

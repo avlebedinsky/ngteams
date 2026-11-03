@@ -237,11 +237,15 @@ async fn calling_command(lab: &Lab, command: Command, signals: &mut Signals, out
             audio,
             seconds,
             wait,
+            admit,
         } => {
             let (Some(chat), Some(meeting)) = (join_url_chat(&link), join_url_meeting(&link)) else {
                 return Err("that isn't a meeting's join link naming its chat, organizer and tenant".into());
             };
-            let plan = call_plan(seconds, wait, 0, audio.camera_after());
+            let plan = call::Plan {
+                admit_lobby: admit,
+                ..call_plan(seconds, wait, 0, audio.camera_after())
+            };
             let asked = CallAsked {
                 target: call::Target::Meeting(chat, meeting),
                 audio,
@@ -486,6 +490,7 @@ fn call_plan(seconds: u64, wait: u64, ring_wait: u64, camera_after: Option<u64>)
         hold: Duration::from_secs(seconds),
         end_within: CALL_END_WAIT,
         camera_after: camera_after.map(Duration::from_secs),
+        admit_lobby: false,
     }
 }
 

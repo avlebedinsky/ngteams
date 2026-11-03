@@ -700,7 +700,8 @@ impl Fence {
     /// - an answer (`accept`) or a decline (`reject`): only of an invitation this fence offered (a lab caller's or a
     ///   call guest's, to its own account), by the call leg its link names, still open for it; the invitation's parties
     ///   and its group chat, read fresh, all lab accounts, approved services or call guests;
-    /// - an `add`: its sender a lab account or an approved service, every invitee one or a call guest;
+    /// - an `add`, a meeting lobby's admit or a removal (its Deny): its sender a lab account or an approved service,
+    ///   every person it names one or a call guest;
     /// - anything else (a follow-up of a call let in, a ring-time send, a `leave`): permitted and logged, with no member
     ///   read and no registry lookup. The registry still reads it (a `leave` ends its call there, an `attach` binds the
     ///   callbacks its ring ends at), but decides nothing.
@@ -713,8 +714,10 @@ impl Fence {
         };
         let sender: BTreeSet<Mri> = from.iter().cloned().collect();
         // a call guest takes part in the lab's calls, but no join or `add` is sent as one
-        if matches!(operation, CallOperation::Join | CallOperation::Add)
-            && !sender.iter().all(|mri| self.roster.admits(mri))
+        if matches!(
+            operation,
+            CallOperation::Join | CallOperation::Add | CallOperation::Admit | CallOperation::RemoveParticipant
+        ) && !sender.iter().all(|mri| self.roster.admits(mri))
         {
             let count = sender.iter().filter(|mri| !self.roster.admits(mri)).count();
             return self.decided(target, Verdict::Deny(DenyReason::Outsiders { count }));
@@ -723,8 +726,14 @@ impl Fence {
             CallOperation::Join if joins.is_some() && !sender.is_empty() && target.added().is_empty() => {
                 Ok(Resolved::unbound(sender, joins.clone()))
             }
-            CallOperation::Add if !target.added().is_empty() => Ok(Resolved::unbound(sender, None)),
-            CallOperation::Join | CallOperation::Add => Err(DenyReason::CallMismatch),
+            CallOperation::Add | CallOperation::Admit | CallOperation::RemoveParticipant
+                if !target.added().is_empty() =>
+            {
+                Ok(Resolved::unbound(sender, None))
+            }
+            CallOperation::Join | CallOperation::Add | CallOperation::Admit | CallOperation::RemoveParticipant => {
+                Err(DenyReason::CallMismatch)
+            }
             CallOperation::Accept | CallOperation::Reject => self.calls.resolve_answer(&target),
             _ => {
                 // logged first: a permit the log can't take is refused, and the registry never hears of it

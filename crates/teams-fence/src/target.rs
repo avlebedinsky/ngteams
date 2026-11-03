@@ -345,10 +345,21 @@ pub enum CallOperation {
     /// call leg's own `callLeg` link (the caller's acceptance's, the callee's acceptance's acknowledgement's), sent
     /// every 90 % of the call's `callKeepAliveInterval` (seen 2026-10-25, `ab-call --call keep-alive`).
     KeepAlive,
+    /// `POST …/conv/<id>/notificationLinks`: the sender's own callbacks for a conversation it subscribed to or entered
+    /// (its roster, its updates, what admitting and adding report), as a meeting's pre-join hands them once its
+    /// Trouter socket is up (seen 2026-11-02, `ab-meeting-join`). Names the sender, adds nobody.
+    NotificationLinks,
+    /// `POST …/conv/<id>/admit`: the sender lets the people of `to` in from the meeting's lobby, at the meeting
+    /// conversation's `admit` link (seen 2026-11-03, `meeting-steps`: the organizer's Admit). Adds them.
+    Admit,
+    /// `POST …/conv/<id>/removeParticipant`: the sender takes the people of `to` out of the meeting's conversation, at
+    /// its `removeParticipant` link: what the organizer's Deny sends for someone waiting in the lobby (seen 2026-11-03,
+    /// `meeting-steps`). Names them.
+    RemoveParticipant,
 }
 
 impl CallOperation {
-    pub const ALL: [Self; 17] = [
+    pub const ALL: [Self; 20] = [
         Self::UpdateEndpointMetadata,
         Self::Add,
         Self::Leave,
@@ -366,6 +377,9 @@ impl CallOperation {
         Self::UpdateMediaDescriptions,
         Self::Join,
         Self::KeepAlive,
+        Self::NotificationLinks,
+        Self::Admit,
+        Self::RemoveParticipant,
     ];
 
     /// The name used in `fence.log`.
@@ -389,6 +403,9 @@ impl CallOperation {
             Self::UpdateMediaDescriptions => "update_media_descriptions",
             Self::Join => "join",
             Self::KeepAlive => "keep_alive",
+            Self::NotificationLinks => "notification_links",
+            Self::Admit => "admit",
+            Self::RemoveParticipant => "remove_participant",
         }
     }
 
@@ -412,7 +429,10 @@ impl CallOperation {
             | Self::MediaAcknowledge
             | Self::UpdateMediaDescriptions
             | Self::Join
-            | Self::KeepAlive => "POST",
+            | Self::KeepAlive
+            | Self::NotificationLinks
+            | Self::Admit
+            | Self::RemoveParticipant => "POST",
         }
     }
 
@@ -434,6 +454,9 @@ impl CallOperation {
             Self::MediaAnswer => "answer",
             Self::Renegotiate => "renegotiate",
             Self::UpdateMediaDescriptions => "updateMediaDescriptions",
+            Self::NotificationLinks => "notificationLinks",
+            Self::Admit => "admit",
+            Self::RemoveParticipant => "removeParticipant",
             // the conversation's own URL, the call leg's own: no segment after it
             Self::Join | Self::KeepAlive => "",
         }
@@ -444,7 +467,7 @@ impl CallOperation {
     #[must_use]
     pub fn kind(self) -> WriteKind {
         match self {
-            Self::Add => WriteKind::Invite,
+            Self::Add | Self::Admit => WriteKind::Invite,
             Self::Attach | Self::Progress => WriteKind::CallRinging,
             Self::Accept => WriteKind::CallAnswer,
             Self::Reject => WriteKind::CallDecline,

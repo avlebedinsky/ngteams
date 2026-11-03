@@ -121,6 +121,9 @@ pub const LIST_MIN: f32 = 220.0;
 pub const LIST_MAX: f32 = 560.0;
 /// An account's avatar on the rail, px.
 const ACCOUNT_AVATAR: f32 = 36.0;
+/// How many of the account's meeting chats, newest first, Join with an ID reads for a meeting the calendar doesn't
+/// have ([`Shell::join_meeting_code`]).
+pub const MEETING_CHATS_LOOKED_THROUGH: usize = 40;
 /// The rail's width, px.
 pub const RAIL_WIDTH: f32 = 76.0;
 /// A rail item's height, px.
@@ -539,11 +542,7 @@ impl Shell {
             CalendarViewEvent::JoinChat { chat, title, link } => {
                 this.join_meeting_chat(chat.clone(), Some(title.clone()), link.clone(), cx);
             }
-            CalendarViewEvent::JoinCode(_) => {
-                let ask = Ask::Join { chat: String::new() };
-                let (calls, trace) = (this.models.calls.clone(), Arc::clone(&this.trace));
-                calls::refuse_here(&calls, &trace, &ask, "no-meeting-code", cx);
-            }
+            CalendarViewEvent::JoinCode(meeting_code) => this.join_meeting_code(meeting_code.clone(), cx),
         });
         (calendar, events)
     }
@@ -719,6 +718,59 @@ impl Shell {
                         let (calls, trace) = (this.models.calls.clone(), Arc::clone(&this.trace));
                         calls::refuse_here(&calls, &trace, &ask, "no-meeting", cx);
                     }
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Join with an ID for a meeting the calendar doesn't have: the meeting is looked for among the account's meeting
+    /// chats (the newest [`MEETING_CHATS_LOOKED_THROUGH`] the list shows), each one's thread read for its join link, and
+    /// the one whose short link carries `code` is joined by its chat, as its chat's Join joins it. A meeting whose chat
+    /// the account isn't in is refused: no read ties an ID to the people in its meeting, so nothing would let the join
+    /// be judged by them (`docs/protocol/calling.md`, "Joining a meeting").
+    pub fn join_meeting_code(&mut self, wanted: teams_core::MeetingCode, cx: &mut Context<Self>) {
+        let chats: Vec<String> = self
+            .list
+            .read(cx)
+            .all_rows()
+            .filter(|row| row.kind == crate::chat_list::RowKind::Meeting)
+            .map(|row| row.id.clone())
+            .take(MEETING_CHATS_LOOKED_THROUGH)
+            .collect();
+        self.trace.record(&TraceLine::new("call", "meeting-code"));
+        let core = Arc::clone(&self.core);
+        cx.spawn(async move |this, cx| {
+            let mut found = None;
+            for chat in chats {
+                let Ok(Some(details)) = core.meeting(chat.clone()).await else {
+                    continue;
+                };
+                let carries = details
+                    .join_url
+                    .as_deref()
+                    .and_then(teams_core::MeetingCode::of_link)
+                    .is_some_and(|carried| carried == wanted);
+                if carries {
+                    found = Some((chat, details));
+                    break;
+                }
+            }
+            let _ = this.update(cx, |this, cx| {
+                if let Some((chat, details)) = found {
+                    let title = details.title.unwrap_or_else(|| "Meeting".to_owned());
+                    this.open_prejoin(
+                        MeetingToJoin {
+                            chat,
+                            meeting: details.meeting,
+                            title,
+                        },
+                        cx,
+                    );
+                } else {
+                    let ask = Ask::Join { chat: String::new() };
+                    let (calls, trace) = (this.models.calls.clone(), Arc::clone(&this.trace));
+                    calls::refuse_here(&calls, &trace, &ask, "no-meeting-code", cx);
                 }
             });
         })

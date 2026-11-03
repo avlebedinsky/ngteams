@@ -5,8 +5,9 @@
 
 use teams_proto::{
     AcceptCall, AcknowledgeAcceptance, AcknowledgeMediaAnswer, AddToCall, AnswerMedia, ApplyChannelParameters,
-    AttachCall, DeclineCall, JoinCall, KeepAliveCall, LeaveCall, Mutating, RenegotiateMedia, ReportRinging, StartCall,
-    UpdateEndpointMetadata, UpdateEndpointState, UpdateMediaDescriptions, UpdateParticipantProperties,
+    AttachCall, DecideLobby, DeclineCall, JoinCall, KeepAliveCall, LeaveCall, Mutating, RenegotiateMedia,
+    ReportRinging, StartCall, UpdateEndpointMetadata, UpdateEndpointState, UpdateMediaDescriptions,
+    UpdateParticipantProperties,
 };
 
 /// The id a write's outcome comes back under ([`crate::Calls::on_outcome`]). Unique for the machine's life.
@@ -51,6 +52,7 @@ pub enum CallWrite {
     AcknowledgeMediaAnswer(AcknowledgeMediaAnswer),
     MediaDescriptions(UpdateMediaDescriptions),
     KeepAlive(KeepAliveCall),
+    Lobby(DecideLobby),
 }
 
 impl CallWrite {
@@ -75,6 +77,7 @@ impl CallWrite {
             Self::AcknowledgeMediaAnswer(write) => sink.submit(id, write),
             Self::MediaDescriptions(write) => sink.submit(id, write),
             Self::KeepAlive(write) => sink.submit(id, write),
+            Self::Lobby(write) => sink.submit(id, write),
         }
     }
 
@@ -100,6 +103,7 @@ impl CallWrite {
             Self::AcknowledgeMediaAnswer(_) => "media_acknowledge",
             Self::MediaDescriptions(_) => "update_media_descriptions",
             Self::KeepAlive(_) => "keep_alive",
+            Self::Lobby(_) => "lobby_decision",
         }
     }
 }

@@ -52,8 +52,10 @@ pub async fn meetings(engine: &EngineRequests, now_ms: i64, look: &Look, out: &m
     Ok(fine)
 }
 
-fn print_event(event: &CalendarEvent, out: &mut impl Write) -> io::Result<()> {
-    let link = event.join_url.as_deref().map_or("none", |url| {
+/// What kind of join link `url` is: a short one carrying the meeting's code (`meet-code`), a long one naming its
+/// thread (`meetup-join`), another, or none.
+fn link_kind(url: Option<&str>) -> &'static str {
+    url.map_or("none", |url| {
         if MeetingCode::of_link(url).is_some() {
             "meet-code"
         } else if url.contains("/l/meetup-join/") {
@@ -61,7 +63,11 @@ fn print_event(event: &CalendarEvent, out: &mut impl Write) -> io::Result<()> {
         } else {
             "other"
         }
-    });
+    })
+}
+
+fn print_event(event: &CalendarEvent, out: &mut impl Write) -> io::Result<()> {
+    let link = link_kind(event.join_url.as_deref());
     writeln!(
         out,
         "meeting id={} chat={} organizer={} link={link} names_organizer={} kind={:?}",
@@ -83,10 +89,11 @@ async fn read_thread(
         Ok(Some(details)) => {
             writeln!(
                 out,
-                "thread chat={chat} organizer_matches={} titled={} link={}",
+                "thread chat={chat} organizer_matches={} titled={} link={} same_code={}",
                 event.meeting.as_ref().is_none_or(|meeting| *meeting == details.meeting),
                 details.title.is_some(),
-                details.join_url.is_some()
+                link_kind(details.join_url.as_deref()),
+                same_code(event.join_url.as_deref(), details.join_url.as_deref())
             )?;
             Ok(true)
         }
@@ -98,6 +105,19 @@ async fn read_thread(
             writeln!(out, "thread chat={chat} read failed {}", error.kind())?;
             Ok(false)
         }
+    }
+}
+
+/// Whether the event's link and its chat's thread's carry the same meeting code (`none` when either carries none):
+/// what joining by an ID the calendar doesn't have finds a meeting's chat by.
+fn same_code(event: Option<&str>, thread: Option<&str>) -> &'static str {
+    match (
+        event.and_then(MeetingCode::of_link),
+        thread.and_then(MeetingCode::of_link),
+    ) {
+        (Some(event), Some(thread)) if event == thread => "yes",
+        (Some(_), Some(_)) => "no",
+        _ => "none",
     }
 }
 

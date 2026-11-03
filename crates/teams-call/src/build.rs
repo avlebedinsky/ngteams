@@ -7,8 +7,8 @@ use std::time::Instant;
 use teams_fence::Mri;
 use teams_proto::{
     AcceptCall, AcceptParts, AcknowledgeAcceptance, AcknowledgeMediaAnswer, AddParts, AddToCall, AnswerMedia,
-    AnswerMediaParts, ApplyChannelParameters, AttachCall, AttachParts, CallLink, ChannelParameters, DeclineCall,
-    Invitee, JoinCall, JoinMedia, JoinParts, KeepAliveCall, LeaveCall, LeaveReason, Links, MediaContent,
+    AnswerMediaParts, ApplyChannelParameters, AttachCall, AttachParts, CallLink, ChannelParameters, DecideLobby,
+    DeclineCall, Invitee, JoinCall, JoinMedia, JoinParts, KeepAliveCall, LeaveCall, LeaveReason, Links, MediaContent,
     MediaDescriptions, RenegotiateMedia, ReportRinging, StartCall, StartParts, UpdateEndpointMetadata,
     UpdateEndpointState, UpdateMediaDescriptions,
 };
@@ -250,6 +250,32 @@ pub(crate) fn answer_media(call: &mut Call, link: &CallLink, answer: MediaConten
 }
 
 /// The call's keep-alive, at the call leg's own link (the acceptance's or the `accept`'s answer's `callLeg`).
+/// A meeting lobby's Admit (`admit` true, at the conversation's `admit` link) or Deny (at its `removeParticipant`
+/// link) of `waiting`, with new callbacks for how it went (named as the web client's are: its admit's
+/// `admitParticipantSuccess` and `admitParticipantFailure`, its removal's `removeParticipantSuccess` and
+/// `removeParticipantFailure`).
+pub(crate) fn lobby(call: &mut Call, link: &CallLink, waiting: &Mri, admit: bool) -> Result<CallWrite, CallError> {
+    let (success, failure) = if admit {
+        ("admitParticipantSuccess", "admitParticipantFailure")
+    } else {
+        ("removeParticipantSuccess", "removeParticipantFailure")
+    };
+    let (on_success, on_failure) = (
+        call.callback(Kind::Conversation, success)?,
+        call.callback(Kind::Conversation, failure)?,
+    );
+    let write = if admit {
+        let links = Links::new()
+            .with("admitSuccess", on_success)
+            .with("admitFailure", on_failure);
+        DecideLobby::admit(&call.context, link, (&call.me, waiting), &links)?
+    } else {
+        let links = Links::new().with(success, on_success).with(failure, on_failure);
+        DecideLobby::deny(&call.context, link, (&call.me, waiting), &links)?
+    };
+    Ok(CallWrite::Lobby(write))
+}
+
 pub(crate) fn keep_alive(call: &Call, link: &CallLink) -> Result<CallWrite, CallError> {
     Ok(CallWrite::KeepAlive(KeepAliveCall::new(&call.context, link)?))
 }

@@ -157,6 +157,13 @@ pub enum CallEvent {
         call: CallId,
         participants: Vec<Participant>,
     },
+    /// Who waits in a meeting's lobby now, the account aside, as the roster tells it: told whenever that changed.
+    /// Each is let in ([`Calls::decide_lobby`] with `admit`) or turned away by whoever may admit; the service turns away
+    /// an Admit of anyone else.
+    Lobby { call: CallId, waiting: Vec<Participant> },
+    /// The account itself waits in the meeting's lobby (`waiting`), or no longer does (let in: the call goes on, or
+    /// turned away: its end follows).
+    InLobby { call: CallId, waiting: bool },
 }
 
 /// The Trouter delivery a response answers: its connection (the fence's key for it) and its id.
@@ -745,6 +752,33 @@ fn ringing(current: &mut Option<Call>, call: CallId) -> Result<&mut Call, CallEr
 
 /// Hanging up, leaving, failing and the outcomes of writes.
 impl Calls {
+    /// The account lets `waiting` in from the meeting's lobby (`admit`) or turns them away: an admit at the meeting
+    /// conversation's `admit` link, a removal at its `removeParticipant` link, as the web client's Admit and Deny send
+    /// them. Only someone the roster tells waiting ([`CallEvent::Lobby`]), in a meeting's call the account is in.
+    ///
+    /// # Errors
+    /// [`CallError::NoSuchCall`] for another call, [`CallError::NotNow`] when nobody by that MRI waits or the
+    /// conversation named no such link; nothing was sent.
+    pub fn decide_lobby(&mut self, call: CallId, waiting: &Mri, admit: bool) -> Result<(), CallError> {
+        let current = self
+            .call
+            .as_mut()
+            .filter(|current| current.id == call)
+            .ok_or(CallError::NoSuchCall)?;
+        let waits = current.roster.waiting().iter().any(|person| &person.mri == waiting);
+        let link = if admit {
+            current.conversation.admit.clone()
+        } else {
+            current.conversation.remove.clone()
+        };
+        let (true, Phase::Connected | Phase::Joining, Some(link)) = (waits, current.phase, link) else {
+            return Err(CallError::NotNow);
+        };
+        let write = build::lobby(current, &link, waiting, admit)?;
+        self.out.send(current, Step::Lobby, write);
+        Ok(())
+    }
+
     /// The account hangs up `call`: cancels it while it rings at its callees, leaves it once it is up. An invitation
     /// that rings here is declined instead ([`Self::decline`]), and so is one being answered whose `accept` hasn't
     /// gone out yet (the account isn't in the call before it, and only a decline ends the ring).
@@ -1027,7 +1061,7 @@ impl Calls {
             (Step::Leave, Some(_)) => self.left(),
             // a keep-alive not taken ends nothing: the next one goes when it falls due, as the web client's does; a
             // group call's media described again and not taken leaves the call as it was (the camera goes unseen)
-            (_, Some(_)) | (Step::KeepAlive | Step::Describe | Step::ChannelParameters, None) => {}
+            (_, Some(_)) | (Step::KeepAlive | Step::Describe | Step::ChannelParameters | Step::Lobby, None) => {}
             (step, None) => self.fail(step, now),
         }
     }
@@ -1050,11 +1084,12 @@ impl Calls {
         let Some(call) = self.call.as_mut() else { return };
         call.conversation = conversation;
         // a meeting's call that runs already: who is in it comes only with this answer (its updates tell changes)
-        if let Some(update) = read::answered_roster(body)
-            && let Some(participants) = call.roster.apply(update, &self.identity.mri)
-        {
-            let id = call.id;
-            self.out.event(CallEvent::Participants { call: id, participants });
+        if let Some(update) = read::answered_roster(body) {
+            if let Some(participants) = call.roster.apply(update, &self.identity.mri) {
+                let id = call.id;
+                self.out.event(CallEvent::Participants { call: id, participants });
+            }
+            lobby_told(call, &mut self.out, &self.identity.mri);
         }
         match call.phase {
             Phase::Leaving { sent: false, end } => {
@@ -1341,6 +1376,7 @@ impl Calls {
             let id = call.id;
             self.out.event(CallEvent::Participants { call: id, participants });
         }
+        lobby_told(call, &mut self.out, &self.identity.mri);
     }
 
     /// The test call's echo in its roster, or no longer: it leaves once it played the recording back (its entry turns
@@ -1589,3 +1625,14 @@ fn correlation() -> String {
 
 #[cfg(test)]
 mod tests;
+
+/// The lobby's change since last told (who waits, whether the account itself does), as events.
+fn lobby_told(call: &mut Call, out: &mut Out, me: &Mri) {
+    let change = call.roster.lobby(me);
+    if let Some(waiting) = change.waiting {
+        out.event(CallEvent::Lobby { call: call.id, waiting });
+    }
+    if let Some(waiting) = change.own {
+        out.event(CallEvent::InLobby { call: call.id, waiting });
+    }
+}

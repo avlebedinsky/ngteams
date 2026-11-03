@@ -412,8 +412,9 @@ teams-headless a call echo|b|abc|<id> [--tone 1000] [--bursts] [--hear <hz>] [--
                                           # a call through the engine, its media on files; held, hung up, its tone looked for
 teams-headless c join abc [--ring-wait 180] [--tone …] [--seconds 45] [--wait 60] \
                                           # the group chat's running call joined late, once its invitation rang out here
-teams-headless a join-meeting <join link> [--tone …] [--seconds 45] [--wait 60]
-                                          # a meeting's call by its join link, as the calendar's Join: started when nobody has
+teams-headless a join-meeting <join link> [--tone …] [--seconds 45] [--wait 60] [--admit]
+                                          # a meeting's call by its join link, as the calendar's Join: started when nobody has;
+                                          # waiting in its lobby is printed (status lobby); --admit lets in whoever waits
 ```
 
 A chat is `a`, `b` or `c` (the 1:1 chat with that account, from the MRIs in `lab.toml`), `abc` (the group chat
@@ -558,7 +559,9 @@ the suggested times and the Scheduler (everyone's busy times beside the form), t
 meeting switch, the text in the rich-text editor (Format, Emoji), Show as, the reminder, categories, private and Print
 (the event's page in the browser, which prints it), the day beside it with the event's block to drag; Save (Send, Send
 update; Ctrl+S) writes through the engine and the calendar reads its days again (`docs/protocol/calendar.md`, "Writing
-an event"). "Join with an ID" asks for the meeting's ID and passcode and joins the calendar's meeting that has them. The settings (the selected chat, typing, read
+an event"). "Join with an ID" asks for the meeting's ID and passcode and joins the calendar's meeting that has them, or
+else the meeting among the account's meeting chats whose join link carries them (the newest 40 chats' threads read); a
+meeting the account isn't in the chat of is refused (`docs/protocol/calling.md`, "Joining a meeting"). The settings (the selected chat, typing, read
 receipts, notifications, the idle time, the manual status, the log's level, the theme, the font and the
 time format, the system's clock or a 12-hour or 24-hour one) live in
 `<data_dir>/ui/<alias>.toml` (`0600`, its directory `0700`); a file that can't be read gives the defaults, a bad value keeps its default, and either is
@@ -608,7 +611,8 @@ the UI is looked at by.
 Calls (M3): the app's engine gets its calling on the UI sandbox's PipeWire (the only one a lab build may open; without
 it the app runs without calls). A chat's header has Call once the calling endpoint is registered (Join
 where an invitation named a running call in that group chat; a meeting's chat has Join, which opens the meeting's
-pre-join whether its call runs or not); an invitation the engine offered rings with a ringtone on
+pre-join whether its call runs or not; waiting in a meeting's lobby, the call window says someone should let you in,
+and to whoever may admit it shows "Waiting in the lobby" with Deny and Admit for each person waiting); an invitation the engine offered rings with a ringtone on
 the default output, a banner (Answer, Decline) and a notification with Answer and Decline on the bus the app is given,
 the caller named as the invitation names them, all gone once its ring ends. A call opens a window of its own, as
 Teams' does, and the main window's chats stay usable beside it: its header names who the call is with, its state and

@@ -7,6 +7,8 @@
 //! what it found is answered before the connection ends:
 //!
 //! - `wait <seconds>`, `shot <name>` (a screenshot in the capture dir), `press <escape|enter|backspace|space>`;
+//! - `go <url>`: loads `url` in the page, a `beforeunload` dialog holding it accepted (a page a script's navigation
+//!   can't leave while that dialog shows);
 //! - `js <code>`: evaluates `code` in the page, answering its value;
 //! - `click <css> <regex>`: clicks the first visible element `css` selects whose text or label matches `regex`;
 //! - `point <css>`: clicks the element `css` selects as a pointer would;
@@ -237,6 +239,10 @@ async fn step(
             drive.press("a key", key).await?;
             Ok("pressed".to_owned())
         }
+        "go" => {
+            drive.navigate("a step's navigation", rest).await?;
+            Ok("loaded".to_owned())
+        }
         "js" => Ok(drive.evaluate("the page", rest).await?.to_string()),
         "click" => {
             let (css, name) = rest.split_once(' ').unwrap_or((rest, "."));
@@ -260,20 +266,24 @@ async fn step(
             Ok("inserted".to_owned())
         }
         "seen" => Ok(writes_seen(drive, report, &mut seen.at, seen.services).await),
-        "hold" => {
-            let (method, rest) = rest.split_once(' ').unwrap_or(("POST", rest));
-            let (pattern, body) = rest.split_once(' ').unwrap_or((rest, ""));
-            let mut rule = ForcedDeny::new(method, pattern).map_err(|error| ScenarioError::Setup(error.to_string()))?;
-            if let Some(text) = body.strip_prefix('+') {
-                rule = rule.with_body_containing(text);
-            } else if let Some(text) = body.strip_prefix('-') {
-                rule = rule.with_body_lacking(text);
-            }
-            page.force_deny(rule.labelled(HELD_BY_A_STEP));
-            Ok("held".to_owned())
-        }
+        "hold" => hold(page, rest),
         other => Ok(format!("unknown step {other}")),
     }
+}
+
+/// A `hold` step: from now on every request of its method whose URL its pattern finds a match in (and whose body holds,
+/// or lacks, its text) is force-denied.
+fn hold(page: &LabSession, rest: &str) -> Result<String, ScenarioError> {
+    let (method, rest) = rest.split_once(' ').unwrap_or(("POST", rest));
+    let (pattern, body) = rest.split_once(' ').unwrap_or((rest, ""));
+    let mut rule = ForcedDeny::new(method, pattern).map_err(|error| ScenarioError::Setup(error.to_string()))?;
+    if let Some(text) = body.strip_prefix('+') {
+        rule = rule.with_body_containing(text);
+    } else if let Some(text) = body.strip_prefix('-') {
+        rule = rule.with_body_lacking(text);
+    }
+    page.force_deny(rule.labelled(HELD_BY_A_STEP));
+    Ok("held".to_owned())
 }
 
 /// The requests since `seen` on the services team management uses (never another host, whose bodies can carry a token),

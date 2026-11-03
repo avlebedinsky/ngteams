@@ -57,6 +57,8 @@ pub struct Plan {
     pub end_within: Duration,
     /// When the camera goes on, after the media connected (`None`: it stays off).
     pub camera_after: Option<Duration>,
+    /// Lets in everyone the meeting's lobby tells waiting (`join-meeting --admit`), each admit through the fence.
+    pub admit_lobby: bool,
 }
 
 /// How often a call's video counts are printed while it runs (`video_lines`).
@@ -313,6 +315,7 @@ impl<W: Write> Following<'_, W> {
                 }
             };
             print(self.out, &event, self.names)?;
+            self.admit_waiting(&event).await?;
             if let Event::Call { call, status } = event
                 && call == self.call
                 && self.status(status, report)
@@ -322,9 +325,51 @@ impl<W: Write> Following<'_, W> {
         }
     }
 
-    /// The call is `status` now: held once its media connected, its end reported; `true` once it ended.
+    /// With `--admit`, lets in everyone a lobby event of the call tells waiting.
+    async fn admit_waiting(&mut self, event: &Event) -> Result<(), CommandError> {
+        let Event::Lobby { call, waiting } = event else {
+            return Ok(());
+        };
+        if *call != self.call || !self.plan.admit_lobby {
+            return Ok(());
+        }
+        for person in waiting {
+            self.admit(&person.mri).await?;
+        }
+        Ok(())
+    }
+
+    /// Lets `waiting` in from the meeting's lobby, the answer printed (`admit` or `admit_refused`).
+    async fn admit(&mut self, waiting: &teams_fence::Mri) -> Result<(), CommandError> {
+        let action = CallAction::Lobby {
+            call: self.call,
+            waiting: waiting.clone(),
+            admit: true,
+        };
+        let answer = self.handle.requests().call(action).await;
+        let (at, who) = (now_ms(), self.names.show(waiting.as_str()));
+        match answer {
+            Ok(_) => writeln!(self.out, "{at} admit call={} who={who}", self.call.get())?,
+            Err(error) => writeln!(
+                self.out,
+                "{at} admit_refused call={} who={who} why={}",
+                self.call.get(),
+                json_line(&Value::String(error.to_string()))
+            )?,
+        }
+        self.out.flush()?;
+        Ok(())
+    }
+
+    /// The call is `status` now: held once its media connected (waiting in a meeting's lobby isn't, so it may take
+    /// the connect wait again from there), its end reported; `true` once it ended.
     fn status(&mut self, status: CallStatus, report: &mut Report) -> bool {
         match status {
+            CallStatus::Lobby => {
+                self.phase = Phase::Connecting(tokio::time::Instant::now() + self.plan.connect_within);
+                self.camera_at = None;
+                false
+            }
             CallStatus::Connected if matches!(self.phase, Phase::Connecting(_)) => {
                 let now = tokio::time::Instant::now();
                 report.setup = Some(now - self.placed);

@@ -595,6 +595,7 @@ call_write!(
     AcknowledgeMediaAnswer,
     UpdateMediaDescriptions,
     KeepAliveCall,
+    DecideLobby,
 );
 
 /// The meeting a call is, as a join or a start names it (`meetingInfo`): its organizer's object id and tenant.
@@ -1181,4 +1182,54 @@ impl KeepAliveCall {
         let body = json!({"callParticipantUpdate": {}});
         Ok(Self(operation(context, CallOperation::KeepAlive, link, Some(body))?))
     }
+}
+
+/// Someone waiting in a meeting's lobby let in, or turned away: `POST` to the meeting conversation's `admit` link (the
+/// organizer's Admit) or its `removeParticipant` link (its Deny), the sender, the one person it names and the
+/// callbacks for how it went (`admitSuccess` and `admitFailure`, `removeParticipantSuccess` and
+/// `removeParticipantFailure`), as the web client sends them (seen 2026-11-03, `meeting-steps`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DecideLobby(Built);
+
+impl DecideLobby {
+    /// `from` admits `waiting` at `link` (the conversation's `admit` link), its callbacks `links`.
+    ///
+    /// # Errors
+    /// [`CallWriteError`] when the request isn't an admit in its captured shape.
+    pub fn admit(
+        context: &CallContext,
+        link: &CallLink,
+        (from, waiting): (&CallParticipant, &Mri),
+        links: &Links,
+    ) -> Result<Self, CallWriteError> {
+        Ok(Self(operation(
+            context,
+            CallOperation::Admit,
+            link,
+            Some(lobby_body(from, waiting, links)),
+        )?))
+    }
+
+    /// `from` turns `waiting` away at `link` (the conversation's `removeParticipant` link), its callbacks `links`.
+    ///
+    /// # Errors
+    /// [`CallWriteError`] when the request isn't a removal in its captured shape.
+    pub fn deny(
+        context: &CallContext,
+        link: &CallLink,
+        (from, waiting): (&CallParticipant, &Mri),
+        links: &Links,
+    ) -> Result<Self, CallWriteError> {
+        Ok(Self(operation(
+            context,
+            CallOperation::RemoveParticipant,
+            link,
+            Some(lobby_body(from, waiting, links)),
+        )?))
+    }
+}
+
+/// An admit's or a removal's body: the sender, the one person it names, the callbacks for how it went.
+fn lobby_body(from: &CallParticipant, waiting: &Mri, links: &Links) -> Value {
+    json!({"participants": {"from": from.json(), "to": [{"id": waiting.as_str()}]}, "links": links.json()})
 }

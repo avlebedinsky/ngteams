@@ -51,6 +51,7 @@ const PLAN: Plan = Plan {
     hold: Duration::from_secs(4),
     end_within: Duration::from_secs(10),
     camera_after: None,
+    admit_lobby: false,
 };
 
 // --- the command line ---

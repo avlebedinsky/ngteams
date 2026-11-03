@@ -576,7 +576,9 @@ pub(crate) fn start_evidence(body: &[u8]) -> Option<StartEvidence> {
     let start = strict_json(body)?;
     // a join or a meeting's start enters a call only with a call invitation; one without subscribes to the roster and
     // starts nothing
-    let enters = (fits(&start, Shape::Object(JOIN)) || fits(&start, Shape::Object(MEETING_CALL_START)))
+    let enters = [JOIN, MEETING_CALL_START, MEETING_JOIN]
+        .iter()
+        .any(|shape| fits(&start, Shape::Object(shape)))
         && start.get("callInvitation").is_some();
     if !fits(&start, Shape::Object(CALL_START)) && !fits(&start, Shape::Object(CHAT_CALL_START)) && !enters {
         return None;
@@ -782,6 +784,9 @@ fn operation_of(url: &Url) -> Option<CallOperation> {
             "leave" => Some(CallOperation::Leave),
             "updateEndpointState" => Some(CallOperation::UpdateEndpointState),
             "updateParticipantProperties" => Some(CallOperation::UpdateParticipantProperties),
+            "notificationLinks" => Some(CallOperation::NotificationLinks),
+            "admit" => Some(CallOperation::Admit),
+            "removeParticipant" => Some(CallOperation::RemoveParticipant),
             _ => None,
         },
         ["api", "v2", "ep", host, "cc", "v1", kind, call, .., op] if !host.is_empty() && !call.is_empty() => {
@@ -824,7 +829,101 @@ fn shape_of(operation: CallOperation) -> &'static [Field] {
         CallOperation::UpdateMediaDescriptions => UPDATE_MEDIA_DESCRIPTIONS,
         CallOperation::Join => JOIN,
         CallOperation::KeepAlive => KEEP_ALIVE,
+        CallOperation::NotificationLinks => NOTIFICATION_LINKS,
+        CallOperation::Admit => ADMIT,
+        CallOperation::RemoveParticipant => REMOVE_PARTICIPANT,
     }
+}
+
+/// The people an admit or a removal names, by their MRI alone, at least one ([`caller_target`] reads them).
+const NAMED: &[Field] = &[
+    required("from", Shape::Object(FROM)),
+    required("to", Shape::Objects(&[required("id", Shape::Text)])),
+];
+
+/// `POST …/conv/<id>/admit` (seen 2026-11-03, `meeting-steps`: the organizer's Admit of someone waiting in the
+/// lobby): the sender, the people let in, the callbacks for how it went.
+const ADMIT: &[Field] = &[
+    required("participants", Shape::Object(NAMED)),
+    field(
+        "links",
+        Shape::Object(&[field("admitSuccess", Shape::Text), field("admitFailure", Shape::Text)]),
+    ),
+    field("debugContent", Shape::Object(&[field("causeId", Shape::Text)])),
+];
+
+/// `POST …/conv/<id>/removeParticipant` (seen 2026-11-03, `meeting-steps`: the organizer's Deny of someone waiting in
+/// the lobby): the sender, the people taken out, the callbacks for how it went.
+const REMOVE_PARTICIPANT: &[Field] = &[
+    required("participants", Shape::Object(NAMED)),
+    field(
+        "links",
+        Shape::Object(&[
+            field("removeParticipantSuccess", Shape::Text),
+            field("removeParticipantFailure", Shape::Text),
+        ]),
+    ),
+];
+
+/// `POST …/conv/<id>/notificationLinks` (seen 2026-11-02, `ab-meeting-join`, at the pre-join once its Trouter socket
+/// was up, before Join now): the sender and its own callbacks for the conversation, the roster's among them.
+const NOTIFICATION_LINKS: &[Field] = &[
+    required("participants", Shape::Object(FROM_ONLY)),
+    field("roster", Shape::Object(ROSTER)),
+    required(
+        "links",
+        Shape::Object(&[
+            field("conversationEnd", Shape::Text),
+            field("conversationUpdate", Shape::Text),
+            field("localParticipantUpdate", Shape::Text),
+            field("rosterUpdate", Shape::Text),
+            field("addParticipantSuccess", Shape::Text),
+            field("addParticipantFailure", Shape::Text),
+            field("nudgeParticipantSuccess", Shape::Text),
+            field("nudgeParticipantFailure", Shape::Text),
+            field("admitParticipantSuccess", Shape::Text),
+            field("admitParticipantFailure", Shape::Text),
+            field("admitAllStatus", Shape::Text),
+            field("removeParticipantSuccess", Shape::Text),
+            field("removeParticipantFailure", Shape::Text),
+            field("addModalitySuccess", Shape::Text),
+            field("addModalityFailure", Shape::Text),
+            field("contentSharingUpdate", Shape::Text),
+            field("contentSharingEnd", Shape::Text),
+            field("broadcastUpdate", Shape::Text),
+            field("confirmUnmute", Shape::Text),
+            field("unmuteSuccess", Shape::Text),
+            field("unmuteFailure", Shape::Text),
+            field("updateMeetingLiveStateStatus", Shape::Text),
+            field("updateMeetingGroupsStatus", Shape::Text),
+            field("setMeetingLayoutStatus", Shape::Text),
+            field("updateParticipantInterpretationStateStatus", Shape::Text),
+            field("updateParticipantPropertiesStatus", Shape::Text),
+            field("joinMeetingGroupStatus", Shape::Text),
+            field("leaveMeetingGroupStatus", Shape::Text),
+            field("receiveMessage", Shape::Text),
+            field("sendMessageStatus", Shape::Text),
+            field("disablePreheatAsyncStatus", Shape::Text),
+            field("updateMeetingStatesStatus", Shape::Text),
+            field("muteUnmuteAsync", Shape::Text),
+        ]),
+    ),
+];
+
+/// The sender's own callbacks for a conversation ([`NOTIFICATION_LINKS`], the shape fits) as a write: its sender and
+/// every callback it hands out, the roster's too.
+fn notification_links_target(url: &Url, request: &Value) -> Option<Target> {
+    let from = Mri::new(request.pointer("/participants/from/id")?.as_str()?);
+    let mut callbacks = links_of(request.get("links"))?;
+    if let Some(roster) = request.pointer("/roster/rosterUpdate") {
+        callbacks.push(roster.as_str()?.to_owned());
+    }
+    Some(invitation_operation(
+        CallOperation::NotificationLinks,
+        url,
+        Some(from),
+        callbacks,
+    ))
 }
 
 /// `POST …/cc/v1/active/<call>/<n>/<leg>/<n>` (seen 2026-10-25, `ab-call --call keep-alive`, from the caller's page and
@@ -932,20 +1031,8 @@ const UPDATE_PARTICIPANT_PROPERTIES: &[Field] = &[
 /// callee's endpoint state in the call's conversation, its sender `from`.
 const UPDATE_ENDPOINT_STATE: &[Field] = &[
     required("from", Shape::Object(FROM)),
-    required(
-        "endpointState",
-        Shape::Object(&[
-            field("state", Shape::Object(&[field("isMuted", Shape::Bool)])),
-            field(
-                "endpointProperties",
-                Shape::Object(&[field(
-                    "additionalEndpointProperties",
-                    Shape::Object(&[field("infoShownInReportMode", Shape::Text)]),
-                )]),
-            ),
-            field("endpointStateSequenceNumber", Shape::Count),
-        ]),
-    ),
+    // a meeting's Join now after its preheat ends the preheat here (`preheatProperties: 0`, seen 2026-11-03)
+    required("endpointState", Shape::Object(MEETING_ENDPOINT_STATE)),
 ];
 
 /// `POST …/cc/v1/incoming/<call>/…/accept` (seen 2026-10-24, `ab-call` and `abc-call`): the callee answers, naming
@@ -1028,6 +1115,7 @@ pub(crate) fn follow_up(method: &str, url: &Url, body: Option<&[u8]>) -> Option<
         CallOperation::UpdateEndpointState | CallOperation::UpdateParticipantProperties => {
             conversation_target(operation, url, &request)
         }
+        CallOperation::NotificationLinks => notification_links_target(url, &request),
         _ => caller_target(operation, url, &request),
     }
 }
@@ -1067,15 +1155,15 @@ fn conversation_target(operation: CallOperation, url: &Url, request: &Value) -> 
 }
 
 /// A caller's follow-up on its registered call, its body read (the shape fits): the sender its `participants.from`
-/// names, an `add`'s invitees (naming its sender's own chat and meeting), and an acknowledgement's or an `add`'s
-/// callbacks.
+/// names, an `add`'s invitees (naming its sender's own chat and meeting) and the people an admit or a removal names,
+/// and an acknowledgement's, an `add`'s, an admit's or a removal's callbacks.
 fn caller_target(operation: CallOperation, url: &Url, request: &Value) -> Option<Target> {
     let from = match request.pointer("/participants/from/id") {
         Some(id) => Some(Mri::new(id.as_str()?)),
         None => None,
     };
     let invitees: Vec<Mri> = match operation {
-        CallOperation::Add => request
+        CallOperation::Add | CallOperation::Admit | CallOperation::RemoveParticipant => request
             .pointer("/participants/to")?
             .as_array()?
             .iter()
@@ -1086,9 +1174,12 @@ fn caller_target(operation: CallOperation, url: &Url, request: &Value) -> Option
     if operation == CallOperation::Add && (invitees.is_empty() || !names_own_chat(request, from.as_ref()?, &invitees)) {
         return None;
     }
+    if invitees.is_empty() && matches!(operation, CallOperation::Admit | CallOperation::RemoveParticipant) {
+        return None;
+    }
     let callbacks = match operation {
         CallOperation::Acknowledge => links_of(request.pointer("/callAcceptanceAcknowledgement/links"))?,
-        CallOperation::Add => links_of(request.get("links"))?,
+        CallOperation::Add | CallOperation::Admit | CallOperation::RemoveParticipant => links_of(request.get("links"))?,
         _ => Vec::new(),
     };
     let scope = Scope::CallOperation {
@@ -1145,15 +1236,90 @@ const JOIN_CONVERSATION_REQUEST: &[Field] = &[
     field("links", Shape::Object(CONVERSATION_LINKS)),
 ];
 
-/// A join in its captured shape ([`JOIN`]) as a write: the conversation's URL, the sender, the group chat it names as
-/// `joins` (a group chat's id), and every callback it hands out (the conversation's, the roster's, and with a call
-/// invitation the call's and the media controller's). Anything else is `None` (unreadable).
-fn join_target(url: &Url, request: &Value) -> Option<Target> {
-    if !fits(request, Shape::Object(JOIN)) {
-        return None;
+/// `POST …/conv/<id>` (seen 2026-11-02, `ab-meeting-join`): a meeting's entry from its pre-join's Join now, once the
+/// pre-join's subscription was answered with the meeting's conversation. A meeting call start's keys
+/// ([`MEETING_CALL_START`]) at the conversation's URL: the subject `""`, nobody named to ring, the meeting's chat and its
+/// organizer and tenant, and the endpoint's state muted when it joins without audio.
+const MEETING_JOIN: &[Field] = &[
+    required("conversationRequest", Shape::Object(JOIN_CONVERSATION_REQUEST)),
+    field("contentSharing", Shape::Null),
+    required(
+        "participants",
+        Shape::Object(&[required("from", Shape::Object(FROM)), field("to", Shape::Objects(&[]))]),
+    ),
+    field("capabilities", Shape::Null),
+    field("endpointCapabilities", Shape::Count),
+    field("clientEndpointCapabilities", Shape::Count),
+    field("endpointMetadata", Shape::Object(ENDPOINT_METADATA)),
+    field("groupContext", Shape::Null),
+    required(
+        "groupChat",
+        Shape::Object(&[required("threadId", Shape::Text), required("messageId", Shape::Text)]),
+    ),
+    required(
+        "meetingInfo",
+        Shape::Object(&[
+            required("tenantId", Shape::Text),
+            required("organizerId", Shape::Text),
+            field("meetingType", Shape::Count),
+        ]),
+    ),
+    // the preheat names the meeting by its code too, beside its chat, which is what it is judged by
+    field(
+        "meetingData",
+        Shape::NullOr(&[field("meetingCode", Shape::Text), field("passcode", Shape::Text)]),
+    ),
+    field("endpointState", Shape::Object(MEETING_ENDPOINT_STATE)),
+    field("callInvitation", Shape::Object(CHAT_CALL_INVITATION)),
+    field(
+        "debugContent",
+        Shape::Object(&[field("ecsEtag", Shape::Text), field("causeId", Shape::Text)]),
+    ),
+    field("participantPropertyBag", Shape::Object(PROPERTY_BAG)),
+];
+
+/// A meeting entry's endpoint state: a call's, muted when the pre-join's audio is "Don't use audio", and marked
+/// `preheatProperties` when the client enters while its pre-join still shows (seen 2026-11-02, `meeting-steps`: the
+/// same entry, its media lines receive-only, before Join now).
+const MEETING_ENDPOINT_STATE: &[Field] = &[
+    field("endpointStateSequenceNumber", Shape::Count),
+    field("state", Shape::Object(&[field("isMuted", Shape::Bool)])),
+    field(
+        "endpointProperties",
+        Shape::Object(&[
+            field("preheatProperties", Shape::Count),
+            field(
+                "additionalEndpointProperties",
+                Shape::Object(&[field("infoShownInReportMode", Shape::Text)]),
+            ),
+        ]),
+    ),
+];
+
+/// Whether `request` is a join in a captured shape for the chat it names: a group chat's call joined ([`JOIN`]), or a
+/// meeting's entry ([`MEETING_JOIN`]) naming its chat with `messageId` `"0"`, its organizer and tenant by GUID, and
+/// nobody to ring.
+fn joins_in_shape(request: &Value, chat: &str) -> bool {
+    if is_group_chat_id(chat) {
+        return fits(request, Shape::Object(JOIN));
     }
+    let guid = |at: &str| request.pointer(at).and_then(Value::as_str).is_some_and(is_guid);
+    is_meeting_chat_id(chat)
+        && fits(request, Shape::Object(MEETING_JOIN))
+        && request.pointer("/groupChat/messageId").and_then(Value::as_str) == Some("0")
+        && guid("/meetingInfo/tenantId")
+        && guid("/meetingInfo/organizerId")
+        && request
+            .pointer("/participants/to")
+            .is_none_or(|to| to.as_array().is_some_and(Vec::is_empty))
+}
+
+/// A join in a captured shape ([`joins_in_shape`]) as a write: the conversation's URL, the sender, the chat it names as
+/// `joins` (a group chat's or a meeting's), and every callback it hands out (the conversation's, the roster's, and with
+/// a call invitation the call's and the media controller's). Anything else is `None` (unreadable).
+fn join_target(url: &Url, request: &Value) -> Option<Target> {
     let chat = request.pointer("/groupChat/threadId")?.as_str()?;
-    if !is_group_chat_id(chat) {
+    if !joins_in_shape(request, chat) {
         return None;
     }
     let from = Mri::new(request.pointer("/participants/from/id")?.as_str()?);

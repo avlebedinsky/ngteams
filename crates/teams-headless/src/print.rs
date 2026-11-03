@@ -320,6 +320,12 @@ fn call_fields(event: &Event, names: &LabNames) -> Value {
                 "speaking": participant.speaking,
             })).collect::<Vec<_>>(),
         }),
+        // each by lab name, never the name the roster gives
+        Event::Lobby { call, waiting } => json!({
+            "event": "lobby",
+            "call": call.get(),
+            "waiting": waiting.iter().map(|person| names.show(person.mri.as_str())).collect::<Vec<_>>(),
+        }),
         Event::Call { call, status } => {
             let mut fields = json!({"event": "call", "call": call.get(), "status": call_status_word(status)});
             if let CallStatus::Ended(end) = status {
@@ -343,6 +349,7 @@ pub const fn call_status_word(status: &CallStatus) -> &'static str {
         CallStatus::Connecting => "connecting",
         CallStatus::Connected => "connected",
         CallStatus::Reconnecting => "reconnecting",
+        CallStatus::Lobby => "lobby",
         CallStatus::Leaving => "leaving",
         CallStatus::Ended(_) => "ended",
     }

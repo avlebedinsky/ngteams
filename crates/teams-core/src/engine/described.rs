@@ -51,6 +51,11 @@ pub(super) fn call(action: &CallAction) -> String {
         CallAction::Mute { call, muted } => format!("call {} muted {muted}", call.get()),
         CallAction::Renegotiate { call } => format!("a renegotiation of call {}", call.get()),
         CallAction::Camera { call, on } => format!("call {} camera {}", call.get(), if *on { "on" } else { "off" }),
+        CallAction::Lobby { call, waiting, admit } => format!(
+            "call {}: {} {waiting} from the lobby",
+            call.get(),
+            if *admit { "admit" } else { "deny" }
+        ),
     }
 }
 
@@ -162,6 +167,8 @@ fn plain(event: &Event) -> String {
             view.participants.iter().filter(|p| p.speaking).count(),
             if view.speaking { " and the account" } else { "" }
         ),
+        // no names: how many wait
+        Event::Lobby { call, waiting } => format!("call {}: {} waiting in the lobby", call.get(), waiting.len()),
         Event::CallingRegistration(report) => format!("calling registration: {report:?}"),
         Event::Message { .. }
         | Event::Typing { .. }

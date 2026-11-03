@@ -29,7 +29,7 @@ use teams_proto::{
     AcceptCall, AcceptParts, AcceptanceAcknowledgement, AcknowledgeAcceptance, AcknowledgeMediaAnswer, AddParts,
     AddToCall, AnswerMedia, AnswerMediaParts, ApplyChannelParameters, AttachCall, AttachParts, Authorized,
     CALL_START_URL, CALLING_BASE, CALLING_HOST, CallContext, CallLink, CallParticipant, CallWriteError,
-    ChannelParameters, ClientInfo, Credentials, DeclineCall, FrameSink, FrameText, FrameWriter, HttpError,
+    ChannelParameters, ClientInfo, Credentials, DecideLobby, DeclineCall, FrameSink, FrameText, FrameWriter, HttpError,
     HttpTransport, InvitationReceipt, Invitee, JoinCall, JoinMedia, JoinParts, LeaveCall, LeaveReason, Links,
     MediaContent, MediaDescription, MediaDescriptions, MeetingInfo, Mutating, Refusal, RelayAnswerError, RelayTokens,
     RenegotiateMedia, ReportRinging, RespondError, Response, ResponseRefused, StartCall, StartParts, Transport,
@@ -1729,4 +1729,42 @@ async fn under_the_lab_rule_an_outsider_s_invitation_is_never_answered() {
         Err(DenyReason::Partial(PartialReason::UnregisteredCall))
     );
     assert!(lab.server.received_requests().await.unwrap().is_empty());
+}
+
+#[test]
+fn a_lobbys_admit_and_deny_are_built_whole_naming_the_person_waiting() {
+    for admit in [true, false] {
+        let (segment, success, failure) = if admit {
+            ("admit", "admitSuccess", "admitFailure")
+        } else {
+            (
+                "removeParticipant",
+                "removeParticipantSuccess",
+                "removeParticipantFailure",
+            )
+        };
+        let links = Links::new()
+            .with(success, callback(PUSH_A, "08080808", "conversation", success))
+            .with(failure, callback(PUSH_A, "09090909", "conversation", failure));
+        let at = link(&conv("Synthetic0", segment));
+        let from = participant(LAB_A);
+        let waiting = Mri::new(LAB_B);
+        let write = if admit {
+            DecideLobby::admit(&context(), &at, (&from, &waiting), &links)
+        } else {
+            DecideLobby::deny(&context(), &at, (&from, &waiting), &links)
+        }
+        .unwrap();
+        let target = write.target();
+        assert_eq!(target.added().iter().collect::<Vec<_>>(), [&waiting], "{segment}");
+        let Scope::CallOperation { operation, .. } = target.scope() else {
+            panic!("{target:?}");
+        };
+        let expected = if admit {
+            CallOperation::Admit
+        } else {
+            CallOperation::RemoveParticipant
+        };
+        assert_eq!(*operation, expected);
+    }
 }

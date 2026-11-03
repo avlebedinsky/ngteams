@@ -720,6 +720,7 @@ impl Core for FakeCore {
             | CallAction::HangUp { call }
             | CallAction::Mute { call, .. }
             | CallAction::Camera { call, .. }
+            | CallAction::Lobby { call, .. }
             | CallAction::Renegotiate { call } => call,
             CallAction::Call { .. }
             | CallAction::TestCall { .. }

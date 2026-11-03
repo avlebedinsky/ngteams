@@ -607,6 +607,245 @@ fn a_meetings_start_off_its_captured_shape_is_unreadable() {
     }
 }
 
+/// A meeting's conversation, as the pre-join's subscription was answered with it (made up).
+const MEETING_CONVERSATION: &str = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticMeeting1?i=10-0-0-1&e=1";
+
+/// A meeting's entry from the pre-join's Join now, at its conversation: a meeting start's keys, the subject `""`, the
+/// endpoint muted when it joins without audio (made-up ids and links, the SDP cut to a stub).
+fn meeting_entry() -> String {
+    let link = |name: &str| {
+        format!(r#""{name}":"https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/x/callAgent/y/1/{name}/""#)
+    };
+    format!(
+        r#"{{"conversationRequest":{{"conversationType":null,"subject":"","suppressDialout":true,"roster":{{"type":"Delta","rosterUpdate":"https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/x/callAgent/y/1/conversation/rosterUpdate/"}},"properties":{{"allowConversationWithoutHost":true}},"links":{{{}}}}},"contentSharing":null,"participants":{{"from":{{"id":"{CALLER}","displayName":"Lab A"}},"to":[]}},"capabilities":null,"endpointCapabilities":1,"clientEndpointCapabilities":1,"endpointMetadata":{{}},"groupContext":null,"groupChat":{{"threadId":"{MEETING_CHAT}","messageId":"0"}},"meetingInfo":{{"organizerId":"00000000-0000-4000-8000-00000000000a","tenantId":"{TENANT}"}},"endpointState":{{"endpointStateSequenceNumber":1,"state":{{"isMuted":true}}}},"callInvitation":{{"callModalities":["Audio","ScreenViewer"],"links":{{{}}},"mediaContent":{{"blob":"v=0\r\n","contentType":"application/sdp-ngc-1.0"}}}},"debugContent":{{}},"participantPropertyBag":{{}}}}"#,
+        link("conversationEnd"),
+        link("acceptance"),
+    )
+}
+
+fn at_conversation(method: &str, url: &str, body: &str) -> Contact {
+    contacting(
+        &Request::new(method, url).with_body(Some(body.as_bytes())),
+        &Policy::new(),
+    )
+}
+
+#[test]
+fn a_meetings_entry_at_its_conversation_is_a_join_of_its_chat_by_the_sender() -> TestResult {
+    let Contact::Write(target) = at_conversation("POST", MEETING_CONVERSATION, &meeting_entry()) else {
+        return Err("the meeting's entry isn't a write".into());
+    };
+    assert_eq!(target.kind(), WriteKind::Call);
+    assert!(target.added().is_empty(), "the entry adds nobody: the chat is read");
+    let Scope::CallOperation {
+        operation,
+        url,
+        from,
+        callbacks,
+        joins,
+    } = target.scope()
+    else {
+        return Err("the meeting's entry isn't a call operation".into());
+    };
+    assert_eq!(*operation, CallOperation::Join);
+    assert_eq!(url.as_str(), Url::parse(MEETING_CONVERSATION)?.as_str());
+    assert_eq!(from.as_ref(), Some(&Mri::new(CALLER)));
+    assert_eq!(joins.as_deref(), Some(MEETING_CHAT));
+    assert_eq!(callbacks.len(), 3, "the conversation's, the roster's and the call's");
+    // with audio, the endpoint isn't muted
+    let unmuted = meeting_entry().replace(r#""state":{"isMuted":true}"#, r#""state":{"isMuted":false}"#);
+    assert!(matches!(
+        at_conversation("POST", MEETING_CONVERSATION, &unmuted),
+        Contact::Write(_)
+    ));
+    // entered while the pre-join still shows: the same entry, marked as a preheat, naming the meeting's code too
+    let preheat = meeting_entry()
+        .replace(
+            r#""state":{"isMuted":true}"#,
+            r#""endpointProperties":{"preheatProperties":1,"additionalEndpointProperties":{"infoShownInReportMode":"FullInformation"}}"#,
+        )
+        .replace(
+            r#""contentSharing":null"#,
+            r#""contentSharing":null,"meetingData":{"meetingCode":"1","passcode":"x"}"#,
+        );
+    assert!(matches!(
+        at_conversation("POST", MEETING_CONVERSATION, &preheat),
+        Contact::Write(_)
+    ));
+    Ok(())
+}
+
+#[test]
+fn a_meetings_entry_off_its_captured_shape_is_unreadable() {
+    let base = meeting_entry();
+    let off = [
+        // someone named to ring
+        base.replace(
+            r#""to":[]"#,
+            r#""to":[{"id":"8:orgid:00000000-0000-4000-8000-00000000000b"}]"#,
+        ),
+        base.replace(r#""to":[]"#, r#""to":[{}]"#),
+        // a channel's message, an organizer or a tenant that doesn't read
+        base.replace(r#""messageId":"0""#, r#""messageId":"1700000000000""#),
+        base.replace(
+            r#""organizerId":"00000000-0000-4000-8000-00000000000a""#,
+            r#""organizerId":"nobody""#,
+        ),
+        base.replace(TENANT, "nowhere"),
+        // a chat that is neither a meeting's nor a group chat's
+        base.replace(MEETING_CHAT, "19:abcdef0123456789@thread.tacv2"),
+        // the meeting's code with more than its ID and passcode, or a key nobody reviewed
+        base.replace(
+            r#""contentSharing":null"#,
+            r#""meetingData":{"meetingCode":"1","meetingUrl":"https://teams.microsoft.com/meet/1"}"#,
+        ),
+        base.replace(
+            r#""state":{"isMuted":true}"#,
+            r#""state":{"isMuted":true,"isOnHold":true}"#,
+        ),
+        base.replace(r#""contentSharing":null"#, r#""contentSharing":{}"#),
+    ];
+    for body in &off {
+        assert_eq!(
+            at_conversation("POST", MEETING_CONVERSATION, body),
+            Contact::Unreadable,
+            "{body}"
+        );
+    }
+    // a group chat's join in a meeting's shape is neither
+    let group = base.replace(MEETING_CHAT, "19:abcdef0123456789@thread.v2");
+    assert_eq!(
+        at_conversation("POST", MEETING_CONVERSATION, &group),
+        Contact::Unreadable
+    );
+}
+
+/// The pre-join's own callbacks for the meeting's conversation (made up, a few of the captured names).
+fn notification_links() -> String {
+    format!(
+        r#"{{"participants":{{"from":{{"id":"{CALLER}","displayName":"Lab A"}}}},"roster":{{"type":"Delta","rosterUpdate":"https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/x/callAgent/y/1/rosterUpdate/"}},"links":{{"conversationEnd":"https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/x/callAgent/y/2/conversationEnd/","admitParticipantSuccess":"https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/x/callAgent/y/3/admitParticipantSuccess/","disablePreheatAsyncStatus":"https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/x/callAgent/y/4/disablePreheatAsyncStatus/"}}}}"#
+    )
+}
+
+/// The organizer's Admit (`admit`) or Deny (`removeParticipant`) of `who` waiting in the lobby (made up).
+fn lobby_decision(segment: &str, who: &str) -> (String, String) {
+    let url = MEETING_CONVERSATION.replacen('?', &format!("/{segment}?"), 1);
+    let links = if segment == "admit" {
+        r#""admitFailure":"https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/x/callAgent/y/5/admitParticipantFailure/","admitSuccess":"https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/x/callAgent/y/6/admitParticipantSuccess/""#
+    } else {
+        r#""removeParticipantSuccess":"https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/x/callAgent/y/7/removeParticipantSuccess/""#
+    };
+    let debug = if segment == "admit" {
+        r#","debugContent":{"causeId":"0a0b"}"#
+    } else {
+        ""
+    };
+    let body = format!(
+        r#"{{"participants":{{"from":{{"id":"{CALLER}","displayName":"Lab A"}},"to":[{{"id":"{who}"}}]}},"links":{{{links}}}{debug}}}"#
+    );
+    (url, body)
+}
+
+#[test]
+fn a_lobby_s_admit_and_deny_name_the_people_waiting() -> TestResult {
+    let waiting = lab_mri(GUID_B);
+    for (segment, operation, kind) in [
+        ("admit", CallOperation::Admit, WriteKind::Invite),
+        (
+            "removeParticipant",
+            CallOperation::RemoveParticipant,
+            WriteKind::CallFollowUp,
+        ),
+    ] {
+        let (url, body) = lobby_decision(segment, waiting.as_str());
+        let Contact::Write(target) = at_conversation("POST", &url, &body) else {
+            return Err(format!("{segment} isn't a write").into());
+        };
+        assert_eq!(target.kind(), kind, "{segment}");
+        assert_eq!(target.added().iter().collect::<Vec<_>>(), [&waiting], "{segment}");
+        let Scope::CallOperation {
+            operation: at,
+            from,
+            callbacks,
+            ..
+        } = target.scope()
+        else {
+            return Err("not a call operation".into());
+        };
+        assert_eq!(*at, operation);
+        assert_eq!(from.as_ref(), Some(&Mri::new(CALLER)));
+        assert!(!callbacks.is_empty());
+        // nobody named, someone named by more than an id, another key, another method
+        for other in [
+            body.replace(&format!(r#"[{{"id":"{waiting}"}}]"#), "[]"),
+            body.replace(
+                &format!(r#"{{"id":"{waiting}"}}"#),
+                &format!(r#"{{"id":"{waiting}","role":"attendee"}}"#),
+            ),
+            body.replace(r#""links":{"#, r#""all":true,"links":{"#),
+        ] {
+            assert_eq!(at_conversation("POST", &url, &other), Contact::Unreadable, "{other}");
+        }
+        assert_eq!(at_conversation("PUT", &url, &body), Contact::Unreadable);
+    }
+    Ok(())
+}
+
+#[test]
+fn a_meetings_join_now_after_its_preheat_is_the_endpoint_s_state_ending_it() -> TestResult {
+    let url = MEETING_CONVERSATION.replacen('?', "/updateEndpointState?", 1);
+    let body = format!(
+        r#"{{"from":{{"id":"{CALLER}","displayName":"Lab A"}},"endpointState":{{"endpointStateSequenceNumber":1,"endpointProperties":{{"preheatProperties":0}}}}}}"#
+    );
+    let Contact::Write(target) = at_conversation("POST", &url, &body) else {
+        return Err("the preheat's end isn't a write".into());
+    };
+    assert_eq!(target.kind(), WriteKind::CallFollowUp);
+    let Scope::CallOperation { operation, from, .. } = target.scope() else {
+        return Err("not a call operation".into());
+    };
+    assert_eq!(*operation, CallOperation::UpdateEndpointState);
+    assert_eq!(from.as_ref(), Some(&Mri::new(CALLER)));
+    let other = body.replace(r#""preheatProperties":0"#, r#""preheatProperties":0,"x":1"#);
+    assert_eq!(at_conversation("POST", &url, &other), Contact::Unreadable);
+    Ok(())
+}
+
+#[test]
+fn a_conversation_s_notification_links_are_a_follow_up_by_their_sender_handing_its_callbacks() -> TestResult {
+    let url = MEETING_CONVERSATION.replacen('?', "/notificationLinks?", 1);
+    let Contact::Write(target) = at_conversation("POST", &url, &notification_links()) else {
+        return Err("the notification links aren't a write".into());
+    };
+    assert_eq!(target.kind(), WriteKind::CallFollowUp);
+    assert!(target.added().is_empty());
+    let Scope::CallOperation {
+        operation,
+        from,
+        callbacks,
+        joins,
+        ..
+    } = target.scope()
+    else {
+        return Err("not a call operation".into());
+    };
+    assert_eq!(*operation, CallOperation::NotificationLinks);
+    assert_eq!(from.as_ref(), Some(&Mri::new(CALLER)));
+    assert_eq!(callbacks.len(), 4, "every link and the roster's");
+    assert!(joins.is_none());
+    let base = notification_links();
+    for other in [
+        base.replace(r#""admitParticipantSuccess""#, r#""somethingElse""#),
+        base.replace(r#""participants":{"from":"#, r#""participants":{"to":[],"from":"#),
+        base.replace(r#""roster":{"type":"Delta","#, r#""roster":{"type":"Delta","x":1,"#),
+        r#"{"links":{}}"#.to_owned(),
+    ] {
+        assert_eq!(at_conversation("POST", &url, &other), Contact::Unreadable, "{other}");
+    }
+    assert_eq!(at_conversation("PUT", &url, &base), Contact::Unreadable);
+    Ok(())
+}
+
 #[test]
 fn the_test_call_start_is_a_call_with_the_caller_and_the_echo_service() {
     let expected = Target::new(WriteKind::Call, Scope::New)

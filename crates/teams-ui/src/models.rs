@@ -338,7 +338,8 @@ impl Models {
             | Event::Voicemail { .. }
             | Event::CameraOff { .. }
             | Event::AudioClosed { .. }
-            | Event::CallParticipants { .. } => {
+            | Event::CallParticipants { .. }
+            | Event::Lobby { .. } => {
                 self.calls.update(cx, |calls, cx| calls.apply(&event, cx));
             }
             // how the push channel's registration went and a waiting transient's send (told on the feed, for the own

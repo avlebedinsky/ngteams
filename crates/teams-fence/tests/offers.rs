@@ -177,7 +177,9 @@ impl MembershipSource for Members {
     fn members<'a>(&'a self, scope: &'a Scope) -> MembershipFuture<'a> {
         self.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let membership = match scope {
-            Scope::Conversation { id } if id == &format!("19:{GROUP}@thread.v2") => self.0.clone(),
+            Scope::Conversation { id } if id == &format!("19:{GROUP}@thread.v2") || id == MEETING_CHAT => {
+                self.0.clone()
+            }
             _ => Membership::Partial(PartialReason::NoSource),
         };
         Box::pin(async move { membership })
@@ -1469,6 +1471,85 @@ async fn under_the_lab_rule_a_join_is_judged_by_the_chat_it_names() -> TestResul
     for (name, members, expected) in cases {
         let denied = lab.fence.check(case_write(ROSTER_JOIN, |_| ())?, &members).await;
         assert_eq!(denied.err().map(|denied| *denied.reason()), Some(expected), "{name}");
+    }
+    Ok(())
+}
+
+/// A meeting's chat (made up), which [`Members`] answers for as for the group chat.
+const MEETING_CHAT: &str = "19:meeting_SyntheticMeeting0001@thread.v2";
+
+/// The group call's join (`MEDIA_JOIN`) as a meeting's entry from its pre-join: the meeting's chat, its organizer and
+/// tenant, nobody to ring, nothing shared.
+fn meeting_entry() -> TestResult<Target> {
+    case_write(MEDIA_JOIN, |body| {
+        body["groupChat"]["threadId"] = json!(MEETING_CHAT);
+        body["meetingInfo"] = json!({"organizerId": GUID_A, "tenantId": GUID_B});
+        body["participants"]["to"] = json!([]);
+        body["contentSharing"] = Value::Null;
+    })
+}
+
+#[tokio::test]
+async fn under_the_lab_rule_a_meeting_s_entry_is_judged_by_the_meeting_s_chat() -> TestResult {
+    let lab = lab_rule_b()?;
+    let lab_only = Members::of(&[LAB_A, LAB_B]);
+    let permit = lab.fence.check(meeting_entry()?, &lab_only).await?;
+    assert_eq!(permit.target().kind(), WriteKind::Call);
+    assert_eq!(lab_only.reads(), 1, "the meeting's chat is read fresh");
+    let cases: [(&str, Members, DenyReason); 3] = [
+        (
+            "an outsider invited",
+            Members::of(&[LAB_A, LAB_B, COWORKER]),
+            DenyReason::Outsiders { count: 1 },
+        ),
+        (
+            "a chat that can't be read in full",
+            Members::new(Membership::Partial(PartialReason::NoSource)),
+            DenyReason::Partial(PartialReason::NoSource),
+        ),
+        (
+            "a chat that doesn't list the joiner",
+            Members::of(&[LAB_A, LAB_C]),
+            DenyReason::CallMismatch,
+        ),
+    ];
+    for (name, members, expected) in cases {
+        let denied = lab.fence.check(meeting_entry()?, &members).await;
+        assert_eq!(denied.err().map(|denied| *denied.reason()), Some(expected), "{name}");
+    }
+    Ok(())
+}
+
+/// b's Admit (`admit`) or Deny (`removeParticipant`) of `who` waiting in a meeting's lobby, as a write.
+fn lobby_decision(segment: &str, who: &str) -> TestResult<Target> {
+    let url = format!(
+        "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticMeeting1/{segment}?i=10-0-0-1&e=1"
+    );
+    let body = json!({
+        "participants": {"from": {"id": LAB_B, "displayName": "Lab B"}, "to": [{"id": who}]},
+        "links": {},
+    })
+    .to_string();
+    match contacting(
+        &Request::new("POST", &url).with_body(Some(body.as_bytes())),
+        &Policy::new(),
+    ) {
+        Contact::Write(target) => Ok(target),
+        other => Err(format!("{segment} is {other:?}").into()),
+    }
+}
+
+#[tokio::test]
+async fn under_the_lab_rule_a_lobby_s_admit_and_deny_reach_only_lab_accounts() -> TestResult {
+    let lab = lab_rule_b()?;
+    for segment in ["admit", "removeParticipant"] {
+        // nobody's members are read: the people it names are what it is judged by
+        lab.fence.check(lobby_decision(segment, LAB_A)?, &FailClosed).await?;
+        assert_eq!(
+            reason(&lab, lobby_decision(segment, COWORKER)?).await,
+            Some(DenyReason::Outsiders { count: 1 }),
+            "{segment}"
+        );
     }
     Ok(())
 }

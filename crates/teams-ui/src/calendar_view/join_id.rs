@@ -1,8 +1,8 @@
 //! The calendar's "Join with an ID", as Teams' toolbar has it: a panel asking for the meeting's ID and passcode, and Join
 //! meeting. The meeting is found among the account's calendar events by the ID and passcode its short join link
 //! carries (`teams_core::MeetingCode`), then joined as its card's Join joins it: its pre-join, its organizer read from
-//! its chat when its link names none. A meeting that isn't in the calendar is joined by its ID alone
-//! ([`CalendarViewEvent::JoinCode`]).
+//! its chat when its link names none. A meeting that isn't in the calendar is looked for among the account's meeting
+//! chats by the link their threads name ([`CalendarViewEvent::JoinCode`], `Shell::join_meeting_code`).
 
 use std::time::Duration;
 

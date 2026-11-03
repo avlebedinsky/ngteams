@@ -144,6 +144,8 @@ pub(crate) enum Step {
     Describe,
     /// A group call's send capabilities: its failing ends nothing.
     ChannelParameters,
+    /// A meeting lobby's Admit or Deny: its failing ends nothing (the person stays waiting, as the roster tells).
+    Lobby,
 }
 
 impl Step {
@@ -167,6 +169,7 @@ impl Step {
             Self::KeepAlive => "keep_alive",
             Self::Describe => "update_media_descriptions",
             Self::ChannelParameters => "apply_channel_parameters",
+            Self::Lobby => "lobby_decision",
         }
     }
 }

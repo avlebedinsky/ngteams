@@ -254,9 +254,12 @@ pub enum Command {
         /// Seconds the call is held once its media connected.
         #[arg(long, default_value_t = 45)]
         seconds: u64,
-        /// Seconds the call may take to connect, from its placing.
+        /// Seconds the call may take to connect, from its placing (and again from waiting in the meeting's lobby).
         #[arg(long, default_value_t = 60)]
         wait: u64,
+        /// Lets in everyone the meeting's lobby tells waiting, as its organizer's Admit (each through the fence).
+        #[arg(long)]
+        admit: bool,
     },
 }
 

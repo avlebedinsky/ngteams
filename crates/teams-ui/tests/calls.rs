@@ -2161,7 +2161,7 @@ fn a_meeting_chats_header_joins_the_meeting_by_its_chat() {
     registered(&rig);
     cx.update(|_, cx| {
         shell.update(cx, |shell, cx| {
-            shell.join_meeting_chat(MEETING_CHAT.to_owned(), None, None, cx)
+            shell.join_meeting_chat(MEETING_CHAT.to_owned(), None, None, cx);
         });
     });
     let window = prejoin_window(&rig, &windows);
@@ -2174,6 +2174,148 @@ fn a_meeting_chats_header_joins_the_meeting_by_its_chat() {
     assert!(actions(&rig).is_empty(), "nothing goes out while it shows");
 }
 
+/// a in the made-up meeting's call: its pre-join's Join now, the call up.
+fn in_meeting(rig: &Rig, trace: &Arc<ViewTrace>) -> (Entity<CallWindows>, &'static mut VisualTestContext) {
+    let (shell, cx) = shell_window(rig, Some(AB), Arc::clone(trace));
+    let (windows, _) = call_windows(rig, &shell, trace);
+    registered(rig);
+    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.open_prejoin(meeting_to_join(), cx)));
+    let window = prejoin_window(rig, &windows);
+    click(window, "prejoin-join");
+    status(rig, 1, CallStatus::Joining);
+    status(rig, 1, CallStatus::Connected);
+    let stage = stage(rig, &windows);
+    (windows, stage)
+}
+
+#[test]
+fn whoever_waits_in_the_meetings_lobby_is_admitted_or_denied_from_the_stage() {
+    let rig = calling();
+    let (trace, _) = trace();
+    let (_windows, stage) = in_meeting(&rig, &trace);
+    assert!(!drawn(stage, "call-lobby"), "nobody waits");
+    rig.send(Event::Lobby {
+        call: call(1),
+        waiting: vec![teams_core::LobbyPerson {
+            mri: Mri::new(LAB_B),
+            name: Some("Lab Bee".to_owned()),
+        }],
+    });
+    rig.cx.run_until_parked();
+    draw(stage);
+    assert!(drawn(stage, "call-lobby"));
+    assert!(drawn(stage, "call-lobby-person-0"));
+    click(stage, "call-lobby-admit-0");
+    click(stage, "call-lobby-deny-0");
+    let asked: Vec<CallAction> = actions(&rig)
+        .into_iter()
+        .filter(|action| matches!(action, CallAction::Lobby { .. }))
+        .collect();
+    assert_eq!(
+        asked,
+        [
+            CallAction::Lobby {
+                call: call(1),
+                waiting: Mri::new(LAB_B),
+                admit: true
+            },
+            CallAction::Lobby {
+                call: call(1),
+                waiting: Mri::new(LAB_B),
+                admit: false
+            }
+        ]
+    );
+    // let in or turned away: nobody waits, and the card goes
+    rig.send(Event::Lobby {
+        call: call(1),
+        waiting: Vec::new(),
+    });
+    rig.cx.run_until_parked();
+    draw(stage);
+    assert!(!drawn(stage, "call-lobby"));
+}
+
+#[test]
+fn waiting_in_the_lobby_the_account_is_told_someone_should_let_it_in() {
+    let rig = calling();
+    let (trace, _) = trace();
+    let (_windows, stage) = in_meeting(&rig, &trace);
+    status(&rig, 1, CallStatus::Lobby);
+    rig.cx.run_until_parked();
+    draw(stage);
+    assert!(drawn(stage, "call-calling"));
+    let text = rig
+        .cx
+        .read(|cx| calls_of(&rig).read(cx).call().map(teams_ui::calls::status_text));
+    assert_eq!(text.as_deref(), Some(teams_ui::calls::LOBBY_WAIT));
+}
+
+/// The made-up meeting's ID and passcode, as its short join link carries them.
+const MEETING_LINK: &str = "https://teams.microsoft.com/meet/123456789012?p=MadeUp";
+
+/// [`MEETING_CHAT`] in a's chat list, its thread naming the meeting with `link`.
+fn meeting_chat_with(rig: &Rig, link: Option<&str>) {
+    rig.core.conversations.lock().unwrap().push(chat(
+        MEETING_CHAT,
+        ConversationKind::Meeting,
+        Some("Synthetic meeting"),
+    ));
+    rig.core
+        .meetings
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(
+            MEETING_CHAT.to_owned(),
+            teams_core::MeetingDetails {
+                meeting: meeting_to_join().meeting,
+                title: Some("Synthetic meeting".to_owned()),
+                join_url: link.map(str::to_owned),
+            },
+        );
+}
+
+#[test]
+fn join_with_an_id_the_calendar_lacks_finds_the_meeting_among_its_chats() {
+    let rig = calling();
+    let (trace, _) = trace();
+    meeting_chat_with(&rig, Some(MEETING_LINK));
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    let code = teams_core::MeetingCode::typed("1234 5678 9012", "MadeUp").expect("a code");
+    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.join_meeting_code(code, cx)));
+    let window = prejoin_window(&rig, &windows);
+    assert!(drawn(window, "prejoin-title"));
+    let prejoin = rig
+        .cx
+        .read(|cx| calls_of(&rig).read(cx).prejoin().cloned())
+        .expect("the pre-join opened");
+    assert_eq!(prejoin.to_join, meeting_to_join());
+    assert!(actions(&rig).is_empty(), "nothing goes out while it shows");
+}
+
+#[test]
+fn join_with_an_id_no_meeting_chat_carries_is_refused() {
+    let rig = calling();
+    let (trace, _) = trace();
+    // the chat's meeting has another ID, or names its long link only
+    meeting_chat_with(&rig, Some("https://teams.microsoft.com/meet/999999999999?p=Other"));
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    let code = teams_core::MeetingCode::typed("123456789012", "MadeUp").expect("a code");
+    cx.update(|_, cx| shell.update(cx, |shell, cx| shell.join_meeting_code(code, cx)));
+    rig.cx.run_until_parked();
+    assert!(rig.cx.read(|cx| windows.read(cx).prejoin_window().is_none()));
+    let refused = rig
+        .cx
+        .read(|cx| calls_of(&rig).read(cx).refused().cloned())
+        .expect("refused");
+    assert_eq!(refused.why, "no-meeting-code");
+    assert!(actions(&rig).is_empty());
+}
+
 #[test]
 fn a_chat_naming_no_meeting_is_refused_rather_than_joined() {
     let rig = calling();
@@ -2183,7 +2325,7 @@ fn a_chat_naming_no_meeting_is_refused_rather_than_joined() {
     registered(&rig);
     cx.update(|_, cx| {
         shell.update(cx, |shell, cx| {
-            shell.join_meeting_chat(MEETING_CHAT.to_owned(), None, None, cx)
+            shell.join_meeting_chat(MEETING_CHAT.to_owned(), None, None, cx);
         });
     });
     rig.cx.run_until_parked();

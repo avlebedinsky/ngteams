@@ -674,6 +674,111 @@ fn a_meeting_goes_from_its_start_to_joining_rings_nobody_and_connects_on_its_acc
     );
 }
 
+/// a's machine in a meeting's call, its start answered with `roster` and the meeting conversation's lobby links.
+fn meeting_answered(roster: Value, now: Instant) -> (Calls, CallId, Vec<CallEvent>) {
+    let placement = Placement::Meeting {
+        chat: "19:meeting_MadeUpMeeting0001@thread.v2".to_owned(),
+        meeting: teams_proto::MeetingInfo {
+            organizer_id: "00000000-0000-4000-8000-00000000000a".to_owned(),
+            tenant_id: "00000000-0000-4000-8000-0000000000f1".to_owned(),
+        },
+    };
+    let mut calls = Calls::new(identity(A));
+    calls.set_push_url(PUSH).unwrap();
+    let call = calls.place(&placement, media(), now).unwrap();
+    let placed = effects(&mut calls);
+    let [(start, "start")] = sent(&placed)[..] else {
+        panic!("{placed:#?}");
+    };
+    let mut answer = conversation_answer();
+    answer["links"]["admit"] = json!(conv("/admit"));
+    answer["links"]["removeParticipant"] = json!(conv("/removeParticipant"));
+    answer["roster"] = roster;
+    calls.on_outcome(start, &ok(&answer), now);
+    let told = events(&effects(&mut calls));
+    (calls, call, told)
+}
+
+/// A roster entry waiting in the lobby: an endpoint with a `lobby`, none with a `call`.
+fn in_lobby(version: u64, name: &str) -> Value {
+    json!({"version": version, "state": "active", "details": {"displayName": name},
+        "endpoints": {"e": {"lobby": {"mediaStreams": []}, "modalityJoined": "Lobby"}}})
+}
+
+#[test]
+fn a_meeting_tells_who_waits_in_its_lobby_and_admits_or_denies_them_at_its_links() {
+    let now = Instant::now();
+    let roster = json!({"type": "Delta", "participants": {
+        A: {"version": 2, "state": "active", "endpoints": {"e": {"call": {}}}},
+        B: in_lobby(4, "Lab Bee"),
+    }});
+    let (mut calls, call, told) = meeting_answered(roster, now);
+    let waiting = told
+        .iter()
+        .find_map(|event| match event {
+            CallEvent::Lobby { call: of, waiting } if *of == call => Some(waiting.clone()),
+            _ => None,
+        })
+        .expect("the lobby told");
+    assert_eq!(waiting.len(), 1);
+    assert_eq!(waiting[0].mri, Mri::new(B));
+    assert!(
+        !told.iter().any(|event| matches!(event, CallEvent::Participants { .. })),
+        "nobody waiting is in the call: {told:#?}"
+    );
+    // nobody else waits
+    assert!(matches!(
+        calls.decide_lobby(call, &Mri::new("8:orgid:00000000-0000-4000-8000-00000000000c"), true),
+        Err(CallError::NotNow)
+    ));
+    calls.decide_lobby(call, &Mri::new(B), true).unwrap();
+    calls.decide_lobby(call, &Mri::new(B), false).unwrap();
+    let decided = effects(&mut calls);
+    let names: Vec<&str> = sent(&decided).iter().map(|(_, name)| *name).collect();
+    assert_eq!(names, ["lobby_decision", "lobby_decision"]);
+    // let in: the lobby is empty again, and b is in the call
+    let roster_path = calls
+        .call
+        .as_ref()
+        .and_then(|call| call.path_of(Kind::Conversation, "rosterUpdate"))
+        .unwrap()
+        .to_owned();
+    let admitted = json!({"participants": {B: {"version": 5, "state": "active",
+        "endpoints": {"e": {"call": {}}}}}});
+    calls.on_delivery(&delivery(&roster_path, &admitted), Observed::Nothing, now);
+    let after = events(&effects(&mut calls));
+    assert!(after.contains(&CallEvent::Lobby {
+        call,
+        waiting: Vec::new()
+    }));
+    assert!(
+        after
+            .iter()
+            .any(|event| matches!(event, CallEvent::Participants { participants, .. } if participants.len() == 1))
+    );
+}
+
+#[test]
+fn a_meeting_tells_the_account_waits_in_its_lobby_until_it_is_let_in() {
+    let now = Instant::now();
+    let roster = json!({"type": "Delta", "participants": {A: in_lobby(1, "Lab A")}});
+    let (mut calls, call, told) = meeting_answered(roster, now);
+    assert!(told.contains(&CallEvent::InLobby { call, waiting: true }), "{told:#?}");
+    let roster_path = calls
+        .call
+        .as_ref()
+        .and_then(|call| call.path_of(Kind::Conversation, "rosterUpdate"))
+        .unwrap()
+        .to_owned();
+    let admitted = json!({"participants": {A: {"version": 2, "state": "active",
+        "endpoints": {"e": {"call": {}}}}}});
+    calls.on_delivery(&delivery(&roster_path, &admitted), Observed::Nothing, now);
+    assert_eq!(
+        events(&effects(&mut calls)),
+        [CallEvent::InLobby { call, waiting: false }]
+    );
+}
+
 #[test]
 fn a_meetings_running_call_tells_who_is_in_it_from_the_starts_answer() {
     let meeting = teams_proto::MeetingInfo {

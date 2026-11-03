@@ -404,6 +404,11 @@ impl CallStage {
         calls::ask(&self.calls, &self.core, &self.trace, ask, cx);
     }
 
+    /// Asks `ask` of the calls from a part of the stage drawn elsewhere (the lobby's card).
+    pub(crate) fn ask_call(&self, ask: Ask, cx: &mut Context<Self>) {
+        self.ask(ask, cx);
+    }
+
     /// Who the call is with, as the window's title says it.
     fn title(&self, active: &ActiveCall, cx: &App) -> SharedString {
         let names = call_view::names_in_call(active, self.people.of(active.id));
@@ -639,9 +644,21 @@ impl CallStage {
 
 impl CallStage {
     /// The stage of the call up: who rings while nobody is in it, else the grid, with the self view over it.
-    fn stage(&mut self, active: &ActiveCall, title: &SharedString, palette: Palette) -> AnyElement {
-        let tiles = self.tiles_of(active);
+    fn stage(
+        &mut self,
+        active: &ActiveCall,
+        title: &SharedString,
+        palette: Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        // waiting in the lobby, the account sees nobody: only that someone should let it in
+        let tiles = if active.status == CallStatus::Lobby {
+            Vec::new()
+        } else {
+            self.tiles_of(active)
+        };
         let call = active.id.get();
+        let lobby = crate::call_lobby::card(active, palette, cx);
         let body = if tiles.is_empty() {
             let waiting = active.kind == CallKind::Meeting && active.status == CallStatus::Connected;
             let state = if waiting {
@@ -676,6 +693,7 @@ impl CallStage {
             .bg(rgb(palette.background))
             .child(body)
             .child(self_view(active.view.speaking, own, palette))
+            .children(lobby)
             .into_any_element()
     }
 
@@ -971,7 +989,7 @@ impl CallStage {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         if let Some(active) = live {
-            let stage = self.stage(active, title, palette);
+            let stage = self.stage(active, title, palette, cx);
             let roster = self.roster.then(|| self.roster_pane(active, palette, cx));
             let effects = self.effects_pane(active, palette, cx);
             return div()
