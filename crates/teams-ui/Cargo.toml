@@ -32,8 +32,8 @@ teams-fence.workspace = true
 teams-proto.workspace = true
 # the rows the engine's queries answer with
 teams-store.workspace = true
-# the incoming call's ringtone: the device seam's speaker (the PipeWire the build allows) and its tones; a call's video
-# frames, turned into the pixels a window draws
+# the incoming call's ringtone: the device seam's speaker (the PipeWire selected at startup) and its tones; a call's
+# video frames, turned into the pixels a window draws
 teams-media.workspace = true
 # the diagnostic log's level in the settings (changed live) and the "copy diagnostics" text; never installed here
 teams-log.workspace = true

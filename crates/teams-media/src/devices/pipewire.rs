@@ -274,7 +274,7 @@ fn desktop_endpoint(env: &SessionEnv) -> Result<Endpoint, DeviceError> {
     })
 }
 
-/// Where a build's camera comes from (see the module docs).
+/// Where the selected reach's camera comes from (see the module docs).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CameraRoute {
     /// A node of the same server as the microphone and the speaker: the UI sandbox's.

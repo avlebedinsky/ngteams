@@ -1,6 +1,6 @@
 //! The incoming call's ringtone (M3 Task 17): two tones and a pause, played on the default output while an invitation
-//! rings, through the device seam (`teams-media`'s [`Devices`]: the app's PipeWire, the one its build allows, so the
-//! lab app's ringtone reaches only the UI sandbox's speaker).
+//! rings, through the device seam (`teams-media`'s [`Devices`]): the PipeWire opened with the reach selected at
+//! startup, desktop for the normal app and sandbox for lab and test runs.
 //!
 //! A [`Ringer`] starts it ([`Ringer::start`]) and the [`Ringtone`] it hands back stops it when dropped. The
 //! [`DeviceRinger`] plays on a thread of its own, opening the speaker there (an open can wait on the audio server),
