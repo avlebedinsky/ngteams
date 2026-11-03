@@ -41,9 +41,9 @@ use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
 use crate::session::{LabSession, SessionError, SessionOptions};
 
 use super::ab_call::{
-    ACCEPT_AUDIO_CSS, CAMERA, CHAT_JOIN, CHAT_JOIN_CSS, CONNECT_WAIT, CallPauses, CalleeRole, EarlierRings,
-    HANG_UP_CSS, INCOMING_CALL, RING_WAIT, RingCheck, RunCall, TONE_WAIT, VIDEO_WAIT, chat_shown, chat_shown_script,
-    check_ring, hang_up_after_failure, hang_up_page, invitations, judge_callee, mri, open_join, policy, ring_check,
+    ACCEPT_AUDIO_CSS, CAMERA, CHAT_JOIN_CSS, CONNECT_WAIT, CallPauses, CalleeRole, EarlierRings, HANG_UP_CSS,
+    INCOMING_CALL, RING_WAIT, RingCheck, RunCall, TONE_WAIT, VIDEO_WAIT, chat_shown, chat_shown_script, check_ring,
+    hang_up_after_failure, hang_up_page, invitations, judge_callee, mri, open_join, policy, ring_check,
     stand_up_calling_with, switch_microphone, video_frames, wait_calling_socket, watch_controls,
 };
 use super::ab_call_native::{
@@ -308,9 +308,7 @@ impl Mixed {
         let before = self.wait_counts_after(&mut first.session, absent, report).await?;
         let from = capture_len(&last.session);
         let mut driver = last.session.driver();
-        driver
-            .click(&format!("{alias} joins the running call"), CHAT_JOIN)
-            .await?;
+        super::ab_call::click_call_in_chat(&mut driver, &self.chat, CHAT_JOIN_CSS).await?;
         report.notes.push(format!("{alias}: clicked join at {}", now_ms()));
         driver
             .wait_for(&format!("{alias}'s call screen after the join"), HANG_UP, CONNECT_WAIT)

@@ -17,7 +17,11 @@ pub(crate) fn chat() -> String {
     one_to_one_id(A, B).unwrap()
 }
 
-pub(crate) fn allow(mut session: LabSession, own: &str) -> LabSession {
+pub(crate) fn allow(session: LabSession, own: &str) -> LabSession {
+    with_members(session, own, &[A, B])
+}
+
+pub(crate) fn with_members(mut session: LabSession, own: &str, members: &[&str]) -> LabSession {
     let roster = LabRoster::new([A, B, C].map(|mri| LabAccount {
         mri: mri.to_owned(),
         upn: format!("{}@lab.example.com", &mri[mri.len() - 1..]),
@@ -25,8 +29,13 @@ pub(crate) fn allow(mut session: LabSession, own: &str) -> LabSession {
     .unwrap();
     let mut replies = BTreeMap::new();
     let chat = chat();
-    replies.insert(chat.clone(), json!({"id":chat,"members":[{"id":A},{"id":B}]}));
-    for group in ["19:synthetic@thread.v2", "19:synthetic-target@thread.v2"] {
+    let members: Vec<_> = members.iter().map(|id| json!({"id":id})).collect();
+    replies.insert(chat.clone(), json!({"id":chat,"members":members}));
+    for group in [
+        "19:synthetic@thread.v2",
+        "19:synthetic-target@thread.v2",
+        "19:synthetic-group@thread.v2",
+    ] {
         replies.insert(
             group.to_owned(),
             json!({"isDeleted":false,"totalMemberCount":3,"members":[{"id":A},{"id":B},{"id":C}]}),

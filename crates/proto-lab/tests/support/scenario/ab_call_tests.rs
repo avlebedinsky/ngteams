@@ -409,6 +409,44 @@ fn planned_conversations_are_derived_from_the_exact_identities_or_group_thread()
 }
 
 #[tokio::test]
+async fn a_call_without_verified_own_identity_or_with_a_non_lab_member_never_clicks_call() {
+    for outsider in [false, true] {
+        let mut page = evaluation_page(vec![json!(true), json!(true)]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let session = page.session(dir.path(), false);
+        let mut session = if outsider {
+            test_targets::with_members(
+                session,
+                test_targets::A,
+                &[test_targets::A, "8:orgid:00000000-0000-4000-8000-000000000004"],
+            )
+        } else {
+            session
+        };
+        let mut report = ScenarioReport::new(ScenarioName::AbCall);
+        let error = place_call(
+            (Alias::A, &mut session),
+            &test_targets::chat(),
+            Modality::Audio,
+            &mut report,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains(if outsider {
+            "server did not return the exact target's full membership"
+        } else {
+            "no explicit lab action target context"
+        }));
+        assert!(report.notes.is_empty());
+        assert!(
+            page.commands()
+                .iter()
+                .all(|command| { !command["params"]["expression"].as_str().unwrap().contains("e.click()") })
+        );
+    }
+}
+
+#[tokio::test]
 async fn retry_and_hangup_buttons_are_clicked_only_when_the_page_shows_them() {
     for shown in [true, false] {
         let values = if shown {
@@ -771,7 +809,7 @@ async fn cancel_and_unanswered_steps_place_the_call_then_hang_up_and_record_cont
             .unwrap();
         assert!(placed.is_some_and(|at| at > 0));
         assert!(report.failures.is_empty());
-        assert_eq!(origin_peer.commands().len(), 9);
+        assert_eq!(origin_peer.commands().len(), 11);
         assert_eq!(answer_peer.commands().len(), 1);
         assert!(report.notes.iter().any(|note| note.contains("hung up at")));
         assert!(
@@ -1278,9 +1316,9 @@ async fn failure_in_the_first_page_still_diagnoses_hangs_up_closes_and_judges_ev
 }
 
 async fn held_page() -> Page {
-    use crate::scenario::ab_chat_full::tests::{broadcast, page_with};
+    use crate::scenario::ab_chat_full::tests::{broadcast, page_with_target};
     let mut starts = 0;
-    page_with(false, false, move |command, events| {
+    page_with_target(&test_targets::chat(), false, false, move |command, events| {
         let expression = command["params"]["expression"].as_str().unwrap_or_default();
         if expression.contains("return buttons.length === 1") {
             return Some(Ok(evaluated(json!(test_targets::chat()))));

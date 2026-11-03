@@ -93,7 +93,12 @@ fn fixture_config(locations: &LabLocations, mris: bool, echo: bool) {
         )
         .unwrap();
         if mris {
-            writeln!(text, "mri = \"8:orgid:00000000-0000-4000-8000-00000000000{}\"", alias.as_str()).unwrap();
+            writeln!(
+                text,
+                "mri = \"8:orgid:00000000-0000-4000-8000-00000000000{}\"",
+                alias.as_str()
+            )
+            .unwrap();
         }
     }
     if echo {

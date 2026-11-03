@@ -182,10 +182,7 @@ fn the_loaders_rules_refuse_a_bad_file() {
             format!(r#"[{{"profile": "a", "email": "{UPN_A}", "password": ""}}]"#),
             "an empty password",
         ),
-        (
-            format!(r#"[{{"profile": "a", "email": "{UPN_A}"}}]"#),
-            "no password",
-        ),
+        (format!(r#"[{{"profile": "a", "email": "{UPN_A}"}}]"#), "no password"),
         // a password of the wrong type: serde would print the value in a type error
         (
             format!(r#"[{{"profile": "a", "email": "{UPN_A}", "password": ["{SECRET}"]}}]"#),

@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use super::*;
 use crate::browser::Display;
 use crate::scenario::ab_call::test_targets;
-use crate::scenario::ab_chat_full::tests::{EventsOut, broadcast, page_with};
+use crate::scenario::ab_chat_full::tests::{EventsOut, broadcast, page_with_target};
 use crate::scenario::test_page::{Page, evaluated};
 
 const A: &str = "8:orgid:00000000-0000-4000-8000-000000000001";
@@ -180,7 +180,10 @@ async fn page(ending: Ending, fault: Fault, sounds: bool) -> Page {
         hung_up: false,
         pumps: Vec::new(),
     };
-    page_with(false, false, move |command, relay| call.answer(command, relay)).await
+    page_with_target(&test_targets::chat(), false, false, move |command, relay| {
+        call.answer(command, relay)
+    })
+    .await
 }
 
 fn socket(page: &Page) {

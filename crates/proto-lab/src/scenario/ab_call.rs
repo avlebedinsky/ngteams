@@ -983,7 +983,7 @@ async fn verify_call_chat(driver: &mut Driver, chat: &str) -> Result<(), Scenari
 }
 
 /// The target check and the click share one JavaScript turn, so a changed selection cannot slip between them.
-async fn click_call_in_chat(driver: &mut Driver, chat: &str, selector: &str) -> Result<(), ScenarioError> {
+pub(crate) async fn click_call_in_chat(driver: &mut Driver, chat: &str, selector: &str) -> Result<(), ScenarioError> {
     driver.preflight_chat("verify the call recipients", chat).await?;
     let clicked = driver
         .evaluate(
@@ -1005,7 +1005,11 @@ fn call_chat_script(chat: &str, selector: Option<&str>) -> String {
         || "return true;".to_owned(),
         |selector| {
             format!(
-                "const e = document.querySelector({}); if (!e) return false; e.click(); return true;",
+                "const controls = [...document.querySelectorAll({})].filter(e => {{ \
+                 const r = e.getBoundingClientRect(); \
+                 return r.width > 0 && r.height > 0 && !e.disabled && e.getAttribute('aria-disabled') !== 'true'; \
+                 }}); if (controls.length !== 1) return false; \
+                 const e = controls[0]; e.click(); return true;",
                 js_string(selector),
             )
         },

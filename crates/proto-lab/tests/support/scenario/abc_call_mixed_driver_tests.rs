@@ -5,13 +5,13 @@ use serde_json::json;
 
 use super::*;
 use crate::browser::Display;
-use crate::scenario::ab_call::CallStep;
+use crate::scenario::ab_call::{CallStep, test_targets};
 use crate::scenario::test_page::{Page as Peer, evaluated};
 
 const CHAT: &str = "19:synthetic-group@thread.v2";
-const A: &str = "8:orgid:synthetic-a";
-const B: &str = "8:orgid:synthetic-b";
-const C: &str = "8:orgid:synthetic-c";
+const A: &str = "8:orgid:00000000-0000-4000-8000-000000000001";
+const B: &str = "8:orgid:00000000-0000-4000-8000-000000000002";
+const C: &str = "8:orgid:00000000-0000-4000-8000-000000000003";
 
 fn mixed(dir: &Path) -> Mixed {
     Mixed {
@@ -74,6 +74,9 @@ async fn peer() -> Peer {
     Peer::new(|command| {
         if command["method"] == "Runtime.evaluate" {
             let expression = command["params"]["expression"].as_str().unwrap();
+            if expression.contains("return buttons.length === 1") {
+                return Ok(evaluated(json!(CHAT)));
+            }
             if expression.contains("r.left + r.width / 2") {
                 return Ok(evaluated(json!([10, 20])));
             }
@@ -150,7 +153,7 @@ async fn a_join_is_bound_to_the_runs_invitation_before_the_visible_chat_is_exami
     page = Page {
         alias: Alias::C,
         mri: C.into(),
-        session: recorded.session(dir.path(), true),
+        session: test_targets::allow(recorded.session(dir.path(), true), test_targets::B),
     };
     let capture = page.session.capture_dir().unwrap().join(EVENTS_FILE);
     fs::write(&capture, "").unwrap();
@@ -192,7 +195,7 @@ async fn leaving_and_rejoining_require_new_frames_after_the_observed_absence_the
         Page {
             alias: Alias::C,
             mri: C.into(),
-            session: c.session(dir.path(), true),
+            session: test_targets::allow(c.session(dir.path(), true), test_targets::C),
         },
     ];
     let file = pages[1].session.capture_dir().unwrap().join(EVENTS_FILE);
@@ -251,6 +254,9 @@ impl LatePage {
             return json!({});
         }
         let expression = command["params"]["expression"].as_str().unwrap();
+        if expression.contains("return buttons.length === 1") {
+            return evaluated(json!(CHAT));
+        }
         if expression.contains("e.click()") {
             self.clicked(expression);
         }
@@ -357,7 +363,7 @@ async fn answering_and_media_steps_require_the_runs_invitation_and_recorded_evid
     let mut page = Page {
         alias: Alias::B,
         mri: B.into(),
-        session: recorded.session(dir.path(), true),
+        session: test_targets::allow(recorded.session(dir.path(), true), test_targets::B),
     };
     let file = page.session.capture_dir().unwrap().join(EVENTS_FILE);
     fs::write(&file, format!("{}\n", invitation(B))).unwrap();
