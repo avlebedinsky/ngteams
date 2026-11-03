@@ -9,7 +9,7 @@ pub(super) const PERSONAL_DIR: &str = "ngteams";
 /// is resolved component by component as the filesystem would ([`resolved`]), so a `..` after a symlink leaves the
 /// symlink's target, and a directory not made yet is compared where it would be made.
 #[must_use]
-pub(super) fn overlapping(one: &Path, other: &Path) -> bool {
+pub(crate) fn overlapping(one: &Path, other: &Path) -> bool {
     let (one, other) = (resolved(one), resolved(other));
     one.starts_with(&other) || other.starts_with(&one)
 }

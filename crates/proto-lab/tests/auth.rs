@@ -7,19 +7,97 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use proto_lab::commands::auth::{
-    AudienceOutcome, AuthError, AuthReport, SkypetokenSummary, region_file, save_region, within,
+    AudienceOutcome, AuthError, AuthReport, NativeTarget, SkypetokenSummary, region_file, save_region, within,
 };
 use proto_lab::config::{Alias, LabPaths};
 use proto_lab::session::SessionReport;
 use serde_json::Value;
 use teams_auth::authz::{AuthzError, Region};
 use teams_auth::claims::TokenSummary;
+use teams_auth::id_token::Account;
 use teams_auth::token::{EntraError, TokenError};
 
 const NOW: u64 = 2_000_000_000;
 
 fn at(seconds: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(seconds)
+}
+
+fn native_identity() -> Account {
+    Account {
+        username: "synthetic-a@example.test".into(),
+        object_id: "00000000-0000-4000-8000-00000000000a".into(),
+        tenant: "00000000-0000-4000-8000-000000000001".into(),
+        display_name: Some("Synthetic Account".into()),
+    }
+}
+
+#[test]
+fn native_account_and_region_are_private_atomic_and_keep_manual_same_account_settings() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = NativeTarget::resolve(Alias::B, None, None, Some(dir.path().as_os_str().to_owned())).unwrap();
+    let identity = native_identity();
+    let file = target.save(&identity, Some(&region())).unwrap();
+    assert_eq!(file, dir.path().join(".local/share/ngteams-lab/b/accounts.toml"));
+    let mode = |path: &std::path::Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
+    assert_eq!(mode(target.root()), 0o700);
+    assert_eq!(mode(&file), 0o600);
+    let native_region = target.root().join(format!("regions/{}.json", identity.object_id));
+    assert_eq!(mode(native_region.parent().unwrap()), 0o700);
+    assert_eq!(mode(&native_region), 0o600);
+    let mut saved: toml::Value = toml::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(saved["account"][0]["name"].as_str(), Some("Synthetic Account"));
+    saved["account"][0]["idp_hosts"] = toml::Value::Array(vec!["signin.example.test".into()]);
+    std::fs::write(&file, toml::to_string(&saved).unwrap()).unwrap();
+    target
+        .save(
+            &Account {
+                display_name: None,
+                ..identity.clone()
+            },
+            None,
+        )
+        .unwrap();
+    let saved: toml::Value = toml::from_str(&std::fs::read_to_string(&file).unwrap()).unwrap();
+    assert_eq!(saved["account"][0]["name"].as_str(), Some("Synthetic Account"));
+    assert_eq!(
+        saved["account"][0]["idp_hosts"][0].as_str(),
+        Some("signin.example.test")
+    );
+    assert_eq!(std::fs::read_dir(target.root()).unwrap().count(), 2);
+    assert_eq!(std::fs::read_dir(target.root().join("regions")).unwrap().count(), 1);
+    target
+        .save(
+            &Account {
+                object_id: "../../escape".into(),
+                ..identity
+            },
+            None,
+        )
+        .unwrap_err();
+    assert!(!dir.path().join("escape.json").exists());
+}
+
+#[test]
+fn native_target_uses_xdg_data_and_rejects_personal_overlap_before_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let config = dir.path().join("config");
+    let target = || {
+        NativeTarget::resolve(
+            Alias::C,
+            Some(data.as_os_str().to_owned()),
+            Some(config.as_os_str().to_owned()),
+            None,
+        )
+    };
+    assert_eq!(target().unwrap().root(), data.join("ngteams-lab/c"));
+    assert!(NativeTarget::resolve(Alias::A, Some("relative".into()), None, None).is_err());
+    std::fs::create_dir_all(data.join("ngteams-lab")).unwrap();
+    std::fs::create_dir_all(config.join("ngteams")).unwrap();
+    std::os::unix::fs::symlink(config.join("ngteams"), data.join("ngteams-lab/c")).unwrap();
+    assert!(target().is_err());
+    assert!(std::fs::read_dir(config.join("ngteams")).unwrap().next().is_none());
 }
 
 fn spaces_summary() -> TokenSummary {

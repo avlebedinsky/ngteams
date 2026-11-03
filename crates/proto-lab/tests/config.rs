@@ -78,11 +78,6 @@ fn lab_directories_derive_from_the_data_dir() {
 }
 
 #[test]
-fn the_lab_s_secrets_live_under_its_own_keyring_application() {
-    assert_eq!(LabPaths::KEYRING_APPLICATION, "teams-lab");
-}
-
-#[test]
 fn data_dir_in_the_file_overrides_the_default() {
     let config = parse(&format!("data_dir = \"/elsewhere/lab\"\n\n{}", three())).unwrap();
     assert_eq!(config.paths().data_dir(), Path::new("/elsewhere/lab"));

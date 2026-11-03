@@ -72,6 +72,29 @@ fn redirect(authorization: &Authorization) -> (Secret, SessionReport) {
     (Secret::new(redirect.to_string()), SessionReport::default())
 }
 
+fn native_target(root: &std::path::Path) -> NativeTarget {
+    NativeTarget::resolve(Alias::A, None, None, Some(root.as_os_str().to_owned())).unwrap()
+}
+
+fn assert_native_files(root: &std::path::Path, report: &AuthReport) {
+    let target = NativeTarget::resolve(Alias::A, None, None, Some(root.as_os_str().to_owned())).unwrap();
+    assert_eq!(KEYRING_APPLICATION, "ngteams-lab");
+    assert_eq!(target.root(), root.join(".local/share/ngteams-lab/a"));
+    let saved: toml::Value =
+        toml::from_str(&std::fs::read_to_string(target.root().join("accounts.toml")).unwrap()).unwrap();
+    let account = &saved["account"][0];
+    assert_eq!(saved["account"].as_array().unwrap().len(), 1);
+    assert_eq!(account["upn"].as_str(), Some(UPN));
+    assert_eq!(account["oid"].as_str(), Some(OID));
+    assert_eq!(account["tid"].as_str(), Some("00000000-0000-4000-8000-000000000001"));
+    assert!(account["idp_hosts"].as_array().unwrap().is_empty());
+    let native_region = target.root().join(format!("regions/{OID}.json"));
+    assert_eq!(
+        Region::from_json(&serde_json::from_slice(&std::fs::read(native_region).unwrap()).unwrap()),
+        Some(report.skypetoken.as_ref().unwrap().as_ref().unwrap().region.clone())
+    );
+}
+
 #[tokio::test]
 async fn code_exchange_refresh_all_audiences_and_authz_run_on_the_supplied_clients() {
     let root = tempfile::tempdir().unwrap();
@@ -100,12 +123,14 @@ async fn code_exchange_refresh_all_audiences_and_authz_run_on_the_supplied_clien
         &options,
         EntraConfig::teams_native().with_authority(tokens.uri()),
         AuthSteps {
+            target: native_target(root.path()),
             redirect: async |authorization: &Authorization| Ok(redirect(authorization)),
             skype: async |tokens: &Tokens| skypetoken_with(&store, UPN, tokens, &client).await,
         },
     )
     .await
     .unwrap();
+    assert_native_files(root.path(), &report);
     assert_eq!(report.audiences.len(), OTHER_AUDIENCES.len());
     assert!(report.audiences.iter().all(|outcome| outcome.token.is_ok()));
     assert!(matches!(report.skypetoken, Some(Ok(_))));
@@ -117,6 +142,13 @@ async fn code_exchange_refresh_all_audiences_and_authz_run_on_the_supplied_clien
     assert!(
         store
             .get(&teams_auth::refresh::refresh_token_key(UPN))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        store
+            .get(&teams_auth::authz::skypetoken_key(UPN))
             .await
             .unwrap()
             .is_some()
@@ -150,6 +182,7 @@ async fn optional_grants_are_not_requested_and_a_refused_authz_is_a_reported_fai
         &options,
         EntraConfig::teams_native().with_authority(tokens.uri()),
         AuthSteps {
+            target: native_target(root.path()),
             redirect: async |authorization: &Authorization| Ok(redirect(authorization)),
             skype: async |_: &Tokens| panic!("skypetoken disabled"),
         },
@@ -169,6 +202,7 @@ async fn optional_grants_are_not_requested_and_a_refused_authz_is_a_reported_fai
         &options,
         EntraConfig::teams_native().with_authority(tokens.uri()),
         AuthSteps {
+            target: native_target(root.path()),
             redirect: async |authorization: &Authorization| Ok(redirect(authorization)),
             skype: async |_: &Tokens| {
                 Err(AuthzError::Refused {
@@ -184,6 +218,64 @@ async fn optional_grants_are_not_requested_and_a_refused_authz_is_a_reported_fai
         report.skypetoken,
         Some(Err(AuthzError::Refused { status: 403, .. }))
     ));
+}
+
+#[tokio::test]
+async fn the_native_entry_keeps_the_configured_spelling_used_by_secret_keys() {
+    let root = tempfile::tempdir().unwrap();
+    let configured = UPN.to_ascii_uppercase();
+    let mut config_text = format!("data_dir = {:?}\n", root.path().join("browser").to_string_lossy());
+    for alias in ["a", "b", "c"] {
+        writeln!(
+            config_text,
+            "[[accounts]]\nalias = {alias:?}\nupn = {:?}",
+            if alias == "a" {
+                configured.clone()
+            } else {
+                format!("synthetic-{alias}@example.test")
+            }
+        )
+        .unwrap();
+    }
+    let config = LabConfig::parse(&config_text, root.path()).unwrap();
+    let tokens = tokens(UPN).await;
+    let store = MemorySecretStore::new();
+    let _report = authorize_with(
+        &config,
+        Alias::A,
+        &store,
+        &AuthOptions {
+            timeout: Duration::from_secs(1),
+            skypetoken: false,
+            other_audiences: false,
+        },
+        EntraConfig::teams_native().with_authority(tokens.uri()),
+        AuthSteps {
+            target: native_target(root.path()),
+            redirect: async |authorization: &Authorization| Ok(redirect(authorization)),
+            skype: async |_: &Tokens| panic!("skypetoken disabled"),
+        },
+    )
+    .await
+    .unwrap();
+    assert!(
+        store
+            .get(&teams_auth::refresh::refresh_token_key(&configured))
+            .await
+            .unwrap()
+            .is_some()
+    );
+    assert!(
+        store
+            .get(&teams_auth::refresh::refresh_token_key(UPN))
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let target = NativeTarget::resolve(Alias::A, None, None, Some(root.path().as_os_str().to_owned())).unwrap();
+    let file = target.root().join("accounts.toml");
+    let saved: toml::Value = toml::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
+    assert_eq!(saved["account"][0]["upn"].as_str(), Some(configured.as_str()));
 }
 
 #[tokio::test]
@@ -204,6 +296,7 @@ async fn a_failed_redirect_or_wrong_identity_stores_no_refresh_and_stops_before_
         &options,
         EntraConfig::teams_native().with_authority(tokens.uri()),
         AuthSteps {
+            target: native_target(root.path()),
             redirect: async |_: &Authorization| Err(AuthError::InteractionNeeded),
             skype: async |_: &Tokens| panic!("no token after refused redirect"),
         },
@@ -218,6 +311,7 @@ async fn a_failed_redirect_or_wrong_identity_stores_no_refresh_and_stops_before_
         &options,
         EntraConfig::teams_native().with_authority(tokens.uri()),
         AuthSteps {
+            target: native_target(root.path()),
             redirect: async |authorization: &Authorization| Ok(redirect(authorization)),
             skype: async |_: &Tokens| panic!("no token after identity mismatch"),
         },

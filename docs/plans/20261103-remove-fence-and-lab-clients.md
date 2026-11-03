@@ -407,15 +407,24 @@ preserves broker/trace originals while ordinary child processes inherit neither.
 - Modify: `crates/proto-lab/src/commands/auth.rs` (the keyring namespace `ngteams-lab`, and the account in the layout
   `ngteams --lab` reads)
 
-- [ ] `proto-lab auth <alias>` stores the native tokens and the lab account's entry where `ngteams --lab <alias>`
+- [x] `proto-lab auth <alias>` stores the native tokens and the lab account's entry where `ngteams --lab <alias>`
       finds them
-- [ ] `run-lab.sh <alias> [--pipewire]`:
+- [x] `run-lab.sh <alias> [--pipewire]`:
       - builds `ngteams` into `target/lab` with `TEAMS_LAB_BUILD=1`, a normal build, not `--all-targets`;
       - starts the broker outside the sandbox and `ngteams --lab <alias>` in its own UI sandbox under
         `~/.local/state/ngteams-lab/<alias>/`, with several aliases at once;
       - holds the live lock while it runs;
       - has the control verbs `--shot`, `--key`, `--type`, `--click`, `--windows`, `--status` and `--stop`.
-- [ ] tests for `auth`'s new target (mock); shellcheck clean on the script
+- [x] tests for `auth`'s new target (mock); shellcheck clean on the script
+
+Validation: 52 focused tests passed: 13 auth-controller/provisioning cases, 30 retained config tests
+(one existing workstation-only case stays ignored), and 9 synthetic launcher lifecycle/control tests.
+All-target proto-lab Clippy (warnings denied), formatting, lint-report, metadata, Bash syntax and
+ShellCheck passed. The launcher preserves custom XDG data/config roots inside the clean sandbox,
+retains account files when data/state roots coincide, and supports --build-only without a live start.
+Concurrent aliases share the fixed legacy live lock; each holder owns its alias lock until cleanup.
+A TERM-only shutdown deadline defaults to 1800 seconds (--timeout overrides); stopped/failed runs
+retain diagnostics. Actual tenant/keyring/browser sessions and a normal lab build were not run.
 
 ### Task 11: The lab rule as the agent's per-run check; docs
 

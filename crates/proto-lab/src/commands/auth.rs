@@ -10,7 +10,8 @@
 //! 3. **Refresh** for `api.spaces.skype.com`, proving the stored refresh token works; with `--audiences`, one refresh
 //!    grant per other audience of the auth notes' table, to see what Conditional Access allows.
 //! 4. **Skypetoken** through authz ([`AuthzClient`]), stored next to the refresh token; the account's region is
-//!    persisted to `<data dir>/auth/<alias>.json` ([`save_region`]).
+//!    persisted to `<data dir>/auth/<alias>.json` ([`save_region`]) for browser probes and to the native client's
+//!    `ngteams-lab/<alias>/regions/<oid>.json`. Its verified identity is provisioned in that alias's `accounts.toml`.
 //!
 //! The CLI keeps the secrets in the Secret Service under the lab's own application attribute ([`KEYRING_APPLICATION`]);
 //! tests pass a memory store. Nothing prints or logs a token, a code or the redirect URL: the report
@@ -26,6 +27,7 @@ use std::time::{Duration, SystemTime};
 use serde_json::json;
 use teams_auth::authz::{AuthzClient, AuthzError, AuthzKind, Region, Skypetoken, unix_seconds};
 use teams_auth::claims::TokenSummary;
+use teams_auth::id_token::Account;
 use teams_auth::pkce::PkceError;
 use teams_auth::redirect::RedirectError;
 use teams_auth::secrets::{Secret, SecretStore};
@@ -36,8 +38,11 @@ use crate::config::{Alias, LabConfig, LabPaths};
 use crate::redirect_catch::{CatchError, RedirectCatch};
 use crate::session::{LabSession, SessionError, SessionReport, SessionState};
 
-/// The `application` attribute of the lab's items in the Secret Service ([`LabPaths::KEYRING_APPLICATION`]).
-pub const KEYRING_APPLICATION: &str = LabPaths::KEYRING_APPLICATION;
+/// The native lab client's fixed Secret Service namespace. Browser profile files remain in `teams-lab`.
+pub const KEYRING_APPLICATION: &str = "ngteams-lab";
+
+pub use native::NativeTarget;
+mod native;
 
 /// The audiences `--audiences` asks a token for, besides `api.spaces.skype.com` (the auth notes' table).
 pub const OTHER_AUDIENCES: [&str; 8] = [
@@ -96,6 +101,8 @@ pub enum AuthError {
     CaptureFailed(String),
     #[error("the account's MRI in lab.toml isn't 8:orgid:<object id>")]
     BadMri,
+    #[error("cannot provision the native lab account: {0}")]
+    Provision(#[from] std::io::Error),
 }
 
 /// One audience's token, or why there is none.
@@ -149,6 +156,7 @@ pub async fn authorize<S: SecretStore>(
     store: &S,
     options: &AuthOptions,
 ) -> Result<AuthReport, AuthError> {
+    let target = NativeTarget::from_env(alias)?;
     let entra = EntraConfig::teams_native();
     authorize_with(
         config,
@@ -157,6 +165,7 @@ pub async fn authorize<S: SecretStore>(
         options,
         entra.clone(),
         AuthSteps {
+            target,
             redirect: async |authorization: &Authorization| {
                 redirect_through_profile(config.paths(), alias, &entra, authorization, options.timeout).await
             },
@@ -167,6 +176,7 @@ pub async fn authorize<S: SecretStore>(
 }
 
 struct AuthSteps<D, K> {
+    target: NativeTarget,
     redirect: D,
     skype: K,
 }
@@ -211,13 +221,26 @@ async fn authorize_with<S: SecretStore>(
     } else {
         None
     };
-    Ok(AuthReport {
+    let report = AuthReport {
         browser,
         signed_in: TokenSummary::read(&sign_in.tokens.access_token),
         refreshed: TokenSummary::read(&refreshed.access_token),
         audiences,
         skypetoken,
-    })
+    };
+    let identity = Account {
+        username: account.upn.clone(),
+        ..sign_in.account
+    };
+    steps.target.save(
+        &identity,
+        report
+            .skypetoken
+            .as_ref()
+            .and_then(|result| result.as_ref().ok())
+            .map(|token| &token.region),
+    )?;
+    Ok(report)
 }
 
 async fn skypetoken<S: SecretStore>(

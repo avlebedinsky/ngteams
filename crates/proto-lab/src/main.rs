@@ -333,6 +333,10 @@ async fn run_auth(alias: Alias, options: &AuthOptions) -> Result<(), Box<dyn std
     let config = LabConfig::load(&LabLocations::from_env()?)?;
     let store = teams_auth::secrets::KeyringSecretStore::new(KEYRING_APPLICATION).await?;
     let report = auth::authorize(&config, alias, &store, options).await?;
+    println!(
+        "{alias}: native lab account saved to {}",
+        auth::NativeTarget::from_env(alias)?.root().display()
+    );
     show_auth(config.paths(), alias, &report)
 }
 

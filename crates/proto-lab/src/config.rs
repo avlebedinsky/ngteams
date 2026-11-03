@@ -41,7 +41,8 @@ use serde::Deserialize;
 mod paths;
 
 use crate::protocol::is_group_chat_id;
-use paths::{PERSONAL_DIR, overlapping};
+use paths::PERSONAL_DIR;
+pub(crate) use paths::overlapping;
 
 /// The number of lab accounts, fixed by the lab's design.
 pub const ACCOUNT_COUNT: usize = 3;
@@ -133,10 +134,6 @@ pub struct LabPaths {
 }
 
 impl LabPaths {
-    /// The `application` attribute of the lab's items in the Secret Service: each lab account's refresh token and
-    /// skypetoken, stored by `proto-lab auth`.
-    pub const KEYRING_APPLICATION: &'static str = "teams-lab";
-
     #[must_use]
     pub fn new(data_dir: PathBuf) -> Self {
         Self { data_dir }
