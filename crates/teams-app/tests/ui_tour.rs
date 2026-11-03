@@ -214,7 +214,7 @@ const STEPS: [Step; 4 + 138] = [
             && let Some(channel) = team.channels.first().cloned()
         {
             shell.update(cx, |shell, cx| {
-                shell.channel_chosen(&team, &channel, teams_ui::channel_menu::ChannelChoice::Edit, window, cx)
+                shell.channel_chosen(&team, &channel, teams_ui::channel_menu::ChannelChoice::Edit, window, cx);
             });
         }
     }),

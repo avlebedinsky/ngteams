@@ -74,7 +74,11 @@ fn click(cx: &mut VisualTestContext, selector: &str) {
 fn open(shell: &Entity<Shell>, choice: ChannelChoice, cx: &mut VisualTestContext) {
     let team = team();
     let channel = team.channels[1].clone();
-    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.channel_chosen(team, channel, choice, window, cx)));
+    cx.update(|window, cx| {
+        shell.update(cx, |shell, cx| {
+            shell.channel_chosen(&team, &channel, choice, window, cx);
+        });
+    });
     cx.run_until_parked();
 }
 #[test]

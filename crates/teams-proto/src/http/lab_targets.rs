@@ -285,6 +285,16 @@ impl<C: Credentials> HttpTransport<C> {
             .map_err(refused)
     }
 
+    pub(super) async fn preflight_lab_channel_own(&self, interest: Option<&str>) -> Result<(), HttpError> {
+        let Some(context) = &self.lab_targets else {
+            return Ok(());
+        };
+        if interest.is_some_and(|own| own != context.own) {
+            return Err(refused(TargetError::Identity));
+        }
+        self.lab_identity().await
+    }
+
     pub(super) async fn lab_peer(&self, mri: &str, upn: &str) -> Result<(), HttpError> {
         let Some(context) = &self.lab_targets else {
             return Ok(());

@@ -1460,6 +1460,29 @@ impl<C: Credentials> Transport for HttpTransport<C> {
         }
     }
 
+    async fn channel_own<R: crate::ChannelOwn + Sync>(&self, request: &R) -> Result<Response, HttpError> {
+        let service = request.service();
+        let method = request.method().to_reqwest();
+        let url = self.url_for(service, &request.endpoint())?;
+        if self.read_only {
+            return Err(self.refused_read_only(method.as_str(), url.as_str()));
+        }
+        self.preflight_lab_channel_own(request.interest_account()).await?;
+        if let (Some(requested), Some(own)) = (request.interest_account(), self.own_account())
+            && requested != own.as_str()
+        {
+            return Err(HttpError::Refused(Refusal::NotAllowed));
+        }
+        let token = self
+            .credentials
+            .bearer(audience(service).ok_or(HttpError::NoRoute)?)
+            .await
+            .map_err(HttpError::Credentials)?;
+        let body = request.body().map(|value| value.to_string().into_bytes());
+        let headers = plain_headers(service, body.is_some());
+        self.send_as(method, &url, &headers, Auth::Bearer(&token), body).await
+    }
+
     async fn send_own<R: OwnState + Request + Sync>(&self, request: &R) -> Result<Response, HttpError> {
         if self.is_personal() {
             self.own_state(request).await

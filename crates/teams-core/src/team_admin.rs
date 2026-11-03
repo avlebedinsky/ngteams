@@ -490,7 +490,7 @@ where
         self.running.spawn_local(async move {
             let mut failed = None;
             for request in &requests {
-                match client.transport().send(request).await {
+                match client.transport().channel_own(request).await {
                     Ok(answer) if (200..300).contains(&answer.status()) => {}
                     Ok(answer) => failed = Some(format!("{}", answer.status())),
                     Err(error) => failed = Some(error.to_string()),
@@ -545,7 +545,7 @@ async fn section_change<C: Credentials + 'static>(
     let write = teams_proto::ChannelSectionWrite::new(action, &sections).ok_or(EngineError::TeamNotChanged {
         code: Some("SectionChanged".to_owned()),
     })?;
-    match client.transport().send(&write).await {
+    match client.transport().channel_own(&write).await {
         Ok(answer) if (200..300).contains(&answer.status()) => Ok(()),
         _ => Err(EngineError::TeamNotChanged { code: None }),
     }

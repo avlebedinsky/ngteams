@@ -284,3 +284,10 @@ fence: a fresh whole CSA response must bind the exact team/group/channel/type, t
 owning-team membership must pass `teams-lab-targets`. Private/shared changes additionally prove that channel's
 full membership. Added people must remain within the exact lab roster; bots, outside humans, partial rosters,
 changed identities and stale selected channels fail before a mutation. Personal transports carry no lab context.
+
+Account-only changes use a sealed `ChannelOwn` route for `OwnTeamView` and `ChannelSectionWrite`, independent of
+legacy request classification. The route verifies the lab actor (and an interest update's named own account),
+refuses read-only mode, and sends once. A native own-alerts round trip on the second disposable General channel
+returned 200 for both updates and both confirming reads; its original effective state was restored. No shared
+roster was changed. Synthetic transport tests cover wrong actors, another account's interest, read-only mode,
+section conflict without replay, and the absence of a team-member read for an account-only update.

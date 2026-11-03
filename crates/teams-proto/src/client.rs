@@ -58,6 +58,14 @@ pub trait Transport: Sync {
     /// which denies nothing (the native transport then sends it too, logged with the classification).
     fn send<R: Request>(&self, request: &R) -> impl Future<Output = Result<Response, Self::Error>> + Send;
 
+    /// Account-owned channel preferences and folder updates, with an independent native actor check.
+    fn channel_own<R: crate::ChannelOwn + Sync>(
+        &self,
+        request: &R,
+    ) -> impl Future<Output = Result<Response, Self::Error>> + Send {
+        self.send(request)
+    }
+
     /// Sends an entry of the sealed own-state list that is also a plain request (the registration): as a plain request
     /// ([`Transport::send`]) by default and through a lab fence; through the personal build's fence, as its own-state
     /// entry, logged by its kind ([`HttpTransport::own_state`]).

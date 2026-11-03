@@ -430,3 +430,108 @@ async fn channel_admin_refuses_a_changed_actor_even_with_an_exact_lab_roster() {
     assert!(transport.preflight_lab_write(&channel_write()).await.is_err());
     assert!(writes(&server).await.is_empty());
 }
+
+#[tokio::test]
+async fn channel_own_preferences_send_once_after_actor_proof_without_contacting_a_team() {
+    let server = MockServer::start().await;
+    identity(&server, A).await;
+    Mock::given(method("PUT"))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&server)
+        .await;
+    let request = crate::OwnTeamView::ChannelProperty {
+        channel: CHANNEL.into(),
+        property: crate::ChannelOwnProperty::Notifications,
+        value: "{\"allNewPosts\":true}".into(),
+    };
+    assert_eq!(
+        transport(&server, true).channel_own(&request).await.unwrap().status(),
+        200
+    );
+    assert_eq!(writes(&server).await.len(), 1);
+    let reads = server.received_requests().await.unwrap();
+    assert!(!reads.iter().any(|request| request.url.path().contains("/threads/")));
+}
+
+#[tokio::test]
+async fn channel_own_refuses_changed_actor_other_interest_account_and_read_only() {
+    let request = crate::OwnTeamView::ChannelInterest {
+        channel: CHANNEL.into(),
+        own: B.into(),
+        shown: false,
+    };
+    let server = MockServer::start().await;
+    identity(&server, X).await;
+    assert!(transport(&server, true).channel_own(&request).await.is_err());
+    let request = crate::OwnTeamView::ChannelFavorite {
+        channel: CHANNEL.into(),
+        general: false,
+        shown: false,
+    };
+    assert!(transport(&server, true).channel_own(&request).await.is_err());
+    assert!(
+        transport(&server, true)
+            .read_only()
+            .channel_own(&request)
+            .await
+            .is_err()
+    );
+    assert!(writes(&server).await.is_empty());
+}
+
+#[tokio::test]
+async fn channel_own_folder_conflict_is_returned_without_replaying_a_create() {
+    let server = MockServer::start().await;
+    identity(&server, A).await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(409))
+        .mount(&server)
+        .await;
+    let request = crate::ChannelSectionWrite::new(
+        &crate::ChannelSectionAction::Create {
+            channel: CHANNEL.into(),
+            name: "Synthetic section".into(),
+        },
+        &crate::ChannelSections {
+            version: 7,
+            sections: Vec::new(),
+        },
+    )
+    .unwrap();
+    let transport = transport(&server, true)
+        .with_csa("https://teams.microsoft.com/api/csa/amer")
+        .unwrap();
+    assert_eq!(transport.channel_own(&request).await.unwrap().status(), 409);
+    assert_eq!(writes(&server).await.len(), 1);
+}
+
+#[tokio::test]
+async fn private_channel_admin_proves_both_parent_and_channel_audience() {
+    for (parent, channel, allowed) in [
+        (vec![A, B], vec![A, B], true),
+        (vec![A, X], vec![A, B], false),
+        (vec![A, B], vec![A, X], false),
+    ] {
+        let server = MockServer::start().await;
+        channel_context(&server, &parent, parent.len(), CHANNEL).await;
+        Mock::given(method("GET")).and(path("/api/csa/amer/api/v3/teams/users/me"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"metadata":{"isPartialData":false},"teams":[{"id":TEAM,"displayName":"Synthetic team","tenantId":"tenant","teamSiteInformation":{"groupId":"group"},"channels":[{"id":CHANNEL,"displayName":"Synthetic private channel","channelType":1,"substrateGroupId":"private-group"}]}]})))
+            .with_priority(1).mount(&server).await;
+        get(
+            &server,
+            &format!("/api/chatsvc/amer/v1/threads/{CHANNEL}"),
+            json!({"id":CHANNEL}),
+        )
+        .await;
+        get(&server,&format!("/api/chatsvc/amer/v1/threads/{CHANNEL}/members"),json!({"isDeleted":false,"totalMemberCount":channel.len(),"members":channel.iter().map(|mri|json!({"id":mri})).collect::<Vec<_>>()})).await;
+        let mut write = channel_write();
+        if let crate::TeamWrite::Channel(write) = &mut write {
+            write.target.channel_group = Some("OID:private-group@tenant".into());
+        }
+        let transport = transport(&server, true)
+            .with_csa("https://teams.microsoft.com/api/csa/amer")
+            .unwrap();
+        assert_eq!(transport.preflight_lab_write(&write).await.is_ok(), allowed);
+        assert!(writes(&server).await.is_empty());
+    }
+}

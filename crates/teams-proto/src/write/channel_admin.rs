@@ -280,8 +280,33 @@ impl ChannelRead {
             }
             Self::Email { .. } => {}
         }
+        if matches!(self, Self::Preferences { .. }) && !valid_preferences(&data.0) {
+            return None;
+        }
         Some(data)
     }
+}
+
+fn valid_preferences(data: &Value) -> bool {
+    let Some(properties) = data.get("properties") else {
+        return true;
+    };
+    let Some(properties) = properties.as_object() else {
+        return false;
+    };
+    if let Some(value) = properties.get("channelNotificationSettings") {
+        let Some(text) = value.as_str() else {
+            return false;
+        };
+        if !serde_json::from_str::<Value>(text).is_ok_and(|value| value.is_object()) {
+            return false;
+        }
+    }
+    ["alerts", "followAllRc", "notifyAllRc"].into_iter().all(|key| {
+        properties
+            .get(key)
+            .is_none_or(|value| matches!(value.as_str(), Some("true" | "false")))
+    })
 }
 
 impl Read for ChannelRead {
