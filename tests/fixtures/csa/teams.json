@@ -1,5 +1,5 @@
 {
-  "_synthetic": "Made up, in the shape of CSA's answer to `proto-lab probe teams a` (M2 Task 16, 2026-10-22: GET <chatSvcAggAfd>/api/v3/teams/users/me with the web client's query and the account's own chatsvcagg token, Accept: application/json and nothing else; it answered 200, application/json, about 32 KB). The probe printed statuses, header names, sizes, key paths with their JSON types and counts, never a value, and kept nothing: two teams of ten channels, each team's general channel the one whose id is the team's (isGeneral true), one archived team and channel, no deleted one. Its top level also had chats, users, privateFeeds, engageCommunities, conversationFolders and metadata, which the native client doesn't read and this fixture trims to empty or a few keys; a team's and a channel's many settings objects (teamSettings to the three flags a new channel needs, teamGuestSettings, memberSettings, guestSettings, defaultFileSettings, extensionDefinition) are trimmed too. Here: a team with its general channel, a standard channel listed before it and a deleted one; an archived team with its general channel; a deleted team; and a Favorites folder holding the standard channel (conversationFolders as docs/protocol/chat.md, \"Favorites\", describes it). Ids, names and times are made up; <guid:tenant> is the tenant, tests fill it in. See docs/protocol/channels.md. The teams also carry what the team pages show (docs/protocol/teams.md).",
+  "_synthetic": "Made up, in the shape of CSA's answer to `proto-lab probe teams a` (M2 Task 16, 2026-10-22: GET <chatSvcAggAfd>/api/v3/teams/users/me with the web client's query and the account's own chatsvcagg token, Accept: application/json and nothing else; it answered 200, application/json, about 32 KB). The probe printed statuses, header names, sizes, key paths with their JSON types and counts, never a value, and kept nothing: two teams of ten channels, each team's general channel the one whose id is the team's (isGeneral true), one archived team and channel, no deleted one. Its top level also had chats, users, privateFeeds, engageCommunities, conversationFolders and metadata, which the native client doesn't read and this fixture trims to empty or a few keys; a team's and a channel's many settings objects (teamSettings to the three flags a new channel needs, teamGuestSettings, memberSettings, guestSettings, defaultFileSettings, extensionDefinition) are trimmed too. Here: a team with its general channel, a standard channel listed before it and a deleted one; an archived team with its general channel; a deleted team; and a Favorites folder holding the standard channel (conversationFolders as docs/protocol/chat.md, \"Favorites\", describes it). Ids, names and times are made up; <guid:tenant> is the tenant, tests fill it in. See docs/protocol/channels.md. The teams also carry what the team pages show (docs/protocol/teams.md). The general channel has a meeting running in it (activeMeetups, as docs/protocol/calling.md, \"A channel's meeting\", describes it), the standard channel none.",
   "request": {
     "method": "GET",
     "path": "/api/csa/<region>/api/v3/teams/users/me",
@@ -107,6 +107,19 @@
               "creator": "8:orgid:<guid:a>",
               "creationTime": "2026-01-01T00:00:00.000Z",
               "lastJoinAt": "2026-01-01T00:00:00.000Z",
+              "activeMeetups": [
+                {
+                  "messageId": "1760000000300",
+                  "conversationUrl": "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/MadeUpMeetup0001?i=10-0-0-1&e=1",
+                  "conversationId": "made-up-meetup-0001",
+                  "groupCallInitiator": "8:orgid:<guid:a>",
+                  "organizerId": "<guid:a>",
+                  "tenantId": "<guid:tenant>",
+                  "callMeetingType": -1,
+                  "conversationType": "adHocMeeting",
+                  "status": "Active"
+                }
+              ],
               "lastMessage": {
                 "messageType": null,
                 "content": null,

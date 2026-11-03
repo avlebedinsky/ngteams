@@ -131,6 +131,8 @@ enum Expect {
     TestStart,
     /// A chat's call start: `Call` on `Scope::Conversation`.
     ChatStart,
+    /// A channel's meeting start: `Call` on `Scope::Team`, the channel's.
+    ChannelStart,
     /// This operation on `Scope::CallOperation`.
     Operation(CallOperation),
 }
@@ -138,9 +140,9 @@ enum Expect {
 impl Expect {
     fn fits(self, target: &Target) -> bool {
         match (self, target.scope()) {
-            (Self::TestStart, Scope::New) | (Self::ChatStart, Scope::Conversation { .. }) => {
-                target.kind() == WriteKind::Call
-            }
+            (Self::TestStart, Scope::New)
+            | (Self::ChatStart, Scope::Conversation { .. })
+            | (Self::ChannelStart, Scope::Team { .. }) => target.kind() == WriteKind::Call,
             (Self::Operation(expected), Scope::CallOperation { operation, .. }) => {
                 *operation == expected && target.kind() == expected.kind()
             }
@@ -336,6 +338,35 @@ fn meeting_start_body(parts: &StartParts, chat: &str, meeting: &MeetingInfo) -> 
     body
 }
 
+/// A channel's Meet now's subscription (`docs/protocol/calling.md`, "A channel's meeting"), as the web client's
+/// pre-join sends it (seen 2026-11-03): the conversation's callbacks, the service asked to make the meeting and post it
+/// to the channel (`enableGroupCallMeetupGeneration`), the channel in `groupChat` with no message, no `meetingInfo`,
+/// nobody named and no call invitation. Its answer is a new `adHocMeeting` conversation; a start with media instead
+/// (the web client's when its subscription fails) makes a plain group call in the channel, which no meeting post or
+/// CSA `activeMeetups` names.
+fn meet_now_body(parts: &StartParts, channel: &str) -> Value {
+    let mut properties = conversation_properties();
+    properties["enableGroupCallMeetupGeneration"] = json!(true);
+    let mut body = Map::new();
+    body.insert(
+        "conversationRequest".to_owned(),
+        json!({
+            "subject": null,
+            "roster": {"type": "Delta", "rosterUpdate": parts.roster_update},
+            "properties": properties,
+            "links": parts.conversation_links.json(),
+        }),
+    );
+    body.insert("participants".to_owned(), json!({"from": parts.from.json()}));
+    parts.client.add_capabilities(&mut body, true);
+    body.insert("endpointMetadata".to_owned(), json!({}));
+    body.insert("groupContext".to_owned(), Value::Null);
+    body.insert("groupChat".to_owned(), json!({"threadId": channel, "messageId": null}));
+    body.insert("meetingInfo".to_owned(), Value::Null);
+    body.insert("endpointState".to_owned(), endpoint_state(0));
+    Value::Object(body)
+}
+
 /// A meeting's `groupChat.messageId` when its chat is its own, as captured.
 const MEETING_MESSAGE_ID: &str = "0";
 /// A meeting's `meetingInfo.meetingType` when its chat is its own, scheduled or a series' (the web client's `Chat`; a
@@ -354,6 +385,11 @@ const MEETING_TYPE_CHAT: u64 = 1;
 /// - [`StartCall::in_meeting`]: a meeting's call from its pre-join, started or not: nobody named, nobody rings; the
 ///   service answers with the meeting's one conversation. Its target is `WriteKind::Call` on the meeting's chat, the
 ///   sender added, so the fence reads that chat fresh.
+/// - [`StartCall::meet_now`]: a channel's Meet now, its first step: the subscription to a new meeting in the channel,
+///   nobody named and no call invitation (it enters no call); the service answers with the meeting's conversation
+///   (`adHocMeeting`), which the account then enters as its organizer ([`JoinCall::enter`]). Its target is
+///   `WriteKind::Call` on the channel's team (`Scope::Team`, the channel's thread), the sender added, so the fence
+///   reads the team fresh.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StartCall {
     caller: Mri,
@@ -405,11 +441,33 @@ impl StartCall {
         Self::start(context, parts, body, Expect::ChatStart, None)
     }
 
+    /// The subscription to a new meeting in the channel `channel` (a team's channel thread), its Meet now (see the
+    /// type's docs). Of `parts` it sends who subscribes, the conversation's callbacks and the client's capabilities;
+    /// it carries no call and pends nothing in the call registry.
+    ///
+    /// # Errors
+    /// [`CallWriteError`] when the request isn't a channel meeting's subscription in its captured shape (the channel
+    /// not a team's thread, the sender not a work account).
+    pub fn meet_now(context: &CallContext, parts: &StartParts, channel: &str) -> Result<Self, CallWriteError> {
+        let body = meet_now_body(parts, channel);
+        Self::start_as(context, parts, body, (Expect::ChannelStart, Registry::Nothing), None)
+    }
+
     fn start(
         context: &CallContext,
         parts: &StartParts,
         body: Value,
         expect: Expect,
+        echo: Option<&Mri>,
+    ) -> Result<Self, CallWriteError> {
+        Self::start_as(context, parts, body, (expect, Registry::Start), echo)
+    }
+
+    fn start_as(
+        context: &CallContext,
+        parts: &StartParts,
+        body: Value,
+        (expect, registry): (Expect, Registry),
         echo: Option<&Mri>,
     ) -> Result<Self, CallWriteError> {
         let url = Url::parse(CALL_START_URL).map_err(|_| CallWriteError::Unmapped)?;
@@ -419,7 +477,7 @@ impl StartCall {
             url: &url,
             body: Some(body),
             expect,
-            registry: Registry::Start,
+            registry,
             echo,
         })?;
         Ok(Self {
@@ -615,9 +673,13 @@ pub struct JoinParts {
     pub conversation_links: Links,
     pub group_chat: String,
     /// The message of the chat the call belongs to (`groupChat.messageId`): `"0"` for a group chat's or a meeting
-    /// chat's call, the meeting's post for a channel's meeting.
-    pub message_id: String,
+    /// chat's call, the meeting's post for a channel's meeting, `None` (`null`) for the organizer's entry into the
+    /// channel meeting it started (Meet now), which has no post yet.
+    pub message_id: Option<String>,
     pub meeting: Option<MeetingInfo>,
+    /// The service is asked to post the meeting to its channel (`enableGroupCallMeetupGeneration`): the organizer's
+    /// entry after Meet now, as the web client's.
+    pub posts_meetup: bool,
     pub client: ClientInfo,
 }
 
@@ -704,6 +766,10 @@ fn join_body(parts: &JoinParts, subject: &Value) -> Map<String, Value> {
         "properties": conversation_properties(),
         "links": parts.conversation_links.json(),
     });
+    let mut request = request;
+    if parts.posts_meetup {
+        request["properties"]["enableGroupCallMeetupGeneration"] = json!(true);
+    }
     let mut body = Map::new();
     body.insert("conversationRequest".to_owned(), request);
     body.insert("groupContext".to_owned(), Value::Null);

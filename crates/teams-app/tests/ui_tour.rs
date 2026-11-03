@@ -83,7 +83,7 @@ const SETTLE: Duration = Duration::from_millis(1500);
 type Step = (&'static str, fn(&Entity<Shell>, &mut Window, &mut App));
 
 /// The tour.
-const STEPS: [Step; 4 + 129] = [
+const STEPS: [Step; 4 + 132] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -679,6 +679,28 @@ const STEPS: [Step; 4 + 129] = [
     ("favorite-channel", |shell, _, cx| {
         let list = shell.read(cx).list().clone();
         list.update(cx, |list, cx| list.open(TEAM_CHANNEL.to_owned(), cx));
+    }),
+    // calls registered (the mock's engine has none: shown as the engine would tell them): the channel's header has
+    // Teams' Meet now, its caret beside it, since no meeting runs in it
+    ("channel-meet-now", |shell, _, cx| {
+        let models = shell.read(cx).models().clone();
+        models
+            .calls
+            .update(cx, |calls, _| *calls = teams_ui::Calls::shown(Some(Mri::new(ECHO))));
+        models.apply(
+            teams_core::Event::CallingRegistration(teams_core::RegistrationReport::Registered),
+            cx,
+        );
+    }),
+    // Meet now clicked: the new meeting's pre-join, titled after the channel, nothing sent
+    ("channel-meet-now-prejoin", |shell, _, cx| {
+        shell.update(cx, Shell::meet_now);
+    }),
+    // the general channel, where the mock's CSA names a meeting running: its header's Join
+    ("channel-join", |shell, window, cx| {
+        let models = shell.read(cx).models().clone();
+        models.calls.update(cx, teams_ui::Calls::cancel_prejoin);
+        shell.update(cx, |shell, cx| shell.open_channel_id(TEAM.to_owned(), window, cx));
     }),
     // the rail's Calendar: the work week of today, the mock's made-up week of meetings in it (recurring, cancelled,
     // overlapping, tentative, all day), the current time's line

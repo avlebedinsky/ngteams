@@ -200,8 +200,10 @@ may add). The own-view writes above reach nobody. The personal build logs and se
 
 The lab's fence reads a team's members from its thread (`LiveMembershipSource`, the user's sign-off of 2026-11-03,
 [lab-rules.md](../lab-rules.md)): `GET v1/threads/<thread>?view=msnp24Equivalent` first, which must be that thread with
-`properties.threadType` `space` (a team's root; a channel's thread is `topic`, and isn't read as a team) and a
-`properties.groupId`; then `GET v1/threads/<thread>/members?view=msnp24Equivalent&pageSize=100`, complete as a group chat's is.
+`properties.threadType` `space` (a team's root) and a `properties.groupId`; a standard channel's thread (`topic`) named
+as the team is read as the team its `spaceId` names, whose root thread is read in turn and must name the channel's
+`groupId` (a private channel's thread is a `space` of its own, `productThreadType` `TeamsPrivateChannel`, read with its
+own members); then `GET v1/threads/<thread>/members?view=msnp24Equivalent&pageSize=100`, complete as a group chat's is.
 A write that names the team by its group (archive, the provisioning service's channel paths) is read only once a read of the
 thread in the same run named that group; before, it is denied. Teams' own apps every new team holds (`28:<guid>`, role
 `User`, no `tenantId`; the same three on the lab's team and on a tenant team of 87 members) are `lab.toml`'s `team_apps` and

@@ -72,6 +72,9 @@ pub enum Placement {
     /// The call of the meeting whose chat is `chat`, whether it runs yet or not: nobody rings, and the service answers
     /// with the meeting's one conversation (`docs/protocol/calling.md`, "Joining a meeting").
     Meeting { chat: String, meeting: MeetingInfo },
+    /// A new meeting in the channel `channel` (its Meet now): nobody rings; the service answers with the meeting's
+    /// conversation and posts the meeting to the channel (`docs/protocol/calling.md`, "A channel's meeting").
+    Channel { channel: String },
 }
 
 /// Where a call is, as the account is told.
@@ -483,11 +486,52 @@ impl Calls {
                 echo: Some(echo.clone()),
             },
             Placement::Chat { .. } => Side::Placed { echo: None },
-            Placement::Meeting { .. } => Side::Meeting,
+            Placement::Meeting { .. } | Placement::Channel { .. } => Side::Meeting,
         };
         let mut call = self.new_call(side, now)?;
+        if let Placement::Channel { channel } = placement {
+            call.meet_now = Some((channel.clone(), offer.clone()));
+            let write = build::start(&mut call, &self.identity, placement, offer)?;
+            return Ok(self.begin(call, Step::Subscribe, write));
+        }
         let write = build::start(&mut call, &self.identity, placement, offer)?;
         Ok(self.begin(call, Step::Start, write))
+    }
+
+    /// A channel's Meet now's subscription was answered with its new meeting's conversation: the account enters it as
+    /// its organizer, with the offer it kept (as the web client's Join now does: the channel, no post yet, the account
+    /// and its tenant as the meeting's organizer, the meeting posted to the channel). An answer naming no conversation
+    /// fails the call.
+    fn subscribed(&mut self, body: &[u8], now: Instant) {
+        let entry = read::conversation_controller(body).zip(self.call.as_mut().and_then(|call| call.meet_now.take()));
+        let Some((conversation, (channel, offer))) = entry else {
+            self.fail(Step::Subscribe, now);
+            return;
+        };
+        let Some(oid) = self.identity.mri.as_str().strip_prefix("8:orgid:").map(str::to_owned) else {
+            self.fail(Step::Subscribe, now);
+            return;
+        };
+        let into = build::JoinInto {
+            chat: &channel,
+            message_id: None,
+            meeting: Some(MeetingInfo {
+                organizer_id: oid,
+                tenant_id: self.identity.tenant_id.clone(),
+            }),
+            posts_meetup: true,
+        };
+        let Some(call) = self.call.as_mut() else { return };
+        call.side = Side::Joined {
+            chat: channel.clone(),
+            conversation: conversation.clone(),
+        };
+        match build::join(call, &self.identity, &conversation, into, offer) {
+            Ok(write) => {
+                self.out.send(call, Step::Join, write);
+            }
+            Err(_) => self.fail(Step::Subscribe, now),
+        }
     }
 
     /// The account joins the running call in the group chat `chat` (one an invitation named) with `offer`.
@@ -510,8 +554,9 @@ impl Calls {
         }
         let into = build::JoinInto {
             chat,
-            message_id: "0",
+            message_id: Some("0"),
             meeting: None,
+            posts_meetup: false,
         };
         let write = build::join(&mut call, &self.identity, &conversation, into, offer)?;
         Ok(self.begin(call, Step::Join, write))
@@ -537,8 +582,9 @@ impl Calls {
         let mut call = self.new_call(side, now)?;
         let into = build::JoinInto {
             chat: channel,
-            message_id: &meetup.message_id,
+            message_id: Some(&meetup.message_id),
             meeting: Some(meetup.meeting.clone()),
+            posts_meetup: false,
         };
         let write = build::join(&mut call, &self.identity, &meetup.conversation, into, offer)?;
         Ok(self.begin(call, Step::Join, write))
@@ -1087,6 +1133,7 @@ impl Calls {
         }
         match (step, body) {
             (Step::Start | Step::Join, Some(body)) => self.started(step, body, now),
+            (Step::Subscribe, Some(body)) => self.subscribed(body, now),
             (Step::Attach, Some(body)) => self.attached(body),
             (Step::Accept, Some(body)) => self.connected_by_accept(body, now),
             (Step::Decline, Some(_)) => self.finish(End::Declined),

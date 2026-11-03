@@ -2214,6 +2214,8 @@ where
                 Act::JoinChannel(chat, Arc::default())
             }
             CallAction::JoinMeeting { chat, meeting } => Act::Place(Placement::Meeting { chat, meeting }),
+            CallAction::MeetNow { channel } => Act::Place(Placement::Channel { channel }),
+            CallAction::JoinChannel { channel } => Act::JoinChannel(channel, Arc::default()),
             CallAction::Answer { call } => Act::Answer(call),
             CallAction::Decline { call } => Act::Decline(call),
             CallAction::HangUp { call } => Act::HangUp(call),

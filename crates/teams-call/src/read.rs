@@ -89,6 +89,12 @@ impl Conversation {
     }
 }
 
+/// The conversation a start's or a subscription's answer `body` opened: its `conversationController`.
+pub(crate) fn conversation_controller(body: &[u8]) -> Option<CallLink> {
+    let body: Value = serde_json::from_slice(body).ok()?;
+    link(&body, "/conversationController")
+}
+
 /// The conversation a start's or a join's answer is (`{"conversationController", "links": {…}}`); `None` unless it
 /// names a conversation controller.
 pub(crate) fn conversation(body: &[u8]) -> Option<Conversation> {

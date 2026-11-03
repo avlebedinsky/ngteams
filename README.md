@@ -418,6 +418,9 @@ teams-headless c join abc [--ring-wait 180] [--tone …] [--seconds 45] [--wait 
 teams-headless a join-meeting <join link> [--tone …] [--seconds 45] [--wait 60] [--admit]
                                           # a meeting's call by its join link, as the calendar's Join: started when nobody has;
                                           # waiting in its lobby is printed (status lobby); --admit lets in whoever waits
+teams-headless a channel-meeting <channel thread> [--join] [--tone …] [--seconds 45] [--wait 60]
+                                          # a channel's meeting, as its header's Meet now (a new one) or Join (--join:
+                                          # the one CSA names running there); judged by the channel's team
 ```
 
 A chat is `a`, `b` or `c` (the 1:1 chat with that account, from the MRIs in `lab.toml`), `abc` (the group chat

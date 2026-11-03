@@ -40,6 +40,8 @@ pub enum Target {
     Join(String),
     /// The call of the meeting whose chat this is, started or not, as the calendar's Join goes into it.
     Meeting(String, MeetingInfo),
+    /// A channel's meeting: a new one (its Meet now), or with `join` the one that runs there now.
+    Channel { channel: String, join: bool },
 }
 
 /// How long each part of a call may take or lasts.
@@ -152,6 +154,8 @@ pub async fn run(
             CallAction::Join { chat }
         }
         Target::Meeting(chat, meeting) => CallAction::JoinMeeting { chat, meeting },
+        Target::Channel { channel, join: false } => CallAction::MeetNow { channel },
+        Target::Channel { channel, join: true } => CallAction::JoinChannel { channel },
     };
     let placed = tokio::time::Instant::now();
     writeln!(out, "{} call_placing", now_ms())?;

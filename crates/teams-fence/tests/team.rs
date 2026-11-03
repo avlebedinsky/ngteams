@@ -429,6 +429,187 @@ async fn a_channel_named_by_its_team_s_thread_is_judged_by_the_team() -> TestRes
     Ok(())
 }
 
+/// A mutation of a channel's thread read, what the source makes of it and how many reads it took.
+type Case = (fn(&mut Value), Membership, usize);
+
+/// A standard channel's thread id, other than the team's own.
+fn other_channel_id() -> String {
+    "19:0123456789abcdef0123456789abcdef@thread.tacv2".to_owned()
+}
+
+/// The thread read of a standard channel of the team, as `channel-create` read one (2026-11-02): `topic`, naming the
+/// team's root (`spaceId`) and its group.
+fn channel_thread() -> TestResult<Value> {
+    let mut thread = thread_body()?;
+    thread["id"] = json!(other_channel_id());
+    let properties = &mut thread["properties"];
+    properties["threadType"] = json!("topic");
+    properties["spaceId"] = json!(team_id());
+    properties.as_object_mut().map(|map| map.remove("spaceType"));
+    Ok(thread)
+}
+
+/// Serves the team as [`serve`] does and `channel` as the thread read of [`other_channel_id`]; its member list is never
+/// served (a read of it fails the test's expectations).
+async fn serve_channel(server: &MockServer, channel: &Value, members: &Value) -> TestResult {
+    serve(server, members).await?;
+    Mock::given(method("GET"))
+        .and(path(thread_path(&other_channel_id())))
+        .and(query_param("view", "msnp24Equivalent"))
+        .and(header("Authorization", format!("Bearer {TOKEN}").as_str()))
+        .respond_with(ResponseTemplate::new(200).set_body_json(channel))
+        .mount(server)
+        .await;
+    Ok(())
+}
+
+#[tokio::test]
+async fn another_channel_s_meeting_is_judged_by_the_team_its_thread_names() -> TestResult {
+    let server = MockServer::start().await;
+    serve_channel(&server, &channel_thread()?, &members_with(&[mri(GUID_B)])?).await?;
+    let source = source(&server)?;
+    let channel = Scope::Team { id: other_channel_id() };
+    assert!(source.reads_in_full(&channel));
+    let mut everyone = vec![mri(GUID_A)];
+    everyone.extend(apps());
+    everyone.push(mri(GUID_B));
+    assert_eq!(source.members(&channel).await, Membership::Complete(everyone));
+    let paths: Vec<String> = requests(&server)
+        .await
+        .iter()
+        .map(|request| request.url.path().to_owned())
+        .collect();
+    let team = thread_path(&team_id());
+    assert_eq!(
+        paths,
+        [
+            thread_path(&other_channel_id()),
+            team.clone(),
+            format!("{team}/members")
+        ],
+        "the channel's thread, then its team's, then the team's members: never the channel's own"
+    );
+    assert_eq!(source.learned(GROUP), Some(team_id()));
+
+    // Meet now in it: a call on the team, the sender its one added participant
+    let meet_now = Target::new(WriteKind::Call, channel)
+        .with_added([mri(GUID_A)])
+        .with_sender(mri(GUID_A));
+    let permit = fence(roster()).check(meet_now, &source).await;
+    assert!(permit.is_ok(), "{permit:?}");
+    Ok(())
+}
+
+#[tokio::test]
+async fn another_channel_of_a_team_with_someone_outside_the_lab_denies() -> TestResult {
+    let server = MockServer::start().await;
+    serve_channel(&server, &channel_thread()?, &members_with(&[mri(GUID_X)])?).await?;
+    let source = source(&server)?;
+    let meet_now = Target::new(WriteKind::Call, Scope::Team { id: other_channel_id() })
+        .with_added([mri(GUID_A)])
+        .with_sender(mri(GUID_A));
+    assert_eq!(
+        denied(&fence(roster()), meet_now, &source).await?,
+        DenyReason::Outsiders { count: 1 }
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_channel_thread_that_doesn_t_tie_to_its_team_is_never_judged_by_one() -> TestResult {
+    let unsupported = Membership::Partial(PartialReason::Unsupported);
+    let cases: [Case; 6] = [
+        // no team named: the channel alone
+        (
+            |thread| {
+                thread["properties"].as_object_mut().map(|map| map.remove("spaceId"));
+            },
+            unsupported.clone(),
+            1,
+        ),
+        (
+            |thread| thread["properties"]["spaceId"] = json!(other_channel_id()),
+            malformed(),
+            1,
+        ),
+        (
+            |thread| thread["properties"]["spaceId"] = json!("19:x@thread.v2"),
+            malformed(),
+            1,
+        ),
+        (
+            |thread| thread["properties"]["groupId"] = json!("not-a-guid"),
+            malformed(),
+            1,
+        ),
+        // the root it names belongs to another group
+        (
+            |thread| thread["properties"]["groupId"] = json!(OTHER_GROUP),
+            malformed(),
+            2,
+        ),
+        // a private channel's thread is a space of its own: read as one, its members its own
+        (
+            |thread| thread["properties"]["threadType"] = json!("chat"),
+            unsupported.clone(),
+            1,
+        ),
+    ];
+    for (mutate, expected, reads) in cases {
+        let server = MockServer::start().await;
+        let mut thread = channel_thread()?;
+        mutate(&mut thread);
+        serve_channel(&server, &thread, &members_body()?).await?;
+        let source = source(&server)?;
+        assert_eq!(
+            source.members(&Scope::Team { id: other_channel_id() }).await,
+            expected,
+            "{thread}"
+        );
+        assert_eq!(requests(&server).await.len(), reads, "{thread}");
+    }
+    // the root it names isn't a team's root
+    let server = MockServer::start().await;
+    let mut root = thread_body()?;
+    root["properties"]["threadType"] = json!("topic");
+    serve_team(&server, &team_id(), &root, &members_body()?).await;
+    serve_channel_only(&server, &channel_thread()?).await;
+    assert_eq!(
+        source(&server)?.members(&Scope::Team { id: other_channel_id() }).await,
+        unsupported
+    );
+    assert_eq!(requests(&server).await.len(), 2, "the two threads, no members");
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_team_named_by_its_group_never_follows_a_channel_s_thread() -> TestResult {
+    // a group learned from a channel's root is that root's; a learned thread that reads as a channel now is no team
+    let server = MockServer::start().await;
+    serve_channel(&server, &channel_thread()?, &members_body()?).await?;
+    let source = source(&server)?;
+    assert!(matches!(source.members(&team()).await, Membership::Complete(_)));
+    server.reset().await;
+    let mut root = channel_thread()?;
+    root["id"] = json!(team_id());
+    root["properties"]["spaceId"] = json!(other_channel_id());
+    serve_team(&server, &team_id(), &root, &members_body()?).await;
+    assert_eq!(
+        source.members(&channel_of(GROUP)).await,
+        Membership::Partial(PartialReason::Unsupported)
+    );
+    assert_eq!(requests(&server).await.len(), 1, "the thread alone");
+    Ok(())
+}
+
+async fn serve_channel_only(server: &MockServer, channel: &Value) {
+    Mock::given(method("GET"))
+        .and(path(thread_path(&other_channel_id())))
+        .respond_with(ResponseTemplate::new(200).set_body_json(channel))
+        .mount(server)
+        .await;
+}
+
 #[test]
 fn a_team_thread_id_is_19_an_id_and_thread_tacv2_or_thread_skype() {
     for id in [

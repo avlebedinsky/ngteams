@@ -575,10 +575,10 @@ fn meeting_start_target(start: &Value) -> Option<Target> {
 
 /// A channel's meeting started from the channel (Meet now, [`CHANNEL_CALL_START`]): [`WriteKind::Call`] on the team
 /// whose thread `groupChat.threadId` is ([`Scope::Team`]), the sender its added participant, so the fence permits it only
-/// when that team's members, read fresh from its thread, are lab accounts (Teams' own apps not counted). A channel's
-/// thread is read as the team's root and must be one: a meeting started in the team's first channel (its thread the
-/// team's own) maps, one in any other channel is read as a team it isn't and denied. Nobody named to ring, the sender a
-/// work account; anything else is `None` (unreadable).
+/// when that team's members, read fresh from its thread, are lab accounts (Teams' own apps not counted). The team's
+/// first channel's thread is the team's own; any other standard channel's names the team it belongs to, which the
+/// source reads in turn ([`crate::parse_channel_thread`]). Nobody named to ring, the sender a work account; anything
+/// else is `None` (unreadable).
 #[must_use]
 pub(crate) fn channel_call_start(method: &str, url: &Url, body: Option<&[u8]>) -> Option<Target> {
     if !is_start_request(method, url) {

@@ -392,6 +392,8 @@ pub enum Ask {
     /// Go into the call of the meeting whose chat is `chat`: it starts the call when nobody has, and joins it when it
     /// runs.
     JoinMeeting { chat: String, meeting: MeetingInfo },
+    /// Start a new meeting in the channel `channel` (its header's Meet now): the account organizes it.
+    MeetNow { channel: String },
     /// Answer the invitation that rings.
     Answer,
     /// Decline the invitation that rings.
@@ -415,6 +417,7 @@ impl Ask {
             Self::TestCall => "test-call",
             Self::Join { .. } => "join",
             Self::JoinMeeting { .. } => "join-meeting",
+            Self::MeetNow { .. } => "meet-now",
             Self::Answer => "answer",
             Self::Decline => "decline",
             Self::HangUp => "hang-up",
@@ -427,7 +430,10 @@ impl Ask {
 
     fn chat(&self) -> Option<&str> {
         match self {
-            Self::Call { chat } | Self::Join { chat } | Self::JoinMeeting { chat, .. } => Some(chat),
+            Self::Call { chat }
+            | Self::Join { chat }
+            | Self::JoinMeeting { chat, .. }
+            | Self::MeetNow { channel: chat } => Some(chat),
             _ => None,
         }
     }
@@ -438,7 +444,9 @@ impl Ask {
             Self::Call { chat } => Some((CallKind::Chat, Some(chat.clone()))),
             Self::TestCall => Some((CallKind::TestCall, None)),
             Self::Join { chat } => Some((CallKind::Join, Some(chat.clone()))),
-            Self::JoinMeeting { chat, .. } => Some((CallKind::Meeting, Some(chat.clone()))),
+            Self::JoinMeeting { chat, .. } | Self::MeetNow { channel: chat } => {
+                Some((CallKind::Meeting, Some(chat.clone())))
+            }
             _ => None,
         }
     }
@@ -467,6 +475,18 @@ pub struct Prejoin {
     pub audio: PrejoinAudio,
     /// Join now was asked, and its call isn't told yet.
     pub joining: bool,
+    /// What Join now does: go into the meeting, or start a new one in the channel `to_join.chat` (its Meet now).
+    pub entry: PrejoinEntry,
+}
+
+/// What a pre-join's Join now does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PrejoinEntry {
+    /// Goes into the meeting: starts its call when nobody has, joins it when it runs.
+    #[default]
+    Join,
+    /// Starts a new meeting in the channel (its header's Meet now).
+    MeetNow,
 }
 
 /// The audio a pre-join picks, as Teams lists it (Phone audio is offered greyed out, Room audio not at all).
@@ -645,8 +665,18 @@ impl Calls {
             camera: false,
             audio: PrejoinAudio::Computer,
             joining: false,
+            entry: PrejoinEntry::Join,
         });
         cx.notify();
+    }
+
+    /// Shows the pre-join of a new meeting in the channel `to_join.chat` (its Meet now), as [`Self::open_prejoin`]
+    /// does; its Join now starts the meeting.
+    pub fn open_meet_now(&mut self, to_join: MeetingToJoin, cx: &mut Context<Self>) {
+        self.open_prejoin(to_join, cx);
+        if let Some(prejoin) = &mut self.prejoin {
+            prejoin.entry = PrejoinEntry::MeetNow;
+        }
     }
 
     /// The pre-join's microphone switch.
@@ -877,7 +907,14 @@ impl Calls {
         }
         let busy = self.busy();
         match ask {
-            Ask::Call { .. } | Ask::TestCall | Ask::Join { .. } | Ask::JoinMeeting { .. } if busy => Err("busy"),
+            Ask::Call { .. } | Ask::TestCall | Ask::Join { .. } | Ask::JoinMeeting { .. } | Ask::MeetNow { .. }
+                if busy =>
+            {
+                Err("busy")
+            }
+            Ask::MeetNow { channel } => Ok(CallAction::MeetNow {
+                channel: channel.clone(),
+            }),
             Ask::Call { chat } => Ok(CallAction::Call { chat: chat.clone() }),
             Ask::TestCall => self
                 .echo
@@ -1086,6 +1123,7 @@ pub fn join_now(calls: &Entity<Calls>, core: &Arc<dyn Core>, trace: &Arc<ViewTra
         let prejoin = calls.prejoin.as_mut().filter(|prejoin| !prejoin.joining)?;
         prejoin.joining = true;
         let to_join = prejoin.to_join.clone();
+        let starts = prejoin.entry == PrejoinEntry::MeetNow;
         let choices = Choices {
             muted: prejoin.muted || prejoin.audio == PrejoinAudio::None,
             camera: prejoin.camera,
@@ -1094,9 +1132,14 @@ pub fn join_now(calls: &Entity<Calls>, core: &Arc<dyn Core>, trace: &Arc<ViewTra
         calls.choices = Some(choices);
         calls.meeting = Some(to_join.clone());
         cx.notify();
-        Some(Ask::JoinMeeting {
-            chat: to_join.chat,
-            meeting: to_join.meeting,
+        // a Rejoin of a meeting started here goes into it as it runs (`Self::rejoin_of`)
+        Some(if starts {
+            Ask::MeetNow { channel: to_join.chat }
+        } else {
+            Ask::JoinMeeting {
+                chat: to_join.chat,
+                meeting: to_join.meeting,
+            }
         })
     });
     if let Some(asked) = asked {

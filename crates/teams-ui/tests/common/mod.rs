@@ -766,6 +766,8 @@ impl Core for FakeCore {
             CallAction::Call { .. }
             | CallAction::TestCall { .. }
             | CallAction::Join { .. }
+            | CallAction::MeetNow { .. }
+            | CallAction::JoinChannel { .. }
             | CallAction::JoinMeeting { .. } => CallId::for_tests(1),
         };
         Reply::ready(locked(&self.call_answers).pop_front().unwrap_or(Ok(named)))

@@ -674,6 +674,85 @@ fn a_meeting_goes_from_its_start_to_joining_rings_nobody_and_connects_on_its_acc
     );
 }
 
+/// What a start or a join is to the fence.
+fn target_of(write: &crate::CallWrite) -> teams_fence::Target {
+    use teams_proto::Mutating as _;
+    match write {
+        crate::CallWrite::Start(start) => start.target(),
+        crate::CallWrite::Join(join) => join.target(),
+        other => panic!("{}", other.name()),
+    }
+}
+
+#[test]
+fn meet_now_subscribes_to_a_new_meeting_then_enters_it_as_its_organizer() {
+    const CHANNEL: &str = "19:MadeUpChannel0001@thread.tacv2";
+    let placement = Placement::Channel {
+        channel: CHANNEL.to_owned(),
+    };
+    let now = Instant::now();
+    let mut calls = Calls::new(identity(A));
+    calls.set_push_url(PUSH).unwrap();
+    let call = calls.place(&placement, media(), now).unwrap();
+    let placed = effects(&mut calls);
+    let [(subscription, "start")] = sent(&placed)[..] else {
+        panic!("{placed:#?}");
+    };
+    let Some(Effect::Send { write, .. }) = placed.iter().find(|effect| matches!(effect, Effect::Send { .. })) else {
+        panic!("{placed:#?}");
+    };
+    assert!(matches!(
+        target_of(write).scope(),
+        teams_fence::Scope::Team { id } if id == CHANNEL
+    ));
+    // the new meeting's conversation: entered at once, the offer kept for it
+    calls.on_outcome(subscription, &ok(&conversation_answer()), now);
+    let entered = effects(&mut calls);
+    let [(entry, "join")] = sent(&entered)[..] else {
+        panic!("{entered:#?}");
+    };
+    let Some(Effect::Send { write, .. }) = entered.iter().find(|effect| matches!(effect, Effect::Send { .. })) else {
+        panic!("{entered:#?}");
+    };
+    assert!(matches!(
+        target_of(write).scope(),
+        teams_fence::Scope::CallOperation { joins: Some(chat), url, .. } if chat == CHANNEL && *url == conv("")
+    ));
+    calls.on_outcome(entry, &ok(&conversation_answer()), now);
+    assert_eq!(
+        events(&effects(&mut calls)),
+        [CallEvent::State {
+            call,
+            state: CallState::Joining
+        }],
+        "nobody rings"
+    );
+}
+
+#[test]
+fn meet_now_whose_subscription_names_no_conversation_ends() {
+    let placement = Placement::Channel {
+        channel: "19:MadeUpChannel0001@thread.tacv2".to_owned(),
+    };
+    let now = Instant::now();
+    let mut calls = Calls::new(identity(A));
+    calls.set_push_url(PUSH).unwrap();
+    calls.place(&placement, media(), now).unwrap();
+    let placed = effects(&mut calls);
+    let [(subscription, "start")] = sent(&placed)[..] else {
+        panic!("{placed:#?}");
+    };
+    calls.on_outcome(subscription, &ok(&json!({})), now);
+    let after = effects(&mut calls);
+    assert!(sent(&after).iter().all(|(_, name)| *name != "join"), "{after:#?}");
+    assert!(
+        events(&after)
+            .iter()
+            .any(|event| matches!(event, CallEvent::Ended { .. })),
+        "{after:#?}"
+    );
+}
+
 /// a's machine in a meeting's call, its start answered with `roster` and the meeting conversation's lobby links.
 fn meeting_answered(roster: Value, now: Instant) -> (Calls, CallId, Vec<CallEvent>) {
     let placement = Placement::Meeting {

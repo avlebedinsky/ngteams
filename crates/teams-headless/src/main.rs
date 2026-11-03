@@ -151,7 +151,8 @@ async fn dispatch(lab: &Lab, command: Command, signals: &mut Signals, out: &mut 
         command @ (Command::Watch { .. }
         | Command::Call { .. }
         | Command::Join { .. }
-        | Command::JoinMeeting { .. }) => calling_command(lab, command, signals, out).await,
+        | Command::JoinMeeting { .. }
+        | Command::ChannelMeeting { .. }) => calling_command(lab, command, signals, out).await,
         Command::Presence { wait, mris } => presence(lab, &mris, Duration::from_secs(wait), signals, out).await,
         Command::Profile { mris, wait } => profile(lab, &mris, Duration::from_secs(wait), signals, out).await,
         Command::Search { query } => search(lab, &query, out).await,
@@ -232,6 +233,16 @@ async fn calling_command(lab: &Lab, command: Command, signals: &mut Signals, out
             };
             place_call(lab, asked, signals, out).await
         }
+        command @ (Command::JoinMeeting { .. } | Command::ChannelMeeting { .. }) => {
+            meeting_command(lab, command, signals, out).await
+        }
+        _ => Err("not a calling command".into()),
+    }
+}
+
+/// A meeting's call: by its join link (`join-meeting`), or a channel's (`channel-meeting`).
+async fn meeting_command(lab: &Lab, command: Command, signals: &mut Signals, out: &mut impl Write) -> Outcome {
+    match command {
         Command::JoinMeeting {
             link,
             audio,
@@ -253,7 +264,24 @@ async fn calling_command(lab: &Lab, command: Command, signals: &mut Signals, out
             };
             place_call(lab, asked, signals, out).await
         }
-        _ => Err("not a calling command".into()),
+        Command::ChannelMeeting {
+            channel,
+            audio,
+            join,
+            seconds,
+            wait,
+        } => {
+            if !teams_fence::is_team_thread_id(&channel) {
+                return Err("that isn't a channel's thread id".into());
+            }
+            let asked = CallAsked {
+                target: call::Target::Channel { channel, join },
+                plan: call_plan(seconds, wait, 0, audio.camera_after()),
+                audio,
+            };
+            place_call(lab, asked, signals, out).await
+        }
+        _ => Err("not a meeting command".into()),
     }
 }
 
@@ -422,7 +450,8 @@ fn write_action(lab: &Lab, command: Command) -> Result<(Action, Duration), Box<d
         | Command::Availability { .. }
         | Command::Call { .. }
         | Command::Join { .. }
-        | Command::JoinMeeting { .. } => {
+        | Command::JoinMeeting { .. }
+        | Command::ChannelMeeting { .. } => {
             return Err("not a write".into());
         }
     };
@@ -611,7 +640,10 @@ async fn watch_calls(
 /// asked and, for the echo, the keyed tone came back.
 async fn place_call(lab: &Lab, asked: CallAsked, signals: &mut Signals, out: &mut impl Write) -> Outcome {
     let CallAsked { target, audio, plan } = asked;
-    let what = if matches!(target, call::Target::Join(_) | call::Target::Meeting(..)) {
+    let what = if matches!(
+        target,
+        call::Target::Join(_) | call::Target::Meeting(..) | call::Target::Channel { .. }
+    ) {
         "join"
     } else {
         "call"

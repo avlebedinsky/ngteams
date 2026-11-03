@@ -122,6 +122,8 @@ impl Phase {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Step {
     Start,
+    /// A channel's Meet now's subscription: its answer is the new meeting, which the account then enters.
+    Subscribe,
     Join,
     Attach,
     Ringing,
@@ -153,6 +155,7 @@ impl Step {
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Start => "start",
+            Self::Subscribe => "subscribe",
             Self::Join => "join",
             Self::Attach => "attach",
             Self::Ringing => "progress",
@@ -271,6 +274,8 @@ pub(crate) struct Call {
     pub(crate) held_after: Option<WriteId>,
     /// An acceptance delivered before the start's or the join's answer, applied once that answer came.
     pub(crate) early_acceptance: Option<(Delivery, Observed)>,
+    /// A channel's Meet now whose subscription waits for its answer: the channel and the offer its entry goes with.
+    pub(crate) meet_now: Option<(String, MediaContent)>,
     pub(crate) started: Instant,
 }
 
@@ -316,6 +321,7 @@ impl Call {
             held: VecDeque::new(),
             held_after: None,
             early_acceptance: None,
+            meet_now: None,
             started,
         }
     }

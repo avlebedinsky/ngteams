@@ -45,6 +45,8 @@ const LAB_C: &str = "8:orgid:00000000-0000-4000-8000-00000000000c";
 const OUTSIDER: &str = "8:orgid:00000000-0000-4000-8000-0000000000ff";
 const ECHO: &str = "28:00000000-0000-4000-8000-0000000000ec";
 const GROUP: &str = "19:syntheticgroupchat0abc@thread.v2";
+/// A channel of a team of the lab's own, other than its first.
+const CHANNEL: &str = "19:SyntheticChannelThread@thread.tacv2";
 const CHAT_BASE: &str = "https://teams.microsoft.com/api/chatsvc/amer";
 const SKYPETOKEN: &str = "placeholder-skypetoken";
 const CHAIN: &str = "00000000-0000-4000-8000-0000000000c1";
@@ -233,6 +235,7 @@ impl MembershipSource for LabChats {
                 Scope::Conversation { id } if id == GROUP => {
                     Membership::Complete(vec![Mri::new(LAB_A), Mri::new(LAB_B), Mri::new(LAB_C)])
                 }
+                Scope::Team { id } if id == CHANNEL => Membership::Complete(vec![Mri::new(LAB_A), Mri::new(LAB_B)]),
                 Scope::Conversation { id } if id == MEETING => {
                     Membership::Complete(vec![Mri::new(LAB_A), Mri::new(LAB_B)])
                 }
@@ -478,6 +481,82 @@ async fn a_meetings_start_targets_its_chat_names_nobody_and_carries_its_organize
 
     let group = StartCall::in_meeting(&context(), &parts, GROUP, &meeting);
     assert!(group.is_err(), "a group chat's isn't a meeting's start");
+}
+
+#[tokio::test]
+async fn a_channels_meet_now_subscribes_on_its_team_then_enters_as_its_organizer() {
+    let parts = start_parts(PUSH_A, LAB_A, None);
+    let subscribe = StartCall::meet_now(&context(), &parts, CHANNEL).unwrap();
+    let target = Target::new(WriteKind::Call, Scope::Team { id: CHANNEL.into() })
+        .with_added([Mri::new(LAB_A)])
+        .with_sender(Mri::new(LAB_A));
+    assert_eq!(subscribe.target(), target);
+
+    // the lab's own rule: each entry judged by itself, as the lab app's fence decides calls
+    let lab = lab_rule(LAB_A).await;
+    lab.answers("POST", CALL_START_URL, conversation_answer("Synthetic1"))
+        .await;
+    let (_, request) = lab.send(subscribe).await;
+    assert_eq!(
+        classified(&request, CALL_START_URL, &Policy::new()),
+        Contact::Write(target)
+    );
+    let sent: Value = serde_json::from_slice(&request.body).unwrap();
+    assert_eq!(sent.get("callInvitation"), None, "a subscription enters no call");
+    assert_eq!(
+        sent["conversationRequest"]["properties"]["enableGroupCallMeetupGeneration"],
+        json!(true),
+        "the service makes the meeting and posts it to the channel"
+    );
+    assert_eq!(sent["groupChat"], json!({"threadId": CHANNEL, "messageId": null}));
+    assert_eq!(
+        sent["meetingInfo"],
+        Value::Null,
+        "the meeting is new: nobody organizes it yet"
+    );
+    assert_eq!(sent["endpointState"]["endpointStateSequenceNumber"], json!(0));
+
+    // the entry into the meeting it made: the account its organizer, no post named yet
+    let entry = JoinParts {
+        from: participant(LAB_A),
+        roster_update: callback(PUSH_A, "40404040", "conversation", "rosterUpdate"),
+        conversation_links: Links::new(),
+        group_chat: CHANNEL.into(),
+        message_id: None,
+        meeting: Some(MeetingInfo {
+            organizer_id: LAB_A["8:orgid:".len()..].into(),
+            tenant_id: "00000000-0000-4000-8000-0000000000d0".into(),
+        }),
+        posts_meetup: true,
+        client: client(),
+    };
+    let join_media = JoinMedia {
+        call_links: Links::new().with("acceptance", callback(PUSH_A, "43434343", "call", "acceptance")),
+        media_controller_links: Links::new(),
+        modalities: vec!["Audio".into(), "ScreenViewer".into()],
+        media: media(None),
+    };
+    let enter = JoinCall::enter(&context(), &link(&conv("Synthetic1", "")), &entry, &join_media).unwrap();
+    assert!(matches!(
+        enter.target().scope(),
+        Scope::CallOperation { operation: CallOperation::Join, joins: Some(chat), .. } if chat == CHANNEL
+    ));
+    lab.answers("POST", &conv("Synthetic1", ""), conversation_answer("Synthetic1"))
+        .await;
+    let (_, request) = lab.send(enter).await;
+    let sent: Value = serde_json::from_slice(&request.body).unwrap();
+    assert_eq!(sent["groupChat"], json!({"threadId": CHANNEL, "messageId": null}));
+    assert_eq!(
+        sent["conversationRequest"]["properties"]["enableGroupCallMeetupGeneration"],
+        json!(true)
+    );
+
+    for chat in [GROUP, MEETING] {
+        assert!(
+            StartCall::meet_now(&context(), &parts, chat).is_err(),
+            "{chat} is no channel"
+        );
+    }
 }
 
 #[tokio::test]
@@ -1137,11 +1216,12 @@ async fn a_join_with_media_of_a_running_group_call_registers_it() {
             callback(PUSH_B, "41414141", "conversation", "conversationEnd"),
         ),
         group_chat: GROUP.into(),
-        message_id: "0".to_owned(),
+        message_id: Some("0".to_owned()),
         meeting: Some(MeetingInfo {
             organizer_id: LAB_A["8:orgid:".len()..].into(),
             tenant_id: "00000000-0000-4000-8000-0000000000d0".into(),
         }),
+        posts_meetup: false,
         client: client(),
     };
     let subscribe = JoinCall::subscribe(&context(), &link(&conv("Synthetic2", "")), &parts).unwrap();
@@ -1184,11 +1264,12 @@ fn a_join_of_a_channels_meeting_names_the_channel_and_its_post() {
             callback(PUSH_B, "41414141", "conversation", "conversationEnd"),
         ),
         group_chat: CHANNEL.into(),
-        message_id: "1700000000000".to_owned(),
+        message_id: Some("1700000000000".to_owned()),
         meeting: Some(MeetingInfo {
             organizer_id: LAB_A["8:orgid:".len()..].into(),
             tenant_id: "00000000-0000-4000-8000-0000000000d0".into(),
         }),
+        posts_meetup: false,
         client: client(),
     };
     let join_media = JoinMedia {

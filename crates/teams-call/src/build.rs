@@ -52,12 +52,34 @@ pub(crate) fn start(
             group_chat: Some(_),
             ..
         } | Placement::Meeting { .. }
+            | Placement::Channel { .. }
     );
     match placement {
         Placement::TestCall { .. } => offer.required_features = None,
         Placement::Chat { group_chat: None, .. } => offer.required_features = Some(ONE_TO_ONE_FEATURES.to_owned()),
-        Placement::Chat { .. } | Placement::Meeting { .. } => {}
+        Placement::Chat { .. } | Placement::Meeting { .. } | Placement::Channel { .. } => {}
     }
+    let parts = start_parts(call, identity, group, offer)?;
+    let start = match placement {
+        Placement::TestCall { echo } => StartCall::echo_test(&call.context, &parts, echo)?,
+        Placement::Chat { callees, group_chat } => {
+            let callees = callees.iter().map(invitee).collect::<Result<Vec<_>, _>>()?;
+            StartCall::in_chat(&call.context, &parts, &callees, group_chat.as_deref())?
+        }
+        Placement::Meeting { chat, meeting } => StartCall::in_meeting(&call.context, &parts, chat, meeting)?,
+        // a new meeting is subscribed to first: its entry, with the offer, goes once its conversation is known
+        Placement::Channel { channel } => StartCall::meet_now(&call.context, &parts, channel)?,
+    };
+    Ok(CallWrite::Start(start))
+}
+
+/// What a start sends besides its kind: the call's callbacks, modalities and `offer`.
+fn start_parts(
+    call: &mut Call,
+    identity: &Identity,
+    group: bool,
+    offer: MediaContent,
+) -> Result<StartParts, CallError> {
     call.modalities = modalities(group);
     let parts = StartParts {
         from: call.me.clone(),
@@ -69,23 +91,17 @@ pub(crate) fn start(
         media: offer,
         client: identity.client.clone(),
     };
-    let start = match placement {
-        Placement::TestCall { echo } => StartCall::echo_test(&call.context, &parts, echo)?,
-        Placement::Chat { callees, group_chat } => {
-            let callees = callees.iter().map(invitee).collect::<Result<Vec<_>, _>>()?;
-            StartCall::in_chat(&call.context, &parts, &callees, group_chat.as_deref())?
-        }
-        Placement::Meeting { chat, meeting } => StartCall::in_meeting(&call.context, &parts, chat, meeting)?,
-    };
-    Ok(CallWrite::Start(start))
+    Ok(parts)
 }
 
-/// What a join goes into: the chat (a group chat, or a channel), its message (`"0"`, or a channel meeting's post) and
-/// the meeting it is, if any.
+/// What a join goes into: the chat (a group chat, or a channel), its message (`"0"`, a channel meeting's post, or
+/// none for the organizer's entry into the meeting it started), the meeting it is, if any, and whether the service
+/// posts the meeting to its channel (Meet now's entry).
 pub(crate) struct JoinInto<'a> {
     pub(crate) chat: &'a str,
-    pub(crate) message_id: &'a str,
+    pub(crate) message_id: Option<&'a str>,
     pub(crate) meeting: Option<MeetingInfo>,
+    pub(crate) posts_meetup: bool,
 }
 
 /// The join of the running call at `conversation` in `into`, with `offer`.
@@ -101,8 +117,9 @@ pub(crate) fn join(
         roster_update: call.callback(Kind::Conversation, "rosterUpdate")?,
         conversation_links: call.links(Kind::Conversation, &CONVERSATION_LINKS)?,
         group_chat: into.chat.to_owned(),
-        message_id: into.message_id.to_owned(),
+        message_id: into.message_id.map(str::to_owned),
         meeting: into.meeting,
+        posts_meetup: into.posts_meetup,
         client: identity.client.clone(),
     };
     call.modalities = modalities(true);

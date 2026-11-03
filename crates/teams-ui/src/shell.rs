@@ -52,6 +52,7 @@ use gpui::{
 use gpui_component::avatar::Avatar;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::kbd::Kbd;
+use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, ResizableState, Size, h_resizable, resizable_panel};
 use teams_core::{Availability, ChannelMeetup, Reporting};
@@ -931,6 +932,50 @@ impl Shell {
         true
     }
 
+    /// A channel meeting's title, as Teams names one: `Meeting in "<channel>"`.
+    fn channel_meeting_title(&self, channel: &str, cx: &App) -> String {
+        self.channel
+            .as_ref()
+            .filter(|(view, _)| view.read(cx).channel() == channel)
+            .map(|(_, chosen)| chosen.name.to_string())
+            .filter(|name| !name.is_empty())
+            .map_or_else(|| "Meeting".to_owned(), |name| format!("Meeting in \"{name}\""))
+    }
+
+    /// The channel header's Meet now: a new meeting in the channel shown, its pre-join first (Join now starts it); while
+    /// a call is up or rings, its refusal.
+    pub fn meet_now(&mut self, cx: &mut Context<Self>) {
+        let Main::Channel(channel) = self.main.clone() else {
+            return;
+        };
+        let busy = self.models.calls.read(cx).busy();
+        if busy || self.busy_elsewhere(cx) {
+            let ask = Ask::MeetNow { channel };
+            let why = if busy { "busy" } else { "another-account" };
+            calls::refuse_here(&self.models.calls, &self.trace, &ask, why, cx);
+            return;
+        }
+        let title = self.channel_meeting_title(&channel, cx);
+        self.trace.record(
+            &TraceLine::new("call", "prejoin")
+                .conversation(&channel)
+                .kind("meet-now"),
+        );
+        // nobody organizes the meeting before it starts: the account will, and the start names no organizer
+        let to_join = MeetingToJoin {
+            chat: channel,
+            meeting: teams_proto::MeetingInfo {
+                organizer_id: String::new(),
+                tenant_id: String::new(),
+            },
+            title,
+        };
+        self.models
+            .calls
+            .update(cx, |calls, cx| calls.open_meet_now(to_join, cx));
+        crate::call_window::raise(cx);
+    }
+
     /// The channel header's Join: the meeting that runs in the channel shown, its pre-join first.
     pub fn join_channel_meeting(&mut self, cx: &mut Context<Self>) {
         let Some((channel, meetup)) = self.channel_meetup.clone() else {
@@ -938,13 +983,7 @@ impl Shell {
             calls::refuse_here(&self.models.calls, &self.trace, &ask, "no-meeting", cx);
             return;
         };
-        let title = self
-            .channel
-            .as_ref()
-            .filter(|(view, _)| view.read(cx).channel() == channel.as_str())
-            .map(|(_, chosen)| chosen.name.to_string())
-            .filter(|name| !name.is_empty())
-            .map_or_else(|| "Meeting".to_owned(), |name| format!("Meeting in \"{name}\""));
+        let title = self.channel_meeting_title(&channel, cx);
         self.open_prejoin(
             MeetingToJoin {
                 chat: channel,
@@ -955,18 +994,46 @@ impl Shell {
         );
     }
 
-    /// The channel header's Join, while a meeting runs in the channel shown and a call may go.
+    /// The channel header's meeting button, as Teams' header has it once calls may go: Join while a meeting runs in the
+    /// channel shown, else Meet now with its menu (Meet now).
     fn channel_join_button(&self, id: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
         let calls = self.models.calls.read(cx);
-        let runs = self.channel_meetup.as_ref().is_some_and(|(shown, _)| shown == id);
-        if !runs || !calls.idle() || !calls.registered() || self.busy_elsewhere(cx) {
+        if !calls.idle() || !calls.registered() || self.busy_elsewhere(cx) || self.core.read_only() {
             return None;
+        }
+        let runs = self.channel_meetup.as_ref().is_some_and(|(shown, _)| shown == id);
+        if !runs {
+            return Some(Self::meet_now_button(cx));
         }
         let button = icon_button("channel-join-meeting", Glyph::VIDEO, "Join the channel's meeting")
             .label("Join")
             .primary()
             .on_click(cx.listener(|this, _, _, cx| this.join_channel_meeting(cx)));
         Some(selected_by("channel-join-meeting", button).into_any_element())
+    }
+
+    /// Teams' Meet now: the button starts a meeting in the channel, and its caret opens the menu of ways to meet.
+    fn meet_now_button(cx: &mut Context<Self>) -> AnyElement {
+        let meet = icon_button("channel-meet-now", Glyph::VIDEO, "Start a meeting in this channel now")
+            .label("Meet now")
+            .on_click(cx.listener(|this, _, _, cx| this.meet_now(cx)));
+        let shell = cx.entity().downgrade();
+        let caret = icon_button("channel-meet-menu", Glyph::CHEVRON_DOWN, "More ways to meet").dropdown_menu(
+            move |menu, _, _| {
+                let shell = shell.clone();
+                menu.item(
+                    meet_menu_row("now", Glyph::VIDEO, "Meet now").on_click(move |_, _, cx| {
+                        let _ = shell.update(cx, Self::meet_now);
+                    }),
+                )
+            },
+        );
+        div()
+            .flex()
+            .items_center()
+            .child(selected_by("channel-meet-now", meet))
+            .child(selected_by("channel-meet-menu", caret))
+            .into_any_element()
     }
 
     /// What a call command of the switcher asks.
@@ -2526,6 +2593,19 @@ fn no_chat(palette: Palette) -> gpui::Div {
                 .child(Kbd::new(gpui::Keystroke::parse("ctrl-k").unwrap_or_default()).outline())
                 .child("to find one"),
         )
+}
+
+/// A row of the channel header's Meet now menu.
+fn meet_menu_row(what: &'static str, glyph: Glyph, label: &'static str) -> PopupMenuItem {
+    PopupMenuItem::element(move |_, _| {
+        div()
+            .debug_selector(move || format!("channel-meet-menu-{what}"))
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(glyph.icon().size(px(14.0)))
+            .child(label)
+    })
 }
 
 /// A pane's header line.

@@ -143,6 +143,11 @@ pub enum CallAction {
     /// The account goes into the call of the meeting whose chat is `chat`: it starts the call when nobody has yet, and
     /// joins it when it runs.
     JoinMeeting { chat: String, meeting: MeetingInfo },
+    /// A new meeting in the channel `channel` (a team's channel thread), its header's Meet now: the account starts it
+    /// and organizes it, and the service posts it to the channel.
+    MeetNow { channel: String },
+    /// The account goes into the meeting that runs in the channel `channel` now, as CSA names it (its header's Join).
+    JoinChannel { channel: String },
     /// The answer of an invitation the engine offered ([`Event::IncomingCall`]).
     Answer { call: CallId },
     /// The decline of an invitation the engine offered.
@@ -1301,9 +1306,9 @@ where
             Act::Place(Placement::Chat { group_chat: None, .. } | Placement::TestCall { .. }) => {
                 (None, None, VideoKind::OneToOne)
             }
-            Act::Place(Placement::Chat { .. } | Placement::Meeting { .. }) | Act::Join(_) | Act::JoinChannel(..) => {
-                (None, None, VideoKind::Group)
-            }
+            Act::Place(Placement::Chat { .. } | Placement::Meeting { .. } | Placement::Channel { .. })
+            | Act::Join(_)
+            | Act::JoinChannel(..) => (None, None, VideoKind::Group),
             // only a start, a join or an answer sets its media up
             _ => return refuse(reply, CallError::NotNow.into()),
         };
@@ -1313,8 +1318,10 @@ where
                 CallActionError::Media("the invitation carries no offer".to_owned()),
             );
         }
-        // a test call's `add` names the account's tenant: read from its token when the engine couldn't name it
-        let tenant = matches!(act, Act::Place(Placement::TestCall { .. })) && !self.calls.knows_tenant();
+        // a test call's `add` and a Meet now's entry (its organizer's tenant) name the account's tenant: read from its
+        // token when the engine couldn't name it
+        let tenant = matches!(act, Act::Place(Placement::TestCall { .. } | Placement::Channel { .. }))
+            && !self.calls.knows_tenant();
         let prepare = media::prepare(
             Arc::clone(&self.client),
             self.media.clone(),

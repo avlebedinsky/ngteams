@@ -45,6 +45,8 @@ pub(super) fn call(action: &CallAction) -> String {
         CallAction::TestCall { echo } => format!("the test call of {echo}"),
         CallAction::Join { chat } => format!("a join of the call in {chat}"),
         CallAction::JoinMeeting { chat, .. } => format!("a join of the meeting in {chat}"),
+        CallAction::MeetNow { channel } => format!("a new meeting in {channel}"),
+        CallAction::JoinChannel { channel } => format!("a join of the meeting running in {channel}"),
         CallAction::Answer { call } => format!("the answer of call {}", call.get()),
         CallAction::Decline { call } => format!("the decline of call {}", call.get()),
         CallAction::HangUp { call } => format!("a hang-up of call {}", call.get()),

@@ -25,9 +25,10 @@
 //! **Teams** ([`Scope::Team`]) and their channels ([`Scope::Channel`], judged by their team's members: a standard
 //! channel reaches its whole team, a private channel's people are drawn from it, and no shared channel is made or
 //! changed by a lab write): the team's root thread, read twice, fresh. First the thread itself, which must be that exact
-//! thread, a team's root (`threadType` `space`) naming its group (`groupId`, a GUID) ([`parse_team_thread`]); a
-//! channel's thread or anything else is [`PartialReason::Unsupported`]. Then its member list, judged as a group chat's
-//! ([`parse_members`]). A team named by its group alone (the provisioning service's paths) is read only once a read of
+//! thread, a team's root (`threadType` `space`) naming its group (`groupId`, a GUID) ([`parse_team_thread`]). A standard
+//! channel's thread (`threadType` `topic`) is read as its team: the root it names (`spaceId`) is read in turn and must be
+//! a team's root naming the channel's group ([`parse_channel_thread`]); anything else is [`PartialReason::Unsupported`].
+//! Then the root's member list, judged as a group chat's ([`parse_members`]). A team named by its group alone (the provisioning service's paths) is read only once a read of
 //! its thread in this source has named that group ([`LiveMembershipSource::learned`]): the group is never mapped from
 //! anything but the chat service's own answer, and its thread's `groupId` must name the group again. The members
 //! include Teams' own team apps (`28:<guid>`); which of them the fence doesn't count is the roster's to say
@@ -518,7 +519,10 @@ impl LiveMembershipSource {
     }
 
     /// The team `team`'s membership (a team's thread, or its group once [`Self::learned`]): its root thread read and
-    /// checked ([`parse_team_thread`]), then its member list ([`parse_members`]), all within this source's deadline.
+    /// checked ([`parse_team_thread`]), then its member list ([`parse_members`]), all within this source's deadline. A
+    /// standard channel's thread (`threadType` `topic`, [`parse_channel_thread`]) named as the team is read as the team
+    /// it names: the root its `spaceId` names is read in turn and must be a team's root naming the same group, and its
+    /// members are the channel's. A team named by its group is never followed so.
     async fn team(&self, team: &str) -> Membership {
         let (thread, group) = if is_team_thread_id(team) {
             (team.to_owned(), None)
@@ -531,20 +535,11 @@ impl LiveMembershipSource {
             return Membership::Partial(PartialReason::Unsupported);
         };
         let read = async {
-            let body = match self.read_renewing(&thread, ThreadRead::Thread).await {
-                Ok(body) => body,
+            let root = match self.team_root(&thread, group).await {
+                Ok(root) => root,
                 Err(reason) => return Membership::Partial(reason),
             };
-            let named = match serde_json::from_slice::<Value>(&body) {
-                Ok(answer) => parse_team_thread(&thread, &answer),
-                Err(_) => Err(MALFORMED),
-            };
-            match named {
-                Ok(named) if group.as_ref().is_none_or(|group| *group == named) => self.learn(named, &thread),
-                Ok(_) => return Membership::Partial(MALFORMED),
-                Err(reason) => return Membership::Partial(reason),
-            }
-            match self.read_renewing(&thread, ThreadRead::Members).await {
+            match self.read_renewing(&root, ThreadRead::Members).await {
                 Ok(body) => serde_json::from_slice::<Value>(&body)
                     .map_or(Membership::Partial(MALFORMED), |members| parse_members(&members)),
                 Err(reason) => Membership::Partial(reason),
@@ -553,6 +548,39 @@ impl LiveMembershipSource {
         tokio::time::timeout(self.deadline, read)
             .await
             .unwrap_or(Membership::Partial(PartialReason::FetchFailed(FetchFailure::Timeout)))
+    }
+
+    /// The root thread whose members are `thread`'s team's, read fresh: `thread` itself when it is a team's root naming
+    /// `group` (when one is expected), or, when `thread` is a standard channel's (and no group is expected), the root its
+    /// `spaceId` names, read in turn, which must be a team's root naming the channel's group. Either root's group is
+    /// learned ([`Self::learned`]).
+    async fn team_root(&self, thread: &str, group: Option<String>) -> Result<String, PartialReason> {
+        let answer = self.thread_answer(thread).await?;
+        let channel = match parse_team_thread(thread, &answer) {
+            Ok(named) if group.as_ref().is_none_or(|group| *group == named) => {
+                self.learn(named, thread);
+                return Ok(thread.to_owned());
+            }
+            Ok(_) => return Err(MALFORMED),
+            Err(PartialReason::Unsupported) if group.is_none() => parse_channel_thread(thread, &answer)?,
+            Err(reason) => return Err(reason),
+        };
+        let (root, group) = channel;
+        let answer = self.thread_answer(&root).await?;
+        match parse_team_thread(&root, &answer) {
+            Ok(named) if named == group => {
+                self.learn(named, &root);
+                Ok(root)
+            }
+            Ok(_) => Err(MALFORMED),
+            Err(reason) => Err(reason),
+        }
+    }
+
+    /// A thread read (`v1/threads/<id>`), as JSON.
+    async fn thread_answer(&self, thread: &str) -> Result<Value, PartialReason> {
+        let body = self.read_renewing(thread, ThreadRead::Thread).await?;
+        serde_json::from_slice::<Value>(&body).map_err(|_| MALFORMED)
     }
 
     /// The thread of the team whose group is `group`, when a read of that thread in this source named it.
@@ -818,6 +846,41 @@ pub fn parse_team_thread(id: &str, thread: &Value) -> Result<String, PartialReas
         .filter(|group| is_guid(group))
         .map(str::to_ascii_lowercase)
         .ok_or(MALFORMED)
+}
+
+/// Reads a chat service thread (`GET v1/threads/<id>?view=msnp24Equivalent`) as a standard channel's: the team's root
+/// thread it names (`properties.spaceId`, a team's thread id other than `id`) and its group (`properties.groupId`, a
+/// GUID, in lower case), when the answer is the thread `id` itself with `properties.threadType` `topic` (seen
+/// 2026-11-02, `channel-create`: a standard channel's thread names its team's root and group so; a private channel's is
+/// a `space` of its own, read as a team's root by [`parse_team_thread`]). A thread of another type, or a topic naming no
+/// `spaceId`, is [`PartialReason::Unsupported`], a pagination marker [`PartialReason::Paginated`], anything else malformed.
+///
+/// # Errors
+/// As above.
+pub fn parse_channel_thread(id: &str, thread: &Value) -> Result<(String, String), PartialReason> {
+    let object = thread.as_object().ok_or(MALFORMED)?;
+    if object.keys().any(|key| is_page_marker(key)) {
+        return Err(PartialReason::Paginated);
+    }
+    if object.get("id").and_then(Value::as_str) != Some(id) {
+        return Err(MALFORMED);
+    }
+    let properties = object.get("properties").and_then(Value::as_object).ok_or(MALFORMED)?;
+    if properties.get("threadType").and_then(Value::as_str) != Some("topic") {
+        return Err(PartialReason::Unsupported);
+    }
+    // a topic that names no team is no channel the fence can tie to one
+    let root = properties.get("spaceId").ok_or(PartialReason::Unsupported)?;
+    let root = root
+        .as_str()
+        .filter(|root| is_team_thread_id(root) && *root != id)
+        .ok_or(MALFORMED)?;
+    let group = properties
+        .get("groupId")
+        .and_then(Value::as_str)
+        .filter(|group| is_guid(group))
+        .ok_or(MALFORMED)?;
+    Ok((root.to_owned(), group.to_ascii_lowercase()))
 }
 
 /// The prefix of a meeting chat's inner id.

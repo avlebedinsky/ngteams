@@ -261,6 +261,24 @@ pub enum Command {
         #[arg(long)]
         admit: bool,
     },
+    /// Goes into a channel's meeting, as the channel header's Meet now and Join do (the same media, hold, hang-up and
+    /// output): a new meeting in the channel, or with `--join` the one that runs there now, as CSA names it. A write
+    /// others see, through the fence (judged by the channel's team, its members read fresh).
+    ChannelMeeting {
+        /// The channel's thread id (`19:…@thread.tacv2`).
+        channel: String,
+        #[command(flatten)]
+        audio: CallAudio,
+        /// Joins the meeting that runs in the channel instead of starting one.
+        #[arg(long)]
+        join: bool,
+        /// Seconds the call is held once its media connected.
+        #[arg(long, default_value_t = 45)]
+        seconds: u64,
+        /// Seconds the call may take to connect, from its placing.
+        #[arg(long, default_value_t = 60)]
+        wait: u64,
+    },
 }
 
 /// A call's audio on files: the microphone's tone and how it is keyed, the tone looked for in the far end's recording,

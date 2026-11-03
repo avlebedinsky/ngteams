@@ -455,12 +455,40 @@ reads "Meeting in "General" ended".
 The fence maps the Meet now (its subscription and its start with media) as a call on the channel's team
 (`Scope::Team`, `contacting::call::channel_call_start`) and every entry naming a channel as a join of that channel
 (`CHANNEL_JOIN`), each judged by the team's members read fresh from the team's thread, Teams' own apps not counted, as
-any write on a team is (`docs/lab-rules.md`, "A team and its channels"). A channel's own thread must read as the team's
-root: a meeting in the team's first channel (whose thread is the team's) passes; one in another channel is read as a
-team it isn't and denied, until a read ties a channel to its team. The native client joins a running channel meeting:
+any write on a team is (`docs/lab-rules.md`, "A team and its channels"). The team's first channel's thread is the team's
+root; another standard channel's thread read (`GET v1/threads/<channel>?view=msnp24Equivalent`, seen 2026-11-02 in
+`channel-create`) has `threadType` `topic`, `spaceId` (the team's root thread) and the team's `groupId`, so the fence reads
+the channel's thread, then the root it names, which must be a team's root naming the same group, then the root's members
+(`teams_fence::parse_channel_thread`). A private channel's thread is a `space` of its own (`productThreadType`
+`TeamsPrivateChannel`, its own `groupId` the team's), read with its own members. The native client joins a running channel meeting:
 the channel's header shows **Join** while CSA names a meeting running in it (read when the channel opens and every 30 s
 while it shows, `Core::channel_meetup`), which opens the pre-join, and Join now reads the meeting again and enters it at
-its conversation in the web client's entry shape (`Calls::join_channel_meeting`). Meet now isn't built natively.
+its conversation in the web client's entry shape (`Calls::join_channel_meeting`). While none runs, the header has
+**Meet now** with its caret's menu, as Teams' has: it opens the pre-join titled `Meeting in "<channel>"`, and Join now
+goes as the web client's does (`CallAction::MeetNow`, `Placement::Channel`): first the subscription at `epconv`
+(`StartCall::meet_now`: the conversation's callbacks, `enableGroupCallMeetupGeneration` `true`, `groupChat` the channel
+with `messageId` `null`, `meetingInfo` `null`, no call invitation; it pends nothing in the call registry), then, from its
+answer's `conversationController`, the entry with media at that conversation (`JoinCall::enter`: `messageId` `null`,
+`meetingInfo` the account itself and its tenant, `enableGroupCallMeetupGeneration` `true`). Seen live 2026-11-03 (a team of
+the lab's own made for it, a and b, in a channel other than General, deleted after): the subscription's answer is the
+new `adHocMeeting` conversation, the entry connects, the service posts the meeting (`Event/Call`, `callEventType`
+`callStarted`, its content naming the `conversationUrl`; the web client draws it as the card "Meeting in "<channel>"")
+and a's CSA read names it under the channel's `activeMeetups` within seconds, so the header shows Join once the account
+left while it still runs. The web client's start with media instead (what it sends when its subscription fails) made a
+`groupCall` conversation, which the native client no longer sends. b's native Join couldn't be seen in that run: b's CSA
+answer still listed teams deleted hours before and not the new one, so it named no meeting there.
+`teams-headless <alias> channel-meeting <channel> [--join]` does the same from the command line. The pre-join's subject
+is shown, not edited: what an edited subject sends wasn't captured.
+
+**Schedule a meeting** (the caret's other item, seen 2026-11-03 with the event's creation held back): the scheduling form
+opens with the channel as a row of its own ("<team> > <channel>", and a "Send personal invites" switch); Send creates
+the online meeting as any form does, then posts the event to the team's group calendar: `POST
+…/api/mt/part/<partition>/v2.0/groups/smtp:<team mailbox>/calendars/default/events?isOnlineMeeting=true&shouldDecryptData=true`
+with the creation's event keys at the top level (no `calendarEvent` wrapper), `attendees` the organizer and the team's
+mailbox (`{"address": <team mailbox>, "role": "User", "type": "Required"}`), `mailboxAddress` the team's mailbox, and
+`skypeTeamsData` naming the channel (`{"cid": <channel>, "uid": <organizer MRI>, "type": 0}`). The fence maps no row for
+it (it reaches the whole team through its mailbox), and the native client doesn't send it: its menu offers Meet now only
+(`docs/backlog/channel-meeting-scheduling.md`).
 
 ## The lobby
 
