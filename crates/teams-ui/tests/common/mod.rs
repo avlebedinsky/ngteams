@@ -42,7 +42,11 @@ impl EventSource for FakeEvents {
 
 /// The engine's request side: records each request by name, answers the store's reads from its own state (as account
 /// a) and everything else `Stopped`; with `stopped` set, every request answers `Stopped`.
+pub type WorkflowHandler = fn(&teams_proto::WorkflowRequest) -> teams_proto::WorkflowResponse;
+
 pub struct FakeCore {
+    pub workflow_handler: Mutex<Option<WorkflowHandler>>,
+    pub workflow_requests: Mutex<Vec<teams_proto::WorkflowRequest>>,
     pub uploads: Mutex<Vec<std::path::PathBuf>>,
     pub hold_uploads: Mutex<bool>,
     pub held_uploads: Mutex<Vec<Answer<teams_proto::UploadedFile>>>,
@@ -183,6 +187,8 @@ pub struct FakeCore {
 impl Default for FakeCore {
     fn default() -> Self {
         Self {
+            workflow_handler: Mutex::new(None),
+            workflow_requests: Mutex::default(),
             uploads: Mutex::default(),
             hold_uploads: Mutex::default(),
             held_uploads: Mutex::default(),
@@ -355,6 +361,15 @@ impl FakeCore {
 }
 
 impl Core for FakeCore {
+    fn workflow_request(&self, request: teams_proto::WorkflowRequest) -> Reply<teams_proto::WorkflowResponse> {
+        locked(&self.workflow_requests).push(request.clone());
+        let answer = locked(&self.workflow_handler).map_or_else(
+            || Err(teams_proto::WorkflowFailure::Connection),
+            |handler| handler(&request),
+        );
+        self.answer("workflow", || answer)
+    }
+
     fn upload_file(&self, path: std::path::PathBuf) -> Reply<teams_proto::UploadedFile> {
         locked(&self.uploads).push(path.clone());
         if *locked(&self.hold_uploads) {

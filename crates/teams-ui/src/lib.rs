@@ -136,6 +136,7 @@ pub mod video;
 pub mod video_player;
 pub mod view;
 pub mod window;
+pub mod workflow_dialog;
 
 pub use account_prompt::{AccountPrompt, AccountPromptEvent};
 pub use accounts::{AccountParts, AccountTile, Accounts, AccountsEvent};

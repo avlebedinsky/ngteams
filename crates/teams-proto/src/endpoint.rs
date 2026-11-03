@@ -5,6 +5,10 @@
 /// A service the native transport reaches, and so the only hosts it sends to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Service {
+    /// Microsoft Power Automate, fixed `https://api.flow.microsoft.com/`, with its own Flow audience.
+    Workflows,
+    /// Microsoft Power Apps connection service, with its separate Power Apps token.
+    WorkflowConnections,
     /// The chat service at the account's chat base, the region's GTM `chatServiceAfd`
     /// (`https://<AFD host>/api/chatsvc/<region>`, or a regional `https://<name>.msg.teams.microsoft.com`): the bases
     /// [`teams_fence::chat_service_path`] accepts a request under, so the transport and the fence's live membership

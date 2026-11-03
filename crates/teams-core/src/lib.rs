@@ -57,6 +57,7 @@ pub mod team_admin;
 mod team_apps;
 pub mod teams;
 pub mod thumbnails;
+mod workflows;
 
 pub use calendar::{EventWrite, EventWritten, Invitable, MeetingAvailability};
 pub use calling::{

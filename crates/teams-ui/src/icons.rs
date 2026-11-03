@@ -12,6 +12,7 @@ use gpui_component::button::{Button, ButtonVariants as _};
 pub struct Glyph(&'static [u8]);
 
 impl Glyph {
+    pub const WORKFLOW: Self = Self(include_bytes!("../assets/icons/workflow.svg"));
     pub const ACCESSIBILITY: Self = Self(include_bytes!("../assets/icons/accessibility.svg"));
     pub const ALARM: Self = Self(include_bytes!("../assets/icons/alarm-clock.svg"));
     pub const ARROW_DOWN: Self = Self(include_bytes!("../assets/icons/arrow-down.svg"));

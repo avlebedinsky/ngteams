@@ -77,6 +77,7 @@ mod team_read;
 mod thumbnail;
 pub use attachment::{DriveSite, DriveWrite, MAX_ATTACHMENT_SIZE, OwnDrive, UploadedFile, direct_file_grants};
 mod urlp;
+pub mod workflow;
 mod write;
 
 pub use ams::{MessagePicture, PastedFormat, PastedPicture};
@@ -166,3 +167,5 @@ pub use write::{
     CancelChannelEvent, CancelEvent, CreateChannelEvent, CreateEvent, CreateOnlineMeeting, DeleteEvent, EventAttendee,
     EventDraft, EventShowAs, MeetingChannel, Organizer, UpdateChannelEvent, UpdateEvent, ZonedTime,
 };
+
+pub use workflow::{WorkflowFailure, WorkflowRequest, WorkflowResponse};

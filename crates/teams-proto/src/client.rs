@@ -34,6 +34,12 @@ pub trait Transport: Sync {
         async { None }
     }
 
+    /// A typed Power Automate operation. Only the outbox issues mutations; unsupported transports fail closed.
+    fn workflow(&self, request: &crate::WorkflowRequest) -> impl Future<Output = crate::WorkflowResponse> + Send {
+        let _ = request;
+        async { Err(crate::WorkflowFailure::Connection) }
+    }
+
     /// Sends a read as a `GET`.
     fn read<R: Read>(&self, request: &R) -> impl Future<Output = Result<Response, Self::Error>> + Send;
 

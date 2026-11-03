@@ -461,6 +461,14 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         &self.me
     }
 
+    /// Issues one Power Automate mutation, never queued or replayed across runs.
+    ///
+    /// # Errors
+    /// Returns the transport's authentication, service, recipient or read-only refusal.
+    pub async fn try_workflow(&self, request: &teams_proto::WorkflowRequest) -> teams_proto::WorkflowResponse {
+        self.transport.workflow(request).await
+    }
+
     /// Whether the outbox sends nothing (its transport is read-only: the personal build's `ngteams --read-only`): every
     /// write it is asked for, a row's, a transient's or a call's, is refused before the fence is asked and logged to
     /// `fence.log` as `refused_read_only`; a row is failed, a transient dropped, a call write not sent.

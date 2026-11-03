@@ -696,6 +696,10 @@ enum Request {
     Team(Box<TeamAsk>),
     /// What the Apps tab, Change picture, a channel's analytics and "More create team options" ask ([`crate::team_apps`]).
     TeamApps(Box<TeamAppsAsk>),
+    Workflow {
+        request: Box<teams_proto::WorkflowRequest>,
+        reply: Responder<teams_proto::WorkflowResponse>,
+    },
     MeetingAvailability {
         attendees: Vec<EventAttendee>,
         start_ms: i64,
@@ -1217,6 +1221,14 @@ impl EngineRequests {
                 period,
                 reply,
             }))
+        })
+    }
+
+    /// Native Power Automate management, bound to this engine's account. Mutations pass through the outbox.
+    pub fn workflow_request(&self, request: teams_proto::WorkflowRequest) -> Reply<teams_proto::WorkflowResponse> {
+        self.ask(|reply| Request::Workflow {
+            request: Box::new(request),
+            reply,
         })
     }
 
@@ -1907,6 +1919,7 @@ where
             Request::TeamPeople { team, keyword, reply } => self.channels.people(team, keyword, reply),
             Request::Team(ask) => self.channels.team_ask(*ask),
             Request::TeamApps(ask) => self.channels.team_apps_ask(*ask),
+            Request::Workflow { request, reply } => self.channels.workflow(*request, reply),
             Request::SearchService { query, scope, reply } => self.service_search.search(query, scope, reply),
             Request::MeetingAvailability {
                 attendees,

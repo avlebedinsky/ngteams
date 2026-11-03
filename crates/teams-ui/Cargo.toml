@@ -114,5 +114,9 @@ harness = false
 name = "meeting_window"
 harness = false
 
+[[test]]
+name = "workflow_window"
+harness = false
+
 [lints]
 workspace = true

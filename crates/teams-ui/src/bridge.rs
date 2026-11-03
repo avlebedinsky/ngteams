@@ -48,6 +48,11 @@ pub trait Core: Send + Sync + 'static {
         let _ = path;
         Reply::ready(Err(teams_core::EngineError::FileUnavailable))
     }
+    /// Native Power Automate requests for this account. A fake without workflow support returns a connection error.
+    fn workflow_request(&self, request: teams_proto::WorkflowRequest) -> Reply<teams_proto::WorkflowResponse> {
+        let _ = request;
+        Reply::ready(Ok(Err(teams_proto::WorkflowFailure::Connection)))
+    }
     /// The account's MRI: who the engine writes as.
     fn me(&self) -> &str;
     /// A write through the outbox; the reply is the row as its first send left it.
@@ -328,6 +333,10 @@ pub trait Core: Send + Sync + 'static {
 }
 
 impl Core for EngineRequests {
+    fn workflow_request(&self, request: teams_proto::WorkflowRequest) -> Reply<teams_proto::WorkflowResponse> {
+        self.workflow_request(request)
+    }
+
     fn upload_file(&self, path: std::path::PathBuf) -> Reply<teams_proto::UploadedFile> {
         EngineRequests::upload_file(self, path)
     }

@@ -121,6 +121,7 @@ use crate::write::{Authorized, CallWire, Mutating, Registry, on_calling_base};
 mod drive;
 mod lab_targets;
 mod native_calls;
+mod workflows;
 
 /// The Entra audience of the token the chat service and the registrar take.
 pub const IC3_AUDIENCE: &str = "https://ic3.teams.office.com";
@@ -759,6 +760,8 @@ impl<C: Credentials> HttpTransport<C> {
             Service::Registrar => fixed(format!("https://{}/registrar", self.registrar_host)),
             Service::Trouter => fixed(format!("https://{TROUTER_HOST}/")),
             Service::Graph => fixed(format!("https://{GRAPH_HOST}/v1.0")),
+            Service::Workflows => fixed("https://api.flow.microsoft.com/".to_owned()),
+            Service::WorkflowConnections => fixed("https://api.powerapps.com/".to_owned()),
             Service::MiddleTier => self.middle_tier.clone().ok_or(refused(Refusal::NoMiddleTier)),
             Service::Csa => self.csa.clone().ok_or(refused(Refusal::NoCsa)),
             Service::Provisioning => self.provisioning.clone().ok_or(refused(Refusal::NoProvisioning)),
@@ -815,6 +818,10 @@ impl<C: Credentials> HttpTransport<C> {
     ) -> Result<Response, HttpError> {
         if service == Service::Substrate {
             return Err(HttpError::Refused(Refusal::Substrate));
+        }
+        // Cloud operations must use the typed route's independent lab/read-only checks and one-attempt policy.
+        if matches!(service, Service::Workflows | Service::WorkflowConnections) {
+            return Err(HttpError::Refused(Refusal::NotAllowed));
         }
         let url = self.url_for(service, endpoint)?;
         if self.read_only && !matches!(method, reqwest::Method::GET | reqwest::Method::HEAD) {
@@ -1424,6 +1431,10 @@ impl<C: Credentials> Transport for HttpTransport<C> {
         }
     }
 
+    fn workflow(&self, request: &crate::WorkflowRequest) -> impl Future<Output = crate::WorkflowResponse> + Send {
+        self.workflow(request)
+    }
+
     fn send<R: Request>(&self, request: &R) -> impl Future<Output = Result<Response, HttpError>> + Send {
         let (service, method, endpoint, body) =
             (request.service(), request.method(), request.endpoint(), request.body());
@@ -1583,6 +1594,8 @@ fn audience(service: Service) -> Option<&'static str> {
         Service::Csa => Some(CSA_AUDIENCE),
         Service::Presence => Some(PRESENCE_AUDIENCE),
         Service::Substrate => Some(SUBSTRATE_AUDIENCE),
+        Service::Workflows => Some(crate::workflow::WORKFLOW_AUDIENCE),
+        Service::WorkflowConnections => Some(crate::workflow::CONNECTION_AUDIENCE),
         Service::Trouter
         | Service::Calling
         | Service::Emoticons
@@ -1598,6 +1611,8 @@ fn plain_headers(service: Service, body: bool) -> Vec<(String, String)> {
     let content_type = match service {
         Service::MiddleTier | Service::UserProfile => "application/json;charset=UTF-8",
         Service::Provisioning
+        | Service::Workflows
+        | Service::WorkflowConnections
         | Service::ChatService
         | Service::Registrar
         | Service::Trouter
@@ -1624,6 +1639,8 @@ fn plain_headers(service: Service, body: bool) -> Vec<(String, String)> {
         | Service::Trouter
         | Service::MiddleTier
         | Service::Provisioning
+        | Service::Workflows
+        | Service::WorkflowConnections
         | Service::UserProfile
         | Service::Graph
         | Service::Csa
@@ -1680,6 +1697,8 @@ fn service_headers(service: Service) -> &'static [(&'static str, &'static str)] 
         | Service::Graph
         | Service::Csa
         | Service::Provisioning
+        | Service::Workflows
+        | Service::WorkflowConnections
         | Service::Calling
         | Service::Emoticons
         | Service::FileThumbnail
@@ -1713,6 +1732,8 @@ fn on_base(service: Service, base: &Url, url: &Url, endpoint: &Endpoint) -> bool
         | Service::MiddleTier
         | Service::Csa
         | Service::Provisioning
+        | Service::Workflows
+        | Service::WorkflowConnections
         | Service::UserProfile
         | Service::Presence
         | Service::Relay
