@@ -24,12 +24,6 @@ prefix="${PREFIX:-$HOME/.local}"
 target="$root/target/personal"
 
 cd "$root"
-# The calls' H.264 (OpenH264, built from its bundled source) gets its SIMD assembly only when `nasm` is there at its
-# first build; plain C is too slow for a 720p camera at 30 fps (docs/protocol/calling.md, "The H.264 codec").
-if ! command -v nasm > /dev/null; then
-  echo "warning: nasm isn't installed: the calls' video codec is built without its SIMD code (slow at 720p);" >&2
-  echo "         install nasm, then: cargo clean --release -p openh264-sys2 --target-dir $target, and run this again" >&2
-fi
 if ! pkg-config --atleast-version=2.54 wpe-webkit-2.0 wpe-web-process-extension-2.0 2> /dev/null; then
   echo "error: the sign-in window needs the system's WPE WebKit 2.54 or newer (the wpewebkit package)," >&2
   echo "       which isn't installed or is older: sudo pacman -S wpewebkit, then run this again" >&2
