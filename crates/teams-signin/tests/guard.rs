@@ -112,8 +112,8 @@ fn an_armed_page_is_decided_as_the_sign_in_classifier_decides() -> TestResult {
     assert!(
         logged
             .iter()
-            .all(|entry| !entry["url"].as_str().unwrap_or("").contains('?')),
-        "no query is logged"
+            .all(|entry| !entry["url"].as_str().unwrap_or("").contains('=')),
+        "no query value is logged"
     );
     Ok(())
 }
@@ -152,7 +152,7 @@ fn the_redirect_is_caught_logged_without_its_code_and_never_allowed() -> TestRes
     }
     let logged = entries(&lab.log_path)?;
     assert_eq!(logged[0]["reason"], "sign_in_redirect");
-    assert_eq!(logged[0]["url"], NATIVE_CLIENT_REDIRECT);
+    assert_eq!(logged[0]["url"], format!("{NATIVE_CLIENT_REDIRECT}?code&state"));
     assert!(!fs::read_to_string(&lab.log_path)?.contains(CODE));
     Ok(())
 }

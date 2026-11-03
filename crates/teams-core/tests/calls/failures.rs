@@ -283,7 +283,10 @@ async fn assert_acceptance_route(lab: &Lab, log: &SharedLog) {
         assert_eq!(http[0].url.path(), url.path(), "the link belongs to this accepted call");
         assert_eq!(http[0].url.query(), url.query());
         assert_eq!(permits[0]["verdict"], "allow");
-        assert_eq!(permits[0]["scope"]["call_operation"]["url"], expected);
+        assert_eq!(
+            permits[0]["scope"]["call_operation"]["url"],
+            teams_fence::log_url(&expected)
+        );
         assert_acknowledgement_payload(http[0], &all);
         eprintln!(
             "call {}: acceptance acknowledged once by its admitted HTTP fallback",

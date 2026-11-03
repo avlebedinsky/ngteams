@@ -608,7 +608,7 @@ impl Driver {
         request: &SeenRequest,
         timeout: Duration,
     ) -> Result<String, StepError> {
-        let waiting_for = format!("{} {} to fail", request.method, request.url);
+        let waiting_for = format!("{} {} to fail", request.method, teams_fence::log_url(&request.url));
         let this = |seen: &SeenRequest| seen.session == request.session && seen.request_id == request.request_id;
         self.wait_failed(step, &waiting_for, timeout, this)
             .await
@@ -652,7 +652,8 @@ impl Driver {
                         step: step.to_owned(),
                         reason: format!(
                             "{} {} got a response ({status}) instead of failing",
-                            seen.method, seen.url
+                            seen.method,
+                            teams_fence::log_url(&seen.url)
                         ),
                     });
                 }

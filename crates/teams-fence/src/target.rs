@@ -5,6 +5,8 @@ use std::fmt;
 
 use serde::Serialize;
 
+use crate::log::log_url;
+
 /// Every kind of write: anything other people could notice.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -175,8 +177,10 @@ impl fmt::Display for Mri {
     }
 }
 
-/// Where a write lands: the thing whose participants are fetched.
-#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
+/// Where a write lands: the thing whose participants are fetched. A call operation's URL is serialized, shown and
+/// debug-printed only as [`log_url`] writes it: the calling services' links carry the account's skypetoken in their
+/// query.
+#[derive(Clone, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Scope {
     /// A chat (1:1, group or meeting chat) by its conversation id.
@@ -199,6 +203,8 @@ pub enum Scope {
     /// incoming group call names.
     CallOperation {
         operation: CallOperation,
+        // the exact link, which may hold the account's skypetoken; `fence.log` keeps only its `log_url` form
+        #[serde(serialize_with = "crate::log::serialize_log_url")]
         url: String,
         // never in `fence.log`, which holds no participant's MRI
         #[serde(skip)]
@@ -230,9 +236,53 @@ impl fmt::Display for Scope {
             Self::Team { id } => write!(f, "team {id}"),
             Self::Call { id } => write!(f, "call {id}"),
             Self::Event { id } => write!(f, "event {id}"),
-            Self::CallOperation { operation, url, .. } => write!(f, "{operation} on the call at {url}"),
+            Self::CallOperation { operation, url, .. } => write!(f, "{operation} on the call at {}", log_url(url)),
             Self::New => f.write_str("a new target"),
             Self::Account { mri } => write!(f, "account {mri}"),
+        }
+    }
+}
+
+impl fmt::Debug for Scope {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Conversation { id } => f.debug_struct("Conversation").field("id", id).finish(),
+            Self::Channel { team, channel } => f
+                .debug_struct("Channel")
+                .field("team", team)
+                .field("channel", channel)
+                .finish(),
+            Self::Team { id } => f.debug_struct("Team").field("id", id).finish(),
+            Self::Call { id } => f.debug_struct("Call").field("id", id).finish(),
+            Self::CallOperation {
+                operation,
+                url,
+                from,
+                callbacks,
+                joins,
+            } => f
+                .debug_struct("CallOperation")
+                .field("operation", operation)
+                .field("url", &log_url(url))
+                .field("from", from)
+                .field(
+                    "callbacks",
+                    &callbacks.iter().map(|link| log_url(link)).collect::<Vec<_>>(),
+                )
+                .field(
+                    "joins",
+                    &joins.as_deref().map(|joins| {
+                        if joins.contains("://") {
+                            log_url(joins)
+                        } else {
+                            joins.to_owned()
+                        }
+                    }),
+                )
+                .finish(),
+            Self::Event { id } => f.debug_struct("Event").field("id", id).finish(),
+            Self::New => f.write_str("New"),
+            Self::Account { mri } => f.debug_struct("Account").field("mri", mri).finish(),
         }
     }
 }

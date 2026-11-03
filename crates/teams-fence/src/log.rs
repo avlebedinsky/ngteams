@@ -11,10 +11,15 @@
 //! material: it stays local (0600) and goes through the fixture guard and a manual review before any of it is copied
 //! into the repo. Allows are logged too (without a reason), so the log is the full audit of a run.
 //!
+//! Every URL an entry holds, a call operation's (`scope.call_operation.url`) too, is written by [`log_url`]: its
+//! scheme, host, port, path and query keys, never a query value, the fragment or the user info, and a path segment
+//! that looks like a credential redacted. Calling services hand out follow-up links with the account's skypetoken
+//! in their query (`…/leave?i=…&e=…&skypeToken=…`), and a token no one has listed yet must stay out as well.
+//!
 //! The browser fence logs a request it denies without a membership check (one that nothing classifies, or a forced
 //! deny) as a [`RequestRecord`], and a mutating one it lets through as an [`AllowedRecord`]; the sign-in window and the
 //! native transport's own-state requests are [`RequestRecord`]s too. Such an entry holds the channel, the method and
-//! the URL without its query, fragment or user info (where tokens travel), never a body:
+//! the URL as [`log_url`] writes it (its query's keys, never their values), never a header or body:
 //!
 //! ```json
 //! {"ts_ms":1760000000000,"verdict":"deny","channel":"http","method":"POST","url":"https://host/path",
@@ -25,11 +30,12 @@
 //! `breach` and the reason `sent_without_allow`.
 //!
 //! The sign-in window (`teams-signin`) logs every request it decides the same way, its reads too (`"read": true`), and
-//! the redirect that carries the authorization code as a deny with the reason `sign_in_redirect` (never its query).
+//! the redirect that carries the authorization code as a deny with the reason `sign_in_redirect` (never its query's
+//! values).
 //!
 //! A frame record ([`FrameRecord`]) is the personal build's (`docs/personal-build.md`: it logs its Trouter frames
 //! before each is sent); the lab's frame sink (`teams_proto::FrameSink`) writes none, a frame being no contacting
-//! write. It holds the channel, the socket's URL without its query, fragment or user info, and the frame's kind
+//! write. It holds the channel, the socket's URL as [`log_url`] writes it, and the frame's kind
 //! (`teams_proto::OwnFrame::KIND`), never its text (the authentication frame carries the account's token):
 //!
 //! ```json
@@ -184,14 +190,25 @@ pub enum RequestOutcome {
     Tunnel,
 }
 
-/// A request the fence decided without a membership check. The URL is logged without its query, fragment or
-/// user info.
-#[derive(Clone, Copy, Debug)]
+/// A request the fence decided without a membership check. The URL is logged, and shown by `Debug`, as [`log_url`]
+/// writes it.
+#[derive(Clone, Copy)]
 pub struct RequestRecord<'a> {
     pub channel: Channel,
     pub method: &'a str,
     pub url: &'a str,
     pub outcome: RequestOutcome,
+}
+
+impl fmt::Debug for RequestRecord<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RequestRecord")
+            .field("channel", &self.channel)
+            .field("method", &self.method)
+            .field("url", &log_url(self.url))
+            .field("outcome", &self.outcome)
+            .finish()
+    }
 }
 
 #[derive(Serialize)]
@@ -215,12 +232,21 @@ struct RequestEntry<'a> {
     message: Option<&'static str>,
 }
 
-/// A frame the personal build is about to send on a WebSocket: the socket's URL (logged without its query, fragment or
-/// user info) and the frame's kind. Never the frame's text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// A frame the personal build is about to send on a WebSocket: the socket's URL (logged, and shown by `Debug`, as
+/// [`log_url`] writes it) and the frame's kind. Never the frame's text.
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct FrameRecord<'a> {
     pub url: &'a str,
     pub kind: &'static str,
+}
+
+impl fmt::Debug for FrameRecord<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("FrameRecord")
+            .field("url", &log_url(self.url))
+            .field("kind", &self.kind)
+            .finish()
+    }
 }
 
 #[derive(Serialize)]
@@ -234,11 +260,21 @@ struct FrameEntry {
 }
 
 /// A mutating request let through because it reaches nobody: its method and URL. Only the URL's host and its path's
-/// shape ([`path_shape`]) are logged: never its query, user info or fragment, nor any header or body.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// shape ([`path_shape`]) are logged: never its query, user info or fragment, nor any header or body. `Debug` shows
+/// the URL as [`log_url`] writes it.
+#[derive(Clone, Copy, PartialEq, Eq)]
 pub struct AllowedRecord<'a> {
     pub method: &'a str,
     pub url: &'a str,
+}
+
+impl fmt::Debug for AllowedRecord<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AllowedRecord")
+            .field("method", &self.method)
+            .field("url", &log_url(self.url))
+            .finish()
+    }
 }
 
 #[derive(Serialize)]
@@ -538,7 +574,7 @@ impl FenceLog {
             verdict,
             channel: request.channel,
             method: request.method,
-            url: redact_url(request.url),
+            url: log_url(request.url),
             own: match request.outcome {
                 RequestOutcome::Own(kind) => Some(kind),
                 _ => None,
@@ -566,7 +602,7 @@ impl FenceLog {
             verdict: "allow",
             event: "frame",
             channel: Channel::WebSocket,
-            url: redact_url(frame.url),
+            url: log_url(frame.url),
             own: frame.kind,
         })
     }
@@ -669,19 +705,129 @@ impl FenceLog {
     }
 }
 
-/// The URL without its query, fragment and user info: what's left names the endpoint, not the credentials sent to it.
-fn redact_url(url: &str) -> String {
-    let end = url.find(['?', '#']).unwrap_or(url.len());
-    let url = &url[..end];
-    let Some(scheme_end) = url.find("://").map(|index| index + 3) else {
-        return url.to_owned();
-    };
-    let rest = &url[scheme_end..];
-    let authority = &rest[..rest.find('/').unwrap_or(rest.len())];
-    match authority.rfind('@') {
-        Some(at) => format!("{}{}", &url[..scheme_end], &rest[at + 1..]),
-        None => url.to_owned(),
+/// What [`log_url`] writes for a path segment, a segment's value or a query key that looks like a credential.
+pub const REDACTED: &str = "[redacted]";
+
+/// What [`log_url`] writes for a URL it can't parse, or one without a path to keep (`data:`, `blob:`, `about:`).
+pub const UNREADABLE_URL: &str = "[unreadable url]";
+
+/// The shortest path segment or query key [`log_url`] takes as an opaque credential when it holds only token
+/// characters: longer than any id a path carries (a 1:1 chat id is 91 characters and holds `:` and `@`), shorter than
+/// any token.
+const OPAQUE_RUN: usize = 100;
+
+/// Path segments (lowercase) after which [`log_url`] takes the next segment as a credential (`/skypetoken/<token>`).
+const CREDENTIAL_NAMES: [&str; 14] = [
+    "token",
+    "skypetoken",
+    "access_token",
+    "accesstoken",
+    "sig",
+    "signature",
+    "key",
+    "apikey",
+    "api_key",
+    "secret",
+    "password",
+    "tempauth",
+    "authorization",
+    "authentication",
+];
+
+/// A URL as the fence logs it: what names the endpoint, and nothing a credential travels in. It keeps the scheme, the
+/// host, an explicit port, the path and the query's keys (`?i&e&skypeToken`), never a query value, the fragment or
+/// the user info, so a credential nobody listed yet stays out wherever a query or a fragment carries it. In the path,
+/// a segment that looks like a credential is [`REDACTED`]: a JWT or base64 JSON (`eyJ…`), a run of 100 or more token
+/// characters, the segment after one named as a credential ([`CREDENTIAL_NAMES`]: `/skypetoken/<token>`), and the
+/// value of any `name=value` segment (`;sig=…`), whatever its name; a query key that looks like a token goes the same
+/// way. An empty URL (an unknown socket's) and a bare `host:port` (a `CONNECT`'s target) stay as they are; one that
+/// can't be parsed, or has no path to keep, is [`UNREADABLE_URL`].
+#[must_use]
+pub fn log_url(url: &str) -> String {
+    if url.starts_with(['?', '#']) {
+        // nothing before the query or fragment: no URL to name (the browser fence's unknown socket, `?`)
+        return String::new();
     }
+    if url.is_empty() || authority_form(url) {
+        return url.to_owned();
+    }
+    let Ok(parsed) = Url::parse(url) else {
+        return UNREADABLE_URL.to_owned();
+    };
+    let Some(segments) = parsed.path_segments() else {
+        return UNREADABLE_URL.to_owned();
+    };
+    let mut out = format!("{}://{}", parsed.scheme(), parsed.host_str().unwrap_or_default());
+    if let Some(port) = parsed.port() {
+        out = format!("{out}:{port}");
+    }
+    let mut after_credential_word = false;
+    for segment in segments {
+        out.push('/');
+        out.push_str(&log_segment(segment, after_credential_word));
+        after_credential_word = credential_name(segment);
+    }
+    if let Some(query) = parsed.query() {
+        out.push('?');
+        out.push_str(&query_keys(query));
+    }
+    out
+}
+
+/// Whether `target` is a bare `host:port` (a `CONNECT`'s target): kept as it is, having nowhere to carry a credential.
+fn authority_form(target: &str) -> bool {
+    !target.contains("://")
+        && target.contains(':')
+        && target
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b':' | b'[' | b']'))
+        && target.rsplit_once(':').is_some_and(|(_, port)| {
+            !port.is_empty() && port.len() <= 5 && port.bytes().all(|byte| byte.is_ascii_digit())
+        })
+}
+
+/// One path segment as [`log_url`] writes it, `after_credential_name` when the segment before it names a credential.
+fn log_segment(segment: &str, after_credential_name: bool) -> String {
+    if after_credential_name || opaque(segment) {
+        return REDACTED.to_owned();
+    }
+    match segment.split_once('=') {
+        Some((name, _)) => format!("{name}={REDACTED}"),
+        None => segment.to_owned(),
+    }
+}
+
+/// A query's keys, without their values, in order: `i=1&e=2&skypeToken=…` is `i&e&skypeToken`.
+fn query_keys(query: &str) -> String {
+    query
+        .split('&')
+        .filter(|pair| !pair.is_empty())
+        .map(|pair| pair.split_once('=').map_or(pair, |(key, _)| key))
+        .map(|key| if opaque(key) { REDACTED } else { key })
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
+/// Whether a path segment or a query key (percent-encoded, as the URL holds it) looks like a credential by its form: a
+/// JWT or base64 JSON (`eyJ…`), or a run of [`OPAQUE_RUN`] or more token characters.
+fn opaque(text: &str) -> bool {
+    let decoded = percent_decode_str(text).decode_utf8_lossy();
+    decoded.starts_with("eyJ")
+        || (decoded.len() >= OPAQUE_RUN
+            && decoded.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~' | b'+' | b'/' | b'=')
+            }))
+}
+
+/// Whether a path segment names a credential ([`CREDENTIAL_NAMES`], in any case).
+fn credential_name(segment: &str) -> bool {
+    let name = percent_decode_str(segment).decode_utf8_lossy().to_ascii_lowercase();
+    CREDENTIAL_NAMES.contains(&name.as_str())
+}
+
+/// Serializes a URL as [`log_url`] writes it (a call operation's in `fence.log`).
+pub(crate) fn serialize_log_url<S: serde::Serializer>(url: &str, serializer: S) -> Result<S::Ok, S::Error> {
+    serializer.serialize_str(&log_url(url))
 }
 
 /// The longest path segment [`path_shape`] keeps as it is.

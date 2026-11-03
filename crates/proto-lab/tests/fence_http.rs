@@ -323,7 +323,11 @@ async fn an_unknown_post_is_denied_kept_and_logged_without_its_query() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0]["verdict"], "deny");
     assert_eq!(entries[0]["reason"], "unclassified");
-    assert_eq!(entries[0]["url"], CHAT);
+    assert_eq!(
+        entries[0]["url"],
+        format!("{CHAT}?secret"),
+        "its query keys, never their values"
+    );
     assert!(!std::fs::read_to_string(&lab.log_path).unwrap().contains("planted"));
 }
 

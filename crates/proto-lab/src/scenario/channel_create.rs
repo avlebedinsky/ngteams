@@ -338,7 +338,10 @@ async fn created(
         .await?;
     report.notes.push(format!(
         "a: attempt {at}: {} {} -> {:?} {:?}",
-        write.method, write.url, write.status, write.failed
+        write.method,
+        teams_fence::log_url(&write.url),
+        write.status,
+        write.failed
     ));
     Ok(write)
 }
@@ -399,7 +402,10 @@ async fn add_member(
         Ok(write) => {
             report.notes.push(format!(
                 "a: attempt {at}: {} {} -> {:?} {:?}",
-                write.method, write.url, write.status, write.failed
+                write.method,
+                teams_fence::log_url(&write.url),
+                write.status,
+                write.failed
             ));
             if !write.status.is_some_and(|status| (200..300).contains(&status)) {
                 report
@@ -712,9 +718,11 @@ async fn press_create(drive: &mut Driver, report: &mut ScenarioReport, at: usize
         })
         .await;
     match write {
-        Ok(write) => report
-            .notes
-            .push(format!("a: attempt {at}: {} {}", write.method, write.url)),
+        Ok(write) => report.notes.push(format!(
+            "a: attempt {at}: {} {}",
+            write.method,
+            teams_fence::log_url(&write.url)
+        )),
         Err(error) => report.failures.push(format!("attempt {at}: {error}")),
     }
     Ok(())

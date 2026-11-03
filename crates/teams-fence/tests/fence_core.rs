@@ -15,7 +15,7 @@ use teams_fence::lab::LabConfig;
 use teams_fence::{
     AllowedRecord, ArmingCause, ArmingRecord, Channel, CloseOutcome, Containment, DenyReason, FailClosed, Fence,
     FenceLog, FetchFailure, FrameRecord, Membership, MembershipFuture, MembershipSource, Mri, OpenError, PartialReason,
-    RequestOutcome, RequestRecord, Roster, Scope, Target, WriteKind, is_chat_id, path_shape,
+    RequestOutcome, RequestRecord, Roster, Scope, Target, WriteKind, is_chat_id, log_url, path_shape,
 };
 
 const LAB_A: &str = "8:orgid:lab-a";
@@ -1006,7 +1006,7 @@ fn allowed_entries_share_the_log_s_failure_mode() {
 // --- browser requests decided without a membership check ---
 
 #[test]
-fn a_request_entry_names_the_endpoint_but_not_its_query_fragment_or_user_info() {
+fn a_request_entry_names_the_endpoint_and_its_query_keys_never_a_value_fragment_or_user_info() {
     let lab = try_lab().unwrap();
     let log = lab.fence.log();
     let url = format!(
@@ -1047,7 +1047,7 @@ fn a_request_entry_names_the_endpoint_but_not_its_query_fragment_or_user_info() 
             "verdict": "deny",
             "channel": "http",
             "method": "POST",
-            "url": "https://chat.example.com:8443/v1/users/ME/conversations",
+            "url": "https://chat.example.com:8443/v1/users/ME/conversations?token",
             "reason": "unclassified",
             "message": "no rule classifies this request",
         }),
@@ -1055,21 +1055,21 @@ fn a_request_entry_names_the_endpoint_but_not_its_query_fragment_or_user_info() 
             "verdict": "allow",
             "channel": "http",
             "method": "POST",
-            "url": "https://login.example.com/common/oauth2/v2.0/token",
+            "url": "https://login.example.com/common/oauth2/v2.0/token?x",
             "own": "entra_token",
         }),
         serde_json::json!({
             "verdict": "allow",
             "channel": "http",
             "method": "POST",
-            "url": "https://teams.example.com/api/mt/part/amer-01/beta/users/fetchShortProfile",
+            "url": "https://teams.example.com/api/mt/part/amer-01/beta/users/fetchShortProfile?isMailAddress",
             "post_read": "short_profile",
         }),
         serde_json::json!({
             "verdict": "breach",
             "channel": "web_socket",
             "method": "SEND",
-            "url": "wss://trouter.example.com/v4/c",
+            "url": "wss://trouter.example.com/v4/c?tc",
             "reason": "sent_without_allow",
             "message": "this left the browser without the fence's allow",
         }),
@@ -1109,14 +1109,14 @@ fn the_sign_in_window_logs_its_reads_and_the_caught_redirect() {
             "verdict": "allow",
             "channel": "http",
             "method": "GET",
-            "url": "https://login.example.com/common/oauth2/v2.0/authorize",
+            "url": "https://login.example.com/common/oauth2/v2.0/authorize?state",
             "read": true,
         }),
         serde_json::json!({
             "verdict": "deny",
             "channel": "http",
             "method": "GET",
-            "url": "https://login.example.com/common/oauth2/nativeclient",
+            "url": "https://login.example.com/common/oauth2/nativeclient?code",
             "reason": "sign_in_redirect",
             "message": "the sign-in's redirect, caught and handed to the parent; it never loads",
         }),
@@ -1176,14 +1176,14 @@ fn a_frame_entry_names_the_socket_and_the_kind_but_not_the_query_or_any_token() 
             "verdict": "allow",
             "event": "frame",
             "channel": "web_socket",
-            "url": "wss://trouter.example.com/v4/c",
+            "url": "wss://trouter.example.com/v4/c?tc&epid",
             "own": "trouter_authenticate",
         }),
         serde_json::json!({
             "verdict": "allow",
             "event": "frame",
             "channel": "web_socket",
-            "url": "wss://trouter.example.com:443/v4/c",
+            "url": "wss://trouter.example.com/v4/c",
             "own": "trouter_ping",
         }),
     ];
@@ -1194,6 +1194,103 @@ fn a_frame_entry_names_the_socket_and_the_kind_but_not_the_query_or_any_token() 
         assert!(ts.as_u64().is_some_and(|ts| ts > 0));
         assert_eq!(&entry, expected);
     }
+    let text = fs::read_to_string(&lab.log_path).unwrap();
+    assert!(!text.contains(PLANTED_TOKEN), "{text}");
+}
+
+// --- how a URL is logged ---
+
+#[test]
+fn a_logged_url_keeps_the_endpoint_and_the_query_s_keys_never_a_credential() {
+    let t = PLANTED_TOKEN;
+    let cases = [
+        // a call follow-up as the calling services hand it out after a meeting join
+        (
+            format!(
+                "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv.skype.com/conv/c1/leave?i=1&e=2&skypeToken={t}"
+            ),
+            "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv.skype.com/conv/c1/leave?i&e&skypeToken"
+                .to_owned(),
+        ),
+        // query credentials, listed or not, and a fragment's
+        (
+            format!(
+                "https://host/a?access_token={t}&sig=s1g&token=t0k&key=k3y&sv=2020&unlisted=s3cret#access_token={t}"
+            ),
+            "https://host/a?access_token&sig&token&key&sv&unlisted".to_owned(),
+        ),
+        // user info and a non-default port
+        (
+            format!("wss://user:{t}@host:8443/v4/c"),
+            "wss://host:8443/v4/c".to_owned(),
+        ),
+        // a token in the path: JWT-shaped, after a credential's name, a matrix parameter, a long opaque run
+        (
+            format!("https://host/v1/{t}/x"),
+            "https://host/v1/[redacted]/x".to_owned(),
+        ),
+        (
+            "https://host/v1/skypetoken/s3cr3t/x".to_owned(),
+            "https://host/v1/skypetoken/[redacted]/x".to_owned(),
+        ),
+        (
+            "https://host/v1/obj;sig=s3cr3t/x".to_owned(),
+            "https://host/v1/obj;sig=[redacted]/x".to_owned(),
+        ),
+        (
+            format!("https://host/v1/{}", "a".repeat(120)),
+            "https://host/v1/[redacted]".to_owned(),
+        ),
+        // a token as a query key without a value
+        (format!("https://host/a?{t}"), "https://host/a?[redacted]".to_owned()),
+        // ids and words of the API stay
+        (
+            "https://host/v1/users/ME/conversations/19:a_b@unq.gbl.spaces/messages".to_owned(),
+            "https://host/v1/users/ME/conversations/19:a_b@unq.gbl.spaces/messages".to_owned(),
+        ),
+        (
+            "https://us-api.asm.skype.com/v1/skypetokenauth".to_owned(),
+            "https://us-api.asm.skype.com/v1/skypetokenauth".to_owned(),
+        ),
+        // what has no path to keep, or can't be read
+        (format!("data:text/plain,{t}"), "[unreadable url]".to_owned()),
+        (format!("not a url {t}"), "[unreadable url]".to_owned()),
+        (String::new(), String::new()),
+        (format!("?tc={t}"), String::new()),
+    ];
+    for (url, expected) in &cases {
+        let logged = log_url(url);
+        assert_eq!(&logged, expected);
+        assert!(!logged.contains("eyJ") && !logged.contains("s3cr"), "{logged}");
+    }
+}
+
+#[test]
+fn a_request_entry_logs_the_query_s_keys_but_no_token() {
+    let lab = try_lab().unwrap();
+    let log = lab.fence.log();
+    let url = format!("https://host/conv/c1/leave?i=1&skypeToken={PLANTED_TOKEN}#access_token={PLANTED_TOKEN}");
+    let record = RequestRecord {
+        channel: Channel::Http,
+        method: "POST",
+        url: &url,
+        outcome: RequestOutcome::Unclassified,
+    };
+    assert!(!format!("{record:?}").contains(PLANTED_TOKEN));
+    log.record_request(&record).unwrap();
+    let allowed = AllowedRecord {
+        method: "POST",
+        url: &url,
+    };
+    assert!(!format!("{allowed:?}").contains(PLANTED_TOKEN));
+    log.record_allowed(&allowed).unwrap();
+    let frame = FrameRecord {
+        url: &url,
+        kind: "trouter_ping",
+    };
+    assert!(!format!("{frame:?}").contains(PLANTED_TOKEN));
+    let entries = log_entries(&lab.log_path).unwrap();
+    assert_eq!(entries[0]["url"], "https://host/conv/c1/leave?i&skypeToken");
     let text = fs::read_to_string(&lab.log_path).unwrap();
     assert!(!text.contains(PLANTED_TOKEN), "{text}");
 }

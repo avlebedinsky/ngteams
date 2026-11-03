@@ -209,6 +209,33 @@ fn a_signed_link_s_sig_is_redacted_in_a_query_a_header_and_json() {
 }
 
 #[test]
+fn a_call_follow_up_s_skypetoken_and_a_signed_link_s_key_are_redacted() {
+    let token = skypetoken("f");
+    let follow_up = format!(
+        "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv.skype.com/conv/c1/leave?i=1&e=2&skypeToken={token}"
+    );
+    for shown in [
+        redact::url(&follow_up),
+        redact::line(&format!("POST {follow_up} failed")),
+    ] {
+        assert!(!shown.contains(&token), "{shown}");
+        assert!(
+            shown.contains(&format!("/leave?i=1&e=2&skypeToken={REDACTED}")),
+            "{shown}"
+        );
+    }
+    let jwt = jwt("p");
+    let in_path = redact::line(&format!("GET https://host/v1/skypetoken/{jwt}/x"));
+    assert!(!in_path.contains(&jwt), "{in_path}");
+    let key = signature("k");
+    for name in ["key", "apikey", "api_key", "access_token", "token", "sig"] {
+        let shown = redact::url(&format!("https://host/a?{name}={key}&v=1"));
+        assert_eq!(shown, format!("https://host/a?{name}={REDACTED}&v=1"));
+        assert!(!redact::line(&format!("see https://host/a?{name}={key}")).contains(&key));
+    }
+}
+
+#[test]
 fn a_file_thumbnail_s_pre_authenticated_link_keeps_no_credential() {
     // SharePoint's own pre-authenticated form: a short `tempauth` only its name catches
     let tempauth = format!("v1.{}", signature("t"));

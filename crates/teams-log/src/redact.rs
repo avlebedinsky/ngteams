@@ -3,7 +3,7 @@
 //! - **By name**: a header whose name is a credential's ([`secret_field`]: `Authorization`, `Cookie`, `Set-Cookie`,
 //!   `X-Skypetoken`, `Authentication`, any name holding `token`, `secret`, `password`, `signature` or `credential`);
 //!   a JSON, form or query field of those names (`access_token`, `refresh_token`, `id_token`, `skypeToken`, `token`,
-//!   Trouter's `connectparams` `sig`, the registrar's `aesKey`, …) and of sign-in's (`code`, `code_verifier`,
+//!   Trouter's `connectparams` `sig`, the registrar's `aesKey`, a signed link's `key`, …) and of sign-in's (`code`, `code_verifier`,
 //!   `client_secret`, …: [`secret_param`]), JSON's at any depth (a string that is itself JSON, a Trouter delivery's
 //!   `body`, read as JSON too); the arguments of Trouter's `user.authenticate`; a URL's query and fragment wherever
 //!   one is written (a request's, a header's value, a string in JSON).
@@ -37,8 +37,9 @@ pub const OPAQUE_RUN: usize = 100;
 /// Header, JSON and form field names that always hold a credential, besides any name holding one of
 /// [`SECRET_WORDS`]: the bearer and cookie headers, Trouter's `connectparams` signature (`sig`, valid for days: a
 /// reconnect's credential), the registrar's push encryption key (`aesKey`), a SAS link's `sig`, a meeting's
-/// `passcode`, a SharePoint pre-authenticated link's `tempauth` (a file thumbnail's link Graph hands out).
-const SECRET_NAMES: [&str; 9] = [
+/// `passcode`, a SharePoint pre-authenticated link's `tempauth` (a file thumbnail's link Graph hands out), and a
+/// signed or keyed link's `key`, `apikey` or `api_key`.
+const SECRET_NAMES: [&str; 12] = [
     "authorization",
     "proxy-authorization",
     "cookie",
@@ -48,6 +49,9 @@ const SECRET_NAMES: [&str; 9] = [
     "aeskey",
     "passcode",
     "tempauth",
+    "key",
+    "apikey",
+    "api_key",
 ];
 
 /// Words a credential's name holds, wherever in the name (`X-Skypetoken`, `skypeToken`, `refresh_token`,

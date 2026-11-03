@@ -448,7 +448,7 @@ async fn an_unknown_frame_is_denied_kept_and_logged_without_its_query_or_content
             "verdict": "deny",
             "channel": "web_socket",
             "method": "SEND",
-            "url": "wss://go.trouter.teams.microsoft.com/v4/c",
+            "url": "wss://go.trouter.teams.microsoft.com/v4/c?tc",
             "reason": "unclassified",
             "message": "no rule classifies this request",
         })]
@@ -478,7 +478,7 @@ async fn a_frame_on_another_realms_socket_is_denied_unclassified_whatever_rule_w
             "verdict": "deny",
             "channel": "web_socket",
             "method": "SEND",
-            "url": "ws://127.0.0.1:9/page",
+            "url": "ws://127.0.0.1:9/page?tc",
             "reason": "unclassified",
             "message": "no rule classifies this request",
         })]
@@ -555,7 +555,7 @@ async fn a_forced_frame_deny_comes_before_the_rule_is_kept_with_its_label_and_lo
     assert_eq!(entries.len(), 3);
     assert_eq!(entries[1]["verdict"], "deny");
     assert_eq!(entries[1]["reason"], "forced");
-    assert_eq!(entries[1]["url"], "wss://go.trouter.teams.microsoft.com/v4/c");
+    assert_eq!(entries[1]["url"], "wss://go.trouter.teams.microsoft.com/v4/c?tc");
     let log = std::fs::read_to_string(&lab.log_path).unwrap();
     assert!(
         !log.contains("user.activity") && !log.contains("planted-query"),
@@ -744,7 +744,7 @@ async fn a_frame_sent_without_an_allow_is_a_logged_breach() {
             "verdict": "breach",
             "channel": "web_socket",
             "method": "SEND",
-            "url": "wss://go.trouter.teams.microsoft.com/v4/c",
+            "url": "wss://go.trouter.teams.microsoft.com/v4/c?tc",
             "reason": "sent_without_allow",
             "message": "this left the browser without the fence's allow",
         })

@@ -289,7 +289,11 @@ async fn writes_seen(drive: &mut Driver, report: &mut ScenarioReport, seen: &mut
             continue;
         }
         if request.method == "GET" {
-            lines.push(format!("GET {} -> {:?}", request.url, request.status));
+            lines.push(format!(
+                "GET {} -> {:?}",
+                teams_fence::log_url(&request.url),
+                request.status
+            ));
             continue;
         }
         let read = drive.read_body("a body", &request).await.unwrap_or(request);
@@ -299,8 +303,9 @@ async fn writes_seen(drive: &mut Driver, report: &mut ScenarioReport, seen: &mut
         } else {
             body
         };
-        report.notes.push(format!("seen: {} {}", read.method, read.url));
-        lines.push(format!("{} {} -> {:?} {body}", read.method, read.url, read.status));
+        let url = teams_fence::log_url(&read.url);
+        report.notes.push(format!("seen: {} {url}", read.method));
+        lines.push(format!("{} {url} -> {:?} {body}", read.method, read.status));
     }
     lines.join("\n")
 }

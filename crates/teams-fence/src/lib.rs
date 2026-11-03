@@ -66,7 +66,7 @@ pub use decision::{
 pub use floor::CallFloor;
 pub use log::{
     AllowedRecord, ArmingCause, ArmingRecord, Channel, CloseOutcome, Containment, FenceLog, FrameRecord,
-    RequestOutcome, RequestRecord, path_shape,
+    RequestOutcome, RequestRecord, log_url, path_shape,
 };
 pub use membership::{
     AFD_HOSTS, ChatCredential, CredentialFuture, CredentialSource, FETCH_TIMEOUT, LiveMembershipSource,

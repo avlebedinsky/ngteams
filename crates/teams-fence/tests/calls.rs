@@ -1466,6 +1466,56 @@ async fn the_follow_ups_are_logged_by_kind_scope_and_operation_never_the_sender(
     Ok(())
 }
 
+/// A synthetic skypetoken, JWT-shaped as the calling services' links carry one.
+const SYNTHETIC_SKYPETOKEN: &str = "eyJhbGciOiJSUzI1NiJ9.eyJza3lwZWlkIjoic3ludGhldGljIn0.c3ludGhldGljLXNpZw";
+
+/// A leave link the way the calling services hand it out after a meeting join: the account's skypetoken in its query.
+fn leave_with_token(id: &str) -> String {
+    format!("{}/leave?{ROUTE}&skypeToken={SYNTHETIC_SKYPETOKEN}", conversation(id))
+}
+
+#[tokio::test]
+async fn a_follow_up_link_s_skypetoken_never_reaches_the_log() -> TestResult {
+    let dir = tempfile::tempdir()?;
+    let log = dir.path().join("fence.log");
+    let roster = Roster::new([Mri::new(LAB_A), Mri::new(LAB_B)], [Mri::new(ECHO)]);
+    // the lab's call rule lets a leave through without a registered call, and logs it
+    let fence = Fence::new(roster, FenceLog::open(&log)?);
+    let leave = leave_with_token("conv-1");
+    verdict(&fence, write(CallOperation::Leave, &leave, &[])?)
+        .await
+        .map_err(|reason| format!("{reason}"))?;
+    let text = fs::read_to_string(&log)?;
+    assert!(!text.contains(SYNTHETIC_SKYPETOKEN), "the token reached fence.log");
+    assert!(!text.contains("eyJ"), "a JWT reached fence.log");
+    let last: Value = serde_json::from_str(text.lines().last().ok_or("an entry")?)?;
+    assert_eq!(last["kind"], "call_follow_up");
+    assert_eq!(last["scope"]["call_operation"]["operation"], "leave");
+    assert_eq!(
+        last["scope"]["call_operation"]["url"],
+        format!("{}/leave?i&e&skypeToken", conversation("conv-1"))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_denied_follow_up_shows_and_logs_its_link_without_the_skypetoken() -> TestResult {
+    let lab = new_lab()?;
+    // the call registry knows no call holding this link
+    let target = write(CallOperation::Leave, &leave_with_token("conv-9"), &[])?;
+    assert!(!format!("{target}").contains(SYNTHETIC_SKYPETOKEN));
+    assert!(!format!("{target:?}").contains(SYNTHETIC_SKYPETOKEN));
+    let Err(denied) = lab.fence.check(target, &FailClosed).await else {
+        return Err("a leave on no registered call was permitted".into());
+    };
+    assert!(!denied.to_string().contains(SYNTHETIC_SKYPETOKEN), "{denied}");
+    assert!(!format!("{denied:?}").contains(SYNTHETIC_SKYPETOKEN), "{denied:?}");
+    let text = fs::read_to_string(&lab.log)?;
+    assert!(!text.contains(SYNTHETIC_SKYPETOKEN), "the token reached fence.log");
+    assert!(text.contains("\"verdict\":\"deny\""), "{text}");
+    Ok(())
+}
+
 // --- the caller's media negotiation (`ab-call --call video`, `abc-call --call video`) ---
 
 #[tokio::test]
