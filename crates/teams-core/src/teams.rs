@@ -152,9 +152,8 @@ impl<C: Credentials + 'static> Teams<C> {
             self.read_now();
             return Ok(false);
         };
-        self.changes.push((change, Instant::now() + CREATED_KEPT));
         let mut teams = store.teams()?;
-        keep_changes(&mut self.changes, &mut teams);
+        note_into(&mut self.changes, &mut teams, change);
         let read_at = store.teams_read_at()?.unwrap_or_else(now_ms);
         let applied = store.replace_teams(&teams, read_at)?;
         self.read_now();
@@ -164,9 +163,8 @@ impl<C: Credentials + 'static> Teams<C> {
     /// Stores a channel just made in its team's list, and reads the list again: the service's own list may not name it
     /// yet, so it is kept against reads that don't ([`CREATED_KEPT`]). Whether the stored list changed.
     pub(crate) fn note_created(&mut self, store: &mut Store, created: Created) -> Result<bool, StoreError> {
-        self.created.push((created, Instant::now() + CREATED_KEPT));
         let mut teams = store.teams()?;
-        keep_created(&mut self.created, &mut teams);
+        created_into(&mut self.created, &mut teams, created);
         let read_at = store.teams_read_at()?.unwrap_or_else(now_ms);
         let applied = store.replace_teams(&teams, read_at)?;
         self.read_now();
@@ -269,15 +267,44 @@ fn keep_created(created: &mut Vec<(Created, Instant)>, teams: &mut [Team]) {
         if *until <= now {
             return false;
         }
-        let name = made.channel.name.to_lowercase();
-        let at = team
-            .channels
-            .iter()
-            .position(|channel| !channel.general && channel.name.to_lowercase() > name)
-            .unwrap_or(team.channels.len());
-        team.channels.insert(at, made.channel.clone());
+        insert_channel(made, team);
         true
     });
+}
+
+/// Puts `change` into the stored list `teams` and keeps it against reads that don't show it yet. Only this change goes
+/// in: the stored list holds the earlier ones already, so it would show them and retire their guards before any read
+/// did (only a read's list retires a change, [`keep_changes`]).
+fn note_into(changes: &mut Vec<(TeamChange, Instant)>, teams: &mut Vec<Team>, change: TeamChange) {
+    change.apply(teams);
+    changes.push((change, Instant::now() + CREATED_KEPT));
+}
+
+/// Puts a channel just made into the stored list `teams` and keeps it against reads that don't name it yet; only this
+/// one goes in, as in [`note_into`].
+fn created_into(created: &mut Vec<(Created, Instant)>, teams: &mut [Team], made: Created) {
+    insert_created(&made, teams);
+    created.push((made, Instant::now() + CREATED_KEPT));
+}
+
+/// Puts a channel just made into its team's list in `teams`, unless the list names it already.
+fn insert_created(made: &Created, teams: &mut [Team]) {
+    if let Some(team) = teams.iter_mut().find(|team| team.id == made.team)
+        && !team.channels.iter().any(|channel| channel.id == made.channel.id)
+    {
+        insert_channel(made, team);
+    }
+}
+
+/// Puts a channel just made into `team`'s list by name, after the general one.
+fn insert_channel(made: &Created, team: &mut Team) {
+    let name = made.channel.name.to_lowercase();
+    let at = team
+        .channels
+        .iter()
+        .position(|channel| !channel.general && channel.name.to_lowercase() > name)
+        .unwrap_or(team.channels.len());
+    team.channels.insert(at, made.channel.clone());
 }
 
 /// The stored teams (`None` before the first read settled them); nothing is read.
@@ -351,4 +378,74 @@ fn now_ms() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| i64::try_from(since.as_millis()).unwrap_or(i64::MAX))
+}
+
+#[cfg(test)]
+mod tests {
+    use teams_store::{ChannelKind, Team, TeamChannel};
+
+    use super::{created_into, keep_created, note_into};
+    use crate::channels::Created;
+    use crate::team_admin::{TeamChange, keep_changes};
+
+    fn team(id: &str) -> Team {
+        Team {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            channels: vec![channel(id, "General", true)],
+            ..Team::default()
+        }
+    }
+
+    fn channel(id: &str, name: &str, general: bool) -> TeamChannel {
+        TeamChannel {
+            id: id.to_owned(),
+            name: name.to_owned(),
+            general,
+            kind: ChannelKind::Standard,
+            shown: true,
+        }
+    }
+
+    #[test]
+    fn a_second_change_noted_before_a_read_shows_the_first_keeps_both() {
+        let stale = vec![team("19:a@thread.tacv2"), team("19:b@thread.tacv2")];
+        let mut stored = stale.clone();
+        let mut changes = Vec::new();
+        let hidden = TeamChange::Hidden {
+            team: "19:a@thread.tacv2".to_owned(),
+            hidden: true,
+        };
+        let archived = TeamChange::Archived {
+            team: "19:b@thread.tacv2".to_owned(),
+            archived: true,
+        };
+        note_into(&mut changes, &mut stored, hidden);
+        note_into(&mut changes, &mut stored, archived);
+        assert_eq!(changes.len(), 2, "the stored list retires nothing");
+        // the read that ran meanwhile answers with the list from before both
+        let mut listed = stale;
+        keep_changes(&mut changes, &mut listed);
+        assert!(listed[0].about.hidden && listed[1].archived);
+        assert!(listed == stored);
+    }
+
+    #[test]
+    fn a_second_channel_made_before_a_read_names_the_first_keeps_both() {
+        let stale = vec![team("19:a@thread.tacv2")];
+        let mut stored = stale.clone();
+        let mut created = Vec::new();
+        for (id, name) in [("19:one@thread.tacv2", "One"), ("19:two@thread.tacv2", "Two")] {
+            let made = Created {
+                team: "19:a@thread.tacv2".to_owned(),
+                channel: channel(id, name, false),
+            };
+            created_into(&mut created, &mut stored, made);
+        }
+        assert_eq!(created.len(), 2, "the stored list retires nothing");
+        let mut listed = stale;
+        keep_created(&mut created, &mut listed);
+        assert_eq!(listed[0].channels.len(), 3);
+        assert!(listed == stored);
+    }
 }

@@ -76,7 +76,7 @@ impl TeamChange {
     }
 
     /// Puts it into `teams`.
-    fn apply(&self, teams: &mut Vec<Team>) {
+    pub(crate) fn apply(&self, teams: &mut Vec<Team>) {
         match self {
             Self::Created(team) => {
                 if !teams.iter().any(|listed| listed.id == team.id) {
