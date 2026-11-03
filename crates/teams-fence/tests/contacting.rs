@@ -1918,6 +1918,11 @@ fn a_team_from_a_template_or_another_team_is_judged_by_whom_it_brings() {
         verdict("POST", &clone, Some(clone_body(GROUP_ID, false, "Public").as_bytes())),
         Contact::Write(Target::new(WriteKind::OpenTeamCreate, Scope::New))
     );
+    // a copy open to the organization is one whoever it brings
+    assert_eq!(
+        verdict("POST", &clone, Some(clone_body(GROUP_ID, true, "Public").as_bytes())),
+        Contact::Write(Target::new(WriteKind::OpenTeamCreate, Scope::New))
+    );
     // a body naming another team than its path is unreadable
     assert_eq!(
         verdict("POST", &clone, Some(clone_body("another", true, "Private").as_bytes())),

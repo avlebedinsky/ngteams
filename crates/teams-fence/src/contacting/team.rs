@@ -294,15 +294,21 @@ fn from_template(request: &Parsed<'_>) -> Option<Contact> {
 }
 
 /// A new team from the team of `group`: with its roster (`includeRoster`) it reaches everyone on that team, a write on
-/// it; without, it names nobody, as a new team does. The body's `teamGroupId` must be the path's group.
+/// it; without, it names nobody, as a new team does. Either way a copy open to the organization is
+/// [`WriteKind::OpenTeamCreate`], whoever it brings. The body's `teamGroupId` must be the path's group.
 fn cloned(request: &Parsed<'_>, group: &str) -> Option<Contact> {
     let object = object_of(request, &CLONE_KEYS)?;
     (object.get("teamGroupId").and_then(Value::as_str) == Some(group)).then_some(())?;
-    match object.get("includeRoster")? {
-        Value::Bool(true) => Some(on_team(WriteKind::MemberChange, group)),
-        Value::Bool(false) => Some(new_team(&object)),
-        _ => None,
-    }
+    let Value::Bool(roster) = object.get("includeRoster")? else {
+        return None;
+    };
+    let created = new_team(&object);
+    let open = matches!(&created, Contact::Write(target) if target.kind() == WriteKind::OpenTeamCreate);
+    Some(if *roster && !open {
+        on_team(WriteKind::MemberChange, group)
+    } else {
+        created
+    })
 }
 
 /// A write on the team `team`.

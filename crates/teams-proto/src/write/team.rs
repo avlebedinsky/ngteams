@@ -298,8 +298,11 @@ impl Mutating for TeamWrite {
             }
             Self::AddApp { team, app } => Target::new(WriteKind::TeamChange, Self::thread(team)).with_added(app.bots()),
             Self::FromTemplate(team) => new_team_target(team.public),
-            // with its people, a copy reaches everyone on the team it copies
-            Self::Copy(copy) if copy.roster => Target::new(WriteKind::MemberChange, Self::thread(&copy.group)),
+            // with its people, a private copy reaches everyone on the team it copies; an open one is open whoever it
+            // brings
+            Self::Copy(copy) if copy.roster && !copy.public => {
+                Target::new(WriteKind::MemberChange, Self::thread(&copy.group))
+            }
             Self::Copy(copy) => new_team_target(copy.public),
         }
     }

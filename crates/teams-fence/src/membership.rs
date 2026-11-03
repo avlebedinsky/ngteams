@@ -561,7 +561,16 @@ impl LiveMembershipSource {
         let answer = self.thread_answer(thread).await?;
         let channel = match parse_team_thread(thread, &answer) {
             Ok(named) if group.as_ref().is_none_or(|group| *group == named) => {
-                self.learn(named, thread);
+                // a private channel's thread is a `space` naming the team's group too, but holds only some of the
+                // team's people: never learned as the team's root, so a write naming the team by group isn't judged
+                // by it
+                if !answer
+                    .get("properties")
+                    .and_then(Value::as_object)
+                    .is_some_and(|properties| properties.contains_key("productThreadType"))
+                {
+                    self.learn(named, thread);
+                }
                 return Ok((thread.to_owned(), answer));
             }
             Ok(_) => return Err(MALFORMED),
