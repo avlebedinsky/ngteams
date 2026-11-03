@@ -22,7 +22,7 @@ use teams_core::{
     CHECK_RETRY_WAIT, Clock, Command, ConversationSync, MAX_ATTEMPTS, MAX_FAILED_CHECKS, MAX_TRANSIENT_WAIT, Outbox,
     OutboxError, Sent, SyncError, Transient, TransientSent, create_chat, enqueue, new_client_message_id,
 };
-use teams_fence::Mri;
+use teams_proto::Mri;
 use teams_proto::chat::MessageText;
 use teams_proto::{
     Author, Credentials, DEFAULT_RETRY_WAIT, Failure, HttpError, HttpTransport, Read, Request as ProtoRequest,

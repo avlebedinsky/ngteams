@@ -1,7 +1,0 @@
-error: cannot construct `WritePermit` with struct literal syntax due to private fields
- --> tests/ui/permit_literal.rs:6:13
-  |
-6 |     let _ = WritePermit { target };
-  |             ^^^^^^^^^^^   ------ private field
-  |
-  = note: ...and other private fields `issuer` and `serial` that were not provided

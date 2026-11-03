@@ -27,7 +27,6 @@ serde_json.workspace = true
 teams-auth.workspace = true
 # a call's signaling machine (M3 Task 14): it builds the call writes, the engine sends them through the outbox
 teams-call.workspace = true
-teams-fence.workspace = true
 # a call's media: the relay, the session on the devices, Teams' SDP dialect
 teams-media.workspace = true
 teams-proto.workspace = true
@@ -45,8 +44,6 @@ teams-core = { path = ".", features = ["test-support"] }
 teams-media = { workspace = true, features = ["test-support"] }
 # the sync tests write as the other lab accounts straight to the mock chat service
 reqwest.workspace = true
-# synthetic identities and service URLs used by the test fixtures
-teams-fence = { workspace = true, features = ["test-support"] }
 # the sync tests' chat service, from the synthetic fixtures; with its calling service's media (a loopback peer behind
 # the parties it plays) for the call session's tests
 teams-mock = { workspace = true, features = ["media"] }

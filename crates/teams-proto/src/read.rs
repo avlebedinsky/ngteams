@@ -10,7 +10,7 @@
 //! channel's posts are read from the chat service like a chat's messages.
 //!
 //! Any other read on Graph ([`Service::Graph`]) or CSA ([`Service::Csa`]) goes to that service's base too; a mutating
-//! request to either is a plain [`Request`](crate::Request), judged by [`teams_fence::contacting`].
+//! request to either is a plain [`Request`](crate::Request).
 
 use std::fmt;
 

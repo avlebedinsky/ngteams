@@ -1,5 +1,0 @@
-error[E0599]: no method named `with_deadline` found for struct `LiveMembershipSource` in the current scope
- --> tests/ui/live_with_deadline.rs:8:50
-  |
-8 |     let _ = LiveMembershipSource::new().unwrap().with_deadline(Duration::from_secs(1));
-  |                                                  ^^^^^^^^^^^^^ method not found in `LiveMembershipSource`

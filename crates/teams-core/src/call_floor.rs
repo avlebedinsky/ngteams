@@ -55,8 +55,8 @@ mod tests {
     use super::CallFloor;
     use std::sync::{Arc, Barrier};
     use teams_call::{Delivery, Observed, Tracker};
-    use teams_fence::Mri;
     use teams_mock::{LAB_A, LAB_B, TrouterMock};
+    use teams_proto::Mri;
 
     fn invitation(from: &str, to: &str) -> Delivery {
         Delivery {
@@ -125,8 +125,8 @@ mod entry_tests {
     use serde_json::{Value, json};
     use std::sync::Arc;
     use teams_call::{Delivery, Observed, Tracker};
-    use teams_fence::Mri;
     use teams_mock::{LAB_A, LAB_B, TrouterMock};
+    use teams_proto::Mri;
     use teams_proto::{Endpoint, Method, Request, Service};
 
     struct Entry {

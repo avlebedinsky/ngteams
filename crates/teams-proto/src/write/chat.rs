@@ -2,8 +2,8 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::Mri;
 use serde_json::{Map, Value, json};
-use teams_fence::Mri;
 use time::OffsetDateTime;
 
 use super::Prepared;
@@ -373,7 +373,7 @@ impl SetMeetingTitle {
     pub fn new(channel: &str, post: &str, title: &str) -> Option<Self> {
         let post_reads = !post.is_empty() && post.bytes().all(|b| b.is_ascii_digit());
         let title = title.trim();
-        (teams_fence::is_team_thread_id(channel) && post_reads && !title.is_empty()).then(|| Self {
+        (crate::is_team_thread_id(channel) && post_reads && !title.is_empty()).then(|| Self {
             channel: channel.to_owned(),
             post: post.to_owned(),
             title: title.to_owned(),

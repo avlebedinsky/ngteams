@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 use std::hash::BuildHasher;
 
-use teams_fence::Mri;
+use teams_proto::Mri;
 use teams_proto::chat::{Code, CodeRun, List, Marks, Node, Quote, Token};
 
 use super::doc::{Attrs, Block, Doc, Kind, MAX_INDENT, Run};

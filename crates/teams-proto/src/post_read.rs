@@ -2,9 +2,9 @@
 
 use std::fmt;
 
+use crate::Mri;
 use serde::Deserialize;
 use serde_json::Value;
-use teams_fence::Mri;
 
 use crate::endpoint::{Endpoint, Method, Service};
 use crate::own::{RegisteredEndpoint, is_guid, is_push_url};

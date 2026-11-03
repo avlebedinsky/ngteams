@@ -5,7 +5,7 @@ use std::fmt;
 use std::future::Future;
 use std::time::Duration;
 
-use teams_fence::Mri;
+use crate::Mri;
 
 use crate::http::{Credentials, HttpError, HttpTransport};
 use crate::own::OwnState;

@@ -3,10 +3,10 @@
 use std::sync::{Arc, Mutex, Once};
 
 use teams_core::{CallAction, CallStatus, End};
-use teams_fence::Mri;
 use teams_media::devices::file::{AudioInput, FileDevices, Pacing, PatternCamera};
 use teams_media::devices::{AudioSink, AudioSource, DeviceError, Devices, VideoSource};
 use teams_mock::{AB_CHAT, ECHO, LAB_A};
+use teams_proto::Mri;
 
 use super::support::{A_TONE, Lab};
 

@@ -1,6 +1,6 @@
 [package]
 name = "ngteams"
-description = "The personal build: the user's own Teams account on the user's desktop, under the personal fence (docs/personal-build.md). Agents compile and mock-test it only; it runs only when scripts/install-personal.sh built it"
+description = "The native Teams client for Linux"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -27,8 +27,6 @@ libc.workspace = true
 rustix = { workspace = true, features = ["fs", "net"] }
 # the account's engine, assembled as every binary builds one (`teams_core::account`)
 teams-core.workspace = true
-# the personal fence: only this crate enables `personal` (docs/personal-build.md; tests/apart.rs checks every manifest)
-teams-fence = { workspace = true, features = ["personal"] }
 # the diagnostic log, installed once before the engine starts
 teams-log.workspace = true
 # the calls' devices: the caller selects desktop or sandbox PipeWire at run time
@@ -43,6 +41,8 @@ teams-wpe.workspace = true
 teams-store.workspace = true
 # the views and the bridge over the engine
 teams-ui.workspace = true
+serde = { workspace = true, features = ["derive"] }
+toml.workspace = true
 thiserror.workspace = true
 # the sign-in's and the engine's runtimes; the session's sign-out watch; the read-only mode's broker socket (`net`)
 tokio = { workspace = true, features = ["net", "rt", "sync"] }
@@ -61,9 +61,6 @@ base64.workspace = true
 gpui-pre = { workspace = true, features = ["test-support"] }
 serde_json.workspace = true
 tempfile.workspace = true
-# a personal fence over a test log and given lab locations, its source and the transports reaching the mock; the two
-# binaries refuse to run when a test build unified it in
-teams-fence = { workspace = true, features = ["test-support", "personal"] }
 # the calls' media in the tests: file devices and the loopback relay; PipeWire tests select sandbox reach
 teams-media = { workspace = true, features = ["test-support"] }
 # the mock's calling service with its media: a loopback TURN server and a peer behind each party it plays
@@ -71,8 +68,6 @@ teams-mock = { workspace = true, features = ["media"] }
 teams-proto = { workspace = true, features = ["test-support"] }
 teams-trouter = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "time"] }
-# the manifest tests read every workspace manifest
-toml.workspace = true
 wiremock.workspace = true
 
 [[test]]

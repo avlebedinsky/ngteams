@@ -39,8 +39,6 @@ tempfile.workspace = true
 # the mock's own tests send raw requests too: a missing header, a malformed body
 reqwest.workspace = true
 teams-auth.workspace = true
-# the end-to-end test: a fence over a test roster whose live membership read goes to the mock
-teams-fence = { workspace = true, features = ["test-support"] }
 # and the native transport reaching the mock through its mock origin
 teams-proto = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt"] }

@@ -35,7 +35,7 @@ use gpui_component::Sizable as _;
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::tooltip::Tooltip;
 use teams_core::{CallId, CallStatus, IncomingCall};
-use teams_fence::Mri;
+use teams_proto::Mri;
 
 use crate::bridge::Core;
 use crate::calls::{self, ActiveCall, Ask, CallKind, Calls, Ended, Refused, Verdict};

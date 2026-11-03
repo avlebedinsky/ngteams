@@ -8,8 +8,8 @@ use crate::support::{A_TONE, B_TONE, Lab, TALK, tokens, wait_until};
 use serde_json::json;
 use teams_core::engine::EngineError;
 use teams_core::{CallAction, CallActionError, CallStatus, CallTried, End, Outbox};
-use teams_fence::Mri;
 use teams_mock::{CHAT_BASE, ECHO, LAB_A, LAB_B, LAB_C, TENANT};
+use teams_proto::Mri;
 use teams_proto::{AcknowledgeMediaAnswer, Author, CallContext, CallLink, HttpTransport};
 
 /// A media answer's acknowledgement on a call no start of this run registered.

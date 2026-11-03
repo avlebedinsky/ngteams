@@ -10,8 +10,8 @@ use percent_encoding::percent_decode_str;
 use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
-use teams_fence::Mri;
 use teams_mock::{AB_CHAT, ABC_CHAT, AC_CHAT, CHAT_BASE, ChatServiceMock, EventKind, LAB_A, LAB_B, LAB_C, OUTSIDER};
+use teams_proto::Mri;
 use teams_proto::chat::{
     Code, CodeRun, ComposeError, Image, List, MAX_CONTENT, MAX_DEPTH, Marks, MessageText, Node, Quote, RichText,
     parse_html,

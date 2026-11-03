@@ -13,7 +13,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
-use teams_fence::Mri;
+use teams_proto::Mri;
 use teams_proto::chat::MessageText;
 use teams_proto::{
     Author, Credentials, Endpoint, EndpointRegistration, FileContentLink, FileDownload, HttpError, HttpTransport,

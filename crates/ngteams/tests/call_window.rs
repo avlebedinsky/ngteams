@@ -6,9 +6,9 @@
 //! microphone (a's 440 Hz, b's 660 Hz) and recording its speaker. In each it runs this test again as lab account a's
 //! or b's app (`ngteams::app::launch` over an engine on the mock with its calling: its calling socket on the mock's
 //! Trouter, its calls' media on the sandbox's PipeWire relayed through the mock's TURN server, unprocessed so a steady
-//! tone crosses as it is; its fence on a test roster writing a `fence.log` of its own), with only the view trace's pipe
+//! tone crosses as it is), with only the view trace's pipe
 //! passed through. Then, driven by each sandbox's keyboard and b's notification's actions and read by the traces, the
-//! recordings and the fence logs:
+//! recordings:
 //!
 //! - a calls b (Ctrl+Shift+C in the a–b chat a's settings open); b's banner, ringtone and notification come, and
 //!   the ringtone is in b's recording; b answers from the notification's Answer; both connect, and each one's tone is
@@ -27,7 +27,7 @@
 //!   show every check passed, in its window;
 //! - each call has its own window (the call keys pressed in it), a's beside its main window (a's screen holds two
 //!   windows side by side), each screenshotted under `target/ui-shots/ngteams-call-*.png`;
-//! - both quit; every write in either `fence.log` was permitted.
+//! - both quit cleanly.
 //!
 //! Without weston 15, niri, `dbus-daemon`, PipeWire or WirePlumber it says so and passes, unless `GPUI_SMOKE_REQUIRE=1`.
 
@@ -46,6 +46,7 @@ use ngteams::app::{self, Launch};
 mod support;
 use ngteams::calling::PersonalCalls;
 use ngteams::descriptors::adopt_trace;
+use support::Alias;
 use support::display_name;
 use teams_auth::secrets::Secret;
 use teams_auth::session::{AccessToken, Renewal};
@@ -53,8 +54,6 @@ use teams_auth::token::TokenError;
 use teams_core::account::web_client_info;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Parts, Push};
 use teams_core::{CallMedia, CallParts, Identity, Outbox, Relay};
-use teams_fence::lab::Alias;
-use teams_fence::{LiveMembershipSource, MembershipSource, Mri};
 use teams_media::devices::pipewire::{PipeWireDevices, Reach};
 use teams_media::devices::{Devices, SAMPLE_RATE, wav};
 use teams_media::processing::ProcessingConfig;
@@ -62,6 +61,7 @@ use teams_media::relay::RelayServer;
 use teams_media::session::SessionConfig;
 use teams_media::tone::{Tone, amplitude_at};
 use teams_mock::{AB_CHAT, CHAT_BASE, ChatServiceMock, ECHO, LAB_A, LAB_B, LAB_C, TENANT};
+use teams_proto::Mri;
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::Store;
 use teams_trouter::{CallStack, Options, Trouter, TrouterCredentials};
@@ -87,7 +87,7 @@ const RELAY_ENV: &str = "NGTEAMS_CALL_RELAY";
 /// The account's mock tokens (the mock's made-up ones).
 const IC3_ENV: &str = "NGTEAMS_CALL_IC3";
 const SKYPE_ENV: &str = "NGTEAMS_CALL_SKYPE";
-/// The child's own directory: its store, settings and `fence.log`.
+/// The child's own directory: its store and settings.
 const DIR_ENV: &str = "NGTEAMS_CALL_DIR";
 /// The file in the sandbox dir the parent writes to have the child quit.
 const QUIT_TRIGGER: &str = "quit";
@@ -340,8 +340,7 @@ impl AppUnderTest {
         Ok(())
     }
 
-    /// Asks the app to quit and waits for it to exit cleanly; its `fence.log` permitted every write, the write kinds
-    /// `kinds` among them.
+    /// Asks the app to quit and waits for it to exit cleanly.
     fn quit(mut self, sandbox: &Sandbox, _kinds: &[&str]) -> SandboxResult {
         fs::write(sandbox.path(QUIT_TRIGGER), "")?;
         self.running
@@ -807,9 +806,7 @@ fn env(name: &str) -> SandboxResult<String> {
     Ok(std::env::var(name).map_err(|_| format!("{name} isn't set"))?)
 }
 
-/// The account's engine on the mock, as `teams_core::account::start` builds one but for the mock origins, a test roster
-/// and a `fence.log` of its own, with its calling: its calls' media on `devices`, relayed through the mock's TURN
-/// server, unprocessed.
+/// The account's engine on the mock, with its calls' media on `devices`, relayed through the mock TURN server.
 fn engine(
     alias: Alias,
     devices: Arc<dyn Devices + Send + Sync>,
@@ -828,9 +825,6 @@ fn engine(
     let trouter_origin = env(TROUTER_ENV)?;
     let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin);
     let transport = Arc::new(http()?);
-    let live = LiveMembershipSource::with_mock_origin(&origin)?;
-
-    let _members: Arc<dyn MembershipSource + Send> = Arc::new(live);
     let options = Options {
         backoff_base: Duration::from_millis(50),
         backoff_cap: Duration::from_millis(200),
@@ -866,7 +860,7 @@ fn engine(
     let push = Push::new(trouter()?);
     let handle = engine::start(Parts {
         calls: Some(CallParts::new(calling, identity, media)),
-        store: Store::open(&dir.join("store.sqlite"))?,
+        store: Store::open(&support::store_file(dir, Alias::A))?,
         client: Arc::new(Client::new(http()?)),
         outbox: Outbox::new(transport, Author::new(Mri::new(mri), name))
             .with_calls(Arc::clone(&tracker), teams_core::CallFloor::new()),

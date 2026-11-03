@@ -1,0 +1,47 @@
+error[E0308]: mismatched types
+ --> tests/ui/proto_raw_html.rs:8:71
+  |
+8 |     let _ = SendMessage::new("19:lab-chat@thread.v2", author.clone(), "<p>raw</p>");
+  |             ---------------- arguments to this function are incorrect ^^^^^^^^^^^^ expected `MessageText`, found `&str`
+  |
+note: associated function defined here
+ --> src/write/chat.rs
+  |
+  |     pub fn new(conversation: impl Into<String>, author: Author, text: MessageText) -> Self {
+  |            ^^^
+
+error[E0308]: mismatched types
+ --> tests/ui/proto_raw_html.rs:9:68
+  |
+9 |     let _ = EditMessage::new("19:lab-chat@thread.v2", "1", author, "<p>raw</p>".to_owned(), original);
+  |             ----------------                                       ^^^^^^^^^^^^^^^^^^^^^^^ expected `MessageText`, found `String`
+  |             |
+  |             arguments to this function are incorrect
+  |
+note: associated function defined here
+ --> src/write/chat.rs
+  |
+  |     pub fn new(
+  |            ^^^
+
+error[E0308]: mismatched types
+  --> tests/ui/proto_raw_html.rs:10:31
+   |
+10 |     let _ = MessageText::from("<p>raw</p>");
+   |             ----------------- ^^^^^^^^^^^^ expected `MessageText`, found `&str`
+   |             |
+   |             arguments to this function are incorrect
+   |
+note: associated function defined here
+  --> $RUST/core/src/convert/mod.rs
+   |
+   |     fn from(value: T) -> Self;
+   |        ^^^^
+
+error: cannot construct `MessageText` with struct literal syntax due to private fields
+  --> tests/ui/proto_raw_html.rs:11:13
+   |
+11 |     let _ = MessageText { html: "<p>raw</p>".to_owned() };
+   |             ^^^^^^^^^^^   ----------------------------- private field
+   |
+   = note: ...and other private fields `text`, `mentioned`, `mentions`, `quoted`, `participants` and `everyone` that were not provided

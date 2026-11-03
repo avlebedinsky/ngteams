@@ -1,11 +1,11 @@
 //! An account's engine assembled from its store, region, credentials, push channel and optional calling devices.
 //! Accounts share `CallFloor` so only one call or ringing invitation is active across the app.
 
+use crate::accounts_file::{PersonalAccount, PersonalPaths};
 use teams_auth::authz::{Region, RegionFileError};
 use teams_auth::secrets::SecretStore;
 use teams_core::CallFloor;
 use teams_core::account::{self, Account, AccountCalls, AccountEngine, AccountError};
-use teams_fence::personal::{PersonalAccount, PersonalPaths};
 
 /// Why the engine couldn't be built or started.
 #[derive(Debug, thiserror::Error)]

@@ -5,7 +5,7 @@
 //! `lobby` rather than a `call`): told apart, the account's own wait too. Nothing is sent for it: the roster is read only to show who is in the
 //! call, whose video goes where, and who speaks (the fence reads no roster).
 
-use teams_fence::Mri;
+use teams_proto::Mri;
 
 use crate::read::RosterEntry;
 

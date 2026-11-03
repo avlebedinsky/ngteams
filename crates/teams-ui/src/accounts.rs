@@ -12,7 +12,7 @@
 //! ([`AccountsEvent::RemoveAsked`]). The app does what is asked (a sign-in, an engine started or stopped) and tells
 //! the model ([`Accounts::add`], [`Accounts::remove`]).
 //!
-//! Calls are one at a time across the accounts (`teams_fence::CallFloor` decides it for the writes): an account's
+//! Calls are one at a time across the accounts (`teams_core::CallFloor` decides it for the writes): an account's
 //! shell offers no call while another account has one up or ringing ([`Accounts::busy_elsewhere`]).
 //!
 //! Traced: `account added`, `account removed` and `account switched`, each with the account's MRI, and `account

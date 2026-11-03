@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use crate::{Delivery, Observed};
 use base64::Engine as _;
 use serde_json::{Value, json};
-use teams_fence::Mri;
+use teams_proto::Mri;
 use teams_proto::{ClientInfo, MediaContent};
 
 use super::{

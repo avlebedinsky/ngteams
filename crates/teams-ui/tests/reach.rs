@@ -391,7 +391,7 @@ fn runtime_closure<'a>(metadata: &'a Value, name: &str) -> Vec<&'a Value> {
 /// libwebrtc is held to the media bindings' audit with two stated exceptions, both outside what runs:
 /// - **its build downloads**: `webrtc-sys`'s build helper ([`LIBWEBRTC_BUILD_HELPER`]) fetches the prebuilt library
 ///   with `reqwest`; no HTTP client is in what links into a binary, and the media's network is libwebrtc's own sockets
-///   to the call's relay, which the signaling fence permitted (media isn't classified).
+///   to the call's relay selected by its signaling setup.
 /// - **its logger**: the binding forwards libwebrtc's own log lines to `log` at `debug` under the target
 ///   `libwebrtc`; `teams-log` writes only our crates' targets (`teams_…`), so none of them reaches the log file.
 ///
@@ -517,13 +517,12 @@ const LOGGER_SETUP: [&str; 4] = [
 ];
 
 /// The crates the app is built from besides the app crates: none of them sets a logger either.
-const LINKED_CRATES: [&str; 6] = [
+const LINKED_CRATES: [&str; 5] = [
     "teams-proto",
     "teams-core",
     "teams-trouter",
     "teams-store",
     "teams-auth",
-    "teams-fence",
 ];
 
 /// Only this logger (M2 Task 24a): `teams-log` is the one crate of the app that sets a logger, and only with `log`'s

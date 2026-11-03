@@ -28,7 +28,7 @@ use gpui::{
     Entity, Modifiers, ScrollDelta, ScrollWheelEvent, TestAppContext, TouchPhase, VisualTestContext, point, px, size,
 };
 use teams_core::{Action, Command, Event, MessageChange, Source, Transient};
-use teams_fence::Mri;
+use teams_proto::Mri;
 use teams_proto::chat::{ComposeError, MessageText, Node, RichText};
 use teams_store::{Applied, Member, Message, OutboxEntry, OutboxState, Reaction, ReadHorizon};
 use teams_ui::ViewTrace;

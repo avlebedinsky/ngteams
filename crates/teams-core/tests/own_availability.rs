@@ -20,10 +20,10 @@ use teams_auth::session::{AccessToken, Renewal};
 use teams_auth::token::TokenError;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Event, Parts, Push};
 use teams_core::{EngineError, Outbox, OwnStatus, Transient, TransientSent};
-use teams_fence::Mri;
 use teams_mock::{
     AvailabilityChange, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, OwnAvailability, PRESENCE_BASE, TrouterMock,
 };
+use teams_proto::Mri;
 use teams_proto::{
     Author, Client, Credentials, EndpointRegistration, HttpError, HttpTransport, ManualAvailability, Read,
     Request as ProtoRequest, Response, Transport, register,

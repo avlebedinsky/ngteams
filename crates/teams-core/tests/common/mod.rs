@@ -12,8 +12,8 @@ use teams_auth::session::{AccessToken, Renewal};
 use teams_auth::token::TokenError;
 use teams_core::Outbox;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Event, Parts, Push};
-use teams_fence::{Fence, FenceLog, LiveMembershipSource, MembershipSource, Mri, Roster};
-use teams_mock::{AB_CHAT, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, TrouterMock};
+use teams_mock::{AB_CHAT, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, TrouterMock};
+use teams_proto::Mri;
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::Store;
 use teams_trouter::{Options, RegistrationReport, Trouter, TrouterCredentials};
@@ -72,16 +72,9 @@ pub fn native(mock: &ChatServiceMock, trouter: &TrouterMock, me: &str, names: [&
         token: mock.token(me).unwrap(),
         renewals: broadcast::channel(4).0,
     });
-    let _fence = Arc::new(Fence::new(
-        Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), []),
-        FenceLog::from_writer(std::io::sink()),
-    ));
     let origin = mock.origin();
     let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin).unwrap();
     let transport = Arc::new(http());
-    let live = LiveMembershipSource::with_mock_origin(&origin).unwrap();
-
-    let _membership: Arc<dyn MembershipSource + Send> = Arc::new(live);
     let push = Trouter::with_mock_origin(Arc::clone(&transport), Arc::clone(&tokens), trouter.origin())
         .unwrap()
         .with_options(Options {

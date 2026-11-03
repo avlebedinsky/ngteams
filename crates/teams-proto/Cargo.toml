@@ -21,7 +21,6 @@ ego-tree.workspace = true
 getrandom.workspace = true
 # the session's tokens (`Credentials`), `TokenError`, and `Retry-After` read as Entra's and authz's answers are
 teams-auth.workspace = true
-teams-fence.workspace = true
 # at `debug`, each request and its answer in full as the diagnostic log's typed records, which redact the credentials
 teams-log.workspace = true
 # the requests in the app's diagnostic log: by method, host, path, status and latency at `info`; capped at `debug` at
@@ -47,8 +46,6 @@ url.workspace = true
 teams-call.workspace = true
 # a picture's bytes in the Graph fixture
 base64.workspace = true
-# Synthetic account/ID helpers used by the protocol fixtures until their shared-code move.
-teams-fence = { workspace = true, features = ["test-support"] }
 # the transport's tests reach wiremock through the mock origin
 teams-proto = { workspace = true, features = ["test-support"] }
 # the chat reads' tests run against the mock chat service, through the transport's mock origin

@@ -2057,17 +2057,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fence-seal"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "teams-fence",
- "teams-proto",
- "teams-trouter",
- "trybuild",
-]
-
-[[package]]
 name = "filedescriptor"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4847,11 +4836,11 @@ dependencies = [
  "libc",
  "log",
  "rustix",
+ "serde",
  "serde_json",
  "teams-auth",
  "teams-call",
  "teams-core",
- "teams-fence",
  "teams-log",
  "teams-media",
  "teams-mock",
@@ -7948,7 +7937,6 @@ dependencies = [
  "serde",
  "serde_json",
  "teams-auth",
- "teams-fence",
  "teams-mock",
  "teams-proto",
  "teams-trouter",
@@ -7970,7 +7958,6 @@ dependencies = [
  "teams-auth",
  "teams-call",
  "teams-core",
- "teams-fence",
  "teams-log",
  "teams-media",
  "teams-mock",
@@ -7982,28 +7969,6 @@ dependencies = [
  "time",
  "tokio",
  "wiremock",
-]
-
-[[package]]
-name = "teams-fence"
-version = "0.1.0"
-dependencies = [
- "base64 0.23.1",
- "fixture-guard",
- "log",
- "percent-encoding",
- "reqwest 0.13.5",
- "serde",
- "serde_json",
- "teams-fence",
- "tempfile",
- "thiserror 2.0.21",
- "tokio",
- "toml 1.1.8+spec-1.1.0",
- "toml_edit 0.25.17+spec-1.1.0",
- "url",
- "wiremock",
- "zeroize",
 ]
 
 [[package]]
@@ -8054,7 +8019,6 @@ dependencies = [
  "reqwest 0.13.5",
  "serde_json",
  "teams-auth",
- "teams-fence",
  "teams-media",
  "teams-mock",
  "teams-proto",
@@ -8081,7 +8045,6 @@ dependencies = [
  "serde_json",
  "teams-auth",
  "teams-call",
- "teams-fence",
  "teams-log",
  "teams-mock",
  "teams-proto",
@@ -8106,6 +8069,7 @@ dependencies = [
  "serde_json",
  "teams-auth",
  "teams-log",
+ "teams-proto",
  "teams-signin",
  "teams-signin-extension",
  "teams-wpe",
@@ -8159,7 +8123,6 @@ dependencies = [
  "serde_json",
  "teams-auth",
  "teams-call",
- "teams-fence",
  "teams-log",
  "teams-mock",
  "teams-proto",
@@ -8189,7 +8152,6 @@ dependencies = [
  "teams-auth",
  "teams-call",
  "teams-core",
- "teams-fence",
  "teams-log",
  "teams-media",
  "teams-mock",

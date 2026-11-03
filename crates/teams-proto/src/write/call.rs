@@ -5,8 +5,8 @@ mod parts;
 use std::fmt;
 
 use crate::CallOperation;
+use crate::Mri;
 use serde_json::{Map, Value, json};
-use teams_fence::Mri;
 use url::Url;
 
 pub(crate) use self::parts::on_calling_base;
@@ -372,7 +372,7 @@ impl StartCall {
         callees: &[Invitee],
         group_chat: Option<&str>,
     ) -> Result<Self, CallWriteError> {
-        let valid_chat = group_chat.map_or(callees.len() == 1, teams_fence::is_group_chat_id);
+        let valid_chat = group_chat.map_or(callees.len() == 1, crate::is_group_chat_id);
         let mut people = std::collections::BTreeSet::new();
         if !valid_chat
             || callees.is_empty()
@@ -401,7 +401,7 @@ impl StartCall {
         chat: &str,
         meeting: &MeetingInfo,
     ) -> Result<Self, CallWriteError> {
-        if !teams_fence::is_meeting_chat_id(chat) {
+        if !crate::is_meeting_chat_id(chat) {
             return Err(CallWriteError::Unmapped);
         }
         let body = meeting_start_body(parts, chat, meeting);
@@ -416,7 +416,7 @@ impl StartCall {
     /// [`CallWriteError`] when the request isn't a channel meeting's subscription in its captured shape (the channel
     /// not a team's thread, the sender not a work account).
     pub fn meet_now(context: &CallContext, parts: &StartParts, channel: &str) -> Result<Self, CallWriteError> {
-        if !teams_fence::is_team_thread_id(channel) {
+        if !crate::is_team_thread_id(channel) {
             return Err(CallWriteError::Unmapped);
         }
         let body = meet_now_body(parts, channel);
@@ -480,13 +480,12 @@ impl Prepared for StartCall {
 }
 
 /// The conversation scenario of the web client's test call (`docs/protocol/calling-echo.md`): the call start that
-/// opens it names no callee. The fence's own, which its classifier reads a test call by.
-pub use teams_fence::TEST_CALL_SCENARIO;
+/// opens it names no callee.
+pub use crate::ids::TEST_CALL_SCENARIO;
 
 /// The echo service's MRI from the web bundle's `teamsEchoBotMri` (its commercial config): the bot the personal build's
-/// "Test call" calls ([`StartCall::echo_test`], then [`AddToCall`] of exactly it). The fence's own, which the personal
-/// fence judges the test call by; never taken from the network or the UI.
-pub use teams_fence::TEAMS_ECHO_BOT_MRI;
+/// "Test call" calls ([`StartCall::echo_test`], then [`AddToCall`] of exactly it). Never taken from the network or UI.
+pub use crate::ids::TEAMS_ECHO_BOT_MRI;
 
 /// Invites someone into a call that exists: the conversation's `add` (how the test call brings the echo in).
 ///
@@ -533,7 +532,7 @@ impl AddToCall {
                     .strip_prefix("8:orgid:")
                     .map(|caller| format!("19:{caller}_{bot}@unq.gbl.spaces"))
             })
-            .or_else(|| teams_fence::one_to_one_id(parts.from.mri.as_str(), parts.invitee.mri.as_str()));
+            .or_else(|| crate::one_to_one_id(parts.from.mri.as_str(), parts.invitee.mri.as_str()));
         if chat.as_deref() != Some(parts.chat_thread.as_str()) {
             return Err(CallWriteError::Unmapped);
         }
@@ -680,7 +679,7 @@ impl JoinCall {
         parts: &JoinParts,
         media: &JoinMedia,
     ) -> Result<Self, CallWriteError> {
-        if teams_fence::is_team_thread_id(&parts.group_chat) && parts.meeting.is_none() && !parts.posts_meetup {
+        if crate::is_team_thread_id(&parts.group_chat) && parts.meeting.is_none() && !parts.posts_meetup {
             return Err(CallWriteError::Unmapped);
         }
         let mut body = join_body(parts, &json!(""));

@@ -20,8 +20,8 @@
 
 use std::fmt;
 
+use crate::Mri;
 use serde_json::{Value, json};
-use teams_fence::Mri;
 use url::Url;
 
 use crate::client::{Response, Transport};

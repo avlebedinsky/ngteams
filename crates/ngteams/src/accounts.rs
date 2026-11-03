@@ -1,13 +1,9 @@
-//! The accounts the app runs at once (`docs/personal-build.md`, "Several accounts"): each signed-in account's engine,
-//! started over a personal fence of its own that shares the app's call floor (`teams_fence::CallFloor`: one call or
-//! ringing invitation at a time across the accounts), its calls on the app's one set of devices ([`CallDevices`]); and
-//! the blocking sign-in and forget the window's "+" and "Sign out and remove" run off GPUI's foreground.
-//!
-//! Nothing is sent here: each engine's writes go through its own outbox under its own fence.
+//! Accounts running side by side, with one shared call floor and device set.
+//! Each engine owns its account's store and sends writes through its outbox.
 
+use crate::accounts_file::PersonalAccount;
 use teams_auth::secrets::{LazyKeyring, SecretStore};
 use teams_core::CallFloor;
-use teams_fence::personal::PersonalAccount;
 use teams_signin::window::Windows;
 
 use crate::KEYRING_APPLICATION;
@@ -45,7 +41,7 @@ pub struct Runner {
 }
 
 impl Runner {
-    /// Starts `account`'s engine: its fence on the floor, its calling on the devices, its push channel.
+    /// Starts `account`'s engine on the shared call floor and devices, with its push channel.
     ///
     /// # Errors
     /// Why it couldn't start, said for the user (another `ngteams` runs on the account, its region can't be read).

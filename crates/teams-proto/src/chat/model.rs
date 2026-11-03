@@ -10,10 +10,10 @@
 //! Numbers the service writes sometimes as numbers and sometimes as strings of digits (a message's `id` and `version`,
 //! `sequenceId`, a quoted message's `messageId`) are read in either form.
 
+use crate::{is_group_chat_id, one_to_one_pair};
 use serde::de::{DeserializeOwned, Deserializer};
 use serde::{Deserialize, Serialize, Serializer};
 use serde_json::{Map, Value};
-use teams_fence::{is_group_chat_id, one_to_one_pair};
 use time::OffsetDateTime;
 use time::format_description::well_known::Rfc3339;
 

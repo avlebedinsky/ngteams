@@ -7,7 +7,7 @@ pub use offer::INVITATION_EVENTS;
 use serde_json::{Map, Value};
 use std::fmt;
 use std::sync::{Mutex, MutexGuard, PoisonError};
-use teams_fence::Mri;
+use teams_proto::Mri;
 use teams_proto::{CallOperation, Request, Response};
 use url::Url;
 const PROXY_HOST: &str = teams_proto::CALLING_HOST;

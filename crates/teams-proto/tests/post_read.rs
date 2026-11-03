@@ -8,7 +8,7 @@ use std::time::Duration;
 use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
-use teams_fence::Mri;
+use teams_proto::Mri;
 use teams_proto::{
     AnswerError, BuildError, Client, Credentials, Endpoint, HttpError, HttpTransport, MIDDLE_TIER_AUDIENCE,
     ProbePostRead, Read, Refusal, Service, ShortProfile, ShortProfileLookup, Transport,

@@ -30,6 +30,7 @@ use ngteams::app::{self, Launch};
 #[path = "support/window.rs"]
 mod support;
 use ngteams::descriptors::adopt_trace;
+use support::Alias;
 use support::display_name;
 use teams_auth::secrets::Secret;
 use teams_auth::session::{AccessToken, Renewal};
@@ -37,15 +38,13 @@ use teams_auth::token::TokenError;
 use teams_core::Outbox;
 use teams_core::VideoOutput;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Parts, Push};
-use teams_fence::lab::{Alias, LabConfig, record_abc_chat};
-use teams_fence::{LiveMembershipSource, Mri};
 use teams_media::devices::catalog::{DeviceInfo, DeviceKind, DeviceList, FixedDirectory};
 use teams_media::devices::pattern::TestPattern;
 use teams_mock::{
     AB_CHAT, ABC_CHAT, AC_CHAT, AMS_BASE, AX_CHAT, CHAT_BASE, CSA_BASE, ChatServiceMock, ECHO, LAB_A, LAB_B, LAB_C,
     MIDDLE_TIER_BASE, OUTSIDER, PRESENCE_BASE, PROVISIONING_BASE, TEAM_CHANNEL, TrouterMock, USER_PROFILE_BASE,
-    lab_toml,
 };
+use teams_proto::Mri;
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::Store;
 use teams_trouter::{Options, Trouter, TrouterCredentials};
@@ -185,7 +184,7 @@ const STEPS: [Step; 4 + 134] = [
         }
     }),
     // a team's "..." menu, then the "Create a channel" dialog through its states (the mock's team lets a make channels;
-    // the lab's fence denies the creation, as it does every team's, which is the failure shown)
+    // the mock does not implement team creation, so its failure is shown)
     ("team-menu", |shell, window, cx| {
         if let Some(chat) = shell.read(cx).chat() {
             let _ = chat.read(cx).text_selection().clear();
@@ -233,7 +232,7 @@ const STEPS: [Step; 4 + 134] = [
         with_channel_dialog(shell, cx, teams_ui::channel_dialog::ChannelDialog::close_now);
     }),
     // "Your teams and channels", its Create team dropdown, a row's "..." menu, the dialogs and Manage team's tabs (the mock's
-    // made-up team; the lab's fence denies its writes)
+    // made-up team; the mock does not implement these writes)
     ("teams-page", |shell, window, cx| {
         shell.update(cx, |shell, cx| shell.open_teams_page(window, cx));
     }),
@@ -374,7 +373,7 @@ const STEPS: [Step; 4 + 134] = [
         });
     }),
     // Analytics' "Select a channel", the Apps tab and an app's Remove asking, Get more apps, the Giphy rating, Change
-    // picture (the mock's made-up apps; the lab's fence denies their writes)
+    // picture (the mock's made-up apps; writes are not implemented by the mock)
     ("manage-analytics-channel", |shell, window, cx| {
         with_manage_team(shell, cx, |page, cx| {
             page.show_tab(teams_ui::manage_team::ManageTab::Analytics, cx);
@@ -1605,8 +1604,6 @@ impl MockLab {
         seed_mentions(&mock)?;
         seed_forwards(&mock, &runtime)?;
         let dir = tempfile::tempdir()?;
-        let config = LabConfig::parse(&lab_toml(dir.path()), dir.path())?;
-        record_abc_chat(config.paths(), ABC_CHAT)?;
         let tokens = Arc::new(Tokens {
             token: mock.token(LAB_A).ok_or("the mock's token for a")?,
             renewals: broadcast::channel(4).0,
@@ -1615,7 +1612,6 @@ impl MockLab {
         let origin = mock.origin();
         let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin);
         let transport = Arc::new(http()?);
-        let _membership = LiveMembershipSource::with_mock_origin(&origin)?;
 
         let trouter_client = Trouter::with_mock_origin(Arc::clone(&transport), Arc::clone(&tokens), trouter.origin())?
             .with_options(Options {
@@ -1627,7 +1623,7 @@ impl MockLab {
         let author = Author::new(Mri::new(LAB_A), display_name("bot-a@lab.example.test"));
         let engine = engine::start(Parts {
             calls: None,
-            store: Store::open(&config.paths().store_file(Alias::A))?,
+            store: Store::open(&support::store_file(dir.path(), Alias::A))?,
             client: Arc::new(Client::new(
                 http()?
                     .with_ams(AMS_BASE)?

@@ -2,14 +2,12 @@
 resolver = "3"
 # Explicit list: cargo refuses a glob that matches nothing. Every new crate is added here.
 members = [
-    "crates/fence-seal",
     "crates/fixture-guard",
     "crates/proto-lab",
     "crates/ngteams",
     "crates/teams-auth",
     "crates/teams-call",
     "crates/teams-core",
-    "crates/teams-fence",
     "crates/teams-log",
     "crates/teams-media",
     "crates/teams-mock",
@@ -29,13 +27,11 @@ members = [
 # Every member but the personal build (`crates/ngteams`): a plain `cargo build`, `cargo build --release` or `cargo run`
 # at the root never builds it (docs/personal-build.md; crates/ngteams/tests/apart.rs checks this list).
 default-members = [
-    "crates/fence-seal",
     "crates/fixture-guard",
     "crates/proto-lab",
     "crates/teams-auth",
     "crates/teams-call",
     "crates/teams-core",
-    "crates/teams-fence",
     "crates/teams-log",
     "crates/teams-media",
     "crates/teams-mock",
@@ -69,7 +65,6 @@ teams-auth = { path = "crates/teams-auth" }
 # a call's signaling state machine (sans-IO): builds the sealed call writes, sends nothing itself
 teams-call = { path = "crates/teams-call" }
 teams-core = { path = "crates/teams-core" }
-teams-fence = { path = "crates/teams-fence" }
 # the app's diagnostic log (M2 Task 24a): installed by the app crates only, through its `install`
 teams-log = { path = "crates/teams-log" }
 # a call's media: Teams' SDP dialect (sdp-ngc-1.0), the relayed libwebrtc peer and its session, the mixer's control
@@ -159,7 +154,7 @@ libwebrtc = "=0.3.55"
 log = "0.4.34"
 # the STUN long-term credential key: MD5(username:realm:password), RFC 8489 9.2.2
 md-5 = "0.11.0"
-# decodes the chat service's path segments (encoded conversation ids) when the fence maps a write
+# decodes the chat service's encoded conversation IDs and request path segments
 percent-encoding = "2.3.2"
 # The async-io flavour GPUI's Linux platform takes too: its ashpd and zbus refuse to build with both `async-io` and
 # `tokio` on, and workspace builds unify features, so oo7's default `tokio` would break every workspace build with

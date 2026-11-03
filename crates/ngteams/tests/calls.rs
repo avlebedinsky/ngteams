@@ -1,22 +1,6 @@
-//! The personal build's calls on the mock (`teams-mock`'s calling service, its Trouter and its media: a loopback TURN
-//! server and a loopback peer behind each party it plays), under the personal fence (`docs/personal-build.md`,
-//! "Calls"): each account an engine of its own, as `crates/ngteams` assembles one, with the personal fence of its
-//! account (which logs every send and denies none, so it reads no members), its own `fence.log`, its messaging socket
-//! and its calling socket, its calls' media on the file backend (a tone in, a recording out, each opening of the
-//! microphone and the camera counted). No PipeWire and no portal is opened: the calls use synthetic file devices.
-//!
-//! - the test call to the web bundle's echo service: every write permitted and logged, its registration an own-state
-//!   entry, its frames logged, no plain request, the microphone opened only once the start passed, the camera never;
-//! - a call in a 1:1 chat: the callee's engine answers only by its action;
-//! - any start, whoever it names and in whatever chat, passes the fence unread and logged;
-//! - an outsider's invitation: offered, rung, answered or declined only by the action;
-//! - an invitation during a call: not offered, nothing sent for it;
-//! - an `attach` refused with a 401 goes again and its invitation is answered; one that failed for good (a refusal, a
-//!   skypetoken that couldn't be had) is let go, and the next invitation rings;
-//! - a running group call joined;
-//! - the plain requests a lab call sends, each with its personal route.
-//!
-//! Every id, token and MRI here is the mocks' made-up one.
+//! Calls on the synthetic chat, calling, Trouter and media services in teams-mock.
+//! Each account owns its engine/store; all media uses file devices, with no PipeWire or portal access.
+//! Covers echo calls, incoming invitations and actions, overlapping calls, retries, releases and group joins.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
@@ -33,7 +17,6 @@ use teams_auth::session::{AccessToken, Renewal};
 use teams_auth::token::TokenError;
 use teams_core::engine::{self, EngineError, EngineHandle, EngineOptions, Event, Parts, Push};
 use teams_core::{CallAction, CallId, CallMedia, CallParts, CallStatus, End, Identity, IncomingCall, Outbox, Relay};
-use teams_fence::Mri;
 use teams_media::devices::file::{AudioInput, FileDevices, Pacing, PatternCamera};
 use teams_media::devices::{AudioSink, AudioSource, DeviceError, Devices, VideoSource, wav};
 use teams_media::processing::ProcessingConfig;
@@ -43,6 +26,7 @@ use teams_media::tone::{Tone, level_at};
 use teams_mock::{
     AB_CHAT, ABC_CHAT, CALLING_APP, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, OUTSIDER, TENANT, TIMED_OUT, TrouterMock,
 };
+use teams_proto::Mri;
 use teams_proto::{Author, Client, ClientInfo, Credentials, HttpTransport, RelayTokens, Transport};
 use teams_store::Store;
 use teams_trouter::{CallStack, Options, RegistrationReport, Trouter, TrouterCredentials};
@@ -637,9 +621,7 @@ async fn a_running_group_call_is_joined_in_a_chat_listing_the_account() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_plain_requests_a_lab_call_sends_each_have_a_personal_route() {
-    // a lab call's requests besides its sealed call writes and typed frames: the calling registration (an `allowed`
-    // line in the lab's fence.log), the TURN credentials (a `GET`). Through the personal fence the first is its
-    // own-state entry (`calling_endpoint_registration`, the test above) and the second goes as the read it is.
+    // Calling registration uses the own-state route; TURN credentials are an ordinary GET.
     let mock = ChatServiceMock::start().await.unwrap();
 
     let tokens = Arc::new(Tokens {

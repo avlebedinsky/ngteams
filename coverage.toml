@@ -4,7 +4,6 @@ target = 90
 metrics = ["lines", "functions", "regions"]
 
 [excluded]
-fence-seal = "compile-test harness only; its library contains documentation and no runtime code"
 gpui-video = "standalone video spike"
 wpe-javascriptcore-sys = "generated gir bindings"
 wpe-platform-sys = "generated gir bindings"
@@ -20,7 +19,6 @@ teams-trouter = { lines = 92, functions = 95, regions = 91 }
 teams-call = { lines = 93, functions = 95, regions = 90 }
 teams-auth = { lines = 95, functions = 95, regions = 93 }
 teams-proto = { lines = 93, functions = 91, regions = 91 }
-teams-fence = { lines = 94, functions = 93, regions = 92 }
 teams-signin-extension = { lines = 100, functions = 100, regions = 99 }
 teams-wpe = { lines = 91, functions = 92, regions = 91 }
 ngteams = { lines = 92, functions = 91, regions = 90 }
@@ -39,13 +37,13 @@ sha256 = "f977642661f3385c9e5b250e07d58b9feea88e143a126309624c16973309eed8"
 reason = "module declarations and documentation only; no executable items"
 
 [unmapped_sources."crates/teams-call/src/lib.rs"]
-sha256 = "a951d0ccdfc9ead2ae1aa8c7c688f02d6cd36cce482dba9508cb084795051436"
+sha256 = "25c3307b0f8003770c6dc5005ff4f3d2cd489172e3db7487565846472be31316"
 reason = "module declarations, re-exports and documentation only; no executable items"
 
 [unmapped_sources."crates/teams-call/src/machine/tests.rs"]
-sha256 = "8c01675454068ee40aa66826be87970e01e21c73a17b9b7127b495c018640559"
+sha256 = "cd94a63b6fe8c27cf66eb936255791232c3130db9b7b0108030dbeb18f2e525c"
 reason = "unit-test module included only by machine.rs cfg(test); omitted by cargo-llvm-cov's test-file filter"
-context = { "crates/teams-call/src/machine.rs" = "bb25d295510660927aeb7146924cf54ff85ee5a368c0bc42d378672965eb597c" }
+context = { "crates/teams-call/src/machine.rs" = "34a50a04f4a201eca0aa892a89651e3ec7c4f8ea9f537a56e6aecffb6b0d8c71" }
 
 [unmapped_sources."crates/teams-media/src/video/effects/tests.rs"]
 sha256 = "f67bd56fdf5683e1b7bd150f306db4e7b7714039d13ce592a602b755d24a4ffb"
@@ -63,7 +61,7 @@ sha256 = "7bdd5ebbbf07a8daf3659fc52c93eb5866aa515311ff1a0b1b3e31fe7d38b9ee"
 reason = "module declarations, re-exports and documentation only; no executable items"
 
 [unmapped_sources."crates/ngteams/src/lib.rs"]
-sha256 = "7934af26b9a0351beef265e1d1b1b4a2bee71afae48739a53bdea732f4aa66ff"
+sha256 = "0612fbfadb37324919e9f2507d3923050006d683d5ea4db7a4a61a730716cec0"
 reason = "module declarations, re-exports, documentation and a string constant only; no executable bodies"
 
 [unmapped_sources."crates/proto-lab/src/bundles.rs"]

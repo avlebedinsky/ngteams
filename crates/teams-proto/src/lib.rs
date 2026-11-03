@@ -1,5 +1,9 @@
 //! Typed Teams requests and their logged transport. Writes require no permit.
 
+mod chat_service;
+mod ids;
+mod log_shape;
+
 mod call_operation;
 pub use call_operation::CallOperation;
 
@@ -29,6 +33,13 @@ mod team_read;
 mod thumbnail;
 mod urlp;
 mod write;
+
+pub use chat_service::chat_service_path;
+pub use ids::{
+    AFD_HOSTS, CALL_PROXY_HOST, INVITATION_EVENTS, Mri, REGIONAL_SUFFIX, is_chat_id, is_group_chat_id,
+    is_meeting_chat_id, is_team_thread_id, one_to_one_id, one_to_one_pair,
+};
+pub use log_shape::{REDACTED, UNREADABLE_URL, log_url, path_shape};
 
 pub use ams::{MessagePicture, PastedFormat, PastedPicture};
 pub use calendar::{

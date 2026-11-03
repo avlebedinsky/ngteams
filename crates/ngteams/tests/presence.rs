@@ -1,7 +1,6 @@
-//! Others' presence through the personal fence, with the whole engine against wiremock as UPS (the transport's
-//! `test-support` mock origin): the fence permits a read by `POST` naming anyone, logged, so the engine reads everyone
-//! its views asked about but a bot or a service, which has no presence (`teams_core::has_presence`). Every id and token
-//! here is made up; the answers follow the synthetic fixture `tests/fixtures/ups/getpresence-answer.json`.
+//! Presence reads through the engine against a synthetic UPS mock origin.
+//! The engine reads every requested person, excluding bots/services that have no presence.
+//! Answers follow tests/fixtures/ups/getpresence-answer.json; all identities and tokens are made up.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
@@ -15,8 +14,8 @@ use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Event, Parts};
 use teams_core::{Availability, Outbox};
-use teams_fence::Mri;
 use teams_mock::{LAB_A, LAB_B, LAB_C, OUTSIDER};
+use teams_proto::Mri;
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::{Conversation, ConversationKind, Member, Store};
 use wiremock::matchers::{method, path};
@@ -85,7 +84,7 @@ fn store(dir: &tempfile::TempDir) -> Store {
     store
 }
 
-/// a's engine through its personal fence (logging to `log`), its reads on `server` as UPS, holding [`store`]'s chat.
+/// a's engine, its reads on `server` as UPS, holding [`store`]'s chat.
 fn start(server: &MockServer, dir: &tempfile::TempDir) -> EngineHandle {
     let transport = || HttpTransport::with_mock_origin(Arc::new(Tokens), CHAT_BASE, &server.uri());
     let reads = transport().unwrap().with_presence(PRESENCE_BASE).unwrap();
@@ -147,7 +146,7 @@ async fn a_read_leaves_out_a_bot_and_names_everyone_else_the_views_asked_about()
     );
 
     // every read names only people (a read may have gone before the last was asked about, then another), the last all
-    // three of them, each permitted by the fence
+    // all three requested by the engine
     let reads: Vec<Request> = server
         .received_requests()
         .await

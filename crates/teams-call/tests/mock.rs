@@ -18,10 +18,10 @@ use std::time::{Duration, Instant};
 use serde_json::Value;
 use support::{Client, answer};
 use teams_call::{CallEvent, CallId, CallState, End, Incoming, Placement};
-use teams_fence::Mri;
 use teams_mock::{
     ABC_CHAT, ANSWERED_ELSEWHERE, CallPhase, ChatServiceMock, ECHO, LAB_A, LAB_B, LAB_C, TIMED_OUT, TrouterMock,
 };
+use teams_proto::Mri;
 
 struct Lab {
     mock: ChatServiceMock,

@@ -18,7 +18,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use teams_fence::Mri;
+use teams_proto::Mri;
 use teams_proto::{
     AddChannelMembers, ChannelCreated, ChannelCreationStatus, Client, CreateChannel, Credentials, HttpError,
     HttpTransport, NewChannel, NewChannelKind, Request, ShowChannelByDefault, TeamPeopleSearch, TeamPerson, Transport,

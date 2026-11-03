@@ -22,8 +22,8 @@ use teams_auth::refresh::refresh_token_key;
 use teams_auth::secrets::{MemorySecretStore, Secret, SecretStore as _};
 use teams_auth::session::{AccessToken, Clock, Renewal, Session};
 use teams_auth::token::{EntraConfig, TokenClient, TokenError};
-use teams_fence::Mri;
 use teams_mock::{AB_CHAT, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, REGIONAL_NAME, SocketRecord, TrouterMock};
+use teams_proto::Mri;
 use teams_proto::{Credentials, HttpTransport, IC3_AUDIENCE, TROUTER_HOST};
 use teams_trouter::{
     BuildError, Change, ChatEvent, Down, Ignored, Options, PushEvent, RegistrationReport, Stop, Trouter,

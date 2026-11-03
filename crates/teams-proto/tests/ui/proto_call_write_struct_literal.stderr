@@ -1,0 +1,31 @@
+error[E0451]: fields `caller`, `echo` and `built` of struct `StartCall` are private
+ --> tests/ui/proto_call_write_struct_literal.rs:9:25
+  |
+9 |     let _ = StartCall { caller: Mri::new("8:orgid:caller"), echo: None, built: any() };
+  |                         ^^^^^^                              ^^^^        ^^^^^ private field
+  |                         |                                   |
+  |                         private field                       private field
+
+error[E0451]: fields `invitee`, `url` and `built` of struct `AddToCall` are private
+  --> tests/ui/proto_call_write_struct_literal.rs:11:9
+   |
+10 |     let _ = AddToCall {
+   |             --------- in this type
+11 |         invitee: Mri::new("8:orgid:callee"),
+   |         ^^^^^^^ private field
+12 |         url: "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv/x/add".parse().unwrap(),
+   |         ^^^ private field
+13 |         built: any(),
+   |         ^^^^^ private field
+
+error: type `teams_proto::write::call::Built` is private
+ --> tests/ui/proto_call_write_struct_literal.rs:9:80
+  |
+9 |     let _ = StartCall { caller: Mri::new("8:orgid:caller"), echo: None, built: any() };
+  |                                                                                ^^^^^ private type
+
+error: type `teams_proto::write::call::Built` is private
+  --> tests/ui/proto_call_write_struct_literal.rs:13:16
+   |
+13 |         built: any(),
+   |                ^^^^^ private type

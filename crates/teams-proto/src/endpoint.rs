@@ -7,8 +7,7 @@
 pub enum Service {
     /// The chat service at the account's chat base, the region's GTM `chatServiceAfd`
     /// (`https://<AFD host>/api/chatsvc/<region>`, or a regional `https://<name>.msg.teams.microsoft.com`): the bases
-    /// [`teams_fence::chat_service_path`] accepts a request under, so the transport and the fence's live membership
-    /// read recognize the chat service by one check. Its endpoints start with `v1`.
+    /// [`crate::chat_service_path`] recognizes. Its endpoints start with `v1`.
     ChatService,
     /// The registrar, `https://<AFD host>/registrar/…`, on the chat base's AFD host (`teams.microsoft.com` when the
     /// chat base is a regional host). It registers an endpoint's Trouter URL ([`crate::EndpointRegistration`]).

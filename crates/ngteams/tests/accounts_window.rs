@@ -26,15 +26,15 @@ use ngteams::app::{self, Launch};
 #[path = "support/window.rs"]
 mod support;
 use ngteams::descriptors::adopt_trace;
+use support::Alias;
 use support::display_name;
 use teams_auth::secrets::Secret;
 use teams_auth::session::{AccessToken, Renewal};
 use teams_auth::token::TokenError;
 use teams_core::Outbox;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Parts, Push};
-use teams_fence::lab::{Alias, LabConfig, record_abc_chat};
-use teams_fence::{LiveMembershipSource, Mri};
-use teams_mock::{ABC_CHAT, AC_CHAT, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, TrouterMock, lab_toml};
+use teams_mock::{AC_CHAT, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, TrouterMock};
+use teams_proto::Mri;
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::Store;
 use teams_trouter::{Options, Trouter, TrouterCredentials};
@@ -322,7 +322,7 @@ impl Tokens {
 }
 
 /// The mock with a's and b's engines on it, each as `teams_core::account::start` builds one but for the mock origins, a
-/// test roster and log, both fences on one call floor; their push channels on the mock's Trouter.
+/// their own stores; their push channels on the mock's Trouter.
 struct MockLab {
     _runtime: tokio::runtime::Runtime,
     mock: Arc<ChatServiceMock>,
@@ -339,8 +339,6 @@ impl MockLab {
         let mock = runtime.block_on(ChatServiceMock::start())?;
         let trouter = mock.start_trouter()?;
         let dir = tempfile::tempdir()?;
-        let config = LabConfig::parse(&lab_toml(dir.path()), dir.path())?;
-        record_abc_chat(config.paths(), ABC_CHAT)?;
         Ok(Self {
             _runtime: runtime,
             mock: Arc::new(mock),
@@ -351,7 +349,6 @@ impl MockLab {
 
     /// `alias`'s engine (its MRI `mri`) on the mock.
     fn engine(&self, alias: Alias, mri: &str, upn: &str) -> SandboxResult<EngineHandle> {
-        let config = LabConfig::parse(&lab_toml(self.dir.path()), self.dir.path())?;
         let tokens = Arc::new(Tokens {
             token: self.mock.token(mri).ok_or("the mock's token")?,
             renewals: broadcast::channel(4).0,
@@ -360,7 +357,6 @@ impl MockLab {
         let origin = self.mock.origin();
         let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin);
         let transport = Arc::new(http()?);
-        let _membership = LiveMembershipSource::with_mock_origin(&origin)?;
 
         let trouter = Trouter::with_mock_origin(Arc::clone(&transport), Arc::clone(&tokens), self.trouter.origin())?
             .with_options(Options {
@@ -372,7 +368,7 @@ impl MockLab {
         let author = Author::new(Mri::new(mri), display_name(upn));
         Ok(engine::start(Parts {
             calls: None,
-            store: Store::open(&config.paths().store_file(alias))?,
+            store: Store::open(&support::store_file(self.dir.path(), alias))?,
             client: Arc::new(Client::new(http()?)),
             outbox: Outbox::new(transport, author),
             push: Some(Push::new(trouter)),
@@ -383,9 +379,11 @@ impl MockLab {
 
     /// Whether both accounts' engine locks are free: their engines' threads have ended.
     fn engines_released(&self) -> SandboxResult<bool> {
-        let config = LabConfig::parse(&lab_toml(self.dir.path()), self.dir.path())?;
         for alias in [Alias::A, Alias::B] {
-            if Store::open(&config.paths().store_file(alias))?.engine_lock().is_err() {
+            if Store::open(&support::store_file(self.dir.path(), alias))?
+                .engine_lock()
+                .is_err()
+            {
                 return Ok(false);
             }
         }

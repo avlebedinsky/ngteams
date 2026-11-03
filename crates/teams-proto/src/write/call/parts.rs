@@ -1,28 +1,25 @@
 //! What the call writes are built from: the links the call's services hand out ([`CallLink`]), the call's own headers
 //! ([`CallContext`]), who sends ([`CallParticipant`]), the endpoint's callbacks ([`Links`]), an offer or an answer
 //! ([`MediaContent`]) and what the client says of itself ([`ClientInfo`]). Each turns into exactly the JSON the captures
-//! show for it (`docs/protocol/calling-echo.md`, `docs/protocol/calling.md`); which keys a body may hold at all is the
-//! fence's classifier's to say, and every write is classified when it is built (`super`).
+//! show for it (`docs/protocol/calling-echo.md`, `docs/protocol/calling.md`).
 
 use std::collections::BTreeMap;
 use std::fmt;
 
+use crate::Mri;
 use percent_encoding::percent_decode_str;
 use serde_json::{Map, Value, json};
-use teams_fence::Mri;
 use url::Url;
 
 /// The flight proxy every call request goes through: the call start, and every link the call's services hand out.
-/// The fence's own ([`teams_fence::CALL_PROXY_HOST`]), so a write's host is the one the fence classifies.
-pub const CALLING_HOST: &str = teams_fence::CALL_PROXY_HOST;
+pub const CALLING_HOST: &str = crate::CALL_PROXY_HOST;
 
 /// The calling service's base (`Service::Calling`): every call request goes under it, the call start to `epconv`
 /// and every other to a link the call's services handed out, `ep/<service host>/…`.
 pub const CALLING_BASE: &str = "https://api.flightproxy.teams.microsoft.com/api/v2";
 
-/// Where a call starts: [`CALLING_BASE`] plus `epconv`, no query. The fence's own, so a start goes exactly where the
-/// fence classifies one.
-pub use teams_fence::CALL_START_URL;
+/// Where a call starts: [`CALLING_BASE`] plus `epconv`, no query.
+pub use crate::ids::CALL_START_URL;
 
 /// A link a call's services handed out (a conversation, its `leave`, the acceptance's `acknowledgement`, an
 /// invitation's `attach`, …), kept exactly as it was given, its routing query (`?i=…&e=…`) included: the call registry

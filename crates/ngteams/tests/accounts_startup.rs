@@ -8,12 +8,11 @@ use std::process::Command;
 
 use gpui::TestAppContext;
 use ngteams::accounts::{self, Runner};
+use ngteams::accounts_file::{PersonalAccount, PersonalPaths};
 use ngteams::forget::Forgot;
 use ngteams::setup::Setup;
 use ngteams::signin;
 use teams_core::CallFloor;
-use teams_fence::lab::LabLocations;
-use teams_fence::personal::{PersonalAccount, PersonalPaths};
 use teams_store::EngineLock;
 
 const CHILD: &str = "NGTEAMS_SAFE_ACCOUNTS_STARTUP_CHILD";
@@ -28,13 +27,6 @@ fn concrete_account_wrappers_stop_before_keyring_or_tenant_access() {
         return;
     }
     let dir = tempfile::tempdir().unwrap();
-    let config = dir.path().join("config/teams-lab");
-    std::fs::create_dir_all(&config).unwrap();
-    std::fs::write(
-        config.join("lab.toml"),
-        teams_mock::lab_toml(&dir.path().join("share/teams-lab")),
-    )
-    .unwrap();
     let output = Command::new(std::env::current_exe().unwrap())
         .args([
             "--exact",
@@ -61,10 +53,10 @@ fn concrete_account_wrappers_stop_before_keyring_or_tenant_access() {
 }
 
 fn check_wrappers(root: &Path) {
-    let setup = Setup::new(
-        PersonalPaths::new(root.join("config/ngteams"), root.join("share/ngteams")),
-        LabLocations::from_env().unwrap(),
-    )
+    let setup = Setup::new(PersonalPaths::new(
+        root.join("config/ngteams"),
+        root.join("share/ngteams"),
+    ))
     .unwrap();
     let runner = Runner {
         setup: setup.clone(),

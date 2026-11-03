@@ -328,14 +328,22 @@ startup still opens no devices. Task 9 will pass sandbox reach from the lab-mode
 - Modify: every crate's `Cargo.toml`, root `Cargo.toml`, `coverage.toml` (baselines and `[excluded] fence-seal`),
   `crates/teams-ui/tests/reach.rs` (`LINKED_CRATES`), `crates/ngteams/tests/apart.rs`
 
-- [ ] move the items with their tests and switch the imports; when `log_url` moves into `teams-proto`, have
+- [x] move the items with their tests and switch the imports; when `log_url` moves into `teams-proto`, have
       `teams-signin::diagnostics::record` call that shared helper and remove its duplicate `endpoint`, `opaque`
       and `authority` helpers, preserving the sign-in diagnostic credential-redaction tests
-- [ ] delete both crates and remove them from the workspace and coverage
-- [ ] `apart.rs` keeps what still holds: test-support only in dev-dependencies, the test-support refusal, no
+- [x] delete both crates and remove them from the workspace and coverage
+- [x] `apart.rs` keeps what still holds: test-support only in dev-dependencies, the test-support refusal, no
       `proto-lab` in `ngteams`' tree
-- [ ] `cargo check --workspace --all-targets`, clippy, `cargo test --workspace` pass; `cargo tree -p ngteams` shows no
+- [x] `cargo check --workspace --all-targets`, clippy, `cargo test --workspace` pass; `cargo tree -p ngteams` shows no
       `teams-fence` or `proto-lab`
+
+Validation: 109 focused tests passed, including the moved account/XDG, IDs, chat-service and URL-shaping
+cases; all 13 retained typed-construction compile-fail cases; production-only mock-origin/registrar
+contracts with a passing feature-off baseline; UI compose/reach; sign-in redaction/gate; fixture guard; and
+the real sandbox startup-controller test (`GPUI_SMOKE_REQUIRE=1`). Workspace all-target check and Clippy
+(warnings denied), formatting, lint-report, dependency-tree and all 14 coverage-source review checks passed.
+The complete workspace runtime suite is deferred to Task 12 per CLAUDE.md Checks; this mechanical move
+reran the retained behavior it moved or adapted. Both obsolete crate directories and dependencies are gone.
 
 ### Task 8: Every API call in the debug log (teams-auth too)
 

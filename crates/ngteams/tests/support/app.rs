@@ -3,23 +3,17 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use crate::accounts_file::PersonalPaths;
 use gpui::TestAppContext;
 use teams_auth::secrets::MemorySecretStore;
 use teams_core::CallFloor;
-use teams_fence::lab::LabLocations;
-use teams_fence::personal::PersonalPaths;
 
 use super::*;
 use crate::setup::Setup;
 
 pub(crate) fn setup(root: &Path, suffix: u8) -> (Setup, PersonalAccount) {
     let paths = PersonalPaths::new(root.join("config/ngteams"), root.join("data/ngteams"));
-    let lab = LabLocations {
-        config_file: root.join("config/lab/lab.toml"),
-        data_dir: root.join("data/lab"),
-        personal_data_dir: paths.data_dir().to_owned(),
-    };
-    let setup = Setup::new(paths, lab).unwrap();
+    let setup = Setup::new(paths).unwrap();
     let account = PersonalAccount::new(
         &format!("synthetic-{suffix}@example.test"),
         &format!("00000000-0000-4000-8000-{suffix:012x}"),

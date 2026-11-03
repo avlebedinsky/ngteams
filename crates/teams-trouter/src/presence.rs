@@ -9,7 +9,7 @@
 //! replayed on a later connect (`"mstore":true`, [`PresenceDelivery::stored`]), as chat deliveries are.
 
 use serde_json::Value;
-use teams_fence::Mri;
+use teams_proto::Mri;
 use teams_proto::UserPresence;
 
 use crate::frames::RawDelivery;

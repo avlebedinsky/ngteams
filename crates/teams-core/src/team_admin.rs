@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use teams_fence::Mri;
+use teams_proto::Mri;
 use teams_proto::{
     AddablePeopleSearch, AllTeamsAnalyticsRead, AnalyticsPeriod, Client, Credentials, HttpError, HttpTransport,
     JoinableTeam, JoinableTeams, ManagedChannel, OwnTeamView, PastedFormat, PastedPicture, PendingInvite,

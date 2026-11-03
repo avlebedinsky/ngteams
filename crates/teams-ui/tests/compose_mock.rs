@@ -3,20 +3,16 @@
 //! bridge, the models, GPUI's test context), account b's engine headless. Each write a makes through the view (a post
 //! with lines and a link, sent key for key as the capture's link inserted with its text, typing, a mention picked
 //! after `@`, a reply, an edit by Up, a reaction, a delete confirmed, a read receipt) reaches b over its push channel
-//! and leaves its decision in a's own `fence.log`; a mention of someone outside the lab is denied by a's fence, shown
-//! as denied, and never reaches the service. And nothing goes out that a didn't ask for: no read receipt for the chat
-//! while it isn't shown, no edit a newer one made out of date sent again, no delete of a message other than the one
-//! selected.
+//! through a's engine and outbox; the view builds no request. Nothing goes out that a didn't ask for: no read receipt
+//! for a hidden chat, no obsolete edit sent again, and no delete of another selected message.
 //!
-//! Every write goes out through a's engine, its outbox and its fence (a fence over the lab roster, the 1:1 chat's
-//! members read live from the mock); the view builds no request. Every id and token is the mock's made-up one.
+//! Every id and token is the mock's made-up one.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
 
 use std::future::{self, Future};
-use std::io::{self, Write};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 
 use gpui::{AppContext as _, Entity, TestAppContext, VisualTestContext, px, size};
@@ -26,15 +22,15 @@ use teams_auth::session::{AccessToken, Renewal};
 use teams_auth::token::TokenError;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Event, MessageChange, Parts, Push};
 use teams_core::{Action, Outbox};
-use teams_fence::{Fence, FenceLog, LiveMembershipSource, Mri, Roster};
-use teams_mock::{AB_CHAT, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, OUTSIDER, TrouterMock};
+use teams_mock::{AB_CHAT, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, TrouterMock};
+use teams_proto::Mri;
 use teams_proto::chat::MessageText;
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::{Message, OutboxKind, OutboxState, Store};
 use teams_trouter::{Options, RegistrationReport, Trouter, TrouterCredentials};
 use teams_ui::chat_view::{ChatView, MessageAction, READ_DEBOUNCE};
 use teams_ui::compose::Compose;
-use teams_ui::sending::{Again, RowState};
+use teams_ui::sending::Again;
 use teams_ui::settings::{Settings, SettingsModel};
 use teams_ui::{Bridge, Core, Link, Models, ShellParts, ViewTrace};
 use tokio::sync::broadcast;
@@ -85,38 +81,6 @@ impl Tokens {
             expires_at: SystemTime::now() + Duration::from_secs(7_200),
             scopes: Vec::new(),
         }
-    }
-}
-
-/// An account's `fence.log`, read back by the test.
-#[derive(Clone, Default)]
-struct SharedLog(Arc<Mutex<Vec<u8>>>);
-
-impl SharedLog {
-    /// The write decisions on `conversation` of `kind`, as their verdicts.
-    fn verdicts(&self, kind: &str, conversation: &str) -> Vec<String> {
-        let bytes = self.0.lock().unwrap_or_else(PoisonError::into_inner).clone();
-        String::from_utf8(bytes)
-            .unwrap()
-            .lines()
-            .map(|line| serde_json::from_str::<Value>(line).unwrap())
-            .filter(|line| line["kind"] == kind && line["scope"]["conversation"]["id"] == conversation)
-            .map(|line| line["verdict"].as_str().unwrap().to_owned())
-            .collect()
-    }
-}
-
-impl Write for SharedLog {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.0
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .extend_from_slice(buf);
-        Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
     }
 }
 
@@ -174,21 +138,15 @@ const LINES_TYPED: [&str; 3] = [
     "a link https://example.com/made-up/path on the third line",
 ];
 
-/// `me`'s engine on the mock, its fence over the lab roster writing to the second value, its store in the third.
-fn engine(lab: &Lab, me: &str) -> (EngineHandle, SharedLog, tempfile::TempDir) {
+/// `me`'s engine on the mock and the temporary directory holding its store.
+fn engine(lab: &Lab, me: &str) -> (EngineHandle, tempfile::TempDir) {
     let tokens = Arc::new(Tokens {
         token: lab.mock.token(me).unwrap(),
         renewals: broadcast::channel(4).0,
     });
-    let log = SharedLog::default();
-    let _fence = Arc::new(Fence::new(
-        Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), []),
-        FenceLog::from_writer(log.clone()),
-    ));
     let origin = lab.mock.origin();
     let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin).unwrap();
     let transport = Arc::new(http());
-    let _membership = LiveMembershipSource::with_mock_origin(&origin).unwrap();
 
     let trouter = Trouter::with_mock_origin(Arc::clone(&transport), Arc::clone(&tokens), lab.trouter.origin())
         .unwrap()
@@ -213,7 +171,7 @@ fn engine(lab: &Lab, me: &str) -> (EngineHandle, SharedLog, tempfile::TempDir) {
         known_names: vec![(LAB_B.to_owned(), "Lab Bee".to_owned())],
     })
     .unwrap();
-    (handle, log, dir)
+    (handle, dir)
 }
 
 /// b, headless: its engine and what it was told.
@@ -340,10 +298,9 @@ fn newest_from(view: &Entity<ChatView>, cx: &mut VisualTestContext, sender: &str
     })
 }
 
-/// The walk through a's writes: the mock, a's `fence.log`, b, a's view and what holds it.
+/// The walk through a's writes: the mock, b, a's view and what holds it.
 struct Walk {
     lab: Lab,
-    a_log: SharedLog,
     b: Headless,
     view: Entity<ChatView>,
     cx: &'static mut VisualTestContext,
@@ -356,8 +313,8 @@ impl Walk {
     /// Both engines on the mock, a's view open, b ready, a connected and caught up.
     fn start() -> Self {
         let lab = Lab::start();
-        let (a_engine, a_log, a_dir) = engine(&lab, LAB_A);
-        let (b_engine, _, b_dir) = engine(&lab, LAB_B);
+        let (a_engine, a_dir) = engine(&lab, LAB_A);
+        let (b_engine, b_dir) = engine(&lab, LAB_B);
         let mut b = Headless {
             handle: b_engine,
             seen: Vec::new(),
@@ -373,7 +330,6 @@ impl Walk {
         });
         Self {
             lab,
-            a_log,
             b,
             view,
             cx,
@@ -381,10 +337,6 @@ impl Walk {
             bridge,
             _dirs: [a_dir, b_dir],
         }
-    }
-
-    fn verdicts(&self, kind: &str) -> Vec<String> {
-        self.a_log.verdicts(kind, AB_CHAT)
     }
 
     /// b posts `text`, and a's view holds it. Its id.
@@ -406,20 +358,15 @@ impl Walk {
         theirs
     }
 
-    /// b's message comes in and is read: a's receipt goes once its wait is over, through a's fence, and reaches the
+    /// b's message comes in and is read: a's receipt goes once its wait is over, through a's outbox, and reaches the
     /// mock. Its id.
     fn b_s_message_is_read(&mut self) -> String {
         let theirs = self.b_posts("hi a, read me");
-        assert!(self.verdicts("read_receipt").is_empty(), "not before its wait is over");
         let horizons = self.lab.bodies("PUT", "/properties").len();
         self.cx.executor().advance_clock(READ_DEBOUNCE);
-        let log = self.a_log.clone();
         let lab = &self.lab;
-        // the fence logs its verdict before the receipt is sent: wait for the receipt itself too, so a later step
-        // counting what reached the mock doesn't count this one
-        settle(self.cx, |_| {
-            log.verdicts("read_receipt", AB_CHAT) == ["allow"] && lab.bodies("PUT", "/properties").len() > horizons
-        });
+        // Wait for the receipt itself so the next step starts after this send.
+        settle(self.cx, |_| lab.bodies("PUT", "/properties").len() > horizons);
         theirs
     }
 
@@ -458,8 +405,6 @@ impl Walk {
             expected[own] = sent[own].clone();
         }
         assert_eq!(sent, expected);
-        assert_eq!(self.verdicts("typing"), ["allow"]);
-        assert_eq!(self.verdicts("message"), ["allow"]);
         posted
     }
 
@@ -513,7 +458,6 @@ impl Walk {
             "the quote kept: {}",
             edited.content
         );
-        assert_eq!(self.verdicts("edit"), ["allow"]);
     }
 
     /// Waits until b is told of a change of message `id` that `wanted` takes.
@@ -536,46 +480,9 @@ impl Walk {
         self.b_told(theirs, |change| {
             matches!(change, MessageChange::Reaction | MessageChange::Other)
         });
-        assert_eq!(self.verdicts("reaction"), ["allow"]);
         act(&self.view, self.cx, MessageAction::Delete, &posted.id);
         self.cx.simulate_keystrokes("enter");
         self.b_told(&posted.id, |change| change == MessageChange::Delete);
-        assert_eq!(self.verdicts("delete"), ["allow"]);
-    }
-
-    /// A mention of someone outside the lab: a's fence denies the post, the view shows it denied, nothing went out.
-    fn an_outsider_mentioned_is_denied(&mut self) {
-        let posts = self.lab.posted().len();
-        focus_compose(&self.view, self.cx);
-        let compose = compose(&self.view, self.cx);
-        self.cx.update(|window, cx| {
-            compose.update(cx, |compose, cx| {
-                compose.insert_mention(OUTSIDER, "Someone Else", window, cx);
-            });
-        });
-        self.cx.simulate_input("never sent");
-        self.cx.simulate_keystrokes("enter");
-        let view = self.view.clone();
-        settle(self.cx, |cx| {
-            cx.update(|_, cx| {
-                view.read(cx)
-                    .pending_items()
-                    .any(|pending| pending.note.state == RowState::Denied)
-            })
-        });
-        assert_eq!(self.verdicts("message"), ["allow", "allow", "allow", "deny"]);
-        let posted = self.lab.posted();
-        assert_eq!(posted.len(), posts, "the denied post never reached the service");
-        assert!(posted.iter().all(|body| !body.contains("never sent")));
-        let models = self.models.clone();
-        let denied = self.cx.update(|_, cx| {
-            models
-                .chats
-                .read(cx)
-                .outbox_rows(AB_CHAT)
-                .any(|row| row.state == OutboxState::Denied)
-        });
-        assert!(denied);
     }
 
     /// The chat hidden (the shell shows the settings): b's message comes in and nothing is asked of a's engine, so no
@@ -596,7 +503,6 @@ impl Walk {
             receipts,
             "none asked for"
         );
-        assert_eq!(self.verdicts("read_receipt"), ["allow"]);
         assert_eq!(
             self.lab.bodies("PUT", "/properties").len(),
             horizons,
@@ -606,8 +512,8 @@ impl Walk {
         self.cx
             .update(|_, cx| view.update(cx, |view, cx| view.set_shown(true, cx)));
         self.cx.executor().advance_clock(READ_DEBOUNCE);
-        let log = self.a_log.clone();
-        settle(self.cx, |_| log.verdicts("read_receipt", AB_CHAT) == ["allow", "allow"]);
+        let lab = &self.lab;
+        settle(self.cx, |_| lab.bodies("PUT", "/properties").len() > horizons);
     }
 
     /// A delete asked on a's newest message, then the selection moved up: Enter deletes nothing.
@@ -622,7 +528,6 @@ impl Walk {
             self.cx.update(|_, cx| view.read(cx).deleting().map(str::to_owned)),
             None
         );
-        assert!(self.verdicts("delete").is_empty(), "no delete asked for");
         assert!(self.lab.bodies("DELETE", "").is_empty(), "none reached the service");
         self.cx.simulate_keystrokes("escape");
     }
@@ -691,7 +596,6 @@ impl Walk {
         let edits = self.lab.bodies("PUT", &edit_path);
         assert_eq!(edits.len(), 2, "the refused edit and the newer one, nothing again");
         assert!(edits[0].contains(" (one)") && edits[1].contains(" (two)"));
-        assert_eq!(self.verdicts("edit"), ["allow", "allow"]);
     }
 
     /// a's bridge shut down (a's engine joined), then b's engine.
@@ -726,7 +630,7 @@ fn nothing_goes_out_from_a_s_view_that_a_didn_t_ask_for() {
 }
 
 #[test]
-fn each_write_from_a_s_view_reaches_b_through_the_mock_and_a_s_fence() {
+fn each_write_from_a_s_view_reaches_b_through_the_mock() {
     let mut walk = Walk::start();
     let theirs = walk.b_s_message_is_read();
     let posted = walk.a_post_with_lines_and_a_link();
@@ -734,6 +638,5 @@ fn each_write_from_a_s_view_reaches_b_through_the_mock_and_a_s_fence() {
     let reply = walk.a_reply(&theirs);
     walk.an_edit_by_up(&reply);
     walk.a_reaction_and_a_delete(&theirs, &posted);
-    walk.an_outsider_mentioned_is_denied();
     walk.stop();
 }

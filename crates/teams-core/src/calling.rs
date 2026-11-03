@@ -76,7 +76,7 @@ use teams_call::{
     CallError, CallEvent, CallId, CallState, CallWrite, Calls, DeliveryKey, DeliveryReply, Effect, End, Identity,
     Outcome, Participant, Placement, WriteId, WriteSink,
 };
-use teams_fence::Mri;
+use teams_proto::Mri;
 use teams_proto::{
     ChannelMeetup, ChannelParameters, Client, Credentials, EndpointRegistrar, HttpError, HttpTransport, MediaContent,
     MeetingInfo, Request, Transport,

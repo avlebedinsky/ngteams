@@ -8,7 +8,7 @@ use std::ops::Range;
 
 use gpui::{Bounds, Context, EntityInputHandler, Pixels, Point, UTF16Selection, Window, px, size};
 use serde_json::{Value, json};
-use teams_fence::Mri;
+use teams_proto::Mri;
 use teams_proto::chat::{Node, RichText, parse_html};
 
 use super::convert;

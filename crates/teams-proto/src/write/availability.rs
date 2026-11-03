@@ -1,7 +1,7 @@
 //! Typed requests for the account's availability and manual status, tied to an endpoint registered for that account.
 
+use crate::Mri;
 use serde_json::json;
-use teams_fence::Mri;
 
 use super::Prepared;
 use super::Wire;

@@ -68,7 +68,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use teams_auth::token::TokenError;
 use teams_call::Tracker;
-use teams_fence::Mri;
+use teams_proto::Mri;
 use teams_proto::chat::MessageText;
 use teams_proto::{
     Author, CreateChat, DEFAULT_RETRY_WAIT, DeleteMessage, EditMessage, HttpError, Original, ReadReceipt,

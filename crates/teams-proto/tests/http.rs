@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use teams_auth::secrets::{MemorySecretStore, Secret};
 use teams_auth::session::Session;
 use teams_auth::token::TokenError;
-use teams_fence::Mri;
+use teams_proto::Mri;
 use teams_proto::chat::MessageText;
 use teams_proto::{
     Author, Client, Credentials, DEFAULT_RETRY_WAIT, Endpoint, HttpError, HttpTransport, MAX_BODY, Method,

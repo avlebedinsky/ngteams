@@ -30,7 +30,7 @@ use gpui_component::input::{Input, InputEvent, InputState};
 use gpui_component::{Disableable as _, Sizable as _};
 use serde_json::Value;
 use teams_core::{TeamChange, TeamMember};
-use teams_fence::Mri;
+use teams_proto::Mri;
 use teams_proto::{
     AnalyticsPeriod, InstalledApp, ManagedChannel, MemberUpdate, OwnTeamView, TagsRead, TeamAnalytics, TeamTag,
     TeamWrite,

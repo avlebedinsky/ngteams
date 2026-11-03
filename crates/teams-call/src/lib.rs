@@ -1,5 +1,5 @@
 //! A call's signaling (M3 Task 13): the state machine of the account's calls, sans-IO. It builds each request a call
-//! makes as a sealed `teams-proto` write and **hands it on; it sends nothing itself**. The engine owns it, feeds it,
+//! makes as a typed `teams-proto` request and **hands it on; it sends nothing itself**. The engine owns it, feeds it,
 //! and carries out what it asks (`docs/protocol/calling.md`, `docs/protocol/calling-echo.md`).
 //!
 //! ```text
@@ -8,22 +8,22 @@
 //! let call = calls.place(&placement, offer, now)?; // or a delivered invitation, answered by `calls.answer(…)`
 //! while let Some(effect) = calls.poll() {
 //!     match effect {
-//!         Effect::Send { id, write } => write.submit_to(id, &mut sink), // fence, outbox; `calls.on_outcome(id, …)`
+//!         Effect::Send { id, write } => write.submit_to(id, &mut sink), // outbox; `calls.on_outcome(id, …)`
 //!         Effect::Respond { delivery, reply } => { /* the delivery's own responder; `on_response_failed` */ }
 //!         Effect::Event(event) => { /* tell the account */ }
-//!         Effect::LetGo { attach } => fence.let_go(attach.as_str()), // an invitation dropped before it rang
+//!         Effect::LetGo { attach } => tracker.release(attach.as_str()), // an invitation dropped before it rang
 //!     }
 //! }
 //! ```
 //!
 //! **In**: the account's actions ([`Calls::place`], [`Calls::join`], [`Calls::answer`], [`Calls::decline`],
-//! [`Calls::hang_up`], [`Calls::renegotiate`], [`Calls::answer_media`]), each call delivery as the fence read it
-//! ([`Calls::on_delivery`]: the calling socket's `teams_fence::Delivery` and `Observed`), each write's outcome under
+//! [`Calls::hang_up`], [`Calls::renegotiate`], [`Calls::answer_media`]), each call delivery as the tracker read it
+//! ([`Calls::on_delivery`]: the calling socket's `track::Delivery` and `track::Observed`), each write's outcome under
 //! its [`WriteId`] ([`Calls::on_outcome`]), a delivery response that didn't go ([`Calls::on_response_failed`]), the
 //! media failing ([`Calls::fail_media`]), the engine stopping ([`Calls::shut_down`]) and the time ([`Calls::tick`]).
-//! **Out** ([`Calls::poll`]): [`Effect::Send`] (a [`CallWrite`], handed to the engine's [`WriteSink`] as its own sealed
-//! type, checked by the fence and sent in order), [`Effect::Respond`] (a typed delivery response, for the delivery's
-//! own responder), [`Effect::Event`] and [`Effect::LetGo`] (an invitation dropped before it rang, for the fence to
+//! **Out** ([`Calls::poll`]): [`Effect::Send`] (a [`CallWrite`], handed to the engine's [`WriteSink`] as its own typed
+//! request, tracked and sent in order), [`Effect::Respond`] (a typed delivery response, for the delivery's
+//! own responder), [`Effect::Event`] and [`Effect::LetGo`] (an invitation dropped before it rang, for the tracker to
 //! retire once no further attempt at its `attach` goes). An engine keeps one write in flight: beside it it takes only what isn't a
 //! write ([`Calls::poll_beside_write`]), so the writes after it stay in the machine's queue, where a call that ends
 //! drops them; a write refused without being acted on (a 401, a throttled one) goes again only while its call still
@@ -42,7 +42,7 @@
 //!   with no action of the account's; once the `attach` is answered it rings here (`progress`,
 //!   [`CallEvent::Incoming`]). Nothing answers it but [`Calls::answer`] (endpoint state, then, once that was taken,
 //!   `accept`) and nothing declines it but [`Calls::decline`], or [`Calls::hang_up`] while it is being answered and
-//!   its `accept` hasn't gone out yet (until then the account isn't in the call). An invitation the fence doesn't offer never reaches the
+//!   its `accept` hasn't gone out yet (until then the account isn't in the call). An invitation the tracker doesn't offer never reaches the
 //!   machine, and one that comes while a call is up isn't offered: nothing is sent for it.
 //! - **Ends**: any delivery at the call's own `call/end` or `conversationEnd` callback ends the call (or the ring, an
 //!   offered invitation's: [`CallEvent::RingEnded`]), whatever its body; what the body says is kept as delivered
@@ -59,7 +59,7 @@
 //!   another negotiation is in progress (`491`), after which the same offer goes again a few seconds later, unless the
 //!   far end's renegotiation came meanwhile: the account's then gives way to it, [`CallEvent::RenegotiationGaveWay`]),
 //!   and one delivered at the account's `mediaRenegotiation` callback (told as [`CallEvent::MediaOffer`], answered only
-//!   by [`Calls::answer_media`]; one the fence bound no link for fails the call: no capture shows a refusal; one that
+//!   by [`Calls::answer_media`]; one the tracker bound no link for fails the call: no capture shows a refusal; one that
 //!   comes while the account's is being made or waits for its answer is told once the account's settled). Every renegotiation, answer and acknowledgement delivered at the call's own
 //!   callback gets its receipt (an empty delivery response) as the web client gives it; a delivery may still come
 //!   again: an answer or a rejection counts only at the callbacks of the account's renegotiation that waits for it

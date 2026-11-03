@@ -13,6 +13,7 @@ use clap::Parser as _;
 use gpui::{App, AppContext as _, AsyncApp, Entity, WindowingModes};
 #[cfg(not(test))]
 use ngteams::accounts::{self, Runner, Started};
+use ngteams::accounts_file::{PersonalAccount, PersonalPaths};
 #[cfg(not(test))]
 use ngteams::app;
 use ngteams::app::{Launch, SignInAgain};
@@ -24,8 +25,6 @@ use ngteams::setup::Setup;
 use ngteams::{KEYRING_APPLICATION, read_only, snapshot};
 use teams_auth::secrets::LazyKeyring;
 use teams_core::CallFloor;
-use teams_fence::lab::LabLocations;
-use teams_fence::personal::{PersonalAccount, PersonalPaths};
 use teams_media::devices::pipewire::Reach;
 #[cfg(not(test))]
 use teams_ui::account_prompt;
@@ -168,14 +167,10 @@ fn broker(upn: &str, fd: RawFd) -> ExitCode {
     let account = PersonalPaths::from_env()
         .map_err(|error| error.to_string())
         .and_then(|paths| PersonalAccount::find(&paths, upn).map_err(|error| error.to_string()));
-    let lab = LabLocations::from_env().map_err(|error| error.to_string());
-    let account = match (account, lab) {
-        (Ok(Some(account)), Ok(lab)) if account.is_signed_in() => match account.check_not_lab(&lab) {
-            Ok(()) => account,
-            Err(error) => return failed("secrets", &error),
-        },
-        (Ok(_), Ok(_)) => return failed("secrets", &format!("{upn} isn't one of your signed-in accounts")),
-        (Err(error), _) | (_, Err(error)) => return failed("secrets", &error),
+    let account = match account {
+        Ok(Some(account)) if account.is_signed_in() => account,
+        Ok(_) => return failed("secrets", &format!("{upn} isn't one of your signed-in accounts")),
+        Err(error) => return failed("secrets", &error),
     };
     let scope = read_only::broker_scope(&account.upn);
     let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
@@ -222,8 +217,7 @@ fn run_read_only(mode: &ReadOnlyMode) -> Result<Outcome, String> {
     read_only::window_allowed_here()?;
     let mine = PersonalPaths::from_env().map_err(|error| error.to_string())?;
     let paths = read_only::snapshot_paths(&mode.data, &mine)?;
-    let lab = LabLocations::from_env().map_err(|error| error.to_string())?;
-    let setup = Setup::new(paths, lab).map_err(|error| error.to_string())?;
+    let setup = Setup::new(paths).map_err(|error| error.to_string())?;
     let account = setup
         .signed_in_accounts()
         .map_err(|error| error.to_string())?

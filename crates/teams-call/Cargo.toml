@@ -19,8 +19,6 @@ serde_json.workspace = true
 serde.workspace = true
 url.workspace = true
 log.workspace = true
-# a call delivery as the fence read it (`Delivery`, `Observed`), MRIs, the 1:1 chat ids
-teams-fence.workspace = true
 # the sealed call writes and the typed delivery responses it builds
 teams-proto.workspace = true
 thiserror.workspace = true
@@ -28,8 +26,6 @@ thiserror.workspace = true
 [dev-dependencies]
 # the tests' Trouter credentials
 teams-auth.workspace = true
-# a lab fence over a test roster and log
-teams-fence = { workspace = true, features = ["test-support"] }
 # the chat service mock with its calling service and Trouter
 teams-mock.workspace = true
 # the native transport reaching the mock through its mock origin

@@ -81,7 +81,7 @@ use std::pin::{Pin, pin};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use serde_json::Value;
-use teams_fence::Mri;
+use teams_proto::Mri;
 use teams_proto::chat::{self, ChatReadError, ChatReads, Field, MAX_PAGE_SIZE, MessagePage};
 use teams_proto::{Client, Credentials, HttpError, HttpTransport, Transport};
 use teams_store::{

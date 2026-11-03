@@ -4,7 +4,7 @@
 
 use std::time::Instant;
 
-use teams_fence::Mri;
+use teams_proto::Mri;
 use teams_proto::{
     AcceptCall, AcceptParts, AcknowledgeAcceptance, AcknowledgeMediaAnswer, AddParts, AddToCall, AnswerMedia,
     AnswerMediaParts, ApplyChannelParameters, AttachCall, AttachParts, CallLink, ChannelParameters, DecideLobby,

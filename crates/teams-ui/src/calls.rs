@@ -34,7 +34,7 @@ use teams_core::{
     CallAction, CallActionError, CallId, CallStatus, CallView, End, EngineError, Event, IncomingCall, LobbyPerson,
     MeetingInfo, RegistrationReport,
 };
-use teams_fence::Mri;
+use teams_proto::Mri;
 
 use crate::bridge::Core;
 use crate::trace::{TraceLine, ViewTrace};
@@ -288,7 +288,7 @@ impl Ended {
     pub fn group_chat(&self) -> Option<&str> {
         self.chat
             .as_deref()
-            .filter(|chat| teams_fence::one_to_one_pair(chat).is_none())
+            .filter(|chat| teams_proto::one_to_one_pair(chat).is_none())
     }
 
     /// The chat a call back goes to: the call's chat, or for a 1:1 invitation the chat of the account (`me`) and its
@@ -297,7 +297,7 @@ impl Ended {
     pub fn call_back_chat(&self, me: &str) -> Option<String> {
         self.chat.clone().or_else(|| {
             let caller = self.caller.as_ref()?;
-            teams_fence::one_to_one_id(me, caller.as_str())
+            teams_proto::one_to_one_id(me, caller.as_str())
         })
     }
 }

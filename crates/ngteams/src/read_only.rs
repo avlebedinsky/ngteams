@@ -29,10 +29,10 @@ use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 
+use crate::accounts_file::PersonalPaths;
+use crate::accounts_file::overlapping;
 use teams_auth::broker::{BrokerScope, BrokerSecretStore, Note, Outcome, ServeError, serve};
 use teams_auth::secrets::{OverlaySecretStore, SecretStore};
-use teams_fence::apart::overlapping;
-use teams_fence::personal::PersonalPaths;
 use ui_sandbox::{SANDBOX_ENV, in_sandbox, names_wayland_display};
 
 use crate::KEYRING_APPLICATION;

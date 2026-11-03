@@ -22,11 +22,11 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use crate::accounts_file::PersonalAccount;
 use gpui::{App, AppContext as _, AsyncApp, Entity, Global, QuitMode, SharedString, Task, WeakEntity, WindowHandle};
 use teams_auth::secrets::{LazyKeyring, SecretStore};
 use teams_auth::session::SignedOut;
 use teams_core::EngineHandle;
-use teams_fence::personal::PersonalAccount;
 use teams_log::diagnostics::Source as DiagnosticsSource;
 use teams_ui::account_prompt::{self, AccountPrompt, AccountPromptEvent};
 use teams_ui::bus::BusError;

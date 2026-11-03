@@ -376,7 +376,7 @@ impl MeetingChannel {
             .split_once('@')
             .is_some_and(|(local, domain)| !local.is_empty() && domain.contains('.') && !domain.contains('@'))
             && !address.contains(['/', '?', '#', ' ', ',', ';', '"', '<', '>', '\\', '%']);
-        (teams_fence::is_team_thread_id(&self.channel) && mailbox_reads).then(|| Self {
+        (crate::is_team_thread_id(&self.channel) && mailbox_reads).then(|| Self {
             mailbox: address.to_owned(),
             channel: self.channel,
         })

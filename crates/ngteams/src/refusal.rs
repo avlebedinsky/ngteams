@@ -1,7 +1,7 @@
 //! What the personal binary refuses before anything else (`docs/personal-build.md`, "What agents never build a
 //! personal build means once the code exists"):
 //!
-//! - **a build with `test-support`**: `teams-fence`'s (a fence over any roster and log, mock origins) or
+//! - **a build with `test-support`**: the protocol's mock origins or
 //!   `teams-signin`'s (a guard with test rules); cargo unifies it in from the dev-dependencies of any `cargo test`,
 //!   `--all-targets` or `--all-features` build, so every binary the gate leaves refuses to run;
 //! - **a build `scripts/install-personal.sh` didn't make**: the install marker, an environment variable only the script

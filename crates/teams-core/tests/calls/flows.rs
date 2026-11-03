@@ -6,8 +6,8 @@ use std::time::Duration;
 
 use crate::support::{A_TONE, B_TONE, Lab, PEER_TONE, TALK, heard, heard_before, wait_until};
 use teams_core::{CallAction, CallStatus, End, Event, RegistrationReport};
-use teams_fence::Mri;
 use teams_mock::{AB_CHAT, ABC_CHAT, ECHO, LAB_A, LAB_B, LAB_C, TIMED_OUT};
+use teams_proto::Mri;
 
 /// The far tone is heard at least this loud in a recording (a tone of 0.5 through Opus and the jitter buffer).
 const HEARD: f32 = 0.25;

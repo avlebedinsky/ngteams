@@ -1,6 +1,6 @@
 //! The read-only mode (`ngteams::read_only`) on the mock chat service (`teams-mock`, through the `test-support` mock
 //! origins) and in temporary directories, never a real account: every write kind the engine is asked for is refused
-//! below the views, before the fence is asked, and logged to `fence.log` as `refused_read_only` (method, host, path
+//! below the views and recorded in the diagnostic log as `refused_read_only` (method, host, path
 //! shape), with nothing sent; reads go through; the transport refuses a write, a call write, a registration and a
 //! mutating plain request on its own too; no push channel and no calling is opened; the broker serves `get` only; the
 //! window refuses anywhere but the UI sandbox; the snapshot leaves its source as it was. Every id and token here is
@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser as _;
+use ngteams::accounts_file::PersonalPaths;
 use ngteams::cli::{Cli, ReadOnlyMode};
 use ngteams::read_only::{self, window_allowed};
 use ngteams::snapshot;
@@ -30,10 +31,9 @@ use teams_auth::token::TokenError;
 use teams_core::engine::{self, Action, EngineHandle, EngineOptions, Event, Parts};
 use teams_core::{CallAction, CallActionError, EngineError, OwnStatus, Transient, TransientSent};
 use teams_core::{Outbox, account};
-use teams_fence::Mri;
-use teams_fence::personal::PersonalPaths;
 use teams_media::devices::file::{AudioInput, FileDevices, Pacing, PatternCamera};
 use teams_mock::{AX_CHAT, CHAT_BASE, ChatServiceMock, LAB_A, OUTSIDER};
+use teams_proto::Mri;
 use teams_proto::chat::MessageText;
 use teams_proto::{
     Author, CallContext, CallLink, CallParticipant, Client, Credentials, Endpoint, EndpointRegistration, HttpError,
@@ -55,7 +55,7 @@ impl Credentials for Tokens {
     }
 }
 
-/// `who`'s read-only transport to the mock under `fence`.
+/// `who`'s read-only transport to the mock.
 fn read_only_http(mock: &ChatServiceMock, who: &str) -> HttpTransport<Tokens> {
     let tokens = Arc::new(Tokens(mock.token(who).unwrap()));
     HttpTransport::with_mock_origin(tokens, CHAT_BASE, &mock.origin())
@@ -73,7 +73,7 @@ async fn not_reads(mock: &ChatServiceMock) -> Vec<String> {
         .collect()
 }
 
-/// `LAB_A`'s engine on the mock, its transports read-only, with no push channel and no calling, and its fence's log.
+/// `LAB_A`'s engine on the mock, with read-only transports, no push channel and no calls.
 fn read_only_engine(mock: &ChatServiceMock, dir: &tempfile::TempDir) -> EngineHandle {
     let transport = Arc::new(read_only_http(mock, LAB_A));
 
@@ -239,7 +239,7 @@ async fn the_transport_refuses_a_write_a_call_write_a_registration_and_a_mutatin
     let transport = read_only_http(&mock, LAB_A);
     assert!(Transport::is_read_only(&transport));
 
-    // a permitted write (the personal fence permits anything), handed to the transport anyway
+    // a typed write handed to the read-only transport
     let post = SendMessage::new(
         AX_CHAT,
         Author::new(Mri::new(LAB_A), "a"),
@@ -440,7 +440,7 @@ fn the_snapshot_copies_what_the_mode_needs_and_leaves_its_source_as_it_was() {
     let home = tempfile::tempdir().unwrap();
     let mine = PersonalPaths::new(home.path().join("config/ngteams"), home.path().join("share/ngteams"));
     mine.make_dirs().unwrap();
-    let account = teams_fence::personal::PersonalAccount::new(
+    let account = ngteams::accounts_file::PersonalAccount::new(
         "someone@example.test",
         "00000000-0000-4000-8000-0000000000ff",
         "00000000-0000-4000-8000-000000000001",
@@ -450,7 +450,8 @@ fn the_snapshot_copies_what_the_mode_needs_and_leaves_its_source_as_it_was() {
     fs::write(mine.settings_file(), "send_typing = false\n").unwrap();
     fs::create_dir_all(mine.data_dir().join("regions")).unwrap();
     fs::write(mine.region_file(&account).unwrap(), r#"{"region": "amer"}"#).unwrap();
-    fs::write(mine.fence_log(), "{}\n").unwrap();
+    fs::create_dir_all(mine.log_dir()).unwrap();
+    fs::write(mine.log_dir().join("app.log"), "synthetic log\n").unwrap();
     let store_file = mine.store_file(&account).unwrap();
     {
         let store = Store::open(&store_file).unwrap();
@@ -465,7 +466,7 @@ fn the_snapshot_copies_what_the_mode_needs_and_leaves_its_source_as_it_was() {
     assert_eq!(tree(home.path()), before, "nothing of the source changed");
     assert!(paths.accounts_file().is_file() && paths.settings_file().is_file());
     assert!(paths.region_file(&account).unwrap().is_file());
-    assert!(!paths.fence_log().exists(), "its own fence.log, made by the mode");
+    assert!(!paths.log_dir().exists(), "diagnostic logs are left out of a snapshot");
     Store::open(&paths.store_file(&account).unwrap()).unwrap();
     assert_eq!(tree(home.path()), before, "the copy is a store of its own");
 

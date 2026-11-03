@@ -20,7 +20,6 @@ use teams_core::{
     CallId, CallMedia, CallParts, CallStatus, CallVideo, CallView, End, Identity, IncomingCall, Outbox, Relay,
     VideoOutput,
 };
-use teams_fence::Mri;
 use teams_media::devices::file::{AudioInput, FileDevices, FrameCounter, Pacing, PatternCamera};
 use teams_media::devices::{AudioSink, AudioSource, DeviceError, Devices, VideoSink, VideoSource, wav};
 use teams_media::processing::ProcessingConfig;
@@ -30,6 +29,7 @@ use teams_media::tone::{Tone, level_at};
 use teams_media::video::codec::EncoderSettings;
 use teams_media::video::convert::MaxSize;
 use teams_mock::{CHAT_BASE, ChatServiceMock, LAB_A, TENANT, TrouterMock};
+use teams_proto::Mri;
 use teams_proto::{Author, Client, ClientInfo, Credentials, HttpTransport};
 use teams_store::Store;
 use teams_trouter::{CallStack, Options, RegistrationReport, Trouter, TrouterCredentials};

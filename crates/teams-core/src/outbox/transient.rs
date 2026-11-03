@@ -1,6 +1,6 @@
 //! The outbox's transient kind: a write that matters only at the moment it is asked for (typing, and the account's own
-//! availability: its endpoint's `PUT` and its manual status, M2 Task 19). It goes out through the outbox like every other write, each send under a fresh
-//! [`Fence::check`](teams_fence::Fence::check) with its `fence.log` line and the transport's rules, but it is never a
+//! availability: its endpoint's `PUT` and its manual status, M2 Task 19). It goes out through the outbox like every
+//! other write, under the transport's rules, but it is never a
 //! row: nothing of it is stored, so nothing is checked for, tried again after an unknown outcome, adopted by a later
 //! run or offered to send again. A durable row for `Control/Typing` would never settle (a `Control/*` message never
 //! settles a row) and could go out again at a moment the user didn't choose.
@@ -17,8 +17,7 @@
 //! - **Latest wins while one waits**: a transient asked for while one of the same ([`Transient::replaces`]) waits takes
 //!   its place, and waits as long; only the newest goes out.
 //! - **An availability names only the outbox's account's endpoint**: one whose endpoint was registered for another
-//!   account (or for none: the registering transport's fence owned no account) is dropped before anything is asked
-//!   of the fence or sent; `teams_proto` builds no write of it.
+//!   account (or for none) is dropped before anything is sent; `teams_proto` builds no write of it.
 
 use std::sync::PoisonError;
 use std::time::Duration;

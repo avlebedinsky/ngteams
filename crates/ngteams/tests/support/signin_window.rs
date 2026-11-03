@@ -31,11 +31,10 @@ fn bound_windows_refuse_foreign_pages_and_report_data_failures_before_the_servic
     let again = cx.update(super::windows);
     let refused = window(&setup, &windows)(request("https://example.test/authorize"));
     assert!(matches!(refused, SignInAnswer::Failed(reason) if reason.contains("isn't on the sign-in window's hosts")));
-    assert!(!setup.paths.fence_log().exists());
     let mut broken = setup.clone();
     let file = root.path().join("not-a-directory");
     std::fs::write(&file, b"_synthetic obstruction").unwrap();
-    broken.paths = teams_fence::personal::PersonalPaths::new(file.clone(), file);
+    broken.paths = crate::accounts_file::PersonalPaths::new(file.clone(), file);
     let refused = window(&broken, &again)(request("https://login.microsoftonline.com/authorize"));
     assert!(matches!(refused, SignInAnswer::Failed(reason) if reason.contains("personal data dir")));
     assert_eq!(cx.update(|cx| cx.windows().len()), 0);
@@ -56,9 +55,5 @@ fn a_bound_request_is_answered_by_the_service_without_loading_an_invalid_redirec
         std::thread::sleep(Duration::from_millis(1));
     }
     assert!(matches!(replying.join().unwrap(), SignInAnswer::Failed(reason) if reason.contains("redirect URI")));
-    assert!(
-        !setup.paths.fence_log().exists(),
-        "sign-in writes only the diagnostic log"
-    );
     assert_eq!(cx.update(|cx| cx.windows().len()), 0);
 }

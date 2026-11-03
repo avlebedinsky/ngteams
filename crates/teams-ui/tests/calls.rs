@@ -25,9 +25,9 @@ use teams_core::{
     CallAction, CallActionError, CallId, CallParticipant, CallStatus, CallView, End, EngineError, Event, IncomingCall,
     MessageChange, RegistrationReport, RemoteEnd, Source,
 };
-use teams_fence::Mri;
 use teams_media::devices::catalog::{DeviceDirectory as _, DeviceInfo, DeviceKind, DeviceList, FixedDirectory};
 use teams_media::devices::pattern::TestPattern;
+use teams_proto::Mri;
 use teams_store::{Applied, ConversationKind, Member};
 use teams_ui::call_alert::{CallAlert, notice_of};
 use teams_ui::call_stage::AUTO_CLOSE;

@@ -110,7 +110,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime};
 
 use teams_call::{CallId, Placement, RemoteEnd};
-use teams_fence::Mri;
+use teams_proto::Mri;
 use teams_proto::chat::{self, MessageText};
 use teams_proto::{
     AnalyticsPeriod, CalendarEvent, ChannelMeetup, Client, Credentials, EndpointRegistrar, EventAttendee, FileRange,
@@ -1742,7 +1742,7 @@ where
 
     /// Keeps `conversation` for the next tick's look at the teams ([`Self::note_noticed`]).
     fn notice(&self, conversation: &str) {
-        if teams_fence::is_team_thread_id(conversation) {
+        if teams_proto::is_team_thread_id(conversation) {
             self.noticed.borrow_mut().push(conversation.to_owned());
         }
     }
@@ -2270,7 +2270,7 @@ where
             CallAction::TestCall { echo } => Act::Place(Placement::TestCall { echo }),
             CallAction::Join { chat } => Act::Join(chat),
             // a channel's meeting is joined at the conversation its channel names it runs at, read as it goes
-            CallAction::JoinMeeting { chat, .. } if teams_fence::is_team_thread_id(&chat) => {
+            CallAction::JoinMeeting { chat, .. } if teams_proto::is_team_thread_id(&chat) => {
                 Act::JoinChannel(chat, Arc::default())
             }
             CallAction::JoinMeeting { chat, meeting } => Act::Place(Placement::Meeting { chat, meeting }),
@@ -2502,7 +2502,7 @@ where
     ) {
         self.notice(&conversation);
         // a team's own activity (people added or gone, a channel made, renamed or deleted) changes what its list shows
-        if teams_fence::is_team_thread_id(&conversation) && message.message_type.as_str().starts_with("ThreadActivity/")
+        if teams_proto::is_team_thread_id(&conversation) && message.message_type.as_str().starts_with("ThreadActivity/")
         {
             self.teams.note_activity();
         }

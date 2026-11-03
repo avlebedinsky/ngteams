@@ -250,10 +250,7 @@ impl ChannelEventRef {
     /// The channel's meeting `entry` (an event as the calendar reads it) is, if it is one.
     fn of(entry: &Value) -> Option<Self> {
         let data: Value = serde_json::from_str(entry.get("skypeTeamsData")?.as_str()?).ok()?;
-        let channel = data
-            .get("cid")?
-            .as_str()
-            .filter(|cid| teams_fence::is_team_thread_id(cid))?;
+        let channel = data.get("cid")?.as_str().filter(|cid| crate::is_team_thread_id(cid))?;
         let ical_uid = entry
             .get("iCalUID")?
             .as_str()

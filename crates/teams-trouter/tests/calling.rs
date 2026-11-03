@@ -16,8 +16,8 @@ use teams_auth::secrets::Secret;
 use teams_auth::session::{AccessToken, Renewal};
 use teams_auth::token::TokenError;
 use teams_call::Observed;
-use teams_fence::Mri;
 use teams_mock::{AB_CHAT, CALLING_APP, CHAT_BASE, ChatServiceMock, LAB_A, LAB_B, SocketRecord, TrouterMock};
+use teams_proto::Mri;
 use teams_proto::{
     AcceptanceAcknowledgement, CALL_START_URL, Credentials, HttpTransport, IC3_AUDIENCE, InvitationReceipt, Links,
     Response, TEST_CALL_SCENARIO,

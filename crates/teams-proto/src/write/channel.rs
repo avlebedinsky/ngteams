@@ -1,7 +1,7 @@
 //! Typed channel creation, membership and visibility requests.
 
+use crate::Mri;
 use serde_json::{Value, json};
-use teams_fence::Mri;
 
 use super::Prepared;
 use super::Wire;

@@ -13,18 +13,18 @@
 //!   `teams_proto::TEAMS_ECHO_BOT_MRI`), never one taken from the network or the UI.
 //! - **Video**: a call takes video on the OpenH264 built into the app; the settings' switch turns it off and on.
 //!
-//! The fence decides every call write (`teams_fence`'s personal call rule); nothing here sends anything.
+//! The engine's call state and shared call floor control call admission; nothing here sends requests.
 
 use std::sync::Arc;
 
 use teams_core::account::{AccountCalls, account_calls, call_video};
-use teams_fence::Mri;
 use teams_media::devices::catalog::DeviceDirectory;
 #[cfg(not(test))]
 use teams_media::devices::pipewire::PipeWireDevices;
 use teams_media::devices::pipewire::Reach;
 use teams_media::devices::{DeviceError, Devices};
 use teams_media::player::PlayerSetup;
+use teams_proto::Mri;
 use teams_ui::{DeviceRinger, Ringer, VideoFeed};
 
 #[cfg(test)]

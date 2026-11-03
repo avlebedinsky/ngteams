@@ -3,7 +3,7 @@
 //! local authz (wiremock), the refresh token stored under the account's UPN in the store handed in (the app hands in the
 //! desktop's Secret Service under `ngteams`; here a `MemorySecretStore`), the account's `accounts.toml` entry
 //! given the object id and tenant, its region saved under `regions/`; a later sign-in landing in another account stores
-//! nothing; a lab account is refused; several accounts side by side (added, abandoned, signed in, forgotten one at a
+//! nothing; several accounts side by side (added, abandoned, signed in, forgotten one at a
 //! time), an added account whose sign-in stored nothing keeping what the user wrote into its entry (its `idp_hosts`)
 //! for the next try, and a host the window refused named with where to add it; a single account's files of an earlier
 //! build moved into theirs; the engine opens each account's store under
@@ -19,6 +19,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use ngteams::KEYRING_APPLICATION;
+use ngteams::accounts_file::{PersonalAccount, PersonalError, PersonalPaths};
 use ngteams::forget::{self, ForgetError, Forgot};
 use ngteams::setup::{Setup, SetupError};
 use ngteams::signin::{self, SignInClients, SignInError};
@@ -28,8 +29,6 @@ use teams_auth::refresh::refresh_token_key;
 use teams_auth::secrets::{MemorySecretStore, Secret, SecretStore};
 use teams_auth::signin::{SignInAnswer, SignInRequest, WindowSignInError};
 use teams_auth::token::{EntraConfig, NATIVE_CLIENT_REDIRECT, TEAMS_NATIVE_CLIENT_ID, TokenClient, TokenError};
-use teams_fence::lab::LabLocations;
-use teams_fence::personal::{PersonalAccount, PersonalError, PersonalPaths};
 use teams_mock::CHAT_BASE;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -40,45 +39,14 @@ const TENANT: &str = "00000000-0000-4000-8000-000000000001";
 const DISPLAY_NAME: &str = "Made-Up Person";
 const OTHER_OID: &str = "00000000-0000-4000-8000-0000000000ee";
 const SECOND_UPN: &str = "someone-else@example.test";
-const LAB_A_OID: &str = "00000000-0000-4000-8000-00000000000a";
 const AUTHZ_FIXTURE: &str = include_str!("../../../tests/fixtures/auth/authz-ok.json");
 
-fn lab_toml() -> String {
-    let mut text = String::new();
-    for (alias, end) in ["a", "b", "c"].iter().zip(["0a", "0b", "0c"]) {
-        text.push_str(
-            &[
-                "[[accounts]]\nalias = \"",
-                alias,
-                "\"\nupn = \"bot-",
-                alias,
-                "@lab.example.test\"\n",
-            ]
-            .concat(),
-        );
-        text.push_str(&["mri = \"8:orgid:00000000-0000-4000-8000-0000000000", end, "\"\n"].concat());
-    }
-    text
+/// Temporary account paths.
+fn paths_in(dir: &tempfile::TempDir) -> PersonalPaths {
+    PersonalPaths::new(dir.path().join("config/ngteams"), dir.path().join("share/ngteams"))
 }
-
-/// The personal build's paths and a lab beside them (its `lab.toml` written), all under `dir`.
-fn paths_in(dir: &tempfile::TempDir) -> (PersonalPaths, LabLocations) {
-    let config_file = dir.path().join("config/teams-lab/lab.toml");
-    fs::create_dir_all(config_file.parent().unwrap()).unwrap();
-    fs::write(&config_file, lab_toml()).unwrap();
-    let lab = LabLocations {
-        config_file,
-        data_dir: dir.path().join("share/teams-lab"),
-        personal_data_dir: dir.path().join("share/ngteams"),
-    };
-    let paths = PersonalPaths::new(dir.path().join("config/ngteams"), dir.path().join("share/ngteams"));
-    (paths, lab)
-}
-
-/// The personal build's files and a lab beside them, all under `dir`.
 fn setup_in(dir: &tempfile::TempDir) -> Setup {
-    let (paths, lab) = paths_in(dir);
-    Setup::new(paths, lab).unwrap()
+    Setup::new(paths_in(dir)).unwrap()
 }
 
 /// `upn` signed in as `oid` through a token endpoint and authz of its own.
@@ -91,7 +59,7 @@ async fn signed_in(setup: &Setup, upn: &str, oid: &str, store: &MemorySecretStor
         .unwrap()
 }
 
-/// `account`'s engine under its own personal fence, its secrets a store of its own (nothing is sent).
+/// `account`'s engine using an in-memory secret store (nothing is sent).
 fn start_engine(setup: &Setup, account: &PersonalAccount) -> ngteams::engine::PersonalEngine<MemorySecretStore> {
     ngteams::engine::start(
         &setup.paths,
@@ -212,7 +180,7 @@ async fn the_first_sign_in_stores_the_token_the_account_and_the_region_and_the_e
     );
     assert!(signin::ready(&setup, &signed, &store).await.unwrap());
 
-    // the engine: the personal fence of the account, the store under the personal data dir; nothing is sent
+    // the engine uses the account store under the personal data dir; nothing is sent
     let engine = start_engine(&setup, &signed);
     let store_file = setup.paths.store_file(&signed).unwrap();
     assert!(store_file.is_file());
@@ -255,35 +223,6 @@ async fn a_later_sign_in_that_lands_in_another_account_stores_nothing() {
         signin::sign_in(&setup, &account, &clients, &store, answering(&SignInAnswer::Closed))
             .await
             .is_err()
-    );
-}
-
-#[tokio::test]
-async fn a_lab_account_is_refused_before_the_window_and_after_it() {
-    let dir = tempfile::tempdir().unwrap();
-    let setup = setup_in(&dir);
-    // by its UPN, before anything is asked
-    assert!(matches!(
-        setup.ask_for("bot-b@lab.example.test"),
-        Err(SetupError::Personal(PersonalError::LabAccount))
-    ));
-    assert!(!setup.paths.accounts_file().exists());
-    // by its MRI, once the ID token names it: what was stored goes again
-    let server = MockServer::start().await;
-    let clients = clients(&server, UPN, LAB_A_OID).await;
-    let store = MemorySecretStore::new();
-    let account = setup.ask_for(UPN).unwrap();
-    let refused = signin::sign_in(&setup, &account, &clients, &store, window()).await;
-    assert!(
-        matches!(refused, Err(SignInError::Personal(PersonalError::LabAccount))),
-        "{refused:?}"
-    );
-    assert!(store.get(&refresh_token_key(UPN)).await.unwrap().is_none());
-    assert!(
-        !PersonalAccount::find(&setup.paths, UPN)
-            .unwrap()
-            .unwrap()
-            .is_signed_in()
     );
 }
 
@@ -330,12 +269,6 @@ async fn an_abandoned_account_goes_only_while_no_sign_in_named_it() {
     // nothing held: the first run's screen asks, with an empty field
     assert!(setup.signed_in_accounts().unwrap().is_empty());
     assert!(setup.pending_upns().unwrap().is_empty());
-    // a lab account is refused before anything is written
-    assert!(matches!(
-        setup.ask_for("bot-b@lab.example.test"),
-        Err(SetupError::Personal(PersonalError::LabAccount))
-    ));
-    assert!(!setup.paths.accounts_file().exists());
     // an account given whose sign-in stored nothing leaves nothing behind
     let typo = setup.ask_for("someone@example.tset").unwrap();
     assert!(!typo.is_signed_in());
@@ -493,7 +426,7 @@ async fn a_second_account_s_sign_in_keeps_the_first_and_each_has_its_region_and_
         assert!(store.get(&refresh_token_key(&account.upn)).await.unwrap().is_some());
         assert!(signin::ready(&setup, account, &store).await.unwrap());
     }
-    // each account its engine, under its own fence, on its own store, side by side
+    // each account has its engine and store, side by side
     let engines = [start_engine(&setup, &first), start_engine(&setup, &second)];
     let stores = [&first, &second].map(|account| setup.paths.store_file(account).unwrap());
     assert_ne!(stores[0], stores[1]);
@@ -599,7 +532,7 @@ async fn forget_is_refused_while_the_engine_runs_and_forgets_one_account_leaving
 #[tokio::test]
 async fn a_single_account_of_an_earlier_build_is_moved_into_the_files_of_several() {
     let dir = tempfile::tempdir().unwrap();
-    let (paths, lab) = paths_in(&dir);
+    let paths = paths_in(&dir);
     fs::create_dir_all(paths.config_dir()).unwrap();
     fs::write(
         paths.legacy_account_file(),
@@ -611,7 +544,7 @@ async fn a_single_account_of_an_earlier_build_is_moved_into_the_files_of_several
         format!(r#"{{"region": "amer", "partition": null, "regionGtms": {{"chatServiceAfd": "{CHAT_BASE}"}}}}"#);
     fs::write(paths.legacy_region_file(), &region).unwrap();
 
-    let setup = Setup::new(paths, lab).unwrap();
+    let setup = Setup::new(paths).unwrap();
     assert!(!setup.paths.legacy_account_file().exists());
     assert!(!setup.paths.legacy_region_file().exists());
     assert!(setup.paths.accounts_file().is_file());
@@ -627,6 +560,6 @@ async fn a_single_account_of_an_earlier_build_is_moved_into_the_files_of_several
         .unwrap();
     assert!(signin::ready(&setup, &held, &store).await.unwrap());
     // a second setup over the moved files changes nothing
-    let again = Setup::new(setup.paths.clone(), setup.lab.clone()).unwrap();
+    let again = Setup::new(setup.paths.clone()).unwrap();
     assert_eq!(again.accounts().unwrap(), vec![held]);
 }

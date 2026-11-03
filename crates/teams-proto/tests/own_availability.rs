@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use serde_json::Value;
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
-use teams_fence::Mri;
+use teams_proto::Mri;
 use teams_proto::{
     Client, Credentials, EndpointRegistration, ForceAvailability, HttpError, HttpTransport, ManualAvailability,
     PRESENCE_AUDIENCE, Read, Refusal, RegisteredEndpoint, Request as ProtoRequest, Response, SetEndpointAvailability,
@@ -191,9 +191,8 @@ async fn only_a_registration_the_registrar_took_registers_an_endpoint() {
     let refused = register(&setup.transport, &registration).await.unwrap_err();
     assert!(matches!(refused, HttpError::Status(_)), "{refused:?}");
 
-    // a transport that answers a failure without an error registers nothing either (a fake transport registers at all
-    // only under `test-support`: outside it `register` takes only the native transport, an `EndpointRegistrar`, as
-    // fence-seal's `proto_register_fake_transport` case shows)
+    // A transport that answers a failure without an error registers nothing either.
+    // Fake registration transports exist only under test-support; normal builds require an EndpointRegistrar.
     let (answer, endpoint) = register(&Answering(503), &registration).await.unwrap();
     assert_eq!(answer.status(), 503);
     assert_eq!(endpoint, None);

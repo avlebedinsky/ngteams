@@ -38,7 +38,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
-use teams_fence::Mri;
+use teams_proto::Mri;
 use teams_proto::{Client, Credentials, HttpError, HttpTransport, PresenceRead, RegisteredEndpoint};
 use teams_trouter::PresenceDelivery;
 use tokio::task::JoinSet;

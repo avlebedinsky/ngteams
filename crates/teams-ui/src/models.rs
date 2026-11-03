@@ -253,14 +253,14 @@ impl Models {
     /// The models of a build that shows calls (the lab app, the personal build), its test call to `echo` (the echo
     /// service's MRI, when known).
     #[must_use]
-    pub fn with_calls(echo: Option<teams_fence::Mri>, cx: &mut App) -> Self {
+    pub fn with_calls(echo: Option<teams_proto::Mri>, cx: &mut App) -> Self {
         Self::with(Calls::shown(echo), cx)
     }
 
     /// The models of a build that shows calls with their video (the lab app or the personal build, when its calls have
     /// video), its test call to `echo` and its calls' video shown on `feed`.
     #[must_use]
-    pub fn with_video_calls(echo: Option<teams_fence::Mri>, feed: crate::video::VideoFeed, cx: &mut App) -> Self {
+    pub fn with_video_calls(echo: Option<teams_proto::Mri>, feed: crate::video::VideoFeed, cx: &mut App) -> Self {
         Self::with(Calls::shown(echo).with_video(feed), cx)
     }
 

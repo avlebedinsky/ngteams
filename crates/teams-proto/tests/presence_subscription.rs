@@ -9,7 +9,7 @@ use std::sync::Arc;
 use serde_json::Value;
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
-use teams_fence::Mri;
+use teams_proto::Mri;
 use teams_proto::{
     AnswerError, Client, Credentials, EndpointRegistration, HttpTransport, PRESENCE_PUSH_PATH, PostRead,
     PresenceSubscription, RegisteredEndpoint, Request as _, SubscriptionStatus, register,

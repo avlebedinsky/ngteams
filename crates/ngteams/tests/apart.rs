@@ -1,9 +1,4 @@
-//! How the lab and the personal build are kept apart (`docs/personal-build.md`): only this crate enables the
-//! `personal` feature of `teams-fence` (every workspace manifest read), and no normal build enables test-support.
-//! The workspace's default members leave this crate out; only the install script sets the install marker, and the
-//! binary refuses to run without it and with `test-support`, before anything else (the sign-in window's page engine
-//! included). Only this crate names the personal Secret Service application and opens the personal fence, and it
-//! never opens the lab's; each side refuses the other's data dir and a lab account.
+//! Build, credential namespace and dependency boundaries of ngteams.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
@@ -12,9 +7,6 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use ngteams::setup::Setup;
-use teams_fence::lab::{ConfigError, LabLocations, LabPaths};
-use teams_fence::personal::{PersonalAccount, PersonalError, PersonalPaths};
 use toml::Value;
 
 fn root() -> PathBuf {
@@ -60,40 +52,27 @@ fn dependency_tables(manifest: &Value) -> Vec<(String, &toml::Table)> {
 }
 
 #[test]
-fn only_this_crate_enables_the_personal_fence() {
-    let workspace = workspace();
-    let mut found = Vec::new();
-    for member in list(&workspace, "members") {
+fn runtime_crates_enable_test_support_only_through_dev_dependencies() {
+    for member in list(&workspace(), "members") {
         let manifest = manifest(&root().join(&member).join("Cargo.toml"));
-        for (kind, table) in dependency_tables(&manifest) {
-            let personal = table
-                .get("teams-fence")
-                .and_then(|entry| entry.get("features"))
-                .and_then(Value::as_array)
-                .is_some_and(|features| features.iter().any(|feature| feature.as_str() == Some("personal")));
-            if personal {
-                found.push(format!("{member} {kind} teams-fence"));
-            }
+        // The dev-only mock's optional media peer itself needs test-support. Its own dependency audit proves
+        // that no runtime crate takes teams-mock as a normal/build dependency, including renamed entries.
+        if manifest["package"]["name"].as_str() == Some("teams-mock") {
+            continue;
         }
-        // a feature of another crate forwarding to them
-        let features = manifest.get("features").and_then(Value::as_table).into_iter().flatten();
-        for (name, enables) in features {
-            let forwarded = enables.as_array().into_iter().flatten().filter_map(Value::as_str);
-            for enabled in forwarded.filter(|enabled| enabled.ends_with("/personal")) {
-                found.push(format!("{member} features.{name} {enabled}"));
+        for (kind, table) in dependency_tables(&manifest) {
+            if kind.ends_with("dev-dependencies") {
+                continue;
+            }
+            for (name, entry) in table {
+                let mut features = entry.get("features").and_then(Value::as_array).into_iter().flatten();
+                assert!(
+                    !features.any(|feature| feature.as_str() == Some("test-support")),
+                    "{member} {kind} {name} enables test-support"
+                );
             }
         }
     }
-    found.sort();
-    assert_eq!(
-        found,
-        [
-            // the fence's own tests of its personal parts, which no binary links
-            "crates/ngteams dependencies teams-fence",
-            "crates/ngteams dev-dependencies teams-fence",
-            "crates/teams-fence dev-dependencies teams-fence",
-        ]
-    );
 }
 
 /// `cargo tree` of `package` alone, its normal and build dependencies with their features.
@@ -119,15 +98,10 @@ fn features_of(package: &str) -> String {
 }
 
 #[test]
-fn normal_builds_leave_test_support_off_and_only_ngteams_enables_the_personal_fence() {
-    assert!(!features_of("proto-lab").contains("teams-fence"));
-    let tree = features_of("teams-signin");
-    assert!(!tree.contains("teams-fence"), "teams-signin: {tree}");
+fn normal_builds_leave_test_support_off_and_no_protocol_lab_is_linked() {
     let tree = features_of("ngteams");
-    assert!(tree.contains(r#"teams-fence feature "personal""#), "{tree}");
-    assert!(!tree.contains(r#"teams-fence feature "test-support""#), "{tree}");
-    assert!(!tree.contains(r#"teams-media feature "test-support""#), "{tree}");
-    assert!(!tree.contains(r#"teams-core feature "test-support""#), "{tree}");
+    assert!(!tree.contains("proto-lab"), "{tree}");
+    assert!(!tree.contains(r#"feature "test-support""#), "{tree}");
 }
 
 #[test]
@@ -224,9 +198,8 @@ fn the_binary_refuses_first() {
 }
 
 #[test]
-fn only_this_crate_names_the_personal_keyring_and_opens_the_personal_fence_and_never_the_lab_s() {
-    // as a store's application argument in any crate's code (the broker's tests name it to show it refuses it); the
-    // data dir shares the name, never as an argument
+fn only_this_crate_names_the_personal_keyring() {
+    // Match a store's application argument, not a directory name.
     let application = ["\"ngteams", "\")"].concat();
     let code: Vec<String> = fs::read_dir(root().join("crates"))
         .unwrap()
@@ -239,26 +212,8 @@ fn only_this_crate_names_the_personal_keyring_and_opens_the_personal_fence_and_n
         assert!(file.starts_with("crates/ngteams/"), "{file} names the personal keyring");
     }
     assert_eq!(ngteams::KEYRING_APPLICATION, "ngteams");
-    assert_ne!(ngteams::KEYRING_APPLICATION, LabPaths::KEYRING_APPLICATION);
     let accounts = fs::read_to_string(root().join("crates/ngteams/src/accounts.rs")).unwrap();
     assert!(accounts.contains("LazyKeyring::new(KEYRING_APPLICATION)"));
-    let opener = ["open", "_personal("].concat();
-    for file in holding(&["crates"], &opener) {
-        let allowed = file.starts_with("crates/ngteams/")
-            || file.starts_with("crates/teams-fence/")
-            || file.starts_with("crates/fence-seal/");
-        assert!(allowed, "{file} opens the personal fence");
-    }
-    for (path, text) in sources(&["crates/ngteams/src"]) {
-        for lab in [
-            "open_lab",
-            "LabPaths::KEYRING_APPLICATION",
-            "teams_core::lab",
-            "LabConfig::load",
-        ] {
-            assert!(!text.contains(lab), "{} uses {lab}", path.display());
-        }
-    }
 }
 
 #[test]
@@ -277,75 +232,4 @@ fn the_binary_built_with_test_support_refuses_and_touches_nothing() {
     assert!(output.stdout.is_empty());
     assert!(String::from_utf8_lossy(&output.stderr).contains("test-support"));
     assert_eq!(fs::read_dir(home.path()).unwrap().count(), 0, "nothing was created");
-}
-
-#[test]
-fn each_side_refuses_the_other_s_data_dir() {
-    let dir = tempfile::tempdir().unwrap();
-    let lab = LabLocations {
-        config_file: dir.path().join("config/teams-lab/lab.toml"),
-        data_dir: dir.path().join("share/teams-lab"),
-        personal_data_dir: dir.path().join("share/ngteams"),
-    };
-    // the personal build refuses the lab's
-    let inside = PersonalPaths::new(
-        dir.path().join("config/ngteams"),
-        dir.path().join("share/teams-lab/teams"),
-    );
-    assert!(matches!(
-        Setup::new(inside, lab.clone()),
-        Err(ngteams::setup::SetupError::Personal(PersonalError::LabDataDir { .. }))
-    ));
-    let apart = PersonalPaths::new(dir.path().join("config/ngteams"), dir.path().join("share/ngteams"));
-    assert!(Setup::new(apart, lab.clone()).is_ok());
-    // a lab binary refuses the personal one
-    let overlapping = LabLocations {
-        data_dir: dir.path().join("share/ngteams/lab"),
-        ..lab
-    };
-    assert!(matches!(
-        overlapping.lab_paths(),
-        Err(ConfigError::PersonalDataDir { .. })
-    ));
-}
-
-#[test]
-fn a_lab_account_among_the_personal_accounts_is_refused() {
-    let dir = tempfile::tempdir().unwrap();
-    let config_file = dir.path().join("config/teams-lab/lab.toml");
-    fs::create_dir_all(config_file.parent().unwrap()).unwrap();
-    let lab_toml = ["a", "b", "c"].map(|alias| {
-        let end = alias.repeat(2);
-        format!(
-            "[[accounts]]\nalias = \"{alias}\"\nupn = \"bot-{alias}@lab.example.test\"\n\
-             mri = \"8:orgid:00000000-0000-4000-8000-0000000000{end}\"\n"
-        )
-    });
-    fs::write(&config_file, lab_toml.concat()).unwrap();
-    let lab = LabLocations {
-        config_file,
-        data_dir: dir.path().join("share/teams-lab"),
-        personal_data_dir: dir.path().join("share/ngteams"),
-    };
-    let paths = PersonalPaths::new(dir.path().join("config/ngteams"), dir.path().join("share/ngteams"));
-    let setup = Setup::new(paths, lab).unwrap();
-    setup.ask_for("someone@example.test").unwrap();
-    // written beside it by hand: every listing of the accounts refuses it, and asking for it does too
-    PersonalAccount::pending("BOT-A@lab.example.test")
-        .unwrap()
-        .save(&setup.paths)
-        .unwrap();
-    for refused in [setup.accounts(), setup.signed_in_accounts()] {
-        assert!(
-            matches!(
-                refused,
-                Err(ngteams::setup::SetupError::Personal(PersonalError::LabAccount))
-            ),
-            "{refused:?}"
-        );
-    }
-    assert!(matches!(
-        setup.ask_for("bot-a@lab.example.test"),
-        Err(ngteams::setup::SetupError::Personal(PersonalError::LabAccount))
-    ));
 }

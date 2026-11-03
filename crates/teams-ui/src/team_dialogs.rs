@@ -26,7 +26,7 @@ use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaSta
 use gpui_component::spinner::Spinner;
 use gpui_component::{Disableable as _, FocusTrapElement as _, Sizable as _};
 use teams_core::{TeamChange, TeamWritten};
-use teams_fence::Mri;
+use teams_proto::Mri;
 use teams_proto::{MemberUpdate, NewTeam, OwnTeamView, TeamPerson, TeamRole, TeamTag, TeamWrite};
 use teams_store::{ChannelKind, Team, TeamAbout, TeamChannel};
 

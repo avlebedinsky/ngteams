@@ -16,8 +16,8 @@ use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Event, Parts};
 use teams_core::{NOTES, Outbox, Source};
-use teams_fence::Mri;
 use teams_mock::{CHANNEL, CHAT_BASE, CSA_BASE, ChatServiceMock, LAB_A, TEAM_CHANNEL};
+use teams_proto::Mri;
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::{ConversationKind, Store};
 

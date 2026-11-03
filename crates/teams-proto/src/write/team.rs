@@ -1,7 +1,7 @@
 //! Typed team creation and management requests, with raw uploads carried separately from JSON bodies.
 
+use crate::Mri;
 use serde_json::{Value, json};
-use teams_fence::Mri;
 
 use super::Prepared;
 use super::{RawBody, Wire};

@@ -1,7 +1,5 @@
-//! A team's new channel through the engine, on the mock (`teams_core::channels`): through a fence that lets it go (a team
-//! read as the lab's alone), what goes out is the dialog's captured shape for each type and layout, the channel is listed
-//! at once, and Teams' refusal is told by its code; a team whose members can't be read, as every team in the lab, is
-//! denied, nothing sent.
+//! A team's new channel through the mock-backed engine: the dialog's captured shape for each type and layout,
+//! immediate listing, member addition and service refusal codes.
 
 #![cfg(test)]
 
@@ -13,10 +11,10 @@ use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Event, Parts};
 use teams_core::{ChannelDraft, ChannelMade, ChannelProblem, EngineError, Outbox};
-use teams_fence::{Fence, FenceLog, Mri, Roster};
 use teams_mock::{
-    CHAT_BASE, CSA_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, MIDDLE_TIER_BASE, PROVISIONING_BASE, USER_PROFILE_BASE,
+    CHAT_BASE, CSA_BASE, ChatServiceMock, LAB_A, LAB_B, MIDDLE_TIER_BASE, PROVISIONING_BASE, USER_PROFILE_BASE,
 };
+use teams_proto::Mri;
 use teams_proto::{Author, ChannelLayout, Client, Credentials, HttpTransport, NewChannel, NewChannelKind};
 use teams_store::{ChannelKind, Store};
 
@@ -45,24 +43,10 @@ struct Rig {
     _dir: tempfile::TempDir,
 }
 
-/// The engine with its bases, its fence reading the team as [`Members`] says.
-async fn rig_with(_lab_only: bool) -> Rig {
+/// The engine with its service bases.
+async fn rig() -> Rig {
     let mock = ChatServiceMock::start().await.unwrap();
     let dir = tempfile::tempdir().unwrap();
-    let _fence = Arc::new(Fence::new(
-        // the one the mock won't add is someone the fence lets a private channel be given: the service refuses them
-        Roster::new(
-            [
-                LAB_A.to_owned(),
-                LAB_B.to_owned(),
-                LAB_C.to_owned(),
-                format!("8:orgid:{}", teams_mock::NOT_ADDED),
-            ]
-            .map(Mri::new),
-            [],
-        ),
-        FenceLog::from_writer(std::io::sink()),
-    ));
     let tokens = Arc::new(Tokens(mock.token(LAB_A).unwrap()));
     let origin = mock.origin();
     let http = || {
@@ -154,7 +138,7 @@ impl Rig {
 
 #[tokio::test]
 async fn a_standard_channel_goes_in_the_dialog_s_shape_for_each_layout_and_is_listed_at_once() {
-    let mut rig = rig_with(true).await;
+    let mut rig = rig().await;
     rig.settled().await;
     let threads = rig
         .create("Threaded", NewChannelKind::Standard, ChannelLayout::Threads, false)
@@ -188,7 +172,7 @@ async fn a_standard_channel_goes_in_the_dialog_s_shape_for_each_layout_and_is_li
 
 #[tokio::test]
 async fn an_owner_s_standard_channel_can_be_shown_to_everyone() {
-    let mut rig = rig_with(true).await;
+    let mut rig = rig().await;
     rig.settled().await;
     let made = rig
         .create("For everyone", NewChannelKind::Standard, ChannelLayout::Threads, true)
@@ -203,7 +187,7 @@ async fn an_owner_s_standard_channel_can_be_shown_to_everyone() {
 
 #[tokio::test]
 async fn a_private_channel_goes_on_the_provisioning_service_takes_its_people_and_lists_once_it_has_its_thread() {
-    let mut rig = rig_with(true).await;
+    let mut rig = rig().await;
     rig.settled().await;
     let made = rig
         .create("Hush", NewChannelKind::Private, ChannelLayout::Posts, false)
@@ -254,7 +238,7 @@ async fn a_private_channel_goes_on_the_provisioning_service_takes_its_people_and
 
 #[tokio::test]
 async fn a_name_the_team_has_comes_back_as_teams_says_it() {
-    let mut rig = rig_with(true).await;
+    let mut rig = rig().await;
     rig.settled().await;
     let refused = rig
         .create(

@@ -20,8 +20,8 @@ use teams_auth::session::{AccessToken, Renewal};
 use teams_auth::token::TokenError;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Event, Parts, Push};
 use teams_core::{Availability, Outbox};
-use teams_fence::{Fence, FenceLog, Mri, Roster};
 use teams_mock::{CHAT_BASE, ChatServiceMock, ECHO, LAB_A, LAB_B, LAB_C, OUTSIDER, PRESENCE_BASE, TrouterMock};
+use teams_proto::Mri;
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::Store;
 use teams_trouter::{Options, RegistrationReport, Trouter, TrouterCredentials};
@@ -85,10 +85,6 @@ async fn rig(poll: Duration, subscribed: Duration, polling_only: &[&str]) -> Rig
         token: mock.token(LAB_A).unwrap(),
         renewals: broadcast::channel(4).0,
     });
-    let _fence = Arc::new(Fence::new(
-        Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), [Mri::new(ECHO)]),
-        FenceLog::from_writer(std::io::sink()),
-    ));
     let origin = mock.origin();
     let http = || {
         HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin)

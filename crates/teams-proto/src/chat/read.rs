@@ -3,7 +3,7 @@
 //!
 //! - **Links**: the service pages and syncs through links it hands out, full URLs (`syncState`, `backwardLink`,
 //!   `forwardLink`). One is followed only when it is on the transport's own chat base (scheme, host and base path
-//!   exactly, as [`teams_fence::chat_service_path`] reads a chat service URL) and names the read it was handed out
+//!   exactly, as [`crate::chat_service_path`] reads a chat service URL) and names the read it was handed out
 //!   for (the same conversation's messages, or the conversation list); anything else is [`ChatReadError::Link`] and
 //!   nothing is sent. The link's path and query are sent as they came, decoded and encoded again by the transport.
 //! - **A region hop**: a 404 with a `Location` (never seen) is [`ChatReadError::RegionMoved`], carrying its status
@@ -11,7 +11,7 @@
 
 use std::iter;
 
-use teams_fence::chat_service_path;
+use crate::chat_service_path;
 use url::Url;
 
 use crate::chat::model::{self, AppConsumptionHorizon, ConversationList, Malformed, MemberList, MessagePage, Thread};

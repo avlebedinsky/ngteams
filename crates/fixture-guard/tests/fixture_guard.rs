@@ -319,7 +319,7 @@ fn made_up_network_data_and_what_only_looks_like_it_pass() {
         "255.255.255.255 224.0.0.251 240.0.0.1 192.0.0.8 198.18.0.1 198.19.255.1",
         "::1 fe80::1 fd00::1 fc00:1::2 ff02::1 :: ::ffff:192.168.1.1 64:ff9b::c000:20a 1:2:3:4:5:6:7:8",
         // Rust paths, socket.io frames, a MAC address, times
-        "teams_fence::contacting, a::b, Kind::Jwt, std::net::Ipv6Addr, add::cafe, beef::dead, <a as B>::c",
+        "teams_proto::chat, a::b, Kind::Jwt, std::net::Ipv6Addr, add::cafe, beef::dead, <a as B>::c",
         // a word glued to an address no public host has, and a hex group that only makes an address of that kind
         "port:2001:db8::1, turn:fd00::1, face:2a01::1",
         r#"5:::{"name":"ping"}, 3:::{"id":1}, 0::, 1::, 2::"#,

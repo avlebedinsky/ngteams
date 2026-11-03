@@ -18,7 +18,7 @@ use clap::{Args, Parser, Subcommand};
 #[derive(Debug, Parser)]
 #[command(
     name = "ngteams",
-    about = "Microsoft Teams for your own accounts, under the personal build's fence. Prints no token.",
+    about = "Microsoft Teams for your accounts. Prints no token.",
     args_conflicts_with_subcommands = true
 )]
 pub struct Cli {

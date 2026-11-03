@@ -62,8 +62,8 @@ use gpui::{
 use gpui_component::Disableable as _;
 use gpui_component::{Selectable as _, Sizable as _, Size};
 use teams_core::{Action, Availability, NOTES, Transient};
-use teams_fence::is_group_chat_id;
 use teams_proto::chat::{ComposeError, Marks, MessageText, MessageType, Node, Quote, RichText, parse_html};
+use teams_proto::is_group_chat_id;
 use teams_store::Message;
 
 pub use crate::editor::Editor;

@@ -229,7 +229,7 @@ impl Gallery {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use teams_fence::Mri;
+    use teams_proto::Mri;
 
     const LOUD: f32 = SPEAKING_LEVEL * 4.0;
 

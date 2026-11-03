@@ -16,8 +16,8 @@ use teams_auth::token::TokenError;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Parts};
 use teams_core::file_content::STALLED;
 use teams_core::{EngineError, Outbox};
-use teams_fence::{Fence, FenceLog, Mri, Roster};
 use teams_mock::{CHAT_BASE, LAB_A};
+use teams_proto::Mri;
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::Store;
 
@@ -99,10 +99,6 @@ fn send_body(stream: &mut TcpStream, body: Body) -> usize {
 }
 
 fn engine(origin: &str, dir: &tempfile::TempDir) -> EngineHandle {
-    let _fence = Arc::new(Fence::new(
-        Roster::new([Mri::new(LAB_A)], []),
-        FenceLog::from_writer(std::io::sink()),
-    ));
     let tokens = Arc::new(Tokens);
     let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, origin).unwrap();
     engine::start(Parts {

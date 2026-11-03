@@ -16,10 +16,10 @@ use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Event, Parts};
 use teams_core::{EngineError, Outbox, TeamChange};
-use teams_fence::Mri;
 use teams_mock::{
     CHAT_BASE, CSA_BASE, ChatServiceMock, LAB_A, LAB_B, LAB_C, MIDDLE_TIER_BASE, PROVISIONING_BASE, USER_PROFILE_BASE,
 };
+use teams_proto::Mri;
 use teams_proto::{
     AnalyticsPeriod, Author, Client, Credentials, HttpTransport, MemberUpdate, NewTeam, OwnTeamView, PastedFormat,
     TeamPicture, TeamRole, TeamWrite,

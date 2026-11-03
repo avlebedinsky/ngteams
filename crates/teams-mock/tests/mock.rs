@@ -1,6 +1,6 @@
 //! The mock chat service against its fixtures: reads replay `tests/fixtures/chatsvc/`, writes read back as the
 //! fixtures recorded and queue an event for every other member, the headers M1 Task 3 found are required, and the
-//! native transport and the fence's membership read reach it through their `test-support` mock origins. Its Trouter
+//! native transport reaches it through its `test-support` mock origin. Its Trouter
 //! (`tests/fixtures/trouter/`): the session's frames, the registrar, and deliveries only to a registered endpoint. Its
 //! calling service takes the account's skypetoken alone (the calls themselves: `crates/teams-call/tests/mock.rs`).
 //!
@@ -14,11 +14,11 @@ use reqwest::Method;
 use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
-use teams_fence::{ChatCredential, LiveMembershipSource, Membership, MembershipSource, Mri, Scope};
 use teams_mock::{
     AB_CHAT, ABC_CHAT, AC_CHAT, AX_CHAT, CHANNEL, CHAT_BASE, ChatEvent, ChatServiceMock, EventKind, LAB_A, LAB_B,
     LAB_C, NOTIFICATIONS, OUTSIDER, REGIONAL_HOST, TEAM_CHANNEL, TENANT,
 };
+use teams_proto::Mri;
 use teams_proto::chat::MessageText;
 use teams_proto::{Author, Client, Credentials, Endpoint, HttpTransport, Read, SendMessage, Service};
 
@@ -478,27 +478,21 @@ impl Credentials for MockToken {
     }
 }
 
-/// A live membership reader using the mock account's token.
-fn membership(lab: &Lab, who: &str) -> TestResult<LiveMembershipSource> {
-    let source = LiveMembershipSource::with_mock_origin(&lab.mock.origin())?;
-    let token = lab.mock.token(who).ok_or("no such account")?;
-    source.set_credential(ChatCredential::bearer(CHAT_BASE, &token).ok_or("not a credential")?);
-    Ok(source)
-}
-
 #[tokio::test]
-async fn the_membership_read_finds_the_mocks_one_to_one_chats_complete() -> TestResult {
+async fn the_thread_read_lists_the_mocks_one_to_one_members() -> TestResult {
     let lab = Lab::start().await?;
-    let source = membership(&lab, LAB_A)?;
-    let chat = |id: &str| Scope::Conversation { id: id.to_owned() };
-    assert_eq!(
-        source.members(&chat(AB_CHAT)).await,
-        Membership::Complete(vec![Mri::new(LAB_A), Mri::new(LAB_B)])
-    );
-    assert_eq!(
-        source.members(&chat(AX_CHAT)).await,
-        Membership::Complete(vec![Mri::new(LAB_A), Mri::new(OUTSIDER)])
-    );
+    for (id, other) in [(AB_CHAT, LAB_B), (AX_CHAT, OUTSIDER)] {
+        let thread = lab
+            .get(LAB_A, &format!("threads/{}?view=msnp24Equivalent", segment(id)))
+            .await?;
+        let members: Vec<&str> = thread["members"]
+            .as_array()
+            .ok_or("no members")?
+            .iter()
+            .filter_map(|member| member["id"].as_str())
+            .collect();
+        assert_eq!(members, [LAB_A, other]);
+    }
     Ok(())
 }
 
@@ -950,7 +944,7 @@ async fn a_request_without_the_headers_task_3_found_is_refused_with_401() -> Tes
 async fn the_thread_read_takes_the_token_alone_and_a_replaced_token_is_refused() -> TestResult {
     let lab = Lab::start().await?;
     let bearer = format!("Bearer {}", lab.mock.token(LAB_A).ok_or("no a")?);
-    // the fence's own read sends the token and `Accept` only, as Task 3 saw the service answer in full
+    // the direct thread read sends the token and `Accept` only, as Task 3 saw the service answer in full
     let thread = lab.url(&format!("threads/{}?view=msnp24Equivalent", segment(AB_CHAT)));
     let alone = lab
         .send_raw(Method::GET, &thread, &[("Authorization", &bearer)], None)

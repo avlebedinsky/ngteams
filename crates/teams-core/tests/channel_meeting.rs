@@ -15,8 +15,8 @@ use teams_core::engine::{self, EngineHandle, EngineOptions, Parts};
 use teams_core::{
     CallAction, CallActionError, EngineError, EventDraft, EventShowAs, EventWrite, Organizer, Outbox, ZonedTime,
 };
-use teams_fence::{Fence, FenceLog, Mri, Roster};
-use teams_mock::{CHAT_BASE, CSA_BASE, LAB_A, LAB_B, LAB_C, MIDDLE_TIER_BASE};
+use teams_mock::{CHAT_BASE, CSA_BASE, LAB_A, LAB_B, MIDDLE_TIER_BASE};
+use teams_proto::Mri;
 use teams_proto::{Author, Client, Credentials, HttpTransport, MeetingChannel, MeetingInfo, ScheduledMeeting};
 use teams_store::Store;
 use wiremock::matchers::{method, path, path_regex};
@@ -57,10 +57,6 @@ struct Rig {
 async fn running_engine() -> Rig {
     let server = MockServer::start().await;
     let dir = tempfile::tempdir().unwrap();
-    let _fence = Arc::new(Fence::new(
-        Roster::new([LAB_A, LAB_B, LAB_C].map(Mri::new), []).with_lab_mail([MAIL_A, MAIL_B]),
-        FenceLog::from_writer(std::io::sink()),
-    ));
     let tokens = Arc::new(Tokens);
     let transport = || {
         HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &server.uri())

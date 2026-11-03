@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use log::{Level, LevelFilter};
 use teams_call::{CallId, Calls, Identity, Placement, RemoteEnd};
-use teams_fence::Mri;
+use teams_proto::Mri;
 use teams_proto::{ClientInfo, MediaContent};
 
 use super::super::{EngineError, Event};

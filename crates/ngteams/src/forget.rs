@@ -10,10 +10,10 @@
 
 use std::path::PathBuf;
 
+use crate::accounts_file::{PersonalAccount, PersonalError};
 use teams_auth::authz::{skypetoken_expiry_key, skypetoken_key};
 use teams_auth::refresh::refresh_token_key;
 use teams_auth::secrets::{SecretError, SecretStore};
-use teams_fence::personal::{PersonalAccount, PersonalError};
 use teams_store::{EngineLock, StoreError};
 
 use crate::setup::Setup;

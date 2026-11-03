@@ -20,7 +20,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
-use teams_fence::Mri;
+use teams_proto::Mri;
 use teams_proto::{Client, Credentials, HttpError, HttpTransport, PresenceSubscription, RegisteredEndpoint};
 use tokio::task::JoinSet;
 use tokio::time::Instant;

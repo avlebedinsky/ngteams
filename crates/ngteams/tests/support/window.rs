@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use ngteams::accounts::{Runner, Started};
+use ngteams::accounts_file::{PersonalAccount, PersonalPaths};
 use ngteams::setup::Setup;
 use teams_auth::authz::{AuthzClient, Region};
 use teams_auth::secrets::MemorySecretStore;
@@ -12,8 +13,6 @@ use teams_auth::token::{EntraConfig, TokenClient};
 use teams_core::CallFloor;
 use teams_core::EngineHandle;
 use teams_core::account::AccountEngine;
-use teams_fence::lab::{Alias, LabLocations};
-use teams_fence::personal::{PersonalAccount, PersonalPaths};
 use ui_sandbox::SandboxResult;
 
 pub fn display_name(upn: &str) -> &str {
@@ -54,14 +53,34 @@ pub fn started(alias: Alias, handle: EngineHandle) -> SandboxResult<Started<Memo
 
 pub fn runner(root: &Path) -> SandboxResult<Runner> {
     let paths = PersonalPaths::new(root.join("ngteams-config"), root.join("ngteams-data"));
-    let lab = LabLocations {
-        config_file: root.join("unused/lab.toml"),
-        data_dir: root.join("unused/lab"),
-        personal_data_dir: paths.data_dir().to_owned(),
-    };
     Ok(Runner {
-        setup: Setup::new(paths, lab)?,
+        setup: Setup::new(paths)?,
         floor: CallFloor::new(),
         devices: None,
     })
+}
+
+/// A synthetic mock account; nothing is read from the lab configuration.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[expect(
+    dead_code,
+    reason = "one synthetic account enum is shared by the four separate GUI test binaries"
+)]
+pub enum Alias {
+    A,
+    B,
+    C,
+}
+impl std::fmt::Display for Alias {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::A => "a",
+            Self::B => "b",
+            Self::C => "c",
+        })
+    }
+}
+/// Each mock engine's own temporary store.
+pub fn store_file(root: &Path, alias: Alias) -> std::path::PathBuf {
+    root.join("store").join(format!("{alias}.sqlite"))
 }

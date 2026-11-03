@@ -6,8 +6,8 @@
 
 use base64::Engine as _;
 use serde_json::Value;
-use teams_fence::{INVITATION_EVENTS, Mri};
 use teams_proto::{CallLink, MediaContent};
+use teams_proto::{INVITATION_EVENTS, Mri};
 
 /// An incoming call's invitation (`{"evt": 107 | 109, "gp": <base64 JSON>}` at the calling endpoint's root), read.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -637,7 +637,7 @@ mod tests {
             "endpointId": "e", "participantId": "p", "hidden": false}, "code": 0, "subCode": 0,
             "phrase": "CallEndReasonLocalUserInitiated", "resultCategories": ["Success"]}});
         let end = remote_end(hung_up.to_string().as_bytes());
-        assert_eq!(end.by.as_ref().map(teams_fence::Mri::as_str), Some(b));
+        assert_eq!(end.by.as_ref().map(teams_proto::Mri::as_str), Some(b));
         assert_eq!(end.by_name.as_deref(), Some("Synthetic B"));
         assert!(!end.failed());
         // a conversation's end names it under its call controller's part

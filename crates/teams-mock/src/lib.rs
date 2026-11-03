@@ -5,7 +5,7 @@
 //!
 //! **Reach and use.** A dev-dependency only, never a lab binary's dependency (a test in this crate checks every
 //! workspace manifest). Clients reach it only through the `test-support` mock origins:
-//! `teams_proto::HttpTransport::with_mock_origin` and `teams_fence::LiveMembershipSource::with_mock_origin`, each
+//! `teams_proto::HttpTransport::with_mock_origin`,
 //! given [`ChatServiceMock::origin`] with [`CHAT_BASE`] as the chat base, so every URL is built and checked as it would
 //! be for the real service first.
 //!
@@ -14,7 +14,7 @@
 //! let trouter = mock.start_trouter()?; // its push channel, at trouter.origin() (M1 Task 16)
 //! let token = mock.token(LAB_A).ok_or("no account")?; // a's `ic3` token, for the client's credentials
 //! let transport = HttpTransport::with_mock_origin(credentials, CHAT_BASE, &mock.origin())?;
-//! // … a sends to AB_CHAT through the fence …
+//! // … a sends to AB_CHAT through its outbox …
 //! let events = mock.take_events(LAB_B); // what b would be told, while no socket of b's takes it
 //! ```
 //!
@@ -176,7 +176,7 @@ pub const AX_CHAT: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000
 /// The a–b–c group chat of `thread-group.json`, empty.
 pub const ABC_CHAT: &str = "19:00000000000000000000000000000abc@thread.v2";
 
-/// A `lab.toml` (`teams_fence::lab::LabConfig::parse`) of the mock's lab: accounts a, b and c with the MRIs
+/// A synthetic `lab.toml` for the mock: accounts a, b and c with the MRIs
 /// [`LAB_A`], [`LAB_B`] and [`LAB_C`], made-up UPNs, its data dir `data_dir`. A fence or a live membership source of
 /// it knows the lab's group chat once that dir's `chats.toml` records [`ABC_CHAT`].
 #[must_use]

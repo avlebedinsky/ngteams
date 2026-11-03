@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use crate::{Delivery, Observed};
 use base64::Engine as _;
-use teams_fence::Mri;
+use teams_proto::Mri;
 use teams_proto::{
     AcceptanceAcknowledgement, CallContext, CallLink, CallParticipant, ChannelMeetup, ChannelParameters, ClientInfo,
     InvitationReceipt, MediaContent, MediaDescriptions, MeetingInfo,
@@ -198,7 +198,7 @@ pub enum DeliveryReply {
 /// What the engine does for the machine, in order.
 #[derive(Clone, Debug)]
 pub enum Effect {
-    /// Send `write` (fence first), and report its outcome under `id` ([`Calls::on_outcome`]).
+    /// Send `write` through the outbox, and report its outcome under `id` ([`Calls::on_outcome`]).
     Send { id: WriteId, write: Box<CallWrite> },
     /// Answer `delivery` with `reply`; report a failure ([`Calls::on_response_failed`]).
     Respond {
@@ -208,8 +208,8 @@ pub enum Effect {
     /// Tell the account.
     Event(CallEvent),
     /// The invitation whose `attach` link is `attach` was let go here before it rang (its `attach` failed for good, its
-    /// answer didn't read, the call's media failed, its ring ended, the engine stopped): tell the fence
-    /// (`teams_fence::Fence::let_go`), which ends its offer, so it holds no call open. Its service may never have taken
+    /// answer didn't read, the call's media failed, its ring ended, the engine stopped): release the tracker
+    /// ([`crate::track::Tracker::release`]), which ends its offer, so it holds no call open. Its service may never have taken
     /// the callbacks that `attach` handed out, so no delivery would end it there.
     LetGo { attach: CallLink },
 }

@@ -5,6 +5,7 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::{AFD_HOSTS, Mri, chat_service_path, path_shape};
 use percent_encoding::percent_decode_str;
 use reqwest::header::{
     ACCEPT, AUTHORIZATION, CONTENT_RANGE, CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, LOCATION, RANGE,
@@ -14,7 +15,6 @@ use teams_auth::claims::TokenSummary;
 use teams_auth::secrets::{Secret, SecretStore};
 use teams_auth::session::Session;
 use teams_auth::token::{SPACES_RESOURCE, TokenError, retry_after};
-use teams_fence::{AFD_HOSTS, Mri, chat_service_path, path_shape};
 use url::Url;
 
 use crate::client::{Response, Transport};
@@ -517,7 +517,7 @@ impl<C: Credentials> HttpTransport<C> {
     }
 
     /// The transport with the account's middle-tier base, the region's GTM `middleTier` (trimmed): `https`, an AFD host
-    /// ([`teams_fence::AFD_HOSTS`]) with no port or user info, the path `/api/mt/part/<partition>` exactly (the
+    /// ([`crate::AFD_HOSTS`]) with no port or user info, the path `/api/mt/part/<partition>` exactly (the
     /// partition a lowercase region, `-` and a number: `amer-03`), one trailing slash allowed, no query or fragment.
     /// Without it, every middle-tier request is refused ([`Refusal::NoMiddleTier`]).
     ///
@@ -529,7 +529,7 @@ impl<C: Credentials> HttpTransport<C> {
     }
 
     /// The transport with the account's CSA base, the region's GTM `chatSvcAggAfd` (trimmed): `https`, an AFD host
-    /// ([`teams_fence::AFD_HOSTS`]) with no port or user info, the path `/api/csa/<region>` exactly (the region
+    /// ([`crate::AFD_HOSTS`]) with no port or user info, the path `/api/csa/<region>` exactly (the region
     /// lowercase letters: `amer`), one trailing slash allowed, no query or fragment. Without it, every CSA request is
     /// refused ([`Refusal::NoCsa`]).
     ///
@@ -554,7 +554,7 @@ impl<C: Credentials> HttpTransport<C> {
     }
 
     /// The transport with the account's provisioning base, the region's GTM `teamsAndChannelsProvisioningService`
-    /// (trimmed): `https`, an AFD host ([`teams_fence::AFD_HOSTS`]) with no port or user info, the path
+    /// (trimmed): `https`, an AFD host ([`crate::AFD_HOSTS`]) with no port or user info, the path
     /// `/fabric/<region>/templates/api` exactly, one trailing slash allowed, no query or fragment. Without it, every
     /// provisioning request is refused ([`Refusal::NoProvisioning`]).
     ///
@@ -574,7 +574,7 @@ impl<C: Credentials> HttpTransport<C> {
     }
 
     /// The transport with the account's user profile base, the region's GTM `userProfileService` (trimmed): `https`, an
-    /// AFD host ([`teams_fence::AFD_HOSTS`]) with no port or user info, the path `/api/userprofilesvc/<region>` exactly,
+    /// AFD host ([`crate::AFD_HOSTS`]) with no port or user info, the path `/api/userprofilesvc/<region>` exactly,
     /// one trailing slash allowed, no query or fragment. Without it, every user profile request is refused
     /// ([`Refusal::NoUserProfile`]).
     ///
@@ -594,7 +594,7 @@ impl<C: Credentials> HttpTransport<C> {
     }
 
     /// The transport with the account's presence base, the region's GTM `presenceUPS` (trimmed): `https`, an AFD host
-    /// ([`teams_fence::AFD_HOSTS`]) with no port or user info, the path `/ups/<geo>` exactly (the geo lowercase
+    /// ([`crate::AFD_HOSTS`]) with no port or user info, the path `/ups/<geo>` exactly (the geo lowercase
     /// letters: `noam`), one trailing slash allowed, no query or fragment. Without it, every presence request is
     /// refused ([`Refusal::NoPresence`]).
     ///

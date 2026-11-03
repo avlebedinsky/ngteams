@@ -9,7 +9,7 @@ use std::sync::Arc;
 use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
-use teams_fence::Mri;
+use teams_proto::Mri;
 use teams_proto::chat::MessageText;
 use teams_proto::{
     Author, CallContext, CallParticipant, ClientInfo, Credentials, Endpoint, EndpointRegistration, FileDownload,

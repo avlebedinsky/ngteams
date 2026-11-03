@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use crate::support::{A_TONE, B_TONE, Lab, wait_until};
 use teams_core::{CallAction, CallStatus, End};
-use teams_fence::Mri;
 use teams_mock::{AB_CHAT, ECHO, LAB_A, LAB_B, LAB_C};
+use teams_proto::Mri;
 
 /// Frames a side must have decoded of the other's test pattern.
 const FRAMES: u64 = 20;

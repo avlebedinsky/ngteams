@@ -10,7 +10,7 @@ use base64::Engine as _;
 use serde_json::{Value, json};
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
-use teams_fence::Mri;
+use teams_proto::Mri;
 use teams_proto::{
     AcceptCall, AcceptParts, AcceptanceAcknowledgement, AcknowledgeAcceptance, AcknowledgeMediaAnswer, AddParts,
     AddToCall, AnswerMedia, AnswerMediaParts, ApplyChannelParameters, AttachCall, AttachParts, CALL_START_URL,
@@ -1156,12 +1156,10 @@ fn a_media_contents_debug_leaves_its_sdp_out() {
 }
 
 #[test]
-fn the_calling_constants_are_the_fences_own() {
-    assert_eq!(CALL_START_URL, teams_fence::CALL_START_URL);
+fn the_calling_constants_share_the_flight_proxy_base() {
     assert_eq!(CALL_START_URL, format!("{CALLING_BASE}/epconv"));
-    assert_eq!(CALLING_HOST, teams_fence::CALL_PROXY_HOST);
+    assert_eq!(CALLING_HOST, teams_proto::CALL_PROXY_HOST);
     assert_eq!(CALLING_BASE, format!("https://{CALLING_HOST}/api/v2"));
-    assert_eq!(teams_proto::TEST_CALL_SCENARIO, teams_fence::TEST_CALL_SCENARIO);
 }
 
 #[test]

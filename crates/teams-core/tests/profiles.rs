@@ -21,7 +21,7 @@ use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Event, Parts};
 use teams_core::{NameFrom, Outbox, PROFILE_MAX_AGE, PROFILE_RETRY};
-use teams_fence::Mri;
+use teams_proto::Mri;
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::{Conversation, ConversationKind, Message, NameSource, PictureState, Profile, Store, StoredPicture};
 use wiremock::matchers::{method, path};

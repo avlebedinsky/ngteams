@@ -10,7 +10,7 @@
 //! - placeholders (`<token:1>`, `<password>`) and values that say they are made up (`SyntheticUfrag0001`);
 //! - a fingerprint of one byte repeated (`AA:AA:…:AA`), which no certificate's digest is.
 //!
-//! What only looks like an address passes too: a Rust path (`teams_fence::contacting`, `a::b`), a socket.io frame's
+//! What only looks like an address passes too: a Rust path (`teams_proto::chat`, `a::b`), a socket.io frame's
 //! `5:::`, a dotted version or section number whose four parts are single digits (`1.2.3.4`, the `OpenID` Connect Core
 //! `3.1.3.7`: a real address of that form is a public resolver like `8.8.8.8`, nobody's own), a product version after
 //! its name (`Chrome/130.0.0.0`), and a longer dotted run (`1.3.6.1.4.1`).

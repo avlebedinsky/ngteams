@@ -9,8 +9,8 @@
 //!    answers the redirect (`teams_auth::signin`);
 //! 3. the code redeemed only for that account: the refresh token stored under the account's UPN in the store handed in
 //!    (the desktop's Secret Service under [`crate::KEYRING_APPLICATION`]); a sign-in that lands in another account or
-//!    tenant stores nothing; a lab account (by its MRI, now known), or an account another entry of `accounts.toml`
-//!    already is (by its object id), has its token deleted again and is refused;
+//!    tenant stores nothing; an account another entry of `accounts.toml` already is (by its object id) has its token
+//!    deleted again and is refused;
 //! 4. the account's entry in `accounts.toml` given the object id, tenant and display name the ID token named (the other
 //!    accounts kept as they are), and the region from authz saved (`regions/<oid>.json`, `0600` in a `0700`
 //!    directory, never a token).
@@ -31,6 +31,7 @@ use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use crate::accounts_file::{PersonalAccount, PersonalError};
 use gpui::{App, Global};
 use teams_auth::authz::{AuthzClient, AuthzError, AuthzKind, Region};
 use teams_auth::pkce::PkceError;
@@ -38,7 +39,6 @@ use teams_auth::refresh::refresh_token_key;
 use teams_auth::secrets::{SecretError, SecretStore};
 use teams_auth::signin::{SignInAnswer, SignInRequest, WindowError, WindowSignInError, sign_in_with};
 use teams_auth::token::{Authorization, EntraConfig, Scope, TokenClient, TokenError};
-use teams_fence::personal::{PersonalAccount, PersonalError};
 use teams_signin::hosts::{HostRefused, SignInHosts};
 use teams_signin::window::{self, Bound, WindowConfig, Windows};
 use teams_ui::window::PERSONAL_APP_ID;
@@ -166,7 +166,7 @@ pub async fn ready<S: SecretStore>(setup: &Setup, account: &PersonalAccount, sto
 ///
 /// # Errors
 /// [`SignInError`]: the window gave no code for this request, Entra refused or the ID token named another account or
-/// tenant (nothing stored then), a lab account or one another entry already is (its token deleted again), authz refused,
+/// tenant (nothing stored then), an account another entry already is (its token deleted again), authz refused,
 /// or a file couldn't be written.
 pub async fn sign_in<S: SecretStore>(
     setup: &Setup,
@@ -175,7 +175,6 @@ pub async fn sign_in<S: SecretStore>(
     store: &S,
     window: Window,
 ) -> Result<PersonalAccount, SignInError> {
-    account.check_not_lab(&setup.lab)?;
     let mut authorization = Authorization::new(&clients.entra, &account.upn, Scope::spaces())?;
     if let (Some(oid), Some(tid)) = (&account.oid, &account.tid) {
         authorization = authorization.expect_object_id(oid).expect_tenant(tid);
@@ -186,15 +185,14 @@ pub async fn sign_in<S: SecretStore>(
         &signed.account.tenant,
         signed.account.display_name.as_deref(),
     )?;
-    // a lab account is never driven by the personal fence, and an account another entry already is (by its object id)
-    // isn't added twice: what was just stored goes again
-    let saved = named.check_not_lab(&setup.lab).and_then(|()| {
+    // If another entry already has this object id, remove the credential just stored for this sign-in.
+    let saved = (|| {
         setup.paths.make_dirs().map_err(|source| PersonalError::Write {
             path: setup.paths.data_dir().to_path_buf(),
             source,
         })?;
         named.save(&setup.paths)
-    });
+    })();
     if let Err(error) = saved {
         store.delete(&refresh_token_key(&account.upn)).await?;
         return Err(error.into());

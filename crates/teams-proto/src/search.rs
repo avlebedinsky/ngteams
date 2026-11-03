@@ -8,8 +8,7 @@
 //!   asked (messages, people, files, group chats, teams and channels), as the web client asks them for its results'
 //!   tabs. The answer is a list of entity sets, each of result sets of results, a result's `Source` the item found.
 //!
-//! Both are reads: they reach nobody, whoever their answer lists (`teams_fence::contacting` carves them out of
-//! Substrate's other paths), and [`crate::HttpTransport::search`] sends them in the read-only mode too.
+//! Both are reads, whoever their answer lists; [`crate::HttpTransport::search`] sends them in read-only mode too.
 //!
 //! An answer is read leniently, one item at a time: an item missing what the app needs (a message without its chat or
 //! id, a person without a name, a file without its link) is left out, never guessed. The text around a match comes

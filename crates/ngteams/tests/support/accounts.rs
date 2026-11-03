@@ -1,4 +1,4 @@
-//! Starting the actual runner with an in-memory credential store, under an explicitly supplied synthetic fence.
+//! Starting the actual runner with an in-memory credential store and synthetic account metadata.
 
 use super::*;
 use teams_auth::secrets::MemorySecretStore;

@@ -696,7 +696,7 @@ impl Request for TeamJoinRequests {
 }
 
 /// What changes only the account's own view of a team: its channels hidden or shown. Each reaches nobody, so it is a
-/// plain request (`teams_fence::contacting`'s rows carve them out by name).
+/// plain read request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OwnTeamView {
     /// All of a team's channels hidden for the account: `PUT team/<team>/hide` on the provisioning service.

@@ -32,12 +32,12 @@ use teams_core::engine::{
 };
 use teams_core::search::{Backfill, Step};
 use teams_core::{Clock, MAX_FAILED_CHECKS, Outbox, Transient, TransientSent};
-use teams_fence::{Mri, is_group_chat_id};
 use teams_mock::{AB_CHAT, ABC_CHAT, CHAT_BASE, ChatServiceMock, EventKind, LAB_A, LAB_B, LAB_C, TrouterMock};
 use teams_proto::chat::MessageText;
 use teams_proto::{
     Author, Client, Credentials, HttpError, HttpTransport, Read, Request as ProtoRequest, Response, Transport,
 };
+use teams_proto::{Mri, is_group_chat_id};
 use teams_store::{
     Applied, Conversation, ConversationKind, Message, OutboxEntry, OutboxKind, OutboxState, SearchHit, Store,
     StoreError,

@@ -24,9 +24,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use crate::{Mri, is_group_chat_id};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use teams_fence::{Mri, is_group_chat_id};
 use url::Url;
 
 use crate::chat::MentionKind;

@@ -17,8 +17,8 @@ use teams_auth::token::TokenError;
 use teams_call::{
     CallEvent, CallId, Calls, DeliveryKey, DeliveryReply, Effect, Identity, Outcome, Placement, WriteId, WriteSink,
 };
-use teams_fence::Mri;
 use teams_mock::{CHAT_BASE, ChatServiceMock, TENANT};
+use teams_proto::Mri;
 use teams_proto::{ClientInfo, Credentials, HttpTransport, MediaContent, Transport};
 use teams_trouter::{CallResponder, CallResponse, CallStack, Options, PushEvent, RegistrationReport, Trouter};
 use tokio::sync::{broadcast, mpsc};

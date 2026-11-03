@@ -328,8 +328,8 @@ async fn a_frame_text_shows_its_length_only() {
 #[tokio::test]
 async fn no_frame_answers_a_delivery() {
     // a delivery is answered with a socket.io message (`3:::`); every frame there is an event (`5:`) or the disconnect
-    // (`0::`), never a message, a JSON message (`4:`) or an acknowledgement (`6:`). The compile-fail cases in
-    // crates/fence-seal (proto_raw_frame, proto_own_frame) show that no other crate can send text or add a frame.
+    // (`0::`), never a message, a JSON message (`4:`) or an acknowledgement (`6:`). The compile-fail cases
+    // in tests/ui (proto_raw_frame, proto_own_frame) show that no other crate can send text or add a frame.
     let mut setup = setup();
     setup
         .sink

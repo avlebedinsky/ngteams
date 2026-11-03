@@ -5,10 +5,10 @@ use std::process::Command;
 use std::sync::{Mutex, OnceLock};
 
 use clap::Parser as _;
+use ngteams::accounts_file::PersonalAccount;
 use ngteams::setup::Setup;
 use teams_auth::secrets::MemorySecretStore;
 use teams_core::CallFloor;
-use teams_fence::personal::PersonalAccount;
 
 use super::{Outcome, run};
 
@@ -248,7 +248,6 @@ fn signed(setup: &Setup, upn: &str, suffix: u8, region: bool) -> PersonalAccount
 fn startup_controllers_use_only_the_fixture_backend_and_close_their_engines() {
     for case in [
         "command-invalid-env",
-        "command-read-setup-error",
         "command-invalid-account",
         "command-error-files",
         "command-no-ready",

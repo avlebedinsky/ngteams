@@ -26,8 +26,6 @@ serde_json.workspace = true
 image = { workspace = true, features = ["png", "jpeg", "gif", "webp"] }
 # the engine: its request side (behind `Core`), its events and its shutdown
 teams-core.workspace = true
-# a mention's MRI, as compose hands it to `teams-proto`'s message text
-teams-fence.workspace = true
 # a message's content read as rich text, for the chat list's preview line (sanitized, capped; never shown as HTML)
 teams-proto.workspace = true
 # the rows the engine's queries answer with
@@ -60,7 +58,6 @@ tempfile.workspace = true
 # compose on two accounts' engines on the mock (`tests/compose_mock.rs`): their tokens, their fences on the lab
 # roster with a `fence.log` each, the mock chat service and its Trouter reached through the test-support mock origins
 teams-auth.workspace = true
-teams-fence = { workspace = true, features = ["test-support"] }
 teams-mock.workspace = true
 teams-proto = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "time"] }

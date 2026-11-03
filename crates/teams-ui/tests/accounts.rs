@@ -21,7 +21,7 @@ use common::{FakeCore, FakeEvents, LAB_A, LAB_B, Rig, Written};
 use gpui::{AppContext as _, Entity, VisualTestContext, WindowHandle};
 use notices::{Asked, FakeServer, chat, message};
 use teams_core::{CallId, CallStatus, End, Event, IncomingCall, MessageChange, Source};
-use teams_fence::Mri;
+use teams_proto::Mri;
 use teams_store::{Applied, ConversationKind, Member};
 use teams_ui::accounts::AccountParts;
 use teams_ui::calls::Ask;

@@ -1,10 +1,10 @@
 //! `ngteams snapshot --to <dir>`: a copy of the user's personal files for the read-only mode to run on
-//! (`crate::read_only`), so it never opens, locks or writes the user's own store, settings or `fence.log`.
+//! (`crate::read_only`), so it never opens, locks or writes the user's own store or settings.
 //!
 //! Copied, under `<dir>` laid out as [`layout`] names it: `accounts.toml` (and an earlier build's `account.toml`), the
 //! settings, every account's region and every account's store, each store as a consistent copy read without writing
 //! it ([`teams_store::snapshot::snapshot`]: `VACUUM INTO` from a read-only connection, the user's running `ngteams`
-//! included). Left out: `fence.log`, the diagnostic logs, a store's run and engine locks and its picture cache
+//! included). Left out: the diagnostic logs, a store's run and engine locks and its picture cache
 //! (`<store>-cache/`, `teams_store::PictureCache`): the read-only mode makes its own. Nothing of the source is
 //! written; `<dir>` must be new (or empty) and lie apart from the user's own directories, and is made `0700`, its
 //! files `0600`.
@@ -14,8 +14,8 @@ use std::io;
 use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 
-use teams_fence::apart::overlapping;
-use teams_fence::personal::PersonalPaths;
+use crate::accounts_file::PersonalPaths;
+use crate::accounts_file::overlapping;
 use teams_store::StoreError;
 
 /// Why the snapshot wasn't made.

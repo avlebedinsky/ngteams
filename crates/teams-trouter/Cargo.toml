@@ -30,8 +30,6 @@ rustls-platform-verifier.workspace = true
 serde_json.workspace = true
 # the `ic3` token with its expiry, the renewal notifications and the clock
 teams-auth.workspace = true
-# shared identity and service URL helpers
-teams-fence.workspace = true
 # the calling socket's decoded deliveries and the account's call tracker
 teams-call.workspace = true
 # the frame sink and the typed own frames, the registrar registration (a plain request), the message model
@@ -49,8 +47,6 @@ url.workspace = true
 tempfile.workspace = true
 # a's writes, sent to the chat service mock as the web client sends them
 reqwest.workspace = true
-# synthetic identities and service URLs in the test fixtures
-teams-fence = { workspace = true, features = ["test-support"] }
 # the registrar reached through the HTTP transport's mock origin
 teams-proto = { workspace = true, features = ["test-support"] }
 # the Trouter mock, and the chat service mock whose queued events it delivers

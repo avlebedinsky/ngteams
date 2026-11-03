@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use chrono::{Local, NaiveDate, TimeZone as _};
 use serde_json::{Map, Value};
-use teams_fence::Mri;
+use teams_proto::Mri;
 use teams_proto::chat::ChatReads;
 use teams_proto::{
     Author, CalendarEvent, CalendarView, CancelChannelEvent, CancelEvent, ChannelEventRead, ChannelMeetup, Client,

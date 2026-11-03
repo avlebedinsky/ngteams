@@ -12,7 +12,7 @@ use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_call::{Delivery, Observed};
 use teams_core::{CallRetries, CallTried, Outbox};
-use teams_fence::Mri;
+use teams_proto::Mri;
 use teams_proto::{
     Author, Credentials, Endpoint, Failure, HttpError, HttpTransport, Method, Read, Refusal, Request, Response,
     Service, Transport,

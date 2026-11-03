@@ -23,7 +23,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use teams_fence::Mri;
+use teams_proto::Mri;
 use teams_proto::{Client, Credentials, GraphPicture, GraphUser, HttpError, HttpTransport, ShortProfileLookup};
 use teams_store::{NameSource, PictureState, Profile, Store, StoreError, StoredPicture};
 use tokio::task::{Id, JoinSet};

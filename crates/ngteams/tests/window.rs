@@ -43,17 +43,17 @@ use ngteams::app::{self, Launch};
 #[path = "support/window.rs"]
 mod support;
 use ngteams::descriptors::adopt_trace;
+use support::Alias;
 use support::display_name;
 use teams_auth::secrets::Secret;
 use teams_auth::session::{AccessToken, Renewal};
 use teams_auth::token::TokenError;
 use teams_core::Outbox;
 use teams_core::engine::{self, EngineHandle, EngineOptions, Parts, Push};
-use teams_fence::lab::{Alias, LabConfig, record_abc_chat};
-use teams_fence::{LiveMembershipSource, Mri};
 use teams_mock::{
-    AB_CHAT, ABC_CHAT, AC_CHAT, CHANNEL, CHAT_BASE, ChatServiceMock, LAB_A, LAB_C, NOTIFICATIONS, TrouterMock, lab_toml,
+    AB_CHAT, ABC_CHAT, AC_CHAT, CHANNEL, CHAT_BASE, ChatServiceMock, LAB_A, LAB_C, NOTIFICATIONS, TrouterMock,
 };
+use teams_proto::Mri;
 use teams_proto::{Author, Client, Credentials, HttpTransport};
 use teams_store::Store;
 use teams_trouter::{Options, Trouter, TrouterCredentials};
@@ -633,8 +633,6 @@ impl MockLab {
         let mock = runtime.block_on(ChatServiceMock::start())?;
         let trouter = mock.start_trouter()?;
         let dir = tempfile::tempdir()?;
-        let config = LabConfig::parse(&lab_toml(dir.path()), dir.path())?;
-        record_abc_chat(config.paths(), ABC_CHAT)?;
         let tokens = Arc::new(Tokens {
             token: mock.token(LAB_A).ok_or("the mock's token for a")?,
             renewals: broadcast::channel(4).0,
@@ -643,7 +641,6 @@ impl MockLab {
         let origin = mock.origin();
         let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin);
         let transport = Arc::new(http()?);
-        let _membership = LiveMembershipSource::with_mock_origin(&origin)?;
 
         let trouter_client = Trouter::with_mock_origin(Arc::clone(&transport), Arc::clone(&tokens), trouter.origin())?
             .with_options(Options {
@@ -655,7 +652,7 @@ impl MockLab {
         let author = Author::new(Mri::new(LAB_A), display_name("bot-a@lab.example.test"));
         let engine = engine::start(Parts {
             calls: None,
-            store: Store::open(&config.paths().store_file(Alias::A))?,
+            store: Store::open(&support::store_file(dir.path(), Alias::A))?,
             client: Arc::new(Client::new(http()?)),
             outbox: Outbox::new(transport, author),
             push: Some(Push::new(trouter_client)),
@@ -673,8 +670,7 @@ impl MockLab {
 
     /// Whether the account's engine lock is free: the engine's thread has ended.
     fn engine_released(&self) -> SandboxResult<bool> {
-        let config = LabConfig::parse(&lab_toml(self.dir.path()), self.dir.path())?;
-        let store = Store::open(&config.paths().store_file(Alias::A))?;
+        let store = Store::open(&support::store_file(self.dir.path(), Alias::A))?;
         Ok(store.engine_lock().is_ok())
     }
 }

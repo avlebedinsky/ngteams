@@ -23,11 +23,11 @@ use teams_core::{
     CLOCK_SKEW_MS, CatchUp, CatchUpError, Clock, Command, DRAFTS, Gaps, MAX_FAILED_CHECKS, MAX_PAGES, NOTES, Outbox,
     OutboxError, StoredMessage, UnreadableSeen, enqueue, outbox::ConversationSync,
 };
-use teams_fence::Mri;
 use teams_mock::{
     AB_CHAT, ABC_CHAT, AC_CHAT, AX_CHAT, CHANNEL, ChatEvent, ChatServiceMock, EventKind, LAB_A, LAB_B, LAB_C,
     NOTIFICATIONS,
 };
+use teams_proto::Mri;
 use teams_proto::chat::{self, MessageText};
 use teams_proto::{
     Author, Client, Credentials, Failure, HttpError, HttpTransport, Read, Request as ProtoRequest, Response, Transport,

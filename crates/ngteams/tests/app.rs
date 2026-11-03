@@ -18,14 +18,13 @@ use std::time::{Duration, Instant};
 
 use gpui::{TestAppContext, WindowHandle};
 use ngteams::accounts::{Runner, Started};
+use ngteams::accounts_file::{PersonalAccount, PersonalPaths};
 use ngteams::app::{self, Launch, SIGNED_OUT_HINT, SignInAgain};
 use ngteams::calling::PersonalCalls;
 use ngteams::setup::Setup;
 use teams_auth::secrets::MemorySecretStore;
 use teams_core::CallFloor;
 use teams_core::{CallAction, CallActionError, CallId, EngineError, Event, IncomingCall, RegistrationReport};
-use teams_fence::lab::LabLocations;
-use teams_fence::personal::{PersonalAccount, PersonalPaths};
 use teams_media::devices::file::{AudioInput, FileDevices, Pacing, PatternCamera};
 use teams_mock::CHAT_BASE;
 use teams_ui::bus::BusError;
@@ -36,13 +35,8 @@ const WAIT: Duration = Duration::from_secs(30);
 
 /// A personal build signed in once (its account and region saved) under `dir`, with no refresh token anywhere.
 fn signed_in_setup(dir: &tempfile::TempDir) -> (Setup, PersonalAccount) {
-    let lab = LabLocations {
-        config_file: dir.path().join("config/teams-lab/lab.toml"),
-        data_dir: dir.path().join("share/teams-lab"),
-        personal_data_dir: dir.path().join("share/ngteams"),
-    };
     let paths = PersonalPaths::new(dir.path().join("config/ngteams"), dir.path().join("share/ngteams"));
-    let setup = Setup::new(paths, lab).unwrap();
+    let setup = Setup::new(paths).unwrap();
     let account = PersonalAccount::new(
         "someone@example.test",
         "00000000-0000-4000-8000-0000000000ff",
@@ -142,7 +136,7 @@ fn shown_after_a_ring(calls: Option<&PersonalCalls>) -> (bool, bool, bool, bool,
         models.apply(
             Event::IncomingCall(IncomingCall {
                 call: CallId::for_tests(1),
-                caller: teams_fence::Mri::new("8:orgid:00000000-0000-4000-8000-00000000000b"),
+                caller: teams_proto::Mri::new("8:orgid:00000000-0000-4000-8000-00000000000b"),
                 caller_name: Some("Someone Else".to_owned()),
                 group_chat: None,
             }),

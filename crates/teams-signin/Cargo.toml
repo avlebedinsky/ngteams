@@ -17,6 +17,8 @@ log.workspace = true
 teams-auth.workspace = true
 # diagnostic decision records, installed by the app
 teams-log.workspace = true
+# shared credential-safe URL shape for guard diagnostics
+teams-proto.workspace = true
 serde_json.workspace = true
 percent-encoding.workspace = true
 # the guard's wire protocol; depending on it also builds the module WebKit loads into every web process

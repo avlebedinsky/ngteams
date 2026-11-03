@@ -30,10 +30,7 @@ pub(super) fn run(case: &str, setup: &Setup) {
                 Ok(Outcome::Quit)
             ));
         }
-        "command-read-engine-error"
-        | "command-read-bad-accounts"
-        | "command-read-window-error"
-        | "command-read-setup-error" => {
+        "command-read-engine-error" | "command-read-bad-accounts" | "command-read-window-error" => {
             read_errors(case, setup);
         }
         "command-snapshot" => snapshot_boundaries(setup),
@@ -58,19 +55,6 @@ fn broker_boundaries(setup: &Setup) {
     peer.write_all(&u32::MAX.to_be_bytes()).unwrap();
     drop(peer);
     assert_eq!(broker("signed@example.test", socket.into_raw_fd()), ExitCode::FAILURE);
-    // A stored personal entry is still refused if the lab configuration later names its UPN.
-    std::fs::create_dir_all(setup.lab.config_file.parent().unwrap()).unwrap();
-    std::fs::write(&setup.lab.config_file,
-        "[[accounts]]\nalias = \"a\"\nupn = \"signed@example.test\"\n[[accounts]]\nalias = \"b\"\nupn = \"synthetic-b@example.test\"\n[[accounts]]\nalias = \"c\"\nupn = \"synthetic-c@example.test\"\n"
-    ).unwrap();
-    let (peer, socket) = UnixStream::pair().unwrap();
-    drop(peer);
-    assert_eq!(broker("signed@example.test", socket.into_raw_fd()), ExitCode::FAILURE);
-    assert!(
-        teams_fence::personal::PersonalAccount::find(&setup.paths, "signed@example.test")
-            .unwrap()
-            .is_some()
-    );
 }
 
 fn snapshot_boundaries(setup: &Setup) {
@@ -157,11 +141,10 @@ fn read_window(setup: &Setup) {
     request.trace_fd = Some(trace.into_raw_fd());
     assert!(matches!(run_read_only(&request), Ok(Outcome::Quit)));
     serving.join().unwrap();
-    let account = teams_fence::personal::PersonalAccount::find(&paths, "signed@example.test")
+    let account = ngteams::accounts_file::PersonalAccount::find(&paths, "signed@example.test")
         .unwrap()
         .unwrap();
     assert!(paths.store_file(&account).unwrap().is_file());
-    assert!(!paths.fence_log().exists());
     assert_eq!(
         std::fs::read(setup.paths.accounts_file()).unwrap(),
         std::fs::read(paths.accounts_file()).unwrap()
@@ -199,11 +182,7 @@ fn corrupt_files(setup: &Setup) {
 fn read_errors(case: &str, setup: &Setup) {
     let account = super::signed(setup, "signed@example.test", 13, true);
     let root = tempfile::tempdir().unwrap();
-    let dest = if case == "command-read-setup-error" {
-        setup.lab.data_dir.clone()
-    } else {
-        root.path().to_owned()
-    };
+    let dest = root.path().to_owned();
     let paths = ngteams::snapshot::snapshot(&setup.paths, &dest).unwrap();
     if case == "command-read-bad-accounts" {
         std::fs::write(paths.accounts_file(), b"invalid accounts").unwrap();
@@ -216,9 +195,7 @@ fn read_errors(case: &str, setup: &Setup) {
     let mut request = mode(setup, socket);
     request.data = dest;
     let error = run_read_only(&request).err().unwrap();
-    let expected = if case.ends_with("setup-error") {
-        "overlaps"
-    } else if case.ends_with("window-error") {
+    let expected = if case.ends_with("window-error") {
         "window couldn't be opened"
     } else if case.ends_with("engine-error") {
         "region"
