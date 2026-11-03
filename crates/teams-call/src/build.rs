@@ -9,7 +9,7 @@ use teams_proto::{
     AcceptCall, AcceptParts, AcknowledgeAcceptance, AcknowledgeMediaAnswer, AddParts, AddToCall, AnswerMedia,
     AnswerMediaParts, ApplyChannelParameters, AttachCall, AttachParts, CallLink, ChannelParameters, DecideLobby,
     DeclineCall, Invitee, JoinCall, JoinMedia, JoinParts, KeepAliveCall, LeaveCall, LeaveReason, Links, MediaContent,
-    MediaDescriptions, RenegotiateMedia, ReportRinging, StartCall, StartParts, UpdateEndpointMetadata,
+    MediaDescriptions, MeetingInfo, RenegotiateMedia, ReportRinging, StartCall, StartParts, UpdateEndpointMetadata,
     UpdateEndpointState, UpdateMediaDescriptions,
 };
 
@@ -80,20 +80,29 @@ pub(crate) fn start(
     Ok(CallWrite::Start(start))
 }
 
-/// The join of the running call at `conversation` in the group chat `chat`, with `offer`.
+/// What a join goes into: the chat (a group chat, or a channel), its message (`"0"`, or a channel meeting's post) and
+/// the meeting it is, if any.
+pub(crate) struct JoinInto<'a> {
+    pub(crate) chat: &'a str,
+    pub(crate) message_id: &'a str,
+    pub(crate) meeting: Option<MeetingInfo>,
+}
+
+/// The join of the running call at `conversation` in `into`, with `offer`.
 pub(crate) fn join(
     call: &mut Call,
     identity: &Identity,
     conversation: &CallLink,
-    chat: &str,
+    into: JoinInto<'_>,
     offer: MediaContent,
 ) -> Result<CallWrite, CallError> {
     let parts = JoinParts {
         from: call.me.clone(),
         roster_update: call.callback(Kind::Conversation, "rosterUpdate")?,
         conversation_links: call.links(Kind::Conversation, &CONVERSATION_LINKS)?,
-        group_chat: chat.to_owned(),
-        meeting: None,
+        group_chat: into.chat.to_owned(),
+        message_id: into.message_id.to_owned(),
+        meeting: into.meeting,
         client: identity.client.clone(),
     };
     call.modalities = modalities(true);

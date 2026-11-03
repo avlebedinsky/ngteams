@@ -299,7 +299,10 @@ fails the run.
   on), after the enforcement test (a probe to its 1:1 chat with `PROTO_LAB_PEER`); `PROTO_LAB_SCHEDULE=<title>`
   schedules a meeting with the peer first (its chat and link in `meeting.txt` in the capture dir) and cancels it as the
   run ends. Every write is judged by the lab rule; two runs at once (a and b) play organizer and invitee, to look at a
-  meeting's pre-join, options and lobby (`docs/protocol/calling.md`); recorded, every deny expected.
+  meeting's pre-join, options, lobby and a channel's meeting (`docs/protocol/calling.md`); recorded, every deny
+  expected. Before its probe it drops any earlier run's probe the web client still holds unsent from the page's own
+  store and opens the chat again: the client sends a chat's messages in turn, and one stuck at the head of the chat's
+  queue holds every later one back.
 - `ab-meeting-join`: account a alone, after the enforcement test: a schedules a Teams meeting with b, opens its join
   link and clicks the pre-join's Join now, only on that meeting; the pre-join's subscription is judged by the meeting's
   chat, read fresh, and everything that would enter a call is held back with a labelled forced deny
@@ -735,8 +738,14 @@ refuses a binary without the mode (`TEAMS_BIN` overrides `~/.local/lib/ngteams/n
 ngteams snapshot --to <dir>                                # a copy of your Teams files (stores via VACUUM INTO, read-only)
 ngteams secrets --account <upn> --fd <n>                   # the broker: get only; put and delete refused (outside the sandbox)
 ngteams --read-only --account <upn> --data <dir> --secrets-fd <n> [--trace-fd <n>]   # in the UI sandbox only
-ui-sandbox-run serve --dir <run> --broker <prog> [--broker-arg A]... --app <prog> [--app-arg A]...
+ui-sandbox-run serve --dir <run> [--pipewire] --broker <prog> [--broker-arg A]... --app <prog> [--app-arg A]...
+ui-sandbox-run shot|screen <name> | key <spec> | type <text> | click <x> <y> | scroll <x> <y> <notches> | windows | stop --dir <run>
 ```
+
+`--pipewire` gives the sandbox its private PipeWire (a tone microphone, a recorded speaker, the test-pattern camera), so
+a lab app run with it (`teams-app --lab <alias>`, its broker `teams-app secrets --lab <alias> --fd {broker-fd}`, under
+the live lock) has calls: an agent's live run of a call from the app's own UI, driven by clicks, keys and the wheel
+(`scroll`, positive down).
 
 What the mode refuses, below the views and logged: messages, edits, deletes, reactions, typing, read receipts, chats
 created, availability and status, registrations and every call write (the transports are read-only:

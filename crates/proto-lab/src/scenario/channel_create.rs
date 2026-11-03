@@ -127,7 +127,12 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
     let mut report = ScenarioReport::new(ScenarioName::ChannelCreate);
     let mut drive = a.driver();
     let forced = if writing.is_some() {
-        probe_rule().map(|rule| vec![rule])
+        probe_rule().and_then(|rule| {
+            // an earlier chat scenario's unsent probe, sent again once the page loads, stays held back too
+            let mut rules = vec![rule];
+            rules.extend(super::ab_chat::probe_rules(None)?);
+            Ok(rules)
+        })
     } else {
         channel_rules()
     }

@@ -201,6 +201,10 @@ pub trait Core: Send + Sync + 'static {
     fn meeting(&self, _chat: String) -> Reply<Option<MeetingDetails>> {
         Reply::ready(Ok(None))
     }
+    /// The meeting that runs in the channel `channel` now. A fake core knows none.
+    fn channel_meetup(&self, _channel: String) -> Reply<Option<teams_core::ChannelMeetup>> {
+        Reply::ready(Ok(None))
+    }
     /// A team's people. A fake core knows nobody.
     fn team_roster(&self, _team: String) -> Reply<Vec<TeamMember>> {
         Reply::ready(Ok(Vec::new()))
@@ -370,6 +374,10 @@ impl Core for EngineRequests {
 
     fn meeting(&self, chat: String) -> Reply<Option<MeetingDetails>> {
         EngineRequests::meeting(self, chat)
+    }
+
+    fn channel_meetup(&self, channel: String) -> Reply<Option<teams_core::ChannelMeetup>> {
+        EngineRequests::channel_meetup(self, channel)
     }
 
     fn team_settings(&self, team: String) -> Reply<Option<String>> {

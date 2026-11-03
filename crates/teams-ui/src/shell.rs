@@ -54,7 +54,7 @@ use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::kbd::Kbd;
 use gpui_component::tooltip::Tooltip;
 use gpui_component::{Icon, ResizableState, Size, h_resizable, resizable_panel};
-use teams_core::{Availability, Reporting};
+use teams_core::{Availability, ChannelMeetup, Reporting};
 use teams_proto::ManualAvailability;
 
 use crate::accounts::{AccountTile, Accounts};
@@ -70,7 +70,7 @@ use crate::create_team_more::{CreateTeamMore, CreateTeamMoreEvent};
 use crate::first_run::FirstRun;
 use crate::forwarded::Original;
 use crate::global_search::{self, GlobalSearch, GlobalSearchEvent, Mode as SearchMode};
-use crate::icons::{Glyph, icon_button_with_key, selected_by};
+use crate::icons::{Glyph, icon_button, icon_button_with_key, selected_by};
 use crate::join_team::{JoinTeam, JoinTeamEvent};
 use crate::manage_team::{ManageTab, ManageTeam, ManageTeamEvent};
 use crate::models::{Account, Models};
@@ -126,6 +126,9 @@ const ACCOUNT_AVATAR: f32 = 36.0;
 /// How many of the account's meeting chats, newest first, Join with an ID reads for a meeting the calendar doesn't
 /// have ([`Shell::join_meeting_code`]).
 pub const MEETING_CHATS_LOOKED_THROUGH: usize = 40;
+/// How often a channel shown is read again for a meeting that runs in it (its header's Join): nothing the native
+/// client hears tells it.
+pub const CHANNEL_MEETUP_REFRESH: std::time::Duration = std::time::Duration::from_secs(30);
 /// The rail's width, px.
 pub const RAIL_WIDTH: f32 = 76.0;
 /// A rail item's height, px.
@@ -253,6 +256,8 @@ pub struct Shell {
     chat: Option<Entity<ChatView>>,
     /// The channel opened in the conversation pane, with the names its header shows.
     channel: Option<(Entity<ChannelView>, ChannelChosen)>,
+    /// The meeting that runs in the channel shown, as last read ([`Self::read_channel_meetup`]): its header's Join.
+    channel_meetup: Option<(String, ChannelMeetup)>,
     settings_view: Entity<SettingsView>,
     /// The calendar, shown across both panes from the rail's Calendar.
     calendar: Entity<CalendarView>,
@@ -344,7 +349,6 @@ impl Shell {
         let first_run = cx.new(|cx| FirstRun::new(settings.clone(), cx));
         let (calendar, calendar_events) = Self::calendar(&core, &models, &trace, window, cx);
         let [settled, presence, renamed] = Self::observe_header(&settings, &models, &list, cx);
-        let typed = Self::keystrokes_are_use(window, cx);
         let (call_bar, calling) = Self::calls(&core, &models, &list, &trace, cx);
         let focus = cx.focus_handle();
         focus.focus(window, cx);
@@ -360,6 +364,7 @@ impl Shell {
             sidebar,
             chat,
             channel: None,
+            channel_meetup: None,
             settings_view,
             calendar,
             first_run,
@@ -393,7 +398,7 @@ impl Shell {
                 channel_opened,
                 kept_channel,
                 presence,
-                typed,
+                Self::keystrokes_are_use(window, cx),
                 renamed,
                 settled,
                 calling,
@@ -873,6 +878,95 @@ impl Shell {
             let ask = Ask::Join { chat: String::new() };
             calls::refuse_here(&self.models.calls, &self.trace, &ask, "no-chat", cx);
         }
+    }
+
+    /// Reads whether a meeting runs in the channel `channel` ([`Core::channel_meetup`]), and again every
+    /// [`CHANNEL_MEETUP_REFRESH`] while that channel is shown: its header has Join while one runs, as Teams' does.
+    fn read_channel_meetup(&mut self, channel: String, cx: &mut Context<Self>) {
+        if self.channel_meetup.as_ref().is_some_and(|(shown, _)| *shown != channel) {
+            self.channel_meetup = None;
+        }
+        let core = Arc::clone(&self.core);
+        cx.spawn(async move |this, cx| {
+            loop {
+                let read = core.channel_meetup(channel.clone()).await;
+                let shown = this
+                    .update(cx, |this, cx| this.channel_meetup_read(&channel, read, cx))
+                    .unwrap_or(false);
+                if !shown {
+                    return;
+                }
+                cx.background_executor().timer(CHANNEL_MEETUP_REFRESH).await;
+            }
+        })
+        .detach();
+    }
+
+    /// What a read of the channel `channel`'s meeting gave, kept while that channel shows (a read that failed keeps what
+    /// was read last); whether it still shows.
+    fn channel_meetup_read(
+        &mut self,
+        channel: &str,
+        read: Result<Option<ChannelMeetup>, teams_core::EngineError>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.main != Main::Channel(channel.to_owned()) {
+            return false;
+        }
+        let kept = self.channel_meetup.take().filter(|(shown, _)| shown == channel);
+        let now = match read {
+            Ok(meetup) => meetup.map(|meetup| (channel.to_owned(), meetup)),
+            Err(_) => kept.clone(),
+        };
+        if now != kept {
+            let kind = if now.is_some() { "running" } else { "none" };
+            self.trace.record(
+                &TraceLine::new("channel-meeting", "shown")
+                    .conversation(channel)
+                    .kind(kind),
+            );
+            cx.notify();
+        }
+        self.channel_meetup = now;
+        true
+    }
+
+    /// The channel header's Join: the meeting that runs in the channel shown, its pre-join first.
+    pub fn join_channel_meeting(&mut self, cx: &mut Context<Self>) {
+        let Some((channel, meetup)) = self.channel_meetup.clone() else {
+            let ask = Ask::Join { chat: String::new() };
+            calls::refuse_here(&self.models.calls, &self.trace, &ask, "no-meeting", cx);
+            return;
+        };
+        let title = self
+            .channel
+            .as_ref()
+            .filter(|(view, _)| view.read(cx).channel() == channel.as_str())
+            .map(|(_, chosen)| chosen.name.to_string())
+            .filter(|name| !name.is_empty())
+            .map_or_else(|| "Meeting".to_owned(), |name| format!("Meeting in \"{name}\""));
+        self.open_prejoin(
+            MeetingToJoin {
+                chat: channel,
+                meeting: meetup.meeting,
+                title,
+            },
+            cx,
+        );
+    }
+
+    /// The channel header's Join, while a meeting runs in the channel shown and a call may go.
+    fn channel_join_button(&self, id: &str, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let calls = self.models.calls.read(cx);
+        let runs = self.channel_meetup.as_ref().is_some_and(|(shown, _)| shown == id);
+        if !runs || !calls.idle() || !calls.registered() || self.busy_elsewhere(cx) {
+            return None;
+        }
+        let button = icon_button("channel-join-meeting", Glyph::VIDEO, "Join the channel's meeting")
+            .label("Join")
+            .primary()
+            .on_click(cx.listener(|this, _, _, cx| this.join_channel_meeting(cx)));
+        Some(selected_by("channel-join-meeting", button).into_any_element())
     }
 
     /// What a call command of the switcher asks.
@@ -1543,6 +1637,7 @@ impl Shell {
             self.channel_events = Some(Self::follow_channel(&view, window, cx));
             self.channel = Some((view, chosen.clone()));
         }
+        self.read_channel_meetup(chosen.id.clone(), cx);
         self.teams
             .update(cx, |teams, cx| teams.select(Some(chosen.id.clone()), cx));
         // the channel is the list's selection: no chat row is highlighted, and the channel's own row under "Favorites"
@@ -2350,7 +2445,12 @@ impl Shell {
                         }
                     },
                 );
-                pane.child(pane_header(None, title, palette).debug_selector(|| "channel-header".to_owned()))
+                let join = self.channel_join_button(id, cx);
+                let header = pane_header(None, title, palette)
+                    .child(div().flex_1())
+                    .children(join)
+                    .debug_selector(|| "channel-header".to_owned());
+                pane.child(header)
                     .child(div().flex_1().min_h_0().children(shown.map(|(view, _)| view.clone())))
                     .into_any_element()
             }

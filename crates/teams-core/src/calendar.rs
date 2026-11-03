@@ -23,10 +23,10 @@ use chrono::{Local, NaiveDate, TimeZone as _};
 use serde_json::{Map, Value};
 use teams_fence::Mri;
 use teams_proto::{
-    Author, CalendarEvent, CalendarView, CancelEvent, Client, CreateEvent, CreateOnlineMeeting, Credentials,
-    DeleteEvent, EventAttendee, EventDraft, EventRead, EventTime, FreeBusyAsk, FullEvent, HttpError, HttpTransport,
-    MeetingDetails, MeetingThread, MeetingTimes, Mutating, Organizer, PersonSchedule, Schedules, ShortProfileLookup,
-    TimeZoneSettings, Transport, UpdateEvent,
+    Author, CalendarEvent, CalendarView, CancelEvent, ChannelMeetup, Client, CreateEvent, CreateOnlineMeeting,
+    Credentials, CsaTeams, DeleteEvent, EventAttendee, EventDraft, EventRead, EventTime, FreeBusyAsk, FullEvent,
+    HttpError, HttpTransport, MeetingDetails, MeetingThread, MeetingTimes, Mutating, Organizer, PersonSchedule,
+    Schedules, ShortProfileLookup, TimeZoneSettings, Transport, UpdateEvent,
 };
 use teams_store::{Store, StoreError, StoredEvent};
 use tokio::task::JoinSet;
@@ -203,6 +203,23 @@ where
                 Ok(answer) => Ok(MeetingThread::read_answer(answer.body())),
                 Err(error) => {
                     log::info!("the meeting's chat couldn't be read: {error}");
+                    Err(EngineError::MeetingUnread)
+                }
+            };
+            let _ = reply.send(answer);
+        });
+    }
+
+    /// Answers `reply` with the meeting that runs in the channel `channel` now, as CSA's teams read names it under the
+    /// channel's `activeMeetups` ([`CsaTeams::meetup_in`]): `None` when none runs (or the answer doesn't name the
+    /// channel), [`EngineError::MeetingUnread`] when it couldn't be read.
+    pub(crate) fn channel_meetup(&self, channel: String, reply: Responder<Option<ChannelMeetup>>) {
+        let client = Arc::clone(&self.client);
+        tokio::task::spawn_local(async move {
+            let answer = match client.read(&CsaTeams).await {
+                Ok(answer) => Ok(CsaTeams::meetup_in(answer.body(), &channel)),
+                Err(error) => {
+                    log::info!("the channel's meeting couldn't be read: {error}");
                     Err(EngineError::MeetingUnread)
                 }
             };

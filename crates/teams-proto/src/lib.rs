@@ -115,7 +115,7 @@ pub use post_read::{
     PresenceSubscription, ShortProfile, ShortProfileLookup, SubscriptionStatus, UserPresence,
 };
 pub use read::{
-    CSA_TEAMS_PATH, CSA_TEAMS_QUERY, Channel, ChannelType, CsaAnswerError, CsaTeams, GRAPH_PICTURE_SIZE,
+    CSA_TEAMS_PATH, CSA_TEAMS_QUERY, Channel, ChannelMeetup, ChannelType, CsaAnswerError, CsaTeams, GRAPH_PICTURE_SIZE,
     GRAPH_USER_SELECT, GraphAnswerError, GraphPicture, GraphUser, MAX_PICTURE, Picture, PictureFormat, Read, Team,
     TeamAbout, TeamsAnswer, object_id,
 };

@@ -614,6 +614,9 @@ pub struct JoinParts {
     pub roster_update: String,
     pub conversation_links: Links,
     pub group_chat: String,
+    /// The message of the chat the call belongs to (`groupChat.messageId`): `"0"` for a group chat's or a meeting
+    /// chat's call, the meeting's post for a channel's meeting.
+    pub message_id: String,
     pub meeting: Option<MeetingInfo>,
     pub client: ClientInfo,
 }
@@ -706,7 +709,7 @@ fn join_body(parts: &JoinParts, subject: &Value) -> Map<String, Value> {
     body.insert("groupContext".to_owned(), Value::Null);
     body.insert(
         "groupChat".to_owned(),
-        json!({"threadId": parts.group_chat, "messageId": "0"}),
+        json!({"threadId": parts.group_chat, "messageId": parts.message_id}),
     );
     body.insert("participants".to_owned(), json!({"from": parts.from.json()}));
     parts.client.add_capabilities(&mut body, true);

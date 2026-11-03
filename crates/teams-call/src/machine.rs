@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use base64::Engine as _;
 use teams_fence::{Delivery, Mri, Observed};
 use teams_proto::{
-    AcceptanceAcknowledgement, CallContext, CallLink, CallParticipant, ChannelParameters, ClientInfo,
+    AcceptanceAcknowledgement, CallContext, CallLink, CallParticipant, ChannelMeetup, ChannelParameters, ClientInfo,
     InvitationReceipt, MediaContent, MediaDescriptions, MeetingInfo,
 };
 
@@ -508,7 +508,39 @@ impl Calls {
         {
             call.roster = followed.roster.seeded();
         }
-        let write = build::join(&mut call, &self.identity, &conversation, chat, offer)?;
+        let into = build::JoinInto {
+            chat,
+            message_id: "0",
+            meeting: None,
+        };
+        let write = build::join(&mut call, &self.identity, &conversation, into, offer)?;
+        Ok(self.begin(call, Step::Join, write))
+    }
+
+    /// The account joins the meeting `meetup` that runs in the channel `channel` (its Join, as the web client's from the
+    /// channel's post: a join at the meeting's conversation naming the channel, the post and the meeting's organizer,
+    /// `docs/protocol/calling.md`, "A channel's meeting"), with `offer`.
+    ///
+    /// # Errors
+    /// [`CallError`]; nothing was sent.
+    pub fn join_channel_meeting(
+        &mut self,
+        channel: &str,
+        meetup: &ChannelMeetup,
+        offer: MediaContent,
+        now: Instant,
+    ) -> Result<CallId, CallError> {
+        let side = Side::Joined {
+            chat: channel.to_owned(),
+            conversation: meetup.conversation.clone(),
+        };
+        let mut call = self.new_call(side, now)?;
+        let into = build::JoinInto {
+            chat: channel,
+            message_id: &meetup.message_id,
+            meeting: Some(meetup.meeting.clone()),
+        };
+        let write = build::join(&mut call, &self.identity, &meetup.conversation, into, offer)?;
         Ok(self.begin(call, Step::Join, write))
     }
 
@@ -1138,6 +1170,7 @@ impl Calls {
             }
             (Kind::Call, "mediaRenegotiation") => self.renegotiated(delivery, observed, now),
             (Kind::Call, "mediaAnswer") => self.media_answered(delivery, now),
+            (Kind::Call, "mediaAcknowledgement") => self.retargeted(delivery, observed),
             (Kind::Call, "rejection") => self.reoffer_rejected(delivery, now),
             (Kind::Conversation, "rosterUpdate") => {
                 self.roster_updated(delivery);
@@ -1190,6 +1223,33 @@ impl Calls {
             }
             _ if matches!(call.phase, Phase::Leaving { .. }) => {}
             _ => self.fail(Step::MediaAnswer, now),
+        }
+    }
+
+    /// The acknowledgement of the account's media answer, read only for a retarget ([`read::retarget`]): a meeting's
+    /// call moved to another call id once the account was let in from its lobby, and the call's own links (its
+    /// renegotiation's, its keep-alive's call leg, a group call's media links) follow it. The renegotiations after it
+    /// name the new call's answer links, which the fence bound from the same delivery. Anything else, or one the fence
+    /// didn't read, changes nothing.
+    fn retargeted(&mut self, delivery: &Delivery, observed: Observed) {
+        if observed != Observed::Renegotiation {
+            return;
+        }
+        let Some(call) = self.call.as_mut() else { return };
+        let Some(retarget) = read::retarget(&delivery.body) else {
+            return;
+        };
+        if retarget.renegotiation.is_some() {
+            call.renegotiation = retarget.renegotiation;
+        }
+        if let Some(keep_alive) = call.keep_alive.as_mut() {
+            keep_alive.link = Some(retarget.call_leg);
+        }
+        if retarget.group_media.descriptions.is_some() {
+            call.group_media.descriptions = retarget.group_media.descriptions;
+        }
+        if retarget.group_media.channel_parameters.is_some() {
+            call.group_media.channel_parameters = retarget.group_media.channel_parameters;
         }
     }
 

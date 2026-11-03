@@ -15,7 +15,9 @@ use url::{Position, Url};
 
 use super::decoded_segments;
 use super::json::strict_json;
-use crate::membership::{ONE_TO_ONE_SUFFIX, is_group_chat_id, is_guid, is_meeting_chat_id, one_to_one_id};
+use crate::membership::{
+    ONE_TO_ONE_SUFFIX, is_group_chat_id, is_guid, is_meeting_chat_id, is_team_thread_id, one_to_one_id,
+};
 use crate::{CallOperation, Mri, Scope, Target, WriteKind};
 
 /// The flight proxy every call request goes through: the call start, and every link the call's services hand out.
@@ -44,6 +46,8 @@ pub(crate) enum Shape {
     TextOrNull,
     /// A non-negative integer.
     Count,
+    /// Any integer: a code that may be `-1` (a meeting's type, unknown to an invitee's subscription).
+    Integer,
     Text,
     /// An array of strings.
     Texts,
@@ -355,12 +359,47 @@ const MEETING_CALL_START: &[Field] = &[
     field("participantPropertyBag", Shape::Object(PROPERTY_BAG)),
 ];
 
+/// A channel's meeting as the web client starts it from the channel header's Meet now (seen 2026-11-03,
+/// `meeting-steps`, the General channel of a team of the lab's own): a meeting call start's keys with the channel in
+/// `groupChat` (`messageId` `null`, the meeting new, or `"0"` as the client subscribes again) and no `meetingInfo`. Without a
+/// call invitation it is the pre-join's roster-only subscription, which enters no call; with one, Join now.
+const CHANNEL_CALL_START: &[Field] = &[
+    required("conversationRequest", Shape::Object(CHAT_CONVERSATION_REQUEST)),
+    field("contentSharing", Shape::Null),
+    required(
+        "participants",
+        Shape::Object(&[required("from", Shape::Object(FROM)), field("to", Shape::Objects(&[]))]),
+    ),
+    field("capabilities", Shape::Null),
+    field("endpointCapabilities", Shape::Count),
+    field("clientEndpointCapabilities", Shape::Count),
+    field("endpointMetadata", Shape::Object(ENDPOINT_METADATA)),
+    field("groupContext", Shape::Null),
+    required(
+        "groupChat",
+        Shape::Object(&[
+            required("threadId", Shape::Text),
+            required("messageId", Shape::TextOrNull),
+        ]),
+    ),
+    required("meetingInfo", Shape::Null),
+    field("meetingData", Shape::Null),
+    field("endpointState", Shape::Object(MEETING_ENDPOINT_STATE)),
+    field("callInvitation", Shape::Object(CHAT_CALL_INVITATION)),
+    field(
+        "debugContent",
+        Shape::Object(&[field("ecsEtag", Shape::Text), field("causeId", Shape::Text)]),
+    ),
+    field("participantPropertyBag", Shape::Object(PROPERTY_BAG)),
+];
+
 /// Whether `value` has `shape`, all the way down.
 pub(crate) fn fits(value: &Value, shape: Shape) -> bool {
     match shape {
         Shape::Null => value.is_null(),
         Shape::Bool => value.is_boolean(),
         Shape::Count => value.is_u64(),
+        Shape::Integer => value.is_i64(),
         Shape::Text => value.is_string(),
         Shape::TextOrNull => value.is_string() || value.is_null(),
         Shape::Texts => value.as_array().is_some_and(|items| items.iter().all(Value::is_string)),
@@ -534,6 +573,43 @@ fn meeting_start_target(start: &Value) -> Option<Target> {
     )
 }
 
+/// A channel's meeting started from the channel (Meet now, [`CHANNEL_CALL_START`]): [`WriteKind::Call`] on the team
+/// whose thread `groupChat.threadId` is ([`Scope::Team`]), the sender its added participant, so the fence permits it only
+/// when that team's members, read fresh from its thread, are lab accounts (Teams' own apps not counted). A channel's
+/// thread is read as the team's root and must be one: a meeting started in the team's first channel (its thread the
+/// team's own) maps, one in any other channel is read as a team it isn't and denied. Nobody named to ring, the sender a
+/// work account; anything else is `None` (unreadable).
+#[must_use]
+pub(crate) fn channel_call_start(method: &str, url: &Url, body: Option<&[u8]>) -> Option<Target> {
+    if !is_start_request(method, url) {
+        return None;
+    }
+    channel_start_target(&strict_json(body?)?)
+}
+
+/// The target of a channel's meeting start already read ([`channel_call_start`]).
+fn channel_start_target(start: &Value) -> Option<Target> {
+    if !fits(start, Shape::Object(CHANNEL_CALL_START)) {
+        return None;
+    }
+    let channel = start.pointer("/groupChat/threadId")?.as_str()?;
+    if !is_team_thread_id(channel) {
+        return None;
+    }
+    let nobody_rings = start
+        .pointer("/participants/to")
+        .is_none_or(|to| to.as_array().is_some_and(Vec::is_empty));
+    let sender = start.pointer("/participants/from/id")?.as_str()?;
+    (nobody_rings && is_guid(sender.strip_prefix("8:orgid:")?)).then_some(())?;
+    let caller = Mri::new(sender);
+    let scope = Scope::Team { id: channel.to_owned() };
+    Some(
+        Target::new(WriteKind::Call, scope)
+            .with_added([caller.clone()])
+            .with_sender(caller),
+    )
+}
+
 /// The target a call start's body gives, as the permit for it was given: the test call's row with the echo service
 /// for a new call ([`Scope::New`]: the start's one participant besides its caller), the chat's row for a call in a
 /// chat. `None` for a body that gives neither.
@@ -550,6 +626,7 @@ pub(crate) fn start_target(target: &Target, body: &[u8], caller: &Mri) -> Option
         Scope::Conversation { .. } => {
             chat_call_start("POST", &url, Some(body)).or_else(|| meeting_call_start("POST", &url, Some(body)))
         }
+        Scope::Team { .. } => channel_call_start("POST", &url, Some(body)),
         Scope::CallOperation {
             operation: CallOperation::Join,
             url,
@@ -576,7 +653,7 @@ pub(crate) fn start_evidence(body: &[u8]) -> Option<StartEvidence> {
     let start = strict_json(body)?;
     // a join or a meeting's start enters a call only with a call invitation; one without subscribes to the roster and
     // starts nothing
-    let enters = [JOIN, MEETING_CALL_START, MEETING_JOIN]
+    let enters = [JOIN, MEETING_CALL_START, MEETING_JOIN, CHANNEL_CALL_START, CHANNEL_JOIN]
         .iter()
         .any(|shape| fits(&start, Shape::Object(shape)))
         && start.get("callInvitation").is_some();
@@ -1261,10 +1338,59 @@ const MEETING_JOIN: &[Field] = &[
         Shape::Object(&[
             required("tenantId", Shape::Text),
             required("organizerId", Shape::Text),
-            field("meetingType", Shape::Count),
+            // an invitee's subscription before it enters (seen 2026-11-03, b's page into a's meeting): `-1`, and
+            // `isBroadcast` beside it, as a group chat's join has it
+            field("meetingType", Shape::Integer),
+            field("isBroadcast", Shape::Bool),
         ]),
     ),
     // the preheat names the meeting by its code too, beside its chat, which is what it is judged by
+    field(
+        "meetingData",
+        Shape::NullOr(&[field("meetingCode", Shape::Text), field("passcode", Shape::Text)]),
+    ),
+    field("endpointState", Shape::Object(MEETING_ENDPOINT_STATE)),
+    field("callInvitation", Shape::Object(CHAT_CALL_INVITATION)),
+    field(
+        "debugContent",
+        Shape::Object(&[field("ecsEtag", Shape::Text), field("causeId", Shape::Text)]),
+    ),
+    field("participantPropertyBag", Shape::Object(PROPERTY_BAG)),
+];
+
+/// `POST …/conv/<id>` for a channel's meeting (seen 2026-11-03, `meeting-steps`, Meet now in a team of the lab's own):
+/// a meeting's entry ([`MEETING_JOIN`]) with the channel in `groupChat`, its `messageId` `null` (or the meeting's post),
+/// and the meeting's organizer and tenant in `meetingInfo`: the preheat while the pre-join shows, and Join now. Judged
+/// by the team's members, as the channel's start is.
+const CHANNEL_JOIN: &[Field] = &[
+    required("conversationRequest", Shape::Object(JOIN_CONVERSATION_REQUEST)),
+    field("contentSharing", Shape::Null),
+    required(
+        "participants",
+        Shape::Object(&[required("from", Shape::Object(FROM)), field("to", Shape::Objects(&[]))]),
+    ),
+    field("capabilities", Shape::Null),
+    field("endpointCapabilities", Shape::Count),
+    field("clientEndpointCapabilities", Shape::Count),
+    field("endpointMetadata", Shape::Object(ENDPOINT_METADATA)),
+    field("groupContext", Shape::Null),
+    required(
+        "groupChat",
+        Shape::Object(&[
+            required("threadId", Shape::Text),
+            required("messageId", Shape::TextOrNull),
+        ]),
+    ),
+    required(
+        "meetingInfo",
+        Shape::Object(&[
+            required("tenantId", Shape::Text),
+            required("organizerId", Shape::Text),
+            field("meetingType", Shape::Integer),
+            field("isBroadcast", Shape::Bool),
+        ]),
+    ),
+    // joined from the meeting's post, the meeting named by its code too, beside its channel, which it is judged by
     field(
         "meetingData",
         Shape::NullOr(&[field("meetingCode", Shape::Text), field("passcode", Shape::Text)]),
@@ -1304,14 +1430,17 @@ fn joins_in_shape(request: &Value, chat: &str) -> bool {
         return fits(request, Shape::Object(JOIN));
     }
     let guid = |at: &str| request.pointer(at).and_then(Value::as_str).is_some_and(is_guid);
+    let nobody_rings = request
+        .pointer("/participants/to")
+        .is_none_or(|to| to.as_array().is_some_and(Vec::is_empty));
+    let organized = guid("/meetingInfo/tenantId") && guid("/meetingInfo/organizerId") && nobody_rings;
+    if is_team_thread_id(chat) {
+        return fits(request, Shape::Object(CHANNEL_JOIN)) && organized;
+    }
     is_meeting_chat_id(chat)
         && fits(request, Shape::Object(MEETING_JOIN))
         && request.pointer("/groupChat/messageId").and_then(Value::as_str) == Some("0")
-        && guid("/meetingInfo/tenantId")
-        && guid("/meetingInfo/organizerId")
-        && request
-            .pointer("/participants/to")
-            .is_none_or(|to| to.as_array().is_some_and(Vec::is_empty))
+        && organized
 }
 
 /// A join in a captured shape ([`joins_in_shape`]) as a write: the conversation's URL, the sender, the chat it names as

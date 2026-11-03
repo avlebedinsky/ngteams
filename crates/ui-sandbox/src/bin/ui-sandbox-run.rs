@@ -2,7 +2,8 @@
 //! socket. `scripts/run-personal-read-only.sh` runs the personal build's read-only mode with it.
 //!
 //! - `ui-sandbox-run serve --dir <run> --broker <program> [--broker-arg A]... --app <program> [--app-arg A]...`:
-//!   starts a sandbox (no PipeWire), a socket pair, the broker **outside** the sandbox (this process's environment,
+//!   starts a sandbox (no PipeWire; `--pipewire` gives it its private one, with its tone, recorded speaker and test
+//!   pattern camera, for a lab app's calls), a socket pair, the broker **outside** the sandbox (this process's environment,
 //!   the user's bus included, so it reaches the Secret Service) with one end, and the app **inside** it
 //!   (`ui_sandbox::clean_command`: the sandbox's compositor and bus only) with the other end and a view trace file
 //!   (`<run>/trace.jsonl`). In the arguments, `{broker-fd}`, `{secrets-fd}` and `{trace-fd}` are replaced by those
@@ -14,7 +15,8 @@
 //! - `ui-sandbox-run <command> --dir <run> [args]`: one command to a running `serve`, its answer printed (`ok …` or
 //!   `error …`, the exit status saying which): `shot <name>` (the window, to `<run>/shots/<name>.png`), `screen <name>`
 //!   (the whole output), `key <spec>` (`ctrl+k`, `Down`, `Enter`, `a`: `ui_sandbox::input::parse_key`), `type <text>`,
-//!   `click <x> <y>` (output pixels), `windows` (niri's list), `stop`.
+//!   `click <x> <y>` (output pixels), `scroll <x> <y> <notches>` (the wheel there, positive down), `windows` (niri's
+//!   list), `stop`.
 
 use std::fs::{self, File};
 use std::io::{BufRead as _, BufReader, Write as _};
@@ -27,11 +29,12 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use ui_sandbox::input::{VirtualInput, keys, parse_key};
+use ui_sandbox::pipewire::PipeWireOptions;
 use ui_sandbox::{NIRI_FULL_WINDOW, Sandbox, SandboxOptions, SandboxResult, Tools, clean_command, spawn};
 
-const USAGE: &str = "usage: ui-sandbox-run serve --dir <run> --broker <program> [--broker-arg A]... --app <program> \
-                     [--app-arg A]...\n       ui-sandbox-run shot|screen <name> | key <spec> | type <text> | click \
-                     <x> <y> | windows | stop  --dir <run>";
+const USAGE: &str = "usage: ui-sandbox-run serve --dir <run> [--pipewire] --broker <program> [--broker-arg A]... --app \
+                     <program> [--app-arg A]...\n       ui-sandbox-run shot|screen <name> | key <spec> | type <text> | click \
+                     <x> <y> | scroll <x> <y> <notches> | windows | stop  --dir <run>";
 
 /// How long the app gets to quit on SIGTERM before it is killed, and the broker to see its socket close.
 const GRACE: Duration = Duration::from_secs(5);
@@ -73,6 +76,8 @@ struct Serve {
     broker_args: Vec<String>,
     app: PathBuf,
     app_args: Vec<String>,
+    /// The sandbox's private PipeWire, for calls.
+    pipewire: bool,
 }
 
 impl Serve {
@@ -80,6 +85,10 @@ impl Serve {
         let mut serve = Self::default();
         let mut args = args.iter();
         while let Some(flag) = args.next() {
+            if flag == "--pipewire" {
+                serve.pipewire = true;
+                continue;
+            }
             let value = args
                 .next()
                 .ok_or_else(|| format!("{flag} needs a value\n{USAGE}"))?
@@ -123,6 +132,7 @@ impl Serve {
             &tools,
             &SandboxOptions {
                 niri_extra: NIRI_FULL_WINDOW,
+                pipewire: self.pipewire.then(PipeWireOptions::default),
                 ..SandboxOptions::default()
             },
         )?;
@@ -253,6 +263,19 @@ impl Controls<'_> {
             }
             "type" => {
                 self.input()?.type_text(rest)?;
+                Ok(String::new())
+            }
+            "scroll" => {
+                let mut numbers = rest.split_whitespace();
+                let (Some(Ok(x)), Some(Ok(y)), Some(Ok(steps)), None) = (
+                    numbers.next().map(str::parse::<u32>),
+                    numbers.next().map(str::parse::<u32>),
+                    numbers.next().map(str::parse::<i32>),
+                    numbers.next(),
+                ) else {
+                    return Err("scroll <x> <y> <notches>".into());
+                };
+                self.input()?.scroll(x, y, steps)?;
                 Ok(String::new())
             }
             "click" => {

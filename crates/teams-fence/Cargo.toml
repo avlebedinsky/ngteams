@@ -20,6 +20,8 @@ personal = []
 [dependencies]
 # decodes a call invitation's `gp` (base64 JSON) the call registry reads
 base64.workspace = true
+# the call registry's debug lines (a retarget followed or not, by call id): the facade only, capped as every crate's
+log.workspace = true
 # decodes the chat service path the write mapping reads its targets from
 percent-encoding.workspace = true
 # the live membership source's own HTTPS client: it reads member lists from the chat service itself

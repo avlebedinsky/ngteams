@@ -20,7 +20,8 @@ use crate::config::{Alias, LabConfig, LabLocations, LabPaths};
 use crate::session::{LabSession, SessionOptions};
 
 use super::ab_chat::{
-    CHAT_OPEN, COMPOSE, chat_link, chat_url, deny_probes, enforce, load, nonce, one_to_one_id, probe_text, setup,
+    CHAT_OPEN, COMPOSE, chat_link, chat_url, deny_probes, enforce, forget_unsent_probes, load, nonce, one_to_one_id,
+    probe_text, setup,
 };
 use super::ab_meeting::{cancel_scheduled, created_chat, created_join_link, schedule};
 use super::ab_trouter::size;
@@ -104,6 +105,35 @@ struct Who<'a> {
     peer_upn: &'a str,
 }
 
+/// Opens the account's chat with `them` for the probe: an earlier run's unsent probe at the head of the chat's queue
+/// would hold this run's back for good, so any is forgotten first and the chat opened again.
+async fn open_chat(
+    drive: &mut super::dsl::Driver,
+    report: &mut ScenarioReport,
+    them: &str,
+    options: RunOptions,
+) -> Result<(), ScenarioError> {
+    for again in [false, true] {
+        drive
+            .navigate("the account opens its chat with its peer", &chat_link(them))
+            .await?;
+        drive
+            .wait_for("the compose box", COMPOSE, options.load_timeout.max(CHAT_OPEN))
+            .await?;
+        if again {
+            break;
+        }
+        let forgotten = forget_unsent_probes(drive).await?;
+        if forgotten == 0 {
+            break;
+        }
+        report.notes.push(format!(
+            "forgot {forgotten} record(s) of earlier runs' unsent probes; the chat opened again"
+        ));
+    }
+    Ok(())
+}
+
 async fn steps(
     who: &Who<'_>,
     page: &mut LabSession,
@@ -118,12 +148,7 @@ async fn steps(
     load(alias, page, options.load_timeout).await?;
     size(page).await?;
     let mut drive = page.driver();
-    drive
-        .navigate("the account opens its chat with its peer", &chat_link(them))
-        .await?;
-    drive
-        .wait_for("the compose box", COMPOSE, options.load_timeout.max(CHAT_OPEN))
-        .await?;
+    open_chat(&mut drive, report, them, options).await?;
     let names_chat = chat_url(&chat).map_err(|error| setup(error.to_string()))?;
     enforce(page, &mut drive, &probe_text(nonce), &names_chat).await?;
     report

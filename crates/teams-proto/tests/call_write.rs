@@ -1137,6 +1137,7 @@ async fn a_join_with_media_of_a_running_group_call_registers_it() {
             callback(PUSH_B, "41414141", "conversation", "conversationEnd"),
         ),
         group_chat: GROUP.into(),
+        message_id: "0".to_owned(),
         meeting: Some(MeetingInfo {
             organizer_id: LAB_A["8:orgid:".len()..].into(),
             tenant_id: "00000000-0000-4000-8000-0000000000d0".into(),
@@ -1170,6 +1171,40 @@ async fn a_join_with_media_of_a_running_group_call_registers_it() {
         Ok(()),
         "the join's answer registered the call"
     );
+}
+
+#[test]
+fn a_join_of_a_channels_meeting_names_the_channel_and_its_post() {
+    const CHANNEL: &str = "19:SyntheticTeamThread@thread.tacv2";
+    let parts = JoinParts {
+        from: participant(LAB_B),
+        roster_update: callback(PUSH_B, "40404040", "conversation", "rosterUpdate"),
+        conversation_links: Links::new().with(
+            "conversationEnd",
+            callback(PUSH_B, "41414141", "conversation", "conversationEnd"),
+        ),
+        group_chat: CHANNEL.into(),
+        message_id: "1700000000000".to_owned(),
+        meeting: Some(MeetingInfo {
+            organizer_id: LAB_A["8:orgid:".len()..].into(),
+            tenant_id: "00000000-0000-4000-8000-0000000000d0".into(),
+        }),
+        client: client(),
+    };
+    let join_media = JoinMedia {
+        call_links: Links::new().with("acceptance", callback(PUSH_B, "43434343", "call", "acceptance")),
+        media_controller_links: Links::new(),
+        modalities: vec!["Audio".into(), "ScreenViewer".into()],
+        media: media(None),
+    };
+    let enter = JoinCall::enter(&context(), &link(&conv("Synthetic3", "")), &parts, &join_media).unwrap();
+    assert!(matches!(
+        enter.target().scope(),
+        Scope::CallOperation { operation: CallOperation::Join, joins: Some(chat), .. } if chat == CHANNEL
+    ));
+    // a channel's meeting is entered only with the meeting named: without its organizer it doesn't map
+    let unnamed = JoinParts { meeting: None, ..parts };
+    assert!(JoinCall::enter(&context(), &link(&conv("Synthetic3", "")), &unnamed, &join_media).is_err());
 }
 
 #[tokio::test]

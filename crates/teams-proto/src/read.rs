@@ -294,6 +294,63 @@ impl CsaTeams {
     }
 }
 
+impl CsaTeams {
+    /// The meeting that runs in the channel `channel` now, as CSA's answer `body` names it under the channel's
+    /// `activeMeetups` (seen 2026-11-03, `meeting-steps`: a channel's Meet now, the web client reading it to show the
+    /// channel's Join): `{"messageId", "conversationUrl", "organizerId", "tenantId", "status": "Active", …}`. `None` when
+    /// the answer doesn't read, the channel isn't in it, or no meeting in it is active with a conversation link on the
+    /// calling service, its meeting's post and its organizer and tenant named.
+    #[must_use]
+    pub fn meetup_in(body: &[u8], channel: &str) -> Option<ChannelMeetup> {
+        let answer: Value = serde_json::from_slice(body).ok()?;
+        let channels = answer
+            .get("teams")?
+            .as_array()?
+            .iter()
+            .filter_map(|team| team.get("channels").and_then(Value::as_array))
+            .flatten();
+        let entry = channels
+            .filter(|entry| entry.get("id").and_then(Value::as_str) == Some(channel))
+            .find(|entry| !flag(entry, "isDeleted"))?;
+        entry
+            .get("activeMeetups")?
+            .as_array()?
+            .iter()
+            .filter(|meetup| meetup.get("status").and_then(Value::as_str) == Some("Active"))
+            .find_map(ChannelMeetup::of)
+    }
+}
+
+/// A meeting running in a channel ([`CsaTeams::meetup_in`]): its post, the conversation it is joined at, and its
+/// organizer and tenant, as a join names them.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChannelMeetup {
+    /// The meeting's post in the channel (`messageId`): the join names it beside the channel.
+    pub message_id: String,
+    /// The meeting's conversation (`conversationUrl`), where the join goes.
+    pub conversation: crate::CallLink,
+    pub meeting: crate::MeetingInfo,
+}
+
+impl ChannelMeetup {
+    fn of(meetup: &Value) -> Option<Self> {
+        let text = |key: &str| {
+            meetup
+                .get(key)
+                .and_then(Value::as_str)
+                .filter(|value| !value.is_empty())
+        };
+        Some(Self {
+            message_id: text("messageId")?.to_owned(),
+            conversation: crate::CallLink::parse(text("conversationUrl")?)?,
+            meeting: crate::MeetingInfo {
+                organizer_id: text("organizerId")?.to_owned(),
+                tenant_id: text("tenantId")?.to_owned(),
+            },
+        })
+    }
+}
+
 impl Read for CsaTeams {
     fn service(&self) -> Service {
         Service::Csa

@@ -99,6 +99,11 @@ impl Gallery {
         self.participants = participants;
     }
 
+    /// The participants the roster told last.
+    pub(super) fn participants(&self) -> &[Participant] {
+        &self.participants
+    }
+
     /// The receiving lines' stream ids, as the media's dialect names them now.
     pub(super) fn set_slots(&mut self, slots: Vec<Option<u32>>) {
         self.shown.resize(slots.len(), None);

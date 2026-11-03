@@ -417,10 +417,7 @@ meeting whose chat the account isn't in (an ID someone passed on) is refused. Se
 --read`): the threads of meetings made from the scheduling form name their long `meetup-join` link, not the short one,
 so only a meeting whose thread names a short link is found by its ID this way.
 
-**A channel's meeting** (Meet in a channel, or a meeting posted to one: its `meetingInfo.meetingType` the other value,
-`groupChat` the channel and its post) has no capture yet: the lab had no team of its own to hold one in, and a team made
-for it couldn't be deleted again until the fence read lab-only teams (`c71eb8b`, landed while the lobby was captured).
-Its start stays unmapped, and the native client joins no channel's meeting.
+**A channel's meeting**: see [A channel's meeting](#a-channels-meeting).
 
 **The pre-join's audio** (seen 2026-11-02, `meeting-steps`, a lab account): Computer audio (the microphone's switch
 and device, the speaker's device), Phone audio drawn greyed out (the account has no dial-in), Room audio (a "Search for
@@ -437,6 +434,33 @@ what joining a room's audio sends (the room device is told to join, a write to i
 search is Outlook's (`outlook.office.com/SchedulingB2`), for which the native client has no token (its sign-in asks for
 Teams' audiences only); and a write to a room reaches the room's device, which the lab rule can't judge without a room
 of the lab's own.
+
+## A channel's meeting
+
+Seen 2026-11-03 (`meeting-steps`, a team of the lab's own made for it with a and b and deleted after, its General
+channel). The channel header's **Meet now** opens a pre-join as a meeting's does, its subscription at `epconv` a
+meeting start's keys with the channel in `groupChat` (`messageId` `null`) and no `meetingInfo`; answered `201` with a new
+conversation, `conversationType` `adHocMeeting`. Join now enters it at the conversation (the preheat while the pre-join
+shows, `preheatProperties: 1`, then `updateEndpointState`), the entry a meeting's with `groupChat` the channel and
+`meetingInfo` `{organizerId, tenantId}`: the account that started it organizes it. With the subscription denied, the
+client sends the whole of it as one start with media at `epconv` (the same keys, a call invitation, `meetingInfo`
+`null`). The service posts the meeting to the channel ("Meeting in "General"", its card's Join) and CSA's teams read
+names it under the channel: `activeMeetups: [{"messageId": <the post>, "conversationUrl", "conversationId",
+"groupCallInitiator", "organizerId", "tenantId", "callMeetingType": -1, "conversationType": "adHocMeeting", "status":
+"Active", "expiration", …}]`. Its card's Join (b's web client) goes to that conversation: a roster-only join, then the
+entry with its call invitation, `groupChat` the channel and the post's id, `meetingInfo` the organizer and tenant (and
+`meetingType` `-1` on the roster-only one), `meetingData` the meeting's code and passcode. When everyone left, the post
+reads "Meeting in "General" ended".
+
+The fence maps the Meet now (its subscription and its start with media) as a call on the channel's team
+(`Scope::Team`, `contacting::call::channel_call_start`) and every entry naming a channel as a join of that channel
+(`CHANNEL_JOIN`), each judged by the team's members read fresh from the team's thread, Teams' own apps not counted, as
+any write on a team is (`docs/lab-rules.md`, "A team and its channels"). A channel's own thread must read as the team's
+root: a meeting in the team's first channel (whose thread is the team's) passes; one in another channel is read as a
+team it isn't and denied, until a read ties a channel to its team. The native client joins a running channel meeting:
+the channel's header shows **Join** while CSA names a meeting running in it (read when the channel opens and every 30 s
+while it shows, `Core::channel_meetup`), which opens the pre-join, and Join now reads the meeting again and enters it at
+its conversation in the web client's entry shape (`Calls::join_channel_meeting`). Meet now isn't built natively.
 
 ## The lobby
 
@@ -474,11 +498,28 @@ lobby is read apart from who is in the call (`teams-call`'s `CallEvent::Lobby` f
 in soon") while the account waits, and the call window shows whoever may admit Teams' "Waiting in the lobby" card with
 Deny and Admit (`CallAction::Lobby`, `DecideLobby` with the web client's callbacks). Seen live 2026-11-03
 (`teams-headless a join-meeting --admit` and `b join-meeting`): b told `lobby`, a told b waiting, a's admit answered
-`202`, a told nobody waiting and b saw a in its call. What follows on the joiner's side isn't handled yet: the mixer's first offer to
-the admitted joiner is a session of its own (every line numbered anew from `1`, its RTP header extensions too), which the
-lobby's media can't take, so the native client sets its media up again and answers it (`202`); a second later a further
-renegotiation names `IsRetargetNegotiationPending` (the call moved to another call controller), which the call registry
-binds to no call, and the joiner's call fails there (`docs/backlog/meeting-lobby-admitted-joiner-retarget.md`).
+`202`, a told nobody waiting and b saw a in its call.
+
+**What the admitted joiner gets** (seen 2026-11-03, `meeting-steps`: b's web client let into a's meeting, every one of
+its deliveries recorded): the conversation's update and a roster that still lists it in the lobby, then the mixer's first
+offer at its `mediaRenegotiation` callback (`mediaContent.newOffer: true`, `fromMixer`, `contentType`
+`application/sdp-ngc-0.5`: a session of its own, every line and RTP header extension numbered anew), its answer
+link on the call's call id. The client answers it (`202`), and the acknowledgement of that answer, at the answer's own
+`mediaAcknowledgement` callback, moves the call: `{"mediaAcknowledgement": {"code": 0, "subCode": 10109, "phrase":
+"Participant retarget was successful.", "resultCategories": ["Success"]}, "links": {…}}`, its `links` the call's own
+(`callLeg`, `mediaRenegotiation`, `transfer`, `retargetCompletion`, `hold`, `monitor`, `updateCallState`,
+`controlVideoStreaming`, `applyChannelParameters`, `updateMediaDescriptions`) all on **another call id** of the same
+call controller, `callLeg` named twice (`null`, then the new leg: read as the web client's `JSON.parse` keeps the last).
+The roster then moves the joiner from `lobby` to `call` (`modalityJoined` `"Lobby,Call"`), and about 5 s later the mixer
+renegotiates the new session (`newOffer: false`, `sdp-ngc-1.0`), its answer link on the new call id; answered `202`, its
+acknowledgement hands out no call leg. The web client posts nothing to `retargetCompletion`. The native client does the
+same: its media set up again for the mixer's first offer (`Calling::rebuild`, the roster's participants kept), the
+retarget's acknowledgement followed (the call registry moves the call to the new call id and binds its links as an
+acceptance's, `teams-fence`'s `Call::follow_retarget`; the call machine takes the new `mediaRenegotiation` and call
+leg, `Calls::retargeted`), and the renegotiations after it answered on the media set up for the mixer (a call's offers
+after its rebuild are its own renegotiations, not another session). Seen live 2026-11-03: b's native client let in by
+a's web client stayed in the meeting 40 and 60 s and hung up itself, every write permitted, its audio frames sent and
+received.
 
 ## A call held past a dropped socket
 

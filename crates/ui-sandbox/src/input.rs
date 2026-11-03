@@ -18,7 +18,7 @@ use wayland_client::{
     Connection, Dispatch, EventQueue, QueueHandle, delegate_noop,
     globals::{GlobalListContents, registry_queue_init},
     protocol::{
-        wl_pointer::ButtonState,
+        wl_pointer::{Axis, AxisSource, ButtonState},
         wl_registry::{self, WlRegistry},
         wl_seat::WlSeat,
     },
@@ -353,6 +353,25 @@ impl VirtualInput {
         self.pointer.motion_absolute(self.time(), x, y, width, height);
         self.pointer.frame();
         self.sync()
+    }
+
+    /// Moves the pointer to (`x`, `y`) and turns the wheel by `steps` notches (positive scrolls down), as a mouse's wheel
+    /// does: 15 pixels a notch, one discrete step each.
+    ///
+    /// # Errors
+    /// The connection fails.
+    pub fn scroll(&mut self, x: u32, y: u32, steps: i32) -> SandboxResult {
+        self.move_to(x, y)?;
+        for _ in 0..steps.unsigned_abs() {
+            let step = if steps < 0 { -1 } else { 1 };
+            let time = self.time();
+            self.pointer.axis_source(AxisSource::Wheel);
+            self.pointer
+                .axis_discrete(time, Axis::VerticalScroll, f64::from(15 * step), step);
+            self.pointer.frame();
+            self.sync()?;
+        }
+        Ok(())
     }
 
     /// Moves the pointer to (`x`, `y`) and clicks `button` (an evdev code, [`keys::BTN_LEFT`]).

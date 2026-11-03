@@ -62,7 +62,9 @@
 //!
 //! **Media negotiation.** A renegotiation or a renegotiation's answer delivered at a registered call's or an answered
 //! invitation's own `mediaRenegotiation` or `mediaAnswer` callback binds the link it names (`answer`, `acknowledge`)
-//! of that call.
+//! of that call. A registered call's media answer acknowledged as a retarget (a meeting's call moved to another call id
+//! once its lobby let the account in) moves the call to the controller the acknowledgement's links name, binding them
+//! as an acceptance's: the same call and participants, its operations taken at another call id.
 
 mod offer;
 
@@ -311,6 +313,52 @@ impl Call {
             self.links.push(link);
         }
         true
+    }
+
+    /// Follows the call to the call id a media answer's acknowledgement delivered at `path` moves it to (a retarget:
+    /// `{"mediaAcknowledgement": {…, "resultCategories": ["Success"]}, "links": {"callLeg", "mediaRenegotiation", …}}`,
+    /// seen 2026-11-03 when a meeting's lobby let the account in): the controller the acknowledgement's links all name,
+    /// and the links of the mapped operations on it, as an acceptance binds them. The same call, its participants
+    /// unchanged: only where the call controller takes its operations moved. One whose links don't all name one call, or
+    /// name no call leg of their own, moves nothing.
+    fn follow_retarget(&mut self, body: &[u8]) {
+        // read as the web client reads it (`JSON.parse`, the last of a duplicate key kept), not strictly: the retarget's
+        // `links` names `callLeg` twice, `null` and then the new call leg (seen 2026-11-03). What it binds is still
+        // only the mapped operations' links on the one call they all name, from the call's own callback.
+        let Ok(body) = serde_json::from_slice::<Value>(body) else {
+            log::debug!("call registry: a media acknowledgement that doesn't read moves nothing");
+            return;
+        };
+        let succeeded = body
+            .pointer("/mediaAcknowledgement/resultCategories")
+            .and_then(Value::as_array)
+            .is_some_and(|categories| categories.iter().any(|category| category.as_str() == Some("Success")));
+        let Some((controller, links)) = body
+            .get("links")
+            .and_then(Value::as_object)
+            .filter(|_| succeeded)
+            .and_then(controller_links)
+        else {
+            log::debug!("call registry: a media acknowledgement names no one call (success: {succeeded})");
+            return;
+        };
+        let leg = links
+            .iter()
+            .any(|(operation, _)| *operation == CallOperation::KeepAlive);
+        if !leg || self.controller.as_ref() == Some(&controller) {
+            log::debug!(
+                "call registry: a media acknowledgement keeps the call at {} (a call leg named: {leg})",
+                controller.1
+            );
+            return;
+        }
+        log::debug!("call registry: the call moved to call id {}", controller.1);
+        self.controller = Some(controller);
+        for link in links {
+            if !self.links.contains(&link) {
+                self.links.push(link);
+            }
+        }
     }
 }
 
@@ -657,7 +705,11 @@ impl CallRegistry {
                 .enumerate()
                 .find(|(_, call)| call.negotiates_at(&delivery.path))
                 .map(|(index, call)| {
-                    let bound = is_acknowledged_at(&delivery.path) || call.bind_media(&delivery.path, &delivery.body);
+                    let acknowledged = is_acknowledged_at(&delivery.path);
+                    if acknowledged {
+                        call.follow_retarget(&delivery.body);
+                    }
+                    let bound = acknowledged || call.bind_media(&delivery.path, &delivery.body);
                     (bound, Negotiated::Call(index))
                 })
         };
@@ -1189,6 +1241,14 @@ fn bind_acceptance(call: &mut Call, delivery: &Delivery) -> Observed {
 /// The call controller (host, call id) and the links of a mapped operation an acceptance's body names; `None` unless
 /// every link under `callAcceptance.links` that names a call names the same one, and at least one does.
 fn acceptance_links(body: &[u8]) -> Option<(Controller, Vec<Link>)> {
+    let body = strict_json(body)?;
+    controller_links(body.pointer("/callAcceptance/links")?.as_object()?)
+}
+
+/// The call controller (host, call id) and the links of a mapped operation `links` names (an acceptance's
+/// `callAcceptance.links`, a retarget's `links`); `None` unless every link that names a call names the same one, and at
+/// least one does.
+fn controller_links(links: &Map<String, Value>) -> Option<(Controller, Vec<Link>)> {
     const NAMES: [(CallOperation, &str, &str); 5] = [
         (CallOperation::Acknowledge, "acknowledgement", "callAcceptance"),
         (CallOperation::KeepAlive, "callLeg", "active"),
@@ -1204,8 +1264,6 @@ fn acceptance_links(body: &[u8]) -> Option<(Controller, Vec<Link>)> {
             "active",
         ),
     ];
-    let body = strict_json(body)?;
-    let links: &Map<String, Value> = body.pointer("/callAcceptance/links")?.as_object()?;
     let mut controller: Option<Controller> = None;
     for link in links.values() {
         let Some(url) = proxy_link(link) else { continue };

@@ -2012,3 +2012,63 @@ fn an_acceptance_by_the_callee_s_voicemail_is_told_once_the_call_is_up() {
     calls.on_delivery(&delivery(&path, &answered), Observed::Acceptance, now);
     assert!(!events(&effects(&mut calls)).contains(&CallEvent::Voicemail { call }));
 }
+
+/// A link of the call `Call2` the call controller moved a call to, `rest` after its call leg.
+fn retargeted_link(rest: &str) -> String {
+    format!("{PROXY}/cc-zz-01-prod-aks.cc.skype.com/cc/v1/active/Call2/1/a4/5{rest}?i=10-0-0-1&e=1")
+}
+
+/// The call's own renegotiation link and its keep-alive's call leg, as text.
+fn own_links(calls: &Calls) -> (Option<String>, Option<String>) {
+    let current = calls.call.as_ref().unwrap();
+    (
+        current.renegotiation.as_ref().map(|link| link.as_str().to_owned()),
+        current
+            .keep_alive
+            .as_ref()
+            .and_then(|keep| keep.link.as_ref())
+            .map(|link| link.as_str().to_owned()),
+    )
+}
+
+#[test]
+fn a_retarget_acknowledged_moves_the_call_s_own_links_to_the_new_call() {
+    let now = Instant::now();
+    let (mut calls, call) = up_with_a_call_leg(now);
+    let at = callback(&calls, "mediaRenegotiation");
+    calls.on_delivery(&delivery(&at, &negotiation()), Observed::Renegotiation, now);
+    drop(effects(&mut calls));
+    calls.answer_media(call, media()).unwrap();
+    drop(effects(&mut calls));
+    let acknowledged = latest_callback(&calls, "mediaAcknowledgement");
+    let retarget = json!({
+        "mediaAcknowledgement": {"code": 0, "subCode": 10109, "phrase": "Participant retarget was successful.",
+            "resultCategories": ["Success"]},
+        "links": {"callLeg": retargeted_link(""), "mediaRenegotiation": retargeted_link("/renegotiate")},
+    });
+    let before = own_links(&calls);
+    // one the fence didn't read moves nothing
+    calls.on_delivery(&delivery(&acknowledged, &retarget), Observed::Nothing, now);
+    assert_eq!(own_links(&calls), before);
+    // nor does a plain acknowledgement, naming no call leg
+    let plain =
+        json!({"mediaAcknowledgement": {"code": 0, "resultCategories": ["Success"]}, "links": {"callLeg": null}});
+    calls.on_delivery(&delivery(&acknowledged, &plain), Observed::Renegotiation, now);
+    assert_eq!(own_links(&calls), before);
+    drop(effects(&mut calls));
+    // as captured, its `callLeg` named twice: `null`, then the new call leg
+    let mut twice = delivery(&acknowledged, &retarget);
+    twice.body = String::from_utf8(twice.body)
+        .unwrap()
+        .replacen(r#""links":{"#, r#""links":{"callLeg":null,"#, 1)
+        .into_bytes();
+    calls.on_delivery(&twice, Observed::Renegotiation, now);
+    let moved = effects(&mut calls);
+    assert_eq!(receipts(&moved).len(), 1, "its receipt, as any negotiation's");
+    assert!(events(&moved).is_empty(), "the call goes on as it was");
+    assert_eq!(
+        own_links(&calls),
+        (Some(retargeted_link("/renegotiate")), Some(retargeted_link("")))
+    );
+    assert_eq!(calls.current().map(|(id, _)| id), Some(call));
+}

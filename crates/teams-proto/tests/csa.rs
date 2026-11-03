@@ -568,3 +568,39 @@ fn a_team_s_group_and_mail_and_a_channel_s_type_are_read() {
         ]
     );
 }
+
+#[test]
+fn a_channel_s_running_meeting_is_read_from_its_active_meetups() {
+    let conversation = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticMeetup1?i=10-0-0-1&e=1";
+    let meetup = |status: &str, url: &str| {
+        json!({
+            "messageId": "1700000000000", "conversationUrl": url, "conversationId": "made-up",
+            "groupCallInitiator": "8:orgid:00000000-0000-4000-8000-00000000000a", "status": status,
+            "tenantId": "00000000-0000-4000-8000-0000000000d0", "organizerId": "00000000-0000-4000-8000-00000000000a",
+            "callMeetingType": -1, "conversationType": "adHocMeeting"
+        })
+    };
+    let answer = |meetups: Value| {
+        json!({"teams": [{"id": TEAM, "displayName": "a", "channels": [
+            {"id": TEAM, "displayName": "General", "activeMeetups": meetups},
+            {"id": CHANNEL, "displayName": "other"},
+        ]}]})
+        .to_string()
+        .into_bytes()
+    };
+    let found = CsaTeams::meetup_in(&answer(json!([meetup("Active", conversation)])), TEAM).unwrap();
+    assert_eq!(found.message_id, "1700000000000");
+    assert_eq!(found.conversation.as_str(), conversation);
+    assert_eq!(found.meeting.organizer_id, "00000000-0000-4000-8000-00000000000a");
+    assert_eq!(found.meeting.tenant_id, "00000000-0000-4000-8000-0000000000d0");
+    // none in another channel, none ended, none at a link off the calling service, none in an answer that doesn't read
+    let running = answer(json!([meetup("Active", conversation)]));
+    assert_eq!(CsaTeams::meetup_in(&running, CHANNEL), None);
+    assert_eq!(
+        CsaTeams::meetup_in(&answer(json!([meetup("Ended", conversation)])), TEAM),
+        None
+    );
+    let elsewhere = answer(json!([meetup("Active", "https://example.invalid/conv/x")]));
+    assert_eq!(CsaTeams::meetup_in(&elsewhere, TEAM), None);
+    assert_eq!(CsaTeams::meetup_in(b"not json", TEAM), None);
+}

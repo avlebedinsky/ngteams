@@ -78,8 +78,8 @@ use teams_call::{
 };
 use teams_fence::Mri;
 use teams_proto::{
-    ChannelParameters, Client, Credentials, EndpointRegistrar, HttpError, HttpTransport, MediaContent, MeetingInfo,
-    Mutating, Transport,
+    ChannelMeetup, ChannelParameters, Client, Credentials, CsaTeams, EndpointRegistrar, HttpError, HttpTransport,
+    MediaContent, MeetingInfo, Mutating, Transport,
 };
 use teams_trouter::{CallResponder, CallResponse, Ignored, PushEvent, Trouter, TrouterCredentials, TrouterHandle};
 use tokio::sync::{mpsc, oneshot};
@@ -246,6 +246,9 @@ pub(crate) type Waiting = oneshot::Sender<Result<CallId, EngineError>>;
 pub(crate) enum Act {
     Place(Placement),
     Join(String),
+    /// The meeting that runs in a channel joined: the channel, and the meeting as CSA names it, read as the media is
+    /// set up ([`Calling::set_up`]).
+    JoinChannel(String, Arc<std::sync::Mutex<Option<ChannelMeetup>>>),
     Answer(CallId),
     Decline(CallId),
     HangUp(CallId),
@@ -675,8 +678,12 @@ where
             }
             CallEvent::State { call, state } => self.state(call, state),
             CallEvent::RemoteMedia { call, media } => self.on_media(call, |live| media::apply(live, media), now),
-            // the mixer's offer once let in may come before the roster tells it: either way it is a session of its own
-            CallEvent::MediaOffer { call, offer } if self.lobby == Some(call) || self.admitted == Some(call) => {
+            // the mixer's offer once let in may come before the roster tells it: either way it is a session of its own;
+            // its offers after that one (the call moved to another call id, the roster still telling the lobby) are
+            // that session's own renegotiations (seen 2026-11-03)
+            CallEvent::MediaOffer { call, offer }
+                if (self.lobby == Some(call) || self.admitted == Some(call)) && self.replaced != Some(call) =>
+            {
                 self.rebuild(call, offer);
             }
             CallEvent::MediaOffer { call, offer } => self.on_media(call, |live| media::answer(live, offer), now),
@@ -778,8 +785,15 @@ where
         };
         let sdp = prepared.sdp.clone();
         let muted = self.live.as_ref().is_some_and(|live| live.session.is_muted());
+        // who is in the call stays as the roster told it: the roster tells only changes from here
+        let participants = self
+            .live
+            .as_ref()
+            .map(|old| old.gallery.participants().to_vec())
+            .unwrap_or_default();
         let mut live = LiveMedia::new(call, prepared);
         live.session.set_muted(muted);
+        live.gallery.set_participants(participants);
         live.applied(now);
         let content = if live.is_group() {
             live.answer_content(&sdp)
@@ -790,7 +804,9 @@ where
         self.open_devices(call);
         if let Err(error) = self.calls.answer_media(call, content) {
             self.media_failed(call, &error.to_string(), now);
+            return;
         }
+        self.show_participants(now);
     }
 
     /// The account waits in its meeting's lobby, or no longer does: told as its status, the call's own once let in.
@@ -1191,7 +1207,7 @@ where
     fn act(&mut self, act: Act, reply: Waiting) {
         let now = Instant::now();
         let answer = match act {
-            Act::Place(_) | Act::Join(_) | Act::Answer(_) => return self.set_up(act, reply),
+            Act::Place(_) | Act::Join(_) | Act::JoinChannel(..) | Act::Answer(_) => return self.set_up(act, reply),
             Act::Decline(call) => self.calls.decline(call).map(|()| call).map_err(CallActionError::from),
             Act::HangUp(call) => self.hang_up(call, now),
             Act::Mute(call, muted) => self.mute(call, muted),
@@ -1285,7 +1301,7 @@ where
             Act::Place(Placement::Chat { group_chat: None, .. } | Placement::TestCall { .. }) => {
                 (None, None, VideoKind::OneToOne)
             }
-            Act::Place(Placement::Chat { .. } | Placement::Meeting { .. }) | Act::Join(_) => {
+            Act::Place(Placement::Chat { .. } | Placement::Meeting { .. }) | Act::Join(_) | Act::JoinChannel(..) => {
                 (None, None, VideoKind::Group)
             }
             // only a start, a join or an answer sets its media up
@@ -1299,11 +1315,28 @@ where
         }
         // a test call's `add` names the account's tenant: read from its token when the engine couldn't name it
         let tenant = matches!(act, Act::Place(Placement::TestCall { .. })) && !self.calls.knows_tenant();
-        let setup = Box::pin(media::prepare(
+        let prepare = media::prepare(
             Arc::clone(&self.client),
             self.media.clone(),
             Setup { offer, tenant, video },
-        ));
+        );
+        let setup: Pin<Box<dyn Future<Output = Result<Prepared, String>>>> = match &act {
+            // a channel's meeting: where it runs is read first (CSA's `activeMeetups`), then its media set up
+            Act::JoinChannel(channel, meetup) => {
+                let (client, channel, meetup) = (Arc::clone(&self.client), channel.clone(), Arc::clone(meetup));
+                Box::pin(async move {
+                    let answer = client
+                        .read(&CsaTeams)
+                        .await
+                        .map_err(|error| format!("the channel's meeting couldn't be read: {error}"))?;
+                    let found = CsaTeams::meetup_in(answer.body(), &channel)
+                        .ok_or_else(|| "no meeting runs in the channel".to_owned())?;
+                    *meetup.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(found);
+                    prepare.await
+                })
+            }
+            _ => Box::pin(prepare),
+        };
         self.preparing = Some(Preparing {
             answering,
             act,
@@ -1328,6 +1361,12 @@ where
         let acted = match &preparing.act {
             Act::Place(placement) => self.calls.place(placement, sdp, now),
             Act::Join(chat) => self.calls.join(chat, sdp, now),
+            Act::JoinChannel(channel, meetup) => {
+                let meetup = meetup.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take();
+                meetup.map_or(Err(CallError::NotJoinable), |meetup| {
+                    self.calls.join_channel_meeting(channel, &meetup, sdp, now)
+                })
+            }
             Act::Answer(call) => self.calls.answer(*call, sdp).map(|()| *call),
             _ => Err(CallError::NotNow),
         };

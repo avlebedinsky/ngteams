@@ -55,7 +55,7 @@ use crate::fence_http::{DenyCause, ForcedDeny};
 use crate::session::{LabSession, SessionOptions};
 
 use super::ab_chat::{
-    CHAT_OPEN, DELIVERY, EARLIER_RUN_PROBE, ForcedPost, PROBE_FAIL, PROBE_MARKER, THIS_RUN_PROBE, chat_requests,
+    CHAT_OPEN, DELIVERY, EARLIER_RUN_PROBE, ForcedPost, PROBE_DENY_WAIT, PROBE_MARKER, THIS_RUN_PROBE, chat_requests,
     chat_url, failed_in_page, load_at, message_text, nonce, probe_text, save_screenshot, send, wait_for_newest,
 };
 use super::expected::Review;
@@ -478,7 +478,7 @@ fn deny_markers(session: &LabSession, nonce: &str) {
     }
 }
 
-/// The error of a run whose message post wasn't force-denied under `label` within [`PROBE_FAIL`].
+/// The error of a run whose message post wasn't force-denied under `label` within [`PROBE_DENY_WAIT`].
 fn no_deny(session: &LabSession, label: &str) -> ScenarioError {
     let forced = session
         .denials()
@@ -486,7 +486,7 @@ fn no_deny(session: &LabSession, label: &str) -> ScenarioError {
         .filter(|denial| denial.cause == DenyCause::Forced)
         .count();
     setup(format!(
-        "no message post denied as {label:?} within {PROBE_FAIL:?} ({forced} other forced deny(s))"
+        "no message post denied as {label:?} within {PROBE_DENY_WAIT:?} ({forced} other forced deny(s))"
     ))
 }
 

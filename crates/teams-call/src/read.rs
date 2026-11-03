@@ -179,6 +179,38 @@ pub(crate) fn accept_answer(body: &[u8]) -> AcceptAnswer {
     }
 }
 
+/// The call's links once the call controller moved it (a retarget), as the acknowledgement of the account's media
+/// answer hands them out: `{"mediaAcknowledgement": {"code": 0, "subCode": 10109, "phrase": "Participant retarget was
+/// successful.", "resultCategories": ["Success"]}, "links": {"callLeg", "mediaRenegotiation", …}}` (seen 2026-11-03,
+/// `meeting-steps`: b's page let into a's meeting from its lobby, the mixer's first offer answered, the call moved to
+/// another call id). An acknowledgement that hands out no call leg (`"links": {"callLeg": null}`, every later one) is
+/// none.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct Retarget {
+    pub(crate) renegotiation: Option<CallLink>,
+    pub(crate) call_leg: CallLink,
+    pub(crate) group_media: GroupMediaLinks,
+}
+
+/// The retarget a media answer's acknowledgement `body` tells, if it is one ([`Retarget`]): a success naming the new
+/// call leg.
+pub(crate) fn retarget(body: &[u8]) -> Option<Retarget> {
+    let body: Value = serde_json::from_slice(body).ok()?;
+    let succeeded = body
+        .pointer("/mediaAcknowledgement/resultCategories")?
+        .as_array()?
+        .iter()
+        .any(|category| category.as_str() == Some("Success"));
+    if !succeeded {
+        return None;
+    }
+    Some(Retarget {
+        renegotiation: link(&body, "/links/mediaRenegotiation"),
+        call_leg: link(&body, "/links/callLeg")?,
+        group_media: GroupMediaLinks::of(&body),
+    })
+}
+
 /// The acceptance of a call the account placed or joined: its `acknowledgement` link (for an acknowledgement by
 /// request), the answer to the account's offer, the keep-alive interval, the call controller's `mediaRenegotiation`
 /// link, and whether the callee's voicemail took the call.

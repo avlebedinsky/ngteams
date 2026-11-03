@@ -607,6 +607,119 @@ fn a_meetings_start_off_its_captured_shape_is_unreadable() {
     }
 }
 
+// --- a channel's meeting started from the channel (Meet now) ---
+
+const CHANNEL: &str = "19:MadeUpTeamThread0001@thread.tacv2";
+
+/// A channel's Meet now as the web client posts it from its pre-join: a meeting start's keys, the channel in `groupChat`
+/// with no message, no `meetingInfo` (made-up ids and links, the SDP cut to a stub).
+fn channel_start() -> String {
+    meeting_start()
+        .replace(
+            &format!(r#""groupChat":{{"threadId":"{MEETING_CHAT}","messageId":"0"}}"#),
+            &format!(r#""groupChat":{{"threadId":"{CHANNEL}","messageId":null}}"#),
+        )
+        .replace(
+            &format!(
+                r#""meetingInfo":{{"tenantId":"{TENANT}","organizerId":"00000000-0000-4000-8000-00000000000a","meetingType":1}}"#
+            ),
+            r#""meetingInfo":null"#,
+        )
+}
+
+fn channel_target() -> Target {
+    Target::new(WriteKind::Call, Scope::Team { id: CHANNEL.to_owned() })
+        .with_added([Mri::new(CALLER)])
+        .with_sender(Mri::new(CALLER))
+}
+
+#[test]
+fn a_channels_meet_now_is_a_call_on_its_team_by_the_sender_alone() {
+    assert!(channel_start().contains(r#""meetingInfo":null"#));
+    assert_eq!(
+        start_verdict(&channel_start(), &Policy::new()),
+        Contact::Write(channel_target())
+    );
+    // its pre-join's subscription: no call invitation, nobody named to ring
+    let mut subscription: serde_json::Value = serde_json::from_str(&channel_start()).unwrap();
+    let object = subscription.as_object_mut().unwrap();
+    object.remove("callInvitation");
+    object.remove("contentSharing");
+    object.remove("meetingData");
+    object["participants"].as_object_mut().unwrap().remove("to");
+    assert_eq!(
+        start_verdict(&subscription.to_string(), &Policy::new()),
+        Contact::Write(channel_target())
+    );
+    // subscribed again once the meeting runs, its message `"0"`
+    let again = subscription
+        .to_string()
+        .replace(r#""messageId":null"#, r#""messageId":"0""#);
+    assert_eq!(start_verdict(&again, &Policy::new()), Contact::Write(channel_target()));
+}
+
+#[test]
+fn a_channels_meeting_entered_at_its_conversation_is_a_join_of_its_channel() -> TestResult {
+    let entry = meeting_entry().replace(
+        &format!(r#""groupChat":{{"threadId":"{MEETING_CHAT}","messageId":"0"}}"#),
+        &format!(r#""groupChat":{{"threadId":"{CHANNEL}","messageId":null}}"#),
+    );
+    assert!(entry.contains(CHANNEL));
+    let Contact::Write(target) = at_conversation("POST", MEETING_CONVERSATION, &entry) else {
+        return Err("the channel meeting's entry isn't a write".into());
+    };
+    let Scope::CallOperation { operation, joins, .. } = target.scope() else {
+        return Err("the channel meeting's entry isn't a call operation".into());
+    };
+    assert_eq!(*operation, CallOperation::Join);
+    assert_eq!(joins.as_deref(), Some(CHANNEL));
+    // without its organizer, or with someone to ring, it doesn't read
+    let unorganized = entry.replace(
+        r#""organizerId":"00000000-0000-4000-8000-00000000000a""#,
+        r#""organizerId":"nobody""#,
+    );
+    let ringing = entry.replace(
+        r#""to":[]"#,
+        r#""to":[{"id":"8:orgid:00000000-0000-4000-8000-00000000000b"}]"#,
+    );
+    for body in [unorganized, ringing] {
+        assert_eq!(
+            at_conversation("POST", MEETING_CONVERSATION, &body),
+            Contact::Unreadable,
+            "{body}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn a_channels_meet_now_off_its_captured_shape_is_unreadable() {
+    let base = channel_start();
+    let off = [
+        // someone named to ring
+        base.replace(
+            r#""to":[]"#,
+            r#""to":[{"id":"8:orgid:00000000-0000-4000-8000-00000000000b"}]"#,
+        ),
+        // a thread that isn't a team's or a channel's, or a reply chain in one
+        base.replace(CHANNEL, "19:abcdef0123456789@thread.v2"),
+        base.replace(CHANNEL, &format!("{CHANNEL};messageid=1700000000000")),
+        // a meeting named: it has a `meetingInfo` (a meeting chat's start), or a message that isn't text
+        base.replace(
+            r#""meetingInfo":null"#,
+            r#""meetingInfo":{"tenantId":"x","organizerId":"y"}"#,
+        ),
+        base.replace(r#""messageId":null"#, r#""messageId":1"#),
+        // a sender that isn't a work account
+        base.replace(&format!(r#""id":"{CALLER}""#), r#""id":"28:bot""#),
+        // a key nobody reviewed
+        base.replace(r#""meetingData":null"#, r#""meetingData":{"meetingCode":"1"}"#),
+    ];
+    for body in &off {
+        assert_eq!(start_verdict(body, &Policy::new()), Contact::Unreadable, "{body}");
+    }
+}
+
 /// A meeting's conversation, as the pre-join's subscription was answered with it (made up).
 const MEETING_CONVERSATION: &str = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/SyntheticMeeting1?i=10-0-0-1&e=1";
 
@@ -672,7 +785,26 @@ fn a_meetings_entry_at_its_conversation_is_a_join_of_its_chat_by_the_sender() ->
         at_conversation("POST", MEETING_CONVERSATION, &preheat),
         Contact::Write(_)
     ));
+    // an invitee's roster-only subscription before it enters: no call invitation, the meeting's type unknown (`-1`)
+    let invitee = meeting_entry().replace(r#""tenantId":"#, r#""meetingType":-1,"isBroadcast":false,"tenantId":"#);
+    let invitee = without_key(&invitee, "callInvitation")?;
+    let Contact::Write(subscription) = at_conversation("POST", MEETING_CONVERSATION, &invitee) else {
+        return Err("the invitee's subscription isn't a write".into());
+    };
+    let Scope::CallOperation { joins, .. } = subscription.scope() else {
+        return Err("the invitee's subscription isn't a call operation".into());
+    };
+    assert_eq!(joins.as_deref(), Some(MEETING_CHAT));
     Ok(())
+}
+
+/// `body` without its top-level key `key`.
+fn without_key(body: &str, key: &str) -> Result<String, serde_json::Error> {
+    let mut value: serde_json::Value = serde_json::from_str(body)?;
+    if let Some(object) = value.as_object_mut() {
+        object.remove(key);
+    }
+    serde_json::to_string(&value)
 }
 
 #[test]
@@ -692,8 +824,10 @@ fn a_meetings_entry_off_its_captured_shape_is_unreadable() {
             r#""organizerId":"nobody""#,
         ),
         base.replace(TENANT, "nowhere"),
-        // a chat that is neither a meeting's nor a group chat's
-        base.replace(MEETING_CHAT, "19:abcdef0123456789@thread.tacv2"),
+        // a chat that is neither a meeting's, a group chat's nor a channel (a 1:1 chat names nobody to join by), or a
+        // channel's reply chain
+        base.replace(MEETING_CHAT, "19:aaaa_bbbb@unq.gbl.spaces"),
+        base.replace(MEETING_CHAT, "19:abcdef0123456789@thread.tacv2;messageid=1700000000000"),
         // the meeting's code with more than its ID and passcode, or a key nobody reviewed
         base.replace(
             r#""contentSharing":null"#,

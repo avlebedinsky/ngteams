@@ -1708,6 +1708,61 @@ async fn an_acknowledgement_of_the_account_s_answer_binds_no_link_and_gets_its_r
     Ok(())
 }
 
+#[tokio::test]
+async fn a_retarget_acknowledged_moves_the_call_to_its_new_call_id() -> TestResult {
+    let lab = new_lab()?;
+    registered(&lab.fence, "conv-1").await?;
+    lab.fence
+        .observe_delivery(&delivery(1, ACCEPTANCE_PATH, acceptance("call-1")));
+    let renegotiation = |call: &str| {
+        let answer_url = format!("{PROXY}/{CC_HOST}/cc/v1/negotiations/{call}/1/t/2/answer?i=10-0-0-2");
+        json!({"mediaNegotiation": {"links": {"mediaAnswer": answer_url}}})
+            .to_string()
+            .into_bytes()
+    };
+    let at = "/v4/f/SyntheticEndpoint00000/callAgent/agent-1/0c0c0c0c/call/mediaRenegotiation/";
+    // before it moved, a renegotiation naming another call binds nothing
+    assert_eq!(
+        lab.fence.observe_delivery(&delivery(2, at, renegotiation("call-2"))),
+        Observed::Nothing
+    );
+    let active = |rest: &str| format!("{PROXY}/{CC_HOST}/cc/v1/active/call-2/1/a4/5{rest}?i=10-0-0-2&e=1");
+    let acknowledged = "/v4/f/SyntheticEndpoint00000/callAgent/agent-1/0d0d0d0d/call/mediaAcknowledgement/";
+    // an acknowledgement that isn't a success, or whose links name two calls, moves nothing
+    let failed = json!({"mediaAcknowledgement": {"code": 1, "resultCategories": ["Failure"]},
+        "links": {"callLeg": active(""), "mediaRenegotiation": active("/renegotiate")}});
+    let split = json!({"mediaAcknowledgement": {"code": 0, "resultCategories": ["Success"]},
+        "links": {"callLeg": active(""), "mediaRenegotiation": active("/renegotiate").replace("call-2", "call-3")}});
+    for body in [failed, split] {
+        lab.fence
+            .observe_delivery(&delivery(3, acknowledged, body.to_string().into_bytes()));
+        assert_eq!(
+            lab.fence.observe_delivery(&delivery(4, at, renegotiation("call-2"))),
+            Observed::Nothing
+        );
+    }
+    // the retarget, as captured (its `callLeg` named twice, `null` first): the call's operations are taken at call-2
+    // from then on
+    let retarget = json!({
+        "mediaAcknowledgement": {"reason": "noError", "code": 0, "subCode": 10109,
+            "phrase": "Participant retarget was successful.", "resultCategories": ["Success"]},
+        "links": {"callLeg": active(""), "mediaRenegotiation": active("/renegotiate"),
+            "retargetCompletion": active("/retargetCompletion")}})
+    .to_string()
+    .replacen(r#""links":{"#, r#""links":{"callLeg":null,"#, 1);
+    assert!(retarget.contains(r#""callLeg":null"#));
+    assert_eq!(
+        lab.fence
+            .observe_delivery(&delivery(5, acknowledged, retarget.into_bytes())),
+        Observed::Renegotiation
+    );
+    assert_eq!(
+        lab.fence.observe_delivery(&delivery(6, at, renegotiation("call-2"))),
+        Observed::Renegotiation
+    );
+    Ok(())
+}
+
 // --- the lab's call rule: only a call's entry is judged ---
 
 /// A lab of a, b and c with the echo service whose fence decides calls by the lab's rule (a lab fence's own).

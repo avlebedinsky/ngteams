@@ -82,6 +82,10 @@ pub const MESSAGE_POST: &str = r"/v1/users/ME/conversations/[^/?]+/messages(\?|$
 pub const CHAT_OPEN: Duration = Duration::from_secs(60);
 /// How long a's probe post gets to fail.
 pub const PROBE_FAIL: Duration = Duration::from_secs(30);
+/// How long this run's probe post gets to be denied once sent. The web client posts a new message to a chat only after
+/// the unsent ones it still holds (an earlier run's probes, sent again on every load) went through their retries, each
+/// about 15 s (seen 2026-11-03: b's page with two of them posted nothing of this run's within 30 s).
+pub const PROBE_DENY_WAIT: Duration = Duration::from_secs(90);
 /// How long the real message gets to reach b.
 pub const DELIVERY: Duration = Duration::from_secs(60);
 
@@ -403,6 +407,67 @@ pub(crate) async fn press_until_sent(driver: &mut Driver, who: &str, text: &str)
     )))
 }
 
+/// The page expression that drops every earlier run's probe the web client still holds unsent from its own store (the
+/// offline actions manager's queue, `OAMData`: a send per `send_<clientmessageid>` and the chat's `queue_<chat>`; and the
+/// pending reply chain `-1` holding it), and sets `window.__labForgotProbes` to how many records went, or to an error.
+///
+/// The web client sends a chat's messages in turn and keeps one it couldn't send at the head of that chat's queue: after
+/// a load it tries an earlier run's probe again (force-denied each time), and a new message on the chat waits behind it
+/// for good (seen 2026-11-03: b's page held two, and this run's probe never went). Only records carrying [`PROBE_MARKER`]
+/// go, and only from the page's own storage: nothing is sent.
+const FORGET_UNSENT_PROBES: &str = r#"window.__labForgotProbes = undefined; (async () => { try {
+  const marker = 'lab fence probe ';
+  const dbs = await indexedDB.databases();
+  const open = name => new Promise((ok, no) => { const q = indexedDB.open(name); q.onsuccess = () => ok(q.result);
+    q.onerror = () => no(q.error); });
+  const each = (db, store, f) => new Promise(done => { const tx = db.transaction(store, 'readwrite');
+    const q = tx.objectStore(store).openCursor();
+    q.onsuccess = () => { const c = q.result; if (c) { f(c); c.continue(); } };
+    tx.oncomplete = () => done(); tx.onerror = () => done(); });
+  let gone = 0;
+  const oam = dbs.find(d => d.name.includes(':offline-actions-manager:'));
+  if (oam) { const db = await open(oam.name); const sends = new Set();
+    await each(db, 'OAMData', c => { const m = JSON.stringify(c.key).match(/send_(\d+)/);
+      if (m && JSON.stringify(c.value).includes(marker)) sends.add(m[1]); });
+    await each(db, 'OAMData', c => { const t = JSON.stringify(c.key) + JSON.stringify(c.value);
+      if ([...sends].some(id => t.includes(id))) { c.delete(); gone++; } });
+    db.close(); }
+  const chains = dbs.find(d => d.name.includes(':replychain-manager:'));
+  if (chains) { const db = await open(chains.name);
+    await each(db, 'replychains-2', c => {
+      if (JSON.stringify(c.key).includes('"-1"') && JSON.stringify(c.value).includes(marker)) { c.delete(); gone++; } });
+    db.close(); }
+  window.__labForgotProbes = gone;
+} catch (e) { window.__labForgotProbes = 'error ' + e; } })(); true"#;
+
+/// How long [`forget_unsent_probes`] waits for the page's store.
+const FORGET_WAIT: Duration = Duration::from_secs(30);
+
+/// Drops every earlier run's probe the web client in `driver`'s page still holds unsent ([`FORGET_UNSENT_PROBES`]), and
+/// gives how many of its records went: with any gone, the page has to load again (its memory still holds them) before
+/// a new message on that chat goes.
+///
+/// # Errors
+/// When the page doesn't answer, or its store can't be read.
+pub(crate) async fn forget_unsent_probes(driver: &mut Driver) -> Result<u64, ScenarioError> {
+    driver
+        .evaluate("the unsent probes forgotten", FORGET_UNSENT_PROBES)
+        .await?;
+    driver
+        .wait_until_true(
+            "the unsent probes forgotten",
+            "window.__labForgotProbes !== undefined",
+            "the page's store",
+            FORGET_WAIT,
+        )
+        .await?;
+    let gone = driver
+        .evaluate("the unsent probes forgotten", "window.__labForgotProbes")
+        .await?;
+    gone.as_u64()
+        .ok_or_else(|| setup(format!("the unsent probes couldn't be forgotten: {gone}")))
+}
+
 /// The live enforcement test: with [`deny_probes`] in place, a sends `probe`, this run's. The fence must force-deny, by
 /// this run's rule ([`THIS_RUN_PROBE`]), a message post to the a–b chat (`chat` finds its id in the URL: the evidence
 /// that a's compose box belongs to that chat) after it was sent, and that very post, found by its `Network` id, must
@@ -452,9 +517,9 @@ impl<'a> ForcedPost<'a> {
             && self.chat.is_match(&denial.url)
     }
 
-    /// Waits up to [`PROBE_FAIL`] for `session`'s fence to deny one; `None` when it didn't.
+    /// Waits up to [`PROBE_DENY_WAIT`] for `session`'s fence to deny one; `None` when it didn't.
     pub(crate) async fn wait(&self, session: &LabSession) -> Option<Denial> {
-        let deadline = tokio::time::Instant::now() + PROBE_FAIL;
+        let deadline = tokio::time::Instant::now() + PROBE_DENY_WAIT;
         loop {
             if let Some(denial) = session.denials().into_iter().find(|denial| self.matches(denial)) {
                 return Some(denial);
@@ -514,7 +579,7 @@ async fn no_probe_deny(a: &LabSession, drive_a: &Driver) -> ScenarioError {
         .and_then(Result::ok)
         .unwrap_or_default();
     setup(format!(
-        "no message post of this run's probe to the a–b chat was denied within {PROBE_FAIL:?} ({elsewhere} other \
+        "no message post of this run's probe to the a–b chat was denied within {PROBE_DENY_WAIT:?} ({elsewhere} other \
          forced deny(s); compose box holds {page} characters)"
     ))
 }

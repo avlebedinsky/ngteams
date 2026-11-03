@@ -8013,6 +8013,7 @@ version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
  "fixture-guard",
+ "log",
  "percent-encoding",
  "reqwest 0.13.5",
  "serde",

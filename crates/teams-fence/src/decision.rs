@@ -28,7 +28,7 @@ use crate::contacting::json::strict_json;
 use crate::floor::CallFloor;
 use crate::lab::{Alias, ConfigError, LabConfig, LabLocations};
 use crate::log::{FenceLog, Verdict};
-use crate::membership::is_chat_id;
+use crate::membership::{is_chat_id, is_team_thread_id};
 use crate::target::{CallOperation, Mri, Scope, Target, WriteKind};
 
 #[cfg(feature = "personal")]
@@ -794,8 +794,21 @@ impl Fence {
         let Some(chat) = chat else {
             return Ok(Vec::new());
         };
-        let scope = Scope::Conversation { id: chat.to_owned() };
-        match source.members(&scope).await {
+        // a channel's call is joined by its team: read from the team's thread, Teams' own apps not counted
+        let team = is_team_thread_id(chat);
+        let scope = if team {
+            Scope::Team { id: chat.to_owned() }
+        } else {
+            Scope::Conversation { id: chat.to_owned() }
+        };
+        let members = match source.members(&scope).await {
+            Membership::Complete(mut members) if team => {
+                members.retain(|mri| !self.roster.is_team_app(mri));
+                Membership::Complete(members)
+            }
+            other => other,
+        };
+        match members {
             Membership::Complete(members) if parties.iter().all(|party| members.contains(party)) => Ok(members),
             Membership::Complete(members) if members.is_empty() => Err(DenyReason::NoMembers),
             // a group call's invitation whose chat doesn't list its own caller and callee isn't bound to that chat

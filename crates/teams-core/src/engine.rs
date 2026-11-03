@@ -113,10 +113,10 @@ use teams_call::{CallId, Placement, RemoteEnd};
 use teams_fence::Mri;
 use teams_proto::chat::{self, MessageText};
 use teams_proto::{
-    AnalyticsPeriod, CalendarEvent, Client, Credentials, EndpointRegistrar, EventAttendee, FileRange, FullEvent,
-    HttpError, HttpTransport, InstalledApp, JoinableTeam, ManagedChannel, ManualAvailability, MeetingDetails,
-    OwnTeamView, PendingInvite, RegisteredEndpoint, StoreApp, TagsRead, TeamAnalytics, TeamPerson, TeamPicture,
-    TeamTemplateCard, TeamTemplateDetails, TeamWrite, Transport,
+    AnalyticsPeriod, CalendarEvent, ChannelMeetup, Client, Credentials, EndpointRegistrar, EventAttendee, FileRange,
+    FullEvent, HttpError, HttpTransport, InstalledApp, JoinableTeam, ManagedChannel, ManualAvailability,
+    MeetingDetails, OwnTeamView, PendingInvite, RegisteredEndpoint, StoreApp, TagsRead, TeamAnalytics, TeamPerson,
+    TeamPicture, TeamTemplateCard, TeamTemplateDetails, TeamWrite, Transport,
 };
 use teams_store::{
     Applied, Conversation, Member, Message, MessagePage, OutboxEntry, OutboxKind, OutboxState, PageCursor, Reaction,
@@ -635,6 +635,10 @@ enum Request {
         chat: String,
         reply: Responder<Option<MeetingDetails>>,
     },
+    ChannelMeetup {
+        channel: String,
+        reply: Responder<Option<ChannelMeetup>>,
+    },
     WriteEvent {
         // boxed: an event's draft and the event as read are far larger than any other request
         write: Box<EventWrite>,
@@ -990,6 +994,14 @@ impl EngineRequests {
     pub fn meeting(&self, chat: impl Into<String>) -> Reply<Option<MeetingDetails>> {
         let chat = chat.into();
         self.ask(|reply| Request::Meeting { chat, reply })
+    }
+
+    /// The meeting that runs in the channel `channel` now (its post, its conversation, its organizer and tenant), read
+    /// now from CSA's teams ([`crate::calendar`]): what the channel's Join shows and joins. `None` when none runs;
+    /// [`EngineError::MeetingUnread`] when the read failed.
+    pub fn channel_meetup(&self, channel: impl Into<String>) -> Reply<Option<ChannelMeetup>> {
+        let channel = channel.into();
+        self.ask(|reply| Request::ChannelMeetup { channel, reply })
     }
 
     /// Creates, changes, cancels or deletes an event of the account's calendar through the outbox, under the fence
@@ -1776,6 +1788,7 @@ where
             } => self.calendar.view(start_ms, end_ms, reply),
             Request::CalendarEvent { id, reply } => self.calendar.event(&id, reply),
             Request::Meeting { chat, reply } => self.calendar.meeting(chat, reply),
+            Request::ChannelMeetup { channel, reply } => self.calendar.channel_meetup(channel, reply),
             Request::WriteEvent { write, reply } => self.calendar.write(*write, reply),
             Request::CreateChannel { draft, reply } => self.channels.create(*draft, reply),
             Request::AddChannelMembers {
@@ -2196,6 +2209,10 @@ where
             },
             CallAction::TestCall { echo } => Act::Place(Placement::TestCall { echo }),
             CallAction::Join { chat } => Act::Join(chat),
+            // a channel's meeting is joined at the conversation its channel names it runs at, read as it goes
+            CallAction::JoinMeeting { chat, .. } if teams_fence::is_team_thread_id(&chat) => {
+                Act::JoinChannel(chat, Arc::default())
+            }
             CallAction::JoinMeeting { chat, meeting } => Act::Place(Placement::Meeting { chat, meeting }),
             CallAction::Answer { call } => Act::Answer(call),
             CallAction::Decline { call } => Act::Decline(call),

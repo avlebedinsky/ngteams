@@ -91,6 +91,18 @@ pub fn probe_rule() -> Result<ForcedDeny, regex::Error> {
         .labelled(PROBE))
 }
 
+/// With writes let through, the forced denies: this run's probe ([`probe_rule`]), and any earlier chat scenario's probe
+/// the web client still holds unsent and sends again once it loads ([`super::ab_chat::probe_rules`]): with members read
+/// live it would otherwise go through to its lab chat (seen 2026-11-02: a's probe posted to the a–b chat by a writing run).
+///
+/// # Errors
+/// Never: the patterns are fixed.
+pub fn written_rules() -> Result<Vec<ForcedDeny>, regex::Error> {
+    let mut rules = vec![probe_rule()?];
+    rules.extend(super::ab_chat::probe_rules(None)?);
+    Ok(rules)
+}
+
 fn account() -> Alias {
     match std::env::var("PROTO_LAB_ACCOUNT").as_deref() {
         Ok("b") => Alias::B,
@@ -119,11 +131,7 @@ pub async fn run(paths: &LabPaths, options: RunOptions) -> Result<ScenarioReport
         .ok_or_else(|| ScenarioError::Setup("PROTO_LAB_STEPS_SOCKET names no socket".to_owned()))?;
     let mut report = ScenarioReport::new(ScenarioName::TeamManage);
     let mut drive = page.driver();
-    match if writes {
-        probe_rule().map(|rule| vec![rule])
-    } else {
-        team_rules()
-    } {
+    match if writes { written_rules() } else { team_rules() } {
         Ok(rules) => rules.into_iter().for_each(|rule| page.force_deny(rule)),
         Err(error) => report.failures.push(error.to_string()),
     }
