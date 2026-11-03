@@ -155,3 +155,129 @@ pub(crate) fn is_user_profile_path(path: &[String]) -> bool {
                 && region.bytes().all(|byte| byte.is_ascii_lowercase())
     )
 }
+
+#[cfg(test)]
+mod tests {
+    //! The answers here are synthetic: the dialog's answers' shapes with made-up ids and names.
+
+    use super::*;
+
+    fn path(texts: &[&str]) -> Vec<String> {
+        texts.iter().map(|text| (*text).to_owned()).collect()
+    }
+
+    #[test]
+    fn a_private_channels_status_names_its_thread_once_it_has_one() {
+        let status = ChannelCreationStatus {
+            team_group: "team-group".to_owned(),
+            channel_group: "OID:channel@tenant".to_owned(),
+        };
+        assert_eq!(status.service(), Service::Provisioning);
+        assert_eq!(
+            status.endpoint().segments(),
+            ["teams", "team-group", "channels", "OID:channel@tenant"]
+        );
+        assert_eq!(
+            ChannelCreationStatus::read_answer(b"{\"threadId\": \"19:new@thread.tacv2\"}").as_deref(),
+            Some("19:new@thread.tacv2")
+        );
+        assert_eq!(ChannelCreationStatus::read_answer(b"{\"threadId\": \"\"}"), None);
+        assert_eq!(ChannelCreationStatus::read_answer(b"{\"threadId\": 1}"), None);
+        assert_eq!(ChannelCreationStatus::read_answer(b"{}"), None);
+        assert_eq!(ChannelCreationStatus::read_answer(b"no"), None);
+    }
+
+    #[test]
+    fn a_teams_people_search_posts_the_keyword_to_the_user_profile_service() {
+        let search = TeamPeopleSearch {
+            team: "19:team@thread.tacv2".to_owned(),
+            keyword: "Ada".to_owned(),
+        };
+        assert_eq!(search.service(), Service::UserProfile);
+        assert_eq!(search.method(), Method::Post);
+        let endpoint = search.endpoint();
+        assert_eq!(
+            endpoint.segments(),
+            ["api", "v1.0", "teams", "19:team@thread.tacv2", "users", "profilesearch"]
+        );
+        let query: Vec<(&str, &str)> = endpoint
+            .query()
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect();
+        assert_eq!(
+            query,
+            [
+                ("top", "15"),
+                ("includeDLs", "false"),
+                ("includeBots", "false"),
+                ("enableGuest", "true")
+            ]
+        );
+        assert_eq!(search.body(), Some(json!({"keyword": "Ada"})));
+    }
+
+    #[test]
+    fn a_people_search_reads_each_person_with_a_name_and_any_address() {
+        let people = json!([
+            {"mri": "8:orgid:a", "displayName": "Ada", "email": "ada@example.com", "jobTitle": "Engineer"},
+            {"mri": "8:orgid:b", "displayName": "Bo", "mail": "bo@example.com"},
+            {"mri": "8:orgid:c", "displayName": "Cy", "userPrincipalName": "cy@example.com", "jobTitle": ""},
+            {"mri": "8:orgid:d", "displayName": "Di"},
+            {"mri": "8:orgid:e"},
+            {"displayName": "No MRI"},
+        ]);
+        for body in [people.clone(), json!({"value": people})] {
+            let found = TeamPeopleSearch::read_answer(body.to_string().as_bytes());
+            let read: Vec<_> = found
+                .iter()
+                .map(|person| {
+                    (
+                        person.mri.as_str(),
+                        person.name.as_str(),
+                        person.email.as_deref(),
+                        person.job_title.as_deref(),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                read,
+                [
+                    ("8:orgid:a", "Ada", Some("ada@example.com"), Some("Engineer")),
+                    ("8:orgid:b", "Bo", Some("bo@example.com"), None),
+                    ("8:orgid:c", "Cy", Some("cy@example.com"), None),
+                    ("8:orgid:d", "Di", None, None),
+                ]
+            );
+            let debug = format!("{:?}", found[0]);
+            assert!(debug.contains("8:orgid:a") && !debug.contains("Ada"));
+        }
+        assert!(TeamPeopleSearch::read_answer(b"{}").is_empty());
+        assert!(TeamPeopleSearch::read_answer(b"[").is_empty());
+    }
+
+    #[test]
+    fn the_provisioning_and_user_profile_paths_name_a_lower_case_region() {
+        assert!(is_provisioning_path(&path(&["fabric", "amer", "templates", "api"])));
+        for other in [
+            &["fabric", "", "templates", "api"][..],
+            &["fabric", "Amer", "templates", "api"],
+            &["fabric", "amer", "template", "api"],
+            &["fabric", "amer", "templates", "apis"],
+            &["fabrics", "amer", "templates", "api"],
+            &["fabric", "amer", "templates"],
+        ] {
+            assert!(!is_provisioning_path(&path(other)), "{other:?}");
+        }
+        assert!(is_user_profile_path(&path(&["api", "userprofilesvc", "emea"])));
+        for other in [
+            &["api", "userprofilesvc", ""][..],
+            &["api", "userprofilesvc", "EMEA"],
+            &["api", "profilesvc", "emea"],
+            &["apis", "userprofilesvc", "emea"],
+            &["api", "userprofilesvc"],
+        ] {
+            assert!(!is_user_profile_path(&path(other)), "{other:?}");
+        }
+    }
+}

@@ -673,6 +673,8 @@ mod tests {
         let wire = write.wire().expect("a wire form");
         let base = match wire.service() {
             Service::Provisioning => "https://teams.cloud.microsoft/fabric/amer/templates/api",
+            Service::ChatService => "https://teams.cloud.microsoft/api/chatsvc/amer",
+            Service::Csa => "https://teams.cloud.microsoft/api/csa/amer",
             _ => "https://teams.cloud.microsoft/api/mt/part/amer-03",
         };
         let mut url = url::Url::parse(&format!("{base}/")).expect("the base");
@@ -776,5 +778,376 @@ mod tests {
         let wire = write.wire().expect("a wire form");
         assert_eq!(wire.body_bytes(), Some(vec![1, 2, 3]));
         assert_eq!(wire.endpoint().query(), [("threadId".to_owned(), TEAM.to_owned())]);
+    }
+
+    fn mri(text: &str) -> Mri {
+        Mri::new(text)
+    }
+
+    /// One of each write on a team itself, its tags and its people.
+    fn managing_writes() -> Vec<TeamWrite> {
+        let team = || TEAM.to_owned();
+        let group = || GROUP.to_owned();
+        let mut writes = vec![
+            TeamWrite::Create(NewTeam {
+                name: "Team".to_owned(),
+                description: "About".to_owned(),
+                first_channel: "General".to_owned(),
+                public: true,
+            }),
+            TeamWrite::Create(NewTeam {
+                name: "Team".to_owned(),
+                description: String::new(),
+                first_channel: "General".to_owned(),
+                public: false,
+            }),
+            TeamWrite::Edit {
+                team: team(),
+                name: Some("Renamed".to_owned()),
+                description: "About".to_owned(),
+                public: Some(false),
+            },
+            TeamWrite::Edit {
+                team: team(),
+                name: None,
+                description: String::new(),
+                public: None,
+            },
+            TeamWrite::Settings {
+                team: team(),
+                settings: "{}".to_owned(),
+            },
+            TeamWrite::TagSettings {
+                team: team(),
+                owners_only: true,
+                automatic: false,
+            },
+            TeamWrite::CreateTag {
+                team: team(),
+                name: "Tag".to_owned(),
+                description: String::new(),
+                members: vec![mri("8:orgid:tagged")],
+            },
+            TeamWrite::EditTag {
+                team: team(),
+                tag: "tag-1".to_owned(),
+                version: 4,
+                name: "Tag".to_owned(),
+                description: "About".to_owned(),
+            },
+            TeamWrite::DeleteTag {
+                team: team(),
+                tag: "tag-1".to_owned(),
+            },
+            TeamWrite::Archive {
+                group: group(),
+                site_read_only: true,
+            },
+            TeamWrite::Archive {
+                group: group(),
+                site_read_only: false,
+            },
+            TeamWrite::Restore { group: group() },
+            TeamWrite::Delete { team: team() },
+        ];
+        writes.extend(people_writes());
+        writes
+    }
+
+    /// One of each write on a team's people and its code, after [`managing_writes`]' own.
+    fn people_writes() -> Vec<TeamWrite> {
+        let team = || TEAM.to_owned();
+        let group = || GROUP.to_owned();
+        vec![
+            TeamWrite::AddMembers {
+                team: team(),
+                group: group(),
+                members: vec![
+                    (mri("8:orgid:member"), TeamRole::Member),
+                    (mri("8:orgid:owner"), TeamRole::Owner),
+                ],
+            },
+            TeamWrite::RequestMembers {
+                group: group(),
+                members: vec![mri("8:orgid:asked")],
+            },
+            TeamWrite::UpdateMember {
+                team: team(),
+                group: group(),
+                member: mri("8:orgid:member"),
+                update: MemberUpdate::Promoted,
+            },
+            TeamWrite::ResetCode { team: team() },
+            TeamWrite::RemoveCode { team: team() },
+            TeamWrite::Join { group: group() },
+            TeamWrite::JoinByCode {
+                code: "abc1234".to_owned(),
+            },
+            TeamWrite::AnswerJoinRequest {
+                group: group(),
+                member: mri("8:orgid:asker"),
+                accept: true,
+            },
+            TeamWrite::AnswerJoinRequest {
+                group: group(),
+                member: mri("8:orgid:asker"),
+                accept: false,
+            },
+        ]
+    }
+
+    #[test]
+    fn each_managing_writes_target_is_what_the_fence_reads_from_its_bytes() {
+        for write in managing_writes() {
+            assert_eq!(classified(&write), Contact::Write(write.target()), "{write:?}");
+        }
+    }
+
+    /// A write's method, its path and query as `path?query`, and its body.
+    fn sent(write: &TeamWrite) -> (Service, &'static str, String, Option<Value>) {
+        let wire = write.wire().expect("a wire form");
+        let mut shown = wire.endpoint().segments().join("/");
+        let query: Vec<String> = wire
+            .endpoint()
+            .query()
+            .iter()
+            .map(|(name, value)| format!("{name}={value}"))
+            .collect();
+        if !query.is_empty() {
+            shown = format!("{shown}?{}", query.join("&"));
+        }
+        (wire.service(), wire.method().as_str(), shown, wire.body().cloned())
+    }
+
+    #[test]
+    fn a_new_team_and_its_details_go_in_the_web_clients_shape() {
+        let writes = managing_writes();
+        let (service, method, path, body) = sent(&writes[0]);
+        assert_eq!(
+            (service, method, path.as_str()),
+            (Service::MiddleTier, "POST", "beta/teams/create")
+        );
+        let body = body.expect("a body");
+        assert_eq!(body["accessType"], json!(TEAM_PUBLIC));
+        assert_eq!(body["topicThreadTopic"], json!("General"));
+        assert_eq!(body["displayName"], json!("Team"));
+        assert_eq!(sent(&writes[1]).3.expect("a body")["accessType"], json!(TEAM_PRIVATE));
+        let (service, method, path, body) = sent(&writes[2]);
+        assert_eq!(
+            (service, method, path),
+            (Service::MiddleTier, "PATCH", format!("beta/teams/{TEAM}"))
+        );
+        let body = body.expect("a body");
+        assert_eq!(body["displayName"], json!("Renamed"));
+        assert_eq!(body["accessType"], json!(TEAM_PRIVATE));
+        let unnamed = sent(&writes[3]).3.expect("a body");
+        assert!(unnamed.get("displayName").is_none() && unnamed.get("accessType").is_none());
+        let (service, method, path, body) = sent(&writes[4]);
+        assert_eq!(
+            (service, method, path),
+            (
+                Service::ChatService,
+                "PUT",
+                format!("v1/threads/{TEAM}/properties?name=spaceAdminSettings")
+            )
+        );
+        assert_eq!(body, Some(json!({"spaceAdminSettings": "{}"})));
+    }
+
+    #[test]
+    fn a_teams_tags_go_to_csa_with_the_version_a_change_names() {
+        let writes = managing_writes();
+        let (service, method, path, body) = sent(&writes[5]);
+        assert_eq!(
+            (service, method, path),
+            (Service::Csa, "PUT", format!("api/v1/teams/{TEAM}/tagSettings"))
+        );
+        assert_eq!(
+            body,
+            Some(json!({"onlyOwnersCanUpdate": true, "disallowedSources": [], "enableAutomaticTags": false}))
+        );
+        let (_, method, path, body) = sent(&writes[6]);
+        assert_eq!((method, path), ("POST", format!("api/v1/teams/{TEAM}/tags")));
+        assert_eq!(body.expect("a body")["memberIds"], json!(["8:orgid:tagged"]));
+        let edit = writes[7].wire().expect("a wire form");
+        assert_eq!(edit.method(), Method::Patch);
+        assert_eq!(edit.headers(), [("if-match", "4".to_owned())]);
+        let (_, method, path, body) = sent(&writes[8]);
+        assert_eq!(
+            (method, path, body),
+            ("DELETE", format!("api/v1/teams/{TEAM}/tags/tag-1"), None)
+        );
+        assert!(writes[8].wire().expect("a wire form").headers().is_empty());
+    }
+
+    #[test]
+    fn a_team_is_archived_restored_deleted_and_its_code_kept_where_the_web_client_does() {
+        let writes = managing_writes();
+        let shown: Vec<_> = writes[9..=17]
+            .iter()
+            .filter(|write| !matches!(write, TeamWrite::AddMembers { .. } | TeamWrite::RequestMembers { .. }))
+            .filter(|write| !matches!(write, TeamWrite::UpdateMember { .. }))
+            .map(|write| {
+                let (service, method, path, body) = sent(write);
+                assert_eq!(body, None, "{write:?}");
+                (service, method, path)
+            })
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (
+                    Service::Provisioning,
+                    "POST",
+                    format!("groups/{GROUP}/archive?setSpoSiteReadOnlyForMembers=true")
+                ),
+                (Service::Provisioning, "POST", format!("groups/{GROUP}/archive")),
+                (Service::Provisioning, "POST", format!("groups/{GROUP}/unarchive")),
+                (Service::MiddleTier, "DELETE", format!("beta/teams/{TEAM}/delete")),
+                (Service::MiddleTier, "PUT", format!("beta/teams/{TEAM}/joinCode")),
+                (Service::MiddleTier, "DELETE", format!("beta/teams/{TEAM}/joinCode")),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_teams_people_are_added_asked_for_changed_and_let_in_on_the_middle_tier() {
+        let writes = managing_writes();
+        let (_, method, path, body) = sent(&writes[13]);
+        assert_eq!(
+            (method, path),
+            (
+                "PUT",
+                format!("beta/teams/{TEAM}/bulkUpdateRoledMembers?allowAsyncAddition=true")
+            )
+        );
+        assert_eq!(
+            body,
+            Some(json!({"users": [
+                {"mri": "8:orgid:member", "role": 0},
+                {"mri": "8:orgid:owner", "role": 1},
+            ], "groupId": GROUP}))
+        );
+        let (_, method, path, body) = sent(&writes[14]);
+        assert_eq!(
+            (method, path),
+            ("POST", format!("beta/teams/sponsorJoinRequest/{GROUP}"))
+        );
+        assert_eq!(body, Some(json!(["8:orgid:asked"])));
+        let (_, method, path, body) = sent(&writes[15]);
+        assert_eq!((method, path), ("PUT", format!("beta/teams/{TEAM}/members")));
+        assert_eq!(
+            body,
+            Some(json!({"userMri": "8:orgid:member", "updateType": "Promoted", "groupId": GROUP}))
+        );
+        let (_, method, path, body) = sent(&writes[18]);
+        assert_eq!(
+            (method, path, body),
+            ("POST", format!("beta/teams/joinRequest/{GROUP}"), None)
+        );
+        let (_, method, path, body) = sent(&writes[19]);
+        assert_eq!(
+            (method, path.as_str(), body),
+            (
+                "POST",
+                "beta/teams/joinByCode?restrictJoinToPublicTeam=false",
+                Some(json!("abc1234"))
+            )
+        );
+        for (write, action) in [(&writes[20], "Accept"), (&writes[21], "Reject")] {
+            let (_, method, path, body) = sent(write);
+            assert_eq!(
+                (method, path.as_str()),
+                ("POST", "beta/teams/joinRequestAdminAction?silentAction=false")
+            );
+            assert_eq!(
+                body,
+                Some(json!({"GroupId": GROUP, "UserMri": "8:orgid:asker", "ActionType": action}))
+            );
+        }
+    }
+
+    #[test]
+    fn roles_and_member_updates_have_their_wire_names() {
+        assert_eq!(TeamRole::default(), TeamRole::Member);
+        assert_eq!((TeamRole::Member.wire(), TeamRole::Owner.wire()), (0, 1));
+        let updates = [
+            MemberUpdate::Promoted,
+            MemberUpdate::Demoted,
+            MemberUpdate::Removed,
+            MemberUpdate::Left,
+            MemberUpdate::DemotedAndLeft,
+        ];
+        let wires: Vec<_> = updates.iter().map(|update| update.wire()).collect();
+        assert_eq!(wires, ["Promoted", "Demoted", "Removed", "Left", "DemotedAndLeft"]);
+    }
+
+    #[test]
+    fn a_new_teams_answer_names_its_thread_and_group() {
+        let created = |body: Value| team_created(body.to_string().as_bytes());
+        assert_eq!(
+            created(json!({"value": {"objectId": TEAM, "siteInfo": {"groupId": GROUP}}})),
+            Some((TEAM.to_owned(), Some(GROUP.to_owned())))
+        );
+        assert_eq!(
+            created(json!({"value": {"skypeThreadId": TEAM, "siteInfo": {"groupId": ""}}})),
+            Some((TEAM.to_owned(), None))
+        );
+        assert_eq!(created(json!({"value": {"objectId": ""}})), None);
+        assert_eq!(created(json!({"value": {}})), None);
+        assert_eq!(created(json!({})), None);
+        assert_eq!(team_created(b"<"), None);
+        assert_eq!(
+            team_error_code(b"{\"errorCode\": \"NameTaken\"}").as_deref(),
+            Some("NameTaken")
+        );
+    }
+
+    #[test]
+    fn a_template_and_a_copy_go_to_the_provisioning_service_with_what_they_take_along() {
+        let template = TeamWrite::FromTemplate(TemplateTeam {
+            template: "com.microsoft.teams.template.ManageAProject".to_owned(),
+            name: "Project".to_owned(),
+            description: "About".to_owned(),
+            public: true,
+            locale: "en-US".to_owned(),
+            channels: vec![("Planning".to_owned(), "Plans".to_owned())],
+            apps: vec!["app-1".to_owned()],
+        });
+        let (service, method, path, body) = sent(&template);
+        assert_eq!(
+            (service, method, path.as_str()),
+            (Service::Provisioning, "POST", "team")
+        );
+        let body = body.expect("a body");
+        assert_eq!(body["visibility"], json!("Public"));
+        assert_eq!(body["channels"], json!([{"displayName": "Plans", "id": "Planning"}]));
+        assert_eq!(body["apps"], json!([{"id": "app-1"}]));
+        assert_eq!(body["templateId"], json!("com.microsoft.teams.template.ManageAProject"));
+        let (service, method, path, body) = sent(&copy(true, false));
+        assert_eq!(
+            (service, method, path),
+            (Service::Provisioning, "POST", format!("groups/{GROUP}/clone"))
+        );
+        let body = body.expect("a body");
+        assert_eq!(body["visibility"], json!("Private"));
+        assert_eq!(
+            (&body["includeRoster"], &body["includeTabs"]),
+            (&json!(true), &json!(false))
+        );
+        let (_, method, path, body) = sent(&TeamWrite::RemoveApp {
+            team: TEAM.to_owned(),
+            app: "app-1".to_owned(),
+        });
+        assert_eq!(
+            (method, path, body),
+            ("DELETE", format!("beta/teams/{TEAM}/apps/entitlements/app-1"), None)
+        );
+        let (_, method, path, body) = sent(&TeamWrite::AddApp {
+            team: TEAM.to_owned(),
+            app: definition(&json!({"id": "app-2", "name": "App"})),
+        });
+        assert_eq!((method, path), ("POST", format!("beta/teams/{TEAM}/apps/entitlements")));
+        assert_eq!(body, Some(json!({"id": "app-2", "name": "App"})));
     }
 }

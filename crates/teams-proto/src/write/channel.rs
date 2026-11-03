@@ -319,3 +319,255 @@ pub fn channel_error_code(body: &[u8]) -> Option<String> {
         .or_else(|| text(answer.get("code")))
         .or_else(|| text(answer.pointer("/error/code")))
 }
+
+#[cfg(test)]
+mod tests {
+    //! The ids, names and answers here are synthetic: the dialog's shapes with made-up values.
+
+    use teams_fence::{Contact, Policy, Request as FenceRequest, contacting};
+
+    use super::*;
+
+    const TEAM: &str = "19:team0001@thread.tacv2";
+    const GROUP: &str = "00000000-0000-4000-8000-0000000000aa";
+    const CHANNEL_GROUP: &str = "OID:00000000-0000-4000-8000-0000000000cc@00000000-0000-4000-8000-0000000000ee";
+
+    /// What the fence makes of the bytes `wire` sends, on made-up bases.
+    fn classified(wire: &Wire) -> Contact {
+        let base = match wire.service() {
+            Service::Provisioning => "https://teams.cloud.microsoft/fabric/amer/templates/api",
+            _ => "https://teams.cloud.microsoft/api/mt/part/amer-03",
+        };
+        let mut url = url::Url::parse(&format!("{base}/")).expect("the base");
+        url.path_segments_mut()
+            .expect("a base")
+            .pop_if_empty()
+            .extend(wire.endpoint().segments());
+        if !wire.endpoint().query().is_empty() {
+            url.query_pairs_mut().extend_pairs(wire.endpoint().query());
+        }
+        let body = wire.body_bytes();
+        contacting(
+            &FenceRequest::new(wire.method().as_str(), url.as_str()).with_body(body.as_deref()),
+            &Policy::new(),
+        )
+    }
+
+    fn new_channel(kind: NewChannelKind, layout: ChannelLayout, mailbox: Option<&str>) -> NewChannel {
+        NewChannel {
+            team: TEAM.to_owned(),
+            group: GROUP.to_owned(),
+            mailbox: mailbox.map(str::to_owned),
+            name: "Plans".to_owned(),
+            description: "Where plans go".to_owned(),
+            kind,
+            layout,
+        }
+    }
+
+    #[test]
+    fn each_kind_and_layout_has_its_wire_name() {
+        assert_eq!(NewChannelKind::Standard.wire(), "Standard");
+        assert_eq!(NewChannelKind::Private.wire(), "Private");
+        assert_eq!(ChannelLayout::default(), ChannelLayout::Threads);
+        assert_eq!(ChannelLayout::Threads.wire(), "Conversational");
+        assert_eq!(ChannelLayout::Posts.wire(), "PostReply");
+    }
+
+    #[test]
+    fn a_standard_channel_is_made_on_the_middle_tier_for_the_team() {
+        let create = CreateChannel::new(new_channel(NewChannelKind::Standard, ChannelLayout::Posts, None));
+        let wire = create.wire().expect("a wire form");
+        assert_eq!(wire.service(), Service::MiddleTier);
+        assert_eq!(wire.method(), Method::Post);
+        assert_eq!(wire.endpoint().segments(), ["beta", "teams", TEAM, "channels"]);
+        assert!(wire.headers().is_empty());
+        assert_eq!(
+            wire.body(),
+            Some(&json!({
+                "displayName": "Plans",
+                "description": "Where plans go",
+                "groupId": GROUP,
+                "channelType": "Standard",
+                "chatModalityType": "PostReply",
+            }))
+        );
+        assert_eq!(
+            create.target(),
+            Target::new(WriteKind::ChannelChange, Scope::Team { id: TEAM.to_owned() })
+        );
+        assert_eq!(classified(&wire), Contact::Write(create.target()));
+    }
+
+    #[test]
+    fn a_private_channel_is_made_on_the_provisioning_service_routed_by_the_teams_mailbox() {
+        let create = CreateChannel::new(new_channel(
+            NewChannelKind::Private,
+            ChannelLayout::Threads,
+            Some("team@example.com"),
+        ));
+        let wire = create.wire().expect("a wire form");
+        assert_eq!(wire.service(), Service::Provisioning);
+        assert_eq!(wire.method(), Method::Post);
+        assert_eq!(wire.endpoint().segments(), ["teams", GROUP, "channels"]);
+        assert_eq!(wire.endpoint().query(), [("forceSync".to_owned(), "false".to_owned())]);
+        assert_eq!(wire.headers(), [("x-anchormailbox", "team@example.com".to_owned())]);
+        assert_eq!(
+            wire.body(),
+            Some(&json!({
+                "spaceThreadId": TEAM,
+                "displayName": "Plans",
+                "description": "Where plans go",
+                "channelType": "Private",
+                "sharedWithParentTeam": true,
+                "chatModalityType": "Conversational",
+            }))
+        );
+        assert_eq!(classified(&wire), Contact::Write(create.target()));
+        let unrouted = CreateChannel::new(new_channel(NewChannelKind::Private, ChannelLayout::Threads, None));
+        assert!(unrouted.wire().expect("a wire form").headers().is_empty());
+    }
+
+    #[test]
+    fn a_creations_answer_names_the_thread_or_the_group() {
+        let read = |body: Value| CreateChannel::read_answer(body.to_string().as_bytes());
+        assert_eq!(
+            read(json!({"value": {"objectId": "19:a@thread.tacv2"}})),
+            Some(ChannelCreated {
+                thread: Some("19:a@thread.tacv2".to_owned()),
+                group: None
+            })
+        );
+        assert_eq!(
+            read(json!({"groupId": CHANNEL_GROUP, "threadId": "19:b@thread.tacv2"})),
+            Some(ChannelCreated {
+                thread: Some("19:b@thread.tacv2".to_owned()),
+                group: Some(CHANNEL_GROUP.to_owned())
+            })
+        );
+        assert_eq!(
+            read(json!({"groupId": CHANNEL_GROUP, "threadId": ""})),
+            Some(ChannelCreated {
+                thread: None,
+                group: Some(CHANNEL_GROUP.to_owned())
+            })
+        );
+        assert_eq!(
+            read(json!({"id": "19:c@thread.tacv2"})).and_then(|created| created.thread),
+            Some("19:c@thread.tacv2".to_owned())
+        );
+        assert_eq!(read(json!({"something": "else"})), None);
+        assert_eq!(CreateChannel::read_answer(b"not json"), None);
+    }
+
+    #[test]
+    fn a_private_channels_people_are_named_by_object_id_in_its_tenant() {
+        let members = [Mri::new("8:orgid:aaaa"), Mri::new("8:orgid:bbbb")];
+        let add = AddChannelMembers::new(GROUP.to_owned(), CHANNEL_GROUP.to_owned(), &members).expect("a request");
+        let tenant = "00000000-0000-4000-8000-0000000000ee";
+        let wire = add.wire().expect("a wire form");
+        assert_eq!(wire.service(), Service::Provisioning);
+        assert_eq!(wire.method(), Method::Post);
+        assert_eq!(
+            wire.endpoint().segments(),
+            ["teams", GROUP, "channels", CHANNEL_GROUP, "users"]
+        );
+        assert_eq!(
+            wire.body(),
+            Some(&json!({"users": [
+                {"id": format!("OID:aaaa@{tenant}"), "role": 1},
+                {"id": format!("OID:bbbb@{tenant}"), "role": 1},
+            ]}))
+        );
+        assert_eq!(
+            add.target(),
+            Target::new(
+                WriteKind::MemberChange,
+                Scope::Channel {
+                    team: GROUP.to_owned(),
+                    channel: CHANNEL_GROUP.to_owned(),
+                },
+            )
+            .with_added(members.clone())
+        );
+        assert_eq!(classified(&wire), Contact::Write(add.target()));
+    }
+
+    #[test]
+    fn a_private_channels_people_need_a_tenant_somebody_and_work_accounts() {
+        let one = [Mri::new("8:orgid:aaaa")];
+        assert!(AddChannelMembers::new(GROUP.to_owned(), "no-prefix@tenant".to_owned(), &one).is_none());
+        assert!(AddChannelMembers::new(GROUP.to_owned(), "OID:no-tenant".to_owned(), &one).is_none());
+        assert!(AddChannelMembers::new(GROUP.to_owned(), "OID:x@".to_owned(), &one).is_none());
+        assert!(AddChannelMembers::new(GROUP.to_owned(), CHANNEL_GROUP.to_owned(), &[]).is_none());
+        for other in ["28:bot", "8:orgid:", "8:live:someone"] {
+            assert!(
+                AddChannelMembers::new(GROUP.to_owned(), CHANNEL_GROUP.to_owned(), &[Mri::new(other)]).is_none(),
+                "{other}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_people_not_added_are_read_by_either_name() {
+        let members = [
+            Mri::new("8:orgid:aaaa"),
+            Mri::new("8:orgid:bbbb"),
+            Mri::new("8:orgid:cccc"),
+        ];
+        let add = AddChannelMembers::new(GROUP.to_owned(), CHANNEL_GROUP.to_owned(), &members).expect("a request");
+        let tenant = "00000000-0000-4000-8000-0000000000ee";
+        let body = json!({"multipleStatus": [
+            {"id": format!("OID:aaaa@{tenant}"), "code": "Failed"},
+            {"id": "8:orgid:cccc"},
+            {"id": "OID:stranger@elsewhere"},
+            {"code": "no id"},
+        ]});
+        assert_eq!(
+            add.failed(body.to_string().as_bytes()),
+            [Mri::new("8:orgid:aaaa"), Mri::new("8:orgid:cccc")]
+        );
+        assert!(add.failed(b"{}").is_empty());
+        assert!(add.failed(b"<html>").is_empty());
+    }
+
+    #[test]
+    fn a_channel_shown_by_default_is_put_on_the_middle_tier() {
+        let show = ShowChannelByDefault::new("19:channel@thread.tacv2".to_owned());
+        let wire = show.wire().expect("a wire form");
+        assert_eq!(wire.service(), Service::MiddleTier);
+        assert_eq!(wire.method(), Method::Put);
+        assert_eq!(
+            wire.endpoint().segments(),
+            ["beta", "teams", "19:channel@thread.tacv2", "setDefaultChannel"]
+        );
+        assert_eq!(wire.body(), None);
+        assert_eq!(
+            show.target(),
+            Target::new(
+                WriteKind::ChannelChange,
+                Scope::Team {
+                    id: "19:channel@thread.tacv2".to_owned()
+                }
+            )
+        );
+        assert_eq!(classified(&wire), Contact::Write(show.target()));
+    }
+
+    #[test]
+    fn an_answers_error_code_is_read_from_each_place_the_bundle_reads() {
+        let code = |body: Value| channel_error_code(body.to_string().as_bytes());
+        assert_eq!(code(json!({"errorCode": "NameTaken"})).as_deref(), Some("NameTaken"));
+        assert_eq!(
+            code(json!({"errorCode": "", "errors": [{"errorCode": "TooLong"}]})).as_deref(),
+            Some("TooLong")
+        );
+        assert_eq!(code(json!({"code": "Forbidden"})).as_deref(), Some("Forbidden"));
+        assert_eq!(
+            code(json!({"error": {"code": "Throttled"}})).as_deref(),
+            Some("Throttled")
+        );
+        assert_eq!(code(json!({"message": "no code"})), None);
+        assert_eq!(channel_error_code(b"]"), None);
+    }
+}
