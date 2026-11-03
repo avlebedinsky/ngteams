@@ -448,4 +448,85 @@ mod tests {
         assert_eq!(listed[0].channels.len(), 3);
         assert_eq!(listed, stored);
     }
+
+    /// No token: the client below has no CSA base, so its reads fail at once, sending nothing.
+    struct NoTokens;
+
+    impl teams_proto::Credentials for NoTokens {
+        fn bearer(
+            &self,
+            _: &str,
+        ) -> impl Future<Output = Result<teams_auth::secrets::Secret, teams_auth::token::TokenError>> + Send {
+            std::future::ready(Ok(teams_auth::secrets::Secret::new("synthetic-teams-token")))
+        }
+
+        fn bearer_rejected(
+            &self,
+            audience: &str,
+            _: &teams_auth::secrets::Secret,
+        ) -> impl Future<Output = Result<teams_auth::secrets::Secret, teams_auth::token::TokenError>> + Send {
+            self.bearer(audience)
+        }
+    }
+
+    fn teams_without_csa() -> super::Teams<NoTokens> {
+        let fence = std::sync::Arc::new(teams_fence::Fence::new(
+            teams_fence::Roster::new([], []),
+            teams_fence::FenceLog::from_writer(std::io::sink()),
+        ));
+        let transport = teams_proto::HttpTransport::with_mock_origin(
+            std::sync::Arc::new(NoTokens),
+            fence,
+            "https://teams.microsoft.com/api/chatsvc/amer",
+            "http://127.0.0.1:9",
+        )
+        .expect("a transport");
+        super::Teams::new(
+            std::sync::Arc::new(teams_proto::Client::new(transport)),
+            std::time::Duration::from_secs(60),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_team_thread_the_stored_teams_don_t_name_reads_them_again_once_a_run() {
+        let dir = tempfile::tempdir().expect("a directory");
+        let mut store = teams_store::Store::open(&dir.path().join("teams.sqlite")).expect("a store");
+        let old = teams_auth::secrets::Secret::new("synthetic-old-token");
+        assert!(
+            teams_proto::Credentials::bearer_rejected(&NoTokens, "csa", &old)
+                .await
+                .is_ok()
+        );
+        let mut teams = teams_without_csa();
+        teams.note_conversation(&store, "19:new@thread.tacv2").expect("noted");
+        assert!(!teams.busy(), "before the first read nothing counts");
+
+        store
+            .replace_teams(&[team("19:a@thread.tacv2")], super::now_ms())
+            .expect("stored");
+        teams.note_conversation(&store, "19:a@thread.tacv2").expect("noted");
+        assert!(!teams.busy(), "a stored team's thread reads nothing");
+        teams.note_conversation(&store, "19:new@thread.tacv2").expect("noted");
+        assert!(teams.busy(), "one no stored team names reads the teams");
+        teams.note_activity();
+        assert!(teams.read_again, "a read runs: another follows it");
+
+        let read = teams.next().await.expect("a read ran");
+        assert!(read.is_err(), "no CSA base");
+        assert!(matches!(teams.store(&mut store, read), Ok(Err(_))));
+        teams.note_conversation(&store, "19:new@thread.tacv2").expect("noted");
+        assert!(!teams.busy(), "once a run");
+
+        teams.read_again = true;
+        let listed = super::TeamsRead {
+            teams: vec![team("19:a@thread.tacv2")],
+            favorites: Some(vec!["19:a@thread.tacv2".to_owned()]),
+        };
+        assert!(matches!(teams.store(&mut store, Ok(listed)), Ok(Ok(true))));
+        assert!(teams.busy(), "the read owed starts");
+        let _ = teams.next().await;
+        assert!(!teams.note_change(&mut store, None).expect("noted"), "nothing to store");
+        assert!(teams.busy(), "a write with no change reads the teams again");
+        assert!(matches!(teams.next().await, Some(Err(_))));
+    }
 }

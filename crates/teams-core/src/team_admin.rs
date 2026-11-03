@@ -561,3 +561,249 @@ fn picture_format(bytes: &[u8]) -> Option<PastedFormat> {
         _ => None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use teams_proto::NewTeam;
+    use teams_store::ChannelKind;
+
+    use super::*;
+
+    fn channel(id: &str, general: bool, shown: bool) -> TeamChannel {
+        TeamChannel {
+            id: id.to_owned(),
+            name: id.to_owned(),
+            general,
+            kind: ChannelKind::Standard,
+            shown,
+        }
+    }
+
+    fn team(id: &str) -> Team {
+        Team {
+            id: id.to_owned(),
+            name: "Made-up".to_owned(),
+            channels: vec![channel(id, true, true), channel("19:other@thread.tacv2", false, true)],
+            ..Team::default()
+        }
+    }
+
+    #[test]
+    fn a_new_team_is_put_in_once_and_is_shown_by_its_id() {
+        let mut teams = Vec::new();
+        let created = TeamChange::Created(team("t"));
+        assert!(!created.shown_in(&teams));
+        created.apply(&mut teams);
+        created.apply(&mut teams);
+        assert_eq!(teams.len(), 1);
+        assert!(created.shown_in(&teams));
+        let gone = TeamChange::Gone("t".to_owned());
+        assert!(!gone.shown_in(&teams));
+        gone.apply(&mut teams);
+        assert!(teams.is_empty());
+        assert!(gone.shown_in(&teams));
+    }
+
+    #[test]
+    fn an_edit_changes_what_it_names_and_keeps_what_it_leaves_out() {
+        let mut teams = vec![team("t")];
+        teams[0].about.public = true;
+        let kept = TeamChange::Edited {
+            team: "t".to_owned(),
+            name: None,
+            description: "new words".to_owned(),
+            public: None,
+        };
+        assert!(!kept.shown_in(&teams));
+        kept.apply(&mut teams);
+        assert!(kept.shown_in(&teams));
+        assert_eq!(teams[0].name, "Made-up");
+        assert!(teams[0].about.public);
+        let changed = TeamChange::Edited {
+            team: "t".to_owned(),
+            name: Some("Renamed".to_owned()),
+            description: "new words".to_owned(),
+            public: Some(false),
+        };
+        assert!(!changed.shown_in(&teams));
+        changed.apply(&mut teams);
+        assert!(changed.shown_in(&teams));
+        assert_eq!(teams[0].name, "Renamed");
+        assert!(!teams[0].about.public);
+        // a team not listed is left alone, and isn't shown
+        let elsewhere = TeamChange::Edited {
+            team: "x".to_owned(),
+            name: None,
+            description: String::new(),
+            public: None,
+        };
+        elsewhere.apply(&mut teams);
+        assert!(!elsewhere.shown_in(&teams));
+    }
+
+    #[test]
+    fn archiving_hiding_and_showing_a_channel_change_the_listed_team() {
+        let mut teams = vec![team("t")];
+        let archived = TeamChange::Archived {
+            team: "t".to_owned(),
+            archived: true,
+        };
+        assert!(!archived.shown_in(&teams));
+        archived.apply(&mut teams);
+        assert!(teams[0].archived && archived.shown_in(&teams));
+
+        let hidden = TeamChange::Hidden {
+            team: "t".to_owned(),
+            hidden: true,
+        };
+        hidden.apply(&mut teams);
+        assert!(hidden.shown_in(&teams));
+        assert!(teams[0].channels.iter().all(|channel| !channel.shown));
+        let shown = TeamChange::Hidden {
+            team: "t".to_owned(),
+            hidden: false,
+        };
+        shown.apply(&mut teams);
+        assert!(!teams[0].about.hidden);
+        assert_eq!(
+            teams[0]
+                .channels
+                .iter()
+                .map(|channel| channel.shown)
+                .collect::<Vec<_>>(),
+            [true, false],
+            "the general channel comes back"
+        );
+
+        let other = TeamChange::ChannelShown {
+            team: "t".to_owned(),
+            channel: "19:other@thread.tacv2".to_owned(),
+            shown: true,
+        };
+        assert!(!other.shown_in(&teams));
+        other.apply(&mut teams);
+        assert!(other.shown_in(&teams));
+        for id in ["t", "19:other@thread.tacv2"] {
+            TeamChange::ChannelShown {
+                team: "t".to_owned(),
+                channel: id.to_owned(),
+                shown: false,
+            }
+            .apply(&mut teams);
+        }
+        assert!(teams[0].about.hidden, "a team with no channel shown is hidden");
+        other.apply(&mut teams);
+        assert!(!teams[0].about.hidden);
+        let missing = TeamChange::ChannelShown {
+            team: "t".to_owned(),
+            channel: "19:missing@thread.tacv2".to_owned(),
+            shown: true,
+        };
+        assert!(!missing.shown_in(&teams));
+        for change in [archived, hidden, missing] {
+            let mut none = Vec::new();
+            change.apply(&mut none);
+            assert!(none.is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn changes_are_kept_until_the_read_shows_them_or_their_time_is_up() {
+        let mut teams = vec![team("t")];
+        let later = tokio::time::Instant::now() + std::time::Duration::from_secs(60);
+        let mut changes = vec![
+            (
+                TeamChange::Archived {
+                    team: "t".to_owned(),
+                    archived: true,
+                },
+                later,
+            ),
+            (TeamChange::Created(team("n")), tokio::time::Instant::now()),
+            (TeamChange::Gone("x".to_owned()), later),
+        ];
+        keep_changes(&mut changes, &mut teams);
+        assert_eq!(changes.len(), 1, "only the archive the read doesn't show is kept");
+        assert!(teams[0].archived);
+        assert_eq!(teams.len(), 1, "an expired change isn't put in");
+        // the next read shows it: let go
+        keep_changes(&mut changes, &mut teams);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn a_new_team_takes_the_thread_and_group_its_answer_names() {
+        let written = TeamWritten {
+            created: Some(("19:made@thread.tacv2".to_owned(), Some("group".to_owned()))),
+            not_added: Vec::new(),
+        };
+        let made = change_of(Some(&written), Some(TeamChange::Created(team("draft"))));
+        let Some(TeamChange::Created(made)) = made else {
+            unreachable!("a created team: {made:?}");
+        };
+        assert_eq!(made.id, "19:made@thread.tacv2");
+        assert_eq!(made.group_id.as_deref(), Some("group"));
+        assert_eq!(made.channels[0].id, "19:made@thread.tacv2");
+        assert_eq!(made.channels[1].id, "19:other@thread.tacv2");
+        let gone = Some(TeamChange::Gone("t".to_owned()));
+        assert_eq!(change_of(Some(&written), gone.clone()), gone);
+        assert_eq!(change_of(None, None), None);
+    }
+
+    #[test]
+    fn a_write_s_answer_is_read_for_what_it_made_or_who_it_left_out() {
+        let create = TeamWrite::Create(NewTeam {
+            name: "n".to_owned(),
+            description: String::new(),
+            first_channel: "General".to_owned(),
+            public: false,
+        });
+        let body = serde_json::json!({"value": {"objectId": "19:t@thread.tacv2", "siteInfo": {"groupId": "g"}}});
+        assert_eq!(
+            written(&create, body.to_string().as_bytes()).created,
+            Some(("19:t@thread.tacv2".to_owned(), Some("g".to_owned())))
+        );
+        let add = TeamWrite::AddMembers {
+            team: "t".to_owned(),
+            group: "g".to_owned(),
+            members: Vec::new(),
+        };
+        let body = serde_json::json!({"value": {
+            "failedMembers": ["8:orgid:one", {"id": "8:orgid:two"}, {"mri": "8:orgid:three"}, {"other": 1}],
+            "updatedMembersError": [{"id": "8:orgid:four"}],
+        }});
+        assert_eq!(
+            written(&add, body.to_string().as_bytes()).not_added,
+            ["8:orgid:one", "8:orgid:two", "8:orgid:three", "8:orgid:four"]
+        );
+        let bare = serde_json::json!({"errors": ["8:orgid:five"]});
+        assert_eq!(not_added(bare.to_string().as_bytes()), ["8:orgid:five"]);
+        assert!(not_added(b"not json").is_empty());
+        let delete = TeamWrite::Delete { team: "t".to_owned() };
+        assert_eq!(written(&delete, b"{}"), TeamWritten::default());
+    }
+
+    #[test]
+    fn a_picture_s_format_is_told_by_its_first_bytes() {
+        assert_eq!(picture_format(&[0xff, 0xd8, 0xff]), Some(PastedFormat::Jpeg));
+        assert_eq!(picture_format(b"\x89PNG\r\n"), Some(PastedFormat::Png));
+        assert_eq!(picture_format(b"GIF89a"), None);
+        assert_eq!(picture_format(&[]), None);
+    }
+
+    #[test]
+    fn a_member_s_debug_shows_only_the_mri_and_role() {
+        let member = TeamMember {
+            mri: "8:orgid:made-up".to_owned(),
+            name: "Secret Name".to_owned(),
+            email: Some("secret@example.com".to_owned()),
+            title: None,
+            location: None,
+            owner: true,
+            guest: false,
+        };
+        let shown = format!("{member:?}");
+        assert!(shown.contains("8:orgid:made-up") && shown.contains("owner"));
+        assert!(!shown.contains("Secret"));
+    }
+}

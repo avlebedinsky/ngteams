@@ -273,3 +273,110 @@ fn message_diagnostics_distinguish_bulk_reads_from_deliveries_and_never_need_a_p
         );
     }
 }
+
+#[test]
+fn meeting_and_lobby_actions_and_events_name_ids_and_counts_only() {
+    let id = call_id();
+    let number = id.get();
+    let actions = [
+        (
+            CallAction::JoinMeeting {
+                chat: "synthetic-meeting".to_owned(),
+                meeting: teams_proto::MeetingInfo {
+                    organizer_id: "00000000-0000-4000-8000-00000000000a".to_owned(),
+                    tenant_id: teams_mock::TENANT.to_owned(),
+                },
+            },
+            "a join of the meeting in synthetic-meeting".to_owned(),
+        ),
+        (
+            CallAction::MeetNow {
+                channel: "synthetic-channel".to_owned(),
+            },
+            "a new meeting in synthetic-channel".to_owned(),
+        ),
+        (
+            CallAction::JoinChannel {
+                channel: "synthetic-channel".to_owned(),
+            },
+            "a join of the meeting running in synthetic-channel".to_owned(),
+        ),
+        (
+            CallAction::Lobby {
+                call: id,
+                waiting: Mri::new(teams_mock::LAB_B),
+                admit: true,
+            },
+            format!("call {number}: admit {} from the lobby", teams_mock::LAB_B),
+        ),
+        (
+            CallAction::Lobby {
+                call: id,
+                waiting: Mri::new(teams_mock::LAB_B),
+                admit: false,
+            },
+            format!("call {number}: deny {} from the lobby", teams_mock::LAB_B),
+        ),
+    ];
+    for (action, expected) in actions {
+        assert_eq!(call(&action), expected);
+    }
+    let lobby = Event::Lobby {
+        call: id,
+        waiting: vec![crate::LobbyPerson {
+            mri: Mri::new(teams_mock::LAB_B),
+            name: Some(PRIVATE_NAME.to_owned()),
+        }],
+    };
+    assert_eq!(
+        logged(&lobby, LevelFilter::Info).unwrap().1,
+        format!("call {number}: 1 waiting in the lobby")
+    );
+}
+
+#[test]
+fn the_plain_events_name_ids_and_counts() {
+    for (event, expected) in [
+        (
+            Event::Connected {
+                endpoint: "synthetic-endpoint".to_owned(),
+            },
+            "push channel up (endpoint synthetic-endpoint)".to_owned(),
+        ),
+        (
+            Event::ReadHorizon {
+                conversation: "synthetic-chat".to_owned(),
+            },
+            "read horizon moved in synthetic-chat".to_owned(),
+        ),
+        (
+            Event::ConversationChanged {
+                conversation: "synthetic-chat".to_owned(),
+            },
+            "conversation synthetic-chat changed".to_owned(),
+        ),
+        (
+            Event::Profile {
+                mri: teams_mock::LAB_B.to_owned(),
+            },
+            format!("profile of {} changed", teams_mock::LAB_B),
+        ),
+        (
+            Event::Indexed { messages: 3 },
+            "search backfill over: 3 message(s) indexed".to_owned(),
+        ),
+        (Event::Teams, "the teams changed".to_owned()),
+    ] {
+        assert_eq!(logged(&event, LevelFilter::Info).unwrap().1, expected);
+    }
+    let typing = Event::Typing {
+        conversation: "synthetic-chat".to_owned(),
+        from: Some(teams_mock::LAB_B.to_owned()),
+        typing: true,
+    };
+    assert!(logged(&typing, LevelFilter::Info).is_none(), "typing is at debug");
+    assert_eq!(
+        logged(&typing, LevelFilter::Debug).unwrap(),
+        (Level::Debug, "typing true in synthetic-chat".to_owned())
+    );
+}

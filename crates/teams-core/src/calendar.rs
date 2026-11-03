@@ -762,3 +762,58 @@ fn instant(time: EventTime) -> i64 {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use teams_proto::FloatingTime;
+
+    use super::*;
+
+    fn floating(month: u8, day: u8, second: u8) -> EventTime {
+        EventTime::Floating(FloatingTime {
+            year: 2026,
+            month,
+            day,
+            hour: 9,
+            minute: 30,
+            second,
+        })
+    }
+
+    #[test]
+    fn a_time_without_an_offset_is_the_desktop_s_local_time() {
+        assert_eq!(instant(EventTime::Instant(1_793_491_200_000)), 1_793_491_200_000);
+        let local = NaiveDate::from_ymd_opt(2026, 11, 2)
+            .and_then(|date| date.and_hms_opt(9, 30, 59))
+            .map(|time| {
+                Local
+                    .from_local_datetime(&time)
+                    .earliest()
+                    .map(|time| time.timestamp_millis())
+            });
+        // a leap second is read as the minute's last
+        assert_eq!(Some(Some(instant(floating(11, 2, 60)))), local);
+        assert_eq!(instant(floating(2, 30, 0)), 0, "a day the calendar has none of");
+    }
+
+    #[test]
+    fn an_empty_or_reversed_window_has_no_stored_events() {
+        let dir = tempfile::tempdir().expect("a directory");
+        let store = Store::open(&dir.path().join("calendar.sqlite")).expect("a store");
+        assert!(stored(&store, 10, 10).expect("read").is_empty());
+        assert!(stored(&store, 10, 5).expect("read").is_empty());
+        assert!(stored(&store, 0, 10).expect("read").is_empty());
+    }
+
+    #[test]
+    fn a_write_s_kind_names_what_it_does() {
+        let delete = EventWrite::Delete { id: "x".to_owned() };
+        assert_eq!(delete.kind(), "delete");
+        let cancel = EventWrite::Cancel {
+            id: "x".to_owned(),
+            chat: None,
+            message: None,
+        };
+        assert_eq!(cancel.kind(), "cancellation");
+    }
+}

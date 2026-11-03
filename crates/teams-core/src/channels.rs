@@ -355,3 +355,37 @@ async fn wait_for_thread<C: Credentials + 'static>(
         tokio::time::sleep(THREAD_POLL).await;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ChannelProblem;
+
+    #[test]
+    fn each_code_teams_answers_is_told_apart() {
+        for (code, problem) in [
+            ("ChannelNameAlreadyExist", ChannelProblem::NameTaken),
+            ("MaxPrivateChannelLimitExceeded", ChannelProblem::TooManyPrivateChannels),
+            ("MaxChannelLimitExceeded", ChannelProblem::TooManyChannels),
+            ("Max1kChannelLimitExceeded", ChannelProblem::TooManyChannels),
+            ("UnableToFetchTeamOwner", ChannelProblem::NoTeamOwner),
+            ("NoPermissionToCreateChannel", ChannelProblem::NoPermission),
+            ("UserNotAllowedToCreateChannel", ChannelProblem::NoPermission),
+            (
+                "CannotCreatePrivateChannelDueToUserPolicy",
+                ChannelProblem::PrivateNotAllowed,
+            ),
+            ("OperationNotAllowedOnArchivedTeam", ChannelProblem::TeamArchived),
+            ("InvalidUsersInCreateChannelRequest", ChannelProblem::InvalidUsers),
+            ("ThreadDescriptionLimitExceeded", ChannelProblem::DescriptionTooLong),
+            ("SomethingMadeUp", ChannelProblem::Other),
+        ] {
+            assert_eq!(ChannelProblem::of(Some(code), 400), problem, "{code}");
+        }
+        assert_eq!(
+            ChannelProblem::of(None, 409),
+            ChannelProblem::NameTaken,
+            "a conflict without a code"
+        );
+        assert_eq!(ChannelProblem::of(None, 500), ChannelProblem::Other);
+    }
+}
