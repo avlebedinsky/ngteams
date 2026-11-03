@@ -321,7 +321,9 @@ mode exists only in test-support builds, which ngteams still refuses.
 - Modify: every crate's `Cargo.toml`, root `Cargo.toml`, `coverage.toml` (baselines and `[excluded] fence-seal`),
   `crates/teams-ui/tests/reach.rs` (`LINKED_CRATES`), `crates/ngteams/tests/apart.rs`
 
-- [ ] move the items with their tests and switch the imports
+- [ ] move the items with their tests and switch the imports; when `log_url` moves into `teams-proto`, have
+      `teams-signin::diagnostics::record` call that shared helper and remove its duplicate `endpoint`, `opaque`
+      and `authority` helpers, preserving the sign-in diagnostic credential-redaction tests
 - [ ] delete both crates and remove them from the workspace and coverage
 - [ ] `apart.rs` keeps what still holds: test-support only in dev-dependencies, the test-support refusal, no
       `proto-lab` in `ngteams`' tree
