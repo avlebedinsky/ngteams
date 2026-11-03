@@ -168,6 +168,19 @@ fn acceptance_path(calls: &Calls) -> String {
         .to_owned()
 }
 
+#[test]
+fn call_target_cleanup_matches_only_the_current_calls_callback() {
+    let (mut calls, id) = ringing_call(Instant::now());
+    let path = acceptance_path(&calls);
+    assert_eq!(calls.call_at(&path), Some(id));
+    assert_eq!(
+        calls.call_at("/v4/f/another/callAgent/old/conversation/rosterUpdate/"),
+        None
+    );
+    calls.call = None;
+    assert_eq!(calls.call_at(&path), None);
+}
+
 fn acceptance() -> Value {
     json!({"callAcceptance": {
         "links": {"acknowledgement": cc("callAcceptance", "acknowledge")},

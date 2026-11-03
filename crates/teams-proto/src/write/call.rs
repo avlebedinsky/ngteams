@@ -76,6 +76,21 @@ pub struct CallWire {
 }
 
 impl CallWire {
+    #[cfg(test)]
+    pub(crate) fn synthetic(method: Method, url: &str, body: Option<Value>) -> Self {
+        Self {
+            method,
+            url: Url::parse(url).unwrap(),
+            headers: Vec::new(),
+            body,
+            registry: Registry::Nothing,
+        }
+    }
+
+    pub(crate) fn body(&self) -> Option<&Value> {
+        self.body.as_ref()
+    }
+
     pub(crate) fn method(&self) -> Method {
         self.method
     }

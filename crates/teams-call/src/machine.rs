@@ -450,6 +450,18 @@ impl Calls {
         self.call.as_ref().map(|call| (call.id, call.phase.state()))
     }
 
+    /// The current call only when it owns this exact service callback. Old background subscriptions do not match.
+    #[must_use]
+    pub fn call_at(&self, path: &str) -> Option<CallId> {
+        let call = self.call.as_ref()?;
+        let followed = call.running().is_some_and(|(chat, conversation)| {
+            self.followed.get(chat).is_some_and(|followed| {
+                followed.conversation == *conversation && followed.paths.iter().any(|known| known == path)
+            })
+        });
+        (call.callback_at(path).is_some() || followed).then_some(call.id)
+    }
+
     /// The keep-alive interval the call's services asked for, once the call is up.
     #[must_use]
     pub fn keep_alive_interval(&self) -> Option<Duration> {

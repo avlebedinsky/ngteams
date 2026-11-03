@@ -546,6 +546,13 @@ where
             PushEvent::Ignored(Ignored::IncomingCall) => {
                 log::info!("an incoming call the fence doesn't offer: ignored");
             }
+            PushEvent::Ignored(Ignored::CallTargetChanged { path }) => {
+                if let Some(call) = self.calls.call_at(&path) {
+                    log::warn!("leaving a call whose participant target changed outside the lab");
+                    let _ = self.hang_up(call, now);
+                    self.drive(now);
+                }
+            }
             PushEvent::MessageLoss(loss) => loss.caught_up(),
             PushEvent::Disconnected { down, .. } => log::info!("calling socket down: {down:?}"),
             PushEvent::Stopped(stop) => log::warn!("calling socket stopped: {stop:?}"),

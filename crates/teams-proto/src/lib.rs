@@ -62,6 +62,7 @@ mod file_content;
 mod frame;
 mod giphy;
 mod http;
+pub mod lab_calls;
 mod meeting;
 mod own;
 mod post_read;

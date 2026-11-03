@@ -10,9 +10,16 @@ The personal build remains unrestricted for the user's normal use ([personal-bui
 ## Who the lab may reach
 
 Only the three dedicated accounts in `lab.toml`'s `accounts`, by exact MRI or UPN. An account whose MRI is unknown
-matches nobody by MRI. The personal user, echo service, bots and external contacts are never lab recipients.
+matches nobody by MRI. The personal user, echo service, other bots and external contacts are never lab recipients.
 Existing `contacts` and `service_participants` config entries are metadata only and cannot grant permission.
 A conversation containing even one participant outside the three accounts is denied, including a mixed conversation.
+
+The user explicitly approved Microsoft's built-in Teams caption/transcription service while all human participants
+remain lab accounts. This narrow exception includes the service's required first-party recorder-scoped
+authentication. Verify the service identity, token audience and Microsoft Teams endpoint against the reference
+client's actual flow; never send credentials to an arbitrary URL or treat this as permission for other bots,
+recording services or human participants. The exact lab actor, conversation and full human membership checks still
+apply immediately before enabling captions or changing the shared spoken language.
 
 ## Before every implementation action
 
@@ -32,6 +39,12 @@ independently before sharing or posting. Never run a contacting scenario until t
 The harness refuses echo-call and legacy file/image, meeting, team and channel scenario entrypoints whose actions
 have not established independent audience checks. Update and offline-test their preflights before enabling them.
 Personal client behavior stays unrestricted for its user's normal use.
+
+Native calls additionally bind each proved conversation to its own service-issued controller, follow-up links and
+account-owned calling callbacks. Incoming offers are checked before being handed to the call engine; delivery
+responses belong to one proved delivery on one socket and are checked again before sending. A later outsider
+roster stops further call actions and leaves only the affected current call. Leaving a proved call remains possible
+using its own cleanup link if a later identity/member lookup fails or the socket disconnects.
 
 ## What is denied
 

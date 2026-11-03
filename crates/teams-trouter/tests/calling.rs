@@ -508,6 +508,83 @@ async fn an_offered_invitation_is_handed_on_and_gets_its_receipt_once_through_th
 }
 
 #[tokio::test]
+async fn native_incoming_calls_require_fresh_exact_members_before_delivery_or_receipt() {
+    use teams_lab_targets::{LabAccount, LabRoster};
+    use wiremock::{
+        Mock, MockServer, ResponseTemplate,
+        matchers::{method, path},
+    };
+    for mixed in [false, true] {
+        let lab = Lab::start_lab_rule().await;
+        let reads = MockServer::start().await;
+        let third = "8:orgid:00000000-0000-4000-8000-00000000000c";
+        let roster = LabRoster::new([LAB_A, LAB_B, third].map(|mri| LabAccount {
+            mri: mri.into(),
+            upn: format!("{}@lab.example.test", mri.chars().last().unwrap()),
+        }))
+        .unwrap();
+        let observer = Arc::new(
+            HttpTransport::with_mock_origin(Arc::clone(&lab.tokens), Arc::clone(&lab.fence), CHAT_BASE, &reads.uri())
+                .unwrap()
+                .with_lab_targets(LAB_B.into(), "b@lab.example.test".into(), Arc::new(roster))
+                .unwrap(),
+        );
+        let members = if mixed {
+            vec![LAB_A, LAB_B, OUTSIDER]
+        } else {
+            vec![LAB_A, LAB_B]
+        };
+        let id = teams_lab_targets::one_to_one_id(LAB_A, LAB_B).unwrap();
+        for (address, body) in [
+            (
+                "/v1.0/me".to_owned(),
+                json!({"id":LAB_B.strip_prefix("8:orgid:").unwrap(),"userPrincipalName":"b@lab.example.test"}),
+            ),
+            (
+                format!("/v1.0/users/{}", LAB_A.strip_prefix("8:orgid:").unwrap()),
+                json!({"id":LAB_A.strip_prefix("8:orgid:").unwrap(),"userPrincipalName":"a@lab.example.test"}),
+            ),
+            (
+                format!("/api/chatsvc/amer/v1/threads/{id}"),
+                json!({"id":id,"members":members.iter().map(|mri|json!({"id":mri})).collect::<Vec<_>>()}),
+            ),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(address))
+                .respond_with(ResponseTemplate::new(200).set_body_json(body))
+                .mount(&reads)
+                .await;
+        }
+        let stack = CallStack::new(Arc::clone(&lab.fence), Arc::new(FailClosed)).with_lab_calls(observer);
+        let mut push = Trouter::with_mock_origin(lab.transport(), Arc::clone(&lab.tokens), lab.trouter.origin())
+            .unwrap()
+            .with_options(options())
+            .for_calls(stack)
+            .spawn();
+        connected(&mut push).await;
+        registered(&mut push).await;
+        let id = lab.trouter.deliver_call_invitation(LAB_B, LAB_A);
+        let event = next(&mut push, |event| {
+            matches!(event, PushEvent::Call(_) | PushEvent::Ignored(_)).then_some(event)
+        })
+        .await;
+        if mixed {
+            assert!(matches!(event, PushEvent::Ignored(Ignored::IncomingCall)));
+            assert!(responses(&lab.trouter).is_empty());
+        } else {
+            let PushEvent::Call(delivery) = event else {
+                panic!("proved invitation was ignored")
+            };
+            assert_eq!(delivery.delivery.id, id);
+            let receipt = InvitationReceipt::new(&delivery.delivery, 2).unwrap();
+            delivery.respond(receipt).await.unwrap();
+            assert_eq!(responses_after(&lab.trouter, 1).await.len(), 1);
+        }
+        push.stop().await;
+    }
+}
+
+#[tokio::test]
 async fn an_invitation_from_outside_the_lab_is_ignored_never_handed_on_and_never_answered() {
     let lab = Lab::start().await;
     let mut push = lab.calling().spawn();

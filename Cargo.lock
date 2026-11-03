@@ -8214,6 +8214,7 @@ dependencies = [
  "serde_json",
  "teams-auth",
  "teams-fence",
+ "teams-lab-targets",
  "teams-log",
  "teams-mock",
  "teams-proto",

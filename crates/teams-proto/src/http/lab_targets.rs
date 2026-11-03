@@ -13,6 +13,7 @@ pub(super) struct LabContext {
     own: String,
     upn: String,
     roster: Arc<LabRoster>,
+    pub(super) calls: Arc<crate::lab_calls::LabCallBindings>,
 }
 
 struct NativeRead {
@@ -39,7 +40,13 @@ impl<C: Credentials> HttpTransport<C> {
     /// Rejects an actor or UPN outside the dedicated roster.
     pub fn with_lab_targets(mut self, own: String, upn: String, roster: Arc<LabRoster>) -> Result<Self, TargetError> {
         roster.verify_identity(&own, &own, &upn)?;
-        self.lab_targets = Some(LabContext { own, upn, roster });
+        let calls = Arc::new(crate::lab_calls::LabCallBindings::new(own.clone(), Arc::clone(&roster)));
+        self.lab_targets = Some(LabContext {
+            own,
+            upn,
+            roster,
+            calls,
+        });
         Ok(self)
     }
 

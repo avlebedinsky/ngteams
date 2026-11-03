@@ -286,7 +286,7 @@ fn calling<S: SecretStore + 'static>(
                 partition: session.region().partition,
             };
             let socket = Trouter::new(Arc::clone(transport), Arc::clone(session))?
-                .for_calls(CallStack::new(Arc::clone(fence), Arc::clone(members)));
+                .for_calls(CallStack::new(Arc::clone(fence), Arc::clone(members)).with_lab_calls(transport.clone()));
             Some(CallParts::new(socket, identity, calls.media))
         }
         None => None,

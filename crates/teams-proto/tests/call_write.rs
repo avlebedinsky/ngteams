@@ -393,6 +393,132 @@ fn conversation_answer(id: &str) -> Value {
     })
 }
 
+/// These additional guards run independently of the legacy test permit policy.
+async fn native_lab() -> Lab {
+    let mut lab = lab_rule(LAB_A).await;
+    let roster = teams_lab_targets::LabRoster::new([LAB_A, LAB_B, LAB_C].map(|mri| teams_lab_targets::LabAccount {
+        mri: mri.into(),
+        upn: format!("{}@lab.example.test", mri.chars().last().unwrap()),
+    }))
+    .unwrap();
+    lab.transport = lab
+        .transport
+        .with_lab_targets(LAB_A.into(), "a@lab.example.test".into(), Arc::new(roster))
+        .unwrap();
+    lab.transport
+        .lab_call_bindings()
+        .unwrap()
+        .connected("calling", PUSH_A)
+        .unwrap();
+    lab
+}
+
+async fn native_read(lab: &Lab, address: &str, body: Value) {
+    Mock::given(method("GET"))
+        .and(path(address))
+        .respond_with(ResponseTemplate::new(200).set_body_json(body))
+        .mount(&lab.server)
+        .await;
+}
+
+async fn native_members(lab: &Lab, members: &[&str], peer_upn: &str) {
+    native_read(
+        lab,
+        "/v1.0/me",
+        json!({"id":object_id(LAB_A),"userPrincipalName":"a@lab.example.test"}),
+    )
+    .await;
+    native_read(
+        lab,
+        &format!("/v1.0/users/{}", object_id(LAB_B)),
+        json!({"id":object_id(LAB_B),"userPrincipalName":peer_upn}),
+    )
+    .await;
+    let chat = teams_lab_targets::one_to_one_id(LAB_A, LAB_B).unwrap();
+    native_read(
+        lab,
+        &format!("/api/chatsvc/amer/v1/threads/{chat}"),
+        json!({"id":chat,"members":members.iter().map(|mri|json!({"id":mri})).collect::<Vec<_>>()}),
+    )
+    .await;
+}
+
+fn invitee(mri: &str) -> Invitee {
+    Invitee {
+        mri: Mri::new(mri),
+        participant_id: Some("00000000-0000-4000-8000-0000000000e3".into()),
+    }
+}
+
+#[tokio::test]
+async fn native_call_proof_allows_exact_lab_start_and_cleanup_when_identity_reads_are_unavailable() {
+    let lab = native_lab().await;
+    native_members(&lab, &[LAB_A, LAB_B], "b@lab.example.test").await;
+    lab.answers("POST", CALL_START_URL, conversation_answer("NativeProof"))
+        .await;
+    let start = StartCall::in_chat(&context(), &start_parts(PUSH_A, LAB_A, None), &[invitee(LAB_B)], None).unwrap();
+    assert_eq!(lab.send(start).await.0.status(), 200);
+    lab.server.reset().await;
+    let leave = conv("NativeProof", "leave");
+    Mock::given(method("POST"))
+        .and(path(url::Url::parse(&leave).unwrap().path()))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&lab.server)
+        .await;
+    let write = LeaveCall::new(&context(), &link(&leave), &participant(LAB_A), LeaveReason::HungUp).unwrap();
+    assert_eq!(lab.send(write).await.0.status(), 204);
+    let requests = lab.server.received_requests().await.unwrap();
+    assert_eq!(
+        requests.len(),
+        1,
+        "cleanup must not depend on an identity or membership lookup"
+    );
+    assert_eq!(requests[0].method.as_str(), "POST");
+}
+
+#[tokio::test]
+async fn native_call_proof_denies_mixed_membership_or_wrong_peer_identity_before_sending() {
+    for (members, upn) in [
+        (vec![LAB_A, LAB_B, OUTSIDER], "b@lab.example.test"),
+        (vec![LAB_A, LAB_B], "outside@example.test"),
+    ] {
+        let lab = native_lab().await;
+        native_members(&lab, &members, upn).await;
+        let write = StartCall::in_chat(&context(), &start_parts(PUSH_A, LAB_A, None), &[invitee(LAB_B)], None).unwrap();
+        let allowed = lab.authorize(write).await;
+        assert!(matches!(
+            lab.transport.deliver(allowed).await,
+            Err(HttpError::Refused(Refusal::LabTarget(_)))
+        ));
+        assert!(
+            lab.server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .all(|request| request.method.as_str() == "GET")
+        );
+    }
+}
+
+#[tokio::test]
+async fn native_call_proof_denies_unbound_cleanup_even_when_the_old_permit_allows_it() {
+    let lab = native_lab().await;
+    let write = LeaveCall::new(
+        &context(),
+        &link(&conv("Unrelated", "leave")),
+        &participant(LAB_A),
+        LeaveReason::HungUp,
+    )
+    .unwrap();
+    let allowed = lab.authorize(write).await;
+    assert!(matches!(
+        lab.transport.deliver(allowed).await,
+        Err(HttpError::Refused(Refusal::LabTarget(_)))
+    ));
+    assert!(lab.server.received_requests().await.unwrap().is_empty());
+}
+
 /// A's test call, started and registered on the conversation `Synthetic0`.
 async fn started_test_call(lab: &Lab) -> (Response, Request) {
     lab.answers("POST", CALL_START_URL, conversation_answer("Synthetic0"))

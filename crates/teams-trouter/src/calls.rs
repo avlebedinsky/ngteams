@@ -75,12 +75,26 @@ fn gunzip(body: &str) -> Option<Vec<u8>> {
 pub struct CallStack {
     pub(crate) fence: Arc<Fence>,
     pub(crate) source: Arc<dyn MembershipSource + Send>,
+    pub(crate) lab: Option<Arc<dyn teams_proto::lab_calls::CallObserver>>,
 }
 
 impl CallStack {
     #[must_use]
     pub fn new(fence: Arc<Fence>, source: Arc<dyn MembershipSource + Send>) -> Self {
-        Self { fence, source }
+        Self {
+            fence,
+            source,
+            lab: None,
+        }
+    }
+
+    /// Uses the write transport's independent account/call evidence for lab delivery handling.
+    #[must_use]
+    pub fn with_lab_calls(mut self, observer: Arc<dyn teams_proto::lab_calls::CallObserver>) -> Self {
+        if observer.call_bindings().is_some() {
+            self.lab = Some(observer);
+        }
+        self
     }
 }
 

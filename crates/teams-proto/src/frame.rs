@@ -420,6 +420,7 @@ pub struct FrameSink<W> {
     /// The calling socket's: the fence that decides its delivery responses, and the connection's key, the one its
     /// deliveries were observed under (`Fence::observe_delivery`).
     calls: Option<(Arc<Fence>, String)>,
+    lab_calls: Option<Arc<crate::lab_calls::LabCallBindings>>,
 }
 
 impl<W> fmt::Debug for FrameSink<W> {
@@ -439,6 +440,7 @@ impl<W: FrameWriter> FrameSink<W> {
             last_ack: 0,
             log: None,
             calls: None,
+            lab_calls: None,
         }
     }
 
@@ -447,6 +449,13 @@ impl<W: FrameWriter> FrameSink<W> {
     #[must_use]
     pub fn with_call_responses(mut self, fence: Arc<Fence>, connection: impl Into<String>) -> Self {
         self.calls = Some((fence, connection.into()));
+        self
+    }
+
+    /// Adds the account-local recipient/call proof to this socket's typed delivery responses.
+    #[must_use]
+    pub fn with_lab_calls(mut self, calls: Arc<crate::lab_calls::LabCallBindings>) -> Self {
+        self.lab_calls = Some(calls);
         self
     }
 
@@ -477,6 +486,7 @@ impl<W: FrameWriter> FrameSink<W> {
         self.calls.as_ref().map(|(fence, connection)| ResponseDecider {
             fence: Arc::clone(fence),
             connection: connection.clone(),
+            lab_calls: self.lab_calls.clone(),
         })
     }
 
@@ -493,6 +503,12 @@ impl<W: FrameWriter> FrameSink<W> {
     ) -> Result<Sent, RespondError<W::Error>> {
         let (fence, connection) = self.calls.as_ref().ok_or(RespondError::NoCallResponses)?;
         if !Arc::ptr_eq(fence, &permitted.fence) || *connection != permitted.connection {
+            return Err(RespondError::Denied(DeliveryDenyReason::Uncorrelated));
+        }
+        if let Some((calls, key)) = &permitted.lab_call
+            && (self.lab_calls.as_ref().is_none_or(|own| !Arc::ptr_eq(own, calls))
+                || !calls.response_still_valid(connection, *key))
+        {
             return Err(RespondError::Denied(DeliveryDenyReason::Uncorrelated));
         }
         let frame = Checked::<R> {
@@ -587,6 +603,7 @@ impl<E: Error + 'static> fmt::Debug for RespondError<E> {
 pub struct ResponseDecider {
     fence: Arc<Fence>,
     connection: String,
+    lab_calls: Option<Arc<crate::lab_calls::LabCallBindings>>,
 }
 
 impl fmt::Debug for ResponseDecider {
@@ -608,6 +625,16 @@ impl ResponseDecider {
         source: &dyn MembershipSource,
     ) -> Result<PermittedResponse<R>, ResponseRefused> {
         let json = response.envelope();
+        let lab_call = self
+            .lab_calls
+            .as_ref()
+            .map(|calls| {
+                calls
+                    .response(&self.connection, response.delivery(), &json)
+                    .map(|key| (Arc::clone(calls), key))
+                    .map_err(|_| ResponseRefused::Denied(DeliveryDenyReason::Uncorrelated))
+            })
+            .transpose()?;
         let decision = self
             .fence
             .check_delivery_response(&self.connection, json.as_bytes(), source)
@@ -617,6 +644,7 @@ impl ResponseDecider {
                 json,
                 fence: Arc::clone(&self.fence),
                 connection: self.connection.clone(),
+                lab_call,
                 kind: PhantomData,
             }),
             DeliveryDecision::Permitted(_) => Err(ResponseRefused::Denied(DeliveryDenyReason::Uncorrelated)),
@@ -633,6 +661,7 @@ pub struct PermittedResponse<R> {
     json: String,
     fence: Arc<Fence>,
     connection: String,
+    lab_call: Option<(Arc<crate::lab_calls::LabCallBindings>, u64)>,
     kind: PhantomData<fn() -> R>,
 }
 

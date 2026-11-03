@@ -120,6 +120,7 @@ use crate::thumbnail::{ThumbnailLink, is_thumbnail_link};
 use crate::write::{Authorized, CallWire, Mutating, Registry, on_calling_base};
 mod drive;
 mod lab_targets;
+mod native_calls;
 
 /// The Entra audience of the token the chat service and the registrar take.
 pub const IC3_AUDIENCE: &str = "https://ic3.teams.office.com";
@@ -1043,6 +1044,7 @@ impl<C: Credentials> HttpTransport<C> {
         if !on_calling_base(url) {
             return Err(HttpError::Refused(Refusal::NotAllowed));
         }
+        let lab_attempt = self.preflight_native_call(call).await?;
         let token = self
             .credentials
             .skypetoken()
@@ -1088,6 +1090,7 @@ impl<C: Credentials> HttpTransport<C> {
                 body,
             )
             .await?;
+        self.native_call_answer(lab_attempt, &answer);
         if answer.status() == 401 {
             // renewed for a later request; this write isn't resent
             let _ = self.credentials.skypetoken_rejected(&token).await;
@@ -1458,10 +1461,10 @@ impl<C: Credentials> Transport for HttpTransport<C> {
         if self.read_only {
             return Err(self.refused_write(write.request()));
         }
-        self.preflight_lab_write(write.request()).await?;
         if let Some(call) = write.call() {
             return self.deliver_call(write.permit(), call).await;
         }
+        self.preflight_lab_write(write.request()).await?;
         let wire = write.wire().ok_or(HttpError::NoRoute)?;
         let service = wire.service();
         match service {

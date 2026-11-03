@@ -46,6 +46,7 @@ tokio-tungstenite.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+teams-lab-targets.workspace = true
 # a's writes, sent to the chat service mock as the web client sends them
 reqwest.workspace = true
 # the tests' fence runs over a test roster and a test log

@@ -185,6 +185,8 @@ pub enum Ignored {
     /// An incoming call: on the messaging stack's socket any (a `callNotification`), on the calling stack's one the
     /// fence doesn't offer. Never answered, nothing sent for it.
     IncomingCall,
+    /// An already proved call's roster now names an outside participant: the owner must leave that call.
+    CallTargetChanged { path: String },
     /// At a path that isn't the endpoint's messaging one (on the calling stack's socket: not its endpoint's root or call
     /// agent).
     NotOurs { path: String },
@@ -531,7 +533,13 @@ where
             None => FrameSink::new(writer),
         };
         match &self.trouter.calls {
-            Some(calls) => sink.with_call_responses(Arc::clone(&calls.fence), connection),
+            Some(calls) => {
+                let sink = sink.with_call_responses(Arc::clone(&calls.fence), connection);
+                match calls.lab.as_ref().and_then(|observer| observer.call_bindings()) {
+                    Some(bindings) => sink.with_lab_calls(bindings),
+                    None => sink,
+                }
+            }
             None => sink,
         }
     }
@@ -591,6 +599,9 @@ where
         if let Some(calls) = &self.trouter.calls {
             // a response to a delivery of this connection is never sent on another
             calls.fence.close_connection(&link.connection);
+            if let Some(bindings) = calls.lab.as_ref().and_then(|observer| observer.call_bindings()) {
+                bindings.disconnected(&link.connection);
+            }
         }
         // a connect that ended before its `trouter.connected` failed, whatever ended it (the socket closed, the
         // service disconnected, `1::` or `trouter.connected` never came), unless a renewal ended it
@@ -685,6 +696,7 @@ enum Step {
     CaughtUp(Vec<DroppedIndicator>),
     Respond(ResponseRequest),
     Decided(Decided),
+    CallChecked((PushEvent, teams_proto::lab_calls::CallObservation)),
 }
 
 /// A message-loss report waiting for its owner to have caught up: its indicators then, `None` if it never did.
@@ -704,6 +716,8 @@ type Decided = (
 
 /// A call delivery response the fence is deciding while the connection reads on.
 type Deciding = Pin<Box<dyn Future<Output = Decided> + Send>>;
+
+type CallCheck = Pin<Box<dyn Future<Output = (PushEvent, teams_proto::lab_calls::CallObservation)> + Send>>;
 
 /// One open socket: its sink (the only way it sends), its read half, and what it waits for.
 struct Link {
@@ -734,6 +748,7 @@ struct Link {
     /// The responses the fence is deciding (a group call's receipt reads its chat fresh): the socket reads on meanwhile,
     /// so a cancellation that comes in the while is observed before the fence's last look at the ring.
     deciding: FuturesUnordered<Deciding>,
+    checking_calls: FuturesUnordered<CallCheck>,
 }
 
 impl Link {
@@ -776,6 +791,7 @@ impl Link {
             reports_to,
             acks: FuturesUnordered::new(),
             deciding: FuturesUnordered::new(),
+            checking_calls: FuturesUnordered::new(),
         }
     }
 
@@ -808,6 +824,7 @@ impl Link {
             Some(Some(indicators)) = self.acks.next(), if !self.acks.is_empty() => Step::CaughtUp(indicators),
             Some(request) = self.responses.recv() => Step::Respond(request),
             Some(decided) = self.deciding.next(), if !self.deciding.is_empty() => Step::Decided(decided),
+            Some(checked) = self.checking_calls.next(), if !self.checking_calls.is_empty() => Step::CallChecked(checked),
         }
     }
 
@@ -852,6 +869,20 @@ impl Link {
                 None
             }
             Step::Decided((decided, done)) => self.send_decided(decided, done).await,
+            Step::CallChecked((event, observed)) => {
+                use teams_proto::lab_calls::CallObservation;
+                run.emit(match observed {
+                    CallObservation::Allowed => event,
+                    CallObservation::Ignored => PushEvent::Ignored(Ignored::IncomingCall),
+                    CallObservation::TargetChanged => match event {
+                        PushEvent::Call(delivery) => PushEvent::Ignored(Ignored::CallTargetChanged {
+                            path: delivery.delivery.path,
+                        }),
+                        _ => PushEvent::Ignored(Ignored::IncomingCall),
+                    },
+                });
+                None
+            }
         }
     }
 
@@ -972,7 +1003,26 @@ impl Link {
                     Some(calls) => self.on_call_delivery(&raw, calls),
                     None => self.on_delivery(&raw),
                 };
-                run.emit(event);
+                if let (Some(observer), PushEvent::Call(delivery)) =
+                    (run.trouter.calls.as_ref().and_then(|calls| calls.lab.as_ref()), &event)
+                {
+                    let packet = teams_proto::lab_calls::CallDeliveryData {
+                        connection: delivery.delivery.connection.clone(),
+                        id: delivery.delivery.id,
+                        path: delivery.delivery.path.clone(),
+                        body: delivery.delivery.body.clone(),
+                        headers: vec![
+                            ("trouter-request", delivery.delivery.trouter_request.clone()),
+                            ("X-Microsoft-Skype-Chain-ID", delivery.delivery.chain_id.clone()),
+                            ("X-Microsoft-Skype-Message-ID", delivery.delivery.message_id.clone()),
+                        ],
+                    };
+                    let checked = Arc::clone(observer).observe_call(packet);
+                    self.checking_calls
+                        .push(Box::pin(async move { (event, checked.await) }));
+                } else {
+                    run.emit(event);
+                }
                 None
             }
             Ok(Incoming::Disconnect { reason }) => Some(self.disconnected(reason, run)),
@@ -1022,6 +1072,16 @@ impl Link {
         K: TrouterCredentials + 'static,
     {
         if let Some(connected) = Connected::from_event(event) {
+            if let Some(bindings) = run
+                .trouter
+                .calls
+                .as_ref()
+                .and_then(|calls| calls.lab.as_ref())
+                .and_then(|observer| observer.call_bindings())
+                && bindings.connected(&self.connection, &connected.push_url).is_err()
+            {
+                log::warn!("calling endpoint did not provide an account-local callback root");
+            }
             run.connected(&connected);
             self.register(&connected, run);
             self.endpoint = Some(connected.id);
