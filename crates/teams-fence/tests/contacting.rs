@@ -1969,6 +1969,69 @@ fn someone_on_a_team_changed_or_gone_is_a_member_change() {
 }
 
 #[test]
+fn a_join_by_code_a_join_request_answered_or_sponsored_reaches_the_people_it_names() {
+    assert_eq!(
+        verdict("POST", &format!("{MT}/joinByCode"), Some(br#""abc1234""#)),
+        on_team(WriteKind::MemberChange, "abc1234")
+    );
+    assert_eq!(
+        verdict("POST", &format!("{MT}/joinByCode"), Some(br#"{"code":"abc1234"}"#)),
+        Contact::Unreadable
+    );
+    let answer = format!(r#"{{"GroupId":"{GROUP_ID}","UserMri":"{LAB_MEMBER}","ActionType":"Approve"}}"#);
+    assert_eq!(
+        verdict("POST", &format!("{MT}/joinRequestAdminAction"), Some(answer.as_bytes())),
+        Contact::Write(
+            Target::new(
+                WriteKind::MemberChange,
+                Scope::Team {
+                    id: GROUP_ID.to_owned()
+                }
+            )
+            .with_added([Mri::new(LAB_MEMBER)])
+        )
+    );
+    assert_eq!(
+        verdict(
+            "POST",
+            &format!("{MT}/joinRequestAdminAction"),
+            Some(br#"{"GroupId":"g"}"#)
+        ),
+        Contact::Unreadable
+    );
+    let sponsored = format!(r#"["{LAB_MEMBER}"]"#);
+    assert_eq!(
+        verdict(
+            "POST",
+            &format!("{MT}/sponsorJoinRequest/{GROUP_ID}"),
+            Some(sponsored.as_bytes())
+        ),
+        Contact::Write(
+            Target::new(
+                WriteKind::MemberChange,
+                Scope::Team {
+                    id: GROUP_ID.to_owned()
+                }
+            )
+            .with_added([Mri::new(LAB_MEMBER)])
+        )
+    );
+    assert_eq!(
+        verdict("POST", &format!("{MT}/sponsorJoinRequest/{GROUP_ID}"), Some(b"[1]")),
+        Contact::Unreadable
+    );
+    // a tag whose people don't read is unreadable
+    assert_eq!(
+        verdict(
+            "POST",
+            &format!("{CSA}/{TEAM}/tags"),
+            Some(br#"{"tagName":"a","memberIds":[1]}"#)
+        ),
+        Contact::Unreadable
+    );
+}
+
+#[test]
 fn the_accounts_own_view_of_a_team_reaches_nobody() {
     for (method, url, body) in [
         ("PUT", format!("{FABRIC}/team/{TEAM}/hide"), None),

@@ -753,6 +753,49 @@ fn meet_now_whose_subscription_names_no_conversation_ends() {
 }
 
 #[test]
+fn a_channel_s_running_meeting_is_joined_at_its_conversation_by_its_post() {
+    const CHANNEL: &str = "19:MadeUpChannel0001@thread.tacv2";
+    let meetup = teams_proto::ChannelMeetup {
+        message_id: "1793680050510".to_owned(),
+        conversation: teams_proto::CallLink::parse(&conv("")).unwrap(),
+        meeting: teams_proto::MeetingInfo {
+            organizer_id: "00000000-0000-4000-8000-00000000000b".to_owned(),
+            tenant_id: "00000000-0000-4000-8000-0000000000f1".to_owned(),
+        },
+    };
+    let now = Instant::now();
+    let mut calls = Calls::new(identity(A));
+    calls.set_push_url(PUSH).unwrap();
+    let call = calls.join_channel_meeting(CHANNEL, &meetup, media(), now).unwrap();
+    let placed = effects(&mut calls);
+    let [(entry, "join")] = sent(&placed)[..] else {
+        panic!("{placed:#?}");
+    };
+    let Some(Effect::Send { write, .. }) = placed.iter().find(|effect| matches!(effect, Effect::Send { .. })) else {
+        panic!("{placed:#?}");
+    };
+    assert!(matches!(
+        target_of(write).scope(),
+        teams_fence::Scope::CallOperation { joins: Some(chat), .. } if chat == CHANNEL
+    ));
+    assert!(
+        matches!(
+            calls.join_channel_meeting(CHANNEL, &meetup, media(), now),
+            Err(CallError::Busy)
+        ),
+        "one call at a time"
+    );
+    calls.on_outcome(entry, &ok(&conversation_answer()), now);
+    assert_eq!(
+        events(&effects(&mut calls)),
+        [CallEvent::State {
+            call,
+            state: CallState::Joining
+        }]
+    );
+}
+
+#[test]
 fn meet_now_hung_up_before_its_subscription_is_answered_never_enters_the_meeting() {
     let placement = Placement::Channel {
         channel: "19:MadeUpChannel0001@thread.tacv2".to_owned(),

@@ -45,9 +45,9 @@ sha256 = "ef92d5c3fd2fd3d42dc5e64e6e8928a9e9a166682bb5f490eab6bffb61c50a97"
 reason = "module declarations, re-exports and documentation only; no executable items"
 
 [unmapped_sources."crates/teams-call/src/machine/tests.rs"]
-sha256 = "3407efacd3bcf22d3352642c3e171604f32f2c4385268db7aac387126f3b4ec9"
+sha256 = "6c1317d22e021794443e02614e8386bee050c090301f5fc67c9faccde1d1b65d"
 reason = "unit-test module included only by machine.rs cfg(test); omitted by cargo-llvm-cov's test-file filter"
-context = { "crates/teams-call/src/machine.rs" = "acbde3d07e15854d5bd816ae461bd8529c8b81ebc727c3ecafa5e498c8870d9c" }
+context = { "crates/teams-call/src/machine.rs" = "f07d278063482147e53441e2aca08440e1dcefc346977936e32fb944fedcdab1" }
 
 [unmapped_sources."crates/teams-media/src/video/effects/tests.rs"]
 sha256 = "f67bd56fdf5683e1b7bd150f306db4e7b7714039d13ce592a602b755d24a4ffb"
@@ -55,11 +55,11 @@ reason = "unit-test module included only by effects.rs cfg(test); omitted by car
 context = { "crates/teams-media/src/video/effects.rs" = "8750279e6eb40593be4f2a107fcbf05892259a47824dbe753c8d6d149ce85305" }
 
 [unmapped_sources."crates/teams-proto/src/lib.rs"]
-sha256 = "69b870b417b55373a3453e8688c289ef0ad303a0196b6fded37f17257a26233a"
+sha256 = "c9dce4c6b595bdf8156f4f8096d2814473705c475f4094b8d7e9679b0d602ff9"
 reason = "module declarations, re-exports and documentation only; no executable items"
 
 [unmapped_sources."crates/teams-proto/src/chat/mod.rs"]
-sha256 = "1e0510218ed45e3703761d4c716e0f38a7a513e5baa1634411dcf1b2d4353454"
+sha256 = "afe16a18058cefe53ea0245f87fa5b17c9a807d7f4158d04ace3e1032bab9f5f"
 reason = "module declarations, re-exports and documentation only; no executable items"
 
 [unmapped_sources."crates/teams-proto/src/request.rs"]
@@ -95,11 +95,11 @@ sha256 = "19ac3256c6b7e3e7ae142cb464ba5a55cb135f77623c7a4fff64402fc79e9f91"
 reason = "module declarations and documentation only; no executable bodies"
 
 [unmapped_sources."crates/teams-core/src/lib.rs"]
-sha256 = "23a722985ddc1e7ec8246949e1f113da5bada8e8c25989143d9ba09baae844e8"
+sha256 = "3745bbbcbe495c80dbd88314dd5be97bbd0d736813e9be34119f8c02448f97ab"
 reason = "module declarations, re-exports and documentation only; no executable bodies"
 
 [unmapped_sources."crates/teams-headless/src/lib.rs"]
-sha256 = "d82c6ebc457e095c65eee8d82618b73efc222ed07a99450e34bcdf6dae8db1fb"
+sha256 = "ec874726177e44e5539d4f62522e2f181785e65e3086756fbfced78df883c456"
 reason = "module declarations and documentation only; no executable bodies"
 
 [unmapped_sources."crates/teams-media/src/lib.rs"]
@@ -115,7 +115,7 @@ sha256 = "5f9d9bd4143625b8c831ea36b2f96b374df717284d4574e1d4e01edcf30a6f92"
 reason = "module declarations and documentation only; no executable bodies"
 
 [unmapped_sources."crates/teams-ui/src/lib.rs"]
-sha256 = "6745afaf316af1f94e954e7e09f36d205785be1d6057073d09e4126aed39ada9"
+sha256 = "6c7e68d4826dd26a48d516388f3ea85dd95ae3caca958c777021265c792f47be"
 reason = "module declarations, re-exports and documentation only; no executable bodies"
 
 [unmapped_sources."crates/teams-wpe/src/event.rs"]

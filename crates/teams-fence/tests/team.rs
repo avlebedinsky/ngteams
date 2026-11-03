@@ -400,6 +400,24 @@ async fn a_team_named_by_its_group_is_read_only_once_its_thread_named_that_group
 }
 
 #[tokio::test]
+async fn a_private_channel_s_thread_is_judged_by_its_own_members_and_never_learned_as_its_team() -> TestResult {
+    // a private channel's thread is a space of its own naming the team's group, with only some of the team on it
+    let server = MockServer::start().await;
+    let mut thread = thread_body()?;
+    thread["properties"]["productThreadType"] = json!("TeamsPrivateChannel");
+    serve_team(&server, &team_id(), &thread, &members_with(&[mri(GUID_B)])?).await;
+    let source = source(&server)?;
+    let fence = fence(roster());
+    let permit = fence
+        .check(Target::new(WriteKind::ChannelChange, team()), &source)
+        .await;
+    assert!(permit.is_ok(), "{permit:?}");
+    assert_eq!(source.learned(GROUP), None, "the team's group isn't tied to it");
+    assert!(!source.reads_in_full(&channel_of(GROUP)));
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_learned_group_whose_thread_names_another_group_now_is_malformed() -> TestResult {
     let server = MockServer::start().await;
     serve(&server, &members_body()?).await?;
