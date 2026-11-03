@@ -8,12 +8,7 @@ use url::Url;
 
 use super::json::strict_json;
 use super::{Callback, Controller, Delivery, Link, controller_path, parse_callback, proxy_link};
-use teams_proto::CallOperation;
-use teams_proto::Mri;
-use teams_proto::is_group_chat_id;
-
-/// The event numbers of a call invitation delivered over Trouter: a 1:1 call's (107) and a group call's (109).
-pub const INVITATION_EVENTS: [u64; 2] = [107, 109];
+use teams_proto::{CallOperation, INVITATION_EVENTS, Mri, is_group_chat_id};
 
 /// What an invitation delivery says, read: who calls whom, in which group chat, and its links.
 #[derive(Clone, Debug, PartialEq, Eq)]

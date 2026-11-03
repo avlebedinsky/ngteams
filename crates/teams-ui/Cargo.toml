@@ -55,8 +55,8 @@ gpui-component = { workspace = true, features = ["test-support"] }
 gpui-pre-platform.workspace = true
 # the settings file, in a directory of its own per test
 tempfile.workspace = true
-# compose on two accounts' engines on the mock (`tests/compose_mock.rs`): their tokens, their fences on the lab
-# roster with a `fence.log` each, the mock chat service and its Trouter reached through the test-support mock origins
+# compose on two accounts' engines on the mock (`tests/compose_mock.rs`): their tokens, the mock chat service and
+# its Trouter reached through the test-support mock origins
 teams-auth.workspace = true
 teams-mock.workspace = true
 teams-proto = { workspace = true, features = ["test-support"] }

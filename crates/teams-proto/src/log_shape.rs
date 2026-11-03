@@ -1,19 +1,11 @@
 //! Endpoint-only URL and path shapes for diagnostic records.
 
 use percent_encoding::percent_decode_str;
-use teams_log::redact::secret_param;
+use teams_log::redact::{OPAQUE_RUN, REDACTED, secret_param};
 use url::Url;
 
-/// What [`log_url`] writes for a path segment, a segment's value or a query key that looks like a credential.
-pub const REDACTED: &str = "[redacted]";
-
 /// What [`log_url`] writes for a URL it can't parse, or one without a path to keep (`data:`, `blob:`, `about:`).
-pub const UNREADABLE_URL: &str = "[unreadable url]";
-
-/// The shortest path segment or query key [`log_url`] takes as an opaque credential when it holds only token
-/// characters: longer than any id a path carries (a 1:1 chat id is 91 characters and holds `:` and `@`), shorter than
-/// any token.
-const OPAQUE_RUN: usize = 100;
+const UNREADABLE_URL: &str = "[unreadable url]";
 
 /// A URL for payload-free diagnostics: what names the endpoint, and nothing a credential travels in. It keeps the scheme, the
 /// host, an explicit port, the path and the query's keys (`?i&e&skypeToken`), never a query value, the fragment or
@@ -22,7 +14,7 @@ const OPAQUE_RUN: usize = 100;
 /// characters, the segment after one named as a credential ([`secret_param`]: `/skypetoken/<token>`), and the
 /// value of any `name=value` segment (`;sig=…`), whatever its name; a query key that looks like a token goes the same
 /// way. An empty URL (an unknown socket's) and a bare `host:port` (a `CONNECT`'s target) stay as they are; one that
-/// can't be parsed, or has no path to keep, is [`UNREADABLE_URL`].
+/// can't be parsed, or has no path to keep, is `[unreadable url]`.
 #[must_use]
 pub fn log_url(url: &str) -> String {
     if url.starts_with(['?', '#']) {

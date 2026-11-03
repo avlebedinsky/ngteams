@@ -73,8 +73,8 @@
 //! **Headers** (M1 Task 3, `docs/protocol/auth.md`): every request must carry `Authorization: Bearer <token>` with a
 //! token the mock handed out ([`ChatServiceMock::token`]), plus `X-MS-Migration: True` and `BehaviorOverride:
 //! redirectAs404`, the web client's set the native transport sends. One exception: the thread read
-//! (`GET v1/threads/<id>`) takes the token alone, the form the fence's own membership read sends and Task 3 saw the
-//! service answer in full. Anything short of that is a 401 with no body (no 401 of the chat service was ever
+//! (`GET v1/threads/<id>`) takes the token alone, the captured form of the member read the service answered in
+//! full. Anything short of that is a 401 with no body (no 401 of the chat service was ever
 //! captured, so its body isn't known).
 //!
 //! **What it doesn't know** it doesn't make up: a request it doesn't model is a 404, a malformed body of one it
@@ -105,7 +105,6 @@ mod ups;
 mod world;
 mod writes;
 
-use std::fmt::Write as _;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use serde_json::Value;
@@ -161,10 +160,10 @@ pub const LAB_A: &str = "8:orgid:00000000-0000-4000-8000-00000000000a";
 pub const LAB_B: &str = "8:orgid:00000000-0000-4000-8000-00000000000b";
 /// Lab account c.
 pub const LAB_C: &str = "8:orgid:00000000-0000-4000-8000-00000000000c";
-/// An account outside the lab, in a 1:1 chat with a ([`AX_CHAT`]): a fence over the lab roster denies writes there.
+/// An additional synthetic account, in a 1:1 chat with a ([`AX_CHAT`]).
 pub const OUTSIDER: &str = "8:orgid:00000000-0000-4000-8000-0000000000ff";
 
-/// The echo service (a bot): the test call adds it; a fence approves it as a service participant.
+/// The echo service (a bot): the test call adds it.
 pub const ECHO: &str = "28:00000000-0000-4000-8000-0000000000ec";
 
 /// The a–b 1:1 chat, holding the messages of `messages.json`.
@@ -175,24 +174,6 @@ pub const AC_CHAT: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000
 pub const AX_CHAT: &str = "19:00000000-0000-4000-8000-00000000000a_00000000-0000-4000-8000-0000000000ff@unq.gbl.spaces";
 /// The a–b–c group chat of `thread-group.json`, empty.
 pub const ABC_CHAT: &str = "19:00000000000000000000000000000abc@thread.v2";
-
-/// A synthetic `lab.toml` for the mock: accounts a, b and c with the MRIs
-/// [`LAB_A`], [`LAB_B`] and [`LAB_C`], made-up UPNs, its data dir `data_dir`. A fence or a live membership source of
-/// it knows the lab's group chat once that dir's `chats.toml` records [`ABC_CHAT`].
-#[must_use]
-pub fn lab_toml(data_dir: &std::path::Path) -> String {
-    let accounts =
-        [("a", LAB_A), ("b", LAB_B), ("c", LAB_C)]
-            .into_iter()
-            .fold(String::new(), |mut out, (alias, mri)| {
-                let _ = write!(
-                    out,
-                    "\n[[accounts]]\nalias = \"{alias}\"\nupn = \"bot-{alias}@lab.example.test\"\nmri = \"{mri}\"\n"
-                );
-                out
-            });
-    format!("data_dir = {:?}\n{accounts}", data_dir.display().to_string())
-}
 
 /// A team channel in a's list: read-only. It is the team's id and its general channel's (`csa/teams.json`).
 pub const CHANNEL: &str = "19:channel0001@thread.tacv2";
@@ -551,7 +532,7 @@ impl ChatServiceMock {
     }
 
     /// The next acceptance the media controller or a group call's mixer delivers names another call in its links (an
-    /// acceptance the fence binds nothing of).
+    /// acceptance the call tracker cannot bind).
     pub fn unbind_next_acceptance(&self) {
         self.lock().calling.unbind_next_acceptance = true;
     }

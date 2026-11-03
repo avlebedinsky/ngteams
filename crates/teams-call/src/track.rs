@@ -3,7 +3,6 @@
 mod json;
 mod offer;
 use json::strict_json;
-pub use offer::INVITATION_EVENTS;
 use serde_json::{Map, Value};
 use std::fmt;
 use std::sync::{Mutex, MutexGuard, PoisonError};

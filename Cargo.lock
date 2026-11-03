@@ -8065,7 +8065,6 @@ dependencies = [
  "gpui-pre",
  "gpui-pre-platform",
  "log",
- "percent-encoding",
  "serde_json",
  "teams-auth",
  "teams-log",

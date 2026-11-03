@@ -6,7 +6,7 @@ use std::fmt;
 pub const AFD_HOSTS: [&str; 2] = ["teams.microsoft.com", "teams.cloud.microsoft"];
 
 /// The regional chat-service host suffix, matched on a dot boundary.
-pub const REGIONAL_SUFFIX: &str = ".msg.teams.microsoft.com";
+pub(crate) const REGIONAL_SUFFIX: &str = ".msg.teams.microsoft.com";
 
 /// The flight proxy used by call starts and call-service follow-up links.
 pub const CALL_PROXY_HOST: &str = "api.flightproxy.teams.microsoft.com";

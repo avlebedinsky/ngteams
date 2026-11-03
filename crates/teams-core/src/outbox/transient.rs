@@ -118,7 +118,7 @@ pub enum TransientSent {
     /// Throttled, or another of the same waits: it goes out from the tick after `not_before` (milliseconds since the
     /// Unix epoch), unless a newer one takes its place first or it is dropped ([`Outbox::drop_waiting`]).
     Waiting { not_before: i64 },
-    /// The fence denied it: nothing went out.
+    /// Refused before sending because another account holds the call floor: nothing went out.
     Denied { reason: String },
     /// It didn't go out (refused, throttled too long or again, or what it announced went first), or whether it
     /// arrived is unknown: dropped, never sent again.
@@ -239,7 +239,7 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
     }
 
     /// One attempt at `transient`; `None` when it names an endpoint registered for another account than the outbox's
-    /// (or for none): nothing of it was built, asked of the fence or sent.
+    /// (or for none): nothing of it was built or sent.
     async fn attempt_transient(&self, transient: &Transient) -> Option<Tried> {
         let me = self.me.mri().clone();
         Some(match transient {

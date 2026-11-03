@@ -3,7 +3,8 @@
 use percent_encoding::percent_decode_str;
 use url::Url;
 
-use crate::{AFD_HOSTS, REGIONAL_SUFFIX};
+use crate::AFD_HOSTS;
+use crate::ids::REGIONAL_SUFFIX;
 
 /// The request path below a recognized chat-service base and `v1`, percent-decoded.
 /// Requires HTTPS, no user info or explicit non-default port, and an AFD or regional service host.
