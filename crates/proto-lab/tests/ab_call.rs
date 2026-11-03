@@ -7,11 +7,10 @@
 use base64::Engine as _;
 use proto_lab::fence_http::{Denial, DenyCause, PausedRequest};
 use proto_lab::scenario::ab_call::{
-    ACCEPT_AUDIO_CSS, CALLEE_FORCED, CallStep, CalleeAction, CalleeRole, DECLINE_CSS, DECLINE_SENDS, EarlierRings,
-    INVITATION_EVENTS, Modality, NATIVE_CONFLICT, RingCheck, RingSends, RunCall, START_HELD, allowed_requests,
-    caller_forced, calling_socket_up, chat_shown, held_back, invitations, judge_step_sends, keep_alives, leaves,
-    native_call_conflict, own_invitations, phase_ring_check, ring_check, ring_sends, running_call_conflict,
-    start_held_rule, video_frames,
+    ACCEPT_AUDIO_CSS, CALLEE_FORCED, CallStep, CalleeAction, CalleeRole, DECLINE_CSS, DECLINE_SENDS, INVITATION_EVENTS,
+    Modality, RingCheck, RingSends, RunCall, START_HELD, allowed_requests, caller_forced, calling_socket_up,
+    chat_shown, held_back, invitations, judge_step_sends, keep_alives, leaves, own_invitations, ring_check, ring_sends,
+    running_call_conflict, start_held_rule, video_frames,
 };
 use proto_lab::scenario::ab_chat::EARLIER_RUN_PROBE;
 use serde_json::json;
@@ -378,60 +377,29 @@ fn any_invitation_but_the_run_s_own_call_s_refuses_the_click() -> TestResult {
 }
 
 #[test]
-fn a_later_phase_leaves_out_only_its_own_call_s_earlier_ring_and_an_outsider_s_still_refuses_the_click() -> TestResult {
+fn any_earlier_or_unrelated_invitation_refuses_the_click() -> TestResult {
     let (direct, direct_gp) = fixture_invitation(0)?;
     let outsider = with(
         &direct_gp,
         "/callNotification/from/id",
         json!("8:orgid:not-a-lab-account"),
     )?;
-    let earlier_call = with(
-        &direct_gp,
-        "/conversationInvitation/conversationController",
-        json!("https://api.flightproxy.teams.microsoft.com/api/v2/ep/conv-zz-01-prod-aks.conv.skype.com/conv/Earlier"),
-    )?;
-    let own = |deliveries: &[Delivery<'_>], earlier| {
-        phase_ring_check(&invitations(&capture_of(deliveries)), &one_to_one(), B, PLACED, earlier)
-    };
-    // an earlier phase rang the page with a's call to b: left out, and this phase's call is the one
-    let after_own_earlier = [
-        (direct, &earlier_call, PLACED - 60_000),
+    for at in [PLACED - 60_000, PLACED - 1, PLACED + 1] {
+        let deliveries = [(direct, &outsider, at), (direct, &direct_gp, PLACED + 900)];
+        let delivered = invitations(&capture_of(&deliveries));
+        assert!(
+            matches!(ring_check(&delivered, &one_to_one(), B, PLACED), RingCheck::Refused(_)),
+            "{at}"
+        );
+    }
+    let deliveries = [
+        (direct, &direct_gp, PLACED - 60_000),
         (direct, &direct_gp, PLACED + 900),
     ];
-    assert_eq!(own(&after_own_earlier, EarlierRings::OwnLeftOut), RingCheck::Ready);
-    // where the page rings for one call in its run, any earlier invitation refuses
     assert!(matches!(
-        own(&after_own_earlier, EarlierRings::Judged),
+        ring_check(&invitations(&capture_of(&deliveries)), &one_to_one(), B, PLACED),
         RingCheck::Refused(_)
     ));
-    // an outsider's invitation, whenever it reached the page, refuses: the page may still show it
-    for at in [PLACED - 60_000, PLACED - 1, PLACED + 1] {
-        for earlier in [EarlierRings::OwnLeftOut, EarlierRings::Judged] {
-            let deliveries = [(direct, &outsider, at), (direct, &direct_gp, PLACED + 900)];
-            assert!(
-                matches!(own(&deliveries, earlier), RingCheck::Refused(_)),
-                "{at} {earlier:?}"
-            );
-        }
-    }
-    // an earlier phase's call and the outsider's before this phase: the outsider's still refuses
-    let both = [
-        (direct, &earlier_call, PLACED - 60_000),
-        (direct, &outsider, PLACED - 30_000),
-        (direct, &direct_gp, PLACED + 900),
-    ];
-    assert!(matches!(own(&both, EarlierRings::OwnLeftOut), RingCheck::Refused(_)));
-    // the earlier phase's call delivered again in this phase: invitations of two calls
-    let again = [
-        (direct, &direct_gp, PLACED + 900),
-        (direct, &earlier_call, PLACED + 1_900),
-    ];
-    assert!(matches!(own(&again, EarlierRings::OwnLeftOut), RingCheck::Refused(_)));
-    // only the earlier phase's ring: nothing of this phase's call yet
-    assert_eq!(
-        own(&[(direct, &earlier_call, PLACED - 60_000)], EarlierRings::OwnLeftOut),
-        RingCheck::Pending
-    );
     Ok(())
 }
 
@@ -777,24 +745,5 @@ fn a_start_ended_at_once_by_a_running_call_in_its_chat_names_that_call() {
         })),
     ] {
         assert_eq!(running_call_conflict(&other), None, "{other}");
-    }
-}
-
-#[test]
-fn a_native_call_ended_at_once_by_a_running_call_names_that_call() {
-    let output = format!(
-        "1792978360556 call call=1 end=\"{NATIVE_CONFLICT}{CONV}\" status=\"ended\"\n1792978360557 call_summary"
-    );
-    assert_eq!(native_call_conflict(&output), Some(CONV.to_owned()));
-    assert_eq!(
-        native_call_conflict(&format!("end=\"{NATIVE_CONFLICT}\"")),
-        Some("?".to_owned())
-    );
-    for other in [
-        "call call=1 end=\"remote 409 Conversation cannot be created\" status=\"ended\"",
-        "call call=1 end=\"hung_up\" status=\"ended\"",
-        "",
-    ] {
-        assert_eq!(native_call_conflict(other), None, "{other}");
     }
 }

@@ -472,14 +472,7 @@ async fn a_ring_click_requires_a_bound_invitation_and_exactly_one_shown_call() {
         )
         .unwrap();
         let action = plan.step.callee_action().unwrap();
-        let outcome = check_ring(
-            (Alias::B, &mut session),
-            action,
-            (&plan.call, callee),
-            100,
-            EarlierRings::Judged,
-        )
-        .await;
+        let outcome = check_ring((Alias::B, &mut session), action, (&plan.call, callee), 100).await;
         assert_eq!(outcome.is_ok(), shown);
         if let Err(error) = outcome {
             assert!(error.to_string().contains("doesn't show exactly one incoming call"));
@@ -512,7 +505,6 @@ async fn an_unrecorded_or_unrelated_ring_is_refused_before_any_page_action() {
             plan.step.callee_action().unwrap(),
             (&plan.call, callee),
             100,
-            EarlierRings::Judged,
         )
         .await;
         assert!(outcome.is_err());

@@ -487,23 +487,6 @@ pub(crate) async fn hang_up_after_failure(alias: Alias, session: &mut LabSession
     }
 }
 
-/// What a native client's call says when the service ended it at once because the chat already has a running call
-/// (`teams-headless`'s end word for a `conversationEnd` of 409, 5704), the running call's conversation after it.
-pub const NATIVE_CONFLICT: &str = "remote 409 chat has a running call ";
-
-/// Whether a native client's output shows its call ended at once because the chat already has a running call
-/// ([`NATIVE_CONFLICT`]): the running call's conversation, as the end names it; `None` when no such end came.
-#[must_use]
-pub fn native_call_conflict(output: &str) -> Option<String> {
-    let (_, rest) = output.split_once(NATIVE_CONFLICT)?;
-    let conversation: String = rest.chars().take_while(|c| !c.is_whitespace() && *c != '"').collect();
-    Some(if conversation.is_empty() {
-        "?".to_owned()
-    } else {
-        conversation
-    })
-}
-
 /// Whether a capture's `events.jsonl` text shows its page's call ended by the service at once because the chat already
 /// has a running call: a Trouter delivery at a `conversationEnd` callback whose body names code 409, sub-code 5704
 /// ("failure to resolve ownership", seen 2026-10-26: a start in a chat whose earlier call still runs). The running
@@ -725,7 +708,6 @@ impl CallPlan {
                 action,
                 (&self.call, self.callee_mri(*alias)),
                 placed,
-                EarlierRings::Judged,
             )
             .await?;
             session
@@ -751,15 +733,14 @@ impl CallPlan {
 }
 
 /// Whether `alias` may click `action`'s button on `call`'s ring at `callee` (its MRI), placed at `placed` (Unix ms):
-/// within [`INVITATION_WAIT`], its capture must pass [`phase_ring_check`] (every invitation the page received is the
-/// run's call, `earlier` saying which earlier ones are left out) and its page must show one incoming call with one such
-/// button. Anything else fails the step, nothing clicked.
+/// within [`INVITATION_WAIT`], its capture must pass [`ring_check`] (every invitation the page received is the
+/// run's call) and its page must show one incoming call with one such button. Anything else fails the step, nothing
+/// clicked.
 pub(crate) async fn check_ring(
     (alias, session): (Alias, &mut LabSession),
     action: CalleeAction,
     (call, callee): (&RunCall, &str),
     placed: u64,
-    earlier: EarlierRings,
 ) -> Result<(), ScenarioError> {
     let refuse = |reason: String| setup(format!("{alias} doesn't click {}: {reason}", action.what));
     let file = session
@@ -770,7 +751,7 @@ pub(crate) async fn check_ring(
     loop {
         let text =
             std::fs::read_to_string(&file).map_err(|error| refuse(format!("can't read the capture: {error}")))?;
-        match phase_ring_check(&invitations(&text), call, callee, placed, earlier) {
+        match ring_check(&invitations(&text), call, callee, placed) {
             RingCheck::Ready => break,
             RingCheck::Refused(reason) => return Err(refuse(reason)),
             RingCheck::Pending if tokio::time::Instant::now() >= deadline => {
@@ -2120,41 +2101,6 @@ pub fn ring_check(invitations: &[Invitation], call: &RunCall, callee: &str, plac
     } else {
         RingCheck::Pending
     }
-}
-
-/// Which of a page's invitations a ring check judges ([`phase_ring_check`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum EarlierRings {
-    /// Every one its page received since it loaded: the page rings for one call in its run (`ab-call`, `abc-call`).
-    Judged,
-    /// Every one but the run's own call's invitations to the callee ([`Invitation::is_of`]) the capture timed before
-    /// the call was placed: an earlier phase of the run rang the page with a call of the same caller
-    /// Any other invitation from before, an outsider's included, still refuses.
-    OwnLeftOut,
-}
-
-/// [`ring_check`] on the invitations `earlier` says a ring check judges: all of them, or all but the run's own call's
-/// from before it was placed at `placed` (Unix ms).
-#[must_use]
-pub fn phase_ring_check(
-    invitations: &[Invitation],
-    call: &RunCall,
-    callee: &str,
-    placed: u64,
-    earlier: EarlierRings,
-) -> RingCheck {
-    let own_earlier = |invitation: &Invitation| {
-        earlier == EarlierRings::OwnLeftOut
-            && invitation.at_ms != 0
-            && invitation.at_ms < placed
-            && invitation.is_of(call, callee)
-    };
-    let judged: Vec<Invitation> = invitations
-        .iter()
-        .filter(|invitation| !own_earlier(invitation))
-        .cloned()
-        .collect();
-    ring_check(&judged, call, callee, placed)
 }
 
 /// The deliveries of `invitations` that are `call`'s invitation to `callee` ([`Invitation::is_of`]) received after the

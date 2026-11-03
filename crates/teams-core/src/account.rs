@@ -1,7 +1,7 @@
-//! One account's engine, assembled the one way every binary builds it: the client (`crates/ngteams`). The binary hands in the account (its UPN, MRI and name,
-//! its store's file, its region as authz gave it), the fence it opened, the secret store its session takes its tokens
-//! from, and how the fence reads a target's members ([`Membership`]: the lab's live member read, or the personal
-//! fence's own source); [`start`] builds the account's [`Session`], the writes' transport (the chat base from the
+//! One account's engine, assembled for the client (`crates/ngteams`). The binary hands in the account (its UPN, MRI
+//! and name, its store's file, its region as authz gave it), the fence it opened, the secret store its session takes
+//! its tokens from, and how the fence reads a target's members ([`Membership`]: the personal fence's own source);
+//! [`start`] builds the account's [`Session`], the writes' transport (the chat base from the
 //! region's GTMs, UPS's base for the account's own availability), the member read with that transport's credential, the
 //! reads' transport (the middle tier's base from the GTM `middleTier`, the profile lookup's; CSA's from
 //! `chatSvcAggAfd`, the teams read's; UPS's from `presenceUPS`, the presence read's; AMS's from `amsV2`, the messages'

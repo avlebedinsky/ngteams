@@ -1,6 +1,6 @@
 //! The file backend: no audio server and no camera. The microphone is a tone, a WAV file or silence; the speaker
 //! records to a WAV file (or nowhere); the camera is the [`TestPattern`]; received video is counted
-//! ([`FrameCounter`]). A movie file can stand in for the microphone and the camera instead ([`super::movie`]).
+//! ([`FrameCounter`]).
 //!
 //! With [`Pacing::RealTime`] (what a call needs) a source hands out frames as fast as a device would: the next frame
 //! is due one frame's time after the last, counted from the first, and a read waits for it (or gives `None` when the
@@ -99,7 +99,7 @@ impl Devices for FileDevices {
 }
 
 /// When the next frame is due.
-pub(super) struct Clock {
+struct Clock {
     pacing: Pacing,
     period: Duration,
     start: Option<Instant>,
@@ -107,7 +107,7 @@ pub(super) struct Clock {
 }
 
 impl Clock {
-    pub(super) fn new(pacing: Pacing, period: Duration) -> Self {
+    fn new(pacing: Pacing, period: Duration) -> Self {
         Self {
             pacing,
             period,
@@ -117,7 +117,7 @@ impl Clock {
     }
 
     /// Waits for the next frame's time, up to `timeout`; whether it came.
-    pub(super) fn wait(&mut self, timeout: Duration) -> bool {
+    fn wait(&mut self, timeout: Duration) -> bool {
         if self.pacing == Pacing::Unpaced {
             return true;
         }
@@ -133,17 +133,8 @@ impl Clock {
         true
     }
 
-    pub(super) fn handed_one(&mut self) {
+    fn handed_one(&mut self) {
         self.handed = self.handed.saturating_add(1);
-    }
-
-    /// How many whole frames past the one due now the clock is behind (none unpaced or before the first wait).
-    pub(super) fn overdue(&self) -> u32 {
-        let Some(start) = self.start.filter(|_| self.pacing != Pacing::Unpaced) else {
-            return 0;
-        };
-        let elapsed = Instant::now().saturating_duration_since(start).as_nanos() / self.period.as_nanos().max(1);
-        u32::try_from(elapsed).unwrap_or(u32::MAX).saturating_sub(self.handed)
     }
 }
 
@@ -227,8 +218,7 @@ pub struct FrameCounts {
     pub last_index: Option<u32>,
 }
 
-/// Counts received frames (`teams-headless` summarises them on its output); [`FrameCounter::counts`] reads them from
-/// any thread.
+/// Counts received frames; [`FrameCounter::counts`] reads them from any thread.
 #[derive(Clone, Debug, Default)]
 pub struct FrameCounter {
     counts: Arc<Mutex<FrameCounts>>,

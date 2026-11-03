@@ -2,9 +2,8 @@
 //! sees it, and what a manual status sends. Presence reaches nobody (CLAUDE.md), so under the lab rule it all passes;
 //! each run holds back on purpose, with a labelled forced deny, what it leaves out.
 //!
-//! Only account a's browser runs. b's view is read outside the scenario, by `teams-headless b presence` (UPS's
-//! presence read, under b's own fence) while a's page is open and after it closes (`scripts/own-presence-run.sh`):
-//! the scenario notes the Unix time of each step, so the reads can be lined up with it.
+//! Only account a's browser runs; the scenario does not sample b's view. It notes the Unix time of each step so
+//! separately collected presence observations can be lined up with it.
 //!
 //! Each runs as `ab-trouter` does (the lab rule, members read live), and differs in what reports a's availability
 //! ([`Report`], [`Report::hold`]):

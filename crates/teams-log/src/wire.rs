@@ -12,18 +12,11 @@ use std::time::Duration;
 
 use crate::redact;
 
-/// The target the transport logs its [`Request`]s and [`Response`]s under: one of our crates' (the app's log takes
-/// it), and one a log that must stay payload-free (`teams-headless`'s) leaves out by name.
+/// The target the transport logs its [`Request`]s and [`Response`]s under, included in the app's debug log.
 pub const HTTP_TARGET: &str = "teams_wire::http";
 
 /// The target the push channel logs its [`Frame`]s under (as [`HTTP_TARGET`]).
 pub const FRAME_TARGET: &str = "teams_wire::trouter";
-
-/// Whether `target` is a wire record's: a full request, answer or frame.
-#[must_use]
-pub fn is_wire(target: &str) -> bool {
-    target.starts_with("teams_wire")
-}
 
 /// The value of a header named `name` (in any case) among `headers`.
 fn header<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
