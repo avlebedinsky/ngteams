@@ -1,8 +1,15 @@
-//! Real authz exchanges through the installed diagnostic logger, using synthetic loopback answers only.
+//! Authz wire logging runs alone because the diagnostic logger is process-global.
+//! All credentials and endpoint responses are synthetic loopback answers.
 
 #![cfg(test)]
 
-use super::*;
+use serde_json::{Value, json};
+use teams_auth::authz::{AuthzClient, AuthzError, AuthzKind};
+use teams_auth::secrets::Secret;
+use wiremock::matchers::{body_string, header, method, path};
+use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+
+const SPACES_TOKEN: &str = "authz-wire-spaces-value";
 
 const WIRE_SKYPE: &str = "authz-wire-skype-value";
 const WIRE_COOKIE: &str = "authz-wire-cookie-value";
@@ -118,14 +125,14 @@ async fn authz_logs_full_success_and_refusal_redacted_at_debug_and_no_payload_at
     let server = MockServer::start().await;
     let success = wire_exchange(&server, "authz-wire-ok", 200).await;
     let granted = success
-        .exchange(&spaces_token(), AuthzKind::TokenRefresh)
+        .exchange(&Secret::new(SPACES_TOKEN), AuthzKind::TokenRefresh)
         .await
         .unwrap();
     assert_eq!(granted.token.expose(), WIRE_SKYPE);
     assert_eq!(granted.region.name.as_deref(), Some("authz-wire-region"));
     let refused = wire_exchange(&server, "authz-wire-refused", 403).await;
     assert!(matches!(
-        refused.exchange(&spaces_token(), AuthzKind::TokenRefresh).await,
+        refused.exchange(&Secret::new(SPACES_TOKEN), AuthzKind::TokenRefresh).await,
         Err(AuthzError::Refused { status: 403, code: Some(code) }) if code == "WireDenied"
     ));
     assert!(logger.flush_written());
@@ -137,11 +144,19 @@ async fn authz_logs_full_success_and_refusal_redacted_at_debug_and_no_payload_at
         Some(teams_log::Level::Info)
     );
     let info = wire_exchange(&server, "authz-wire-info", 200).await;
-    info.exchange(&spaces_token(), AuthzKind::TokenRefresh).await.unwrap();
+    info.exchange(&Secret::new(SPACES_TOKEN), AuthzKind::TokenRefresh)
+        .await
+        .unwrap();
     assert!(logger.flush_written());
     let all = std::fs::read_to_string(logger.path()).unwrap();
     let info = &all[debug.len()..];
-    for payload in ["authz-wire-info", WIRE_SKYPE, WIRE_COOKIE, SPACES_TOKEN] {
+    for payload in [
+        "teams_wire::http",
+        "authz-wire-info",
+        WIRE_SKYPE,
+        WIRE_COOKIE,
+        SPACES_TOKEN,
+    ] {
         assert!(!info.contains(payload), "info contains authz payload: {info}");
     }
 }

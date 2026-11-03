@@ -1,7 +1,8 @@
-//! Typed records of what goes over the wire, for the transport and the socket to hand the log at `debug`: a request,
-//! its answer, a Trouter frame. They hold everything as it was sent or read (the token included: redaction is the
-//! logger's, never the call site's); their `Display` is what the log writes, redacted ([`crate::redact`]), and every
-//! line then passes the logger's last pass too.
+//! Typed records of what goes over the wire, for the transport, auth clients and socket to log at `debug`: a request,
+//! its answer, a Trouter frame. Token and authz clients use [`WithSecrets`] to hide known credential echoes too.
+//! The records hold everything as it was sent or read (the token included: redaction is the logger's, never the call
+//! site's); their `Display` is what the log writes, redacted ([`crate::redact`]), and every line then passes the
+//! logger's last pass too.
 //!
 //! ```text
 //! log::debug!("{}", teams_log::wire::Request { method: "GET", url, headers: &headers, body: None });
@@ -16,7 +17,7 @@ mod known;
 
 pub use known::WithSecrets;
 
-/// The target the transport logs its [`Request`]s and [`Response`]s under, included in the app's debug log.
+/// The target the transport and token/authz clients log HTTP requests and responses under in the app's debug log.
 pub const HTTP_TARGET: &str = "teams_wire::http";
 
 /// The target the push channel logs its [`Frame`]s under (as [`HTTP_TARGET`]).

@@ -1,4 +1,5 @@
-//! Token endpoints use the real diagnostic logger; all credentials are synthetic.
+//! Token endpoint wire logging runs alone because the diagnostic logger is process-global.
+//! All credentials and endpoint responses are synthetic.
 
 #![cfg(test)]
 
@@ -6,10 +7,14 @@ use std::fs;
 
 use teams_log::{Config, Level, Rotation};
 
-use super::{
-    ACCOUNT, Fixture, MemorySecretStore, MockServer, TestResult, TokenClient, authorization, claims_of, json,
-    store_with,
-};
+use serde_json::json;
+use teams_auth::secrets::MemorySecretStore;
+use teams_auth::token::TokenClient;
+use wiremock::MockServer;
+
+#[path = "support/token_fixture.rs"]
+mod fixture;
+use fixture::{ACCOUNT, Fixture, TestResult, authorization, claims_of, store_with};
 
 const CODE: &str = "wire-code-value+percent%and&equals=";
 const REFRESH: &str = "wire-refresh-input+percent%and&equals=";
