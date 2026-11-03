@@ -1,23 +1,21 @@
 //! The PipeWire backend: the microphone, the speaker and the camera as streams on one PipeWire server.
 //!
-//! **Which server is fixed when the crate is built** ([`THIS_BUILD`]), never by an argument:
+//! The caller selects [`Reach`] when opening the devices:
 //!
-//! - [`Reach::Sandbox`] for the lab (no feature) and for every build with `test-support` on, even with `personal` on
-//!   too (as `cargo test --workspace` and `clippy --all-features` build it): only the UI sandbox's private server, at
-//!   [`SANDBOX_SOCKET`] inside the dir [`SANDBOX_ENV`] names, with the client config the sandbox wrote there
-//!   ([`SANDBOX_CLIENT_CONF`]). Anything else is refused: no sandbox, a sandbox dir that is (or holds) the desktop's
-//!   runtime dir, a socket that leads out of the sandbox dir, the desktop's PipeWire or Pulse sockets, and a process
-//!   whose environment sets one of [`CONFIG_OVERRIDES`] (libpipewire would load that config instead of the sandbox's).
-//! - [`Reach::Desktop`] only for `personal` without `test-support` (only `crates/ngteams` enables `personal`): the
-//!   desktop session's server, `pipewire-0` in `PIPEWIRE_RUNTIME_DIR` or else `XDG_RUNTIME_DIR`.
+//! - [`Reach::Sandbox`]: only the UI sandbox's private server, at [`SANDBOX_SOCKET`] inside the dir [`SANDBOX_ENV`]
+//!   names, with the client config the sandbox wrote there ([`SANDBOX_CLIENT_CONF`]). Anything else is refused: no
+//!   sandbox, a sandbox dir that is (or holds) the desktop's runtime dir, a socket that leads out of the sandbox dir,
+//!   the desktop's PipeWire or Pulse sockets, and a process whose environment sets one of [`CONFIG_OVERRIDES`]
+//!   (libpipewire would load that config instead of the sandbox's).
+//! - [`Reach::Desktop`]: the desktop session's server, `pipewire-0` in `PIPEWIRE_RUNTIME_DIR` or else `XDG_RUNTIME_DIR`.
 //!
 //! The socket is connected here and handed to libpipewire as a descriptor (`pw_context_connect_fd`), so libpipewire
 //! never looks for a server by itself (it would fall back from one runtime dir to another, and to `/run/pipewire`).
 //!
-//! **The camera** ([`CameraRoute`], fixed by the reach too): a sandbox build's is a node of the sandbox's server, like
-//! its microphone and speaker; the personal build's comes through the desktop's camera portal ([`super::portal`]),
+//! **The camera** ([`CameraRoute`], selected by the reach too): the sandbox's is a node of its server, like
+//! its microphone and speaker; the desktop's comes through the camera portal ([`super::portal`]),
 //! which asks the user and hands over a PipeWire remote showing only the cameras, one remote for each camera opened.
-//! [`PipeWireDevices::connect_with_camera_portal`] names a portal's bus outright; a sandbox build takes only one inside
+//! [`PipeWireDevices::connect_with_camera_portal`] names a portal's bus outright; sandbox reach takes only one inside
 //! the UI sandbox's dir (the sandbox's own bus, where its fake portal answers), never the desktop's.
 //!
 //! **The devices there are and the user's choice** ([`DeviceDirectory`]): the loop thread watches the server's
@@ -57,7 +55,7 @@ use crate::queue::Queue;
 use listing::Listing;
 use serve::Command;
 
-/// Which PipeWire server a build may open.
+/// Which PipeWire server the caller selects when opening devices.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reach {
     /// Only the UI sandbox's private server.
@@ -65,19 +63,6 @@ pub enum Reach {
     /// Only the desktop session's server.
     Desktop,
 }
-
-/// The reach of a build with these features: `test-support` always wins.
-#[must_use]
-pub const fn reach_for(test_support: bool, personal: bool) -> Reach {
-    if personal && !test_support {
-        Reach::Desktop
-    } else {
-        Reach::Sandbox
-    }
-}
-
-/// This build's reach, fixed by its features.
-pub const THIS_BUILD: Reach = reach_for(cfg!(feature = "test-support"), cfg!(feature = "personal"));
 
 /// The variable naming the UI sandbox's dir (as `ui_sandbox::SANDBOX_ENV`).
 pub const SANDBOX_ENV: &str = "UI_SANDBOX_DIR";
@@ -171,7 +156,7 @@ fn own_uid() -> u32 {
     unsafe { libc::getuid() }
 }
 
-/// Where this build's devices connect, and with which client config (`None`: libpipewire's default lookup).
+/// Where the selected devices connect, and with which client config (`None`: libpipewire's default lookup).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Endpoint {
     pub socket: PathBuf,
@@ -196,7 +181,7 @@ fn refused(reason: impl Into<String>) -> DeviceError {
 fn sandbox_endpoint(env: &SessionEnv) -> Result<Endpoint, DeviceError> {
     let dir = env.var(SANDBOX_ENV).ok_or_else(|| {
         refused(format!(
-            "this build opens only the UI sandbox's PipeWire, and {SANDBOX_ENV} is unset (the sandbox sets it)"
+            "sandbox reach opens only the UI sandbox's PipeWire, and {SANDBOX_ENV} is unset (the sandbox sets it)"
         ))
     })?;
     if let Some(name) = env.config_override() {
@@ -324,9 +309,9 @@ fn session_bus(env: &SessionEnv) -> Option<String> {
     Some(format!("unix:path={}", dir.join("bus").display()))
 }
 
-/// Whether `reach` may ask the camera portal on the bus at `address`: a sandbox build only on a bus whose socket lies
+/// Whether `reach` may ask the camera portal on the bus at `address`: sandbox reach only on a bus whose socket lies
 /// in the UI sandbox's dir (`unix:path=<a path in it>`, nothing else), so no lab or test process ever asks the
-/// desktop's portal; the personal build on any.
+/// desktop's portal; desktop reach on any.
 ///
 /// # Errors
 /// [`DeviceError::Refused`], with the reason.
@@ -338,7 +323,7 @@ pub fn portal_bus(reach: Reach, env: &SessionEnv, address: &str) -> Result<(), D
         .var(SANDBOX_ENV)
         .ok_or_else(|| {
             refused(format!(
-                "this build asks only the UI sandbox's camera portal, and {SANDBOX_ENV} is unset"
+                "sandbox reach asks only the UI sandbox's camera portal, and {SANDBOX_ENV} is unset"
             ))
         })?
         .canonicalize()?;
@@ -383,7 +368,7 @@ fn unescape_address(value: &str) -> Option<String> {
     String::from_utf8(bytes).ok()
 }
 
-/// The PipeWire backend's devices: one connection, on a thread of its own, to the server this build allows; the
+/// The PipeWire backend's devices: one connection, on a thread of its own, to the selected server; the
 /// camera on it or through the camera portal ([`CameraRoute`]); the devices there are and the user's choice of each
 /// kind ([`DeviceDirectory`]).
 #[derive(Clone)]
@@ -410,29 +395,29 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 impl PipeWireDevices {
-    /// Connects to the server this build allows ([`THIS_BUILD`]) in this process's session, its camera on the route
-    /// the build takes ([`camera_route`]), and returns once the devices there are listed.
+    /// Connects to the server `reach` selects in this process's session, its camera on the corresponding
+    /// [`camera_route`], and returns once the devices there are listed.
     ///
     /// # Errors
     /// The server is refused ([`DeviceError::Refused`]), can't be reached, or doesn't answer in time.
-    pub fn connect() -> Result<Self, DeviceError> {
+    pub fn connect(reach: Reach) -> Result<Self, DeviceError> {
         let env = SessionEnv::current();
-        Self::connect_routed(&env, camera_route(THIS_BUILD, &env))
+        Self::connect_routed(reach, &env, camera_route(reach, &env))
     }
 
-    /// [`PipeWireDevices::connect`], the camera through the camera portal on the bus at `bus` (in a sandbox build,
+    /// [`PipeWireDevices::connect`], the camera through the camera portal on the bus at `bus` (with sandbox reach,
     /// only the UI sandbox's: [`portal_bus`]).
     ///
     /// # Errors
-    /// As [`PipeWireDevices::connect`]'s, and [`DeviceError::Refused`] for a bus this build may not ask.
-    pub fn connect_with_camera_portal(bus: &str) -> Result<Self, DeviceError> {
+    /// As [`PipeWireDevices::connect`]'s, and [`DeviceError::Refused`] for a bus outside the selected reach.
+    pub fn connect_with_camera_portal(reach: Reach, bus: &str) -> Result<Self, DeviceError> {
         let env = SessionEnv::current();
-        portal_bus(THIS_BUILD, &env, bus)?;
-        Self::connect_routed(&env, CameraRoute::Portal(bus.to_owned()))
+        portal_bus(reach, &env, bus)?;
+        Self::connect_routed(reach, &env, CameraRoute::Portal(bus.to_owned()))
     }
 
-    fn connect_routed(env: &SessionEnv, camera: CameraRoute) -> Result<Self, DeviceError> {
-        let endpoint = endpoint(THIS_BUILD, env)?;
+    fn connect_routed(reach: Reach, env: &SessionEnv, camera: CameraRoute) -> Result<Self, DeviceError> {
+        let endpoint = endpoint(reach, env)?;
         let stream = UnixStream::connect(&endpoint.socket)?;
         let connection = Connection::start(stream.into(), endpoint.client_conf.clone(), Choices::default())?;
         Ok(Self {
@@ -732,7 +717,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_sandbox_build_s_camera_is_the_sandbox_s_and_the_personal_build_s_comes_through_the_portal() {
+    fn sandbox_reach_uses_its_server_camera_and_desktop_reach_uses_the_portal() {
         let env = SessionEnv::from_vars([(SESSION_BUS_ENV, "unix:path=/run/user/1000/bus")], 1000);
         assert_eq!(camera_route(Reach::Sandbox, &env), CameraRoute::Server);
         assert_eq!(
@@ -760,7 +745,7 @@ mod tests {
     }
 
     #[test]
-    fn a_sandbox_build_asks_only_a_portal_on_a_bus_in_the_sandbox() {
+    fn sandbox_reach_asks_only_a_portal_on_a_bus_in_the_sandbox() {
         let sandbox = tempfile::tempdir().unwrap();
         let outside = tempfile::tempdir().unwrap();
         let bus = sandbox.path().join("bus");

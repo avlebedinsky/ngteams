@@ -1,8 +1,6 @@
-//! Which PipeWire server a build may open, fixed when it is built: `test-support` always wins (this test build has
-//! both `test-support` and `personal` on, and still opens only the UI sandbox's server); the lab (no feature) opens
-//! only the sandbox's; only `personal` alone opens the desktop's. The sandbox's server is accepted only at its fixed
-//! place inside the sandbox dir, never through a link out of it, never the desktop's PipeWire or Pulse sockets, never
-//! with the session overriding the sandbox's client config, and nothing here connects to any socket.
+//! The PipeWire server selected at run time: sandbox reach accepts only its fixed socket and client config;
+//! desktop reach resolves the session's server. The same build can resolve both. Sandbox reach refuses links out
+//! of its dir, the desktop's PipeWire or Pulse sockets and config overrides. Endpoint tests never connect.
 
 // test code throughout (its helpers unwrap like the tests do)
 #![cfg(test)]
@@ -15,7 +13,7 @@ use std::path::{Path, PathBuf};
 use teams_media::devices::DeviceError;
 use teams_media::devices::pipewire::{
     CONFIG_OVERRIDES, Endpoint, PipeWireDevices, Reach, SANDBOX_CLIENT_CONF, SANDBOX_ENV, SANDBOX_SOCKET, SessionEnv,
-    THIS_BUILD, endpoint, reach_for,
+    endpoint,
 };
 
 /// This process's user id, as the files it makes carry it.
@@ -61,23 +59,31 @@ fn refusal(result: Result<Endpoint, DeviceError>) -> String {
 }
 
 #[test]
-fn test_support_always_wins_and_only_personal_alone_reaches_the_desktop() {
-    assert_eq!(reach_for(false, false), Reach::Sandbox, "the lab");
-    assert_eq!(reach_for(true, false), Reach::Sandbox);
-    assert_eq!(reach_for(true, true), Reach::Sandbox, "test-support wins");
-    assert_eq!(reach_for(false, true), Reach::Desktop, "the personal build");
-    // this test build has both on
-    assert_eq!(THIS_BUILD, Reach::Sandbox);
+fn the_caller_selects_between_sandbox_and_desktop_in_the_same_session() {
+    let (sandbox, sandbox_canary) = sandbox();
+    let desktop = tempfile::tempdir().unwrap();
+    let desktop_canary = Canary::plant(&desktop.path().join("pipewire-0"));
+    let env = SessionEnv::from_vars(
+        [(SANDBOX_ENV, sandbox.path()), ("XDG_RUNTIME_DIR", desktop.path())],
+        uid(),
+    );
+    let sandbox_endpoint = endpoint(Reach::Sandbox, &env).unwrap();
+    let desktop_endpoint = endpoint(Reach::Desktop, &env).unwrap();
+    assert_eq!(sandbox_endpoint.socket, sandbox.path().join(SANDBOX_SOCKET));
+    assert_eq!(desktop_endpoint.socket, desktop.path().join("pipewire-0"));
+    assert!(sandbox_endpoint.client_conf.is_some());
+    assert_eq!(desktop_endpoint.client_conf, None);
+    assert!(sandbox_canary.untouched() && desktop_canary.untouched());
 }
 
 #[test]
-fn a_build_with_both_features_refuses_the_session_s_pipewire() {
+fn sandbox_reach_refuses_the_session_s_pipewire() {
     if std::env::var_os(SANDBOX_ENV).is_some() {
         eprintln!("skipping: this test process runs inside a UI sandbox");
         return;
     }
     // this process's own session: no sandbox, so nothing is opened (the refusal comes before any connect)
-    let error = PipeWireDevices::connect().unwrap_err();
+    let error = PipeWireDevices::connect(Reach::Sandbox).unwrap_err();
     assert!(
         matches!(&error, DeviceError::Refused(reason) if reason.contains(SANDBOX_ENV)),
         "{error}"
@@ -183,7 +189,7 @@ fn a_sandbox_without_its_server_or_its_client_config_is_refused() {
 }
 
 #[test]
-fn the_personal_reach_takes_the_desktop_session_s_server_only() {
+fn desktop_reach_takes_the_desktop_session_s_server_only() {
     let desktop = tempfile::tempdir().unwrap();
     let canary = Canary::plant(&desktop.path().join("pipewire-0"));
     let other = tempfile::tempdir().unwrap();

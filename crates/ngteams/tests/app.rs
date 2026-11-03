@@ -2,7 +2,7 @@
 //! "signed out", the engine is stopped (nothing more is sent: every request answers that it stopped) and the sign-in
 //! window is opened again, once; the settings ask for the first run's screen. The personal build's window shows calls
 //! when its devices opened (its test call to the web bundle's echo service, an invitation ringing by the name it
-//! gives), and none without them; a test build opens no PipeWire outside the UI sandbox. The engine is the personal
+//! gives), and none without them; these tests select only sandbox PipeWire. The engine is the personal
 //! build's own (`ngteams::engine::start`) over a `MemorySecretStore` holding no refresh token, so no request leaves the
 //! process; the calls themselves run in `tests/calls.rs`. The rail's "+" opens the window asking for the account, and
 //! the account it names reaches the app as it runs (an account it runs already said on that window).
@@ -179,11 +179,14 @@ fn without_its_devices_the_personal_build_shows_no_call() {
 }
 
 #[test]
-fn a_test_build_s_devices_are_the_sandbox_s_and_its_engine_without_them_places_no_call() {
-    // `test-support` wins over `personal`: outside the UI sandbox the PipeWire is refused, so no call opens the desktop's
+fn sandbox_devices_are_refused_outside_the_sandbox_and_the_engine_without_them_places_no_call() {
+    // Sandbox reach refuses PipeWire outside the UI sandbox, before any desktop connection.
     let dir = tempfile::tempdir().unwrap();
     let (setup, account) = signed_in_setup(&dir);
-    assert!(ngteams::calling::open().is_err() || std::env::var_os("UI_SANDBOX_DIR").is_some());
+    assert!(
+        ngteams::calling::open(teams_media::devices::pipewire::Reach::Sandbox).is_err()
+            || std::env::var_os("UI_SANDBOX_DIR").is_some()
+    );
     let fence = Arc::new(Fence::open_personal_with(&setup.paths, &account.upn, &setup.lab).unwrap());
     let engine = ngteams::engine::start(&setup.paths, &account, fence, MemorySecretStore::new(), false, None).unwrap();
     let refused = engine

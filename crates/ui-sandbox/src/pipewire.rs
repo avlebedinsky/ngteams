@@ -18,7 +18,7 @@
 //! session bus, and the plugin and module dirs cut down to links to the few the sandbox needs (no ALSA, Bluetooth,
 //! V4L2 or libcamera plugin, no D-Bus support library, no portal or realtime module), so neither can reach a device or
 //! a service of the desktop even if a config asked. A client of the sandbox ([`PrivatePipeWire::client_env`]) gets
-//! the same server, config and plugin dirs; `teams-media`'s PipeWire backend in a lab or test build opens only this
+//! the same server, config and plugin dirs; `teams-media`'s PipeWire backend with sandbox reach opens only this
 //! server, at its fixed place inside [`SANDBOX_ENV`](crate::SANDBOX_ENV)'s dir.
 
 pub mod media;

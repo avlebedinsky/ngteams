@@ -5,8 +5,8 @@
 //! [`open_camera_remote`] makes the two calls on the bus it is given, each on a connection of its own to that address
 //! (never one taken from the environment): `AccessCamera`, whose answer comes as the `Response` signal of the request
 //! object the call names (listened to before the call, at the path the portal derives from our unique name and our
-//! token), then `OpenPipeWireRemote`, which answers with the remote's descriptor. Which bus a build may ask is the
-//! PipeWire backend's to decide ([`super::pipewire::CameraRoute`]): a lab or test build only the UI sandbox's, where
+//! token), then `OpenPipeWireRemote`, which answers with the remote's descriptor. Which bus a reach may ask is the
+//! PipeWire backend's to decide ([`super::pipewire::CameraRoute`]): sandbox reach asks only the UI sandbox's, where
 //! the sandbox's fake portal answers.
 
 use std::collections::HashMap;

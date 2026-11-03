@@ -10,7 +10,7 @@ fn the_runner_holds_one_engine_per_account_and_releases_it_on_shutdown() {
     let runner = Runner {
         setup,
         floor: CallFloor::new(),
-        devices: Some(crate::calling::CallDevices::open().unwrap()),
+        devices: Some(crate::calling::CallDevices::open(teams_media::devices::pipewire::Reach::Sandbox).unwrap()),
     };
     let fence = || Fence::open_personal_with(&runner.setup.paths, &account.upn, &runner.setup.lab).unwrap();
     let started = runner.start_on(&account, fence(), MemorySecretStore::new()).unwrap();

@@ -18,13 +18,16 @@ pub(super) fn run(case: &str, setup: &Setup) {
         "command-invalid-account" => {
             let cli =
                 <ngteams::cli::Cli as clap::Parser>::try_parse_from(["ngteams", "--account", "invalid-upn"]).unwrap();
-            assert!(super::run(&cli).is_err());
+            assert!(super::run(&cli, teams_media::devices::pipewire::Reach::Sandbox).is_err());
         }
         "command-error-files" => corrupt_files(setup),
         "command-no-ready" => {
             super::signed(setup, "unready@example.test", 12, true);
             assert!(matches!(
-                super::run(&<ngteams::cli::Cli as clap::Parser>::try_parse_from(["ngteams"]).unwrap()),
+                super::run(
+                    &<ngteams::cli::Cli as clap::Parser>::try_parse_from(["ngteams"]).unwrap(),
+                    teams_media::devices::pipewire::Reach::Sandbox
+                ),
                 Ok(Outcome::Quit)
             ));
         }
@@ -189,7 +192,7 @@ fn corrupt_files(setup: &Setup) {
     assert!(super::super::ready_accounts(setup).is_err());
     assert!(super::super::ask_account(setup.clone(), None).is_err());
     let cli = <ngteams::cli::Cli as clap::Parser>::try_parse_from(["ngteams"]).unwrap();
-    assert!(super::run(&cli).is_err());
+    assert!(super::run(&cli, teams_media::devices::pipewire::Reach::Sandbox).is_err());
     let (peer, socket) = UnixStream::pair().unwrap();
     assert_eq!(broker("signed@example.test", socket.into_raw_fd()), ExitCode::FAILURE);
     drop(peer);
@@ -233,7 +236,7 @@ fn read_errors(case: &str, setup: &Setup) {
 
 pub(super) fn invalid_environment() {
     let cli = <ngteams::cli::Cli as clap::Parser>::try_parse_from(["ngteams"]).unwrap();
-    assert!(super::run(&cli).is_err());
+    assert!(super::run(&cli, teams_media::devices::pipewire::Reach::Sandbox).is_err());
     assert_eq!(
         take_snapshot(std::path::Path::new("/synthetic/not-created")),
         ExitCode::FAILURE

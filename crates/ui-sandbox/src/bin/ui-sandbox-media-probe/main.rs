@@ -1,5 +1,5 @@
 //! A client of the sandbox's private PipeWire for the sandbox's own tests: opens `teams-media`'s PipeWire backend
-//! (which in this build opens only the sandbox's server) and prints what it measured as `key=value` lines.
+//! (selecting sandbox reach explicitly) and prints what it measured as `key=value` lines.
 //!
 //! - `mic <seconds> <hz>...`: the microphone's level at each frequency.
 //! - `speaker <seconds> <hz> <amplitude>`: plays a tone.
@@ -30,7 +30,7 @@ use std::time::{Duration, Instant};
 
 use teams_media::devices::file::FrameCounter;
 use teams_media::devices::pattern::index_of;
-use teams_media::devices::pipewire::PipeWireDevices;
+use teams_media::devices::pipewire::{PipeWireDevices, Reach};
 use teams_media::devices::{
     AudioFrame, AudioSink, AudioSource, DeviceError, Devices, FRAME_DURATION, VideoFrame, VideoSink,
 };
@@ -65,7 +65,7 @@ fn run(args: &[String]) -> ProbeResult {
     if args.first().map(String::as_str) == Some("portal-camera") {
         return choice::portal_camera(number(args, 1, "frames")?, number(args, 2, "seconds")?);
     }
-    let devices = PipeWireDevices::connect()?;
+    let devices = PipeWireDevices::connect(Reach::Sandbox)?;
     match args.first().map(String::as_str) {
         Some("mic") => mic(&devices, number(args, 1, "seconds")?, &args[2..]),
         Some("speaker") => speaker(

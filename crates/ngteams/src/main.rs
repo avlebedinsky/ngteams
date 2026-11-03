@@ -26,6 +26,7 @@ use teams_auth::secrets::LazyKeyring;
 use teams_fence::lab::LabLocations;
 use teams_fence::personal::{PersonalAccount, PersonalPaths};
 use teams_fence::{CallFloor, Fence};
+use teams_media::devices::pipewire::Reach;
 #[cfg(not(test))]
 use teams_ui::account_prompt;
 use teams_ui::account_prompt::{AccountPrompt, AccountPromptEvent};
@@ -68,7 +69,7 @@ fn main() -> ExitCode {
     }
     let outcome = match cli.read_only_mode(std::env::var_os(read_only::ENV).as_deref()) {
         Ok(Some(mode)) => run_read_only(&mode),
-        Ok(None) => run(&cli),
+        Ok(None) => run(&cli, Reach::Desktop),
         Err(error) => Err(error),
     };
     match outcome {
@@ -87,7 +88,7 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(cli: &Cli) -> Result<Outcome, String> {
+fn run(cli: &Cli, reach: Reach) -> Result<Outcome, String> {
     let setup = Setup::from_env().map_err(|error| error.to_string())?;
     if let Some(upn) = cli.forget.as_deref() {
         forget(&setup, upn)?;
@@ -110,8 +111,8 @@ fn run(cli: &Cli) -> Result<Outcome, String> {
         file.load().settings.log_level,
         setup.paths.fence_log(),
     );
-    // the calls on the desktop's PipeWire, shared by every account; without it the app runs without calls
-    let devices = match CallDevices::open() {
+    // the selected PipeWire, shared by every account; without it the app runs without calls
+    let devices = match CallDevices::open(reach) {
         Ok(devices) => Some(devices),
         Err(error) => {
             eprintln!("teams: no calls: {error}");

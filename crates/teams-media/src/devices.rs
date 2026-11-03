@@ -6,11 +6,10 @@
 //!
 //! - [`file`]: no audio server at all. A tone or a WAV file in, a WAV recording out, a generated test pattern as the
 //!   camera ([`pattern`]), received frames counted. Tests and mock calls use it.
-//! - [`pipewire`]: one PipeWire server for audio and the camera. Which server a build may open is fixed when it is
-//!   built ([`pipewire::THIS_BUILD`]): the UI sandbox's private one for the lab and every `test-support` build, the
-//!   desktop's for the personal build only, whose camera comes through the desktop's camera portal ([`portal`]: a
-//!   PipeWire remote showing only the cameras). It lists the devices there are and follows the user's choice of each
-//!   kind ([`catalog`]).
+//! - [`pipewire`]: one PipeWire server for audio and the camera, selected by the caller at run time
+//!   ([`pipewire::Reach`]): the UI sandbox's private one, or the desktop's, whose camera comes through the desktop's
+//!   camera portal ([`portal`]: a PipeWire remote showing only the cameras). It lists the devices there are and
+//!   follows the user's choice of each kind ([`catalog`]).
 //!
 //! Every device hands frames over on threads of its own: a source is read with a timeout and a sink takes a frame and
 //! returns at once, so the caller's thread never waits on an audio server.
@@ -113,7 +112,7 @@ pub struct VideoFrame {
 /// Why a device can't be opened or used.
 #[derive(Debug, thiserror::Error)]
 pub enum DeviceError {
-    /// This build may not open what was asked: the reason, as the message to print.
+    /// The selected reach may not open what was asked: the reason, as the message to print.
     #[error("refused: {0}")]
     Refused(String),
     #[error("{0}")]

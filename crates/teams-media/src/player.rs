@@ -7,7 +7,7 @@
 //!   the elements that would fetch anything (an adaptive demuxer a playlist's bytes would plug, a network source) are
 //!   never plugged, and one that is made anyway fails the player before it starts. Its frames go to an appsink as BGRA
 //!   and its sound to another as 48 kHz mono, which plays them on the device seam's speaker ([`crate::devices`], the
-//!   PipeWire the build allows), never on a sink of `GStreamer`'s own. Hardware video decoders are left out too: making
+//!   PipeWire selected by the caller), never on a sink of `GStreamer`'s own. Hardware video decoders are left out too: making
 //!   one probes the GPU's drivers, which can take seconds.
 //! - **Seeking**: a seek first lets go of the read the pipeline waits on and of the streams of the old place (the
 //!   pipeline can't flush while a read holds it), so the new place's bytes are asked for at once and have the network to

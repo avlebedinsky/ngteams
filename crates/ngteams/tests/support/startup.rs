@@ -380,7 +380,10 @@ fn child() {
         "empty" | "prompt-window-error" => {}
         other => panic!("unknown synthetic case {other}"),
     }
-    let outcome = run(&ngteams::cli::Cli::try_parse_from(args).unwrap());
+    let outcome = run(
+        &ngteams::cli::Cli::try_parse_from(args).unwrap(),
+        teams_media::devices::pipewire::Reach::Sandbox,
+    );
     if let Err(error) = &outcome {
         eprintln!("synthetic startup {case}: {error}");
     }

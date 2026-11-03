@@ -259,10 +259,17 @@ mode exists only in test-support builds, which ngteams still refuses.
 - Modify: `crates/ui-sandbox/src/bin/ui-sandbox-media-probe/main.rs`, `crates/ui-sandbox/tests/pipewire.rs`
 - Modify: `crates/ngteams/src/calling.rs`, `crates/ngteams/Cargo.toml`
 
-- [ ] remove `THIS_BUILD` and the `personal` feature; callers pass the `Reach` (ngteams: desktop normally, sandbox
+- [x] remove `THIS_BUILD` and the `personal` feature; callers pass the `Reach` (ngteams: desktop normally, sandbox
       in lab and read-only modes; tests and ui-sandbox: sandbox)
-- [ ] adapt the reach tests
-- [ ] tests of `teams-media`, `ui-sandbox` (PipeWire) and `ngteams` (`calls`), and clippy, pass
+- [x] adapt the reach tests
+- [x] tests of `teams-media`, `ui-sandbox` (PipeWire) and `ngteams` (`calls`), and clippy, pass
+
+Validation: 76 focused tests passed: media reach and camera routing (12), private PipeWire (6), the sandbox
+camera portal (1), ngteams's library/startup/calls/app/separation tests (43), and the UI dependency audit (14).
+PipeWire and portal tests ran with `GPUI_SMOKE_REQUIRE=1`; the ignored canary child is exercised by its parent.
+All-target Clippy for teams-media, ui-sandbox and ngteams, formatting and coverage-source metadata checks passed.
+Normal startup passes desktop reach explicitly; controller tests and sandbox probes pass sandbox reach. Read-only
+startup still opens no devices. Task 9 will pass sandbox reach from the lab-mode startup it introduces.
 
 ### Task 6: The behavioral cut: writes without permits, call tracking in teams-call
 

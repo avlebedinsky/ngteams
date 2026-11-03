@@ -12,7 +12,7 @@
 //!   libwebrtc's own module) to libwebrtc, libwebrtc's audio to the speaker, the camera's frames to libwebrtc and its
 //!   decoded video to the caller's sinks ([`video`]: the camera's bounds and the frames' conversions).
 //! - [`devices`]: the device seam (a microphone, a speaker, a camera): a file backend that opens no audio server, and
-//!   a PipeWire backend that opens only the server its build allows (the UI sandbox's, or the desktop's for the
+//!   a PipeWire backend whose caller selects its server at run time (the UI sandbox's, or the desktop's for the
 //!   personal build). [`tone`] makes and measures the test tone.
 //! - [`mcp`]: a group call's media control plane, the messages the client and the call's mixer exchange over the
 //!   group call's data channel: whose video the mixer sends on each receiving video line, who speaks.

@@ -31,9 +31,8 @@ teams-core.workspace = true
 teams-fence = { workspace = true, features = ["personal"] }
 # the diagnostic log, installed once before the engine starts
 teams-log.workspace = true
-# the calls' devices: the desktop's PipeWire and its camera portal (only this crate enables `personal`;
-# `test-support`, which every test build unifies in, wins over it: the UI sandbox's only)
-teams-media = { workspace = true, features = ["personal"] }
+# the calls' devices: the caller selects desktop or sandbox PipeWire at run time
+teams-media.workspace = true
 # the echo service's MRI the test call goes to (`TEAMS_ECHO_BOT_MRI`, from the web bundle)
 teams-proto.workspace = true
 # the host-gated sign-in window, used in-process
@@ -65,9 +64,8 @@ tempfile.workspace = true
 # a personal fence over a test log and given lab locations, its source and the transports reaching the mock; the two
 # binaries refuse to run when a test build unified it in
 teams-fence = { workspace = true, features = ["test-support", "personal"] }
-# the calls' media in the tests: the file devices, the loopback relay's types (`test-support` wins over `personal`: the
-# UI sandbox's PipeWire only, and the tests open none)
-teams-media = { workspace = true, features = ["test-support", "personal"] }
+# the calls' media in the tests: file devices and the loopback relay; PipeWire tests select sandbox reach
+teams-media = { workspace = true, features = ["test-support"] }
 # the mock's calling service with its media: a loopback TURN server and a peer behind each party it plays
 teams-mock = { workspace = true, features = ["media"] }
 teams-proto = { workspace = true, features = ["test-support"] }

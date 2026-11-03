@@ -22,7 +22,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use teams_media::devices::DeviceError;
-use teams_media::devices::pipewire::{PipeWireDevices, QUEUED_VIDEO, SANDBOX_CLIENT_CONF, SANDBOX_SOCKET};
+use teams_media::devices::pipewire::{PipeWireDevices, QUEUED_VIDEO, Reach, SANDBOX_CLIENT_CONF, SANDBOX_SOCKET};
 use teams_media::devices::wav;
 use teams_media::tone::{Tone, ToneGenerator, amplitude_at, decibels};
 use tempfile::TempDir;
@@ -461,8 +461,8 @@ fn environ(pid: u32) -> Vec<String> {
 fn a_private_pipewire_with_canaries_planted() {
     let canary = std::env::var(CANARY_ENV).expect("run by the_session_s_pipewire_pulse_and_bus_are_never_reached");
     assert!(!canary.is_empty() && canary != "/");
-    // this test build opens only the sandbox's PipeWire, and this process's session has none
-    let error = PipeWireDevices::connect().unwrap_err();
+    // Sandbox reach opens only the sandbox's PipeWire, and this process's session has none.
+    let error = PipeWireDevices::connect(Reach::Sandbox).unwrap_err();
     assert!(
         matches!(&error, DeviceError::Refused(reason) if reason.contains(SANDBOX_ENV)),
         "{error}"
@@ -490,9 +490,7 @@ fn a_private_pipewire_with_canaries_planted() {
     assert!(value::<u64>(&seen, "frames") >= 5, "{seen:?}");
 
     // handed the session's PipeWire and Pulse variables and no sandbox, the probe refuses before connecting to
-    // anything. Under `cargo test --workspace` it links the teams-media this test build unifies (`test-support` and
-    // `personal`, where `test-support` wins); built alone it is a lab build with no teams-media feature, which
-    // `the_probe_built_alone_is_a_lab_build` checks
+    // anything. The probe explicitly selects sandbox reach, independent of the features its caller unified.
     let session: Vec<(&str, OsString)> = [
         "XDG_RUNTIME_DIR",
         "PIPEWIRE_RUNTIME_DIR",
@@ -508,36 +506,4 @@ fn a_private_pipewire_with_canaries_planted() {
         refused.contains("refused") && refused.contains(SANDBOX_ENV),
         "{refused}"
     );
-}
-
-/// `cargo tree` of this crate alone (its normal and build dependencies with their features): the probe built alone
-/// turns on no feature of `teams-media` beyond its default, so it is a lab build ([`teams_media::devices::pipewire::reach_for`]
-/// with neither feature, which `teams-media`'s own tests cover).
-#[test]
-fn the_probe_built_alone_is_a_lab_build() {
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let output = Command::new(cargo)
-        .current_dir(root)
-        .args([
-            "tree",
-            "--offline",
-            "--locked",
-            "-p",
-            "ui-sandbox",
-            "-e",
-            "normal,build,features",
-            "--prefix",
-            "none",
-        ])
-        .output()
-        .unwrap();
-    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
-    let tree = String::from_utf8(output.stdout).unwrap();
-    assert!(tree.contains("teams-media v"), "{tree}");
-    let features: Vec<&str> = tree
-        .lines()
-        .filter(|line| line.starts_with("teams-media feature ") && *line != r#"teams-media feature "default""#)
-        .collect();
-    assert!(features.is_empty(), "ui-sandbox turns on {features:?}");
 }

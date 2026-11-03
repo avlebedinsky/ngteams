@@ -8,7 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use teams_media::devices::catalog::{DeviceDirectory, DeviceKind, DeviceList};
-use teams_media::devices::pipewire::PipeWireDevices;
+use teams_media::devices::pipewire::{PipeWireDevices, Reach};
 use teams_media::devices::{AudioFrame, AudioSink, AudioSource, DeviceError, Devices, FRAME_DURATION, FRAME_SAMPLES};
 use teams_media::tone::{Tone, ToneGenerator, amplitude_at};
 
@@ -236,7 +236,7 @@ pub fn switch_speaker(devices: &PipeWireDevices, name: &str, tone: Tone, each: D
 /// `camera=refused` when the portal (the user) said no.
 pub fn portal_camera(wanted: u64, seconds: u64) -> ProbeResult {
     let bus = std::env::var("DBUS_SESSION_BUS_ADDRESS").map_err(|_| "no bus")?;
-    let devices = PipeWireDevices::connect_with_camera_portal(&bus)?;
+    let devices = PipeWireDevices::connect_with_camera_portal(Reach::Sandbox, &bus)?;
     let mut camera = match devices.camera() {
         Ok(camera) => camera,
         Err(DeviceError::Refused(why)) => {

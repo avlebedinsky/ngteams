@@ -1,4 +1,4 @@
-//! Personal call-device controllers over silent file devices; the real backend's test-build guard is separate.
+//! Personal call-device controllers over silent file devices; the real backend's sandbox reach is checked separately.
 
 use std::cell::Cell;
 use std::process::Command;
@@ -6,10 +6,12 @@ use std::sync::Arc;
 
 use teams_media::devices::catalog::{DeviceKind, DeviceList, DeviceWatcher, FixedDirectory};
 use teams_media::devices::file::{AudioInput, FileDevices, Pacing, PatternCamera};
+use teams_media::devices::pipewire::Reach;
 use teams_media::devices::{AudioSink, AudioSource, DeviceError, Devices, VideoSource};
 
 thread_local! {
     static REFUSE: Cell<bool> = const { Cell::new(false) };
+    static LAST_REACH: Cell<Option<Reach>> = const { Cell::new(None) };
 }
 
 pub(super) struct PipeWireDevices {
@@ -18,7 +20,8 @@ pub(super) struct PipeWireDevices {
 }
 
 impl PipeWireDevices {
-    pub(super) fn connect() -> Result<Self, DeviceError> {
+    pub(super) fn connect(reach: Reach) -> Result<Self, DeviceError> {
+        LAST_REACH.set(Some(reach));
         if REFUSE.get() {
             return Err(DeviceError::Refused("synthetic unavailable devices".to_owned()));
         }
@@ -63,7 +66,7 @@ impl teams_media::devices::catalog::DeviceDirectory for PipeWireDevices {
 
 #[test]
 fn account_devices_share_the_catalog_and_playback_but_keep_their_video_feeds_separate() {
-    let devices = super::CallDevices::open().unwrap();
+    let devices = super::CallDevices::open(Reach::Sandbox).unwrap();
     let (first_engine, first) = devices.for_account();
     let (_, second) = devices.for_account();
     assert_eq!(first.echo, super::echo());
@@ -90,20 +93,20 @@ fn account_devices_share_the_catalog_and_playback_but_keep_their_video_feeds_sep
     let mut speaker = devices.playback().speaker.unwrap().speaker().unwrap();
     speaker.play(&teams_media::devices::AudioFrame::silence()).unwrap();
     assert!(format!("{devices:?}").contains("CallDevices"));
-    let (opened, _) = super::open().unwrap();
+    let (opened, _) = super::open(Reach::Sandbox).unwrap();
     assert!(opened.media.video.is_some());
 }
 
 #[test]
 fn a_device_backend_failure_is_returned_before_any_account_calling_is_built() {
     REFUSE.set(true);
-    let refused = super::CallDevices::open().unwrap_err();
+    let refused = super::CallDevices::open(Reach::Sandbox).unwrap_err();
     REFUSE.set(false);
     assert!(matches!(refused, DeviceError::Refused(_)));
 }
 
 #[test]
-fn the_real_backend_in_a_test_build_refuses_the_desktop() {
+fn the_real_backend_with_sandbox_reach_refuses_the_desktop() {
     let directory = tempfile::tempdir().unwrap();
     let mut child = Command::new(std::env::current_exe().unwrap());
     child
@@ -125,9 +128,19 @@ fn real_guard_child() {
     if std::env::var_os("NGTEAMS_CALL_DEVICE_GUARD").is_none() {
         return;
     }
-    let actual = teams_media::devices::pipewire::PipeWireDevices::connect();
+    let actual = teams_media::devices::pipewire::PipeWireDevices::connect(Reach::Sandbox);
     assert!(
         matches!(actual, Err(DeviceError::Refused(_))),
-        "a test build never opens the personal device backend"
+        "sandbox reach never opens the desktop device backend"
     );
+}
+
+#[test]
+fn the_call_controller_passes_the_selected_reach_to_its_backend() {
+    for reach in [Reach::Desktop, Reach::Sandbox] {
+        super::CallDevices::open(reach).unwrap();
+        assert_eq!(LAST_REACH.get(), Some(reach));
+        super::open(reach).unwrap();
+        assert_eq!(LAST_REACH.get(), Some(reach));
+    }
 }

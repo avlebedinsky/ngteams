@@ -3,7 +3,7 @@
 //! "Calls"): each account an engine of its own, as `crates/ngteams` assembles one, with the personal fence of its
 //! account (which logs every send and denies none, so it reads no members), its own `fence.log`, its messaging socket
 //! and its calling socket, its calls' media on the file backend (a tone in, a recording out, each opening of the
-//! microphone and the camera counted). No PipeWire and no portal is opened (`test-support` wins over `personal`).
+//! microphone and the camera counted). No PipeWire and no portal is opened: the calls use synthetic file devices.
 //!
 //! - the test call to the web bundle's echo service: every write permitted and logged, its registration an own-state
 //!   entry, its frames logged, no plain request, the microphone opened only once the start passed, the camera never;

@@ -1,14 +1,14 @@
 //! The personal build's calls (`docs/personal-build.md`, "Calls"): the account's engine gets its calling
-//! ([`account_calls`], shared with the lab app: the calls' media on the devices the app opened, relayed through Teams'
+//! ([`account_calls`]: the calls' media on the devices the app opened, relayed through Teams'
 //! relay, the microphone processed as a call's is, the account describing its client as the web client does), and the
 //! window shows calls
 //! ([`PersonalCalls`]: the ringtone on the same devices, the test call to the echo service, a call's video, the
 //! devices the settings choose among).
 //!
-//! - **The devices** are the PipeWire this build allows ([`PipeWireDevices::connect`]): the personal build's is the
-//!   desktop's, its camera through the desktop's camera portal (fixed when `teams-media` is built with `personal`,
-//!   which only this crate enables; a test build's is the UI sandbox's only, so `cargo test -p ngteams` opens neither).
-//!   Without them the app runs without calls: no call is shown, and the engine has no calling socket.
+//! - **The devices** are the PipeWire the caller selects at run time ([`Reach`]): the normal app takes the
+//!   desktop's, its camera through the desktop's camera portal; sandbox runs and tests select the sandbox's private
+//!   server. Read-only startup opens no devices. Without devices the app runs without calls: no call is shown, and
+//!   the engine has no calling socket.
 //! - **The test call** goes to the echo service by its MRI from the web bundle ([`echo`],
 //!   `teams_proto::TEAMS_ECHO_BOT_MRI`), never one taken from the network or the UI.
 //! - **Video**: a call takes video on the OpenH264 built into the app; the settings' switch turns it off and on.
@@ -22,6 +22,7 @@ use teams_fence::Mri;
 use teams_media::devices::catalog::DeviceDirectory;
 #[cfg(not(test))]
 use teams_media::devices::pipewire::PipeWireDevices;
+use teams_media::devices::pipewire::Reach;
 use teams_media::devices::{DeviceError, Devices};
 use teams_media::player::PlayerSetup;
 use teams_ui::{DeviceRinger, Ringer, VideoFeed};
@@ -84,7 +85,7 @@ pub fn on_devices(devices: Arc<dyn Devices + Send + Sync>, video: bool) -> (Acco
 }
 
 /// The calls' devices of the app, opened once and shared by every account (`docs/personal-build.md`, "Several
-/// accounts"): the PipeWire this build allows.
+/// accounts"): the PipeWire selected by the caller.
 #[derive(Clone)]
 pub struct CallDevices {
     devices: Arc<PipeWireDevices>,
@@ -97,12 +98,12 @@ impl std::fmt::Debug for CallDevices {
 }
 
 impl CallDevices {
-    /// The PipeWire this build allows (see the module docs).
+    /// The PipeWire selected by `reach` (see the module docs).
     ///
     /// # Errors
     /// The PipeWire is refused or can't be reached ([`PipeWireDevices::connect`]).
-    pub fn open() -> Result<Self, DeviceError> {
-        let devices = Arc::new(PipeWireDevices::connect()?);
+    pub fn open(reach: Reach) -> Result<Self, DeviceError> {
+        let devices = Arc::new(PipeWireDevices::connect(reach)?);
         Ok(Self { devices })
     }
 
@@ -124,10 +125,10 @@ impl CallDevices {
     }
 }
 
-/// The engine's calling and the window's calls on the PipeWire this build allows (see the module docs).
+/// The engine's calling and the window's calls on the PipeWire selected by `reach` (see the module docs).
 ///
 /// # Errors
 /// The PipeWire is refused or can't be reached ([`PipeWireDevices::connect`]).
-pub fn open() -> Result<(AccountCalls, PersonalCalls), DeviceError> {
-    CallDevices::open().map(|devices| devices.for_account())
+pub fn open(reach: Reach) -> Result<(AccountCalls, PersonalCalls), DeviceError> {
+    CallDevices::open(reach).map(|devices| devices.for_account())
 }

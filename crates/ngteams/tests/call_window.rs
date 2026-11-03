@@ -55,7 +55,7 @@ use teams_core::engine::{self, EngineHandle, EngineOptions, Parts, Push};
 use teams_core::{CallMedia, CallParts, Identity, Outbox, Relay};
 use teams_fence::lab::Alias;
 use teams_fence::{Fence, FenceLog, LiveMembershipSource, MembershipSource, Mri, Roster};
-use teams_media::devices::pipewire::PipeWireDevices;
+use teams_media::devices::pipewire::{PipeWireDevices, Reach};
 use teams_media::devices::{Devices, SAMPLE_RATE, wav};
 use teams_media::processing::ProcessingConfig;
 use teams_media::relay::RelayServer;
@@ -897,7 +897,7 @@ fn child(alias: Alias) -> SandboxResult {
     ngteams::read_only::window_allowed_here()?;
     let trace = teams_ui::ViewTrace::new(adopt_trace(env(TRACE_FD_ENV)?.parse()?)?);
     let dir = PathBuf::from(env(DIR_ENV)?);
-    let pipewire = Arc::new(PipeWireDevices::connect()?);
+    let pipewire = Arc::new(PipeWireDevices::connect(Reach::Sandbox)?);
     let devices: Arc<dyn Devices + Send + Sync> = pipewire.clone();
     let feed = VideoFeed::new();
     let engine = engine(alias, Arc::clone(&devices), feed.clone(), &dir)?;
