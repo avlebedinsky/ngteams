@@ -175,6 +175,11 @@ pub(super) mod platform {
     }
 
     impl Platform {
+        /// The test context draws nothing, so it needs no assets.
+        pub fn with_assets(self, _: impl gpui::AssetSource) -> Self {
+            self
+        }
+
         pub fn run(self, launch: impl FnOnce(&mut App) + 'static) {
             let cx = self.cx;
             cx.update(launch);

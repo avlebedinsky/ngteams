@@ -892,7 +892,8 @@ fn child(alias: Alias) -> SandboxResult {
     let ringer: Arc<dyn Ringer> = Arc::new(DeviceRinger::new(devices));
     let failed = Arc::new(Mutex::new(None));
     let failed_in_app = Arc::clone(&failed);
-    gpui_platform::linux(WindowingModes::WAYLAND).run(move |cx: &mut App| {
+    let application = gpui_platform::linux(WindowingModes::WAYLAND).with_assets(teams_ui::AppAssets);
+    application.run(move |cx: &mut App| {
         let launched = app::launch(
             cx,
             Launch {

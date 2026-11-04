@@ -5,6 +5,7 @@
 use std::time::Duration;
 
 use super::*;
+use crate::icons::Spinning as _;
 use teams_proto::{Principal, TeamPerson};
 
 /// One owner of the open workflow: their directory object id, their name once known, and whether they made it.
@@ -218,7 +219,7 @@ impl WorkflowDialog {
                     Button::new(SharedString::from(format!("workflow-owner-remove-{}", owner.id)))
                         .outline()
                         .label("Remove")
-                        .loading(self.busy && self.changing == Some(Change::Owners))
+                        .spinning(self.busy && self.changing == Some(Change::Owners))
                         .disabled(self.busy || self.uncertain.is_some())
                         .on_click(cx.listener(move |this, _, _, cx| this.remove_owner(id.clone(), cx))),
                 )

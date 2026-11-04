@@ -2,6 +2,7 @@
 //! description and state with Turn off/on, Edit and a "..." menu holding Delete, the webhook link to copy, how a
 //! webhook workflow runs, and its run history. Delete asks first, over the Overview.
 use super::*;
+use crate::icons::Spinning as _;
 use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
 
 impl WorkflowDialog {
@@ -56,7 +57,7 @@ impl WorkflowDialog {
                         .primary()
                         .min_w(px(96.0))
                         .label(if saving { "Saving" } else { "Save" })
-                        .loading(saving)
+                        .spinning(saving)
                         .disabled(saving || empty || self.uncertain.is_some())
                         .on_click(cx.listener(|this, _, _, cx| this.save_rename(cx))),
                 ))
@@ -247,7 +248,7 @@ impl WorkflowDialog {
                                         .primary()
                                         .min_w(px(96.0))
                                         .label("Delete")
-                                        .loading(self.busy)
+                                        .spinning(self.busy)
                                         .disabled(self.busy)
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             if let Some(environment) = this.environment.clone() {

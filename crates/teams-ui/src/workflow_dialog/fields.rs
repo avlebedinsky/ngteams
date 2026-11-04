@@ -6,6 +6,7 @@
 //! the text). A connector's choices are read as Teams reads them: the operation's input definition names its dynamic
 //! list or folder tree, which the field's own connection answers.
 use super::*;
+use crate::icons::Spinning as _;
 use gpui_component::Sizable as _;
 use gpui_component::date_picker::{DatePicker, DatePickerEvent, DatePickerState};
 use teams_proto::TeamPerson;
@@ -583,32 +584,9 @@ impl WorkflowDialog {
                 .message
                 .as_ref()
                 .map(|(editor, bar)| Self::message_box(&param.id, editor, bar, palette))?,
+            // Teams' calendar at the field's right is the kit's own (`AppAssets` serves it)
             Kind::StartDate => field.date.as_ref().map(|date| {
-                // Teams' calendar at the field's right: the kit draws its own by an icon path the app's glyphs
-                // don't serve, so the app's glyph sits in its place.
-                div()
-                    .relative()
-                    .child(selected_by(
-                        format!("workflow-field-{}", param.id),
-                        DatePicker::new(date).w_full(),
-                    ))
-                    .child(
-                        div()
-                            .debug_selector(|| "workflow-date-calendar".to_owned())
-                            .absolute()
-                            .top_0()
-                            .bottom_0()
-                            .right(px(10.0))
-                            .flex()
-                            .items_center()
-                            .child(
-                                Glyph::CALENDAR
-                                    .icon()
-                                    .size(px(14.0))
-                                    .text_color(rgb(palette.muted_foreground)),
-                            ),
-                    )
-                    .into_any_element()
+                selected_by(format!("workflow-field-{}", param.id), DatePicker::new(date).w_full()).into_any_element()
             })?,
             Kind::WeekDays => Self::days(index, param, palette, cx),
             Kind::Folder => Self::folder_field(index, param, field, palette, cx),
@@ -1040,7 +1018,7 @@ impl WorkflowDialog {
                 .primary()
                 .min_w(px(96.0))
                 .label(if self.busy { "Saving" } else { "Save" })
-                .loading(self.busy)
+                .spinning(self.busy)
                 .disabled(self.busy || unready || message_empty || self.uncertain.is_some())
                 .on_click(cx.listener(|this, _, _, cx| this.simple_save(cx))),
         )

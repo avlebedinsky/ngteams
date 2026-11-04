@@ -19,6 +19,8 @@ log = { workspace = true, features = ["max_level_debug", "release_max_level_debu
 # the UI kit: compose's text area, the theme, the resizable panes, the command palette (the chat switcher), avatars,
 # buttons, switches and radios
 gpui-component.workspace = true
+# the kit's icons, served by the paths its components ask for (`AppAssets`)
+gpui-kit-assets.workspace = true
 # the view trace: one JSON object per line
 serde_json.workspace = true
 # a reaction's animation strip (a PNG) cut into the frames GPUI plays, and a message's pictures (PNG, JPEG, GIF,

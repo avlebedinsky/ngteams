@@ -690,7 +690,8 @@ fn child_window() -> SandboxResult {
     let failed = Arc::new(Mutex::new(None));
     let failed_in_app = Arc::clone(&failed);
     let mock = Arc::clone(&lab.mock);
-    gpui_platform::linux(WindowingModes::WAYLAND).run(move |cx: &mut App| {
+    let application = gpui_platform::linux(WindowingModes::WAYLAND).with_assets(teams_ui::AppAssets);
+    application.run(move |cx: &mut App| {
         let launched = app::launch(
             cx,
             Launch {
@@ -779,7 +780,8 @@ fn child_http() -> SandboxResult {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     listener.set_nonblocking(true)?;
     let url = format!("https://127.0.0.1:{}/picture.png", listener.local_addr()?.port());
-    gpui_platform::linux(WindowingModes::WAYLAND).run(move |cx: &mut App| {
+    let application = gpui_platform::linux(WindowingModes::WAYLAND).with_assets(teams_ui::AppAssets);
+    application.run(move |cx: &mut App| {
         let bounds = Bounds::centered(None, size(px(320.0), px(240.0)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),

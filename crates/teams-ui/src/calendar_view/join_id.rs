@@ -17,7 +17,7 @@ use teams_core::{CalendarEvent, MeetingCode};
 
 use super::{CalendarView, CalendarViewEvent};
 use crate::calls::MeetingToJoin;
-use crate::icons::{Glyph, icon_button, selected_by};
+use crate::icons::{Glyph, Spinning as _, icon_button, selected_by};
 use crate::theme::Palette;
 use crate::trace::TraceLine;
 
@@ -181,7 +181,7 @@ impl CalendarView {
                         Button::new("calendar-join-id-join")
                             .label("Join meeting")
                             .primary()
-                            .loading(form.finding)
+                            .spinning(form.finding)
                             .on_click(cx.listener(|this, _, _, cx| this.join_by_id(cx))),
                     )),
                 ),

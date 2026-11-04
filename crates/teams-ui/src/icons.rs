@@ -195,6 +195,25 @@ pub fn icon_button_with_key(
         .tooltip_with_action(tip, action, None)
 }
 
+/// A button that shows its work: the kit draws a loading button's spinner only in its icon's place, so a button with
+/// a label alone would only dim.
+pub trait Spinning {
+    /// `loading`, with the kit's spinner (Teams' ring, `AppAssets`) before the label while it lasts.
+    #[must_use]
+    fn spinning(self, loading: bool) -> Self;
+}
+
+impl Spinning for Button {
+    fn spinning(self, loading: bool) -> Self {
+        let button = if loading {
+            self.icon(Glyph::LOADING.icon())
+        } else {
+            self
+        };
+        button.loading(loading)
+    }
+}
+
 /// `element` with `selector` as its test selector: the kit's buttons take none of their own.
 pub fn selected_by(selector: impl Into<String>, element: impl IntoElement) -> gpui::Div {
     let selector = selector.into();

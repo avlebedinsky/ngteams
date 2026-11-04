@@ -403,7 +403,8 @@ fn child_window() -> SandboxResult {
     let failed = Arc::new(Mutex::new(None));
     let failed_in_app = Arc::clone(&failed);
     let mock = Arc::clone(&lab.mock);
-    gpui_platform::linux(WindowingModes::WAYLAND).run(move |cx: &mut App| {
+    let application = gpui_platform::linux(WindowingModes::WAYLAND).with_assets(teams_ui::AppAssets);
+    application.run(move |cx: &mut App| {
         let launched = app::launch(
             cx,
             Launch {

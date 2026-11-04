@@ -124,7 +124,8 @@ fn child(mode: &str) -> SandboxResult {
     let run_inputs = page == "run-inputs";
     let webhook = page.starts_with("webhook");
     let page = page.to_owned();
-    gpui_platform::linux(WindowingModes::WAYLAND).run(move |cx: &mut App| {
+    let application = gpui_platform::linux(WindowingModes::WAYLAND).with_assets(teams_ui::AppAssets);
+    application.run(move |cx: &mut App| {
         teams_ui::window::init(cx);
         theme::set_appearance(
             &Appearance {

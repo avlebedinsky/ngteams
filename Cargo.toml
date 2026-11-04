@@ -135,6 +135,9 @@ bitflags = { version = "2.13.2", features = ["serde"] }
 # copy above. It takes `gpui-pre` with its default features, so the workspace's GPUI gains `x11`, `font-kit` and
 # `windows-manifest` (the lab app refuses a set `DISPLAY`); none of the kit's own optional features.
 gpui-component = { version = "0.8.0", default-features = false }
+# The kit's icons, by the paths its components draw them from (`teams_ui::AppAssets`): the kit's own assets crate
+# (Apache-2.0; Lucide's SVGs, ISC/MIT), the version the kit locks
+gpui-kit-assets = { version = "0.8.0", default-features = false }
 # GPUI's `RenderImage` frames are `image` buffers: the version GPUI already links.
 image = { version = "0.25.10", default-features = false }
 # STUN MESSAGE-INTEGRITY (HMAC-SHA1 over a long-term key) for the echo call's TURN client

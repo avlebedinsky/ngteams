@@ -110,6 +110,11 @@ notifications, the README and the tests for the old name. Errors say what happen
 ## Kit pitfalls (gpui-component 0.8)
 
 - `Button` takes no `debug_selector`: wrap it with `selected_by(id, button)` so tests can still find it.
+- The kit draws some icons by path (`IconName`: carets, submenu chevrons, the date field's calendar, spinners);
+  `teams_ui::AppAssets` serves them, so every GPUI start (the app's, a sandbox test's) runs
+  `.with_assets(teams_ui::AppAssets)`, or those icons are blank.
+- A loading `Button` shows its spinner only in its icon's place: use `.spinning(busy)` (`icons::Spinning`), not
+  `.loading(busy)`, on a button with a label alone.
 - `.dropdown_caret(true)` doesn't show when the button's content is a custom child: add a `Glyph::CHEVRON_DOWN` to the
   face yourself (see `picker`).
 - A dropdown's rows are `PopupMenuItem::element(..)` whose element carries the row's `debug_selector`, so a test can

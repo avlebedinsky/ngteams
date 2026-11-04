@@ -46,6 +46,7 @@ use crate::chat_view::{DELETED, MAX_SEEK, UNSHOWN_CONTENT, UNSUPPORTED, files_of
 use crate::clock::{self, HourCycle};
 use crate::files;
 use crate::forwarded::{self, ForwardOrigin, Original};
+use crate::icons::Spinning as _;
 use crate::link_preview;
 use crate::models::Models;
 use crate::people::{Face, Shown};
@@ -1115,7 +1116,7 @@ impl Render for ChannelView {
                 Button::new("channel-older")
                     .label("Load older posts")
                     .ghost()
-                    .loading(self.older.is_some())
+                    .spinning(self.older.is_some())
                     .on_click(cx.listener(|this, _, _, cx| this.load_older(cx))),
             )
         });

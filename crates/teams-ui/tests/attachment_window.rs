@@ -161,7 +161,8 @@ fn child(mode: &str) -> SandboxResult {
     ui_sandbox::window_allowed()?;
     let source = mode == "source";
     let dark = mode == DARK_KEY;
-    gpui_platform::linux(WindowingModes::WAYLAND).run(move |cx: &mut App| {
+    let application = gpui_platform::linux(WindowingModes::WAYLAND).with_assets(teams_ui::AppAssets);
+    application.run(move |cx: &mut App| {
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();

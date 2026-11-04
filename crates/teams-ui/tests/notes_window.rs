@@ -197,7 +197,8 @@ fn after_frames(window: &Window, frames: usize, done: impl FnOnce(&mut Window, &
 fn child(theme: &str) -> SandboxResult {
     ui_sandbox::window_allowed()?;
     let theme: &'static str = if theme == DARK_KEY { DARK_KEY } else { LIGHT_KEY };
-    gpui_platform::linux(WindowingModes::WAYLAND).run(move |cx: &mut App| {
+    let application = gpui_platform::linux(WindowingModes::WAYLAND).with_assets(teams_ui::AppAssets);
+    application.run(move |cx: &mut App| {
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();

@@ -153,7 +153,8 @@ fn run_setup(cli: &Cli, reach: Reach, setup: Setup, trace: ViewTrace) -> Result<
     let restart = Rc::new(Cell::new(false));
     let failed = Rc::new(Cell::new(false));
     let (restart_in_app, failed_in_app) = (Rc::clone(&restart), Rc::clone(&failed));
-    gpui_platform::linux(WindowingModes::WAYLAND).run(move |cx: &mut App| {
+    let application = gpui_platform::linux(WindowingModes::WAYLAND).with_assets(teams_ui::AppAssets);
+    application.run(move |cx: &mut App| {
         let (again_setup, again_restart) = (setup.clone(), Rc::clone(&restart_in_app));
         let launch = Launch {
             first,
@@ -328,7 +329,8 @@ fn run_read_only(mode: &ReadOnlyMode) -> Result<Outcome, String> {
     };
     let failed = Rc::new(Cell::new(false));
     let failed_in_app = Rc::clone(&failed);
-    gpui_platform::linux(WindowingModes::WAYLAND).run(move |cx: &mut App| {
+    let application = gpui_platform::linux(WindowingModes::WAYLAND).with_assets(teams_ui::AppAssets);
+    application.run(move |cx: &mut App| {
         let launch = Launch {
             first,
             others: Vec::new(),
@@ -400,7 +402,8 @@ fn ask_account(setup: Setup, held: Option<String>) -> Result<Outcome, String> {
     let restart = Rc::new(Cell::new(false));
     let failed = Rc::new(Cell::new(false));
     let (restart_in_app, failed_in_app) = (Rc::clone(&restart), Rc::clone(&failed));
-    gpui_platform::linux(WindowingModes::WAYLAND).run(move |cx: &mut App| {
+    let application = gpui_platform::linux(WindowingModes::WAYLAND).with_assets(teams_ui::AppAssets);
+    application.run(move |cx: &mut App| {
         match account_prompt::open(cx, PERSONAL_APP_ID, app::TITLE.into(), held.as_deref()) {
             Ok((_, prompt)) => cx
                 .subscribe(&prompt, move |prompt, event, cx| {
@@ -453,7 +456,8 @@ fn sign_in_first(setup: Setup, account: PersonalAccount) -> Result<Outcome, Stri
     let restart = Rc::new(Cell::new(false));
     let failure = Rc::new(std::cell::RefCell::new(None));
     let (restart_in_app, failure_in_app) = (Rc::clone(&restart), Rc::clone(&failure));
-    gpui_platform::linux(WindowingModes::WAYLAND).run(move |cx: &mut App| {
+    let application = gpui_platform::linux(WindowingModes::WAYLAND).with_assets(teams_ui::AppAssets);
+    application.run(move |cx: &mut App| {
         // the sign-in window is the only one: closing it mustn't quit before the sign-in is done
         cx.set_quit_mode(gpui::QuitMode::Explicit);
         let windows = ngteams::signin::windows(cx);

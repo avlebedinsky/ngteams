@@ -456,7 +456,8 @@ fn link_child() -> SandboxResult {
         &teams_proto::chat::parse_html(&content),
         &teams_ui::rich_text::Mentions::default(),
     ));
-    gpui_platform::linux(WindowingModes::WAYLAND).run(move |cx: &mut App| {
+    let application = gpui_platform::linux(WindowingModes::WAYLAND).with_assets(teams_ui::AppAssets);
+    application.run(move |cx: &mut App| {
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();
@@ -485,7 +486,8 @@ fn child() -> SandboxResult {
     ui_sandbox::window_allowed()?;
     let failed = Rc::new(Cell::new(false));
     let failed_in_app = Rc::clone(&failed);
-    gpui_platform::linux(WindowingModes::WAYLAND).run(move |cx: &mut App| {
+    let application = gpui_platform::linux(WindowingModes::WAYLAND).with_assets(teams_ui::AppAssets);
+    application.run(move |cx: &mut App| {
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();

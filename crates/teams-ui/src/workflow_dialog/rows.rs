@@ -207,17 +207,12 @@ impl WorkflowDialog {
             .into_any_element()
     }
 
-    /// The spinner a row shows while it is turned off or on, as Teams' ring: the kit's own draws by an icon path the
-    /// app's glyphs don't serve, so it turns the app's loader.
+    /// The spinner a row shows while it is turned off or on: the kit's, drawn as Teams' ring (`AppAssets`).
     fn row_spinner(palette: Palette) -> AnyElement {
         div()
             .debug_selector(|| "workflow-row-spinner".to_owned())
             .text_color(rgb(palette.brand))
-            .child(
-                gpui_component::spinner::Spinner::new()
-                    .icon(Glyph::LOADING.icon())
-                    .small(),
-            )
+            .child(gpui_component::spinner::Spinner::new().small())
             .into_any_element()
     }
 

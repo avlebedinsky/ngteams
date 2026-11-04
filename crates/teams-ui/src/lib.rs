@@ -70,6 +70,7 @@
 pub mod account_prompt;
 pub mod accounts;
 pub mod app_icon;
+pub mod assets;
 pub mod bridge;
 pub mod bus;
 pub mod calendar;
@@ -143,6 +144,7 @@ pub mod workflows_app;
 
 pub use account_prompt::{AccountPrompt, AccountPromptEvent};
 pub use accounts::{AccountParts, AccountTile, Accounts, AccountsEvent};
+pub use assets::AppAssets;
 pub use bridge::{Bridge, Core, EventSource, StoppedCore};
 pub use call_alert::{CallAlert, CallAlertEvent};
 pub use call_view::CallBar;

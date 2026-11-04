@@ -34,7 +34,7 @@ use crate::bridge::Core;
 use crate::call_stage::device_items;
 use crate::calls::{self, Calls, Prejoin};
 use crate::effects::{EffectsPicker, PickerPlace, PreviewSession};
-use crate::icons::{Glyph, icon_button, selected_by};
+use crate::icons::{Glyph, Spinning as _, icon_button, selected_by};
 use crate::settings::SettingsModel;
 use crate::settings_view;
 use crate::shell::{ToggleCameraCall, ToggleMuteCall};
@@ -500,7 +500,7 @@ impl PrejoinView {
                 Button::new("prejoin-join")
                     .label(if prejoin.joining { "Joining…" } else { "Join now" })
                     .primary()
-                    .loading(prejoin.joining)
+                    .spinning(prejoin.joining)
                     .on_click(cx.listener(|this, _, _, cx| this.join(cx))),
             ))
     }
