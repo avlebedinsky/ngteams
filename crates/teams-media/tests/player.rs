@@ -64,11 +64,11 @@ impl Seen {
         self.statuses.lock().unwrap().last().copied()
     }
 
-    fn wait_for_any(&self, within: Duration, wanted: impl Fn(State) -> bool) -> Status {
+    fn wait_for_any(&self, within: Duration, wanted: impl Fn(Status) -> bool) -> Status {
         let until = Instant::now() + within;
         loop {
             if let Some(status) = self.last()
-                && wanted(status.state)
+                && wanted(status)
             {
                 return status;
             }
@@ -172,13 +172,14 @@ fn a_paused_seek_shows_the_frame_there() {
         assert!(Instant::now() < until, "no first frame");
         thread::sleep(Duration::from_millis(10));
     }
-    player.send(Command::Seek(Duration::from_millis(1_200)));
-    let until = Instant::now() + Duration::from_secs(10);
-    while seen.frames.lock().unwrap().len() < 2 {
-        assert!(Instant::now() < until, "no frame after the seek");
-        thread::sleep(Duration::from_millis(10));
-    }
-    let status = seen.last().unwrap();
+    let before = seen.frames.lock().unwrap().len();
+    let destination = Duration::from_millis(1_200);
+    player.send(Command::Seek(destination));
+    // GStreamer's streaming thread may deliver the sought frame before the command loop publishes its status.
+    // Both must arrive; neither callback establishes that the other has run.
+    let status = seen.wait_for_any(Duration::from_secs(10), |status| {
+        status.state == State::Paused && status.position == destination && seen.frames.lock().unwrap().len() > before
+    });
     assert_eq!(
         (status.state, status.position),
         (State::Paused, Duration::from_millis(1_200))
@@ -235,7 +236,9 @@ fn a_playlist_s_links_are_never_fetched() {
         true,
     )
     .unwrap();
-    let failed = seen.wait_for_any(Duration::from_secs(10), |state| matches!(state, State::Failed(_)));
+    let failed = seen.wait_for_any(Duration::from_secs(10), |status| {
+        matches!(status.state, State::Failed(_))
+    });
     assert_eq!(failed.state, State::Failed(teams_media::player::Failure::Unsupported));
     thread::sleep(Duration::from_millis(500));
     assert!(listener.accept().is_err(), "a link of the playlist was fetched");

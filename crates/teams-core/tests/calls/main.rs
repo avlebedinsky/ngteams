@@ -13,6 +13,7 @@
 // test code throughout (its helpers unwrap and panic like the tests do)
 #![cfg(test)]
 
+mod captions;
 mod diagnostics;
 mod failures;
 mod flows;

@@ -82,6 +82,41 @@ impl CallRetries {
 }
 
 impl<T: Transport<Error = HttpError>> Outbox<T> {
+    /// A private upload or direct file grant. Each attempt verifies its intrinsic sharing details; unknown outcomes are not retried.
+    pub async fn try_attachment(&self, write: teams_proto::DriveWrite) -> CallTried {
+        let tried = match self.transport.deliver_attachment(write).await {
+            None => CallTried::NotSent("This transport has no attachment route.".to_owned()),
+            Some(Ok(answer)) => CallTried::Answered(answer),
+            Some(Err(error)) => match super::from_transport(error) {
+                Tried::Answered(answer) => CallTried::Answered(answer),
+                Tried::Denied(reason) => CallTried::Denied(reason),
+                Tried::NotSent(reason) => CallTried::NotSent(reason),
+                Tried::Uncertain(reason) => CallTried::Uncertain(reason),
+                Tried::Throttled { wait, .. } => CallTried::Throttled(wait),
+            },
+        };
+        log::info!("attachment write: {}", tried.summary());
+        tried
+    }
+    /// A caption service operation, kept separate from failures of the voice call.
+    pub async fn try_caption(&self, write: teams_proto::captions::CaptionWrite) -> CallTried {
+        let tried = match self.transport.deliver_caption(write).await {
+            None => CallTried::NotSent("This transport has no caption route.".to_owned()),
+            Some(Ok(answer)) => CallTried::Answered(answer),
+            Some(Err(error)) => match super::from_transport(error) {
+                Tried::Answered(answer) => CallTried::Answered(answer),
+                Tried::Denied(reason) => CallTried::Denied(reason),
+                Tried::NotSent(reason) => CallTried::NotSent(reason),
+                Tried::Uncertain(reason) => CallTried::Uncertain(reason),
+                Tried::Throttled { wait, .. } => CallTried::Throttled(wait),
+            },
+        };
+        match &tried {
+            CallTried::Answered(answer) => log::info!("caption service operation: HTTP {}", answer.status()),
+            _ => log::info!("caption service operation did not complete"),
+        }
+        tried
+    }
     /// One attempt at a call write: call-floor admission and tracking, then the transport, which sends it once
     /// (see the module docs).
     pub async fn try_call<R: Request + Send>(&self, write: R) -> CallTried {

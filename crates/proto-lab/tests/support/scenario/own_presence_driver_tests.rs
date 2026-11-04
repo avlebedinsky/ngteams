@@ -144,7 +144,7 @@ async fn page() -> Page {
         account_open: false,
         statuses_open: false,
     };
-    let page = Page::new(move |command| presence.answer(command)).await;
+    let page = Page::new_lab_chat(CHAT, move |command| presence.answer(command)).await;
     wire.lock().unwrap().replace(page.sender());
     page
 }

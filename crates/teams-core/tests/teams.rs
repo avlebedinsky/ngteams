@@ -59,7 +59,11 @@ async fn rig_polling(csa: bool, teams_retry: Duration, poll: Option<Duration>) -
     let dir = tempfile::tempdir().unwrap();
     let tokens = Arc::new(Tokens(mock.token(LAB_A).unwrap()));
     let origin = mock.origin();
-    let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin).unwrap();
+    let http = || {
+        HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin)
+            .unwrap()
+            .for_account(Mri::new(LAB_A))
+    };
     let transport = Arc::new(http());
 
     let reads = if csa {

@@ -206,7 +206,12 @@ impl State {
         let token = request.headers.get("x-skypetoken")?.to_str().ok()?;
         self.accounts
             .iter()
-            .find(|account| skypetoken_of(&account.mri) == token)
+            .find(|account| {
+                account
+                    .skypetoken
+                    .as_deref()
+                    .map_or_else(|| skypetoken_of(&account.mri) == token, |value| value == token)
+            })
             .map(|account| account.mri.clone())
     }
 

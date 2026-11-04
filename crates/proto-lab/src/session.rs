@@ -10,6 +10,7 @@ use serde_json::Value;
 use tokio::sync::mpsc;
 use url::Url;
 
+use crate::action_targets::ActionTargets;
 use crate::arming::{ArmError, ArmedBrowser, CaptureStatus};
 use crate::browser::{Browser, BrowserError, Display, LaunchOptions, Media};
 use crate::capture::{Capture, CaptureError, Recorder, RtcHooks};
@@ -141,6 +142,7 @@ pub struct SessionWatch {
     /// How many documents the main frame has committed.
     documents: u64,
     identities: Vec<Identity>,
+    action_targets: Option<Arc<ActionTargets>>,
 }
 
 impl SessionWatch {
@@ -160,11 +162,15 @@ impl SessionWatch {
             service_requests: HashSet::new(),
             documents: 0,
             identities: Vec::new(),
+            action_targets: None,
         }
     }
 
     /// Takes one event into account.
     pub fn observe(&mut self, event: &Event) {
+        if let Some(targets) = &self.action_targets {
+            targets.observe(event);
+        }
         match event.method.as_str() {
             "Page.frameNavigated" if self.on_page(event) => self.navigated(&event.params["frame"]),
             "Page.frameStoppedLoading" if self.on_page(event) => {
@@ -343,7 +349,7 @@ fn is_service_read(url: &str) -> bool {
 }
 
 /// The identity in a request's `Authorization: Bearer` token, if it is a JWT with the claims.
-fn identity_in(headers: &Value) -> Option<Identity> {
+pub(crate) fn identity_in(headers: &Value) -> Option<Identity> {
     let value = headers
         .as_object()?
         .iter()
@@ -396,6 +402,8 @@ impl SessionReport {
 }
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
+    #[error("browser action target evidence: {0}")]
+    ActionTargets(String),
     #[error("no Chrome for Testing at {} (run `proto-lab chrome install`)",.0.display())]
     NoChrome(PathBuf),
     #[error(transparent)]
@@ -495,6 +503,17 @@ impl LabSession {
         if !chrome.is_file() {
             return Err(SessionError::NoChrome(chrome));
         }
+        let action_targets = if matches!(options.capture.as_deref(), Some("ab-call" | "abc-call")) {
+            let locations = crate::config::LabLocations::from_env()
+                .map_err(|error| SessionError::ActionTargets(error.to_string()))?;
+            let config = crate::config::LabConfig::load(&locations)
+                .map_err(|error| SessionError::ActionTargets(error.to_string()))?;
+            Some(Arc::new(
+                ActionTargets::new(&config, alias).map_err(SessionError::ActionTargets)?,
+            ))
+        } else {
+            None
+        };
         let http = match catch {
             Some(catch) => CaptureHold::new().with_pending_messages().with_redirect_catch(catch),
             None => CaptureHold::new().with_pending_messages(),
@@ -524,11 +543,13 @@ impl LabSession {
         };
         let events = armed.watch();
         let page = armed.open_page(PAGE_TIMEOUT).await?.session;
+        let mut watch = SessionWatch::new(page.clone());
+        watch.action_targets = action_targets;
         Ok(Self {
-            watch: SessionWatch::new(page.clone()),
             armed,
             page,
             events,
+            watch,
             recorder,
         })
     }
@@ -537,6 +558,17 @@ impl LabSession {
     #[must_use]
     pub fn driver(&self) -> Driver {
         Driver::new(self.armed.cdp().clone(), self.page.clone(), self.armed.watch())
+            .with_action_targets(self.watch.action_targets.clone())
+    }
+
+    /// Declares the exact conversation and participants of this browser call scenario.
+    pub(crate) fn declare_target(&self, chat: &str, members: &[String]) -> Result<(), SessionError> {
+        self.watch
+            .action_targets
+            .as_ref()
+            .ok_or_else(|| SessionError::ActionTargets("no explicit scenario identity evidence".to_owned()))?
+            .declare(chat, members)
+            .map_err(SessionError::ActionTargets)
     }
 
     /// Where the run is recorded, if it is.

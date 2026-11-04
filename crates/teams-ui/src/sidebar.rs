@@ -21,8 +21,8 @@ use std::sync::Arc;
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, Context, ElementId, Entity, FocusHandle, InteractiveElement as _, IntoElement, KeyDownEvent,
-    ListAlignment, ListOffset, ListState, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Window, div, list, px, rgb,
+    ListAlignment, ListOffset, ListState, MouseButton, ParentElement as _, Render, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Window, div, list, px, rgb,
 };
 use gpui_component::Sizable as _;
 use gpui_component::tooltip::Tooltip;
@@ -31,7 +31,7 @@ use teams_store::Team;
 use crate::chat_list::{ChatList, ROW_HEIGHT};
 use crate::icons::{Glyph, icon_button, selected_by};
 use crate::models::Models;
-use crate::teams_list::{CHANNEL_HEIGHT, LOADING, NO_TEAMS, TeamsList, UNREADABLE};
+use crate::teams_list::{CHANNEL_HEIGHT, ChannelMenuAnchor, LOADING, NO_TEAMS, TeamsList, UNREADABLE};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 use crate::view::{Shown, status_text};
@@ -128,12 +128,17 @@ enum Entry {
     },
     /// "See all your teams", under the teams.
     SeeAllTeams,
+    CustomSection {
+        id: String,
+        name: String,
+    },
 }
 
 impl Entry {
     /// What the row is, wherever it stands: the list's rows are matched by it across a change.
     fn key(&self) -> (u8, &str) {
         match self {
+            Self::CustomSection { id, .. } => (9, id),
             Self::Section(section) => (0, section.key()),
             Self::Chat { id, .. } => (1, id),
             Self::Note(text) => (2, text),
@@ -150,7 +155,7 @@ impl Entry {
     /// after every row the sidebar scrolls to.
     fn height(&self) -> f32 {
         match self {
-            Self::Section(_) | Self::Note(_) => SECTION_HEIGHT,
+            Self::Section(_) | Self::Note(_) | Self::CustomSection { .. } => SECTION_HEIGHT,
             Self::Favorite { .. } | Self::Chat { .. } => ROW_HEIGHT,
             Self::SeeMore | Self::SeeAllChannels { .. } | Self::SeeAllTeams => SEE_MORE_HEIGHT,
             Self::Team { .. } => TEAM_HEIGHT,
@@ -243,6 +248,19 @@ impl Sidebar {
     #[must_use]
     pub fn team_open(&self, id: &str) -> bool {
         !self.folded.contains(id)
+    }
+
+    fn custom_section_open(&self, id: &str, cx: &App) -> bool {
+        self.teams
+            .read(cx)
+            .sections()
+            .iter()
+            .find(|section| section.id == id)
+            .is_none_or(|section| section.expanded)
+    }
+
+    fn toggle_custom_section(&mut self, id: &str, cx: &mut Context<Self>) {
+        self.teams.update(cx, |teams, cx| teams.toggle_section(id, cx));
     }
 
     /// Folds `section`, or unfolds it when it is folded; the teams unfolded are asked for again.
@@ -350,6 +368,7 @@ impl Sidebar {
                 }));
             }
         }
+        entries.extend(self.custom_entries(cx));
         entries.push(Entry::Section(Section::Chats));
         if self.chats_open {
             let list = self.list.read(cx);
@@ -372,7 +391,7 @@ impl Sidebar {
                     entries.push(Entry::SeeAllTeams);
                 }
                 Some(shown) => {
-                    self.team_entries(shown, teams.selected(), &mut entries);
+                    self.team_entries(shown, teams.selected(), teams.sections(), &mut entries);
                     entries.push(Entry::SeeAllTeams);
                 }
             }
@@ -380,9 +399,40 @@ impl Sidebar {
         entries
     }
 
+    fn custom_entries(&self, cx: &App) -> Vec<Entry> {
+        let mut entries = Vec::new();
+        // Custom folders retain Teams' server order; their channel items retain that folder's order.
+        let teams = self.teams.read(cx);
+        for section in teams.sections().iter().filter(|section| !section.favorite) {
+            entries.push(Entry::CustomSection {
+                id: section.id.clone(),
+                name: section.name.clone(),
+            });
+            if !section.expanded {
+                continue;
+            }
+            entries.extend(section.items.iter().filter_map(|id| {
+                let (index, team, channel) = teams.channel_location(id)?;
+                Some(Entry::Channel {
+                    index,
+                    team,
+                    channel,
+                    id: id.clone(),
+                })
+            }));
+        }
+        entries
+    }
+
     /// Each team's line unless its channels are hidden, as Teams leaves them out, with the channels it shows unless it is
     /// folded (the one open stays, shown or not) and "See all channels" while some are hidden.
-    fn team_entries(&self, teams: &[Team], selected: Option<&str>, entries: &mut Vec<Entry>) {
+    fn team_entries(
+        &self,
+        teams: &[Team],
+        selected: Option<&str>,
+        sections: &[teams_proto::ChannelSection],
+        entries: &mut Vec<Entry>,
+    ) {
         let mut index = 0;
         for (team_index, team) in teams.iter().enumerate() {
             let listed = !team.about.hidden
@@ -398,7 +448,8 @@ impl Sidebar {
             }
             let open = listed && self.team_open(&team.id);
             for (channel, shown) in team.channels.iter().enumerate() {
-                if open && (shown.shown || selected == Some(shown.id.as_str())) {
+                let moved = sections.iter().any(|section| section.items.contains(&shown.id));
+                if open && !moved && (shown.shown || selected == Some(shown.id.as_str())) {
                     entries.push(Entry::Channel {
                         index,
                         team: team_index,
@@ -445,10 +496,35 @@ impl Sidebar {
             return div().into_any_element();
         };
         match entry {
+            Entry::CustomSection { id, name } => {
+                let open = self
+                    .teams
+                    .read(cx)
+                    .sections()
+                    .iter()
+                    .find(|section| section.id == id)
+                    .is_none_or(|section| section.expanded);
+                let selector = id.clone();
+                div()
+                    .id(SharedString::from(format!("channel-section-{id}")))
+                    .debug_selector(move || format!("channel-section-{selector}"))
+                    .w_full()
+                    .h(px(SECTION_HEIGHT))
+                    .px_2()
+                    .flex()
+                    .items_center()
+                    .gap_1()
+                    .text_sm()
+                    .text_color(rgb(palette.muted_foreground))
+                    .cursor_pointer()
+                    .hover(move |style| style.bg(rgb(palette.hover)))
+                    .on_click(cx.listener(move |this, _, _, cx| this.toggle_custom_section(&id, cx)))
+                    .child(chevron(open))
+                    .child(name)
+                    .into_any_element()
+            }
             Entry::Section(section) => self.section_header(section, palette, cx),
-            Entry::Favorite { index, .. } => self
-                .list
-                .update(cx, |list, cx| list.render_favorite(index, palette, cx)),
+            Entry::Favorite { index, id } => self.favorite_row(index, id, palette, cx),
             Entry::Chat { index, .. } => self.list.update(cx, |list, cx| list.render_row(index, palette, cx)),
             Entry::SeeMore => self.see_more_row(palette, cx),
             Entry::SeeAllChannels { index, id } => Self::see_all_channels_row(index, id, palette, cx),
@@ -468,6 +544,32 @@ impl Sidebar {
                 .teams
                 .update(cx, |teams, cx| teams.channel_row(index, team, channel, palette, cx)),
         }
+    }
+
+    fn favorite_row(&mut self, index: usize, id: String, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+        let location = self.teams.read(cx).channel_location(&id);
+        let more = location.map(|(channel_at, _, _)| {
+            self.teams.update(cx, |teams, cx| {
+                teams.channel_more_from(channel_at, &id, ChannelMenuAnchor::Favorite(index), cx)
+            })
+        });
+        let row = self
+            .list
+            .update(cx, |list, cx| list.render_favorite(index, palette, more, cx));
+        div()
+            .when(location.is_some(), |row| {
+                row.on_mouse_down(
+                    MouseButton::Right,
+                    cx.listener(move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.teams.update(cx, |teams, cx| {
+                            teams.open_channel_menu_from(&id, ChannelMenuAnchor::Favorite(index), window, cx);
+                        });
+                    }),
+                )
+            })
+            .child(row)
+            .into_any_element()
     }
 
     /// A section's header, its test selector `section-<key>`.
@@ -815,6 +917,17 @@ impl Sidebar {
             return false;
         };
         if crate::keyboard::opens_menu(event) {
+            if let Entry::Channel { id, .. } | Entry::Favorite { id, .. } = &entry
+                && self.teams.read(cx).channel_location(id).is_some()
+            {
+                let anchor = match &entry {
+                    Entry::Favorite { index, .. } => ChannelMenuAnchor::Favorite(*index),
+                    _ => ChannelMenuAnchor::Tree,
+                };
+                self.teams
+                    .update(cx, |teams, cx| teams.open_channel_menu_from(id, anchor, window, cx));
+                return true;
+            }
             let Entry::Team { id, .. } = entry else {
                 return false;
             };
@@ -835,11 +948,17 @@ impl Sidebar {
             "enter" | "space" => self.activate(entry, cx),
             "right" => match entry {
                 Entry::Section(section) if !self.is_open(section) => self.toggle(section, cx),
+                Entry::CustomSection { id, .. } if !self.custom_section_open(&id, cx) => {
+                    self.toggle_custom_section(&id, cx);
+                }
                 Entry::Team { id, .. } if !self.team_open(&id) => self.toggle_team(&id, cx),
                 _ => {}
             },
             "left" => match entry {
                 Entry::Section(section) if self.is_open(section) => self.toggle(section, cx),
+                Entry::CustomSection { id, .. } if self.custom_section_open(&id, cx) => {
+                    self.toggle_custom_section(&id, cx);
+                }
                 Entry::Team { id, .. } if self.team_open(&id) => self.toggle_team(&id, cx),
                 _ => {
                     if let Some(parent) = self.parent(at) {
@@ -855,6 +974,7 @@ impl Sidebar {
     /// What Enter does on a row: what a click on it does.
     fn activate(&mut self, entry: Entry, cx: &mut Context<Self>) {
         match entry {
+            Entry::CustomSection { id, .. } => self.toggle_custom_section(&id, cx),
             Entry::Section(section) => self.toggle(section, cx),
             Entry::Favorite { id, .. } | Entry::Chat { id, .. } => self.list.update(cx, |list, cx| list.open(id, cx)),
             Entry::SeeMore => self.list.update(cx, ChatList::see_more),
@@ -874,7 +994,7 @@ impl Sidebar {
         );
         self.entries[..at].iter().rposition(|entry| match entry {
             Entry::Team { .. } => in_team,
-            Entry::Section(_) => true,
+            Entry::Section(_) | Entry::CustomSection { .. } => true,
             _ => false,
         })
     }

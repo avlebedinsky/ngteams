@@ -345,6 +345,8 @@ impl ChannelParameters {
 /// blob out: the SDP holds the call's ICE credentials and addresses.
 #[derive(Clone, PartialEq, Eq)]
 pub struct MediaContent {
+    /// Received service marker: a new mixer session (not an ordinary renegotiation). Never emitted in our answers.
+    pub new_mixer_session: bool,
     pub blob: String,
     pub content_type: String,
     pub required_features: Option<String>,
@@ -359,6 +361,7 @@ impl fmt::Debug for MediaContent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // the blob holds ICE credentials and addresses: never in a log
         f.debug_struct("MediaContent")
+            .field("new_mixer_session", &self.new_mixer_session)
             .field("blob", &format_args!("<{} bytes>", self.blob.len()))
             .field("content_type", &self.content_type)
             .field("required_features", &self.required_features)
@@ -376,6 +379,7 @@ impl MediaContent {
     #[must_use]
     pub fn new(blob: impl Into<String>, content_type: impl Into<String>) -> Self {
         Self {
+            new_mixer_session: false,
             blob: blob.into(),
             content_type: content_type.into(),
             required_features: None,

@@ -6029,6 +6029,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.1",
  "teams-auth",
+ "teams-proto",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -7950,6 +7951,7 @@ dependencies = [
 name = "teams-core"
 version = "0.1.0"
 dependencies = [
+ "base64 0.23.1",
  "chrono",
  "getrandom 0.4.3",
  "log",

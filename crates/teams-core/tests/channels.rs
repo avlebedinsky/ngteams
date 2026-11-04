@@ -52,6 +52,7 @@ async fn rig() -> Rig {
     let http = || {
         HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin)
             .unwrap()
+            .for_account(Mri::new(LAB_A))
             .with_middle_tier(MIDDLE_TIER_BASE)
             .unwrap()
             .with_provisioning(PROVISIONING_BASE)

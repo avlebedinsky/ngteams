@@ -169,6 +169,7 @@ pub enum CallCommand {
     HangUp,
     ToggleMute,
     ToggleCamera,
+    ToggleCaptions,
 }
 
 impl CallCommand {
@@ -184,6 +185,7 @@ impl CallCommand {
             Self::HangUp => "Leave call",
             Self::ToggleMute => "Mute or unmute",
             Self::ToggleCamera => "Turn camera on or off",
+            Self::ToggleCaptions => "Show or hide live captions",
         }
     }
 
@@ -198,6 +200,11 @@ impl CallCommand {
         }
         if calls.call().is_some() {
             let mut up = vec![Self::HangUp, Self::ToggleMute];
+            if calls.call().is_some_and(|call| {
+                call.status == teams_core::CallStatus::Connected && call.kind != crate::calls::CallKind::TestCall
+            }) {
+                up.push(Self::ToggleCaptions);
+            }
             if calls.video().is_some() {
                 up.push(Self::ToggleCamera);
             }

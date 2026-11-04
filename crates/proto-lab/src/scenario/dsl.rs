@@ -24,6 +24,7 @@
 //! step instead of hanging the run before its teardown.
 
 use std::fmt;
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -31,6 +32,7 @@ use regex::Regex;
 use serde_json::{Value, json};
 use tokio::sync::mpsc;
 
+use crate::action_targets::ActionTargets;
 use crate::capture_hold::without_query;
 use crate::cdp::{Cdp, CdpError, Event, SessionId};
 
@@ -310,6 +312,7 @@ pub struct Driver {
     /// Synthetic peers can omit observation pauses while retaining all request deadlines.
     #[cfg(test)]
     pause_override: Option<Duration>,
+    action_targets: Option<Arc<ActionTargets>>,
 }
 
 impl Driver {
@@ -326,7 +329,71 @@ impl Driver {
             call_timeout: CALL_TIMEOUT,
             #[cfg(test)]
             pause_override: None,
+            action_targets: None,
         }
+    }
+
+    pub(crate) fn with_action_targets(mut self, targets: Option<Arc<ActionTargets>>) -> Self {
+        self.action_targets = targets;
+        self
+    }
+
+    /// Reads full recipients fresh and verifies the actual actor before an explicit call scenario action.
+    ///
+    /// # Errors
+    /// Fails on unknown actor evidence, an unavailable or incomplete read, or a mismatch with the scenario's
+    /// declared participants.
+    pub async fn preflight_recipients(&mut self, step: &str, expected_chat: &str) -> Result<(), StepError> {
+        self.drain();
+        let targets = self.action_targets.as_ref().ok_or_else(|| StepError::Failed {
+            step: step.to_owned(),
+            reason: "no explicit lab action target context".to_owned(),
+        })?;
+        targets
+            .recipients(expected_chat)
+            .await
+            .map_err(|reason| StepError::Failed {
+                step: step.to_owned(),
+                reason,
+            })
+    }
+
+    /// Checks the exact selected conversation and fresh full membership immediately before an action.
+    /// The action itself must recheck the selected thread atomically with its click when applicable.
+    ///
+    /// # Errors
+    /// As [`Self::preflight_recipients`], or when selected chat evidence is missing/ambiguous/mismatched.
+    pub async fn preflight_chat(&mut self, step: &str, expected_chat: &str) -> Result<(), StepError> {
+        if self.selected_chat(step).await? != expected_chat {
+            return Err(StepError::Failed {
+                step: step.to_owned(),
+                reason: "selected conversation differs from the intended lab target".to_owned(),
+            });
+        }
+        self.preflight_recipients(step, expected_chat).await?;
+        if self.selected_chat(step).await? != expected_chat {
+            return Err(StepError::Failed {
+                step: step.to_owned(),
+                reason: "selected conversation changed during the recipient preflight".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    async fn selected_chat(&self, step: &str) -> Result<String, StepError> {
+        let selected = self.evaluate(step, r#"/* __labSelectedConversation */ (() => {
+            const buttons = [...document.querySelectorAll('[data-tid="sendMessageCommands-send"][data-track-thread-id]')]
+              .filter(e => { const r = e.getBoundingClientRect(); return r.width > 0 && r.height > 0; });
+            return buttons.length === 1 ? buttons[0].getAttribute('data-track-thread-id') : null;
+        })()"#).await?;
+        selected
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned)
+            .ok_or_else(|| StepError::Failed {
+                step: step.to_owned(),
+                reason: "no unambiguous selected conversation identity".to_owned(),
+            })
     }
 
     /// Gives each call to the page `timeout` to answer from now on, instead of [`CALL_TIMEOUT`].
@@ -786,6 +853,9 @@ impl Driver {
     }
 
     fn observe(&mut self, event: &Event) {
+        if let Some(targets) = &self.action_targets {
+            targets.observe(event);
+        }
         let params = &event.params;
         let Some(id) = params["requestId"].as_str() else {
             return;

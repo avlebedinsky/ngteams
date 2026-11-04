@@ -376,6 +376,7 @@ pub struct FrameSink<W> {
     writer: W,
     last_ack: u64,
     connection: Option<String>,
+    call_state: Option<std::sync::Arc<dyn crate::CallState>>,
 }
 
 impl<W> fmt::Debug for FrameSink<W> {
@@ -394,6 +395,7 @@ impl<W: FrameWriter> FrameSink<W> {
             writer,
             last_ack: 0,
             connection: None,
+            call_state: None,
         }
     }
 
@@ -401,6 +403,13 @@ impl<W: FrameWriter> FrameSink<W> {
     #[must_use]
     pub fn with_call_responses(mut self, connection: impl Into<String>) -> Self {
         self.connection = Some(connection.into());
+        self
+    }
+
+    /// Checks replies against the canonical lifecycle immediately before writing.
+    #[must_use]
+    pub fn with_call_state(mut self, state: std::sync::Arc<dyn crate::CallState>) -> Self {
+        self.call_state = Some(state);
         self
     }
 
@@ -413,7 +422,15 @@ impl<W: FrameWriter> FrameSink<W> {
         if connection != response.connection() {
             return Err(RespondError::OtherConnection);
         }
-        let text = format!("3:::{}", response.envelope());
+        let envelope = response.envelope();
+        if self
+            .call_state
+            .as_ref()
+            .is_some_and(|state| !state.response_allowed(connection, response.delivery(), &envelope))
+        {
+            return Err(RespondError::NotCurrentCall);
+        }
+        let text = format!("3:::{envelope}");
         self.writer
             .write(FrameText(text))
             .await
@@ -452,6 +469,8 @@ pub enum RespondError<E: Error + 'static> {
     NoCallResponses,
     #[error("the delivery belongs to another connection")]
     OtherConnection,
+    #[error("the delivery no longer belongs to a current call")]
+    NotCurrentCall,
     #[error(transparent)]
     Frame(FrameError<E>),
 }

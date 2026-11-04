@@ -44,4 +44,4 @@ error: cannot construct `MessageText` with struct literal syntax due to private 
 11 |     let _ = MessageText { html: "<p>raw</p>".to_owned() };
    |             ^^^^^^^^^^^   ----------------------------- private field
    |
-   = note: ...and other private fields `text`, `mentioned`, `mentions`, `quoted`, `participants` and `everyone` that were not provided
+   = note: ...and other private fields that were not provided

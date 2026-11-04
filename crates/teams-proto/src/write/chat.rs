@@ -636,7 +636,7 @@ fn properties(text: &MessageText) -> Map<String, Value> {
         ("links", json!("[]")),
         ("mentions", json!(text.mentions_property())),
         ("onbehalfof", Value::Null),
-        ("files", json!("[]")),
+        ("files", json!(text.files_property())),
         ("policyViolation", Value::Null),
         ("formatVariant", json!("TEAMS")),
     ] {

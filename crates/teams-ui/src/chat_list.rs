@@ -49,6 +49,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use chrono::Local;
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, App, AsyncApp, Context, Div, ElementId, EventEmitter, InteractiveElement as _, IntoElement, ObjectFit,
     ParentElement as _, SharedString, StatefulInteractiveElement as _, Styled as _, StyledImage as _, Subscription,
@@ -880,20 +881,33 @@ impl ChatList {
     /// The "Chats" row at `index`; its test selector `chat-row-<index>`.
     pub(crate) fn render_row(&self, index: usize, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         match self.rows.get(index) {
-            Some(row) => self.render(row, format!("chat-row-{index}"), palette, cx),
+            Some(row) => self.render(row, format!("chat-row-{index}"), palette, None, cx),
             None => div().into_any_element(),
         }
     }
 
     /// The "Favorites" row at `index`; its test selector `favorite-row-<index>`.
-    pub(crate) fn render_favorite(&self, index: usize, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    pub(crate) fn render_favorite(
+        &self,
+        index: usize,
+        palette: Palette,
+        more: Option<AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         match self.favorites.get(index) {
-            Some(row) => self.render(row, format!("favorite-row-{index}"), palette, cx),
+            Some(row) => self.render(row, format!("favorite-row-{index}"), palette, more, cx),
             None => div().into_any_element(),
         }
     }
 
-    fn render(&self, row: &ChatRow, selector: String, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
+    fn render(
+        &self,
+        row: &ChatRow,
+        selector: String,
+        palette: Palette,
+        more: Option<AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let selected = self.selected.as_deref() == Some(row.id.as_str());
         let id = row.id.clone();
         let background = if selected { palette.selected } else { palette.surface };
@@ -902,7 +916,7 @@ impl ChatList {
             .debug_selector(move || selector.clone())
             .w_full()
             .h(px(ROW_HEIGHT))
-            .overflow_hidden()
+            .when(more.is_none(), gpui::Styled::overflow_hidden)
             .px_3()
             .flex()
             .items_center()
@@ -912,6 +926,7 @@ impl ChatList {
             .on_click(cx.listener(move |this, _, _, cx| this.open(id.clone(), cx)))
             .child(self.avatar(row, background, palette, cx))
             .child(row_text(row, palette, clock::cycle(cx)))
+            .children(more)
             .into_any_element()
     }
 

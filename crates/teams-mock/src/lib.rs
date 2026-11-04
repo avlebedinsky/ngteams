@@ -493,9 +493,23 @@ impl ChatServiceMock {
     /// The skypetoken the mock's calling service takes as `mri`'s (`X-Skypetoken`), if `mri` is one of its accounts.
     #[must_use]
     pub fn skypetoken(&self, mri: &str) -> Option<String> {
-        self.lock()
-            .account(mri)
-            .map(|account| calling::skypetoken_of(&account.mri))
+        self.lock().account(mri).map(|account| {
+            account
+                .skypetoken
+                .clone()
+                .unwrap_or_else(|| calling::skypetoken_of(&account.mri))
+        })
+    }
+
+    /// Installs an explicit synthetic calling credential for an existing mock account.
+    /// The default remains the opaque fixture credential until a test replaces it.
+    pub fn set_skypetoken(&self, mri: &str, token: impl Into<String>) -> bool {
+        let mut state = self.lock();
+        let Some(account) = state.accounts.iter_mut().find(|account| account.mri == mri) else {
+            return false;
+        };
+        account.skypetoken = Some(token.into());
+        true
     }
 
     /// A caller the mock plays (`from`, no client of its own) rings `to` in their 1:1 call, on every calling endpoint
@@ -596,6 +610,16 @@ impl ChatServiceMock {
     #[must_use]
     pub fn mixer_stats(&self, id: &str, account: &str) -> Option<mixer::MixerStats> {
         self.lock().peers.mixer_stats(id, account)
+    }
+
+    /// Sends a synthetic service packet over the existing mixer's real data channel.
+    #[cfg(feature = "media")]
+    #[must_use]
+    pub fn send_call_data(&self, id: &str, account: &str, packet: Vec<u8>) -> bool {
+        self.lock()
+            .peers
+            .known_mixer(id, account)
+            .is_some_and(|mixer| mixer.send_channel(packet))
     }
 
     /// The mixer of call `id` on `account`'s side tells the dominant speakers, newest first: the audio sources of

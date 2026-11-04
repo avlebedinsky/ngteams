@@ -78,7 +78,7 @@ impl TwoAccounts {
         let shell = parts::parts(&rig, Settings::default(), Arc::new(ViewTrace::new(written.clone())));
         let (events, received) = mpsc::unbounded_channel();
         let core = Arc::new(FakeCore {
-            me: LAB_B.to_owned(),
+            me: LAB_B.to_owned().into(),
             ..FakeCore::default()
         });
         store(&core, BC, LAB_B, 3);

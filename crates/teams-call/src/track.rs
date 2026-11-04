@@ -1,9 +1,12 @@
 //! Call bookkeeping independent of transport policy: offers, callbacks, acceptance and media links.
 
+mod context;
 mod json;
 mod offer;
+use context::{Context, Reply};
 use json::strict_json;
 use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use teams_proto::Mri;
@@ -88,6 +91,7 @@ struct Callback {
 #[derive(Debug)]
 struct Call {
     state: State,
+    context: Context,
     acceptance: Option<Callback>,
     /// The start's `call/end` and `conversationEnd` callbacks.
     ends: Vec<Callback>,
@@ -101,6 +105,7 @@ struct Call {
 
 impl Call {
     fn answered(&mut self, response: &Response) {
+        self.context.answer(response.body());
         let links = response.is_success().then(|| answer_links(response.body())).flatten();
         self.state = if links.is_some() { State::Live } else { State::Ended };
         self.links.extend(links.into_iter().flatten());
@@ -225,6 +230,8 @@ pub struct Tracker {
 struct Inner {
     calls: Vec<Call>,
     offers: Vec<offer::Offer>,
+    connections: BTreeMap<String, String>,
+    responses: BTreeMap<(String, i64), Reply>,
 }
 
 /// A pre-send binding waiting for this attempt's outcome; not an authorization.
@@ -257,6 +264,11 @@ impl Tracker {
     }
     /// Observes an incoming delivery. `other_busy` is read under the app's floor lock.
     pub fn observe_on_floor(&self, delivery: &Delivery, other_busy: bool) -> Observed {
+        let observed = self.observe_filtered(delivery, other_busy);
+        self.remember_delivery(delivery, observed);
+        observed
+    }
+    fn observe_filtered(&self, delivery: &Delivery, other_busy: bool) -> Observed {
         let Some(invitation) = offer::read_invitation(delivery) else {
             return if offer::may_be_invitation(delivery) {
                 Observed::Ignored
@@ -333,6 +345,7 @@ impl Tracker {
             let agent = acceptance.as_ref().and_then(agent_of);
             inner.calls.push(Call {
                 state: State::Pending,
+                context: Context::from_request(&body, &self.account),
                 acceptance,
                 ends,
                 agent,
@@ -351,6 +364,7 @@ impl Tracker {
                 .rposition(|offer| offer.holds(operation, url.as_str()) && offer.open_for(operation))
         {
             let offer = &mut inner.offers[index];
+            offer.context.request(&body, &self.account);
             if operation == CallOperation::Attach {
                 offer.attached(&callbacks);
             }
@@ -401,9 +415,11 @@ impl Tracker {
                     match (operation, offer.state) {
                         (CallOperation::Attach, offer::OfferState::Ringing) => {
                             offer.bind_answer(response.body());
+                            offer.context.answer(response.body());
                         }
                         (CallOperation::Accept, offer::OfferState::Answered) => {
                             offer.bind_acceptance(response.body());
+                            offer.context.answer(response.body());
                         }
                         _ => {}
                     }

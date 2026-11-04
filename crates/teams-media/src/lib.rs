@@ -23,6 +23,7 @@
 
 use std::io;
 
+pub mod captions;
 pub mod devices;
 pub mod mcp;
 pub mod player;

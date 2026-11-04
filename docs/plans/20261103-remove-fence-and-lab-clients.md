@@ -514,6 +514,133 @@ coverage rules. No further documentation correction was needed. All 18 local Mar
 those two files resolve, and the runner's read-only `--help` matches its documented controls. No runtime build,
 live run or repeated acceptance test was needed for this final documentation check.
 
+## Upstream integration acceptance (separate from Task 12)
+
+Integration combines validated plan tip `950e032a06632dd0d8651c85a761a33eb70bdf69` with incoming main tip
+`9a45dde92a15155f2399bb047473b99d829fdacc` in a cumulative two-parent merge. Task 12's figures above certify
+only the earlier plan tip. Fresh integrated checks and exact coverage figures are recorded here when complete.
+No live tenant, personal installation, user credentials or personal display are used for these checks.
+
+The selected plan's agent reach rule supersedes incoming global roster admission. Intrinsic authenticated actor,
+request target, owner, direct grant, service audience, role, schema and call lifecycle predicates remain. Browser
+call tooling compares fresh observed participants with the scenario's explicitly declared intended participants;
+normal chat operations and native clients have no global lab roster guard. The canonical `teams-call` tracker
+owns call context and connection-bound responses; no parallel lab call registry remains.
+
+| Incoming commit | Preserved behavior and integrated evidence destination |
+| --- | --- |
+| `0f6fc73` | Canonical `.agents/skills/task-dispatch`, Python status server/tests and `.claude` symlink; editing the skill does not activate dispatch. |
+| `b776918` | English shared dispatch instructions and examples; status Python and shell checks. |
+| `9ad1b68` | People search click opens the intended chat; `teams-ui/tests/search.rs`. |
+| `0e1f042` | Independent actual browser identity/selected-thread evidence scoped to declared call scenarios; `proto-lab/src/action_targets/tests.rs` and scenario DSL tests. |
+| `1dd8fe3` | Intended call conversation is checked with the action; `proto-lab` surviving `ab_call` scenario/control tests. |
+| `2c63629` | Complete fresh recipients compared to declared participants for each call action; shared pure `teams-proto::chat_members` parser and browser evidence tests. |
+| `047b071` | Actual selected-call/visible-control assertions retained in surviving web scenarios; obsolete app/native/mixed clients remain deleted. |
+| `75e1ff7` | Dropped files → staged compose → Core/outbox → private own-drive upload/direct grants → message links; attachment transport/Core tests, `attachment_window`, sandbox input and moved tour steps. |
+| `65c5eac` | Draft text/files retained while sends are pending and after failure; Core attachment and UI compose/window tests. |
+| `e33ea63` | Seen-message events update unread store/badges; Core sync and UI chat-list tests. |
+| `ac0281a` | Actor/call/connection/callback/end binding retained in canonical tracker, Core floor and Trouter; tracker and typed-response lifecycle regressions replace policy registry tests. |
+| `e39da18` | Native channel/workflow foundation has real HttpTransport methods and UI/Core consumers; protocol HTTP, Core team/channel and UI window tests. |
+| `326928a` | Workflow lifecycle, permissions, access, connections and run/history states; workflow protocol and UI form/window tests. Read-only, first-party and version checks retained. |
+| `84c7369` | Actual authenticated creator/actor evidence remains in retained browser/native tooling and attachment owner/recipient binding; obsolete client fixture entrypoints remain deleted. |
+| `726e335` | Caption writes and real media receive → Core → UI, language/reset/end behavior and recorder actor/audience/scope checks; protocol captions, Core calls/captions, media and call UI tests. |
+| `00d4291` | Channel menu/dialog → Core context → typed transport/outbox, including freshness/privacy/role checks and reconciliation; channel/team protocol/Core and UI window tests. |
+| `de81896` | Correct native service audiences and dialog error/retry/confirmation behavior; actual transport checks and channel workflow/dialog tests. |
+| `db7ab91` | Preferences remain account scoped; authenticated `own_account` required. Released migration0017 retained byte for byte, schema16→17 and existing17 opening covered by store tests. |
+| `9a45dde` | Validated native trigger inputs, required/type/default/schema and first-party runtime URLs reach actual HTTP execution; workflow protocol and UI inputs/window tests. |
+
+Released migration `0017_channel_management.sql` SHA256:
+`7f93be2c0766a8d9e1bdeb3dfa331a2e46b2fe24d891eeaf802b28568f380351` (matches incoming main exactly).
+
+Normal integrated validation (2026-11-04, offline):
+
+- The complete ordinary workspace run finished with status101 in `target/integration-workspace-tests.log`:
+  eleven failing targets identified stale policy/diagnostic/schema assertions, missing synthetic actor evidence,
+  asynchronous seek-status ordering, and channel-list/favorite-row integration defects. The original result is
+  retained. All affected targets passed their final reruns; producer packages and fixture guard also passed a
+  complete rerun, including compile contracts and real isolated Chrome scenarios.
+- Channel selection now distinguishes local notifications from completed successful snapshots; an unlisted new
+  channel survives until it has actually appeared in the list, and later server removal still closes it. Favorite
+  channels retain their rich row and share the management menu with an explicit opening-row anchor, so duplicate
+  visible locations show exactly one popup. Existing opening/search assertions and new lifecycle/menu regressions
+  pass. Views still hand domain actions to Core; an all-UI audit rejects concrete HTTP request/transport builders.
+- Final focused Core, media-player, store-search, protocol/call/action-evidence and ten UI targets passed. The
+  143-step native UI tour and normal `cargo check -p ngteams --release --locked --offline` passed. Current themed
+  attachment/channel/workflow captures, clean management/workflow tour shots and the actual rich-favorite popup
+  were inspected in the sandbox; no blocking visual defect was found.
+- The existing narrow 640px Calls settings layout still wraps device labels; its settings sources are unchanged
+  from the validated plan tip. Compare `target/ui-shots/ngteams-call-settings.png` with the clean 1280px
+  `target/ui-shots/tour-settings-calls.png`. Widening the window is the current workaround; a later layout fix can
+  stack device labels above their pickers at narrow widths. This pre-existing minor defect does not block this plan.
+
+All 17 current runtime crates pass the strict 90% line, function and region gates on the integrated source.
+The complete counts and full precision percentages are in `target/integration-final-runtime-summary.json`;
+rounded percentages and per-crate evidence provenance follow. These are fresh integrated measurements, not the
+historical Task 12 results.
+
+| Runtime crate | Lines % | Functions % | Regions % | Evidence freeze |
+| --- | ---: | ---: | ---: | --- |
+| `fixture-guard` | 95.8834 | 91.6031 | 92.1807 | freeze01 |
+| `ngteams` | 92.8188 | 90.9091 | 90.0596 | freeze03 |
+| `proto-lab` | 93.8102 | 92.5076 | 90.1370 | freeze01 |
+| `teams-auth` | 97.2350 | 97.0968 | 94.8823 | freeze01 |
+| `teams-call` | 95.1432 | 96.5863 | 92.3719 | freeze01 |
+| `teams-core` | 92.3992 | 93.6364 | 90.3747 | freeze03 |
+| `teams-log` | 95.8545 | 96.0227 | 94.6931 | freeze01 |
+| `teams-media` | 92.3568 | 91.9807 | 91.5115 | freeze01 |
+| `teams-mock` | 94.5012 | 94.0845 | 93.5421 | freeze01 |
+| `teams-proto` | 95.2213 | 94.4635 | 93.4425 | freeze01 |
+| `teams-signin` | 92.3854 | 93.5484 | 91.8560 | freeze01 |
+| `teams-signin-extension` | 100.0000 | 100.0000 | 99.0291 | freeze01 |
+| `teams-store` | 97.9314 | 100.0000 | 90.1629 | freeze02 |
+| `teams-trouter` | 93.0831 | 96.0000 | 92.1500 | freeze01 |
+| `teams-ui` | 92.4991 | 90.5158 | 91.9362 | freeze03 |
+| `teams-wpe` | 93.2001 | 93.6809 | 93.3099 | freeze01 |
+| `ui-sandbox` | 94.3376 | 91.8317 | 90.4056 | freeze02 |
+
+The final source inventory has 1,169 hashed source/test/build/configuration files, plus an archived source copy
+(`target/integration-source-freeze-03.{json,zip}`). The frozen final Core/UI/native-consumer run completed with
+status 0: `scripts/coverage.sh --require-target --webrtc-cache <preserved-sdk> -p ngteams -p teams-core -p teams-ui`,
+with four build jobs, incremental compilation disabled and Cargo offline. Every runtime target passed, including
+all 36 real native call cases, all 26 channel/workflow administration cases, native accounts/call/main windows,
+the 143-step tour and all UI suites. The LLVM export and 197 profiles are retained in `target/integration-coverage-03/`.
+
+Evidence reuse is scoped by actual source and dependency closure, not averages or a synthetic union of counters:
+
+- Twelve other runtime crates retain the fresh integrated full-run measurements from freeze01, individually
+  re-gated with status 0. They have no Core/UI production dependency or changed source/build/support inputs.
+- Store and Sandbox retain the passing runtime tests and strict measurements from freeze02, individually
+  re-gated with status 0. Only two external Core test files changed afterward.
+- `target/integration-preserved-14-{closure,summary}.json` records these proofs and exact per-crate provenance.
+  The earlier closure reconstructs the freeze01 Core source hash by removing only two appended functions inside
+  its existing `cfg(test)` module, and reconstructs the coverage-policy hash by restoring only a test-file audit
+  hash. Runtime production bytes, thresholds, exclusions and shared inputs did not change between measurements.
+  All 53,045 reused native SDK include/library payload files also match the preserved reference byte for byte.
+- The complete first integrated run/export/profiles remain in `target/integration-coverage-01/` with status 101:
+  every target except the Sandbox audio test passed. Freeze02 then passed every runtime test, including audio,
+  but retained report status 1 for Core/UI metric gaps. Its four-crate selection omitted the native `ngteams`
+  consumer tests; measured deltas exposed that missing reach. The final three-crate run restores those real
+  windows/call/tour observations and adds measured Core domain/media lifecycle cases. Both prior results remain
+  available rather than being rewritten as acceptance.
+
+The audio correction is confined to the external test estimator. A captured failed synthetic WAV shows the
+expected 48,000 periodic tone samples plus 128 inserted zero samples, which shift phase: a coherent 500 ms
+component reads 0.438645 while the same complete half-second's mean of all fifty 10 ms components reads 0.497271.
+The stimulus remains one second at 1 kHz/0.5, the tolerance remains 0.5 ± 0.05, silence counts in every average,
+and the 1,500 ms recording wait is unchanged. Regression cases reject silence, another frequency, a weak 0.44
+tone, 10 ms/200 ms fragments and sustained 20% dropouts; complete windows also reject the old partial-tail false
+positive. Fresh instrumentation passes the original microphone, camera, echo delay/attenuation and session-canary
+assertions. The original 0.277992 failure has no retained WAV, so a shared cause is plausible rather than proven;
+this amplitude contract does not prove uninterrupted or lossless playback. Diagnostic WAV/log/analysis and the
+independent signed-off discussion are retained in `target/integration-audio-*` and the run-state discussion archive.
+
+Final normal gates also pass on this source: workspace all-target Clippy with warnings denied, workspace
+all-target check, formatting and lint report, plus `cargo check -p ngteams --release --locked --offline`
+(`target/integration-*-pre03.{log,status}`). The lint report retains 21 existing complexity exceptions and adds
+none. The full producer/fixture/typed-compile-contract/isolated-Chrome checks and Python/shell/vendor checks above
+cover unchanged inputs. All frozen hashes still match after the final instrumented run.
+
+
 ## Post-Completion
 *Needs the user or the live tenant; no checkboxes*
 

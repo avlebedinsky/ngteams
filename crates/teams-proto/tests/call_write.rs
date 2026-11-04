@@ -288,6 +288,67 @@ fn conversation_answer(id: &str) -> Value {
     })
 }
 
+/// Uses the same canonical tracker as the native calling transport.
+async fn native_lab() -> Lab {
+    use teams_proto::CallState as _;
+    let mut lab = lab(LAB_A).await;
+    assert!(lab.tracker.connected("calling", PUSH_A));
+    lab.transport = lab
+        .transport
+        .for_account(Mri::new(LAB_A))
+        .with_call_state(lab.tracker.clone());
+    lab
+}
+
+fn invitee(mri: &str) -> Invitee {
+    Invitee {
+        mri: Mri::new(mri),
+        participant_id: Some("00000000-0000-4000-8000-0000000000e3".into()),
+    }
+}
+
+#[tokio::test]
+async fn a_bound_call_cleanup_needs_no_identity_or_membership_lookup() {
+    let lab = native_lab().await;
+    lab.answers("POST", CALL_START_URL, conversation_answer("NativeProof"))
+        .await;
+    let start = StartCall::in_chat(&context(), &start_parts(PUSH_A, LAB_A, None), &[invitee(LAB_B)], None).unwrap();
+    assert_eq!(lab.send(start).await.0.status(), 200);
+    lab.server.reset().await;
+    let leave = conv("NativeProof", "leave");
+    Mock::given(method("POST"))
+        .and(path(url::Url::parse(&leave).unwrap().path()))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&lab.server)
+        .await;
+    let write = LeaveCall::new(&context(), &link(&leave), &participant(LAB_A), LeaveReason::HungUp).unwrap();
+    assert_eq!(lab.send(write).await.0.status(), 204);
+    let requests = lab.server.received_requests().await.unwrap();
+    assert_eq!(
+        requests.len(),
+        1,
+        "cleanup must not depend on an identity or membership lookup"
+    );
+    assert_eq!(requests[0].method.as_str(), "POST");
+}
+
+#[tokio::test]
+async fn the_canonical_tracker_refuses_unbound_cleanup() {
+    let lab = native_lab().await;
+    let write = LeaveCall::new(
+        &context(),
+        &link(&conv("Unrelated", "leave")),
+        &participant(LAB_A),
+        LeaveReason::HungUp,
+    )
+    .unwrap();
+    assert!(matches!(
+        lab.transport.deliver(write).await,
+        Err(HttpError::Refused(Refusal::CallState))
+    ));
+    assert!(lab.server.received_requests().await.unwrap().is_empty());
+}
+
 /// A's test call, started and registered on the conversation `Synthetic0`.
 async fn started_test_call(lab: &Lab) -> (Response, Request) {
     lab.answers("POST", CALL_START_URL, conversation_answer("Synthetic0"))

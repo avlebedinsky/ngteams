@@ -43,6 +43,16 @@ use crate::models::Models;
 /// The engine's request side, as the views see it: writes and queries, each answered by a [`Reply`]. No view builds a
 /// request of its own; every write goes out through the engine's outbox.
 pub trait Core: Send + Sync + 'static {
+    /// A local file uploaded privately; access is granted only on Send through `write`.
+    fn upload_file(&self, path: std::path::PathBuf) -> Reply<teams_proto::UploadedFile> {
+        let _ = path;
+        Reply::ready(Err(teams_core::EngineError::FileUnavailable))
+    }
+    /// Native Power Automate requests for this account. A fake without workflow support returns a connection error.
+    fn workflow_request(&self, request: teams_proto::WorkflowRequest) -> Reply<teams_proto::WorkflowResponse> {
+        let _ = request;
+        Reply::ready(Ok(Err(teams_proto::WorkflowFailure::Connection)))
+    }
     /// The account's MRI: who the engine writes as.
     fn me(&self) -> &str;
     /// A write through the outbox; the reply is the row as its first send left it.
@@ -232,6 +242,15 @@ pub trait Core: Send + Sync + 'static {
         Reply::ready(Ok(None))
     }
     /// A team's channels as Manage team lists them. A fake core has none.
+    /// Fresh data for a channel's management dialogs.
+    fn channel_section(&self, _action: teams_proto::ChannelSectionAction) -> Reply<()> {
+        Reply::ready(Err(teams_core::EngineError::TeamNotChanged { code: None }))
+    }
+
+    fn channel_data(&self, _query: teams_proto::ChannelRead) -> Reply<teams_proto::ChannelData> {
+        Reply::ready(Err(teams_core::EngineError::TeamNotChanged { code: None }))
+    }
+
     fn team_channels(&self, _group: String) -> Reply<Vec<ManagedChannel>> {
         Reply::ready(Ok(Vec::new()))
     }
@@ -323,6 +342,13 @@ pub trait Core: Send + Sync + 'static {
 }
 
 impl Core for EngineRequests {
+    fn workflow_request(&self, request: teams_proto::WorkflowRequest) -> Reply<teams_proto::WorkflowResponse> {
+        self.workflow_request(request)
+    }
+
+    fn upload_file(&self, path: std::path::PathBuf) -> Reply<teams_proto::UploadedFile> {
+        EngineRequests::upload_file(self, path)
+    }
     fn me(&self) -> &str {
         EngineRequests::me(self)
     }
@@ -408,6 +434,14 @@ impl Core for EngineRequests {
 
     fn team_code(&self, team: String) -> Reply<Option<String>> {
         EngineRequests::team_code(self, team)
+    }
+
+    fn channel_section(&self, action: teams_proto::ChannelSectionAction) -> Reply<()> {
+        EngineRequests::channel_section(self, action)
+    }
+
+    fn channel_data(&self, query: teams_proto::ChannelRead) -> Reply<teams_proto::ChannelData> {
+        EngineRequests::channel_data(self, query)
     }
 
     fn team_channels(&self, group: String) -> Reply<Vec<ManagedChannel>> {

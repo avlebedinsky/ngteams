@@ -73,7 +73,11 @@ pub fn native(mock: &ChatServiceMock, trouter: &TrouterMock, me: &str, names: [&
         renewals: broadcast::channel(4).0,
     });
     let origin = mock.origin();
-    let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin).unwrap();
+    let http = || {
+        HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin)
+            .unwrap()
+            .for_account(Mri::new(me))
+    };
     let transport = Arc::new(http());
     let push = Trouter::with_mock_origin(Arc::clone(&transport), Arc::clone(&tokens), trouter.origin())
         .unwrap()

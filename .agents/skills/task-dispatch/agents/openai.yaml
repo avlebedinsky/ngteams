@@ -1,0 +1,4 @@
+interface:
+  display_name: "Task Dispatch"
+  short_description: "Queue tasks in isolated agents and resume the board"
+  default_prompt: "Use $task-dispatch to dispatch my tasks to background agents."

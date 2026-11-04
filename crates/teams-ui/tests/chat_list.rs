@@ -251,6 +251,7 @@ fn ops_crew() -> Team {
                 name: "General".to_owned(),
                 general: true,
                 kind: ChannelKind::Standard,
+                about: teams_store::ChannelAbout::default(),
                 shown: true,
             },
             TeamChannel {
@@ -258,9 +259,39 @@ fn ops_crew() -> Team {
                 name: "Prod alerts".to_owned(),
                 general: false,
                 kind: ChannelKind::Standard,
+                about: teams_store::ChannelAbout::default(),
                 shown: true,
             },
         ],
+    }
+}
+
+fn exercise_channel_menus(shell: &Entity<Shell>, cx: &mut VisualTestContext) {
+    // Both copies are in view, so opening either must paint only its own popup.
+    let chats = cx.debug_bounds("section-chats").unwrap();
+    cx.simulate_click(chats.center(), Modifiers::none());
+    cx.run_until_parked();
+    for (button, panel) in [
+        ("favorite-channel-more-1", "channel-menu-panel-favorite-1"),
+        ("tree-channel-more-1", "channel-menu-panel-tree-1"),
+    ] {
+        assert!(drawn(cx, button), "{button} is reachable");
+        let more = cx.debug_bounds(button).unwrap();
+        cx.simulate_click(more.center(), Modifiers::none());
+        cx.run_until_parked();
+        assert!(
+            drawn(cx, "channel-workflows-1"),
+            "the same channel management is offered"
+        );
+        assert!(cx.debug_bounds(panel).is_some(), "the clicked row anchors the menu");
+        let panels = ["channel-menu-panel-favorite-1", "channel-menu-panel-tree-1"]
+            .into_iter()
+            .filter(|selector| cx.debug_bounds(selector).is_some())
+            .count();
+        assert_eq!(panels, 1, "the same channel elsewhere must not render another popup");
+        assert_eq!(cx.update(|_, cx| shell.read(cx).main().clone()), Main::Nothing);
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
     }
 }
 
@@ -302,6 +333,7 @@ fn a_favourite_channel_is_listed_by_its_name_and_team_and_opens_as_a_channel() {
     assert!(channel.partner.is_none(), "a channel shows no presence");
     assert!(!rows.iter().any(|row| row.id == CHANNEL));
     assert!(drawn(cx, "avatar-team"), "its team's mark for its avatar");
+    exercise_channel_menus(&shell, cx);
     let lines = written.lines();
     let line = lines
         .iter()

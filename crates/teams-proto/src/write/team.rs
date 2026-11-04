@@ -76,6 +76,8 @@ impl MemberUpdate {
 /// Microsoft 365 group.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TeamWrite {
+    /// An existing channel managed through the same one-attempt engine path.
+    Channel(crate::ChannelWrite),
     /// A new team.
     Create(NewTeam),
     /// A team's name, description and privacy; a name or a privacy left out stays as it is.
@@ -467,6 +469,9 @@ impl TeamWrite {
 
 impl Prepared for TeamWrite {
     fn wire(&self) -> Option<Wire> {
+        if let Self::Channel(write) = self {
+            return write.wire();
+        }
         self.details_wire()
             .or_else(|| self.tags_wire())
             .or_else(|| self.people_wire())

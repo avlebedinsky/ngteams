@@ -28,6 +28,10 @@ use crate::search::{SUBSTRATE_AUDIENCE, SUBSTRATE_HOST, SubstrateSearch};
 use crate::thumbnail::{ThumbnailLink, is_thumbnail_link};
 use crate::write::on_calling_base;
 
+mod captions;
+mod drive;
+mod workflows;
+
 /// The Entra audience of the token the chat service and the registrar take.
 pub const IC3_AUDIENCE: &str = "https://ic3.teams.office.com";
 
@@ -156,6 +160,10 @@ pub enum HttpError {
 /// Why a request was refused before sending.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum Refusal {
+    #[error("the attachment owner or expected direct recipients do not match")]
+    Attachment,
+    #[error("the operation does not belong to the current call")]
+    CallState,
     /// An endpoint with an empty, `.` or `..` segment.
     #[error("an empty, `.` or `..` path segment")]
     Segment,
@@ -280,6 +288,7 @@ pub struct HttpTransport<C> {
     /// Read-only ([`HttpTransport::read_only`]): only reads (a `GET`, a read by `POST` of the sealed list, a search) go
     /// out.
     read_only: bool,
+    call_state: Option<Arc<dyn crate::CallState>>,
 }
 
 impl<C> fmt::Debug for HttpTransport<C> {
@@ -331,6 +340,39 @@ impl BuiltRequest {
 }
 
 impl<C: Credentials> HttpTransport<C> {
+    async fn send_call(
+        &self,
+        method: reqwest::Method,
+        url: &Url,
+        headers: &[(String, String)],
+        body: Option<Vec<u8>>,
+    ) -> Result<Response, HttpError> {
+        let token = self
+            .credentials
+            .skypetoken()
+            .await
+            .map_err(HttpError::Credentials)?
+            .ok_or(HttpError::Refused(Refusal::NoSkypetoken))?;
+        let decoded = body
+            .as_deref()
+            .filter(|body| !body.is_empty())
+            .and_then(|body| serde_json::from_slice::<Value>(body).ok());
+        if self
+            .call_state
+            .as_ref()
+            .is_some_and(|state| !state.call_allowed(url, decoded.as_ref()))
+        {
+            return Err(HttpError::Refused(Refusal::CallState));
+        }
+        let answer = self
+            .send_as(method, url, headers, Auth::Skypetoken(&token), body)
+            .await?;
+        if answer.status() == 401 {
+            let _ = self.credentials.skypetoken_rejected(&token).await;
+        }
+        Ok(answer)
+    }
+
     async fn send_built(&self, request: BuiltRequest) -> Result<Response, HttpError> {
         if !request.routable {
             return Err(HttpError::NoRoute);
@@ -366,25 +408,7 @@ impl<C: Credentials> HttpTransport<C> {
             headers.push(("content-length".to_owned(), "0".to_owned()));
         }
         if request.service == Service::Calling {
-            let token = self
-                .credentials
-                .skypetoken()
-                .await
-                .map_err(HttpError::Credentials)?
-                .ok_or(HttpError::Refused(Refusal::NoSkypetoken))?;
-            let answer = self
-                .send_as(
-                    request.method.to_reqwest(),
-                    &url,
-                    &headers,
-                    Auth::Skypetoken(&token),
-                    body,
-                )
-                .await?;
-            if answer.status() == 401 {
-                let _ = self.credentials.skypetoken_rejected(&token).await;
-            }
-            return Ok(answer);
+            return self.send_call(request.method.to_reqwest(), &url, &headers, body).await;
         }
         let token = self.token(request.service).await?;
         let answer = self
@@ -474,12 +498,20 @@ impl<C: Credentials> HttpTransport<C> {
             max_retry_wait: MAX_RETRY_WAIT,
             mock_origin: None,
             read_only: false,
+            call_state: None,
         })
     }
 
     #[must_use]
     pub fn read_only(mut self) -> Self {
         self.read_only = true;
+        self
+    }
+
+    /// Shares the account's canonical call lifecycle with its calling transport.
+    #[must_use]
+    pub fn with_call_state(mut self, state: Arc<dyn crate::CallState>) -> Self {
+        self.call_state = Some(state);
         self
     }
 
@@ -704,6 +736,9 @@ impl<C: Credentials> HttpTransport<C> {
             Service::Registrar => fixed(format!("https://{}/registrar", self.registrar_host)),
             Service::Trouter => fixed(format!("https://{TROUTER_HOST}/")),
             Service::Graph => fixed(format!("https://{GRAPH_HOST}/v1.0")),
+            Service::Workflows => fixed("https://api.flow.microsoft.com/".to_owned()),
+            Service::WorkflowConnections => fixed("https://api.powerapps.com/".to_owned()),
+            Service::WorkflowRuntime => Err(refused(Refusal::NotAllowed)),
             Service::MiddleTier => self.middle_tier.clone().ok_or(refused(Refusal::NoMiddleTier)),
             Service::Csa => self.csa.clone().ok_or(refused(Refusal::NoCsa)),
             Service::Provisioning => self.provisioning.clone().ok_or(refused(Refusal::NoProvisioning)),
@@ -729,6 +764,13 @@ impl<C: Credentials> HttpTransport<C> {
     ) -> Result<Response, HttpError> {
         if service == Service::Substrate {
             return Err(HttpError::Refused(Refusal::Substrate));
+        }
+        // Cloud operations must use the typed route's independent lab/read-only checks and one-attempt policy.
+        if matches!(
+            service,
+            Service::Workflows | Service::WorkflowConnections | Service::WorkflowRuntime
+        ) {
+            return Err(HttpError::Refused(Refusal::NotAllowed));
         }
         let url = self.url_for(service, endpoint)?;
         if self.read_only && !matches!(method, reqwest::Method::GET | reqwest::Method::HEAD) {
@@ -840,7 +882,7 @@ impl<C: Credentials> HttpTransport<C> {
     ) -> Result<Response, HttpError> {
         let map = header_map(headers, auth)?;
         let full = log_request(&method, url, &map, body.as_deref());
-        let shown = format!("{method} {}{}", url.host_str().unwrap_or_default(), url.path());
+        let shown = format!("{method} {}{}", url.host_str().unwrap_or_default(), request_path(url));
         let started = Instant::now();
         let mut request = self.client.request(method.clone(), self.destination(url)).headers(map);
         if let Some(body) = body {
@@ -1140,6 +1182,23 @@ impl Drop for FileBody {
 impl<C: Credentials> Transport for HttpTransport<C> {
     type Error = HttpError;
 
+    async fn deliver_caption(&self, write: crate::captions::CaptionWrite) -> Option<Result<Response, HttpError>> {
+        Some(self.deliver_caption_write(&write).await)
+    }
+
+    async fn deliver_attachment(&self, write: crate::DriveWrite) -> Option<Result<Response, HttpError>> {
+        if self.read_only {
+            return Some(Err(Self::refused_read_only(
+                write.method().as_str(),
+                write.url().as_str(),
+            )));
+        }
+        if let Err(error) = self.preflight_attachment(&write).await {
+            return Some(Err(error));
+        }
+        Some(self.deliver_drive(&write).await)
+    }
+
     fn read<R: Read>(&self, request: &R) -> impl Future<Output = Result<Response, HttpError>> + Send {
         let service = request.service();
         let endpoint = request.endpoint();
@@ -1160,9 +1219,37 @@ impl<C: Credentials> Transport for HttpTransport<C> {
         }
     }
 
+    fn workflow(&self, request: &crate::WorkflowRequest) -> impl Future<Output = crate::WorkflowResponse> + Send {
+        self.workflow(request)
+    }
+
     fn send<R: Request>(&self, request: &R) -> impl Future<Output = Result<Response, HttpError>> + Send {
         let built = BuiltRequest::of(request);
         async move { self.send_built(built).await }
+    }
+
+    async fn channel_own<R: crate::ChannelOwn + Sync>(&self, request: &R) -> Result<Response, HttpError> {
+        let service = request.service();
+        let method = request.method().to_reqwest();
+        let url = self.url_for(service, &request.endpoint())?;
+        if self.read_only {
+            return Err(Self::refused_read_only(method.as_str(), url.as_str()));
+        }
+        if request
+            .interest_account()
+            .is_some_and(|requested| self.own_account().is_none_or(|own| requested != own.as_str()))
+        {
+            return Err(HttpError::Refused(Refusal::NotAllowed));
+        }
+        self.verify_account_actor().await?;
+        let token = self
+            .credentials
+            .bearer(audience(service).ok_or(HttpError::NoRoute)?)
+            .await
+            .map_err(HttpError::Credentials)?;
+        let body = request.body().map(|value| value.to_string().into_bytes());
+        let headers = plain_headers(service, body.is_some());
+        self.send_as(method, &url, &headers, Auth::Bearer(&token), body).await
     }
 
     async fn send_own<R: OwnState + Request + Sync>(&self, request: &R) -> Result<Response, HttpError> {
@@ -1192,6 +1279,7 @@ enum Auth<'a> {
     None,
     Bearer(&'a Secret),
     Skypetoken(&'a Secret),
+    Recorder { bearer: &'a Secret, skype: &'a Secret },
 }
 
 impl<'a> Auth<'a> {
@@ -1235,6 +1323,9 @@ fn audience(service: Service) -> Option<&'static str> {
         Service::Csa => Some(CSA_AUDIENCE),
         Service::Presence => Some(PRESENCE_AUDIENCE),
         Service::Substrate => Some(SUBSTRATE_AUDIENCE),
+        Service::Workflows => Some(crate::workflow::WORKFLOW_AUDIENCE),
+        Service::WorkflowConnections => Some(crate::workflow::CONNECTION_AUDIENCE),
+        Service::WorkflowRuntime => Some(crate::workflow::RUNTIME_AUDIENCE),
         Service::Trouter
         | Service::Calling
         | Service::Emoticons
@@ -1250,6 +1341,9 @@ fn plain_headers(service: Service, body: bool) -> Vec<(String, String)> {
     let content_type = match service {
         Service::MiddleTier | Service::UserProfile => "application/json;charset=UTF-8",
         Service::Provisioning
+        | Service::Workflows
+        | Service::WorkflowConnections
+        | Service::WorkflowRuntime
         | Service::ChatService
         | Service::Registrar
         | Service::Trouter
@@ -1276,6 +1370,9 @@ fn plain_headers(service: Service, body: bool) -> Vec<(String, String)> {
         | Service::Trouter
         | Service::MiddleTier
         | Service::Provisioning
+        | Service::Workflows
+        | Service::WorkflowConnections
+        | Service::WorkflowRuntime
         | Service::UserProfile
         | Service::Graph
         | Service::Csa
@@ -1332,6 +1429,9 @@ fn service_headers(service: Service) -> &'static [(&'static str, &'static str)] 
         | Service::Graph
         | Service::Csa
         | Service::Provisioning
+        | Service::Workflows
+        | Service::WorkflowConnections
+        | Service::WorkflowRuntime
         | Service::Calling
         | Service::Emoticons
         | Service::FileThumbnail
@@ -1365,6 +1465,9 @@ fn on_base(service: Service, base: &Url, url: &Url, endpoint: &Endpoint) -> bool
         | Service::MiddleTier
         | Service::Csa
         | Service::Provisioning
+        | Service::Workflows
+        | Service::WorkflowConnections
+        | Service::WorkflowRuntime
         | Service::UserProfile
         | Service::Presence
         | Service::Relay
@@ -1563,6 +1666,14 @@ fn max_body(url: &Url) -> usize {
     }
 }
 
+fn request_path(url: &Url) -> String {
+    const FOLDER: &str = "/root:/Microsoft%20Teams%20Chat%20Files/";
+    url.path().split_once(FOLDER).map_or_else(
+        || url.path().to_owned(),
+        |(prefix, _)| format!("{prefix}{FOLDER}<file>:/content"),
+    )
+}
+
 /// A request's description in the log at `info`: its method, host and path, never its query.
 fn shown(outgoing: &Outgoing<'_>) -> String {
     format!(
@@ -1585,6 +1696,12 @@ fn header_map(headers: &[(String, String)], auth: Auth<'_>) -> Result<HeaderMap,
         Auth::None => None,
         Auth::Bearer(token) => Some((AUTHORIZATION, format!("Bearer {}", token.expose()))),
         Auth::Skypetoken(token) => Some((HeaderName::from_static(SKYPETOKEN_HEADER), token.expose().to_owned())),
+        Auth::Recorder { bearer, skype } => {
+            let mut value = HeaderValue::from_str(skype.expose()).map_err(|_| HttpError::Refused(Refusal::Token))?;
+            value.set_sensitive(true);
+            map.insert(HeaderName::from_static(SKYPETOKEN_HEADER), value);
+            Some((AUTHORIZATION, format!("Bearer {}", bearer.expose())))
+        }
     };
     if let Some((name, value)) = credential {
         let mut value = HeaderValue::from_str(&value).map_err(|_| HttpError::Refused(Refusal::Token))?;
@@ -1696,3 +1813,7 @@ fn failure(error: &reqwest::Error) -> HttpError {
         Failure::Network
     })
 }
+
+#[cfg(test)]
+#[path = "http/attachment_tests.rs"]
+mod attachment_tests;

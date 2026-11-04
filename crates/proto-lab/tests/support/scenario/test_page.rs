@@ -19,6 +19,7 @@ pub(crate) struct Page {
     commands: Arc<Mutex<Vec<Value>>>,
     peer: tokio::task::JoinHandle<()>,
     close_process: Arc<Mutex<Option<rustix::process::Pid>>>,
+    action_targets: Option<Arc<crate::action_targets::ActionTargets>>,
 }
 
 impl Page {
@@ -77,7 +78,27 @@ impl Page {
             commands,
             peer,
             close_process,
+            action_targets: None,
         }
+    }
+
+    /// A local synthetic page with an explicit selected conversation; call evidence is supplied separately.
+    pub(crate) async fn new_lab_chat(
+        expected: &str,
+        mut answer: impl FnMut(&Value) -> Result<Value, String> + Send + 'static,
+    ) -> Self {
+        let selected = expected.to_owned();
+        Self::new(move |command| {
+            if command["method"] == "Runtime.evaluate"
+                && command["params"]["expression"]
+                    .as_str()
+                    .is_some_and(|expression| expression.contains("__labSelectedConversation"))
+            {
+                return Ok(evaluated(json!(selected)));
+            }
+            answer(command)
+        })
+        .await
     }
 
     pub(crate) fn commands(&self) -> Vec<Value> {
@@ -136,7 +157,11 @@ impl Page {
             Some(browser) => ArmedBrowser::synthetic_managed(self.cdp.clone(), incoming, http, capture, browser),
             None => ArmedBrowser::synthetic(self.cdp.clone(), incoming, http, capture),
         };
-        crate::session::LabSession::synthetic(armed, SessionId::new("synthetic-page"), recorder)
+        let mut session = crate::session::LabSession::synthetic(armed, SessionId::new("synthetic-page"), recorder);
+        if let Some(targets) = &self.action_targets {
+            session.set_action_targets(Arc::clone(targets));
+        }
+        session
     }
 
     pub(crate) async fn loaded_session(&mut self, dir: &std::path::Path, record: bool) -> crate::session::LabSession {

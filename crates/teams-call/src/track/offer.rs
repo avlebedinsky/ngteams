@@ -45,6 +45,7 @@ pub(crate) enum OfferState {
 /// One offered invitation of the run.
 #[derive(Debug)]
 pub(crate) struct Offer {
+    pub(super) context: super::Context,
     pub(crate) state: OfferState,
     pub(crate) invitation: Invitation,
     /// The links a ring-time send may go to, exactly.
@@ -64,7 +65,13 @@ pub(crate) const UNATTACHED_RING: Duration = Duration::from_secs(90);
 impl Offer {
     pub(crate) fn new(invitation: Invitation) -> Self {
         let links = vec![(CallOperation::Attach, invitation.attach.clone())];
+        let chat = invitation
+            .group_chat
+            .clone()
+            .or_else(|| teams_proto::one_to_one_id(invitation.callee.as_str(), invitation.caller.as_str()));
+        let context = super::Context::incoming(chat, invitation.controller.clone());
         Self {
+            context,
             state: OfferState::Ringing,
             invitation,
             links,

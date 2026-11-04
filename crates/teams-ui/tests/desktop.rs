@@ -482,7 +482,7 @@ fn an_account_added_to_an_open_window_keeps_the_active_shell_and_inherits_the_no
         });
     });
     let core = Arc::new(common::FakeCore {
-        me: LAB_B.to_owned(),
+        me: LAB_B.to_owned().into(),
         ..common::FakeCore::default()
     });
     let models = d.rig.cx.update(Models::new);

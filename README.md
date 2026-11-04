@@ -10,6 +10,13 @@ audio/video calls, and the calendar and meeting flows. Earlier milestone outcome
 [the acceptance records](docs/m3-acceptance.md) and [completed plans](docs/plans/completed/); they describe the code
 and live runs at those milestones, rather than today's commands. Current rules are in [CLAUDE.md](CLAUDE.md).
 
+The client also stages dropped files as private attachments, retains compose drafts while sends are pending,
+opens people search results as chats, and keeps unread badges in sync with read receipts. Channel menus provide
+management, notification and section preferences, email and workflow actions. Calls and meetings support Teams
+live captions and spoken-language controls (Alt+Shift+C); caption text stays in memory and clears on hide or call
+end. See [channel management](docs/protocol/channels.md#managing-an-existing-channel),
+[workflows](docs/protocol/workflows.md), and [live captions](docs/protocol/live-captions.md).
+
 ## Layout
 
 | path | contents |

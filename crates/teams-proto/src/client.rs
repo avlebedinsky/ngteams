@@ -17,10 +17,43 @@ use crate::request::Request;
 pub trait Transport: Sync {
     type Error: Error + Send + Sync + 'static;
 
+    /// A typed call-scoped operation on Microsoft's built-in caption service.
+    fn deliver_caption(
+        &self,
+        write: crate::captions::CaptionWrite,
+    ) -> impl Future<Output = Option<Result<Response, Self::Error>>> + Send {
+        let _ = write;
+        async { None }
+    }
+
+    /// A typed own-drive attachment operation, issued only by the outbox after its operational preflight.
+    /// A transport without this route answers `None` and sends nothing.
+    fn deliver_attachment(
+        &self,
+        write: crate::DriveWrite,
+    ) -> impl Future<Output = Option<Result<Response, Self::Error>>> + Send {
+        let _ = write;
+        async { None }
+    }
+
+    /// A typed Power Automate operation. Only the outbox issues mutations; unsupported transports fail closed.
+    fn workflow(&self, request: &crate::WorkflowRequest) -> impl Future<Output = crate::WorkflowResponse> + Send {
+        let _ = request;
+        async { Err(crate::WorkflowFailure::Connection) }
+    }
+
     /// Sends a read as a `GET`.
     fn read<R: Read>(&self, request: &R) -> impl Future<Output = Result<Response, Self::Error>> + Send;
 
     fn send<R: Request>(&self, request: &R) -> impl Future<Output = Result<Response, Self::Error>> + Send;
+
+    /// Account-owned channel preferences and folder updates, with an independent native actor check.
+    fn channel_own<R: crate::ChannelOwn + Sync>(
+        &self,
+        request: &R,
+    ) -> impl Future<Output = Result<Response, Self::Error>> + Send {
+        self.send(request)
+    }
 
     /// Sends an account-owned protocol request through the transport.
     fn send_own<R: OwnState + Request + Sync>(

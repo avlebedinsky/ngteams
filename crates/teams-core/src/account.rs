@@ -55,7 +55,7 @@ pub fn call_video(output: Arc<dyn crate::VideoOutput>) -> crate::CallVideo {
     }
 }
 
-/// An app's calling on `devices` (the lab app's and the personal build's alike): the calls' media on those devices,
+/// An account's calling on `devices`: the calls' media on those devices,
 /// relayed through Teams' relay, the microphone processed as a call's is, their video `video` (none without), and the
 /// account describing its client as the web client does ([`web_client_info`], [`CALL_LANGUAGE`]).
 #[must_use]
@@ -190,7 +190,7 @@ pub fn start<S: SecretStore + 'static>(
     let writes = with_middle_tier(
         || {
             HttpTransport::new(Arc::clone(&session), &base)
-                .map(|transport| writable(transport.for_account(Mri::new(&mri))))
+                .map(|transport| writable(transport.for_account(Mri::new(&mri)).with_call_state(tracker.clone())))
         },
         session.service_base(MIDDLE_TIER_GTM).as_deref(),
     )?;
@@ -199,7 +199,7 @@ pub fn start<S: SecretStore + 'static>(
     let reads = with_middle_tier(
         || {
             HttpTransport::new(Arc::clone(&session), &base)
-                .map(|transport| writable(transport.for_account(Mri::new(&mri))))
+                .map(|transport| writable(transport.for_account(Mri::new(&mri)).with_call_state(tracker.clone())))
         },
         session.service_base(MIDDLE_TIER_GTM).as_deref(),
     )?;

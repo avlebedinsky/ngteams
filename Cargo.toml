@@ -161,7 +161,7 @@ percent-encoding = "2.3.2"
 # GPUI in it. async-io runs its own reactor thread, so the futures still run under tokio.
 oo7 = { version = "0.6.0", default-features = false, features = ["async-std", "native_crypto"] }
 # The device seam's PipeWire backend (teams-media): audio and the camera on one server, the sandbox's or the
-# desktop's as the build fixes it (libpipewire through bindgen; MIT)
+# desktop's as the caller selects at run time (libpipewire through bindgen; MIT)
 pipewire = { version = "0.10.1", features = ["v0_3_49"] }
 # the Public Suffix List, compiled in: which dotted part of a display name ends in a real top-level domain
 psl = "2.1.243"

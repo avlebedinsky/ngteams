@@ -364,3 +364,134 @@ async fn a_group_call_without_video_shows_nobody_on_a_line_and_nobody_speaking()
     let mix = heard(&a.recording, PEER_TONE, TALK);
     assert!(mix > 0.25, "a heard its mixer's tone at {mix:.3}");
 }
+
+async fn actual_callback(lab: &Lab, pointer: &str) -> String {
+    let url = lab
+        .mock
+        .received_requests()
+        .await
+        .iter()
+        .find_map(|request| {
+            serde_json::from_slice::<Value>(&request.body)
+                .ok()?
+                .pointer(pointer)?
+                .as_str()
+                .map(str::to_owned)
+        })
+        .expect("the native call supplied its callback");
+    url.split_once("/v4/f/")
+        .unwrap()
+        .1
+        .split_once('/')
+        .unwrap()
+        .1
+        .to_owned()
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_admitted_group_call_reports_lobby_transitions_and_cleans_up_failed_replacement_media() {
+    let lab = Lab::start_group_video().await;
+    let mut b = lab.account(LAB_B, B_TONE).await;
+    let call_id = lab.mock.ring_group(LAB_A, ABC_CHAT, &[LAB_B]);
+    let ringing = b.incoming().await;
+    let call = answer(&mut b, ringing.call).await;
+    let roster = actual_callback(
+        &lab,
+        "/additionalActions/0/input/conversationRequest/roster/rosterUpdate",
+    )
+    .await;
+    let waiting = serde_json::json!({"participants":{LAB_B:{"version":1000,"state":"active","endpoints":{"synthetic-lobby":{"lobby":{}}}}}});
+    let _ = lab.trouter.deliver_call(LAB_B, &roster, &waiting);
+    b.status(call, &CallStatus::Lobby).await;
+    let admitted = serde_json::json!({"participants":{LAB_B:{"version":1001,"state":"active","endpoints":{"synthetic-call":{"call":{"mediaStreams":[]}}}}}});
+    let _ = lab.trouter.deliver_call(LAB_B, &roster, &admitted);
+    b.status(call, &CallStatus::Connected).await;
+    let callback = actual_callback(&lab, "/callAcceptance/links/mediaRenegotiation").await;
+    // A new mixer session uses its own setup; malformed SDP fails it and releases the existing leg once.
+    let replacement = serde_json::json!({"mediaNegotiation":{
+        "mediaContent":{"blob":"synthetic invalid SDP","contentType":"application/sdp-ngc-1.0","newOffer":true,"fromMixer":true},
+        "links":{"mediaAnswer":format!("https://api.flightproxy.teams.microsoft.com/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/negotiations/{call_id}/1/t/4/answer?i=10-0-0-1")}
+    }});
+    let _ = lab.trouter.deliver_call(LAB_B, &callback, &replacement);
+    assert_eq!(b.ended(call).await, End::Failed("media"));
+    wait_until(|| lab.sent_by(LAB_B).iter().filter(|op| op.as_str() == "leave").count() == 1).await;
+    assert!(
+        b.handle
+            .requests()
+            .call(CallAction::Mute { call, muted: true })
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_real_new_mixer_session_replaces_media_and_keeps_gallery_and_camera() {
+    let lab = Lab::start_group_video().await;
+    let mut a = lab.account(LAB_A, A_TONE).await;
+    let mut b = lab.account(LAB_B, B_TONE).await;
+    let call_a = a
+        .handle
+        .requests()
+        .call(CallAction::Call { chat: ABC_CHAT.into() })
+        .await
+        .unwrap();
+    let ringing = b.incoming().await;
+    let call = answer(&mut b, ringing.call).await;
+    a.status(call_a, &CallStatus::Connected).await;
+    let call_id = lab.last_call();
+    let before = b.view(call, |view| !view.participants.is_empty()).await;
+    camera_on(&b, call).await;
+    b.handle
+        .requests()
+        .call(CallAction::Mute { call, muted: true })
+        .await
+        .unwrap();
+    let replacement = teams_mock::mixer::MixerPeer::start_at(lab.relay, 80_000, PEER_TONE).unwrap();
+    let offer = replacement.offer().unwrap();
+    let callback = actual_callback(&lab, "/callAcceptance/links/mediaRenegotiation").await;
+    let answer_path = format!("/api/v2/ep/cc-zz-01-prod-aks.cc.skype.com/cc/v1/negotiations/{call_id}/1/t/4/answer");
+    lab.mock
+        .answer_next("POST", &answer_path, 200, &serde_json::json!({}))
+        .await;
+    let negotiation = serde_json::json!({"mediaNegotiation":{
+        "mediaContent":{"blob":offer.as_str(),"contentType":offer.content_type(),"newOffer":true,"fromMixer":true},
+        "links":{"mediaAnswer":format!("https://api.flightproxy.teams.microsoft.com{answer_path}?i=10-0-0-1")}
+    }});
+    let _ = lab.trouter.deliver_call(LAB_B, &callback, &negotiation);
+    lab.wait_attempts(&answer_path, 1).await;
+    let content = lab
+        .mock
+        .received_requests()
+        .await
+        .into_iter()
+        .find_map(|request| {
+            if request.url.path() != answer_path {
+                return None;
+            }
+            let body: Value = serde_json::from_slice(&request.body).ok()?;
+            body.pointer("/mediaAnswer/mediaContent").cloned()
+        })
+        .expect("Core answered with the replacement session's SDP");
+    assert!(described_and_seeded(&content));
+    let answer = teams_media::sdp::NgcSdp::new(
+        content["contentType"].as_str().unwrap(),
+        content["blob"].as_str().unwrap(),
+    )
+    .unwrap();
+    replacement.accept_answer(&answer).unwrap();
+    wait_until(|| replacement.stats().handshakes > 0 && replacement.stats().received >= FRAMES).await;
+    let after = b
+        .view(call, |view| {
+            view.participants.iter().map(|p| &p.mri).collect::<Vec<_>>()
+                == before.participants.iter().map(|p| &p.mri).collect::<Vec<_>>()
+        })
+        .await;
+    assert_eq!(after.participants.len(), before.participants.len());
+    b.handle
+        .requests()
+        .call(CallAction::Mute { call, muted: false })
+        .await
+        .unwrap();
+    hang_up(&mut b, call).await;
+    hang_up(&mut a, call_a).await;
+    assert_eq!(lab.attempts(&answer_path).await, 1);
+}

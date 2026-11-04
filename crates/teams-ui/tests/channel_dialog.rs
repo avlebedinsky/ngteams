@@ -45,6 +45,7 @@ fn team(can_add: bool, can_add_private: bool, owner: bool) -> Team {
                 name: "General".to_owned(),
                 general: true,
                 kind: ChannelKind::Standard,
+                about: teams_store::ChannelAbout::default(),
                 shown: true,
             },
             TeamChannel {
@@ -52,6 +53,7 @@ fn team(can_add: bool, can_add_private: bool, owner: bool) -> Team {
                 name: "Made-up Channel".to_owned(),
                 general: false,
                 kind: ChannelKind::Private,
+                about: teams_store::ChannelAbout::default(),
                 shown: true,
             },
         ],
@@ -370,6 +372,7 @@ fn a_new_channel_the_engine_stored_is_in_the_sidebar_when_it_opens() {
         name: "Brand new".to_owned(),
         general: false,
         kind: ChannelKind::Standard,
+        about: teams_store::ChannelAbout::default(),
         shown: true,
     });
     *rig.core.teams.lock().unwrap() = Some(vec![listed]);
@@ -377,4 +380,69 @@ fn a_new_channel_the_engine_stored_is_in_the_sidebar_when_it_opens() {
     cx.run_until_parked();
     assert!(bounds(cx, "channel-row-2").is_some());
     assert!(cx.update(|_, cx| shell.read(cx).teams().read(cx).chosen(NEW).is_some()));
+}
+
+#[test]
+fn only_a_refreshed_team_list_closes_a_previously_listed_channel_that_was_removed() {
+    let rig = rig_with(vec![team(true, true, false)]);
+    let (shell, cx) = shell_window(&rig);
+    let channel = "19:channel0002@thread.tacv2";
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_channel_id(channel.into(), window, cx)));
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).main().clone()),
+        Main::Channel(channel.into())
+    );
+
+    let teams = cx.update(|_, cx| shell.read(cx).teams().clone());
+    cx.update(|_, cx| teams.update(cx, |teams, cx| teams.select(None, cx)));
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).main().clone()),
+        Main::Channel(channel.into()),
+        "a local selection notification carries no deletion evidence"
+    );
+
+    let mut listed = team(true, true, false);
+    listed.channels.retain(|listed| listed.id != channel);
+    *rig.core.teams.lock().unwrap() = Some(vec![listed]);
+    rig.send(Event::Teams);
+    cx.run_until_parked();
+    assert_eq!(cx.update(|_, cx| shell.read(cx).main().clone()), Main::Nothing);
+    assert!(cx.update(|_, cx| shell.read(cx).channel().is_none()));
+}
+
+#[test]
+fn an_unlisted_channel_survives_missing_snapshots_until_a_listed_channel_is_actually_removed() {
+    let rig = rig_with(vec![team(true, true, false)]);
+    let (shell, cx) = shell_window(&rig);
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_channel_id(NEW.into(), window, cx)));
+    cx.run_until_parked();
+    rig.send(Event::Teams);
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).main().clone()),
+        Main::Channel(NEW.into()),
+        "a previously started list read cannot prove that a newly opened channel was removed"
+    );
+    let mut listed = team(true, true, false);
+    let mut made = listed.channels[1].clone();
+    made.id = NEW.into();
+    made.name = "Brand new".into();
+    listed.channels.push(made);
+    *rig.core.teams.lock().unwrap() = Some(vec![listed]);
+    rig.send(Event::Teams);
+    cx.run_until_parked();
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).main().clone()),
+        Main::Channel(NEW.into())
+    );
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).teams().read(cx).chosen(NEW).unwrap().name.to_string()),
+        "Brand new"
+    );
+    *rig.core.teams.lock().unwrap() = Some(vec![team(true, true, false)]);
+    rig.send(Event::Teams);
+    cx.run_until_parked();
+    assert_eq!(cx.update(|_, cx| shell.read(cx).main().clone()), Main::Nothing);
 }

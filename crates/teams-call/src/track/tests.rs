@@ -728,3 +728,248 @@ fn a_new_leg_of_the_same_conversation_is_offered_after_decline_or_leave() {
         );
     }
 }
+
+const PUSH_ROOT: &str = "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000/";
+const CAPTION_COMMAND: &str = "https://api.flightproxy.teams.microsoft.com/api/v2/ep/aks-prod-zz-api.callrecorder.teams.cloud.microsoft:21606/v2/oncommand/00000000-0000-4000-8000-000000000001";
+const ROSTER_PATH: &str = "/v4/f/SyntheticEndpoint00000/callAgent/agent-1/07070707/conversation/rosterUpdate/";
+fn caption_actor() -> teams_proto::CallParticipant {
+    teams_proto::CallParticipant {
+        mri: Mri::new(LAB_A),
+        display_name: None,
+        endpoint_id: "00000000-0000-4000-8000-0000000000e1".into(),
+        participant_id: Some("00000000-0000-4000-8000-0000000000e2".into()),
+        language_id: None,
+    }
+}
+fn caption_seed(tracker: &Tracker) -> Attempt {
+    let mut body: Value = serde_json::from_slice(&start_body()).unwrap();
+    body["participants"]["from"]["endpointId"] = json!(caption_actor().endpoint_id);
+    body["participants"]["from"]["participantId"] = json!(caption_actor().participant_id);
+    body["groupChat"] = json!({"threadId":teams_proto::one_to_one_id(LAB_A, LAB_B).unwrap()});
+    body["conversationRequest"]["links"]["rosterUpdate"] =
+        json!(format!("{}{ROSTER_PATH}", PUSH_ROOT.split("/v4/").next().unwrap()));
+    tracker.before(&write(CALL_START_URL, body))
+}
+fn caption_start(actor: &teams_proto::CallParticipant) -> teams_proto::captions::CaptionWrite {
+    teams_proto::captions::CaptionWrite::start(
+        &teams_proto::CallContext::new(CHAIN_ID),
+        &teams_proto::captions::CaptionCommandLink::parse(CAPTION_COMMAND).unwrap(),
+        actor,
+        &teams_proto::one_to_one_id(LAB_A, LAB_B).unwrap(),
+    )
+    .unwrap()
+}
+fn caption_roster(version: u64, state: &str, command: &str) -> Delivery {
+    delivery(
+        30,
+        ROSTER_PATH,
+        json!({"participants":{teams_proto::captions::CAPTION_SERVICE_MRI:{
+            "version":version,"state":state,"endpoints":{"recorder":{"endpointMetadata":{
+                "commandUrl":command,"spokenLanguage":"en-us","processingModes":{"closedCaptions":{"state":"Inactive"}}
+            }}}
+        }}})
+        .to_string()
+        .into_bytes(),
+    )
+}
+fn assert_caption_actor_is_bound(tracker: &Tracker) {
+    use teams_proto::CallState as _;
+    let mut wrong = caption_actor();
+    wrong.mri = Mri::new(LAB_B);
+    assert!(!tracker.caption_allowed(&caption_start(&wrong)));
+    wrong = caption_actor();
+    wrong.endpoint_id = "00000000-0000-4000-8000-0000000000e3".into();
+    assert!(!tracker.caption_allowed(&caption_start(&wrong)));
+    wrong = caption_actor();
+    wrong.participant_id = Some("00000000-0000-4000-8000-0000000000e3".into());
+    assert!(!tracker.caption_allowed(&caption_start(&wrong)));
+}
+fn assert_caption_roster_updates_are_current(tracker: &Tracker, start: &teams_proto::captions::CaptionWrite) {
+    use teams_proto::CallState as _;
+    tracker.observe_delivery(&caption_roster(1, "disconnected", "invalid"));
+    assert!(
+        tracker.caption_allowed(start),
+        "older roster delta cannot revoke newer service"
+    );
+    let mut other = caption_roster(3, "disconnected", "invalid");
+    other.path = "/v4/f/Other/callAgent/agent/rosterUpdate/".into();
+    tracker.observe_delivery(&other);
+    assert!(
+        tracker.caption_allowed(start),
+        "another callback cannot update this service"
+    );
+    tracker.observe_delivery(&caption_roster(3, "active", "invalid"));
+    assert!(
+        !tracker.caption_allowed(start),
+        "new malformed command revokes old link"
+    );
+    tracker.observe_delivery(&caption_roster(4, "active", CAPTION_COMMAND));
+    assert!(tracker.caption_allowed(start));
+}
+#[test]
+fn captions_follow_current_actor_call_roster_version_and_connection() {
+    use teams_proto::CallState as _;
+    let tracker = Tracker::new(Mri::new(LAB_A));
+    let start = caption_start(&caption_actor());
+    assert!(!tracker.caption_allowed(&start));
+    assert!(tracker.connected(CONNECTION, PUSH_ROOT));
+    let pending = caption_seed(&tracker);
+    assert!(!tracker.caption_allowed(&start));
+    tracker.answered(pending, &Response::new(200, answer("caption")));
+    let context = teams_proto::CallContext::new(CHAIN_ID);
+    let chat = teams_proto::one_to_one_id(LAB_A, LAB_B).unwrap();
+    let invite = teams_proto::captions::CaptionWrite::invite(
+        &context,
+        &teams_proto::CallLink::parse(&format!("{}/addParticipant?{ROUTE}", conversation("caption"))).unwrap(),
+        &caption_actor(),
+        &chat,
+        (
+            &format!("{CALLBACKS}/08080808/conversation/addParticipantSuccess/"),
+            &format!("{CALLBACKS}/09090909/conversation/addParticipantFailure/"),
+        ),
+    )
+    .unwrap();
+    assert!(tracker.caption_allowed(&invite));
+    assert!(!tracker.caption_allowed(&start));
+    tracker.observe_delivery(&caption_roster(2, "active", CAPTION_COMMAND));
+    assert!(tracker.caption_allowed(&start));
+    assert_caption_actor_is_bound(&tracker);
+    assert_caption_roster_updates_are_current(&tracker, &start);
+    tracker.disconnected(CONNECTION);
+    assert!(!tracker.caption_allowed(&start));
+    assert!(tracker.connected(CONNECTION, PUSH_ROOT));
+    tracker.observe_delivery(&caption_roster(5, "disconnected", CAPTION_COMMAND));
+    assert!(!tracker.caption_allowed(&start));
+    tracker.observe_delivery(&caption_roster(6, "active", CAPTION_COMMAND));
+    assert!(tracker.caption_allowed(&start));
+    tracker.observe_delivery(&delivery(31, END_PATH, b"{}".to_vec()));
+    assert!(!tracker.caption_allowed(&invite));
+    assert!(!tracker.caption_allowed(&start));
+}
+fn assert_invalid_reply_envelopes_are_refused(tracker: &Tracker, envelope: &Value) {
+    use teams_proto::CallState as _;
+    for field in [
+        "trouter-request",
+        "X-Microsoft-Skype-Chain-ID",
+        "X-Microsoft-Skype-Message-ID",
+    ] {
+        let mut wrong = envelope.clone();
+        wrong["headers"][field] = json!("different");
+        assert!(!tracker.response_allowed(CONNECTION, 20, &wrong.to_string()));
+    }
+    let mut wrong = envelope.clone();
+    wrong["status"] = json!(500);
+    assert!(!tracker.response_allowed(CONNECTION, 20, &wrong.to_string()));
+    wrong = envelope.clone();
+    wrong["id"] = json!(21);
+    assert!(!tracker.response_allowed(CONNECTION, 20, &wrong.to_string()));
+    wrong = envelope.clone();
+    wrong["body"] = json!("not json");
+    assert!(!tracker.response_allowed(CONNECTION, 20, &wrong.to_string()));
+    wrong = envelope.clone();
+    wrong["body"]=json!({"callAcceptanceAcknowledgement":{"links":{"end":"https://other.trouter.teams.microsoft.com/v4/f/Other/callAgent/a/end/"}}}).to_string().into();
+    assert!(!tracker.response_allowed(CONNECTION, 20, &wrong.to_string()));
+}
+#[test]
+fn only_current_registered_delivery_replies_pass_once_with_exact_echoed_headers() {
+    use teams_proto::CallState as _;
+    let tracker = Tracker::new(Mri::new(LAB_A));
+    assert!(tracker.connected(CONNECTION, PUSH_ROOT));
+    tracker.answered(starting(&tracker), &Response::new(200, answer("c")));
+    let accepted = delivery(20, ACCEPTANCE_PATH, acceptance("call"));
+    assert_eq!(tracker.observe_delivery(&accepted), Observed::Acceptance);
+    let envelope = json!({"id":20,"status":200,"headers":{
+        "trouter-request":TROUTER_REQUEST,"X-Microsoft-Skype-Chain-ID":CHAIN_ID,
+        "X-Microsoft-Skype-Message-ID":MESSAGE_ID
+    },"body":json!({"callAcceptanceAcknowledgement":{"links":{}}}).to_string()});
+    assert!(!tracker.response_allowed("other", 20, &envelope.to_string()));
+    assert!(!tracker.response_allowed(CONNECTION, 20, "not json"));
+    assert_invalid_reply_envelopes_are_refused(&tracker, &envelope);
+    assert!(tracker.response_allowed(CONNECTION, 20, &envelope.to_string()));
+    assert!(!tracker.response_allowed(CONNECTION, 20, &envelope.to_string()));
+    tracker.observe_delivery(&accepted);
+    tracker.disconnected(CONNECTION);
+    assert!(!tracker.response_allowed(CONNECTION, 20, &envelope.to_string()));
+    assert!(tracker.connected(CONNECTION, PUSH_ROOT));
+    tracker.observe_delivery(&accepted);
+    tracker.observe_delivery(&delivery(21, END_PATH, b"{}".to_vec()));
+    assert!(!tracker.response_allowed(CONNECTION, 20, &envelope.to_string()));
+}
+#[test]
+fn connection_roots_are_first_party_complete_endpoint_roots() {
+    use teams_proto::CallState as _;
+    let tracker = Tracker::new(Mri::new(LAB_A));
+    for root in [
+        "invalid",
+        "http://pub-ent-zz-01-f.trouter.teams.microsoft.com/v4/f/Endpoint/",
+        "https://unrelated.example/v4/f/Endpoint/",
+        "https://u:p@pub-ent-zz-01-f.trouter.teams.microsoft.com/v4/f/Endpoint/",
+        "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:444/v4/f/Endpoint/",
+        "https://pub-ent-zz-01-f.trouter.teams.microsoft.com/v4/f/Endpoint/?token=1",
+        "https://pub-ent-zz-01-f.trouter.teams.microsoft.com/v4/f/Endpoint/#part",
+        "https://pub-ent-zz-01-f.trouter.teams.microsoft.com/v4/f/Endpoint/callAgent/",
+    ] {
+        assert!(!tracker.connected(CONNECTION, root), "{root}");
+    }
+    assert!(!tracker.connected("", PUSH_ROOT));
+    assert!(tracker.connected(CONNECTION, PUSH_ROOT));
+}
+
+#[test]
+fn current_call_links_keep_their_bound_sender_without_a_recipient_allowlist() {
+    use teams_proto::CallState as _;
+    let tracker = Tracker::new(Mri::new(LAB_A));
+    let start_url = Url::parse(CALL_START_URL).unwrap();
+    let request: Value = serde_json::from_slice(&start_body()).unwrap();
+    assert!(!tracker.call_allowed(&start_url, Some(&request)));
+    assert!(tracker.connected(CONNECTION, PUSH_ROOT));
+    assert!(tracker.call_allowed(&start_url, Some(&request)));
+    let pending = caption_seed(&tracker);
+    tracker.answered(pending, &Response::new(200, answer("actor")));
+    let leave = Url::parse(&format!("{}/leave?{ROUTE}", conversation("actor"))).unwrap();
+    let actor =
+        json!({"id":LAB_A,"endpointId":caption_actor().endpoint_id,"participantId":caption_actor().participant_id});
+    let body = json!({"participants":{"from":actor,"to":[{"id":COWORKER}]}});
+    assert!(
+        tracker.call_allowed(&leave, Some(&body)),
+        "a recipient is no runtime policy decision"
+    );
+    for pointer in [
+        "/participants/from",
+        "/from",
+        "/sender",
+        "/callProgress/sender",
+        "/callAcceptance/acceptedBy",
+        "/mediaNegotiation/sender",
+        "/mediaAnswer/sender",
+    ] {
+        let fields: Vec<_> = pointer.trim_start_matches('/').split('/').collect();
+        let mut foreign = json!({"id":LAB_B});
+        for field in fields.into_iter().rev() {
+            foreign = json!({field:foreign});
+        }
+        assert!(!tracker.call_allowed(&leave, Some(&foreign)), "{pointer}");
+    }
+    assert!(!tracker.call_allowed(
+        &leave,
+        Some(&json!({"additionalActions":[{"input":{"participants":{"from":{"id":LAB_B}}}}]}))
+    ));
+    let mut changed = body.clone();
+    changed["participants"]["from"]["endpointId"] = json!("different");
+    tracker.before(&write(leave.as_str(), changed.clone()));
+    assert!(
+        !tracker.call_allowed(&leave, Some(&changed)),
+        "before cannot rebind an existing call actor"
+    );
+    assert!(tracker.call_allowed(&leave, Some(&body)));
+    let other = Url::parse(&format!("{}/leave?{ROUTE}", conversation("other"))).unwrap();
+    assert!(!tracker.call_allowed(&other, Some(&body)));
+    let foreign_callback =
+        json!({"links":{"end":"https://other.trouter.teams.microsoft.com/v4/f/Other/callAgent/a/end/"}});
+    assert!(!tracker.call_allowed(&leave, Some(&foreign_callback)));
+    tracker.disconnected(CONNECTION);
+    assert!(
+        tracker.call_allowed(&leave, Some(&body)),
+        "bound cleanup survives socket loss"
+    );
+}

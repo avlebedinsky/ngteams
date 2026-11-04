@@ -31,7 +31,7 @@ pub enum CallWriteError {
 }
 
 /// A call write as the transport sends it: method, exact URL, headers (by lower-cased name, none of them a
-/// credential), body, and its registry step. Only this module makes one.
+/// credential), body. Only this module makes one.
 #[derive(Clone, PartialEq, Eq)]
 pub struct CallWire {
     method: Method,
@@ -41,6 +41,10 @@ pub struct CallWire {
 }
 
 impl CallWire {
+    pub(crate) fn body(&self) -> Option<&Value> {
+        self.body.as_ref()
+    }
+
     pub(crate) fn method(&self) -> Method {
         self.method
     }
@@ -56,10 +60,6 @@ impl CallWire {
     /// The body's bytes, exactly as classified and as sent.
     pub(crate) fn body_bytes(&self) -> Option<Vec<u8>> {
         self.body.as_ref().map(body_bytes)
-    }
-
-    pub(crate) fn body(&self) -> Option<&Value> {
-        self.body.as_ref()
     }
 }
 

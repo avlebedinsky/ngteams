@@ -34,10 +34,12 @@
 //! (`docs/plans/20261021-native-teams-m2-gpui-daily-driver.md`).
 
 pub mod account;
+mod attachments;
 pub mod call_floor;
 pub use call_floor::CallFloor;
 pub mod calendar;
 pub mod calling;
+mod channel_admin;
 pub mod channels;
 pub mod emoticons;
 pub mod engine;
@@ -54,11 +56,12 @@ pub mod team_admin;
 mod team_apps;
 pub mod teams;
 pub mod thumbnails;
+mod workflows;
 
 pub use calendar::{EventWrite, EventWritten, Invitable, MeetingAvailability};
 pub use calling::{
-    CallAction, CallActionError, CallMedia, CallParticipant, CallParts, CallStatus, CallVideo, CallView, GROUP_SLOTS,
-    IncomingCall, LobbyPerson, Relay, VideoOutput,
+    CallAction, CallActionError, CallCaptions, CallMedia, CallParticipant, CallParts, CallStatus, CallVideo, CallView,
+    Caption, CaptionPhase, GROUP_SLOTS, IncomingCall, LobbyPerson, Relay, VideoOutput,
 };
 pub use channels::{ChannelDraft, ChannelMade, ChannelProblem};
 pub use emoticons::Strip;

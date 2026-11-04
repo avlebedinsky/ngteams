@@ -23,6 +23,7 @@ pub(crate) struct Account {
     /// The name the service takes from the account's token (`fromDisplayNameInToken`).
     pub(crate) display_name: String,
     pub(crate) token: String,
+    pub(crate) skypetoken: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -112,6 +113,7 @@ impl State {
             mri: mri.to_owned(),
             display_name: name.to_owned(),
             token: initial_token(mri),
+            skypetoken: None,
         })
         .collect();
         let conversations = seed(&fixtures)?;

@@ -1,6 +1,10 @@
 //! Typed Teams requests and their logged transport. Writes require no permit.
 
+mod call_state;
+mod chat_members;
 mod chat_service;
+pub use call_state::CallState;
+pub use chat_members::chat_members;
 mod ids;
 mod log_shape;
 
@@ -8,9 +12,16 @@ mod call_operation;
 pub use call_operation::CallOperation;
 
 mod ams;
+mod attachment;
 mod calendar;
+pub mod captions;
 mod channel_meeting;
+mod channel_own;
 mod channel_read;
+mod channel_sections;
+pub use channel_own::ChannelOwn;
+pub use channel_sections::{ChannelSection, ChannelSectionAction, ChannelSectionWrite, ChannelSections};
+pub use write::{ChannelChange, ChannelData, ChannelRead, ChannelTarget, ChannelWrite};
 pub mod chat;
 mod client;
 mod emoticon;
@@ -31,7 +42,9 @@ mod search;
 mod team_apps;
 mod team_read;
 mod thumbnail;
+pub use attachment::{DriveSite, DriveWrite, MAX_ATTACHMENT_SIZE, OwnDrive, UploadedFile, direct_file_grants};
 mod urlp;
+pub mod workflow;
 mod write;
 
 pub use chat_service::chat_service_path;
@@ -101,10 +114,10 @@ pub use team_apps::{
     TEMPLATE_LOCALE, TeamApps, TeamTemplateCard, TeamTemplateDetails, TeamTemplateRead, TeamTemplates, TemplateChannel,
 };
 pub use team_read::{
-    AddablePeopleSearch, AllTeamsAnalyticsRead, AnalyticsPeriod, ChannelAnalyticsRead, JoinableTeam, JoinableTeams,
-    ManagedChannel, OwnTeamView, PendingInvite, PendingInvites, RosterMember, TagsRead, TeamAnalytics,
-    TeamAnalyticsRead, TeamChannels, TeamCode, TeamJoinRequests, TeamPicture, TeamRoster, TeamTag, TeamTags,
-    TeamThread,
+    AddablePeopleSearch, AllTeamsAnalyticsRead, AnalyticsPeriod, ChannelAnalyticsRead, ChannelOwnProperty,
+    JoinableTeam, JoinableTeams, ManagedChannel, OwnTeamView, PendingInvite, PendingInvites, RosterMember, TagsRead,
+    TeamAnalytics, TeamAnalyticsRead, TeamChannels, TeamCode, TeamJoinRequests, TeamPicture, TeamRoster, TeamTag,
+    TeamTags, TeamThread,
 };
 pub use thumbnail::{FileThumbnails, THUMBNAIL_HOST_SUFFIX, ThumbnailLink, is_thumbnail_link};
 pub use urlp::LinkPreviewPicture;
@@ -128,6 +141,8 @@ pub use write::{
     CancelChannelEvent, CancelEvent, CreateChannelEvent, CreateEvent, CreateOnlineMeeting, DeleteEvent, EventAttendee,
     EventDraft, EventShowAs, MeetingChannel, Organizer, UpdateChannelEvent, UpdateEvent, ZonedTime,
 };
+
+pub use workflow::{WorkflowFailure, WorkflowRequest, WorkflowResponse};
 
 /// Whether test-only transport origins are enabled in this build.
 #[must_use]

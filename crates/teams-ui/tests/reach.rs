@@ -667,14 +667,19 @@ const CREATES_A_CHAT: [&str; 5] = [
     "CreateChat {",
 ];
 
-/// Creating a chat is never offered (M2 Task 13): starting one needs the people search, whose results list other
-/// tenant users. No app crate's source asks the engine for one.
+/// Only an explicit people-search activation offers a new chat, through the engine's persistent outbox.
+/// Other views cannot create one incidentally.
 #[test]
-fn no_view_offers_creating_a_chat() {
+fn only_people_search_offers_creating_a_chat_through_the_engine() {
     let mut read = 0;
     for package in APP_CRATES {
         for (path, text) in sources(&workspace_root().join("crates").join(package).join("src")) {
             read += 1;
+            if path.ends_with("teams-ui/src/global_search.rs") {
+                assert_eq!(text.matches("self.core.write(Action::CreateChat").count(), 1);
+                assert!(text.contains("if self.core.read_only()"));
+                continue;
+            }
             for builds in CREATES_A_CHAT {
                 assert!(!text.contains(builds), "{} names {builds}", path.display());
             }
@@ -737,12 +742,10 @@ fn the_search_is_the_store_s_and_the_service_s_only_through_the_engine() {
     assert!(proto.contains("pub const SUBSTRATE_HOST: &str = \"substrate.office.com\";"));
 }
 
-/// Teams and channels are read-only (M2 Task 16): no write type of the native client targets a channel post's kind
-/// (`teams-proto` maps none: a channel post needs a capture of the web client's in a team of the lab's own first), and
-/// the views that show teams and channels hold no write, no composer and
-/// no transient: nothing there can post, reply, react, mark read or type.
+/// Channel posts have no write route or composer. Channel management and account preferences use domain actions
+/// through Core; views neither construct protocol request builders nor send them.
 #[test]
-fn no_channel_write_exists_and_the_teams_views_write_nothing() {
+fn channel_posts_have_no_write_route_and_views_reach_management_only_through_core() {
     let proto = workspace_root().join("crates/teams-proto/src");
     let mut read = 0;
     for (path, text) in sources(&proto) {
@@ -756,8 +759,72 @@ fn no_channel_write_exists_and_the_teams_views_write_nothing() {
     assert!(read >= 10, "teams-proto's sources were read ({read} files)");
     for view in ["teams_list.rs", "channel_view.rs"] {
         let text = fs::read_to_string(workspace_root().join("crates/teams-ui/src").join(view)).expect("UTF-8");
-        for writes in [".write(", ".resend(", ".transient(", "Action::", "Compose", "compose::"] {
+        for writes in [
+            ".write(",
+            ".resend(",
+            ".transient(",
+            "MessageAction::",
+            "Compose",
+            "compose::",
+        ] {
             assert!(!text.contains(writes), "{view} names {writes}");
+        }
+        for (at, _) in text.match_indices("Action::") {
+            let is_engine_action = text[..at]
+                .chars()
+                .next_back()
+                .is_none_or(|before| !before.is_alphanumeric() && before != '_');
+            assert!(!is_engine_action, "{view} names the engine's message Action");
+        }
+    }
+}
+
+// These are concrete transport/request builders, rather than domain DTOs such as ChannelSectionAction,
+// OwnTeamView, TeamWrite, ChannelRead and WorkflowRequest, whose fixed operations the engine interprets.
+const HTTP_BUILDERS: &[&str] = &[
+    "HttpTransport",
+    "BuiltRequest",
+    "Endpoint",
+    "Client",
+    "Transport",
+    "RequestBuilder",
+    "Prepared",
+    "ChannelSectionWrite",
+    "DriveWrite",
+    "CaptionWrite",
+    "CallWrite",
+    "EndpointRegistration",
+];
+
+#[test]
+fn views_never_construct_or_send_protocol_requests() {
+    for (path, text) in sources(&workspace_root().join("crates/teams-ui/src")) {
+        for (at, _) in text.match_indices("CallingRegistration") {
+            assert!(
+                text[..at].ends_with("Event::"),
+                "{} names the calling registration request builder",
+                path.display()
+            );
+        }
+        for token in text.split(|character: char| !character.is_alphanumeric() && character != '_') {
+            assert!(
+                !HTTP_BUILDERS.contains(&token),
+                "{} names protocol builder {token}",
+                path.display()
+            );
+        }
+        for sends in [
+            ".transport(",
+            ".deliver(",
+            ".send_as(",
+            "impl Request for",
+            "impl teams_proto::Request for",
+        ] {
+            assert!(
+                !text.contains(sends),
+                "{} constructs or sends a protocol request with {sends}",
+                path.display()
+            );
         }
     }
 }

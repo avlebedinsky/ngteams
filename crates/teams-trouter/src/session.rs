@@ -514,9 +514,10 @@ where
 
     fn sink(&self, writer: SocketWriter, connection: &str) -> FrameSink<SocketWriter> {
         let sink = FrameSink::new(writer);
-        if self.trouter.calls.is_some() {
-            // Typed replies stay bound to this socket's delivery connection.
+        if let Some(calls) = &self.trouter.calls {
+            // Typed replies stay bound to this socket and its canonical current call.
             sink.with_call_responses(connection)
+                .with_call_state(Arc::clone(&calls.state))
         } else {
             sink
         }
@@ -574,6 +575,9 @@ where
 
     /// What a connection that ended as `end` leaves behind.
     fn served(&mut self, link: &Link, end: &End) {
+        if let Some(calls) = &self.trouter.calls {
+            calls.state.disconnected(&link.connection);
+        }
         // a connect that ended before its `trouter.connected` failed, whatever ended it (the socket closed, the
         // service disconnected, `1::` or `trouter.connected` never came), unless a renewal ended it
         let failed = matches!(end, End::Again(down, _) if !matches!(down, Down::Renewal));
@@ -820,7 +824,9 @@ impl Link {
         };
         let (outcome, end) = match sent {
             Ok(_) => (Ok(()), None),
-            Err(RespondError::NoCallResponses) => (Err(RespondFailure::NotPending), None),
+            Err(RespondError::NoCallResponses | RespondError::NotCurrentCall) => {
+                (Err(RespondFailure::NotPending), None)
+            }
             Err(RespondError::OtherConnection) => (Err(RespondFailure::OtherConnection), None),
             Err(RespondError::Frame(FrameError::Write(failed))) => (
                 Err(RespondFailure::Failed),
@@ -947,6 +953,11 @@ impl Link {
         K: TrouterCredentials + 'static,
     {
         if let Some(connected) = Connected::from_event(event) {
+            if let Some(calls) = &run.trouter.calls
+                && !calls.state.connected(&self.connection, &connected.push_url)
+            {
+                log::warn!("calling endpoint did not provide a valid callback root");
+            }
             run.connected(&connected);
             self.register(&connected, run);
             self.endpoint = Some(connected.id);

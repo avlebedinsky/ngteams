@@ -94,6 +94,7 @@ enum Command {
     Answer(NgcSdp, Reply<NgcSdp>),
     Accept(NgcSdp, Reply<()>),
     Speak(Vec<i64>),
+    Data(Vec<u8>, Sender<bool>),
 }
 
 /// A group call's mixer on loopback (see the module docs).
@@ -206,6 +207,13 @@ impl MixerPeer {
         let _ = self.commands.send(Command::Speak(sources));
     }
 
+    /// Sends one synthetic service packet over the negotiated client data channel.
+    #[must_use]
+    pub fn send_channel(&self, packet: Vec<u8>) -> bool {
+        let (reply, answer) = mpsc::channel();
+        self.commands.send(Command::Data(packet, reply)).is_ok() && answer.recv_timeout(COMMAND_WAIT).unwrap_or(false)
+    }
+
     /// What it saw and did so far.
     #[must_use]
     pub fn stats(&self) -> MixerStats {
@@ -288,6 +296,9 @@ impl Mixing {
                     .map_err(PeerError::from)
                     .and_then(|answer| Ok(self.peer.accept_answer(&answer)?));
                 let _ = reply.send(result);
+            }
+            Command::Data(packet, reply) => {
+                let _ = reply.send(self.peer.send_channel(&packet));
             }
             Command::Speak(sources) => {
                 let message = json!([{"type": "dsh", "history": sources}]);

@@ -45,6 +45,7 @@ fn team(id: &str, name: &str, owner: bool) -> Team {
             name: "General".to_owned(),
             general: true,
             kind: ChannelKind::Standard,
+            about: teams_store::ChannelAbout::default(),
             shown: true,
         }],
         ..Team::default()
@@ -400,6 +401,7 @@ fn person(mri: &str, name: &str, owner: bool, guest: bool) -> teams_core::TeamMe
         location: Some("Remote".to_owned()),
         owner,
         guest,
+        moderator: false,
     }
 }
 

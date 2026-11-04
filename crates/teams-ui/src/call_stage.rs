@@ -33,6 +33,7 @@
 //! `call-participant self` for the account's own; the tiles' `video-tile` lines; `call-window ended` with the call's
 //! number, why it ended and what it offers: `call-back`, `rejoin` or `none`), never a name.
 
+mod captions;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -59,7 +60,7 @@ use crate::notify::SOMEONE;
 use crate::people;
 use crate::settings::SettingsModel;
 use crate::settings_view::{self, DeviceChoice, device_label};
-use crate::shell::{CallChat, HangUpCall, JoinCall, ToggleCameraCall, ToggleMuteCall};
+use crate::shell::{CallChat, HangUpCall, JoinCall, ToggleCameraCall, ToggleCaptionsCall, ToggleMuteCall};
 use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 use crate::video::{Tile, Tiles, VideoFeed};
@@ -143,6 +144,10 @@ pub struct CallStage {
     grid_traced: Option<CallView>,
     /// The window's title as last set.
     titled: Option<SharedString>,
+    caption_scroll: gpui::ScrollHandle,
+    caption_font: f32,
+    caption_top: bool,
+    caption_language: Option<String>,
     /// Who the call was with, as last said while it was up: its end still names them.
     with: Option<SharedString>,
     /// The call's end was shown (and traced).
@@ -197,6 +202,10 @@ impl CallStage {
             results: None,
             grid_traced: None,
             titled: None,
+            caption_scroll: gpui::ScrollHandle::new(),
+            caption_font: 18.0,
+            caption_top: false,
+            caption_language: None,
             with: None,
             end_shown: false,
             closing: None,
@@ -266,6 +275,7 @@ impl CallStage {
     /// The calls changed: the participants read, the duration ticking while connected; once the call ended its frames
     /// go and a test call's devices are named as they were.
     fn changed(&mut self, cx: &mut Context<Self>) {
+        self.caption_scroll.scroll_to_bottom();
         let live = self.live(cx);
         if let Some(active) = &live {
             let (core, echo) = (Arc::clone(&self.core), self.calls.read(cx).echo().cloned());
@@ -575,6 +585,11 @@ impl CallStage {
     fn more(&self, palette: Palette, cx: &mut Context<Self>) -> AnyElement {
         let stage = cx.weak_entity();
         let video = self.calls.read(cx).video().is_some();
+        let caption_visible = self.calls.read(cx).captions().phase != teams_core::CaptionPhase::Off;
+        let caption_available = !self.core.read_only()
+            && self
+                .live(cx)
+                .is_some_and(|call| call.status == CallStatus::Connected && call.kind != CallKind::TestCall);
         let face = tool_face(Glyph::MORE, "More", palette);
         selected_by(
             "call-more",
@@ -583,7 +598,8 @@ impl CallStage {
                 .h(px(48.0))
                 .child(face)
                 .tooltip("More actions")
-                .dropdown_menu_with_anchor(Anchor::TopRight, move |menu: PopupMenu, _, _| {
+                .dropdown_menu_with_anchor(Anchor::TopRight, move |menu: PopupMenu, window, cx| {
+                    let menu = captions::more(menu, stage.clone(), caption_visible, caption_available, window, cx);
                     let menu = if video {
                         menu.item(effects_item("call-more-video-effects", stage.clone()))
                     } else {
@@ -1125,6 +1141,7 @@ impl Render for CallStage {
         self.retitle(&title, window);
         let body = self.body((live.as_ref(), ended.as_ref()), &title, palette, cx);
         let header = self.header(live.as_ref(), title, palette, cx);
+        let mut captions = live.as_ref().and_then(|_| self.caption_pane(palette, cx));
         // a refusal while the call is up, or of a call back from its end
         let refused = (live.is_some() || ended.as_ref().is_some_and(|ended| ended.check.is_none()))
             .then(|| self.refused(palette, cx))
@@ -1134,6 +1151,7 @@ impl Render for CallStage {
             .key_context(CONTEXT)
             .track_focus(&self.focus)
             .on_action(cx.listener(|this, _: &ToggleMuteCall, _, cx| this.ask(Ask::ToggleMute, cx)))
+            .on_action(cx.listener(|this, _: &ToggleCaptionsCall, _, cx| this.ask(Ask::ToggleCaptions, cx)))
             .on_action(cx.listener(|this, _: &ToggleCameraCall, _, cx| this.ask(Ask::ToggleCamera, cx)))
             .on_action(cx.listener(|this, _: &HangUpCall, _, cx| this.ask(Ask::HangUp, cx)))
             .on_action(cx.listener(|this, _: &CallChat, _, cx| this.act_on_end(false, cx)))
@@ -1145,7 +1163,9 @@ impl Render for CallStage {
             .text_color(rgb(palette.foreground))
             .child(header)
             .children(refused)
+            .children(if self.caption_top { captions.take() } else { None })
             .child(div().flex_1().min_h_0().child(body))
+            .children(captions)
     }
 }
 

@@ -204,6 +204,15 @@ pub(in crate::scenario) async fn page(fail_editor: bool, missing_name: bool) -> 
 pub(in crate::scenario) async fn page_with(
     fail_editor: bool,
     missing_name: bool,
+    hook: impl FnMut(&Value, &EventsOut) -> Option<Result<Value, String>> + Send + 'static,
+) -> Page {
+    page_with_target("19:synthetic-ab@thread.v2", fail_editor, missing_name, hook).await
+}
+
+pub(in crate::scenario) async fn page_with_target(
+    expected: &str,
+    fail_editor: bool,
+    missing_name: bool,
     mut hook: impl FnMut(&Value, &EventsOut) -> Option<Result<Value, String>> + Send + 'static,
 ) -> Page {
     let relay: EventsOut = Arc::new(Mutex::new(None));
@@ -217,7 +226,10 @@ pub(in crate::scenario) async fn page_with(
         missing_name,
     };
     let hooked = Arc::clone(&relay);
-    let page = Page::new(move |command| hook(command, &hooked).unwrap_or_else(|| chat.answer(command))).await;
+    let page = Page::new_lab_chat(expected, move |command| {
+        hook(command, &hooked).unwrap_or_else(|| chat.answer(command))
+    })
+    .await;
     relay.lock().unwrap().replace((page.events.clone(), page.sender()));
     page
 }

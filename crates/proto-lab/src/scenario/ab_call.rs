@@ -502,6 +502,17 @@ async fn open_all_with(
 }
 
 impl CallPlan {
+    /// The exact conversation this run may call, independently of the web client's restored selection.
+    fn expected_chat(&self) -> Result<String, ScenarioError> {
+        if let Some(chat) = &self.call.group_chat {
+            return Ok(chat.clone());
+        }
+        let [(.., callee)] = self.callees.as_slice() else {
+            return Err(setup("a 1:1 call needs exactly one planned callee".to_owned()));
+        };
+        call_chat(&self.call.caller, callee)
+    }
+
     /// `alias`'s MRI, `""` (nobody's) for an account the plan doesn't call.
     fn callee_mri(&self, alias: Alias) -> &str {
         self.callees
@@ -516,13 +527,20 @@ impl CallPlan {
         placed: &mut Option<u64>,
         report: &mut ScenarioReport,
     ) -> Result<(), ScenarioError> {
+        let expected = self.expected_chat()?;
+        let members: Vec<String> = std::iter::once(self.call.caller.clone())
+            .chain(self.callees.iter().map(|(_, mri)| mri.clone()))
+            .collect();
+        for (_, session) in sessions.iter() {
+            session.declare_target(&expected, &members)?;
+        }
         let (caller, callees) = sessions
             .split_first_mut()
             .ok_or_else(|| setup("no caller's browser".to_owned()))?;
         let caller = &mut caller.1;
         self.load_pages(caller, callees, report).await?;
         if self.step == CallStep::StartHeld {
-            return start_held(caller, self.held_starts, report).await;
+            return start_held(caller, &self.expected_chat()?, self.held_starts, report).await;
         }
         wait_calling_socket(CALLER, caller, report).await?;
         for (alias, session) in callees.iter_mut() {
@@ -577,7 +595,7 @@ impl CallPlan {
     ) -> Result<(), ScenarioError> {
         let at = now_ms();
         *placed = Some(at);
-        place_call((CALLER, caller), Modality::Audio, report).await?;
+        place_call((CALLER, caller), &self.expected_chat()?, Modality::Audio, report).await?;
         match self.step.callee_action() {
             Some(action) => {
                 if let Err(error) = wait_incoming(callees, caller.capture_dir(), report).await {
@@ -678,6 +696,14 @@ pub(crate) async fn check_ring(
             }
         }
     }
+    let expected = call
+        .group_chat
+        .clone()
+        .map_or_else(|| call_chat(&call.caller, callee), Ok)?;
+    session
+        .driver()
+        .preflight_recipients("verify the incoming call recipients", &expected)
+        .await?;
     let shown = session
         .driver()
         .evaluate(
@@ -766,13 +792,14 @@ async fn note_ringing(alias: Alias, session: &LabSession, report: &mut ScenarioR
 /// client tries again by itself: every try is), and the screen each leaves is closed.
 async fn start_held(
     caller: &mut LabSession,
+    chat: &str,
     modalities: &[Modality],
     report: &mut ScenarioReport,
 ) -> Result<(), ScenarioError> {
     caller.hold(start_held_rule().map_err(|error| setup(error.to_string()))?);
     for &modality in modalities {
         let before = held_back(&caller.held_requests(), START_HELD);
-        place_call((CALLER, caller), modality, report).await?;
+        place_call((CALLER, caller), chat, modality, report).await?;
         wait_held(caller, before + 1).await?;
         report
             .notes
@@ -827,14 +854,77 @@ impl Modality {
     }
 }
 
+/// The expected 1:1 conversation, derived from both configured lab identities.
+pub(crate) fn call_chat(origin: &str, recipient: &str) -> Result<String, ScenarioError> {
+    teams_proto::one_to_one_id(origin, recipient)
+        .ok_or_else(|| setup("the planned call needs two distinct work-account identities".to_owned()))
+}
+
+/// Refuses a stale or ambiguous restored conversation before opening any call controls.
+async fn verify_call_chat(driver: &mut Driver, chat: &str) -> Result<(), ScenarioError> {
+    let shown = driver
+        .evaluate("the planned call's conversation", &call_chat_script(chat, None))
+        .await?;
+    if shown == Value::Bool(true) {
+        Ok(())
+    } else {
+        Err(setup(
+            "refusing to call: the page does not show exactly the planned conversation".to_owned(),
+        ))
+    }
+}
+
+/// The target check and the click share one JavaScript turn, so a changed selection cannot slip between them.
+pub(crate) async fn click_call_in_chat(driver: &mut Driver, chat: &str, selector: &str) -> Result<(), ScenarioError> {
+    driver.preflight_chat("verify the call recipients", chat).await?;
+    let clicked = driver
+        .evaluate(
+            "call only the planned conversation",
+            &call_chat_script(chat, Some(selector)),
+        )
+        .await?;
+    if clicked == Value::Bool(true) {
+        Ok(())
+    } else {
+        Err(setup(
+            "refusing to call: the planned conversation or its call control changed".to_owned(),
+        ))
+    }
+}
+
+fn call_chat_script(chat: &str, selector: Option<&str>) -> String {
+    let action = selector.map_or_else(
+        || "return true;".to_owned(),
+        |selector| {
+            format!(
+                "const controls = [...document.querySelectorAll({})].filter(e => {{ \
+                 const r = e.getBoundingClientRect(); \
+                 return r.width > 0 && r.height > 0 && !e.disabled && e.getAttribute('aria-disabled') !== 'true'; \
+                 }}); if (controls.length !== 1) return false; \
+                 const e = controls[0]; e.click(); return true;",
+                js_string(selector),
+            )
+        },
+    );
+    format!(
+        "(() => {{ const sends = [...document.querySelectorAll({sends})]; \
+         if (sends.length !== 1 || sends[0].getAttribute('data-track-thread-id') !== {chat}) return false; \
+         {action} }})()",
+        sends = js_string(CHAT_SEND_CSS),
+        chat = js_string(chat),
+    )
+}
+
 /// `alias` places a call from the chat's header ([`Modality::control`]): its button when the header shows one, else its item
 /// in the call options; a group chat's confirmation, when it asks for one within [`CONFIRM_WAIT`], is confirmed.
 pub(crate) async fn place_call(
     (alias, caller): (Alias, &mut LabSession),
+    chat: &str,
     modality: Modality,
     report: &mut ScenarioReport,
 ) -> Result<(), ScenarioError> {
     let mut driver = caller.driver();
+    verify_call_chat(&mut driver, chat).await?;
     let control = Selector::Css(modality.control());
     let shown = driver
         .evaluate(
@@ -850,9 +940,7 @@ pub(crate) async fn place_call(
             .wait_for(&format!("the item of {}", modality.what()), control, CONTROL_WAIT)
             .await?;
     }
-    driver
-        .click(&format!("{alias} starts {}", modality.what()), control)
-        .await?;
+    click_call_in_chat(&mut driver, chat, modality.control()).await?;
     report
         .notes
         .push(format!("{alias}: {} clicked at {}", modality.what(), unix_ms()));
@@ -866,9 +954,7 @@ pub(crate) async fn place_call(
         .await
         .is_ok();
     if asks {
-        driver
-            .click(&format!("{alias} confirms the group call"), GROUP_CALL_CONFIRM)
-            .await?;
+        click_call_in_chat(&mut driver, chat, GROUP_CALL_CONFIRM_CSS).await?;
         report
             .notes
             .push(format!("{alias}: confirmed the group call at {}", unix_ms()));
@@ -1092,9 +1178,7 @@ impl CallPlan {
         open_join(alias, joiner, report).await?;
         self.check_join(alias, joiner, placed, report).await?;
         let mut driver = joiner.driver();
-        driver
-            .click(&format!("{alias} joins the running call"), CHAT_JOIN)
-            .await?;
+        click_call_in_chat(&mut driver, &self.expected_chat()?, CHAT_JOIN_CSS).await?;
         report.notes.push(format!("{alias}: clicked join at {}", unix_ms()));
         driver
             .wait_for(&format!("{alias}'s call screen after the join"), HANG_UP, CONNECT_WAIT)
@@ -2079,3 +2163,7 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 #[path = "../../tests/support/scenario/ab_call_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "../../tests/support/scenario/call_targets.rs"]
+pub(crate) mod test_targets;

@@ -36,6 +36,7 @@ fn teams() -> Vec<Team> {
         name: name.to_owned(),
         general,
         kind: ChannelKind::Standard,
+        about: teams_store::ChannelAbout::default(),
         shown: true,
     };
     vec![

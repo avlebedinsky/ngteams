@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::browser::Display;
+use crate::scenario::ab_call::test_targets;
 use crate::scenario::test_page::{Page, evaluated};
 use crate::session::SessionReport;
 
@@ -10,10 +11,10 @@ fn plan(step: CallStep) -> CallPlan {
         scenario: ScenarioName::AbCall,
         chat_link: "https://teams.microsoft.com/l/chat/synthetic".to_owned(),
         call: RunCall {
-            caller: "8:orgid:synthetic-a".to_owned(),
+            caller: "8:orgid:00000000-0000-4000-8000-000000000001".to_owned(),
             group_chat: None,
         },
-        callees: vec![(Alias::B, "8:orgid:synthetic-b".to_owned())],
+        callees: vec![(Alias::B, "8:orgid:00000000-0000-4000-8000-000000000002".to_owned())],
         held_starts: &[Modality::Audio, Modality::Video],
         step,
         options: RunOptions {
@@ -47,7 +48,10 @@ async fn invalid_call_plans_fail_before_opening_any_browser() {
     let dir = tempfile::tempdir().unwrap();
     let paths = LabPaths::new(dir.path().to_path_buf());
     let plan = plan(CallStep::Answer);
-    assert_eq!(plan.callee_mri(Alias::B), "8:orgid:synthetic-b");
+    assert_eq!(
+        plan.callee_mri(Alias::B),
+        "8:orgid:00000000-0000-4000-8000-000000000002"
+    );
     assert_eq!(plan.callee_mri(Alias::C), "");
     let mut report = ScenarioReport::new(ScenarioName::AbCall);
     let error = plan.drive(&mut [], &mut None, &mut report).await.unwrap_err();
@@ -64,7 +68,7 @@ async fn invalid_call_plans_fail_before_opening_any_browser() {
 }
 
 #[tokio::test]
-async fn a_normal_call_plan_without_the_pinned_browser_fails_before_opening_a_lab_fence() {
+async fn a_normal_call_plan_without_the_pinned_browser_fails_before_opening_a_profile() {
     for step in [CallStep::Answer, CallStep::StartHeld] {
         let dir = tempfile::tempdir().unwrap();
         let paths = LabPaths::new(dir.path().to_path_buf());
@@ -83,9 +87,16 @@ fn missing_account_mris_fail_with_the_account_name() {
     let config = LabConfig::parse(&text, dir.path()).unwrap();
     let error = mri(&config, Alias::B).unwrap_err();
     assert!(error.to_string().contains("no MRI for b"));
-    let text = text.replacen("alias = 'b'", "alias = 'b'\nmri = '8:orgid:synthetic-b'", 1);
+    let text = text.replacen(
+        "alias = 'b'",
+        "alias = 'b'\nmri = '8:orgid:00000000-0000-4000-8000-000000000002'",
+        1,
+    );
     let config = LabConfig::parse(&text, dir.path()).unwrap();
-    assert_eq!(mri(&config, Alias::B).unwrap(), "8:orgid:synthetic-b");
+    assert_eq!(
+        mri(&config, Alias::B).unwrap(),
+        "8:orgid:00000000-0000-4000-8000-000000000002"
+    );
 }
 
 #[test]
@@ -121,7 +132,11 @@ fn a_callee_report_requires_an_invitation_and_the_action_its_role_sent() {
     let call = plan(CallStep::Answer).call;
     let mut report = ScenarioReport::new(ScenarioName::AbCall);
     judge_callee(
-        (Alias::B, "8:orgid:synthetic-b", CalleeRole::Other),
+        (
+            Alias::B,
+            "8:orgid:00000000-0000-4000-8000-000000000002",
+            CalleeRole::Other,
+        ),
         &call,
         None,
         dir.path(),
@@ -144,7 +159,7 @@ fn a_callee_report_requires_an_invitation_and_the_action_its_role_sent() {
         std::fs::write(dir.path().join(EVENTS_FILE), text).unwrap();
         let mut report = ScenarioReport::new(ScenarioName::AbCall);
         judge_callee(
-            (Alias::B, "8:orgid:synthetic-b", role),
+            (Alias::B, "8:orgid:00000000-0000-4000-8000-000000000002", role),
             &call,
             Some(1),
             dir.path(),
@@ -213,9 +228,21 @@ async fn returning_to_chat_clicks_the_app_before_waiting_for_the_header() {
 }
 
 async fn evaluation_page(values: Vec<Value>) -> Page {
+    evaluation_page_in(values, &test_targets::chat()).await
+}
+
+async fn evaluation_page_in(values: Vec<Value>, chat: &str) -> Page {
+    let chat = chat.to_owned();
     let mut values = std::collections::VecDeque::from(values);
     Page::new(move |command| {
         assert_eq!(command["method"], "Runtime.evaluate");
+        if command["params"]["expression"]
+            .as_str()
+            .unwrap()
+            .contains("return buttons.length === 1")
+        {
+            return Ok(evaluated(json!(chat)));
+        }
         Ok(evaluated(
             values.pop_front().expect("an unexpected extra page evaluation"),
         ))
@@ -227,9 +254,10 @@ async fn evaluation_page(values: Vec<Value>) -> Page {
 async fn placing_a_call_uses_the_shown_button_or_opens_its_options_before_confirmation() {
     for (shown, modality) in [(true, Modality::Audio), (false, Modality::Video)] {
         let values = if shown {
-            vec![json!(true); 4]
+            vec![json!(true); 5]
         } else {
             vec![
+                json!(true),
                 json!(false),
                 json!(true),
                 json!(true),
@@ -238,23 +266,30 @@ async fn placing_a_call_uses_the_shown_button_or_opens_its_options_before_confir
                 json!(true),
             ]
         };
-        let mut page = evaluation_page(values).await;
+        let mut page = evaluation_page_in(values, "19:synthetic-target@thread.v2").await;
         let dir = tempfile::tempdir().unwrap();
-        let mut session = page.session(dir.path(), false);
+        let mut session = test_targets::allow(page.session(dir.path(), false), test_targets::A);
         let mut report = ScenarioReport::new(ScenarioName::AbCall);
-        place_call((Alias::A, &mut session), modality, &mut report)
-            .await
-            .unwrap();
+        place_call(
+            (Alias::A, &mut session),
+            "19:synthetic-target@thread.v2",
+            modality,
+            &mut report,
+        )
+        .await
+        .unwrap();
         let commands = page.commands();
         let expressions: Vec<_> = commands
             .iter()
             .map(|command| command["params"]["expression"].as_str().unwrap())
+            .filter(|expression| !expression.contains("return buttons.length === 1"))
             .collect();
-        assert!(expressions[0].contains(&js_string(modality.control())));
+        assert!(expressions[0].contains("data-track-thread-id"));
+        assert!(expressions[1].contains(&js_string(modality.control())));
         if !shown {
-            assert!(expressions[1].contains("dropdown-calling-toggle-more-options-btn"));
-            assert!(expressions[1].contains("e.click()"));
-            assert!(expressions[2].contains(&js_string(modality.control())));
+            assert!(expressions[2].contains("dropdown-calling-toggle-more-options-btn"));
+            assert!(expressions[2].contains("e.click()"));
+            assert!(expressions[3].contains(&js_string(modality.control())));
         }
         assert!(expressions[expressions.len() - 3].contains(&js_string(modality.control())));
         assert!(expressions[expressions.len() - 3].contains("e.click()"));
@@ -271,6 +306,113 @@ async fn placing_a_call_uses_the_shown_button_or_opens_its_options_before_confir
 }
 
 #[tokio::test]
+async fn a_restored_unrelated_chat_is_refused_before_any_call_control_is_touched() {
+    let mut page = evaluation_page_in(vec![json!(false)], "19:synthetic-target@thread.v2").await;
+    let dir = tempfile::tempdir().unwrap();
+    let mut session = test_targets::allow(page.session(dir.path(), false), test_targets::A);
+    let mut report = ScenarioReport::new(ScenarioName::AbCall);
+    let error = place_call(
+        (Alias::A, &mut session),
+        "19:synthetic-target@thread.v2",
+        Modality::Audio,
+        &mut report,
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("does not show exactly the planned conversation")
+    );
+    assert!(report.notes.is_empty());
+    let commands = page.commands();
+    assert_eq!(commands.len(), 1);
+    let expression = commands[0]["params"]["expression"].as_str().unwrap();
+    assert!(expression.contains("19:synthetic-target@thread.v2"));
+    assert!(expression.contains("sends.length !== 1"));
+    assert!(!expression.contains("click()"));
+}
+
+#[tokio::test]
+async fn a_selection_changed_before_the_call_or_confirmation_is_refused_atomically() {
+    for values in [
+        vec![json!(true), json!(true), json!(false)],
+        vec![json!(true), json!(true), json!(true), json!(true), json!(false)],
+    ] {
+        let mut page = evaluation_page_in(values, "19:synthetic-target@thread.v2").await;
+        let dir = tempfile::tempdir().unwrap();
+        let mut session = test_targets::allow(page.session(dir.path(), false), test_targets::A);
+        let mut report = ScenarioReport::new(ScenarioName::AbCall);
+        let error = place_call(
+            (Alias::A, &mut session),
+            "19:synthetic-target@thread.v2",
+            Modality::Audio,
+            &mut report,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("conversation or its call control changed"));
+        let commands = page.commands();
+        let expression = commands.last().unwrap()["params"]["expression"].as_str().unwrap();
+        assert!(expression.contains("data-track-thread-id"));
+        assert!(expression.contains("19:synthetic-target@thread.v2"));
+        assert!(expression.find("return false").unwrap() < expression.find("e.click()").unwrap());
+    }
+}
+
+#[test]
+fn planned_conversations_are_derived_from_the_exact_identities_or_group_thread() {
+    let mut call = plan(CallStep::Answer);
+    assert_eq!(
+        call.expected_chat().unwrap(),
+        "19:00000000-0000-4000-8000-000000000001_00000000-0000-4000-8000-000000000002@unq.gbl.spaces"
+    );
+    call.callees.clear();
+    assert!(call.expected_chat().is_err());
+    call.call.group_chat = Some("19:synthetic-group@thread.v2".to_owned());
+    assert_eq!(call.expected_chat().unwrap(), "19:synthetic-group@thread.v2");
+    assert!(call_chat("unknown", "8:orgid:unknown").is_err());
+}
+
+#[tokio::test]
+async fn a_call_without_actor_evidence_or_with_changed_declared_members_never_clicks_call() {
+    for changed_members in [false, true] {
+        let mut page = evaluation_page(vec![json!(true), json!(true)]).await;
+        let dir = tempfile::tempdir().unwrap();
+        let session = page.session(dir.path(), false);
+        let mut session = if changed_members {
+            test_targets::with_members(
+                session,
+                test_targets::A,
+                &[test_targets::A, "8:orgid:00000000-0000-4000-8000-000000000004"],
+            )
+        } else {
+            session
+        };
+        let mut report = ScenarioReport::new(ScenarioName::AbCall);
+        let error = place_call(
+            (Alias::A, &mut session),
+            &test_targets::chat(),
+            Modality::Audio,
+            &mut report,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains(if changed_members {
+            "exact-target membership"
+        } else {
+            "no explicit lab action target context"
+        }));
+        assert!(report.notes.is_empty());
+        assert!(
+            page.commands()
+                .iter()
+                .all(|command| { !command["params"]["expression"].as_str().unwrap().contains("e.click()") })
+        );
+    }
+}
+
+#[tokio::test]
 async fn retry_and_hangup_buttons_are_clicked_only_when_the_page_shows_them() {
     for shown in [true, false] {
         let values = if shown {
@@ -280,7 +422,7 @@ async fn retry_and_hangup_buttons_are_clicked_only_when_the_page_shows_them() {
         };
         let mut page = evaluation_page(values).await;
         let dir = tempfile::tempdir().unwrap();
-        let mut session = page.session(dir.path(), false);
+        let mut session = test_targets::allow(page.session(dir.path(), false), test_targets::A);
         let mut report = ScenarioReport::new(ScenarioName::AbCall);
         give_up_retry(&mut session, &mut report).await.unwrap();
         hang_up(&mut session, &mut report).await.unwrap();
@@ -302,7 +444,7 @@ async fn an_error_reading_the_call_screen_is_reported_without_hanging_up() {
     })
     .await;
     let dir = tempfile::tempdir().unwrap();
-    let mut session = page.session(dir.path(), false);
+    let mut session = test_targets::allow(page.session(dir.path(), false), test_targets::A);
     let mut report = ScenarioReport::new(ScenarioName::AbCall);
     hang_up_after_failure(Alias::B, &mut session, &mut report).await;
     assert_eq!(page.commands().len(), 1);
@@ -321,7 +463,7 @@ async fn call_diagnostics_include_controls_and_microphone_without_changing_the_p
     ])
     .await;
     let dir = tempfile::tempdir().unwrap();
-    let session = page.session(dir.path(), false);
+    let session = test_targets::allow(page.session(dir.path(), false), test_targets::A);
     let mut report = ScenarioReport::new(ScenarioName::AbCall);
     watch_controls(Alias::B, &session).await.unwrap();
     note_microphone(Alias::B, &session, &mut report).await;
@@ -350,7 +492,10 @@ async fn ring_end_reports_both_a_gone_and_a_still_visible_notification() {
         })
         .await;
         let dir = tempfile::tempdir().unwrap();
-        let mut callees = [(Alias::B, page.session(dir.path(), false))];
+        let mut callees = [(
+            Alias::B,
+            test_targets::allow(page.session(dir.path(), false), test_targets::A),
+        )];
         let mut report = ScenarioReport::new(ScenarioName::AbCall);
         wait_ring_end(&mut callees, Duration::from_secs(1), &mut report).await;
         assert!(
@@ -394,7 +539,7 @@ async fn closing_a_calling_socket_releases_its_object_group_and_counts_only_clos
     })
     .await;
     let dir = tempfile::tempdir().unwrap();
-    let session = page.session(dir.path(), false);
+    let session = test_targets::allow(page.session(dir.path(), false), test_targets::A);
     assert_eq!(close_calling_socket(&session).await, 2);
     assert_eq!(
         page.commands()
@@ -431,7 +576,7 @@ async fn a_ring_click_requires_a_bound_invitation_and_exactly_one_shown_call() {
     for shown in [true, false] {
         let mut page = evaluation_page(vec![json!(shown)]).await;
         let dir = tempfile::tempdir().unwrap();
-        let mut session = page.session(dir.path(), true);
+        let mut session = test_targets::allow(page.session(dir.path(), true), test_targets::A);
         let plan = plan(CallStep::Answer);
         let callee = plan.callee_mri(Alias::B);
         std::fs::write(
@@ -458,7 +603,7 @@ async fn an_unrecorded_or_unrelated_ring_is_refused_before_any_page_action() {
     for record in [true, false] {
         let mut page = Page::new(|_| Err("no CDP command is permitted for this refusal".to_owned())).await;
         let dir = tempfile::tempdir().unwrap();
-        let mut session = page.session(dir.path(), record);
+        let mut session = test_targets::allow(page.session(dir.path(), record), test_targets::A);
         let plan = plan(CallStep::Answer);
         let callee = plan.callee_mri(Alias::B);
         if record {
@@ -491,7 +636,7 @@ async fn joining_requires_the_group_invitation_and_the_groups_visible_chat() {
         };
         let mut page = evaluation_page(vec![json!(reading.to_string())]).await;
         let dir = tempfile::tempdir().unwrap();
-        let session = page.session(dir.path(), true);
+        let session = test_targets::allow(page.session(dir.path(), true), test_targets::A);
         let mut plan = plan(CallStep::Join);
         plan.call.group_chat = Some("19:synthetic@thread.v2".to_owned());
         std::fs::write(
@@ -517,7 +662,7 @@ async fn joining_requires_the_group_invitation_and_the_groups_visible_chat() {
 async fn joining_without_group_capture_or_invitation_never_evaluates_the_page() {
     let mut page = Page::new(|_| Err("no CDP command is permitted for this refusal".to_owned())).await;
     let dir = tempfile::tempdir().unwrap();
-    let session = page.session(dir.path(), false);
+    let session = test_targets::allow(page.session(dir.path(), false), test_targets::A);
     let mut plan = plan(CallStep::Join);
     let mut report = ScenarioReport::new(ScenarioName::AbCall);
     let error = plan.check_join(Alias::B, &session, 100, &mut report).await.unwrap_err();
@@ -528,7 +673,7 @@ async fn joining_without_group_capture_or_invitation_never_evaluates_the_page() 
     assert!(page.commands().is_empty());
 
     let mut page = Page::new(|_| Err("no CDP command is permitted for this refusal".to_owned())).await;
-    let session = page.session(dir.path(), true);
+    let session = test_targets::allow(page.session(dir.path(), true), test_targets::A);
     let error = plan.check_join(Alias::B, &session, 100, &mut report).await.unwrap_err();
     assert!(error.to_string().contains("no invitation of the run's call"));
     assert!(page.commands().is_empty());
@@ -605,12 +750,15 @@ fn live_recording_pauses_keep_the_existing_scenario_durations() {
 #[tokio::test]
 async fn cancel_and_unanswered_steps_place_the_call_then_hang_up_and_record_controls() {
     for step in [CallStep::Cancel, CallStep::Timeout] {
-        let mut origin_peer = evaluation_page(vec![json!(true); 6]).await;
+        let mut origin_peer = evaluation_page(vec![json!(true); 7]).await;
         let mut answer_peer = evaluation_page(vec![json!("{synthetic:1}")]).await;
         let origin_dir = tempfile::tempdir().unwrap();
         let answer_dir = tempfile::tempdir().unwrap();
-        let mut caller = origin_peer.session(origin_dir.path(), true);
-        let mut callees = [(Alias::B, answer_peer.session(answer_dir.path(), true))];
+        let mut caller = test_targets::allow(origin_peer.session(origin_dir.path(), true), test_targets::A);
+        let mut callees = [(
+            Alias::B,
+            test_targets::allow(answer_peer.session(answer_dir.path(), true), test_targets::A),
+        )];
         let plan = plan(step);
         let mut placed = None;
         let mut report = ScenarioReport::new(ScenarioName::AbCall);
@@ -619,7 +767,7 @@ async fn cancel_and_unanswered_steps_place_the_call_then_hang_up_and_record_cont
             .unwrap();
         assert!(placed.is_some_and(|at| at > 0));
         assert!(report.failures.is_empty());
-        assert_eq!(origin_peer.commands().len(), 6);
+        assert_eq!(origin_peer.commands().len(), 11);
         assert_eq!(answer_peer.commands().len(), 1);
         assert!(report.notes.iter().any(|note| note.contains("hung up at")));
         assert!(
@@ -634,12 +782,12 @@ async fn cancel_and_unanswered_steps_place_the_call_then_hang_up_and_record_cont
 
 #[tokio::test]
 async fn declining_checks_the_bound_ring_before_clicking_then_waits_for_it_to_end() {
-    let mut origin_peer = evaluation_page(vec![json!(true); 6]).await;
+    let mut origin_peer = evaluation_page(vec![json!(true); 7]).await;
     let mut answer_peer = evaluation_page(vec![json!(true), json!(true), json!(true), json!(true), json!("{}")]).await;
     let origin_dir = tempfile::tempdir().unwrap();
     let answer_dir = tempfile::tempdir().unwrap();
-    let mut caller = origin_peer.session(origin_dir.path(), true);
-    let recipient = answer_peer.session(answer_dir.path(), true);
+    let mut caller = test_targets::allow(origin_peer.session(origin_dir.path(), true), test_targets::A);
+    let recipient = test_targets::allow(answer_peer.session(answer_dir.path(), true), test_targets::A);
     let plan = plan(CallStep::Decline);
     let mut capture: Value = serde_json::from_str(&invitation(&plan.call, plan.callee_mri(Alias::B))).unwrap();
     capture["ts_ms"] = json!(now_ms() + 60_000);
@@ -665,6 +813,11 @@ async fn declining_checks_the_bound_ring_before_clicking_then_waits_for_it_to_en
 }
 
 async fn calling_page() -> Page {
+    calling_page_in(&test_targets::chat()).await
+}
+
+async fn calling_page_in(chat: &str) -> Page {
+    let chat = chat.to_owned();
     let relay: std::sync::Arc<std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedSender<Value>>>> =
         std::sync::Arc::default();
     let callback = std::sync::Arc::clone(&relay);
@@ -685,8 +838,14 @@ async fn calling_page() -> Page {
         }
         "Runtime.evaluate" => {
             let expression = command["params"]["expression"].as_str().unwrap();
+            if expression.contains("return buttons.length === 1") {
+                return Ok(evaluated(json!(chat)));
+            }
             if expression == "WebSocket.prototype" {
                 return Ok(json!({"result": {"objectId": "synthetic-prototype"}}));
+            }
+            if expression.contains("sends.length !== 1") {
+                return Ok(evaluated(json!(true)));
             }
             if expression.contains("const sends =") {
                 return Ok(evaluated(json!(json!({"sends": 1, "ours": 1, "joins": 1}).to_string())));
@@ -738,8 +897,14 @@ async fn a_decline_drive_loads_both_pages_and_unconfirmed_closes_preserve_both_r
     let mut answer_peer = calling_page().await;
     let origin_dir = tempfile::tempdir().unwrap();
     let answer_dir = tempfile::tempdir().unwrap();
-    let origin = origin_peer.loaded_session(origin_dir.path(), true).await;
-    let recipient = answer_peer.loaded_session(answer_dir.path(), true).await;
+    let origin = test_targets::allow(
+        origin_peer.loaded_session(origin_dir.path(), true).await,
+        test_targets::A,
+    );
+    let recipient = test_targets::allow(
+        answer_peer.loaded_session(answer_dir.path(), true).await,
+        test_targets::A,
+    );
     let plan = plan(CallStep::Decline);
     let mut received: Value = serde_json::from_str(&invitation(&plan.call, plan.callee_mri(Alias::B))).unwrap();
     received["ts_ms"] = json!(now_ms() + 60_000);
@@ -835,8 +1000,8 @@ async fn answered_video_and_keepalive_phases_require_audio_and_media_on_both_pag
         let mut answer_peer = calling_page().await;
         let origin_dir = tempfile::tempdir().unwrap();
         let answer_dir = tempfile::tempdir().unwrap();
-        let mut origin = origin_peer.session(origin_dir.path(), true);
-        let recipient = answer_peer.session(answer_dir.path(), true);
+        let mut origin = test_targets::allow(origin_peer.session(origin_dir.path(), true), test_targets::A);
+        let recipient = test_targets::allow(answer_peer.session(answer_dir.path(), true), test_targets::A);
         for session in [&origin, &recipient] {
             std::fs::write(session.capture_dir().unwrap().join(EVENTS_FILE), media_capture()).unwrap();
         }
@@ -898,8 +1063,11 @@ async fn absent_audio_video_and_keepalive_proof_fail_each_pages_result() {
     let mut answer_peer = calling_page().await;
     let origin_dir = tempfile::tempdir().unwrap();
     let answer_dir = tempfile::tempdir().unwrap();
-    let mut origin = origin_peer.session(origin_dir.path(), true);
-    let mut callees = [(Alias::B, answer_peer.session(answer_dir.path(), true))];
+    let mut origin = test_targets::allow(origin_peer.session(origin_dir.path(), true), test_targets::A);
+    let mut callees = [(
+        Alias::B,
+        test_targets::allow(answer_peer.session(answer_dir.path(), true), test_targets::A),
+    )];
     let mut report = ScenarioReport::new(ScenarioName::AbCall);
     judge_audio(&mut origin, &mut callees, &mut report);
     assert_eq!(report.failures.len(), 2);
@@ -935,11 +1103,11 @@ async fn absent_audio_video_and_keepalive_proof_fail_each_pages_result() {
 #[tokio::test]
 async fn a_late_join_waits_for_the_ring_and_binds_the_group_before_clicking_join() {
     let mut first_peer = calling_page().await;
-    let mut join_peer = calling_page().await;
+    let mut join_peer = calling_page_in("19:synthetic@thread.v2").await;
     let first_dir = tempfile::tempdir().unwrap();
     let join_dir = tempfile::tempdir().unwrap();
-    let first = first_peer.session(first_dir.path(), true);
-    let joiner = join_peer.session(join_dir.path(), true);
+    let first = test_targets::allow(first_peer.session(first_dir.path(), true), test_targets::A);
+    let joiner = test_targets::allow(join_peer.session(join_dir.path(), true), test_targets::A);
     let capture_dir = joiner.capture_dir().unwrap().to_path_buf();
     let mut plan = plan(CallStep::Join);
     plan.callees.push((Alias::C, "8:orgid:synthetic-c".to_owned()));
@@ -983,8 +1151,8 @@ async fn dropping_a_page_closes_its_calling_socket_restores_network_and_checks_b
     let mut answer_peer = calling_page().await;
     let origin_dir = tempfile::tempdir().unwrap();
     let answer_dir = tempfile::tempdir().unwrap();
-    let mut origin = origin_peer.session(origin_dir.path(), true);
-    let recipient = answer_peer.session(answer_dir.path(), true);
+    let mut origin = test_targets::allow(origin_peer.session(origin_dir.path(), true), test_targets::A);
+    let recipient = test_targets::allow(answer_peer.session(answer_dir.path(), true), test_targets::A);
     std::fs::write(recipient.capture_dir().unwrap().join(EVENTS_FILE), connected_socket()).unwrap();
     let mut callees = [(Alias::B, recipient)];
     let mut report = ScenarioReport::new(ScenarioName::AbCall);
@@ -1024,8 +1192,11 @@ async fn a_socket_close_failure_still_brings_the_page_back_online() {
     .await;
     let origin_dir = tempfile::tempdir().unwrap();
     let answer_dir = tempfile::tempdir().unwrap();
-    let mut origin = origin_peer.session(origin_dir.path(), true);
-    let mut callees = [(Alias::B, answer_peer.session(answer_dir.path(), true))];
+    let mut origin = test_targets::allow(origin_peer.session(origin_dir.path(), true), test_targets::A);
+    let mut callees = [(
+        Alias::B,
+        test_targets::allow(answer_peer.session(answer_dir.path(), true), test_targets::A),
+    )];
     let mut report = ScenarioReport::new(ScenarioName::AbCall);
     let error = drop_off(&mut origin, &mut callees, &mut report, plan(CallStep::Dropped).pauses)
         .await
@@ -1040,7 +1211,7 @@ async fn a_socket_close_failure_still_brings_the_page_back_online() {
 async fn a_call_ending_during_a_hold_fails_the_hold_and_requires_keepalive_proof() {
     let mut page = evaluation_page(vec![json!(false)]).await;
     let dir = tempfile::tempdir().unwrap();
-    let mut session = page.session(dir.path(), true);
+    let mut session = test_targets::allow(page.session(dir.path(), true), test_targets::A);
     let mut pauses = plan(CallStep::KeepAlive).pauses;
     pauses.keep_alive_hold = Duration::from_secs(1);
     let mut report = ScenarioReport::new(ScenarioName::AbCall);
@@ -1058,8 +1229,14 @@ async fn failure_in_the_first_page_still_diagnoses_hangs_up_closes_and_judges_ev
     let mut a = Page::new(|_| Err("synthetic caller disappeared".to_owned())).await;
     let mut b = Page::new(|_| Err("synthetic callee disappeared".to_owned())).await;
     let sessions = vec![
-        (Alias::A, a.session(a_dir.path(), true)),
-        (Alias::B, b.session(b_dir.path(), true)),
+        (
+            Alias::A,
+            test_targets::allow(a.session(a_dir.path(), true), test_targets::A),
+        ),
+        (
+            Alias::B,
+            test_targets::allow(b.session(b_dir.path(), true), test_targets::A),
+        ),
     ];
     let report = run_sessions(
         &plan(CallStep::Answer),
@@ -1092,10 +1269,13 @@ async fn failure_in_the_first_page_still_diagnoses_hangs_up_closes_and_judges_ev
 }
 
 async fn held_page() -> Page {
-    use crate::scenario::ab_chat_full::tests::{broadcast, page_with};
+    use crate::scenario::ab_chat_full::tests::{broadcast, page_with_target};
     let mut starts = 0;
-    page_with(false, false, move |command, events| {
+    page_with_target(&test_targets::chat(), false, false, move |command, events| {
         let expression = command["params"]["expression"].as_str().unwrap_or_default();
+        if expression.contains("return buttons.length === 1") {
+            return Some(Ok(evaluated(json!(test_targets::chat()))));
+        }
         if command["method"] == "Runtime.evaluate" && expression.contains("e.click()")
             && (expression.contains("chat-call-audio-button") || expression.contains("chat-call-video-button"))
         {
@@ -1120,6 +1300,7 @@ async fn held_audio_and_video_starts_are_really_denied_before_each_retry_screen_
     let dir = tempfile::tempdir().unwrap();
     let mut peer = held_page().await;
     let (session, pid) = peer.managed_session(dir.path(), true);
+    let session = test_targets::allow(session, test_targets::A);
     peer.send(
         "Page.frameNavigated",
         json!({"frame":{"id":"synthetic-frame","url":crate::session::TEAMS_URL}}),
@@ -1185,7 +1366,10 @@ async fn a_running_call_conflict_stops_the_ring_wait_and_ringing_diagnostics_kee
     let event = json!({"type":"cdp","method":"Network.webSocketFrameReceived","params":{"response":{"payloadData":format!("3:::{frame}")}}});
     std::fs::write(caller.path().join(EVENTS_FILE), format!("{event}\n")).unwrap();
     let mut peer = Page::new(|_| Err("synthetic incoming call is not shown".to_owned())).await;
-    let mut sessions = [(Alias::B, peer.session(recipient.path(), true))];
+    let mut sessions = [(
+        Alias::B,
+        test_targets::allow(peer.session(recipient.path(), true), test_targets::A),
+    )];
     let mut report = ScenarioReport::new(ScenarioName::AbCall);
     let error = wait_incoming(&mut sessions, Some(caller.path()), &mut report)
         .await
@@ -1204,6 +1388,7 @@ async fn failure_opening_a_callee_closes_the_caller_and_does_not_open_later_acco
     let dir = tempfile::tempdir().unwrap();
     let mut peer = Page::new(|_| Ok(json!({}))).await;
     let (session, pid) = peer.managed_session(dir.path(), true);
+    let session = test_targets::allow(session, test_targets::A);
     let mut session = Some(session);
     let mut aliases = Vec::new();
     let error = open_all_with(

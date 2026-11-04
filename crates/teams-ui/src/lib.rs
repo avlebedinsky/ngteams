@@ -81,6 +81,8 @@ pub mod call_view;
 pub mod call_window;
 pub mod calls;
 pub mod channel_dialog;
+pub mod channel_management;
+pub mod channel_menu;
 pub mod channel_view;
 pub mod chat_list;
 pub mod chat_view;
@@ -136,6 +138,7 @@ pub mod video;
 pub mod video_player;
 pub mod view;
 pub mod window;
+pub mod workflow_dialog;
 
 pub use account_prompt::{AccountPrompt, AccountPromptEvent};
 pub use accounts::{AccountParts, AccountTile, Accounts, AccountsEvent};

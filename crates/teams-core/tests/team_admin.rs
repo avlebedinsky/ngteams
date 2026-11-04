@@ -60,6 +60,7 @@ async fn setup() -> Rig {
     let http = || {
         HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin)
             .unwrap()
+            .for_account(Mri::new(LAB_A))
             .with_middle_tier(MIDDLE_TIER_BASE)
             .unwrap()
             .with_provisioning(PROVISIONING_BASE)
@@ -594,6 +595,14 @@ async fn hiding_a_team_for_the_account_reaches_nobody_and_lists_it_hidden() {
     let mut rig = setup().await;
     rig.settled().await;
     let requests = rig.handle.requests();
+    rig.mock
+        .answer_next(
+            "GET",
+            "/v1.0/me",
+            200,
+            &json!({"id": LAB_A.strip_prefix("8:orgid:").unwrap()}),
+        )
+        .await;
     rig.mock.answer_next("PUT", "hide", 200, &json!({})).await;
     requests
         .own_team_view(
@@ -613,6 +622,14 @@ async fn hiding_a_team_for_the_account_reaches_nobody_and_lists_it_hidden() {
     assert_eq!(sent[0].0, "PUT");
 
     // a refused one changes nothing
+    rig.mock
+        .answer_next(
+            "GET",
+            "/v1.0/me",
+            200,
+            &json!({"id": LAB_A.strip_prefix("8:orgid:").unwrap()}),
+        )
+        .await;
     rig.mock.refuse_next("PUT", "conversations/show", 403).await;
     let refused = requests
         .own_team_view(
@@ -629,6 +646,9 @@ async fn hiding_a_team_for_the_account_reaches_nobody_and_lists_it_hidden() {
         "{refused:?}"
     );
     assert!(rig.stored_team().await.about.hidden);
+    let show = rig.sent(|path| path.ends_with("conversations/show")).await;
+    assert_eq!(show.len(), 1, "the actor was verified and the service refused the show");
+    assert_eq!(show[0].0, "PUT");
 }
 
 #[tokio::test]
@@ -690,4 +710,466 @@ async fn people_a_channel_can_t_be_given_come_back_as_not_added() {
         1,
         "one rejected attempt"
     );
+}
+
+const MANAGED: &str = "19:channel0002@thread.tacv2";
+fn management_context() -> serde_json::Value {
+    json!({"metadata":{"isPartialData":false},"teams":[{
+        "id":TEAM,"displayName":"Synthetic team","memberRoleString":"admin",
+        "teamSiteInformation":{"groupId":GROUP},"tenantId":"00000000-0000-4000-8000-0000000000d0",
+        "channels":[{"id":MANAGED,"displayName":"Current","description":"Before","channelType":0,"isGeneral":false}]
+    }]})
+}
+fn management(action: teams_proto::ChannelChange) -> TeamWrite {
+    TeamWrite::Channel(teams_proto::ChannelWrite {
+        target: teams_proto::ChannelTarget {
+            team: TEAM.into(),
+            team_group: GROUP.into(),
+            channel: MANAGED.into(),
+            channel_group: None,
+            mailbox: None,
+        },
+        action,
+    })
+}
+async fn fresh_context(rig: &Rig, body: &serde_json::Value) {
+    rig.mock.answer_next("GET", "api/v3/teams/users/me", 200, body).await;
+}
+#[tokio::test]
+async fn fresh_channel_edit_updates_only_the_selected_stored_channel() {
+    let mut rig = setup().await;
+    rig.settled().await;
+    fresh_context(&rig, &management_context()).await;
+    rig.mock
+        .answer_next("PATCH", &format!("/channels/{MANAGED}"), 200, &json!({}))
+        .await;
+    rig.handle
+        .requests()
+        .team_write(
+            management(teams_proto::ChannelChange::Edit {
+                name: "Renamed".into(),
+                description: "New description".into(),
+            }),
+            Some(TeamChange::ChannelEdited {
+                team: TEAM.into(),
+                channel: MANAGED.into(),
+                name: "Renamed".into(),
+                description: "New description".into(),
+            }),
+        )
+        .await
+        .unwrap();
+    let team = rig.stored_team().await;
+    let row = team.channels.iter().find(|row| row.id == MANAGED).unwrap();
+    assert_eq!((&*row.name, &*row.about.description), ("Renamed", "New description"));
+    assert_eq!(team.channels.iter().find(|row| row.general).unwrap().name, "General");
+    let sent = rig.sent(|path| path.ends_with(&format!("/channels/{MANAGED}"))).await;
+    assert_eq!(sent.len(), 1);
+    assert_eq!(sent[0].0, "PATCH");
+}
+#[tokio::test]
+async fn fresh_channel_context_rejects_stale_group_role_type_and_missing_channel() {
+    for fault in ["group", "role", "private", "missing", "archived", "partial"] {
+        let mut rig = setup().await;
+        rig.settled().await;
+        let mut body = management_context();
+        match fault {
+            "group" => body["teams"][0]["teamSiteInformation"]["groupId"] = json!("changed"),
+            "role" => body["teams"][0]["memberRoleString"] = json!("user"),
+            "private" => body["teams"][0]["channels"][0]["channelType"] = json!(1),
+            "missing" => body["teams"][0]["channels"] = json!([]),
+            "archived" => body["teams"][0]["isArchived"] = json!(true),
+            "partial" => body = json!({"metadata":{"isPartialData":true},"teams":[]}),
+            _ => unreachable!(),
+        }
+        fresh_context(&rig, &body).await;
+        let failed = rig
+            .handle
+            .requests()
+            .team_write(
+                management(teams_proto::ChannelChange::Edit {
+                    name: "After".into(),
+                    description: "After".into(),
+                }),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(failed, EngineError::TeamNotChanged { .. }),
+            "{fault}: {failed:?}"
+        );
+        let writes = rig.sent(|path| path.ends_with(&format!("/channels/{MANAGED}"))).await;
+        assert!(writes.is_empty(), "{fault}: {writes:?}");
+    }
+}
+#[tokio::test]
+async fn reconciled_archive_and_delete_do_not_repeat_the_remote_mutation() {
+    for gone in [false, true] {
+        let mut rig = setup().await;
+        rig.settled().await;
+        let mut body = management_context();
+        let (action, change) = if gone {
+            body["teams"][0]["channels"] = json!([]);
+            (
+                teams_proto::ChannelChange::Delete,
+                TeamChange::ChannelGone {
+                    team: TEAM.into(),
+                    channel: MANAGED.into(),
+                },
+            )
+        } else {
+            body["teams"][0]["channels"][0]["isArchived"] = json!(true);
+            (
+                teams_proto::ChannelChange::Archive {
+                    archived: true,
+                    site_read_only: false,
+                },
+                TeamChange::ChannelArchived {
+                    team: TEAM.into(),
+                    channel: MANAGED.into(),
+                    archived: true,
+                },
+            )
+        };
+        fresh_context(&rig, &body).await;
+        rig.handle
+            .requests()
+            .team_write(management(action), Some(change))
+            .await
+            .unwrap();
+        let team = rig.stored_team().await;
+        let channel = team.channels.iter().find(|row| row.id == MANAGED);
+        if gone {
+            assert!(channel.is_none());
+        } else {
+            assert!(channel.unwrap().about.archived);
+        }
+        let writes: Vec<_> = rig
+            .mock
+            .received_requests()
+            .await
+            .into_iter()
+            .filter(|r| r.method.as_str() != "GET")
+            .collect();
+        assert!(writes.is_empty(), "{writes:?}");
+    }
+}
+#[tokio::test]
+async fn channel_membership_partial_success_is_reported_without_replay() {
+    for body in [
+        json!({"multipleStatus":[{"id":LAB_B}]}),
+        json!({"failedMembers":[LAB_B]}),
+        json!({"updatedMembersError":[LAB_B]}),
+        json!({"results":[{"status":"Failed"}]}),
+    ] {
+        let mut rig = setup().await;
+        rig.settled().await;
+        fresh_context(&rig, &management_context()).await;
+        rig.mock
+            .answer_next("PUT", &format!("/channels/{MANAGED}/members"), 200, &body)
+            .await;
+        let failed = rig
+            .handle
+            .requests()
+            .team_write(
+                management(teams_proto::ChannelChange::Moderator {
+                    mri: LAB_B.into(),
+                    moderator: true,
+                }),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(failed,EngineError::TeamNotChanged{code:Some(code)} if code=="MemberChangeRejected"));
+        assert_eq!(
+            rig.sent(|path| path.ends_with(&format!("/channels/{MANAGED}/members")))
+                .await
+                .len(),
+            1
+        );
+    }
+}
+fn hierarchy() -> serde_json::Value {
+    json!({"isPartialResponse":false,"folderHierarchyVersion":42,"conversationFolderOrder":["favorites"],"conversationFolders":[{"id":"favorites","name":"Favorites","folderType":"Favorites","conversationFolderItems":[{"conversationId":MANAGED}]}]})
+}
+#[tokio::test]
+async fn channel_sections_use_fresh_version_and_independent_actor_once() {
+    let mut rig = setup().await;
+    rig.settled().await;
+    rig.mock
+        .answer_next("GET", "conversationFolders", 200, &hierarchy())
+        .await;
+    rig.mock
+        .answer_next(
+            "GET",
+            "/v1.0/me",
+            200,
+            &json!({"id":LAB_A.strip_prefix("8:orgid:").unwrap()}),
+        )
+        .await;
+    rig.mock
+        .answer_next("PATCH", "batchUpdateExpandedState", 200, &json!({}))
+        .await;
+    rig.handle
+        .requests()
+        .channel_section(teams_proto::ChannelSectionAction::Expanded {
+            section: "favorites".into(),
+            expanded: false,
+        })
+        .await
+        .unwrap();
+    let sent = rig.mock.received_requests().await;
+    let written: Vec<_> = sent
+        .iter()
+        .filter(|r| r.url.path().ends_with("batchUpdateExpandedState"))
+        .collect();
+    assert_eq!(written.len(), 1);
+    let body: serde_json::Value = serde_json::from_slice(&written[0].body).unwrap();
+    assert_eq!(body["folderHierarchyVersion"], 42);
+    assert_eq!(body["isExpanded"], false);
+    assert!(sent.iter().any(|r| r.url.path() == "/v1.0/me"));
+}
+#[tokio::test]
+async fn channel_sections_reject_partial_unknown_and_changed_actor_without_write() {
+    for fault in ["partial", "section", "actor"] {
+        let mut rig = setup().await;
+        rig.settled().await;
+        let mut body = hierarchy();
+        if fault == "partial" {
+            body["isPartialResponse"] = json!(true);
+        }
+        rig.mock.answer_next("GET", "conversationFolders", 200, &body).await;
+        rig.mock
+            .answer_next(
+                "GET",
+                "/v1.0/me",
+                200,
+                &json!({"id":LAB_B.strip_prefix("8:orgid:").unwrap()}),
+            )
+            .await;
+        let section = if fault == "section" { "unknown" } else { "favorites" };
+        assert!(
+            rig.handle
+                .requests()
+                .channel_section(teams_proto::ChannelSectionAction::Expanded {
+                    section: section.into(),
+                    expanded: false
+                })
+                .await
+                .is_err(),
+            "{fault}"
+        );
+        assert!(
+            !rig.mock
+                .received_requests()
+                .await
+                .iter()
+                .any(|r| r.method.as_str() == "PATCH")
+        );
+    }
+}
+
+#[tokio::test]
+async fn channel_dialog_reads_reject_wrong_deleted_and_malformed_target_evidence() {
+    use teams_proto::ChannelRead;
+    for fault in ["wrong", "deleted", "malformed", "network", "valid"] {
+        let mut rig = setup().await;
+        rig.settled().await;
+        let route = format!("threads/{MANAGED}");
+        let body = match fault {
+            "wrong" => json!({"id":TEAM}),
+            "deleted" => json!({"id":MANAGED,"isDeleted":true}),
+            "malformed" => json!(["not an object"]),
+            _ => json!({"id":MANAGED,"properties":{"channelSettings":"{}"}}),
+        };
+        rig.mock
+            .answer_next("GET", &route, if fault == "network" { 403 } else { 200 }, &body)
+            .await;
+        let result = rig
+            .handle
+            .requests()
+            .channel_data(ChannelRead::Thread {
+                channel: MANAGED.into(),
+            })
+            .await;
+        if fault == "valid" {
+            assert_eq!(result.unwrap().0["id"], MANAGED);
+        } else {
+            assert!(result.is_err(), "{fault}");
+        }
+        assert!(
+            rig.mock
+                .received_requests()
+                .await
+                .iter()
+                .all(|r| r.method.as_str() == "GET")
+        );
+    }
+}
+#[tokio::test]
+async fn channel_section_remove_reconciles_absent_items_and_sends_one_versioned_present_change() {
+    for present in [false, true] {
+        let mut rig = setup().await;
+        rig.settled().await;
+        let mut body = hierarchy();
+        if !present {
+            body["conversationFolders"][0]["conversationFolderItems"] = json!([]);
+        }
+        rig.mock.answer_next("GET", "conversationFolders", 200, &body).await;
+        rig.mock
+            .answer_next(
+                "GET",
+                "/v1.0/me",
+                200,
+                &json!({"id":LAB_A.strip_prefix("8:orgid:").unwrap()}),
+            )
+            .await;
+        rig.mock
+            .answer_next("POST", "conversationFolders", 200, &json!({}))
+            .await;
+        rig.handle
+            .requests()
+            .channel_section(teams_proto::ChannelSectionAction::Remove {
+                channel: MANAGED.into(),
+            })
+            .await
+            .unwrap();
+        let requests = rig.mock.received_requests().await;
+        let sent: Vec<_> = requests
+            .iter()
+            .filter(|r| r.method.as_str() == "POST" && r.url.path().ends_with("conversationFolders"))
+            .collect();
+        assert_eq!(sent.len(), usize::from(present));
+        if let Some(write) = sent.first() {
+            let body: serde_json::Value = serde_json::from_slice(&write.body).unwrap();
+            assert_eq!(body["folderHierarchyVersion"], 42);
+            assert_eq!(body["actions"][0]["action"], "RemoveItem");
+        }
+    }
+}
+#[tokio::test]
+async fn private_channel_edits_follow_fresh_channel_ownership_and_exact_substrate_group() {
+    const PRIVATE: &str = "00000000-0000-4000-8000-0000000000cc";
+    const TENANT: &str = "00000000-0000-4000-8000-0000000000d0";
+    for fault in ["valid", "not-owner", "group-mismatch", "missing-group", "unknown-type"] {
+        let mut rig = setup().await;
+        rig.settled().await;
+        let mut body = management_context();
+        body["teams"][0]["channels"][0]["channelType"] = json!(if fault == "unknown-type" { 99 } else { 1 });
+        body["teams"][0]["channels"][0]["memberRole"] = json!(if fault == "not-owner" { 1 } else { 2 });
+        if fault != "missing-group" {
+            body["teams"][0]["channels"][0]["substrateGroupId"] = json!(PRIVATE);
+        }
+        fresh_context(&rig, &body).await;
+        let TeamWrite::Channel(mut write) = management(teams_proto::ChannelChange::Edit {
+            name: "Private renamed".into(),
+            description: "Private description".into(),
+        }) else {
+            unreachable!()
+        };
+        write.target.channel_group = Some(format!(
+            "OID:{}@{TENANT}",
+            if fault == "group-mismatch" { GROUP } else { PRIVATE }
+        ));
+        rig.mock.answer_next("PATCH", "", 200, &json!({})).await;
+        let result = rig.handle.requests().team_write(TeamWrite::Channel(write), None).await;
+        assert_eq!(result.is_ok(), fault == "valid", "{fault}: {result:?}");
+        assert_eq!(
+            rig.mock
+                .received_requests()
+                .await
+                .iter()
+                .filter(|r| r.method.as_str() == "PATCH")
+                .count(),
+            usize::from(fault == "valid")
+        );
+    }
+}
+#[tokio::test]
+async fn standard_channel_settings_email_and_archive_use_fresh_operational_context() {
+    use teams_proto::ChannelChange;
+    let cases = [
+        (
+            ChannelChange::Settings(json!({"moderationEnabled":true})),
+            "PUT",
+            "/properties",
+        ),
+        (
+            ChannelChange::Archive {
+                archived: true,
+                site_read_only: true,
+            },
+            "POST",
+            "/archive",
+        ),
+        (ChannelChange::CreateEmail, "POST", "/email"),
+        (
+            ChannelChange::UpdateEmail {
+                allowed_sender_type: "members".into(),
+                allowed_domains: vec!["example.test".into()],
+            },
+            "PUT",
+            "/email",
+        ),
+        (ChannelChange::RemoveEmail, "DELETE", "/email"),
+    ];
+    for (action, verb, suffix) in cases {
+        let mut rig = setup().await;
+        rig.settled().await;
+        fresh_context(&rig, &management_context()).await;
+        rig.mock.answer_next(verb, suffix, 200, &json!({})).await;
+        rig.handle
+            .requests()
+            .team_write(management(action), None)
+            .await
+            .unwrap();
+        assert_eq!(
+            rig.mock
+                .received_requests()
+                .await
+                .iter()
+                .filter(|r| r.method.as_str() == verb && r.url.path().ends_with(suffix))
+                .count(),
+            1
+        );
+    }
+}
+#[tokio::test]
+async fn workflow_engine_delegates_reads_and_single_attempt_mutations_to_native_routes() {
+    use teams_proto::{WorkflowFailure, WorkflowRequest};
+    let rig = setup().await;
+    let base = "/providers/Microsoft.ProcessSimple/environments/Default-synthetic/flows";
+    rig.mock.answer_next("GET", base, 200, &json!({"value":[]})).await;
+    let read = rig
+        .handle
+        .requests()
+        .workflow_request(WorkflowRequest::List {
+            environment: "Default-synthetic".into(),
+        })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(read, json!({"value":[]}));
+    for (status, expected) in [
+        (403, WorkflowFailure::Forbidden),
+        (429, WorkflowFailure::Throttled),
+        (503, WorkflowFailure::Service(503)),
+    ] {
+        rig.mock
+            .answer_next("POST", "/triggers/manual/run", status, &json!({}))
+            .await;
+        let result = rig
+            .handle
+            .requests()
+            .workflow_request(WorkflowRequest::Run {
+                environment: "Default-synthetic".into(),
+                flow: "synthetic".into(),
+                trigger: "manual".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(result, Err(expected));
+    }
+    assert_eq!(rig.sent(|path| path.ends_with("/triggers/manual/run")).await.len(), 3);
 }

@@ -116,7 +116,7 @@ fn channel_meeting(mailbox: &str) -> Option<teams_core::FullEvent> {
 }
 
 /// The tour.
-const STEPS: [Step; 4 + 134] = [
+const STEPS: [Step; 5 + 138] = [
     ("no-chat", |_, _, _| {}),
     ("chat", |shell, window, cx| {
         // the mock answers no one's presence: b's as UPS would tell it, for the avatar's badge
@@ -152,6 +152,24 @@ const STEPS: [Step; 4 + 134] = [
     ("chat-compose", |shell, window, cx| {
         type_in_compose(shell, "Lunch at noon?", window, cx);
     }),
+    ("chat-attachment-error", |shell, window, cx| {
+        let path = std::env::temp_dir().join(format!("tour-attachment-{}.txt", std::process::id()));
+        if let Err(error) = fs::write(&path, "A made-up local file for the attachment error view.") {
+            eprintln!("tour attachment: {error}");
+            cx.quit();
+            return;
+        }
+        with_compose(shell, cx, |compose, cx| compose.attach_files(&[path], window, cx));
+    }),
+    ("chat-attachment-discarded", |shell, window, cx| {
+        with_compose(shell, cx, |compose, cx| compose.discard(window, cx));
+        let path = std::env::temp_dir().join(format!("tour-attachment-{}.txt", std::process::id()));
+        if let Err(error) = fs::remove_file(path) {
+            eprintln!("tour attachment cleanup: {error}");
+            cx.quit();
+        }
+        type_in_compose(shell, "Lunch at noon?", window, cx);
+    }),
     // the box expanded with its format bar (Ctrl+Shift+X), holding formatted text: a heading, bold, a colour and a
     // highlight, a bulleted list
     ("chat-compose-expanded", |shell, window, cx| {
@@ -185,7 +203,50 @@ const STEPS: [Step; 4 + 134] = [
     }),
     // a team's "..." menu, then the "Create a channel" dialog through its states (the mock's team lets a make channels;
     // the mock does not implement team creation, so its failure is shown)
+    ("channel-management-edit", |shell, window, cx| {
+        if let Some(chat) = shell.read(cx).chat() {
+            chat.read(cx).text_selection().close_menu();
+        }
+        let team = shell
+            .read(cx)
+            .teams()
+            .read(cx)
+            .teams()
+            .and_then(|teams| teams.iter().find(|team| team.id == TEAM))
+            .cloned();
+        if let Some(team) = team
+            && let Some(channel) = team.channels.first().cloned()
+        {
+            shell.update(cx, |shell, cx| {
+                shell.channel_chosen(&team, &channel, teams_ui::channel_menu::ChannelChoice::Edit, window, cx);
+            });
+        }
+    }),
+    ("channel-workflows", |shell, window, cx| {
+        shell.update(cx, Shell::close_team_dialog);
+        let team = shell
+            .read(cx)
+            .teams()
+            .read(cx)
+            .teams()
+            .and_then(|teams| teams.iter().find(|team| team.id == TEAM))
+            .cloned();
+        if let Some(team) = team
+            && let Some(channel) = team.channels.first()
+        {
+            shell.update(cx, |shell, cx| {
+                shell.channel_chosen(
+                    &team,
+                    channel,
+                    teams_ui::channel_menu::ChannelChoice::Workflows,
+                    window,
+                    cx,
+                );
+            });
+        }
+    }),
     ("team-menu", |shell, window, cx| {
+        shell.update(cx, Shell::close_team_dialog);
         if let Some(chat) = shell.read(cx).chat() {
             let _ = chat.read(cx).text_selection().clear();
         }
@@ -713,9 +774,33 @@ const STEPS: [Step; 4 + 134] = [
         let list = shell.read(cx).list().clone();
         list.update(cx, |list, cx| list.open(TEAM_CHANNEL.to_owned(), cx));
     }),
+    ("favorite-channel-menu", |shell, window, cx| {
+        let at = shell
+            .read(cx)
+            .list()
+            .read(cx)
+            .favorites()
+            .iter()
+            .position(|row| row.id == TEAM_CHANNEL);
+        if let Some(at) = at {
+            let sidebar = shell.read(cx).sidebar().clone();
+            sidebar.update(cx, |sidebar, cx| {
+                if !sidebar.is_open(teams_ui::sidebar::Section::Favorites) {
+                    sidebar.toggle(teams_ui::sidebar::Section::Favorites, cx);
+                }
+                sidebar.focus_list(window, cx);
+            });
+            press(window, cx, "home");
+            for _ in 0..=at {
+                press(window, cx, "down");
+            }
+            press(window, cx, "shift-f10");
+        }
+    }),
     // calls registered (the mock's engine has none: shown as the engine would tell them): the channel's header has
     // Teams' Meet now, its caret beside it, since no meeting runs in it
-    ("channel-meet-now", |shell, _, cx| {
+    ("channel-meet-now", |shell, window, cx| {
+        press(window, cx, "escape");
         let models = shell.read(cx).models().clone();
         models
             .calls

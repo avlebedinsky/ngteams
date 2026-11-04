@@ -94,6 +94,7 @@ use crate::theme::{self, Palette};
 use crate::trace::{TraceLine, ViewTrace};
 use crate::view::status_text;
 
+mod channel_management;
 mod title_bar;
 
 pub use title_bar::{FocusSearch, GoBack, GoForward, History, RIGHT_WIDTH, SEARCH_MAX, TITLE_HEIGHT, ToggleListPane};
@@ -110,6 +111,7 @@ actions!(
         DeclineCall,
         HangUpCall,
         ToggleMuteCall,
+        ToggleCaptionsCall,
         ToggleCameraCall
     ]
 );
@@ -196,6 +198,7 @@ pub fn init(cx: &mut App) {
         KeyBinding::new("ctrl-shift-d", DeclineCall, None),
         KeyBinding::new("ctrl-shift-h", HangUpCall, None),
         KeyBinding::new("ctrl-shift-m", ToggleMuteCall, None),
+        KeyBinding::new("alt-shift-c", ToggleCaptionsCall, None),
         // Teams' own key for the camera
         KeyBinding::new("ctrl-shift-o", ToggleCameraCall, None),
     ]);
@@ -255,8 +258,12 @@ pub struct Shell {
     sidebar: Entity<Sidebar>,
     /// The chat opened in the conversation pane.
     chat: Option<Entity<ChatView>>,
+    /// Unsaved composers keep their text, reply and in-flight uploads when another chat is opened.
+    drafts: std::collections::HashMap<String, Entity<crate::compose::Compose>>,
     /// The channel opened in the conversation pane, with the names its header shows.
     channel: Option<(Entity<ChannelView>, ChannelChosen)>,
+    /// This open channel has appeared in a successful team list, so a later absence can establish removal.
+    channel_listed: bool,
     /// The meeting that runs in the channel shown, as last read ([`Self::read_channel_meetup`]): its header's Join.
     channel_meetup: Option<(String, ChannelMeetup)>,
     settings_view: Entity<SettingsView>,
@@ -364,7 +371,9 @@ impl Shell {
             teams,
             sidebar,
             chat,
+            drafts: std::collections::HashMap::new(),
             channel: None,
+            channel_listed: false,
             channel_meetup: None,
             settings_view,
             calendar,
@@ -441,6 +450,7 @@ impl Shell {
         let search = cx.new(|cx| GlobalSearch::new(core, list, teams, trace, window, cx));
         let events = cx.subscribe_in(&search, window, |this: &mut Self, _, event, window, cx| match event {
             GlobalSearchEvent::OpenChat(id) => this.open_chat(id.clone(), window, cx),
+            GlobalSearchEvent::Toast(words) => this.show_toast(words, cx),
             GlobalSearchEvent::OpenChannel(id) => this.open_channel_id(id.clone(), window, cx),
             GlobalSearchEvent::OpenMessage(target) => this.open_message(target.clone(), window, cx),
             GlobalSearchEvent::ShowResults => this.show_search_results(window, cx),
@@ -470,10 +480,18 @@ impl Shell {
         });
         // a channel kept as the selected chat (by a build that opened one in a chat view) opens as a channel once the
         // list knows it
-        let kept_channel = cx.observe_in(&teams, window, |this: &mut Self, teams, window, cx| {
-            let Main::Chat(id) = &this.main else { return };
-            if let Some(chosen) = teams.read(cx).chosen(id) {
-                this.open_channel(chosen, window, cx);
+        let mut loaded_at = teams.read(cx).revision();
+        let kept_channel = cx.observe_in(&teams, window, move |this: &mut Self, teams, window, cx| {
+            let loaded = teams.read(cx).revision();
+            let refreshed = loaded != loaded_at;
+            loaded_at = loaded;
+            if let Main::Chat(id) = &this.main {
+                if let Some(chosen) = teams.read(cx).chosen(id) {
+                    this.open_channel(chosen, window, cx);
+                }
+            } else if refreshed {
+                // Selection, menus and sections also notify. Only a completed list read can establish removal.
+                this.channels_changed(&teams, cx);
             }
         });
         (teams, [channel_opened, kept_channel])
@@ -948,6 +966,9 @@ impl Shell {
         let Main::Channel(channel) = self.main.clone() else {
             return;
         };
+        if self.channel_archived(&channel, cx) {
+            return;
+        }
         let busy = self.models.calls.read(cx).busy();
         if busy || self.busy_elsewhere(cx) {
             let ask = Ask::MeetNow { channel };
@@ -987,7 +1008,7 @@ impl Shell {
             .iter()
             .find(|team| team.channels.iter().any(|known| known.id == *channel))?;
         let known = team.channels.iter().find(|known| known.id == *channel)?;
-        if known.kind != teams_store::ChannelKind::Standard {
+        if known.kind != teams_store::ChannelKind::Standard || team.archived || known.about.archived {
             return None;
         }
         Some(crate::event_form::MeetingPlace {
@@ -1059,6 +1080,9 @@ impl Shell {
         }
         let runs = self.channel_meetup.as_ref().is_some_and(|(shown, _)| shown == id);
         if !runs {
+            if self.channel_archived(id, cx) {
+                return None;
+            }
             let schedules = self.meeting_place(cx).is_some();
             return Some(Self::meet_now_button(schedules, cx));
         }
@@ -1114,6 +1138,7 @@ impl Shell {
             CallCommand::HangUp => self.ask_call(Ask::HangUp, cx),
             CallCommand::ToggleMute => self.ask_call(Ask::ToggleMute, cx),
             CallCommand::ToggleCamera => self.ask_call(Ask::ToggleCamera, cx),
+            CallCommand::ToggleCaptions => self.ask_call(Ask::ToggleCaptions, cx),
         }
     }
 
@@ -1312,9 +1337,15 @@ impl Shell {
         match event {
             TeamsListEvent::AddChannel(team) => self.open_channel_dialog(team.clone(), window, cx),
             TeamsListEvent::Chosen(team, choice) => self.team_chosen(team.clone(), *choice, window, cx),
+            TeamsListEvent::ChannelChosen(team, channel, choice) => {
+                self.channel_chosen(team, channel, choice.clone(), window, cx);
+            }
             TeamsListEvent::SeeAllTeams => self.open_teams_page(window, cx),
             TeamsListEvent::SeeAllChannels(team) => {
                 self.open_manage_team(team.clone(), ManageTab::Channels, window, cx);
+            }
+            TeamsListEvent::SectionFailed => {
+                self.show_toast("Couldn't save the section's expanded state. Try again.", cx);
             }
             TeamsListEvent::Opened(_) => {}
         }
@@ -1636,6 +1667,7 @@ impl Shell {
                         this.show_team_dialog(&dialog, window, cx);
                     }
                     TeamDialogEvent::Changed { team, words } => {
+                        this.teams.update(cx, TeamsList::reload);
                         this.show_toast(words, cx);
                         let team = team.clone();
                         if let Some((page, _)) = &this.manage_team
@@ -1756,6 +1788,8 @@ impl Shell {
             .channel
             .as_ref()
             .is_some_and(|(view, _)| view.read(cx).channel() == chosen.id);
+        let listed = self.teams.read(cx).chosen(&chosen.id).is_some();
+        self.channel_listed = listed || shown && self.channel_listed;
         if shown {
             // opened again: synced again (an earlier sync may have failed, and no catch-up reads a channel)
             if let Some((view, kept)) = &mut self.channel {
@@ -1918,9 +1952,11 @@ impl Shell {
         self.hide_calendar(window, cx);
         let shown = self.chat.as_ref().map(|chat| chat.read(cx).conversation() == id);
         if shown != Some(true) {
+            self.keep_draft(cx);
             let parts = self.parts();
             let conversation = id.clone();
-            let chat = cx.new(|cx| ChatView::new(parts, conversation, window, cx));
+            let compose = self.drafts.remove(&id);
+            let chat = cx.new(|cx| ChatView::with_compose(parts, conversation, compose, window, cx));
             self.chat_events = Some(Self::follow_chat(&chat, window, cx));
             self.chat = Some(chat);
         }
@@ -1945,10 +1981,27 @@ impl Shell {
         cx.notify();
     }
 
+    fn keep_draft(&mut self, cx: &App) {
+        self.drafts.retain(|_, compose| compose.read(cx).has_draft(cx));
+        if let Some(chat) = &self.chat {
+            let chat = chat.read(cx);
+            let compose = chat.compose();
+            if compose.read(cx).has_draft(cx) {
+                self.drafts.insert(chat.conversation().to_owned(), compose.clone());
+            } else {
+                self.drafts.remove(chat.conversation());
+            }
+        }
+    }
+
     /// Opens a message's chat ([`Shell::open_chat`]) at the message: the chat view reads back to it, shows it and
     /// selects it ([`ChatView::reveal`]); a channel's opens at the message's thread ([`ChannelView::reveal`]).
     pub fn open_message(&mut self, target: HitTarget, window: &mut Window, cx: &mut Context<Self>) {
-        self.open_chat(target.conversation.clone(), window, cx);
+        if teams_proto::is_team_thread_id(&target.conversation) {
+            self.open_channel_id(target.conversation.clone(), window, cx);
+        } else {
+            self.open_chat(target.conversation.clone(), window, cx);
+        }
         if self.main == Main::Channel(target.conversation.clone()) {
             if let Some((channel, _)) = &self.channel {
                 let thread = target.thread.unwrap_or_else(|| target.message.clone());
@@ -2705,6 +2758,22 @@ fn pane_header(face: Option<Avatar>, title: impl Into<SharedString>, palette: Pa
         )
 }
 
+impl Shell {
+    fn call_keys(shell: gpui::Div, cx: &mut Context<Self>) -> gpui::Div {
+        shell
+            .on_action(cx.listener(|this, _: &CallChat, _, cx| this.call_chat(cx)))
+            .on_action(cx.listener(|this, _: &JoinCall, _, cx| this.join_call(cx)))
+            .on_action(cx.listener(|this, _: &AnswerCall, _, cx| this.ask_call(Ask::Answer, cx)))
+            .on_action(cx.listener(|this, _: &DeclineCall, _, cx| this.ask_call(Ask::Decline, cx)))
+            .on_action(cx.listener(|this, _: &HangUpCall, _, cx| this.ask_call(Ask::HangUp, cx)))
+            .on_action(cx.listener(|this, _: &ToggleMuteCall, _, cx| this.ask_call(Ask::ToggleMute, cx)))
+            .on_action(cx.listener(|this, _: &ToggleCaptionsCall, _, cx| this.ask_call(Ask::ToggleCaptions, cx)))
+            .on_action(cx.listener(|this, _: &ToggleCameraCall, _, cx| {
+                this.ask_call(Ask::ToggleCamera, cx);
+            }))
+    }
+}
+
 impl Render for Shell {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = theme::current(cx);
@@ -2746,18 +2815,7 @@ impl Render for Shell {
             .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, _, cx| this.used(cx)))
             .map(|shell| Self::shell_keys(shell, cx))
             // the call keys only in a build that shows calls: elsewhere they reach whatever else takes them
-            .when(self.models.calls.read(cx).shows(), |shell| {
-                shell
-                    .on_action(cx.listener(|this, _: &CallChat, _, cx| this.call_chat(cx)))
-                    .on_action(cx.listener(|this, _: &JoinCall, _, cx| this.join_call(cx)))
-                    .on_action(cx.listener(|this, _: &AnswerCall, _, cx| this.ask_call(Ask::Answer, cx)))
-                    .on_action(cx.listener(|this, _: &DeclineCall, _, cx| this.ask_call(Ask::Decline, cx)))
-                    .on_action(cx.listener(|this, _: &HangUpCall, _, cx| this.ask_call(Ask::HangUp, cx)))
-                    .on_action(cx.listener(|this, _: &ToggleMuteCall, _, cx| this.ask_call(Ask::ToggleMute, cx)))
-                    .on_action(cx.listener(|this, _: &ToggleCameraCall, _, cx| {
-                        this.ask_call(Ask::ToggleCamera, cx);
-                    }))
-            })
+            .when(self.models.calls.read(cx).shows(), |shell| Self::call_keys(shell, cx))
             .relative()
             .size_full()
             .flex()

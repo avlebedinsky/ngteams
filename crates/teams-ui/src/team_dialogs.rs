@@ -184,6 +184,7 @@ fn new_team_row(name: &str, description: &str, first_channel: &str, public: bool
             name: first_channel.to_owned(),
             general: true,
             kind: ChannelKind::Standard,
+            about: teams_store::ChannelAbout::default(),
             shown: true,
         }],
     }

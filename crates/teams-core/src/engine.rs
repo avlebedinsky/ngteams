@@ -43,7 +43,9 @@
 //!   they were made, but a query (and a person, the teams and the chat listing, from the store alone, their own
 //!   background read started afterwards) is answered also while a read of the catch-up waits on the service, from the
 //!   store as it stands (`inbox`): a catch-up that runs for minutes (hundreds of conversations, a page of 200 channel
-//!   posts taking seconds) doesn't hold up a view's reads, while every other request waits for it.
+//!   posts taking seconds) doesn't hold up a view's reads. Read receipts queue and advance the local horizon during
+//!   those waits too; local queries and receipts also proceed while an outbox attempt awaits transport. Other requests
+//!   wait their turn. The timestamp-ordered service horizon reconciles the local read without reviving stale badges.
 //! - **People** ([`EngineRequests::person`]): someone's name and picture as the views show them, from the store, and
 //!   read in the background when the store's are missing or old ([`crate::profiles`]: Graph, else the middle tier's
 //!   profile lookup, a read sent as a `POST`); each change stored is told as [`Event::Profile`].
@@ -409,6 +411,11 @@ pub enum Event {
     /// Who is in the account's call besides it, whose video each line shows, and who is speaking ([`CallView`]):
     /// told whenever that changed.
     CallParticipants { call: CallId, view: CallView },
+    /// Ephemeral live captions for this viewer. Recognized speech is redacted in debug output.
+    CallCaptions {
+        call: CallId,
+        captions: crate::CallCaptions,
+    },
     /// Who waits in the lobby of the account's meeting now (empty once nobody does): each let in or turned away with
     /// [`CallAction::Lobby`]. Told whenever that changed.
     Lobby { call: CallId, waiting: Vec<LobbyPerson> },
@@ -417,6 +424,8 @@ pub enum Event {
 /// What the engine's requests can fail with.
 #[derive(Debug, thiserror::Error)]
 pub enum EngineError {
+    #[error("{why}")]
+    Attachment { why: String },
     #[error(transparent)]
     Store(#[from] StoreError),
     #[error(transparent)]
@@ -498,6 +507,7 @@ impl EngineError {
     #[must_use]
     pub fn kind(&self) -> &'static str {
         match self {
+            Self::Attachment { .. } => "attachment",
             Self::Store(_) => "store",
             Self::Outbox(_) => "outbox",
             Self::CatchUp(_) => "catch-up",
@@ -593,7 +603,10 @@ impl<T> Answer<T> {
 
 /// A request to the engine's thread, with where its answer goes.
 enum Request {
+    UploadFile(PathBuf, Responder<teams_proto::UploadedFile>),
     Write(Action, Responder<OutboxEntry>),
+    /// A read receipt already queued while the engine waited on the service.
+    SendQueued(i64, Responder<OutboxEntry>),
     Resend(i64, Responder<OutboxEntry>),
     Transient(Transient, Responder<TransientSent>),
     OwnAvailability(OwnStatus, Responder<TransientSent>),
@@ -684,6 +697,10 @@ enum Request {
     Team(Box<TeamAsk>),
     /// What the Apps tab, Change picture, a channel's analytics and "More create team options" ask ([`crate::team_apps`]).
     TeamApps(Box<TeamAppsAsk>),
+    Workflow {
+        request: Box<teams_proto::WorkflowRequest>,
+        reply: Responder<teams_proto::WorkflowResponse>,
+    },
     MeetingAvailability {
         attendees: Vec<EventAttendee>,
         start_ms: i64,
@@ -769,6 +786,10 @@ pub struct EngineRequests {
 }
 
 impl EngineRequests {
+    /// Uploads a local file privately. Sharing waits for the message's Send action.
+    pub fn upload_file(&self, path: PathBuf) -> Reply<teams_proto::UploadedFile> {
+        self.ask(|reply| Request::UploadFile(path, reply))
+    }
     /// The account's MRI: who the engine writes as, and whose read horizon and unread counts it answers with.
     #[must_use]
     pub fn me(&self) -> &str {
@@ -790,6 +811,8 @@ impl EngineRequests {
     }
 
     /// Writes through the outbox (see the module docs); the reply is the row as its first send left it.
+    /// A read receipt advances the shared local horizon when queued, before the service answers; only the exact
+    /// stored target is read, and the service reconciles it by the horizon timestamp as usual.
     pub fn write(&self, action: Action) -> Reply<OutboxEntry> {
         self.ask(|reply| Request::Write(action, reply))
     }
@@ -1089,6 +1112,16 @@ impl EngineRequests {
 
     /// Sends a write managing a team through the outbox, and puts `change` in the stored teams once it
     /// went ([`crate::team_admin`]); [`EngineError::TeamNotChanged`] when it didn't.
+    /// Reads channel management data freshly from its own service.
+    /// Moves a channel or creates a section in the account's own Teams hierarchy.
+    pub fn channel_section(&self, action: teams_proto::ChannelSectionAction) -> Reply<()> {
+        self.ask(|reply| Request::Team(Box::new(TeamAsk::ChannelSection { action, reply })))
+    }
+
+    pub fn channel_data(&self, query: teams_proto::ChannelRead) -> Reply<teams_proto::ChannelData> {
+        self.ask(|reply| Request::Team(Box::new(TeamAsk::ChannelRead { query, reply })))
+    }
+
     pub fn team_write(&self, write: TeamWrite, change: Option<TeamChange>) -> Reply<TeamWritten> {
         self.ask(|reply| Request::Team(Box::new(TeamAsk::Write { write, change, reply })))
     }
@@ -1199,6 +1232,14 @@ impl EngineRequests {
                 period,
                 reply,
             }))
+        })
+    }
+
+    /// Native Power Automate management, bound to this engine's account. Mutations pass through the outbox.
+    pub fn workflow_request(&self, request: teams_proto::WorkflowRequest) -> Reply<teams_proto::WorkflowResponse> {
+        self.ask(|reply| Request::Workflow {
+            request: Box::new(request),
+            reply,
         })
     }
 
@@ -1511,6 +1552,7 @@ struct Core<C, T> {
     pictures: Pictures<C>,
     thumbnails: Thumbnails<C>,
     files: FileContents<C>,
+    uploads: crate::attachments::Uploads<C, T>,
     calendar: Calendar<C, T>,
     channels: Channels<C, T>,
     service_search: ServiceSearch<C>,
@@ -1572,13 +1614,20 @@ where
         let pictures = Pictures::new(Arc::clone(&parts.client), disk.clone());
         let thumbnails = Thumbnails::new(Arc::clone(&parts.client), disk);
         let files = FileContents::new(Arc::clone(&parts.client));
+        let uploads = crate::attachments::Uploads::new(Arc::clone(&parts.client), Arc::clone(&outbox));
         let calendar = Calendar::new(Arc::clone(&parts.client), Arc::clone(&outbox));
         let channels = Channels::new(Arc::clone(&parts.client), Arc::clone(&outbox));
         let service_search = ServiceSearch::new(Arc::clone(&parts.client));
         let calling = parts
             .calls
             .map(|calls| Calling::new(calls, Arc::clone(&outbox), Arc::clone(&parts.client), events.clone()));
-        let inbox = Arc::new(Inbox::new(me.as_str().to_owned(), known, requests));
+        let inbox = Arc::new(Inbox::new(
+            me.as_str().to_owned(),
+            known,
+            requests,
+            events.clone(),
+            outbox.is_read_only(),
+        ));
         let catch_up = CatchUp::new(parts.client, Arc::clone(&outbox), me).with_meanwhile(inbox.clone());
         Self {
             store: parts.store,
@@ -1592,6 +1641,7 @@ where
             pictures,
             thumbnails,
             files,
+            uploads,
             calendar,
             channels,
             service_search,
@@ -1781,8 +1831,12 @@ where
 
     async fn on_request(&mut self, request: Request) {
         match request {
+            Request::UploadFile(path, reply) => self.uploads.upload(path, reply),
             Request::Write(action, reply) => {
                 let _ = reply.send(self.logged_write(action).await);
+            }
+            Request::SendQueued(id, reply) => {
+                let _ = reply.send(self.send_row(id).await);
             }
             Request::Sync(reply) => {
                 log::info!("action: a catch-up asked for");
@@ -1876,6 +1930,7 @@ where
             Request::TeamPeople { team, keyword, reply } => self.channels.people(team, keyword, reply),
             Request::Team(ask) => self.channels.team_ask(*ask),
             Request::TeamApps(ask) => self.channels.team_apps_ask(*ask),
+            Request::Workflow { request, reply } => self.channels.workflow(*request, reply),
             Request::SearchService { query, scope, reply } => self.service_search.search(query, scope, reply),
             Request::MeetingAvailability {
                 attendees,
@@ -2051,7 +2106,18 @@ where
     }
 
     async fn write(&mut self, action: Action) -> Result<OutboxEntry, EngineError> {
+        if let Action::Read {
+            conversation,
+            message_id,
+        } = action
+        {
+            let row = self.inbox.queue_read(&mut self.store, conversation, message_id)?;
+            return self.send_row(row.id).await;
+        }
         let command = self.command(action)?;
+        if let Command::Send { conversation, text } = &command {
+            self.uploads.share(conversation, text.files()).await?;
+        }
         if let Command::Send { conversation, .. } = &command {
             // the message a waiting typing announced goes now: the typing must not follow it
             for (transient, dropped) in self.outbox.drop_waiting(conversation) {
@@ -2168,19 +2234,7 @@ where
             Action::Read {
                 conversation,
                 message_id,
-            } => {
-                let message = self.stored(&conversation, &message_id)?;
-                let client_message_id = message.client_message_id.ok_or_else(|| EngineError::Unknown {
-                    message: message_id.clone(),
-                    missing: "clientmessageid",
-                    action: "read up to",
-                })?;
-                Command::ReadReceipt {
-                    conversation,
-                    message_id,
-                    client_message_id,
-                }
-            }
+            } => inbox::read_command(&self.store, conversation, message_id)?,
             Action::CreateChat { others } => {
                 let others: Vec<String> = others.iter().map(|other| other.as_str().to_owned()).collect();
                 create_chat(self.outbox.me().mri(), &others).ok_or(EngineError::NotAChat)?;
@@ -2259,6 +2313,8 @@ where
     fn call(&mut self, action: CallAction, reply: Responder<CallId>) {
         log::info!("action: {}", described::call(&action));
         let act = match action {
+            CallAction::Captions { call, enabled } => Act::Captions(call, enabled),
+            CallAction::CaptionLanguage { call, language } => Act::CaptionLanguage(call, language),
             CallAction::Call { chat } => match self.placement(&chat) {
                 Ok(placement) => Act::Place(placement),
                 Err(error) => {

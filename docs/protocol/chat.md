@@ -603,6 +603,38 @@ stored them, read for their markup only (tags, attributes and style properties c
 
 ## Files: sending, denied (ab-file)
 
+### Chat-file upload and specific-recipient sharing
+
+A fresh armed reference on 2026-11-03 supersedes the old unavailable-storage finding below: the lab account now offers
+"Upload from this device". Picking a synthetic text file starts a content `PUT` to its personal SharePoint site's
+`_api/v2.0/drive/root:/Microsoft Teams Chat Files/<name>:/content`, with `@name.conflictBehavior=rename` and
+`$select=*,sharepointIds,webDavUrl`. A forced-deny probe came first. The next upload, after the folder's current grants
+were read, answered 201 with its item id, name, size, web URL, parent drive and SharePoint item identifiers. The folder
+did not exist before this upload; its new contents inherit the drive root's grants. The file stays in the composer
+until Send. Send first attempts `POST _api/v2.0/sites/root/items/<item GUID>/driveItem/invite`, body with `recipients`
+(one `email` per recipient) and `roles` containing `write`; the initial attempt was denied before any sharing.
+
+The implicit body is unsafe in this tenant: a later reference attempt returned an anonymous edit link despite naming
+one specific recipient. That run is a fence breach; its evidence is preserved separately. The final chat post was
+forced-denied. The native uploader never uses that implicit request. The anonymous permission was revoked; a fresh owner read showed only the owner, and the old unauthenticated link returned “This link has been removed” without file contents. Native sharing requires explicit `requireSignIn:true` and
+`sendInvitation:false`, the documented direct-grant semantics, and confirms the resulting effective grants before
+posting a message. A separate armed direct-grant request, followed by a fresh read, showed only the owner and the
+named lab recipient, with no sharing link. Revoking the unintended anonymous permission uses the documented
+revoke-only `DELETE .../driveItem/permissions/<permission GUID>` endpoint; it grants nobody access and creates no
+invitation. The original breach is not replaced by this later clean evidence.
+
+The native transport independently checks current effective grants as the item's owner. It reads the drive's owner and
+requires that id to match the active account; then it reads the folder and its permissions, or root permissions if the
+folder is absent. A staged upload requires an owner-only private folder. Implementation transports carry only the
+three dedicated lab accounts, validate the active Graph identity and UPN fresh, and read the exact selected thread's
+complete membership before each message or share. They validate each share recipient's Graph identity and exact UPN,
+reject personal/echo/bot/mixed targets, and recheck effective file grants on every outbox message attempt. Renaming on conflict prevents replacing an existing shared
+file. The share similarly reads its item's current permissions and includes every added recipient. The owner receives
+all effective grants, including inherited permissions, according to
+[Microsoft's permission-list contract](https://learn.microsoft.com/en-us/graph/api/driveitem-list-permissions?view=graph-rest-1.0).
+A non-owner, a page, an unknown grant, a group or a broad sharing link fails closed. Every check reads again; grants
+from an earlier upload are never reused for a share. These action checks do not depend on the fence or its mappings. Personal transports do not carry the lab roster.
+
 What the web client does to send a file, with every write of it force-denied by the scenario (M2 Task 23): writes to
 the file services (SharePoint and OneDrive hosts, their media hosts, Graph), to AMS objects, and any `POST` or `PUT`
 whose body names a lab file (the file's name and the caption both carry the marker). a typed a caption, then handed

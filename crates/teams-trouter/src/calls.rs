@@ -51,6 +51,7 @@ fn gunzip(body: &str) -> Option<Vec<u8>> {
 #[derive(Clone)]
 pub struct CallStack {
     observe: Arc<dyn Fn(&Delivery) -> Observed + Send + Sync>,
+    pub(crate) state: Arc<dyn teams_proto::CallState>,
 }
 
 impl CallStack {
@@ -58,6 +59,7 @@ impl CallStack {
     #[must_use]
     pub fn new(tracker: Arc<Tracker>) -> Self {
         Self {
+            state: tracker.clone(),
             observe: Arc::new(move |delivery| tracker.observe_delivery(delivery)),
         }
     }

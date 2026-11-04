@@ -127,6 +127,32 @@ pub struct TeamChannel {
     pub kind: ChannelKind,
     /// Whether it is in the account's channel list.
     pub shown: bool,
+    /// Channel management metadata last read from Teams.
+    pub about: ChannelAbout,
+}
+
+/// What Teams says about a channel. Unknown permissions stay false.
+#[derive(Clone, Default, PartialEq, Eq)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent metadata and permissions supplied by Teams"
+)]
+pub struct ChannelAbout {
+    pub description: String,
+    pub archived: bool,
+    pub owner: bool,
+    pub can_edit: bool,
+    pub can_delete: bool,
+    /// The private/shared channel's substrate group, when supplied.
+    pub group: Option<String>,
+}
+
+impl fmt::Debug for ChannelAbout {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ChannelAbout")
+            .field("archived", &self.archived)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Who a channel is for.
@@ -199,8 +225,8 @@ impl Store {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
             )?;
             let mut channel_row = tx.prepare_cached(
-                "INSERT INTO team_channels (id, team_id, name, general, position, kind, shown)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO team_channels (id, team_id, name, general, position, kind, shown, description, archived, owner, can_edit, can_delete, channel_group)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             )?;
             for (position, team) in (0_i64..).zip(&teams) {
                 team_row.execute(params![
@@ -232,7 +258,13 @@ impl Store {
                         channel.general,
                         place,
                         channel.kind.key(),
-                        channel.shown
+                        channel.shown,
+                        channel.about.description,
+                        channel.about.archived,
+                        channel.about.owner,
+                        channel.about.can_edit,
+                        channel.about.can_delete,
+                        channel.about.group
                     ])?;
                 }
             }
@@ -286,7 +318,7 @@ impl Store {
             })?
             .collect::<Result<_, _>>()?;
         let mut channels = self.conn.prepare_cached(
-            "SELECT id, name, general, kind, shown FROM team_channels WHERE team_id = ?1 ORDER BY position",
+            "SELECT id, name, general, kind, shown, description, archived, owner, can_edit, can_delete, channel_group FROM team_channels WHERE team_id = ?1 ORDER BY position",
         )?;
         for team in &mut teams {
             team.channels = channels
@@ -296,6 +328,14 @@ impl Store {
                         name: row.get(1)?,
                         general: row.get(2)?,
                         kind: ChannelKind::of_key(&row.get::<_, String>(3)?),
+                        about: ChannelAbout {
+                            description: row.get(5)?,
+                            archived: row.get(6)?,
+                            owner: row.get(7)?,
+                            can_edit: row.get(8)?,
+                            can_delete: row.get(9)?,
+                            group: row.get(10)?,
+                        },
                         shown: row.get(4)?,
                     })
                 })?

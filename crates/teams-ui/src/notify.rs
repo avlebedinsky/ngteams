@@ -554,11 +554,51 @@ async fn choose(
     cutoff: i64,
 ) -> Vec<(Candidate, bool)> {
     let channel = stored.is_some_and(|stored| stored.kind == ConversationKind::Channel);
+    let channel_preferences = if channel {
+        let id = candidates
+            .first()
+            .map(|candidate| candidate.conversation.clone())
+            .unwrap_or_default();
+        let read = core
+            .channel_data(teams_proto::ChannelRead::Preferences { channel: id })
+            .await;
+        match read {
+            Ok(data) => Some(crate::channel_management::ChannelNotifications::read(&data.0)),
+            // An unverified preference must not produce a banner while the channel may be muted elsewhere.
+            Err(_) => return Vec::new(),
+        }
+    } else {
+        None
+    };
+    if channel_preferences.as_ref().is_some_and(|settings| {
+        settings.preset == crate::channel_management::NotificationPreset::Muted || settings.desktop == Some(false)
+    }) {
+        return Vec::new();
+    }
+    let roots = if channel_preferences.as_ref().is_some_and(|settings| {
+        settings.follow_threads || settings.preset == crate::channel_management::NotificationPreset::All
+    }) {
+        let id = candidates
+            .first()
+            .map(|candidate| candidate.conversation.clone())
+            .unwrap_or_default();
+        core.reply_roots(id).await.unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let mut horizon = None;
     let mut chosen = Vec::new();
     for candidate in candidates {
         let mention = Mentions::of_message(&candidate.message, core.me()).names_me();
-        if (level == Notifications::Mentions || channel) && !mention {
+        let is_reply = roots.iter().any(|(id, root)| id == &candidate.message.id && id != root);
+        let channel_all = channel_preferences.as_ref().is_some_and(|settings| {
+            if is_reply {
+                settings.follow_threads
+            } else {
+                settings.preset == crate::channel_management::NotificationPreset::All
+            }
+        });
+        if (level == Notifications::Mentions || channel && !channel_all) && !mention {
             continue;
         }
         if matches!(candidate.source, Source::CatchUp | Source::Replay) {

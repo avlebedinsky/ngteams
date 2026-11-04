@@ -55,6 +55,15 @@ struct Private {
     _dir: TempDir,
 }
 
+fn retain_synthetic_recording(pipewire: &PrivatePipeWire) {
+    if let Some(dir) = std::env::var_os("UI_SANDBOX_AUDIO_DIAGNOSTICS") {
+        let dir = PathBuf::from(dir);
+        let _ = fs::create_dir_all(&dir);
+        let _ = fs::copy(pipewire.recording(), dir.join("synthetic-speaker.wav"));
+        let _ = fs::write(dir.join("private-pipewire.log"), pipewire.logs());
+    }
+}
+
 fn private_or_skip(test: &str, options: &PipeWireOptions) -> Option<Private> {
     let tools = match PipeWireTools::find() {
         Ok(tools) => tools,
@@ -139,8 +148,16 @@ fn the_private_pipewire_hears_a_tone_records_the_speaker_shows_a_camera_and_loop
     let Some(private) = private_or_skip("the_private_pipewire", &options) else {
         return;
     };
-    if let Err(error) = check_everything(&private.pipewire) {
-        panic!("{error}{}", private.pipewire.logs());
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| check_everything(&private.pipewire))) {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            retain_synthetic_recording(&private.pipewire);
+            panic!("{error}{}", private.pipewire.logs());
+        }
+        Err(panic) => {
+            retain_synthetic_recording(&private.pipewire);
+            std::panic::resume_unwind(panic);
+        }
     }
     let pids = private.pipewire.pids();
     drop(private);
@@ -204,14 +221,93 @@ fn check_late_camera(env: &[(&str, OsString)]) -> SandboxResult {
     Ok(())
 }
 
-/// The loudest the recording got at `hz`, over half-second windows, once its header holds the last second played.
+/// The loudest complete half-second's mean local tone level, once the header holds the last second played.
 fn recording_level(pipewire: &PrivatePipeWire, hz: f32) -> SandboxResult<f32> {
     std::thread::sleep(Duration::from_millis(1_500));
     let samples = wav::read(&pipewire.recording())?;
-    Ok(samples
-        .chunks(24_000)
-        .map(|window| amplitude_at(window, hz))
-        .fold(0.0, f32::max))
+    if std::env::var_os("UI_SANDBOX_AUDIO_DIAGNOSTICS").is_some() {
+        eprintln!(
+            "synthetic recording: samples={}, half-second levels={:?}",
+            samples.len(),
+            samples
+                .chunks(24_000)
+                .map(|window| amplitude_at(window, hz))
+                .collect::<Vec<_>>()
+        );
+    }
+    Ok(strongest_recorded_tone(&samples, hz))
+}
+
+/// Keep the full 500 ms amplitude requirement, counting silence in its average. A private graph may insert a few
+/// silent samples when the probe's independently paced writer briefly underruns. Those samples shift phase, so a
+/// coherent Fourier measurement over the whole 500 ms cancels an otherwise full-level tone. Measure its component
+/// in each 10 ms device frame, then average every frame in the same complete half-second; a fragment cannot pass.
+fn strongest_recorded_tone(samples: &[f32], hz: f32) -> f32 {
+    samples
+        .as_chunks::<24_000>()
+        .0
+        .iter()
+        .map(|window| {
+            window
+                .as_chunks::<480>()
+                .0
+                .iter()
+                .map(|frame| amplitude_at(frame, hz))
+                .sum::<f32>()
+                / 50.0
+        })
+        .fold(0.0, f32::max)
+}
+
+#[test]
+fn the_recorded_level_counts_every_frame_without_cancelling_a_tone_after_a_tiny_silent_gap() {
+    let mut tone = vec![0.0; 24_000];
+    ToneGenerator::new(Tone {
+        hz: 1_000.0,
+        amplitude: 0.5,
+    })
+    .fill(&mut tone);
+    tone.splice(12_000..12_000, [0.0; 128]);
+    tone.resize(48_000, 0.0);
+    let coherent = tone
+        .as_chunks::<24_000>()
+        .0
+        .iter()
+        .map(|window| amplitude_at(window, 1_000.0))
+        .fold(0.0, f32::max);
+    assert!(
+        coherent < 0.45,
+        "the old coherent estimator must reproduce cancellation: {coherent}"
+    );
+    let recorded = strongest_recorded_tone(&tone, 1_000.0);
+    assert!((recorded - 0.5).abs() < 0.05, "recorded at {recorded}");
+}
+
+#[test]
+fn the_recorded_level_rejects_silence_wrong_frequency_weak_tones_fragments_and_sustained_dropouts() {
+    let make_tone = |hz, amplitude| {
+        let mut samples = vec![0.0; 24_000];
+        ToneGenerator::new(Tone { hz, amplitude }).fill(&mut samples);
+        samples
+    };
+    assert!((strongest_recorded_tone(&make_tone(1_000.0, 0.5), 1_000.0) - 0.5).abs() < 0.05);
+    let mut brief = make_tone(1_000.0, 0.5);
+    brief[9_600..].fill(0.0);
+    let mut dropouts = make_tone(1_000.0, 0.5);
+    for frame in dropouts.as_chunks_mut::<480>().0.iter_mut().step_by(5) {
+        frame.fill(0.0);
+    }
+    for samples in [
+        vec![0.0; 24_000],
+        make_tone(440.0, 0.5),
+        make_tone(1_000.0, 0.44),
+        make_tone(1_000.0, 0.5)[..480].to_vec(),
+        brief,
+        dropouts,
+    ] {
+        let recorded = strongest_recorded_tone(&samples, 1_000.0);
+        assert!(recorded < 0.45, "a sustained full-level tone was absent: {recorded}");
+    }
 }
 
 /// A microphone plugged in that plays given samples over and over is heard as the default and marks when it played

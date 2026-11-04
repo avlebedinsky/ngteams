@@ -871,6 +871,7 @@ fn team_in_search(rig: &Rig) {
             name: "Release notes".to_owned(),
             general: true,
             kind: ChannelKind::Standard,
+            about: teams_store::ChannelAbout::default(),
             shown: true,
         }],
     }]);
@@ -967,40 +968,220 @@ fn group_and_channel_results_merge_local_and_service_entries_and_open_the_select
     assert!(rig.core.actions.lock().unwrap().is_empty());
 }
 
-#[test]
-fn a_person_without_an_existing_chat_opens_people_results_and_never_creates_a_chat_by_itself() {
-    let rig = seeded();
+fn new_person(rig: &Rig) {
     rig.core.service_answer.lock().unwrap().people = vec![FoundPerson {
-        mri: Some("8:orgid:00000000-0000-4000-8000-00000000000d".to_owned()),
+        mri: Some(LAB_C.to_owned()),
         name: "Synthetic analyst".to_owned(),
         email: Some("analyst@lab.example.test".to_owned()),
         job_title: None,
-        department: Some("Research".to_owned()),
+        department: None,
     }];
-    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
-    cx.simulate_keystrokes("ctrl-e");
-    cx.simulate_input("analyst");
-    draw(cx);
-    cx.executor().advance_clock(SUGGEST_DELAY);
-    draw(cx);
-    let search = cx.update(|_, cx| shell.read(cx).search().clone());
-    let at = cx.update(|_, cx| {
-        search
-            .read(cx)
-            .suggestions()
-            .iter()
-            .position(|suggestion| matches!(suggestion, Suggestion::Person { chat: None, .. }))
+}
+
+fn created_chat(state: teams_store::OutboxState) -> teams_store::OutboxEntry {
+    let mut row = common::outbox_row(17, teams_store::OutboxKind::CreateChat, state);
+    row.message_id = Some("19:new-synthetic-chat@thread.v2".to_owned());
+    row
+}
+
+#[test]
+fn clicking_a_person_without_a_listed_chat_opens_the_created_chat_from_suggestions_and_results() {
+    for route in ["suggestion", "people", "keyboard"] {
+        let rig = seeded();
+        new_person(&rig);
+        rig.core
+            .write_answers
+            .lock()
             .unwrap()
-    });
-    cx.update(|window, cx| search.update(cx, |search, cx| search.choose(at, window, cx)));
-    draw(cx);
-    assert_eq!(cx.update(|_, cx| shell.read(cx).main().clone()), Main::Search);
-    assert_eq!(
-        cx.update(|_, cx| search.read(cx).results().unwrap().tab()),
-        teams_ui::global_search::Tab::People
-    );
+            .push_back(created_chat(teams_store::OutboxState::Sent));
+        let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+        cx.simulate_keystrokes("ctrl-e");
+        cx.simulate_input("analyst");
+        draw(cx);
+        cx.executor().advance_clock(SUGGEST_DELAY);
+        draw(cx);
+        assert!(
+            rig.core.actions.lock().unwrap().is_empty(),
+            "searching never creates a chat"
+        );
+        if route == "people" {
+            click(cx, "title-search-chip-people");
+            click(cx, "search-person-0");
+        } else if route == "keyboard" {
+            cx.simulate_keystrokes("down enter");
+            draw(cx);
+        } else {
+            click(cx, "title-search-person-0");
+        }
+        assert_eq!(
+            cx.update(|_, cx| shell.read(cx).main().clone()),
+            Main::Chat("19:new-synthetic-chat@thread.v2".to_owned())
+        );
+        assert!(
+            matches!(rig.core.actions.lock().unwrap().as_slice(), [Action::CreateChat { others }] if others.iter().map(teams_proto::Mri::as_str).collect::<Vec<_>>() == [LAB_C])
+        );
+        assert!(!suggestions_open(&shell, cx));
+    }
+}
+
+#[test]
+fn a_pending_chat_creation_is_watched_without_duplicate_writes_and_opens_when_sent() {
+    let rig = seeded();
+    new_person(&rig);
+    rig.core
+        .write_answers
+        .lock()
+        .unwrap()
+        .push_back(created_chat(teams_store::OutboxState::Pending));
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    search_for(cx, "analyst");
     click(cx, "search-person-0");
-    assert_eq!(cx.update(|_, cx| shell.read(cx).main().clone()), Main::Search);
+    click(cx, "search-person-0");
+    assert_eq!(rig.core.actions.lock().unwrap().len(), 1);
+    // A temporarily unreadable row is still pending: another click must not enqueue a replacement.
+    cx.executor().advance_clock(std::time::Duration::from_millis(500));
+    draw(cx);
+    click(cx, "search-person-0");
+    assert_eq!(rig.core.actions.lock().unwrap().len(), 1);
+    rig.core
+        .outbox_answers
+        .lock()
+        .unwrap()
+        .push_back(created_chat(teams_store::OutboxState::Sent));
+    cx.executor().advance_clock(std::time::Duration::from_millis(500));
+    draw(cx);
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).main().clone()),
+        Main::Chat("19:new-synthetic-chat@thread.v2".to_owned())
+    );
+}
+
+#[test]
+fn a_person_without_a_chat_reports_denial_missing_identity_and_read_only_without_navigating() {
+    for case in ["denied", "missing", "read-only"] {
+        let rig = seeded();
+        new_person(&rig);
+        if case == "missing" {
+            rig.core.service_answer.lock().unwrap().people[0].mri = None;
+        }
+        if case == "read-only" {
+            *rig.core.read_only.lock().unwrap() = true;
+        }
+        rig.core
+            .write_answers
+            .lock()
+            .unwrap()
+            .push_back(created_chat(teams_store::OutboxState::Denied));
+        let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+        search_for(cx, "analyst");
+        click(cx, "search-person-0");
+        assert_eq!(cx.update(|_, cx| shell.read(cx).main().clone()), Main::Search);
+        assert!(cx.debug_bounds("toast").is_some());
+        assert_eq!(rig.core.actions.lock().unwrap().len(), usize::from(case == "denied"));
+    }
+}
+
+#[test]
+fn service_only_channel_and_group_suggestions_open_their_destinations_on_click() {
+    for channel in [false, true] {
+        let rig = seeded();
+        let remote = if channel {
+            "19:remote-channel@thread.tacv2"
+        } else {
+            "19:remote-chat@thread.v2"
+        };
+        if channel {
+            rig.core.service_answer.lock().unwrap().channels.push(FoundChannel {
+                id: remote.to_owned(),
+                name: "Remote".to_owned(),
+                team: None,
+            });
+        } else {
+            rig.core.service_answer.lock().unwrap().chats.push(FoundChat {
+                id: remote.to_owned(),
+                name: "Remote".to_owned(),
+            });
+        }
+        let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+        cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(AB.to_owned(), window, cx)));
+        draw(cx);
+        cx.simulate_keystrokes("ctrl-e");
+        cx.simulate_input("Remote");
+        draw(cx);
+        cx.executor().advance_clock(SUGGEST_DELAY);
+        draw(cx);
+        let selector = if channel {
+            "title-search-channel-0"
+        } else {
+            "title-search-chat-0"
+        };
+        let row = cx.debug_bounds(selector).expect("the suggestion is drawn");
+        // Even the blank right edge owns its click instead of focusing the conversation underneath.
+        cx.simulate_click(point(row.right() - px(8.0), row.center().y), Modifiers::none());
+        draw(cx);
+        assert_eq!(
+            cx.update(|_, cx| shell.read(cx).main().clone()),
+            if channel {
+                Main::Channel(remote.to_owned())
+            } else {
+                Main::Chat(remote.to_owned())
+            }
+        );
+        assert!(rig.core.actions.lock().unwrap().is_empty());
+    }
+}
+
+#[test]
+fn a_chat_creation_that_finishes_after_navigation_does_not_take_the_user_back() {
+    let rig = seeded();
+    new_person(&rig);
+    rig.core
+        .write_answers
+        .lock()
+        .unwrap()
+        .push_back(created_chat(teams_store::OutboxState::Pending));
+    rig.core
+        .outbox_answers
+        .lock()
+        .unwrap()
+        .push_back(created_chat(teams_store::OutboxState::Sent));
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    search_for(cx, "analyst");
+    click(cx, "search-person-0");
+    cx.update(|window, cx| shell.update(cx, |shell, cx| shell.open_chat(AB.to_owned(), window, cx)));
+    draw(cx);
+    cx.executor().advance_clock(std::time::Duration::from_millis(500));
+    draw(cx);
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).main().clone()),
+        Main::Chat(AB.to_owned())
+    );
+    assert_eq!(rig.core.actions.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn a_message_in_a_service_only_channel_opens_the_channel_at_its_thread() {
+    let rig = seeded();
+    let channel = "19:remote-channel@thread.tacv2";
+    rig.core.service_answer.lock().unwrap().messages.push(FoundMessage {
+        id: "9003".to_owned(),
+        conversation: channel.to_owned(),
+        sent_ms: NOON,
+        sender_mri: Some(LAB_B.to_owned()),
+        sender_name: Some("Lab Bee".to_owned()),
+        to: Some("Remote channel".to_owned()),
+        snippet: "Remote post".to_owned(),
+        matched: Vec::new(),
+        parent: Some("9003".to_owned()),
+    });
+    let (shell, cx) = shell_window(&rig, Arc::new(ViewTrace::off()));
+    search_for(cx, "Remote");
+    click(cx, "search-message-9003");
+    assert_eq!(
+        cx.update(|_, cx| shell.read(cx).main().clone()),
+        Main::Channel(channel.to_owned())
+    );
+    assert!(rig.core.synced.lock().unwrap().contains(&channel.to_owned()));
     assert!(rig.core.actions.lock().unwrap().is_empty());
 }
 

@@ -56,6 +56,7 @@ pub const PEER_TONE: Tone = Tone {
 
 /// One account's tokens: its `ic3` token and its skypetoken, as the mock takes them.
 pub struct Tokens {
+    mri: String,
     ic3: String,
     skypetoken: String,
     renewals: broadcast::Sender<Renewal>,
@@ -64,6 +65,7 @@ pub struct Tokens {
 /// `mri`'s tokens on the lab's mock.
 pub fn tokens(lab: &Lab, mri: &str) -> Tokens {
     Tokens {
+        mri: mri.to_owned(),
         ic3: lab.mock.token(mri).unwrap(),
         skypetoken: lab.mock.skypetoken(mri).unwrap(),
         renewals: broadcast::channel(4).0,
@@ -71,12 +73,21 @@ pub fn tokens(lab: &Lab, mri: &str) -> Tokens {
 }
 
 impl Credentials for Tokens {
-    fn bearer(&self, _audience: &str) -> impl Future<Output = Result<Secret, TokenError>> + Send {
-        future::ready(Ok(Secret::new(self.ic3.clone())))
+    fn bearer(&self, audience: &str) -> impl Future<Output = Result<Secret, TokenError>> + Send {
+        let token = if audience == teams_proto::captions::RECORDER_AUDIENCE {
+            jwt(&serde_json::json!({
+                "aud": audience,
+                "oid": self.mri.strip_prefix("8:orgid:").unwrap(),
+                "scp": "access_recorder_service"
+            }))
+        } else {
+            self.ic3.clone()
+        };
+        future::ready(Ok(Secret::new(token)))
     }
 
-    fn bearer_rejected(&self, _audience: &str, _: &Secret) -> impl Future<Output = Result<Secret, TokenError>> + Send {
-        future::ready(Ok(Secret::new(self.ic3.clone())))
+    fn bearer_rejected(&self, audience: &str, _: &Secret) -> impl Future<Output = Result<Secret, TokenError>> + Send {
+        self.bearer(audience)
     }
 
     fn skypetoken(&self) -> impl Future<Output = Result<Option<Secret>, TokenError>> + Send {
@@ -100,6 +111,15 @@ impl TrouterCredentials for Tokens {
     fn renewals(&self) -> broadcast::Receiver<Renewal> {
         self.renewals.subscribe()
     }
+}
+
+/// A made-up JWT with explicit claims, never valid outside the loopback mock.
+pub fn jwt(claims: &serde_json::Value) -> String {
+    use base64::Engine as _;
+    format!(
+        "synthetic.{}.synthetic",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(claims.to_string())
+    )
 }
 
 /// The mock with its Trouter and its calls' media on.
@@ -296,7 +316,12 @@ impl Account {
 
         let tokens = Arc::new(tokens(lab, mri));
         let origin = lab.mock.origin();
-        let http = || HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin).unwrap();
+        let http = || {
+            HttpTransport::with_mock_origin(Arc::clone(&tokens), CHAT_BASE, &origin)
+                .unwrap()
+                .for_account(Mri::new(mri))
+                .with_call_state(tracker.clone())
+        };
         let transport = Arc::new(http());
         let trouter = || {
             Trouter::with_mock_origin(Arc::clone(&transport), Arc::clone(&tokens), lab.trouter.origin())

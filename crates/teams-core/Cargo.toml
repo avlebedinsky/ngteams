@@ -38,6 +38,8 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
 
 [dev-dependencies]
+# Synthetic actor/audience credentials for native caption integration tests.
+base64.workspace = true
 # the call session's tests relay through the mock's loopback TURN server
 teams-core = { path = ".", features = ["test-support"] }
 # and run on the file backend

@@ -200,7 +200,7 @@ async fn reaction_page(shown_after: u8, status: u16) -> Page {
         stage: 0,
         status,
     };
-    let page = Page::new(move |command| reaction.answer(command)).await;
+    let page = Page::new_lab_chat("19:synthetic-ab@thread.v2", move |command| reaction.answer(command)).await;
     wire.lock().unwrap().replace(page.sender());
     page
 }

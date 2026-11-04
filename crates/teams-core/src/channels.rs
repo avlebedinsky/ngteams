@@ -264,6 +264,7 @@ fn row(id: String, name: String, kind: NewChannelKind) -> TeamChannel {
             NewChannelKind::Standard => ChannelKind::Standard,
             NewChannelKind::Private => ChannelKind::Private,
         },
+        about: teams_store::ChannelAbout::default(),
         shown: true,
     }
 }

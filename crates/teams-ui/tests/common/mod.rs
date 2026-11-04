@@ -42,8 +42,19 @@ impl EventSource for FakeEvents {
 
 /// The engine's request side: records each request by name, answers the store's reads from its own state (as account
 /// a) and everything else `Stopped`; with `stopped` set, every request answers `Stopped`.
+pub type WorkflowHandler = fn(&teams_proto::WorkflowRequest) -> teams_proto::WorkflowResponse;
+
+#[derive(Default)]
 pub struct FakeCore {
-    pub me: String,
+    pub workflow_handler: Mutex<Option<WorkflowHandler>>,
+    pub workflow_requests: Mutex<Vec<teams_proto::WorkflowRequest>>,
+    pub hold_workflow_catalog: Mutex<bool>,
+    pub held_workflow_catalog: Mutex<Vec<Answer<teams_proto::WorkflowResponse>>>,
+    pub uploads: Mutex<Vec<std::path::PathBuf>>,
+    pub hold_uploads: Mutex<bool>,
+    pub held_uploads: Mutex<Vec<Answer<teams_proto::UploadedFile>>>,
+    pub upload_answers: Mutex<VecDeque<Result<teams_proto::UploadedFile, EngineError>>>,
+    pub me: AccountMri,
     pub stopped: Mutex<bool>,
     pub asked: Mutex<Vec<&'static str>>,
     pub conversations: Mutex<Vec<Conversation>>,
@@ -88,6 +99,8 @@ pub struct FakeCore {
     pub limits: Mutex<Vec<usize>>,
     /// Every write asked for, in order; each is answered with a pending row of its own.
     pub actions: Mutex<Vec<Action>>,
+    pub write_answers: Mutex<std::collections::VecDeque<OutboxEntry>>,
+    pub outbox_answers: Mutex<std::collections::VecDeque<OutboxEntry>>,
     /// Every transient asked for, in order; each is answered sent.
     pub transients: Mutex<Vec<Transient>>,
     /// Every own availability asked for, in order.
@@ -114,6 +127,10 @@ pub struct FakeCore {
     pub service_searches: Mutex<Vec<(String, SearchScope)>>,
     /// The account's teams as the store has them; `None` before a read settled them.
     pub teams: Mutex<Option<Vec<Team>>>,
+    /// Synthetic channel responses, keyed by sections/thread:<id>/preferences:<id>/email:<id>.
+    pub channel_data: Mutex<HashMap<String, teams_proto::ChannelData>>,
+    pub channel_data_errors: Mutex<HashSet<String>>,
+    pub section_actions: Mutex<Vec<teams_proto::ChannelSectionAction>>,
     /// The channels Create asked for, in order.
     pub channels_asked: Mutex<Vec<teams_core::ChannelDraft>>,
     /// The writes on a team asked for, in order, with what they change.
@@ -180,79 +197,26 @@ pub struct FakeCore {
     pub meetings: Mutex<HashMap<String, teams_core::MeetingDetails>>,
 }
 
-impl Default for FakeCore {
+/// An explicit actor, with account A as the fixture's default. An explicit override keeps its exact value.
+pub struct AccountMri(String);
+
+impl Default for AccountMri {
     fn default() -> Self {
-        Self {
-            me: LAB_A.to_owned(),
-            stopped: Mutex::new(false),
-            asked: Mutex::default(),
-            conversations: Mutex::default(),
-            messages: Mutex::default(),
-            members: Mutex::default(),
-            unread: Mutex::default(),
-            names: Mutex::default(),
-            people: Mutex::default(),
-            hold_people: Mutex::default(),
-            held: Mutex::default(),
-            reactions: Mutex::default(),
-            animations: Mutex::default(),
-            unread_animations: Mutex::default(),
-            pictures: Mutex::default(),
-            thumbnails: Mutex::default(),
-            recent: Mutex::default(),
-            frequent: Mutex::default(),
-            horizons: Mutex::default(),
-            older: Mutex::default(),
-            unsynced: Mutex::default(),
-            catch_up_before_history_complete: Mutex::default(),
-            limits: Mutex::default(),
-            actions: Mutex::default(),
-            transients: Mutex::default(),
-            own_statuses: Mutex::default(),
-            own_answers: Mutex::default(),
-            resent: Mutex::default(),
-            unsettled: Mutex::default(),
-            hold_unsettled: Mutex::new(false),
-            held_unsettled: Mutex::default(),
-            unsettled_before_hold: Mutex::new(0),
-            earlier: Mutex::default(),
-            searches: Mutex::default(),
-            service_answer: Mutex::default(),
-            service_searches: Mutex::default(),
-            teams: Mutex::default(),
-            channels_asked: Mutex::default(),
-            team_writes: Mutex::default(),
-            team_written: Mutex::default(),
-            team_views: Mutex::default(),
-            team_roster: Mutex::default(),
-            team_settings: Mutex::default(),
-            team_tags: Mutex::default(),
-            team_code: Mutex::default(),
-            team_requests: Mutex::default(),
-            team_numbers: Mutex::default(),
-            team_analytics_asked: Mutex::default(),
-            team_apps: Mutex::default(),
-            store_apps: Mutex::default(),
-            templates: Mutex::default(),
-            channel_analytics_asked: Mutex::default(),
-            channel_answer: Mutex::default(),
-            channel_members_added: Mutex::default(),
-            channel_thread_answer: Mutex::default(),
-            team_found: Mutex::default(),
-            addable: Mutex::default(),
-            listing: Mutex::default(),
-            roots: Mutex::default(),
-            synced: Mutex::default(),
-            presence_asked: Mutex::default(),
-            presences: Mutex::default(),
-            call_actions: Mutex::default(),
-            call_answers: Mutex::default(),
-            hold_calls: Mutex::new(false),
-            held_calls: Mutex::default(),
-            read_only: Mutex::new(false),
-            calendar: Mutex::default(),
-            meetings: Mutex::default(),
-        }
+        Self(LAB_A.to_owned())
+    }
+}
+
+impl From<String> for AccountMri {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl std::ops::Deref for AccountMri {
+    type Target = str;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 
@@ -354,6 +318,34 @@ impl FakeCore {
 }
 
 impl Core for FakeCore {
+    fn workflow_request(&self, request: teams_proto::WorkflowRequest) -> Reply<teams_proto::WorkflowResponse> {
+        locked(&self.workflow_requests).push(request.clone());
+        if matches!(request, teams_proto::WorkflowRequest::Catalog) && *locked(&self.hold_workflow_catalog) {
+            let (answer, reply) = Reply::later();
+            locked(&self.held_workflow_catalog).push(answer);
+            return reply;
+        }
+        let answer = locked(&self.workflow_handler).map_or_else(
+            || Err(teams_proto::WorkflowFailure::Connection),
+            |handler| handler(&request),
+        );
+        self.answer("workflow", || answer)
+    }
+
+    fn upload_file(&self, path: std::path::PathBuf) -> Reply<teams_proto::UploadedFile> {
+        locked(&self.uploads).push(path.clone());
+        if *locked(&self.hold_uploads) {
+            let (answer, reply) = Reply::later();
+            locked(&self.held_uploads).push(answer);
+            return reply;
+        }
+        let name = path.file_name().and_then(|name| name.to_str()).unwrap_or("made-up.txt");
+        Reply::ready(
+            locked(&self.upload_answers)
+                .pop_front()
+                .unwrap_or_else(|| Ok(uploaded_file(name))),
+        )
+    }
     fn meeting(&self, chat: String) -> Reply<Option<teams_core::MeetingDetails>> {
         let found = locked(&self.meetings).get(&chat).cloned();
         self.answer("meeting", || found)
@@ -397,6 +389,41 @@ impl Core for FakeCore {
                 why: teams_core::ChannelProblem::Other,
             }),
         })
+    }
+
+    fn channel_data(&self, query: teams_proto::ChannelRead) -> Reply<teams_proto::ChannelData> {
+        use serde_json::json;
+        let (key, fallback) = match query {
+            teams_proto::ChannelRead::Sections => (
+                "sections".to_owned(),
+                json!({"isPartialResponse":false,"folderHierarchyVersion":1,"conversationFolderOrder":["favorites"],"conversationFolders":[{"id":"favorites","name":"Favorites","folderType":"Favorites","conversationFolderItems":[]}]}),
+            ),
+            teams_proto::ChannelRead::Thread { channel } => (
+                format!("thread:{channel}"),
+                json!({"id":channel,"properties":{"channelSettings":json!({"postPermissions":0,"allowReplies":0,"allowPinPosts":0,"allowBotsPost":1,"allowConnectorsPost":1}).to_string(),"spaceAdminSettings":json!({"userSettings":{"generalChannelSetting":0}}).to_string()}}),
+            ),
+            teams_proto::ChannelRead::Preferences { channel } => {
+                (format!("preferences:{channel}"), json!({"id":channel,"properties":{}}))
+            }
+            teams_proto::ChannelRead::Email { channel } => (
+                format!("email:{channel}"),
+                json!({"emailAddressDetails":{"emailId":"synthetic-channel@example.invalid"},"allowedSenders":{"allowedSenderType":"members","allowedDomains":[]}}),
+            ),
+        };
+        if locked(&self.channel_data_errors).contains(&key) {
+            return Reply::ready(Err(EngineError::TeamNotChanged { code: None }));
+        }
+        self.answer("channel_data", || {
+            locked(&self.channel_data)
+                .get(&key)
+                .cloned()
+                .unwrap_or(teams_proto::ChannelData(fallback))
+        })
+    }
+
+    fn channel_section(&self, action: teams_proto::ChannelSectionAction) -> Reply<()> {
+        locked(&self.section_actions).push(action);
+        self.answer("channel_section", || ())
     }
 
     fn team_write(
@@ -533,6 +560,9 @@ impl Core for FakeCore {
         let id = i64::try_from(actions.len()).unwrap();
         drop(actions);
         self.answer("write", || {
+            if let Some(row) = locked(&self.write_answers).pop_front() {
+                return row;
+            }
             let mut row = outbox_row(id, OutboxKind::Send, OutboxState::Pending);
             row.conversation_id = conversation_of(&action);
             row
@@ -706,7 +736,10 @@ impl Core for FakeCore {
     }
 
     fn outbox_entry(&self, _id: i64) -> Reply<Option<OutboxEntry>> {
-        self.ask("outbox_entry")
+        match locked(&self.outbox_answers).pop_front() {
+            Some(row) => self.answer("outbox_entry", || Some(row)),
+            None => self.ask("outbox_entry"),
+        }
     }
 
     fn outbox_unsettled(&self, conversation: String) -> Reply<Vec<OutboxEntry>> {
@@ -799,7 +832,9 @@ impl Core for FakeCore {
             return reply;
         }
         let named = match action {
-            CallAction::Answer { call }
+            CallAction::Captions { call, .. }
+            | CallAction::CaptionLanguage { call, .. }
+            | CallAction::Answer { call }
             | CallAction::Decline { call }
             | CallAction::HangUp { call }
             | CallAction::Mute { call, .. }
@@ -815,6 +850,22 @@ impl Core for FakeCore {
         };
         Reply::ready(locked(&self.call_answers).pop_front().unwrap_or(Ok(named)))
     }
+}
+
+/// Synthetic upload metadata for view tests; this never contacts a service.
+///
+/// # Panics
+/// If the synthetic fixture no longer matches the supported upload answer.
+#[must_use]
+pub fn uploaded_file(name: &str) -> teams_proto::UploadedFile {
+    let site =
+        teams_proto::DriveSite::from_web_url("https://madeup-my.sharepoint.com/personal/a_example_test/Documents")
+            .expect("synthetic site");
+    let body = serde_json::json!({"id":"MadeUpItem","name":name,"size":54,
+        "webUrl":format!("{}Documents/Microsoft%20Teams%20Chat%20Files/{name}",site.base()),
+        "parentReference":{"driveId":"made-up-drive"},
+        "sharepointIds":{"listItemUniqueId":"00000000-0000-4000-8000-00000000000f"}});
+    teams_proto::UploadedFile::from_upload(&site, body.to_string().as_bytes()).expect("synthetic upload")
 }
 
 /// Whether `count` was above zero, taking one off it.

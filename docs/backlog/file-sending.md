@@ -1,9 +1,15 @@
 ---
 worth: later
+status: superseded by the 2026-11-03 native attachment implementation
 where: docs/protocol/chat.md (Files: sending, denied), crates/proto-lab/src/scenario/ab_file.rs, crates/teams-ui/src/chat_view.rs
 added: 2026-10-22
 ---
 # Sending a file: the account's file storage check comes first, then an upload and a share nothing fences yet
+
+The storage limitation below is historical. Fresh 2026-11-03 captures established a private content upload and explicit
+named-recipient direct grants. Native drag/drop and the file picker now stage files, preserve drafts and send through
+the normal composer/outbox. Files above 250 MB still need an upload-session implementation; this note remains only for
+that remaining work and historical context. See [the current protocol](../protocol/chat.md#chat-file-upload-and-specific-recipient-sharing).
 
 M2 Task 23 asked to capture the web client sending a file in the a–b chat with every write of it denied (as M1 Task
 20 did for images, `docs/backlog/ams-image-sending.md`), and to decide from that whether a file's sharing can be

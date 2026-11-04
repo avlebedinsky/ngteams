@@ -443,7 +443,14 @@ async fn a_registered_call_s_acceptance_reaches_its_consumer_and_only_it_is_ackn
     let id = lab.trouter.deliver_call(LAB_B, &at, &acceptance());
     let accepted = call_delivery(&mut push).await;
     assert_eq!((accepted.delivery.id, accepted.observed), (id, Observed::Acceptance));
-    // the denied response took the pending delivery: the call controller's redelivery is answered
+    let foreign = Links::new().with(
+        "mediaRenegotiation",
+        callback("OtherEndpoint", "08080808", "call", "mediaRenegotiation").0,
+    );
+    let wrong_callback = AcceptanceAcknowledgement::new(&accepted.delivery, "cv.1", 3, foreign).unwrap();
+    assert_eq!(accepted.respond(wrong_callback).await, Err(RespondFailure::NotPending));
+    assert!(responses(&lab.trouter).is_empty());
+    // The controller's redelivery can be answered with callbacks on this account's registered endpoint.
     let id = lab.trouter.deliver_call(LAB_B, &at, &acceptance());
     let again = call_delivery(&mut push).await;
     assert_eq!(again.observed, Observed::Acceptance);
@@ -583,24 +590,36 @@ async fn a_token_renewal_reconnects_the_calling_socket_with_the_new_token_on_the
 }
 
 #[tokio::test]
-async fn an_unregistered_delivery_can_receive_a_typed_response_on_its_connection() {
+async fn only_a_pending_call_delivery_can_receive_a_typed_response_on_its_connection() {
     let lab = Lab::start().await;
     let mut push = lab.calling().spawn();
     let endpoint = connected(&mut push).await;
     registered(&mut push).await;
-    // A delivery at the call agent is handed on; its typed response goes on that same connection.
+    // Receiving an unrelated update does not turn it into a pending call reply.
     let (_, roster) = callback(&endpoint, "06060606", "conversation", "conversationUpdate");
     let id = lab
         .trouter
         .deliver_call(LAB_B, &roster, &json!({"conversationUpdate": {}}));
     let update = call_delivery(&mut push).await;
     assert_eq!((update.delivery.id, update.observed), (id, Observed::Nothing));
-    update
-        .respond(InvitationReceipt::new(&update.delivery, 1).unwrap())
-        .await
-        .unwrap();
+    assert_eq!(
+        update
+            .respond(InvitationReceipt::new(&update.delivery, 1).unwrap())
+            .await,
+        Err(RespondFailure::NotPending)
+    );
+    assert!(responses(&lab.trouter).is_empty());
+
+    // A real invitation addressed to this account creates a pending reply on this connection.
+    let id = lab.trouter.deliver_call_invitation(LAB_B, LAB_A);
+    let invitation = call_delivery(&mut push).await;
+    assert_eq!((invitation.delivery.id, invitation.observed), (id, Observed::Offered));
+    let receipt = InvitationReceipt::new(&invitation.delivery, 1).unwrap();
+    invitation.respond(receipt.clone()).await.unwrap();
     let sent = responses_after(&lab.trouter, 1).await;
     assert_eq!(sent.len(), 1, "{sent:?}");
     assert_eq!(sent[0]["id"], id);
+    assert_eq!(invitation.respond(receipt).await, Err(RespondFailure::NotPending));
+    assert_eq!(responses(&lab.trouter).len(), 1);
     push.stop().await;
 }

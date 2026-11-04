@@ -982,7 +982,12 @@ fn the_camera_is_off_when_a_call_starts_and_goes_on_and_off_by_its_key_its_butto
         .read(|cx| CallCommand::fitting(calls_of(&rig).read(cx), Some(AB)));
     assert_eq!(
         offered,
-        [CallCommand::HangUp, CallCommand::ToggleMute, CallCommand::ToggleCamera]
+        [
+            CallCommand::HangUp,
+            CallCommand::ToggleMute,
+            CallCommand::ToggleCaptions,
+            CallCommand::ToggleCamera
+        ]
     );
 
     // a camera that went off by itself (its device gone, its encoder failed) is shown off
@@ -1274,7 +1279,14 @@ fn a_build_without_video_has_no_camera_and_its_key_asks_nothing() {
     let offered = rig
         .cx
         .read(|cx| CallCommand::fitting(calls_of(&rig).read(cx), Some(AB)));
-    assert_eq!(offered, [CallCommand::HangUp, CallCommand::ToggleMute]);
+    assert_eq!(
+        offered,
+        [
+            CallCommand::HangUp,
+            CallCommand::ToggleMute,
+            CallCommand::ToggleCaptions
+        ]
+    );
 }
 
 #[test]
@@ -2486,4 +2498,259 @@ fn a_meeting_is_not_offered_while_a_call_is_up_and_its_end_offers_rejoin() {
     assert!(drawn(window, "call-end-rejoin"), "a meeting can be gone into again");
     click(window, "call-end-rejoin");
     assert_eq!(actions(&rig).last(), Some(&join_meeting_action()));
+}
+
+#[test]
+fn caption_shortcut_pane_hide_and_call_end_keep_speech_ephemeral() {
+    let rig = calling();
+    let (trace, written) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    click(cx, "chat-call");
+    status(&rig, 1, CallStatus::Connected);
+    let window = stage(&rig, &windows);
+    window.simulate_keystrokes("alt-shift-c");
+    window.run_until_parked();
+    assert!(
+        rig.core
+            .call_actions
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|action| matches!(action, CallAction::Captions { call: id, enabled:true } if *id == call(1)))
+    );
+    let captions = teams_core::CallCaptions {
+        phase: teams_core::CaptionPhase::On,
+        spoken_language: "en-us".into(),
+        error: None,
+        lines: vec![teams_core::Caption {
+            id: "synthetic/1".into(),
+            speaker: Some(LAB_A.into()),
+            display_name: Some("Lab Speaker".into()),
+            text: "Private synthetic caption words.".into(),
+            final_result: true,
+            spoken_language: "en-us".into(),
+            track_language: "en-us".into(),
+            audio_timestamp: 123,
+            duration: 10,
+        }],
+    };
+    rig.send(Event::CallCaptions {
+        call: call(1),
+        captions,
+    });
+    assert!(drawn(window, "call-captions"));
+    assert!(drawn(window, "call-caption-text"));
+    // A stale other call cannot replace these lines.
+    rig.send(Event::CallCaptions {
+        call: call(99),
+        captions: teams_core::CallCaptions::default(),
+    });
+    assert!(drawn(window, "call-captions"));
+    window.simulate_keystrokes("alt-shift-c");
+    window.run_until_parked();
+    assert!(
+        rig.core
+            .call_actions
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|action| matches!(action, CallAction::Captions { call: id, enabled:false } if *id == call(1)))
+    );
+    rig.send(Event::CallCaptions {
+        call: call(1),
+        captions: teams_core::CallCaptions::default(),
+    });
+    assert!(!drawn(window, "call-captions"));
+    status(&rig, 1, CallStatus::Ended(End::HungUp));
+    assert!(rig.cx.read(|cx| rig.models.calls.read(cx).captions().lines.is_empty()));
+    assert!(
+        !String::from_utf8(written.0.lock().unwrap().clone())
+            .unwrap()
+            .contains("Private synthetic caption words")
+    );
+}
+
+fn caption_stage() -> (Rig, Entity<CallWindows>, &'static mut VisualTestContext) {
+    let rig = calling();
+    let (trace, _) = trace();
+    let (shell, cx) = shell_window(&rig, Some(AB), Arc::clone(&trace));
+    let (windows, _) = call_windows(&rig, &shell, &trace);
+    registered(&rig);
+    click(cx, "chat-call");
+    status(&rig, 1, CallStatus::Connected);
+    let window = stage(&rig, &windows);
+    (rig, windows, window)
+}
+fn caption_state(rig: &Rig, phase: teams_core::CaptionPhase, error: Option<&str>) {
+    rig.send(Event::CallCaptions {
+        call: call(1),
+        captions: teams_core::CallCaptions {
+            phase,
+            spoken_language: "en-us".into(),
+            error: error.map(str::to_owned),
+            lines: Vec::new(),
+        },
+    });
+}
+fn caption_language_menu(window: &mut VisualTestContext) {
+    click(window, "call-caption-settings");
+    window.simulate_keystrokes("down left");
+    draw(window);
+    if !drawn(window, "call-caption-language-sq-al") {
+        window.simulate_keystrokes("right");
+    }
+    assert!(drawn(window, "call-caption-language-sq-al"));
+}
+
+// These kit Buttons have no debug-selector wrapper. Target their visible controls within the pane's stable bounds.
+fn click_caption_retry(window: &mut VisualTestContext) {
+    draw(window);
+    let pane = window.debug_bounds("call-captions").unwrap();
+    window.simulate_click(
+        gpui::point(pane.center().x, pane.center().y + gpui::px(36.0)),
+        Modifiers::none(),
+    );
+    window.run_until_parked();
+}
+fn click_caption_confirmation(window: &mut VisualTestContext, update: bool) {
+    draw(window);
+    let panel = window.debug_bounds("call-caption-language-confirm").unwrap();
+    window.simulate_click(
+        gpui::point(
+            panel.origin.x + panel.size.width - gpui::px(if update { 52.0 } else { 128.0 }),
+            panel.origin.y + panel.size.height - gpui::px(32.0),
+        ),
+        Modifiers::none(),
+    );
+    window.run_until_parked();
+}
+
+#[test]
+fn caption_service_states_offer_explicit_retry_and_hide_without_touching_the_voice_call() {
+    let (rig, _windows, window) = caption_stage();
+    caption_state(&rig, teams_core::CaptionPhase::Starting, None);
+    assert!(drawn(window, "call-captions"));
+    assert!(!drawn(window, "call-caption-text"));
+    caption_state(
+        &rig,
+        teams_core::CaptionPhase::Failed,
+        Some("Synthetic caption service is busy. Try again."),
+    );
+    click_caption_retry(window);
+    assert!(matches!(
+        actions(&rig).last(),
+        Some(CallAction::Captions { enabled: true, .. })
+    ));
+    caption_state(
+        &rig,
+        teams_core::CaptionPhase::On,
+        Some("Synthetic spoken language change failed."),
+    );
+    assert!(drawn(window, "call-captions"));
+    assert!(!drawn(window, "call-caption-text"));
+    click(window, "call-caption-hide");
+    assert!(matches!(
+        actions(&rig).last(),
+        Some(CallAction::Captions { enabled: false, .. })
+    ));
+    assert!(
+        !actions(&rig)
+            .iter()
+            .any(|action| matches!(action, CallAction::HangUp { .. }))
+    );
+    caption_state(&rig, teams_core::CaptionPhase::Off, None);
+    assert!(!drawn(window, "call-captions"));
+}
+
+#[test]
+fn caption_language_selection_requires_confirmation_and_cancel_has_no_shared_effect() {
+    let (rig, _windows, window) = caption_stage();
+    caption_state(&rig, teams_core::CaptionPhase::On, None);
+    caption_language_menu(window);
+    click(window, "call-caption-language-sq-al");
+    assert!(drawn(window, "call-caption-language-confirm"));
+    let before = actions(&rig).len();
+    click_caption_confirmation(window, false);
+    assert_eq!(actions(&rig).len(), before);
+    assert!(!drawn(window, "call-caption-language-confirm"));
+    caption_language_menu(window);
+    click(window, "call-caption-language-sq-al");
+    click_caption_confirmation(window, true);
+    assert!(matches!(actions(&rig).last(), Some(CallAction::CaptionLanguage { language, .. }) if language == "sq-al"));
+    assert!(!drawn(window, "call-caption-language-confirm"));
+}
+
+#[test]
+fn caption_font_and_position_choices_are_local_and_preserve_the_ephemeral_lines() {
+    let (rig, _windows, window) = caption_stage();
+    rig.send(Event::CallCaptions {
+        call: call(1),
+        captions: teams_core::CallCaptions {
+            phase: teams_core::CaptionPhase::On,
+            spoken_language: "unknown".into(),
+            error: None,
+            lines: vec![teams_core::Caption {
+                id: "synthetic/local".into(),
+                speaker: None,
+                display_name: None,
+                text: "Synthetic local caption".into(),
+                final_result: false,
+                spoken_language: "en-us".into(),
+                track_language: "en-us".into(),
+                audio_timestamp: 7,
+                duration: 1,
+            }],
+        },
+    });
+    assert!(drawn(window, "call-caption-text"));
+    let before_actions = actions(&rig).len();
+    let before = window.debug_bounds("call-captions").unwrap();
+    click(window, "call-caption-settings");
+    window.simulate_keystrokes("down down left down down enter");
+    draw(window);
+    assert!(drawn(window, "call-caption-text"));
+    click(window, "call-caption-settings");
+    window.simulate_keystrokes("down down down left down enter");
+    draw(window);
+    let after = window.debug_bounds("call-captions").unwrap();
+    assert!(
+        after.origin.y < before.origin.y,
+        "At top moves the caption pane above the stage"
+    );
+    assert_eq!(
+        actions(&rig).len(),
+        before_actions,
+        "local styles never change the meeting"
+    );
+    assert_eq!(rig.cx.read(|cx| rig.models.calls.read(cx).captions().lines.len()), 1);
+}
+
+#[test]
+fn language_and_speech_menu_exposes_caption_toggle_through_the_actual_more_popup() {
+    let (rig, _windows, window) = caption_stage();
+    click(window, "call-more");
+    window.simulate_keystrokes("down right");
+    draw(window);
+    if !drawn(window, "call-toggle-captions") {
+        window.simulate_keystrokes("left");
+    }
+    click(window, "call-toggle-captions");
+    assert!(matches!(
+        actions(&rig).last(),
+        Some(CallAction::Captions { enabled: true, .. })
+    ));
+    caption_state(&rig, teams_core::CaptionPhase::On, None);
+    click(window, "call-more");
+    window.simulate_keystrokes("down right");
+    draw(window);
+    if !drawn(window, "call-toggle-captions") {
+        window.simulate_keystrokes("left");
+    }
+    click(window, "call-toggle-captions");
+    assert!(matches!(
+        actions(&rig).last(),
+        Some(CallAction::Captions { enabled: false, .. })
+    ));
 }
