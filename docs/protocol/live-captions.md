@@ -84,3 +84,44 @@ authenticated actor and credential audience/scopes. These are current-call and s
 client has no global lab roster admission or automatic hang-up based on changed participants. Before a live lab
 run, the agent establishes the call's complete reach under [the lab-contact rule](../lab-rules.md). A failed
 caption invite/command is reported in the caption pane and cannot fail the voice call.
+
+## Translated captions: reference and verification prerequisite
+
+Microsoft's [live caption guidance](https://support.microsoft.com/en-gb/teams/meetings/use-live-captions-in-microsoft-teams-meetings)
+requires Teams Premium or Microsoft 365 Copilot for the organizer (making translation available to the meeting),
+or for an individual viewer (making it available to that viewer). The separate
+[multilingual meeting guidance](https://support.microsoft.com/en-us/teams/meetings/multilingual-speech-recognition-in-microsoft-teams)
+confirms that **Translate to** can be available without enabling multilingual speech recognition. A spoken-language
+picker alone does not establish translation entitlement. Local web authentication state for the dedicated lab
+accounts reports `licenseDetails.isTPManagement=false` and `licenseDetails.isCopilot=false`; these are the same
+flags read by the first-party calling implementation. The captured lab caption settings expose no **Translate to**.
+An eligible dedicated lab account is needed to verify a successful translated stream; no translation controls have
+been added on the assumption that source-language captions demonstrate this capability.
+
+Static inspection of the first-party Teams web calling implementation on 2026-11-04 establishes the following
+request and track behavior. These are **source observations, not successful native or live translation captures**:
+
+- For an ordinary participant, requesting a subtitle track uses the existing recorder command endpoint, actor,
+  participant leg and credentials, with `action: setLanguage` and
+  `actionParameters: {applyForAllParticipants: false, subtitleLanguages: [<target>], type: setLanguage}`.
+  The mode remains `transcription`, with only `closedCaptions` in `processingModes`. A streaming/broadcast path uses
+  different semantics and must not be inferred from this participant path.
+- Translation-off in the reference is a local selection: it selects the original caption track without stopping
+  the shared caption service. The reference's local off marker is not a service language code. Hiding captions and
+  changing the meeting spoken language remain separate operations.
+- The service can advertise `textTracks` in its endpoint metadata. A track has a `source` and `lang`; a track with
+  `translations` advertises separate language choices. The reference treats machine translation as source `Mt`,
+  distinct from recognition source `Ai`, captioner source `Cart`, and broadcast source `Cea708`.
+- On data ID 3, translated entries arrive in `textTracks`, alongside the original `recognitionResults` array.
+  The reference preserves the entry's speaker, text, final/interim status, timing, source and track language.
+  The existing native parser reads only `recognitionResults`; parsing another array without choosing its source
+  and target would mix original and translated speech in one pane.
+- A successful language command changes the reference's selected translation language. A command failure does not
+  establish that the requested language is active. A verified implementation must retain the previous selection,
+  distinguish policy/license rejection from network failure, and keep the voice call and original captions usable.
+
+Before implementing the user-facing path, capture an eligible lab meeting's language options, exact target codes,
+command result, advertised tracks and interleaved original/translated interim/final entries. Verify enable, target
+change, local off, hide/reopen and call end against that stream. Preserve speaker and audio timestamp independently
+for each source/track, and retain the caption text's bounded, memory-only lifecycle. No third-party translation
+service or additional bot is needed or authorized by this protocol.
