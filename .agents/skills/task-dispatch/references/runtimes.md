@@ -74,3 +74,30 @@ Persist enough to resume without transcripts: task text and follow-ups, screensh
 worktree/branch/base, checks and shell handles, questions, and result. Read the repository's applicable `AGENTS.md`
 and `CLAUDE.md` explicitly when they aren't automatically loaded. If background agents are unavailable, explain
 that dispatch mode cannot run in this host and keep the board recoverable; do not silently perform queued tasks inline.
+
+### All-tasks-done desktop notice in ngterm
+
+Chat completion is required on every host. In ngterm (`NGTERM_ENABLED=1`), also use its native notifier once the
+current drain's required tasks, reviews, checks, and cleanup are complete. Recheck newly received task events first;
+a new task reopens the drain. Blocked or waiting work prevents this notice. Disclose explicitly deferred/canceled
+tasks in the completion summary and notification body.
+
+When `ngtermctl notify` and this session's `NGTERM_SESSION_ID`/`NGTERM_SOCKET` are available, arm
+`completion_notice.desktop_pending` in the same atomic board write as the chat's pending flag, before posting either
+notice. Then call:
+
+```sh
+ngtermctl notify 'All tasks are done. Reviews, checks, and cleanup are complete.' --title 'Task dispatch complete' \
+  --target "$NGTERM_SESSION_ID" --socket "$NGTERM_SOCKET"
+```
+
+Use the actual completion summary when there are exclusions. Scope to this session explicitly; never use the
+frontmost/`active` default. After successful submission, atomically clear `desktop_pending` and record
+`desktop_sent_at`; the command's success acknowledges submission, not that the user saw it. On resume, skip a channel
+with a receipt for this drain and retry an explicitly pending desktop notice without replaying the chat notice.
+Missing desktop fields on an older, already-settled board are a baseline, not a new notification request.
+
+If the notifier or session scope is unavailable, deliver chat completion and report the desktop limitation. If a
+submission fails, preserve its pending state and record the failure; don't retry in a loop or hold the turn open
+solely for it. Reconcile ambiguous submission outcomes against available history before retrying. These instructions
+provide no background wake or guaranteed OS delivery after the turn ends.

@@ -50,7 +50,10 @@ The dispatcher alone writes the board. Workers append only their own event logs.
   "updated_at": "2026-11-03T12:00:00Z",
   "slots": 2,
   "review_base": "full-commit-id",
-  "completion_notice": {"pending": false, "sent_at": null},
+  "completion_notice": {
+    "pending": false, "sent_at": null,
+    "desktop_pending": false, "desktop_sent_at": null
+  },
   "standing": ["User instructions applying to later tasks"],
   "tasks": [
     {
@@ -81,11 +84,13 @@ For older boards with absent fields, baseline already-recorded completed results
 nonpending without inventing a sent timestamp; newly discovered results or later settlement of unfinished work still
 need notices. Missing fields alone must not replay historical results.
 
-`completion_notice` tracks the current drain: any new task receipt or follow-up reopens it by clearing `pending` and
-`sent_at`. When this drain's required work, cleanup, and review settle, set it pending, announce completion promptly in
-commentary, then record delivery before the final response ends the turn. Resume a pending notice; don't repeat one
-already sent for the same drain. If work is blocked, report the outstanding needs without announcing completion.
-An eligible review is work remaining even after the last implementation worker returns.
+`completion_notice` tracks the current drain: any new task receipt or follow-up reopens it by clearing both channels'
+pending flags and sent timestamps. When all required tasks, checks, cleanup, and review settle, set the chat notice
+pending and promptly announce that all tasks are done in commentary. Record delivery before the final response ends
+the turn. In ngterm also send one native desktop notification, using the separate desktop receipt and instructions
+in the runtime reference. Resume pending notices; don't repeat a channel already sent for the same drain. Report
+waiting/blocked work distinctly; it prevents all-done notices. Disclose any tasks explicitly deferred or canceled by
+the user as exclusions. An eligible review is work remaining even after the last implementation worker returns.
 
 States: `queued`, `running`, `waiting on user`, `landed <hash>`, `done` (read-only result), and `failed`. Record the
 question for a waiting task. Keep unfinished tasks' original words, follow-ups, relevant standing instructions,
