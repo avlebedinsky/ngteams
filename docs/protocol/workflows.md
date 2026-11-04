@@ -35,7 +35,65 @@ service ids supply those values, never its displayed name.
 
 A connected account is bound by connection name, `source=Embedded`, its actual Microsoft Power Apps API id and
 `tier=NotSpecified`, matching Microsoft's Power Automate client. Connection metadata is not copied into runtime
-connection references. New flows are saved stopped so configuration does not itself start a schedule.
+connection references. The full editor saves new flows stopped so configuration does not itself start a schedule; the
+card editor below saves as Teams does.
+
+## The webhook template in Teams
+
+Seen 2026-11-04 with `proto-lab run team-manage` steps: lab account a, its own lab-only team's General channel,
+channel menu → Workflows → "Send webhook alerts to a channel". The shots stay in the lab's capture dir.
+
+A template whose gallery entry has `properties.metadata.userIntentMarkup` opens in Teams' card editor, not a form of
+the definition. The markup's `automation.template` lists `parameters` (`id`, `typeName` such as `Teams.Group` and
+`Teams.Channel`, `dependencies`), `editorBindings` (a parameter with a `label` resource gets its own label), a
+`summary` resource formatted with the channel, and `dataBindings` naming which action inputs each parameter fills.
+The screen shows a back chevron, "Untitled workflow" and "Collapse all"/"Expand all"; one rounded card with a
+"Microsoft Teams" chip, the title "Send webhook alerts to <channel>", the template's description and two required
+dropdowns, "Team the channel is in" and "Channel", defaulting to the channel Workflows was opened from; Save and Back.
+There is no name field, connection control or definition. The dropdowns list the account's teams and the chosen team's
+channels with a check on the current one; they are type-to-filter comboboxes. The card's chevron folds it to its title
+and description. Back returns to the template list. Edit on a saved workflow opens the same card titled with the
+workflow's name.
+
+Save sends `POST …/powerautomate/flows` with `properties`: `displayName` (the card's title), `templateName` (the
+template id), `connectionReferences.<key> = {id: "/providers/Microsoft.PowerApps/apis/shared_teams",
+connectionName, source: "NotSpecified"}` and the template's definition with the recipient group and channel ids filled,
+`description` set to the template's, and one more action, `Do_Not_Remove_FlowIL` (an `InitializeVariable` of
+`flow.IL (DO NOT REMOVE)`), that the template's first actions now run after. Its `metadata.userIntentMarkup` is the
+markup as a JSON string with each parameter's `value` and `valueDisplayName`, the template's `displayName` and its
+connection references. No `state` is sent and the workflow is created on (201). Teams then reads
+`triggers/manual/listCallbackUrl`, the flow, its triggers, connections, runs and owners, and shows the Overview:
+Overview (name, Rename, description, "Active", Turn off, Edit, "..." with Delete, "Copy webhook link" whose tooltip
+shows the address), "How to run this workflow after setup", "Run history" with Refresh ("Your flow hasn't run yet."),
+Owners with "Add a co-owner"; Back and Workflows Home. Delete asks "Delete automation" ("Would you like to delete
+your automation? Alternatively, you can turn it off.") with Delete and Cancel, then returns to the template list.
+The native client uses the classic Flow routes for the same operations.
+
+## The Teams connection behind the scenes
+
+When the template opens, Teams makes the Microsoft Teams connection itself; the user never sees a sign-in:
+
+1. `PUT …/connectivity/apis/shared_teams/connections/shared-teams-<32 hex>?$filter=environment eq '<environment>'
+   &$expand=ConsentLink` with `{"properties": {"connectionParameters": {}, "consentInfo": {"redirectUrl":
+   "https://make.powerautomate.com/oauth/redirect"}, "environment": {"name": <environment>}}}`. The 201 answer is the
+   connection, status `Error`/`Unauthenticated`, with `consentInfo.consentLink` and `consentInfo.firstPartyLoginUri`
+   (the same `data` on a `*.consent.azure-apihub.net` host, paths `/login` and `/firstPartyLogin`).
+2. `POST https://<environment id>.environment.api.powerplatform.com/powerautomate/users/me/onBehalfOfTokenBundle
+   ?api-version=1` with the Flow token and no body. The answer's `audienceToToken` maps audiences (Graph, API Hub,
+   Power Platform, Power Apps and others) to tokens Power Automate issued for the actor.
+3. `POST <firstPartyLoginUri>` with `{"accessToken": <the bundle's https://apihub.azure.com token>}` and no
+   `Authorization`: 200, and the connection is signed in.
+
+The connector's metadata marks it `IsFirstParty` and `IsOnbehalfofLoginSupported`. The template's dropdowns then read
+the account's teams through the connection (`apim/teams/<connection>/beta/me/teamwork` on the API Hub runtime). The
+environment host is the environment name in lower case without dashes, with a dot before its last two characters.
+
+The native `AuthorizeConnection` makes the same three requests: the connection through the classic Power Apps route
+with the same body and `$expand=ConsentLink`, the bundle on the environment host with the account's own Flow token,
+and the bundle's API Hub token posted only to a `firstPartyLoginUri` on a Microsoft consent host's exact
+`/firstPartyLogin` path. The bundle never leaves the transport, and the account's own tokens never go to the consent
+host. A connection the service already reports `Connected` is reused. The native card editor takes the teams and
+channels from the account's store rather than through the connector.
 
 ## Lifecycle routes
 
@@ -65,9 +123,11 @@ properties contain empty connection parameters and the environment name. `getCon
 Microsoft Power Automate redirect. These operation bodies also follow Microsoft's client source above.
 
 The view opens only HTTPS consent links on Microsoft's `consent.azure-apim.net` or `consent.azure-apihub.net`
-subdomains, with no userinfo, explicit port or fragment. It never posts a bearer token to a service-returned
-`firstPartyLoginUri` or a template URL. Connector sign-in is completed by the user in the browser, followed by a fresh
-native connection read. Only a connection whose status is `Connected` can be bound in the form.
+subdomains, with no userinfo, explicit port or fragment. It never posts the account's own bearer token to a
+service-returned `firstPartyLoginUri` or a template URL; only the card editor's Microsoft Teams connection posts
+Power Automate's own on-behalf-of API Hub token there ([below](#the-teams-connection-behind-the-scenes)). In the full
+editor, connector sign-in is completed by the user in the browser, followed by a fresh native connection read. Only a
+connection whose status is `Connected` can be bound in the form.
 
 ## Execution boundaries
 

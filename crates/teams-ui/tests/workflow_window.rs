@@ -61,7 +61,15 @@ fn parent() -> SandboxResult {
         return Ok(());
     };
     for (theme, label) in [(LIGHT_KEY, "light"), (DARK_KEY, "dark")] {
-        for page in ["browse", "configure", "run-inputs"] {
+        for page in [
+            "browse",
+            "configure",
+            "run-inputs",
+            "webhook",
+            "webhook-collapsed",
+            "webhook-overview",
+            "webhook-delete",
+        ] {
             shot(&sandbox, theme, label, page)?;
         }
     }
@@ -101,8 +109,9 @@ fn child(mode: &str) -> SandboxResult {
     ui_sandbox::window_allowed()?;
     let (theme, page) = mode.split_once('|').unwrap_or((LIGHT_KEY, "browse"));
     let theme = if theme == DARK_KEY { DARK_KEY } else { LIGHT_KEY };
-    let configure = page == "configure";
     let run_inputs = page == "run-inputs";
+    let webhook = page.starts_with("webhook");
+    let page = page.to_owned();
     gpui_platform::linux(WindowingModes::WAYLAND).run(move |cx: &mut App| {
         teams_ui::window::init(cx);
         theme::set_appearance(
@@ -125,24 +134,15 @@ fn child(mode: &str) -> SandboxResult {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(if run_inputs {
             fixtures::input_answer
+        } else if webhook {
+            fixtures::webhook_answer
         } else {
             fixtures::answer
         });
+        let team = synthetic_team();
+        *core.teams.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(vec![team.clone()]);
         let core: Arc<dyn Core> = core;
-        let team = Team {
-            id: "synthetic-team".into(),
-            group_id: Some("synthetic-group".into()),
-            name: "Synthetic team".into(),
-            ..Team::default()
-        };
-        let channel = TeamChannel {
-            id: "synthetic-channel".into(),
-            name: "General".into(),
-            general: false,
-            kind: teams_store::ChannelKind::Standard,
-            shown: true,
-            about: teams_store::ChannelAbout::default(),
-        };
+        let channel = team.channels[0].clone();
         let options = WindowOptions {
             app_id: Some("ngteams-workflow-test".to_owned()),
             ..WindowOptions::default()
@@ -152,13 +152,11 @@ fn child(mode: &str) -> SandboxResult {
             let stage = cx.new(|_| Stage(dialog.clone()));
             let root = cx.new(|cx| KitRoot::new(stage, window, cx));
             after(window, 15, move |window, cx| {
-                if configure {
-                    dialog.update(cx, |view, cx| view.select_template("synthetic-template", window, cx));
-                }
-                if run_inputs {
-                    dialog.update(cx, |view, cx| view.prepare_workflow_run("synthetic-flow", window, cx));
-                }
-                after(window, 15, |_, _| say("ready"));
+                open_page(&dialog, &page, window, cx);
+                after(window, 15, move |window, cx| {
+                    then_page(&dialog, &page, cx);
+                    after(window, 15, |_, _| say("ready"));
+                });
             });
             root
         });
@@ -167,6 +165,46 @@ fn child(mode: &str) -> SandboxResult {
         }
     });
     Ok(())
+}
+fn synthetic_team() -> Team {
+    let channel = |id: &str, name: &str| TeamChannel {
+        id: id.into(),
+        name: name.into(),
+        general: false,
+        kind: teams_store::ChannelKind::Standard,
+        shown: true,
+        about: teams_store::ChannelAbout::default(),
+    };
+    Team {
+        id: "synthetic-team".into(),
+        group_id: Some("synthetic-group".into()),
+        name: "Synthetic team".into(),
+        channels: vec![
+            channel("synthetic-channel", "General"),
+            channel("synthetic-alerts", "Alerts"),
+        ],
+        ..Team::default()
+    }
+}
+/// Opens the screen `page` shows.
+fn open_page(dialog: &Entity<WorkflowDialog>, page: &str, window: &mut Window, cx: &mut App) {
+    match page {
+        "configure" => dialog.update(cx, |view, cx| view.select_template("synthetic-template", window, cx)),
+        "run-inputs" => dialog.update(cx, |view, cx| view.prepare_workflow_run("synthetic-flow", window, cx)),
+        "webhook" | "webhook-collapsed" => {
+            dialog.update(cx, |view, cx| view.select_template("synthetic-webhook", window, cx));
+        }
+        "webhook-overview" | "webhook-delete" => dialog.update(cx, |view, cx| view.open_workflow("synthetic-flow", cx)),
+        _ => {}
+    }
+}
+/// The step a page takes once its screen is open: folding the card, or asking to delete.
+fn then_page(dialog: &Entity<WorkflowDialog>, page: &str, cx: &mut App) {
+    match page {
+        "webhook-collapsed" => dialog.update(cx, WorkflowDialog::collapse_all),
+        "webhook-delete" => dialog.update(cx, WorkflowDialog::ask_delete),
+        _ => {}
+    }
 }
 fn after(window: &mut Window, frames: usize, done: impl FnOnce(&mut Window, &mut App) + 'static) {
     window.on_next_frame(move |window, cx| {

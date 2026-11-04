@@ -1,4 +1,5 @@
 //! Bounded first-party workflow operations, preserving read-only mode, version checks and single-shot writes.
+mod connect;
 mod inputs;
 
 use crate::workflow::{WorkflowFailure, WorkflowRequest, WorkflowResponse};
@@ -23,6 +24,9 @@ impl<C: Credentials> HttpTransport<C> {
         } = request
         {
             return self.workflow_run_inputs(environment, flow, trigger, inputs).await;
+        }
+        if let WorkflowRequest::AuthorizeConnection { environment, .. } = request {
+            return self.workflow_authorize_connection(request, environment).await;
         }
         self.check_workflow_version(request).await?;
         self.workflow_http(request).await

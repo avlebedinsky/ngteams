@@ -3,25 +3,34 @@
 use super::*;
 
 impl WorkflowDialog {
-    pub(super) fn webhook_copy(&self, card: &Card, cx: &Context<Self>) -> Option<AnyElement> {
-        let triggers = card.properties.pointer("/definition/triggers")?.as_object()?;
-        let (trigger, _) = triggers.iter().find(|(_, value)| {
-            value
-                .get("kind")
-                .and_then(Value::as_str)
-                .is_some_and(|kind| matches!(kind, "TeamsWebhook" | "TeamsWebhookV2"))
-        })?;
-        let (flow, trigger) = (card.id.clone(), trigger.clone());
+    /// Teams' "Copy webhook link": a link-coloured action whose tooltip shows the address once it has been read.
+    pub(super) fn webhook_copy(&self, card: &Card, palette: Palette, cx: &Context<Self>) -> Option<AnyElement> {
+        let trigger = webhook_trigger(card)?;
+        let flow = card.id.clone();
+        let shown = self.webhook_link.clone();
         Some(
-            selected_by(
-                "workflow-copy-webhook",
-                Button::new("workflow-copy-webhook")
-                    .label("Copy webhook URL")
-                    .icon(Glyph::COPY.icon())
-                    .disabled(self.busy)
-                    .on_click(cx.listener(move |this, _, _, cx| this.copy_webhook(flow.clone(), trigger.clone(), cx))),
-            )
-            .into_any_element(),
+            div()
+                .id("workflow-copy-webhook")
+                .debug_selector(|| "workflow-copy-webhook".to_owned())
+                .flex()
+                .items_center()
+                .gap_2()
+                .cursor_pointer()
+                .text_color(rgb(palette.brand))
+                .hover(gpui::Styled::underline)
+                .child(Glyph::COPY.icon().size(px(16.0)))
+                .child("Copy webhook link")
+                .when_some(shown, |link, shown| {
+                    link.tooltip(move |window, cx| {
+                        gpui_component::tooltip::Tooltip::new(shown.clone()).build(window, cx)
+                    })
+                })
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    if !this.busy {
+                        this.copy_webhook(flow.clone(), trigger.clone(), cx);
+                    }
+                }))
+                .into_any_element(),
         )
     }
 
@@ -54,7 +63,7 @@ impl WorkflowDialog {
                             {
                                 Some(link) => {
                                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(link.to_owned()));
-                                    this.notice = Some("Webhook URL copied".to_owned());
+                                    this.webhook_link = Some(link.to_owned());
                                 }
                                 None => this.error = Some(
                                     "Power Automate did not return a webhook URL. Refresh the workflow and try again."
@@ -136,4 +145,18 @@ impl WorkflowDialog {
         }
         view.into_any_element()
     }
+}
+
+/// The name of the workflow's Teams webhook trigger, if it has one.
+pub(super) fn webhook_trigger(card: &Card) -> Option<String> {
+    let triggers = card.properties.pointer("/definition/triggers")?.as_object()?;
+    triggers
+        .iter()
+        .find(|(_, value)| {
+            value
+                .get("kind")
+                .and_then(Value::as_str)
+                .is_some_and(|kind| matches!(kind, "TeamsWebhook" | "TeamsWebhookV2"))
+        })
+        .map(|(trigger, _)| trigger.clone())
 }

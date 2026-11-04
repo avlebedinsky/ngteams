@@ -207,6 +207,7 @@ async fn step(
             drive.pointer_click("a pointer's click", Selector::Css(rest)).await?;
             Ok("clicked".to_owned())
         }
+        "xy" | "wheel" => at_point(drive, verb, rest).await,
         "hover" => {
             drive.hover("a hover", Selector::Css(rest)).await?;
             Ok("hovered".to_owned())
@@ -224,6 +225,23 @@ async fn step(
         "hold" => hold(page, rest),
         other => Ok(format!("unknown step {other}")),
     }
+}
+
+/// An `xy <x> <y>` click or a `wheel <x> <y> <dy>` turn at a viewport point: what a page selector can't reach, such
+/// as a cross-origin frame's controls. A missing or unreadable number is 0.
+async fn at_point(drive: &mut Driver, verb: &str, rest: &str) -> Result<String, ScenarioError> {
+    let mut words = rest.split_whitespace().map(|word| word.parse().unwrap_or(0.0));
+    let (x, y, dy) = (
+        words.next().unwrap_or(0.0),
+        words.next().unwrap_or(0.0),
+        words.next().unwrap_or(0.0),
+    );
+    if verb == "wheel" {
+        drive.wheel_at("a wheel turn", x, y, dy).await?;
+        return Ok("scrolled".to_owned());
+    }
+    drive.pointer_click_at("a pointer's click", x, y).await?;
+    Ok("clicked".to_owned())
 }
 
 /// A `hold` step: from now on every request of its method whose URL its pattern finds a match in (and whose body holds,

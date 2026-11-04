@@ -16,6 +16,10 @@ pub const RUNTIME_AUDIENCE: &str = "https://apihub.azure.com";
 /// The separately authenticated connection service audience.
 pub const CONNECTION_AUDIENCE: &str = "https://service.powerapps.com/";
 const API_VERSION: &str = "2016-11-01";
+/// The Power Automate redirect the Teams Workflows app names when it creates a connection.
+const CONSENT_REDIRECT: &str = "https://make.powerautomate.com/oauth/redirect";
+/// The audience, in Power Automate's on-behalf-of bundle, of the token that signs a first-party connection in.
+pub const CONSENT_TOKEN_AUDIENCE: &str = "https://apihub.azure.com";
 
 /// An explicitly chosen native management operation. Definitions remain service JSON: unknown fields survive edits.
 #[derive(Clone, Debug, PartialEq)]
@@ -41,6 +45,14 @@ pub enum WorkflowRequest {
     Connections { environment: String },
     /// Creates a Microsoft connector connection without accepting user credentials in this app.
     CreateConnection {
+        environment: String,
+        connector: String,
+        connection: String,
+    },
+    /// Creates a Microsoft first-party connector connection and signs it in for the actor without a browser, as the
+    /// Teams Workflows app does: Power Automate's own on-behalf-of API Hub token goes only to the connection's
+    /// service-issued Microsoft consent host. The account's own tokens never leave their services.
+    AuthorizeConnection {
         environment: String,
         connector: String,
         connection: String,
@@ -135,7 +147,7 @@ impl WorkflowRequest {
             | Self::RunWithInputs { .. }
             | Self::ConnectionConsent { .. }
             | Self::WebhookAddress { .. } => "POST",
-            Self::CreateConnection { .. } => "PUT",
+            Self::CreateConnection { .. } | Self::AuthorizeConnection { .. } => "PUT",
             Self::Update { .. } => "PATCH",
             Self::Delete { .. } => "DELETE",
             _ => "GET",
@@ -148,10 +160,11 @@ impl WorkflowRequest {
         match self {
             Self::CopilotEligibility => Service::MiddleTier,
             Self::RunWithInputs { .. } => Service::WorkflowRuntime,
-            Self::LogicFlowsMetadata { .. } => Service::WorkflowConnections,
-            Self::Connections { .. } | Self::CreateConnection { .. } | Self::ConnectionConsent { .. } => {
-                Service::WorkflowConnections
-            }
+            Self::LogicFlowsMetadata { .. }
+            | Self::Connections { .. }
+            | Self::CreateConnection { .. }
+            | Self::AuthorizeConnection { .. }
+            | Self::ConnectionConsent { .. } => Service::WorkflowConnections,
             _ => Service::Workflows,
         }
     }
@@ -217,6 +230,9 @@ impl WorkflowRequest {
             Self::CreateConnection {
                 connector, connection, ..
             }
+            | Self::AuthorizeConnection {
+                connector, connection, ..
+            }
             | Self::ConnectionConsent {
                 connector, connection, ..
             } => {
@@ -232,13 +248,19 @@ impl WorkflowRequest {
             }
             _ => {}
         }
-        Endpoint::new(path).with_query("api-version", API_VERSION).with_query(
+        let endpoint = Endpoint::new(path).with_query("api-version", API_VERSION).with_query(
             "$filter",
             format!(
                 "environment eq '{}'",
                 self.environment().unwrap_or_default().replace('\'', "''")
             ),
-        )
+        );
+        // A created connection then carries its consent links, its first-party sign-in among them.
+        if matches!(self, Self::CreateConnection { .. } | Self::AuthorizeConnection { .. }) {
+            endpoint.with_query("$expand", "ConsentLink")
+        } else {
+            endpoint
+        }
     }
 
     /// A continuation may only read the same exact flow-list endpoint on the same Microsoft host.
@@ -300,6 +322,7 @@ impl WorkflowRequest {
             | Self::Page { environment, .. }
             | Self::Connections { environment }
             | Self::CreateConnection { environment, .. }
+            | Self::AuthorizeConnection { environment, .. }
             | Self::ConnectionConsent { environment, .. }
             | Self::List { environment }
             | Self::Get { environment, .. }
@@ -324,9 +347,13 @@ impl WorkflowRequest {
                 Some(serde_json::json!({"properties": properties}))
             }
             Self::Run { .. } => Some(serde_json::json!({})),
-            Self::CreateConnection { environment, .. } => Some(
-                serde_json::json!({"properties": {"connectionParameters": {}, "environment": {"name": environment}}}),
-            ),
+            Self::CreateConnection { environment, .. } | Self::AuthorizeConnection { environment, .. } => {
+                Some(serde_json::json!({"properties": {
+                    "connectionParameters": {},
+                    "consentInfo": {"redirectUrl": CONSENT_REDIRECT},
+                    "environment": {"name": environment},
+                }}))
+            }
             Self::ConnectionConsent { .. } => {
                 Some(serde_json::json!({"redirectUrl": "https://make.powerautomate.com"}))
             }
@@ -377,4 +404,26 @@ pub fn is_workflow_consent_link(link: &str) -> bool {
         && url.host_str().is_some_and(|host| {
             host.ends_with(".consent.azure-apim.net") || host.ends_with(".consent.azure-apihub.net")
         })
+}
+
+/// Whether a connection's service-issued first-party sign-in address is a Microsoft consent host's exact
+/// `firstPartyLogin` path, with only its `data` query. Only such an address receives Power Automate's on-behalf-of
+/// API Hub token.
+#[must_use]
+pub fn is_first_party_login(link: &str) -> bool {
+    is_workflow_consent_link(link)
+        && url::Url::parse(link)
+            .is_ok_and(|url| url.path() == "/firstPartyLogin" && url.query_pairs().all(|(key, _)| key == "data"))
+}
+
+/// The environment's Power Platform API host, `<id>.environment.api.powerplatform.com`: the environment name in lower
+/// case without dashes, with a dot before its last two characters. Anything but letters and digits forms no host.
+#[must_use]
+pub fn platform_host(environment: &str) -> Option<String> {
+    let id = environment.replace('-', "").to_ascii_lowercase();
+    if id.len() < 3 || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    let (head, tail) = id.split_at(id.len() - 2);
+    Some(format!("{head}.{tail}.environment.api.powerplatform.com"))
 }

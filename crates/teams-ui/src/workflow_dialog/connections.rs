@@ -94,7 +94,7 @@ impl WorkflowDialog {
                 .as_deref()
                 .ok_or("Choose a connected account for every app before saving.")?;
             let connected = self.connections.iter().any(|connection| {
-                connection_name(connection) == Some(selected) && compatible(connection, &binding.connector)
+                connection_name(connection) == Some(selected) && is_connected(connection, &binding.connector)
             });
             if !connected {
                 return Err("A selected connection is no longer connected. Refresh and choose another account.");
@@ -157,7 +157,7 @@ impl WorkflowDialog {
         let connections: Vec<_> = self
             .connections
             .iter()
-            .filter(|connection| compatible(connection, &binding.connector))
+            .filter(|connection| is_connected(connection, &binding.connector))
             .filter_map(|connection| {
                 Some((
                     connection_name(connection)?.to_owned(),
@@ -249,7 +249,8 @@ impl WorkflowDialog {
 fn connection_name(value: &Value) -> Option<&str> {
     value.get("name").and_then(Value::as_str)
 }
-fn compatible(value: &Value, connector: &str) -> bool {
+/// Whether `value` is a signed-in connection of `connector`.
+pub(super) fn is_connected(value: &Value, connector: &str) -> bool {
     value
         .pointer("/properties/apiId")
         .and_then(Value::as_str)

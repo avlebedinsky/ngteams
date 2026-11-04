@@ -10,7 +10,7 @@ use teams_ui::workflow_dialog::WorkflowDialog;
 
 #[path = "support/workflow_fixtures.rs"]
 mod fixtures;
-use fixtures::answer;
+use fixtures::{answer, webhook_answer};
 fn window() -> (common::Rig, Entity<WorkflowDialog>, &'static mut VisualTestContext) {
     let rig = common::Rig::start();
     *rig.core.workflow_handler.lock().unwrap() = Some(answer);
@@ -71,7 +71,9 @@ fn lifecycle_actions_keep_the_opened_account_environment_and_workflow() {
 fn delete_requires_its_own_confirmation_and_history_is_a_read() {
     let (rig, _view, cx) = window();
     click(cx, "workflow-open-synthetic-flow");
+    click(cx, "workflow-more");
     click(cx, "workflow-delete");
+    assert!(bounds(cx, "workflow-delete-dialog").is_some());
     assert!(
         !rig.core
             .workflow_requests
@@ -145,9 +147,12 @@ fn read_only_managers_offer_history_without_mutating_actions() {
     assert!(bounds(cx, "workflow-build").is_none());
     click(cx, "workflow-open-synthetic-flow");
     assert!(bounds(cx, "workflow-toggle").is_none());
-    assert!(bounds(cx, "workflow-delete").is_none());
+    assert!(bounds(cx, "workflow-more").is_none());
+    assert!(
+        bounds(cx, "workflow-run-synthetic-run").is_some(),
+        "the Overview shows the run history"
+    );
     click(cx, "workflow-history");
-    assert!(bounds(cx, "workflow-run-synthetic-run").is_some());
     click(cx, "workflow-run-synthetic-run");
     assert!(rig.core.workflow_requests.lock().unwrap().iter().any(|request| matches!(request, WorkflowRequest::RunActions{flow,run,..} if flow=="synthetic-flow" && run=="synthetic-run")));
     assert!(
@@ -627,4 +632,169 @@ fn existing_account_answer(request: &WorkflowRequest) -> teams_proto::WorkflowRe
         }
     }
     Ok(value)
+}
+
+fn webhook_window(rig: &common::Rig) -> &'static mut VisualTestContext {
+    let channel = |id: &str, name: &str| TeamChannel {
+        id: id.into(),
+        name: name.into(),
+        general: false,
+        kind: teams_store::ChannelKind::Standard,
+        shown: true,
+        about: teams_store::ChannelAbout::default(),
+    };
+    let team = Team {
+        id: "synthetic-team".into(),
+        group_id: Some("synthetic-group".into()),
+        name: "Synthetic team".into(),
+        channels: vec![
+            channel("synthetic-channel", "General"),
+            channel("synthetic-alerts", "Alerts"),
+        ],
+        ..Team::default()
+    };
+    *rig.core.teams.lock().unwrap() = Some(vec![team.clone()]);
+    *rig.core.workflow_handler.lock().unwrap() = Some(webhook_answer);
+    rig.cx.update(teams_ui::window::init);
+    let app: &'static mut TestAppContext = Box::leak(Box::new(rig.cx.clone()));
+    let core: Arc<dyn teams_ui::Core> = rig.core.clone();
+    let channel = team.channels[0].clone();
+    let (_view, cx) = app.add_window_view(|window, cx| WorkflowDialog::new(core, team, channel, window, cx));
+    cx.run_until_parked();
+    cx
+}
+fn authorized(rig: &common::Rig) -> Option<String> {
+    rig.core
+        .workflow_requests
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|request| match request {
+            WorkflowRequest::AuthorizeConnection {
+                connector, connection, ..
+            } if connector == "shared_teams" => Some(connection.clone()),
+            _ => None,
+        })
+}
+
+#[test]
+fn the_webhook_template_is_teams_card_with_a_team_and_a_channel_and_connects_by_itself() {
+    let rig = common::Rig::start();
+    let cx = webhook_window(&rig);
+    click(cx, "workflow-template-synthetic-webhook");
+    for shown in [
+        "workflow-simple-card",
+        "workflow-simple-team",
+        "workflow-simple-channel",
+        "workflow-save",
+    ] {
+        assert!(bounds(cx, shown).is_some(), "{shown} is drawn");
+    }
+    for hidden in [
+        "workflow-name",
+        "workflow-definition-toggle",
+        "workflow-connection-0",
+        "workflow-connect-0",
+        "workflow-config-0",
+    ] {
+        assert!(bounds(cx, hidden).is_none(), "Teams shows no {hidden}");
+    }
+    let connection = authorized(&rig).expect("the Teams connection is made behind the scenes");
+    click(cx, "workflow-collapse-all");
+    assert!(
+        bounds(cx, "workflow-simple-team").is_none(),
+        "Collapse all folds the card"
+    );
+    click(cx, "workflow-card-toggle");
+    click(cx, "workflow-simple-channel");
+    click(cx, "workflow-simple-channel-synthetic-alerts");
+    click(cx, "workflow-save");
+    let created = rig
+        .core
+        .workflow_requests
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|request| match request {
+            WorkflowRequest::Create { properties, .. } => Some(properties.clone()),
+            _ => None,
+        })
+        .expect("Save creates the workflow");
+    assert_saved_as_teams_does(&created, &connection);
+    assert!(
+        bounds(cx, "workflow-copy-webhook").is_some(),
+        "Save leads to the Overview"
+    );
+    assert!(bounds(cx, "workflow-detail-back").is_some());
+}
+
+/// What Teams' Save sends for the webhook template, with Alerts chosen.
+fn assert_saved_as_teams_does(created: &serde_json::Value, connection: &str) {
+    assert_eq!(created["displayName"], "Send webhook alerts to Alerts");
+    assert_eq!(created["templateName"], "synthetic-webhook");
+    assert_eq!(
+        created["connectionReferences"]["shared_teams"]["connectionName"],
+        connection
+    );
+    let post = &created["definition"]["actions"]["Post"];
+    assert_eq!(
+        post["inputs"]["parameters"]["body/recipient/groupId"],
+        "synthetic-group"
+    );
+    assert_eq!(
+        post["inputs"]["parameters"]["body/recipient/channelId"],
+        "synthetic-alerts"
+    );
+    assert_eq!(
+        post["runAfter"],
+        serde_json::json!({"Do_Not_Remove_FlowIL": ["Succeeded"]})
+    );
+    let kept: serde_json::Value = serde_json::from_str(
+        created["definition"]["actions"]["Do_Not_Remove_FlowIL"]["metadata"]["userIntentMarkup"]
+            .as_str()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        kept["automation"]["template"]["parameters"][1]["valueDisplayName"],
+        "Alerts"
+    );
+    assert!(
+        created.get("state").is_none(),
+        "Teams leaves a saved webhook workflow on"
+    );
+    assert_eq!(
+        created["definition"]["description"],
+        fixtures::webhook_template()["properties"]["description"],
+        "the Overview's description is the one the saved definition keeps"
+    );
+}
+
+#[test]
+fn an_existing_teams_connection_is_reused_and_back_leaves_without_writing() {
+    fn connected(request: &WorkflowRequest) -> teams_proto::WorkflowResponse {
+        if matches!(request, WorkflowRequest::Connections { .. }) {
+            return Ok(serde_json::json!({"value":[{"name":"synthetic-teams","properties":{
+                "apiId":"/providers/Microsoft.PowerApps/apis/shared_teams",
+                "statuses":[{"status":"Connected"}]
+            }}]}));
+        }
+        webhook_answer(request)
+    }
+    let rig = common::Rig::start();
+    let cx = webhook_window(&rig);
+    *rig.core.workflow_handler.lock().unwrap() = Some(connected);
+    click(cx, "workflow-template-synthetic-webhook");
+    assert!(bounds(cx, "workflow-simple-card").is_some());
+    assert_eq!(authorized(&rig), None);
+    click(cx, "workflow-edit-cancel");
+    assert!(bounds(cx, "workflow-template-synthetic-webhook").is_some());
+    assert!(
+        !rig.core
+            .workflow_requests
+            .lock()
+            .unwrap()
+            .iter()
+            .any(WorkflowRequest::writes)
+    );
 }

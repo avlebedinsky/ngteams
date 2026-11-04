@@ -572,6 +572,32 @@ impl Driver {
         Ok(())
     }
 
+    /// Clicks the viewport point (`x`, `y`) as a pointer would. It reaches what a page selector can't, such as a
+    /// cross-origin frame's controls (Teams' Workflows dialog).
+    ///
+    /// # Errors
+    /// When the browser refuses the input.
+    pub async fn pointer_click_at(&mut self, step: &str, x: f64, y: f64) -> Result<(), StepError> {
+        for (kind, button, clicks) in [
+            ("mouseMoved", "none", 0),
+            ("mousePressed", "left", 1),
+            ("mouseReleased", "left", 1),
+        ] {
+            let params = json!({"type": kind, "x": x, "y": y, "button": button, "clickCount": clicks});
+            self.call(step, "Input.dispatchMouseEvent", params).await?;
+        }
+        Ok(())
+    }
+
+    /// Turns the mouse wheel by `dy` pixels over the viewport point (`x`, `y`).
+    ///
+    /// # Errors
+    /// When the browser refuses the input.
+    pub async fn wheel_at(&mut self, step: &str, x: f64, y: f64, dy: f64) -> Result<(), StepError> {
+        let params = json!({"type": "mouseWheel", "x": x, "y": y, "deltaX": 0, "deltaY": dy});
+        self.call(step, "Input.dispatchMouseEvent", params).await.map(drop)
+    }
+
     /// The middle of the element `selector` finds, in the viewport, once it is scrolled into view.
     async fn centre(&self, step: &str, selector: Selector<'_>) -> Result<(f64, f64), StepError> {
         let expression = format!(

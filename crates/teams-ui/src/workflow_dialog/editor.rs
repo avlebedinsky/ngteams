@@ -48,6 +48,12 @@ impl WorkflowDialog {
         self.busy = false;
         match answer {
             Ok(value) => match Card::from_flow(&value) {
+                Some(card)
+                    if kind.is_none()
+                        && let Some(simple) = simple::Simple::open(&card, false) =>
+                {
+                    self.open_simple(simple, cx);
+                }
                 Some(mut card) => {
                     if matches!(kind, Some(BuildKind::Manual)) {
                         card.properties["definition"]["triggers"] = serde_json::json!({"manual": {"type": "Request", "kind": "Button", "inputs": {"schema": {"type": "object", "properties": {}}}}});
@@ -68,6 +74,11 @@ impl WorkflowDialog {
         if self.core.read_only() || self.busy {
             return;
         }
+        if existing && let Some(simple) = simple::Simple::open(&card, true) {
+            self.open_simple(simple, cx);
+            return;
+        }
+        self.simple = None;
         self.error = None;
         let mut properties = serde_json::json!({"displayName": card.name, "definition": card.properties.get("definition"), "connectionReferences": card.properties.get("connectionReferences"), "state": card.properties.get("state").cloned().unwrap_or(Value::String("Stopped".to_owned()))});
         if !existing {
@@ -115,7 +126,7 @@ impl WorkflowDialog {
                     this.busy = false;
                     match answer {
                         Ok(value) => match Card::from_flow(&value) {
-                            Some(card) => this.screen = Screen::Detail(card),
+                            Some(card) => this.show_overview(card, cx),
                             None => this.error = Some(model::problem(&WorkflowFailure::InvalidResponse).to_owned()),
                         },
                         Err(error) => this.error = Some(model::problem(&error).to_owned()),
@@ -191,6 +202,10 @@ impl WorkflowDialog {
     }
 
     pub(super) fn mutate(&mut self, request: WorkflowRequest, notice: &'static str, cx: &mut Context<Self>) {
+        self.mutate_then(request, Outcome::Notice(notice), cx);
+    }
+
+    pub(super) fn mutate_then(&mut self, request: WorkflowRequest, outcome: Outcome, cx: &mut Context<Self>) {
         if self.busy || self.core.read_only() || self.uncertain.is_some() {
             return;
         }
@@ -206,17 +221,29 @@ impl WorkflowDialog {
                         return;
                     }
                     this.busy = false;
-                    this.mutation_read(answer, notice, cx);
+                    this.mutation_read(answer, outcome, cx);
                     cx.notify();
                 });
             }));
         cx.notify();
     }
 
-    fn mutation_read(&mut self, answer: WorkflowResponse, notice: &str, cx: &mut Context<Self>) {
+    fn mutation_read(&mut self, answer: WorkflowResponse, outcome: Outcome, cx: &mut Context<Self>) {
         match answer {
+            // Teams shows the saved workflow's Overview after Save.
+            Ok(value)
+                if matches!(outcome, Outcome::Overview)
+                    && let Some(card) = Card::from_flow(&value) =>
+            {
+                self.simple = None;
+                self.show_overview(card, cx);
+                self.load_workflows(cx);
+            }
             Ok(_) => {
-                self.notice = Some(notice.to_owned());
+                self.simple = None;
+                if let Outcome::Notice(notice) = outcome {
+                    self.notice = Some(notice.to_owned());
+                }
                 self.screen = Screen::Browse;
                 self.load_workflows(cx);
             }
@@ -229,11 +256,20 @@ impl WorkflowDialog {
         }
     }
 
-    fn history(&mut self, card: Card, cx: &mut Context<Self>) {
+    /// Opens a workflow's Overview and reads its run history into it.
+    fn show_overview(&mut self, card: Card, cx: &mut Context<Self>) {
+        self.history.clear();
+        self.history_next = None;
+        self.webhook_link = None;
+        self.screen = Screen::Detail(card.clone());
+        self.history(card, cx);
+    }
+
+    pub(super) fn history(&mut self, card: Card, cx: &mut Context<Self>) {
         self.history_read(card, None, cx);
     }
 
-    fn history_read(&mut self, card: Card, next: Option<String>, cx: &mut Context<Self>) {
+    pub(super) fn history_read(&mut self, card: Card, next: Option<String>, cx: &mut Context<Self>) {
         let Some(environment) = self.environment.clone() else {
             return;
         };
@@ -261,14 +297,18 @@ impl WorkflowDialog {
                         return;
                     }
                     this.busy = false;
-                    this.history_received(answer, card, append);
+                    this.history_received(answer, &card, append);
                     cx.notify();
                 });
             }));
         cx.notify();
     }
 
-    fn history_received(&mut self, answer: WorkflowResponse, card: Card, append: bool) {
+    fn history_received(&mut self, answer: WorkflowResponse, card: &Card, append: bool) {
+        // A late answer for a workflow no longer open is dropped.
+        if !matches!(&self.screen, Screen::Detail(open) | Screen::Delete(open) if open.id == card.id) {
+            return;
+        }
         match answer.and_then(|value| model::rows(&value).map(|rows| (rows.to_vec(), model::next(&value)))) {
             Ok((history, next)) => {
                 if !append {
@@ -276,7 +316,6 @@ impl WorkflowDialog {
                 }
                 self.history.extend(history);
                 self.history_next = next;
-                self.screen = Screen::History(card);
             }
             Err(error) => self.error = Some(model::problem(&error).to_owned()),
         }
@@ -377,87 +416,7 @@ impl WorkflowDialog {
         cx.notify();
     }
 
-    pub(super) fn detail(&self, card: &Card, palette: Palette, cx: &Context<Self>) -> AnyElement {
-        let history = card.clone();
-        div()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .child(
-                div()
-                    .text_lg()
-                    .font_weight(gpui::FontWeight::SEMIBOLD)
-                    .child(card.name.clone()),
-            )
-            .child(
-                div()
-                    .text_color(rgb(palette.muted_foreground))
-                    .child(card.description.clone()),
-            )
-            .child(format!(
-                "Status: {}",
-                card.properties
-                    .get("state")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Unknown")
-            ))
-            .child(selected_by(
-                "workflow-history",
-                Button::new("workflow-history")
-                    .label("Run history")
-                    .icon(Glyph::CLOCK.icon())
-                    .disabled(self.busy)
-                    .on_click(cx.listener(move |this, _, _, cx| this.history(history.clone(), cx))),
-            ))
-            .children(self.webhook_copy(card, cx))
-            .when(!self.core.read_only(), |view| {
-                view.child(self.detail_controls(card, cx))
-            })
-            .into_any_element()
-    }
-
-    fn detail_controls(&self, card: &Card, cx: &Context<Self>) -> AnyElement {
-        let (editing, changing, running, deleting) = (card.clone(), card.clone(), card.clone(), card.clone());
-        div()
-            .flex()
-            .gap_3()
-            .child(selected_by(
-                "workflow-edit",
-                Button::new("workflow-edit")
-                    .label("Edit")
-                    .disabled(self.busy || self.uncertain.is_some())
-                    .on_click(cx.listener(move |this, _, window, cx| this.edit(editing.clone(), true, window, cx))),
-            ))
-            .child(selected_by(
-                "workflow-toggle",
-                Button::new("workflow-toggle")
-                    .label(if card.enabled() { "Turn off" } else { "Turn on" })
-                    .disabled(self.busy || self.uncertain.is_some())
-                    .on_click(cx.listener(move |this, _, _, cx| this.toggle(&changing, cx))),
-            ))
-            .child(selected_by(
-                "workflow-run",
-                Button::new("workflow-run")
-                    .label("Run")
-                    .icon(Glyph::PLAY.icon())
-                    .disabled(self.busy || self.uncertain.is_some())
-                    .on_click(cx.listener(move |this, _, window, cx| this.prepare_run(&running, window, cx))),
-            ))
-            .child(selected_by(
-                "workflow-delete",
-                Button::new("workflow-delete")
-                    .danger()
-                    .label("Delete")
-                    .disabled(self.busy || self.uncertain.is_some())
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.screen = Screen::Delete(deleting.clone());
-                        cx.notify();
-                    })),
-            ))
-            .into_any_element()
-    }
-
-    fn toggle(&mut self, card: &Card, cx: &mut Context<Self>) {
+    pub(super) fn toggle(&mut self, card: &Card, cx: &mut Context<Self>) {
         let Some(environment) = self.environment.clone() else {
             return;
         };
@@ -470,92 +429,5 @@ impl WorkflowDialog {
             "Workflow updated",
             cx,
         );
-    }
-
-    pub(super) fn history_view(&self, card: &Card, palette: Palette, cx: &Context<Self>) -> AnyElement {
-        let mut view = div().flex().flex_col().gap_3().child(
-            div()
-                .text_lg()
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .child(format!("{} · Run history", card.name)),
-        );
-        if self.history.is_empty() {
-            view = view.child(state(
-                "No runs yet",
-                "Runs appear here after this workflow has been triggered.",
-                palette,
-            ));
-        }
-        for run in &self.history {
-            let status = run
-                .pointer("/properties/status")
-                .and_then(Value::as_str)
-                .unwrap_or("Unknown");
-            let started = run
-                .pointer("/properties/startTime")
-                .and_then(Value::as_str)
-                .unwrap_or("Time unavailable");
-            let ended = run
-                .pointer("/properties/endTime")
-                .and_then(Value::as_str)
-                .unwrap_or("Running");
-            let (card, run) = (card.clone(), run.clone());
-            view = view.child(selected_by(
-                format!(
-                    "workflow-run-{}",
-                    run.get("name").and_then(Value::as_str).unwrap_or_default()
-                ),
-                Button::new(format!(
-                    "workflow-history-{}",
-                    run.get("name").and_then(Value::as_str).unwrap_or_default()
-                ))
-                .outline()
-                .label(format!("{status} · {started} · {ended}"))
-                .on_click(cx.listener(move |this, _, _, cx| this.run_details(card.clone(), run.clone(), cx))),
-            ));
-        }
-        if let Some(next) = &self.history_next {
-            let (card, next) = (card.clone(), next.clone());
-            view = view.child(selected_by(
-                "workflow-more-history",
-                Button::new("workflow-more-history")
-                    .label("Load more runs")
-                    .disabled(self.busy)
-                    .on_click(
-                        cx.listener(move |this, _, _, cx| this.history_read(card.clone(), Some(next.clone()), cx)),
-                    ),
-            ));
-        }
-        view.into_any_element()
-    }
-
-    pub(super) fn delete_view(&self, card: &Card, cx: &Context<Self>) -> AnyElement {
-        let chosen = card.clone();
-        div()
-            .flex()
-            .flex_col()
-            .gap_4()
-            .child(div().text_lg().child("Delete workflow?"))
-            .child(format!("{} will be deleted. This cannot be undone.", card.name))
-            .child(selected_by(
-                "workflow-delete-confirm",
-                Button::new("workflow-delete-confirm")
-                    .danger()
-                    .label("Delete workflow")
-                    .disabled(self.busy)
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if let Some(environment) = this.environment.clone() {
-                            this.mutate(
-                                WorkflowRequest::Delete {
-                                    environment,
-                                    flow: chosen.id.clone(),
-                                },
-                                "Workflow deleted",
-                                cx,
-                            );
-                        }
-                    })),
-            ))
-            .into_any_element()
     }
 }

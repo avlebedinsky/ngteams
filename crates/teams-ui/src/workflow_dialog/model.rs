@@ -26,8 +26,10 @@ impl Card {
         Some(Self {
             id: value.get("name")?.as_str()?.to_owned(),
             name: properties.get("displayName")?.as_str()?.to_owned(),
+            // A saved workflow keeps its description in its definition, where Teams writes it.
             description: properties
                 .get("description")
+                .or_else(|| properties.pointer("/definition/description"))
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_owned(),

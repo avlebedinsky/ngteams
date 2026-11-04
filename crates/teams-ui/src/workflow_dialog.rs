@@ -4,9 +4,11 @@ mod connections;
 mod editor;
 mod form;
 mod model;
+mod overview;
 mod run_inputs;
 mod runs;
 mod service;
+mod simple;
 mod view;
 
 use std::sync::Arc;
@@ -33,6 +35,13 @@ use form::{ConfigField, EditorMode};
 use model::Card;
 use run_inputs::RunField;
 
+/// Where a change's success leads: back to the list with a notice, or to the changed workflow's Overview.
+#[derive(Clone, Copy)]
+enum Outcome {
+    Notice(&'static str),
+    Overview,
+}
+
 #[derive(Clone, Copy)]
 enum BuildKind {
     Manual,
@@ -56,7 +65,6 @@ enum Screen {
         flow: Option<Card>,
     },
     Detail(Card),
-    History(Card),
     RunDetails {
         card: Card,
         run: Value,
@@ -115,6 +123,9 @@ pub struct WorkflowDialog {
     screen: Screen,
     all_templates: bool,
     offset: usize,
+    teams: Vec<Team>,
+    simple: Option<simple::Simple>,
+    webhook_link: Option<String>,
 }
 
 impl EventEmitter<TeamDialogEvent> for WorkflowDialog {}
@@ -176,7 +187,11 @@ impl WorkflowDialog {
             screen: Screen::Browse,
             all_templates: false,
             offset: 0,
+            teams: Vec::new(),
+            simple: None,
+            webhook_link: None,
         };
+        this.load_teams(cx);
         this.refresh(cx);
         this
     }
@@ -192,6 +207,45 @@ impl WorkflowDialog {
     pub fn prepare_workflow_run(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(card) = self.workflows.iter().find(|card| card.id == id).cloned() {
             self.prepare_run(&card, window, cx);
+        }
+    }
+
+    /// The account's teams and channels, from the store, for the card editor's choices.
+    fn load_teams(&mut self, cx: &mut Context<Self>) {
+        let reply = self.core.teams();
+        cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+            if let Ok(Some(teams)) = reply.await {
+                let _ = this.update(cx, |this, cx| {
+                    this.teams = teams;
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// Opens the Overview of a workflow already loaded for this account and environment.
+    pub fn open_workflow(&mut self, id: &str, cx: &mut Context<Self>) {
+        if let Some(card) = self.workflows.iter().find(|card| card.id == id).cloned() {
+            self.open_flow(card, cx);
+        }
+    }
+
+    /// Folds the card editor's card to its title, as its "Collapse all" does.
+    pub fn collapse_all(&mut self, cx: &mut Context<Self>) {
+        if let Some(simple) = &mut self.simple {
+            simple.collapse();
+            cx.notify();
+        }
+    }
+
+    /// Asks to delete the workflow whose Overview is open, as its "..." menu's Delete does.
+    pub fn ask_delete(&mut self, cx: &mut Context<Self>) {
+        if let Screen::Detail(card) = &self.screen
+            && !self.core.read_only()
+        {
+            self.screen = Screen::Delete(card.clone());
+            cx.notify();
         }
     }
 

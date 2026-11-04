@@ -17,10 +17,16 @@ skill through the `.claude/skills/teams-ui` symlink. Keep updates in the shared 
 
 ## Before you build
 
+- **Look at it in browser Teams first, never invent it.** Before building a feature or a screen, open it in the web
+  client with a lab account: `proto-lab run team-manage --headless` under the exclusive live lock and an outer timeout,
+  driven over `PROTO_LAB_STEPS_SOCKET` (`shot <name>.png` after each step; `xy <x> <y>` and `wheel <x> <y> <dy>` reach
+  cross-origin frames such as Workflows), after the lab-contact check. Screenshot every step: entry, each state,
+  menus opened, validation and empty states, and what the final action leads to. Keep the shots out of the repo
+  (they hold tenant data), build from them, and compare them side by side with the sandbox shots before handing over.
 - **Find the Teams reference.** When the user shows a screenshot or says "like Teams", list every behavior it shows
-  (layout, sections, scrolling, hover, empty and fallback states) and build all of it. Where unclear, look at the web
-  client. A feature real Teams has and the app lacks is a gap to fix, not "by design". A control drawn disabled, a
-  "not available yet" note or a "Not done" list doesn't finish the job. If a part needs a capture, a read or a lab run
+  (layout, sections, scrolling, hover, empty and fallback states) and build all of it. A feature real Teams has and
+  the app lacks is a gap to fix, not "by design". A control drawn disabled, a "not available yet" note or a "Not done"
+  list doesn't finish the job. If a part needs a capture, a read or a lab run
   nobody has made yet, make it. Leave a part out only when it truly can't be built now, and say what blocks it.
 - **Look at the current state first**: run the UI tour (below) and read the shots of the surfaces you will touch.
 - **Reuse what exists** before writing new widgets: `crates/teams-ui/src/icons.rs` (icons, icon buttons),

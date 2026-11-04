@@ -446,3 +446,118 @@ async fn refused_workflow_bearers_are_invalidated_without_replaying_any_write() 
         }
     }
 }
+
+fn authorize() -> WorkflowRequest {
+    WorkflowRequest::AuthorizeConnection {
+        environment: "Default-synthetic".into(),
+        connector: "shared_teams".into(),
+        connection: "shared-teams-synthetic".into(),
+    }
+}
+async fn mount_created(server: &MockServer, login: &str) {
+    Mock::given(method("PUT"))
+        .and(path(
+            "/providers/Microsoft.PowerApps/apis/shared_teams/connections/shared-teams-synthetic",
+        ))
+        .and(query_param("$expand", "ConsentLink"))
+        .and(header("authorization", "Bearer synthetic-connections-token"))
+        .and(wiremock::matchers::body_partial_json(json!({"properties":{"consentInfo":{"redirectUrl":"https://make.powerautomate.com/oauth/redirect"},"environment":{"name":"Default-synthetic"}}})))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({"name":"shared-teams-synthetic","properties":{"statuses":[{"status":"Error"}],"consentInfo":{"firstPartyLoginUri":login}}})))
+        .expect(1)
+        .mount(server)
+        .await;
+}
+#[tokio::test]
+async fn a_teams_connection_is_signed_in_only_through_its_microsoft_first_party_login() {
+    let server = MockServer::start().await;
+    mount_created(
+        &server,
+        "https://synthetic.consent.azure-apihub.net/firstPartyLogin?data=synthetic",
+    )
+    .await;
+    Mock::given(method("POST"))
+        .and(path("/powerautomate/users/me/onBehalfOfTokenBundle"))
+        .and(query_param("api-version", "1"))
+        .and(header("authorization", "Bearer synthetic-flow-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(
+            json!({"audienceToToken":{"https://apihub.azure.com":"synthetic-bundle-token","https://graph.microsoft.com":"synthetic-other"}}),
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/firstPartyLogin"))
+        .and(query_param("data", "synthetic"))
+        .and(wiremock::matchers::body_json(
+            json!({"accessToken":"synthetic-bundle-token"}),
+        ))
+        .respond_with(ResponseTemplate::new(200))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let tokens = Arc::new(Tokens::default());
+    let created = transport(&server, tokens.clone()).workflow(&authorize()).await.unwrap();
+    assert_eq!(created["name"], "shared-teams-synthetic");
+    assert!(!created.to_string().contains("synthetic-bundle-token"));
+    let login = server
+        .received_requests()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|request| request.url.path() == "/firstPartyLogin")
+        .unwrap();
+    assert!(
+        !login.headers.contains_key("authorization"),
+        "the account's own token never goes to the consent host"
+    );
+    assert_eq!(
+        *tokens.0.lock().unwrap(),
+        ["https://service.powerapps.com/", "https://service.flow.microsoft.com/"]
+    );
+}
+#[tokio::test]
+async fn an_external_or_unexpected_first_party_login_receives_nothing() {
+    for login in [
+        "https://synthetic.consent.azure-apihub.net.evil.test/firstPartyLogin?data=synthetic",
+        "https://synthetic.consent.azure-apihub.net/login?data=synthetic",
+        "https://synthetic.consent.azure-apihub.net/firstPartyLogin?data=synthetic&next=elsewhere",
+        "http://synthetic.consent.azure-apihub.net/firstPartyLogin?data=synthetic",
+    ] {
+        let server = MockServer::start().await;
+        mount_created(&server, login).await;
+        let tokens = Arc::new(Tokens::default());
+        assert_eq!(
+            transport(&server, tokens.clone()).workflow(&authorize()).await,
+            Err(WorkflowFailure::InvalidResponse)
+        );
+        assert_eq!(server.received_requests().await.unwrap().len(), 1, "{login}");
+        assert_eq!(*tokens.0.lock().unwrap(), ["https://service.powerapps.com/"]);
+    }
+}
+#[tokio::test]
+async fn an_already_connected_connection_is_not_signed_in_again() {
+    let server = MockServer::start().await;
+    Mock::given(method("PUT"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(
+                json!({"name":"shared-teams-synthetic","properties":{"statuses":[{"status":"Connected"}]}}),
+            ),
+        )
+        .expect(1)
+        .mount(&server)
+        .await;
+    let tokens = Arc::new(Tokens::default());
+    assert!(transport(&server, tokens).workflow(&authorize()).await.is_ok());
+    assert_eq!(server.received_requests().await.unwrap().len(), 1);
+    assert!(authorize().writes());
+}
+#[test]
+fn environment_hosts_follow_the_power_platform_form() {
+    use teams_proto::workflow::platform_host;
+    assert_eq!(
+        platform_host("Default-0a1b2c3d-0000-4000-8000-000000000042").as_deref(),
+        Some("default0a1b2c3d0000400080000000000000.42.environment.api.powerplatform.com")
+    );
+    assert_eq!(platform_host("evil.test/x"), None);
+    assert_eq!(platform_host("a"), None);
+}

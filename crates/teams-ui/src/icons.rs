@@ -126,6 +126,7 @@ impl Glyph {
     pub const PLAY: Self = Self(include_bytes!("../assets/icons/circle-play.svg"));
     pub const PLAY_MEDIA: Self = Self(include_bytes!("../assets/icons/play.svg"));
     pub const PLUS: Self = Self(include_bytes!("../assets/icons/plus.svg"));
+    pub const POWER: Self = Self(include_bytes!("../assets/icons/power.svg"));
     pub const POP_OUT: Self = Self(include_bytes!("../assets/icons/square-arrow-out-up-right.svg"));
     pub const QUOTE: Self = Self(include_bytes!("../assets/icons/quote.svg"));
     pub const REACT: Self = Self(include_bytes!("../assets/icons/smile-plus.svg"));

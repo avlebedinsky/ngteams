@@ -42,3 +42,48 @@ pub fn input_answer(request: &WorkflowRequest) -> WorkflowResponse {
     }
     Ok(value)
 }
+
+/// The webhook template as the gallery shapes it: its markup names a team and a channel, and Microsoft Teams is its
+/// only app.
+pub fn webhook_template() -> Value {
+    json!({"name":"synthetic-webhook","properties":{
+        "displayName":"Send webhook alerts to a channel",
+        "description":"Generate a webhook URL that lets anyone send external systems updates into a channel using rich adaptive cards or message cards.",
+        "metadata":{"userIntentMarkup":{"version":"1.0","automation":{"template":{
+            "id":"synthetic-webhook",
+            "summary":"${format(resources['synthetic-webhook.summary'], context['parameters']['TeamsChannel'])}",
+            "parameters":[
+                {"id":"TeamsGroup","typeName":"Teams.Group","mode":"input"},
+                {"id":"TeamsChannel","typeName":"Teams.Channel","mode":"input","dependencies":["TeamsGroup"]}
+            ],
+            "editorBindings":[{"parameterId":"TeamsGroup","label":"${resources['synthetic-webhook.TeamsGroup.label']}"},{"parameterId":"TeamsChannel"}]
+        }}}},
+        "definition":{
+            "parameters":{"teams.group":{"defaultValue":"","type":"String"},"teams.channel":{"defaultValue":"","type":"String"}},
+            "triggers":{"manual":{"type":"Request","kind":"TeamsWebhook","inputs":{"triggerAuthenticationType":"All"}}},
+            "actions":{"Post":{"runAfter":{},"type":"OpenApiConnection","inputs":{"parameters":{"location":"Channel","body/recipient/groupId":"","body/recipient/channelId":"","body/messageBody":"@triggerBody()"},"host":{"apiId":"/providers/Microsoft.PowerApps/apis/shared_teams","connectionName":"shared_teams","operationId":"PostCardToConversation"}}}}
+        },
+        "connectionReferences":{"shared_teams":{"api":{"name":"shared_teams","id":"/providers/Microsoft.PowerApps/apis/shared_teams"}}}
+    }})
+}
+
+/// The service for the webhook template: no Teams connection yet (one is made), the saved workflow, no runs.
+pub fn webhook_answer(request: &WorkflowRequest) -> WorkflowResponse {
+    Ok(match request {
+        WorkflowRequest::Template { .. } => webhook_template(),
+        WorkflowRequest::Connections { .. } | WorkflowRequest::History { .. } => json!({"value": []}),
+        WorkflowRequest::AuthorizeConnection { connection, .. } => json!({"name": connection}),
+        WorkflowRequest::Create { properties, .. } => json!({"name":"synthetic-webhook-flow","properties":{
+            "displayName": properties["displayName"],
+            "state": "Started",
+            "definition": properties["definition"]
+        }}),
+        WorkflowRequest::Get { .. } => json!({"name":"synthetic-flow","properties":{
+            "displayName": "Send webhook alerts to General",
+            "description": webhook_template()["properties"]["description"],
+            "state": "Started",
+            "definition": webhook_template()["properties"]["definition"]
+        }}),
+        other => return answer(other),
+    })
+}

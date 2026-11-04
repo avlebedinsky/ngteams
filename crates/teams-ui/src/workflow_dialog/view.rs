@@ -352,12 +352,13 @@ impl WorkflowDialog {
                 .child(self.catalog(palette, cx))
                 .child(self.workflow_list(palette, cx))
                 .into_any_element(),
-            Screen::Edit { .. } => self.editor(palette, cx),
-            Screen::Detail(card) => self.detail(card, palette, cx),
-            Screen::History(card) => self.history_view(card, palette, cx),
+            Screen::Edit { .. } => match &self.simple {
+                Some(simple) => self.simple_editor(simple, palette, cx),
+                None => self.editor(palette, cx),
+            },
+            Screen::Detail(card) | Screen::Delete(card) => self.detail(card, palette, cx),
             Screen::RunDetails { card, run, actions } => Self::run_view(card, run, actions, palette),
             Screen::RunInputs { card, .. } => self.run_inputs_view(card, palette, cx),
-            Screen::Delete(card) => self.delete_view(card, cx),
         }
     }
 
@@ -493,32 +494,51 @@ impl WorkflowDialog {
         .into_any_element()
     }
 
+    /// Teams' footer: Save and Back under the card editor, Back and Workflows Home under an Overview, Workflows Home
+    /// elsewhere.
     fn footer(&self, palette: Palette, cx: &Context<Self>) -> AnyElement {
-        div()
+        let footer = div()
             .flex()
             .items_center()
-            .justify_between()
-            .p_4()
+            .justify_end()
+            .gap_2()
+            .px_8()
+            .py_6()
             .border_t_1()
-            .border_color(rgb(palette.border))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(rgb(palette.muted_foreground))
-                    .child(format!("{} / {}", self.team.name, self.channel.name)),
-            )
+            .border_color(rgb(palette.border));
+        if matches!(self.screen, Screen::Edit { .. }) && self.simple.is_some() {
+            return footer.child(self.simple_footer(cx)).into_any_element();
+        }
+        footer
+            .when(matches!(self.screen, Screen::Detail(_) | Screen::Delete(_)), |footer| {
+                footer.child(selected_by(
+                    "workflow-detail-back",
+                    Button::new("workflow-detail-back")
+                        .outline()
+                        .min_w(px(96.0))
+                        .label("Back")
+                        .disabled(self.busy)
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.screen = Screen::Browse;
+                            this.error = None;
+                            cx.notify();
+                        })),
+                ))
+            })
             .child(selected_by(
                 "workflow-home",
                 Button::new("workflow-home")
                     .primary()
-                    .label(if matches!(self.screen, Screen::Browse) {
-                        "Workflows Home"
-                    } else {
-                        "Back to workflows"
-                    })
+                    .label(
+                        if matches!(self.screen, Screen::Browse | Screen::Detail(_) | Screen::Delete(_)) {
+                            "Workflows Home"
+                        } else {
+                            "Back to workflows"
+                        },
+                    )
                     .disabled(self.busy)
                     .on_click(cx.listener(|this, _, _, cx| {
-                        this.screen = if matches!(this.screen, Screen::Browse) {
+                        this.screen = if matches!(this.screen, Screen::Browse | Screen::Detail(_) | Screen::Delete(_)) {
                             Screen::Home
                         } else {
                             Screen::Browse
@@ -538,6 +558,7 @@ impl Render for WorkflowDialog {
         div()
             .id("workflow-dialog")
             .debug_selector(|| "workflow-dialog".to_owned())
+            .relative()
             .occlude()
             .w(px(1120.0))
             .max_w_full()
@@ -560,6 +581,7 @@ impl Render for WorkflowDialog {
                     if matches!(this.screen, Screen::Browse) {
                         cx.emit(TeamDialogEvent::Closed);
                     } else if !this.busy {
+                        this.simple = None;
                         this.screen = Screen::Browse;
                         this.error = None;
                         cx.notify();
@@ -592,5 +614,12 @@ impl Render for WorkflowDialog {
                     }),
             )
             .child(self.footer(palette, cx))
+            .when_some(
+                match &self.screen {
+                    Screen::Delete(card) => Some(self.delete_prompt(card, palette, cx)),
+                    _ => None,
+                },
+                gpui::ParentElement::child,
+            )
     }
 }

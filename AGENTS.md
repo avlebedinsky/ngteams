@@ -75,6 +75,8 @@ Live runs reach the real tenant, so these stay firm. Commands are in README's la
 
 ## Conventions
 
+- Before building a feature or UI, look at how browser Teams does it and screenshot each step with a lab account
+  (`proto-lab`); build from those shots, never invent it ([how](.agents/skills/teams-ui/SKILL.md#before-you-build)).
 - Split a function over a `clippy.toml` limit; if it really can't be split, put an outer
   `#[expect(clippy::..., reason = "...")]` on that item. Thresholds only go down.
 - Bump `rust-toolchain.toml` in a change of its own. Every crate (spikes too) has `[lints] workspace = true` and is in
