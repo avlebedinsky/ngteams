@@ -158,6 +158,9 @@ impl WorkflowDialog {
             cx.notify();
             return;
         }
+        if matches!(self.editor_mode, EditorMode::Definition) {
+            self.prepare_bindings(&properties);
+        }
         if let Err(error) = self.bind_connections(&mut properties) {
             self.error = Some(error.to_owned());
             cx.notify();

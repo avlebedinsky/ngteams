@@ -477,3 +477,59 @@ fn channel_move_submenu_preserves_current_section_and_moves_only_on_an_explicit_
         "a section move is an own preference"
     );
 }
+
+#[test]
+fn standard_channel_moderators_are_read_from_the_selected_channel_and_refresh_after_changes() {
+    let rig = Rig::start();
+    *rig.core.team_roster.lock().unwrap() = vec![member(LAB_A, true), member(LAB_B, false)];
+    let mut moderator = member(LAB_B, false);
+    moderator.moderator = true;
+    rig.core
+        .team_rosters
+        .lock()
+        .unwrap()
+        .insert(CHANNEL.to_owned(), vec![moderator]);
+    let (shell, cx) = shell(&rig);
+    open(&shell, ChannelChoice::Manage, cx);
+    click(cx, "channel-manage-members");
+    rig.core
+        .team_rosters
+        .lock()
+        .unwrap()
+        .insert(CHANNEL.to_owned(), vec![member(LAB_B, false)]);
+    click(cx, "channel-member-moderator-1");
+    assert!(
+        matches!(&rig.core.team_writes.lock().unwrap()[0].0, TeamWrite::Channel(write)
+        if write.target.channel == CHANNEL && matches!(&write.action, ChannelChange::Moderator { mri, moderator:false } if mri == LAB_B))
+    );
+    rig.core
+        .team_rosters
+        .lock()
+        .unwrap()
+        .insert(CHANNEL.to_owned(), vec![member(LAB_B, false)]);
+    click(cx, "channel-member-moderator-1");
+    assert!(
+        matches!(&rig.core.team_writes.lock().unwrap()[1].0, TeamWrite::Channel(write)
+        if matches!(&write.action, ChannelChange::Moderator { moderator:true, .. }))
+    );
+}
+
+#[test]
+fn existing_email_domains_are_shown_and_can_be_saved_without_retyping() {
+    let rig = Rig::start();
+    rig.core.channel_data.lock().unwrap().insert(
+        format!("email:{CHANNEL}"),
+        ChannelData(serde_json::json!({
+            "emailAddress":"synthetic@example.invalid",
+            "allowedSenders":{"allowedSenderType":"domains", "allowedDomains":["example.test", "other.example"]}
+        })),
+    );
+    let (shell, cx) = shell(&rig);
+    open(&shell, ChannelChoice::Email, cx);
+    click(cx, "channel-email-settings");
+    click(cx, "channel-management-save");
+    assert!(
+        matches!(&rig.core.team_writes.lock().unwrap()[0].0, TeamWrite::Channel(write)
+        if matches!(&write.action, ChannelChange::UpdateEmail { allowed_domains, .. } if allowed_domains == &["example.test", "other.example"]))
+    );
+}

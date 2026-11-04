@@ -148,7 +148,7 @@ use crate::pictures::{Disk, PictureBytes, Pictures};
 use crate::presence::{Availability, PRESENCE_POLL, PRESENCE_POLL_SUBSCRIBED, PresenceDone, Presences};
 use crate::profiles::{PROFILE_RETRY, Person, Profiles};
 use crate::search::{Backfill, INDEX_BATCH, Step};
-use crate::sync::{CatchUp, CatchUpError, CatchUpReport, Gaps, NOTES, Synced};
+use crate::sync::{CatchUp, CatchUpError, CatchUpReport, Gaps, Meanwhile, NOTES, Synced};
 use crate::teams::{ChatListing, READING_TEAMS, TEAMS_RETRY, Teams, TeamsRead, TeamsReadError};
 use crate::thumbnails::Thumbnails;
 
@@ -2116,7 +2116,12 @@ where
         }
         let command = self.command(action)?;
         if let Command::Send { conversation, text } = &command {
-            self.uploads.share(conversation, text.files()).await?;
+            let mut sharing = std::pin::pin!(self.uploads.share(conversation, text.files()));
+            tokio::select! {
+                biased;
+                result = &mut sharing => result?,
+                () = self.inbox.serve(&mut self.store) => sharing.await?,
+            }
         }
         if let Command::Send { conversation, .. } = &command {
             // the message a waiting typing announced goes now: the typing must not follow it

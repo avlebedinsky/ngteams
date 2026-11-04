@@ -51,6 +51,14 @@ impl<C: Credentials> HttpTransport<C> {
             range: None,
         };
         let answer = self.attempt(&outgoing, token.as_ref()).await.map_err(failure)?;
+        if answer.status() == 401
+            && let Some(token) = &token
+        {
+            let _ = self
+                .credentials
+                .bearer_rejected(crate::workflow::RUNTIME_AUDIENCE, token)
+                .await;
+        }
         if !answer.is_success() {
             return Err(status(answer.status()));
         }

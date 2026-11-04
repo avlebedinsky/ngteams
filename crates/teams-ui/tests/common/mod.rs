@@ -141,6 +141,7 @@ pub struct FakeCore {
     pub team_views: Mutex<Vec<teams_proto::OwnTeamView>>,
     /// A team's people, as its roster answers.
     pub team_roster: Mutex<Vec<teams_core::TeamMember>>,
+    pub team_rosters: Mutex<HashMap<String, Vec<teams_core::TeamMember>>>,
     /// A team's settings, as the service keeps them.
     pub team_settings: Mutex<Option<String>>,
     /// Tags, code, pending membership and analytics returned by the fake service.
@@ -448,8 +449,11 @@ impl Core for FakeCore {
         Reply::ready(Ok(()))
     }
 
-    fn team_roster(&self, _team: String) -> Reply<Vec<teams_core::TeamMember>> {
-        Reply::ready(Ok(locked(&self.team_roster).clone()))
+    fn team_roster(&self, team: String) -> Reply<Vec<teams_core::TeamMember>> {
+        Reply::ready(Ok(locked(&self.team_rosters)
+            .get(&team)
+            .cloned()
+            .unwrap_or_else(|| locked(&self.team_roster).clone())))
     }
 
     fn team_settings(&self, _team: String) -> Reply<Option<String>> {

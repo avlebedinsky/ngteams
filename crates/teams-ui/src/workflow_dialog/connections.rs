@@ -64,7 +64,14 @@ impl WorkflowDialog {
     }
 
     pub(super) fn bind_connections(&self, properties: &mut Value) -> Result<(), &'static str> {
-        let mut references = serde_json::Map::new();
+        let mut references = match properties.get("connectionReferences") {
+            Some(Value::Object(references)) => references.clone(),
+            None | Some(Value::Null) => serde_json::Map::new(),
+            _ => return Err("The workflow connection references must be an object."),
+        };
+        if references.len() != self.bindings.len() {
+            return Err("A connection reference has no supported app identity. Check the definition before saving.");
+        }
         for binding in &self.bindings {
             let selected = binding
                 .selected
@@ -76,7 +83,15 @@ impl WorkflowDialog {
             if !connected {
                 return Err("A selected connection is no longer connected. Refresh and choose another account.");
             }
-            references.insert(binding.key.clone(), serde_json::json!({"connectionName": selected, "source": "Embedded", "id": format!("/providers/Microsoft.PowerApps/apis/{}", binding.connector), "tier": "NotSpecified"}));
+            let reference = references
+                .get_mut(&binding.key)
+                .ok_or("The workflow connections changed. Reopen the configuration.")?;
+            reference["connectionName"] = Value::String(selected.to_owned());
+            reference["source"] = Value::String("Embedded".to_owned());
+            reference["id"] = Value::String(format!("/providers/Microsoft.PowerApps/apis/{}", binding.connector));
+            if reference.get("tier").is_none() {
+                reference["tier"] = Value::String("NotSpecified".to_owned());
+            }
         }
         properties["connectionReferences"] = Value::Object(references);
         Ok(())

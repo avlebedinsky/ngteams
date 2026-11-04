@@ -38,9 +38,17 @@ impl ChannelManagement {
             self.channel.id.clone()
         };
         let reply = self.core.team_roster(thread);
+        let moderators = (self.channel.kind == ChannelKind::Standard && self.channel.id != self.team.id)
+            .then(|| self.core.team_roster(self.channel.id.clone()));
         self.members.loading = true;
         self.members.read = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            let result = reply.await;
+            let mut result = reply.await;
+            if let Some(moderators) = moderators {
+                result = match (result, moderators.await) {
+                    (Ok(members), Ok(moderators)) => Ok(with_moderators(members, &moderators)),
+                    (Err(error), _) | (_, Err(error)) => Err(error),
+                };
+            }
             let _ = this.update(cx, |this, cx| {
                 this.members.loading = false;
                 if let Ok(members) = result
@@ -319,4 +327,13 @@ impl ChannelManagement {
         }
         line
     }
+}
+
+fn with_moderators(mut members: Vec<TeamMember>, moderators: &[TeamMember]) -> Vec<TeamMember> {
+    for member in &mut members {
+        member.moderator = moderators
+            .iter()
+            .any(|moderator| moderator.mri == member.mri && moderator.moderator);
+    }
+    members
 }

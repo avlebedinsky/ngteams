@@ -11,7 +11,7 @@ use wiremock::matchers::{header, method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[derive(Default)]
-struct Tokens(Mutex<Vec<String>>);
+struct Tokens(Mutex<Vec<String>>, Mutex<Vec<String>>);
 impl Credentials for Tokens {
     fn bearer(&self, audience: &str) -> impl Future<Output = Result<Secret, TokenError>> + Send {
         self.0.lock().unwrap().push(audience.to_owned());
@@ -24,6 +24,7 @@ impl Credentials for Tokens {
         })))
     }
     async fn bearer_rejected(&self, audience: &str, _: &Secret) -> Result<Secret, TokenError> {
+        self.1.lock().unwrap().push(audience.to_owned());
         self.bearer(audience).await
     }
 }
@@ -378,4 +379,70 @@ async fn fresh_trigger_validation_prevents_running_invalid_or_stale_input() {
         Err(WorkflowFailure::InvalidInput)
     );
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn refused_workflow_bearers_are_invalidated_without_replaying_any_write() {
+    let requests = [
+        (
+            WorkflowRequest::Create {
+                environment: "Default-synthetic".into(),
+                properties: json!({}),
+            },
+            "https://service.flow.microsoft.com/",
+        ),
+        (
+            WorkflowRequest::CreateConnection {
+                environment: "Default-synthetic".into(),
+                connector: "shared_teams".into(),
+                connection: "synthetic".into(),
+            },
+            "https://service.powerapps.com/",
+        ),
+        (input_request(), "https://apihub.azure.com"),
+    ];
+    for (request, audience) in requests {
+        for status in [401, 403] {
+            let server = MockServer::start().await;
+            if matches!(request, WorkflowRequest::RunWithInputs { .. }) {
+                mount_input_reads(
+                    &server,
+                    "https://default-synthetic.00.common.synthetic.azure-apihub.net/apim/logicflows",
+                )
+                .await;
+            }
+            Mock::given(method(request.method()))
+                .respond_with(ResponseTemplate::new(status))
+                .expect(1)
+                .mount(&server)
+                .await;
+            let tokens = Arc::new(Tokens::default());
+            assert_eq!(
+                transport(&server, tokens.clone()).workflow(&request).await,
+                Err(if status == 401 {
+                    WorkflowFailure::Authentication
+                } else {
+                    WorkflowFailure::Forbidden
+                })
+            );
+            assert_eq!(
+                *tokens.1.lock().unwrap(),
+                if status == 401 {
+                    vec![audience.to_owned()]
+                } else {
+                    vec![]
+                }
+            );
+            assert_eq!(
+                server
+                    .received_requests()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .filter(|sent| sent.method.as_str() == request.method())
+                    .count(),
+                1
+            );
+        }
+    }
 }

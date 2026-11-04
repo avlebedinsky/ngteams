@@ -857,6 +857,42 @@ async fn a_read_receipt_moves_b_s_horizon_as_the_service_sees_it() {
 /// The server response is deliberately held. The badge's queries must see local progress before it arrives,
 /// while a later incoming message remains unread and stale deliveries cannot undo what was actually seen.
 #[tokio::test]
+async fn attachment_sharing_keeps_store_queries_and_seen_receipts_responsive() {
+    let lab = Lab::start().await;
+    let b = native(&lab, LAB_B, QUIET);
+    let id = lab.mock.post_as(LAB_A, ABC_CHAT, "<p>seen while sharing</p>").unwrap();
+    b.handle.sync().await.unwrap();
+    let site = teams_proto::DriveSite::from_web_url("https://madeup-my.sharepoint.com/personal/lab_b/").unwrap();
+    let file = teams_proto::UploadedFile::from_upload(
+        &site,
+        &json!({
+            "id":"SyntheticFile","name":"demo.txt","size":3,
+            "webUrl":"https://madeup-my.sharepoint.com/personal/lab_b/Documents/demo.txt",
+            "parentReference":{"driveId":"synthetic-drive"},
+            "sharepointIds":{"listItemUniqueId":"00000000-0000-4000-8000-000000000001"}
+        })
+        .to_string()
+        .into_bytes(),
+    )
+    .unwrap();
+    b.reads_held.send_replace(true);
+    let sending = b.handle.write(Action::Send {
+        conversation: ABC_CHAT.to_owned(),
+        text: MessageText::plain("attached").unwrap().with_files(vec![file]),
+    });
+    let receipt = b.handle.write(Action::Read {
+        conversation: ABC_CHAT.to_owned(),
+        message_id: id,
+    });
+    let count = tokio::time::timeout(Duration::from_secs(2), b.handle.unread_count(ABC_CHAT)).await;
+    b.reads_held.send_replace(false);
+    assert!(sending.await.is_err(), "the mock has no file-profile service");
+    receipt.await.unwrap();
+    b.shutdown();
+    assert_eq!(count.expect("file sharing must serve local requests").unwrap(), 0);
+}
+
+#[tokio::test]
 async fn a_seen_message_clears_unread_before_the_receipt_server_answers_and_keeps_newer_messages_unread() {
     let lab = Lab::start().await;
     let mut b = native(&lab, LAB_B, How::default());

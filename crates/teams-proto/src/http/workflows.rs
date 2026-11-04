@@ -72,7 +72,13 @@ impl<C: Credentials> HttpTransport<C> {
         };
         let answer = if request.writes() {
             let token = self.token(service).await.map_err(failure)?;
-            self.attempt(&outgoing, token.as_ref()).await
+            let answer = self.attempt(&outgoing, token.as_ref()).await;
+            if let (Ok(answer), Some(audience), Some(token)) = (&answer, super::audience(service), &token)
+                && answer.status() == 401
+            {
+                let _ = self.credentials.bearer_rejected(audience, token).await;
+            }
+            answer
         } else {
             self.exchange(outgoing).await
         }

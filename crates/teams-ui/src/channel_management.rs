@@ -241,7 +241,7 @@ impl ChannelManagement {
             manage_members,
             _inputs: inputs,
         };
-        this.reload(cx);
+        this.reload(window, cx);
         this
     }
     fn target(&self) -> ChannelTarget {
@@ -263,7 +263,7 @@ impl ChannelManagement {
             mailbox: self.team.mailbox.clone(),
         }
     }
-    fn reload(&mut self, cx: &mut Context<Self>) {
+    fn reload(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.mode == Mode::Manage {
             self.reload_members(cx);
         }
@@ -282,13 +282,16 @@ impl ChannelManagement {
         self.loading = true;
         self.error = None;
         let reply = self.core.channel_data(query);
+        let window = window.window_handle();
         self.read = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let result = reply.await;
-            let _ = this.update(cx, |this, cx| this.loaded(result, cx));
+            let _ = window.update(cx, |_, window, cx| {
+                let _ = this.update(cx, |this, cx| this.loaded(result, window, cx));
+            });
         }));
         cx.notify();
     }
-    fn loaded(&mut self, result: Result<ChannelData, EngineError>, cx: &mut Context<Self>) {
+    fn loaded(&mut self, result: Result<ChannelData, EngineError>, window: &mut Window, cx: &mut Context<Self>) {
         self.loading = false;
         match result {
             Ok(data) => {
@@ -311,7 +314,7 @@ impl ChannelManagement {
                     }
                     Mode::Email => {
                         if data.0.get("errorCode").and_then(Value::as_str) == Some("NotFound") {
-                            self.create_email(cx);
+                            self.create_email(window, cx);
                             cx.notify();
                             return;
                         }
@@ -336,6 +339,9 @@ impl ChannelManagement {
                             .filter_map(Value::as_str)
                             .map(str::to_owned)
                             .collect();
+                        self.domains.update(cx, |state, cx| {
+                            state.set_value(self.email_domains.join(", "), window, cx);
+                        });
                         if let Some(allowed) = data
                             .0
                             .pointer("/allowedSenders/allowedSenderType")
@@ -839,7 +845,7 @@ impl ChannelManagement {
                     Button::new("channel-email-create")
                         .label("Get email address")
                         .primary()
-                        .on_click(cx.listener(|this, _, _, cx| this.create_email(cx))),
+                        .on_click(cx.listener(|this, _, window, cx| this.create_email(window, cx))),
                 ));
         }
         if self.email_settings {
@@ -870,7 +876,7 @@ impl ChannelManagement {
                 .child("Email sent to this address appears in the channel."),
         )
     }
-    fn create_email(&mut self, cx: &mut Context<Self>) {
+    fn create_email(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.core.read_only() || self.working.is_some() || self.error.is_some() {
             return;
         }
@@ -881,20 +887,23 @@ impl ChannelManagement {
             }),
             None,
         );
+        let window = window.window_handle();
         self.working = Some(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             let result = reply.await;
-            let _ = this.update(cx, |this, cx| {
-                this.working = None;
-                if result.is_ok() {
-                    this.reload(cx);
-                } else {
-                    this.error = Some(
-                        "Couldn't create an email address. Your administrator may have disabled channel email.".into(),
-                    );
-                }
-                cx.notify();
+            let _ = window.update(cx, |_, window, cx| {
+                this.update(cx, |this, cx| this.email_created(result.is_ok(), window, cx))
             });
         }));
+        cx.notify();
+    }
+    fn email_created(&mut self, confirmed: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.working = None;
+        if confirmed {
+            self.reload(window, cx);
+        } else {
+            self.error =
+                Some("Couldn't create an email address. Your administrator may have disabled channel email.".into());
+        }
         cx.notify();
     }
     fn footer(&self, palette: Palette, cx: &mut Context<Self>) -> gpui::Div {
@@ -1008,7 +1017,7 @@ impl Render for ChannelManagement {
                         "channel-management-reload",
                         Button::new("channel-management-reload")
                             .label("Refresh")
-                            .on_click(cx.listener(|this, _, _, cx| this.reload(cx))),
+                            .on_click(cx.listener(|this, _, window, cx| this.reload(window, cx))),
                     ))
                 },
             )

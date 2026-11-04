@@ -224,10 +224,13 @@ async fn incomplete_or_changed_recipient_evidence_never_creates_a_share() {
         let path = temp.path().join("demo.txt");
         std::fs::write(&path, b"abc").unwrap();
         let file = upload(&client, &outbox, path).await.unwrap();
-        get(
+        mock_recipients(&server, B, true).await;
+        mock_share(&server, B).await;
+        override_reply(
             &server,
+            "GET",
             "/api/chatsvc/amer/v1/threads/19:synthetic@thread.v2/members",
-            members,
+            ResponseTemplate::new(200).set_body_json(members),
         )
         .await;
         assert!(
@@ -236,14 +239,10 @@ async fn incomplete_or_changed_recipient_evidence_never_creates_a_share() {
                 .await
                 .is_err()
         );
-        assert!(
-            !server
-                .received_requests()
-                .await
-                .unwrap()
-                .iter()
-                .any(|request| { request.method.as_str() == "POST" && request.url.path().ends_with("/invite") })
-        );
+        assert!(!server.received_requests().await.unwrap().iter().any(|request| {
+            request.method.as_str() == "POST"
+                && (request.url.path().ends_with("/invite") || request.url.path().ends_with("/fetchShortProfile"))
+        }));
     }
 }
 

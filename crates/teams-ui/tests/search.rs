@@ -1077,6 +1077,15 @@ fn a_person_without_a_chat_reports_denial_missing_identity_and_read_only_without
         click(cx, "search-person-0");
         assert_eq!(cx.update(|_, cx| shell.read(cx).main().clone()), Main::Search);
         assert!(cx.debug_bounds("toast").is_some());
+        let expected = match case {
+            "denied" => "We couldn't open the chat. Check your connection and try again.",
+            "missing" => "This account has no chat address.",
+            _ => "A new chat can't be opened in read-only mode.",
+        };
+        assert_eq!(
+            cx.update(|_, cx| shell.read(cx).toast().map(ToString::to_string)),
+            Some(expected.to_owned())
+        );
         assert_eq!(rig.core.actions.lock().unwrap().len(), usize::from(case == "denied"));
     }
 }

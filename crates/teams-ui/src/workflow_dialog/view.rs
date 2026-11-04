@@ -570,6 +570,7 @@ impl Render for WorkflowDialog {
             .child(
                 div()
                     .id("workflow-scroll")
+                    .debug_selector(|| "workflow-scroll".to_owned())
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()

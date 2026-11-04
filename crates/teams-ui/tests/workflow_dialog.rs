@@ -505,3 +505,63 @@ fn managed_answer(request: &WorkflowRequest) -> teams_proto::WorkflowResponse {
     }
     Ok(value)
 }
+
+#[test]
+fn advanced_definition_saves_its_current_connection_references_without_losing_unknown_fields() {
+    let (rig, _view, cx) = managed_window();
+    cx.simulate_resize(gpui::size(gpui::px(1280.0), gpui::px(1600.0)));
+    click(cx, "workflow-open-synthetic-flow");
+    click(cx, "workflow-edit");
+    choose_connection(cx, 0);
+    choose_connection(cx, 1);
+    click(cx, "workflow-definition-toggle");
+    let mut properties = managed_answer(&WorkflowRequest::Get {
+        environment: "Default-synthetic".into(),
+        flow: "synthetic-flow".into(),
+    })
+    .unwrap()["properties"]
+        .clone();
+    properties["connectionReferences"] = serde_json::json!({
+        "added":{"id":"/providers/Microsoft.PowerApps/apis/shared_teams", "connectionName":"synthetic-connection", "unknown":{"preserve":true}}
+    });
+    properties["definition"]["actions"]["new_action"] =
+        serde_json::json!({"type":"OpenApiConnection", "inputs":{"host":{"connectionName":"added"}}});
+    click(cx, "workflow-definition");
+    cx.update(|window, cx| window.dispatch_action(Box::new(gpui_component::input::SelectAll), cx));
+    cx.simulate_input(&properties.to_string());
+    cx.update(|window, cx| {
+        window.dispatch_action(Box::new(gpui_component::input::SelectAll), cx);
+        window.dispatch_action(Box::new(gpui_component::input::Copy), cx);
+    });
+    assert_eq!(
+        cx.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text())),
+        Some(properties.to_string())
+    );
+    let body = bounds(cx, "workflow-scroll").unwrap();
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position: gpui::point(body.left() + gpui::px(8.0), body.center().y),
+        delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(-1200.0))),
+        touch_phase: gpui::TouchPhase::Moved,
+        ..gpui::ScrollWheelEvent::default()
+    });
+    click(cx, "workflow-save");
+    assert!(
+        bounds(cx, "workflow-error").is_none(),
+        "the edited document must validate"
+    );
+    let requests = rig.core.workflow_requests.lock().unwrap();
+    let saved = requests
+        .iter()
+        .find_map(|request| match request {
+            WorkflowRequest::Update { properties, .. } => Some(properties),
+            _ => None,
+        })
+        .expect("the advanced definition is saved");
+    assert_eq!(
+        saved["connectionReferences"]["added"]["connectionName"],
+        "synthetic-connection"
+    );
+    assert_eq!(saved["connectionReferences"]["added"]["unknown"]["preserve"], true);
+    assert!(saved["connectionReferences"].get("legacy").is_none());
+    assert!(saved["definition"]["actions"].get("new_action").is_some());
+}
