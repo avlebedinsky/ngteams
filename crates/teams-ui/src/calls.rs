@@ -552,8 +552,9 @@ pub struct Calls {
     asked: Option<(CallKind, Option<String>)>,
     /// How many starts or joins were asked for: which one [`START_TOLD_WITHIN`] gives up on.
     starts: u64,
-    /// The start or join (its number) given up on untold: the engine's late refusal of it is not told again.
-    gave_up: Option<u64>,
+    /// The starts or joins (their numbers) given up on untold and not answered yet: the engine's late refusal of one
+    /// is not told again.
+    gave_up: BTreeSet<u64>,
     running: BTreeSet<String>,
     ended: Option<Ended>,
     refused: Option<Refused>,
@@ -1084,7 +1085,7 @@ impl Calls {
             return false;
         }
         self.asked = None;
-        self.gave_up = Some(start);
+        self.gave_up.insert(start);
         self.refuse(ask, "not-told", local_refusal_text("not-told"), cx);
         true
     }
@@ -1121,6 +1122,7 @@ impl Calls {
         answer: Result<CallId, EngineError>,
         cx: &mut Context<Self>,
     ) {
+        let given_up = start.is_some_and(|start| self.gave_up.remove(&start));
         match answer {
             Ok(call) => {
                 let Some(active) = self.call.as_mut().filter(|active| active.id == call) else {
@@ -1140,7 +1142,7 @@ impl Calls {
                 if let Some(start) = start {
                     // a start already given up on was said not to start: its refusal (the engine refuses it as late)
                     // says nothing more, and leaves a start asked since alone
-                    if self.gave_up == Some(start) {
+                    if given_up {
                         return;
                     }
                     // the one start asked for (another is refused as busy meanwhile)

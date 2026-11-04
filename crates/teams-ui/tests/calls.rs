@@ -847,6 +847,36 @@ fn a_start_the_engine_never_tells_is_given_up_and_said_and_call_comes_back() {
 }
 
 #[test]
+fn a_late_refusal_of_any_start_given_up_on_is_not_told_again() {
+    let rig = calling();
+    let (trace, _written) = trace();
+    let (_shell, cx) = shell_window(&rig, Some(AB), trace);
+    registered(&rig);
+    *rig.core.hold_calls.lock().unwrap() = true;
+    // two starts, each given up on in turn
+    for _ in 0..2 {
+        click(cx, "chat-call");
+        rig.cx
+            .executor()
+            .advance_clock(teams_ui::calls::START_TOLD_WITHIN + std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(drawn(cx, "chat-call"), "given up, Call is offered again");
+    }
+    // the engine refuses both as late, the older first
+    let held = std::mem::take(&mut *rig.core.held_calls.lock().unwrap());
+    assert_eq!(held.len(), 2);
+    for answer in held {
+        answer.send(Err(EngineError::Call(CallActionError::Late)));
+        cx.run_until_parked();
+        let told = rig.cx.read(|cx| calls_of(&rig).read(cx).refused().cloned());
+        assert!(
+            told.is_none_or(|told| !told.text.contains("too long")),
+            "the late refusal isn't told again"
+        );
+    }
+}
+
+#[test]
 fn a_start_told_at_once_whose_media_fails_keeps_why_with_its_end_either_way_round() {
     for reply_first in [false, true] {
         let rig = calling();
