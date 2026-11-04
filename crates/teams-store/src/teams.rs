@@ -61,6 +61,8 @@ pub struct TeamAbout {
     pub hidden: bool,
     /// Its picture's version.
     pub picture_etag: Option<String>,
+    /// Its SharePoint site's address, when the read named one: the Workflows card editor's default site.
+    pub site: Option<String>,
 }
 
 impl fmt::Debug for TeamAbout {
@@ -221,8 +223,8 @@ impl Store {
             let mut team_row = tx.prepare_cached(
                 "INSERT INTO teams (id, name, archived, position, group_id, mailbox, owner, can_add_channel,
                  can_add_private_channel, tenant, description, public, people, guest, dynamic_membership, tenant_wide,
-                 channel_only, hidden, picture_etag)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19)",
+                 channel_only, hidden, picture_etag, site)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20)",
             )?;
             let mut channel_row = tx.prepare_cached(
                 "INSERT INTO team_channels (id, team_id, name, general, position, kind, shown, description, archived, owner, can_edit, can_delete, channel_group)
@@ -248,7 +250,8 @@ impl Store {
                     team.about.tenant_wide,
                     team.about.channel_only,
                     team.about.hidden,
-                    team.about.picture_etag
+                    team.about.picture_etag,
+                    team.about.site
                 ])?;
                 for (place, channel) in (0_i64..).zip(&team.channels) {
                     channel_row.execute(params![
@@ -288,7 +291,7 @@ impl Store {
             .conn
             .prepare_cached(
                 "SELECT id, name, archived, group_id, mailbox, owner, can_add_channel, can_add_private_channel,
-                 tenant, description, public, people, guest, dynamic_membership, tenant_wide, channel_only, hidden, picture_etag
+                 tenant, description, public, people, guest, dynamic_membership, tenant_wide, channel_only, hidden, picture_etag, site
                  FROM teams ORDER BY position",
             )?
             .query_map([], |row| {
@@ -312,6 +315,7 @@ impl Store {
                         channel_only: row.get(15)?,
                         hidden: row.get(16)?,
                         picture_etag: row.get(17)?,
+                        site: row.get(18)?,
                     },
                     channels: Vec::new(),
                 })

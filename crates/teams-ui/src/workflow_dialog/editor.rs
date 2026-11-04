@@ -50,7 +50,7 @@ impl WorkflowDialog {
             Ok(value) => match Card::from_flow(&value) {
                 Some(card)
                     if kind.is_none()
-                        && let Some(simple) = simple::Simple::open(&card, false, window, cx) =>
+                        && let Some(simple) = simple::Simple::open(&card, false) =>
                 {
                     self.open_simple(simple, window, cx);
                 }
@@ -71,10 +71,23 @@ impl WorkflowDialog {
     }
 
     pub(super) fn edit(&mut self, card: Card, existing: bool, window: &mut Window, cx: &mut Context<Self>) {
+        self.edit_from(card, existing, false, window, cx);
+    }
+
+    /// Edits a workflow; from the list's menu, Save and Back return to the list, as in Teams.
+    pub(super) fn edit_from(
+        &mut self,
+        card: Card,
+        existing: bool,
+        from_list: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.core.read_only() || self.busy {
             return;
         }
-        if existing && let Some(simple) = simple::Simple::open(&card, true, window, cx) {
+        if existing && let Some(mut simple) = simple::Simple::open(&card, true) {
+            simple.from_list = from_list;
             self.open_simple(simple, window, cx);
             return;
         }
@@ -230,6 +243,7 @@ impl WorkflowDialog {
 
     fn mutation_read(&mut self, answer: WorkflowResponse, outcome: Outcome, cx: &mut Context<Self>) {
         self.changing = None;
+        self.acting = None;
         match answer {
             // Teams shows the saved workflow's Overview after Save.
             Ok(value)
@@ -263,14 +277,7 @@ impl WorkflowDialog {
                     self.load_owners(&card, cx);
                 }
             }
-            Ok(_) => {
-                self.simple = None;
-                if let Outcome::Notice(notice) = outcome {
-                    self.notice = Some(notice.to_owned());
-                }
-                self.screen = Screen::Browse;
-                self.load_workflows(cx);
-            }
+            Ok(_) => self.back_to_list(outcome, cx),
             Err(error) => {
                 if matches!(error, WorkflowFailure::Connection | WorkflowFailure::Service(500..=599)) {
                     self.uncertain = Some(error.clone());
@@ -278,6 +285,21 @@ impl WorkflowDialog {
                 self.error = Some(model::problem(&error).to_owned());
             }
         }
+    }
+
+    /// After a change that leaves the Overview or editor: the list it came from (a row's list) or the channel's, with
+    /// its notice, read again.
+    fn back_to_list(&mut self, outcome: Outcome, cx: &mut Context<Self>) {
+        self.simple = None;
+        if let Outcome::Notice(notice) = outcome {
+            self.notice = Some(notice.to_owned());
+        }
+        self.screen = if matches!(outcome, Outcome::List) {
+            self.list_screen()
+        } else {
+            Screen::Browse
+        };
+        self.load_workflows(cx);
     }
 
     /// Opens a workflow's Overview and reads its run history into it.
@@ -289,6 +311,7 @@ impl WorkflowDialog {
         self.owners = None;
         self.owner_found = None;
         self.screen = Screen::Detail(card.clone());
+        self.next_runs_of(std::slice::from_ref(&card), cx);
         self.load_owners(&card, cx);
         self.history(card, cx);
     }

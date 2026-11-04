@@ -473,7 +473,7 @@ fn a_team_s_group_and_mail_and_a_channel_s_type_are_read() {
         "id": "19:team@thread.tacv2",
         "displayName": "A team",
         "smtpAddress": "team@example.invalid",
-        "teamSiteInformation": { "groupId": "made-up-group" },
+        "teamSiteInformation": { "groupId": "made-up-group", "sharepointSiteUrl": "https://made-up.example.invalid/sites/team" },
         "channels": [
             { "id": "19:a@thread.tacv2", "displayName": "a", "channelType": 0 },
             { "id": "19:b@thread.tacv2", "displayName": "b", "channelType": 1 },
@@ -484,6 +484,10 @@ fn a_team_s_group_and_mail_and_a_channel_s_type_are_read() {
     }));
     assert_eq!(team.group_id.as_deref(), Some("made-up-group"));
     assert_eq!(team.mailbox.as_deref(), Some("team@example.invalid"));
+    assert_eq!(
+        team.about.site.as_deref(),
+        Some("https://made-up.example.invalid/sites/team")
+    );
     let kinds: Vec<teams_proto::ChannelType> = team.channels.iter().map(|channel| channel.kind).collect();
     assert_eq!(
         kinds,

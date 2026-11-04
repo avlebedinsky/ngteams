@@ -188,7 +188,7 @@ pub enum TeamsPageEvent {
     /// A team's row, to manage it.
     Manage(String),
     /// An entry of a team's "..." menu.
-    Chosen(Team, TeamChoice),
+    Chosen(Box<Team>, TeamChoice),
 }
 
 impl EventEmitter<TeamsPageEvent> for TeamsPage {}
@@ -330,7 +330,7 @@ impl TeamsPage {
             .teams()
             .and_then(|teams| teams.iter().find(|listed| listed.id == team).cloned());
         if let Some(team) = found {
-            cx.emit(TeamsPageEvent::Chosen(team, choice));
+            cx.emit(TeamsPageEvent::Chosen(Box::new(team), choice));
         }
     }
 

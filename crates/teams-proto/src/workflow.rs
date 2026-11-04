@@ -132,6 +132,25 @@ pub enum WorkflowRequest {
         flow: String,
         trigger: String,
     },
+    /// A workflow's triggers with their state and next run, as Teams' Overview and list read them.
+    Triggers { environment: String, flow: String },
+    /// A connector operation's definition (its inputs and the dynamic lists that fill them), read on the environment's
+    /// Power Platform host as Teams' card editor does.
+    Operation {
+        environment: String,
+        api: String,
+        operation: String,
+    },
+    /// The choices a connector's dynamic list (`listEnum`) or folder tree (`listTree`) offers through one of the
+    /// account's connections: a read the service answers by POST. `body` is the service's own invocation definition
+    /// with the values it refers to.
+    Choices {
+        environment: String,
+        api: String,
+        connection: String,
+        tree: bool,
+        body: Value,
+    },
 }
 
 impl WorkflowRequest {
@@ -154,6 +173,9 @@ impl WorkflowRequest {
                 | Self::RunActions { .. }
                 | Self::WebhookAddress { .. }
                 | Self::Owners { .. }
+                | Self::Triggers { .. }
+                | Self::Operation { .. }
+                | Self::Choices { .. }
         )
     }
 
@@ -168,7 +190,8 @@ impl WorkflowRequest {
             | Self::Run { .. }
             | Self::RunWithInputs { .. }
             | Self::ConnectionConsent { .. }
-            | Self::WebhookAddress { .. } => "POST",
+            | Self::WebhookAddress { .. }
+            | Self::Choices { .. } => "POST",
             Self::CreateConnection { .. } | Self::AuthorizeConnection { .. } => "PUT",
             Self::Update { .. } | Self::Rename { .. } => "PATCH",
             Self::Delete { .. } | Self::RemoveOwner { .. } => "DELETE",
@@ -236,6 +259,7 @@ impl WorkflowRequest {
                     .with_query("api-version", API_VERSION);
             }
             Self::History { flow, .. } => path.extend([flow.clone(), "runs".to_owned()]),
+            Self::Triggers { flow, .. } => path.extend([flow.clone(), "triggers".to_owned()]),
             Self::RunActions { flow, run, .. } => {
                 path.extend([flow.clone(), "runs".to_owned(), run.clone(), "actions".to_owned()]);
             }
@@ -294,6 +318,49 @@ impl WorkflowRequest {
             endpoint.with_query("$expand", "ConsentLink")
         } else {
             endpoint
+        }
+    }
+
+    /// The path and query of an operation Teams sends to the environment's Power Platform host
+    /// ([`platform_host`]) rather than to the classic Flow API: a connector operation's definition and its choices.
+    /// Each name is one checked path segment, so no caller can reach another route.
+    #[must_use]
+    pub fn platform_endpoint(&self) -> Option<Endpoint> {
+        let segment = |name: &str| {
+            !name.is_empty()
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))
+        };
+        match self {
+            Self::Operation { api, operation, .. } if segment(api) && segment(operation) => Some(
+                Endpoint::new([
+                    "powerautomate",
+                    "apis",
+                    api.as_str(),
+                    "apiOperations",
+                    operation.as_str(),
+                ])
+                .with_query(
+                    "$expand",
+                    "properties/inputsDefinition,properties/responsesDefinition,properties/connector",
+                )
+                .with_query("api-version", "1"),
+            ),
+            Self::Choices {
+                api, connection, tree, ..
+            } if segment(api) && segment(connection) => Some(
+                Endpoint::new([
+                    "powerautomate",
+                    "apis",
+                    api.as_str(),
+                    "connections",
+                    connection.as_str(),
+                    if *tree { "listTree" } else { "listEnum" },
+                ])
+                .with_query("api-version", "1"),
+            ),
+            _ => None,
         }
     }
 
@@ -370,7 +437,10 @@ impl WorkflowRequest {
             | Self::RemoveOwner { environment, .. }
             | Self::SetEnabled { environment, .. }
             | Self::Delete { environment, .. }
-            | Self::Run { environment, .. } => Some(environment),
+            | Self::Run { environment, .. }
+            | Self::Triggers { environment, .. }
+            | Self::Operation { environment, .. }
+            | Self::Choices { environment, .. } => Some(environment),
         }
     }
 
@@ -406,6 +476,7 @@ impl WorkflowRequest {
             Self::ConnectionConsent { .. } => {
                 Some(serde_json::json!({"redirectUrl": "https://make.powerautomate.com"}))
             }
+            Self::Choices { body, .. } => Some(body.clone()),
             _ => None,
         }
     }

@@ -1365,7 +1365,7 @@ impl Shell {
                     TeamsPageEvent::Manage(team) => {
                         this.open_manage_team(team.clone(), ManageTab::Channels, window, cx);
                     }
-                    TeamsPageEvent::Chosen(team, choice) => this.team_chosen(team.clone(), *choice, window, cx),
+                    TeamsPageEvent::Chosen(team, choice) => this.team_chosen((**team).clone(), *choice, window, cx),
                 },
             );
             self.teams_page = Some((page, events));

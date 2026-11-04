@@ -1,34 +1,81 @@
-//! Teams' card editor for a template whose own markup names its choices (the webhook template's team and channel),
-//! as the Teams Workflows app shows it: one collapsible card per template, no definition, field names or connection
-//! controls. The Microsoft Teams connection is created and signed in behind the scenes the way that app does it, so
-//! the user only picks the team and the channel. A template whose markup names anything else keeps the full editor.
+//! Teams' card editor, for every template whose own markup names its choices (`metadata.userIntentMarkup`): one
+//! collapsible card per template with the apps it uses, its title and description, and one field per choice (a team
+//! and a channel, a schedule, a message, a plan, a SharePoint site, list and folder, a mail folder, people, a subject),
+//! as the Teams Workflows app shows it. No definition, field names or connection controls: each app's connection is
+//! made and signed in behind the scenes the way that app does it, and an edited workflow keeps its own connections.
+use std::collections::BTreeMap;
+
 use super::*;
-use gpui_component::Sizable as _;
+use gpui_component::date_picker::DatePickerState;
+use teams_proto::TeamPerson;
 
-use super::combo::{Combo, Which};
+use super::combo::Combo;
+use super::markup::{self, Kind, Param};
 
-/// The connector this editor signs in by itself: the only one the Teams reference was seen doing it for.
-const TEAMS_API: &str = "shared_teams";
-
-/// The card editor's state: the template's own markup, the definition it fills and the user's two choices.
+/// The card editor's state: the template's own markup, the definition it fills and the user's choices.
 pub(super) struct Simple {
     template: String,
-    name: String,
-    description: String,
-    apps: Vec<String>,
+    /// The template's name ("Send webhook alerts to a channel"): the markup keeps it.
+    title: String,
+    pub(super) description: String,
     markup: Value,
     definition: Value,
+    /// The template's (or the workflow's) connection references, by key.
     references: Value,
-    flow: Option<Card>,
-    pub(super) team: Option<String>,
-    pub(super) channel: Option<String>,
-    expanded: bool,
-    link: Link,
-    pub(super) team_combo: Combo,
-    pub(super) channel_combo: Combo,
+    pub(super) flow: Option<Card>,
+    /// Edit was chosen in the workflow list's menu: Save and Back return to the list, as in Teams.
+    pub(super) from_list: bool,
+    pub(super) params: Vec<Param>,
+    bindings: Vec<markup::Binding>,
+    pub(super) fields: Vec<Field>,
+    pub(super) expanded: bool,
+    /// Each app's connection, by API name (`shared_teams`), in the order the card's chips show them.
+    pub(super) links: Vec<(String, Link)>,
+    /// Connector operations' inputs, read once: (API, operation) to its `inputsDefinition.properties`.
+    pub(super) operations: BTreeMap<(String, String), Option<Value>>,
 }
 
-/// The Microsoft Teams connection the saved workflow posts with.
+/// One field's controls and what it has listed.
+#[derive(Default)]
+pub(super) struct Field {
+    pub(super) combo: Option<Combo>,
+    pub(super) input: Option<Entity<InputState>>,
+    pub(super) area: Option<Entity<TextareaState>>,
+    pub(super) date: Option<Entity<DatePickerState>>,
+    pub(super) choices: Choices,
+    /// A folder field's open list and the folders browsed into.
+    pub(super) folder_open: bool,
+    pub(super) folder_path: Vec<Choice>,
+    /// A people field's search: its text and who it found.
+    pub(super) found: Option<(String, Vec<TeamPerson>)>,
+    pub(super) asked: u64,
+    /// What is wrong with the value typed, shown under the field.
+    pub(super) problem: Option<&'static str>,
+    pub(super) subscriptions: Vec<Subscription>,
+}
+
+/// What a connector listed for a field.
+#[derive(Default)]
+pub(super) enum Choices {
+    #[default]
+    Idle,
+    Loading,
+    Ready(Vec<Choice>),
+    Failed,
+}
+
+/// One choice a connector offered: its value, its name, and for a folder whether it holds folders and how to browse
+/// into it.
+#[derive(Clone, Debug)]
+pub(super) struct Choice {
+    pub(super) value: String,
+    pub(super) name: String,
+    pub(super) full: String,
+    pub(super) parent: bool,
+    pub(super) selection: Value,
+}
+
+/// An app's connection the saved workflow uses.
 #[derive(Clone)]
 pub(super) enum Link {
     Checking,
@@ -38,14 +85,8 @@ pub(super) enum Link {
 
 impl Simple {
     /// The editor for a gallery template (its `metadata.userIntentMarkup`) or for a workflow saved from one (the
-    /// markup its `Do_Not_Remove_FlowIL` action keeps), when every choice is a team or a channel and every app is
-    /// Microsoft Teams.
-    pub(super) fn open(
-        card: &Card,
-        existing: bool,
-        window: &mut Window,
-        cx: &mut Context<WorkflowDialog>,
-    ) -> Option<Self> {
+    /// markup its `Do_Not_Remove_FlowIL` action keeps).
+    pub(super) fn open(card: &Card, existing: bool) -> Option<Self> {
         let properties = &card.properties;
         let markup = if existing {
             let kept = properties
@@ -56,73 +97,115 @@ impl Simple {
             properties.pointer("/metadata/userIntentMarkup")?.clone()
         };
         let template = markup.pointer("/automation/template")?;
-        let parameters = template.get("parameters")?.as_array()?;
-        if parameters.is_empty()
-            || !parameters.iter().all(|parameter| {
-                matches!(
-                    parameter.get("typeName").and_then(Value::as_str),
-                    Some("Teams.Group" | "Teams.Channel")
-                )
-            })
-        {
+        let params = markup::params(&markup);
+        if params.is_empty() {
             return None;
         }
         let references = properties.get("connectionReferences").cloned().unwrap_or(Value::Null);
-        let apis = references.as_object()?;
-        if apis.is_empty() || !apis.values().all(|reference| api_name(reference) == Some(TEAMS_API)) {
+        let definition = properties.get("definition")?.clone();
+        let mut apis: Vec<String> = references
+            .as_object()?
+            .values()
+            .filter_map(api_name)
+            .map(str::to_owned)
+            .collect();
+        if apis.is_empty() {
             return None;
         }
-        let value = |kind: &str| {
-            parameters
-                .iter()
-                .find(|parameter| parameter.get("typeName").and_then(Value::as_str) == Some(kind))
-                .and_then(|parameter| parameter.get("value"))
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-        };
-        let name = if existing {
-            template
-                .get("displayName")
-                .and_then(Value::as_str)
-                .unwrap_or(&card.name)
-                .to_owned()
-        } else {
-            card.name.clone()
-        };
+        apis.sort_by_key(|api| chip_rank(api, &definition));
+        apis.dedup();
         Some(Self {
             template: template
                 .get("id")
                 .and_then(Value::as_str)
                 .unwrap_or(&card.id)
                 .to_owned(),
-            name,
+            title: if existing {
+                template
+                    .get("displayName")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&card.name)
+                    .to_owned()
+            } else {
+                card.name.clone()
+            },
             description: properties
                 .get("description")
                 .or_else(|| properties.pointer("/definition/description"))
                 .and_then(Value::as_str)
                 .unwrap_or(&card.description)
                 .to_owned(),
-            apps: vec!["Microsoft Teams".to_owned()],
-            definition: properties.get("definition")?.clone(),
+            bindings: markup::bindings(&markup),
+            fields: Vec::new(),
+            params,
+            definition,
             references,
             markup: markup.clone(),
             flow: existing.then(|| card.clone()),
-            team: value("Teams.Group"),
-            channel: value("Teams.Channel"),
+            from_list: false,
             expanded: true,
-            link: Link::Checking,
-            team_combo: Combo::new(Which::Team, "Type or select a team", String::new(), window, cx),
-            channel_combo: Combo::new(Which::Channel, "Type or select a channel", String::new(), window, cx),
+            links: apis.into_iter().map(|api| (api, Link::Checking)).collect(),
+            operations: BTreeMap::new(),
+        })
+    }
+
+    pub(super) fn collapse(&mut self) {
+        self.expanded = false;
+    }
+
+    /// The card's title as it reads now.
+    pub(super) fn summary(&self) -> String {
+        markup::summary(&self.template, &self.title, &self.params)
+    }
+
+    /// The team a channel field lists the channels of: the team field it depends on, else the card's first.
+    pub(super) fn team_of(&self, channel: &Param) -> Option<String> {
+        self.params
+            .iter()
+            .find(|param| param.kind == Kind::TeamsGroup && channel.dependencies.contains(&param.id))
+            .or_else(|| self.params.iter().find(|param| param.kind == Kind::TeamsGroup))
+            .and_then(|param| param.text().map(str::to_owned))
+    }
+
+    /// The connection made for an app, once it is ready.
+    pub(super) fn connection(&self, api: &str) -> Option<&str> {
+        self.links.iter().find_map(|(name, link)| match link {
+            Link::Ready(connection) if name == api => Some(connection.as_str()),
+            _ => None,
+        })
+    }
+
+    fn set_links(&mut self, links: Vec<(String, Link)>) {
+        for (api, link) in links {
+            if let Some((_, slot)) = self.links.iter_mut().find(|(name, _)| *name == api) {
+                *slot = link;
+            }
+        }
+    }
+
+    pub(super) fn connecting(&self) -> bool {
+        self.links.iter().any(|(_, link)| matches!(link, Link::Checking))
+    }
+
+    pub(super) fn bindings(&self) -> &[markup::Binding] {
+        &self.bindings
+    }
+
+    pub(super) fn definition(&self) -> &Value {
+        &self.definition
+    }
+
+    /// Whether every required field holds a valid value: Teams keeps Save off until then.
+    pub(super) fn complete(&self) -> bool {
+        self.params.iter().all(|param| match param.kind {
+            Kind::Fixed => true,
+            Kind::Interval => markup::interval(&param.value).is_some(),
+            _ => param.optional || !param.empty(),
         })
     }
 }
 
-impl Simple {
-    pub(super) fn collapse(&mut self) {
-        self.expanded = false;
-    }
-}
-
+/// A reference's connector (`shared_teams`), from its API object or its id.
 fn api_name(reference: &Value) -> Option<&str> {
     reference.pointer("/api/name").and_then(Value::as_str).or_else(|| {
         reference
@@ -132,49 +215,234 @@ fn api_name(reference: &Value) -> Option<&str> {
     })
 }
 
+/// The order Teams' chips show apps in: the trigger's first, then Office 365 Users, Microsoft Teams, SharePoint.
+fn chip_rank(api: &str, definition: &Value) -> usize {
+    let trigger = definition
+        .get("triggers")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|triggers| triggers.values())
+        .find_map(|trigger| trigger.pointer("/inputs/host/apiId").and_then(Value::as_str))
+        .and_then(|id| id.rsplit('/').next());
+    if trigger == Some(api) {
+        return 0;
+    }
+    match api {
+        "shared_office365users" => 1,
+        "shared_teams" => 2,
+        "shared_sharepointonline" => 3,
+        _ => 4,
+    }
+}
+
+/// The name Teams' chip gives an app.
+pub(super) fn app_name(api: &str) -> &str {
+    match api {
+        "shared_teams" => "Microsoft Teams",
+        "shared_planner" => "Planner",
+        "shared_office365users" => "Office 365 Users",
+        "shared_sharepointonline" => "SharePoint",
+        "shared_office365" => "Office 365 Outlook",
+        other => other.strip_prefix("shared_").unwrap_or(other),
+    }
+}
+
 impl WorkflowDialog {
-    /// Opens the card editor, its choices defaulting to this channel for a new workflow, and makes sure of the
-    /// Microsoft Teams connection.
+    /// Opens the card editor: a new workflow's fields default as Teams' do (this channel, now, this time zone), the
+    /// controls are made, and each app's connection is made sure of.
     pub(super) fn open_simple(&mut self, mut simple: Simple, window: &mut Window, cx: &mut Context<Self>) {
         if simple.flow.is_none() {
-            simple.team = Some(self.team.group_id.clone().unwrap_or_else(|| self.team.id.clone()));
-            simple.channel = Some(self.channel.id.clone());
+            self.default_fields(&mut simple);
         }
+        simple.fields = (0..simple.params.len())
+            .map(|index| Self::field_controls(&simple, index, window, cx))
+            .collect();
         self.error = None;
         self.notice = None;
+        self.screen = Screen::Edit {
+            flow: simple.flow.clone(),
+        };
         self.simple = Some(simple);
         self.show_choices(window, cx);
-        self.screen = Screen::Edit {
-            flow: self.simple.as_ref().and_then(|simple| simple.flow.clone()),
-        };
-        self.ensure_teams_connection(cx);
+        self.ensure_connections(cx);
         cx.notify();
     }
 
-    /// Reads the environment's connections and uses a signed-in Microsoft Teams one; without one, creates and signs
-    /// one in as the Teams Workflows app does.
-    fn ensure_teams_connection(&mut self, cx: &mut Context<Self>) {
-        let Some(environment) = self.environment.clone() else {
-            self.set_link(Link::Failed(WorkflowFailure::NotFound));
+    /// Teams' defaults for a new workflow: the channel Workflows was opened from, a weekly interval of one, today,
+    /// the next five minutes, the local time zone, and the team's own SharePoint site.
+    fn default_fields(&self, simple: &mut Simple) {
+        let now = chrono::Local::now().naive_local();
+        let group = self.team.group_id.clone().unwrap_or_else(|| self.team.id.clone());
+        for param in &mut simple.params {
+            if !param.empty() {
+                continue;
+            }
+            let (value, display) = match param.kind {
+                Kind::TeamsGroup => (Value::String(group.clone()), Some(self.team.name.clone())),
+                Kind::TeamsChannel => (Value::String(self.channel.id.clone()), Some(self.channel.name.clone())),
+                Kind::Interval => (Value::from(1), None),
+                Kind::StartDate => {
+                    let (value, shown) = markup::date_value(now.date());
+                    (Value::String(value), Some(shown))
+                }
+                Kind::TimeOfDay => {
+                    let (hour, minute) = markup::default_time(now);
+                    (
+                        Value::String(format!("{hour:02}:{minute:02}")),
+                        Some(markup::clock_name(hour, minute)),
+                    )
+                }
+                Kind::TimeZone => {
+                    let (id, name) = zones::local();
+                    (Value::String(id.to_owned()), Some(name.to_owned()))
+                }
+                Kind::Choice if param.type_name == "SharePoint.Site" => match &self.team.about.site {
+                    Some(site) => (Value::String(site.clone()), Some(self.team.name.clone())),
+                    None => continue,
+                },
+                _ => continue,
+            };
+            param.value = value;
+            param.display = display;
+        }
+    }
+
+    /// Shows each combobox's chosen name (once the teams are read, too).
+    pub(super) fn show_choices(&mut self, window: &mut Window, cx: &mut App) {
+        let names: Vec<Option<String>> = match &self.simple {
+            Some(simple) => simple
+                .params
+                .iter()
+                .map(|param| {
+                    if param.empty() {
+                        return None;
+                    }
+                    match param.kind {
+                        Kind::TeamsGroup => param
+                            .text()
+                            .and_then(|group| self.team_by_group(group))
+                            .map(|team| team.name.clone())
+                            .or_else(|| param.display.clone()),
+                        Kind::TeamsChannel => simple
+                            .team_of(param)
+                            .and_then(|group| self.team_by_group(&group))
+                            .and_then(|team| {
+                                team.channels
+                                    .iter()
+                                    .find(|channel| Some(channel.id.as_str()) == param.text())
+                            })
+                            .map(|channel| channel.name.clone())
+                            .or_else(|| param.display.clone()),
+                        _ => param.display.clone().or_else(|| param.text().map(str::to_owned)),
+                    }
+                })
+                .collect(),
+            None => return,
+        };
+        if let Some(simple) = &mut self.simple {
+            for ((param, field), name) in simple.params.iter_mut().zip(&mut simple.fields).zip(names) {
+                if matches!(param.kind, Kind::TeamsGroup | Kind::TeamsChannel) && name.is_some() {
+                    param.display.clone_from(&name);
+                }
+                if let Some(combo) = &mut field.combo {
+                    combo.show(name.unwrap_or_default());
+                }
+            }
+        }
+        self.sync_combos(window, cx);
+    }
+
+    /// A field changed: the fields that depend on it are cleared and list again.
+    pub(super) fn dependents_changed(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(simple) = &mut self.simple else {
             return;
         };
+        let Some(id) = simple.params.get(index).map(|param| param.id.clone()) else {
+            return;
+        };
+        let mut cleared = Vec::new();
+        for (at, param) in simple.params.iter_mut().enumerate() {
+            if param.dependencies.contains(&id) {
+                param.value = Value::Null;
+                param.display = None;
+                cleared.push(at);
+            }
+        }
+        for at in &cleared {
+            if let Some(field) = simple.fields.get_mut(*at) {
+                field.choices = Choices::Idle;
+                field.folder_path.clear();
+                if let Some(combo) = &mut field.combo {
+                    combo.show(String::new());
+                }
+            }
+        }
+        for at in cleared {
+            self.load_choices(at, cx);
+        }
+    }
+
+    /// Makes sure of each app's connection: an edited workflow keeps its own; otherwise a signed-in one of the
+    /// environment is used, or one is made and signed in as the Teams Workflows app does, reusing one a failed
+    /// sign-in left behind rather than making another.
+    fn ensure_connections(&mut self, cx: &mut Context<Self>) {
+        let Some(simple) = &mut self.simple else {
+            return;
+        };
+        let Some(environment) = self.environment.clone() else {
+            for (_, link) in &mut simple.links {
+                *link = Link::Failed(WorkflowFailure::NotFound);
+            }
+            return;
+        };
+        let own: Vec<(String, String)> = simple
+            .flow
+            .as_ref()
+            .and_then(|flow| flow.properties.get("connectionReferences"))
+            .and_then(Value::as_object)
+            .into_iter()
+            .flatten()
+            .filter_map(|(_, reference)| {
+                Some((
+                    api_name(reference)?.to_owned(),
+                    reference.get("connectionName")?.as_str()?.to_owned(),
+                ))
+            })
+            .collect();
+        let mut wanted = Vec::new();
+        for (api, link) in &mut simple.links {
+            match own.iter().find(|(name, _)| name == api) {
+                Some((_, connection)) => *link = Link::Ready(connection.clone()),
+                None => wanted.push(api.clone()),
+            }
+        }
+        if wanted.is_empty() {
+            self.connections_ready(cx);
+            return;
+        }
         let generation = self.generation;
         let core = Arc::clone(&self.core);
         self.tasks
             .push(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-                let link = teams_connection(&core, environment).await;
+                let links = connect_all(&core, environment, wanted).await;
                 let _ = this.update(cx, |this, cx| {
-                    if this.generation == generation {
-                        this.set_link(link);
-                        cx.notify();
+                    if this.generation != generation {
+                        return;
                     }
+                    if let Some(simple) = &mut this.simple {
+                        simple.set_links(links);
+                    }
+                    this.connections_ready(cx);
+                    cx.notify();
                 });
             }));
     }
 
-    fn set_link(&mut self, link: Link) {
-        if let Some(simple) = &mut self.simple {
-            simple.link = link;
+    /// The connections are known: the connector fields list their choices.
+    fn connections_ready(&mut self, cx: &mut Context<Self>) {
+        let count = self.simple.as_ref().map_or(0, |simple| simple.params.len());
+        for index in 0..count {
+            self.load_choices(index, cx);
         }
     }
 
@@ -187,87 +455,56 @@ impl WorkflowDialog {
             cx.notify();
             return;
         };
-        let request = match self.simple_properties() {
-            Ok(properties) => match self.simple.as_ref().and_then(|simple| simple.flow.clone()) {
-                Some(flow) => WorkflowRequest::Update {
-                    environment,
-                    flow: flow.id.clone(),
-                    expected_modified: flow
-                        .properties
-                        .get("lastModifiedTime")
-                        .and_then(Value::as_str)
-                        .map(str::to_owned),
-                    properties,
-                },
-                None => WorkflowRequest::Create {
-                    environment,
-                    properties,
-                },
-            },
-            Err(error) => {
+        self.read_message(cx);
+        let (properties, flow, from_list) = match self
+            .simple
+            .as_ref()
+            .map(|simple| (simple_properties(simple), simple.flow.clone(), simple.from_list))
+        {
+            Some((Ok(properties), flow, from_list)) => (properties, flow, from_list),
+            Some((Err(error), ..)) => {
                 self.error = Some(error.to_owned());
                 cx.notify();
                 return;
             }
+            None => return,
         };
-        self.mutate_then(request, Outcome::Overview, cx);
+        let request = match flow {
+            Some(flow) => WorkflowRequest::Update {
+                environment,
+                flow: flow.id.clone(),
+                expected_modified: flow
+                    .properties
+                    .get("lastModifiedTime")
+                    .and_then(Value::as_str)
+                    .map(str::to_owned),
+                properties,
+            },
+            None => WorkflowRequest::Create {
+                environment,
+                properties,
+            },
+        };
+        // Teams goes to the Overview after Save, or back to the list when Edit came from the list's menu.
+        let outcome = if from_list { Outcome::List } else { Outcome::Overview };
+        self.mutate_then(request, outcome, cx);
     }
 
-    /// The workflow Teams saves: the template's definition sent to the chosen channel, the markup kept with the
-    /// choices and their names so Teams can edit it again, and the signed-in Microsoft Teams connection.
-    fn simple_properties(&self) -> Result<Value, &'static str> {
-        let simple = self.simple.as_ref().ok_or("Open the workflow again.")?;
-        let team = simple
-            .team
-            .as_deref()
-            .and_then(|group| self.team_by_group(group))
-            .ok_or("Choose the team the channel is in.")?;
-        let group = team.group_id.as_deref().unwrap_or(&team.id);
-        let channel = simple
-            .channel
-            .as_deref()
-            .and_then(|id| team.channels.iter().find(|channel| channel.id == id))
-            .ok_or("Choose a channel.")?;
-        let connection = match &simple.link {
-            Link::Ready(name) => name.clone(),
-            Link::Checking => return Err("Microsoft Teams is still connecting. Try again in a moment."),
-            Link::Failed(_) => return Err("Microsoft Teams could not be connected. Close Workflows and try again."),
+    /// A message field's text, read into its value.
+    pub(super) fn read_message(&mut self, cx: &App) {
+        let Some(simple) = &mut self.simple else {
+            return;
         };
-        let mut properties = serde_json::json!({"definition": simple.definition.clone()});
-        form::apply_channel(&mut properties, group, &channel.id);
-        let mut definition = properties["definition"].take();
-        definition["description"] = Value::String(simple.description.clone());
-        keep_markup(
-            &mut definition,
-            simple,
-            (group, &team.name),
-            (&channel.id, &channel.name),
-        );
-        let references: serde_json::Map<String, Value> = simple
-            .references
-            .as_object()
-            .into_iter()
-            .flatten()
-            .map(|(key, _)| {
-                (
-                    key.clone(),
-                    serde_json::json!({
-                        "id": format!("/providers/Microsoft.PowerApps/apis/{TEAMS_API}"),
-                        "connectionName": connection,
-                        "source": "NotSpecified",
-                    }),
-                )
-            })
-            .collect();
-        let mut properties = serde_json::json!({
-            "definition": definition,
-            "connectionReferences": references,
-            "displayName": summary(simple, Some(&channel.name)),
-        });
-        if simple.flow.is_none() {
-            properties["templateName"] = Value::String(simple.template.clone());
+        for (param, field) in simple.params.iter_mut().zip(&simple.fields) {
+            if let Some(area) = &field.area {
+                let text = area.read(cx).value().to_string();
+                param.value = if text.trim().is_empty() {
+                    Value::Null
+                } else {
+                    Value::String(text)
+                };
+            }
         }
-        Ok(properties)
     }
 
     pub(super) fn team_by_group(&self, group: &str) -> Option<&Team> {
@@ -276,282 +513,91 @@ impl WorkflowDialog {
             .find(|team| team.group_id.as_deref().unwrap_or(&team.id) == group)
     }
 
-    fn channel_name(&self) -> Option<String> {
-        let simple = self.simple.as_ref()?;
-        let team = self.team_by_group(simple.team.as_deref()?)?;
-        let channel = simple.channel.as_deref()?;
-        team.channels
-            .iter()
-            .find(|candidate| candidate.id == channel)
-            .map(|channel| channel.name.clone())
+    pub(super) fn leave_simple(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
+        self.error = None;
+        self.screen = match self.simple.take() {
+            Some(Simple {
+                flow: Some(flow),
+                from_list: false,
+                ..
+            }) => Screen::Detail(flow),
+            Some(Simple { from_list: true, .. }) => self.list_screen(),
+            _ => Screen::Browse,
+        };
+        cx.notify();
     }
 
-    pub(super) fn simple_editor(&self, simple: &Simple, palette: Palette, cx: &Context<Self>) -> AnyElement {
-        let heading = simple
-            .flow
-            .as_ref()
-            .map_or_else(|| "Untitled workflow".to_owned(), |flow| flow.name.clone());
-        div()
-            .flex()
-            .flex_col()
-            .gap_8()
-            .px_12()
-            .pt_2()
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_3()
-                            .child(selected_by(
-                                "workflow-simple-back",
-                                icon_button("workflow-simple-back", Glyph::CHEVRON_LEFT, "Back")
-                                    .ghost()
-                                    .disabled(self.busy)
-                                    .on_click(cx.listener(|this, _, _, cx| this.leave_simple(cx))),
-                            ))
-                            .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(heading)),
-                    )
-                    .child(selected_by(
-                        "workflow-collapse-all",
-                        Button::new("workflow-collapse-all")
-                            .ghost()
-                            .small()
-                            .label(if simple.expanded { "Collapse all" } else { "Expand all" })
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_card(cx))),
-                    )),
-            )
-            .child(self.simple_card(simple, palette, cx))
-            .into_any_element()
+    /// The list a change from a row's menu returns to: Workflows Home's, or the channel's.
+    pub(super) fn list_screen(&self) -> Screen {
+        match self.listing {
+            Listing::Home => Screen::Home,
+            Listing::Channel => Screen::Browse,
+        }
     }
 
-    fn simple_card(&self, simple: &Simple, palette: Palette, cx: &Context<Self>) -> AnyElement {
-        let channel = self.channel_name();
-        div()
-            .id("workflow-simple-card")
-            .debug_selector(|| "workflow-simple-card".to_owned())
-            .flex()
-            .flex_col()
-            .gap_3()
-            .p_4()
-            .rounded_xl()
-            .border_1()
-            .border_color(rgb(palette.border))
-            .hover(|card| card.border_color(rgb(palette.foreground)))
-            .child(
-                div()
-                    .flex()
-                    .items_start()
-                    .justify_between()
-                    .child(div().flex().gap_2().children(simple.apps.iter().map(|app| {
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap_1p5()
-                            .px_2()
-                            .py_0p5()
-                            .rounded_full()
-                            .text_sm()
-                            .bg(rgb(palette.hover))
-                            .child(gpui::img(art::teams()).size(px(14.0)))
-                            .child(app.clone())
-                    })))
-                    .child(selected_by(
-                        "workflow-card-toggle",
-                        icon_button(
-                            "workflow-card-toggle",
-                            if simple.expanded {
-                                Glyph::CHEVRON_UP
-                            } else {
-                                Glyph::CHEVRON_DOWN
-                            },
-                            if simple.expanded { "Collapse" } else { "Expand" },
-                        )
-                        .ghost()
-                        .on_click(cx.listener(|this, _, _, cx| this.toggle_card(cx))),
-                    )),
-            )
-            .child(
-                div()
-                    .font_weight(gpui::FontWeight::BOLD)
-                    .child(summary(simple, channel.as_deref())),
-            )
-            .child(
-                div()
-                    .text_color(rgb(palette.muted_foreground))
-                    .child(simple.description.clone()),
-            )
-            .when(simple.expanded, |card| {
-                card.child(self.team_field(simple, palette, cx))
-                    .child(self.channel_field(palette, cx))
-            })
-            .when_some(
-                match &simple.link {
-                    Link::Failed(error) => Some(error),
-                    Link::Checking | Link::Ready(_) => None,
-                },
-                |card, error| {
-                    card.child(
-                        div()
-                            .debug_selector(|| "workflow-simple-problem".to_owned())
-                            .text_sm()
-                            .text_color(rgb(theme::DANGER))
-                            .child(format!(
-                                "Microsoft Teams could not be connected. {}",
-                                model::problem(error)
-                            )),
-                    )
-                },
-            )
-            .into_any_element()
-    }
-
-    fn toggle_card(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn toggle_card(&mut self, cx: &mut Context<Self>) {
         if let Some(simple) = &mut self.simple {
             simple.expanded = !simple.expanded;
         }
         cx.notify();
     }
-
-    fn leave_simple(&mut self, cx: &mut Context<Self>) {
-        if self.busy {
-            return;
-        }
-        self.error = None;
-        self.screen = match self.simple.take().and_then(|simple| simple.flow) {
-            Some(flow) => Screen::Detail(flow),
-            None => Screen::Browse,
-        };
-        cx.notify();
-    }
-
-    fn team_field(&self, simple: &Simple, palette: Palette, cx: &Context<Self>) -> AnyElement {
-        let label = if has_label(simple, "Teams.Group") {
-            "Team the channel is in"
-        } else {
-            "Team"
-        };
-        self.combo_field(Which::Team, label, palette, cx)
-    }
-
-    fn channel_field(&self, palette: Palette, cx: &Context<Self>) -> AnyElement {
-        self.combo_field(Which::Channel, "Channel", palette, cx)
-    }
-
-    /// Shows the chosen team's and channel's names in their fields (once the teams are read, too).
-    pub(super) fn show_choices(&mut self, window: &mut Window, cx: &mut App) {
-        let names = (self.chosen_team_name(), self.channel_name());
-        if let Some(simple) = &mut self.simple {
-            simple.team_combo.show(names.0.unwrap_or_default());
-            simple.channel_combo.show(names.1.unwrap_or_default());
-            simple.team_combo.sync(window, cx);
-            simple.channel_combo.sync(window, cx);
-        }
-    }
-
-    fn chosen_team_name(&self) -> Option<String> {
-        let simple = self.simple.as_ref()?;
-        self.team_by_group(simple.team.as_deref()?)
-            .map(|team| team.name.clone())
-    }
-
-    /// The card editor's footer: Save and Back, as in Teams.
-    pub(super) fn simple_footer(&self, cx: &Context<Self>) -> AnyElement {
-        let connecting = self
-            .simple
-            .as_ref()
-            .is_some_and(|simple| matches!(simple.link, Link::Checking));
-        // Teams keeps Save off until both a team and a channel are chosen.
-        let unchosen = self
-            .simple
-            .as_ref()
-            .is_none_or(|simple| simple.team.is_none() || simple.channel.is_none());
-        div()
-            .flex()
-            .gap_2()
-            .child(selected_by(
-                "workflow-save",
-                Button::new("workflow-save")
-                    .primary()
-                    .min_w(px(96.0))
-                    .label(if self.busy { "Saving…" } else { "Save" })
-                    .loading(self.busy)
-                    .disabled(self.busy || connecting || unchosen || self.uncertain.is_some())
-                    .on_click(cx.listener(|this, _, _, cx| this.simple_save(cx))),
-            ))
-            .child(selected_by(
-                "workflow-edit-cancel",
-                Button::new("workflow-edit-cancel")
-                    .outline()
-                    .min_w(px(96.0))
-                    .label("Back")
-                    .disabled(self.busy)
-                    .on_click(cx.listener(|this, _, _, cx| this.leave_simple(cx))),
-            ))
-            .into_any_element()
-    }
 }
 
-fn has_label(simple: &Simple, kind: &str) -> bool {
-    let Some(template) = simple.markup.pointer("/automation/template") else {
-        return false;
+/// The workflow Teams saves: the template's definition with each field's input filled, the markup kept with the
+/// choices and their names so Teams can edit it again, and the apps' connections. An edited workflow keeps its name,
+/// which a Rename may have changed.
+fn simple_properties(simple: &Simple) -> Result<Value, &'static str> {
+    if !simple.complete() {
+        return Err("Fill in the required fields.");
+    }
+    let mut definition = simple.definition.clone();
+    markup::apply(&mut definition, &simple.params, &simple.bindings);
+    definition["description"] = Value::String(simple.description.clone());
+    let name = match &simple.flow {
+        Some(flow) => flow.name.clone(),
+        None => simple.summary(),
     };
-    let id = template
-        .get("parameters")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .find(|parameter| parameter.get("typeName").and_then(Value::as_str) == Some(kind))
-        .and_then(|parameter| parameter.get("id"));
-    template
-        .get("editorBindings")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .any(|binding| binding.get("parameterId") == id && binding.get("label").is_some())
+    let mut references = serde_json::Map::new();
+    for (key, reference) in simple.references.as_object().into_iter().flatten() {
+        let api = api_name(reference).ok_or("Open the workflow again.")?;
+        let connection = match simple.links.iter().find(|(name, _)| name == api).map(|(_, link)| link) {
+            Some(Link::Ready(connection)) => connection.clone(),
+            Some(Link::Checking) => return Err("The workflow's apps are still connecting. Try again in a moment."),
+            _ => return Err("An app the workflow uses could not be connected. Close Workflows and try again."),
+        };
+        references.insert(
+            key.clone(),
+            serde_json::json!({
+                "id": format!("/providers/Microsoft.PowerApps/apis/{api}"),
+                "connectionName": connection,
+                "source": "NotSpecified",
+            }),
+        );
+    }
+    let template_references = if simple.flow.is_some() {
+        Value::Null
+    } else {
+        simple.references.clone()
+    };
+    let kept = markup::filled(&simple.markup, &simple.params, &simple.title, &template_references);
+    keep_markup(&mut definition, &kept);
+    let mut properties = serde_json::json!({
+        "definition": definition,
+        "connectionReferences": references,
+        "displayName": name,
+    });
+    if simple.flow.is_none() {
+        properties["templateName"] = Value::String(simple.template.clone());
+    }
+    Ok(properties)
 }
 
-/// The card's title as Teams words it: a template that is sent "to a channel" names the chosen channel.
-fn summary(simple: &Simple, channel: Option<&str>) -> String {
-    let names_channel = simple
-        .markup
-        .pointer("/automation/template/summary")
-        .and_then(Value::as_str)
-        .is_some_and(|summary| summary.contains("TeamsChannel"));
-    if !names_channel || !simple.name.contains(" a channel") {
-        return simple.name.clone();
-    }
-    // With no channel chosen Teams' title says just "channel": "Send webhook alerts to channel".
-    simple
-        .name
-        .replacen(" a channel", &format!(" {}", channel.unwrap_or("channel")), 1)
-}
-
-/// Keeps the template's markup in the definition, with the chosen values and their names, as Teams does: its
-/// `Do_Not_Remove_FlowIL` action runs first, so the template's first actions run after it.
-fn keep_markup(definition: &mut Value, simple: &Simple, team: (&str, &str), channel: (&str, &str)) {
-    let mut markup = simple.markup.clone();
-    if let Some(parameters) = markup
-        .pointer_mut("/automation/template/parameters")
-        .and_then(Value::as_array_mut)
-    {
-        for parameter in parameters {
-            let (value, name) = match parameter.get("typeName").and_then(Value::as_str) {
-                Some("Teams.Group") => team,
-                Some("Teams.Channel") => channel,
-                _ => continue,
-            };
-            parameter["value"] = Value::String(value.to_owned());
-            parameter["valueDisplayName"] = Value::String(name.to_owned());
-        }
-    }
-    if let Some(template) = markup.pointer_mut("/automation/template") {
-        template["displayName"] = Value::String(simple.name.clone());
-    }
+/// Keeps the markup in the definition, as Teams does: its `Do_Not_Remove_FlowIL` action runs first, so the
+/// template's first actions run after it.
+fn keep_markup(definition: &mut Value, markup: &Value) {
     let Some(actions) = definition.get_mut("actions").and_then(Value::as_object_mut) else {
         return;
     };
@@ -577,8 +623,8 @@ fn keep_markup(definition: &mut Value, simple: &Simple, team: (&str, &str), chan
     );
 }
 
-/// A signed-in Microsoft Teams connection of the environment, made and signed in when there is none.
-async fn teams_connection(core: &Arc<dyn Core>, environment: String) -> Link {
+/// Each app's connection: listed once, then a signed-in one reused or one made and signed in.
+async fn connect_all(core: &Arc<dyn Core>, environment: String, apis: Vec<String>) -> Vec<(String, Link)> {
     let listed = core
         .workflow_request(WorkflowRequest::Connections {
             environment: environment.clone(),
@@ -586,26 +632,48 @@ async fn teams_connection(core: &Arc<dyn Core>, environment: String) -> Link {
         .await
         .unwrap_or(Err(WorkflowFailure::Connection))
         .and_then(|value| model::rows(&value).map(<[Value]>::to_vec));
-    let connections = match listed {
-        Ok(connections) => connections,
-        Err(error) => return Link::Failed(error),
-    };
-    if let Some(name) = connections.iter().find_map(|connection| {
-        (connections::is_connected(connection, TEAMS_API))
-            .then(|| connection.get("name").and_then(Value::as_str))
-            .flatten()
-    }) {
-        return Link::Ready(name.to_owned());
+    let mut links = Vec::new();
+    for api in apis {
+        let link = match &listed {
+            Ok(connections) => connect(core, &environment, &api, connections).await,
+            Err(error) => Link::Failed(error.clone()),
+        };
+        links.push((api, link));
     }
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let connection = format!("shared-teams-{stamp:032x}");
+    links
+}
+
+/// A signed-in connection of the environment for `api`, made and signed in when there is none. A connection of
+/// `api` left unauthenticated (a sign-in that failed before) is signed in again rather than another one made.
+async fn connect(core: &Arc<dyn Core>, environment: &str, api: &str, connections: &[Value]) -> Link {
+    let name_of = |connection: &Value| connection.get("name").and_then(Value::as_str).map(str::to_owned);
+    if let Some(name) = connections
+        .iter()
+        .find(|connection| connections::is_connected(connection, api))
+        .and_then(name_of)
+    {
+        return Link::Ready(name);
+    }
+    let prefix = format!("shared-{}-", api.strip_prefix("shared_").unwrap_or(api));
+    let connection = connections
+        .iter()
+        .filter(|connection| {
+            connection.pointer("/properties/apiId").and_then(Value::as_str)
+                == Some(format!("/providers/Microsoft.PowerApps/apis/{api}").as_str())
+        })
+        .filter_map(name_of)
+        .find(|name| name.starts_with(&prefix))
+        .unwrap_or_else(|| {
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            format!("{prefix}{stamp:032x}")
+        });
     match core
         .workflow_request(WorkflowRequest::AuthorizeConnection {
-            environment,
-            connector: TEAMS_API.to_owned(),
+            environment: environment.to_owned(),
+            connector: api.to_owned(),
             connection: connection.clone(),
         })
         .await

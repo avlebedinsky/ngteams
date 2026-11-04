@@ -4,15 +4,19 @@ mod art;
 mod combo;
 mod connections;
 mod editor;
+mod fields;
 mod form;
+mod markup;
 mod model;
 mod overview;
 mod owners;
+mod rows;
 mod run_inputs;
 mod runs;
 mod service;
 mod simple;
 mod view;
+mod zones;
 
 use std::sync::Arc;
 
@@ -46,6 +50,8 @@ enum Outcome {
     Overview,
     Stay,
     Owners,
+    /// Back on the workflow list, read again (an edit or a change made from the list's menu).
+    List,
 }
 
 /// The Overview change under way, whose button shows it working.
@@ -54,6 +60,13 @@ enum Change {
     Toggle,
     Rename,
     Owners,
+}
+
+/// Which list a row's menu was used in.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Listing {
+    Channel,
+    Home,
 }
 
 #[derive(Clone, Copy)]
@@ -90,6 +103,8 @@ enum Screen {
         schema: Value,
     },
     Delete(Card),
+    /// The delete question asked from the workflow list's menu, over the list.
+    DeleteListed(Card),
 }
 
 #[derive(Default)]
@@ -146,6 +161,12 @@ pub struct WorkflowDialog {
     owner_search: Entity<InputState>,
     owner_query: u64,
     owner_found: Option<owners::Found>,
+    /// The listed workflow a change from its row is under way for (its row shows it working).
+    acting: Option<String>,
+    /// The list (the channel's or Workflows Home's) a row was acted on in: the change returns there.
+    listing: Listing,
+    /// Each listed schedule's next run, as shown.
+    next_runs: std::collections::HashMap<String, String>,
     scroll: gpui::ScrollHandle,
     /// The kind of screen the page was last shown for: a new kind starts at its top.
     scrolled_for: Option<u8>,
@@ -230,6 +251,9 @@ impl WorkflowDialog {
             owner_search,
             owner_query: 0,
             owner_found: None,
+            acting: None,
+            listing: Listing::Channel,
+            next_runs: std::collections::HashMap::new(),
             scroll: gpui::ScrollHandle::new(),
             scrolled_for: None,
         };
@@ -308,14 +332,29 @@ impl WorkflowDialog {
 
     /// Opens the card editor's team list, as a click in its field does.
     pub fn open_team_choices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(simple) = &self.simple {
-            simple.team_combo.input.update(cx, |state, cx| state.focus(window, cx));
+        if let Some(index) = self.team_field() {
+            let input = self.combo_mut(index).map(|combo| combo.input.clone());
+            if let Some(input) = input {
+                input.update(cx, |state, cx| state.focus(window, cx));
+            }
         }
     }
 
     /// Chooses a team in the card editor by its group id, as picking it in the team list does.
     pub fn choose_team(&mut self, group: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.choose(combo::Which::Team, group.to_owned(), window, cx);
+        let name = self.team_by_group(group).map(|team| team.name.clone());
+        if let (Some(index), Some(name)) = (self.team_field(), name) {
+            self.choose(index, group.to_owned(), name, window, cx);
+        }
+    }
+
+    /// The card editor's team field.
+    fn team_field(&self) -> Option<usize> {
+        self.simple
+            .as_ref()?
+            .params
+            .iter()
+            .position(|param| param.kind == markup::Kind::TeamsGroup)
     }
 
     /// Searches the directory for a co-owner, as typing `text` in "Add a co-owner" does.
@@ -461,6 +500,7 @@ impl WorkflowDialog {
                     }
                     this.loading.workflows = false;
                     this.workflows_read(answer, append);
+                    this.load_next_runs(cx);
                     cx.notify();
                 });
             }));

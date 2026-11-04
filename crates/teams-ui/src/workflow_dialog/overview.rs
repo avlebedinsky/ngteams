@@ -25,6 +25,7 @@ impl WorkflowDialog {
                     .when(!self.core.read_only(), |view| {
                         view.child(self.detail_controls(card, cx))
                     })
+                    .children(self.schedule_line(card, palette))
                     .children(self.webhook_copy(card, palette, cx)),
             )
             .when(webhook, |view| {
@@ -84,20 +85,8 @@ impl WorkflowDialog {
     }
 
     fn detail_controls(&self, card: &Card, cx: &Context<Self>) -> AnyElement {
-        let (editing, changing, running, deleting) = (card.clone(), card.clone(), card.clone(), card.clone());
+        let (editing, changing, deleting) = (card.clone(), card.clone(), card.clone());
         let locked = self.busy || self.uncertain.is_some();
-        let manual = card
-            .properties
-            .pointer("/definition/triggers")
-            .and_then(Value::as_object)
-            .is_some_and(|triggers| {
-                triggers.values().any(|trigger| {
-                    matches!(
-                        trigger.get("kind").and_then(Value::as_str),
-                        Some("Button" | "PowerApp" | "PowerAppV2" | "Skills" | "PowerPages")
-                    )
-                })
-            });
         let weak = cx.entity().downgrade();
         div()
             .flex()
@@ -112,6 +101,7 @@ impl WorkflowDialog {
                     .disabled(locked)
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle(&changing, cx))),
             ))
+            .children(Self::run_button(card, locked, cx))
             .child(selected_by(
                 "workflow-edit",
                 Button::new("workflow-edit")
@@ -121,17 +111,6 @@ impl WorkflowDialog {
                     .disabled(locked)
                     .on_click(cx.listener(move |this, _, window, cx| this.edit(editing.clone(), true, window, cx))),
             ))
-            .when(manual, |row| {
-                row.child(selected_by(
-                    "workflow-run",
-                    Button::new("workflow-run")
-                        .outline()
-                        .icon(Glyph::PLAY.icon())
-                        .label("Run")
-                        .disabled(locked)
-                        .on_click(cx.listener(move |this, _, window, cx| this.prepare_run(&running, window, cx))),
-                ))
-            })
             .child(selected_by(
                 "workflow-more",
                 icon_button("workflow-more", Glyph::ELLIPSIS, "More options")
@@ -225,8 +204,9 @@ impl WorkflowDialog {
             .into_any_element()
     }
 
-    /// Teams' delete question, over the whole dialog and the Overview it was asked from.
-    pub(super) fn delete_prompt(&self, card: &Card, palette: Palette, cx: &Context<Self>) -> AnyElement {
+    /// Teams' delete question, over the whole dialog and the Overview (or, from a row's menu, the list) it was asked
+    /// from; Delete spins while it goes.
+    pub(super) fn delete_prompt(&self, card: &Card, listed: bool, palette: Palette, cx: &Context<Self>) -> AnyElement {
         let (chosen, kept) = (card.clone(), card.clone());
         div()
             .absolute()
@@ -267,15 +247,20 @@ impl WorkflowDialog {
                                         .primary()
                                         .min_w(px(96.0))
                                         .label("Delete")
+                                        .loading(self.busy)
                                         .disabled(self.busy)
                                         .on_click(cx.listener(move |this, _, _, cx| {
                                             if let Some(environment) = this.environment.clone() {
-                                                this.mutate(
+                                                this.mutate_then(
                                                     WorkflowRequest::Delete {
                                                         environment,
                                                         flow: chosen.id.clone(),
                                                     },
-                                                    "Workflow deleted",
+                                                    if listed {
+                                                        Outcome::List
+                                                    } else {
+                                                        Outcome::Notice("Workflow deleted")
+                                                    },
                                                     cx,
                                                 );
                                             }
@@ -289,7 +274,11 @@ impl WorkflowDialog {
                                         .label("Cancel")
                                         .disabled(self.busy)
                                         .on_click(cx.listener(move |this, _, _, cx| {
-                                            this.screen = Screen::Detail(kept.clone());
+                                            this.screen = if listed {
+                                                this.list_screen()
+                                            } else {
+                                                Screen::Detail(kept.clone())
+                                            };
                                             cx.notify();
                                         })),
                                 )),
@@ -297,6 +286,72 @@ impl WorkflowDialog {
                 ),
             )
             .into_any_element()
+    }
+}
+
+impl WorkflowDialog {
+    /// A schedule's line under the Overview's buttons: "Active: Next run: <when>" and "Last modified: <when>".
+    fn schedule_line(&self, card: &Card, palette: Palette) -> Option<AnyElement> {
+        card.properties.get("definition").and_then(markup::recurrence_trigger)?;
+        let modified = card
+            .properties
+            .get("lastModifiedTime")
+            .and_then(Value::as_str)
+            .and_then(rows::local_time);
+        let next = self.next_runs.get(&card.id).filter(|_| card.enabled());
+        Some(
+            div()
+                .debug_selector(|| "workflow-schedule".to_owned())
+                .flex()
+                .flex_wrap()
+                .gap_x_6()
+                .text_sm()
+                .text_color(rgb(palette.muted_foreground))
+                .children(next.map(|next| format!("Active: Next run: {next}")))
+                .children(modified.map(|modified| format!("Last modified: {modified}")))
+                .into_any_element(),
+        )
+    }
+
+    /// Teams' Run, after Turn off, for a workflow that can run now: a schedule runs at once; one started by hand asks
+    /// for its inputs first.
+    fn run_button(card: &Card, locked: bool, cx: &Context<Self>) -> Option<AnyElement> {
+        if !Self::runnable(card) {
+            return None;
+        }
+        let scheduled = card.properties.get("definition").and_then(markup::recurrence_trigger);
+        let running = card.clone();
+        Some(
+            selected_by(
+                "workflow-run",
+                Button::new("workflow-run")
+                    .outline()
+                    .icon(Glyph::PLAY.icon())
+                    .label("Run")
+                    .disabled(locked)
+                    .on_click(cx.listener(move |this, _, window, cx| match &scheduled {
+                        Some(trigger) => this.run_now(&running, trigger.clone(), cx),
+                        None => this.prepare_run(&running, window, cx),
+                    })),
+            )
+            .into_any_element(),
+        )
+    }
+
+    /// Runs a schedule now, from its Overview, and reads its runs again.
+    fn run_now(&mut self, card: &Card, trigger: String, cx: &mut Context<Self>) {
+        let Some(environment) = self.environment.clone() else {
+            return;
+        };
+        self.mutate_then(
+            WorkflowRequest::Run {
+                environment,
+                flow: card.id.clone(),
+                trigger,
+            },
+            Outcome::Stay,
+            cx,
+        );
     }
 }
 

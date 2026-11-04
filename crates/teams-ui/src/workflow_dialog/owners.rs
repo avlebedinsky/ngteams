@@ -88,7 +88,7 @@ impl WorkflowDialog {
         let asked = self.owner_query;
         let reply = self.core.addable_people(query.clone());
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
-            let people = reply.await.unwrap_or_default();
+            let people = starting_with(reply.await.unwrap_or_default(), &query);
             let _ = this.update(cx, |this, cx| {
                 if this.owner_query == asked {
                     this.owner_found = Some(Found { query, people });
@@ -162,10 +162,7 @@ impl WorkflowDialog {
             .border_1()
             .border_color(rgb(palette.border))
             .bg(rgb(palette.surface))
-            .child(div().child(
-                "Adding an owner gives them full control of this flow. They'll be able to add or remove other users \
-                     as owners, access the run history, and can update, edit or delete this flow.",
-            ));
+            .child(learn_more(palette));
         match &self.owners {
             None => list = list.child(div().text_color(rgb(palette.muted_foreground)).child("Loading owners…")),
             Some(Err(error)) => {
@@ -356,7 +353,7 @@ async fn owner_name(core: &Arc<dyn Core>, id: &str, cx: &mut AsyncApp) -> Option
 }
 
 /// Teams' owner picture when it has none: their first letter in a grey circle.
-fn initial(name: &str, palette: Palette) -> gpui::Div {
+pub(super) fn initial(name: &str, palette: Palette) -> gpui::Div {
     div()
         .size(px(32.0))
         .flex_none()
@@ -373,4 +370,50 @@ fn initial(name: &str, palette: Palette) -> gpui::Div {
                 .map(|c| c.to_uppercase().to_string())
                 .unwrap_or_default(),
         )
+}
+
+/// What owners may do, with Teams' "Learn more" link at its end, in the same run of text.
+fn learn_more(palette: Palette) -> AnyElement {
+    const TEXT: &str = concat!(
+        "Adding an owner gives them full control of this flow. They'll be able to add or remove other users as ",
+        "owners, access the run history, and can update, edit or delete this flow. ",
+    );
+    let link = TEXT.len()..TEXT.len() + "Learn more".len();
+    let style = gpui::HighlightStyle {
+        color: Some(rgb(palette.brand).into()),
+        ..gpui::HighlightStyle::default()
+    };
+    div()
+        .debug_selector(|| "workflow-owners-learn-more".to_owned())
+        .child(
+            gpui::InteractiveText::new(
+                "workflow-owners-learn-more",
+                gpui::StyledText::new(format!("{TEXT}Learn more")).with_highlights([(link.clone(), style)]),
+            )
+            .on_click(vec![link], |_, _, cx| cx.open_url(LEARN_MORE)),
+        )
+        .into_any_element()
+}
+
+/// Where Teams' "Learn more" about owners leads: Microsoft's page on sharing a flow with co-owners.
+const LEARN_MORE: &str = "https://go.microsoft.com/fwlink/?linkid=839912";
+
+/// The people a directory search found whose name or address starts with the text, as Teams' own search asks (Graph's
+/// `startswith` on the display name, mail and sign-in name): "ai2" finds AI2, not AI3.
+pub(super) fn starting_with(people: Vec<TeamPerson>, query: &str) -> Vec<TeamPerson> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return people;
+    }
+    people
+        .into_iter()
+        .filter(|person| {
+            let name = person.name.to_lowercase();
+            name.starts_with(&query)
+                || person
+                    .email
+                    .as_deref()
+                    .is_some_and(|email| email.to_lowercase().starts_with(&query))
+        })
+        .collect()
 }

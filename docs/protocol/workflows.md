@@ -86,8 +86,8 @@ flow, its triggers, connections, runs and `owners`, and resolves the owners' nam
   `start` the same way). Copy webhook link stays.
 - **Owners**, below Run history: "Adding an owner gives them full control of this flow. They'll be able to add or
   remove other users as owners, access the run history, and can update, edit or delete this flow." with a Learn more
-  link, then each owner (initial, name; "Owner" beside the one who made the flow, Remove beside a co-owner), then
-  "Add a co-owner" with a search box ("Enter names, email or user groups"). Typing searches the directory (Teams asks
+  link (`https://go.microsoft.com/fwlink/?linkid=839912`, Microsoft's page on team flows), then each owner (initial,
+  name; "Owner" beside the one who made the flow, Remove beside a co-owner), then "Add a co-owner" with a search box ("Enter names, email or user groups"). Typing searches the directory (Teams asks
   Graph for users and groups whose name, address or UPN starts with the text) and lists who it finds above the box,
   name and address, or "<text> is not in your organization's directory.". Picking someone adds them at once:
   `POST …/flows/<flow>/modifyowners?cascadeoperation=true` with `{"put": [{"name": <object id>, "properties":
@@ -98,12 +98,12 @@ flow, its triggers, connections, runs and `owners`, and resolves the owners' nam
   Home tab (Find templates, Build from scratch, Create a workflow, Your workflows with Refresh), beside Templates and
   Chat (the Workflows bot's chat). The native client has no app pages, so its Workflows Home is the dialog's own page
   of every template and workflow.
-- The channel's list shows a saved workflow as its name over "Active" or "Inactive", with a "..." menu (Edit, Manage,
-  Turn off, Details, Delete).
+- The channel's list: [below](#the-workflow-list-and-its-menu).
 
-The native client sends the same bodies on the classic Flow routes. Its co-owner search uses the engine's directory
-people search (the one Manage team's Add member uses), and owners' names the engine's profile lookups, rather than
-Graph from Power Automate's token bundle.
+The native client sends the same bodies on the classic Flow routes. Its co-owner and people searches use the engine's
+directory people search (the one Manage team's Add member uses), keeping only people whose name or address starts with
+the text as Graph's `startswith` does, and owners' names the engine's profile lookups, rather than Graph from Power
+Automate's token bundle.
 
 ## The Teams connection behind the scenes
 
@@ -130,6 +130,87 @@ and the bundle's API Hub token posted only to a `firstPartyLoginUri` on a Micros
 `/firstPartyLogin` path. The bundle never leaves the transport, and the account's own tokens never go to the consent
 host. A connection the service already reports `Connected` is reused. The native card editor takes the teams and
 channels from the account's store rather than through the connector.
+
+## Teams' cards for the other templates
+
+Seen 2026-11-04 the same way, for every template the channel's dialog lists: the weekly reminder, Planner, the two
+SharePoint templates and forwarding email. Each was saved once and deleted again; the lab team's only member was the
+lab account. Every one opens in the same card editor as the webhook template, never a form of the definition.
+
+The markup drives the card. Its `parameters` are the fields, in `editorBindings` order, each by `typeName`;
+`optional: true` leaves the red star off; `dependencies` name the fields a field's choices depend on. Its
+`dataBindings` map each action or trigger (by name, possibly nested in a loop or branch) to the inputs each field
+fills: `${context['parameters']['X']}` into `${json['inputs']['parameters']['groupId']}`, or into a trigger's
+`recurrence`. The labels and the card's title are the Workflows app's own words, which the markup names only by
+resource key; a field without a label resource gets its kind's ("Start date", "Time", "Time zone", "Day", "Channel",
+"SharePoint library", "SharePoint folder").
+
+| `typeName` | field |
+|---|---|
+| `Teams.Group`, `Teams.Channel` | the comboboxes above; the template's label ("Select team", "Team to notify", "Team") |
+| `Teams.MessageBody` | a message box ("Add message") with Teams' formatting bar; the text goes to `body/messageBody` |
+| `BuiltIn.Frequency` | fixed (`Week`), not shown |
+| `BuiltIn.Interval` | "Repeat every (weeks)", 1 by default, "Specify the interval" when empty; anything but a whole number from 1 to 71 shows "Enter a number between 1 and 71, with no decimals" under it and keeps Save off |
+| `BuiltIn.StartDate` | a date field (`11/4/2026`) with a calendar; earlier days can't be picked; sent as `2026-11-04T00:00:00` |
+| `BuiltIn.TimeOfDay` | a combobox of half-hours, the next five-minute mark by default (`8:05 PM`); sent as `20:05` into `schedule.hours`/`schedule.minutes` |
+| `BuiltIn.Timezone` | Windows' zones (`Turkey Standard Time`, shown "(UTC+03:00) Istanbul"), the local one by default |
+| `BuiltIn.WeekDays` | seven round toggles S M T W T F S, the template's (Monday) by default; sent in week order into `schedule.weekDays` |
+| `Planner.GroupId`, `Planner.PlanId`, `SharePoint.Site`, `SharePoint.List`, `SharePoint.Library` | comboboxes of a connector's dynamic list; empty, with "No options available", until what they depend on is chosen |
+| `SharePoint.FolderPath`, `Outlook.MailFolderPath` | a folder picker: "Your folders", the app's name ("SharePoint", "Outlook") and the folders browsed into, then each folder (choose it, or its chevron to look inside) |
+| `Outlook.ToLine`, `Outlook.From` | people pickers ("Enter part of a name or email address to find people"): typing asks Graph for users and mail-enabled groups whose display name, mail or sign-in name starts with the text; the chosen show as chips; sent as their addresses joined by `;` |
+| `Outlook.SubjectFilter` | a text field |
+
+The titles read "Send a message to <channel> every <n> week(s) on <day, or "selected days"> at <time>" ("every few
+week(s)" while the interval is invalid), "Notify <channel> when a Planner task is completed in <plan>", "Notify
+<channel> when files or list items are changed in <list>", "Notify <channel> when a new file is uploaded or created
+within <library>" and "Forward the message to <channel> when the email meets your selected conditions"; an unchosen
+name reads as its kind ("channel", "plan", "list"). The card's chips are the template's apps (trigger's first), each
+with its connector icon: Planner, Office 365 Users, Microsoft Teams, SharePoint, Office 365 Outlook.
+
+A connector field's choices come the way Teams reads them, on the environment's Power Platform host with the Flow
+token. `GET …/powerautomate/apis/<connector>/apiOperations/<operation>` (the bound action's `host.operationId`) gives
+the operation's `inputsDefinition.properties`; the bound input's `x-ms-dynamic-list` (or `x-ms-dynamic-tree`) is posted
+back with the values it refers to, `POST …/apis/<connector>/connections/<connection>/listEnum` (or `listTree`) with
+`{"parameters": {…}, "dynamicInvocationDefinition": <it>}`; a `parameterReference` takes the value of the field bound
+to that input of the same action. A tree's browse adds the folder's `selectionState`. The answer is `value[]` of
+`value` and `displayName`. The SharePoint site is the team's own by default, its `teamSiteInformation.sharepointSiteUrl`
+from the teams read (the connector's `GetDataSets` listed nothing in the lab); its list ends with "Enter a site URL".
+
+Every app's connection is made the way the webhook template's is, behind the scenes: an existing signed-in one of the
+environment is reused (Teams reused the connections it made earlier in the session), otherwise `PUT` a
+`shared-<connector>-<hex>` connection, the on-behalf-of bundle and the first-party login. Planner's, Office 365 Users',
+SharePoint's and Office 365 Outlook's were made so. The native client also signs in again a connection of the same
+connector a failed sign-in left unauthenticated, rather than making another.
+
+Save sends what the webhook's does, with each field's input filled from the bindings: an optional field left empty
+takes its input out of the action (an empty `folderPath` or `to` is not sent), and the kept markup holds each value and
+its `valueDisplayName`. A Planner Save took several seconds; Teams showed "Saving…" and then a toast, "Still setting up
+your workflow / Workflow's saving - you can safely leave this page." The weekly reminder's Overview adds Run and a line
+"Active: Next run: 11/9/2026 8:05:00 PM    Last modified: 11/4/2026 8:07:01 PM" (the next run is the trigger's
+`nextExecutionTime`).
+
+Edit reads the workflow again and opens the same card, its heading the workflow's name, with the values the kept markup
+holds. Its Save is `PATCH …/flows/<flow>` with `definition`, `connectionReferences` (the workflow's own connections),
+`displayName` and `templateName`. After a Rename, Edit's heading is the new name and its Save keeps it: the
+`displayName` sent is the workflow's name, not the card's title. Save goes back to the Overview, or to the list when Edit
+came from the list's menu.
+
+## The workflow list and its menu
+
+Under "Your workflows", "Available in this channel" asks for the flows whose operations name this team and channel
+(`$filter=operations/any(…teams.groupId…teams.channelId…)`) and "Workflows" for those the account owns with
+`flowState=active`: both list only workflows that are on. A workflow turned off leaves the channel's list at once. A
+row is the name (semibold, grey) over "Active", or "Active: Next run: <when>" for a schedule, which also shows a
+recurrence mark and Run. "See all" (beside the heading while there are rows) leads to the Workflows app. With none:
+"Create an automation for your channel", "Pick one of our ready-to-go templates or build your own from scratch" and
+"View templates".
+
+A click on a row opens its Overview. Its "..." menu holds Run (a schedule or a workflow started by hand), Edit, Manage,
+Turn off (Turn on), then Details, then Delete. Manage opens the workflow's page in Power Automate in a new browser tab,
+`https://make.powerautomate.com/environments/<environment>/flows/<flow>/details`. Turn off spins in the row's Run
+place, sends `stop` and reads the list again. Details is the Overview. Delete asks Teams' "Delete automation" question
+over the list (Delete spins while it goes) and the list stays. The native client opens Manage's page in the system
+browser.
 
 ## Lifecycle routes
 
@@ -168,9 +249,10 @@ connection whose status is `Connected` can be bound in the form.
 ## Execution boundaries
 
 Every mutation reaches the engine's outbox and has one HTTP attempt, with no automatic resend after a timeout,
-throttle or uncertain outcome. A read-only app refuses mutations before token lookup. The transport applies no global lab policy. Before a live lab run, the agent must establish the complete reach
-of any automation, including later notifications, under the current lab-contact rule. Offline synthetic services exercise mutations; no Planner,
-SharePoint, email, webhook or Teams notification was executed in the tenant during implementation.
+throttle or uncertain outcome. A read-only app refuses mutations before token lookup. The transport applies no global
+lab policy. Before a live lab run, the agent must establish the complete reach of any automation, including later
+notifications, under the current lab-contact rule. The card editor's templates were created, edited and deleted live
+by a lab account in a team whose only member it was; no workflow was run.
 
 ## AI workflows
 
@@ -194,9 +276,9 @@ blocker. Opening the Teams modal would install an automation bot, which was bloc
 ## Validation limits
 
 The service’s actual read catalogs, environments and connections were verified with the normal native auth client.
-Creation, connector consent, edits, start/stop, deletion and running were exercised against synthetic local services
-only. The implementation did not establish a schedule’s later recipients for a permitted lab run, so no real automation
-was created or run. That is a validation limit rather than a normal-client admission rule.
+The card editor's creation, edits, Rename, Turn off, deletion, the row menu and the connector lists were exercised live
+on the lab tenant (2026-11-04); running a workflow and Manage's page were not. The full editor's creation and running
+were exercised against synthetic local services only.
 The advanced definition view preserves unsupported action types; a visual action graph and separate Copilot Actions
 session are not implemented.
 

@@ -9,6 +9,7 @@ use teams_store::{Team, TeamChannel};
 use teams_ui::workflow_dialog::WorkflowDialog;
 
 #[path = "support/workflow_fixtures.rs"]
+#[expect(dead_code, reason = "fixtures shared with the other workflow view tests")]
 mod fixtures;
 use fixtures::{answer, webhook_answer};
 fn window() -> (common::Rig, Entity<WorkflowDialog>, &'static mut VisualTestContext) {

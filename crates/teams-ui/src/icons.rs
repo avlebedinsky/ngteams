@@ -62,6 +62,8 @@ impl Glyph {
     pub const UNDERLINE: Self = Self(include_bytes!("../assets/icons/underline.svg"));
     pub const STRIKETHROUGH: Self = Self(include_bytes!("../assets/icons/strikethrough.svg"));
     pub const LIST: Self = Self(include_bytes!("../assets/icons/list.svg"));
+    pub const FOLDER: Self = Self(include_bytes!("../assets/icons/folder.svg"));
+    pub const OPEN_OUT: Self = Self(include_bytes!("../assets/icons/square-arrow-out-up-right.svg"));
     pub const LIST_ORDERED: Self = Self(include_bytes!("../assets/icons/list-ordered.svg"));
     pub const HIGHLIGHTER: Self = Self(include_bytes!("../assets/icons/highlighter.svg"));
     pub const FONT_COLOUR: Self = Self(include_bytes!("../assets/icons/baseline.svg"));

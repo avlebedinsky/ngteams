@@ -100,7 +100,7 @@ impl WorkflowDialog {
                                 .text_color(rgb(palette.muted_foreground))
                                 .child(card.description.clone()),
                         )
-                        .child(Self::template_apps(card, palette)),
+                        .child(Self::template_apps(card)),
                 )
                 .on_click(
                     cx.listener(move |this, _, window, cx| this.configure_template(selected.clone(), window, cx)),
@@ -112,21 +112,13 @@ impl WorkflowDialog {
         .into_any_element()
     }
 
-    fn template_apps(card: &Card, palette: Palette) -> gpui::Div {
-        div()
-            .flex()
-            .w_full()
-            .justify_end()
-            .gap_2()
-            .children(card.connectors().into_iter().map(|app| {
-                div()
-                    .px_2()
-                    .py_1()
-                    .rounded_md()
-                    .text_xs()
-                    .bg(rgb(palette.selected))
-                    .child(app)
-            }))
+    /// The template's apps as Teams' cards show them: each connector's icon, at the card's bottom right.
+    fn template_apps(card: &Card) -> gpui::Div {
+        div().flex().w_full().justify_end().gap_2().children(
+            card.connectors()
+                .into_iter()
+                .map(|api| gpui::img(art::connector(api)).size(px(16.0))),
+        )
     }
 
     fn search_row(&self, cx: &Context<Self>) -> AnyElement {
@@ -265,11 +257,28 @@ impl WorkflowDialog {
     }
 
     fn workflow_list(&self, palette: Palette, cx: &Context<Self>) -> AnyElement {
+        // The channel's dialog lists only the workflows that are on, as Teams' own reads do; Home lists every one.
+        let on_only = !matches!(self.screen, Screen::Home);
+        let cards: Vec<_> = self
+            .workflows
+            .iter()
+            .filter(|card| !on_only || card.enabled())
+            .filter(|card| match self.tab {
+                Tab::Channel => {
+                    card.in_channel(self.team.group_id.as_deref().unwrap_or(&self.team.id), &self.channel.id)
+                }
+                Tab::Workflows => !card.is_ai(),
+                Tab::Ai => card.is_ai(),
+            })
+            .collect();
         let mut list = div()
             .flex()
             .flex_col()
             .gap_4()
-            .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Your workflows"))
+            .child(Self::workflows_heading(
+                on_only && !cards.is_empty() && !self.loading.workflows,
+                cx,
+            ))
             .child(self.tabs(cx));
         if self.loading.workflows {
             return list
@@ -293,40 +302,15 @@ impl WorkflowDialog {
                 "Cloud AI workflows are shown here. Copilot actions could not be loaded from the AI workflow service.",
             ));
         }
-        let cards: Vec<_> = self
-            .workflows
-            .iter()
-            .filter(|card| match self.tab {
-                Tab::Channel => {
-                    card.in_channel(self.team.group_id.as_deref().unwrap_or(&self.team.id), &self.channel.id)
-                }
-                Tab::Workflows => !card.is_ai(),
-                Tab::Ai => card.is_ai(),
-            })
-            .collect();
         if cards.is_empty() {
-            list = list.child(state(
-                "Create an automation for your channel",
-                "Pick a template above or build your own workflow.",
-                palette,
-            ));
+            list = list.child(Self::no_workflows(palette, cx));
         }
-        for card in cards {
-            let chosen = card.clone();
-            let id = format!("workflow-open-{}", card.id);
-            list = list.child(selected_by(
-                id.clone(),
-                Button::new(id)
-                    .ghost()
-                    .w_full()
-                    .label(format!(
-                        "{} · {}",
-                        card.name,
-                        if card.enabled() { "Active" } else { "Inactive" }
-                    ))
-                    .on_click(cx.listener(move |this, _, _, cx| this.open_flow(chosen.clone(), cx))),
-            ));
-        }
+        list = list.child(
+            div()
+                .flex()
+                .flex_col()
+                .children(cards.into_iter().map(|card| self.workflow_row(card, palette, cx))),
+        );
         if self.continuation.is_some() {
             list = list.child(selected_by(
                 "workflow-load-more",
@@ -339,6 +323,46 @@ impl WorkflowDialog {
             ));
         }
         list.into_any_element()
+    }
+
+    /// "Your workflows", with Teams' "See all" while the channel lists any.
+    fn workflows_heading(see_all: bool, cx: &Context<Self>) -> AnyElement {
+        div()
+            .flex()
+            .items_center()
+            .justify_between()
+            .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child("Your workflows"))
+            .when(see_all, |heading| {
+                heading.child(selected_by(
+                    "workflow-see-all",
+                    Button::new("workflow-see-all")
+                        .ghost()
+                        .label("See all")
+                        .on_click(cx.listener(|this, _, _, cx| this.show_home(cx))),
+                ))
+            })
+            .into_any_element()
+    }
+
+    /// Teams' empty list: what to do, and "View templates" back up to them.
+    fn no_workflows(palette: Palette, cx: &Context<Self>) -> AnyElement {
+        state(
+            "Create an automation for your channel",
+            "Pick one of our ready-to-go templates or build your own from scratch",
+            palette,
+        )
+        .child(selected_by(
+            "workflow-view-templates",
+            Button::new("workflow-view-templates")
+                .outline()
+                .label("View templates")
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.screen = Screen::Browse;
+                    this.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+                    cx.notify();
+                })),
+        ))
+        .into_any_element()
     }
 
     fn ai_access_state(&self, palette: Palette) -> Option<gpui::Div> {
@@ -362,7 +386,7 @@ impl WorkflowDialog {
         match &self.screen {
             Screen::Home => self.home(palette, cx),
             Screen::Build => Self::builder_choices(cx),
-            Screen::Browse => div()
+            Screen::Browse | Screen::DeleteListed(_) => div()
                 .flex()
                 .flex_col()
                 .gap_8()
@@ -529,7 +553,10 @@ impl WorkflowDialog {
         }
         // Teams' Workflows Home leaves the channel's dialog for the Workflows app's own Home, hence its
         // external-link icon; here that Home is the dialog's own page of every template and workflow.
-        let home = matches!(self.screen, Screen::Browse | Screen::Detail(_) | Screen::Delete(_));
+        let home = matches!(
+            self.screen,
+            Screen::Browse | Screen::Detail(_) | Screen::Delete(_) | Screen::DeleteListed(_)
+        );
         footer
             .when(matches!(self.screen, Screen::Detail(_) | Screen::Delete(_)), |footer| {
                 footer.child(selected_by(
@@ -553,12 +580,8 @@ impl WorkflowDialog {
                     .when(home, |button| button.icon(Glyph::EXTERNAL_LINK.icon()))
                     .label(if home { "Workflows Home" } else { "Back to workflows" })
                     .disabled(self.busy)
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.screen = if matches!(this.screen, Screen::Browse | Screen::Detail(_) | Screen::Delete(_)) {
-                            Screen::Home
-                        } else {
-                            Screen::Browse
-                        };
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.screen = if home { Screen::Home } else { Screen::Browse };
                         this.tab = Tab::Workflows;
                         this.error = None;
                         cx.notify();
@@ -572,7 +595,7 @@ impl WorkflowDialog {
     /// Another screen starts at its top; the delete question keeps the Overview where it was.
     fn top_of_a_new_screen(&mut self) {
         let kind = match &self.screen {
-            Screen::Browse => 0,
+            Screen::Browse | Screen::DeleteListed(_) => 0,
             Screen::Home => 1,
             Screen::Build => 2,
             Screen::Edit { .. } => 3,
@@ -661,7 +684,8 @@ impl Render for WorkflowDialog {
             .child(self.footer(palette, cx))
             .when_some(
                 match &self.screen {
-                    Screen::Delete(card) => Some(self.delete_prompt(card, palette, cx)),
+                    Screen::Delete(card) => Some(self.delete_prompt(card, false, palette, cx)),
+                    Screen::DeleteListed(card) => Some(self.delete_prompt(card, true, palette, cx)),
                     _ => None,
                 },
                 gpui::ParentElement::child,

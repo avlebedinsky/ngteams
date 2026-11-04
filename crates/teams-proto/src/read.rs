@@ -553,6 +553,8 @@ pub struct TeamAbout {
     pub hidden: bool,
     /// Its picture's version (`pictureETag`).
     pub picture_etag: Option<String>,
+    /// Its SharePoint site (`teamSiteInformation.sharepointSiteUrl`), where its files and lists live.
+    pub site: Option<String>,
 }
 
 impl fmt::Debug for Team {
@@ -761,6 +763,11 @@ fn about(entry: &Value) -> TeamAbout {
             .get("pictureETag")
             .and_then(Value::as_str)
             .filter(|etag| !etag.is_empty())
+            .map(str::to_owned),
+        site: entry
+            .pointer("/teamSiteInformation/sharepointSiteUrl")
+            .and_then(Value::as_str)
+            .filter(|site| site.starts_with("https://"))
             .map(str::to_owned),
     }
 }

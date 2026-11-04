@@ -120,7 +120,7 @@ fn the_calendar_migration_starts_with_no_events() -> Result<(), StoreError> {
     drop(store);
     // the store as schema 15 left it
     let raw = rusqlite::Connection::open(store_path(&dir)).expect("open directly");
-    raw.execute_batch("ALTER TABLE team_channels DROP COLUMN description; ALTER TABLE team_channels DROP COLUMN archived; ALTER TABLE team_channels DROP COLUMN owner; ALTER TABLE team_channels DROP COLUMN can_edit; ALTER TABLE team_channels DROP COLUMN can_delete; ALTER TABLE team_channels DROP COLUMN channel_group; DROP TABLE calendar_events; PRAGMA user_version = 15;")
+    raw.execute_batch("ALTER TABLE teams DROP COLUMN site; ALTER TABLE team_channels DROP COLUMN description; ALTER TABLE team_channels DROP COLUMN archived; ALTER TABLE team_channels DROP COLUMN owner; ALTER TABLE team_channels DROP COLUMN can_edit; ALTER TABLE team_channels DROP COLUMN can_delete; ALTER TABLE team_channels DROP COLUMN channel_group; DROP TABLE calendar_events; PRAGMA user_version = 15;")
         .expect("back to schema 15");
     drop(raw);
 

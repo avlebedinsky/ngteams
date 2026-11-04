@@ -62,6 +62,7 @@ impl Card {
                 })
     }
 
+    /// The connectors (`shared_teams`) a template's card shows the icons of, in the catalog's order.
     pub fn connectors(&self) -> Vec<&'static str> {
         let mut apps = Vec::new();
         for icon in self
@@ -77,12 +78,13 @@ impl Card {
             else {
                 continue;
             };
+            // The icon's folder names its connector.
             let label = match icon.rsplit('/').nth(1) {
-                Some("teams") => "Teams",
-                Some("planner") => "Planner",
-                Some("sharepointonline") => "SharePoint",
-                Some("office365") => "Outlook",
-                Some("office365users") => "Microsoft 365",
+                Some("teams") => "shared_teams",
+                Some("planner") => "shared_planner",
+                Some("sharepointonline") => "shared_sharepointonline",
+                Some("office365") => "shared_office365",
+                Some("office365users") => "shared_office365users",
                 _ => continue,
             };
             if !apps.contains(&label) {

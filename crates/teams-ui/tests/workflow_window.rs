@@ -76,6 +76,11 @@ fn parent() -> SandboxResult {
             "webhook-owners",
             "webhook-owner-search",
             "home",
+            "weekly",
+            "weekly-bottom",
+            "planner",
+            "email",
+            "list",
         ] {
             shot(&sandbox, theme, label, page)?;
         }
@@ -143,6 +148,12 @@ fn child(mode: &str) -> SandboxResult {
             fixtures::input_answer
         } else if page == "webhook-off" {
             fixtures::stopped_webhook_answer
+        } else if page == "list" {
+            fixtures::saved_webhook_answer
+        } else if page.starts_with("weekly") || page == "email" {
+            fixtures::cards_answer
+        } else if page == "planner" {
+            fixtures::planner_answer
         } else if webhook {
             fixtures::webhook_answer
         } else {
@@ -239,6 +250,11 @@ fn open_page(dialog: &Entity<WorkflowDialog>, page: &str, window: &mut Window, c
         | "webhook-owners"
         | "webhook-owner-search" => dialog.update(cx, |view, cx| view.open_workflow("synthetic-flow", cx)),
         "home" => dialog.update(cx, WorkflowDialog::show_home),
+        "weekly" | "weekly-bottom" => {
+            dialog.update(cx, |view, cx| view.select_template("synthetic-template", window, cx));
+        }
+        "planner" => dialog.update(cx, |view, cx| view.select_template("synthetic-planner", window, cx)),
+        "email" => dialog.update(cx, |view, cx| view.select_template("synthetic-email", window, cx)),
         _ => {}
     }
 }
@@ -251,7 +267,7 @@ fn then_page(dialog: &Entity<WorkflowDialog>, page: &str, window: &mut Window, c
         "webhook-rename" => dialog.update(cx, |view, cx| view.rename_open_workflow(window, cx)),
         "webhook-team-open" => dialog.update(cx, |view, cx| view.open_team_choices(window, cx)),
         "webhook-team-changed" => dialog.update(cx, |view, cx| view.choose_team("synthetic-other-group", window, cx)),
-        "webhook-owners" => dialog.update(cx, WorkflowDialog::scroll_to_end),
+        "webhook-owners" | "weekly-bottom" | "list" => dialog.update(cx, WorkflowDialog::scroll_to_end),
         "webhook-owner-search" => dialog.update(cx, |view, cx| {
             view.scroll_to_end(cx);
             view.search_co_owner("Synth", window, cx);

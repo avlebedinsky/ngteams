@@ -656,3 +656,103 @@ async fn overview_changes_send_what_teams_sends() {
                 .is_some_and(|query| query.contains("cascadeoperation=true"))
     }));
 }
+
+/// The card editor's reads: a connector operation's definition and a list's or a folder tree's choices go to the
+/// environment's Power Platform host with the account's own Flow token, and the triggers read to the Flow API. None
+/// of them is a write.
+#[tokio::test]
+async fn card_editor_reads_go_to_the_environment_host_with_the_flow_token() {
+    use wiremock::matchers::body_json;
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/powerautomate/apis/shared_planner/apiOperations/OnCompleteTask_V3",
+        ))
+        .and(query_param("api-version", "1"))
+        .and(query_param(
+            "$expand",
+            "properties/inputsDefinition,properties/responsesDefinition,properties/connector",
+        ))
+        .and(header("authorization", "Bearer synthetic-flow-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"properties":{"inputsDefinition":{}}})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let choices = json!({"parameters":{"groupId":"synthetic-group"},"dynamicInvocationDefinition":{"operationId":"ListGroupPlans"}});
+    for (route, body) in [("listEnum", choices.clone()), ("listTree", json!({"parameters":{}}))] {
+        Mock::given(method("POST"))
+            .and(path(format!(
+                "/powerautomate/apis/shared_planner/connections/shared-planner-synthetic/{route}"
+            )))
+            .and(query_param("api-version", "1"))
+            .and(header("authorization", "Bearer synthetic-flow-token"))
+            .and(body_json(body))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": []})))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    Mock::given(method("GET"))
+        .and(path(format!("{FLOW_PATH}/triggers")))
+        .and(query_param("api-version", "2016-11-01"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": []})))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let environment = || "Default-synthetic".to_owned();
+    let requests = [
+        WorkflowRequest::Operation {
+            environment: environment(),
+            api: "shared_planner".into(),
+            operation: "OnCompleteTask_V3".into(),
+        },
+        WorkflowRequest::Choices {
+            environment: environment(),
+            api: "shared_planner".into(),
+            connection: "shared-planner-synthetic".into(),
+            tree: false,
+            body: choices,
+        },
+        WorkflowRequest::Choices {
+            environment: environment(),
+            api: "shared_planner".into(),
+            connection: "shared-planner-synthetic".into(),
+            tree: true,
+            body: json!({"parameters":{}}),
+        },
+        WorkflowRequest::Triggers {
+            environment: environment(),
+            flow: "synthetic-flow".into(),
+        },
+    ];
+    let transport = transport(&server, Arc::default());
+    for request in &requests {
+        assert!(!request.writes(), "{request:?} is a read");
+        assert!(transport.workflow(request).await.is_ok(), "{request:?}");
+    }
+}
+
+#[test]
+fn a_connector_read_names_only_plain_path_segments() {
+    let read = |api: &str, operation: &str| WorkflowRequest::Operation {
+        environment: "Default-synthetic".into(),
+        api: api.into(),
+        operation: operation.into(),
+    };
+    assert!(read("shared_planner", "ListGroupPlans").platform_endpoint().is_some());
+    for (api, operation) in [
+        ("shared_planner", "../flows"),
+        ("shared/x", "op"),
+        ("", "op"),
+        ("api", "a?b"),
+    ] {
+        assert!(read(api, operation).platform_endpoint().is_none(), "{api} {operation}");
+    }
+    assert!(
+        WorkflowRequest::List {
+            environment: "Default-synthetic".into()
+        }
+        .platform_endpoint()
+        .is_none()
+    );
+}

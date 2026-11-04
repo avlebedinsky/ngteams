@@ -272,7 +272,7 @@ fn the_favourites_migration_keeps_the_teams_but_has_them_read_again() -> Result<
          ALTER TABLE teams DROP COLUMN can_add_private_channel; ALTER TABLE teams DROP COLUMN tenant; ALTER TABLE teams DROP COLUMN description; ALTER TABLE teams DROP COLUMN public;
          ALTER TABLE teams DROP COLUMN people; ALTER TABLE teams DROP COLUMN guest; ALTER TABLE teams DROP COLUMN dynamic_membership;
          ALTER TABLE teams DROP COLUMN tenant_wide; ALTER TABLE teams DROP COLUMN channel_only; ALTER TABLE teams DROP COLUMN hidden;
-         ALTER TABLE teams DROP COLUMN picture_etag; ALTER TABLE team_channels DROP COLUMN shown; ALTER TABLE team_channels DROP COLUMN kind; ALTER TABLE team_channels DROP COLUMN description; ALTER TABLE team_channels DROP COLUMN archived; ALTER TABLE team_channels DROP COLUMN owner; ALTER TABLE team_channels DROP COLUMN can_edit; ALTER TABLE team_channels DROP COLUMN can_delete; ALTER TABLE team_channels DROP COLUMN channel_group;
+         ALTER TABLE teams DROP COLUMN picture_etag; ALTER TABLE teams DROP COLUMN site; ALTER TABLE team_channels DROP COLUMN shown; ALTER TABLE team_channels DROP COLUMN kind; ALTER TABLE team_channels DROP COLUMN description; ALTER TABLE team_channels DROP COLUMN archived; ALTER TABLE team_channels DROP COLUMN owner; ALTER TABLE team_channels DROP COLUMN can_edit; ALTER TABLE team_channels DROP COLUMN can_delete; ALTER TABLE team_channels DROP COLUMN channel_group;
          DROP TABLE app_read_horizon; DROP TABLE calendar_events;
          PRAGMA user_version = 10;",
     )
@@ -486,6 +486,7 @@ fn every_channel_kind_and_what_a_team_shows_survive_the_store() -> Result<(), St
                 channel_only: false,
                 hidden: true,
                 picture_etag: Some("made-up-etag".to_owned()),
+                site: Some("https://made-up.example.invalid/sites/made-up".to_owned()),
             },
         )
     };

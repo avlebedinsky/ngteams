@@ -349,6 +349,7 @@ async fn read<C: Credentials>(client: &Client<HttpTransport<C>>) -> Result<Teams
                 channel_only: team.about.channel_only,
                 hidden: team.about.hidden,
                 picture_etag: team.about.picture_etag,
+                site: team.about.site,
             },
             channels: team
                 .channels
