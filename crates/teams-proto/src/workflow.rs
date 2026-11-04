@@ -104,6 +104,26 @@ pub enum WorkflowRequest {
         flow: String,
         enabled: bool,
     },
+    /// Renames a workflow, as Teams' Overview does: only its display name changes.
+    Rename {
+        environment: String,
+        flow: String,
+        name: String,
+    },
+    /// The workflow's owners, each a principal (`properties.principal.id`, a directory object id) and its kind.
+    Owners { environment: String, flow: String },
+    /// Makes someone in the directory a co-owner, as Teams' "Add a co-owner" does.
+    AddOwner {
+        environment: String,
+        flow: String,
+        owner: Principal,
+    },
+    /// Takes a co-owner off the workflow, as Teams' Remove beside a co-owner does.
+    RemoveOwner {
+        environment: String,
+        flow: String,
+        owner: String,
+    },
     /// Delete after an explicit confirmation.
     Delete { environment: String, flow: String },
     /// Run a trigger through the authenticated management endpoint, without callback URLs or implicit resends.
@@ -133,6 +153,7 @@ impl WorkflowRequest {
                 | Self::HistoryPage { .. }
                 | Self::RunActions { .. }
                 | Self::WebhookAddress { .. }
+                | Self::Owners { .. }
         )
     }
 
@@ -143,13 +164,14 @@ impl WorkflowRequest {
             Self::CopilotEligibility
             | Self::Create { .. }
             | Self::SetEnabled { .. }
+            | Self::AddOwner { .. }
             | Self::Run { .. }
             | Self::RunWithInputs { .. }
             | Self::ConnectionConsent { .. }
             | Self::WebhookAddress { .. } => "POST",
             Self::CreateConnection { .. } | Self::AuthorizeConnection { .. } => "PUT",
-            Self::Update { .. } => "PATCH",
-            Self::Delete { .. } => "DELETE",
+            Self::Update { .. } | Self::Rename { .. } => "PATCH",
+            Self::Delete { .. } | Self::RemoveOwner { .. } => "DELETE",
             _ => "GET",
         }
     }
@@ -200,7 +222,19 @@ impl WorkflowRequest {
             path.extend([environment.to_owned(), "flows".to_owned()]);
         }
         match self {
-            Self::Get { flow, .. } | Self::Update { flow, .. } | Self::Delete { flow, .. } => path.push(flow.clone()),
+            Self::Get { flow, .. }
+            | Self::Update { flow, .. }
+            | Self::Rename { flow, .. }
+            | Self::Delete { flow, .. } => path.push(flow.clone()),
+            Self::Owners { flow, .. } => path.extend([flow.clone(), "owners".to_owned()]),
+            Self::RemoveOwner { flow, owner, .. } => path.extend([flow.clone(), "owners".to_owned(), owner.clone()]),
+            // Teams asks the service to carry the change on to the workflow's connections too.
+            Self::AddOwner { flow, .. } => {
+                path.extend([flow.clone(), "modifyowners".to_owned()]);
+                return Endpoint::new(path)
+                    .with_query("cascadeoperation", "true")
+                    .with_query("api-version", API_VERSION);
+            }
             Self::History { flow, .. } => path.extend([flow.clone(), "runs".to_owned()]),
             Self::RunActions { flow, run, .. } => {
                 path.extend([flow.clone(), "runs".to_owned(), run.clone(), "actions".to_owned()]);
@@ -330,13 +364,17 @@ impl WorkflowRequest {
             | Self::HistoryPage { environment, .. }
             | Self::Create { environment, .. }
             | Self::Update { environment, .. }
+            | Self::Rename { environment, .. }
+            | Self::Owners { environment, .. }
+            | Self::AddOwner { environment, .. }
+            | Self::RemoveOwner { environment, .. }
             | Self::SetEnabled { environment, .. }
             | Self::Delete { environment, .. }
             | Self::Run { environment, .. } => Some(environment),
         }
     }
 
-    /// Only create and update carry properties. Runtime callbacks never receive the account's bearer token.
+    /// Create, update and rename carry properties; adding an owner carries the principal. Runtime callbacks never receive the account's bearer token.
     #[must_use]
     pub fn body(&self) -> Option<Value> {
         match self {
@@ -346,7 +384,18 @@ impl WorkflowRequest {
             Self::Create { properties, .. } | Self::Update { properties, .. } => {
                 Some(serde_json::json!({"properties": properties}))
             }
-            Self::Run { .. } => Some(serde_json::json!({})),
+            // Teams sends Turn off and Turn on with an empty object too.
+            Self::Run { .. } | Self::SetEnabled { .. } => Some(serde_json::json!({})),
+            Self::Rename { name, .. } => Some(serde_json::json!({"properties": {"displayName": name}})),
+            Self::AddOwner { owner, .. } => Some(serde_json::json!({"put": [{
+                "name": owner.id,
+                "properties": {"principal": {
+                    "id": owner.id,
+                    "displayName": owner.name,
+                    "email": owner.email,
+                    "type": "User",
+                }},
+            }]})),
             Self::CreateConnection { environment, .. } | Self::AuthorizeConnection { environment, .. } => {
                 Some(serde_json::json!({"properties": {
                     "connectionParameters": {},
@@ -360,6 +409,14 @@ impl WorkflowRequest {
             _ => None,
         }
     }
+}
+
+/// A person in the directory made a co-owner: their object id, and the name and address Teams sends with it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Principal {
+    pub id: String,
+    pub name: String,
+    pub email: Option<String>,
 }
 
 /// The distinction matters: denied access is not an empty workflow list.

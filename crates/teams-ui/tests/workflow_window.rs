@@ -69,6 +69,13 @@ fn parent() -> SandboxResult {
             "webhook-collapsed",
             "webhook-overview",
             "webhook-delete",
+            "webhook-team-open",
+            "webhook-team-changed",
+            "webhook-rename",
+            "webhook-off",
+            "webhook-owners",
+            "webhook-owner-search",
+            "home",
         ] {
             shot(&sandbox, theme, label, page)?;
         }
@@ -134,13 +141,16 @@ fn child(mode: &str) -> SandboxResult {
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(if run_inputs {
             fixtures::input_answer
+        } else if page == "webhook-off" {
+            fixtures::stopped_webhook_answer
         } else if webhook {
             fixtures::webhook_answer
         } else {
             fixtures::answer
         });
+        people(&core);
         let team = synthetic_team();
-        *core.teams.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(vec![team.clone()]);
+        *core.teams.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(vec![team.clone(), other_team()]);
         let core: Arc<dyn Core> = core;
         let channel = team.channels[0].clone();
         let options = WindowOptions {
@@ -154,7 +164,7 @@ fn child(mode: &str) -> SandboxResult {
             after(window, 15, move |window, cx| {
                 open_page(&dialog, &page, window, cx);
                 after(window, 15, move |window, cx| {
-                    then_page(&dialog, &page, cx);
+                    then_page(&dialog, &page, window, cx);
                     after(window, 15, |_, _| say("ready"));
                 });
             });
@@ -165,6 +175,34 @@ fn child(mode: &str) -> SandboxResult {
         }
     });
     Ok(())
+}
+/// The owners' names and who the co-owner search finds, all synthetic.
+fn people(core: &common::FakeCore) {
+    let mut names = core.names.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    names.insert(format!("8:orgid:{}", fixtures::OWNER), "Synthetic Maker".to_owned());
+    names.insert(format!("8:orgid:{}", fixtures::CO_OWNER), "Synthetic Helper".to_owned());
+    *core.addable.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = vec![teams_proto::TeamPerson {
+        mri: "8:orgid:00000000-0000-4000-8000-00000000000c".into(),
+        name: "Synthetic Newcomer".into(),
+        email: Some("newcomer@example.test".into()),
+        job_title: None,
+    }];
+}
+fn other_team() -> Team {
+    Team {
+        id: "synthetic-other-team".into(),
+        group_id: Some("synthetic-other-group".into()),
+        name: "Other synthetic team".into(),
+        channels: vec![TeamChannel {
+            id: "synthetic-planning".into(),
+            name: "Planning".into(),
+            general: false,
+            kind: teams_store::ChannelKind::Standard,
+            shown: true,
+            about: teams_store::ChannelAbout::default(),
+        }],
+        ..Team::default()
+    }
 }
 fn synthetic_team() -> Team {
     let channel = |id: &str, name: &str| TeamChannel {
@@ -191,18 +229,33 @@ fn open_page(dialog: &Entity<WorkflowDialog>, page: &str, window: &mut Window, c
     match page {
         "configure" => dialog.update(cx, |view, cx| view.select_template("synthetic-template", window, cx)),
         "run-inputs" => dialog.update(cx, |view, cx| view.prepare_workflow_run("synthetic-flow", window, cx)),
-        "webhook" | "webhook-collapsed" => {
+        "webhook" | "webhook-collapsed" | "webhook-team-open" | "webhook-team-changed" => {
             dialog.update(cx, |view, cx| view.select_template("synthetic-webhook", window, cx));
         }
-        "webhook-overview" | "webhook-delete" => dialog.update(cx, |view, cx| view.open_workflow("synthetic-flow", cx)),
+        "webhook-overview"
+        | "webhook-delete"
+        | "webhook-rename"
+        | "webhook-off"
+        | "webhook-owners"
+        | "webhook-owner-search" => dialog.update(cx, |view, cx| view.open_workflow("synthetic-flow", cx)),
+        "home" => dialog.update(cx, WorkflowDialog::show_home),
         _ => {}
     }
 }
-/// The step a page takes once its screen is open: folding the card, or asking to delete.
-fn then_page(dialog: &Entity<WorkflowDialog>, page: &str, cx: &mut App) {
+/// The step a page takes once its screen is open: folding the card, asking to delete, renaming, opening or changing
+/// the team, scrolling to the Owners and searching for a co-owner.
+fn then_page(dialog: &Entity<WorkflowDialog>, page: &str, window: &mut Window, cx: &mut App) {
     match page {
         "webhook-collapsed" => dialog.update(cx, WorkflowDialog::collapse_all),
         "webhook-delete" => dialog.update(cx, WorkflowDialog::ask_delete),
+        "webhook-rename" => dialog.update(cx, |view, cx| view.rename_open_workflow(window, cx)),
+        "webhook-team-open" => dialog.update(cx, |view, cx| view.open_team_choices(window, cx)),
+        "webhook-team-changed" => dialog.update(cx, |view, cx| view.choose_team("synthetic-other-group", window, cx)),
+        "webhook-owners" => dialog.update(cx, WorkflowDialog::scroll_to_end),
+        "webhook-owner-search" => dialog.update(cx, |view, cx| {
+            view.scroll_to_end(cx);
+            view.search_co_owner("Synth", window, cx);
+        }),
         _ => {}
     }
 }

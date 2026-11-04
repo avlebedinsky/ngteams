@@ -12,7 +12,20 @@ impl WorkflowDialog {
                     .flex()
                     .items_center()
                     .gap_3()
-                    .child(Glyph::WORKFLOW.icon().size(px(26.0)))
+                    .child(
+                        // Teams' header: the Workflows app's icon on a small white tile.
+                        div()
+                            .debug_selector(|| "workflow-app-icon".to_owned())
+                            .size(px(32.0))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded_md()
+                            .border_1()
+                            .border_color(rgb(0x00e0_e0e0))
+                            .bg(rgb(0x00ff_ffff))
+                            .child(gpui::img(art::workflows()).size(px(22.0))),
+                    )
                     .child(div().text_xl().font_weight(gpui::FontWeight::BOLD).child("Workflows")),
             )
             .child(
@@ -306,7 +319,11 @@ impl WorkflowDialog {
                 Button::new(id)
                     .ghost()
                     .w_full()
-                    .label(format!("{} · {}", card.name, if card.enabled() { "On" } else { "Off" }))
+                    .label(format!(
+                        "{} · {}",
+                        card.name,
+                        if card.enabled() { "Active" } else { "Inactive" }
+                    ))
                     .on_click(cx.listener(move |this, _, _, cx| this.open_flow(chosen.clone(), cx))),
             ));
         }
@@ -427,6 +444,7 @@ impl WorkflowDialog {
                     .child("Workflows Home"),
             )
             .child(self.environment_picker(cx))
+            .child(self.catalog(palette, cx))
             .child(self.workflow_list(palette, cx))
             .into_any_element()
     }
@@ -509,6 +527,9 @@ impl WorkflowDialog {
         if matches!(self.screen, Screen::Edit { .. }) && self.simple.is_some() {
             return footer.child(self.simple_footer(cx)).into_any_element();
         }
+        // Teams' Workflows Home leaves the channel's dialog for the Workflows app's own Home, hence its
+        // external-link icon; here that Home is the dialog's own page of every template and workflow.
+        let home = matches!(self.screen, Screen::Browse | Screen::Detail(_) | Screen::Delete(_));
         footer
             .when(matches!(self.screen, Screen::Detail(_) | Screen::Delete(_)), |footer| {
                 footer.child(selected_by(
@@ -529,13 +550,8 @@ impl WorkflowDialog {
                 "workflow-home",
                 Button::new("workflow-home")
                     .primary()
-                    .label(
-                        if matches!(self.screen, Screen::Browse | Screen::Detail(_) | Screen::Delete(_)) {
-                            "Workflows Home"
-                        } else {
-                            "Back to workflows"
-                        },
-                    )
+                    .when(home, |button| button.icon(Glyph::EXTERNAL_LINK.icon()))
+                    .label(if home { "Workflows Home" } else { "Back to workflows" })
                     .disabled(self.busy)
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.screen = if matches!(this.screen, Screen::Browse | Screen::Detail(_) | Screen::Delete(_)) {
@@ -552,9 +568,49 @@ impl WorkflowDialog {
     }
 }
 
+impl WorkflowDialog {
+    /// Another screen starts at its top; the delete question keeps the Overview where it was.
+    fn top_of_a_new_screen(&mut self) {
+        let kind = match &self.screen {
+            Screen::Browse => 0,
+            Screen::Home => 1,
+            Screen::Build => 2,
+            Screen::Edit { .. } => 3,
+            Screen::Detail(_) | Screen::Delete(_) => 4,
+            Screen::RunDetails { .. } => 5,
+            Screen::RunInputs { .. } => 6,
+        };
+        if self.scrolled_for != Some(kind) {
+            self.scroll.set_offset(gpui::point(px(0.0), px(0.0)));
+            self.scrolled_for = Some(kind);
+        }
+    }
+
+    /// What went wrong, the check after an unknown outcome and notices, in sight above the footer however far down a
+    /// long Overview is scrolled.
+    fn status(&self, cx: &Context<Self>) -> gpui::Div {
+        div()
+            .px_6()
+            .when_some(self.error.as_ref(), |view, error| {
+                view.child(
+                    div()
+                        .debug_selector(|| "workflow-error".to_owned())
+                        .p_3()
+                        .text_color(rgb(theme::DANGER))
+                        .child(error.clone()),
+                )
+            })
+            .when(self.uncertain.is_some(), |view| view.child(Self::reconcile_button(cx)))
+            .when_some(self.notice.as_ref(), |view, notice| {
+                view.child(div().p_3().child(notice.clone()))
+            })
+    }
+}
+
 impl Render for WorkflowDialog {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = theme::current(cx);
+        self.top_of_a_new_screen();
         div()
             .id("workflow-dialog")
             .debug_selector(|| "workflow-dialog".to_owned())
@@ -596,23 +652,12 @@ impl Render for WorkflowDialog {
                     .flex_1()
                     .min_h_0()
                     .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
                     .px_6()
                     .pb_6()
-                    .child(self.body(palette, cx))
-                    .when_some(self.error.as_ref(), |view, error| {
-                        view.child(
-                            div()
-                                .debug_selector(|| "workflow-error".to_owned())
-                                .p_3()
-                                .text_color(rgb(theme::DANGER))
-                                .child(error.clone()),
-                        )
-                    })
-                    .when(self.uncertain.is_some(), |view| view.child(Self::reconcile_button(cx)))
-                    .when_some(self.notice.as_ref(), |view, notice| {
-                        view.child(div().p_3().child(notice.clone()))
-                    }),
+                    .child(self.body(palette, cx)),
             )
+            .child(self.status(cx))
             .child(self.footer(palette, cx))
             .when_some(
                 match &self.screen {

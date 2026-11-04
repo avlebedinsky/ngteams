@@ -50,9 +50,9 @@ impl WorkflowDialog {
             Ok(value) => match Card::from_flow(&value) {
                 Some(card)
                     if kind.is_none()
-                        && let Some(simple) = simple::Simple::open(&card, false) =>
+                        && let Some(simple) = simple::Simple::open(&card, false, window, cx) =>
                 {
-                    self.open_simple(simple, cx);
+                    self.open_simple(simple, window, cx);
                 }
                 Some(mut card) => {
                     if matches!(kind, Some(BuildKind::Manual)) {
@@ -74,8 +74,8 @@ impl WorkflowDialog {
         if self.core.read_only() || self.busy {
             return;
         }
-        if existing && let Some(simple) = simple::Simple::open(&card, true) {
-            self.open_simple(simple, cx);
+        if existing && let Some(simple) = simple::Simple::open(&card, true, window, cx) {
+            self.open_simple(simple, window, cx);
             return;
         }
         self.simple = None;
@@ -229,6 +229,7 @@ impl WorkflowDialog {
     }
 
     fn mutation_read(&mut self, answer: WorkflowResponse, outcome: Outcome, cx: &mut Context<Self>) {
+        self.changing = None;
         match answer {
             // Teams shows the saved workflow's Overview after Save.
             Ok(value)
@@ -238,6 +239,29 @@ impl WorkflowDialog {
                 self.simple = None;
                 self.show_overview(card, cx);
                 self.load_workflows(cx);
+            }
+            // Rename and Turn off/on keep the Overview, showing the workflow as it now is.
+            Ok(value) if matches!(outcome, Outcome::Stay) => {
+                self.rename = None;
+                let open = match &self.screen {
+                    Screen::Detail(card) => Some(card.id.clone()),
+                    _ => None,
+                };
+                match Card::from_flow(&value).filter(|card| Some(&card.id) == open.as_ref()) {
+                    Some(card) => self.screen = Screen::Detail(card),
+                    None => {
+                        if let Some(flow) = open {
+                            self.reread_flow(flow, cx);
+                        }
+                    }
+                }
+                self.load_workflows(cx);
+            }
+            Ok(_) if matches!(outcome, Outcome::Owners) => {
+                if let Screen::Detail(card) = &self.screen {
+                    let card = card.clone();
+                    self.load_owners(&card, cx);
+                }
             }
             Ok(_) => {
                 self.simple = None;
@@ -261,8 +285,40 @@ impl WorkflowDialog {
         self.history.clear();
         self.history_next = None;
         self.webhook_link = None;
+        self.rename = None;
+        self.owners = None;
+        self.owner_found = None;
         self.screen = Screen::Detail(card.clone());
+        self.load_owners(&card, cx);
         self.history(card, cx);
+    }
+
+    /// Reads the open workflow again, as Teams does after Turn off or on, and shows it as it now is.
+    fn reread_flow(&mut self, flow: String, cx: &mut Context<Self>) {
+        let Some(environment) = self.environment.clone() else {
+            return;
+        };
+        let generation = self.generation;
+        let reply = self.core.workflow_request(WorkflowRequest::Get {
+            environment,
+            flow: flow.clone(),
+        });
+        self.tasks
+            .push(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
+                let answer = reply.await.unwrap_or(Err(WorkflowFailure::Connection));
+                let _ = this.update(cx, |this, cx| {
+                    if this.generation != generation {
+                        return;
+                    }
+                    let open = matches!(&this.screen, Screen::Detail(card) if card.id == flow);
+                    match answer.map(|value| Card::from_flow(&value)) {
+                        Ok(Some(card)) if open => this.screen = Screen::Detail(card),
+                        Ok(_) => {}
+                        Err(error) => this.error = Some(model::problem(&error).to_owned()),
+                    }
+                    cx.notify();
+                });
+            }));
     }
 
     pub(super) fn history(&mut self, card: Card, cx: &mut Context<Self>) {
@@ -420,14 +476,61 @@ impl WorkflowDialog {
         let Some(environment) = self.environment.clone() else {
             return;
         };
-        self.mutate(
+        self.changing = Some(Change::Toggle);
+        self.mutate_then(
             WorkflowRequest::SetEnabled {
                 environment,
                 flow: card.id.clone(),
                 enabled: !card.enabled(),
             },
-            "Workflow updated",
+            Outcome::Stay,
             cx,
         );
+        if !self.busy {
+            self.changing = None;
+        }
+    }
+
+    /// Turns the Overview's name into a field holding it, selected, as Teams' Rename does.
+    pub(super) fn start_rename(&mut self, card: &Card, window: &mut Window, cx: &mut Context<Self>) {
+        if self.core.read_only() || self.busy {
+            return;
+        }
+        let name = card.name.clone();
+        let field = cx.new(|cx| InputState::new(window, cx).default_value(name));
+        field.update(cx, |state, cx| {
+            state.focus(window, cx);
+            state.select_all(window, cx);
+        });
+        let subscription = cx.subscribe_in(&field, window, |this, _, event: &InputEvent, _, cx| match event {
+            InputEvent::PressEnter { .. } => this.save_rename(cx),
+            InputEvent::Change => cx.notify(),
+            _ => {}
+        });
+        self.rename = Some((field, subscription));
+        cx.notify();
+    }
+
+    /// Saves the new name: only the display name changes (Teams' `PATCH` of `properties.displayName`).
+    pub(super) fn save_rename(&mut self, cx: &mut Context<Self>) {
+        let (Some((field, _)), Some(environment), Screen::Detail(card)) =
+            (&self.rename, &self.environment, &self.screen)
+        else {
+            return;
+        };
+        let name = field.read(cx).value().trim().to_owned();
+        if name.is_empty() {
+            return;
+        }
+        let request = WorkflowRequest::Rename {
+            environment: environment.clone(),
+            flow: card.id.clone(),
+            name,
+        };
+        self.changing = Some(Change::Rename);
+        self.mutate_then(request, Outcome::Stay, cx);
+        if !self.busy {
+            self.changing = None;
+        }
     }
 }

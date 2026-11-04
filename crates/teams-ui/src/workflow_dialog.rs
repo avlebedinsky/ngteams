@@ -1,10 +1,13 @@
 //! Teams' channel Workflows modal, backed by the active account's first-party Power Automate service.
 //! The catalog, environments and workflows have separate loading/errors: an inaccessible service is never an empty list.
+mod art;
+mod combo;
 mod connections;
 mod editor;
 mod form;
 mod model;
 mod overview;
+mod owners;
 mod run_inputs;
 mod runs;
 mod service;
@@ -15,9 +18,9 @@ use std::sync::Arc;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext as _, AsyncApp, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _,
-    IntoElement, KeyDownEvent, ParentElement as _, Render, StatefulInteractiveElement as _, Styled as _, Subscription,
-    Task, WeakEntity, Window, div, px, rgb,
+    AnyElement, App, AppContext as _, AsyncApp, Context, Entity, EventEmitter, FocusHandle, InteractiveElement as _,
+    IntoElement, KeyDownEvent, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _,
+    Subscription, Task, WeakEntity, Window, div, px, rgb,
 };
 use gpui_component::button::{Button, ButtonVariants as _};
 use gpui_component::input::{Input, InputEvent, InputState, Textarea, TextareaState};
@@ -35,11 +38,22 @@ use form::{ConfigField, EditorMode};
 use model::Card;
 use run_inputs::RunField;
 
-/// Where a change's success leads: back to the list with a notice, or to the changed workflow's Overview.
+/// Where a change's success leads: back to the list with a notice, to the changed workflow's Overview, staying on the
+/// Overview with the workflow read again (Rename, Turn off/on, as Teams does), or its owners read again.
 #[derive(Clone, Copy)]
 enum Outcome {
     Notice(&'static str),
     Overview,
+    Stay,
+    Owners,
+}
+
+/// The Overview change under way, whose button shows it working.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Change {
+    Toggle,
+    Rename,
+    Owners,
 }
 
 #[derive(Clone, Copy)]
@@ -126,6 +140,15 @@ pub struct WorkflowDialog {
     teams: Vec<Team>,
     simple: Option<simple::Simple>,
     webhook_link: Option<String>,
+    rename: Option<(Entity<InputState>, Subscription)>,
+    changing: Option<Change>,
+    owners: Option<Result<Vec<owners::Owner>, WorkflowFailure>>,
+    owner_search: Entity<InputState>,
+    owner_query: u64,
+    owner_found: Option<owners::Found>,
+    scroll: gpui::ScrollHandle,
+    /// The kind of screen the page was last shown for: a new kind starts at its top.
+    scrolled_for: Option<u8>,
 }
 
 impl EventEmitter<TeamDialogEvent> for WorkflowDialog {}
@@ -142,11 +165,22 @@ impl WorkflowDialog {
         let search = cx.new(|cx| InputState::new(window, cx).placeholder("Find templates"));
         let name = cx.new(|cx| InputState::new(window, cx).placeholder("Workflow name"));
         let definition = cx.new(|cx| TextareaState::new(window, cx).placeholder("Workflow definition"));
-        let subscriptions = vec![cx.subscribe(&search, |_, _, event, cx| {
-            if matches!(event, InputEvent::Change) {
-                cx.notify();
-            }
-        })];
+        let owner_search = cx.new(|cx| InputState::new(window, cx).placeholder("Enter names, email or user groups"));
+        let subscriptions = vec![
+            cx.subscribe(&search, |_, _, event, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            }),
+            cx.subscribe(&owner_search, |this, _, event, cx| match event {
+                InputEvent::Change => this.search_owners(cx),
+                InputEvent::Blur => {
+                    this.owner_found = None;
+                    cx.notify();
+                }
+                _ => {}
+            }),
+        ];
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         let mut this = Self {
@@ -190,8 +224,16 @@ impl WorkflowDialog {
             teams: Vec::new(),
             simple: None,
             webhook_link: None,
+            rename: None,
+            changing: None,
+            owners: None,
+            owner_search,
+            owner_query: 0,
+            owner_found: None,
+            scroll: gpui::ScrollHandle::new(),
+            scrolled_for: None,
         };
-        this.load_teams(cx);
+        this.load_teams(window, cx);
         this.refresh(cx);
         this
     }
@@ -211,17 +253,24 @@ impl WorkflowDialog {
     }
 
     /// The account's teams and channels, from the store, for the card editor's choices.
-    fn load_teams(&mut self, cx: &mut Context<Self>) {
+    fn load_teams(&mut self, window: &Window, cx: &mut Context<Self>) {
         let reply = self.core.teams();
+        let window = window.window_handle();
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
             if let Ok(Some(teams)) = reply.await {
-                let _ = this.update(cx, |this, cx| {
-                    this.teams = teams;
-                    cx.notify();
+                let _ = window.update(cx, |_, window, cx| {
+                    this.update(cx, |this, cx| this.teams_read(teams, window, cx))
                 });
             }
         })
         .detach();
+    }
+
+    fn teams_read(&mut self, teams: Vec<Team>, window: &mut Window, cx: &mut Context<Self>) {
+        self.teams = teams;
+        // A card editor opened before the teams were read shows its choices' names now.
+        self.show_choices(window, cx);
+        cx.notify();
     }
 
     /// Opens the Overview of a workflow already loaded for this account and environment.
@@ -247,6 +296,48 @@ impl WorkflowDialog {
             self.screen = Screen::Delete(card.clone());
             cx.notify();
         }
+    }
+
+    /// Starts renaming the workflow whose Overview is open, as its Rename does.
+    pub fn rename_open_workflow(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Screen::Detail(card) = &self.screen {
+            let card = card.clone();
+            self.start_rename(&card, window, cx);
+        }
+    }
+
+    /// Opens the card editor's team list, as a click in its field does.
+    pub fn open_team_choices(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(simple) = &self.simple {
+            simple.team_combo.input.update(cx, |state, cx| state.focus(window, cx));
+        }
+    }
+
+    /// Chooses a team in the card editor by its group id, as picking it in the team list does.
+    pub fn choose_team(&mut self, group: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.choose(combo::Which::Team, group.to_owned(), window, cx);
+    }
+
+    /// Searches the directory for a co-owner, as typing `text` in "Add a co-owner" does.
+    pub fn search_co_owner(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.owner_search.update(cx, |state, cx| {
+            state.set_value(text.to_owned(), window, cx);
+            state.focus(window, cx);
+        });
+        self.search_owners(cx);
+    }
+
+    /// Scrolls the dialog's page to its end.
+    pub fn scroll_to_end(&mut self, cx: &mut Context<Self>) {
+        self.scroll.scroll_to_bottom();
+        cx.notify();
+    }
+
+    /// Opens Workflows Home, as the footer's button does.
+    pub fn show_home(&mut self, cx: &mut Context<Self>) {
+        self.screen = Screen::Home;
+        self.tab = Tab::Workflows;
+        cx.notify();
     }
 
     /// Refreshes both service sources. A generation rejects late results from an older refresh.

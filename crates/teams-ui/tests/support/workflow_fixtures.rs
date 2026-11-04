@@ -78,12 +78,34 @@ pub fn webhook_answer(request: &WorkflowRequest) -> WorkflowResponse {
             "state": "Started",
             "definition": properties["definition"]
         }}),
-        WorkflowRequest::Get { .. } => json!({"name":"synthetic-flow","properties":{
-            "displayName": "Send webhook alerts to General",
-            "description": webhook_template()["properties"]["description"],
-            "state": "Started",
-            "definition": webhook_template()["properties"]["definition"]
-        }}),
+        WorkflowRequest::Get { .. } => webhook_flow("Started"),
+        WorkflowRequest::Owners { .. } => json!({"value": [
+            {"name": OWNER, "properties": {"permissionType": "Principal", "principal": {"id": OWNER, "type": "User"}}},
+            {"name": CO_OWNER, "properties": {"permissionType": "Principal", "principal": {"id": CO_OWNER, "type": "User"}}}
+        ]}),
         other => return answer(other),
     })
+}
+
+/// The synthetic workflow's maker and its co-owner, by directory object id.
+pub const OWNER: &str = "00000000-0000-4000-8000-00000000000a";
+pub const CO_OWNER: &str = "00000000-0000-4000-8000-00000000000b";
+
+/// The saved webhook workflow in `state`, made by [`OWNER`].
+pub fn webhook_flow(state: &str) -> Value {
+    json!({"name":"synthetic-flow","properties":{
+        "displayName": "Send webhook alerts to General",
+        "description": webhook_template()["properties"]["description"],
+        "state": state,
+        "creator": {"objectId": OWNER},
+        "definition": webhook_template()["properties"]["definition"]
+    }})
+}
+
+/// The webhook workflow turned off.
+pub fn stopped_webhook_answer(request: &WorkflowRequest) -> WorkflowResponse {
+    match request {
+        WorkflowRequest::Get { .. } => Ok(webhook_flow("Stopped")),
+        other => webhook_answer(other),
+    }
 }

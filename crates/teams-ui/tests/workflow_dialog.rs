@@ -798,3 +798,216 @@ fn an_existing_teams_connection_is_reused_and_back_leaves_without_writing() {
             .any(WorkflowRequest::writes)
     );
 }
+
+fn requests(rig: &common::Rig) -> Vec<WorkflowRequest> {
+    rig.core.workflow_requests.lock().unwrap().clone()
+}
+
+/// The webhook window over the synthetic team and a second team with its own channel.
+fn two_teams_window(rig: &common::Rig) -> &'static mut VisualTestContext {
+    let _ = webhook_window(rig);
+    let channel = TeamChannel {
+        id: "synthetic-other-channel".into(),
+        name: "Planning".into(),
+        general: false,
+        kind: teams_store::ChannelKind::Standard,
+        shown: true,
+        about: teams_store::ChannelAbout::default(),
+    };
+    let mut teams = rig.core.teams.lock().unwrap().clone().unwrap();
+    teams.push(Team {
+        id: "synthetic-other-team".into(),
+        group_id: Some("synthetic-other-group".into()),
+        name: "Other team".into(),
+        channels: vec![channel],
+        ..Team::default()
+    });
+    *rig.core.teams.lock().unwrap() = Some(teams.clone());
+    let app: &'static mut TestAppContext = Box::leak(Box::new(rig.cx.clone()));
+    let core: Arc<dyn teams_ui::Core> = rig.core.clone();
+    let team = teams[0].clone();
+    let channel = team.channels[0].clone();
+    let (_view, cx) = app.add_window_view(|window, cx| WorkflowDialog::new(core, team, channel, window, cx));
+    cx.run_until_parked();
+    cx
+}
+
+#[test]
+fn the_team_and_channel_fields_filter_as_typed_and_a_new_team_clears_the_channel() {
+    let rig = common::Rig::start();
+    let cx = two_teams_window(&rig);
+    click(cx, "workflow-template-synthetic-webhook");
+    click(cx, "workflow-simple-team");
+    for team in ["synthetic-group", "synthetic-other-group"] {
+        assert!(
+            bounds(cx, &format!("workflow-simple-team-{team}")).is_some(),
+            "opening the field lists every team"
+        );
+    }
+    cx.simulate_keystrokes("ctrl-a backspace");
+    cx.simulate_input("oth");
+    assert!(bounds(cx, "workflow-simple-team-synthetic-other-group").is_some());
+    assert!(
+        bounds(cx, "workflow-simple-team-synthetic-group").is_none(),
+        "typing filters the teams to the names holding the text"
+    );
+    click(cx, "workflow-simple-team-synthetic-other-group");
+    click(cx, "workflow-save");
+    assert!(
+        !requests(&rig)
+            .iter()
+            .any(|request| matches!(request, WorkflowRequest::Create { .. })),
+        "a new team clears the channel, and Save waits for one"
+    );
+    click(cx, "workflow-simple-channel");
+    assert!(
+        bounds(cx, "workflow-simple-channel-synthetic-alerts").is_none(),
+        "the channels are the new team's"
+    );
+    click(cx, "workflow-simple-channel-synthetic-other-channel");
+    click(cx, "workflow-save");
+    let created = requests(&rig)
+        .into_iter()
+        .find_map(|request| match request {
+            WorkflowRequest::Create { properties, .. } => Some(properties),
+            _ => None,
+        })
+        .expect("Save creates the workflow once both are chosen");
+    assert_eq!(created["displayName"], "Send webhook alerts to Planning");
+    assert_eq!(
+        created["definition"]["actions"]["Post"]["inputs"]["parameters"]["body/recipient/groupId"],
+        "synthetic-other-group"
+    );
+}
+
+fn overview_window(rig: &common::Rig) -> &'static mut VisualTestContext {
+    let cx = webhook_window(rig);
+    for (id, name) in [
+        (fixtures::OWNER, "Synthetic Maker"),
+        (fixtures::CO_OWNER, "Synthetic Helper"),
+    ] {
+        rig.core
+            .names
+            .lock()
+            .unwrap()
+            .insert(format!("8:orgid:{id}"), name.to_owned());
+    }
+    // The synthetic webhook names no channel, so it is listed under Workflows, not this channel.
+    click(cx, "workflow-tab-all");
+    click(cx, "workflow-open-synthetic-flow");
+    cx
+}
+
+#[test]
+fn rename_and_turn_off_stay_on_the_overview_and_send_what_teams_sends() {
+    let rig = common::Rig::start();
+    let cx = overview_window(&rig);
+    click(cx, "workflow-rename");
+    assert!(bounds(cx, "workflow-rename-field").is_some());
+    cx.simulate_keystrokes("ctrl-a backspace");
+    click(cx, "workflow-rename-save");
+    assert!(
+        !requests(&rig)
+            .iter()
+            .any(|request| matches!(request, WorkflowRequest::Rename { .. })),
+        "an empty name is never saved"
+    );
+    click(cx, "workflow-rename-field");
+    cx.simulate_input("Synthetic alerts");
+    click(cx, "workflow-rename-save");
+    assert!(requests(&rig).iter().any(|request| matches!(request,
+        WorkflowRequest::Rename { flow, name, .. } if flow == "synthetic-flow" && name == "Synthetic alerts")));
+    assert!(
+        bounds(cx, "workflow-rename").is_some(),
+        "the Overview stays, its name shown again"
+    );
+    *rig.core.workflow_handler.lock().unwrap() = Some(fixtures::stopped_webhook_answer);
+    click(cx, "workflow-toggle");
+    assert!(requests(&rig).iter().any(|request| matches!(request,
+        WorkflowRequest::SetEnabled { flow, enabled: false, .. } if flow == "synthetic-flow")));
+    assert!(
+        bounds(cx, "workflow-copy-webhook").is_some() && bounds(cx, "workflow-template-synthetic-webhook").is_none(),
+        "Turn off stays on the Overview"
+    );
+    assert!(bounds(cx, "workflow-state").is_some());
+    assert!(
+        requests(&rig)
+            .iter()
+            .filter(|request| matches!(request, WorkflowRequest::Get { .. }))
+            .count()
+            >= 2,
+        "Turn off reads the workflow again, as Teams does"
+    );
+}
+
+#[test]
+fn owners_are_read_and_a_co_owner_is_added_and_removed_as_teams_does() {
+    let rig = common::Rig::start();
+    *rig.core.addable.lock().unwrap() = vec![teams_proto::TeamPerson {
+        mri: "8:orgid:00000000-0000-4000-8000-00000000000c".into(),
+        name: "Synthetic Newcomer".into(),
+        email: Some("newcomer@example.test".into()),
+        job_title: None,
+    }];
+    let cx = overview_window(&rig);
+    assert!(bounds(cx, &format!("workflow-owner-{}", fixtures::OWNER)).is_some());
+    assert!(
+        bounds(cx, &format!("workflow-owner-remove-{}", fixtures::OWNER)).is_none(),
+        "the maker is the Owner, not removable"
+    );
+    to_the_end(cx);
+    click(cx, "workflow-owner-search");
+    cx.simulate_input("new");
+    click(cx, "workflow-owner-pick-8:orgid:00000000-0000-4000-8000-00000000000c");
+    assert!(requests(&rig).iter().any(|request| matches!(request,
+        WorkflowRequest::AddOwner { flow, owner, .. }
+            if flow == "synthetic-flow" && owner.id == "00000000-0000-4000-8000-00000000000c"
+                && owner.email.as_deref() == Some("newcomer@example.test"))));
+    click(cx, &format!("workflow-owner-remove-{}", fixtures::CO_OWNER));
+    assert!(requests(&rig).iter().any(|request| matches!(request,
+        WorkflowRequest::RemoveOwner { owner, .. } if owner == fixtures::CO_OWNER)));
+    assert!(
+        requests(&rig)
+            .iter()
+            .filter(|request| matches!(request, WorkflowRequest::Owners { .. }))
+            .count()
+            >= 3,
+        "each change reads the owners again"
+    );
+}
+
+#[test]
+fn a_co_owner_search_finding_nobody_says_so_and_adds_nobody() {
+    let rig = common::Rig::start();
+    let cx = overview_window(&rig);
+    to_the_end(cx);
+    click(cx, "workflow-owner-search");
+    cx.simulate_input("zzq");
+    assert!(bounds(cx, "workflow-owner-found").is_some());
+    assert!(
+        !requests(&rig)
+            .iter()
+            .any(|request| matches!(request, WorkflowRequest::AddOwner { .. }))
+    );
+}
+
+#[test]
+fn workflows_home_lists_the_templates_and_every_workflow() {
+    let rig = common::Rig::start();
+    let cx = webhook_window(&rig);
+    click(cx, "workflow-home");
+    assert!(bounds(cx, "workflow-environment").is_some());
+    assert!(bounds(cx, "workflow-template-synthetic-webhook").is_some());
+    assert!(bounds(cx, "workflow-tab-all").is_some());
+}
+
+/// Scrolls the dialog's page to its end, where the Owners are.
+fn to_the_end(cx: &mut VisualTestContext) {
+    let body = bounds(cx, "workflow-scroll").unwrap();
+    cx.simulate_event(gpui::ScrollWheelEvent {
+        position: gpui::point(body.left() + gpui::px(8.0), body.center().y),
+        delta: gpui::ScrollDelta::Pixels(gpui::point(gpui::px(0.0), gpui::px(-3000.0))),
+        touch_phase: gpui::TouchPhase::Moved,
+        ..gpui::ScrollWheelEvent::default()
+    });
+}

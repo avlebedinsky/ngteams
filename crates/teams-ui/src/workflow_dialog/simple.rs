@@ -4,7 +4,8 @@
 //! the user only picks the team and the channel. A template whose markup names anything else keeps the full editor.
 use super::*;
 use gpui_component::Sizable as _;
-use gpui_component::menu::{DropdownMenu as _, PopupMenuItem};
+
+use super::combo::{Combo, Which};
 
 /// The connector this editor signs in by itself: the only one the Teams reference was seen doing it for.
 const TEAMS_API: &str = "shared_teams";
@@ -19,10 +20,12 @@ pub(super) struct Simple {
     definition: Value,
     references: Value,
     flow: Option<Card>,
-    team: Option<String>,
-    channel: Option<String>,
+    pub(super) team: Option<String>,
+    pub(super) channel: Option<String>,
     expanded: bool,
     link: Link,
+    pub(super) team_combo: Combo,
+    pub(super) channel_combo: Combo,
 }
 
 /// The Microsoft Teams connection the saved workflow posts with.
@@ -37,7 +40,12 @@ impl Simple {
     /// The editor for a gallery template (its `metadata.userIntentMarkup`) or for a workflow saved from one (the
     /// markup its `Do_Not_Remove_FlowIL` action keeps), when every choice is a team or a channel and every app is
     /// Microsoft Teams.
-    pub(super) fn open(card: &Card, existing: bool) -> Option<Self> {
+    pub(super) fn open(
+        card: &Card,
+        existing: bool,
+        window: &mut Window,
+        cx: &mut Context<WorkflowDialog>,
+    ) -> Option<Self> {
         let properties = &card.properties;
         let markup = if existing {
             let kept = properties
@@ -103,6 +111,8 @@ impl Simple {
             channel: value("Teams.Channel"),
             expanded: true,
             link: Link::Checking,
+            team_combo: Combo::new(Which::Team, "Type or select a team", String::new(), window, cx),
+            channel_combo: Combo::new(Which::Channel, "Type or select a channel", String::new(), window, cx),
         })
     }
 }
@@ -125,7 +135,7 @@ fn api_name(reference: &Value) -> Option<&str> {
 impl WorkflowDialog {
     /// Opens the card editor, its choices defaulting to this channel for a new workflow, and makes sure of the
     /// Microsoft Teams connection.
-    pub(super) fn open_simple(&mut self, mut simple: Simple, cx: &mut Context<Self>) {
+    pub(super) fn open_simple(&mut self, mut simple: Simple, window: &mut Window, cx: &mut Context<Self>) {
         if simple.flow.is_none() {
             simple.team = Some(self.team.group_id.clone().unwrap_or_else(|| self.team.id.clone()));
             simple.channel = Some(self.channel.id.clone());
@@ -133,6 +143,7 @@ impl WorkflowDialog {
         self.error = None;
         self.notice = None;
         self.simple = Some(simple);
+        self.show_choices(window, cx);
         self.screen = Screen::Edit {
             flow: self.simple.as_ref().and_then(|simple| simple.flow.clone()),
         };
@@ -259,7 +270,7 @@ impl WorkflowDialog {
         Ok(properties)
     }
 
-    fn team_by_group(&self, group: &str) -> Option<&Team> {
+    pub(super) fn team_by_group(&self, group: &str) -> Option<&Team> {
         self.teams
             .iter()
             .find(|team| team.group_id.as_deref().unwrap_or(&team.id) == group)
@@ -346,7 +357,7 @@ impl WorkflowDialog {
                             .rounded_full()
                             .text_sm()
                             .bg(rgb(palette.hover))
-                            .child(gpui::img(crate::app_icon::image()).size(px(16.0)))
+                            .child(gpui::img(art::teams()).size(px(14.0)))
                             .child(app.clone())
                     })))
                     .child(selected_by(
@@ -376,7 +387,7 @@ impl WorkflowDialog {
             )
             .when(simple.expanded, |card| {
                 card.child(self.team_field(simple, palette, cx))
-                    .child(self.channel_field(simple, palette, cx))
+                    .child(self.channel_field(palette, cx))
             })
             .when_some(
                 match &simple.link {
@@ -419,63 +430,33 @@ impl WorkflowDialog {
     }
 
     fn team_field(&self, simple: &Simple, palette: Palette, cx: &Context<Self>) -> AnyElement {
-        let teams: Vec<(String, String)> = self
-            .teams
-            .iter()
-            .filter(|team| !team.archived)
-            .map(|team| {
-                (
-                    team.group_id.clone().unwrap_or_else(|| team.id.clone()),
-                    team.name.clone(),
-                )
-            })
-            .collect();
         let label = if has_label(simple, "Teams.Group") {
             "Team the channel is in"
         } else {
             "Team"
         };
-        field(
-            (label, "workflow-simple-team"),
-            teams,
-            simple.team.clone(),
-            |this, group| {
-                if let Some(simple) = &mut this.simple
-                    && simple.team.as_deref() != Some(&group)
-                {
-                    simple.team = Some(group);
-                    simple.channel = None;
-                }
-            },
-            palette,
-            cx,
-        )
+        self.combo_field(Which::Team, label, palette, cx)
     }
 
-    fn channel_field(&self, simple: &Simple, palette: Palette, cx: &Context<Self>) -> AnyElement {
-        let channels: Vec<(String, String)> = simple
-            .team
-            .as_deref()
-            .and_then(|group| self.team_by_group(group))
-            .map(|team| {
-                team.channels
-                    .iter()
-                    .map(|channel| (channel.id.clone(), channel.name.clone()))
-                    .collect()
-            })
-            .unwrap_or_default();
-        field(
-            ("Channel", "workflow-simple-channel"),
-            channels,
-            simple.channel.clone(),
-            |this, channel| {
-                if let Some(simple) = &mut this.simple {
-                    simple.channel = Some(channel);
-                }
-            },
-            palette,
-            cx,
-        )
+    fn channel_field(&self, palette: Palette, cx: &Context<Self>) -> AnyElement {
+        self.combo_field(Which::Channel, "Channel", palette, cx)
+    }
+
+    /// Shows the chosen team's and channel's names in their fields (once the teams are read, too).
+    pub(super) fn show_choices(&mut self, window: &mut Window, cx: &mut App) {
+        let names = (self.chosen_team_name(), self.channel_name());
+        if let Some(simple) = &mut self.simple {
+            simple.team_combo.show(names.0.unwrap_or_default());
+            simple.channel_combo.show(names.1.unwrap_or_default());
+            simple.team_combo.sync(window, cx);
+            simple.channel_combo.sync(window, cx);
+        }
+    }
+
+    fn chosen_team_name(&self) -> Option<String> {
+        let simple = self.simple.as_ref()?;
+        self.team_by_group(simple.team.as_deref()?)
+            .map(|team| team.name.clone())
     }
 
     /// The card editor's footer: Save and Back, as in Teams.
@@ -484,6 +465,11 @@ impl WorkflowDialog {
             .simple
             .as_ref()
             .is_some_and(|simple| matches!(simple.link, Link::Checking));
+        // Teams keeps Save off until both a team and a channel are chosen.
+        let unchosen = self
+            .simple
+            .as_ref()
+            .is_none_or(|simple| simple.team.is_none() || simple.channel.is_none());
         div()
             .flex()
             .gap_2()
@@ -494,7 +480,7 @@ impl WorkflowDialog {
                     .min_w(px(96.0))
                     .label(if self.busy { "Saving…" } else { "Save" })
                     .loading(self.busy)
-                    .disabled(self.busy || connecting || self.uncertain.is_some())
+                    .disabled(self.busy || connecting || unchosen || self.uncertain.is_some())
                     .on_click(cx.listener(|this, _, _, cx| this.simple_save(cx))),
             ))
             .child(selected_by(
@@ -508,87 +494,6 @@ impl WorkflowDialog {
             ))
             .into_any_element()
     }
-}
-
-/// A required choice drawn as Teams' dropdown: its label with a red star, then the whole-width field.
-fn field(
-    (label, id): (&'static str, &'static str),
-    options: Vec<(String, String)>,
-    chosen: Option<String>,
-    choose: fn(&mut WorkflowDialog, String),
-    palette: Palette,
-    cx: &Context<WorkflowDialog>,
-) -> AnyElement {
-    let shown = options
-        .iter()
-        .find(|(value, _)| Some(value) == chosen.as_ref())
-        .map(|(_, name)| name.clone())
-        .unwrap_or_default();
-    let weak = cx.entity().downgrade();
-    let face = div()
-        .w_full()
-        .flex()
-        .items_center()
-        .justify_between()
-        .gap_2()
-        .child(
-            div()
-                .flex_1()
-                .min_w_0()
-                .overflow_hidden()
-                .text_ellipsis()
-                .whitespace_nowrap()
-                .child(shown),
-        )
-        .child(
-            Glyph::CHEVRON_DOWN
-                .icon()
-                .size(px(16.0))
-                .text_color(rgb(palette.muted_foreground)),
-        );
-    div()
-        .flex()
-        .flex_col()
-        .gap_1p5()
-        .child(
-            div()
-                .flex()
-                .gap_1()
-                .child(label)
-                .child(div().text_color(rgb(theme::DANGER)).child("*")),
-        )
-        .child(selected_by(
-            id,
-            Button::new(id)
-                .outline()
-                .w_full()
-                .h(px(36.0))
-                .child(face)
-                .dropdown_menu(move |menu, _, _| {
-                    let menu = menu.min_w(px(480.0)).scrollable(true).max_h(px(280.0));
-                    options.iter().fold(menu, |menu, (value, name)| {
-                        let (value, name, weak) = (value.clone(), name.clone(), weak.clone());
-                        let selector = format!("{id}-{value}");
-                        menu.item(
-                            PopupMenuItem::element(move |_, _| {
-                                let selector = selector.clone();
-                                div()
-                                    .debug_selector(move || selector.clone())
-                                    .text_color(rgb(palette.foreground))
-                                    .child(name.clone())
-                            })
-                            .checked(chosen.as_ref() == Some(&value))
-                            .on_click(move |_, _, cx| {
-                                let _ = weak.update(cx, |this, cx| {
-                                    choose(this, value.clone());
-                                    cx.notify();
-                                });
-                            }),
-                        )
-                    })
-                }),
-        ))
-        .into_any_element()
 }
 
 fn has_label(simple: &Simple, kind: &str) -> bool {
@@ -617,12 +522,13 @@ fn summary(simple: &Simple, channel: Option<&str>) -> String {
         .pointer("/automation/template/summary")
         .and_then(Value::as_str)
         .is_some_and(|summary| summary.contains("TeamsChannel"));
-    match channel {
-        Some(channel) if names_channel && simple.name.contains(" a channel") => {
-            simple.name.replacen(" a channel", &format!(" {channel}"), 1)
-        }
-        _ => simple.name.clone(),
+    if !names_channel || !simple.name.contains(" a channel") {
+        return simple.name.clone();
     }
+    // With no channel chosen Teams' title says just "channel": "Send webhook alerts to channel".
+    simple
+        .name
+        .replacen(" a channel", &format!(" {}", channel.unwrap_or("channel")), 1)
 }
 
 /// Keeps the template's markup in the definition, with the chosen values and their names, as Teams does: its

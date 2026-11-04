@@ -561,3 +561,98 @@ fn environment_hosts_follow_the_power_platform_form() {
     assert_eq!(platform_host("evil.test/x"), None);
     assert_eq!(platform_host("a"), None);
 }
+
+const FLOW_PATH: &str = "/providers/Microsoft.ProcessSimple/environments/Default-synthetic/flows/synthetic-flow";
+
+fn overview_requests() -> Vec<WorkflowRequest> {
+    let environment = || "Default-synthetic".to_owned();
+    let flow_id = || "synthetic-flow".to_owned();
+    vec![
+        WorkflowRequest::Rename {
+            environment: environment(),
+            flow: flow_id(),
+            name: "Synthetic name".into(),
+        },
+        WorkflowRequest::SetEnabled {
+            environment: environment(),
+            flow: flow_id(),
+            enabled: false,
+        },
+        WorkflowRequest::Owners {
+            environment: environment(),
+            flow: flow_id(),
+        },
+        WorkflowRequest::AddOwner {
+            environment: environment(),
+            flow: flow_id(),
+            owner: teams_proto::Principal {
+                id: "synthetic-owner".into(),
+                name: "Synthetic Person".into(),
+                email: Some("person@example.test".into()),
+            },
+        },
+        WorkflowRequest::RemoveOwner {
+            environment: environment(),
+            flow: flow_id(),
+            owner: "synthetic-owner".into(),
+        },
+    ]
+}
+
+/// Rename, Turn off/on and the owners' operations send what Teams' Overview sends, each once.
+#[tokio::test]
+async fn overview_changes_send_what_teams_sends() {
+    use wiremock::matchers::body_json;
+    let server = MockServer::start().await;
+    let principal =
+        json!({"id":"synthetic-owner","displayName":"Synthetic Person","email":"person@example.test","type":"User"});
+    let routes = [
+        (
+            "PATCH",
+            FLOW_PATH.to_owned(),
+            Some(json!({"properties":{"displayName":"Synthetic name"}})),
+        ),
+        ("POST", format!("{FLOW_PATH}/stop"), Some(json!({}))),
+        ("GET", format!("{FLOW_PATH}/owners"), None),
+        (
+            "POST",
+            format!("{FLOW_PATH}/modifyowners"),
+            Some(json!({"put":[{"name":"synthetic-owner","properties":{"principal":principal}}]})),
+        ),
+        ("DELETE", format!("{FLOW_PATH}/owners/synthetic-owner"), None),
+    ];
+    for (verb, route, body) in routes {
+        let mock = Mock::given(method(verb))
+            .and(path(route))
+            .and(query_param("api-version", "2016-11-01"))
+            .and(header("authorization", "Bearer synthetic-flow-token"));
+        let mock = match body {
+            Some(body) => mock.and(body_json(body)),
+            None => mock,
+        };
+        mock.respond_with(ResponseTemplate::new(200).set_body_json(json!({"value": []})))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+    let requests = overview_requests();
+    let transport = transport(&server, Arc::default());
+    for request in &requests {
+        assert!(transport.workflow(request).await.is_ok(), "{request:?}");
+    }
+    assert!(!requests[2].writes());
+    assert!(
+        requests
+            .iter()
+            .enumerate()
+            .all(|(at, request)| at == 2 || request.writes())
+    );
+    let sent = server.received_requests().await.unwrap();
+    assert!(sent.iter().any(|request| {
+        request.url.path().ends_with("/modifyowners")
+            && request
+                .url
+                .query()
+                .is_some_and(|query| query.contains("cascadeoperation=true"))
+    }));
+}

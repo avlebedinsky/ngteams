@@ -15,7 +15,7 @@ impl WorkflowDialog {
             .child(
                 boxed(palette)
                     .gap_4()
-                    .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(card.name.clone()))
+                    .child(self.name_row(card, cx))
                     .child(
                         div()
                             .text_color(rgb(palette.muted_foreground))
@@ -32,7 +32,55 @@ impl WorkflowDialog {
                     .child(how_to_run(palette))
             })
             .child(self.inline_history(card, palette, cx))
+            .child(self.owners_section(palette, cx))
             .into_any_element()
+    }
+
+    /// The workflow's name with Rename beside it; while renaming, a field holding the name and Save, which an empty
+    /// name keeps off.
+    fn name_row(&self, card: &Card, cx: &Context<Self>) -> AnyElement {
+        let row = div().flex().items_start().justify_between().gap_4();
+        if let Some((field, _)) = &self.rename {
+            let saving = self.busy && self.changing == Some(Change::Rename);
+            let empty = field.read(cx).value().trim().is_empty();
+            return row
+                .child(
+                    div()
+                        .flex_1()
+                        .child(selected_by("workflow-rename-field", Input::new(field).disabled(saving))),
+                )
+                .child(selected_by(
+                    "workflow-rename-save",
+                    Button::new("workflow-rename-save")
+                        .primary()
+                        .min_w(px(96.0))
+                        .label(if saving { "Saving" } else { "Save" })
+                        .loading(saving)
+                        .disabled(saving || empty || self.uncertain.is_some())
+                        .on_click(cx.listener(|this, _, _, cx| this.save_rename(cx))),
+                ))
+                .into_any_element();
+        }
+        let renaming = card.clone();
+        row.child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .child(card.name.clone()),
+        )
+        .when(!self.core.read_only(), |row| {
+            row.child(selected_by(
+                "workflow-rename",
+                Button::new("workflow-rename")
+                    .outline()
+                    .min_w(px(96.0))
+                    .label("Rename")
+                    .disabled(self.busy || self.uncertain.is_some())
+                    .on_click(cx.listener(move |this, _, window, cx| this.start_rename(&renaming, window, cx))),
+            ))
+        })
+        .into_any_element()
     }
 
     fn detail_controls(&self, card: &Card, cx: &Context<Self>) -> AnyElement {
@@ -60,6 +108,7 @@ impl WorkflowDialog {
                     .outline()
                     .icon(Glyph::POWER.icon())
                     .label(if card.enabled() { "Turn off" } else { "Turn on" })
+                    .loading(self.busy && self.changing == Some(Change::Toggle))
                     .disabled(locked)
                     .on_click(cx.listener(move |this, _, _, cx| this.toggle(&changing, cx))),
             ))
@@ -266,19 +315,33 @@ fn boxed(palette: Palette) -> gpui::Div {
         .bg(rgb(palette.surface))
 }
 
+/// Teams' state line: a brand-coloured cycle and "Active" while on; a filled grey circle with a bar and "Inactive"
+/// while off.
 fn state_line(card: &Card, palette: Palette) -> gpui::Div {
-    div()
+    let line = div()
+        .debug_selector(|| "workflow-state".to_owned())
         .flex()
         .items_center()
         .gap_2()
         .text_sm()
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .child(Glyph::REFRESH.icon().size(px(16.0)).text_color(rgb(if card.enabled() {
-            palette.brand
-        } else {
-            palette.muted_foreground
-        })))
-        .child(if card.enabled() { "Active" } else { "Off" })
+        .font_weight(gpui::FontWeight::SEMIBOLD);
+    if card.enabled() {
+        return line
+            .child(Glyph::REFRESH.icon().size(px(16.0)).text_color(rgb(palette.brand)))
+            .child("Active");
+    }
+    line.child(
+        div()
+            .size(px(14.0))
+            .mx(px(1.0))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded_full()
+            .bg(rgb(palette.muted_foreground))
+            .child(div().w(px(8.0)).h(px(2.0)).rounded_full().bg(rgb(palette.surface))),
+    )
+    .child("Inactive")
 }
 
 /// What Teams says about running a webhook workflow.

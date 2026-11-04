@@ -63,11 +63,47 @@ connectionName, source: "NotSpecified"}` and the template's definition with the 
 markup as a JSON string with each parameter's `value` and `valueDisplayName`, the template's `displayName` and its
 connection references. No `state` is sent and the workflow is created on (201). Teams then reads
 `triggers/manual/listCallbackUrl`, the flow, its triggers, connections, runs and owners, and shows the Overview:
-Overview (name, Rename, description, "Active", Turn off, Edit, "..." with Delete, "Copy webhook link" whose tooltip
-shows the address), "How to run this workflow after setup", "Run history" with Refresh ("Your flow hasn't run yet."),
-Owners with "Add a co-owner"; Back and Workflows Home. Delete asks "Delete automation" ("Would you like to delete
+Overview (below); Back and Workflows Home. Delete asks "Delete automation" ("Would you like to delete
 your automation? Alternatively, you can turn it off.") with Delete and Cancel, then returns to the template list.
 The native client uses the classic Flow routes for the same operations.
+
+The two dropdowns are type-to-filter comboboxes. Opening one lists every choice (teams in the service's order) with a
+check on the chosen one; typing filters to the names holding the text, or "No results match your search". Choosing
+another team clears the channel: its field shows "Type or select a channel", the card's title becomes "Send webhook
+alerts to channel" and Save turns off until a channel is chosen. Typed text left in a field without choosing keeps
+the earlier choice (Teams leaves the text shown; the native field shows the chosen name again).
+
+## The Overview
+
+Seen 2026-11-04 the same way, on a workflow made from the webhook template and deleted afterwards. Teams reads the
+flow, its triggers, connections, runs and `owners`, and resolves the owners' names through Graph.
+
+- **Rename** turns the name into a field holding it, selected, and the button into a primary Save, off while the field
+  is empty; Save shows "Saving" and sends `PATCH …/flows/<flow>` with only `{"properties": {"displayName": <name>}}`.
+  The answer is the flow, and the Overview stays with the new name.
+- **Turn off** shows its spinner, sends `POST …/flows/<flow>/stop` with `{}`, reads the flow again and stays on the
+  Overview: the state line becomes a filled grey circle with a bar and "Inactive", the button "Turn on" (which sends
+  `start` the same way). Copy webhook link stays.
+- **Owners**, below Run history: "Adding an owner gives them full control of this flow. They'll be able to add or
+  remove other users as owners, access the run history, and can update, edit or delete this flow." with a Learn more
+  link, then each owner (initial, name; "Owner" beside the one who made the flow, Remove beside a co-owner), then
+  "Add a co-owner" with a search box ("Enter names, email or user groups"). Typing searches the directory (Teams asks
+  Graph for users and groups whose name, address or UPN starts with the text) and lists who it finds above the box,
+  name and address, or "<text> is not in your organization's directory.". Picking someone adds them at once:
+  `POST …/flows/<flow>/modifyowners?cascadeoperation=true` with `{"put": [{"name": <object id>, "properties":
+  {"principal": {"id": <object id>, "displayName", "email", "type": "User"}}}]}`. Remove sends
+  `DELETE …/flows/<flow>/owners/<object id>` with no question. The owners read answers each owner as
+  `properties.principal` (`id`, `type`); the flow's `properties.creator.objectId` names who made it.
+- **Workflows Home** (external-link icon) closes the dialog and opens the Workflows app in Teams' main window: its
+  Home tab (Find templates, Build from scratch, Create a workflow, Your workflows with Refresh), beside Templates and
+  Chat (the Workflows bot's chat). The native client has no app pages, so its Workflows Home is the dialog's own page
+  of every template and workflow.
+- The channel's list shows a saved workflow as its name over "Active" or "Inactive", with a "..." menu (Edit, Manage,
+  Turn off, Details, Delete).
+
+The native client sends the same bodies on the classic Flow routes. Its co-owner search uses the engine's directory
+people search (the one Manage team's Add member uses), and owners' names the engine's profile lookups, rather than
+Graph from Power Automate's token bundle.
 
 ## The Teams connection behind the scenes
 
