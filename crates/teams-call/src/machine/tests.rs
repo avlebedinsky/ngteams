@@ -366,6 +366,33 @@ fn an_acceptance_the_tracker_bound_nothing_of_ends_the_call_with_a_cancel() {
 }
 
 #[test]
+fn a_start_takes_the_number_reserved_for_it_and_a_later_call_is_numbered_after_it() {
+    let now = Instant::now();
+    let mut calls = Calls::new(identity(A));
+    calls.set_push_url(PUSH).unwrap();
+    let placement = Placement::Chat {
+        callees: vec![Mri::new(B)],
+        group_chat: None,
+    };
+    // a reservation no start took (its media failed) is replaced by the next
+    let unused = calls.reserve();
+    let reserved = calls.reserve();
+    assert_ne!(unused, reserved);
+    let call = calls.place(&placement, media(), now).unwrap();
+    assert_eq!(call, reserved);
+    assert!(
+        events(&effects(&mut calls)).contains(&CallEvent::State {
+            call,
+            state: CallState::Placing
+        }),
+        "the machine tells the reserved call"
+    );
+    calls.hang_up(call, now).unwrap();
+    drop(effects(&mut calls));
+    assert!(calls.reserve() > call, "numbers only go up");
+}
+
+#[test]
 fn a_failed_start_ends_the_call_and_nothing_is_sent_again() {
     let now = Instant::now();
     let mut calls = Calls::new(identity(A));

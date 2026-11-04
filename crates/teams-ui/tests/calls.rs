@@ -812,6 +812,62 @@ fn a_start_asked_while_one_sets_up_is_refused_and_the_first_keeps_its_chat() {
     assert_eq!(shown["conversation"], AB);
 }
 
+#[test]
+fn a_start_the_engine_never_tells_is_given_up_and_said_and_call_comes_back() {
+    let rig = calling();
+    let (trace, written) = trace();
+    let (_shell, cx) = shell_window(&rig, Some(AB), trace);
+    registered(&rig);
+    *rig.core.hold_calls.lock().unwrap() = true;
+    click(cx, "chat-call");
+    assert!(!drawn(cx, "chat-call"), "no Call while the start is asked");
+    rig.cx.executor().advance_clock(teams_ui::calls::START_TOLD_WITHIN / 2);
+    assert!(!drawn(cx, "chat-call") && !drawn(cx, "call-after"), "not given up yet");
+    rig.cx.executor().advance_clock(teams_ui::calls::START_TOLD_WITHIN);
+    cx.run_until_parked();
+    let refused = lines(&written, "call", "refused");
+    assert_eq!(kinds(refused.last().unwrap()), ["call", "not-told"]);
+    assert!(drawn(cx, "call-after"), "the user is told");
+    assert!(drawn(cx, "chat-call"), "Call is offered again");
+}
+
+#[test]
+fn a_start_told_at_once_whose_media_fails_keeps_why_with_its_end_either_way_round() {
+    for reply_first in [false, true] {
+        let rig = calling();
+        let (trace, _written) = trace();
+        let (_shell, cx) = shell_window(&rig, Some(AB), trace);
+        registered(&rig);
+        *rig.core.hold_calls.lock().unwrap() = true;
+        click(cx, "chat-call");
+        // the engine tells the call as its media setup begins
+        status(&rig, 1, CallStatus::Placing);
+        let active = rig.cx.read(|cx| calls_of(&rig).read(cx).call().cloned()).unwrap();
+        assert_eq!((active.kind, active.chat.as_deref()), (CallKind::Chat, Some(AB)));
+        let held = std::mem::take(&mut *rig.core.held_calls.lock().unwrap());
+        let refuse = || {
+            for answer in held {
+                answer.send(Err(EngineError::Call(CallActionError::Media("no relay".to_owned()))));
+            }
+            rig.cx.run_until_parked();
+        };
+        if reply_first {
+            refuse();
+            status(&rig, 1, CallStatus::Ended(End::Failed("setup")));
+        } else {
+            status(&rig, 1, CallStatus::Ended(End::Failed("setup")));
+            refuse();
+        }
+        rig.cx.read(|cx| {
+            let calls = calls_of(&rig).read(cx);
+            assert!(calls.ended().is_some_and(|ended| ended.end == End::Failed("setup")));
+            let told = calls.refused().expect("why it failed is kept");
+            assert!(told.text.contains("no relay"), "{told:?}");
+        });
+        assert!(drawn(cx, "chat-call"), "Call is offered again");
+    }
+}
+
 /// The account signs out (its tokens can't be renewed): the engine is shut down, so no call event comes any more.
 fn sign_out(rig: &Rig) {
     rig.cx.update(|cx| {

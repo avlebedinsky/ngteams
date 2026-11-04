@@ -4,8 +4,8 @@
 //! before its engine starts: `<data_dir>/logs/teams-app.log` (the retained file name), private and rotated by size,
 //! written from a thread of its own ([`file`]).
 //!
-//! - **Only our crates**: a record reaches the file only when its target is one of our crates' (`teams_…`, [`ours`]);
-//!   a third-party crate's `log` line, and the UI kit's `tracing` events (which `tracing` forwards to `log` when no
+//! - **Only our crates**: a record reaches the file only when its target is one of our crates' (`teams_…` and the
+//!   app's `ngteams`, [`ours`]); a third-party crate's `log` line, and the UI kit's `tracing` events (which `tracing` forwards to `log` when no
 //!   subscriber is set), never do, at any level. `log` is capped at `debug` at compile time (`max_level_debug`), so no
 //!   crate's `trace!` (tungstenite's frames, the authentication's token with them) exists in the binary.
 //! - **Levels** ([`Level`]): `info` by default, the settings file's `log_level`, changed live ([`apply_setting`]),
@@ -122,10 +122,13 @@ pub fn effective(setting: Level, env: Option<&str>) -> Level {
     env.and_then(Level::parse).unwrap_or(setting)
 }
 
-/// Whether a record is one of our crates' (`teams_…` targets): the only ones the file takes.
+/// Whether a record is one of our crates' (`teams_…` targets, and the app's own `ngteams`): the only ones the file
+/// takes.
 #[must_use]
 pub fn ours(metadata: &Metadata<'_>) -> bool {
-    metadata.target().starts_with("teams_")
+    // the app crate's own lines too (its quit and account paths), never a crate merely named like it
+    let target = metadata.target();
+    target.starts_with("teams_") || target == "ngteams" || target.starts_with("ngteams::")
 }
 
 /// One line of the file: `<UTC time> <LEVEL> <target>: <message>`, the message passed through the last redaction

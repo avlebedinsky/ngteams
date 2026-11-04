@@ -590,7 +590,13 @@ impl Desktop {
         self.window = None;
         self.parts.shell.trace.record(&TraceLine::new("window", "closed"));
         // a call's window keeps the app until it closes too
-        if !self.in_tray && self.call_windows.read(cx).window().is_none() {
+        let call_window = self.call_windows.read(cx).window().is_some();
+        log::info!(
+            "the main window closed (in the tray: {}, a call window open: {call_window})",
+            self.in_tray
+        );
+        if !self.in_tray && !call_window {
+            log::info!("the app quits: its main window closed");
             self.quit(cx);
         }
     }
@@ -613,6 +619,7 @@ impl Desktop {
             }
             TrayEvent::Quit => {
                 self.parts.shell.trace.record(&TraceLine::new("tray", "quit"));
+                log::info!("the app quits: the tray's Quit");
                 self.quit(cx);
             }
         }

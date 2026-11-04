@@ -432,6 +432,12 @@ fn the_engine_shut_down_leaves_the_rows_shown_and_the_list_offline() {
     let list = list_of(&shell, cx);
     rig.cx
         .update(|cx| rig.bridge.update(cx, teams_ui::Bridge::shutdown).detach());
+    // offline as the shutdown begins, before the engine's thread is joined (one held up stays shown offline)
+    assert_eq!(rig.shutdowns(), 0);
+    assert_eq!(
+        rig.cx.read(|cx| status_text(rig.models.status.read(cx))).as_ref(),
+        "Offline"
+    );
     rig.cx.run_until_parked();
     assert_eq!(rig.shutdowns(), 1);
     assert_eq!(ids(&list, cx), [TRIO, AB, AC, UNNAMED]);

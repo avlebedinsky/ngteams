@@ -246,6 +246,8 @@ fn only_our_crates_records_at_the_level_that_applies_reach_the_file() {
         assert!(!text.contains(absent), "{absent}: {text}");
     }
     assert!(ours(&Metadata::builder().target("teams_ui::bridge").build()));
+    assert!(ours(&Metadata::builder().target("ngteams::app").build()));
+    assert!(!ours(&Metadata::builder().target("ngteamsish").build()));
     assert!(!ours(&Metadata::builder().target("reqwest::connect").build()));
 }
 

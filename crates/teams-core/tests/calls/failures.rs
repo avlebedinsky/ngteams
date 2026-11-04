@@ -7,7 +7,7 @@ use std::time::Duration;
 use crate::support::{A_TONE, B_TONE, Lab, TALK, tokens, wait_until};
 use serde_json::json;
 use teams_core::engine::EngineError;
-use teams_core::{CallAction, CallActionError, CallStatus, CallTried, End, Outbox};
+use teams_core::{CallAction, CallActionError, CallStatus, CallTried, End, Event, Outbox};
 use teams_mock::{CHAT_BASE, ECHO, LAB_A, LAB_B, LAB_C, TENANT};
 use teams_proto::Mri;
 use teams_proto::{AcknowledgeMediaAnswer, Author, CallContext, CallLink, HttpTransport};
@@ -71,21 +71,99 @@ async fn an_acceptance_that_binds_nothing_is_never_acknowledged_and_the_call_lea
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_media_setup_that_fails_refuses_the_action_and_sends_nothing() {
+async fn a_media_setup_that_fails_refuses_the_action_ends_its_told_call_and_sends_nothing() {
     let lab = Lab::start().await;
-    let a = lab.account(LAB_A, A_TONE).await;
+    let mut a = lab.account(LAB_A, A_TONE).await;
     lab.mock.refuse_next("GET", "/trap/tokens", 500).await;
     let refused = a.handle.requests().call(test_call()).await;
     assert!(
         matches!(refused, Err(EngineError::Call(CallActionError::Media(_)))),
         "{refused:?}"
     );
+    // told placing as its setup began (its window shows it at once), then ended where it shows
+    let told = a
+        .next(|event| match event {
+            Event::Call {
+                call,
+                status: CallStatus::Placing,
+            } => Some(*call),
+            _ => None,
+        })
+        .await;
+    assert_eq!(a.ended(told).await, End::Failed("setup"));
     assert!(lab.mock.calls().is_empty());
     assert_eq!(lab.attempts("/epconv").await, 0);
-    // and the next one goes
+    // and the next one goes, told placing once
     let call = a.handle.requests().call(test_call()).await.unwrap();
-    let mut a = a;
+    assert_ne!(call, told);
     a.status(call, &CallStatus::Connected).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_start_hung_up_while_its_media_is_set_up_ends_at_once_and_sends_nothing() {
+    let lab = Lab::start().await;
+    let mut a = lab.account(LAB_A, A_TONE).await;
+    lab.mock
+        .refuse_next_after("GET", "/trap/tokens", 500, Duration::from_secs(2))
+        .await;
+    let requests = a.handle.requests();
+    let start = requests.call(test_call());
+    let told = a
+        .next(|event| match event {
+            Event::Call {
+                call,
+                status: CallStatus::Placing,
+            } => Some(*call),
+            _ => None,
+        })
+        .await;
+    // a mute meanwhile is held for its media
+    assert_eq!(
+        requests
+            .call(CallAction::Mute {
+                call: told,
+                muted: true
+            })
+            .await
+            .unwrap(),
+        told
+    );
+    assert_eq!(requests.call(CallAction::HangUp { call: told }).await.unwrap(), told);
+    assert_eq!(start.await.unwrap(), told, "the start's call, ended");
+    assert_eq!(a.ended(told).await, End::HungUp);
+    let quiet = a.events_within(Duration::from_millis(2500)).await;
+    assert!(quiet.is_empty(), "nothing after its end: {quiet:#?}");
+    assert_eq!(lab.attempts("/epconv").await, 0);
+    assert!(lab.mock.calls().is_empty());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_call_asked_while_a_catch_up_waits_on_the_service_starts_at_once() {
+    let lab = Lab::start().await;
+    let mut a = lab.account(LAB_A, A_TONE).await;
+    // the service is slow to answer the catch-up's read of the conversations, as a long catch-up holds the engine
+    lab.mock
+        .refuse_next_after("GET", "/conversations", 500, Duration::from_secs(4))
+        .await;
+    let sync = tokio::spawn(a.handle.requests().sync());
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    let start = a.handle.requests().call(test_call());
+    let told = tokio::time::timeout(
+        Duration::from_secs(2),
+        a.next(|event| match event {
+            Event::Call {
+                call,
+                status: CallStatus::Placing,
+            } => Some(*call),
+            _ => None,
+        }),
+    )
+    .await
+    .expect("the call waited for the catch-up");
+    assert!(!sync.is_finished(), "the catch-up was over before the call started");
+    assert_eq!(start.await.unwrap(), told);
+    a.status(told, &CallStatus::Connected).await;
+    drop(sync.await);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

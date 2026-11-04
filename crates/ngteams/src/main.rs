@@ -434,6 +434,7 @@ fn sign_in_from_prompt(
     let signing = cx.background_spawn(async move { accounts::add(&setup, &upn, &windows) });
     cx.spawn(async move |cx: &mut AsyncApp| match signing.await {
         Ok(_) => {
+            log::info!("the first account was signed in: the app restarts");
             restart.set(true);
             cx.update(app::quit);
         }
@@ -491,6 +492,7 @@ fn sign_in_again(setup: Setup, account: PersonalAccount, restart: Rc<Cell<bool>>
         let signing = cx.background_spawn(async move { accounts::sign_in(&setup, &account, &windows) });
         cx.spawn(async move |cx: &mut AsyncApp| match signing.await {
             Ok(_) => {
+                log::info!("signed in again after a sign-out: the app restarts");
                 restart.set(true);
                 cx.update(app::quit);
             }

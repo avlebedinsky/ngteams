@@ -366,6 +366,8 @@ pub struct Calls {
     /// kept from the ring on (see [`Followed`]).
     followed: BTreeMap<String, Followed>,
     next_call: u64,
+    /// The number [`Self::reserve`] handed out for the next start or join, until one takes it.
+    reserved: Option<u64>,
     out: Out,
 }
 
@@ -391,6 +393,7 @@ impl Calls {
             running: BTreeMap::new(),
             followed: BTreeMap::new(),
             next_call: 0,
+            reserved: None,
             out: Out::default(),
         }
     }
@@ -638,9 +641,21 @@ impl Calls {
         }
         let agent = self.agent.clone().ok_or(CallError::NoEndpoint)?;
         let context = CallContext::fresh()?.with_region(self.identity.region.clone(), self.identity.partition.clone());
-        self.next_call += 1;
         let me = self.participant()?;
-        Ok(Call::new(CallId(self.next_call), side, context, me, agent, now))
+        let number = self.reserved.take().unwrap_or_else(|| {
+            self.next_call += 1;
+            self.next_call
+        });
+        Ok(Call::new(CallId(number), side, context, me, agent, now))
+    }
+
+    /// Numbers the call the next start or join ([`Self::place`], [`Self::join`], [`Self::join_channel_meeting`]) will
+    /// be, so it can be told before its media is set up and its first write goes. A later reservation replaces one no
+    /// start took; an invitation that rings meanwhile is numbered after it.
+    pub fn reserve(&mut self) -> CallId {
+        self.next_call += 1;
+        self.reserved = Some(self.next_call);
+        CallId(self.next_call)
     }
 
     fn participant(&self) -> Result<CallParticipant, getrandom::Error> {

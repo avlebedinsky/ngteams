@@ -23,13 +23,18 @@
 //! - **The video** a build shows ([`Calls::with_video`]: the lab app's or the personal build's, when its calls have
 //!   video) is the feed the call's media draws on ([`crate::video::VideoFeed`]).
 //!
-//! The asks are traced by the caller's trace (`call asked`, `call refused` with the ask and why), never with a name.
+//! - **A start never goes silently**: the engine tells a start's or a join's call as its media begins to be set up, so
+//!   the call window shows it calling at once; one the engine never told within [`START_TOLD_WITHIN`] is given up and
+//!   said, as is one whose setup failed (its reason kept with how the call ended).
+//!
+//! The asks are traced by the caller's trace (`call asked`, `call refused` with the ask and why), never with a name, and
+//! logged at `info` with the chat's id (the diagnostic log).
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use gpui::{App, AsyncApp, Context, Entity};
+use gpui::{App, AsyncApp, Context, Entity, WeakEntity};
 use teams_core::{
     CallAction, CallActionError, CallId, CallStatus, CallView, End, EngineError, Event, IncomingCall, LobbyPerson,
     MeetingInfo, RegistrationReport,
@@ -545,6 +550,8 @@ pub struct Calls {
     /// The kind and chat of a start or a join asked for, until its call is told (the engine tells every call it
     /// started, at the latest as it ends), it is refused or the engine stops.
     asked: Option<(CallKind, Option<String>)>,
+    /// How many starts or joins were asked for: which one [`START_TOLD_WITHIN`] gives up on.
+    starts: u64,
     running: BTreeSet<String>,
     ended: Option<Ended>,
     refused: Option<Refused>,
@@ -924,8 +931,16 @@ impl Calls {
         if let CallStatus::Ended(end) = status {
             self.captions = teams_core::CallCaptions::default();
             active.check.failed = matches!(end, End::Failed(_));
-            // a refusal during the call was shown in its bar: how it ended is what is told now
-            self.refused = None;
+            // a refusal during the call was shown in its bar: how it ended is what is told now; but the start's own
+            // refusal (its media couldn't be set up, told as it ended) says why it never connected
+            let why_it_failed = matches!(end, End::Failed(_))
+                && self
+                    .refused
+                    .as_ref()
+                    .is_some_and(|refused| refused.why == "media" && START_ASKS.contains(&refused.ask));
+            if !why_it_failed {
+                self.refused = None;
+            }
             self.ended = self.call.take().map(|active| Ended::of(active, end.clone()));
         }
     }
@@ -1061,6 +1076,16 @@ impl Calls {
         }
     }
 
+    /// The start or join `start` (its number) still isn't told: the engine never answered it. It is given up, and said.
+    fn not_told(&mut self, start: u64, ask: &Ask, cx: &mut Context<Self>) -> bool {
+        if self.starts != start || self.asked.is_none() || self.call.is_some() {
+            return false;
+        }
+        self.asked = None;
+        self.refuse(ask, "not-told", local_refusal_text("not-told"), cx);
+        true
+    }
+
     fn refuse(&mut self, ask: &Ask, why: &'static str, text: String, cx: &mut Context<Self>) {
         if !self.shown {
             return;
@@ -1170,6 +1195,7 @@ fn local_refusal_text(why: &str) -> String {
         }
         "no-video" => "calls here carry no video".to_owned(),
         "not-waiting" => "they aren't waiting in the lobby any more".to_owned(),
+        "not-told" => "the call didn't start: the app got no answer from the calling service, try again".to_owned(),
         _ => "calls aren't available".to_owned(),
     }
 }
@@ -1186,6 +1212,7 @@ pub fn ask(calls: &Entity<Calls>, core: &Arc<dyn Core>, trace: &Arc<ViewTrace>, 
         asked = asked.conversation(chat);
     }
     trace.record(&asked);
+    log::info!("call: {} asked{}", ask.name(), logged_chat(&ask));
     let action = match calls.read(cx).action_for(&ask) {
         Ok(action) => action,
         Err(why) => {
@@ -1194,24 +1221,60 @@ pub fn ask(calls: &Entity<Calls>, core: &Arc<dyn Core>, trace: &Arc<ViewTrace>, 
             return;
         }
     };
-    if let Some(start) = ask.starts() {
+    let start = ask.starts().map(|start| {
         // busy until its call is told or it is refused: the header's Call goes, and another start is refused meanwhile
         calls.update(cx, |calls, cx| {
             calls.asked = Some(start);
+            calls.starts += 1;
             cx.notify();
-        });
-    }
+            calls.starts
+        })
+    });
     let reply = core.call(action.clone());
-    let (calls, trace) = (calls.downgrade(), Arc::clone(trace));
+    let (weak, trace) = (calls.downgrade(), Arc::clone(trace));
+    if let Some(start) = start {
+        give_up_untold(weak.clone(), Arc::clone(&trace), ask.clone(), start, cx);
+    }
     cx.spawn(async move |cx: &mut AsyncApp| {
         let answer = reply.await;
         if let Err(error) = &answer {
             refused(&trace, &ask, refusal_kind(error));
         }
         // calls that are gone have nobody left to tell
-        let _ = calls.update(cx, |calls, cx| calls.answered(&ask, &action, answer, cx));
+        let _ = weak.update(cx, |calls, cx| calls.answered(&ask, &action, answer, cx));
     })
     .detach();
+}
+
+/// How long a start or a join may go untold by the engine (it tells one as its media begins to be set up, at once)
+/// before it is given up and the user told so, rather than the header's Call staying gone with nothing shown.
+pub const START_TOLD_WITHIN: Duration = Duration::from_secs(20);
+
+/// The asks that start or join a call, by their trace names.
+const START_ASKS: [&str; 5] = ["call", "test-call", "join", "join-meeting", "meet-now"];
+
+/// Gives up on the start or join `start` (its number) once [`START_TOLD_WITHIN`] passed with its call untold.
+fn give_up_untold(calls: WeakEntity<Calls>, trace: Arc<ViewTrace>, ask: Ask, start: u64, cx: &mut App) {
+    cx.spawn(async move |cx: &mut AsyncApp| {
+        cx.background_executor().timer(START_TOLD_WITHIN).await;
+        let gave_up = calls
+            .update(cx, |calls, cx| calls.not_told(start, &ask, cx))
+            .unwrap_or(false);
+        if gave_up {
+            log::warn!(
+                "call: {} not told by the engine within {} s: given up",
+                ask.name(),
+                START_TOLD_WITHIN.as_secs()
+            );
+            refused(&trace, &ask, "not-told");
+        }
+    })
+    .detach();
+}
+
+/// The ask's chat for a log line, when it has one.
+fn logged_chat(ask: &Ask) -> String {
+    ask.chat().map_or_else(String::new, |chat| format!(" in {chat}"))
 }
 
 /// Join now of the pre-join that shows: its choices kept for its call, its join asked. Nothing while none shows or its
@@ -1269,6 +1332,7 @@ pub fn refuse_here(calls: &Entity<Calls>, trace: &Arc<ViewTrace>, ask: &Ask, why
 }
 
 fn refused(trace: &ViewTrace, ask: &Ask, why: &'static str) {
+    log::info!("call: {} refused: {why}", ask.name());
     trace.record(&TraceLine::new("call", "refused").kind(ask.name()).kind(why));
 }
 

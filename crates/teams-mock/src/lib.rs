@@ -365,6 +365,17 @@ impl ChatServiceMock {
             .await;
     }
 
+    /// [`Self::refuse_next`], its answer held back for `delay`: a service that is slow to refuse.
+    pub async fn refuse_next_after(&self, http_method: &str, path_end: &str, status: u16, delay: std::time::Duration) {
+        Mock::given(method(http_method))
+            .and(PathEnds(path_end.to_owned()))
+            .respond_with(ResponseTemplate::new(status).set_delay(delay))
+            .up_to_n_times(1)
+            .with_priority(1)
+            .mount(&self.server)
+            .await;
+    }
+
     /// Answers the next request of `http_method` whose path ends with `path_end` with `status` and the JSON `body`,
     /// before the world sees it: a test's stand-in for an answer the client can't read (the world doesn't change).
     pub async fn answer_next(&self, http_method: &str, path_end: &str, status: u16, body: &Value) {

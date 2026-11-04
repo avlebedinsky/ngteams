@@ -922,6 +922,9 @@ impl Bridge {
         let _ = stop.send(());
         let models = self.models.clone();
         log::info!("the engine is shutting down");
+        // told at once, not once its thread is joined: a window over an engine that is going (or whose thread is held
+        // up) shows it offline, its calls ended and no Call offered
+        models.engine_stopped(cx);
         cx.spawn(async move |bridge, cx: &mut AsyncApp| {
             let shutdown = task.await;
             cx.background_spawn(async move { shutdown() }).await;
@@ -952,10 +955,12 @@ async fn drain<E: EventSource>(
     loop {
         let next = {
             let event = pin!(events.next_event());
-            match select(event, &mut stop).await {
-                Either::Left((event, _)) => Some(event),
+            // the stop first: an engine that tells events without a pause (a catch-up's) is still shut down when asked,
+            // not once it falls quiet (it went on taking the user's asks meanwhile)
+            match select(&mut stop, event).await {
                 // stopped, or the bridge is gone without a shutdown
-                Either::Right(_) => None,
+                Either::Left(_) => None,
+                Either::Right((event, _)) => Some(event),
             }
         };
         match next {

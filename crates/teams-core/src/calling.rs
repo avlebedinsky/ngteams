@@ -8,10 +8,14 @@
 //!   action while one is up (or set up) is refused. Nothing answers or declines an invitation but its action: the engine never does by itself.
 //! - **The media comes first, the devices last**: a start, a join or an answer goes only once its media is set up
 //!   ([`CallMedia`]: the relay's credentials read, an allocation on the relay, the session started without its devices,
-//!   our offer or our answer in Teams' dialect); a setup that fails refuses the action and sends nothing (an invitation
-//!   keeps ringing, still answerable or declinable). The microphone and the speaker open only once the start, the join
-//!   or the answer was admitted and taken: when the machine tells the call ringing at its callees, joining, or
-//!   connected. Devices that can't be opened then fail the call (`End::Failed("media")`).
+//!   our offer or our answer in Teams' dialect, within [`SETUP_TIMEOUT`]); a setup that fails refuses the action and
+//!   sends nothing (an invitation keeps ringing, still answerable or declinable). A start's or a join's call is told
+//!   placing as its setup begins, so its window shows it calling at once (the setup takes seconds, and a header's Call
+//!   that only went away until then looked like nothing happened); a setup that fails ends that call
+//!   (`End::Failed("setup")`), a hang-up meanwhile drops it unsent, and a mute meanwhile holds once its media runs.
+//!   The microphone and the speaker open only once the start, the join or the answer was admitted and taken: when the
+//!   machine tells the call ringing at its callees, joining, or connected. Devices that can't be opened then fail the
+//!   call (`End::Failed("media")`).
 //! - **The writes** go out through the outbox's call kind (`Outbox::try_call`), one in flight at a time: beside it the
 //!   machine's events and delivery responses go at once, its next writes wait in its own queue (so a call that ends
 //!   drops them); a write refused without being acted on goes again only within `CallRetries`' allowance and only if
@@ -94,6 +98,10 @@ use media::{LiveMedia, MediaChange, MediaDone, Prepared, Setup, VideoKind};
 pub const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 /// How often a running call's media is looked at.
 const MEDIA_LOOK: Duration = Duration::from_millis(50);
+/// How long a start's, a join's or an answer's media may take to be set up (the relay's credentials read, the session
+/// made, its candidates gathered) before the action fails: a setup that never ends would hold the calling busy, every
+/// later start refused, with nothing to show for it.
+pub const SETUP_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// The account's calling, built and not started: its calling socket (`Trouter::for_calls`, over the transport the
 /// outbox writes with, so its deliveries and the call writes feed one call registry), who the account is in its calls
@@ -302,6 +310,13 @@ enum Landed {
 struct Preparing {
     /// What it is set up for: a start or join (`None`), or the answer of an offered invitation.
     answering: Option<CallId>,
+    /// A start's or a join's call, told [`CallStatus::Placing`] as its setup began: the call window shows it calling
+    /// at once, and a failed setup ends it there.
+    told: Option<CallId>,
+    /// When its setup began, for the log.
+    since: Instant,
+    /// The microphone muted while it was set up.
+    muted: bool,
     act: Act,
     reply: Waiting,
     setup: Pin<Box<dyn Future<Output = Result<Prepared, String>>>>,
@@ -332,13 +347,30 @@ pub(crate) struct CallingTask {
     task: tokio::task::JoinHandle<()>,
 }
 
-impl CallingTask {
+/// The calling's actions as another part of the engine hands them in ([`CallingTask::actions`]): the engine's inbox,
+/// which hands a call action in while a catch-up's read waits. It doesn't keep the calling running: once its
+/// [`CallingTask`] shut it down, an action is answered [`EngineError::Stopped`].
+#[derive(Clone)]
+pub(crate) struct CallActions(mpsc::WeakUnboundedSender<(Act, Waiting)>);
+
+impl CallActions {
     /// Hands the account's action to the calling; its answer goes to `reply`.
     pub(crate) fn act(&self, act: Act, reply: Waiting) {
-        if let Err(refused) = self.actions.send((act, reply)) {
+        let Some(actions) = self.0.upgrade() else {
+            let _ = reply.send(Err(EngineError::Stopped));
+            return;
+        };
+        if let Err(refused) = actions.send((act, reply)) {
             let (_, reply) = refused.0;
             let _ = reply.send(Err(EngineError::Stopped));
         }
+    }
+}
+
+impl CallingTask {
+    /// Its actions, for another part of the engine to hand them in.
+    pub(crate) fn actions(&self) -> CallActions {
+        CallActions(self.actions.downgrade())
     }
 
     /// Stops the calling as [`Calling::shut_down`] does, once that is done.
@@ -362,6 +394,8 @@ pub(crate) struct Calling<C, T> {
     responders: HashMap<DeliveryKey, CallResponder>,
     writing: Option<Writing>,
     preparing: Option<Preparing>,
+    /// The call told placing as its setup began, until the machine tells it placing in turn (told once).
+    told_placing: Option<CallId>,
     media_steps: JoinSet<MediaDone>,
     /// The SDP steps waiting for the one running to finish, in the order the signaling asked for them.
     sdp_steps: VecDeque<Box<dyn FnOnce() -> MediaDone + Send>>,
@@ -427,6 +461,7 @@ where
             responders: HashMap::new(),
             writing: None,
             preparing: None,
+            told_placing: None,
             media_steps: JoinSet::new(),
             sdp_steps: VecDeque::new(),
             sdp_running: false,
@@ -746,6 +781,8 @@ where
 
     fn state(&mut self, call: CallId, state: CallState) {
         let status = match state {
+            // told as its setup began
+            CallState::Placing if self.told_placing.take() == Some(call) => return,
             CallState::Placing => CallStatus::Placing,
             CallState::Ringing => {
                 self.open_devices(call);
@@ -1265,7 +1302,15 @@ where
             Act::Place(_) | Act::Join(_) | Act::JoinChannel(..) | Act::Answer(_) => return self.set_up(act, reply),
             Act::Decline(call) => self.calls.decline(call).map(|()| call).map_err(CallActionError::from),
             Act::HangUp(call) => self.hang_up(call, now),
-            Act::Mute(call, muted) => self.mute(call, muted),
+            Act::Mute(call, muted) => match self.preparing.as_mut().filter(|preparing| preparing.told == Some(call)) {
+                Some(preparing) => {
+                    // held until the call's media runs
+                    preparing.muted = muted;
+                    log::info!("call {}: muted {muted} (once its media is set up)", call.get());
+                    Ok(call)
+                }
+                None => self.mute(call, muted),
+            },
             Act::Lobby(call, waiting, admit) => self
                 .calls
                 .decide_lobby(call, &waiting, admit)
@@ -1311,6 +1356,14 @@ where
     }
 
     fn hang_up(&mut self, call: CallId, now: Instant) -> Result<CallId, CallActionError> {
+        if let Some(preparing) = self.preparing.take_if(|preparing| preparing.told == Some(call)) {
+            // nothing went out yet: the start or join is dropped with its setup, and its call ends here
+            log::info!("call {}: hung up while its media was being set up", call.get());
+            self.told_placing = None;
+            let _ = preparing.reply.send(Ok(call));
+            self.ended(call, End::HungUp);
+            return Ok(call);
+        }
         if let Some(preparing) = self.preparing.take_if(|preparing| preparing.answering == Some(call)) {
             // its answer never went: the invitation still rings, and only its decline ends it
             let _ = preparing.reply.send(Err(EngineError::Call(CallActionError::Media(
@@ -1372,6 +1425,16 @@ where
         // token when the engine couldn't name it
         let tenant = matches!(act, Act::Place(Placement::TestCall { .. } | Placement::Channel { .. }))
             && !self.calls.knows_tenant();
+        let told = answering.is_none().then(|| self.calls.reserve());
+        match (told, answering) {
+            (Some(call), _) => {
+                log::info!("call {}: its media is being set up", call.get());
+                self.told_placing = Some(call);
+                self.emit_status(call, CallStatus::Placing);
+            }
+            (None, Some(call)) => log::info!("call {}: its media is being set up to answer it", call.get()),
+            (None, None) => {}
+        }
         let prepare = media::prepare(
             Arc::clone(&self.client),
             self.media.clone(),
@@ -1391,8 +1454,16 @@ where
             }
             _ => Box::pin(prepare),
         };
+        let setup = Box::pin(async move {
+            tokio::time::timeout(SETUP_TIMEOUT, setup)
+                .await
+                .unwrap_or_else(|_| Err(format!("it took over {} s", SETUP_TIMEOUT.as_secs())))
+        });
         self.preparing = Some(Preparing {
             answering,
+            told,
+            since: Instant::now(),
+            muted: false,
             act,
             reply,
             setup,
@@ -1404,10 +1475,17 @@ where
         let Some(preparing) = self.preparing.take() else {
             return;
         };
+        let call = preparing.told.or(preparing.answering).map_or(0, CallId::get);
+        let took = preparing.since.elapsed().as_millis();
         let mut prepared = match prepared {
             Ok(prepared) => prepared,
-            Err(why) => return refuse(preparing.reply, CallActionError::Media(why)),
+            Err(why) => {
+                log::warn!("call {call}: its media couldn't be set up in {took} ms: {why}");
+                self.fail_told(preparing.told);
+                return refuse(preparing.reply, CallActionError::Media(why));
+            }
         };
+        log::info!("call {call}: its media was set up in {took} ms");
         if let Some(tenant) = prepared.tenant.take() {
             self.calls.set_tenant(tenant);
         }
@@ -1427,6 +1505,9 @@ where
         match acted {
             Ok(call) => {
                 let mut live = LiveMedia::new(call, prepared);
+                if preparing.muted {
+                    live.session.set_muted(true);
+                }
                 if preparing.answering.is_some() {
                     // our answer applied the far end's offer: the media connects from here
                     live.applied(now);
@@ -1435,9 +1516,19 @@ where
                 let _ = preparing.reply.send(Ok(call));
             }
             Err(error) => {
+                log::warn!("call {call}: refused once its media was set up: {error}");
                 tokio::task::spawn_blocking(move || drop(prepared));
+                self.fail_told(preparing.told);
                 refuse(preparing.reply, error.into());
             }
+        }
+    }
+
+    /// A start's or a join's call told placing that won't go after all: it ends, failed, where it shows.
+    fn fail_told(&mut self, told: Option<CallId>) {
+        if let Some(call) = told {
+            self.told_placing = None;
+            self.ended(call, End::Failed("setup"));
         }
     }
 }

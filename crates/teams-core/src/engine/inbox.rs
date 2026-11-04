@@ -12,18 +12,25 @@
 //!   if it had been asked then.
 //! - **Read receipts**: queued locally at once, advancing the shared read horizon for the messages seen; the
 //!   transport waits its turn with the other writes. Queries and read receipts also run while an outbox attempt waits.
-//! - **Kept**: everything else (another write, older history, a sync, presence, a call, the shutdown).
+//! - **Call actions**: handed to the calling at once ([`Inbox::hand_calls_to`]), as the loop hands them: the calling
+//!   runs on its own, so a Call pressed while a catch-up runs for minutes rings now, not once that is over (the
+//!   header's Call went, and nothing happened until then). A group chat's call reads whom it calls from the store.
+//!   Once a shutdown is kept, none goes any more: each is answered [`EngineError::Stopped`].
+//! - **Kept**: everything else (another write, older history, a sync, presence, the shutdown).
 //! - Such an answer comes before a request made earlier that is kept (a write's row isn't in it yet); what that request
 //!   changes is told by its events, as always.
 
 use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use teams_store::{Applied, OutboxEntry, ReadHorizon, Store, StoreError};
 use tokio::sync::{Mutex, mpsc, oneshot};
 
 use super::{Action, EngineError, Event, Query, Request, Responder};
+use crate::calling::CallActions;
 use crate::outbox::{Command, enqueue};
 use crate::sync::Meanwhile;
 use crate::{profiles, teams};
@@ -37,6 +44,10 @@ pub(super) struct Inbox {
     requests: Mutex<Requests>,
     events: mpsc::UnboundedSender<Event>,
     read_only: bool,
+    /// The calling a call action goes to meanwhile, once it runs.
+    calls: OnceLock<CallActions>,
+    /// A shutdown was kept: the engine stops once the read is over, and starts no call meanwhile.
+    stopping: AtomicBool,
 }
 
 /// The requests not taken yet: those kept while a read waited first, then the channel's.
@@ -58,11 +69,18 @@ impl Inbox {
             known,
             events,
             read_only,
+            calls: OnceLock::new(),
+            stopping: AtomicBool::new(false),
             requests: Mutex::new(Requests {
                 received,
                 kept: VecDeque::new(),
             }),
         }
+    }
+
+    /// From now on a call action that comes while a read waits goes to `calls` at once (see the module docs).
+    pub(super) fn hand_calls_to(&self, calls: CallActions) {
+        let _ = self.calls.set(calls);
     }
 
     /// The next request, in the order they were made; `None` once every request handle is gone and every request
@@ -95,6 +113,18 @@ impl Inbox {
                 self.answer(store, query);
                 None
             }
+            Request::Call(_, reply) if self.stopping.load(Ordering::Relaxed) => {
+                log::info!("a call action came after the engine's shutdown: refused");
+                let _ = reply.send(Err(EngineError::Stopped));
+                None
+            }
+            Request::Call(action, reply) => match self.calls.get() {
+                Some(calls) => {
+                    super::hand_call(store, &self.me, calls, action, reply);
+                    None
+                }
+                None => Some(Request::Call(action, reply)),
+            },
             Request::Person(mri, reply) => {
                 let person = store.profile(&mri).and_then(|stored| {
                     profiles::stored_person(store, &mri, &self.known, profiles::due(stored.as_ref()))
@@ -109,6 +139,10 @@ impl Inbox {
             Request::ChatListing(reply) => {
                 let _ = reply.send(teams::stored_listing(store).map_err(EngineError::from));
                 Some(Request::ChatListing(answered()))
+            }
+            Request::Shutdown => {
+                self.stopping.store(true, Ordering::Relaxed);
+                Some(Request::Shutdown)
             }
             other => Some(other),
         }

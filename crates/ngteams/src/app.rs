@@ -429,6 +429,7 @@ impl Running {
         let next = self.bridges.first().map(|(next, _, _)| next.clone());
         self.settings
             .update(cx, |settings, cx| settings.forget_account(&key, next.as_deref(), cx));
+        log::info!("an account is signed out and removed: its engine shuts down");
         let stopped = bridge.update(cx, Bridge::shutdown);
         let setup = self.runner.setup.clone();
         cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
@@ -470,6 +471,7 @@ impl Running {
         if std::mem::replace(&mut self.quitting, true) {
             return;
         }
+        log::info!("the app quits: every account's engine shuts down first");
         let stopped = self.shutdown(cx);
         quit_after(stopped, cx);
     }
@@ -558,6 +560,7 @@ pub fn quit(cx: &mut App) {
 pub fn quit_after(stopped: Task<()>, cx: &mut App) {
     cx.spawn(async move |cx: &mut AsyncApp| {
         stopped.await;
+        log::info!("the engines are shut down: the app quits now");
         cx.update(|cx| cx.quit());
     })
     .detach();

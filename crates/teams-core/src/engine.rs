@@ -136,10 +136,13 @@ use crate::service_search::{SearchAnswer, SearchScope, ServiceSearch};
 use crate::team_admin::{TeamAsk, TeamChange, TeamMember, TeamWritten};
 use crate::team_apps::TeamAppsAsk;
 
+/// How long the engine's thread waits, as it ends, for its blocking work (a call's media closing or being set up).
+const BLOCKING_GRACE: Duration = Duration::from_secs(5);
 /// How many people the attendee picker suggests at most.
 const INVITABLE: usize = 8;
 use crate::calling::{
-    Act, CallAction, CallActionError, CallParts, CallStatus, CallView, Calling, CallingTask, IncomingCall, LobbyPerson,
+    Act, CallAction, CallActionError, CallActions, CallParts, CallStatus, CallView, Calling, CallingTask, IncomingCall,
+    LobbyPerson,
 };
 use crate::emoticons::{Animations, Strip};
 use crate::file_content::{FileContents, FileStream};
@@ -1521,7 +1524,13 @@ where
             local.block_on(&runtime, Core::new(parts, events, received).run());
             // its tasks (the push channel's) and the store are gone before another engine may start
             drop(local);
-            drop(runtime);
+            // a blocking task that never ends (a call's media setup stuck in libwebrtc) is left to itself: dropping the
+            // runtime would wait for it forever, the engine's thread never joined and the app never quitting
+            let stopping = std::time::Instant::now();
+            runtime.shutdown_timeout(BLOCKING_GRACE);
+            if stopping.elapsed() >= BLOCKING_GRACE {
+                log::warn!("the engine's blocking work didn't end within {BLOCKING_GRACE:?}: left running");
+            }
             drop(lock);
             drop(ending);
         })
@@ -1667,7 +1676,7 @@ where
         if push.is_none() && self.options.poll.is_some() {
             self.poll_at = Some(Instant::now());
         }
-        self.calls = self.calling.take().map(Calling::spawn);
+        self.start_calling();
         let mut tick = tokio::time::interval(self.options.tick);
         tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
         loop {
@@ -1705,6 +1714,15 @@ where
             self.arrived(&[]);
         }
         self.stop(push).await;
+    }
+
+    /// Starts the calling, its actions handed to the inbox too: a call pressed while a catch-up's read waits goes at
+    /// once, not once the catch-up is over.
+    fn start_calling(&mut self) {
+        self.calls = self.calling.take().map(Calling::spawn);
+        if let Some(calls) = &self.calls {
+            self.inbox.hand_calls_to(calls.actions());
+        }
     }
 
     /// The engine stops: the call is hung up first ([`Calling::shut_down`]), then the push channel sends its
@@ -2314,68 +2332,18 @@ where
 
     // --- calls ---
 
-    /// A call action ([`EngineRequests::call`]): a chat's call resolved into whom it calls, then handed to the calling.
+    /// A call action ([`EngineRequests::call`]), handed to the calling ([`hand_call`]). The inbox hands one in the
+    /// same way while a catch-up's read waits.
     fn call(&mut self, action: CallAction, reply: Responder<CallId>) {
-        log::info!("action: {}", described::call(&action));
-        let act = match action {
-            CallAction::Captions { call, enabled } => Act::Captions(call, enabled),
-            CallAction::CaptionLanguage { call, language } => Act::CaptionLanguage(call, language),
-            CallAction::Call { chat } => match self.placement(&chat) {
-                Ok(placement) => Act::Place(placement),
-                Err(error) => {
-                    let _ = reply.send(Err(error.into()));
-                    return;
-                }
-            },
-            CallAction::TestCall { echo } => Act::Place(Placement::TestCall { echo }),
-            CallAction::Join { chat } => Act::Join(chat),
-            // a channel's meeting is joined at the conversation its channel names it runs at, read as it goes
-            CallAction::JoinMeeting { chat, .. } if teams_proto::is_team_thread_id(&chat) => {
-                Act::JoinChannel(chat, Arc::default())
-            }
-            CallAction::JoinMeeting { chat, meeting } => Act::Place(Placement::Meeting { chat, meeting }),
-            CallAction::MeetNow { channel } => Act::Place(Placement::Channel { channel }),
-            CallAction::JoinChannel { channel } => Act::JoinChannel(channel, Arc::default()),
-            CallAction::Answer { call } => Act::Answer(call),
-            CallAction::Decline { call } => Act::Decline(call),
-            CallAction::HangUp { call } => Act::HangUp(call),
-            CallAction::Mute { call, muted } => Act::Mute(call, muted),
-            CallAction::Renegotiate { call } => Act::Renegotiate(call),
-            CallAction::Camera { call, on } => Act::Camera(call, on),
-            CallAction::Lobby { call, waiting, admit } => Act::Lobby(call, waiting, admit),
-        };
-        match self.calls.as_ref() {
-            Some(calls) => calls.act(act, reply),
-            None => {
-                let _ = reply.send(Err(CallActionError::NoCalling.into()));
-            }
+        if let Some(calls) = self.calls.as_ref().map(CallingTask::actions) {
+            hand_call(&self.store, self.me(), &calls, action, reply);
+        } else {
+            log::info!(
+                "action: {}: refused, this engine has no calling",
+                described::call(&action)
+            );
+            let _ = reply.send(Err(CallActionError::NoCalling.into()));
         }
-    }
-
-    /// Whom a call from `chat` calls: a 1:1 chat's other member (from its id), or a group chat's other members as
-    /// the store holds them.
-    fn placement(&self, chat: &str) -> Result<Placement, CallActionError> {
-        let me = self.me();
-        if let Some(other) = one_to_one_other(chat, me) {
-            return Ok(Placement::Chat {
-                callees: vec![Mri::new(other)],
-                group_chat: None,
-            });
-        }
-        let members = self.store.members(chat).map_err(|_| CallActionError::NotAChat)?;
-        let callees: Vec<Mri> = members
-            .into_iter()
-            .map(|member| member.mri)
-            .filter(|mri| mri != me)
-            .map(Mri::new)
-            .collect();
-        if callees.is_empty() {
-            return Err(CallActionError::NotAChat);
-        }
-        Ok(Placement::Chat {
-            callees,
-            group_chat: Some(chat.to_owned()),
-        })
     }
 
     // --- the tick ---
@@ -2689,6 +2657,70 @@ fn one_to_one_other(chat: &str, me: &str) -> Option<String> {
         return None;
     };
     (!them.is_empty() && them != own).then(|| format!("{prefix}:{them}"))
+}
+
+/// A call action, logged, resolved (a chat's call into whom it calls: [`placement`]) and handed to the calling `calls`;
+/// one that can't be resolved is answered here, logged with why.
+fn hand_call(store: &Store, me: &str, calls: &CallActions, action: CallAction, reply: Responder<CallId>) {
+    let described = described::call(&action);
+    log::info!("action: {described}");
+    match call_act(store, me, action) {
+        Ok(act) => calls.act(act, reply),
+        Err(error) => {
+            log::info!("action: {described}: refused, {error}");
+            let _ = reply.send(Err(error.into()));
+        }
+    }
+}
+
+/// What the calling does for `action`.
+fn call_act(store: &Store, me: &str, action: CallAction) -> Result<Act, CallActionError> {
+    Ok(match action {
+        CallAction::Captions { call, enabled } => Act::Captions(call, enabled),
+        CallAction::CaptionLanguage { call, language } => Act::CaptionLanguage(call, language),
+        CallAction::Call { chat } => Act::Place(placement(store, me, &chat)?),
+        CallAction::TestCall { echo } => Act::Place(Placement::TestCall { echo }),
+        CallAction::Join { chat } => Act::Join(chat),
+        // a channel's meeting is joined at the conversation its channel names it runs at, read as it goes
+        CallAction::JoinMeeting { chat, .. } if teams_proto::is_team_thread_id(&chat) => {
+            Act::JoinChannel(chat, Arc::default())
+        }
+        CallAction::JoinMeeting { chat, meeting } => Act::Place(Placement::Meeting { chat, meeting }),
+        CallAction::MeetNow { channel } => Act::Place(Placement::Channel { channel }),
+        CallAction::JoinChannel { channel } => Act::JoinChannel(channel, Arc::default()),
+        CallAction::Answer { call } => Act::Answer(call),
+        CallAction::Decline { call } => Act::Decline(call),
+        CallAction::HangUp { call } => Act::HangUp(call),
+        CallAction::Mute { call, muted } => Act::Mute(call, muted),
+        CallAction::Renegotiate { call } => Act::Renegotiate(call),
+        CallAction::Camera { call, on } => Act::Camera(call, on),
+        CallAction::Lobby { call, waiting, admit } => Act::Lobby(call, waiting, admit),
+    })
+}
+
+/// Whom a call from `chat` calls: a 1:1 chat's other member (from its id), or a group chat's other members as the
+/// store holds them.
+fn placement(store: &Store, me: &str, chat: &str) -> Result<Placement, CallActionError> {
+    if let Some(other) = one_to_one_other(chat, me) {
+        return Ok(Placement::Chat {
+            callees: vec![Mri::new(other)],
+            group_chat: None,
+        });
+    }
+    let members = store.members(chat).map_err(|_| CallActionError::NotAChat)?;
+    let callees: Vec<Mri> = members
+        .into_iter()
+        .map(|member| member.mri)
+        .filter(|mri| mri != me)
+        .map(Mri::new)
+        .collect();
+    if callees.is_empty() {
+        return Err(CallActionError::NotAChat);
+    }
+    Ok(Placement::Chat {
+        callees,
+        group_chat: Some(chat.to_owned()),
+    })
 }
 
 /// A read in the background that is over.
