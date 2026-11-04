@@ -8,6 +8,9 @@ and schemas exposed by the session. Never invent a tool or start a nested CLI to
 - Start a named `general-purpose` agent with `Agent`, a clean brief, and background execution. For edits use
   `isolation: "worktree"`. Record its actual worktree, branch, and agent identifier when returned.
 - Send steering with `SendMessage`; use the runtime's agent listing to distinguish live agents from old metadata.
+- Consume background-agent completion notifications while work remains. Use the host's exposed event/yield mechanism
+  to wait while keeping the conversation available; don't assume ending a turn guarantees a later wake. Keep any
+  blocking wait at most 60 seconds and report only meaningful changes.
 - Use `run_in_background` for long shell commands and `TaskStop` to stop owned commands. Keep their IDs in the task.
 - The owner PID is `$CLAUDE_PID` and session ID is `$CLAUDE_CODE_SESSION_ID` when provided. Verify the owner exists.
   Do not use the PID of a short-lived tool shell.
@@ -33,6 +36,14 @@ and schemas exposed by the session. Never invent a tool or start a nested CLI to
 - Send steering to a running worker with its message tool (for example `collaboration.send_message`). Resume an
   idle worker with the runtime's follow-up/resume tool (`collaboration.followup_task` where exposed); a message
   alone may not start another turn. Close/interrupt only workers owned by this board, using available lifecycle tools.
+- After dispatching or answering an ETA/status question, keep the turn active with `collaboration.wait_agent` when
+  exposed, using `timeout_ms: 60000` or less. This waits for agent mailbox updates and can return early for user input;
+  it returns a summary, so consume the delivered messages/results before updating the board. A timeout is not a
+  completion: process any newly eligible work and wait again without a heartbeat message. Handle user steering in
+  commentary and resume monitoring. Agent events can arrive at message/tool boundaries; recheck for queued results
+  before waiting or ending the turn, including after the last worker returns and a review is due. Don't busy-poll
+  agent listings or launch shell sleep loops. If this tool is absent, use the exposed runtime event wait; if none is
+  available, report that monitoring limitation and preserve the board rather than promise an automatic wake.
 - Respect the runtime's actual capacity, including the dispatcher and other live agents. `slots` records the user's
   requested limit; run no more than that or the available worker capacity. A waiting worker frees a slot only after
   it has actually yielded/stopped. If it still occupies a runtime slot, persist its question and close it when

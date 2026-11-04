@@ -9,6 +9,13 @@ Keep this conversation available while background agents work. Once the user req
 later tasks until they end it. Coordinate, record state, answer status questions, and report results; don't take over
 implementation inline.
 
+While workers, reviews, or eligible queued tasks remain, stay active: consume runtime completion events using the
+host's wait mechanism and start eligible work. Answer new steering/status requests in commentary, then continue
+monitoring. A spawn receipt or ETA is an update, not a reason to end the turn. Report meaningful results promptly;
+don't busy-poll or send empty heartbeat updates. Finish the turn when the board is idle/complete, the user explicitly
+stops work, or every remaining task requires user/external input and no independent work can progress. Surface
+required questions promptly; waiting never supplies authorization. Host waiting details are in the runtime reference.
+
 Read the matching host section of [references/runtimes.md](references/runtimes.md) before starting agents. In ngteams,
 also read [references/ngteams.md](references/ngteams.md). Resolve `<skill-dir>` to this skill's absolute directory;
 pass absolute helper paths to workers. The canonical repository path is `.agents/skills/task-dispatch`; the Claude
@@ -43,6 +50,7 @@ The dispatcher alone writes the board. Workers append only their own event logs.
   "updated_at": "2026-11-03T12:00:00Z",
   "slots": 2,
   "review_base": "full-commit-id",
+  "completion_notice": {"pending": false, "sent_at": null},
   "standing": ["User instructions applying to later tasks"],
   "tasks": [
     {
@@ -51,7 +59,8 @@ The dispatcher alone writes the board. Workers append only their own event logs.
       "text": "User's request and context needed to resume, including follow-ups",
       "worktree": "/repo/.dispatch/run/worktrees/escape-search",
       "branch": "dispatch/run/escape-search", "base_commit": "full-base-id",
-      "transcript": "/repo/.dispatch/run/events/1.jsonl", "shells": []
+      "transcript": "/repo/.dispatch/run/events/1.jsonl", "shells": [],
+      "result_notice": {"pending": false, "sent_at": null}
     },
     {"num": 2, "title": "Pinned chats", "agent": "", "state": "queued", "after": 1,
      "text": "User's request", "note": "Needs #1's view"}
@@ -63,6 +72,20 @@ The dispatcher alone writes the board. Workers append only their own event logs.
 session IDs when available, but don't depend on a transcript existing. `flow` is `edit`, `scratch` (read-only), or
 `review`; always set it. `transcript` may be a Claude JSONL or the portable event log in the runtime adapter.
 Store explicit worktree/branch/base metadata even when the host stores it too. Older Claude boards remain readable.
+
+Persist announcement state with the same atomic board writes. On a new worker result, set its `result_notice.pending`
+and clear its prior `sent_at` before reporting it; after actually posting the notice, clear `pending` and record `sent_at`.
+Resume pending notices; a timestamp acknowledges delivery, not just a status-page update. If interrupted between posting and recording,
+check available conversation history before replaying; don't claim exactly-once delivery when that history is unavailable.
+For older boards with absent fields, baseline already-recorded completed results and an already-settled drain as
+nonpending without inventing a sent timestamp; newly discovered results or later settlement of unfinished work still
+need notices. Missing fields alone must not replay historical results.
+
+`completion_notice` tracks the current drain: any new task receipt or follow-up reopens it by clearing `pending` and
+`sent_at`. When this drain's required work, cleanup, and review settle, set it pending, announce completion promptly in
+commentary, then record delivery before the final response ends the turn. Resume a pending notice; don't repeat one
+already sent for the same drain. If work is blocked, report the outstanding needs without announcing completion.
+An eligible review is work remaining even after the last implementation worker returns.
 
 States: `queued`, `running`, `waiting on user`, `landed <hash>`, `done` (read-only result), and `failed`. Record the
 question for a waiting task. Keep unfinished tasks' original words, follow-ups, relevant standing instructions,
@@ -106,8 +129,8 @@ preserve work and report persistent failures.
 ## Completion, cleanup, and review
 
 When a worker returns, answer pending user questions, verify material claims against Git if needed, then report its
-result briefly. Update the board before dispatching more work. If part of the task is missing, continue it or queue
-a follow-up within its original authorized scope; don't call it complete.
+result briefly using its announcement state. Update the board before dispatching more work. If part of the task is
+missing, continue it or queue a follow-up within its original authorized scope; don't call it complete.
 
 Check/stop all task-owned background commands, not just the handles its report lists. For a landed, clean worktree,
 use `<skill-dir>/scripts/cleanup.sh <absolute-worktree>` from outside it. Keep unfinished worktrees and report where
@@ -153,7 +176,8 @@ and restarts.
 
 ## Optional status page
 
-The page reads the ledger plus Claude transcripts or portable event logs and binds loopback only. In ngterm
+The page supplements chat notices; updating it does not deliver a result to the user. It reads the ledger plus Claude
+transcripts or portable event logs and binds loopback only. In ngterm
 (`NGTERM_ENABLED=1`) start it with dispatch mode after writing the ledger; elsewhere start it when requested:
 
 ```sh
