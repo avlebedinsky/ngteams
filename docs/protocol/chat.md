@@ -260,6 +260,11 @@ every profile lookup; the account's display name since the lookups of lab accoun
   edited message. The edit was a `PUT v1/users/ME/conversations/<chat>/messages/<id>` of the whole message again (the
   post's fields with `id` the message's, `from` `worker/<MRI>`, `conversationLink` `conversation/<chat>;messageid=<id>`,
   `version` the edit's ISO time and `properties.edittime`), answered 200 with an empty body.
+  The native text-edit path preserves only the original raw `properties.files` and `properties.cards` unchanged,
+  including unknown inner fields and JSON representation. It rebuilds mentions and other text-derived properties
+  from the edited content. The durable edit snapshot survives retries and manual resend. A legacy queued edit
+  without one loads a safe original once before its attempt; an unavailable or unsafe original fails locally
+  without HTTP. This cannot recover file metadata already erased by an earlier successful edit.
 - **Deleted** (fixture `delete.json`): `DELETE v1/users/ME/conversations/<chat>/messages/<id>?behavior=softDelete`, no
   body, answered 200 with the text `null`. Read back: same `id` and `clientmessageid`, `content` empty, `properties`
   only `{deletetime}`, `version` the delete's time, no `amsreferences`, and **`skypeeditedid` set to the message's

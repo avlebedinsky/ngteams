@@ -514,11 +514,13 @@ coverage rules. No further documentation correction was needed. All 18 local Mar
 those two files resolve, and the runner's read-only `--help` matches its documented controls. No runtime build,
 live run or repeated acceptance test was needed for this final documentation check.
 
-## Upstream integration acceptance (separate from Task 12)
+## Historical upstream integration acceptance (before post-review fixes)
 
 Integration combines validated plan tip `950e032a06632dd0d8651c85a761a33eb70bdf69` with incoming main tip
 `9a45dde92a15155f2399bb047473b99d829fdacc` in a cumulative two-parent merge. Task 12's figures above certify
-only the earlier plan tip. Fresh integrated checks and exact coverage figures are recorded here when complete.
+only the earlier plan tip. This section records integrated merge `7acdc4755d1976542fe0642ccd9ca435404c870a`
+before the review and attachment fixes. Its measurements and source inventory remain historical evidence;
+the final post-review section below certifies `03201788`.
 No live tenant, personal installation, user credentials or personal display are used for these checks.
 
 The selected plan's agent reach rule supersedes incoming global roster admission. Intrinsic authenticated actor,
@@ -640,6 +642,101 @@ all-target check, formatting and lint report, plus `cargo check -p ngteams --rel
 none. The full producer/fixture/typed-compile-contract/isolated-Chrome checks and Python/shell/vendor checks above
 cover unchanged inputs. All frozen hashes still match after the final instrumented run.
 
+
+## Final post-review acceptance (2026-11-04)
+
+Final validated code: `03201788a2e3b705af3dd209bc7af2c538702784`, following the preserved two-parent
+merge `7acdc4755d1976542fe0642ccd9ca435404c870a`, review fix
+`0c656f58cd2c986de458d343afcae4cac7d9e60a`, and the separate pre-existing attachment fix. The historical
+Task 12 and integration tables above retain their original scope; they do not by themselves certify this code.
+All 19 incoming feature rows remain applicable. No runtime source, test, build or configuration input changes
+are part of this final documentation update.
+
+The integration review's dynamic callback-registration defect is fixed: later call and acceptance-Ack callback
+URLs are registered against the existing actor/call/connection context, with retained identity checks and UI
+forwarding. The final independent review reported no actionable findings. Its pre-existing major attachment
+edit defect was then separately reproduced through Core → durable outbox → HTTP, fixed and signed off.
+
+Text edits now durably snapshot only the original raw `files` and `cards` properties, preserving their exact
+JSON representation and unknown inner data. Mentions, quotes, edit time and other properties remain derived
+normally from the edited text; the public original-message shape is unchanged. A legacy queued edit without a
+snapshot may hydrate once from a safe original through a current-run Pending/Edit-only store update before
+`begin_attempt`, preserving identity, timestamps, ordering and retry budgets. Missing, foreign, deleted,
+mismatched or unreadable originals fail visibly and locally with zero HTTP. Known snapshots survive reopening
+and manual resend; this introduces no hidden or cross-run retry, migration or UI runtime change. Metadata
+already erased by an earlier successful destructive edit cannot be reconstructed. Opaque-format fixture cases
+prove faithful transport, rather than service acceptance of invented formats.
+
+All 17 current runtime crates individually pass the unchanged strict 90% line, function and region gates.
+The table is copied from `target/postreview-final/all17-metrics.md`; complete precision, integer counts and
+per-crate export provenance are in `target/postreview-final/all17-runtime-summary.json` (SHA256
+`fc2d6a608be60c1f799c29d2ec9b181390596310a1f44474b306a9f364a4c388`).
+
+| Crate | Lines covered/count (%) | Functions covered/count (%) | Regions covered/count (%) | Source |
+| --- | ---: | ---: | ---: | --- |
+| fixture-guard | 559/583 (95.883361921) | 120/131 (91.603053435) | 1061/1151 (92.180712424) | fresh-final03201788 |
+| ngteams | 1900/2047 (92.818759160) | 320/352 (90.909090909) | 3325/3692 (90.059588299) | fresh-final03201788 |
+| proto-lab | 14716/15687 (93.810161280) | 2136/2309 (92.507579039) | 25717/28531 (90.137043917) | preserved-freeze01 |
+| teams-auth | 1688/1736 (97.235023041) | 301/310 (97.096774194) | 2781/2931 (94.882292733) | preserved-freeze01 |
+| teams-call | 3427/3600 (95.194444444) | 488/505 (96.633663366) | 6174/6677 (92.466676651) | fresh-final03201788 |
+| teams-core | 9067/9810 (92.426095821) | 1344/1435 (93.658536585) | 15570/17219 (90.423369534) | fresh-final03201788 |
+| teams-log | 1133/1182 (95.854483926) | 169/176 (96.022727273) | 2052/2167 (94.693124135) | preserved-freeze01 |
+| teams-media | 6948/7523 (92.356772564) | 952/1035 (91.980676329) | 12139/13265 (91.511496419) | preserved-freeze01 |
+| teams-mock | 4349/4601 (94.522929798) | 668/710 (94.084507042) | 8664/9260 (93.563714903) | fresh-final03201788 |
+| teams-proto | 13032/13637 (95.563540368) | 1934/2043 (94.664708762) | 22795/24324 (93.714027298) | fresh-final03201788 |
+| teams-signin | 1189/1287 (92.385392385) | 174/186 (93.548387097) | 2143/2333 (91.855979426) | preserved-freeze01 |
+| teams-signin-extension | 274/274 (100.000000000) | 40/40 (100.000000000) | 510/515 (99.029126214) | preserved-freeze01 |
+| teams-store | 1810/1848 (97.943722944) | 221/221 (100.000000000) | 2905/3221 (90.189382179) | fresh-final03201788 |
+| teams-trouter | 1265/1359 (93.083149375) | 192/200 (96.000000000) | 2113/2293 (92.150021805) | fresh-final03201788 |
+| teams-ui | 45686/49391 (92.498633354) | 6317/6979 (90.514400344) | 80223/87260 (91.935594774) | fresh-final03201788 |
+| teams-wpe | 4523/4853 (93.200082423) | 593/633 (93.680884676) | 7950/8520 (93.309859155) | preserved-freeze01 |
+| ui-sandbox | 2699/2861 (94.337644180) | 371/404 (91.831683168) | 4881/5399 (90.405630672) | preserved-freeze02 |
+
+Nine packages were freshly measured at final code `03201788`: FixtureGuard, ngteams, Call, Core, Mock, Proto,
+Store, Trouter and UI. Runtime execution, export and strict gates finished with status 0, retaining 246 profiles.
+There are 134 standard Rust result summaries: 1,969 passed, 0 failed, 0 ignored, plus successful custom real
+isolated native harnesses. The 143-step native UI tour and actual call-window audio/video/device switching
+passed. Focused final targets include Core native calls (36), engine (49) and outbox (48); Proto chat_write (24);
+Store outbox_regressions (17) and UI compose (56), including attachment edits and durable legacy snapshots.
+
+Eight unchanged package results were independently re-gated against current policy with status 0: ProtoLab,
+Auth, Log, Media, Signin, SigninExtension and WPE from integration freeze01, and Sandbox from freeze02.
+`target/postreview-final/closure.json` and `preserved-runtime-proof.json` retain exact own runtime/test/manifest/
+support bytes, common build inputs, the changed-runtime normal/dev reverse dependency graph and actual
+successful runtime results. Signin uses unchanged Proto log_url; ProtoLab uses unchanged IDs, chat_members and
+one_to_one_id helpers; the normal extension has no Proto dependency. This is complete per-crate result selection
+from original LLVM exports, with source/test/build/API-use closure: no LLVM counter union, metric averaging,
+new exclusions, weaker thresholds or changed audit reasons. Historical exports retain DWARF; the fresh run uses
+the current CI no-DWARF/no-incremental flags. Both use opt0, continuous source instrumentation and matching
+cfg/test semantics; binary identity is not claimed.
+
+All 1,171 frozen source/test/build/configuration inputs plus 84 supplemental build/support inputs (1,255 total)
+were rehashed unchanged after measurement, and every source ZIP entry matches its frozen hash. All 53,045 reused
+native SDK include/library payload paths and hashes also match. The source, profile, SDK, environment and process
+proofs and the 285-file artifact manifest are retained in `target/postreview-final/`. All 12 observed owned
+processes exited; no final-validation executables or helper processes remain.
+
+Final normal formatting, lint report, workspace all-target check, workspace all-target Clippy with warnings denied
+and release ngteams check each returned status 0. Normal feature builds and coverage ran serially, offline, with
+test threads 1 and the unchanged mandatory Chrome/GPUI harness requirements. A duplicate ordinary 17-package run
+was unnecessary. This documentation-only finalization uses fixture-guard, local Markdown link/anchor checks
+and whitespace checks; it does not repeat runtime, release or coverage validation.
+
+Original failures remain in `target/integration-recorded-failures.json` and their original logs/exports: the
+ordinary integration run and first strict run returned 101, freeze02 retained report status 1 after all runtime
+tests passed, and the canceled pre-attachment-fix `0c656f5` run returned 143 with 62 partial profiles under
+`target/postreview-aborted-0c/`. None is relabeled successful or contributes partial counters to final acceptance.
+The attachment baseline-red exit 101 and passing fixer evidence remain in the run-state
+`preexisting-attachment-edit-evidence/` directory. The final handoff is `target/postreview-final/handoff.md`.
+
+Remaining limitations: the pre-existing 640px Calls labels wrap; widening the window works, with responsive
+stacking deferred. The scenario fallback, repeated Wire construction, duplicate private atomic staging and
+CallState naming collision remain immaterial maintenance issues, with no unresolved actionable major/critical
+finding or filed backlog. Audio evidence proves the stated amplitude contract, not uninterrupted/lossless playback;
+the original 0.277992 failure has no WAV, so its shared cause remains plausible rather than proven. No live tenant,
+personal credentials/keyring/display or installation was used. New-account live smoke and installation remain
+Post-Completion. Final metadata secret-delta scanning, plan relocation and the authorized non-force main push
+are subsequent root finalization steps, not claims made by these measurements.
 
 ## Post-Completion
 *Needs the user or the live tenant; no checkboxes*
