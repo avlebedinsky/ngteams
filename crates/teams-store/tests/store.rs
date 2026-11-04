@@ -1149,6 +1149,76 @@ fn conversations_kept_to_be_synced_again_stay_until_synced() {
     assert!(matches!(error, StoreError::UnknownConversation(_)));
 }
 
+/// Keeps one of everything the store holds of a conversation `id`: members, a message (indexed, with a reaction), a
+/// read horizon, a sync state and the mark to be synced again.
+fn keep_all_of(store: &mut Store, id: &str) -> Result<(), StoreError> {
+    store.replace_members(id, 1, &[Member::new(ME, None), Member::new(PEER, None)])?;
+    let mut kept = message("1000", 1000, "synthetic gone", 1000, PEER);
+    id.clone_into(&mut kept.conversation_id);
+    store.upsert_message_indexed(&kept, None, |message| message.content.clone())?;
+    store.apply_reaction(&ReactionChange::add(id, "1000", "like", ME, 2000))?;
+    store.set_read_horizon(&ReadHorizon {
+        conversation_id: id.to_owned(),
+        user: ME.to_owned(),
+        last_read_arrival: 1000,
+        updated: 1,
+        raw: None,
+    })?;
+    store.set_sync_state(&SyncState {
+        conversation_id: id.to_owned(),
+        sync_link: Some("https://chat.example.invalid/v1/sync?syncState=one".to_owned()),
+        backward_link: None,
+        backward_oldest: None,
+        sync_until: None,
+        gap_link: None,
+        gap_until: None,
+        history_complete: true,
+        updated: 1,
+    })?;
+    store.set_unsynced(id)
+}
+
+/// What the store still holds of conversation `id`, by name (see [`keep_all_of`]).
+fn held_of(store: &Store, id: &str) -> Result<Vec<&'static str>, StoreError> {
+    let held = [
+        ("row", store.conversation(id)?.is_some()),
+        ("members", !store.members(id)?.is_empty()),
+        ("message", store.message(id, "1000")?.is_some()),
+        ("reaction", !store.reactions(id, "1000")?.is_empty()),
+        ("horizon", store.read_horizon(id, ME)?.is_some()),
+        ("sync state", store.sync_state(id)?.is_some()),
+        ("kept", store.unsynced_conversations()?.iter().any(|kept| kept == id)),
+    ];
+    Ok(held
+        .into_iter()
+        .filter(|(_, held)| *held)
+        .map(|(name, _)| name)
+        .collect())
+}
+
+#[test]
+fn a_forgotten_conversation_leaves_nothing_of_it_and_the_others_stay() -> Result<(), StoreError> {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut store = with_chat(&dir)?;
+    store.upsert_conversation(&conversation(GROUP, ConversationKind::Group, 1))?;
+    keep_all_of(&mut store, CHAT)?;
+    keep_all_of(&mut store, GROUP)?;
+    let everything = ["row", "members", "message", "reaction", "horizon", "sync state", "kept"];
+    assert_eq!(held_of(&store, GROUP)?, everything);
+    assert_eq!(store.search("gone", 10)?.len(), 2);
+
+    assert!(store.forget_conversation(GROUP)?);
+    assert!(!store.forget_conversation(GROUP)?, "again: not stored");
+    assert!(held_of(&store, GROUP)?.is_empty());
+    assert_eq!(
+        store.search("gone", 10)?.len(),
+        1,
+        "its search entries go with its messages"
+    );
+    assert_eq!(held_of(&store, CHAT)?, everything, "the other one keeps all of it");
+    Ok(())
+}
+
 #[test]
 fn the_conversation_list_sync_link_is_kept() {
     let dir = tempfile::tempdir().expect("tempdir");

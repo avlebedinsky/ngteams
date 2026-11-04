@@ -81,6 +81,29 @@ percent-encoded as one segment.
   the web bundle titles a chat by it, and the thread read carries it as `properties.topic`. Read from the web bundle
   (the `meeting` thread type from the personal build's store), not from a lab capture.
 
+### Threads in the list the account can't read
+
+The full list (`startTime=1`) still names threads the account can no longer read. A personal build's debug log of
+2026-11-04 showed 15 of them on one account, team channel threads (`@thread.tacv2`) and a meeting chat among them:
+
+- **Left or removed**: reading its messages answers **403**, the service's code `AclCheckFailed` (the account isn't on
+  the thread's roster).
+- **Deleted for good**: **404**, the code `ThreadNotFound` (the thread was hard-deleted). An ordinary 404 for a
+  conversation the service doesn't know names `RequestHandlerException` instead, and the account's own notes
+  (`48:notes`) answer 404 until a first note is written.
+
+An error answer is JSON. Its top-level `errorCode` is a number, either the status or the service's own number (209 for
+`AclCheckFailed`). The code as a word is in `standardizedError.errorSubCodeString`, and the `message` may hold a second
+answer as a JSON string with a `subErrorCode`. `teams_proto::chat::ChatReadError::service_code` reads the word from
+either place, and from a plain `message` that starts with `<code>:`.
+
+Neither kind gets better on a second read. The native catch-up (`teams-core` `sync`, `Unreadable`) therefore doesn't
+keep such a conversation to be synced again. If the account is added back, the incremental list brings the
+conversation at a newer version and it syncs as any other. A `ThreadNotFound` thread is also removed from the store
+(`Store::forget_conversation`), but notes never are. Each such thread gets one `info` line naming the status and the
+code, and the catch-up summary counts them as "skipped (not a member or deleted)". The error bodies seen are in our
+own words here; none was captured from the web client, which never reads this list.
+
 ## Favorites, empty chats and the chat list
 
 What Teams v2's list shows above and in its "Chats" section, as the native client reads it (the lab's captures of

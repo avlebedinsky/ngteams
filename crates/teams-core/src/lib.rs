@@ -86,7 +86,7 @@ pub use search::{Backfill, INDEX_BATCH, search_text};
 pub use service_search::{SearchAnswer, SearchScope};
 pub use sync::{
     CLOCK_SKEW_MS, CatchUp, CatchUpError, CatchUpReport, Changes, ConversationFailed, DRAFTS, Gaps, MAX_PAGES, NOTES,
-    StoredMessage, Synced,
+    StoredMessage, Synced, Unreadable,
 };
 pub use team_admin::{TeamChange, TeamMember, TeamWritten};
 pub use teams::{ChatListing, READING_TEAMS, TEAMS_MAX_AGE, TEAMS_RETRY, TeamsReadError};

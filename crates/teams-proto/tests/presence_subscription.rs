@@ -173,11 +173,39 @@ async fn a_subscription_goes_out_in_its_captured_shape_as_a_plain_request() {
                 "content-type",
                 "x-ms-client-type",
                 "x-ms-client-user-agent",
+                "x-ms-client-version",
+                "x-ms-correlation-id",
+                "x-ms-endpoint-id",
                 "x-ms-object-id"
             ],
-            "{name}: the presence read's headers, no endpoint header, caller, session or cookie"
+            "{name}: the presence read's headers, a correlation id, the client build and the endpoint, no caller, session or cookie"
         );
+        assert_eq!(
+            header(request, "x-ms-client-version"),
+            teams_proto::CLIENT_BUILD,
+            "{name}"
+        );
+        assert_eq!(
+            header(request, "x-ms-endpoint-id"),
+            EPID,
+            "{name}: the path's endpoint again"
+        );
+        assert!(is_guid(&header(request, "x-ms-correlation-id")), "{name}");
     }
+}
+
+/// The value of `request`'s header `name`.
+fn header(request: &Request, name: &str) -> String {
+    request.headers.get(name).unwrap().to_str().unwrap().to_owned()
+}
+
+/// A lowercase, hyphenated GUID.
+fn is_guid(text: &str) -> bool {
+    let groups: Vec<&str> = text.split('-').collect();
+    groups.iter().map(|group| group.len()).eq([8, 4, 4, 4, 12])
+        && text
+            .bytes()
+            .all(|byte| byte == b'-' || byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[tokio::test]
@@ -206,6 +234,16 @@ async fn as_a_typed_post_read_it_goes_once_for_its_exact_mris() {
     let sent = setup.subscriptions().await;
     assert_eq!(sent.len(), 1);
     assert_eq!(sent[0].url.path(), subscriptions_path());
+
+    // UPS refuses a subscription without a correlation id: each one goes with its own
+    setup.client.post_read(subscription).await.unwrap();
+    let sent = setup.subscriptions().await;
+    let ids: Vec<String> = sent
+        .iter()
+        .map(|request| header(request, "x-ms-correlation-id"))
+        .collect();
+    assert!(ids.iter().all(|id| is_guid(id)), "{ids:?}");
+    assert_ne!(ids[0], ids[1], "a fresh one each time");
 }
 
 #[tokio::test]

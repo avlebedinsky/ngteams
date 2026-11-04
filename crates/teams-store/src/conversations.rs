@@ -146,6 +146,18 @@ impl Store {
         Ok(applied)
     }
 
+    /// Forgets `id` and all that is kept of it: its members, messages (their reactions, reply roots and search
+    /// entries), read horizons, sync state and its mark to be synced again all go with its row. For a thread the
+    /// service says is gone (hard-deleted). Whether it was stored.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::Sqlite`] when the write fails.
+    pub fn forget_conversation(&mut self, id: &str) -> Result<bool, StoreError> {
+        let removed = self.conn.execute("DELETE FROM conversations WHERE id = ?1", [id])?;
+        Ok(removed > 0)
+    }
+
     /// One conversation.
     ///
     /// # Errors

@@ -43,6 +43,73 @@ pub enum ChatReadError {
     Malformed(#[from] Malformed),
 }
 
+/// The chat service's code for a thread it no longer has: a 404 whose answer names it is a thread hard-deleted, not one
+/// the account merely can't see.
+const THREAD_NOT_FOUND: &str = "ThreadNotFound";
+
+impl ChatReadError {
+    /// The status of the service's answer when it answered with one other than a success (a region hop's included).
+    #[must_use]
+    pub fn status(&self) -> Option<u16> {
+        match self {
+            Self::Http(HttpError::Status(answer)) => Some(answer.status()),
+            Self::RegionMoved { status } => Some(*status),
+            _ => None,
+        }
+    }
+
+    /// The chat service's own code for why it refused the read (`AclCheckFailed` for an account no longer on the
+    /// thread's roster, `ThreadNotFound` for a thread hard-deleted, …), read from its answer's body (see
+    /// [`service_code`]); `None` for an error that isn't the service's answer, or one whose body names none.
+    #[must_use]
+    pub fn service_code(&self) -> Option<String> {
+        match self {
+            Self::Http(HttpError::Status(answer)) => service_code(answer.body()),
+            _ => None,
+        }
+    }
+
+    /// Whether the service answered that the thread is gone: a 404 (with no `Location`, which would be a region hop)
+    /// naming `ThreadNotFound`. A 404 that names nothing, or another code ("Conversation was not found"), isn't.
+    #[must_use]
+    pub fn is_thread_gone(&self) -> bool {
+        self.status() == Some(404)
+            && matches!(self, Self::Http(_))
+            && self.service_code().as_deref() == Some(THREAD_NOT_FOUND)
+    }
+}
+
+/// The code a chat service error answer `body` names, the first of: `standardizedError.errorSubCodeString`,
+/// `subErrorCode`, a textual `errorCode`, then the same of the JSON object its `message` may hold (the service nests
+/// one answer in another), and last the word a plain `message` starts with before a `:` (`AclCheckFailed: …`). Only
+/// a single word of letters and digits is taken, never the message's text: a body may name people or threads.
+fn service_code(body: &[u8]) -> Option<String> {
+    let answer: serde_json::Value = serde_json::from_slice(body).ok()?;
+    code_of(&answer, 2)
+}
+
+/// [`service_code`] of one answer object, looking `depth` answers deep into a nested `message`.
+fn code_of(answer: &serde_json::Value, depth: u8) -> Option<String> {
+    let word = |value: Option<&serde_json::Value>| value.and_then(serde_json::Value::as_str).and_then(code_word);
+    let named = word(answer.pointer("/standardizedError/errorSubCodeString"))
+        .or_else(|| word(answer.get("subErrorCode")))
+        .or_else(|| word(answer.get("errorCode")));
+    if named.is_some() {
+        return named;
+    }
+    let message = answer.get("message")?.as_str()?;
+    match serde_json::from_str::<serde_json::Value>(message) {
+        Ok(inner) if inner.is_object() => depth.checked_sub(1).and_then(|depth| code_of(&inner, depth)),
+        _ => message.split_once(':').and_then(|(word, _)| code_word(word)),
+    }
+}
+
+/// `text` when it is one word of ASCII letters and digits starting with a letter, at most 64 long: a code, not prose.
+fn code_word(text: &str) -> Option<String> {
+    let starts = text.chars().next().is_some_and(|first| first.is_ascii_alphabetic());
+    (starts && text.len() <= 64 && text.chars().all(|c| c.is_ascii_alphanumeric())).then(|| text.to_owned())
+}
+
 /// The chat service's reads over a client's native transport.
 #[derive(Debug)]
 pub struct ChatReads<'c, C> {
@@ -240,4 +307,70 @@ pub fn link_endpoint(chat_base: &str, link: &str) -> Option<Endpoint> {
         url.query_pairs()
             .fold(endpoint, |endpoint, (name, value)| endpoint.with_query(name, value)),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    //! The answers here are synthetic: the chat service's error shapes with made-up text and ids.
+
+    use super::*;
+    use crate::client::Response;
+    use serde_json::json;
+
+    fn refused(status: u16, body: &serde_json::Value) -> ChatReadError {
+        ChatReadError::Http(HttpError::Status(Box::new(Response::new(status, body.to_string()))))
+    }
+
+    /// The service's nested form: an answer whose `message` holds another, beside its standardized error.
+    fn nested(status: u16, code: &str, text: &str) -> serde_json::Value {
+        json!({
+            "errorCode": status,
+            "message": json!({"errorCode": status, "message": text, "subErrorCode": code}).to_string(),
+            "standardizedError": {"errorCode": status, "errorSubCode": 1, "errorSubCodeString": code},
+        })
+    }
+
+    #[test]
+    fn a_hard_deleted_thread_is_gone_and_a_missing_conversation_is_not() {
+        let gone = refused(404, &nested(404, "ThreadNotFound", "Synthetic thread hard-deleted."));
+        assert_eq!(gone.service_code().as_deref(), Some("ThreadNotFound"));
+        assert!(gone.is_thread_gone());
+
+        let missing = refused(404, &nested(404, "RequestHandlerException", "Synthetic not found"));
+        assert_eq!(missing.service_code().as_deref(), Some("RequestHandlerException"));
+        assert!(!missing.is_thread_gone());
+
+        // the code alone where the nested answer holds it, and a plain 404 naming nothing
+        let inner_only = json!({"errorCode": 404, "message": json!({"subErrorCode": "ThreadNotFound"}).to_string()});
+        assert!(refused(404, &inner_only).is_thread_gone());
+        assert!(!refused(404, &json!({})).is_thread_gone());
+        assert!(
+            !refused(403, &nested(403, "ThreadNotFound", "x")).is_thread_gone(),
+            "a 404 only"
+        );
+        assert!(
+            !ChatReadError::RegionMoved { status: 404 }.is_thread_gone(),
+            "a region hop isn't"
+        );
+    }
+
+    #[test]
+    fn the_code_is_one_word_never_the_message() {
+        let acl = json!({"errorCode": 209, "message": "AclCheckFailed: initiator 8:orgid:synthetic isn't on 92:x"});
+        assert_eq!(refused(403, &acl).service_code().as_deref(), Some("AclCheckFailed"));
+        assert_eq!(refused(403, &acl).status(), Some(403));
+        let textual = json!({"errorCode": "ThreadNotFound", "message": "Synthetic"});
+        assert_eq!(refused(404, &textual).service_code().as_deref(), Some("ThreadNotFound"));
+        for body in [
+            json!({"message": "Synthetic prose with no code"}),
+            json!({"message": "two words: synthetic"}),
+            json!({"errorCode": 403, "message": "8:orgid:synthetic"}),
+            json!([1, 2]),
+        ] {
+            assert_eq!(refused(403, &body).service_code(), None, "{body}");
+        }
+        assert_eq!(service_code(b"not json"), None);
+        assert_eq!(ChatReadError::Link { expected: "x" }.status(), None);
+        assert_eq!(ChatReadError::Link { expected: "x" }.service_code(), None);
+    }
 }

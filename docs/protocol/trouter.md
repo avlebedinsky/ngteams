@@ -357,7 +357,9 @@ presence deliveries) and the web bundle `26260.1717.5229.7049` (read locally; no
 
 - **The request**: `POST <presence base>/v1/pubsub/subscriptions/<epid>`, the path ending in the endpoint's `epid`
   (the registration's GUID, the one the endpoint `PUT` names) with **no** trailing slash and no query, the presence
-  read's headers plus `x-ms-endpoint-id` (the same `epid`) and the client's caller, session and correlation ids. Its
+  read's headers plus `x-ms-endpoint-id` (the same `epid`) and the client's caller, version, session and correlation ids.
+  The lab's 51 captured subscriptions of 2026-11-04 had a fresh correlation GUID on each request, one session id per
+  browser session, and `x-ms-object-id` and `x-ms-request-id` present but empty. Its
   body: exactly `trouterUri` (the messaging socket's `surl` from `trouter.connected`, the `-f` host on port 3443, then
   `unifiedPresenceService`), `shouldPurgePreviousSubscriptions` (a boolean), `subscriptionsToAdd` and
   `subscriptionsToRemove` (each a list of `{"mri": …, "source": "ups"}`; the web client adds its own MRI too). The
@@ -397,9 +399,14 @@ The native client (`teams-core` `presence/subscription.rs`, `teams_proto::Presen
   (a connect's, a reconnect's with its new `surl`, the hourly renewal's), every 55 minutes, and once someone no longer
   watched has stayed subscribed for 6 minutes (left out rather than named in a removal: it sends no removal); anyone
   newly watched is added at once. One subscription at a time, at least 10 s apart; one that failed is tried again
-  after a minute (or its `Retry-After`). It uses the typed `PostRead` entry `presence_subscription`, with the presence read's header
-  values only (no `x-ms-endpoint-id`, caller, session ids or cookie: whether UPS takes it without `x-ms-endpoint-id`
-  is for a lab live run to show).
+  after a minute (or its `Retry-After`). It uses the typed `PostRead` entry `presence_subscription`, with the presence
+  read's header values plus `x-ms-correlation-id` (a fresh GUID for each request), `x-ms-client-version` (the
+  registration's client build, `teams_proto::CLIENT_BUILD`) and `x-ms-endpoint-id` (the path's `epid`). It sends no
+  caller, session id or cookie, and leaves `x-ms-object-id` empty as the web client does. UPS answers `400` "Missing
+  mandatory header '<name>'" without the correlation id, and then without the client version. Until 2026-11-04 every
+  try got that answer (a lab account's and a personal build's logs), so no change came live and the reads polled every
+  minute. A lab run of that day had a's subscription of a, b and the user's account answered `200` (`20200` each),
+  the snapshot delivered, and b's start reached a as a pushed `Available` change.
 - A delivery at the endpoint's `unifiedPresenceService` path becomes `PushEvent::Presence`, never answered; the engine
   applies each watched person's availability as a read's would be applied, telling each change once
   (`Event::Presence`). A stored replay is left alone: it is up to ten minutes old, and the connect's subscription

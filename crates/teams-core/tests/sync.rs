@@ -813,6 +813,171 @@ async fn a_conversation_the_service_refuses_keeps_no_catch_up_due_but_is_synced_
     assert!(!gaps.is_due());
 }
 
+// --- threads the account can't read ---
+
+/// A team thread the account left, one deleted for good and one the service doesn't know; made-up ids, each told apart
+/// by its last hex digits.
+const LEFT: &str = "19:00000000000000000000000000000a1e@thread.tacv2";
+const GONE: &str = "19:000000000000000000000000000090e0@thread.tacv2";
+const MISSING: &str = "19:00000000000000000000000000000155@thread.v2";
+
+/// The chat service's error answer, in its nested form, with `code` (its text made up).
+fn service_error(status: u16, code: &str) -> Value {
+    json!({
+        "errorCode": status,
+        "message": json!({"errorCode": status, "message": "Synthetic refusal.", "subErrorCode": code}).to_string(),
+        "standardizedError": {"errorCode": status, "errorSubCode": 1, "errorSubCodeString": code},
+    })
+}
+
+/// Every read of the conversation whose id ends in `hex` (its messages, its thread) answered `status` with `code`.
+async fn refuse_reads(server: &MockServer, hex: &str, status: u16, code: &str) {
+    Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path_regex(format!("{hex}(@|%40)thread")))
+        .respond_with(ResponseTemplate::new(status).set_body_json(service_error(status, code)))
+        .with_priority(1)
+        .mount(server)
+        .await;
+}
+
+/// How many reads went to the conversation whose id ends in `hex`.
+async fn reads_of(server: &MockServer, hex: &str) -> usize {
+    let requests = server.received_requests().await.unwrap();
+    requests
+        .iter()
+        .filter(|request| request.url.path().contains(hex))
+        .count()
+}
+
+#[tokio::test]
+async fn a_thread_the_account_left_is_skipped_once_and_not_kept_to_be_synced() {
+    let server = MockServer::start().await;
+    mount_list(&server, vec![listed(LEFT, 2)], "l1").await;
+    refuse_reads(&server, "0a1e", 403, "AclCheckFailed").await;
+    let mut a = Account::on(&server.uri(), LAB_A, "placeholder-token");
+    let mut gaps = Gaps::new();
+    gaps.connected();
+    let report = a
+        .catch_up
+        .catch_up_if_due(&mut a.store, &mut gaps)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(report.failed.is_empty(), "{report:?}");
+    assert_eq!(
+        report.unreadable,
+        [teams_core::Unreadable {
+            conversation: LEFT.to_owned(),
+            status: 403,
+            code: Some("AclCheckFailed".to_owned()),
+            forgotten: false,
+        }]
+    );
+    assert!(report.caught_up() && !gaps.is_due());
+    assert!(a.store.unsynced_conversations().unwrap().is_empty(), "not kept");
+    assert_eq!(a.store.conversation_list_sync_link().unwrap(), Some(list_link("l1")));
+    assert!(
+        a.store.conversation(LEFT).unwrap().is_some(),
+        "what the list said of it stays"
+    );
+    let read = reads_of(&server, "0a1e").await;
+    assert!(read > 0);
+
+    // the list doesn't bring it again: no later catch-up reads it
+    server.reset().await;
+    mount_list(&server, vec![], "l2").await;
+    refuse_reads(&server, "0a1e", 403, "AclCheckFailed").await;
+    gaps.missed();
+    let report = a
+        .catch_up
+        .catch_up_if_due(&mut a.store, &mut gaps)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(report.failed.is_empty() && report.unreadable.is_empty(), "{report:?}");
+    assert_eq!(reads_of(&server, "0a1e").await, 0);
+}
+
+#[tokio::test]
+async fn threads_kept_from_an_earlier_build_are_left_and_a_deleted_one_forgotten() {
+    let server = MockServer::start().await;
+    mount_list(&server, vec![], "l1").await;
+    refuse_reads(&server, "0a1e", 403, "AclCheckFailed").await;
+    refuse_reads(&server, "90e0", 404, "ThreadNotFound").await;
+    refuse_reads(&server, "0155", 404, "RequestHandlerException").await;
+    let mut a = Account::on(&server.uri(), LAB_A, "placeholder-token");
+    // what a build before this one kept: each refused conversation to be synced again by every catch-up
+    for id in [LEFT, GONE, MISSING] {
+        a.store
+            .upsert_conversation(&Conversation {
+                id: id.to_owned(),
+                kind: ConversationKind::Group,
+                topic: None,
+                version: 1,
+                last_activity: None,
+            })
+            .unwrap();
+        a.store.set_unsynced(id).unwrap();
+    }
+    let report = a.catch_up.catch_up(&mut a.store).await.unwrap();
+    assert!(report.failed.is_empty(), "{report:?}");
+    let left: Vec<(&str, u16, Option<&str>, bool)> = report
+        .unreadable
+        .iter()
+        .map(|unreadable| {
+            (
+                unreadable.conversation.as_str(),
+                unreadable.status,
+                unreadable.code.as_deref(),
+                unreadable.forgotten,
+            )
+        })
+        .collect();
+    assert_eq!(
+        left,
+        [
+            (MISSING, 404, Some("RequestHandlerException"), false),
+            (LEFT, 403, Some("AclCheckFailed"), false),
+            (GONE, 404, Some("ThreadNotFound"), true),
+        ]
+    );
+    assert!(a.store.unsynced_conversations().unwrap().is_empty());
+    assert_eq!(
+        a.store.conversation(GONE).unwrap(),
+        None,
+        "a deleted thread is forgotten"
+    );
+    assert!(a.store.conversation(LEFT).unwrap().is_some());
+    assert!(
+        a.store.conversation(MISSING).unwrap().is_some(),
+        "only a thread named gone is forgotten"
+    );
+    assert_eq!(
+        a.catch_up.take_changes().conversations,
+        [GONE],
+        "the forgotten one is told, so a view drops it"
+    );
+
+    // none of them is read again
+    let before: usize = [
+        reads_of(&server, "0a1e").await,
+        reads_of(&server, "90e0").await,
+        reads_of(&server, "0155").await,
+    ]
+    .iter()
+    .sum();
+    let report = a.catch_up.catch_up(&mut a.store).await.unwrap();
+    assert!(report.failed.is_empty() && report.unreadable.is_empty(), "{report:?}");
+    let after: usize = [
+        reads_of(&server, "0a1e").await,
+        reads_of(&server, "90e0").await,
+        reads_of(&server, "0155").await,
+    ]
+    .iter()
+    .sum();
+    assert_eq!(after, before);
+}
+
 // --- the outbox's check ---
 
 #[tokio::test]

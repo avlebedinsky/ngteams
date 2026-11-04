@@ -445,8 +445,9 @@ fn entity_request(kind: SearchKind, query: &str, all: bool, size: u32, from: u32
     }
 }
 
-/// A fresh lowercase GUID: a search's correlation ids (`cvid`, `logicalId`), which name nothing of the account.
-fn fresh_id() -> String {
+/// A fresh lowercase GUID: a search's correlation ids (`cvid`, `logicalId`) and a presence subscription's, which name
+/// nothing of the account.
+pub(crate) fn fresh_id() -> String {
     let mut bytes = [0_u8; 16];
     if getrandom::fill(&mut bytes).is_err() {
         // a correlation id only: a fixed one asks the same

@@ -7,7 +7,7 @@ use serde::Deserialize;
 use serde_json::Value;
 
 use crate::endpoint::{Endpoint, Method, Service};
-use crate::own::{RegisteredEndpoint, is_guid, is_push_url};
+use crate::own::{CLIENT_BUILD, RegisteredEndpoint, is_guid, is_push_url};
 use crate::request::Request;
 
 /// A reviewed read by `POST` (see the module docs). Sealed: no other crate can implement it.
@@ -60,7 +60,7 @@ pub(crate) mod sealed {
         fn wire(&self) -> PostReadWire {
             PostReadWire {
                 endpoint: self.wire_endpoint(),
-                headers: Vec::new(),
+                headers: self.wire_headers(),
                 body: self.wire_body(),
             }
         }
@@ -88,7 +88,8 @@ pub(crate) mod sealed {
 
 /// An entry's shape as the capture showed it: the service, the path under its base (and whether the account's own
 /// endpoint ends it), the query (each pair once, nothing else, in any order), the headers it is sent with besides the
-/// token (each once, exactly these values, all of them) and its body's schema. Only this crate makes or reads one.
+/// token (each once, exactly these values, all of them; and each of its id headers once) and its body's schema. Only
+/// this crate makes or reads one.
 #[derive(Debug)]
 pub struct Shape {
     service: Service,
@@ -97,7 +98,20 @@ pub struct Shape {
     endpoint: bool,
     query: &'static [(&'static str, &'static str)],
     headers: &'static [(&'static str, &'static str)],
+    /// Headers that carry an id rather than a fixed value, each sent once (see [`IdHeader`]).
+    ids: &'static [(&'static str, IdHeader)],
     body: Body,
+}
+
+/// What an id header of a [`Shape`] carries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IdHeader {
+    /// A fresh lowercase GUID for each request, naming nothing of the account (a correlation id).
+    Fresh,
+    /// The account's Trouter endpoint, the one the path ends with.
+    Endpoint,
+    /// The client build the endpoint's registration names ([`CLIENT_BUILD`]).
+    Build,
 }
 
 /// The schema of an entry's body, which names the MRIs it asks about.
@@ -240,19 +254,46 @@ impl Shape {
         headers: &[(String, String)],
         body: &[u8],
     ) -> Option<Vec<Mri>> {
-        let path = if self.endpoint {
+        let (path, endpoint) = if self.endpoint {
             let (endpoint, rest) = path.split_last()?;
             if !is_guid(endpoint) {
                 return None;
             }
-            rest
+            (rest, Some(endpoint.as_str()))
         } else {
-            path
+            (path, None)
         };
+        let fixed = self.without_ids(headers, endpoint)?;
         let same_path = path.iter().map(String::as_str).eq(self.path.iter().copied());
-        (same_path && same_pairs(query, self.query) && same_pairs(headers, self.headers))
+        (same_path && same_pairs(query, self.query) && same_pairs(&fixed, self.headers))
             .then(|| self.body.read(body))
             .flatten()
+    }
+
+    /// `headers` but the shape's id headers, when each of those is there once with what it carries (a lowercase GUID,
+    /// `endpoint` or the client build); `None` otherwise.
+    fn without_ids(&self, headers: &[(String, String)], endpoint: Option<&str>) -> Option<Vec<(String, String)>> {
+        for (name, id) in self.ids {
+            let mut values = headers.iter().filter(|(sent, _)| sent == name).map(|(_, value)| value);
+            let (Some(value), None) = (values.next(), values.next()) else {
+                return None;
+            };
+            let carries = match id {
+                IdHeader::Fresh => is_guid(value),
+                IdHeader::Endpoint => endpoint == Some(value.as_str()),
+                IdHeader::Build => value == CLIENT_BUILD,
+            };
+            if !carries {
+                return None;
+            }
+        }
+        Some(
+            headers
+                .iter()
+                .filter(|(sent, _)| !self.ids.iter().any(|(name, _)| sent == name))
+                .cloned()
+                .collect(),
+        )
     }
 }
 
@@ -301,6 +342,7 @@ static SHORT_PROFILE: Shape = Shape {
     endpoint: false,
     query: LOOKUP_QUERY,
     headers: LOOKUP_HEADERS,
+    ids: &[],
     body: Body::Mris,
 };
 
@@ -328,6 +370,7 @@ static PRESENCE: Shape = Shape {
     endpoint: false,
     query: &[],
     headers: PRESENCE_HEADERS,
+    ids: &[],
     body: Body::MriObjects,
 };
 
@@ -605,17 +648,33 @@ const UPS_SOURCE: &str = "ups";
 /// The status UPS gave every subscription it took in the captures (its web client's "success").
 const SUBSCRIBED: i64 = 20_200;
 
-/// `v1/pubsub/subscriptions/<endpoint>` (see [`PresenceSubscription`]): the presence read's headers, as the presence
-/// read sends them (no `x-ms-endpoint-id`, which every captured subscription carried with the path's endpoint again,
-/// no caller, session or correlation ids, no cookie), and no trailing slash, as no captured one had.
+/// `v1/pubsub/subscriptions/<endpoint>` (see [`PresenceSubscription`]): the presence read's headers, with
+/// `x-ms-correlation-id` (a fresh GUID each time), `x-ms-client-version` (the client build the registration names) and
+/// `x-ms-endpoint-id` (the path's endpoint again), as every captured subscription carried them. UPS answers a
+/// subscription without the correlation id or the client version 400 ("Missing mandatory header"). No caller or session
+/// id and no cookie. No trailing slash, as no captured one had.
 static PRESENCE_SUBSCRIPTION: Shape = Shape {
     service: Service::Presence,
     path: &["v1", "pubsub", "subscriptions"],
     endpoint: true,
     query: &[],
     headers: PRESENCE_HEADERS,
+    ids: &[
+        (CORRELATION_ID, IdHeader::Fresh),
+        (CLIENT_VERSION, IdHeader::Build),
+        (ENDPOINT_ID, IdHeader::Endpoint),
+    ],
     body: Body::Subscription,
 };
+
+/// The header a subscription's correlation id goes in.
+const CORRELATION_ID: &str = "x-ms-correlation-id";
+
+/// The header that names the subscribing endpoint again.
+const ENDPOINT_ID: &str = "x-ms-endpoint-id";
+
+/// The header that names the client's build.
+const CLIENT_VERSION: &str = "x-ms-client-version";
 
 /// `POST <presence base>/v1/pubsub/subscriptions/<endpoint>` with `{"trouterUri": "<push URL>unifiedPresenceService",
 /// "shouldPurgePreviousSubscriptions": …, "subscriptionsToAdd": [{"mri": …, "source": "ups"}, …],
@@ -728,6 +787,15 @@ impl PresenceSubscription {
         )
     }
 
+    /// Its id headers: a fresh correlation id, the client build and its endpoint.
+    fn wire_headers(&self) -> Vec<(String, String)> {
+        vec![
+            (CORRELATION_ID.to_owned(), crate::search::fresh_id()),
+            (CLIENT_VERSION.to_owned(), CLIENT_BUILD.to_owned()),
+            (ENDPOINT_ID.to_owned(), self.endpoint.clone()),
+        ]
+    }
+
     fn wire_body(&self) -> Value {
         serde_json::json!({
             "trouterUri": format!("{}{PRESENCE_PUSH_PATH}", self.push_url),
@@ -753,6 +821,10 @@ impl Request for PresenceSubscription {
 
     fn body(&self) -> Option<Value> {
         Some(self.wire_body())
+    }
+
+    fn headers(&self) -> Vec<(String, String)> {
+        self.wire_headers()
     }
 }
 
@@ -857,5 +929,64 @@ impl PostRead for ProbePostRead {
 
     fn names(&self) -> &[Mri] {
         &self.names
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! The endpoint, push URL and MRI here are synthetic.
+
+    use super::*;
+
+    const EPID: &str = "00000000-0000-4000-8000-0000000000e1";
+    const PUSH_URL: &str = "https://pub-ent-zz-01-f.trouter.teams.microsoft.com:3443/v4/f/SyntheticEndpoint00000A/";
+
+    /// What the subscription shape reads back from a request to `EPID` with the presence read's headers and `ids`.
+    fn read_back(ids: &[(&str, &str)]) -> Option<Vec<Mri>> {
+        let path: Vec<String> = ["v1", "pubsub", "subscriptions", EPID].map(str::to_owned).to_vec();
+        let headers: Vec<(String, String)> = PRESENCE_HEADERS
+            .iter()
+            .chain(ids)
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect();
+        let body = serde_json::json!({
+            "trouterUri": format!("{PUSH_URL}{PRESENCE_PUSH_PATH}"),
+            "shouldPurgePreviousSubscriptions": true,
+            "subscriptionsToAdd": [{"mri": "8:orgid:lab-b", "source": "ups"}],
+            "subscriptionsToRemove": [],
+        });
+        PRESENCE_SUBSCRIPTION.read_back(&path, &[], &headers, body.to_string().as_bytes())
+    }
+
+    #[test]
+    fn a_subscription_goes_only_with_one_correlation_id_and_its_own_endpoint_again() {
+        let fresh = crate::search::fresh_id();
+        let fresh = fresh.as_str();
+        assert_eq!(
+            read_back(&[
+                (CORRELATION_ID, fresh),
+                (CLIENT_VERSION, CLIENT_BUILD),
+                (ENDPOINT_ID, EPID)
+            ]),
+            Some(vec![Mri::new("8:orgid:lab-b")])
+        );
+        let other = "00000000-0000-4000-8000-0000000000e2";
+        let build = (CLIENT_VERSION, CLIENT_BUILD);
+        for ids in [
+            vec![build, (ENDPOINT_ID, EPID)],
+            vec![(CORRELATION_ID, fresh), build],
+            vec![(CORRELATION_ID, fresh), (ENDPOINT_ID, EPID)],
+            vec![(CORRELATION_ID, fresh), (CLIENT_VERSION, "1415/0"), (ENDPOINT_ID, EPID)],
+            vec![(CORRELATION_ID, "not-a-guid"), build, (ENDPOINT_ID, EPID)],
+            vec![
+                (CORRELATION_ID, fresh),
+                (CORRELATION_ID, other),
+                build,
+                (ENDPOINT_ID, EPID),
+            ],
+            vec![(CORRELATION_ID, fresh), build, (ENDPOINT_ID, other)],
+        ] {
+            assert_eq!(read_back(&ids), None, "{ids:?}");
+        }
     }
 }

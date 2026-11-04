@@ -10,6 +10,12 @@
 //!   members) whether or not the list brings it, until it syncs, so no conversation holds the list back. A conversation the
 //!   service refuses ([`ConversationFailed::is_refused`]) keeps no catch-up due ([`CatchUpReport::caught_up`]); the
 //!   account's drafts ([`DRAFTS`]), whose messages the service won't give, are never read.
+//! - **Threads the account can't read** ([`Unreadable`]): the list still brings threads the account left or was removed
+//!   from (their reads answer 403 `AclCheckFailed`) and threads deleted for good (404 `ThreadNotFound`). Such a
+//!   conversation isn't kept to be synced again: reading it again changes nothing, and if the account is added back the
+//!   list brings it with a newer version, which syncs it. A deleted one is forgotten ([`Store::forget_conversation`],
+//!   told as a change so the views drop it), but the account's own notes, whose 404 means none yet. Each is one `info`
+//!   line naming the status and the service's code, never its answer.
 //! - **A conversation's messages** ([`CatchUp::sync_messages`]): the first read is the newest page, whose
 //!   `backwardLink` is kept for older history ([`CatchUp::load_older`]); every later one follows the conversation's
 //!   sync link, which brings what changed since (`docs/protocol/chat.md`, "Sync answers"). A gap is bounded by the
@@ -220,6 +226,8 @@ pub struct CatchUpReport {
     /// ([`Store::unsynced_conversations`]), so the list's sync link moves on past it; the account's own notes
     /// ([`NOTES`]), which the list never brings, are synced again by it all the same.
     pub failed: Vec<ConversationFailed>,
+    /// Conversations the account can't read (not a member, or deleted): not synced, and not kept to be.
+    pub unreadable: Vec<Unreadable>,
 }
 
 impl CatchUpReport {
@@ -250,6 +258,38 @@ impl ConversationFailed {
             CatchUpError::Read(ChatReadError::Http(HttpError::Status(answer)))
                 if matches!(answer.status(), 400 | 403 | 404 | 410)
         )
+    }
+}
+
+/// A conversation the account can't read, as the service answered its sync: 403 (the account isn't on the thread's
+/// roster: it left, or was removed), 404 without a `Location` (the thread isn't there) or 410. It isn't kept to be
+/// synced again ([`Store::set_synced`]): the list brings it again, at a newer version, if the account is added back.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Unreadable {
+    pub conversation: String,
+    /// The status the service answered.
+    pub status: u16,
+    /// The service's code for it (`AclCheckFailed`, `ThreadNotFound`, …) when its answer named one.
+    pub code: Option<String>,
+    /// The thread is gone (a 404 naming `ThreadNotFound`: hard-deleted), so the store forgot it
+    /// ([`Store::forget_conversation`]).
+    pub forgotten: bool,
+}
+
+impl Unreadable {
+    /// What a conversation's failed sync says of it, when it is one the account can't read; `None` for any other
+    /// failure.
+    fn of(conversation: &str, error: &CatchUpError) -> Option<Self> {
+        let CatchUpError::Read(read @ ChatReadError::Http(HttpError::Status(answer))) = error else {
+            return None;
+        };
+        matches!(answer.status(), 403 | 404 | 410).then(|| Self {
+            conversation: conversation.to_owned(),
+            status: answer.status(),
+            code: read.service_code(),
+            // the notes' 404 is no notes yet, never a thread gone
+            forgotten: read.is_thread_gone() && conversation != NOTES,
+        })
     }
 }
 
@@ -557,14 +597,14 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         let mut kept = true;
         for conversation in conversations {
             let result = self.catch_up_conversation(store, conversation).await;
-            kept &= settle(store, &conversation.id, result, report);
+            kept &= self.settle(store, &conversation.id, result, report);
         }
         for id in unsynced {
             if conversations.iter().any(|listed| listed.id == id) {
                 continue;
             }
             let result = self.resync(store, &id).await;
-            kept &= settle(store, &id, result, report);
+            kept &= self.settle(store, &id, result, report);
         }
         Ok(kept)
     }
@@ -921,7 +961,7 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
     /// One conversation of the list: kept, its messages synced when it is new or changed, then what the list says of
     /// it (its row, whether it is empty, its read horizon, its members) whether or not they synced. Messages that
     /// failed keep the conversation to be synced again before its new version is stored, so neither a later catch-up
-    /// nor a later listing of it skips them.
+    /// nor a later listing of it skips them; but not when the account can't read it ([`Unreadable`]).
     async fn catch_up_conversation(
         &self,
         store: &mut Store,
@@ -942,7 +982,9 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
         } else {
             Ok(Synced::default())
         };
-        if messages.is_err() {
+        if let Err(error) = &messages
+            && Unreadable::of(&listed.id, error).is_none()
+        {
             store.set_unsynced(&listed.id)?;
         }
         self.store_listing(store, listed, stored.as_ref(), version)?;
@@ -1005,6 +1047,67 @@ impl<C: Credentials, T: Transport<Error = HttpError>> CatchUp<C, T> {
             }),
         }
         Ok(())
+    }
+
+    /// Keeps what became of one conversation's sync in a catch-up: in `report`, and in the store as synced or to be
+    /// synced again by every later catch-up; one the account can't read as neither ([`CatchUp::leave_unreadable`]).
+    /// Whether the store kept it: when it couldn't, the list's sync link stays.
+    fn settle(
+        &self,
+        store: &mut Store,
+        conversation: &str,
+        result: Result<Synced, CatchUpError>,
+        report: &mut CatchUpReport,
+    ) -> bool {
+        let error = match result {
+            Ok(synced) => {
+                report.messages.add(synced);
+                // one that stays kept is only synced once more
+                if let Err(error) = store.set_synced(conversation) {
+                    log::warn!("catch-up: conversation {conversation} synced, but still kept to be synced: {error}");
+                }
+                return true;
+            }
+            Err(error) => error,
+        };
+        if let Some(unreadable) = Unreadable::of(conversation, &error) {
+            return self.leave_unreadable(store, unreadable, report);
+        }
+        let kept = store.set_unsynced(conversation);
+        if let Err(kept) = &kept {
+            log::warn!("catch-up: conversation {conversation} can't be kept to be synced again: {kept}");
+        }
+        report.failed.push(ConversationFailed {
+            conversation: conversation.to_owned(),
+            error,
+        });
+        kept.is_ok()
+    }
+
+    /// A conversation the account can't read ([`Unreadable`]): no longer kept to be synced again, or forgotten when its
+    /// thread is gone (told as a change, so a view showing it drops it). One `info` line tells which, with the status
+    /// and the service's code, never its answer. Whether the store kept that.
+    fn leave_unreadable(&self, store: &mut Store, unreadable: Unreadable, report: &mut CatchUpReport) -> bool {
+        let id = unreadable.conversation.as_str();
+        let (status, code) = (unreadable.status, unreadable.code.as_deref().unwrap_or("no code"));
+        let left = if unreadable.forgotten {
+            log::info!("catch-up: conversation {id} forgotten: the service answered HTTP {status} ({code}), deleted");
+            store.forget_conversation(id).map(|forgot| {
+                if forgot {
+                    self.changed(|changes| changes.conversation(id));
+                }
+            })
+        } else {
+            log::info!(
+                "catch-up: conversation {id} skipped: the service answered HTTP {status} ({code}), not readable"
+            );
+            store.set_synced(id).map(|_| ())
+        };
+        if let Err(error) = &left {
+            log::warn!("catch-up: conversation {id} can't be left unsynced: {error}");
+        }
+        report.unreadable.push(unreadable);
+        left.is_ok()
     }
 
     /// A conversation the store doesn't know, read as a thread: kept at version 0 (the list's version replaces it),
@@ -1144,11 +1247,13 @@ impl<C: Credentials, T: Transport<Error = HttpError> + Send> ConversationSync fo
 /// Logs what a catch-up did.
 fn log_report(report: &CatchUpReport, first: bool) {
     log::info!(
-        "catch-up: {} conversation(s) listed ({} skipped), {} message(s) new, {} newer, {} failed{}",
+        "catch-up: {} conversation(s) listed ({} skipped), {} message(s) new, {} newer, {} skipped (not a member or \
+         deleted), {} failed{}",
         report.conversations,
         report.skipped,
         report.messages.inserted,
         report.messages.updated,
+        report.unreadable.len(),
         report.failed.len(),
         if first { " (the first)" } else { "" }
     );
@@ -1158,37 +1263,6 @@ fn log_report(report: &CatchUpReport, first: bool) {
             failed.conversation,
             failed.error
         );
-    }
-}
-
-/// Keeps what became of one conversation's sync in a catch-up: in `report`, and in the store as synced or to be synced
-/// again by every later catch-up. Whether the store kept it: when it couldn't, the list's sync link stays.
-fn settle(
-    store: &mut Store,
-    conversation: &str,
-    result: Result<Synced, CatchUpError>,
-    report: &mut CatchUpReport,
-) -> bool {
-    match result {
-        Ok(synced) => {
-            report.messages.add(synced);
-            // one that stays kept is only synced once more
-            if let Err(error) = store.set_synced(conversation) {
-                log::warn!("catch-up: conversation {conversation} synced, but still kept to be synced: {error}");
-            }
-            true
-        }
-        Err(error) => {
-            let kept = store.set_unsynced(conversation);
-            if let Err(kept) = &kept {
-                log::warn!("catch-up: conversation {conversation} can't be kept to be synced again: {kept}");
-            }
-            report.failed.push(ConversationFailed {
-                conversation: conversation.to_owned(),
-                error,
-            });
-            kept.is_ok()
-        }
     }
 }
 
