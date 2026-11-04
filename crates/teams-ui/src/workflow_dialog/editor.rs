@@ -302,8 +302,10 @@ impl WorkflowDialog {
             )
             .child("Workflow name")
             .child(selected_by("workflow-name", Input::new(&self.name)))
-            .child(self.connections_view(palette, cx))
-            .child(self.config_fields(palette))
+            .when(matches!(self.editor_mode, EditorMode::Form), |view| {
+                view.child(self.connections_view(palette, cx))
+                    .child(self.config_fields(palette))
+            })
             .child(selected_by(
                 "workflow-definition-toggle",
                 Button::new("workflow-definition-toggle")
@@ -353,7 +355,8 @@ impl WorkflowDialog {
     fn toggle_definition(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if matches!(self.editor_mode, EditorMode::Form) {
             match self.configured(cx) {
-                Ok(properties) => {
+                Ok(mut properties) => {
+                    self.carry_connection_choices(&mut properties);
                     self.definition.update(cx, |state, cx| {
                         state.set_value(
                             serde_json::to_string_pretty(&properties).unwrap_or_default(),

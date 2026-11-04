@@ -63,6 +63,22 @@ impl WorkflowDialog {
             .collect();
     }
 
+    pub(super) fn carry_connection_choices(&self, properties: &mut Value) {
+        let Some(references) = properties
+            .get_mut("connectionReferences")
+            .and_then(Value::as_object_mut)
+        else {
+            return;
+        };
+        for binding in &self.bindings {
+            if let (Some(selected), Some(Value::Object(reference))) =
+                (&binding.selected, references.get_mut(&binding.key))
+            {
+                reference.insert("connectionName".to_owned(), Value::String(selected.clone()));
+            }
+        }
+    }
+
     pub(super) fn bind_connections(&self, properties: &mut Value) -> Result<(), &'static str> {
         let mut references = match properties.get("connectionReferences") {
             Some(Value::Object(references)) => references.clone(),

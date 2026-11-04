@@ -565,3 +565,66 @@ fn advanced_definition_saves_its_current_connection_references_without_losing_un
     assert!(saved["connectionReferences"].get("legacy").is_none());
     assert!(saved["definition"]["actions"].get("new_action").is_some());
 }
+
+#[test]
+fn connection_choices_survive_switching_to_advanced_definition_and_back() {
+    let (rig, _view, cx) = managed_window();
+    click(cx, "workflow-template-synthetic-template");
+    choose_connection(cx, 0);
+    choose_connection(cx, 1);
+    click(cx, "workflow-definition-toggle");
+    assert!(bounds(cx, "workflow-connection-0").is_none());
+    assert!(bounds(cx, "workflow-config-0").is_none());
+    click(cx, "workflow-save");
+    let first = rig
+        .core
+        .workflow_requests
+        .lock()
+        .unwrap()
+        .iter()
+        .find_map(|request| match request {
+            WorkflowRequest::Create { properties, .. } => Some(properties.clone()),
+            _ => None,
+        })
+        .expect("selected form connections survive advanced-mode save");
+    for key in ["legacy", "teams"] {
+        assert_eq!(
+            first["connectionReferences"][key]["connectionName"],
+            "synthetic-connection"
+        );
+    }
+    *rig.core.workflow_handler.lock().unwrap() = Some(existing_account_answer);
+    click(cx, "workflow-open-synthetic-flow");
+    click(cx, "workflow-edit");
+    choose_connection(cx, 0);
+    choose_connection(cx, 1);
+    click(cx, "workflow-definition-toggle");
+    click(cx, "workflow-definition-toggle");
+    assert!(bounds(cx, "workflow-connection-0").is_some());
+    click(cx, "workflow-save");
+    let requests = rig.core.workflow_requests.lock().unwrap();
+    let updated = requests
+        .iter()
+        .find_map(|request| match request {
+            WorkflowRequest::Update { properties, .. } => Some(properties),
+            _ => None,
+        })
+        .expect("an existing workflow's changed account is saved");
+    for key in ["legacy", "teams"] {
+        assert_eq!(
+            updated["connectionReferences"][key]["connectionName"],
+            "synthetic-connection"
+        );
+    }
+}
+
+fn existing_account_answer(request: &WorkflowRequest) -> teams_proto::WorkflowResponse {
+    let mut value = managed_answer(request)?;
+    if matches!(request, WorkflowRequest::Get { .. }) {
+        for key in ["legacy", "teams"] {
+            value["properties"]["connectionReferences"][key]["connectionName"] =
+                serde_json::json!("previous-connection");
+        }
+    }
+    Ok(value)
+}
