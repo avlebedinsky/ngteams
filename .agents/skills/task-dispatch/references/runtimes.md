@@ -37,7 +37,7 @@ and schemas exposed by the session. Never invent a tool or start a nested CLI to
   idle worker with the runtime's follow-up/resume tool (`collaboration.followup_task` where exposed); a message
   alone may not start another turn. Close/interrupt only workers owned by this board, using available lifecycle tools.
 - After dispatching or answering an ETA/status question, keep the turn active with `collaboration.wait_agent` when
-  exposed, using `timeout_ms: 60000` or less. This waits for agent mailbox updates and can return early for user input;
+  exposed, using `timeout_ms: 60000`. This waits for agent mailbox updates and can return early for user input;
   it returns a summary, so consume the delivered messages/results before updating the board. A timeout is not a
   completion: process any newly eligible work and wait again without a heartbeat message. Handle user steering in
   commentary and resume monitoring. Agent events can arrive at message/tool boundaries; recheck for queued results
@@ -79,8 +79,9 @@ that dispatch mode cannot run in this host and keep the board recoverable; do no
 
 Chat completion is required on every host. In ngterm (`NGTERM_ENABLED=1`), also use its native notifier once the
 current drain's required tasks, reviews, checks, and cleanup are complete. Recheck newly received task events first;
-a new task reopens the drain. Blocked or waiting work prevents this notice. Disclose explicitly deferred/canceled
-tasks in the completion summary and notification body.
+a new task reopens the drain. Waiting, blocked, or failed work prevents this notice, including a failed landing or
+preserved unfinished work. Only tasks explicitly deferred or canceled by the user are exclusions; disclose them
+in the completion summary and notification body.
 
 When `ngtermctl notify` and this session's `NGTERM_SESSION_ID`/`NGTERM_SOCKET` are available, arm
 `completion_notice.desktop_pending` in the same atomic board write as the chat's pending flag, before posting either

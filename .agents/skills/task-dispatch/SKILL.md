@@ -89,8 +89,9 @@ pending flags and sent timestamps. When all required tasks, checks, cleanup, and
 pending and promptly announce that all tasks are done in commentary. Record delivery before the final response ends
 the turn. In ngterm also send one native desktop notification, using the separate desktop receipt and instructions
 in the runtime reference. Resume pending notices; don't repeat a channel already sent for the same drain. Report
-waiting/blocked work distinctly; it prevents all-done notices. Disclose any tasks explicitly deferred or canceled by
-the user as exclusions. An eligible review is work remaining even after the last implementation worker returns.
+waiting, blocked, or failed work distinctly; it prevents all-done notices, including a failed landing or preserved
+unfinished work. Only tasks explicitly deferred or canceled by the user are exclusions; disclose them in the
+completion summary. An eligible review is work remaining even after the last implementation worker returns.
 
 States: `queued`, `running`, `waiting on user`, `landed <hash>`, `done` (read-only result), and `failed`. Record the
 question for a waiting task. Keep unfinished tasks' original words, follow-ups, relevant standing instructions,
