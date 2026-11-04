@@ -113,17 +113,17 @@ impl Inbox {
                 self.answer(store, query);
                 None
             }
-            Request::Call(_, reply) if self.stopping.load(Ordering::Relaxed) => {
+            Request::Call(_, _, reply) if self.stopping.load(Ordering::Relaxed) => {
                 log::info!("a call action came after the engine's shutdown: refused");
                 let _ = reply.send(Err(EngineError::Stopped));
                 None
             }
-            Request::Call(action, reply) => match self.calls.get() {
+            Request::Call(action, asked, reply) => match self.calls.get() {
                 Some(calls) => {
-                    super::hand_call(store, &self.me, calls, action, reply);
+                    super::hand_call(store, &self.me, calls, action, asked, reply);
                     None
                 }
-                None => Some(Request::Call(action, reply)),
+                None => Some(Request::Call(action, asked, reply)),
             },
             Request::Person(mri, reply) => {
                 let person = store.profile(&mri).and_then(|stored| {

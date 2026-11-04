@@ -829,6 +829,21 @@ fn a_start_the_engine_never_tells_is_given_up_and_said_and_call_comes_back() {
     assert_eq!(kinds(refused.last().unwrap()), ["call", "not-told"]);
     assert!(drawn(cx, "call-after"), "the user is told");
     assert!(drawn(cx, "chat-call"), "Call is offered again");
+
+    // asked again; the engine then refuses the first as late (it was said already): the second stays asked
+    click(cx, "chat-call");
+    assert!(!drawn(cx, "chat-call"), "the second start is asked");
+    let held = std::mem::take(&mut *rig.core.held_calls.lock().unwrap());
+    assert_eq!(held.len(), 2);
+    let mut held = held.into_iter();
+    held.next().unwrap().send(Err(EngineError::Call(CallActionError::Late)));
+    cx.run_until_parked();
+    assert!(!drawn(cx, "chat-call"), "the second start is still asked");
+    let told = rig.cx.read(|cx| calls_of(&rig).read(cx).refused().cloned());
+    assert!(
+        told.is_none_or(|told| !told.text.contains("too long")),
+        "the late refusal isn't told again"
+    );
 }
 
 #[test]

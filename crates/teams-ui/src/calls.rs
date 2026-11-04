@@ -552,6 +552,8 @@ pub struct Calls {
     asked: Option<(CallKind, Option<String>)>,
     /// How many starts or joins were asked for: which one [`START_TOLD_WITHIN`] gives up on.
     starts: u64,
+    /// The start or join (its number) given up on untold: the engine's late refusal of it is not told again.
+    gave_up: Option<u64>,
     running: BTreeSet<String>,
     ended: Option<Ended>,
     refused: Option<Refused>,
@@ -1082,6 +1084,7 @@ impl Calls {
             return false;
         }
         self.asked = None;
+        self.gave_up = Some(start);
         self.refuse(ask, "not-told", local_refusal_text("not-told"), cx);
         true
     }
@@ -1113,6 +1116,7 @@ impl Calls {
     fn answered(
         &mut self,
         ask: &Ask,
+        start: Option<u64>,
         action: &CallAction,
         answer: Result<CallId, EngineError>,
         cx: &mut Context<Self>,
@@ -1133,9 +1137,16 @@ impl Calls {
                 cx.notify();
             }
             Err(error) => {
-                if ask.starts().is_some() {
+                if let Some(start) = start {
+                    // a start already given up on was said not to start: its refusal (the engine refuses it as late)
+                    // says nothing more, and leaves a start asked since alone
+                    if self.gave_up == Some(start) {
+                        return;
+                    }
                     // the one start asked for (another is refused as busy meanwhile)
-                    self.asked = None;
+                    if self.starts == start {
+                        self.asked = None;
+                    }
                 }
                 // a camera the media couldn't turn on (its device missing, the portal refusing it): it doesn't work
                 if let (CallAction::Camera { call, on: true }, EngineError::Call(CallActionError::Media(_))) =
@@ -1160,6 +1171,7 @@ pub fn refusal_kind(error: &EngineError) -> &'static str {
         EngineError::Call(CallActionError::NoMedia) => "no-media",
         EngineError::Call(CallActionError::NoVideo) => "no-video",
         EngineError::Call(CallActionError::Media(_)) => "media",
+        EngineError::Call(CallActionError::Late) => "late",
         EngineError::Call(CallActionError::Call(teams_core::CallError::NotJoinable)) => "not-joinable",
         EngineError::Call(CallActionError::Call(_)) => "refused",
         EngineError::Stopped => "stopped",
@@ -1241,14 +1253,16 @@ pub fn ask(calls: &Entity<Calls>, core: &Arc<dyn Core>, trace: &Arc<ViewTrace>, 
             refused(&trace, &ask, refusal_kind(error));
         }
         // calls that are gone have nobody left to tell
-        let _ = weak.update(cx, |calls, cx| calls.answered(&ask, &action, answer, cx));
+        let _ = weak.update(cx, |calls, cx| calls.answered(&ask, start, &action, answer, cx));
     })
     .detach();
 }
 
 /// How long a start or a join may go untold by the engine (it tells one as its media begins to be set up, at once)
 /// before it is given up and the user told so, rather than the header's Call staying gone with nothing shown.
-pub const START_TOLD_WITHIN: Duration = Duration::from_secs(20);
+/// Longer than the engine's own bound ([`teams_core::START_WITHIN`]), past which it refuses a start rather than placing
+/// it: one given up on here never rings anyone afterwards.
+pub const START_TOLD_WITHIN: Duration = Duration::from_secs(teams_core::START_WITHIN.as_secs() + 5);
 
 /// The asks that start or join a call, by their trace names.
 const START_ASKS: [&str; 5] = ["call", "test-call", "join", "join-meeting", "meet-now"];

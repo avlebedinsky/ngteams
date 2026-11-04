@@ -615,7 +615,8 @@ enum Request {
     OwnAvailability(OwnStatus, Responder<TransientSent>),
     Sync(Responder<CatchUpReport>),
     LoadOlder(String, Responder<Option<Synced>>),
-    Call(CallAction, Responder<CallId>),
+    /// A call action, with when it was asked (a start taken too late is refused: [`crate::calling::START_WITHIN`]).
+    Call(CallAction, std::time::Instant, Responder<CallId>),
     SyncConversation(String, Responder<Synced>),
     Person(String, Responder<Person>),
     Presence(String, Responder<Availability>),
@@ -810,7 +811,8 @@ impl EngineRequests {
     /// A call action ([`crate::calling`]); the reply is the call it acted on, once the action went (a start, a join or an
     /// answer once its media was set up), or why it was refused (nothing was sent).
     pub fn call(&self, action: CallAction) -> Reply<CallId> {
-        self.ask(|reply| Request::Call(action, reply))
+        let asked = std::time::Instant::now();
+        self.ask(|reply| Request::Call(action, asked, reply))
     }
 
     /// Writes through the outbox (see the module docs); the reply is the row as its first send left it.
@@ -1872,7 +1874,7 @@ where
             Request::Transient(transient, reply) => {
                 let _ = reply.send(self.transient(transient).await);
             }
-            Request::Call(action, reply) => self.call(action, reply),
+            Request::Call(action, asked, reply) => self.call(action, asked, reply),
             Request::OwnAvailability(status, reply) => {
                 log::info!("action: own availability {status:?}");
                 let _ = reply.send(self.own_availability(status).await);
@@ -2334,9 +2336,9 @@ where
 
     /// A call action ([`EngineRequests::call`]), handed to the calling ([`hand_call`]). The inbox hands one in the
     /// same way while a catch-up's read waits.
-    fn call(&mut self, action: CallAction, reply: Responder<CallId>) {
+    fn call(&mut self, action: CallAction, asked: std::time::Instant, reply: Responder<CallId>) {
         if let Some(calls) = self.calls.as_ref().map(CallingTask::actions) {
-            hand_call(&self.store, self.me(), &calls, action, reply);
+            hand_call(&self.store, self.me(), &calls, action, asked, reply);
         } else {
             log::info!(
                 "action: {}: refused, this engine has no calling",
@@ -2659,12 +2661,27 @@ fn one_to_one_other(chat: &str, me: &str) -> Option<String> {
     (!them.is_empty() && them != own).then(|| format!("{prefix}:{them}"))
 }
 
-/// A call action, logged, resolved (a chat's call into whom it calls: [`placement`]) and handed to the calling `calls`;
-/// one that can't be resolved is answered here, logged with why.
-fn hand_call(store: &Store, me: &str, calls: &CallActions, action: CallAction, reply: Responder<CallId>) {
+/// A call action asked at `asked`, logged, resolved (a chat's call into whom it calls: [`placement`]) and handed to the
+/// calling `calls`; one that can't be resolved is answered here, logged with why. A start or a join that waited past
+/// [`START_WITHIN`](crate::calling::START_WITHIN) is refused: its view has given up on it, or is about to.
+fn hand_call(
+    store: &Store,
+    me: &str,
+    calls: &CallActions,
+    action: CallAction,
+    asked: std::time::Instant,
+    reply: Responder<CallId>,
+) {
     let described = described::call(&action);
     log::info!("action: {described}");
-    match call_act(store, me, action) {
+    let waited = asked.elapsed();
+    let act = if action.starts() && waited >= crate::calling::START_WITHIN {
+        log::warn!("action: {described}: waited {} ms to be taken", waited.as_millis());
+        Err(CallActionError::Late)
+    } else {
+        call_act(store, me, action)
+    };
+    match act {
         Ok(act) => calls.act(act, reply),
         Err(error) => {
             log::info!("action: {described}: refused, {error}");
@@ -2756,5 +2773,51 @@ async fn next_push(push: Option<&mut TrouterHandle>) -> Option<PushEvent> {
     match push {
         Some(push) => push.next().await,
         None => pending().await,
+    }
+}
+
+#[cfg(test)]
+mod start_within {
+    //! A start or a join that waited past [`START_WITHIN`](crate::calling::START_WITHIN) to be taken is refused, never
+    //! placed. The MRIs are synthetic.
+
+    use super::*;
+
+    const ME: &str = "8:orgid:00000000-0000-4000-8000-00000000000a";
+
+    /// What `action`, asked `waited` ago, comes to: whether the calling was handed it, and the answer given at once.
+    fn handed(action: CallAction, waited: Duration) -> (bool, Option<Result<CallId, EngineError>>) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("store.db")).unwrap();
+        let (sender, mut taken) = tokio::sync::mpsc::unbounded_channel();
+        let calls = CallActions::of(&sender);
+        let asked = std::time::Instant::now().checked_sub(waited).unwrap();
+        let (reply, mut answer) = oneshot::channel();
+        hand_call(&store, ME, &calls, action, asked, reply);
+        (taken.try_recv().is_ok(), answer.try_recv().ok())
+    }
+
+    #[test]
+    fn a_start_that_waited_too_long_is_refused_and_one_in_time_goes() {
+        let echo = CallAction::TestCall {
+            echo: Mri::new("28:00000000-0000-4000-8000-0000000000ec"),
+        };
+        let (went, answer) = handed(echo.clone(), crate::calling::START_WITHIN);
+        assert!(!went, "nothing handed to the calling");
+        assert!(
+            matches!(answer, Some(Err(EngineError::Call(CallActionError::Late)))),
+            "{answer:?}"
+        );
+        let (went, answer) = handed(echo, Duration::ZERO);
+        assert!(went && answer.is_none(), "a start in time goes: {answer:?}");
+    }
+
+    #[test]
+    fn only_a_start_or_a_join_is_bounded() {
+        let chat = "19:00000000000000000000000000000001@thread.v2".to_owned();
+        assert!(CallAction::Call { chat: chat.clone() }.starts());
+        assert!(CallAction::Join { chat: chat.clone() }.starts());
+        assert!(CallAction::MeetNow { channel: chat.clone() }.starts());
+        assert!(CallAction::JoinChannel { channel: chat }.starts());
     }
 }

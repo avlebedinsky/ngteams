@@ -102,6 +102,11 @@ const MEDIA_LOOK: Duration = Duration::from_millis(50);
 /// made, its candidates gathered) before the action fails: a setup that never ends would hold the calling busy, every
 /// later start refused, with nothing to show for it.
 pub const SETUP_TIMEOUT: Duration = Duration::from_secs(60);
+/// How long a start or a join may wait for the engine to hand it to the calling (behind a write or a sync the engine
+/// awaits) before it is refused ([`CallActionError::Late`]) rather than placed. A view gives up on a start it isn't
+/// told of within a longer wait of its own and says so; one placed after that would ring people who were told it
+/// didn't start.
+pub const START_WITHIN: Duration = Duration::from_secs(15);
 
 /// The account's calling, built and not started: its calling socket (`Trouter::for_calls`, over the transport the
 /// outbox writes with, so its deliveries and the call writes feed one call registry), who the account is in its calls
@@ -182,6 +187,22 @@ pub enum CallAction {
     Lobby { call: CallId, waiting: Mri, admit: bool },
 }
 
+impl CallAction {
+    /// Whether it starts or joins a call (what [`START_WITHIN`] bounds), rather than acting on one.
+    #[must_use]
+    pub fn starts(&self) -> bool {
+        matches!(
+            self,
+            Self::Call { .. }
+                | Self::TestCall { .. }
+                | Self::Join { .. }
+                | Self::JoinMeeting { .. }
+                | Self::MeetNow { .. }
+                | Self::JoinChannel { .. }
+        )
+    }
+}
+
 /// Where a call is, as the account is told ([`Event::Call`]).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CallStatus {
@@ -252,6 +273,9 @@ pub enum CallActionError {
     /// The call's media couldn't be set up, or its SDP made.
     #[error("the call's media couldn't be set up: {0}")]
     Media(String),
+    /// A start or a join waited longer than [`START_WITHIN`] to be taken: nothing was sent.
+    #[error("the call waited too long to start")]
+    Late,
     /// The machine refused it.
     #[error(transparent)]
     Call(#[from] CallError),
@@ -354,6 +378,12 @@ pub(crate) struct CallingTask {
 pub(crate) struct CallActions(mpsc::WeakUnboundedSender<(Act, Waiting)>);
 
 impl CallActions {
+    /// The actions that go to `actions`, for a test that stands in for the calling.
+    #[cfg(test)]
+    pub(crate) fn of(actions: &mpsc::UnboundedSender<(Act, Waiting)>) -> Self {
+        Self(actions.downgrade())
+    }
+
     /// Hands the account's action to the calling; its answer goes to `reply`.
     pub(crate) fn act(&self, act: Act, reply: Waiting) {
         let Some(actions) = self.0.upgrade() else {
