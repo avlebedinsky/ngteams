@@ -66,7 +66,7 @@ use std::time::Duration;
 
 use crate::CallFloor;
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use teams_auth::token::TokenError;
 use teams_call::Tracker;
 use teams_proto::Mri;
@@ -142,12 +142,31 @@ pub enum Lane<'a> {
 }
 
 /// What an edit sends again of the message it changes, as the store had it when the edit was asked for: its
-/// `clientmessageid` and its times, in milliseconds since the Unix epoch.
+/// `clientmessageid`, times in milliseconds since the Unix epoch, and raw attachment properties.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Sent {
     pub client_message_id: String,
     pub compose_time_ms: i64,
     pub arrival_time_ms: i64,
+    /// Original raw `files`/`cards`, captured from the store rather than new upload staging. `None` denotes an
+    /// older queued edit that must be upgraded before delivery; `Some({})` means neither property was present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attachment_properties: Option<Map<String, Value>>,
+}
+
+/// The attachment metadata that a text edit must keep, without parsing or rebuilding any entries. Invalid outer
+/// properties cannot establish that attachments are absent; unknown inner values can still be preserved.
+pub(crate) fn attachment_properties(message: &Message) -> Result<Map<String, Value>, serde_json::Error> {
+    let properties: Map<String, Value> = message
+        .properties
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()?
+        .unwrap_or_default();
+    Ok(properties
+        .into_iter()
+        .filter(|(key, _)| matches!(key.as_str(), "files" | "cards"))
+        .collect())
 }
 
 impl Command {
@@ -567,8 +586,14 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
             {
                 return Ok(arrived);
             }
+            let preparation = self.prepare_edit(store, &row)?;
             let row = store.begin_attempt(id)?;
-            let mut attempt = pin!(self.attempt(&row));
+            let mut attempt = pin!(async {
+                match preparation {
+                    Ok(()) => self.attempt(&row).await,
+                    Err(error) => Tried::NotSent(error),
+                }
+            });
             let tried = tokio::select! {
                 biased;
                 tried = &mut attempt => tried,
@@ -786,6 +811,52 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
         }
     }
 
+    /// Legacy edit commands had no attachment snapshot. Recover it once from the authoritative original and
+    /// persist it before the attempt, so retries and explicit resends use the same request even after a restart.
+    fn prepare_edit(&self, store: &mut Store, row: &OutboxEntry) -> Result<Result<(), String>, OutboxError> {
+        if row.kind != OutboxKind::Edit {
+            return Ok(Ok(()));
+        }
+        let Ok(mut command) = serde_json::from_str::<Command>(&row.payload) else {
+            // The ordinary attempt reports an unreadable command through its existing terminal failure path.
+            return Ok(Ok(()));
+        };
+        let Command::Edit {
+            conversation,
+            message_id,
+            original,
+            ..
+        } = &mut command
+        else {
+            return Ok(Ok(()));
+        };
+        if original.attachment_properties.is_some() {
+            return Ok(Ok(()));
+        }
+        let Some(message) = store.message(conversation, message_id)? else {
+            return Ok(Err(
+                "the original message for this queued edit is unavailable; nothing was sent".into(),
+            ));
+        };
+        if !self.is_mine(&message)
+            || message.delete_time.is_some()
+            || message.client_message_id.as_deref() != Some(original.client_message_id.as_str())
+        {
+            return Ok(Err(
+                "the original message for this queued edit cannot be identified; nothing was sent".into(),
+            ));
+        }
+        let Ok(properties) = attachment_properties(&message) else {
+            return Ok(Err(
+                "the original attachment properties cannot be read; nothing was sent".into(),
+            ));
+        };
+        original.attachment_properties = Some(properties);
+        let payload = serde_json::to_string(&command).map_err(OutboxError::Payload)?;
+        store.upgrade_pending_edit(row.id, &payload)?;
+        Ok(Ok(()))
+    }
+
     async fn attempt(&self, row: &OutboxEntry) -> Tried {
         let command = match serde_json::from_str::<Command>(&row.payload) {
             Ok(command) => command,
@@ -806,12 +877,19 @@ impl<T: Transport<Error = HttpError>> Outbox<T> {
                 text,
                 original,
             } => {
+                let Some(attachments) = original.attachment_properties else {
+                    return Tried::NotSent(
+                        "the queued edit has no original attachment snapshot; nothing was sent".into(),
+                    );
+                };
                 let original = Original {
                     client_message_id: original.client_message_id,
                     compose_time_ms: original.compose_time_ms,
                     arrival_time_ms: original.arrival_time_ms,
                 };
-                let request = EditMessage::new(conversation, message_id, me, text, original).edited_at(at);
+                let request = EditMessage::new(conversation, message_id, me, text, original)
+                    .with_original_attachments(attachments)
+                    .edited_at(at);
                 self.deliver(request).await
             }
             Command::Delete {

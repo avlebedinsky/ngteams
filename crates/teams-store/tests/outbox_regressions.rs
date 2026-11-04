@@ -25,6 +25,13 @@ fn command() -> NewOutboxEntry {
     }
 }
 
+fn edit_command() -> NewOutboxEntry {
+    NewOutboxEntry {
+        kind: OutboxKind::Edit,
+        ..command()
+    }
+}
+
 fn run_directory(path: &Path) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push("-runs");
@@ -89,11 +96,192 @@ fn a_missing_command_is_absent_from_reads_and_every_mutation_refuses_it() {
         store.finish_attempt(id, &failure()).expect_err("missing"),
         store.check_failed(id, &give_up()).expect_err("missing"),
         store.resend(id).expect_err("missing"),
+        store.upgrade_pending_edit(id, "upgraded").expect_err("missing"),
     ] {
         assert!(matches!(error, StoreError::UnknownOutboxEntry(found) if found == id));
     }
     assert!(store.outbox_due(i64::MAX).expect("nothing enqueued").is_empty());
     assert_eq!(store.enqueue(&command()).expect("still usable").client_message_id, CMID);
+}
+
+#[test]
+fn a_legacy_edit_payload_upgrade_preserves_every_other_field() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("store.sqlite");
+    let mut owner = Store::open(&path).expect("owner");
+    let pending = owner.enqueue(&edit_command()).expect("enqueue edit");
+    owner.begin_attempt(pending.id).expect("first attempt");
+    owner
+        .finish_attempt(pending.id, &failure())
+        .expect("first attempt fails");
+    owner.resend(pending.id).expect("explicit resend");
+    owner.begin_attempt(pending.id).expect("second attempt");
+    owner
+        .finish_attempt(
+            pending.id,
+            &AttemptOutcome::Retry {
+                not_before: i64::MAX,
+                error: "synthetic throttle".into(),
+            },
+        )
+        .expect("retry waits");
+    owner
+        .check_failed(
+            pending.id,
+            &CheckFailed::Wait {
+                not_before: i64::MAX,
+                error: "synthetic failed check".into(),
+            },
+        )
+        .expect("check waits");
+    owner
+        .outbox_unreadable_seen(pending.id, 5_000)
+        .expect("unknown outcome");
+    let before = row(&owner, pending.id);
+    let upgraded = owner
+        .upgrade_pending_edit(pending.id, "opaque attachment snapshot")
+        .expect("upgrade");
+    assert_eq!(
+        upgraded,
+        OutboxEntry {
+            payload: "opaque attachment snapshot".into(),
+            ..before
+        },
+        "only the payload changes, even with existing attempts and a waiting check"
+    );
+    assert!(owner.outbox_due(i64::MAX - 1).expect("still waiting").is_empty());
+}
+
+#[test]
+fn a_payload_upgrade_is_durable_and_requires_explicit_adoption_after_reopen() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("store.sqlite");
+    let mut owner = Store::open(&path).expect("owner");
+    let pending = owner.enqueue(&edit_command()).expect("enqueue edit");
+    let upgraded = owner
+        .upgrade_pending_edit(pending.id, "opaque attachment snapshot")
+        .expect("upgrade");
+    let mut observer = Store::open(&path).expect("another live run");
+    assert!(matches!(
+        observer.upgrade_pending_edit(upgraded.id, "foreign change"),
+        Err(StoreError::OutboxNotSendable { id, state: OutboxState::Pending }) if id == upgraded.id
+    ));
+    assert_eq!(row(&observer, upgraded.id), upgraded);
+    assert!(
+        observer
+            .outbox_left_by_earlier_runs()
+            .expect("owner still live")
+            .is_empty()
+    );
+    drop(observer);
+    drop(owner);
+
+    let mut reopened = Store::open(&path).expect("later run");
+    assert_eq!(row(&reopened, upgraded.id), upgraded, "the snapshot is durable");
+    assert!(reopened.outbox_due(i64::MAX).expect("no automatic adoption").is_empty());
+    assert_eq!(
+        reopened.outbox_left_by_earlier_runs().expect("left edit"),
+        std::slice::from_ref(&upgraded)
+    );
+    assert!(matches!(
+        reopened.upgrade_pending_edit(upgraded.id, "unadopted change"),
+        Err(StoreError::OutboxNotSendable { id, state: OutboxState::Pending }) if id == upgraded.id
+    ));
+    assert_eq!(row(&reopened, upgraded.id), upgraded);
+    let adopted = reopened.resend(upgraded.id).expect("explicit adoption");
+    let upgraded = reopened
+        .upgrade_pending_edit(adopted.id, "adopted snapshot")
+        .expect("owned edit");
+    assert_eq!(
+        upgraded,
+        OutboxEntry {
+            payload: "adopted snapshot".into(),
+            ..adopted
+        }
+    );
+}
+
+#[test]
+fn a_payload_upgrade_refuses_non_edits_and_edits_that_are_not_pending_without_changing_them() {
+    for kind in [
+        OutboxKind::Send,
+        OutboxKind::Delete,
+        OutboxKind::AddReaction,
+        OutboxKind::RemoveReaction,
+        OutboxKind::ReadReceipt,
+        OutboxKind::CreateChat,
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = Store::open(&dir.path().join("store.sqlite")).expect("open");
+        let pending = store.enqueue(&NewOutboxEntry { kind, ..command() }).expect("enqueue");
+        let error = store
+            .upgrade_pending_edit(pending.id, "changed")
+            .expect_err("not an edit");
+        assert!(matches!(error, StoreError::OutboxNotSendable { id, state: OutboxState::Pending } if id == pending.id));
+        assert_eq!(row(&store, pending.id), pending);
+    }
+    for outcome in [
+        None,
+        Some(AttemptOutcome::Sent {
+            message_id: Some("synthetic-message".into()),
+        }),
+        Some(AttemptOutcome::Denied {
+            reason: "synthetic refusal".into(),
+        }),
+        Some(failure()),
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut store = Store::open(&dir.path().join("store.sqlite")).expect("open");
+        let id = store.enqueue(&edit_command()).expect("enqueue edit").id;
+        store.begin_attempt(id).expect("begin edit");
+        if let Some(outcome) = outcome {
+            store.finish_attempt(id, &outcome).expect("finish edit");
+        }
+        let before = row(&store, id);
+        let error = store.upgrade_pending_edit(id, "changed").expect_err("not pending");
+        assert!(
+            matches!(error, StoreError::OutboxNotSendable { id: actual, state } if actual == id && state == before.state)
+        );
+        assert_eq!(row(&store, id), before);
+    }
+}
+
+#[test]
+fn a_failed_payload_upgrade_rolls_back_and_allows_a_later_retry() {
+    for trigger in [
+        "CREATE TRIGGER refuse_upgrade AFTER UPDATE ON outbox BEGIN
+         SELECT RAISE(ABORT, 'synthetic upgrade refused'); END;",
+        "CREATE TRIGGER refuse_upgrade AFTER UPDATE ON outbox
+         WHEN NEW.kind <> 'post-write-unknown-kind' BEGIN
+         UPDATE outbox SET kind = 'post-write-unknown-kind' WHERE id = NEW.id; END;",
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("store.sqlite");
+        let mut store = Store::open(&path).expect("open");
+        let before = store.enqueue(&edit_command()).expect("enqueue edit");
+        let raw = Connection::open(&path).expect("second connection");
+        raw.execute_batch(trigger).expect("refuse update or its result");
+
+        let error = store
+            .upgrade_pending_edit(before.id, "snapshot")
+            .expect_err("upgrade refused");
+
+        assert!(matches!(error, StoreError::Sqlite(_)), "{error}");
+        assert_eq!(
+            row(&store, before.id),
+            before,
+            "a failed transaction preserves every field"
+        );
+        raw.execute_batch("DROP TRIGGER refuse_upgrade")
+            .expect("remove refusal");
+        assert_eq!(
+            store
+                .upgrade_pending_edit(before.id, "snapshot")
+                .expect("retry")
+                .payload,
+            "snapshot"
+        );
+    }
 }
 
 #[test]

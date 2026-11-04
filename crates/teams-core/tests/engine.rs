@@ -601,6 +601,150 @@ async fn a_message_from_a_reaches_b_over_its_push_channel_and_no_delivery_is_ans
 }
 
 #[tokio::test]
+async fn text_edits_preserve_original_attachments_without_leaking_them_to_other_messages() {
+    let lab = Lab::start().await;
+    let files = json!([
+        {
+            "@type": "http://schema.skype.com/File",
+            "fileName": "preserved.pdf",
+            "fileInfo": {"shareUrl": "https://contoso.sharepoint.com/preserved.pdf", "unknown": [1, null, "x"]},
+            "unknown": {"keep": true}
+        },
+        {"futureAttachmentShape": {"keep": true}}
+    ])
+    .to_string();
+    let cards = json!([{"futureCard": {"keep": ["opaque", null]}}]).to_string();
+    assert!(lab.mock.change_message(AB_CHAT, "1111111111111111111", |message| {
+        message["properties"]["files"] = json!(files);
+        message["properties"]["cards"] = json!(cards);
+    }));
+    let account = native(&lab, LAB_A, QUIET);
+    account.handle.sync().await.unwrap();
+    let edit = account
+        .write(Action::Edit {
+            conversation: AB_CHAT.to_owned(),
+            message_id: A_EDITED.to_owned(),
+            text: MessageText::plain("edited text with original attachments").unwrap(),
+        })
+        .await;
+    assert_eq!(edit.state, OutboxState::Sent, "{edit:?}");
+    let requests = lab.mock.received_requests().await;
+    let put = requests
+        .iter()
+        .rev()
+        .find(|request| request.method.as_str() == "PUT")
+        .unwrap();
+    let body: Value = put.body_json().unwrap();
+    assert_eq!(body["properties"]["files"], files);
+    assert_eq!(body["properties"]["cards"], cards);
+
+    account.handle.sync().await.unwrap();
+    let stored = account.stored(AB_CHAT, A_EDITED).await;
+    let properties: Value = serde_json::from_str(stored.properties.as_deref().unwrap()).unwrap();
+    assert_eq!(properties["files"], files);
+    assert_eq!(properties["cards"], cards);
+    let rendered = teams_proto::chat::shared_files(properties.get("files"));
+    assert_eq!(rendered.files.len(), 1);
+    assert_eq!(rendered.files[0].name, "preserved.pdf");
+    assert_eq!(
+        rendered.unread,
+        Some(json!([{"futureAttachmentShape": {"keep": true}}]))
+    );
+    assert!(stored.content.contains("edited text with original attachments"));
+
+    let fresh = account.send(AB_CHAT, "fresh text without attachments").await;
+    account.handle.sync().await.unwrap();
+    let fresh_edit = account
+        .write(Action::Edit {
+            conversation: AB_CHAT.to_owned(),
+            message_id: id_of(&fresh),
+            text: MessageText::plain("another edit without attachments").unwrap(),
+        })
+        .await;
+    assert_eq!(fresh_edit.state, OutboxState::Sent, "{fresh_edit:?}");
+    let requests = lab.mock.received_requests().await;
+    for method in ["POST", "PUT"] {
+        let request = requests
+            .iter()
+            .rev()
+            .find(|request| request.method.as_str() == method)
+            .unwrap();
+        let body: Value = request.body_json().unwrap();
+        assert_eq!(body["properties"]["files"], "[]", "{method}");
+        assert_eq!(body["properties"]["cards"], "[]", "{method}");
+    }
+    account.shutdown();
+}
+
+#[tokio::test]
+async fn edits_refuse_unreadable_outer_properties_before_queuing() {
+    let lab = Lab::start().await;
+    for properties in ["{", "null", "[]", "\"not an object\""] {
+        let account = native_with_unreadable_properties(&lab, properties);
+        let error = account
+            .handle
+            .write(Action::Edit {
+                conversation: AB_CHAT.to_owned(),
+                message_id: A_EDITED.to_owned(),
+                text: MessageText::plain("do not erase unknown metadata").unwrap(),
+            })
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(
+                error,
+                EngineError::Unknown {
+                    missing: "attachment properties",
+                    ..
+                }
+            ),
+            "{error:?}"
+        );
+        assert!(account.handle.outbox_unsettled(AB_CHAT).await.unwrap().is_empty());
+        account.shutdown();
+    }
+    assert!(lab.mock.received_requests().await.is_empty());
+}
+
+/// An earlier store with unreadable outer properties; only the engine opens it once started.
+fn native_with_unreadable_properties(lab: &Lab, properties: &str) -> Native {
+    let dir = Arc::new(tempfile::tempdir().unwrap());
+    {
+        let mut store = Store::open(&dir.path().join("store").join("lab.sqlite")).unwrap();
+        store
+            .upsert_conversation(&Conversation {
+                id: AB_CHAT.to_owned(),
+                kind: ConversationKind::OneToOne,
+                topic: None,
+                version: 1,
+                last_activity: None,
+            })
+            .unwrap();
+        store
+            .upsert_message(
+                &Message {
+                    conversation_id: AB_CHAT.to_owned(),
+                    id: A_EDITED.to_owned(),
+                    version: 1,
+                    client_message_id: Some("1111111111111111111".to_owned()),
+                    sender: Some(LAB_A.to_owned()),
+                    sender_name: None,
+                    message_type: "RichText/Html".to_owned(),
+                    content: "<p>original text</p>".to_owned(),
+                    properties: Some(properties.to_owned()),
+                    arrival_time: 1_760_000_000_000,
+                    compose_time: Some(1_760_000_000_000),
+                    edit_time: None,
+                    delete_time: None,
+                },
+                None,
+            )
+            .unwrap();
+    }
+    try_native_in(lab, LAB_A, QUIET, dir).unwrap()
+}
+
+#[tokio::test]
 async fn an_edit_a_reaction_its_take_back_and_a_delete_arrive_on_b() {
     let lab = Lab::start().await;
     let mut a = native(&lab, LAB_A, How::default());

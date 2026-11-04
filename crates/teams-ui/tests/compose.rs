@@ -1487,6 +1487,7 @@ fn rows_of_every_state(theirs: &Message) -> (Vec<OutboxEntry>, OutboxEntry) {
             client_message_id: "1".to_owned(),
             compose_time_ms: NOON,
             arrival_time_ms: NOON,
+            attachment_properties: Some(serde_json::Map::new()),
         },
     };
     let rows = vec![
@@ -2007,6 +2008,7 @@ fn edit_of(message: &Message, text: &str) -> Command {
             client_message_id: "1".to_owned(),
             compose_time_ms: NOON,
             arrival_time_ms: NOON,
+            attachment_properties: Some(serde_json::Map::new()),
         },
     }
 }

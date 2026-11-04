@@ -2656,6 +2656,9 @@ fn original(message: &Message) -> Result<Sent, EngineError> {
             .ok_or_else(|| unknown("clientmessageid"))?,
         compose_time_ms: message.compose_time.ok_or_else(|| unknown("compose time"))?,
         arrival_time_ms: message.arrival_time,
+        attachment_properties: Some(
+            crate::outbox::attachment_properties(message).map_err(|_| unknown("attachment properties"))?,
+        ),
     })
 }
 

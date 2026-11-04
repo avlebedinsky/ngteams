@@ -359,6 +359,26 @@ impl Store {
         Ok(left)
     }
 
+    /// Replaces only the opaque payload of this run's pending edit. Core uses this before an attempt to persist a
+    /// one-time attachment snapshot for a legacy edit; Core decides whether its payload still needs that upgrade.
+    /// No identity, retry budget, timestamp, ordering or scheduling field changes, and no row is adopted or sent.
+    ///
+    /// # Errors
+    ///
+    /// [`StoreError::UnknownOutboxEntry`] for no such row, [`StoreError::OutboxNotSendable`] for anything except this
+    /// run's pending edit, [`StoreError::Sqlite`] when the write fails.
+    pub fn upgrade_pending_edit(&mut self, id: i64, payload: &str) -> Result<OutboxEntry, StoreError> {
+        let tx = self.conn.transaction()?;
+        let row = entry(&tx, id)?;
+        if row.run_id != self.run_id || row.state != OutboxState::Pending || row.kind != OutboxKind::Edit {
+            return Err(StoreError::OutboxNotSendable { id, state: row.state });
+        }
+        tx.execute("UPDATE outbox SET payload = ?2 WHERE id = ?1", params![id, payload])?;
+        let updated = entry(&tx, id)?;
+        tx.commit()?;
+        Ok(updated)
+    }
+
     /// Begins an attempt on one of this run's pending rows: it becomes `sending` and its attempt count goes up.
     ///
     /// # Errors

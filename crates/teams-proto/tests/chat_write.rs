@@ -688,6 +688,44 @@ async fn an_edit_is_sent_as_the_edit_fixture() -> TestResult {
 }
 
 #[tokio::test]
+async fn preserving_attachments_cannot_restore_stale_quotes_mentions_or_edit_time() -> TestResult {
+    let text = reply();
+    let baseline = EditMessage::new(AB_CHAT, "1760000010000", lab_a(), text.clone(), original());
+    let baseline = read_listed(sent(ChatWrite::Edit(baseline)).await?)?
+        .body
+        .ok_or("no body")?;
+    let properties = serde_json::from_value(json!({
+        "files": [{"futureFile": {"keep": [null, 7]}}],
+        "cards": null,
+        "mentions": "stale mentions",
+        "qtdMsgs": "stale quotes",
+        "edittime": "stale time",
+        "emotions": "stale reactions"
+    }))?;
+    let request = EditMessage::new(AB_CHAT, "1760000010000", lab_a(), text, original())
+        .with_original_attachments(properties)
+        .edited_at(NEW_YEAR_MS);
+    let sent = read_listed(sent(ChatWrite::Edit(request)).await?)?;
+    let body = sent.body.ok_or("no body")?;
+    assert_eq!(
+        body["properties"]["files"],
+        json!([{"futureFile": {"keep": [null, 7]}}])
+    );
+    assert_eq!(body["properties"]["cards"], Value::Null);
+    assert_eq!(body["properties"]["qtdMsgs"], baseline["properties"]["qtdMsgs"]);
+    assert_eq!(body["properties"]["mentions"], json!([]));
+    assert_eq!(body["properties"]["edittime"], NEW_YEAR_MS);
+    assert!(body["properties"].get("emotions").is_none());
+    assert!(
+        body["content"]
+            .as_str()
+            .ok_or("no content")?
+            .contains("a made-up reply")
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn a_delete_is_sent_as_the_delete_fixture() -> TestResult {
     let sent = sent(ChatWrite::Delete(DeleteMessage::new(AB_CHAT, "1760000060000"))).await?;
 

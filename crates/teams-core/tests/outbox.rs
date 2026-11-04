@@ -15,7 +15,7 @@ use std::sync::atomic::{AtomicBool, AtomicI64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 use teams_auth::secrets::Secret;
 use teams_auth::token::TokenError;
 use teams_core::{
@@ -388,6 +388,7 @@ fn other_writes() -> Vec<(Command, OutboxKind)> {
                     client_message_id: "1111111111111111111".to_owned(),
                     compose_time_ms: START - 2_000,
                     arrival_time_ms: START - 1_000,
+                    attachment_properties: Some(Map::new()),
                 },
             },
             OutboxKind::Edit,
@@ -489,6 +490,209 @@ async fn an_edit_sends_the_message_again_as_it_was_sent_and_keeps_its_id() {
         json!(row.created_at),
         "edited when it was asked for"
     );
+}
+
+#[tokio::test]
+async fn original_attachment_values_survive_a_reopen_and_explicit_resend() {
+    let setup = setup().await;
+    Mock::given(method("PUT"))
+        .and(path(format!("{MESSAGES}/1001")))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&setup.server)
+        .await;
+    let entries = json!([{"unknown": {"nested": [1, null]}}, {"futureEntry": true}]);
+    for value in [
+        json!(entries.to_string()),
+        entries,
+        Value::Null,
+        json!({"opaque": "unread"}),
+        json!(17),
+    ] {
+        let properties = serde_json::from_value(json!({"files": value, "cards": value})).unwrap();
+        let row = {
+            let mut earlier = setup.open_store();
+            let mut command = edit("changed text");
+            let Command::Edit { original, .. } = &mut command else {
+                unreachable!()
+            };
+            original.attachment_properties = Some(properties);
+            enqueue(&mut earlier, &command).unwrap()
+        };
+        let before = setup.server.received_requests().await.unwrap().len();
+        let mut store = setup.open_store();
+        assert!(
+            setup
+                .outbox
+                .send_due(&mut store, &setup.sync)
+                .await
+                .unwrap()
+                .rows
+                .is_empty()
+        );
+        assert_eq!(setup.server.received_requests().await.unwrap().len(), before);
+        store.resend(row.id).unwrap();
+        let sent = send(&setup, &mut store, &row).await;
+        assert_eq!(sent.state, OutboxState::Sent, "{sent:?}");
+        assert_eq!(sent.payload, row.payload, "known snapshots are not rehydrated");
+        let requests = setup.server.received_requests().await.unwrap();
+        let body: Value = requests.last().unwrap().body_json().unwrap();
+        assert_eq!(body["properties"]["files"], value);
+        assert_eq!(body["properties"]["cards"], value);
+    }
+}
+
+#[tokio::test]
+async fn a_legacy_edit_is_upgraded_once_and_keeps_its_snapshot_after_a_failed_attempt_and_resend() {
+    let setup = setup().await;
+    Mock::given(method("PUT"))
+        .and(path(format!("{MESSAGES}/1001")))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&setup.server)
+        .await;
+    let attachments = json!({
+        "files": "[{\"futureFile\":{\"keep\":[null,7]}}]",
+        "cards": null
+    });
+    let row = {
+        let mut earlier = setup.open_store();
+        let mut original = message(CHAT, "1001", 1, "1111111111111111111", ME);
+        original.properties = Some(
+            json!({
+                "files": attachments["files"], "cards": attachments["cards"],
+                "mentions": "stale mentions", "qtdMsgs": "stale quotes", "emotions": "stale reactions"
+            })
+            .to_string(),
+        );
+        earlier.upsert_message(&original, None).unwrap();
+        let mut command = edit("edited by a legacy queued command");
+        let Command::Edit { original, .. } = &mut command else {
+            unreachable!()
+        };
+        original.attachment_properties = None;
+        enqueue(&mut earlier, &command).unwrap()
+    };
+    assert!(!row.payload.contains("attachment_properties"));
+    let mut store = setup.open_store();
+    assert_no_due_rows(&setup, &mut store).await;
+    store.resend(row.id).unwrap();
+    setup.fault(Fault::LoseAnswer);
+    let failed = send(&setup, &mut store, &row).await;
+    assert_eq!(failed.state, OutboxState::Failed, "unknown edit outcome is not retried");
+    assert_eq!(failed.attempts, 1);
+    let payload: Value = serde_json::from_str(&failed.payload).unwrap();
+    assert_eq!(payload["original"]["attachment_properties"], attachments);
+
+    let mut changed = message(CHAT, "1001", 2, "1111111111111111111", ME);
+    changed.properties = Some(json!({"files": "[]", "cards": "[]"}).to_string());
+    store.upsert_message(&changed, None).unwrap();
+    assert_no_due_rows(&setup, &mut store).await;
+    assert_eq!(setup.server.received_requests().await.unwrap().len(), 1);
+    drop(store);
+    let mut store = setup.open_store();
+    assert_no_due_rows(&setup, &mut store).await;
+    store.resend(row.id).unwrap();
+    let sent = send(&setup, &mut store, &row).await;
+    assert_eq!(sent.state, OutboxState::Sent);
+    assert_eq!(sent.payload, failed.payload);
+    assert_eq!(sent.client_message_id, row.client_message_id);
+    assert_eq!(sent.created_at, row.created_at);
+    assert!(setup.sync.calls().is_empty(), "edits never become findable posts");
+    let requests = setup.server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 2);
+    for request in requests {
+        let body: Value = request.body_json().unwrap();
+        assert_eq!(body["properties"]["files"], attachments["files"]);
+        assert_eq!(body["properties"]["cards"], attachments["cards"]);
+        assert_eq!(body["properties"]["mentions"], "[]");
+        assert!(body["properties"].get("qtdMsgs").is_none());
+        assert!(body["properties"].get("emotions").is_none());
+    }
+}
+
+async fn assert_no_due_rows(setup: &Setup, store: &mut Store) {
+    assert!(setup.outbox.send_due(store, &setup.sync).await.unwrap().rows.is_empty());
+}
+
+#[tokio::test]
+async fn a_legacy_edit_with_no_attachment_properties_gets_a_known_empty_snapshot() {
+    let setup = setup().await;
+    Mock::given(method("PUT"))
+        .and(path(format!("{MESSAGES}/1001")))
+        .respond_with(ResponseTemplate::new(200))
+        .mount(&setup.server)
+        .await;
+    for properties in [None, Some("{}".to_owned())] {
+        let mut store = setup.open_store();
+        let version = if properties.is_none() { 1 } else { 2 };
+        let mut message = message(CHAT, "1001", version, "1111111111111111111", ME);
+        message.properties = properties;
+        store.upsert_message(&message, None).unwrap();
+        let mut command = edit("legacy text-only edit");
+        let Command::Edit { original, .. } = &mut command else {
+            unreachable!()
+        };
+        original.attachment_properties = None;
+        let row = enqueue(&mut store, &command).unwrap();
+        let sent = send(&setup, &mut store, &row).await;
+        assert_eq!(sent.state, OutboxState::Sent, "{sent:?}");
+        let payload: Value = serde_json::from_str(&sent.payload).unwrap();
+        assert_eq!(payload["original"]["attachment_properties"], json!({}));
+        let requests = setup.server.received_requests().await.unwrap();
+        let body: Value = requests.last().unwrap().body_json().unwrap();
+        assert_eq!(body["properties"]["files"], "[]");
+        assert_eq!(body["properties"]["cards"], "[]");
+    }
+}
+
+#[tokio::test]
+async fn an_unrecoverable_legacy_edit_fails_locally_without_erasing_attachments() {
+    for case in [
+        "missing",
+        "foreign",
+        "wrong client id",
+        "deleted",
+        "invalid json",
+        "nonobject",
+    ] {
+        let setup = setup().await;
+        let mut store = setup.open_store();
+        let mut original = message(CHAT, "1001", 1, "1111111111111111111", ME);
+        match case {
+            "foreign" => original.sender = Some(PEER.to_owned()),
+            "wrong client id" => original.client_message_id = Some("another message".to_owned()),
+            "deleted" => original.delete_time = Some(START),
+            "invalid json" => original.properties = Some("{".to_owned()),
+            "nonobject" => original.properties = Some("null".to_owned()),
+            "missing" => {}
+            _ => unreachable!(),
+        }
+        if case != "missing" {
+            store.upsert_message(&original, None).unwrap();
+        }
+        let mut command = edit("legacy edit");
+        let Command::Edit { original, .. } = &mut command else {
+            unreachable!()
+        };
+        original.attachment_properties = None;
+        let row = enqueue(&mut store, &command).unwrap();
+        let failed = send(&setup, &mut store, &row).await;
+        assert_eq!(failed.state, OutboxState::Failed, "{case}: {failed:?}");
+        assert!(
+            failed.last_error.as_deref().unwrap().contains("nothing was sent"),
+            "{case}: {failed:?}"
+        );
+        assert_eq!(failed.payload, row.payload);
+        assert!(
+            setup
+                .outbox
+                .send_due(&mut store, &setup.sync)
+                .await
+                .unwrap()
+                .rows
+                .is_empty()
+        );
+        assert!(setup.server.received_requests().await.unwrap().is_empty(), "{case}");
+    }
 }
 
 #[tokio::test]
@@ -1014,6 +1218,7 @@ fn edit(text: &str) -> Command {
             client_message_id: "1111111111111111111".to_owned(),
             compose_time_ms: START - 2_000,
             arrival_time_ms: START - 1_000,
+            attachment_properties: Some(Map::new()),
         },
     }
 }

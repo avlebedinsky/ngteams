@@ -162,6 +162,7 @@ pub struct EditMessage {
     author: Author,
     text: MessageText,
     original: Original,
+    attachment_properties: Map<String, Value>,
     edit_time_ms: i64,
 }
 
@@ -182,6 +183,7 @@ impl EditMessage {
             author,
             text,
             original,
+            attachment_properties: Map::new(),
             edit_time_ms: now_ms(),
         }
     }
@@ -190,6 +192,17 @@ impl EditMessage {
     #[must_use]
     pub fn edited_at(mut self, time_ms: i64) -> Self {
         self.edit_time_ms = time_ms;
+        self
+    }
+
+    /// Keeps the original message's opaque `files` and `cards` properties through a text edit. Other keys are
+    /// ignored: mentions, quotes and the edit time still come from this edit.
+    #[must_use]
+    pub fn with_original_attachments(mut self, properties: Map<String, Value>) -> Self {
+        self.attachment_properties = properties
+            .into_iter()
+            .filter(|(key, _)| matches!(key.as_str(), "files" | "cards"))
+            .collect();
         self
     }
 
@@ -232,6 +245,7 @@ impl Prepared for EditMessage {
             client_message_id: Some(&self.original.client_message_id),
         });
         let mut properties = properties(&self.text);
+        properties.extend(self.attachment_properties.clone());
         properties.insert("edittime".to_owned(), json!(self.edit_time_ms));
         if let Some(fields) = body.as_object_mut() {
             fields.insert("properties".to_owned(), Value::Object(properties));
