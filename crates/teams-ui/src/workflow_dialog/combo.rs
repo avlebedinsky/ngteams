@@ -70,6 +70,18 @@ impl WorkflowDialog {
         self.simple.as_ref()?.fields.get(index)?.combo.as_ref()
     }
 
+    /// A list that could not be read is asked for again as its field is opened.
+    fn retry_choices(&mut self, index: usize, cx: &mut Context<Self>) {
+        let failed = self
+            .simple
+            .as_ref()
+            .and_then(|simple| simple.fields.get(index))
+            .is_some_and(|field| matches!(field.choices, Choices::Failed));
+        if failed {
+            self.load_choices(index, cx);
+        }
+    }
+
     fn combo_event(&mut self, index: usize, event: &InputEvent, window: &mut Window, cx: &mut Context<Self>) {
         match event {
             InputEvent::Focus => {
@@ -77,6 +89,7 @@ impl WorkflowDialog {
                     combo.open = true;
                     combo.typed = false;
                 }
+                self.retry_choices(index, cx);
             }
             InputEvent::Change => {
                 if let Some(combo) = self.combo_mut(index) {
@@ -258,6 +271,7 @@ impl WorkflowDialog {
                     {
                         combo.open = true;
                         combo.typed = false;
+                        this.retry_choices(index, cx);
                         cx.notify();
                     }
                 }),
@@ -324,15 +338,22 @@ impl WorkflowDialog {
                 window.prevent_default();
                 cx.stop_propagation();
             });
-        let loading = matches!(
-            self.simple
-                .as_ref()
-                .and_then(|simple| simple.fields.get(index))
-                .map(|field| &field.choices),
-            Some(Choices::Loading)
-        );
-        let list = if loading {
+        let choices = self
+            .simple
+            .as_ref()
+            .and_then(|simple| simple.fields.get(index))
+            .map(|field| &field.choices);
+        let list = if matches!(choices, Some(Choices::Loading)) {
             list.child(div().px_3().py_2().pl(px(38.0)).child("Loading…"))
+        } else if matches!(choices, Some(Choices::Failed)) && rows.is_empty() {
+            list.child(
+                div()
+                    .debug_selector(|| "workflow-choices-failed".to_owned())
+                    .px_3()
+                    .py_2()
+                    .pl(px(38.0))
+                    .child("The options could not be loaded."),
+            )
         } else if rows.is_empty() {
             list.child(div().px_3().py_2().pl(px(38.0)).child(empty))
         } else {

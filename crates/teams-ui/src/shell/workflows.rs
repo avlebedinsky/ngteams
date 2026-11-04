@@ -2,7 +2,6 @@
 //! Home", "See all") or from the rail's More apps flyout, it takes both panes; while it is shown, the rail shows it
 //! (chosen) under a separator, and it leaves the rail when another place is shown.
 use super::*;
-use crate::workflow_dialog::AppTab;
 use crate::workflows_app::WorkflowsApp;
 
 /// The rail's Workflows item: its outline glyph (Lucide's) and its caption.
@@ -29,9 +28,35 @@ pub(super) struct Place {
 }
 
 impl Shell {
-    /// Opens the Workflows app across both panes: its Home, or with `see_all` its "Your workflows". The app keeps its
-    /// pages between visits.
+    /// Opens the Workflows app across both panes on its Home, or with `see_all` its "Your workflows", as the channel's
+    /// Workflows asks: its list is read again, as changes made there may have left it behind.
     pub fn open_workflows(&mut self, see_all: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let page = self.enter_workflows(window, cx);
+        page.update(cx, |page, cx| {
+            if see_all {
+                page.show_all_workflows(window, cx);
+            } else {
+                page.show_home(window, cx);
+            }
+            page.reread_workflows(cx);
+        });
+        cx.notify();
+    }
+
+    /// Shows the Workflows app again as it was left (the rail's item, More apps, history), or on its Home the first
+    /// time.
+    pub fn resume_workflows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.workflows.app.is_none() {
+            self.open_workflows(false, window, cx);
+            return;
+        }
+        let page = self.enter_workflows(window, cx);
+        page.update(cx, |page, cx| page.resume(window, cx));
+        cx.notify();
+    }
+
+    /// The app, made the first time, across both panes.
+    fn enter_workflows(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<WorkflowsApp> {
         self.workflows.more_apps = false;
         let page = if let Some(page) = &self.workflows.app {
             page.clone()
@@ -55,14 +80,7 @@ impl Shell {
             self.close_switcher(window, cx);
             self.close_search(cx);
         }
-        page.update(cx, |page, cx| {
-            if see_all {
-                page.show_all_workflows(window, cx);
-            } else {
-                page.show_tab(AppTab::Home, window, cx);
-            }
-        });
-        cx.notify();
+        page
     }
 
     /// Opens or closes the rail's More apps flyout, as its button does.
@@ -102,7 +120,7 @@ impl Shell {
                 true,
                 palette,
                 cx,
-                |this, window, cx| this.open_workflows(false, window, cx),
+                Self::resume_workflows,
             ));
         }
         items.push(Self::rail_button(
@@ -145,7 +163,7 @@ impl Shell {
                     .child(gpui::img(crate::workflow_dialog::workflows_icon()).size(px(18.0))),
             )
             .child("Workflows")
-            .on_click(cx.listener(|this, _, window, cx| this.open_workflows(false, window, cx)));
+            .on_click(cx.listener(|this, _, window, cx| this.resume_workflows(window, cx)));
         Some(
             div()
                 .id("more-apps-backdrop")

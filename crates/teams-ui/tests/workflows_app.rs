@@ -170,6 +170,31 @@ fn your_workflows_lists_every_state_and_see_all_filters_them() {
 }
 
 #[test]
+fn your_workflows_loads_the_lists_later_pages() {
+    fn paged(request: &WorkflowRequest) -> WorkflowResponse {
+        match request {
+            WorkflowRequest::List { .. } => Ok(serde_json::json!({
+                "value": [fixtures::webhook_flow("Started")],
+                "nextLink": "https://api.flow.microsoft.com/providers/Microsoft.ProcessSimple/environments/Default-synthetic/flows?api-version=2016-11-01&$skiptoken=synthetic"
+            })),
+            WorkflowRequest::Page { .. } => Ok(serde_json::json!({"value": [fixtures::stopped_flow()]})),
+            other => listed_answer(other),
+        }
+    }
+    let rig = common::Rig::start();
+    let (_view, cx) = app_window(&rig, paged);
+    click(cx, "workflow-see-all");
+    assert!(bounds(cx, "workflow-open-synthetic-off").is_none());
+    click(cx, "workflow-load-more");
+    assert!(
+        bounds(cx, "workflow-open-synthetic-off").is_some(),
+        "the next page's workflows are listed too"
+    );
+    assert!(bounds(cx, "workflow-open-synthetic-flow").is_some());
+    assert!(bounds(cx, "workflow-load-more").is_none(), "no more pages");
+}
+
+#[test]
 fn a_template_from_the_app_opens_with_no_team_chosen_and_saves_in_the_page() {
     let rig = common::Rig::start();
     let (_view, cx) = app_window(&rig, fixtures::webhook_answer);
@@ -224,6 +249,85 @@ fn more_apps_opens_workflows_across_both_panes_and_its_chat_is_the_bots() {
         bounds(cx, "rail-workflows").is_none(),
         "leaving it takes it off the rail"
     );
+}
+
+/// Whether the app's bot chat is shown (its messages read as they come).
+fn bot_chat_shown(shell: &Entity<Shell>, cx: &mut VisualTestContext) -> bool {
+    cx.update(|_, cx| {
+        shell
+            .read(cx)
+            .workflows()
+            .and_then(|app| app.read(cx).chat().map(|chat| chat.read(cx).is_shown()))
+            .unwrap_or(false)
+    })
+}
+
+#[test]
+fn every_way_out_of_the_app_hides_the_bots_chat_and_coming_back_shows_it_again() {
+    type Leave = fn(&mut Shell, &mut gpui::Window, &mut gpui::Context<Shell>);
+    let rig = common::Rig::start();
+    let (shell, cx) = shell_window(&rig);
+    click(cx, "rail-more-apps");
+    click(cx, "more-apps-workflows");
+    click(cx, "workflows-tab-chat");
+    assert!(bot_chat_shown(&shell, cx));
+    let leaves: [(&str, Leave); 3] = [
+        ("calendar", Shell::show_calendar),
+        ("settings", |shell, _, cx| shell.show_settings(cx)),
+        ("chats", Shell::show_chats),
+    ];
+    for (place, leave) in leaves {
+        shell.update_in(cx, leave);
+        assert!(!bot_chat_shown(&shell, cx), "the {place} hides the bot's chat: no read receipt goes");
+        click(cx, "rail-more-apps");
+        click(cx, "more-apps-workflows");
+        assert!(bot_chat_shown(&shell, cx), "back from the {place}, the app is on its Chat again");
+    }
+}
+
+#[test]
+fn coming_back_to_the_app_keeps_an_open_card_editor() {
+    let rig = common::Rig::start();
+    let (shell, cx) = shell_window(&rig);
+    *rig.core.workflow_handler.lock().unwrap() = Some(fixtures::webhook_answer);
+    click(cx, "rail-more-apps");
+    click(cx, "more-apps-workflows");
+    click(cx, "workflow-template-synthetic-webhook");
+    assert!(bounds(cx, "workflow-simple-card").is_some());
+    click(cx, "workflows-tab-chat");
+    click(cx, "workflows-tab-home");
+    assert!(
+        bounds(cx, "workflow-simple-card").is_some(),
+        "a look at the Chat tab keeps the editor"
+    );
+    shell.update_in(cx, Shell::show_calendar);
+    click(cx, "rail-more-apps");
+    click(cx, "more-apps-workflows");
+    assert!(
+        bounds(cx, "workflow-simple-card").is_some(),
+        "the app comes back as it was left"
+    );
+    shell.update_in(cx, |shell, window, cx| shell.open_workflows(false, window, cx));
+    assert!(bounds(cx, "workflow-simple-card").is_none(), "Workflows Home is Home");
+}
+
+#[test]
+fn the_channels_workflows_reads_the_apps_list_again() {
+    let rig = common::Rig::start();
+    let (shell, cx) = shell_window(&rig);
+    let lists = |rig: &common::Rig| {
+        asked(rig)
+            .iter()
+            .filter(|request| matches!(request, WorkflowRequest::List { .. }))
+            .count()
+    };
+    shell.update_in(cx, |shell, window, cx| shell.open_workflows(false, window, cx));
+    cx.run_until_parked();
+    let before = lists(&rig);
+    shell.update_in(cx, Shell::show_calendar);
+    shell.update_in(cx, |shell, window, cx| shell.open_workflows(true, window, cx));
+    cx.run_until_parked();
+    assert!(lists(&rig) > before, "a change made in the channel's dialog shows in the app");
 }
 
 #[test]

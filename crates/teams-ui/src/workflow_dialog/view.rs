@@ -323,18 +323,25 @@ impl WorkflowDialog {
                 .flex_col()
                 .children(cards.into_iter().map(|card| self.workflow_row(card, palette, cx))),
         );
-        if self.continuation.is_some() {
-            list = list.child(selected_by(
+        list.children(self.load_more(cx)).into_any_element()
+    }
+
+    /// "Load more workflows", while the service holds more pages of the list.
+    pub(super) fn load_more(&self, cx: &Context<Self>) -> Option<AnyElement> {
+        self.continuation.as_ref()?;
+        Some(
+            selected_by(
                 "workflow-load-more",
                 Button::new("workflow-load-more")
                     .label("Load more workflows")
+                    .disabled(self.loading.workflows)
                     .on_click(cx.listener(|this, _, _, cx| {
                         let next = this.continuation.clone();
                         this.read_workflows(next, cx);
                     })),
-            ));
-        }
-        list.into_any_element()
+            )
+            .into_any_element(),
+        )
     }
 
     /// "Your workflows", with Teams' "See all" while the channel lists any.

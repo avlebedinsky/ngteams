@@ -165,7 +165,7 @@ impl Shell {
             }
             Main::JoinTeam => self.open_join_team(window, cx),
             Main::CreateTeamMore => self.open_create_team_more(window, cx),
-            Main::Workflows => self.open_workflows(false, window, cx),
+            Main::Workflows => self.resume_workflows(window, cx),
             Main::Nothing => {}
         }
         // what was shown is the history's place now, whatever the opening made of it

@@ -127,27 +127,46 @@ impl WorkflowDialog {
         let Some(app) = &mut self.app else {
             return;
         };
-        app.tab = tab;
         app.filter_open = false;
+        // The bot's chat is drawn over the pages, which stay as they are (an open card editor keeps what was typed).
+        if tab == AppTab::Chat {
+            cx.notify();
+            return;
+        }
+        app.tab = tab;
         if !self.busy {
             self.simple = None;
             self.error = None;
-            match tab {
-                AppTab::Home => self.screen = Screen::Home,
-                AppTab::Templates => self.screen = Screen::Templates,
-                AppTab::Chat => {}
-            }
+            self.screen = match tab {
+                AppTab::Templates => Screen::Templates,
+                AppTab::Home | AppTab::Chat => Screen::Home,
+            };
         }
         cx.notify();
     }
 
-    /// The app's "Reload app": its templates and workflows read again.
+    /// The app's "Reload app": the app starts again on its tab, its templates and workflows read again. Not while a
+    /// change is under way, whose answer the reload would drop.
     pub fn reload(&mut self, cx: &mut Context<Self>) {
+        if self.busy {
+            return;
+        }
         if let Some(app) = &mut self.app {
             app.home = Gallery::Loading;
             app.all = Gallery::Loading;
         }
+        self.simple = None;
+        self.error = None;
+        self.screen = self.start_screen();
         self.refresh(cx);
+    }
+
+    /// The app is shown again: a list it shows (Home's, Templates' or "Your workflows") is read again, as changes made
+    /// elsewhere (the channel's Workflows) may have left it behind. An open card editor or Overview stays as it is.
+    pub fn reread_workflows(&mut self, cx: &mut Context<Self>) {
+        if !self.busy && matches!(self.screen, Screen::Home | Screen::Templates | Screen::AllWorkflows) {
+            self.load_workflows(cx);
+        }
     }
 
     /// Home's "See all": the app's "Your workflows".
@@ -972,6 +991,8 @@ impl WorkflowDialog {
                     .child(Self::refresh_button(self.busy, cx)),
             )
             .child(self.flow_rows(&cards, palette, cx))
+            // every workflow of the account: its later pages too
+            .children(self.load_more(cx))
             .into_any_element()
     }
 

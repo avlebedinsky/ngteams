@@ -44,6 +44,9 @@ pub(super) struct Field {
     pub(super) message: Option<(Entity<crate::editor::Editor>, Entity<crate::editor::toolbar::FormatBar>)>,
     pub(super) date: Option<Entity<DatePickerState>>,
     pub(super) choices: Choices,
+    /// How many choice reads were started for the field: only the latest one's answer is taken, so a list read for a
+    /// value chosen before (another site, another group) never fills it.
+    pub(super) listed: u64,
     /// A folder field's open list and the folders browsed into.
     pub(super) folder_open: bool,
     pub(super) folder_path: Vec<Choice>,

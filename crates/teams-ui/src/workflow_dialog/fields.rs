@@ -282,6 +282,12 @@ impl WorkflowDialog {
         let Some(simple) = &mut self.simple else {
             return;
         };
+        // Whatever this call does, a read started before for the field no longer answers it.
+        self.choice_reads += 1;
+        let read = self.choice_reads;
+        if let Some(field) = simple.fields.get_mut(index) {
+            field.listed = read;
+        }
         let (api, connection, tree, mut body) = match source(simple, index) {
             Source::Ready {
                 api,
@@ -326,7 +332,12 @@ impl WorkflowDialog {
                     if this.generation != generation {
                         return;
                     }
-                    if let Some(field) = this.simple.as_mut().and_then(|simple| simple.fields.get_mut(index)) {
+                    if let Some(field) = this
+                        .simple
+                        .as_mut()
+                        .and_then(|simple| simple.fields.get_mut(index))
+                        .filter(|field| field.listed == read)
+                    {
                         field.choices = match answer.and_then(|value| model::rows(&value).map(choices)) {
                             Ok(list) if tree => Choices::Ready(sorted_folders(list)),
                             Ok(list) => Choices::Ready(list),
@@ -350,34 +361,47 @@ impl WorkflowDialog {
         self.tasks
             .push(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
                 let answer = reply.await.unwrap_or(Err(WorkflowFailure::Connection));
-                let _ = this.update(cx, |this, cx| {
-                    if this.generation != generation {
-                        return;
-                    }
-                    let inputs = answer
-                        .ok()
-                        .and_then(|value| value.pointer("/properties/inputsDefinition/properties").cloned());
-                    let count = match &mut this.simple {
-                        Some(simple) => {
-                            simple.operations.insert(key, inputs);
-                            simple.params.len()
-                        }
-                        None => return,
-                    };
-                    let waiting: Vec<usize> = (0..count)
-                        .filter(|index| {
-                            this.simple
-                                .as_ref()
-                                .and_then(|simple| simple.fields.get(*index))
-                                .is_some_and(|field| matches!(field.choices, Choices::Idle))
-                        })
-                        .collect();
-                    for index in waiting {
-                        this.load_choices(index, cx);
-                    }
-                    cx.notify();
-                });
+                let _ = this.update(cx, |this, cx| this.operation_read(generation, key, answer, cx));
             }));
+    }
+
+    /// An operation's input definition was read: the fields that wait for it list their choices; if it could not be
+    /// read, they say so (not "No options") and opening one asks again.
+    fn operation_read(
+        &mut self,
+        generation: u64,
+        key: (String, String),
+        answer: WorkflowResponse,
+        cx: &mut Context<Self>,
+    ) {
+        if self.generation != generation {
+            return;
+        }
+        let Some(simple) = &mut self.simple else {
+            return;
+        };
+        // The fields that wait for this definition: those whose source it is, with it unread.
+        simple.operations.remove(&key);
+        let waiting: Vec<usize> = (0..simple.params.len())
+            .filter(|index| matches!(source(simple, *index), Source::Operation(ref wanted) if *wanted == key))
+            .collect();
+        match answer {
+            Ok(value) => {
+                let inputs = value.pointer("/properties/inputsDefinition/properties").cloned();
+                simple.operations.insert(key, inputs);
+                for index in waiting {
+                    self.load_choices(index, cx);
+                }
+            }
+            Err(_) => {
+                for index in waiting {
+                    if let Some(field) = simple.fields.get_mut(index) {
+                        field.choices = Choices::Failed;
+                    }
+                }
+            }
+        }
+        cx.notify();
     }
 
     fn toggle_folders(&mut self, index: usize, cx: &mut Context<Self>) {

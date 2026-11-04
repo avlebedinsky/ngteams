@@ -175,6 +175,10 @@ pub struct WorkflowDialog {
     owner_found: Option<owners::Found>,
     /// The listed workflow a change from its row is under way for (its row shows it working).
     acting: Option<String>,
+    /// How many workflow-list reads were started: only the latest one's answer is taken.
+    list_reads: u64,
+    /// How many connector choice reads were started: each field takes only the answer of its latest.
+    choice_reads: u64,
     /// The list (the channel's or Workflows Home's) a row was acted on in: the change returns there.
     listing: Listing,
     /// Each listed schedule's next run, as shown.
@@ -288,6 +292,8 @@ impl WorkflowDialog {
             owner_query: 0,
             owner_found: None,
             acting: None,
+            list_reads: 0,
+            choice_reads: 0,
             listing: Listing::Channel,
             next_runs: std::collections::HashMap::new(),
             scroll: gpui::ScrollHandle::new(),
@@ -552,6 +558,10 @@ impl WorkflowDialog {
             return;
         };
         let generation = self.generation;
+        // Only the latest read lands: an older one (a Refresh overtaken by a row's change and its re-read) would put
+        // back the list as it was before the change.
+        self.list_reads += 1;
+        let read = self.list_reads;
         let append = next.is_some();
         self.loading.workflows = true;
         self.workflows_error = None;
@@ -560,7 +570,7 @@ impl WorkflowDialog {
             .push(cx.spawn(async move |this: WeakEntity<Self>, cx: &mut AsyncApp| {
                 let answer = service::workflows(&core, &environment, next).await;
                 let _ = this.update(cx, |this, cx| {
-                    if generation != this.generation {
+                    if generation != this.generation || read != this.list_reads {
                         return;
                     }
                     this.loading.workflows = false;

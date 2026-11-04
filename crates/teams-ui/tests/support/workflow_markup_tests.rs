@@ -246,4 +246,6 @@ fn the_local_zone_is_found_by_offset_and_city() {
     assert_eq!(by_offset(3 * 3600, None).0, "Arabic Standard Time");
     assert_eq!(by_offset(0, Some("London")).0, "GMT Standard Time");
     assert_eq!(by_offset(5 * 3600 + 45 * 60, None).0, "Nepal Standard Time");
+    // the names carry standard offsets: Berlin by its standard +01:00, summer or not
+    assert_eq!(by_offset(3600, Some("Berlin")).0, "W. Europe Standard Time");
 }

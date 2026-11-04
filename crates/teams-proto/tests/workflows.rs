@@ -789,6 +789,8 @@ fn a_connector_read_names_only_plain_path_segments() {
         ("shared/x", "op"),
         ("", "op"),
         ("api", "a?b"),
+        ("shared_planner", ".."),
+        (".", "op"),
     ] {
         assert!(read(api, operation).platform_endpoint().is_none(), "{api} {operation}");
     }
@@ -799,4 +801,30 @@ fn a_connector_read_names_only_plain_path_segments() {
         .platform_endpoint()
         .is_none()
     );
+}
+
+/// A connector read whose name fails the segment check is refused before anything is sent: it never falls through to
+/// the Flow API, where a choices read's POST would reach the flows collection.
+#[tokio::test]
+async fn a_connector_read_with_a_bad_name_sends_nothing() {
+    let server = MockServer::start().await;
+    let transport = transport(&server, Arc::default());
+    let requests = [
+        WorkflowRequest::Choices {
+            environment: "Default-synthetic".into(),
+            api: "shared_planner".into(),
+            connection: "bad/connection".into(),
+            tree: false,
+            body: json!({"parameters":{}}),
+        },
+        WorkflowRequest::Operation {
+            environment: "Default-synthetic".into(),
+            api: "shared_planner".into(),
+            operation: "..".into(),
+        },
+    ];
+    for request in &requests {
+        assert!(transport.workflow(request).await.is_err(), "{request:?}");
+    }
+    assert!(server.received_requests().await.unwrap().is_empty());
 }

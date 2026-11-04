@@ -1,5 +1,5 @@
 //! The time zones Teams' Time zone field offers: Windows' zone ids (what a recurrence's `timeZone` takes) and the
-//! names Teams shows, in its order. The local zone is the one whose offset matches now and whose name holds the
+//! names Teams shows, in its order. The local zone is the one whose standard offset it has and whose name holds the
 //! system zone's city, else the first with that offset.
 
 /// (Windows zone id, name shown).
@@ -175,9 +175,10 @@ pub(super) const ZONES: [(&str, &str); 136] = [
     ("Line Islands Standard Time", "(UTC+14:00) Kiritimati Island"),
 ];
 
-/// The local zone: by the system zone's city (`/etc/localtime`'s link, or `TZ`) among those with now's offset.
+/// The local zone: by the system zone's city (`/etc/localtime`'s link, or `TZ`) among those with its standard offset
+/// (the names carry standard offsets: Berlin's is +01:00 in summer too).
 pub(super) fn local() -> (&'static str, &'static str) {
-    let seconds = chrono::Local::now().offset().local_minus_utc();
+    let seconds = standard_offset();
     let city = std::env::var("TZ")
         .ok()
         .or_else(|| {
@@ -187,6 +188,22 @@ pub(super) fn local() -> (&'static str, &'static str) {
         })
         .and_then(|zone| zone.rsplit('/').next().map(|city| city.replace('_', " ")));
     by_offset(seconds, city.as_deref())
+}
+
+/// The local zone's standard offset, seconds east of UTC: the smaller of its January and July offsets, as daylight
+/// saving adds to it in either hemisphere.
+fn standard_offset() -> i32 {
+    use chrono::{Datelike as _, TimeZone as _};
+    let year = chrono::Local::now().year();
+    let offset = |month: u32| {
+        chrono::NaiveDate::from_ymd_opt(year, month, 1)
+            .and_then(|day| day.and_hms_opt(12, 0, 0))
+            .map(|noon| chrono::Local.from_utc_datetime(&noon).offset().local_minus_utc())
+    };
+    match (offset(1), offset(7)) {
+        (Some(january), Some(july)) => january.min(july),
+        _ => chrono::Local::now().offset().local_minus_utc(),
+    }
 }
 
 /// The zone with `seconds` east of UTC whose name holds `city`, else the first with that offset, else UTC.

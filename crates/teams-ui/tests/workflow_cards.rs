@@ -154,6 +154,38 @@ fn a_planner_template_is_teams_card_listing_the_connectors_choices() {
 }
 
 #[test]
+fn a_connector_definition_that_could_not_be_read_says_so_and_is_asked_again() {
+    fn failing(request: &WorkflowRequest) -> WorkflowResponse {
+        match request {
+            WorkflowRequest::Operation { .. } => Err(teams_proto::WorkflowFailure::Service(503)),
+            other => fixtures::planner_answer(other),
+        }
+    }
+    let rig = common::Rig::start();
+    let cx = window(&rig, failing);
+    click(cx, "workflow-template-synthetic-planner");
+    click(cx, "workflow-field-PlannerGroupId");
+    assert!(
+        bounds(cx, "workflow-choices-failed").is_some(),
+        "the field says its options could not be loaded, not that there are none"
+    );
+    let operations = |rig: &common::Rig| {
+        requests(rig)
+            .iter()
+            .filter(|request| matches!(request, WorkflowRequest::Operation { .. }))
+            .count()
+    };
+    let before = operations(&rig);
+    *rig.core.workflow_handler.lock().unwrap() = Some(fixtures::planner_answer);
+    click(cx, "workflow-field-PlannerPlanId");
+    click(cx, "workflow-field-PlannerGroupId");
+    assert_eq!(operations(&rig), before + 1, "opening a failed field asks again, once");
+    click(cx, "workflow-field-PlannerGroupId-synthetic-group");
+    click(cx, "workflow-field-PlannerPlanId");
+    assert!(bounds(cx, "workflow-field-PlannerPlanId-synthetic-plan").is_some());
+}
+
+#[test]
 fn an_edit_keeps_the_workflows_name_and_its_own_connection() {
     let rig = common::Rig::start();
     let cx = window(&rig, fixtures::saved_webhook_answer);

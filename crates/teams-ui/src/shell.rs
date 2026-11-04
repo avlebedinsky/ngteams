@@ -603,6 +603,7 @@ impl Shell {
         if let Some(chat) = &self.chat {
             chat.update(cx, |chat, cx| chat.set_shown(false, cx));
         }
+        self.leave_workflows(cx);
         self.close_switcher(window, cx);
         self.close_search(cx);
         self.calendar
@@ -2098,12 +2099,13 @@ impl Shell {
             if let Some(chat) = &self.chat {
                 chat.update(cx, |chat, cx| chat.set_shown(false, cx));
             }
+            self.leave_workflows(cx);
             cx.notify();
         }
     }
 
-    /// The rail's Chat (and Ctrl+2): leaves the settings, the calendar or the search results for what they hid (the
-    /// chat or the channel shown before them, opened again), or nothing; elsewhere it does nothing.
+    /// The rail's Chat (and Ctrl+2): leaves the settings, the calendar, the search results or the Workflows app for
+    /// what they hid (the chat or the channel shown before them, opened again), or nothing; elsewhere it does nothing.
     pub fn show_chats(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.show_chats_pane(window, cx);
         // the keyboard goes to the list, as Teams' Ctrl+2 takes it there

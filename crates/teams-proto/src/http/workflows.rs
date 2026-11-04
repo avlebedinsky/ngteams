@@ -29,7 +29,12 @@ impl<C: Credentials> HttpTransport<C> {
         if let WorkflowRequest::AuthorizeConnection { environment, .. } = request {
             return self.workflow_authorize_connection(request, environment).await;
         }
-        if request.platform_endpoint().is_some() {
+        // Routed by kind, never by whether a route could be built: a name that fails the segment check must fail here
+        // rather than fall through to the Flow API (where a choices read's POST would land on the flows collection).
+        if matches!(
+            request,
+            WorkflowRequest::Operation { .. } | WorkflowRequest::Choices { .. }
+        ) {
             return self.workflow_platform(request).await;
         }
         self.check_workflow_version(request).await?;

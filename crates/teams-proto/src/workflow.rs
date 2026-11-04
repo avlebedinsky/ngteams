@@ -351,11 +351,13 @@ impl WorkflowRequest {
 
     /// The path and query of an operation Teams sends to the environment's Power Platform host
     /// ([`platform_host`]) rather than to the classic Flow API: a connector operation's definition and its choices.
-    /// Each name is one checked path segment, so no caller can reach another route.
+    /// Each name is one checked path segment (not `.` or `..`, which a URL resolves away), so no caller can reach
+    /// another route.
     #[must_use]
     pub fn platform_endpoint(&self) -> Option<Endpoint> {
         let segment = |name: &str| {
             !name.is_empty()
+                && !name.chars().all(|c| c == '.')
                 && name
                     .chars()
                     .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'))

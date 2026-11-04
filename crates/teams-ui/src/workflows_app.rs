@@ -69,8 +69,12 @@ impl WorkflowsApp {
 
     /// Shows a tab, as the header's tabs do.
     pub fn show_tab(&mut self, tab: AppTab, window: &mut Window, cx: &mut Context<Self>) {
+        // Back from Chat to the tab the pages were on, they show what they showed (an open card editor too).
+        let returning = self.tab == AppTab::Chat && self.pages.read(cx).app_tab() == Some(tab);
         self.tab = tab;
-        self.pages.update(cx, |pages, cx| pages.show_tab(tab, cx));
+        if !returning {
+            self.pages.update(cx, |pages, cx| pages.show_tab(tab, cx));
+        }
         if tab == AppTab::Chat {
             if self.chat.is_none()
                 && let Some(conversation) = bot_chat(self.parts.core.me())
@@ -91,10 +95,31 @@ impl WorkflowsApp {
         cx.notify();
     }
 
+    /// The app's Home itself, whatever the pages showed (the channel's "Workflows Home").
+    pub fn show_home(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_tab(AppTab::Home, window, cx);
+        self.pages.update(cx, |pages, cx| pages.show_tab(AppTab::Home, cx));
+    }
+
     /// Home's "See all": "Your workflows".
     pub fn show_all_workflows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.show_tab(AppTab::Home, window, cx);
+        self.show_home(window, cx);
         self.pages.update(cx, WorkflowDialog::show_all_workflows);
+    }
+
+    /// The app is shown again (the rail, More apps, history): it shows what it showed when it was left. The bot's
+    /// chat is shown again; a list is read again, as changes made elsewhere may have left it behind.
+    pub fn resume(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tab == AppTab::Chat {
+            self.show_tab(AppTab::Chat, window, cx);
+        } else {
+            self.pages.update(cx, WorkflowDialog::reread_workflows);
+        }
+    }
+
+    /// The list the pages show is read again (after the channel's Workflows asked for the app).
+    pub fn reread_workflows(&mut self, cx: &mut Context<Self>) {
+        self.pages.update(cx, WorkflowDialog::reread_workflows);
     }
 
     /// The page is left (another place of the rail is shown): the bot's chat is hidden, so no read receipt goes.
