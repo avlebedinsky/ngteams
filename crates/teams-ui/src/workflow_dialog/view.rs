@@ -512,8 +512,8 @@ impl WorkflowDialog {
         .into_any_element()
     }
 
-    /// Teams' footer: Save and Back under the card editor, Back and Workflows Home under an Overview, Workflows Home
-    /// elsewhere.
+    /// Teams' footer: Save and Back under the card editor, Back and Workflows Home under an Overview and its delete
+    /// question, Workflows Home on the workflow list, and "Back to workflows" (to the list) on every other screen.
     fn footer(&self, palette: Palette, cx: &Context<Self>) -> AnyElement {
         let footer = div()
             .flex()

@@ -100,6 +100,10 @@ impl WorkflowDialog {
     }
 
     fn add_owner(&mut self, person: &TeamPerson, window: &mut Window, cx: &mut Context<Self>) {
+        // a pick while another change goes keeps the box as it is: nothing is sent for it
+        if self.busy || self.uncertain.is_some() {
+            return;
+        }
         let (Some(environment), Some(flow), Some(id)) = (
             self.environment.clone(),
             self.open_flow_id().map(str::to_owned),
@@ -115,13 +119,12 @@ impl WorkflowDialog {
         self.owner_found = None;
         self.owner_search
             .update(cx, |state, cx| state.set_value("", window, cx));
-        self.mutate_then(
+        self.change_owners(
             WorkflowRequest::AddOwner {
                 environment,
                 flow,
                 owner,
             },
-            Outcome::Owners,
             cx,
         );
     }
@@ -130,15 +133,23 @@ impl WorkflowDialog {
         let (Some(environment), Some(flow)) = (self.environment.clone(), self.open_flow_id().map(str::to_owned)) else {
             return;
         };
-        self.mutate_then(
+        self.change_owners(
             WorkflowRequest::RemoveOwner {
                 environment,
                 flow,
                 owner: id,
             },
-            Outcome::Owners,
             cx,
         );
+    }
+
+    /// Adds or removes an owner, the owners' Remove buttons showing it working until it is over.
+    fn change_owners(&mut self, request: WorkflowRequest, cx: &mut Context<Self>) {
+        self.changing = Some(Change::Owners);
+        self.mutate_then(request, Outcome::Owners, cx);
+        if !self.busy {
+            self.changing = None;
+        }
     }
 
     pub(super) fn owners_section(&self, palette: Palette, cx: &Context<Self>) -> AnyElement {

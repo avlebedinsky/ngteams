@@ -232,8 +232,9 @@ pub struct CatchUpReport {
 
 impl CatchUpReport {
     /// Whether nothing failed that trying again soon may change: every conversation was synced, or refused by the
-    /// service ([`ConversationFailed::is_refused`]). A refused one is still synced again by every later catch-up, but
-    /// keeps none due.
+    /// service ([`ConversationFailed::is_refused`]). A refused one (a 400, or the account's notes refused) is still
+    /// synced again by every later catch-up, but keeps none due. One the account can't read (a listed or kept
+    /// conversation answered 403, 404 or 410) isn't here but in [`CatchUpReport::unreadable`], and isn't synced again.
     #[must_use]
     pub fn caught_up(&self) -> bool {
         self.failed.iter().all(ConversationFailed::is_refused)
