@@ -580,14 +580,11 @@ impl TeamsList {
                         .child(Glyph::LOCK.icon().size(px(12.0))),
                 )
             })
-            .child(self.channel_more(index, &shown.id, cx))
+            .child(self.channel_more_from(index, &shown.id, ChannelMenuAnchor::Tree, cx))
             .into_any_element()
     }
-    /// The same captured channel menu in the team tree and a rich favourite row.
-    pub(crate) fn channel_more(&self, index: usize, id: &str, cx: &mut Context<Self>) -> AnyElement {
-        self.channel_more_from(index, id, ChannelMenuAnchor::Tree, cx)
-    }
 
+    /// The same captured channel menu in the team tree and a rich favourite row.
     pub(crate) fn channel_more_from(
         &self,
         index: usize,

@@ -4,6 +4,9 @@
 #[path = "../../tests/support/decline_ordering.rs"]
 mod decline_ordering;
 
+#[path = "../../tests/support/dynamic_callbacks.rs"]
+mod dynamic_callbacks;
+
 use std::time::{Duration, Instant};
 
 use crate::{Delivery, Observed};

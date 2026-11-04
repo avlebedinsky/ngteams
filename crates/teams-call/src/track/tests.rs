@@ -973,3 +973,113 @@ fn current_call_links_keep_their_bound_sender_without_a_recipient_allowlist() {
         "bound cleanup survives socket loss"
     );
 }
+
+fn current_reply_tracker() -> Tracker {
+    use teams_proto::CallState as _;
+    let tracker = Tracker::new(Mri::new(LAB_A));
+    assert!(tracker.connected(CONNECTION, PUSH_ROOT));
+    tracker.answered(caption_seed(&tracker), &Response::new(200, answer("c")));
+    assert_eq!(
+        tracker.observe_delivery(&delivery(20, ACCEPTANCE_PATH, acceptance("one"))),
+        Observed::Acceptance
+    );
+    tracker
+}
+
+fn plain_receipt(delivery: &Delivery) -> String {
+    json!({"id":delivery.id,"status":200,"headers":{"trouter-request":TROUTER_REQUEST},"body":""}).to_string()
+}
+
+fn callback_request_body(callback: &str) -> Value {
+    let actor = caption_actor();
+    json!({"participants":{"from":{
+        "id":actor.mri.as_str(),"endpointId":actor.endpoint_id,"participantId":actor.participant_id
+    }},"links":{"mediaRenegotiation":callback}})
+}
+
+#[test]
+fn subsequent_call_requests_register_callbacks_before_their_deliveries() {
+    use teams_proto::CallState as _;
+    for request_url in [
+        acknowledge_url("one"),
+        format!("{PROXY}/{CC_HOST}/cc/v1/negotiations/one/1/a1/1/answer?i=1"),
+    ] {
+        let tracker = current_reply_tracker();
+        let mut media = media_delivery("one");
+        media.id = 21;
+        assert_eq!(tracker.observe_delivery(&media), Observed::Renegotiation);
+        assert!(!tracker.response_allowed(CONNECTION, media.id, &plain_receipt(&media)));
+        let callback = format!("{CALLBACKS}/08080808/call/mediaRenegotiation/");
+        let request = write(&request_url, callback_request_body(&callback));
+        assert!(tracker.call_allowed(request.call_url().unwrap(), request.body().as_ref()));
+        tracker.before(&request);
+        assert_eq!(tracker.observe_delivery(&media), Observed::Renegotiation);
+        assert!(tracker.response_allowed(CONNECTION, media.id, &plain_receipt(&media)));
+        assert!(!tracker.response_allowed(CONNECTION, media.id, &plain_receipt(&media)));
+    }
+}
+
+#[test]
+fn later_request_callbacks_cannot_rebind_a_foreign_actor_endpoint_or_call() {
+    use teams_proto::CallState as _;
+    let callback = format!("{CALLBACKS}/08080808/call/mediaRenegotiation/");
+    for changed in ["sender", "endpoint", "participant", "root", "call", "ended"] {
+        let tracker = current_reply_tracker();
+        let mut body = callback_request_body(&callback);
+        let mut url = acknowledge_url("one");
+        match changed {
+            "sender" => body["participants"]["from"]["id"] = json!(LAB_B),
+            "endpoint" => body["participants"]["from"]["endpointId"] = json!("another"),
+            "participant" => body["participants"]["from"]["participantId"] = json!("another"),
+            "root" => body["links"]["other"] = json!(callback.replace("SyntheticEndpoint00000", "Other")),
+            "call" => url = acknowledge_url("another"),
+            _ => assert_eq!(
+                tracker.observe_delivery(&delivery(22, END_PATH, b"{}".to_vec())),
+                Observed::Ended
+            ),
+        }
+        tracker.before(&write(&url, body));
+        let media = media_delivery("one");
+        tracker.observe_delivery(&media);
+        assert!(
+            !tracker.response_allowed(CONNECTION, media.id, &plain_receipt(&media)),
+            "{changed}"
+        );
+    }
+}
+
+fn acceptance_receipt(callback: &str) -> Value {
+    json!({"id":20,"status":200,"headers":{
+        "trouter-request":TROUTER_REQUEST,"X-Microsoft-Skype-Chain-ID":CHAIN_ID,
+        "X-Microsoft-Skype-Message-ID":MESSAGE_ID
+    },"body":json!({"callAcceptanceAcknowledgement":{"links":{"mediaRenegotiation":callback}}}).to_string()})
+}
+
+#[test]
+fn a_valid_acceptance_reply_registers_new_callbacks_even_before_the_start_answer() {
+    use teams_proto::CallState as _;
+    for before_answer in [false, true] {
+        let tracker = Tracker::new(Mri::new(LAB_A));
+        assert!(tracker.connected(CONNECTION, PUSH_ROOT));
+        let pending = caption_seed(&tracker);
+        if !before_answer {
+            tracker.answered(pending, &Response::new(200, answer("c")));
+        }
+        tracker.observe_delivery(&delivery(20, ACCEPTANCE_PATH, acceptance("one")));
+        let callback = format!("{CALLBACKS}/08080808/call/mediaRenegotiation/");
+        let mut invalid = acceptance_receipt(&callback);
+        let mut content: Value = serde_json::from_str(invalid["body"].as_str().unwrap()).unwrap();
+        content["unrelated"] = json!(callback.replace("SyntheticEndpoint00000", "Other"));
+        invalid["body"] = json!(content.to_string());
+        assert!(!tracker.response_allowed(CONNECTION, 20, &invalid.to_string()));
+        assert!(tracker.response_allowed(CONNECTION, 20, &acceptance_receipt(&callback).to_string()));
+        assert!(!tracker.response_allowed(CONNECTION, 20, &acceptance_receipt(&callback).to_string()));
+        if before_answer {
+            tracker.answered(pending, &Response::new(200, answer("c")));
+        }
+        let mut media = media_delivery("one");
+        media.id = 23;
+        assert_eq!(tracker.observe_delivery(&media), Observed::Renegotiation);
+        assert!(tracker.response_allowed(CONNECTION, media.id, &plain_receipt(&media)));
+    }
+}

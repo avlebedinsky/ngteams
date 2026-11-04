@@ -41,14 +41,14 @@ sha256 = "4a134f96edff58035d54f463692f4a3df8a5aca0edfced394cb9ce595cdfa3bf"
 reason = "module declarations, re-exports and documentation only; no executable items"
 
 [unmapped_sources."crates/teams-call/src/machine/tests.rs"]
-sha256 = "d7ab9647cfc9d84f0c2b87852c0a78565403444160c96d7e6dae8f9df7ca23a1"
+sha256 = "a4301a58fa467fc509dcc9110e92fd4a71305b49041d3d52bd63afe12f26f181"
 reason = "unit-test module included only by machine.rs cfg(test); omitted by cargo-llvm-cov's test-file filter"
 context = { "crates/teams-call/src/machine.rs" = "8342c90736fa2c5a9630163386971d638b40e2f28ae1fe24f6d2ec264fa4ba25" }
 
 [unmapped_sources."crates/teams-call/src/track/tests.rs"]
-sha256 = "5b6ae5a018bc744b62c915520c1506e02e591cf380729b818d46e13c711a4f13"
+sha256 = "b0ef4a0a1423a609747ffbb888f45a411ec0aad365709f9b4ff34f11c53a9b1f"
 reason = "unit-test module included only by track.rs cfg(test); omitted by cargo-llvm-cov's test-file filter"
-context = { "crates/teams-call/src/track.rs" = "4d7ea371e2be8c1f85ea259ee8db9cec7911d122d2e3447845e44b2e50bfa496" }
+context = { "crates/teams-call/src/track.rs" = "87f10a490f6c71e826709eca83b1ecc7df1c3d02c9fef068c55d7edee6d2149a" }
 
 [unmapped_sources."crates/teams-media/src/video/effects/tests.rs"]
 sha256 = "f67bd56fdf5683e1b7bd150f306db4e7b7714039d13ce592a602b755d24a4ffb"
@@ -110,7 +110,7 @@ context = { "crates/proto-lab/src/action_targets.rs" = "8627c0b66dfd2e24ea5126e7
 [unmapped_sources."crates/teams-proto/src/http/attachment_tests.rs"]
 sha256 = "909df35e897a2669555420ad24f34094b1c62b2efe007ea18651d547be12b144"
 reason = "unit-test module included only under cfg(test); omitted by cargo-llvm-cov default tests.rs/_tests.rs filename filter; executable parent remains measured"
-context = { "crates/teams-proto/src/http.rs" = "d8aa5f0effc92fd7e6d11e774c60debe2a9e7816a65564762ad45903659db774" }
+context = { "crates/teams-proto/src/http.rs" = "1a6bce1b9cd459c83d8acc4fa5ba31164a3caf749439c2d17fd936329e73db83" }
 
 [unmapped_sources."crates/teams-core/src/attachments_tests.rs"]
 sha256 = "b6a50932ced5a42e957f3b64f97351b7e7fbfe0592f5988d2522288696b581f4"

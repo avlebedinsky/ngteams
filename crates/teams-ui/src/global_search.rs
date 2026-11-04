@@ -805,7 +805,7 @@ impl GlobalSearch {
         channels
     }
 
-    /// Opens a person's existing 1:1 chat, or creates it through the engine's fenced outbox.
+    /// Opens a person's existing 1:1 chat, or creates it through the engine's persistent outbox.
     pub fn open_person(&mut self, mri: Option<&str>, cx: &mut Context<Self>) {
         let Some(mri) = mri.filter(|mri| !mri.is_empty()) else {
             cx.emit(GlobalSearchEvent::Toast("This account has no chat address."));

@@ -623,17 +623,21 @@ named lab recipient, with no sharing link. Revoking the unintended anonymous per
 revoke-only `DELETE .../driveItem/permissions/<permission GUID>` endpoint; it grants nobody access and creates no
 invitation. The original breach is not replaced by this later clean evidence.
 
-The native transport independently checks current effective grants as the item's owner. It reads the drive's owner and
-requires that id to match the active account; then it reads the folder and its permissions, or root permissions if the
-folder is absent. A staged upload requires an owner-only private folder. Implementation transports carry only the
-three dedicated lab accounts, validate the active Graph identity and UPN fresh, and read the exact selected thread's
-complete membership before each message or share. They validate each share recipient's Graph identity and exact UPN,
-reject personal/echo/bot/mixed targets, and recheck effective file grants on every outbox message attempt. Renaming on conflict prevents replacing an existing shared
-file. The share similarly reads its item's current permissions and includes every added recipient. The owner receives
-all effective grants, including inherited permissions, according to
+The native transport verifies the authenticated Graph actor with `/me` and independently checks current effective
+grants as the item's owner. It reads the drive's owner and requires that id to match the active account; then it reads
+the folder and its permissions, or root permissions if the folder is absent. A staged upload requires an owner-only
+private folder. Renaming on conflict prevents replacing an existing shared file.
+
+For an explicit share, the native client reads the selected thread's complete membership and leaves bots out of the
+recipient set. The intended recipients must be exactly the other people in that chat. Each recipient's Graph object
+id must match, and the intended email must match the current `userPrincipalName` or `mail`, ignoring case. The share
+reads the item's effective grants before sending and confirms them again before queuing its file-reference message.
+Plain message attempts do not repeat those membership or grant reads. The owner receives all effective grants,
+including inherited permissions, according to
 [Microsoft's permission-list contract](https://learn.microsoft.com/en-us/graph/api/driveitem-list-permissions?view=graph-rest-1.0).
 A non-owner, a page, an unknown grant, a group or a broad sharing link fails closed. Every check reads again; grants
-from an earlier upload are never reused for a share. These action checks do not depend on the fence or its mappings. Personal transports do not carry the lab roster.
+from an earlier upload are never reused for a share. These actor, ownership and direct-recipient checks apply to every
+build; they carry no lab roster. The agent applies the lab-contact check before a live run.
 
 What the web client does to send a file, with every write of it force-denied by the scenario (M2 Task 23): writes to
 the file services (SharePoint and OneDrive hosts, their media hosts, Graph), to AMS objects, and any `POST` or `PUT`

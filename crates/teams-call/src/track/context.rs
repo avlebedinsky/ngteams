@@ -192,6 +192,31 @@ pub(super) struct Reply {
     acceptance: bool,
 }
 impl Tracker {
+    /// Later call requests hand out fresh callback paths before their deliveries can arrive.
+    pub(super) fn remember_request(&self, url: &url::Url, body: &Value) {
+        let mut inner = self.lock();
+        if !request_fits(&self.account, &inner.connections, body) {
+            return;
+        }
+        if let Some(call) = inner.calls.iter_mut().rfind(|call| {
+            call.state == State::Live
+                && call.context.matches_actor(body)
+                && call.links.iter().any(|(_, link)| link == url.as_str())
+        }) {
+            call.context.request(body, &self.account);
+            return;
+        }
+        if let Some(offer) = inner.offers.iter_mut().rfind(|offer| {
+            matches!(offer.state, OfferState::Ringing | OfferState::Answered)
+                && offer.context.matches_actor(body)
+                && teams_proto::CallOperation::ALL
+                    .into_iter()
+                    .any(|operation| offer.holds(operation, url.as_str()) && offer.open_for(operation))
+        }) {
+            offer.context.request(body, &self.account);
+        }
+    }
+
     pub(super) fn remember_delivery(&self, delivery: &Delivery, observed: Observed) {
         if matches!(
             observed,
@@ -257,21 +282,8 @@ impl CallState for Tracker {
     fn call_allowed(&self, url: &url::Url, body: Option<&Value>) -> bool {
         let empty = Value::Null;
         let body = body.unwrap_or(&empty);
-        if actors(body)
-            .iter()
-            .any(|actor| actor.get("id").and_then(Value::as_str) != Some(self.account.as_str()))
-        {
-            return false;
-        }
         let inner = self.lock();
-        if !inner.connections.is_empty()
-            && all_callbacks(body).iter().any(|callback| {
-                !inner
-                    .connections
-                    .values()
-                    .any(|root| callback.starts_with(&format!("{root}callAgent/")))
-            })
-        {
+        if !request_fits(&self.account, &inner.connections, body) {
             return false;
         }
         if body.get("conversationRequest").is_some() {
@@ -397,23 +409,48 @@ impl CallState for Tracker {
         let Some(content) = body.get("body").and_then(Value::as_str) else {
             return false;
         };
-        if reply.acceptance {
-            let Ok(ack) = serde_json::from_str::<Value>(content) else {
+        let callbacks = if reply.acceptance {
+            let Some(callbacks) = acknowledgement_callbacks(content, &root) else {
                 return false;
             };
-            if !ack.get("callAcceptanceAcknowledgement").is_some_and(Value::is_object)
-                || super::callbacks(&ack)
-                    .iter()
-                    .any(|url| !url.starts_with(&format!("{root}callAgent/")))
-            {
-                return false;
-            }
+            callbacks
         } else if !content.is_empty() {
             return false;
+        } else {
+            Vec::new()
+        };
+        let entry = reply.entry;
+        match entry {
+            Entry::Call(i) => inner.calls[i].context.callbacks.extend(callbacks),
+            Entry::Offer(i) => inner.offers[i].context.callbacks.extend(callbacks),
         }
         inner.responses.remove(&key);
         true
     }
+}
+
+fn request_fits(account: &Mri, connections: &std::collections::BTreeMap<String, String>, body: &Value) -> bool {
+    !actors(body)
+        .iter()
+        .any(|actor| actor.get("id").and_then(Value::as_str) != Some(account.as_str()))
+        && (connections.is_empty()
+            || all_callbacks(body).iter().all(|callback| {
+                connections
+                    .values()
+                    .any(|root| callback.starts_with(&format!("{root}callAgent/")))
+            }))
+}
+
+fn acknowledgement_callbacks(content: &str, root: &str) -> Option<Vec<String>> {
+    let ack = serde_json::from_str::<Value>(content).ok()?;
+    if !ack.get("callAcceptanceAcknowledgement").is_some_and(Value::is_object) {
+        return None;
+    }
+    let callbacks = all_callbacks(&ack);
+    callbacks
+        .iter()
+        .all(|callback| callback.starts_with(&format!("{root}callAgent/")))
+        .then_some(callbacks)
 }
 
 fn all_callbacks(value: &Value) -> Vec<String> {

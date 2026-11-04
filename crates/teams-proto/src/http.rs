@@ -30,6 +30,7 @@ use crate::write::on_calling_base;
 
 mod captions;
 mod drive;
+mod identity;
 mod workflows;
 
 /// The Entra audience of the token the chat service and the registrar take.

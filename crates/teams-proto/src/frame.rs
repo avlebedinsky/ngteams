@@ -416,7 +416,8 @@ impl<W: FrameWriter> FrameSink<W> {
     /// Sends a typed reply only on the connection its delivery arrived on.
     ///
     /// # Errors
-    /// No reply connection, a different connection, or a socket write failure.
+    /// No reply connection, a different connection, a delivery the canonical call state no longer holds
+    /// ([`RespondError::NotCurrentCall`]), or a socket write failure.
     pub async fn respond<R: DeliveryResponse + Send>(&mut self, response: R) -> Result<Sent, RespondError<W::Error>> {
         let connection = self.connection.as_deref().ok_or(RespondError::NoCallResponses)?;
         if connection != response.connection() {

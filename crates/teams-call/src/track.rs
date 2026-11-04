@@ -327,6 +327,7 @@ impl Tracker {
             return Attempt::Nothing;
         };
         let body = request.body().unwrap_or(Value::Null);
+        self.remember_request(url, &body);
         let callbacks = callbacks(&body);
         let mut inner = self.lock();
         let start = body
@@ -364,7 +365,6 @@ impl Tracker {
                 .rposition(|offer| offer.holds(operation, url.as_str()) && offer.open_for(operation))
         {
             let offer = &mut inner.offers[index];
-            offer.context.request(&body, &self.account);
             if operation == CallOperation::Attach {
                 offer.attached(&callbacks);
             }
